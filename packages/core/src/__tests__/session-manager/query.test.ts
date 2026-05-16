@@ -220,7 +220,9 @@ describe("list", () => {
     const sm = createSessionManager({ config, registry: registryWithDead });
     const sessions = await sm.list();
 
-    expect(sessions[0].status).toBe("killed");
+    // sm.list() persists "detecting" (not "terminated") so the lifecycle
+    // manager's probe pipeline makes the final terminal decision (#1735).
+    expect(sessions[0].status).toBe("detecting");
     expect(sessions[0].activity).toBe("exited");
   });
 
@@ -336,7 +338,8 @@ describe("list", () => {
 
     expect(sessions).toHaveLength(1);
     expect(sessions[0].runtimeHandle?.id).toBe(expectedTmuxName);
-    expect(sessions[0].status).toBe("killed");
+    // sm.list() persists "detecting" so the lifecycle manager decides (#1735).
+    expect(sessions[0].status).toBe("detecting");
     expect(sessions[0].activity).toBe("exited");
     expect(agentWithSpy.getActivityState).not.toHaveBeenCalled();
   });
