@@ -1,0 +1,68 @@
+name: Linux testing build
+
+# Manual, Linux-only testing build. Click "Run workflow" in the Actions tab and it
+# builds the unsigned Linux desktop app, cuts a prerelease tagged
+# 0.0.0-testing-<short-sha> at the chosen commit, and attaches the .deb/.rpm.
+#
+# Linux only for now (no macOS/Windows, no signing). The .deb is the easiest thing
+# to hand someone: `sudo apt install ./Agent*.deb` then run `agent-orchestrator`;
+# the deb sets chrome-sandbox setuid root, so no --no-sandbox workaround is needed.
+#
+# The daemon is compiled natively on the ubuntu runner by build-daemon.mjs during
+# premake (host == target), so the bundled `ao` is a real Linux binary.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "0.0.0-testing-*"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: frontend
+    env:
+      # Pure-Go sqlite (modernc) needs no cgo; static daemon = portable across glibc.
+      CGO_ENABLED: 0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      # The rpm maker needs rpmbuild, which ubuntu-latest does not ship.
+      - name: Install rpm tooling
+        run: sudo apt-get update && sudo apt-get install -y rpm
+      - run: npm ci
+      - name: Build Linux artifacts (unsigned)
+        run: npm run make
+      - name: Publish to a 0.0.0-testing-<sha> prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Tag push: use the pushed tag. Manual run: mint 0.0.0-testing-<sha>.
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="0.0.0-testing-${GITHUB_SHA::7}"
+          fi
+          # Creates the tag at this commit if it does not exist; idempotent on re-run.
+          gh release create "$TAG" --prerelease --target "$GITHUB_SHA" --title "$TAG" \
+            --notes "Unsigned Linux testing build (.deb/.rpm). Not signed; for testing only." \
+            || true
+          # NUL-delimited to survive spaces in the app name ("Agent Orchestrator-...").
+          find out/make -type f -print0 | while IFS= read -r -d '' f; do
+            echo "uploading: $f"
+            gh release upload "$TAG" "$f" --clobber
+          done

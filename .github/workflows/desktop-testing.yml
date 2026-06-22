@@ -18,10 +18,14 @@ name: Desktop testing build
 # builds do NOT pass Gatekeeper/SmartScreen. They are for pipeline validation,
 # not distribution.
 
+# Disabled: the Linux-only `linux-testing-build.yml` owns the 0.0.0-testing-* tag
+# for now. Re-enable by restoring the `push.tags` trigger below when macOS/Windows
+# testing builds are wanted again.
 on:
-  push:
-    tags:
-      - "0.0.0-testing-*"
+  workflow_dispatch:
+  # push:
+  #   tags:
+  #     - "0.0.0-testing-*"
 
 jobs:
   build:
