@@ -277,12 +277,7 @@ function ZoneColumn({
 			{/* md+: the column owns its scroll inside the fixed-height grid cell.
 			    Mobile: it grows with its cards and the page scrolls instead, and a
 			    collapsed lane hides its cards. */}
-			<div
-				className={cn(
-					"px-[11px] pb-3 md:min-h-0 md:flex-1 md:overflow-y-auto",
-					collapsed && "hidden md:block",
-				)}
-			>
+			<div className={cn("px-[11px] pb-3 md:min-h-0 md:flex-1 md:overflow-y-auto", collapsed && "hidden md:block")}>
 				<div className="flex flex-col gap-2.5">
 					{sessions.map((session) => (
 						<SessionCard key={session.id} session={session} onOpen={() => onOpen(session)} />
