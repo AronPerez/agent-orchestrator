@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
+	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -108,21 +110,22 @@ type containerReapConfig struct {
 // client. The CLI sets common fields via flags and the whole object via
 // --config-json.
 type projectConfig struct {
-	ContainerReap     *containerReapConfig `json:"containerReap,omitempty"`
-	CanonicalRepoURL  string               `json:"canonicalRepoURL,omitempty"`
-	DefaultBranch     string               `json:"defaultBranch,omitempty"`
-	SessionPrefix     string               `json:"sessionPrefix,omitempty"`
-	Env               map[string]string    `json:"env,omitempty"`
-	Symlinks          []string             `json:"symlinks,omitempty"`
-	PostCreate        []string             `json:"postCreate,omitempty"`
-	AgentRules        string               `json:"agentRules,omitempty"`
-	AgentRulesFile    string               `json:"agentRulesFile,omitempty"`
-	OrchestratorRules string               `json:"orchestratorRules,omitempty"`
-	AgentConfig       agentConfig          `json:"agentConfig,omitempty"`
-	Worker            roleOverride         `json:"worker,omitempty"`
-	Orchestrator      roleOverride         `json:"orchestrator,omitempty"`
-	TrackerIntake     trackerIntakeConfig  `json:"trackerIntake,omitempty"`
-	AutoReview        bool                 `json:"autoReview,omitempty"`
+	ContainerReap      *containerReapConfig `json:"containerReap,omitempty"`
+	CanonicalRepoURL   string               `json:"canonicalRepoURL,omitempty"`
+	DefaultBranch      string               `json:"defaultBranch,omitempty"`
+	SessionPrefix      string               `json:"sessionPrefix,omitempty"`
+	Env                map[string]string    `json:"env,omitempty"`
+	Symlinks           []string             `json:"symlinks,omitempty"`
+	PostCreate         []string             `json:"postCreate,omitempty"`
+	AgentRules         string               `json:"agentRules,omitempty"`
+	AgentRulesFile     string               `json:"agentRulesFile,omitempty"`
+	OrchestratorRules  string               `json:"orchestratorRules,omitempty"`
+	OrchestratorPrompt string               `json:"orchestratorPrompt,omitempty"`
+	AgentConfig        agentConfig          `json:"agentConfig,omitempty"`
+	Worker             roleOverride         `json:"worker,omitempty"`
+	Orchestrator       roleOverride         `json:"orchestrator,omitempty"`
+	TrackerIntake      trackerIntakeConfig  `json:"trackerIntake,omitempty"`
+	AutoReview         bool                 `json:"autoReview,omitempty"`
 	// WorkersRequestReview must round-trip through set-config so a CLI edit
 	// of another field never silently turns it off.
 	WorkersRequestReview bool             `json:"workersRequestReview,omitempty"`
@@ -136,26 +139,27 @@ type setConfigRequest struct {
 }
 
 type projectSetConfigOptions struct {
-	canonicalRepoURL  string
-	defaultBranch     string
-	sessionPrefix     string
-	model             string
-	permission        string
-	workerAgent       string
-	orchestratorAgent string
-	agentRules        string
-	agentRulesFile    string
-	orchestratorRules string
-	env               []string
-	symlink           []string
-	postCreate        []string
-	trackerIntake     bool
-	trackerRepo       string
-	trackerAssignee   string
-	reviewers         []string
-	configJSON        string
-	clear             bool
-	json              bool
+	canonicalRepoURL       string
+	defaultBranch          string
+	sessionPrefix          string
+	model                  string
+	permission             string
+	workerAgent            string
+	orchestratorAgent      string
+	agentRules             string
+	agentRulesFile         string
+	orchestratorRules      string
+	orchestratorPromptFile string
+	env                    []string
+	symlink                []string
+	postCreate             []string
+	trackerIntake          bool
+	trackerRepo            string
+	trackerAssignee        string
+	reviewers              []string
+	configJSON             string
+	clear                  bool
+	json                   bool
 }
 
 type projectListResult struct {
@@ -312,7 +316,11 @@ func newProjectSetConfigCommand(ctx *commandContext) *cobra.Command {
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := strings.TrimSpace(args[0])
-			config, err := buildProjectConfig(opts)
+			prompt, err := readOrchestratorPrompt(cmd.InOrStdin(), opts.orchestratorPromptFile)
+			if err != nil {
+				return err
+			}
+			config, err := buildProjectConfig(opts, prompt)
 			if err != nil {
 				return err
 			}
@@ -339,6 +347,7 @@ func newProjectSetConfigCommand(ctx *commandContext) *cobra.Command {
 	f.StringVar(&opts.agentRules, "agent-rules", "", "Project-specific standing instructions for worker sessions")
 	f.StringVar(&opts.agentRulesFile, "agent-rules-file", "", "Repo-relative file containing worker standing instructions")
 	f.StringVar(&opts.orchestratorRules, "orchestrator-rules", "", "Project-specific standing instructions for orchestrator sessions")
+	f.StringVar(&opts.orchestratorPromptFile, "orchestrator-prompt-file", "", "Path to a file with the orchestrator system prompt, or - for stdin")
 	f.StringArrayVar(&opts.env, "env", nil, "Env var KEY=VALUE forwarded into sessions (repeatable)")
 	f.StringArrayVar(&opts.symlink, "symlink", nil, "Repo-relative path to symlink into workspaces (repeatable)")
 	f.StringArrayVar(&opts.postCreate, "post-create", nil, "Command to run after workspace creation (repeatable)")
@@ -354,13 +363,21 @@ func newProjectSetConfigCommand(ctx *commandContext) *cobra.Command {
 
 // buildProjectConfig turns the set-config flags into the typed config sent to
 // the daemon. --clear empties the config; --config-json supplies the whole
-// object; otherwise the field flags form the config. The daemon validates the
+// object; otherwise the field flags form the config. orchestratorPrompt (already
+// resolved from --orchestrator-prompt-file) sets ProjectConfig.OrchestratorPrompt
+// and cannot be combined with --config-json or --clear. The daemon validates the
 // values.
-func buildProjectConfig(opts projectSetConfigOptions) (projectConfig, error) {
+func buildProjectConfig(opts projectSetConfigOptions, orchestratorPrompt string) (projectConfig, error) {
 	if opts.clear {
+		if orchestratorPrompt != "" {
+			return projectConfig{}, usageError{errors.New("--orchestrator-prompt-file cannot be combined with --clear")}
+		}
 		return projectConfig{}, nil
 	}
 	if opts.configJSON != "" {
+		if orchestratorPrompt != "" {
+			return projectConfig{}, usageError{errors.New("--orchestrator-prompt-file cannot be combined with --config-json")}
+		}
 		var cfg projectConfig
 		if err := json.Unmarshal([]byte(opts.configJSON), &cfg); err != nil {
 			return projectConfig{}, usageError{fmt.Errorf("--config-json is not a valid JSON object: %w", err)}
@@ -373,18 +390,19 @@ func buildProjectConfig(opts projectSetConfigOptions) (projectConfig, error) {
 		return projectConfig{}, err
 	}
 	cfg := projectConfig{
-		CanonicalRepoURL:  opts.canonicalRepoURL,
-		DefaultBranch:     opts.defaultBranch,
-		SessionPrefix:     opts.sessionPrefix,
-		Env:               env,
-		Symlinks:          opts.symlink,
-		PostCreate:        opts.postCreate,
-		AgentRules:        opts.agentRules,
-		AgentRulesFile:    opts.agentRulesFile,
-		OrchestratorRules: opts.orchestratorRules,
-		AgentConfig:       agentConfig{Model: opts.model, Permissions: opts.permission},
-		Worker:            roleOverride{Agent: opts.workerAgent},
-		Orchestrator:      roleOverride{Agent: opts.orchestratorAgent},
+		CanonicalRepoURL:   opts.canonicalRepoURL,
+		DefaultBranch:      opts.defaultBranch,
+		SessionPrefix:      opts.sessionPrefix,
+		Env:                env,
+		Symlinks:           opts.symlink,
+		PostCreate:         opts.postCreate,
+		AgentRules:         opts.agentRules,
+		AgentRulesFile:     opts.agentRulesFile,
+		OrchestratorRules:  opts.orchestratorRules,
+		OrchestratorPrompt: orchestratorPrompt,
+		AgentConfig:        agentConfig{Model: opts.model, Permissions: opts.permission},
+		Worker:             roleOverride{Agent: opts.workerAgent},
+		Orchestrator:       roleOverride{Agent: opts.orchestratorAgent},
 		TrackerIntake: trackerIntakeConfig{
 			Enabled:  opts.trackerIntake,
 			Repo:     opts.trackerRepo,
@@ -393,7 +411,7 @@ func buildProjectConfig(opts projectSetConfigOptions) (projectConfig, error) {
 		Reviewers: reviewersForFlags(opts.reviewers),
 	}
 	if reflect.DeepEqual(cfg, projectConfig{}) {
-		return projectConfig{}, usageError{errors.New("usage: provide at least one config flag, --config-json, or --clear")}
+		return projectConfig{}, usageError{errors.New("usage: provide at least one config flag, --config-json, --orchestrator-prompt-file, or --clear")}
 	}
 	return cfg, nil
 }
@@ -416,6 +434,27 @@ func reviewersForFlags(harnesses []string) []reviewerConfig {
 		return nil
 	}
 	return reviewers
+}
+
+// readOrchestratorPrompt resolves --orchestrator-prompt-file: "" -> no prompt,
+// "-" -> read from in, otherwise read the named file. Kept local (the same
+// path/stdin shape exists in review.go) to avoid a drive-by refactor.
+func readOrchestratorPrompt(in io.Reader, path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", nil
+	}
+	var raw []byte
+	var err error
+	if path == "-" {
+		raw, err = io.ReadAll(in)
+	} else {
+		raw, err = os.ReadFile(path)
+	}
+	if err != nil {
+		return "", usageError{fmt.Errorf("read orchestrator prompt: %w", err)}
+	}
+	return string(raw), nil
 }
 
 // parseEnvPairs turns repeated KEY=VALUE flags into a map.

@@ -61,6 +61,11 @@ type ProjectConfig struct {
 	// tracker is not commented on or transitioned.
 	TrackerIntake TrackerIntakeConfig `json:"trackerIntake,omitempty"`
 
+	// OrchestratorPrompt, when set, replaces the built-in orchestrator standing
+	// instructions for this project's orchestrator sessions. The confidentiality
+	// guard is still appended. Empty = built-in default. Used literally.
+	OrchestratorPrompt string `json:"orchestratorPrompt,omitempty"`
+
 	// ContainerReap controls whether AO reaps a worker session's ao.session-
 	// labeled Docker containers on terminal state / kill. Enabled by default;
 	// set Disabled to opt a project out entirely. Per-container sparing uses
@@ -171,6 +176,10 @@ const (
 	DefaultBranchName = "main"
 )
 
+// maxOrchestratorPromptBytes bounds the per-project orchestrator prompt so it
+// stays well within process-arg limits when injected into an agent launch.
+const maxOrchestratorPromptBytes = 64 * 1024
+
 // DefaultProjectConfig returns the config a project has when it sets nothing:
 // automatic per-repository branch resolution. Every other field defaults to
 // its zero value (no env/symlinks/post-create, agent + role defaults).
@@ -262,6 +271,9 @@ func (c ProjectConfig) Validate() error {
 	}
 	if err := c.TrackerIntake.Validate(); err != nil {
 		return err
+	}
+	if n := len(c.OrchestratorPrompt); n > maxOrchestratorPromptBytes {
+		return fmt.Errorf("orchestratorPrompt: %d bytes exceeds max %d", n, maxOrchestratorPromptBytes)
 	}
 	return nil
 }

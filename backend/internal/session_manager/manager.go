@@ -5429,6 +5429,9 @@ func (m *Manager) buildSystemPrompt(ctx context.Context, kind domain.SessionKind
 
 	switch kind {
 	case domain.KindOrchestrator:
+		// A per-project OrchestratorPrompt replaces the built-in role prompt;
+		// OrchestratorRules augment it. Both are optional.
+		cfg.OrchestratorOverride = project.Config.OrchestratorPrompt
 		cfg.OrchestratorRules = project.Config.OrchestratorRules
 	case domain.KindWorker:
 		if projectID != "" {
