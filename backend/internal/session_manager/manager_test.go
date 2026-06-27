@@ -1173,6 +1173,10 @@ type fakeWorkspace struct {
 	stashErr        error
 	applyErr        error
 	forceDestroyErr error
+	// worktreeMissing makes Exists report the worktree directory as absent,
+	// simulating a worktree removed out from under a live runtime.
+	worktreeMissing bool
+	existsErr       error
 	// stashCalls counts StashUncommitted invocations.
 	stashCalls int
 	stashHook  func()
@@ -1339,6 +1343,9 @@ func (w *fakeWorkspace) Restore(ctx context.Context, cfg ports.WorkspaceConfig) 
 		return ports.WorkspaceInfo{Path: cfg.Path, Branch: cfg.Branch, BaseRef: cfg.BaseRef, SessionID: cfg.SessionID, ProjectID: cfg.ProjectID, RepoPath: cfg.RepoPath}, nil
 	}
 	return w.Create(ctx, cfg)
+}
+func (w *fakeWorkspace) Exists(_ context.Context, _ ports.WorkspaceInfo) (bool, error) {
+	return !w.worktreeMissing, w.existsErr
 }
 func (w *fakeWorkspace) ForceDestroy(_ context.Context, info ports.WorkspaceInfo) error {
 	entry := "ForceDestroy:" + string(info.SessionID)
@@ -5143,6 +5150,40 @@ func TestCleanup_WorkspaceProjectDirtyRowsAreSkipped(t *testing.T) {
 	}
 	if states["api"] != "" || refs["api"] != "" {
 		t.Fatalf("api state/ref = %q/%q, want unchanged dirty row", states["api"], refs["api"])
+	}
+}
+
+// TestCleanup_SkipsWorktreeSharedWithLiveSession locks the guard against the
+// orchestrator-worktree stomp: orchestrator worktrees are a per-project
+// singleton keyed on project+prefix, so a terminated orchestrator row shares its
+// WorkspacePath with the active one. Cleanup must NOT reclaim that shared path —
+// destroying it deletes the live agent's working directory out from under it.
+func TestCleanup_SkipsWorktreeSharedWithLiveSession(t *testing.T) {
+	m, st, _, ws := newManager()
+	const shared = "/ws/mer/orchestrator/mer-orchestrator"
+	// A terminated orchestrator row and the live one resolve to the SAME worktree.
+	seedTerminal(st, "mer-1", domain.SessionMetadata{WorkspacePath: shared, Branch: "ao/mer-orchestrator"})
+	st.sessions["mer-2"] = domain.SessionRecord{
+		ID: "mer-2", ProjectID: "mer", Kind: domain.KindOrchestrator,
+		Metadata: domain.SessionMetadata{WorkspacePath: shared, Branch: "ao/mer-orchestrator", RuntimeHandleID: "mer-2"},
+		Activity: domain.Activity{State: domain.ActivityActive},
+	}
+
+	res, err := m.Cleanup(ctx, "mer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ws.destroyed != 0 {
+		t.Fatalf("Destroy calls = %d, want 0 (shared live worktree must be preserved)", ws.destroyed)
+	}
+	if len(res.Cleaned) != 0 {
+		t.Fatalf("cleaned = %v, want none (path is in use)", res.Cleaned)
+	}
+	if len(res.Skipped) != 1 || res.Skipped[0].SessionID != "mer-1" {
+		t.Fatalf("skipped = %v, want [mer-1]", res.Skipped)
+	}
+	if res.Skipped[0].Reason != "workspace in use by an active session" {
+		t.Fatalf("reason = %q", res.Skipped[0].Reason)
 	}
 }
 
@@ -9857,6 +9898,29 @@ func TestReconcileLive_InterruptedSpawnSeedRowIsRemoved(t *testing.T) {
 	}
 	if _, ok := st.sessions[rec.ID]; ok {
 		t.Fatalf("interrupted seed row should have been removed, still present: %+v", st.sessions[rec.ID])
+	}
+}
+
+// TestReconcileLive_AliveButMissingWorktreeIsNotAdopted: a live runtime whose
+// worktree was removed out from under it sits on a deleted cwd and cannot be
+// healed in place, so reconcile must kill the orphan instead of adopting it.
+func TestReconcileLive_AliveButMissingWorktreeIsNotAdopted(t *testing.T) {
+	st := newFakeStore()
+	st.projects["p1"] = domain.ProjectRecord{ID: "p1", Config: testRoleAgents()}
+	rt := &fakeRuntime{aliveByHandle: map[string]bool{"s4": true}}
+	rec := domain.SessionRecord{
+		ID: "s4", ProjectID: "p1", Harness: domain.HarnessClaudeCode,
+		Metadata: domain.SessionMetadata{Branch: "ao/s4/root", WorkspacePath: "/wt/s4", RuntimeHandleID: "s4"},
+	}
+	st.sessions[rec.ID] = rec
+	m := New(Deps{
+		Runtime: rt, Agents: fakeAgents{}, Workspace: &fakeWorkspace{worktreeMissing: true}, Store: st,
+		Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+	_ = m.reconcileLive(context.Background(), rec)
+	if len(rt.destroyedIDs) == 0 || rt.destroyedIDs[0] != "s4" {
+		t.Fatalf("destroyedIDs = %v, want the orphan runtime s4 killed", rt.destroyedIDs)
 	}
 }
 

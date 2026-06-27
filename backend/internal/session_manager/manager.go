@@ -3628,7 +3628,24 @@ func (m *Manager) reconcileLive(ctx context.Context, rec domain.SessionRecord) e
 				return fmt.Errorf("reconcile %s: probe: %w", rec.ID, err)
 			}
 			if alive {
-				return nil // adopt: the session survived the crash.
+				// Adopt a live runtime only if its worktree is still on disk. If it
+				// was removed out from under the session (a sibling session sharing
+				// the path was torn down, an external `git worktree prune`), the
+				// shell's cwd is a deleted inode that cannot be healed in place:
+				// kill the orphan and fall through to the in-place relaunch, which
+				// re-creates the worktree from the branch.
+				exists, err := m.workspace.Exists(ctx, workspaceInfo(rec))
+				if err != nil {
+					// A failed probe is not proof the worktree is gone: leave as-is.
+					return fmt.Errorf("reconcile %s: workspace probe: %w", rec.ID, err)
+				}
+				if exists {
+					return nil // adopt: survived the crash with its worktree intact.
+				}
+				m.logger.Warn("reconcile: live session lost its worktree; relaunching into a fresh one", "sessionID", rec.ID)
+				if err := m.runtime.Destroy(ctx, handle); err != nil {
+					m.logger.Warn("reconcile: destroy orphaned runtime failed", "sessionID", rec.ID, "error", err)
+				}
 			}
 		}
 	}
@@ -3748,6 +3765,32 @@ func (m *Manager) preserveFailedReconcileRelaunch(ctx context.Context, before do
 		}
 	}
 	return false, errors.New("session changed while recording failed relaunch")
+}
+
+// markSavedAndTeardown records the shutdown-saved marker (carrying preserveRef,
+// which may be empty), marks the session terminated, and force-removes its
+// worktree so RestoreAll re-creates it clean and replays the ref. It mirrors the
+// tail of saveAndTeardownOne and is shared by reconcileLive's two teardown
+// branches (dead runtime, and live runtime whose worktree vanished).
+func (m *Manager) markSavedAndTeardown(ctx context.Context, rec domain.SessionRecord, ws ports.WorkspaceInfo, preserveRef string) error {
+	row := domain.SessionWorktreeRecord{
+		SessionID:    rec.ID,
+		RepoName:     domain.RootWorkspaceRepoName,
+		Branch:       rec.Metadata.Branch,
+		WorktreePath: rec.Metadata.WorkspacePath,
+		PreservedRef: preserveRef,
+		State:        "removed",
+	}
+	if err := m.store.UpsertSessionWorktree(ctx, row); err != nil {
+		return fmt.Errorf("reconcile %s: upsert worktree marker: %w", rec.ID, err)
+	}
+	if err := m.lcm.MarkTerminated(ctx, rec.ID); err != nil {
+		return fmt.Errorf("reconcile %s: mark terminated: %w", rec.ID, err)
+	}
+	if err := m.workspace.ForceDestroy(ctx, ws); err != nil {
+		m.logger.Warn("reconcile: force destroy failed after marker", "sessionID", rec.ID, "error", err)
+	}
+	return nil
 }
 
 // reconcileReap kills the leaked tmux session of a session the DB already marks

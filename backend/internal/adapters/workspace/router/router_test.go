@@ -65,6 +65,11 @@ func (w *recordingWorkspace) Destroy(_ context.Context, info ports.WorkspaceInfo
 	w.lastInfo = info
 	return nil
 }
+func (w *recordingWorkspace) Exists(_ context.Context, info ports.WorkspaceInfo) (bool, error) {
+	w.lastInfo = info
+	return true, nil
+}
+
 func (w *recordingWorkspace) ForceDestroy(_ context.Context, info ports.WorkspaceInfo) error {
 	w.forceDestroyCalls++
 	w.lastInfo = info
