@@ -192,7 +192,7 @@ export function SessionView({ sessionId }: SessionViewProps) {
 						/>
 					) : (
 						<CenterPane
-							daemonReady={daemonStatus.state === "ready"}
+							daemonReady={daemonStatus.state === "ready" || import.meta.env.VITE_AO_API_BASE_URL != null}
 							onSelectWorkerTerminal={() => setTerminalTarget({ kind: "worker" })}
 							session={session}
 							terminalTarget={terminalTarget}
