@@ -236,12 +236,34 @@ function ZoneColumn({
 	sessions: WorkspaceSession[];
 	onOpen: (s: WorkspaceSession) => void;
 }) {
+	// Lanes are collapsible on mobile only: tapping the header hides its cards so
+	// all four lane headers fit on a phone. On md+ the grid shows every lane in
+	// full, so the toggle is a no-op there (body forced visible, chevron hidden).
+	const [collapsed, setCollapsed] = useState(false);
 	return (
 		<section
 			className="flex flex-col overflow-hidden rounded-[13px] md:min-w-0"
 			style={{ background: `linear-gradient(180deg, ${col.glow}, transparent 130px), var(--kanban-column-bg)` }}
 		>
-			<div className="flex shrink-0 items-center gap-[9px] px-[15px] pb-[11px] pt-[14px]">
+			<button
+				type="button"
+				aria-expanded={!collapsed}
+				onClick={() => setCollapsed((v) => !v)}
+				className="flex w-full shrink-0 items-center gap-[9px] px-[15px] pb-[11px] pt-[14px] text-left md:cursor-default"
+			>
+				<svg
+					aria-hidden="true"
+					className={cn(
+						"h-3 w-3 shrink-0 text-passive transition-transform duration-150 md:hidden",
+						!collapsed && "rotate-90",
+					)}
+					fill="none"
+					stroke="currentColor"
+					strokeWidth="2"
+					viewBox="0 0 24 24"
+				>
+					<path d="m9 18 6-6-6-6" />
+				</svg>
 				<span
 					className="h-[7px] w-[7px] rounded-full"
 					style={{
@@ -251,10 +273,11 @@ function ZoneColumn({
 				/>
 				<span className={cn("text-[11px] font-semibold uppercase tracking-[0.08em]", col.titleClass)}>{col.label}</span>
 				<span className="ml-auto font-mono text-[11px] leading-none text-passive">{sessions.length}</span>
-			</div>
+			</button>
 			{/* md+: the column owns its scroll inside the fixed-height grid cell.
-			    Mobile: it grows with its cards and the page scrolls instead. */}
-			<div className="px-[11px] pb-3 md:min-h-0 md:flex-1 md:overflow-y-auto">
+			    Mobile: it grows with its cards and the page scrolls instead, and a
+			    collapsed lane hides its cards. */}
+			<div className={cn("px-[11px] pb-3 md:min-h-0 md:flex-1 md:overflow-y-auto", collapsed && "hidden md:block")}>
 				<div className="flex flex-col gap-2.5">
 					{sessions.map((session) => (
 						<SessionCard key={session.id} session={session} onOpen={() => onOpen(session)} />
