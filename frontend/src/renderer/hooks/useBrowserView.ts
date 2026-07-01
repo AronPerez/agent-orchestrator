@@ -77,6 +77,7 @@ export function useBrowserView({
 	const viewIdRef = useRef("");
 	const activeRef = useRef(active);
 	const frameRef = useRef<number | null>(null);
+	const settleTimerRef = useRef<number | null>(null);
 	const observerRef = useRef<ResizeObserver | null>(null);
 	const previewTriggerRef = useRef<{ revision: number | null; target: string } | null>(null);
 
@@ -123,6 +124,23 @@ export function useBrowserView({
 			: window.setTimeout(() => measureAndSend(), 16);
 	}, [measureAndSend]);
 
+	// A ResizeObserver only fires on size changes, so a position-only layout shift
+	// leaves the native overlay at stale bounds: entering/leaving pop-out moves the
+	// slot into a different panel, and opening the inspector (what `ao preview`
+	// does) reflows the slot's x without changing the observed node's box size.
+	// Neither fires the observer, so the view visibly spills over the sidebar/
+	// terminal until an unrelated window resize re-measures it. Re-measure now and
+	// again once the panel transition has settled (~240ms) so the final geometry
+	// always wins.
+	const scheduleSettleMeasure = useCallback(() => {
+		scheduleMeasure();
+		if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
+		settleTimerRef.current = window.setTimeout(() => {
+			settleTimerRef.current = null;
+			measureAndSend();
+		}, 280);
+	}, [measureAndSend, scheduleMeasure]);
+
 	const slotRef = useCallback(
 		(node: HTMLDivElement | null) => {
 			observerRef.current?.disconnect();
@@ -151,7 +169,7 @@ export function useBrowserView({
 			viewIdRef.current = state.viewId;
 			setViewId(state.viewId);
 			setNavState(state);
-			scheduleMeasure();
+			scheduleSettleMeasure();
 		});
 		return () => {
 			disposed = true;
@@ -161,7 +179,7 @@ export function useBrowserView({
 			}
 			viewIdRef.current = "";
 		};
-	}, [scheduleMeasure, sendHiddenBounds, sessionId]);
+	}, [scheduleSettleMeasure, sendHiddenBounds, sessionId]);
 
 	useEffect(() => {
 		return window.ao?.browser.onNavState((state) => {
@@ -172,11 +190,11 @@ export function useBrowserView({
 
 	useEffect(() => {
 		if (active) {
-			scheduleMeasure();
+			scheduleSettleMeasure();
 		} else {
 			sendHiddenBounds();
 		}
-	}, [active, poppedOut, scheduleMeasure, sendHiddenBounds]);
+	}, [active, poppedOut, scheduleSettleMeasure, sendHiddenBounds]);
 
 	useEffect(() => {
 		const handle = () => scheduleMeasure();
@@ -187,6 +205,7 @@ export function useBrowserView({
 			window.removeEventListener("scroll", handle, true);
 			observerRef.current?.disconnect();
 			cancelScheduledMeasure();
+			if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
 		};
 	}, [cancelScheduledMeasure, scheduleMeasure]);
 

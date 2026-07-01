@@ -5,13 +5,27 @@ import {
 	dialog,
 	ipcMain,
 	net,
+	nativeImage,
 	Notification as ElectronNotification,
 	protocol,
 	shell,
 	WebContentsView,
 	type OpenDialogOptions,
 } from "electron";
-import { startAutoUpdates, ensureUpdatePrefs } from "./main/auto-updater";
+import {
+	startAutoUpdates,
+	ensureUpdatePrefs,
+	checkForUpdatesNow,
+	downloadUpdateNow,
+	quitAndInstallUpdate,
+	getUpdateStatus,
+} from "./main/auto-updater";
+import {
+	readUpdateSettings,
+	writeUpdateSettings,
+	type UpdateSettings,
+	type UpdateStatus,
+} from "./main/update-settings";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
@@ -141,6 +155,16 @@ function windowIconPath(): string | undefined {
 		? path.join(process.resourcesPath, "icon.png")
 		: path.join(__dirname, "../../assets/icon.png");
 	return existsSync(candidate) ? candidate : undefined;
+}
+
+function applyRuntimeAppIcon(): void {
+	if (process.platform !== "darwin") return;
+	const iconPath = windowIconPath();
+	if (!iconPath) return;
+	const icon = nativeImage.createFromPath(iconPath);
+	if (!icon.isEmpty()) {
+		app.dock.setIcon(icon);
+	}
 }
 
 function setDaemonStatus(nextStatus: DaemonStatus): void {
@@ -806,6 +830,30 @@ ipcMain.handle("appState:setMigration", async (_event, migration: MigrationState
 	await updateMigration({ stateDir: path.dirname(runFile), migration, now: () => new Date() });
 });
 
+ipcMain.handle("updateSettings:get", async (): Promise<UpdateSettings> => {
+	const runFile = runFilePath();
+	if (!runFile) return { enabled: false, channel: "latest", nightlyAck: false };
+	return readUpdateSettings(path.dirname(runFile));
+});
+ipcMain.handle("updateSettings:set", async (_event, settings: UpdateSettings) => {
+	const runFile = runFilePath();
+	if (!runFile) return;
+	await writeUpdateSettings(path.dirname(runFile), settings);
+});
+
+ipcMain.handle("updates:getStatus", (): UpdateStatus => getUpdateStatus());
+ipcMain.handle("updates:check", async () => {
+	const runFile = runFilePath();
+	if (!runFile) return;
+	await checkForUpdatesNow(path.dirname(runFile));
+});
+ipcMain.handle("updates:download", async () => {
+	await downloadUpdateNow();
+});
+ipcMain.handle("updates:install", () => {
+	quitAndInstallUpdate();
+});
+
 ipcMain.handle("notifications:show", (_event, notification: { id: string; title: string; body?: string }) => {
 	if (!notification.id || !notification.title || !ElectronNotification.isSupported()) return;
 	const toast = new ElectronNotification({
@@ -915,6 +963,7 @@ app.whenReady().then(async () => {
 	}
 
 	registerRendererProtocol();
+	applyRuntimeAppIcon();
 	createWindow();
 	void startDaemon();
 	initAutoUpdates();

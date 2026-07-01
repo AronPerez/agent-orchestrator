@@ -96,6 +96,8 @@ type Store interface {
 	// presence of any row is the marker; preserved_ref may be empty for clean
 	// worktrees.
 	ListSessionWorktrees(ctx context.Context, id domain.SessionID) ([]domain.SessionWorktreeRecord, error)
+	// DeleteSessionWorktrees clears the "shutdown-saved" restore marker.
+	DeleteSessionWorktrees(ctx context.Context, id domain.SessionID) error
 }
 
 // Manager coordinates internal session spawn, restore, kill, and cleanup over
@@ -202,6 +204,10 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 		return domain.SessionRecord{}, fmt.Errorf("spawn: %w: %q", ErrUnknownHarness, cfg.Harness)
 	}
 
+	if err := m.validateRuntimePrerequisites(); err != nil {
+		return domain.SessionRecord{}, fmt.Errorf("spawn: %w", err)
+	}
+
 	prompt, systemPrompt, err := m.buildSpawnTexts(ctx, cfg)
 	if err != nil {
 		return domain.SessionRecord{}, fmt.Errorf("spawn: prompt: %w", err)
@@ -237,19 +243,19 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 	// post-create commands (e.g. `pnpm install`) before the agent launches.
 	if err := m.provisionWorkspace(ctx, project, ws.Path); err != nil {
 		_ = m.workspace.Destroy(ctx, ws)
-		m.markSpawnFailedTerminated(ctx, id)
+		m.rollbackSpawnSeedRow(ctx, id)
 		return domain.SessionRecord{}, fmt.Errorf("spawn %s: provision: %w", id, err)
 	}
 
 	agent, ok := m.agents.Agent(cfg.Harness)
 	if !ok {
 		_ = m.workspace.Destroy(ctx, ws)
-		m.markSpawnFailedTerminated(ctx, id)
+		m.rollbackSpawnSeedRow(ctx, id)
 		return domain.SessionRecord{}, fmt.Errorf("spawn %s: no agent adapter for harness %q", id, cfg.Harness)
 	}
 	if err := m.prepareWorkspace(ctx, agent, id, ws.Path); err != nil {
 		_ = m.workspace.Destroy(ctx, ws)
-		m.markSpawnFailedTerminated(ctx, id)
+		m.rollbackSpawnSeedRow(ctx, id)
 		return domain.SessionRecord{}, fmt.Errorf("spawn %s: %w", id, err)
 	}
 	agentConfig := effectiveAgentConfig(cfg.Kind, project.Config)
@@ -264,7 +270,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 	})
 	if err != nil {
 		_ = m.workspace.Destroy(ctx, ws)
-		m.markSpawnFailedTerminated(ctx, id)
+		m.rollbackSpawnSeedRow(ctx, id)
 		return domain.SessionRecord{}, fmt.Errorf("spawn %s: launch command: %w", id, err)
 	}
 	// Pre-flight: confirm argv[0] actually exists on PATH (or as an absolute
@@ -273,7 +279,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 	// unresolved binary would leak through as a "live" session that never ran.
 	if err := m.validateAgentBinary(argv); err != nil {
 		_ = m.workspace.Destroy(ctx, ws)
-		m.markSpawnFailedTerminated(ctx, id)
+		m.rollbackSpawnSeedRow(ctx, id)
 		return domain.SessionRecord{}, fmt.Errorf("spawn %s: %w", id, err)
 	}
 	handle, err := m.runtime.Create(ctx, ports.RuntimeConfig{
@@ -284,7 +290,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 	})
 	if err != nil {
 		_ = m.workspace.Destroy(ctx, ws)
-		m.markSpawnFailedTerminated(ctx, id)
+		m.rollbackSpawnSeedRow(ctx, id)
 		return domain.SessionRecord{}, fmt.Errorf("spawn %s: runtime: %w", id, err)
 	}
 
@@ -442,6 +448,12 @@ func (m *Manager) Kill(ctx context.Context, id domain.SessionID) (bool, error) {
 	// when the runtime/workspace handle is missing.
 	if err := m.lcm.MarkTerminated(ctx, id); err != nil {
 		return false, fmt.Errorf("kill %s: %w", id, err)
+	}
+
+	// Clear the restore marker so the next boot's RestoreAll cannot resurrect a
+	// killed session (#2319). Best-effort: teardown below still matters.
+	if err := m.store.DeleteSessionWorktrees(ctx, id); err != nil {
+		m.logger.Warn("kill: delete restore marker failed", "sessionID", id, "error", err)
 	}
 
 	// Only tear down what exists. A session may have lost its handle after a
@@ -865,6 +877,12 @@ func (m *Manager) RestoreAll(ctx context.Context) error {
 				m.logger.Error("restore-all: relaunch failed", "sessionID", rec.ID, "error", err)
 			}
 		}
+
+		// One-shot: drop the consumed marker so it never outlives one restart
+		// (#2319). A still-live session re-acquires it at the next quit.
+		if err := m.store.DeleteSessionWorktrees(ctx, rec.ID); err != nil {
+			m.logger.Warn("restore-all: delete restore marker failed", "sessionID", rec.ID, "error", err)
+		}
 	}
 	return nil
 }
@@ -973,13 +991,14 @@ func liveWorkspacePaths(recs []domain.SessionRecord) map[string]bool {
 
 func seedRecord(cfg ports.SpawnConfig, now time.Time) domain.SessionRecord {
 	return domain.SessionRecord{
-		ProjectID: cfg.ProjectID,
-		IssueID:   cfg.IssueID,
-		Kind:      cfg.Kind,
-		CreatedAt: now,
-		UpdatedAt: now,
-		Harness:   cfg.Harness,
-		Activity:  domain.Activity{State: domain.ActivityIdle, LastActivityAt: now},
+		ProjectID:   cfg.ProjectID,
+		IssueID:     cfg.IssueID,
+		Kind:        cfg.Kind,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		Harness:     cfg.Harness,
+		DisplayName: cfg.DisplayName,
+		Activity:    domain.Activity{State: domain.ActivityIdle, LastActivityAt: now},
 	}
 }
 
@@ -1340,6 +1359,16 @@ func (m *Manager) validateAgentBinary(argv []string) error {
 	bin := argv[0]
 	if _, err := m.lookPath(bin); err != nil {
 		return fmt.Errorf("agent binary %q: %w", bin, ports.ErrAgentBinaryNotFound)
+	}
+	return nil
+}
+
+func (m *Manager) validateRuntimePrerequisites() error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	if path, err := m.lookPath("tmux"); err != nil || path == "" {
+		return fmt.Errorf("%w: tmux required on macOS/Linux but not in PATH", ports.ErrRuntimePrerequisite)
 	}
 	return nil
 }

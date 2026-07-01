@@ -122,6 +122,60 @@ describe("useBrowserView", () => {
 		);
 	});
 
+	it("re-measures after a layout transition settles, catching a position-only shift", async () => {
+		// A ResizeObserver fires on size changes only; entering pop-out / opening the
+		// inspector moves the slot to a new x without resizing it, so the transition
+		// itself must drive a settle re-measure or the native overlay keeps stale
+		// (spilled) bounds. This is the regression behind the preview covering the
+		// terminal until an unrelated window resize fixed it.
+		vi.useFakeTimers();
+		try {
+			const bridge = setupBridge();
+			const slot = createSlot();
+			const { result, rerender } = renderHook(
+				({ poppedOut }) => useBrowserView({ sessionId: "sess-1", active: true, poppedOut }),
+				{ initialProps: { poppedOut: false } },
+			);
+			// ensure() resolves on a microtask; flush it without advancing timers.
+			await act(async () => {
+				await Promise.resolve();
+			});
+			act(() => result.current.slotRef(slot));
+			// Flush the mount measure (immediate frame + settle timer).
+			await act(async () => {
+				vi.advanceTimersByTime(300);
+			});
+			expect(bridge.setBounds).toHaveBeenCalled();
+
+			// Pop-out transition: the immediate frame captures the still-animating
+			// geometry; the final position only lands once the panel has settled.
+			act(() => rerender({ poppedOut: true }));
+			await act(async () => {
+				vi.advanceTimersByTime(20);
+			});
+			bridge.setBounds.mockClear();
+			slot.getBoundingClientRect = vi.fn(() => ({
+				x: 240,
+				y: 34,
+				width: 320,
+				height: 240,
+				top: 34,
+				right: 560,
+				bottom: 274,
+				left: 240,
+				toJSON: () => ({}),
+			}));
+			await act(async () => {
+				vi.advanceTimersByTime(300);
+			});
+			expect(bridge.setBounds).toHaveBeenCalledWith(
+				expect.objectContaining({ rect: expect.objectContaining({ x: 240, width: 320 }) }),
+			);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("hides the native view when inactive and on unmount without destroying session state", async () => {
 		const bridge = setupBridge();
 		const slot = createSlot();

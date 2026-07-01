@@ -1,28 +1,22 @@
 <div align="center">
 
-<p align="center">
-  <img src="ao-logo.svg" alt="Agent Orchestrator" width="200" height="200" />
-</p>
+<p style="text-align: center;"><img src="ao-logo.svg" alt="Agent Orchestrator" width="200" height="200" style="max-width: 100%; height: auto; margin-left: 50px;" /></p>
 
-<h1 align="center">Agent Orchestrator</h1>
+# Agent Orchestrator
 
-<p align="center"><strong>The orchestration layer for parallel AI coding agents</strong></p>
+**The orchestration layer for parallel AI coding agents**
 
-<p align="center">
-  <a href="https://github.com/AgentWrapper/agent-orchestrator/stargazers"><img src="https://img.shields.io/github/stars/AgentWrapper/agent-orchestrator" alt="Stars" /></a>
-  <a href="https://github.com/AgentWrapper/agent-orchestrator/graphs/contributors"><img src="https://img.shields.io/github/contributors/AgentWrapper/agent-orchestrator" alt="Contributors" /></a>
-  <a href="https://x.com/aoagents"><img src="https://img.shields.io/badge/Twitter-1DA1F2?logo=twitter&logoColor=white" alt="Twitter" /></a>
-  <a href="https://discord.com/invite/UZv7JjxbwG"><img src="https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white" alt="Discord" /></a>
-  <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/License-Apache--2.0-blue.svg" alt="License: Apache-2.0" /></a>
-</p>
+[![Stars](https://img.shields.io/github/stars/AgentWrapper/agent-orchestrator)](https://github.com/AgentWrapper/agent-orchestrator/stargazers)
+[![Contributors](https://img.shields.io/github/contributors/AgentWrapper/agent-orchestrator)](https://github.com/AgentWrapper/agent-orchestrator/graphs/contributors)
+[![Twitter](https://img.shields.io/badge/Twitter-1DA1F2?logo=twitter&logoColor=white)](https://x.com/aoagents)
+[![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.com/invite/UZv7JjxbwG)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 
-<p align="center">An Agentic IDE that supervises parallel AI coding agents in isolated workspaces, with complete control and automatic feedback loops from CI failures, review comments, and merge conflicts.</p>
+An Agentic IDE that supervises parallel AI coding agents in isolated workspaces, with complete control and automatic feedback loops from CI failures, review comments, and merge conflicts.
 
-<p align="center">
-  <img src="ao-dashboard-preview.png" alt="Agent Orchestrator Dashboard" />
-</p>
+![Agent Orchestrator Dashboard](ao-dashboard-preview.png)
 
-### See AO in Action (before the re-write)
+### Witness AO's Journey on X
 
 <table border="1" style="border-collapse: collapse; width: 100%;">
 <tr>
