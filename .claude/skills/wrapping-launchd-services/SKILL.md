@@ -103,21 +103,21 @@ alias myservice="$HOME/bin/myservice-svc"
 
 ## Quick Reference
 
-| Action | Command |
-|---|---|
-| Start (register + run) | `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist` |
-| Stop (clean, no respawn) | `launchctl bootout gui/$(id -u)/<label>` |
-| Restart a loaded job | `launchctl kickstart -k gui/$(id -u)/<label>` |
-| Check status | `launchctl list \| grep <label-substring>` |
+| Action                   | Command                                                                 |
+| ------------------------ | ----------------------------------------------------------------------- |
+| Start (register + run)   | `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist` |
+| Stop (clean, no respawn) | `launchctl bootout gui/$(id -u)/<label>`                                |
+| Restart a loaded job     | `launchctl kickstart -k gui/$(id -u)/<label>`                           |
+| Check status             | `launchctl list \| grep <label-substring>`                              |
 
 ## Common Mistakes
 
-| Mistake | Reality |
-|---|---|
-| `launchctl load -w` / `unload` | Deprecated since 10.11. Use `bootstrap`/`bootout` targeting `gui/$(id -u)/<label>`. |
-| Relying only on `zsh -lc` to fix `PATH` | Re-sourcing `.zshrc` on every restart is slow and fragile (interactive-only guards, slow rc files can break it silently). Pin `PATH` via `EnvironmentVariables` too — belt and suspenders. |
-| Separate run.sh + control.sh + install.sh + uninstall.sh + README | Overbuilt for a personal dev machine. One ~20-line script with a `case` dispatch, looping over a `services=()` array, is enough. Hand-place the plist once; skip installer ceremony unless actually distributing this to other machines/users. |
-| Writing a run.sh just to hold one `exec` line | Unneeded — a single start command fits directly in the plist's `-lc "exec ..."` string. Only add a separate run script when startup needs more than one step (e.g. `cd` somewhere the plist's `WorkingDirectory` can't reach, or extra env setup). |
-| `launchctl kickstart`/`enable` right after `bootstrap` | Redundant — `bootstrap` + `RunAtLoad` already starts the job. Only reach for `kickstart -k` to force-restart an already-loaded job. |
-| Hand-parsing `launchctl list` PID/exit-status columns | `launchctl list \| grep <label>` is enough for a personal tool; only parse columns if something downstream needs the exit code programmatically. |
-| LaunchDaemon for a personal dev tool | Needs root + `/Library/LaunchDaemons` + `sudo`. Use a LaunchAgent (`~/Library/LaunchAgents`, `gui/<uid>` domain) unless the job truly must run before any login. |
+| Mistake                                                           | Reality                                                                                                                                                                                                                                            |
+| ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `launchctl load -w` / `unload`                                    | Deprecated since 10.11. Use `bootstrap`/`bootout` targeting `gui/$(id -u)/<label>`.                                                                                                                                                                |
+| Relying only on `zsh -lc` to fix `PATH`                           | Re-sourcing `.zshrc` on every restart is slow and fragile (interactive-only guards, slow rc files can break it silently). Pin `PATH` via `EnvironmentVariables` too — belt and suspenders.                                                         |
+| Separate run.sh + control.sh + install.sh + uninstall.sh + README | Overbuilt for a personal dev machine. One ~20-line script with a `case` dispatch, looping over a `services=()` array, is enough. Hand-place the plist once; skip installer ceremony unless actually distributing this to other machines/users.     |
+| Writing a run.sh just to hold one `exec` line                     | Unneeded — a single start command fits directly in the plist's `-lc "exec ..."` string. Only add a separate run script when startup needs more than one step (e.g. `cd` somewhere the plist's `WorkingDirectory` can't reach, or extra env setup). |
+| `launchctl kickstart`/`enable` right after `bootstrap`            | Redundant — `bootstrap` + `RunAtLoad` already starts the job. Only reach for `kickstart -k` to force-restart an already-loaded job.                                                                                                                |
+| Hand-parsing `launchctl list` PID/exit-status columns             | `launchctl list \| grep <label>` is enough for a personal tool; only parse columns if something downstream needs the exit code programmatically.                                                                                                   |
+| LaunchDaemon for a personal dev tool                              | Needs root + `/Library/LaunchDaemons` + `sudo`. Use a LaunchAgent (`~/Library/LaunchAgents`, `gui/<uid>` domain) unless the job truly must run before any login.                                                                                   |
