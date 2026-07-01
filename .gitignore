@@ -103,3 +103,6 @@ pnpm-lock.yaml
 
 # Serena MCP local project config
 .serena/
+
+# Runtime lock file (session-specific, regenerated each run)
+.claude/scheduled_tasks.lock
