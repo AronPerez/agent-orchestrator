@@ -331,6 +331,12 @@ export function XtermTerminal(props: XtermTerminalProps) {
 				});
 		};
 		term.attachCustomKeyEventHandler((event) => {
+			// xterm invokes this handler on keydown, keyup AND keypress (all three
+			// call _customKeyEventHandler internally). Our shortcut logic must run
+			// once per press, so ignore the keyup/keypress echoes — otherwise every
+			// shortcut fires twice (double paste, double alt-backspace). Returning
+			// true lets xterm handle those events normally.
+			if (event.type === "keyup" || event.type === "keypress") return true;
 			if (isTerminalCopyShortcut(event)) {
 				if (copySelection()) {
 					consumeTerminalShortcut(event);

@@ -438,6 +438,55 @@ describe("XtermTerminal", () => {
 		expect(onInput).toHaveBeenCalledWith(expected, "shortcut");
 	});
 
+	// Regression: xterm invokes the custom key handler on keydown, keyup AND
+	// keypress. A single physical press must emit the shortcut once — the
+	// keyup/keypress echoes previously re-ran it (double paste, double
+	// alt-backspace).
+	it("emits a shortcut once per press, ignoring keyup/keypress echoes", async () => {
+		const onInput = vi.fn();
+		window.ao!.clipboard.readText = vi.fn().mockResolvedValue("clip text");
+		render(<XtermTerminal theme="dark" onReady={(terminal) => terminal.onUserInput(onInput)} />);
+
+		const altBackspace = (type: string) =>
+			({
+				type,
+				key: "Backspace",
+				metaKey: false,
+				ctrlKey: false,
+				shiftKey: false,
+				altKey: true,
+				preventDefault: vi.fn(),
+				stopPropagation: vi.fn(),
+			}) as unknown as KeyboardEvent;
+
+		// Alt+Backspace: keydown deletes a word once; the echoes pass through to xterm.
+		expect(state.lastTerminal!.keyHandler!(altBackspace("keydown"))).toBe(false);
+		expect(state.lastTerminal!.keyHandler!(altBackspace("keyup"))).toBe(true);
+		expect(state.lastTerminal!.keyHandler!(altBackspace("keypress"))).toBe(true);
+		expect(onInput).toHaveBeenCalledTimes(1);
+		expect(onInput).toHaveBeenCalledWith("\x1b\x7f", "shortcut");
+
+		// Cmd+V: keydown reads the clipboard once; the keyup echo must not read again.
+		const cmdV = (type: string) =>
+			({
+				type,
+				key: "v",
+				metaKey: true,
+				ctrlKey: false,
+				shiftKey: false,
+				altKey: false,
+				preventDefault: vi.fn(),
+				stopPropagation: vi.fn(),
+			}) as unknown as KeyboardEvent;
+		onInput.mockClear();
+		expect(state.lastTerminal!.keyHandler!(cmdV("keydown"))).toBe(false);
+		expect(state.lastTerminal!.keyHandler!(cmdV("keyup"))).toBe(true);
+		await new Promise((resolve) => window.setTimeout(resolve, 0));
+		expect(window.ao!.clipboard.readText).toHaveBeenCalledTimes(1);
+		expect(onInput).toHaveBeenCalledTimes(1);
+		expect(onInput).toHaveBeenCalledWith("clip text", "paste");
+	});
+
 	it("forwards keyboard input from explicit key events", () => {
 		const onInput = vi.fn();
 		render(<XtermTerminal theme="dark" onReady={(terminal) => terminal.onUserInput(onInput)} />);
