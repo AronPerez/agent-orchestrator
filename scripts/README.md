@@ -44,9 +44,10 @@ The launchd daemon runs `~/.ao/bin/ao`, a **separate copy** from the PATH instal
 scripts/daemon-build.sh
 cp -f ~/.cache/aoagents/agent-orchestrator/bin/ao ~/.ao/bin/ao
 launchctl kickstart -k "gui/$(id -u)/dev.agent-orchestrator.daemon"    # daemon only — live agents keep old argv
-# To relaunch agents with new flags/config: `ao stop --timeout 30s` (all, KeepAlive
-# respawns + restore-all) or `ao session kill <id> && ao session restore <id>` (one).
-# Relaunched agents park at the claude --resume menu — option 2 keeps full context.
+# Agents never relaunch on a daemon restart (kickstart OR ao stop — panes survive
+# both and get reattached). To pick up new flags/config, cycle each session:
+#   ao session kill <id> && ao session restore <id>   # resumes with full context
+
 ```
 
 Full runbook (403 mux gotcha, TCC/Desktop override, session-restore behavior):
