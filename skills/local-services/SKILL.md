@@ -48,16 +48,25 @@ launchctl kickstart -k "gui/$(id -u)/dev.agent-orchestrator.daemon"   # daemon o
 
 ## Daemon restart ≠ agent relaunch (verified 2026-07-02)
 
-`kickstart -k` cycles only the daemon process; tmux panes are independent, so
-the new daemon **reattaches** to live sessions — zero disruption, but running
-agents keep their old argv (new flags/config do NOT apply to them). To actually
-relaunch agents with fresh argv (`ao session ls` first — they re-park at the
-`claude --resume` menu; pick option 2 for full context):
+Running agents keep the argv they were launched with. **Neither `kickstart -k`
+nor `ao stop` relaunches them**: the daemon exits (KeepAlive respawns it) and
+the new daemon reattaches to the surviving tmux panes — zero disruption, zero
+config pickup. Daemon restarts are only for daemon-binary/wrapper changes.
+
+To make agents pick up new flags/config (e.g. a permission-mode change via
+`ao project set-config`), cycle each session:
 
 ```sh
-ao stop --timeout 30s                            # all: panes torn down; KeepAlive respawns daemon → restore-all
-ao session kill <id> && ao session restore <id>  # one session, surgical
+ao session kill <id> && ao session restore <id>   # relaunches with the project's CURRENT config
+# whole project:
+ao session ls   # then loop kill+restore over the live ids
+# verify:
+ps ax -o command | grep -c 'dangerously-skip-permissions'
 ```
+
+`restore` relaunches `claude --resume <native-id>` — context survives, and it
+resumes directly (no menu on current builds; if an older build parks at the
+resume menu, pick option 2 / full transcript).
 
 ## Gotchas
 
