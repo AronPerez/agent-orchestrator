@@ -106,3 +106,7 @@ pnpm-lock.yaml
 
 # Runtime lock file (session-specific, regenerated each run)
 .claude/scheduled_tasks.lock
+
+# Daemon run-state; lives at ~/.ao/running.json, written wherever the daemon
+# starts — never commit a stray copy
+scripts/running.json
