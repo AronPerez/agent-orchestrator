@@ -120,9 +120,10 @@ func (p *Plugin) GetConfigSpec(ctx context.Context) (ports.ConfigSpec, error) {
 // GetRestoreCommand) and its transcript is locatable (see SessionInfo) without
 // a separate capture step.
 //
-// <mode> is acceptEdits, auto, or bypassPermissions. AO's "default"
-// mode emits no --permission-mode flag, so Claude's TUI resolves the starting
-// mode from ~/.claude/settings.json exactly as a normal launch.
+// <mode> is acceptEdits or auto; bypass-permissions instead emits
+// --dangerously-skip-permissions (see appendPermissionFlags). AO's "default"
+// mode emits no flag, so Claude's TUI resolves the starting mode from
+// ~/.claude/settings.json exactly as a normal launch.
 //
 // The prompt is passed after `--` so a prompt beginning with "-" is not
 // mistaken for a flag.
@@ -208,7 +209,7 @@ func (p *Plugin) PreLaunch(ctx context.Context, cfg ports.LaunchConfig) error {
 }
 
 // GetRestoreCommand rebuilds the argv that continues an existing Claude Code
-// session: `claude [--permission-mode <mode>] --resume <agentSessionId>`. It
+// session: `claude [<permission flag>] --resume <agentSessionId>`. It
 // prefers the hook-captured native session id from
 // cfg.Session.Metadata["agentSessionId"]; for sessions created before hooks
 // captured it, it falls back to the deterministic UUID AO pins via
@@ -297,8 +298,11 @@ func resolveSystemPrompt(cfg ports.LaunchConfig) (string, error) {
 //     safe filesystem bash; still prompts for network/system bash, MCP, web)
 //   - auto               → --permission-mode auto (classifier-gated
 //     auto-approval; auto-runs what a safety model deems safe)
-//   - bypass-permissions → --permission-mode bypassPermissions (skip all
-//     checks; equivalent to --dangerously-skip-permissions)
+//   - bypass-permissions → --dangerously-skip-permissions (skip all checks).
+//     Not `--permission-mode bypassPermissions`: that mode is gated behind a
+//     one-time interactive acceptance screen AO never answers, so a spawned
+//     session hangs there. --dangerously-skip-permissions is the unattended
+//     equivalent and runs straight through.
 //
 // Empty/unrecognized normalizes to default, so no flag is emitted.
 func appendPermissionFlags(cmd *[]string, permissions ports.PermissionMode) {
@@ -310,7 +314,7 @@ func appendPermissionFlags(cmd *[]string, permissions ports.PermissionMode) {
 	case ports.PermissionModeAuto:
 		*cmd = append(*cmd, "--permission-mode", "auto")
 	case ports.PermissionModeBypassPermissions:
-		*cmd = append(*cmd, "--permission-mode", "bypassPermissions")
+		*cmd = append(*cmd, "--dangerously-skip-permissions")
 	}
 }
 
