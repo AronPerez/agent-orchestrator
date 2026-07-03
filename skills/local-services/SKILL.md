@@ -9,10 +9,10 @@ trigger: Anything involving the launchd jobs dev.agent-orchestrator.daemon / .la
 Two launchd LaunchAgents run AO on this machine. Repo `scripts/` is the source
 of truth; launchd runs **copies** under `~/.ao/`. Deep runbook: `~/.ao/FEREADME.md`.
 
-| Job (gui/$(id -u)/…)             | Runs                     | Serves                                  |
-| -------------------------------- | ------------------------ | --------------------------------------- |
-| `dev.agent-orchestrator.daemon`  | `~/.ao/ao-daemon.sh`     | `~/.ao/bin/ao daemon` on `127.0.0.1:3001` |
-| `dev.agent-orchestrator.lan-web` | `~/.ao/lan-web-server.sh`| Vite renderer UI on `0.0.0.0:3000` (LAN) |
+| Job (gui/$(id -u)/…)             | Runs                      | Serves                                    |
+| -------------------------------- | ------------------------- | ----------------------------------------- |
+| `dev.agent-orchestrator.daemon`  | `~/.ao/ao-daemon.sh`      | `~/.ao/bin/ao daemon` on `127.0.0.1:3001` |
+| `dev.agent-orchestrator.lan-web` | `~/.ao/lan-web-server.sh` | Vite renderer UI on `0.0.0.0:3000` (LAN)  |
 
 Plists: `~/Library/LaunchAgents/dev.agent-orchestrator.{daemon,lan-web}.plist`.
 `~/.ao/ao-svc {up|down|status}` manages **lan-web only**; drive the daemon job

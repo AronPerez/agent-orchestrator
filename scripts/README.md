@@ -4,12 +4,12 @@ Source of truth for the local launchd service wrappers. These are **deployed by
 copy** to `~/.ao/` — launchd runs the copies, not this checkout. After editing a
 script here, re-copy and restart the job (see below).
 
-| File                | What it is                                                                                          |
-| ------------------- | --------------------------------------------------------------------------------------------------- |
+| File                | What it is                                                                                                 |
+| ------------------- | ---------------------------------------------------------------------------------------------------------- |
 | `ao-daemon.sh`      | launchd wrapper for the AO daemon (`~/.ao/bin/ao daemon`); pins `AO_ALLOWED_ORIGINS` to the current LAN IP |
-| `lan-web-server.sh` | launchd wrapper for the LAN web UI — Vite renderer dev server on `0.0.0.0:3000`                      |
-| `ao-svc`            | `up/down/status` for the **lan-web job only** (the daemon has its own plist, managed via raw `launchctl`) |
-| `daemon-build.sh`   | builds `ao` from `backend/` and installs it on PATH (`~/.local/bin/ao` → `~/.cache/aoagents/.../ao`)  |
+| `lan-web-server.sh` | launchd wrapper for the LAN web UI — Vite renderer dev server on `0.0.0.0:3000`                            |
+| `ao-svc`            | `up/down/status` for the **lan-web job only** (the daemon has its own plist, managed via raw `launchctl`)  |
+| `daemon-build.sh`   | builds `ao` from `backend/` and installs it on PATH (`~/.local/bin/ao` → `~/.cache/aoagents/.../ao`)       |
 
 The plists live at `~/Library/LaunchAgents/dev.agent-orchestrator.{daemon,lan-web}.plist`
 (reference copies in `~/.ao/`); they are not tracked here.
