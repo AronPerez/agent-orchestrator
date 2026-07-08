@@ -36,7 +36,7 @@ export function BrowserPanelView({
 	onTogglePopOut,
 	browserView,
 }: BrowserPanelProps & { browserView: BrowserViewModel }) {
-	const { navState, slotRef, navigate, goBack, goForward, reload, stop } = browserView;
+	const { navState, slotRef, navigate, goBack, goForward, reload, stop, mode, iframeSrc, iframeKey } = browserView;
 	const [urlInput, setUrlInput] = useState(navState.url);
 
 	useEffect(() => {
@@ -110,7 +110,13 @@ export function BrowserPanelView({
 				</Button>
 			</form>
 			<div className="browser-panel__content">
-				<div className="browser-panel__slot" ref={slotRef} />
+				{/* Native (Electron) paints a WebContentsView over this slot; the web
+				    app has no such view, so it renders an <iframe> here instead. */}
+				<div className="browser-panel__slot" ref={slotRef}>
+					{mode === "web" && iframeSrc ? (
+						<iframe key={iframeKey} title="Browser preview" src={iframeSrc} className="browser-panel__iframe" />
+					) : null}
+				</div>
 				{navState.url === "" ? (
 					<div className="browser-panel__overlay">
 						<p>Enter a dev-server URL to preview it here.</p>
