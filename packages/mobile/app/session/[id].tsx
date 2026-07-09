@@ -374,6 +374,17 @@ export default function TerminalScreen() {
 				},
 			});
 			muxRef.current = mux;
+			// The web terminal mounts synchronously and its onReady always fires
+			// before this async config load resolves (loadConfig yields at least
+			// one microtask, and WebTerminal's mount effect - a child effect -
+			// always commits before this parent effect), so onWebReady's own
+			// openTerminal attempt no-ops on a still-null muxRef. Finish the
+			// attach here instead, once the terminal side is the one already done.
+			if (isWeb && webTermRef.current && !openedRef.current) {
+				openedRef.current = true;
+				mux.openTerminal(id, projectId);
+				applyDims(webTermRef.current.cols, webTermRef.current.rows);
+			}
 			mux.connect();
 		})();
 		return () => {
@@ -478,9 +489,12 @@ export default function TerminalScreen() {
 					}, 250);
 				}, 100);
 			});
-			if (openedRef.current) return;
+			// muxRef may still be null here (see the mux effect's fallback
+			// attach above) - in that case leave openedRef false so that
+			// fallback is the one that performs the actual attach.
+			if (openedRef.current || !muxRef.current) return;
 			openedRef.current = true;
-			muxRef.current?.openTerminal(id, projectId);
+			muxRef.current.openTerminal(id, projectId);
 			// The open frame carries no size; report the real grid immediately
 			// (applyDims records it, updates the dims chip, and sends the resize).
 			applyDims(handle.cols, handle.rows);
