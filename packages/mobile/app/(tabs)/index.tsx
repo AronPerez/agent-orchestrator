@@ -1,7 +1,16 @@
 import { Feather } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { useCallback, useMemo, useState } from "react";
-import { ActivityIndicator, Pressable, RefreshControl, ScrollView, SectionList, StyleSheet, Text, View } from "react-native";
+import {
+	ActivityIndicator,
+	Pressable,
+	RefreshControl,
+	ScrollView,
+	SectionList,
+	StyleSheet,
+	Text,
+	View,
+} from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { attentionOf, sessionTitle, type DashboardSession } from "../../lib/api";
 import { ProjectSwitcher } from "../../lib/ProjectSwitcher";

@@ -108,7 +108,12 @@ export default function SettingsScreen() {
 							<Field label="API PORT" value={cfg.httpPort} onChangeText={set("httpPort")} keyboardType="number-pad" />
 						</View>
 						<View style={{ flex: 1, marginLeft: 8 }}>
-							<Field label="TERMINAL PORT" value={cfg.muxPort} onChangeText={set("muxPort")} keyboardType="number-pad" />
+							<Field
+								label="TERMINAL PORT"
+								value={cfg.muxPort}
+								onChangeText={set("muxPort")}
+								keyboardType="number-pad"
+							/>
 						</View>
 					</View>
 
