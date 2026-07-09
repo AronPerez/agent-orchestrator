@@ -10,7 +10,24 @@ your AO server's HTTP API over your LAN or Tailscale.
 cd packages/mobile
 npm install
 npm start          # then press i (iOS), a (Android), or scan the QR in Expo Go
+npm run web        # real terminal in a desktop browser (http://localhost:8081)
 ```
+
+### Web target
+
+`npm run web` serves the same app to a desktop browser via react-native-web.
+The session screen renders a real xterm.js terminal (`lib/WebTerminal.web.tsx`,
+a port of the desktop renderer's terminal) against the daemon's `/mux` socket -
+keyboard, paste, copy-on-select, wheel scroll (SGR reports into the pane),
+zoom, and Restore all work.
+
+- **Browser on the same machine as the daemon:** set Host `localhost`, API
+  Port `3001` in Settings. Zero daemon config - the CORS guard allows
+  loopback origins.
+- **Browser on a different machine:** the daemon 403s non-loopback browser
+  Origins. Either run the Origin-rewriting bridge (`scripts/README.md`) and
+  point Settings at `<machine>:3011`, or start the daemon with
+  `AO_ALLOWED_ORIGINS=http://<web-host>:8081`.
 
 ## Connect
 

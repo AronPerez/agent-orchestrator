@@ -10,8 +10,15 @@ import { isConfigured, loadConfig, type ServerConfig } from "../../lib/config";
 import { MuxClient, type MuxStatus } from "../../lib/mux";
 import { useApp } from "../../lib/store";
 import { theme } from "../../lib/theme";
+import { WebTerminal, type WebTerminalHandle } from "../../lib/WebTerminal";
 
 const FONT_SIZE = 12;
+
+// Platform seam: on web the native WebView can't run (react-native-webview
+// resolves to a stub), so the screen swaps in the DOM terminal
+// (lib/WebTerminal.web.tsx) and an <iframe> preview. Platform.OS is constant
+// for the app's lifetime, so branching hooks/refs/JSX on it is safe.
+const isWeb = Platform.OS === "web";
 
 // Injected into the xterm WebView after load. xterm has its own touch handlers
 // that scroll by discrete lines (the janky "1 line per swipe"). We intercept in
@@ -230,7 +237,16 @@ export default function TerminalScreen() {
 	// The REAL keyboard input. The WebView can't show/control a keyboard reliably,
 	// so this hidden RN TextInput is what raises the keyboard and captures typing,
 	// which we forward to the PTY over the mux. Focus it to type, blur it to hide.
+	// (Native only - on web xterm's own textarea owns keyboard focus.)
 	const kbInputRef = useRef<TextInput | null>(null);
+	// Web target: the real xterm.js surface (native uses the WebView instead).
+	const webTermRef = useRef<WebTerminalHandle | null>(null);
+	// Trailing debounce for web grid changes: a window drag emits a burst of
+	// onResize events; the PTY should get one resize when the burst settles,
+	// then one re-assert frame (mirrors the renderer's 100ms/250ms pair in
+	// useTerminalSession - the re-assert recovers a resize the pane client
+	// lost mid-attach).
+	const webResizeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
 	const [cfg, setCfg] = useState<ServerConfig | null>(null);
 	const [status, setStatus] = useState<MuxStatus>("connecting");
@@ -323,9 +339,25 @@ export default function TerminalScreen() {
 			if (!isConfigured(config)) return;
 
 			const mux = new MuxClient(config, {
-				onStatus: (s) => setStatus(s),
+				onStatus: (s) => {
+					setStatus(s);
+					// After a reconnect MuxClient re-opens the terminal but sends no
+					// size; re-assert the last known grid so the fresh attach and the
+					// PTY agree. Deferred one tick because onStatus fires BEFORE the
+					// open frames are replayed (mux.ts ws.onopen), and the daemon
+					// ignores a resize for a pane that isn't open yet. Clear the web
+					// terminal so the attach repaint lands on a blank grid instead of
+					// interleaving with stale cells.
+					if (s === "open" && openedRef.current) {
+						if (isWeb) webTermRef.current?.clear();
+						const d = lastDimsRef.current;
+						if (d) setTimeout(() => muxRef.current?.resize(id, d.cols, d.rows, projectId), 0);
+					}
+				},
 				onTerminalData: (tid, bytes) => {
-					if (tid === id) xtermRef.current?.write(bytes);
+					if (tid !== id) return;
+					if (isWeb) webTermRef.current?.write(bytes);
+					else xtermRef.current?.write(bytes);
 				},
 				onTerminalExited: (tid, code) => {
 					if (tid === id) {
@@ -346,10 +378,14 @@ export default function TerminalScreen() {
 		})();
 		return () => {
 			disposed = true;
+			if (webResizeTimer.current) {
+				clearTimeout(webResizeTimer.current);
+				webResizeTimer.current = null;
+			}
 			muxRef.current?.disconnect();
 			muxRef.current = null;
 		};
-	}, [id]);
+	}, [id, projectId]);
 
 	// Poll for a generated preview (index.html) and auto-open it the first time it
 	// appears. Detection is on-demand server-side, so we re-check on an interval;
@@ -421,6 +457,36 @@ export default function TerminalScreen() {
 		const d = lastDimsRef.current;
 		if (d) muxRef.current?.resize(id, d.cols, d.rows, projectId);
 	}, [id, projectId]);
+
+	// Web: the DOM terminal is mounted and ready - wire its I/O to the mux and
+	// attach. Mirrors onInitialized (native) plus the renderer's binding:
+	// input forwards to the PTY; grid changes report a debounced resize (one
+	// settled frame + one re-assert). If the socket isn't open yet, MuxClient
+	// queues the open in its openTerminals map and replays it on connect; the
+	// onStatus handler then re-asserts the size.
+	const onWebReady = useCallback(
+		(handle: WebTerminalHandle) => {
+			webTermRef.current = handle;
+			handle.onUserInput((data) => muxRef.current?.sendInput(id, data, projectId));
+			handle.onResize(({ cols, rows }) => {
+				if (webResizeTimer.current) clearTimeout(webResizeTimer.current);
+				webResizeTimer.current = setTimeout(() => {
+					applyDims(cols, rows);
+					webResizeTimer.current = setTimeout(() => {
+						webResizeTimer.current = null;
+						if (openedRef.current) muxRef.current?.resize(id, cols, rows, projectId);
+					}, 250);
+				}, 100);
+			});
+			if (openedRef.current) return;
+			openedRef.current = true;
+			muxRef.current?.openTerminal(id, projectId);
+			// The open frame carries no size; report the real grid immediately
+			// (applyDims records it, updates the dims chip, and sends the resize).
+			applyDims(handle.cols, handle.rows);
+		},
+		[id, projectId, applyDims],
+	);
 
 	const onData = useCallback(
 		(data: string) => {
@@ -555,12 +621,16 @@ export default function TerminalScreen() {
 		[fontSize],
 	);
 
-	// Zoom re-mounts the terminal at a new font size (see fontSize note above).
-	// Reset open/size so the fresh mount re-attaches the PTY and re-reports dims.
+	// Zoom: native re-mounts the WebView terminal at the new font size (see the
+	// key on XtermJsWebView), so open/size reset for the fresh mount to
+	// re-attach. Web updates xterm's fontSize in place - the PTY stays attached
+	// and the resulting onResize reports the denser grid.
 	const zoom = useCallback((delta: number) => {
 		setFontSize((f) => Math.min(20, Math.max(7, f + delta)));
-		openedRef.current = false;
-		setSize(null);
+		if (!isWeb) {
+			openedRef.current = false;
+			setSize(null);
+		}
 	}, []);
 
 	const webViewOptions = useMemo(
@@ -584,32 +654,29 @@ export default function TerminalScreen() {
 		);
 	}
 
-	// The terminal and preview render inside a native WebView, which the web target
-	// can't run - react-native-webview resolves to a stub that just prints "React
-	// Native WebView does not support this platform." Gate both off web.
-	const isWeb = Platform.OS === "web";
-
 	// The composer and key bar sit directly atop each other, so they share one
 	// bottom inset: reserve room above the keyboard, else the home-indicator inset.
 	const bottomPad = kbHeight > 0 ? 8 : insets.bottom > 0 ? insets.bottom : 8;
 
 	return (
 		<View style={[styles.screen, Platform.OS === "ios" && { paddingBottom: kbHeight }]}>
-			<TextInput
-				ref={kbInputRef}
-				value=""
-				onKeyPress={onKeyPress}
-				onChangeText={() => {}}
-				blurOnSubmit={false}
-				multiline={false}
-				autoCapitalize="none"
-				autoCorrect={false}
-				autoComplete="off"
-				spellCheck={false}
-				keyboardAppearance="dark"
-				caretHidden
-				style={styles.kbInput}
-			/>
+			{!isWeb && (
+				<TextInput
+					ref={kbInputRef}
+					value=""
+					onKeyPress={onKeyPress}
+					onChangeText={() => {}}
+					blurOnSubmit={false}
+					multiline={false}
+					autoCapitalize="none"
+					autoCorrect={false}
+					autoComplete="off"
+					spellCheck={false}
+					keyboardAppearance="dark"
+					caretHidden
+					style={styles.kbInput}
+				/>
+			)}
 			<View style={styles.statusBar}>
 				<View style={[styles.statusDot, { backgroundColor: statusColors[status] }]} />
 				<Text style={styles.statusText}>{statusLabel[status]}</Text>
@@ -665,16 +732,12 @@ export default function TerminalScreen() {
 
 			<View style={styles.termWrap}>
 				{isWeb ? (
-					<View style={styles.deadOverlay}>
-						<View style={styles.deadIcon}>
-							<Feather name="smartphone" size={24} color={theme.textTertiary} />
-						</View>
-						<Text style={styles.deadTitle}>Terminal is phone-only</Text>
-						<Text style={styles.deadMsg}>
-							The live terminal renders in a native WebView, which the browser can't run. Open this session in
-							the app on your phone to interact with it.
-						</Text>
-					</View>
+					<WebTerminal
+						ariaLabel={`Terminal for ${id}`}
+						fontSize={fontSize}
+						onReady={onWebReady}
+						onError={(e) => setBanner(`Terminal failed: ${e instanceof Error ? e.message : String(e)}`)}
+					/>
 				) : (
 					<XtermJsWebView
 						key={`term-${fontSize}`}
@@ -688,7 +751,7 @@ export default function TerminalScreen() {
 						style={{ flex: 1, backgroundColor: theme.bgBase }}
 					/>
 				)}
-				{!isWeb && dead && (
+				{dead && (
 					<View style={styles.deadOverlay}>
 						<View style={styles.deadIcon}>
 							<Feather name="power" size={24} color={theme.textTertiary} />
@@ -782,20 +845,29 @@ export default function TerminalScreen() {
 				<Pressable style={({ pressed }) => [styles.key, pressed && styles.keyPressed]} onPress={() => zoom(1)}>
 					<Feather name="zoom-in" size={15} color={theme.textPrimary} />
 				</Pressable>
-				{/* Compose a high-level message to the agent. */}
+				{/* Compose a high-level message to the agent. On web it is the last
+				    key (no keyboard toggle), so it carries the right-align margin. */}
 				<Pressable
-					style={({ pressed }) => [styles.key, compose && styles.keyToggle, pressed && styles.keyPressed]}
+					style={({ pressed }) => [
+						styles.key,
+						isWeb && styles.keyRight,
+						compose && styles.keyToggle,
+						pressed && styles.keyPressed,
+					]}
 					onPress={() => setCompose((c) => !c)}
 				>
 					<Feather name="message-square" size={15} color={compose ? theme.blue : theme.textPrimary} />
 				</Pressable>
-				{/* Show/hide the keyboard (replaces the OS "Done" button we removed). */}
-				<Pressable
-					style={({ pressed }) => [styles.key, styles.keyToggle, pressed && styles.keyPressed]}
-					onPress={toggleKeyboard}
-				>
-					<Text style={styles.keyText}>{kbVisible ? "⌨▾" : "⌨▴"}</Text>
-				</Pressable>
+				{/* Show/hide the phone keyboard - meaningless on web, where xterm
+				    owns focus and a hardware keyboard types directly. */}
+				{!isWeb && (
+					<Pressable
+						style={({ pressed }) => [styles.key, styles.keyToggle, pressed && styles.keyPressed]}
+						onPress={toggleKeyboard}
+					>
+						<Text style={styles.keyText}>{kbVisible ? "⌨▾" : "⌨▴"}</Text>
+					</Pressable>
+				)}
 			</View>
 		</View>
 	);
@@ -851,6 +923,7 @@ const styles = StyleSheet.create({
 	},
 	keyPressed: { backgroundColor: theme.accentTint, borderColor: theme.accent },
 	keyToggle: { borderColor: theme.accent, marginLeft: "auto" },
+	keyRight: { marginLeft: "auto" },
 	kbInput: { position: "absolute", width: 1, height: 1, top: 0, left: 0, opacity: 0 },
 	keyText: { color: theme.textPrimary, fontFamily: theme.fontMono, fontSize: 14 },
 	killBtn: {
