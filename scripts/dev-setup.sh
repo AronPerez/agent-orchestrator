@@ -18,6 +18,9 @@ repo_root="$(cd "${script_dir}/.." && pwd)"
 la_dir="${HOME}/Library/LaunchAgents"
 dom="gui/$(id -u)"
 
+# 0. git hooks: enable the tracked pre-commit (prettier + gofmt checks)
+"${script_dir}/install-hooks.sh"
+
 # 1. daemon binary: build + PATH install, then the copy launchd actually runs
 "${script_dir}/daemon-build.sh"
 mkdir -p "${HOME}/.ao/bin"

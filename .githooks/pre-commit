@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Pre-commit: block commits that would fail the CI style checks, so formatting
+# problems surface here instead of in a red PR. Mirrors the CI jobs exactly:
+#   .github/workflows/prettier.yml  → npx prettier@3 --check on changed files
+#   .github/workflows/go.yml        → gofmt on Go files
+#
+# Enable once per clone (scripts/dev-setup.sh and scripts/install-hooks.sh do
+# this for you):
+#   git config core.hooksPath .githooks
+#
+# This checks and blocks; it never rewrites your working tree, so a
+# partially-staged file is safe. To auto-fix instead, run the printed command
+# (or flip --check→--write / gofmt -l→-w and re-stage).
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+# Staged, non-deleted paths, NUL-delimited so spaces/newlines are safe.
+# (while-read, not mapfile -d: macOS ships bash 3.2, which lacks mapfile -d.)
+staged=()
+while IFS= read -r -d '' f; do staged+=("$f"); done \
+	< <(git diff --cached --name-only -z --diff-filter=d)
+[ ${#staged[@]} -eq 0 ] && exit 0
+
+fail=0
+
+# 1. Prettier — every staged file it has a parser for. --ignore-unknown skips
+#    the rest (Go, images, lockfiles); .prettierignore is honored automatically.
+if ! npx --yes prettier@3 --check --ignore-unknown "${staged[@]}"; then
+	echo "" >&2
+	echo "✖ Prettier found unformatted files. Fix with:" >&2
+	echo "    npx prettier@3 --write <files>   (then re-stage)" >&2
+	fail=1
+fi
+
+# 2. gofmt — Go files only (Prettier has no Go parser).
+go_files=()
+for f in "${staged[@]}"; do
+	case "$f" in *.go) go_files+=("$f") ;; esac
+done
+if [ ${#go_files[@]} -gt 0 ] && command -v gofmt >/dev/null 2>&1; then
+	unformatted="$(gofmt -l "${go_files[@]}")"
+	if [ -n "$unformatted" ]; then
+		echo "" >&2
+		echo "✖ gofmt needed:" >&2
+		echo "$unformatted" | sed 's/^/    /' >&2
+		echo "  fix with:  gofmt -w <files>   (then re-stage)" >&2
+		fail=1
+	fi
+fi
+
+exit "$fail"
