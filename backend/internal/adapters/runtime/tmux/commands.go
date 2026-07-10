@@ -69,3 +69,11 @@ func sendEnterArgs(id string) []string {
 func capturePaneArgs(id string, lines int) []string {
 	return []string{"capture-pane", "-t", id, "-p", "-S", fmt.Sprintf("-%d", lines)}
 }
+
+// panePIDArgs builds args for `tmux display-message -p -t <id> #{pane_pid}`,
+// printing the pane's lead process id. Destroy uses it to resolve the agent's
+// process group before teardown. display-message is pane-targeting, so it takes
+// a plain session name (no `=` prefix; see setStatusOffArgs).
+func panePIDArgs(id string) []string {
+	return []string{"display-message", "-p", "-t", id, "#{pane_pid}"}
+}

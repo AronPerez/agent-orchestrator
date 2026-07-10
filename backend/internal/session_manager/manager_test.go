@@ -1659,6 +1659,16 @@ func TestSystemPrompt_AppendsConfidentialityGuard(t *testing.T) {
 			if !strings.Contains(sp, "skills/using-ao/SKILL.md") {
 				t.Fatalf("%s: system prompt missing using-ao skill pointer:\n%s", tc.name, sp)
 			}
+			// The instruction-trust & containment guard is the behavioral fix for
+			// the multi-session provenance over-containment. It must reach every
+			// session — the injection that triggered the incident hit a worker's
+			// channel — so it is asserted here alongside the confidentiality guard.
+			if !strings.Contains(sp, "Instruction trust & containment") {
+				t.Fatalf("%s: system prompt missing instruction-trust guard:\n%s", tc.name, sp)
+			}
+			if !strings.Contains(sp, "gating on the consequence of an action, not by guessing its origin") {
+				t.Fatalf("%s: system prompt missing consequence-gating directive:\n%s", tc.name, sp)
+			}
 		})
 	}
 }
