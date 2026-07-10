@@ -4,7 +4,6 @@ import { useMemo, useState, type ReactNode } from "react";
 import { Linking, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { DashboardPR, DashboardSession } from "../../lib/api";
-import { isTerminalStatus } from "../../lib/api";
 import { ProjectSwitcher } from "../../lib/ProjectSwitcher";
 import { BoardColumn, CardGrid, WideContainer, useBreakpoint } from "../../lib/responsive";
 import { useApp, usePRs, type PRDensity } from "../../lib/store";
@@ -642,12 +641,8 @@ function groupPRs(items: PRItem[], filter: Filter, search: string, sortMode: Sor
 	const query = search.trim().toLowerCase();
 	for (const item of items) {
 		if (!passesFilter(item.pr, filter) || !matchesSearch(item, query)) continue;
-		if (isTerminalStatus(item.session.status)) {
-			groups.dead.push(item);
-			continue;
-		}
 		const section = classifyPR(item.pr);
-		if (section) groups[section].push(item);
+		groups[section].push(item);
 	}
 	for (const section of Object.keys(groups) as SectionId[]) {
 		groups[section].sort((a, b) => compareItems(a, b, sortMode));
@@ -655,9 +650,9 @@ function groupPRs(items: PRItem[], filter: Filter, search: string, sortMode: Sor
 	return groups;
 }
 
-function classifyPR(pr: DashboardPR): Exclude<SectionId, "dead"> | null {
+function classifyPR(pr: DashboardPR): Exclude<SectionId, "dead"> | "dead" {
 	if (pr.state === "merged") return "merged";
-	if (!activePR(pr)) return null;
+	if (pr.state === "closed") return "dead";
 	if (pr.ciStatus === "failing" || pr.reviewDecision === "changes_requested") return "needs";
 	if (pr.reviewDecision === "approved" && pr.ciStatus === "passing" && pr.mergeability?.mergeable) return "ready";
 	return "review";

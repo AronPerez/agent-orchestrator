@@ -266,15 +266,12 @@ export default function TerminalScreen() {
 	const [notFound, setNotFound] = useState(false);
 	const [restoring, setRestoring] = useState(false);
 	// In-app browser: shows the static preview file the agent generated (an
-	// index.html). We poll the daemon's on-demand detector while the terminal is
-	// open and AUTO-OPEN a WebView overlay the first time one appears. The user can
-	// close it and keep prompting; we won't re-pop the same file (autoOpenedRef
-	// remembers what we've already surfaced).
+	// index.html). Preview availability is detected while the terminal is open;
+	// the user opens it with the globe button.
 	const [browserOpen, setBrowserOpen] = useState(false);
 	const [preview, setPreview] = useState<{ entry: string; url: string } | null>(null);
 	const previewWebRef = useRef<WebView>(null);
 	const webIframeRef = useRef<HTMLIFrameElement | null>(null);
-	const autoOpenedRef = useRef<string | null>(null);
 
 	const { sessions, orchestrators, restore } = useApp();
 	const known = sessions.find((s) => s.id === id) ?? orchestrators.find((o) => o.id === id) ?? null;
@@ -398,10 +395,8 @@ export default function TerminalScreen() {
 		};
 	}, [id, projectId]);
 
-	// Poll for a generated preview (index.html) and auto-open it the first time it
-	// appears. Detection is on-demand server-side, so we re-check on an interval;
-	// once we've auto-opened a given URL we never force it open again, so closing
-	// the browser to keep prompting sticks. Manual reopen via the globe still works.
+	// Poll for a generated preview (index.html) so the browser button becomes
+	// available without taking focus away from the terminal.
 	useEffect(() => {
 		if (!cfg || !isConfigured(cfg)) return;
 		let cancelled = false;
@@ -411,10 +406,6 @@ export default function TerminalScreen() {
 				const p = await getPreview(cfg, id);
 				if (cancelled) return;
 				setPreview(p);
-				if (p && autoOpenedRef.current !== p.url) {
-					autoOpenedRef.current = p.url;
-					setBrowserOpen(true);
-				}
 			} catch {
 				/* transient - keep polling */
 			}
@@ -699,8 +690,7 @@ export default function TerminalScreen() {
 						{size.cols}x{size.rows}
 					</Text>
 				)}
-				{/* In-app browser toggle - shows the agent's generated preview file.
-				    Brighter when one is available; auto-opens on first detection. */}
+				{/* In-app browser toggle - brighter when a generated preview is available. */}
 				<Pressable
 					hitSlop={8}
 					onPress={toggleBrowser}
