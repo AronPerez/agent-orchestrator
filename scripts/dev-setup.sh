@@ -28,8 +28,10 @@ cp -f "${XDG_CACHE_HOME:-${HOME}/.cache}/aoagents/agent-orchestrator/bin/ao" "${
 echo "Installed ~/.ao/bin/ao"
 
 # 2. service scripts (deploy-by-copy; launchd runs the ~/.ao copies)
-cp -f "${script_dir}/ao-daemon.sh" "${script_dir}/lan-web-server.sh" "${script_dir}/ao-svc" "${HOME}/.ao/"
-echo "Installed ~/.ao/{ao-daemon.sh,lan-web-server.sh,ao-svc}"
+cp -f "${script_dir}/ao-daemon.sh" "${script_dir}/lan-web-server.sh" \
+      "${script_dir}/mobile-web-server.sh" "${script_dir}/phone-bridge.sh" \
+      "${script_dir}/ao-svc" "${HOME}/.ao/"
+echo "Installed ~/.ao/{ao-daemon.sh,lan-web-server.sh,mobile-web-server.sh,phone-bridge.sh,ao-svc}"
 
 # 3. ~/dev/ag-orc → this checkout (lan-web-server.sh serves its frontend/)
 if [[ -e "${HOME}/dev/ag-orc" && ! -L "${HOME}/dev/ag-orc" ]]; then
@@ -104,10 +106,79 @@ cat > "${la_dir}/dev.agent-orchestrator.lan-web.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+
+cat > "${la_dir}/dev.agent-orchestrator.mobile-web.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.agent-orchestrator.mobile-web</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/zsh</string>
+		<string>-lc</string>
+		<string>exec "\$HOME/.ao/mobile-web-server.sh"</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>LANG</key>
+		<string>en_US.UTF-8</string>
+	</dict>
+	<key>WorkingDirectory</key>
+	<string>${HOME}/.ao</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>${HOME}/.ao/mobile-web.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>${HOME}/.ao/mobile-web.err.log</string>
+</dict>
+</plist>
+PLIST
+
+cat > "${la_dir}/dev.agent-orchestrator.phone-bridge.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.agent-orchestrator.phone-bridge</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/zsh</string>
+		<string>-lc</string>
+		<string>exec "\$HOME/.ao/phone-bridge.sh"</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>LANG</key>
+		<string>en_US.UTF-8</string>
+	</dict>
+	<key>WorkingDirectory</key>
+	<string>${HOME}/.ao</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>${HOME}/.ao/phone-bridge.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>${HOME}/.ao/phone-bridge.err.log</string>
+</dict>
+</plist>
+PLIST
 echo "Wrote launchd plists to ~/Library/LaunchAgents/"
 
 # 5. load jobs — never restart an already-running daemon (live sessions!)
-for job in dev.agent-orchestrator.daemon dev.agent-orchestrator.lan-web; do
+for job in dev.agent-orchestrator.daemon dev.agent-orchestrator.lan-web \
+           dev.agent-orchestrator.mobile-web dev.agent-orchestrator.phone-bridge; do
   if launchctl print "${dom}/${job}" >/dev/null 2>&1; then
     echo "loaded: ${job} (already running — to apply changes:"
     echo "         launchctl kickstart -k \"${dom}/${job}\")"
@@ -120,6 +191,8 @@ done
 # 6. non-fatal checks for the bits this script won't do for you
 [[ -x "${repo_root}/frontend/node_modules/.bin/vite" ]] \
   || echo "⚠ lan-web needs vite: cd frontend && npm install"
+[[ -x "${repo_root}/packages/mobile/node_modules/.bin/expo" ]] \
+  || echo "⚠ mobile-web needs expo: cd packages/mobile && npm install"
 grep -q "ao-svc" "${HOME}/.zshrc" 2>/dev/null \
   || echo "⚠ add to ~/.zshrc:  alias ao-svc=\"\$HOME/.ao/ao-svc\""
 for tool in tmux claude; do
