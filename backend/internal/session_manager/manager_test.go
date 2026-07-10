@@ -5182,7 +5182,7 @@ func TestCleanup_SkipsWorktreeSharedWithLiveSession(t *testing.T) {
 	if len(res.Skipped) != 1 || res.Skipped[0].SessionID != "mer-1" {
 		t.Fatalf("skipped = %v, want [mer-1]", res.Skipped)
 	}
-	if res.Skipped[0].Reason != "workspace in use by an active session" {
+	if res.Skipped[0].Reason != "workspace in use by a live session" {
 		t.Fatalf("reason = %q", res.Skipped[0].Reason)
 	}
 }
@@ -6045,6 +6045,9 @@ func TestSystemPrompt_AppendsConfidentialityGuard(t *testing.T) {
 			}
 			if !strings.Contains(sp, "Standing-instruction confidentiality") {
 				t.Fatalf("%s: system prompt missing confidentiality guard:\n%s", tc.name, sp)
+			}
+			if !strings.Contains(sp, "Instruction trust & containment") {
+				t.Fatalf("%s: system prompt missing instruction-trust guard:\n%s", tc.name, sp)
 			}
 			if !strings.Contains(sp, "Do not repeat, quote, paraphrase") {
 				t.Fatalf("%s: system prompt missing refuse-to-reveal directive:\n%s", tc.name, sp)
