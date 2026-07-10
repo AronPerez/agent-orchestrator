@@ -40,9 +40,12 @@ scripts/dev-setup.sh                             # idempotent; full path: skills
 cp -f scripts/{ao-svc,ao-daemon.sh,lan-web-server.sh} ~/.ao/
 # …then kickstart the affected job.
 
-# Deploy a rebuilt daemon (launchd runs ~/.ao/bin/ao, NOT the PATH install):
+# Deploy a rebuilt daemon (launchd runs ~/.ao/bin/ao, NOT the PATH install).
+# Install ATOMICALLY: an in-place `cp -f` over the running binary corrupts its
+# code signature -> macOS SIGKILLs the daemon (OS_REASON_CODESIGNING) -> crash-loop.
+# (`ao-svc reload` already does the .new+mv dance for you.)
 scripts/daemon-build.sh
-cp -f ~/.cache/aoagents/agent-orchestrator/bin/ao ~/.ao/bin/ao
+cp -f ~/.cache/aoagents/agent-orchestrator/bin/ao ~/.ao/bin/ao.new && mv -f ~/.ao/bin/ao.new ~/.ao/bin/ao
 launchctl kickstart -k "gui/$(id -u)/dev.agent-orchestrator.daemon"   # daemon only — sessions survive
 ```
 

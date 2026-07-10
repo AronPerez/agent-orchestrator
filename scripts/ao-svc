@@ -1,9 +1,11 @@
 #!/bin/zsh
-# Stop/start the AO web/mobile UI launchd jobs. Reversible.
-# (The daemon is intentionally NOT supervised here: a launchd-spawned daemon
-# can't read ~/Desktop project repos due to macOS TCC. Start it from a terminal.)
-#   ao-svc down     # bootout the web/mobile jobs (clean stop, no respawn)
-#   ao-svc up       # bootstrap the web/mobile jobs
+# Stop/start the AO daemon + web/mobile UI launchd jobs. Reversible.
+# The daemon is supervised here too, via its KeepAlive plist (~/.ao/ao-daemon.sh
+# pins AO_ALLOWED_ORIGINS to the current LAN IP — the durable equivalent of
+# `AO_ALLOWED_ORIGINS=http://<lan-ip>:3000 ao daemon`). Requires the ao binary to
+# have Full Disk Access so a launchd-spawned daemon can read ~/Desktop repos.
+#   ao-svc down     # bootout all jobs (clean stop, no respawn)
+#   ao-svc up       # bootstrap all jobs (daemon first)
 #   ao-svc status   # show which jobs are loaded
 #   ao-svc reload   # rebuild daemon from source, deploy to ~/.ao/bin/ao, kickstart it
 set -u
@@ -11,7 +13,7 @@ dom="gui/$(id -u)"
 LA="$HOME/Library/LaunchAgents"
 repo="$HOME/dev/ag-orc"                                                  # symlink to the checkout (dev-setup.sh)
 cache_bin="${XDG_CACHE_HOME:-$HOME/.cache}/aoagents/agent-orchestrator/bin/ao"
-services=(dev.agent-orchestrator.lan-web dev.agent-orchestrator.mobile-web dev.agent-orchestrator.phone-bridge)
+services=(dev.agent-orchestrator.daemon dev.agent-orchestrator.lan-web dev.agent-orchestrator.mobile-web dev.agent-orchestrator.phone-bridge)
 
 case "${1:-status}" in
   down)
@@ -28,10 +30,11 @@ case "${1:-status}" in
     launchctl list | grep agent-orchestrator || echo "(no agent-orchestrator jobs loaded)"
     ;;
   reload)
-    # daemon runs its own KeepAlive plist (not in $services); rebuild + redeploy + kickstart it.
+    # rebuild + redeploy the daemon binary + kickstart it in place (up/down manage its lifecycle).
     mkdir -p "$HOME/.ao/bin"
     "$repo/scripts/daemon-build.sh" \
-      && cp -f "$cache_bin" "$HOME/.ao/bin/ao" \
+      && cp -f "$cache_bin" "$HOME/.ao/bin/ao.new" \
+      && mv -f "$HOME/.ao/bin/ao.new" "$HOME/.ao/bin/ao" \
       && launchctl kickstart -k "$dom/dev.agent-orchestrator.daemon" \
       && echo "reload: daemon rebuilt + live on :3001" \
       || { echo "reload: FAILED" >&2; exit 1; }

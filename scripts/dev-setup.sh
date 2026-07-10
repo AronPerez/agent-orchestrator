@@ -21,10 +21,13 @@ dom="gui/$(id -u)"
 # 0. git hooks: enable the tracked pre-commit (prettier + gofmt checks)
 "${script_dir}/install-hooks.sh"
 
-# 1. daemon binary: build + PATH install, then the copy launchd actually runs
+# 1. daemon binary: build + PATH install, then the copy launchd actually runs.
+# Install atomically (cp to .new + mv) — an in-place `cp` over the running binary
+# corrupts its code signature and macOS SIGKILLs the daemon (OS_REASON_CODESIGNING).
 "${script_dir}/daemon-build.sh"
 mkdir -p "${HOME}/.ao/bin"
-cp -f "${XDG_CACHE_HOME:-${HOME}/.cache}/aoagents/agent-orchestrator/bin/ao" "${HOME}/.ao/bin/ao"
+cp -f "${XDG_CACHE_HOME:-${HOME}/.cache}/aoagents/agent-orchestrator/bin/ao" "${HOME}/.ao/bin/ao.new"
+mv -f "${HOME}/.ao/bin/ao.new" "${HOME}/.ao/bin/ao"
 echo "Installed ~/.ao/bin/ao"
 
 # 2. service scripts (deploy-by-copy; launchd runs the ~/.ao copies)
