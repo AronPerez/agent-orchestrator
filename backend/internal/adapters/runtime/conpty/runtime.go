@@ -127,8 +127,19 @@ func (r *Runtime) Destroy(ctx context.Context, handle ports.RuntimeHandle) error
 		time.Sleep(25 * time.Millisecond)
 	}
 
-	// Best-effort force-kill (the host's graceful shutdown already disposed
-	// the ConPTY child; killing the host process is sufficient).
+	// Best-effort force-kill of the pty-host. On the healthy path the host's
+	// graceful shutdown already disposed the ConPTY child, so killing the host
+	// is sufficient.
+	//
+	// ponytail: parity gap with the tmux runtime, deferred pending Windows-runner
+	// validation. This confirms the HOST pid, not the agent CHILD; if the host is
+	// wedged, force-killing it can orphan a live ConPTY child (nothing ties the
+	// child's lifetime to the host). The reap-then-resurrect fix is to spawn the
+	// host into a Windows Job Object with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+	// (spawn_windows.go) so this fallback reaps the whole tree, and to confirm the
+	// child via StatusPayload.Alive (a clientStatus helper reading sp.Alive)
+	// rather than the host pid. tmux — the platform the incident occurred on — is
+	// fixed in tmux.go Destroy.
 	if p, err := findProcess(sess.pid); err == nil {
 		_ = p.Kill()
 	}

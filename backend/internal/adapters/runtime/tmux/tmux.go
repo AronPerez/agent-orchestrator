@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -34,6 +35,16 @@ const (
 	// (capture-pane shows a rendered TUI, not input-buffer state). Tunable via
 	// Options.EnterDelay if a codex release changes the threshold.
 	defaultEnterDelay = 120 * time.Millisecond
+	// Destroy confirms the agent process is actually gone before returning, so a
+	// killed session cannot keep running: tmux kill-session only sends SIGHUP,
+	// which an agent can trap (the reap-then-resurrect bug). defaultKillTermGrace
+	// is how long to wait for that SIGHUP to work before escalating to an
+	// uncatchable SIGKILL; defaultKillConfirmTimeout bounds the total wait for a
+	// confirmed exit.
+	defaultKillTermGrace      = 500 * time.Millisecond
+	defaultKillConfirmTimeout = 2 * time.Second
+	// killPollInterval is how often Destroy re-checks the process group for exit.
+	killPollInterval = 25 * time.Millisecond
 )
 
 var sessionIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
@@ -48,17 +59,25 @@ type Options struct {
 	Timeout    time.Duration // default 5s
 	ChunkSize  int           // default 16*1024
 	EnterDelay time.Duration // pause before the submit Enter; default 120ms, <0 disables
+	// KillTermGrace is how long Destroy waits for kill-session's SIGHUP to reap
+	// the agent before escalating to SIGKILL; default 500ms.
+	KillTermGrace time.Duration
+	// KillConfirmTimeout bounds Destroy's total wait for the agent process group
+	// to exit; default 2s.
+	KillConfirmTimeout time.Duration
 }
 
 // Runtime runs agent sessions inside tmux sessions, driving them via the tmux
 // CLI. It implements ports.Runtime.
 type Runtime struct {
-	binary     string
-	shell      string
-	timeout    time.Duration
-	chunkSize  int
-	enterDelay time.Duration
-	runner     runner
+	binary             string
+	shell              string
+	timeout            time.Duration
+	chunkSize          int
+	enterDelay         time.Duration
+	killTermGrace      time.Duration
+	killConfirmTimeout time.Duration
+	runner             runner
 }
 
 var _ ports.Runtime = (*Runtime)(nil)
@@ -111,13 +130,26 @@ func New(opts Options) *Runtime {
 	case enterDelay < 0:
 		enterDelay = 0
 	}
+	killTermGrace := opts.KillTermGrace
+	if killTermGrace <= 0 {
+		killTermGrace = defaultKillTermGrace
+	}
+	killConfirmTimeout := opts.KillConfirmTimeout
+	if killConfirmTimeout <= 0 {
+		killConfirmTimeout = defaultKillConfirmTimeout
+	}
+	if killConfirmTimeout < killTermGrace {
+		killConfirmTimeout = killTermGrace
+	}
 	return &Runtime{
-		binary:     binary,
-		shell:      shellPath,
-		timeout:    timeout,
-		chunkSize:  chunkSize,
-		enterDelay: enterDelay,
-		runner:     execRunner{},
+		binary:             binary,
+		shell:              shellPath,
+		timeout:            timeout,
+		chunkSize:          chunkSize,
+		enterDelay:         enterDelay,
+		killTermGrace:      killTermGrace,
+		killConfirmTimeout: killConfirmTimeout,
+		runner:             execRunner{},
 	}
 }
 
@@ -171,13 +203,24 @@ func (r *Runtime) Create(ctx context.Context, cfg ports.RuntimeConfig) (ports.Ru
 	return handle, nil
 }
 
-// Destroy kills the handle's tmux session. An already-gone session is treated
-// as success (idempotent).
+// Destroy kills the handle's tmux session and confirms the agent process is
+// actually gone before returning. tmux kill-session only sends SIGHUP, which an
+// agent can trap and survive; Manager.Kill marks the session terminated once
+// Destroy returns, so a Destroy that returned while the agent was still alive
+// would let a "terminated" session keep running and complete outbound side
+// effects (the reap-then-resurrect bug). So Destroy resolves the pane's process
+// group first, then escalates to an uncatchable SIGKILL and waits, bounded, for
+// exit. An already-gone session is treated as success (idempotent).
 func (r *Runtime) Destroy(ctx context.Context, handle ports.RuntimeHandle) error {
 	id, err := handleID(handle)
 	if err != nil {
 		return err
 	}
+	// Resolve the pane's process group before teardown, while the pane still
+	// exists to query. tmux runs each pane in its own group led by pane_pid, so
+	// one group signal reaps the agent and every child it spawned.
+	pgid, havePgid := r.resolvePaneGroup(ctx, id)
+
 	out, err := r.run(ctx, killSessionArgs(id)...)
 	if err != nil {
 		var exitErr *exec.ExitError
@@ -186,7 +229,66 @@ func (r *Runtime) Destroy(ctx context.Context, handle ports.RuntimeHandle) error
 		}
 		return fmt.Errorf("tmux runtime: destroy session %s: %w", id, err)
 	}
+	if !havePgid {
+		// Pane already gone or unresolvable: kill-session's SIGHUP is all we can
+		// do, and there is no group to confirm. (On Windows, where the pgid
+		// helpers are stubs, this is always the path.)
+		return nil
+	}
+	return r.confirmGroupDead(ctx, id, pgid)
+}
+
+// resolvePaneGroup returns the process-group id of the session's pane, or ok
+// false when it cannot be determined (pane already gone, unparseable output, or
+// a transient tmux failure). A false result makes Destroy fall back to a plain
+// kill-session rather than signaling a guessed group.
+func (r *Runtime) resolvePaneGroup(ctx context.Context, id string) (int, bool) {
+	out, err := r.run(ctx, panePIDArgs(id)...)
+	if err != nil {
+		return 0, false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil || pid <= 1 {
+		return 0, false
+	}
+	return paneProcessGroup(pid)
+}
+
+// confirmGroupDead waits for the pane's process group to exit after
+// kill-session's SIGHUP, escalating to SIGKILL once the grace elapses. It
+// returns an error only if the group is still alive after SIGKILL, so
+// Manager.Kill does not mark a still-running agent terminated.
+func (r *Runtime) confirmGroupDead(ctx context.Context, id string, pgid int) error {
+	if r.waitGroupExit(ctx, pgid, r.killTermGrace) {
+		return nil
+	}
+	// SIGKILL is uncatchable, so it reaps an agent that trapped the SIGHUP.
+	_ = terminateProcessGroup(pgid)
+	if r.waitGroupExit(ctx, pgid, r.killConfirmTimeout-r.killTermGrace) {
+		return nil
+	}
+	if processGroupAlive(pgid) {
+		return fmt.Errorf("tmux runtime: destroy session %s: process group %d still alive after SIGKILL", id, pgid)
+	}
 	return nil
+}
+
+// waitGroupExit polls until the process group is gone or timeout elapses,
+// returning true once it has exited. A cancelled ctx ends the wait early,
+// returning the group's current liveness.
+func (r *Runtime) waitGroupExit(ctx context.Context, pgid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if !processGroupAlive(pgid) {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		if err := sleep(ctx, killPollInterval); err != nil {
+			return !processGroupAlive(pgid)
+		}
+	}
 }
 
 // IsAlive reports whether the handle's session still exists via `tmux

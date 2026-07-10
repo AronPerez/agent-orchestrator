@@ -98,6 +98,10 @@ func TestCommandBuilders(t *testing.T) {
 	if got, want := capturePaneArgs("sess-1", 10), []string{"capture-pane", "-t", "sess-1", "-p", "-S", "-10"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("capturePaneArgs = %#v, want %#v", got, want)
 	}
+	// display-message is pane-targeting (plain name, no = prefix).
+	if got, want := panePIDArgs("sess-1"), []string{"display-message", "-p", "-t", "sess-1", "#{pane_pid}"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("panePIDArgs = %#v, want %#v", got, want)
+	}
 }
 
 // -- session name sanitization --
@@ -325,20 +329,23 @@ func (f *fakeRunnerSelectiveErr) Run(_ context.Context, env []string, name strin
 
 func TestDestroyIsIdempotentWhenSessionMissing(t *testing.T) {
 	r, fr := newTestRuntime(0)
-	fr.outputs = [][]byte{[]byte("can't find session: sess-1")}
+	// Destroy first resolves the pane pid (display-message), then kill-session; a
+	// missing session fails both, and Destroy still succeeds (idempotent).
+	fr.outputs = [][]byte{[]byte("can't find session: sess-1"), []byte("can't find session: sess-1")}
 	fr.err = &exec.ExitError{}
 
 	if err := r.Destroy(context.Background(), ports.RuntimeHandle{ID: "sess-1"}); err != nil {
 		t.Fatalf("Destroy: %v", err)
 	}
-	if len(fr.calls) != 1 || fr.calls[0].args[0] != "kill-session" {
-		t.Fatalf("calls = %#v, want only kill-session", fr.calls)
+	if len(fr.calls) != 2 || fr.calls[0].args[0] != "display-message" || fr.calls[1].args[0] != "kill-session" {
+		t.Fatalf("calls = %#v, want display-message then kill-session", fr.calls)
 	}
 }
 
 func TestDestroyIsIdempotentWhenNoServer(t *testing.T) {
 	r, fr := newTestRuntime(0)
-	fr.outputs = [][]byte{[]byte("no server running on /tmp/tmux-1000/default")}
+	// Both display-message and kill-session report the dead server.
+	fr.outputs = [][]byte{[]byte("no server running on /tmp/tmux-1000/default"), []byte("no server running on /tmp/tmux-1000/default")}
 	fr.err = &exec.ExitError{}
 
 	if err := r.Destroy(context.Background(), ports.RuntimeHandle{ID: "sess-1"}); err != nil {
@@ -348,7 +355,9 @@ func TestDestroyIsIdempotentWhenNoServer(t *testing.T) {
 
 func TestDestroyReportsUnexpectedFailures(t *testing.T) {
 	r, fr := newTestRuntime(0)
-	fr.outputs = [][]byte{[]byte("permission denied")}
+	// Pane resolution fails transiently, then kill-session fails with a non-
+	// missing error: Destroy must surface it, not swallow it.
+	fr.outputs = [][]byte{[]byte("permission denied"), []byte("permission denied")}
 	fr.err = &exec.ExitError{}
 
 	if err := r.Destroy(context.Background(), ports.RuntimeHandle{ID: "sess-1"}); err == nil {
@@ -358,14 +367,19 @@ func TestDestroyReportsUnexpectedFailures(t *testing.T) {
 
 func TestDestroyArgs(t *testing.T) {
 	r, fr := newTestRuntime(0)
-	fr.outputs = [][]byte{nil}
+	// Empty (non-numeric) pane-pid output makes resolvePaneGroup give up, so
+	// Destroy issues display-message then kill-session and returns nil.
+	fr.outputs = [][]byte{nil, nil}
 
 	if err := r.Destroy(context.Background(), ports.RuntimeHandle{ID: "sess-1"}); err != nil {
 		t.Fatalf("Destroy: %v", err)
 	}
+	if got, want := fr.calls[0].args, panePIDArgs("sess-1"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("destroy call[0] = %#v, want %#v (pane-pid resolution first)", got, want)
+	}
 	// killSessionArgs uses exact-match target =<id>.
-	if got, want := fr.calls[0].args, killSessionArgs("sess-1"); !reflect.DeepEqual(got, want) {
-		t.Fatalf("destroy args = %#v, want %#v", got, want)
+	if got, want := fr.calls[1].args, killSessionArgs("sess-1"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("destroy call[1] = %#v, want %#v", got, want)
 	}
 }
 

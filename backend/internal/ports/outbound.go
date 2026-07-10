@@ -79,6 +79,12 @@ type AgentMessenger interface {
 // liveness probing for reapers and terminal attachment.
 type Runtime interface {
 	Create(ctx context.Context, cfg RuntimeConfig) (RuntimeHandle, error)
+	// Destroy tears down the session and must not return nil until the agent
+	// process is confirmed gone. Manager.Kill marks a session terminated only
+	// after Destroy succeeds, so a Destroy that returned while the agent was
+	// still alive would let a "terminated" session keep running and complete
+	// outbound side effects (the reap-then-resurrect bug). An already-gone
+	// session is a nil (idempotent) success.
 	Destroy(ctx context.Context, handle RuntimeHandle) error
 	IsAlive(ctx context.Context, handle RuntimeHandle) (bool, error)
 }
