@@ -840,6 +840,10 @@ export interface components {
             /** Format: date-time */
             updatedAt: string;
         };
+        ControllersSpawnAttachmentInput: {
+            data: string;
+            mimeType?: string;
+        };
         DegradedProject: {
             id: string;
             kind: string;
@@ -1275,6 +1279,7 @@ export interface components {
             orchestrator: components["schemas"]["OrchestratorResponse"];
         };
         SpawnSessionRequest: {
+            attachments?: components["schemas"]["ControllersSpawnAttachmentInput"][];
             branch?: string;
             displayName?: string;
             /** @enum {string} */
