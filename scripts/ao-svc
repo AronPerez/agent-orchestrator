@@ -35,7 +35,8 @@ case "${1:-status}" in
     "$repo/scripts/daemon-build.sh" \
       && cp -f "$cache_bin" "$HOME/.ao/bin/ao.new" \
       && mv -f "$HOME/.ao/bin/ao.new" "$HOME/.ao/bin/ao" \
-      && launchctl kickstart -k "$dom/dev.agent-orchestrator.daemon" \
+      && { launchctl kickstart -k "$dom/dev.agent-orchestrator.daemon" 2>/dev/null \
+            || launchctl bootstrap "$dom" "$LA/dev.agent-orchestrator.daemon.plist"; } \
       && echo "reload: daemon rebuilt + live on :3001" \
       || { echo "reload: FAILED" >&2; exit 1; }
     ;;
