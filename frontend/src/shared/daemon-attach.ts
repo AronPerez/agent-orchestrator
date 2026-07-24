@@ -32,6 +32,9 @@ export type DaemonProbe = {
 	executablePath?: string;
 	workingDirectory?: string;
 	startupWorkingDirectory?: string;
+	/** VCS build stamp (git revision, "-dirty" suffix when the tree was modified).
+	 * Absent on unstamped builds (`go run`) — callers then fall back to path. */
+	buildIdentity?: string;
 };
 
 /** A /healthz|/readyz probe of a loopback port; resolves null when nothing valid answers. */
@@ -66,6 +69,7 @@ export function parseDaemonProbe(endpoint: "healthz" | "readyz", body: unknown):
 		workingDirectory: typeof candidate.workingDirectory === "string" ? candidate.workingDirectory : undefined,
 		startupWorkingDirectory:
 			typeof candidate.startupWorkingDirectory === "string" ? candidate.startupWorkingDirectory : undefined,
+		buildIdentity: typeof candidate.buildIdentity === "string" ? candidate.buildIdentity : undefined,
 	};
 }
 
