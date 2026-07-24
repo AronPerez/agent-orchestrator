@@ -1,6 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import * as SecureStore from "expo-secure-store";
 import { useCallback, useEffect, useState } from "react";
+import { secureDeleteItem, secureGetItem, secureSetItem } from "./secure-store";
 
 // The user points the app at their AO daemon (over Tailscale/LAN). We store the
 // host + API port; HTTP and WS URLs are derived from them. The Go daemon serves
@@ -51,11 +51,11 @@ export async function loadConfig(): Promise<ServerConfig> {
 		// blob. If we find one there, move it into SecureStore and rewrite the blob
 		// without it so the plaintext copy doesn't linger on disk.
 		if (parsed.password) {
-			await SecureStore.setItemAsync(PW_KEY, parsed.password);
+			await secureSetItem(PW_KEY, parsed.password);
 			await writeNonSecret(base);
 			return { ...base, password: parsed.password };
 		}
-		const password = (await SecureStore.getItemAsync(PW_KEY)) ?? "";
+		const password = (await secureGetItem(PW_KEY)) ?? "";
 		return { ...base, password };
 	} catch {
 		return DEFAULT_CONFIG;
@@ -72,9 +72,9 @@ async function writeNonSecret(cfg: ServerConfig): Promise<void> {
 export async function saveConfig(cfg: ServerConfig): Promise<void> {
 	await writeNonSecret(cfg);
 	if (cfg.password) {
-		await SecureStore.setItemAsync(PW_KEY, cfg.password);
+		await secureSetItem(PW_KEY, cfg.password);
 	} else {
-		await SecureStore.deleteItemAsync(PW_KEY);
+		await secureDeleteItem(PW_KEY);
 	}
 }
 
