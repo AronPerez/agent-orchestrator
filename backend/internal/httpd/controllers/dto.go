@@ -552,8 +552,9 @@ type AgentInfo = agentsvc.Info
 
 // ListNotificationsQuery is the query string accepted by GET /api/v1/notifications.
 type ListNotificationsQuery struct {
-	Status string `query:"status,omitempty" enum:"unread" description:"Notification status filter. V1 supports only unread."`
-	Limit  int    `query:"limit,omitempty" minimum:"1" maximum:"100" description:"Maximum notifications to return. Defaults to 50; capped at 100."`
+	Status string `query:"status,omitempty" enum:"unread,all" description:"Notification status filter. Defaults to unread; all includes read history."`
+	Limit  int    `query:"limit,omitempty" minimum:"1" maximum:"100" description:"Maximum notifications to return. Defaults to 100."`
+	Cursor string `query:"cursor,omitempty" description:"Opaque cursor returned by the previous page."`
 }
 
 // NotificationStreamQuery is the query string accepted by GET /api/v1/notifications/stream.
@@ -587,9 +588,11 @@ type NotificationResponse struct {
 	Target    NotificationTarget `json:"target"`
 }
 
-// ListNotificationsResponse is the body of GET /api/v1/notifications.
+// ListNotificationsResponse is one history page from GET /api/v1/notifications.
 type ListNotificationsResponse struct {
 	Notifications []NotificationResponse `json:"notifications"`
+	NextCursor    string                 `json:"nextCursor,omitempty"`
+	UnreadCount   int                    `json:"unreadCount"`
 }
 
 // MarkNotificationReadRequest is the body of PATCH /api/v1/notifications/{id}.
@@ -637,7 +640,8 @@ type ShellTerminalEnvelope struct {
 
 // MarkAllNotificationsReadResponse is the body of POST /api/v1/notifications/read-all.
 type MarkAllNotificationsReadResponse struct {
-	Notifications []NotificationResponse `json:"notifications"`
+	Notifications []NotificationResponse `json:"notifications" description:"Deprecated compatibility field. Always empty so mark-all responses stay bounded."`
+	UpdatedCount  int64                  `json:"updatedCount" description:"Number of notifications changed from unread to read."`
 }
 
 // ImportStatusResponse is the body of GET /api/v1/import: whether a legacy AO
