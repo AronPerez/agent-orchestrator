@@ -4,10 +4,12 @@ import { useMemo, useState, type ReactNode } from "react";
 import { Linking, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { DashboardPR, DashboardSession } from "../../lib/api";
+import { haptics } from "../../lib/haptics";
 import { ProjectSwitcher } from "../../lib/ProjectSwitcher";
 import { BoardColumn, CardGrid, WideContainer, useBreakpoint } from "../../lib/responsive";
 import { useApp, usePRs, type PRDensity } from "../../lib/store";
 import { ciVisual, theme } from "../../lib/theme";
+import { useTabScrollToTop } from "../../lib/useTabScrollToTop";
 import { Button, Chip, ConnectionPill, Dot, EmptyState, Pill, ScreenHeader } from "../../lib/ui";
 
 type Filter = "open" | "merged" | "all";
@@ -52,6 +54,8 @@ export default function PRsScreen() {
 	const [busy, setBusy] = useState<{ action: PRAction; key: string } | null>(null);
 	const [notice, setNotice] = useState<{ kind: "error" | "success"; text: string } | null>(null);
 
+	const scrollRef = useTabScrollToTop<ScrollView>();
+
 	const items = useMemo<PRItem[]>(
 		() =>
 			prs.map(({ pr, session }) => ({
@@ -74,6 +78,7 @@ export default function PRsScreen() {
 	const hasResults = [...ACTIVE_SECTIONS, ...PASSIVE_SECTIONS].some((section) => grouped[section.id].length > 0);
 
 	const onRefresh = async () => {
+		haptics.tap();
 		setRefreshing(true);
 		await refresh();
 		setRefreshing(false);
@@ -196,6 +201,7 @@ export default function PRsScreen() {
 			) : null}
 
 			<ScrollView
+				ref={scrollRef}
 				contentContainerStyle={wide ? styles.wideScrollContent : styles.scrollContent}
 				refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={theme.blue} />}
 			>

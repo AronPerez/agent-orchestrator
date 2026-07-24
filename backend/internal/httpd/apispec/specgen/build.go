@@ -67,10 +67,16 @@ func Build() ([]byte, error) {
 			"Code-review runs and findings"),
 		*(&openapi31.Tag{Name: "notifications"}).WithDescription(
 			"Durable dashboard notifications"),
+		*(&openapi31.Tag{Name: "push"}).WithDescription(
+			"Mobile push-device registration for OS push notifications"),
 		*(&openapi31.Tag{Name: "events"}).WithDescription(
 			"Server-sent CDC event stream with durable replay"),
 		*(&openapi31.Tag{Name: "import"}).WithDescription(
 			"Legacy AO project import (availability probe and run)"),
+		*(&openapi31.Tag{Name: "dev"}).WithDescription(
+			"Developer-only maintenance operations"),
+		*(&openapi31.Tag{Name: "mobile"}).WithDescription(
+			"Connect Mobile LAN bridge control (loopback/desktop only)"),
 	}
 
 	for _, op := range operations() {
@@ -144,6 +150,7 @@ var schemaNames = map[string]string{
 	"ControllersCleanupSessionsQuery":             "CleanupSessionsQuery",
 	"ControllersListSessionsResponse":             "ListSessionsResponse",
 	"ControllersSpawnSessionRequest":              "SpawnSessionRequest",
+	"ControllersSpawnSessionResponse":             "SpawnSessionResponse",
 	"ControllersSessionResponse":                  "SessionResponse",
 	"ControllersSessionPreviewResponse":           "SessionPreviewResponse",
 	"ControllersSetSessionPreviewRequest":         "SetSessionPreviewRequest",
@@ -152,6 +159,10 @@ var schemaNames = map[string]string{
 	"ControllersRestoreSessionResponse":           "RestoreSessionResponse",
 	"ControllersCleanupSessionsResponse":          "CleanupSessionsResponse",
 	"ControllersCleanupSkippedSession":            "CleanupSkippedSession",
+	"ControllersWorkspaceFileQuery":               "WorkspaceFileQuery",
+	"ControllersListWorkspaceFilesResponse":       "ListWorkspaceFilesResponse",
+	"ControllersWorkspaceFileSummary":             "WorkspaceFileSummary",
+	"ControllersWorkspaceFileResponse":            "WorkspaceFileResponse",
 	"ControllersKillSessionResponse":              "KillSessionResponse",
 	"ControllersRollbackSessionResponse":          "RollbackSessionResponse",
 	"ControllersSendSessionMessageRequest":        "SendSessionMessageRequest",
@@ -163,6 +174,7 @@ var schemaNames = map[string]string{
 	"ControllersSessionPRCISummary":               "SessionPRCISummary",
 	"ControllersSessionPRFailingCheck":            "SessionPRFailingCheck",
 	"ControllersSessionPRReviewSummary":           "SessionPRReviewSummary",
+	"ControllersSessionPRReviewEntry":             "SessionPRReviewEntry",
 	"ControllersSessionPRUnresolvedReviewer":      "SessionPRUnresolvedReviewer",
 	"ControllersSessionPRReviewCommentLink":       "SessionPRReviewCommentLink",
 	"ControllersSessionPRMergeabilitySummary":     "SessionPRMergeabilitySummary",
@@ -185,6 +197,12 @@ var schemaNames = map[string]string{
 	"ControllersMarkNotificationReadRequest":      "MarkNotificationReadRequest",
 	"ControllersNotificationEnvelope":             "NotificationEnvelope",
 	"ControllersMarkAllNotificationsReadResponse": "MarkAllNotificationsReadResponse",
+	// httpd/controllers — standalone shell terminal wire envelopes
+	"ControllersShellTerminalHandleIDParam": "ShellTerminalHandleIDParam",
+	"ControllersOpenShellTerminalRequest":   "OpenShellTerminalRequest",
+	"ControllersShellTerminalResponse":      "ShellTerminalResponse",
+	"ControllersListShellTerminalsResponse": "ListShellTerminalsResponse",
+	"ControllersShellTerminalEnvelope":      "ShellTerminalEnvelope",
 	// httpd/controllers — PR wire envelopes
 	"ControllersMergePRResponse":         "MergePRResponse",
 	"ControllersClosePRResponse":         "ClosePRResponse",
@@ -194,6 +212,7 @@ var schemaNames = map[string]string{
 	"ControllersListReviewsResponse":   "ListReviewsResponse",
 	"ControllersReviewRunResponse":     "ReviewRunResponse",
 	"ControllersTriggerReviewResponse": "TriggerReviewResponse",
+	"ControllersCancelReviewResponse":  "CancelReviewResponse",
 	"ControllersSubmitReviewItem":      "SubmitReviewItem",
 	"ControllersSubmitReviewInput":     "SubmitReviewInput",
 	// domain review entities
@@ -202,16 +221,33 @@ var schemaNames = map[string]string{
 	// httpd/controllers: import wire envelopes
 	"ControllersImportStatusResponse": "ImportStatusResponse",
 	"ControllersImportRunResponse":    "ImportRunResponse",
+	// httpd/controllers: dev wire envelopes
+	"ControllersDevImportProjectsRequest":  "DevImportProjectsRequest",
+	"ControllersDevImportProjectsResponse": "DevImportProjectsResponse",
+	// httpd/controllers: mobile wire envelopes
+	"ControllersMobileStatusResponse": "MobileStatusResponse",
+	// devimport report
+	"DevimportReport":   "DevImportProjectsReport",
+	"DevimportConflict": "DevImportProjectsConflict",
+	// httpd/controllers: push-device wire envelopes
+	"ControllersRegisterPushDeviceRequest":    "RegisterPushDeviceRequest",
+	"ControllersPushDeviceEnvelope":           "PushDeviceEnvelope",
+	"ControllersPushDeviceResponse":           "PushDeviceResponse",
+	"ControllersUnregisterPushDeviceResponse": "UnregisterPushDeviceResponse",
 	// legacyimport report
 	"LegacyimportReport": "ImportReport",
 	// service/project entities + DTOs
-	"ProjectProject":        "Project",
-	"ProjectSummary":        "ProjectSummary",
-	"ProjectDegraded":       "DegradedProject",
-	"ProjectAddInput":       "AddProjectInput",
-	"ProjectRemoveResult":   "RemoveProjectResult",
-	"ProjectSetConfigInput": "SetProjectConfigInput",
-	"ProjectWorkspaceRepo":  "WorkspaceRepo",
+	"ProjectProject":                    "Project",
+	"ProjectSummary":                    "ProjectSummary",
+	"ProjectDegraded":                   "DegradedProject",
+	"ProjectAddInput":                   "AddProjectInput",
+	"ProjectInitializeRepositoryInput":  "InitializeRepositoryInput",
+	"ProjectInitializeRepositoryResult": "InitializeRepositoryResult",
+	"ProjectRemoveResult":               "RemoveProjectResult",
+	"ProjectSetConfigInput":             "SetProjectConfigInput",
+	"ProjectUpdateSettingsInput":        "UpdateProjectSettingsInput",
+	"ProjectWorkspaceRepo":              "WorkspaceRepo",
+	"SessionWorkspaceFileStatus":        "WorkspaceFileStatus",
 }
 
 // markRequestBodyRequired sets requestBody.required: true on the operation's
@@ -292,8 +328,52 @@ func operations() []operation {
 	ops = append(ops, prOperations()...)
 	ops = append(ops, reviewOperations()...)
 	ops = append(ops, notificationOperations()...)
+	ops = append(ops, pushOperations()...)
 	ops = append(ops, importOperations()...)
+	ops = append(ops, devOperations()...)
+	ops = append(ops, mobileOperations()...)
+	ops = append(ops, shellTerminalOperations()...)
 	return ops
+}
+
+// shellTerminalOperations describes the standalone shell terminal surface:
+// shells the user opens by hand, with no agent session behind them.
+func shellTerminalOperations() []operation {
+	return []operation{
+		{
+			method: http.MethodGet, path: "/api/v1/shell-terminals", id: "listShellTerminals", tag: "shellTerminals",
+			summary: "List the standalone shell terminals owned by the current app run",
+			resps: []respUnit{
+				{http.StatusOK, controllers.ListShellTerminalsResponse{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/shell-terminals", id: "openShellTerminal", tag: "shellTerminals",
+			summary: "Open a standalone shell terminal",
+			reqBody: controllers.OpenShellTerminalRequest{},
+			resps: []respUnit{
+				{http.StatusCreated, controllers.ShellTerminalEnvelope{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodDelete, path: "/api/v1/shell-terminals/{handleId}", id: "closeShellTerminal", tag: "shellTerminals",
+			summary:    "Close a standalone shell terminal and destroy its PTY",
+			pathParams: []any{controllers.ShellTerminalHandleIDParam{}},
+			resps: []respUnit{
+				{http.StatusNoContent, nil},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+	}
 }
 
 func agentOperations() []operation {
@@ -330,6 +410,51 @@ func agentOperations() []operation {
 	}
 }
 
+// mobileOperations declares the 4 /mobile control operations. These are
+// mounted on the loopback router (mountMobile in router.go), not the REST
+// /api/v1 group — only the desktop/CLI may enable, disable, or regenerate the
+// phone's LAN access; the phone never toggles its own connection. Must stay
+// 1:1 with the routes mountMobile registers (enforced by the parity test).
+func mobileOperations() []operation {
+	return []operation{
+		{
+			method: http.MethodGet, path: "/api/v1/mobile/status", id: "getMobileStatus", tag: "mobile",
+			summary: "Check whether Connect Mobile's LAN bridge is enabled",
+			resps: []respUnit{
+				{http.StatusOK, controllers.MobileStatusResponse{}},
+				{http.StatusForbidden, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/mobile/enable", id: "enableMobile", tag: "mobile",
+			summary: "Enable the Connect Mobile LAN bridge and issue a fresh password",
+			resps: []respUnit{
+				{http.StatusOK, controllers.MobileStatusResponse{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/mobile/disable", id: "disableMobile", tag: "mobile",
+			summary: "Disable the Connect Mobile LAN bridge",
+			resps: []respUnit{
+				{http.StatusOK, controllers.MobileStatusResponse{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/mobile/regenerate", id: "regenerateMobile", tag: "mobile",
+			summary: "Rotate the Connect Mobile password, dropping any connected phone",
+			resps: []respUnit{
+				{http.StatusOK, controllers.MobileStatusResponse{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+			},
+		},
+	}
+}
+
 // importOperations declares the 2 /import operations. Must stay 1:1 with
 // the routes ImportController.Register mounts (enforced by the parity test).
 func importOperations() []operation {
@@ -355,11 +480,29 @@ func importOperations() []operation {
 	}
 }
 
+// devOperations declares developer-only API operations. Must stay 1:1 with
+// the routes DevController.Register mounts (enforced by the parity test).
+func devOperations() []operation {
+	return []operation{
+		{
+			method: http.MethodPost, path: "/api/v1/dev/import-projects", id: "runDevImportProjects", tag: "dev",
+			summary: "Run the developer project-registry import through the daemon store",
+			reqBody: controllers.DevImportProjectsRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.DevImportProjectsResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+	}
+}
+
 func notificationOperations() []operation {
 	return []operation{
 		{
 			method: http.MethodGet, path: "/api/v1/notifications", id: "listNotifications", tag: "notifications",
-			summary:    "List unread notifications",
+			summary:    "List notification history",
 			pathParams: []any{controllers.ListNotificationsQuery{}},
 			resps: []respUnit{
 				{http.StatusOK, controllers.ListNotificationsResponse{}},
@@ -407,6 +550,34 @@ func notificationOperations() []operation {
 // reviewOperations declares the session-scoped /reviews operations. Must stay
 // 1:1 with the routes ReviewsController.Register mounts (enforced by the parity
 // test).
+// pushOperations declares the /push/devices operations. Must stay 1:1 with the
+// routes PushController.Register mounts (enforced by the parity test).
+func pushOperations() []operation {
+	return []operation{
+		{
+			method: http.MethodPost, path: "/api/v1/push/devices", id: "registerPushDevice", tag: "push",
+			summary: "Register (upsert) a phone's Expo push token",
+			reqBody: controllers.RegisterPushDeviceRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.PushDeviceEnvelope{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodDelete, path: "/api/v1/push/devices/{token}", id: "unregisterPushDevice", tag: "push",
+			summary:    "Unregister a phone's Expo push token",
+			pathParams: []any{controllers.PushDeviceTokenParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.UnregisterPushDeviceResponse{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+	}
+}
+
 func reviewOperations() []operation {
 	return []operation{
 		{
@@ -426,6 +597,17 @@ func reviewOperations() []operation {
 			resps: []respUnit{
 				{http.StatusOK, controllers.TriggerReviewResponse{}},
 				{http.StatusCreated, controllers.TriggerReviewResponse{}},
+				{http.StatusUnprocessableEntity, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/sessions/{sessionId}/reviews/cancel", id: "cancelReview", tag: "reviews",
+			summary:    "Cancel a running code review",
+			pathParams: []any{controllers.SessionIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.CancelReviewResponse{}},
 				{http.StatusUnprocessableEntity, envelope.APIError{}},
 				{http.StatusNotFound, envelope.APIError{}},
 				{http.StatusNotImplemented, envelope.APIError{}},
@@ -468,7 +650,7 @@ func eventOperations() []operation {
 	}
 }
 
-// projectOperations declares the 4 canonical /projects operations. The set must
+// projectOperations declares the canonical /projects operations. The set must
 // stay 1:1 with the routes ProjectsController.Register mounts —
 // TestRouteSpecParity fails the build otherwise.
 func projectOperations() []operation {
@@ -493,11 +675,33 @@ func projectOperations() []operation {
 			},
 		},
 		{
+			method: http.MethodPost, path: "/api/v1/projects/initialize", id: "initializeProjectRepository", tag: "projects",
+			summary: "Initialize a selected folder as a Git repository with an initial commit",
+			reqBody: projectsvc.InitializeRepositoryInput{},
+			resps: []respUnit{
+				{http.StatusOK, projectsvc.InitializeRepositoryResult{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+			},
+		}, {
 			method: http.MethodGet, path: "/api/v1/projects/{id}", id: "getProject", tag: "projects",
 			summary:    "Fetch one project; discriminates ok vs degraded",
 			pathParams: []any{controllers.ProjectIDParam{}},
 			resps: []respUnit{
 				{http.StatusOK, controllers.GetProjectResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPut, path: "/api/v1/projects/{id}", id: "updateProjectSettings", tag: "projects",
+			summary:    "Atomically replace a project's display name and config",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			reqBody:    projectsvc.UpdateSettingsInput{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProjectResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
 				{http.StatusNotFound, envelope.APIError{}},
 				{http.StatusInternalServerError, envelope.APIError{}},
 			},
@@ -545,7 +749,7 @@ func sessionOperations() []operation {
 			summary: "Spawn a new agent session",
 			reqBody: controllers.SpawnSessionRequest{},
 			resps: []respUnit{
-				{http.StatusCreated, controllers.SessionResponse{}},
+				{http.StatusCreated, controllers.SpawnSessionResponse{}},
 				{http.StatusBadRequest, envelope.APIError{}},
 				{http.StatusNotFound, envelope.APIError{}},
 				{http.StatusInternalServerError, envelope.APIError{}},
@@ -607,6 +811,29 @@ func sessionOperations() []operation {
 				{http.StatusNotImplemented, envelope.APIError{}},
 			},
 			contentTypes: map[int]string{http.StatusOK: "text/html"},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/sessions/{sessionId}/workspace/files", id: "listSessionWorkspaceFiles", tag: "sessions",
+			summary:    "List files in a session workspace with git change status",
+			pathParams: []any{controllers.SessionIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ListWorkspaceFilesResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/sessions/{sessionId}/workspace/file", id: "getSessionWorkspaceFile", tag: "sessions",
+			summary:    "Read one session workspace file and its git diff",
+			pathParams: []any{controllers.SessionIDParam{}, controllers.WorkspaceFileQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkspaceFileResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
 		},
 		{
 			method: http.MethodGet, path: "/api/v1/sessions/{sessionId}/pr", id: "listSessionPRs", tag: "sessions",
@@ -699,6 +926,10 @@ func sessionOperations() []operation {
 				{http.StatusOK, controllers.SendSessionMessageResponse{}},
 				{http.StatusBadRequest, envelope.APIError{}},
 				{http.StatusNotFound, envelope.APIError{}},
+				// Conflict: the session is terminated, or paused on a permission
+				// decision (SESSION_AWAITING_DECISION) — the guarded send refuses
+				// to paste into a pending dialog.
+				{http.StatusConflict, envelope.APIError{}},
 				{http.StatusInternalServerError, envelope.APIError{}},
 			},
 		},

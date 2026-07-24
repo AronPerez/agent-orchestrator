@@ -1,4 +1,4 @@
-import { httpBase, type ServerConfig } from "./config";
+import { authHeaders, httpBase, type ServerConfig } from "./config";
 import type { AttentionLevel } from "./theme";
 
 // ---- Types (subset of AO's DashboardSession we use on the phone) ------------
@@ -68,6 +68,7 @@ export type OrchestratorLink = {
 export type ProjectInfo = {
 	id: string;
 	name: string;
+	kind?: "single_repo" | "workspace" | "scratch";
 	sessionPrefix?: string;
 };
 
@@ -133,6 +134,24 @@ function repoFromURL(url: string): { owner?: string; repo?: string } {
 	const match = url.match(/^https?:\/\/[^/]+\/([^/]+)\/([^/]+)\/(?:pull|merge_requests)\//);
 	if (!match) return {};
 	return { owner: decodeURIComponent(match[1]), repo: decodeURIComponent(match[2]) };
+}
+
+type WireProject = {
+	id: string;
+	name: string;
+	kind?: string;
+	sessionPrefix?: string;
+};
+
+function mapProjectKind(kind?: string): ProjectInfo["kind"] {
+	switch (kind) {
+		case "single_repo":
+		case "workspace":
+		case "scratch":
+			return kind;
+		default:
+			return undefined;
+	}
 }
 
 function mapPR(pr: WirePR): DashboardPR {
@@ -230,7 +249,7 @@ async function req(cfg: ServerConfig, path: string, init?: RequestInit): Promise
 		res = await fetch(url, {
 			...init,
 			signal: controller.signal,
-			headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+			headers: { ...authHeaders(cfg), "Content-Type": "application/json", ...(init?.headers ?? {}) },
 		});
 	} catch (e) {
 		if ((e as { name?: string })?.name === "AbortError") {
@@ -260,9 +279,10 @@ export async function getProjects(cfg: ServerConfig): Promise<ProjectInfo[]> {
 	const res = await req(cfg, `${API}/projects`);
 	const data = await res.json();
 	const projects = Array.isArray(data?.projects) ? data.projects : [];
-	return projects.map((p: { id: string; name: string; sessionPrefix?: string }) => ({
+	return projects.map((p: WireProject) => ({
 		id: p.id,
 		name: p.name,
+		kind: mapProjectKind(p.kind),
 		sessionPrefix: p.sessionPrefix,
 	}));
 }
@@ -320,6 +340,69 @@ export async function getPreview(cfg: ServerConfig, id: string): Promise<{ entry
 	const escaped = entry.split("/").map(encodeURIComponent).join("/");
 	const url = `${httpBase(cfg)}${API}/sessions/${encodeURIComponent(id)}/preview/files/${escaped}`;
 	return { entry, url };
+}
+
+// ---- Agent catalog ----------------------------------------------------------
+
+export type AgentInfo = {
+	id: string;
+	label: string;
+	authStatus?: "authorized" | "unauthorized" | "unknown";
+};
+
+export type AgentCatalog = {
+	supported: AgentInfo[];
+	installed: AgentInfo[];
+	authorized: AgentInfo[];
+};
+
+export async function getAgents(cfg: ServerConfig): Promise<AgentCatalog> {
+	const res = await req(cfg, `${API}/agents`);
+	const data = await res.json();
+	return {
+		supported: Array.isArray(data?.supported) ? data.supported : [],
+		installed: Array.isArray(data?.installed) ? data.installed : [],
+		authorized: Array.isArray(data?.authorized) ? data.authorized : [],
+	};
+}
+
+export async function refreshAgents(cfg: ServerConfig): Promise<AgentCatalog> {
+	const res = await req(cfg, `${API}/agents/refresh`, { method: "POST" });
+	const data = await res.json();
+	return {
+		supported: Array.isArray(data?.supported) ? data.supported : [],
+		installed: Array.isArray(data?.installed) ? data.installed : [],
+		authorized: Array.isArray(data?.authorized) ? data.authorized : [],
+	};
+}
+
+// ---- Push notifications -----------------------------------------------------
+
+// Register (idempotent upsert) this device's Expo push token with the daemon so
+// its dispatcher can deliver OS push notifications. Keyed daemon-side by token.
+export async function registerPushDevice(
+	cfg: ServerConfig,
+	device: { token: string; platform?: string; deviceName?: string },
+): Promise<void> {
+	await req(cfg, `${API}/push/devices`, {
+		method: "POST",
+		body: JSON.stringify(device),
+	});
+}
+
+// Unregister this device's push token (best-effort on disconnect/unpair). The
+// token's [ ] brackets must be URL-encoded for the path segment.
+export async function unregisterPushDevice(cfg: ServerConfig, token: string): Promise<void> {
+	await req(cfg, `${API}/push/devices/${encodeURIComponent(token)}`, { method: "DELETE" });
+}
+
+// Mark a notification read (best-effort on notification tap) so unread counts
+// stay consistent with the web dashboard.
+export async function markNotificationRead(cfg: ServerConfig, id: string): Promise<void> {
+	await req(cfg, `${API}/notifications/${encodeURIComponent(id)}`, {
+		method: "PATCH",
+		body: JSON.stringify({ status: "read" }),
+	});
 }
 
 // ---- Writes / actions -------------------------------------------------------
@@ -424,6 +507,37 @@ export function attentionOf(s: DashboardSession): AttentionLevel {
 
 export function sessionTitle(s: DashboardSession): string {
 	return s.displayName || s.issueTitle || s.userPrompt || s.summary || s.id;
+}
+
+// Project ids/names carry a generated hash suffix (`my-app_98d163a851`) and
+// session ids are minted as `<projectId>-<n>`. Printed in full on a phone that's
+// the same slug twice, wider than the card. These two helpers shorten each label
+// to something that still identifies it — only when it's actually too long.
+
+const MAX_LABEL = 20;
+
+// Middle-truncate. A plain tail-cut would drop the hash and make two projects
+// that share a base name render identically, so keep the head (the readable
+// part) AND the tail (the part that disambiguates).
+export function shortLabel(value: string, max = MAX_LABEL): string {
+	if (value.length <= max) return value;
+	const keep = max - 1; // room for the ellipsis
+	const head = Math.ceil(keep / 2);
+	const tail = Math.floor(keep / 2);
+	return `${value.slice(0, head)}…${value.slice(value.length - tail)}`;
+}
+
+// A session id is its project id plus a `-n` discriminator, so when that holds
+// the only new information is the discriminator — show `#n` rather than
+// reprinting the project slug. Ids that don't follow the convention fall back to
+// a middle-truncated label.
+export function shortSessionId(s: DashboardSession): string {
+	const { projectId, id } = s;
+	// The separator is required: a bare `startsWith(projectId)` would also match a
+	// longer sibling slug (project `app`, session `apple-1`) and print `#le-1`.
+	const prefixed = projectId && (id.startsWith(`${projectId}-`) || id.startsWith(`${projectId}_`));
+	const rest = prefixed ? id.slice(projectId.length + 1) : "";
+	return rest ? `#${rest}` : shortLabel(id);
 }
 
 // All PRs across sessions, de-duplicated by number+repo.

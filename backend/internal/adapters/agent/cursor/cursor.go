@@ -39,6 +39,23 @@ func New() *Plugin {
 var _ adapters.Adapter = (*Plugin)(nil)
 var _ ports.Agent = (*Plugin)(nil)
 
+// cursorDataDir returns the isolated Cursor profile AO uses for managed Cursor
+// sessions. This keeps Cursor's trust/cache state under AO_DATA_DIR instead of
+// the user's normal ~/.cursor profile.
+func cursorDataDir(dataDir string) string {
+	return filepath.Join(dataDir, "cursor")
+}
+
+// AugmentRuntimeEnv points cursor-agent at AO's isolated Cursor profile so
+// workspace trust seeded during hook installation is read by the launched
+// process without modifying the user's normal Cursor state.
+func (p *Plugin) AugmentRuntimeEnv(env map[string]string, dataDir string) {
+	if strings.TrimSpace(dataDir) == "" {
+		return
+	}
+	env[cursorDataDirEnv] = cursorDataDir(dataDir)
+}
+
 // Manifest returns the adapter's static self-description.
 func (p *Plugin) Manifest() adapters.Manifest {
 	return adapters.Manifest{
@@ -52,14 +69,13 @@ func (p *Plugin) Manifest() adapters.Manifest {
 	}
 }
 
-// GetLaunchCommand builds the argv to start a new Cursor CLI session:
+// GetLaunchCommand builds the argv to start a new interactive Cursor CLI
+// session:
 //
-//	cursor-agent -p --output-format stream-json --trust [permission flags] <prompt>
+//	cursor-agent [permission flags] <prompt>
 //
-// `-p` runs print/non-interactive mode, `--output-format stream-json` emits the
-// machine-readable event stream AO consumes, and `--trust` skips the
-// workspace-trust prompt. The prompt is positional and must come last, so a
-// leading "-" is not read as a flag.
+// The prompt is positional and must come last, so a leading "-" is not read as
+// a flag.
 //
 // Cursor has no inline/file system-prompt flag: it reads workspace rule files
 // (AGENTS.md, .cursor/rules, CLAUDE.md). SystemPrompt/SystemPromptFile are
@@ -70,7 +86,7 @@ func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (
 		return nil, err
 	}
 
-	cmd = []string{binary, "-p", "--output-format", "stream-json", "--trust"}
+	cmd = []string{binary}
 	appendApprovalFlags(&cmd, cfg.Permissions)
 
 	// Prompt is positional and must be last. The `--` sentinel ends option
@@ -85,7 +101,7 @@ func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (
 // GetRestoreCommand rebuilds the argv that continues an existing Cursor CLI
 // session:
 //
-//	cursor-agent -p --output-format stream-json --trust [perm flags] --resume <id>
+//	cursor-agent [perm flags] --resume <id>
 //
 // ok is false when the hook-derived native session id has not landed yet, so
 // callers can fall back to fresh launch behavior. ports.RestoreConfig carries no
@@ -104,8 +120,8 @@ func (p *Plugin) GetRestoreCommand(ctx context.Context, cfg ports.RestoreConfig)
 		return nil, false, err
 	}
 
-	cmd = make([]string, 0, 10)
-	cmd = append(cmd, binary, "-p", "--output-format", "stream-json", "--trust")
+	cmd = make([]string, 0, 6)
+	cmd = append(cmd, binary)
 	appendApprovalFlags(&cmd, cfg.Permissions)
 	cmd = append(cmd, "--resume", agentSessionID)
 	return cmd, true, nil

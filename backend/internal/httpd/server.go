@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
@@ -46,7 +45,7 @@ func NewWithDeps(cfg config.Config, log *slog.Logger, termMgr *terminal.Manager,
 	log = loggerOrDefault(log)
 	ln, err := net.Listen("tcp", cfg.Addr())
 	if err != nil {
-		if !errors.Is(err, syscall.EADDRINUSE) {
+		if !isAddrInUse(err) {
 			return nil, fmt.Errorf("bind %s: %w", cfg.Addr(), err)
 		}
 		// Configured port is taken by a non-AO process: retry on an ephemeral port.
@@ -79,6 +78,11 @@ func NewWithDeps(cfg config.Config, log *slog.Logger, termMgr *terminal.Manager,
 // Addr returns the actual bound address (useful when the configured port was 0
 // and the OS chose one — primarily in tests).
 func (s *Server) Addr() net.Addr { return s.listen.Addr() }
+
+// Handler returns the loopback server's built router so the daemon can share
+// the exact same handler instance with the LAN listener (via NewMobileLAN),
+// keeping the loopback and LAN surfaces identical.
+func (s *Server) Handler() http.Handler { return s.http.Handler }
 
 // Run serves until ctx is cancelled (SIGINT/SIGTERM via signal.NotifyContext),
 // then performs a graceful shutdown bounded by cfg.ShutdownTimeout. It writes

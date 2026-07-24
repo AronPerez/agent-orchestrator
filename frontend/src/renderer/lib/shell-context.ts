@@ -12,7 +12,9 @@ export type ShellContextValue = {
 		workerAgent: string;
 		orchestratorAgent: string;
 		trackerIntake?: components["schemas"]["TrackerIntakeConfig"];
+		asWorkspace?: boolean;
 	}) => Promise<void>;
+	initializeProjectRepository: (path: string) => Promise<void>;
 };
 
 const ShellContext = createContext<ShellContextValue | null>(null);
@@ -23,4 +25,10 @@ export function useShell(): ShellContextValue {
 	const ctx = useContext(ShellContext);
 	if (!ctx) throw new Error("useShell must be used within the _shell layout route");
 	return ctx;
+}
+
+// Non-throwing variant for components that also render outside the shell
+// (e.g. Sidebar in unit tests): returns null instead of throwing.
+export function useShellMaybe(): ShellContextValue | null {
+	return useContext(ShellContext);
 }

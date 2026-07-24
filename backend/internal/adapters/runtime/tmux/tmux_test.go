@@ -40,13 +40,29 @@ func (f *fakeRunner) Run(_ context.Context, env []string, name string, args ...s
 	return out, nil
 }
 
+// -- reapSessions test seam --
+
+// recordingReaper captures reapSessions calls instead of signaling real
+// processes, so unit tests exercising Destroy never touch the host's process
+// table.
+type recordingReaper struct {
+	pids   [][]int
+	graces []time.Duration
+}
+
+func (rr *recordingReaper) reap(_ context.Context, pids []int, grace time.Duration) {
+	rr.pids = append(rr.pids, append([]int(nil), pids...))
+	rr.graces = append(rr.graces, grace)
+}
+
 // -- helpers --
 
 func newTestRuntime(chunkSize int) (*Runtime, *fakeRunner) {
 	fr := &fakeRunner{}
 	r := New(Options{Binary: "tmux-test", Timeout: time.Second, Shell: "/bin/sh", ChunkSize: chunkSize})
 	r.runner = fr
-	r.enterDelay = 0 // keep the send-message tests instant; delay is covered explicitly below
+	r.enterDelay = 0                           // keep the send-message tests instant; delay is covered explicitly below
+	r.reapSessions = (&recordingReaper{}).reap // never signal real processes from unit tests
 	return r, fr
 }
 
@@ -79,6 +95,12 @@ func TestCommandBuilders(t *testing.T) {
 	if got, want := setStatusOffArgs("sess-1"), []string{"set-option", "-t", "sess-1", "status", "off"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("setStatusOffArgs = %#v, want %#v", got, want)
 	}
+	if got, want := setWindowSizeLargestArgs("sess-1"), []string{"set-option", "-t", "sess-1", "window-size", "largest"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("setWindowSizeLargestArgs = %#v, want %#v", got, want)
+	}
+	if got, want := paneCurrentPathArgs("sess-1"), []string{"display-message", "-p", "-t", "sess-1", "#{pane_current_path}"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("paneCurrentPathArgs = %#v, want %#v", got, want)
+	}
 	if got, want := setMouseOnArgs("sess-1"), []string{"set-option", "-t", "sess-1", "mouse", "on"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("setMouseOnArgs = %#v, want %#v", got, want)
 	}
@@ -89,11 +111,18 @@ func TestCommandBuilders(t *testing.T) {
 	if got, want := hasSessionArgs("sess-1"), []string{"has-session", "-t", "=sess-1"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("hasSessionArgs = %#v, want %#v", got, want)
 	}
+	// list-panes reaps whole-session (-s) with exact-match target and prints pane pids.
+	if got, want := listPanePIDsArgs("sess-1"), []string{"list-panes", "-s", "-t", "=sess-1", "-F", "#{pane_pid}"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("listPanePIDsArgs = %#v, want %#v", got, want)
+	}
 	if got, want := sendKeysLiteralArgs("sess-1", "hello"), []string{"send-keys", "-t", "sess-1", "-l", "hello"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("sendKeysLiteralArgs = %#v, want %#v", got, want)
 	}
 	if got, want := sendEnterArgs("sess-1"), []string{"send-keys", "-t", "sess-1", "Enter"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("sendEnterArgs = %#v, want %#v", got, want)
+	}
+	if got, want := sendInterruptArgs("sess-1"), []string{"send-keys", "-t", "sess-1", "C-c"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("sendInterruptArgs = %#v, want %#v", got, want)
 	}
 	if got, want := capturePaneArgs("sess-1", 10), []string{"capture-pane", "-t", "sess-1", "-p", "-S", "-10"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("capturePaneArgs = %#v, want %#v", got, want)
@@ -161,9 +190,10 @@ func TestCreateRejectsInvalidEnvKeys(t *testing.T) {
 // -- Create tests --
 
 func TestCreateIssuesNewSessionAndStatusOff(t *testing.T) {
-	// new-session, set-option status, set-option mouse, has-session (exit 0 = alive)
+	// new-session, display-message cwd verification, set-option status,
+	// set-option mouse, set-option window-size, has-session (exit 0 = alive)
 	r, fr := newTestRuntime(0)
-	fr.outputs = [][]byte{nil, nil, nil, nil}
+	fr.outputs = [][]byte{nil, []byte("/tmp/ws\n"), nil, nil, nil, nil}
 
 	h, err := r.Create(context.Background(), ports.RuntimeConfig{
 		SessionID:     "sess-1",
@@ -177,9 +207,10 @@ func TestCreateIssuesNewSessionAndStatusOff(t *testing.T) {
 	if h.ID != "sess-1" {
 		t.Fatalf("handle ID = %q, want sess-1", h.ID)
 	}
-	// Expect 4 calls: new-session, set-option status, set-option mouse, has-session.
-	if len(fr.calls) != 4 {
-		t.Fatalf("calls = %d, want 4", len(fr.calls))
+	// Expect 6 calls: new-session, display-message cwd verification,
+	// set-option status, set-option mouse, set-option window-size, has-session.
+	if len(fr.calls) != 6 {
+		t.Fatalf("calls = %d, want 6", len(fr.calls))
 	}
 
 	// Call 0: new-session
@@ -199,25 +230,36 @@ func TestCreateIssuesNewSessionAndStatusOff(t *testing.T) {
 		t.Fatalf("new-session args missing -x/-y: %v", fr.calls[0].args)
 	}
 
-	// Call 1: set-option status off (plain target, pane-targeting does not use =).
-	if got, want := fr.calls[1].args, setStatusOffArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	// Call 1: verify pane cwd.
+	if got, want := fr.calls[1].args, paneCurrentPathArgs("sess-1"); !reflect.DeepEqual(got, want) {
 		t.Fatalf("call[1] = %#v, want %#v", got, want)
 	}
 
-	// Call 2: set-option mouse on (enables wheel-scroll of the pane).
-	if got, want := fr.calls[2].args, setMouseOnArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	// Call 2: set-option status off (plain target, pane-targeting does not use =).
+	if got, want := fr.calls[2].args, setStatusOffArgs("sess-1"); !reflect.DeepEqual(got, want) {
 		t.Fatalf("call[2] = %#v, want %#v", got, want)
 	}
 
-	// Call 3: has-session (IsAlive, uses exact-match target =sess-1).
-	if got, want := fr.calls[3].args, hasSessionArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	// Call 3: set-option mouse on (enables wheel-scroll of the pane).
+	if got, want := fr.calls[3].args, setMouseOnArgs("sess-1"); !reflect.DeepEqual(got, want) {
 		t.Fatalf("call[3] = %#v, want %#v", got, want)
+	}
+
+	// Call 4: set-option window-size largest (multi-client sizing, see
+	// setWindowSizeLargestArgs).
+	if got, want := fr.calls[4].args, setWindowSizeLargestArgs("sess-1"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("call[4] = %#v, want %#v", got, want)
+	}
+
+	// Call 5: has-session (IsAlive, uses exact-match target =sess-1).
+	if got, want := fr.calls[5].args, hasSessionArgs("sess-1"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("call[5] = %#v, want %#v", got, want)
 	}
 }
 
 func TestCreateLaunchCommandContainsKeepAliveShell(t *testing.T) {
 	r, fr := newTestRuntime(0)
-	fr.outputs = [][]byte{nil, nil, nil}
+	fr.outputs = [][]byte{nil, []byte("/tmp/ws\n"), nil, nil, nil, nil}
 
 	_, err := r.Create(context.Background(), ports.RuntimeConfig{
 		SessionID:     "sess-1",
@@ -232,6 +274,9 @@ func TestCreateLaunchCommandContainsKeepAliveShell(t *testing.T) {
 	launchCmd := args[len(args)-1]
 	if !strings.Contains(launchCmd, `exec "${SHELL:-/bin/sh}" -i`) {
 		t.Fatalf("launch command missing keep-alive shell: %q", launchCmd)
+	}
+	if !strings.HasPrefix(launchCmd, "cd '/tmp/ws' || exit; ") {
+		t.Fatalf("launch command missing cwd guard: %q", launchCmd)
 	}
 	if !strings.Contains(launchCmd, "'myagent'") {
 		t.Fatalf("launch command missing quoted argv: %q", launchCmd)
@@ -249,7 +294,7 @@ func TestCreateLaunchCommandExportsEnvVars(t *testing.T) {
 	defer func() { getenv = oldGetenv }()
 
 	r, fr := newTestRuntime(0)
-	fr.outputs = [][]byte{nil, nil, nil}
+	fr.outputs = [][]byte{nil, []byte("/tmp/ws\n"), nil, nil, nil, nil}
 
 	_, err := r.Create(context.Background(), ports.RuntimeConfig{
 		SessionID:     "sess-1",
@@ -277,11 +322,37 @@ func TestCreateLaunchCommandExportsEnvVars(t *testing.T) {
 	}
 }
 
+func TestCreateDestroysAndReturnsErrorWhenPaneCWDDoesNotMatch(t *testing.T) {
+	r, fr := newTestRuntime(0)
+	fr.outputs = [][]byte{nil, []byte("/deleted/shipit\n")}
+
+	_, err := r.Create(context.Background(), ports.RuntimeConfig{
+		SessionID:     "sess-1",
+		WorkspacePath: "/tmp/ws",
+		Argv:          []string{"myagent"},
+	})
+	if err == nil || !strings.Contains(err.Error(), `started in "/deleted/shipit", want "/tmp/ws"`) {
+		t.Fatalf("Create err = %v, want pane cwd mismatch", err)
+	}
+	hasKill := false
+	for _, c := range fr.calls {
+		if len(c.args) > 0 && c.args[0] == "kill-session" {
+			hasKill = true
+		}
+	}
+	if !hasKill {
+		t.Fatal("expected kill-session cleanup call when pane cwd verification fails")
+	}
+}
+
 func TestCreateDestroysAndReturnsErrorWhenNotAlive(t *testing.T) {
-	// Use a specialized fakeRunner that returns an exit error only for the 3rd call.
+	// Every setup command succeeds; only the has-session liveness probe reports the
+	// session as gone, so Create must fail on the liveness check specifically.
 	r2, _ := newTestRuntime(0)
-	fr3 := &fakeRunnerSelectiveErr{exitErrAt: 3}
-	fr3.outputs = [][]byte{nil, nil, nil, []byte("can't find session: sess-1")}
+	fr3 := &fakeRunnerSelectiveErr{
+		exitErrOn: "has-session",
+		errOutput: []byte("can't find session: sess-1"),
+	}
 	r2.runner = fr3
 
 	_, err := r2.Create(context.Background(), ports.RuntimeConfig{
@@ -291,6 +362,21 @@ func TestCreateDestroysAndReturnsErrorWhenNotAlive(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("Create: got nil, want error when session not alive after create")
+	}
+	// The failure must come from the liveness probe, not from an earlier setup
+	// command. Without this the test would still pass if a newly inserted tmux
+	// call took the injected error first — which is exactly what happened once.
+	if !strings.Contains(err.Error(), "exited before ready") {
+		t.Fatalf("Create err = %v, want the liveness-check failure (exited before ready)", err)
+	}
+	sawHasSession := false
+	for _, c := range fr3.calls {
+		if len(c.args) > 0 && c.args[0] == "has-session" {
+			sawHasSession = true
+		}
+	}
+	if !sawHasSession {
+		t.Fatal("Create never reached the has-session liveness probe")
 	}
 	// Verify Destroy was called (kill-session).
 	hasKill := false
@@ -304,48 +390,50 @@ func TestCreateDestroysAndReturnsErrorWhenNotAlive(t *testing.T) {
 	}
 }
 
-// fakeRunnerSelectiveErr returns an exec.ExitError for the call at index exitErrAt.
+// fakeRunnerSelectiveErr returns an exec.ExitError (carrying errOutput) for the
+// call whose tmux subcommand is exitErrOn, and succeeds for every other call.
+// Matching on the subcommand rather than a call index is deliberate: Create's
+// command sequence grows over time, and an index would silently retarget the
+// injected failure onto whichever command was inserted before the intended one.
 type fakeRunnerSelectiveErr struct {
 	calls     []runnerCall
-	outputs   [][]byte
-	exitErrAt int
+	exitErrOn string
+	errOutput []byte
 }
 
 func (f *fakeRunnerSelectiveErr) Run(_ context.Context, env []string, name string, args ...string) ([]byte, error) {
-	idx := len(f.calls)
 	f.calls = append(f.calls, runnerCall{env: append([]string(nil), env...), name: name, args: append([]string(nil), args...)})
-	var out []byte
-	if len(f.outputs) > 0 {
-		out = f.outputs[0]
-		f.outputs = f.outputs[1:]
+	if len(args) > 0 && args[0] == f.exitErrOn {
+		return f.errOutput, &exec.ExitError{}
 	}
-	if idx == f.exitErrAt {
-		return out, &exec.ExitError{}
+	if len(args) > 0 && args[0] == "display-message" {
+		return []byte("/tmp/ws\n"), nil
 	}
-	return out, nil
+	return nil, nil
 }
 
 // -- Destroy tests --
 
 func TestDestroyIsIdempotentWhenSessionMissing(t *testing.T) {
 	r, fr := newTestRuntime(0)
-	// Destroy first resolves the pane pid (display-message), then kill-session; a
-	// missing session fails both, and Destroy still succeeds (idempotent).
-	fr.outputs = [][]byte{[]byte("can't find session: sess-1"), []byte("can't find session: sess-1")}
+	// Destroy resolves the pane pid (display-message), lists pane sessions
+	// (list-panes), then kill-session. All fail here; the missing-session marker
+	// on the kill-session call makes Destroy succeed anyway (idempotent).
+	fr.outputs = [][]byte{nil, nil, []byte("can't find session: sess-1")}
 	fr.err = &exec.ExitError{}
 
 	if err := r.Destroy(context.Background(), ports.RuntimeHandle{ID: "sess-1"}); err != nil {
 		t.Fatalf("Destroy: %v", err)
 	}
-	if len(fr.calls) != 2 || fr.calls[0].args[0] != "display-message" || fr.calls[1].args[0] != "kill-session" {
-		t.Fatalf("calls = %#v, want display-message then kill-session", fr.calls)
+	if len(fr.calls) != 3 || fr.calls[0].args[0] != "display-message" || fr.calls[1].args[0] != "list-panes" || fr.calls[2].args[0] != "kill-session" {
+		t.Fatalf("calls = %#v, want display-message, list-panes, then kill-session", fr.calls)
 	}
 }
 
 func TestDestroyIsIdempotentWhenNoServer(t *testing.T) {
 	r, fr := newTestRuntime(0)
-	// Both display-message and kill-session report the dead server.
-	fr.outputs = [][]byte{[]byte("no server running on /tmp/tmux-1000/default"), []byte("no server running on /tmp/tmux-1000/default")}
+	// The dead-server marker must land on the kill-session call (call 3).
+	fr.outputs = [][]byte{nil, nil, []byte("no server running on /tmp/tmux-1000/default")}
 	fr.err = &exec.ExitError{}
 
 	if err := r.Destroy(context.Background(), ports.RuntimeHandle{ID: "sess-1"}); err != nil {
@@ -355,9 +443,9 @@ func TestDestroyIsIdempotentWhenNoServer(t *testing.T) {
 
 func TestDestroyReportsUnexpectedFailures(t *testing.T) {
 	r, fr := newTestRuntime(0)
-	// Pane resolution fails transiently, then kill-session fails with a non-
-	// missing error: Destroy must surface it, not swallow it.
-	fr.outputs = [][]byte{[]byte("permission denied"), []byte("permission denied")}
+	// kill-session fails with a non-missing error: Destroy must surface it, not
+	// swallow it. The marker lands on the kill-session call (call 3).
+	fr.outputs = [][]byte{nil, nil, []byte("permission denied")}
 	fr.err = &exec.ExitError{}
 
 	if err := r.Destroy(context.Background(), ports.RuntimeHandle{ID: "sess-1"}); err == nil {
@@ -367,9 +455,10 @@ func TestDestroyReportsUnexpectedFailures(t *testing.T) {
 
 func TestDestroyArgs(t *testing.T) {
 	r, fr := newTestRuntime(0)
-	// Empty (non-numeric) pane-pid output makes resolvePaneGroup give up, so
-	// Destroy issues display-message then kill-session and returns nil.
-	fr.outputs = [][]byte{nil, nil}
+	// Non-numeric pane-pid output makes resolvePaneGroup give up (no group to
+	// confirm), but Destroy still issues display-message, list-panes, and
+	// kill-session in order and returns nil.
+	fr.outputs = [][]byte{nil, nil, nil}
 
 	if err := r.Destroy(context.Background(), ports.RuntimeHandle{ID: "sess-1"}); err != nil {
 		t.Fatalf("Destroy: %v", err)
@@ -377,9 +466,39 @@ func TestDestroyArgs(t *testing.T) {
 	if got, want := fr.calls[0].args, panePIDArgs("sess-1"); !reflect.DeepEqual(got, want) {
 		t.Fatalf("destroy call[0] = %#v, want %#v (pane-pid resolution first)", got, want)
 	}
-	// killSessionArgs uses exact-match target =<id>.
-	if got, want := fr.calls[1].args, killSessionArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	// list-panes discovers pane sessions for reaping.
+	if got, want := fr.calls[1].args, listPanePIDsArgs("sess-1"); !reflect.DeepEqual(got, want) {
 		t.Fatalf("destroy call[1] = %#v, want %#v", got, want)
+	}
+	// killSessionArgs uses exact-match target =<id>.
+	if got, want := fr.calls[2].args, killSessionArgs("sess-1"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("destroy call[2] = %#v, want %#v", got, want)
+	}
+}
+
+// Destroy must reap the pane sessions it discovered so a worker's backgrounded
+// dev servers do not outlive the session.
+func TestDestroyReapsDiscoveredPaneSessions(t *testing.T) {
+	r, fr := newTestRuntime(0)
+	// Destroy calls display-message (call 0), then list-panes (call 1) which
+	// lists two pane pids (one per line, plus noise the parser must drop), then
+	// kill-session (call 2).
+	fr.outputs = [][]byte{nil, []byte("4242\n4243\n\n1\n"), nil}
+	reaper := &recordingReaper{}
+	r.reapSessions = reaper.reap
+
+	if err := r.Destroy(context.Background(), ports.RuntimeHandle{ID: "sess-1"}); err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	if len(reaper.pids) != 1 {
+		t.Fatalf("reaper called %d times, want 1", len(reaper.pids))
+	}
+	// pids <= 1 and blank lines are dropped; the real sids reach the reaper.
+	if got, want := reaper.pids[0], []int{4242, 4243}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("reaped session ids = %#v, want %#v", got, want)
+	}
+	if reaper.graces[0] != r.reapGrace {
+		t.Fatalf("reap grace = %v, want %v", reaper.graces[0], r.reapGrace)
 	}
 }
 
@@ -507,41 +626,94 @@ func TestNewEnterDelayDefaultsAndDisable(t *testing.T) {
 	}
 }
 
-// The submit Enter must land after a settle delay so codex's paste-burst
-// detection treats it as a keypress (submit), not a pasted newline.
+// TestSendMessageDelaysBeforeEnter verifies the pre-Enter pause (mirroring
+// conpty's ptyInputEnterDelay) fires only for a non-empty message: a large
+// multiline paste needs time to settle before the trailing Enter, or the Enter
+// is absorbed and the prompt is left unsubmitted (issue #2342). An empty
+// (nudge) message skips the pause — there is no paste ahead of a catch-up Enter.
 func TestSendMessageDelaysBeforeEnter(t *testing.T) {
-	r, fr := newTestRuntime(0)
-	r.enterDelay = 40 * time.Millisecond
+	// enterDelay=0 (the test default) => no pause: SendMessage is near-instant.
+	r0, _ := newTestRuntime(0)
+	r0.enterDelay = 0
 	start := time.Now()
-	if err := r.SendMessage(context.Background(), ports.RuntimeHandle{ID: "sess-1"}, "hi"); err != nil {
+	if err := r0.SendMessage(context.Background(), ports.RuntimeHandle{ID: "sess-1"}, "hi"); err != nil {
+		t.Fatalf("SendMessage (no delay): %v", err)
+	}
+	if dt := time.Since(start); dt > 50*time.Millisecond {
+		t.Fatalf("SendMessage with enterDelay=0 took %s; want no real pause", dt)
+	}
+
+	// enterDelay>0 => SendMessage blocks at least enterDelay before Enter, but
+	// only for a non-empty message.
+	r, fr := newTestRuntime(0)
+	r.enterDelay = 30 * time.Millisecond
+	start = time.Now()
+	if err := r.SendMessage(context.Background(), ports.RuntimeHandle{ID: "sess-1"}, "hello"); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
-	if elapsed := time.Since(start); elapsed < 35*time.Millisecond {
-		t.Fatalf("SendMessage returned after %v, want >= the 40ms enter delay", elapsed)
+	if dt := time.Since(start); dt < r.enterDelay {
+		t.Fatalf("SendMessage took %s, want >= %s pre-Enter pause", dt, r.enterDelay)
 	}
+	// Non-empty message still ends with the literal chunks then Enter.
 	if len(fr.calls) != 2 {
 		t.Fatalf("calls = %d, want 2 (chunk + Enter)", len(fr.calls))
 	}
 	if got, want := fr.calls[1].args, sendEnterArgs("sess-1"); !reflect.DeepEqual(got, want) {
-		t.Fatalf("last call = %#v, want Enter %#v (delay must precede the Enter)", got, want)
+		t.Fatalf("Enter args = %#v, want %#v", got, want)
+	}
+
+	// Empty (nudge) message: no paste, no pause — even with enterDelay set.
+	rNudge, frNudge := newTestRuntime(0)
+	rNudge.enterDelay = 30 * time.Millisecond
+	start = time.Now()
+	if err := rNudge.SendMessage(context.Background(), ports.RuntimeHandle{ID: "sess-1"}, ""); err != nil {
+		t.Fatalf("SendMessage (nudge): %v", err)
+	}
+	if dt := time.Since(start); dt > 50*time.Millisecond {
+		t.Fatalf("nudge SendMessage took %s; want no pause for empty message", dt)
+	}
+	// Empty message is Enter-only: no send-keys -l call, just Enter.
+	if len(frNudge.calls) != 1 {
+		t.Fatalf("nudge calls = %d, want 1 (Enter only)", len(frNudge.calls))
+	}
+	if got, want := frNudge.calls[0].args, sendEnterArgs("sess-1"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("nudge Enter args = %#v, want %#v", got, want)
 	}
 }
 
-// The settle delay is context-aware: an aborted send returns the context error
-// and must NOT press Enter (proving the delay sits before the Enter).
-func TestSendMessageEnterDelayRespectsContext(t *testing.T) {
+// TestSendMessageEnterSurvivesCallerCancel pins the detached-Enter contract:
+// once the chunks are pasted, a caller cancellation landing in the pre-Enter
+// pause must NOT abandon the send — the pasted draft would sit unsubmitted and
+// a retried send would double-paste. The pause and Enter run on a context
+// detached from the caller's, so SendMessage completes (chunks then Enter).
+func TestSendMessageEnterSurvivesCallerCancel(t *testing.T) {
 	r, fr := newTestRuntime(0)
-	r.enterDelay = time.Hour // would hang if the delay ignored ctx cancellation
+	// A pause long enough that the 50ms-delayed cancel deterministically lands
+	// inside it (the chunk send is near-instant against the fake runner).
+	r.enterDelay = 200 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	err := r.SendMessage(ctx, ports.RuntimeHandle{ID: "sess-1"}, "hi")
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("SendMessage err = %v, want context.Canceled", err)
+	defer cancel()
+	timer := time.AfterFunc(50*time.Millisecond, cancel)
+	defer timer.Stop()
+
+	if err := r.SendMessage(ctx, ports.RuntimeHandle{ID: "sess-1"}, "hello"); err != nil {
+		t.Fatalf("SendMessage cancelled mid-pause: %v (Enter must run detached)", err)
 	}
-	for _, c := range fr.calls {
-		if reflect.DeepEqual(c.args, sendEnterArgs("sess-1")) {
-			t.Fatalf("Enter was sent despite cancellation during the settle delay")
-		}
+	if len(fr.calls) != 2 {
+		t.Fatalf("calls = %d, want 2 (chunk + Enter despite the caller cancel after the paste)", len(fr.calls))
+	}
+	if got, want := fr.calls[1].args, sendEnterArgs("sess-1"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Enter args = %#v, want %#v", got, want)
+	}
+}
+
+func TestInterruptSendsCtrlC(t *testing.T) {
+	r, fr := newTestRuntime(0)
+	if err := r.Interrupt(context.Background(), ports.RuntimeHandle{ID: "sess-1"}); err != nil {
+		t.Fatalf("Interrupt: %v", err)
+	}
+	if got, want := fr.calls[0].args, sendInterruptArgs("sess-1"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("interrupt args = %#v, want %#v", got, want)
 	}
 }
 
@@ -602,7 +774,7 @@ func TestAttachCommandReturnsExpectedArgv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AttachCommand: %v", err)
 	}
-	want := []string{"/usr/bin/tmux", "attach-session", "-t", "sess-1"}
+	want := []string{"/usr/bin/tmux", "-u", "attach-session", "-t", "sess-1"}
 	if !reflect.DeepEqual(argv, want) {
 		t.Fatalf("argv = %#v, want %#v", argv, want)
 	}

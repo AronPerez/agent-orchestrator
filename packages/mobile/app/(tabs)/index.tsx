@@ -13,11 +13,13 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { attentionOf, sessionTitle, type DashboardSession } from "../../lib/api";
+import { haptics } from "../../lib/haptics";
 import { ProjectSwitcher } from "../../lib/ProjectSwitcher";
 import { BoardColumn, WideContainer, useBreakpoint } from "../../lib/responsive";
 import { SessionCard } from "../../lib/SessionCard";
 import { useApp, useVisibleSessions } from "../../lib/store";
 import { attentionMeta, theme, type AttentionLevel } from "../../lib/theme";
+import { useTabScrollToTop } from "../../lib/useTabScrollToTop";
 import { Button, ConnectionPill, EmptyState, ScreenHeader, SectionHeader } from "../../lib/ui";
 
 type Section = { key: string; label: string; color: string; order: number; data: DashboardSession[] };
@@ -75,6 +77,8 @@ export default function FleetScreen() {
 	const [refreshing, setRefreshing] = useState(false);
 	const [doneExpanded, setDoneExpanded] = useState(false);
 
+	const listRef = useTabScrollToTop<SectionList<DashboardSession>>();
+
 	const sections = useMemo(() => groupByAttention(sessions), [sessions]);
 	const board = useMemo(() => groupForBoard(sessions), [sessions]);
 
@@ -100,6 +104,7 @@ export default function FleetScreen() {
 	);
 
 	const onRefresh = useCallback(async () => {
+		haptics.tap();
 		setRefreshing(true);
 		await refresh();
 		setRefreshing(false);
@@ -205,6 +210,7 @@ export default function FleetScreen() {
 				</WideContainer>
 			) : (
 				<SectionList
+					ref={listRef}
 					sections={sections}
 					keyExtractor={(item) => `${item.projectId}:${item.id}`}
 					contentContainerStyle={{ paddingBottom: 120 }}
@@ -240,7 +246,10 @@ export default function FleetScreen() {
 
 			{/* Spawn FAB */}
 			<Pressable
-				onPress={() => router.push("/spawn")}
+				onPress={() => {
+					haptics.tap();
+					router.push("/spawn");
+				}}
 				style={({ pressed }) => [styles.fab, pressed && { opacity: 0.85 }]}
 			>
 				<Feather name="plus" size={24} color="#06101f" />

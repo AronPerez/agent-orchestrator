@@ -21,6 +21,28 @@ type Reviewer interface {
 	ReviewMessage(ctx context.Context, inv ReviewInvocation) (string, error)
 }
 
+// ReviewCancelMode names how AO should stop a running reviewer.
+type ReviewCancelMode string
+
+const (
+	// ReviewCancelInterrupt sends the terminal interrupt key sequence to the
+	// reviewer process while preserving the terminal pane.
+	ReviewCancelInterrupt ReviewCancelMode = "interrupt"
+)
+
+// ReviewCancelSpec is the adapter-selected cancellation behavior for a running
+// reviewer.
+type ReviewCancelSpec struct {
+	Mode       ReviewCancelMode
+	Interrupts int
+}
+
+// ReviewerCanceller is implemented by reviewer adapters that explicitly define
+// how their running CLI should be cancelled.
+type ReviewerCanceller interface {
+	ReviewCancel(ctx context.Context) (ReviewCancelSpec, error)
+}
+
 // ReviewInvocation describes one review pass for a reviewer to act on. All ids
 // the reviewer needs are passed explicitly here (and embedded in the prompt /
 // message), never through environment variables.
@@ -51,6 +73,19 @@ type ReviewInvocation struct {
 	// ignore them.
 	Prompt       string
 	SystemPrompt string
+	// SystemPromptFile is the AO-owned file form of SystemPrompt. Reviewer
+	// launchers use it to keep standing instructions out of the shared terminal
+	// stream while preserving their system-level role in agent harnesses that
+	// support prompt files.
+	SystemPromptFile string
+	// TaskPromptFile is the AO-owned file containing the full per-pass task.
+	// Prompt carries only a short reference to this file so the instructions do
+	// not enter the shared terminal stream.
+	TaskPromptFile string
+	// TaskPromptRoot is the stable AO-owned directory containing task prompt
+	// files for this reviewer. Adapters use it when a long-lived reviewer needs
+	// permission to read request-scoped task files created after launch.
+	TaskPromptRoot string
 }
 
 // ReviewTask is one PR/run in a multi-PR review trigger queue.

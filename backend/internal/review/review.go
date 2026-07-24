@@ -34,11 +34,12 @@ type Store interface {
 	GetReviewBySession(ctx stdctx.Context, id domain.SessionID) (domain.Review, bool, error)
 	InsertReviewRun(ctx stdctx.Context, r domain.ReviewRun) error
 	UpdateReviewRunResult(ctx stdctx.Context, id string, status domain.ReviewRunStatus, verdict domain.ReviewVerdict, body, githubReviewID string) (bool, error)
-	SupersedeReviewRun(ctx stdctx.Context, id, body string) (bool, error)
 	SupersedeStaleRunningReviewRuns(ctx stdctx.Context, sessionID domain.SessionID, prURL, targetSHA, body string) (int64, error)
+	CancelRunningReviewRunsBySession(ctx stdctx.Context, sessionID domain.SessionID, body string) (int64, error)
 	GetReviewRun(ctx stdctx.Context, id string) (domain.ReviewRun, bool, error)
 	GetReviewRunBySessionPRAndSHA(ctx stdctx.Context, id domain.SessionID, prURL, targetSHA string) (domain.ReviewRun, bool, error)
 	ListReviewRunsBySession(ctx stdctx.Context, id domain.SessionID) ([]domain.ReviewRun, error)
+	ListRunningReviewRunsBySession(ctx stdctx.Context, id domain.SessionID) ([]domain.ReviewRun, error)
 }
 
 // Sessions resolves the worker session under review.
@@ -147,6 +148,13 @@ type SessionReviews struct {
 	Reviews          []PRReviewState
 }
 
+// CancelResult is the review state after a reviewer pane cancellation.
+type CancelResult struct {
+	ReviewerHandleID string
+	Reviews          []PRReviewState
+	CancelledRuns    []domain.ReviewRun
+}
+
 // Trigger starts reviews for every PR on the worker session that needs review.
 // It reuses running/up-to-date runs, retries failed/current changes-requested
 // heads, and uses one reviewer pane for every new run in the batch.
@@ -199,8 +207,28 @@ func (e *Engine) Trigger(ctx stdctx.Context, workerID domain.SessionID) (Trigger
 		return TriggerResult{}, err
 	}
 
+	// Harness the live reviewer pane was launched under, captured before the
+	// upsert below overwrites it. The reviewer handle is stable per worker, so a
+	// harness switch keeps the previous harness's process alive; reusing it (via
+	// Notify, which only sends prompt text) would silently run the review under
+	// the old harness's sandbox/permissions/env, since those apply only at Spawn.
+	// A changed (or unrecorded) harness therefore respawns instead of reusing.
+	prevHarness := reviewRow.Harness
+
 	now := e.clock()
-	reviewRow, err = e.upsertReview(ctx, worker, harness, reviewRow.ReviewerHandleID, now)
+	// This eager upsert only needs the review row to exist so the runs below can
+	// reference it; it must NOT advance the recorded harness past what the live
+	// pane actually runs. On a harness switch that creates no run, the
+	// len(created)==0 early return below reuses the old pane without respawning,
+	// so recording the new harness here would make the next trigger read it back
+	// as prevHarness, see prevHarness == harness, and Notify the stale old-harness
+	// pane. Preserve an existing row's harness; only the post-spawn upsert (after
+	// an actual Spawn/Notify) records the harness we launched under.
+	eagerHarness := harness
+	if hasReview {
+		eagerHarness = prevHarness
+	}
+	reviewRow, err = e.upsertReview(ctx, worker, eagerHarness, reviewRow.ReviewerHandleID, now)
 	if err != nil {
 		return TriggerResult{}, err
 	}
@@ -210,20 +238,6 @@ func (e *Engine) Trigger(ctx stdctx.Context, workerID domain.SessionID) (Trigger
 	for _, reviewState := range reviews {
 		if reviewState.Status != ReviewStateNeedsReview && reviewState.Status != ReviewStateChangesRequested {
 			continue
-		}
-		if reviewState.LatestRun != nil && reviewState.LatestRun.Status != domain.ReviewRunFailed && reviewState.LatestRun.Status != domain.ReviewRunRunning && reviewState.LatestRun.Verdict == domain.VerdictNone {
-			superseded, err := e.store.SupersedeReviewRun(ctx, reviewState.LatestRun.ID, "superseded by a new review trigger")
-			if err != nil {
-				return TriggerResult{}, err
-			}
-			if !superseded {
-				if latest, ok, err := e.store.GetReviewRun(ctx, reviewState.LatestRun.ID); err != nil {
-					return TriggerResult{}, err
-				} else if ok {
-					reviews = replaceReviewLatestRun(reviews, reviewState.PRURL, reviewState.TargetSHA, latest)
-					continue
-				}
-			}
 		}
 		if _, err := e.store.SupersedeStaleRunningReviewRuns(ctx, workerID, reviewState.PRURL, reviewState.TargetSHA, "superseded by a review trigger for a newer commit"); err != nil {
 			return TriggerResult{}, err
@@ -272,7 +286,7 @@ func (e *Engine) Trigger(ctx stdctx.Context, workerID domain.SessionID) (Trigger
 
 	handleID := ""
 	queue := reviewQueue(created)
-	if hasReview && reviewRow.ReviewerHandleID != "" {
+	if hasReview && reviewRow.ReviewerHandleID != "" && prevHarness == harness {
 		alive, err := e.launcher.Alive(ctx, reviewRow.ReviewerHandleID)
 		if err != nil {
 			return TriggerResult{}, failRuns(0, err)
@@ -282,6 +296,13 @@ func (e *Engine) Trigger(ctx stdctx.Context, workerID domain.SessionID) (Trigger
 		}
 	}
 	if handleID == "" {
+		// Preflight before launching a new reviewer pane. Runs only when a
+		// fresh launch is actually required (not when an existing pane is
+		// reused via Notify). On failure failRuns marks the created runs as
+		// failed, matching the Spawn error semantics.
+		if err := e.launcher.Preflight(ctx, harness, worker.Metadata.WorkspacePath); err != nil {
+			return TriggerResult{}, failRuns(0, fmt.Errorf("reviewer preflight: %w", err))
+		}
 		h, err := e.launcher.Spawn(ctx, reviewLaunchSpec(worker, harness, created[0], queue, 0))
 		if err != nil {
 			return TriggerResult{}, failRuns(0, fmt.Errorf("launch reviewer: %w", err))
@@ -305,6 +326,7 @@ func (e *Engine) Trigger(ctx stdctx.Context, workerID domain.SessionID) (Trigger
 func reviewLaunchSpec(worker domain.SessionRecord, harness domain.ReviewerHarness, run domain.ReviewRun, queue []ports.ReviewTask, index int) LaunchSpec {
 	return LaunchSpec{
 		RunID:         run.ID,
+		BatchID:       run.BatchID,
 		WorkerID:      worker.ID,
 		Harness:       harness,
 		WorkspacePath: worker.Metadata.WorkspacePath,
@@ -374,8 +396,57 @@ func (e *Engine) List(ctx stdctx.Context, workerID domain.SessionID) (SessionRev
 	return SessionReviews{ReviewerHandleID: handle, Runs: runs, Reviews: Plan(prs, runs)}, nil
 }
 
+// Cancel interrupts the live reviewer pane for a worker and marks running
+// review runs as cancelled so they no longer block a fresh trigger.
+func (e *Engine) Cancel(ctx stdctx.Context, workerID domain.SessionID) (CancelResult, error) {
+	if workerID == "" {
+		return CancelResult{}, fmt.Errorf("%w: worker session id is required", ErrInvalid)
+	}
+	review, ok, err := e.store.GetReviewBySession(ctx, workerID)
+	if err != nil {
+		return CancelResult{}, err
+	}
+	if !ok || review.ReviewerHandleID == "" {
+		return CancelResult{}, fmt.Errorf("%w: reviewer for worker session %q", ErrNotFound, workerID)
+	}
+	running, err := e.store.ListRunningReviewRunsBySession(ctx, workerID)
+	if err != nil {
+		return CancelResult{}, err
+	}
+	if err := e.launcher.Cancel(ctx, review.ReviewerHandleID, review.Harness); err != nil {
+		alive, aliveErr := e.launcher.Alive(ctx, review.ReviewerHandleID)
+		if aliveErr != nil {
+			return CancelResult{}, err
+		}
+		if alive {
+			return CancelResult{}, err
+		}
+	}
+	if _, err := e.store.CancelRunningReviewRunsBySession(ctx, workerID, "cancelled by user"); err != nil {
+		return CancelResult{}, err
+	}
+	cancelled := make([]domain.ReviewRun, 0, len(running))
+	for _, run := range running {
+		run.Status = domain.ReviewRunCancelled
+		run.Verdict = domain.VerdictNone
+		run.Body = "cancelled by user"
+		run.GithubReviewID = ""
+		cancelled = append(cancelled, run)
+	}
+	prs, err := e.prs.ListPRsBySession(ctx, workerID)
+	if err != nil {
+		return CancelResult{}, err
+	}
+	runs, err := e.store.ListReviewRunsBySession(ctx, workerID)
+	if err != nil {
+		return CancelResult{}, err
+	}
+	return CancelResult{ReviewerHandleID: review.ReviewerHandleID, Reviews: Plan(prs, runs), CancelledRuns: cancelled}, nil
+}
+
 // reviewerHarness resolves which harness reviews the worker's PR: a configured
-// reviewer wins, otherwise claude-code is used, per domain.ResolveReviewerHarness.
+// reviewer wins, otherwise worker's own harness is reused when it is a
+// supported reviewer, otherwise fallback to claude-code.
 func (e *Engine) reviewerHarness(ctx stdctx.Context, worker domain.SessionRecord) (domain.ReviewerHarness, error) {
 	var cfg domain.ProjectConfig
 	if e.projects != nil {

@@ -38,6 +38,43 @@ func TestGetLaunchCommandBuildsArgv(t *testing.T) {
 	}
 }
 
+func TestGetLaunchCommandReadsSystemPromptFile(t *testing.T) {
+	plugin := &Plugin{resolvedBinary: "qwen"}
+	dir := t.TempDir()
+	file := filepath.Join(dir, "system.md")
+	if err := os.WriteFile(file, []byte("file instructions\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd, err := plugin.GetLaunchCommand(context.Background(), ports.LaunchConfig{
+		SystemPromptFile: file,
+		Prompt:           "do it",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{
+		"qwen",
+		"--append-system-prompt", "file instructions\n",
+		"-p", "do it",
+	}
+	if !reflect.DeepEqual(cmd, want) {
+		t.Fatalf("unexpected command\nwant: %#v\n got: %#v", want, cmd)
+	}
+}
+
+func TestGetLaunchCommandSystemPromptFileReadError(t *testing.T) {
+	plugin := &Plugin{resolvedBinary: "qwen"}
+
+	_, err := plugin.GetLaunchCommand(context.Background(), ports.LaunchConfig{
+		SystemPromptFile: filepath.Join(t.TempDir(), "missing.md"),
+	})
+	if err == nil {
+		t.Fatal("expected error for missing system prompt file")
+	}
+}
+
 func TestGetLaunchCommandMapsApprovalModes(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -187,6 +224,68 @@ func TestGetLaunchCommandWorkerRequiresDataDirForRemoteInput(t *testing.T) {
 	}
 }
 
+func TestGetLaunchCommandWorkerAppendsTrimmedConfiguredModel(t *testing.T) {
+	plugin := &Plugin{resolvedBinary: "qwen"}
+
+	cmd, err := plugin.GetLaunchCommand(context.Background(), ports.LaunchConfig{
+		Kind:        domain.KindWorker,
+		DataDir:     t.TempDir(),
+		SessionID:   "sess-123",
+		Config:      domain.AgentConfig{Model: "  qwen-plus  "},
+		Permissions: ports.PermissionModeBypassPermissions,
+		Prompt:      "fix it",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS == "windows" {
+		if !containsSubsequence(cmd, []string{"--model", "qwen-plus"}) {
+			t.Fatalf("command %#v missing trimmed --model qwen-plus", cmd)
+		}
+		return
+	}
+	if len(cmd) != 3 || !strings.Contains(cmd[2], "'--model' 'qwen-plus'") {
+		t.Fatalf("worker command %#v missing trimmed --model qwen-plus", cmd)
+	}
+}
+
+func TestGetLaunchCommandOmitsBlankConfiguredModel(t *testing.T) {
+	plugin := &Plugin{resolvedBinary: "qwen"}
+
+	cmd, err := plugin.GetLaunchCommand(context.Background(), ports.LaunchConfig{
+		Config:      domain.AgentConfig{Model: "  "},
+		Permissions: ports.PermissionModeBypassPermissions,
+		Prompt:      "fix it",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contains(cmd, "--model") {
+		t.Fatalf("command %#v contains unexpected --model flag", cmd)
+	}
+}
+
+func TestGetRestoreCommandAppendsConfiguredModel(t *testing.T) {
+	plugin := &Plugin{resolvedBinary: "qwen"}
+
+	cmd, ok, err := plugin.GetRestoreCommand(context.Background(), ports.RestoreConfig{
+		Config:      domain.AgentConfig{Model: "qwen-max"},
+		Permissions: ports.PermissionModeAuto,
+		Session: ports.SessionRef{
+			Metadata: map[string]string{ports.MetadataKeyAgentSessionID: "sess-123"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	if !containsSubsequence(cmd, []string{"--model", "qwen-max"}) {
+		t.Fatalf("command %#v missing --model qwen-max", cmd)
+	}
+}
+
 func TestGetPromptDeliveryStrategy(t *testing.T) {
 	plugin := &Plugin{}
 
@@ -207,15 +306,22 @@ func TestGetPromptDeliveryStrategy(t *testing.T) {
 	}
 }
 
-func TestGetConfigSpecHasNoCustomFieldsYet(t *testing.T) {
+func TestGetConfigSpecReportsModelField(t *testing.T) {
 	plugin := &Plugin{}
 
 	spec, err := plugin.GetConfigSpec(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(spec.Fields) != 0 {
-		t.Fatalf("unexpected config fields: %#v", spec.Fields)
+	want := []ports.ConfigField{
+		{
+			Key:         "model",
+			Type:        ports.ConfigFieldString,
+			Description: "Model override passed to `qwen --model`.",
+		},
+	}
+	if !reflect.DeepEqual(spec.Fields, want) {
+		t.Fatalf("config fields\nwant: %#v\n got: %#v", want, spec.Fields)
 	}
 }
 
@@ -310,23 +416,58 @@ func TestGetAgentHooksInstallsQwenHooks(t *testing.T) {
 	if countQwenHookCommand(config.Hooks["Stop"], "custom stop hook") != 1 {
 		t.Fatalf("existing Stop hook was not preserved: %#v", config.Hooks["Stop"])
 	}
-	// SessionStart lands under the "startup" matcher.
-	assertStartupMatcher(t, config.Hooks["SessionStart"])
+	// SessionStart lands under the startup/resume matcher.
+	assertSessionStartMatcher(t, config.Hooks["SessionStart"])
 }
 
-func assertStartupMatcher(t *testing.T, groups []hooksjson.MatcherGroup) {
+func assertSessionStartMatcher(t *testing.T, groups []hooksjson.MatcherGroup) {
 	t.Helper()
 	for _, group := range groups {
 		for _, hook := range group.Hooks {
 			if hook.Command == qwenHookCommandPrefix+"session-start" {
-				if group.Matcher == nil || *group.Matcher != "startup" {
-					t.Fatalf("session-start hook not under 'startup' matcher: %#v", group)
+				if group.Matcher == nil || *group.Matcher != "startup|resume" {
+					t.Fatalf("session-start hook not under startup/resume matcher: %#v", group)
 				}
 				return
 			}
 		}
 	}
 	t.Fatalf("session-start hook not found: %#v", groups)
+}
+
+func TestGetAgentHooksMigratesSessionStartMatcher(t *testing.T) {
+	plugin := &Plugin{resolvedBinary: "qwen"}
+	workspace := t.TempDir()
+	settingsDir := filepath.Join(workspace, ".qwen")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(settingsDir, "settings.json")
+	existing := `{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"ao hooks qwen session-start","timeout":30000},{"type":"command","command":"custom startup hook","timeout":3}]}]}}`
+	if err := os.WriteFile(settingsPath, []byte(existing), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := plugin.GetAgentHooks(context.Background(), ports.WorkspaceHookConfig{WorkspacePath: workspace}); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config qwenHookFile
+	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatal(err)
+	}
+	groups := config.Hooks["SessionStart"]
+	assertSessionStartMatcher(t, groups)
+	if count := countQwenHookCommand(groups, qwenHookCommandPrefix+"session-start"); count != 1 {
+		t.Fatalf("session-start command count = %d, want 1 in %#v", count, groups)
+	}
+	if count := countQwenHookCommand(groups, "custom startup hook"); count != 1 {
+		t.Fatalf("custom startup hook count = %d, want 1 in %#v", count, groups)
+	}
 }
 
 func TestUninstallHooksRemovesQwenHooks(t *testing.T) {
@@ -382,7 +523,8 @@ func TestGetRestoreCommandReadsAgentSessionID(t *testing.T) {
 	plugin := &Plugin{resolvedBinary: "qwen"}
 
 	cmd, ok, err := plugin.GetRestoreCommand(context.Background(), ports.RestoreConfig{
-		Permissions: ports.PermissionModeAuto,
+		Permissions:  ports.PermissionModeAuto,
+		SystemPrompt: "restore instructions",
 		Session: ports.SessionRef{
 			Metadata: map[string]string{ports.MetadataKeyAgentSessionID: "sess-123"},
 		},
@@ -396,7 +538,38 @@ func TestGetRestoreCommandReadsAgentSessionID(t *testing.T) {
 	want := []string{
 		"qwen",
 		"--approval-mode", "auto",
-		"-r", "sess-123",
+		"--append-system-prompt", "restore instructions",
+		"--resume", "sess-123",
+	}
+	if !reflect.DeepEqual(cmd, want) {
+		t.Fatalf("restore cmd\nwant: %#v\n got: %#v", want, cmd)
+	}
+}
+
+func TestGetRestoreCommandReadsSystemPromptFile(t *testing.T) {
+	plugin := &Plugin{resolvedBinary: "qwen"}
+	dir := t.TempDir()
+	file := filepath.Join(dir, "restore-system.md")
+	if err := os.WriteFile(file, []byte("restore file instructions"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd, ok, err := plugin.GetRestoreCommand(context.Background(), ports.RestoreConfig{
+		SystemPromptFile: file,
+		Session: ports.SessionRef{
+			Metadata: map[string]string{ports.MetadataKeyAgentSessionID: "sess-123"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	want := []string{
+		"qwen",
+		"--append-system-prompt", "restore file instructions",
+		"--resume", "sess-123",
 	}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("restore cmd\nwant: %#v\n got: %#v", want, cmd)
@@ -420,7 +593,7 @@ func TestGetRestoreCommandDefaultModeOmitsApprovalFlags(t *testing.T) {
 	}
 	want := []string{
 		"qwen",
-		"-r", "sess-123",
+		"--resume", "sess-123",
 	}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("restore cmd\nwant: %#v\n got: %#v", want, cmd)

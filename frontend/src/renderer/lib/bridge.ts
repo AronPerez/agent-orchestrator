@@ -1,4 +1,5 @@
 import type { AoBridge } from "../../preload";
+export type { FeatureBuild } from "../../main/feature-builds";
 
 export const aoBridge: AoBridge =
 	window.ao ??
@@ -6,7 +7,32 @@ export const aoBridge: AoBridge =
 		app: {
 			getVersion: async () => "0.0.0-preview",
 			chooseDirectory: async () => null,
+			openExternal: async (url: string) => {
+				window.open(url, "_blank", "noopener,noreferrer");
+			},
 			scanImportFolder: async ({ path }) => ({ path, repos: [] }),
+			onNewSessionShortcut: () => () => undefined,
+			onKeyboardShortcutsHelp: () => () => undefined,
+			onNewShellTerminalShortcut: () => () => undefined,
+			onOpenSettingsShortcut: () => () => undefined,
+			onPreviousSessionShortcut: () => () => undefined,
+			onNextSessionShortcut: () => () => undefined,
+			onFocusTerminalShortcut: () => () => undefined,
+		},
+		terminal: {
+			saveDroppedFile: async () => "",
+		},
+		window: {
+			setOverlay: async () => undefined,
+			isFullScreen: async () => false,
+			onFullScreen: () => () => undefined,
+		},
+		theme: {
+			set: async () => undefined,
+		},
+		menu: {
+			action: async () => undefined,
+			notifyShellFocus: () => undefined,
 		},
 		clipboard: {
 			writeText: async (text: string) => {
@@ -87,7 +113,12 @@ export const aoBridge: AoBridge =
 				isLoading: false,
 			}),
 			destroy: () => undefined,
+			capture: async () => "",
+			requestMirror: async () => false,
+			setAnnotationMode: async () => undefined,
 			onNavState: () => () => undefined,
+			onAnnotationSubmit: () => () => undefined,
+			onAnnotationCancel: () => () => undefined,
 		},
 		notifications: {
 			show: async () => undefined,
@@ -98,7 +129,7 @@ export const aoBridge: AoBridge =
 			setMigration: async () => undefined,
 		},
 		updateSettings: {
-			get: async () => ({ enabled: false, channel: "latest", nightlyAck: false }),
+			get: async () => ({ enabled: false, channel: "latest", nightlyAck: false, feature: null }),
 			set: async () => undefined,
 		},
 		updates: {
@@ -107,5 +138,9 @@ export const aoBridge: AoBridge =
 			download: async () => undefined,
 			install: async () => undefined,
 			onStatus: () => () => undefined,
+		},
+		featureBuilds: {
+			list: async () => [],
+			getActive: async () => null,
 		},
 	} satisfies AoBridge);

@@ -45,7 +45,7 @@ func TestGetLaunchCommandBuildsCrossPlatformArgv(t *testing.T) {
 		Permissions:      ports.PermissionModeBypassPermissions,
 		Prompt:           "-fix this",
 		SystemPromptFile: filepath.Join("tmp", "prompt with spaces.md"),
-		SystemPrompt:     "ignored",
+		SystemPrompt:     "inline wins",
 		WorkspacePath:    workspace,
 	})
 	if err != nil {
@@ -65,7 +65,7 @@ func TestGetLaunchCommandBuildsCrossPlatformArgv(t *testing.T) {
 	}
 	want = append(want,
 		"-c", `projects={`+codexTOMLConfigString(workspace)+`={trust_level="trusted"}}`,
-		"-c", "model_instructions_file="+filepath.Join("tmp", "prompt with spaces.md"),
+		"-c", "developer_instructions="+codexTOMLConfigString("inline wins"),
 		"--", "-fix this",
 	)
 	if !reflect.DeepEqual(cmd, want) {
@@ -87,6 +87,38 @@ func TestGetLaunchCommandWithoutWorkspaceOmitsTrustFlag(t *testing.T) {
 	}
 	if !containsSubsequence(cmd, sessionHookFlags()) {
 		t.Fatalf("command %#v missing session hook flags", cmd)
+	}
+}
+
+func TestGetLaunchCommandAppendsConfiguredModel(t *testing.T) {
+	plugin := &Plugin{resolvedBinary: "codex"}
+
+	cmd, err := plugin.GetLaunchCommand(context.Background(), ports.LaunchConfig{
+		Config: ports.AgentConfig{Model: "  gpt-5.4-mini  "},
+		Prompt: "fix this",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSubsequence(cmd, []string{"--model", "gpt-5.4-mini"}) {
+		t.Fatalf("command %#v missing trimmed --model flag", cmd)
+	}
+	if containsSubsequence(cmd, []string{"--model", "  gpt-5.4-mini  "}) {
+		t.Fatalf("command %#v used untrimmed model", cmd)
+	}
+}
+
+func TestGetLaunchCommandOmitsBlankConfiguredModel(t *testing.T) {
+	plugin := &Plugin{resolvedBinary: "codex"}
+
+	cmd, err := plugin.GetLaunchCommand(context.Background(), ports.LaunchConfig{
+		Config: ports.AgentConfig{Model: " \t "},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contains(cmd, "--model") {
+		t.Fatalf("command %#v contains --model for blank model", cmd)
 	}
 }
 
@@ -112,6 +144,44 @@ func TestResolveCodexBinaryFindsNVMInstallWhenPathIsSparse(t *testing.T) {
 	t.Cleanup(func() {
 		fileExists = origFileExists
 	})
+
+	got, err := ResolveCodexBinary(context.Background())
+	if err != nil {
+		t.Fatalf("ResolveCodexBinary: %v", err)
+	}
+	if got != want {
+		t.Fatalf("ResolveCodexBinary = %q, want %q", got, want)
+	}
+}
+
+func TestResolveCodexBinaryPrefersNPMOverWindowsAppsExecutable(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows resolver only")
+	}
+	root := t.TempDir()
+	appData := filepath.Join(root, "Roaming")
+	npmDir := filepath.Join(appData, "npm")
+	want := filepath.Join(npmDir, "node_modules", "@openai", "codex", "node_modules", "@openai", "codex-win32-x64", "vendor", "x86_64-pc-windows-msvc", "bin", "codex.exe")
+	if err := os.MkdirAll(filepath.Dir(want), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(want, []byte("native codex"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	shim := filepath.Join(npmDir, "codex.cmd")
+	if err := os.WriteFile(shim, []byte("@echo off\r\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	windowsApps := filepath.Join(root, "WindowsApps", "OpenAI.Codex_1.0.0.0_x64__test", "app", "resources")
+	if err := os.MkdirAll(windowsApps, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	blocked := filepath.Join(windowsApps, "codex.exe")
+	if err := os.WriteFile(blocked, []byte("blocked codex"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("APPDATA", appData)
+	t.Setenv("PATH", windowsApps)
 
 	got, err := ResolveCodexBinary(context.Background())
 	if err != nil {
@@ -244,15 +314,22 @@ func TestGetPromptDeliveryStrategyIsInCommand(t *testing.T) {
 	}
 }
 
-func TestGetConfigSpecHasNoCustomFieldsYet(t *testing.T) {
+func TestGetConfigSpecReportsModelField(t *testing.T) {
 	plugin := &Plugin{}
 
 	spec, err := plugin.GetConfigSpec(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(spec.Fields) != 0 {
-		t.Fatalf("unexpected config fields: %#v", spec.Fields)
+	want := []ports.ConfigField{
+		{
+			Key:         "model",
+			Type:        ports.ConfigFieldString,
+			Description: "Model override passed to `codex --model`.",
+		},
+	}
+	if !reflect.DeepEqual(spec.Fields, want) {
+		t.Fatalf("config fields\nwant: %#v\n got: %#v", want, spec.Fields)
 	}
 }
 
@@ -430,7 +507,9 @@ func TestGetRestoreCommandReadsAgentSessionID(t *testing.T) {
 	workspace := canonicalTempDir(t)
 
 	cmd, ok, err := plugin.GetRestoreCommand(context.Background(), ports.RestoreConfig{
-		Permissions: ports.PermissionModeAuto,
+		Permissions:      ports.PermissionModeAuto,
+		SystemPrompt:     "restore inline wins",
+		SystemPromptFile: filepath.Join("tmp", "restore-system.md"),
 		Session: ports.SessionRef{
 			Metadata:      map[string]string{ports.MetadataKeyAgentSessionID: "thread-123"},
 			WorkspacePath: workspace,
@@ -457,10 +536,31 @@ func TestGetRestoreCommandReadsAgentSessionID(t *testing.T) {
 	}
 	want = append(want,
 		"-c", `projects={`+codexTOMLConfigString(workspace)+`={trust_level="trusted"}}`,
+		"-c", "developer_instructions="+codexTOMLConfigString("restore inline wins"),
 		"thread-123",
 	)
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("restore cmd\nwant: %#v\n got: %#v", want, cmd)
+	}
+}
+
+func TestGetRestoreCommandAppendsConfiguredModel(t *testing.T) {
+	plugin := &Plugin{resolvedBinary: "codex"}
+
+	cmd, ok, err := plugin.GetRestoreCommand(context.Background(), ports.RestoreConfig{
+		Config: ports.AgentConfig{Model: "  gpt-5.4-mini  "},
+		Session: ports.SessionRef{
+			Metadata: map[string]string{ports.MetadataKeyAgentSessionID: "thread-123"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	if !containsSubsequence(cmd, []string{"--model", "gpt-5.4-mini"}) {
+		t.Fatalf("restore command %#v missing trimmed --model flag", cmd)
 	}
 }
 

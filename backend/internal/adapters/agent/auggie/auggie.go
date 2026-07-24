@@ -9,12 +9,12 @@
 //
 // Launch shape:
 //
-//	auggie --print [--instruction-file <f> | --instruction <s>] [-- <prompt>]
+//	auggie --print [--rules <f>] [-- <prompt>]
 //
 // The prompt is the print-mode positional, passed after `--` so a prompt
-// beginning with "-" is not mistaken for a flag. A system prompt, when supplied,
-// is injected via Auggie's `--instruction-file` / `--instruction` flags, which
-// append guidance to the workspace rules.
+// beginning with "-" is not mistaken for a flag. A system prompt, when supplied
+// as an AO-owned file, is injected via Auggie's `--rules` flag, which appends
+// guidance to the workspace rules.
 //
 // Permissions: Auggie has no single "approve everything" flag. It governs
 // unattended tool/file approval through granular `--permission <tool>:<allow|deny>`
@@ -78,13 +78,30 @@ func (p *Plugin) Manifest() adapters.Manifest {
 	}
 }
 
+// GetConfigSpec reports the per-project agent config keys Auggie understands.
+func (p *Plugin) GetConfigSpec(ctx context.Context) (ports.ConfigSpec, error) {
+	if err := ctx.Err(); err != nil {
+		return ports.ConfigSpec{}, err
+	}
+	return ports.ConfigSpec{
+		Fields: []ports.ConfigField{
+			{
+				Key:         "model",
+				Type:        ports.ConfigFieldString,
+				Description: "Model override passed to `auggie --model`.",
+			},
+		},
+	}, nil
+}
+
 // GetLaunchCommand builds the argv to start a new headless Auggie session:
 //
-//	auggie --print [--instruction-file <f> | --instruction <s>] [-- <prompt>]
+//	auggie --print [--rules <f>] [-- <prompt>]
 //
 // The prompt is passed after `--` so a prompt beginning with "-" is not mistaken
-// for a flag. A system prompt is injected via --instruction-file / --instruction,
-// mirroring the system-prompt handling of the other adapters.
+// for a flag. Auggie's `--instruction` flags are the task input, not a rule or
+// system-prompt surface; AO standing instructions use `--rules` when the
+// manager provides a prompt file.
 func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (cmd []string, err error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -96,10 +113,9 @@ func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (
 
 	cmd = []string{binary, "--print"}
 	if cfg.SystemPromptFile != "" {
-		cmd = append(cmd, "--instruction-file", cfg.SystemPromptFile)
-	} else if cfg.SystemPrompt != "" {
-		cmd = append(cmd, "--instruction", cfg.SystemPrompt)
+		cmd = append(cmd, "--rules", cfg.SystemPromptFile)
 	}
+	appendModelFlag(&cmd, cfg.Config)
 	if cfg.Prompt != "" {
 		cmd = append(cmd, "--", cfg.Prompt)
 	}
@@ -126,8 +142,22 @@ func (p *Plugin) GetRestoreCommand(ctx context.Context, cfg ports.RestoreConfig)
 	if err != nil {
 		return nil, false, err
 	}
-	cmd = []string{binary, "--print", "--resume", agentSessionID}
+	cmd = []string{binary, "--print"}
+	if cfg.SystemPromptFile != "" {
+		cmd = append(cmd, "--rules", cfg.SystemPromptFile)
+	}
+	appendModelFlag(&cmd, cfg.Config)
+	cmd = append(cmd, "--resume", agentSessionID)
 	return cmd, true, nil
+}
+
+// appendModelFlag treats the configured model as opaque: it trims and forwards
+// non-empty values for Auggie to validate. Invalid models intentionally surface
+// Auggie's error; AO does not silently retry with Auggie's default model.
+func appendModelFlag(cmd *[]string, cfg ports.AgentConfig) {
+	if model := strings.TrimSpace(cfg.Model); model != "" {
+		*cmd = append(*cmd, "--model", model)
+	}
 }
 
 // Auggie has no single blanket auto-approve/bypass flag; unattended tool/file
@@ -140,7 +170,8 @@ var auggieBinarySpec = binaryutil.BinarySpec{
 	Names:         []string{"auggie"},
 	WinNames:      []string{"auggie.cmd", "auggie.exe", "auggie"},
 	UnixPaths:     []string{"/usr/local/bin/auggie", "/opt/homebrew/bin/auggie"},
-	UnixHomePaths: [][]string{{".local", "bin", "auggie"}, {".npm", "bin", "auggie"}, {".npm-global", "bin", "auggie"}},
+	UnixHomePaths: binaryutil.NodeManagedUnixHomePaths("auggie"),
+	NodeManaged:   true,
 	WinPaths: []binaryutil.WinPath{
 		{Base: binaryutil.WinAppData, Parts: []string{"npm", "auggie.cmd"}},
 		{Base: binaryutil.WinAppData, Parts: []string{"npm", "auggie.exe"}},
@@ -148,8 +179,8 @@ var auggieBinarySpec = binaryutil.BinarySpec{
 }
 
 // ResolveAuggieBinary finds the `auggie` binary, searching PATH then common
-// install locations. It returns "auggie" as a last resort so callers get the
-// shell's normal command-not-found behavior if Auggie is absent.
+// install locations. It returns a wrapped ports.ErrAgentBinaryNotFound when
+// Auggie is absent.
 func ResolveAuggieBinary(ctx context.Context) (string, error) {
 	return binaryutil.ResolveBinary(ctx, auggieBinarySpec)
 }

@@ -1,5 +1,5 @@
 import { Platform } from "react-native";
-import { muxUrl, type ServerConfig } from "./config";
+import { authHeaders, muxUrl, type ServerConfig } from "./config";
 
 // Mirrors AO's mux-protocol.ts (the bits we use).
 export type SessionPatch = {
@@ -18,6 +18,10 @@ type Handlers = {
 	onTerminalOpened?: (id: string) => void;
 	onTerminalExited?: (id: string, code: number) => void;
 	onTerminalError?: (id: string, message: string) => void;
+	// The daemon pushes the shared PTY's authoritative grid (the size the PTY is
+	// actually using, driven by the largest/primary client) so this follower can
+	// render that exact grid scaled to fit, instead of its own fitted size.
+	onTerminalResize?: (id: string, cols: number, rows: number) => void;
 	onSessions?: (sessions: SessionPatch[]) => void;
 };
 
@@ -142,7 +146,7 @@ export class MuxClient {
 				const WS = WebSocket as unknown as {
 					new (url: string, protocols?: string | string[], options?: { headers?: Record<string, string> }): WebSocket;
 				};
-				ws = new WS(muxUrl(this.cfg), undefined, { headers: { Origin: "http://localhost" } });
+				ws = new WS(muxUrl(this.cfg), undefined, { headers: { Origin: "http://localhost", ...authHeaders(this.cfg) } });
 			}
 		} catch (e) {
 			this.handlers.onStatus?.("error", String(e));
@@ -157,7 +161,7 @@ export class MuxClient {
 			if (this.subscribed) this.send({ ch: "subscribe", topics: ["sessions", "notifications"] });
 			// Re-open any terminals that were active before a reconnect (with projectId).
 			for (const [id, projectId] of this.openTerminals) {
-				this.send({ ch: "terminal", id, type: "open", projectId });
+				this.send({ ch: "terminal", id, type: "open", projectId, role: "secondary" });
 			}
 			this.pingTimer = setInterval(() => {
 				this.send({ ch: "system", type: "ping" });
@@ -198,6 +202,8 @@ export class MuxClient {
 			id?: string;
 			data?: string;
 			code?: number;
+			cols?: number;
+			rows?: number;
 			// The daemon reports terminal errors in `error`; older servers used `message`.
 			error?: string;
 			message?: string;
@@ -219,6 +225,12 @@ export class MuxClient {
 					break;
 				case "error":
 					this.handlers.onTerminalError?.(id, msg.error ?? msg.message ?? "terminal error");
+					break;
+				case "resize":
+					// Authoritative grid from the daemon (see onTerminalResize).
+					if (typeof msg.cols === "number" && typeof msg.rows === "number" && msg.cols > 0 && msg.rows > 0) {
+						this.handlers.onTerminalResize?.(id, msg.cols, msg.rows);
+					}
 					break;
 			}
 		}
@@ -258,7 +270,11 @@ export class MuxClient {
 
 	openTerminal(id: string, projectId?: string) {
 		this.openTerminals.set(id, projectId);
-		this.send({ ch: "terminal", id, type: "open", projectId });
+		// The phone is always a follower: it announces role "secondary" so a
+		// co-attached desktop drives the shared PTY grid (and the phone renders that
+		// grid scaled). When the phone is the only client the daemon falls back to
+		// its size, so "secondary" is safe even solo.
+		this.send({ ch: "terminal", id, type: "open", projectId, role: "secondary" });
 	}
 
 	sendInput(id: string, data: string, projectId?: string) {

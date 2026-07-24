@@ -68,7 +68,9 @@ type ClaimOutcome struct {
 	OwnerTerminated bool
 }
 
-// AgentMessenger injects a message into a running agent.
+// AgentMessenger injects a message into a running agent. An empty message
+// sends only the submit keystroke (Enter) — callers use it to nudge a pasted
+// prompt that was not submitted; every runtime must honor this contract.
 type AgentMessenger interface {
 	Send(ctx context.Context, id domain.SessionID, message string) error
 }
@@ -86,6 +88,7 @@ type Runtime interface {
 	// outbound side effects (the reap-then-resurrect bug). An already-gone
 	// session is a nil (idempotent) success.
 	Destroy(ctx context.Context, handle RuntimeHandle) error
+	GetOutput(ctx context.Context, handle RuntimeHandle, lines int) (string, error)
 	IsAlive(ctx context.Context, handle RuntimeHandle) (bool, error)
 }
 
@@ -152,6 +155,12 @@ type Workspace interface {
 	// tree, and ErrPreservedConflict (wrapped) is returned. The ref must never
 	// be deleted on a failed or conflicted apply.
 	ApplyPreserved(ctx context.Context, info WorkspaceInfo, ref string) error
+	// AddExclude appends the given git ignore patterns to the worktree's local
+	// info/exclude so daemon-generated files (e.g. pasted task attachments) never
+	// surface as untracked changes or get committed. Idempotent: patterns already
+	// present are skipped. Owning this here keeps git/process execution inside the
+	// workspace adapter rather than leaking into callers.
+	AddExclude(ctx context.Context, info WorkspaceInfo, patterns ...string) error
 }
 
 // WorkspaceProject is an optional extension for projects composed from a
@@ -180,6 +189,11 @@ var (
 	// it holds uncommitted changes or untracked files. Teardown is never
 	// forced; callers treat the workspace as intentionally preserved.
 	ErrWorkspaceDirty = errors.New("workspace: uncommitted changes present")
+	// ErrWorkspaceStale reports an AO-managed workspace path no longer points
+	// at a registered git worktree. Replacement paths may skip preservation for
+	// this state after path-safety checks, while real preserve failures remain
+	// fatal.
+	ErrWorkspaceStale = errors.New("workspace: stale managed worktree")
 	// ErrPreservedConflict is returned by ApplyPreserved when replaying a
 	// preserved ref onto the worktree produces merge conflicts. The ref is
 	// kept intact (never deleted on conflict); the working tree is left with

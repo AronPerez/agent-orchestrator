@@ -1,15 +1,18 @@
 // Package opencode implements the opencode (sst/opencode) agent adapter:
 // launching new TUI sessions, resuming sessions by native id, installing a
-// workspace-local activity plugin, and reading plugin-derived session info.
+// workspace-local activity plugin plus the using-ao skill, and reading
+// plugin-derived session info.
 //
 // opencode differs from Claude Code and Codex in two ways AO has to bridge:
 //   - It has no native command-hook config (no settings.local.json / hooks.json
 //     equivalent). Its only lifecycle-extensibility surface is a JS/TS plugin
 //     loaded from .opencode/plugins/, so GetAgentHooks installs an AO-owned
-//     plugin file (see hooks.go) instead of merging JSON.
+//     plugin file (see hooks.go) instead of merging JSON. The same install also
+//     materializes using-ao under .opencode/skills/ so opencode's skill tool
+//     can discover it (the data-dir skill path alone is invisible to opencode).
 //   - Its CLI exposes only one approval flag (--dangerously-skip-permissions)
-//     and no system-prompt flag, so the graduated permission modes and the
-//     system prompt are deferred to opencode's own config.
+//     and no system-prompt flag, so AO injects standing instructions by writing
+//     an AO-owned per-session config and selecting the generated agent.
 //
 // AO-managed sessions derive native session identity and display metadata from
 // the opencode plugin's reported events, mirroring the Codex adapter.
@@ -30,6 +33,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/agentbase"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/binaryutil"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/hookutil"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 
@@ -48,6 +52,11 @@ const (
 	// (same value), but GetRestoreCommand reads it directly, so the const stays.
 	opencodeAgentSessionIDMetadataKey = "agentSessionId"
 )
+
+var opencodeUnixPaths = []string{
+	"/usr/local/bin/opencode",
+	"/opt/homebrew/bin/opencode",
+}
 
 // Plugin is the opencode agent adapter. It is safe for concurrent use; the
 // binary path is resolved once and cached under binaryMu.
@@ -82,22 +91,29 @@ func (p *Plugin) Manifest() adapters.Manifest {
 // GetLaunchCommand builds the argv to start a new interactive opencode session.
 // Shape:
 //
-//	opencode [--dangerously-skip-permissions] [--prompt <prompt>]
+//	[env OPENCODE_CONFIG=<ao-config>] opencode [--dangerously-skip-permissions] [--agent <ao-agent>] [--prompt <prompt>]
 //
 // The session runs in the worktree (cwd is set by the runtime, as for Claude
-// Code and Codex). opencode has no CLI flag to set a system prompt, so
-// cfg.SystemPrompt / SystemPromptFile are intentionally ignored here — opencode
-// resolves instructions from its own config and AGENTS.md rules. The initial
-// task prompt is delivered via --prompt (its argument, so a leading "-" is not
-// read as a flag).
+// Code and Codex). opencode has no CLI flag to set a system prompt, so AO writes
+// an opencode config into the AO prompt artifact directory, points OPENCODE_CONFIG
+// at it, and selects the generated agent with --agent. The initial task prompt
+// is delivered via --prompt (its argument, so a leading "-" is not read as a flag).
 func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (cmd []string, err error) {
 	binary, err := p.opencodeBinary(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	cmd = []string{binary}
+	envPrefix, agentName, err := opencodeConfigEnvPrefix(cfg.SystemPrompt, cfg.SystemPromptFile, cfg.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	cmd = envPrefix
+	cmd = append(cmd, binary)
 	appendPermissionFlags(&cmd, cfg.Permissions)
+	if agentName != "" {
+		cmd = append(cmd, "--agent", agentName)
+	}
 	if cfg.Prompt != "" {
 		cmd = append(cmd, "--prompt", cfg.Prompt)
 	}
@@ -105,11 +121,11 @@ func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (
 }
 
 // GetRestoreCommand rebuilds the argv that continues an existing opencode
-// session: `opencode [--dangerously-skip-permissions] --session <agentSessionId>`.
-// It re-applies the permission flag (resume otherwise reverts to the configured
-// default) but not the prompt, which the session already carries. ok is false
-// when the plugin-derived native session id has not landed yet, so callers fall
-// back to fresh launch behavior — mirroring the Codex adapter.
+// session: `[env OPENCODE_CONFIG=<ao-config>] opencode [--dangerously-skip-permissions] [--agent <ao-agent>] --session <agentSessionId>`.
+// It re-applies the permission flag and the generated AO agent config (resume
+// otherwise reverts to configured defaults). ok is false when the plugin-derived
+// native session id has not landed yet, so callers fall back to fresh launch
+// behavior — mirroring the Codex adapter.
 func (p *Plugin) GetRestoreCommand(ctx context.Context, cfg ports.RestoreConfig) (cmd []string, ok bool, err error) {
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
@@ -124,9 +140,16 @@ func (p *Plugin) GetRestoreCommand(ctx context.Context, cfg ports.RestoreConfig)
 		return nil, false, err
 	}
 
-	cmd = make([]string, 0, 4)
+	envPrefix, agentName, err := opencodeConfigEnvPrefix(cfg.SystemPrompt, cfg.SystemPromptFile, cfg.Session.ID)
+	if err != nil {
+		return nil, false, err
+	}
+	cmd = envPrefix
 	cmd = append(cmd, binary)
 	appendPermissionFlags(&cmd, cfg.Permissions)
+	if agentName != "" {
+		cmd = append(cmd, "--agent", agentName)
+	}
 	cmd = append(cmd, "--session", agentSessionID)
 	return cmd, true, nil
 }
@@ -335,6 +358,81 @@ func appendPermissionFlags(cmd *[]string, permissions ports.PermissionMode) {
 	}
 }
 
+const opencodeConfigEnvVar = "OPENCODE_CONFIG"
+
+type opencodeInlineConfig struct {
+	Schema string                           `json:"$schema,omitempty"`
+	Agent  map[string]opencodeAgentSettings `json:"agent,omitempty"`
+}
+
+type opencodeAgentSettings struct {
+	Mode   string `json:"mode,omitempty"`
+	Prompt string `json:"prompt,omitempty"`
+}
+
+func opencodeConfigEnvPrefix(inlinePrompt, promptFile, sessionID string) ([]string, string, error) {
+	if inlinePrompt == "" && promptFile == "" {
+		return nil, "", nil
+	}
+	if promptFile == "" {
+		return nil, "", fmt.Errorf("opencode: system prompt file required to build agent config")
+	}
+	agentName := opencodeAOAgentName(sessionID)
+	prompt := inlinePrompt
+	if prompt == "" {
+		prompt = "{file:./" + filepath.Base(promptFile) + "}"
+	}
+	dir := filepath.Dir(promptFile)
+	configPath := filepath.Join(dir, "opencode.json")
+	config := opencodeInlineConfig{
+		Schema: "https://opencode.ai/config.json",
+		Agent: map[string]opencodeAgentSettings{
+			agentName: {
+				Mode:   "primary",
+				Prompt: prompt,
+			},
+		},
+	}
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return nil, "", err
+	}
+	data = append(data, '\n')
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, "", fmt.Errorf("opencode: create prompt config dir: %w", err)
+	}
+	if err := hookutil.AtomicWriteFile(configPath, data, 0o600); err != nil {
+		return nil, "", fmt.Errorf("opencode: write prompt config: %w", err)
+	}
+	return []string{"env", opencodeConfigEnvVar + "=" + configPath}, agentName, nil
+}
+
+func opencodeAOAgentName(sessionID string) string {
+	const fallback = "ao-system-prompt"
+	trimmed := strings.TrimSpace(sessionID)
+	if trimmed == "" {
+		return fallback
+	}
+	var b strings.Builder
+	for _, r := range trimmed {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			r == '-',
+			r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	name := strings.Trim(b.String(), "-_")
+	if name == "" {
+		return fallback
+	}
+	return "ao-" + name
+}
+
 // ResolveOpenCodeBinary returns the path to the opencode binary on this machine,
 // searching PATH then a handful of well-known install locations (the install
 // script's ~/.opencode/bin, Homebrew, npm global).
@@ -368,15 +466,19 @@ func ResolveOpenCodeBinary(ctx context.Context) (string, error) {
 		return path, nil
 	}
 
-	candidates := []string{
-		"/usr/local/bin/opencode",
-		"/opt/homebrew/bin/opencode",
-	}
+	candidates := append([]string(nil), opencodeUnixPaths...)
 	if home, err := os.UserHomeDir(); err == nil {
 		candidates = append(candidates,
-			filepath.Join(home, ".opencode", "bin", "opencode"),
+			filepath.Join(home, ".npm-global", "bin", "opencode"),
 			filepath.Join(home, ".npm", "bin", "opencode"),
+			filepath.Join(home, ".local", "bin", "opencode"),
+			filepath.Join(home, ".opencode", "bin", "opencode"),
 		)
+		nodeManagerCandidates, err := binaryutil.UnixNodeManagerBinCandidates(ctx, home, "opencode")
+		if err != nil {
+			return "", err
+		}
+		candidates = append(candidates, nodeManagerCandidates...)
 	}
 
 	for _, candidate := range candidates {

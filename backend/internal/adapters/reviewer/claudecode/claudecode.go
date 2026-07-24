@@ -30,6 +30,7 @@ func (r *Reviewer) Harness() domain.ReviewerHarness {
 }
 
 var _ ports.Reviewer = (*Reviewer)(nil)
+var _ ports.ReviewerCanceller = (*Reviewer)(nil)
 
 // reviewerAllowedTools is the read-only tool allowlist the reviewer launches
 // with. The reviewer runs headless (no human to approve prompts) but must stay
@@ -65,13 +66,16 @@ var reviewerDisallowedTools = []string{
 }
 
 // ReviewCommand builds a claude-code invocation that reviews the worker's
-// checkout for the PR, with the review prompt baked in.
+// checkout for the PR. Production launches provide the standing instructions
+// through an AO-owned prompt file so only the short task-file reference is
+// terminal-visible.
 func (r *Reviewer) ReviewCommand(ctx context.Context, inv ports.ReviewInvocation) (ports.ReviewCommandSpec, error) {
 	argv, err := r.agent.GetLaunchCommand(ctx, ports.LaunchConfig{
-		SessionID:     inv.ReviewerID,
-		WorkspacePath: inv.WorkspacePath,
-		Prompt:        inv.Prompt,
-		SystemPrompt:  inv.SystemPrompt,
+		SessionID:        inv.ReviewerID,
+		WorkspacePath:    inv.WorkspacePath,
+		Prompt:           inv.Prompt,
+		SystemPrompt:     inv.SystemPrompt,
+		SystemPromptFile: inv.SystemPromptFile,
 		// Launch off bypassPermissions so the allow/deny lists are enforced.
 		// Set an explicit non-bypass mode instead of deferring to the user's
 		// Claude defaultMode, which may itself be bypassPermissions.
@@ -104,4 +108,10 @@ func (r *Reviewer) PreLaunch(ctx context.Context, inv ports.ReviewInvocation) er
 // review a new commit — AO's central review prompt.
 func (r *Reviewer) ReviewMessage(_ context.Context, inv ports.ReviewInvocation) (string, error) {
 	return inv.Prompt, nil
+}
+
+// ReviewCancel stops the active Claude Code reviewer turn while preserving the
+// terminal pane for inspection.
+func (r *Reviewer) ReviewCancel(context.Context) (ports.ReviewCancelSpec, error) {
+	return ports.ReviewCancelSpec{Mode: ports.ReviewCancelInterrupt, Interrupts: 2}, nil
 }

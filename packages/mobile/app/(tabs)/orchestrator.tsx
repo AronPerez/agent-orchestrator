@@ -4,9 +4,11 @@ import { useState } from "react";
 import { Alert, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { attentionOf, type DashboardSession, type OrchestratorLink } from "../../lib/api";
+import { haptics } from "../../lib/haptics";
 import { CardGrid, WideContainer, useBreakpoint } from "../../lib/responsive";
 import { useApp } from "../../lib/store";
 import { attentionMeta, statusVisual, theme, type AttentionLevel, type StatusVisual } from "../../lib/theme";
+import { useTabScrollToTop } from "../../lib/useTabScrollToTop";
 import { Button, ConnectionPill, Dot, EmptyState, ScreenHeader } from "../../lib/ui";
 
 const ZONE_ORDER: AttentionLevel[] = ["merge", "respond", "review", "pending", "working", "done"];
@@ -17,10 +19,13 @@ export default function OrchestratorScreen() {
 	const { configured, connection, projects, sessions, orchestrators, refresh } = useApp();
 	const [refreshing, setRefreshing] = useState(false);
 
+	const scrollRef = useTabScrollToTop<ScrollView>();
+
 	// Always show every project's orchestrator here - no per-project filtering.
 	const visibleProjects = projects;
 
 	const onRefresh = async () => {
+		haptics.tap();
 		setRefreshing(true);
 		await refresh();
 		setRefreshing(false);
@@ -61,6 +66,7 @@ export default function OrchestratorScreen() {
 			/>
 
 			<ScrollView
+				ref={scrollRef}
 				contentContainerStyle={wide ? styles.wideScrollContent : styles.scrollContent}
 				refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={theme.blue} />}
 			>

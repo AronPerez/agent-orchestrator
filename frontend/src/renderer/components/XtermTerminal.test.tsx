@@ -1,4 +1,4 @@
-import { render } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { XtermTerminal } from "./XtermTerminal";
 
@@ -10,6 +10,11 @@ const state = vi.hoisted(() => ({
 		selection: string;
 		options: Record<string, unknown>;
 		modes: { bracketedPasteMode: boolean; mouseTrackingMode: string };
+		buffer: { active: { type: string } };
+		scrollLines: ReturnType<typeof vi.fn>;
+		clear: ReturnType<typeof vi.fn>;
+		focus: ReturnType<typeof vi.fn>;
+		selectAll: ReturnType<typeof vi.fn>;
 		dataListeners: Set<(data: string) => void>;
 		keyListeners: Set<(event: { key: string }) => void>;
 		selectionListeners: Set<() => void>;
@@ -32,6 +37,11 @@ vi.mock("@xterm/xterm", () => ({
 		keyHandler?: (event: KeyboardEvent) => boolean;
 		wheelHandler?: (event: WheelEvent) => boolean;
 		modes = { bracketedPasteMode: false, mouseTrackingMode: "vt200" };
+		buffer = { active: { type: "normal" } };
+		scrollLines = vi.fn();
+		clear = vi.fn();
+		focus = vi.fn();
+		selectAll = vi.fn();
 		dataListeners = new Set<(data: string) => void>();
 		keyListeners = new Set<(event: { key: string }) => void>();
 		selectionListeners = new Set<() => void>();
@@ -192,6 +202,62 @@ describe("XtermTerminal", () => {
 
 		expect(event.defaultPrevented).toBe(true);
 		expect(window.ao!.clipboard.writeText).toHaveBeenCalledWith("focused copied selection");
+	});
+
+	it("opens a themed context menu on right-click and disables Copy without a selection", async () => {
+		const { container } = render(<XtermTerminal theme="dark" />);
+		const host = container.firstElementChild!;
+
+		expect(fireEvent.contextMenu(host, { clientX: 120, clientY: 88 })).toBe(false);
+
+		expect(await screen.findByText("Paste")).toBeInTheDocument();
+		expect(screen.getByText("Copy")).toHaveAttribute("data-disabled");
+		const trigger = container.querySelector("button[aria-hidden='true']") as HTMLButtonElement;
+		expect(trigger.style.left).toBe("120px");
+		expect(trigger.style.top).toBe("88px");
+	});
+
+	it("runs context menu copy, select all, and clear against the xterm instance", async () => {
+		const { container } = render(<XtermTerminal theme="dark" />);
+		const host = container.firstElementChild!;
+		state.lastTerminal!.selection = "menu copy";
+
+		fireEvent.contextMenu(host);
+		fireEvent.click(await screen.findByText("Copy"));
+		await waitFor(() => expect(window.ao!.clipboard.writeText).toHaveBeenCalledWith("menu copy"));
+		expect(state.lastTerminal!.focus).toHaveBeenCalled();
+
+		fireEvent.contextMenu(host);
+		fireEvent.click(await screen.findByText("Select All"));
+		expect(state.lastTerminal!.selectAll).toHaveBeenCalled();
+
+		fireEvent.contextMenu(host);
+		fireEvent.click(await screen.findByText("Clear"));
+		expect(state.lastTerminal!.clear).toHaveBeenCalled();
+	});
+
+	it("pastes from the context menu through the terminal paste path", async () => {
+		const onInput = vi.fn();
+		window.ao!.clipboard.readText = vi.fn().mockResolvedValue("menu\npaste");
+		const { container } = render(<XtermTerminal theme="dark" onReady={(terminal) => terminal.onUserInput(onInput)} />);
+
+		fireEvent.contextMenu(container.firstElementChild!);
+		fireEvent.click(await screen.findByText("Paste"));
+
+		await waitFor(() => expect(onInput).toHaveBeenCalledWith("menu\rpaste", "paste"));
+		expect(window.ao!.clipboard.readText).toHaveBeenCalledTimes(1);
+	});
+
+	it("honors bracketed paste mode from the context menu", async () => {
+		const onInput = vi.fn();
+		window.ao!.clipboard.readText = vi.fn().mockResolvedValue("bracketed\npaste");
+		const { container } = render(<XtermTerminal theme="dark" onReady={(terminal) => terminal.onUserInput(onInput)} />);
+		state.lastTerminal!.modes.bracketedPasteMode = true;
+
+		fireEvent.contextMenu(container.firstElementChild!);
+		fireEvent.click(await screen.findByText("Paste"));
+
+		await waitFor(() => expect(onInput).toHaveBeenCalledWith("\x1b[200~bracketed\rpaste\x1b[201~", "paste"));
 	});
 
 	it("auto-copies new selections and retries explicit copy if the auto-copy failed", async () => {
@@ -478,6 +544,124 @@ describe("XtermTerminal", () => {
 		expect(onInput).toHaveBeenCalledWith(expected, "shortcut");
 	});
 
+	it("does not re-fire a shortcut on the keyup that follows its keydown", () => {
+		// xterm.js invokes attachCustomKeyEventHandler on keydown, keyup, AND
+		// keypress for the same physical key press. Without gating on event.type,
+		// releasing Ctrl+Backspace would emit the escape sequence a second time.
+		const onInput = vi.fn();
+		render(<XtermTerminal theme="dark" onReady={(terminal) => terminal.onUserInput(onInput)} />);
+
+		const keyDown = {
+			type: "keydown",
+			key: "Backspace",
+			ctrlKey: true,
+			metaKey: false,
+			shiftKey: false,
+			altKey: false,
+			preventDefault: vi.fn(),
+			stopPropagation: vi.fn(),
+		} as unknown as KeyboardEvent;
+		expect(state.lastTerminal!.keyHandler!(keyDown)).toBe(false);
+		expect(onInput).toHaveBeenCalledTimes(1);
+
+		const keyUp = { ...keyDown, type: "keyup" } as unknown as KeyboardEvent;
+		expect(state.lastTerminal!.keyHandler!(keyUp)).toBe(true);
+		expect(onInput).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not re-paste on the keyup that follows a Cmd+V keydown", async () => {
+		window.ao!.clipboard.readText = vi.fn().mockResolvedValue("pasted once");
+		const onInput = vi.fn();
+		render(<XtermTerminal theme="dark" onReady={(terminal) => terminal.onUserInput(onInput)} />);
+
+		const keyDown = {
+			type: "keydown",
+			key: "v",
+			ctrlKey: false,
+			metaKey: true,
+			shiftKey: false,
+			altKey: false,
+			preventDefault: vi.fn(),
+			stopPropagation: vi.fn(),
+		} as unknown as KeyboardEvent;
+		expect(state.lastTerminal!.keyHandler!(keyDown)).toBe(false);
+		await Promise.resolve();
+
+		const keyUp = { ...keyDown, type: "keyup" } as unknown as KeyboardEvent;
+		expect(state.lastTerminal!.keyHandler!(keyUp)).toBe(true);
+		await Promise.resolve();
+
+		expect(window.ao!.clipboard.readText).toHaveBeenCalledTimes(1);
+		expect(onInput).toHaveBeenCalledTimes(1);
+	});
+
+	it("sends the meta-return escape sequence for Shift+Enter and consumes the event", () => {
+		const onInput = vi.fn();
+		render(<XtermTerminal theme="dark" onReady={(terminal) => terminal.onUserInput(onInput)} />);
+
+		const event = {
+			type: "keydown",
+			key: "Enter",
+			metaKey: false,
+			ctrlKey: false,
+			shiftKey: true,
+			altKey: false,
+			preventDefault: vi.fn(),
+			stopPropagation: vi.fn(),
+		} as unknown as KeyboardEvent;
+		const allowed = state.lastTerminal!.keyHandler!(event);
+
+		expect(allowed).toBe(false);
+		expect(event.preventDefault).toHaveBeenCalled();
+		expect(event.stopPropagation).toHaveBeenCalled();
+		expect(onInput).toHaveBeenCalledTimes(1);
+		expect(onInput).toHaveBeenCalledWith("\x1b\r", "keyboard");
+	});
+
+	it("does not re-send the meta-return sequence on the keyup that follows Shift+Enter", () => {
+		const onInput = vi.fn();
+		render(<XtermTerminal theme="dark" onReady={(terminal) => terminal.onUserInput(onInput)} />);
+
+		const keyDown = {
+			type: "keydown",
+			key: "Enter",
+			metaKey: false,
+			ctrlKey: false,
+			shiftKey: true,
+			altKey: false,
+			preventDefault: vi.fn(),
+			stopPropagation: vi.fn(),
+		} as unknown as KeyboardEvent;
+		expect(state.lastTerminal!.keyHandler!(keyDown)).toBe(false);
+		expect(onInput).toHaveBeenCalledTimes(1);
+
+		const keyUp = { ...keyDown, type: "keyup" } as unknown as KeyboardEvent;
+		expect(state.lastTerminal!.keyHandler!(keyUp)).toBe(true);
+		expect(onInput).toHaveBeenCalledTimes(1);
+	});
+
+	it("leaves plain Enter as normal terminal input rather than intercepting it", () => {
+		const onInput = vi.fn();
+		render(<XtermTerminal theme="dark" onReady={(terminal) => terminal.onUserInput(onInput)} />);
+
+		const event = {
+			type: "keydown",
+			key: "Enter",
+			metaKey: false,
+			ctrlKey: false,
+			shiftKey: false,
+			altKey: false,
+			preventDefault: vi.fn(),
+			stopPropagation: vi.fn(),
+		} as unknown as KeyboardEvent;
+		const allowed = state.lastTerminal!.keyHandler!(event);
+
+		expect(allowed).toBe(true);
+		expect(event.preventDefault).not.toHaveBeenCalled();
+		expect(event.stopPropagation).not.toHaveBeenCalled();
+		expect(onInput).not.toHaveBeenCalled();
+	});
+
 	it("forwards keyboard input from explicit key events", () => {
 		const onInput = vi.fn();
 		render(<XtermTerminal theme="dark" onReady={(terminal) => terminal.onUserInput(onInput)} />);
@@ -532,33 +716,50 @@ describe("XtermTerminal", () => {
 		expect(onInput).not.toHaveBeenCalled();
 	});
 
-	it("sends PageUp/PageDown instead of SGR reports when the pane app has mouse tracking off", () => {
+	it("scrolls xterm's own viewport for normal-buffer panes with mouse tracking off (codex, plain shell)", () => {
 		const onInput = vi.fn();
 		render(<XtermTerminal theme="dark" onReady={(terminal) => terminal.onUserInput(onInput)} />);
 		state.lastTerminal!.modes.mouseTrackingMode = "none";
+		state.lastTerminal!.buffer.active.type = "normal";
 
-		// A keyboard-scroll TUI: one page key per notch regardless of line count,
-		// so 3 lines up => a single PageUp.
+		// rowHeight = 16.2px; -50px => 3 lines up. The pane never sees these bytes;
+		// we scroll the terminal's retained scrollback locally instead.
+		expect(state.lastTerminal!.wheelHandler!({ deltaY: -50 } as WheelEvent)).toBe(false);
+		expect(state.lastTerminal!.scrollLines).toHaveBeenLastCalledWith(-3);
+		expect(onInput).not.toHaveBeenCalled();
+
+		expect(state.lastTerminal!.wheelHandler!({ deltaY: 20 } as WheelEvent)).toBe(false);
+		expect(state.lastTerminal!.scrollLines).toHaveBeenLastCalledWith(1);
+		expect(onInput).not.toHaveBeenCalled();
+	});
+
+	it("falls back to PageUp/PageDown for alt-buffer panes with mouse tracking off", () => {
+		const onInput = vi.fn();
+		render(<XtermTerminal theme="dark" onReady={(terminal) => terminal.onUserInput(onInput)} />);
+		state.lastTerminal!.modes.mouseTrackingMode = "none";
+		// Alt buffer: no local scrollback to move, and no keyboard-scroll hint, so a
+		// page key per notch is the best fallback.
+		state.lastTerminal!.buffer.active.type = "alternate";
+
 		expect(state.lastTerminal!.wheelHandler!({ deltaY: -50 } as WheelEvent)).toBe(false);
 		expect(onInput).toHaveBeenLastCalledWith("\x1b[5~", "wheel");
+		expect(state.lastTerminal!.scrollLines).not.toHaveBeenCalled();
 
 		expect(state.lastTerminal!.wheelHandler!({ deltaY: 20 } as WheelEvent)).toBe(false);
 		expect(onInput).toHaveBeenLastCalledWith("\x1b[6~", "wheel");
 	});
 
-	it("sends PageUp/PageDown on Windows even when the pane app tracks the mouse (conpty, no mux)", () => {
+	it("sends SGR reports on Windows when the pane tracks the mouse (conpty delivers them to the app)", () => {
 		setNavigatorPlatform("Win32");
 		const onInput = vi.fn();
 		render(<XtermTerminal theme="dark" onReady={(terminal) => terminal.onUserInput(onInput)} />);
-		// opencode enables full mouse tracking but scrolls its transcript only by
-		// keyboard; with no mux to consume SGR reports, Windows must use page keys.
+		// A mouse-tracking pane gets SGR reports on every platform; on Windows conpty
+		// forwards them straight to the app. Keyboard-scroll panes (opencode) opt out
+		// via the paneScrollsByKeyboard hint, tested separately.
 		state.lastTerminal!.modes.mouseTrackingMode = "any";
 
 		expect(state.lastTerminal!.wheelHandler!({ deltaY: -50 } as WheelEvent)).toBe(false);
-		expect(onInput).toHaveBeenLastCalledWith("\x1b[5~", "wheel");
-
-		expect(state.lastTerminal!.wheelHandler!({ deltaY: 20 } as WheelEvent)).toBe(false);
-		expect(onInput).toHaveBeenLastCalledWith("\x1b[6~", "wheel");
+		expect(onInput).toHaveBeenLastCalledWith("\x1b[<64;1;1M".repeat(3), "wheel");
 	});
 
 	it("sends PageUp/PageDown for keyboard-scroll panes even under a mux (opencode on macOS/Linux)", () => {
@@ -572,9 +773,10 @@ describe("XtermTerminal", () => {
 		expect(onInput).toHaveBeenLastCalledWith("\x1b[5~", "wheel");
 	});
 
-	it("opens terminal links via window.open so Electron routes them to the OS browser", () => {
+	it("opens terminal links externally and reports the clicked URL", () => {
 		const open = vi.spyOn(window, "open").mockReturnValue(null);
-		render(<XtermTerminal theme="dark" />);
+		const onLinkOpen = vi.fn();
+		render(<XtermTerminal onLinkOpen={onLinkOpen} theme="dark" />);
 
 		// The default WebLinksAddon handler opens an empty window first, which the
 		// Electron main process denies; ours must pass the matched URL directly.
@@ -582,6 +784,22 @@ describe("XtermTerminal", () => {
 		state.linkHandler!({} as MouseEvent, "https://example.com");
 
 		expect(open).toHaveBeenCalledWith("https://example.com", "_blank", "noopener");
+		expect(onLinkOpen).toHaveBeenCalledWith("https://example.com");
+		open.mockRestore();
+	});
+
+	it("opens OSC 8 links externally and reports the clicked URL", () => {
+		const open = vi.spyOn(window, "open").mockReturnValue(null);
+		const onLinkOpen = vi.fn();
+		render(<XtermTerminal onLinkOpen={onLinkOpen} theme="dark" />);
+		const oscLinkHandler = state.lastTerminal!.options.linkHandler as {
+			activate: (event: MouseEvent, uri: string) => void;
+		};
+
+		oscLinkHandler.activate({} as MouseEvent, "http://localhost:3000");
+
+		expect(open).toHaveBeenCalledWith("http://localhost:3000", "_blank", "noopener");
+		expect(onLinkOpen).toHaveBeenCalledWith("http://localhost:3000");
 		open.mockRestore();
 	});
 

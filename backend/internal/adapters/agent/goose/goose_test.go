@@ -42,14 +42,17 @@ func TestGetLaunchCommandBuildsArgv(t *testing.T) {
 		"env", "GOOSE_MODE=auto",
 		"goose", "run",
 		"--system", "be terse",
-		"-t", "-fix this",
+		"-t", "", "--interactive",
 	}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("unexpected command\nwant: %#v\n got: %#v", want, cmd)
 	}
+	if contains(cmd, "-fix this") {
+		t.Fatalf("command %#v unexpectedly contains prompt text", cmd)
+	}
 }
 
-func TestGetLaunchCommandSystemPromptFileInlined(t *testing.T) {
+func TestGetLaunchCommandPrefersInlineSystemPrompt(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "prompt.md")
 	if err := os.WriteFile(file, []byte("  from file  \n"), 0o600); err != nil {
@@ -59,20 +62,20 @@ func TestGetLaunchCommandSystemPromptFileInlined(t *testing.T) {
 
 	cmd, err := plugin.GetLaunchCommand(context.Background(), ports.LaunchConfig{
 		SystemPromptFile: file,
-		SystemPrompt:     "inline fallback ignored",
+		SystemPrompt:     "inline wins",
 		Prompt:           "do work",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	want := []string{"goose", "run", "--system", "from file", "-t", "do work"}
+	want := []string{"goose", "run", "--system", "inline wins", "-t", "", "--interactive"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("unexpected command\nwant: %#v\n got: %#v", want, cmd)
 	}
 }
 
-func TestGetLaunchCommandPromptlessLaunchStaysInteractive(t *testing.T) {
+func TestGetLaunchCommandAlwaysLaunchesInteractive(t *testing.T) {
 	plugin := &Plugin{resolvedBinary: "goose"}
 
 	cmd, err := plugin.GetLaunchCommand(context.Background(), ports.LaunchConfig{
@@ -141,27 +144,85 @@ func TestGetLaunchCommandMapsApprovalModes(t *testing.T) {
 	}
 }
 
-func TestGetPromptDeliveryStrategyIsInCommand(t *testing.T) {
+func TestGetPromptDeliveryStrategyIsAfterStart(t *testing.T) {
 	plugin := &Plugin{}
 
 	got, err := plugin.GetPromptDeliveryStrategy(context.Background(), ports.LaunchConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != ports.PromptDeliveryInCommand {
+	if got != ports.PromptDeliveryAfterStart {
 		t.Fatalf("unexpected strategy: %q", got)
 	}
 }
 
-func TestGetConfigSpecHasNoCustomFieldsYet(t *testing.T) {
+func TestGetConfigSpecReportsModelField(t *testing.T) {
 	plugin := &Plugin{}
 
 	spec, err := plugin.GetConfigSpec(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(spec.Fields) != 0 {
-		t.Fatalf("unexpected config fields: %#v", spec.Fields)
+	want := []ports.ConfigField{
+		{
+			Key:         "model",
+			Type:        ports.ConfigFieldString,
+			Description: "Model override passed to `goose run --model`.",
+		},
+	}
+	if !reflect.DeepEqual(spec.Fields, want) {
+		t.Fatalf("config fields\nwant: %#v\n got: %#v", want, spec.Fields)
+	}
+}
+
+func TestGetLaunchCommandAppendsConfiguredModel(t *testing.T) {
+	plugin := &Plugin{resolvedBinary: "goose"}
+
+	cmd, err := plugin.GetLaunchCommand(context.Background(), ports.LaunchConfig{
+		Config: ports.AgentConfig{Model: "  claude-4-sonnet  "},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSubsequence(cmd, []string{"--model", "claude-4-sonnet"}) {
+		t.Fatalf("command %#v missing trimmed --model flag", cmd)
+	}
+	if containsSubsequence(cmd, []string{"--model", "  claude-4-sonnet  "}) {
+		t.Fatalf("command %#v used untrimmed model", cmd)
+	}
+}
+
+func TestGetLaunchCommandOmitsBlankConfiguredModel(t *testing.T) {
+	plugin := &Plugin{resolvedBinary: "goose"}
+
+	cmd, err := plugin.GetLaunchCommand(context.Background(), ports.LaunchConfig{
+		Config: ports.AgentConfig{Model: " \t "},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contains(cmd, "--model") {
+		t.Fatalf("command %#v contains --model for blank model", cmd)
+	}
+}
+
+func TestGetRestoreCommandAppendsConfiguredModel(t *testing.T) {
+	plugin := &Plugin{resolvedBinary: "goose"}
+
+	cmd, ok, err := plugin.GetRestoreCommand(context.Background(), ports.RestoreConfig{
+		Config: ports.AgentConfig{Model: "  claude-4-sonnet  "},
+		Session: ports.SessionRef{
+			Metadata: map[string]string{ports.MetadataKeyAgentSessionID: "20260720_1"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	if !containsSubsequence(cmd, []string{"--model", "claude-4-sonnet"}) {
+		t.Fatalf("restore command %#v missing trimmed --model flag", cmd)
 	}
 }
 
@@ -362,9 +423,11 @@ func TestGetRestoreCommandReadsAgentSessionID(t *testing.T) {
 	plugin := &Plugin{resolvedBinary: "goose"}
 
 	cmd, ok, err := plugin.GetRestoreCommand(context.Background(), ports.RestoreConfig{
-		Permissions: ports.PermissionModeAuto,
+		Permissions:      ports.PermissionModeAuto,
+		SystemPrompt:     "restore inline wins",
+		SystemPromptFile: filepath.Join(t.TempDir(), "missing.md"),
 		Session: ports.SessionRef{
-			Metadata: map[string]string{ports.MetadataKeyAgentSessionID: "thread-123"},
+			Metadata: map[string]string{ports.MetadataKeyAgentSessionID: "20260720_1"},
 		},
 	})
 	if err != nil {
@@ -375,10 +438,13 @@ func TestGetRestoreCommandReadsAgentSessionID(t *testing.T) {
 	}
 	want := []string{
 		"env", "GOOSE_MODE=auto",
-		"goose", "run", "--resume", "--session-id", "thread-123",
+		"goose", "run", "--system", "restore inline wins", "--resume", "--session-id", "20260720_1",
 	}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("restore cmd\nwant: %#v\n got: %#v", want, cmd)
+	}
+	if contains(cmd, "-t") || contains(cmd, "restore original task") {
+		t.Fatalf("restore command %#v unexpectedly replays the original task", cmd)
 	}
 }
 

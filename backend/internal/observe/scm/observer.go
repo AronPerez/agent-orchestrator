@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +32,13 @@ const (
 	DefaultReviewInterval = 2 * time.Minute
 	// DefaultCacheMax bounds each in-memory ETag/review cache map.
 	DefaultCacheMax = 512
+	// DefaultPRMaxAge bounds how long a locally-open tracked PR may go without a
+	// forced re-fetch. It is a bounded-staleness backstop, not a distrust of the
+	// ETag: the refresh signals the observer consults (the repo PR-list guard and
+	// the per-commit checks guard) do not track a PR's own state, so a merged or
+	// closed PR whose head SHA is unchanged can otherwise read stale. This caps
+	// how long that inference can persist.
+	DefaultPRMaxAge = 5 * time.Minute
 	// BatchSize is the maximum number of PRs in one provider batch fetch.
 	BatchSize = 25
 )
@@ -93,6 +101,10 @@ type ObserverCache struct {
 	// ReviewRefreshFailed marks PRs whose review-thread refresh failed; the
 	// next poll retries regardless of the normal review cadence/status rules.
 	ReviewRefreshFailed map[string]bool
+	// LastPRFetchAt maps PR keys to the last time the PR was successfully fetched from the provider.
+	LastPRFetchAt map[string]time.Time
+	// lastPRFetchOrder tracks FIFO eviction order for LastPRFetchAt.
+	lastPRFetchOrder []string
 	// repoOrder tracks FIFO eviction order for RepoPRListETag.
 	repoOrder []string
 	// commitOrder tracks FIFO eviction order for CommitChecksETag.
@@ -114,6 +126,7 @@ func newCache(maxEntries int) ObserverCache {
 		CommitChecksETag:    map[string]string{},
 		LastReviewPollAt:    map[string]time.Time{},
 		ReviewRefreshFailed: map[string]bool{},
+		LastPRFetchAt:       map[string]time.Time{},
 		max:                 maxEntries,
 	}
 }
@@ -273,7 +286,7 @@ func (o *Observer) Poll(ctx context.Context) error {
 		return err
 	}
 
-	selection := o.selectRefreshCandidates(ctx, subjects, repoGuards, markRepoRefreshFailed)
+	selection := o.selectRefreshCandidates(ctx, subjects, repoGuards, markRepoRefreshFailed, now)
 	observations := map[string]ports.SCMObservation{}
 	prRefreshOK := map[string]bool{}
 	for key := range selection.candidateKeys {
@@ -330,10 +343,11 @@ func (o *Observer) Poll(ctx context.Context) error {
 		return err
 	}
 
-	for key, obs := range observations {
+	for _, key := range dispatchOrder(observations, selection.subjectsByPR) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		obs := observations[key]
 		subj, ok := selection.subjectsByPR[key]
 		if !ok {
 			continue
@@ -401,6 +415,7 @@ func (o *Observer) Poll(ctx context.Context) error {
 		if reviewModes[key] != ports.ReviewWritePreserve {
 			o.cacheSetTime(o.Cache.LastReviewPollAt, &o.Cache.lastReviewPollOrder, key, now)
 		}
+		o.cacheSetTime(o.Cache.LastPRFetchAt, &o.Cache.lastPRFetchOrder, key, now)
 	}
 	for key, ok := range repoRefreshOK {
 		if !ok {
@@ -413,6 +428,30 @@ func (o *Observer) Poll(ctx context.Context) error {
 	return nil
 }
 
+// dispatchOrder returns observation keys in a deterministic order so lifecycle
+// notifications for a session are stable across polls.
+func dispatchOrder(observations map[string]ports.SCMObservation, subjectsByPR map[string]*subject) []string {
+	keys := make([]string, 0, len(observations))
+	for key := range observations {
+		keys = append(keys, key)
+	}
+	sessionOf := func(key string) string {
+		if s := subjectsByPR[key]; s != nil {
+			return string(s.session.ID)
+		}
+		return ""
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if si, sj := sessionOf(keys[i]), sessionOf(keys[j]); si != sj {
+			return si < sj
+		}
+		if ni, nj := observations[keys[i]].PR.Number, observations[keys[j]].PR.Number; ni != nj {
+			return ni < nj
+		}
+		return keys[i] < keys[j]
+	})
+	return keys
+}
 func (o *Observer) checkCredentials(ctx context.Context) (bool, error) {
 	var probe observe.CredentialProbe
 	if checker, ok := o.provider.(credentialChecker); ok {
@@ -791,7 +830,7 @@ func sessionBranchPrefixes(branch string) []string {
 	return prefixes
 }
 
-func (o *Observer) selectRefreshCandidates(ctx context.Context, subjects map[string]*subject, guards map[string]repoGuardState, markRepoFailed func(ports.SCMRepo)) refreshSelection {
+func (o *Observer) selectRefreshCandidates(ctx context.Context, subjects map[string]*subject, guards map[string]repoGuardState, markRepoFailed func(ports.SCMRepo), now time.Time) refreshSelection {
 	selection := refreshSelection{
 		subjectsByPR:  map[string]*subject{},
 		commitETags:   map[string]pendingCacheString{},
@@ -822,6 +861,19 @@ func (o *Observer) selectRefreshCandidates(ctx context.Context, subjects map[str
 				if res.ETag != "" {
 					selection.commitETags[key] = pendingCacheString{key: commitKey, value: res.ETag}
 				}
+			}
+		}
+		if !candidate {
+			// Force an unconditional fetch once the snapshot is older than
+			// DefaultPRMaxAge. Trade-off: GitHub does not bill 304 responses, so
+			// this forgoes the conditional-request savings the ETag path bought.
+			// At the current 30s tick / 5m max-age that is ~12 unconditional
+			// fetches/hour per tracked open PR, and it scales linearly with the
+			// number of tracked PRs. It also fires for every stale PR in the same
+			// tick, so watch secondary-rate-limit burstiness as fleets grow.
+			last := o.Cache.LastPRFetchAt[key]
+			if last.IsZero() || now.Sub(last) > DefaultPRMaxAge {
+				candidate = true
 			}
 		}
 		if candidate {
@@ -1084,6 +1136,7 @@ func domainFromObservation(sessionID domain.SessionID, obs ports.SCMObservation,
 			Author:      review.Author,
 			State:       domain.ReviewDecision(firstNonEmpty(review.State, string(domain.ReviewNone))),
 			URL:         review.URL,
+			Body:        review.Body,
 			IsBot:       review.IsBot,
 			SubmittedAt: firstTime(review.SubmittedAt, now),
 		})

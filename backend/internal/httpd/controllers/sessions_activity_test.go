@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
@@ -66,6 +67,91 @@ func TestSessionsAPI_ActivityAppliesSignal(t *testing.T) {
 	}
 }
 
+func TestSessionsAPI_ActivityAcceptsBlocked(t *testing.T) {
+	rec := &fakeActivityRecorder{}
+	srv := newActivityTestServer(t, rec)
+
+	body, status, _ := doRequest(t, srv, "POST", "/api/v1/sessions/ao-1/activity", `{"state":"blocked"}`)
+	if status != http.StatusOK {
+		t.Fatalf("activity = %d, want 200; body=%s", status, body)
+	}
+	if !rec.gotSignal.Valid || rec.gotSignal.State != domain.ActivityBlocked {
+		t.Fatalf("recorder signal = %#v", rec.gotSignal)
+	}
+}
+
+func TestSessionsAPI_ActivityThreadsCorrelationFields(t *testing.T) {
+	// The optional correlation fields ride into the signal (sanitized); a
+	// body without them (old CLIs) keeps producing a plain state-only signal,
+	// which the other tests in this file pin.
+	rec := &fakeActivityRecorder{}
+	srv := newActivityTestServer(t, rec)
+
+	body, status, _ := doRequest(t, srv, "POST", "/api/v1/sessions/ao-1/activity",
+		`{"state":"active","event":"post-tool-use","toolName":"Bash","toolUseId":"toolu_42"}`)
+	if status != http.StatusOK {
+		t.Fatalf("activity = %d, want 200; body=%s", status, body)
+	}
+	want := ports.ActivitySignal{Valid: true, State: domain.ActivityActive, Event: "post-tool-use", ToolName: "Bash", ToolUseID: "toolu_42"}
+	if rec.gotSignal != want {
+		t.Fatalf("recorder signal = %#v, want %#v", rec.gotSignal, want)
+	}
+}
+
+func TestSessionsAPI_ActivityAcceptsMetadataOnlyAgentSessionID(t *testing.T) {
+	rec := &fakeActivityRecorder{}
+	srv := newActivityTestServer(t, rec)
+
+	body, status, _ := doRequest(t, srv, "POST", "/api/v1/sessions/ao-1/activity",
+		`{"event":"session-start","agentSessionId":"native-session-1"}`)
+	if status != http.StatusOK {
+		t.Fatalf("activity = %d, want 200; body=%s", status, body)
+	}
+	want := ports.ActivitySignal{Event: "session-start", AgentSessionID: "native-session-1"}
+	if rec.gotSignal != want {
+		t.Fatalf("recorder signal = %#v, want %#v", rec.gotSignal, want)
+	}
+}
+
+func TestSessionsAPI_ActivityThreadsAgentSessionIDWithState(t *testing.T) {
+	rec := &fakeActivityRecorder{}
+	srv := newActivityTestServer(t, rec)
+
+	body, status, _ := doRequest(t, srv, "POST", "/api/v1/sessions/ao-1/activity",
+		`{"state":"idle","event":"stop","agentSessionId":"native-session-1"}`)
+	if status != http.StatusOK {
+		t.Fatalf("activity = %d, want 200; body=%s", status, body)
+	}
+	want := ports.ActivitySignal{Valid: true, State: domain.ActivityIdle, Event: "stop", AgentSessionID: "native-session-1"}
+	if rec.gotSignal != want {
+		t.Fatalf("recorder signal = %#v, want %#v", rec.gotSignal, want)
+	}
+}
+
+func TestSessionsAPI_ActivityCapsOverlongCorrelationFields(t *testing.T) {
+	// Overlong values are dropped, not truncated: a truncated id could never
+	// match its pre/post counterpart, so an empty value (fail-safe: no
+	// correlated clear) is strictly better.
+	rec := &fakeActivityRecorder{}
+	srv := newActivityTestServer(t, rec)
+
+	long := make([]byte, 300)
+	for i := range long {
+		long[i] = 'a'
+	}
+	body, status, _ := doRequest(t, srv, "POST", "/api/v1/sessions/ao-1/activity",
+		`{"state":"active","event":"post-tool-use","toolUseId":"`+string(long)+`"}`)
+	if status != http.StatusOK {
+		t.Fatalf("activity = %d, want 200; body=%s", status, body)
+	}
+	if rec.gotSignal.ToolUseID != "" {
+		t.Fatalf("overlong toolUseId not dropped: %q", rec.gotSignal.ToolUseID)
+	}
+	if rec.gotSignal.Event != "post-tool-use" {
+		t.Fatalf("in-bounds event dropped: %#v", rec.gotSignal)
+	}
+}
+
 func TestSessionsAPI_ActivityRejectsUnknownState(t *testing.T) {
 	rec := &fakeActivityRecorder{}
 	srv := newActivityTestServer(t, rec)
@@ -74,6 +160,30 @@ func TestSessionsAPI_ActivityRejectsUnknownState(t *testing.T) {
 	assertErrorCode(t, body, status, http.StatusBadRequest, "INVALID_ACTIVITY_STATE")
 	if rec.calls != 0 {
 		t.Fatalf("recorder should not be called for an invalid state; calls=%d", rec.calls)
+	}
+}
+
+func TestSessionsAPI_ActivityRejectsEmptyMetadataOnlyRequest(t *testing.T) {
+	rec := &fakeActivityRecorder{}
+	srv := newActivityTestServer(t, rec)
+
+	body, status, _ := doRequest(t, srv, "POST", "/api/v1/sessions/ao-1/activity", `{"event":"session-start"}`)
+	assertErrorCode(t, body, status, http.StatusBadRequest, "ACTIVITY_OR_SESSION_ID_REQUIRED")
+	if rec.calls != 0 {
+		t.Fatalf("recorder should not be called for an empty metadata request; calls=%d", rec.calls)
+	}
+}
+
+func TestSessionsAPI_ActivityRejectsOverlongMetadataOnlySessionID(t *testing.T) {
+	rec := &fakeActivityRecorder{}
+	srv := newActivityTestServer(t, rec)
+	longID := strings.Repeat("a", 300)
+
+	body, status, _ := doRequest(t, srv, "POST", "/api/v1/sessions/ao-1/activity",
+		`{"event":"session-start","agentSessionId":"`+longID+`"}`)
+	assertErrorCode(t, body, status, http.StatusBadRequest, "ACTIVITY_OR_SESSION_ID_REQUIRED")
+	if rec.calls != 0 {
+		t.Fatalf("recorder should not be called for an overlong session id; calls=%d", rec.calls)
 	}
 }
 

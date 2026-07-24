@@ -13,13 +13,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/agentbase"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/binaryutil"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
@@ -36,8 +36,26 @@ func New() *Plugin {
 	return &Plugin{}
 }
 
+// EmitsSubmitActivity signals Codex fires a user-prompt-submit hook under AO's
+// launch. See ports.ActivitySignaler.
+func (p *Plugin) EmitsSubmitActivity() bool { return true }
+
+// EmitsBlockedActivity is false: codex reports permission prompts as
+// waiting_input — it installs no post-tool-use hook, so a blocked state could
+// never be cleared mid-turn. confirmActive must not nudge it (an Enter could
+// answer a pending decision it cannot report as blocked). See
+// ports.ActivitySignaler.
+func (p *Plugin) EmitsBlockedActivity() bool { return false }
+
+// SteersActiveTurn is true: submitting input to the codex TUI mid-turn steers
+// the running turn rather than being swallowed or queued, so AO may write an
+// unsolicited coordination message into an active codex session. See
+// ports.ActiveTurnSteerer.
+func (p *Plugin) SteersActiveTurn() bool { return true }
+
 var _ adapters.Adapter = (*Plugin)(nil)
 var _ ports.Agent = (*Plugin)(nil)
+var _ ports.ActiveTurnSteerer = (*Plugin)(nil)
 var _ ports.AgentAuthChecker = (*Plugin)(nil)
 
 // Manifest returns the adapter's static self-description.
@@ -51,6 +69,22 @@ func (p *Plugin) Manifest() adapters.Manifest {
 			adapters.CapabilityAgent,
 		},
 	}
+}
+
+// GetConfigSpec reports the per-project agent config keys Codex understands.
+func (p *Plugin) GetConfigSpec(ctx context.Context) (ports.ConfigSpec, error) {
+	if err := ctx.Err(); err != nil {
+		return ports.ConfigSpec{}, err
+	}
+	return ports.ConfigSpec{
+		Fields: []ports.ConfigField{
+			{
+				Key:         "model",
+				Type:        ports.ConfigFieldString,
+				Description: "Model override passed to `codex --model`.",
+			},
+		},
+	}, nil
 }
 
 // GetLaunchCommand builds the argv to start a new Codex session, applying the
@@ -72,11 +106,12 @@ func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (
 	appendSessionHookFlags(&cmd)
 	appendTerminalCompatibilityFlags(&cmd)
 	appendWorkspaceTrustFlag(&cmd, cfg.WorkspacePath)
+	appendModelFlag(&cmd, cfg.Config)
 
-	if cfg.SystemPromptFile != "" {
-		cmd = append(cmd, "-c", "model_instructions_file="+cfg.SystemPromptFile)
-	} else if cfg.SystemPrompt != "" {
+	if cfg.SystemPrompt != "" {
 		cmd = append(cmd, "-c", "developer_instructions="+codexTOMLConfigString(cfg.SystemPrompt))
+	} else if cfg.SystemPromptFile != "" {
+		cmd = append(cmd, "-c", "model_instructions_file="+cfg.SystemPromptFile)
 	}
 
 	if cfg.Prompt != "" {
@@ -113,6 +148,12 @@ func (p *Plugin) GetRestoreCommand(ctx context.Context, cfg ports.RestoreConfig)
 	appendSessionHookFlags(&cmd)
 	appendTerminalCompatibilityFlags(&cmd)
 	appendWorkspaceTrustFlag(&cmd, cfg.Session.WorkspacePath)
+	appendModelFlag(&cmd, cfg.Config)
+	if cfg.SystemPrompt != "" {
+		cmd = append(cmd, "-c", "developer_instructions="+codexTOMLConfigString(cfg.SystemPrompt))
+	} else if cfg.SystemPromptFile != "" {
+		cmd = append(cmd, "-c", "model_instructions_file="+cfg.SystemPromptFile)
+	}
 	cmd = append(cmd, agentSessionID)
 	return cmd, true, nil
 }
@@ -154,26 +195,13 @@ func (p *Plugin) AuthStatus(ctx context.Context) (ports.AgentAuthStatus, error) 
 }
 
 // ResolveCodexBinary returns the path to the codex binary on this machine,
-// searching PATH then a handful of well-known install locations
-// (Homebrew, Cargo, npm global, NVM). Returns "codex" as a last-ditch
-// fallback so callers see a clear "command not found" rather than an empty
-// argv.
+// searching platform-specific well-known install locations and PATH.
 func ResolveCodexBinary(ctx context.Context) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 
 	if runtime.GOOS == "windows" {
-		for _, name := range []string{"codex.exe", "codex.cmd", "codex"} {
-			path, err := exec.LookPath(name)
-			if err == nil && path != "" {
-				return resolveNativeWindowsCodex(path), nil
-			}
-			if err := ctx.Err(); err != nil {
-				return "", err
-			}
-		}
-
 		candidates := []string{}
 		if appData := os.Getenv("APPDATA"); appData != "" {
 			shim := filepath.Join(appData, "npm", "codex.cmd")
@@ -195,6 +223,19 @@ func ResolveCodexBinary(ctx context.Context) (string, error) {
 			}
 		}
 
+		for _, name := range []string{"codex.cmd", "codex", "codex.exe"} {
+			path, err := exec.LookPath(name)
+			if err == nil && path != "" {
+				if isWindowsAppsCodexExecutable(path) {
+					continue
+				}
+				return resolveNativeWindowsCodex(path), nil
+			}
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+		}
+
 		return "", fmt.Errorf("codex: %w", ports.ErrAgentBinaryNotFound)
 	}
 
@@ -208,10 +249,16 @@ func ResolveCodexBinary(ctx context.Context) (string, error) {
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		candidates = append(candidates,
-			filepath.Join(home, ".cargo", "bin", "codex"),
+			filepath.Join(home, ".npm-global", "bin", "codex"),
 			filepath.Join(home, ".npm", "bin", "codex"),
+			filepath.Join(home, ".local", "bin", "codex"),
+			filepath.Join(home, ".cargo", "bin", "codex"),
 		)
-		candidates = append(candidates, nvmNodeBinCandidates(home, "codex")...)
+		nodeManagerCandidates, err := binaryutil.UnixNodeManagerBinCandidates(ctx, home, "codex")
+		if err != nil {
+			return "", err
+		}
+		candidates = append(candidates, nodeManagerCandidates...)
 	}
 
 	for _, candidate := range candidates {
@@ -226,14 +273,6 @@ func ResolveCodexBinary(ctx context.Context) (string, error) {
 	return "", fmt.Errorf("codex: %w", ports.ErrAgentBinaryNotFound)
 }
 
-func nvmNodeBinCandidates(home, binary string) []string {
-	matches, err := filepath.Glob(filepath.Join(home, ".nvm", "versions", "node", "*", "bin", binary))
-	if err != nil || len(matches) == 0 {
-		return nil
-	}
-	sort.Sort(sort.Reverse(sort.StringSlice(matches)))
-	return matches
-}
 func resolveNativeWindowsCodex(path string) string {
 	if runtime.GOOS != "windows" || !strings.EqualFold(filepath.Ext(path), ".cmd") {
 		return path
@@ -252,6 +291,16 @@ func windowsNativeCodexCandidatesForShim(shim string) []string {
 		filepath.Join(dir, "node_modules", "@openai", "codex", "node_modules", "@openai", "codex-win32-x64", "vendor", "x86_64-pc-windows-msvc", "bin", "codex.exe"),
 		filepath.Join(dir, "node_modules", "@openai", "codex", "bin", "codex.exe"),
 	}
+}
+
+func isWindowsAppsCodexExecutable(path string) bool {
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	clean := strings.ToLower(filepath.Clean(path))
+	base := filepath.Base(clean)
+	return (base == "codex.exe" || base == "codex") &&
+		strings.Contains(clean, string(filepath.Separator)+"windowsapps"+string(filepath.Separator)+"openai.codex_")
 }
 
 func (p *Plugin) codexBinary(ctx context.Context) (string, error) {
@@ -314,6 +363,12 @@ func appendHookTrustBypassFlag(cmd *[]string) {
 func appendTerminalCompatibilityFlags(cmd *[]string) {
 	if runtime.GOOS == "windows" {
 		*cmd = append(*cmd, "--no-alt-screen")
+	}
+}
+
+func appendModelFlag(cmd *[]string, cfg ports.AgentConfig) {
+	if model := strings.TrimSpace(cfg.Model); model != "" {
+		*cmd = append(*cmd, "--model", model)
 	}
 }
 

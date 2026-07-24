@@ -104,10 +104,13 @@ type projectConfig struct {
 	Env                map[string]string   `json:"env,omitempty"`
 	Symlinks           []string            `json:"symlinks,omitempty"`
 	PostCreate         []string            `json:"postCreate,omitempty"`
+	AgentRules         string              `json:"agentRules,omitempty"`
+	AgentRulesFile     string              `json:"agentRulesFile,omitempty"`
+	OrchestratorRules  string              `json:"orchestratorRules,omitempty"`
+	OrchestratorPrompt string              `json:"orchestratorPrompt,omitempty"`
 	AgentConfig        agentConfig         `json:"agentConfig,omitempty"`
 	Worker             roleOverride        `json:"worker,omitempty"`
 	Orchestrator       roleOverride        `json:"orchestrator,omitempty"`
-	OrchestratorPrompt string              `json:"orchestratorPrompt,omitempty"`
 	TrackerIntake      trackerIntakeConfig `json:"trackerIntake,omitempty"`
 }
 
@@ -124,6 +127,9 @@ type projectSetConfigOptions struct {
 	permission             string
 	workerAgent            string
 	orchestratorAgent      string
+	agentRules             string
+	agentRulesFile         string
+	orchestratorRules      string
 	orchestratorPromptFile string
 	env                    []string
 	symlink                []string
@@ -275,7 +281,7 @@ func newProjectSetConfigCommand(ctx *commandContext) *cobra.Command {
 		Use:   "set-config <id>",
 		Short: "Set the per-project config",
 		Long: "Replace a project's per-project config (branch, session prefix, env, " +
-			"symlinks, post-create, agent model/permissions, role overrides, tracker intake). The config " +
+			"symlinks, post-create, rules, agent model/permissions, role overrides, tracker intake). The config " +
 			"is resolved when a session spawns.\n\n" +
 			"Set fields via flags, pass the whole object with --config-json, or --clear " +
 			"to remove all config.",
@@ -317,6 +323,9 @@ func newProjectSetConfigCommand(ctx *commandContext) *cobra.Command {
 	f.StringVar(&opts.permission, "permission", "", "Permission mode: default, accept-edits, auto, bypass-permissions")
 	f.StringVar(&opts.workerAgent, "worker-agent", "", "Harness override for worker sessions")
 	f.StringVar(&opts.orchestratorAgent, "orchestrator-agent", "", "Harness override for orchestrator sessions")
+	f.StringVar(&opts.agentRules, "agent-rules", "", "Project-specific standing instructions for worker sessions")
+	f.StringVar(&opts.agentRulesFile, "agent-rules-file", "", "Repo-relative file containing worker standing instructions")
+	f.StringVar(&opts.orchestratorRules, "orchestrator-rules", "", "Project-specific standing instructions for orchestrator sessions")
 	f.StringVar(&opts.orchestratorPromptFile, "orchestrator-prompt-file", "", "Path to a file with the orchestrator system prompt, or - for stdin")
 	f.StringArrayVar(&opts.env, "env", nil, "Env var KEY=VALUE forwarded into sessions (repeatable)")
 	f.StringArrayVar(&opts.symlink, "symlink", nil, "Repo-relative path to symlink into workspaces (repeatable)")
@@ -364,10 +373,13 @@ func buildProjectConfig(opts projectSetConfigOptions, orchestratorPrompt string)
 		Env:                env,
 		Symlinks:           opts.symlink,
 		PostCreate:         opts.postCreate,
+		AgentRules:         opts.agentRules,
+		AgentRulesFile:     opts.agentRulesFile,
+		OrchestratorRules:  opts.orchestratorRules,
+		OrchestratorPrompt: orchestratorPrompt,
 		AgentConfig:        agentConfig{Model: opts.model, Permissions: opts.permission},
 		Worker:             roleOverride{Agent: opts.workerAgent},
 		Orchestrator:       roleOverride{Agent: opts.orchestratorAgent},
-		OrchestratorPrompt: orchestratorPrompt,
 		TrackerIntake: trackerIntakeConfig{
 			Enabled:  opts.trackerIntake,
 			Provider: trackerProviderForFlags(opts),

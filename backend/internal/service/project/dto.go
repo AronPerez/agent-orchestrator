@@ -18,6 +18,23 @@ type AddInput struct {
 	AsWorkspace bool                  `json:"asWorkspace,omitempty"`
 }
 
+// InitializeRepositoryInput is the body shape for POST /api/v1/projects/initialize.
+type InitializeRepositoryInput struct {
+	Path string `json:"path"`
+}
+
+// InitializeRepositoryResult reports the repository path initialized for onboarding.
+type InitializeRepositoryResult struct {
+	Path string `json:"path"`
+}
+
+// UpdateSettingsInput is the body shape for PUT /api/v1/projects/{id}. It
+// atomically replaces the user-facing display name and per-project config.
+type UpdateSettingsInput struct {
+	DisplayName string               `json:"displayName" minLength:"1" maxLength:"20"`
+	Config      domain.ProjectConfig `json:"config"`
+}
+
 // SetConfigInput is the body shape for PUT /api/v1/projects/{id}/config. Config
 // replaces the project's stored config wholesale; a zero-value config clears it.
 type SetConfigInput struct {

@@ -19,7 +19,7 @@
 //    itself only fires onResize when the grid actually changed, so repeated
 //    fits don't spam the PTY.
 
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { CanvasAddon } from "@xterm/addon-canvas";
 import { FitAddon } from "@xterm/addon-fit";
@@ -29,8 +29,16 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import type { AttachableTerminal, TerminalUserInputSource } from "../hooks/useTerminalSession";
 import { aoBridge } from "../lib/bridge";
+import { TERMINAL_FONT_SIZE_DEFAULT } from "../lib/design-tokens";
 import { buildTerminalThemes } from "../lib/terminal-themes";
 import type { Theme } from "../stores/ui-store";
+import {
+	DropdownMenu,
+	DropdownMenuContent,
+	DropdownMenuItem,
+	DropdownMenuSeparator,
+	DropdownMenuTrigger,
+} from "./ui/dropdown-menu";
 
 export type XtermTerminalProps = {
 	ariaLabel?: string;
@@ -46,6 +54,8 @@ export type XtermTerminalProps = {
 	paneScrollsByKeyboard?: boolean;
 	/** Terminal construction failed; the owner decides how to surface it. */
 	onError?: (error: unknown) => void;
+	/** Called after a terminal hyperlink is opened in the OS browser. */
+	onLinkOpen?: (uri: string) => void;
 	/**
 	 * The terminal is open in the DOM and ready to be attached to a PTY. The
 	 * handle stays valid until unmount; cols/rows are live getters.
@@ -72,9 +82,7 @@ function loadRenderer(term: Terminal): void {
 	}
 }
 
-// xterm palette tracks the app theme (see lib/terminal-themes.ts + --term-* in
-// styles.css). The PTY content is still the agent's own ANSI output.
-const terminalThemes = buildTerminalThemes();
+// xterm palette tracks the app theme (see lib/terminal-themes.ts + tokens.css).
 const SUPPRESS_NATIVE_PASTE_MS = 100;
 
 // Erase scrollback (3J) + display (2J) and home the cursor. Deliberately NOT
@@ -169,13 +177,23 @@ type XtermInternal = Terminal & {
 	};
 };
 
-// We never scroll locally (scrollback:0). Instead we synthesize SGR mouse-wheel
-// reports and write them to the pane; tmux (with `mouse on`, set by the runtime
-// adapter) acts on them and scrolls its scrollback via copy-mode. With
-// scrollback:0 xterm would otherwise convert the wheel into cursor-arrow keys
-// (its alt-buffer fallback), which move the agent's cursor rather than scrolling.
-// SGR button 64 = wheel up, 65 = down; reports are 1-based and a single cell is
-// enough for a borderless single pane.
+type TerminalContextMenuState = {
+	canCopy: boolean;
+	open: boolean;
+	x: number;
+	y: number;
+};
+
+type TerminalContextMenuAction = "copy" | "paste" | "selectAll" | "clear";
+
+type TerminalContextMenuActions = Record<TerminalContextMenuAction, () => void>;
+
+// For mouse-tracking panes we synthesize SGR mouse-wheel reports and write them
+// to the pane; tmux (with `mouse on`, set by the runtime adapter) acts on them
+// and scrolls its scrollback via copy-mode. Left to itself xterm would convert
+// the wheel into cursor-arrow keys (its alt-buffer fallback), which move the
+// agent's cursor rather than scrolling. SGR button 64 = wheel up, 65 = down;
+// reports are 1-based and a single cell is enough for a borderless single pane.
 const SGR_WHEEL_UP = 64;
 const SGR_WHEEL_DOWN = 65;
 
@@ -207,10 +225,29 @@ export function XtermTerminal(props: XtermTerminalProps) {
 	const hostRef = useRef<HTMLDivElement | null>(null);
 	const termRef = useRef<Terminal | null>(null);
 	const fitRef = useRef<(() => void) | null>(null);
+	const contextMenuActionsRef = useRef<TerminalContextMenuActions | null>(null);
+	const [contextMenu, setContextMenu] = useState<TerminalContextMenuState>({
+		canCopy: false,
+		open: false,
+		x: 0,
+		y: 0,
+	});
 	// Latest callbacks in a ref so the mount effect stays dependency-free — we
 	// never tear down and recreate the terminal because a handler identity
 	// changed between renders.
 	const callbacksRef = useRef(props);
+
+	const setContextMenuOpen = useCallback((open: boolean) => {
+		setContextMenu((current) => ({ ...current, open }));
+	}, []);
+
+	const runContextMenuAction = useCallback(
+		(action: TerminalContextMenuAction) => {
+			contextMenuActionsRef.current?.[action]();
+			setContextMenuOpen(false);
+		},
+		[setContextMenuOpen],
+	);
 
 	useEffect(() => {
 		callbacksRef.current = props;
@@ -219,7 +256,8 @@ export function XtermTerminal(props: XtermTerminalProps) {
 	useEffect(() => {
 		const term = termRef.current;
 		if (!term) return;
-		term.options.theme = props.theme === "dark" ? terminalThemes.dark : terminalThemes.light;
+		const { dark, light } = buildTerminalThemes();
+		term.options.theme = props.theme === "dark" ? dark : light;
 	}, [props.theme]);
 
 	useEffect(() => {
@@ -234,9 +272,14 @@ export function XtermTerminal(props: XtermTerminalProps) {
 	useEffect(() => {
 		const host = hostRef.current;
 		if (!host) return undefined;
+		const activateLink = (_event: MouseEvent, uri: string) => {
+			window.open(uri, "_blank", "noopener");
+			callbacksRef.current.onLinkOpen?.(uri);
+		};
 
 		let term: Terminal;
 		try {
+			const { dark, light } = buildTerminalThemes();
 			term = new Terminal({
 				// Required for the Unicode 11 width addon below.
 				allowProposedApi: true,
@@ -249,8 +292,9 @@ export function XtermTerminal(props: XtermTerminalProps) {
 				fontFamily:
 					getComputedStyle(host).getPropertyValue("--font-mono").trim() ||
 					'ui-monospace, Menlo, Monaco, "Courier New", monospace',
-				fontSize: props.fontSize ?? 12,
+				fontSize: props.fontSize ?? TERMINAL_FONT_SIZE_DEFAULT,
 				lineHeight: 1.35,
+				linkHandler: { activate: activateLink },
 				// Agent TUIs leave SGR bold active while using ANSI black for
 				// separators; keep bold weight-only so black stays black.
 				drawBoldTextInBrightColors: false,
@@ -258,14 +302,15 @@ export function XtermTerminal(props: XtermTerminalProps) {
 				// background, the way VS Code's terminal does; without it dim colors
 				// render washed out.
 				minimumContrastRatio: 4.5,
-				// The pane PTY runs a full-screen alt-buffer app (tmux attach) that
-				// owns scrollback itself, so xterm's own buffer never accumulates
-				// history (the alt screen doesn't feed scrollback) and wheel events
-				// are forwarded as mouse reports instead of scrolling locally. 0 also
-				// stops FitAddon reserving ~14px on the right for a scrollbar that can
-				// never appear.
-				scrollback: 0,
-				theme: props.theme === "dark" ? terminalThemes.dark : terminalThemes.light,
+				// Alt-buffer panes (tmux attach, mouse-tracking agent TUIs) never feed
+				// this buffer — the alt screen doesn't accumulate scrollback — so this
+				// only matters for normal-buffer panes that print their transcript and
+				// rely on the terminal's scrollback (codex, a plain shell). Keep it > 0
+				// so that history survives to be scrolled locally (see the wheel
+				// handler's normal-buffer branch). The scrollbar itself is hidden in
+				// CSS so FitAddon's ~14px reservation doesn't shift the grid.
+				scrollback: 5000,
+				theme: props.theme === "dark" ? dark : light,
 			});
 		} catch (error) {
 			callbacksRef.current.onError?.(error);
@@ -279,17 +324,13 @@ export function XtermTerminal(props: XtermTerminalProps) {
 		const unicode = new Unicode11Addon();
 		term.loadAddon(unicode);
 		term.unicode.activeVersion = "11";
-		// Open links in the OS browser. The default WebLinksAddon handler calls
+		// Open plain and OSC 8 links in the OS browser. The default handlers call
 		// window.open() with no URL and then assigns location.href, but the
 		// Electron main process denies every window.open and only forwards the URL
-		// passed to it (main.ts setWindowOpenHandler), so the default handler's
+		// passed to it (main.ts setWindowOpenHandler), so the default handlers'
 		// empty open is dropped and clicks silently no-op. Pass the matched URL to
 		// window.open directly so the main process routes it to shell.openExternal.
-		term.loadAddon(
-			new WebLinksAddon((_event, uri) => {
-				window.open(uri, "_blank", "noopener");
-			}),
-		);
+		term.loadAddon(new WebLinksAddon(activateLink));
 		term.loadAddon(new SearchAddon());
 
 		term.open(host);
@@ -347,14 +388,66 @@ export function XtermTerminal(props: XtermTerminalProps) {
 					console.warn("Unable to paste terminal clipboard text", error);
 				});
 		};
+		const focusTerminal = () => {
+			try {
+				term.focus();
+			} catch {
+				// Terminal is being torn down or its hidden textarea is unavailable.
+			}
+		};
+		contextMenuActionsRef.current = {
+			clear: () => {
+				term.clear();
+				focusTerminal();
+			},
+			copy: () => {
+				copySelection();
+				focusTerminal();
+			},
+			paste: () => {
+				pasteFromClipboard();
+				focusTerminal();
+			},
+			selectAll: () => {
+				term.selectAll();
+				focusTerminal();
+			},
+		};
+		const openContextMenu = (event: MouseEvent) => {
+			event.preventDefault();
+			event.stopPropagation();
+			setContextMenu({
+				canCopy: term.hasSelection(),
+				open: true,
+				x: event.clientX,
+				y: event.clientY,
+			});
+		};
+		host.addEventListener("contextmenu", openContextMenu);
 		term.attachCustomKeyEventHandler((event) => {
-			// xterm runs this handler for keydown, keypress AND keyup. Our
-			// copy/paste/shortcut handling must fire once per chord — on keydown
-			// only. Without this guard the keyup for Cmd/Ctrl+V re-matched the paste
-			// shortcut and pasted a second time (the #400 native-paste suppression
-			// only guarded the browser paste event, not this keyup re-trigger). Real
-			// KeyboardEvents always carry a type; a missing type stays processable.
-			if (event.type && event.type !== "keydown") return true;
+			// xterm invokes this same handler on keydown, keyup, AND keypress (see
+			// Terminal.ts _keyDown/_keyUp/_keyPress). Only keydown should trigger our
+			// shortcut actions (copy/paste/word-nav) — otherwise releasing the key
+			// re-matches the same combo and fires the action a second time (double
+			// paste, double word-delete, etc). keyup/keypress fall through to
+			// xterm's own default handling for that event type.
+			if (event.type === "keyup" || event.type === "keypress") return true;
+			// Shift+Enter → newline without submitting, matching Claude Code / Codex.
+			// A terminal normally sends the same CR for Enter and Shift+Enter, so the
+			// agent can't distinguish them; emit the meta-return (ESC+CR) that
+			// readline/Ink-based TUIs interpret as "insert a newline" rather than
+			// "submit". Plain Enter still falls through to xterm's default CR.
+			//
+			// SCOPE: this meta-return is applied to every pane intentionally for now.
+			// It is correct for agent TUIs but untested and unintended for plain login
+			// shells, where ESC+CR is not a "newline" affordance. The correct fix is to
+			// scope it by pane kind — TerminalPane already branches on
+			// `terminalTarget?.kind === "shell"` at the XtermTerminal call site.
+			if (event.key === "Enter" && event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
+				consumeTerminalShortcut(event);
+				emitUserInput("\x1b\r", "keyboard");
+				return false;
+			}
 			if (isTerminalCopyShortcut(event)) {
 				if (copySelection()) {
 					consumeTerminalShortcut(event);
@@ -504,29 +597,39 @@ export function XtermTerminal(props: XtermTerminalProps) {
 			} else if (event.deltaMode === 2 /* DOM_DELTA_PAGE */) {
 				lines = (Math.trunc(event.deltaY) || Math.sign(event.deltaY)) * term.rows;
 			} else {
-				const rowHeight = (term.options.fontSize ?? 12) * (term.options.lineHeight ?? 1);
+				const rowHeight = (term.options.fontSize ?? TERMINAL_FONT_SIZE_DEFAULT) * (term.options.lineHeight ?? 1);
 				wheelAccumPx += event.deltaY;
 				lines = Math.trunc(wheelAccumPx / rowHeight);
 				wheelAccumPx -= lines * rowHeight;
 			}
 			if (lines === 0) return false;
-			// The SGR wheel path exists to drive tmux/zellij copy-mode on
-			// macOS/Linux. It cannot scroll a full-screen TUI that keeps its own
-			// transcript and only scrolls on PageUp/PageDown (opencode): the report
-			// is either consumed by the mux or handed to an app that ignores it.
-			// Send page keys for such apps (paneScrollsByKeyboard), on Windows
-			// (conpty has no mux, so SGR reaches the app and is ignored), and for
-			// any pane app with mouse tracking fully off.
-			if (
-				callbacksRef.current.paneScrollsByKeyboard ||
-				isWindowsPlatform() ||
-				term.modes.mouseTrackingMode === "none"
-			) {
+			// A full-screen TUI that keeps its own transcript and scrolls it only by
+			// keyboard (opencode) ignores wheel/mouse reports on every platform; route
+			// its wheel to page keys. Kept first so opencode is unaffected by the
+			// buffer-aware paths below.
+			if (callbacksRef.current.paneScrollsByKeyboard) {
 				emitUserInput(pageKeyReport(lines), "wheel");
 				return false;
 			}
-			const button = lines < 0 ? SGR_WHEEL_UP : SGR_WHEEL_DOWN;
-			emitUserInput(sgrWheelReport(button, Math.abs(lines)), "wheel");
+			// A normal-buffer pane with mouse tracking off (codex, a plain shell)
+			// prints its transcript and relies on the terminal's own scrollback — the
+			// way it scrolls in a raw terminal. Scroll xterm's viewport locally; the
+			// pane never sees these bytes. Requires scrollback > 0 (see Terminal opts).
+			if (term.modes.mouseTrackingMode === "none" && term.buffer.active.type === "normal") {
+				term.scrollLines(lines);
+				return false;
+			}
+			// Mouse tracking on: the pane (tmux/zellij copy-mode, or any app that
+			// tracks the mouse) acts on SGR wheel reports. On Windows conpty this
+			// reaches the app directly; under a mux it drives copy-mode.
+			if (term.modes.mouseTrackingMode !== "none") {
+				const button = lines < 0 ? SGR_WHEEL_UP : SGR_WHEEL_DOWN;
+				emitUserInput(sgrWheelReport(button, Math.abs(lines)), "wheel");
+				return false;
+			}
+			// Alt-buffer pane with mouse tracking off and no keyboard-scroll hint:
+			// no scrollback to move locally, so fall back to page keys.
+			emitUserInput(pageKeyReport(lines), "wheel");
 			return false;
 		});
 		const pasteInput = (event: ClipboardEvent) => {
@@ -544,6 +647,39 @@ export function XtermTerminal(props: XtermTerminalProps) {
 		};
 		host.addEventListener("paste", pasteInput, true);
 		host.addEventListener("compositionend", compositionInput, true);
+
+		// A file dropped on the pane inserts its path, mirroring a native terminal
+		// so an agent (e.g. Claude Code) attaches it. The sandboxed renderer cannot
+		// read a dropped file's original path on macOS, so the bytes are stashed to
+		// a temp file by the main process and that path is inserted instead.
+		const isFileDrag = (event: DragEvent) => Array.from(event.dataTransfer?.types ?? []).includes("Files");
+		const dragOverInput = (event: DragEvent) => {
+			if (!isFileDrag(event)) return;
+			event.preventDefault();
+			if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+		};
+		const dropInput = (event: DragEvent) => {
+			const files = Array.from(event.dataTransfer?.files ?? []);
+			if (files.length === 0) return;
+			event.preventDefault();
+			event.stopPropagation();
+			void (async () => {
+				const paths: string[] = [];
+				for (const file of files) {
+					try {
+						const bytes = new Uint8Array(await file.arrayBuffer());
+						const saved = await aoBridge.terminal.saveDroppedFile({ name: file.name, bytes });
+						if (saved) paths.push(saved);
+					} catch (error) {
+						console.warn("Unable to attach dropped file", error);
+					}
+				}
+				if (paths.length === 0) return;
+				pasteText(`${paths.map((p) => (/\s/.test(p) ? `'${p}'` : p)).join(" ")} `);
+			})();
+		};
+		host.addEventListener("dragover", dragOverInput);
+		host.addEventListener("drop", dropInput);
 
 		// Live cols/rows getters: the owner reads the current grid at attach time,
 		// not a snapshot taken at ready time (the first fit may not have run yet).
@@ -576,8 +712,12 @@ export function XtermTerminal(props: XtermTerminalProps) {
 			host.removeEventListener("copy", copyInput);
 			window.removeEventListener("keydown", copyShortcut, true);
 			selectionChange.dispose();
+			host.removeEventListener("contextmenu", openContextMenu);
 			host.removeEventListener("paste", pasteInput, true);
 			host.removeEventListener("compositionend", compositionInput, true);
+			host.removeEventListener("dragover", dragOverInput);
+			host.removeEventListener("drop", dropInput);
+			contextMenuActionsRef.current = null;
 			clearSuppressNativePaste();
 			keyInput.dispose();
 			userInputListeners.clear();
@@ -591,11 +731,48 @@ export function XtermTerminal(props: XtermTerminalProps) {
 	}, []);
 
 	return (
-		<div
-			ref={hostRef}
-			aria-label={props.ariaLabel}
-			className={props.className}
-			style={{ height: "100%", overflow: "hidden", width: "100%" }}
-		/>
+		<>
+			<div
+				ref={hostRef}
+				aria-label={props.ariaLabel}
+				className={props.className}
+				style={{ height: "100%", overflow: "hidden", width: "100%" }}
+			/>
+			<DropdownMenu modal={false} open={contextMenu.open} onOpenChange={setContextMenuOpen}>
+				<DropdownMenuTrigger asChild>
+					<button
+						type="button"
+						aria-hidden="true"
+						tabIndex={-1}
+						style={{
+							border: 0,
+							height: 0,
+							left: contextMenu.x,
+							opacity: 0,
+							padding: 0,
+							pointerEvents: "none",
+							position: "fixed",
+							top: contextMenu.y,
+							width: 0,
+						}}
+					/>
+				</DropdownMenuTrigger>
+				<DropdownMenuContent
+					align="start"
+					className="min-w-36"
+					onCloseAutoFocus={(event) => event.preventDefault()}
+					side="right"
+					sideOffset={2}
+				>
+					<DropdownMenuItem disabled={!contextMenu.canCopy} onSelect={() => runContextMenuAction("copy")}>
+						Copy
+					</DropdownMenuItem>
+					<DropdownMenuItem onSelect={() => runContextMenuAction("paste")}>Paste</DropdownMenuItem>
+					<DropdownMenuItem onSelect={() => runContextMenuAction("selectAll")}>Select All</DropdownMenuItem>
+					<DropdownMenuSeparator />
+					<DropdownMenuItem onSelect={() => runContextMenuAction("clear")}>Clear</DropdownMenuItem>
+				</DropdownMenuContent>
+			</DropdownMenu>
+		</>
 	);
 }

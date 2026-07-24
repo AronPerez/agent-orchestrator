@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/telemetrymeta"
@@ -45,12 +47,14 @@ type ControlDeps struct {
 func NewRouterWithControl(cfg config.Config, log *slog.Logger, termMgr *terminal.Manager, deps APIDeps, control ControlDeps) chi.Router {
 	log = loggerOrDefault(log)
 	r := chi.NewRouter()
+	api := NewAPI(cfg, deps)
 
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(requestLogger(log, deps.Telemetry))
 	r.Use(recoverTelemetry(log, deps.Telemetry))
 	r.Use(corsMiddleware(cfg.AllowedOrigins))
+	r.Use(previewOriginMiddleware(api.sessions))
 
 	// JSON envelopes for unmatched routes / methods — chi's defaults are
 	// text/plain, which would break consumers that parse every response as
@@ -58,20 +62,36 @@ func NewRouterWithControl(cfg config.Config, log *slog.Logger, termMgr *terminal
 	r.NotFound(notFoundJSON)
 	r.MethodNotAllowed(methodNotAllowedJSON)
 
-	mountHealth(r)
+	mountHealth(r, cfg)
 	mountTerminalMux(r, termMgr, log)
 	mountControl(r, control)
 	mountTelemetry(r, deps.Telemetry)
-	NewAPI(cfg, deps).Register(r)
+	mountMobile(r, deps.Mobile)
+	api.Register(r)
 
 	return r
 }
 
+func previewOriginMiddleware(sessions *controllers.SessionsController) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if sessions != nil && sessions.PreviewOrigin(w, r) {
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // mountHealth registers the liveness and readiness probes the Electron
 // supervisor polls before letting the renderer connect.
-func mountHealth(r chi.Router) {
-	r.Get("/healthz", handleHealthz)
-	r.Get("/readyz", handleReadyz)
+func mountHealth(r chi.Router, cfg config.Config) {
+	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		envelope.WriteJSON(w, http.StatusOK, daemonProbePayload("ok", cfg))
+	})
+	r.Get("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+		envelope.WriteJSON(w, http.StatusOK, daemonProbePayload("ready", cfg))
+	})
 }
 
 // mountControl registers the loopback daemon-control endpoints. /shutdown is
@@ -99,6 +119,26 @@ func mountControl(r chi.Router, deps ControlDeps) {
 	})
 }
 
+// mountMobile registers the Connect Mobile control routes: status, enable,
+// disable, and regenerate. These toggle the LAN bridge that lets a phone reach
+// the daemon. They must be reachable from the desktop renderer — a browser
+// context that always sends an Origin header — so they are NOT gated by
+// localControlRequest (which rejects any Origin-bearing request and is meant for
+// the CLI). The "phone must never toggle its own access" invariant is enforced
+// on the LAN listener instead, by lanControlBlock, which 404s /api/v1/mobile on
+// the 0.0.0.0 socket the phone reaches — a transport-based check that cannot be
+// spoofed with a forged Host header. On the loopback listener these routes are
+// protected by the same CORS allowlist as every other app route.
+func mountMobile(r chi.Router, c *controllers.MobileController) {
+	if c == nil {
+		return
+	}
+	r.Get("/api/v1/mobile/status", c.Status)
+	r.Post("/api/v1/mobile/enable", c.Enable)
+	r.Post("/api/v1/mobile/disable", c.Disable)
+	r.Post("/api/v1/mobile/regenerate", c.Regenerate)
+}
+
 type cliInvokedRequest struct {
 	Command     string `json:"command"`
 	CommandPath string `json:"commandPath"`
@@ -113,6 +153,43 @@ type cliUsageErrorRequest struct {
 func mountTelemetry(r chi.Router, sink ports.EventSink) {
 	if sink == nil {
 		return
+	}
+	// CLI telemetry is capped to daily uniques: ao.app.active once per UTC day
+	// (matching the renderer heartbeat) and ao.cli.invoked once per command
+	// path per UTC day. Scripts and agent sessions invoke read-only commands
+	// (status, ls, get) in polling loops, so raw invocation counts measure
+	// automation, not usage; daily uniques keep the "which commands, how many
+	// users" signal without the firehose. In-memory state: a daemon restart may
+	// re-emit once that day, which dashboards dedupe by distinct ID anyway.
+	var (
+		cliTelemetryMu sync.Mutex
+		cliActiveDay   string
+		cliInvokedDay  string
+		cliInvokedSeen map[string]struct{}
+	)
+	reserveCLIActive := func(now time.Time) bool {
+		day := now.UTC().Format("2006-01-02")
+		cliTelemetryMu.Lock()
+		defer cliTelemetryMu.Unlock()
+		if cliActiveDay == day {
+			return false
+		}
+		cliActiveDay = day
+		return true
+	}
+	reserveCLIInvoked := func(now time.Time, commandPath string) bool {
+		day := now.UTC().Format("2006-01-02")
+		cliTelemetryMu.Lock()
+		defer cliTelemetryMu.Unlock()
+		if cliInvokedDay != day {
+			cliInvokedDay = day
+			cliInvokedSeen = make(map[string]struct{})
+		}
+		if _, seen := cliInvokedSeen[commandPath]; seen {
+			return false
+		}
+		cliInvokedSeen[commandPath] = struct{}{}
+		return true
 	}
 	r.Post("/internal/telemetry/cli-invoked", func(w http.ResponseWriter, req *http.Request) {
 		if !localControlRequest(req) {
@@ -135,29 +212,33 @@ func mountTelemetry(r chi.Router, sink ports.EventSink) {
 			return
 		}
 
-		sink.Emit(req.Context(), ports.TelemetryEvent{
-			Name:       "ao.cli.invoked",
-			Source:     "cli",
-			OccurredAt: time.Now().UTC(),
-			Level:      ports.TelemetryLevelInfo,
-			RequestID:  middleware.GetReqID(req.Context()),
-			Payload: map[string]any{
-				"command":      body.Command,
-				"command_path": body.CommandPath,
-			},
-		})
-		sink.Emit(req.Context(), ports.TelemetryEvent{
-			Name:       "ao.app.active",
-			Source:     "cli",
-			OccurredAt: time.Now().UTC(),
-			Level:      ports.TelemetryLevelInfo,
-			RequestID:  middleware.GetReqID(req.Context()),
-			Payload: map[string]any{
-				"channel":      "cli",
-				"command":      body.Command,
-				"command_path": body.CommandPath,
-			},
-		})
+		if now := time.Now(); reserveCLIInvoked(now, body.CommandPath) {
+			sink.Emit(req.Context(), ports.TelemetryEvent{
+				Name:       "ao.cli.invoked",
+				Source:     "cli",
+				OccurredAt: now.UTC(),
+				Level:      ports.TelemetryLevelInfo,
+				RequestID:  middleware.GetReqID(req.Context()),
+				Payload: map[string]any{
+					"command":      body.Command,
+					"command_path": body.CommandPath,
+				},
+			})
+		}
+		if now := time.Now(); reserveCLIActive(now) {
+			sink.Emit(req.Context(), ports.TelemetryEvent{
+				Name:       "ao.app.active",
+				Source:     "cli",
+				OccurredAt: now.UTC(),
+				Level:      ports.TelemetryLevelInfo,
+				RequestID:  middleware.GetReqID(req.Context()),
+				Payload: map[string]any{
+					"channel":      "cli",
+					"command":      body.Command,
+					"command_path": body.CommandPath,
+				},
+			})
+		}
 		w.WriteHeader(http.StatusAccepted)
 	})
 	r.Post("/internal/telemetry/cli-usage-error", func(w http.ResponseWriter, req *http.Request) {
@@ -223,19 +304,10 @@ func localControlRequest(r *http.Request) bool {
 	return false
 }
 
-// handleHealthz is the liveness probe: it answers 200 as long as the process is
-// up and serving. It does no dependency checks by design.
-func handleHealthz(w http.ResponseWriter, _ *http.Request) {
-	envelope.WriteJSON(w, http.StatusOK, daemonProbePayload("ok"))
-}
-
-// handleReadyz is the readiness probe. Dependency initialization happens before
-// the server is constructed, so a listening daemon is ready to answer requests.
-func handleReadyz(w http.ResponseWriter, _ *http.Request) {
-	envelope.WriteJSON(w, http.StatusOK, daemonProbePayload("ready"))
-}
-
-func daemonProbePayload(status string) map[string]any {
+// daemonProbePayload is shared by /healthz and /readyz. Dependency
+// initialization happens before the server is constructed, so a listening
+// daemon is ready to answer requests.
+func daemonProbePayload(status string, cfg config.Config) map[string]any {
 	payload := map[string]any{
 		"status":  status,
 		"service": daemonmeta.ServiceName,
@@ -246,6 +318,9 @@ func daemonProbePayload(status string) map[string]any {
 	}
 	if cwd, err := os.Getwd(); err == nil && cwd != "" {
 		payload["workingDirectory"] = cwd
+	}
+	if cfg.StartupWorkingDirectory != "" {
+		payload["startupWorkingDirectory"] = cfg.StartupWorkingDirectory
 	}
 	return payload
 }

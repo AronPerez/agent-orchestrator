@@ -1,11 +1,15 @@
 import { useQueryClient } from "@tanstack/react-query";
+import { RotateCcw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { TerminalTarget } from "../types/terminal";
 import type { WorkspaceSession } from "../types/workspace";
 import type { Theme } from "../stores/ui-store";
 import { useTerminalSession, type AttachableTerminal, type TerminalSessionState } from "../hooks/useTerminalSession";
-import { apiClient, apiErrorMessage } from "../lib/api-client";
+import { apiClient } from "../lib/api-client";
+import { isLoopbackHostname } from "../lib/loopback";
+import { cn } from "../lib/utils";
 import { workspaceQueryKey } from "../hooks/useWorkspaceQuery";
+import { useRestoreSession } from "../hooks/useRestoreSession";
 import { XtermTerminal } from "./XtermTerminal";
 import { RestoreUnavailableDialog } from "./RestoreUnavailableDialog";
 
@@ -19,35 +23,55 @@ type TerminalPaneProps = {
 
 export function TerminalPane({ session, theme, daemonReady, terminalTarget, fontSize }: TerminalPaneProps) {
 	const terminalKey =
-		terminalTarget?.kind === "reviewer" ? terminalTarget.handleId : (session?.terminalHandleId ?? "empty");
+		terminalTarget?.kind === "reviewer" || terminalTarget?.kind === "shell"
+			? terminalTarget.handleId
+			: (session?.terminalHandleId ?? "empty");
 
 	// Electron attaches the live PTY via window.ao's bridge; a plain browser
 	// normally can't, so it shows a static surface. But when an explicit API base
 	// is configured (LAN-exposed), the terminal attaches over the proxied /mux
 	// websocket instead — no Electron bridge needed.
 	if (!window.ao && import.meta.env.VITE_AO_API_BASE_URL == null) {
+		// A standalone shell has no agent and no branch, so it previews as a plain
+		// prompt rather than borrowing the session's agent transcript.
+		if (terminalTarget?.kind === "shell") {
+			return (
+				<pre
+					className="h-full overflow-auto bg-terminal p-4 font-mono leading-relaxed text-terminal"
+					style={{ fontSize }}
+				>
+					<span className="text-terminal-dim">{terminalTarget.title}</span> $ {"\n"}
+					<span className="text-terminal-dim">
+						{"(standalone shell — a live PTY here in the desktop app)"}
+						{"\n"}
+					</span>
+				</pre>
+			);
+		}
 		const provider = terminalTarget?.kind === "reviewer" ? terminalTarget.harness : (session?.provider ?? "claude");
 		const lines =
 			terminalTarget?.kind === "reviewer" ? reviewerPreviewLines(session) : workerPreviewLines(session, provider);
 		return (
 			<pre
-				className="h-full overflow-auto bg-terminal p-4 font-mono leading-relaxed text-[var(--term-fg)]"
+				className="h-full overflow-auto bg-terminal p-4 font-mono leading-relaxed text-terminal-foreground"
+				data-testid="session-terminal"
 				style={{ fontSize }}
 			>
-				<span className="text-[var(--term-dim)]">~/{session?.workspaceName ?? "reverbcode"}</span>{" "}
-				<span className="text-[var(--term-blue)]">{session?.branch || "main"}</span> $ {provider}
+				<span className="text-terminal-dim">~/{session?.workspaceName ?? "reverbcode"}</span>{" "}
+				{session?.branch ? <span className="text-accent">{session.branch}</span> : null}
+				{session?.branch ? " " : ""}$ {provider}
 				{"\n"}
 				{lines.map((line, index) => (
 					<span
 						key={`${line}:${index}`}
 						className={
 							line.startsWith("PASS") || line.startsWith("DONE")
-								? "text-[var(--term-green)]"
+								? "text-success"
 								: line.startsWith("WARN") || line.startsWith("TODO")
-									? "text-[var(--term-amber)]"
-									: line.startsWith("$")
-										? "text-[var(--term-blue)]"
-										: "text-[var(--term-fg)]"
+									? "text-warning"
+									: line.startsWith("$") || line.startsWith("▲")
+										? "text-accent"
+										: "text-terminal-foreground"
 						}
 					>
 						{line}
@@ -71,6 +95,40 @@ export function TerminalPane({ session, theme, daemonReady, terminalTarget, font
 }
 
 function workerPreviewLines(session: WorkspaceSession | undefined, provider: string): string[] {
+	if (session?.id === "ao-demo-orchestrator") {
+		return [
+			"> Go through my Linear backlog and let's plan which tasks to spawn off",
+			"",
+			"Ran 3 shell commands",
+			"",
+			"Here's the backlog triage. Half of it is already in flight — don't spawn those.",
+			"",
+			"Already covered — don't spawn (session → PR):",
+			"— terminal polish → PR #318, changes requested",
+			"— browser preview stack → PRs #319/#320, in review",
+			"— README screenshot assets → PR #323, approved and mergeable",
+			"",
+			"Plan: 3 sessions worth spawning",
+			"",
+			"┌───┬────────────────────┬──────────────────────────────────────────┬──────────────────────────────────┐",
+			"│ # │ Session            │ Scope                                    │ Why now                          │",
+			"├───┼────────────────────┼──────────────────────────────────────────┼──────────────────────────────────┤",
+			"│ 1 │ new-task-flake     │ NewTaskDialog smoke test flakes on Enter │ Failing PR #324's e2e; small fix │",
+			"│ 2 │ checkout-retries   │ e2e retries leak state between runs      │ Flakes 1-in-5 on CI; well scoped │",
+			"│ 3 │ session-pr-surface │ PR checks missing on board cards         │ Additive; touches board only     │",
+			"└───┴────────────────────┴──────────────────────────────────────────┴──────────────────────────────────┘",
+			"",
+			"Want me to spawn all three? I'd put #1–2 on codex and #3 on claude-code.",
+			"",
+			"> yes, spawn all three",
+			"",
+			"Running 3 shell commands…",
+			'└ $ ao spawn --project ao-demo --name "new-task-flake" --agent codex --prompt',
+			'  "Fix the flaky NewTaskDialog smoke test: submit is debounced 300ms while the',
+			'  e2e check asserts synchronously. Reproduce, fix, and push to update PR #324."',
+			"PASS 3 sessions spawned — board updated",
+		];
+	}
 	if (session?.id === "demo-review-stack") {
 		return [
 			'$ rg "previewUrl|Browser" frontend/src/renderer',
@@ -102,6 +160,33 @@ function workerPreviewLines(session: WorkspaceSession | undefined, provider: str
 			"TODO confirm whether to keep the toolbar density change",
 		];
 	}
+	if (session?.id === "demo-ci-failed") {
+		return [
+			"╭────────────────────────────────────────────╮",
+			"│ >_ OpenAI Codex (v0.133.0)                 │",
+			"│ model:        gpt-5.5 high  /model to change",
+			"│ directory:    ~/ao-demo/demo-new-task-flake",
+			"│ permissions:  YOLO mode                    │",
+			"╰────────────────────────────────────────────╯",
+			"",
+			"• I'll start from the failing check output, reproduce the Enter-submit",
+			"  path locally, then patch and push.",
+			"",
+			"• Ran npm test -- NewTaskDialog",
+			"└ PASS 12 tests passed",
+			"",
+			"▲ ao send · CI failed on PR #324. The failing checks are e2e (NewTaskDialog",
+			"  submits with Enter). Investigate and push a fix.",
+			"",
+			'• Ran rg -n "onKeyDown|Enter" src/components/NewTaskDialog.tsx',
+			'└ src/components/NewTaskDialog.tsx:88:  onKeyDown={(e) => e.key === "Enter" && scheduleSubmit()}',
+			"  src/components/NewTaskDialog.tsx:141: const scheduleSubmit = debounce(submit, 300)",
+			"  … +42 lines (ctrl + t to view transcript)",
+			"",
+			"Found it: submit is debounced 300ms, the check asserts immediately.",
+			"Patching the handler and re-running e2e…",
+		];
+	}
 	return [
 		`$ ${provider} --status`,
 		"Reading task context and local diff...",
@@ -124,7 +209,14 @@ function reviewerPreviewLines(session: WorkspaceSession | undefined): string[] {
 // Agents whose full-screen TUI keeps its own transcript and scrolls it only by
 // keyboard, ignoring SGR wheel reports. The terminal routes the wheel to
 // PageUp/PageDown for these (see XtermTerminal's paneScrollsByKeyboard).
-const KEYBOARD_SCROLL_PROVIDERS = new Set(["opencode"]);
+// kilocode is a fork of opencode and shares its TUI surface, so it scrolls the
+// same way.
+const KEYBOARD_SCROLL_PROVIDERS = new Set(["opencode", "kilocode"]);
+
+// Whether the given provider's TUI is one of the keyboard-scroll agents above.
+export function providerScrollsByKeyboard(provider?: string): boolean {
+	return provider ? KEYBOARD_SCROLL_PROVIDERS.has(provider) : false;
+}
 
 function bannerText(state: TerminalSessionState, error?: string): string | undefined {
 	if (state === "reattaching") return "Terminal disconnected — reattaching…";
@@ -146,11 +238,17 @@ function AttachedTerminal({ session, theme, daemonReady, terminalTarget, fontSiz
 	const [restoreError, setRestoreError] = useState<string | undefined>();
 	const [restoreUnavailable, setRestoreUnavailable] = useState(false);
 	const queryClient = useQueryClient();
-	const { attach, state, error } = useTerminalSession(attachSession, { daemonReady });
-	const handleId = attachSession?.terminalHandleId;
+	const restoreSessionById = useRestoreSession();
+	// A shell pane has no session, so it hands the hook its handle directly
+	// instead of reading one off `attachSession`.
+	const shellTerminalHandleId = terminalTarget?.kind === "shell" ? terminalTarget.handleId : undefined;
+	const { attach, state, error } = useTerminalSession(attachSession, { daemonReady, shellTerminalHandleId });
+	const handleId = shellTerminalHandleId ?? attachSession?.terminalHandleId;
 	const provider = terminalTarget?.kind === "reviewer" ? terminalTarget.harness : session?.provider;
 	const hadAttachmentRef = useRef(false);
-	const canRestoreSession = terminalTarget?.kind !== "reviewer" && session?.status === "terminated";
+	// A standalone shell is never restorable: there is no session row to restore.
+	const canRestoreSession =
+		terminalTarget?.kind !== "reviewer" && terminalTarget?.kind !== "shell" && session?.status === "terminated";
 
 	const handleReady = useCallback((handle: AttachableTerminal) => {
 		setTerminal(handle);
@@ -159,29 +257,52 @@ function AttachedTerminal({ session, theme, daemonReady, terminalTarget, fontSiz
 		console.error("xterm failed to initialize", err);
 		setInitFailed(true);
 	}, []);
+	const handleLinkOpen = useCallback(
+		(uri: string) => {
+			if (!session?.id || session.kind !== "worker" || session.status === "terminated") return;
+			try {
+				const url = new URL(uri);
+				if ((url.protocol !== "http:" && url.protocol !== "https:") || !isLoopbackHostname(url.hostname)) return;
+			} catch {
+				return;
+			}
+			void (async () => {
+				try {
+					const { error: previewError } = await apiClient.POST("/api/v1/sessions/{sessionId}/preview", {
+						params: { path: { sessionId: session.id } },
+						body: { url: uri },
+					});
+					if (previewError) {
+						console.warn("Unable to open terminal link in Browser preview", previewError);
+						return;
+					}
+					await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
+				} catch (error) {
+					console.warn("Unable to open terminal link in Browser preview", error);
+				}
+			})();
+		},
+		[queryClient, session?.id, session?.kind, session?.status],
+	);
 	const restoreSession = useCallback(async () => {
 		if (!session?.id || !canRestoreSession || isRestoring) return;
 		setIsRestoring(true);
 		setRestoreError(undefined);
 		try {
-			const { error: restoreError } = await apiClient.POST("/api/v1/sessions/{sessionId}/restore", {
-				params: { path: { sessionId: session.id } },
-			});
-			if (restoreError) {
-				const code = (restoreError as { code?: string }).code;
-				if (code === "SESSION_NOT_RESUMABLE") {
-					setRestoreUnavailable(true);
-					return;
-				}
-				throw new Error(apiErrorMessage(restoreError, "Unable to restore session"));
+			const result = await restoreSessionById(session.id);
+			if (result.status === "not_resumable") {
+				setRestoreUnavailable(true);
+				return;
 			}
-			await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
+			if (result.status === "error") {
+				setRestoreError(result.message);
+			}
 		} catch (err) {
 			setRestoreError(err instanceof Error ? err.message : "Unable to restore session");
 		} finally {
 			setIsRestoring(false);
 		}
-	}, [canRestoreSession, isRestoring, queryClient, session?.id]);
+	}, [canRestoreSession, isRestoring, restoreSessionById, session?.id]);
 
 	useEffect(() => {
 		if (!terminal) return;
@@ -202,7 +323,7 @@ function AttachedTerminal({ session, theme, daemonReady, terminalTarget, fontSiz
 
 	if (initFailed) {
 		return (
-			<div className="grid h-full place-items-center bg-terminal p-4 font-mono text-[12px] text-muted-foreground">
+			<div className="grid h-full place-items-center bg-terminal p-4 font-mono text-xs text-muted-foreground">
 				Terminal failed to initialize on this GPU/driver. Restart the app to retry.
 			</div>
 		);
@@ -210,40 +331,51 @@ function AttachedTerminal({ session, theme, daemonReady, terminalTarget, fontSiz
 
 	const banner = bannerText(state, error);
 	const showEmptyState = !handleId;
-	const showExitedState = state === "exited";
+	const showEndedState = state === "exited" || canRestoreSession;
+	const emptyStateTitle = session ? "Starting session" : "Agent Orchestrator";
+	const emptyStateMessage = session
+		? session.kind === "orchestrator"
+			? "Preparing the orchestrator terminal. This can take a moment while AO creates the workspace and starts the agent."
+			: "Preparing the worker terminal. This can take a moment while AO creates the workspace and starts the agent."
+		: "No session selected. Pick a worker to attach its terminal.";
 
 	return (
-		<div className="flex h-full min-h-0 flex-col bg-terminal">
-			{showExitedState && (
+		<div className="flex h-full min-h-0 flex-col bg-terminal" data-testid="session-terminal">
+			{showEndedState && (
 				<TerminalEndedStrip
 					canRestore={canRestoreSession}
 					error={restoreError}
 					isRestoring={isRestoring}
 					onRestore={restoreSession}
-					variant={terminalTarget?.kind === "reviewer" ? "reviewer" : "session"}
+					variant={
+						terminalTarget?.kind === "reviewer" ? "reviewer" : terminalTarget?.kind === "shell" ? "shell" : "session"
+					}
 				/>
 			)}
-			<div className="relative min-h-0 flex-1">
+			{/* p-2 keeps the xterm content off the pane edges; the host fills the
+			    remaining content box, so FitAddon still measures it correctly and
+			    the absolute overlays (empty state, banner) keep covering the
+			    full padding box. */}
+			<div className="relative min-h-0 flex-1 p-2">
 				<XtermTerminal
-					ariaLabel="Session terminal"
+					ariaLabel={terminalTarget?.kind === "shell" ? "Shell terminal" : "Session terminal"}
 					fontSize={fontSize}
 					onError={handleInitError}
+					onLinkOpen={handleLinkOpen}
 					onReady={handleReady}
-					paneScrollsByKeyboard={provider ? KEYBOARD_SCROLL_PROVIDERS.has(provider) : false}
+					paneScrollsByKeyboard={providerScrollsByKeyboard(provider)}
 					theme={theme}
 				/>
 				{showEmptyState && (
-					<div className="absolute inset-0 grid place-items-center bg-terminal font-mono text-[13px]">
+					<div className="absolute inset-0 grid place-items-center bg-terminal font-mono text-control">
 						<div className="text-center">
-							<div className="text-[var(--term-fg)]">Agent Orchestrator</div>
-							<div className="mt-2 text-[var(--term-dim)]">
-								No session selected. Pick a worker to attach its terminal.
-							</div>
+							<div className="text-terminal">{emptyStateTitle}</div>
+							<div className="mt-2 text-terminal-dim">{emptyStateMessage}</div>
 						</div>
 					</div>
 				)}
 				{banner && (
-					<div className="absolute inset-x-3 top-2 rounded-md border border-border bg-surface/95 px-3 py-1.5 font-mono text-[11px] text-muted-foreground">
+					<div className="absolute inset-x-3 top-2 rounded-md border border-border bg-surface/95 px-3 py-1.5 font-mono text-caption text-muted-foreground">
 						{banner}
 					</div>
 				)}
@@ -267,7 +399,7 @@ type TerminalEndedStripProps = {
 	error?: string;
 	isRestoring: boolean;
 	onRestore: () => void;
-	variant: "reviewer" | "session";
+	variant: "reviewer" | "session" | "shell";
 };
 
 function TerminalEndedStrip({ canRestore, error, isRestoring, onRestore, variant }: TerminalEndedStripProps) {
@@ -275,26 +407,30 @@ function TerminalEndedStrip({ canRestore, error, isRestoring, onRestore, variant
 		? "Restore the session to attach a live terminal and continue writing."
 		: variant === "reviewer"
 			? "This reviewer terminal has ended. Re-run review from the summary panel, or switch back to the agent terminal."
-			: "This terminal process ended, but the session is not marked terminated yet.";
+			: variant === "shell"
+				? "This shell exited. Close the tab, or open a new terminal."
+				: "This terminal process ended, but the session is not marked terminated yet.";
 
 	return (
 		<div className="shrink-0 border-b border-border bg-surface/80 px-4 py-2">
-			<div className="flex min-h-9 items-center gap-3">
+			<div className="flex min-h-control-board items-center gap-3">
 				<div className="min-w-0 flex-1">
-					<div className="font-mono text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
+					<div className="font-mono text-caption font-medium uppercase tracking-wide-md text-muted-foreground">
 						Terminal ended
 					</div>
-					<div className="mt-0.5 truncate text-[12px] text-muted-foreground">{message}</div>
+					<div className="mt-0.5 truncate text-xs text-muted-foreground">{message}</div>
 				</div>
-				{error && <div className="max-w-[320px] truncate text-[12px] text-destructive">{error}</div>}
+				{error && <div className="max-w-content-max truncate text-xs text-destructive">{error}</div>}
 				{canRestore && (
 					<button
 						type="button"
-						className="h-8 shrink-0 rounded-md border border-border bg-raised px-3 text-[12px] font-medium text-foreground transition hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
+						aria-label="Restore session"
+						title="Restore session"
+						className="inline-flex size-control-form shrink-0 items-center justify-center rounded-md border border-border bg-raised text-foreground transition hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
 						disabled={isRestoring}
 						onClick={onRestore}
 					>
-						{isRestoring ? "Restoring..." : "Restore session"}
+						<RotateCcw className={cn("size-icon-base", isRestoring && "animate-spin")} aria-hidden="true" />
 					</button>
 				)}
 			</div>

@@ -28,17 +28,19 @@ func (r *Reviewer) Harness() domain.ReviewerHarness {
 }
 
 var _ ports.Reviewer = (*Reviewer)(nil)
+var _ ports.ReviewerCanceller = (*Reviewer)(nil)
 
 // ReviewCommand launches the reviewer with an enforced read-only filesystem
 // sandbox. Auto approval lets the headless session request the narrowly needed
 // network access for posting the review and reporting its result.
 func (r *Reviewer) ReviewCommand(ctx context.Context, inv ports.ReviewInvocation) (ports.ReviewCommandSpec, error) {
 	argv, err := r.agent.GetLaunchCommand(ctx, ports.LaunchConfig{
-		SessionID:     inv.ReviewerID,
-		WorkspacePath: inv.WorkspacePath,
-		Prompt:        inv.Prompt,
-		SystemPrompt:  inv.SystemPrompt,
-		Permissions:   ports.PermissionModeAuto,
+		SessionID:        inv.ReviewerID,
+		WorkspacePath:    inv.WorkspacePath,
+		Prompt:           inv.Prompt,
+		SystemPrompt:     inv.SystemPrompt,
+		SystemPromptFile: inv.SystemPromptFile,
+		Permissions:      ports.PermissionModeAuto,
 	})
 	if err != nil {
 		return ports.ReviewCommandSpec{}, err
@@ -63,6 +65,12 @@ func (r *Reviewer) ReviewCommand(ctx context.Context, inv ports.ReviewInvocation
 // ReviewMessage returns the centrally-authored task for an existing pane.
 func (r *Reviewer) ReviewMessage(_ context.Context, inv ports.ReviewInvocation) (string, error) {
 	return inv.Prompt, nil
+}
+
+// ReviewCancel stops the active Codex reviewer turn while preserving the
+// terminal pane for inspection.
+func (r *Reviewer) ReviewCancel(context.Context) (ports.ReviewCancelSpec, error) {
+	return ports.ReviewCancelSpec{Mode: ports.ReviewCancelInterrupt, Interrupts: 2}, nil
 }
 
 func insertBeforePrompt(argv []string, extra ...string) []string {

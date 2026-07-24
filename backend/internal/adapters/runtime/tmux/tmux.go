@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -25,16 +26,13 @@ const (
 	defaultTimeout    = 5 * time.Second
 	defaultChunkBytes = 16 * 1024
 	// defaultEnterDelay spaces the submit Enter after the literal text in
-	// SendMessage. Codex's TUI has paste-burst detection: text and an Enter
-	// arriving in the same input burst are treated as a paste, so the Enter is
-	// inserted as a literal newline instead of submitting. The pause lets that
-	// window close so the Enter registers as a discrete keypress.
-	//
-	// ponytail: a fixed delay, not condition-polling — the paste window is an
-	// external, codex-version-dependent quantity with no clean signal to observe
-	// (capture-pane shows a rendered TUI, not input-buffer state). Tunable via
-	// Options.EnterDelay if a codex release changes the threshold.
-	defaultEnterDelay = 120 * time.Millisecond
+	// SendMessage, mirroring conpty's ptyInputEnterDelay. Some TUIs treat text
+	// and an immediately-following Enter arriving in one input burst as a paste,
+	// so the Enter becomes a literal newline instead of submitting: a large
+	// multiline paste can absorb the Enter (issue #2342), and codex's paste-burst
+	// detection does the same. The pause lets that window close so the Enter
+	// registers as a discrete keypress. Tunable via Options.EnterDelay.
+	defaultEnterDelay = 300 * time.Millisecond
 	// Destroy confirms the agent process is actually gone before returning, so a
 	// killed session cannot keep running: tmux kill-session only sends SIGHUP,
 	// which an agent can trap (the reap-then-resurrect bug). defaultKillTermGrace
@@ -45,6 +43,10 @@ const (
 	defaultKillConfirmTimeout = 2 * time.Second
 	// killPollInterval is how often Destroy re-checks the process group for exit.
 	killPollInterval = 25 * time.Millisecond
+	// defaultReapGrace is how long Destroy waits between SIGTERM and SIGKILL when
+	// reaping a pane's leftover background processes, giving them a chance to
+	// exit cleanly (release ports) before being forced (issue #2523).
+	defaultReapGrace = 5 * time.Second
 )
 
 var sessionIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
@@ -58,13 +60,16 @@ type Options struct {
 	Shell      string        // default $SHELL else /bin/sh
 	Timeout    time.Duration // default 5s
 	ChunkSize  int           // default 16*1024
-	EnterDelay time.Duration // pause before the submit Enter; default 120ms, <0 disables
+	EnterDelay time.Duration // pause after pasting a non-empty message before the submit Enter; 0 → default defaultEnterDelay, <0 disables. Mirrors conpty's ptyInputEnterDelay so a large multiline paste does not absorb the trailing Enter (issue #2342).
 	// KillTermGrace is how long Destroy waits for kill-session's SIGHUP to reap
 	// the agent before escalating to SIGKILL; default 500ms.
 	KillTermGrace time.Duration
 	// KillConfirmTimeout bounds Destroy's total wait for the agent process group
 	// to exit; default 2s.
 	KillConfirmTimeout time.Duration
+	// ReapGrace is the grace between SIGTERM and SIGKILL when reaping a pane's
+	// leftover background processes on Destroy; default defaultReapGrace.
+	ReapGrace time.Duration
 }
 
 // Runtime runs agent sessions inside tmux sessions, driving them via the tmux
@@ -77,7 +82,9 @@ type Runtime struct {
 	enterDelay         time.Duration
 	killTermGrace      time.Duration
 	killConfirmTimeout time.Duration
+	reapGrace          time.Duration
 	runner             runner
+	reapSessions       func(ctx context.Context, pids []int, grace time.Duration)
 }
 
 var _ ports.Runtime = (*Runtime)(nil)
@@ -85,6 +92,63 @@ var _ ports.Attacher = (*Runtime)(nil)
 
 type runner interface {
 	Run(ctx context.Context, env []string, name string, args ...string) ([]byte, error)
+}
+
+// killSessionsByPID force-terminates every process in each pid's tmux pane
+// session. tmux runs each pane in its own session (pane pid == session id), so
+// signaling the session reaps the pane's background children — e.g. a dev
+// server a worker started with `&` — that `kill-session`'s SIGHUP leaves
+// running. It SIGTERMs, waits grace for a clean exit, then
+// SIGKILLs survivors. Best-effort: `pkill` is absent on Windows, where tmux is
+// never the runtime, so the calls simply no-op there.
+func killSessionsByPID(ctx context.Context, pids []int, grace time.Duration) {
+	if len(pids) == 0 {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), grace+5*time.Second)
+	defer cancel()
+
+	signalSessions(cleanupCtx, pids, "-TERM")
+	if !sessionsHaveProcesses(cleanupCtx, pids) {
+		return
+	}
+
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-cleanupCtx.Done():
+		return
+	case <-timer.C:
+	}
+	if !sessionsHaveProcesses(cleanupCtx, pids) {
+		return
+	}
+	signalSessions(cleanupCtx, pids, "-KILL")
+}
+
+// signalSessions sends a pkill signal flag (e.g. "-TERM") to every process in
+// each pane session, matched by session id via `pkill -s`.
+func signalSessions(ctx context.Context, pids []int, sig string) {
+	for _, pid := range pids {
+		_ = exec.CommandContext(ctx, "pkill", sig, "-s", strconv.Itoa(pid)).Run()
+	}
+}
+
+// sessionsHaveProcesses reports whether any process remains in the pane
+// sessions. `pgrep` exit 1 means no matches; other failures are treated as
+// survivors so Destroy stays conservative and still attempts SIGKILL.
+func sessionsHaveProcesses(ctx context.Context, pids []int) bool {
+	for _, pid := range pids {
+		err := exec.CommandContext(ctx, "pgrep", "-s", strconv.Itoa(pid)).Run()
+		if err == nil || ctx.Err() != nil {
+			return true
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			return true
+		}
+	}
+	return false
 }
 
 type execRunner struct{}
@@ -141,6 +205,10 @@ func New(opts Options) *Runtime {
 	if killConfirmTimeout < killTermGrace {
 		killConfirmTimeout = killTermGrace
 	}
+	reapGrace := opts.ReapGrace
+	if reapGrace <= 0 {
+		reapGrace = defaultReapGrace
+	}
 	return &Runtime{
 		binary:             binary,
 		shell:              shellPath,
@@ -149,7 +217,9 @@ func New(opts Options) *Runtime {
 		enterDelay:         enterDelay,
 		killTermGrace:      killTermGrace,
 		killConfirmTimeout: killConfirmTimeout,
+		reapGrace:          reapGrace,
 		runner:             execRunner{},
+		reapSessions:       killSessionsByPID,
 	}
 }
 
@@ -175,6 +245,10 @@ func (r *Runtime) Create(ctx context.Context, cfg ports.RuntimeConfig) (ports.Ru
 	if _, err := r.run(ctx, args...); err != nil {
 		return ports.RuntimeHandle{}, fmt.Errorf("tmux runtime: create session %s: %w", id, err)
 	}
+	if err := r.verifyPaneWorkingDirectory(ctx, id, cfg.WorkspacePath); err != nil {
+		_ = r.Destroy(context.Background(), ports.RuntimeHandle{ID: id})
+		return ports.RuntimeHandle{}, err
+	}
 
 	// Hide the status bar in the embedded terminal: it clutters the view and
 	// was not designed for the in-browser display context.
@@ -190,6 +264,14 @@ func (r *Runtime) Create(ctx context.Context, cfg ports.RuntimeConfig) (ports.Ru
 		return ports.RuntimeHandle{}, fmt.Errorf("tmux runtime: set mouse %s: %w", id, err)
 	}
 
+	// Size the shared window to the largest attached client, not the most recent
+	// one, so a small secondary viewer (e.g. the phone) can't strip down a larger
+	// client's view (see setWindowSizeLargestArgs).
+	if _, err := r.run(ctx, setWindowSizeLargestArgs(id)...); err != nil {
+		_ = r.Destroy(context.Background(), ports.RuntimeHandle{ID: id})
+		return ports.RuntimeHandle{}, fmt.Errorf("tmux runtime: set window-size %s: %w", id, err)
+	}
+
 	handle := ports.RuntimeHandle{ID: id}
 	alive, err := r.IsAlive(ctx, handle)
 	if err != nil {
@@ -203,14 +285,29 @@ func (r *Runtime) Create(ctx context.Context, cfg ports.RuntimeConfig) (ports.Ru
 	return handle, nil
 }
 
-// Destroy kills the handle's tmux session and confirms the agent process is
-// actually gone before returning. tmux kill-session only sends SIGHUP, which an
-// agent can trap and survive; Manager.Kill marks the session terminated once
-// Destroy returns, so a Destroy that returned while the agent was still alive
-// would let a "terminated" session keep running and complete outbound side
-// effects (the reap-then-resurrect bug). So Destroy resolves the pane's process
-// group first, then escalates to an uncatchable SIGKILL and waits, bounded, for
-// exit. An already-gone session is treated as success (idempotent).
+func (r *Runtime) verifyPaneWorkingDirectory(ctx context.Context, id, want string) error {
+	out, err := r.run(ctx, paneCurrentPathArgs(id)...)
+	if err != nil {
+		return fmt.Errorf("tmux runtime: verify working directory %s: %w", id, err)
+	}
+	got := strings.TrimSpace(string(out))
+	if sameDirectory(got, want) {
+		return nil
+	}
+	return fmt.Errorf("tmux runtime: session %s started in %q, want %q", id, got, want)
+}
+
+// Destroy kills the handle's tmux session, confirms the agent process is
+// actually gone, and reaps the pane's leftover background processes. tmux
+// kill-session only sends SIGHUP, which an agent can trap and survive (the
+// reap-then-resurrect bug); Manager.Kill marks the session terminated once
+// Destroy returns, so Destroy resolves the pane's process group first and
+// escalates to an uncatchable SIGKILL, waiting bounded for exit. kill-session
+// also leaves a worker's backgrounded children (e.g. a dev server started with
+// `&`, later reparented to init) holding their ports indefinitely (issue
+// #2523), so Destroy records each pane's session id before teardown and, after
+// kill-session, signals the whole session (see killSessionsByPID). An
+// already-gone session is treated as success (idempotent).
 func (r *Runtime) Destroy(ctx context.Context, handle ports.RuntimeHandle) error {
 	id, err := handleID(handle)
 	if err != nil {
@@ -220,8 +317,17 @@ func (r *Runtime) Destroy(ctx context.Context, handle ports.RuntimeHandle) error
 	// exists to query. tmux runs each pane in its own group led by pane_pid, so
 	// one group signal reaps the agent and every child it spawned.
 	pgid, havePgid := r.resolvePaneGroup(ctx, id)
+	// Capture pane session ids while the session still exists; a missing
+	// session lists no panes and reaps nothing. Best-effort: failures here must
+	// not block the kill-session below.
+	sessionIDs := r.paneSessionIDs(ctx, id)
 
 	out, err := r.run(ctx, killSessionArgs(id)...)
+	// Reap regardless of the kill-session result: orphaned children outlive the
+	// session, so they must be cleaned up even when the session was already
+	// gone (a benign double-kill).
+	r.reapSessions(ctx, sessionIDs, r.reapGrace)
+
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && killSessionMissingOutput(string(out)) {
@@ -291,6 +397,27 @@ func (r *Runtime) waitGroupExit(ctx context.Context, pgid int, timeout time.Dura
 	}
 }
 
+// paneSessionIDs lists the pid of every pane in the session. tmux launches each
+// pane in its own session (setsid), so a pane's pid is also its session id —
+// the handle killSessionsByPID uses to reap the pane's descendants. Best-effort:
+// any error (including a missing session) or unparseable line yields no ids,
+// and pids <= 1 are skipped so we never signal init or the "current session".
+func (r *Runtime) paneSessionIDs(ctx context.Context, id string) []int {
+	out, err := r.run(ctx, listPanePIDsArgs(id)...)
+	if err != nil {
+		return nil
+	}
+	var ids []int
+	for _, line := range strings.Split(string(out), "\n") {
+		pid, convErr := strconv.Atoi(strings.TrimSpace(line))
+		if convErr != nil || pid <= 1 {
+			continue
+		}
+		ids = append(ids, pid)
+	}
+	return ids
+}
+
 // IsAlive reports whether the handle's session still exists via `tmux
 // has-session`. Exit 0 means alive. A non-zero exit with output indicating the
 // session or server is missing is a definitive false, nil. Any other non-zero
@@ -314,12 +441,14 @@ func (r *Runtime) IsAlive(ctx context.Context, handle ports.RuntimeHandle) (bool
 }
 
 // SendMessage sends literal text to the session (chunked via send-keys -l),
-// pauses r.enterDelay so the input settles, then presses Enter to submit.
+// pauses r.enterDelay so the input settles, then presses Enter to submit. An
+// empty message presses Enter alone (the nudge contract on ports.AgentMessenger).
 //
-// The pause matters for TUIs with paste-burst detection (codex): text and an
-// immediately-following Enter arriving in one burst are treated as a paste, so
-// the Enter becomes a literal newline and nothing is submitted (the user has to
-// press Enter by hand). Spacing the Enter out makes it a discrete keypress.
+// The pause matters for TUIs that treat text and an immediately-following Enter
+// arriving in one burst as a paste, so the Enter becomes a literal newline and
+// nothing is submitted: a large multiline paste can absorb it (issue #2342) and
+// codex's paste-burst detection does the same. Spacing the Enter out makes it a
+// discrete keypress.
 //
 // ponytail: send-keys -l chunked is simpler than load-buffer/paste-buffer; the
 // ceiling is very large messages may be slower, but chunk size defaults to 16 KB
@@ -329,15 +458,35 @@ func (r *Runtime) SendMessage(ctx context.Context, handle ports.RuntimeHandle, m
 	if err != nil {
 		return err
 	}
-	for _, chunk := range chunks(message, r.chunkSize) {
-		if _, err := r.run(ctx, sendKeysLiteralArgs(id, chunk)...); err != nil {
-			return fmt.Errorf("tmux runtime: send message %s: %w", id, err)
+	enterCtx := ctx
+	if message != "" {
+		for _, chunk := range chunks(message, r.chunkSize) {
+			if _, err := r.run(ctx, sendKeysLiteralArgs(id, chunk)...); err != nil {
+				return fmt.Errorf("tmux runtime: send message %s: %w", id, err)
+			}
+		}
+		// Give the target TUI a moment to accept the pasted text before the
+		// trailing Enter, mirroring conpty's ptyInputEnterDelay. Without it a
+		// large multiline paste can absorb the Enter and leave the prompt
+		// unsubmitted (issue #2342). Empty-message nudges skip this — there is
+		// no paste ahead of a catch-up Enter.
+		//
+		// From here on the chunks are already in the pane, so the pause and
+		// the Enter are detached from the caller's cancellation (bounded by
+		// their own timeout instead): abandoning mid-pause would strand an
+		// unsubmitted draft that a retried send would then double-paste.
+		var cancel context.CancelFunc
+		enterCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), r.enterDelay+5*time.Second)
+		defer cancel()
+		if r.enterDelay > 0 {
+			select {
+			case <-enterCtx.Done():
+				return enterCtx.Err()
+			case <-time.After(r.enterDelay):
+			}
 		}
 	}
-	if err := sleep(ctx, r.enterDelay); err != nil {
-		return fmt.Errorf("tmux runtime: send message %s: %w", id, err)
-	}
-	if _, err := r.run(ctx, sendEnterArgs(id)...); err != nil {
+	if _, err := r.run(enterCtx, sendEnterArgs(id)...); err != nil {
 		return fmt.Errorf("tmux runtime: send enter %s: %w", id, err)
 	}
 	return nil
@@ -357,6 +506,19 @@ func sleep(ctx context.Context, d time.Duration) error {
 	case <-t.C:
 		return nil
 	}
+}
+
+// Interrupt sends Ctrl-C to the foreground process without destroying the tmux
+// session, keeping the terminal available for inspection and reuse.
+func (r *Runtime) Interrupt(ctx context.Context, handle ports.RuntimeHandle) error {
+	id, err := handleID(handle)
+	if err != nil {
+		return err
+	}
+	if _, err := r.run(ctx, sendInterruptArgs(id)...); err != nil {
+		return fmt.Errorf("tmux runtime: interrupt session %s: %w", id, err)
+	}
+	return nil
 }
 
 // GetOutput returns the last `lines` lines of the session pane's captured
@@ -389,12 +551,28 @@ func (r *Runtime) Attach(ctx context.Context, handle ports.RuntimeHandle, rows, 
 
 // attachCommand returns the argv to attach a terminal to the session.
 // tmux needs no per-session env block.
+//
+// -u forces tmux's client-side CLIENT_UTF8 flag on. Without it, tmux infers
+// UTF-8 capability from LC_ALL/LC_CTYPE/LANG in the attaching process's env
+// (see tmux's main()); AO's daemon is typically started without an
+// interactive shell's locale, so that inference silently fails. A non-UTF8
+// client makes tmux's tty_check_codeset (tty.c) replace any character it
+// can't map through the legacy ACS table with underscores matching the
+// glyph's display width. Box-drawing glyphs are in that ACS table so they
+// still looked fine; agent CLI status icons outside it (e.g. Claude Code's
+// spinner "✻" U+273B, its "⎿" U+23BF continuation marker) were silently
+// rewritten to "_", which is the underscore corruption reported in #2484.
+// Confirmed byte-for-byte: attaching with a stripped, locale-less env
+// reproduces "_ _ _" for those glyphs; adding -u fixes it, with no observable
+// difference for the still-correct box-drawing case. AO already treats the
+// PTY byte stream as UTF-8 end to end, so forcing the flag is always
+// correct here regardless of the daemon's own environment.
 func (r *Runtime) attachCommand(handle ports.RuntimeHandle) ([]string, error) {
 	id, err := handleID(handle)
 	if err != nil {
 		return nil, err
 	}
-	return []string{r.binary, "attach-session", "-t", id}, nil
+	return []string{r.binary, "-u", "attach-session", "-t", id}, nil
 }
 
 func attachEnv(base []string) []string {
@@ -608,6 +786,9 @@ func buildLaunchCommand(cfg ports.RuntimeConfig) string {
 	}
 
 	var b strings.Builder
+	b.WriteString("cd ")
+	b.WriteString(shellQuote(cfg.WorkspacePath))
+	b.WriteString(" || exit; ")
 	for _, key := range sortedKeys(cfg.Env) {
 		if key == "PATH" {
 			continue
@@ -634,6 +815,27 @@ func buildLaunchCommand(cfg ports.RuntimeConfig) string {
 	// the process env if set, otherwise falls back to /bin/sh.
 	b.WriteString(`; exec "${SHELL:-/bin/sh}" -i`)
 	return b.String()
+}
+
+func sameDirectory(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	absA, errA := filepath.Abs(a)
+	if errA == nil {
+		a = absA
+	}
+	absB, errB := filepath.Abs(b)
+	if errB == nil {
+		b = absB
+	}
+	if realA, err := filepath.EvalSymlinks(a); err == nil {
+		a = realA
+	}
+	if realB, err := filepath.EvalSymlinks(b); err == nil {
+		b = realB
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
 }
 
 // -- error type --

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
@@ -38,6 +39,18 @@ func gitRepo(t *testing.T) string {
 	if out, err := exec.Command("git", "init", "-b", "main", dir).CombinedOutput(); err != nil {
 		t.Fatalf("git unavailable: %v (%s)", err, out)
 	}
+	commitEmpty(t, dir)
+	return dir
+}
+
+func isolatedPlainFolder(t *testing.T) string {
+	t.Helper()
+	base := t.TempDir()
+	t.Setenv("GIT_CEILING_DIRECTORIES", base)
+	dir := filepath.Join(base, "selected")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	return dir
 }
 
@@ -49,6 +62,7 @@ func gitRepoOnBranch(t *testing.T, branch string) string {
 	if out, err := exec.Command("git", "init", "-b", branch, dir).CombinedOutput(); err != nil {
 		t.Fatalf("git unavailable: %v (%s)", err, out)
 	}
+	commitEmpty(t, dir)
 	return dir
 }
 
@@ -78,6 +92,12 @@ func gitRepoWithOriginHead(t *testing.T, defaultBranch, featureBranch string) st
 	return dir
 }
 
+func commitEmpty(t *testing.T, dir string) {
+	t.Helper()
+	if out, err := exec.Command("git", "-C", dir, "-c", "user.email=ao@example.com", "-c", "user.name=AO Test", "commit", "--allow-empty", "-m", "initial").CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v (%s)", err, out)
+	}
+}
 func ptr(s string) *string { return &s }
 
 // wantCode asserts err is an *apierr.Error carrying the given machine code.
@@ -204,6 +224,149 @@ func TestManager_AddDoesNotRepeatFirstProjectTelemetry(t *testing.T) {
 	}
 	if firstProjectCount != 1 {
 		t.Fatalf("first project telemetry count = %d, want 1", firstProjectCount)
+	}
+}
+
+func TestManager_EnsureDefaultScratchProjectSeedsFreshRegistry(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	m := project.NewWithDeps(project.Deps{Store: store, DefaultHarness: domain.HarnessCodex})
+	scratchPath := filepath.Join(t.TempDir(), "scratch", "default")
+
+	proj, err := m.EnsureDefaultScratchProject(ctx, scratchPath)
+	if err != nil {
+		t.Fatalf("EnsureDefaultScratchProject: %v", err)
+	}
+	if proj.ID != "scratch" || proj.Name != "Scratch" || proj.Path != scratchPath || proj.Kind != domain.ProjectKindScratch {
+		t.Fatalf("scratch project = %#v", proj)
+	}
+	if proj.Repo != "" || proj.DefaultBranch != "" {
+		t.Fatalf("scratch repo/default branch = %q/%q, want empty", proj.Repo, proj.DefaultBranch)
+	}
+	if proj.Agent != string(domain.HarnessCodex) || proj.Config == nil ||
+		proj.Config.Worker.Harness != domain.HarnessCodex ||
+		proj.Config.Orchestrator.Harness != domain.HarnessCodex {
+		t.Fatalf("scratch agents/config = agent:%q config:%#v, want codex role overrides", proj.Agent, proj.Config)
+	}
+
+	list, err := m.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 || list[0].ID != "scratch" || list[0].Kind != domain.ProjectKindScratch {
+		t.Fatalf("List = %#v, want one scratch project", list)
+	}
+	if list[0].OrchestratorAgent != domain.HarnessCodex {
+		t.Fatalf("summary orchestrator agent = %q, want codex", list[0].OrchestratorAgent)
+	}
+}
+
+func TestManager_EnsureDefaultScratchProjectDoesNotReseedWithActiveProject(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := store.UpsertProject(ctx, domain.ProjectRecord{
+		ID:           "old",
+		DisplayName:  "Old",
+		Path:         "/tmp/old",
+		Kind:         domain.ProjectKindSingleRepo,
+		RegisteredAt: now,
+	}); err != nil {
+		t.Fatalf("seed old project: %v", err)
+	}
+
+	m := project.NewWithDeps(project.Deps{Store: store})
+	proj, err := m.EnsureDefaultScratchProject(ctx, filepath.Join(t.TempDir(), "scratch", "default"))
+	if err != nil {
+		t.Fatalf("EnsureDefaultScratchProject: %v", err)
+	}
+	if proj.ID != "" {
+		t.Fatalf("seeded scratch with active project: %#v", proj)
+	}
+	if list, err := m.List(ctx); err != nil || len(list) != 1 || list[0].ID != "old" {
+		t.Fatalf("active projects = %#v, %v; want old project only", list, err)
+	}
+}
+
+func TestManager_EnsureDefaultScratchProjectReseedsAfterArchivedScratchLeavesNoActiveProjects(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	m := project.NewWithDeps(project.Deps{Store: store})
+	firstPath := filepath.Join(t.TempDir(), "scratch", "default")
+	first, err := m.EnsureDefaultScratchProject(ctx, firstPath)
+	if err != nil {
+		t.Fatalf("first EnsureDefaultScratchProject: %v", err)
+	}
+	if first.ID != "scratch" {
+		t.Fatalf("first scratch project = %#v", first)
+	}
+	if ok, err := store.ArchiveProject(ctx, "scratch", time.Now().UTC().Add(time.Minute)); err != nil || !ok {
+		t.Fatalf("archive scratch project: ok=%v err=%v", ok, err)
+	}
+	scratchPath := filepath.Join(t.TempDir(), "scratch", "replacement")
+	proj, err := m.EnsureDefaultScratchProject(ctx, scratchPath)
+	if err != nil {
+		t.Fatalf("EnsureDefaultScratchProject: %v", err)
+	}
+	if proj.ID != "scratch" || proj.Path != scratchPath || proj.Kind != domain.ProjectKindScratch {
+		t.Fatalf("reseeded scratch project = %#v", proj)
+	}
+	list, err := m.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 || list[0].ID != "scratch" {
+		t.Fatalf("active projects = %#v, want reseeded scratch", list)
+	}
+}
+
+func TestManager_SetConfigRejectsScratchGitOnlyFields(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	m := project.NewWithDeps(project.Deps{Store: store})
+	scratchPath := filepath.Join(t.TempDir(), "scratch", "default")
+	if _, err := m.EnsureDefaultScratchProject(ctx, scratchPath); err != nil {
+		t.Fatalf("EnsureDefaultScratchProject: %v", err)
+	}
+
+	_, err = m.SetConfig(ctx, "scratch", project.SetConfigInput{Config: domain.ProjectConfig{DefaultBranch: "main"}})
+	wantCode(t, err, "INVALID_PROJECT_CONFIG")
+
+	_, err = m.SetConfig(ctx, "scratch", project.SetConfigInput{Config: domain.ProjectConfig{
+		TrackerIntake: domain.TrackerIntakeConfig{Enabled: true, Assignee: "alice"},
+	}})
+	wantCode(t, err, "INVALID_PROJECT_CONFIG")
+
+	_, err = m.SetConfig(ctx, "scratch", project.SetConfigInput{Config: domain.ProjectConfig{
+		Reviewers: []domain.ReviewerConfig{{Harness: domain.ReviewerCodex}},
+	}})
+	wantCode(t, err, "INVALID_PROJECT_CONFIG")
+
+	proj, err := m.SetConfig(ctx, "scratch", project.SetConfigInput{Config: domain.ProjectConfig{
+		AgentConfig: domain.AgentConfig{Model: "gpt-5"},
+		Worker:      domain.RoleOverride{Harness: domain.HarnessCodex},
+	}})
+	if err != nil {
+		t.Fatalf("allowed SetConfig: %v", err)
+	}
+	if proj.DefaultBranch != "" || proj.Config == nil || proj.Config.AgentConfig.Model != "gpt-5" {
+		t.Fatalf("scratch config result = %#v", proj)
 	}
 }
 
@@ -389,7 +552,7 @@ func TestManager_AddPrefersOriginHeadNonMain(t *testing.T) {
 	}
 }
 
-func TestManager_SetConfig(t *testing.T) {
+func TestManager_UpdateSettings(t *testing.T) {
 	ctx := context.Background()
 	m := newManager(t)
 	repo := gitRepo(t)
@@ -399,40 +562,61 @@ func TestManager_SetConfig(t *testing.T) {
 	}
 
 	cfg := domain.ProjectConfig{
-		DefaultBranch: "develop",
-		Env:           map[string]string{"FOO": "bar"},
-		AgentConfig:   domain.AgentConfig{Model: "claude-opus-4-5"},
+		DefaultBranch:     "develop",
+		Env:               map[string]string{"FOO": "bar"},
+		AgentRules:        "Run focused tests.",
+		OrchestratorRules: "Delegate implementation.",
+		AgentConfig:       domain.AgentConfig{Model: "claude-opus-4-5"},
 	}
-	proj, err := m.SetConfig(ctx, "ao", project.SetConfigInput{Config: cfg})
+	proj, err := m.UpdateSettings(ctx, "ao", project.UpdateSettingsInput{
+		DisplayName: "  AO Project  ",
+		Config:      cfg,
+	})
 	if err != nil {
-		t.Fatalf("SetConfig: %v", err)
+		t.Fatalf("UpdateSettings: %v", err)
 	}
-	if proj.Config == nil || proj.Config.AgentConfig.Model != "claude-opus-4-5" {
-		t.Fatalf("returned config = %#v", proj.Config)
+	if proj.Name != "AO Project" || proj.Config == nil || proj.Config.AgentConfig.Model != "claude-opus-4-5" {
+		t.Fatalf("returned project = %#v", proj)
 	}
 	if proj.DefaultBranch != "develop" {
 		t.Fatalf("DefaultBranch = %q, want develop", proj.DefaultBranch)
 	}
 
-	// The config persists and shows up on a fresh Get.
+	// Both values persist and show up together on a fresh Get.
 	got, err := m.Get(ctx, "ao")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if got.Project == nil || got.Project.Config == nil || got.Project.Config.Env["FOO"] != "bar" {
-		t.Fatalf("Get config = %#v", got.Project)
+	if got.Project == nil || got.Project.Name != "AO Project" || got.Project.Config == nil || got.Project.Config.Env["FOO"] != "bar" {
+		t.Fatalf("Get project = %#v", got.Project)
+	}
+	if got.Project.Config.AgentRules != "Run focused tests." || got.Project.Config.OrchestratorRules != "Delegate implementation." {
+		t.Fatalf("Get rules config = %#v", got.Project.Config)
 	}
 
-	// An invalid permission value is rejected when set.
-	_, err = m.SetConfig(ctx, "ao", project.SetConfigInput{Config: domain.ProjectConfig{AgentConfig: domain.AgentConfig{Permissions: "yolo"}}})
+	// Invalid fields are rejected before either value is persisted.
+	_, err = m.UpdateSettings(ctx, "ao", project.UpdateSettingsInput{
+		DisplayName: "Should Not Persist",
+		Config:      domain.ProjectConfig{AgentConfig: domain.AgentConfig{Permissions: "yolo"}},
+	})
 	wantCode(t, err, "INVALID_PROJECT_CONFIG")
+	got, err = m.Get(ctx, "ao")
+	if err != nil {
+		t.Fatalf("Get after rejected update: %v", err)
+	}
+	if got.Project == nil || got.Project.Name != "AO Project" || got.Project.Config == nil || got.Project.Config.AgentConfig.Model != "claude-opus-4-5" {
+		t.Fatalf("project changed after rejected update = %#v", got.Project)
+	}
+	_, err = m.UpdateSettings(ctx, "ao", project.UpdateSettingsInput{DisplayName: "  ", Config: cfg})
+	wantCode(t, err, "DISPLAY_NAME_REQUIRED")
 
-	// An unknown role-override harness is rejected too.
-	_, err = m.SetConfig(ctx, "ao", project.SetConfigInput{Config: domain.ProjectConfig{Worker: domain.RoleOverride{Harness: "nope"}}})
-	wantCode(t, err, "INVALID_PROJECT_CONFIG")
+	_, err = m.UpdateSettings(ctx, "ao", project.UpdateSettingsInput{
+		DisplayName: strings.Repeat("x", 21),
+		Config:      cfg,
+	})
+	wantCode(t, err, "DISPLAY_NAME_TOO_LONG")
 
-	// Setting on an unknown project is a clean not-found.
-	_, err = m.SetConfig(ctx, "ghost", project.SetConfigInput{Config: cfg})
+	_, err = m.UpdateSettings(ctx, "missing", project.UpdateSettingsInput{DisplayName: "Missing", Config: cfg})
 	wantCode(t, err, "PROJECT_NOT_FOUND")
 }
 
@@ -486,6 +670,177 @@ func TestManager_ReaddAfterRemove(t *testing.T) {
 	}
 }
 
+func TestManager_InitializeRepositoryRecovery(t *testing.T) {
+	ctx := context.Background()
+	m := newManager(t)
+
+	t.Run("plain folder", func(t *testing.T) {
+		dir := isolatedPlainFolder(t)
+		if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("keep me\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		result, err := m.InitializeRepository(ctx, project.InitializeRepositoryInput{Path: dir})
+		if err != nil {
+			t.Fatalf("InitializeRepository: %v", err)
+		}
+		if result.Path != dir {
+			t.Fatalf("Path = %q, want %q", result.Path, dir)
+		}
+		if _, err := exec.Command("git", "-C", dir, "rev-parse", "--verify", "HEAD").CombinedOutput(); err != nil {
+			t.Fatalf("expected initial commit: %v", err)
+		}
+		out, err := exec.Command("git", "-C", dir, "show", "HEAD:notes.txt").CombinedOutput()
+		if err != nil {
+			t.Fatalf("expected existing file in initial commit: %v (%s)", err, out)
+		}
+		if got := string(out); got != "keep me\n" {
+			t.Fatalf("HEAD:notes.txt = %q, want %q", got, "keep me\n")
+		}
+		if _, err := m.Add(ctx, project.AddInput{Path: dir, ProjectID: ptr("plain")}); err != nil {
+			t.Fatalf("Add after init: %v", err)
+		}
+	})
+
+	t.Run("unborn git repo", func(t *testing.T) {
+		dir := t.TempDir()
+		if out, err := exec.Command("git", "init", "-b", "main", dir).CombinedOutput(); err != nil {
+			t.Fatalf("git init: %v (%s)", err, out)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("unborn file\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := m.InitializeRepository(ctx, project.InitializeRepositoryInput{Path: dir}); err != nil {
+			t.Fatalf("InitializeRepository unborn: %v", err)
+		}
+		if _, err := exec.Command("git", "-C", dir, "rev-parse", "--verify", "HEAD").CombinedOutput(); err != nil {
+			t.Fatalf("expected initial commit: %v", err)
+		}
+		out, err := exec.Command("git", "-C", dir, "show", "HEAD:notes.txt").CombinedOutput()
+		if err != nil {
+			t.Fatalf("expected unborn repo file in initial commit: %v (%s)", err, out)
+		}
+		if got := string(out); got != "unborn file\n" {
+			t.Fatalf("HEAD:notes.txt = %q, want %q", got, "unborn file\n")
+		}
+	})
+
+	t.Run("already committed repo", func(t *testing.T) {
+		_, err := m.InitializeRepository(ctx, project.InitializeRepositoryInput{Path: gitRepo(t)})
+		wantCode(t, err, "PROJECT_ALREADY_INITIALIZED")
+	})
+
+	t.Run("repo subdirectory is rejected", func(t *testing.T) {
+		repo := gitRepo(t)
+		subdir := filepath.Join(repo, "nested")
+		if err := os.Mkdir(subdir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		_, err := m.InitializeRepository(ctx, project.InitializeRepositoryInput{Path: subdir})
+		wantCode(t, err, "PROJECT_PATH_NOT_REPO_ROOT")
+		if _, statErr := os.Stat(filepath.Join(subdir, ".git")); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("unexpected nested .git after rejected init: %v", statErr)
+		}
+	})
+
+	t.Run("bare repo is rejected", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "bare.git")
+		if out, err := exec.Command("git", "init", "--bare", dir).CombinedOutput(); err != nil {
+			t.Fatalf("git init --bare: %v (%s)", err, out)
+		}
+		_, err := m.InitializeRepository(ctx, project.InitializeRepositoryInput{Path: dir})
+		wantCode(t, err, "PROJECT_BARE_REPOSITORY")
+	})
+
+	t.Run("unsupported git metadata is rejected", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: missing\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := m.InitializeRepository(ctx, project.InitializeRepositoryInput{Path: dir})
+		wantCode(t, err, "UNSUPPORTED_GIT_REPO")
+	})
+
+	t.Run("broad setup paths are rejected before init", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("USERPROFILE", home)
+		paths := []string{
+			home,
+			filepath.Join(home, "Desktop"),
+			filepath.Join(home, "Documents"),
+			filepath.Join(home, "Downloads"),
+			filepath.Join(home, ".ao"),
+			filepath.Join(home, ".ao", "data"),
+		}
+		for _, path := range paths {
+			if err := os.MkdirAll(path, 0o755); err != nil {
+				t.Fatalf("mkdir %s: %v", path, err)
+			}
+			_, err := m.InitializeRepository(ctx, project.InitializeRepositoryInput{Path: path})
+			wantCode(t, err, "PROJECT_SETUP_PATH_UNSAFE")
+			if _, statErr := os.Lstat(filepath.Join(path, ".git")); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("unexpected .git after rejected broad path %s: %v", path, statErr)
+			}
+		}
+	})
+
+	t.Run("plain folder rolls back git init when staging fails", func(t *testing.T) {
+		dir := isolatedPlainFolder(t)
+		gitignore := []byte("node_modules/\n")
+		if err := os.WriteFile(filepath.Join(dir, ".gitignore"), gitignore, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GIT_INDEX_FILE", filepath.Join(t.TempDir(), "missing", "index"))
+
+		_, err := m.InitializeRepository(ctx, project.InitializeRepositoryInput{Path: dir})
+		wantCode(t, err, "GIT_ADD_FAILED")
+		if _, statErr := os.Lstat(filepath.Join(dir, ".git")); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf(".git still exists after rollback: %v", statErr)
+		}
+		got, readErr := os.ReadFile(filepath.Join(dir, ".gitignore"))
+		if readErr != nil {
+			t.Fatalf("read .gitignore after rollback: %v", readErr)
+		}
+		if string(got) != string(gitignore) {
+			t.Fatalf(".gitignore after rollback = %q, want %q", got, gitignore)
+		}
+	})
+
+	t.Run("plain folder with nested repo is rejected before init", func(t *testing.T) {
+		dir := isolatedPlainFolder(t)
+		nested := filepath.Join(dir, "packages", "foo")
+		if out, err := exec.Command("git", "init", "-b", "main", nested).CombinedOutput(); err != nil {
+			t.Fatalf("git init nested: %v (%s)", err, out)
+		}
+
+		_, err := m.InitializeRepository(ctx, project.InitializeRepositoryInput{Path: dir})
+		wantCode(t, err, "PROJECT_NESTED_GIT_REPOSITORY")
+		if _, statErr := os.Lstat(filepath.Join(dir, ".git")); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("unexpected .git after rejected nested repo setup: %v", statErr)
+		}
+	})
+
+	t.Run("unborn repo with nested repo is rejected before staging", func(t *testing.T) {
+		dir := t.TempDir()
+		if out, err := exec.Command("git", "init", "-b", "main", dir).CombinedOutput(); err != nil {
+			t.Fatalf("git init root: %v (%s)", err, out)
+		}
+		nested := filepath.Join(dir, "vendor", "child")
+		if out, err := exec.Command("git", "init", "-b", "main", nested).CombinedOutput(); err != nil {
+			t.Fatalf("git init nested: %v (%s)", err, out)
+		}
+
+		_, err := m.InitializeRepository(ctx, project.InitializeRepositoryInput{Path: dir})
+		wantCode(t, err, "PROJECT_NESTED_GIT_REPOSITORY")
+		out, lsErr := exec.Command("git", "-C", dir, "ls-files", "-s").CombinedOutput()
+		if lsErr != nil {
+			t.Fatalf("git ls-files: %v (%s)", lsErr, out)
+		}
+		if strings.Contains(string(out), "160000") {
+			t.Fatalf("nested repo was staged as a gitlink:\n%s", out)
+		}
+	})
+}
 func TestManager_AddValidationAndConflicts(t *testing.T) {
 	ctx := context.Background()
 	m := newManager(t)
@@ -496,6 +851,12 @@ func TestManager_AddValidationAndConflicts(t *testing.T) {
 	_, err = m.Add(ctx, project.AddInput{Path: t.TempDir()}) // exists but not a git repo
 	wantCode(t, err, "NOT_A_GIT_REPO")
 
+	unborn := t.TempDir()
+	if out, err := exec.Command("git", "init", "-b", "main", unborn).CombinedOutput(); err != nil {
+		t.Fatalf("git init unborn: %v (%s)", err, out)
+	}
+	_, err = m.Add(ctx, project.AddInput{Path: unborn})
+	wantCode(t, err, "PROJECT_UNBORN")
 	// An embedded ".." passes the id pattern but would yield an invalid git
 	// branch (ao/a..b-1) at spawn time; reject it up front as a clear 400.
 	_, err = m.Add(ctx, project.AddInput{Path: gitRepo(t), ProjectID: ptr("a..b")})

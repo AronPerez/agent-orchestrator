@@ -58,7 +58,30 @@ if (typeof window !== "undefined") {
 		app: {
 			getVersion: async () => "0.0.0-test",
 			chooseDirectory: async () => null,
+			openExternal: async () => undefined,
 			scanImportFolder: async ({ path }: { path: string }) => ({ path, repos: [] }),
+			onNewSessionShortcut: () => () => undefined,
+			onKeyboardShortcutsHelp: () => () => undefined,
+			onNewShellTerminalShortcut: () => () => undefined,
+			onOpenSettingsShortcut: () => () => undefined,
+			onPreviousSessionShortcut: () => () => undefined,
+			onNextSessionShortcut: () => () => undefined,
+			onFocusTerminalShortcut: () => () => undefined,
+		},
+		terminal: {
+			saveDroppedFile: async () => "",
+		},
+		window: {
+			setOverlay: async () => undefined,
+			isFullScreen: async () => false,
+			onFullScreen: () => () => undefined,
+		},
+		theme: {
+			set: async () => undefined,
+		},
+		menu: {
+			action: async () => undefined,
+			notifyShellFocus: () => undefined,
 		},
 		clipboard: {
 			writeText: async () => undefined,
@@ -83,6 +106,8 @@ if (typeof window !== "undefined") {
 				isLoading: false,
 			}),
 			setBounds: () => undefined,
+			capture: async () => "",
+			requestMirror: async () => false,
 			navigate: async ({ viewId }: { viewId: string }) => ({
 				viewId,
 				url: "",
@@ -132,7 +157,10 @@ if (typeof window !== "undefined") {
 				isLoading: false,
 			}),
 			destroy: () => undefined,
+			setAnnotationMode: async () => undefined,
 			onNavState: () => () => undefined,
+			onAnnotationSubmit: () => () => undefined,
+			onAnnotationCancel: () => () => undefined,
 		},
 		notifications: {
 			show: async () => undefined,
@@ -143,7 +171,7 @@ if (typeof window !== "undefined") {
 			setMigration: async () => undefined,
 		},
 		updateSettings: {
-			get: async () => ({ enabled: false, channel: "latest", nightlyAck: false }),
+			get: async () => ({ enabled: false, channel: "latest", nightlyAck: false, feature: null }),
 			set: async () => undefined,
 		},
 		updates: {
@@ -152,6 +180,10 @@ if (typeof window !== "undefined") {
 			download: async () => undefined,
 			install: async () => undefined,
 			onStatus: () => () => undefined,
+		},
+		featureBuilds: {
+			list: async () => [],
+			getActive: async () => null,
 		},
 	};
 } // end if (typeof window !== "undefined")

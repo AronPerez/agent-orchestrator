@@ -87,10 +87,10 @@ func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (
 	}
 	cmd = append(cmd, settingsArgs...)
 
-	if cfg.SystemPromptFile != "" {
-		cmd = append(cmd, "--append-system-prompt-file", cfg.SystemPromptFile)
-	} else if cfg.SystemPrompt != "" {
+	if cfg.SystemPrompt != "" {
 		cmd = append(cmd, "--append-system-prompt", cfg.SystemPrompt)
+	} else if cfg.SystemPromptFile != "" {
+		cmd = append(cmd, "--append-system-prompt-file", cfg.SystemPromptFile)
 	}
 
 	if cfg.Prompt != "" {
@@ -127,6 +127,11 @@ func (p *Plugin) GetRestoreCommand(ctx context.Context, cfg ports.RestoreConfig)
 		return nil, false, err
 	}
 	cmd = append(cmd, settingsArgs...)
+	if cfg.SystemPrompt != "" {
+		cmd = append(cmd, "--append-system-prompt", cfg.SystemPrompt)
+	} else if cfg.SystemPromptFile != "" {
+		cmd = append(cmd, "--append-system-prompt-file", cfg.SystemPromptFile)
+	}
 	cmd = append(cmd, "-r", agentSessionID)
 	return cmd, true, nil
 }
@@ -223,7 +228,8 @@ var droidBinarySpec = binaryutil.BinarySpec{
 	Names:         []string{"droid"},
 	WinNames:      []string{"droid.cmd", "droid.exe", "droid"},
 	UnixPaths:     []string{"/usr/local/bin/droid", "/opt/homebrew/bin/droid"},
-	UnixHomePaths: [][]string{{".local", "bin", "droid"}, {".factory", "bin", "droid"}},
+	UnixHomePaths: binaryutil.NodeManagedUnixHomePaths("droid", []string{".factory", "bin", "droid"}),
+	NodeManaged:   true,
 	WinPaths: []binaryutil.WinPath{
 		{Base: binaryutil.WinAppData, Parts: []string{"npm", "droid.cmd"}},
 		{Base: binaryutil.WinAppData, Parts: []string{"npm", "droid.exe"}},

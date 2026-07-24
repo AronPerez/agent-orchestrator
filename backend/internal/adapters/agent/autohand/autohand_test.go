@@ -34,7 +34,7 @@ func TestGetLaunchCommandBuildsArgv(t *testing.T) {
 		Prompt:           "-fix this",
 		WorkspacePath:    "/work/space",
 		SystemPromptFile: filepath.Join("tmp", "prompt with spaces.md"),
-		SystemPrompt:     "ignored",
+		SystemPrompt:     "inline wins",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -44,7 +44,7 @@ func TestGetLaunchCommandBuildsArgv(t *testing.T) {
 		"autohand",
 		"--path", "/work/space",
 		"--unrestricted",
-		"--sys-prompt", filepath.Join("tmp", "prompt with spaces.md"),
+		"--sys-prompt", "inline wins",
 		"--", "-fix this",
 	}
 	if !reflect.DeepEqual(cmd, want) {
@@ -137,15 +137,76 @@ func TestGetPromptDeliveryStrategyIsInCommand(t *testing.T) {
 	}
 }
 
-func TestGetConfigSpecHasNoCustomFieldsYet(t *testing.T) {
+func TestGetConfigSpecReportsModelField(t *testing.T) {
 	plugin := &Plugin{}
 
 	spec, err := plugin.GetConfigSpec(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(spec.Fields) != 0 {
-		t.Fatalf("unexpected config fields: %#v", spec.Fields)
+	want := []ports.ConfigField{
+		{
+			Key:         "model",
+			Type:        ports.ConfigFieldString,
+			Description: "Model override passed to `autohand --model`.",
+		},
+	}
+	if !reflect.DeepEqual(spec.Fields, want) {
+		t.Fatalf("config fields\nwant: %#v\n got: %#v", want, spec.Fields)
+	}
+}
+
+func TestGetLaunchCommandAppendsConfiguredModel(t *testing.T) {
+	plugin := &Plugin{resolvedBinary: "autohand"}
+
+	cmd, err := plugin.GetLaunchCommand(context.Background(), ports.LaunchConfig{
+		Config: ports.AgentConfig{Model: "  anthropic/claude-sonnet-4-20250514  "},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(cmd, "--model") {
+		t.Fatalf("command %#v missing --model flag", cmd)
+	}
+	want := []string{"autohand", "--model", "anthropic/claude-sonnet-4-20250514"}
+	if !reflect.DeepEqual(cmd, want) {
+		t.Fatalf("unexpected command\nwant: %#v\n got: %#v", want, cmd)
+	}
+}
+
+func TestGetLaunchCommandOmitsBlankConfiguredModel(t *testing.T) {
+	plugin := &Plugin{resolvedBinary: "autohand"}
+
+	cmd, err := plugin.GetLaunchCommand(context.Background(), ports.LaunchConfig{
+		Config: ports.AgentConfig{Model: " \t "},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contains(cmd, "--model") {
+		t.Fatalf("command %#v contains --model for blank model", cmd)
+	}
+}
+
+func TestGetRestoreCommandAppendsConfiguredModel(t *testing.T) {
+	plugin := &Plugin{resolvedBinary: "autohand"}
+
+	cmd, ok, err := plugin.GetRestoreCommand(context.Background(), ports.RestoreConfig{
+		Config: ports.AgentConfig{Model: "  anthropic/claude-sonnet-4-20250514  "},
+		Session: ports.SessionRef{
+			WorkspacePath: "/work/space",
+			Metadata:      map[string]string{ports.MetadataKeyAgentSessionID: "sess-123"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	want := []string{"autohand", "resume", "--path", "/work/space", "--model", "anthropic/claude-sonnet-4-20250514", "sess-123"}
+	if !reflect.DeepEqual(cmd, want) {
+		t.Fatalf("restore cmd\nwant: %#v\n got: %#v", want, cmd)
 	}
 }
 
@@ -153,7 +214,8 @@ func TestGetRestoreCommandReadsAgentSessionID(t *testing.T) {
 	plugin := &Plugin{resolvedBinary: "autohand"}
 
 	cmd, ok, err := plugin.GetRestoreCommand(context.Background(), ports.RestoreConfig{
-		Permissions: ports.PermissionModeAuto,
+		Permissions:  ports.PermissionModeAuto,
+		SystemPrompt: "restore instructions ignored by resume",
 		Session: ports.SessionRef{
 			WorkspacePath: "/work/space",
 			Metadata:      map[string]string{ports.MetadataKeyAgentSessionID: "sess-123"},
@@ -352,7 +414,7 @@ func TestDeriveActivityState(t *testing.T) {
 		{"session start -> active", "session-start", domain.ActivityActive, true},
 		{"user prompt -> active", "user-prompt-submit", domain.ActivityActive, true},
 		{"stop -> idle", "stop", domain.ActivityIdle, true},
-		{"permission request -> waiting input", "permission-request", domain.ActivityWaitingInput, true},
+		{"permission request -> waiting_input", "permission-request", domain.ActivityWaitingInput, true},
 		{"unknown event -> no signal", "frobnicate", "", false},
 	}
 	for _, tt := range tests {

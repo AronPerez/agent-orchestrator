@@ -3,7 +3,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { agentsQueryKey } from "../hooks/useAgentsQuery";
-import { CreateProjectAgentSheet } from "./CreateProjectAgentSheet";
+import { CreateProjectAgentSheet, defaultAuthorizedAgent, RequiredAgentField } from "./CreateProjectAgentSheet";
 
 function renderSheet(onSubmit = vi.fn().mockResolvedValue(undefined)) {
 	const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -42,17 +42,57 @@ async function chooseOption(trigger: HTMLElement, optionName: string) {
 }
 
 describe("CreateProjectAgentSheet", () => {
+	it("chooses the highest-priority authorized default agent", () => {
+		expect(
+			defaultAuthorizedAgent([
+				{ id: "opencode", label: "OpenCode", authStatus: "authorized" },
+				{ id: "codex", label: "Codex", authStatus: "authorized" },
+			]),
+		).toBe("codex");
+	});
+
+	it("falls back to the alphabetically first authorized agent when no priority agent is authorized", () => {
+		expect(
+			defaultAuthorizedAgent([
+				{ id: "goose", label: "Goose", authStatus: "authorized" },
+				{ id: "devin", label: "Devin", authStatus: "authorized" },
+			]),
+		).toBe("devin");
+	});
+
+	it("uses the compact trigger size for agent fields", () => {
+		render(
+			<RequiredAgentField
+				id="agent"
+				label="Agent"
+				onChange={() => undefined}
+				placeholder="Project default"
+				value="claude-code"
+			/>,
+		);
+
+		expect(screen.getByLabelText("Agent")).toHaveAttribute("data-size", "sm");
+	});
+
+	it("caps the agent menu height with a theme token", async () => {
+		render(
+			<RequiredAgentField id="agent" label="Agent" onChange={() => undefined} placeholder="Project default" value="" />,
+		);
+
+		await userEvent.click(screen.getByLabelText("Agent"));
+
+		expect(await screen.findByRole("listbox")).toHaveClass("max-h-select-menu-max!");
+	});
+
 	it("creates without intake when the toggle is left off", async () => {
 		const onSubmit = renderSheet();
-		await chooseOption(screen.getByLabelText("Worker agent"), "claude-code");
-		await chooseOption(screen.getByLabelText("Orchestrator agent"), "codex");
 
 		await userEvent.click(screen.getByRole("button", { name: "Create and start" }));
 
 		await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
 		expect(onSubmit).toHaveBeenCalledWith({
 			workerAgent: "claude-code",
-			orchestratorAgent: "codex",
+			orchestratorAgent: "claude-code",
 			trackerIntake: undefined,
 		});
 	});

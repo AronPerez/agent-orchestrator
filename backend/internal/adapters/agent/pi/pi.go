@@ -74,9 +74,25 @@ func (p *Plugin) Manifest() adapters.Manifest {
 	}
 }
 
+// GetConfigSpec reports the per-project agent config keys Pi understands.
+func (p *Plugin) GetConfigSpec(ctx context.Context) (ports.ConfigSpec, error) {
+	if err := ctx.Err(); err != nil {
+		return ports.ConfigSpec{}, err
+	}
+	return ports.ConfigSpec{
+		Fields: []ports.ConfigField{
+			{
+				Key:         "model",
+				Type:        ports.ConfigFieldString,
+				Description: "Model override passed to `pi --model`.",
+			},
+		},
+	}, nil
+}
+
 // GetLaunchCommand builds the argv to start a new interactive Pi session:
 //
-//	pi [--append-system-prompt <system prompt>] [<prompt>]
+//	pi [--append-system-prompt <system prompt>] [--model <model>] [<prompt>]
 //
 // The prompt is delivered in-command as a trailing positional message. Pi does
 // not honor a `--` options terminator, so the prompt must not begin with "-".
@@ -88,15 +104,16 @@ func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (
 	}
 
 	cmd = []string{binary}
-	if cfg.SystemPromptFile != "" {
+	if cfg.SystemPrompt != "" {
+		cmd = append(cmd, "--append-system-prompt", cfg.SystemPrompt)
+	} else if cfg.SystemPromptFile != "" {
 		data, err := os.ReadFile(cfg.SystemPromptFile) //nolint:gosec // path is AO-owned launch config
 		if err != nil {
 			return nil, err
 		}
 		cmd = append(cmd, "--append-system-prompt", string(data))
-	} else if cfg.SystemPrompt != "" {
-		cmd = append(cmd, "--append-system-prompt", cfg.SystemPrompt)
 	}
+	appendModelFlag(&cmd, cfg.Config)
 	if cfg.Prompt != "" {
 		cmd = append(cmd, cfg.Prompt)
 	}
@@ -123,9 +140,22 @@ func (p *Plugin) GetRestoreCommand(ctx context.Context, cfg ports.RestoreConfig)
 	cmd = []string{binary}
 	if cfg.SystemPrompt != "" {
 		cmd = append(cmd, "--append-system-prompt", cfg.SystemPrompt)
+	} else if cfg.SystemPromptFile != "" {
+		data, err := os.ReadFile(cfg.SystemPromptFile) //nolint:gosec // path is AO-owned launch config
+		if err != nil {
+			return nil, false, err
+		}
+		cmd = append(cmd, "--append-system-prompt", string(data))
 	}
+	appendModelFlag(&cmd, cfg.Config)
 	cmd = append(cmd, "--session", agentSessionID)
 	return cmd, true, nil
+}
+
+func appendModelFlag(cmd *[]string, cfg ports.AgentConfig) {
+	if model := strings.TrimSpace(cfg.Model); model != "" {
+		*cmd = append(*cmd, "--model", model)
+	}
 }
 
 var piBinarySpec = binaryutil.BinarySpec{
@@ -133,7 +163,8 @@ var piBinarySpec = binaryutil.BinarySpec{
 	Names:         []string{"pi"},
 	WinNames:      []string{"pi.cmd", "pi.exe", "pi"},
 	UnixPaths:     []string{"/usr/local/bin/pi", "/opt/homebrew/bin/pi"},
-	UnixHomePaths: [][]string{{".npm-global", "bin", "pi"}, {".local", "bin", "pi"}, {".pi", "bin", "pi"}},
+	UnixHomePaths: binaryutil.NodeManagedUnixHomePaths("pi", []string{".pi", "bin", "pi"}),
+	NodeManaged:   true,
 	WinPaths: []binaryutil.WinPath{
 		{Base: binaryutil.WinAppData, Parts: []string{"npm", "pi.cmd"}},
 		{Base: binaryutil.WinAppData, Parts: []string{"npm", "pi.exe"}},
@@ -141,8 +172,7 @@ var piBinarySpec = binaryutil.BinarySpec{
 }
 
 // ResolvePiBinary finds the `pi` binary, searching PATH then common install
-// locations. It returns "pi" as a last resort so callers get the shell's normal
-// command-not-found behavior if Pi is absent.
+// locations. It returns a wrapped ports.ErrAgentBinaryNotFound when Pi is absent.
 func ResolvePiBinary(ctx context.Context) (string, error) {
 	return binaryutil.ResolveBinary(ctx, piBinarySpec)
 }

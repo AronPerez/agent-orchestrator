@@ -55,10 +55,31 @@ func capturedState(t *testing.T, capture *activityCapture) string {
 	return req.State
 }
 
-func TestHooks_NotificationReportsWaitingInput(t *testing.T) {
+func TestHooks_NotificationReportsBlocked(t *testing.T) {
 	t.Setenv("AO_SESSION_ID", "ao-7")
 	cfg := setConfigEnv(t)
-	srv, capture := activityServer(t, http.StatusOK, `{"ok":true,"sessionId":"ao-7","state":"waiting_input"}`)
+	srv, capture := activityServer(t, http.StatusOK, `{"ok":true,"sessionId":"ao-7","state":"blocked"}`)
+	writeRunFileFor(t, cfg, srv)
+
+	_, errOut, err := executeCLI(t, Deps{
+		In:           strings.NewReader(`{"notification_type":"permission_prompt"}`),
+		ProcessAlive: func(int) bool { return true },
+	}, "hooks", "claude-code", "notification")
+	if err != nil {
+		t.Fatalf("unexpected error: %v\nstderr=%s", err, errOut)
+	}
+	if capture.path != "/api/v1/sessions/ao-7/activity" {
+		t.Errorf("path = %q, want /api/v1/sessions/ao-7/activity", capture.path)
+	}
+	if got := capturedState(t, capture); got != "blocked" {
+		t.Errorf("state = %q, want blocked", got)
+	}
+}
+
+func TestHooks_IdlePromptReportsIdle(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "ao-7")
+	cfg := setConfigEnv(t)
+	srv, capture := activityServer(t, http.StatusOK, `{"ok":true,"sessionId":"ao-7","state":"idle"}`)
 	writeRunFileFor(t, cfg, srv)
 
 	_, errOut, err := executeCLI(t, Deps{
@@ -68,11 +89,8 @@ func TestHooks_NotificationReportsWaitingInput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v\nstderr=%s", err, errOut)
 	}
-	if capture.path != "/api/v1/sessions/ao-7/activity" {
-		t.Errorf("path = %q, want /api/v1/sessions/ao-7/activity", capture.path)
-	}
-	if got := capturedState(t, capture); got != "waiting_input" {
-		t.Errorf("state = %q, want waiting_input", got)
+	if got := capturedState(t, capture); got != "idle" {
+		t.Errorf("state = %q, want idle (idle_prompt is not a blocking request)", got)
 	}
 }
 
@@ -112,7 +130,120 @@ func TestHooks_StopReportsIdle(t *testing.T) {
 	}
 }
 
-func TestHooks_CodexPermissionRequestReportsWaitingInput(t *testing.T) {
+func TestHooks_SessionStartReportsNativeSessionIDWithoutActivity(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "ao-7")
+	cfg := setConfigEnv(t)
+	srv, capture := activityServer(t, http.StatusOK, `{"ok":true}`)
+	writeRunFileFor(t, cfg, srv)
+
+	_, _, err := executeCLI(t, Deps{
+		In:           strings.NewReader(`{"session_id":"019f6af0-codex-session"}`),
+		ProcessAlive: func(int) bool { return true },
+	}, "hooks", "codex", "session-start")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var req setActivityAPIRequest
+	if err := json.Unmarshal([]byte(capture.body), &req); err != nil {
+		t.Fatalf("decode body: %v\nbody=%s", err, capture.body)
+	}
+	want := setActivityAPIRequest{Event: "session-start", AgentSessionID: "019f6af0-codex-session"}
+	if req != want {
+		t.Fatalf("body = %+v, want %+v", req, want)
+	}
+}
+
+func TestHooks_ActivityAlsoReportsNativeSessionID(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "ao-7")
+	cfg := setConfigEnv(t)
+	srv, capture := activityServer(t, http.StatusOK, `{"ok":true}`)
+	writeRunFileFor(t, cfg, srv)
+
+	_, _, err := executeCLI(t, Deps{
+		In:           strings.NewReader(`{"session_id":"claude-session-1"}`),
+		ProcessAlive: func(int) bool { return true },
+	}, "hooks", "claude-code", "stop")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var req setActivityAPIRequest
+	if err := json.Unmarshal([]byte(capture.body), &req); err != nil {
+		t.Fatalf("decode body: %v\nbody=%s", err, capture.body)
+	}
+	want := setActivityAPIRequest{State: "idle", Event: "stop", AgentSessionID: "claude-session-1"}
+	if req != want {
+		t.Fatalf("body = %+v, want %+v", req, want)
+	}
+}
+
+func TestHooks_UnknownAgentCannotReportNativeSessionID(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "ao-7")
+	cfg := setConfigEnv(t)
+	srv, capture := activityServer(t, http.StatusOK, `{"ok":true}`)
+	writeRunFileFor(t, cfg, srv)
+
+	_, _, err := executeCLI(t, Deps{
+		In:           strings.NewReader(`{"session_id":"untrusted-session"}`),
+		ProcessAlive: func(int) bool { return true },
+	}, "hooks", "unknown-agent", "session-start")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if capture.hits != 0 {
+		t.Fatalf("unknown agent reported metadata; hits=%d body=%s", capture.hits, capture.body)
+	}
+}
+
+func TestHooks_ClaudeCodePermissionRequestReportsBlocked(t *testing.T) {
+	// claude-code installs the pre/post-tool-use trio, so a permission-request
+	// blocked state can be correlated and cleared — it is the one harness that
+	// reports blocked.
+	t.Setenv("AO_SESSION_ID", "ao-7")
+	cfg := setConfigEnv(t)
+	srv, capture := activityServer(t, http.StatusOK, `{"ok":true}`)
+	writeRunFileFor(t, cfg, srv)
+
+	_, _, err := executeCLI(t, Deps{
+		In:           strings.NewReader(`{"tool_name":"Bash"}`),
+		ProcessAlive: func(int) bool { return true },
+	}, "hooks", "claude-code", "permission-request")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := capturedState(t, capture); got != "blocked" {
+		t.Errorf("state = %q, want blocked", got)
+	}
+}
+
+func TestHooks_PostToolUseCarriesCorrelationFields(t *testing.T) {
+	// Tool-use signals must carry the event and the native tool identity so
+	// lifecycle can clear a stale blocked only on the approved tool's post.
+	t.Setenv("AO_SESSION_ID", "ao-7")
+	cfg := setConfigEnv(t)
+	srv, capture := activityServer(t, http.StatusOK, `{"ok":true}`)
+	writeRunFileFor(t, cfg, srv)
+
+	_, _, err := executeCLI(t, Deps{
+		In:           strings.NewReader(`{"tool_name":"Bash","tool_use_id":"toolu_42","tool_response":"ok"}`),
+		ProcessAlive: func(int) bool { return true },
+	}, "hooks", "claude-code", "post-tool-use")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var req setActivityAPIRequest
+	if err := json.Unmarshal([]byte(capture.body), &req); err != nil {
+		t.Fatalf("decode body: %v\nbody=%s", err, capture.body)
+	}
+	want := setActivityAPIRequest{State: "active", Event: "post-tool-use", ToolName: "Bash", ToolUseID: "toolu_42"}
+	if req != want {
+		t.Errorf("body = %+v, want %+v", req, want)
+	}
+}
+
+func TestHooks_EventWithoutToolIdentityOmitsIt(t *testing.T) {
+	// Adapters whose payloads carry no tool fields (codex permission-request
+	// payload here has tool_name only) still tag the event; missing identity
+	// fields stay empty rather than inventing values.
 	t.Setenv("AO_SESSION_ID", "ao-7")
 	cfg := setConfigEnv(t)
 	srv, capture := activityServer(t, http.StatusOK, `{"ok":true}`)
@@ -125,8 +256,13 @@ func TestHooks_CodexPermissionRequestReportsWaitingInput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got := capturedState(t, capture); got != "waiting_input" {
-		t.Errorf("state = %q, want waiting_input", got)
+	var req setActivityAPIRequest
+	if err := json.Unmarshal([]byte(capture.body), &req); err != nil {
+		t.Fatalf("decode body: %v\nbody=%s", err, capture.body)
+	}
+	want := setActivityAPIRequest{State: "waiting_input", Event: "permission-request", ToolName: "Bash", ToolUseID: ""}
+	if req != want {
+		t.Errorf("body = %+v, want %+v", req, want)
 	}
 }
 
@@ -145,6 +281,318 @@ func TestHooks_OpenCodeUserPromptReportsActive(t *testing.T) {
 	}
 	if got := capturedState(t, capture); got != "active" {
 		t.Errorf("state = %q, want active", got)
+	}
+}
+
+func TestHooks_CodexSessionStartReportsAgentSessionID(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "ao-7")
+	cfg := setConfigEnv(t)
+	srv, capture := activityServer(t, http.StatusOK, `{"ok":true}`)
+	writeRunFileFor(t, cfg, srv)
+
+	_, _, err := executeCLI(t, Deps{
+		In:           strings.NewReader(`{"session_id":"codex-native-1"}`),
+		ProcessAlive: func(int) bool { return true },
+	}, "hooks", "codex", "session-start")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if capture.hits != 1 {
+		t.Fatalf("daemon calls = %d, want 1", capture.hits)
+	}
+	var req setActivityAPIRequest
+	if err := json.Unmarshal([]byte(capture.body), &req); err != nil {
+		t.Fatalf("decode body: %v\nbody=%s", err, capture.body)
+	}
+	want := setActivityAPIRequest{Event: "session-start", AgentSessionID: "codex-native-1"}
+	if req != want {
+		t.Fatalf("body = %+v, want %+v", req, want)
+	}
+}
+
+func TestHooks_CodexBlankSessionIDIsIgnored(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "ao-7")
+	cfg := setConfigEnv(t)
+	srv, capture := activityServer(t, http.StatusOK, `{"ok":true}`)
+	writeRunFileFor(t, cfg, srv)
+
+	_, _, err := executeCLI(t, Deps{
+		In:           strings.NewReader(`{"session_id":"   "}`),
+		ProcessAlive: func(int) bool { return true },
+	}, "hooks", "codex", "session-start")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if capture.hits != 0 {
+		t.Fatalf("daemon calls = %d, want 0", capture.hits)
+	}
+}
+
+func TestHooks_ClaudeCodeSessionStartReportsAgentSessionID(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "ao-7")
+	cfg := setConfigEnv(t)
+	srv, capture := activityServer(t, http.StatusOK, `{"ok":true}`)
+	writeRunFileFor(t, cfg, srv)
+
+	_, _, err := executeCLI(t, Deps{
+		In:           strings.NewReader(`{"session_id":"claude-native-1"}`),
+		ProcessAlive: func(int) bool { return true },
+	}, "hooks", "claude-code", "session-start")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if capture.hits != 1 {
+		t.Fatalf("daemon calls = %d, want 1", capture.hits)
+	}
+	var req setActivityAPIRequest
+	if err := json.Unmarshal([]byte(capture.body), &req); err != nil {
+		t.Fatalf("decode body: %v\nbody=%s", err, capture.body)
+	}
+	want := setActivityAPIRequest{Event: "session-start", AgentSessionID: "claude-native-1"}
+	if req != want {
+		t.Fatalf("body = %+v, want %+v", req, want)
+	}
+}
+
+func TestHooks_ClaudeCodeBlankSessionIDIsIgnored(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "ao-7")
+	cfg := setConfigEnv(t)
+	srv, capture := activityServer(t, http.StatusOK, `{"ok":true}`)
+	writeRunFileFor(t, cfg, srv)
+
+	_, _, err := executeCLI(t, Deps{
+		In:           strings.NewReader(`{"session_id":"   "}`),
+		ProcessAlive: func(int) bool { return true },
+	}, "hooks", "claude-code", "session-start")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if capture.hits != 0 {
+		t.Fatalf("daemon calls = %d, want 0", capture.hits)
+	}
+}
+
+func TestHooks_GrokSessionStartReportsAgentSessionID(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "ao-7")
+	cfg := setConfigEnv(t)
+	srv, capture := activityServer(t, http.StatusOK, `{"ok":true}`)
+	writeRunFileFor(t, cfg, srv)
+
+	_, _, err := executeCLI(t, Deps{
+		In:           strings.NewReader(`{"session_id":"grok-native-1"}`),
+		ProcessAlive: func(int) bool { return true },
+	}, "hooks", "grok", "session-start")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if capture.hits != 1 {
+		t.Fatalf("daemon calls = %d, want 1", capture.hits)
+	}
+	var req setActivityAPIRequest
+	if err := json.Unmarshal([]byte(capture.body), &req); err != nil {
+		t.Fatalf("decode body: %v\nbody=%s", err, capture.body)
+	}
+	want := setActivityAPIRequest{Event: "session-start", AgentSessionID: "grok-native-1"}
+	if req != want {
+		t.Fatalf("body = %+v, want %+v", req, want)
+	}
+}
+
+func TestHooks_RegisteredHarnessSessionStartReportsAgentSessionID(t *testing.T) {
+	for _, agent := range []string{"opencode", "qwen", "kimi", "kilocode", "goose"} {
+		t.Run(agent, func(t *testing.T) {
+			t.Setenv("AO_SESSION_ID", "ao-7")
+			cfg := setConfigEnv(t)
+			srv, capture := activityServer(t, http.StatusOK, `{"ok":true}`)
+			writeRunFileFor(t, cfg, srv)
+
+			_, _, err := executeCLI(t, Deps{
+				In:           strings.NewReader(`{"session_id":"` + agent + `-native-1"}`),
+				ProcessAlive: func(int) bool { return true },
+			}, "hooks", agent, "session-start")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if capture.hits != 1 {
+				t.Fatalf("daemon calls = %d, want 1", capture.hits)
+			}
+			var req setActivityAPIRequest
+			if err := json.Unmarshal([]byte(capture.body), &req); err != nil {
+				t.Fatalf("decode body: %v\nbody=%s", err, capture.body)
+			}
+			want := setActivityAPIRequest{State: "active", Event: "session-start", AgentSessionID: agent + "-native-1"}
+			if req != want {
+				t.Fatalf("body = %+v, want %+v", req, want)
+			}
+		})
+	}
+}
+
+func TestHooks_VibePostAgentReportsSessionIDAndIdle(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "ao-7")
+	cfg := setConfigEnv(t)
+	srv, capture := activityServer(t, http.StatusOK, `{"ok":true}`)
+	writeRunFileFor(t, cfg, srv)
+
+	_, _, err := executeCLI(t, Deps{
+		In:           strings.NewReader(`{"session_id":"vibe-native-1","hook_event_name":"post_agent"}`),
+		ProcessAlive: func(int) bool { return true },
+	}, "hooks", "vibe", "post-agent")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if capture.hits != 1 {
+		t.Fatalf("daemon calls = %d, want 1", capture.hits)
+	}
+	var req setActivityAPIRequest
+	if err := json.Unmarshal([]byte(capture.body), &req); err != nil {
+		t.Fatalf("decode body: %v\nbody=%s", err, capture.body)
+	}
+	want := setActivityAPIRequest{State: "idle", Event: "post-agent", AgentSessionID: "vibe-native-1"}
+	if req != want {
+		t.Fatalf("body = %+v, want %+v", req, want)
+	}
+}
+
+func TestHooks_AgySessionStartReportsConversationID(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "ao-7")
+	cfg := setConfigEnv(t)
+	promptDir := filepath.Join(cfg.dataDir, "prompts", "ao-7")
+	if err := os.MkdirAll(promptDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(promptDir, "system.md"), []byte("follow AO standing instructions\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv, capture := activityServer(t, http.StatusOK, `{"ok":true}`)
+	writeRunFileFor(t, cfg, srv)
+
+	out, _, err := executeCLI(t, Deps{
+		In:           strings.NewReader(`{"conversationId":"agy-native-1"}`),
+		ProcessAlive: func(int) bool { return true },
+	}, "hooks", "agy", "session-start")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.TrimSpace(out) == "" {
+		t.Fatal("expected Agy session-start context output")
+	}
+	if capture.hits != 1 {
+		t.Fatalf("daemon calls = %d, want 1", capture.hits)
+	}
+	var req setActivityAPIRequest
+	if err := json.Unmarshal([]byte(capture.body), &req); err != nil {
+		t.Fatalf("decode body: %v\nbody=%s", err, capture.body)
+	}
+	want := setActivityAPIRequest{Event: "session-start", AgentSessionID: "agy-native-1"}
+	if req != want {
+		t.Fatalf("body = %+v, want %+v", req, want)
+	}
+}
+
+func TestHooks_CopilotSessionStartReportsSessionID(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "ao-7")
+	cfg := setConfigEnv(t)
+	srv, capture := activityServer(t, http.StatusOK, `{"ok":true}`)
+	writeRunFileFor(t, cfg, srv)
+
+	_, _, err := executeCLI(t, Deps{
+		In:           strings.NewReader(`{"sessionId":"copilot-native-1"}`),
+		ProcessAlive: func(int) bool { return true },
+	}, "hooks", "copilot", "session-start")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if capture.hits != 1 {
+		t.Fatalf("daemon calls = %d, want 1", capture.hits)
+	}
+	var req setActivityAPIRequest
+	if err := json.Unmarshal([]byte(capture.body), &req); err != nil {
+		t.Fatalf("decode body: %v\nbody=%s", err, capture.body)
+	}
+	want := setActivityAPIRequest{State: "active", Event: "session-start", AgentSessionID: "copilot-native-1"}
+	if req != want {
+		t.Fatalf("body = %+v, want %+v", req, want)
+	}
+}
+
+func TestHooks_DevinSessionStartInjectsSystemPromptContext(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "ao-7")
+	cfg := setConfigEnv(t)
+	promptDir := filepath.Join(cfg.dataDir, "prompts", "ao-7")
+	if err := os.MkdirAll(promptDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(promptDir, "system.md"), []byte("follow AO standing instructions\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv, capture := activityServer(t, http.StatusOK, `{"ok":true}`)
+	writeRunFileFor(t, cfg, srv)
+
+	out, _, err := executeCLI(t, Deps{
+		In:           strings.NewReader(`{"source":"startup"}`),
+		ProcessAlive: func(int) bool { return true },
+	}, "hooks", "devin", "session-start")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var got struct {
+		HookSpecificOutput struct {
+			HookEventName     string `json:"hookEventName"`
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode Devin hook output: %v\n%s", err, out)
+	}
+	if got.HookSpecificOutput.HookEventName != "SessionStart" {
+		t.Fatalf("hookEventName = %q", got.HookSpecificOutput.HookEventName)
+	}
+	if got.HookSpecificOutput.AdditionalContext != "follow AO standing instructions" {
+		t.Fatalf("additionalContext = %q", got.HookSpecificOutput.AdditionalContext)
+	}
+	if got := capturedState(t, capture); got != "active" {
+		t.Errorf("state = %q, want active", got)
+	}
+}
+
+func TestHooks_AgySessionStartInjectsSystemPromptContext(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "ao-7")
+	cfg := setConfigEnv(t)
+	promptDir := filepath.Join(cfg.dataDir, "prompts", "ao-7")
+	if err := os.MkdirAll(promptDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(promptDir, "system.md"), []byte("follow AO standing instructions\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv, capture := activityServer(t, http.StatusOK, `{"ok":true}`)
+	writeRunFileFor(t, cfg, srv)
+
+	out, _, err := executeCLI(t, Deps{
+		In:           strings.NewReader(`{"source":"startup"}`),
+		ProcessAlive: func(int) bool { return true },
+	}, "hooks", "agy", "session-start")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var got struct {
+		HookSpecificOutput struct {
+			HookEventName     string `json:"hookEventName"`
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode Agy hook output: %v\n%s", err, out)
+	}
+	if got.HookSpecificOutput.HookEventName != "SessionStart" {
+		t.Fatalf("hookEventName = %q", got.HookSpecificOutput.HookEventName)
+	}
+	if got.HookSpecificOutput.AdditionalContext != "follow AO standing instructions" {
+		t.Fatalf("additionalContext = %q", got.HookSpecificOutput.AdditionalContext)
+	}
+	if capture.hits != 0 {
+		t.Errorf("Agy session-start should only inject context, got %d daemon calls", capture.hits)
 	}
 }
 

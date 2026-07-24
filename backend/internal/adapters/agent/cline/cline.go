@@ -16,6 +16,7 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/agentbase"
@@ -52,6 +53,22 @@ func (p *Plugin) Manifest() adapters.Manifest {
 	}
 }
 
+// GetConfigSpec reports the per-project agent config keys Cline understands.
+func (p *Plugin) GetConfigSpec(ctx context.Context) (ports.ConfigSpec, error) {
+	if err := ctx.Err(); err != nil {
+		return ports.ConfigSpec{}, err
+	}
+	return ports.ConfigSpec{
+		Fields: []ports.ConfigField{
+			{
+				Key:         "model",
+				Type:        ports.ConfigFieldString,
+				Description: "Model override passed to `cline --model`.",
+			},
+		},
+	}, nil
+}
+
 // GetLaunchCommand builds the argv to start a new interactive Cline session.
 // Prompted worker tasks are injected after startup; passing them in argv makes
 // Cline's startup parser reject short prompts such as "hi" as unknown commands.
@@ -63,6 +80,7 @@ func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (
 
 	cmd = []string{binary}
 	appendApprovalFlags(&cmd, cfg.Permissions)
+	appendModelFlag(&cmd, cfg.Config)
 
 	if cfg.SystemPrompt != "" {
 		cmd = append(cmd, "-s", cfg.SystemPrompt)
@@ -78,6 +96,25 @@ func (p *Plugin) GetPromptDeliveryStrategy(ctx context.Context, _ ports.LaunchCo
 		return "", err
 	}
 	return ports.PromptDeliveryAfterStart, nil
+}
+
+// PromptReadinessHints waits briefly for Cline's interactive prompt before AO
+// injects the worker's first task.
+func (p *Plugin) PromptReadinessHints(ctx context.Context, _ ports.LaunchConfig) (ports.PromptReadinessHints, error) {
+	if err := ctx.Err(); err != nil {
+		return ports.PromptReadinessHints{}, err
+	}
+	return ports.PromptReadinessHints{
+		InitialDelay: 750 * time.Millisecond,
+		Patterns: []string{
+			"Type a message",
+			"What can I help",
+			">",
+		},
+		PollInterval: 200 * time.Millisecond,
+		Timeout:      8 * time.Second,
+		Lines:        80,
+	}, nil
 }
 
 // GetRestoreCommand rebuilds the argv that continues an existing Cline session:
@@ -102,6 +139,10 @@ func (p *Plugin) GetRestoreCommand(ctx context.Context, cfg ports.RestoreConfig)
 	cmd = make([]string, 0, 8)
 	cmd = append(cmd, binary)
 	appendApprovalFlags(&cmd, cfg.Permissions)
+	appendModelFlag(&cmd, cfg.Config)
+	if cfg.SystemPrompt != "" {
+		cmd = append(cmd, "-s", cfg.SystemPrompt)
+	}
 	cmd = append(cmd, "--id", agentSessionID)
 	return cmd, true, nil
 }
@@ -121,7 +162,8 @@ var clineBinarySpec = binaryutil.BinarySpec{
 	Names:         []string{"cline"},
 	WinNames:      []string{"cline.cmd", "cline.exe", "cline"},
 	UnixPaths:     []string{"/usr/local/bin/cline", "/opt/homebrew/bin/cline"},
-	UnixHomePaths: [][]string{{".npm-global", "bin", "cline"}, {".npm", "bin", "cline"}, {".local", "bin", "cline"}},
+	UnixHomePaths: binaryutil.NodeManagedUnixHomePaths("cline"),
+	NodeManaged:   true,
 	WinPaths: []binaryutil.WinPath{
 		{Base: binaryutil.WinAppData, Parts: []string{"npm", "cline.cmd"}},
 		{Base: binaryutil.WinAppData, Parts: []string{"npm", "cline.exe"}},
@@ -149,6 +191,12 @@ func (p *Plugin) clineBinary(ctx context.Context) (string, error) {
 	}
 	p.resolvedBinary = binary
 	return binary, nil
+}
+
+func appendModelFlag(cmd *[]string, cfg ports.AgentConfig) {
+	if model := strings.TrimSpace(cfg.Model); model != "" {
+		*cmd = append(*cmd, "--model", model)
+	}
 }
 
 func appendApprovalFlags(cmd *[]string, permissions ports.PermissionMode) {

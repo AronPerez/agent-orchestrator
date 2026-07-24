@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { BrowserNavState, BrowserRect } from "../../main/browser-view-host";
+import type { BrowserAnnotationCancelPayload, BrowserAnnotationSubmitPayload } from "../../shared/browser-annotations";
+import { OPEN_DIALOG_OR_MENU_SELECTOR } from "../lib/dom-selectors";
 
 export type { BrowserNavState };
 
@@ -30,6 +32,8 @@ type UseBrowserViewOptions = {
 export type BrowserViewModel = {
 	viewId: string;
 	navState: BrowserNavState;
+	mirrorUrl: string;
+	mirrorStream: MediaStream | null;
 	slotRef: (node: HTMLDivElement | null) => void;
 	navigate: (url: string) => Promise<void>;
 	goBack: () => Promise<void>;
@@ -37,6 +41,8 @@ export type BrowserViewModel = {
 	reload: () => Promise<void>;
 	stop: () => Promise<void>;
 	destroy: () => void;
+	annotationMode: boolean;
+	setAnnotationMode: (enabled: boolean) => Promise<void>;
 	/**
 	 * "native" in Electron (a window-level WebContentsView paints into the slot);
 	 * "web" in a plain browser, where there is no WebContentsView so the panel
@@ -92,6 +98,21 @@ export function useBrowserView(options: UseBrowserViewOptions): BrowserViewModel
 	return hasNativeBrowser() ? native : web;
 }
 
+// `requestFullscreen` (the terminal pane's fullscreen button) promotes an element
+// into the DOM top layer, which covers every other DOM node — but not the native
+// view, which Chromium composites above the page regardless. The transition also
+// leaves the slot's own box untouched, since the top layer does not reflow
+// normal-flow siblings, so neither the ResizeObserver nor `resize` fires and the
+// view would keep painting at its pre-fullscreen bounds, over the fullscreen
+// element and without its own (now hidden) toolbar. Nothing outside the
+// fullscreen subtree is visible, so hide the view unless the slot is inside it.
+function hiddenByFullscreen(node: HTMLElement): boolean {
+	// Truthy, not `!== null`: the spec says null, but jsdom (and older engines)
+	// leave `fullscreenElement` undefined when nothing is fullscreen.
+	const fullscreen = document.fullscreenElement;
+	return Boolean(fullscreen) && !fullscreen!.contains(node);
+}
+
 function useNativeBrowserView({
 	sessionId,
 	active,
@@ -102,14 +123,22 @@ function useNativeBrowserView({
 }: UseBrowserViewOptions): BrowserViewModel {
 	const [viewId, setViewId] = useState("");
 	const [navState, setNavState] = useState<BrowserNavState>(EMPTY_NAV_STATE);
+	const [mirrorUrl, setMirrorUrl] = useState("");
+	const [mirrorStream, setMirrorStream] = useState<MediaStream | null>(null);
+	const [annotationMode, setAnnotationModeState] = useState(false);
 	const slotNodeRef = useRef<HTMLDivElement | null>(null);
 	const viewIdRef = useRef("");
+	const annotationModeRef = useRef(false);
 	const activeRef = useRef(active);
 	const frameRef = useRef<number | null>(null);
 	const settleTimerRef = useRef<number | null>(null);
 	const observerRef = useRef<ResizeObserver | null>(null);
 	const previewTriggerRef = useRef<{ revision: number | null; target: string } | null>(null);
 	const hasUrlRef = useRef(false);
+	const modalOpenRef = useRef(false);
+	const mirrorTokenRef = useRef(0);
+	const mirrorTimerRef = useRef<number | null>(null);
+	const mirrorStreamRef = useRef<MediaStream | null>(null);
 	const hasNativeBrowser = Boolean(window.ao?.browser);
 
 	useEffect(() => {
@@ -120,21 +149,43 @@ function useNativeBrowserView({
 		hasUrlRef.current = Boolean(navState.url);
 	}, [navState.url]);
 
+	useEffect(() => {
+		annotationModeRef.current = annotationMode;
+	}, [annotationMode]);
+
 	const sendHiddenBounds = useCallback((id = viewIdRef.current) => {
 		if (!id) return;
 		window.ao?.browser.setBounds({ viewId: id, rect: HIDDEN_RECT, visible: false });
 	}, []);
 
 	const measureAndSend = useCallback(() => {
+		// measureAndSend runs both from the scheduleMeasure() rAF callback and as a
+		// direct synchronous call (parking on overlay open, the settle timer). A
+		// direct call may land while a scheduled frame is still queued, so cancel
+		// that live handle rather than blindly nulling it — otherwise the
+		// scheduleMeasure() dedupe guard and cancelScheduledMeasure() cleanup would
+		// both trust a frameRef that no longer reflects the pending frame.
+		if (frameRef.current !== null) {
+			if (window.cancelAnimationFrame) window.cancelAnimationFrame(frameRef.current);
+			window.clearTimeout(frameRef.current);
+		}
 		frameRef.current = null;
 		const id = viewIdRef.current;
 		const node = slotNodeRef.current;
 		if (!id) return;
-		if (!activeRef.current || !node || !node.isConnected || !hasUrlRef.current) {
+		if (!activeRef.current || !node || !node.isConnected || !hasUrlRef.current || hiddenByFullscreen(node)) {
 			sendHiddenBounds(id);
 			return;
 		}
 		const rect = visibleSlotRect(node);
+		if (modalOpenRef.current) {
+			if (rect.width > 0 && rect.height > 0) {
+				window.ao?.browser.setBounds({ viewId: id, rect, visible: true, parked: true });
+			} else {
+				sendHiddenBounds(id);
+			}
+			return;
+		}
 		const payload = {
 			viewId: id,
 			rect,
@@ -225,6 +276,10 @@ function useNativeBrowserView({
 			disposed = true;
 			const id = viewIdRef.current;
 			if (id) {
+				if (annotationModeRef.current) {
+					void window.ao?.browser.setAnnotationMode({ viewId: id, enabled: false });
+					setAnnotationModeState(false);
+				}
 				sendHiddenBounds(id);
 			}
 			viewIdRef.current = "";
@@ -246,25 +301,171 @@ function useNativeBrowserView({
 		}
 	}, [active, navState.url, poppedOut, scheduleSettleMeasure, sendHiddenBounds]);
 
+	const stopMirrorStream = useCallback(() => {
+		mirrorStreamRef.current?.getTracks().forEach((track) => track.stop());
+		mirrorStreamRef.current = null;
+		setMirrorStream(null);
+	}, []);
+
+	const runMirror = useCallback(
+		(id: string) => {
+			const token = ++mirrorTokenRef.current;
+			const live = () => mirrorTokenRef.current === token && modalOpenRef.current && viewIdRef.current === id;
+			const streamMirror = async (): Promise<boolean> => {
+				if (!navigator.mediaDevices?.getDisplayMedia) return false;
+				const granted = await window.ao?.browser.requestMirror?.(id).catch(() => false);
+				if (!granted || !live()) return false;
+				const stream = await navigator.mediaDevices.getDisplayMedia({ audio: false, video: true });
+				if (!live()) {
+					stream.getTracks().forEach((track) => track.stop());
+					return true;
+				}
+				stopMirrorStream();
+				mirrorStreamRef.current = stream;
+				setMirrorStream(stream);
+				return true;
+			};
+			const frameMirror = async () => {
+				while (live()) {
+					const pending = window.ao?.browser.capture?.(id) ?? Promise.resolve("");
+					const frame = await pending.catch(() => "");
+					if (!live()) return;
+					if (frame) setMirrorUrl(frame);
+					await new Promise((resolve) => {
+						window.setTimeout(resolve, 66);
+					});
+				}
+			};
+			const tick = async () => {
+				const streamed = await streamMirror().catch(() => false);
+				if (streamed || !live()) return;
+				await frameMirror();
+			};
+			void tick();
+		},
+		[stopMirrorStream],
+	);
+
+	useEffect(() => {
+		if (!hasNativeBrowser) return;
+		const clearMirrorTimer = () => {
+			if (mirrorTimerRef.current === null) return;
+			window.clearTimeout(mirrorTimerRef.current);
+			mirrorTimerRef.current = null;
+		};
+		const update = () => {
+			const open = document.querySelector(OPEN_DIALOG_OR_MENU_SELECTOR) !== null;
+			if (open === modalOpenRef.current) return;
+			modalOpenRef.current = open;
+			if (open) {
+				clearMirrorTimer();
+				const id = viewIdRef.current;
+				if (id && activeRef.current && hasUrlRef.current) {
+					runMirror(id);
+					// Park the native view synchronously, in the same tick the overlay
+					// opened. `modalOpenRef` is already true, so measureAndSend() emits
+					// the `parked: true` bounds now instead of a frame later — deferring
+					// to rAF leaves a ~16ms window where the live view paints over the
+					// freshly-opened dropdown, which stacks into a stuck overlay under
+					// rapid toggling. rAF still refines geometry on later resize/scroll.
+					measureAndSend();
+				} else {
+					sendHiddenBounds();
+				}
+			} else {
+				mirrorTokenRef.current += 1;
+				scheduleSettleMeasure();
+				clearMirrorTimer();
+				mirrorTimerRef.current = window.setTimeout(() => {
+					mirrorTimerRef.current = null;
+					setMirrorUrl("");
+					stopMirrorStream();
+				}, 320);
+			}
+		};
+		update();
+		const observer = new MutationObserver(update);
+		// Radix reuses its portal node and flips `data-state` in place rather than
+		// adding/removing a body child, so a `childList`-only observer misses the
+		// open/close transition under rapid toggling and `modalOpenRef` desyncs.
+		// Watch subtree attribute flips on `data-state` too so the transition is
+		// always observed. This widens the firing rate a lot — `data-state` is used
+		// across Radix (tooltips, accordions, selects, switches, …), so `update()`
+		// now runs a document-wide querySelector on activity anywhere in the app
+		// before it can bail. Cheap enough in practice, but not free.
+		observer.observe(document.body, {
+			childList: true,
+			subtree: true,
+			attributes: true,
+			attributeFilter: ["data-state"],
+		});
+		return () => {
+			observer.disconnect();
+			clearMirrorTimer();
+			mirrorTokenRef.current += 1;
+			stopMirrorStream();
+		};
+	}, [hasNativeBrowser, measureAndSend, runMirror, scheduleSettleMeasure, sendHiddenBounds, stopMirrorStream]);
+
 	useEffect(() => {
 		const handle = () => scheduleMeasure();
+		// Fullscreen animates on macOS, so settle-measure: hiding lands on the
+		// leading edge, and the restore on exit waits for the final geometry.
+		const handleFullscreenChange = () => scheduleSettleMeasure();
 		window.addEventListener("resize", handle);
 		window.addEventListener("scroll", handle, true);
+		document.addEventListener("fullscreenchange", handleFullscreenChange);
 		return () => {
 			window.removeEventListener("resize", handle);
 			window.removeEventListener("scroll", handle, true);
+			document.removeEventListener("fullscreenchange", handleFullscreenChange);
 			observerRef.current?.disconnect();
 			cancelScheduledMeasure();
 			if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
 		};
-	}, [cancelScheduledMeasure, scheduleMeasure]);
+	}, [cancelScheduledMeasure, scheduleMeasure, scheduleSettleMeasure]);
 
 	const withView = useCallback(async (fn: (id: string) => Promise<BrowserNavState | void>) => {
 		const id = viewIdRef.current;
 		if (!id) return;
-		const next = await fn(id);
-		if (next) setNavState(next);
+		try {
+			const next = await fn(id);
+			if (next) setNavState(next);
+		} catch {
+			// navigation errors are handled by the did-fail-load event channel
+		}
 	}, []);
+
+	const setAnnotationMode = useCallback(
+		async (enabled: boolean) => {
+			const id = viewIdRef.current;
+			if (!id || !hasNativeBrowser) {
+				setAnnotationModeState(false);
+				return;
+			}
+			await window.ao!.browser.setAnnotationMode({ viewId: id, enabled });
+			setAnnotationModeState(enabled);
+		},
+		[hasNativeBrowser],
+	);
+
+	useEffect(() => {
+		const handleDone = (payload: BrowserAnnotationSubmitPayload | BrowserAnnotationCancelPayload) => {
+			if (payload.viewId !== viewIdRef.current) return;
+			setAnnotationModeState(false);
+		};
+		const offSubmit = window.ao?.browser.onAnnotationSubmit(handleDone);
+		const offCancel = window.ao?.browser.onAnnotationCancel(handleDone);
+		return () => {
+			offSubmit?.();
+			offCancel?.();
+		};
+	}, []);
+
+	useEffect(() => {
+		if (navState.url || !annotationModeRef.current) return;
+		void setAnnotationMode(false);
+	}, [navState.url, setAnnotationMode]);
 
 	const navigate = useCallback(
 		(url: string) => {
@@ -319,14 +520,23 @@ function useNativeBrowserView({
 	const destroy = useCallback(() => {
 		const id = viewIdRef.current;
 		if (!id) return;
+		if (annotationModeRef.current) {
+			void window.ao?.browser.setAnnotationMode({ viewId: id, enabled: false });
+			setAnnotationModeState(false);
+		}
+		mirrorTokenRef.current += 1;
+		stopMirrorStream();
+		setMirrorUrl("");
 		sendHiddenBounds(id);
 		window.ao?.browser.destroy(id);
 		viewIdRef.current = "";
-	}, [sendHiddenBounds]);
+	}, [sendHiddenBounds, stopMirrorStream]);
 
 	return {
 		viewId,
 		navState,
+		mirrorUrl,
+		mirrorStream,
 		slotRef,
 		navigate,
 		goBack: () => (hasNativeBrowser ? withView((id) => window.ao!.browser.goBack(id)) : Promise.resolve()),
@@ -334,6 +544,8 @@ function useNativeBrowserView({
 		reload: () => (hasNativeBrowser ? withView((id) => window.ao!.browser.reload(id)) : Promise.resolve()),
 		stop: () => (hasNativeBrowser ? withView((id) => window.ao!.browser.stop(id)) : Promise.resolve()),
 		destroy,
+		annotationMode,
+		setAnnotationMode,
 		mode: "native",
 		iframeSrc: "",
 		iframeKey: 0,
@@ -425,6 +637,10 @@ function useWebBrowserView(
 	return {
 		viewId: url ? "web" : "",
 		navState,
+		// The web fallback has no native mirror or annotation surface; provide
+		// inert defaults so it still satisfies BrowserViewModel.
+		mirrorUrl: "",
+		mirrorStream: null,
 		slotRef,
 		navigate,
 		goBack: async () => {},
@@ -432,6 +648,8 @@ function useWebBrowserView(
 		reload,
 		stop: async () => {},
 		destroy: () => setUrl(""),
+		annotationMode: false,
+		setAnnotationMode: async () => {},
 		mode: "web",
 		iframeSrc: url,
 		iframeKey,

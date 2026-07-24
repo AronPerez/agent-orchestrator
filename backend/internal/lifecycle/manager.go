@@ -8,16 +8,23 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	"github.com/aoagents/agent-orchestrator/backend/internal/sessionguard"
 )
 
 type sessionStore interface {
 	GetSession(ctx context.Context, id domain.SessionID) (domain.SessionRecord, bool, error)
 	UpdateSession(ctx context.Context, rec domain.SessionRecord) error
+	// ListSessions returns every session in a project. The dispatcher reads it
+	// to resolve the current orchestrator at delivery time.
+	ListSessions(ctx context.Context, project domain.ProjectID) ([]domain.SessionRecord, error)
 	// ListPRsBySession returns every PR row tracked for the session. The
 	// reducer reads it to apply the multi-PR completion rule (terminate only
 	// when no open PR remains and at least one merged) and to suppress
@@ -27,6 +34,13 @@ type sessionStore interface {
 	// reaction-dedup map so nudges survive a daemon restart.
 	GetPRLastNudgeSignature(ctx context.Context, prURL string) (string, error)
 	UpdatePRLastNudgeSignature(ctx context.Context, prURL, payload string) error
+	// RecordWorkerIdle persists the worker's activity transition and its
+	// worker_idle outbox event atomically. ListPending* / MarkWorkerIdleEventDelivered
+	// drive the durable at-least-once delivery of those events.
+	RecordWorkerIdle(ctx context.Context, rec domain.SessionRecord, ev domain.WorkerIdleEvent) error
+	ListPendingWorkerIdleEventsByProject(ctx context.Context, project domain.ProjectID) ([]domain.WorkerIdleEvent, error)
+	ListPendingWorkerIdleEvents(ctx context.Context) ([]domain.WorkerIdleEvent, error)
+	MarkWorkerIdleEventDelivered(ctx context.Context, id string, at time.Time) error
 }
 
 // notificationSink is the optional lifecycle-to-notification-producer boundary.
@@ -47,11 +61,25 @@ func WithTelemetry(sink ports.EventSink) Option {
 	return func(m *Manager) { m.telemetry = sink }
 }
 
+// WithActiveSteering supplies the adapter-provided active-turn steering
+// capability (see ports.ActiveTurnSteerer). Without it the reducer assumes no
+// harness can be steered mid-turn.
+func WithActiveSteering(pred func(domain.AgentHarness) bool) Option {
+	return func(m *Manager) {
+		if pred != nil {
+			m.steerActive = pred
+		}
+	}
+}
+
 // Manager reduces runtime, activity, spawn, and termination observations into durable session facts.
 // It also owns agent nudges caused by PR observations, including merge-conflict, CI-failure, and review-feedback prompts.
 type Manager struct {
-	store         sessionStore
-	messenger     ports.AgentMessenger
+	store sessionStore
+	// guard is the shared pane-write primitive every reaction nudge goes
+	// through (see sessionguard). Nil when no messenger was wired: reaction
+	// nudges become no-ops but the reducer still runs.
+	guard         *sessionguard.Guard
 	notifications notificationSink
 
 	mu        sync.Mutex
@@ -59,6 +87,18 @@ type Manager struct {
 	clock     func() time.Time
 	react     reactionState
 	telemetry ports.EventSink
+	// flights tracks, per session, the in-flight tool executions and the
+	// pending permission dialog's identity (see toolFlight). Guarded by mu.
+	flights map[domain.SessionID]*toolFlight
+	// steerActive reports whether a harness can safely receive a write during an
+	// active turn (input steers the run) rather than only while idle. Supplied by
+	// the agent adapter via WithActiveSteering; the default answers false, so an
+	// unknown harness is only written to while idle.
+	steerActive func(domain.AgentHarness) bool
+	// dispatchLocks serializes delivery per project. Six triggers can dispatch
+	// concurrently; without this two of them can read the same pending row and
+	// both send it before either marks it delivered.
+	dispatchLocks sync.Map
 }
 
 // New builds a Lifecycle Manager over the session store it writes and the messenger it uses for agent nudges.
@@ -68,7 +108,10 @@ func New(store sessionStore, messenger ports.AgentMessenger, opts ...Option) *Ma
 	// `ao session get` showing created in UTC but updated in local time. A
 	// WithClock option may still override this in tests.
 	clock := func() time.Time { return time.Now().UTC() }
-	m := &Manager{store: store, messenger: messenger, window: defaultRecentActivityWindow, clock: clock, react: newReactionState()}
+	m := &Manager{store: store, window: defaultRecentActivityWindow, clock: clock, react: newReactionState(), flights: map[domain.SessionID]*toolFlight{}, steerActive: func(domain.AgentHarness) bool { return false }}
+	if messenger != nil {
+		m.guard = sessionguard.New(store, messenger, nil)
+	}
 	for _, opt := range opts {
 		opt(m)
 	}
@@ -105,13 +148,22 @@ func (m *Manager) ApplyRuntimeObservation(ctx context.Context, id domain.Session
 		next := cur
 		next.IsTerminated = true
 		next.Activity = domain.Activity{State: domain.ActivityExited, LastActivityAt: timeOr(f.ObservedAt, now)}
+		// Reaper-driven death (crash/SIGKILL) never fires a session-end hook,
+		// so this is the last chance to release the session's tool-flight
+		// state; a leaked entry would otherwise persist for the daemon's life
+		// (later observations return early on cur.IsTerminated). Runs under
+		// m.mu — mutate holds it across this callback.
+		delete(m.flights, id)
 		return next, true
 	})
 }
 
-// ApplyActivitySignal records an authoritative agent activity signal.
+// ApplyActivitySignal records an authoritative agent activity signal and any
+// native agent session id carried alongside it. Metadata-only hooks leave the
+// existing activity and first-signal facts untouched.
 func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, s ports.ActivitySignal) error {
-	if !s.Valid {
+	s.AgentSessionID = strings.TrimSpace(s.AgentSessionID)
+	if !s.Valid && s.AgentSessionID == "" {
 		return nil
 	}
 	var intent *ports.NotificationIntent
@@ -127,22 +179,55 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 	}
 	now := m.clock()
 	if rec.IsTerminated {
+		delete(m.flights, id)
 		m.mu.Unlock()
 		return nil
 	}
+	// Event-tagged signals fold through the session's tool-flight state first:
+	// they may be suppressed (state write skipped) by the blocked-precedence
+	// rule, while their tracking side effects still land. Untagged signals
+	// (old CLIs, adapters without tool identity) pass through untouched —
+	// last-writer-wins, exactly as before.
+	metadataChanged := s.AgentSessionID != "" && rec.Metadata.AgentSessionID != s.AgentSessionID
+	if s.Valid {
+		s = m.applyToolPrecedenceLocked(id, rec.Activity.State, s)
+	}
+	if !s.Valid && !metadataChanged {
+		m.mu.Unlock()
+		return nil
+	}
+	if !s.Valid {
+		rec.Metadata.AgentSessionID = s.AgentSessionID
+		rec.UpdatedAt = now
+		err := m.store.UpdateSession(ctx, rec)
+		m.mu.Unlock()
+		return err
+	}
+	if metadataChanged {
+		// Fold metadata into rec before copying it into next below, so the
+		// activity and resume handle land in one store update.
+		rec.Metadata.AgentSessionID = s.AgentSessionID
+	}
 	prevState := rec.Activity.State
 	prevAt := rec.Activity.LastActivityAt
-	next := rec
 	act := domain.Activity{State: s.State, LastActivityAt: timeOr(s.Timestamp, now)}
+	sameState := sameActivity(rec.Activity, act)
 	// A same-state repeat is still a write when it is the FIRST signal for
 	// this spawn: the receipt itself is a durable fact (it clears the
 	// no_signal display status). Hook deliveries are best-effort, so the
 	// first to ARRIVE may match the seeded state — e.g. a turn's "active"
 	// POST is lost and its Stop hook lands idle on the idle-seeded row.
-	if sameActivity(rec.Activity, act) && !rec.FirstSignalAt.IsZero() {
+	if sameState && !rec.FirstSignalAt.IsZero() {
+		if metadataChanged {
+			rec.UpdatedAt = now
+			err := m.store.UpdateSession(ctx, rec)
+			m.mu.Unlock()
+			return err
+		}
 		m.mu.Unlock()
 		return nil
 	}
+	next := rec
 	next.Activity = act
 	if next.FirstSignalAt.IsZero() {
 		next.FirstSignalAt = timeOr(s.Timestamp, now)
@@ -151,11 +236,27 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 		next.IsTerminated = true
 	}
 	next.UpdatedAt = now
-	if err := m.store.UpdateSession(ctx, next); err != nil {
+	// A worker's active->idle transition creates a durable worker_idle event in
+	// the same write as the activity change, so a crash can't persist the idle
+	// state while losing the pending delivery.
+	var idleEvent *domain.WorkerIdleEvent
+	if crossedToIdle(prevState, next) {
+		idleEvent = &domain.WorkerIdleEvent{
+			ID:           uuid.NewString(),
+			ProjectID:    next.ProjectID,
+			WorkerID:     next.ID,
+			TransitionAt: next.Activity.LastActivityAt,
+			CreatedAt:    now,
+		}
+	}
+	if err := m.persistActivity(ctx, next, idleEvent); err != nil {
 		m.mu.Unlock()
 		return err
 	}
-	if rec.Activity.State != domain.ActivityWaitingInput && next.Activity.State == domain.ActivityWaitingInput && !next.IsTerminated {
+	// Transition into the needs-input family (waiting_input or blocked) pings
+	// the user; an in-family escalation (waiting_input -> blocked) does not
+	// re-notify — the user was already pinged once for this pause.
+	if !rec.Activity.State.NeedsInput() && next.Activity.State.NeedsInput() && !next.IsTerminated {
 		intent = &ports.NotificationIntent{
 			Type:               domain.NotificationNeedsInput,
 			SessionID:          next.ID,
@@ -165,12 +266,343 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 		}
 	}
 	waitingEvents := m.waitingInputEvents(next, prevState, prevAt, now)
+	// Re-attempt delivery of pending worker_idle events on: a fresh event; the
+	// orchestrator crossing into a deliverable state; or the orchestrator's first
+	// authentic activity signal (its runtime has proven it is up, so a restored
+	// orchestrator seeded idle is not written into before it is ready).
+	firstSignal := rec.FirstSignalAt.IsZero() && !next.FirstSignalAt.IsZero()
+	dispatch := idleEvent != nil ||
+		m.orchestratorDispatchTrigger(prevState, next) ||
+		(firstSignal && next.Kind == domain.KindOrchestrator && m.safeToDeliver(next))
 	m.mu.Unlock()
 	for _, ev := range waitingEvents {
 		m.emitTelemetry(ctx, ev)
 	}
 	m.emitNotification(ctx, intent)
+	if dispatch {
+		m.DispatchPendingWorkerIdleEvents(ctx, next.ProjectID)
+	}
 	return nil
+}
+
+// persistActivity writes the activity transition, atomically appending the
+// worker_idle outbox event when one was produced. Callers hold m.mu.
+func (m *Manager) persistActivity(ctx context.Context, next domain.SessionRecord, ev *domain.WorkerIdleEvent) error {
+	if ev == nil {
+		return m.store.UpdateSession(ctx, next)
+	}
+	return m.store.RecordWorkerIdle(ctx, next, *ev)
+}
+
+// crossedToIdle reports a worker finishing a turn: an active->idle transition on
+// a live worker session, which is AO's "this worker may be done" signal. Gating
+// on active (not merely non-idle) skips the spawn-time idle seed and
+// waiting_input->idle demotions.
+func crossedToIdle(prev domain.ActivityState, next domain.SessionRecord) bool {
+	return next.Kind == domain.KindWorker &&
+		prev == domain.ActivityActive &&
+		next.Activity.State == domain.ActivityIdle &&
+		!next.IsTerminated
+}
+
+// orchestratorDispatchTrigger reports an orchestrator transition after which a
+// pending report should be (re)attempted:
+//   - entering idle from any state — the orchestrator is free, and this is how a
+//     backlog drains one nudge per turn (each delivery moves it out of idle;
+//     coming back re-triggers the next).
+//   - resuming an active turn from a user pause (blocked/waiting_input) on a
+//     steerable harness — safe to steer, so deliver now rather than wait for the
+//     sweep. Entering active from idle is ordinary work and must NOT pull the
+//     backlog into a fresh turn.
+func (m *Manager) orchestratorDispatchTrigger(prev domain.ActivityState, next domain.SessionRecord) bool {
+	if next.Kind != domain.KindOrchestrator || next.IsTerminated || next.Activity.State == prev {
+		return false
+	}
+	switch next.Activity.State {
+	case domain.ActivityIdle:
+		return true
+	case domain.ActivityActive:
+		return m.steerActive(next.Harness) &&
+			(prev == domain.ActivityBlocked || prev == domain.ActivityWaitingInput)
+	default:
+		return false
+	}
+}
+
+// DispatchPendingWorkerIdleEvents delivers AT MOST ONE of this project's pending
+// worker_idle events to its current orchestrator, then returns. Delivering the
+// nudge moves the orchestrator out of idle, but that state change lands
+// asynchronously via its activity hook — so sending more in the same pass would
+// dump the whole backlog into one turn before the state reflects the first send.
+// The orchestrator's next entry into idle re-triggers this to deliver the next
+// event, draining the backlog one nudge per turn.
+//
+// Delivery is serialized per project so overlapping triggers cannot both read
+// and send the same pending row. The binding safety decision is re-evaluated
+// inside the guard at the write boundary; the snapshot check here only avoids
+// pointless work.
+func (m *Manager) DispatchPendingWorkerIdleEvents(ctx context.Context, project domain.ProjectID) {
+	if m.guard == nil {
+		return
+	}
+	lock := m.projectDispatchLock(project)
+	lock.Lock()
+	defer lock.Unlock()
+
+	orch, ok, err := m.liveOrchestrator(ctx, project)
+	if err != nil {
+		slog.Default().Error("lifecycle: resolve orchestrator", "project", project, "err", err)
+		return
+	}
+	if !ok || !m.safeToDeliver(orch) {
+		return
+	}
+	events, err := m.store.ListPendingWorkerIdleEventsByProject(ctx, project)
+	if err != nil {
+		slog.Default().Error("lifecycle: list pending worker events", "project", project, "err", err)
+		return
+	}
+	if len(events) == 0 {
+		return
+	}
+	ev := events[0]
+	outcome, err := m.guard.NudgeCoordination(ctx, orch.ID, m.workerIdleNudgeMessage(ctx, ev.WorkerID), m.steerActive)
+	if err != nil {
+		slog.Default().Error("lifecycle: deliver worker idle", "worker", ev.WorkerID, "orchestrator", orch.ID, "err", err)
+	}
+	if outcome != sessionguard.Sent {
+		return
+	}
+	if err := m.store.MarkWorkerIdleEventDelivered(ctx, ev.ID, m.clock()); err != nil {
+		slog.Default().Error("lifecycle: mark worker idle delivered", "event", ev.ID, "err", err)
+	}
+}
+
+// DispatchAllPendingWorkerIdleEvents re-attempts delivery for every project with
+// pending worker_idle events. Used on daemon start and by the recovery sweep.
+func (m *Manager) DispatchAllPendingWorkerIdleEvents(ctx context.Context) {
+	if m.guard == nil {
+		return
+	}
+	events, err := m.store.ListPendingWorkerIdleEvents(ctx)
+	if err != nil {
+		slog.Default().Error("lifecycle: list pending worker events", "err", err)
+		return
+	}
+	seen := map[domain.ProjectID]struct{}{}
+	for _, ev := range events {
+		if _, done := seen[ev.ProjectID]; done {
+			continue
+		}
+		seen[ev.ProjectID] = struct{}{}
+		m.DispatchPendingWorkerIdleEvents(ctx, ev.ProjectID)
+	}
+}
+
+func (m *Manager) projectDispatchLock(project domain.ProjectID) *sync.Mutex {
+	lock, _ := m.dispatchLocks.LoadOrStore(project, &sync.Mutex{})
+	mu, _ := lock.(*sync.Mutex)
+	return mu
+}
+
+// safeToDeliver reports whether the orchestrator can receive a coordination
+// write now: idle always, active only for a harness that steers an active turn;
+// blocked, waiting_input, exited, and terminated defer.
+//
+// A zero FirstSignalAt means the orchestrator has produced no authentic activity
+// signal since it was spawned/restored — its runtime is not proven up yet — so a
+// seeded-idle row is not written into until the runtime settles.
+func (m *Manager) safeToDeliver(orch domain.SessionRecord) bool {
+	if orch.IsTerminated || orch.FirstSignalAt.IsZero() {
+		return false
+	}
+	switch orch.Activity.State {
+	case domain.ActivityIdle:
+		return true
+	case domain.ActivityActive:
+		return m.steerActive(orch.Harness)
+	default:
+		return false
+	}
+}
+
+// liveOrchestrator resolves the project's current (non-terminated) orchestrator
+// at delivery time, so an event is never bound to one that was later replaced.
+func (m *Manager) liveOrchestrator(ctx context.Context, project domain.ProjectID) (domain.SessionRecord, bool, error) {
+	recs, err := m.store.ListSessions(ctx, project)
+	if err != nil {
+		return domain.SessionRecord{}, false, err
+	}
+	for _, rec := range recs {
+		if rec.Kind == domain.KindOrchestrator && !rec.IsTerminated {
+			return rec, true, nil
+		}
+	}
+	return domain.SessionRecord{}, false, nil
+}
+
+// workerIdleNudgeMessage tells the orchestrator to inspect the worker with a
+// live `ao session get`, deliberately embedding no status snapshot that could
+// be stale by delivery time. The display name is best-effort identity only.
+func (m *Manager) workerIdleNudgeMessage(ctx context.Context, worker domain.SessionID) string {
+	label := string(worker)
+	if rec, ok, err := m.store.GetSession(ctx, worker); err == nil && ok {
+		if name := strings.TrimSpace(domain.SanitizeControlChars(rec.DisplayName)); name != "" {
+			label = fmt.Sprintf("%s (%q)", worker, name)
+		}
+	}
+	return fmt.Sprintf("[AO] Worker %s has gone idle and may be done. Inspect it with `ao session get %s`, then report its status and any PR to the human. If it needs more work, redirect it with `ao send`.", label, worker)
+}
+
+// toolFlight tracks one session's in-flight tool executions and the pending
+// permission dialog's identity, so a sticky `blocked` is cleared by the post
+// of the exact approved tool — and by nothing else tool-shaped. Answering a
+// permission dialog fires no hook of its own, so the approved tool's
+// post-tool-use is the earliest observable "the decision was resolved"
+// signal; but tool hooks also fire for parallel subagents on the same
+// session, whose traffic must never clear a dialog that is still on screen.
+// In-memory only: a daemon restart loses it and the session degrades to
+// clearing at the next turn boundary — fail-safe staleness, never a spurious
+// clear.
+type toolFlight struct {
+	// inflight maps toolUseID -> toolName for pre-tool-use signals whose post
+	// has not arrived yet.
+	inflight map[string]string
+	// blockedCandidate is the tool-use id of the UNIQUE in-flight tool bearing
+	// the dialog's tool_name when it appeared — the tool whose post proves the
+	// dialog was answered. Empty when no in-flight tool matched, or when the
+	// match was ambiguous (two same-name tools in flight: the permission
+	// payload carries no tool_use_id to disambiguate, so a sibling's post must
+	// NOT be mistaken for the approval). Either way, empty means nothing
+	// tool-shaped may clear the block and it lifts only at a turn boundary.
+	blockedCandidate string
+}
+
+// maxInflightTools caps a session's in-flight map so lost posts cannot grow
+// it without bound; hitting the cap resets the map, degrading that session to
+// turn-boundary clearing (fail-safe).
+const maxInflightTools = 128
+
+// isToolUseEvent reports whether the AO hook event is one of the tool-use
+// trio whose signals must not demote a sticky state on their own.
+func isToolUseEvent(event string) bool {
+	return event == "pre-tool-use" || event == "post-tool-use" || event == "post-tool-use-failure"
+}
+
+// isTurnBoundaryEvent reports the events that reliably mean the pending
+// dialog is gone: a prompt cannot be submitted while a dialog holds the
+// composer, and a turn cannot end (or the session exit) with one on screen.
+func isTurnBoundaryEvent(event string) bool {
+	return event == "user-prompt-submit" || event == "stop" || event == "session-end"
+}
+
+// applyToolPrecedenceLocked folds an event-tagged activity signal through the
+// session's tool-flight state and decides whether its state write may
+// proceed. Returned signal with Valid=false means "suppressed": the tracking
+// side effects have landed but the state must not change. Signals without an
+// Event pass through untouched — the compatibility contract for old CLIs and
+// for adapters that don't tag their signals (their last-writer-wins semantics
+// are pinned by tests). Caller must hold m.mu.
+func (m *Manager) applyToolPrecedenceLocked(id domain.SessionID, cur domain.ActivityState, s ports.ActivitySignal) ports.ActivitySignal {
+	if s.Event == "" {
+		return s
+	}
+	suppressed := s
+	suppressed.Valid = false
+
+	fl := m.flights[id]
+	ensure := func() *toolFlight {
+		if fl == nil {
+			fl = &toolFlight{inflight: map[string]string{}}
+			m.flights[id] = fl
+		}
+		return fl
+	}
+
+	// Tracking side effects happen regardless of what the state decision is.
+	switch s.Event {
+	case "pre-tool-use":
+		if s.ToolUseID != "" {
+			f := ensure()
+			if len(f.inflight) >= maxInflightTools {
+				f.inflight = map[string]string{}
+			}
+			f.inflight[s.ToolUseID] = s.ToolName
+		}
+	case "post-tool-use", "post-tool-use-failure":
+		if fl != nil {
+			delete(fl.inflight, s.ToolUseID)
+		}
+	}
+
+	switch {
+	case s.State == domain.ActivityBlocked:
+		// Entering (or re-asserting) blocked: snapshot the dialog's identity.
+		// permission-request carries the blocking tool_name; the Notification
+		// duplicate does not and must not wipe an existing snapshot.
+		//
+		// The permission hook payload does not carry the blocking tool's
+		// tool_use_id (only its name), so we can only identify the blocking
+		// tool unambiguously when EXACTLY ONE in-flight tool bears that name.
+		// With two same-name tools in flight (a batch of Bash calls, one of
+		// them the one at the dialog), a sibling's post could otherwise clear
+		// a still-open dialog — the exact permission-bypass this change exists
+		// to prevent. So we correlate only in the unique case; otherwise no
+		// candidate is recorded and the block clears only at a turn boundary
+		// (fail-closed).
+		f := ensure()
+		if s.ToolName != "" {
+			// Recompute from scratch: this is a fresh dialog, so any candidate
+			// carried from a prior one must not leak in.
+			f.blockedCandidate = ""
+			for useID, name := range f.inflight {
+				if name != s.ToolName {
+					continue
+				}
+				if f.blockedCandidate != "" {
+					// A second same-name tool: ambiguous, fail closed by
+					// leaving no candidate (only a turn boundary clears).
+					f.blockedCandidate = ""
+					break
+				}
+				f.blockedCandidate = useID
+			}
+		}
+		return s
+
+	case cur == domain.ActivityBlocked:
+		// Paused on a decision: only a turn boundary or the correlated post
+		// may change the state.
+		switch {
+		case isTurnBoundaryEvent(s.Event):
+			delete(m.flights, id)
+			return s
+		case (s.Event == "post-tool-use" || s.Event == "post-tool-use-failure") &&
+			fl != nil && fl.blockedCandidate != "" && s.ToolUseID == fl.blockedCandidate:
+			// The single unambiguous blocking tool finished: the dialog was
+			// answered. Clear the candidate so a later dialog in the same turn
+			// starts from a clean slate.
+			fl.blockedCandidate = ""
+			return s
+		default:
+			// Subagent/sibling tool traffic (including a same-name sibling when
+			// the block was ambiguous), notification sub-types (idle_prompt,
+			// agent_completed), and anything else that is not proof the dialog
+			// closed.
+			return suppressed
+		}
+
+	case cur.IsSticky() && isToolUseEvent(s.Event):
+		// waiting_input: background tool traffic must not clear the "waiting
+		// on the user" marker; only an explicit user/turn signal does.
+		return suppressed
+
+	default:
+		if isTurnBoundaryEvent(s.Event) {
+			delete(m.flights, id)
+		}
+		return s
+	}
 }
 
 func (m *Manager) waitingInputEvents(next domain.SessionRecord, prevState domain.ActivityState, prevAt, now time.Time) []ports.TelemetryEvent {
@@ -180,7 +612,11 @@ func (m *Manager) waitingInputEvents(next domain.SessionRecord, prevState domain
 	projectID := next.ProjectID
 	sessionID := next.ID
 	var events []ports.TelemetryEvent
-	if prevState != domain.ActivityWaitingInput && next.Activity.State == domain.ActivityWaitingInput && !next.IsTerminated {
+	// Entry/exit is measured on the needs-input family boundary (waiting_input
+	// or blocked): the event names stay waiting_input_* for dashboard
+	// continuity, the payload state distinguishes the two, and an in-family
+	// transition emits neither event so dwell covers the whole pause.
+	if !prevState.NeedsInput() && next.Activity.State.NeedsInput() && !next.IsTerminated {
 		events = append(events, ports.TelemetryEvent{
 			Name:       "ao.session.waiting_input_entered",
 			Source:     "lifecycle",
@@ -193,7 +629,7 @@ func (m *Manager) waitingInputEvents(next domain.SessionRecord, prevState domain
 			},
 		})
 	}
-	if prevState == domain.ActivityWaitingInput && next.Activity.State != domain.ActivityWaitingInput {
+	if prevState.NeedsInput() && !next.Activity.State.NeedsInput() {
 		payload := map[string]any{
 			"state":     string(next.Activity.State),
 			"dwell_ms":  now.Sub(prevAt).Milliseconds(),
@@ -259,6 +695,7 @@ func (m *Manager) MarkTerminated(ctx context.Context, id domain.SessionID) error
 		}
 		cur.IsTerminated = true
 		cur.Activity = domain.Activity{State: domain.ActivityExited, LastActivityAt: now}
+		delete(m.flights, id) // runs under m.mu (mutate holds it)
 		return cur, true
 	})
 }

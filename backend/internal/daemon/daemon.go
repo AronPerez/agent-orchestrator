@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -18,11 +19,15 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/daemon/supervisor"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
+	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
 	"github.com/aoagents/agent-orchestrator/backend/internal/notify"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/preview"
+	"github.com/aoagents/agent-orchestrator/backend/internal/push"
 	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
 	agentsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/agent"
+	devimportsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/devimport"
 	importsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/importer"
 	notificationsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/notification"
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
@@ -36,6 +41,12 @@ import (
 func Run() error {
 	cfg, err := config.Load()
 	if err != nil {
+		return err
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		cfg.StartupWorkingDirectory = cwd
+	}
+	if err := stabilizeWorkingDirectory(cfg.DataDir); err != nil {
 		return err
 	}
 
@@ -114,14 +125,29 @@ func Run() error {
 	// Bring up the Lifecycle Manager and the reaper first: it makes the session
 	// lifecycle write path live (reducer write -> store -> DB trigger ->
 	// change_log -> poller -> broadcaster) and gives startSession the shared LCM.
-	lcStack := startLifecycle(ctx, store, runtimeAdapter, messenger, notificationWriter, telemetrySink, log)
+	// The agent resolver is built before the LCM so lifecycle can consume the
+	// adapter-declared active-turn steering capability; startSession reuses it.
+	defaultAgent := cfg.Agent
+	if defaultAgent == "" {
+		defaultAgent = config.DefaultAgent
+	}
+	agents, err := buildAgentResolver(defaultAgent, log)
+	if err != nil {
+		stop()
+		if cdcErr := cdcPipe.Stop(); cdcErr != nil {
+			log.Error("cdc pipeline shutdown", "err", cdcErr)
+		}
+		return fmt.Errorf("wire agent resolver: %w", err)
+	}
+
+	lcStack := startLifecycle(ctx, store, runtimeAdapter, messenger, notificationWriter, telemetrySink, agents, log)
 	lcStack.scmDone = startSCMObserver(ctx, store, lcStack.LCM, log)
 
 	// Wire the controller-facing session service over the same store + LCM, the
-	// selected runtime, a gitworktree workspace, the per-session agent resolver
-	// (AO_AGENT validated here for compatibility), and the agent messenger, then mount it
-	// on the API.
-	sessionSvc, prActions, reviewSvc, sessMgr, err := startSession(cfg, runtimeAdapter, store, lcStack.LCM, messenger, telemetrySink, log)
+	// selected runtime, routed git/scratch workspaces, the per-session agent
+	// resolver (AO_AGENT validated here for compatibility), and the agent
+	// messenger, then mount it on the API.
+	sessionSvc, prActions, reviewSvc, sessMgr, err := startSession(cfg, runtimeAdapter, store, lcStack.LCM, messenger, telemetrySink, agents, log)
 	if err != nil {
 		stop()
 		lcStack.Stop()
@@ -130,8 +156,17 @@ func Run() error {
 		}
 		return fmt.Errorf("wire session service: %w", err)
 	}
+	projectSvc := projectsvc.NewWithDeps(projectsvc.Deps{Store: store, Sessions: sessionSvc, DefaultHarness: domain.AgentHarness(cfg.Agent), Telemetry: telemetrySink})
+	if err := seedScratchProjectOnBoot(ctx, cfg, projectSvc); err != nil {
+		stop()
+		lcStack.Stop()
+		if cdcErr := cdcPipe.Stop(); cdcErr != nil {
+			log.Error("cdc pipeline shutdown", "err", cdcErr)
+		}
+		return err
+	}
 	lcStack.trackerDone = startTrackerIntake(ctx, store, sessionSvc, log)
-	previewDone := preview.NewPoller(store, sessionSvc, "http://"+cfg.Addr(), preview.PollerConfig{Logger: log}).Start(ctx)
+
 	agentSvc := agentsvc.New()
 	go func() {
 		if _, err := agentSvc.Refresh(ctx); err != nil {
@@ -139,28 +174,94 @@ func Run() error {
 		}
 	}()
 
+	// Connect Mobile: the bridge service needs the LAN listener, but the LAN
+	// listener needs the built router's handler, which only exists once srv is
+	// constructed — and srv's router mounts the mobile controller, which needs
+	// the bridge service. Break the cycle with late binding: build bs with LAN
+	// left nil, hand its controller into NewWithDeps, then once srv exists,
+	// build the LAN listener over srv.Handler() and assign it onto bs.LAN.
+	bs := &controllers.BridgeService{
+		ConfigPath:  mobilebridge.Path(cfg.DataDir),
+		DefaultPort: mobilebridge.DefaultPort,
+	}
+	mc := &controllers.MobileController{Bridge: bs}
+
+	// Standalone shell terminals: user-opened shells with no agent session
+	// behind them. They reuse the same runtime adapter (and therefore the same
+	// terminal mux) as session panes, but keep their own ids, storage, and
+	// lifetime — see internal/service/shellterm.
+	shellTermSvc := startShellTerminals(ctx, cfg, runtimeAdapter, store, projectSvc, log)
+	// Push-device registry: persisted phones that receive OS push notifications.
+	// A load failure must not block boot — degrade to no push rather than refusing
+	// to start the daemon. pushRegistry (interface) is assigned only when load
+	// succeeds so a failure leaves a true nil interface (not a non-nil interface
+	// wrapping a nil pointer), which the controller's nil guard relies on to
+	// return 501. pushDevices keeps the concrete registry for the dispatcher.
+	var (
+		pushRegistry controllers.PushRegistry
+		pushDevices  *mobilebridge.DeviceRegistry
+	)
+	if reg, regErr := mobilebridge.LoadRegistry(mobilebridge.PushDevicesPath(cfg.DataDir)); regErr != nil {
+		log.Warn("load push device registry failed; push notifications disabled", "err", regErr)
+	} else {
+		pushRegistry = reg
+		pushDevices = reg
+	}
+
+	// Push dispatcher: an additive notification-hub subscriber that relays each
+	// new notification to every registered device via the Expo Push Service. Runs
+	// for the daemon's lifetime and stops when ctx is cancelled. EXPO_ACCESS_TOKEN
+	// (optional) enables Expo's enforced push security when set.
+	if pushDevices != nil {
+		dispatcher := push.NewDispatcher(notificationHub, pushDevices, push.NewExpoClient(os.Getenv("EXPO_ACCESS_TOKEN")), log)
+		go dispatcher.Run(ctx)
+	}
+
 	srv, err := httpd.NewWithDeps(cfg, log, termMgr, httpd.APIDeps{
-		Projects:           projectsvc.NewWithDeps(projectsvc.Deps{Store: store, Sessions: sessionSvc, DefaultHarness: domain.AgentHarness(cfg.Agent), Telemetry: telemetrySink}),
+		Projects:           projectSvc,
 		Agents:             agentSvc,
 		Sessions:           sessionSvc,
 		PRs:                prActions,
 		Reviews:            reviewSvc,
 		Notifications:      notifier,
 		NotificationStream: notificationHub,
+		Push:               pushRegistry,
 		Import:             importsvc.New(importsvc.Deps{Store: store}),
+		ShellTerminals:     shellTermSvc,
 		CDC:                store,
 		Events:             cdcPipe.Broadcaster,
 		Activity:           lcStack.LCM,
 		Telemetry:          telemetrySink,
+		Mobile:             mc,
+		DevImport: devimportsvc.New(devimportsvc.Deps{
+			Store:         store,
+			TargetDataDir: cfg.DataDir,
+			OpenSource: func(ctx context.Context, dataDir string) (devimportsvc.SourceStore, error) {
+				return sqlite.OpenReadOnly(ctx, dataDir)
+			},
+		}),
 	})
 	if err != nil {
 		stop()
-		<-previewDone
 		lcStack.Stop()
 		if cdcErr := cdcPipe.Stop(); cdcErr != nil {
 			log.Error("cdc pipeline shutdown", "err", cdcErr)
 		}
 		return err
+	}
+	previewDone := preview.NewPoller(store, sessionSvc, "http://"+srv.Addr().String(), preview.PollerConfig{Logger: log}).Start(ctx)
+
+	// Late-bind: the LAN listener shares the exact loopback router instance so
+	// the LAN surface and loopback surface never drift apart.
+	lan := httpd.NewMobileLAN(srv.Handler(), mobilebridge.DefaultPort, log)
+	bs.LAN = lan
+
+	// Restore Connect Mobile across a daemon restart: if the bridge was left
+	// enabled, re-arm the listener on its last port with the same password
+	// hash so an already-paired phone keeps working with no new password.
+	// Best-effort: never blocks boot.
+	if err := restoreMobileOnBoot(mobilebridge.Path(cfg.DataDir), lan); err != nil {
+		log.Warn("restore mobile bridge on boot failed", "err", err)
 	}
 
 	// Reconcile sessions on boot: adopt crash-surviving runtimes, capture and
@@ -170,6 +271,12 @@ func Run() error {
 	if reconcileErr := sessMgr.Reconcile(ctx); reconcileErr != nil {
 		log.Error("reconcile sessions on boot failed", "err", reconcileErr)
 	}
+
+	// Redeliver any worker_idle events left pending across the restart, now that
+	// sessions (and their orchestrators) have been reconciled. Off the critical
+	// boot path (a store read plus a possible pane write per pending project);
+	// the recovery sweep is the backstop if it does not finish before shutdown.
+	go lcStack.LCM.DispatchAllPendingWorkerIdleEvents(ctx)
 
 	// ponytail: 5s tolerates a brief frontend restart; tune if dev hot-reload trips it.
 	const supervisorGrace = 5 * time.Second
@@ -203,14 +310,42 @@ func Run() error {
 	stop()
 	<-previewDone
 	lcStack.Stop()
+	lanStopCtx, lanCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+	defer lanCancel()
+	if err := lan.Stop(lanStopCtx); err != nil {
+		log.Error("mobile LAN listener shutdown", "err", err)
+	}
 	if err := cdcPipe.Stop(); err != nil {
 		log.Error("cdc pipeline shutdown", "err", err)
 	}
 	return runErr
 }
 
+func seedScratchProjectOnBoot(ctx context.Context, cfg config.Config, projects *projectsvc.Service) error {
+	if projects == nil {
+		return nil
+	}
+	if _, err := projects.EnsureDefaultScratchProject(ctx, filepath.Join(cfg.DataDir, "scratch", "default")); err != nil {
+		return fmt.Errorf("seed scratch project: %w", err)
+	}
+	return nil
+}
+
 // newLogger returns the daemon's slog logger. It writes to stderr so supervisors
 // can capture it separately from any structured stdout protocol added later.
 func newLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
+
+func stabilizeWorkingDirectory(dataDir string) error {
+	if dataDir == "" {
+		return fmt.Errorf("daemon working directory: data dir is required")
+	}
+	if err := os.MkdirAll(dataDir, 0o750); err != nil {
+		return fmt.Errorf("daemon working directory: create %s: %w", dataDir, err)
+	}
+	if err := os.Chdir(dataDir); err != nil {
+		return fmt.Errorf("daemon working directory: chdir %s: %w", dataDir, err)
+	}
+	return nil
 }

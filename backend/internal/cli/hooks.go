@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/url"
@@ -14,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/activitydispatch"
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
 // sessionIDPattern bounds the AO_SESSION_ID we will place in a request path to
@@ -34,9 +36,77 @@ const (
 
 // setActivityAPIRequest mirrors the daemon's SetActivityRequest body for
 // POST /api/v1/sessions/{id}/activity. The CLI keeps its own copy so it need
-// not import httpd.
+// not import httpd. Event carries the AO hook sub-command that produced the
+// state; ToolName/ToolUseID are the tool-use correlation facts lifted from the
+// native payload when present. All four are optional: an old daemon decodes
+// the body leniently and simply ignores them.
 type setActivityAPIRequest struct {
-	State string `json:"state"`
+	State          string `json:"state,omitempty"`
+	Event          string `json:"event,omitempty"`
+	ToolName       string `json:"toolName,omitempty"`
+	ToolUseID      string `json:"toolUseId,omitempty"`
+	AgentSessionID string `json:"agentSessionId,omitempty"`
+}
+
+// maxActivityMetaLen caps the correlation fields lifted from a native hook
+// payload before they go on the wire — they are ids/names, anything longer is
+// garbage and gets dropped rather than truncated (a truncated id would never
+// match its pre/post counterpart).
+const maxActivityMetaLen = 256
+
+// activityMeta extracts the tool-use correlation facts from a native hook
+// payload. The field names are shared vocabulary across agent CLIs that emit
+// them (claude-code's PreToolUse/PostToolUse/PostToolUseFailure and
+// PermissionRequest payloads); adapters whose payloads lack them yield empty
+// strings and the signal degrades to today's state-only form.
+func activityMeta(payload []byte) (toolName, toolUseID string) {
+	var p struct {
+		ToolName  string `json:"tool_name"`
+		ToolUseID string `json:"tool_use_id"`
+	}
+	_ = json.Unmarshal(payload, &p)
+	if len(p.ToolName) > maxActivityMetaLen {
+		p.ToolName = ""
+	}
+	if len(p.ToolUseID) > maxActivityMetaLen {
+		p.ToolUseID = ""
+	}
+	return p.ToolName, p.ToolUseID
+}
+
+// hookAgentSessionID extracts the native resume handle shared by Agy, Copilot,
+// Codex, Claude Code, and other hook payloads. It is independent of activity
+// derivation because SessionStart is intentionally metadata-only for harnesses
+// where process startup is not proof that a turn is active.
+func hookAgentSessionID(payload []byte) string {
+	var p struct {
+		SessionID           string `json:"session_id"`
+		SessionIDCamel      string `json:"sessionId"`
+		ConversationID      string `json:"conversation_id"`
+		ConversationIDCamel string `json:"conversationId"`
+	}
+	_ = json.Unmarshal(payload, &p)
+	id := strings.TrimSpace(p.SessionID)
+	if id == "" {
+		id = strings.TrimSpace(p.SessionIDCamel)
+	}
+	if id == "" {
+		id = strings.TrimSpace(p.ConversationID)
+	}
+	if id == "" {
+		id = strings.TrimSpace(p.ConversationIDCamel)
+	}
+	if len(id) > maxActivityMetaLen {
+		return ""
+	}
+	return id
+}
+
+type sessionStartHookOutput struct {
+	HookSpecificOutput struct {
+		HookEventName     string `json:"hookEventName"`
+		AdditionalContext string `json:"additionalContext"`
+	} `json:"hookSpecificOutput"`
 }
 
 // newHooksCommand builds the hidden `ao hooks <agent> <event>` command that
@@ -74,20 +144,73 @@ func (c *commandContext) runHook(ctx context.Context, agent, event string) error
 		// agent. The deriver tolerates an empty payload.
 		c.reportHookFailure(agent, event, sessionID, fmt.Errorf("read stdin: %w", err))
 	}
+	if shouldEmitSessionStartContext(agent, event) {
+		c.emitSessionStartContext(agent, event, sessionID)
+	}
 
-	state, ok := activitydispatch.Derive(agent, event, payload)
-	if !ok {
-		// Unknown agent, or an event that carries no activity signal: report nothing.
+	state, hasActivity := activitydispatch.Derive(agent, event, payload)
+	agentSessionID := ""
+	if activitydispatch.SupportsHarness(domain.AgentHarness(agent)) {
+		agentSessionID = hookAgentSessionID(payload)
+	}
+	if !hasActivity && agentSessionID == "" {
+		// Unknown agent, or an event carrying neither activity nor resumable
+		// session metadata: report nothing.
 		return nil
 	}
 
+	toolName, toolUseID := activityMeta(payload)
 	path := "sessions/" + url.PathEscape(sessionID) + "/activity"
-	if err := c.postJSON(ctx, path, setActivityAPIRequest{State: string(state)}, nil); err != nil {
+	req := setActivityAPIRequest{
+		Event:          event,
+		ToolName:       toolName,
+		ToolUseID:      toolUseID,
+		AgentSessionID: agentSessionID,
+	}
+	if hasActivity {
+		req.State = string(state)
+	}
+	if err := c.postJSON(ctx, path, req, nil); err != nil {
 		// Surface the failure for diagnosis, but exit 0: a failed activity
 		// report must not disrupt the agent.
 		c.reportHookFailure(agent, event, sessionID, err)
 	}
 	return nil
+}
+
+func shouldEmitSessionStartContext(agent, event string) bool {
+	if event != "session-start" {
+		return false
+	}
+	switch agent {
+	case "agy", "devin":
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *commandContext) emitSessionStartContext(agent, event, sessionID string) {
+	dataDir := strings.TrimSpace(os.Getenv("AO_DATA_DIR"))
+	if dataDir == "" {
+		return
+	}
+	path := filepath.Join(dataDir, "prompts", sessionID, "system.md")
+	data, err := os.ReadFile(path) //nolint:gosec // sessionID is bounded by sessionIDPattern.
+	if err != nil {
+		c.reportHookFailure(agent, event, sessionID, fmt.Errorf("read system prompt: %w", err))
+		return
+	}
+	prompt := strings.TrimSpace(string(data))
+	if prompt == "" {
+		return
+	}
+	var out sessionStartHookOutput
+	out.HookSpecificOutput.HookEventName = "SessionStart"
+	out.HookSpecificOutput.AdditionalContext = prompt
+	if err := json.NewEncoder(c.deps.Out).Encode(out); err != nil {
+		c.reportHookFailure(agent, event, sessionID, fmt.Errorf("write session-start context: %w", err))
+	}
 }
 
 // reportHookFailure surfaces a hook delivery failure without breaking the

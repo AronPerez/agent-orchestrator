@@ -351,10 +351,34 @@ func (w *Workspace) StashUncommitted(ctx context.Context, info ports.WorkspaceIn
 	if info.SessionID == "" {
 		return "", errors.New("gitworktree: session id is required for StashUncommitted")
 	}
+	repo, err := w.repoPathForInfo(info)
+	if err != nil {
+		return "", err
+	}
+	path, err := w.validateManagedPath(info.Path)
+	if err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("gitworktree: stale worktree %q: %w", path, ports.ErrWorkspaceStale)
+		}
+		return "", fmt.Errorf("gitworktree: stat worktree %q: %w", path, err)
+	}
+	records, err := w.listRecords(ctx, repo)
+	if err != nil {
+		return "", err
+	}
+	if _, ok := findWorktree(records, path); !ok {
+		return "", fmt.Errorf("gitworktree: worktree %q is not registered: %w", path, ports.ErrWorkspaceStale)
+	}
 
 	// Early exit for clean worktrees: nothing to preserve.
-	dirty, err := w.isDirty(ctx, info.Path)
+	dirty, err := w.isDirty(ctx, path)
 	if err != nil {
+		if isNotGitRepositoryError(err) {
+			return "", fmt.Errorf("gitworktree: stale worktree %q: %w", path, ports.ErrWorkspaceStale)
+		}
 		return "", fmt.Errorf("gitworktree: StashUncommitted dirty check: %w", err)
 	}
 	if !dirty {
@@ -362,7 +386,7 @@ func (w *Workspace) StashUncommitted(ctx context.Context, info ports.WorkspaceIn
 	}
 
 	// Log the count of ignored paths that will be skipped.
-	if skipCount, err := w.countIgnoredPaths(ctx, info.Path); err == nil {
+	if skipCount, err := w.countIgnoredPaths(ctx, path); err == nil {
 		slog.InfoContext(ctx, "gitworktree: StashUncommitted skipping ignored paths",
 			"session", string(info.SessionID),
 			"skipped_count", skipCount,
@@ -386,24 +410,24 @@ func (w *Workspace) StashUncommitted(ctx context.Context, info ports.WorkspaceIn
 
 	// Stage all tracked and non-ignored untracked files into the temp index.
 	// GIT_INDEX_FILE overrides the index so the real index is never touched.
-	addCmd := exec.CommandContext(ctx, w.binary, addAllTempIndexArgs(info.Path)...)
+	addCmd := exec.CommandContext(ctx, w.binary, addAllTempIndexArgs(path)...)
 	addCmd.Env = append(os.Environ(), "GIT_INDEX_FILE="+tmpIdxPath)
 	if out, err := addCmd.CombinedOutput(); err != nil {
-		return "", commandError{args: append([]string{w.binary}, addAllTempIndexArgs(info.Path)...), output: string(out), err: err}
+		return "", commandError{args: append([]string{w.binary}, addAllTempIndexArgs(path)...), output: string(out), err: err}
 	}
 
 	// Write the staged tree to get a tree SHA.
-	writeTreeCmd := exec.CommandContext(ctx, w.binary, writeTreeArgs(info.Path)...)
+	writeTreeCmd := exec.CommandContext(ctx, w.binary, writeTreeArgs(path)...)
 	writeTreeCmd.Env = append(os.Environ(), "GIT_INDEX_FILE="+tmpIdxPath)
 	treeOut, err := writeTreeCmd.CombinedOutput()
 	if err != nil {
-		return "", commandError{args: append([]string{w.binary}, writeTreeArgs(info.Path)...), output: string(treeOut), err: err}
+		return "", commandError{args: append([]string{w.binary}, writeTreeArgs(path)...), output: string(treeOut), err: err}
 	}
 	treeSHA := strings.TrimSpace(string(treeOut))
 
 	// Resolve HEAD. An unborn HEAD (no commits yet) means we omit the -p flag
 	// from commit-tree so the preserve commit has no parent.
-	headOut, headErr := w.run(ctx, w.binary, revParseHeadArgs(info.Path)...)
+	headOut, headErr := w.run(ctx, w.binary, revParseHeadArgs(path)...)
 	headSHA := ""
 	if headErr == nil {
 		headSHA = strings.TrimSpace(string(headOut))
@@ -413,7 +437,7 @@ func (w *Workspace) StashUncommitted(ctx context.Context, info ports.WorkspaceIn
 	// If the preserve tree SHA equals HEAD's tree SHA the working tree is
 	// effectively clean from git's perspective (only ignored files differ).
 	if headSHA != "" {
-		headTreeOut, err := w.run(ctx, w.binary, "-C", info.Path, "rev-parse", headSHA+"^{tree}")
+		headTreeOut, err := w.run(ctx, w.binary, "-C", path, "rev-parse", headSHA+"^{tree}")
 		if err == nil {
 			headTreeSHA := strings.TrimSpace(string(headTreeOut))
 			if headTreeSHA == treeSHA {
@@ -425,7 +449,7 @@ func (w *Workspace) StashUncommitted(ctx context.Context, info ports.WorkspaceIn
 
 	// Create a commit object that wraps the preserve tree.
 	msg := "ao preserved " + string(info.SessionID)
-	commitOut, err := w.run(ctx, w.binary, commitTreeArgs(info.Path, treeSHA, headSHA, msg)...)
+	commitOut, err := w.run(ctx, w.binary, commitTreeArgs(path, treeSHA, headSHA, msg)...)
 	if err != nil {
 		return "", fmt.Errorf("gitworktree: commit-tree: %w", err)
 	}
@@ -433,10 +457,14 @@ func (w *Workspace) StashUncommitted(ctx context.Context, info ports.WorkspaceIn
 
 	// Point the preserve ref at the commit.
 	ref := "refs/ao/preserved/" + string(info.SessionID)
-	if _, err := w.run(ctx, w.binary, updateRefArgs(info.Path, ref, commitSHA)...); err != nil {
+	if _, err := w.run(ctx, w.binary, updateRefArgs(path, ref, commitSHA)...); err != nil {
 		return "", fmt.Errorf("gitworktree: update-ref %q: %w", ref, err)
 	}
 	return ref, nil
+}
+
+func isNotGitRepositoryError(err error) bool {
+	return strings.Contains(err.Error(), "not a git repository")
 }
 
 // countIgnoredPaths returns the number of entries listed by
@@ -498,6 +526,60 @@ func (w *Workspace) ApplyPreserved(ctx context.Context, info ports.WorkspaceInfo
 			"ref", ref,
 			"err", err,
 		)
+	}
+	return nil
+}
+
+// AddExclude appends git ignore patterns to the worktree's local info/exclude so
+// daemon-generated files never surface as untracked changes. The exclude file is
+// resolved via `git rev-parse --git-common-dir`, not `--git-dir`: git reads
+// info/exclude from $GIT_COMMON_DIR, and this adapter only ever creates linked
+// worktrees, where --git-dir points into .git/worktrees/<name> (per-worktree)
+// while --git-common-dir points at the shared main .git. Writing under --git-dir
+// would land info/exclude in a directory git never consults, making the exclude a
+// no-op. Idempotent: patterns already present are skipped.
+func (w *Workspace) AddExclude(ctx context.Context, info ports.WorkspaceInfo, patterns ...string) error {
+	if len(patterns) == 0 {
+		return nil
+	}
+	path, err := w.validateManagedPath(info.Path)
+	if err != nil {
+		return err
+	}
+	out, err := w.run(ctx, w.binary, "-C", path, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return fmt.Errorf("gitworktree: AddExclude resolve git common dir: %w", err)
+	}
+	gitDir := strings.TrimSpace(string(out))
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(path, gitDir)
+	}
+	infoDir := filepath.Join(gitDir, "info")
+	if err := os.MkdirAll(infoDir, 0o750); err != nil {
+		return fmt.Errorf("gitworktree: AddExclude create info dir: %w", err)
+	}
+	excludePath := filepath.Join(infoDir, "exclude")
+	existing, _ := os.ReadFile(excludePath)
+	var toAdd []string
+	for _, p := range patterns {
+		if !strings.Contains(string(existing), p) {
+			toAdd = append(toAdd, p)
+		}
+	}
+	if len(toAdd) == 0 {
+		return nil
+	}
+	f, err := os.OpenFile(excludePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("gitworktree: AddExclude open exclude: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	prefix := ""
+	if len(existing) > 0 && !strings.HasSuffix(string(existing), "\n") {
+		prefix = "\n"
+	}
+	if _, err := f.WriteString(prefix + strings.Join(toAdd, "\n") + "\n"); err != nil {
+		return fmt.Errorf("gitworktree: AddExclude write exclude: %w", err)
 	}
 	return nil
 }

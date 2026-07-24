@@ -8,6 +8,7 @@ import {
 	sessionIsActive,
 	sessionNeedsAttention,
 	toAgentProvider,
+	toSessionActivity,
 	toSessionStatus,
 	workerDisplayStatus,
 	workerStatusPulses,
@@ -73,6 +74,24 @@ describe("toSessionStatus", () => {
 	it("falls back to unknown for an unknown live status", () => {
 		expect(toSessionStatus("bogus")).toBe("unknown");
 		expect(toSessionStatus(undefined)).toBe("unknown");
+	});
+});
+
+describe("toSessionActivity", () => {
+	it.each(["active", "idle", "waiting_input", "blocked", "exited"] as const)(
+		"passes through the known state %s",
+		(state) => {
+			expect(toSessionActivity({ state })?.state).toBe(state);
+		},
+	);
+
+	it("falls back to unknown for an unrecognized state", () => {
+		expect(toSessionActivity({ state: "bogus" })?.state).toBe("unknown");
+	});
+
+	it("returns undefined for a missing activity", () => {
+		expect(toSessionActivity(undefined)).toBeUndefined();
+		expect(toSessionActivity(null)).toBeUndefined();
 	});
 });
 
@@ -193,7 +212,7 @@ describe("findProjectOrchestrator", () => {
 });
 
 describe("sessionNeedsAttention", () => {
-	it.each(["needs_input", "no_signal", "changes_requested", "review_pending", "ci_failed"] as const)(
+	it.each(["needs_input", "no_signal", "changes_requested", "ci_failed", "unknown"] as const)(
 		"is true for %s",
 		(status) => {
 			expect(sessionNeedsAttention(sessionWith({ status }))).toBe(true);
@@ -207,6 +226,7 @@ describe("sessionNeedsAttention", () => {
 	it("is false for statuses that don't need the user", () => {
 		expect(sessionNeedsAttention(sessionWith({ status: "working" }))).toBe(false);
 		expect(sessionNeedsAttention(sessionWith({ status: "mergeable" }))).toBe(false);
+		expect(sessionNeedsAttention(sessionWith({ status: "review_pending" }))).toBe(false);
 	});
 });
 
@@ -275,6 +295,10 @@ describe("toAgentProvider", () => {
 		expect(toAgentProvider("totally-unknown")).toBe("codex");
 		expect(toAgentProvider(undefined)).toBe("codex");
 	});
+
+	it("keeps the fake harness (test sessions must not normalize to codex)", () => {
+		expect(toAgentProvider("fake")).toBe("fake");
+	});
 });
 
 describe("PR helpers", () => {
@@ -320,10 +344,10 @@ describe("attentionZone", () => {
 		["no_signal", "action"],
 		["ci_failed", "action"],
 		["changes_requested", "action"],
+		["unknown", "action"],
 		["review_pending", "pending"],
 		["pr_open", "pending"],
 		["draft", "pending"],
-		["unknown", "pending"],
 		["working", "working"],
 		["idle", "working"],
 		["merged", "done"],

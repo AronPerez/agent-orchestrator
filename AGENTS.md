@@ -50,7 +50,6 @@ When showing or demoing frontend changes, run `ao preview [url]` from inside the
 - `docs/architecture.md` — backend mental model, package layout, lifecycle/session/service boundaries, and load-bearing rules.
 - `docs/STATUS.md` — what is shipped on `main` today and what is still in flight.
 - `docs/cli/README.md` — intended CLI shape: thin Cobra client over daemon HTTP, never direct storage/runtime access.
-- `docs/agent/README.md` — agent adapter contract and hook behavior.
 - `CLAUDE.md` — compatibility pointer for Claude Code; it directs agents back to `AGENTS.md`.
 
 For code entry points:
@@ -62,6 +61,11 @@ For code entry points:
 - Port contracts: `backend/internal/ports/`.
 - SQLite queries/migrations/store: `backend/internal/storage/sqlite/`.
 - Generated sqlc code: `backend/internal/storage/sqlite/gen/`.
+
+## Distribution
+
+- The **desktop app** (GitHub Releases) is the canonical, auto-updating install path. Point users there first.
+- **npm still works but is no longer recommended.** `0.10.0` is the final version published to npm; the `@aoagents/ao` package is frozen and will not receive further updates. It remains a legacy on-ramp for users who already have `ao` on their PATH, where `ao start` fetches and opens the desktop build. Do not add features, docs, or flows that treat npm as the intended way to install AO.
 
 ## Coding conventions
 
@@ -77,7 +81,8 @@ For code entry points:
 
 ## Hard rules and boundaries
 
-- The daemon is a loopback-only sidecar. Do not make the bind host configurable or expose it beyond `127.0.0.1`.
+- The daemon's **primary (loopback) listener** stays bound to `127.0.0.1` and unauthenticated. Do not change its bind host or add auth to it.
+- The daemon MAY run a **second, opt-in LAN listener** (the "Connect Mobile" feature) that binds `0.0.0.0` **only while explicitly enabled**, **only** behind the bearer-password `authMiddleware`, serving the app API but never the loopback-gated control routes (`/shutdown`, telemetry, mobile control). It is plaintext and home-network-only by deliberate decision — see `docs/adr/0001-lan-listener-for-mobile.md` and `CONTEXT.md`. Do not add any other network-facing bind.
 - The CLI is a thin client. Do not port old in-process TypeScript CLI behavior that bypasses daemon HTTP routes.
 - Do not store derived/display session status. Status is derived from durable facts (`activity_state`, `is_terminated`, PR/check/comment facts) at service read time.
 - Do not treat failed/unknown runtime probes as proof a session is dead.

@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import { TriangleAlert } from "lucide-react";
 import type { components } from "../../api/schema";
 import { agentsQueryKey, agentsQueryOptions, refreshAgents } from "../hooks/useAgentsQuery";
 import { useWorkspaceQuery, workspaceQueryKey } from "../hooks/useWorkspaceQuery";
@@ -26,7 +27,7 @@ const PERMISSION_MODE_OPTIONS = [
 	{ value: "bypass-permissions", label: "Bypass permissions" },
 ] as const;
 
-const REVIEWER_OPTIONS = ["claude-code", "codex", "opencode"] as const;
+const KNOWN_REVIEWER_HARNESS_IDS = new Set(["claude-code", "codex", "opencode"]);
 
 const projectQueryKey = (id: string) => ["project", id] as const;
 
@@ -57,7 +58,7 @@ export function ProjectSettingsForm({ projectId }: { projectId: string }) {
 	return (
 		<div className="flex h-full min-h-0 flex-col bg-background text-foreground">
 			<DashboardSubhead title="Settings" subtitle={query.data.path} />
-			<div className="min-h-0 flex-1 overflow-y-auto p-[18px]">
+			<div className="min-h-0 flex-1 overflow-y-auto p-4.5">
 				<SettingsBody
 					key={projectId}
 					project={query.data}
@@ -73,10 +74,12 @@ function SettingsBody({ project, projectId, onSaved }: { project: Project; proje
 	const queryClient = useQueryClient();
 	const workspaceQuery = useWorkspaceQuery();
 	const config = project.config ?? {};
+	const isScratchProject = project.kind === "scratch";
 	const workspace = workspaceQuery.data?.find((item) => item.id === projectId);
 	const activeOrchestrator = newestActiveOrchestrator(workspace?.sessions ?? []);
 	const intake: TrackerIntakeConfig = config.trackerIntake ?? {};
 	const [form, setForm] = useState({
+		displayName: project.name,
 		defaultBranch: config.defaultBranch ?? project.defaultBranch ?? "",
 		sessionPrefix: config.sessionPrefix ?? "",
 		workerAgent: config.worker?.agent ?? "",
@@ -100,10 +103,9 @@ function SettingsBody({ project, projectId, onSaved }: { project: Project; proje
 		onSuccess: (next) => queryClient.setQueryData(agentsQueryKey, next),
 	});
 
-	// The Electron app only registers git projects today, so the daemon always has a usable
-	// git origin to derive owner/repo from (trackerRepo() in observer.go) when
-	// trackerIntake.repo is unset — there's no manual override input here. This mirrors that
-	// same derivation client-side purely for display (a link to the repo being polled).
+	// Git projects can derive owner/repo from origin when trackerIntake.repo is unset.
+	// Scratch hides tracker intake entirely, so this display-only preview is only
+	// rendered for git-backed projects.
 	const intakeForm: IntakeForm = {
 		enabled: form.intakeEnabled,
 		repo: form.intakeRepo,
@@ -117,30 +119,42 @@ function SettingsBody({ project, projectId, onSaved }: { project: Project; proje
 			intakeAssignee: patch.assignee ?? f.intakeAssignee,
 		}));
 	const effectiveIntakeRepo = form.intakeRepo.trim() || deriveGitHubRepo(project.repo);
-	const intakeIncomplete = intakeNeedsRule(intakeForm);
+	const intakeIncomplete = !isScratchProject && intakeNeedsRule(intakeForm);
 
 	const mutation = useMutation({
 		mutationFn: async () => {
 			void captureRendererEvent("ao.renderer.settings_save_requested", { project_id: projectId });
+			const displayName = form.displayName.trim();
 			// PUT replaces the whole config; merge the edited fields over what loaded
 			// so we don't drop env/symlinks/postCreate the form doesn't expose.
-			const next: ProjectConfig = {
-				...config,
-				defaultBranch: form.defaultBranch || undefined,
-				sessionPrefix: form.sessionPrefix || undefined,
-				worker: { ...config.worker, agent: form.workerAgent },
-				orchestrator: { ...config.orchestrator, agent: form.orchestratorAgent },
-				agentConfig: blankToUndefined({
-					...config.agentConfig,
-					model: form.model || undefined,
-					permissions: form.permissions || undefined,
-				}),
-				reviewers: form.reviewerHarness ? [{ harness: form.reviewerHarness }] : undefined,
-				trackerIntake: buildIntake(intakeForm),
-			};
-			const { error } = await apiClient.PUT("/api/v1/projects/{id}/config", {
+			const next: ProjectConfig = isScratchProject
+				? {
+						...scratchSupportedConfig(config),
+						worker: { ...config.worker, agent: form.workerAgent },
+						orchestrator: { ...config.orchestrator, agent: form.orchestratorAgent },
+						agentConfig: blankToUndefined({
+							...config.agentConfig,
+							model: form.model || undefined,
+							permissions: form.permissions || undefined,
+						}),
+					}
+				: {
+						...config,
+						defaultBranch: form.defaultBranch || undefined,
+						sessionPrefix: form.sessionPrefix || undefined,
+						worker: { ...config.worker, agent: form.workerAgent },
+						orchestrator: { ...config.orchestrator, agent: form.orchestratorAgent },
+						agentConfig: blankToUndefined({
+							...config.agentConfig,
+							model: form.model || undefined,
+							permissions: form.permissions || undefined,
+						}),
+						reviewers: form.reviewerHarness ? [{ harness: form.reviewerHarness }] : undefined,
+						trackerIntake: buildIntake(intakeForm),
+					};
+			const { error } = await apiClient.PUT("/api/v1/projects/{id}", {
 				params: { path: { id: projectId } },
-				body: { config: next },
+				body: { displayName, config: next },
 			});
 			if (error) throw new Error(apiErrorMessage(error));
 			if (
@@ -181,6 +195,10 @@ function SettingsBody({ project, projectId, onSaved }: { project: Project; proje
 					setValidationError("Worker and orchestrator agents are required.");
 					return;
 				}
+				if (form.displayName.trim() === "") {
+					setValidationError("Project name is required.");
+					return;
+				}
 				if (intakeIncomplete) {
 					setValidationError("Enabling intake requires an assignee.");
 					return;
@@ -191,11 +209,19 @@ function SettingsBody({ project, projectId, onSaved }: { project: Project; proje
 		>
 			<Card>
 				<CardHeader>
-					<CardTitle className="text-[13px]">Identity</CardTitle>
+					<CardTitle className="text-control">Identity</CardTitle>
 				</CardHeader>
-				<CardContent className="flex flex-col gap-2 font-mono text-[12px] text-muted-foreground">
+				<CardContent className="flex flex-col gap-4 font-mono text-xs text-muted-foreground">
+					<Field label="Project name" htmlFor="projectName">
+						<input
+							id="projectName"
+							className="h-control-form w-full rounded-md border border-input bg-transparent px-2.5 font-sans text-control text-foreground placeholder:text-passive focus-visible:border-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-weak"
+							value={form.displayName}
+							onChange={(e) => setForm((f) => ({ ...f, displayName: e.target.value }))}
+						/>
+					</Field>
 					<ReadonlyRow label="id" value={project.id} />
-					<ReadonlyRow label="kind" value={project.kind === "workspace" ? "workspace" : "single repo"} />
+					<ReadonlyRow label="kind" value={projectKindLabel(project.kind)} />
 					<ReadonlyRow label="path" value={project.path} />
 					<ReadonlyRow label="repo" value={project.repo || "—"} />
 				</CardContent>
@@ -227,35 +253,37 @@ function SettingsBody({ project, projectId, onSaved }: { project: Project; proje
 				</Card>
 			)}
 
-			<Card>
-				<CardHeader>
-					<CardTitle className="text-[13px]">Worktrees</CardTitle>
-				</CardHeader>
-				<CardContent className="flex flex-col gap-4">
-					<Field label="Default branch" htmlFor="defaultBranch">
-						<input
-							id="defaultBranch"
-							className="h-8 w-full rounded-md border border-input bg-transparent px-2.5 text-[13px] text-foreground placeholder:text-passive focus-visible:border-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-weak"
-							value={form.defaultBranch}
-							onChange={(e) => setForm((f) => ({ ...f, defaultBranch: e.target.value }))}
-							placeholder="main"
-						/>
-					</Field>
-					<Field label="Session prefix" htmlFor="sessionPrefix">
-						<input
-							id="sessionPrefix"
-							className="h-8 w-full rounded-md border border-input bg-transparent px-2.5 text-[13px] text-foreground placeholder:text-passive focus-visible:border-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-weak"
-							value={form.sessionPrefix}
-							onChange={(e) => setForm((f) => ({ ...f, sessionPrefix: e.target.value }))}
-							placeholder="ao"
-						/>
-					</Field>
-				</CardContent>
-			</Card>
+			{!isScratchProject && (
+				<Card>
+					<CardHeader>
+						<CardTitle className="text-control">Worktrees</CardTitle>
+					</CardHeader>
+					<CardContent className="flex flex-col gap-4">
+						<Field label="Default branch" htmlFor="defaultBranch">
+							<input
+								id="defaultBranch"
+								className="h-control-form w-full rounded-md border border-input bg-transparent px-2.5 text-control text-foreground placeholder:text-passive focus-visible:border-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-weak"
+								value={form.defaultBranch}
+								onChange={(e) => setForm((f) => ({ ...f, defaultBranch: e.target.value }))}
+								placeholder="main"
+							/>
+						</Field>
+						<Field label="Session prefix" htmlFor="sessionPrefix">
+							<input
+								id="sessionPrefix"
+								className="h-control-form w-full rounded-md border border-input bg-transparent px-2.5 text-control text-foreground placeholder:text-passive focus-visible:border-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-weak"
+								value={form.sessionPrefix}
+								onChange={(e) => setForm((f) => ({ ...f, sessionPrefix: e.target.value }))}
+								placeholder="ao"
+							/>
+						</Field>
+					</CardContent>
+				</Card>
+			)}
 
 			<Card>
 				<CardHeader>
-					<CardTitle className="text-[13px]">Agents</CardTitle>
+					<CardTitle className="text-control">Agents</CardTitle>
 				</CardHeader>
 				<CardContent className="flex flex-col gap-4">
 					<RequiredAgentField
@@ -282,7 +310,7 @@ function SettingsBody({ project, projectId, onSaved }: { project: Project; proje
 						invalid={validationError !== null && form.orchestratorAgent === ""}
 						onChange={(v) => setForm((f) => ({ ...f, orchestratorAgent: v }))}
 					/>
-					<div className="flex items-center justify-between gap-3 text-[12px] leading-5 text-muted-foreground">
+					<div className="flex items-center justify-between gap-3 text-xs leading-row text-muted-foreground">
 						<span>Agent availability is cached.</span>
 						<button
 							type="button"
@@ -294,19 +322,19 @@ function SettingsBody({ project, projectId, onSaved }: { project: Project; proje
 						</button>
 					</div>
 					{refreshAgentsMutation.isError && (
-						<p className="text-[12px] leading-5 text-error">
+						<p className="text-xs leading-row text-error">
 							{refreshAgentsMutation.error instanceof Error
 								? refreshAgentsMutation.error.message
 								: "Could not refresh agent catalog."}
 						</p>
 					)}
 					{missingRequiredAgent && (
-						<p className="text-[12px] leading-5 text-error">Worker and orchestrator agents are required.</p>
+						<p className="text-xs leading-row text-error">Worker and orchestrator agents are required.</p>
 					)}
 					<Field label="Model override" htmlFor="model">
 						<input
 							id="model"
-							className="h-8 w-full rounded-md border border-input bg-transparent px-2.5 text-[13px] text-foreground placeholder:text-passive focus-visible:border-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-weak"
+							className="h-control-form w-full rounded-md border border-input bg-transparent px-2.5 text-control text-foreground placeholder:text-passive focus-visible:border-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-weak"
 							value={form.model}
 							onChange={(e) => setForm((f) => ({ ...f, model: e.target.value }))}
 							placeholder="(agent default)"
@@ -322,45 +350,51 @@ function SettingsBody({ project, projectId, onSaved }: { project: Project; proje
 				</CardContent>
 			</Card>
 
-			<Card>
-				<CardHeader>
-					<CardTitle className="text-[13px]">Reviewers</CardTitle>
-				</CardHeader>
-				<CardContent className="flex flex-col gap-4">
-					<Field label="Default reviewer agent" htmlFor="reviewerHarness">
-						<ReviewerSelect
-							id="reviewerHarness"
-							value={form.reviewerHarness}
-							onChange={(v) => setForm((f) => ({ ...f, reviewerHarness: v }))}
-						/>
-					</Field>
-				</CardContent>
-			</Card>
+			{!isScratchProject && (
+				<Card>
+					<CardHeader>
+						<CardTitle className="text-control">Reviewers</CardTitle>
+					</CardHeader>
+					<CardContent className="flex flex-col gap-4">
+						<Field label="Default reviewer agent" htmlFor="reviewerHarness">
+							<ReviewerSelect
+								id="reviewerHarness"
+								value={form.reviewerHarness}
+								onChange={(v) => setForm((f) => ({ ...f, reviewerHarness: v }))}
+								authorized={agentCatalog?.authorized}
+								installed={agentCatalog?.installed}
+								supported={agentCatalog?.supported}
+								disabled={agentsQuery.isFetching && agentCatalog === undefined}
+							/>
+						</Field>
+					</CardContent>
+				</Card>
+			)}
 
-			<Card>
-				<CardHeader>
-					<CardTitle className="text-[13px]">Tracker intake</CardTitle>
-				</CardHeader>
-				<CardContent>
-					<IntakeFields form={intakeForm} onChange={patchIntake} repoPreview={{ value: effectiveIntakeRepo }} />
-				</CardContent>
-			</Card>
+			{!isScratchProject && (
+				<Card>
+					<CardHeader>
+						<CardTitle className="text-control">Tracker intake</CardTitle>
+					</CardHeader>
+					<CardContent>
+						<IntakeFields form={intakeForm} onChange={patchIntake} repoPreview={{ value: effectiveIntakeRepo }} />
+					</CardContent>
+				</Card>
+			)}
 
 			<div className="flex items-center gap-3">
 				<Button type="submit" variant="primary" disabled={mutation.isPending}>
 					{mutation.isPending ? "Saving…" : "Save changes"}
 				</Button>
-				{validationError && <span className="text-[12px] text-error">{validationError}</span>}
+				{validationError && <span className="text-xs text-error">{validationError}</span>}
 				{mutation.isError && (
-					<span className="text-[12px] text-error">
+					<span className="text-xs text-error">
 						{mutation.error instanceof Error ? mutation.error.message : "Save failed"}
 					</span>
 				)}
-				{savedAt && !mutation.isPending && !mutation.isError && (
-					<span className="text-[12px] text-success">Saved.</span>
-				)}
+				{savedAt && !mutation.isPending && !mutation.isError && <span className="text-xs text-success">Saved.</span>}
 				{replacementError && !mutation.isPending && !mutation.isError && (
-					<span className="text-[12px] text-warning">Orchestrator restart failed: {replacementError}</span>
+					<span className="text-xs text-warning">Orchestrator restart failed: {replacementError}</span>
 				)}
 			</div>
 		</form>
@@ -378,7 +412,7 @@ function PermissionModeSelect({
 }) {
 	return (
 		<Select value={value || "__default__"} onValueChange={(v) => onChange(v === "__default__" ? "" : v)}>
-			<SelectTrigger id={id} className="h-8 w-full text-[13px]">
+			<SelectTrigger id={id} className="h-control-form w-full text-control">
 				<SelectValue />
 			</SelectTrigger>
 			<SelectContent>
@@ -393,17 +427,83 @@ function PermissionModeSelect({
 	);
 }
 
-function ReviewerSelect({ id, value, onChange }: { id: string; value: string; onChange: (value: string) => void }) {
+const REVIEWER_AGENT_PRIORITY = ["claude-code", "codex", "cursor", "opencode", "aider"] as const;
+const REVIEWER_AGENT_PRIORITY_RANK = new Map<string, number>(
+	REVIEWER_AGENT_PRIORITY.map((agent, index) => [agent, index]),
+);
+
+function agentLabelCompare(a: components["schemas"]["AgentInfo"], b: components["schemas"]["AgentInfo"]): number {
+	return a.label.localeCompare(b.label) || a.id.localeCompare(b.id);
+}
+
+function ReviewerSelect({
+	id,
+	value,
+	onChange,
+	disabled = false,
+	authorized,
+	installed,
+	supported,
+}: {
+	id: string;
+	value: string;
+	onChange: (value: string) => void;
+	disabled?: boolean;
+	authorized?: components["schemas"]["AgentInfo"][];
+	installed?: components["schemas"]["AgentInfo"][];
+	supported?: components["schemas"]["AgentInfo"][];
+}) {
+	const fallbackAgents: components["schemas"]["AgentInfo"][] = [...KNOWN_REVIEWER_HARNESS_IDS].map((id) => ({
+		id,
+		label: id,
+	}));
+	const filteredSupported = (supported ?? fallbackAgents).filter((a) => KNOWN_REVIEWER_HARNESS_IDS.has(a.id));
+	const supportedAgents = filteredSupported.length > 0 ? filteredSupported : fallbackAgents;
+	const installedAgents = installed ?? supportedAgents;
+	const authorizedAgents = authorized ?? supportedAgents;
+	const authorizedIds = new Set(authorizedAgents.map((agent) => agent.id));
+	const installedById = new Map(installedAgents.map((agent) => [agent.id, agent]));
+	const options = supportedAgents
+		.map((agent) => {
+			const installedAgent = installedById.get(agent.id);
+			const authStatus = installedAgent?.authStatus;
+			const isAuthorized = authorizedIds.has(agent.id) || authStatus === "authorized";
+			const isAuthUnknown = Boolean(installedAgent) && !isAuthorized && authStatus !== "unauthorized";
+			const isSelectable = isAuthorized || isAuthUnknown;
+			const rank = isAuthorized ? 0 : isAuthUnknown ? 1 : installedAgent ? 2 : 3;
+			return {
+				...agent,
+				disabled: !isSelectable,
+				priorityRank: REVIEWER_AGENT_PRIORITY_RANK.get(agent.id) ?? Number.MAX_SAFE_INTEGER,
+				rank,
+				reason: !installedAgent ? "Needs install" : isAuthUnknown ? "Auth unknown" : !isAuthorized ? "Needs auth" : "",
+				warning: isAuthUnknown,
+			};
+		})
+		.sort((a, b) => a.rank - b.rank || a.priorityRank - b.priorityRank || agentLabelCompare(a, b));
+
 	return (
-		<Select value={value || "__default__"} onValueChange={(v) => onChange(v === "__default__" ? "" : v)}>
-			<SelectTrigger id={id} className="h-8 w-full text-[13px]">
+		<Select
+			value={value || "__default__"}
+			onValueChange={(v) => onChange(v === "__default__" ? "" : v)}
+			disabled={disabled}
+		>
+			<SelectTrigger id={id} size="sm" className="w-full text-control">
 				<SelectValue />
 			</SelectTrigger>
-			<SelectContent>
+			<SelectContent position="popper" side="bottom" align="start" sideOffset={4} className="max-h-select-menu-max!">
 				<SelectItem value="__default__">Project default</SelectItem>
-				{REVIEWER_OPTIONS.map((reviewer) => (
-					<SelectItem key={reviewer} value={reviewer}>
-						{reviewer}
+				{options.map((agent) => (
+					<SelectItem key={agent.id} value={agent.id} disabled={agent.disabled} className="[&>span:last-child]:w-full">
+						<span className="flex min-w-0 w-full items-center justify-between gap-4">
+							<span className="truncate">{agent.label}</span>
+							{agent.reason && (
+								<span className="inline-flex shrink-0 items-center gap-1 text-caption text-muted-foreground">
+									{agent.warning && <TriangleAlert className="size-3 text-warning" aria-hidden="true" />}
+									{agent.reason}
+								</span>
+							)}
+						</span>
 					</SelectItem>
 				))}
 			</SelectContent>
@@ -414,7 +514,7 @@ function ReviewerSelect({ id, value, onChange }: { id: string; value: string; on
 function Field({ label, htmlFor, children }: { label: string; htmlFor?: string; children: React.ReactNode }) {
 	return (
 		<div className="flex flex-col gap-1.5">
-			<Label htmlFor={htmlFor} className="text-[12px] text-muted-foreground">
+			<Label htmlFor={htmlFor} className="text-xs text-muted-foreground">
 				{label}
 			</Label>
 			{children}
@@ -433,10 +533,26 @@ function ReadonlyRow({ label, value }: { label: string; value: string }) {
 
 function CenteredNote({ children }: { children: React.ReactNode }) {
 	return (
-		<div className="grid h-full place-items-center bg-background p-6 text-center text-[12px] text-passive">
-			{children}
-		</div>
+		<div className="grid h-full place-items-center bg-background p-6 text-center text-xs text-passive">{children}</div>
 	);
+}
+
+function projectKindLabel(kind: string): string {
+	switch (kind) {
+		case "single_repo":
+			return "single repo";
+		case "workspace":
+			return "workspace";
+		case "scratch":
+			return "scratch";
+		default:
+			return kind || "unknown";
+	}
+}
+
+function scratchSupportedConfig(config: ProjectConfig): ProjectConfig {
+	const { defaultBranch: _defaultBranch, reviewers: _reviewers, trackerIntake: _trackerIntake, ...supported } = config;
+	return supported;
 }
 
 // Drop an object whose every value is undefined so we send `undefined` (omit)
