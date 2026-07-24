@@ -316,6 +316,13 @@ func daemonProbePayload(status string, cfg config.Config) map[string]any {
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		payload["executablePath"] = exe
 	}
+	// Build identity (VCS revision) lets a client recognize a same-build daemon
+	// running from a different path — e.g. a launchd-supervised daemon under
+	// ~/.ao/bin vs. the app-bundled one — instead of rejecting it on path alone.
+	// Empty for unstamped builds (`go run`); clients then fall back to the path.
+	if id := daemonmeta.BuildIdentity(); id != "" {
+		payload["buildIdentity"] = id
+	}
 	if cwd, err := os.Getwd(); err == nil && cwd != "" {
 		payload["workingDirectory"] = cwd
 	}
