@@ -95,8 +95,7 @@ func buildSystemPromptText(cfg systemPromptConfig) string {
 	default:
 		return ""
 	}
-	sections = append(sections, systemPromptGuard())
-	sections = append(sections, instructionTrustGuard)
+	sections = append(sections, systemPromptGuard(), instructionTrustGuard)
 	for _, section := range cfg.AdditionalSections {
 		if section := strings.TrimSpace(section); section != "" {
 			sections = append(sections, section)
