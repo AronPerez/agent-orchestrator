@@ -34,6 +34,9 @@ export type DaemonProbe = {
 	startupWorkingDirectory?: string;
 	/** Stable outer .AppImage path (AO_APPIMAGE), present only when the daemon's launcher runs under AppImage. */
 	appImagePath?: string;
+	/** VCS build stamp (git revision, "-dirty" suffix when the tree was modified).
+	 * Absent on unstamped builds (`go run`) — callers then fall back to path. */
+	buildIdentity?: string;
 };
 
 /** A /healthz|/readyz probe of a loopback port; resolves null when nothing valid answers. */
@@ -69,6 +72,7 @@ export function parseDaemonProbe(endpoint: "healthz" | "readyz", body: unknown):
 		startupWorkingDirectory:
 			typeof candidate.startupWorkingDirectory === "string" ? candidate.startupWorkingDirectory : undefined,
 		appImagePath: typeof candidate.appImagePath === "string" ? candidate.appImagePath : undefined,
+		buildIdentity: typeof candidate.buildIdentity === "string" ? candidate.buildIdentity : undefined,
 	};
 }
 

@@ -190,6 +190,12 @@ import { AGENT_SWITCH_VISIBILITY_IPC_CHANNEL } from "./shared/agent-switch-obser
 // Globals injected at compile time by @electron-forge/plugin-vite.
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string | undefined;
 declare const MAIN_WINDOW_VITE_NAME: string;
+// VCS build stamp injected at build time by vite.main.config.ts (git revision,
+// "-dirty" suffix on a modified tree). Matched against the running daemon's
+// reported buildIdentity so the app attaches to a same-build daemon regardless
+// of where it runs. Empty in tests / unstamped builds → falls back to path.
+declare const __AO_BUILD_IDENTITY__: string | undefined;
+const APP_BUILD_IDENTITY = typeof __AO_BUILD_IDENTITY__ === "string" ? __AO_BUILD_IDENTITY__ : "";
 
 const execFileAsync = promisify(execFile);
 
@@ -1441,7 +1447,7 @@ async function readDaemonProbe(port: number, endpoint: "healthz" | "readyz"): Pr
 	}
 }
 
-function daemonIdentityError(launch: DaemonLaunchSpec, probe: DaemonProbe): string | null {
+function daemonIdentityError(launch: DaemonLaunchSpec, probe: DaemonProbe, appBuildIdentity: string): string | null {
 	if (launch.source === "dev") {
 		const cwdMatches = probe.workingDirectory ? sameCanonicalPath(probe.workingDirectory, launch.cwd) : false;
 		const startupCwdMatches = probe.startupWorkingDirectory
@@ -1460,6 +1466,15 @@ function daemonIdentityError(launch: DaemonLaunchSpec, probe: DaemonProbe): stri
 	}
 
 	if (launch.source === "bundled") {
+		// Prefer build identity over path: a daemon built from the same commit is
+		// the same build even when it runs from a different location (e.g. a
+		// launchd-supervised daemon under ~/.ao/bin instead of the app bundle), so
+		// attach to it. Only fall back to the path comparison when a build stamp is
+		// unavailable on either side (an unstamped `go run`, or an older daemon).
+		if (appBuildIdentity && probe.buildIdentity) {
+			if (probe.buildIdentity === appBuildIdentity) return null;
+			return `Another AO daemon is already running from a different build (${probe.buildIdentity}); this app expects ${appBuildIdentity}. Rebuild and redeploy the daemon (e.g. \`ao-svc reload\`) so they match, or stop the other daemon.`;
+		}
 		return bundledDaemonIdentityError(probe, launch.command, process.env.APPIMAGE, sameCanonicalPath);
 	}
 	return null;
@@ -1587,7 +1602,7 @@ async function inspectExistingDaemon(
 		runFileContents,
 		isProcessAlive: processAlive,
 		probe: readDaemonProbe,
-		identityError: (probe) => daemonIdentityError(launch, probe),
+		identityError: (probe) => daemonIdentityError(launch, probe, APP_BUILD_IDENTITY),
 	});
 	if (!status) return null;
 	const info = runFileContents ? parseRunFile(runFileContents) : null;
@@ -1755,7 +1770,7 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 	const directDaemon = await resolveDaemonFromPort({
 		expectedPort: resolvedDaemonPort(),
 		probe: readDaemonProbe,
-		identityError: (probe) => daemonIdentityError(launch, probe),
+		identityError: (probe) => daemonIdentityError(launch, probe, APP_BUILD_IDENTITY),
 	});
 	if (startEpoch !== daemonStartEpoch) {
 		return daemonStatus;
