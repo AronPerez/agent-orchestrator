@@ -5,14 +5,21 @@
 # DHCP lease change. lan-web-server.sh derives the same IP for the UI, so the two
 # always agree. See ~/.ao/FEREADME.md for the full gotcha.
 #
+# AO_ALLOWED_ORIGINS *replaces* config.DefaultAllowedOrigins rather than adding to
+# it, so app://renderer must be listed explicitly — it is the packaged desktop
+# app's origin, and omitting it makes every renderer fetch fail CORS ("Something
+# went wrong!" from the router's catch boundary). Since the app now attaches to
+# this supervised daemon instead of spawning its own, it is a first-class client
+# here and its origin has to stay in the list.
+#
 # NOTE: a launchd-spawned daemon can't read the ~/Desktop project repos (macOS
 # TCC). For sessions that need those, stop this job and start from a terminal:
 #   launchctl bootout gui/$(id -u)/dev.agent-orchestrator.daemon
-#   AO_ALLOWED_ORIGINS=http://<lan-ip>:3000 ao start
+#   AO_ALLOWED_ORIGINS=app://renderer,http://<lan-ip>:3000 ao start
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 export LANG="${LANG:-en_US.UTF-8}"
 
 IP=$(ipconfig getifaddr "$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')" 2>/dev/null)
 [ -z "$IP" ] && IP=$(ipconfig getifaddr en0 2>/dev/null)
 
-exec env AO_ALLOWED_ORIGINS="http://${IP}:3000" "$HOME/.ao/bin/ao" daemon
+exec env AO_ALLOWED_ORIGINS="app://renderer,http://${IP}:3000" "$HOME/.ao/bin/ao" daemon
