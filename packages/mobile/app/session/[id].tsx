@@ -76,11 +76,11 @@ const TERMINAL_ENHANCE_JS = `
   // ---- Zoom & pan -----------------------------------------------------------
   // The daemon may hold the grid wider than the phone (a co-viewing desktop
   // drives the size). The resting view shrinks the whole grid uniformly to fit
-  // the width (overview — may be tiny). Pinch zooms between that fit scale and
-  // 1:1 (crisp, readable); while zoomed, one finger pans the viewport (vertical
-  // overshoot spills into scrollback) and double-tap toggles overview <-> 1:1.
-  // While zoomed we auto-pan to keep the cursor framed, so the prompt/output
-  // stays in view without chasing it by hand.
+  // the width, but never past the readability floor below - beyond that the grid
+  // stays oversized and one finger pans it (vertical overshoot spills into
+  // scrollback), with the cursor auto-framed so the prompt stays in view. Pinch
+  // zooms freely between the true fit (whole-grid birds-eye) and 1:1; double-tap
+  // toggles the two.
   function term() { return window.terminal; }
   var Z = { s: 1, min: 1, tx: 0, ty: 0, zoomed: false, lastPan: 0 };
   function box() {
@@ -102,14 +102,30 @@ const TERMINAL_ENHANCE_JS = `
     b.root.style.transformOrigin = 'top left';
     b.root.style.transform = 'translate(' + Z.tx + 'px,' + Z.ty + 'px) scale(' + Z.s + ')';
   }
-  // Fit-to-width baseline, re-run on grid/container changes. Tracks the fit
+  // Readability floor for the RESTING view. At pure fit-to-width the on-screen
+  // text size is contW/cols — it does not depend on the xterm font size (a bigger
+  // font just shrinks harder), so a wide daemon grid rendered whole gives ~4px
+  // text and the font buttons can't fix it. So rest no smaller than MIN_TEXT_PX
+  // and let the extra width be panned. An explicit pinch/double-tap still reaches
+  // the true fit (Z.min) when you want the whole-screen birds-eye.
+  var MIN_TEXT_PX = 9;
+  function restScale(b) {
+    var fs = 12; try { fs = term().options.fontSize || fs; } catch (_) {}
+    return Math.min(1, Math.max(Math.min(1, b.contW / b.natW), MIN_TEXT_PX / fs));
+  }
+  // Content bigger than the container at the current scale: true while zoomed in,
+  // and also at rest when the floor above holds the grid wider than the screen.
+  // Gates panning + cursor-follow, which both exist to reach off-screen content.
+  function overflows(b) { return b.natW * Z.s > b.contW + 1 || b.natH * Z.s > b.contH + 1; }
+  // Fit-to-width baseline, re-run on grid/container changes. Tracks the resting
   // scale while at overview; preserves (re-clamps) the user's zoom otherwise.
   function applyScale() {
     try {
       var b = box(); if (!b || !b.natW || !b.contW) return;
       Z.min = Math.min(1, b.contW / b.natW);
-      if (!Z.zoomed) { Z.s = Z.min; Z.tx = 0; Z.ty = 0; }
-      else { if (Z.s < Z.min) Z.s = Z.min; clampT(b); }
+      if (!Z.zoomed) { Z.s = restScale(b); Z.tx = 0; Z.ty = 0; }
+      else if (Z.s < Z.min) Z.s = Z.min;
+      clampT(b);
       applyTransform(b);
     } catch (_) {}
   }
@@ -128,8 +144,9 @@ const TERMINAL_ENHANCE_JS = `
   // the live screen — not while the user is reading scrollback.
   function followCursor() {
     try {
-      if (!Z.zoomed || Date.now() - Z.lastPan < 4000) return;
+      if (Date.now() - Z.lastPan < 4000) return;
       var T = term(); var b = box(); if (!T || !b || !T.cols || !T.rows) return;
+      if (!overflows(b)) return;
       var buf = T.buffer && T.buffer.active; if (!buf) return;
       if (buf.viewportY !== buf.baseY) return;
       var cx = (buf.cursorX + 0.5) * (b.natW / T.cols) * Z.s;
@@ -325,29 +342,30 @@ const TERMINAL_ENHANCE_JS = `
           for (var i = 0; i < Math.abs(diff); i++) wheelTick(up, t.clientX, t.clientY);
           altLines = want;
         }
-        // While zoomed, the horizontal component still pans the magnified grid.
-        if (Z.zoomed) {
-          var bz = box();
-          if (bz) { Z.tx += t.clientX - lX; clampT(bz); applyTransform(bz); Z.lastPan = Date.now(); }
-        }
+        // When the grid is wider than the screen, the horizontal component still
+        // pans it (zoomed in, or held oversized by the readability floor).
+        var bz = box();
+        if (bz && overflows(bz)) { Z.tx += t.clientX - lX; clampT(bz); applyTransform(bz); Z.lastPan = Date.now(); }
         lX = t.clientX; lY = t.clientY;
         return;
       }
-      if (Z.zoomed) {
-        // Zoomed in: one finger pans the viewport over the big grid. Vertical
-        // overshoot past the grid edge spills into scrollback scrolling (divide
-        // by scale: scrollTop is in unscaled content px, the finger in screen px).
+      var b = box();
+      if (b && overflows(b)) {
+        // Grid bigger than the screen (zoomed in, or the readability floor): one
+        // finger pans the viewport over it. Overshoot past an edge spills into
+        // scrollback scrolling (divide by scale: scrollTop is in unscaled content
+        // px, the finger in screen px) - so with only horizontal overflow the
+        // vertical drag is pure scrollback, same as the overview below.
+        // ponytail: this costs iOS momentum scrolling at rest (we preventDefault
+        // instead of letting native fling). Restore per-axis if it grates.
         if (e.cancelable) e.preventDefault();
-        var b = box();
-        if (b) {
-          Z.tx += t.clientX - lX;
-          var wantTy = Z.ty + (t.clientY - lY);
-          Z.ty = wantTy;
-          clampT(b);
-          var spill = wantTy - Z.ty;
-          if (spill !== 0 && _vp) _vp.scrollTop -= spill / Z.s;
-          applyTransform(b);
-        }
+        Z.tx += t.clientX - lX;
+        var wantTy = Z.ty + (t.clientY - lY);
+        Z.ty = wantTy;
+        clampT(b);
+        var spill = wantTy - Z.ty;
+        if (spill !== 0 && _vp) _vp.scrollTop -= spill / Z.s;
+        applyTransform(b);
         Z.lastPan = Date.now();
         lX = t.clientX; lY = t.clientY;
         return;
@@ -381,7 +399,9 @@ const TERMINAL_ENHANCE_JS = `
       var now = Date.now();
       if (now - lastTap < DBLTAP && Math.abs(sX - ltX) < 40 && Math.abs(sY - ltY) < 40) {
         lastTap = 0;
-        if (Z.zoomed) setZoom(Z.min, 0, 0);
+        // Out goes back to the RESTING view (floored, readable), not the true
+        // fit - the whole-grid birds-eye stays a deliberate pinch away.
+        if (Z.zoomed) { Z.zoomed = false; applyScale(); }
         else { setZoom(1, sX, sY); Z.lastPan = Date.now(); }
       } else { lastTap = now; ltX = sX; ltY = sY; }
     }
