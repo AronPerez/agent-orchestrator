@@ -15,7 +15,9 @@ _latest_node_bin=$(ls -d "$NVM_DIR"/versions/node/*/bin 2>/dev/null | sort -V | 
 
 export EXPO_NO_TELEMETRY=1
 cd "$HOME/dev/ag-orc/packages/mobile" || exit 1
-# --lan serves both the browser (localhost:8081) and Expo Go over the LAN.
+# --offline still serves over LAN, but prevents Expo Go's signed-manifest
+# request from prompting this non-interactive launchd job for Expo credentials.
+# This server is local-only and must not require an EXPO_TOKEN to start an app.
 # --port is explicit so a busy 8081 fails loudly instead of silently using 8082
 # (which would break the phone's saved exp:// URL).
-exec ./node_modules/.bin/expo start --lan --port 8081
+exec ./node_modules/.bin/expo start --offline --port 8081
