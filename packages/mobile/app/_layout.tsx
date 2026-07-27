@@ -1,5 +1,6 @@
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
+import { Platform } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { PushManager } from "../lib/PushManager";
 import { AppProvider } from "../lib/store";
@@ -10,7 +11,11 @@ export default function RootLayout() {
 		<SafeAreaProvider>
 			<AppProvider>
 				<StatusBar style="light" />
-				<PushManager />
+				{/* Push notifications are native-only: expo-notifications' response
+				    APIs (getLastNotificationResponseAsync, the response listener) are
+				    not implemented on web, so mounting PushManager there throws. The
+				    web target has no push, so skip it entirely. */}
+				{Platform.OS !== "web" ? <PushManager /> : null}
 				<Stack
 					screenOptions={{
 						headerStyle: { backgroundColor: theme.bgSurface },

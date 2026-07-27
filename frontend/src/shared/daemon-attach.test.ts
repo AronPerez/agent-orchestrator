@@ -69,6 +69,7 @@ describe("parseDaemonProbe", () => {
 				executablePath: "/bin/ao",
 				workingDirectory: "/work/data",
 				startupWorkingDirectory: "/work",
+				buildIdentity: "abc123-dirty",
 			}),
 		).toEqual({
 			status: "ready",
@@ -77,6 +78,7 @@ describe("parseDaemonProbe", () => {
 			executablePath: "/bin/ao",
 			workingDirectory: "/work/data",
 			startupWorkingDirectory: "/work",
+			buildIdentity: "abc123-dirty",
 		});
 	});
 
@@ -103,10 +105,16 @@ describe("parseDaemonProbe", () => {
 	});
 
 	it("drops identity fields that are not strings", () => {
-		const probe = parseDaemonProbe("healthz", { ...healthBody, executablePath: 5, workingDirectory: {} });
+		const probe = parseDaemonProbe("healthz", {
+			...healthBody,
+			executablePath: 5,
+			workingDirectory: {},
+			buildIdentity: 42,
+		});
 		expect(probe?.executablePath).toBeUndefined();
 		expect(probe?.workingDirectory).toBeUndefined();
 		expect(probe?.startupWorkingDirectory).toBeUndefined();
+		expect(probe?.buildIdentity).toBeUndefined();
 	});
 });
 
