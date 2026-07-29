@@ -9,7 +9,9 @@ import {
 	Plus,
 	RotateCcw,
 	RotateCw,
+	Search,
 	Trash2,
+	X,
 } from "lucide-react";
 import {
 	type WorkspaceSession,
@@ -49,6 +51,7 @@ import { usesPreviewWorkspaceData } from "../lib/preview-mode";
 import { cn } from "../lib/utils";
 import { isLinuxPlatform, isMacPlatform, usesBoardActionsInPanel } from "../lib/platform";
 import { useUiStore } from "../stores/ui-store";
+import { matchesRendererShortcut } from "../stores/keybindings-store";
 import { RestoreUnavailableDialog } from "./RestoreUnavailableDialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import { SessionTerminationDialog } from "./SessionTerminationDialog";
@@ -121,11 +124,38 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
 		}
 	}, [orchestrator, orchestratorStartupError, projectId, setOrchestratorStartupError]);
 
-	const archived = sessions
+	// Cmd/Ctrl+F narrows every lane — and the archive — to the sessions whose card
+	// text matches. `null` means the find bar is closed.
+	// ponytail: plain substring match over the card's identifying fields; reach
+	// for a fuzzy matcher only once "contains" proves too strict.
+	const [search, setSearch] = useState<string | null>(null);
+	const searchInputRef = useRef<HTMLInputElement>(null);
+	const query = search?.trim().toLowerCase() ?? "";
+	const matching = query
+		? sessions.filter((session) =>
+				[session.title, session.branch, canonicalTrackerIssueId(session.issueId)].some((field) =>
+					field?.toLowerCase().includes(query),
+				),
+			)
+		: sessions;
+	const noSearchMatches = query !== "" && matching.length === 0;
+	useEffect(() => {
+		const onKeyDown = (event: globalThis.KeyboardEvent) => {
+			if (!matchesRendererShortcut("search-board", event)) return;
+			event.preventDefault();
+			// Re-pressing the chord while open re-focuses the field, as in any find bar.
+			setSearch((current) => current ?? "");
+			searchInputRef.current?.select();
+		};
+		window.addEventListener("keydown", onKeyDown, true);
+		return () => window.removeEventListener("keydown", onKeyDown, true);
+	}, []);
+
+	const archived = matching
 		.filter(isArchivedSession)
 		.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 	const byZone = new Map<AttentionZone, WorkspaceSession[]>();
-	for (const session of sessions.filter((candidate) => !isArchivedSession(candidate))) {
+	for (const session of matching.filter((candidate) => !isArchivedSession(candidate))) {
 		const zone = attentionZone(session);
 		(byZone.get(zone) ?? byZone.set(zone, []).get(zone)!).push(session);
 	}
@@ -157,6 +187,7 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
 		setRestoreErrors({});
 		setRestoreUnavailableSession(undefined);
 		setTerminationSession(undefined);
+		setSearch(null);
 	}, [projectId]);
 
 	const openSession = (session: WorkspaceSession) =>
@@ -307,6 +338,47 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
 				</div>
 			) : null}
 
+			{/* Startup and welcome hide the crumb row above, and on macOS/Linux the
+			    fixed titlebar nav would then sit on top of this one — so the find bar
+			    waits for the lanes it filters. */}
+			{search !== null && !showStartup && !showWelcome ? (
+				<div
+					className="flex h-toolbar shrink-0 items-center gap-2 border-b border-border-strong px-3"
+					data-testid="board-search"
+				>
+					<Search aria-hidden="true" className="size-icon-md shrink-0 text-passive" />
+					<input
+						aria-label="Search board"
+						autoFocus
+						className="min-w-0 flex-1 bg-transparent text-control text-foreground outline-none placeholder:text-passive"
+						onChange={(event) => setSearch(event.target.value)}
+						onKeyDown={(event) => {
+							if (event.key !== "Escape") return;
+							event.preventDefault();
+							setSearch(null);
+						}}
+						placeholder="Search sessions"
+						ref={searchInputRef}
+						value={search}
+					/>
+					{query ? (
+						<span className="shrink-0 font-mono text-2xs text-passive" role="status">
+							{matching.length === 0
+								? "No results"
+								: `${matching.length} ${matching.length === 1 ? "match" : "matches"}`}
+						</span>
+					) : null}
+					<button
+						aria-label="Close search"
+						className="grid size-control-board-sm shrink-0 place-items-center rounded-md text-passive transition-colors hover:bg-interactive-hover hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent/50"
+						onClick={() => setSearch(null)}
+						type="button"
+					>
+						<X aria-hidden="true" className="size-icon-md" />
+					</button>
+				</div>
+			) : null}
+
 			<div className="min-h-0 flex-1 overflow-y-auto md:overflow-hidden">
 				{projectId && health.state !== "ok" ? (
 					<div className="mx-3 my-3 flex items-center gap-3 rounded-md border border-border bg-surface px-3 py-2 text-xs text-muted-foreground">
@@ -335,6 +407,10 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
 						onOpenOrchestrator={() => void openOrchestrator()}
 						spawnError={visibleSpawnError}
 					/>
+				) : noSearchMatches ? (
+					<p className="py-10 text-center text-xs text-passive" role="status">
+						No sessions match "{search?.trim()}".
+					</p>
 				) : (
 					<div className="md:h-full md:overflow-x-auto md:overflow-y-hidden">
 						{/* Hairline column grid: vertical divide-x + one absolute header rule so
