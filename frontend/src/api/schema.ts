@@ -504,6 +504,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{sessionId}/merge-policy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Configure whether PR completion terminates the session */
+        patch: operations["setSessionMergePolicy"];
+        trace?: never;
+    };
     "/api/v1/sessions/{sessionId}/pr": {
         parameters: {
             query?: never;
@@ -585,6 +602,23 @@ export interface paths {
         put?: never;
         /** Restore a terminated session */
         post: operations["restoreSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/{sessionId}/resume-agent": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Resume an exited agent in its existing session */
+        post: operations["resumeAgent"];
         delete?: never;
         options?: never;
         head?: never;
@@ -776,7 +810,8 @@ export interface paths {
         delete: operations["closeShellTerminal"];
         options?: never;
         head?: never;
-        patch?: never;
+        /** Rename a standalone shell terminal tab */
+        patch: operations["renameShellTerminal"];
         trace?: never;
     };
 }
@@ -857,8 +892,11 @@ export interface components {
             projectId: string;
             prs: components["schemas"]["SessionPRFacts"][];
             /** @enum {string} */
-            status: "working" | "pr_open" | "draft" | "ci_failed" | "review_pending" | "changes_requested" | "approved" | "mergeable" | "merged" | "needs_input" | "idle" | "terminated" | "no_signal";
+            scmStatus?: "pr_open" | "draft" | "ci_failed" | "review_pending" | "changes_requested" | "approved" | "mergeable" | "merged";
+            /** @enum {string} */
+            status: "working" | "pr_open" | "draft" | "ci_failed" | "review_pending" | "changes_requested" | "approved" | "mergeable" | "merged" | "needs_input" | "exited" | "idle" | "terminated" | "no_signal";
             terminalHandleId?: string;
+            terminateOnPrMerge: boolean;
             /** Format: date-time */
             updatedAt: string;
         };
@@ -1019,6 +1057,8 @@ export interface components {
         OpenShellTerminalRequest: {
             /** @description Project whose root the shell starts in. Omitted opens the shell in the daemon data dir. */
             projectId?: string;
+            /** @description Agent session the shell is scoped to, so it appears only in that session's tab strip. Omitted makes it a standalone shell. */
+            sessionId?: string;
         };
         OrchestratorResponse: {
             id: string;
@@ -1135,6 +1175,13 @@ export interface components {
             session: components["schemas"]["ControllersSessionView"];
             sessionId: string;
         };
+        ResumeAgentResponse: {
+            ok: boolean;
+            /** @enum {string} */
+            resumeMode: "native" | "saved_prompt" | "fresh";
+            session: components["schemas"]["ControllersSessionView"];
+            sessionId: string;
+        };
         ReviewRun: {
             batchId: string;
             body: string;
@@ -1242,6 +1289,8 @@ export interface components {
             ci: components["schemas"]["SessionPRCISummary"];
             /** Format: date-time */
             ciObservedAt?: string;
+            /** Format: date-time */
+            createdAt?: null | string;
             deletions: number;
             headSha: string;
             htmlUrl?: string;
@@ -1258,6 +1307,8 @@ export interface components {
             sourceBranch: string;
             /** @enum {string} */
             state: "draft" | "open" | "merged" | "closed";
+            /** Format: date-time */
+            stateChangedAt?: null | string;
             targetBranch: string;
             title: string;
             /** Format: date-time */
@@ -1284,6 +1335,8 @@ export interface components {
             agentSessionId?: string;
             /** @description AO hook sub-command that produced this state (e.g. post-tool-use). */
             event?: string;
+            /** @description AO process generation that produced the signal. */
+            launchId?: string;
             /**
              * @description Agent activity state reported by an agent hook. Optional for metadata-only hooks.
              * @enum {string}
@@ -1302,6 +1355,15 @@ export interface components {
         SetProjectConfigInput: {
             config: components["schemas"]["ProjectConfig"];
         };
+        SetSessionMergePolicyRequest: {
+            terminateOnPrMerge: boolean;
+        };
+        SetSessionMergePolicyResponse: {
+            ok: boolean;
+            session: components["schemas"]["ControllersSessionView"];
+            sessionId: string;
+            terminateOnPrMerge: boolean;
+        };
         SetSessionPreviewRequest: {
             /** @description Preview target URL. When empty, the daemon autodetects a static entry point in the session workspace. */
             url?: string;
@@ -1314,6 +1376,7 @@ export interface components {
             createdAt: string;
             handleId: string;
             projectId?: string;
+            sessionId?: string;
             title: string;
             workingDir: string;
         };
@@ -1383,6 +1446,10 @@ export interface components {
         UpdateProjectSettingsInput: {
             config: components["schemas"]["ProjectConfig"];
             displayName: string;
+        };
+        UpdateShellTerminalRequest: {
+            /** @description New tab title for the shell terminal. Trimmed; must be non-empty. */
+            title: string;
         };
         WorkspaceFileResponse: {
             additions: number;
@@ -3119,6 +3186,69 @@ export interface operations {
             };
         };
     };
+    setSessionMergePolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Session identifier, e.g. project-1. */
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetSessionMergePolicyRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SetSessionMergePolicyResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
     listSessionPRs: {
         parameters: {
             query?: never;
@@ -3504,6 +3634,65 @@ export interface operations {
             };
             /** @description Internal Server Error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    resumeAgent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Session identifier, e.g. project-1. */
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResumeAgentResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -4108,6 +4297,69 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    renameShellTerminal: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Shell terminal runtime handle identifier. */
+                handleId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateShellTerminalRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ShellTerminalEnvelope"];
+                };
             };
             /** @description Bad Request */
             400: {
