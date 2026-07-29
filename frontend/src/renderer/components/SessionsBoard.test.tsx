@@ -1026,6 +1026,64 @@ describe("SessionsBoard", () => {
 		expect(await screen.findByText("Failed to terminate session (500)")).toBeInTheDocument();
 		expect(screen.getByRole("dialog")).toBeInTheDocument();
 	});
+
+	it("opens search on the find shortcut, filters cards, and reports when nothing matches", async () => {
+		workspaceQueryMock.mockReturnValue({
+			data: [
+				workspaceWithSessions([
+					boardSession({ id: "s-idle", title: "brand-font-pipeline", status: "idle" }),
+					boardSession({ id: "s-docs", title: "docs cleanup", status: "idle" }),
+				]),
+			],
+			isError: false,
+			isSuccess: true,
+		});
+		renderBoard("p1");
+		expect(screen.queryByRole("textbox", { name: "Search board" })).not.toBeInTheDocument();
+
+		await userEvent.keyboard("{Control>}f{/Control}");
+		const search = screen.getByRole("textbox", { name: "Search board" });
+
+		await userEvent.type(search, "docs");
+		expect(screen.getByText("docs cleanup")).toBeInTheDocument();
+		expect(screen.queryByText("brand-font-pipeline")).not.toBeInTheDocument();
+		expect(screen.getByText("1 match")).toBeInTheDocument();
+
+		await userEvent.clear(search);
+		await userEvent.type(search, "nothing-here");
+		expect(screen.getByText('No sessions match "nothing-here".')).toBeInTheDocument();
+		expect(screen.getByText("No results")).toBeInTheDocument();
+
+		await userEvent.keyboard("{Escape}");
+		expect(screen.queryByRole("textbox", { name: "Search board" })).not.toBeInTheDocument();
+		expect(screen.getByText("brand-font-pipeline")).toBeInTheDocument();
+	});
+
+	it("matches the branch and issue id shown on a card", async () => {
+		workspaceQueryMock.mockReturnValue({
+			data: [
+				workspaceWithSessions([
+					boardSession({ id: "s-idle", title: "brand-font-pipeline", status: "idle", branch: "ao/radic-5" }),
+					boardSession({ id: "s-docs", title: "docs cleanup", status: "idle", issueId: "github:INT-17" }),
+				]),
+			],
+			isError: false,
+			isSuccess: true,
+		});
+		renderBoard("p1");
+
+		await userEvent.keyboard("{Control>}f{/Control}");
+		const search = screen.getByRole("textbox", { name: "Search board" });
+
+		await userEvent.type(search, "radic-5");
+		expect(screen.getByText("brand-font-pipeline")).toBeInTheDocument();
+		expect(screen.queryByText("docs cleanup")).not.toBeInTheDocument();
+
+		await userEvent.clear(search);
+		await userEvent.type(search, "int-17");
+		expect(screen.getByText("docs cleanup")).toBeInTheDocument();
+		expect(screen.queryByText("brand-font-pipeline")).not.toBeInTheDocument();
+	});
 });
 
 function workspaceWithSessions(sessions: WorkspaceSession[]): WorkspaceSummary {

@@ -15,7 +15,7 @@ export type ShortcutChord = {
 };
 
 export type AppShortcutId =
-	"new-session" | "new-shell-terminal" | "keyboard-shortcuts" | "toggle-sidebar" | "open-project" | "toggle-inspector" | "command-palette" | "open-settings" | "previous-session" | "next-session" | "focus-terminal";
+	"new-session" | "new-shell-terminal" | "keyboard-shortcuts" | "toggle-sidebar" | "open-project" | "toggle-inspector" | "command-palette" | "open-settings" | "previous-session" | "next-session" | "focus-terminal" | "search-board";
 
 export type ShortcutCategory = "General" | "Navigation" | "Session";
 
@@ -80,6 +80,11 @@ export const APP_SHORTCUTS: readonly ShortcutDefinition[] = [
 		customizable: false,
 	},
 	{
+		id: "search-board",
+		label: "Search board",
+		category: "Navigation",
+	},
+	{
 		id: "previous-session",
 		label: "Previous session",
 		category: "Navigation",
@@ -136,6 +141,9 @@ export function defaultShortcutBindings(id: AppShortcutId, isMac: boolean): read
 			return [isMac ? binding("k", { meta: true }) : binding("k", { ctrl: true })];
 		case "open-settings":
 			return [isMac ? binding(",", { meta: true }) : binding(",", { ctrl: true })];
+		case "search-board":
+			// The find chord users already reach for: ⌘F on macOS, Ctrl+F elsewhere.
+			return [isMac ? binding("f", { meta: true }) : binding("f", { ctrl: true })];
 		case "previous-session":
 			return [isMac ? binding("ArrowUp", { meta: true, alt: true }) : binding("PageUp", { ctrl: true })];
 		case "next-session":
