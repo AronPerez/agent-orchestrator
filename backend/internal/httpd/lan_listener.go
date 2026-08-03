@@ -31,11 +31,12 @@ type LANManager struct {
 // (backed by the shared state) and returns a manager that can start/stop the
 // network-facing listener. Most callers want NewMobileLAN, which owns the state.
 func NewLANManager(handler http.Handler, state *authState, defaultPort int, log *slog.Logger) *LANManager {
+	log = loggerOrDefault(log)
 	lock := newLockout(5, time.Minute, time.Now)
 	return &LANManager{
-		handler:     lanControlBlock(authMiddleware(state, lock)(handler)),
+		handler:     lanControlBlock(authMiddleware(state, lock, log)(handler)),
 		defaultPort: defaultPort,
-		log:         loggerOrDefault(log),
+		log:         log,
 		state:       state,
 	}
 }

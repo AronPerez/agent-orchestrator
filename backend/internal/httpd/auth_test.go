@@ -15,7 +15,7 @@ func newAuthUnderTest(pw string, now func() time.Time) (http.Handler, *lockout) 
 	st.setHash(h)
 	lock := newLockout(5, time.Minute, now)
 	ok := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-	return authMiddleware(st, lock)(ok), lock
+	return authMiddleware(st, lock, discardLogger())(ok), lock
 }
 
 func req(auth string) *http.Request {
@@ -167,6 +167,67 @@ func TestAuthStillGuardsNonPreflightOptions(t *testing.T) {
 		if w.Code != http.StatusUnauthorized {
 			t.Errorf("%s: got %d want 401 (must not bypass auth)", tc.name, w.Code)
 		}
+	}
+}
+
+// wsUpgradeReq builds the GET a browser's new WebSocket() issues: no
+// Authorization header (browsers cannot set one there), the token riding in the
+// Sec-WebSocket-Protocol list instead.
+func wsUpgradeReq(protocols string) *http.Request {
+	r := httptest.NewRequest(http.MethodGet, "/mux", nil)
+	r.RemoteAddr = "192.168.1.50:5555"
+	r.Header.Set("Sec-WebSocket-Protocol", protocols)
+	return r
+}
+
+// A browser /mux handshake carries the token as the ao.bearer.* subprotocol
+// entry (comma-separated alongside the ao.auth marker). It must authenticate.
+func TestAuthAcceptsSubprotocolToken(t *testing.T) {
+	h, _ := newAuthUnderTest("secret12", time.Now)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, wsUpgradeReq("ao.auth, ao.bearer.secret12"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("subprotocol token: got %d want 200", w.Code)
+	}
+}
+
+// Guessing the password via the subprotocol channel is still guessing: it must
+// consume lockout budget exactly like a wrong Bearer token.
+func TestAuthWrongSubprotocolTokenCountsTowardLockout(t *testing.T) {
+	now := time.Now()
+	h, _ := newAuthUnderTest("secret12", func() time.Time { return now })
+	for i := 0; i < 5; i++ {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, wsUpgradeReq("ao.auth, ao.bearer.wrongpw1"))
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: got %d want 401", i, w.Code)
+		}
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req("Bearer secret12"))
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("after 5 wrong subprotocol tokens: got %d want 429", w.Code)
+	}
+}
+
+// A request with NO token guesses nothing, so it must not consume lockout
+// budget: counting headerless traffic (an old web build's /mux retry loop, a
+// stray probe) would 429 every request from that IP — including correctly
+// authenticated REST. That is the bug that motivated this test.
+func TestAuthTokenlessDoesNotCountTowardLockout(t *testing.T) {
+	now := time.Now()
+	h, _ := newAuthUnderTest("secret12", func() time.Time { return now })
+	for i := 0; i < 10; i++ {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req(""))
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("tokenless attempt %d: got %d want 401", i, w.Code)
+		}
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req("Bearer secret12"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("after 10 tokenless requests: got %d want 200 (tokenless must not consume lockout budget)", w.Code)
 	}
 }
 

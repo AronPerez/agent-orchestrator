@@ -28,6 +28,16 @@ func mountTerminalMux(r chi.Router, mgr *terminal.Manager, log *slog.Logger) {
 	r.Get("/mux", terminalMuxHandler(mgr, log))
 }
 
+// muxAuthSubprotocol is the marker the server negotiates and echoes so a
+// browser client can request subprotocols at all: the web client sends
+// ["ao.auth", "ao.bearer.<pw>"] to carry the connection token (see
+// wsProtocolPrefix in auth.go), and browsers fail the handshake unless the
+// server echoes one requested entry. Only this marker is in the negotiable
+// list, so the credential entry can never be reflected back. Clients that
+// request no subprotocols (the phone, the desktop renderer) get no echo and
+// are unaffected.
+const muxAuthSubprotocol = "ao.auth"
+
 // terminalMuxHandler upgrades the request to a WebSocket and hands the connection to the
 // terminal manager. httpd owns only the upgrade and the transport adaptation;
 // all stream logic lives in internal/terminal.
@@ -36,7 +46,10 @@ func terminalMuxHandler(mgr *terminal.Manager, log *slog.Logger) http.HandlerFun
 		// InsecureSkipVerify disables coder/websocket's same-origin check: the
 		// daemon binds loopback only and the desktop renderer's origin differs
 		// from the loopback host, mirroring the legacy Node mux server.
-		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+			InsecureSkipVerify: true,
+			Subprotocols:       []string{muxAuthSubprotocol},
+		})
 		if err != nil {
 			log.Warn("terminal mux: websocket upgrade failed", "err", err)
 			return

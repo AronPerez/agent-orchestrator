@@ -1,6 +1,7 @@
 package httpd
 
 import (
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -58,13 +59,18 @@ func (l *lockout) blocked(src string) bool {
 	return false
 }
 
-func (l *lockout) fail(src string) {
+// fail records a failed password guess and reports whether THIS call tripped
+// the lockout (exactly at the limit), so the caller can log the trip once
+// rather than on every subsequent failure.
+func (l *lockout) fail(src string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.fails[src]++
 	if l.fails[src] >= l.limit {
 		l.until[src] = l.now().Add(l.cooldown)
+		return l.fails[src] == l.limit
 	}
+	return false
 }
 
 func (l *lockout) reset(src string) {
@@ -85,6 +91,26 @@ func bearerToken(r *http.Request) string {
 	h := r.Header.Get("Authorization")
 	if strings.HasPrefix(h, "Bearer ") {
 		return strings.TrimPrefix(h, "Bearer ")
+	}
+	return ""
+}
+
+// wsProtocolPrefix marks the Sec-WebSocket-Protocol entry carrying the
+// connection token. Browsers cannot set headers on new WebSocket(), so the web
+// client requests ["ao.auth", "ao.bearer.<pw>"] and the daemon echoes the
+// "ao.auth" marker (see muxAuthSubprotocol in terminal_mux.go). Safe as an
+// auth channel: the Fetch spec forbids Sec-* headers on fetch/XHR, so only a
+// real WebSocket handshake can carry it, and the value is still verified
+// against the password hash exactly like a Bearer token.
+const wsProtocolPrefix = "ao.bearer."
+
+func wsProtocolToken(r *http.Request) string {
+	for _, v := range r.Header.Values("Sec-WebSocket-Protocol") {
+		for _, p := range strings.Split(v, ",") {
+			if p = strings.TrimSpace(p); strings.HasPrefix(p, wsProtocolPrefix) {
+				return strings.TrimPrefix(p, wsProtocolPrefix)
+			}
+		}
 	}
 	return ""
 }
@@ -112,12 +138,17 @@ func previewFilesCookiePath(urlPath string) string {
 
 // connectionToken returns the caller's connection token. It comes from the
 // Authorization: Bearer header (the mobile API client and a preview page's
-// top-level navigation) or, ONLY on the preview-files route, the auth cookie (a
-// preview page's subresource requests — images/CSS/JS — which the WebView issues
-// without our header). Restricting the cookie to the preview-files path means it
-// can never authenticate any other mobile endpoint even if a client sends it.
+// top-level navigation), the ao.bearer.* Sec-WebSocket-Protocol entry (a
+// browser's /mux handshake, which cannot set Authorization) or, ONLY on the
+// preview-files route, the auth cookie (a preview page's subresource requests —
+// images/CSS/JS — which the WebView issues without our header). Restricting the
+// cookie to the preview-files path means it can never authenticate any other
+// mobile endpoint even if a client sends it.
 func connectionToken(r *http.Request) string {
 	if t := bearerToken(r); t != "" {
+		return t
+	}
+	if t := wsProtocolToken(r); t != "" {
 		return t
 	}
 	if previewFilesCookiePath(r.URL.Path) != "" {
@@ -170,7 +201,7 @@ func isCORSPreflight(r *http.Request) bool {
 		r.Header.Get("Access-Control-Request-Method") != ""
 }
 
-func authMiddleware(state *authState, lock *lockout) func(http.Handler) http.Handler {
+func authMiddleware(state *authState, lock *lockout, log *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// A CORS preflight can never be authenticated: browsers strip
@@ -197,13 +228,22 @@ func authMiddleware(state *authState, lock *lockout) func(http.Handler) http.Han
 					"too many failed attempts; try again shortly", nil)
 				return
 			}
-			if tok := connectionToken(r); mobilebridge.PasswordMatches(state.currentHash(), tok) {
+			tok := connectionToken(r)
+			if mobilebridge.PasswordMatches(state.currentHash(), tok) {
 				lock.reset(src)
 				maybeSetPreviewAuthCookie(w, r, tok)
 				next.ServeHTTP(w, r)
 				return
 			}
-			lock.fail(src)
+			// A tokenless request guesses nothing: 401 it, but don't let it consume
+			// lockout budget — the lockout throttles password guessing, and counting
+			// headerless traffic (an old web build's /mux retry loop, a stray probe)
+			// would 429 every request from that IP, including authenticated REST.
+			// The trip Warn is the only trace a lockout leaves: auth runs outside
+			// requestLogger, so these 401/429s never reach the access log.
+			if tok != "" && lock.fail(src) {
+				log.Warn("LAN auth lockout tripped", "src", src)
+			}
 			envelope.WriteAPIError(w, r, http.StatusUnauthorized, "unauthorized", "BAD_PASSWORD",
 				"missing or invalid connection password", nil)
 		})
