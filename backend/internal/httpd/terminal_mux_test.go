@@ -107,6 +107,32 @@ func TestMuxUpgradeStreamsTerminal(t *testing.T) {
 	readFrame(t, c, "terminal", "exited", 5*time.Second)
 }
 
+// A browser web client requests ["ao.auth", "ao.bearer.<pw>"] to carry the
+// connection token (see wsProtocolPrefix in auth.go) and fails the handshake
+// unless the server echoes a requested entry. Pin that the negotiated protocol
+// is the marker — and only ever the marker, never the credential entry.
+func TestMuxNegotiatesAuthSubprotocol(t *testing.T) {
+	mgr := terminal.NewManager(&stubSource{argv: []string{"/bin/sh"}}, nil, discardLogger())
+	defer mgr.Close()
+
+	router := newTestRouter(config.Config{}, discardLogger(), mgr)
+	ts := httptest.NewServer(router)
+	defer ts.Close()
+	url := "ws" + strings.TrimPrefix(ts.URL, "http") + "/mux"
+
+	c, _, err := websocket.Dial(context.Background(), url, &websocket.DialOptions{
+		Subprotocols: []string{"ao.auth", "ao.bearer.secret12"},
+	})
+	if err != nil {
+		t.Fatalf("dial /mux with subprotocols: %v", err)
+	}
+	defer func() { _ = c.Close(websocket.StatusNormalClosure, "test done") }()
+
+	if got := c.Subprotocol(); got != muxAuthSubprotocol {
+		t.Fatalf("negotiated subprotocol = %q, want %q", got, muxAuthSubprotocol)
+	}
+}
+
 func TestMuxSystemPingPong(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("PTY spawning not supported on Windows")
