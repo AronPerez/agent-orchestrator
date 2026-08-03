@@ -36,7 +36,13 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import { useEffect, useRef } from "react";
-import { theme } from "./theme";
+// Dark-only by design (see the Theme note above). Theming moved the palette
+// behind themeFor/terminalTheme(scheme); this surface pins the dark one rather
+// than following the app theme — wire it to useTheme/useThemeState if the web
+// target ever gains a light mode.
+import { darkTheme as theme, terminalTheme } from "./theme";
+
+const TERM = terminalTheme("dark");
 // Type-only import of the platform seam (WebTerminal.tsx). Erased at compile
 // time, so Metro never sees a runtime self-import from the web file; tsc
 // resolves the bare specifier to WebTerminal.tsx, keeping one contract.
@@ -65,9 +71,9 @@ function loadRenderer(term: Terminal): void {
 // xtermOptions in app/session/[id].tsx so both targets read identically.
 // The ANSI 16 stay xterm defaults; pane content is the agent's own output.
 const TERMINAL_THEME = {
-	background: theme.term,
-	foreground: theme.textPrimary,
-	cursor: theme.orange,
+	background: TERM.background,
+	foreground: TERM.foreground,
+	cursor: TERM.cursor,
 };
 
 const SUPPRESS_NATIVE_PASTE_MS = 100;
@@ -587,7 +593,7 @@ export function WebTerminal(props: WebTerminalProps) {
 				bottom: 0,
 				left: 0,
 				overflow: "hidden",
-				backgroundColor: theme.term,
+				backgroundColor: TERM.background,
 			}}
 		/>
 	);

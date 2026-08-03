@@ -1,9 +1,9 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
+	ApiError,
 	closePR as apiClosePR,
-	collectPRs,
-	getProjects,
+	getNotifications,
 	getSessions,
 	killSession,
 	launchOrchestrator as apiLaunchOrchestrator,
@@ -18,6 +18,8 @@ import {
 	type ProjectInfo,
 } from "./api";
 import { isConfigured, loadConfig, type ServerConfig } from "./config";
+import { shouldKeepPolling } from "./connectionError";
+import { collectPRs } from "./prView";
 
 const ACTIVE_PROJECT_KEY = "ao.activeProject";
 const PR_DENSITY_KEY = "ao.prDensity";
@@ -27,6 +29,17 @@ const POLL_INTERVAL_MS = 8000;
 // tracks its own terminal mux connection separately.
 export type ConnStatus = "closed" | "connecting" | "open";
 export type PRDensity = "cards" | "table";
+
+// An options object rather than four optional positionals: `spawn(a, b, c, d)`
+// with every argument optional and same-typed is where call-site mistakes live.
+export type SpawnOptions = {
+	/** Falls back to the active project, or the only project. */
+	projectId?: string;
+	prompt?: string;
+	/** The task name. Becomes the session's title — see sessionTitle. */
+	issueId?: string;
+	harness?: string;
+};
 
 type AppState = {
 	config: ServerConfig | null;
@@ -39,14 +52,18 @@ type AppState = {
 	activeProjectId: string; // 'all' or a projectId
 	prDensity: PRDensity;
 	connection: ConnStatus;
+	/** Unread notification count, for the board's bell badge. 0 when unknown. */
+	notificationsUnread: number;
 	loading: boolean;
 	error: string | null;
+	// HTTP status behind `error`, or null when the server was never reached.
+	errorStatus: number | null;
 	// actions
 	reloadConfig: () => Promise<void>;
 	refresh: () => Promise<void>;
 	setActiveProject: (id: string) => void;
 	setPRDensity: (density: PRDensity) => void;
-	spawn: (prompt?: string, projectId?: string, harness?: string) => Promise<DashboardSession>;
+	spawn: (opts: SpawnOptions) => Promise<DashboardSession>;
 	launchConductor: (projectId: string, clean?: boolean) => Promise<OrchestratorLink>;
 	merge: (pr: DashboardPR) => Promise<void>;
 	close: (pr: DashboardPR) => Promise<void>;
@@ -90,8 +107,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
 	const [activeProjectId, setActiveProjectId] = useState<string>("all");
 	const [prDensity, setPRDensityState] = useState<PRDensity>("cards");
 	const [connection, setConnection] = useState<ConnStatus>("closed");
+	const [notificationsUnread, setNotificationsUnread] = useState(0);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState<string | null>(null);
+	const [errorStatus, setErrorStatus] = useState<number | null>(null);
 
 	const cfgRef = useRef<ServerConfig | null>(null);
 
@@ -125,26 +144,46 @@ export function AppProvider({ children }: { children: ReactNode }) {
 		const c = cfgRef.current;
 		if (!c || !isConfigured(c)) {
 			setConnection("closed");
+			setNotificationsUnread(0);
 			setLoading(false);
 			return false;
 		}
 		try {
-			const [projs, sess] = await Promise.all([getProjects(c).catch(() => [] as ProjectInfo[]), getSessions(c, "all")]);
-			setProjects(projs);
+			// getSessions returns projects, so don't fetch /projects again alongside
+			// it — that duplicate doubled the auth attempts spent per failing tick.
+			const sess = await getSessions(c, "all");
+			setProjects(sess.projects);
 			setSessions(sess.sessions);
 			setOrchestrators(sess.orchestrators);
 			setOrchestratorId(sess.orchestratorId);
 			setStats(sess.stats);
 			setError(null);
+			setErrorStatus(null);
 			setConnection("open");
+			// Badge count for the board's bell. Deliberately after the session fetch
+			// and separately caught: an older daemon without /notifications must not
+			// knock the board offline. limit:1 because we only read unreadCount.
+			try {
+				const page = await getNotifications(c, { status: "unread", limit: 1 });
+				setNotificationsUnread(page.unreadCount);
+			} catch {
+				setNotificationsUnread(0);
+			}
 			return true;
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : "Failed to load";
 			setError(msg);
+			// Keep the HTTP status alongside the raw message so screens can render
+			// human copy via describeConnectionFailure instead of surfacing strings
+			// like "401 - missing or invalid connection password". Null means the
+			// server was never reached (DNS failure, refused, timeout).
+			const status = e instanceof ApiError ? e.status : undefined;
+			setErrorStatus(status ?? null);
 			setConnection("closed");
 			// Auth failures are not transient — don't keep polling into a lockout.
 			// Network/other errors are transient, so keep polling for recovery.
-			return !(msg.startsWith("401") || msg.startsWith("429"));
+			// Decided from the status, not the message text: see shouldKeepPolling.
+			return shouldKeepPolling(status);
 		} finally {
 			setLoading(false);
 		}
@@ -189,11 +228,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
 	}, [activeProjectId, projects]);
 
 	const spawn = useCallback(
-		async (prompt?: string, projectId?: string, harness?: string) => {
+		async ({ projectId, prompt, issueId, harness }: SpawnOptions) => {
 			const c = cfgRef.current;
 			const proj = projectId ?? targetProject();
 			if (!c || !proj) throw new Error("Pick a project first");
-			const session = await spawnSession(c, { projectId: proj, prompt, harness });
+			const session = await spawnSession(c, { projectId: proj, prompt, issueId, harness });
 			await fetchAll();
 			return session;
 		},
@@ -260,8 +299,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
 			activeProjectId,
 			prDensity,
 			connection,
+			notificationsUnread,
 			loading,
 			error,
+			errorStatus,
 			reloadConfig,
 			refresh: async () => {
 				await fetchAll();
@@ -286,8 +327,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
 			activeProjectId,
 			prDensity,
 			connection,
+			notificationsUnread,
 			loading,
 			error,
+			errorStatus,
 			reloadConfig,
 			fetchAll,
 			setActiveProject,

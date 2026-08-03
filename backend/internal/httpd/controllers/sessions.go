@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
@@ -21,7 +23,9 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	previewutil "github.com/aoagents/agent-orchestrator/backend/internal/preview"
+	"github.com/aoagents/agent-orchestrator/backend/internal/previewserver"
 	sessionsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/session"
+	"github.com/aoagents/agent-orchestrator/backend/internal/workspacewatch"
 )
 
 const (
@@ -76,6 +80,7 @@ type SessionService interface {
 	Send(ctx context.Context, id domain.SessionID, message string) error
 	ListPRSummaries(ctx context.Context, id domain.SessionID) ([]sessionsvc.PRSummary, error)
 	ClaimPR(ctx context.Context, id domain.SessionID, ref string, opts sessionsvc.ClaimPROptions) (sessionsvc.ClaimPRResult, error)
+	WorkspaceWatchPaths(ctx context.Context, id domain.SessionID) ([]string, error)
 	ListWorkspaceFiles(ctx context.Context, id domain.SessionID) (sessionsvc.WorkspaceFiles, error)
 	GetWorkspaceFile(ctx context.Context, id domain.SessionID, path string) (sessionsvc.WorkspaceFileDetail, error)
 }
@@ -89,11 +94,27 @@ type ActivityRecorder interface {
 	ApplyActivitySignal(ctx context.Context, id domain.SessionID, s ports.ActivitySignal) error
 }
 
+// ManagedPreviewServer is the deterministic server lifecycle attached to a
+// worker. It is separate from static file rendering and browser automation.
+type ManagedPreviewServer interface {
+	Start(ctx context.Context, sessionID domain.SessionID, workspacePath, configurationName string) (previewserver.Status, error)
+	Stop(ctx context.Context, sessionID domain.SessionID) (previewserver.Status, error)
+	Status(sessionID domain.SessionID) previewserver.Status
+}
+
+// SessionCapabilityValidator verifies the daemon-issued token injected only
+// into the owning worker session.
+type SessionCapabilityValidator interface {
+	Valid(sessionID domain.SessionID, token string) bool
+}
+
 // SessionsController owns the session routes. Nil keeps routes registered but
 // returns OpenAPI-backed 501s.
 type SessionsController struct {
-	Svc      SessionService
-	Activity ActivityRecorder
+	Svc           SessionService
+	Activity      ActivityRecorder
+	PreviewServer ManagedPreviewServer
+	Capabilities  SessionCapabilityValidator
 }
 
 // Register mounts the session routes on the supplied router.
@@ -105,6 +126,9 @@ func (c *SessionsController) Register(r chi.Router) {
 	r.Get("/sessions/{sessionId}/preview", c.preview)
 	r.Post("/sessions/{sessionId}/preview", c.setPreview)
 	r.Delete("/sessions/{sessionId}/preview", c.clearPreview)
+	r.Get("/sessions/{sessionId}/preview/server", c.previewServerStatus)
+	r.Post("/sessions/{sessionId}/preview/server", c.startPreviewServer)
+	r.Delete("/sessions/{sessionId}/preview/server", c.stopPreviewServer)
 	r.Get("/sessions/{sessionId}/preview/files/*", c.previewFile)
 	r.Get("/sessions/{sessionId}/workspace/files", c.listWorkspaceFiles)
 	r.Get("/sessions/{sessionId}/workspace/file", c.getWorkspaceFile)
@@ -121,6 +145,13 @@ func (c *SessionsController) Register(r chi.Router) {
 	r.Get("/orchestrators", c.listOrchestrators)
 	r.Post("/orchestrators", c.spawnOrchestrator)
 	r.Get("/orchestrators/{id}", c.getOrchestrator)
+}
+
+// RegisterStreams mounts long-lived session streams outside the REST timeout
+// middleware. Worktree notifications remain active only while a client is
+// actually viewing that session's files.
+func (c *SessionsController) RegisterStreams(r chi.Router) {
+	r.Get("/sessions/{sessionId}/workspace/events", c.streamWorkspaceChanges)
 }
 
 func (c *SessionsController) list(w http.ResponseWriter, r *http.Request) {
@@ -406,6 +437,58 @@ func (c *SessionsController) getWorkspaceFile(w http.ResponseWriter, r *http.Req
 	envelope.WriteJSON(w, http.StatusOK, workspaceFileResponse(file))
 }
 
+func (c *SessionsController) streamWorkspaceChanges(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "GET", "/api/v1/sessions/{sessionId}/workspace/events")
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		envelope.WriteAPIError(w, r, http.StatusInternalServerError, "internal", "SSE_UNSUPPORTED", "Streaming is not supported by this server", nil)
+		return
+	}
+	paths, err := c.Svc.WorkspaceWatchPaths(r.Context(), sessionID(r))
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	changes, err := workspacewatch.Watch(r.Context(), paths...)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+
+	h := w.Header()
+	h.Set("Content-Type", "text/event-stream; charset=utf-8")
+	h.Set("Cache-Control", "no-cache")
+	h.Set("Connection", "keep-alive")
+	h.Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	keepAlive := time.NewTicker(15 * time.Second)
+	defer keepAlive.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case _, ok := <-changes:
+			if !ok {
+				return
+			}
+			if _, err := fmt.Fprint(w, "event: workspace_changed\ndata: {}\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		case <-keepAlive.C:
+			if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}
+
 // setPreview persists the browser preview URL the desktop app opens for a
 // session and fans out a session_updated CDC event so the dashboard's browser
 // panel reacts live. The target is resolved as follows:
@@ -436,7 +519,9 @@ func (c *SessionsController) setPreview(w http.ResponseWriter, r *http.Request) 
 		envelope.WriteError(w, r, err)
 		return
 	}
-	// ponytail: no URL sanitization on preview target; agent-trusted for now
+	// Passive preview intentionally accepts an explicit external URL or an
+	// existing local file. Managed process execution uses the separately
+	// capability-protected /preview/server route.
 	previewURL := strings.TrimSpace(in.URL)
 	if previewURL == "" {
 		if entry, ok := discoverPreviewEntry(sess.Metadata.WorkspacePath); ok {
@@ -488,6 +573,166 @@ func (c *SessionsController) clearPreview(w http.ResponseWriter, r *http.Request
 		return
 	}
 	envelope.WriteJSON(w, http.StatusOK, SessionResponse{Session: sessionView(updated)})
+}
+
+func (c *SessionsController) previewServerStatus(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil || c.PreviewServer == nil || c.Capabilities == nil {
+		apispec.NotImplemented(w, r, http.MethodGet, "/api/v1/sessions/{sessionId}/preview/server")
+		return
+	}
+	if !c.authorizePreviewServer(w, r) {
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, previewServerStatusResponse(c.PreviewServer.Status(sessionID(r))))
+}
+
+func (c *SessionsController) startPreviewServer(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil || c.PreviewServer == nil || c.Capabilities == nil {
+		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/sessions/{sessionId}/preview/server")
+		return
+	}
+	var in StartPreviewServerRequest
+	if err := decodeJSON(r, &in); err != nil {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
+		return
+	}
+	if !c.authorizePreviewServer(w, r) {
+		return
+	}
+	sess, err := c.Svc.Get(r.Context(), sessionID(r))
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	previous := c.PreviewServer.Status(sessionID(r))
+	status, err := c.PreviewServer.Start(
+		r.Context(),
+		sessionID(r),
+		sess.Metadata.WorkspacePath,
+		strings.TrimSpace(in.Configuration),
+	)
+	if err != nil {
+		currentStatus := c.PreviewServer.Status(sessionID(r))
+		if previous.URL != "" &&
+			(currentStatus.State != previewserver.StateReady || currentStatus.URL != previous.URL) {
+			if current, getErr := c.Svc.Get(r.Context(), sessionID(r)); getErr == nil &&
+				current.Metadata.PreviewURL == previous.URL {
+				clearCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 2*time.Second)
+				_, _ = c.Svc.SetPreview(clearCtx, sessionID(r), "")
+				cancel()
+			}
+		}
+		writePreviewServerError(w, r, err)
+		return
+	}
+	if status.TargetKind == previewserver.TargetApp {
+		if _, err := c.Svc.SetPreview(r.Context(), sessionID(r), status.URL); err != nil {
+			_, _ = c.PreviewServer.Stop(context.Background(), sessionID(r))
+			envelope.WriteError(w, r, err)
+			return
+		}
+	}
+	envelope.WriteJSON(w, http.StatusOK, previewServerStatusResponse(status))
+}
+
+func (c *SessionsController) stopPreviewServer(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil || c.PreviewServer == nil || c.Capabilities == nil {
+		apispec.NotImplemented(w, r, http.MethodDelete, "/api/v1/sessions/{sessionId}/preview/server")
+		return
+	}
+	if !c.authorizePreviewServer(w, r) {
+		return
+	}
+	previous := c.PreviewServer.Status(sessionID(r))
+	status, err := c.PreviewServer.Stop(r.Context(), sessionID(r))
+	if err != nil {
+		writePreviewServerError(w, r, err)
+		return
+	}
+	current, getErr := c.Svc.Get(r.Context(), sessionID(r))
+	if getErr != nil {
+		envelope.WriteError(w, r, getErr)
+		return
+	}
+	if previous.URL != "" && current.Metadata.PreviewURL == previous.URL {
+		if _, err := c.Svc.SetPreview(r.Context(), sessionID(r), ""); err != nil {
+			envelope.WriteError(w, r, err)
+			return
+		}
+	}
+	envelope.WriteJSON(w, http.StatusOK, previewServerStatusResponse(status))
+}
+
+func (c *SessionsController) authorizePreviewServer(w http.ResponseWriter, r *http.Request) bool {
+	id := sessionID(r)
+	sess, err := c.Svc.Get(r.Context(), id)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return false
+	}
+	if sess.IsTerminated {
+		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict", "SESSION_TERMINATED", "Session is terminated", nil)
+		return false
+	}
+	if !c.Capabilities.Valid(id, strings.TrimSpace(r.Header.Get(browserCapabilityHeader))) {
+		envelope.WriteAPIError(
+			w,
+			r,
+			http.StatusForbidden,
+			"forbidden",
+			"PREVIEW_CAPABILITY_INVALID",
+			"Preview capability is invalid",
+			nil,
+		)
+		return false
+	}
+	return true
+}
+
+func previewServerStatusResponse(status previewserver.Status) PreviewServerStatusResponse {
+	logs := status.Logs
+	if logs == nil {
+		logs = []string{}
+	}
+	return PreviewServerStatusResponse{
+		SessionID:     status.SessionID,
+		State:         string(status.State),
+		Configuration: status.Configuration,
+		TargetKind:    string(status.TargetKind),
+		URL:           status.URL,
+		Port:          status.Port,
+		StartedAt:     status.StartedAt,
+		Error:         status.Error,
+		Logs:          logs,
+	}
+}
+
+func writePreviewServerError(w http.ResponseWriter, r *http.Request, err error) {
+	var serviceErr previewserver.Error
+	if !errors.As(err, &serviceErr) {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	status := http.StatusUnprocessableEntity
+	typeName := "unprocessable"
+	switch serviceErr.Code {
+	case "PREVIEW_CONFIG_NOT_FOUND", "PREVIEW_CONFIGURATION_NOT_FOUND":
+		status = http.StatusNotFound
+		typeName = "not_found"
+	case "PREVIEW_CONFIGURATION_REQUIRED":
+		status = http.StatusBadRequest
+		typeName = "bad_request"
+	case "PREVIEW_NOT_READY":
+		status = http.StatusGatewayTimeout
+		typeName = "timeout"
+	case "PREVIEW_START_CANCELED":
+		status = http.StatusRequestTimeout
+		typeName = "timeout"
+	case "PREVIEW_START_FAILED", "PREVIEW_EXITED", "PREVIEW_STOP_FAILED":
+		status = http.StatusInternalServerError
+		typeName = "internal_error"
+	}
+	envelope.WriteAPIError(w, r, status, typeName, serviceErr.Code, serviceErr.Message, nil)
 }
 
 func (c *SessionsController) listPRs(w http.ResponseWriter, r *http.Request) {
@@ -980,21 +1225,30 @@ func workspaceFilesResponse(files sessionsvc.WorkspaceFiles) ListWorkspaceFilesR
 	out := make([]WorkspaceFileSummary, 0, len(files.Files))
 	for _, file := range files.Files {
 		out = append(out, WorkspaceFileSummary{
-			Path:      file.Path,
-			Status:    file.Status,
-			Additions: file.Additions,
-			Deletions: file.Deletions,
-			Size:      file.Size,
-			Binary:    file.Binary,
+			Path:         file.Path,
+			PreviousPath: file.PreviousPath,
+			Status:       file.Status,
+			Additions:    file.Additions,
+			Deletions:    file.Deletions,
+			Size:         file.Size,
+			Binary:       file.Binary,
 		})
 	}
-	return ListWorkspaceFilesResponse{SessionID: files.SessionID, Files: out, Truncated: files.Truncated}
+	return ListWorkspaceFilesResponse{
+		SessionID:      files.SessionID,
+		CompareBaseSHA: files.CompareBaseSHA,
+		CompareBaseRef: files.CompareBaseRef,
+		CompareMode:    files.CompareMode,
+		Files:          out,
+		Truncated:      files.Truncated,
+	}
 }
 
 func workspaceFileResponse(file sessionsvc.WorkspaceFileDetail) WorkspaceFileResponse {
 	return WorkspaceFileResponse{
 		SessionID:        file.SessionID,
 		Path:             file.Path,
+		PreviousPath:     file.PreviousPath,
 		Status:           file.Status,
 		Additions:        file.Additions,
 		Deletions:        file.Deletions,
@@ -1005,6 +1259,9 @@ func workspaceFileResponse(file sessionsvc.WorkspaceFileDetail) WorkspaceFileRes
 		ContentTruncated: file.ContentTruncated,
 		Diff:             file.Diff,
 		DiffTruncated:    file.DiffTruncated,
+		CompareBaseSHA:   file.CompareBaseSHA,
+		CompareBaseRef:   file.CompareBaseRef,
+		CompareMode:      file.CompareMode,
 	}
 }
 

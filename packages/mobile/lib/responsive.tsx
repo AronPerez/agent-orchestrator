@@ -1,6 +1,9 @@
 import { Children, type ReactNode } from "react";
 import { ScrollView, StyleSheet, Text, useWindowDimensions, View, type StyleProp, type ViewStyle } from "react-native";
-import { theme } from "./theme";
+// Currently unused: upstream's rebuilt mobile shell replaced the wide layouts
+// that consumed these helpers, so the re-port onto useTheme/useThemedStyles is
+// still outstanding. Pinned to the dark palette until then.
+import { darkTheme as theme } from "./theme";
 import { Dot } from "./ui";
 
 export const WIDE_MIN = 768 as const;

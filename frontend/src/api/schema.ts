@@ -55,6 +55,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/browser/commands": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Execute a target-scoped command in a session's desktop browser */
+        post: operations["executeBrowserCommand"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/browser/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Check whether the desktop browser runtime is connected for a session */
+        get: operations["getBrowserStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/dev/import-projects": {
         parameters: {
             query?: never;
@@ -218,7 +252,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Mark all unread notifications read */
+        /** Mark notifications read */
         post: operations["markAllNotificationsRead"];
         delete?: never;
         options?: never;
@@ -591,6 +625,25 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{sessionId}/preview/server": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get the managed preview server status for a session */
+        get: operations["getSessionPreviewServer"];
+        put?: never;
+        /** Start a session-owned server from .ao/launch.json and open its application preview */
+        post: operations["startSessionPreviewServer"];
+        /** Stop the managed preview server for a session */
+        delete: operations["stopSessionPreviewServer"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{sessionId}/restore": {
         parameters: {
             query?: never;
@@ -727,6 +780,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{sessionId}/workspace/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Stream session workspace file changes */
+        get: operations["streamSessionWorkspaceChanges"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{sessionId}/workspace/file": {
         parameters: {
             query?: never;
@@ -847,6 +917,26 @@ export interface components {
             id: string;
             label: string;
         };
+        BrowserCommandRequest: {
+            action: string;
+            args?: {
+                [key: string]: unknown;
+            };
+            sessionId: string;
+        };
+        BrowserCommandResponse: {
+            action: string;
+            requestId: string;
+            result: unknown;
+            sessionId: string;
+        };
+        BrowserStatusResponse: {
+            connected: boolean;
+            /** Format: date-time */
+            connectedAt?: string;
+            sessionId: string;
+            transport: string;
+        };
         CancelReviewResponse: {
             reviewerHandleId: string;
             reviews: components["schemas"]["PRReviewState"][];
@@ -874,6 +964,9 @@ export interface components {
         ClosePRResponse: {
             ok: boolean;
             prNumber: number;
+        };
+        ContainerReapConfig: {
+            disabled?: boolean;
         };
         ControllersSessionView: {
             activity: components["schemas"]["DomainActivity"];
@@ -979,6 +1072,7 @@ export interface components {
             nextCursor?: string;
             notifications: components["schemas"]["NotificationResponse"][];
             unreadCount: number;
+            unresolvedCount: number;
         };
         ListProjectsResponse: {
             projects: components["schemas"]["ProjectSummary"][];
@@ -998,9 +1092,17 @@ export interface components {
             shellTerminals: components["schemas"]["ShellTerminalResponse"][];
         };
         ListWorkspaceFilesResponse: {
+            compareBaseRef?: string;
+            compareBaseSha?: string;
+            /** @enum {string} */
+            compareMode?: "base" | "head_fallback";
             files: components["schemas"]["WorkspaceFileSummary"][];
             sessionId: string;
             truncated: boolean;
+        };
+        MarkAllNotificationsReadRequest: {
+            /** @description Acknowledge exactly these notifications. Omit to acknowledge every unread notification; paginating clients should send the ids they actually rendered so later pages stay unread. */
+            ids?: string[];
         };
         MarkAllNotificationsReadResponse: {
             /** @description Deprecated compatibility field. Always empty so mark-all responses stay bounded. */
@@ -1040,8 +1142,13 @@ export interface components {
             id: string;
             prUrl: string;
             projectId: string;
+            /** Format: date-time */
+            resolvedAt?: null | string;
             sessionId: string;
-            /** @enum {string} */
+            /**
+             * @description Seen state. unread means the user has not opened the notification panel since it arrived.
+             * @enum {string}
+             */
             status: "unread" | "read";
             target: components["schemas"]["NotificationTarget"];
             title: string;
@@ -1075,6 +1182,20 @@ export interface components {
             targetSha: string;
             title: string;
         };
+        PreviewServerStatusResponse: {
+            configuration?: string;
+            error?: string;
+            logs: string[];
+            port?: number;
+            sessionId: string;
+            /** Format: date-time */
+            startedAt?: string;
+            /** @enum {string} */
+            state: "stopped" | "starting" | "ready" | "stopping" | "failed";
+            /** @enum {string} */
+            targetKind?: "app" | "api";
+            url?: string;
+        };
         ProbeAgentResponse: {
             agent: components["schemas"]["AgentInfo"];
             installed: boolean;
@@ -1096,6 +1217,7 @@ export interface components {
             agentConfig?: components["schemas"]["AgentConfig"];
             agentRules?: string;
             agentRulesFile?: string;
+            containerReap?: components["schemas"]["ContainerReapConfig"];
             defaultBranch?: string;
             env?: {
                 [key: string]: string;
@@ -1404,6 +1526,10 @@ export interface components {
             session: components["schemas"]["ControllersSessionView"];
             systemPromptBytes: number;
         };
+        StartPreviewServerRequest: {
+            /** @description Named preview configuration. Optional when exactly one configuration exists. */
+            configuration?: string;
+        };
         SubmitReviewInput: {
             /** @description Review body recorded by AO. Required for changes_requested. */
             body?: string;
@@ -1454,6 +1580,10 @@ export interface components {
         WorkspaceFileResponse: {
             additions: number;
             binary: boolean;
+            compareBaseRef?: string;
+            compareBaseSha?: string;
+            /** @enum {string} */
+            compareMode?: "base" | "head_fallback";
             content: string;
             contentTruncated: boolean;
             deleted: boolean;
@@ -1461,6 +1591,7 @@ export interface components {
             diff: string;
             diffTruncated: boolean;
             path: string;
+            previousPath?: string;
             sessionId: string;
             /** Format: int64 */
             size: number;
@@ -1472,6 +1603,7 @@ export interface components {
             binary: boolean;
             deletions: number;
             path: string;
+            previousPath?: string;
             /** Format: int64 */
             size: number;
             /** @enum {string} */
@@ -1599,6 +1731,167 @@ export interface operations {
             };
             /** @description Internal Server Error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    executeBrowserCommand: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Opaque browser capability injected into the owning AO worker. */
+                "X-AO-Browser-Capability"?: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BrowserCommandRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BrowserCommandResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getBrowserStatus: {
+        parameters: {
+            query?: {
+                /** @description AO session identifier. */
+                sessionId?: string;
+            };
+            header?: {
+                /** @description Opaque browser capability injected into the owning AO worker. */
+                "X-AO-Browser-Capability"?: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BrowserStatusResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1940,8 +2233,8 @@ export interface operations {
     listNotifications: {
         parameters: {
             query?: {
-                /** @description Notification status filter. Defaults to unread; all includes read history. */
-                status?: "unread" | "all";
+                /** @description Notification filter. Defaults to unread (unseen); unresolved returns notifications whose underlying issue is still open; all includes read history. */
+                status?: "unread" | "all" | "unresolved";
                 /** @description Maximum notifications to return. Defaults to 100. */
                 limit?: number;
                 /** @description Opaque cursor returned by the previous page. */
@@ -2061,7 +2354,11 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MarkAllNotificationsReadRequest"];
+            };
+        };
         responses: {
             /** @description OK */
             200: {
@@ -2070,6 +2367,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MarkAllNotificationsReadResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
                 };
             };
             /** @description Internal Server Error */
@@ -3593,6 +3899,259 @@ export interface operations {
             };
         };
     };
+    getSessionPreviewServer: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Opaque browser capability injected into the owning AO worker. */
+                "X-AO-Browser-Capability"?: string;
+            };
+            path: {
+                /** @description Session identifier, e.g. project-1. */
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PreviewServerStatusResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    startSessionPreviewServer: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Opaque browser capability injected into the owning AO worker. */
+                "X-AO-Browser-Capability"?: string;
+            };
+            path: {
+                /** @description Session identifier, e.g. project-1. */
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StartPreviewServerRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PreviewServerStatusResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Request Timeout */
+            408: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Gateway Timeout */
+            504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    stopSessionPreviewServer: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Opaque browser capability injected into the owning AO worker. */
+                "X-AO-Browser-Capability"?: string;
+            };
+            path: {
+                /** @description Session identifier, e.g. project-1. */
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PreviewServerStatusResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
     restoreSession: {
         parameters: {
             query?: never;
@@ -4019,6 +4578,56 @@ export interface operations {
             };
             /** @description Internal Server Error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    streamSessionWorkspaceChanges: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Session identifier, e.g. project-1. */
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": string;
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
                 headers: {
                     [name: string]: unknown;
                 };

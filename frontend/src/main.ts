@@ -29,9 +29,10 @@ import {
 import { listFeatureBuilds, getActiveFeatureBuild } from "./main/feature-builds";
 import { readUpdateSettings, type UpdateSettings, type UpdateStatus } from "./main/update-settings";
 import { readKeybindingOverrides, writeKeybindingOverrides } from "./main/keybinding-settings";
+import { readUiSettings, writeUiSettings, type UiSettings } from "./main/ui-settings";
 import { spawn, type ChildProcess } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, openSync } from "node:fs";
+import { randomBytes, randomUUID } from "node:crypto";
+import { closeSync, existsSync, openSync, readFileSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -42,6 +43,7 @@ import type { DaemonStatus } from "./shared/daemon-status";
 import { attachAppShortcuts } from "./main/app-shortcuts";
 import {
 	KEYBOARD_SHORTCUTS_HELP_CHANNEL,
+	SET_CLOSE_SHELL_TERMINAL_SHORTCUT_ENABLED_CHANNEL,
 	type KeybindingOverrides,
 } from "./shared/shortcuts";
 import {
@@ -57,11 +59,12 @@ import { DEFAULT_POSTHOG_HOST, DEFAULT_POSTHOG_PROJECT_KEY } from "./shared/post
 import { buildTelemetryBootstrap } from "./shared/telemetry";
 import { createBrowserViewHost, type BrowserViewHost } from "./main/browser-view-host";
 import { connectSupervisor, type SupervisorLinkHandle } from "./main/supervisor-link";
+import { connectBrowserRuntime, type BrowserRuntimeLinkHandle } from "./main/browser-runtime-link";
 import { keepDaemonAlive, shouldLinkOnAttach } from "./main/daemon-owner";
 import { readMigrationState, updateMigration, writeAppStateMarker, type MigrationState } from "./main/app-state";
 import { isAllowedAppExternalURL, openAllowedAppExternalURL } from "./main/external-open";
 import { buildWindowsAppMenuTemplate } from "./main/menu";
-import { scanImportFolder } from "./main/import-folder-scan";
+import { ancestorRepositorySetupWarning, scanImportFolder } from "./main/import-folder-scan";
 
 // Globals injected at compile time by @electron-forge/plugin-vite.
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string | undefined;
@@ -102,7 +105,14 @@ if (process.platform === "win32") {
 // inside ~/.ao alongside the daemon's data dir and running.json. sessionData and
 // crashDumps derive from userData, so this one override reparents them all.
 // Must run before app ready.
-app.setPath("userData", path.join(os.homedir(), ".ao", "electron"));
+// Dev runs get their own profile under the same ~/.ao root: the packaged app
+// keeps this directory open, and two Chromium instances sharing one profile
+// corrupt its LevelDB stores. Mirrors how dev already isolates running.json and
+// the daemon data dir into ~/.ao/dev.
+app.setPath(
+	"userData",
+	app.isPackaged ? path.join(os.homedir(), ".ao", "electron") : path.join(os.homedir(), ".ao", "dev", "electron"),
+);
 
 let mainWindow: BrowserWindow | null = null;
 let daemonProcess: ChildProcess | null = null;
@@ -113,8 +123,10 @@ let daemonStartEpoch = 0;
 let daemonStatus: DaemonStatus = { state: "stopped" };
 let daemonOutput = "";
 let browserViewHost: BrowserViewHost | null = null;
+let browserRuntimeLink: BrowserRuntimeLinkHandle | null = null;
 let keybindingOverrides: KeybindingOverrides = {};
 let keybindingRecordingActive = false;
+let closeShellTerminalShortcutEnabled = false;
 // Held for the app lifetime. Dropping it (on any exit) triggers daemon self-stop.
 let supervisorLink: SupervisorLinkHandle | null = null;
 
@@ -127,9 +139,10 @@ const isDev = !app.isPackaged;
 const DEV_DAEMON_PORT = 3002;
 const DEV_STATE_SUBDIR = "dev"; // ~/.ao/dev/
 
-// Height (px) of the custom Windows title bar. Must stay in sync with the Window
-// Controls Overlay height passed to BrowserWindow and the .window-titlebar height
-// in styles.css, so the native min/max/close buttons line up with the app's bar.
+// Height (px) of the custom Windows title bar. Must stay in sync with
+// --size-window-titlebar (tokens.css) and .window-titlebar, plus the Window
+// Controls Overlay height passed to BrowserWindow, so the native min/max/close
+// buttons line up with the app's bar.
 const TITLEBAR_HEIGHT = 36;
 // Traffic lights stay fixed across sidebar expand/collapse. Y matches the
 // natural macOS titlebar band (TitlebarNav is h-traffic-light-clearance).
@@ -221,6 +234,9 @@ function applyRuntimeAppIcon(): void {
 function setDaemonStatus(nextStatus: DaemonStatus): void {
 	daemonStatus = nextStatus;
 	mainWindow?.webContents.send("daemon:status", daemonStatus);
+	if (nextStatus.state === "ready" && browserViewHost) {
+		establishBrowserRuntimeLink();
+	}
 }
 
 const MAX_DAEMON_OUTPUT_CHARS = 12_000;
@@ -311,6 +327,7 @@ function createWindow(): void {
 		false,
 		() => keybindingOverrides,
 		() => keybindingRecordingActive,
+		(id) => id !== "close-shell-terminal" || closeShellTerminalShortcutEnabled,
 	);
 
 	browserViewHost = createBrowserViewHost({
@@ -319,11 +336,13 @@ function createWindow(): void {
 		shell,
 		WebContentsView,
 		annotatePreloadPath: annotatePreloadPath(),
-		rendererOrigin: RENDERER_ORIGIN,
+		rendererOrigin: new URL(rendererUrl()).origin,
 		isMac,
 		getKeybindingOverrides: () => keybindingOverrides,
 		isKeybindingRecording: () => keybindingRecordingActive,
+		isCloseShellTerminalShortcutEnabled: () => closeShellTerminalShortcutEnabled,
 	});
+	if (daemonStatus.state === "ready") establishBrowserRuntimeLink();
 
 	void mainWindow.loadURL(rendererUrl());
 
@@ -350,6 +369,8 @@ function createWindow(): void {
 	});
 
 	mainWindow.on("closed", () => {
+		browserRuntimeLink?.dispose();
+		browserRuntimeLink = null;
 		keybindingRecordingActive = false;
 		browserViewHost?.dispose();
 		browserViewHost = null;
@@ -388,12 +409,25 @@ let shellEnvPromise: Promise<void> | null = null;
 
 // Telemetry defaults stamped on the daemon env on every platform; explicit env
 // always wins.
+//
+// Unpackaged builds keep local event recording but never export to PostHog: a
+// dev loop or a CI job driving the real app would otherwise bill production
+// events and inflate install/DAU counts. Set AO_TELEMETRY_REMOTE explicitly to
+// exercise the export path from a dev build.
 function telemetryOverrides(): Record<string, string> {
 	return {
 		AO_TELEMETRY_EVENTS: process.env.AO_TELEMETRY_EVENTS ?? "on",
-		AO_TELEMETRY_REMOTE: process.env.AO_TELEMETRY_REMOTE ?? "posthog",
+		AO_TELEMETRY_REMOTE: process.env.AO_TELEMETRY_REMOTE ?? (isDev ? "off" : "posthog"),
 		AO_TELEMETRY_POSTHOG_KEY: process.env.AO_TELEMETRY_POSTHOG_KEY ?? DEFAULT_POSTHOG_PROJECT_KEY,
 		AO_TELEMETRY_POSTHOG_HOST: process.env.AO_TELEMETRY_POSTHOG_HOST ?? DEFAULT_POSTHOG_HOST,
+		// The daemon binary has no version of its own that release tooling sets,
+		// so without this every daemon event lands unattributable to a release.
+		AO_TELEMETRY_APP_VERSION: process.env.AO_TELEMETRY_APP_VERSION ?? app.getVersion(),
+		// Kill switch: forwarded so a noisy stream can be silenced by env on an
+		// install that already exists, without shipping a new build.
+		...(process.env.AO_TELEMETRY_DISABLED_EVENTS
+			? { AO_TELEMETRY_DISABLED_EVENTS: process.env.AO_TELEMETRY_DISABLED_EVENTS }
+			: {}),
 	};
 }
 
@@ -455,6 +489,7 @@ function ensureShellEnv(): Promise<void> {
 // (including supervisor restarts) reports the same run. An explicit
 // AO_APP_RUN_ID in the environment wins, which lets a test or a wrapper pin it.
 const appRunId = process.env.AO_APP_RUN_ID ?? `apprun-${randomUUID()}`;
+const browserRuntimeToken = randomBytes(32).toString("base64url");
 
 function daemonEnv(): NodeJS.ProcessEnv {
 	// AO_OWNER is the daemon's durable spawn-mode record: the daemon writes it
@@ -470,7 +505,11 @@ function daemonEnv(): NodeJS.ProcessEnv {
 	// is how the daemon recognises the previous run's shells as orphans and
 	// destroys them (see internal/service/shellterm).
 	const AO_OWNER = keepDaemonAlive(process.env) ? "persistent" : "app";
-	const ownerTag = { AO_OWNER, AO_APP_RUN_ID: appRunId };
+	const ownerTag = {
+		AO_OWNER,
+		AO_APP_RUN_ID: appRunId,
+		AO_BROWSER_RUNTIME_TOKEN: browserRuntimeToken,
+	};
 	// In dev mode, inject isolation defaults so the dev daemon never collides with
 	// the installed app. User-set env vars take priority (checked first).
 	const devExtras: Record<string, string> = {};
@@ -579,6 +618,41 @@ function supervisorPipeFromRunFile(rfp: string | null): string {
 	const dir = path.basename(path.dirname(rfp));
 	if (dir === ".ao" || dir === "." || dir === "") return "\\\\.\\pipe\\ao-supervise";
 	return "\\\\.\\pipe\\ao-supervise-" + dir.replace(/[^a-zA-Z0-9-]/g, "-");
+}
+
+function establishBrowserRuntimeLink(): void {
+	if (!browserViewHost || browserRuntimeLink) return;
+	const rfp = runFilePath();
+	if (!rfp) {
+		console.warn("AO: browser runtime link skipped; run-file path unavailable");
+		return;
+	}
+	let runInfo: ReturnType<typeof parseRunFile> = null;
+	try {
+		runInfo = parseRunFile(readFileSync(rfp, "utf8"));
+	} catch {
+		// Daemon readiness will retry this after running.json becomes readable.
+	}
+	const address = runInfo?.browserRuntimeAddress;
+	if (!address) {
+		console.warn("AO: browser runtime link skipped; daemon did not publish an address");
+		return;
+	}
+	let token = browserRuntimeToken;
+	token = runInfo?.browserRuntimeToken ?? token;
+	browserRuntimeLink = connectBrowserRuntime(address, {
+		token,
+		execute: (command, signal) => {
+			const host = browserViewHost;
+			if (!host) {
+				throw Object.assign(new Error("Browser target owner is unavailable"), {
+					code: "BROWSER_TARGET_UNAVAILABLE",
+				});
+			}
+			return host.execute(command.sessionId, command.action, command.args, signal);
+		},
+		log: (message) => console.log(`AO: ${message}`),
+	});
 }
 
 function establishSupervisorLink(): void {
@@ -1091,6 +1165,8 @@ function stopDaemon(): DaemonStatus {
 	// A later daemon:start re-establishes the link via reportBoundPort.
 	supervisorLink?.dispose();
 	supervisorLink = null;
+	browserRuntimeLink?.dispose();
+	browserRuntimeLink = null;
 	killDaemon(daemonProcess);
 	setDaemonStatus({ state: "stopped" });
 	return daemonStatus;
@@ -1194,6 +1270,10 @@ ipcMain.handle("theme:set", (_event, preference: "light" | "dark" | "system") =>
 // Renderer calls this when focus lands on real shell UI (not the titlebar menu), so menu:action's panel fallback below doesn't go stale.
 ipcMain.on("shell:focus", () => browserViewHost?.forgetLastFocusedPanel());
 
+ipcMain.on(SET_CLOSE_SHELL_TERMINAL_SHORTCUT_ENABLED_CHANNEL, (_event, enabled: unknown) => {
+	closeShellTerminalShortcutEnabled = enabled === true;
+});
+
 // Backs the custom title-bar menu (WindowTitlebar). Each item maps to the same
 // action the native default menu would have performed.
 ipcMain.handle("menu:action", (_event, action: string) => {
@@ -1252,7 +1332,7 @@ ipcMain.handle("menu:action", (_event, action: string) => {
 	}
 });
 ipcMain.handle("telemetry:getBootstrap", () =>
-	buildTelemetryBootstrap(process.env, app.getVersion(), process.platform),
+	buildTelemetryBootstrap(process.env, app.getVersion(), process.platform, os.homedir(), app.isPackaged),
 );
 async function chooseDirectory(title: string): Promise<string | null> {
 	const options: OpenDialogOptions = {
@@ -1275,6 +1355,10 @@ ipcMain.handle("app:chooseDirectory", async (_event, title?: string) => {
 ipcMain.handle("app:scanImportFolder", async (_event, input: { path: string; mode: "project" | "workspace" }) => {
 	await ensureShellEnv();
 	return scanImportFolder(input.path, input.mode, { env: daemonEnv(), homeDir: os.homedir() });
+});
+ipcMain.handle("app:checkAncestorRepo", async (_event, path: string) => {
+	await ensureShellEnv();
+	return ancestorRepositorySetupWarning(path, { env: daemonEnv(), homeDir: os.homedir() });
 });
 ipcMain.handle("clipboard:writeText", (_event, text: string) => {
 	clipboard.writeText(text, "clipboard");
@@ -1318,6 +1402,17 @@ ipcMain.handle("updateSettings:set", async (_event, settings: UpdateSettings) =>
 	const runFile = runFilePath();
 	if (!runFile) return;
 	await setUpdateSettings(path.dirname(runFile), settings);
+});
+
+ipcMain.handle("uiSettings:get", async (): Promise<UiSettings> => {
+	const runFile = runFilePath();
+	if (!runFile) return { locale: "en" };
+	return readUiSettings(path.dirname(runFile));
+});
+ipcMain.handle("uiSettings:set", async (_event, settings: UiSettings): Promise<UiSettings> => {
+	const runFile = runFilePath();
+	if (!runFile) return { locale: settings?.locale === "zh-CN" ? "zh-CN" : "en" };
+	return writeUiSettings(path.dirname(runFile), settings);
 });
 
 ipcMain.handle("keybindings:get", (): KeybindingOverrides => keybindingOverrides);
@@ -1484,6 +1579,8 @@ app.whenReady().then(async () => {
 // The supervisorLink fd is NOT explicitly closed on quit; the OS closes it when
 // the process exits for any reason (Cmd+Q, crash, SIGKILL). Sessions survive.
 app.on("before-quit", () => {
+	browserRuntimeLink?.dispose();
+	browserRuntimeLink = null;
 	browserViewHost?.dispose();
 	browserViewHost = null;
 });
