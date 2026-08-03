@@ -103,6 +103,73 @@ func TestAuthLockoutAfterFive(t *testing.T) {
 	}
 }
 
+// preflight builds the OPTIONS request a browser sends before a cross-origin
+// request that carries an Authorization header. Browsers strip credentials from
+// it, so it deliberately has no Authorization of its own.
+func preflight() *http.Request {
+	r := httptest.NewRequest(http.MethodOptions, "/api/v1/sessions", nil)
+	r.RemoteAddr = "192.168.1.50:5555"
+	r.Header.Set("Origin", "http://192.168.1.250:8081")
+	r.Header.Set("Access-Control-Request-Method", "GET")
+	r.Header.Set("Access-Control-Request-Headers", "authorization")
+	return r
+}
+
+// A CORS preflight arrives without credentials by design. Rejecting it makes the
+// browser report an opaque "CORS error" and never send the real request, so a
+// cross-origin client can never connect no matter what password it holds.
+func TestAuthPassesCORSPreflight(t *testing.T) {
+	h, _ := newAuthUnderTest("secret12", time.Now)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, preflight())
+	if w.Code != http.StatusOK {
+		t.Fatalf("preflight: got %d want 200 (passed through to corsMiddleware)", w.Code)
+	}
+}
+
+// Counting preflights as failed attempts locks out a client holding the CORRECT
+// password: a browser issues one per cross-origin request, so it trips the
+// 5-failure lockout on its own before any authenticated request goes through.
+func TestAuthPreflightDoesNotCountTowardLockout(t *testing.T) {
+	now := time.Now()
+	h, _ := newAuthUnderTest("secret12", func() time.Time { return now })
+	for i := 0; i < 10; i++ {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, preflight())
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req("Bearer secret12"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("after 10 preflights: got %d want 200 (preflights must not consume lockout budget)", w.Code)
+	}
+}
+
+// The exemption keys on the full preflight shape. A bare OPTIONS — no Origin, no
+// Access-Control-Request-Method — is a normal request corsMiddleware would pass
+// to a route handler, so it must still be authenticated or this is an auth bypass.
+func TestAuthStillGuardsNonPreflightOptions(t *testing.T) {
+	h, _ := newAuthUnderTest("secret12", time.Now)
+	for _, tc := range []struct {
+		name    string
+		headers map[string]string
+	}{
+		{"bare OPTIONS", nil},
+		{"OPTIONS with Origin only", map[string]string{"Origin": "http://192.168.1.250:8081"}},
+		{"OPTIONS with ACRM only", map[string]string{"Access-Control-Request-Method": "GET"}},
+	} {
+		r := httptest.NewRequest(http.MethodOptions, "/api/v1/sessions", nil)
+		r.RemoteAddr = "192.168.1.50:5555"
+		for k, v := range tc.headers {
+			r.Header.Set(k, v)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("%s: got %d want 401 (must not bypass auth)", tc.name, w.Code)
+		}
+	}
+}
+
 // reqPathCookie builds a request to an arbitrary path, optionally carrying the
 // Bearer header and/or the preview auth cookie, for the preview-cookie tests.
 func reqPathCookie(method, path, auth, cookie string) *http.Request {
