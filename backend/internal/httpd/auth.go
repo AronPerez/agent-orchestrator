@@ -160,9 +160,37 @@ func maybeSetPreviewAuthCookie(w http.ResponseWriter, r *http.Request, tok strin
 	})
 }
 
+// isCORSPreflight reports whether r is a CORS preflight: an OPTIONS request
+// bearing both an Origin and the Access-Control-Request-Method header. This is
+// the same shape corsMiddleware answers itself (see cors.go), so anything
+// matching here terminates there and never reaches a route handler.
+func isCORSPreflight(r *http.Request) bool {
+	return r.Method == http.MethodOptions &&
+		r.Header.Get("Origin") != "" &&
+		r.Header.Get("Access-Control-Request-Method") != ""
+}
+
 func authMiddleware(state *authState, lock *lockout) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// A CORS preflight can never be authenticated: browsers strip
+			// credentials from it, so it arrives with no Authorization header by
+			// design. Rejecting it 401s the preflight, the browser reports an
+			// opaque "CORS error", and the real request is never sent — so every
+			// cross-origin browser client (the Expo web build reaching the LAN
+			// listener from another machine) is locked out regardless of password.
+			// Worse, counting it as a failed attempt means `limit` preflights trip
+			// the per-source lockout for a client holding the CORRECT password.
+			//
+			// Pass it through to corsMiddleware, which answers it with 204 and no
+			// body, or 403 when the Origin is not allowlisted. Requiring BOTH
+			// preflight headers is what keeps this from becoming an auth bypass:
+			// corsMiddleware handles every request matching this shape itself and
+			// never calls a route handler, so no side effect can run unauthenticated.
+			if isCORSPreflight(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
 			src := sourceKey(r)
 			if lock.blocked(src) {
 				envelope.WriteAPIError(w, r, http.StatusTooManyRequests, "too_many_requests", "LOCKED_OUT",
