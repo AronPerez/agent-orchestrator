@@ -599,7 +599,7 @@ export default function TerminalScreen() {
 	const previewWebRef = useRef<WebView>(null);
 	const webIframeRef = useRef<HTMLIFrameElement | null>(null);
 
-	const { sessions, orchestrators, restore } = useApp();
+	const { sessions, orchestrators, restore, config } = useApp();
 	const known = sessions.find((s) => s.id === id) ?? orchestrators.find((o) => o.id === id) ?? null;
 	const dead = notFound || (known ? isTerminalStatus(known.status) : false);
 	// What counts as a live preview: any file the daemon surfaces (an .html build, or
@@ -792,6 +792,15 @@ export default function TerminalScreen() {
 			if (timer) clearTimeout(timer);
 		};
 	}, [cfg, id]);
+
+	// Switching to another node while a terminal is open: this session id belongs
+	// to the daemon we just left and does not exist on the new one, so the screen
+	// can only sit there failing to attach. Pop back to the board instead. `cfg`
+	// is the node this screen connected to; `config` is the app's active one.
+	useEffect(() => {
+		if (!cfg || !config || !isConfigured(cfg)) return;
+		if (config.host !== cfg.host || config.httpPort !== cfg.httpPort) leave();
+	}, [cfg, config, leave]);
 
 	// The WebView reports the phone's NATURAL fit (proposeDimensions, measure-only).
 	// We forward it to the daemon as this client's requested size — used only when

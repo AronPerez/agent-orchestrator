@@ -88,6 +88,10 @@ export default function PairScreen() {
 			host: parsed.host,
 			httpPort: parsed.port,
 			password: parsed.password || cfg.password,
+			// A QR code carries no name, and the active node's name must not follow a
+			// scan onto a different machine. Blank lets saveConfig keep this node's
+			// own name, or fall back to its host.
+			label: "",
 		});
 	}
 

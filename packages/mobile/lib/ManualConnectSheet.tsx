@@ -30,8 +30,13 @@ export function ManualConnectSheet({ onConnected }: { onConnected: () => void })
 	// Load whatever is already saved when the sheet opens, so a user who closes it
 	// to re-try the scanner doesn't lose what they typed. Mount is the open now
 	// that this is a route rather than an always-rendered component.
+	//
+	// The name is deliberately NOT prefilled: this same sheet also adds a *new*
+	// node, and carrying the active node's name onto a different host is how you
+	// end up with two "Studio"s. Blank means "keep the existing name, or use the
+	// host" — saveConfig decides.
 	useEffect(() => {
-		loadConfig().then(setCfg);
+		loadConfig().then((c) => setCfg({ ...c, label: "" }));
 	}, []);
 
 	const set = (k: keyof ServerConfig) => (v: string) => setCfg((prev) => ({ ...prev, [k]: v }));
@@ -76,6 +81,15 @@ export function ManualConnectSheet({ onConnected }: { onConnected: () => void })
 				autoCapitalize="none"
 				autoCorrect={false}
 				keyboardType="url"
+			/>
+			{/* Ten nodes of raw Tailscale IPs are unreadable in a list, so a node can
+			    carry a human name. Optional — the host is the fallback. */}
+			<Field
+				label="NAME"
+				value={cfg.label ?? ""}
+				onChangeText={set("label")}
+				placeholder={cfg.host.trim() || "Optional — defaults to the host"}
+				autoCorrect={false}
 			/>
 			<Field label="API PORT" value={cfg.httpPort} onChangeText={set("httpPort")} keyboardType="number-pad" />
 			<Field
