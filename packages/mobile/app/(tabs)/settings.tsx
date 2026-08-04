@@ -1,16 +1,26 @@
+import { Feather } from "@expo/vector-icons";
 import Constants from "expo-constants";
 import { useFocusEffect, useRouter } from "expo-router";
 import { useCallback, useEffect, useState } from "react";
-import { ActivityIndicator, Alert, Platform, ScrollView, StyleSheet, View } from "react-native";
+import { ActivityIndicator, Alert, Platform, Pressable, ScrollView, StyleSheet, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { ApiError, pingServer } from "../../lib/api";
 import { bugReportBody, formatVersion, type BuildInfo } from "../../lib/appInfo";
-import { DEFAULT_CONFIG, isConfigured, loadConfig, type ServerConfig } from "../../lib/config";
+import {
+	DEFAULT_CONFIG,
+	isConfigured,
+	listServers,
+	loadConfig,
+	removeServer,
+	switchServer,
+	type ServerConfig,
+	type ServerEntry,
+} from "../../lib/config";
 import { classifyConnectionFailure, describeConnectionFailure } from "../../lib/connectionError";
 import { forgetServer } from "../../lib/disconnect";
 import type { Theme } from "../../lib/theme";
 import { haptics } from "../../lib/haptics";
-import { projectSheetRoute } from "../../lib/sheetResult";
+import { connectSheetRoute, projectSheetRoute } from "../../lib/sheetResult";
 import { preferenceLabel } from "../../lib/themePreference";
 import { getPushStatus, openNotificationSettings, registerForPush, unregisterFromPush } from "../../lib/push";
 import { describePushToggle, describeRegisterFailure, type PushStatus } from "../../lib/pushStatus";
@@ -31,20 +41,38 @@ export default function SettingsScreen() {
 	const scrollRef = useTabScrollToTop<ScrollView>();
 
 	const [cfg, setCfg] = useState<ServerConfig>(DEFAULT_CONFIG);
+	const [servers, setServers] = useState<ServerEntry[]>([]);
+	const [activeId, setActiveId] = useState<string | null>(null);
 	const [loaded, setLoaded] = useState(false);
 	const { preference } = useThemeState();
+
+	const refresh = useCallback(async () => {
+		const [c, list] = await Promise.all([loadConfig(), listServers()]);
+		setCfg(c);
+		setServers(list.servers);
+		setActiveId(list.activeId);
+		setLoaded(true);
+	}, []);
 
 	// Reload the saved config every time the screen regains focus — not just on
 	// mount — so returning from the pairing flow (which writes host/port to
 	// storage then navigates back here) repaints the rows with the new values.
 	useFocusEffect(
 		useCallback(() => {
-			loadConfig().then((c) => {
-				setCfg(c);
-				setLoaded(true);
-			});
-		}, []),
+			void refresh();
+		}, [refresh]),
 	);
+
+	// Switching nodes swaps the whole world behind the app: the store restarts its
+	// poll off the new config, and push re-registers itself (registerForPush
+	// unregisters the daemon it was last pointed at). Project ids are per-node, so
+	// the saved filter has to go back to "all" or the board filters on an id the
+	// new node has never heard of.
+	const applyActiveChange = useCallback(async () => {
+		setActiveProject("all");
+		await reloadConfig();
+		await refresh();
+	}, [reloadConfig, refresh, setActiveProject]);
 
 	if (!loaded) {
 		return (
@@ -67,6 +95,28 @@ export default function SettingsScreen() {
 				keyboardShouldPersistTaps="handled"
 			>
 				<ConnectionSection cfg={cfg} paired={paired} connection={connection} />
+
+				<ServersSection
+					servers={servers}
+					activeId={activeId}
+					onSwitch={async (id) => {
+						await switchServer(id);
+						await applyActiveChange();
+					}}
+					onRemove={async (entry) => {
+						// Removing the node we're on is a disconnect: forgetServer is the
+						// path that also unregisters this device from that daemon's push,
+						// and clearConfig promotes whatever node is left.
+						if (entry.id === activeId) {
+							await forgetServer();
+							await applyActiveChange();
+							return;
+						}
+						await removeServer(entry.id);
+						await refresh();
+					}}
+					onAdd={() => router.push(connectSheetRoute(() => void applyActiveChange()))}
+				/>
 
 				<SettingsGroup title="Projects" footer="Scopes the Agents and PRs tabs.">
 					<SettingsRow
@@ -103,12 +153,109 @@ export default function SettingsScreen() {
 				<AboutSection
 					onForget={async () => {
 						await forgetServer();
-						await reloadConfig();
-						router.replace("/onboarding");
+						await applyActiveChange();
+						// Forgetting the active node promotes the next one, so only an app
+						// left with no nodes at all belongs back in onboarding.
+						if (!isConfigured(await loadConfig())) router.replace("/onboarding");
 					}}
 				/>
 			</ScrollView>
 		</View>
+	);
+}
+
+// The node switcher. One `ao` runs per machine, so a user with ten of them needs
+// to say which one the app is looking at — and nothing else in the app has to
+// know: switching rewrites the active config and the store repolls off it.
+//
+// Settings-only by decision: a header switcher would put a destructive-feeling
+// context swap one stray tap from the board.
+function ServersSection({
+	servers,
+	activeId,
+	onSwitch,
+	onRemove,
+	onAdd,
+}: {
+	servers: ServerEntry[];
+	activeId: string | null;
+	onSwitch: (id: string) => Promise<void>;
+	onRemove: (entry: ServerEntry) => Promise<void>;
+	onAdd: () => void;
+}) {
+	const t = useTheme();
+	const styles = useThemedStyles(makeStyles);
+	const [busy, setBusy] = useState<string | null>(null);
+
+	// Nothing saved yet means an unpaired app, where the Connection row above is
+	// already the way in — a second empty list would just be noise.
+	if (servers.length === 0) return null;
+
+	function confirmRemove(entry: ServerEntry) {
+		const active = entry.id === activeId;
+		Alert.alert(
+			`Remove ${entry.label}?`,
+			active
+				? "This device will stop receiving notifications from it, and its saved address and password will be removed."
+				: "Its saved address and password will be removed from this device.",
+			[
+				{ text: "Cancel", style: "cancel" },
+				{
+					text: "Remove",
+					style: "destructive",
+					onPress: async () => {
+						setBusy(entry.id);
+						try {
+							await onRemove(entry);
+						} finally {
+							setBusy(null);
+						}
+					},
+				},
+			],
+		);
+	}
+
+	return (
+		<SettingsGroup title="Servers" footer="Each node runs its own ao. Tap one to switch the app to it.">
+			{servers.map((s) => (
+				<SettingsRow
+					key={s.id}
+					icon="server"
+					label={`${s.label} · ${s.host}:${s.httpPort}`}
+					loading={busy === s.id}
+					disabled={!!busy}
+					onPress={async () => {
+						if (s.id === activeId) return;
+						setBusy(s.id);
+						try {
+							await onSwitch(s.id);
+						} finally {
+							setBusy(null);
+						}
+					}}
+					right={
+						busy === s.id ? (
+							<ActivityIndicator size="small" color={t.textTertiary} />
+						) : (
+							<View style={styles.serverActions}>
+								{s.id === activeId ? <Feather name="check" size={17} color={t.blue} /> : null}
+								<Pressable
+									hitSlop={10}
+									accessibilityRole="button"
+									accessibilityLabel={`Remove ${s.label}`}
+									onPress={() => confirmRemove(s)}
+									style={({ pressed }) => pressed && { opacity: 0.6 }}
+								>
+									<Feather name="trash-2" size={16} color={t.red} />
+								</Pressable>
+							</View>
+						)
+					}
+				/>
+			))}
+			<SettingsRow icon="plus" label="Add server" disabled={!!busy} onPress={onAdd} />
+		</SettingsGroup>
 	);
 }
 
@@ -317,4 +464,5 @@ const makeStyles = (t: Theme) =>
 	StyleSheet.create({
 	screen: { flex: 1, backgroundColor: t.bgBase },
 	center: { flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: t.bgBase },
+	serverActions: { flexDirection: "row", alignItems: "center", gap: 14 },
 });
