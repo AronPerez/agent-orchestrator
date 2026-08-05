@@ -2,8 +2,9 @@ package pr
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -11,162 +12,220 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
-// ActionManager is the controller-facing contract for /prs/{id} action routes.
-type ActionManager interface {
-	Merge(ctx context.Context, prID string) (MergeResult, error)
-	Close(ctx context.Context, prID string) (CloseResult, error)
-	ResolveComments(ctx context.Context, prID string, commentIDs []string) (ResolveResult, error)
-}
+var (
+	prNumberPattern = regexp.MustCompile(`^[1-9]\d*$`)
+	gitSHAPattern   = regexp.MustCompile(`^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$`)
+)
 
-// Lookup resolves the API's PR-number path parameter to stored PR facts.
-type Lookup interface {
+type actionStore interface {
+	GetPR(ctx context.Context, url string) (domain.PullRequest, bool, error)
 	GetPRByNumber(ctx context.Context, number int) (domain.PullRequest, bool, error)
 }
 
-// ActionDeps holds ActionService dependencies.
+type actionReader interface {
+	FetchPullRequests(ctx context.Context, refs []ports.SCMPRRef) ([]ports.SCMObservation, error)
+	FetchReviewThreads(ctx context.Context, ref ports.SCMPRRef) (ports.SCMReviewObservation, error)
+}
+
+// ActionDeps contains the storage and SCM boundaries used by ActionService.
 type ActionDeps struct {
-	Lookup Lookup
-	SCM    ports.SCMPRActions
+	Store  actionStore
+	Merger ports.SCMMerger
+	Closer ports.SCMCloser
+	Reader actionReader
 }
 
-// MergeResult is the successful outcome of a PR merge.
-type MergeResult struct {
-	PRNumber int
-	Method   string // always "squash"
-}
-
-// CloseResult is the successful outcome of closing a PR.
-type CloseResult struct {
-	PRNumber int
-}
-
-// ResolveResult is the successful outcome of a resolve-comments operation.
-type ResolveResult struct {
-	Resolved int
-}
-
-// ActionService implements ActionManager.
+// ActionService validates current pull request state before applying mutations.
 type ActionService struct {
-	lookup Lookup
-	scm    ports.SCMPRActions
+	store  actionStore
+	merger ports.SCMMerger
+	closer ports.SCMCloser
+	reader actionReader
 }
 
 var _ ActionManager = (*ActionService)(nil)
 
-// NewActionService returns an ActionService over stored PR facts and SCM actions.
+// NewActionService builds the guarded pull request action service.
 func NewActionService(deps ActionDeps) *ActionService {
-	return &ActionService{lookup: deps.Lookup, scm: deps.SCM}
+	return &ActionService{store: deps.Store, merger: deps.Merger, closer: deps.Closer, reader: deps.Reader}
 }
 
-// Merge squash-merges the PR identified by prID.
-func (s *ActionService) Merge(ctx context.Context, prID string) (MergeResult, error) {
-	target, err := s.resolveActionTarget(ctx, prID)
+// Merge re-fetches authoritative SCM state and then squash-merges only the
+// exact head the user saw. The provider repeats the SHA guard atomically.
+func (s *ActionService) Merge(ctx context.Context, request MergeRequest) (MergeResult, error) {
+	prNumber, err := parsePRNumber(request.PRID)
+	if err != nil || strings.TrimSpace(request.PRURL) == "" {
+		return MergeResult{}, fmt.Errorf("%w: invalid pull request identity", ErrInvalidPR)
+	}
+	if s.store == nil || s.merger == nil || s.reader == nil {
+		return MergeResult{}, errors.New("pr: merge action is not configured")
+	}
+	expectedHead := strings.ToLower(strings.TrimSpace(request.ExpectedHeadSHA))
+	if !gitSHAPattern.MatchString(expectedHead) {
+		return MergeResult{}, fmt.Errorf("%w: invalid expected head", ErrInvalidPR)
+	}
+
+	tracked, ok, err := s.store.GetPR(ctx, request.PRURL)
+	if err != nil {
+		return MergeResult{}, fmt.Errorf("load pull request: %w", err)
+	}
+	if !ok || tracked.Number != prNumber {
+		return MergeResult{}, ErrPRNotFound
+	}
+	if tracked.Draft || tracked.Merged || tracked.Closed {
+		return MergeResult{}, ErrPRNotMergeable
+	}
+	if !gitSHAPattern.MatchString(strings.TrimSpace(tracked.HeadSHA)) {
+		return MergeResult{}, fmt.Errorf("%w: pull request head is unknown", ErrPRPreconditions)
+	}
+	if !strings.EqualFold(expectedHead, tracked.HeadSHA) {
+		return MergeResult{}, ErrPRHeadChanged
+	}
+
+	repo, ok := scmRepoForPR(tracked)
+	if !ok {
+		return MergeResult{}, fmt.Errorf("%w: pull request repository is unknown", ErrPRPreconditions)
+	}
+	ref := ports.SCMPRRef{Repo: repo, Number: tracked.Number, URL: tracked.URL}
+	fresh, review, err := s.fetchMergeReadiness(ctx, ref)
 	if err != nil {
 		return MergeResult{}, err
 	}
-	const method = "squash"
-	if err := s.scm.MergePR(ctx, target.owner, target.repo, target.number, method); err != nil {
-		return MergeResult{}, err
+	if !strings.EqualFold(fresh.PR.HeadSHA, expectedHead) {
+		return MergeResult{}, ErrPRHeadChanged
 	}
-	return MergeResult{PRNumber: target.number, Method: method}, nil
+	if !readyToMerge(fresh, review) {
+		return MergeResult{}, ErrPRPreconditions
+	}
+
+	out, err := s.merger.MergePullRequest(ctx, ports.SCMMergeRequest{PR: ref, ExpectedHeadSHA: expectedHead, Method: ports.SCMMergeSquash})
+	if err != nil {
+		switch {
+		case errors.Is(err, ports.ErrSCMNotFound):
+			return MergeResult{}, fmt.Errorf("%w: %w", ErrPRNotFound, err)
+		case errors.Is(err, ports.ErrSCMHeadChanged):
+			return MergeResult{}, fmt.Errorf("%w: %w", ErrPRHeadChanged, err)
+		case errors.Is(err, ports.ErrSCMNotMergeable):
+			return MergeResult{}, fmt.Errorf("%w: %w", ErrPRNotMergeable, err)
+		default:
+			return MergeResult{}, fmt.Errorf("merge pull request: %w", err)
+		}
+	}
+	return MergeResult{PRNumber: tracked.Number, Method: string(ports.SCMMergeSquash), MergeCommitSHA: out.MergeCommitSHA}, nil
 }
 
-// Close closes the PR identified by prID without merging it.
+func (s *ActionService) fetchMergeReadiness(ctx context.Context, ref ports.SCMPRRef) (ports.SCMObservation, ports.SCMReviewObservation, error) {
+	observations, err := s.reader.FetchPullRequests(ctx, []ports.SCMPRRef{ref})
+	if err != nil {
+		if errors.Is(err, ports.ErrSCMNotFound) {
+			return ports.SCMObservation{}, ports.SCMReviewObservation{}, fmt.Errorf("%w: %w", ErrPRNotFound, err)
+		}
+		return ports.SCMObservation{}, ports.SCMReviewObservation{}, fmt.Errorf("refresh pull request before merge: %w", err)
+	}
+	if len(observations) != 1 || !observations[0].Fetched || observations[0].PR.Number != ref.Number {
+		return ports.SCMObservation{}, ports.SCMReviewObservation{}, ErrPRNotFound
+	}
+	review, err := s.reader.FetchReviewThreads(ctx, ref)
+	if err != nil {
+		if errors.Is(err, ports.ErrSCMNotFound) {
+			return ports.SCMObservation{}, ports.SCMReviewObservation{}, fmt.Errorf("%w: %w", ErrPRNotFound, err)
+		}
+		return ports.SCMObservation{}, ports.SCMReviewObservation{}, fmt.Errorf("refresh pull request reviews before merge: %w", err)
+	}
+	return observations[0], review, nil
+}
+
+func readyToMerge(o ports.SCMObservation, review ports.SCMReviewObservation) bool {
+	if o.PR.HeadSHA == "" || o.CI.HeadSHA != o.PR.HeadSHA || review.Partial {
+		return false
+	}
+	return domain.MergeReadiness{
+		Draft:              o.PR.Draft,
+		Merged:             o.PR.Merged,
+		Closed:             o.PR.Closed,
+		CI:                 domain.CIState(o.CI.Summary),
+		Review:             domain.ReviewDecision(review.Decision),
+		Mergeability:       domain.Mergeability(o.Mergeability.State),
+		UnresolvedComments: hasUnresolvedHumanComments(review.Threads),
+	}.ReadyToMerge()
+}
+
+func hasUnresolvedHumanComments(threads []ports.SCMReviewThreadObservation) bool {
+	for _, thread := range threads {
+		if thread.Resolved {
+			continue
+		}
+		for _, comment := range thread.Comments {
+			if !comment.IsBot {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func parsePRNumber(value string) (int, error) {
+	if !prNumberPattern.MatchString(value) {
+		return 0, ErrInvalidPR
+	}
+	n, err := strconv.ParseInt(value, 10, 32)
+	if err != nil || n <= 0 {
+		return 0, ErrInvalidPR
+	}
+	return int(n), nil
+}
+
+func scmRepoForPR(pr domain.PullRequest) (ports.SCMRepo, bool) {
+	parts := strings.Split(pr.Repo, "/")
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return ports.SCMRepo{}, false
+	}
+	provider := strings.ToLower(strings.TrimSpace(pr.Provider))
+	if provider == "" {
+		provider = "github"
+	}
+	host := strings.ToLower(strings.TrimSpace(pr.Host))
+	if host == "" && provider == "github" {
+		host = "github.com"
+	}
+	return ports.SCMRepo{Provider: provider, Host: host, Owner: parts[0], Name: parts[1], Repo: pr.Repo}, true
+}
+
+// Close closes a tracked pull request without merging it. Unlike Merge there is
+// no head-SHA guard: closing is reversible and does not depend on the reviewed
+// state, so the number the caller saw is enough.
 func (s *ActionService) Close(ctx context.Context, prID string) (CloseResult, error) {
-	target, err := s.resolveActionTarget(ctx, prID)
+	prNumber, err := parsePRNumber(prID)
 	if err != nil {
-		return CloseResult{}, err
+		return CloseResult{}, fmt.Errorf("%w: invalid pull request identity", ErrInvalidPR)
 	}
-	if err := s.scm.ClosePR(ctx, target.owner, target.repo, target.number); err != nil {
-		return CloseResult{}, err
+	if s.store == nil || s.closer == nil {
+		return CloseResult{}, errors.New("pr: close action is not configured")
 	}
-	return CloseResult{PRNumber: target.number}, nil
-}
 
-// ResolveComments resolves review threads on the PR identified by prID.
-// TODO: implement — resolve review threads via the SCM provider.
-func (s *ActionService) ResolveComments(_ context.Context, _ string, _ []string) (ResolveResult, error) {
-	return ResolveResult{Resolved: 0}, nil
-}
-
-type actionTarget struct {
-	owner  string
-	repo   string
-	number int
-}
-
-func (s *ActionService) resolveActionTarget(ctx context.Context, prID string) (actionTarget, error) {
-	if s == nil || s.lookup == nil || s.scm == nil {
-		return actionTarget{}, fmt.Errorf("pr: action service not configured")
-	}
-	n, err := parsePRID(prID)
+	tracked, ok, err := s.store.GetPRByNumber(ctx, prNumber)
 	if err != nil {
-		return actionTarget{}, err
-	}
-	pr, ok, err := s.lookup.GetPRByNumber(ctx, n)
-	if err != nil {
-		return actionTarget{}, fmt.Errorf("lookup pr %d: %w", n, err)
+		return CloseResult{}, fmt.Errorf("load pull request: %w", err)
 	}
 	if !ok {
-		return actionTarget{}, ErrPRNotFound
+		return CloseResult{}, ErrPRNotFound
 	}
-	owner, repo, err := ownerRepoForAction(pr)
-	if err != nil {
-		return actionTarget{}, err
+	repo, ok := scmRepoForPR(tracked)
+	if !ok {
+		return CloseResult{}, fmt.Errorf("%w: pull request repository is unknown", ErrPRPreconditions)
 	}
-	number := pr.Number
-	if number <= 0 {
-		number = n
-	}
-	return actionTarget{owner: owner, repo: repo, number: number}, nil
-}
 
-func parsePRID(prID string) (int, error) {
-	n, err := strconv.Atoi(strings.TrimSpace(prID))
-	if err != nil || n <= 0 {
-		return 0, ErrPRNotFound
-	}
-	return n, nil
-}
-
-func ownerRepoForAction(pr domain.PullRequest) (string, string, error) {
-	if owner, repo, ok := splitRepo(pr.Repo); ok {
-		return owner, repo, nil
-	}
-	owner, repo, _, err := parseGitHubPRURL(pr.URL)
-	if err != nil {
-		return "", "", fmt.Errorf("%w: stored PR %q has no GitHub repo", ErrPRNotFound, pr.URL)
-	}
-	return owner, repo, nil
-}
-
-func splitRepo(full string) (string, string, bool) {
-	parts := strings.Split(strings.Trim(strings.TrimSpace(full), "/"), "/")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", false
-	}
-	return parts[0], strings.TrimSuffix(parts[1], ".git"), true
-}
-
-func parseGitHubPRURL(raw string) (string, string, int, error) {
-	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil {
-		return "", "", 0, err
-	}
-	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
-	if len(parts) >= 4 && (parts[2] == "pull" || parts[2] == "pulls") {
-		n, err := strconv.Atoi(parts[3])
-		if err != nil || n <= 0 {
-			return "", "", 0, ErrPRNotFound
+	ref := ports.SCMPRRef{Repo: repo, Number: tracked.Number, URL: tracked.URL}
+	if err := s.closer.ClosePullRequest(ctx, ref); err != nil {
+		if errors.Is(err, ports.ErrSCMNotFound) {
+			return CloseResult{}, fmt.Errorf("%w: %w", ErrPRNotFound, err)
 		}
-		return parts[0], strings.TrimSuffix(parts[1], ".git"), n, nil
+		return CloseResult{}, fmt.Errorf("close pull request: %w", err)
 	}
-	if len(parts) >= 5 && parts[0] == "repos" && parts[3] == "pulls" {
-		n, err := strconv.Atoi(parts[4])
-		if err != nil || n <= 0 {
-			return "", "", 0, ErrPRNotFound
-		}
-		return parts[1], strings.TrimSuffix(parts[2], ".git"), n, nil
-	}
-	return "", "", 0, ErrPRNotFound
+	return CloseResult{PRNumber: tracked.Number}, nil
+}
+
+// ResolveComments is not implemented by the current provider action service.
+func (s *ActionService) ResolveComments(_ context.Context, _ string, _ []string) (ResolveResult, error) {
+	return ResolveResult{Resolved: 0}, nil
 }

@@ -15,7 +15,6 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
-	prsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/pr"
 )
 
 // ---------------------------------------------------------------------------
@@ -1026,79 +1025,7 @@ func TestObserve_TokenInjectedAsBearer(t *testing.T) {
 	}
 }
 
-func TestMergePR_UsesGitHubRESTMergeEndpoint(t *testing.T) {
-	f := newFakeGH(t)
-	f.on(http.MethodPut, "/repos/octocat/hello/pulls/42/merge", func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("Authorization"); got != "Bearer tkn-test" {
-			t.Fatalf("Authorization = %q, want Bearer token", got)
-		}
-		var body struct {
-			MergeMethod string `json:"merge_method"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatalf("decode body: %v", err)
-		}
-		if body.MergeMethod != "squash" {
-			t.Fatalf("merge_method = %q, want squash", body.MergeMethod)
-		}
-		w.WriteHeader(http.StatusOK)
-	})
-	p := newProviderForTest(t, f)
-
-	if err := p.MergePR(ctx(), "octocat", "hello", 42, "squash"); err != nil {
-		t.Fatalf("MergePR: %v", err)
-	}
-	if got := f.callsTo(http.MethodPut, "/repos/octocat/hello/pulls/42/merge"); got != 1 {
-		t.Fatalf("merge endpoint calls = %d, want 1", got)
-	}
-}
-
-func TestMergePR_AlreadyMergedConflictMapsToNotMergeableWithoutRetry(t *testing.T) {
-	f := newFakeGH(t)
-	f.on(http.MethodPut, "/repos/octocat/hello/pulls/42/merge", func(w http.ResponseWriter, r *http.Request) {
-		envelope := map[string]string{"message": "Pull Request is not mergeable"}
-		w.WriteHeader(http.StatusConflict)
-		_ = json.NewEncoder(w).Encode(envelope)
-	})
-	p := newProviderForTest(t, f)
-
-	err := p.MergePR(ctx(), "octocat", "hello", 42, "squash")
-	if !errors.Is(err, prsvc.ErrPRNotMergeable) {
-		t.Fatalf("err = %v, want ErrPRNotMergeable", err)
-	}
-	if got := f.callsTo(http.MethodPut, "/repos/octocat/hello/pulls/42/merge"); got != 1 {
-		t.Fatalf("merge endpoint calls = %d, want 1", got)
-	}
-}
-
-func TestMergePR_StatusErrorsMapToPRSentinels(t *testing.T) {
-	tests := []struct {
-		name   string
-		status int
-		want   error
-	}{
-		{name: "not found", status: http.StatusNotFound, want: prsvc.ErrPRNotFound},
-		{name: "method not allowed", status: http.StatusMethodNotAllowed, want: prsvc.ErrPRNotMergeable},
-		{name: "preconditions", status: http.StatusUnprocessableEntity, want: prsvc.ErrPRPreconditions},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			f := newFakeGH(t)
-			f.on(http.MethodPut, "/repos/octocat/hello/pulls/42/merge", func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(tt.status)
-				_, _ = w.Write([]byte(`{"message":"nope"}`))
-			})
-			p := newProviderForTest(t, f)
-
-			err := p.MergePR(ctx(), "octocat", "hello", 42, "squash")
-			if !errors.Is(err, tt.want) {
-				t.Fatalf("err = %v, want %v", err, tt.want)
-			}
-		})
-	}
-}
-
-func TestClosePR_UsesGitHubRESTPatchEndpoint(t *testing.T) {
+func TestClosePullRequest_UsesGitHubRESTPatchEndpoint(t *testing.T) {
 	f := newFakeGH(t)
 	f.on(http.MethodPatch, "/repos/octocat/hello/pulls/42", func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer tkn-test" {
@@ -1117,23 +1044,24 @@ func TestClosePR_UsesGitHubRESTPatchEndpoint(t *testing.T) {
 	})
 	p := newProviderForTest(t, f)
 
-	if err := p.ClosePR(ctx(), "octocat", "hello", 42); err != nil {
-		t.Fatalf("ClosePR: %v", err)
+	ref := ports.SCMPRRef{Repo: ports.SCMRepo{Owner: "octocat", Name: "hello"}, Number: 42}
+	if err := p.ClosePullRequest(ctx(), ref); err != nil {
+		t.Fatalf("ClosePullRequest: %v", err)
 	}
 	if got := f.callsTo(http.MethodPatch, "/repos/octocat/hello/pulls/42"); got != 1 {
 		t.Fatalf("close endpoint calls = %d, want 1", got)
 	}
 }
 
-func TestClosePR_StatusErrorsMapToPRSentinels(t *testing.T) {
+func TestClosePullRequest_StatusErrorsMapToSCMSentinels(t *testing.T) {
 	tests := []struct {
 		name   string
 		status int
 		want   error
 	}{
-		{name: "not found", status: http.StatusNotFound, want: prsvc.ErrPRNotFound},
-		{name: "conflict", status: http.StatusConflict, want: prsvc.ErrPRNotMergeable},
-		{name: "preconditions", status: http.StatusUnprocessableEntity, want: prsvc.ErrPRPreconditions},
+		{name: "not found", status: http.StatusNotFound, want: ports.ErrSCMNotFound},
+		{name: "method not allowed", status: http.StatusMethodNotAllowed, want: ports.ErrSCMNotMergeable},
+		{name: "preconditions", status: http.StatusUnprocessableEntity, want: ports.ErrSCMNotMergeable},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1144,7 +1072,8 @@ func TestClosePR_StatusErrorsMapToPRSentinels(t *testing.T) {
 			})
 			p := newProviderForTest(t, f)
 
-			err := p.ClosePR(ctx(), "octocat", "hello", 42)
+			ref := ports.SCMPRRef{Repo: ports.SCMRepo{Owner: "octocat", Name: "hello"}, Number: 42}
+			err := p.ClosePullRequest(ctx(), ref)
 			if !errors.Is(err, tt.want) {
 				t.Fatalf("err = %v, want %v", err, tt.want)
 			}

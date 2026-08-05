@@ -22,7 +22,6 @@ export const AGENT_OPTIONS = [
 	"vibe",
 	"pi",
 	"autohand",
-	"fake",
 ] as const;
 
 // The agent new projects use by default, and the fallback for worker/orchestrator

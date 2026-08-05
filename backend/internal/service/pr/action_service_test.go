@@ -6,147 +6,101 @@ import (
 	"testing"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
-type fakeActionLookup struct {
-	pr  domain.PullRequest
-	ok  bool
-	err error
+type fakeActionStore struct {
+	pr domain.PullRequest
+	ok bool
 }
 
-func (f *fakeActionLookup) GetPRByNumber(_ context.Context, _ int) (domain.PullRequest, bool, error) {
-	return f.pr, f.ok, f.err
+func (f *fakeActionStore) GetPR(context.Context, string) (domain.PullRequest, bool, error) {
+	return f.pr, f.ok, nil
 }
 
-type fakeSCMActions struct {
-	mergeOwner  string
-	mergeRepo   string
-	mergeNumber int
-	mergeMethod string
+func (f *fakeActionStore) GetPRByNumber(context.Context, int) (domain.PullRequest, bool, error) {
+	return f.pr, f.ok, nil
+}
+
+type fakeSCMAction struct {
+	observation ports.SCMObservation
+	review      ports.SCMReviewObservation
 	mergeErr    error
-	closeOwner  string
-	closeRepo   string
-	closeNumber int
-	closeErr    error
+	request     ports.SCMMergeRequest
+	mergeCalls  int
 }
 
-func (f *fakeSCMActions) MergePR(_ context.Context, owner, repo string, number int, method string) error {
-	f.mergeOwner = owner
-	f.mergeRepo = repo
-	f.mergeNumber = number
-	f.mergeMethod = method
-	return f.mergeErr
+func (f *fakeSCMAction) FetchPullRequests(context.Context, []ports.SCMPRRef) ([]ports.SCMObservation, error) {
+	return []ports.SCMObservation{f.observation}, nil
 }
 
-func (f *fakeSCMActions) ClosePR(_ context.Context, owner, repo string, number int) error {
-	f.closeOwner = owner
-	f.closeRepo = repo
-	f.closeNumber = number
-	return f.closeErr
+func (f *fakeSCMAction) FetchReviewThreads(context.Context, ports.SCMPRRef) (ports.SCMReviewObservation, error) {
+	return f.review, nil
 }
 
-func TestMerge_LooksUpStoredPRAndSquashMergesViaSCM(t *testing.T) {
-	scm := &fakeSCMActions{}
-	svc := NewActionService(ActionDeps{
-		Lookup: &fakeActionLookup{
-			pr: domain.PullRequest{URL: "https://github.com/acme/widgets/pull/42", Number: 42, Repo: "acme/widgets"},
-			ok: true,
-		},
-		SCM: scm,
-	})
+func (f *fakeSCMAction) MergePullRequest(_ context.Context, request ports.SCMMergeRequest) (ports.SCMMergeResult, error) {
+	f.mergeCalls++
+	f.request = request
+	return ports.SCMMergeResult{MergeCommitSHA: "merge-sha"}, f.mergeErr
+}
 
-	res, err := svc.Merge(context.Background(), "42")
+func mergeableActionFixture() (domain.PullRequest, *fakeSCMAction) {
+	pr := domain.PullRequest{
+		URL:          "https://github.com/acme/widgets/pull/42",
+		Number:       42,
+		Provider:     "github",
+		Host:         "github.com",
+		Repo:         "acme/widgets",
+		HeadSHA:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Mergeability: domain.MergeMergeable,
+	}
+	scm := &fakeSCMAction{observation: ports.SCMObservation{
+		Fetched:      true,
+		PR:           ports.SCMPRObservation{URL: pr.URL, Number: pr.Number, HeadSHA: pr.HeadSHA},
+		CI:           ports.SCMCIObservation{Summary: string(domain.CIPassing), HeadSHA: pr.HeadSHA},
+		Mergeability: ports.SCMMergeabilityObservation{State: string(domain.MergeMergeable), Mergeable: true},
+	}}
+	return pr, scm
+}
+
+func TestActionServiceMerge_GuardsAndSquashMergesExactHead(t *testing.T) {
+	pr, scm := mergeableActionFixture()
+	svc := NewActionService(ActionDeps{Store: &fakeActionStore{pr: pr, ok: true}, Reader: scm, Merger: scm})
+	result, err := svc.Merge(context.Background(), MergeRequest{PRID: "42", PRURL: pr.URL, ExpectedHeadSHA: pr.HeadSHA})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if scm.mergeOwner != "acme" || scm.mergeRepo != "widgets" || scm.mergeNumber != 42 || scm.mergeMethod != "squash" {
-		t.Fatalf("MergePR called with owner=%q repo=%q number=%d method=%q", scm.mergeOwner, scm.mergeRepo, scm.mergeNumber, scm.mergeMethod)
+	if result.PRNumber != 42 || result.Method != "squash" || result.MergeCommitSHA != "merge-sha" {
+		t.Fatalf("result = %#v", result)
 	}
-	if res.PRNumber != 42 || res.Method != "squash" {
-		t.Fatalf("result = %+v, want PRNumber 42 Method squash", res)
-	}
-}
-
-func TestMerge_FallsBackToPRURLWhenRepoFieldMissing(t *testing.T) {
-	scm := &fakeSCMActions{}
-	svc := NewActionService(ActionDeps{
-		Lookup: &fakeActionLookup{
-			pr: domain.PullRequest{URL: "https://github.com/acme/widgets/pull/42", Number: 42},
-			ok: true,
-		},
-		SCM: scm,
-	})
-
-	if _, err := svc.Merge(context.Background(), "42"); err != nil {
-		t.Fatal(err)
-	}
-	if scm.mergeOwner != "acme" || scm.mergeRepo != "widgets" || scm.mergeNumber != 42 {
-		t.Fatalf("MergePR called with owner=%q repo=%q number=%d", scm.mergeOwner, scm.mergeRepo, scm.mergeNumber)
+	if scm.mergeCalls != 1 || scm.request.ExpectedHeadSHA != pr.HeadSHA || scm.request.Method != ports.SCMMergeSquash {
+		t.Fatalf("request = %#v, calls = %d", scm.request, scm.mergeCalls)
 	}
 }
 
-func TestMerge_UnknownPRNumberReturnsNotFoundWithoutSCMCall(t *testing.T) {
-	scm := &fakeSCMActions{}
-	svc := NewActionService(ActionDeps{Lookup: &fakeActionLookup{}, SCM: scm})
-
-	if _, err := svc.Merge(context.Background(), "42"); !errors.Is(err, ErrPRNotFound) {
-		t.Fatalf("err = %v, want ErrPRNotFound", err)
+func TestActionServiceMerge_FailsClosedForStaleHeadOrReadiness(t *testing.T) {
+	pr, scm := mergeableActionFixture()
+	svc := NewActionService(ActionDeps{Store: &fakeActionStore{pr: pr, ok: true}, Reader: scm, Merger: scm})
+	_, err := svc.Merge(context.Background(), MergeRequest{PRID: "42", PRURL: pr.URL, ExpectedHeadSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"})
+	if !errors.Is(err, ErrPRHeadChanged) || scm.mergeCalls != 0 {
+		t.Fatalf("stale head error = %v, calls = %d", err, scm.mergeCalls)
 	}
-	if scm.mergeNumber != 0 {
-		t.Fatalf("MergePR called for missing PR: %+v", scm)
-	}
-}
 
-func TestMerge_PropagatesSCMActionError(t *testing.T) {
-	scm := &fakeSCMActions{mergeErr: ErrPRNotMergeable}
-	svc := NewActionService(ActionDeps{
-		Lookup: &fakeActionLookup{pr: domain.PullRequest{URL: "https://github.com/acme/widgets/pull/42", Number: 42, Repo: "acme/widgets"}, ok: true},
-		SCM:    scm,
-	})
-
-	if _, err := svc.Merge(context.Background(), "42"); !errors.Is(err, ErrPRNotMergeable) {
-		t.Fatalf("err = %v, want ErrPRNotMergeable", err)
+	pr, scm = mergeableActionFixture()
+	scm.observation.CI.Summary = string(domain.CIPending)
+	svc = NewActionService(ActionDeps{Store: &fakeActionStore{pr: pr, ok: true}, Reader: scm, Merger: scm})
+	_, err = svc.Merge(context.Background(), MergeRequest{PRID: "42", PRURL: pr.URL, ExpectedHeadSHA: pr.HeadSHA})
+	if !errors.Is(err, ErrPRPreconditions) || scm.mergeCalls != 0 {
+		t.Fatalf("pending CI error = %v, calls = %d", err, scm.mergeCalls)
 	}
 }
 
-func TestClose_LooksUpStoredPRAndClosesViaSCM(t *testing.T) {
-	scm := &fakeSCMActions{}
-	svc := NewActionService(ActionDeps{
-		Lookup: &fakeActionLookup{
-			pr: domain.PullRequest{URL: "https://github.com/acme/widgets/pull/42", Number: 42, Repo: "acme/widgets"},
-			ok: true,
-		},
-		SCM: scm,
-	})
-
-	res, err := svc.Close(context.Background(), "42")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if scm.closeOwner != "acme" || scm.closeRepo != "widgets" || scm.closeNumber != 42 {
-		t.Fatalf("ClosePR called with owner=%q repo=%q number=%d", scm.closeOwner, scm.closeRepo, scm.closeNumber)
-	}
-	if res.PRNumber != 42 {
-		t.Fatalf("result = %+v, want PRNumber 42", res)
-	}
-}
-
-func TestClose_PropagatesSCMActionError(t *testing.T) {
-	scm := &fakeSCMActions{closeErr: ErrPRNotFound}
-	svc := NewActionService(ActionDeps{
-		Lookup: &fakeActionLookup{pr: domain.PullRequest{URL: "https://github.com/acme/widgets/pull/42", Number: 42, Repo: "acme/widgets"}, ok: true},
-		SCM:    scm,
-	})
-
-	if _, err := svc.Close(context.Background(), "42"); !errors.Is(err, ErrPRNotFound) {
-		t.Fatalf("err = %v, want ErrPRNotFound", err)
-	}
-}
-
-func TestResolveComments_ReturnsOK(t *testing.T) {
-	svc := NewActionService(ActionDeps{})
-	_, err := svc.ResolveComments(context.Background(), "1", nil)
-	if err != nil {
-		t.Fatal(err)
+func TestActionServiceMerge_MapsProviderConflict(t *testing.T) {
+	pr, scm := mergeableActionFixture()
+	scm.mergeErr = ports.ErrSCMHeadChanged
+	svc := NewActionService(ActionDeps{Store: &fakeActionStore{pr: pr, ok: true}, Reader: scm, Merger: scm})
+	_, err := svc.Merge(context.Background(), MergeRequest{PRID: "42", PRURL: pr.URL, ExpectedHeadSHA: pr.HeadSHA})
+	if !errors.Is(err, ErrPRHeadChanged) {
+		t.Fatalf("error = %v", err)
 	}
 }
