@@ -94,17 +94,14 @@ app_name="$(basename "$app_src")"
 app_dest="${dest%/}/${app_name}"
 log "Built app: ${app_src}"
 
-# --- 3. reload the daemon from the same commit (optional) ------------------
-if [ "$reload_daemon" -eq 1 ] && [ -x "${repo_root}/scripts/ao-svc" ]; then
-  log "Reloading the AO daemon so it matches this build (ao-svc reload)…"
-  "${repo_root}/scripts/ao-svc" reload || echo "warning: ao-svc reload failed; the app may hit the daemon identity check." >&2
-elif [ "$reload_daemon" -eq 1 ]; then
-  echo "note: scripts/ao-svc not found — skipping daemon reload. Make sure whatever runs your daemon is on this same commit." >&2
-fi
-
-# --- 4. quit any running instance ------------------------------------------
+# --- 3. quit any running instance ------------------------------------------
 # You can't cleanly replace a running .app, so ask it to quit first. Graceful
 # (AppleScript quit) with a bounded wait, then a hard fallback.
+#
+# This has to happen BEFORE the daemon reload: an app-owned daemon from the old
+# bundle still holds :3001, so a daemon kickstarted while it runs quietly falls
+# back to an ephemeral port and publishes that in running.json — leaving anything
+# pinned to :3001 (the LAN UI's vite proxy) talking to the stale daemon.
 bundle_id="$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$app_src/Contents/Info.plist" 2>/dev/null || true)"
 if [ -n "$bundle_id" ] && pgrep -f "${app_dest}/Contents/MacOS/" >/dev/null 2>&1; then
   log "Quitting the running app (${bundle_id})…"
@@ -114,6 +111,14 @@ if [ -n "$bundle_id" ] && pgrep -f "${app_dest}/Contents/MacOS/" >/dev/null 2>&1
     sleep 0.5
   done
   pkill -f "${app_dest}/Contents/MacOS/" 2>/dev/null || true
+fi
+
+# --- 4. reload the daemon from the same commit (optional) ------------------
+if [ "$reload_daemon" -eq 1 ] && [ -x "${repo_root}/scripts/ao-svc" ]; then
+  log "Reloading the AO daemon so it matches this build (ao-svc reload)…"
+  "${repo_root}/scripts/ao-svc" reload || echo "warning: ao-svc reload failed; the app may hit the daemon identity check." >&2
+elif [ "$reload_daemon" -eq 1 ]; then
+  echo "note: scripts/ao-svc not found — skipping daemon reload. Make sure whatever runs your daemon is on this same commit." >&2
 fi
 
 # --- 5. install ------------------------------------------------------------
