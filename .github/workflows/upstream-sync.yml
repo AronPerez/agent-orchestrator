@@ -1,0 +1,170 @@
+# Daily upstream drift check.
+#
+# Mirrors Untrivial-ai/agent-orchestrator into this fork's `main`, then keeps a
+# single long-lived PR open from `main` into `develop` describing the drift.
+#
+# Why head=main and not a dated sync branch: a branch-per-run pile of PRs is the
+# usual failure mode of sync bots. With head=main there is exactly one sync PR
+# ever — it refreshes itself as main advances, so nothing accumulates and the
+# title always states the current backlog.
+#
+# HOW TO MERGE THIS PR: use "Create a merge commit". Do NOT squash.
+# Squashing drops main's parentage, so develop stops recording which upstream
+# commits it already contains, and the next sync re-conflicts all of them. That
+# is not hypothetical: the 2026-08-05 sync reported 116 conflicted files when
+# the true number was 9, because prior sync PRs were squashed.
+name: Upstream sync
+
+on:
+  schedule:
+    - cron: "0 13 * * *" # 13:00 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: https://github.com/Untrivial-ai/agent-orchestrator.git
+  BASE: develop
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream "$UPSTREAM" 2>/dev/null || git remote set-url upstream "$UPSTREAM"
+          git fetch upstream --prune
+          git fetch origin --prune
+
+      # The fork's main is a pure mirror. Fast-forward only: if it ever diverges,
+      # something committed directly to main and a human needs to look.
+      - name: Mirror upstream into main
+        run: |
+          if git merge-base --is-ancestor origin/main upstream/main; then
+            git push origin "upstream/main:refs/heads/main"
+            echo "main mirrored to $(git rev-parse --short upstream/main)"
+          else
+            echo "::error::origin/main has diverged from upstream/main; refusing to force-push. Resolve by hand."
+            exit 1
+          fi
+
+      - name: Measure drift
+        id: drift
+        run: |
+          COUNT=$(git rev-list --count "origin/$BASE..upstream/main")
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          {
+            echo "COUNT=$COUNT"
+            echo "HEAD_SHA=$(git rev-parse --short upstream/main)"
+          } >> "$GITHUB_ENV"
+          git log --no-merges --format='- %s' "origin/$BASE..upstream/main" | head -25 > /tmp/commits.txt || true
+          echo "$COUNT upstream commits not in $BASE"
+
+      - name: Close the sync PR when drift is gone
+        if: steps.drift.outputs.count == '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NUM=$(gh pr list --base "$BASE" --head main --state open --json number --jq '.[0].number // empty')
+          if [ -n "$NUM" ]; then
+            gh pr close "$NUM" --comment "No upstream drift remains; closing. This reopens automatically on the next upstream commit."
+          fi
+          echo "in sync"
+
+      # One PR, forever. Created once, retitled on every later run so the tab
+      # shows the live backlog instead of whatever it was the day it opened.
+      - name: Open or refresh the sync PR
+        if: steps.drift.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TITLE="sync: merge upstream main ($COUNT commits behind)"
+          {
+            echo "Upstream is **$COUNT commits** ahead of \`$BASE\` (upstream head \`$HEAD_SHA\`)."
+            echo
+            echo "### Merge this with a merge commit — do not squash"
+            echo
+            echo "Squashing drops \`main\`'s parentage, so \`$BASE\` stops recording which"
+            echo "upstream commits it already contains and the *next* sync re-conflicts all"
+            echo "of them. The 2026-08-05 sync reported 116 conflicted files when only 9 were"
+            echo "real, for exactly this reason."
+            echo
+            echo "### Conflicts are expected"
+            echo
+            echo "Resolve them here in the web editor, or locally:"
+            echo
+            echo '```sh'
+            echo "git fetch origin && git checkout $BASE"
+            echo "git merge origin/main   # resolve, then push"
+            echo '```'
+            echo
+            echo "### Recent upstream commits"
+            echo
+            cat /tmp/commits.txt
+            echo
+            echo "<sub>Opened and refreshed by \`.github/workflows/upstream-sync.yml\`.</sub>"
+          } > /tmp/body.md
+
+          NUM=$(gh pr list --base "$BASE" --head main --state open --json number --jq '.[0].number // empty')
+          if [ -n "$NUM" ]; then
+            gh pr edit "$NUM" --title "$TITLE" --body-file /tmp/body.md
+            echo "refreshed PR #$NUM"
+          else
+            gh pr create --base "$BASE" --head main --title "$TITLE" --body-file /tmp/body.md
+            NUM=$(gh pr list --base "$BASE" --head main --state open --json number --jq '.[0].number // empty')
+            echo "opened sync PR #$NUM"
+          fi
+          echo "PR_NUM=$NUM" >> "$GITHUB_ENV"
+
+      # Hand conflicts to Copilot cloud agent. Gated on the upstream head SHA:
+      # the ask is repeated only when new upstream commits arrive, never on a
+      # quiet day. That matters because a coding-agent session costs one premium
+      # request regardless of model, so an ungated daily comment would bill every
+      # day to re-resolve conflicts it already looked at.
+      - name: Ask Copilot to resolve conflicts
+        if: steps.drift.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          # GitHub computes mergeability asynchronously and reports UNKNOWN until
+          # it settles, which it always does on a freshly created PR.
+          STATE=UNKNOWN
+          for _ in 1 2 3 4 5 6; do
+            STATE=$(gh pr view "$PR_NUM" --json mergeable --jq '.mergeable')
+            [ "$STATE" != "UNKNOWN" ] && break
+            sleep 10
+          done
+          echo "mergeable=$STATE"
+          if [ "$STATE" != "CONFLICTING" ]; then
+            echo "no conflicts (state=$STATE); leaving it alone"
+            exit 0
+          fi
+          MARK="copilot-asked:$HEAD_SHA"
+          if gh pr view "$PR_NUM" --json comments --jq '.comments[].body' | grep -qF "$MARK"; then
+            echo "already asked for $HEAD_SHA"
+            exit 0
+          fi
+          gh pr comment "$PR_NUM" --body "$(cat <<EOF
+          @copilot merge in \`main\` and resolve the conflicts.
+
+          Read \`.github/workflows/upstream-sync.yml\` and the repo's AGENTS.md first. Two rules specific to this fork:
+
+          1. Where upstream has reimplemented something this fork also built, prefer upstream's version — but check whether the fork's variant is still referenced anywhere before deleting it. \`packages/mobile\` calls daemon endpoints that upstream does not have, and dropping one silently breaks the mobile app.
+          2. When upstream adds locales or config keys, carry this fork's added keys into the new files rather than dropping them.
+
+          Verify with \`go build ./...\`, \`go test ./...\`, and in \`frontend/\`: \`npm run typecheck\` and \`npx vitest run\`. Leave anything you are unsure about conflicted and say so in a comment.
+
+          <!-- $MARK -->
+          EOF
+          )"
+          echo "asked Copilot to resolve ($HEAD_SHA)"
