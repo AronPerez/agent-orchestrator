@@ -31,6 +31,12 @@ concurrency:
 env:
   UPSTREAM: https://github.com/Untrivial-ai/agent-orchestrator.git
   BASE: develop
+  # Every `gh` call here means *this* repo. Without this it would not: the
+  # `Fetch upstream` step adds a remote literally named `upstream`, and gh
+  # picks its base repo by remote name, preferring `upstream` over `origin`.
+  # So `gh pr create` aimed at Untrivial-ai/agent-orchestrator, where the token
+  # has no write access — "Resource not accessible by integration".
+  GH_REPO: ${{ github.repository }}
 
 jobs:
   sync:
@@ -84,7 +90,7 @@ jobs:
       - name: Close the sync PR when drift is gone
         if: steps.drift.outputs.count == '0'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.SYNC_PAT || secrets.GITHUB_TOKEN }}
         run: |
           NUM=$(gh pr list --base "$BASE" --head main --state open --json number --jq '.[0].number // empty')
           if [ -n "$NUM" ]; then
@@ -94,10 +100,11 @@ jobs:
 
       # One PR, forever. Created once, retitled on every later run so the tab
       # shows the live backlog instead of whatever it was the day it opened.
+      # `gh pr create` here depends on GH_REPO above; see the note there.
       - name: Open or refresh the sync PR
         if: steps.drift.outputs.count != '0'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.SYNC_PAT || secrets.GITHUB_TOKEN }}
         run: |
           TITLE="sync: merge upstream main ($COUNT commits behind)"
           {
