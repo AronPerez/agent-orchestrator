@@ -84,7 +84,7 @@ jobs:
       - name: Close the sync PR when drift is gone
         if: steps.drift.outputs.count == '0'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.SYNC_PAT || secrets.GITHUB_TOKEN }}
         run: |
           NUM=$(gh pr list --base "$BASE" --head main --state open --json number --jq '.[0].number // empty')
           if [ -n "$NUM" ]; then
@@ -94,10 +94,17 @@ jobs:
 
       # One PR, forever. Created once, retitled on every later run so the tab
       # shows the live backlog instead of whatever it was the day it opened.
+      #
+      # `pull-requests: write` above is necessary but not sufficient: GITHUB_TOKEN
+      # may only open a PR when Settings > Actions > General > "Allow GitHub
+      # Actions to create and approve pull requests" is on. With it off this step
+      # fails "Resource not accessible by integration (createPullRequest)" no
+      # matter what the permissions block says. Setting a SYNC_PAT is the other
+      # way out — a PAT is not subject to that toggle.
       - name: Open or refresh the sync PR
         if: steps.drift.outputs.count != '0'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.SYNC_PAT || secrets.GITHUB_TOKEN }}
         run: |
           TITLE="sync: merge upstream main ($COUNT commits behind)"
           {
