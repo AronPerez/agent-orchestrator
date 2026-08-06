@@ -36,7 +36,7 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -48,10 +48,21 @@ jobs:
 
       # The fork's main is a pure mirror. Fast-forward only: if it ever diverges,
       # something committed directly to main and a human needs to look.
+      #
+      # Not `git push`: that authenticates as GITHUB_TOKEN, which is a GitHub App
+      # token, and app tokens may not write .github/workflows/** without the
+      # `workflows` permission — which the `permissions:` block above cannot grant
+      # (it is not one of the available scopes). So any upstream commit touching a
+      # workflow file killed the mirror outright. GitHub's own fork-sync endpoint
+      # does the identical server-side fast-forward and is not subject to that rule.
+      # If it turns out to be, set a SYNC_PAT secret with workflow scope; no code
+      # change needed.
       - name: Mirror upstream into main
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_PAT || secrets.GITHUB_TOKEN }}
         run: |
           if git merge-base --is-ancestor origin/main upstream/main; then
-            git push origin "upstream/main:refs/heads/main"
+            gh api --method POST "repos/${{ github.repository }}/merge-upstream" -f branch=main
             echo "main mirrored to $(git rev-parse --short upstream/main)"
           else
             echo "::error::origin/main has diverged from upstream/main; refusing to force-push. Resolve by hand."
