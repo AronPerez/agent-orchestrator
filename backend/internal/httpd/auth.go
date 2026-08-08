@@ -201,7 +201,12 @@ func isCORSPreflight(r *http.Request) bool {
 		r.Header.Get("Access-Control-Request-Method") != ""
 }
 
-func authMiddleware(state *authState, lock *lockout, log *slog.Logger) func(http.Handler) http.Handler {
+// authMiddleware authenticates LAN requests against the current connection
+// password. connected, which may be nil, is notified of the source address of
+// every request that authenticates; it exists so telemetry can observe that a
+// phone actually reached this desktop, and it must not block the request, since
+// it runs inline on every authenticated call.
+func authMiddleware(state *authState, lock *lockout, log *slog.Logger, connected *mobileConnectReporter) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// A CORS preflight can never be authenticated: browsers strip
@@ -231,6 +236,7 @@ func authMiddleware(state *authState, lock *lockout, log *slog.Logger) func(http
 			tok := connectionToken(r)
 			if mobilebridge.PasswordMatches(state.currentHash(), tok) {
 				lock.reset(src)
+				connected.report(src)
 				maybeSetPreviewAuthCookie(w, r, tok)
 				next.ServeHTTP(w, r)
 				return
