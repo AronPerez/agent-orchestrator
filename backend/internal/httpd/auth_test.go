@@ -3,6 +3,7 @@ package httpd
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -311,17 +312,127 @@ func TestPreviewCookieRefreshedAfterPasswordChange(t *testing.T) {
 	}
 }
 
-// The cookie must NOT authenticate any non-preview endpoint: a preview page that
-// tries POST /kill with only the cookie is rejected. This is the server-side
-// half of the guarantee (the cookie's Path already stops the browser sending it
-// here at all).
-func TestPreviewCookieRejectedOnOtherEndpoints(t *testing.T) {
+// The cookie is a session credential on the authenticated listener: it
+// authenticates any route, not just preview files (this is what lets an
+// EventSource, which cannot set a header, subscribe). What keeps that from
+// being CSRF is the origin rule, exercised below.
+func TestCookieAuthenticatesAnyRouteOnAuthenticatedListener(t *testing.T) {
 	h, _ := newAuthUnderTest("secret12", time.Now)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, reqPathCookie(http.MethodPost, "/api/v1/sessions/abc/kill", "", "secret12"))
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("cookie on /kill: got %d want 401", w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("cookie on /kill: got %d want 200", w.Code)
 	}
+}
+
+// A cookie is the one credential a browser attaches to requests a hostile page
+// initiates, so a cookie-authenticated request from anywhere but this daemon's
+// own pages is refused — whether the page announces itself with an Origin or
+// (EventSource, <img>) only with Sec-Fetch-Site.
+func TestCookieRejectedCrossOrigin(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		headers map[string]string
+	}{
+		{"foreign origin", map[string]string{"Origin": "http://evil.example"}},
+		{"foreign loopback origin", map[string]string{"Origin": "http://localhost:8080"}},
+		{"no origin but cross-site", map[string]string{"Sec-Fetch-Site": "cross-site"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _ := newAuthUnderTest("secret12", time.Now)
+			r := reqPathCookie(http.MethodPost, "/api/v1/sessions/abc/kill", "", "secret12")
+			for k, v := range tc.headers {
+				r.Header.Set(k, v)
+			}
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != http.StatusForbidden {
+				t.Fatalf("got %d want 403", w.Code)
+			}
+		})
+	}
+}
+
+// A Bearer cannot be attached by a page that was not given the password, so the
+// same cross-origin request authenticates fine with one. This asymmetry is the
+// point of the cookie rule — it must not leak into the header channel, which
+// the native mobile client uses while pinning Origin: http://localhost.
+func TestBearerUnaffectedByCookieOriginRule(t *testing.T) {
+	h, _ := newAuthUnderTest("secret12", time.Now)
+	r := reqPathCookie(http.MethodPost, "/api/v1/sessions/abc/kill", "Bearer secret12", "")
+	r.Header.Set("Origin", "http://localhost")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("bearer from a pinned foreign origin: got %d want 200", w.Code)
+	}
+}
+
+// POST /api/v1/auth/login exchanges the connection password for the session
+// cookie. This is the contract the daemon-served web UI consumes: 204 + an
+// HttpOnly, SameSite=Strict, Path=/ ao_conn cookie on success; 401 on a wrong
+// password, counted by the same lockout as every other failed guess.
+func TestLoginIssuesSessionCookie(t *testing.T) {
+	h, lock := newAuthUnderTest("secret12", time.Now)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, loginReq(`{"password":"secret12"}`))
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("login: got %d want 204", w.Code)
+	}
+	var c *http.Cookie
+	for _, ck := range w.Result().Cookies() {
+		if ck.Name == authCookieName {
+			c = ck
+		}
+	}
+	if c == nil {
+		t.Fatal("login did not set the ao_conn cookie")
+		return
+	}
+	if c.Value != "secret12" || c.Path != "/" || !c.HttpOnly || c.SameSite != http.SameSiteStrictMode {
+		t.Errorf("cookie = %+v, want value secret12, Path=/, HttpOnly, SameSite=Strict", c)
+	}
+
+	// The cookie it just minted authenticates a normal route.
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, reqPathCookie(http.MethodGet, "/api/v1/sessions", "", c.Value))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("cookie from login: got %d want 200", w2.Code)
+	}
+
+	// Wrong password: 401, and it consumes lockout budget.
+	w3 := httptest.NewRecorder()
+	h.ServeHTTP(w3, loginReq(`{"password":"nope"}`))
+	if w3.Code != http.StatusUnauthorized {
+		t.Fatalf("bad login: got %d want 401", w3.Code)
+	}
+	for i := 0; i < 4; i++ {
+		h.ServeHTTP(httptest.NewRecorder(), loginReq(`{"password":"nope"}`))
+	}
+	if !lock.blocked("192.168.1.50") {
+		t.Error("five failed logins must trip the per-source lockout")
+	}
+}
+
+// Login mints a cookie, so it is refused cross-origin: handing one to a foreign
+// page is handing out CSRF, password or no password.
+func TestLoginRejectedCrossOrigin(t *testing.T) {
+	h, _ := newAuthUnderTest("secret12", time.Now)
+	r := loginReq(`{"password":"secret12"}`)
+	r.Header.Set("Origin", "http://evil.example")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin login: got %d want 403", w.Code)
+	}
+}
+
+// loginReq builds a same-origin POST to the login route with the given JSON body.
+func loginReq(body string) *http.Request {
+	r := httptest.NewRequest(http.MethodPost, authLoginPath, strings.NewReader(body))
+	r.RemoteAddr = "192.168.1.50:5555"
+	r.Header.Set("Origin", "http://"+r.Host)
+	return r
 }
 
 // A normal (non-preview) authenticated request must not get an auth cookie set,

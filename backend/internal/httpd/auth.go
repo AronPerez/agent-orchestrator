@@ -1,6 +1,7 @@
 package httpd
 
 import (
+	"encoding/json"
 	"log/slog"
 	"net"
 	"net/http"
@@ -115,19 +116,21 @@ func wsProtocolToken(r *http.Request) string {
 	return ""
 }
 
-// authCookieName carries the connection token for a preview page's in-page
-// subresource requests. See connectionToken / maybeSetPreviewAuthCookie.
+// authCookieName carries the connection token on requests a browser cannot put
+// a header on. It is minted two ways: by handleLogin at Path=/ (a session
+// credential for a daemon-served page), and by maybeSetPreviewAuthCookie scoped
+// to one session's preview files. See credential for how both are honored.
 const authCookieName = "ao_conn"
 
 // previewFilesMarker is the path segment that identifies a preview-file request
-// (GET /api/v1/sessions/{id}/preview/files/*). The auth cookie is both scoped to
-// and honored only on this path, so it can never authenticate any other endpoint.
+// (GET /api/v1/sessions/{id}/preview/files/*).
 const previewFilesMarker = "/preview/files/"
 
 // previewFilesCookiePath returns the cookie Path to scope the auth cookie to the
 // requesting session's preview files (".../preview/files/"), or "" if the request
-// is not a preview-file request. Scoping this tightly is what keeps the cookie
-// from ever reaching /kill, /send, another session, or any non-preview route.
+// is not a preview-file request. Preview output is workspace-authored content, so
+// the cookie IT gets stays pinned to its own path — it never widens into the
+// Path=/ session cookie handleLogin issues to a page the daemon served itself.
 func previewFilesCookiePath(urlPath string) string {
 	i := strings.Index(urlPath, previewFilesMarker)
 	if i < 0 {
@@ -136,27 +139,46 @@ func previewFilesCookiePath(urlPath string) string {
 	return urlPath[:i+len(previewFilesMarker)]
 }
 
-// connectionToken returns the caller's connection token. It comes from the
-// Authorization: Bearer header (the mobile API client and a preview page's
-// top-level navigation), the ao.bearer.* Sec-WebSocket-Protocol entry (a
-// browser's /mux handshake, which cannot set Authorization) or, ONLY on the
-// preview-files route, the auth cookie (a preview page's subresource requests —
-// images/CSS/JS — which the WebView issues without our header). Restricting the
-// cookie to the preview-files path means it can never authenticate any other
-// mobile endpoint even if a client sends it.
-func connectionToken(r *http.Request) string {
+// authLoginPath exchanges the connection password for a session cookie. It
+// exists on the authenticated (LAN) listener only, where there is a password to
+// exchange; on the no-auth loopback listener it is simply not a route.
+const authLoginPath = "/api/v1/auth/login"
+
+// credential returns the token authenticating r against hash, whether it
+// arrived in a cookie, and whether it is valid.
+//
+// It comes from the Authorization: Bearer header (the mobile API client and a
+// preview page's top-level navigation), the ao.bearer.* Sec-WebSocket-Protocol
+// entry (a browser's /mux handshake, which cannot set Authorization), or the
+// ao_conn cookie — the only channel available to a browser API that lets it set
+// neither, notably EventSource/SSE, <img>, and top-level navigation.
+//
+// Every ao_conn cookie is tried, not just the first: the login route mints one
+// at Path=/ while a preview page may separately hold one scoped to its own
+// preview-files path (see maybeSetPreviewAuthCookie), and the browser sends
+// both. Picking the first would fail auth roughly half the time.
+//
+// A cookie authenticating on its own is deliberately narrower than it looks —
+// authMiddleware additionally requires a strict origin whenever the cookie is
+// what authenticated, because cookies ride cross-site and a Bearer never does.
+func credential(hash string, r *http.Request) (tok string, viaCookie, ok bool) {
 	if t := bearerToken(r); t != "" {
-		return t
+		return t, false, mobilebridge.PasswordMatches(hash, t)
 	}
 	if t := wsProtocolToken(r); t != "" {
-		return t
+		return t, false, mobilebridge.PasswordMatches(hash, t)
 	}
-	if previewFilesCookiePath(r.URL.Path) != "" {
-		if c, err := r.Cookie(authCookieName); err == nil {
-			return c.Value
+	var seen string
+	for _, c := range r.Cookies() {
+		if c.Name != authCookieName {
+			continue
 		}
+		if mobilebridge.PasswordMatches(hash, c.Value) {
+			return c.Value, true, true
+		}
+		seen = c.Value
 	}
-	return ""
+	return seen, seen != "", false
 }
 
 // maybeSetPreviewAuthCookie drops the auth cookie when a preview FILE is fetched
@@ -189,6 +211,73 @@ func maybeSetPreviewAuthCookie(w http.ResponseWriter, r *http.Request, tok strin
 		// No Secure: the LAN link is plain http (a TLS tunnel still sends it),
 		// matching how the Bearer token already travels.
 	})
+}
+
+// handleLogin serves POST /api/v1/auth/login: it exchanges the connection
+// password for the ao_conn session cookie.
+//
+//	POST /api/v1/auth/login {"password":"<connection password>"}
+//	  204 No Content + Set-Cookie: ao_conn=<token>; HttpOnly; SameSite=Strict; Path=/
+//	  401 on a wrong password, counted by the same per-source lockout
+//
+// It exists because a browser cannot put an Authorization header on everything:
+// EventSource (SSE) in particular sends cookies and nothing else. The cookie
+// value is the password itself, so it validates through exactly the same hash
+// comparison as a Bearer — there is no second credential system to keep in sync
+// or to revoke separately: rotating the password invalidates every cookie.
+//
+// Minting the cookie is gated on a strict origin. A cookie is the one
+// credential a browser will attach to requests a hostile page initiates, so
+// handing one out to a cross-origin caller would be handing out CSRF. That is
+// checked here, and again on every request the cookie authenticates.
+func handleLogin(w http.ResponseWriter, r *http.Request, state *authState, lock *lockout, log *slog.Logger, connected *mobileConnectReporter) {
+	if r.Method != http.MethodPost {
+		methodNotAllowedJSON(w, r)
+		return
+	}
+	if !strictOriginOK(nil, r) {
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "ORIGIN_FORBIDDEN",
+			"login is accepted only from this daemon's own pages", nil)
+		return
+	}
+	var body struct {
+		Password string `json:"password"`
+	}
+	// 4 KiB is orders of magnitude more than an 8-char password needs; the cap
+	// is only there so an unauthenticated route cannot be used to buffer a
+	// large body.
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON",
+			"request body must be JSON of the form {\"password\":\"...\"}", nil)
+		return
+	}
+	src := sourceKey(r)
+	if body.Password == "" || !mobilebridge.PasswordMatches(state.currentHash(), body.Password) {
+		if body.Password != "" && lock.fail(src) {
+			log.Warn("LAN auth lockout tripped", "src", src)
+		}
+		envelope.WriteAPIError(w, r, http.StatusUnauthorized, "unauthorized", "BAD_PASSWORD",
+			"missing or invalid connection password", nil)
+		return
+	}
+	lock.reset(src)
+	connected.report(src)
+	//nolint:gosec // Secure is intentionally omitted, exactly as for the preview
+	// cookie: the LAN bridge is plaintext http by design (ADR 0001), and a Secure
+	// cookie would never be sent over it. The password already travels the same
+	// plain link as a Bearer.
+	http.SetCookie(w, &http.Cookie{
+		Name:     authCookieName,
+		Value:    body.Password,
+		Path:     "/",
+		HttpOnly: true,
+		// Strict, not Lax: nothing about this daemon is meant to be reached by
+		// following a link from another site, so there is no navigation case Lax
+		// would buy — and Strict keeps the cookie off cross-site top-level
+		// requests entirely.
+		SameSite: http.SameSiteStrictMode,
+	})
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // isCORSPreflight reports whether r is a CORS preflight: an OPTIONS request
@@ -233,8 +322,23 @@ func authMiddleware(state *authState, lock *lockout, log *slog.Logger, connected
 					"too many failed attempts; try again shortly", nil)
 				return
 			}
-			tok := connectionToken(r)
-			if mobilebridge.PasswordMatches(state.currentHash(), tok) {
+			if r.URL.Path == authLoginPath {
+				handleLogin(w, r, state, lock, log, connected)
+				return
+			}
+			tok, viaCookie, ok := credential(state.currentHash(), r)
+			if ok {
+				// A cookie rides along on cross-site requests; a Bearer or the
+				// ao.bearer.* subprotocol can only be attached by code that was
+				// handed the password. So when the cookie is what authenticated,
+				// origin checking is not optional — without it any page on the
+				// network could drive this daemon through the user's browser
+				// (classic CSRF, and CSWSH on the /mux upgrade).
+				if viaCookie && !strictOriginOK(nil, r) {
+					envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "ORIGIN_FORBIDDEN",
+						"cookie credentials are accepted only from this daemon's own pages", nil)
+					return
+				}
 				lock.reset(src)
 				connected.report(src)
 				maybeSetPreviewAuthCookie(w, r, tok)

@@ -7,16 +7,19 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
 // LANManager owns the daemon's second, network-facing HTTP listener. It binds
-// 0.0.0.0 only while Connect Mobile is enabled and wraps the shared router in
-// authMiddleware. The loopback listener is unaffected.
+// only while Connect Mobile is enabled (0.0.0.0 by default; narrower with a
+// bind mode — see Start) and wraps the shared router in authMiddleware. The
+// loopback listener is unaffected.
 type LANManager struct {
 	handler     http.Handler // shared router, already auth-wrapped
 	defaultPort int
@@ -61,17 +64,32 @@ var lanControlBlockedPrefixes = []string{
 	"/api/v1/browser",
 }
 
+// lanListenerCtxKey marks a request as having arrived on the physical LAN
+// socket. Unlike Host or X-Forwarded-For it cannot be spoofed by the client:
+// only lanControlBlock sets it, and lanControlBlock wraps the LAN-served
+// handler only.
+type lanListenerCtxKey struct{}
+
+// servedOverLAN reports whether r arrived on the LAN listener (and is therefore
+// credential-gated by authMiddleware) rather than the no-auth loopback
+// listener. Origin policy differs between the two — see requiresStrictOrigin.
+func servedOverLAN(r *http.Request) bool {
+	v, _ := r.Context().Value(lanListenerCtxKey{}).(bool)
+	return v
+}
+
 // lanControlBlock returns 404 for any request whose path is, or is nested
 // under, a loopback-only control-route prefix, before it ever reaches auth or
 // the shared router. It answers as if the route were never mounted at all —
-// no 403/401 that would confirm the path exists.
+// no 403/401 that would confirm the path exists. It also stamps the
+// LAN-listener marker every layer below reads.
 func lanControlBlock(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isLANControlBlockedPath(r.URL.Path) {
 			notFoundJSON(w, r)
 			return
 		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), lanListenerCtxKey{}, true)))
 	})
 }
 
@@ -117,10 +135,17 @@ func (m *LANManager) PasswordHash() string {
 	return m.state.currentHash()
 }
 
-// Start binds the network-facing listener on 0.0.0.0:port (falling back to an
-// ephemeral port if that port is in use) and serves the wrapped handler. It is
-// idempotent: a second call while running returns the already-bound port.
-func (m *LANManager) Start(port int) (int, error) {
+// Start binds the network-facing listener on <bind>:port (falling back to an
+// ephemeral port if that port is in use) and serves the wrapped handler. bind
+// is a mobilebridge bind mode — "" / "all" for every interface, "tailscale" for
+// the Tailscale interface only (WireGuard-encrypted transport, no TLS work), or
+// a literal IP. It is idempotent: a second call while running returns the
+// already-bound port, bind included.
+func (m *LANManager) Start(port int, bind string) (int, error) {
+	host, err := mobilebridge.BindAddress(bind)
+	if err != nil {
+		return 0, fmt.Errorf("bind LAN: %w", err)
+	}
 	m.mu.Lock()
 	if m.srv != nil {
 		defer m.mu.Unlock()
@@ -129,14 +154,15 @@ func (m *LANManager) Start(port int) (int, error) {
 	if port == 0 {
 		port = m.defaultPort
 	}
-	ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", port))
+	//nolint:gosec // G102: binding all interfaces is the deliberate default of the Connect Mobile LAN listener; it runs only while the bridge is enabled and behind authMiddleware, and `bind` narrows it when the user asks.
+	ln, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 	if err != nil {
 		if !isAddrInUse(err) {
 			m.mu.Unlock()
-			return 0, fmt.Errorf("bind LAN 0.0.0.0:%d: %w", port, err)
+			return 0, fmt.Errorf("bind LAN %s:%d: %w", host, port, err)
 		}
-		//nolint:gosec // G102: binding all interfaces is the deliberate purpose of the Connect Mobile LAN listener; it runs only while the bridge is enabled and behind authMiddleware.
-		if ln, err = net.Listen("tcp", "0.0.0.0:0"); err != nil {
+		//nolint:gosec // G102: see above — same bind host, ephemeral port.
+		if ln, err = net.Listen("tcp", net.JoinHostPort(host, "0")); err != nil {
 			m.mu.Unlock()
 			return 0, fmt.Errorf("bind LAN ephemeral: %w", err)
 		}

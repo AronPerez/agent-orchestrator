@@ -185,3 +185,72 @@ func TestCORSPreflightHeaders(t *testing.T) {
 		}
 	}
 }
+
+// A state-changing request runs on ambient authority on the no-auth loopback
+// listener — reaching the socket is the whole authorization — so "some loopback
+// origin" is not good enough for it, even though it stays good enough for reads
+// (workspace previews, dev servers). Only an origin this daemon actually names
+// gets through.
+func TestCORSStrictOriginOnStateChangingRoutes(t *testing.T) {
+	cfg := config.Config{AllowedOrigins: []string{"app://renderer"}}
+	srv := httptest.NewServer(newTestRouter(cfg, discardLogger(), nil))
+	defer srv.Close()
+
+	tests := []struct {
+		name          string
+		origin        string
+		secFetchSite  string
+		wantForbidden bool
+	}{
+		{name: "foreign loopback dev server", origin: "http://localhost:8080", wantForbidden: true},
+		{name: "foreign loopback IP", origin: "http://127.0.0.1:5173", wantForbidden: true},
+		{name: "workspace preview subdomain", origin: "http://ao-preview.abc.localhost:5181", wantForbidden: true},
+		{name: "cross-site with no origin at all", secFetchSite: "cross-site", wantForbidden: true},
+		{name: "allowlisted renderer", origin: "app://renderer"},
+		{name: "allowlisted origin the browser calls cross-site", origin: "app://renderer", secFetchSite: "cross-site"},
+		{name: "the daemon's own origin", origin: srv.URL},
+		{name: "browser-attested same-origin", secFetchSite: "same-origin"},
+		{name: "no origin (CLI)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/sessions", nil)
+			if err != nil {
+				t.Fatalf("NewRequest: %v", err)
+			}
+			if tt.origin != "" {
+				req.Header.Set("Origin", tt.origin)
+			}
+			if tt.secFetchSite != "" {
+				req.Header.Set("Sec-Fetch-Site", tt.secFetchSite)
+			}
+			resp, err := srv.Client().Do(req)
+			if err != nil {
+				t.Fatalf("POST: %v", err)
+			}
+			defer resp.Body.Close()
+			if got := resp.StatusCode == http.StatusForbidden; got != tt.wantForbidden {
+				t.Errorf("status = %d, forbidden = %v, want forbidden = %v", resp.StatusCode, got, tt.wantForbidden)
+			}
+		})
+	}
+}
+
+// Reads keep the looser loopback trust: workspace preview pages and local dev
+// servers fetch from the daemon on ports that can never be allowlisted ahead of
+// time, and a read carries no side effect to protect.
+func TestCORSLoopbackOriginStillReads(t *testing.T) {
+	srv := httptest.NewServer(newTestRouter(config.Config{}, discardLogger(), nil))
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/healthz", nil)
+	req.Header.Set("Origin", "http://ao-preview.abc.localhost:5181")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("GET /healthz: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("loopback origin read: got %d want 200", resp.StatusCode)
+	}
+}

@@ -69,7 +69,7 @@ func (c *MobileController) Regenerate(w http.ResponseWriter, r *http.Request) {
 // LANController is the runtime hook set the concrete bridge needs. httpd's
 // LANManager + authState satisfy it (adapter wired in daemon.go).
 type LANController interface {
-	Start(port int) (int, error)
+	Start(port int, bind string) (int, error)
 	Stop(ctx context.Context) error
 	Running() bool
 	BoundPort() int
@@ -85,7 +85,17 @@ type BridgeService struct {
 	DefaultPort int
 }
 
-func (b *BridgeService) currentHost() string { return mobilebridge.AutopickLANIP() }
+// currentHost is the address to show the user (and encode in the pairing QR).
+// When the bridge is pinned to one interface the answer is that interface's
+// address — autopicking the LAN IP there would print an address the listener
+// is not even bound to.
+func (b *BridgeService) currentHost() string {
+	st, _ := mobilebridge.Load(b.ConfigPath)
+	if host, err := mobilebridge.BindAddress(st.Bind); err == nil && host != "0.0.0.0" {
+		return host
+	}
+	return mobilebridge.AutopickLANIP()
+}
 
 // Status reports the current bridge state, host, and port. The plaintext
 // password is included only while the bridge is enabled (loopback route only).
@@ -115,14 +125,18 @@ func (b *BridgeService) enableWithPassword(pw string) (MobileStatusResponse, err
 	prevHash := b.LAN.PasswordHash()
 	wasRunning := b.LAN.Running()
 
+	// Load first so the persisted bind mode survives the write below — it is
+	// user-set config, not something enable/regenerate owns.
+	st, _ := mobilebridge.Load(b.ConfigPath)
 	// The persisted password is plaintext; the auth hash is derived in memory.
 	b.LAN.SetPasswordHash(mobilebridge.HashPassword(pw))
-	port, err := b.LAN.Start(b.DefaultPort)
+	port, err := b.LAN.Start(b.DefaultPort, st.Bind)
 	if err != nil {
 		b.LAN.SetPasswordHash(prevHash) // Start failed: undo the hash swap.
 		return MobileStatusResponse{}, err
 	}
-	if err := mobilebridge.Save(b.ConfigPath, mobilebridge.State{Enabled: true, Password: pw, LastPort: port}); err != nil {
+	st.Enabled, st.Password, st.LastPort = true, pw, port
+	if err := mobilebridge.Save(b.ConfigPath, st); err != nil {
 		// Persist failed after the listener came up. Roll back so reality matches
 		// the unchanged persisted state (and the UI's "enable failed"). A rotate on
 		// an already-running listener (wasRunning) keeps serving on the prior hash;

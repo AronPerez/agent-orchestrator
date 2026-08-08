@@ -21,6 +21,12 @@ UI shows **"terminal disconnected, reattaching"** in an endless loop. The daemon
 sessions, and `ao doctor` all look perfectly healthy in this state — only the env-var
 restart fixes it. It does **not** self-heal.
 
+The same allowlist now also gates **every state-changing request** (any non-GET), not
+just `/mux`. A loopback origin used to be trusted for those automatically; it no longer
+is, because that trust extended to any page any local dev server happened to be serving.
+So an unallowlisted browser UI does not merely lose terminals — spawning, killing, and
+sending all 403 too. Same fix, same env var.
+
 The known-good origin value is documented in the comment block of `lan-web-server.sh`.
 
 ### Verify the fix

@@ -221,6 +221,18 @@ function rendererUrl(): string {
 	return `${RENDERER_ORIGIN}/index.html`;
 }
 
+// devServerOrigin is the origin a Vite-served renderer presents to the daemon,
+// or "" in a packaged build (where the renderer is app://renderer). Only the
+// origin, never the path — that is what an Origin header carries.
+function devServerOrigin(): string {
+	if (typeof MAIN_WINDOW_VITE_DEV_SERVER_URL === "undefined" || !MAIN_WINDOW_VITE_DEV_SERVER_URL) return "";
+	try {
+		return new URL(MAIN_WINDOW_VITE_DEV_SERVER_URL).origin;
+	} catch {
+		return "";
+	}
+}
+
 function preloadPath(): string {
 	return path.join(__dirname, "preload.js");
 }
@@ -653,6 +665,16 @@ function daemonEnv(forceKeep = keepDaemonAlive(process.env)): NodeJS.ProcessEnv 
 		if (!process.env.AO_PORT) devExtras.AO_PORT = String(DEV_DAEMON_PORT);
 		if (!process.env.AO_RUN_FILE) devExtras.AO_RUN_FILE = runFilePath() ?? "";
 		if (!process.env.AO_DATA_DIR) devExtras.AO_DATA_DIR = path.join(os.homedir(), ".ao", DEV_STATE_SUBDIR, "data");
+		// A dev renderer is served by Vite, so it presents http://localhost:<port>
+		// instead of app://renderer. The daemon no longer blanket-trusts loopback
+		// origins for /mux and state-changing routes (any local dev server could
+		// otherwise drive it), so name this exact origin or dev-mode terminals and
+		// every write 403. Packaged builds are unaffected: app://renderer is the
+		// daemon's own default.
+		const devOrigin = devServerOrigin();
+		if (!process.env.AO_ALLOWED_ORIGINS && devOrigin) {
+			devExtras.AO_ALLOWED_ORIGINS = `app://renderer,${devOrigin}`;
+		}
 	}
 	// Windows keeps the old behavior exactly: no shell probe, no unix PATH floor.
 	if (process.platform === "win32") {
