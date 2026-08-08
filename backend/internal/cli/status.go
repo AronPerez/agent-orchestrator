@@ -36,12 +36,15 @@ type daemonStatus struct {
 	Port      int         `json:"port,omitempty"`
 	StartedAt *time.Time  `json:"startedAt,omitempty"`
 	Uptime    string      `json:"uptime,omitempty"`
-	RunFile   string      `json:"runFile"`
-	DataDir   string      `json:"dataDir"`
-	Health    string      `json:"health,omitempty"`
-	Ready     string      `json:"ready,omitempty"`
-	Error     string      `json:"error,omitempty"`
-	owned     bool
+	RunFile   string      `json:"runFile,omitempty"`
+	DataDir   string      `json:"dataDir,omitempty"`
+	// URL is set only for a remote target, where there is no local run-file or
+	// data dir to report.
+	URL    string `json:"url,omitempty"`
+	Health string `json:"health,omitempty"`
+	Ready  string `json:"ready,omitempty"`
+	Error  string `json:"error,omitempty"`
+	owned  bool
 }
 
 type probeResult struct {
@@ -74,6 +77,9 @@ func newStatusCommand(ctx *commandContext) *cobra.Command {
 }
 
 func (c *commandContext) inspectDaemon(ctx context.Context) (daemonStatus, error) {
+	if c.remote != nil {
+		return c.inspectRemoteDaemon(ctx), nil
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		return daemonStatus{}, err
@@ -100,7 +106,7 @@ func (c *commandContext) inspectDaemon(ctx context.Context) (daemonStatus, error
 		return st, nil
 	}
 
-	health, err := c.readProbe(ctx, info.Port, "healthz")
+	health, err := c.readProbe(ctx, loopbackBase(info.Port), "healthz")
 	if err != nil {
 		st.State = stateUnhealthy
 		st.Error = err.Error()
@@ -118,7 +124,7 @@ func (c *commandContext) inspectDaemon(ctx context.Context) (daemonStatus, error
 		return st, nil
 	}
 
-	ready, err := c.readProbe(ctx, info.Port, "readyz")
+	ready, err := c.readProbe(ctx, loopbackBase(info.Port), "readyz")
 	if err != nil {
 		st.State = stateNotReady
 		st.Error = err.Error()
@@ -139,14 +145,58 @@ func (c *commandContext) inspectDaemon(ctx context.Context) (daemonStatus, error
 	return st, nil
 }
 
-func (c *commandContext) readProbe(ctx context.Context, port int, path string) (probeResult, error) {
+func loopbackBase(port int) string {
+	return fmt.Sprintf("http://%s:%d", config.LoopbackHost, port)
+}
+
+// inspectRemoteDaemon reports the state of a daemon reached over the network.
+// There is no run-file and no local PID to gate on, so liveness comes entirely
+// from the authenticated /healthz and /readyz probes.
+func (c *commandContext) inspectRemoteDaemon(ctx context.Context) daemonStatus {
+	st := daemonStatus{State: stateStopped, URL: c.remote.baseURL}
+
+	health, err := c.readProbe(ctx, c.remote.baseURL, "healthz")
+	if err != nil {
+		st.State = stateUnhealthy
+		st.Error = err.Error()
+		return st
+	}
+	if health.Service != daemonmeta.ServiceName {
+		st.State = stateUnhealthy
+		st.Error = "healthz: response is not from AO daemon"
+		return st
+	}
+	st.PID = health.PID
+	st.Health = health.Status
+	if health.Status != "ok" {
+		st.State = stateUnhealthy
+		return st
+	}
+
+	ready, err := c.readProbe(ctx, c.remote.baseURL, "readyz")
+	if err != nil {
+		st.State = stateNotReady
+		st.Error = err.Error()
+		return st
+	}
+	st.Ready = ready.Status
+	if ready.Status == string(stateReady) {
+		st.State = stateReady
+		return st
+	}
+	st.State = stateNotReady
+	return st
+}
+
+func (c *commandContext) readProbe(ctx context.Context, base, path string) (probeResult, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, fmt.Sprintf("http://%s:%d/%s", config.LoopbackHost, port, path), http.NoBody)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, base+"/"+path, http.NoBody) // #nosec G704 -- base is loopback or an explicitly configured daemon URL.
 	if err != nil {
 		return probeResult{}, err
 	}
+	c.authorize(req)
 	resp, err := c.deps.HTTPClient.Do(req)
 	if err != nil {
 		return probeResult{}, fmt.Errorf("%s: %w", path, err)
@@ -200,11 +250,20 @@ func writeStatus(cmd *cobra.Command, st daemonStatus) error {
 			return err
 		}
 	}
-	if _, err := fmt.Fprintf(out, "  run file: %s\n", st.RunFile); err != nil {
-		return err
+	if st.URL != "" {
+		if _, err := fmt.Fprintf(out, "  url: %s\n", st.URL); err != nil {
+			return err
+		}
 	}
-	if _, err := fmt.Fprintf(out, "  data dir: %s\n", st.DataDir); err != nil {
-		return err
+	if st.RunFile != "" {
+		if _, err := fmt.Fprintf(out, "  run file: %s\n", st.RunFile); err != nil {
+			return err
+		}
+	}
+	if st.DataDir != "" {
+		if _, err := fmt.Fprintf(out, "  data dir: %s\n", st.DataDir); err != nil {
+			return err
+		}
 	}
 	if st.Health != "" {
 		if _, err := fmt.Fprintf(out, "  healthz: %s\n", st.Health); err != nil {
