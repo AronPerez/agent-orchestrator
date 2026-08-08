@@ -12,16 +12,17 @@
 # So local installs have to be done by hand: build, copy into /Applications,
 # deep ad-hoc re-sign, strip the quarantine flag, launch. This wraps that.
 #
-# It also (by default, if scripts/ao-svc is present) reloads the AO daemon from
-# the same commit, so the desktop app attaches to that daemon via its build
-# identity instead of failing the daemon identity check. Skip with --no-daemon.
+# It also (by default, if scripts/ao-svc is present) rebuilds the source-built
+# ao CLI from the same commit (ao-svc reload). The daemon itself is bundled in
+# the app and spawned by it on launch, so the app+daemon pair always match; the
+# CLI rebuild keeps `ao` on PATH at the same commit too. Skip with --no-daemon.
 #
 # Usage:
 #   scripts/install-desktop-app.sh [options]
 #
 # Options:
 #   --skip-build     Use the existing build in frontend/out (don't run `npm run make`).
-#   --no-daemon      Don't reload the AO daemon (skip `ao-svc reload`).
+#   --no-daemon      Don't rebuild the ao CLI (skip `ao-svc reload`).
 #   --no-launch      Install but don't open the app.
 #   --dest DIR       Install directory (default: /Applications).
 #   -h, --help       Show this help.
@@ -113,12 +114,12 @@ if [ -n "$bundle_id" ] && pgrep -f "${app_dest}/Contents/MacOS/" >/dev/null 2>&1
   pkill -f "${app_dest}/Contents/MacOS/" 2>/dev/null || true
 fi
 
-# --- 4. reload the daemon from the same commit (optional) ------------------
+# --- 4. rebuild the ao CLI from the same commit (optional) -----------------
 if [ "$reload_daemon" -eq 1 ] && [ -x "${repo_root}/scripts/ao-svc" ]; then
-  log "Reloading the AO daemon so it matches this build (ao-svc reload)…"
-  "${repo_root}/scripts/ao-svc" reload || echo "warning: ao-svc reload failed; the app may hit the daemon identity check." >&2
+  log "Rebuilding the ao CLI from this tree (ao-svc reload)…"
+  "${repo_root}/scripts/ao-svc" reload || echo "warning: ao-svc reload failed; \`ao\` on PATH may lag this build." >&2
 elif [ "$reload_daemon" -eq 1 ]; then
-  echo "note: scripts/ao-svc not found — skipping daemon reload. Make sure whatever runs your daemon is on this same commit." >&2
+  echo "note: scripts/ao-svc not found — skipping ao CLI rebuild." >&2
 fi
 
 # --- 5. install ------------------------------------------------------------
