@@ -610,3 +610,129 @@ func TestSpawnRemoteRefusesInheritedProjectEnv(t *testing.T) {
 		t.Fatalf("refused spawn still contacted the remote daemon: %v", requests)
 	}
 }
+
+// refuseLocalOnly is the whole point of the local-only refusals: the operator
+// must be able to see, from the message alone, which flag pointed them off-box
+// and where it pointed. Exit code 2, matching #50 and #56.
+func TestRefuseLocalOnlyNamesFlagAndURL(t *testing.T) {
+	local := &commandContext{deps: Deps{}.withDefaults()}
+	if err := local.refuseLocalOnly("ao doctor", "is local"); err != nil {
+		t.Fatalf("local refuseLocalOnly = %v, want nil (local behavior must not change)", err)
+	}
+	if err := local.refuseDaemonURLFlag(); err != nil {
+		t.Fatalf("local refuseDaemonURLFlag = %v, want nil", err)
+	}
+
+	for _, source := range []string{"--url", "AO_URL"} {
+		remote := &commandContext{
+			deps:   Deps{}.withDefaults(),
+			remote: &remoteTarget{baseURL: "http://host:3011", token: "tok", source: source},
+		}
+		err := remote.refuseLocalOnly("ao doctor", "probes this machine")
+		if err == nil {
+			t.Fatalf("source %s: refuseLocalOnly = nil, want a refusal", source)
+		}
+		for _, want := range []string{source, "http://host:3011", "ao doctor", "probes this machine"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("source %s: error %q does not name %q", source, err, want)
+			}
+		}
+		if got := ExitCode(err); got != 2 {
+			t.Errorf("source %s: exit code = %d, want 2 (usage)", source, got)
+		}
+	}
+
+	// `ao daemon` alone refuses the flag and ignores the environment variable:
+	// it is spawned by the desktop app, so an exported AO_URL must not brick it.
+	flagged := &commandContext{
+		deps:   Deps{}.withDefaults(),
+		remote: &remoteTarget{baseURL: "http://host:3011", token: "tok", source: "--url"},
+	}
+	if err := flagged.refuseDaemonURLFlag(); err == nil {
+		t.Error("refuseDaemonURLFlag with --url = nil, want a refusal")
+	}
+	exported := &commandContext{
+		deps:   Deps{}.withDefaults(),
+		remote: &remoteTarget{baseURL: "http://host:3011", token: "tok", source: "AO_URL"},
+	}
+	if err := exported.refuseDaemonURLFlag(); err != nil {
+		t.Errorf("refuseDaemonURLFlag with AO_URL = %v, want nil (must not brick a spawned daemon)", err)
+	}
+}
+
+// End to end: each command that acts only on this machine must refuse --url
+// before it reaches the network. The real assertion is the EMPTY request log —
+// `ao preview --url` reaching a remote daemon sets a preview target on a session
+// that is not the operator's, and nothing in its output would say so.
+//
+// Deliberately path-free (no filepath, no t.Chdir, no absolute-path literals):
+// #50 shipped a Windows-only break by judging a path with filepath.IsAbs, so
+// these assert identically on every runner OS.
+func TestLocalOnlyCommandsRefuseRemoteTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"doctor", []string{"doctor"}},
+		{"preview", []string{"preview", "README.md"}},
+		{"preview clear", []string{"preview", "clear"}},
+		{"preview status", []string{"preview", "status"}},
+		{"import", []string{"import", "--yes"}},
+		{"start", []string{"start"}},
+		{"daemon", []string{"daemon"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			aoHome(t)
+			setConfigEnv(t)
+			// Set, to prove the refusal beats the local session id rather than
+			// falling out of preview's "not inside a session" error.
+			t.Setenv("AO_SESSION_ID", "local-1")
+			t.Setenv("AO_TOKEN", "tok")
+
+			var requests int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				http.NotFound(w, r)
+			}))
+			t.Cleanup(srv.Close)
+
+			_, _, err := executeCLI(t, Deps{}, append(tc.args, "--url", srv.URL)...)
+			if err == nil {
+				t.Fatalf("ao %s --url succeeded, want a refusal", strings.Join(tc.args, " "))
+			}
+			if !strings.Contains(err.Error(), "targets the remote daemon at "+srv.URL) {
+				t.Fatalf("error = %v, want it to name --url and %s", err, srv.URL)
+			}
+			if got := ExitCode(err); got != 2 {
+				t.Errorf("exit code = %d, want 2 (usage)", got)
+			}
+			if requests != 0 {
+				t.Errorf("%d request(s) reached the remote daemon, want 0", requests)
+			}
+		})
+	}
+}
+
+// Local behavior is untouched: with no remote target, every one of these
+// commands must fail (or not) for exactly the reasons it did before.
+func TestLocalOnlyCommandsUnchangedWithoutRemoteTarget(t *testing.T) {
+	aoHome(t)
+	setConfigEnv(t)
+	t.Setenv("AO_SESSION_ID", "")
+
+	// preview still reports the missing session id, not a remote refusal.
+	_, _, err := executeCLI(t, Deps{}, "preview", "README.md")
+	if err == nil || !strings.Contains(err.Error(), "AO_SESSION_ID is not set") {
+		t.Fatalf("local ao preview error = %v, want the missing-session-id usage error", err)
+	}
+
+	// doctor still runs its checks. Which ones pass depends on the runner, so
+	// the assertion is only that it did not refuse and did print a report.
+	out, _, err := executeCLI(t, Deps{}, "doctor")
+	if err != nil && strings.Contains(err.Error(), "targets the remote daemon") {
+		t.Fatalf("local ao doctor refused: %v", err)
+	}
+	if !strings.Contains(out, "Core:") {
+		t.Fatalf("local ao doctor output = %q, want the Core section", out)
+	}
+}
