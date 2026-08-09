@@ -1936,8 +1936,11 @@ func (c *SessionsController) cleanup(w http.ResponseWriter, r *http.Request) {
 	for _, skip := range out.Skipped {
 		skipped = append(skipped, CleanupSkippedSession{SessionID: skip.SessionID, Reason: skip.Reason})
 	}
+	// ok reports whether cleanup did everything it was asked to, so a caller can
+	// branch on one field: a declined teardown (e.g. a worktree with
+	// uncommitted changes) is listed in skipped and is not success.
 	envelope.WriteJSON(w, http.StatusOK, CleanupSessionsResponse{
-		OK: true, Cleaned: out.Cleaned, AlreadyGone: out.AlreadyGone, Skipped: skipped,
+		OK: len(skipped) == 0, Cleaned: out.Cleaned, AlreadyGone: out.AlreadyGone, Skipped: skipped,
 	})
 }
 
