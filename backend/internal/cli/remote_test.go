@@ -445,3 +445,59 @@ func TestPostLoopbackJSONSkippedForRemote(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A host-relative path aimed at a remote daemon is refused, because the daemon
+// resolves it against ITS OWN home/cwd — silently naming a directory on another
+// machine. Measured: `ao project add --path '~/repo' --url <remote>` registers
+// the remote host's ~/repo and never consults the operator's.
+func TestCheckRemoteProjectPathRefusesHostRelative(t *testing.T) {
+	aoHome(t)
+	remote := &commandContext{
+		deps:   Deps{}.withDefaults(),
+		remote: &remoteTarget{baseURL: "http://host:3011", token: "tok", source: "--url"},
+	}
+	for _, p := range []string{"~", "~/repo", "~user/repo", "repo", "./repo", "../repo"} {
+		err := remote.checkRemoteProjectPath(p)
+		if err == nil {
+			t.Fatalf("checkRemoteProjectPath(%q) = nil, want a refusal", p)
+		}
+		if ExitCode(err) != 2 {
+			t.Errorf("checkRemoteProjectPath(%q) exit code = %d, want 2 (usage)", p, ExitCode(err))
+		}
+		if !strings.Contains(err.Error(), "http://host:3011") {
+			t.Errorf("refusal for %q does not name the target: %v", p, err)
+		}
+	}
+
+	// Absolute paths stay allowed: they are meaningful on the remote host, and
+	// refusing them would make a remote target useless.
+	if err := remote.checkRemoteProjectPath("/srv/repo"); err != nil {
+		t.Fatalf("absolute path refused: %v", err)
+	}
+
+	// Local behavior is untouched — every form above is still accepted.
+	local := &commandContext{deps: Deps{}.withDefaults()}
+	for _, p := range []string{"~", "~/repo", "repo", "./repo", "/srv/repo"} {
+		if err := local.checkRemoteProjectPath(p); err != nil {
+			t.Fatalf("local checkRemoteProjectPath(%q) = %v, want nil", p, err)
+		}
+	}
+}
+
+// The "registered project ... at <path>" echo is the only moment the operator
+// can catch a wrong host, and for an absolute path the path alone is identical
+// to what they typed. Name the daemon for a remote target; stay byte-identical
+// for a local one.
+func TestResolvedBySuffix(t *testing.T) {
+	local := &commandContext{deps: Deps{}.withDefaults()}
+	if got := local.resolvedBySuffix(); got != "" {
+		t.Fatalf("local suffix = %q, want empty (output must not change)", got)
+	}
+	remote := &commandContext{
+		deps:   Deps{}.withDefaults(),
+		remote: &remoteTarget{baseURL: "http://host:3011", token: "tok", source: "--url"},
+	}
+	if got := remote.resolvedBySuffix(); !strings.Contains(got, "http://host:3011") {
+		t.Fatalf("remote suffix = %q, want it to name the daemon", got)
+	}
+}
