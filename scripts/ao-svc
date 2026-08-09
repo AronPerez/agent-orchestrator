@@ -17,7 +17,11 @@ dom="gui/$(id -u)"
 LA="$HOME/Library/LaunchAgents"
 repo="$HOME/dev/ag-orc"                                                  # symlink to the checkout (dev-setup.sh)
 cache_bin="${XDG_CACHE_HOME:-$HOME/.cache}/aoagents/agent-orchestrator/bin/ao"
-services=(dev.agent-orchestrator.env dev.agent-orchestrator.lan-web dev.agent-orchestrator.mobile-web dev.agent-orchestrator.phone-bridge)
+# lan-web and phone-bridge were retired once the daemon started serving the
+# browser UI from its own LAN origin: the second Vite server had nothing left to
+# serve, and the phone proxy existed only to launder Origin headers. Their
+# launchd jobs are booted out by scripts/dev-setup.sh.
+services=(dev.agent-orchestrator.env dev.agent-orchestrator.mobile-web)
 
 case "${1:-status}" in
   down)

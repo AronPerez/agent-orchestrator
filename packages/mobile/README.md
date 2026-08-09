@@ -80,10 +80,12 @@ zoom, and Restore all work.
 - **Browser on the same machine as the daemon:** set Host `localhost`, API
   Port `3001` in Settings. Zero daemon config - the CORS guard allows
   loopback origins.
-- **Browser on a different machine:** the daemon 403s non-loopback browser
-  Origins. Either run the Origin-rewriting bridge (`scripts/README.md`) and
-  point Settings at `<machine>:3011`, or start the daemon with
-  `AO_ALLOWED_ORIGINS=http://<web-host>:8081`.
+- **Browser on a different machine:** open the Connect Mobile listener directly
+  — `http://<machine>:3011` — and log in with the connection password. The daemon
+  serves its own web UI there, same-origin with the API, so no allowlist entry and
+  no bridge is involved. Only a UI you host _elsewhere_ (the Expo web build on
+  `:8081`, a Vite dev server) still needs `AO_ALLOWED_ORIGINS=http://<web-host>:8081`
+  on the daemon.
 
 ## Step 1 — Turn on Connect Mobile on the desktop
 
@@ -259,7 +261,7 @@ lib/
   pairing.ts         pairing-QR payload parser
   store.tsx          app state + connection polling
   theme.ts, ui.tsx   design primitives
-scripts/             ao-phone-proxy.js — superseded by Connect Mobile, kept for reference
+scripts/             icon generation and preview helpers
 ```
 
 ## Verify

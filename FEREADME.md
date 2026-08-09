@@ -1,58 +1,62 @@
 # ~/.ao — Agent Orchestrator runtime
 
 Runtime state + logs for the **new** AO install (binary: `~/.local/bin/ao`).
-The daemon listens on `127.0.0.1:3001`. The web UI is a separate LAN Vite server on
-`http://192.168.1.250:3000` (see "Web UI" below).
+The daemon listens on `127.0.0.1:3001` and, when Connect Mobile is enabled, serves
+the web UI itself on its LAN listener (see "Web UI" below).
 
-## ⚠️ Restarting the daemon — set AO_ALLOWED_ORIGINS or the UI terminals break
+## Web UI: the daemon serves it — no second server, no AO_ALLOWED_ORIGINS
 
-Always restart from a **real terminal** (not launchd — see TCC note) with the LAN
-origin allowlisted:
+Enable **Settings → Connect Mobile**, then open the `host:port` it shows (`:3011`
+by default) from any browser on the network. The daemon serves the UI from that
+same origin and prompts for the connection password; the cookie it sets carries
+REST, the SSE stream, and terminals.
+
+Nothing else needs configuring. The UI and the API are the same origin now, so
+`AO_ALLOWED_ORIGINS` is **not** involved — it is load-bearing only for a UI hosted
+somewhere else (a Vite dev server, or a build served from another host). If a
+daemon-served page ever needs an allowlist entry, that is a bug, not a setting.
+
+**Requires a daemon built at or after `2399595db`.** An older one has no embedded
+UI and answers a browser navigation with a JSON 401. After updating the repo,
+redeploy the daemon (`scripts/install-desktop-app.sh`, or `ao-svc reload` for the
+CLI) _before_ expecting the browser UI.
+
+**Retired:** the `dev.agent-orchestrator.lan-web` Vite server on `:3000` and the
+`dev.agent-orchestrator.phone-bridge` proxy on `:3011`. The first served a
+cross-origin UI that needed the allowlist; the second laundered `Origin` headers so
+a browser could reach the loopback daemon. The daemon binds `:3011` itself now and
+authenticates with the connection password. `scripts/dev-setup.sh` boots both jobs
+out and removes their plists on its next run.
+
+### Verify the browser path
 
 ```sh
-ao stop --timeout 30s && AO_ALLOWED_ORIGINS=http://192.168.1.250:3000 ao start --timeout 30s
-```
+# host:port of the LAN listener (Settings → Connect Mobile shows both):
+curl -s -o /dev/null -w '%{http_code} %{content_type}\n' http://<lan-ip>:3011/
+#   200 text/html  → the daemon is serving the UI (login prompt)
+#   401 application/json → the daemon predates 2399595db; redeploy it
 
-**Why:** the daemon gates the terminal-attach WebSocket (`GET /mux`) by Origin via
-`AO_ALLOWED_ORIGINS`. The browser loads the UI from `http://192.168.1.250:3000`, so that
-is the Origin it sends. A bare `ao start` defaults the allowlist to the daemon's own
-`127.0.0.1:3001`, so every UI terminal WebSocket upgrade is rejected with **403** and the
-UI shows **"terminal disconnected, reattaching"** in an endless loop. The daemon, tmux
-sessions, and `ao doctor` all look perfectly healthy in this state — only the env-var
-restart fixes it. It does **not** self-heal.
+# Data stays gated until you log in — 401 here is CORRECT, not a fault:
+curl -s -o /dev/null -w '%{http_code}\n' http://<lan-ip>:3011/api/v1/sessions
 
-The same allowlist now also gates **every state-changing request** (any non-GET), not
-just `/mux`. A loopback origin used to be trusted for those automatically; it no longer
-is, because that trust extended to any page any local dev server happened to be serving.
-So an unallowlisted browser UI does not merely lose terminals — spawning, killing, and
-sending all 403 too. Same fix, same env var.
-
-The known-good origin value is documented in the comment block of `lan-web-server.sh`.
-
-### Verify the fix
-
-```sh
-# Should print "HTTP/1.1 101 Switching Protocols" (was 403 when broken):
-curl -s -i -N -H "Connection: Upgrade" -H "Upgrade: websocket" \
-  -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
-  -H "Origin: http://192.168.1.250:3000" http://127.0.0.1:3001/mux | head -1
-
-# Fresh status=101 lines after the restart timestamp = UI terminals attaching:
+# Terminals attaching, after logging in from the browser:
 grep 'path=/mux' ~/.ao/daemon.log | grep 'status=101' | tail
 ```
 
+A failed **login** leaves no line in `~/.ao/daemon.log` at all: `POST
+/api/v1/auth/login` is answered outside the request logger. Silence there means
+nothing — check the browser's network tab instead.
+
 (A `/api/v1/notifications/stream` request stuck on **"pending"** in the network tab is
-normal — it's a long-lived SSE stream, unrelated to the mux issue.)
+normal — it's a long-lived SSE stream.)
 
 ## Web UI (LAN)
 
-Served by launchd job `dev.agent-orchestrator.lan-web`
-(`~/Library/LaunchAgents/dev.agent-orchestrator.lan-web.plist` → `lan-web-server.sh`),
-a Vite dev server bound to `0.0.0.0:3000`. launchd KeepAlive supervises it across crashes
-and reboots. **This LaunchAgent intentionally does NOT start the daemon** — the
-skyvern / skyvern-cloud repos under `~/Desktop` are TCC-blocked for launchd-spawned
-processes, so a daemon launched there couldn't read them. Start the daemon from a
-terminal (which has Desktop access) instead, per the command above.
+Served by the daemon itself on the Connect Mobile listener — there is no separate
+web-server job any more. See the section at the top for how to reach it.
+
+The **mobile** Expo app is still a launchd job (`dev.agent-orchestrator.mobile-web`,
+`~/.ao/mobile-web-server.sh`) on `:8081`; it points at the same LAN listener.
 
 ## What a daemon restart does to running sessions
 
@@ -73,16 +77,16 @@ re-checks-out each session's git worktree and relaunches the agent as `claude --
 
 ## File map
 
-| Path                    | What                                                     |
-| ----------------------- | -------------------------------------------------------- |
-| `bin/`                  | helper shims (e.g. `gh` wrapper used for git credential) |
-| `daemon.log`            | daemon HTTP + lifecycle log                              |
-| `data/`                 | sqlite (`ao.db`), worktrees, session state, `hooks.log`  |
-| `electron/`             | Electron desktop shell state                             |
-| `lan-web-server.sh`     | launchd-run Vite UI launcher (port 3000, LAN)            |
-| `lan-web.{out,err}.log` | Vite UI server stdout/stderr                             |
-| `running.json`          | live daemon `{pid, port, startedAt}`                     |
-| `mandates/`             | session mandate backups                                  |
+| Path                       | What                                                      |
+| -------------------------- | --------------------------------------------------------- |
+| `bin/`                     | helper shims (e.g. `gh` wrapper used for git credential)  |
+| `daemon.log`               | daemon HTTP + lifecycle log                               |
+| `data/`                    | sqlite (`ao.db`), worktrees, session state, `hooks.log`   |
+| `electron/`                | Electron desktop shell state                              |
+| `mobile-web-server.sh`     | launchd-run Expo/Metro launcher for the mobile app (8081) |
+| `mobile-web.{out,err}.log` | Expo server stdout/stderr                                 |
+| `running.json`             | live daemon `{pid, port, startedAt}`                      |
+| `mandates/`                | session mandate backups                                   |
 
 ## Health check
 

@@ -61,3 +61,49 @@ Security posture:
   reworking the auth, lifecycle, or persistence chosen here.
 - AGENTS.md must be updated so the loopback-only rule reads as scoped to the
   Loopback Listener, or future agents will (correctly) flag this code as a violation.
+
+## Amendment — 2026-08-08: the LAN Listener now serves a UI, and the proxy is retired
+
+The decision above stands unchanged; this records what the listener grew into.
+Three changes landed on `develop` (`ff9ea706c`, `ae3394e9f`, `2399595db`):
+
+- **The LAN Listener serves the web UI as well as the app API**, from its own
+  origin (`backend/internal/httpd/webui`). The static shell is served _without_ the
+  Connection Password — it is the password prompt itself, and a browser cannot send
+  a credential it has not been asked for yet. Every data route stays gated. The
+  bypass is scoped by the router: a request is treated as UI only when the router
+  has no handler for it, and the static handler is served directly rather than
+  through the router, so no router middleware runs on the unauthenticated path.
+- **UI and API are same-origin.** That is what retires `AO_ALLOWED_ORIGINS` for
+  this flow: origin trust is now carried by host-equality (`Origin` host:port ==
+  request `Host`), so a daemon-served page needs no allowlist entry and no
+  configuration at all. `AO_ALLOWED_ORIGINS` remains load-bearing **only for a
+  separately hosted UI** — a Vite dev server, or a build served from another host.
+- **A third credential channel, the `ao_conn` cookie**, minted by
+  `POST /api/v1/auth/login` (204 + `HttpOnly; SameSite=Strict; Path=/`). It exists
+  because a browser cannot put a header on everything: `EventSource` sends cookies
+  and nothing else. Because a cookie is the one credential a browser attaches to
+  requests a hostile page initiates, both minting it and authenticating with it
+  require a strict origin — unlike `Authorization: Bearer` and the `ao.bearer.*`
+  subprotocol, which no page can forge and which stay exempt.
+
+**`ao-phone-proxy` is retired**, together with the `lan-web` Vite service. The
+proxy existed to launder `Origin` headers so a browser could reach a loopback-only
+daemon — the approach this ADR's Context records the user rejecting. It is now
+unnecessary rather than merely unwanted: the LAN Listener binds the port itself
+(`:3011` by default), and its Connection Password plus per-source lockout replaces
+the proxy's IP trust-on-first-connect. Note the property that changes: TOFU pinned
+exactly one device forever, whereas any device holding the password may now connect
+— which is the pairing model this ADR chose, not a regression introduced by the
+retirement.
+
+**Debugging trap worth knowing:** `POST /api/v1/auth/login` is answered by
+`authMiddleware`, which sits _outside_ `requestLogger`. A login — successful or
+failed — leaves **no entry in the daemon access log**. Do not read that silence as
+"the request never arrived"; instrument the handler or look at the client.
+
+TLS remains deferred exactly as decided above. The bind host may now be _narrowed_
+(`bind: all | tailscale | <ip>` in `~/.ao/mobile/config.json`); binding the
+Tailscale interface yields WireGuard-encrypted transport without any TLS work,
+which is a mitigation for the plaintext consequence above, not a replacement for
+the deferred TLS decision.

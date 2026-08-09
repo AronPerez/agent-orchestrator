@@ -1,6 +1,6 @@
 ---
 name: machine-setup
-description: Use when setting up AO on a fresh or rebuilt macOS machine, migrating machines, or repairing a drifted install (missing plists, stale ~/.ao scripts, ao not on PATH, lan-web won't start after reinstall).
+description: Use when setting up AO on a fresh or rebuilt macOS machine, migrating machines, or repairing a drifted install (missing plists, stale ~/.ao scripts, ao not on PATH, the browser UI or mobile-web job not coming up after reinstall).
 trigger: User wants AO running on a new machine, or the local install no longer matches the repo.
 ---
 
@@ -13,20 +13,20 @@ skill (`skills/local-services/SKILL.md`).
 
 ## 1. Prerequisites (install once, not scripted)
 
-| Tool           | Why                                            | Check              |
-| -------------- | ---------------------------------------------- | ------------------ |
-| go             | builds the `ao` daemon/CLI                     | `go version`       |
-| node via nvm   | lan-web resolves node from `~/.nvm` explicitly | `nvm ls`           |
-| tmux           | session runtime — spawn fails fast without it  | `tmux -V`          |
-| claude         | default agent harness                          | `claude --version` |
-| gh (logged in) | git credential for HTTPS remotes + PR tooling  | `gh auth status`   |
+| Tool           | Why                                           | Check              |
+| -------------- | --------------------------------------------- | ------------------ |
+| go             | builds the `ao` daemon/CLI                    | `go version`       |
+| node via nvm   | service wrappers resolve node from `~/.nvm`   | `nvm ls`           |
+| tmux           | session runtime — spawn fails fast without it | `tmux -V`          |
+| claude         | default agent harness                         | `claude --version` |
+| gh (logged in) | git credential for HTTPS remotes + PR tooling | `gh auth status`   |
 
 ## 2. Bootstrap
 
 ```sh
 git clone https://github.com/AronPerez/agent-orchestrator.git ~/dev/agent-orchestrator
 cd ~/dev/agent-orchestrator
-(cd frontend && npm install)     # vite — lan-web needs it
+(cd frontend && npm install)     # vite — the daemon build embeds the web UI bundle
 scripts/dev-setup.sh             # build ao, deploy ~/.ao scripts, generate plists, load jobs
 ```
 
@@ -54,18 +54,26 @@ launchd-spawned daemons from reading them (terminal-start override in
 
 ```sh
 ao status && ao doctor                            # daemon ready, tools found
-launchctl list | grep agent-orchestrator          # both jobs loaded
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3000/   # 200
+launchctl list | grep agent-orchestrator          # env + mobile-web loaded
 ```
 
-Then open `http://<lan-ip>:3000` (both wrappers derive the LAN IP themselves —
-no hardcoding, survives DHCP drift).
+For the browser UI, enable **Settings → Connect Mobile** and open the `host:port`
+it shows (`:3011` by default) — the daemon serves the UI from that origin and
+prompts for the connection password. It needs a daemon built at or after
+`2399595db`; an older one answers a browser navigation with a JSON 401.
+
+```sh
+curl -s -o /dev/null -w '%{http_code} %{content_type}\n' http://<lan-ip>:3011/  # 200 text/html
+```
 
 ## Pitfalls
 
 - **`ao` resolves but wrong port** — another AO install shadows it; `which -a ao`,
   expect `~/.local/bin/ao` → port 3001.
-- **lan-web crash-loops** — `frontend/node_modules` missing (step 2) or no nvm
-  node; check `~/.ao/lan-web.err.log`.
+- **mobile-web crash-loops** — `packages/mobile/node_modules` missing or no nvm
+  node; check `~/.ao/mobile-web.err.log`.
+- **Browser UI 401s a plain navigation** — the running daemon has no embedded UI
+  bundle. Redeploy it (`scripts/install-desktop-app.sh`); building without
+  `frontend/node_modules` skips the bundle silently.
 - **Never `ao start`** to launch the daemon here — it fetches the release
-  desktop app; the daemon runs via its launchd job (dev-setup loads it).
+  desktop app. The desktop app owns the daemon; there is no daemon launchd job.
