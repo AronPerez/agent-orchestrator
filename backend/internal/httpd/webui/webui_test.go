@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -134,5 +135,76 @@ func TestContentSecurityPolicyIgnoresAHostileHost(t *testing.T) {
 	req.Host = "evil; script-src *"
 	if csp := contentSecurityPolicy(req); strings.Contains(csp, "script-src *") {
 		t.Fatalf("hostile Host reflected into CSP: %q", csp)
+	}
+}
+
+// TestHandlerRefusesTraversal pins the classic static-server bug. This is safe
+// by construction — the bundle is a virtual FS rooted by fs.Sub, with no parent
+// to escape to, and every candidate name is path.Clean'd before lookup — but
+// "safe by construction" is exactly the claim that deserves a test rather than a
+// comment, because a later refactor to os.DirFS would silently make it false.
+//
+// An escape attempt is not an error here: it resolves to no embedded file, so it
+// falls through to the SPA shell like any other unknown client-side route. What
+// must never happen is that it serves something outside the bundle.
+func TestHandlerRefusesTraversal(t *testing.T) {
+	// A bundle with a SIBLING the handler must never reach, mounted exactly the
+	// way production mounts it (fs.Sub over a parent). Without a real secret
+	// outside the served root the assertions below would pass vacuously.
+	parent := fstest.MapFS{
+		"bundle/index.html":             {Data: []byte("<!doctype html><title>AO</title>")},
+		"bundle/assets/index-abc123.js": {Data: []byte("console.log(1)")},
+		"etc/passwd":                    {Data: []byte("root:x:0:0:SECRET")},
+	}
+	assets, err := fs.Sub(parent, "bundle")
+	if err != nil {
+		t.Fatalf("fs.Sub: %v", err)
+	}
+	h := handlerFor(assets, jsonNotFound())
+	shell := "<title>AO</title>"
+
+	// The served FS cannot even name the sibling: fs.Sub rejects an escaping
+	// path before path cleaning gets a say, so the two defenses are independent.
+	if f, err := assets.Open("../etc/passwd"); err == nil {
+		f.Close()
+		t.Fatal("the served FS resolved a path outside the bundle")
+	}
+
+	escapes := []string{
+		"/assets/../../../../etc/passwd",
+		"/../../../../etc/passwd",
+		"/assets/%2e%2e%2f%2e%2e%2f%2e%2e%2fetc/passwd",
+		"/assets/..%2f..%2f..%2fetc/passwd",
+		"/....//....//etc/passwd",
+		"/assets/index-abc123.js/../../../etc/passwd",
+		"//etc/passwd",
+		"/assets/%00../etc/passwd",
+		"/etc/passwd%00.js",
+	}
+	for _, target := range escapes {
+		for _, method := range []string{http.MethodGet, http.MethodHead} {
+			rec := get(t, h, method, target)
+			if rec.Code != http.StatusOK {
+				t.Errorf("%s %s: got %d, want the SPA shell", method, target, rec.Code)
+				continue
+			}
+			// GET returns the shell; HEAD legitimately has no body, so only the
+			// absence of foreign content is checked there.
+			body := rec.Body.String()
+			if strings.Contains(body, "SECRET") {
+				t.Fatalf("%s %s: escaped the bundle and served the sibling file", method, target)
+			}
+			// GET returns the shell; HEAD legitimately has no body, so only the
+			// absence of foreign content is checked there.
+			if body != "" && !strings.Contains(body, shell) {
+				t.Errorf("%s %s: served %q, which is not the SPA shell", method, target, body)
+			}
+		}
+	}
+
+	// The same attempt aimed at a daemon prefix must still reach the daemon's
+	// JSON 404 rather than being laundered into an HTML page by path cleaning.
+	if rec := get(t, h, http.MethodGet, "/assets/../api/v1/sessions"); !strings.Contains(rec.Body.String(), "not_found") {
+		t.Errorf("traversal into /api served %q instead of the JSON envelope", rec.Body.String())
 	}
 }
