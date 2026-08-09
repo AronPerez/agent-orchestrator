@@ -112,7 +112,12 @@ if [[ -x "${frontend_dir}/node_modules/.bin/vite" ]]; then
     exit 1
   fi
 else
-  printf 'Skipping the web UI bundle: %s/node_modules is missing\n' "${frontend_dir}" >&2
+  # Name the consequence, not just the skip: "Skipping" alone reads as an
+  # optimisation, and the resulting daemon looks fine until someone opens it in a
+  # browser. Mirrors the wording of the 503 the daemon itself will serve.
+  printf 'Skipping the web UI bundle: %s/node_modules is missing.\n' "${frontend_dir}" >&2
+  printf '  This daemon will answer every web UI request with 503 "web UI bundle was not built into this daemon".\n' >&2
+  printf '  Run (cd %s && npm install) and rebuild if you want the browser UI.\n' "${frontend_dir}" >&2
 fi
 
 (cd "${backend_dir}" && go build -o "${binary_path}" ./cmd/ao)
