@@ -9,6 +9,7 @@ import "./styles.css";
 import { queryClient } from "./lib/query-client";
 import { mergeUnreadNotification, unreadNotificationsQueryKey } from "./lib/notifications";
 import { createAppRouter } from "./router";
+import { LoginGate } from "./components/LoginGate";
 import { TelemetryBoundary } from "./components/TelemetryBoundary";
 import { initTelemetry } from "./lib/telemetry";
 import { startDaemonFailureTelemetry } from "./lib/daemon-telemetry";
@@ -79,6 +80,7 @@ async function renderApp(): Promise<void> {
 				<TelemetryBoundary>
 					<QueryClientProvider client={queryClient}>
 						<RouterProvider router={router} />
+						<LoginGate />
 					</QueryClientProvider>
 				</TelemetryBoundary>
 			</I18nextProvider>

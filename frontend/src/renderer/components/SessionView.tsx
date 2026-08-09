@@ -35,6 +35,7 @@ import { useWorkspaceQuery } from "../hooks/useWorkspaceQuery";
 import { useWindowFullScreen } from "../hooks/useWindowFullScreen";
 import { apiClient, apiErrorMessage } from "../lib/api-client";
 import { hidesShellTopbar } from "../lib/platform";
+import { hasBrowserDaemon } from "../lib/preview-mode";
 import { useShell } from "../lib/shell-context";
 import { cn } from "../lib/utils";
 import { isOrchestratorSession, sessionIsActive } from "../types/workspace";
@@ -657,7 +658,7 @@ export function SessionView({ sessionId }: SessionViewProps) {
 			/>
 		) : (
 			<CenterPane
-				daemonReady={daemonStatus.state === "ready" || import.meta.env.VITE_AO_API_BASE_URL != null}
+				daemonReady={daemonStatus.state === "ready" || hasBrowserDaemon}
 				onSelectSessionTerminal={selectSessionTerminal}
 				session={session}
 				terminalTarget={terminalTarget}
@@ -756,7 +757,7 @@ export function SessionView({ sessionId }: SessionViewProps) {
 								agentInputDisabled={
 									(interfaceSwitch.starting || activeInterfaceTransition) && session?.mode === "tui"
 								}
-								daemonReady={daemonStatus.state === "ready" || import.meta.env.VITE_AO_API_BASE_URL != null}
+								daemonReady={daemonStatus.state === "ready" || hasBrowserDaemon}
 								onCloseShellTerminal={closeShellTerminalByHandle}
 								onNewShellTerminal={addShellTerminal}
 								onRenameShellTerminal={renameShellTerminalByHandle}

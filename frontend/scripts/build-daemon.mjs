@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -30,6 +30,32 @@ if (versionResult.status !== 0 || !actualGoVersion || !meetsMinimumVersion(actua
 	console.error(`Go ${minimumGoVersion.join(".")}+ required, found ${found} — upgrade at https://go.dev/dl/`);
 	process.exit(1);
 }
+
+// Build the browser bundle the daemon embeds and serves at its own origin
+// (backend/internal/httpd/webui), so a machine with only a browser gets the
+// full UI. Generated here rather than committed: it is a megabyte of hashed
+// assets that would churn on every renderer change. The directory keeps a
+// tracked .gitkeep so go:embed — and therefore `go build` — works in a
+// checkout that has not run this step.
+const webuiDir = join(backendRoot, "internal", "httpd", "webui", "bundle");
+rmSync(webuiDir, { recursive: true, force: true });
+
+const viteCli = join(frontendRoot, "node_modules", "vite", "bin", "vite.js");
+const webResult = spawnSync(
+	process.execPath,
+	[viteCli, "build", "--config", "vite.renderer.config.ts", "--outDir", webuiDir, "--emptyOutDir"],
+	{ cwd: frontendRoot, stdio: "inherit", env: { ...process.env, VITE_AO_WEB: "1" } },
+);
+
+if (webResult.error) {
+	console.error(`failed to start the web UI build: ${webResult.error.message}`);
+	process.exit(1);
+}
+if (webResult.status !== 0) {
+	process.exit(webResult.status ?? 1);
+}
+mkdirSync(webuiDir, { recursive: true });
+writeFileSync(join(webuiDir, ".gitkeep"), "");
 
 rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });

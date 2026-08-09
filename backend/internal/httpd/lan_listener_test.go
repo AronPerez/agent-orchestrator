@@ -2,6 +2,7 @@ package httpd
 
 import (
 	"context"
+	"encoding/base32"
 	"fmt"
 	"io"
 	"log/slog"
@@ -35,7 +36,9 @@ func TestLANManagerAuthGatesSharedHandler(t *testing.T) {
 		t.Fatalf("running=%v boundPort=%d port=%d", m.Running(), m.BoundPort(), port)
 	}
 
-	base := fmt.Sprintf("http://127.0.0.1:%d/anything", port)
+	// An API path, not "/anything": paths the daemon does not own are the web UI
+	// bundle, which is served without a password on purpose (see webUIBypass).
+	base := fmt.Sprintf("http://127.0.0.1:%d/api/v1/anything", port)
 	// no auth → 401
 	resp, _ := http.Get(base)
 	if resp.StatusCode != http.StatusUnauthorized {
@@ -294,6 +297,19 @@ func TestDaemonServedUIOnLANNeedsNoAllowlistEntry(t *testing.T) {
 // data-free app shell (a static bundle rendering a login prompt) is fine. A
 // route that reads state, or changes any, is not — it re-opens rebinding against
 // the LAN listener and the exemption has to be revisited with it.
+// The embedded web UI (internal/httpd/webui, routed by webUIBypass) is the one
+// unauthenticated surface on the LAN listener, and it is deliberately absent
+// from this map: it is not a registered chi route but the NotFound fallback, so
+// chi.Walk below never yields it and no entry could exempt it. Declaring it here
+// anyway would be worse than useless — the key would silently exempt a real
+// route of that name later. It is a data-free app shell whose only job is to
+// render the password prompt, and it is covered by
+// TestLANManagerServesWebUIWithoutPassword, which asserts the other half: that
+// every path the daemon answers itself still requires the password.
+//
+// The walk below is therefore still exhaustive over registered routes, which is
+// the property that matters: webui.IsUIRequest excludes every daemon prefix, so
+// nothing chi serves can slip through the bypass.
 var unauthenticatedLANRoutes = map[string]struct{}{}
 
 // TestEveryLANRouteIsCredentialGated walks the real router and proves each route
@@ -350,4 +366,238 @@ func TestEveryLANRouteIsCredentialGated(t *testing.T) {
 		t.Fatal("walked no routes — the test proved nothing")
 	}
 	t.Logf("checked %d routes", walked)
+}
+
+// TestLANManagerServesWebUIWithoutPassword pins the one deliberate hole in LAN
+// auth: the static web UI, which is the password prompt itself. It must load
+// unauthenticated, and nothing the daemon answers may follow it through.
+func TestLANManagerServesWebUIWithoutPassword(t *testing.T) {
+	// The real router, not a stand-in handler: the bypass now decides by asking
+	// the router whether a route matches, so a fake handler would exercise a
+	// different code path than production takes.
+	router := newTestRouter(config.Config{}, discardLogger(), nil)
+	st := &authState{}
+	st.setHash(mobilebridge.HashPassword("secret12"))
+	m := NewLANManager(router, st, 0, slog.Default(), nil)
+	port, err := m.Start(0, "")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer m.Stop(context.Background())
+
+	// The UI shell and its assets: no password, served by the shared handler.
+	for _, path := range []string{"/", "/assets/index.js", "/projects/ao-1"} {
+		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d%s", port, path))
+		if err != nil {
+			t.Fatalf("%s: request failed: %v", path, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusUnauthorized {
+			t.Fatalf("%s: got 401; the UI must load so the user can enter a password", path)
+		}
+	}
+
+	// Everything that can carry daemon data still needs the password, including
+	// the GET routes that look most like a page.
+	for _, path := range []string{"/api/v1/sessions", "/mux", "/healthz", "/readyz"} {
+		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d%s", port, path))
+		if err != nil {
+			t.Fatalf("%s: request failed: %v", path, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("%s: got %d want 401 (the web UI bypass must not cover daemon routes)", path, resp.StatusCode)
+		}
+	}
+
+	// A POST is never a UI request, so an unknown path cannot be used to reach a
+	// side effect without the password.
+	resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/anything", port), "application/json", nil)
+	if err != nil {
+		t.Fatalf("post: request failed: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("POST /anything: got %d want 401", resp.StatusCode)
+	}
+}
+
+// TestWebUIBypassFailsClosedForRegisteredRoutes is the regression test for the
+// deny-list's failure mode. webui.IsUIRequest enumerates the paths the daemon
+// owns TODAY, so a top-level route added later without updating it stops being
+// excluded — and before the bypass consulted the router, that handed the request
+// to the router and ran the handler with no password, on a socket bound to the
+// network. Verified against the pre-fix code: GET /metrics returned 200 and the
+// handler's body to an unauthenticated caller.
+//
+// The daemon has no such route today, which is exactly why this test invents
+// one: the bug is only reachable through a route nobody has written yet, and it
+// would be silent and remote-only when it arrives.
+func TestWebUIBypassFailsClosedForRegisteredRoutes(t *testing.T) {
+	router := chi.NewRouter()
+	router.Get("/metrics", func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, "daemon-data")
+	})
+	st := &authState{}
+	st.setHash(mobilebridge.HashPassword("secret12"))
+	m := NewLANManager(router, st, 0, slog.Default(), nil)
+	port, err := m.Start(0, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer m.Stop(context.Background())
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+
+	// A registered route is the daemon's, whether or not anyone remembered to
+	// add its prefix to webui.daemonPrefixes.
+	resp, err := http.Get(base + "/metrics")
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("GET /metrics: got %d %q, want 401 — an unlisted route must not answer without the password",
+			resp.StatusCode, body)
+	}
+	if strings.Contains(string(body), "daemon-data") {
+		t.Fatal("GET /metrics: the handler ran for an unauthenticated caller")
+	}
+
+	// ...and the same route with the password still works, so failing closed
+	// costs nothing but the credential.
+	req, _ := http.NewRequest(http.MethodGet, base+"/metrics", nil)
+	req.Header.Set("Authorization", "Bearer secret12")
+	authed, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("authenticated GET /metrics: %v", err)
+	}
+	defer authed.Body.Close()
+	if authed.StatusCode != http.StatusOK {
+		t.Fatalf("authenticated GET /metrics: got %d, want 200", authed.StatusCode)
+	}
+
+	// A path the router does not serve is still the UI, so the prompt can load.
+	shell, err := http.Get(base + "/projects/ao-1")
+	if err != nil {
+		t.Fatalf("GET /projects/ao-1: %v", err)
+	}
+	defer shell.Body.Close()
+	if shell.StatusCode == http.StatusUnauthorized {
+		t.Fatal("GET /projects/ao-1: got 401; the UI shell must still load unauthenticated")
+	}
+}
+
+// TestWebUIBypassDisabledForUnknownHandler pins that "cannot tell" means
+// restrictive. The bypass identifies daemon routes by asking the router; a
+// handler that cannot answer — anything but the chi router, which is what a
+// future middleware wrapper around it would produce — must disable the bypass
+// entirely, not skip the question.
+//
+// The permissive reading of the same nil is the bug this whole guard exists to
+// prevent, and it would have been reintroduced silently: no panic, no failing
+// test, just an unauthenticated route on a network-bound socket. The visible
+// cost of failing closed is that the LAN UI stops loading, which someone reports.
+func TestWebUIBypassDisabledForUnknownHandler(t *testing.T) {
+	opaque := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, "daemon-data")
+	})
+	st := &authState{}
+	st.setHash(mobilebridge.HashPassword("secret12"))
+	m := NewLANManager(opaque, st, 0, slog.Default(), nil)
+	port, err := m.Start(0, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer m.Stop(context.Background())
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+
+	// Every path a UI request could take, including the shell itself.
+	for _, path := range []string{"/", "/assets/index.js", "/projects/ao-1", "/api/v1/sessions"} {
+		resp, err := http.Get(base + path)
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s: got %d %q, want 401 — an unrecognized handler must disable the bypass, not skip the check",
+				path, resp.StatusCode, body)
+		}
+		if strings.Contains(string(body), "daemon-data") {
+			t.Errorf("%s: the wrapped handler ran for an unauthenticated caller", path)
+		}
+	}
+
+	// The credential still works, so failing closed costs only the password.
+	req, _ := http.NewRequest(http.MethodGet, base+"/", nil)
+	req.Header.Set("Authorization", "Bearer secret12")
+	authed, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("authenticated GET /: %v", err)
+	}
+	defer authed.Body.Close()
+	if authed.StatusCode != http.StatusOK {
+		t.Fatalf("authenticated GET /: got %d, want 200", authed.StatusCode)
+	}
+}
+
+// TestWebUIBypassDoesNotExposeWorkspacePreviews is the regression test for the
+// bypass routing unauthenticated requests through the shared router.
+//
+// previewOriginMiddleware sits in the router's middleware stack and terminates
+// any GET whose Host is a preview subdomain by serving files out of that
+// session's workspace. It is keyed on a base32 session id in the Host, which is
+// not a secret. So "run the router and let it land in NotFound" was never the
+// same thing as "serve the static bundle": the router runs its middleware
+// first. Measured before the fix, on the LAN listener with no password, these
+// requests reached PreviewOrigin and got its envelope back — session data on a
+// socket bound to the network.
+//
+// Two things hold it shut now: the bypass serves the UI handler directly rather
+// than the router, so no router middleware can run unauthenticated at all, and a
+// preview Host is routed to authMiddleware so the preview flow keeps working
+// over the LAN with the password, as it did before the bypass existed.
+func TestWebUIBypassDoesNotExposeWorkspacePreviews(t *testing.T) {
+	router := newTestRouter(config.Config{}, discardLogger(), nil)
+	st := &authState{}
+	st.setHash(mobilebridge.HashPassword("secret12"))
+	m := NewLANManager(router, st, 0, slog.Default(), nil)
+	port, err := m.Start(0, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer m.Stop(context.Background())
+
+	label := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString([]byte("ao-1")))
+	previewHost := "ao-preview." + label + ".localhost"
+
+	for _, path := range []string{"/", "/index.html", "/app.js", "/assets/main.css"} {
+		req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d%s", port, path), nil)
+		req.Host = previewHost
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s with a preview Host: got %d %q, want 401 — workspace previews must not be reachable without the password",
+				path, resp.StatusCode, body)
+		}
+		// PreviewOrigin's own envelopes are the tell that it ran at all.
+		if strings.Contains(string(body), "PREVIEW_NOT_FOUND") || strings.Contains(string(body), "NO_PREVIEW_ENTRY") {
+			t.Errorf("%s with a preview Host: previewOriginMiddleware ran for an unauthenticated caller (%q)", path, body)
+		}
+	}
+
+	// The ordinary UI shell, on a normal Host, still loads without a password.
+	shell, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer shell.Body.Close()
+	if shell.StatusCode == http.StatusUnauthorized {
+		t.Fatal("GET / on a normal Host: got 401; the UI shell must still load unauthenticated")
+	}
 }

@@ -12,8 +12,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/webui"
 	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	"github.com/aoagents/agent-orchestrator/backend/internal/preview"
 )
 
 // LANManager owns the daemon's second, network-facing HTTP listener. It binds
@@ -38,12 +42,90 @@ type LANManager struct {
 func NewLANManager(handler http.Handler, state *authState, defaultPort int, log *slog.Logger, sink ports.EventSink) *LANManager {
 	log = loggerOrDefault(log)
 	lock := newLockout(5, time.Minute, time.Now)
+	authed := authMiddleware(state, lock, log, newMobileConnectReporter(sink, time.Now))(handler)
 	return &LANManager{
-		handler:     lanControlBlock(authMiddleware(state, lock, log, newMobileConnectReporter(sink, time.Now))(handler)),
+		handler:     lanControlBlock(webUIBypass(handler, webui.Handler(http.HandlerFunc(notFoundJSON)), authed, log)),
 		defaultPort: defaultPort,
 		log:         log,
 		state:       state,
 	}
+}
+
+// routeMatcher is chi.Router's route-matching half. Declared as an interface so
+// the bypass can ask "does the daemon actually serve this?" without the LAN
+// manager taking a hard dependency on the concrete router type.
+type routeMatcher interface {
+	Match(rctx *chi.Context, method, path string) bool
+}
+
+// webUIBypass serves the embedded web UI without a connection password and
+// sends everything else through authMiddleware.
+//
+// The UI *is* the password prompt: a browser on another machine has no way to
+// send a credential it has not been asked for yet, so 401-ing index.html and
+// its assets would leave the user staring at a JSON error with nowhere to type.
+// What it exposes is a static bundle — the same bytes every AO release ships —
+// and never a byte of daemon data, which is what makes the SPA see a 401 and
+// show the prompt.
+//
+// It fails CLOSED, and that is the load-bearing part. webui.IsUIRequest is a
+// deny-list of the paths the daemon owns today, and a deny-list fails open: the
+// day someone registers a top-level route (say GET /metrics) without adding it
+// there, that route stops being excluded and the bypass hands the request
+// straight to the router — which runs the handler, unauthenticated, on a socket
+// bound to the network. Not a shadowed route: a live one, answering strangers.
+// The failure would be silent and remote-only, so local dev would never show it.
+//
+// So a request is only treated as UI when the router has NO handler for it. A
+// registered route always goes through authMiddleware, whether or not anyone
+// remembered to list its prefix, and the deny-list becomes defense-in-depth
+// rather than the sole guard.
+//
+// A handler that cannot report its routes — anything but the chi router, e.g.
+// if someone later wraps it in middleware before it reaches here — disables the
+// bypass entirely rather than skipping the check. "Cannot prove this is not a
+// daemon route" is exactly when to charge for the password; the visible cost is
+// that the LAN UI stops loading, which is a bug someone reports, not a silent
+// unauthenticated route on a socket bound to the network.
+//
+// It serves ui directly and never calls the shared router. Routing an
+// unauthenticated request into the router and expecting it to land in NotFound
+// was a real hole: the router runs its own middleware stack first, and
+// previewOriginMiddleware terminates any GET whose Host is a preview subdomain
+// by serving files out of that session's workspace — session data, keyed on a
+// base32 session id in the Host, which is not a secret. Measured before this
+// change: GET / with Host ao-preview.<b32>.localhost reached PreviewOrigin on
+// the LAN listener with no password. Serving the bundle directly means no
+// router middleware can ever run on the unauthenticated path, which closes the
+// whole class rather than that one instance.
+func webUIBypass(router, ui, authed http.Handler, log *slog.Logger) http.Handler {
+	matcher, isRouter := router.(routeMatcher)
+	if !isRouter {
+		log.Warn("web UI bypass disabled: the LAN handler cannot report its routes, so every LAN request will require the connection password, including the UI shell",
+			"handler", fmt.Sprintf("%T", router))
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isRouter || !webui.IsUIRequest(r) {
+			authed.ServeHTTP(w, r)
+			return
+		}
+		// A preview-origin Host belongs to the workspace preview flow, not the
+		// UI. Sending it to authMiddleware keeps that flow working over the LAN
+		// exactly as it did before the bypass existed — with the password —
+		// rather than silently answering it with the app shell.
+		if _, isPreview := preview.SessionIDFromHost(r.Host); isPreview {
+			authed.ServeHTTP(w, r)
+			return
+		}
+		// A path the daemon serves is the daemon's, however it is spelled. chi
+		// matches per method, so a HEAD to a GET-only route falls through to the
+		// UI shell — harmless, since no daemon handler runs either way.
+		if matcher.Match(chi.NewRouteContext(), r.Method, r.URL.Path) {
+			authed.ServeHTTP(w, r)
+			return
+		}
+		ui.ServeHTTP(w, r)
+	})
 }
 
 // lanControlBlockedPrefixes are the loopback-only daemon-control route
