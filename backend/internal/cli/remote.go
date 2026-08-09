@@ -175,6 +175,55 @@ func lookupRemoteEntry(base string) (*remoteEntry, error) {
 	return nil, nil
 }
 
+// resolvedBySuffix names the daemon that resolved a path, for the one message
+// where the operator can still catch a mistake. Empty for a local daemon, so
+// local output stays byte-identical; a remote target is never silent.
+//
+// This exists because the path echo alone is not a signal: the daemon resolves
+// the path against its OWN filesystem, and for an absolute path the echoed
+// string is byte-identical to what the operator typed — so it carries no
+// information about which machine resolved it. Measured: `ao project add
+// --path '~/repo' --url <remote>` registers the REMOTE host's ~/repo, and the
+// operator's own ~/repo is never consulted.
+func (c *commandContext) resolvedBySuffix() string {
+	if c.remote == nil {
+		return ""
+	}
+	return " on the remote daemon at " + c.remote.baseURL
+}
+
+// checkRemoteProjectPath refuses a host-relative path aimed at a remote daemon.
+//
+// Refuse rather than warn: "~/repo" and "./repo" are resolved by the daemon
+// against its own home and its own working directory, so against a remote
+// target they silently name a directory on someone else's machine. There is no
+// reading under which the operator meant the remote daemon's home — and unlike
+// an absolute path, which may legitimately exist on either host, a host-relative
+// path cannot be checked by the operator after the fact. A warning on stderr
+// would be missed exactly when it matters, in a script or a busy terminal.
+//
+// Absolute paths are deliberately still allowed: they are meaningful on the
+// remote host, and refusing them would make a remote target useless.
+func (c *commandContext) checkRemoteProjectPath(path string) error {
+	if c.remote == nil {
+		return nil
+	}
+	trimmed := strings.TrimSpace(path)
+	switch {
+	case strings.HasPrefix(trimmed, "~"):
+		return usageError{fmt.Errorf(
+			"--path %q is relative to a home directory, and %s targets the remote daemon at %s, "+
+				"where it would mean that host's home — pass an absolute path as it exists on that host",
+			path, c.remote.source, c.remote.baseURL)}
+	case !filepath.IsAbs(trimmed):
+		return usageError{fmt.Errorf(
+			"--path %q is relative, and %s targets the remote daemon at %s, where it would be resolved "+
+				"against that daemon's working directory — pass an absolute path as it exists on that host",
+			path, c.remote.source, c.remote.baseURL)}
+	}
+	return nil
+}
+
 // authorize presents the remote connection password. Loopback calls carry no
 // credential: the local daemon's loopback listener has no auth at all.
 func (c *commandContext) authorize(req *http.Request) {
