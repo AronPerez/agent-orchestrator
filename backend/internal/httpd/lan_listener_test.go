@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -736,6 +738,64 @@ func TestWebUIBypassDoesNotExposeWorkspacePreviews(t *testing.T) {
 	defer shell.Body.Close()
 	if shell.StatusCode == http.StatusUnauthorized {
 		t.Fatal("GET / on a normal Host: got 401; the UI shell must still load unauthenticated")
+	}
+}
+
+// TestFSDirsIsAuthGatedOnLANAndNotBlocked pins both halves of the folder-browse
+// endpoint's LAN policy. It must be a credential-gated data route (401 without
+// one, like every other) and it must NOT be on lanControlBlockedPrefixes:
+// browsing a remote host for a project path is the entire point, so a
+// ROUTE_LOOPBACK_ONLY answer here would be a silent feature kill that no
+// loopback test could catch.
+func TestFSDirsIsAuthGatedOnLANAndNotBlocked(t *testing.T) {
+	st := &authState{}
+	st.setHash(mobilebridge.HashPassword("secret12"))
+	m := NewLANManager(newTestRouter(config.Config{}, discardLogger(), nil), st, 0, slog.Default(), nil)
+	port, err := m.Start(0, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer m.Stop(context.Background())
+
+	// Unauthenticated: 401, and specifically not the loopback-only block.
+	status, body := lanGet(t, port, "/api/v1/fs/dirs", "")
+	if status != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated /api/v1/fs/dirs: got %d want 401", status)
+	}
+	if body.Code == "ROUTE_LOOPBACK_ONLY" {
+		t.Fatalf("/api/v1/fs is on lanControlBlockedPrefixes — remote folder browsing needs it reachable over the LAN")
+	}
+
+	// Authenticated: a real listing of the daemon user's home directory.
+	req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/api/v1/fs/dirs", port), nil)
+	req.Header.Set("Authorization", "Bearer secret12")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("authenticated request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("authenticated /api/v1/fs/dirs: got %d want 200", resp.StatusCode)
+	}
+	var listing struct {
+		Path    string `json:"path"`
+		Entries []struct {
+			Name string `json:"name"`
+			Path string `json:"path"`
+		} `json:"entries"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&listing); err != nil {
+		t.Fatalf("decode listing: %v", err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("user home: %v", err)
+	}
+	if listing.Path != filepath.Clean(home) {
+		t.Errorf("path = %q, want the daemon user's home %q", listing.Path, filepath.Clean(home))
+	}
+	if listing.Entries == nil {
+		t.Error("entries is absent from the body; the picker needs it present even when empty")
 	}
 }
 

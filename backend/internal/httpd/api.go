@@ -60,6 +60,7 @@ type API struct {
 	notifications *controllers.NotificationsController
 	push          *controllers.PushController
 	imports       *controllers.ImportController
+	fs            *controllers.FSController
 	shellTerms    *controllers.ShellTerminalsController
 	conversations *controllers.ConversationsController
 	settings      *controllers.SettingsController
@@ -93,6 +94,7 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 		notifications: &controllers.NotificationsController{Svc: deps.Notifications, Stream: deps.NotificationStream},
 		push:          &controllers.PushController{Registry: deps.Push},
 		imports:       &controllers.ImportController{Svc: deps.Import},
+		fs:            &controllers.FSController{},
 		shellTerms:    &controllers.ShellTerminalsController{Svc: deps.ShellTerminals},
 		conversations: &controllers.ConversationsController{Svc: deps.Conversations},
 		settings:      &controllers.SettingsController{Svc: deps.Settings},
@@ -125,6 +127,7 @@ func (a *API) Register(root chi.Router) {
 			a.notifications.Register(r)
 			a.push.Register(r)
 			a.imports.Register(r)
+			a.fs.Register(r)
 			a.shellTerms.Register(r)
 			a.conversations.Register(r)
 			a.settings.Register(r)
