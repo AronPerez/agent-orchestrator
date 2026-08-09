@@ -43,7 +43,7 @@ func NewLANManager(handler http.Handler, state *authState, defaultPort int, log 
 	lock := newLockout(5, time.Minute, time.Now)
 	authed := authMiddleware(state, lock, log, newMobileConnectReporter(sink, time.Now))(handler)
 	return &LANManager{
-		handler:     lanControlBlock(webUIBypass(handler, authed)),
+		handler:     lanControlBlock(webUIBypass(handler, authed, log)),
 		defaultPort: defaultPort,
 		log:         log,
 		state:       state,
@@ -79,17 +79,28 @@ type routeMatcher interface {
 // registered route always goes through authMiddleware, whether or not anyone
 // remembered to list its prefix, and the deny-list becomes defense-in-depth
 // rather than the sole guard.
-func webUIBypass(router, authed http.Handler) http.Handler {
-	matcher, _ := router.(routeMatcher)
+//
+// A handler that cannot report its routes — anything but the chi router, e.g.
+// if someone later wraps it in middleware before it reaches here — disables the
+// bypass entirely rather than skipping the check. "Cannot prove this is not a
+// daemon route" is exactly when to charge for the password; the visible cost is
+// that the LAN UI stops loading, which is a bug someone reports, not a silent
+// unauthenticated route on a socket bound to the network.
+func webUIBypass(router, authed http.Handler, log *slog.Logger) http.Handler {
+	matcher, isRouter := router.(routeMatcher)
+	if !isRouter {
+		log.Warn("web UI bypass disabled: the LAN handler cannot report its routes, so every LAN request will require the connection password, including the UI shell",
+			"handler", fmt.Sprintf("%T", router))
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !webui.IsUIRequest(r) {
+		if !isRouter || !webui.IsUIRequest(r) {
 			authed.ServeHTTP(w, r)
 			return
 		}
 		// A path the daemon serves is the daemon's, however it is spelled. chi
 		// matches per method, so a HEAD to a GET-only route falls through to the
 		// UI shell — harmless, since no daemon handler runs either way.
-		if matcher != nil && matcher.Match(chi.NewRouteContext(), r.Method, r.URL.Path) {
+		if matcher.Match(chi.NewRouteContext(), r.Method, r.URL.Path) {
 			authed.ServeHTTP(w, r)
 			return
 		}
