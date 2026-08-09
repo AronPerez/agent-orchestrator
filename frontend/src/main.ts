@@ -30,6 +30,8 @@ import { listFeatureBuilds, getActiveFeatureBuild } from "./main/feature-builds"
 import { addRemote, readRemotes, type RemoteEntry } from "./main/remotes-store";
 import { probeRemote, remoteRequest, type RemoteRequestInit } from "./main/remote-request";
 import { toHostViews } from "./main/remotes-ipc";
+import { ActiveRemote } from "./main/active-remote";
+import { startRemoteProxy } from "./main/remote-proxy";
 import { readUpdateSettings, type UpdateSettings, type UpdateStatus } from "./main/update-settings";
 import { readKeybindingOverrides, writeKeybindingOverrides } from "./main/keybinding-settings";
 import { coerceUiSettings, readUiSettings, writeUiSettings, type UiSettings } from "./main/ui-settings";
@@ -1621,6 +1623,17 @@ ipcMain.handle("remotes:probe", async (_event, url: string) => probeRemote(await
 ipcMain.handle("remotes:request", async (_event, url: string, init: RemoteRequestInit) =>
 	remoteRequest(await findRemote(url), init),
 );
+
+// The proxy that lets the renderer talk to one remote daemon (see
+// main/remote-proxy.ts). Its socket dies with this process, so there is no
+// quit-time teardown: the OS closes the listener on exit, for any exit.
+const activeRemote = new ActiveRemote(startRemoteProxy);
+
+ipcMain.handle("remotes:activate", async (_event, url: string) => activeRemote.activate(await findRemote(url)));
+
+ipcMain.handle("remotes:deactivate", async () => activeRemote.deactivate());
+
+ipcMain.handle("remotes:active", async () => activeRemote.view());
 
 ipcMain.handle("app:scanImportFolder", async (_event, input: { path: string; mode: "project" | "workspace" }) => {
 	await ensureShellEnv();

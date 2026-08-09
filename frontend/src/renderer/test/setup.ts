@@ -227,6 +227,9 @@ if (typeof window !== "undefined") {
 			add: async () => "offline" as const,
 			probe: async () => "offline" as const,
 			request: async () => ({ status: 0, body: null }),
+			activate: async () => ({ label: "", url: "", base: "" }),
+			deactivate: async () => undefined,
+			active: async () => null,
 		},
 	};
 } // end if (typeof window !== "undefined")
