@@ -597,7 +597,11 @@ function CreateProjectFolderDialog({
 			? t("createProject.footerResolve", { count: failedRepos.length })
 			: hasScan
 				? t("createProject.footerReview")
-				: t("createProject.footerChoose");
+				: // "Choose a different folder" is wrong on the remote path — there is no
+					// folder picker there, and the field's own hint already says what to type.
+					remoteHost
+					? null
+					: t("createProject.footerChoose");
 	return (
 		<Dialog.Root open={open} onOpenChange={onOpenChange}>
 			<Dialog.Portal>
@@ -736,6 +740,7 @@ function CreateProjectFolderDialog({
 						)}
 					</div>
 					<div className="flex shrink-0 flex-col gap-3 border-t border-[var(--color-border-import-modal)] p-(--size-import-dialog-padding) sm:flex-row sm:items-center sm:justify-between">
+						{/* Kept mounted even when empty so justify-between still right-aligns the actions. */}
 						<p className="text-[12px] font-medium text-[var(--color-text-import-muted)]">{footerMessage}</p>
 						<div className="flex flex-wrap items-center justify-end gap-3">
 							<Button type="button" variant="footer" disabled={disabled} onClick={() => onOpenChange(false)}>
