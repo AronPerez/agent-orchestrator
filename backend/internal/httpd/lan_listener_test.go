@@ -8,9 +8,12 @@ import (
 	"net"
 	"net/http"
 	"net/http/cookiejar"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-chi/chi/v5"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
@@ -211,13 +214,21 @@ func TestDaemonServedUIOnLANNeedsNoAllowlistEntry(t *testing.T) {
 	}
 	defer m.Stop(context.Background())
 	base := fmt.Sprintf("http://127.0.0.1:%d", port)
-	origin := base // the page the daemon served is at this exact origin
+	// The origin a real phone sees is the LAN address, NOT loopback. Using the
+	// socket's own loopback URL here would send every request down
+	// isLoopbackOrigin and the test would pass while host-equality — the thing
+	// this test exists to prove — was broken for every actual client. Host is
+	// pinned to match; hostGuard exempts the LAN listener, so the socket it
+	// physically listens on is irrelevant to the logic under test.
+	const lanHost = "192.168.1.227:65142"
+	const origin = "http://" + lanHost
 
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Jar: jar}
 
 	login, _ := http.NewRequest(http.MethodPost, base+"/api/v1/auth/login",
 		strings.NewReader(`{"password":"secret12"}`))
+	login.Host = lanHost
 	login.Header.Set("Origin", origin)
 	login.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(login)
@@ -229,28 +240,114 @@ func TestDaemonServedUIOnLANNeedsNoAllowlistEntry(t *testing.T) {
 		t.Fatalf("login: got %d want 204", resp.StatusCode)
 	}
 
-	// The jar now holds ao_conn. A state-changing call carrying only that cookie
-	// must authenticate AND pass the origin rule.
-	req, _ := http.NewRequest(http.MethodPost, base+"/api/v1/sessions", nil)
-	req.Header.Set("Origin", origin)
-	resp2, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("cookie-authenticated POST: %v", err)
+	// The jar now holds ao_conn. Every shape the page then uses must authenticate
+	// AND pass the origin rule. The Origin-BEARING cases are the ones that matter:
+	// a browser sends Origin on same-origin fetch(), so an Origin-less request
+	// alone would prove nothing about what the UI actually does.
+	cookies := jar.Cookies(login.URL)
+	for _, tc := range []struct {
+		name, method, origin, secFetchSite string
+	}{
+		{name: "GET (fetch sends Origin)", method: http.MethodGet, origin: origin},
+		{name: "GET with fetch metadata", method: http.MethodGet, origin: origin, secFetchSite: "same-origin"},
+		{name: "state-changing POST", method: http.MethodPost, origin: origin},
+		{name: "PATCH", method: http.MethodPatch, origin: origin},
+		// EventSource is same-origin, so the browser sends no Origin at all.
+		{name: "SSE-shaped GET (no Origin)", method: http.MethodGet, secFetchSite: "same-origin"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req, _ := http.NewRequest(tc.method, base+"/api/v1/sessions", nil)
+			req.Host = lanHost
+			for _, c := range cookies {
+				req.AddCookie(c)
+			}
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+			if tc.secFetchSite != "" {
+				req.Header.Set("Sec-Fetch-Site", tc.secFetchSite)
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("%s: %v", tc.method, err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+				t.Fatalf("daemon-served LAN UI got %d with the cookie it just logged in for", resp.StatusCode)
+			}
+		})
 	}
-	defer resp2.Body.Close()
-	if resp2.StatusCode == http.StatusUnauthorized || resp2.StatusCode == http.StatusForbidden {
-		t.Fatalf("daemon-served LAN UI got %d with the cookie it just logged in for", resp2.StatusCode)
-	}
+}
 
-	// And the SSE shape: same-origin EventSource sends the cookie and no Origin.
-	sse, _ := http.NewRequest(http.MethodGet, base+"/api/v1/sessions", nil)
-	sse.Header.Set("Sec-Fetch-Site", "same-origin")
-	resp3, err := client.Do(sse)
+// unauthenticatedLANRoutes names the routes that are allowed to answer an
+// unauthenticated request on the LAN listener. It is EMPTY on purpose.
+//
+// The LAN listener's exemption from hostGuard (see cors.go) rests entirely on
+// every route there being credential-gated: a DNS-rebinding page reaching the
+// LAN socket carries no Bearer and no ao_conn cookie — the browser scopes the
+// cookie to the host the daemon actually served — so it gets nothing. Add one
+// unauthenticated route that returns data or has a side effect and that argument
+// silently stops holding, on a listener bound to the network.
+//
+// If you are here because TestEveryLANRouteIsCredentialGated failed: adding your
+// route to this list is the mechanism working, not a formality. A public,
+// data-free app shell (a static bundle rendering a login prompt) is fine. A
+// route that reads state, or changes any, is not — it re-opens rebinding against
+// the LAN listener and the exemption has to be revisited with it.
+var unauthenticatedLANRoutes = map[string]struct{}{}
+
+// TestEveryLANRouteIsCredentialGated walks the real router and proves each route
+// either authenticates or is not served at all on the LAN listener. Prose in
+// AGENTS.md cannot fail a build; this can.
+func TestEveryLANRouteIsCredentialGated(t *testing.T) {
+	st := &authState{}
+	st.setHash(mobilebridge.HashPassword("secret12"))
+	router := newTestRouter(config.Config{}, discardLogger(), nil)
+	m := NewLANManager(router, st, 0, slog.Default(), nil)
+	port, err := m.Start(0, "127.0.0.1")
 	if err != nil {
-		t.Fatalf("SSE-shaped GET: %v", err)
+		t.Fatalf("start: %v", err)
 	}
-	defer resp3.Body.Close()
-	if resp3.StatusCode == http.StatusUnauthorized || resp3.StatusCode == http.StatusForbidden {
-		t.Fatalf("cookie-authenticated SSE-shaped GET: got %d", resp3.StatusCode)
+	defer m.Stop(context.Background())
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+
+	walked := 0
+	err = chi.Walk(router, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+		if _, exempt := unauthenticatedLANRoutes[route]; exempt {
+			return nil
+		}
+		// Substitute any URL params so the request reaches the route rather than
+		// dying in the router.
+		path := regexp.MustCompile(`\{[^}]+\}`).ReplaceAllString(route, "probe")
+		path = strings.TrimSuffix(path, "/*") // wildcard tails
+		walked++
+		req, err := http.NewRequest(method, base+path, nil)
+		if err != nil {
+			return nil // a pattern we cannot build a request for proves nothing
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Errorf("%s %s: %v", method, route, err)
+			return nil
+		}
+		defer resp.Body.Close()
+		// 401 = authenticated surface refusing us. 404/405 = lanControlBlock or
+		// the router declining to serve it at all. Anything else means an
+		// unauthenticated caller got a real answer.
+		switch resp.StatusCode {
+		case http.StatusUnauthorized, http.StatusNotFound, http.StatusMethodNotAllowed:
+		default:
+			t.Errorf("%s %s answered an UNAUTHENTICATED LAN request with %d — "+
+				"the hostGuard exemption for the LAN listener assumes this cannot happen; "+
+				"see unauthenticatedLANRoutes", method, route, resp.StatusCode)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk routes: %v", err)
 	}
+	if walked == 0 {
+		t.Fatal("walked no routes — the test proved nothing")
+	}
+	t.Logf("checked %d routes", walked)
 }

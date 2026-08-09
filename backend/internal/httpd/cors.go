@@ -55,7 +55,19 @@ func corsMiddleware(allowedOrigins []string) func(http.Handler) http.Handler {
 			// Cache keys must split on Origin even for rejected values, or a
 			// 403 could be replayed to an allowed origin.
 			w.Header().Add("Vary", "Origin")
-			if _, ok := allowed[origin]; !ok && !isLoopbackOrigin(origin) {
+			// sameOriginRequest is here for the LAN listener, whose own address is
+			// neither allowlisted nor loopback: without it every REST call a
+			// daemon-served page makes on that listener 403s, since browsers DO
+			// send Origin on same-origin fetch(). It adds no trust surface — it is
+			// the identical predicate the strict path above already trusts, and a
+			// same-origin request needs no CORS grant to read a response anyway.
+			//
+			// Scheme is deliberately not compared: a page reached through a
+			// TLS-terminating tunnel is https while the daemon speaks plaintext, and
+			// the one case that divergence admits (https page → http daemon on the
+			// same host:port) is blocked by the browser as mixed content long before
+			// it gets here.
+			if _, ok := allowed[origin]; !ok && !isLoopbackOrigin(origin) && !sameOriginRequest(origin, r) {
 				envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "ORIGIN_FORBIDDEN",
 					"Origin is not allowed to access this daemon", nil)
 				return

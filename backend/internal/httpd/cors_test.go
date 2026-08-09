@@ -258,8 +258,16 @@ func TestCORSLoopbackOriginStillReads(t *testing.T) {
 
 // W2's keystone: a UI the daemon serves itself is same-origin with the API, so
 // it must work with ZERO configuration — an empty allowlist, no
-// AO_ALLOWED_ORIGINS, on either listener. Host-equality is what provides that;
-// nothing here may come to depend on an allowlist entry.
+// AO_ALLOWED_ORIGINS, on either listener.
+//
+// Read this one honestly: on the loopback listener a daemon-served page's origin
+// IS loopback, so isLoopbackOrigin carries these cases and host-equality is
+// never the load-bearing branch. That is not a blind spot here — hostGuard only
+// admits a non-loopback Host when it belongs to an allowlisted origin, so the
+// non-loopback same-origin shape is unreachable on this listener by
+// construction. It IS reachable on the LAN listener, where the daemon's own
+// address is neither loopback nor allowlisted, and
+// TestDaemonServedUIOnLANNeedsNoAllowlistEntry is what exercises it.
 func TestDaemonServedUINeedsNoAllowlistEntry(t *testing.T) {
 	// Deliberately empty: not even the app://renderer default.
 	srv := httptest.NewServer(newTestRouter(config.Config{AllowedOrigins: nil}, discardLogger(), nil))
