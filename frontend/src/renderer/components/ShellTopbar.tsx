@@ -4,6 +4,7 @@ import { useNavigate, useParams } from "@tanstack/react-router";
 import { GitBranch, PanelRightClose, PanelRightOpen, Plus, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { animate, LayoutGroup, motion, useMotionValue, useReducedMotion } from "motion/react";
+import { HostSwitcher } from "./HostSwitcher";
 import { NotificationCenter } from "./NotificationCenter";
 import {
 	findProjectOrchestrator,
@@ -352,6 +353,12 @@ export function ShellTopbar({ embedded = false }: { embedded?: boolean } = {}) {
 						)}
 					</>
 				) : null}
+				{/* Which machine you are looking at — rendered in both the shell and the
+				    embedded (macOS session) topbar, so the answer stays visible on the
+				    routes where every other cue looks identical to local. */}
+				<div className="flex shrink-0 items-center" style={noDragStyle}>
+					<HostSwitcher />
+				</div>
 				{/* The bell always trails the actions row, on every platform. */}
 				<NotificationCenter style={noDragStyle} />
 			</div>

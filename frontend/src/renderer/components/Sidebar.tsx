@@ -69,11 +69,22 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import { OrchestratorIcon } from "./icons";
 import aoLogo from "../../../assets/ao-logo.svg";
 import { cn } from "../lib/utils";
+import { activeHost } from "../lib/active-host";
 import { useUiStore } from "../stores/ui-store"
 import { ConfirmDialog } from "./ConfirmDialog";
 import { CreateProjectFlow, type CreateProjectInput } from "./CreateProjectFlow";
 import { ResizeHandle } from "./ResizeHandle";
+import { SidebarRemoteHosts } from "./SidebarRemoteHosts";
 import { isMacPlatform } from "../lib/platform";
+
+// Destructive controls must say which machine they destroy on: while a remote
+// host is active nothing else in this tree distinguishes its sessions from the
+// local ones. Empty on local, so that copy stays byte-identical to before.
+function useHostSuffix(): string {
+	const { t } = useTranslation();
+	const host = activeHost();
+	return host ? ` ${t("hosts.on", { host: host.label })}` : "";
+}
 
 // macOS paints framed chrome: the fixed TitlebarNav cluster carries the
 // sidebar toggle + history arrows above this surface. Windows hangs the sidebar
@@ -389,6 +400,8 @@ export function Sidebar({
 						)}
 					</SidebarGroupContent>
 				</SidebarGroup>
+				{/* The machines you are not looking at — read-only, below the tree. */}
+				<SidebarRemoteHosts />
 			</SidebarContent>
 
 			{/* Footer — Settings opens the global settings page directly.
@@ -481,6 +494,7 @@ function ProjectItem({
 	onRemoveProject: (projectId: string) => Promise<void>;
 }) {
 	const { t } = useTranslation();
+	const hostSuffix = useHostSuffix();
 	const prefersReducedMotion = useReducedMotion();
 	const activeProjectMatches = selection.activeProjectId === workspace.id;
 	const dashboardActive = activeProjectMatches && !selection.activeSessionId;
@@ -802,6 +816,7 @@ function ProjectItem({
 				<>
 					<p className="text-sm font-medium text-foreground">
 						{t("shell.removeProjectLead", { name: workspace.name })}
+						{hostSuffix}
 					</p>
 					<p className="mt-1 text-xs text-muted-foreground">{t("shell.removeProjectBody")}</p>
 				</>
@@ -851,6 +866,7 @@ function SessionRow({
 	onOpen: () => void;
 }) {
 	const { t } = useTranslation();
+	const hostSuffix = useHostSuffix();
 	const [isEditing, setIsEditing] = useState(false);
 	const [draft, setDraft] = useState(session.title);
 	// Escape must not be swallowed by the blur-to-save path: the keydown handler
@@ -981,7 +997,7 @@ function SessionRow({
 					<Pencil aria-hidden="true" />
 				</button>
 				<button
-					aria-label={t("shell.killSession")}
+					aria-label={`${t("shell.killSession")}${hostSuffix}`}
 					className={cn(
 						"grid h-5 w-0 shrink-0 place-items-center overflow-hidden rounded-md text-passive opacity-0",
 						"transition-[width,margin,background-color,color,opacity] hover:text-destructive focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent/50 [&_svg]:size-3!",

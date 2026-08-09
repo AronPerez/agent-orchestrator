@@ -35,6 +35,14 @@ const { getMock, navigateMock, mockParams, renameSessionMock, spawnMock, updateS
 );
 
 vi.mock("../lib/rename-session", () => ({ renameSession: renameSessionMock }));
+
+// Destructive copy names the machine it acts on; default to local so every
+// pre-existing assertion keeps seeing today's strings.
+let mockActiveHost: { label: string; url: string } | null = null;
+vi.mock("../lib/active-host", () => ({
+	activeHost: () => mockActiveHost,
+	switchToHost: vi.fn(),
+}));
 vi.mock("../lib/spawn-orchestrator", () => ({ spawnOrchestrator: spawnMock }));
 
 vi.mock("../hooks/useCommandPaletteEnabled", () => ({
@@ -242,10 +250,49 @@ beforeEach(() => {
 	updateStatusMock.mockReset().mockResolvedValue({ state: "idle" });
 	mockParams.projectId = undefined;
 	mockParams.sessionId = undefined;
+	mockActiveHost = null;
 });
 
 afterEach(() => {
 	vi.restoreAllMocks();
+});
+
+describe("destructive actions name the remote host", () => {
+	it("names the host on the session kill control", () => {
+		mockActiveHost = { label: "workbox", url: "http://192.0.2.1:3011" };
+		renderSidebar({ workspaces: [{ ...workspace, sessions: [session] }] });
+
+		expect(screen.getByRole("button", { name: "Kill session on workbox" })).toBeInTheDocument();
+	});
+
+	it("names the host in the remove-project confirmation", async () => {
+		mockActiveHost = { label: "workbox", url: "http://192.0.2.1:3011" };
+		const user = userEvent.setup();
+		renderSidebar();
+
+		await user.click(screen.getByLabelText("Project actions for Project One"));
+		await user.click(await screen.findByRole("menuitem", { name: "Remove project" }));
+
+		const dialog = await screen.findByRole("dialog", { name: "Remove project" });
+		expect(dialog).toHaveTextContent("on workbox");
+	});
+
+	it("says nothing extra while local is the active host", async () => {
+		const user = userEvent.setup();
+		renderSidebar({ workspaces: [{ ...workspace, sessions: [session] }] });
+
+		// Exact name: a suffixed label would no longer match.
+		expect(screen.getByRole("button", { name: "Kill session" })).toBeInTheDocument();
+
+		await user.click(screen.getByLabelText("Project actions for Project One"));
+		await user.click(await screen.findByRole("menuitem", { name: "Remove project" }));
+		const dialog = await screen.findByRole("dialog", { name: "Remove project" });
+		// Byte-identical to today's copy — no trailing host clause.
+		expect(within(dialog).getByText(/This will remove/).textContent).toBe(
+			"This will remove Project One from AO",
+		);
+		expect(dialog).not.toHaveTextContent(/on workbox/);
+	});
 });
 
 describe("Sidebar", () => {

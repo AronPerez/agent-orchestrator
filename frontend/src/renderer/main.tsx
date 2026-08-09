@@ -15,6 +15,7 @@ import { initTelemetry } from "./lib/telemetry";
 import { startDaemonFailureTelemetry } from "./lib/daemon-telemetry";
 import { startUpdateTelemetry } from "./lib/update-telemetry";
 import { appI18n } from "./i18n";
+import { initActiveHost } from "./lib/active-host";
 import { useLocaleStore } from "./stores/locale-store";
 
 const router = createAppRouter(queryClient);
@@ -74,6 +75,9 @@ async function renderApp(): Promise<void> {
 	// Resolve the persisted locale before mounting so translated text never
 	// flashes in English for users who selected another language.
 	await useLocaleStore.getState().load();
+	// Point the API base at the saved remote host before the first render, so no
+	// query starts against the local daemon only to be thrown away a frame later.
+	await initActiveHost();
 	createRoot(document.getElementById("root") as HTMLElement).render(
 		<React.StrictMode>
 			<I18nextProvider i18n={appI18n}>
