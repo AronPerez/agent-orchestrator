@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
+	"strings"
 	"testing"
 	"time"
 
@@ -190,5 +192,65 @@ func TestLANListenerAllowsPinnedOriginWithBearer(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusForbidden {
 		t.Fatal("the native mobile client's pinned Origin was rejected on the LAN listener")
+	}
+}
+
+// The same zero-configuration guarantee on the LAN listener, end to end through
+// the real router and authMiddleware: a UI the daemon serves on :3011 logs in,
+// gets the session cookie, and drives the API — with an empty allowlist and no
+// AO_ALLOWED_ORIGINS anywhere. Host-equality carries it; if this ever needs an
+// allowlist entry, the daemon-served web UI is broken.
+func TestDaemonServedUIOnLANNeedsNoAllowlistEntry(t *testing.T) {
+	st := &authState{}
+	st.setHash(mobilebridge.HashPassword("secret12"))
+	router := newTestRouter(config.Config{AllowedOrigins: nil}, discardLogger(), nil)
+	m := NewLANManager(router, st, 0, slog.Default(), nil)
+	port, err := m.Start(0, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer m.Stop(context.Background())
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	origin := base // the page the daemon served is at this exact origin
+
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+
+	login, _ := http.NewRequest(http.MethodPost, base+"/api/v1/auth/login",
+		strings.NewReader(`{"password":"secret12"}`))
+	login.Header.Set("Origin", origin)
+	login.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(login)
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("login: got %d want 204", resp.StatusCode)
+	}
+
+	// The jar now holds ao_conn. A state-changing call carrying only that cookie
+	// must authenticate AND pass the origin rule.
+	req, _ := http.NewRequest(http.MethodPost, base+"/api/v1/sessions", nil)
+	req.Header.Set("Origin", origin)
+	resp2, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("cookie-authenticated POST: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode == http.StatusUnauthorized || resp2.StatusCode == http.StatusForbidden {
+		t.Fatalf("daemon-served LAN UI got %d with the cookie it just logged in for", resp2.StatusCode)
+	}
+
+	// And the SSE shape: same-origin EventSource sends the cookie and no Origin.
+	sse, _ := http.NewRequest(http.MethodGet, base+"/api/v1/sessions", nil)
+	sse.Header.Set("Sec-Fetch-Site", "same-origin")
+	resp3, err := client.Do(sse)
+	if err != nil {
+		t.Fatalf("SSE-shaped GET: %v", err)
+	}
+	defer resp3.Body.Close()
+	if resp3.StatusCode == http.StatusUnauthorized || resp3.StatusCode == http.StatusForbidden {
+		t.Fatalf("cookie-authenticated SSE-shaped GET: got %d", resp3.StatusCode)
 	}
 }

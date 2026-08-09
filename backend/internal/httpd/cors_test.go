@@ -254,3 +254,50 @@ func TestCORSLoopbackOriginStillReads(t *testing.T) {
 		t.Fatalf("loopback origin read: got %d want 200", resp.StatusCode)
 	}
 }
+
+// W2's keystone: a UI the daemon serves itself is same-origin with the API, so
+// it must work with ZERO configuration — an empty allowlist, no
+// AO_ALLOWED_ORIGINS, on either listener. Host-equality is what provides that;
+// nothing here may come to depend on an allowlist entry.
+func TestDaemonServedUINeedsNoAllowlistEntry(t *testing.T) {
+	// Deliberately empty: not even the app://renderer default.
+	srv := httptest.NewServer(newTestRouter(config.Config{AllowedOrigins: nil}, discardLogger(), nil))
+	defer srv.Close()
+
+	for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPatch, http.MethodDelete} {
+		t.Run(method, func(t *testing.T) {
+			req, err := http.NewRequest(method, srv.URL+"/api/v1/sessions", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// What a browser sends for a page the daemon served: its own origin,
+			// and the fetch-metadata label to match.
+			req.Header.Set("Origin", srv.URL)
+			req.Header.Set("Sec-Fetch-Site", "same-origin")
+			resp, err := srv.Client().Do(req)
+			if err != nil {
+				t.Fatalf("%s: %v", method, err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusForbidden {
+				t.Fatalf("%s from the daemon's own origin was 403'd with an empty allowlist", method)
+			}
+			if got := resp.Header.Get("Access-Control-Allow-Origin"); got != srv.URL {
+				t.Errorf("ACAO = %q, want the daemon's own origin %q", got, srv.URL)
+			}
+		})
+	}
+
+	// The same page's EventSource: same-origin, so the browser sends no Origin
+	// at all. It must not be mistaken for a foreign caller.
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/sessions", nil)
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("SSE-shaped GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusForbidden {
+		t.Fatal("a same-origin request with no Origin header was 403'd")
+	}
+}
