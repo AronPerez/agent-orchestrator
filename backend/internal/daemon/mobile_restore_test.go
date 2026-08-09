@@ -13,11 +13,13 @@ type fakeLAN struct {
 	started bool
 	hash    string
 	port    int
+	bind    string
 }
 
-func (f *fakeLAN) Start(port int) (int, error) {
+func (f *fakeLAN) Start(port int, bind string) (int, error) {
 	f.started = true
 	f.port = port
+	f.bind = bind
 	return port, nil
 }
 func (f *fakeLAN) Stop(ctx context.Context) error { return nil }

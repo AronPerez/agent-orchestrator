@@ -23,7 +23,7 @@ func restoreMobileOnBoot(path string, lan controllers.LANController) error {
 		return nil
 	}
 	lan.SetPasswordHash(mobilebridge.HashPassword(state.Password))
-	if _, err := lan.Start(state.LastPort); err != nil {
+	if _, err := lan.Start(state.LastPort, state.Bind); err != nil {
 		return fmt.Errorf("restart mobile LAN listener: %w", err)
 	}
 	return nil

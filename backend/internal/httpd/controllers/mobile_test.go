@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
 )
 
 type fakeBridge struct{ enabled bool }
@@ -33,9 +35,14 @@ type fakeLAN struct {
 	running   bool
 	hash      string
 	stopCalls int
+	bind      string
 }
 
-func (f *fakeLAN) Start(port int) (int, error) { f.running = true; return port, nil }
+func (f *fakeLAN) Start(port int, bind string) (int, error) {
+	f.running = true
+	f.bind = bind
+	return port, nil
+}
 func (f *fakeLAN) Stop(ctx context.Context) error {
 	f.stopCalls++
 	f.running = false
@@ -84,5 +91,33 @@ func TestMobileEnableReturnsPassword(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&got)
 	if !got.Enabled || got.Password != "abcd1234" || got.Warning == "" {
 		t.Fatalf("bad response: %+v", got)
+	}
+}
+
+// The bind mode is user-set config, not something enable/regenerate owns: it
+// must reach the listener and survive the write-back that stamps the new
+// password and port.
+func TestEnablePassesAndPreservesBind(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mobile", "config.json")
+	if err := mobilebridge.Save(path, mobilebridge.State{Bind: "tailscale"}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	lan := &fakeLAN{}
+	b := &BridgeService{LAN: lan, ConfigPath: path, DefaultPort: 3011}
+	if _, err := b.Enable(); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	if lan.bind != "tailscale" {
+		t.Errorf("LAN.Start bind = %q, want tailscale", lan.bind)
+	}
+	st, err := mobilebridge.Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if st.Bind != "tailscale" {
+		t.Errorf("persisted bind = %q, want it preserved across enable", st.Bind)
+	}
+	if !st.Enabled || st.Password == "" {
+		t.Errorf("enable did not persist enabled state: %+v", st)
 	}
 }
