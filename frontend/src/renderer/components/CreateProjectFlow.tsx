@@ -1,12 +1,15 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { useTranslation } from "react-i18next";
 import { CheckCircle2, ChevronRight, Folder, FolderPlus, X, XCircle } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import type { ImportFolderScan } from "../../preload";
+import { LOCAL_HOST_ID, remotesBridge, useRemoteHosts, type Host } from "../hooks/useRemoteHosts";
 import { aoBridge } from "../lib/bridge";
 import { cn } from "../lib/utils";
 import type { ProjectKind } from "../types/workspace";
+import { AddRemoteHostDialog } from "./AddRemoteHostDialog";
 import { CreateProjectAgentSheet, type CreateProjectAgentSelection } from "./CreateProjectAgentSheet";
+import { HostSelect } from "./HostSelect";
 import { Button } from "./ui/button";
 
 export type CreateProjectInput = { path: string; asWorkspace?: boolean } & CreateProjectAgentSelection;
@@ -51,15 +54,73 @@ export function CreateProjectFlow({
 	const [isInitializing, setIsInitializing] = useState(false);
 	const [repositorySetup, setRepositorySetup] = useState<"NOT_A_GIT_REPO" | "PROJECT_UNBORN" | null>(null);
 	const [repositorySetupWarning, setRepositorySetupWarning] = useState<string | null>(null);
+	const { hosts, refresh: refreshHosts } = useRemoteHosts();
+	const [hostId, setHostId] = useState<string>(LOCAL_HOST_ID);
+	const [addHostOpen, setAddHostOpen] = useState(false);
+	const [remotePath, setRemotePath] = useState("");
 
 	const hasModePicker = mode === "choose";
 	const isBusy = isChoosingPath || isCreating || isInitializing;
+	// The selected host when it is not "This Mac". Undefined while a just-added
+	// host is still being listed, so the flow is never pointed at nothing.
+	const remoteHost = hosts.find((host): host is Host & { url: string } => host.id === hostId && host.url !== null);
 
 	const openFolderStep = (kind: ProjectKind) => {
+		if (remoteHost) {
+			// chooseDirectory opens a native picker on *this* machine and no remote
+			// directory listing exists, so the remote path is typed, not browsed.
+			setError(null);
+			setValidationScan(null);
+			setRemotePath("");
+			setSelectedKind(kind);
+			setModePickerOpen(false);
+			setFolderPickerOpen(true);
+			return;
+		}
 		// Keep the selector mounted behind the native picker. Closing it first
 		// exposes a blank compositor frame on Windows before Explorer takes focus.
 		void chooseDirectory(kind);
 	};
+
+	// Registering a project on a remote daemon is REST-only, which is why this
+	// slice works at all: the session stream and terminal cannot carry a Bearer
+	// token. Nothing local changes, so there is no local list to refresh after.
+	const createRemoteProject = async () => {
+		if (!remoteHost) return;
+		setError(null);
+		setIsCreating(true);
+		try {
+			const response = await remotesBridge().request(remoteHost.url, {
+				method: "POST",
+				path: "/api/v1/projects",
+				body: { path: remotePath.trim(), asWorkspace: selectedKind === "workspace" },
+			});
+			if (response.status >= 200 && response.status < 300) {
+				setFolderPickerOpen(false);
+				setRemotePath("");
+				return;
+			}
+			// The daemon owns the verdict on its own filesystem — judging the path
+			// here would judge the wrong machine's OS.
+			setError(daemonErrorMessage(response.body) ?? t("createProject.couldNotAdd"));
+		} catch (err) {
+			setError(err instanceof Error ? err.message : t("createProject.couldNotAdd"));
+		} finally {
+			setIsCreating(false);
+		}
+	};
+
+	const hostRow = hasModePicker ? (
+		<HostSelect
+			hosts={hosts}
+			value={hostId}
+			onChange={setHostId}
+			onAddHost={() => setAddHostOpen(true)}
+			// ponytail: re-probes every host, not just this one. Fine for a handful;
+			// add a single-host probe if the list ever grows.
+			onReconnect={() => void refreshHosts()}
+		/>
+	) : null;
 
 	const chooseDirectory = async (kind: ProjectKind) => {
 		setError(null);
@@ -189,7 +250,7 @@ export function CreateProjectFlow({
 				})}
 			{hasModePicker && embedded && !modePickerOpen && (
 				<div className="flex w-full flex-col items-center gap-3">
-					<ImportModePicker disabled={isBusy} onSelect={openFolderStep} />
+					<ImportModePicker disabled={isBusy} hostRow={hostRow} onSelect={openFolderStep} />
 					{error && !folderPickerOpen && selectedPath === null && (
 						<p className="text-caption leading-body text-error" role="status">
 							{error}
@@ -201,16 +262,29 @@ export function CreateProjectFlow({
 				<>
 					<CreateProjectModeDialog
 						disabled={isBusy}
+						hostRow={hostRow}
 						open={modePickerOpen}
 						onOpenChange={(open) => !isBusy && setModePickerOpen(open)}
 						onSelect={openFolderStep}
+					/>
+					<AddRemoteHostDialog
+						open={addHostOpen}
+						onOpenChange={setAddHostOpen}
+						onAdded={(url) => {
+							void refreshHosts();
+							setHostId(url);
+						}}
 					/>
 					<CreateProjectFolderDialog
 						disabled={isBusy}
 						error={error}
 						kind={selectedKind}
 						open={folderPickerOpen}
+						remoteHost={remoteHost ?? null}
+						remotePath={remotePath}
 						scan={validationScan}
+						onRemotePathChange={setRemotePath}
+						onSubmitRemote={() => void createRemoteProject()}
 						onBack={() => {
 							setError(null);
 							setValidationScan(null);
@@ -299,6 +373,16 @@ async function projectRepositoryPreflight(path: string): Promise<ProjectReposito
 	}
 }
 
+// The daemon's locked error envelope is {error, code, message} (httpd/envelope);
+// `message` is the sentence the CLI prints, so both surfaces say the same thing.
+// Some paths carry only `error`.
+function daemonErrorMessage(body: unknown): string | null {
+	if (typeof body !== "object" || body === null) return null;
+	const { error, message } = body as { error?: unknown; message?: unknown };
+	if (typeof message === "string" && message !== "") return message;
+	return typeof error === "string" && error !== "" ? error : null;
+}
+
 function shouldScanCreateFailure(message: string): boolean {
 	if (/daemon|server|conflict|already exists|not ready|start|orchestrator|permission denied/i.test(message))
 		return false;
@@ -308,11 +392,13 @@ function shouldScanCreateFailure(message: string): boolean {
 
 function CreateProjectModeDialog({
 	disabled,
+	hostRow,
 	onOpenChange,
 	onSelect,
 	open,
 }: {
 	disabled: boolean;
+	hostRow?: ReactNode;
 	onOpenChange: (open: boolean) => void;
 	onSelect: (kind: ProjectKind) => void;
 	open: boolean;
@@ -322,7 +408,13 @@ function CreateProjectModeDialog({
 			<Dialog.Portal>
 				<Dialog.Overlay className="dialog-overlay data-[state=open]:animate-overlay-in" />
 				<Dialog.Content className="fixed left-1/2 top-1/2 z-overlay w-[min(var(--size-import-modal-max),calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2 border-0 bg-transparent p-0 shadow-none outline-none data-[state=open]:animate-modal-in">
-					<ImportModePicker disabled={disabled} onClose={() => onOpenChange(false)} onSelect={onSelect} dialog />
+					<ImportModePicker
+						dialog
+						disabled={disabled}
+						hostRow={hostRow}
+						onClose={() => onOpenChange(false)}
+						onSelect={onSelect}
+					/>
 				</Dialog.Content>
 			</Dialog.Portal>
 		</Dialog.Root>
@@ -333,11 +425,13 @@ function CreateProjectModeDialog({
 function ImportModePicker({
 	dialog = false,
 	disabled,
+	hostRow,
 	onClose,
 	onSelect,
 }: {
 	dialog?: boolean;
 	disabled: boolean;
+	hostRow?: ReactNode;
 	onClose?: () => void;
 	onSelect: (kind: ProjectKind) => void;
 }) {
@@ -360,6 +454,12 @@ function ImportModePicker({
 					<p className="import-description">{t("createProject.importWhat")}</p>
 				)}
 			</div>
+			{hostRow && (
+				<div className="relative z-[2] flex flex-col items-start gap-2 self-stretch">
+					<span className="text-[13px] font-medium text-[var(--color-text-import-muted)]">{t("hosts.label")}</span>
+					{hostRow}
+				</div>
+			)}
 			<div className="relative z-[2] flex flex-row items-stretch justify-center gap-6 self-stretch">
 				<ProjectModeButton
 					description={t("createProject.workspaceDesc")}
@@ -466,7 +566,11 @@ function CreateProjectFolderDialog({
 	onBack,
 	onChooseFolder,
 	onOpenChange,
+	onRemotePathChange,
+	onSubmitRemote,
 	open,
+	remoteHost,
+	remotePath,
 	scan,
 }: {
 	disabled: boolean;
@@ -475,10 +579,16 @@ function CreateProjectFolderDialog({
 	onBack: () => void;
 	onChooseFolder: () => void;
 	onOpenChange: (open: boolean) => void;
+	onRemotePathChange: (path: string) => void;
+	onSubmitRemote: () => void;
 	open: boolean;
+	/** Non-null when the project is being registered on another machine. */
+	remoteHost: { label: string; url: string } | null;
+	remotePath: string;
 	scan: ImportFolderScan | null;
 }) {
 	const { t } = useTranslation();
+	const remotePathId = useId();
 	const isWorkspace = kind === "workspace";
 	const failedRepos = scan?.repos.filter((repo) => repo.status === "error" || !repo.hasRemote) ?? [];
 	const hasScan = scan !== null;
@@ -575,6 +685,25 @@ function CreateProjectFolderDialog({
 									</div>
 								)}
 							</div>
+						) : remoteHost ? (
+							<div className="flex flex-col gap-2">
+								<label
+									className="text-[13px] font-semibold text-[var(--color-text-import-title)]"
+									htmlFor={remotePathId}
+								>
+									{t("hosts.remotePath", { host: remoteHost.label })}
+								</label>
+								<input
+									id={remotePathId}
+									autoComplete="off"
+									spellCheck={false}
+									className="settings-field-control h-(--size-settings-action-height) font-mono"
+									disabled={disabled}
+									value={remotePath}
+									onChange={(event) => onRemotePathChange(event.target.value)}
+								/>
+								<p className="text-[12px] text-[var(--color-text-import-muted)]">{t("hosts.remotePathHint")}</p>
+							</div>
 						) : (
 							<button
 								type="button"
@@ -595,6 +724,9 @@ function CreateProjectFolderDialog({
 						)}
 						{error && !hasScan && (
 							<div
+								// The remote path has no scan card to hang the failure on, so the
+								// daemon's rejection has to announce itself.
+								role={remoteHost ? "alert" : undefined}
 								className={cn(
 									"mt-4 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-3 text-[12px] leading-5 text-destructive",
 								)}
@@ -609,6 +741,16 @@ function CreateProjectFolderDialog({
 							<Button type="button" variant="footer" disabled={disabled} onClick={() => onOpenChange(false)}>
 								{t("createProject.cancel")}
 							</Button>
+							{remoteHost && (
+								<Button
+									type="button"
+									variant="footer-primary"
+									disabled={disabled || remotePath.trim() === ""}
+									onClick={onSubmitRemote}
+								>
+									{t("hosts.addProjectOn", { host: remoteHost.label })}
+								</Button>
+							)}
 						</div>
 					</div>
 				</Dialog.Content>

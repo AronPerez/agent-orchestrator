@@ -28,7 +28,9 @@ vi.mock("../../lib/api-client", () => ({
 }));
 
 vi.mock("../../lib/bridge", () => ({
-	aoBridge: { app: { chooseDirectory: chooseDirectoryMock } },
+	// The welcome panel's host row lists saved AO daemons on mount; an omitted
+	// namespace surfaces as an unhandled rejection, not a failed assertion.
+	aoBridge: { app: { chooseDirectory: chooseDirectoryMock }, remotes: { list: async () => [] } },
 }));
 
 vi.mock("@tanstack/react-router", async (importOriginal) => {

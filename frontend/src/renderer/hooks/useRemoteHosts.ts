@@ -19,16 +19,9 @@ export type Host = {
 	status: HostStatus;
 };
 
-type RemotesBridge = {
-	list: () => Promise<RemoteHostView[]>;
-	add: (input: { label: string; url: string; password: string }) => Promise<RemoteHealth>;
-	probe: (url: string) => Promise<RemoteHealth>;
-};
-
-// ponytail: the preload bridge declares `remotes` in the IPC slice; this cast is
-// the seam until that lands. Drop it once `AoBridge` carries the type itself.
-export function remotesBridge(): RemotesBridge {
-	return (aoBridge as unknown as { remotes: RemotesBridge }).remotes;
+/** The preload bridge's saved-host surface: list, add, probe, request. */
+export function remotesBridge() {
+	return aoBridge.remotes;
 }
 
 export function useRemoteHosts(): { hosts: Host[]; refresh: () => Promise<void> } {
