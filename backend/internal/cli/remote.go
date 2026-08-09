@@ -215,13 +215,41 @@ func (c *commandContext) checkRemoteProjectPath(path string) error {
 			"--path %q is relative to a home directory, and %s targets the remote daemon at %s, "+
 				"where it would mean that host's home — pass an absolute path as it exists on that host",
 			path, c.remote.source, c.remote.baseURL)}
-	case !filepath.IsAbs(trimmed):
+	case !isAbsForSomeHost(trimmed):
 		return usageError{fmt.Errorf(
 			"--path %q is relative, and %s targets the remote daemon at %s, where it would be resolved "+
 				"against that daemon's working directory — pass an absolute path as it exists on that host",
 			path, c.remote.source, c.remote.baseURL)}
 	}
 	return nil
+}
+
+// isAbsForSomeHost reports whether p is an absolute path on ANY host AO might
+// talk to, rather than on the machine running the CLI.
+//
+// filepath.IsAbs is the wrong question here and shipping it was a bug: it
+// judges by the local OS, so on Windows it calls "/srv/repo" relative — and a
+// Windows operator targeting a Linux remote host, which is exactly what remote
+// execution creates, was refused a perfectly valid path on that host. The
+// destination filesystem is the remote daemon's, so the CLI must accept every
+// absolute form and let the daemon judge its own.
+//
+// Deliberately NOT accepted, because both are host-relative even on Windows:
+// a bare drive-relative path ("C:foo") and a single leading backslash
+// ("\foo", relative to the current drive).
+func isAbsForSomeHost(p string) bool {
+	if strings.HasPrefix(p, "/") {
+		return true // POSIX absolute
+	}
+	if strings.HasPrefix(p, `\\`) {
+		return true // Windows UNC: \\server\share
+	}
+	// Windows drive-absolute: C:\foo or C:/foo (a slash after the colon is
+	// what separates this from drive-RELATIVE "C:foo").
+	if len(p) >= 3 && p[1] == ':' && (p[2] == '\\' || p[2] == '/') {
+		return (p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z')
+	}
+	return false
 }
 
 // authorize presents the remote connection password. Loopback calls carry no
