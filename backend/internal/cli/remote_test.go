@@ -73,6 +73,45 @@ func TestNormalizeRemoteURL(t *testing.T) {
 			t.Errorf("normalizeRemoteURL(%q) = %q, want error", in, got)
 		}
 	}
+
+	// An "@" outside the authority is not userinfo and must still parse.
+	for _, in := range []string{"http://host:3011/a@b", "http://host:3011/x?q=a@b"} {
+		if _, err := normalizeRemoteURL(in); err != nil {
+			t.Errorf("normalizeRemoteURL(%q): %v", in, err)
+		}
+	}
+}
+
+// A credential typed into the URL is rejected outright rather than silently
+// dropped — and the error must never echo it back.
+func TestNormalizeRemoteURLRejectsUserinfo(t *testing.T) {
+	for _, in := range []string{
+		"http://user:hunter2@host:3011",
+		"https://user:hunter2@host:3011/path",
+		"user:hunter2@host:3011", // scheme-less form
+		"http://hunter2@host:3011",
+	} {
+		_, err := normalizeRemoteURL(in)
+		if err == nil {
+			t.Fatalf("normalizeRemoteURL(%q) succeeded, want a userinfo rejection", in)
+		}
+		if !strings.Contains(err.Error(), "must not carry a username or password") {
+			t.Errorf("normalizeRemoteURL(%q) error = %q, want a userinfo rejection", in, err)
+		}
+		if strings.Contains(err.Error(), "hunter2") {
+			t.Errorf("normalizeRemoteURL(%q) echoed the credential: %q", in, err)
+		}
+	}
+}
+
+// The same rejection must reach the user through the real resolution path, with
+// the credential still absent from the message.
+func TestResolveRemoteTargetRejectsUserinfo(t *testing.T) {
+	aoHome(t)
+	_, err := resolveRemoteTarget("http://user:hunter2@host:3011")
+	if err == nil || strings.Contains(err.Error(), "hunter2") {
+		t.Fatalf("err = %v, want a rejection that does not echo the password", err)
+	}
 }
 
 // No --url and no AO_URL must resolve to nil: that is what keeps every local
@@ -144,8 +183,26 @@ func TestResolveRemoteTargetCredentialSources(t *testing.T) {
 	t.Run("unknown host in remotes.json is an error", func(t *testing.T) {
 		home := aoHome(t)
 		writeRemotes(t, home, 0o600, remoteEntry{URL: "http://elsewhere:3011", Password: "nope"})
-		if _, err := resolveRemoteTarget("http://host:3011"); err == nil {
-			t.Fatal("want an error when no entry matches")
+		_, err := resolveRemoteTarget("http://host:3011")
+		if err == nil || !strings.Contains(err.Error(), "no connection password") {
+			t.Fatalf("err = %v, want the missing-entry error", err)
+		}
+	})
+
+	// An entry that exists but carries no password is a different problem from
+	// no entry at all, and must not be told to add the entry it already has.
+	t.Run("matching entry with an empty password says so", func(t *testing.T) {
+		home := aoHome(t)
+		writeRemotes(t, home, 0o600, remoteEntry{Label: "desk", URL: "http://host:3011", Password: ""})
+		_, err := resolveRemoteTarget("http://host:3011")
+		if err == nil {
+			t.Fatal("want an error for an entry with an empty password")
+		}
+		if !strings.Contains(err.Error(), "has an empty password") {
+			t.Fatalf("err = %q, want it to name the empty password", err)
+		}
+		if strings.Contains(err.Error(), "add an entry") {
+			t.Fatalf("err = %q, must not tell the user to add an entry that already exists", err)
 		}
 	})
 }
@@ -291,6 +348,24 @@ func TestStopRefusesRemoteTarget(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error %q missing %q", err.Error(), want)
 		}
+	}
+	// The message must not assert anything about what the target exposes: a
+	// loopback --url refuses too, and there /shutdown IS reachable.
+	if strings.Contains(err.Error(), "/shutdown") {
+		t.Fatalf("error %q claims something about the target's routes", err.Error())
+	}
+}
+
+// The refusal is unconditional: a --url that happens to name loopback is still
+// not the daemon `ao stop` discovered locally, and must not be stopped.
+func TestStopRefusesLoopbackURLToo(t *testing.T) {
+	aoHome(t)
+	c := &commandContext{
+		deps:   Deps{ProcessAlive: func(int) bool { t.Fatal("stop must refuse before touching local state"); return false }}.withDefaults(),
+		remote: &remoteTarget{baseURL: "http://127.0.0.1:3001", token: "tok", source: "--url"},
+	}
+	if _, err := c.stopDaemon(context.Background(), stopOptions{}); err == nil {
+		t.Fatal("ao stop --url http://127.0.0.1:3001 must refuse")
 	}
 }
 

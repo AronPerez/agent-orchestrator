@@ -48,8 +48,12 @@ Notes:
 
 - The link is plain HTTP by design (ADR 0001, home network / Tailscale only).
   There is no TLS or certificate pinning.
-- `ao stop` refuses a remote target rather than shutting down a daemon on
-  another machine; `/shutdown` is not exposed over the network anyway.
+- The URL must not carry a username or password. A credential belongs in
+  `AO_TOKEN` or the `remotes.json` entry, so `--url http://user:pw@host:3011` is
+  rejected rather than silently stripped.
+- `ao stop` only ever stops the local daemon it found through `running.json`. A
+  `--url` / `AO_URL` target is refused — including one that names loopback, so
+  the single destructive verb never changes behavior based on how the URL looks.
 - CLI telemetry (`/internal/*`) is never sent to a remote daemon.
 
 ## Current commands

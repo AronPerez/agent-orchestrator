@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -63,13 +64,18 @@ func resolveRemoteTarget(flagURL string) (*remoteTarget, error) {
 	}
 	token := strings.TrimSpace(os.Getenv("AO_TOKEN"))
 	if token == "" {
-		if token, err = lookupRemoteToken(base); err != nil {
+		entry, err := lookupRemoteEntry(base)
+		if err != nil {
 			return nil, err
 		}
-	}
-	if token == "" {
 		path, _ := remotesFilePath()
-		return nil, fmt.Errorf("no connection password for %s — set AO_TOKEN or add an entry for it to %s", base, path)
+		switch {
+		case entry == nil:
+			return nil, fmt.Errorf("no connection password for %s — set AO_TOKEN or add an entry for it to %s", base, path)
+		case strings.TrimSpace(entry.Password) == "":
+			return nil, fmt.Errorf("the entry for %s in %s has an empty password — set its password, or use AO_TOKEN", base, path)
+		}
+		token = strings.TrimSpace(entry.Password)
 	}
 	return &remoteTarget{baseURL: base, token: token, source: source}, nil
 }
@@ -78,6 +84,15 @@ func resolveRemoteTarget(flagURL string) (*remoteTarget, error) {
 // trailing slash. A bare "host:3011" is accepted and assumed plaintext http,
 // matching the LAN listener (ADR 0001 is deliberately http-only).
 func normalizeRemoteURL(raw string) (string, error) {
+	// A URL-embedded credential is never trusted — the connection password comes
+	// from AO_TOKEN or remotes.json. Silently dropping it would leave the user
+	// certain they had passed a password and then told there was none, so say so
+	// instead. Checked first, and reported without quoting the URL, so no later
+	// error path can echo the credential into a message or a log line.
+	if hasUserinfo(raw) {
+		return "", errors.New("invalid daemon URL: it must not carry a username or password — " +
+			"pass the connection password in AO_TOKEN or a ~/.ao/remotes.json entry")
+	}
 	if !strings.Contains(raw, "://") {
 		raw = "http://" + raw
 	}
@@ -94,6 +109,21 @@ func normalizeRemoteURL(raw string) (string, error) {
 	return strings.TrimRight(u.Scheme+"://"+u.Host+u.Path, "/"), nil
 }
 
+// hasUserinfo reports whether raw's authority component carries userinfo. It
+// works textually, before url.Parse, so that a malformed URL cannot slip a
+// credential into the parse error — and it catches the scheme-less form
+// ("user:pw@host:3011") too. An "@" in the path or query is not authority.
+func hasUserinfo(raw string) bool {
+	authority := raw
+	if i := strings.Index(authority, "://"); i >= 0 {
+		authority = authority[i+3:]
+	}
+	if i := strings.IndexAny(authority, "/?#"); i >= 0 {
+		authority = authority[:i]
+	}
+	return strings.Contains(authority, "@")
+}
+
 func remotesFilePath() (string, error) {
 	dir, err := config.StateDir()
 	if err != nil {
@@ -102,34 +132,36 @@ func remotesFilePath() (string, error) {
 	return filepath.Join(dir, remotesFileName), nil
 }
 
-// lookupRemoteToken returns the saved password for base, or "" when the file
-// does not exist or holds no entry for it. A file readable by anyone but the
-// owner is refused rather than used: it is a plaintext credential store.
-func lookupRemoteToken(base string) (string, error) {
+// lookupRemoteEntry returns the saved entry for base, or nil when the file does
+// not exist or holds no entry for it. A nil entry and an entry with an empty
+// password are different problems, so the caller can say which one it is. A file
+// readable by anyone but the owner is refused rather than used: it is a
+// plaintext credential store.
+func lookupRemoteEntry(base string) (*remoteEntry, error) {
 	path, err := remotesFilePath()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", nil
+			return nil, nil
 		}
-		return "", err
+		return nil, err
 	}
 	// Windows file modes do not carry meaningful group/other bits, so the check
 	// would reject every file there.
 	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-		return "", fmt.Errorf("%s holds connection passwords and is readable by others (mode %04o) — run: chmod 600 %s",
+		return nil, fmt.Errorf("%s holds connection passwords and is readable by others (mode %04o) — run: chmod 600 %s",
 			path, info.Mode().Perm(), path)
 	}
 	raw, err := os.ReadFile(path) // #nosec G304 -- fixed path under the AO home directory.
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	var file remotesFile
 	if err := json.Unmarshal(raw, &file); err != nil {
-		return "", fmt.Errorf("parse %s: %w", path, err)
+		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	for _, entry := range file.Remotes {
 		saved, err := normalizeRemoteURL(entry.URL)
@@ -137,10 +169,10 @@ func lookupRemoteToken(base string) (string, error) {
 			continue // a hand-edited entry must not break every other one
 		}
 		if saved == base {
-			return strings.TrimSpace(entry.Password), nil
+			return &entry, nil
 		}
 	}
-	return "", nil
+	return nil, nil
 }
 
 // authorize presents the remote connection password. Loopback calls carry no

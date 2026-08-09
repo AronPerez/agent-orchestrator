@@ -48,13 +48,15 @@ func newStopCommand(ctx *commandContext) *cobra.Command {
 func (c *commandContext) stopDaemon(ctx context.Context, opts stopOptions) (daemonStatus, error) {
 	// `ao stop` is the one command that must never follow a stray --url/AO_URL:
 	// silently shutting down a daemon on someone else's machine is not a
-	// recoverable mistake. It is also not possible — /shutdown is 404'd at the
-	// LAN socket (lanControlBlockedPrefixes) — so say so instead of failing with
-	// a bare 404 that reads like a broken URL.
+	// recoverable mistake. The refusal is unconditional, and deliberately does
+	// NOT branch on whether the URL looks like loopback — --url means "a daemon
+	// other than the one I discovered locally", and letting the single
+	// destructive verb behave differently based on how a string happens to look
+	// is exactly the surprise worth refusing.
 	if c.remote != nil {
 		return daemonStatus{}, fmt.Errorf(
-			"refusing to stop a remote daemon: %s targets %s. `ao stop` stops the LOCAL daemon only; "+
-				"a remote daemon does not expose /shutdown over the network — stop it on that machine",
+			"refusing to stop a remote daemon: %s targets %s. `ao stop` only ever stops the local daemon "+
+				"it discovers through the run-file, never a --url/AO_URL target — stop that daemon on the machine running it",
 			c.remote.source, c.remote.baseURL)
 	}
 	cfg, err := config.Load()
