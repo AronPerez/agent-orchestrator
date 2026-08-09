@@ -80,6 +80,10 @@ mkdirSync(outDir, { recursive: true });
 // runs inside a linked git worktree — even with -buildvcs=true, which exits 0 and
 // stamps nothing — and the app-bundled daemon shipped with no build identity for
 // exactly that reason. `git rev-parse` works in a worktree, so ask git directly.
+//
+// DO NOT "simplify" this back to -buildvcs. It is a silent no-op in a worktree:
+// the build succeeds, the app ships, and /healthz reports source "unknown"
+// forever — which is precisely the bug this replaced.
 const stampPkg = "github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta";
 const gitOutput = (args) => {
 	const r = spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" });

@@ -124,6 +124,10 @@ fi
 # runs inside a linked git worktree — even with -buildvcs=true, which exits 0 and
 # stamps nothing — and every AO agent session builds from one. `git rev-parse`
 # works there, so ask git directly.
+#
+# DO NOT "simplify" this back to -buildvcs. It is a silent no-op in a worktree:
+# the build succeeds, the daemon ships, and /healthz reports source "unknown"
+# forever. That is how the app-bundled daemon came to have no build identity.
 build_stamp=""
 if git_rev="$(git -C "${repo_root}" rev-parse HEAD 2>/dev/null)"; then
   build_stamp="${git_rev}"
