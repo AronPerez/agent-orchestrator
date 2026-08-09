@@ -70,9 +70,6 @@ var bundle = func() fs.FS {
 	return sub
 }()
 
-// Available reports whether a UI bundle was built into this daemon.
-func Available() bool { return indexHTML(bundle) != nil }
-
 func indexHTML(assets fs.FS) []byte {
 	b, err := fs.ReadFile(assets, "index.html")
 	if err != nil {
@@ -159,10 +156,14 @@ func contentSecurityPolicy(r *http.Request) string {
 		"object-src 'none'",
 		"base-uri 'self'",
 		"form-action 'none'",
-		// The workspace preview panel frames whatever dev server the agent
-		// started, which is a different origin on an unpredictable port. A framed
-		// document cannot reach into this one, so allowing http(s) frames costs
-		// nothing here while 'none' would blank the panel.
+		// DELIBERATELY looser than the desktop build, which sends frame-src
+		// 'none' (frontend/vite.renderer.config.ts). The BrowserPanel web
+		// fallback frames whatever dev server the agent started — a different
+		// origin on an unpredictable port — so 'none' would blank that panel,
+		// and the port cannot be enumerated ahead of time. A framed document
+		// cannot reach into this one, so the cost is nil; but this header goes
+		// to every LAN client, so treat widening it further as a security
+		// decision rather than a rendering fix.
 		"frame-src http: https:",
 	}, "; ")
 }

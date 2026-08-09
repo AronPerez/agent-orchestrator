@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -56,6 +56,22 @@ if (webResult.status !== 0) {
 }
 mkdirSync(webuiDir, { recursive: true });
 writeFileSync(join(webuiDir, ".gitkeep"), "");
+
+// Prove the bundle is really there before `go build` embeds it. go:embed is
+// satisfied by the tracked .gitkeep alone, so an empty bundle directory still
+// compiles, still passes CI, and still ships — producing a daemon whose UI
+// answers 503 to the first person who opens the URL. That is a silent ship, and
+// this is the only place that can catch it: a Go test cannot, because CI checks
+// out .gitkeep and nothing else, so asserting the bundle exists there would
+// fail by design.
+if (!existsSync(join(webuiDir, "index.html"))) {
+	console.error(
+		`web UI bundle missing: ${join(webuiDir, "index.html")} does not exist after the vite build.\n` +
+			"The daemon would compile and ship with no UI (503 on every page request).\n" +
+			"Check the `vite build` step above — do not skip or reorder it.",
+	);
+	process.exit(1);
+}
 
 rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });
