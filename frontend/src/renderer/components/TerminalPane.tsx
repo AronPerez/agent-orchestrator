@@ -24,6 +24,7 @@ import {
 } from "../hooks/useTerminalSession";
 import { useSessionBrowserLink } from "../hooks/useSessionBrowserLink";
 import { getApiBaseUrl } from "../lib/api-client";
+import { hasBrowserDaemon } from "../lib/preview-mode";
 import {
 	createTerminalMux,
 	createTerminalMuxPool,
@@ -652,10 +653,10 @@ export function TerminalPane({
 			: (session?.terminalHandleId ?? "empty");
 
 	// Electron attaches the live PTY via window.ao's bridge; a plain browser
-	// normally can't, so it shows a static surface. But when an explicit API base
-	// is configured (LAN-exposed), the terminal attaches over the proxied /mux
-	// websocket instead — no Electron bridge needed.
-	if (!window.ao && import.meta.env.VITE_AO_API_BASE_URL == null) {
+	// normally can't, so it shows a static surface. But whenever a real daemon is
+	// reachable — it served this page, or an explicit API base is configured —
+	// the terminal attaches over the /mux websocket instead, no bridge needed.
+	if (!window.ao && !hasBrowserDaemon) {
 		// A standalone shell has no agent and no branch, so it previews as a plain
 		// prompt rather than borrowing the session's agent transcript.
 		if (terminalTarget?.kind === "shell") {

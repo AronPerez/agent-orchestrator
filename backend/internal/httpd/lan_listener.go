@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/webui"
 	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
@@ -38,12 +39,34 @@ type LANManager struct {
 func NewLANManager(handler http.Handler, state *authState, defaultPort int, log *slog.Logger, sink ports.EventSink) *LANManager {
 	log = loggerOrDefault(log)
 	lock := newLockout(5, time.Minute, time.Now)
+	authed := authMiddleware(state, lock, log, newMobileConnectReporter(sink, time.Now))(handler)
 	return &LANManager{
-		handler:     lanControlBlock(authMiddleware(state, lock, log, newMobileConnectReporter(sink, time.Now))(handler)),
+		handler:     lanControlBlock(webUIBypass(handler, authed)),
 		defaultPort: defaultPort,
 		log:         log,
 		state:       state,
 	}
+}
+
+// webUIBypass serves the embedded web UI without a connection password and
+// sends everything else through authMiddleware.
+//
+// The UI *is* the password prompt: a browser on another machine has no way to
+// send a credential it has not been asked for yet, so 401-ing index.html and
+// its assets would leave the user staring at a JSON error with nowhere to type.
+// What is exposed by this is a static bundle — the same bytes every AO release
+// ships — and never a byte of daemon data: webui.IsUIRequest excludes every
+// path the daemon answers itself (API, /mux, probes, control), so the first
+// request that could return anything about this machine is still authenticated,
+// which is what makes the SPA see a 401 and show the prompt.
+func webUIBypass(ui http.Handler, authed http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if webui.IsUIRequest(r) {
+			ui.ServeHTTP(w, r)
+			return
+		}
+		authed.ServeHTTP(w, r)
+	})
 }
 
 // lanControlBlockedPrefixes are the loopback-only daemon-control route

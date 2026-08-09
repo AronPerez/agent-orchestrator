@@ -17,6 +17,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/webui"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/telemetrymeta"
 	"github.com/aoagents/agent-orchestrator/backend/internal/terminal"
@@ -57,10 +58,11 @@ func NewRouterWithControl(cfg config.Config, log *slog.Logger, termMgr *terminal
 	r.Use(corsMiddleware(cfg.AllowedOrigins))
 	r.Use(previewOriginMiddleware(api.sessions))
 
-	// JSON envelopes for unmatched routes / methods — chi's defaults are
-	// text/plain, which would break consumers that parse every response as
-	// the locked APIError shape.
-	r.NotFound(notFoundJSON)
+	// Last-resort route: the embedded browser UI, falling through to the JSON
+	// 404 for anything the daemon owns. chi's defaults are text/plain, which
+	// would break consumers that parse every response as the locked APIError
+	// shape, so webui.Handler delegates every non-UI path to notFoundJSON.
+	r.NotFound(webui.Handler(http.HandlerFunc(notFoundJSON)).ServeHTTP)
 	r.MethodNotAllowed(methodNotAllowedJSON)
 
 	mountHealth(r, cfg)

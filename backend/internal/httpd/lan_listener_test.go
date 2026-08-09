@@ -35,7 +35,9 @@ func TestLANManagerAuthGatesSharedHandler(t *testing.T) {
 		t.Fatalf("running=%v boundPort=%d port=%d", m.Running(), m.BoundPort(), port)
 	}
 
-	base := fmt.Sprintf("http://127.0.0.1:%d/anything", port)
+	// An API path, not "/anything": paths the daemon does not own are the web UI
+	// bundle, which is served without a password on purpose (see webUIBypass).
+	base := fmt.Sprintf("http://127.0.0.1:%d/api/v1/anything", port)
 	// no auth → 401
 	resp, _ := http.Get(base)
 	if resp.StatusCode != http.StatusUnauthorized {
@@ -294,6 +296,19 @@ func TestDaemonServedUIOnLANNeedsNoAllowlistEntry(t *testing.T) {
 // data-free app shell (a static bundle rendering a login prompt) is fine. A
 // route that reads state, or changes any, is not — it re-opens rebinding against
 // the LAN listener and the exemption has to be revisited with it.
+// The embedded web UI (internal/httpd/webui, routed by webUIBypass) is the one
+// unauthenticated surface on the LAN listener, and it is deliberately absent
+// from this map: it is not a registered chi route but the NotFound fallback, so
+// chi.Walk below never yields it and no entry could exempt it. Declaring it here
+// anyway would be worse than useless — the key would silently exempt a real
+// route of that name later. It is a data-free app shell whose only job is to
+// render the password prompt, and it is covered by
+// TestLANManagerServesWebUIWithoutPassword, which asserts the other half: that
+// every path the daemon answers itself still requires the password.
+//
+// The walk below is therefore still exhaustive over registered routes, which is
+// the property that matters: webui.IsUIRequest excludes every daemon prefix, so
+// nothing chi serves can slip through the bypass.
 var unauthenticatedLANRoutes = map[string]struct{}{}
 
 // TestEveryLANRouteIsCredentialGated walks the real router and proves each route
@@ -350,4 +365,57 @@ func TestEveryLANRouteIsCredentialGated(t *testing.T) {
 		t.Fatal("walked no routes — the test proved nothing")
 	}
 	t.Logf("checked %d routes", walked)
+}
+
+// TestLANManagerServesWebUIWithoutPassword pins the one deliberate hole in LAN
+// auth: the static web UI, which is the password prompt itself. It must load
+// unauthenticated, and nothing the daemon answers may follow it through.
+func TestLANManagerServesWebUIWithoutPassword(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "ok")
+	})
+	st := &authState{}
+	st.setHash(mobilebridge.HashPassword("secret12"))
+	m := NewLANManager(inner, st, 0, slog.Default(), nil)
+	port, err := m.Start(0, "")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer m.Stop(context.Background())
+
+	// The UI shell and its assets: no password, served by the shared handler.
+	for _, path := range []string{"/", "/assets/index.js", "/projects/ao-1"} {
+		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d%s", port, path))
+		if err != nil {
+			t.Fatalf("%s: request failed: %v", path, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusUnauthorized {
+			t.Fatalf("%s: got 401; the UI must load so the user can enter a password", path)
+		}
+	}
+
+	// Everything that can carry daemon data still needs the password, including
+	// the GET routes that look most like a page.
+	for _, path := range []string{"/api/v1/sessions", "/mux", "/healthz", "/readyz"} {
+		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d%s", port, path))
+		if err != nil {
+			t.Fatalf("%s: request failed: %v", path, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("%s: got %d want 401 (the web UI bypass must not cover daemon routes)", path, resp.StatusCode)
+		}
+	}
+
+	// A POST is never a UI request, so an unknown path cannot be used to reach a
+	// side effect without the password.
+	resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/anything", port), "application/json", nil)
+	if err != nil {
+		t.Fatalf("post: request failed: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("POST /anything: got %d want 401", resp.StatusCode)
+	}
 }

@@ -2,13 +2,20 @@ import createClient from "openapi-fetch";
 import type { paths } from "../../api/schema";
 import type { DaemonStatus } from "../../shared/daemon-status";
 import { daemonFailureMessage } from "./daemon-failure";
+import { isDaemonServedWeb } from "./preview-mode";
+import { reportUnauthorized } from "./auth-gate";
 import { captureRendererEvent } from "./telemetry";
 
 function devApiBaseUrl(): string {
 	return typeof window === "undefined" ? "http://127.0.0.1:3001" : window.location.origin;
 }
 
-const explicitApiBaseUrl = import.meta.env.VITE_AO_API_BASE_URL;
+// The daemon-served web build has no Electron supervisor to report a port, and
+// needs none: the daemon that sent this page is the daemon it talks to, on
+// whichever address the user reached it by. Resolved at runtime rather than
+// baked in, so one bundle works over loopback and over the LAN.
+const explicitApiBaseUrl =
+	isDaemonServedWeb && typeof window !== "undefined" ? window.location.origin : import.meta.env.VITE_AO_API_BASE_URL;
 const initialApiBaseUrl = explicitApiBaseUrl ?? (import.meta.env.DEV ? devApiBaseUrl() : "http://127.0.0.1:3001");
 
 let runtimeApiBaseUrl: string | null = explicitApiBaseUrl ?? null;
@@ -240,6 +247,10 @@ async function runtimeFetch(input: Request): Promise<Response> {
 		throw error;
 	}
 	if (!response.ok) {
+		// A 401 means the daemon wants the LAN connection password. Only the
+		// browser build can see one — the loopback listener has no auth — and it
+		// is the signal that the login prompt has to come up.
+		if (response.status === 401) reportUnauthorized();
 		reportApiError(operation, response.status >= 500 ? "http_5xx" : "http_4xx", response.status);
 	}
 	return response;

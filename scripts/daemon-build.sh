@@ -92,6 +92,22 @@ binary_name="ao${goexe}"
 binary_path="${build_dir}/${binary_name}"
 
 mkdir -p "${build_dir}"
+
+# Regenerate the browser bundle the daemon embeds and serves at its own origin,
+# so an `ao` installed from source has the web UI too. Skipped when frontend deps
+# are absent — go:embed still resolves against the tracked .gitkeep, and the
+# daemon then answers UI requests with a 503 that says the bundle was not built.
+frontend_dir="${repo_root}/frontend"
+webui_bundle="${backend_dir}/internal/httpd/webui/bundle"
+if [[ -x "${frontend_dir}/node_modules/.bin/vite" ]]; then
+  rm -rf "${webui_bundle}"
+  (cd "${frontend_dir}" && VITE_AO_WEB=1 ./node_modules/.bin/vite build \
+    --config vite.renderer.config.ts --outDir "${webui_bundle}" --emptyOutDir)
+  mkdir -p "${webui_bundle}" && : > "${webui_bundle}/.gitkeep"
+else
+  printf 'Skipping the web UI bundle: %s/node_modules is missing\n' "${frontend_dir}" >&2
+fi
+
 (cd "${backend_dir}" && go build -o "${binary_path}" ./cmd/ao)
 
 if ! install_dir="$(select_install_dir)"; then
