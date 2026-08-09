@@ -84,6 +84,77 @@ func corsMiddleware(allowedOrigins []string) func(http.Handler) http.Handler {
 	}
 }
 
+// hostGuard rejects any request to the loopback listener whose Host header
+// names something other than an address this daemon is meant to answer to.
+//
+// No origin check can substitute for this, which is why it exists as its own
+// boundary. Under DNS rebinding an attacker serves a page from
+// http://evil.com:3001 (they own the host AND the port), then repoints evil.com
+// at 127.0.0.1. The page's subsequent requests reach this daemon and are
+// genuinely same-origin — the browser is not lying: it sends
+// Host: evil.com:3001, Sec-Fetch-Site: same-origin, and for a same-origin GET
+// no Origin header at all. Every origin-based trust path passes, correctly, and
+// the response is readable to the page because no CORS check applies. Origin
+// tells you who is asking; only Host tells you who they think they reached.
+//
+// Legitimate Hosts are loopback literals, RFC 6761 *.localhost (workspace
+// preview subdomains — an attacker cannot own DNS for .localhost), and the
+// hosts of allowlisted origins, which covers a dev proxy that forwards the
+// browser's original Host (vite's changeOrigin: false) for a UI the operator
+// has already named in AO_ALLOWED_ORIGINS.
+//
+// The LAN listener is exempt: it is credential-gated, and rebinding yields
+// neither the password nor the ao_conn cookie (the cookie is bound to the host
+// the daemon actually served, never to the attacker's). Enforcing bound-address
+// equality there would instead break the legitimate ways a phone addresses it —
+// a Tailscale MagicDNS name, or ao-phone-proxy forwarding the client's Host.
+func hostGuard(allowedOrigins []string) func(http.Handler) http.Handler {
+	hosts := make(map[string]struct{}, len(allowedOrigins))
+	for _, origin := range allowedOrigins {
+		u, err := url.Parse(strings.TrimSpace(origin))
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			continue // app://renderer and friends name no reachable address
+		}
+		hosts[strings.ToLower(u.Host)] = struct{}{}
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !servedOverLAN(r) && !hostAllowed(hosts, r.Host) {
+				envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "HOST_FORBIDDEN",
+					"Host is not an address this daemon answers to", nil)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// hostAllowed reports whether a Host header names this daemon. An empty Host is
+// refused: every real client sends one, so its absence is a malformed or
+// hand-rolled request, not a case worth widening the boundary for.
+func hostAllowed(allowedHosts map[string]struct{}, rawHost string) bool {
+	if rawHost == "" {
+		return false
+	}
+	if _, ok := allowedHosts[strings.ToLower(rawHost)]; ok {
+		return true
+	}
+	host := rawHost
+	if h, _, err := net.SplitHostPort(rawHost); err == nil {
+		host = h
+	}
+	host = strings.ToLower(strings.TrimSuffix(strings.Trim(host, "[]"), "."))
+	// RFC 6761 reserves localhost and every name below it for loopback, so a
+	// workspace preview's ao-preview.<id>.localhost cannot be pointed elsewhere.
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
+}
+
 // requiresStrictOrigin reports whether r carries enough authority that
 // loopback-origin trust (see isLoopbackOrigin) is too coarse for it.
 //

@@ -1,6 +1,7 @@
 package httpd
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -299,5 +300,111 @@ func TestDaemonServedUINeedsNoAllowlistEntry(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusForbidden {
 		t.Fatal("a same-origin request with no Origin header was 403'd")
+	}
+}
+
+// DNS rebinding: the attacker serves a page from http://evil.com:3001 (they own
+// the host AND the port), then repoints evil.com at 127.0.0.1. The page's next
+// request reaches this daemon and is GENUINELY same-origin — the browser sends
+// Host: evil.com:3001, Sec-Fetch-Site: same-origin, and for a same-origin GET
+// no Origin header at all, so every origin-based trust path passes on purpose.
+// Only the Host tells us the caller thought it was talking to evil.com.
+//
+// The read case is the dangerous one: with no Origin header there is nothing for
+// the CORS gate to reject, and the response is readable to the page because a
+// same-origin request runs no CORS check at all.
+func TestRebindingHostRejected(t *testing.T) {
+	cfg := config.Config{AllowedOrigins: []string{"app://renderer", "http://192.168.1.250:3000"}}
+	srv := httptest.NewServer(newTestRouter(cfg, discardLogger(), nil))
+	defer srv.Close()
+
+	for _, tc := range []struct {
+		name, method, host, origin, secFetchSite string
+		wantForbidden                            bool
+	}{
+		{
+			name:   "same-origin read after rebinding (no Origin at all)",
+			method: http.MethodGet, host: "evil.com:3001", secFetchSite: "same-origin",
+			wantForbidden: true,
+		},
+		{
+			name:   "same-origin read after rebinding, pre-fetch-metadata browser",
+			method: http.MethodGet, host: "evil.com:3001",
+			wantForbidden: true,
+		},
+		{
+			name: "write after rebinding", method: http.MethodPost, host: "evil.com:3001",
+			origin: "http://evil.com:3001", secFetchSite: "same-origin", wantForbidden: true,
+		},
+		{
+			name:   "write after rebinding with no Origin (form POST)",
+			method: http.MethodPost, host: "evil.com:3001", secFetchSite: "same-origin",
+			wantForbidden: true,
+		},
+		// Everything that legitimately reaches the loopback listener keeps working.
+		{name: "loopback IP", method: http.MethodPost, host: "127.0.0.1:3001"},
+		{name: "localhost", method: http.MethodPost, host: "localhost:3001"},
+		{name: "IPv6 loopback", method: http.MethodPost, host: "[::1]:3001"},
+		{name: "workspace preview subdomain", method: http.MethodGet, host: "ao-preview.mfxs2mi.localhost:3001"},
+		// A dev proxy with changeOrigin:false forwards the browser's own Host, so
+		// a UI the operator allowlisted must be addressable by that Host too.
+		{name: "allowlisted dev-proxy host", method: http.MethodGet, host: "192.168.1.250:3000"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequest(tc.method, srv.URL+"/api/v1/sessions", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Host = tc.host
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+			if tc.secFetchSite != "" {
+				req.Header.Set("Sec-Fetch-Site", tc.secFetchSite)
+			}
+			resp, err := srv.Client().Do(req)
+			if err != nil {
+				t.Fatalf("%s: %v", tc.method, err)
+			}
+			defer resp.Body.Close()
+			if got := resp.StatusCode == http.StatusForbidden; got != tc.wantForbidden {
+				t.Errorf("Host %q: status = %d, forbidden = %v, want forbidden = %v",
+					tc.host, resp.StatusCode, got, tc.wantForbidden)
+			}
+		})
+	}
+}
+
+// The LAN listener is exempt from the Host rule: it is credential-gated, and a
+// rebinding page obtains neither the password nor the ao_conn cookie (which the
+// browser binds to the host the daemon actually served). Enforcing it there
+// would instead break how a phone legitimately addresses the bridge — a
+// Tailscale MagicDNS name, or ao-phone-proxy forwarding the client's own Host.
+func TestHostGuardExemptsLANListener(t *testing.T) {
+	guarded := hostGuard(nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	for _, tc := range []struct {
+		name, host string
+		lan        bool
+		want       int
+	}{
+		{"loopback listener, foreign host", "evil.com:3001", false, http.StatusForbidden},
+		{"loopback listener, no host", "", false, http.StatusForbidden},
+		{"LAN listener, MagicDNS name", "my-mac.tail1234.ts.net:3011", true, http.StatusOK},
+		{"LAN listener, LAN IP", "192.168.1.5:3011", true, http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil)
+			r.Host = tc.host
+			if tc.lan {
+				r = r.WithContext(context.WithValue(r.Context(), lanListenerCtxKey{}, true))
+			}
+			w := httptest.NewRecorder()
+			guarded.ServeHTTP(w, r)
+			if w.Code != tc.want {
+				t.Errorf("got %d want %d", w.Code, tc.want)
+			}
+		})
 	}
 }

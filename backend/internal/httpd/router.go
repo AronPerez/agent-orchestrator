@@ -39,6 +39,7 @@ type ControlDeps struct {
 //	RealIP         → normalise client IP (loopback proxy from the dev server)
 //	requestLogger  → slog-backed access log + 5xx telemetry, carries the request id
 //	recoverer      → turn a handler panic into 500 instead of crashing the daemon
+//	hostGuard      → reject Hosts this daemon does not answer to (DNS rebinding)
 //	cors           → CORS allowlist for the Electron renderer / dev origins
 //
 // The per-request timeout is deliberately not global: it wraps only bounded
@@ -52,6 +53,7 @@ func NewRouterWithControl(cfg config.Config, log *slog.Logger, termMgr *terminal
 	r.Use(middleware.RealIP)
 	r.Use(requestLogger(log, deps.Telemetry))
 	r.Use(recoverTelemetry(log, deps.Telemetry))
+	r.Use(hostGuard(cfg.AllowedOrigins))
 	r.Use(corsMiddleware(cfg.AllowedOrigins))
 	r.Use(previewOriginMiddleware(api.sessions))
 
