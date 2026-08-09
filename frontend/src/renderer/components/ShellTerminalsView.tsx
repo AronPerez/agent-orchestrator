@@ -7,6 +7,7 @@ import { useCloseShellTerminal, useRenameShellTerminal, useShellTerminals } from
 import { useShell } from "../lib/shell-context";
 import { aoBridge } from "../lib/bridge";
 import { isMacPlatform } from "../lib/platform";
+import { hasBrowserDaemon } from "../lib/preview-mode";
 import { cn } from "../lib/utils";
 import { handleTerminalTabListKeyDown } from "../lib/terminal-tabs";
 import { useResolvedTheme, useUiStore } from "../stores/ui-store";
@@ -149,7 +150,7 @@ export function ShellTerminalsView() {
 			<div className="min-h-0 flex-1">
 				{active ? (
 					<TerminalPane
-						daemonReady={daemonStatus.state === "ready"}
+						daemonReady={daemonStatus.state === "ready" || hasBrowserDaemon}
 						fontSize={12}
 						terminalTarget={{
 							generation: active.createdAt,

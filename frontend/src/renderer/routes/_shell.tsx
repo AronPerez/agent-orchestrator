@@ -25,7 +25,7 @@ import { useWindowFullScreen } from "../hooks/useWindowFullScreen";
 import { useWorkspaceQuery, workspaceQueryKey, workspaceQueryOptions } from "../hooks/useWorkspaceQuery";
 import { apiClient, apiErrorCode, apiErrorMessage, hasTrustedApiBaseUrl } from "../lib/api-client";
 import { refreshDaemonStatus } from "../lib/daemon-status";
-import { usesPreviewWorkspaceData } from "../lib/preview-mode";
+import { hasBrowserDaemon, usesPreviewWorkspaceData } from "../lib/preview-mode";
 import { addRendererExceptionStep, captureRendererEvent, captureRendererException } from "../lib/telemetry";
 import { ShellProvider } from "../lib/shell-context";
 import { restartProjectOrchestrator } from "../lib/restart-orchestrator";
@@ -96,6 +96,12 @@ function ShellLayout() {
 	const workspaceQuery = useWorkspaceQuery();
 	const workspaces = workspaceQuery.data ?? [];
 	const daemonStatus = useDaemonStatus(queryClient);
+	// Daemon lifecycle is an Electron-bridge signal: without a preload it stays
+	// "stopped" forever, which would pin the whole shell on the startup splash.
+	// A browser-served build has no lifecycle to report and no daemon to wait
+	// for — the one that served this page is already up. Same escape hatch
+	// SessionView and TerminalPane use.
+	const isDaemonReady = daemonStatus.state === "ready" || hasBrowserDaemon;
 	const [workspaceStartupState, setWorkspaceStartupState] = useState<"loading" | "ready" | "error">("loading");
 	const workspaceStartupBaselineRef = useRef(0);
 	const agentCatalogPortRef = useRef<number | undefined>(undefined);
@@ -174,7 +180,7 @@ function ShellLayout() {
 	const isStartupLoading =
 		!usesPreviewWorkspaceData &&
 		!daemonStatus.code &&
-		(daemonStatus.state !== "ready" || workspaceStartupState === "loading");
+		(!isDaemonReady || workspaceStartupState === "loading");
 	const cancelSidebarPeekClose = useCallback(() => {
 		if (sidebarPeekCloseTimerRef.current === undefined) return;
 		window.clearTimeout(sidebarPeekCloseTimerRef.current);
@@ -400,7 +406,9 @@ function ShellLayout() {
 				active = false;
 			};
 		}
-		if (daemonStatus.state !== "ready" || !daemonStatus.port) {
+		// The port is Electron's cue that it knows where to point REST. A
+		// browser-served build is already same-origin, so it has nothing to wait for.
+		if (!hasBrowserDaemon && (daemonStatus.state !== "ready" || !daemonStatus.port)) {
 			workspaceStartupBaselineRef.current = 0;
 			setWorkspaceStartupState("loading");
 			return () => {
@@ -432,7 +440,7 @@ function ShellLayout() {
 	useEffect(() => {
 		if (
 			usesPreviewWorkspaceData ||
-			daemonStatus.state !== "ready" ||
+			!isDaemonReady ||
 			workspaceStartupState === "ready" ||
 			!workspaceQuery.isSuccess ||
 			workspaceQuery.dataUpdatedAt <= workspaceStartupBaselineRef.current
@@ -638,7 +646,7 @@ function ShellLayout() {
 					onOpenChange={setIsKeyboardShortcutsSettingsOpen}
 				/>
 				<TerminalCacheProvider
-					daemonReady={daemonStatus.state === "ready"}
+					daemonReady={isDaemonReady}
 					theme={resolvedTheme}
 				>
 
