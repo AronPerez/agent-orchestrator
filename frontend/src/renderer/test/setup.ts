@@ -222,5 +222,11 @@ if (typeof window !== "undefined") {
 			list: async () => [],
 			getActive: async () => null,
 		},
+		remotes: {
+			list: async () => [],
+			add: async () => "offline" as const,
+			probe: async () => "offline" as const,
+			request: async () => ({ status: 0, body: null }),
+		},
 	};
 } // end if (typeof window !== "undefined")

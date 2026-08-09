@@ -17,6 +17,8 @@ import {
 	type TrayOpenSessionTarget,
 } from "./shared/tray";
 import type { DaemonStatus } from "./shared/daemon-status";
+import type { RemoteHostView } from "./main/remotes-ipc";
+import type { RemoteHealth, RemoteRequestInit, RemoteResponse } from "./main/remote-request";
 import type { TelemetryBootstrap } from "./shared/telemetry";
 import type { MigrationState } from "./main/app-state";
 import type { UpdateSettings, UpdateStatus } from "./main/update-settings";
@@ -328,6 +330,17 @@ const api = {
 	featureBuilds: {
 		list: () => ipcRenderer.invoke("featureBuilds:list") as Promise<FeatureBuild[]>,
 		getActive: () => ipcRenderer.invoke("featureBuilds:getActive") as Promise<{ pr: number } | null>,
+	},
+	// Saved AO daemons, shared with the CLI's ~/.ao/remotes.json. Everything the
+	// renderer receives back is password-free (see main/remotes-ipc.ts); the
+	// plaintext password only ever travels renderer -> main, on `add`.
+	remotes: {
+		list: () => ipcRenderer.invoke("remotes:list") as Promise<RemoteHostView[]>,
+		add: (input: { label: string; url: string; password: string }) =>
+			ipcRenderer.invoke("remotes:add", input) as Promise<RemoteHealth>,
+		probe: (url: string) => ipcRenderer.invoke("remotes:probe", url) as Promise<RemoteHealth>,
+		request: (url: string, init: RemoteRequestInit) =>
+			ipcRenderer.invoke("remotes:request", url, init) as Promise<RemoteResponse>,
 	},
 };
 
