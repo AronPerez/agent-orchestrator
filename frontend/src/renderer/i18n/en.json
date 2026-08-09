@@ -165,6 +165,7 @@
 	"daemon.title.notConfigured": "AO daemon is not configured",
 	"daemon.title.notReady": "AO daemon is not ready yet",
 	"daemon.title.unreachable": "AO daemon is unreachable",
+	"hosts.local": "This Mac",
 	"inspector.activity": "Activity",
 	"inspector.agent": "Agent",
 	"inspector.aria": "Session inspector",

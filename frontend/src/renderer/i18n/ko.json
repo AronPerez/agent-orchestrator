@@ -165,6 +165,7 @@
 	"daemon.title.notConfigured": "AO 데몬이 구성되지 않았습니다",
 	"daemon.title.notReady": "AO 데몬이 아직 준비되지 않았습니다",
 	"daemon.title.unreachable": "AO 데몬에 연결할 수 없습니다",
+	"hosts.local": "이 Mac",
 	"inspector.activity": "활동",
 	"inspector.agent": "에이전트",
 	"inspector.aria": "세션 인스펙터",

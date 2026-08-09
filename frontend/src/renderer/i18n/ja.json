@@ -165,6 +165,7 @@
 	"daemon.title.notConfigured": "AO デーモンが設定されていません",
 	"daemon.title.notReady": "AO デーモンの準備がまだ完了していません",
 	"daemon.title.unreachable": "AO デーモンに接続できません",
+	"hosts.local": "このMac",
 	"inspector.activity": "アクティビティ",
 	"inspector.agent": "エージェント",
 	"inspector.aria": "セッションインスペクター",
