@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -28,7 +29,22 @@ const (
 	stateStale     daemonState = "stale"
 	stateUnhealthy daemonState = "unhealthy"
 	stateNotReady  daemonState = "not_ready"
+	// stateLockedOut is reachable only for a remote target: the per-source
+	// lockout lives in the LAN listener's auth middleware, which the loopback
+	// path never reaches. See remoteProbeFailure.
+	stateLockedOut daemonState = "locked_out"
 )
+
+// probeHTTPError is a non-2xx probe response. Its message is deliberately
+// identical to the plain error it replaces, so the local path renders
+// byte-for-byte as before; it exists so the remote path can read the status code
+// back out and tell a lockout apart from an unhealthy daemon.
+type probeHTTPError struct {
+	path   string
+	status int
+}
+
+func (e probeHTTPError) Error() string { return fmt.Sprintf("%s: HTTP %d", e.path, e.status) }
 
 type daemonStatus struct {
 	State     daemonState `json:"state"`
@@ -157,9 +173,7 @@ func (c *commandContext) inspectRemoteDaemon(ctx context.Context) daemonStatus {
 
 	health, err := c.readProbe(ctx, c.remote.baseURL, "healthz")
 	if err != nil {
-		st.State = stateUnhealthy
-		st.Error = err.Error()
-		return st
+		return remoteProbeFailure(st, err, stateUnhealthy)
 	}
 	if health.Service != daemonmeta.ServiceName {
 		st.State = stateUnhealthy
@@ -175,9 +189,7 @@ func (c *commandContext) inspectRemoteDaemon(ctx context.Context) daemonStatus {
 
 	ready, err := c.readProbe(ctx, c.remote.baseURL, "readyz")
 	if err != nil {
-		st.State = stateNotReady
-		st.Error = err.Error()
-		return st
+		return remoteProbeFailure(st, err, stateNotReady)
 	}
 	st.Ready = ready.Status
 	if ready.Status == string(stateReady) {
@@ -185,6 +197,26 @@ func (c *commandContext) inspectRemoteDaemon(ctx context.Context) daemonStatus {
 		return st
 	}
 	st.State = stateNotReady
+	return st
+}
+
+// remoteProbeFailure classifies a failed probe against a remote daemon. A 429 is
+// the LAN listener's per-source lockout after repeated bad connection passwords:
+// the daemon is healthy, so reporting "unhealthy" inverts the diagnosis and
+// sends a user who fat-fingered a password off to investigate a daemon that is
+// fine. Remote-only by construction — the lockout lives in the authenticated
+// listener's middleware, which the loopback path never reaches — so local status
+// is untouched.
+func remoteProbeFailure(st daemonStatus, err error, fallback daemonState) daemonStatus {
+	var httpErr probeHTTPError
+	if errors.As(err, &httpErr) && httpErr.status == http.StatusTooManyRequests {
+		st.State = stateLockedOut
+		st.Error = "too many failed connection passwords from this machine; it is temporarily locked out — " +
+			"wait for the lockout to clear, then retry with the correct password. The daemon itself is fine."
+		return st
+	}
+	st.State = fallback
+	st.Error = err.Error()
 	return st
 }
 
@@ -203,7 +235,7 @@ func (c *commandContext) readProbe(ctx context.Context, base, path string) (prob
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return probeResult{}, fmt.Errorf("%s: HTTP %d", path, resp.StatusCode)
+		return probeResult{}, probeHTTPError{path: path, status: resp.StatusCode}
 	}
 	var body probeResult
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {

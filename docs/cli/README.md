@@ -55,6 +55,9 @@ Notes:
   `--url` / `AO_URL` target is refused — including one that names loopback, so
   the single destructive verb never changes behavior based on how the URL looks.
 - CLI telemetry (`/internal/*`) is never sent to a remote daemon.
+- Repeated bad passwords lock your source address out of the LAN listener for a
+  minute. `ao status` reports that as `locked_out` rather than `unhealthy` — the
+  daemon is fine; wait and retry. This state cannot occur against a local daemon.
 
 ## Current commands
 

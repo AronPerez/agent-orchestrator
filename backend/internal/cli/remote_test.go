@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -330,6 +331,69 @@ func TestStatusRemoteRejectsForeignService(t *testing.T) {
 	st := c.inspectRemoteDaemon(context.Background())
 	if st.State != stateUnhealthy || !strings.Contains(st.Error, "not from AO daemon") {
 		t.Fatalf("state = %q, error = %q", st.State, st.Error)
+	}
+}
+
+// A 429 from a remote daemon is the LAN listener's per-source lockout, not an
+// unhealthy daemon. Reporting it as "unhealthy" inverts the diagnosis.
+func TestStatusRemoteReportsLockoutDistinctly(t *testing.T) {
+	aoHome(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	c := &commandContext{
+		deps:   Deps{}.withDefaults(),
+		remote: &remoteTarget{baseURL: srv.URL, token: "tok"},
+	}
+	st := c.inspectRemoteDaemon(context.Background())
+	if st.State != stateLockedOut {
+		t.Fatalf("state = %q, want %q", st.State, stateLockedOut)
+	}
+	if !strings.Contains(st.Error, "locked out") {
+		t.Fatalf("error = %q, want it to name the lockout", st.Error)
+	}
+	// The whole point: it must not send the user to debug a healthy daemon.
+	if strings.Contains(string(st.State), "unhealthy") || strings.Contains(st.Error, "HTTP 429") {
+		t.Fatalf("lockout still rendered as a daemon fault: state=%q error=%q", st.State, st.Error)
+	}
+}
+
+// ...and the LOCAL path must render the very same 429 exactly as before. The
+// lockout cannot occur on loopback, so nothing about local status may change.
+func TestStatusLocalUnchangedForSameHTTPStatus(t *testing.T) {
+	dir := aoHome(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	port, err := strconv.Atoi(srv.URL[strings.LastIndex(srv.URL, ":")+1:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	runFile := filepath.Join(dir, "running.json")
+	t.Setenv("AO_RUN_FILE", runFile)
+	t.Setenv("AO_DATA_DIR", filepath.Join(dir, "data"))
+	if err := runfile.Write(runFile, runfile.Info{PID: os.Getpid(), Port: port, StartedAt: time.Unix(100, 0).UTC()}); err != nil {
+		t.Fatal(err)
+	}
+
+	c := &commandContext{deps: Deps{
+		ProcessAlive: func(int) bool { return true },
+		Now:          func() time.Time { return time.Unix(200, 0).UTC() },
+	}.withDefaults()}
+
+	st, err := c.inspectDaemon(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.State != stateUnhealthy {
+		t.Fatalf("local state = %q, want unhealthy (unchanged)", st.State)
+	}
+	if st.Error != "healthz: HTTP 429" {
+		t.Fatalf("local error = %q, want the byte-identical %q", st.Error, "healthz: HTTP 429")
 	}
 }
 
