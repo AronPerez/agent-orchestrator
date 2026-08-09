@@ -164,6 +164,16 @@ beforeEach(() => {
 	useUiStore.setState({ inspectorSessions: {}, settingsModal: null });
 });
 
+describe("ShellTopbar host switcher", () => {
+	it("names the host in both the shell topbar and the embedded one", () => {
+		renderTopbar(sessionWith());
+		expect(screen.getByRole("combobox", { name: /this mac/i })).toBeInTheDocument();
+
+		renderTopbar(sessionWith(), true);
+		expect(screen.getAllByRole("combobox", { name: /this mac/i })).toHaveLength(2);
+	});
+});
+
 describe("ShellTopbar status pill", () => {
 	it("renders only session actions when embedded in the terminal bar", () => {
 		renderTopbar(sessionWith(), true);
