@@ -453,6 +453,10 @@ type CleanupSkippedSession struct {
 
 // CleanupSessionsResponse is the body of POST /api/v1/sessions/cleanup.
 type CleanupSessionsResponse struct {
+	// OK reports whether every candidate was cleaned. It is false when any
+	// session appears in Skipped — a declined teardown is not a completed one,
+	// and the request itself still succeeds (200), so this is the only field
+	// that distinguishes them.
 	OK      bool                    `json:"ok"`
 	Cleaned []domain.SessionID      `json:"cleaned"`
 	Skipped []CleanupSkippedSession `json:"skipped"`

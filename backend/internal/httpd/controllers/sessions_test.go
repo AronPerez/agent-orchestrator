@@ -1907,7 +1907,10 @@ func TestSessionsAPI_CleanupWithProjectFilter(t *testing.T) {
 		} `json:"skipped"`
 	}
 	mustJSON(t, body, &got)
-	if !got.OK || len(got.Cleaned) != 1 || got.Cleaned[0] != "ao-1" {
+	// ok is false here on purpose: ao-2 was skipped. This assertion used to
+	// require true, which is the bug — it encoded a response that reported
+	// success while a workspace was left behind.
+	if got.OK || len(got.Cleaned) != 1 || got.Cleaned[0] != "ao-1" {
 		t.Fatalf("cleanup response = %#v", got)
 	}
 	if len(got.Skipped) != 1 || got.Skipped[0].SessionID != "ao-2" || got.Skipped[0].Reason != "workspace has uncommitted changes" {
@@ -1916,6 +1919,66 @@ func TestSessionsAPI_CleanupWithProjectFilter(t *testing.T) {
 	if len(svc.cleanupProjects) != 1 || svc.cleanupProjects[0] != "ao" {
 		t.Fatalf("cleanupProjects = %#v, want [ao]", svc.cleanupProjects)
 	}
+}
+
+// A declined teardown must not report success. cleanup refuses a worktree with
+// uncommitted changes — the normal state of a session an agent worked in — and
+// still returns 200, so `ok` is the only field distinguishing "cleaned
+// everything" from "left a workspace, and whatever is in it, on disk".
+//
+// This reads the response state back rather than asserting a call, and covers
+// both branches: the all-clean case must stay true, or the fix would be
+// indistinguishable from hardcoding false.
+func TestSessionsAPI_CleanupOKReflectsSkipped(t *testing.T) {
+	decode := func(t *testing.T, body []byte) bool {
+		t.Helper()
+		var got struct {
+			OK      bool     `json:"ok"`
+			Cleaned []string `json:"cleaned"`
+			Skipped []struct {
+				SessionID string `json:"sessionId"`
+			} `json:"skipped"`
+		}
+		mustJSON(t, body, &got)
+		return got.OK
+	}
+
+	t.Run("every candidate cleaned", func(t *testing.T) {
+		svc := newFakeSessionService()
+		svc.cleanupResult = []domain.SessionID{"ao-1"}
+		body, status, _ := doRequest(t, newSessionTestServer(t, svc), "POST", "/api/v1/sessions/cleanup", "")
+		if status != http.StatusOK {
+			t.Fatalf("status = %d; body=%s", status, body)
+		}
+		if !decode(t, body) {
+			t.Fatalf("ok = false with nothing skipped; body=%s", body)
+		}
+	})
+
+	t.Run("a skipped session makes it false", func(t *testing.T) {
+		svc := newFakeSessionService()
+		svc.cleanupResult = []domain.SessionID{"ao-1"}
+		svc.cleanupSkipped = []sessionsvc.CleanupSkipped{{SessionID: "ao-2", Reason: "workspace has uncommitted changes"}}
+		body, status, _ := doRequest(t, newSessionTestServer(t, svc), "POST", "/api/v1/sessions/cleanup", "")
+		if status != http.StatusOK {
+			t.Fatalf("status = %d; body=%s", status, body)
+		}
+		if decode(t, body) {
+			t.Fatalf("ok = true while ao-2 was skipped; body=%s", body)
+		}
+	})
+
+	t.Run("nothing cleaned and everything skipped is still not ok", func(t *testing.T) {
+		svc := newFakeSessionService()
+		svc.cleanupSkipped = []sessionsvc.CleanupSkipped{{SessionID: "ao-2", Reason: "workspace has uncommitted changes"}}
+		body, status, _ := doRequest(t, newSessionTestServer(t, svc), "POST", "/api/v1/sessions/cleanup", "")
+		if status != http.StatusOK {
+			t.Fatalf("status = %d; body=%s", status, body)
+		}
+		if decode(t, body) {
+			t.Fatalf("ok = true with zero cleaned and one skipped; body=%s", body)
+		}
+	})
 }
 
 func TestSessionsAPI_CleanupWithoutProjectFilter(t *testing.T) {
