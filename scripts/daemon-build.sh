@@ -104,6 +104,13 @@ if [[ -x "${frontend_dir}/node_modules/.bin/vite" ]]; then
   (cd "${frontend_dir}" && VITE_AO_WEB=1 ./node_modules/.bin/vite build \
     --config vite.renderer.config.ts --outDir "${webui_bundle}" --emptyOutDir)
   mkdir -p "${webui_bundle}" && : > "${webui_bundle}/.gitkeep"
+  # go:embed is satisfied by .gitkeep alone, so an empty bundle would still
+  # compile and install a daemon whose UI answers 503. Fail here instead.
+  if [[ ! -f "${webui_bundle}/index.html" ]]; then
+    printf 'Web UI bundle missing: %s/index.html does not exist after the vite build.\n' "${webui_bundle}" >&2
+    printf 'The daemon would install with no UI (503 on every page request).\n' >&2
+    exit 1
+  fi
 else
   printf 'Skipping the web UI bundle: %s/node_modules is missing\n' "${frontend_dir}" >&2
 fi
