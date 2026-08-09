@@ -92,6 +92,34 @@ binary_name="ao${goexe}"
 binary_path="${build_dir}/${binary_name}"
 
 mkdir -p "${build_dir}"
+
+# Regenerate the browser bundle the daemon embeds and serves at its own origin,
+# so an `ao` installed from source has the web UI too. Skipped when frontend deps
+# are absent — go:embed still resolves against the tracked .gitkeep, and the
+# daemon then answers UI requests with a 503 that says the bundle was not built.
+frontend_dir="${repo_root}/frontend"
+webui_bundle="${backend_dir}/internal/httpd/webui/bundle"
+if [[ -x "${frontend_dir}/node_modules/.bin/vite" ]]; then
+  rm -rf "${webui_bundle}"
+  (cd "${frontend_dir}" && VITE_AO_WEB=1 ./node_modules/.bin/vite build \
+    --config vite.renderer.config.ts --outDir "${webui_bundle}" --emptyOutDir)
+  mkdir -p "${webui_bundle}" && : > "${webui_bundle}/.gitkeep"
+  # go:embed is satisfied by .gitkeep alone, so an empty bundle would still
+  # compile and install a daemon whose UI answers 503. Fail here instead.
+  if [[ ! -f "${webui_bundle}/index.html" ]]; then
+    printf 'Web UI bundle missing: %s/index.html does not exist after the vite build.\n' "${webui_bundle}" >&2
+    printf 'The daemon would install with no UI (503 on every page request).\n' >&2
+    exit 1
+  fi
+else
+  # Name the consequence, not just the skip: "Skipping" alone reads as an
+  # optimisation, and the resulting daemon looks fine until someone opens it in a
+  # browser. Mirrors the wording of the 503 the daemon itself will serve.
+  printf 'Skipping the web UI bundle: %s/node_modules is missing.\n' "${frontend_dir}" >&2
+  printf '  This daemon will answer every web UI request with 503 "web UI bundle was not built into this daemon".\n' >&2
+  printf '  Run (cd %s && npm install) and rebuild if you want the browser UI.\n' "${frontend_dir}" >&2
+fi
+
 (cd "${backend_dir}" && go build -o "${binary_path}" ./cmd/ao)
 
 if ! install_dir="$(select_install_dir)"; then

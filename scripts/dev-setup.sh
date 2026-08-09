@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # One-shot, idempotent setup of the local AO dev services on a macOS machine.
 # Makes a fresh machine reproducible from this repo alone:
-#   clone → scripts/dev-setup.sh → LAN web UI running under launchd.
+#   clone → scripts/dev-setup.sh → mobile Expo web UI running under launchd.
+#
+# The browser UI is no longer a service here: the daemon serves it itself, from
+# the LAN listener's own origin (Settings → Connect Mobile). See 4a-2.
 #
 # The AO daemon is NOT a launchd job: the desktop app spawns its bundled daemon
 # on :3001 and replaces any running one on every launch (per-launch
@@ -13,9 +16,9 @@
 #
 # Installs/refreshes:
 #   - ao CLI           (daemon-build.sh → PATH install)
-#   - service scripts  (lan-web-server.sh, mobile-web-server.sh, phone-bridge.sh, ao-svc → ~/.ao/)
+#   - service scripts  (mobile-web-server.sh, ao-svc → ~/.ao/)
 #   - launchd plists   (generated → ~/Library/LaunchAgents/)
-#   - ~/dev/ag-orc     (symlink to this checkout; lan-web serves from it)
+#   - ~/dev/ag-orc     (symlink to this checkout; mobile-web serves from it)
 #
 # Safe to re-run: already-loaded jobs are left running (prints the kickstart
 # command instead).
@@ -40,12 +43,10 @@ mv -f "${HOME}/.ao/bin/ao.new" "${HOME}/.ao/bin/ao"
 echo "Installed ~/.ao/bin/ao"
 
 # 2. service scripts (deploy-by-copy; launchd runs the ~/.ao copies)
-cp -f "${script_dir}/lan-web-server.sh" \
-      "${script_dir}/mobile-web-server.sh" "${script_dir}/phone-bridge.sh" \
-      "${script_dir}/ao-svc" "${HOME}/.ao/"
-echo "Installed ~/.ao/{lan-web-server.sh,mobile-web-server.sh,phone-bridge.sh,ao-svc}"
+cp -f "${script_dir}/mobile-web-server.sh" "${script_dir}/ao-svc" "${HOME}/.ao/"
+echo "Installed ~/.ao/{mobile-web-server.sh,ao-svc}"
 
-# 3. ~/dev/ag-orc → this checkout (lan-web-server.sh serves its frontend/)
+# 3. ~/dev/ag-orc → this checkout (mobile-web-server.sh serves its packages/mobile/)
 if [[ -e "${HOME}/dev/ag-orc" && ! -L "${HOME}/dev/ag-orc" ]]; then
   echo "⚠ ~/dev/ag-orc exists and is not a symlink — leaving it alone" >&2
 else
@@ -63,6 +64,22 @@ if launchctl print "${dom}/dev.agent-orchestrator.daemon" >/dev/null 2>&1; then
   echo "Retired launchd daemon job (daemon is app-owned now)"
 fi
 rm -f "${la_dir}/dev.agent-orchestrator.daemon.plist" "${HOME}/.ao/ao-daemon.sh"
+
+# 4a-2. migration: retire lan-web and phone-bridge. The daemon serves the browser
+# UI from its own LAN origin now, so the second Vite server on :3000 (a
+# cross-origin UI needing AO_ALLOWED_ORIGINS) and the Origin-laundering phone
+# proxy on :3011 both have nothing left to do — the LAN listener binds :3011
+# itself. Booting them out is the point, not a courtesy: a stale lan-web keeps
+# serving a UI against a daemon nobody allowlists for it any more, and the proxy
+# would fight the daemon for :3011.
+for retired in dev.agent-orchestrator.lan-web dev.agent-orchestrator.phone-bridge; do
+  if launchctl print "${dom}/${retired}" >/dev/null 2>&1; then
+    launchctl bootout "${dom}/${retired}" || true
+    echo "Retired ${retired} (the daemon serves the web UI itself now)"
+  fi
+  rm -f "${la_dir}/${retired}.plist"
+done
+rm -f "${HOME}/.ao/lan-web-server.sh" "${HOME}/.ao/phone-bridge.sh"
 
 # 4b. one-shot login job: AO_KEEP_DAEMON=1 for the GUI session, so Dock/Finder
 # app launches spawn a persistent daemon (survives app quit; stops on `ao stop`).
@@ -86,32 +103,6 @@ cat > "${la_dir}/dev.agent-orchestrator.env.plist" <<PLIST
 </plist>
 PLIST
 
-cat > "${la_dir}/dev.agent-orchestrator.lan-web.plist" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>Label</key>
-	<string>dev.agent-orchestrator.lan-web</string>
-	<key>ProgramArguments</key>
-	<array>
-		<string>/bin/zsh</string>
-		<string>-lc</string>
-		<string>exec "\$HOME/.ao/lan-web-server.sh"</string>
-	</array>
-	<key>RunAtLoad</key>
-	<true/>
-	<key>KeepAlive</key>
-	<true/>
-	<key>ProcessType</key>
-	<string>Background</string>
-	<key>StandardOutPath</key>
-	<string>${HOME}/.ao/lan-web.out.log</string>
-	<key>StandardErrorPath</key>
-	<string>${HOME}/.ao/lan-web.err.log</string>
-</dict>
-</plist>
-PLIST
 
 cat > "${la_dir}/dev.agent-orchestrator.mobile-web.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -147,44 +138,10 @@ cat > "${la_dir}/dev.agent-orchestrator.mobile-web.plist" <<PLIST
 </plist>
 PLIST
 
-cat > "${la_dir}/dev.agent-orchestrator.phone-bridge.plist" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>Label</key>
-	<string>dev.agent-orchestrator.phone-bridge</string>
-	<key>ProgramArguments</key>
-	<array>
-		<string>/bin/zsh</string>
-		<string>-lc</string>
-		<string>exec "\$HOME/.ao/phone-bridge.sh"</string>
-	</array>
-	<key>EnvironmentVariables</key>
-	<dict>
-		<key>PATH</key>
-		<string>${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-		<key>LANG</key>
-		<string>en_US.UTF-8</string>
-	</dict>
-	<key>WorkingDirectory</key>
-	<string>${HOME}/.ao</string>
-	<key>RunAtLoad</key>
-	<true/>
-	<key>KeepAlive</key>
-	<true/>
-	<key>StandardOutPath</key>
-	<string>${HOME}/.ao/phone-bridge.out.log</string>
-	<key>StandardErrorPath</key>
-	<string>${HOME}/.ao/phone-bridge.err.log</string>
-</dict>
-</plist>
-PLIST
 echo "Wrote launchd plists to ~/Library/LaunchAgents/"
 
 # 5. load jobs — leave already-running ones alone
-for job in dev.agent-orchestrator.env dev.agent-orchestrator.lan-web \
-           dev.agent-orchestrator.mobile-web dev.agent-orchestrator.phone-bridge; do
+for job in dev.agent-orchestrator.env dev.agent-orchestrator.mobile-web; do
   if launchctl print "${dom}/${job}" >/dev/null 2>&1; then
     echo "loaded: ${job} (already running — to apply changes:"
     echo "         launchctl kickstart -k \"${dom}/${job}\")"
@@ -195,16 +152,15 @@ for job in dev.agent-orchestrator.env dev.agent-orchestrator.lan-web \
 done
 
 # 6. non-fatal checks for the bits this script won't do for you
-[[ -x "${repo_root}/frontend/node_modules/.bin/vite" ]] \
-  || echo "⚠ lan-web needs vite: cd frontend && npm install"
 [[ -x "${repo_root}/packages/mobile/node_modules/.bin/expo" ]] \
   || echo "⚠ mobile-web needs expo: cd packages/mobile && npm install"
 grep -q "ao-svc" "${HOME}/.zshrc" 2>/dev/null \
   || echo "⚠ add to ~/.zshrc:  alias ao-svc=\"\$HOME/.ao/ao-svc\""
 grep -q "AO_KEEP_DAEMON" "${HOME}/.zshrc" 2>/dev/null \
-  || echo "⚠ add to ~/.zshrc:  export AO_KEEP_DAEMON=1  (+ dynamic AO_ALLOWED_ORIGINS for the LAN UI)"
+  || echo "⚠ add to ~/.zshrc:  export AO_KEEP_DAEMON=1"
 for tool in tmux claude; do
   command -v "${tool}" >/dev/null || echo "⚠ ${tool} not on PATH (sessions need it)"
 done
 
-echo "Done. Health: ao status && curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3000/"
+echo "Done. Health: ao status"
+echo "Browser UI: enable Settings → Connect Mobile, then open the host:port it shows."

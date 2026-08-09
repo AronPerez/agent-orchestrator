@@ -1,13 +1,15 @@
 #!/bin/zsh
 # Durable mobile FE (Expo/Metro) for Agent Orchestrator, bound to the LAN on :8081.
-# launchd KeepAlive supervises it across crashes and reboots. Companion to
-# lan-web-server.sh. Serves packages/mobile: web at http://<lan-ip>:8081 and the
-# Expo Go manifest at exp://<lan-ip>:8081. The app talks to the daemon on :3001
-# (a physical phone reaches it via the ao-phone-proxy bridge on :3011).
+# launchd KeepAlive supervises it across crashes and reboots. Serves
+# packages/mobile: web at http://<lan-ip>:8081 and the Expo Go manifest at
+# exp://<lan-ip>:8081. The app talks to the daemon's LAN listener directly —
+# enable Settings → Connect Mobile and point it at the host:port shown there
+# (:3011 by default). It no longer goes through a proxy: the daemon binds that
+# port itself and authenticates with the connection password.
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
-# node lives under nvm (interactive-only in ~/.zshrc); resolve it explicitly like
-# lan-web-server.sh: source nvm, then fall back to the newest installed node bin.
+# node lives under nvm (interactive-only in ~/.zshrc); resolve it explicitly:
+# source nvm, then fall back to the newest installed node bin.
 export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" >/dev/null 2>&1
 _latest_node_bin=$(ls -d "$NVM_DIR"/versions/node/*/bin 2>/dev/null | sort -V | tail -1)
