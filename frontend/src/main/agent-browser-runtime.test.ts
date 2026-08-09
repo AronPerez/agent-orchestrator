@@ -9,6 +9,7 @@ import {
 	BROWSER_RUNTIME_RECLAIM_GRACE_MS,
 	agentBrowserSocketPath,
 	nativeArgumentsForAction,
+	nativeCommandsForAction,
 	parseAgentBrowserJSON,
 	scavengeBrowserRuntime,
 	scavengeBrowserSocketAliases,
@@ -41,6 +42,40 @@ describe("agent-browser command policy", () => {
 });
 
 describe("AO action translation", () => {
+	// `type` must never reach agent-browser's own `type`, which inserts one
+	// character at a time ("Types text into the specified element character by
+	// character", per its help). On a React controlled input the caret does not
+	// advance between insertions, so every character after the first lands at
+	// position 0 and the text arrives reversed — "abcdefgh" as "hgfedcba".
+	//
+	// This asserts the command mapping only. It cannot prove the text ARRIVES
+	// correctly; that requires driving a real controlled input through a desktop
+	// build of this branch, which is tracked as pending end-to-end verification.
+	// The mapping assertion is what fails loudly if someone routes `type` back to
+	// the per-character primitive.
+	it("types via a single insertion, never agent-browser's per-character type", () => {
+		expect(nativeCommandsForAction("type", { ref: "e3", text: "abcdefgh" })).toEqual([
+			["focus", "@e3"],
+			["keyboard", "inserttext", "abcdefgh"],
+		]);
+		// The per-character command must not appear anywhere in the sequence.
+		for (const command of nativeCommandsForAction("type", { ref: "e3", text: "abcdefgh" })) {
+			expect(command[0]).not.toBe("type");
+		}
+	});
+
+	it("keeps every other action a single native invocation", () => {
+		expect(nativeCommandsForAction("click", { ref: "e2" })).toEqual([["click", "@e2"]]);
+		// fill is deliberately untouched: it already inserts exactly once, which is
+		// why it never reproduced the reversal.
+		expect(nativeCommandsForAction("fill", { ref: "e3", text: "abc" })).toEqual([["fill", "@e3", "abc"]]);
+	});
+
+	it("validates type arguments before issuing either command", () => {
+		expect(() => nativeCommandsForAction("type", { text: "abc" })).toThrow(/ref is required/);
+		expect(() => nativeCommandsForAction("type", { ref: "e3" })).toThrow(/text is required/);
+	});
+
 	it("maps the public snapshot and ref contract to native arguments", () => {
 		expect(nativeArgumentsForAction("snapshot", { interactive: true })).toEqual([
 			"snapshot",
