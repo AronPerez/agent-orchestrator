@@ -172,7 +172,7 @@ describe("startRemoteProxy", () => {
 
 describe("startRemoteProxy streams", () => {
 	it("delivers SSE chunks as they are written, not on close", async () => {
-		upstream = createServer((req, res) => {
+		upstream = createServer((_req, res) => {
 			res.writeHead(200, { "content-type": "text/event-stream" });
 			res.write("data: first\n\n");
 			setTimeout(() => {
@@ -247,7 +247,7 @@ describe("startRemoteProxy streams", () => {
 	it("destroys an upgrade that carries no token", async () => {
 		const sawUpgrade: string[] = [];
 		upstream = createServer();
-		upstream.on("upgrade", (req) => sawUpgrade.push(req.url ?? ""));
+		upstream.on("upgrade", (upgraded) => sawUpgrade.push(upgraded.url ?? ""));
 		await new Promise<void>((resolve) => upstream?.listen(0, "127.0.0.1", resolve));
 		const port = (upstream.address() as AddressInfo).port;
 		proxy = await startRemoteProxy({

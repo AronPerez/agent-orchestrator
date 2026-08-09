@@ -18,6 +18,7 @@ import {
 } from "./shared/tray";
 import type { DaemonStatus } from "./shared/daemon-status";
 import type { RemoteHostView } from "./main/remotes-ipc";
+import type { ActiveHostView } from "./main/active-remote";
 import type { RemoteHealth, RemoteRequestInit, RemoteResponse } from "./main/remote-request";
 import type { TelemetryBootstrap } from "./shared/telemetry";
 import type { MigrationState } from "./main/app-state";
@@ -341,6 +342,11 @@ const api = {
 		probe: (url: string) => ipcRenderer.invoke("remotes:probe", url) as Promise<RemoteHealth>,
 		request: (url: string, init: RemoteRequestInit) =>
 			ipcRenderer.invoke("remotes:request", url, init) as Promise<RemoteResponse>,
+		// Point the whole app at a saved host: main starts a loopback proxy that
+		// holds the password, and hands back only the base URL to fetch through.
+		activate: (url: string) => ipcRenderer.invoke("remotes:activate", url) as Promise<ActiveHostView>,
+		deactivate: () => ipcRenderer.invoke("remotes:deactivate") as Promise<void>,
+		active: () => ipcRenderer.invoke("remotes:active") as Promise<ActiveHostView | null>,
 	},
 };
 
