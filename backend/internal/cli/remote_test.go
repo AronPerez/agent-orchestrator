@@ -470,9 +470,27 @@ func TestCheckRemoteProjectPathRefusesHostRelative(t *testing.T) {
 	}
 
 	// Absolute paths stay allowed: they are meaningful on the remote host, and
-	// refusing them would make a remote target useless.
-	if err := remote.checkRemoteProjectPath("/srv/repo"); err != nil {
-		t.Fatalf("absolute path refused: %v", err)
+	// refusing them would make a remote target useless. Every absolute FORM must
+	// be accepted regardless of the OS running this test — the destination
+	// filesystem is the remote daemon's, not this machine's. Using
+	// filepath.IsAbs here shipped as a bug: it calls "/srv/repo" relative on
+	// Windows, so a Windows CLI could not register a project on a Linux host.
+	for _, p := range []string{
+		"/srv/repo",        // POSIX absolute
+		`C:\srv\repo`,      // Windows drive-absolute, backslash
+		"C:/srv/repo",      // Windows drive-absolute, forward slash
+		`\\server\share\r`, // Windows UNC
+	} {
+		if err := remote.checkRemoteProjectPath(p); err != nil {
+			t.Errorf("absolute path %q refused: %v", p, err)
+		}
+	}
+
+	// Still refused everywhere: forms that are host-relative even on Windows.
+	for _, p := range []string{`C:repo`, `\repo`} {
+		if err := remote.checkRemoteProjectPath(p); err == nil {
+			t.Errorf("checkRemoteProjectPath(%q) = nil, want a refusal (drive/current-drive relative)", p)
+		}
 	}
 
 	// Local behavior is untouched — every form above is still accepted.
