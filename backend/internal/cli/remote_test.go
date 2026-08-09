@@ -519,3 +519,94 @@ func TestResolvedBySuffix(t *testing.T) {
 		t.Fatalf("remote suffix = %q, want it to name the daemon", got)
 	}
 }
+
+// A local signal — AO_PROJECT_ID, AO_SESSION_ID or the current directory —
+// must never select a project on a remote daemon. Measured on the base commit:
+// `ao spawn --url <remote>` run inside an AO session inherited AO_PROJECT_ID
+// and spawned a real session on the remote host, exit 0, no warning.
+//
+// Deliberately path-free so the assertion is identical on every runner OS.
+func TestCheckRemoteImplicitProjectRefusesLocalSignals(t *testing.T) {
+	newRemote := func() *commandContext {
+		return &commandContext{
+			deps:   Deps{}.withDefaults(),
+			remote: &remoteTarget{baseURL: "http://host:3011", token: "tok", source: "--url"},
+		}
+	}
+	for _, tc := range []struct {
+		name       string
+		projectID  string
+		sessionID  string
+		wantSignal string
+	}{
+		{name: "AO_PROJECT_ID", projectID: "demo", wantSignal: "AO_PROJECT_ID"},
+		{name: "AO_SESSION_ID", sessionID: "demo-1", wantSignal: "AO_SESSION_ID"},
+		{name: "cwd", wantSignal: "the current directory"},
+		// An id that is only whitespace is not a signal — resolution would fall
+		// through to the next one, so the refusal must name that one instead.
+		{name: "blank AO_PROJECT_ID falls through", projectID: " \t ", sessionID: "demo-1", wantSignal: "AO_SESSION_ID"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AO_PROJECT_ID", tc.projectID)
+			t.Setenv("AO_SESSION_ID", tc.sessionID)
+			err := newRemote().checkRemoteImplicitProject("")
+			if err == nil {
+				t.Fatal("checkRemoteImplicitProject = nil, want a refusal")
+			}
+			if ExitCode(err) != 2 {
+				t.Errorf("exit code = %d, want 2 (usage)", ExitCode(err))
+			}
+			for _, want := range []string{tc.wantSignal, "--url", "http://host:3011", "--project"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("refusal does not mention %q: %v", want, err)
+				}
+			}
+		})
+	}
+
+	// An explicit --project is the one input that means the same on both hosts.
+	t.Setenv("AO_PROJECT_ID", "demo")
+	if err := newRemote().checkRemoteImplicitProject("other"); err != nil {
+		t.Errorf("explicit --project refused: %v", err)
+	}
+
+	// Local behavior is untouched: every implicit signal is still accepted.
+	local := &commandContext{deps: Deps{}.withDefaults()}
+	for _, id := range []string{"", "demo"} {
+		if err := local.checkRemoteImplicitProject(id); err != nil {
+			t.Errorf("local checkRemoteImplicitProject(%q) = %v, want nil", id, err)
+		}
+	}
+}
+
+// End to end: the refusal must land BEFORE any request, so a wrong-machine
+// spawn cannot happen at all. The empty request log is the real assertion —
+// a session created on the wrong host is undetectable from the output.
+func TestSpawnRemoteRefusesInheritedProjectEnv(t *testing.T) {
+	aoHome(t)
+	t.Setenv("AO_SESSION_ID", "")
+	var requests []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	t.Setenv("AO_TOKEN", "s3cret12")
+	t.Setenv("AO_PROJECT_ID", "demo")
+
+	var out bytes.Buffer
+	err := executeWithDeps(Deps{Out: &out, Err: &out, ProcessAlive: func(int) bool { return true }},
+		[]string{"spawn", "--url", srv.URL, "--name", "worker", "--prompt", "hi"})
+	if err == nil {
+		t.Fatalf("spawn --url with an inherited AO_PROJECT_ID succeeded: %s", out.String())
+	}
+	if ExitCode(err) != 2 {
+		t.Errorf("exit code = %d, want 2 (usage)", ExitCode(err))
+	}
+	if !strings.Contains(err.Error(), "AO_PROJECT_ID") || !strings.Contains(err.Error(), "--project") {
+		t.Errorf("error does not name the signal and the remedy: %v", err)
+	}
+	if len(requests) != 0 {
+		t.Fatalf("refused spawn still contacted the remote daemon: %v", requests)
+	}
+}

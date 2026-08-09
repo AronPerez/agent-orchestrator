@@ -252,6 +252,39 @@ func isAbsForSomeHost(p string) bool {
 	return false
 }
 
+// checkRemoteImplicitProject refuses to resolve a project from a local signal
+// when the command targets a remote daemon.
+//
+// Refuse rather than guess, for the same reason as checkRemoteProjectPath:
+// AO_PROJECT_ID, AO_SESSION_ID and the current directory all describe THIS
+// machine, but with a remote target they are matched against the remote
+// daemon's projects. Measured: `ao spawn --url <remote>` run inside any AO
+// session inherits an AO_PROJECT_ID the operator never typed and spawns
+// against whatever project on the remote host happens to share that id — and
+// cwd matching picks a remote project whenever the two machines' paths
+// coincide. A session started on the wrong machine cannot be caught after the
+// fact from the output, which names only the session it created.
+//
+// So --project is required for a remote target: it is the one input that means
+// the same thing on both hosts.
+func (c *commandContext) checkRemoteImplicitProject(explicit string) error {
+	if c.remote == nil || strings.TrimSpace(explicit) != "" {
+		return nil
+	}
+	signal := "the current directory"
+	switch {
+	case strings.TrimSpace(os.Getenv("AO_PROJECT_ID")) != "":
+		signal = "AO_PROJECT_ID"
+	case strings.TrimSpace(os.Getenv("AO_SESSION_ID")) != "":
+		signal = "AO_SESSION_ID"
+	}
+	return usageError{fmt.Errorf(
+		"%s describes this machine, and %s targets the remote daemon at %s, where it would select "+
+			"a project on that host — pass --project <id> as it exists on that host "+
+			"(list them with `ao project ls --url %s`)",
+		signal, c.remote.source, c.remote.baseURL, c.remote.baseURL)}
+}
+
 // authorize presents the remote connection password. Loopback calls carry no
 // credential: the local daemon's loopback listener has no auth at all.
 func (c *commandContext) authorize(req *http.Request) {
