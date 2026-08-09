@@ -5,9 +5,12 @@ import type { components } from "../../api/schema";
 import { useRemoteHosts } from "../hooks/useRemoteHosts";
 import { activeHost, switchToHost } from "../lib/active-host";
 import { aoBridge } from "../lib/bridge";
+import { daemonErrorMessage } from "../lib/daemon-error";
 import { cn } from "../lib/utils";
 
-type Peek = { state: "loading" | "ready" | "unreachable"; projects: string[] };
+// `failure` carries the daemon's own sentence when it answered and refused (a
+// rotated password says so); a transport failure has no body, hence null.
+type Peek = { state: "loading" | "ready" | "failed"; projects: string[]; failure: string | null };
 
 // A peek at the other machines, not a second app: the rows are plain text, not
 // links, because opening one means pointing the whole window at that host — the
@@ -30,7 +33,7 @@ export function SidebarRemoteHosts() {
 		setOpenUrls((current) => (wasOpen ? current.filter((entry) => entry !== url) : [...current, url]));
 		// Re-expanding a host that failed retries it; a host already listed does not.
 		if (wasOpen || peeks[url]?.state === "ready") return;
-		setPeeks((current) => ({ ...current, [url]: { state: "loading", projects: [] } }));
+		setPeeks((current) => ({ ...current, [url]: { state: "loading", projects: [], failure: null } }));
 		const response = await aoBridge.remotes
 			.request(url, { method: "GET", path: "/api/v1/projects" })
 			.catch(() => ({ status: 0, body: null }));
@@ -39,8 +42,8 @@ export function SidebarRemoteHosts() {
 			...current,
 			[url]:
 				response.status === 200 && Array.isArray(projects)
-					? { state: "ready", projects: projects.map((project) => project.name) }
-					: { state: "unreachable", projects: [] },
+					? { state: "ready", projects: projects.map((project) => project.name), failure: null }
+					: { state: "failed", projects: [], failure: daemonErrorMessage(response.body) },
 		}));
 	};
 
@@ -72,8 +75,8 @@ export function SidebarRemoteHosts() {
 						</button>
 						{open ? (
 							<div className="flex min-w-0 flex-col gap-0.5 pb-1 pl-8 pr-2.5">
-								{peek?.state === "unreachable" ? (
-									<span className="py-1 text-xs text-warning">{t("hosts.unreachable")}</span>
+								{peek?.state === "failed" ? (
+									<span className="py-1 text-xs text-warning">{peek.failure ?? t("hosts.unreachable")}</span>
 								) : peek?.state === "ready" && peek.projects.length === 0 ? (
 									<span className="py-1 text-xs text-passive">{t("hosts.peekEmpty")}</span>
 								) : (

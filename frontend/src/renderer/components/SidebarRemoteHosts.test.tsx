@@ -58,6 +58,17 @@ describe("SidebarRemoteHosts", () => {
 		expect(await screen.findByText(/unreachable/i)).toBeInTheDocument();
 	});
 
+	it("repeats the daemon's own refusal instead of calling it unreachable", async () => {
+		vi.spyOn(aoBridge.remotes, "request").mockResolvedValue({
+			status: 401,
+			body: { error: "unauthorized", code: "UNAUTHORIZED", message: "connection password rejected" },
+		});
+		render(<SidebarRemoteHosts />);
+		await userEvent.click(screen.getByRole("button", { name: /workbox/ }));
+		expect(await screen.findByText("connection password rejected")).toBeInTheDocument();
+		expect(screen.queryByText(/unreachable/i)).not.toBeInTheDocument();
+	});
+
 	it("says so when a reachable host has no projects", async () => {
 		vi.spyOn(aoBridge.remotes, "request").mockResolvedValue({ status: 200, body: { projects: [] } });
 		render(<SidebarRemoteHosts />);
