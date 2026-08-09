@@ -466,7 +466,7 @@ func newProjectRemoveCommand(ctx *commandContext) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := strings.TrimSpace(args[0])
 			if !opts.yes {
-				confirmed, err := confirmProjectRemoval(cmd, id)
+				confirmed, err := ctx.confirmProjectRemoval(cmd, id)
 				if err != nil {
 					return err
 				}
@@ -489,7 +489,7 @@ func newProjectRemoveCommand(ctx *commandContext) *cobra.Command {
 			if removedID == "" {
 				removedID = id
 			}
-			_, err := fmt.Fprintf(cmd.OutOrStdout(), "removed project %s\n", removedID)
+			_, err := fmt.Fprintf(cmd.OutOrStdout(), "removed project %s%s\n", removedID, ctx.resolvedBySuffix())
 			return err
 		},
 	}
@@ -588,8 +588,14 @@ func formatProjectConfig(config *projectConfig) string {
 	return string(data)
 }
 
-func confirmProjectRemoval(cmd *cobra.Command, id string) (bool, error) {
-	if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Remove project %q? Type the project id to confirm: ", id); err != nil {
+// confirmProjectRemoval is a method so the prompt can name the daemon whose
+// project is about to go. A project id is not host-qualified — the same id can
+// exist on two daemons — so the prompt alone cannot otherwise tell the operator
+// which one they are answering for. Empty suffix for a local daemon keeps local
+// output byte-identical.
+func (c *commandContext) confirmProjectRemoval(cmd *cobra.Command, id string) (bool, error) {
+	if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Remove project %q%s? Type the project id to confirm: ",
+		id, c.resolvedBySuffix()); err != nil {
 		return false, err
 	}
 	reader := bufio.NewReader(cmd.InOrStdin())
