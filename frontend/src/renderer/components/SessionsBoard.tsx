@@ -56,7 +56,7 @@ import { prBrowserUrl, sessionPRDisplaySummaries } from "../lib/pr-display";
 import { formatTimeCompact } from "../lib/format-time";
 import { formatTokenCount } from "../lib/format-token-count";
 import { aoBridge } from "../lib/bridge";
-import { usesPreviewWorkspaceData } from "../lib/preview-mode";
+import { hasBrowserDaemon, usesPreviewWorkspaceData } from "../lib/preview-mode";
 import { cn } from "../lib/utils";
 import { isLinuxPlatform, isMacPlatform, usesBoardActionsInPanel } from "../lib/platform";
 import { useUiStore } from "../stores/ui-store";
@@ -152,7 +152,8 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
 	// query has resolved, so the welcome never flashes over real data): the
 	// global board teaches the app before any project exists, and a fresh
 	// project board invites the first task instead of showing four zeros.
-	const isDaemonReady = usesPreviewWorkspaceData || (shell ? shell.daemonStatus.state === "ready" : true);
+	const isDaemonReady =
+		usesPreviewWorkspaceData || hasBrowserDaemon || (shell ? shell.daemonStatus.state === "ready" : true);
 	const daemonHasFailed = Boolean(shell?.daemonStatus.code);
 	const workspaceStartupState = shell?.workspaceStartupState ?? "ready";
 	const isLoaded = isDaemonReady && workspaceStartupState === "ready" && workspaceQuery.isSuccess;
