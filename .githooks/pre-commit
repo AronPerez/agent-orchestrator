@@ -1,8 +1,21 @@
 #!/usr/bin/env bash
-# Pre-commit: block commits that would fail the CI style checks, so formatting
-# problems surface here instead of in a red PR. Mirrors the CI jobs exactly:
-#   .github/workflows/prettier.yml  → npx prettier@3 --check on changed files
-#   .github/workflows/go.yml        → gofmt on Go files
+# Pre-commit: catch formatting problems here instead of in a red PR.
+#
+# What this actually mirrors:
+#   .github/workflows/go.yml  → gofmt on Go files.  Mirrored exactly; a failure
+#                               here is a real CI failure.
+#
+# The prettier check below mirrors NOTHING. `.github/workflows/prettier.yml`
+# existed once and was deleted in f7a5923 ("chore: remove partial prettier
+# setup", #3090) — along with `.prettierrc` and `.prettierignore`, i.e. the whole
+# setup, config included. No workflow enforces prettier today. This hook was left
+# behind, so it now runs prettier with its BUILT-IN DEFAULTS and no ignore file,
+# against a repo that deliberately removed both. That is why it flags files you
+# never touched.
+#
+# So: a gofmt failure here predicts CI. A prettier failure here predicts nothing
+# and is advisory. Whether that half should exist at all is a decision nobody has
+# made yet — this comment only stops it claiming an enforcement that is not there.
 #
 # Enable once per clone (scripts/dev-setup.sh and scripts/install-hooks.sh do
 # this for you):
