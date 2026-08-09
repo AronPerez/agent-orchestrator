@@ -175,11 +175,18 @@ func lookupRemoteEntry(base string) (*remoteEntry, error) {
 	return nil, nil
 }
 
-// resolvedBySuffix names the daemon that resolved a path, for the one message
-// where the operator can still catch a mistake. Empty for a local daemon, so
-// local output stays byte-identical; a remote target is never silent.
+// resolvedBySuffix names the daemon that acted, for the messages where the
+// operator can still catch a mistake. Empty for a local daemon, so local output
+// stays byte-identical; a remote target is never silent.
 //
-// This exists because the path echo alone is not a signal: the daemon resolves
+// It is also what the destructive verbs use — `session kill`, `session cleanup`
+// and `project rm` are correct about which daemon they hit, but a prompt that
+// says "across all projects" and a success line that says "session x killed"
+// name no host, and a session or project id is not host-qualified. For a
+// destructive verb, "you are about to do this, and you cannot tell where" is the
+// whole defect.
+//
+// It began as a path echo, because the path echo alone is not a signal: the daemon resolves
 // the path against its OWN filesystem, and for an absolute path the echoed
 // string is byte-identical to what the operator typed — so it carries no
 // information about which machine resolved it. Measured: `ao project add
