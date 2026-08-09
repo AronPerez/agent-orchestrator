@@ -23,6 +23,7 @@ import (
 var ctx = context.Background()
 
 type fakeStore struct {
+	cleanupFacts  map[domain.SessionID]domain.SessionCleanupRecord
 	sessions      map[domain.SessionID]domain.SessionRecord
 	pr            map[domain.SessionID]domain.PRFacts
 	projects      map[string]domain.ProjectRecord
@@ -50,6 +51,23 @@ func (f *fakeStore) GetProject(_ context.Context, id string) (domain.ProjectReco
 	r, ok := f.projects[id]
 	return r, ok, nil
 }
+
+// cleanupFacts records what the manager persisted about each session's
+// teardown, so tests can read the disposition back instead of asserting that a
+// write was attempted.
+func (f *fakeStore) UpsertSessionCleanupFacts(_ context.Context, rec domain.SessionCleanupRecord) error {
+	if f.cleanupFacts == nil {
+		f.cleanupFacts = map[domain.SessionID]domain.SessionCleanupRecord{}
+	}
+	f.cleanupFacts[rec.SessionID] = rec
+	return nil
+}
+
+func (f *fakeStore) GetSessionCleanupFacts(_ context.Context, id domain.SessionID) (domain.SessionCleanupRecord, bool, error) {
+	rec, ok := f.cleanupFacts[id]
+	return rec, ok, nil
+}
+
 func (f *fakeStore) ListWorkspaceRepos(_ context.Context, projectID string) ([]domain.WorkspaceRepoRecord, error) {
 	return f.workspaceRepo[projectID], nil
 }
@@ -2526,6 +2544,96 @@ func TestCleanup_SkipsWorkspaceReleaseWhenShellTerminalsWontClose(t *testing.T) 
 	if ws.destroyed != 0 {
 		t.Fatal("workspace must not be destroyed while a scoped shell is still alive")
 	}
+}
+
+// The durable half of the same fact. Reporting a refusal in the response body
+// only tells whoever made the call; session_cleanup_facts is what lets anything
+// else — a reaper, a later pass, an operator who was never at the terminal —
+// enumerate the workspaces still owed removal. The table has existed since
+// migration 0030 with nothing writing it.
+//
+// These read the persisted disposition back rather than asserting a write
+// happened, and cover every terminal path Cleanup can take, because a table
+// that records only some outcomes looks authoritative while being incomplete.
+func TestCleanup_RecordsWorkspaceDisposition(t *testing.T) {
+	t.Run("reclaimed workspace records removed", func(t *testing.T) {
+		m, st, _, _ := newManager()
+		seedTerminal(st, "mer-1", domain.SessionMetadata{WorkspacePath: "/ws/mer-1"})
+		if _, err := m.Cleanup(ctx, "mer"); err != nil {
+			t.Fatalf("cleanup: %v", err)
+		}
+		got, ok, _ := st.GetSessionCleanupFacts(ctx, "mer-1")
+		if !ok || got.WorkspaceDisposition != domain.DispositionRemoved {
+			t.Fatalf("disposition = %q (found=%v), want removed", got.WorkspaceDisposition, ok)
+		}
+		if got.AttemptCount != 1 || got.LastAttemptAt.IsZero() {
+			t.Fatalf("attempt bookkeeping = %d / %v, want 1 and a timestamp", got.AttemptCount, got.LastAttemptAt)
+		}
+		// Nothing schedules retries, so claiming a next attempt would be fiction.
+		if !got.NextAttemptAt.IsZero() {
+			t.Fatalf("NextAttemptAt = %v, want zero while no scheduler reads it", got.NextAttemptAt)
+		}
+	})
+
+	t.Run("dirty worktree records preserved_dirty", func(t *testing.T) {
+		m, st, _, ws := newManager()
+		seedTerminal(st, "mer-1", domain.SessionMetadata{WorkspacePath: "/ws/mer-1"})
+		ws.destroyErr = fmt.Errorf("gitworktree: refusing to remove: %w", ports.ErrWorkspaceDirty)
+		if _, err := m.Cleanup(ctx, "mer"); err != nil {
+			t.Fatalf("cleanup: %v", err)
+		}
+		got, ok, _ := st.GetSessionCleanupFacts(ctx, "mer-1")
+		if !ok || got.WorkspaceDisposition != domain.DispositionPreservedDirty {
+			t.Fatalf("disposition = %q (found=%v), want preserved_dirty", got.WorkspaceDisposition, ok)
+		}
+	})
+
+	// A non-dirty teardown failure stays pending, NOT failed. DispositionFailed
+	// means "exhausted after the retry cap, auto-retry stopped" (domain/cleanup.go)
+	// and no retry cap exists — the next pass will try again. Recording failed
+	// would have the table assert a workspace was abandoned while it is still owed.
+	t.Run("non-dirty failure stays pending, never failed", func(t *testing.T) {
+		m, st, _, ws := newManager()
+		seedTerminal(st, "mer-1", domain.SessionMetadata{WorkspacePath: "/ws/mer-1"})
+		ws.destroyErr = fmt.Errorf("disk on fire")
+		if _, err := m.Cleanup(ctx, "mer"); err != nil {
+			t.Fatalf("cleanup: %v", err)
+		}
+		got, _, _ := st.GetSessionCleanupFacts(ctx, "mer-1")
+		if got.WorkspaceDisposition == domain.DispositionFailed {
+			t.Fatal("recorded failed: that claims auto-retry stopped, but nothing caps retries")
+		}
+		if got.WorkspaceDisposition != domain.DispositionPending {
+			t.Fatalf("disposition = %q, want pending", got.WorkspaceDisposition)
+		}
+	})
+
+	t.Run("session with no workspace records not_applicable", func(t *testing.T) {
+		m, st, _, _ := newManager()
+		seedTerminal(st, "mer-1", domain.SessionMetadata{})
+		if _, err := m.Cleanup(ctx, "mer"); err != nil {
+			t.Fatalf("cleanup: %v", err)
+		}
+		got, ok, _ := st.GetSessionCleanupFacts(ctx, "mer-1")
+		if !ok || got.WorkspaceDisposition != domain.DispositionNotApplicable {
+			t.Fatalf("disposition = %q (found=%v), want not_applicable", got.WorkspaceDisposition, ok)
+		}
+	})
+
+	t.Run("repeated passes accumulate attempts", func(t *testing.T) {
+		m, st, _, ws := newManager()
+		seedTerminal(st, "mer-1", domain.SessionMetadata{WorkspacePath: "/ws/mer-1"})
+		ws.destroyErr = fmt.Errorf("gitworktree: refusing to remove: %w", ports.ErrWorkspaceDirty)
+		for i := 0; i < 3; i++ {
+			if _, err := m.Cleanup(ctx, "mer"); err != nil {
+				t.Fatalf("cleanup %d: %v", i, err)
+			}
+		}
+		got, _, _ := st.GetSessionCleanupFacts(ctx, "mer-1")
+		if got.AttemptCount != 3 {
+			t.Fatalf("AttemptCount = %d after 3 passes, want 3", got.AttemptCount)
+		}
+	})
 }
 
 // TestCleanup_ReportsSkippedWorkspaces: a refused teardown must be visible in
