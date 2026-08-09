@@ -619,8 +619,8 @@ func TestRefuseLocalOnlyNamesFlagAndURL(t *testing.T) {
 	if err := local.refuseLocalOnly("ao doctor", "is local"); err != nil {
 		t.Fatalf("local refuseLocalOnly = %v, want nil (local behavior must not change)", err)
 	}
-	if err := local.refuseLocalOnlyFlag("ao daemon", "is local"); err != nil {
-		t.Fatalf("local refuseLocalOnlyFlag = %v, want nil", err)
+	if err := local.refuseDaemonURLFlag(); err != nil {
+		t.Fatalf("local refuseDaemonURLFlag = %v, want nil", err)
 	}
 
 	for _, source := range []string{"--url", "AO_URL"} {
@@ -648,15 +648,15 @@ func TestRefuseLocalOnlyNamesFlagAndURL(t *testing.T) {
 		deps:   Deps{}.withDefaults(),
 		remote: &remoteTarget{baseURL: "http://host:3011", token: "tok", source: "--url"},
 	}
-	if err := flagged.refuseLocalOnlyFlag("ao daemon", "runs here"); err == nil {
-		t.Error("refuseLocalOnlyFlag with --url = nil, want a refusal")
+	if err := flagged.refuseDaemonURLFlag(); err == nil {
+		t.Error("refuseDaemonURLFlag with --url = nil, want a refusal")
 	}
 	exported := &commandContext{
 		deps:   Deps{}.withDefaults(),
 		remote: &remoteTarget{baseURL: "http://host:3011", token: "tok", source: "AO_URL"},
 	}
-	if err := exported.refuseLocalOnlyFlag("ao daemon", "runs here"); err != nil {
-		t.Errorf("refuseLocalOnlyFlag with AO_URL = %v, want nil (must not brick a spawned daemon)", err)
+	if err := exported.refuseDaemonURLFlag(); err != nil {
+		t.Errorf("refuseDaemonURLFlag with AO_URL = %v, want nil (must not brick a spawned daemon)", err)
 	}
 }
 

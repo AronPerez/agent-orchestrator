@@ -307,19 +307,22 @@ func (c *commandContext) refuseLocalOnly(command, why string) error {
 		c.remote.source, c.remote.baseURL, command, why)}
 }
 
-// refuseLocalOnlyFlag is refuseLocalOnly narrowed to an explicit --url,
-// deliberately ignoring AO_URL. Used only by `ao daemon`.
+// refuseDaemonURLFlag is refuseLocalOnly for `ao daemon`, narrowed to an
+// explicit --url and deliberately ignoring AO_URL.
 //
-// An explicit --url is a keystroke and always misuse. AO_URL is an exported
-// shell variable — the very foot-gun a remote-access guide creates — and
-// `ao daemon` is spawned by the desktop app, not typed. Refusing it on AO_URL
-// would take an operator's working remote setup and turn it into a dead desktop
-// app on their own machine, which is worse than the ignored flag this refuses.
-func (c *commandContext) refuseLocalOnlyFlag(command, why string) error {
+// The one asymmetry among the local-only refusals. An explicit --url is a
+// keystroke and always misuse. AO_URL is an exported shell variable — the very
+// foot-gun a remote-access guide creates — and `ao daemon` is spawned by the
+// desktop app, not typed. Refusing it on AO_URL would take an operator's
+// working remote setup and turn it into a dead desktop app on their own
+// machine, which is worse than the ignored flag this refuses.
+func (c *commandContext) refuseDaemonURLFlag() error {
 	if c.remote == nil || c.remote.source != "--url" {
 		return nil
 	}
-	return c.refuseLocalOnly(command, why)
+	return c.refuseLocalOnly("ao daemon",
+		"runs a daemon process on the machine executing it and makes no outbound call — "+
+			"there is nothing it could do with that URL. Start the daemon on that host")
 }
 
 // authorize presents the remote connection password. Loopback calls carry no

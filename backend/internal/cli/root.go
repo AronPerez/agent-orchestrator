@@ -332,10 +332,8 @@ func newDaemonCommand(ctx *commandContext) *cobra.Command {
 		Hidden: true,
 		Args:   noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Flag-only, not AO_URL — see refuseLocalOnlyFlag.
-			if err := ctx.refuseLocalOnlyFlag("ao daemon",
-				"runs a daemon process on the machine executing it and makes no outbound call — "+
-					"there is nothing it could do with that URL. Start the daemon on that host"); err != nil {
+			// Flag-only, not AO_URL — see refuseDaemonURLFlag.
+			if err := ctx.refuseDaemonURLFlag(); err != nil {
 				return err
 			}
 			return daemon.Run()
