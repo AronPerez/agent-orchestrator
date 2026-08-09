@@ -220,8 +220,11 @@ export class AgentBrowserRuntime {
 		provider: AgentBrowserTargetProvider,
 		signal?: AbortSignal,
 	): Promise<AgentBrowserJSONResult> {
-		const nativeArgs = nativeArgumentsForAction(action, args);
-		const result = await this.run(sessionId, [...nativeArgs, "--json"], provider, signal);
+		const commands = nativeCommandsForAction(action, args);
+		let result = await this.run(sessionId, [...commands[0], "--json"], provider, signal);
+		for (const nativeArgs of commands.slice(1)) {
+			result = await this.run(sessionId, [...nativeArgs, "--json"], provider, signal);
+		}
 		return parseAgentBrowserJSON(result.stdout);
 	}
 
@@ -633,6 +636,44 @@ async function closeBridgeWithTimeout(bridge: AgentBrowserBridge): Promise<void>
 	} finally {
 		if (timer) clearTimeout(timer);
 	}
+}
+
+/**
+ * The native command sequence for one AO action. Every action is a single
+ * agent-browser invocation except `type`, which needs two.
+ *
+ * agent-browser's own `type` inserts ONE CHARACTER AT A TIME — its help says so:
+ * "Types text into the specified element character by character." On a React
+ * controlled input (`value={state}` + `onChange`) the caret does not advance
+ * after an insertion, so every character after the first lands at position 0 and
+ * the text arrives REVERSED: "abcdefgh" becomes "hgfedcba".
+ *
+ * That is worth stating precisely, because the obvious explanation is wrong. It
+ * is NOT a race between the keystroke and React's re-render, so no delay closes
+ * it: measured on a real controlled input, the caret is already 0 at the `input`
+ * event, which fires synchronously during the insertion and before React's own
+ * listener runs. The insertion simply never moves the caret there.
+ *
+ * `keyboard inserttext` performs a SINGLE insertion at the focused element and,
+ * like `type`, does not clear existing content — `type`'s contract minus the
+ * per-character loop. One insertion cannot be misplaced by a caret that fails to
+ * advance, so the failure cannot occur. `fill` is unaffected for the same
+ * reason: it also inserts exactly once.
+ *
+ * This is a workaround at the call site. The defect is upstream in
+ * agent-browser (pinned 0.33.1, frontend/scripts/prepare-agent-browser.mjs),
+ * not in AO.
+ */
+export function nativeCommandsForAction(action: string, args: Record<string, unknown>): string[][] {
+	if (action === "type") {
+		// `keyboard` has no selector — it types into whatever holds focus — so the
+		// ref is resolved by focusing it first.
+		return [
+			["focus", nativeRef(stringValue(args.ref, "ref is required"))],
+			["keyboard", "inserttext", stringValue(args.text, "text is required", true)],
+		];
+	}
+	return [nativeArgumentsForAction(action, args)];
 }
 
 export function nativeArgumentsForAction(action: string, args: Record<string, unknown>): string[] {
