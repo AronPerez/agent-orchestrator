@@ -154,8 +154,9 @@ func (c *commandContext) clearPreview(ctx context.Context) error {
 // not a client of the remote daemon. So even a request that lands sets a
 // preview target nobody will look at — on a stranger's session, if the id
 // happens to exist there. `preview start|status|stop` are blocked at the LAN
-// listener today and report ROUTE_NOT_FOUND, which reads as "that daemon is too
-// old"; they come through here too and now say what is actually wrong.
+// listener too, and used to report ROUTE_NOT_FOUND there, which reads as "that
+// daemon is too old" (the listener now says ROUTE_LOOPBACK_ONLY instead); they
+// come through here too and say what is actually wrong before any request.
 func (c *commandContext) sessionPreviewPath() (string, error) {
 	if err := c.refuseLocalOnly("ao preview",
 		"drives the browser panel of the desktop app running on THIS machine, which is not a client "+
