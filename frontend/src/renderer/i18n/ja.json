@@ -199,6 +199,7 @@
 	"hosts.viewing": "{{host}} を表示中",
 	"hosts.backToLocal": "このMacに戻る",
 	"hosts.passwordChanged": "{{host}} が保存されたパスワードを拒否しました",
+	"hosts.on": "（{{host}} 上）",
 	"inspector.activity": "アクティビティ",
 	"inspector.agent": "エージェント",
 	"inspector.aria": "セッションインスペクター",

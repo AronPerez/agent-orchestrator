@@ -199,6 +199,7 @@
 	"hosts.viewing": "{{host}} wird angezeigt",
 	"hosts.backToLocal": "Zurück zu diesem Mac",
 	"hosts.passwordChanged": "{{host}} hat das gespeicherte Passwort abgelehnt",
+	"hosts.on": "auf {{host}}",
 	"inspector.activity": "Aktivität",
 	"inspector.agent": "Agent",
 	"inspector.aria": "Sitzungs-Inspektor",

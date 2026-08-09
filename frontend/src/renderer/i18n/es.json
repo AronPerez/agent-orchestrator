@@ -201,6 +201,7 @@
 	"hosts.viewing": "Viendo {{host}}",
 	"hosts.backToLocal": "Volver a este Mac",
 	"hosts.passwordChanged": "{{host}} rechazó la contraseña guardada",
+	"hosts.on": "en {{host}}",
 	"inspector.activity": "Actividad",
 	"inspector.agent": "Agente",
 	"inspector.aria": "Inspector de sesión",

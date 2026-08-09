@@ -201,6 +201,7 @@
 	"hosts.viewing": "Affichage de {{host}}",
 	"hosts.backToLocal": "Revenir à ce Mac",
 	"hosts.passwordChanged": "{{host}} a refusé le mot de passe enregistré",
+	"hosts.on": "sur {{host}}",
 	"inspector.activity": "Activité",
 	"inspector.agent": "Agent",
 	"inspector.aria": "Inspecteur de session",

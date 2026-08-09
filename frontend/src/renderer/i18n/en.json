@@ -199,6 +199,7 @@
 	"hosts.viewing": "Viewing {{host}}",
 	"hosts.backToLocal": "Back to This Mac",
 	"hosts.passwordChanged": "{{host}} rejected the saved password",
+	"hosts.on": "on {{host}}",
 	"inspector.activity": "Activity",
 	"inspector.agent": "Agent",
 	"inspector.aria": "Session inspector",

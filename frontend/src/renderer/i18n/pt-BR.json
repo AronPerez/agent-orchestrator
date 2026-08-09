@@ -201,6 +201,7 @@
 	"hosts.viewing": "Vendo {{host}}",
 	"hosts.backToLocal": "Voltar para este Mac",
 	"hosts.passwordChanged": "{{host}} recusou a senha salva",
+	"hosts.on": "em {{host}}",
 	"inspector.activity": "Atividade",
 	"inspector.agent": "Agente",
 	"inspector.aria": "Inspetor da sessão",
