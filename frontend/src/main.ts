@@ -27,6 +27,9 @@ import {
 	type UpdateCheckOptions,
 } from "./main/auto-updater";
 import { listFeatureBuilds, getActiveFeatureBuild } from "./main/feature-builds";
+import { addRemote, readRemotes, type RemoteEntry } from "./main/remotes-store";
+import { probeRemote, remoteRequest, type RemoteRequestInit } from "./main/remote-request";
+import { toHostViews } from "./main/remotes-ipc";
 import { readUpdateSettings, type UpdateSettings, type UpdateStatus } from "./main/update-settings";
 import { readKeybindingOverrides, writeKeybindingOverrides } from "./main/keybinding-settings";
 import { coerceUiSettings, readUiSettings, writeUiSettings, type UiSettings } from "./main/ui-settings";
@@ -1588,6 +1591,37 @@ async function chooseDirectory(title: string): Promise<string | null> {
 ipcMain.handle("app:chooseDirectory", async (_event, title?: string) => {
 	return chooseDirectory(typeof title === "string" && title.trim() ? title : "Choose a git repository");
 });
+// The CLI resolves this file through config.StateDir(), which is ~/.ao
+// unconditionally — it does NOT honour AO_DATA_DIR (that points at ~/.ao/data,
+// the daemon's data dir). Following AO_DATA_DIR here would make the app read a
+// different file than `ao --url` writes, which defeats the whole point of
+// sharing one host list and one credential store.
+function remotesFilePath(): string {
+	return path.join(os.homedir(), ".ao", "remotes.json");
+}
+
+async function findRemote(url: string): Promise<RemoteEntry> {
+	const entry = (await readRemotes(remotesFilePath())).find((candidate) => candidate.url === url);
+	if (!entry) throw new Error(`no saved host for ${url}`);
+	return entry;
+}
+
+ipcMain.handle("remotes:list", async () => toHostViews(await readRemotes(remotesFilePath())));
+
+ipcMain.handle("remotes:add", async (_event, input: RemoteEntry) => {
+	// Probe before saving: a host that never answered is worse than no host,
+	// because it looks configured.
+	const health = await probeRemote(input);
+	if (health === "online") await addRemote(remotesFilePath(), input);
+	return health;
+});
+
+ipcMain.handle("remotes:probe", async (_event, url: string) => probeRemote(await findRemote(url)));
+
+ipcMain.handle("remotes:request", async (_event, url: string, init: RemoteRequestInit) =>
+	remoteRequest(await findRemote(url), init),
+);
+
 ipcMain.handle("app:scanImportFolder", async (_event, input: { path: string; mode: "project" | "workspace" }) => {
 	await ensureShellEnv();
 	return scanImportFolder(input.path, input.mode, { env: daemonEnv(), homeDir: os.homedir() });
