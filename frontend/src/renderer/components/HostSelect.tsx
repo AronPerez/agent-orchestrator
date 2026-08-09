@@ -1,0 +1,86 @@
+import { useTranslation } from "react-i18next";
+import { LOCAL_HOST_ID, type Host, type HostStatus } from "../hooks/useRemoteHosts";
+import type { MessageKey } from "../i18n";
+import { Button } from "./ui/button";
+import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from "./ui/select";
+
+// Sentinel row value: "Add remote host" lives in the same list as the hosts so
+// it is reachable by keyboard, but it opens a dialog instead of selecting.
+const ADD_HOST_VALUE = "__add-remote-host__";
+
+const statusKeys: Record<Exclude<HostStatus, "local">, MessageKey> = {
+	online: "hosts.status.online",
+	checking: "hosts.status.checking",
+	offline: "hosts.status.offline",
+	unauthorized: "hosts.status.unauthorized",
+};
+
+// A host you cannot reach can only fail one step later, so it is not selectable.
+function unreachable(host: Host): boolean {
+	return host.status === "offline" || host.status === "unauthorized";
+}
+
+type HostSelectProps = {
+	hosts: Host[];
+	value: string;
+	onChange: (hostId: string) => void;
+	onAddHost: () => void;
+	/** Re-probe one host — a host has no session to open, reachability is the whole state. */
+	onReconnect?: (url: string) => void;
+};
+
+export function HostSelect({ hosts, value, onChange, onAddHost, onReconnect }: HostSelectProps) {
+	const { t } = useTranslation();
+	const selected = hosts.find((host) => host.id === value);
+
+	return (
+		<Select
+			value={value}
+			onValueChange={(next) => (next === ADD_HOST_VALUE ? onAddHost() : onChange(next))}
+		>
+			<SelectTrigger className="w-full" aria-label={t("hosts.label")}>
+				<SelectValue>
+					<span className="min-w-0 truncate">{selected?.label ?? ""}</span>
+				</SelectValue>
+			</SelectTrigger>
+			<SelectContent position="popper" className="min-w-(--radix-select-trigger-width)">
+				{hosts.map((host) => {
+					if (host.id === LOCAL_HOST_ID) {
+						return (
+							<SelectItem key={host.id} value={host.id}>
+								{host.label}
+							</SelectItem>
+						);
+					}
+					const url = host.url;
+					// The inline action is a sibling of the row, not a child: a disabled
+					// SelectItem is pointer-events-none, which would swallow its clicks.
+					return (
+						<div key={host.id} className="flex items-center gap-1">
+							<SelectItem value={host.id} disabled={unreachable(host)} className="min-w-0 flex-1">
+								<span className="flex min-w-0 flex-col items-start">
+									<span className="min-w-0 truncate text-foreground">{host.label}</span>
+									{host.status === "local" ? null : (
+										<span className="text-xs text-muted-foreground">{t(statusKeys[host.status])}</span>
+									)}
+								</span>
+							</SelectItem>
+							{unreachable(host) && url && onReconnect ? (
+								<Button type="button" variant="ghost" size="sm" className="shrink-0" onClick={() => onReconnect(url)}>
+									{t("hosts.connect")}
+								</Button>
+							) : null}
+						</div>
+					);
+				})}
+				<SelectSeparator />
+				<SelectItem value={ADD_HOST_VALUE}>
+					<span className="flex min-w-0 flex-col items-start">
+						<span className="text-foreground">{t("hosts.addRemote")}</span>
+						<span className="text-xs text-muted-foreground">{t("hosts.addRemote.hint")}</span>
+					</span>
+				</SelectItem>
+			</SelectContent>
+		</Select>
+	);
+}
