@@ -299,10 +299,11 @@ func TestCreateIssuesNewSessionAndStatusOff(t *testing.T) {
 	if h.ID != "sess-1" {
 		t.Fatalf("handle ID = %q, want sess-1", h.ID)
 	}
-	// Expect 6 calls: new-session, display-message cwd verification,
-	// set-option status, set-option mouse, set-option window-size, has-session.
-	if len(fr.calls) != 6 {
-		t.Fatalf("calls = %d, want 6", len(fr.calls))
+	// Expect 8 calls: new-session, display-message cwd verification, set-option
+	// status, set-option mouse, set-option window-size, set-option
+	// destroy-unattached, set-option history-limit, has-session.
+	if len(fr.calls) != 8 {
+		t.Fatalf("calls = %d, want 8", len(fr.calls))
 	}
 
 	// Call 0: new-session
@@ -343,9 +344,53 @@ func TestCreateIssuesNewSessionAndStatusOff(t *testing.T) {
 		t.Fatalf("call[4] = %#v, want %#v", got, want)
 	}
 
-	// Call 5: has-session (IsAlive, uses exact-match target =sess-1).
-	if got, want := fr.calls[5].args, hasSessionArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	// Call 5: set-option destroy-unattached off — pinned so a host tmux config
+	// cannot destroy the session on the last client detach.
+	if got, want := fr.calls[5].args, setDestroyUnattachedOffArgs("sess-1"); !reflect.DeepEqual(got, want) {
 		t.Fatalf("call[5] = %#v, want %#v", got, want)
+	}
+
+	// Call 6: set-option history-limit — pinned so scrollback does not depend on
+	// the host's tmux config.
+	if got, want := fr.calls[6].args, setHistoryLimitArgs("sess-1"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("call[6] = %#v, want %#v", got, want)
+	}
+
+	// Call 7: has-session (IsAlive, uses exact-match target =sess-1).
+	if got, want := fr.calls[7].args, hasSessionArgs("sess-1"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("call[7] = %#v, want %#v", got, want)
+	}
+}
+
+// TestSurvivalOptionArgs pins the argv for the two options AO must not inherit
+// from the host's tmux config.
+func TestSurvivalOptionArgs(t *testing.T) {
+	if got, want := setDestroyUnattachedOffArgs("sess-1"),
+		[]string{"set-option", "-t", "sess-1", "destroy-unattached", "off"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("setDestroyUnattachedOffArgs = %#v, want %#v", got, want)
+	}
+	if got, want := setHistoryLimitArgs("sess-1"),
+		[]string{"set-option", "-t", "sess-1", "history-limit", "2000"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("setHistoryLimitArgs = %#v, want %#v", got, want)
+	}
+}
+
+// TestRestartDoesNotResetSessionOptions guards the adoption contract: Restart
+// respawns the pane and must not re-issue set-option, so a session AO re-adopts
+// after a daemon restart is never reconfigured underneath a live agent.
+func TestRestartDoesNotResetSessionOptions(t *testing.T) {
+	r, fr := newTestRuntime(0)
+	if _, err := r.Restart(context.Background(), ports.RuntimeHandle{ID: "sess-1"}, ports.RuntimeConfig{
+		SessionID:     "sess-1",
+		WorkspacePath: "/tmp/ws",
+		Argv:          []string{"echo", "hi"},
+	}); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	for i, c := range fr.calls {
+		if len(c.args) > 0 && c.args[0] == "set-option" {
+			t.Fatalf("Restart issued set-option at call[%d]: %#v", i, c.args)
+		}
 	}
 }
 

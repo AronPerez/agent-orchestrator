@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -245,4 +246,55 @@ func waitForOutput(t *testing.T, r *Runtime, h ports.RuntimeHandle, want string,
 		time.Sleep(100 * time.Millisecond)
 	}
 	return out
+}
+
+// TestRuntimeIntegrationSurvivalOptionsTakeEffect verifies the options AO pins
+// at create are actually in force on the live tmux server, by reading them back
+// with plain tmux invocations rather than through this package's own argv
+// builders — asserting the commands were sent would only prove we called
+// ourselves correctly.
+//
+// The behavioural half (a host with `destroy-unattached on` destroys the session
+// on detach without this option, and does not with it) cannot be asserted here:
+// it needs a server-global option, and this test shares the operator's tmux
+// server. It was verified out of band on an isolated `-L` socket; see the PR.
+func TestRuntimeIntegrationSurvivalOptionsTakeEffect(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux unavailable")
+	}
+
+	ctx := context.Background()
+	id := strings.ReplaceAll(t.Name(), "/", "_")
+	r := New(Options{Timeout: 5 * time.Second})
+	_ = r.Destroy(ctx, ports.RuntimeHandle{ID: id})
+	t.Cleanup(func() { _ = r.Destroy(context.Background(), ports.RuntimeHandle{ID: id}) })
+
+	h, err := r.Create(ctx, ports.RuntimeConfig{
+		SessionID:     domain.SessionID(id),
+		WorkspacePath: t.TempDir(),
+		Argv:          []string{"sh", "-c", "echo ready"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// destroy-unattached: read the session option straight from the server.
+	out, err := exec.CommandContext(ctx, "tmux", "show-options", "-t", h.ID, "destroy-unattached").Output()
+	if err != nil {
+		t.Fatalf("show-options destroy-unattached: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "destroy-unattached off" {
+		t.Fatalf("destroy-unattached = %q, want %q", got, "destroy-unattached off")
+	}
+
+	// history-limit: ask the PANE what limit it is actually operating under,
+	// not what the session option says, so an option that never reached the
+	// pane would fail here.
+	out, err = exec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", h.ID+":0.0", "#{history_limit}").Output()
+	if err != nil {
+		t.Fatalf("display-message history_limit: %v", err)
+	}
+	if got, want := strings.TrimSpace(string(out)), strconv.Itoa(historyLimitLines); got != want {
+		t.Fatalf("pane history_limit = %q, want %q", got, want)
+	}
 }
