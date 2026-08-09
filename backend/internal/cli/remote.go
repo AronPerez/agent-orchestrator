@@ -325,6 +325,41 @@ func (c *commandContext) refuseDaemonURLFlag() error {
 			"there is nothing it could do with that URL. Start the daemon on that host")
 }
 
+// pinToLocalDaemon keeps a daemon-local callback on the local daemon.
+//
+// `ao hooks` and `ao agent-process supervise` are hidden commands an agent
+// process fires at the daemon that started it: they report activity for a
+// session that exists on THIS machine. Sending that to a remote daemon is never
+// right — measured, it reports SESSION_NOT_FOUND and exits 0, so the local UI's
+// activity feed simply goes dead while the agent keeps working.
+//
+// The split is the same one refuseDaemonURLFlag makes, for the same reason, and
+// it is the whole point of this helper:
+//
+//   - AO_URL is ignored. These commands are spawned by the harness, not typed,
+//     and an operator who exports AO_URL in a shell profile — the natural thing
+//     to do after reading the remote-access guide — must not have every local
+//     agent broken by it. Refusing here would break the user's agent, the exact
+//     thing hooks are designed never to do. The ignore is logged to hooks.log so
+//     it is discoverable rather than silent.
+//   - An explicit --url is refused (exit 2). A typed flag on a hidden,
+//     agent-invoked command is misuse, and nothing in AO constructs one:
+//     session_manager builds the supervise argv itself, with fixed arguments.
+func (c *commandContext) pinToLocalDaemon(command string) error {
+	if c.remote == nil {
+		return nil
+	}
+	if c.remote.source == "--url" {
+		return c.refuseLocalOnly(command,
+			"reports on a session owned by the daemon that started it, so it can only ever mean the local "+
+				"daemon — there is no remote form. Drop the flag")
+	}
+	target := c.remote.baseURL
+	c.remote = nil
+	noteIgnoredRemoteTarget(command, target)
+	return nil
+}
+
 // authorize presents the remote connection password. Loopback calls carry no
 // credential: the local daemon's loopback listener has no auth at all.
 func (c *commandContext) authorize(req *http.Request) {
