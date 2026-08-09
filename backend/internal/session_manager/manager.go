@@ -2702,6 +2702,13 @@ func (m *Manager) Cleanup(ctx context.Context, project domain.ProjectID) (Cleanu
 // inventing a time no scheduler reads would be the misleading half of populating
 // this table. AttemptCount increments so the count is truthful for the passes
 // that did happen.
+//
+// A MISSING ROW MEANS NOTHING IS KNOWN, NOT THAT NOTHING IS OWED. Only the
+// Cleanup path writes here. Kill and RetireForReplacement destroy workspaces
+// without recording, so a session torn down that way has no row at all. Anything
+// enumerating this table — a reaper especially — must treat absence as unknown
+// and fall back to the session list, or it will skip every killed session while
+// believing it covered its backlog.
 func (m *Manager) recordCleanupDisposition(ctx context.Context, rec domain.SessionRecord, disposition domain.WorkspaceDisposition) {
 	now := m.clock()
 	facts := domain.SessionCleanupRecord{
