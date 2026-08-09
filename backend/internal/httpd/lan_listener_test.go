@@ -419,3 +419,69 @@ func TestLANManagerServesWebUIWithoutPassword(t *testing.T) {
 		t.Fatalf("POST /anything: got %d want 401", resp.StatusCode)
 	}
 }
+
+// TestWebUIBypassFailsClosedForRegisteredRoutes is the regression test for the
+// deny-list's failure mode. webui.IsUIRequest enumerates the paths the daemon
+// owns TODAY, so a top-level route added later without updating it stops being
+// excluded — and before the bypass consulted the router, that handed the request
+// to the router and ran the handler with no password, on a socket bound to the
+// network. Verified against the pre-fix code: GET /metrics returned 200 and the
+// handler's body to an unauthenticated caller.
+//
+// The daemon has no such route today, which is exactly why this test invents
+// one: the bug is only reachable through a route nobody has written yet, and it
+// would be silent and remote-only when it arrives.
+func TestWebUIBypassFailsClosedForRegisteredRoutes(t *testing.T) {
+	router := chi.NewRouter()
+	router.Get("/metrics", func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, "daemon-data")
+	})
+	st := &authState{}
+	st.setHash(mobilebridge.HashPassword("secret12"))
+	m := NewLANManager(router, st, 0, slog.Default(), nil)
+	port, err := m.Start(0, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer m.Stop(context.Background())
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+
+	// A registered route is the daemon's, whether or not anyone remembered to
+	// add its prefix to webui.daemonPrefixes.
+	resp, err := http.Get(base + "/metrics")
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("GET /metrics: got %d %q, want 401 — an unlisted route must not answer without the password",
+			resp.StatusCode, body)
+	}
+	if strings.Contains(string(body), "daemon-data") {
+		t.Fatal("GET /metrics: the handler ran for an unauthenticated caller")
+	}
+
+	// ...and the same route with the password still works, so failing closed
+	// costs nothing but the credential.
+	req, _ := http.NewRequest(http.MethodGet, base+"/metrics", nil)
+	req.Header.Set("Authorization", "Bearer secret12")
+	authed, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("authenticated GET /metrics: %v", err)
+	}
+	defer authed.Body.Close()
+	if authed.StatusCode != http.StatusOK {
+		t.Fatalf("authenticated GET /metrics: got %d, want 200", authed.StatusCode)
+	}
+
+	// A path the router does not serve is still the UI, so the prompt can load.
+	shell, err := http.Get(base + "/projects/ao-1")
+	if err != nil {
+		t.Fatalf("GET /projects/ao-1: %v", err)
+	}
+	defer shell.Body.Close()
+	if shell.StatusCode == http.StatusUnauthorized {
+		t.Fatal("GET /projects/ao-1: got 401; the UI shell must still load unauthenticated")
+	}
+}

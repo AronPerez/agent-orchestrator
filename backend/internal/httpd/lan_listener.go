@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/webui"
 	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -48,24 +50,50 @@ func NewLANManager(handler http.Handler, state *authState, defaultPort int, log 
 	}
 }
 
+// routeMatcher is chi.Router's route-matching half. Declared as an interface so
+// the bypass can ask "does the daemon actually serve this?" without the LAN
+// manager taking a hard dependency on the concrete router type.
+type routeMatcher interface {
+	Match(rctx *chi.Context, method, path string) bool
+}
+
 // webUIBypass serves the embedded web UI without a connection password and
 // sends everything else through authMiddleware.
 //
 // The UI *is* the password prompt: a browser on another machine has no way to
 // send a credential it has not been asked for yet, so 401-ing index.html and
 // its assets would leave the user staring at a JSON error with nowhere to type.
-// What is exposed by this is a static bundle — the same bytes every AO release
-// ships — and never a byte of daemon data: webui.IsUIRequest excludes every
-// path the daemon answers itself (API, /mux, probes, control), so the first
-// request that could return anything about this machine is still authenticated,
-// which is what makes the SPA see a 401 and show the prompt.
-func webUIBypass(ui http.Handler, authed http.Handler) http.Handler {
+// What it exposes is a static bundle — the same bytes every AO release ships —
+// and never a byte of daemon data, which is what makes the SPA see a 401 and
+// show the prompt.
+//
+// It fails CLOSED, and that is the load-bearing part. webui.IsUIRequest is a
+// deny-list of the paths the daemon owns today, and a deny-list fails open: the
+// day someone registers a top-level route (say GET /metrics) without adding it
+// there, that route stops being excluded and the bypass hands the request
+// straight to the router — which runs the handler, unauthenticated, on a socket
+// bound to the network. Not a shadowed route: a live one, answering strangers.
+// The failure would be silent and remote-only, so local dev would never show it.
+//
+// So a request is only treated as UI when the router has NO handler for it. A
+// registered route always goes through authMiddleware, whether or not anyone
+// remembered to list its prefix, and the deny-list becomes defense-in-depth
+// rather than the sole guard.
+func webUIBypass(router, authed http.Handler) http.Handler {
+	matcher, _ := router.(routeMatcher)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if webui.IsUIRequest(r) {
-			ui.ServeHTTP(w, r)
+		if !webui.IsUIRequest(r) {
+			authed.ServeHTTP(w, r)
 			return
 		}
-		authed.ServeHTTP(w, r)
+		// A path the daemon serves is the daemon's, however it is spelled. chi
+		// matches per method, so a HEAD to a GET-only route falls through to the
+		// UI shell — harmless, since no daemon handler runs either way.
+		if matcher != nil && matcher.Match(chi.NewRouteContext(), r.Method, r.URL.Path) {
+			authed.ServeHTTP(w, r)
+			return
+		}
+		router.ServeHTTP(w, r) // unmatched → the router's NotFound, i.e. the UI
 	})
 }
 
