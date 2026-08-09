@@ -226,7 +226,7 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 		}
 		return pflag.NormalizedName(name)
 	})
-	f.StringVar(&opts.project, "project", "", "Project id to spawn the session in (default: AO_PROJECT_ID or the current registered repo)")
+	f.StringVar(&opts.project, "project", "", "Project id to spawn the session in (default: AO_PROJECT_ID or the current registered repo; required with --url)")
 	f.BoolVar(&opts.standalone, "standalone", false, "Spawn a projectless worker in an AO-managed plain directory (requires --agent)")
 	f.StringVar(&opts.harness, "harness", "", "Agent harness / --agent: claude-code, codex, aider, opencode, opencode-v2, grok, droid, amp, agy, crush, cursor, qwen, gemini, copilot, goose, auggie, continue, devin, cline, kimi, muse, kiro, kilocode, vibe, pi, kimchi, prime-agent, autohand, omp, fx, unreal-agent, mimo-code, deepseek-harness, openhands, command-code (default: project worker.agent; orchestrator spawns default to project orchestrator.agent; required if the project has none)")
 	f.StringVar(&opts.kind, "kind", "", "Session role: worker or orchestrator (default: worker)")
@@ -262,6 +262,11 @@ func (c *commandContext) fetchAgentInventory(ctx context.Context, refresh bool) 
 func (c *commandContext) resolveSpawnProject(ctx context.Context, explicit string) (projectDetails, error) {
 	if id := strings.TrimSpace(explicit); id != "" {
 		return c.fetchProjectDetails(ctx, id)
+	}
+	// Every fallback below reads a LOCAL signal and resolves it against
+	// whichever daemon we are talking to. That is only safe for the local one.
+	if err := c.checkRemoteImplicitProject(explicit); err != nil {
+		return projectDetails{}, err
 	}
 	if id := strings.TrimSpace(os.Getenv("AO_PROJECT_ID")); id != "" {
 		return c.fetchProjectDetails(ctx, id)
