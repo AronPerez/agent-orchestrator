@@ -76,10 +76,28 @@ if (!existsSync(join(webuiDir, "index.html"))) {
 rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });
 
-const result = spawnSync("go", ["build", "-o", outPath, "./cmd/ao"], {
-	cwd: backendRoot,
-	stdio: "inherit",
-});
+// Link-time build stamp. Go's own VCS stamping is silently absent when the build
+// runs inside a linked git worktree — even with -buildvcs=true, which exits 0 and
+// stamps nothing — and the app-bundled daemon shipped with no build identity for
+// exactly that reason. `git rev-parse` works in a worktree, so ask git directly.
+//
+// DO NOT "simplify" this back to -buildvcs. It is a silent no-op in a worktree:
+// the build succeeds, the app ships, and /healthz reports source "unknown"
+// forever — which is precisely the bug this replaced.
+const stampPkg = "github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta";
+const gitOutput = (args) => {
+	const r = spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" });
+	return r.status === 0 ? r.stdout.trim() : "";
+};
+const head = gitOutput(["rev-parse", "HEAD"]);
+const dirty = head && spawnSync("git", ["diff", "--quiet", "HEAD"], { cwd: repoRoot }).status !== 0;
+const buildStamp = head ? `${head}${dirty ? "-dirty" : ""}` : "";
+
+const result = spawnSync(
+	"go",
+	["build", "-ldflags", `-X ${stampPkg}.buildStamp=${buildStamp}`, "-o", outPath, "./cmd/ao"],
+	{ cwd: backendRoot, stdio: "inherit" },
+);
 
 if (result.error) {
 	console.error(`failed to start go build: ${result.error.message}`);
