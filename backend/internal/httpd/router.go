@@ -306,12 +306,27 @@ func daemonProbePayload(status string, cfg config.Config) map[string]any {
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		payload["executablePath"] = exe
 	}
-	// Build identity (VCS revision) lets a client recognize a same-build daemon
-	// running from a different path — e.g. a launchd-supervised daemon under
-	// ~/.ao/bin vs. the app-bundled one — instead of rejecting it on path alone.
-	// Empty for unstamped builds (`go run`); clients then fall back to the path.
-	if id := daemonmeta.BuildIdentity(); id != "" {
-		payload["buildIdentity"] = id
+	// Build identity lets a client recognize a same-build daemon running from a
+	// different path — e.g. a launchd-supervised daemon under ~/.ao/bin vs. the
+	// app-bundled one — instead of rejecting it on path alone.
+	//
+	// Two shapes, deliberately. `buildIdentity` is the original flat field and is
+	// omitted when unknown, which existing clients already guard for
+	// (frontend/src/main.ts compares only when both sides are non-empty). `build`
+	// is the form a *remote* client needs: it carries `source`, so "this daemon
+	// does not know its build" is distinguishable from a real answer. Comparing
+	// two daemons that both report source "unknown" tells you nothing, and
+	// without that field it reads as a match.
+	//
+	// This is the only version signal on the wire. It is reachable on the LAN
+	// listener only WITH the connection password (/healthz and /readyz are in
+	// webui.daemonPrefixes, so they are never served as UI) — deliberately, since
+	// an unauthenticated data-returning route on that socket would break the
+	// hostGuard LAN exemption (see AGENTS.md hard rules).
+	build := daemonmeta.CurrentBuild()
+	payload["build"] = build
+	if build.Identity != "" {
+		payload["buildIdentity"] = build.Identity
 	}
 	if cwd, err := os.Getwd(); err == nil && cwd != "" {
 		payload["workingDirectory"] = cwd

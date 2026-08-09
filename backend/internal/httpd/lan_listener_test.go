@@ -3,6 +3,7 @@ package httpd
 import (
 	"context"
 	"encoding/base32"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -600,4 +601,70 @@ func TestWebUIBypassDoesNotExposeWorkspacePreviews(t *testing.T) {
 	if shell.StatusCode == http.StatusUnauthorized {
 		t.Fatal("GET / on a normal Host: got 401; the UI shell must still load unauthenticated")
 	}
+}
+
+// The version signal is only useful if a REMOTE client can actually read it, so
+// this reads it back over the wire through the real LAN listener rather than
+// asserting the field was set. It also pins where it must NOT be readable:
+// /healthz is credential-gated on that socket, because an unauthenticated
+// data-returning route there would break the hostGuard LAN exemption.
+func TestBuildSignalReadableOnlyWithCredential(t *testing.T) {
+	st := &authState{}
+	st.setHash(mobilebridge.HashPassword("secret12"))
+	m := NewLANManager(newTestRouter(config.Config{}, discardLogger(), nil), st, 0, slog.Default(), nil)
+	port, err := m.Start(0, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer m.Stop(context.Background())
+	url := fmt.Sprintf("http://127.0.0.1:%d/healthz", port)
+
+	// No credential: the signal must not be readable at all.
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated /healthz: got %d want 401 — a version signal must not be an unauthenticated data route on the LAN socket", resp.StatusCode)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req.Header.Set("Authorization", "Bearer secret12")
+	resp2, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("authenticated /healthz: got %d want 200", resp2.StatusCode)
+	}
+	var got struct {
+		Build *struct {
+			Identity string `json:"identity"`
+			Source   string `json:"source"`
+		} `json:"build"`
+	}
+	if err := json.NewDecoder(resp2.Body).Decode(&got); err != nil {
+		t.Fatalf("decode probe payload: %v", err)
+	}
+	if got.Build == nil {
+		t.Fatal("no build object on the wire — a remote client has no version signal at all")
+	}
+	switch got.Build.Source {
+	case "stamp", "vcs":
+		if got.Build.Identity == "" {
+			t.Errorf("source %q carried an empty identity over the wire", got.Build.Source)
+		}
+	case "unknown":
+		// The case this whole change exists for: the test binary is built from a
+		// worktree with no -X stamp, so this is the DEFAULT outcome here, and it
+		// must arrive as an explicit "unknown" with no identity to mis-compare.
+		if got.Build.Identity != "" {
+			t.Errorf("unknown build sent identity %q over the wire", got.Build.Identity)
+		}
+	default:
+		t.Fatalf("unrecognised build source %q on the wire", got.Build.Source)
+	}
+	t.Logf("build signal over the wire: source=%q identity=%q", got.Build.Source, got.Build.Identity)
 }

@@ -120,7 +120,19 @@ else
   printf '  Run (cd %s && npm install) and rebuild if you want the browser UI.\n' "${frontend_dir}" >&2
 fi
 
-(cd "${backend_dir}" && go build -o "${binary_path}" ./cmd/ao)
+# Link-time build stamp. Go's own VCS stamping is silently absent when the build
+# runs inside a linked git worktree — even with -buildvcs=true, which exits 0 and
+# stamps nothing — and every AO agent session builds from one. `git rev-parse`
+# works there, so ask git directly.
+build_stamp=""
+if git_rev="$(git -C "${repo_root}" rev-parse HEAD 2>/dev/null)"; then
+  build_stamp="${git_rev}"
+  if ! git -C "${repo_root}" diff --quiet HEAD 2>/dev/null; then
+    build_stamp="${build_stamp}-dirty"
+  fi
+fi
+stamp_pkg="github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
+(cd "${backend_dir}" && go build -ldflags "-X ${stamp_pkg}.buildStamp=${build_stamp}" -o "${binary_path}" ./cmd/ao)
 
 if ! install_dir="$(select_install_dir)"; then
   printf 'Could not find a writable directory on PATH for ao\n' >&2
