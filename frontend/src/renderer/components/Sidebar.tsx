@@ -74,6 +74,7 @@ import { useUiStore } from "../stores/ui-store"
 import { ConfirmDialog } from "./ConfirmDialog";
 import { CreateProjectFlow, type CreateProjectInput } from "./CreateProjectFlow";
 import { ResizeHandle } from "./ResizeHandle";
+import { SidebarRemoteHosts } from "./SidebarRemoteHosts";
 import { isMacPlatform } from "../lib/platform";
 
 // Destructive controls must say which machine they destroy on: while a remote
@@ -399,6 +400,8 @@ export function Sidebar({
 						)}
 					</SidebarGroupContent>
 				</SidebarGroup>
+				{/* The machines you are not looking at — read-only, below the tree. */}
+				<SidebarRemoteHosts />
 			</SidebarContent>
 
 			{/* Footer — Settings opens the global settings page directly.
