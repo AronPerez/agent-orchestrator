@@ -396,6 +396,19 @@ func (r *Runtime) Create(ctx context.Context, cfg ports.RuntimeConfig) (ports.Ru
 		return ports.RuntimeHandle{}, r.failedCreatedRuntime(handle, fmt.Errorf("tmux runtime: set detach-on-destroy %s: %w", id, err))
 	}
 
+	// Pin the options session survival depends on rather than inheriting them
+	// from a tmux config AO does not control. A host with `destroy-unattached on`
+	// destroys the session on the last client detach, which is precisely the
+	// event a detached agent session exists to survive; and an inherited
+	// history-limit silently sets how much scrollback GetOutput can reach back
+	// through. Set on create only: a re-adopted session is never re-created.
+	if _, err := r.run(ctx, setDestroyUnattachedOffArgs(id)...); err != nil {
+		return ports.RuntimeHandle{}, r.failedCreatedRuntime(handle, fmt.Errorf("tmux runtime: set destroy-unattached %s: %w", id, err))
+	}
+	if _, err := r.run(ctx, setHistoryLimitArgs(id)...); err != nil {
+		return ports.RuntimeHandle{}, r.failedCreatedRuntime(handle, fmt.Errorf("tmux runtime: set history-limit %s: %w", id, err))
+	}
+
 	alive, err := r.IsAlive(ctx, handle)
 	if err != nil {
 		return ports.RuntimeHandle{}, r.failedCreatedRuntime(handle, fmt.Errorf("tmux runtime: verify session %s: %w", id, err))
