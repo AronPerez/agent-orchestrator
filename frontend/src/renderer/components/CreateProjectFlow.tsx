@@ -5,11 +5,13 @@ import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import type { ImportFolderScan } from "../../preload";
 import { LOCAL_HOST_ID, remotesBridge, useRemoteHosts, type Host } from "../hooks/useRemoteHosts";
 import { aoBridge } from "../lib/bridge";
+import { daemonErrorMessage } from "../lib/daemon-error";
 import { cn } from "../lib/utils";
 import type { ProjectKind } from "../types/workspace";
 import { AddRemoteHostDialog } from "./AddRemoteHostDialog";
 import { CreateProjectAgentSheet, type CreateProjectAgentSelection } from "./CreateProjectAgentSheet";
 import { HostSelect } from "./HostSelect";
+import { RemoteFolderPicker } from "./RemoteFolderPicker";
 import { Button } from "./ui/button";
 
 export type CreateProjectInput = { path: string; asWorkspace?: boolean } & CreateProjectAgentSelection;
@@ -373,16 +375,6 @@ async function projectRepositoryPreflight(path: string): Promise<ProjectReposito
 	}
 }
 
-// The daemon's locked error envelope is {error, code, message} (httpd/envelope);
-// `message` is the sentence the CLI prints, so both surfaces say the same thing.
-// Some paths carry only `error`.
-function daemonErrorMessage(body: unknown): string | null {
-	if (typeof body !== "object" || body === null) return null;
-	const { error, message } = body as { error?: unknown; message?: unknown };
-	if (typeof message === "string" && message !== "") return message;
-	return typeof error === "string" && error !== "" ? error : null;
-}
-
 function shouldScanCreateFailure(message: string): boolean {
 	if (/daemon|server|conflict|already exists|not ready|start|orchestrator|permission denied/i.test(message))
 		return false;
@@ -589,6 +581,7 @@ function CreateProjectFolderDialog({
 }) {
 	const { t } = useTranslation();
 	const remotePathId = useId();
+	const [browseOpen, setBrowseOpen] = useState(false);
 	const isWorkspace = kind === "workspace";
 	const failedRepos = scan?.repos.filter((repo) => repo.status === "error" || !repo.hasRemote) ?? [];
 	const hasScan = scan !== null;
@@ -693,16 +686,30 @@ function CreateProjectFolderDialog({
 								>
 									{t("hosts.remotePath", { host: remoteHost.label })}
 								</label>
-								<input
-									id={remotePathId}
-									autoComplete="off"
-									spellCheck={false}
-									className="settings-field-control h-(--size-settings-action-height) font-mono"
-									disabled={disabled}
-									value={remotePath}
-									onChange={(event) => onRemotePathChange(event.target.value)}
-								/>
+								{/* Browse is an assist, not a replacement: a typed path still wins,
+								    and it is the only way in when the host refuses to list. */}
+								<div className="flex items-center gap-2">
+									<input
+										id={remotePathId}
+										autoComplete="off"
+										spellCheck={false}
+										className="settings-field-control h-(--size-settings-action-height) min-w-0 flex-1 font-mono"
+										disabled={disabled}
+										value={remotePath}
+										onChange={(event) => onRemotePathChange(event.target.value)}
+									/>
+									<Button type="button" variant="footer" disabled={disabled} onClick={() => setBrowseOpen(true)}>
+										{t("fsBrowse.browse")}
+									</Button>
+								</div>
 								<p className="text-[12px] text-[var(--color-text-import-muted)]">{t("hosts.remotePathHint")}</p>
+								<RemoteFolderPicker
+									hostLabel={remoteHost.label}
+									hostUrl={remoteHost.url}
+									open={browseOpen}
+									onOpenChange={setBrowseOpen}
+									onSelect={onRemotePathChange}
+								/>
 							</div>
 						) : (
 							<button

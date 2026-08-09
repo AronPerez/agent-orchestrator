@@ -89,6 +89,37 @@ describe("CreateProjectFlow — remote host", () => {
 		expect(await screen.findByRole("alert")).toHaveTextContent(/must be absolute on the daemon host/i);
 	});
 
+	it("browsing fills the remote path field", async () => {
+		vi.spyOn(aoBridge.remotes, "request")
+			.mockResolvedValueOnce({
+				status: 200,
+				body: { path: "/srv", parent: "/", entries: [{ name: "repo", path: "/srv/repo", gitRepo: true }] },
+			})
+			.mockResolvedValueOnce({ status: 200, body: { path: "/srv/repo", parent: "/srv", entries: [] } });
+		renderFlow();
+		await selectWorkbox();
+		await userEvent.click(screen.getByRole("button", { name: "Project" }));
+		await userEvent.click(screen.getByRole("button", { name: /browse/i }));
+		// Descend into repo, then take the folder the picker is standing in.
+		await userEvent.click(await screen.findByRole("button", { name: /^repo/ }));
+		await userEvent.click(screen.getByRole("button", { name: /choose this folder/i }));
+		expect(screen.getByLabelText(/path on workbox/i)).toHaveValue("/srv/repo");
+	});
+
+	it("keeps a typed path working alongside Browse", async () => {
+		const request = vi.spyOn(aoBridge.remotes, "request").mockResolvedValue({ status: 201, body: { id: "p1" } });
+		renderFlow();
+		await selectWorkbox();
+		await userEvent.click(screen.getByRole("button", { name: "Project" }));
+		await userEvent.type(screen.getByLabelText(/path on workbox/i), "/srv/typed");
+		await userEvent.click(screen.getByRole("button", { name: /add project on workbox/i }));
+		expect(request).toHaveBeenCalledWith("http://192.0.2.1:3011", {
+			method: "POST",
+			path: "/api/v1/projects",
+			body: { path: "/srv/typed", asWorkspace: false },
+		});
+	});
+
 	it("skips the local git preflight on the remote path", async () => {
 		const scanImportFolder = vi.spyOn(aoBridge.app, "scanImportFolder");
 		const checkAncestorRepo = vi.spyOn(aoBridge.app, "checkAncestorRepo");
