@@ -414,6 +414,52 @@ paths:
       summary: Stream CDC events with durable replay
       tags:
       - events
+  /api/v1/fs/dirs:
+    get:
+      operationId: listDirs
+      parameters:
+      - description: Absolute directory on the daemon host to list. When omitted,
+          the daemon user's home directory.
+        in: query
+        name: path
+        schema:
+          description: Absolute directory on the daemon host to list. When omitted,
+            the daemon user's home directory.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListDirsResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+      summary: List the subdirectories of a directory on the daemon host
+      tags:
+      - fs
   /api/v1/import:
     get:
       operationId: getImportStatus
@@ -5396,6 +5442,23 @@ components:
       required:
       - harness
       type: object
+    FSEntry:
+      properties:
+        gitRepo:
+          description: True when the directory carries a .git entry (clone or worktree
+            checkout).
+          type: boolean
+        name:
+          description: Directory name.
+          type: string
+        path:
+          description: Absolute path of the directory on the daemon host.
+          type: string
+      required:
+      - name
+      - path
+      - gitRepo
+      type: object
     ImportReport:
       properties:
         dryRun:
@@ -5508,6 +5571,29 @@ components:
           type: array
       required:
       - sessions
+      type: object
+    ListDirsResponse:
+      properties:
+        entries:
+          description: Subdirectories, excluding dotted names.
+          items:
+            $ref: '#/components/schemas/FSEntry'
+          type: array
+        parent:
+          description: Absolute path of the listed directory's parent; equals path
+            at the filesystem root.
+          type: string
+        path:
+          description: Absolute path that was listed.
+          type: string
+        truncated:
+          description: True when the listing hit the entry cap and more subdirectories
+            exist.
+          type: boolean
+      required:
+      - path
+      - parent
+      - entries
       type: object
     ListNotificationsResponse:
       properties:
@@ -7430,3 +7516,5 @@ tags:
   name: mobile
 - description: Target-isolated desktop browser runtime (loopback only)
   name: browser
+- description: Read-only filesystem browsing for remote clients
+  name: fs
