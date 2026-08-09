@@ -2,6 +2,7 @@ package httpd
 
 import (
 	"context"
+	"encoding/base32"
 	"fmt"
 	"io"
 	"log/slog"
@@ -538,5 +539,65 @@ func TestWebUIBypassDisabledForUnknownHandler(t *testing.T) {
 	defer authed.Body.Close()
 	if authed.StatusCode != http.StatusOK {
 		t.Fatalf("authenticated GET /: got %d, want 200", authed.StatusCode)
+	}
+}
+
+// TestWebUIBypassDoesNotExposeWorkspacePreviews is the regression test for the
+// bypass routing unauthenticated requests through the shared router.
+//
+// previewOriginMiddleware sits in the router's middleware stack and terminates
+// any GET whose Host is a preview subdomain by serving files out of that
+// session's workspace. It is keyed on a base32 session id in the Host, which is
+// not a secret. So "run the router and let it land in NotFound" was never the
+// same thing as "serve the static bundle": the router runs its middleware
+// first. Measured before the fix, on the LAN listener with no password, these
+// requests reached PreviewOrigin and got its envelope back — session data on a
+// socket bound to the network.
+//
+// Two things hold it shut now: the bypass serves the UI handler directly rather
+// than the router, so no router middleware can run unauthenticated at all, and a
+// preview Host is routed to authMiddleware so the preview flow keeps working
+// over the LAN with the password, as it did before the bypass existed.
+func TestWebUIBypassDoesNotExposeWorkspacePreviews(t *testing.T) {
+	router := newTestRouter(config.Config{}, discardLogger(), nil)
+	st := &authState{}
+	st.setHash(mobilebridge.HashPassword("secret12"))
+	m := NewLANManager(router, st, 0, slog.Default(), nil)
+	port, err := m.Start(0, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer m.Stop(context.Background())
+
+	label := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString([]byte("ao-1")))
+	previewHost := "ao-preview." + label + ".localhost"
+
+	for _, path := range []string{"/", "/index.html", "/app.js", "/assets/main.css"} {
+		req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d%s", port, path), nil)
+		req.Host = previewHost
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s with a preview Host: got %d %q, want 401 — workspace previews must not be reachable without the password",
+				path, resp.StatusCode, body)
+		}
+		// PreviewOrigin's own envelopes are the tell that it ran at all.
+		if strings.Contains(string(body), "PREVIEW_NOT_FOUND") || strings.Contains(string(body), "NO_PREVIEW_ENTRY") {
+			t.Errorf("%s with a preview Host: previewOriginMiddleware ran for an unauthenticated caller (%q)", path, body)
+		}
+	}
+
+	// The ordinary UI shell, on a normal Host, still loads without a password.
+	shell, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer shell.Body.Close()
+	if shell.StatusCode == http.StatusUnauthorized {
+		t.Fatal("GET / on a normal Host: got 401; the UI shell must still load unauthenticated")
 	}
 }
