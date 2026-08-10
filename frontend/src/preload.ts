@@ -339,6 +339,12 @@ const api = {
 		list: () => ipcRenderer.invoke("remotes:list") as Promise<RemoteHostView[]>,
 		add: (input: { label: string; url: string; password: string }) =>
 			ipcRenderer.invoke("remotes:add", input) as Promise<RemoteHealth>,
+		// An edit carries only what changed: an omitted password keeps the saved
+		// one, so a rotated credential is fixed without the renderer ever holding
+		// the old one.
+		update: (url: string, changes: { label?: string; url?: string; password?: string }) =>
+			ipcRenderer.invoke("remotes:update", url, changes) as Promise<RemoteHealth>,
+		remove: (url: string) => ipcRenderer.invoke("remotes:remove", url) as Promise<void>,
 		probe: (url: string) => ipcRenderer.invoke("remotes:probe", url) as Promise<RemoteHealth>,
 		request: (url: string, init: RemoteRequestInit) =>
 			ipcRenderer.invoke("remotes:request", url, init) as Promise<RemoteResponse>,
