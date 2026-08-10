@@ -15,8 +15,10 @@ vi.mock("../lib/auth-gate", () => ({
 	isUnauthorized: () => mockUnauthorized,
 	subscribeUnauthorized: () => () => undefined,
 }));
-vi.mock("../hooks/useRemoteHosts", () => ({
-	LOCAL_HOST_ID: "local",
+// Only the hook is faked. probeFailed is a pure predicate over HostStatus, so a
+// stub of it would just be a second copy of the rule under test.
+vi.mock(import("../hooks/useRemoteHosts"), async (importOriginal) => ({
+	...(await importOriginal()),
 	useRemoteHosts: () => ({
 		hosts: [
 			{ id: "local", label: "This Mac", url: null, status: "local" },

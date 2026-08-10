@@ -1,3 +1,4 @@
+import { parseDaemonProbe } from "../shared/daemon-attach";
 import type { RemoteEntry } from "./remotes-store";
 
 // Remote HTTP lives in the main process for two reasons: the renderer's origin
@@ -14,7 +15,10 @@ export type RemoteResponse = {
 	body: unknown;
 };
 
-export type RemoteHealth = "online" | "unauthorized" | "offline";
+// "not-a-daemon" is its own answer because the honest sentence differs: the
+// address replied, so telling someone it is unreachable sends them to debug a
+// network that is working.
+export type RemoteHealth = "online" | "unauthorized" | "offline" | "not-a-daemon";
 
 type FetchImpl = typeof fetch;
 
@@ -46,9 +50,14 @@ export async function remoteRequest(
 
 export async function probeRemote(entry: RemoteEntry, fetchImpl: FetchImpl = fetch): Promise<RemoteHealth> {
 	try {
-		const { status } = await remoteRequest(entry, { method: "GET", path: "/healthz" }, fetchImpl);
+		const { status, body } = await remoteRequest(entry, { method: "GET", path: "/healthz" }, fetchImpl);
 		if (status === 401 || status === 403) return "unauthorized";
-		return status >= 200 && status < 300 ? "online" : "offline";
+		if (status < 200 || status >= 300) return "offline";
+		// A status code proves something replied, not that it is a daemon. An SPA
+		// catch-all (an Expo dev server on a mistyped port, say) answers every path
+		// with 200 and an HTML page; accepting that as the api base hands the whole
+		// renderer bodies it will read fields off and crash on.
+		return parseDaemonProbe("healthz", body) === null ? "not-a-daemon" : "online";
 	} catch {
 		// A transport failure is indistinguishable from a wrong port here, and
 		// both mean the same thing to the user: it is not reachable.
