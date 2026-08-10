@@ -80,6 +80,38 @@ describe("RemoteFolderPicker", () => {
 		expect(onSelect).toHaveBeenCalledWith("/home/dev/repo");
 	});
 
+	// GET /api/v1/fs/dirs is new, so a saved host on an older build is the normal
+	// case, not an edge one. Every unreadable 200 below used to reach
+	// `listing.entries.map` as undefined and take the whole renderer down.
+	describe("a 200 that is not a listing", () => {
+		const cases: Array<[string, unknown]> = [
+			// What an older daemon's web-UI catch-all actually serves for a route it
+			// does not know: 200, and a page.
+			["html from an older daemon's catch-all", "<!doctype html><html><body>AO</body></html>"],
+			["json without an entries key", { path: "/home/dev", parent: "/home" }],
+			["entries that is not an array", { path: "/home/dev", parent: "/home", entries: { "0": "repo" } }],
+			["entries holding rows that are not entries", { path: "/home/dev", parent: "/home", entries: [null] }],
+		];
+
+		for (const [name, body] of cases) {
+			it(`reports a version gap for ${name}`, async () => {
+				vi.spyOn(aoBridge.remotes, "request").mockResolvedValue({ status: 200, body });
+				renderPicker();
+
+				expect(await screen.findByRole("alert")).toHaveTextContent(/older build/i);
+				// The honest failure, not a folder that merely looks empty.
+				expect(screen.queryByText(/no subfolders/i)).not.toBeInTheDocument();
+			});
+		}
+	});
+
+	it("reports a failure when the host has no folder-browsing route at all", async () => {
+		vi.spyOn(aoBridge.remotes, "request").mockResolvedValue({ status: 404, body: null });
+		renderPicker();
+
+		expect(await screen.findByRole("alert")).toHaveTextContent(/could not list folders/i);
+	});
+
 	it("renders the daemon's error text when browsing fails", async () => {
 		// The locked envelope is flat {code, error, message} (schema.ts APIError),
 		// not a nested {error:{message}}.

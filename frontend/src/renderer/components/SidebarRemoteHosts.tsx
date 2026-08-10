@@ -38,11 +38,17 @@ export function SidebarRemoteHosts() {
 			.request(url, { method: "GET", path: "/api/v1/projects" })
 			.catch(() => ({ status: 0, body: null }));
 		const projects = (response.body as components["schemas"]["ListProjectsResponse"] | null)?.projects;
+		// Array.isArray only proves the shell; a row from an unknown build need not
+		// carry a name, and reading `.name` off a non-object throws where a cast
+		// cannot help. Drop unreadable rows rather than lose the whole peek.
+		const names = Array.isArray(projects)
+			? projects.filter((project) => typeof project?.name === "string").map((project) => project.name)
+			: null;
 		setPeeks((current) => ({
 			...current,
 			[url]:
-				response.status === 200 && Array.isArray(projects)
-					? { state: "ready", projects: projects.map((project) => project.name), failure: null }
+				response.status === 200 && names !== null
+					? { state: "ready", projects: names, failure: null }
 					: { state: "failed", projects: [], failure: daemonErrorMessage(response.body) },
 		}));
 	};
