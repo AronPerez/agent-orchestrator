@@ -27,9 +27,9 @@ import {
 	type UpdateCheckOptions,
 } from "./main/auto-updater";
 import { listFeatureBuilds, getActiveFeatureBuild } from "./main/feature-builds";
-import { addRemote, readRemotes, type RemoteEntry } from "./main/remotes-store";
+import { addRemote, readRemotes, type RemoteChanges, type RemoteEntry } from "./main/remotes-store";
 import { probeRemote, remoteRequest, type RemoteRequestInit } from "./main/remote-request";
-import { toHostViews } from "./main/remotes-ipc";
+import { removeSavedRemote, toHostViews, updateSavedRemote } from "./main/remotes-ipc";
 import { ActiveRemote } from "./main/active-remote";
 import { startRemoteProxy } from "./main/remote-proxy";
 import { readUpdateSettings, type UpdateSettings, type UpdateStatus } from "./main/update-settings";
@@ -1634,6 +1634,12 @@ ipcMain.handle("remotes:activate", async (_event, url: string) => activeRemote.a
 ipcMain.handle("remotes:deactivate", async () => activeRemote.deactivate());
 
 ipcMain.handle("remotes:active", async () => activeRemote.view());
+
+ipcMain.handle("remotes:update", async (_event, url: string, changes: RemoteChanges) =>
+	updateSavedRemote(remotesFilePath(), url, changes, activeRemote),
+);
+
+ipcMain.handle("remotes:remove", async (_event, url: string) => removeSavedRemote(remotesFilePath(), url, activeRemote));
 
 ipcMain.handle("app:scanImportFolder", async (_event, input: { path: string; mode: "project" | "workspace" }) => {
 	await ensureShellEnv();

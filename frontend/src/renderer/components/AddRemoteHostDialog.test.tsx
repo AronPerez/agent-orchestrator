@@ -3,17 +3,19 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AddRemoteHostDialog } from "./AddRemoteHostDialog";
 
-const { addMock } = vi.hoisted(() => ({ addMock: vi.fn() }));
+const { addMock, updateMock } = vi.hoisted(() => ({ addMock: vi.fn(), updateMock: vi.fn() }));
 
 // The bridge's `remotes` surface lands with the IPC task; mock the module
 // rather than spying on a stub that does not exist yet.
 vi.mock("../lib/bridge", () => ({
-	aoBridge: { remotes: { add: addMock } },
+	aoBridge: { remotes: { add: addMock, update: updateMock } },
 }));
 
 beforeEach(() => {
 	addMock.mockReset();
 	addMock.mockResolvedValue("online");
+	updateMock.mockReset();
+	updateMock.mockResolvedValue("online");
 });
 
 async function fillAndSubmit(address = "http://192.0.2.1:3011") {
@@ -27,25 +29,25 @@ async function fillAndSubmit(address = "http://192.0.2.1:3011") {
 
 describe("AddRemoteHostDialog", () => {
 	it("saves and reports the new host when it answers", async () => {
-		const onAdded = vi.fn();
-		render(<AddRemoteHostDialog open onOpenChange={vi.fn()} onAdded={onAdded} />);
+		const onSaved = vi.fn();
+		render(<AddRemoteHostDialog open onOpenChange={vi.fn()} onSaved={onSaved} />);
 		await fillAndSubmit();
 		expect(addMock).toHaveBeenCalledWith({ label: "workbox", url: "http://192.0.2.1:3011", password: "pw" });
-		expect(onAdded).toHaveBeenCalledWith("http://192.0.2.1:3011");
+		expect(onSaved).toHaveBeenCalledWith("http://192.0.2.1:3011");
 	});
 
 	it("distinguishes a wrong password from an unreachable host", async () => {
 		addMock.mockResolvedValue("unauthorized");
-		const onAdded = vi.fn();
-		render(<AddRemoteHostDialog open onOpenChange={vi.fn()} onAdded={onAdded} />);
+		const onSaved = vi.fn();
+		render(<AddRemoteHostDialog open onOpenChange={vi.fn()} onSaved={onSaved} />);
 		await fillAndSubmit();
 		expect(await screen.findByRole("alert")).toHaveTextContent(/password/i);
-		expect(onAdded).not.toHaveBeenCalled();
+		expect(onSaved).not.toHaveBeenCalled();
 	});
 
 	it("says the host is unreachable when it does not answer", async () => {
 		addMock.mockResolvedValue("offline");
-		render(<AddRemoteHostDialog open onOpenChange={vi.fn()} onAdded={vi.fn()} />);
+		render(<AddRemoteHostDialog open onOpenChange={vi.fn()} onSaved={vi.fn()} />);
 		await fillAndSubmit();
 		expect(await screen.findByRole("alert")).toHaveTextContent(/could not reach/i);
 	});
@@ -66,22 +68,22 @@ describe("AddRemoteHostDialog", () => {
 
 		for (const [name, typed, expected] of cases) {
 			it(`saves ${name} as ${expected}`, async () => {
-				const onAdded = vi.fn();
-				render(<AddRemoteHostDialog open onOpenChange={vi.fn()} onAdded={onAdded} />);
+				const onSaved = vi.fn();
+				render(<AddRemoteHostDialog open onOpenChange={vi.fn()} onSaved={onSaved} />);
 				await fillAndSubmit(typed);
 				expect(addMock).toHaveBeenCalledWith({ label: "workbox", url: expected, password: "pw" });
-				expect(onAdded).toHaveBeenCalledWith(expected);
+				expect(onSaved).toHaveBeenCalledWith(expected);
 			});
 		}
 
 		it("shows the address it will actually save before connecting", async () => {
-			render(<AddRemoteHostDialog open onOpenChange={vi.fn()} onAdded={vi.fn()} />);
+			render(<AddRemoteHostDialog open onOpenChange={vi.fn()} onSaved={vi.fn()} />);
 			await userEvent.type(screen.getByLabelText(/address/i), "192.168.1.250:3011");
 			expect(screen.getByText(/http:\/\/192\.168\.1\.250:3011/)).toBeInTheDocument();
 		});
 
 		it("stays quiet when the typed address is already the saved one", async () => {
-			render(<AddRemoteHostDialog open onOpenChange={vi.fn()} onAdded={vi.fn()} />);
+			render(<AddRemoteHostDialog open onOpenChange={vi.fn()} onSaved={vi.fn()} />);
 			await userEvent.type(screen.getByLabelText(/address/i), "http://192.0.2.1:3011");
 			expect(screen.queryByText(/will connect to/i)).not.toBeInTheDocument();
 		});
@@ -90,7 +92,7 @@ describe("AddRemoteHostDialog", () => {
 	// The whole point of the split: a typo and a silent host must not share a
 	// sentence, because they send the user to different places.
 	it("blames the address, not the network, when the address cannot name a host", async () => {
-		render(<AddRemoteHostDialog open onOpenChange={vi.fn()} onAdded={vi.fn()} />);
+		render(<AddRemoteHostDialog open onOpenChange={vi.fn()} onSaved={vi.fn()} />);
 		await fillAndSubmit("not a url");
 
 		const alert = await screen.findByRole("alert");
@@ -101,7 +103,7 @@ describe("AddRemoteHostDialog", () => {
 	});
 
 	it("rejects a scheme that is not http or https", async () => {
-		render(<AddRemoteHostDialog open onOpenChange={vi.fn()} onAdded={vi.fn()} />);
+		render(<AddRemoteHostDialog open onOpenChange={vi.fn()} onSaved={vi.fn()} />);
 		await fillAndSubmit("ftp://192.0.2.1");
 		expect(await screen.findByRole("alert")).toHaveTextContent(/not a valid address/i);
 		expect(addMock).not.toHaveBeenCalled();
@@ -114,7 +116,7 @@ describe("AddRemoteHostDialog", () => {
 				release = resolve;
 			}),
 		);
-		render(<AddRemoteHostDialog open onOpenChange={vi.fn()} onAdded={vi.fn()} />);
+		render(<AddRemoteHostDialog open onOpenChange={vi.fn()} onSaved={vi.fn()} />);
 		await fillAndSubmit();
 
 		// Conveyed as text in a live region, not by a disabled button alone.
@@ -126,7 +128,7 @@ describe("AddRemoteHostDialog", () => {
 
 	it("drops a stale error as soon as the input that caused it changes", async () => {
 		addMock.mockResolvedValue("unauthorized");
-		render(<AddRemoteHostDialog open onOpenChange={vi.fn()} onAdded={vi.fn()} />);
+		render(<AddRemoteHostDialog open onOpenChange={vi.fn()} onSaved={vi.fn()} />);
 		await fillAndSubmit();
 		expect(await screen.findByRole("alert")).toHaveTextContent(/password/i);
 
@@ -135,8 +137,85 @@ describe("AddRemoteHostDialog", () => {
 		expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 	});
 
+	// Editing a saved host: the reason this exists is a host whose connection
+	// password rotated, whose entry had no way to be fixed or thrown away.
+	describe("editing a saved host", () => {
+		const host = { label: "workbox", url: "http://192.0.2.1:3011" };
+
+		it("prefills the name and address but never the password", async () => {
+			render(<AddRemoteHostDialog open host={host} onOpenChange={vi.fn()} onSaved={vi.fn()} />);
+			expect(screen.getByLabelText(/name/i)).toHaveValue("workbox");
+			expect(screen.getByLabelText(/address/i)).toHaveValue("http://192.0.2.1:3011");
+			// The renderer is never handed the password, so there is nothing to show
+			// and an empty box has to mean "keep it" — which the hint has to say.
+			expect(screen.getByLabelText(/password/i)).toHaveValue("");
+			expect(screen.getByText(/leave blank/i)).toBeInTheDocument();
+		});
+
+		it("sends no password at all when the field is left blank", async () => {
+			const onSaved = vi.fn();
+			render(<AddRemoteHostDialog open host={host} onOpenChange={vi.fn()} onSaved={onSaved} />);
+			await userEvent.clear(screen.getByLabelText(/name/i));
+			await userEvent.type(screen.getByLabelText(/name/i), "the workbox");
+			await userEvent.click(screen.getByRole("button", { name: /save/i }));
+
+			expect(updateMock).toHaveBeenCalledWith("http://192.0.2.1:3011", {
+				label: "the workbox",
+				url: "http://192.0.2.1:3011",
+			});
+			expect(onSaved).toHaveBeenCalledWith("http://192.0.2.1:3011");
+			expect(addMock).not.toHaveBeenCalled();
+		});
+
+		it("sends the rotated password when one is typed", async () => {
+			render(<AddRemoteHostDialog open host={host} onOpenChange={vi.fn()} onSaved={vi.fn()} />);
+			await userEvent.type(screen.getByLabelText(/password/i), "rotated");
+			await userEvent.click(screen.getByRole("button", { name: /save/i }));
+			expect(updateMock).toHaveBeenCalledWith("http://192.0.2.1:3011", {
+				label: "workbox",
+				url: "http://192.0.2.1:3011",
+				password: "rotated",
+			});
+		});
+
+		it("targets the old url and normalizes the new one when the address changes", async () => {
+			const onSaved = vi.fn();
+			render(<AddRemoteHostDialog open host={host} onOpenChange={vi.fn()} onSaved={onSaved} />);
+			await userEvent.clear(screen.getByLabelText(/address/i));
+			await userEvent.type(screen.getByLabelText(/address/i), "192.0.2.5:3011");
+			await userEvent.click(screen.getByRole("button", { name: /save/i }));
+
+			expect(updateMock).toHaveBeenCalledWith("http://192.0.2.1:3011", {
+				label: "workbox",
+				url: "http://192.0.2.5:3011",
+			});
+			// The caller needs the url that was written, not the one it passed in.
+			expect(onSaved).toHaveBeenCalledWith("http://192.0.2.5:3011");
+		});
+
+		it("keeps the same probe-before-save discipline as adding", async () => {
+			updateMock.mockResolvedValue("unauthorized");
+			const onSaved = vi.fn();
+			render(<AddRemoteHostDialog open host={host} onOpenChange={vi.fn()} onSaved={onSaved} />);
+			await userEvent.type(screen.getByLabelText(/password/i), "still-wrong");
+			await userEvent.click(screen.getByRole("button", { name: /save/i }));
+
+			expect(await screen.findByRole("alert")).toHaveTextContent(/password/i);
+			expect(onSaved).not.toHaveBeenCalled();
+		});
+
+		it("refuses an address that cannot name a host without probing", async () => {
+			render(<AddRemoteHostDialog open host={host} onOpenChange={vi.fn()} onSaved={vi.fn()} />);
+			await userEvent.clear(screen.getByLabelText(/address/i));
+			await userEvent.type(screen.getByLabelText(/address/i), "not a url");
+			await userEvent.click(screen.getByRole("button", { name: /save/i }));
+			expect(await screen.findByRole("alert")).toHaveTextContent(/not a valid address/i);
+			expect(updateMock).not.toHaveBeenCalled();
+		});
+	});
+
 	it("rejects a url carrying an embedded credential, as the CLI does", async () => {
-		render(<AddRemoteHostDialog open onOpenChange={vi.fn()} onAdded={vi.fn()} />);
+		render(<AddRemoteHostDialog open onOpenChange={vi.fn()} onSaved={vi.fn()} />);
 		await userEvent.type(screen.getByLabelText(/name/i), "bad");
 		await userEvent.type(screen.getByLabelText(/address/i), "http://user:pw@192.0.2.1:3011");
 		await userEvent.type(screen.getByLabelText(/password/i), "pw");

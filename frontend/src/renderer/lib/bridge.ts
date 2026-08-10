@@ -184,6 +184,8 @@ export const aoBridge: AoBridge =
 		remotes: {
 			list: async () => [],
 			add: async () => "offline" as const,
+			update: async () => "offline" as const,
+			remove: async () => undefined,
 			probe: async () => "offline" as const,
 			request: async () => ({ status: 0, body: null }),
 			// Switching hosts needs the main-process proxy, so it cannot work here;

@@ -1,7 +1,7 @@
 import { useEffect, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { X } from "lucide-react";
-import { remotesBridge, type RemoteHealth } from "../hooks/useRemoteHosts";
+import { remotesBridge, type RemoteHealth, type RemoteHostView } from "../hooks/useRemoteHosts";
 import type { MessageKey } from "../i18n";
 import { Button } from "./ui/button";
 import {
@@ -64,15 +64,22 @@ const healthErrorKeys: Record<Exclude<RemoteHealth, "online">, MessageKey> = {
 type AddRemoteHostDialogProps = {
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
-	/** Fires only after a successful save, so the caller can select the new host. */
-	onAdded: (url: string) => void;
+	/**
+	 * The saved host being edited, or omitted to add a new one. Password-free by
+	 * construction: it is a RemoteHostView, the only shape the main process hands
+	 * the renderer, so an edit cannot round-trip a credential through this window.
+	 */
+	host?: RemoteHostView | null;
+	/** Fires only after a successful save, with the url that was written. */
+	onSaved: (url: string) => void;
 };
 
-export function AddRemoteHostDialog({ open, onOpenChange, onAdded }: AddRemoteHostDialogProps) {
+export function AddRemoteHostDialog({ open, onOpenChange, host, onSaved }: AddRemoteHostDialogProps) {
 	const { t } = useTranslation();
 	const nameId = useId();
 	const addressId = useId();
 	const passwordId = useId();
+	const editing = host ?? null;
 	const [label, setLabel] = useState("");
 	const [url, setUrl] = useState("");
 	const [password, setPassword] = useState("");
@@ -80,13 +87,15 @@ export function AddRemoteHostDialog({ open, onOpenChange, onAdded }: AddRemoteHo
 	const [busy, setBusy] = useState(false);
 
 	useEffect(() => {
-		if (open) return;
-		setLabel("");
-		setUrl("");
+		// Opening prefills what the renderer is allowed to know and nothing else:
+		// the password field starts empty on an edit too, where blank means "keep
+		// the saved one". Closing clears, so the next open is never the last host's.
+		setLabel(open ? (editing?.label ?? "") : "");
+		setUrl(open ? (editing?.url ?? "") : "");
 		setPassword("");
 		setError(null);
 		setBusy(false);
-	}, [open]);
+	}, [open, editing?.label, editing?.url]);
 
 	const address = url.trim();
 	const normalized = normalizeHostUrl(address);
@@ -107,11 +116,18 @@ export function AddRemoteHostDialog({ open, onOpenChange, onAdded }: AddRemoteHo
 		setBusy(true);
 		setError(null);
 		try {
-			// The main process probes before it saves: a host that never answered is
-			// worse than no host, because it looks configured.
-			const health = await remotesBridge().add({ label: label.trim(), url: normalized, password });
+			// The main process probes before it saves, on both paths: a host that
+			// never answered is worse than no host, because it looks configured.
+			const health = editing
+				? await remotesBridge().update(editing.url, {
+						label: label.trim(),
+						url: normalized,
+						// Omitted, not "": an empty string would wipe a working password.
+						...(password === "" ? {} : { password }),
+					})
+				: await remotesBridge().add({ label: label.trim(), url: normalized, password });
 			if (health === "online") {
-				onAdded(normalized);
+				onSaved(normalized);
 				onOpenChange(false);
 				return;
 			}
@@ -136,9 +152,11 @@ export function AddRemoteHostDialog({ open, onOpenChange, onAdded }: AddRemoteHo
 				</DialogClose>
 
 				<div className={settingsDialogHeaderClass}>
-					<DialogTitle className="settings-dialog-title">{t("hosts.add.title")}</DialogTitle>
+					<DialogTitle className="settings-dialog-title">
+						{editing ? t("hosts.edit.title") : t("hosts.add.title")}
+					</DialogTitle>
 					<DialogDescription className="text-control leading-4 text-settings-muted">
-						{t("hosts.addRemote.hint")}
+						{editing ? t("hosts.edit.hint") : t("hosts.addRemote.hint")}
 					</DialogDescription>
 				</div>
 
@@ -197,7 +215,9 @@ export function AddRemoteHostDialog({ open, onOpenChange, onAdded }: AddRemoteHo
 								setPassword(event.target.value);
 							}}
 						/>
-						<p className="text-caption leading-4 text-settings-muted">{t("hosts.add.passwordHint")}</p>
+						<p className="text-caption leading-4 text-settings-muted">
+							{editing ? t("hosts.edit.passwordHint") : t("hosts.add.passwordHint")}
+						</p>
 					</div>
 
 					{/* A probe can take seconds, and a button that only greys out reads as
@@ -229,7 +249,7 @@ export function AddRemoteHostDialog({ open, onOpenChange, onAdded }: AddRemoteHo
 						disabled={busy}
 						onClick={() => void submit()}
 					>
-						{t("hosts.add.submit")}
+						{editing ? t("hosts.edit.submit") : t("hosts.add.submit")}
 					</Button>
 				</div>
 			</DialogContent>

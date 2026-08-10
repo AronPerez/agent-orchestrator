@@ -1,5 +1,7 @@
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { LOCAL_HOST_ID, type Host, type HostStatus } from "../hooks/useRemoteHosts";
+import { Pencil, Trash2 } from "lucide-react";
+import { LOCAL_HOST_ID, type Host, type HostStatus, type RemoteHostView } from "../hooks/useRemoteHosts";
 import type { MessageKey } from "../i18n";
 import { Button } from "./ui/button";
 import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from "./ui/select";
@@ -27,14 +29,32 @@ type HostSelectProps = {
 	onAddHost: () => void;
 	/** Re-probe one host — a host has no session to open, reachability is the whole state. */
 	onReconnect?: (url: string) => void;
+	/** Fix a saved host in place: renamed, re-pointed, or given a rotated password. */
+	onEditHost?: (host: RemoteHostView) => void;
+	onRemoveHost?: (host: RemoteHostView) => void;
 };
 
-export function HostSelect({ hosts, value, onChange, onAddHost, onReconnect }: HostSelectProps) {
+export function HostSelect({
+	hosts,
+	value,
+	onChange,
+	onAddHost,
+	onReconnect,
+	onEditHost,
+	onRemoveHost,
+}: HostSelectProps) {
 	const { t } = useTranslation();
 	const selected = hosts.find((host) => host.id === value);
+	// Open is controlled only so Edit and Remove can close it: each opens a modal
+	// dialog, and Radix leaves the list up — and aria-hides everything under it —
+	// when a sibling of a row is what got clicked. Connect deliberately does not
+	// close it, because its result is the status shown in the list.
+	const [open, setOpen] = useState(false);
 
 	return (
 		<Select
+			open={open}
+			onOpenChange={setOpen}
 			value={value}
 			onValueChange={(next) => (next === ADD_HOST_VALUE ? onAddHost() : onChange(next))}
 		>
@@ -68,6 +88,40 @@ export function HostSelect({ hosts, value, onChange, onAddHost, onReconnect }: H
 							{unreachable(host) && url && onReconnect ? (
 								<Button type="button" variant="ghost" size="sm" className="shrink-0" onClick={() => onReconnect(url)}>
 									{t("hosts.connect")}
+								</Button>
+							) : null}
+							{/* Icons, not words: a row already carries a name, a status and
+							    sometimes Connect, and three text buttons would push the name
+							    it identifies out of view. Each carries its host's name in its
+							    label so the action is never just "Edit" to a screen reader. */}
+							{url && onEditHost ? (
+								<Button
+									type="button"
+									variant="ghost"
+									size="icon-sm"
+									className="shrink-0"
+									aria-label={t("hosts.edit", { host: host.label })}
+									onClick={() => {
+										setOpen(false);
+										onEditHost({ label: host.label, url });
+									}}
+								>
+									<Pencil aria-hidden="true" />
+								</Button>
+							) : null}
+							{url && onRemoveHost ? (
+								<Button
+									type="button"
+									variant="ghost"
+									size="icon-sm"
+									className="shrink-0"
+									aria-label={t("hosts.remove", { host: host.label })}
+									onClick={() => {
+										setOpen(false);
+										onRemoveHost({ label: host.label, url });
+									}}
+								>
+									<Trash2 aria-hidden="true" />
 								</Button>
 							) : null}
 						</div>

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { chmod, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { addRemote, readRemotes, RemotesFilePermissionError } from "./remotes-store";
+import { addRemote, readRemotes, removeRemote, RemotesFilePermissionError, updateRemote } from "./remotes-store";
 
 async function tempFile(contents?: string, mode = 0o600): Promise<string> {
 	const dir = await mkdtemp(join(tmpdir(), "ao-remotes-"));
@@ -54,5 +54,106 @@ describe("addRemote", () => {
 		await addRemote(path, { label: "new", url: "http://192.0.2.1:1", password: "z" });
 		const remotes = JSON.parse(await readFile(path, "utf8")).remotes;
 		expect(remotes).toEqual([{ label: "new", url: "http://192.0.2.1:1", password: "z" }]);
+	});
+});
+
+const TWO_HOSTS =
+	'{"remotes":[{"label":"workbox","url":"http://192.0.2.1:1","password":"old"},{"label":"mini","url":"http://192.0.2.9:9","password":"m"}]}';
+
+async function savedRemotes(path: string): Promise<unknown[]> {
+	return JSON.parse(await readFile(path, "utf8")).remotes;
+}
+
+describe("updateRemote", () => {
+	// The reason this exists: re-enabling the LAN bridge rotates the connection
+	// password, and until now the saved entry just died.
+	it("changes the password and nothing else", async () => {
+		const path = await tempFile(TWO_HOSTS);
+		await expect(updateRemote(path, "http://192.0.2.1:1", { password: "rotated" })).resolves.toEqual({
+			label: "workbox",
+			url: "http://192.0.2.1:1",
+			password: "rotated",
+		});
+		expect(await savedRemotes(path)).toEqual([
+			{ label: "workbox", url: "http://192.0.2.1:1", password: "rotated" },
+			{ label: "mini", url: "http://192.0.2.9:9", password: "m" },
+		]);
+	});
+
+	it("renames without touching the saved password", async () => {
+		const path = await tempFile(TWO_HOSTS);
+		await updateRemote(path, "http://192.0.2.1:1", { label: "the workbox" });
+		expect(await savedRemotes(path)).toContainEqual({ label: "the workbox", url: "http://192.0.2.1:1", password: "old" });
+	});
+
+	// An explicitly-undefined field survives Electron's structured clone, so
+	// "leave the password alone" arrives as a present key with no value.
+	it("treats an undefined field as absent rather than as a wipe", async () => {
+		const path = await tempFile(TWO_HOSTS);
+		await updateRemote(path, "http://192.0.2.1:1", { label: "renamed", password: undefined });
+		expect(await savedRemotes(path)).toContainEqual({ label: "renamed", url: "http://192.0.2.1:1", password: "old" });
+	});
+
+	it("moves the entry when the url changes instead of cloning it", async () => {
+		const path = await tempFile(TWO_HOSTS);
+		await updateRemote(path, "http://192.0.2.1:1", { url: "http://192.0.2.5:5" });
+		expect(await savedRemotes(path)).toEqual([
+			{ label: "workbox", url: "http://192.0.2.5:5", password: "old" },
+			{ label: "mini", url: "http://192.0.2.9:9", password: "m" },
+		]);
+	});
+
+	// Typing the address of a host you already saved must leave one host, not two
+	// rows racing to answer for the same machine.
+	it("absorbs another entry that already sits on the new url", async () => {
+		const path = await tempFile(TWO_HOSTS);
+		await updateRemote(path, "http://192.0.2.1:1", { url: "http://192.0.2.9:9" });
+		expect(await savedRemotes(path)).toEqual([{ label: "workbox", url: "http://192.0.2.9:9", password: "old" }]);
+	});
+
+	it("refuses a url it has never saved", async () => {
+		const path = await tempFile(TWO_HOSTS);
+		await expect(updateRemote(path, "http://192.0.2.7:7", { label: "ghost" })).rejects.toThrow(/no saved host/);
+	});
+
+	it("keeps the file 0600", async () => {
+		const path = await tempFile(TWO_HOSTS);
+		await updateRemote(path, "http://192.0.2.1:1", { password: "rotated" });
+		expect((await stat(path)).mode & 0o777).toBe(0o600);
+	});
+
+	it("refuses to touch a file others can read", async () => {
+		const path = await tempFile(TWO_HOSTS, 0o644);
+		await expect(updateRemote(path, "http://192.0.2.1:1", { password: "rotated" })).rejects.toBeInstanceOf(
+			RemotesFilePermissionError,
+		);
+		// And left the passwords exactly where they were.
+		expect(await readFile(path, "utf8")).toBe(TWO_HOSTS);
+	});
+});
+
+describe("removeRemote", () => {
+	it("drops only the named host", async () => {
+		const path = await tempFile(TWO_HOSTS);
+		await removeRemote(path, "http://192.0.2.1:1");
+		expect(await savedRemotes(path)).toEqual([{ label: "mini", url: "http://192.0.2.9:9", password: "m" }]);
+	});
+
+	it("keeps the file 0600", async () => {
+		const path = await tempFile(TWO_HOSTS);
+		await removeRemote(path, "http://192.0.2.1:1");
+		expect((await stat(path)).mode & 0o777).toBe(0o600);
+	});
+
+	it("is a no-op for a host that was never saved", async () => {
+		const path = await tempFile(TWO_HOSTS);
+		await removeRemote(path, "http://192.0.2.7:7");
+		expect(await readFile(path, "utf8")).toBe(TWO_HOSTS);
+	});
+
+	it("refuses to touch a file others can read", async () => {
+		const path = await tempFile(TWO_HOSTS, 0o644);
+		await expect(removeRemote(path, "http://192.0.2.1:1")).rejects.toBeInstanceOf(RemotesFilePermissionError);
+		expect(await readFile(path, "utf8")).toBe(TWO_HOSTS);
 	});
 });

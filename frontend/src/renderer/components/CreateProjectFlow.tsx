@@ -3,12 +3,14 @@ import { useTranslation } from "react-i18next";
 import { CheckCircle2, ChevronRight, Folder, FolderPlus, X, XCircle } from "lucide-react";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import type { ImportFolderScan } from "../../preload";
-import { LOCAL_HOST_ID, remotesBridge, useRemoteHosts, type Host } from "../hooks/useRemoteHosts";
+import { LOCAL_HOST_ID, remotesBridge, useRemoteHosts, type Host, type RemoteHostView } from "../hooks/useRemoteHosts";
+import { activeHost, switchToHost } from "../lib/active-host";
 import { aoBridge } from "../lib/bridge";
 import { daemonErrorMessage } from "../lib/daemon-error";
 import { cn } from "../lib/utils";
 import type { ProjectKind } from "../types/workspace";
 import { AddRemoteHostDialog } from "./AddRemoteHostDialog";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { CreateProjectAgentSheet, type CreateProjectAgentSelection } from "./CreateProjectAgentSheet";
 import { HostSelect } from "./HostSelect";
 import { RemoteFolderPicker } from "./RemoteFolderPicker";
@@ -59,6 +61,9 @@ export function CreateProjectFlow({
 	const { hosts, refresh: refreshHosts } = useRemoteHosts();
 	const [hostId, setHostId] = useState<string>(LOCAL_HOST_ID);
 	const [addHostOpen, setAddHostOpen] = useState(false);
+	const [editingHost, setEditingHost] = useState<RemoteHostView | null>(null);
+	const [removingHost, setRemovingHost] = useState<RemoteHostView | null>(null);
+	const [removingHostBusy, setRemovingHostBusy] = useState(false);
 	const [remotePath, setRemotePath] = useState("");
 
 	const hasModePicker = mode === "choose";
@@ -112,6 +117,31 @@ export function CreateProjectFlow({
 		}
 	};
 
+	// A saved host that was renamed, re-pointed or given a rotated password. The
+	// url is the identity everything else keys off — the selection here, and the
+	// active-host url the next boot re-activates — so a changed one is followed
+	// through both rather than left pointing at an entry that no longer exists.
+	const hostSaved = async (previousUrl: string, savedUrl: string) => {
+		await refreshHosts();
+		setHostId((current) => (current === previousUrl ? savedUrl : current));
+		if (activeHost()?.url === previousUrl) await switchToHost(savedUrl);
+	};
+
+	const removeHost = async (url: string) => {
+		setRemovingHostBusy(true);
+		try {
+			await remotesBridge().remove(url);
+			await refreshHosts();
+			setHostId((current) => (current === url ? LOCAL_HOST_ID : current));
+			setRemovingHost(null);
+			// Main already dropped the proxy; this drops the stored url with it, so
+			// the app lands on local instead of on a host that is no longer saved.
+			if (activeHost()?.url === url) await switchToHost(null);
+		} finally {
+			setRemovingHostBusy(false);
+		}
+	};
+
 	const hostRow = hasModePicker ? (
 		<HostSelect
 			hosts={hosts}
@@ -121,6 +151,8 @@ export function CreateProjectFlow({
 			// ponytail: re-probes every host, not just this one. Fine for a handful;
 			// add a single-host probe if the list ever grows.
 			onReconnect={() => void refreshHosts()}
+			onEditHost={setEditingHost}
+			onRemoveHost={setRemovingHost}
 		/>
 	) : null;
 
@@ -272,9 +304,41 @@ export function CreateProjectFlow({
 					<AddRemoteHostDialog
 						open={addHostOpen}
 						onOpenChange={setAddHostOpen}
-						onAdded={(url) => {
+						onSaved={(url) => {
 							void refreshHosts();
 							setHostId(url);
+						}}
+					/>
+					{/* Its own mount rather than a mode on the add dialog: `host` is what
+					    switches the form, and a single dialog would have to keep holding
+					    the edited host through the close animation to avoid flashing "Add". */}
+					<AddRemoteHostDialog
+						host={editingHost}
+						open={editingHost !== null}
+						onOpenChange={(open) => !open && setEditingHost(null)}
+						onSaved={(url) => {
+							const previousUrl = editingHost?.url;
+							setEditingHost(null);
+							if (previousUrl) void hostSaved(previousUrl, url);
+						}}
+					/>
+					<ConfirmDialog
+						open={removingHost !== null}
+						onOpenChange={(open) => !open && !removingHostBusy && setRemovingHost(null)}
+						title={t("hosts.remove.title")}
+						description={
+							<>
+								<p className="text-sm font-medium text-foreground">
+									{t("hosts.remove.lead", { host: removingHost?.label ?? "" })}
+								</p>
+								<p className="mt-1 text-xs text-muted-foreground">{t("hosts.remove.body")}</p>
+							</>
+						}
+						confirmLabel={t("hosts.remove.confirm")}
+						destructive
+						busy={removingHostBusy}
+						onConfirm={() => {
+							if (removingHost?.url) void removeHost(removingHost.url);
 						}}
 					/>
 					<CreateProjectFolderDialog
