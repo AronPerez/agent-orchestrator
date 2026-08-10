@@ -27,6 +27,35 @@ function hasUserinfo(raw: string): boolean {
 	return authority.includes("@");
 }
 
+/**
+ * Turns what people actually type — "192.168.1.250:3011", "workbox",
+ * "[fe80::1]:3011" — into the URL that gets saved, or null when the string
+ * cannot address a host at all.
+ *
+ * The scheme must be added before parsing, not after a failed parse: new URL()
+ * reads "workbox:3011" as scheme "workbox", so a bare host:port never fails in
+ * a way that could be detected afterwards. Getting this wrong is what made a
+ * typo surface as "could not reach that host" — fetch() threw on the unparseable
+ * address, probeRemote caught it, and the user went to debug their network.
+ */
+function normalizeHostUrl(raw: string): string | null {
+	const trimmed = raw.trim();
+	if (trimmed === "") return null;
+	// Only "://" marks a scheme here; a lone colon is a port.
+	const schemed = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed);
+	if (schemed && !/^https?:\/\//i.test(trimmed)) return null;
+	let parsed: URL;
+	try {
+		parsed = new URL(schemed ? trimmed : `http://${trimmed}`);
+	} catch {
+		return null;
+	}
+	if (parsed.hostname === "") return null;
+	// A query or fragment cannot be part of a base address. A path can be — a
+	// daemon behind a reverse proxy — so keep it, minus any trailing slash.
+	return `${parsed.protocol}//${parsed.host}${parsed.pathname.replace(/\/+$/, "")}`;
+}
+
 const healthErrorKeys: Record<Exclude<RemoteHealth, "online">, MessageKey> = {
 	unauthorized: "hosts.add.errorUnauthorized",
 	offline: "hosts.add.errorOffline",
@@ -59,10 +88,20 @@ export function AddRemoteHostDialog({ open, onOpenChange, onAdded }: AddRemoteHo
 		setBusy(false);
 	}, [open]);
 
+	const address = url.trim();
+	const normalized = normalizeHostUrl(address);
+	// Only worth showing when it differs; echoing back what was just typed is noise.
+	const preview = normalized !== null && normalized !== address ? normalized : null;
+
 	const submit = async () => {
-		const address = url.trim();
 		if (hasUserinfo(address)) {
 			setError(t("hosts.add.errorCredentialInUrl"));
+			return;
+		}
+		// Three outcomes, three sentences: a string that cannot address a host is
+		// the user's typo, not a silent host, and must never be reported as one.
+		if (normalized === null) {
+			setError(t("hosts.add.errorInvalidAddress"));
 			return;
 		}
 		setBusy(true);
@@ -70,9 +109,9 @@ export function AddRemoteHostDialog({ open, onOpenChange, onAdded }: AddRemoteHo
 		try {
 			// The main process probes before it saves: a host that never answered is
 			// worse than no host, because it looks configured.
-			const health = await remotesBridge().add({ label: label.trim(), url: address, password });
+			const health = await remotesBridge().add({ label: label.trim(), url: normalized, password });
 			if (health === "online") {
-				onAdded(address);
+				onAdded(normalized);
 				onOpenChange(false);
 				return;
 			}
@@ -112,7 +151,10 @@ export function AddRemoteHostDialog({ open, onOpenChange, onAdded }: AddRemoteHo
 							id={nameId}
 							className="settings-field-control h-(--size-settings-action-height)"
 							value={label}
-							onChange={(event) => setLabel(event.target.value)}
+							onChange={(event) => {
+								setError(null);
+								setLabel(event.target.value);
+							}}
 						/>
 					</div>
 
@@ -124,8 +166,21 @@ export function AddRemoteHostDialog({ open, onOpenChange, onAdded }: AddRemoteHo
 							id={addressId}
 							className="settings-field-control h-(--size-settings-action-height)"
 							value={url}
-							onChange={(event) => setUrl(event.target.value)}
+							onChange={(event) => {
+								// Typing is the fix for every error here, so the old message goes
+								// the moment it stops describing the input: a stale "Wrong
+								// password" over a corrected one reads as a second rejection.
+								setError(null);
+								setUrl(event.target.value);
+							}}
 						/>
+						{preview ? (
+							// The address that gets saved is not always the one typed, and a
+							// silent rewrite is how "but I entered the right host" starts.
+							<p className="text-caption leading-4 text-settings-muted">
+								{t("hosts.add.willConnectTo", { url: preview })}
+							</p>
+						) : null}
 					</div>
 
 					<div className="flex flex-col gap-1.5">
@@ -137,13 +192,25 @@ export function AddRemoteHostDialog({ open, onOpenChange, onAdded }: AddRemoteHo
 							type="password"
 							className="settings-field-control h-(--size-settings-action-height)"
 							value={password}
-							onChange={(event) => setPassword(event.target.value)}
+							onChange={(event) => {
+								setError(null);
+								setPassword(event.target.value);
+							}}
 						/>
 						<p className="text-caption leading-4 text-settings-muted">{t("hosts.add.passwordHint")}</p>
 					</div>
 
-					{error ? (
-						<p role="alert" className="text-caption leading-4 text-error">
+					{/* A probe can take seconds, and a button that only greys out reads as
+					    a dead dialog to everyone and as nothing at all to a screen reader.
+					    This region stays mounted because role="status" is announced far
+					    more reliably on a content change than on insertion; role="alert"
+					    below is the exception, being defined to announce when inserted. */}
+					<p role="status" className="empty:hidden text-control leading-4 text-settings-muted">
+						{busy ? t("hosts.status.checking") : ""}
+					</p>
+					{/* Set in the dialog's smallest type before, where it was easy to miss. */}
+					{!busy && error ? (
+						<p role="alert" className="text-control leading-4 font-medium text-error">
 							{error}
 						</p>
 					) : null}
@@ -155,7 +222,13 @@ export function AddRemoteHostDialog({ open, onOpenChange, onAdded }: AddRemoteHo
 							{t("confirm.cancel")}
 						</Button>
 					</DialogClose>
-					<Button type="button" variant="footer-primary" disabled={busy} onClick={() => void submit()}>
+					<Button
+						type="button"
+						variant="footer-primary"
+						aria-busy={busy}
+						disabled={busy}
+						onClick={() => void submit()}
+					>
 						{t("hosts.add.submit")}
 					</Button>
 				</div>

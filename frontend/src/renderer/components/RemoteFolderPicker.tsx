@@ -17,6 +17,33 @@ import {
 } from "./ui/dialog";
 
 type Listing = components["schemas"]["ListDirsResponse"];
+type Entry = components["schemas"]["FSEntry"];
+
+function isEntry(value: unknown): value is Entry {
+	if (typeof value !== "object" || value === null) return false;
+	const entry = value as Partial<Entry>;
+	return typeof entry.name === "string" && typeof entry.path === "string";
+}
+
+/**
+ * A 200 is not proof of a listing. This body came off another machine, possibly
+ * from a build that predates GET /api/v1/fs/dirs, where the web-UI catch-all
+ * answers an unknown route with 200 and an HTML page. Casting that to Listing
+ * put `undefined.map` on the render path and took the whole window down, so the
+ * shape is checked once here rather than guessed at every render site.
+ */
+function parseListing(body: unknown): Listing | null {
+	if (typeof body !== "object" || body === null) return null;
+	const candidate = body as Partial<Listing>;
+	if (typeof candidate.path !== "string" || typeof candidate.parent !== "string") return null;
+	if (!Array.isArray(candidate.entries) || !candidate.entries.every(isEntry)) return null;
+	return {
+		entries: candidate.entries,
+		parent: candidate.parent,
+		path: candidate.path,
+		truncated: candidate.truncated === true,
+	};
+}
 
 /**
  * Browses a remote daemon's directories over GET /api/v1/fs/dirs so a project
@@ -60,8 +87,15 @@ export function RemoteFolderPicker({
 				});
 				if (cancelled) return;
 				if (response.status === 200) {
-					setListing(response.body as Listing);
-					setError(null);
+					const parsed = parseListing(response.body);
+					if (parsed !== null) {
+						setListing(parsed);
+						setError(null);
+						return;
+					}
+					// A 200 we cannot read is a version gap, not an empty folder, and
+					// saying "no subfolders" would be a lie that costs an hour to unpick.
+					setError(t("fsBrowse.unsupported"));
 					return;
 				}
 				// Keep the last good listing on screen so a refused directory is a
@@ -101,7 +135,7 @@ export function RemoteFolderPicker({
 								<FolderRow icon={CornerLeftUp} label={t("fsBrowse.up")} onClick={() => setPath(listing.parent)} />
 							</li>
 						) : null}
-						{listing?.entries.map((entry) => (
+						{listing?.entries?.map((entry) => (
 							<li key={entry.path}>
 								<FolderRow
 									icon={Folder}
