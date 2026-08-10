@@ -1,15 +1,29 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import type { RemoteHealth } from "../../main/remote-request";
 import { aoBridge } from "../lib/bridge";
 
 export const LOCAL_HOST_ID = "local";
 
-export type HostStatus = "local" | "online" | "unauthorized" | "offline" | "checking";
+// Re-exported, not re-declared: probe() returns whatever the main process says,
+// so a second hand-written copy of this union can only drift out of agreement
+// with the values actually arriving over the bridge.
+export type { RemoteHealth };
+
+/** Every health a probe can report, plus the two states no probe produces. */
+export type HostStatus = "local" | "checking" | RemoteHealth;
+
+/**
+ * Whether a probe came back bad. Written as "not one of the good ones" so a
+ * health added later is unselectable until someone decides otherwise — the safe
+ * default, since selecting a host that cannot serve only fails a step later.
+ */
+export function probeFailed(status: HostStatus): boolean {
+	return status !== "local" && status !== "checking" && status !== "online";
+}
 
 /** What the main process is allowed to hand the renderer — never the password. */
 export type RemoteHostView = { label: string; url: string };
-
-export type RemoteHealth = "online" | "unauthorized" | "offline";
 
 export type Host = {
 	id: string;

@@ -9,6 +9,13 @@ function fakeFetch(status: number, body: unknown = {}) {
 	return vi.fn<typeof fetch>(async () => new Response(JSON.stringify(body), { status }));
 }
 
+// A body that is not JSON at all, the way an SPA catch-all answers every path.
+function fakeTextFetch(status: number, text: string) {
+	return vi.fn<typeof fetch>(async () => new Response(text, { status }));
+}
+
+const daemonProbe = { status: "ok", service: "agent-orchestrator-daemon", pid: 1234 };
+
 describe("remoteRequest", () => {
 	it("sends the connection password as a Bearer token", async () => {
 		const doFetch = fakeFetch(201, { id: "p1" });
@@ -36,8 +43,8 @@ describe("remoteRequest", () => {
 });
 
 describe("probeRemote", () => {
-	it("reports online on 200", async () => {
-		await expect(probeRemote(entry, fakeFetch(200, { status: "ok" }))).resolves.toBe("online");
+	it("reports online on a 200 that carries the daemon's own probe body", async () => {
+		await expect(probeRemote(entry, fakeFetch(200, daemonProbe))).resolves.toBe("online");
 	});
 
 	it("distinguishes a bad password from an unreachable host", async () => {
@@ -46,5 +53,21 @@ describe("probeRemote", () => {
 			throw new TypeError("fetch failed");
 		});
 		await expect(probeRemote(entry, refused)).resolves.toBe("offline");
+	});
+
+	// The port typo that white-screened the app: :8081 was an Expo web server,
+	// whose SPA catch-all answers /healthz with 200 and an HTML page. A status
+	// code proves something replied, not that it speaks the daemon's protocol —
+	// and once such a host became the api base, every query returned that page.
+	it("rejects a 200 whose body is not a daemon probe", async () => {
+		const html = fakeTextFetch(200, "<!DOCTYPE html><html><title>AO</title></html>");
+		await expect(probeRemote(entry, html)).resolves.toBe("not-a-daemon");
+	});
+
+	it("rejects a 200 from a JSON service that is not the daemon", async () => {
+		await expect(probeRemote(entry, fakeFetch(200, { status: "ok" }))).resolves.toBe("not-a-daemon");
+		await expect(probeRemote(entry, fakeFetch(200, { ...daemonProbe, service: "grafana" }))).resolves.toBe(
+			"not-a-daemon",
+		);
 	});
 });

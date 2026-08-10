@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Pencil, Trash2 } from "lucide-react";
-import { LOCAL_HOST_ID, type Host, type HostStatus, type RemoteHostView } from "../hooks/useRemoteHosts";
+import { LOCAL_HOST_ID, probeFailed, type Host, type HostStatus, type RemoteHostView } from "../hooks/useRemoteHosts";
 import type { MessageKey } from "../i18n";
 import { Button } from "./ui/button";
 import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from "./ui/select";
@@ -15,11 +15,12 @@ const statusKeys: Record<Exclude<HostStatus, "local">, MessageKey> = {
 	checking: "hosts.status.checking",
 	offline: "hosts.status.offline",
 	unauthorized: "hosts.status.unauthorized",
+	"not-a-daemon": "hosts.status.notADaemon",
 };
 
 // A host you cannot reach can only fail one step later, so it is not selectable.
 function unreachable(host: Host): boolean {
-	return host.status === "offline" || host.status === "unauthorized";
+	return probeFailed(host.status);
 }
 
 type HostSelectProps = {

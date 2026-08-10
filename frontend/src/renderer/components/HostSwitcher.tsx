@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
-import { LOCAL_HOST_ID, useRemoteHosts, type Host, type HostStatus } from "../hooks/useRemoteHosts";
+import { LOCAL_HOST_ID, probeFailed, useRemoteHosts, type Host, type HostStatus } from "../hooks/useRemoteHosts";
 import { activeHost, switchToHost } from "../lib/active-host";
 import { isUnauthorized, subscribeUnauthorized } from "../lib/auth-gate";
 import type { MessageKey } from "../i18n";
@@ -13,6 +13,7 @@ const statusKeys: Record<Exclude<HostStatus, "local">, MessageKey> = {
 	checking: "hosts.status.checking",
 	offline: "hosts.status.offline",
 	unauthorized: "hosts.status.unauthorized",
+	"not-a-daemon": "hosts.status.notADaemon",
 };
 
 // Which machine the whole app is showing. Local is deliberately quiet — it is
@@ -79,5 +80,5 @@ export function HostSwitcher() {
 // already viewing, whose row must stay in the list as the current selection.
 function unselectable(host: Host, activeUrl: string | undefined): boolean {
 	if (host.url === activeUrl) return false;
-	return host.status === "offline" || host.status === "unauthorized";
+	return probeFailed(host.status);
 }

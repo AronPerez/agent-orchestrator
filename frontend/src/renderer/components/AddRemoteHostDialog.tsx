@@ -59,6 +59,7 @@ function normalizeHostUrl(raw: string): string | null {
 const healthErrorKeys: Record<Exclude<RemoteHealth, "online">, MessageKey> = {
 	unauthorized: "hosts.add.errorUnauthorized",
 	offline: "hosts.add.errorOffline",
+	"not-a-daemon": "hosts.add.errorNotADaemon",
 };
 
 type AddRemoteHostDialogProps = {

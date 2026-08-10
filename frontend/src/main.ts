@@ -1629,7 +1629,17 @@ ipcMain.handle("remotes:request", async (_event, url: string, init: RemoteReques
 // quit-time teardown: the OS closes the listener on exit, for any exit.
 const activeRemote = new ActiveRemote(startRemoteProxy);
 
-ipcMain.handle("remotes:activate", async (_event, url: string) => activeRemote.activate(await findRemote(url)));
+ipcMain.handle("remotes:activate", async (_event, url: string) => {
+	const entry = await findRemote(url);
+	// Probe before pointing the app at it, for the same reason remotes:add does:
+	// the saved host is activated at boot, before the first render, so a host that
+	// answers with something other than daemon JSON would white-screen the window
+	// on every launch — and the url that did it survives in localStorage, so the
+	// next launch repeats it. Refusing here lets initActiveHost fall back to local.
+	const health = await probeRemote(entry);
+	if (health !== "online") throw new Error(`host ${url} is ${health}`);
+	return activeRemote.activate(entry);
+});
 
 ipcMain.handle("remotes:deactivate", async () => activeRemote.deactivate());
 
