@@ -50,6 +50,7 @@ export async function startRemoteProxy(entry: RemoteEntry): Promise<ActiveProxy>
 	const upstream = new URL(entry.url);
 	const upstreamPort = Number(upstream.port || (upstream.protocol === "https:" ? 443 : 80));
 	const server: Server = createServer();
+	const tunnels = new Set<() => void>();
 	// SSE connections outlive any fixed request timeout.
 	server.requestTimeout = 0;
 
@@ -144,9 +145,11 @@ export async function startRemoteProxy(entry: RemoteEntry): Promise<ActiveProxy>
 			upstreamSocket.pipe(socket);
 		});
 		const drop = () => {
+			tunnels.delete(drop);
 			socket.destroy();
 			upstreamSocket.destroy();
 		};
+		tunnels.add(drop);
 		// http.Server keeps upgraded sockets half-open (allowHalfOpen), so a peer
 		// that only sends FIN never triggers "close" — tear the pair down on
 		// "end" too or every closed terminal leaks a socket to the remote host.
@@ -165,6 +168,7 @@ export async function startRemoteProxy(entry: RemoteEntry): Promise<ActiveProxy>
 			new Promise((resolve) => {
 				// close() alone waits on keep-alive and tunnelled sockets forever;
 				// a deactivated proxy must actually stop serving.
+				for (const drop of tunnels) drop();
 				server.closeAllConnections();
 				server.close(() => resolve());
 			}),
