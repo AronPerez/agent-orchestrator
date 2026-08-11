@@ -232,6 +232,9 @@ if (typeof window !== "undefined") {
 			activate: async () => ({ label: "", url: "", base: "" }),
 			deactivate: async () => undefined,
 			active: async () => null,
+			connect: async () => ({ label: "", url: "", base: "" }),
+			disconnect: async () => undefined,
+			connected: async () => [],
 		},
 	};
 } // end if (typeof window !== "undefined")

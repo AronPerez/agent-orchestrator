@@ -192,6 +192,9 @@ export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}
 					activate: async () => ({ label: "", url: "", base: "" }),
 					deactivate: async () => undefined,
 					active: async () => null,
+					connect: async () => ({ label: "", url: "", base: "" }),
+					disconnect: async () => undefined,
+					connected: async () => [],
 				},
 			} satisfies AoBridge;
 			(window as unknown as { ao: unknown }).ao = ao;
@@ -610,6 +613,9 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 					activate: async () => ({ label: "", url: "", base: "" }),
 					deactivate: async () => undefined,
 					active: async () => null,
+					connect: async () => ({ label: "", url: "", base: "" }),
+					disconnect: async () => undefined,
+					connected: async () => [],
 				},
 			} satisfies AoBridge;
 			(window as unknown as { ao: unknown }).ao = ao;

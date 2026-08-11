@@ -19,6 +19,7 @@ import {
 import type { DaemonStatus } from "./shared/daemon-status";
 import type { RemoteHostView } from "./main/remotes-ipc";
 import type { ActiveHostView } from "./main/active-remote";
+import type { ConnectedHostView } from "./main/remote-registry";
 import type { RemoteHealth, RemoteRequestInit, RemoteResponse } from "./main/remote-request";
 import type { TelemetryBootstrap } from "./shared/telemetry";
 import type { MigrationState } from "./main/app-state";
@@ -353,6 +354,9 @@ const api = {
 		activate: (url: string) => ipcRenderer.invoke("remotes:activate", url) as Promise<ActiveHostView>,
 		deactivate: () => ipcRenderer.invoke("remotes:deactivate") as Promise<void>,
 		active: () => ipcRenderer.invoke("remotes:active") as Promise<ActiveHostView | null>,
+		connect: (url: string) => ipcRenderer.invoke("remotes:connect", url) as Promise<ConnectedHostView>,
+		disconnect: (url: string) => ipcRenderer.invoke("remotes:disconnect", url) as Promise<void>,
+		connected: () => ipcRenderer.invoke("remotes:connected") as Promise<ConnectedHostView[]>,
 	},
 };
 

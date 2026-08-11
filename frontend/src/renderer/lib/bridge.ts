@@ -196,5 +196,10 @@ export const aoBridge: AoBridge =
 			},
 			deactivate: async () => undefined,
 			active: async () => null,
+			connect: async () => {
+				throw new Error("remote hosts need the desktop app");
+			},
+			disconnect: async () => undefined,
+			connected: async () => [],
 		},
 	} satisfies AoBridge);

@@ -30,8 +30,8 @@ import { listFeatureBuilds, getActiveFeatureBuild } from "./main/feature-builds"
 import { addRemote, readRemotes, type RemoteChanges, type RemoteEntry } from "./main/remotes-store";
 import { probeRemote, remoteRequest, type RemoteRequestInit } from "./main/remote-request";
 import { removeSavedRemote, toHostViews, updateSavedRemote } from "./main/remotes-ipc";
-import { ActiveRemote } from "./main/active-remote";
 import { startRemoteProxy } from "./main/remote-proxy";
+import { RemoteRegistry } from "./main/remote-registry";
 import { readUpdateSettings, type UpdateSettings, type UpdateStatus } from "./main/update-settings";
 import { readKeybindingOverrides, writeKeybindingOverrides } from "./main/keybinding-settings";
 import { coerceUiSettings, readUiSettings, writeUiSettings, type UiSettings } from "./main/ui-settings";
@@ -1624,32 +1624,64 @@ ipcMain.handle("remotes:request", async (_event, url: string, init: RemoteReques
 	remoteRequest(await findRemote(url), init),
 );
 
-// The proxy that lets the renderer talk to one remote daemon (see
-// main/remote-proxy.ts). Its socket dies with this process, so there is no
-// quit-time teardown: the OS closes the listener on exit, for any exit.
-const activeRemote = new ActiveRemote(startRemoteProxy);
+const registry = new RemoteRegistry(startRemoteProxy);
+let activeRemoteUrl: string | null = null;
 
-ipcMain.handle("remotes:activate", async (_event, url: string) => {
+async function validatedRemote(url: string): Promise<RemoteEntry> {
 	const entry = await findRemote(url);
-	// Probe before pointing the app at it, for the same reason remotes:add does:
-	// the saved host is activated at boot, before the first render, so a host that
-	// answers with something other than daemon JSON would white-screen the window
-	// on every launch — and the url that did it survives in localStorage, so the
-	// next launch repeats it. Refusing here lets initActiveHost fall back to local.
+	// Probe before starting a proxy: a reachable port may serve something other
+	// than an AO daemon, and exposing it as connected can wedge the app at boot.
 	const health = await probeRemote(entry);
 	if (health !== "online") throw new Error(`host ${url} is ${health}`);
-	return activeRemote.activate(entry);
+	return entry;
+}
+
+function connectedRemote(url: string) {
+	return {
+		view: async () => registry.views().find((view) => view.url === url) ?? null,
+		deactivate: async () => {
+			if (activeRemoteUrl === url) activeRemoteUrl = null;
+			await registry.disconnect(url);
+		},
+	};
+}
+
+ipcMain.handle("remotes:connect", async (_event, url: string) => registry.connect(await validatedRemote(url)));
+
+ipcMain.handle("remotes:disconnect", async (_event, url: string) => connectedRemote(url).deactivate());
+
+ipcMain.handle("remotes:connected", async () => registry.views());
+
+ipcMain.handle("remotes:activate", async (_event, url: string) => {
+	const entry = await validatedRemote(url);
+	if (activeRemoteUrl && activeRemoteUrl !== url) {
+		const previous = activeRemoteUrl;
+		activeRemoteUrl = null;
+		await registry.disconnect(previous);
+	}
+	const view = await registry.connect(entry);
+	activeRemoteUrl = url;
+	return view;
 });
 
-ipcMain.handle("remotes:deactivate", async () => activeRemote.deactivate());
+ipcMain.handle("remotes:deactivate", async () => {
+	if (!activeRemoteUrl) return;
+	const url = activeRemoteUrl;
+	activeRemoteUrl = null;
+	await registry.disconnect(url);
+});
 
-ipcMain.handle("remotes:active", async () => activeRemote.view());
-
-ipcMain.handle("remotes:update", async (_event, url: string, changes: RemoteChanges) =>
-	updateSavedRemote(remotesFilePath(), url, changes, activeRemote),
+ipcMain.handle("remotes:active", async () =>
+	activeRemoteUrl ? (registry.views().find((view) => view.url === activeRemoteUrl) ?? null) : null,
 );
 
-ipcMain.handle("remotes:remove", async (_event, url: string) => removeSavedRemote(remotesFilePath(), url, activeRemote));
+ipcMain.handle("remotes:update", async (_event, url: string, changes: RemoteChanges) =>
+	updateSavedRemote(remotesFilePath(), url, changes, connectedRemote(url)),
+);
+
+ipcMain.handle("remotes:remove", async (_event, url: string) =>
+	removeSavedRemote(remotesFilePath(), url, connectedRemote(url)),
+);
 
 ipcMain.handle("app:scanImportFolder", async (_event, input: { path: string; mode: "project" | "workspace" }) => {
 	await ensureShellEnv();
@@ -1981,11 +2013,13 @@ app.on("before-quit", (event) => {
 	if (!browserCleanupComplete) {
 		event.preventDefault();
 		if (!browserQuitCleanupPromise) {
-			browserQuitCleanupPromise = disposeAllBrowserViewHosts().finally(() => {
-				browserCleanupComplete = true;
-				browserQuitCleanupPromise = null;
-				app.quit();
-			});
+			browserQuitCleanupPromise = Promise.all([disposeAllBrowserViewHosts(), registry.closeAll()])
+				.then(() => undefined)
+				.finally(() => {
+					browserCleanupComplete = true;
+					browserQuitCleanupPromise = null;
+					app.quit();
+				});
 		}
 		return;
 	}
