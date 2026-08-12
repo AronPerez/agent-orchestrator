@@ -171,6 +171,44 @@ describe("startRemoteProxy", () => {
 });
 
 describe("startRemoteProxy streams", () => {
+	it("closes while an upgraded socket is still open", async () => {
+		upstream = createServer();
+		const upgraded = new Promise<void>((resolve) => {
+			upstream?.on("upgrade", (_req, socket) => {
+				socket.on("error", () => undefined);
+				socket.write("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n");
+				socket.on("end", () => socket.destroy());
+				resolve();
+			});
+		});
+		await new Promise<void>((resolve) => upstream?.listen(0, "127.0.0.1", resolve));
+		const port = (upstream.address() as AddressInfo).port;
+		proxy = await startRemoteProxy({
+			label: "workbox",
+			url: `http://127.0.0.1:${port}`,
+			password: "pw",
+		});
+
+		const proxyUrl = new URL(proxy.base);
+		const socket = netConnect(Number(proxyUrl.port), "127.0.0.1");
+		socket.on("error", () => undefined);
+		socket.write(
+			`GET ${proxyUrl.pathname}/mux HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGVzdA==\r\nSec-WebSocket-Version: 13\r\n\r\n`,
+		);
+		await upgraded;
+
+		const closing = proxy.close();
+		const result = await Promise.race([
+			closing.then(() => "closed"),
+			new Promise<string>((resolve) => setTimeout(() => resolve("timed out"), 500)),
+		]);
+		socket.destroy();
+		await closing;
+		proxy = undefined;
+
+		expect(result).toBe("closed");
+	});
+
 	it("delivers SSE chunks as they are written, not on close", async () => {
 		upstream = createServer((_req, res) => {
 			res.writeHead(200, { "content-type": "text/event-stream" });
