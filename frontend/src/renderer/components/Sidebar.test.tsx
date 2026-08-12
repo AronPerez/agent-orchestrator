@@ -82,6 +82,7 @@ vi.mock("../lib/api-client", () => ({
 }));
 
 const workspace: WorkspaceSummary = {
+	host: "local",
 	id: "proj-1",
 	name: "Project One",
 	path: "/repo/project-one",
@@ -90,6 +91,7 @@ const workspace: WorkspaceSummary = {
 };
 
 const session: WorkspaceSession = {
+	host: "local",
 	id: "proj-1-1",
 	workspaceId: "proj-1",
 	workspaceName: "Project One",
@@ -475,6 +477,7 @@ describe("Sidebar", () => {
 	it("toggles project sessions from the folder icon without selecting the project first", async () => {
 		const user = userEvent.setup();
 		const other: WorkspaceSummary = {
+			host: "local",
 			id: "proj-2",
 			name: "Project Two",
 			path: "/repo/project-two",

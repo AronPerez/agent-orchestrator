@@ -45,15 +45,19 @@ import { ProjectSettingsForm } from "./ProjectSettingsForm";
 import { workspaceQueryKey } from "../hooks/useWorkspaceQuery";
 import type { WorkspaceSummary } from "../types/workspace";
 
+function localSection(workspaces: WorkspaceSummary[]) {
+	return [{ host: "local", label: "Local", status: "ready", workspaces, failure: null }];
+}
+
 function renderSettings(projectId = "proj-1", workspaces?: WorkspaceSummary[], section?: "general" | "agents" | "workflow" | "intake") {
 	const queryClient = new QueryClient({
 		defaultOptions: {
-			queries: { retry: false },
+			queries: { retry: false, staleTime: Infinity },
 			mutations: { retry: false },
 		},
 	});
 	if (workspaces) {
-		queryClient.setQueryData(workspaceQueryKey, workspaces);
+		queryClient.setQueryData(workspaceQueryKey, localSection(workspaces));
 	}
 	render(
 		<QueryClientProvider client={queryClient}>
@@ -1185,12 +1189,14 @@ describe("ProjectSettingsForm", () => {
 
 		renderSettings("proj-1", [
 			{
+				host: "local",
 				id: "proj-1",
 				name: "Project One",
 				path: "/repo/project-one",
 				orchestratorAgent: "goose",
 				sessions: [
 					{
+						host: "local",
 						id: "proj-1-orchestrator",
 						workspaceId: "proj-1",
 						workspaceName: "Project One",

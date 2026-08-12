@@ -17,7 +17,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 
 vi.mock("../hooks/useWorkspaceQuery", () => ({
 	useWorkspaceQuery: () => ({
-		data: routeMocks.workspaces,
+		data: [{ host: "local", label: "Local", status: "ready", workspaces: routeMocks.workspaces, failure: null }],
 		isSuccess: routeMocks.queryState === "success",
 	}),
 }));
@@ -44,6 +44,7 @@ describe("shell index route", () => {
 	it("redirects a first-run scratch-only workspace list to the scratch board", async () => {
 		routeMocks.workspaces = [
 			{
+				host: "local",
 				id: "scratch",
 				name: "Scratch",
 				kind: "scratch",
@@ -65,8 +66,8 @@ describe("shell index route", () => {
 
 	it("does not redirect when another project exists", async () => {
 		routeMocks.workspaces = [
-			{ id: "scratch", name: "Scratch", kind: "scratch", path: "/scratch", sessions: [] },
-			{ id: "proj-1", name: "Project One", kind: "single_repo", path: "/repo/project-one", sessions: [] },
+			{ host: "local", id: "scratch", name: "Scratch", kind: "scratch", path: "/scratch", sessions: [] },
+			{ host: "local", id: "proj-1", name: "Project One", kind: "single_repo", path: "/repo/project-one", sessions: [] },
 		];
 
 		await renderIndex();

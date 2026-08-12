@@ -27,7 +27,16 @@ vi.mock("@tanstack/react-router", () => ({
 
 vi.mock("../hooks/useWorkspaceQuery", () => ({
 	workspaceQueryKey: ["workspaces"],
-	useWorkspaceQuery: workspaceQueryMock,
+	useWorkspaceQuery: () => {
+		const result = workspaceQueryMock();
+		return {
+			...result,
+			data:
+				result.data === undefined
+					? undefined
+					: [{ host: "local", label: "Local", status: "ready", workspaces: result.data, failure: null }],
+		};
+	},
 }));
 
 vi.mock("../hooks/useSessionUsageSummaries", () => ({
@@ -432,6 +441,7 @@ describe("SessionsBoard", () => {
 			data: [
 				workspaceWithSessions([
 					{
+						host: "local",
 						id: "s-exited",
 						workspaceId: "p1",
 						workspaceName: "radic",
@@ -1244,6 +1254,7 @@ describe("SessionsBoard", () => {
 
 function workspaceWithSessions(sessions: WorkspaceSession[]): WorkspaceSummary {
 	return {
+		host: "local",
 		id: "p1",
 		name: "radic",
 		path: "/tmp/radic",
@@ -1255,6 +1266,7 @@ function boardSession(
 	overrides: Pick<WorkspaceSession, "id" | "title" | "status"> & Partial<WorkspaceSession>,
 ): WorkspaceSession {
 	return {
+		host: "local",
 		workspaceId: "p1",
 		workspaceName: "radic",
 		provider: "claude-code",
@@ -1267,6 +1279,7 @@ function boardSession(
 
 function terminatedSession(overrides: Partial<WorkspaceSession> = {}): WorkspaceSession {
 	return {
+		host: "local",
 		id: "s-dead",
 		workspaceId: "p1",
 		workspaceName: "radic",

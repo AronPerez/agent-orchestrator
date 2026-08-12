@@ -75,6 +75,7 @@ type PanelEntry = {
 
 const { workspaces, workspaceQueryState, panels, shellTerminalsState } = vi.hoisted(() => {
 	const worker = {
+		host: "local",
 		id: "sess-1",
 		workspaceId: "proj-1",
 		workspaceName: "my-app",
@@ -107,8 +108,8 @@ const { workspaces, workspaceQueryState, panels, shellTerminalsState } = vi.hois
 		branch: "ao/cross-project",
 	} satisfies WorkspaceSession;
 	const workspaces: WorkspaceSummary[] = [
-		{ id: "proj-1", name: "my-app", path: "/p", type: "main", sessions: [worker, secondWorker, orchestrator] },
-		{ id: "proj-2", name: "other-app", path: "/q", type: "main", sessions: [crossProjectWorker] },
+		{ host: "local", id: "proj-1", name: "my-app", path: "/p", type: "main", sessions: [worker, secondWorker, orchestrator] },
+		{ host: "local", id: "proj-2", name: "other-app", path: "/q", type: "main", sessions: [crossProjectWorker] },
 	];
 	const workspaceQueryState: { data: WorkspaceSummary[] | undefined; isLoading: boolean } = {
 		data: workspaces,
@@ -301,7 +302,10 @@ vi.mock("../lib/shell-context", () => ({
 }));
 vi.mock("../hooks/useWorkspaceQuery", () => ({
 	useWorkspaceQuery: () => ({
-		data: workspaceQueryState.data,
+		data:
+			workspaceQueryState.data === undefined
+				? undefined
+				: [{ host: "local", label: "Local", status: "ready", workspaces: workspaceQueryState.data, failure: null }],
 		isLoading: workspaceQueryState.isLoading,
 	}),
 }));

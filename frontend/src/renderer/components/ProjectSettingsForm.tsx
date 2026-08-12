@@ -30,6 +30,7 @@ import {
 } from "../hooks/useAgentModelsQuery";
 import { agentsQueryKey, agentsQueryOptions, refreshAgents } from "../hooks/useAgentsQuery";
 import { useWorkspaceQuery, workspaceQueryKey } from "../hooks/useWorkspaceQuery";
+import { flattenHostSections } from "../types/workspace";
 import { apiClient, apiErrorMessage } from "../lib/api-client";
 import { captureRendererEvent } from "../lib/telemetry";
 import { spawnOrchestrator } from "../lib/spawn-orchestrator";
@@ -95,9 +96,10 @@ function SettingsBody({ project, projectId, onSaved, section = "general" }: { pr
 	const { t } = useTranslation();
 	const queryClient = useQueryClient();
 	const workspaceQuery = useWorkspaceQuery();
+	const workspaces = flattenHostSections(workspaceQuery.data);
 	const config = project.config ?? {};
 	const isScratchProject = project.kind === "scratch";
-	const workspace = workspaceQuery.data?.find((item) => item.id === projectId);
+	const workspace = workspaces.find((item) => item.id === projectId);
 	const activeOrchestrator = newestActiveOrchestrator(workspace?.sessions ?? []);
 	const intake: TrackerIntakeConfig = config.trackerIntake ?? {};
 	const [form, setForm] = useState({

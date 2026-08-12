@@ -1,19 +1,25 @@
 import { useQuery } from "@tanstack/react-query";
 import type { components } from "../../api/schema";
-import { apiClient, hasTrustedApiBaseUrl } from "../lib/api-client";
+import { apiErrorMessage } from "../lib/api-client";
+import { clientFor, connectedHosts, isHostReady } from "../lib/host-clients";
+import { LOCAL_HOST, type HostId } from "../lib/hosts";
 import { mockWorkspaces } from "../lib/mock-data";
 import { usesPreviewWorkspaceData } from "../lib/preview-mode";
+import { parseResponseArray } from "../lib/response-validation";
 import { toReviewerHarnessId } from "../lib/reviewer-harnesses";
 import { captureRendererEvent } from "../lib/telemetry";
 import {
 	type PRState,
 	type PullRequestFacts,
+	type HostSection,
 	toAgentProvider,
 	toProjectKind,
 	toSessionActivity,
 	toSessionStatus,
 	type WorkspaceSummary,
 } from "../types/workspace";
+
+export type { HostSection } from "../types/workspace";
 
 function toPullRequestFacts(pr: components["schemas"]["SessionPRFacts"]): PullRequestFacts {
 	return {
@@ -46,32 +52,58 @@ function reportUnknownSessionField(field: "status" | "activity", value?: string)
 // and always hits the real daemon.
 type FakeAgentSeam = { snapshot: () => WorkspaceSummary[] };
 
-async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
-	if (usesPreviewWorkspaceData) {
+type ProjectSummaryDTO = components["schemas"]["ProjectSummary"];
+type SessionDTO = components["schemas"]["ControllersSessionView"];
+
+function isProject(value: unknown): value is ProjectSummaryDTO {
+	if (typeof value !== "object" || value === null) return false;
+	const project = value as Partial<ProjectSummaryDTO>;
+	return typeof project.id === "string" && typeof project.name === "string" && typeof project.path === "string";
+}
+
+function isSession(value: unknown): value is SessionDTO {
+	if (typeof value !== "object" || value === null) return false;
+	const session = value as Partial<SessionDTO>;
+	return typeof session.id === "string" && typeof session.projectId === "string";
+}
+
+function tagWorkspaces(host: HostId, workspaces: WorkspaceSummary[]): WorkspaceSummary[] {
+	return workspaces.map((workspace) => ({
+		...workspace,
+		host,
+		sessions: workspace.sessions.map((session) => ({ ...session, host })),
+	}));
+}
+
+async function fetchWorkspaces(host: HostId): Promise<WorkspaceSummary[]> {
+	if (usesPreviewWorkspaceData && host === LOCAL_HOST) {
 		const fake =
 			typeof window !== "undefined"
 				? (window as unknown as { __aoFakeAgent?: FakeAgentSeam }).__aoFakeAgent
 				: undefined;
-		return fake ? fake.snapshot() : mockWorkspaces;
+		return tagWorkspaces(host, fake ? fake.snapshot() : mockWorkspaces);
 	}
-	if (!hasTrustedApiBaseUrl()) {
-		throw new Error("AO daemon API is not ready");
-	}
+	if (!isHostReady(host)) throw new Error(`host ${host} is not connected`);
 
+	const client = clientFor(host);
 	const [{ data: projectsData, error: projectsError }, { data: sessionsData, error: sessionsError }] =
-		await Promise.all([apiClient.GET("/api/v1/projects"), apiClient.GET("/api/v1/sessions")]);
+		await Promise.all([client.GET("/api/v1/projects"), client.GET("/api/v1/sessions")]);
 
 	if (projectsError || sessionsError) throw projectsError ?? sessionsError;
+	const projects = parseResponseArray(projectsData, "projects", isProject);
+	const sessions = parseResponseArray(sessionsData, "sessions", isSession);
+	if (projects === null || sessions === null) throw new Error("Host returned malformed workspace data");
 
-	return (projectsData?.projects ?? []).map((project) => {
+	return projects.map((project) => {
 		const kind = toProjectKind(project.kind);
 		return {
+			host,
 			id: project.id,
 			name: project.name,
 			kind,
 			path: project.path,
 			orchestratorAgent: project.orchestratorAgent ? toAgentProvider(project.orchestratorAgent) : undefined,
-			sessions: (sessionsData?.sessions ?? [])
+			sessions: sessions
 				.filter((session) => session.projectId === project.id)
 				.map((session) => {
 					const status = toSessionStatus(session.status, session.isTerminated);
@@ -82,6 +114,7 @@ async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
 						reportUnknownSessionField("activity", session.activity?.state);
 					}
 					return {
+						host,
 						id: session.id,
 						terminalHandleId: session.terminalHandleId,
 						workspaceId: project.id,
@@ -114,11 +147,34 @@ async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
 	});
 }
 
+async function fetchAllHosts(): Promise<HostSection[]> {
+	const hosts = [LOCAL_HOST, ...connectedHosts()];
+	const outcomes = await Promise.allSettled(hosts.map((host) => fetchWorkspaces(host)));
+	return outcomes.map((outcome, index) => {
+		const host = hosts[index];
+		return outcome.status === "fulfilled"
+			? {
+					host,
+					label: host === LOCAL_HOST ? "Local" : host,
+					status: "ready" as const,
+					workspaces: outcome.value,
+					failure: null,
+				}
+			: {
+					host,
+					label: host === LOCAL_HOST ? "Local" : host,
+					status: "failed" as const,
+					workspaces: [],
+					failure: apiErrorMessage(outcome.reason, "Could not load projects"),
+				};
+	});
+}
+
 // Shared so route loaders can prefetch via queryClient.ensureQueryData (paired
 // with the router's defaultPreload: "intent") and the hook reads the same cache.
 export const workspaceQueryOptions = {
 	queryKey: workspaceQueryKey,
-	queryFn: fetchWorkspaces,
+	queryFn: fetchAllHosts,
 	retry: 1,
 	refetchInterval: 15_000,
 };

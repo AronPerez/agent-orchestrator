@@ -44,6 +44,7 @@ import {
 	useTerminateSessionState,
 } from "../hooks/useTerminateSession";
 import { useWorkspaceQuery, workspaceQueryKey } from "../hooks/useWorkspaceQuery";
+import { flattenHostSections } from "../types/workspace";
 import { NotificationCenter } from "./NotificationCenter";
 import { BoardWelcome, ProjectBoardEmpty } from "./BoardEmptyStates";
 import { OrchestratorIcon } from "./icons";
@@ -98,7 +99,7 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
 	const boardActionsInPanel = usesBoardActionsInPanel();
 	/** Bell lives in the board action row when the shell topbar does not host it. */
 	const boardOwnsNotificationCenter = isLinuxPlatform() || boardActionsInPanel;
-	const all = workspaceQuery.data ?? [];
+	const all = flattenHostSections(workspaceQuery.data);
 	const workspaces = projectId ? all.filter((w) => w.id === projectId) : all;
 	const workspace = projectId ? workspaces[0] : undefined;
 	// Same crumb as ShellTopbar: project name in scope, else root-board "Board".

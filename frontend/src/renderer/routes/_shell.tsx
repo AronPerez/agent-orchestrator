@@ -1,6 +1,6 @@
 import { createFileRoute, Outlet, useMatchRoute, useNavigate, useParams } from "@tanstack/react-router";
 import { isCancelledError, useQueryClient } from "@tanstack/react-query";
-import { type CSSProperties, useCallback, useEffect, useRef, useState } from "react";
+import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CommandPalette } from "../components/CommandPalette";
 import { CenterPanelShell } from "../components/CenterPanelShell";
 import { DaemonFailureBanner } from "../components/DaemonFailureBanner";
@@ -22,7 +22,11 @@ import { agentsQueryKey, agentsQueryOptions, refreshAgents } from "../hooks/useA
 import { useDaemonStatus } from "../hooks/useDaemonStatus";
 import { useOpenShellTerminal } from "../hooks/useShellTerminals";
 import { useWindowFullScreen } from "../hooks/useWindowFullScreen";
-import { useWorkspaceQuery, workspaceQueryKey, workspaceQueryOptions } from "../hooks/useWorkspaceQuery";
+import {
+	useWorkspaceQuery,
+	workspaceQueryKey,
+	workspaceQueryOptions,
+} from "../hooks/useWorkspaceQuery";
 import { apiClient, apiErrorCode, apiErrorMessage, hasTrustedApiBaseUrl } from "../lib/api-client";
 import { refreshDaemonStatus } from "../lib/daemon-status";
 import { hasBrowserDaemon, usesPreviewWorkspaceData } from "../lib/preview-mode";
@@ -34,6 +38,7 @@ import { applyDocumentTheme, applyDocumentThemeStyle } from "../lib/theme";
 import { aoBridge } from "../lib/bridge";
 import { handleModifierLinkClick } from "../lib/external-link-policy";
 import { cn } from "../lib/utils";
+import { LOCAL_HOST } from "../lib/hosts";
 import {
 	isLinuxPlatform,
 	isMacPlatform,
@@ -43,7 +48,14 @@ import {
 } from "../lib/platform";
 import { useUiStore } from "../stores/ui-store";
 import { matchesRendererShortcut } from "../stores/keybindings-store";
-import { sessionIsActive, toProjectKind, type WorkspaceSummary } from "../types/workspace";
+import {
+	flattenHostSections,
+	type HostSection,
+	sessionIsActive,
+	toProjectKind,
+	updateHostWorkspaces,
+	type WorkspaceSummary,
+} from "../types/workspace";
 import type { components } from "../../api/schema";
 import { useAgentInventoryTelemetry } from "../hooks/useAgentInventoryTelemetry";
 
@@ -94,7 +106,7 @@ function ShellLayout() {
 	const matchRoute = useMatchRoute();
 	const queryClient = useQueryClient();
 	const workspaceQuery = useWorkspaceQuery();
-	const workspaces = workspaceQuery.data ?? [];
+	const workspaces = useMemo(() => flattenHostSections(workspaceQuery.data), [workspaceQuery.data]);
 	const daemonStatus = useDaemonStatus(queryClient);
 	// Daemon lifecycle is an Electron-bridge signal: without a preload it stays
 	// "stopped" forever, which would pin the whole shell on the startup splash.
@@ -228,7 +240,21 @@ function ShellLayout() {
 
 	const updateWorkspaces = useCallback(
 		(updater: (workspaces: WorkspaceSummary[]) => WorkspaceSummary[]) => {
-			queryClient.setQueryData<WorkspaceSummary[]>(workspaceQueryKey, (current = []) => updater(current));
+			queryClient.setQueryData<HostSection[]>(workspaceQueryKey, (current) =>
+				updateHostWorkspaces(
+					current ?? [
+						{
+							host: LOCAL_HOST,
+							label: "Local",
+							status: "ready",
+							workspaces: [],
+							failure: null,
+						},
+					],
+					LOCAL_HOST,
+					updater,
+				),
+			);
 		},
 		[queryClient],
 	);
@@ -271,6 +297,7 @@ function ShellLayout() {
 			if (!data?.project) throw new Error("Project creation returned no project");
 
 			const workspace: WorkspaceSummary = {
+				host: LOCAL_HOST,
 				id: data.project.id,
 				name: data.project.name,
 				kind: toProjectKind(data.project.kind),

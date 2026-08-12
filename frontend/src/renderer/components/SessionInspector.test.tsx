@@ -61,6 +61,7 @@ const pr = (n: number, state: PRState, overrides: Partial<PullRequestFacts> = {}
 });
 
 const session = (prs: PullRequestFacts[], overrides: Partial<WorkspaceSession> = {}): WorkspaceSession => ({
+	host: "local",
 	id: "sess-1",
 	workspaceId: "ws-1",
 	workspaceName: "my-app",
@@ -148,11 +149,15 @@ const usageTelemetry = (overrides: Partial<SessionUsage> = {}): SessionUsage => 
 	...overrides,
 });
 
+function localSection(workspaces: WorkspaceSummary[]) {
+	return [{ host: "local", label: "Local", status: "ready", workspaces, failure: null }];
+}
+
 function renderWithQuery(children: ReactNode, workspaces?: WorkspaceSummary[], seed?: (client: QueryClient) => void) {
 	const client = new QueryClient({
 		defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
 	});
-	if (workspaces) client.setQueryData(workspaceQueryKey, workspaces);
+	if (workspaces) client.setQueryData(workspaceQueryKey, localSection(workspaces));
 	seed?.(client);
 	return {
 		...render(
@@ -466,8 +471,9 @@ describe("SessionInspector completion controls", () => {
 		const worker = session([pr(7, "merged")], { status: "merged" });
 		const orchestrator = session([], { id: "orch-1", kind: "orchestrator", title: "orchestrator" });
 		renderWithQuery(<SessionInspector session={worker} />, [
-			{
-				id: "ws-1",
+		{
+			host: "local",
+			id: "ws-1",
 				name: "my-app",
 				path: "/repo",
 				sessions: [worker, orchestrator],

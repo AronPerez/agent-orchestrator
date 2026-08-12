@@ -34,6 +34,7 @@ import {
 } from "../lib/terminal-mux";
 import { cn } from "../lib/utils";
 import { useWorkspaceQuery, workspaceQueryKey } from "../hooks/useWorkspaceQuery";
+import { flattenHostSections } from "../types/workspace";
 import { useRestoreSession } from "../hooks/useRestoreSession";
 import { useShellTerminals } from "../hooks/useShellTerminals";
 import { XtermTerminal } from "./XtermTerminal";
@@ -510,7 +511,7 @@ export function TerminalCacheProvider({
 	useEffect(() => {
 		if (!workspaceQuery.isSuccess) return;
 		const sessions = new Map(
-			(workspaceQuery.data ?? []).flatMap((workspace) =>
+		flattenHostSections(workspaceQuery.data).flatMap((workspace) =>
 				workspace.sessions.map((session) => [session.id, session] as const),
 			),
 		);

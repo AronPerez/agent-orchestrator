@@ -27,6 +27,12 @@ vi.mock("../../lib/api-client", () => ({
 	hasTrustedApiBaseUrl: () => true,
 }));
 
+vi.mock("../../lib/host-clients", () => ({
+	clientFor: () => ({ GET: getMock }),
+	connectedHosts: () => [],
+	isHostReady: () => true,
+}));
+
 vi.mock("../../lib/bridge", () => ({
 	// The welcome panel's host row lists saved AO daemons on mount; an omitted
 	// namespace surfaces as an unhandled rejection, not a failed assertion.

@@ -46,6 +46,7 @@ vi.mock("./TerminalPane", () => ({
 }));
 
 const worker = {
+	host: "local",
 	id: "sess-1",
 	workspaceId: "proj-1",
 	workspaceName: "my-app",

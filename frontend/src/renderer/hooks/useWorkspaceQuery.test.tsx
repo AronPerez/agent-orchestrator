@@ -3,20 +3,32 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 
-const { captureRendererEventMock, getMock, hasTrustedApiBaseUrlMock } = vi.hoisted(() => ({
+const {
+	captureRendererEventMock,
+	connectedHostsMock,
+	getMock,
+	isHostReadyMock,
+} = vi.hoisted(() => ({
 	captureRendererEventMock: vi.fn().mockResolvedValue(undefined),
+	connectedHostsMock: vi.fn((): string[] => []),
 	getMock: vi.fn(),
-	hasTrustedApiBaseUrlMock: vi.fn(() => true),
+	isHostReadyMock: vi.fn(() => true),
 }));
 
 vi.mock("../lib/api-client", () => ({
-	apiClient: { GET: getMock },
-	hasTrustedApiBaseUrl: hasTrustedApiBaseUrlMock,
+	apiErrorMessage: (error: unknown, fallback: string) => (error instanceof Error ? error.message : fallback),
+}));
+
+vi.mock("../lib/host-clients", () => ({
+	clientFor: (host: string) => ({ GET: (url: string) => getMock(host, url) }),
+	connectedHosts: connectedHostsMock,
+	isHostReady: isHostReadyMock,
 }));
 
 vi.mock("../lib/telemetry", () => ({ captureRendererEvent: captureRendererEventMock }));
 
 import { useWorkspaceQuery } from "./useWorkspaceQuery";
+import { LOCAL_HOST, refKey, type HostId } from "../lib/hosts";
 
 function wrapper({ children }: { children: ReactNode }) {
 	// The hook pins its own retry policy; retryDelay 0 keeps the error tests fast.
@@ -28,7 +40,7 @@ function respondWith(payload: {
 	projects?: { data?: unknown; error?: unknown };
 	sessions?: { data?: unknown; error?: unknown };
 }) {
-	getMock.mockImplementation(async (url: string) => {
+	getMock.mockImplementation(async (_host: HostId, url: string) => {
 		if (url === "/api/v1/projects") return payload.projects ?? { data: { projects: [] }, error: undefined };
 		if (url === "/api/v1/sessions") return payload.sessions ?? { data: { sessions: [] }, error: undefined };
 		throw new Error(`unexpected GET ${url}`);
@@ -38,17 +50,65 @@ function respondWith(payload: {
 beforeEach(() => {
 	captureRendererEventMock.mockClear();
 	getMock.mockReset();
-	hasTrustedApiBaseUrlMock.mockReset().mockReturnValue(true);
+	connectedHostsMock.mockReset().mockReturnValue([]);
+	isHostReadyMock.mockReset().mockReturnValue(true);
 });
 
+type HostFixture = {
+	host: HostId;
+	projects?: Array<{ id: string; name: string; path?: string }>;
+	sessions?: Array<{ id: string; projectId: string }>;
+	fail?: string;
+	body?: unknown;
+};
+
+async function fetchAllForTest(fixtures: HostFixture[]) {
+	connectedHostsMock.mockReturnValue(fixtures.map(({ host }) => host).filter((host) => host !== LOCAL_HOST));
+	getMock.mockImplementation(async (host: HostId, url: string) => {
+		const fixture = fixtures.find((candidate) => candidate.host === host);
+		if (!fixture) throw new Error(`unexpected host ${host}`);
+		if (fixture.fail) throw new Error(fixture.fail);
+		if (fixture.body !== undefined) return { data: fixture.body, error: undefined };
+		if (url === "/api/v1/projects") {
+			return {
+				data: {
+					projects: (fixture.projects ?? []).map((project) => ({ path: `/${project.id}`, ...project })),
+				},
+				error: undefined,
+			};
+		}
+		if (url === "/api/v1/sessions") {
+			return {
+				data: {
+					sessions: (fixture.sessions ?? []).map((session) => ({
+						isTerminated: false,
+						updatedAt: "2026-08-11T00:00:00Z",
+						...session,
+					})),
+				},
+				error: undefined,
+			};
+		}
+		throw new Error(`unexpected GET ${url}`);
+	});
+
+	const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
+	await waitFor(() => expect(result.current.isSuccess).toBe(true));
+	return result.current.data ?? [];
+}
+
 describe("useWorkspaceQuery", () => {
-	it("rejects workspace reads while the daemon base URL is untrusted", async () => {
-		hasTrustedApiBaseUrlMock.mockReturnValue(false);
+	it("reports the local host as failed while the daemon client is not ready", async () => {
+		isHostReadyMock.mockReturnValue(false);
 
 		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
 
-		await waitFor(() => expect(result.current.isError).toBe(true));
-		expect(result.current.error).toEqual(new Error("AO daemon API is not ready"));
+		await waitFor(() => expect(result.current.isSuccess).toBe(true));
+		expect(result.current.data?.[0]).toMatchObject({
+			host: LOCAL_HOST,
+			status: "failed",
+			workspaces: [],
+		});
 		expect(getMock).not.toHaveBeenCalled();
 	});
 
@@ -107,7 +167,9 @@ describe("useWorkspaceQuery", () => {
 		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
 		await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
-		const [workspace] = result.current.data ?? [];
+		const workspace = result.current.data?.[0].workspaces[0];
+		expect(workspace).toBeDefined();
+		if (!workspace) throw new Error("workspace missing");
 		expect(workspace).toMatchObject({
 			id: "proj-1",
 			name: "my-app",
@@ -180,11 +242,11 @@ describe("useWorkspaceQuery", () => {
 		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
 		await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
-		expect(result.current.data?.[0]).toMatchObject({
+		expect(result.current.data?.[0].workspaces[0]).toMatchObject({
 			id: "scratch",
 			kind: "scratch",
 		});
-		expect(result.current.data?.[0].sessions[0]).toMatchObject({
+		expect(result.current.data?.[0].workspaces[0].sessions[0]).toMatchObject({
 			id: "scratch-worker-1",
 			branch: undefined,
 		});
@@ -231,7 +293,7 @@ describe("useWorkspaceQuery", () => {
 		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
 		await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
-		const sessions = result.current.data?.[0].sessions ?? [];
+		const sessions = result.current.data?.[0].workspaces[0].sessions ?? [];
 		expect(sessions[0].prs).toEqual([
 			{
 				number: 278,
@@ -270,8 +332,8 @@ describe("useWorkspaceQuery", () => {
 		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
 		await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
-		expect(result.current.data?.[0].sessions[0].status).toBe("merged");
-		expect(result.current.data?.[0].sessions[0].isTerminated).toBe(true);
+		expect(result.current.data?.[0].workspaces[0].sessions[0].status).toBe("merged");
+		expect(result.current.data?.[0].workspaces[0].sessions[0].isTerminated).toBe(true);
 	});
 
 	it("falls back to terminated for terminated sessions without a known backend status", async () => {
@@ -296,21 +358,21 @@ describe("useWorkspaceQuery", () => {
 		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
 		await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
-		expect(result.current.data?.[0].sessions[0].status).toBe("terminated");
-		expect(result.current.data?.[0].sessions[0].isTerminated).toBe(true);
+		expect(result.current.data?.[0].workspaces[0].sessions[0].status).toBe("terminated");
+		expect(result.current.data?.[0].workspaces[0].sessions[0].isTerminated).toBe(true);
 	});
 
-	it("surfaces a projects fetch error", async () => {
+	it("reports a projects fetch error on the local host", async () => {
 		const failure = new TypeError("Failed to fetch");
 		respondWith({ projects: { data: undefined, error: failure } });
 
 		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
 
-		await waitFor(() => expect(result.current.isError).toBe(true), { timeout: 3_000 });
-		expect(result.current.error).toBe(failure);
+		await waitFor(() => expect(result.current.isSuccess).toBe(true));
+		expect(result.current.data?.[0]).toMatchObject({ status: "failed", failure: "Failed to fetch" });
 	});
 
-	it("surfaces a sessions fetch error even when projects load", async () => {
+	it("reports a sessions fetch error on the local host even when projects load", async () => {
 		const failure = new Error("sessions backend down");
 		respondWith({
 			projects: { data: { projects: [{ id: "proj-1", name: "my-app", path: "/p" }] }, error: undefined },
@@ -319,7 +381,67 @@ describe("useWorkspaceQuery", () => {
 
 		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
 
-		await waitFor(() => expect(result.current.isError).toBe(true), { timeout: 3_000 });
-		expect(result.current.error).toBe(failure);
+		await waitFor(() => expect(result.current.isSuccess).toBe(true));
+		expect(result.current.data?.[0]).toMatchObject({ status: "failed", failure: "sessions backend down" });
+	});
+});
+
+describe("useWorkspaceQuery — multi-host", () => {
+	const REMOTE = "http://192.0.2.1:3011";
+
+	it("tags every workspace and session with its host", async () => {
+		const sections = await fetchAllForTest([
+			{
+				host: LOCAL_HOST,
+				projects: [{ id: "skyvern-cloud", name: "skyvern-cloud" }],
+				sessions: [{ id: "s1", projectId: "skyvern-cloud" }],
+			},
+			{
+				host: REMOTE,
+				projects: [{ id: "skyvern-cloud", name: "skyvern-cloud" }],
+				sessions: [{ id: "s1", projectId: "skyvern-cloud" }],
+			},
+		]);
+		const hosts = sections.flatMap((section) => section.workspaces.map((workspace) => workspace.host));
+		expect(hosts).toEqual([LOCAL_HOST, REMOTE]);
+		expect(refKey({ host: LOCAL_HOST, id: "skyvern-cloud" })).not.toBe(
+			refKey({ host: REMOTE, id: "skyvern-cloud" }),
+		);
+		expect(sections[0].workspaces[0].sessions[0].host).toBe(LOCAL_HOST);
+	});
+
+	it("one host failing does not discard another host's data", async () => {
+		const sections = await fetchAllForTest([
+			{ host: LOCAL_HOST, projects: [{ id: "p", name: "p" }], sessions: [] },
+			{ host: REMOTE, fail: "connect ECONNREFUSED" },
+		]);
+		expect(sections.find((section) => section.host === LOCAL_HOST)?.status).toBe("ready");
+		expect(sections.find((section) => section.host === LOCAL_HOST)?.workspaces).toHaveLength(1);
+		const failed = sections.find((section) => section.host === REMOTE);
+		expect(failed?.status).toBe("failed");
+		expect(failed?.workspaces).toEqual([]);
+		expect(failed?.failure).toMatch(/ECONNREFUSED/);
+	});
+
+	it("a host returning a malformed body fails that host, it does not throw", async () => {
+		const sections = await fetchAllForTest([
+			{ host: LOCAL_HOST, projects: [], sessions: [] },
+			{ host: REMOTE, body: "<!doctype html><html></html>" },
+		]);
+		expect(sections.find((section) => section.host === REMOTE)?.status).toBe("failed");
+		expect(sections.find((section) => section.host === LOCAL_HOST)?.status).toBe("ready");
+	});
+
+	it("joins sessions to projects within a host, never across hosts", async () => {
+		const sections = await fetchAllForTest([
+			{ host: LOCAL_HOST, projects: [{ id: "shared", name: "shared" }], sessions: [] },
+			{
+				host: REMOTE,
+				projects: [{ id: "shared", name: "shared" }],
+				sessions: [{ id: "r1", projectId: "shared" }],
+			},
+		]);
+		expect(sections.find((section) => section.host === LOCAL_HOST)?.workspaces[0].sessions).toEqual([]);
+		expect(sections.find((section) => section.host === REMOTE)?.workspaces[0].sessions).toHaveLength(1);
 	});
 });

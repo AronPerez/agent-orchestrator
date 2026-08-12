@@ -10,7 +10,9 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock("../hooks/useWorkspaceQuery", () => ({
-	useWorkspaceQuery: () => ({ data: h.workspaces }),
+	useWorkspaceQuery: () => ({
+		data: [{ host: "local", label: "Local", status: "ready", workspaces: h.workspaces, failure: null }],
+	}),
 	workspaceQueryKey: ["workspaces"],
 }));
 
@@ -36,6 +38,7 @@ import { TrayRuntime } from "./TrayRuntime";
 
 function worker(overrides: Partial<WorkspaceSession> & { id: string }): WorkspaceSession {
 	return {
+		host: "local",
 		workspaceId: "proj-1",
 		workspaceName: "note-tauri",
 		title: overrides.id,
@@ -52,6 +55,7 @@ function worker(overrides: Partial<WorkspaceSession> & { id: string }): Workspac
 function workspaces(): WorkspaceSummary[] {
 	return [
 		{
+			host: "local",
 			id: "proj-1",
 			name: "note-tauri",
 			path: "/repos/note",

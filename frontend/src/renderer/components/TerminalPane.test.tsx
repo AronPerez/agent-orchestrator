@@ -100,6 +100,7 @@ vi.mock("../hooks/useTerminalSession", () => ({
 }));
 
 const worker = {
+	host: "local",
 	id: "sess-1",
 	workspaceId: "proj-1",
 	workspaceName: "my-app",
@@ -157,12 +158,25 @@ function renderPane(session?: WorkspaceSession) {
 function workspaceWithSessions(sessions: WorkspaceSession[]) {
 	return [
 		{
+			host: "local",
 			id: "proj-1",
 			name: "my-app",
 			kind: "single_repo" as const,
 			path: "/repo/my-app",
 			type: "main" as const,
 			sessions,
+		},
+	];
+}
+
+function localSection(sessions: WorkspaceSession[]) {
+	return [
+		{
+			host: "local",
+			label: "Local",
+			status: "ready",
+			workspaces: workspaceWithSessions(sessions),
+			failure: null,
 		},
 	];
 }
@@ -178,8 +192,8 @@ function renderCachedPane({
 	shellTerminals?: ShellTerminal[];
 	terminalTarget?: TerminalTarget;
 }) {
-	const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-	queryClient.setQueryData(workspaceQueryKey, workspaceWithSessions(sessions));
+	const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+	queryClient.setQueryData(workspaceQueryKey, localSection(sessions));
 	queryClient.setQueryData(shellTerminalsQueryKey, shellTerminals);
 	const previousAO = window.ao;
 	window.ao = {} as typeof window.ao;
@@ -428,7 +442,7 @@ describe("TerminalCacheProvider", () => {
 		try {
 			const oldGeneration = await waitFor(() => activeXterm());
 			act(() => {
-				view.queryClient.setQueryData(workspaceQueryKey, workspaceWithSessions([replacement]));
+				view.queryClient.setQueryData(workspaceQueryKey, localSection([replacement]));
 			});
 			view.show(replacement);
 
@@ -449,7 +463,7 @@ describe("TerminalCacheProvider", () => {
 			view.show(sessionB);
 			await waitFor(() => expect(activeXterm()).not.toBe(terminalA));
 			act(() => {
-				view.queryClient.setQueryData(workspaceQueryKey, workspaceWithSessions([sessionB]));
+				view.queryClient.setQueryData(workspaceQueryKey, localSection([sessionB]));
 			});
 
 			await waitFor(() => expect(terminalA.isConnected).toBe(false));

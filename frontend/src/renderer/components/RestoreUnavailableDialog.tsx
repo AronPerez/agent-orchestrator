@@ -3,6 +3,7 @@ import { Loader2, X } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useWorkspaceQuery } from "../hooks/useWorkspaceQuery";
+import { flattenHostSections } from "../types/workspace";
 import { spawnOrchestrator } from "../lib/spawn-orchestrator";
 import { useUiStore } from "../stores/ui-store";
 import { hasConfiguredOrchestratorAgent, isOrchestratorSession } from "../types/workspace";
@@ -25,10 +26,11 @@ type RestoreUnavailableDialogProps = {
 export function RestoreUnavailableDialog({ open, session, onOpenChange, onRecreated }: RestoreUnavailableDialogProps) {
 	const { t } = useTranslation();
 	const workspaceQuery = useWorkspaceQuery();
+	const workspaces = flattenHostSections(workspaceQuery.data);
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | undefined>();
 	const orchestrator = isOrchestratorSession(session);
-	const workspace = workspaceQuery.data?.find((candidate) => candidate.id === session.workspaceId);
+	const workspace = workspaces.find((candidate) => candidate.id === session.workspaceId);
 	const hasOrchestratorAgent = hasConfiguredOrchestratorAgent(workspace);
 	const checkingProject = workspaceQuery.isLoading && workspaceQuery.data === undefined;
 

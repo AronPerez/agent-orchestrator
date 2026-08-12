@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import type { components } from "../../api/schema";
 import { remotesBridge } from "../hooks/useRemoteHosts";
 import { daemonErrorMessage } from "../lib/daemon-error";
+import { parseResponseArray } from "../lib/response-validation";
 import { Button } from "./ui/button";
 import {
 	Dialog,
@@ -36,9 +37,10 @@ function parseListing(body: unknown): Listing | null {
 	if (typeof body !== "object" || body === null) return null;
 	const candidate = body as Partial<Listing>;
 	if (typeof candidate.path !== "string" || typeof candidate.parent !== "string") return null;
-	if (!Array.isArray(candidate.entries) || !candidate.entries.every(isEntry)) return null;
+	const entries = parseResponseArray(body, "entries", isEntry);
+	if (entries === null) return null;
 	return {
-		entries: candidate.entries,
+		entries,
 		parent: candidate.parent,
 		path: candidate.path,
 		truncated: candidate.truncated === true,

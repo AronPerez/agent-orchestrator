@@ -1,6 +1,7 @@
 import { attentionZone as presentationAttentionZone } from "../lib/session-presentation";
 
 import type { ReviewerHarnessId } from "../lib/reviewer-harnesses";
+import type { HostId } from "../lib/hosts";
 
 export type SessionStatus =
 	| "working"
@@ -124,6 +125,7 @@ export type PullRequestFacts = {
 export type SessionMode = "chat" | "tui";
 
 export type WorkspaceSession = {
+	host: HostId;
 	id: string;
 	terminalHandleId?: string;
 	workspaceId: string;
@@ -292,6 +294,7 @@ export { attentionZone, attentionZoneLabel, attentionZoneOrder } from "../lib/se
 export type { AttentionZone } from "../lib/session-presentation";
 
 export type WorkspaceSummary = {
+	host: HostId;
 	id: string;
 	name: string;
 	kind?: ProjectKind;
@@ -306,6 +309,31 @@ export type WorkspaceSummary = {
 	};
 	sessions: WorkspaceSession[];
 };
+
+export type HostSection = {
+	host: HostId;
+	label: string;
+	status: "ready" | "failed";
+	workspaces: WorkspaceSummary[];
+	failure: string | null;
+};
+
+export function flattenHostSections(
+	sections: readonly HostSection[] | undefined,
+): WorkspaceSummary[] {
+	return sections?.flatMap((section) => section.workspaces) ?? [];
+}
+
+export function updateHostWorkspaces(
+	sections: HostSection[] | undefined,
+	host: HostId,
+	update: (workspaces: WorkspaceSummary[]) => WorkspaceSummary[],
+): HostSection[] | undefined {
+	if (!sections) return sections;
+	return sections.map((section) =>
+		section.host === host ? { ...section, workspaces: update(section.workspaces) } : section,
+	);
+}
 
 export function hasConfiguredOrchestratorAgent(
 	workspace: Pick<WorkspaceSummary, "orchestratorAgent"> | undefined,

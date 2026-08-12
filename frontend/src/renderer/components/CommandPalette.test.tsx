@@ -14,6 +14,7 @@ const restoreMock = vi.hoisted(() => vi.fn());
 const ctx = vi.hoisted(() => {
 	const workspaces: WorkspaceSummary[] = [
 		{
+			host: "local",
 			id: "proj-1",
 			name: "app",
 			path: "/repos/app",
@@ -21,6 +22,7 @@ const ctx = vi.hoisted(() => {
 			orchestratorAgent: "codex",
 			sessions: [
 				{
+					host: "local",
 					id: "w-merge",
 					workspaceId: "proj-1",
 					workspaceName: "app",
@@ -33,6 +35,7 @@ const ctx = vi.hoisted(() => {
 					prs: [],
 				},
 				{
+					host: "local",
 					id: "w-fix",
 					workspaceId: "proj-1",
 					workspaceName: "app",
@@ -45,6 +48,7 @@ const ctx = vi.hoisted(() => {
 					prs: [],
 				},
 				{
+					host: "local",
 					id: "w-archived",
 					workspaceId: "proj-1",
 					workspaceName: "app",
@@ -57,6 +61,7 @@ const ctx = vi.hoisted(() => {
 					prs: [],
 				},
 				{
+					host: "local",
 					id: "orch",
 					workspaceId: "proj-1",
 					workspaceName: "app",
@@ -71,6 +76,7 @@ const ctx = vi.hoisted(() => {
 			],
 		},
 		{
+			host: "local",
 			id: "proj-2",
 			name: "lib",
 			path: "/repos/lib",
@@ -97,7 +103,9 @@ vi.mock("../hooks/useCommandPaletteEnabled", () => ({
 }));
 
 vi.mock("../hooks/useWorkspaceQuery", () => ({
-	useWorkspaceQuery: () => ({ data: ctx.workspaces }),
+	useWorkspaceQuery: () => ({
+		data: [{ host: "local", label: "Local", status: "ready", workspaces: ctx.workspaces, failure: null }],
+	}),
 	workspaceQueryKey: ["workspaces"],
 }));
 
