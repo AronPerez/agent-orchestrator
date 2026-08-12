@@ -114,7 +114,7 @@ function attachmentURL(apiBaseUrl: string, sessionId: string, path: string): str
 		.split("/")
 		.map(encodeURIComponent)
 		.join("/")}`;
-	return apiBaseUrl ? new URL(route, apiBaseUrl).toString() : route;
+	return apiBaseUrl ? `${apiBaseUrl.replace(/\/+$/, "")}${route}` : route;
 }
 
 /** Collapse the home directory so a long absolute path does not eat the row. */

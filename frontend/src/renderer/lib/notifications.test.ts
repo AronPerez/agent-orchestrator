@@ -379,6 +379,7 @@ describe("notification cache helpers", () => {
 
 describe("createNotificationsTransport", () => {
 	it("opens the notification stream and invalidates unread notifications on open", () => {
+		getApiBaseUrlMock.mockReturnValue("http://127.0.0.1:62220/proxy-token/");
 		const qc = queryClient();
 		const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
 
@@ -386,7 +387,9 @@ describe("createNotificationsTransport", () => {
 		EventSourceStub.instances[0].onopen?.();
 
 		expect(EventSourceStub.instances).toHaveLength(1);
-		expect(EventSourceStub.instances[0].url).toBe("http://127.0.0.1:3001/api/v1/notifications/stream");
+		expect(EventSourceStub.instances[0].url).toBe(
+			"http://127.0.0.1:62220/proxy-token/api/v1/notifications/stream",
+		);
 		expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: unreadNotificationsQueryKey });
 		expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: recentNotificationsQueryKey });
 	});

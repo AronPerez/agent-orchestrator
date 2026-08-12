@@ -87,6 +87,23 @@ describe("HumanMessage attachments", () => {
 		);
 	});
 
+	it("keeps the proxy path prefix in attachment image URLs", () => {
+		render(
+			<HumanMessage
+				message={humanMessage(
+					"inspect this\n\nAttached files (read these files in the workspace):\n- .ao/attachments/attachment-ab12.png",
+				)}
+				sessionId="ao-1"
+				apiBaseUrl="http://127.0.0.1:62220/proxy-token/"
+			/>,
+		);
+
+		expect(screen.getByRole("img", { name: "attachment-ab12.png" })).toHaveAttribute(
+			"src",
+			"http://127.0.0.1:62220/proxy-token/api/v1/sessions/ao-1/preview/files/.ao/attachments/attachment-ab12.png",
+		);
+	});
+
 	it.each([
 		[
 			"spawn",

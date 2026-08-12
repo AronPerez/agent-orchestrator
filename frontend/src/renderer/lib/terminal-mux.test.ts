@@ -47,6 +47,9 @@ describe("terminal-mux framing", () => {
 	it("derives the ws mux url from the http api base (root path, not /api/v1)", () => {
 		expect(muxUrlFromApiBase("http://127.0.0.1:4317")).toBe("ws://127.0.0.1:4317/mux");
 		expect(muxUrlFromApiBase("https://host:8443/")).toBe("wss://host:8443/mux");
+		expect(muxUrlFromApiBase("http://127.0.0.1:62220/proxy-token/")).toBe(
+			"ws://127.0.0.1:62220/proxy-token/mux",
+		);
 	});
 
 	it("uses the current origin for a relative dev API base", () => {

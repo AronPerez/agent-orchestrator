@@ -67,13 +67,14 @@ afterEach(() => {
 
 describe("subscribeWorkspaceFileChanges", () => {
 	it("shares one daemon stream until the final Files view unmounts", () => {
+		getApiBaseUrlMock.mockReturnValue("http://127.0.0.1:62220/proxy-token/");
 		const queryClient = fakeQueryClient();
 		const unsubscribeRail = subscribeWorkspaceFileChanges("session/a", queryClient);
 		const unsubscribeMaximized = subscribeWorkspaceFileChanges("session/a", queryClient);
 
 		expect(EventSourceStub.instances).toHaveLength(1);
 		expect(EventSourceStub.instances[0].url).toBe(
-			"http://127.0.0.1:3001/api/v1/sessions/session%2Fa/workspace/events",
+			"http://127.0.0.1:62220/proxy-token/api/v1/sessions/session%2Fa/workspace/events",
 		);
 
 		unsubscribeRail();
