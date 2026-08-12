@@ -95,7 +95,16 @@ vi.mock("../hooks/useRestoreSession", () => ({
 }));
 
 vi.mock("../hooks/useWorkspaceQuery", () => ({
-	useWorkspaceQuery: () => workspaceQueryMock(),
+	useWorkspaceQuery: () => {
+		const result = workspaceQueryMock();
+		return {
+			...result,
+			data:
+				result.data === undefined
+					? undefined
+					: [{ host: "local", label: "Local", status: "ready", workspaces: result.data, failure: null }],
+		};
+	},
 	workspaceQueryKey: ["workspaces"],
 }));
 

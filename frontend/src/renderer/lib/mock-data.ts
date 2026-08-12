@@ -38,6 +38,7 @@ export const mockShellTerminals: ShellTerminal[] = [
 
 export const mockWorkspaces: WorkspaceSummary[] = [
 	{
+		host: "local",
 		id: "ao-demo",
 		name: "ao-demo",
 		path: "/demo/ao-demo",
@@ -46,6 +47,7 @@ export const mockWorkspaces: WorkspaceSummary[] = [
 		accentColor: "var(--color-project-accent-mint)",
 		sessions: [
 			{
+				host: "local",
 				id: "ao-demo-orchestrator",
 				terminalHandleId: "ao-demo-orchestrator/terminal_0",
 				workspaceId: "ao-demo",
@@ -61,6 +63,7 @@ export const mockWorkspaces: WorkspaceSummary[] = [
 				prs: [],
 			},
 			{
+				host: "local",
 				id: "demo-working",
 				terminalHandleId: "demo-working/terminal_0",
 				workspaceId: "ao-demo",
@@ -80,6 +83,7 @@ export const mockWorkspaces: WorkspaceSummary[] = [
 				prs: [],
 			},
 			{
+				host: "local",
 				id: "demo-needs-input",
 				terminalHandleId: "demo-needs-input/terminal_0",
 				workspaceId: "ao-demo",
@@ -99,6 +103,7 @@ export const mockWorkspaces: WorkspaceSummary[] = [
 				prs: [demoPr(318, "open", "passing", "changes_requested")],
 			},
 			{
+				host: "local",
 				id: "demo-review-stack",
 				terminalHandleId: "demo-review-stack/terminal_0",
 				workspaceId: "ao-demo",
@@ -125,6 +130,7 @@ export const mockWorkspaces: WorkspaceSummary[] = [
 				],
 			},
 			{
+				host: "local",
 				id: "demo-in-review",
 				terminalHandleId: "demo-in-review/terminal_0",
 				workspaceId: "ao-demo",
@@ -139,6 +145,7 @@ export const mockWorkspaces: WorkspaceSummary[] = [
 				prs: [demoPr(322, "open", "pending", "none", "unknown")],
 			},
 			{
+				host: "local",
 				id: "demo-ready",
 				terminalHandleId: "demo-ready/terminal_0",
 				workspaceId: "ao-demo",
@@ -157,6 +164,7 @@ export const mockWorkspaces: WorkspaceSummary[] = [
 				prs: [demoPr(323, "open", "passing", "approved")],
 			},
 			{
+				host: "local",
 				id: "demo-ci-failed",
 				terminalHandleId: "demo-ci-failed/terminal_0",
 				workspaceId: "ao-demo",
@@ -173,6 +181,7 @@ export const mockWorkspaces: WorkspaceSummary[] = [
 		],
 	},
 	{
+		host: "local",
 		id: "docs-site",
 		name: "docs-site",
 		path: "/demo/docs-site",
@@ -181,6 +190,7 @@ export const mockWorkspaces: WorkspaceSummary[] = [
 		accentColor: "var(--color-project-accent-sky)",
 		sessions: [
 			{
+				host: "local",
 				id: "docs-installation",
 				terminalHandleId: "docs-installation/terminal_0",
 				workspaceId: "docs-site",
@@ -195,6 +205,7 @@ export const mockWorkspaces: WorkspaceSummary[] = [
 				prs: [],
 			},
 			{
+				host: "local",
 				id: "docs-ready",
 				terminalHandleId: "docs-ready/terminal_0",
 				workspaceId: "docs-site",

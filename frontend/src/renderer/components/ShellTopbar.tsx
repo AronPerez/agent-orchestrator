@@ -8,6 +8,7 @@ import { HostSwitcher } from "./HostSwitcher";
 import { NotificationCenter } from "./NotificationCenter";
 import {
 	findProjectOrchestrator,
+	flattenHostSections,
 	hasConfiguredOrchestratorAgent,
 	isOrchestratorSession,
 	sessionIsActive,
@@ -94,7 +95,7 @@ export function ShellTopbar({ embedded = false }: { embedded?: boolean } = {}) {
 	const [isSpawning, setIsSpawning] = useState(false);
 	// Board-scope spawn failures surface where the board actions render.
 	const [boardSpawnError, setBoardSpawnError] = useState<string | null>(null);
-	const all = useWorkspaceQuery().data ?? [];
+	const all = flattenHostSections(useWorkspaceQuery().data);
 
 	const session = params.sessionId
 		? all.flatMap((workspace) => workspace.sessions).find((s) => s.id === params.sessionId)

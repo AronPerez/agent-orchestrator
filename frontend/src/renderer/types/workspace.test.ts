@@ -32,6 +32,7 @@ describe("canonicalTrackerIssueId", () => {
 
 function sessionWith(overrides: Partial<WorkspaceSession>): WorkspaceSession {
 	return {
+		host: "local",
 		id: "sess-1",
 		workspaceId: "ws-1",
 		workspaceName: "my-app",
@@ -113,7 +114,7 @@ describe("sessionIsActive", () => {
 
 describe("findProjectOrchestrator", () => {
 	function workspaceWith(sessions: WorkspaceSession[]): WorkspaceSummary {
-		return { id: "skills", name: "skills", path: "/tmp/skills", sessions };
+		return { host: "local", id: "skills", name: "skills", path: "/tmp/skills", sessions };
 	}
 
 	it("skips a terminated orchestrator that precedes the live one", () => {
@@ -230,8 +231,9 @@ describe("orchestratorHealth", () => {
 			updatedAt: "2026-01-02T00:00:00Z",
 		});
 
-		expect(
+			expect(
 			orchestratorHealth({
+				host: "local",
 				id: "skills",
 				name: "skills",
 				path: "/tmp/skills",
@@ -246,6 +248,7 @@ describe("orchestratorHealth", () => {
 
 		expect(
 			orchestratorHealth({
+				host: "local",
 				id: "skills",
 				name: "skills",
 				path: "/tmp/skills",

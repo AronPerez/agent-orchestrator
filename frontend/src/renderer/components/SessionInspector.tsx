@@ -33,8 +33,15 @@ import { useSessionWorkspaceFilesChangedCount } from "../hooks/useSessionWorkspa
 import { clearTerminateSessionState, useTerminateSession } from "../hooks/useTerminateSession";
 import { prBrowserUrl, prCardPresentation, sessionPRDisplaySummaries } from "../lib/pr-display";
 import { formatTokenCount } from "../lib/format-token-count";
-import type { WorkspaceSession, WorkspaceSummary } from "../types/workspace";
-import { findProjectOrchestrator, sortedPRs } from "../types/workspace";
+import {
+	findProjectOrchestrator,
+	flattenHostSections,
+	sortedPRs,
+	type HostSection,
+	updateHostWorkspaces,
+	type WorkspaceSession,
+	type WorkspaceSummary,
+} from "../types/workspace";
 import { getAgentActivityView, getSessionTimelinePillView } from "../lib/session-presentation";
 import { aoBridge } from "../lib/bridge";
 import { BrowserPanelView, type BrowserAnnotationQueueModel } from "./BrowserPanel";
@@ -719,9 +726,11 @@ function CompletionControls({ session }: { session: WorkspaceSession }) {
 		},
 		onMutate: async (terminateOnPrMerge) => {
 			await queryClient.cancelQueries({ queryKey: workspaceQueryKey });
-			const previous = queryClient.getQueryData<WorkspaceSummary[]>(workspaceQueryKey);
-			queryClient.setQueryData<WorkspaceSummary[]>(workspaceQueryKey, (current) =>
-				updateSessionMergePolicy(current, session.id, terminateOnPrMerge),
+			const previous = queryClient.getQueryData<HostSection[]>(workspaceQueryKey);
+			queryClient.setQueryData<HostSection[]>(workspaceQueryKey, (current) =>
+				updateHostWorkspaces(current, session.host, (workspaces) =>
+					updateSessionMergePolicy(workspaces, session.id, terminateOnPrMerge),
+				),
 			);
 			return { previous };
 		},
@@ -736,7 +745,7 @@ function CompletionControls({ session }: { session: WorkspaceSession }) {
 	const canTerminateNow = session.status === "merged";
 
 	const confirmTermination = () => {
-		const workspaces = queryClient.getQueryData<WorkspaceSummary[]>(workspaceQueryKey) ?? [];
+		const workspaces = flattenHostSections(queryClient.getQueryData<HostSection[]>(workspaceQueryKey));
 		const orchestrator = findProjectOrchestrator(workspaces, session.workspaceId);
 		setConfirmOpen(false);
 		terminate.mutate(session);
@@ -800,11 +809,11 @@ function CompletionControls({ session }: { session: WorkspaceSession }) {
 }
 
 function updateSessionMergePolicy(
-	workspaces: WorkspaceSummary[] | undefined,
+	workspaces: WorkspaceSummary[],
 	sessionId: string,
 	terminateOnPrMerge: boolean,
-): WorkspaceSummary[] | undefined {
-	return workspaces?.map((workspace) => ({
+): WorkspaceSummary[] {
+	return workspaces.map((workspace) => ({
 		...workspace,
 		sessions: workspace.sessions.map((candidate) =>
 			candidate.id === sessionId ? { ...candidate, terminateOnPrMerge } : candidate,

@@ -19,6 +19,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMarkAllNotificationsReadMutation, useNotificationsQuery } from "../hooks/useNotificationsQuery";
 import { useRestoreSession } from "../hooks/useRestoreSession";
 import { useWorkspaceQuery } from "../hooks/useWorkspaceQuery";
+import { flattenHostSections } from "../types/workspace";
 import { aoBridge } from "../lib/bridge";
 import { openLinkInSystemBrowser } from "../lib/external-link-policy";
 import { formatTimeCompact } from "../lib/format-time";
@@ -78,9 +79,10 @@ function useSessionTerminationLookup(): {
 	workspaceError: boolean;
 } {
 	const { data: workspaces, isError, isSuccess, refetch } = useWorkspaceQuery();
+	const flatWorkspaces = useMemo(() => flattenHostSections(workspaces), [workspaces]);
 	const terminatedIds = useMemo(() => {
 		const ids = new Set<string>();
-		for (const workspace of workspaces ?? []) {
+		for (const workspace of flatWorkspaces) {
 			for (const session of workspace.sessions) {
 				if (session.isTerminated === true || session.status === "terminated") {
 					ids.add(session.id);
@@ -88,7 +90,7 @@ function useSessionTerminationLookup(): {
 			}
 		}
 		return ids;
-	}, [workspaces]);
+	}, [flatWorkspaces]);
 	// Only successful workspace data is trustworthy. Pending and error both leave
 	// sessions non-navigable — a failed query must not treat terminated rows as live.
 	return {
@@ -166,17 +168,18 @@ export function NotificationCenter({ style }: NotificationCenterProps) {
 	const restoreSession = useRestoreSession();
 	const { retryWorkspace, sessionsReady, terminatedIds, workspaceError } = useSessionTerminationLookup();
 	const { data: workspaces } = useWorkspaceQuery();
+	const flatWorkspaces = useMemo(() => flattenHostSections(workspaces), [workspaces]);
 	// Resolve the human project + session names for each notification so the row
 	// can show where it came from (the DTO only carries opaque ids).
 	const sessionMeta = useMemo(() => {
 		const map = new Map<string, { projectName: string; sessionName: string }>();
-		for (const workspace of workspaces ?? []) {
+		for (const workspace of flatWorkspaces) {
 			for (const session of workspace.sessions) {
 				map.set(session.id, { projectName: workspace.name, sessionName: session.title });
 			}
 		}
 		return map;
-	}, [workspaces]);
+	}, [flatWorkspaces]);
 	const notifications = useMemo(() => getCachedNotifications(allQuery.data), [allQuery.data]);
 	const unreadCount = getCachedUnreadCount(unreadQuery.data);
 	const { openSession } = useNotificationTargetNavigation();

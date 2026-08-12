@@ -14,6 +14,12 @@ vi.mock("../../lib/api-client", () => ({
 	hasTrustedApiBaseUrl: () => true,
 }));
 
+vi.mock("../../lib/host-clients", () => ({
+	clientFor: () => ({ GET: getMock }),
+	connectedHosts: () => [],
+	isHostReady: () => true,
+}));
+
 vi.mock("@tanstack/react-router", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("@tanstack/react-router")>();
 	return { ...actual, useNavigate: () => navigateMock };

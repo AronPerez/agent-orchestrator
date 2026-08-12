@@ -4,7 +4,7 @@ import { Suspense, type ComponentType, type PropsWithChildren } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { KeybindingOverrides } from "../../shared/shortcuts";
 import { useUiStore } from "../stores/ui-store";
-import type { WorkspaceSummary } from "../types/workspace";
+import type { HostSection, WorkspaceSummary } from "../types/workspace";
 
 const shellMocks = vi.hoisted(() => {
 	const state = {
@@ -19,7 +19,7 @@ const shellMocks = vi.hoisted(() => {
 		routeSearch: {} as Record<string, unknown>,
 		workspaces: [] as WorkspaceSummary[],
 		workspaceQuery: {
-			data: [] as WorkspaceSummary[],
+			data: [] as HostSection[],
 			dataUpdatedAt: 0,
 			isError: false,
 			isSuccess: true,
@@ -232,6 +232,10 @@ const workspaces = [
 	},
 ] as unknown as WorkspaceSummary[];
 
+function localSection(items: WorkspaceSummary[]): HostSection[] {
+	return [{ host: "local", label: "Local", status: "ready", workspaces: items, failure: null }];
+}
+
 async function renderShell() {
 	let view: ReturnType<typeof render> | undefined;
 	await act(async () => {
@@ -278,7 +282,7 @@ beforeEach(() => {
 	shellMocks.state.routeSearch = {};
 	shellMocks.state.workspaces = workspaces;
 	shellMocks.state.workspaceQuery = {
-		data: workspaces,
+		data: localSection(workspaces),
 		dataUpdatedAt: 0,
 		isError: false,
 		isSuccess: true,
@@ -384,9 +388,9 @@ describe("shell workspace startup", () => {
 	});
 
 	it("recovers after a newer workspace query succeeds", async () => {
-		shellMocks.state.daemonStatus = { state: "ready", port: 4777 };
-		shellMocks.state.workspaceQuery = {
-			data: workspaces,
+	shellMocks.state.daemonStatus = { state: "ready", port: 4777 };
+	shellMocks.state.workspaceQuery = {
+		data: localSection(workspaces),
 			dataUpdatedAt: 100,
 			isError: false,
 			isSuccess: true,

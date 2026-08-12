@@ -44,6 +44,7 @@ vi.mock("./ChatWorkspace", () => ({
 import { SessionChatSurface } from "./SessionChatSurface";
 
 const session = {
+	host: "local",
 	id: "sess-1",
 	workspaceId: "proj-1",
 	workspaceName: "my-app",

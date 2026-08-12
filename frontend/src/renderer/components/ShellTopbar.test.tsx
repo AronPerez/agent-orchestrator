@@ -26,7 +26,16 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
 });
 
 vi.mock("../hooks/useWorkspaceQuery", () => ({
-	useWorkspaceQuery: () => useWorkspaceQueryMock(),
+	useWorkspaceQuery: () => {
+		const result = useWorkspaceQueryMock();
+		return {
+			...result,
+			data:
+				result.data === undefined
+					? undefined
+					: [{ host: "local", label: "Local", status: "ready", workspaces: result.data, failure: null }],
+		};
+	},
 	workspaceQueryKey: ["workspaces"],
 }));
 
@@ -53,6 +62,7 @@ vi.mock("./NewTaskDialog", () => ({ NewTaskDialog: () => null }));
 vi.mock("./NotificationCenter", () => ({ NotificationCenter: () => null }));
 
 const worker: WorkspaceSession = {
+	host: "local",
 	id: "sess-1",
 	workspaceId: "proj-1",
 	workspaceName: "my-app",
@@ -73,6 +83,7 @@ const secondWorker: WorkspaceSession = {
 };
 
 const orchestrator: WorkspaceSession = {
+	host: "local",
 	id: "orch-1",
 	workspaceId: "proj-1",
 	workspaceName: "my-app",
@@ -100,6 +111,7 @@ function renderTopbar(session: WorkspaceSession, embedded = false) {
 function renderTopbarSessions(sessions: WorkspaceSession[], sessionId: string, embedded = false) {
 	const data: WorkspaceSummary[] = [
 		{
+			host: "local",
 			id: sessions[0].workspaceId,
 			name: sessions[0].workspaceName,
 			path: "/repo/my-app",

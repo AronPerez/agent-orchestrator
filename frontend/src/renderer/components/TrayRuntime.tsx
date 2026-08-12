@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef } from "react";
 import { useWorkspaceQuery } from "../hooks/useWorkspaceQuery";
+import { flattenHostSections } from "../types/workspace";
 import { aoBridge } from "../lib/bridge";
 import { useNavigateToSession } from "../lib/navigate-to-session";
 import { attentionZone, workerSessions } from "../types/workspace";
 import type { TraySessionEntry } from "../../shared/tray";
 
 export function TrayRuntime() {
-	const workspaces = useWorkspaceQuery().data ?? [];
+	const workspaceSections = useWorkspaceQuery().data;
+	const workspaces = useMemo(() => flattenHostSections(workspaceSections), [workspaceSections]);
 	const navigateToSession = useNavigateToSession();
 
 	const sessions = useMemo<TraySessionEntry[]>(() => {

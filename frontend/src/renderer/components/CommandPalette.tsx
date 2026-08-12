@@ -6,6 +6,7 @@ import { useTranslation } from "react-i18next";
 import { useCommandPaletteEnabled } from "../hooks/useCommandPaletteEnabled";
 import { useRestoreSession } from "../hooks/useRestoreSession";
 import { useWorkspaceQuery, workspaceQueryKey } from "../hooks/useWorkspaceQuery";
+import { flattenHostSections } from "../types/workspace";
 import { aoBridge } from "../lib/bridge";
 import {
 	buildCommands,
@@ -48,7 +49,8 @@ export function CommandPalette() {
 	const queryClient = useQueryClient();
 	const restoreSessionById = useRestoreSession();
 	const params = useParams({ strict: false }) as { projectId?: string; sessionId?: string };
-	const workspaces = useWorkspaceQuery().data ?? [];
+	const workspaceSections = useWorkspaceQuery().data;
+	const workspaces = useMemo(() => flattenHostSections(workspaceSections), [workspaceSections]);
 	const { createProject, initializeProjectRepository } = useShell();
 	const resolvedTheme = useUiStore((s) => s.resolvedTheme);
 	const setThemePreference = useUiStore((s) => s.setThemePreference);

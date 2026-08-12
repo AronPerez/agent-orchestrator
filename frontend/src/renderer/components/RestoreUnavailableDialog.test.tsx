@@ -11,7 +11,16 @@ const { spawnMock, workspaceQueryMock } = vi.hoisted(() => ({
 }));
 
 vi.mock("../hooks/useWorkspaceQuery", () => ({
-	useWorkspaceQuery: () => workspaceQueryMock(),
+	useWorkspaceQuery: () => {
+		const result = workspaceQueryMock();
+		return {
+			...result,
+			data:
+				result.data === undefined
+					? undefined
+					: [{ host: "local", label: "Local", status: "ready", workspaces: result.data, failure: null }],
+		};
+	},
 }));
 
 vi.mock("../lib/spawn-orchestrator", () => ({
@@ -19,6 +28,7 @@ vi.mock("../lib/spawn-orchestrator", () => ({
 }));
 
 const session: WorkspaceSession = {
+	host: "local",
 	id: "orch-old",
 	workspaceId: "proj-1",
 	workspaceName: "Project One",
@@ -31,6 +41,7 @@ const session: WorkspaceSession = {
 };
 
 const workspace: WorkspaceSummary = {
+	host: "local",
 	id: "proj-1",
 	name: "Project One",
 	path: "/repo/project-one",
