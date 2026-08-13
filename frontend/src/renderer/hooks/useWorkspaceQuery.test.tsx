@@ -1,4 +1,4 @@
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
@@ -421,6 +421,38 @@ describe("useWorkspaceQuery — multi-host", () => {
 		expect(failed?.status).toBe("failed");
 		expect(failed?.workspaces).toEqual([]);
 		expect(failed?.failure).toMatch(/ECONNREFUSED/);
+	});
+
+	it("refetches only the host targeted by a host-scoped invalidation", async () => {
+		const queryClient = new QueryClient({ defaultOptions: { queries: { retryDelay: 0 } } });
+		const fetchCounts = new Map<HostId, number>();
+		connectedHostsMock.mockReturnValue([REMOTE]);
+		getMock.mockImplementation(async (host: HostId, url: string) => {
+			if (url === "/api/v1/projects") {
+				const count = (fetchCounts.get(host) ?? 0) + 1;
+				fetchCounts.set(host, count);
+				return { data: { projects: [{ id: host, name: `${host}-${count}`, path: `/${host}` }] } };
+			}
+			if (url === "/api/v1/sessions") return { data: { sessions: [] } };
+			throw new Error(`unexpected GET ${url}`);
+		});
+		const queryWrapper = ({ children }: { children: ReactNode }) => (
+			<QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+		);
+		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper: queryWrapper });
+		await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+		await act(async () => {
+			await queryClient.invalidateQueries({ queryKey: ["workspaces", REMOTE] });
+		});
+
+		await waitFor(() =>
+			expect(result.current.data?.find((section) => section.host === REMOTE)?.workspaces[0].name).toBe(
+				`${REMOTE}-2`,
+			),
+		);
+		expect(fetchCounts.get(REMOTE)).toBe(2);
+		expect(fetchCounts.get(LOCAL_HOST)).toBe(1);
 	});
 
 	it("a host returning a malformed body fails that host, it does not throw", async () => {
