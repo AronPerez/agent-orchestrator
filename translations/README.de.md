@@ -140,8 +140,8 @@ Lade den neuesten Desktop-Build für deine Plattform herunter:
 
 | Plattform             | Download                                                                                                                      |
 | --------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| macOS (Apple silicon) | [Download](https://github.com/Untrivial-ai/agent-orchestrator/releases/latest/download/agent-orchestrator-darwin-arm64.zip)   |
-| macOS (Intel)         | [Download](https://github.com/Untrivial-ai/agent-orchestrator/releases/latest/download/agent-orchestrator-darwin-x64.zip)     |
+| macOS (Apple silicon) | [Download](https://github.com/Untrivial-ai/agent-orchestrator/releases/latest/download/agent-orchestrator-darwin-arm64.dmg)   |
+| macOS (Intel)         | [Download](https://github.com/Untrivial-ai/agent-orchestrator/releases/latest/download/agent-orchestrator-darwin-x64.dmg)     |
 | Windows               | [Download](https://github.com/Untrivial-ai/agent-orchestrator/releases/latest/download/agent-orchestrator-win32-x64.exe)      |
 | Linux (AppImage)      | [Download](https://github.com/Untrivial-ai/agent-orchestrator/releases/latest/download/agent-orchestrator-linux-x64.AppImage) |
 | Linux (Debian/Ubuntu) | [Download](https://github.com/Untrivial-ai/agent-orchestrator/releases/latest/download/agent-orchestrator-linux-x64.deb)      |
@@ -189,9 +189,9 @@ ao start
 | [docs/STATUS.md](../docs/STATUS.md)                                 | Was derzeit auf `main` ausgeliefert wird und was noch in Arbeit ist.                         |
 | [docs/stack.md](../docs/stack.md)                                   | Entscheidungen zu Bibliotheken, Runtime und Abhängigkeiten.                                  |
 
-## Telemetrie
+## Anonyme Telemetrie
 
-Der Electron-Renderer von Agent Orchestrator sendet anonyme Nutzungsereignisse an PostHog für Zuverlässigkeit und Produktverständnis. Die PostHog-Session-Aufzeichnung ist standardmäßig deaktiviert; wenn eine zeitlich begrenzte Untersuchung sie aktiviert, werden lokale Pfade und lokale URLs vor der Übertragung redigiert. Setze `VITE_AO_POSTHOG_KEY` vor dem Build auf eine leere Zeichenkette, um die Übertragung zu deaktivieren. Siehe [docs/telemetry.md](../docs/telemetry.md).
+AO nutzt datenschutzfreundliche Kennzahlen zu Produktnutzung und Zuverlässigkeit, die PII und Projektinhalte ausschließen sollen, um die Akzeptanz zu verstehen und das Produkt zu verbessern. [Mehr über Telemetrie und Datenschutz erfahren](../docs/telemetry.md).
 
 ## Lizenz
 
