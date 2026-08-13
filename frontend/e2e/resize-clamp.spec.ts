@@ -47,7 +47,7 @@ test("sidebar drag stops at its minimum width instead of collapsing", async ({ p
 
 test("inspector drag stops at minSize instead of collapsing; buttons still toggle", async ({ page }) => {
 	// A worker session from the dev:web mock dataset (lib/mock-data.ts).
-	await page.goto("/#/projects/ao-demo/sessions/demo-working");
+	await page.goto("/#/host/local/session/demo-working");
 
 	const inspector = page.locator("#inspector");
 	await expect(inspector).toBeVisible();

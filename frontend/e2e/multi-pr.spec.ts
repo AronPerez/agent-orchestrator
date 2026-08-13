@@ -8,7 +8,7 @@ import { expect, test } from "@playwright/test";
 test("the inspector rail stacks every PR a session owns, actionable-first", async ({ page }) => {
 	await page.goto("/");
 	await page.getByRole("button", { name: "Open auth stack" }).click();
-	await expect(page).toHaveURL(/sessions\/stacked-auth/);
+	await expect(page).toHaveURL(/host\/local\/session\/stacked-auth/);
 
 	const inspector = page.locator("#inspector");
 	await expect(inspector).toBeVisible();

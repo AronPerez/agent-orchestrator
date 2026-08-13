@@ -182,7 +182,7 @@ test("renderer: route nav home to board to session detail and back @T0 @BRD", as
 
 	// → session detail (open the first card on the board)
 	await page.getByTestId("board-session-card").first().click();
-	await expect(page).toHaveURL(/sessions\//);
+	await expect(page).toHaveURL(/host\/local\/session\//);
 	await expect(page.getByTestId("session-detail")).toBeVisible();
 
 	// ← back to the project board

@@ -48,7 +48,7 @@ test("the Reviews tab renders the reviewer panel for a session that owns PRs", a
 
 	await page.goto("/");
 	await page.getByRole("button", { name: "Open auth stack" }).click();
-	await expect(page).toHaveURL(/sessions\/stacked-auth/);
+	await expect(page).toHaveURL(/host\/local\/session\/stacked-auth/);
 
 	const inspector = page.locator("#inspector");
 	await expect(inspector).toBeVisible();
@@ -67,7 +67,7 @@ test("the Reviews tab renders the reviewer panel for a session that owns PRs", a
 test("the Reviews tab shows the empty state for a session with no PRs", async ({ page }) => {
 	await page.goto("/");
 	await page.getByRole("button", { name: "Open Split terminal mux responsibilities" }).click();
-	await expect(page).toHaveURL(/sessions\/refactor-mux/);
+	await expect(page).toHaveURL(/host\/local\/session\/refactor-mux/);
 
 	const inspector = page.locator("#inspector");
 	await expect(inspector).toBeVisible();

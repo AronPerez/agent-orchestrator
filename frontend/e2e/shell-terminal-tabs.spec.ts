@@ -6,7 +6,7 @@ import { expect, test } from "@playwright/test";
 // an in-memory shell list — enough to cover the parts that live in the renderer:
 // which tab is current, and that opening/closing updates the strip.
 test("opens, selects, and closes standalone shell terminals from the tab strip", async ({ page }) => {
-	await page.goto("/#/projects/ao-demo/sessions/demo-working");
+	await page.goto("/#/host/local/session/demo-working");
 	await expect(page.getByRole("button", { name: "New terminal" })).toBeVisible();
 
 	const closeButtons = page.getByRole("button", { name: /^Close terminal / });
