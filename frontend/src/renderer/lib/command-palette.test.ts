@@ -106,6 +106,7 @@ describe("buildCommands grouping", () => {
 	it("disables New task and Open orchestrator while the project orchestrator is restarting", () => {
 		const items = buildCommands({
 			workspaces: workspaces(),
+			currentHostId: "local",
 			currentProjectId: "proj-1",
 			restartingProjectIds: new Set(["local:proj-1"]),
 		});
@@ -291,7 +292,7 @@ describe("result caps", () => {
 		);
 		// Enter targets the first item in render order, so that must be the top match.
 		const rendered = groups.flatMap((g) => g.items);
-		expect(rendered[0]?.id).toBe("project:alpha");
+		expect(rendered[0]?.id).toBe("project:local:alpha");
 		expect(rendered.length).toBeLessThanOrEqual(MAX_SEARCH_RESULTS);
 	});
 
@@ -367,8 +368,8 @@ describe("result caps", () => {
 
 		const visible = visibleForQuery(items, "deploy");
 		expect(visible.slice(0, MAX_ATTENTION_SEARCH_RESULTS).every(isAttentionInZone)).toBe(true);
-		expect(visible).toContainEqual(expect.objectContaining({ id: "project:deploy" }));
-		expect(visible.findIndex((item) => item.id === "project:deploy")).toBeLessThan(MAX_SEARCH_RESULTS);
+		expect(visible).toContainEqual(expect.objectContaining({ id: "project:local:deploy" }));
+		expect(visible.findIndex((item) => item.id === "project:local:deploy")).toBeLessThan(MAX_SEARCH_RESULTS);
 	});
 
 	it("still surfaces the exact match when every attention title also prefix-matches (tied score)", () => {
@@ -392,7 +393,7 @@ describe("result caps", () => {
 		};
 		const items = buildCommands({ workspaces: [floodedWorkspace, exactMatchWorkspace] });
 		const visible = visibleForQuery(items, "deploy");
-		expect(visible).toContainEqual(expect.objectContaining({ id: "project:deploy" }));
+		expect(visible).toContainEqual(expect.objectContaining({ id: "project:local:deploy" }));
 		expect(visible.filter((item) => !isAttentionInZone(item))).not.toHaveLength(0);
 	});
 });
@@ -405,7 +406,7 @@ describe("filterCommands / matchScore", () => {
 	it("ranks a title prefix above a keyword-only hit", () => {
 		const items = buildCommands({ workspaces: workspaces() });
 		const results = filterCommands(items, "app");
-		expect(results[0]?.id).toBe("project:proj-1");
+		expect(results[0]?.id).toBe("project:local:proj-1");
 	});
 
 	it("matches a PR by its #number", () => {
@@ -417,7 +418,7 @@ describe("filterCommands / matchScore", () => {
 
 describe("groupCommands", () => {
 	it("skips empty groups and preserves group order", () => {
-		const items = buildCommands({ workspaces: workspaces(), currentProjectId: "proj-1" });
+		const items = buildCommands({ workspaces: workspaces(), currentHostId: "local", currentProjectId: "proj-1" });
 		const grouped = groupCommands(items);
 		const order = grouped.map((g) => g.id);
 		expect(order).toEqual(["current", "attention", "projects", "sessions", "prs", "global"]);
@@ -434,7 +435,7 @@ describe("session rows open the actions panel", () => {
 			session: expect.objectContaining({ host: "local", id: "w-merge" }),
 		});
 		expect(map.get("pr:local:w-pr:42")?.action?.kind).toBe("navigate");
-		expect(map.get("project:proj-1")?.action?.kind).toBe("navigate");
+		expect(map.get("project:local:proj-1")?.action?.kind).toBe("navigate");
 	});
 });
 

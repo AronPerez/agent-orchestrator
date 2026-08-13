@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { aoBridge } from "./bridge";
 import { getApiBaseUrl, setApiBaseUrl } from "./api-client";
-import { activeHost, applyDaemonBaseUrl, initHosts } from "./active-host";
+import { applyDaemonBaseUrl, initHosts } from "./active-host";
 import { baseUrlFor, forgetHost } from "./host-clients";
 import { LOCAL_HOST } from "./hosts";
 
@@ -32,7 +32,6 @@ describe("multi-host boot", () => {
 		await initHosts();
 
 		expect(connect).toHaveBeenCalledTimes(2);
-		expect(activeHost()).toBeNull();
 		expect(baseUrlFor(WORKBOX)).toBe("http://127.0.0.1:9001/one");
 		expect(baseUrlFor(MINI)).toBe("http://127.0.0.1:9002/two");
 	});
@@ -51,6 +50,14 @@ describe("multi-host boot", () => {
 
 		expect(baseUrlFor(WORKBOX)).toBeNull();
 		expect(baseUrlFor(MINI)).toBe("http://127.0.0.1:9002/two");
+	});
+
+	it("treats an unreadable saved-host list as no remote hosts", async () => {
+		vi.spyOn(aoBridge.remotes, "list").mockRejectedValue(new Error("chmod 600 required"));
+
+		await expect(initHosts()).resolves.toBeUndefined();
+		expect(baseUrlFor(WORKBOX)).toBeNull();
+		expect(baseUrlFor(MINI)).toBeNull();
 	});
 });
 

@@ -9,6 +9,7 @@ const {
 	navigateMock,
 	notificationShowMock,
 	postMock,
+	remotePostMock,
 	workspaceQueryMock,
 	usageQueryMock,
 	boardActionsInPanelMock,
@@ -16,6 +17,7 @@ const {
 	navigateMock: vi.fn(),
 	notificationShowMock: vi.fn(),
 	postMock: vi.fn(),
+	remotePostMock: vi.fn(),
 	workspaceQueryMock: vi.fn(),
 	usageQueryMock: vi.fn(),
 	boardActionsInPanelMock: vi.fn(() => false),
@@ -34,7 +36,20 @@ vi.mock("../hooks/useWorkspaceQuery", () => ({
 			data:
 				result.data === undefined
 					? undefined
-					: [{ host: "local", label: "Local", status: "ready", workspaces: result.data, failure: null }],
+					: [{
+						host: "local",
+						label: "Local",
+						status: "ready",
+						workspaces: result.data.map((workspace: WorkspaceSummary) => ({
+							...workspace,
+							host: workspace.host ?? "local",
+							sessions: workspace.sessions.map((session) => ({
+								...session,
+								host: session.host ?? workspace.host ?? "local",
+							})),
+						})),
+						failure: null,
+					}],
 		};
 	},
 }));
@@ -50,9 +65,17 @@ vi.mock("../lib/api-client", () => ({
 
 vi.mock("../lib/host-clients", () => ({
 	baseUrlFor: () => "http://127.0.0.1:3001",
-	connectedHosts: () => [],
+	connectedHosts: (() => {
+		const hosts: string[] = [];
+		return () => hosts;
+	})(),
+	subscribeConnectedHosts: () => () => undefined,
 	isHostReady: () => true,
-	clientFor: () => ({ POST: (...args: unknown[]) => postMock(...args) }),
+	hostLabelFor: (host: string) => host === "http://192.0.2.1:3011" ? "workbox" : host,
+	clientFor: (host: string) => ({
+		POST: (...args: unknown[]) =>
+			host === "http://192.0.2.1:3011" ? remotePostMock(...args) : postMock(...args),
+	}),
 }));
 
 vi.mock("../lib/bridge", () => ({
@@ -84,11 +107,11 @@ function renderBoard(projectId?: string) {
 	return queryClient;
 }
 
-function renderBoardWithClient(queryClient: QueryClient, projectId?: string) {
+function renderBoardWithClient(queryClient: QueryClient, projectId?: string, host = "local") {
 	return render(
 		<QueryClientProvider client={queryClient}>
 			<TooltipProvider>
-				<SessionsBoard projectId={projectId} />
+				<SessionsBoard project={projectId ? { host, id: projectId } : undefined} />
 			</TooltipProvider>
 		</QueryClientProvider>,
 	);
@@ -98,6 +121,10 @@ beforeEach(() => {
 	navigateMock.mockReset();
 	notificationShowMock.mockReset().mockResolvedValue(undefined);
 	postMock.mockReset().mockResolvedValue({ data: {} });
+	remotePostMock.mockReset().mockResolvedValue({
+		data: { orchestrator: { id: "remote-new" } },
+		response: { status: 201 },
+	});
 	workspaceQueryMock.mockReset().mockReturnValue({ data: [], isError: false });
 	usageQueryMock.mockReset().mockReturnValue({ data: new Map() });
 	window.localStorage.removeItem("ao.board.archive.layout");
@@ -105,6 +132,51 @@ beforeEach(() => {
 });
 
 describe("SessionsBoard", () => {
+	it("restarts the host-qualified project when project ids collide", async () => {
+		const host = "http://192.0.2.1:3011";
+		const orchestrator = (id: string): WorkspaceSession => ({
+			...boardSession({ id, title: id, status: "working" }),
+			host,
+			kind: "orchestrator",
+		});
+		workspaceQueryMock.mockReturnValue({
+			data: [
+				workspaceWithSessions([]),
+				{ ...workspaceWithSessions([orchestrator("remote-one"), orchestrator("remote-two")]), host },
+			],
+			isError: false,
+			isSuccess: true,
+		});
+		renderBoardWithClient(
+			new QueryClient({ defaultOptions: { queries: { retry: false } } }),
+			"p1",
+			host,
+		);
+
+		await userEvent.click(screen.getByRole("button", { name: "Restart on workbox" }));
+
+		await waitFor(() => expect(remotePostMock).toHaveBeenCalledWith("/api/v1/orchestrators", {
+			body: { projectId: "p1", clean: true },
+		}));
+		expect(postMock).not.toHaveBeenCalled();
+	});
+
+	it("names the target host in a remote session termination prompt", async () => {
+		const host = "http://192.0.2.1:3011";
+		const remoteSession = { ...boardSession({ id: "remote-worker", title: "remote worker", status: "working" }), host };
+		workspaceQueryMock.mockReturnValue({
+			data: [{ ...workspaceWithSessions([remoteSession]), host }],
+			isError: false,
+			isSuccess: true,
+		});
+		renderBoardWithClient(new QueryClient(), "p1", host);
+
+		await userEvent.click(screen.getByRole("button", { name: "Terminate remote worker" }));
+
+		expect(await screen.findByRole("dialog")).toHaveTextContent("on workbox");
+		expect(screen.getByRole("button", { name: "Yes, terminate session on workbox" })).toBeInTheDocument();
+	});
+
 	it("localizes dynamic card actions and pull request lifecycle labels", async () => {
 		await appI18n.changeLanguage("zh-CN");
 		workspaceQueryMock.mockReturnValue({
@@ -329,7 +401,7 @@ describe("SessionsBoard", () => {
 		const activeUsage = screen.getByText("12.4K tok");
 		expect(activeUsage).toHaveAttribute("aria-label", "12,400 tokens");
 		expect(screen.queryByText("0 tok")).not.toBeInTheDocument();
-		expect(usageQueryMock).toHaveBeenCalledWith("p1");
+		expect(usageQueryMock).toHaveBeenCalledWith({ host: "local", id: "p1" });
 		await userEvent.hover(activeUsage);
 		expect((await screen.findAllByText("12,400 tokens")).length).toBeGreaterThan(0);
 
@@ -734,7 +806,7 @@ describe("SessionsBoard", () => {
 		view.rerender(
 			<QueryClientProvider client={queryClient}>
 				<TooltipProvider>
-					<SessionsBoard projectId="p2" />
+					<SessionsBoard project={{ host: "local", id: "p2" }} />
 				</TooltipProvider>
 			</QueryClientProvider>,
 		);
@@ -991,7 +1063,7 @@ describe("SessionsBoard", () => {
 		view.rerender(
 			<QueryClientProvider client={queryClient}>
 				<TooltipProvider>
-					<SessionsBoard projectId="p2" />
+					<SessionsBoard project={{ host: "local", id: "p2" }} />
 				</TooltipProvider>
 			</QueryClientProvider>,
 		);
@@ -1032,7 +1104,7 @@ describe("SessionsBoard", () => {
 		view.rerender(
 			<QueryClientProvider client={queryClient}>
 				<TooltipProvider>
-					<SessionsBoard projectId="p2" />
+					<SessionsBoard project={{ host: "local", id: "p2" }} />
 				</TooltipProvider>
 			</QueryClientProvider>,
 		);

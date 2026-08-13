@@ -1,7 +1,8 @@
 import { useQueries, type UseQueryResult } from "@tanstack/react-query";
+import { useSyncExternalStore } from "react";
 import type { components } from "../../api/schema";
 import { apiErrorMessage } from "../lib/api-client";
-import { clientFor, connectedHosts, isHostReady } from "../lib/host-clients";
+import { clientFor, connectedHosts, isHostReady, subscribeConnectedHosts } from "../lib/host-clients";
 import { LOCAL_HOST, type HostId } from "../lib/hosts";
 import { mockWorkspaces } from "../lib/mock-data";
 import { usesPreviewWorkspaceData } from "../lib/preview-mode";
@@ -199,8 +200,9 @@ function combineWorkspaceQueries(results: UseQueryResult<HostSection[]>[]) {
 export const workspaceQueryOptions = workspaceHostQueryOptions(LOCAL_HOST);
 
 export function useWorkspaceQuery() {
+	const remotes = useSyncExternalStore(subscribeConnectedHosts, connectedHosts, connectedHosts);
 	return useQueries({
-		queries: [LOCAL_HOST, ...connectedHosts()].map(workspaceHostQueryOptions),
+		queries: [LOCAL_HOST, ...remotes].map(workspaceHostQueryOptions),
 		combine: combineWorkspaceQueries,
 	});
 }

@@ -9,8 +9,10 @@ import {
 	connectHost,
 	disconnectHost,
 	forgetHost,
+	hostLabelFor,
 	isHostReady,
 	registerHostBase,
+	subscribeConnectedHosts,
 	syncConnectedHosts,
 } from "./host-clients";
 
@@ -97,6 +99,20 @@ describe("host-clients", () => {
 		await connectHost(REMOTE);
 
 		expect(baseUrlFor(REMOTE)).toBe("http://127.0.0.1:9999/tok");
+		expect(hostLabelFor(REMOTE)).toBe("workbox");
+	});
+
+	it("publishes connected-host changes for a mounted workspace query", () => {
+		const changed = vi.fn();
+		const unsubscribe = subscribeConnectedHosts(changed);
+
+		registerHostBase(REMOTE, "http://127.0.0.1:9999/tok", "workbox");
+		expect(changed).toHaveBeenCalledOnce();
+		expect(connectedHosts()).toEqual([REMOTE]);
+
+		forgetHost(REMOTE);
+		expect(changed).toHaveBeenCalledTimes(2);
+		unsubscribe();
 	});
 
 	it("forgets a host before waiting for its proxy to close", async () => {

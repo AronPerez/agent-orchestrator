@@ -240,6 +240,9 @@ describe("telemetry sanitizers", () => {
 		expect(routeSurface("/projects/demo")).toBe("project_board");
 		expect(routeSurface("/projects/demo/settings")).toBe("project_settings");
 		expect(routeSurface("/projects/demo/sessions/demo-1")).toBe("session_detail");
+		expect(routeSurface("/host/http%3A%2F%2F192.0.2.1%3A3011/session/demo-1")).toBe("session_detail");
+		expect(routeSurface("/host/http%3A%2F%2F192.0.2.1%3A3011/project/demo")).toBe("project_board");
+		expect(routeSurface("/host/http%3A%2F%2F192.0.2.1%3A3011/project/demo/settings")).toBe("project_settings");
 	});
 
 	it("hashes renderer ids and drops raw route identifiers", async () => {

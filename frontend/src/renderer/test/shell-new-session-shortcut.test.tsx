@@ -307,7 +307,7 @@ beforeEach(() => {
 
 describe("shell workspace startup", () => {
 	it("places the topbar host inside the center panel surface on session routes", async () => {
-		shellMocks.state.routeParams = { sessionId: "sess-1" };
+		shellMocks.state.routeParams = { hostId: "local", sessionId: "sess-1" };
 		await renderShell();
 
 		const host = screen.getByTestId("session-topbar-host");
@@ -476,7 +476,7 @@ describe("shell new-shell-terminal shortcut subscription", () => {
 	});
 
 	it("scopes the terminal to the project in scope", async () => {
-		shellMocks.state.routeParams = { projectId: "proj-1" };
+		shellMocks.state.routeParams = { hostId: "local", projectId: "proj-1" };
 		await renderShell();
 
 		pressNewShellTerminal();
@@ -547,7 +547,7 @@ describe("shell keyboard-shortcuts help subscription", () => {
 
 describe("shell new-session shortcut subscription", () => {
 	it("opens the new-task flow for the route project", async () => {
-		shellMocks.state.routeParams = { projectId: "proj-1" };
+		shellMocks.state.routeParams = { hostId: "local", projectId: "proj-1" };
 		await renderShell();
 
 		emitShortcut();

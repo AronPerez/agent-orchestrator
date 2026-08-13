@@ -342,6 +342,11 @@ function normalizeException(reason: unknown): Error {
 function routeSurface(pathname: string): string {
 	if (pathname === "/") return "home";
 	if (/^\/settings(?:\/|$)/.test(pathname)) return "global_settings";
+	if (/^\/host\/[^/]+\/session\/[^/]+$/.test(pathname)) return "session_detail";
+	if (/^\/host\/[^/]+\/project\/[^/]+(?:\/|$)/.test(pathname)) {
+		if (/\/settings$/.test(pathname)) return "project_settings";
+		return "project_board";
+	}
 	if (/^\/projects\/[^/]+\/sessions\/[^/]+$/.test(pathname)) return "session_detail";
 	if (/^\/projects\/[^/]+(?:\/|$)/.test(pathname)) {
 		if (/\/settings$/.test(pathname)) return "project_settings";

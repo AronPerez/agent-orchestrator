@@ -55,6 +55,17 @@ describe("probeRemote", () => {
 		await expect(probeRemote(entry, refused)).resolves.toBe("offline");
 	});
 
+	it("bounds probes to sleeping hosts", async () => {
+		const sleeping = vi.fn<typeof fetch>((_input, init) =>
+			new Promise((_resolve, reject) => {
+				init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+			}),
+		);
+
+		await expect(probeRemote(entry, sleeping, 1)).resolves.toBe("offline");
+		expect(sleeping.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal);
+	});
+
 	// The port typo that white-screened the app: :8081 was an Expo web server,
 	// whose SPA catch-all answers /healthz with 200 and an HTML page. A status
 	// code proves something replied, not that it speaks the daemon's protocol —

@@ -357,11 +357,14 @@ describe("CommandPalette drill-in + Enter", () => {
 		fireEvent.change(input, { target: { value: "app" } });
 		await waitFor(() => {
 			const selected = document.querySelector('[cmdk-item][data-selected="true"]');
-			expect(selected?.getAttribute("data-value")).toBe("project:proj-1");
+			expect(selected?.getAttribute("data-value")).toBe("project:local:proj-1");
 		});
 		fireEvent.keyDown(input, { key: "Enter" });
 
-		expect(navigateMock).toHaveBeenCalledWith({ to: "/projects/$projectId", params: { projectId: "proj-1" } });
+		expect(navigateMock).toHaveBeenCalledWith({
+			to: "/host/$hostId/project/$projectId",
+			params: { hostId: "local", projectId: "proj-1" },
+		});
 	});
 
 	it("jumps to an archived (terminated) session via search + Enter", async () => {
@@ -487,7 +490,7 @@ describe("CommandPalette actions", () => {
 	});
 
 	it("does not spawn Open orchestrator while the project is restarting", async () => {
-		ctx.params = { projectId: "proj-1" };
+		ctx.params = { hostId: "local", projectId: "proj-1" };
 		act(() => useUiStore.setState({ restartingProjectIds: new Set(["local:proj-1"]) }));
 		renderPalette();
 		act(() => useUiStore.getState().setCommandPaletteOpen(true));
@@ -498,7 +501,7 @@ describe("CommandPalette actions", () => {
 	});
 
 	it("opens project settings instead of spawning when no orchestrator agent is configured", async () => {
-		ctx.params = { projectId: "proj-2" };
+		ctx.params = { hostId: "local", projectId: "proj-2" };
 		ctx.workspaces[1].orchestratorAgent = undefined;
 		renderPalette();
 		act(() => useUiStore.getState().setCommandPaletteOpen(true));
@@ -520,12 +523,15 @@ describe("CommandPalette actions", () => {
 		act(() => useUiStore.getState().setCommandPaletteOpen(true));
 		await screen.findByPlaceholderText(/search projects/i);
 		fireEvent.click(screen.getByText("lib"));
-		expect(navigateMock).toHaveBeenCalledWith({ to: "/projects/$projectId", params: { projectId: "proj-2" } });
+		expect(navigateMock).toHaveBeenCalledWith({
+			to: "/host/$hostId/project/$projectId",
+			params: { hostId: "local", projectId: "proj-2" },
+		});
 		await waitFor(() => expect(paletteInput()).toBeNull());
 	});
 
 	it("re-highlights the first result after the query changes", async () => {
-		ctx.params = { projectId: "proj-1" };
+		ctx.params = { hostId: "local", projectId: "proj-1" };
 		renderPalette();
 		act(() => useUiStore.getState().setCommandPaletteOpen(true));
 		const input = await screen.findByPlaceholderText(/search projects/i);
@@ -542,7 +548,7 @@ describe("CommandPalette actions", () => {
 	});
 
 	it("spawns only once when Open orchestrator is selected twice (in-flight guard)", async () => {
-		ctx.params = { projectId: "proj-2" };
+		ctx.params = { hostId: "local", projectId: "proj-2" };
 		spawnMock.mockReturnValueOnce(new Promise<string>(() => {}));
 		renderPalette();
 		act(() => useUiStore.getState().setCommandPaletteOpen(true));
@@ -554,7 +560,7 @@ describe("CommandPalette actions", () => {
 	});
 
 	it("keeps the palette open and shows an error when spawning an orchestrator fails", async () => {
-		ctx.params = { projectId: "proj-2" };
+		ctx.params = { hostId: "local", projectId: "proj-2" };
 		spawnMock.mockRejectedValueOnce(new Error("daemon down"));
 		renderPalette();
 		act(() => useUiStore.getState().setCommandPaletteOpen(true));
@@ -676,7 +682,7 @@ describe("CommandPalette back navigation", () => {
 
 describe("CommandPalette inline task composer", () => {
 	async function openComposer() {
-		ctx.params = { projectId: "proj-1" };
+		ctx.params = { hostId: "local", projectId: "proj-1" };
 		renderPalette();
 		act(() => useUiStore.getState().setCommandPaletteOpen(true));
 		await screen.findByPlaceholderText(/search projects/i);

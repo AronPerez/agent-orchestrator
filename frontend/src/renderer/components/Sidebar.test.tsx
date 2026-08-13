@@ -20,13 +20,18 @@ import {
 } from "./Sidebar";
 import type { WorkspaceSession, WorkspaceSummary } from "../types/workspace";
 import { agentsQueryKey } from "../hooks/useAgentsQuery";
+import { refKey } from "../lib/hosts";
 import { useUiStore } from "../stores/ui-store";
 
 const { getMock, navigateMock, mockParams, renameSessionMock, spawnMock, updateStatusMock, commandPaletteEnabled } = vi.hoisted(
 	() => ({
 		getMock: vi.fn(),
 		navigateMock: vi.fn(),
-		mockParams: { projectId: undefined as string | undefined, sessionId: undefined as string | undefined },
+		mockParams: {
+			hostId: undefined as string | undefined,
+			projectId: undefined as string | undefined,
+			sessionId: undefined as string | undefined,
+		},
 		renameSessionMock: vi.fn().mockResolvedValue(undefined),
 		spawnMock: vi.fn(),
 		updateStatusMock: vi.fn(),
@@ -36,13 +41,6 @@ const { getMock, navigateMock, mockParams, renameSessionMock, spawnMock, updateS
 
 vi.mock("../lib/rename-session", () => ({ renameSession: renameSessionMock }));
 
-// Destructive copy names the machine it acts on; default to local so every
-// pre-existing assertion keeps seeing today's strings.
-let mockActiveHost: { label: string; url: string } | null = null;
-vi.mock("../lib/active-host", () => ({
-	activeHost: () => mockActiveHost,
-	switchToHost: vi.fn(),
-}));
 vi.mock("../lib/spawn-orchestrator", () => ({ spawnOrchestrator: spawnMock }));
 
 vi.mock("../hooks/useCommandPaletteEnabled", () => ({
@@ -83,7 +81,12 @@ vi.mock("../lib/api-client", () => ({
 
 vi.mock("../lib/host-clients", () => ({
 	baseUrlFor: () => "http://127.0.0.1:3001",
-	connectedHosts: () => [],
+	connectedHosts: (() => {
+		const hosts: string[] = [];
+		return () => hosts;
+	})(),
+	subscribeConnectedHosts: () => () => undefined,
+	hostLabelFor: (host: string) => host === "http://192.0.2.1:3011" ? "workbox" : host,
 	isHostReady: () => true,
 	clientFor: () => ({ GET: getMock, POST: vi.fn(), PUT: vi.fn() }),
 }));
@@ -258,8 +261,8 @@ beforeEach(() => {
 	spawnMock.mockReset();
 	updateStatusMock.mockReset().mockResolvedValue({ state: "idle" });
 	mockParams.projectId = undefined;
+	mockParams.hostId = undefined;
 	mockParams.sessionId = undefined;
-	mockActiveHost = null;
 });
 
 afterEach(() => {
@@ -268,16 +271,15 @@ afterEach(() => {
 
 describe("destructive actions name the remote host", () => {
 	it("names the host on the session kill control", () => {
-		mockActiveHost = { label: "workbox", url: "http://192.0.2.1:3011" };
-		renderSidebar({ workspaces: [{ ...workspace, sessions: [session] }] });
+		const host = "http://192.0.2.1:3011";
+		renderSidebar({ workspaces: [{ ...workspace, host, sessions: [{ ...session, host }] }] });
 
 		expect(screen.getByRole("button", { name: "Kill session on workbox" })).toBeInTheDocument();
 	});
 
 	it("names the host in the remove-project confirmation", async () => {
-		mockActiveHost = { label: "workbox", url: "http://192.0.2.1:3011" };
 		const user = userEvent.setup();
-		renderSidebar();
+		renderSidebar({ workspaces: [{ ...workspace, host: "http://192.0.2.1:3011" }] });
 
 		await user.click(screen.getByLabelText("Project actions for Project One"));
 		await user.click(await screen.findByRole("menuitem", { name: "Remove project" }));
@@ -305,6 +307,35 @@ describe("destructive actions name the remote host", () => {
 });
 
 describe("Sidebar", () => {
+	it("keeps colliding projects keyed, selected, and routed by host", async () => {
+		const remoteHost = "http://192.0.2.1:3011";
+		const remoteOrchestrator = {
+			...session,
+			host: remoteHost,
+			id: "remote-orchestrator",
+			kind: "orchestrator" as const,
+		};
+		const remote = { ...workspace, host: remoteHost, sessions: [remoteOrchestrator] };
+		mockParams.hostId = remote.host;
+		mockParams.projectId = remote.id;
+		mockParams.sessionId = remoteOrchestrator.id;
+		const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+		renderSidebar({ workspaces: [workspace, remote] });
+
+		const rows = [workspace, remote].map((project) =>
+			document.querySelector<HTMLElement>(`[data-project-ref="${refKey(project)}"] [data-sidebar="menu-button"]`),
+		);
+		expect(consoleError).not.toHaveBeenCalledWith(expect.stringContaining("same key"), expect.anything());
+		expect(rows[0]).not.toHaveAttribute("data-active", "true");
+		expect(rows[1]).toHaveAttribute("data-active", "true");
+
+		await userEvent.click(rows[1]!);
+		expect(navigateMock).toHaveBeenCalledWith({
+			to: "/host/$hostId/project/$projectId",
+			params: { hostId: remote.host, projectId: remote.id },
+		});
+	});
+
 	it("suppresses focus chrome without removing keyboard focusability", () => {
 		renderSidebar();
 
@@ -517,7 +548,10 @@ describe("Sidebar", () => {
 		// Click the project name text — it's inside SidebarMenuButton and bubbles up to onProjectClick.
 		await user.click(screen.getByText("Project One"));
 
-		expect(navigateMock).toHaveBeenCalledWith({ to: "/projects/$projectId", params: { projectId: "proj-1" } });
+		expect(navigateMock).toHaveBeenCalledWith({
+			to: "/host/$hostId/project/$projectId",
+			params: { hostId: "local", projectId: "proj-1" },
+		});
 	});
 
 	it("returns to the project board from an orchestrator session without collapsing", async () => {
@@ -529,6 +563,7 @@ describe("Sidebar", () => {
 			kind: "orchestrator",
 		};
 		mockParams.projectId = "proj-1";
+		mockParams.hostId = "local";
 		mockParams.sessionId = "proj-1-orc";
 		renderSidebar({
 			workspaces: [{ ...workspace, sessions: [orchestrator, session] }],
@@ -538,7 +573,10 @@ describe("Sidebar", () => {
 
 		await user.click(screen.getByText("Project One"));
 
-		expect(navigateMock).toHaveBeenCalledWith({ to: "/projects/$projectId", params: { projectId: "proj-1" } });
+		expect(navigateMock).toHaveBeenCalledWith({
+			to: "/host/$hostId/project/$projectId",
+			params: { hostId: "local", projectId: "proj-1" },
+		});
 		expect(screen.getByLabelText("Open fix login")).toBeInTheDocument();
 		expect(screen.getByText("Project One").closest("button")).toHaveAttribute("aria-expanded", "true");
 	});
@@ -546,6 +584,7 @@ describe("Sidebar", () => {
 	it("collapses an expanded project when its board is already active", async () => {
 		const user = userEvent.setup();
 		mockParams.projectId = "proj-1";
+		mockParams.hostId = "local";
 		mockParams.sessionId = undefined;
 		renderSidebar({
 			workspaces: [{ ...workspace, sessions: [session] }],
@@ -1351,6 +1390,7 @@ describe("Sidebar", () => {
 	it("hides all sessions when project is collapsed via folder icon", async () => {
 		const user = userEvent.setup();
 		mockParams.projectId = "proj-1";
+		mockParams.hostId = "local";
 		mockParams.sessionId = "proj-1-2";
 		renderSidebar({
 			workspaces: [

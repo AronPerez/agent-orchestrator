@@ -59,6 +59,7 @@ import { RestoreUnavailableDialog } from "./RestoreUnavailableDialog";
 import { DaemonStartupLoader } from "./DaemonStartupLoader";
 import { useShellMaybe } from "../lib/shell-context";
 import { refKey, type Ref } from "../lib/hosts";
+import { hostActionSuffix } from "../lib/host-disclosure";
 import {
   ArchivedSessionCardAdapter,
   BoardSessionCardAdapter,
@@ -67,7 +68,7 @@ import {
 
 type SessionsBoardProps = {
   /** When set, the board shows only this project's sessions. */
-  projectId?: string;
+  project?: Ref;
 };
 
 type UsageBySession = ReadonlyMap<string, SessionUsageSummary>;
@@ -87,7 +88,7 @@ const noDragStyle = isMac
   ? ({ WebkitAppRegion: "no-drag" } as React.CSSProperties)
   : undefined;
 
-export function SessionsBoard({ projectId }: SessionsBoardProps) {
+export function SessionsBoard({ project }: SessionsBoardProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -98,23 +99,23 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
   const workspaceQuery = useWorkspaceQuery();
   const shell = useShellMaybe();
   const usageBySession =
-    useSessionUsageSummaries(projectId).data ?? emptyUsageBySession;
+    useSessionUsageSummaries(project).data ?? emptyUsageBySession;
   // Evaluated at render so platform mocks in tests can flip the in-panel chrome.
   const boardActionsInPanel = usesBoardActionsInPanel();
   /** Bell lives in the board action row when the shell topbar does not host it. */
   const boardOwnsNotificationCenter = isLinuxPlatform() || boardActionsInPanel;
   const all = flattenHostSections(workspaceQuery.data);
-  const workspaces = projectId
-    ? all.filter((workspace) => workspace.id === projectId)
+  const workspaces = project
+    ? all.filter((workspace) => workspace.host === project.host && workspace.id === project.id)
     : all;
-  const workspace = projectId ? workspaces[0] : undefined;
+  const workspace = project ? workspaces[0] : undefined;
   const projectKey = workspace ? refKey(workspace) : undefined;
   // Same crumb as ShellTopbar: project name in scope, else root-board "Board".
-  const boardLabel = workspace?.name ?? (projectId ? "" : t("shell.board"));
+  const boardLabel = workspace?.name ?? (project ? "" : t("shell.board"));
   const sessions = workspaces.flatMap((workspace) =>
     workerSessions(workspace.sessions),
   );
-  const orchestrator = projectId
+  const orchestrator = project
     ? newestActiveOrchestrator(workspaces[0]?.sessions ?? [])
     : undefined;
   const orchestratorActivityLabel = orchestrator
@@ -152,7 +153,7 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
   useEffect(() => {
     setSpawnError(null);
     setCanCreateAsTui(false);
-  }, [projectId]);
+  }, [projectKey]);
   const previousProjectRef = useRef<Ref | undefined>(workspace);
   useEffect(() => {
     const previousProject = previousProjectRef.current;
@@ -199,9 +200,9 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
     (!isDaemonReady ||
       workspaceStartupState === "loading" ||
       (!workspaceQuery.isSuccess && !workspaceQuery.isError));
-  const showWelcome = !projectId && isLoaded && all.length === 0;
+  const showWelcome = !project && isLoaded && all.length === 0;
   const showProjectEmpty =
-    projectId !== undefined &&
+    project !== undefined &&
     isLoaded &&
     workspaces.length > 0 &&
     sessions.length === 0;
@@ -217,13 +218,13 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
     WorkspaceSession | undefined
   >();
   const terminateSession = useTerminateSession();
-  const activeProjectIdRef = useRef(projectId);
-  activeProjectIdRef.current = projectId;
+  const activeProjectKeyRef = useRef(projectKey);
+  activeProjectKeyRef.current = projectKey;
   useEffect(() => {
     setRestoringSessionId(undefined);
     setRestoreErrors({});
     setRestoreUnavailableSession(undefined);
-  }, [projectId]);
+  }, [projectKey]);
 
   const openSession = (session: WorkspaceSession) =>
     void navigate({
@@ -238,9 +239,9 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
     event.stopPropagation();
     if (restoringSessionId) return;
 	const sessionKey = refKey(session);
-    const restoreProjectId = projectId;
+    const restoreProjectKey = projectKey;
     const isStillActiveProject = () =>
-      !restoreProjectId || activeProjectIdRef.current === restoreProjectId;
+      !restoreProjectKey || activeProjectKeyRef.current === restoreProjectKey;
     setRestoringSessionId(sessionKey);
     setRestoreErrors((current) => {
       const next = { ...current };
@@ -326,7 +327,7 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
     });
   };
 
-  const actions = projectId ? (
+  const actions = project ? (
     <>
       {visibleSpawnError && !showProjectEmpty && (
         <TopbarKillError
@@ -417,7 +418,7 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
       ) : null}
 
       <div className="min-h-0 flex-1 overflow-hidden">
-        {projectId && health.state !== "ok" ? (
+        {project && health.state !== "ok" ? (
           <div className="mx-3 my-3 flex items-center gap-3 rounded-md border border-border bg-surface px-3 py-2 text-xs text-muted-foreground">
             <AlertTriangle
               className="size-icon-base shrink-0 text-warning"
@@ -432,7 +433,7 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
                 variant="primary"
               >
                 <RotateCw className="size-3.5" aria-hidden="true" />
-                {t("shell.restart")}
+                {t("shell.restart")}{workspace ? hostActionSuffix(t, workspace.host) : ""}
               </TopbarButton>
             ) : null}
           </div>
@@ -460,7 +461,7 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
         ) : (
           <SessionsBoardGridView
             columns={columns}
-            key={projectId ?? "all"}
+            key={projectKey ?? "all"}
             labels={boardLabels}
             renderSessionCard={(session) => (
               <BoardSessionCardAdapter

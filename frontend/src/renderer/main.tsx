@@ -75,8 +75,6 @@ async function renderApp(): Promise<void> {
 	// Resolve the persisted locale before mounting so translated text never
 	// flashes in English for users who selected another language.
 	await useLocaleStore.getState().load();
-	// Start every saved host proxy before the first all-host workspace query.
-	await initHosts();
 	createRoot(document.getElementById("root") as HTMLElement).render(
 		<React.StrictMode>
 			<I18nextProvider i18n={appI18n}>
@@ -89,6 +87,10 @@ async function renderApp(): Promise<void> {
 			</I18nextProvider>
 		</React.StrictMode>,
 	);
+	// Saved hosts are additive. A bad credential file or sleeping machine must
+	// never block local first paint; the reactive host registry adds each proxy
+	// to the workspace fan-out as it connects.
+	void initHosts();
 }
 
 void renderApp();

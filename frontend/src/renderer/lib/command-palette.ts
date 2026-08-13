@@ -18,8 +18,8 @@ export type CommandGroupId = "current" | "attention" | "projects" | "sessions" |
 
 export type NavigateTarget =
 	| { to: "/settings" }
-	| { to: "/projects/$projectId"; params: { projectId: string } }
-	| { to: "/projects/$projectId/settings"; params: { projectId: string } }
+	| { to: "/host/$hostId/project/$projectId"; params: { hostId: string; projectId: string } }
+	| { to: "/host/$hostId/project/$projectId/settings"; params: { hostId: string; projectId: string } }
 	| { to: "/host/$hostId/session/$sessionId"; params: { hostId: string; sessionId: string } };
 
 export type CommandAction =
@@ -174,8 +174,8 @@ export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n
 	const { workspaces, currentHostId, currentProjectId, currentSessionId, restartingProjectIds } = ctx;
 	const items: CommandItem[] = [];
 
-	const currentProject = currentProjectId
-		? workspaces.find((workspace) => workspace.id === currentProjectId && (!currentHostId || workspace.host === currentHostId))
+	const currentProject = currentProjectId && currentHostId
+		? workspaces.find((workspace) => workspace.id === currentProjectId && workspace.host === currentHostId)
 		: undefined;
 	const currentSession = currentHostId && currentSessionId
 		? findSession(workspaces, { host: currentHostId, id: currentSessionId })?.session
@@ -250,11 +250,17 @@ export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n
 
 	for (const workspace of workspaces) {
 		items.push({
-			id: `project:${workspace.id}`,
+			id: `project:${refKey(workspace)}`,
 			group: "projects",
 			title: workspace.name,
 			keywords: [workspace.path],
-			action: { kind: "navigate", target: { to: "/projects/$projectId", params: { projectId: workspace.id } } },
+			action: {
+				kind: "navigate",
+				target: {
+					to: "/host/$hostId/project/$projectId",
+					params: { hostId: workspace.host, projectId: workspace.id },
+				},
+			},
 		});
 	}
 

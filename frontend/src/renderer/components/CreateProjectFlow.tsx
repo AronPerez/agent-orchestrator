@@ -18,8 +18,8 @@ import {
   type Host,
   type RemoteHostView,
 } from "../hooks/useRemoteHosts";
-import { activeHost, switchToHost } from "../lib/active-host";
 import { aoBridge } from "../lib/bridge";
+import { connectHost, disconnectHost } from "../lib/host-clients";
 import { daemonErrorMessage } from "../lib/daemon-error";
 import { cn } from "../lib/utils";
 import type { ProjectKind } from "../types/workspace";
@@ -161,13 +161,14 @@ export function CreateProjectFlow({
   };
 
   // A saved host that was renamed, re-pointed or given a rotated password. The
-  // url is the identity everything else keys off — the selection here, and the
-  // active-host url the next boot re-activates — so a changed one is followed
-  // through both rather than left pointing at an entry that no longer exists.
+  // url is the identity everything else keys off. Main drops the old proxy on
+  // every edit, including password-only changes, so replace the renderer's
+  // cached base with the fresh proxy before any project can write through it.
   const hostSaved = async (previousUrl: string, savedUrl: string) => {
     await refreshHosts();
     setHostId((current) => (current === previousUrl ? savedUrl : current));
-    if (activeHost()?.url === previousUrl) await switchToHost(savedUrl);
+    await disconnectHost(previousUrl);
+    await connectHost(savedUrl);
   };
 
   const removeHost = async (url: string) => {
@@ -177,9 +178,8 @@ export function CreateProjectFlow({
       await refreshHosts();
       setHostId((current) => (current === url ? LOCAL_HOST_ID : current));
       setRemovingHost(null);
-      // Main already dropped the proxy; this drops the stored url with it, so
-      // the app lands on local instead of on a host that is no longer saved.
-      if (activeHost()?.url === url) await switchToHost(null);
+      // Main already dropped the proxy; clear the renderer's matching client.
+      await disconnectHost(url);
     } finally {
       setRemovingHostBusy(false);
     }

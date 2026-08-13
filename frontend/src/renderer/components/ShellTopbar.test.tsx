@@ -58,7 +58,11 @@ vi.mock("../lib/api-client", () => ({
 
 vi.mock("../lib/host-clients", () => ({
 	baseUrlFor: () => "http://127.0.0.1:3001",
-	connectedHosts: () => [],
+	connectedHosts: (() => {
+		const hosts: string[] = [];
+		return () => hosts;
+	})(),
+	subscribeConnectedHosts: () => () => undefined,
 	isHostReady: () => true,
 	clientFor: () => ({ POST: postMock }),
 }));
@@ -189,16 +193,6 @@ beforeEach(() => {
 	useUiStore.setState({ inspectorSessions: {}, settingsModal: null });
 });
 
-describe("ShellTopbar host switcher", () => {
-	it("names the host in both the shell topbar and the embedded one", () => {
-		renderTopbar(sessionWith());
-		expect(screen.getByRole("combobox", { name: /this mac/i })).toBeInTheDocument();
-
-		renderTopbar(sessionWith(), true);
-		expect(screen.getAllByRole("combobox", { name: /this mac/i })).toHaveLength(2);
-	});
-});
-
 describe("ShellTopbar status pill", () => {
 	it("renders only session actions when embedded in the terminal bar", () => {
 		renderTopbar(sessionWith(), true);
@@ -286,8 +280,8 @@ describe("ShellTopbar orchestrator actions", () => {
 		expect(screen.queryByText("my-app")).not.toBeInTheDocument();
 		await userEvent.click(kanbanButton);
 		expect(navigateMock).toHaveBeenCalledWith({
-			to: "/projects/$projectId",
-			params: { projectId: "proj-1" },
+			to: "/host/$hostId/project/$projectId",
+			params: { hostId: "local", projectId: "proj-1" },
 		});
 	});
 
@@ -300,8 +294,8 @@ describe("ShellTopbar orchestrator actions", () => {
 		expect(screen.getByRole("button", { name: "New task" })).toHaveClass("bg-raised");
 		await userEvent.click(kanbanButton);
 		expect(navigateMock).toHaveBeenCalledWith({
-			to: "/projects/$projectId",
-			params: { projectId: "proj-1" },
+			to: "/host/$hostId/project/$projectId",
+			params: { hostId: "local", projectId: "proj-1" },
 		});
 	});
 

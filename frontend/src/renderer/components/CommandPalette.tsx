@@ -23,7 +23,7 @@ import { isMacPlatform } from "../lib/platform";
 import { spawnOrchestrator } from "../lib/spawn-orchestrator";
 import { useShell } from "../lib/shell-context";
 import { hasConfiguredOrchestratorAgent, newestActiveOrchestrator } from "../types/workspace";
-import { LOCAL_HOST, refKey, type Ref } from "../lib/hosts";
+import { refKey, type Ref } from "../lib/hosts";
 import { useUiStore } from "../stores/ui-store";
 import { matchesRendererShortcut } from "../stores/keybindings-store";
 import { Button } from "./ui/button";
@@ -195,11 +195,11 @@ export function CommandPalette() {
 					// Modal — do not route to /settings (that legacy path redirects home).
 					useUiStore.getState().openGlobalSettings();
 					break;
-				case "/projects/$projectId":
+				case "/host/$hostId/project/$projectId":
 					void navigate({ to: target.to, params: target.params });
 					break;
-				case "/projects/$projectId/settings":
-					useUiStore.getState().openProjectSettings({ host: LOCAL_HOST, id: target.params.projectId });
+				case "/host/$hostId/project/$projectId/settings":
+					useUiStore.getState().openProjectSettings({ host: target.params.hostId, id: target.params.projectId });
 					break;
 				case "/host/$hostId/session/$sessionId":
 					void navigate({ to: target.to, params: target.params });

@@ -39,7 +39,7 @@ test("opens, selects, and closes standalone shell terminals from the tab strip",
 // listening. Both silently did nothing. The shell layout owns it now, and
 // routes to the standalone terminals view when there is no session on screen.
 test("opens a terminal from the board, where no session view is mounted", async ({ page }) => {
-	await page.goto("/#/projects/ao-demo");
+	await page.goto("/#/host/local/project/ao-demo");
 	await expect(page.getByRole("button", { name: "New terminal" })).toBeVisible();
 
 	await page.getByRole("button", { name: "New terminal" }).click();

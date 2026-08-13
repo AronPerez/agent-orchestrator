@@ -63,7 +63,11 @@ vi.mock("../lib/api-client", () => ({
 
 vi.mock("../lib/host-clients", () => ({
   baseUrlFor: () => "http://127.0.0.1:3001",
-  connectedHosts: () => [],
+  connectedHosts: (() => {
+    const hosts: string[] = [];
+    return () => hosts;
+  })(),
+  subscribeConnectedHosts: () => () => undefined,
   isHostReady: () => true,
   clientFor: () => ({ GET: getMock, PATCH: patchMock, POST: postMock, PUT: putMock }),
 }));
@@ -675,8 +679,8 @@ describe("SessionInspector completion controls", () => {
     await waitFor(() => expect(postMock).toHaveBeenCalledTimes(1));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(navigateMock).toHaveBeenCalledWith({
-      to: "/projects/$projectId",
-      params: { projectId: "ws-1" },
+      to: "/host/$hostId/project/$projectId",
+      params: { hostId: "local", projectId: "ws-1" },
     });
   });
 

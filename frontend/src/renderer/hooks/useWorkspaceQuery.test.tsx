@@ -23,6 +23,7 @@ vi.mock("../lib/host-clients", () => ({
 	clientFor: (host: string) => ({ GET: (url: string) => getMock(host, url) }),
 	connectedHosts: connectedHostsMock,
 	isHostReady: isHostReadyMock,
+	subscribeConnectedHosts: () => () => undefined,
 }));
 
 vi.mock("../lib/telemetry", () => ({ captureRendererEvent: captureRendererEventMock }));

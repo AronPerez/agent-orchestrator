@@ -22,7 +22,11 @@ vi.mock("../lib/api-client", () => ({
 
 vi.mock("../lib/host-clients", () => ({
 	baseUrlFor: () => "http://127.0.0.1:3001",
-	connectedHosts: () => [],
+	connectedHosts: (() => {
+		const hosts: string[] = [];
+		return () => hosts;
+	})(),
+	subscribeConnectedHosts: () => () => undefined,
 	isHostReady: () => true,
 	clientFor: () => ({ POST: postMock }),
 }));
@@ -534,9 +538,9 @@ describe("BrowserPanel", () => {
 		expect(await screen.findByText("Sent")).toBeInTheDocument();
 		expect(postMock).toHaveBeenCalledWith("/api/v1/sessions/{sessionId}/send", {
 			params: { path: { sessionId: "sess-1" } },
-			body: expect.objectContaining({
+			body: {
 				message: expect.stringContaining("Make this button blue."),
-			}),
+			},
 		});
 		const body = postMock.mock.calls[0][1].body as { message: string };
 		expect(body.message).toContain("button#save");

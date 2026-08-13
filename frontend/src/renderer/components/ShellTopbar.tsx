@@ -17,7 +17,6 @@ import {
   useMotionValue,
   useReducedMotion,
 } from "motion/react";
-import { HostSwitcher } from "./HostSwitcher";
 import { NotificationCenter } from "./NotificationCenter";
 import {
   flattenHostSections,
@@ -59,6 +58,7 @@ import {
 } from "./TopbarButton";
 import { SidebarTrigger } from "./ui/sidebar";
 import { SessionTerminationPopover } from "./SessionTerminationPopover";
+import { hostActionSuffix } from "../lib/host-disclosure";
 import { refKey, type Ref } from "../lib/hosts";
 
 const isMac = isMacPlatform();
@@ -150,10 +150,11 @@ export function ShellTopbar({ embedded = false }: { embedded?: boolean } = {}) {
   // removed, or data still loading) shows an empty crumb — never the raw
   // route slug. "Board" is the root-board crumb only.
   const projectId = session?.workspaceId ?? params.projectId;
+  const projectHostId = session?.host ?? params.hostId;
   const isProjectBoardRoute = !isSessionRoute && Boolean(projectId);
   const isRootBoardRoute = !isSessionRoute && !isProjectBoardRoute;
   const project = projectId
-    ? all.find((workspace) => workspace.id === projectId && (!session || workspace.host === session.host))
+    ? all.find((workspace) => workspace.id === projectId && workspace.host === projectHostId)
     : undefined;
   const projectLabel =
     project?.name ??
@@ -168,8 +169,11 @@ export function ShellTopbar({ embedded = false }: { embedded?: boolean } = {}) {
     : false;
 
   const openBoard = () =>
-    projectId
-      ? void navigate({ to: "/projects/$projectId", params: { projectId } })
+    projectId && projectHostId
+      ? void navigate({
+          to: "/host/$hostId/project/$projectId",
+          params: { hostId: projectHostId, projectId },
+        })
       : void navigate({ to: "/" });
 
   const openNewTask = () => {
@@ -398,8 +402,8 @@ export function ShellTopbar({ embedded = false }: { embedded?: boolean } = {}) {
                       return;
                     }
                     void navigate({
-                      to: "/projects/$projectId",
-                      params: { projectId: workspaceId },
+                      to: "/host/$hostId/project/$projectId",
+                      params: { hostId: session.host, projectId: workspaceId },
                     });
                   }}
                 />
@@ -452,12 +456,6 @@ export function ShellTopbar({ embedded = false }: { embedded?: boolean } = {}) {
               )}
             </>
           ) : null}
-          {/* Which machine you are looking at — rendered in both the shell and the
-				    embedded (macOS session) topbar, so the answer stays visible on the
-				    routes where every other cue looks identical to local. */}
-          <div className="flex shrink-0 items-center" style={noDragStyle}>
-            <HostSwitcher />
-          </div>
           {/* The bell always trails the actions row, on every platform. */}
           <NotificationCenter style={noDragStyle} />
         </div>
@@ -567,6 +565,7 @@ function ProjectTerminationFeedback({
   const { t } = useTranslation();
   const states = useProjectTerminateSessionStates(project);
   if (states.length === 0) return null;
+	const hostSuffix = project ? hostActionSuffix(t, project.host) : "";
 
   return (
     <div
@@ -587,9 +586,9 @@ function ProjectTerminationFeedback({
             className="max-w-40 truncate text-caption text-muted-foreground"
             key={refKey(state.session)}
             role="status"
-            title={t("shell.killingNamed", { title: state.session.title })}
+            title={`${t("shell.killingNamed", { title: state.session.title })}${hostSuffix}`}
           >
-            {t("shell.killingNamed", { title: state.session.title })}
+            {t("shell.killingNamed", { title: state.session.title })}{hostSuffix}
           </span>
         ),
       )}

@@ -55,7 +55,11 @@ vi.mock("../lib/api-client", () => ({
 
 vi.mock("../lib/host-clients", () => ({
 	baseUrlFor: () => "http://127.0.0.1:3001",
-	connectedHosts: () => [],
+	connectedHosts: (() => {
+		const hosts: string[] = [];
+		return () => hosts;
+	})(),
+	subscribeConnectedHosts: () => () => undefined,
 	isHostReady: () => true,
 	clientFor: () => ({
 		GET: (path: string, options: unknown) => getMock(path, options),
@@ -478,6 +482,76 @@ describe("TerminalCacheProvider", () => {
 
 			await waitFor(() => expect(terminalA.isConnected).toBe(false));
 			await waitFor(() => expect(xtermUnmounts.value).toBe(1));
+		} finally {
+			view.restore();
+		}
+	});
+
+	it("retains terminals while their host workspace snapshot is failed", async () => {
+		const view = renderCachedPane({ session: sessionA, sessions: [sessionA, sessionB] });
+		try {
+			const terminalA = await waitFor(() => activeXterm());
+			view.show(sessionB);
+			await waitFor(() => expect(activeXterm()).not.toBe(terminalA));
+			act(() => {
+				view.queryClient.setQueryData(workspaceHostQueryKey("local"), [{
+					host: "local",
+					label: "Local",
+					status: "failed",
+					workspaces: [],
+					failure: "temporarily unavailable",
+				}]);
+			});
+
+			await act(async () => {
+				await new Promise((resolve) => setTimeout(resolve, 50));
+			});
+			expect(terminalA.isConnected).toBe(true);
+			expect(xtermUnmounts.value).toBe(0);
+		} finally {
+			view.restore();
+		}
+	});
+
+	it("does not vacuously evict shell terminals when no host snapshot is authoritative", async () => {
+		const shell: ShellTerminal = {
+			host: "local",
+			handleId: "shell-handle",
+			sessionId: sessionA.id,
+			workingDir: "/repo/my-app",
+			title: "scratch",
+			createdAt: "2026-07-30T00:00:00Z",
+		};
+		const view = renderCachedPane({
+			session: sessionA,
+			sessions: [sessionA],
+			shellTerminals: [shell],
+			terminalTarget: {
+				kind: "shell",
+				host: shell.host,
+				handleId: shell.handleId,
+				generation: shell.createdAt,
+				session: sessionA,
+				title: shell.title,
+			},
+		});
+		try {
+			const shellXterm = await waitFor(() => activeXterm());
+			act(() => {
+				view.queryClient.setQueryData(workspaceHostQueryKey("local"), [{
+					host: "local",
+					label: "Local",
+					status: "failed",
+					workspaces: [],
+					failure: "temporarily unavailable",
+				}]);
+			});
+			await act(async () => {
+				await new Promise((resolve) => setTimeout(resolve, 50));
+			});
+
+			expect(shellXterm.isConnected).toBe(true);
+			expect(xtermUnmounts.value).toBe(0);
 		} finally {
 			view.restore();
 		}

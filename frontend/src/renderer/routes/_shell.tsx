@@ -175,7 +175,9 @@ function ShellLayout() {
 				),
 			)
 		: routeParams.projectId
-			? workspaces.find((workspace) => workspace.id === routeParams.projectId)
+			? workspaces.find(
+					(workspace) => workspace.host === routeParams.hostId && workspace.id === routeParams.projectId,
+				)
 			: undefined;
 	const scopedProjectId = scopedWorkspace?.id;
 	// Warms the New Task composer's model-catalog cache while the user is just
@@ -212,7 +214,7 @@ function ShellLayout() {
 		workspaces.length === 0;
 	const isSettingsRoute =
 		Boolean(matchRoute({ to: "/settings", fuzzy: true })) ||
-		Boolean(matchRoute({ to: "/projects/$projectId/settings", fuzzy: true }));
+		Boolean(matchRoute({ to: "/host/$hostId/project/$projectId/settings", fuzzy: true }));
 	// Welcome/settings always self-frame. Platforms that hide the shell-owned
 	// topbar (macOS) use the same full-height inset; session actions mount
 	// inside SessionView.
@@ -382,7 +384,10 @@ function ShellLayout() {
 					project_id: workspace.id,
 					source: "project_add",
 				});
-				void navigate({ to: "/projects/$projectId", params: { projectId: workspace.id } });
+				void navigate({
+					to: "/host/$hostId/project/$projectId",
+					params: { hostId: workspace.host, projectId: workspace.id },
+				});
 				const message = spawnError instanceof Error ? spawnError.message : "Could not start orchestrator";
 				const startupMessage = `Project added, but orchestrator did not start: ${message}`;
 				setOrchestratorStartupError(workspace, startupMessage);
@@ -603,7 +608,10 @@ function ShellLayout() {
 				const workspace = workspaces[Number(event.key) - 1];
 				if (workspace) {
 					event.preventDefault();
-					void navigate({ to: "/projects/$projectId", params: { projectId: workspace.id } });
+					void navigate({
+						to: "/host/$hostId/project/$projectId",
+						params: { hostId: workspace.host, projectId: workspace.id },
+					});
 				}
 			}
 		};

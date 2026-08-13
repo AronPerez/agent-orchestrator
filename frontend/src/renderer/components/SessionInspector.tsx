@@ -442,8 +442,8 @@ function CompletionControls({ session }: { session: WorkspaceSession }) {
       return;
     }
     void navigate({
-      to: "/projects/$projectId",
-      params: { projectId: session.workspaceId },
+      to: "/host/$hostId/project/$projectId",
+      params: { hostId: session.host, projectId: session.workspaceId },
     });
   };
 

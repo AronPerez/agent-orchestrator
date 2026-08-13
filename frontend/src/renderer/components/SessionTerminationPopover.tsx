@@ -1,6 +1,7 @@
 import type { ReactElement } from "react";
 import { useTranslation } from "react-i18next";
 import type { WorkspaceSession } from "../types/workspace";
+import { hostActionSuffix } from "../lib/host-disclosure";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
 
 export function SessionTerminationPopover({
@@ -18,6 +19,7 @@ export function SessionTerminationPopover({
 }) {
 	const { t } = useTranslation();
 	const title = session?.title;
+	const hostSuffix = session ? hostActionSuffix(t, session.host) : "";
 	return (
 		<Popover onOpenChange={onOpenChange} open={open}>
 			<PopoverTrigger asChild>{trigger}</PopoverTrigger>
@@ -33,7 +35,7 @@ export function SessionTerminationPopover({
 			>
 				<p className="text-control font-semibold text-foreground">{t("termination.dialog")}</p>
 				<p className="mt-1 text-caption leading-4 text-muted-foreground">
-					{title ? t("termination.bodyNamed", { title }) : t("termination.body")}
+					{title ? t("termination.bodyNamed", { title }) : t("termination.body")}{hostSuffix}
 				</p>
 				<div className="mt-3 flex justify-end gap-1.5">
 					<button
@@ -44,7 +46,7 @@ export function SessionTerminationPopover({
 						{t("common.no")}
 					</button>
 					<button
-						aria-label={t("termination.confirmAria")}
+						aria-label={`${t("termination.confirmAria")}${hostSuffix}`}
 						className="h-control-md rounded-md bg-danger-strong px-2.5 text-xs font-semibold text-white transition-[filter] hover:brightness-110"
 						onClick={onConfirm}
 						type="button"

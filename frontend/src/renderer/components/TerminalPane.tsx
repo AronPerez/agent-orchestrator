@@ -526,12 +526,15 @@ export function TerminalCacheProvider({
 	// snapshot no longer contains their logical session.
 	useEffect(() => {
 		if (!workspaceQuery.isSuccess) return;
+		const readySections = (workspaceQuery.data ?? []).filter((section) => section.status === "ready");
+		const authoritativeHosts = new Set(readySections.map((section) => section.host));
 		const sessions = new Map(
-		flattenHostSections(workspaceQuery.data).flatMap((workspace) =>
+			flattenHostSections(readySections).flatMap((workspace) =>
 				workspace.sessions.map((session) => [refKey(session), session] as const),
 			),
 		);
 		for (const entry of entriesRef.current.values()) {
+			if (!authoritativeHosts.has(entry.host)) continue;
 			const session = entry.sessionKey ? sessions.get(entry.sessionKey) : undefined;
 			if (entry.sessionKey && !session) {
 				removeEntry(entry.cacheKey);
@@ -555,12 +558,18 @@ export function TerminalCacheProvider({
 	// Shell handles have their own lifecycle outside WorkspaceSession. Closing a
 	// shell must close its retained mux writer even if it was parked.
 	useEffect(() => {
-		if (shellTerminalsQueries.some((query) => !query.isSuccess)) return;
+		if (!workspaceQuery.isSuccess) return;
+		const authoritativeHosts = new Set<HostId>();
 		const shells = new Map(
-			shellTerminalsQueries.flatMap((query) => query.data ?? []).map((terminal) => [refKey({ host: terminal.host, id: terminal.handleId }), terminal] as const),
+			shellTerminalsQueries.flatMap((query, index) => {
+				const section = workspaceQuery.data?.[index];
+				if (section?.status !== "ready" || !query.isSuccess) return [];
+				authoritativeHosts.add(section.host);
+				return query.data ?? [];
+			}).map((terminal) => [refKey({ host: terminal.host, id: terminal.handleId }), terminal] as const),
 		);
 		for (const entry of entriesRef.current.values()) {
-			if (entry.kind !== "shell") continue;
+			if (entry.kind !== "shell" || !authoritativeHosts.has(entry.host)) continue;
 			const shell = shells.get(refKey({ host: entry.host, id: entry.handleId }));
 			if (
 				!shell ||
@@ -579,7 +588,7 @@ export function TerminalCacheProvider({
 				rerender();
 			}
 		}
-	}, [removeEntry, shellTerminalsQueries]);
+	}, [removeEntry, shellTerminalsQueries, workspaceQuery.data, workspaceQuery.isSuccess]);
 
 	// The provider is the final shell ownership boundary. React disposes the
 	// portals; remove their externally-created host nodes as well.

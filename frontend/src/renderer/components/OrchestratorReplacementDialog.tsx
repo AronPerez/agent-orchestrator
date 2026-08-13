@@ -7,6 +7,7 @@ import type { OrchestratorReplacementFailure } from "../stores/ui-store";
 import { findProjectOrchestrator, type WorkspaceSummary } from "../types/workspace";
 import { Button } from "./ui/button";
 import type { Ref } from "../lib/hosts";
+import { hostActionSuffix } from "../lib/host-disclosure";
 import {
 	settingsDialogContentClass,
 	settingsDialogFooterClass,
@@ -33,6 +34,7 @@ export function OrchestratorReplacementDialog({
 	const { t } = useTranslation();
 	const navigate = useNavigate();
 	const open = Boolean(project && error);
+	const hostSuffix = project ? hostActionSuffix(t, project.host) : "";
 	const orchestrator = project ? findProjectOrchestrator(workspaces, project) : undefined;
 
 	const openCurrent = () => {
@@ -68,7 +70,7 @@ export function OrchestratorReplacementDialog({
 							<div className="min-w-0 flex-1">
 								<Dialog.Title className="settings-dialog-title">{t("orchestratorReplacement.title")}</Dialog.Title>
 								<Dialog.Description className="mt-1 text-control leading-5 text-settings-muted">
-									{error?.message ?? t("orchestratorReplacement.fallback")}
+									{error?.message ?? t("orchestratorReplacement.fallback")}{hostSuffix}
 								</Dialog.Description>
 							</div>
 						</div>
@@ -76,7 +78,7 @@ export function OrchestratorReplacementDialog({
 					<div className={settingsDialogFooterClass}>
 						{error && isChatPreflightCode(error.code) ? (
 							<Button type="button" variant="footer" onClick={() => project && onRetryAsTui(project)}>
-								{t("newTask.createAsTui")}
+								{t("newTask.createAsTui")}{hostSuffix}
 							</Button>
 						) : null}
 						{orchestrator ? (
@@ -90,7 +92,7 @@ export function OrchestratorReplacementDialog({
 							onClick={() => project && onRetry(project)}
 						>
 							<RotateCw className="size-3.5" aria-hidden="true" />
-							{t("orchestratorReplacement.retry")}
+							{t("orchestratorReplacement.retry")}{hostSuffix}
 						</Button>
 					</div>
 				</Dialog.Content>
