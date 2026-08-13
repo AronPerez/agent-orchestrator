@@ -101,7 +101,6 @@ describe("agent-browser runtime lifecycle", () => {
 		const bridge = {
 			start: vi.fn(overrides.start ?? (async () => "ws://127.0.0.1:1/fixture")),
 			close: vi.fn(overrides.close ?? (async () => undefined)),
-		endpointForTarget: vi.fn(() => "ws://127.0.0.1:1/fixture?devtools=fixture-capability"),
 		};
 		const processRunner = vi.fn(
 			overrides.processRunner ?? (async () => ({ stdout: "", stderr: "", exitCode: 0 })),
@@ -192,11 +191,10 @@ describe("agent-browser runtime lifecycle", () => {
 	it("serializes concurrent initialization and removes the owned run root", async () => {
 		const { dataDir, bridge, runtime } = await fixture();
 		try {
-			const endpoints = await Promise.all([
-				runtime.devtoolsEndpoint("session-1", "t1", provider),
-				runtime.devtoolsEndpoint("session-1", "t1", provider),
+			await Promise.all([
+				runtime.run("session-1", ["snapshot"], provider),
+				runtime.run("session-1", ["snapshot"], provider),
 			]);
-			expect(endpoints).toEqual([endpoints[0], endpoints[0]]);
 			expect(bridge.start).toHaveBeenCalledTimes(1);
 
 			await runtime.dispose();
@@ -336,7 +334,7 @@ describe("agent-browser runtime lifecycle", () => {
 		const socketDir = path.join(socketBase, "x".repeat(120));
 		const { dataDir, runtime, bridge } = await fixture({ platform: "darwin", socketDir });
 		try {
-			await expect(runtime.devtoolsEndpoint("session-1", "t1", provider)).rejects.toMatchObject({
+			await expect(runtime.run("session-1", ["snapshot"], provider)).rejects.toMatchObject({
 				code: "AGENT_BROWSER_START_FAILED",
 			});
 			expect(bridge.start).not.toHaveBeenCalled();
@@ -359,7 +357,7 @@ describe("agent-browser runtime lifecycle", () => {
 			},
 		});
 		try {
-			await runtime.devtoolsEndpoint("session-1", "t1", provider);
+			await runtime.run("session-1", ["snapshot"], provider);
 			const closing = runtime.closeSession("session-1");
 			await vi.waitFor(() => expect(processRunner).toHaveBeenCalledWith(
 				process.execPath,
@@ -391,7 +389,7 @@ describe("agent-browser runtime lifecycle", () => {
 			},
 		});
 		try {
-			await runtime.devtoolsEndpoint("session-1", "t1", provider);
+			await runtime.run("session-1", ["snapshot"], provider);
 			await runtime.dispose();
 			expect(bridge.close).toHaveBeenCalledTimes(1);
 			expect(await readdir(dataDir)).toEqual([]);

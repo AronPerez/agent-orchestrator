@@ -462,7 +462,14 @@ describe("prSummaryParts", () => {
 						{
 							reviewerId: "alice",
 							count: 6,
-							links: [{ url: "https://github.com/acme/repo/pull/7#discussion_r1", file: "main.go", line: 12 }],
+							links: [
+								{
+									url: "https://github.com/acme/repo/pull/7#discussion_r1",
+									file: "main.go",
+									line: 12,
+									autoInjectReview: true,
+								},
+							],
 						},
 					],
 				},
@@ -536,8 +543,18 @@ describe("prSummaryParts", () => {
 							count: 2,
 							reviewUrl: "https://github.com/acme/repo/pull/7#pullrequestreview-1",
 							links: [
-								{ url: "https://github.com/acme/repo/pull/7#discussion_r1", file: "main.go", line: 12 },
-								{ url: "https://github.com/acme/repo/pull/7#discussion_r2", file: "test.go", line: 20 },
+								{
+									url: "https://github.com/acme/repo/pull/7#discussion_r1",
+									file: "main.go",
+									line: 12,
+									autoInjectReview: true,
+								},
+								{
+									url: "https://github.com/acme/repo/pull/7#discussion_r2",
+									file: "test.go",
+									line: 20,
+									autoInjectReview: true,
+								},
 							],
 						},
 					],
@@ -563,8 +580,18 @@ describe("prSummaryParts", () => {
 							reviewerId: "alice",
 							count: 2,
 							links: [
-								{ url: "https://github.com/acme/repo/pull/7#discussion_r1", file: "main.go", line: 12 },
-								{ url: "https://github.com/acme/repo/pull/7#discussion_r2", file: "test.go", line: 20 },
+								{
+									url: "https://github.com/acme/repo/pull/7#discussion_r1",
+									file: "main.go",
+									line: 12,
+									autoInjectReview: true,
+								},
+								{
+									url: "https://github.com/acme/repo/pull/7#discussion_r2",
+									file: "test.go",
+									line: 20,
+									autoInjectReview: true,
+								},
 							],
 						},
 					],

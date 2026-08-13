@@ -26,28 +26,37 @@ export const DEFAULT_DAEMON_PORT = 3001;
 export const DAEMON_SERVICE_NAME = "agent-orchestrator-daemon";
 
 export type DaemonProbe = {
-	status: string;
-	service: string;
-	pid: number;
-	executablePath?: string;
-	workingDirectory?: string;
-	startupWorkingDirectory?: string;
-	/** VCS build stamp (git revision, "-dirty" suffix when the tree was modified).
-	 * Absent on unstamped builds (`go run`) — callers then fall back to path. */
-	buildIdentity?: string;
+  status: string;
+  service: string;
+  pid: number;
+  executablePath?: string;
+  workingDirectory?: string;
+  startupWorkingDirectory?: string;
+  /** VCS build stamp (git revision, "-dirty" suffix when the tree was modified).
+   * Absent on unstamped builds (`go run`) — callers then fall back to path. */
+  buildIdentity?: string;
+  /** Stable outer .AppImage path (AO_APPIMAGE), present only when the daemon's launcher runs under AppImage. */
+  appImagePath?: string;
 };
 
 /** A /healthz|/readyz probe of a loopback port; resolves null when nothing valid answers. */
-export type DaemonProber = (port: number, endpoint: "healthz" | "readyz") => Promise<DaemonProbe | null>;
+export type DaemonProber = (
+  port: number,
+  endpoint: "healthz" | "readyz",
+) => Promise<DaemonProbe | null>;
 
 /**
  * The port a freshly spawned daemon is expected to bind: AO_PORT when set and
  * valid, otherwise the daemon's default. Used to probe for an already-serving
  * daemon before spawning a child that would only refuse and exit.
  */
-export function expectedDaemonPort(env: Record<string, string | undefined>): number {
-	const configured = env.AO_PORT ? Number(env.AO_PORT) : NaN;
-	return Number.isInteger(configured) && configured >= 1 && configured <= 65535 ? configured : DEFAULT_DAEMON_PORT;
+export function expectedDaemonPort(
+  env: Record<string, string | undefined>,
+): number {
+  const configured = env.AO_PORT ? Number(env.AO_PORT) : NaN;
+  return Number.isInteger(configured) && configured >= 1 && configured <= 65535
+    ? configured
+    : DEFAULT_DAEMON_PORT;
 }
 
 /**
@@ -55,31 +64,51 @@ export function expectedDaemonPort(env: Record<string, string | undefined>): num
  * the typed probe, or null when the body is the wrong shape, status, or service
  * (e.g. some unrelated server happens to occupy the port).
  */
-export function parseDaemonProbe(endpoint: "healthz" | "readyz", body: unknown): DaemonProbe | null {
-	if (typeof body !== "object" || body === null) return null;
-	const candidate = body as Partial<DaemonProbe>;
-	if (candidate.status !== (endpoint === "healthz" ? "ok" : "ready")) return null;
-	if (candidate.service !== DAEMON_SERVICE_NAME) return null;
-	if (typeof candidate.pid !== "number" || !Number.isInteger(candidate.pid)) return null;
-	return {
-		status: candidate.status,
-		service: candidate.service,
-		pid: candidate.pid,
-		executablePath: typeof candidate.executablePath === "string" ? candidate.executablePath : undefined,
-		workingDirectory: typeof candidate.workingDirectory === "string" ? candidate.workingDirectory : undefined,
-		startupWorkingDirectory:
-			typeof candidate.startupWorkingDirectory === "string" ? candidate.startupWorkingDirectory : undefined,
-		buildIdentity: typeof candidate.buildIdentity === "string" ? candidate.buildIdentity : undefined,
-	};
+export function parseDaemonProbe(
+  endpoint: "healthz" | "readyz",
+  body: unknown,
+): DaemonProbe | null {
+  if (typeof body !== "object" || body === null) return null;
+  const candidate = body as Partial<DaemonProbe>;
+  if (candidate.status !== (endpoint === "healthz" ? "ok" : "ready"))
+    return null;
+  if (candidate.service !== DAEMON_SERVICE_NAME) return null;
+  if (typeof candidate.pid !== "number" || !Number.isInteger(candidate.pid))
+    return null;
+  return {
+    status: candidate.status,
+    service: candidate.service,
+    pid: candidate.pid,
+    executablePath:
+      typeof candidate.executablePath === "string"
+        ? candidate.executablePath
+        : undefined,
+    workingDirectory:
+      typeof candidate.workingDirectory === "string"
+        ? candidate.workingDirectory
+        : undefined,
+    startupWorkingDirectory:
+      typeof candidate.startupWorkingDirectory === "string"
+        ? candidate.startupWorkingDirectory
+        : undefined,
+    buildIdentity:
+      typeof candidate.buildIdentity === "string"
+        ? candidate.buildIdentity
+        : undefined,
+    appImagePath:
+      typeof candidate.appImagePath === "string"
+        ? candidate.appImagePath
+        : undefined,
+  };
 }
 
 export type RunFileResolveDeps = {
-	/** running.json contents, or null when the file has no path or could not be read. */
-	runFileContents: string | null;
-	isProcessAlive: (pid: number) => boolean;
-	probe: DaemonProber;
-	/** Foreign-daemon check (dev/bundled identity); returns a message, or null when it is ours. */
-	identityError: (probe: DaemonProbe) => string | null;
+  /** running.json contents, or null when the file has no path or could not be read. */
+  runFileContents: string | null;
+  isProcessAlive: (pid: number) => boolean;
+  probe: DaemonProber;
+  /** Foreign-daemon check (dev/bundled identity); returns a message, or null when it is ours. */
+  identityError: (probe: DaemonProbe) => string | null;
 };
 
 /**
@@ -90,25 +119,27 @@ export type RunFileResolveDeps = {
  *   - null               → the run-file is absent/stale/inconsistent; the caller
  *                          should fall through to {@link resolveDaemonFromPort}.
  */
-export async function resolveDaemonFromRunFile(deps: RunFileResolveDeps): Promise<DaemonStatus | null> {
-	const { runFileContents, isProcessAlive, probe, identityError } = deps;
-	if (runFileContents === null) return null;
-	const info = parseRunFile(runFileContents);
-	if (!info || !isProcessAlive(info.pid)) return null;
+export async function resolveDaemonFromRunFile(
+  deps: RunFileResolveDeps,
+): Promise<DaemonStatus | null> {
+  const { runFileContents, isProcessAlive, probe, identityError } = deps;
+  if (runFileContents === null) return null;
+  const info = parseRunFile(runFileContents);
+  if (!info || !isProcessAlive(info.pid)) return null;
 
-	const health = await probe(info.port, "healthz");
-	// The recorded PID must match the live daemon; otherwise the run-file points
-	// at the wrong process — return null so the caller falls through to the port
-	// probe rather than trusting a stale handshake.
-	if (!health || health.pid !== info.pid) return null;
-	return readinessStatus(info.port, info.pid, health, probe, identityError);
+  const health = await probe(info.port, "healthz");
+  // The recorded PID must match the live daemon; otherwise the run-file points
+  // at the wrong process — return null so the caller falls through to the port
+  // probe rather than trusting a stale handshake.
+  if (!health || health.pid !== info.pid) return null;
+  return readinessStatus(info.port, info.pid, health, probe, identityError);
 }
 
 export type PortProbeResolveDeps = {
-	expectedPort: number;
-	probe: DaemonProber;
-	/** Foreign-daemon check (dev/bundled identity); returns a message, or null when it is ours. */
-	identityError: (probe: DaemonProbe) => string | null;
+  expectedPort: number;
+  probe: DaemonProber;
+  /** Foreign-daemon check (dev/bundled identity); returns a message, or null when it is ours. */
+  identityError: (probe: DaemonProbe) => string | null;
 };
 
 /**
@@ -124,11 +155,19 @@ export type PortProbeResolveDeps = {
  * (/readyz + identity), anchoring on the PID /healthz reports instead of the
  * run-file's, so attaching via the port is no laxer than attaching via the file.
  */
-export async function resolveDaemonFromPort(deps: PortProbeResolveDeps): Promise<DaemonStatus | null> {
-	const { expectedPort, probe, identityError } = deps;
-	const health = await probe(expectedPort, "healthz");
-	if (!health) return null;
-	return readinessStatus(expectedPort, health.pid, health, probe, identityError);
+export async function resolveDaemonFromPort(
+  deps: PortProbeResolveDeps,
+): Promise<DaemonStatus | null> {
+  const { expectedPort, probe, identityError } = deps;
+  const health = await probe(expectedPort, "healthz");
+  if (!health) return null;
+  return readinessStatus(
+    expectedPort,
+    health.pid,
+    health,
+    probe,
+    identityError,
+  );
 }
 
 /**
@@ -139,43 +178,43 @@ export async function resolveDaemonFromPort(deps: PortProbeResolveDeps): Promise
  * move.
  */
 async function readinessStatus(
-	port: number,
-	pid: number,
-	health: DaemonProbe,
-	probe: DaemonProber,
-	identityError: (probe: DaemonProbe) => string | null,
+  port: number,
+  pid: number,
+  health: DaemonProbe,
+  probe: DaemonProber,
+  identityError: (probe: DaemonProbe) => string | null,
 ): Promise<DaemonStatus> {
-	const ready = await probe(port, "readyz");
-	if (!ready || ready.pid !== pid) {
-		return {
-			state: "error",
-			port,
-			pid,
-			executablePath: health.executablePath,
-			workingDirectory: health.workingDirectory,
-			message: "An AO daemon is already running, but it is not ready yet.",
-			code: "not_ready",
-		};
-	}
+  const ready = await probe(port, "readyz");
+  if (!ready || ready.pid !== pid) {
+    return {
+      state: "error",
+      port,
+      pid,
+      executablePath: health.executablePath,
+      workingDirectory: health.workingDirectory,
+      message: "An AO daemon is already running, but it is not ready yet.",
+      code: "not_ready",
+    };
+  }
 
-	const message = identityError(ready);
-	if (message) {
-		return {
-			state: "error",
-			port,
-			pid,
-			executablePath: ready.executablePath,
-			workingDirectory: ready.workingDirectory,
-			message,
-			code: "identity_mismatch",
-		};
-	}
+  const message = identityError(ready);
+  if (message) {
+    return {
+      state: "error",
+      port,
+      pid,
+      executablePath: ready.executablePath,
+      workingDirectory: ready.workingDirectory,
+      message,
+      code: "identity_mismatch",
+    };
+  }
 
-	return {
-		state: "ready",
-		port,
-		pid,
-		executablePath: ready.executablePath,
-		workingDirectory: ready.workingDirectory,
-	};
+  return {
+    state: "ready",
+    port,
+    pid,
+    executablePath: ready.executablePath,
+    workingDirectory: ready.workingDirectory,
+  };
 }

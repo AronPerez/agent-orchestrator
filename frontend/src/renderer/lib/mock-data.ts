@@ -295,6 +295,7 @@ export const mockSessionScmSummaries: Record<string, SessionPRSummary[]> = {
 				reviews: [
 					{
 						reviewerId: "prateek",
+						autoInjectReview: true,
 						verdict: "changes_requested",
 						submittedAt: minutesAgo(18),
 						reviewUrl: "https://github.com/acme-inc/ao-demo/pull/318#pullrequestreview-3101",
@@ -302,6 +303,7 @@ export const mockSessionScmSummaries: Record<string, SessionPRSummary[]> = {
 					},
 					{
 						reviewerId: "codex",
+						autoInjectReview: true,
 						isBot: true,
 						verdict: "approved",
 						submittedAt: minutesAgo(15),
@@ -316,8 +318,8 @@ export const mockSessionScmSummaries: Record<string, SessionPRSummary[]> = {
 						reviewUrl: "https://github.com/acme-inc/ao-demo/pull/318#pullrequestreview-3101",
 						// Two comments, two separate threads — resolving addresses threads.
 						links: [
-							{ file: "frontend/src/renderer/components/TerminalPane.tsx", line: 84 },
-							{ file: "frontend/src/renderer/styles.css", line: 219 },
+							{ file: "frontend/src/renderer/components/TerminalPane.tsx", line: 84, autoInjectReview: true },
+							{ file: "frontend/src/renderer/styles.css", line: 219, autoInjectReview: true },
 						],
 					},
 				],
@@ -437,6 +439,7 @@ export const mockSessionScmSummaries: Record<string, SessionPRSummary[]> = {
 				reviews: [
 					{
 						reviewerId: "prateek",
+						autoInjectReview: true,
 						verdict: "approved",
 						submittedAt: minutesAgo(41),
 						reviewUrl: "https://github.com/me/webgl-preview/pull/52#pullrequestreview-2001",
@@ -444,6 +447,7 @@ export const mockSessionScmSummaries: Record<string, SessionPRSummary[]> = {
 					},
 					{
 						reviewerId: "codex",
+						autoInjectReview: true,
 						isBot: true,
 						verdict: "approved",
 						submittedAt: minutesAgo(38),
@@ -466,6 +470,7 @@ export const mockSessionScmSummaries: Record<string, SessionPRSummary[]> = {
 				reviews: [
 					{
 						reviewerId: "maya",
+						autoInjectReview: true,
 						verdict: "changes_requested",
 						submittedAt: minutesAgo(24),
 						reviewUrl: "https://github.com/me/webgl-preview/pull/56#pullrequestreview-1001",
@@ -473,6 +478,7 @@ export const mockSessionScmSummaries: Record<string, SessionPRSummary[]> = {
 					},
 					{
 						reviewerId: "copilot",
+						autoInjectReview: true,
 						isBot: true,
 						verdict: "none",
 						submittedAt: minutesAgo(19),
@@ -490,11 +496,13 @@ export const mockSessionScmSummaries: Record<string, SessionPRSummary[]> = {
 								url: "https://github.com/me/webgl-preview/pull/56#discussion_r1001",
 								file: "src/input/pointer-lock.ts",
 								line: 88,
+								autoInjectReview: true,
 							},
 							{
 								url: "https://github.com/me/webgl-preview/pull/56#discussion_r1002",
 								file: "src/input/keyboard.ts",
 								line: 41,
+								autoInjectReview: true,
 							},
 						],
 					},
