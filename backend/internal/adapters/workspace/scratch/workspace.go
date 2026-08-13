@@ -23,6 +23,7 @@ type Workspace struct {
 }
 
 var _ ports.Workspace = (*Workspace)(nil)
+var _ ports.WorkspaceObserver = (*Workspace)(nil)
 
 // New validates ManagedRoot and returns a scratch workspace adapter.
 func New(opts Options) (*Workspace, error) {
@@ -128,6 +129,16 @@ func (w *Workspace) Exists(_ context.Context, info ports.WorkspaceInfo) (bool, e
 		return false, fmt.Errorf("scratch workspace: stat %q: %w", path, err)
 	}
 	return fi.IsDir(), nil
+}
+
+// ObserveWorkspace validates the managed path and returns a path-only
+// observation. Scratch projects intentionally have no fabricated Git facts.
+func (w *Workspace) ObserveWorkspace(_ context.Context, info ports.WorkspaceInfo) (ports.WorkspaceObservation, error) {
+	path, err := w.validateManagedPath(info.Path)
+	if err != nil {
+		return ports.WorkspaceObservation{}, err
+	}
+	return ports.WorkspaceObservation{Path: path}, nil
 }
 
 func (w *Workspace) managedPath(cfg ports.WorkspaceConfig) (string, error) {

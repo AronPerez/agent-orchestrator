@@ -116,6 +116,19 @@ describe("parseDaemonProbe", () => {
 		expect(probe?.startupWorkingDirectory).toBeUndefined();
 		expect(probe?.buildIdentity).toBeUndefined();
 	});
+
+	it("carries appImagePath when the daemon reports it", () => {
+		const probe = parseDaemonProbe("readyz", {
+			...readyBody,
+			appImagePath: "/home/user/Apps/agent-orchestrator.AppImage",
+		});
+		expect(probe?.appImagePath).toBe("/home/user/Apps/agent-orchestrator.AppImage");
+	});
+
+	it("drops appImagePath when absent or not a string", () => {
+		expect(parseDaemonProbe("healthz", healthBody)?.appImagePath).toBeUndefined();
+		expect(parseDaemonProbe("healthz", { ...healthBody, appImagePath: 42 })?.appImagePath).toBeUndefined();
+	});
 });
 
 describe("resolveDaemonFromRunFile", () => {

@@ -140,8 +140,8 @@ Téléchargez la dernière build de bureau pour votre plateforme :
 
 | Plateforme            | Téléchargement                                                                                                                |
 | --------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| macOS (Apple silicon) | [Download](https://github.com/Untrivial-ai/agent-orchestrator/releases/latest/download/agent-orchestrator-darwin-arm64.zip)   |
-| macOS (Intel)         | [Download](https://github.com/Untrivial-ai/agent-orchestrator/releases/latest/download/agent-orchestrator-darwin-x64.zip)     |
+| macOS (Apple silicon) | [Download](https://github.com/Untrivial-ai/agent-orchestrator/releases/latest/download/agent-orchestrator-darwin-arm64.dmg)   |
+| macOS (Intel)         | [Download](https://github.com/Untrivial-ai/agent-orchestrator/releases/latest/download/agent-orchestrator-darwin-x64.dmg)     |
 | Windows               | [Download](https://github.com/Untrivial-ai/agent-orchestrator/releases/latest/download/agent-orchestrator-win32-x64.exe)      |
 | Linux (AppImage)      | [Download](https://github.com/Untrivial-ai/agent-orchestrator/releases/latest/download/agent-orchestrator-linux-x64.AppImage) |
 | Linux (Debian/Ubuntu) | [Download](https://github.com/Untrivial-ai/agent-orchestrator/releases/latest/download/agent-orchestrator-linux-x64.deb)      |
@@ -189,9 +189,9 @@ ao start
 | [docs/STATUS.md](../docs/STATUS.md)                                 | Ce qui est actuellement livré sur `main` et ce qui est encore en cours.                      |
 | [docs/stack.md](../docs/stack.md)                                   | Décisions de bibliothèques, runtime et dépendances.                                          |
 
-## Télémétrie
+## Télémétrie anonyme
 
-Le renderer Electron d'Agent Orchestrator envoie des événements d'usage anonymes à PostHog pour la fiabilité et la compréhension produit. L'enregistrement de session PostHog est désactivé par défaut ; si une investigation limitée dans le temps l'active, les chemins locaux et les URL locales sont expurgés avant transmission. Définissez `VITE_AO_POSTHOG_KEY` sur une chaîne vide avant la compilation pour désactiver la transmission. Voir [docs/telemetry.md](../docs/telemetry.md).
+AO utilise des mesures d'usage et de fiabilité respectueuses de la vie privée — conçues pour exclure les PII et le contenu des projets — afin de mesurer l'adoption et d'améliorer le produit. [En savoir plus sur la télémétrie et la confidentialité](../docs/telemetry.md).
 
 ## Licence
 
