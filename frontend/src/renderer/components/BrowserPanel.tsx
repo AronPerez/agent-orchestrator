@@ -19,7 +19,9 @@ import {
   RefreshCw,
   X,
 } from "lucide-react";
-import { apiClient, apiErrorMessage } from "../lib/api-client";
+import { apiErrorMessage } from "../lib/api-client";
+import { clientFor } from "../lib/host-clients";
+import { refKey, type Ref } from "../lib/hosts";
 import { useBrowserView, type BrowserViewModel } from "../hooks/useBrowserView";
 import {
   formatBrowserAnnotationMessage,
@@ -65,10 +67,10 @@ export type BrowserAnnotationQueueModel = {
 };
 
 export function useBrowserAnnotationQueue({
-  sessionId,
-  navUrl,
+	session,
+	navUrl,
 }: {
-  sessionId?: string;
+	session?: Ref;
   navUrl?: string;
 }): BrowserAnnotationQueueModel {
   const [state, setState] = useState<{
@@ -82,7 +84,9 @@ export function useBrowserAnnotationQueue({
   });
   const annotationQueueRef = useRef<BrowserAnnotationSubmitPayload[]>([]);
   const annotationSendingRef = useRef(false);
-  const sessionIdRef = useRef(sessionId ?? "");
+	const sessionRef = useRef<Ref | null>(session ?? null);
+	const sessionHost = session?.host;
+	const sessionId = session?.id;
   const generationRef = useRef(0);
   const sentTimerRef = useRef<number | null>(null);
 
@@ -97,7 +101,7 @@ export function useBrowserAnnotationQueue({
   }, []);
 
   const drainAnnotationQueue = useCallback(() => {
-    if (annotationSendingRef.current || !sessionIdRef.current) {
+		if (annotationSendingRef.current || !sessionRef.current) {
       return;
     }
 
@@ -110,7 +114,7 @@ export function useBrowserAnnotationQueue({
 
     annotationSendingRef.current = true;
     const sendGeneration = generationRef.current;
-    const sendSessionId = sessionIdRef.current;
+		const sendSession = sessionRef.current;
     setState({
       status: "sending",
       error: "",
@@ -122,10 +126,10 @@ export function useBrowserAnnotationQueue({
       let failureMessage = appI18n.t("browser.unableSendAnnotation");
       try {
         const message = formatBrowserAnnotationMessage(payload);
-        const { error } = await apiClient.POST(
+				const { error } = await clientFor(sendSession.host).POST(
           "/api/v1/sessions/{sessionId}/send",
           {
-            params: { path: { sessionId: sendSessionId } },
+					params: { path: { sessionId: sendSession.id } },
             body: { message, attachment: payload.snapshot },
           },
         );
@@ -145,7 +149,7 @@ export function useBrowserAnnotationQueue({
       } finally {
         if (
           sendGeneration !== generationRef.current ||
-          sendSessionId !== sessionIdRef.current
+				!sessionRef.current || refKey(sendSession) !== refKey(sessionRef.current)
         )
           return;
         annotationSendingRef.current = false;
@@ -184,9 +188,9 @@ export function useBrowserAnnotationQueue({
   }, []);
 
   useEffect(() => {
-    sessionIdRef.current = sessionId ?? "";
-    resetQueue();
-  }, [resetQueue, sessionId]);
+		sessionRef.current = sessionHost && sessionId ? { host: sessionHost, id: sessionId } : null;
+		resetQueue();
+	}, [resetQueue, sessionHost, sessionId]);
 
   useEffect(() => {
     if (navUrl) return;
@@ -268,14 +272,14 @@ export function BrowserPanel({
   onTogglePopOut,
 }: BrowserPanelProps) {
   const browserView = useBrowserView({
-    sessionId: session.id,
+		session,
     active,
     poppedOut,
     previewUrl: session.previewUrl,
     previewRevision: session.previewRevision,
   });
-  const annotationQueue = useBrowserAnnotationQueue({
-    sessionId: session.id,
+	const annotationQueue = useBrowserAnnotationQueue({
+		session,
     navUrl: browserView.navState.url,
   });
   return (

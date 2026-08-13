@@ -1,4 +1,4 @@
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueries, useQueryClient } from "@tanstack/react-query";
 import { RotateCcw } from "lucide-react";
 import {
 	createContext,
@@ -31,12 +31,12 @@ import {
 	type TerminalMux,
 	type TerminalMuxPool,
 } from "../lib/terminal-mux";
-import type { HostId } from "../lib/hosts";
+import { refKey, type HostId } from "../lib/hosts";
 import { cn } from "../lib/utils";
 import { useWorkspaceQuery, workspaceQueryKey } from "../hooks/useWorkspaceQuery";
 import { flattenHostSections } from "../types/workspace";
 import { useRestoreSession } from "../hooks/useRestoreSession";
-import { useShellTerminals } from "../hooks/useShellTerminals";
+import { shellTerminalsQueryOptions } from "../hooks/useShellTerminals";
 import { XtermTerminal } from "./XtermTerminal";
 import { RestoreUnavailableDialog } from "./RestoreUnavailableDialog";
 
@@ -60,7 +60,8 @@ type TerminalCacheDescriptor = {
 	handleId: string;
 	kind: "shell" | "worker";
 	ownerKey: string;
-	sessionId?: string;
+	host: HostId;
+	sessionKey?: string;
 };
 
 type CachedTerminalEntry = TerminalCacheDescriptor & {
@@ -90,10 +91,17 @@ function terminalTargetMatches(left?: TerminalTarget, right?: TerminalTarget): b
 	if (!left || !right || left.kind !== right.kind) return false;
 	if (left.kind === "worker" && right.kind === "worker") return true;
 	if (left.kind === "reviewer" && right.kind === "reviewer") {
-		return left.handleId === right.handleId && left.harness === right.harness;
+		return (
+			refKey(left.session) === refKey(right.session) &&
+			left.handleId === right.handleId &&
+			left.harness === right.harness
+		);
 	}
 	if (left.kind === "shell" && right.kind === "shell") {
 		return (
+			left.host === right.host &&
+			(left.session ? refKey(left.session) : undefined) ===
+				(right.session ? refKey(right.session) : undefined) &&
 			left.handleId === right.handleId &&
 			left.generation === right.generation &&
 			left.title === right.title
@@ -120,15 +128,17 @@ function cacheDescriptor(
 	terminalTarget: TerminalTarget | undefined,
 ): TerminalCacheDescriptor | null {
 	if (terminalTarget?.kind === "shell") {
-		if (!terminalTargetBelongsToSession(terminalTarget, session?.id)) return null;
-		const ownerKey = `shell:${session?.id ?? "standalone"}:${terminalTarget.handleId}`;
+		if (!terminalTargetBelongsToSession(terminalTarget, session)) return null;
+		const sessionKey = session ? refKey(session) : undefined;
+		const ownerKey = `shell:${sessionKey ?? terminalTarget.host}:${terminalTarget.handleId}`;
 		return {
 			cacheKey: `${ownerKey}|handle:${terminalTarget.handleId}|generation:${terminalTarget.generation}`,
 			generation: terminalTarget.generation,
 			handleId: terminalTarget.handleId,
+			host: terminalTarget.host,
 			kind: "shell",
 			ownerKey,
-			sessionId: session?.id,
+			sessionKey,
 		};
 	}
 
@@ -137,13 +147,15 @@ function cacheDescriptor(
 	if (terminalTarget?.kind === "reviewer") return null;
 	const handleId = session?.terminalHandleId;
 	if (!session?.id || !handleId) return null;
-	const ownerKey = `session:${session.id}:worker`;
+	const sessionKey = refKey(session);
+	const ownerKey = `session:${sessionKey}:worker`;
 	return {
 		cacheKey: `${ownerKey}|handle:${handleId}`,
 		handleId,
+		host: session.host,
 		kind: "worker",
 		ownerKey,
-		sessionId: session.id,
+		sessionKey,
 	};
 }
 
@@ -299,7 +311,8 @@ export function TerminalCacheProvider({
 	theme: Theme;
 }) {
 	const workspaceQuery = useWorkspaceQuery();
-	const shellTerminalsQuery = useShellTerminals();
+	const hosts = workspaceQuery.data?.map((section) => section.host) ?? [];
+	const shellTerminalsQueries = useQueries({ queries: hosts.map(shellTerminalsQueryOptions) });
 	const entriesRef = useRef(new Map<string, CachedTerminalEntry>());
 	const activeRef = useRef<ActiveTerminalEntry | null>(null);
 	const parkingRef = useRef<HTMLDivElement | null>(null);
@@ -515,12 +528,12 @@ export function TerminalCacheProvider({
 		if (!workspaceQuery.isSuccess) return;
 		const sessions = new Map(
 		flattenHostSections(workspaceQuery.data).flatMap((workspace) =>
-				workspace.sessions.map((session) => [session.id, session] as const),
+				workspace.sessions.map((session) => [refKey(session), session] as const),
 			),
 		);
 		for (const entry of entriesRef.current.values()) {
-			const session = entry.sessionId ? sessions.get(entry.sessionId) : undefined;
-			if (entry.sessionId && !session) {
+			const session = entry.sessionKey ? sessions.get(entry.sessionKey) : undefined;
+			if (entry.sessionKey && !session) {
 				removeEntry(entry.cacheKey);
 				continue;
 			}
@@ -542,17 +555,17 @@ export function TerminalCacheProvider({
 	// Shell handles have their own lifecycle outside WorkspaceSession. Closing a
 	// shell must close its retained mux writer even if it was parked.
 	useEffect(() => {
-		if (!shellTerminalsQuery.isSuccess) return;
+		if (shellTerminalsQueries.some((query) => !query.isSuccess)) return;
 		const shells = new Map(
-			(shellTerminalsQuery.data ?? []).map((terminal) => [terminal.handleId, terminal] as const),
+			shellTerminalsQueries.flatMap((query) => query.data ?? []).map((terminal) => [refKey({ host: terminal.host, id: terminal.handleId }), terminal] as const),
 		);
 		for (const entry of entriesRef.current.values()) {
 			if (entry.kind !== "shell") continue;
-			const shell = shells.get(entry.handleId);
+			const shell = shells.get(refKey({ host: entry.host, id: entry.handleId }));
 			if (
 				!shell ||
 				shell.createdAt !== entry.generation ||
-				shell.sessionId !== entry.sessionId
+				(shell.sessionId ? refKey({ host: shell.host, id: shell.sessionId }) : undefined) !== entry.sessionKey
 			) {
 				removeEntry(entry.cacheKey);
 				continue;
@@ -566,7 +579,7 @@ export function TerminalCacheProvider({
 				rerender();
 			}
 		}
-	}, [removeEntry, shellTerminalsQuery.data, shellTerminalsQuery.isSuccess]);
+	}, [removeEntry, shellTerminalsQueries]);
 
 	// The provider is the final shell ownership boundary. React disposes the
 	// portals; remove their externally-created host nodes as well.
@@ -628,7 +641,7 @@ function CachedTerminalSlot({
 		if (!cache || !slot) return;
 		cache.activate(descriptor, props, slot);
 		return () => cache.deactivate(descriptor.cacheKey, slot);
-	}, [cache, descriptor.cacheKey, descriptor.handleId, descriptor.kind, descriptor.ownerKey, descriptor.sessionId]);
+	}, [cache, descriptor.cacheKey, descriptor.handleId, descriptor.host, descriptor.kind, descriptor.ownerKey, descriptor.sessionKey]);
 
 	useLayoutEffect(() => {
 		cache?.update(descriptor.cacheKey, props);
@@ -648,14 +661,18 @@ export function TerminalPane({
 }: TerminalPaneProps) {
 	const terminalTarget =
 		requestedTerminalTarget &&
-		terminalTargetBelongsToSession(requestedTerminalTarget, session?.id)
+		terminalTargetBelongsToSession(requestedTerminalTarget, session)
 			? requestedTerminalTarget
 			: ({ kind: "worker" } satisfies TerminalTarget);
 	const cache = useContext(TerminalCacheContext);
 	const terminalKey =
-		terminalTarget?.kind === "reviewer" || terminalTarget?.kind === "shell"
-			? terminalTarget.handleId
-			: (session?.terminalHandleId ?? "empty");
+		terminalTarget?.kind === "reviewer"
+			? `reviewer:${refKey(terminalTarget.session)}:${terminalTarget.handleId}`
+			: terminalTarget?.kind === "shell"
+				? `shell:${terminalTarget.host}:${terminalTarget.handleId}:${terminalTarget.generation}`
+				: session?.terminalHandleId
+					? `worker:${refKey(session)}:${session.terminalHandleId}`
+					: "empty";
 
 	// Electron attaches the live PTY via window.ao's bridge; a plain browser
 	// normally can't, so it shows a static surface. But whenever a real daemon is
@@ -958,7 +975,7 @@ function AttachedTerminal({
 		setIsRestoring(true);
 		setRestoreError(undefined);
 		try {
-			const result = await restoreSessionById(session.id);
+			const result = await restoreSessionById(session);
 			if (result.status === "not_resumable") {
 				setRestoreUnavailable(true);
 				return;
@@ -971,7 +988,7 @@ function AttachedTerminal({
 		} finally {
 			setIsRestoring(false);
 		}
-	}, [canRestoreSession, isRestoring, restoreSessionById, session?.id, t]);
+	}, [canRestoreSession, isRestoring, restoreSessionById, session, t]);
 
 	useEffect(() => {
 		if (!terminal) return;

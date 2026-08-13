@@ -48,6 +48,13 @@ vi.mock("../lib/api-client", () => ({
 	apiErrorMessage: (_error: unknown, fallback: string) => fallback,
 }));
 
+vi.mock("../lib/host-clients", () => ({
+	baseUrlFor: () => "http://127.0.0.1:3001",
+	connectedHosts: () => [],
+	isHostReady: () => true,
+	clientFor: () => ({ POST: (...args: unknown[]) => postMock(...args) }),
+}));
+
 vi.mock("../lib/bridge", () => ({
 	aoBridge: {
 		clipboard: {
@@ -291,7 +298,7 @@ describe("SessionsBoard", () => {
 		usageQueryMock.mockReturnValue({
 			data: new Map([
 				[
-					"s-active",
+					"local:s-active",
 					{
 						sessionId: "s-active",
 						totalTokens: 12_400,
@@ -299,7 +306,7 @@ describe("SessionsBoard", () => {
 					},
 				],
 				[
-					"s-empty",
+					"local:s-empty",
 					{
 						sessionId: "s-empty",
 						totalTokens: 0,
@@ -307,7 +314,7 @@ describe("SessionsBoard", () => {
 					},
 				],
 				[
-					"s-dead",
+					"local:s-dead",
 					{
 						sessionId: "s-dead",
 						totalTokens: 2_000,
@@ -834,8 +841,8 @@ describe("SessionsBoard", () => {
 		);
 		expect(invalidate).toHaveBeenCalledWith({ queryKey: ["workspaces"] });
 		expect(navigateMock).toHaveBeenCalledWith({
-			to: "/projects/$projectId/sessions/$sessionId",
-			params: { projectId: "p1", sessionId: "s-dead" },
+		to: "/host/$hostId/session/$sessionId",
+		params: { hostId: "local", sessionId: "s-dead" },
 		});
 	});
 
@@ -1063,8 +1070,8 @@ describe("SessionsBoard", () => {
 
 		expect(postMock).not.toHaveBeenCalled();
 		expect(navigateMock).toHaveBeenCalledWith({
-			to: "/projects/$projectId/sessions/$sessionId",
-			params: { projectId: "p1", sessionId: "s-merged" },
+		to: "/host/$hostId/session/$sessionId",
+		params: { hostId: "local", sessionId: "s-merged" },
 		});
 	});
 

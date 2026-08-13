@@ -1,58 +1,27 @@
-import { aoBridge } from "./bridge";
 import { setApiBaseUrl } from "./api-client";
+import { aoBridge } from "./bridge";
+import { connectHost } from "./host-clients";
+import { LOCAL_HOST, type HostId } from "./hosts";
 
-// Which daemon the whole app is pointed at. Selection persists in localStorage
-// and a switch reloads the window — every query, the SSE streams and the mux
-// socket restart against the new base, the same simplification auth-gate.ts
-// uses after login. Within one page lifetime the active host is therefore
-// immutable, which is what makes activeHost() a plain accessor.
-const STORAGE_KEY = "ao.active-host-url";
+/** Connect every saved host without making any one host own the window. */
+export async function initHosts(): Promise<void> {
+	const saved = await aoBridge.remotes.list();
+	await Promise.allSettled(saved.map(({ url }) => connectHost(url)));
+}
 
-let current: { label: string; url: string } | null = null;
+// Compatibility for the pre-unified-tree controls. It only ensures the host is
+// connected; it no longer persists global selection or reloads the window.
+export async function switchToHost(url: string | null): Promise<void> {
+	if (url) await connectHost(url);
+}
 
+/** There is no global active host after federation. */
 export function activeHost(): { label: string; url: string } | null {
-	return current;
+	return null;
 }
 
-export async function initActiveHost(): Promise<void> {
-	const stored = localStorage.getItem(STORAGE_KEY);
-	if (!stored) {
-		current = null;
-		// A proxy left over from a previous page lifetime serves nobody.
-		await aoBridge.remotes.deactivate().catch(() => undefined);
-		return;
-	}
-	try {
-		const view = await aoBridge.remotes.activate(stored);
-		current = { label: view.label, url: view.url };
-		setApiBaseUrl(view.base);
-	} catch {
-		// The saved host is gone or refused: clear it so the next boot is local
-		// instead of wedged, and let this boot continue as local.
-		localStorage.removeItem(STORAGE_KEY);
-		current = null;
-	}
-}
-
-export async function switchToHost(
-	url: string | null,
-	reload: () => void = () => window.location.reload(),
-): Promise<void> {
-	if (url === null) {
-		localStorage.removeItem(STORAGE_KEY);
-		await aoBridge.remotes.deactivate().catch(() => undefined);
-	} else {
-		localStorage.setItem(STORAGE_KEY, url);
-	}
-	reload();
-}
-
-/**
- * The one sanctioned path for daemon-status base updates. While a remote host
- * is active the local daemon's ready/port announcements must not repoint the
- * app — that would flip every view back to local data mid-session.
- */
-export function applyDaemonBaseUrl(base: string | null): void {
-	if (current !== null) return;
+/** Local daemon lifecycle signals may update only the local host's base. */
+export function applyDaemonBaseUrl(host: HostId, base: string | null): void {
+	if (host !== LOCAL_HOST) return;
 	setApiBaseUrl(base);
 }

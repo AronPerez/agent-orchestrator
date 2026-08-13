@@ -61,6 +61,13 @@ vi.mock("../lib/api-client", () => ({
   },
 }));
 
+vi.mock("../lib/host-clients", () => ({
+  baseUrlFor: () => "http://127.0.0.1:3001",
+  connectedHosts: () => [],
+  isHostReady: () => true,
+  clientFor: () => ({ GET: getMock, PATCH: patchMock, POST: postMock, PUT: putMock }),
+}));
+
 const pr = (
   n: number,
   state: PRState,
@@ -324,12 +331,12 @@ describe("SessionInspector tabs", () => {
     ).not.toBeInTheDocument();
     view.unmount();
 
-    useUiStore.getState().setBrowserUnseen(currentSession.id, true);
+    useUiStore.getState().setBrowserUnseen("local:sess-1", true);
     renderWithQuery(<SessionInspector session={currentSession} />);
     expect(screen.getByTestId("browser-unseen-indicator")).toBeInTheDocument();
 
     act(() =>
-      useUiStore.getState().setInspectorView(currentSession.id, "browser"),
+      useUiStore.getState().setInspectorView("local:sess-1", "browser"),
     );
     expect(
       screen.queryByTestId("browser-unseen-indicator"),
@@ -372,7 +379,7 @@ describe("SessionInspector tabs", () => {
       <SessionInspector session={session([])} />,
       undefined,
       (client) => {
-        client.setQueryData(sessionWorkspaceFilesQueryKey("sess-1"), {
+		client.setQueryData(sessionWorkspaceFilesQueryKey({ host: "local", id: "sess-1" }), {
           sessionId: "sess-1",
           truncated: false,
           files: [
@@ -408,7 +415,7 @@ describe("SessionInspector tabs", () => {
       <SessionInspector session={session([])} />,
       undefined,
       (client) => {
-        client.setQueryData(sessionWorkspaceFilesQueryKey("sess-1"), {
+		client.setQueryData(sessionWorkspaceFilesQueryKey({ host: "local", id: "sess-1" }), {
           sessionId: "sess-1",
           truncated: false,
           files: [
@@ -459,7 +466,7 @@ describe("SessionInspector PR section", () => {
       <SessionInspector session={session([pr(7, "open")])} />,
       undefined,
       (client) => {
-        client.setQueryData(sessionScmSummaryQueryKey("sess-1"), [
+		client.setQueryData(sessionScmSummaryQueryKey({ host: "local", id: "sess-1" }), [
           prSummary(7, "open"),
         ]);
       },
@@ -498,7 +505,7 @@ describe("SessionInspector PR section", () => {
       <SessionInspector session={session([pr(7, "open")])} />,
       undefined,
       (client) => {
-        client.setQueryData(sessionScmSummaryQueryKey("sess-1"), [readyPR]);
+		client.setQueryData(sessionScmSummaryQueryKey({ host: "local", id: "sess-1" }), [readyPR]);
       },
     );
 
@@ -640,8 +647,8 @@ describe("SessionInspector completion controls", () => {
     });
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(navigateMock).toHaveBeenCalledWith({
-      to: "/projects/$projectId/sessions/$sessionId",
-      params: { projectId: "ws-1", sessionId: "orch-1" },
+      to: "/host/$hostId/session/$sessionId",
+      params: { hostId: "local", sessionId: "orch-1" },
     });
   });
 

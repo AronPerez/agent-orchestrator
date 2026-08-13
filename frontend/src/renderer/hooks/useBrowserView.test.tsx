@@ -193,15 +193,15 @@ describe("useBrowserView", () => {
     const bridge = setupBridge();
     const slot = createSlot();
     const { result } = renderHook(() =>
-      useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }),
+      useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }),
     );
 
-    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-1"));
+    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("local:sess-1"));
     // Simulate the real IPC flow: after ensure, a navigate call sends a nav
     // state with a URL so the positioning effect considers the view visible.
     act(() =>
       bridge.emit({
-        viewId: "42:sess-1",
+        viewId: "42:local:sess-1",
         url: "http://localhost:3000/",
         title: "",
         canGoBack: false,
@@ -213,27 +213,27 @@ describe("useBrowserView", () => {
 
     await waitFor(() =>
       expect(bridge.setBounds).toHaveBeenCalledWith({
-        viewId: "42:sess-1",
+        viewId: "42:local:sess-1",
         rect: { x: 12, y: 34, width: 320, height: 240 },
         visible: true,
       }),
     );
-    expect(result.current.viewId).toBe("42:sess-1");
+    expect(result.current.viewId).toBe("42:local:sess-1");
   });
 
   it("keeps an active blank target live", async () => {
     const bridge = setupBridge();
     const slot = createSlot();
     const { result } = renderHook(() =>
-      useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }),
+      useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }),
     );
 
-    await waitFor(() => expect(result.current.viewId).toBe("42:sess-1"));
+    await waitFor(() => expect(result.current.viewId).toBe("42:local:sess-1"));
     act(() => result.current.slotRef(slot));
 
     await waitFor(() =>
       expect(bridge.setBounds).toHaveBeenCalledWith({
-        viewId: "42:sess-1",
+        viewId: "42:local:sess-1",
         rect: { x: 12, y: 34, width: 320, height: 240 },
         visible: true,
       }),
@@ -243,7 +243,7 @@ describe("useBrowserView", () => {
   it("tracks popup tabs and routes manual select and close actions", async () => {
     const bridge = setupBridge();
     const { result } = renderHook(() =>
-      useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }),
+      useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }),
     );
 
     await waitFor(() =>
@@ -251,7 +251,7 @@ describe("useBrowserView", () => {
     );
     act(() =>
       bridge.emitTabs({
-        viewId: "42:sess-1",
+        viewId: "42:local:sess-1",
         activeTabId: "t2",
         tabs: [
           {
@@ -276,12 +276,12 @@ describe("useBrowserView", () => {
 
     await act(() => result.current.selectTab("t1"));
     expect(bridge.selectTab).toHaveBeenCalledWith({
-      viewId: "42:sess-1",
+      viewId: "42:local:sess-1",
       tabId: "t1",
     });
     await act(() => result.current.closeTab("t2"));
     expect(bridge.closeTab).toHaveBeenCalledWith({
-      viewId: "42:sess-1",
+      viewId: "42:local:sess-1",
       tabId: "t2",
     });
   });
@@ -291,13 +291,13 @@ describe("useBrowserView", () => {
     const slot = createSlot();
     const { result, rerender } = renderHook(
       ({ poppedOut }) =>
-        useBrowserView({ sessionId: "sess-1", active: true, poppedOut }),
+        useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut }),
       { initialProps: { poppedOut: false } },
     );
-    await waitFor(() => expect(result.current.viewId).toBe("42:sess-1"));
+    await waitFor(() => expect(result.current.viewId).toBe("42:local:sess-1"));
     act(() =>
       bridge.emit({
-        viewId: "42:sess-1",
+        viewId: "42:local:sess-1",
         url: "http://localhost:3000/",
         title: "",
         canGoBack: false,
@@ -308,7 +308,7 @@ describe("useBrowserView", () => {
     act(() => result.current.slotRef(slot));
     await waitFor(() =>
       expect(bridge.setBounds).toHaveBeenCalledWith({
-        viewId: "42:sess-1",
+        viewId: "42:local:sess-1",
         rect: { x: 12, y: 34, width: 320, height: 240 },
         visible: true,
       }),
@@ -321,7 +321,7 @@ describe("useBrowserView", () => {
 
     await waitFor(() =>
       expect(bridge.setBounds).toHaveBeenCalledWith({
-        viewId: "42:sess-1",
+        viewId: "42:local:sess-1",
         rect: { x: 12, y: 34, width: 320, height: 240 },
         visible: true,
       }),
@@ -351,12 +351,12 @@ describe("useBrowserView", () => {
     document.body.appendChild(column);
 
     const { result } = renderHook(() =>
-      useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }),
+      useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }),
     );
-    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-1"));
+    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("local:sess-1"));
     act(() =>
       bridge.emit({
-        viewId: "42:sess-1",
+        viewId: "42:local:sess-1",
         url: "http://localhost:3000/",
         title: "",
         canGoBack: false,
@@ -368,7 +368,7 @@ describe("useBrowserView", () => {
 
     await waitFor(() =>
       expect(bridge.setBounds).toHaveBeenCalledWith({
-        viewId: "42:sess-1",
+        viewId: "42:local:sess-1",
         rect: { x: 100, y: 34, width: 150, height: 240 },
         visible: true,
       }),
@@ -387,7 +387,7 @@ describe("useBrowserView", () => {
       const slot = createSlot();
       const { result, rerender } = renderHook(
         ({ poppedOut }) =>
-          useBrowserView({ sessionId: "sess-1", active: true, poppedOut }),
+          useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut }),
         { initialProps: { poppedOut: false } },
       );
       // ensure() resolves on a microtask; flush it without advancing timers.
@@ -397,7 +397,7 @@ describe("useBrowserView", () => {
       // Simulate a real nav state with URL so the positioning effect shows the view.
       act(() =>
         bridge.emit({
-          viewId: "42:sess-1",
+          viewId: "42:local:sess-1",
           url: "http://localhost:3000/",
           title: "",
           canGoBack: false,
@@ -448,16 +448,16 @@ describe("useBrowserView", () => {
     const slot = createSlot();
     const { result, rerender, unmount } = renderHook(
       ({ active }) =>
-        useBrowserView({ sessionId: "sess-1", active, poppedOut: false }),
+        useBrowserView({ session: { host: "local", id: "sess-1" }, active, poppedOut: false }),
       { initialProps: { active: true } },
     );
-    await waitFor(() => expect(result.current.viewId).toBe("42:sess-1"));
+    await waitFor(() => expect(result.current.viewId).toBe("42:local:sess-1"));
     act(() => result.current.slotRef(slot));
 
     rerender({ active: false });
     await waitFor(() =>
       expect(bridge.setBounds).toHaveBeenLastCalledWith({
-        viewId: "42:sess-1",
+        viewId: "42:local:sess-1",
         rect: { x: 0, y: 0, width: 0, height: 0 },
         visible: false,
       }),
@@ -465,7 +465,7 @@ describe("useBrowserView", () => {
 
     unmount();
     expect(bridge.setBounds).toHaveBeenLastCalledWith({
-      viewId: "42:sess-1",
+      viewId: "42:local:sess-1",
       rect: { x: 0, y: 0, width: 0, height: 0 },
       visible: false,
     });
@@ -476,13 +476,13 @@ describe("useBrowserView", () => {
     const bridge = setupBridge();
     const slot = createSlot();
     const { result } = renderHook(() =>
-      useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }),
+      useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }),
     );
 
-    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-1"));
+    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("local:sess-1"));
     act(() =>
       bridge.emit({
-        viewId: "42:sess-1",
+        viewId: "42:local:sess-1",
         url: "http://localhost:3000/",
         title: "",
         canGoBack: false,
@@ -493,7 +493,7 @@ describe("useBrowserView", () => {
     act(() => result.current.slotRef(slot));
     await waitFor(() =>
       expect(bridge.setBounds).toHaveBeenCalledWith({
-        viewId: "42:sess-1",
+        viewId: "42:local:sess-1",
         rect: { x: 12, y: 34, width: 320, height: 240 },
         visible: true,
       }),
@@ -520,13 +520,13 @@ describe("useBrowserView", () => {
     const bridge = setupBridge();
     const slot = createSlot();
     const { result } = renderHook(() =>
-      useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }),
+      useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }),
     );
 
-    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-1"));
+    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("local:sess-1"));
     act(() =>
       bridge.emit({
-        viewId: "42:sess-1",
+        viewId: "42:local:sess-1",
         url: "http://localhost:3000/",
         title: "",
         canGoBack: false,
@@ -537,7 +537,7 @@ describe("useBrowserView", () => {
     act(() => result.current.slotRef(slot));
     await waitFor(() =>
       expect(bridge.setBounds).toHaveBeenCalledWith({
-        viewId: "42:sess-1",
+        viewId: "42:local:sess-1",
         rect: { x: 12, y: 34, width: 320, height: 240 },
         visible: true,
       }),
@@ -561,12 +561,12 @@ describe("useBrowserView", () => {
     const bridge = setupBridge();
     const slot = createSlot();
     const { result } = renderHook(() =>
-      useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }),
+      useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }),
     );
-    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-1"));
+    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("local:sess-1"));
     act(() =>
       bridge.emit({
-        viewId: "42:sess-1",
+        viewId: "42:local:sess-1",
         url: "http://localhost:3000/",
         title: "",
         canGoBack: false,
@@ -596,13 +596,13 @@ describe("useBrowserView", () => {
     const bridge = setupBridge();
     const slot = createSlot();
     const { result } = renderHook(() =>
-      useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }),
+      useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }),
     );
 
-    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-1"));
+    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("local:sess-1"));
     act(() =>
       bridge.emit({
-        viewId: "42:sess-1",
+        viewId: "42:local:sess-1",
         url: "http://localhost:3000/",
         title: "",
         canGoBack: false,
@@ -613,7 +613,7 @@ describe("useBrowserView", () => {
     act(() => result.current.slotRef(slot));
     await waitFor(() =>
       expect(bridge.setBounds).toHaveBeenCalledWith({
-        viewId: "42:sess-1",
+        viewId: "42:local:sess-1",
         rect: { x: 12, y: 34, width: 320, height: 240 },
         visible: true,
       }),
@@ -646,13 +646,13 @@ describe("useBrowserView", () => {
     const bridge = setupBridge();
     const slot = createSlot();
     const { result } = renderHook(() =>
-      useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }),
+      useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }),
     );
 
-    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-1"));
+    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("local:sess-1"));
     act(() =>
       bridge.emit({
-        viewId: "42:sess-1",
+        viewId: "42:local:sess-1",
         url: "http://localhost:3000/",
         title: "",
         canGoBack: false,
@@ -692,9 +692,9 @@ describe("useBrowserView", () => {
   it("updates nav state only for the current view", async () => {
     const bridge = setupBridge();
     const { result } = renderHook(() =>
-      useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }),
+      useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }),
     );
-    await waitFor(() => expect(result.current.viewId).toBe("42:sess-1"));
+    await waitFor(() => expect(result.current.viewId).toBe("42:local:sess-1"));
 
     act(() =>
       bridge.emit({
@@ -710,7 +710,7 @@ describe("useBrowserView", () => {
 
     act(() =>
       bridge.emit({
-        viewId: "42:sess-1",
+        viewId: "42:local:sess-1",
         url: "http://localhost:5173/",
         title: "Local app",
         canGoBack: false,
@@ -737,7 +737,7 @@ describe("useBrowserView", () => {
     const observedUrls: string[] = [];
     function useProbe(sid: string) {
       const view = useBrowserView({
-        sessionId: sid,
+        session: { host: "local", id: sid },
         active: true,
         poppedOut: false,
       });
@@ -749,10 +749,10 @@ describe("useBrowserView", () => {
     const { rerender } = renderHook(({ sessionId }) => useProbe(sessionId), {
       initialProps: { sessionId: "sess-1" },
     });
-    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-1"));
+    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("local:sess-1"));
     act(() =>
       bridge.emit({
-        viewId: "42:sess-1",
+        viewId: "42:local:sess-1",
         url: "http://localhost:3000/",
         title: "",
         canGoBack: false,
@@ -763,7 +763,7 @@ describe("useBrowserView", () => {
 
     observedUrls.length = 0;
     rerender({ sessionId: "sess-2" });
-    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-2"));
+    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("local:sess-2"));
 
     expect(observedUrls).not.toContain("http://localhost:3000/");
   });
@@ -773,7 +773,7 @@ describe("useBrowserView", () => {
     const { rerender } = renderHook(
       ({ previewUrl, previewRevision }) =>
         useBrowserView({
-          sessionId: "sess-1",
+          session: { host: "local", id: "sess-1" },
           active: true,
           poppedOut: false,
           previewUrl,
@@ -789,7 +789,7 @@ describe("useBrowserView", () => {
 
     await waitFor(() =>
       expect(bridge.navigate).toHaveBeenCalledWith({
-        viewId: "42:sess-1",
+        viewId: "42:local:sess-1",
         url: "http://localhost:5173/",
       }),
     );
@@ -812,7 +812,7 @@ describe("useBrowserView", () => {
     });
     await waitFor(() =>
       expect(bridge.navigate).toHaveBeenCalledWith({
-        viewId: "42:sess-1",
+        viewId: "42:local:sess-1",
         url: "file:///tmp/preview/index.html",
       }),
     );
@@ -827,7 +827,7 @@ describe("useBrowserView", () => {
     const { result, rerender } = renderHook(
       ({ sessionId, previewUrl, previewRevision }) =>
         useBrowserView({
-          sessionId,
+          session: { host: "local", id: sessionId },
           active: true,
           poppedOut: false,
           previewUrl,
@@ -843,7 +843,7 @@ describe("useBrowserView", () => {
     );
     await waitFor(() =>
       expect(bridge.navigate).toHaveBeenCalledWith({
-        viewId: "42:sess-1",
+        viewId: "42:local:sess-1",
         url: "http://localhost:5217/",
       }),
     );
@@ -852,7 +852,7 @@ describe("useBrowserView", () => {
     // The user browses elsewhere; the main-process view now holds google.com.
     act(() =>
       bridge.emit({
-        viewId: "42:sess-1",
+        viewId: "42:local:sess-1",
         url: "https://www.google.com/",
         title: "Google",
         canGoBack: true,
@@ -867,13 +867,13 @@ describe("useBrowserView", () => {
       previewUrl: undefined,
       previewRevision: undefined,
     });
-    await waitFor(() => expect(result.current.viewId).toBe("42:sess-2"));
+    await waitFor(() => expect(result.current.viewId).toBe("42:local:sess-2"));
     rerender({
       sessionId: "sess-1",
       previewUrl: "http://localhost:5217/",
       previewRevision: 1,
     });
-    await waitFor(() => expect(result.current.viewId).toBe("42:sess-1"));
+    await waitFor(() => expect(result.current.viewId).toBe("42:local:sess-1"));
 
     // The already-consumed preview must not be re-asserted: the view keeps
     // whatever the user navigated to.
@@ -888,7 +888,7 @@ describe("useBrowserView", () => {
     });
     await waitFor(() => expect(bridge.navigate).toHaveBeenCalledTimes(2));
     expect(bridge.navigate).toHaveBeenLastCalledWith({
-      viewId: "42:sess-1",
+      viewId: "42:local:sess-1",
       url: "http://localhost:5217/",
     });
   });
@@ -899,7 +899,7 @@ describe("useBrowserView", () => {
     const bridge = setupBridge();
     const first = renderHook(() =>
       useBrowserView({
-        sessionId: "sess-1",
+        session: { host: "local", id: "sess-1" },
         active: true,
         poppedOut: false,
         previewUrl: "http://localhost:5217/",
@@ -911,14 +911,14 @@ describe("useBrowserView", () => {
 
     const second = renderHook(() =>
       useBrowserView({
-        sessionId: "sess-1",
+        session: { host: "local", id: "sess-1" },
         active: true,
         poppedOut: false,
         previewUrl: "http://localhost:5217/",
         previewRevision: 1,
       }),
     );
-    await waitFor(() => expect(second.result.current.viewId).toBe("42:sess-1"));
+    await waitFor(() => expect(second.result.current.viewId).toBe("42:local:sess-1"));
     expect(bridge.navigate).toHaveBeenCalledTimes(1);
     second.unmount();
   });
@@ -928,7 +928,7 @@ describe("useBrowserView", () => {
     const first = renderHook(
       ({ terminated }) =>
         useBrowserView({
-          sessionId: "sess-1",
+          session: { host: "local", id: "sess-1" },
           active: true,
           poppedOut: false,
           terminated,
@@ -940,14 +940,14 @@ describe("useBrowserView", () => {
     await waitFor(() => expect(bridge.navigate).toHaveBeenCalledTimes(1));
     first.rerender({ terminated: true });
     await waitFor(() =>
-      expect(bridge.destroy).toHaveBeenCalledWith("42:sess-1"),
+      expect(bridge.destroy).toHaveBeenCalledWith("42:local:sess-1"),
     );
     first.unmount();
 
     // A fresh worker reusing the session ID gets its own preview navigation.
     const second = renderHook(() =>
       useBrowserView({
-        sessionId: "sess-1",
+        session: { host: "local", id: "sess-1" },
         active: true,
         poppedOut: false,
         previewUrl: "http://localhost:5217/",
@@ -965,7 +965,7 @@ describe("useBrowserView", () => {
     window.ao = undefined;
     try {
       const props = {
-        sessionId: "sess-1",
+        session: { host: "local", id: "sess-1" },
         active: true,
         poppedOut: false,
         previewUrl: "http://localhost:5217/",
@@ -996,7 +996,7 @@ describe("useBrowserView", () => {
     const { rerender } = renderHook(
       ({ sessionId, previewUrl }) =>
         useBrowserView({
-          sessionId,
+          session: { host: "local", id: sessionId },
           active: true,
           poppedOut: false,
           previewUrl,
@@ -1012,16 +1012,16 @@ describe("useBrowserView", () => {
 
     await waitFor(() =>
       expect(bridge.navigate).toHaveBeenCalledWith({
-        viewId: "42:sess-1",
+        viewId: "42:local:sess-1",
         url: "http://127.0.0.1:4173/",
       }),
     );
 
     rerender({ sessionId: "sess-2", previewUrl: "http://127.0.0.1:5173/" });
-    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-2"));
+    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("local:sess-2"));
     await waitFor(() =>
       expect(bridge.navigate).toHaveBeenCalledWith({
-        viewId: "42:sess-2",
+        viewId: "42:local:sess-2",
         url: "http://127.0.0.1:5173/",
       }),
     );
@@ -1033,20 +1033,20 @@ describe("useBrowserView", () => {
     const { result, rerender } = renderHook(
       ({ previewUrl }) =>
         useBrowserView({
-          sessionId: "sess-1",
+          session: { host: "local", id: "sess-1" },
           active: true,
           poppedOut: false,
           previewUrl,
         }),
       { initialProps: { previewUrl: undefined as string | undefined } },
     );
-    await waitFor(() => expect(result.current.viewId).toBe("42:sess-1"));
+    await waitFor(() => expect(result.current.viewId).toBe("42:local:sess-1"));
     expect(bridge.navigate).not.toHaveBeenCalled();
 
     rerender({ previewUrl: "http://localhost:5173/" });
     await waitFor(() =>
       expect(bridge.navigate).toHaveBeenCalledWith({
-        viewId: "42:sess-1",
+        viewId: "42:local:sess-1",
         url: "http://localhost:5173/",
       }),
     );
@@ -1060,7 +1060,7 @@ describe("useBrowserView", () => {
     });
     await waitFor(() =>
       expect(bridge.navigate).toHaveBeenCalledWith({
-        viewId: "42:sess-1",
+        viewId: "42:local:sess-1",
         url: "C:\\Users\\Lenovo\\Downloads\\sm5\\paper_explainer.html",
       }),
     );
@@ -1072,7 +1072,7 @@ describe("useBrowserView", () => {
     const { rerender } = renderHook(
       ({ previewUrl, previewRevision }) =>
         useBrowserView({
-          sessionId: "sess-1",
+          session: { host: "local", id: "sess-1" },
           active: true,
           poppedOut: false,
           previewUrl,
@@ -1089,16 +1089,16 @@ describe("useBrowserView", () => {
 
     // `ao preview clear` empties previewUrl and bumps the revision.
     rerender({ previewUrl: undefined, previewRevision: 2 });
-    await waitFor(() => expect(bridge.clear).toHaveBeenCalledWith("42:sess-1"));
+    await waitFor(() => expect(bridge.clear).toHaveBeenCalledWith("42:local:sess-1"));
     expect(bridge.navigate).toHaveBeenCalledTimes(1);
   });
 
   it("does not navigate or clear without a preview URL at revision zero", async () => {
     const bridge = setupBridge();
     const { result } = renderHook(() =>
-      useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }),
+      useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }),
     );
-    await waitFor(() => expect(result.current.viewId).toBe("42:sess-1"));
+    await waitFor(() => expect(result.current.viewId).toBe("42:local:sess-1"));
     expect(bridge.navigate).not.toHaveBeenCalled();
     expect(bridge.clear).not.toHaveBeenCalled();
   });
@@ -1108,7 +1108,7 @@ describe("useBrowserView", () => {
     const { rerender, result } = renderHook(
       ({ terminated }) =>
         useBrowserView({
-          sessionId: "sess-1",
+          session: { host: "local", id: "sess-1" },
           active: true,
           poppedOut: false,
           terminated,
@@ -1123,7 +1123,7 @@ describe("useBrowserView", () => {
     // Terminate the session – the view must be cleared and no re-navigate.
     rerender({ terminated: true });
     await waitFor(() =>
-      expect(bridge.destroy).toHaveBeenCalledWith("42:sess-1"),
+      expect(bridge.destroy).toHaveBeenCalledWith("42:local:sess-1"),
     );
     expect(bridge.clear).not.toHaveBeenCalled();
     expect(bridge.navigate).toHaveBeenCalledTimes(1);
@@ -1144,14 +1144,14 @@ describe("useBrowserView", () => {
       document.body.appendChild(terminalPane);
 
       const { result } = renderHook(() =>
-        useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }),
+        useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }),
       );
       await act(async () => {
         await Promise.resolve();
       });
       act(() =>
         bridge.emit({
-          viewId: "42:sess-1",
+          viewId: "42:local:sess-1",
           url: "http://localhost:3000/",
           title: "",
           canGoBack: false,
@@ -1179,7 +1179,7 @@ describe("useBrowserView", () => {
         vi.advanceTimersByTime(300);
       });
       expect(bridge.setBounds).toHaveBeenLastCalledWith({
-        viewId: "42:sess-1",
+        viewId: "42:local:sess-1",
         rect: { x: 0, y: 0, width: 0, height: 0 },
         visible: false,
       });
@@ -1212,12 +1212,12 @@ describe("useBrowserView", () => {
     host.appendChild(slot);
 
     const { result } = renderHook(() =>
-      useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }),
+      useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }),
     );
-    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-1"));
+    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("local:sess-1"));
     act(() =>
       bridge.emit({
-        viewId: "42:sess-1",
+        viewId: "42:local:sess-1",
         url: "http://localhost:3000/",
         title: "",
         canGoBack: false,
@@ -1272,7 +1272,7 @@ describe("useBrowserView (web fallback, no window.ao)", () => {
 
   it("runs in web mode and loads a manually entered URL into the iframe", async () => {
     const { result } = renderHook(() =>
-      useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }),
+      useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }),
     );
     expect(result.current.mode).toBe("web");
     expect(result.current.iframeSrc).toBe("");
@@ -1287,7 +1287,7 @@ describe("useBrowserView (web fallback, no window.ao)", () => {
   it("auto-loads the ao preview URL into the iframe", async () => {
     const { result } = renderHook(() =>
       useBrowserView({
-        sessionId: "sess-1",
+        session: { host: "local", id: "sess-1" },
         active: true,
         poppedOut: false,
         previewUrl: "http://localhost:4173/",
@@ -1301,7 +1301,7 @@ describe("useBrowserView (web fallback, no window.ao)", () => {
 
   it("remounts the iframe with a fresh key on reload", async () => {
     const { result } = renderHook(() =>
-      useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }),
+      useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }),
     );
     await act(async () => {
       await result.current.navigate("localhost:5173");

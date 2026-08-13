@@ -7,7 +7,7 @@ import {
 	type RemoteChanges,
 	type RemoteEntry,
 } from "./remotes-store";
-import type { ActiveHostView } from "./active-remote";
+import type { ConnectedHostView } from "./remote-registry";
 
 // What the renderer is allowed to see. The password stays in the main process.
 export type RemoteHostView = {
@@ -20,8 +20,8 @@ export function toHostViews(entries: RemoteEntry[]): RemoteHostView[] {
 }
 
 // The proxy the app is currently talking through, as much of it as these need.
-type ActiveProxyHandle = {
-	view(): Promise<ActiveHostView | null>;
+type ConnectedProxyHandle = {
+	view(): Promise<ConnectedHostView | null>;
 	deactivate(): Promise<void>;
 };
 
@@ -41,18 +41,18 @@ export async function updateSavedRemote(
 	path: string,
 	url: string,
 	changes: RemoteChanges,
-	active: ActiveProxyHandle,
+	connected: ConnectedProxyHandle,
 	probe: (entry: RemoteEntry) => Promise<RemoteHealth> = probeRemote,
 ): Promise<RemoteHealth> {
 	const health = await probe(applyRemoteChanges(await findRemote(path, url), changes));
 	if (health !== "online") return health;
 	await updateRemote(path, url, changes);
-	if ((await active.view())?.url === url) await active.deactivate();
+	if ((await connected.view())?.url === url) await connected.deactivate();
 	return health;
 }
 
 /** Forget a saved host. A proxy to a host that no longer exists is an open door with no doorman. */
-export async function removeSavedRemote(path: string, url: string, active: ActiveProxyHandle): Promise<void> {
+export async function removeSavedRemote(path: string, url: string, connected: ConnectedProxyHandle): Promise<void> {
 	await removeRemote(path, url);
-	if ((await active.view())?.url === url) await active.deactivate();
+	if ((await connected.view())?.url === url) await connected.deactivate();
 }

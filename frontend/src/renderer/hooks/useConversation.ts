@@ -12,7 +12,9 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback } from "react";
 import type { components } from "../../api/schema";
-import { apiClient, apiErrorCode, apiErrorMessage } from "../lib/api-client";
+import { apiErrorCode, apiErrorMessage } from "../lib/api-client";
+import { clientFor } from "../lib/host-clients";
+import { refKey, type Ref } from "../lib/hosts";
 import { workspaceQueryKey } from "./useWorkspaceQuery";
 import type {
 	ActivityKind,
@@ -52,8 +54,8 @@ export interface ConversationSendInput {
 	resources?: WireResourceContent[];
 }
 
-export function conversationQueryKey(sessionId: string) {
-	return ["conversation", sessionId] as const;
+export function conversationQueryKey(session?: Ref) {
+	return session ? (["conversation", refKey(session)] as const) : (["conversation"] as const);
 }
 
 const CONVERSATION_PAGE_SIZE = 200;
@@ -82,13 +84,14 @@ export interface ConversationQueryResult {
 	loadOlder: () => void;
 }
 
-export function useConversation(sessionId: string | undefined): ConversationQueryResult {
+export function useConversation(session: Ref | undefined): ConversationQueryResult {
+	const sessionId = session?.id;
 	const query = useInfiniteQuery({
-		queryKey: conversationQueryKey(sessionId ?? ""),
+		queryKey: conversationQueryKey(session),
 		enabled: Boolean(sessionId),
 		initialPageParam: undefined as number | undefined,
 		queryFn: async ({ pageParam }) => {
-			const { data, error } = await apiClient.GET("/api/v1/sessions/{sessionId}/conversation", {
+			const { data, error } = await clientFor(session!.host).GET("/api/v1/sessions/{sessionId}/conversation", {
 				params: {
 					path: { sessionId: sessionId as string },
 					query: { beforeSequence: pageParam, limit: CONVERSATION_PAGE_SIZE },
@@ -145,20 +148,21 @@ export function useConversation(sessionId: string | undefined): ConversationQuer
 }
 
 /** Commands against a conversation. Each refetches the snapshot on success. */
-export function useConversationCommands(sessionId: string | undefined) {
+export function useConversationCommands(session: Ref | undefined) {
+	const sessionId = session?.id;
 	const queryClient = useQueryClient();
 	const invalidate = useCallback(async () => {
 		if (sessionId) {
 			// Keep the mutation pending until the active conversation has refreshed. A
 			// queued message or landed steer should be visible before the composer clears,
 			// otherwise the action looks dropped even though the daemon accepted it.
-			await queryClient.invalidateQueries({ queryKey: conversationQueryKey(sessionId) });
+			await queryClient.invalidateQueries({ queryKey: conversationQueryKey(session) });
 		}
-	}, [queryClient, sessionId]);
+	}, [queryClient, session, sessionId]);
 
 	const send = useMutation({
 		mutationFn: async (input: ConversationSendInput) => {
-			const { data, error } = await apiClient.POST(
+			const { data, error } = await clientFor(session!.host).POST(
 				"/api/v1/sessions/{sessionId}/conversation/messages",
 				{
 					params: { path: { sessionId: sessionId as string } },
@@ -175,7 +179,7 @@ export function useConversationCommands(sessionId: string | undefined) {
 
 	const resolve = useMutation({
 		mutationFn: async (input: { requestId: string; decisionId: string }) => {
-			const { error } = await apiClient.POST(
+			const { error } = await clientFor(session!.host).POST(
 				"/api/v1/sessions/{sessionId}/conversation/approvals/{requestId}/resolve",
 				{
 					params: { path: { sessionId: sessionId as string, requestId: input.requestId } },
@@ -193,7 +197,7 @@ export function useConversationCommands(sessionId: string | undefined) {
 			action: "accept" | "decline" | "cancel";
 			content?: Record<string, unknown>;
 		}) => {
-			const { error } = await apiClient.POST(
+			const { error } = await clientFor(session!.host).POST(
 				"/api/v1/sessions/{sessionId}/conversation/inputs/{requestId}/resolve",
 				{
 					params: { path: { sessionId: sessionId as string, requestId: input.requestId } },
@@ -207,7 +211,7 @@ export function useConversationCommands(sessionId: string | undefined) {
 
 	const interrupt = useMutation({
 		mutationFn: async () => {
-			const { error } = await apiClient.POST(
+			const { error } = await clientFor(session!.host).POST(
 				"/api/v1/sessions/{sessionId}/conversation/interrupt",
 				{ params: { path: { sessionId: sessionId as string } } },
 			);
@@ -218,7 +222,7 @@ export function useConversationCommands(sessionId: string | undefined) {
 
 	const resume = useMutation({
 		mutationFn: async () => {
-			const { data, error, response } = await apiClient.POST(
+			const { data, error, response } = await clientFor(session!.host).POST(
 				"/api/v1/sessions/{sessionId}/resume-agent",
 				{ params: { path: { sessionId: sessionId as string } } },
 			);
@@ -247,7 +251,7 @@ export function useConversationCommands(sessionId: string | undefined) {
 	 */
 	const compact = useMutation({
 		mutationFn: async () => {
-			const { data, error } = await apiClient.POST(
+			const { data, error } = await clientFor(session!.host).POST(
 				"/api/v1/sessions/{sessionId}/conversation/compact",
 				{ params: { path: { sessionId: sessionId as string } } },
 			);
@@ -259,7 +263,7 @@ export function useConversationCommands(sessionId: string | undefined) {
 
 	const chooseSettings = useMutation({
 		mutationFn: async (settings: TurnSettings) => {
-			const { error } = await apiClient.PATCH(
+			const { error } = await clientFor(session!.host).PATCH(
 				"/api/v1/sessions/{sessionId}/conversation/settings",
 				{ params: { path: { sessionId: sessionId as string } }, body: settings },
 			);
@@ -290,7 +294,7 @@ export function useConversationCommands(sessionId: string | undefined) {
 	 */
 	const steer = useMutation({
 		mutationFn: async (text: string) => {
-			const { data, error } = await apiClient.POST(
+			const { data, error } = await clientFor(session!.host).POST(
 				"/api/v1/sessions/{sessionId}/conversation/steer",
 				{
 					params: { path: { sessionId: sessionId as string } },
@@ -313,7 +317,7 @@ export function useConversationCommands(sessionId: string | undefined) {
 	 */
 	const reloadMcp = useMutation({
 		mutationFn: async () => {
-			const { data, error } = await apiClient.POST(
+			const { data, error } = await clientFor(session!.host).POST(
 				"/api/v1/sessions/{sessionId}/conversation/mcp/reload",
 				{ params: { path: { sessionId: sessionId as string } } },
 			);
@@ -325,7 +329,7 @@ export function useConversationCommands(sessionId: string | undefined) {
 
 	const rollback = useMutation({
 		mutationFn: async (turnId: string) => {
-			const { data, error } = await apiClient.POST(
+			const { data, error } = await clientFor(session!.host).POST(
 				"/api/v1/sessions/{sessionId}/conversation/turns/{turnId}/rollback",
 				{ params: { path: { sessionId: sessionId as string, turnId } } },
 			);
@@ -337,7 +341,7 @@ export function useConversationCommands(sessionId: string | undefined) {
 
 	const editMessage = useMutation({
 		mutationFn: async ({ turnId, text }: { turnId: string; text: string }) => {
-			const { data, error } = await apiClient.POST(
+			const { data, error } = await clientFor(session!.host).POST(
 				"/api/v1/sessions/{sessionId}/conversation/turns/{turnId}/edit",
 				{
 					params: { path: { sessionId: sessionId as string, turnId } },
@@ -352,7 +356,7 @@ export function useConversationCommands(sessionId: string | undefined) {
 
 	const activateBranch = useMutation({
 		mutationFn: async (branchId: string) => {
-			const { data, error } = await apiClient.POST(
+			const { data, error } = await clientFor(session!.host).POST(
 				"/api/v1/sessions/{sessionId}/conversation/branches/{branchId}/activate",
 				{ params: { path: { sessionId: sessionId as string, branchId } } },
 			);
@@ -467,15 +471,16 @@ function steerRefusal(error: unknown): string | undefined {
  * session is open: the catalog depends on the account's entitlements, which the
  * provider knows and AO does not.
  */
-export function useConversationModels(sessionId: string | undefined, enabled: boolean) {
+export function useConversationModels(session: Ref | undefined, enabled: boolean) {
+	const sessionId = session?.id;
 	const query = useQuery({
-		queryKey: ["conversation-models", sessionId ?? ""],
+		queryKey: ["conversation-models", session ? refKey(session) : ""],
 		enabled: Boolean(sessionId) && enabled,
 		// The catalog changes on the scale of provider releases, not turns.
 		staleTime: 5 * 60 * 1000,
 		retry: false,
 		queryFn: async () => {
-			const { data, error } = await apiClient.GET(
+			const { data, error } = await clientFor(session!.host).GET(
 				"/api/v1/sessions/{sessionId}/conversation/models",
 				{ params: { path: { sessionId: sessionId as string } } },
 			);
@@ -499,9 +504,10 @@ export function useConversationModels(sessionId: string | undefined, enabled: bo
  * the effort choices, for example). The daemon therefore returns the complete
  * catalog after every mutation and that response replaces the cache atomically.
  */
-export function useConversationConfigOptions(sessionId: string | undefined, enabled: boolean) {
+export function useConversationConfigOptions(session: Ref | undefined, enabled: boolean) {
+	const sessionId = session?.id;
 	const queryClient = useQueryClient();
-	const queryKey = ["conversation-config-options", sessionId ?? ""] as const;
+	const queryKey = ["conversation-config-options", session ? refKey(session) : ""] as const;
 	const query = useQuery({
 		queryKey,
 		enabled: Boolean(sessionId) && enabled,
@@ -511,7 +517,7 @@ export function useConversationConfigOptions(sessionId: string | undefined, enab
 		// visible without coupling them to conversation history polling.
 		refetchInterval: CONFIG_OPTIONS_POLL_INTERVAL_MS,
 		queryFn: async () => {
-			const { data, error } = await apiClient.GET(
+			const { data, error } = await clientFor(session!.host).GET(
 				"/api/v1/sessions/{sessionId}/conversation/config-options",
 				{ params: { path: { sessionId: sessionId as string } } },
 			);
@@ -527,7 +533,7 @@ export function useConversationConfigOptions(sessionId: string | undefined, enab
 			optionId: string;
 			value: ChatConfigOptionValue;
 		}) => {
-			const { data, error } = await apiClient.PATCH(
+			const { data, error } = await clientFor(session!.host).PATCH(
 				"/api/v1/sessions/{sessionId}/conversation/config-options/{configId}",
 				{
 					params: {
@@ -562,9 +568,10 @@ export function useConversationConfigOptions(sessionId: string | undefined, enab
  * from a failure — with no skills, `/` has to stay an ordinary character rather than
  * opening an empty menu.
  */
-export function useConversationSkills(sessionId: string | undefined, enabled: boolean) {
+export function useConversationSkills(session: Ref | undefined, enabled: boolean) {
+	const sessionId = session?.id;
 	const query = useQuery({
-		queryKey: ["conversation-skills", sessionId ?? ""],
+		queryKey: ["conversation-skills", session ? refKey(session) : ""],
 		enabled: Boolean(sessionId) && enabled,
 		// ACP agents publish this catalog asynchronously and may replace it later.
 		// Polling also keeps Codex project skills current without introducing a
@@ -575,7 +582,7 @@ export function useConversationSkills(sessionId: string | undefined, enabled: bo
 		refetchInterval: 60 * 1000,
 		retry: false,
 		queryFn: async () => {
-			const { data, error } = await apiClient.GET(
+			const { data, error } = await clientFor(session!.host).GET(
 				"/api/v1/sessions/{sessionId}/conversation/skills",
 				{ params: { path: { sessionId: sessionId as string } } },
 			);
@@ -595,9 +602,10 @@ export function useConversationSkills(sessionId: string | undefined, enabled: bo
  * The endpoint caps itself, and `truncated` is respected rather than presented as a
  * complete list.
  */
-export function useWorkspaceFilePaths(sessionId: string | undefined, enabled: boolean) {
+export function useWorkspaceFilePaths(session: Ref | undefined, enabled: boolean) {
+	const sessionId = session?.id;
 	const query = useQuery({
-		queryKey: ["workspace-file-paths", sessionId ?? ""],
+		queryKey: ["workspace-file-paths", session ? refKey(session) : ""],
 		enabled: Boolean(sessionId) && enabled,
 		// The agent edits files as it works, so this goes stale; refetched on demand
 		// rather than polled, since a mention menu that is a minute out of date is
@@ -605,7 +613,7 @@ export function useWorkspaceFilePaths(sessionId: string | undefined, enabled: bo
 		staleTime: 30 * 1000,
 		retry: false,
 		queryFn: async () => {
-			const { data, error } = await apiClient.GET(
+			const { data, error } = await clientFor(session!.host).GET(
 				"/api/v1/sessions/{sessionId}/workspace/files",
 				{ params: { path: { sessionId: sessionId as string } } },
 			);
@@ -634,18 +642,19 @@ export function useWorkspaceFilePaths(sessionId: string | undefined, enabled: bo
  * paths in the message it sends, which is how an image reaches an agent whose
  * conversation carries text: the same thing spawn does for the opening brief.
  */
-export function useStageAttachments(sessionId: string | undefined) {
+export function useStageAttachments(session: Ref | undefined) {
+	const sessionId = session?.id;
 	return useCallback(
 		async (attachments: { mimeType: string; data: string }[]): Promise<string[]> => {
 			if (!sessionId || attachments.length === 0) return [];
-			const { data, error } = await apiClient.POST(
+			const { data, error } = await clientFor(session!.host).POST(
 				"/api/v1/sessions/{sessionId}/attachments",
 				{ params: { path: { sessionId } }, body: { attachments } },
 			);
 			if (error) throw error;
 			return data?.paths ?? [];
 		},
-		[sessionId],
+		[session, sessionId],
 	);
 }
 

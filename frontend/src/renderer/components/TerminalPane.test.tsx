@@ -53,6 +53,16 @@ vi.mock("../lib/api-client", () => ({
 	apiErrorMessage: (_error: unknown, fallback: string) => fallback,
 }));
 
+vi.mock("../lib/host-clients", () => ({
+	baseUrlFor: () => "http://127.0.0.1:3001",
+	connectedHosts: () => [],
+	isHostReady: () => true,
+	clientFor: () => ({
+		GET: (path: string, options: unknown) => getMock(path, options),
+		POST: (...args: unknown[]) => postMock(...args),
+	}),
+}));
+
 vi.mock("./XtermTerminal", () => ({
 	XtermTerminal: (props: {
 		onLinkOpen?: (uri: string) => void;
@@ -194,7 +204,7 @@ function renderCachedPane({
 }) {
 	const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
 	queryClient.setQueryData(workspaceHostQueryKey("local"), localSection(sessions));
-	queryClient.setQueryData(shellTerminalsQueryKey, shellTerminals);
+	queryClient.setQueryData(shellTerminalsQueryKey("local"), shellTerminals);
 	const previousAO = window.ao;
 	window.ao = {} as typeof window.ao;
 
@@ -420,7 +430,7 @@ describe("TerminalCacheProvider", () => {
 				view.show(session);
 				await waitFor(() =>
 					expect(
-						document.querySelector(`[data-terminal-cache-key^="session:${session.id}:worker|"]`),
+						document.querySelector(`[data-terminal-cache-key^="session:local:${session.id}:worker|"]`),
 					).not.toBeNull(),
 				);
 			}
@@ -475,6 +485,7 @@ describe("TerminalCacheProvider", () => {
 
 	it("disposes a parked shell when the shell lifecycle removes its handle", async () => {
 		const shell: ShellTerminal = {
+			host: "local",
 			handleId: "shell-handle",
 			sessionId: sessionA.id,
 			workingDir: "/repo/my-app",
@@ -483,9 +494,10 @@ describe("TerminalCacheProvider", () => {
 		};
 		const shellTarget: TerminalTarget = {
 			generation: shell.createdAt,
+			host: shell.host,
 			kind: "shell",
 			handleId: shell.handleId,
-			sessionId: sessionA.id,
+			session: sessionA,
 			title: shell.title,
 		};
 		const view = renderCachedPane({
@@ -499,7 +511,7 @@ describe("TerminalCacheProvider", () => {
 			view.show(sessionA, { kind: "worker" });
 			await waitFor(() => expect(activeXterm()).not.toBe(shellXterm));
 			act(() => {
-				view.queryClient.setQueryData(shellTerminalsQueryKey, []);
+				view.queryClient.setQueryData(shellTerminalsQueryKey("local"), []);
 			});
 
 			await waitFor(() => expect(shellXterm.isConnected).toBe(false));
@@ -514,7 +526,7 @@ describe("TerminalCacheProvider", () => {
 			handleId: "stable-reviewer-handle",
 			harness: "codex",
 			kind: "reviewer",
-			sessionId: sessionA.id,
+			session: sessionA,
 		} satisfies TerminalTarget;
 		const view = renderCachedPane({
 			session: sessionA,

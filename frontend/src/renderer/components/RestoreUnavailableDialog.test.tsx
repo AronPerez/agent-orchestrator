@@ -75,7 +75,10 @@ describe("RestoreUnavailableDialog", () => {
 		await userEvent.click(screen.getByRole("button", { name: "Configure orchestrator agent" }));
 
 		expect(onOpenChange).toHaveBeenCalledWith(false);
-		expect(useUiStore.getState().settingsModal).toEqual({ scope: "project", projectId: "proj-1" });
+		expect(useUiStore.getState().settingsModal).toEqual({
+			scope: "project",
+			project: { host: "local", id: "proj-1" },
+		});
 		expect(spawnMock).not.toHaveBeenCalled();
 		expect(onRecreated).not.toHaveBeenCalled();
 	});
@@ -96,7 +99,7 @@ describe("RestoreUnavailableDialog", () => {
 		await userEvent.click(screen.getByRole("button", { name: "Create new orchestrator" }));
 
 		await waitFor(() => expect(onRecreated).toHaveBeenCalledWith("orch-new"));
-		expect(spawnMock).toHaveBeenCalledWith("proj-1", "restore_dialog", true);
+		expect(spawnMock).toHaveBeenCalledWith({ host: "local", id: "proj-1" }, "restore_dialog", true);
 		expect(onOpenChange).toHaveBeenCalledWith(false);
 	});
 });

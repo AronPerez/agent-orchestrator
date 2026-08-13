@@ -58,6 +58,7 @@ import { useUiStore } from "../stores/ui-store";
 import { RestoreUnavailableDialog } from "./RestoreUnavailableDialog";
 import { DaemonStartupLoader } from "./DaemonStartupLoader";
 import { useShellMaybe } from "../lib/shell-context";
+import { refKey, type Ref } from "../lib/hosts";
 import {
   ArchivedSessionCardAdapter,
   BoardSessionCardAdapter,
@@ -107,6 +108,7 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
     ? all.filter((workspace) => workspace.id === projectId)
     : all;
   const workspace = projectId ? workspaces[0] : undefined;
+  const projectKey = workspace ? refKey(workspace) : undefined;
   // Same crumb as ShellTopbar: project name in scope, else root-board "Board".
   const boardLabel = workspace?.name ?? (projectId ? "" : t("shell.board"));
   const sessions = workspaces.flatMap((workspace) =>
@@ -125,7 +127,7 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
     (state) => state.restartingProjectIds,
   );
   const orchestratorStartupError = useUiStore((state) =>
-    projectId ? (state.orchestratorStartupErrors[projectId] ?? null) : null,
+    projectKey ? (state.orchestratorStartupErrors[projectKey] ?? null) : null,
   );
   const setProjectRestarting = useUiStore(
     (state) => state.setProjectRestarting,
@@ -137,8 +139,8 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
     (state) => state.setOrchestratorStartupError,
   );
   const requestNewTask = useUiStore((state) => state.requestNewTask);
-  const isProjectRestarting = projectId
-    ? restartingProjectIds.has(projectId)
+  const isProjectRestarting = projectKey
+    ? restartingProjectIds.has(projectKey)
     : false;
   const health = workspace
     ? orchestratorHealth(workspace, isProjectRestarting)
@@ -151,23 +153,23 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
     setSpawnError(null);
     setCanCreateAsTui(false);
   }, [projectId]);
-  const previousProjectIdRef = useRef(projectId);
+  const previousProjectRef = useRef<Ref | undefined>(workspace);
   useEffect(() => {
-    const previousProjectId = previousProjectIdRef.current;
-    if (previousProjectId && previousProjectId !== projectId) {
-      setOrchestratorStartupError(previousProjectId, null);
+    const previousProject = previousProjectRef.current;
+    if (previousProject && refKey(previousProject) !== projectKey) {
+      setOrchestratorStartupError(previousProject, null);
     }
-    previousProjectIdRef.current = projectId;
-  }, [projectId, setOrchestratorStartupError]);
+    previousProjectRef.current = workspace;
+  }, [projectKey, setOrchestratorStartupError, workspace]);
   useEffect(() => {
-    if (projectId && orchestrator && orchestratorStartupError) {
-      setOrchestratorStartupError(projectId, null);
+    if (workspace && orchestrator && orchestratorStartupError) {
+      setOrchestratorStartupError(workspace, null);
     }
   }, [
     orchestrator,
     orchestratorStartupError,
-    projectId,
     setOrchestratorStartupError,
+    workspace,
   ]);
 
   const archived = sessions
@@ -225,8 +227,8 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
 
   const openSession = (session: WorkspaceSession) =>
     void navigate({
-      to: "/projects/$projectId/sessions/$sessionId",
-      params: { projectId: session.workspaceId, sessionId: session.id },
+      to: "/host/$hostId/session/$sessionId",
+      params: { hostId: session.host, sessionId: session.id },
     });
 
   const restoreArchivedSession = async (
@@ -235,22 +237,23 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
   ) => {
     event.stopPropagation();
     if (restoringSessionId) return;
+	const sessionKey = refKey(session);
     const restoreProjectId = projectId;
     const isStillActiveProject = () =>
       !restoreProjectId || activeProjectIdRef.current === restoreProjectId;
-    setRestoringSessionId(session.id);
+    setRestoringSessionId(sessionKey);
     setRestoreErrors((current) => {
       const next = { ...current };
-      delete next[session.id];
+      delete next[sessionKey];
       return next;
     });
     try {
-      const result = await restoreSessionById(session.id);
+      const result = await restoreSessionById(session);
       if (!isStillActiveProject()) return;
       if (result.status === "success") {
         void navigate({
-          to: "/projects/$projectId/sessions/$sessionId",
-          params: { projectId: session.workspaceId, sessionId: session.id },
+          to: "/host/$hostId/session/$sessionId",
+          params: { hostId: session.host, sessionId: session.id },
         });
         return;
       }
@@ -260,7 +263,7 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
       }
       setRestoreErrors((current) => ({
         ...current,
-        [session.id]: result.message,
+        [sessionKey]: result.message,
       }));
     } finally {
       if (isStillActiveProject()) {
@@ -270,36 +273,34 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
   };
 
   const openOrchestrator = async (mode?: "tui") => {
-    if (!projectId || isProjectRestarting) return;
+		if (!workspace || isProjectRestarting) return;
     if (orchestrator) {
       void navigate({
-        to: "/projects/$projectId/sessions/$sessionId",
-        params: { projectId, sessionId: orchestrator.id },
+        to: "/host/$hostId/session/$sessionId",
+        params: { hostId: orchestrator.host, sessionId: orchestrator.id },
       });
       return;
     }
     if (!hasConfiguredOrchestratorAgent(workspace)) {
-      if (workspace) {
-        useUiStore.getState().openProjectSettings(projectId);
-      }
+		if (workspace) useUiStore.getState().openProjectSettings(workspace);
       return;
     }
     setSpawnError(null);
     setCanCreateAsTui(false);
-    setOrchestratorStartupError(projectId, null);
+		setOrchestratorStartupError(workspace, null);
     setIsSpawning(true);
     try {
-      const sessionId = await spawnOrchestrator(
-        projectId,
+		const sessionId = await spawnOrchestrator(
+			workspace,
         "board",
         false,
         mode,
       );
       await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
-      setOrchestratorStartupError(projectId, null);
+		setOrchestratorStartupError(workspace, null);
       void navigate({
-        to: "/projects/$projectId/sessions/$sessionId",
-        params: { projectId, sessionId },
+        to: "/host/$hostId/session/$sessionId",
+		params: { hostId: workspace.host, sessionId },
       });
     } catch (error) {
       // Never fail silently: the daemon's message (e.g. a worktree/branch
@@ -315,9 +316,9 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
   };
 
   const restartOrchestrator = async () => {
-    if (!projectId) return;
+		if (!workspace) return;
     await restartProjectOrchestrator({
-      projectId,
+		project: workspace,
       queryClient,
       navigate,
       setProjectRestarting,
@@ -346,7 +347,7 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
       <TopbarButton
         aria-label={t("shell.newTask")}
         disabled={isProjectRestarting}
-        onClick={() => projectId && requestNewTask(projectId)}
+		onClick={() => workspace && requestNewTask(workspace)}
         variant="accent"
       >
         <Plus className="size-icon-md" aria-hidden="true" />
@@ -449,7 +450,7 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
             hasOrchestrator={orchestrator !== undefined}
             isSpawning={isSpawning}
             isProjectRestarting={isProjectRestarting}
-            onNewTask={() => projectId && requestNewTask(projectId)}
+			onNewTask={() => workspace && requestNewTask(workspace)}
             onOpenOrchestrator={() => void openOrchestrator()}
             onOpenOrchestratorAsTui={
               canCreateAsTui ? () => void openOrchestrator("tui") : undefined
@@ -466,7 +467,7 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
                 onOpen={() => openSession(session)}
                 onTerminate={() => terminateSession.mutate(session)}
                 session={session}
-                usage={usageBySession.get(session.id)}
+                usage={usageBySession.get(refKey(session))}
               />
             )}
             sessions={activeSessions}
@@ -487,13 +488,13 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
         renderSessionCard={(session) => (
           <ArchivedSessionCardAdapter
             isRestoreDisabled={restoringSessionId !== undefined}
-            isRestoring={restoringSessionId === session.id}
+            isRestoring={restoringSessionId === refKey(session)}
             restoreAction={(event) =>
               void restoreArchivedSession(event, session)
             }
-            restoreError={restoreErrors[session.id]}
+            restoreError={restoreErrors[refKey(session)]}
             session={session}
-            usage={usageBySession.get(session.id)}
+            usage={usageBySession.get(refKey(session))}
           />
         )}
         sessions={archived}

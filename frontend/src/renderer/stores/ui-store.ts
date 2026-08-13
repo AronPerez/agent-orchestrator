@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { TerminalTarget } from "../types/terminal";
+import { refKey, type Ref } from "../lib/hosts";
 import {
 	applyDocumentTheme,
 	applyDocumentThemeStyle,
@@ -22,7 +23,7 @@ export type SettingsModal =
 	| { scope: "global" }
 	| {
 			scope: "project";
-			projectId: string;
+			project: Ref;
 	  };
 
 /** Worker detail view toggles — Changes (Git rail) is the default. */
@@ -61,7 +62,7 @@ type UiState = {
 	// bumps on every request so a repeat press (even for the same project) still
 	// re-fires; the always-mounted GlobalNewTaskDialog consumes it. Selection
 	// still lives in the URL — this is a one-shot action, not persisted state.
-	newTaskRequest: { projectId: string; nonce: number } | null;
+	newTaskRequest: { project: Ref; nonce: number } | null;
 	// Bumps to ask the sidebar's create-project flow to open (the ⌘N fallback
 	// when no project is in scope).
 	createProjectNonce: number;
@@ -85,7 +86,7 @@ type UiState = {
 	setThemePreference: (theme: ThemePreference) => void;
 	setThemeStyle: (style: ThemeStyle) => void;
 	openGlobalSettings: () => void;
-	openProjectSettings: (projectId: string) => void;
+	openProjectSettings: (project: Ref) => void;
 	closeSettings: () => void;
 	/** Refresh resolvedTheme from OS without writing light/dark to storage. */
 	syncSystemTheme: () => void;
@@ -97,13 +98,13 @@ type UiState = {
 	setBrowserContentRevealed: (sessionId: string, revealed: boolean) => void;
 	setBrowserUnseen: (sessionId: string, unseen: boolean) => void;
 	setCommandPaletteOpen: (open: boolean) => void;
-	setProjectRestarting: (projectId: string, restarting: boolean) => void;
-	setOrchestratorReplacementError: (projectId: string, failure: OrchestratorReplacementFailure | null) => void;
-	setOrchestratorStartupError: (projectId: string, message: string | null) => void;
-	requestNewTask: (projectId: string) => void;
+	setProjectRestarting: (project: Ref, restarting: boolean) => void;
+	setOrchestratorReplacementError: (project: Ref, failure: OrchestratorReplacementFailure | null) => void;
+	setOrchestratorStartupError: (project: Ref, message: string | null) => void;
+	requestNewTask: (project: Ref) => void;
 	requestCreateProject: () => void;
 	requestNewShellTerminal: () => void;
-	setActiveShellTerminal: (handleId: string | null) => void;
+	setActiveShellTerminal: (terminal: Ref | null) => void;
 	setVisibleTerminalKind: (sessionId: string, kind: TerminalTarget["kind"]) => void;
 	clearVisibleTerminalKind: (sessionId: string) => void;
 };
@@ -167,7 +168,7 @@ export const useUiStore = create<UiState>((set, get) => ({
 		});
 	},
 	openGlobalSettings: () => set({ settingsModal: { scope: "global" } }),
-	openProjectSettings: (projectId) => set({ settingsModal: { scope: "project", projectId } }),
+	openProjectSettings: (project) => set({ settingsModal: { scope: "project", project } }),
 	closeSettings: () => set({ settingsModal: null }),
 	syncSystemTheme: () => {
 		const { themePreference, resolvedTheme } = get();
@@ -253,41 +254,45 @@ export const useUiStore = create<UiState>((set, get) => ({
 			};
 		}),
 	setCommandPaletteOpen: (isCommandPaletteOpen) => set({ isCommandPaletteOpen }),
-	setProjectRestarting: (projectId, restarting) =>
+	setProjectRestarting: (project, restarting) =>
 		set((state) => {
 			const restartingProjectIds = new Set(state.restartingProjectIds);
+			const projectKey = refKey(project);
 			if (restarting) {
-				restartingProjectIds.add(projectId);
+				restartingProjectIds.add(projectKey);
 			} else {
-				restartingProjectIds.delete(projectId);
+				restartingProjectIds.delete(projectKey);
 			}
 			return { restartingProjectIds };
 		}),
-	setOrchestratorReplacementError: (projectId, failure) =>
+	setOrchestratorReplacementError: (project, failure) =>
 		set((state) => {
 			const orchestratorReplacementErrors = { ...state.orchestratorReplacementErrors };
+			const projectKey = refKey(project);
 			if (failure) {
-				orchestratorReplacementErrors[projectId] = failure;
+				orchestratorReplacementErrors[projectKey] = failure;
 			} else {
-				delete orchestratorReplacementErrors[projectId];
+				delete orchestratorReplacementErrors[projectKey];
 			}
 			return { orchestratorReplacementErrors };
 		}),
-	setOrchestratorStartupError: (projectId, message) =>
+	setOrchestratorStartupError: (project, message) =>
 		set((state) => {
 			const orchestratorStartupErrors = { ...state.orchestratorStartupErrors };
+			const projectKey = refKey(project);
 			if (message) {
-				orchestratorStartupErrors[projectId] = message;
+				orchestratorStartupErrors[projectKey] = message;
 			} else {
-				delete orchestratorStartupErrors[projectId];
+				delete orchestratorStartupErrors[projectKey];
 			}
 			return { orchestratorStartupErrors };
 		}),
-	requestNewTask: (projectId) =>
-		set((state) => ({ newTaskRequest: { projectId, nonce: (state.newTaskRequest?.nonce ?? 0) + 1 } })),
+	requestNewTask: (project) =>
+		set((state) => ({ newTaskRequest: { project, nonce: (state.newTaskRequest?.nonce ?? 0) + 1 } })),
 	requestCreateProject: () => set((state) => ({ createProjectNonce: state.createProjectNonce + 1 })),
 	requestNewShellTerminal: () => set((state) => ({ newShellTerminalNonce: state.newShellTerminalNonce + 1 })),
-	setActiveShellTerminal: (activeShellTerminalHandleId) => set({ activeShellTerminalHandleId }),
+	setActiveShellTerminal: (terminal) =>
+		set({ activeShellTerminalHandleId: terminal ? refKey(terminal) : null }),
 	setVisibleTerminalKind: (sessionId, kind) =>
 		set((state) =>
 			state.visibleTerminalKindBySession[sessionId] === kind

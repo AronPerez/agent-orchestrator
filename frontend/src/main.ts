@@ -1922,7 +1922,6 @@ ipcMain.handle(
 );
 
 const registry = new RemoteRegistry(startRemoteProxy);
-let activeRemoteUrl: string | null = null;
 
 async function validatedRemote(url: string): Promise<RemoteEntry> {
   const entry = await findRemote(url);
@@ -1936,10 +1935,7 @@ async function validatedRemote(url: string): Promise<RemoteEntry> {
 function connectedRemote(url: string) {
   return {
     view: async () => registry.views().find((view) => view.url === url) ?? null,
-    deactivate: async () => {
-      if (activeRemoteUrl === url) activeRemoteUrl = null;
-      await registry.disconnect(url);
-    },
+    deactivate: async () => registry.disconnect(url),
   };
 }
 
@@ -1952,31 +1948,6 @@ ipcMain.handle("remotes:disconnect", async (_event, url: string) =>
 );
 
 ipcMain.handle("remotes:connected", async () => registry.views());
-
-ipcMain.handle("remotes:activate", async (_event, url: string) => {
-  const entry = await validatedRemote(url);
-  if (activeRemoteUrl && activeRemoteUrl !== url) {
-    const previous = activeRemoteUrl;
-    activeRemoteUrl = null;
-    await registry.disconnect(previous);
-  }
-  const view = await registry.connect(entry);
-  activeRemoteUrl = url;
-  return view;
-});
-
-ipcMain.handle("remotes:deactivate", async () => {
-  if (!activeRemoteUrl) return;
-  const url = activeRemoteUrl;
-  activeRemoteUrl = null;
-  await registry.disconnect(url);
-});
-
-ipcMain.handle("remotes:active", async () =>
-  activeRemoteUrl
-    ? (registry.views().find((view) => view.url === activeRemoteUrl) ?? null)
-    : null,
-);
 
 ipcMain.handle(
   "remotes:update",

@@ -20,11 +20,12 @@ import type {
   BrowserAnnotationSubmitPayload,
 } from "../../shared/browser-annotations";
 import { OPEN_BROWSER_OVERLAY_SELECTOR } from "../lib/dom-selectors";
+import { refKey, type Ref } from "../lib/hosts";
 
 export type { BrowserNavState };
 
 type UseBrowserViewOptions = {
-  sessionId: string;
+	session: Ref;
   active: boolean;
   poppedOut: boolean;
   /**
@@ -174,13 +175,14 @@ function hiddenByFullscreen(node: HTMLElement): boolean {
 }
 
 function useNativeBrowserView({
-  sessionId,
+	session,
   active,
   poppedOut,
   terminated,
   previewUrl,
   previewRevision,
 }: UseBrowserViewOptions): BrowserViewModel {
+	const sessionId = refKey(session);
   const [viewId, setViewId] = useState("");
   const [navState, setNavState] = useState<BrowserNavState>(EMPTY_NAV_STATE);
   const [annotationMode, setAnnotationModeState] = useState(false);
@@ -816,9 +818,10 @@ export function normalizeWebPreviewURL(raw: string): string {
 // URL bar reflects only what we navigated to. `enabled` is false in Electron so
 // this hook stays inert while the native one drives the real view.
 function useWebBrowserView(
-  { sessionId, previewUrl, previewRevision }: UseBrowserViewOptions,
+	{ session, previewUrl, previewRevision }: UseBrowserViewOptions,
   enabled: boolean,
 ): BrowserViewModel {
+	const sessionId = refKey(session);
   const [url, setUrl] = useState("");
   const [iframeKey, setIframeKey] = useState(0);
   const previewTriggerRef = useRef<{

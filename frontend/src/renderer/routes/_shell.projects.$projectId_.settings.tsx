@@ -1,6 +1,7 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect } from "react";
 import { useUiStore } from "../stores/ui-store";
+import { LOCAL_HOST } from "../lib/hosts";
 
 export const Route = createFileRoute("/_shell/projects/$projectId_/settings")({
 	component: ProjectSettingsRoute,
@@ -14,7 +15,7 @@ function ProjectSettingsRoute() {
 	const openProjectSettings = useUiStore((state) => state.openProjectSettings);
 
 	useEffect(() => {
-		openProjectSettings(projectId);
+		openProjectSettings({ host: LOCAL_HOST, id: projectId });
 		void navigate({ to: "/projects/$projectId", params: { projectId }, replace: true });
 	}, [navigate, openProjectSettings, projectId]);
 

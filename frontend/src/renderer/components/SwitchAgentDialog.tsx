@@ -88,8 +88,8 @@ export function SwitchAgentDialog({
 	const [targetHarness, setTargetHarness] = useState<SwitchAgentHarness>(defaultTargetHarness);
 	const [note, setNote] = useState("");
 	const switchAgent = useSwitchAgent();
-	const switchMutation = useSwitchAgentState(session.id);
-	const switchesQuery = useAgentSwitches(session.id);
+	const switchMutation = useSwitchAgentState(session);
+	const switchesQuery = useAgentSwitches(session);
 	const switches = switchesQuery.data ?? [];
 	const activeSwitch = findActiveAgentSwitch(switches);
 	const recoverySwitch = findRecoveryRequiredAgentSwitch(switches);
@@ -103,7 +103,7 @@ export function SwitchAgentDialog({
 
 	const clearFailedAttempt = () => {
 		if (!switchMutation.error) return;
-		clearSwitchAgentState(queryClient, session.id);
+		clearSwitchAgentState(queryClient, session);
 	};
 
 	const submit = () => {

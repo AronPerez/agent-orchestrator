@@ -267,8 +267,20 @@ describe("project board with no sessions", () => {
 		await userEvent.click(spawnButton);
 		await userEvent.click(await screen.findByRole("button", { name: "Create as Terminal UI" }));
 
-		expect(spawnOrchestratorMock).toHaveBeenNthCalledWith(1, "proj-1", "board", false, undefined);
-		expect(spawnOrchestratorMock).toHaveBeenNthCalledWith(2, "proj-1", "board", false, "tui");
+		expect(spawnOrchestratorMock).toHaveBeenNthCalledWith(
+			1,
+			expect.objectContaining({ host: "local", id: "proj-1" }),
+			"board",
+			false,
+			undefined,
+		);
+		expect(spawnOrchestratorMock).toHaveBeenNthCalledWith(
+			2,
+			expect.objectContaining({ host: "local", id: "proj-1" }),
+			"board",
+			false,
+			"tui",
+		);
 	});
 
 	it("opens project settings instead of spawning when no orchestrator agent is configured", async () => {
@@ -280,7 +292,10 @@ describe("project board with no sessions", () => {
 		const [spawnButton] = screen.getAllByRole("button", { name: "Spawn Orchestrator" });
 		await userEvent.click(spawnButton);
 
-		expect(useUiStore.getState().settingsModal).toEqual({ scope: "project", projectId: "proj-1" });
+		expect(useUiStore.getState().settingsModal).toEqual({
+			scope: "project",
+			project: expect.objectContaining({ host: "local", id: "proj-1" }),
+		});
 		expect(navigateMock).not.toHaveBeenCalled();
 		expect(spawnOrchestratorMock).not.toHaveBeenCalled();
 	});
@@ -290,7 +305,7 @@ describe("project board with no sessions", () => {
 		useUiStore
 			.getState()
 			.setOrchestratorStartupError(
-				"proj-1",
+				{ host: "local", id: "proj-1" },
 				"Project added, but orchestrator did not start: branch is already checked out in another worktree",
 			);
 		renderBoard(<SessionsBoard projectId="proj-1" />);
@@ -304,7 +319,7 @@ describe("project board with no sessions", () => {
 		useUiStore
 			.getState()
 			.setOrchestratorStartupError(
-				"proj-1",
+				{ host: "local", id: "proj-1" },
 				"Project added, but orchestrator did not start: branch is already checked out in another worktree",
 			);
 		spawnOrchestratorMock.mockResolvedValue("proj-1-orchestrator");
@@ -317,7 +332,7 @@ describe("project board with no sessions", () => {
 		await waitFor(() =>
 			expect(screen.queryByText(/Project added, but orchestrator did not start/)).not.toBeInTheDocument(),
 		);
-		expect(useUiStore.getState().orchestratorStartupErrors["proj-1"]).toBeUndefined();
+		expect(useUiStore.getState().orchestratorStartupErrors["local:proj-1"]).toBeUndefined();
 	});
 
 	it("clears a project creation startup error when switching projects", async () => {
@@ -326,7 +341,7 @@ describe("project board with no sessions", () => {
 		useUiStore
 			.getState()
 			.setOrchestratorStartupError(
-				"proj-1",
+				{ host: "local", id: "proj-1" },
 				"Project added, but orchestrator did not start: branch is already checked out in another worktree",
 			);
 		const { rerender } = renderBoard(<SessionsBoard projectId="proj-1" />);
@@ -341,7 +356,7 @@ describe("project board with no sessions", () => {
 		);
 
 		await screen.findByText("No worker sessions yet");
-		await waitFor(() => expect(useUiStore.getState().orchestratorStartupErrors["proj-1"]).toBeUndefined());
+		await waitFor(() => expect(useUiStore.getState().orchestratorStartupErrors["local:proj-1"]).toBeUndefined());
 		expect(screen.queryByText(/Project added, but orchestrator did not start/)).not.toBeInTheDocument();
 	});
 
@@ -350,13 +365,13 @@ describe("project board with no sessions", () => {
 		useUiStore
 			.getState()
 			.setOrchestratorStartupError(
-				"proj-1",
+				{ host: "local", id: "proj-1" },
 				"Project added, but orchestrator did not start: branch is already checked out in another worktree",
 			);
 		renderBoard(<SessionsBoard projectId="proj-1" />);
 
 		await screen.findByText("No worker sessions yet");
-		await waitFor(() => expect(useUiStore.getState().orchestratorStartupErrors["proj-1"]).toBeUndefined());
+		await waitFor(() => expect(useUiStore.getState().orchestratorStartupErrors["local:proj-1"]).toBeUndefined());
 		expect(screen.queryByText(/Project added, but orchestrator did not start/)).not.toBeInTheDocument();
 	});
 

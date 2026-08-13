@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceSummary } from "../types/workspace";
 import { useUiStore } from "../stores/ui-store";
+import type { Ref } from "../lib/hosts";
 
 const navigateMock = vi.hoisted(() => vi.fn());
 const spawnMock = vi.hoisted(() => vi.fn());
@@ -86,7 +87,7 @@ const ctx = vi.hoisted(() => {
 		},
 	];
 	return {
-		params: {} as { projectId?: string; sessionId?: string },
+		params: {} as { hostId?: string; projectId?: string; sessionId?: string },
 		enabled: true,
 		workspaces,
 	};
@@ -131,13 +132,13 @@ function StubNestedLayer() {
 
 vi.mock("./TaskComposer", () => ({
 	TaskComposer: (props: {
-		projectId?: string;
+		project?: Ref;
 		onCreated: (id: string) => void;
 		onDirtyChange?: (dirty: boolean) => void;
 		onSubmittingChange?: (submitting: boolean) => void;
 	}) => (
 		<div data-testid="task-composer">
-			<span>composer {props.projectId}</span>
+			<span>composer {props.project?.id}</span>
 			<StubNestedLayer />
 			<button type="button" onClick={() => props.onDirtyChange?.(true)}>
 				stub-dirty
@@ -339,8 +340,8 @@ describe("CommandPalette drill-in + Enter", () => {
 		fireEvent.keyDown(actionsInput, { key: "Enter" });
 
 		expect(navigateMock).toHaveBeenCalledWith({
-			to: "/projects/$projectId/sessions/$sessionId",
-			params: { projectId: "proj-1", sessionId: "w-merge" },
+			to: "/host/$hostId/session/$sessionId",
+			params: { hostId: "local", sessionId: "w-merge" },
 		});
 		await waitFor(() => expect(paletteInput()).toBeNull());
 	});
@@ -417,11 +418,13 @@ describe("CommandPalette drill-in + Enter", () => {
 		await screen.findByPlaceholderText(/search actions/i);
 
 		fireEvent.click(screen.getByText("Resume agent"));
-		await waitFor(() => expect(restoreMock).toHaveBeenCalledWith("w-archived"));
+		await waitFor(() =>
+			expect(restoreMock).toHaveBeenCalledWith(expect.objectContaining({ host: "local", id: "w-archived" })),
+		);
 		await waitFor(() =>
 			expect(navigateMock).toHaveBeenCalledWith({
-				to: "/projects/$projectId/sessions/$sessionId",
-				params: { projectId: "proj-1", sessionId: "w-archived" },
+				to: "/host/$hostId/session/$sessionId",
+				params: { hostId: "local", sessionId: "w-archived" },
 			}),
 		);
 		await waitFor(() => expect(paletteInput()).toBeNull());
@@ -485,7 +488,7 @@ describe("CommandPalette actions", () => {
 
 	it("does not spawn Open orchestrator while the project is restarting", async () => {
 		ctx.params = { projectId: "proj-1" };
-		act(() => useUiStore.setState({ restartingProjectIds: new Set(["proj-1"]) }));
+		act(() => useUiStore.setState({ restartingProjectIds: new Set(["local:proj-1"]) }));
 		renderPalette();
 		act(() => useUiStore.getState().setCommandPaletteOpen(true));
 		await screen.findByPlaceholderText(/search projects/i);
@@ -502,7 +505,10 @@ describe("CommandPalette actions", () => {
 		await screen.findByPlaceholderText(/search projects/i);
 		fireEvent.click(screen.getByText("Open orchestrator"));
 
-		expect(useUiStore.getState().settingsModal).toEqual({ scope: "project", projectId: "proj-2" });
+		expect(useUiStore.getState().settingsModal).toEqual({
+			scope: "project",
+			project: expect.objectContaining({ host: "local", id: "proj-2" }),
+		});
 		expect(navigateMock).not.toHaveBeenCalled();
 		expect(spawnMock).not.toHaveBeenCalled();
 		await waitFor(() => expect(paletteInput()).toBeNull());
@@ -555,7 +561,10 @@ describe("CommandPalette actions", () => {
 		await screen.findByPlaceholderText(/search projects/i);
 		fireEvent.click(screen.getByText("Open orchestrator"));
 		expect(await screen.findByRole("alert")).toHaveTextContent("daemon down");
-		expect(spawnMock).toHaveBeenCalledWith("proj-2", "command_palette");
+		expect(spawnMock).toHaveBeenCalledWith(
+			expect.objectContaining({ host: "local", id: "proj-2" }),
+			"command_palette",
+		);
 		expect(useUiStore.getState().isCommandPaletteOpen).toBe(true);
 	});
 
@@ -686,8 +695,8 @@ describe("CommandPalette inline task composer", () => {
 		fireEvent.click(screen.getByText("stub-create"));
 		await waitFor(() =>
 			expect(navigateMock).toHaveBeenCalledWith({
-				to: "/projects/$projectId/sessions/$sessionId",
-				params: { projectId: "proj-1", sessionId: "new-session" },
+				to: "/host/$hostId/session/$sessionId",
+				params: { hostId: "local", sessionId: "new-session" },
 			}),
 		);
 		await waitFor(() => expect(paletteInput()).toBeNull());
@@ -727,8 +736,8 @@ describe("CommandPalette inline task composer", () => {
 		fireEvent.click(screen.getByText("stub-create"));
 		await waitFor(() =>
 			expect(navigateMock).toHaveBeenCalledWith({
-				to: "/projects/$projectId/sessions/$sessionId",
-				params: { projectId: "proj-1", sessionId: "new-session" },
+				to: "/host/$hostId/session/$sessionId",
+				params: { hostId: "local", sessionId: "new-session" },
 			}),
 		);
 	});

@@ -12,6 +12,7 @@ import {
 	type WorkspaceSummary,
 } from "../types/workspace";
 import { appI18n, type MessageKey } from "../i18n";
+import { refKey, type Ref } from "./hosts";
 
 export type CommandGroupId = "current" | "attention" | "projects" | "sessions" | "prs" | "global";
 
@@ -19,15 +20,16 @@ export type NavigateTarget =
 	| { to: "/settings" }
 	| { to: "/projects/$projectId"; params: { projectId: string } }
 	| { to: "/projects/$projectId/settings"; params: { projectId: string } }
-	| { to: "/projects/$projectId/sessions/$sessionId"; params: { projectId: string; sessionId: string } };
+	| { to: "/host/$hostId/session/$sessionId"; params: { hostId: string; sessionId: string } };
 
 export type CommandAction =
 	| { kind: "navigate"; target: NavigateTarget }
-	| { kind: "open-new-task"; projectId: string }
+	| { kind: "open-new-task"; project: Ref }
 	| { kind: "open-new-project" }
-	| { kind: "open-orchestrator"; projectId: string }
-	| { kind: "open-session-actions"; sessionId: string }
-	| { kind: "resume-session"; projectId: string; sessionId: string }
+	| { kind: "open-orchestrator"; project: Ref }
+	| { kind: "open-project-settings"; project: Ref }
+	| { kind: "open-session-actions"; session: Ref }
+	| { kind: "resume-session"; session: Ref }
 	| { kind: "copy-branch"; branch: string }
 	| { kind: "toggle-theme" };
 
@@ -47,6 +49,7 @@ export type CommandItem = {
 export type CommandPaletteContext = {
 	workspaces: WorkspaceSummary[];
 	currentProjectId?: string;
+	currentHostId?: string;
 	currentSessionId?: string;
 	restartingProjectIds?: ReadonlySet<string>;
 };
@@ -97,10 +100,10 @@ export type WorkspaceSessionContext = {
 	session: WorkspaceSession;
 };
 
-function jumpTarget(workspace: WorkspaceSummary, session: WorkspaceSession): NavigateTarget {
+function jumpTarget(session: WorkspaceSession): NavigateTarget {
 	return {
-		to: "/projects/$projectId/sessions/$sessionId",
-		params: { projectId: workspace.id, sessionId: session.id },
+		to: "/host/$hostId/session/$sessionId",
+		params: { hostId: session.host, sessionId: session.id },
 	};
 }
 
@@ -110,45 +113,44 @@ function sessionCommand(
 	group: SessionCommandGroup,
 ): CommandItem {
 	return {
-		id: `${SESSION_ID_PREFIX[group]}:${session.id}`,
+		id: `${SESSION_ID_PREFIX[group]}:${refKey(session)}`,
 		group,
 		title: session.title,
 		subtitle: workspace.name,
 		zone: attentionZone(session),
 		keywords: [workspace.name, session.branch ?? "", session.issueId ?? ""],
-		action: { kind: "open-session-actions", sessionId: session.id },
+		action: { kind: "open-session-actions", session },
 	};
 }
 
 export function buildSessionActions(
-	workspace: WorkspaceSummary,
 	session: WorkspaceSession,
 	t: TFunction = appI18n.t,
 ): CommandItem[] {
 	const items: CommandItem[] = [];
 
 	items.push({
-		id: `session-action:jump:${session.id}`,
+		id: `session-action:jump:${refKey(session)}`,
 		group: "current",
 		title: t("command.jumpToSession"),
 		keywords: ["open", "go", "view", session.title],
-		action: { kind: "navigate", target: jumpTarget(workspace, session) },
+		action: { kind: "navigate", target: jumpTarget(session) },
 	});
 
 	if (!sessionIsActive(session) && !isOrchestratorSession(session)) {
 		items.push({
-			id: `session-action:resume:${session.id}`,
+			id: `session-action:resume:${refKey(session)}`,
 			group: "current",
 			title: t("command.resumeAgent"),
 			subtitle: t("command.resumeAgentSubtitle"),
 			keywords: ["restore", "restart", "retry", "resume", session.title],
-			action: { kind: "resume-session", projectId: workspace.id, sessionId: session.id },
+			action: { kind: "resume-session", session },
 		});
 	}
 
 	if (session.branch && !isOrchestratorSession(session) && !isSyntheticBranch(session)) {
 		items.push({
-			id: `session-action:copy-branch:${session.id}`,
+			id: `session-action:copy-branch:${refKey(session)}`,
 			group: "current",
 			title: t("command.copyBranch"),
 			subtitle: session.branch,
@@ -160,23 +162,25 @@ export function buildSessionActions(
 	return items;
 }
 
-export function findSession(workspaces: WorkspaceSummary[], sessionId: string): WorkspaceSessionContext | undefined {
+export function findSession(workspaces: WorkspaceSummary[], ref: Ref): WorkspaceSessionContext | undefined {
 	for (const workspace of workspaces) {
-		const match = workspace.sessions.find((session) => session.id === sessionId);
+		const match = workspace.sessions.find((session) => session.host === ref.host && session.id === ref.id);
 		if (match) return { workspace, session: match };
 	}
 	return undefined;
 }
 
 export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n.t): CommandItem[] {
-	const { workspaces, currentProjectId, currentSessionId, restartingProjectIds } = ctx;
+	const { workspaces, currentHostId, currentProjectId, currentSessionId, restartingProjectIds } = ctx;
 	const items: CommandItem[] = [];
 
 	const currentProject = currentProjectId
-		? workspaces.find((workspace) => workspace.id === currentProjectId)
+		? workspaces.find((workspace) => workspace.id === currentProjectId && (!currentHostId || workspace.host === currentHostId))
 		: undefined;
-	const currentSession = currentSessionId ? findSession(workspaces, currentSessionId)?.session : undefined;
-	const isProjectRestarting = Boolean(currentProject && restartingProjectIds?.has(currentProject.id));
+	const currentSession = currentHostId && currentSessionId
+		? findSession(workspaces, { host: currentHostId, id: currentSessionId })?.session
+		: undefined;
+	const isProjectRestarting = Boolean(currentProject && restartingProjectIds?.has(refKey(currentProject)));
 
 	items.push({
 		id: "current-new-task",
@@ -190,7 +194,7 @@ export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n
 			: isProjectRestarting
 				? t("command.orchestratorRestarting")
 				: undefined,
-		...(currentProject ? { action: { kind: "open-new-task" as const, projectId: currentProject.id } } : {}),
+		...(currentProject ? { action: { kind: "open-new-task" as const, project: currentProject } } : {}),
 	});
 
 	if (currentProject) {
@@ -202,7 +206,7 @@ export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n
 			keywords: ["orchestrator", "spawn", currentProject.name],
 			disabled: isProjectRestarting,
 			disabledReason: isProjectRestarting ? t("command.orchestratorRestarting") : undefined,
-			action: { kind: "open-orchestrator", projectId: currentProject.id },
+			action: { kind: "open-orchestrator", project: currentProject },
 		});
 		items.push({
 			id: "current-project-settings",
@@ -210,10 +214,7 @@ export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n
 			title: t("command.projectSettings"),
 			subtitle: currentProject.name,
 			keywords: ["settings", "config", currentProject.name],
-			action: {
-				kind: "navigate",
-				target: { to: "/projects/$projectId/settings", params: { projectId: currentProject.id } },
-			},
+			action: { kind: "open-project-settings", project: currentProject },
 		});
 	}
 
@@ -233,14 +234,15 @@ export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n
 		.flatMap((workspace) => workerSessions(workspace.sessions).map((session) => ({ workspace, session })))
 		.filter(
 			({ session }) =>
-				session.id !== currentSessionId && (attentionZone(session) === "merge" || sessionNeedsAttention(session)),
+				(!currentSession || refKey(session) !== refKey(currentSession)) &&
+				(attentionZone(session) === "merge" || sessionNeedsAttention(session)),
 		)
 		.sort(
 			(a, b) =>
 				attentionZoneOrder.indexOf(attentionZone(a.session)) - attentionZoneOrder.indexOf(attentionZone(b.session)),
 		);
 
-	const attentionIds = new Set(attentionSessions.map(({ session }) => session.id));
+	const attentionIds = new Set(attentionSessions.map(({ session }) => refKey(session)));
 
 	for (const { workspace, session } of attentionSessions) {
 		items.push(sessionCommand(workspace, session, "attention"));
@@ -258,7 +260,7 @@ export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n
 
 	for (const workspace of workspaces) {
 		for (const session of workerSessions(workspace.sessions).filter(
-			(session) => !attentionIds.has(session.id) && session.id !== currentSessionId,
+			(session) => !attentionIds.has(refKey(session)) && (!currentSession || refKey(session) !== refKey(currentSession)),
 		)) {
 			items.push({ ...sessionCommand(workspace, session, "sessions"), searchOnly: !sessionIsActive(session) });
 		}
@@ -268,7 +270,7 @@ export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n
 		for (const session of workerSessions(workspace.sessions)) {
 			for (const pr of openPRs(session)) {
 				items.push({
-					id: `pr:${session.id}:${pr.number}`,
+					id: `pr:${refKey(session)}:${pr.number}`,
 					group: "prs",
 					title: `#${pr.number}`,
 					subtitle: `${session.title} · ${workspace.name}`,
@@ -284,8 +286,8 @@ export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n
 					action: {
 						kind: "navigate",
 						target: {
-							to: "/projects/$projectId/sessions/$sessionId",
-							params: { projectId: workspace.id, sessionId: session.id },
+							to: "/host/$hostId/session/$sessionId",
+							params: { hostId: session.host, sessionId: session.id },
 						},
 					},
 				});

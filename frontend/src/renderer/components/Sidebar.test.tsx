@@ -81,6 +81,13 @@ vi.mock("../lib/api-client", () => ({
 	},
 }));
 
+vi.mock("../lib/host-clients", () => ({
+	baseUrlFor: () => "http://127.0.0.1:3001",
+	connectedHosts: () => [],
+	isHostReady: () => true,
+	clientFor: () => ({ GET: getMock, POST: vi.fn(), PUT: vi.fn() }),
+}));
+
 const workspace: WorkspaceSummary = {
 	host: "local",
 	id: "proj-1",
@@ -127,7 +134,7 @@ type CreateProjectInput = {
 };
 type CreateProjectHandler = (input: CreateProjectInput) => Promise<void>;
 type InitializeProjectHandler = (path: string) => Promise<void>;
-type RemoveProjectHandler = (projectId: string) => Promise<void>;
+type RemoveProjectHandler = (project: { host: string; id: string }) => Promise<void>;
 
 function renderSidebar({
 	onCreateProject = vi.fn().mockResolvedValue(undefined) as CreateProjectHandler,
@@ -356,7 +363,10 @@ describe("Sidebar", () => {
 
 		await user.click(screen.getByRole("button", { name: "Spawn Project One orchestrator" }));
 
-		expect(useUiStore.getState().settingsModal).toEqual({ scope: "project", projectId: "proj-1" });
+		expect(useUiStore.getState().settingsModal).toEqual({
+			scope: "project",
+			project: expect.objectContaining({ host: "local", id: "proj-1" }),
+		});
 		expect(navigateMock).not.toHaveBeenCalled();
 		expect(spawnMock).not.toHaveBeenCalled();
 	});
@@ -442,7 +452,7 @@ describe("Sidebar", () => {
 		await user.click(await screen.findByRole("menuitem", { name: /New session/ }));
 
 		const request = useUiStore.getState().newTaskRequest;
-		expect(request?.projectId).toBe("proj-1");
+		expect(request?.project).toEqual(expect.objectContaining({ host: "local", id: "proj-1" }));
 		expect(request?.nonce ?? 0).toBeGreaterThan(before);
 	});
 
@@ -569,8 +579,8 @@ describe("Sidebar", () => {
 		await user.click(screen.getByRole("button", { name: "Open Project One orchestrator" }));
 
 		expect(navigateMock).toHaveBeenCalledWith({
-			to: "/projects/$projectId/sessions/$sessionId",
-			params: { projectId: "proj-1", sessionId: "proj-1-orc" },
+			to: "/host/$hostId/session/$sessionId",
+			params: { hostId: "local", sessionId: "proj-1-orc" },
 		});
 		expect(screen.getByLabelText("Open fix login")).toBeInTheDocument();
 		expect(screen.getByText("Project One").closest("button")).toHaveAttribute("aria-expanded", "true");
@@ -1083,7 +1093,12 @@ describe("Sidebar", () => {
 		await user.clear(input);
 		await user.type(input, "polish login{Enter}");
 
-		await waitFor(() => expect(renameSessionMock).toHaveBeenCalledWith("proj-1-1", "polish login"));
+		await waitFor(() =>
+			expect(renameSessionMock).toHaveBeenCalledWith(
+				expect.objectContaining({ host: "local", id: "proj-1-1" }),
+				"polish login",
+			),
+		);
 	});
 
 	it("caps the inline rename input at 20 characters", async () => {

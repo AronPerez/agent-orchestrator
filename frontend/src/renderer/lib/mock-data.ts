@@ -28,6 +28,7 @@ const demoPr = (
 // enough to exercise the tab strip's layout, selection, and close control.
 export const mockShellTerminals: ShellTerminal[] = [
 	{
+		host: "local",
 		handleId: "shellterm-demo-1",
 		projectId: "ao-demo",
 		workingDir: "/Users/demo/Projects/ao-demo",

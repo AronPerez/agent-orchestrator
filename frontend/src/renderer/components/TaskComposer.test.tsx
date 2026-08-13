@@ -13,7 +13,12 @@ const h = vi.hoisted(() => ({
 
 vi.mock("../hooks/useAgentsQuery", () => ({
 	agentsQueryKey: ["agents"],
+	agentsQueryKeyFor: (host: string) => (host === "local" ? ["agents"] : ["agents", host]),
 	agentsQueryOptions: { queryKey: ["agents"], queryFn: async () => ({}) },
+	agentsQueryOptionsFor: (host: string) => ({
+		queryKey: host === "local" ? ["agents"] : ["agents", host],
+		queryFn: async () => ({}),
+	}),
 	refreshAgents: vi.fn(),
 	refreshAgentsIfStale: vi.fn(async () => undefined),
 }));
@@ -49,6 +54,13 @@ vi.mock("../lib/api-client", () => ({
 	},
 	apiErrorCode: (error: { code?: string }) => error?.code,
 	apiErrorMessage: (_e: unknown, fallback = "err") => fallback,
+}));
+
+vi.mock("../lib/host-clients", () => ({
+	baseUrlFor: () => "http://127.0.0.1:3001",
+	connectedHosts: () => [],
+	isHostReady: () => true,
+	clientFor: () => ({ GET: h.get, POST: h.post }),
 }));
 
 vi.mock("../lib/telemetry", () => ({ captureRendererEvent: h.capture }));
@@ -94,7 +106,7 @@ describe("TaskComposer", () => {
 
 		render(
 			<Wrap>
-				<TaskComposer projectId="proj-1" onCreated={onCreated} />
+				<TaskComposer project={{ host: "local", id: "proj-1" }} onCreated={onCreated} />
 			</Wrap>,
 		);
 
@@ -114,7 +126,7 @@ describe("TaskComposer", () => {
 	it("keeps prompt guidance in the field instead of adding a separate footer row", () => {
 		render(
 			<Wrap>
-				<TaskComposer projectId="proj-1" onCreated={vi.fn()} />
+				<TaskComposer project={{ host: "local", id: "proj-1" }} onCreated={vi.fn()} />
 			</Wrap>,
 		);
 
@@ -128,7 +140,7 @@ describe("TaskComposer", () => {
 	it("keeps agent and model in equal stable toolbar tracks", () => {
 		render(
 			<Wrap>
-				<TaskComposer projectId="proj-1" onCreated={vi.fn()} />
+				<TaskComposer project={{ host: "local", id: "proj-1" }} onCreated={vi.fn()} />
 			</Wrap>,
 		);
 
@@ -144,7 +156,7 @@ describe("TaskComposer", () => {
 	it("keeps the file attach control inside the prompt surface", () => {
 		render(
 			<Wrap>
-				<TaskComposer projectId="proj-1" onCreated={vi.fn()} />
+				<TaskComposer project={{ host: "local", id: "proj-1" }} onCreated={vi.fn()} />
 			</Wrap>,
 		);
 
@@ -159,7 +171,7 @@ describe("TaskComposer", () => {
 
 		render(
 			<Wrap>
-				<TaskComposer projectId="proj-1" onCreated={onCreated} onSubmittingChange={onSubmittingChange} />
+				<TaskComposer project={{ host: "local", id: "proj-1" }} onCreated={onCreated} onSubmittingChange={onSubmittingChange} />
 			</Wrap>,
 		);
 
@@ -190,7 +202,7 @@ describe("TaskComposer", () => {
 
 		const { container } = render(
 			<Wrap>
-				<TaskComposer projectId="proj-1" onCreated={vi.fn()} />
+				<TaskComposer project={{ host: "local", id: "proj-1" }} onCreated={vi.fn()} />
 			</Wrap>,
 		);
 
@@ -232,7 +244,7 @@ describe("TaskComposer", () => {
 
 		const { container } = render(
 			<Wrap>
-				<TaskComposer projectId="proj-1" onCreated={vi.fn()} />
+				<TaskComposer project={{ host: "local", id: "proj-1" }} onCreated={vi.fn()} />
 			</Wrap>,
 		);
 
@@ -257,7 +269,7 @@ describe("TaskComposer", () => {
 
 		const { container } = render(
 			<Wrap>
-				<TaskComposer projectId="proj-1" onCreated={vi.fn()} />
+				<TaskComposer project={{ host: "local", id: "proj-1" }} onCreated={vi.fn()} />
 			</Wrap>,
 		);
 
@@ -282,7 +294,7 @@ describe("TaskComposer", () => {
 
 		render(
 			<Wrap>
-				<TaskComposer projectId="proj-1" onCreated={vi.fn()} onSubmittingChange={onSubmittingChange} />
+				<TaskComposer project={{ host: "local", id: "proj-1" }} onCreated={vi.fn()} onSubmittingChange={onSubmittingChange} />
 			</Wrap>,
 		);
 
@@ -301,7 +313,7 @@ describe("TaskComposer", () => {
 
 		render(
 			<Wrap>
-				<TaskComposer projectId="proj-1" onCreated={onCreated} />
+				<TaskComposer project={{ host: "local", id: "proj-1" }} onCreated={onCreated} />
 			</Wrap>,
 		);
 		fireEvent.change(task(), { target: { value: "Do the thing" } });
@@ -320,7 +332,7 @@ describe("TaskComposer", () => {
 		const onDirtyChange = vi.fn();
 		const { unmount } = render(
 			<Wrap>
-				<TaskComposer projectId="proj-1" onCreated={vi.fn()} onDirtyChange={onDirtyChange} />
+				<TaskComposer project={{ host: "local", id: "proj-1" }} onCreated={vi.fn()} onDirtyChange={onDirtyChange} />
 			</Wrap>,
 		);
 		fireEvent.change(task(), { target: { value: "T" } });
@@ -342,7 +354,7 @@ describe("TaskComposer", () => {
 
 		render(
 			<Wrap>
-				<TaskComposer projectId="proj-1" onCreated={vi.fn()} />
+				<TaskComposer project={{ host: "local", id: "proj-1" }} onCreated={vi.fn()} />
 			</Wrap>,
 		);
 
@@ -374,11 +386,11 @@ describe("TaskComposer", () => {
 			return { data: { status: "ok", project: { agent: "codex", config: {} } } };
 		});
 		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-		queryClient.setQueryData(["project", "proj-1"], { agent: "codex", config: {} });
+		queryClient.setQueryData(["project", "local:proj-1"], { agent: "codex", config: {} });
 
 		render(
 			<QueryClientProvider client={queryClient}>
-				<TaskComposer projectId="proj-1" onCreated={vi.fn()} />
+				<TaskComposer project={{ host: "local", id: "proj-1" }} onCreated={vi.fn()} />
 			</QueryClientProvider>,
 		);
 
@@ -396,7 +408,7 @@ describe("TaskComposer", () => {
 
 		render(
 			<Wrap>
-				<TaskComposer projectId="proj-1" onCreated={vi.fn()} />
+				<TaskComposer project={{ host: "local", id: "proj-1" }} onCreated={vi.fn()} />
 			</Wrap>,
 		);
 
@@ -423,7 +435,7 @@ describe("TaskComposer", () => {
 
 		render(
 			<Wrap>
-				<TaskComposer projectId="proj-1" onCreated={vi.fn()} />
+				<TaskComposer project={{ host: "local", id: "proj-1" }} onCreated={vi.fn()} />
 			</Wrap>,
 		);
 
@@ -460,7 +472,7 @@ describe("TaskComposer", () => {
 
 		render(
 			<Wrap>
-				<TaskComposer projectId="proj-1" onCreated={vi.fn()} />
+				<TaskComposer project={{ host: "local", id: "proj-1" }} onCreated={vi.fn()} />
 			</Wrap>,
 		);
 
@@ -500,7 +512,7 @@ describe("TaskComposer", () => {
 
 		render(
 			<Wrap>
-				<TaskComposer projectId="proj-1" onCreated={vi.fn()} />
+				<TaskComposer project={{ host: "local", id: "proj-1" }} onCreated={vi.fn()} />
 			</Wrap>,
 		);
 
@@ -537,7 +549,7 @@ describe("TaskComposer", () => {
 
 		render(
 			<Wrap>
-				<TaskComposer projectId="proj-1" onCreated={vi.fn()} />
+				<TaskComposer project={{ host: "local", id: "proj-1" }} onCreated={vi.fn()} />
 			</Wrap>,
 		);
 

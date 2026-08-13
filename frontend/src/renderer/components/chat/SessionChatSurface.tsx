@@ -22,6 +22,7 @@ import {
 import { useSessionBrowserLink } from "../../hooks/useSessionBrowserLink";
 import { can } from "../../types/conversation";
 import type { WorkspaceSession } from "../../types/workspace";
+import { baseUrlFor } from "../../lib/host-clients";
 
 export function SessionChatSurface({
 	session,
@@ -47,10 +48,10 @@ export function SessionChatSurface({
 		hasOlder,
 		isLoadingOlder,
 		loadOlder,
-	} = useConversation(session.id);
-	const commands = useConversationCommands(session.id);
+	} = useConversation(session);
+	const commands = useConversationCommands(session);
 	const configOptions = useConversationConfigOptions(
-		session.id,
+		session,
 		Boolean(snapshot && can(snapshot, "config_options")),
 	);
 	// A provider config catalog may cover only model, only mode, or both.
@@ -66,12 +67,12 @@ export function SessionChatSurface({
 	// Only asked for once the conversation is actually readable: the catalog comes
 	// from the live controller, so there is nothing to fetch before then.
 	const { models } = useConversationModels(
-		session.id,
+		session,
 		Boolean(snapshot) && !hasProviderModel,
 	);
-	const { skills } = useConversationSkills(session.id, Boolean(snapshot));
-	const { paths, truncated } = useWorkspaceFilePaths(session.id, Boolean(snapshot));
-	const stageAttachments = useStageAttachments(session.id);
+	const { skills } = useConversationSkills(session, Boolean(snapshot));
+	const { paths, truncated } = useWorkspaceFilePaths(session, Boolean(snapshot));
+	const stageAttachments = useStageAttachments(session);
 	const openLinkInBrowser = useSessionBrowserLink(session);
 
 	if (isLoading) {
@@ -115,6 +116,7 @@ export function SessionChatSurface({
 
 	return (
 		<ChatWorkspace
+			apiBaseUrl={baseUrlFor(session.host) ?? undefined}
 			snapshot={snapshot}
 			onLinkOpen={openLinkInBrowser}
 			sessionTitle={session.title}

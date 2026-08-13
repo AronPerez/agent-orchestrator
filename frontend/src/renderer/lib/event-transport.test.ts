@@ -175,7 +175,7 @@ describe("createEventTransport", () => {
 
 			vi.advanceTimersByTime(200);
 			expect(queryClient.invalidateQueries).toHaveBeenCalledWith({
-				queryKey: ["conversation", "chat-1"],
+				queryKey: ["conversation", "local:chat-1"],
 			});
 			expect(queryClient.invalidateQueries).not.toHaveBeenCalledWith({ queryKey: ["workspaces"] });
 			expect(queryClient.invalidateQueries).not.toHaveBeenCalledWith({

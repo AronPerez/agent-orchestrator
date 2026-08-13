@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import type { components } from "../../api/schema";
 import { apiClient } from "../lib/api-client";
+import { LOCAL_HOST, refKey } from "../lib/hosts";
 
 export type SessionUsageSummary = components["schemas"]["CompactSessionUsageResponse"];
 
@@ -22,7 +23,7 @@ export function sessionUsageQueryOptions(projectId?: string) {
 		queryFn: () => fetchSessionUsageSummaries(projectId),
 		retry: 1,
 		select: (items: SessionUsageSummary[]) =>
-			new Map(items.map((item) => [item.sessionId, item] as const)),
+			new Map(items.map((item) => [refKey({ host: LOCAL_HOST, id: item.sessionId }), item] as const)),
 	};
 }
 

@@ -54,7 +54,14 @@ vi.mock("node:fs", async (importOriginal) => {
 import { createTrayController } from "./tray";
 
 function entry(overrides: Partial<TraySessionEntry> & { sessionId: string }): TraySessionEntry {
-	return { projectId: "proj-1", projectName: "note-tauri", title: overrides.sessionId, zone: "action", ...overrides };
+	return {
+		host: "local",
+		projectId: "proj-1",
+		projectName: "note-tauri",
+		title: overrides.sessionId,
+		zone: "action",
+		...overrides,
+	};
 }
 
 function setup() {
@@ -109,7 +116,7 @@ describe("createTrayController", () => {
 		const { controller, tray, openSession } = setup();
 		controller.setState({ sessions: [entry({ sessionId: "s1", title: "one" })] });
 		sessionItems(tray)[0].click?.();
-		expect(openSession).toHaveBeenCalledWith({ projectId: "proj-1", sessionId: "s1" });
+		expect(openSession).toHaveBeenCalledWith({ host: "local", sessionId: "s1" });
 	});
 
 	it("marks the icon as a macOS template so the menu bar can tint it", () => {

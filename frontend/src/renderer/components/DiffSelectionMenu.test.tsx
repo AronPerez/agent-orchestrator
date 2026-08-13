@@ -14,6 +14,13 @@ vi.mock("../lib/api-client", () => ({
 			: fallback,
 }));
 
+vi.mock("../lib/host-clients", () => ({
+	baseUrlFor: () => "http://127.0.0.1:3001",
+	connectedHosts: () => [],
+	isHostReady: () => true,
+	clientFor: () => ({ POST: postMock }),
+}));
+
 const writeTextMock = vi.hoisted(() => vi.fn());
 
 const SAMPLE_LINES: DiffSelectionLine[] = [
@@ -24,7 +31,7 @@ const SAMPLE_LINES: DiffSelectionLine[] = [
 function renderMenu(overrides: Partial<DiffSelectionMenuProps> = {}) {
 	const onOpenChange = overrides.onOpenChange ?? vi.fn();
 	const props: DiffSelectionMenuProps = {
-		sessionId: "sess-1",
+		session: { host: "local", id: "sess-1" },
 		filePath: "src/app.ts",
 		lines: SAMPLE_LINES,
 		selectedText: "  return 42;",

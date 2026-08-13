@@ -118,6 +118,7 @@ beforeEach(() => {
 describe("CenterPane toolbar session label", () => {
 	const makeShells = (count: number) =>
 		Array.from({ length: count }, (_, i) => ({
+			host: "local",
 			handleId: `h-${i}`,
 			title: `agent-orchestrator-${i}`,
 			workingDir: "/tmp/ws",
@@ -237,8 +238,10 @@ describe("CenterPane toolbar session label", () => {
 			shellTerminals: [shell],
 			terminalTarget: {
 				generation: shell.createdAt,
+				host: shell.host,
 				kind: "shell",
 				handleId: shell.handleId,
+				session: worker,
 				title: shell.title,
 			},
 		});
@@ -273,8 +276,10 @@ describe("CenterPane toolbar session label", () => {
 			shellTerminals: [shell],
 			terminalTarget: {
 				generation: shell.createdAt,
+				host: shell.host,
 				kind: "shell",
 				handleId: shell.handleId,
+				session: worker,
 				title: shell.title,
 			},
 			onCloseShellTerminal,
@@ -307,7 +312,14 @@ describe("CenterPane toolbar session label", () => {
 		renderCenterPane({
 			session: worker,
 			shellTerminals: [shell],
-			terminalTarget: { generation: shell.createdAt, kind: "shell", handleId: shell.handleId, title: shell.title },
+			terminalTarget: {
+				generation: shell.createdAt,
+				host: shell.host,
+				kind: "shell",
+				handleId: shell.handleId,
+				session: worker,
+				title: shell.title,
+			},
 			onSelectSessionTerminal,
 		});
 
@@ -322,8 +334,10 @@ describe("CenterPane toolbar session label", () => {
 			shellTerminals: [shell],
 			terminalTarget: {
 				generation: shell.createdAt,
+				host: shell.host,
 				kind: "shell",
 				handleId: shell.handleId,
+				session: worker,
 				title: shell.title,
 			},
 			onCloseShellTerminal: vi.fn(),
@@ -338,7 +352,7 @@ describe("CenterPane toolbar session label", () => {
 		renderCenterPane({
 			session: worker,
 			reviewerTerminal: { handleId: "review-sess-1", harness: "codex" },
-			terminalTarget: { kind: "reviewer", handleId: "review-sess-1", harness: "codex", sessionId: worker.id },
+			terminalTarget: { kind: "reviewer", handleId: "review-sess-1", harness: "codex", session: worker },
 		});
 
 		expect(screen.getByRole("tab", { name: "Reviewer" })).toHaveAttribute("aria-current", "true");

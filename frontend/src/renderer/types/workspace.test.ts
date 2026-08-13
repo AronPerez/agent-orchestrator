@@ -125,28 +125,28 @@ describe("findProjectOrchestrator", () => {
 		const dead = sessionWith({ id: "skills-4", kind: "orchestrator", status: "terminated" });
 		const live = sessionWith({ id: "skills-5", kind: "orchestrator", status: "needs_input" });
 		const worker = sessionWith({ id: "skills-6", kind: "worker", status: "working" });
-		expect(findProjectOrchestrator([workspaceWith([dead, live, worker])], "skills")).toBe(live);
+		expect(findProjectOrchestrator([workspaceWith([dead, live, worker])], { host: "local", id: "skills" })).toBe(live);
 	});
 
 	it("prefers the newest live orchestrator when multiple replacements overlap", () => {
 		const older = sessionWith({ id: "skills-4", kind: "orchestrator", status: "idle", provider: "claude-code" });
 		const newer = sessionWith({ id: "skills-5", kind: "orchestrator", status: "working", provider: "codex" });
-		expect(findProjectOrchestrator([workspaceWith([older, newer])], "skills")).toBe(newer);
+		expect(findProjectOrchestrator([workspaceWith([older, newer])], { host: "local", id: "skills" })).toBe(newer);
 	});
 
 	it("returns undefined when every orchestrator is terminated", () => {
 		const dead = sessionWith({ id: "skills-4", kind: "orchestrator", status: "terminated" });
-		expect(findProjectOrchestrator([workspaceWith([dead])], "skills")).toBeUndefined();
+		expect(findProjectOrchestrator([workspaceWith([dead])], { host: "local", id: "skills" })).toBeUndefined();
 	});
 
 	it("ignores live workers when looking for an orchestrator", () => {
 		const worker = sessionWith({ id: "skills-6", kind: "worker", status: "working" });
-		expect(findProjectOrchestrator([workspaceWith([worker])], "skills")).toBeUndefined();
+		expect(findProjectOrchestrator([workspaceWith([worker])], { host: "local", id: "skills" })).toBeUndefined();
 	});
 
 	it("returns undefined for an unknown project", () => {
 		const live = sessionWith({ id: "skills-5", kind: "orchestrator", status: "working" });
-		expect(findProjectOrchestrator([workspaceWith([live])], "other")).toBeUndefined();
+		expect(findProjectOrchestrator([workspaceWith([live])], { host: "local", id: "other" })).toBeUndefined();
 	});
 
 	it("selects the newest active orchestrator, not the first active one", () => {
@@ -164,7 +164,7 @@ describe("findProjectOrchestrator", () => {
 			createdAt: "2026-01-02T00:00:00Z",
 			updatedAt: "2026-01-02T00:00:00Z",
 		});
-		expect(findProjectOrchestrator([workspaceWith([older, newer])], "skills")).toBe(newer);
+		expect(findProjectOrchestrator([workspaceWith([older, newer])], { host: "local", id: "skills" })).toBe(newer);
 	});
 
 	it("uses updatedAt and id as newest orchestrator tie breakers", () => {

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ActiveRemote } from "./active-remote";
+import { RemoteRegistry } from "./remote-registry";
 import { removeSavedRemote, toHostViews, updateSavedRemote } from "./remotes-ipc";
 import type { RemoteEntry } from "./remotes-store";
 
@@ -17,24 +17,28 @@ async function tempFile(contents = TWO_HOSTS, mode = 0o600): Promise<string> {
 	return path;
 }
 
-// A real ActiveRemote over a fake proxy: the close() call is the assertion, and
+// A real RemoteRegistry over a fake proxy: the close() call is the assertion, and
 // only the real class knows when it fires.
-function activeOn(url: string, label = "workbox") {
+function connectedOn(url: string, label = "workbox") {
 	const close = vi.fn().mockResolvedValue(undefined);
-	const active = new ActiveRemote(async () => ({
+	const registry = new RemoteRegistry(async () => ({
 		base: "http://127.0.0.1:9999/tok",
 		url,
 		close,
 	}));
+	const connected = {
+		view: async () => registry.views().find((view) => view.url === url) ?? null,
+		deactivate: async () => registry.disconnect(url),
+	};
 	return {
-		active,
+		connected,
 		close,
-		activated: active.activate({ label, url, password: "old" }),
+		connection: registry.connect({ label, url, password: "old" }),
 	};
 }
 
-// No proxy has been started, so nothing is active.
-const idleProxy = () => new ActiveRemote(async () => ({ base: "", url: "", close: async () => {} }));
+// No proxy has been started, so nothing is connected.
+const idleProxy = () => ({ view: async () => null, deactivate: async () => undefined });
 
 const online = async () => "online" as const;
 
@@ -86,22 +90,22 @@ describe("updateSavedRemote", () => {
 
 	// The live proxy holds the address and password that were saved when it
 	// started; after an edit both may be stale, so it does not get to keep serving.
-	it("tears down the proxy when the edited host is the active one", async () => {
+	it("tears down the proxy when the edited host is connected", async () => {
 		const path = await tempFile();
-		const { active, close, activated } = activeOn("http://192.0.2.1:1");
-		await activated;
-		await updateSavedRemote(path, "http://192.0.2.1:1", { url: "http://192.0.2.5:5" }, active, online);
+		const { connected, close, connection } = connectedOn("http://192.0.2.1:1");
+		await connection;
+		await updateSavedRemote(path, "http://192.0.2.1:1", { url: "http://192.0.2.5:5" }, connected, online);
 		expect(close).toHaveBeenCalled();
-		await expect(active.view()).resolves.toBeNull();
+		await expect(connected.view()).resolves.toBeNull();
 	});
 
 	it("leaves another host's proxy alone", async () => {
 		const path = await tempFile();
-		const { active, close, activated } = activeOn("http://192.0.2.9:9", "mini");
-		await activated;
-		await updateSavedRemote(path, "http://192.0.2.1:1", { password: "rotated" }, active, online);
+		const { connected, close, connection } = connectedOn("http://192.0.2.9:9", "mini");
+		await connection;
+		await updateSavedRemote(path, "http://192.0.2.1:1", { password: "rotated" }, connected, online);
 		expect(close).not.toHaveBeenCalled();
-		await expect(active.view()).resolves.not.toBeNull();
+		await expect(connected.view()).resolves.not.toBeNull();
 	});
 });
 
@@ -114,21 +118,21 @@ describe("removeSavedRemote", () => {
 		]);
 	});
 
-	it("tears down the proxy when the removed host is the active one", async () => {
+	it("tears down the proxy when the removed host is connected", async () => {
 		const path = await tempFile();
-		const { active, close, activated } = activeOn("http://192.0.2.1:1");
-		await activated;
-		await removeSavedRemote(path, "http://192.0.2.1:1", active);
+		const { connected, close, connection } = connectedOn("http://192.0.2.1:1");
+		await connection;
+		await removeSavedRemote(path, "http://192.0.2.1:1", connected);
 		expect(close).toHaveBeenCalled();
 		// Nothing left pointing at a host that no longer exists.
-		await expect(active.view()).resolves.toBeNull();
+		await expect(connected.view()).resolves.toBeNull();
 	});
 
 	it("leaves another host's proxy alone", async () => {
 		const path = await tempFile();
-		const { active, close, activated } = activeOn("http://192.0.2.9:9", "mini");
-		await activated;
-		await removeSavedRemote(path, "http://192.0.2.1:1", active);
+		const { connected, close, connection } = connectedOn("http://192.0.2.9:9", "mini");
+		await connection;
+		await removeSavedRemote(path, "http://192.0.2.1:1", connected);
 		expect(close).not.toHaveBeenCalled();
 	});
 
