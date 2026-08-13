@@ -89,6 +89,14 @@ describe("createEventTransport", () => {
 		expect(EventSourceStub.instances[0].onmessage).toBeTypeOf("function");
 	});
 
+	it("keeps a proxy path prefix in the SSE URL", () => {
+		getApiBaseUrlMock.mockReturnValue("http://127.0.0.1:62220/proxy-token/");
+
+		createEventTransport(fakeQueryClient()).connect();
+
+		expect(EventSourceStub.instances[0].url).toBe("http://127.0.0.1:62220/proxy-token/api/v1/events");
+	});
+
 	it("does not reconnect when a daemon status keeps the same base URL", () => {
 		createEventTransport(fakeQueryClient()).connect();
 		const onStatusHandler = onStatusMock.mock.calls[0][0] as () => void;

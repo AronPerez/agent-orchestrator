@@ -210,7 +210,12 @@ async function runtimeFetch(input: Request): Promise<Response> {
 		}
 
 		const url = new URL(input.url);
-		const target = new URL(url.pathname + url.search + url.hash, baseUrl);
+		const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
+		const target = new URL(
+			input.url.startsWith(`${normalizedBaseUrl}/`)
+				? input.url
+				: `${normalizedBaseUrl}/${url.pathname.replace(/^\/+/, "")}${url.search}${url.hash}`,
+		);
 		if (target.href === input.url) {
 			return fetch(input);
 		}
