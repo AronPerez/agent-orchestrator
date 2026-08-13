@@ -3,14 +3,14 @@ import { useCallback, useEffect } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import { defaultShortcutBindings, shortcutBindingLabel } from "../../shared/shortcuts";
 import { useOverflowScroll } from "../hooks/useOverflowScroll";
-import { useCloseShellTerminal, useRenameShellTerminal, useShellTerminals } from "../hooks/useShellTerminals";
+import { useCloseShellTerminal, useConnectedShellTerminals, useRenameShellTerminal } from "../hooks/useShellTerminals";
 import { useShell } from "../lib/shell-context";
 import { aoBridge } from "../lib/bridge";
 import { isMacPlatform } from "../lib/platform";
 import { hasBrowserDaemon } from "../lib/preview-mode";
 import { cn } from "../lib/utils";
 import { handleTerminalTabListKeyDown } from "../lib/terminal-tabs";
-import { LOCAL_HOST, refKey } from "../lib/hosts";
+import { refKey } from "../lib/hosts";
 import { useResolvedTheme, useUiStore } from "../stores/ui-store";
 import { ShellTerminalTab } from "./ShellTerminalTab";
 import { TerminalPane } from "./TerminalPane";
@@ -31,7 +31,7 @@ export function ShellTerminalsView() {
 	const theme = useResolvedTheme();
 	// The standalone screen shows only session-less shells; a session's own
 	// shells belong to that session's tab strip, not this global list.
-	const shellTerminals = (useShellTerminals(LOCAL_HOST).data ?? []).filter((s) => !s.sessionId);
+	const shellTerminals = useConnectedShellTerminals().filter((shell) => !shell.sessionId);
 	const closeShellTerminal = useCloseShellTerminal();
 	const renameShellTerminal = useRenameShellTerminal();
 	const requestNewShellTerminal = useUiStore((state) => state.requestNewShellTerminal);

@@ -183,13 +183,14 @@ function workspaceHostQueryOptions(host: HostId) {
 }
 
 function combineWorkspaceQueries(results: UseQueryResult<HostSection[]>[]) {
-	const isSuccess = results.every((result) => result.isSuccess);
+	const local = results[0];
+	const isSuccess = local?.isSuccess ?? false;
 	return {
 		data: isSuccess ? results.flatMap((result) => result.data ?? []) : undefined,
 		dataUpdatedAt: Math.max(0, ...results.map((result) => result.dataUpdatedAt)),
-		error: results.find((result) => result.error)?.error ?? null,
-		isError: results.some((result) => result.isError),
-		isLoading: results.some((result) => result.isLoading),
+		error: local?.error ?? null,
+		isError: local?.isError ?? false,
+		isLoading: local?.isLoading ?? true,
 		isSuccess,
 		refetch: () => Promise.all(results.map((result) => result.refetch())),
 	};

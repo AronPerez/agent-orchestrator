@@ -3,10 +3,11 @@
 // the workspaces query — they are not sessions, never appear on the board, and
 // must not invalidate session state when they come and go.
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useSyncExternalStore } from "react";
 import type { components } from "../../api/schema";
 import { mockShellTerminals } from "../lib/mock-data";
-import { clientFor, isHostReady } from "../lib/host-clients";
+import { clientFor, connectedHosts, isHostReady, subscribeConnectedHosts } from "../lib/host-clients";
 import { LOCAL_HOST, refKey, type HostId, type Ref } from "../lib/hosts";
 
 export type ShellTerminal = {
@@ -66,6 +67,14 @@ export const shellTerminalsQueryOptions = (host: HostId) => ({
 
 export function useShellTerminals(host: HostId = LOCAL_HOST) {
 	return useQuery(shellTerminalsQueryOptions(host));
+}
+
+export function useConnectedShellTerminals(): ShellTerminal[] {
+	const remotes = useSyncExternalStore(subscribeConnectedHosts, connectedHosts, connectedHosts);
+	return useQueries({
+		queries: [LOCAL_HOST, ...remotes].map(shellTerminalsQueryOptions),
+		combine: (results) => results.flatMap((result) => result.data ?? []),
+	});
 }
 
 export type OpenShellTerminalInput = { project?: Ref; session?: Ref };

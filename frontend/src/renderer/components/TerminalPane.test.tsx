@@ -17,6 +17,8 @@ import {
 
 const {
 	attachMock,
+	connectedHostIds,
+	connectedHostListeners,
 	getMock,
 	postMock,
 	prepareForActivationMock,
@@ -29,6 +31,8 @@ const {
 } = vi.hoisted(
 	() => ({
 		attachMock: vi.fn(() => vi.fn()),
+		connectedHostIds: { value: [] as string[] },
+		connectedHostListeners: new Set<() => void>(),
 		getMock: vi.fn(async (_path: string, _options: unknown) => ({ data: undefined })),
 		postMock: vi.fn(),
 		prepareForActivationMock: vi.fn(async (): Promise<void> => undefined),
@@ -55,11 +59,11 @@ vi.mock("../lib/api-client", () => ({
 
 vi.mock("../lib/host-clients", () => ({
 	baseUrlFor: () => "http://127.0.0.1:3001",
-	connectedHosts: (() => {
-		const hosts: string[] = [];
-		return () => hosts;
-	})(),
-	subscribeConnectedHosts: () => () => undefined,
+	connectedHosts: () => connectedHostIds.value,
+	subscribeConnectedHosts: (listener: () => void) => {
+		connectedHostListeners.add(listener);
+		return () => connectedHostListeners.delete(listener);
+	},
 	isHostReady: () => true,
 	clientFor: () => ({
 		GET: (path: string, options: unknown) => getMock(path, options),
@@ -135,6 +139,8 @@ const orchestrator = {
 } satisfies WorkspaceSession;
 
 beforeEach(() => {
+	connectedHostIds.value = [];
+	connectedHostListeners.clear();
 	getMock.mockClear();
 	postMock.mockReset();
 	postMock.mockResolvedValue({ data: {} });
@@ -552,6 +558,25 @@ describe("TerminalCacheProvider", () => {
 
 			expect(shellXterm.isConnected).toBe(true);
 			expect(xtermUnmounts.value).toBe(0);
+		} finally {
+			view.restore();
+		}
+	});
+
+	it("evicts a remote terminal when its host disconnects", async () => {
+		const remoteSession = { ...sessionA, host: "http://192.0.2.10:3011" };
+		connectedHostIds.value = [remoteSession.host];
+		const view = renderCachedPane({ session: remoteSession, sessions: [remoteSession] });
+		try {
+			const terminal = await waitFor(() => activeXterm());
+
+			act(() => {
+				connectedHostIds.value = [];
+				for (const listener of connectedHostListeners) listener();
+			});
+
+			await waitFor(() => expect(terminal.isConnected).toBe(false));
+			expect(xtermUnmounts.value).toBe(1);
 		} finally {
 			view.restore();
 		}

@@ -7,11 +7,13 @@ const {
 	captureRendererEventMock,
 	connectedHostsMock,
 	getMock,
+	hostListeners,
 	isHostReadyMock,
 } = vi.hoisted(() => ({
 	captureRendererEventMock: vi.fn().mockResolvedValue(undefined),
 	connectedHostsMock: vi.fn((): string[] => []),
 	getMock: vi.fn(),
+	hostListeners: new Set<() => void>(),
 	isHostReadyMock: vi.fn(() => true),
 }));
 
@@ -23,7 +25,10 @@ vi.mock("../lib/host-clients", () => ({
 	clientFor: (host: string) => ({ GET: (url: string) => getMock(host, url) }),
 	connectedHosts: connectedHostsMock,
 	isHostReady: isHostReadyMock,
-	subscribeConnectedHosts: () => () => undefined,
+	subscribeConnectedHosts: (listener: () => void) => {
+		hostListeners.add(listener);
+		return () => hostListeners.delete(listener);
+	},
 }));
 
 vi.mock("../lib/telemetry", () => ({ captureRendererEvent: captureRendererEventMock }));
@@ -52,6 +57,7 @@ beforeEach(() => {
 	captureRendererEventMock.mockClear();
 	getMock.mockReset();
 	connectedHostsMock.mockReset().mockReturnValue([]);
+	hostListeners.clear();
 	isHostReadyMock.mockReset().mockReturnValue(true);
 });
 
@@ -425,6 +431,28 @@ describe("useWorkspaceQuery — multi-host", () => {
 		expect(failed?.status).toBe("failed");
 		expect(failed?.workspaces).toEqual([]);
 		expect(failed?.failure).toMatch(/ECONNREFUSED/);
+	});
+
+	it("keeps the local board painted while a newly connected host is pending", async () => {
+		getMock.mockImplementation(async (host: HostId, url: string) => {
+			if (host === REMOTE) return new Promise(() => undefined);
+			if (url === "/api/v1/projects") {
+				return { data: { projects: [{ id: "local-project", name: "local-project", path: "/local" }] } };
+			}
+			if (url === "/api/v1/sessions") return { data: { sessions: [] } };
+			throw new Error(`unexpected GET ${url}`);
+		});
+		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
+		await waitFor(() => expect(result.current.data?.[0]?.host).toBe(LOCAL_HOST));
+
+		connectedHostsMock.mockReturnValue([REMOTE]);
+		act(() => {
+			for (const listener of hostListeners) listener();
+		});
+
+		expect(result.current.isSuccess).toBe(true);
+		expect(result.current.isLoading).toBe(false);
+		expect(result.current.data?.map((section) => section.host)).toEqual([LOCAL_HOST]);
 	});
 
 	it("refetches only the host targeted by a host-scoped invalidation", async () => {

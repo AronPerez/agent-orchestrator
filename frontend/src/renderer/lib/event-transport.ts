@@ -2,7 +2,7 @@ import type { QueryClient } from "@tanstack/react-query";
 import { aoBridge } from "./bridge";
 import { subscribeApiBaseUrl } from "./api-client";
 import { setEventsConnectionState } from "./events-connection";
-import { connectedHosts } from "./host-clients";
+import { connectedHosts, subscribeConnectedHosts } from "./host-clients";
 import { closeAllHostStreams, syncHostStreams } from "./host-events";
 import { LOCAL_HOST, parseRefKey, refKey, type HostId } from "./hosts";
 import { workspaceQueryKey } from "../hooks/useWorkspaceQuery";
@@ -105,12 +105,14 @@ export function createEventTransport(queryClient: QueryClient): EventTransport {
 			// Rebind when the daemon comes back on a different port, independent of
 			// status-event ordering.
 			const removeBaseUrlListener = subscribeApiBaseUrl(connectSources);
+			const removeHostsListener = subscribeConnectedHosts(connectSources);
 			connectSources();
 
 			return () => {
 				if (debounce) clearTimeout(debounce);
 				removeDaemonListener();
 				removeBaseUrlListener();
+				removeHostsListener();
 				closeAllHostStreams();
 				setEventsConnectionState("idle");
 			};
