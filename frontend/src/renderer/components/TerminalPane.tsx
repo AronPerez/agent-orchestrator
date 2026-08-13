@@ -9,7 +9,6 @@ import {
 	useMemo,
 	useRef,
 	useState,
-	useSyncExternalStore,
 	type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
@@ -32,8 +31,7 @@ import {
 	type TerminalMux,
 	type TerminalMuxPool,
 } from "../lib/terminal-mux";
-import { connectedHosts, subscribeConnectedHosts } from "../lib/host-clients";
-import { LOCAL_HOST, refKey, type HostId } from "../lib/hosts";
+import { refKey, type HostId } from "../lib/hosts";
 import { cn } from "../lib/utils";
 import { useWorkspaceQuery, workspaceQueryKey } from "../hooks/useWorkspaceQuery";
 import { flattenHostSections } from "../types/workspace";
@@ -313,7 +311,6 @@ export function TerminalCacheProvider({
 	theme: Theme;
 }) {
 	const workspaceQuery = useWorkspaceQuery();
-	const connectedRemotes = useSyncExternalStore(subscribeConnectedHosts, connectedHosts, connectedHosts);
 	const hosts = workspaceQuery.data?.map((section) => section.host) ?? [];
 	const shellTerminalsQueries = useQueries({ queries: hosts.map(shellTerminalsQueryOptions) });
 	const entriesRef = useRef(new Map<string, CachedTerminalEntry>());
@@ -345,13 +342,6 @@ export function TerminalCacheProvider({
 		},
 		[rerender],
 	);
-
-	useEffect(() => {
-		const availableHosts = new Set<HostId>([LOCAL_HOST, ...connectedRemotes]);
-		for (const entry of entriesRef.current.values()) {
-			if (!availableHosts.has(entry.host)) removeEntry(entry.cacheKey);
-		}
-	}, [connectedRemotes, removeEntry]);
 
 	const activate = useCallback(
 		(descriptor: TerminalCacheDescriptor, props: TerminalPaneProps, slot: HTMLDivElement) => {

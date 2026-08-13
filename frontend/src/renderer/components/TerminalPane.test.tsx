@@ -563,20 +563,26 @@ describe("TerminalCacheProvider", () => {
 		}
 	});
 
-	it("evicts a remote terminal when its host disconnects", async () => {
+	it("retains a remote terminal across a disconnect and reconnect", async () => {
 		const remoteSession = { ...sessionA, host: "http://192.0.2.10:3011" };
 		connectedHostIds.value = [remoteSession.host];
 		const view = renderCachedPane({ session: remoteSession, sessions: [remoteSession] });
 		try {
 			const terminal = await waitFor(() => activeXterm());
+			view.show();
 
 			act(() => {
 				connectedHostIds.value = [];
 				for (const listener of connectedHostListeners) listener();
 			});
+			act(() => {
+				connectedHostIds.value = [remoteSession.host];
+				for (const listener of connectedHostListeners) listener();
+			});
+			view.show(remoteSession);
 
-			await waitFor(() => expect(terminal.isConnected).toBe(false));
-			expect(xtermUnmounts.value).toBe(1);
+			await waitFor(() => expect(activeXterm()).toBe(terminal));
+			expect(terminal.isConnected).toBe(true);
 		} finally {
 			view.restore();
 		}
