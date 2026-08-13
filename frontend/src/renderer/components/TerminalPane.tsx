@@ -23,15 +23,15 @@ import {
 	type TerminalSessionState,
 } from "../hooks/useTerminalSession";
 import { useSessionBrowserLink } from "../hooks/useSessionBrowserLink";
-import { getApiBaseUrl } from "../lib/api-client";
 import { hasBrowserDaemon } from "../lib/preview-mode";
 import {
 	createTerminalMux,
 	createTerminalMuxPool,
-	muxUrlFromApiBase,
+	muxUrlForHost,
 	type TerminalMux,
 	type TerminalMuxPool,
 } from "../lib/terminal-mux";
+import type { HostId } from "../lib/hosts";
 import { cn } from "../lib/utils";
 import { useWorkspaceQuery, workspaceQueryKey } from "../hooks/useWorkspaceQuery";
 import { flattenHostSections } from "../types/workspace";
@@ -51,7 +51,7 @@ type TerminalPaneProps = {
 	/** Focus the terminal when an in-flight controller asks for human input. */
 	focusRequested?: boolean;
 	/** Provider-owned shared transport lease factory. */
-	createMux?: () => TerminalMux;
+	createMux?: (host: HostId) => TerminalMux;
 };
 
 type TerminalCacheDescriptor = {
@@ -305,8 +305,8 @@ export function TerminalCacheProvider({
 	const parkingRef = useRef<HTMLDivElement | null>(null);
 	const muxPoolRef = useRef<TerminalMuxPool | null>(null);
 	if (!muxPoolRef.current) {
-		muxPoolRef.current = createTerminalMuxPool(() =>
-			createTerminalMux(muxUrlFromApiBase(getApiBaseUrl())),
+		muxPoolRef.current = createTerminalMuxPool((host) =>
+			createTerminalMux(muxUrlForHost(host)),
 		);
 	}
 	const muxPool = muxPoolRef.current;
