@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { useEffect, useRef } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { shellTerminalsQueryKey, type ShellTerminal } from "../hooks/useShellTerminals";
-import { workspaceQueryKey } from "../hooks/useWorkspaceQuery";
+import { workspaceHostQueryKey } from "../hooks/useWorkspaceQuery";
 import type { AttachableTerminal } from "../hooks/useTerminalSession";
 import type { TerminalTarget } from "../types/terminal";
 import type { WorkspaceSession } from "../types/workspace";
@@ -193,7 +193,7 @@ function renderCachedPane({
 	terminalTarget?: TerminalTarget;
 }) {
 	const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
-	queryClient.setQueryData(workspaceQueryKey, localSection(sessions));
+	queryClient.setQueryData(workspaceHostQueryKey("local"), localSection(sessions));
 	queryClient.setQueryData(shellTerminalsQueryKey, shellTerminals);
 	const previousAO = window.ao;
 	window.ao = {} as typeof window.ao;
@@ -442,7 +442,7 @@ describe("TerminalCacheProvider", () => {
 		try {
 			const oldGeneration = await waitFor(() => activeXterm());
 			act(() => {
-				view.queryClient.setQueryData(workspaceQueryKey, localSection([replacement]));
+				view.queryClient.setQueryData(workspaceHostQueryKey("local"), localSection([replacement]));
 			});
 			view.show(replacement);
 
@@ -463,7 +463,7 @@ describe("TerminalCacheProvider", () => {
 			view.show(sessionB);
 			await waitFor(() => expect(activeXterm()).not.toBe(terminalA));
 			act(() => {
-				view.queryClient.setQueryData(workspaceQueryKey, localSection([sessionB]));
+				view.queryClient.setQueryData(workspaceHostQueryKey("local"), localSection([sessionB]));
 			});
 
 			await waitFor(() => expect(terminalA.isConnected).toBe(false));

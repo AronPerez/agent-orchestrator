@@ -24,6 +24,7 @@ import { useOpenShellTerminal } from "../hooks/useShellTerminals";
 import { useWindowFullScreen } from "../hooks/useWindowFullScreen";
 import {
 	useWorkspaceQuery,
+	workspaceHostQueryKey,
 	workspaceQueryKey,
 	workspaceQueryOptions,
 } from "../hooks/useWorkspaceQuery";
@@ -240,7 +241,7 @@ function ShellLayout() {
 
 	const updateWorkspaces = useCallback(
 		(updater: (workspaces: WorkspaceSummary[]) => WorkspaceSummary[]) => {
-			queryClient.setQueryData<HostSection[]>(workspaceQueryKey, (current) =>
+			queryClient.setQueryData<HostSection[]>(workspaceHostQueryKey(LOCAL_HOST), (current) =>
 				updateHostWorkspaces(
 					current ?? [
 						{
@@ -444,7 +445,7 @@ function ShellLayout() {
 		}
 
 		workspaceStartupBaselineRef.current =
-			queryClient.getQueryState(workspaceQueryKey)?.dataUpdatedAt ?? 0;
+			queryClient.getQueryState(workspaceQueryOptions.queryKey)?.dataUpdatedAt ?? 0;
 		setWorkspaceStartupState("loading");
 		void queryClient
 			.fetchQuery({ ...workspaceQueryOptions, staleTime: 0 })

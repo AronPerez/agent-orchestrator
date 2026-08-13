@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 import type { components } from "../../api/schema";
 import { apiClient, apiErrorMessage } from "../lib/api-client";
-import { workspaceQueryKey } from "../hooks/useWorkspaceQuery";
+import { workspaceHostQueryKey, workspaceQueryKey } from "../hooks/useWorkspaceQuery";
 import { formatTimeCompact } from "../lib/format-time";
 import { AgentAvatar } from "./AgentAvatar";
 import {
@@ -725,9 +725,10 @@ function CompletionControls({ session }: { session: WorkspaceSession }) {
 			if (error) throw new Error(apiErrorMessage(error, `Failed to update merge policy (${response.status})`));
 		},
 		onMutate: async (terminateOnPrMerge) => {
-			await queryClient.cancelQueries({ queryKey: workspaceQueryKey });
-			const previous = queryClient.getQueryData<HostSection[]>(workspaceQueryKey);
-			queryClient.setQueryData<HostSection[]>(workspaceQueryKey, (current) =>
+			const queryKey = workspaceHostQueryKey(session.host);
+			await queryClient.cancelQueries({ queryKey });
+			const previous = queryClient.getQueryData<HostSection[]>(queryKey);
+			queryClient.setQueryData<HostSection[]>(queryKey, (current) =>
 				updateHostWorkspaces(current, session.host, (workspaces) =>
 					updateSessionMergePolicy(workspaces, session.id, terminateOnPrMerge),
 				),
@@ -735,7 +736,9 @@ function CompletionControls({ session }: { session: WorkspaceSession }) {
 			return { previous };
 		},
 		onError: (_error, _next, context) => {
-			if (context?.previous) queryClient.setQueryData(workspaceQueryKey, context.previous);
+			if (context?.previous) {
+				queryClient.setQueryData(workspaceHostQueryKey(session.host), context.previous);
+			}
 		},
 		onSettled: () => {
 			void queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
@@ -745,7 +748,9 @@ function CompletionControls({ session }: { session: WorkspaceSession }) {
 	const canTerminateNow = session.status === "merged";
 
 	const confirmTermination = () => {
-		const workspaces = flattenHostSections(queryClient.getQueryData<HostSection[]>(workspaceQueryKey));
+		const workspaces = flattenHostSections(
+			queryClient.getQueryData<HostSection[]>(workspaceHostQueryKey(session.host)),
+		);
 		const orchestrator = findProjectOrchestrator(workspaces, session.workspaceId);
 		setConfirmOpen(false);
 		terminate.mutate(session);

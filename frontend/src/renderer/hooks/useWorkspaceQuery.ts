@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQueries, type UseQueryResult } from "@tanstack/react-query";
 import type { components } from "../../api/schema";
 import { apiErrorMessage } from "../lib/api-client";
 import { clientFor, connectedHosts, isHostReady } from "../lib/host-clients";
@@ -36,6 +36,10 @@ function toPullRequestFacts(pr: components["schemas"]["SessionPRFacts"]): PullRe
 
 export const workspaceQueryKey = ["workspaces"] as const;
 const reportedUnknownSessionFields = new Set<string>();
+
+export function workspaceHostQueryKey(host: HostId) {
+	return [...workspaceQueryKey, host] as const;
+}
 
 function reportUnknownSessionField(field: "status" | "activity", value?: string): void {
 	const reason = value ? "unrecognized" : "missing";
@@ -147,38 +151,55 @@ async function fetchWorkspaces(host: HostId): Promise<WorkspaceSummary[]> {
 	});
 }
 
-async function fetchAllHosts(): Promise<HostSection[]> {
-	const hosts = [LOCAL_HOST, ...connectedHosts()];
-	const outcomes = await Promise.allSettled(hosts.map((host) => fetchWorkspaces(host)));
-	return outcomes.map((outcome, index) => {
-		const host = hosts[index];
-		return outcome.status === "fulfilled"
-			? {
-					host,
-					label: host === LOCAL_HOST ? "Local" : host,
-					status: "ready" as const,
-					workspaces: outcome.value,
-					failure: null,
-				}
-			: {
-					host,
-					label: host === LOCAL_HOST ? "Local" : host,
-					status: "failed" as const,
-					workspaces: [],
-					failure: apiErrorMessage(outcome.reason, "Could not load projects"),
-				};
-	});
+async function fetchHostSection(host: HostId): Promise<HostSection[]> {
+	try {
+		return [{
+			host,
+			label: host === LOCAL_HOST ? "Local" : host,
+			status: "ready",
+			workspaces: await fetchWorkspaces(host),
+			failure: null,
+		}];
+	} catch (error) {
+		return [{
+			host,
+			label: host === LOCAL_HOST ? "Local" : host,
+			status: "failed",
+			workspaces: [],
+			failure: apiErrorMessage(error, "Could not load projects"),
+		}];
+	}
 }
 
-// Shared so route loaders can prefetch via queryClient.ensureQueryData (paired
-// with the router's defaultPreload: "intent") and the hook reads the same cache.
-export const workspaceQueryOptions = {
-	queryKey: workspaceQueryKey,
-	queryFn: fetchAllHosts,
-	retry: 1,
-	refetchInterval: 15_000,
-};
+function workspaceHostQueryOptions(host: HostId) {
+	return {
+		queryKey: workspaceHostQueryKey(host),
+		queryFn: () => fetchHostSection(host),
+		retry: 1,
+		refetchInterval: 15_000,
+	};
+}
+
+function combineWorkspaceQueries(results: UseQueryResult<HostSection[]>[]) {
+	const isSuccess = results.every((result) => result.isSuccess);
+	return {
+		data: isSuccess ? results.flatMap((result) => result.data ?? []) : undefined,
+		dataUpdatedAt: Math.max(0, ...results.map((result) => result.dataUpdatedAt)),
+		error: results.find((result) => result.error)?.error ?? null,
+		isError: results.some((result) => result.isError),
+		isLoading: results.some((result) => result.isLoading),
+		isSuccess,
+		refetch: () => Promise.all(results.map((result) => result.refetch())),
+	};
+}
+
+// Shared so route loaders can prefetch the local host via
+// queryClient.ensureQueryData and the hook reads the same cache.
+export const workspaceQueryOptions = workspaceHostQueryOptions(LOCAL_HOST);
 
 export function useWorkspaceQuery() {
-	return useQuery(workspaceQueryOptions);
+	return useQueries({
+		queries: [LOCAL_HOST, ...connectedHosts()].map(workspaceHostQueryOptions),
+		combine: combineWorkspaceQueries,
+	});
 }
