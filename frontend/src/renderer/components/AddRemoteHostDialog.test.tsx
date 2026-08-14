@@ -1,6 +1,8 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { probeRemote } from "../../main/remote-request";
+import { fakeDaemon, type Behaviour } from "../test/fake-daemon";
 import { AddRemoteHostDialog } from "./AddRemoteHostDialog";
 
 const { addMock, updateMock } = vi.hoisted(() => ({ addMock: vi.fn(), updateMock: vi.fn() }));
@@ -28,6 +30,19 @@ async function fillAndSubmit(address = "http://192.0.2.1:3011") {
 }
 
 describe("AddRemoteHostDialog", () => {
+	it.each<Behaviour>(["html-catchall", "wrong-shape"])(
+		"reports %s as a non-daemon response without throwing",
+		async (behaviour) => {
+			addMock.mockImplementation((entry) => probeRemote(entry, fakeDaemon(behaviour)));
+
+			expect(() =>
+				render(<AddRemoteHostDialog open onOpenChange={vi.fn()} onSaved={vi.fn()} />),
+			).not.toThrow();
+			await fillAndSubmit();
+			expect(await screen.findByRole("alert")).toHaveTextContent(/not an AO daemon/i);
+		},
+	);
+
 	it("saves and reports the new host when it answers", async () => {
 		const onSaved = vi.fn();
 		render(<AddRemoteHostDialog open onOpenChange={vi.fn()} onSaved={onSaved} />);

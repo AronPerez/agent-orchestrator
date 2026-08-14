@@ -92,7 +92,10 @@ async function fetchWorkspaces(host: HostId): Promise<WorkspaceSummary[]> {
 
 	const client = clientFor(host);
 	const [{ data: projectsData, error: projectsError }, { data: sessionsData, error: sessionsError }] =
-		await Promise.all([client.GET("/api/v1/projects"), client.GET("/api/v1/sessions")]);
+		await Promise.all([client.GET("/api/v1/projects"), client.GET("/api/v1/sessions")]).catch((error: unknown) => {
+			if (error instanceof SyntaxError) throw new Error("Host returned malformed workspace data");
+			throw error;
+		});
 
 	if (projectsError || sessionsError) throw projectsError ?? sessionsError;
 	const projects = parseResponseArray(projectsData, "projects", isProject);

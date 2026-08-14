@@ -1,7 +1,9 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { remoteRequest } from "../../main/remote-request";
 import { aoBridge } from "../lib/bridge";
+import { fakeDaemon, type Behaviour } from "../test/fake-daemon";
 import { RemoteFolderPicker } from "./RemoteFolderPicker";
 
 const listing = (path: string, parent: string, entries: Array<{ name: string; path: string; gitRepo: boolean }>) => ({
@@ -27,6 +29,22 @@ function renderPicker(props: Partial<Parameters<typeof RemoteFolderPicker>[0]> =
 }
 
 describe("RemoteFolderPicker", () => {
+	it.each<Behaviour>(["html-catchall", "wrong-shape"])(
+		"reports a version gap without throwing when the daemon returns %s",
+		async (behaviour) => {
+			vi.spyOn(aoBridge.remotes, "request").mockImplementation((_url, init) =>
+				remoteRequest(
+					{ label: "workbox", url: "http://192.0.2.1:3011", password: "pw" },
+					init,
+					fakeDaemon(behaviour),
+				),
+			);
+
+			expect(() => renderPicker()).not.toThrow();
+			expect(await screen.findByRole("alert")).toHaveTextContent(/older build/i);
+		},
+	);
+
 	it("opens at the host's home and marks git repos", async () => {
 		vi.spyOn(aoBridge.remotes, "request").mockResolvedValue(
 			listing("/home/dev", "/home", [

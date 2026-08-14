@@ -1,7 +1,10 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import createClient from "openapi-fetch";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
+import type { paths } from "../../api/schema";
+import { fakeDaemon, type Behaviour } from "../test/fake-daemon";
 
 const {
 	captureRendererEventMock,
@@ -41,6 +44,10 @@ function wrapper({ children }: { children: ReactNode }) {
 	// The hook pins its own retry policy; retryDelay 0 keeps the error tests fast.
 	const queryClient = new QueryClient({ defaultOptions: { queries: { retryDelay: 0 } } });
 	return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+}
+
+function renderWorkspaceQuery() {
+	return renderHook(() => useWorkspaceQuery(), { wrapper });
 }
 
 function respondWith(payload: {
@@ -106,6 +113,29 @@ async function fetchAllForTest(fixtures: HostFixture[]) {
 }
 
 describe("useWorkspaceQuery", () => {
+	it.each<Behaviour>(["html-catchall", "wrong-shape"])(
+		"reports %s workspace responses as malformed instead of throwing",
+		async (behaviour) => {
+			const client = createClient<paths>({ baseUrl: "http://x", fetch: fakeDaemon(behaviour) });
+			getMock.mockImplementation((_host: HostId, url: "/api/v1/projects" | "/api/v1/sessions") =>
+				client.GET(url),
+			);
+
+			let rendered: ReturnType<typeof renderWorkspaceQuery> | undefined;
+			expect(() => {
+				rendered = renderWorkspaceQuery();
+			}).not.toThrow();
+			if (!rendered) throw new Error("workspace query did not render");
+			const { result } = rendered;
+
+			await waitFor(() => expect(result.current.isSuccess).toBe(true));
+			expect(result.current.data?.[0]).toMatchObject({
+				status: "failed",
+				failure: "Host returned malformed workspace data",
+			});
+		},
+	);
+
 	it("reports the local host as failed while the daemon client is not ready", async () => {
 		isHostReadyMock.mockReturnValue(false);
 
