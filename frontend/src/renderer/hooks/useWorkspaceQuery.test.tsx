@@ -24,6 +24,7 @@ vi.mock("../lib/api-client", () => ({
 vi.mock("../lib/host-clients", () => ({
 	clientFor: (host: string) => ({ GET: (url: string) => getMock(host, url) }),
 	connectedHosts: connectedHostsMock,
+	hostLabelFor: (host: string) => host === "http://192.0.2.1:3011" ? "workbox" : host,
 	isHostReady: isHostReadyMock,
 	subscribeConnectedHosts: (listener: () => void) => {
 		hostListeners.add(listener);
@@ -418,6 +419,7 @@ describe("useWorkspaceQuery — multi-host", () => {
 			refKey({ host: REMOTE, id: "skyvern-cloud" }),
 		);
 		expect(sections[0].workspaces[0].sessions[0].host).toBe(LOCAL_HOST);
+		expect(sections[1].label).toBe("workbox");
 	});
 
 	it("one host failing does not discard another host's data", async () => {

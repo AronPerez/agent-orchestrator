@@ -18,9 +18,10 @@ import {
 	SIDEBAR_DEFAULT_WIDTH,
 	SIDEBAR_MIN_WIDTH,
 } from "./Sidebar";
-import type { WorkspaceSession, WorkspaceSummary } from "../types/workspace";
+import type { HostSection, WorkspaceSession, WorkspaceSummary } from "../types/workspace";
 import { agentsQueryKey } from "../hooks/useAgentsQuery";
-import { refKey } from "../lib/hosts";
+import { workspaceHostQueryKey } from "../hooks/useWorkspaceQuery";
+import { LOCAL_HOST, refKey } from "../lib/hosts";
 import { useUiStore } from "../stores/ui-store";
 
 const { getMock, navigateMock, mockParams, renameSessionMock, spawnMock, updateStatusMock, commandPaletteEnabled } = vi.hoisted(
@@ -145,18 +146,28 @@ function renderSidebar({
 	onRemoveProject = vi.fn().mockResolvedValue(undefined) as RemoveProjectHandler,
 	seedAgents = true,
 	workspaces = [workspace],
+	hostSections,
 	initialOpen = true,
+	queryClient = new QueryClient({
+		defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+	}),
 }: {
 	onCreateProject?: CreateProjectHandler;
 	onInitializeProject?: InitializeProjectHandler;
 	onRemoveProject?: RemoveProjectHandler;
 	seedAgents?: boolean;
 	workspaces?: WorkspaceSummary[];
+	hostSections?: HostSection[];
 	initialOpen?: boolean;
+	queryClient?: QueryClient;
 } = {}) {
-	const queryClient = new QueryClient({
-		defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-	});
+	const sections = hostSections ?? [...new Set(workspaces.map(({ host }) => host))].map((host) => ({
+		host,
+		label: host === LOCAL_HOST ? "Local" : host === "http://192.0.2.1:3011" ? "workbox" : host,
+		status: "ready" as const,
+		workspaces: workspaces.filter((candidate) => candidate.host === host),
+		failure: null,
+	}));
 	if (seedAgents) {
 		queryClient.setQueryData(agentsQueryKey, {
 			supported: [
@@ -180,7 +191,7 @@ function renderSidebar({
 					onCreateProject={onCreateProject}
 					onInitializeProject={onInitializeProject}
 					onRemoveProject={onRemoveProject}
-					workspaces={workspaces}
+					hostSections={sections}
 				/>
 			</SidebarProvider>
 		</QueryClientProvider>,
@@ -306,8 +317,8 @@ describe("destructive actions name the remote host", () => {
 	});
 });
 
-describe("Sidebar", () => {
-	it("keeps colliding projects keyed, selected, and routed by host", async () => {
+describe("Sidebar — one tree across hosts", () => {
+	it("labels remote rows and keys colliding projects by host", () => {
 		const remoteHost = "http://192.0.2.1:3011";
 		const remoteOrchestrator = {
 			...session,
@@ -325,17 +336,75 @@ describe("Sidebar", () => {
 		const rows = [workspace, remote].map((project) =>
 			document.querySelector<HTMLElement>(`[data-project-ref="${refKey(project)}"] [data-sidebar="menu-button"]`),
 		);
-		expect(consoleError).not.toHaveBeenCalledWith(expect.stringContaining("same key"), expect.anything());
+		expect(screen.getByText("Project One", { selector: "[data-project-label]" })).toBeInTheDocument();
+		expect(screen.getByText("Project One · workbox", { selector: "[data-project-label]" })).toBeInTheDocument();
+		expect(consoleError).not.toHaveBeenCalled();
 		expect(rows[0]).not.toHaveAttribute("data-active", "true");
 		expect(rows[1]).toHaveAttribute("data-active", "true");
+	});
 
-		await userEvent.click(rows[1]!);
+	it("opens a remote project in place without reloading", async () => {
+		const remoteHost = "http://192.0.2.1:3011";
+		const remote = { ...workspace, host: remoteHost };
+		// jsdom's window.location.reload wrapper is non-configurable; it delegates
+		// directly to this implementation method, which is safe to spy on.
+		const locationImpl = Object.getOwnPropertySymbols(window.location)
+			.map((symbol) => (window.location as unknown as Record<symbol, { reload?: () => void }>)[symbol])
+			.find((value) => typeof value?.reload === "function");
+		const windowLocationReload = vi.spyOn(locationImpl!, "reload");
+		renderSidebar({ workspaces: [workspace, remote] });
+
+		await userEvent.click(screen.getByText("Project One · workbox", { selector: "[data-project-label]" }));
 		expect(navigateMock).toHaveBeenCalledWith({
 			to: "/host/$hostId/project/$projectId",
 			params: { hostId: remote.host, projectId: remote.id },
 		});
+		expect(windowLocationReload).not.toHaveBeenCalled();
 	});
 
+	it("filters the tree without changing host routing", async () => {
+		const remoteHost = "http://192.0.2.1:3011";
+		const local = { ...workspace, name: "Local Project" };
+		const remote = { ...workspace, host: remoteHost, name: "Remote Project" };
+		renderSidebar({ workspaces: [local, remote] });
+
+		await userEvent.click(screen.getByRole("combobox", { name: "Host" }));
+		expect(screen.getByRole("option", { name: "All hosts" })).toBeInTheDocument();
+		expect(screen.getByRole("option", { name: "This Mac" })).toBeInTheDocument();
+		await userEvent.click(screen.getByRole("option", { name: "workbox" }));
+
+		expect(screen.queryByText("Local Project", { selector: "[data-project-label]" })).not.toBeInTheDocument();
+		expect(screen.getByText("Remote Project · workbox", { selector: "[data-project-label]" })).toBeInTheDocument();
+		expect(navigateMock).not.toHaveBeenCalled();
+	});
+
+	it("keeps ready rows visible beside a failed host and retries only that host", async () => {
+		const remoteHost = "http://192.0.2.1:3011";
+		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		const invalidate = vi.spyOn(queryClient, "invalidateQueries").mockResolvedValue(undefined);
+		renderSidebar({
+			queryClient,
+			hostSections: [
+				{ host: LOCAL_HOST, label: "Local", status: "ready", workspaces: [workspace], failure: null },
+				{
+					host: remoteHost,
+					label: "workbox",
+					status: "failed",
+					workspaces: [],
+					failure: "connect ECONNREFUSED",
+				},
+			],
+		});
+
+		expect(screen.getByText("Project One", { selector: "[data-project-label]" })).toBeInTheDocument();
+		expect(screen.getByText("workbox is unreachable")).toBeInTheDocument();
+		expect(screen.getByText("connect ECONNREFUSED")).toBeInTheDocument();
+		await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+		expect(invalidate).toHaveBeenCalledWith({ queryKey: workspaceHostQueryKey(remoteHost) });
+	});
+});
+
+describe("Sidebar", () => {
 	it("suppresses focus chrome without removing keyboard focusability", () => {
 		renderSidebar();
 
