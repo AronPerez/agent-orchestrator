@@ -29,12 +29,13 @@ import {
 	newestActiveOrchestrator,
 	type WorkspaceSession,
 	type WorkspaceSummary,
+	type HostSection,
 	workerSessions,
 } from "../types/workspace";
 import { getAgentActivityView } from "../lib/session-presentation";
 import { aoBridge } from "../lib/bridge";
 import { useCommandPaletteEnabled } from "../hooks/useCommandPaletteEnabled";
-import { workspaceQueryKey } from "../hooks/useWorkspaceQuery";
+import { workspaceHostQueryKey, workspaceQueryKey } from "../hooks/useWorkspaceQuery";
 import { usePinSession, useUnpinSession } from "../hooks/usePinSession";
 import { spawnOrchestrator } from "../lib/spawn-orchestrator";
 import { renameSession } from "../lib/rename-session";
@@ -76,7 +77,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import { OrchestratorIcon } from "./icons";
 import aoLogo from "../../../assets/ao-logo.svg";
 import { cn } from "../lib/utils";
-import { refKey, type Ref } from "../lib/hosts";
+import { LOCAL_HOST, refKey, type HostId, type Ref } from "../lib/hosts";
 import { hostActionSuffix } from "../lib/host-disclosure";
 import { useUiStore } from "../stores/ui-store"
 import { useKeybindingsStore } from "../stores/keybindings-store";
@@ -85,10 +86,10 @@ import { CreateProjectFlow, type CreateProjectInput } from "./CreateProjectFlow"
 import { ResizeHandle } from "./ResizeHandle";
 import { isMacPlatform } from "../lib/platform";
 import { useCloudSession } from "../lib/cloud-session";
+import { HostSwitcher } from "./HostSwitcher";
 
-// Destructive controls must say which machine they destroy on: while a remote
-// host is active nothing else in this tree distinguishes its sessions from the
-// local ones. Empty on local, so that copy stays byte-identical to before.
+// Destructive controls name the machine they act on even though remote rows
+// are labelled. Empty on local, so that copy stays byte-identical to before.
 function useHostSuffix(host: string): string {
 	const { t } = useTranslation();
 	return hostActionSuffix(t, host);
@@ -133,7 +134,7 @@ type SidebarProps = {
 	topbarOffset?: "toolbar" | "titlebar" | "trafficLights" | "session";
 	onPreviewLeave?: () => void;
 	workspaceError?: string;
-	workspaces: WorkspaceSummary[];
+	hostSections: HostSection[];
 	onCreateProject: (input: CreateProjectInput) => Promise<void>;
 	onInitializeProject: (path: string) => Promise<void>;
 	onRemoveProject: (project: Ref) => Promise<void>;
@@ -193,7 +194,7 @@ export function Sidebar({
 	topbarOffset = "toolbar",
 	onPreviewLeave,
 	workspaceError,
-	workspaces,
+	hostSections,
 	onCreateProject,
 	onInitializeProject,
 	onRemoveProject,
@@ -210,6 +211,13 @@ export function Sidebar({
 	const daemonStatus = useShellMaybe()?.daemonStatus ?? null;
 	const commandPaletteEnabled = useCommandPaletteEnabled();
 	const setCommandPaletteOpen = useUiStore((s) => s.setCommandPaletteOpen);
+	const [hostFilter, setHostFilter] = useState<HostId | null>(null);
+	const selectedHost = hostFilter !== null && hostSections.some(({ host }) => host === hostFilter) ? hostFilter : null;
+	const visibleHostSections = selectedHost === null
+		? hostSections
+		: hostSections.filter(({ host }) => host === selectedHost);
+	const workspaces = visibleHostSections.flatMap((section) => section.workspaces);
+	const allWorkspaces = hostSections.flatMap((section) => section.workspaces);
 
 	useLayoutEffect(() => {
 		// Offcanvas: the panel slides off-screen on collapse — no need to hide content.
@@ -380,13 +388,18 @@ export function Sidebar({
 						collapsible={false}
 						trailing={
 							<CreateProjectButton
-								hideTrigger={workspaces.length === 0}
+								hideTrigger={allWorkspaces.length === 0}
 								onCreateProject={onCreateProject}
 								onInitializeProject={onInitializeProject}
 							/>
 						}
 					/>
 				</div>
+				{hostSections.length > 1 ? (
+					<div className="sidebar-expanded-chrome px-2.5 pb-2 group-data-[collapsible=icon]:hidden">
+						<HostSwitcher hosts={hostSections} value={selectedHost} onChange={setHostFilter} />
+					</div>
+				) : null}
 			</div>
 
 			<SidebarContent className="gap-0 px-2 group-data-[collapsible=icon]:items-center group-data-[collapsible=icon]:px-1.5">
@@ -398,18 +411,25 @@ export function Sidebar({
 								<p className="text-sm text-foreground">{t("shell.couldNotLoadProjects")}</p>
 								<p className="mt-1 text-caption text-passive">{workspaceError}</p>
 							</div>
-						) : workspaces.length === 0 ? null : (
+						) : visibleHostSections.every(
+							(section) => section.status === "ready" && section.workspaces.length === 0,
+						) ? null : (
 							<SidebarMenu className="gap-0.5 rounded-lg overflow-hidden group-data-[collapsible=icon]:gap-1 group-data-[collapsible=icon]:rounded-none group-data-[collapsible=icon]:overflow-visible">
-								{workspaces.map((workspace) => (
-									<ProjectItem
-										key={refKey(workspace)}
-										workspace={workspace}
-										expanded={!collapsedIds.has(refKey(workspace))}
-										selection={selection}
-										onToggle={() => toggleCollapsed(refKey(workspace))}
-										onRemoveProject={onRemoveProject}
-									/>
-								))}
+								{visibleHostSections.flatMap((section) =>
+									section.status === "failed"
+										? [<HostFailureSection key={`failed:${section.host}`} section={section} />]
+										: section.workspaces.map((workspace) => (
+											<ProjectItem
+												key={refKey(workspace)}
+												workspace={workspace}
+												hostLabel={section.label}
+												expanded={!collapsedIds.has(refKey(workspace))}
+												selection={selection}
+												onToggle={() => toggleCollapsed(refKey(workspace))}
+												onRemoveProject={onRemoveProject}
+											/>
+										)),
+								)}
 								{isCollapsed && <CreateProjectListItem />}
 							</SidebarMenu>
 						)}
@@ -495,14 +515,39 @@ export function Sidebar({
 
 type Selection = ReturnType<typeof useSelection>;
 
+function HostFailureSection({ section }: { section: HostSection }) {
+	const { t } = useTranslation();
+	const queryClient = useQueryClient();
+	const label = section.host === LOCAL_HOST ? t("hosts.local") : section.label;
+
+	return (
+		<SidebarMenuItem className="sidebar-expanded-chrome px-2.5 py-2 group-data-[collapsible=icon]:hidden">
+			<div role="alert">
+				<p className="text-sm font-medium text-foreground">{t("hosts.sectionFailed", { host: label })}</p>
+				<p className="mt-0.5 text-xs text-passive">{section.failure ?? t("hosts.unreachable")}</p>
+				<button
+					className="mt-1 inline-flex items-center gap-1 text-xs font-medium text-accent hover:underline"
+					onClick={() => void queryClient.invalidateQueries({ queryKey: workspaceHostQueryKey(section.host) })}
+					type="button"
+				>
+					<RefreshCw aria-hidden="true" className="size-3" />
+					{t("hosts.retry")}
+				</button>
+			</div>
+		</SidebarMenuItem>
+	);
+}
+
 function ProjectItem({
 	workspace,
+	hostLabel,
 	expanded,
 	selection,
 	onToggle,
 	onRemoveProject,
 }: {
 	workspace: WorkspaceSummary;
+	hostLabel: string;
 	expanded: boolean;
 	selection: Selection;
 	onToggle: () => void;
@@ -510,6 +555,9 @@ function ProjectItem({
 }) {
 	const { t } = useTranslation();
 	const hostSuffix = useHostSuffix(workspace.host);
+	const projectLabel = workspace.host === LOCAL_HOST
+		? workspace.name
+		: t("hosts.qualified", { name: workspace.name, host: hostLabel });
 	const prefersReducedMotion = useReducedMotion();
 	const activeProjectMatches =
 		selection.activeHostId === workspace.host && selection.activeProjectId === workspace.id;
@@ -651,7 +699,7 @@ function ProjectItem({
 		aria-current={dashboardActive ? "page" : undefined}
 		aria-expanded={expanded}
 		isActive={projectActive}
-		tooltip={workspace.name}
+		tooltip={projectLabel}
 		onClick={onProjectClick}
 		onKeyDown={onProjectKeyDown}
 		className={cn(
@@ -700,7 +748,7 @@ function ProjectItem({
 			className="sidebar-expanded-chrome min-w-0 flex-1 translate-y-px truncate group-data-[collapsible=icon]:hidden"
 			data-project-label=""
 		>
-			{workspace.name}
+			{projectLabel}
 		</span>
 	</SidebarMenuButton>
 	{/* Folder disclosure toggle: sibling of the nav button, absolutely positioned over

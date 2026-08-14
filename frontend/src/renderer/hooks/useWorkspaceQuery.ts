@@ -2,7 +2,7 @@ import { useQueries, type UseQueryResult } from "@tanstack/react-query";
 import { useSyncExternalStore } from "react";
 import type { components } from "../../api/schema";
 import { apiErrorMessage } from "../lib/api-client";
-import { clientFor, connectedHosts, isHostReady, subscribeConnectedHosts } from "../lib/host-clients";
+import { clientFor, connectedHosts, hostLabelFor, isHostReady, subscribeConnectedHosts } from "../lib/host-clients";
 import { LOCAL_HOST, type HostId } from "../lib/hosts";
 import { mockWorkspaces } from "../lib/mock-data";
 import { usesPreviewWorkspaceData } from "../lib/preview-mode";
@@ -157,7 +157,7 @@ async function fetchHostSection(host: HostId): Promise<HostSection[]> {
 	try {
 		return [{
 			host,
-			label: host === LOCAL_HOST ? "Local" : host,
+			label: host === LOCAL_HOST ? "Local" : hostLabelFor(host),
 			status: "ready",
 			workspaces: await fetchWorkspaces(host),
 			failure: null,
@@ -165,7 +165,7 @@ async function fetchHostSection(host: HostId): Promise<HostSection[]> {
 	} catch (error) {
 		return [{
 			host,
-			label: host === LOCAL_HOST ? "Local" : host,
+			label: host === LOCAL_HOST ? "Local" : hostLabelFor(host),
 			status: "failed",
 			workspaces: [],
 			failure: apiErrorMessage(error, "Could not load projects"),
