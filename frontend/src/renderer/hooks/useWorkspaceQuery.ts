@@ -1,4 +1,4 @@
-import { useQueries, type UseQueryResult } from "@tanstack/react-query";
+import { useQueries, type QueryFunctionContext, type UseQueryResult } from "@tanstack/react-query";
 import { useSyncExternalStore } from "react";
 import type { components } from "../../api/schema";
 import { apiErrorMessage } from "../lib/api-client";
@@ -153,7 +153,7 @@ async function fetchWorkspaces(host: HostId): Promise<WorkspaceSummary[]> {
 	});
 }
 
-async function fetchHostSection(host: HostId): Promise<HostSection[]> {
+async function fetchHostSection(host: HostId, lastGoodWorkspaces: WorkspaceSummary[] = []): Promise<HostSection[]> {
 	try {
 		return [{
 			host,
@@ -167,31 +167,40 @@ async function fetchHostSection(host: HostId): Promise<HostSection[]> {
 			host,
 			label: host === LOCAL_HOST ? "Local" : hostLabelFor(host),
 			status: "failed",
-			workspaces: [],
+			workspaces: lastGoodWorkspaces,
 			failure: apiErrorMessage(error, "Could not load projects"),
 		}];
 	}
 }
 
 function workspaceHostQueryOptions(host: HostId) {
+	const queryKey = workspaceHostQueryKey(host);
 	return {
-		queryKey: workspaceHostQueryKey(host),
-		queryFn: () => fetchHostSection(host),
+		queryKey,
+		queryFn: ({ client }: QueryFunctionContext<typeof queryKey>) =>
+			fetchHostSection(host, client.getQueryData<HostSection[]>(queryKey)?.[0]?.workspaces),
 		retry: 1,
 		refetchInterval: 15_000,
 	};
 }
 
+export function localWorkspaceFailure(sections: readonly HostSection[] | undefined): string | undefined {
+	const local = sections?.find((section) => section.host === LOCAL_HOST);
+	return local?.status === "failed" ? (local.failure ?? "Could not load projects") : undefined;
+}
+
 function combineWorkspaceQueries(results: UseQueryResult<HostSection[]>[]) {
 	const local = results[0];
 	const isSuccess = local?.isSuccess ?? false;
+	const data = isSuccess ? results.flatMap((result) => result.data ?? []) : undefined;
 	return {
-		data: isSuccess ? results.flatMap((result) => result.data ?? []) : undefined,
+		data,
 		dataUpdatedAt: Math.max(0, ...results.map((result) => result.dataUpdatedAt)),
 		error: local?.error ?? null,
 		isError: local?.isError ?? false,
 		isLoading: local?.isLoading ?? true,
 		isSuccess,
+		localFailure: localWorkspaceFailure(data),
 		refetch: () => Promise.all(results.map((result) => result.refetch())),
 	};
 }

@@ -658,13 +658,14 @@ describe("NotificationCenter", () => {
 		expect(screen.queryByRole("button", { name: "Restore session" })).not.toBeInTheDocument();
 	});
 
-	it("does not treat terminated sessions as live when the workspace query fails", async () => {
+	it("does not treat terminated sessions as live when the local host fails", async () => {
 		const refetch = vi.fn();
 		workspaceQueryMock.mockReturnValue({
-			data: undefined,
-			isError: true,
+			data: [],
+			isError: false,
 			isPending: false,
-			isSuccess: false,
+			isSuccess: true,
+			localFailure: "local daemon dropped",
 			refetch,
 		});
 		renderNotificationCenter();

@@ -121,6 +121,8 @@ vi.mock("../lib/bridge", () => ({
 }));
 
 vi.mock("../hooks/useWorkspaceQuery", () => ({
+	localWorkspaceFailure: (sections: Array<{ host: string; status?: string; failure?: string | null }> | undefined) =>
+		sections?.find((section) => section.host === "local" && section.status === "failed")?.failure ?? undefined,
 	useWorkspaceQuery: () => shellMocks.state.workspaceQuery,
 	workspaceQueryKey: ["workspaces"],
 	workspaceQueryOptions: {},
@@ -369,6 +371,23 @@ describe("shell workspace startup", () => {
 			expect(shellMocks.queryClient.fetchQuery).toHaveBeenCalledWith(expect.objectContaining({ staleTime: 0 })),
 		);
 		expect(shellMocks.state.shellValue?.workspaceStartupState).toBe("loading");
+	});
+
+	it("marks startup as failed when the confirmed local host fetch fails", async () => {
+		shellMocks.state.daemonStatus = { state: "ready", port: 4777 };
+		shellMocks.queryClient.fetchQuery.mockResolvedValueOnce([
+			{
+				host: "local",
+				label: "Local",
+				status: "failed",
+				workspaces: [],
+				failure: "local daemon dropped",
+			},
+		]);
+
+		await renderShell();
+
+		await waitFor(() => expect(shellMocks.state.shellValue?.workspaceStartupState).toBe("error"));
 	});
 
 	it("forces a workspace fetch when a daemon returns ready on the same port", async () => {

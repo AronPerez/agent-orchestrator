@@ -14,7 +14,7 @@ function ShellIndex() {
 	const workspaceQuery = useWorkspaceQuery();
 
 	useEffect(() => {
-		if (!workspaceQuery.isSuccess) return;
+		if (!workspaceQuery.isSuccess || workspaceQuery.localFailure) return;
 		const workspaces = flattenHostSections(workspaceQuery.data);
 		if (workspaces.length !== 1) return;
 		const [workspace] = workspaces;
@@ -24,7 +24,7 @@ function ShellIndex() {
 			params: { hostId: workspace.host, projectId: "scratch" },
 			replace: true,
 		});
-	}, [navigate, workspaceQuery.data, workspaceQuery.isSuccess]);
+	}, [navigate, workspaceQuery.data, workspaceQuery.isSuccess, workspaceQuery.localFailure]);
 
 	return (
 		<>

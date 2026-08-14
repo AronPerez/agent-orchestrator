@@ -24,6 +24,7 @@ import { useDaemonStatus } from "../hooks/useDaemonStatus";
 import { useOpenShellTerminal } from "../hooks/useShellTerminals";
 import { useWindowFullScreen } from "../hooks/useWindowFullScreen";
 import {
+	localWorkspaceFailure,
 	useWorkspaceQuery,
 	workspaceHostQueryKey,
 	workspaceQueryKey,
@@ -211,6 +212,7 @@ function ShellLayout() {
 		Boolean(matchRoute({ to: "/" })) &&
 		workspaceStartupState === "ready" &&
 		workspaceQuery.isSuccess &&
+		!workspaceQuery.localFailure &&
 		workspaces.length === 0;
 	const isSettingsRoute =
 		Boolean(matchRoute({ to: "/settings", fuzzy: true })) ||
@@ -494,8 +496,8 @@ function ShellLayout() {
 		setWorkspaceStartupState("loading");
 		void queryClient
 			.fetchQuery({ ...workspaceQueryOptions, staleTime: 0 })
-			.then(() => {
-				if (active) setWorkspaceStartupState("ready");
+			.then((sections) => {
+				if (active) setWorkspaceStartupState(localWorkspaceFailure(sections) ? "error" : "ready");
 			})
 			.catch((error) => {
 				if (active && !isCancelledError(error)) setWorkspaceStartupState("error");
@@ -511,9 +513,12 @@ function ShellLayout() {
 	// the workspace query later, so let a newer successful result recover the
 	// shell without requiring a daemon restart or port change.
 	useEffect(() => {
+		if (usesPreviewWorkspaceData || !isDaemonReady) return;
+		if (workspaceQuery.localFailure) {
+			setWorkspaceStartupState("error");
+			return;
+		}
 		if (
-			usesPreviewWorkspaceData ||
-			!isDaemonReady ||
 			workspaceStartupState === "ready" ||
 			!workspaceQuery.isSuccess ||
 			workspaceQuery.dataUpdatedAt <= workspaceStartupBaselineRef.current
@@ -525,6 +530,7 @@ function ShellLayout() {
 		daemonStatus.state,
 		workspaceQuery.dataUpdatedAt,
 		workspaceQuery.isSuccess,
+		workspaceQuery.localFailure,
 		workspaceStartupState,
 	]);
 
@@ -783,7 +789,10 @@ function ShellLayout() {
 						onCreateProject={createProject}
 						onInitializeProject={initializeProjectRepository}
 						onRemoveProject={removeProject}
-						workspaceError={workspaceQuery.isError ? errorMessage(workspaceQuery.error) : undefined}
+						workspaceError={
+							workspaceQuery.localFailure ??
+							(workspaceQuery.isError ? errorMessage(workspaceQuery.error) : undefined)
+						}
 						hostSections={workspaceQuery.data ?? []}
 					/>
 					<main className={cn("flex min-w-0 flex-1 flex-col overflow-x-hidden", !isSidebarOpen && "sidebar-hidden")}>
