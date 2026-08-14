@@ -30,7 +30,6 @@ import {
 } from "./shared/tray";
 import type { DaemonStatus } from "./shared/daemon-status";
 import type { RemoteHostView } from "./main/remotes-ipc";
-import type { ActiveHostView } from "./main/active-remote";
 import type { ConnectedHostView } from "./main/remote-registry";
 import type {
   RemoteHealth,
@@ -510,13 +509,6 @@ const api = {
         url,
         init,
       ) as Promise<RemoteResponse>,
-    // Point the whole app at a saved host: main starts a loopback proxy that
-    // holds the password, and hands back only the base URL to fetch through.
-    activate: (url: string) =>
-      ipcRenderer.invoke("remotes:activate", url) as Promise<ActiveHostView>,
-    deactivate: () => ipcRenderer.invoke("remotes:deactivate") as Promise<void>,
-    active: () =>
-      ipcRenderer.invoke("remotes:active") as Promise<ActiveHostView | null>,
     connect: (url: string) =>
       ipcRenderer.invoke("remotes:connect", url) as Promise<ConnectedHostView>,
     disconnect: (url: string) =>

@@ -5,6 +5,9 @@ const {
 	removeStatusMock,
 	getApiBaseUrlMock,
 	hasTrustedApiBaseUrlMock,
+	connectedHostsMock,
+	subscribeConnectedHostsMock,
+	unsubscribeConnectedHostsMock,
 	subscribeApiBaseUrlMock,
 	unsubscribeBaseUrlMock,
 } = vi.hoisted(() => ({
@@ -12,6 +15,9 @@ const {
 	removeStatusMock: vi.fn(),
 	getApiBaseUrlMock: vi.fn(() => "http://127.0.0.1:3001"),
 	hasTrustedApiBaseUrlMock: vi.fn(() => true),
+	connectedHostsMock: vi.fn((): string[] => []),
+	subscribeConnectedHostsMock: vi.fn(),
+	unsubscribeConnectedHostsMock: vi.fn(),
 	subscribeApiBaseUrlMock: vi.fn(),
 	unsubscribeBaseUrlMock: vi.fn(),
 }));
@@ -28,8 +34,17 @@ vi.mock("./api-client", () => ({
 	subscribeApiBaseUrl: subscribeApiBaseUrlMock,
 }));
 
+vi.mock("./host-clients", async (importOriginal) => ({
+	...(await importOriginal<typeof import("./host-clients")>()),
+	connectedHosts: connectedHostsMock,
+	subscribeConnectedHosts: subscribeConnectedHostsMock,
+}));
+
 import { createEventTransport } from "./event-transport";
 import { getEventsConnectionState, setEventsConnectionState } from "./events-connection";
+import { forgetHost, registerHostBase } from "./host-clients";
+
+const REMOTE = "http://192.0.2.10:3011";
 
 class EventSourceStub {
 	static instances: EventSourceStub[] = [];
@@ -68,6 +83,9 @@ beforeEach(() => {
 	removeStatusMock.mockReset();
 	getApiBaseUrlMock.mockReset().mockReturnValue("http://127.0.0.1:3001");
 	hasTrustedApiBaseUrlMock.mockReset().mockReturnValue(true);
+	connectedHostsMock.mockReset().mockReturnValue([]);
+	subscribeConnectedHostsMock.mockReset().mockReturnValue(unsubscribeConnectedHostsMock);
+	unsubscribeConnectedHostsMock.mockReset();
 	subscribeApiBaseUrlMock.mockReset().mockReturnValue(unsubscribeBaseUrlMock);
 	unsubscribeBaseUrlMock.mockReset();
 	setEventsConnectionState("idle");
@@ -75,6 +93,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	forgetHost(REMOTE);
 	delete (globalThis as unknown as { EventSource?: unknown }).EventSource;
 });
 
@@ -175,7 +194,7 @@ describe("createEventTransport", () => {
 
 			vi.advanceTimersByTime(200);
 			expect(queryClient.invalidateQueries).toHaveBeenCalledWith({
-				queryKey: ["conversation", "chat-1"],
+				queryKey: ["conversation", "local:chat-1"],
 			});
 			expect(queryClient.invalidateQueries).not.toHaveBeenCalledWith({ queryKey: ["workspaces"] });
 			expect(queryClient.invalidateQueries).not.toHaveBeenCalledWith({
@@ -251,6 +270,20 @@ describe("createEventTransport", () => {
 		expect(EventSourceStub.instances[1].url).toBe("http://127.0.0.1:4555/api/v1/events");
 	});
 
+	it("opens an event stream when a remote host connects after mount", () => {
+		createEventTransport(fakeQueryClient()).connect();
+		const onHostsChanged = subscribeConnectedHostsMock.mock.calls[0][0] as () => void;
+
+		registerHostBase(REMOTE, "http://127.0.0.1:4556/proxy-token");
+		connectedHostsMock.mockReturnValue([REMOTE]);
+		onHostsChanged();
+
+		expect(EventSourceStub.instances).toHaveLength(2);
+		expect(EventSourceStub.instances[1].url).toBe(
+			"http://127.0.0.1:4556/proxy-token/api/v1/events",
+		);
+	});
+
 	it("resets the connection state and unsubscribes on disconnect", () => {
 		const disconnect = createEventTransport(fakeQueryClient()).connect();
 		const source = EventSourceStub.instances[0];
@@ -262,5 +295,6 @@ describe("createEventTransport", () => {
 
 		expect(getEventsConnectionState()).toBe("idle");
 		expect(unsubscribeBaseUrlMock).toHaveBeenCalledTimes(1);
+		expect(unsubscribeConnectedHostsMock).toHaveBeenCalledTimes(1);
 	});
 });

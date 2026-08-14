@@ -114,7 +114,7 @@ export function CreateProjectAgentSheet({
 		enabled: open,
 	});
 	const refreshAgentsMutation = useMutation({
-		mutationFn: refreshAgents,
+		mutationFn: () => refreshAgents(),
 		onSuccess: (next) => queryClient.setQueryData(agentsQueryKey, next),
 	});
 	const agents = agentsQuery.data;

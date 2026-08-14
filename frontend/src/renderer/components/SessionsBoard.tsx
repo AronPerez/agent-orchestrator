@@ -58,6 +58,8 @@ import { useUiStore } from "../stores/ui-store";
 import { RestoreUnavailableDialog } from "./RestoreUnavailableDialog";
 import { DaemonStartupLoader } from "./DaemonStartupLoader";
 import { useShellMaybe } from "../lib/shell-context";
+import { refKey, type Ref } from "../lib/hosts";
+import { hostActionSuffix } from "../lib/host-disclosure";
 import {
   ArchivedSessionCardAdapter,
   BoardSessionCardAdapter,
@@ -66,7 +68,7 @@ import {
 
 type SessionsBoardProps = {
   /** When set, the board shows only this project's sessions. */
-  projectId?: string;
+  project?: Ref;
 };
 
 type UsageBySession = ReadonlyMap<string, SessionUsageSummary>;
@@ -86,7 +88,7 @@ const noDragStyle = isMac
   ? ({ WebkitAppRegion: "no-drag" } as React.CSSProperties)
   : undefined;
 
-export function SessionsBoard({ projectId }: SessionsBoardProps) {
+export function SessionsBoard({ project }: SessionsBoardProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -97,22 +99,23 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
   const workspaceQuery = useWorkspaceQuery();
   const shell = useShellMaybe();
   const usageBySession =
-    useSessionUsageSummaries(projectId).data ?? emptyUsageBySession;
+    useSessionUsageSummaries(project).data ?? emptyUsageBySession;
   // Evaluated at render so platform mocks in tests can flip the in-panel chrome.
   const boardActionsInPanel = usesBoardActionsInPanel();
   /** Bell lives in the board action row when the shell topbar does not host it. */
   const boardOwnsNotificationCenter = isLinuxPlatform() || boardActionsInPanel;
   const all = flattenHostSections(workspaceQuery.data);
-  const workspaces = projectId
-    ? all.filter((workspace) => workspace.id === projectId)
+  const workspaces = project
+    ? all.filter((workspace) => workspace.host === project.host && workspace.id === project.id)
     : all;
-  const workspace = projectId ? workspaces[0] : undefined;
+  const workspace = project ? workspaces[0] : undefined;
+  const projectKey = workspace ? refKey(workspace) : undefined;
   // Same crumb as ShellTopbar: project name in scope, else root-board "Board".
-  const boardLabel = workspace?.name ?? (projectId ? "" : t("shell.board"));
+  const boardLabel = workspace?.name ?? (project ? "" : t("shell.board"));
   const sessions = workspaces.flatMap((workspace) =>
     workerSessions(workspace.sessions),
   );
-  const orchestrator = projectId
+  const orchestrator = project
     ? newestActiveOrchestrator(workspaces[0]?.sessions ?? [])
     : undefined;
   const orchestratorActivityLabel = orchestrator
@@ -125,7 +128,7 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
     (state) => state.restartingProjectIds,
   );
   const orchestratorStartupError = useUiStore((state) =>
-    projectId ? (state.orchestratorStartupErrors[projectId] ?? null) : null,
+    projectKey ? (state.orchestratorStartupErrors[projectKey] ?? null) : null,
   );
   const setProjectRestarting = useUiStore(
     (state) => state.setProjectRestarting,
@@ -137,8 +140,8 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
     (state) => state.setOrchestratorStartupError,
   );
   const requestNewTask = useUiStore((state) => state.requestNewTask);
-  const isProjectRestarting = projectId
-    ? restartingProjectIds.has(projectId)
+  const isProjectRestarting = projectKey
+    ? restartingProjectIds.has(projectKey)
     : false;
   const health = workspace
     ? orchestratorHealth(workspace, isProjectRestarting)
@@ -150,24 +153,24 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
   useEffect(() => {
     setSpawnError(null);
     setCanCreateAsTui(false);
-  }, [projectId]);
-  const previousProjectIdRef = useRef(projectId);
+  }, [projectKey]);
+  const previousProjectRef = useRef<Ref | undefined>(workspace);
   useEffect(() => {
-    const previousProjectId = previousProjectIdRef.current;
-    if (previousProjectId && previousProjectId !== projectId) {
-      setOrchestratorStartupError(previousProjectId, null);
+    const previousProject = previousProjectRef.current;
+    if (previousProject && refKey(previousProject) !== projectKey) {
+      setOrchestratorStartupError(previousProject, null);
     }
-    previousProjectIdRef.current = projectId;
-  }, [projectId, setOrchestratorStartupError]);
+    previousProjectRef.current = workspace;
+  }, [projectKey, setOrchestratorStartupError, workspace]);
   useEffect(() => {
-    if (projectId && orchestrator && orchestratorStartupError) {
-      setOrchestratorStartupError(projectId, null);
+    if (workspace && orchestrator && orchestratorStartupError) {
+      setOrchestratorStartupError(workspace, null);
     }
   }, [
     orchestrator,
     orchestratorStartupError,
-    projectId,
     setOrchestratorStartupError,
+    workspace,
   ]);
 
   const archived = sessions
@@ -197,9 +200,9 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
     (!isDaemonReady ||
       workspaceStartupState === "loading" ||
       (!workspaceQuery.isSuccess && !workspaceQuery.isError));
-  const showWelcome = !projectId && isLoaded && all.length === 0;
+  const showWelcome = !project && isLoaded && all.length === 0;
   const showProjectEmpty =
-    projectId !== undefined &&
+    project !== undefined &&
     isLoaded &&
     workspaces.length > 0 &&
     sessions.length === 0;
@@ -215,18 +218,18 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
     WorkspaceSession | undefined
   >();
   const terminateSession = useTerminateSession();
-  const activeProjectIdRef = useRef(projectId);
-  activeProjectIdRef.current = projectId;
+  const activeProjectKeyRef = useRef(projectKey);
+  activeProjectKeyRef.current = projectKey;
   useEffect(() => {
     setRestoringSessionId(undefined);
     setRestoreErrors({});
     setRestoreUnavailableSession(undefined);
-  }, [projectId]);
+  }, [projectKey]);
 
   const openSession = (session: WorkspaceSession) =>
     void navigate({
-      to: "/projects/$projectId/sessions/$sessionId",
-      params: { projectId: session.workspaceId, sessionId: session.id },
+      to: "/host/$hostId/session/$sessionId",
+      params: { hostId: session.host, sessionId: session.id },
     });
 
   const restoreArchivedSession = async (
@@ -235,22 +238,23 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
   ) => {
     event.stopPropagation();
     if (restoringSessionId) return;
-    const restoreProjectId = projectId;
+	const sessionKey = refKey(session);
+    const restoreProjectKey = projectKey;
     const isStillActiveProject = () =>
-      !restoreProjectId || activeProjectIdRef.current === restoreProjectId;
-    setRestoringSessionId(session.id);
+      !restoreProjectKey || activeProjectKeyRef.current === restoreProjectKey;
+    setRestoringSessionId(sessionKey);
     setRestoreErrors((current) => {
       const next = { ...current };
-      delete next[session.id];
+      delete next[sessionKey];
       return next;
     });
     try {
-      const result = await restoreSessionById(session.id);
+      const result = await restoreSessionById(session);
       if (!isStillActiveProject()) return;
       if (result.status === "success") {
         void navigate({
-          to: "/projects/$projectId/sessions/$sessionId",
-          params: { projectId: session.workspaceId, sessionId: session.id },
+          to: "/host/$hostId/session/$sessionId",
+          params: { hostId: session.host, sessionId: session.id },
         });
         return;
       }
@@ -260,7 +264,7 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
       }
       setRestoreErrors((current) => ({
         ...current,
-        [session.id]: result.message,
+        [sessionKey]: result.message,
       }));
     } finally {
       if (isStillActiveProject()) {
@@ -270,36 +274,34 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
   };
 
   const openOrchestrator = async (mode?: "tui") => {
-    if (!projectId || isProjectRestarting) return;
+		if (!workspace || isProjectRestarting) return;
     if (orchestrator) {
       void navigate({
-        to: "/projects/$projectId/sessions/$sessionId",
-        params: { projectId, sessionId: orchestrator.id },
+        to: "/host/$hostId/session/$sessionId",
+        params: { hostId: orchestrator.host, sessionId: orchestrator.id },
       });
       return;
     }
     if (!hasConfiguredOrchestratorAgent(workspace)) {
-      if (workspace) {
-        useUiStore.getState().openProjectSettings(projectId);
-      }
+		if (workspace) useUiStore.getState().openProjectSettings(workspace);
       return;
     }
     setSpawnError(null);
     setCanCreateAsTui(false);
-    setOrchestratorStartupError(projectId, null);
+		setOrchestratorStartupError(workspace, null);
     setIsSpawning(true);
     try {
-      const sessionId = await spawnOrchestrator(
-        projectId,
+		const sessionId = await spawnOrchestrator(
+			workspace,
         "board",
         false,
         mode,
       );
       await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
-      setOrchestratorStartupError(projectId, null);
+		setOrchestratorStartupError(workspace, null);
       void navigate({
-        to: "/projects/$projectId/sessions/$sessionId",
-        params: { projectId, sessionId },
+        to: "/host/$hostId/session/$sessionId",
+		params: { hostId: workspace.host, sessionId },
       });
     } catch (error) {
       // Never fail silently: the daemon's message (e.g. a worktree/branch
@@ -315,9 +317,9 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
   };
 
   const restartOrchestrator = async () => {
-    if (!projectId) return;
+		if (!workspace) return;
     await restartProjectOrchestrator({
-      projectId,
+		project: workspace,
       queryClient,
       navigate,
       setProjectRestarting,
@@ -325,7 +327,7 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
     });
   };
 
-  const actions = projectId ? (
+  const actions = project ? (
     <>
       {visibleSpawnError && !showProjectEmpty && (
         <TopbarKillError
@@ -346,7 +348,7 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
       <TopbarButton
         aria-label={t("shell.newTask")}
         disabled={isProjectRestarting}
-        onClick={() => projectId && requestNewTask(projectId)}
+		onClick={() => workspace && requestNewTask(workspace)}
         variant="accent"
       >
         <Plus className="size-icon-md" aria-hidden="true" />
@@ -416,7 +418,7 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
       ) : null}
 
       <div className="min-h-0 flex-1 overflow-hidden">
-        {projectId && health.state !== "ok" ? (
+        {project && health.state !== "ok" ? (
           <div className="mx-3 my-3 flex items-center gap-3 rounded-md border border-border bg-surface px-3 py-2 text-xs text-muted-foreground">
             <AlertTriangle
               className="size-icon-base shrink-0 text-warning"
@@ -431,7 +433,7 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
                 variant="primary"
               >
                 <RotateCw className="size-3.5" aria-hidden="true" />
-                {t("shell.restart")}
+                {t("shell.restart")}{workspace ? hostActionSuffix(t, workspace.host) : ""}
               </TopbarButton>
             ) : null}
           </div>
@@ -449,7 +451,7 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
             hasOrchestrator={orchestrator !== undefined}
             isSpawning={isSpawning}
             isProjectRestarting={isProjectRestarting}
-            onNewTask={() => projectId && requestNewTask(projectId)}
+			onNewTask={() => workspace && requestNewTask(workspace)}
             onOpenOrchestrator={() => void openOrchestrator()}
             onOpenOrchestratorAsTui={
               canCreateAsTui ? () => void openOrchestrator("tui") : undefined
@@ -459,14 +461,14 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
         ) : (
           <SessionsBoardGridView
             columns={columns}
-            key={projectId ?? "all"}
+            key={projectKey ?? "all"}
             labels={boardLabels}
             renderSessionCard={(session) => (
               <BoardSessionCardAdapter
                 onOpen={() => openSession(session)}
                 onTerminate={() => terminateSession.mutate(session)}
                 session={session}
-                usage={usageBySession.get(session.id)}
+                usage={usageBySession.get(refKey(session))}
               />
             )}
             sessions={activeSessions}
@@ -487,13 +489,13 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
         renderSessionCard={(session) => (
           <ArchivedSessionCardAdapter
             isRestoreDisabled={restoringSessionId !== undefined}
-            isRestoring={restoringSessionId === session.id}
+            isRestoring={restoringSessionId === refKey(session)}
             restoreAction={(event) =>
               void restoreArchivedSession(event, session)
             }
-            restoreError={restoreErrors[session.id]}
+            restoreError={restoreErrors[refKey(session)]}
             session={session}
-            usage={usageBySession.get(session.id)}
+            usage={usageBySession.get(refKey(session))}
           />
         )}
         sessions={archived}

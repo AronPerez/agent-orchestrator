@@ -19,6 +19,7 @@ export function TrayRuntime() {
 				if (zone === "merge" && session.status === "merged") continue;
 				if (zone !== "action" && zone !== "merge") continue;
 				entries.push({
+					host: session.host,
 					projectId: workspace.id,
 					projectName: workspace.name,
 					sessionId: session.id,
@@ -40,7 +41,7 @@ export function TrayRuntime() {
 
 	useEffect(() => {
 		return aoBridge.tray.onOpenSession((target) => {
-			navigateToSession(target.projectId, target.sessionId);
+			navigateToSession({ host: target.host, id: target.sessionId });
 		});
 	}, [navigateToSession]);
 

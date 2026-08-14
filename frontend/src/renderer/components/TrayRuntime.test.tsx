@@ -6,7 +6,7 @@ const h = vi.hoisted(() => ({
 	setAttentionState: vi.fn(),
 	navigateToSession: vi.fn(),
 	workspaces: [] as WorkspaceSummary[],
-	listener: null as null | ((target: { projectId: string; sessionId: string }) => void),
+	listener: null as null | ((target: { host: string; sessionId: string }) => void),
 }));
 
 vi.mock("../hooks/useWorkspaceQuery", () => ({
@@ -24,7 +24,7 @@ vi.mock("../lib/bridge", () => ({
 	aoBridge: {
 		tray: {
 			setAttentionState: h.setAttentionState,
-			onOpenSession: (listener: (target: { projectId: string; sessionId: string }) => void) => {
+			onOpenSession: (listener: (target: { host: string; sessionId: string }) => void) => {
 				h.listener = listener;
 				return () => {
 					h.listener = null;
@@ -83,8 +83,8 @@ describe("TrayRuntime", () => {
 		render(<TrayRuntime />);
 		expect(h.setAttentionState).toHaveBeenLastCalledWith({
 			sessions: [
-				{ projectId: "proj-1", projectName: "note-tauri", sessionId: "s-need", title: "needs it", zone: "action" },
-				{ projectId: "proj-1", projectName: "note-tauri", sessionId: "s-merge", title: "merge me", zone: "merge" },
+				{ host: "local", projectId: "proj-1", projectName: "note-tauri", sessionId: "s-need", title: "needs it", zone: "action" },
+				{ host: "local", projectId: "proj-1", projectName: "note-tauri", sessionId: "s-merge", title: "merge me", zone: "merge" },
 			],
 		});
 	});
@@ -92,8 +92,8 @@ describe("TrayRuntime", () => {
 	it("navigates when main reports a tray open-session", () => {
 		h.workspaces = workspaces();
 		render(<TrayRuntime />);
-		act(() => h.listener?.({ projectId: "proj-1", sessionId: "s-need" }));
-		expect(h.navigateToSession).toHaveBeenCalledWith("proj-1", "s-need");
+		act(() => h.listener?.({ host: "local", sessionId: "s-need" }));
+		expect(h.navigateToSession).toHaveBeenCalledWith({ host: "local", id: "s-need" });
 	});
 
 	it("excludes an already-merged session even though it shares the merge zone", () => {

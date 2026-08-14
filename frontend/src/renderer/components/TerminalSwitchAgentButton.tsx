@@ -22,10 +22,10 @@ export function TerminalSwitchAgentButton({ session }: TerminalSwitchAgentButton
 	const { t } = useTranslation();
 	const queryClient = useQueryClient();
 	const [open, setOpen] = useState(false);
-	const switches = useAgentSwitches(session.id).data ?? [];
+	const switches = useAgentSwitches(session).data ?? [];
 	const activeSwitch = findActiveAgentSwitch(switches);
 	const recoverySwitch = findRecoveryRequiredAgentSwitch(switches);
-	const switchMutation = useSwitchAgentState(session.id);
+	const switchMutation = useSwitchAgentState(session);
 	const targetHarness = activeSwitch?.targetHarness ?? switchMutation.input?.targetHarness;
 	const switching = Boolean(!recoverySwitch && (activeSwitch || (switchMutation.isPending && targetHarness)));
 
@@ -50,7 +50,7 @@ export function TerminalSwitchAgentButton({ session }: TerminalSwitchAgentButton
 	const handleOpenChange = (nextOpen: boolean) => {
 		setOpen(nextOpen);
 		if (!nextOpen && switchMutation.error) {
-			clearSwitchAgentState(queryClient, session.id);
+			clearSwitchAgentState(queryClient, session);
 		}
 	};
 

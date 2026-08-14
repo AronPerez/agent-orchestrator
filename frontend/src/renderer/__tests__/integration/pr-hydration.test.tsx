@@ -16,7 +16,11 @@ vi.mock("../../lib/api-client", () => ({
 
 vi.mock("../../lib/host-clients", () => ({
 	clientFor: () => ({ GET: getMock }),
-	connectedHosts: () => [],
+	connectedHosts: (() => {
+		const hosts: string[] = [];
+		return () => hosts;
+	})(),
+	subscribeConnectedHosts: () => () => undefined,
 	isHostReady: () => true,
 }));
 

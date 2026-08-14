@@ -16,7 +16,7 @@ test("renders the orchestrator-first workbench shell", async ({ page }) => {
 });
 
 test("deep-links into a worker session", async ({ page }) => {
-	await page.goto("/#/workspaces/api-gateway/sessions/refactor-mux");
+	await page.goto("/#/host/local/session/refactor-mux");
 	// Worker view = three-pane with the Git review rail.
 	await expect(page.getByText("Changed")).toBeVisible();
 	await expect(page.getByRole("button", { name: /Commit & Push/ })).toBeVisible();

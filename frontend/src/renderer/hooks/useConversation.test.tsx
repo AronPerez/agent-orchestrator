@@ -17,6 +17,17 @@ vi.mock("../lib/api-client", () => ({
 	apiErrorMessage: apiErrorMessageMock,
 }));
 
+vi.mock("../lib/host-clients", () => ({
+	baseUrlFor: () => "http://127.0.0.1:3001",
+	connectedHosts: (() => {
+		const hosts: string[] = [];
+		return () => hosts;
+	})(),
+	subscribeConnectedHosts: () => () => undefined,
+	isHostReady: () => true,
+	clientFor: () => ({ GET: getMock, POST: postMock, PATCH: vi.fn() }),
+}));
+
 import { useConversation, useConversationCommands } from "./useConversation";
 import { workspaceQueryKey } from "./useWorkspaceQuery";
 
@@ -117,7 +128,7 @@ describe("useConversation snapshot mapping", () => {
 			error: undefined,
 		});
 
-		const { result } = renderHook(() => useConversation("ao-1"), { wrapper });
+		const { result } = renderHook(() => useConversation({ host: "local", id: "ao-1" }), { wrapper });
 		await waitFor(() => expect(result.current.snapshot).toBeDefined());
 
 		expect(result.current.snapshot).toMatchObject({
@@ -137,7 +148,7 @@ describe("useConversation snapshot mapping", () => {
 	it("maps the provider state the timeline cannot express", async () => {
 		getMock.mockResolvedValue({ data: WIRE, error: undefined });
 
-		const { result } = renderHook(() => useConversation("ao-1"), { wrapper });
+		const { result } = renderHook(() => useConversation({ host: "local", id: "ao-1" }), { wrapper });
 		await waitFor(() => expect(result.current.snapshot).toBeDefined());
 		const snapshot = result.current.snapshot!;
 
@@ -170,7 +181,7 @@ describe("useConversation snapshot mapping", () => {
 			error: undefined,
 		});
 
-		const { result } = renderHook(() => useConversation("ao-1"), { wrapper });
+		const { result } = renderHook(() => useConversation({ host: "local", id: "ao-1" }), { wrapper });
 		await waitFor(() => expect(result.current.snapshot).toBeDefined());
 
 		expect(result.current.snapshot!.modelReroute).toBeUndefined();
@@ -183,7 +194,7 @@ describe("useConversation snapshot mapping", () => {
 describe("conversation branching commands", () => {
 	it("edits through the dedicated endpoint without rolling back", async () => {
 		postMock.mockResolvedValue({ data: {}, error: undefined });
-		const { result } = renderHook(() => useConversationCommands("ao-1"), { wrapper });
+		const { result } = renderHook(() => useConversationCommands({ host: "local", id: "ao-1" }), { wrapper });
 
 		await act(async () => {
 			await result.current.editMessage("turn-2", "edited prompt");
@@ -203,7 +214,7 @@ describe("conversation branching commands", () => {
 
 	it("activates an existing branch", async () => {
 		postMock.mockResolvedValue({ data: {}, error: undefined });
-		const { result } = renderHook(() => useConversationCommands("ao-1"), { wrapper });
+		const { result } = renderHook(() => useConversationCommands({ host: "local", id: "ao-1" }), { wrapper });
 
 		await act(async () => {
 			await result.current.activateBranch("branch-previous");
@@ -222,7 +233,7 @@ describe("steering refusals", () => {
 		apiErrorMessageMock.mockReturnValue("a compaction turn is running.");
 		postMock.mockResolvedValue({ data: undefined, error: { code } });
 
-		const { result } = renderHook(() => useConversationCommands("ao-1"), { wrapper });
+		const { result } = renderHook(() => useConversationCommands({ host: "local", id: "ao-1" }), { wrapper });
 		await act(async () => {
 			await result.current.steer("go left").catch(() => {});
 		});
@@ -261,7 +272,7 @@ describe("tool server reload refusals", () => {
 		apiErrorCodeMock.mockReturnValue("CHAT_MCP_RELOAD_UNSUPPORTED");
 		postMock.mockResolvedValue({ data: undefined, error: { code: "CHAT_MCP_RELOAD_UNSUPPORTED" } });
 
-		const { result } = renderHook(() => useConversationCommands("ao-1"), { wrapper });
+		const { result } = renderHook(() => useConversationCommands({ host: "local", id: "ao-1" }), { wrapper });
 		await act(async () => {
 			await result.current.reloadMcpServers().catch(() => {});
 		});
@@ -278,7 +289,7 @@ describe("tool server reload refusals", () => {
 		apiErrorMessageMock.mockReturnValue("a turn is running");
 		postMock.mockResolvedValue({ data: undefined, error: { code: "CHAT_TURN_RUNNING" } });
 
-		const { result } = renderHook(() => useConversationCommands("ao-1"), { wrapper });
+		const { result } = renderHook(() => useConversationCommands({ host: "local", id: "ao-1" }), { wrapper });
 		await act(async () => {
 			await result.current.reloadMcpServers().catch(() => {});
 		});
@@ -295,7 +306,7 @@ describe("controller recovery", () => {
 		postMock.mockResolvedValue({ data: {}, error: undefined, response: { status: 200 } });
 		const invalidateSpy = vi.spyOn(QueryClient.prototype, "invalidateQueries");
 
-		const { result } = renderHook(() => useConversationCommands("ao-1"), { wrapper });
+		const { result } = renderHook(() => useConversationCommands({ host: "local", id: "ao-1" }), { wrapper });
 		await act(async () => {
 			await result.current.resumeAgent();
 		});
@@ -303,7 +314,7 @@ describe("controller recovery", () => {
 		expect(postMock).toHaveBeenCalledWith("/api/v1/sessions/{sessionId}/resume-agent", {
 			params: { path: { sessionId: "ao-1" } },
 		});
-		expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["conversation", "ao-1"] });
+		expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["conversation", "local:ao-1"] });
 		expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: workspaceQueryKey });
 		invalidateSpy.mockRestore();
 	});

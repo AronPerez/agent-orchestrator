@@ -119,6 +119,7 @@ type MessageEditDraft = {
 
 export interface ChatWorkspaceProps {
 	snapshot: ConversationSnapshot;
+	apiBaseUrl?: string;
 	/** The session title from the sidebar (matches what users see in the left sidebar) */
 	sessionTitle?: string;
 	/** The AO role using this shared conversation surface. */
@@ -217,6 +218,7 @@ export interface ChatWorkspaceProps {
 
 export function ChatWorkspace({
 	snapshot,
+	apiBaseUrl,
 	sessionTitle,
 	sessionRole = "worker",
 	headerActions,
@@ -397,6 +399,7 @@ export function ChatWorkspace({
 			/>
 			<ChatLinkProvider onLinkOpen={onLinkOpen}>
 				<Timeline
+					apiBaseUrl={apiBaseUrl}
 					snapshot={snapshot}
 					hasOlder={hasOlder}
 					loadingOlder={loadingOlder}
@@ -924,6 +927,7 @@ function ControllerBanner({
  * an unbounded history in every snapshot response.
  */
 function Timeline({
+	apiBaseUrl: apiBaseUrlProp,
 	snapshot,
 	hasOlder,
 	loadingOlder,
@@ -940,6 +944,7 @@ function Timeline({
 	activateBranchPending,
 	activateBranchError,
 }: {
+	apiBaseUrl?: string;
 	snapshot: ConversationSnapshot;
 	hasOlder?: boolean;
 	loadingOlder?: boolean;
@@ -974,7 +979,8 @@ function Timeline({
 	const decide = useStableCallback(onDecide);
 	const resolveInput = useStableCallback(onResolveInput);
 	const rollback = useStableCallback(onRollback);
-	const apiBaseUrl = useSyncExternalStore(subscribeApiBaseUrl, getApiBaseUrl, getApiBaseUrl);
+	const localApiBaseUrl = useSyncExternalStore(subscribeApiBaseUrl, getApiBaseUrl, getApiBaseUrl);
+	const apiBaseUrl = apiBaseUrlProp ?? localApiBaseUrl;
 	const editHumanMessage = useStableCallback(onEditHumanMessage);
 	const activateBranch = useStableCallback(onActivateBranch);
 	const canEditHumanMessage = Boolean(onEditHumanMessage);

@@ -1,92 +1,73 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { aoBridge } from "./bridge";
 import { getApiBaseUrl, setApiBaseUrl } from "./api-client";
-import { activeHost, applyDaemonBaseUrl, initActiveHost, switchToHost } from "./active-host";
+import { applyDaemonBaseUrl, initHosts } from "./active-host";
+import { baseUrlFor, forgetHost } from "./host-clients";
+import { LOCAL_HOST } from "./hosts";
 
-beforeEach(async () => {
+const WORKBOX = "http://192.0.2.1:3011";
+const MINI = "http://192.0.2.9:3011";
+
+beforeEach(() => {
 	localStorage.clear();
+	forgetHost(WORKBOX);
+	forgetHost(MINI);
 	setApiBaseUrl(null);
 	vi.restoreAllMocks();
-	// Module state outlives a test; reset it to local so each case starts clean.
-	vi.spyOn(aoBridge.remotes, "deactivate").mockResolvedValue(undefined);
-	await initActiveHost();
-	vi.restoreAllMocks();
-	setApiBaseUrl(null);
 });
 
-describe("active-host", () => {
-	it("boots local when nothing is stored, and tears down any stale proxy", async () => {
-		const deactivate = vi.spyOn(aoBridge.remotes, "deactivate").mockResolvedValue(undefined);
-		await initActiveHost();
-		expect(activeHost()).toBeNull();
-		expect(deactivate).toHaveBeenCalled();
+describe("multi-host boot", () => {
+	it("ignores the legacy selection and connects every saved host", async () => {
+		localStorage.setItem("ao.active-host-url", WORKBOX);
+		vi.spyOn(aoBridge.remotes, "list").mockResolvedValue([
+			{ label: "workbox", url: WORKBOX },
+			{ label: "mini", url: MINI },
+		]);
+		const connect = vi.spyOn(aoBridge.remotes, "connect").mockImplementation(async (url) => ({
+			label: url === WORKBOX ? "workbox" : "mini",
+			url,
+			base: url === WORKBOX ? "http://127.0.0.1:9001/one" : "http://127.0.0.1:9002/two",
+		}));
+
+		await initHosts();
+
+		expect(connect).toHaveBeenCalledTimes(2);
+		expect(baseUrlFor(WORKBOX)).toBe("http://127.0.0.1:9001/one");
+		expect(baseUrlFor(MINI)).toBe("http://127.0.0.1:9002/two");
 	});
 
-	it("boots onto the stored host via the proxy base", async () => {
-		localStorage.setItem("ao.active-host-url", "http://192.0.2.1:3011");
-		vi.spyOn(aoBridge.remotes, "activate").mockResolvedValue({
-			label: "workbox",
-			url: "http://192.0.2.1:3011",
-			base: "http://127.0.0.1:9999/tok",
+	it("keeps connecting other saved hosts when one is unavailable", async () => {
+		vi.spyOn(aoBridge.remotes, "list").mockResolvedValue([
+			{ label: "workbox", url: WORKBOX },
+			{ label: "mini", url: MINI },
+		]);
+		vi.spyOn(aoBridge.remotes, "connect").mockImplementation(async (url) => {
+			if (url === WORKBOX) throw new Error("offline");
+			return { label: "mini", url, base: "http://127.0.0.1:9002/two" };
 		});
-		await initActiveHost();
-		expect(activeHost()).toEqual({
-			label: "workbox",
-			url: "http://192.0.2.1:3011",
-		});
-		expect(getApiBaseUrl()).toBe("http://127.0.0.1:9999/tok");
+
+		await initHosts();
+
+		expect(baseUrlFor(WORKBOX)).toBeNull();
+		expect(baseUrlFor(MINI)).toBe("http://127.0.0.1:9002/two");
 	});
 
-	it("falls back to local when the stored host cannot be activated", async () => {
-		localStorage.setItem("ao.active-host-url", "http://192.0.2.1:3011");
-		vi.spyOn(aoBridge.remotes, "activate").mockRejectedValue(new Error("gone"));
-		await initActiveHost();
-		expect(activeHost()).toBeNull();
-		// A host that fails to boot must not wedge every future boot.
-		expect(localStorage.getItem("ao.active-host-url")).toBeNull();
+	it("treats an unreadable saved-host list as no remote hosts", async () => {
+		vi.spyOn(aoBridge.remotes, "list").mockRejectedValue(new Error("chmod 600 required"));
+
+		await expect(initHosts()).resolves.toBeUndefined();
+		expect(baseUrlFor(WORKBOX)).toBeNull();
+		expect(baseUrlFor(MINI)).toBeNull();
 	});
+});
 
-	it("switchToHost persists and reloads; switching to local clears", async () => {
-		vi.spyOn(aoBridge.remotes, "deactivate").mockResolvedValue(undefined);
-		const reload = vi.fn();
-		await switchToHost("http://192.0.2.1:3011", reload);
-		expect(localStorage.getItem("ao.active-host-url")).toBe("http://192.0.2.1:3011");
-		expect(reload).toHaveBeenCalled();
-
-		await switchToHost(null, reload);
-		expect(localStorage.getItem("ao.active-host-url")).toBeNull();
-	});
-
-	it("gates the local daemon's base-URL stomp while a remote host is active", async () => {
-		localStorage.setItem("ao.active-host-url", "http://192.0.2.1:3011");
-		vi.spyOn(aoBridge.remotes, "activate").mockResolvedValue({
-			label: "workbox",
-			url: "http://192.0.2.1:3011",
-			base: "http://127.0.0.1:9999/tok",
-		});
-		await initActiveHost();
-
-		applyDaemonBaseUrl("http://127.0.0.1:3001"); // local daemon came up — must NOT stomp
-		expect(getApiBaseUrl()).toBe("http://127.0.0.1:9999/tok");
-	});
-
-	it("does not let a daemon-down report clear the remote base either", async () => {
-		localStorage.setItem("ao.active-host-url", "http://192.0.2.1:3011");
-		vi.spyOn(aoBridge.remotes, "activate").mockResolvedValue({
-			label: "workbox",
-			url: "http://192.0.2.1:3011",
-			base: "http://127.0.0.1:9999/tok",
-		});
-		await initActiveHost();
-
-		applyDaemonBaseUrl(null);
-		expect(getApiBaseUrl()).toBe("http://127.0.0.1:9999/tok");
-	});
-
-	it("passes the daemon base through when local is active", async () => {
-		vi.spyOn(aoBridge.remotes, "deactivate").mockResolvedValue(undefined);
-		await initActiveHost();
-		applyDaemonBaseUrl("http://127.0.0.1:3001");
+describe("applyDaemonBaseUrl", () => {
+	it("updates the local host and ignores every remote host", () => {
+		setApiBaseUrl("http://127.0.0.1:3001");
+		applyDaemonBaseUrl(WORKBOX, "http://127.0.0.1:9999/proxy-token");
 		expect(getApiBaseUrl()).toBe("http://127.0.0.1:3001");
+
+		applyDaemonBaseUrl(LOCAL_HOST, "http://127.0.0.1:3037");
+		expect(getApiBaseUrl()).toBe("http://127.0.0.1:3037");
 	});
 });

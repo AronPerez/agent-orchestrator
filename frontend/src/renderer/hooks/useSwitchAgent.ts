@@ -1,6 +1,8 @@
 import { type QueryClient, useMutation, useMutationState, useQueryClient } from "@tanstack/react-query";
 import type { components } from "../../api/schema";
-import { apiClient, apiErrorMessage } from "../lib/api-client";
+import { apiErrorMessage } from "../lib/api-client";
+import { clientFor } from "../lib/host-clients";
+import { refKey, type Ref } from "../lib/hosts";
 import type { WorkspaceSession } from "../types/workspace";
 import { agentSwitchesQueryKey, type AgentSwitch } from "./useAgentSwitches";
 import { workspaceQueryKey } from "./useWorkspaceQuery";
@@ -35,12 +37,12 @@ function useSwitchAgentMutations() {
 	});
 }
 
-export function useSwitchAgentState(sessionId: string) {
+export function useSwitchAgentState(session: Ref | undefined) {
 	const mutations = useSwitchAgentMutations();
 	let latest: SwitchAgentMutationState | undefined;
 	let pending: SwitchAgentMutationState | undefined;
 	for (const mutation of mutations) {
-		if (mutation.input?.session.id !== sessionId) continue;
+		if (!session || !mutation.input || refKey(mutation.input.session) !== refKey(session)) continue;
 		if (!latest || mutation.submittedAt > latest.submittedAt) latest = mutation;
 		if (
 			mutation.status === "pending" &&
@@ -62,11 +64,11 @@ export function useSwitchAgentState(sessionId: string) {
 	};
 }
 
-export function clearSwitchAgentState(queryClient: QueryClient, sessionId: string) {
+export function clearSwitchAgentState(queryClient: QueryClient, session: Ref) {
 	const mutationCache = queryClient.getMutationCache();
 	for (const mutation of mutationCache.findAll({ mutationKey: switchAgentMutationKey })) {
 		const input = mutation.state.variables as SwitchAgentInput | undefined;
-		if (input?.session.id === sessionId && mutation.state.status !== "pending") {
+		if (input && refKey(input.session) === refKey(session) && mutation.state.status !== "pending") {
 			mutationCache.remove(mutation);
 		}
 	}
@@ -89,7 +91,7 @@ export function useSwitchAgent() {
 			const normalizedNote = note.trim();
 			if (normalizedNote) body.note = normalizedNote;
 
-			const { data, error, response } = await apiClient.POST(
+			const { data, error, response } = await clientFor(session.host).POST(
 				"/api/v1/sessions/{sessionId}/switch-agent",
 				{
 					params: { path: { sessionId: session.id } },
@@ -107,7 +109,7 @@ export function useSwitchAgent() {
 		onSuccess: (agentSwitch, variables) => {
 			if (!agentSwitch) return;
 			queryClient.setQueryData<AgentSwitch[]>(
-				agentSwitchesQueryKey(variables.session.id),
+				agentSwitchesQueryKey(variables.session),
 				(current = []) => [agentSwitch, ...current.filter((entry) => entry.id !== agentSwitch.id)],
 			);
 		},
@@ -117,7 +119,7 @@ export function useSwitchAgent() {
 		onSettled: async (_data, _error, variables) => {
 			await Promise.all([
 				queryClient.invalidateQueries({ queryKey: workspaceQueryKey }),
-				queryClient.invalidateQueries({ queryKey: agentSwitchesQueryKey(variables.session.id) }),
+				queryClient.invalidateQueries({ queryKey: agentSwitchesQueryKey(variables.session) }),
 			]);
 		},
 	});

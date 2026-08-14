@@ -4,10 +4,9 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Managing saved hosts from the Host dropdown. Two consequences are the point of
-// these cases: the app must not keep viewing a host it just removed, and it must
-// not keep the old url stored for a host it just re-pointed — that url is what
-// the next boot re-activates, so a stale one silently falls back to local.
-const { bridge, activeHostMock, switchToHostMock } = vi.hoisted(() => ({
+// these cases: the renderer must not keep a client for a removed or edited
+// host after main has dropped the proxy behind that base URL.
+const { bridge, connectHostMock, disconnectHostMock } = vi.hoisted(() => ({
 	bridge: {
 		app: { chooseDirectory: vi.fn() },
 		remotes: {
@@ -18,14 +17,14 @@ const { bridge, activeHostMock, switchToHostMock } = vi.hoisted(() => ({
 			remove: vi.fn(),
 		},
 	},
-	activeHostMock: vi.fn(),
-	switchToHostMock: vi.fn(),
+	connectHostMock: vi.fn(),
+	disconnectHostMock: vi.fn(),
 }));
 
 vi.mock("../lib/bridge", () => ({ aoBridge: bridge }));
-vi.mock("../lib/active-host", () => ({
-	activeHost: activeHostMock,
-	switchToHost: switchToHostMock,
+vi.mock("../lib/host-clients", () => ({
+	connectHost: connectHostMock,
+	disconnectHost: disconnectHostMock,
 }));
 
 import { CreateProjectFlow } from "./CreateProjectFlow";
@@ -38,8 +37,8 @@ beforeEach(() => {
 	bridge.remotes.probe.mockResolvedValue("online");
 	bridge.remotes.update.mockResolvedValue("online");
 	bridge.remotes.remove.mockResolvedValue(undefined);
-	activeHostMock.mockReturnValue(null);
-	switchToHostMock.mockResolvedValue(undefined);
+	connectHostMock.mockResolvedValue(undefined);
+	disconnectHostMock.mockResolvedValue(undefined);
 });
 
 async function openHostList() {
@@ -68,30 +67,24 @@ describe("host management from the Host dropdown", () => {
 		await waitFor(() => expect(bridge.remotes.remove).toHaveBeenCalledWith(WORKBOX.url));
 	});
 
-	it("puts the app back on local when the host it removed was the active one", async () => {
-		activeHostMock.mockReturnValue(WORKBOX);
+	it("forgets the renderer client when a host is removed", async () => {
 		await openHostList();
 		await userEvent.click(screen.getByRole("button", { name: /remove workbox/i }));
 		await userEvent.click(await screen.findByRole("button", { name: /^remove$/i }));
 
-		await waitFor(() => expect(switchToHostMock).toHaveBeenCalledWith(null));
+		await waitFor(() => expect(disconnectHostMock).toHaveBeenCalledWith(WORKBOX.url));
 	});
 
-	it("leaves the active host alone when a different one is removed", async () => {
-		activeHostMock.mockReturnValue({
-			label: "mini",
-			url: "http://192.0.2.9:3011",
-		});
+	it("does not connect a replacement when a host is removed", async () => {
 		await openHostList();
 		await userEvent.click(screen.getByRole("button", { name: /remove workbox/i }));
 		await userEvent.click(await screen.findByRole("button", { name: /^remove$/i }));
 
 		await waitFor(() => expect(bridge.remotes.remove).toHaveBeenCalled());
-		expect(switchToHostMock).not.toHaveBeenCalled();
+		expect(connectHostMock).not.toHaveBeenCalled();
 	});
 
-	it("follows the stored active-host url when the active host is re-pointed", async () => {
-		activeHostMock.mockReturnValue(WORKBOX);
+	it("replaces the renderer client when a host is re-pointed", async () => {
 		await openHostList();
 		await userEvent.click(screen.getByRole("button", { name: /edit workbox/i }));
 
@@ -106,12 +99,11 @@ describe("host management from the Host dropdown", () => {
 				url: "http://192.0.2.5:3011",
 			}),
 		);
-		// Not switchToHost(null): the host still exists, it just moved.
-		await waitFor(() => expect(switchToHostMock).toHaveBeenCalledWith("http://192.0.2.5:3011"));
+		await waitFor(() => expect(disconnectHostMock).toHaveBeenCalledWith(WORKBOX.url));
+		expect(connectHostMock).toHaveBeenCalledWith("http://192.0.2.5:3011");
 	});
 
-	it("re-activates the active host after a password fix, whose proxy main just dropped", async () => {
-		activeHostMock.mockReturnValue(WORKBOX);
+	it("reconnects after a password fix, whose proxy main just dropped", async () => {
 		await openHostList();
 		await userEvent.click(screen.getByRole("button", { name: /edit workbox/i }));
 		await userEvent.type(await screen.findByLabelText(/password/i), "rotated");
@@ -120,6 +112,7 @@ describe("host management from the Host dropdown", () => {
 		await waitFor(() => expect(bridge.remotes.update).toHaveBeenCalled());
 		// Same url, but the proxy behind it held the old password — the app has to
 		// come back through a fresh one rather than keep a base that now 401s.
-		expect(switchToHostMock).toHaveBeenCalledWith(WORKBOX.url);
+		expect(disconnectHostMock).toHaveBeenCalledWith(WORKBOX.url);
+		expect(connectHostMock).toHaveBeenCalledWith(WORKBOX.url);
 	});
 });

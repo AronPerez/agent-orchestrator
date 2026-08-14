@@ -34,11 +34,13 @@ import {
 import { useWorkspaceQuery } from "../hooks/useWorkspaceQuery";
 import { flattenHostSections } from "../types/workspace";
 import { useWindowFullScreen } from "../hooks/useWindowFullScreen";
-import { apiClient, apiErrorMessage } from "../lib/api-client";
+import { apiErrorMessage } from "../lib/api-client";
+import { clientFor } from "../lib/host-clients";
 import { hidesShellTopbar } from "../lib/platform";
 import { hasBrowserDaemon } from "../lib/preview-mode";
 import { useShell } from "../lib/shell-context";
 import { cn } from "../lib/utils";
+import { refKey, type Ref } from "../lib/hosts";
 import { isOrchestratorSession, sessionIsActive } from "../types/workspace";
 import { terminalTargetBelongsToSession, type TerminalTarget } from "../types/terminal";
 import { matchesRendererShortcut } from "../stores/keybindings-store";
@@ -66,9 +68,9 @@ function previewRevealKey(previewUrl?: string, previewRevision?: number): string
 	return `url:${target}`;
 }
 
-function browserIsVisible(sessionId: string, browserPoppedOut: boolean): boolean {
+function browserIsVisible(sessionKey: string, browserPoppedOut: boolean): boolean {
 	if (browserPoppedOut) return true;
-	const current = useUiStore.getState().inspectorSessions[sessionId];
+	const current = useUiStore.getState().inspectorSessions[sessionKey];
 	return (current?.isOpen ?? true) && (current?.view ?? "summary") === "browser";
 }
 
@@ -80,7 +82,7 @@ function reviewerTerminalFromReviews(data?: ReviewsResponse): ReviewerTerminalTa
 }
 
 type SessionViewProps = {
-	sessionId: string;
+	sessionRef: Ref;
 };
 
 // The session detail screen: terminal + git rail. On Win/Linux the shell owns
@@ -100,13 +102,15 @@ type SessionViewProps = {
 // hard-stops at INSPECTOR_MIN_PERCENT; only the explicit controls collapse it.
 // Content keeps a stable min-width inside the clipped panel so nothing reflows
 // mid-animation; split width persists.
-export function SessionView({ sessionId }: SessionViewProps) {
+export function SessionView({ sessionRef }: SessionViewProps) {
+	const sessionId = sessionRef.id;
+	const sessionKey = refKey(sessionRef);
 	const { t } = useTranslation();
 	const workspaceQuery = useWorkspaceQuery();
 	const workspaces = flattenHostSections(workspaceQuery.data);
 	const theme = useResolvedTheme();
-	const isInspectorOpen = useUiStore((state) => state.inspectorSessions[sessionId]?.isOpen ?? true);
-	const inspectorView = useUiStore((state) => state.inspectorSessions[sessionId]?.view ?? "summary");
+	const isInspectorOpen = useUiStore((state) => state.inspectorSessions[sessionKey]?.isOpen ?? true);
+	const inspectorView = useUiStore((state) => state.inspectorSessions[sessionKey]?.view ?? "summary");
 	const setInspectorOpenForSession = useUiStore((state) => state.setInspectorOpen);
 	const toggleInspector = useUiStore((state) => state.toggleInspector);
 	const isMobile = useIsMobile();
@@ -118,17 +122,19 @@ export function SessionView({ sessionId }: SessionViewProps) {
 	const inspectorRef = useRef<PanelImperativeHandle | null>(null);
 	const inspectorSeparatorRef = useRef<HTMLDivElement | null>(null);
 	const [terminalTarget, setTerminalTarget] = useState<TerminalTarget>({ kind: "worker" });
-	const [browserPopOutState, setBrowserPopOutState] = useState({ sessionId, poppedOut: false });
+	const [browserPopOutState, setBrowserPopOutState] = useState({ sessionKey, poppedOut: false });
 	const [filesPoppedOut, setFilesPoppedOut] = useState(false);
-	const browserPoppedOut = browserPopOutState.sessionId === sessionId && browserPopOutState.poppedOut;
+	const browserPoppedOut = browserPopOutState.sessionKey === sessionKey && browserPopOutState.poppedOut;
 	const [interfaceSwitchDialogOpen, setInterfaceSwitchDialogOpen] = useState(false);
 	const [dismissedTransitionID, setDismissedTransitionID] = useState("");
 	const isNativeFullScreen = useWindowFullScreen();
 
-	const session = workspaces.flatMap((workspace) => workspace.sessions).find((s) => s.id === sessionId);
-	const interfaceSwitch = useSessionInterfaceTransition(session?.id);
+	const session = workspaces
+		.flatMap((workspace) => workspace.sessions)
+		.find((candidate) => candidate.host === sessionRef.host && candidate.id === sessionId);
+	const interfaceSwitch = useSessionInterfaceTransition(session);
 	const reviewerQuery = useQuery({
-		queryKey: ["session-reviews", sessionId],
+		queryKey: ["session-reviews", sessionKey],
 		enabled: Boolean(
 			window.ao && session && sessionIsActive(session) && !isOrchestratorSession(session) && session.prs.length > 0,
 		),
@@ -137,7 +143,7 @@ export function SessionView({ sessionId }: SessionViewProps) {
 			return data?.reviews?.some((review) => review.status === "running") ? 2500 : false;
 		},
 		queryFn: async () => {
-			const { data, error } = await apiClient.GET("/api/v1/sessions/{sessionId}/reviews", {
+			const { data, error } = await clientFor(sessionRef.host).GET("/api/v1/sessions/{sessionId}/reviews", {
 				params: { path: { sessionId } },
 			});
 			if (error) throw new Error(apiErrorMessage(error, "Unable to load reviews"));
@@ -149,7 +155,7 @@ export function SessionView({ sessionId }: SessionViewProps) {
 
 	// Shell terminals opened inside a session live beside its pane as extra tabs,
 	// scoped to the session on screen so each session has its own shell set.
-	const allShellTerminals = useShellTerminals().data ?? [];
+	const allShellTerminals = useShellTerminals(sessionRef.host).data ?? [];
 	const shellTerminals = useMemo(
 		() => allShellTerminals.filter((shell) => shell.sessionId === sessionId),
 		[allShellTerminals, sessionId],
@@ -162,8 +168,8 @@ export function SessionView({ sessionId }: SessionViewProps) {
 	const setVisibleTerminalKind = useUiStore((state) => state.setVisibleTerminalKind);
 	const clearVisibleTerminalKind = useUiStore((state) => state.clearVisibleTerminalKind);
 	const renameShellTerminalByHandle = useCallback(
-		(handleId: string, title: string) => renameShellTerminal.mutate({ handleId, title }),
-		[renameShellTerminal],
+		(handleId: string, title: string) => renameShellTerminal.mutate({ terminal: { host: sessionRef.host, id: handleId }, title }),
+		[renameShellTerminal, sessionRef.host],
 	);
 
 	// Scoped to the session on screen so the daemon roots the shell in that
@@ -171,32 +177,37 @@ export function SessionView({ sessionId }: SessionViewProps) {
 	// workspace can no longer be resolved).
 	const addShellTerminal = useCallback(() => {
 		openShellTerminal.mutate(
-			{ projectId: session?.workspaceId, sessionId },
+			{
+				project: session ? { host: session.host, id: session.workspaceId } : undefined,
+				session: sessionRef,
+			},
 			{
 				onSuccess: (shell) => {
-					setActiveShellTerminal(shell.handleId);
+					setActiveShellTerminal({ host: shell.host, id: shell.handleId });
 					setTerminalTarget({
 						generation: shell.createdAt,
 						kind: "shell",
+						host: shell.host,
 						handleId: shell.handleId,
-						sessionId,
+						session: { host: sessionRef.host, id: sessionId },
 						title: shell.title,
 					});
 				},
 			},
 		);
-	}, [openShellTerminal, sessionId, session?.workspaceId, setActiveShellTerminal]);
+	}, [openShellTerminal, sessionId, session?.workspaceId, sessionRef.host, setActiveShellTerminal]);
 
 	const selectShellTerminal = useCallback(
 		(handleId: string) => {
 			const shell = shellTerminals.find((s) => s.handleId === handleId);
 			if (!shell) return;
-			setActiveShellTerminal(shell.handleId);
+			setActiveShellTerminal({ host: shell.host, id: shell.handleId });
 			setTerminalTarget({
 				generation: shell.createdAt,
 				kind: "shell",
+				host: shell.host,
 				handleId: shell.handleId,
-				sessionId,
+				session: { host: sessionRef.host, id: sessionId },
 				title: shell.title,
 			});
 		},
@@ -212,28 +223,30 @@ export function SessionView({ sessionId }: SessionViewProps) {
 				// closes. The permanent agent terminal is only the final fallback.
 				const nextShell = shellTerminals[closingIndex - 1] ?? shellTerminals[closingIndex + 1];
 				if (nextShell) {
-					setActiveShellTerminal(nextShell.handleId);
+					setActiveShellTerminal({ host: nextShell.host, id: nextShell.handleId });
 					setTerminalTarget({
 						generation: nextShell.createdAt,
 						kind: "shell",
+						host: nextShell.host,
 						handleId: nextShell.handleId,
-						sessionId,
+						session: { host: sessionRef.host, id: sessionId },
 						title: nextShell.title,
 					});
 				} else {
 					setActiveShellTerminal(null);
 					setTerminalTarget({ kind: "worker" });
 				}
-			} else if (activeShellTerminalHandleId === handleId) {
+			} else if (activeShellTerminalHandleId === refKey({ host: sessionRef.host, id: handleId })) {
 				setActiveShellTerminal(null);
 			}
-			closeShellTerminal.mutate(handleId);
+			closeShellTerminal.mutate({ host: sessionRef.host, id: handleId });
 		},
 		[
 			activeShellTerminalHandleId,
 			closeShellTerminal,
 			setActiveShellTerminal,
 			sessionId,
+			sessionRef.host,
 			shellTerminals,
 			terminalTarget,
 		],
@@ -247,8 +260,13 @@ export function SessionView({ sessionId }: SessionViewProps) {
 	}, [setActiveShellTerminal]);
 	const selectReviewerTerminal = useCallback((target: ReviewerTerminalTarget) => {
 		setActiveShellTerminal(null);
-		setTerminalTarget({ kind: "reviewer", handleId: target.handleId, harness: target.harness, sessionId });
-	}, [sessionId, setActiveShellTerminal]);
+		setTerminalTarget({
+			kind: "reviewer",
+			handleId: target.handleId,
+			harness: target.harness,
+			session: { host: sessionRef.host, id: sessionId },
+		});
+	}, [sessionId, sessionRef.host, setActiveShellTerminal]);
 
 	// The shell layout owns opening (it is mounted on every route, so the button
 	// and ⌘T / Ctrl+T work everywhere); this view only follows the result. When a new
@@ -256,7 +274,9 @@ export function SessionView({ sessionId }: SessionViewProps) {
 	// that is what makes the shortcut feel like it opened a terminal *here*.
 	useEffect(() => {
 		if (!activeShellTerminalHandleId) return;
-		const shell = shellTerminals.find((s) => s.handleId === activeShellTerminalHandleId);
+		const shell = shellTerminals.find(
+			(candidate) => refKey({ host: candidate.host, id: candidate.handleId }) === activeShellTerminalHandleId,
+		);
 		if (!shell) return;
 		setTerminalTarget((current) =>
 			current.kind === "shell" &&
@@ -267,12 +287,13 @@ export function SessionView({ sessionId }: SessionViewProps) {
 				: {
 						generation: shell.createdAt,
 						kind: "shell",
+						host: sessionRef.host,
 						handleId: shell.handleId,
-						sessionId,
+						session: { host: sessionRef.host, id: sessionId },
 						title: shell.title,
 					},
 		);
-	}, [activeShellTerminalHandleId, sessionId, shellTerminals]);
+	}, [activeShellTerminalHandleId, sessionId, sessionRef.host, shellTerminals]);
 
 	// If the pane is pointed at a shell that is not in THIS session's strip — e.g.
 	// after navigating to a different session whose globally-active shell belongs
@@ -373,7 +394,7 @@ export function SessionView({ sessionId }: SessionViewProps) {
 	);
 	const terminated = session ? !sessionIsActive(session) : false;
 	const browserView = useBrowserView({
-		sessionId,
+		session: session ?? sessionRef,
 		active: browserSlotVisible,
 		poppedOut: browserPoppedOut,
 		terminated,
@@ -381,7 +402,7 @@ export function SessionView({ sessionId }: SessionViewProps) {
 		previewRevision,
 	});
 	const browserAnnotationQueue = useBrowserAnnotationQueue({
-		sessionId: session?.id,
+		session,
 		navUrl: browserView.navState.url,
 	});
 	const browserUrl = browserView.navState.url.trim();
@@ -393,14 +414,14 @@ export function SessionView({ sessionId }: SessionViewProps) {
 
 	useLayoutEffect(() => {
 		setTerminalTarget({ kind: "worker" });
-		setBrowserPopOutState({ sessionId, poppedOut: false });
+		setBrowserPopOutState({ sessionKey, poppedOut: false });
 		setFilesPoppedOut(false);
-	}, [sessionId]);
+	}, [sessionKey]);
 
 	// Route props change one render before the passive reset above. Reject the
 	// previous session's shell/reviewer synchronously so its handle can never be
 	// cached under the destination session.
-	const routedTerminalTarget = terminalTargetBelongsToSession(terminalTarget, sessionId)
+	const routedTerminalTarget = terminalTargetBelongsToSession(terminalTarget, sessionRef)
 		? terminalTarget
 		: ({ kind: "worker" } satisfies TerminalTarget);
 	const showChatSurface = session?.mode === "chat" && routedTerminalTarget.kind === "worker";
@@ -410,33 +431,33 @@ export function SessionView({ sessionId }: SessionViewProps) {
 	// Publish which one is showing: the notification runtime lives outside this
 	// subtree and must not treat "on the session route" as "watching the agent".
 	useEffect(() => {
-		setVisibleTerminalKind(sessionId, routedTerminalTarget.kind);
-		return () => clearVisibleTerminalKind(sessionId);
-	}, [clearVisibleTerminalKind, routedTerminalTarget.kind, sessionId, setVisibleTerminalKind]);
+		setVisibleTerminalKind(sessionKey, routedTerminalTarget.kind);
+		return () => clearVisibleTerminalKind(sessionKey);
+	}, [clearVisibleTerminalKind, routedTerminalTarget.kind, sessionKey, setVisibleTerminalKind]);
 
 	const handleOpenFiles = useCallback(() => {
-		setBrowserPopOutState({ sessionId, poppedOut: false });
+		setBrowserPopOutState({ sessionKey, poppedOut: false });
 		setFilesPoppedOut(false);
-		setInspectorViewForSession(sessionId, "files");
-		setInspectorOpenForSession(sessionId, true);
-	}, [sessionId, setInspectorOpenForSession, setInspectorViewForSession]);
+		setInspectorViewForSession(sessionKey, "files");
+		setInspectorOpenForSession(sessionKey, true);
+	}, [sessionKey, setInspectorOpenForSession, setInspectorViewForSession]);
 
 	const handleToggleFilesPopOut = useCallback(
 		(next: boolean) => {
-			if (next) setBrowserPopOutState({ sessionId, poppedOut: false });
+			if (next) setBrowserPopOutState({ sessionKey, poppedOut: false });
 			setFilesPoppedOut(next);
-			setInspectorViewForSession(sessionId, "files");
-			setInspectorOpenForSession(sessionId, true);
+			setInspectorViewForSession(sessionKey, "files");
+			setInspectorOpenForSession(sessionKey, true);
 		},
-		[sessionId, setInspectorOpenForSession, setInspectorViewForSession],
+		[sessionKey, setInspectorOpenForSession, setInspectorViewForSession],
 	);
 
 	const handleToggleBrowserPopOut = useCallback(
 		(next: boolean) => {
 			if (next) setFilesPoppedOut(false);
-			setBrowserPopOutState({ sessionId, poppedOut: next });
+			setBrowserPopOutState({ sessionKey, poppedOut: next });
 		},
-		[sessionId],
+		[sessionKey],
 	);
 
 	// Reveal the first real content in each non-empty browser lifecycle. Once the
@@ -446,21 +467,21 @@ export function SessionView({ sessionId }: SessionViewProps) {
 	// clear consumes unseen activity even when the browser was already empty.
 	useEffect(() => {
 		if (!hasInspector) return;
-		const current = useUiStore.getState().inspectorSessions[sessionId];
+		const current = useUiStore.getState().inspectorSessions[sessionKey];
 		if (!hasBrowserContent) {
-			if (current?.browserContentRevealed) setBrowserContentRevealed(sessionId, false);
-			else if (current?.browserUnseen) setBrowserUnseen(sessionId, false);
+			if (current?.browserContentRevealed) setBrowserContentRevealed(sessionKey, false);
+			else if (current?.browserUnseen) setBrowserUnseen(sessionKey, false);
 			return;
 		}
 		if (current?.browserContentRevealed) return;
-		setBrowserContentRevealed(sessionId, true);
-		setInspectorViewForSession(sessionId, "browser");
-		setInspectorOpenForSession(sessionId, true);
+		setBrowserContentRevealed(sessionKey, true);
+		setInspectorViewForSession(sessionKey, "browser");
+		setInspectorOpenForSession(sessionKey, true);
 	}, [
 		hasBrowserContent,
 		hasInspector,
 		previewRevision,
-		sessionId,
+		sessionKey,
 		setBrowserContentRevealed,
 		setBrowserUnseen,
 		setInspectorOpenForSession,
@@ -474,17 +495,17 @@ export function SessionView({ sessionId }: SessionViewProps) {
 	useEffect(() => {
 		if (!hasInspector) return;
 		const previewKey = previewRevealKey(previewUrl, previewRevision);
-		const seenKey = useUiStore.getState().inspectorSessions[sessionId]?.previewKey;
+		const seenKey = useUiStore.getState().inspectorSessions[sessionKey]?.previewKey;
 		if (seenKey === undefined) {
-			markInspectorPreviewSeen(sessionId, previewKey);
+			markInspectorPreviewSeen(sessionKey, previewKey);
 			return;
 		}
 		if (seenKey === previewKey) return;
-		markInspectorPreviewSeen(sessionId, previewKey);
+		markInspectorPreviewSeen(sessionKey, previewKey);
 		if (!previewKey) return;
-		const current = useUiStore.getState().inspectorSessions[sessionId];
-		const viewingBrowser = browserIsVisible(sessionId, browserPoppedOut);
-		if (current?.browserContentRevealed && !viewingBrowser) setBrowserUnseen(sessionId, true);
+		const current = useUiStore.getState().inspectorSessions[sessionKey];
+		const viewingBrowser = browserIsVisible(sessionKey, browserPoppedOut);
+		if (current?.browserContentRevealed && !viewingBrowser) setBrowserUnseen(sessionKey, true);
 	}, [
 		browserPoppedOut,
 		hasInspector,
@@ -502,7 +523,7 @@ export function SessionView({ sessionId }: SessionViewProps) {
 	// on hasBrowserContent/browserContentRevealed missed exactly that case.
 	useEffect(() => {
 		if (!hasInspector || terminated || !browserView.agentBrowserActive) return;
-		if (!browserIsVisible(sessionId, browserPoppedOut)) setBrowserUnseen(sessionId, true);
+		if (!browserIsVisible(sessionKey, browserPoppedOut)) setBrowserUnseen(sessionKey, true);
 	}, [
 		browserPoppedOut,
 		browserView.agentBrowserActive,
@@ -517,10 +538,10 @@ export function SessionView({ sessionId }: SessionViewProps) {
 	// Opening Browser consumes the pending activity indicator, including the
 	// case where the inspector was collapsed while already parked on Browser.
 	useEffect(() => {
-		if (hasInspector && browserIsVisible(sessionId, browserPoppedOut)) {
-			setBrowserUnseen(sessionId, false);
+		if (hasInspector && browserIsVisible(sessionKey, browserPoppedOut)) {
+			setBrowserUnseen(sessionKey, false);
 		}
-	}, [browserPoppedOut, hasInspector, inspectorView, isInspectorOpen, sessionId, setBrowserUnseen]);
+	}, [browserPoppedOut, hasInspector, inspectorView, isInspectorOpen, sessionKey, setBrowserUnseen]);
 
 	// Computed when the inspector panel mounts and frozen while it stays
 	// mounted: rrp re-registers the panel (a layout effect keyed on defaultSize,
@@ -552,11 +573,11 @@ export function SessionView({ sessionId }: SessionViewProps) {
 		const handleKeyDown = (event: KeyboardEvent) => {
 			if (!matchesRendererShortcut("toggle-inspector", event)) return;
 			event.preventDefault();
-			toggleInspector(sessionId);
+			toggleInspector(sessionKey);
 		};
 		window.addEventListener("keydown", handleKeyDown);
 		return () => window.removeEventListener("keydown", handleKeyDown);
-	}, [hasInspector, sessionId, toggleInspector]);
+	}, [hasInspector, sessionKey, toggleInspector]);
 
 	// Drive the collapsible panel from the store so the topbar button, ⌘⇧B, and
 	// drag-to-reopen all stay in sync. When the inspector panel mounts into
@@ -624,10 +645,10 @@ export function SessionView({ sessionId }: SessionViewProps) {
 			if (inspectorSeparatorRef.current?.getAttribute("data-separator") !== "active") return;
 			if (size.asPercentage <= 0) return;
 			window.localStorage?.setItem(inspectorSplitStorageKey, String(size.asPercentage));
-			const currentOpen = useUiStore.getState().inspectorSessions[sessionId]?.isOpen ?? true;
-			if (!currentOpen) toggleInspector(sessionId);
+			const currentOpen = useUiStore.getState().inspectorSessions[sessionKey]?.isOpen ?? true;
+			if (!currentOpen) toggleInspector(sessionKey);
 		},
-		[sessionId, toggleInspector],
+		[sessionKey, toggleInspector],
 	);
 
 	if (!session && !workspaceQuery.isLoading) {
@@ -674,7 +695,7 @@ export function SessionView({ sessionId }: SessionViewProps) {
 			isInspectorVisible={isInspectorOpen}
 			onOpenReviewerTerminal={selectReviewerTerminal}
 			onToggleBrowserPopOut={handleToggleBrowserPopOut}
-			onViewChange={(next) => setInspectorViewForSession(sessionId, next)}
+			onViewChange={(next) => setInspectorViewForSession(sessionKey, next)}
 			view={inspectorView}
 			browserView={browserView}
 			session={session}
@@ -695,7 +716,7 @@ export function SessionView({ sessionId }: SessionViewProps) {
 					<Sheet
 						open={isInspectorOpen}
 						onOpenChange={(open) => {
-							if (open !== isInspectorOpen) toggleInspector(sessionId);
+							if (open !== isInspectorOpen) toggleInspector(sessionKey);
 						}}
 					>
 						<SheetContent
@@ -717,7 +738,7 @@ export function SessionView({ sessionId }: SessionViewProps) {
 								<button
 									type="button"
 									aria-label={t("shell.closeInspector")}
-									onClick={() => toggleInspector(sessionId)}
+									onClick={() => toggleInspector(sessionKey)}
 									className="grid size-10 place-items-center rounded-md text-passive transition-colors hover:bg-interactive-hover hover:text-foreground"
 								>
 									<X className="size-4" aria-hidden="true" />
@@ -807,14 +828,14 @@ export function SessionView({ sessionId }: SessionViewProps) {
 									browserPoppedOut={browserPoppedOut}
 									filesView={
 										session ? (
-											<SessionFilesView onToggleMaximized={handleToggleFilesPopOut} sessionId={session.id} />
+											<SessionFilesView onToggleMaximized={handleToggleFilesPopOut} session={session} />
 										) : null
 									}
 									isInspectorVisible={isInspectorOpen}
 									onOpenFiles={handleOpenFiles}
 									onOpenReviewerTerminal={selectReviewerTerminal}
 									onToggleBrowserPopOut={handleToggleBrowserPopOut}
-									onViewChange={(next: InspectorView) => setInspectorViewForSession(sessionId, next)}
+									onViewChange={(next: InspectorView) => setInspectorViewForSession(sessionKey, next)}
 									view={inspectorView}
 									browserView={browserView}
 									session={session}
@@ -844,7 +865,7 @@ export function SessionView({ sessionId }: SessionViewProps) {
 							<SessionFilesView
 								isMaximized
 								onToggleMaximized={handleToggleFilesPopOut}
-								sessionId={session.id}
+								session={session}
 							/>
 						</div>,
 						document.body,

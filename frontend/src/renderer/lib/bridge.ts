@@ -203,14 +203,6 @@ export const aoBridge: AoBridge =
       remove: async () => undefined,
       probe: async () => "offline" as const,
       request: async () => ({ status: 0, body: null }),
-      // Switching hosts needs the main-process proxy, so it cannot work here;
-      // deactivate/active answer honestly (nothing is active) rather than throw,
-      // because boot calls them unconditionally.
-      activate: async () => {
-        throw new Error("remote hosts need the desktop app");
-      },
-      deactivate: async () => undefined,
-      active: async () => null,
       connect: async () => {
         throw new Error("remote hosts need the desktop app");
       },

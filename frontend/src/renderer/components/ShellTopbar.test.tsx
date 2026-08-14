@@ -10,7 +10,11 @@ import { SidebarProvider } from "./ui/sidebar";
 const { navigateMock, onKilledMock, paramsMock, postMock, spawnMock, useWorkspaceQueryMock } = vi.hoisted(() => ({
 	navigateMock: vi.fn(),
 	onKilledMock: vi.fn(),
-	paramsMock: { projectId: undefined as string | undefined, sessionId: undefined as string | undefined },
+	paramsMock: {
+		hostId: undefined as string | undefined,
+		projectId: undefined as string | undefined,
+		sessionId: undefined as string | undefined,
+	},
 	postMock: vi.fn(),
 	spawnMock: vi.fn(),
 	useWorkspaceQueryMock: vi.fn(),
@@ -50,6 +54,17 @@ vi.mock("../lib/api-client", () => ({
 		}
 		return fallback;
 	},
+}));
+
+vi.mock("../lib/host-clients", () => ({
+	baseUrlFor: () => "http://127.0.0.1:3001",
+	connectedHosts: (() => {
+		const hosts: string[] = [];
+		return () => hosts;
+	})(),
+	subscribeConnectedHosts: () => () => undefined,
+	isHostReady: () => true,
+	clientFor: () => ({ POST: postMock }),
 }));
 
 vi.mock("../lib/spawn-orchestrator", () => ({ spawnOrchestrator: spawnMock }));
@@ -121,6 +136,7 @@ function renderTopbarSessions(sessions: WorkspaceSession[], sessionId: string, e
 	];
 	useWorkspaceQueryMock.mockReturnValue({ data, isError: false, isLoading: false });
 	paramsMock.projectId = sessions[0].workspaceId;
+	paramsMock.hostId = sessions[0].host;
 	paramsMock.sessionId = sessionId;
 	const queryClient = new QueryClient();
 	const topbar = () => (
@@ -145,7 +161,7 @@ function renderKill(session: WorkspaceSession = worker, orchestratorId?: string)
 		<QueryClientProvider client={queryClient}>
 			<TopbarKillButton
 				session={currentSession}
-				orchestratorId={currentOrchestratorId}
+				orchestrator={currentOrchestratorId === orchestrator.id ? orchestrator : undefined}
 				onKilled={onKilledMock}
 			/>
 		</QueryClientProvider>
@@ -168,22 +184,13 @@ beforeEach(() => {
 	navigateMock.mockReset();
 	onKilledMock.mockReset();
 	paramsMock.projectId = undefined;
+	paramsMock.hostId = undefined;
 	paramsMock.sessionId = undefined;
 	postMock.mockReset();
 	postMock.mockResolvedValue({ data: { ok: true, sessionId: "sess-1" }, error: undefined });
 	useWorkspaceQueryMock.mockReset();
 	useWorkspaceQueryMock.mockReturnValue({ data: [], isError: false, isLoading: false });
 	useUiStore.setState({ inspectorSessions: {}, settingsModal: null });
-});
-
-describe("ShellTopbar host switcher", () => {
-	it("names the host in both the shell topbar and the embedded one", () => {
-		renderTopbar(sessionWith());
-		expect(screen.getByRole("combobox", { name: /this mac/i })).toBeInTheDocument();
-
-		renderTopbar(sessionWith(), true);
-		expect(screen.getAllByRole("combobox", { name: /this mac/i })).toHaveLength(2);
-	});
 });
 
 describe("ShellTopbar status pill", () => {
@@ -273,8 +280,8 @@ describe("ShellTopbar orchestrator actions", () => {
 		expect(screen.queryByText("my-app")).not.toBeInTheDocument();
 		await userEvent.click(kanbanButton);
 		expect(navigateMock).toHaveBeenCalledWith({
-			to: "/projects/$projectId",
-			params: { projectId: "proj-1" },
+			to: "/host/$hostId/project/$projectId",
+			params: { hostId: "local", projectId: "proj-1" },
 		});
 	});
 
@@ -287,16 +294,17 @@ describe("ShellTopbar orchestrator actions", () => {
 		expect(screen.getByRole("button", { name: "New task" })).toHaveClass("bg-raised");
 		await userEvent.click(kanbanButton);
 		expect(navigateMock).toHaveBeenCalledWith({
-			to: "/projects/$projectId",
-			params: { projectId: "proj-1" },
+			to: "/host/$hostId/project/$projectId",
+			params: { hostId: "local", projectId: "proj-1" },
 		});
 	});
 
 	it("opens project settings instead of spawning when no orchestrator agent is configured", async () => {
 		useWorkspaceQueryMock.mockReturnValue({
 			data: [
-				{
-					id: "proj-1",
+			{
+				host: "local",
+				id: "proj-1",
 					name: "my-app",
 					path: "/repo/my-app",
 					sessions: [worker],
@@ -305,8 +313,9 @@ describe("ShellTopbar orchestrator actions", () => {
 			isError: false,
 			isLoading: false,
 		});
-		paramsMock.projectId = "proj-1";
-		paramsMock.sessionId = "sess-1";
+	paramsMock.projectId = "proj-1";
+	paramsMock.hostId = "local";
+	paramsMock.sessionId = "sess-1";
 		render(
 			<QueryClientProvider client={new QueryClient()}>
 				<SidebarProvider>
@@ -317,7 +326,10 @@ describe("ShellTopbar orchestrator actions", () => {
 
 		await userEvent.click(screen.getByRole("button", { name: "Open orchestrator" }));
 
-		expect(useUiStore.getState().settingsModal).toEqual({ scope: "project", projectId: "proj-1" });
+		expect(useUiStore.getState().settingsModal).toEqual({
+			scope: "project",
+			project: expect.objectContaining({ host: "local", id: "proj-1" }),
+		});
 		expect(navigateMock).not.toHaveBeenCalled();
 		expect(spawnMock).not.toHaveBeenCalled();
 	});
@@ -330,8 +342,8 @@ describe("ShellTopbar orchestrator actions", () => {
 		await clickKillDialogConfirm();
 
 		expect(navigateMock).toHaveBeenCalledWith({
-			to: "/projects/$projectId/sessions/$sessionId",
-			params: { projectId: "proj-1", sessionId: "orch-1" },
+			to: "/host/$hostId/session/$sessionId",
+			params: { hostId: "local", sessionId: "orch-1" },
 		});
 	});
 });
@@ -345,14 +357,14 @@ describe("ShellTopbar inspector state", () => {
 
 		await userEvent.click(toggle);
 
-		expect(useUiStore.getState().inspectorSessions["sess-1"]).toEqual({ isOpen: false, view: "summary" });
+		expect(useUiStore.getState().inspectorSessions["local:sess-1"]).toEqual({ isOpen: false, view: "summary" });
 	});
 
 	it("routes aria-pressed to the current worker session", () => {
 		useUiStore.setState({
 			inspectorSessions: {
-				"sess-1": { isOpen: true, view: "summary" },
-				"sess-2": { isOpen: false, view: "summary" },
+				"local:sess-1": { isOpen: true, view: "summary" },
+				"local:sess-2": { isOpen: false, view: "summary" },
 			},
 		});
 		const view = renderTopbarSessions([worker, secondWorker], "sess-1");
@@ -368,16 +380,16 @@ describe("ShellTopbar inspector state", () => {
 	it("toggles only the current worker session", async () => {
 		useUiStore.setState({
 			inspectorSessions: {
-				"sess-1": { isOpen: false, view: "summary" },
-				"sess-2": { isOpen: true, view: "browser" },
+				"local:sess-1": { isOpen: false, view: "summary" },
+				"local:sess-2": { isOpen: true, view: "browser" },
 			},
 		});
 		renderTopbarSessions([worker, secondWorker], "sess-1");
 
 		await userEvent.click(screen.getByRole("button", { name: "Open inspector panel" }));
 
-		expect(useUiStore.getState().inspectorSessions["sess-1"]?.isOpen).toBe(true);
-		expect(useUiStore.getState().inspectorSessions["sess-2"]).toEqual({ isOpen: true, view: "browser" });
+		expect(useUiStore.getState().inspectorSessions["local:sess-1"]?.isOpen).toBe(true);
+		expect(useUiStore.getState().inspectorSessions["local:sess-2"]).toEqual({ isOpen: true, view: "browser" });
 	});
 });
 
@@ -453,7 +465,7 @@ describe("TopbarKillButton", () => {
 		await userEvent.click(screen.getByRole("button", { name: "Kill session" }));
 		await clickKillDialogConfirm();
 
-		expect(onKilledMock).toHaveBeenCalledWith("proj-1", "orch-1");
+		expect(onKilledMock).toHaveBeenCalledWith("proj-1", orchestrator);
 		expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 		resolveKill({ data: { ok: true, sessionId: "sess-1" }, error: undefined });
 	});

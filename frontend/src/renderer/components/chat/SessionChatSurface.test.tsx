@@ -15,6 +15,11 @@ vi.mock("../../lib/api-client", () => ({
 	apiClient: { POST: postMock },
 }));
 
+vi.mock("../../lib/host-clients", () => ({
+	baseUrlFor: () => "http://127.0.0.1:3001",
+	clientFor: () => ({ POST: postMock }),
+}));
+
 vi.mock("../../hooks/useConversation", () => ({
 	useConversation: () => ({
 		snapshot: { capabilities: [] },
@@ -81,7 +86,7 @@ describe("SessionChatSurface link routing", () => {
 		);
 		await user.click(screen.getByRole("button", { name: "Open chat link" }));
 
-		expect(useUiStore.getState().inspectorSessions[session.id]).toMatchObject({
+		expect(useUiStore.getState().inspectorSessions["local:sess-1"]).toMatchObject({
 			isOpen: true,
 			view: "browser",
 		});

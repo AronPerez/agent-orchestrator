@@ -19,10 +19,12 @@ import {
 	revalidateAgentModels,
 	type AgentModelCatalog,
 } from "../hooks/useAgentModelsQuery";
-import { agentsQueryKey, agentsQueryOptions, refreshAgents } from "../hooks/useAgentsQuery";
+import { agentsQueryKeyFor, agentsQueryOptionsFor, refreshAgents } from "../hooks/useAgentsQuery";
 import { useWorkspaceQuery, workspaceQueryKey } from "../hooks/useWorkspaceQuery";
 import { flattenHostSections } from "../types/workspace";
-import { apiClient, apiErrorMessage } from "../lib/api-client";
+import { apiErrorMessage } from "../lib/api-client";
+import { clientFor } from "../lib/host-clients";
+import { refKey, type Ref } from "../lib/hosts";
 import { captureRendererEvent } from "../lib/telemetry";
 import { spawnOrchestrator } from "../lib/spawn-orchestrator";
 import { cn } from "../lib/utils";
@@ -41,7 +43,7 @@ type TrackerIntakeConfig = components["schemas"]["TrackerIntakeConfig"];
 
 const PERMISSION_MODE_VALUES = ["default", "accept-edits", "auto", "bypass-permissions"] as const;
 
-const projectQueryKey = (id: string) => ["project", id] as const;
+const projectQueryKey = (project: Ref) => ["project", refKey(project)] as const;
 
 export type ProjectSettingsSection = "general" | "agents" | "workflow" | "intake";
 export interface ProjectSettingsSaveState {
@@ -54,11 +56,11 @@ export interface ProjectSettingsSaveState {
 }
 
 export function ProjectSettingsForm({
-	projectId,
+	project,
 	section = "general",
 	onSaveState,
 }: {
-	projectId: string;
+	project: Ref;
 	section?: ProjectSettingsSection;
 	onSaveState?: (state: ProjectSettingsSaveState) => void;
 }) {
@@ -66,10 +68,10 @@ export function ProjectSettingsForm({
 	const queryClient = useQueryClient();
 
 	const query = useQuery({
-		queryKey: projectQueryKey(projectId),
+		queryKey: projectQueryKey(project),
 		queryFn: async () => {
-			const { data, error } = await apiClient.GET("/api/v1/projects/{id}", {
-				params: { path: { id: projectId } },
+			const { data, error } = await clientFor(project.host).GET("/api/v1/projects/{id}", {
+				params: { path: { id: project.id } },
 			});
 			if (error) throw new Error(apiErrorMessage(error));
 			if (data?.status !== "ok") throw new Error(t("settings.project.degraded"));
@@ -87,10 +89,10 @@ export function ProjectSettingsForm({
 				</p>
 			) : (
 				<SettingsBody
-					key={projectId}
+					key={refKey(project)}
 					project={query.data}
 					onSaved={() => queryClient.invalidateQueries({ queryKey: workspaceQueryKey })}
-					projectId={projectId}
+					projectRef={project}
 					section={section}
 					onSaveState={onSaveState}
 				/>
@@ -101,13 +103,13 @@ export function ProjectSettingsForm({
 
 function SettingsBody({
 	project,
-	projectId,
+	projectRef,
 	onSaved,
 	section = "general",
 	onSaveState,
 }: {
 	project: Project;
-	projectId: string;
+	projectRef: Ref;
 	onSaved: () => void;
 	section?: ProjectSettingsSection;
 	onSaveState?: (state: ProjectSettingsSaveState) => void;
@@ -116,9 +118,10 @@ function SettingsBody({
 	const queryClient = useQueryClient();
 	const workspaceQuery = useWorkspaceQuery();
 	const workspaces = flattenHostSections(workspaceQuery.data);
+	const projectId = projectRef.id;
 	const config = project.config ?? {};
 	const isScratchProject = project.kind === "scratch";
-	const workspace = workspaces.find((item) => item.id === projectId);
+	const workspace = workspaces.find((item) => item.host === projectRef.host && item.id === projectId);
 	const activeOrchestrator = newestActiveOrchestrator(workspace?.sessions ?? []);
 	const intake: TrackerIntakeConfig = config.trackerIntake ?? {};
 	const [form, setForm] = useState({
@@ -143,11 +146,11 @@ function SettingsBody({
 	const [validationError, setValidationError] = useState<string | null>(null);
 	const initialOrchestratorAgent = config.orchestrator?.agent ?? "";
 	const missingRequiredAgent = form.workerAgent === "" || form.orchestratorAgent === "";
-	const agentsQuery = useQuery(agentsQueryOptions);
+	const agentsQuery = useQuery(agentsQueryOptionsFor(projectRef.host));
 	const agentCatalog = agentsQuery.data;
 	const refreshAgentsMutation = useMutation({
-		mutationFn: refreshAgents,
-		onSuccess: (next) => queryClient.setQueryData(agentsQueryKey, next),
+		mutationFn: () => refreshAgents(projectRef.host),
+		onSuccess: (next) => queryClient.setQueryData(agentsQueryKeyFor(projectRef.host), next),
 	});
 
 	const intakeForm: IntakeForm = {
@@ -221,7 +224,7 @@ function SettingsBody({
 						reviewers: form.reviewerHarness ? [{ harness: form.reviewerHarness }] : undefined,
 						trackerIntake: buildIntake(intakeForm),
 					};
-			const { error } = await apiClient.PUT("/api/v1/projects/{id}", {
+			const { error } = await clientFor(projectRef.host).PUT("/api/v1/projects/{id}", {
 				params: { path: { id: projectId } },
 				body: { displayName, config: next },
 			});
@@ -231,7 +234,7 @@ function SettingsBody({
 				(activeOrchestrator && activeOrchestrator.provider !== form.orchestratorAgent)
 			) {
 				try {
-					await spawnOrchestrator(projectId, "settings", true);
+					await spawnOrchestrator(projectRef, "settings", true);
 				} catch (error) {
 					return {
 						replacementError:
@@ -246,7 +249,7 @@ function SettingsBody({
 			setSavedAt(Date.now());
 			setReplacementError(result.replacementError);
 			setValidationError(null);
-			void queryClient.invalidateQueries({ queryKey: ["project", projectId] });
+			void queryClient.invalidateQueries({ queryKey: projectQueryKey(projectRef) });
 			onSaved();
 		},
 		onError: () => {
@@ -374,7 +377,7 @@ function SettingsBody({
 							<AgentModelField
 								role="worker"
 								agentId={form.workerAgent}
-								projectId={projectId}
+								project={projectRef}
 								model={form.workerModel}
 								mode={form.workerMode}
 								onModelChange={(workerModel) => setForm((f) => ({ ...f, workerModel }))}
@@ -407,7 +410,7 @@ function SettingsBody({
 							<AgentModelField
 								role="orchestrator"
 								agentId={form.orchestratorAgent}
-								projectId={projectId}
+								project={projectRef}
 								model={form.orchestratorModel}
 								mode={form.orchestratorMode}
 								onModelChange={(orchestratorModel) => setForm((f) => ({ ...f, orchestratorModel }))}
@@ -524,7 +527,7 @@ function SettingsBody({
 function AgentModelField({
 	role,
 	agentId,
-	projectId,
+	project,
 	model,
 	mode,
 	onModelChange,
@@ -532,7 +535,7 @@ function AgentModelField({
 }: {
 	role: "worker" | "orchestrator";
 	agentId: string;
-	projectId: string;
+	project: Ref;
 	model: string;
 	mode: string;
 	onModelChange: (value: string) => void;
@@ -541,23 +544,23 @@ function AgentModelField({
 	const { t } = useTranslation();
 	const queryClient = useQueryClient();
 	const [customAgentId, setCustomAgentId] = useState<string | null>(null);
-	const query = useQuery(agentModelsQueryOptions(agentId, projectId));
+	const query = useQuery(agentModelsQueryOptions(agentId, project));
 	const catalog: AgentModelCatalog | undefined = query.data;
 	const revalidationQuery = useQuery({
-		queryKey: ["agent-model-revalidation", agentId, projectId, catalog?.validatedAt ?? ""],
-		queryFn: () => revalidateAgentModels(agentId, projectId),
+		queryKey: ["agent-model-revalidation", agentId, refKey(project), catalog?.validatedAt ?? ""],
+		queryFn: () => revalidateAgentModels(agentId, project),
 		enabled: agentId !== "" && catalog?.refreshRecommended === true,
 		staleTime: Number.POSITIVE_INFINITY,
 		retry: false,
 	});
 	useEffect(() => {
 		if (revalidationQuery.data) {
-			queryClient.setQueryData(agentModelsQueryKey(agentId, projectId), revalidationQuery.data);
+			queryClient.setQueryData(agentModelsQueryKey(agentId, project), revalidationQuery.data);
 		}
-	}, [agentId, projectId, queryClient, revalidationQuery.data]);
+	}, [agentId, project, queryClient, revalidationQuery.data]);
 	const refreshMutation = useMutation({
-		mutationFn: () => refreshAgentModels(agentId, projectId),
-		onSuccess: (catalog) => queryClient.setQueryData(agentModelsQueryKey(agentId, projectId), catalog),
+		mutationFn: () => refreshAgentModels(agentId, project),
+		onSuccess: (catalog) => queryClient.setQueryData(agentModelsQueryKey(agentId, project), catalog),
 	});
 	const isMode = catalog?.selectionMode === "mode";
 	const label = t(`settings.models.${role}${isMode ? "Mode" : "Model"}`);

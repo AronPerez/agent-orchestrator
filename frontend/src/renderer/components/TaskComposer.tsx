@@ -10,9 +10,11 @@ import { useTranslation } from "react-i18next";
 import { Loader2 } from "lucide-react";
 import { RequiredAgentField } from "./CreateProjectAgentSheet";
 import type { components } from "../../api/schema";
-import { apiClient, apiErrorCode, apiErrorMessage } from "../lib/api-client";
+import { apiErrorCode, apiErrorMessage } from "../lib/api-client";
+import { clientFor } from "../lib/host-clients";
+import { LOCAL_HOST, refKey, type Ref } from "../lib/hosts";
 import { captureRendererEvent } from "../lib/telemetry";
-import { agentsQueryKey, agentsQueryOptions, refreshAgentsIfStale } from "../hooks/useAgentsQuery";
+import { agentsQueryKeyFor, agentsQueryOptionsFor, refreshAgentsIfStale } from "../hooks/useAgentsQuery";
 import { type FileAttachmentPayload, useFileAttachments } from "../hooks/useFileAttachments";
 import { useSettings } from "../hooks/useSettings";
 import {
@@ -28,7 +30,7 @@ type Project = components["schemas"]["Project"];
 type DelegateAgent = components["schemas"]["DelegateTaskRequest"]["agent"];
 
 type CreateTaskInput = {
-	projectId: string;
+	project: Ref;
 	brief: string;
 	agent?: DelegateAgent;
 	model?: string;
@@ -54,7 +56,7 @@ class TaskCreateError extends Error {
 }
 
 export type TaskComposerProps = {
-	projectId?: string;
+	project?: Ref;
 	onCreated: (sessionId: string) => void;
 	onDirtyChange?: (dirty: boolean) => void;
 	onSubmittingChange?: (submitting: boolean) => void;
@@ -62,7 +64,7 @@ export type TaskComposerProps = {
 };
 
 export function TaskComposer({
-	projectId,
+	project,
 	onCreated,
 	onDirtyChange,
 	onSubmittingChange,
@@ -79,6 +81,7 @@ export function TaskComposer({
 	const [isSubmitting, setIsSubmitting] = useState(false);
 	const [error, setError] = useState<string | undefined>();
 	const [canCreateAsTUI, setCanCreateAsTUI] = useState(false);
+	const projectHost = project?.host ?? LOCAL_HOST;
 	const {
 		attachments,
 		error: attachmentError,
@@ -89,11 +92,11 @@ export function TaskComposer({
 	} = useFileAttachments();
 	const createTask = useCallback(
 		async (input: CreateTaskInput): Promise<string> => {
-			void captureRendererEvent("ao.renderer.task_create_requested", { project_id: input.projectId });
+			void captureRendererEvent("ao.renderer.task_create_requested", { project_id: input.project.id });
 			try {
-				const { data, error } = await apiClient.POST("/api/v1/orchestrators/delegate", {
+				const { data, error } = await clientFor(input.project.host).POST("/api/v1/orchestrators/delegate", {
 					body: {
-						projectId: input.projectId,
+						projectId: input.project.id,
 						brief: input.brief,
 						agent: input.agent,
 						model: input.model,
@@ -108,11 +111,11 @@ export function TaskComposer({
 					);
 				}
 				if (!data?.workerId) throw new Error(t("newTask.noSession"));
-				void captureRendererEvent("ao.renderer.task_create_succeeded", { project_id: input.projectId });
+				void captureRendererEvent("ao.renderer.task_create_succeeded", { project_id: input.project.id });
 				return data.workerId;
 			} catch (err) {
-				void captureRendererEvent("ao.renderer.task_create_failed", { project_id: input.projectId });
-				void queryClient.invalidateQueries({ queryKey: agentsQueryKey });
+				void captureRendererEvent("ao.renderer.task_create_failed", { project_id: input.project.id });
+				void queryClient.invalidateQueries({ queryKey: agentsQueryKeyFor(input.project.host) });
 				throw err instanceof Error ? err : new Error(t("newTask.unableToStart"));
 			}
 		},
@@ -120,26 +123,26 @@ export function TaskComposer({
 	);
 
 	const projectQuery = useQuery({
-		queryKey: ["project", projectId],
-		enabled: Boolean(projectId),
+		queryKey: ["project", project ? refKey(project) : ""],
+		enabled: Boolean(project),
 		queryFn: async () => {
-			const { data, error: apiError } = await apiClient.GET("/api/v1/projects/{id}", {
-				params: { path: { id: projectId ?? "" } },
+			const { data, error: apiError } = await clientFor(project!.host).GET("/api/v1/projects/{id}", {
+				params: { path: { id: project!.id } },
 			});
 			if (apiError) throw new Error(apiErrorMessage(apiError));
 			if (data?.status !== "ok") throw new Error(t("newTask.configUnavailable"));
 			return data.project as Project;
 		},
 	});
-	const agentsQuery = useQuery(agentsQueryOptions);
+	const agentsQuery = useQuery(agentsQueryOptionsFor(projectHost));
 	const { settings } = useSettings();
 	// Freshen the inventory on open so a just-installed or just-authenticated agent
 	// is present without the user asking for it.
 	useEffect(() => {
-		void refreshAgentsIfStale().then((next) => {
-			if (next) queryClient.setQueryData(agentsQueryKey, next);
+		void refreshAgentsIfStale(projectHost).then((next) => {
+			if (next) queryClient.setQueryData(agentsQueryKeyFor(projectHost), next);
 		});
-	}, [queryClient]);
+	}, [projectHost, queryClient]);
 	// The composer preselects the agent and model a spawn would actually use
 	// instead of parking the controls on a "default" label the user has to
 	// remember. Both resolved values remain directly editable.
@@ -156,15 +159,15 @@ export function TaskComposer({
 	const agentCatalog = agentsQuery.data;
 
 	// Shares the picker's query key, so this is the same fetch, not a second one.
-	const modelCatalogQuery = useQuery(agentModelsQueryOptions(selectedAgent, projectId ?? ""));
+	const modelCatalogQuery = useQuery(agentModelsQueryOptions(selectedAgent, project));
 	const revalidationQuery = useQuery({
 		queryKey: [
 			"agent-model-revalidation",
 			selectedAgent,
-			projectId ?? "",
+			project?.id ?? "",
 			modelCatalogQuery.data?.validatedAt ?? "",
 		],
-		queryFn: () => revalidateAgentModels(selectedAgent, projectId ?? ""),
+		queryFn: () => revalidateAgentModels(selectedAgent, project),
 		enabled: selectedAgent !== "" && modelCatalogQuery.data?.refreshRecommended === true,
 		staleTime: Number.POSITIVE_INFINITY,
 		retry: false,
@@ -172,11 +175,11 @@ export function TaskComposer({
 	useEffect(() => {
 		if (revalidationQuery.data) {
 			queryClient.setQueryData(
-				agentModelsQueryKey(selectedAgent, projectId ?? ""),
+				agentModelsQueryKey(selectedAgent, project),
 				revalidationQuery.data,
 			);
 		}
-	}, [projectId, queryClient, revalidationQuery.data, selectedAgent]);
+	}, [project?.id, queryClient, revalidationQuery.data, selectedAgent]);
 	const modelWarning =
 		(revalidationQuery.isError
 			? revalidationQuery.error instanceof Error
@@ -232,7 +235,7 @@ export function TaskComposer({
 	useEffect(() => () => clearAttachments(), [clearAttachments]);
 
 	const submitTask = async (interfaceMode?: "tui") => {
-		if (!projectId || isSubmitting) return;
+		if (!project || isSubmitting) return;
 
 		const cleanModel = model.trim();
 		const cleanMode = mode.trim();
@@ -247,7 +250,7 @@ export function TaskComposer({
 		try {
 			const attachmentPayloads = await toSettledPayload();
 			const sessionId = await createTask({
-				projectId,
+				project,
 				brief: prompt,
 				// The visible selection is authoritative: it is either the user's pick
 				// or the resolved default, so spawning names it explicitly.
@@ -272,7 +275,7 @@ export function TaskComposer({
 	return (
 		<TaskComposerView
 			autoFocusPrompt={autoFocusTitle}
-			canSubmit={Boolean(projectId)}
+			canSubmit={Boolean(project)}
 			prompt={prompt}
 			onPromptChange={setPrompt}
 			labels={{
@@ -304,7 +307,7 @@ export function TaskComposer({
 			model={{
 				agentId: selectedAgent,
 				agentLabel: selectedAgentLabel,
-				projectId: projectId ?? "",
+				projectId: project?.id ?? "",
 				value: model,
 				mode,
 				catalog: modelCatalog,

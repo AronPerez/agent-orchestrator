@@ -3,12 +3,27 @@ import { renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { getMock } = vi.hoisted(() => ({ getMock: vi.fn() }));
+const { deleteMock, getMock, postMock } = vi.hoisted(() => ({
+	deleteMock: vi.fn(),
+	getMock: vi.fn(),
+	postMock: vi.fn(),
+}));
 
 vi.mock("../lib/api-client", () => ({
-	apiClient: { GET: getMock, POST: vi.fn(), DELETE: vi.fn() },
+	apiClient: { GET: getMock, POST: postMock, DELETE: deleteMock },
 	apiErrorMessage: () => "request failed",
 	hasTrustedApiBaseUrl: () => true,
+}));
+
+vi.mock("../lib/host-clients", () => ({
+	baseUrlFor: () => "http://127.0.0.1:3001",
+	connectedHosts: (() => {
+		const hosts: string[] = [];
+		return () => hosts;
+	})(),
+	subscribeConnectedHosts: () => () => undefined,
+	isHostReady: () => true,
+	clientFor: () => ({ GET: getMock, POST: postMock, DELETE: deleteMock }),
 }));
 
 import { useSessionInterfaceTransition } from "./useSessionInterfaceTransition";
@@ -41,7 +56,7 @@ describe("interface switch readiness", () => {
 				error: undefined,
 			});
 
-		const { result } = renderHook(() => useSessionInterfaceTransition("session-1"), {
+		const { result } = renderHook(() => useSessionInterfaceTransition({ host: "local", id: "session-1" }), {
 			wrapper,
 		});
 
@@ -63,7 +78,7 @@ describe("interface switch readiness", () => {
 			error: undefined,
 		});
 
-		const { result } = renderHook(() => useSessionInterfaceTransition("session-1"), {
+		const { result } = renderHook(() => useSessionInterfaceTransition({ host: "local", id: "session-1" }), {
 			wrapper,
 		});
 

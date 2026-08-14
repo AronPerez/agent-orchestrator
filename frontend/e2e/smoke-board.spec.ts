@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { LOCAL_HOST, refKey } from "../src/renderer/lib/hosts";
 import { installFakeAgent } from "./support/fake-bridge";
 
 // BRD-* RENDERER SMOKE (issue #2483, renderer slice). dev:web + fake bridge —
@@ -10,7 +11,7 @@ import { installFakeAgent } from "./support/fake-bridge";
 // path the real daemon uses (see fake-bridge.ts). IDs cross-reference #2483.
 
 const columnCard = (column: string, id: string) =>
-	`[data-testid="board-column"][data-column="${column}"] [data-session-id="${id}"]`;
+	`[data-testid="board-column"][data-column="${column}"] [data-session-id="${refKey({ host: LOCAL_HOST, id })}"]`;
 
 // #2483 BRD-002.
 test("renderer: card moves columns when its status changes @T0 @BRD", async ({ page }) => {

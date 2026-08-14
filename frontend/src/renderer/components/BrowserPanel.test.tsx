@@ -20,6 +20,17 @@ vi.mock("../lib/api-client", () => ({
 			: fallback,
 }));
 
+vi.mock("../lib/host-clients", () => ({
+	baseUrlFor: () => "http://127.0.0.1:3001",
+	connectedHosts: (() => {
+		const hosts: string[] = [];
+		return () => hosts;
+	})(),
+	subscribeConnectedHosts: () => () => undefined,
+	isHostReady: () => true,
+	clientFor: () => ({ POST: postMock }),
+}));
+
 const hookState = vi.hoisted(() => ({
 	navigate: vi.fn(),
 	goBack: vi.fn(),
@@ -124,14 +135,14 @@ function PersistentBrowserPanelView({
 	visible: boolean;
 }) {
 	const browserView = useBrowserView({
-		sessionId: currentSession.id,
+		session: { host: "local", id: currentSession.id },
 		active: true,
 		poppedOut: false,
 		previewUrl: currentSession.previewUrl,
 		previewRevision: currentSession.previewRevision,
 	});
 	const annotationQueue = useBrowserAnnotationQueue({
-		sessionId: currentSession.id,
+		session: { host: "local", id: currentSession.id },
 		navUrl: browserView.navState.url,
 	});
 	if (!visible) return null;
@@ -774,7 +785,7 @@ describe("BrowserPanel", () => {
 		try {
 			const { result } = renderHook(() =>
 				useBrowserAnnotationQueue({
-					sessionId: "sess-1",
+					session: { host: "local", id: "sess-1" },
 					navUrl: "http://localhost:5173/",
 				}),
 			);

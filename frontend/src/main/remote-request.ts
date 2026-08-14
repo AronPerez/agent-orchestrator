@@ -26,6 +26,7 @@ export async function remoteRequest(
 	entry: RemoteEntry,
 	init: RemoteRequestInit,
 	fetchImpl: FetchImpl = fetch,
+	signal?: AbortSignal,
 ): Promise<RemoteResponse> {
 	const base = entry.url.replace(/\/+$/, "");
 	const response = await fetchImpl(`${base}${init.path}`, {
@@ -36,6 +37,7 @@ export async function remoteRequest(
 			Authorization: `Bearer ${entry.password}`,
 		},
 		body: init.body === undefined ? undefined : JSON.stringify(init.body),
+		signal,
 	});
 
 	const text = await response.text();
@@ -48,9 +50,18 @@ export async function remoteRequest(
 	return { status: response.status, body };
 }
 
-export async function probeRemote(entry: RemoteEntry, fetchImpl: FetchImpl = fetch): Promise<RemoteHealth> {
+export async function probeRemote(
+	entry: RemoteEntry,
+	fetchImpl: FetchImpl = fetch,
+	timeoutMs = 5_000,
+): Promise<RemoteHealth> {
 	try {
-		const { status, body } = await remoteRequest(entry, { method: "GET", path: "/healthz" }, fetchImpl);
+		const { status, body } = await remoteRequest(
+			entry,
+			{ method: "GET", path: "/healthz" },
+			fetchImpl,
+			AbortSignal.timeout(timeoutMs),
+		);
 		if (status === 401 || status === 403) return "unauthorized";
 		if (status < 200 || status >= 300) return "offline";
 		// A status code proves something replied, not that it is a daemon. An SPA

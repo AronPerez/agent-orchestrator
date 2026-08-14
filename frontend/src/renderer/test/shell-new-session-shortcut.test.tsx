@@ -15,7 +15,7 @@ const shellMocks = vi.hoisted(() => {
 		previousSessionListener: undefined as (() => void) | undefined,
 		nextSessionListener: undefined as (() => void) | undefined,
 		focusTerminalListener: undefined as (() => void) | undefined,
-		routeParams: {} as { projectId?: string; sessionId?: string },
+		routeParams: {} as { hostId?: string; projectId?: string; sessionId?: string },
 		routeSearch: {} as Record<string, unknown>,
 		workspaces: [] as WorkspaceSummary[],
 		workspaceQuery: {
@@ -133,6 +133,7 @@ vi.mock("../hooks/useDaemonStatus", () => ({
 // The shell layout opens standalone terminals; this suite only covers the
 // shortcut subscriptions, so the mutation is stubbed rather than driven.
 vi.mock("../hooks/useShellTerminals", () => ({
+	shellTerminalsQueryOptions: (host: string) => ({ queryKey: ["shell-terminals", host] }),
 	useShellTerminals: () => ({ data: [], isSuccess: true }),
 	useOpenShellTerminal: () => ({ mutate: shellMocks.openShellTerminal }),
 }));
@@ -192,7 +193,7 @@ vi.mock("../components/GlobalNewTaskDialog", async () => {
 	return {
 		GlobalNewTaskDialog: () => {
 			const request = useStore((state) => state.newTaskRequest);
-			return request ? <div data-testid="new-task-flow" data-project={request.projectId} /> : null;
+			return request ? <div data-testid="new-task-flow" data-project={request.project.id} /> : null;
 		},
 	};
 });
@@ -216,21 +217,23 @@ const ShellRoute = Route.options.component as ComponentType;
 
 const workspaces = [
 	{
+		host: "local",
 		id: "proj-1",
 		name: "Project One",
 		path: "/one",
 		sessions: [
-			{ id: "sess-1", workspaceId: "proj-1", status: "working" },
-			{ id: "sess-2", workspaceId: "proj-1", status: "terminated" },
-			{ id: "sess-merged-terminated", workspaceId: "proj-1", status: "merged", isTerminated: true },
-			{ id: "sess-3", workspaceId: "proj-1", status: "idle" },
+			{ host: "local", id: "sess-1", workspaceId: "proj-1", status: "working" },
+			{ host: "local", id: "sess-2", workspaceId: "proj-1", status: "terminated" },
+			{ host: "local", id: "sess-merged-terminated", workspaceId: "proj-1", status: "merged", isTerminated: true },
+			{ host: "local", id: "sess-3", workspaceId: "proj-1", status: "idle" },
 		],
 	},
 	{
+		host: "local",
 		id: "proj-2",
 		name: "Project Two",
 		path: "/two",
-		sessions: [{ id: "sess-cross", workspaceId: "proj-2", status: "working" }],
+		sessions: [{ host: "local", id: "sess-cross", workspaceId: "proj-2", status: "working" }],
 	},
 ] as unknown as WorkspaceSummary[];
 
@@ -304,7 +307,7 @@ beforeEach(() => {
 
 describe("shell workspace startup", () => {
 	it("places the topbar host inside the center panel surface on session routes", async () => {
-		shellMocks.state.routeParams = { sessionId: "sess-1" };
+		shellMocks.state.routeParams = { hostId: "local", sessionId: "sess-1" };
 		await renderShell();
 
 		const host = screen.getByTestId("session-topbar-host");
@@ -473,13 +476,13 @@ describe("shell new-shell-terminal shortcut subscription", () => {
 	});
 
 	it("scopes the terminal to the project in scope", async () => {
-		shellMocks.state.routeParams = { projectId: "proj-1" };
+		shellMocks.state.routeParams = { hostId: "local", projectId: "proj-1" };
 		await renderShell();
 
 		pressNewShellTerminal();
 
 		expect(shellMocks.openShellTerminal).toHaveBeenCalledWith(
-			expect.objectContaining({ projectId: "proj-1" }),
+			expect.objectContaining({ project: expect.objectContaining({ host: "local", id: "proj-1" }) }),
 			expect.anything(),
 		);
 	});
@@ -488,13 +491,16 @@ describe("shell new-shell-terminal shortcut subscription", () => {
 	// id, not just its owning project's, so the daemon can resolve the
 	// session's own worktree instead of the registered project root.
 	it("scopes the terminal to the session in scope", async () => {
-		shellMocks.state.routeParams = { sessionId: "sess-1" };
+		shellMocks.state.routeParams = { hostId: "local", sessionId: "sess-1" };
 		await renderShell();
 
 		pressNewShellTerminal();
 
 		expect(shellMocks.openShellTerminal).toHaveBeenCalledWith(
-			expect.objectContaining({ projectId: "proj-1", sessionId: "sess-1" }),
+			expect.objectContaining({
+				project: expect.objectContaining({ host: "local", id: "proj-1" }),
+				session: { host: "local", id: "sess-1" },
+			}),
 			expect.anything(),
 		);
 	});
@@ -502,13 +508,16 @@ describe("shell new-shell-terminal shortcut subscription", () => {
 	// Session terminals always belong to the session on screen — there is no
 	// longer an "owner" session whose worktree could be borrowed here (#3208).
 	it("scopes the terminal to the session on screen, not the route's project alone", async () => {
-		shellMocks.state.routeParams = { projectId: "proj-2", sessionId: "sess-cross" };
+		shellMocks.state.routeParams = { hostId: "local", projectId: "proj-2", sessionId: "sess-cross" };
 		await renderShell();
 
 		pressNewShellTerminal();
 
 		expect(shellMocks.openShellTerminal).toHaveBeenCalledWith(
-			expect.objectContaining({ projectId: "proj-2", sessionId: "sess-cross" }),
+			expect.objectContaining({
+				project: expect.objectContaining({ host: "local", id: "proj-2" }),
+				session: { host: "local", id: "sess-cross" },
+			}),
 			expect.anything(),
 		);
 	});
@@ -538,7 +547,7 @@ describe("shell keyboard-shortcuts help subscription", () => {
 
 describe("shell new-session shortcut subscription", () => {
 	it("opens the new-task flow for the route project", async () => {
-		shellMocks.state.routeParams = { projectId: "proj-1" };
+		shellMocks.state.routeParams = { hostId: "local", projectId: "proj-1" };
 		await renderShell();
 
 		emitShortcut();
@@ -548,7 +557,7 @@ describe("shell new-session shortcut subscription", () => {
 	});
 
 	it("opens the new-task flow for the project owning the current session", async () => {
-		shellMocks.state.routeParams = { sessionId: "sess-1" };
+		shellMocks.state.routeParams = { hostId: "local", sessionId: "sess-1" };
 		await renderShell();
 
 		emitShortcut();
@@ -577,26 +586,26 @@ describe("shell application shortcut subscriptions", () => {
 	});
 
 	it("moves to the next active session in the current project", async () => {
-		shellMocks.state.routeParams = { sessionId: "sess-1" };
+		shellMocks.state.routeParams = { hostId: "local", sessionId: "sess-1" };
 		await renderShell();
 
 		act(() => shellMocks.state.nextSessionListener?.());
 
 		expect(shellMocks.navigate).toHaveBeenCalledWith({
-			to: "/projects/$projectId/sessions/$sessionId",
-			params: { projectId: "proj-1", sessionId: "sess-3" },
+			to: "/host/$hostId/session/$sessionId",
+			params: { hostId: "local", sessionId: "sess-3" },
 		});
 	});
 
 	it("wraps to the last session when moving previous from the first", async () => {
-		shellMocks.state.routeParams = { sessionId: "sess-1" };
+		shellMocks.state.routeParams = { hostId: "local", sessionId: "sess-1" };
 		await renderShell();
 
 		act(() => shellMocks.state.previousSessionListener?.());
 
 		expect(shellMocks.navigate).toHaveBeenCalledWith({
-			to: "/projects/$projectId/sessions/$sessionId",
-			params: { projectId: "proj-1", sessionId: "sess-3" },
+			to: "/host/$hostId/session/$sessionId",
+			params: { hostId: "local", sessionId: "sess-3" },
 		});
 	});
 

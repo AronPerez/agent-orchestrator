@@ -56,28 +56,28 @@ describe("isTrayEnabled", () => {
 describe("createTrayLifecycle openSession", () => {
 	it("focuses the window and sends immediately when the window is not loading", () => {
 		const { lifecycle, window, focusWindow } = setup();
-		lifecycle.openSession({ projectId: "p1", sessionId: "s1" });
+		lifecycle.openSession({ host: "local", sessionId: "s1" });
 		expect(focusWindow).toHaveBeenCalledTimes(1);
-		expect(window.webContents.send).toHaveBeenCalledWith(TRAY_OPEN_SESSION_CHANNEL, { projectId: "p1", sessionId: "s1" });
+		expect(window.webContents.send).toHaveBeenCalledWith(TRAY_OPEN_SESSION_CHANNEL, { host: "local", sessionId: "s1" });
 	});
 
 	it("queues the target instead of sending while the window is still loading", () => {
 		const window = fakeWindow(true);
 		const { lifecycle } = setup({ getWindow: () => window as never });
-		lifecycle.openSession({ projectId: "p1", sessionId: "s1" });
+		lifecycle.openSession({ host: "local", sessionId: "s1" });
 		expect(window.webContents.send).not.toHaveBeenCalled();
 		lifecycle.handleRendererReady(eventFrom(window.webContents));
-		expect(window.webContents.send).toHaveBeenCalledWith(TRAY_OPEN_SESSION_CHANNEL, { projectId: "p1", sessionId: "s1" });
+		expect(window.webContents.send).toHaveBeenCalledWith(TRAY_OPEN_SESSION_CHANNEL, { host: "local", sessionId: "s1" });
 	});
 
 	it("queues the target when there is no window at all", () => {
 		const window = fakeWindow(true);
 		let currentWindow: ReturnType<typeof fakeWindow> | null = null;
 		const { lifecycle } = setup({ getWindow: () => currentWindow as never });
-		lifecycle.openSession({ projectId: "p1", sessionId: "s1" });
+		lifecycle.openSession({ host: "local", sessionId: "s1" });
 		currentWindow = window;
 		lifecycle.handleRendererReady(eventFrom(window.webContents));
-		expect(window.webContents.send).toHaveBeenCalledWith(TRAY_OPEN_SESSION_CHANNEL, { projectId: "p1", sessionId: "s1" });
+		expect(window.webContents.send).toHaveBeenCalledWith(TRAY_OPEN_SESSION_CHANNEL, { host: "local", sessionId: "s1" });
 	});
 });
 
@@ -103,11 +103,14 @@ describe("createTrayLifecycle sender validation", () => {
 	it("ignores a renderer-ready ping from a sender that is not the tracked window", () => {
 		const loadingWindow = fakeWindow(true);
 		const { lifecycle } = setup({ getWindow: () => loadingWindow as never });
-		lifecycle.openSession({ projectId: "p1", sessionId: "s1" });
+		lifecycle.openSession({ host: "local", sessionId: "s1" });
 		lifecycle.handleRendererReady(eventFrom({ other: true }));
 		expect(loadingWindow.webContents.send).not.toHaveBeenCalled();
 		lifecycle.handleRendererReady(eventFrom(loadingWindow.webContents));
-		expect(loadingWindow.webContents.send).toHaveBeenCalledWith(TRAY_OPEN_SESSION_CHANNEL, { projectId: "p1", sessionId: "s1" });
+		expect(loadingWindow.webContents.send).toHaveBeenCalledWith(TRAY_OPEN_SESSION_CHANNEL, {
+			host: "local",
+			sessionId: "s1",
+		});
 	});
 });
 
@@ -115,11 +118,11 @@ describe("createTrayLifecycle pending-target flush", () => {
 	it("flushes a queued target once the renderer reports ready", () => {
 		const loadingWindow = fakeWindow(true);
 		const { lifecycle } = setup({ getWindow: () => loadingWindow as never });
-		lifecycle.openSession({ projectId: "p1", sessionId: "s1" });
+		lifecycle.openSession({ host: "local", sessionId: "s1" });
 
 		lifecycle.handleRendererReady(eventFrom(loadingWindow.webContents));
 		expect(loadingWindow.webContents.send).toHaveBeenCalledWith(TRAY_OPEN_SESSION_CHANNEL, {
-			projectId: "p1",
+			host: "local",
 			sessionId: "s1",
 		});
 	});
@@ -136,7 +139,7 @@ describe("createTrayLifecycle clear and dispose", () => {
 		const loadingWindow = fakeWindow(true);
 		const tray = fakeTrayController();
 		const { lifecycle } = setup({ getWindow: () => loadingWindow as never, getTrayController: () => tray });
-		lifecycle.openSession({ projectId: "p1", sessionId: "s1" });
+		lifecycle.openSession({ host: "local", sessionId: "s1" });
 
 		lifecycle.clear();
 		lifecycle.handleRendererReady(eventFrom(loadingWindow.webContents));
@@ -148,7 +151,7 @@ describe("createTrayLifecycle clear and dispose", () => {
 		const loadingWindow = fakeWindow(true);
 		const tray = fakeTrayController();
 		const { lifecycle } = setup({ getWindow: () => loadingWindow as never, getTrayController: () => tray });
-		lifecycle.openSession({ projectId: "p1", sessionId: "s1" });
+		lifecycle.openSession({ host: "local", sessionId: "s1" });
 
 		lifecycle.clearPendingTarget();
 		lifecycle.handleRendererReady(eventFrom(loadingWindow.webContents));

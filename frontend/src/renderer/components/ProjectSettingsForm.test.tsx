@@ -43,6 +43,17 @@ vi.mock("../lib/api-client", () => ({
   },
 }));
 
+vi.mock("../lib/host-clients", () => ({
+  baseUrlFor: () => "http://127.0.0.1:3001",
+  connectedHosts: (() => {
+    const hosts: string[] = [];
+    return () => hosts;
+  })(),
+  subscribeConnectedHosts: () => () => undefined,
+  isHostReady: () => true,
+  clientFor: () => ({ GET: getMock, PUT: putMock, POST: postMock }),
+}));
+
 import {
   ProjectSettingsForm,
   type ProjectSettingsSaveState,
@@ -91,7 +102,7 @@ function TestProjectSettings({
   return (
     <>
       <ProjectSettingsForm
-        projectId={projectId}
+        project={{ host: "local", id: projectId }}
         section={section}
         onSaveState={setSaveState}
       />
@@ -124,7 +135,7 @@ function renderSettings(
   }
   render(
     <QueryClientProvider client={queryClient}>
-      <TestProjectSettings projectId={projectId} section={section} />
+		<TestProjectSettings projectId={projectId} section={section} />
     </QueryClientProvider>,
   );
   return queryClient;
@@ -1597,7 +1608,7 @@ describe("ProjectSettingsForm", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText("Save failed")).not.toBeInTheDocument();
     expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: ["project", "proj-1"],
+      queryKey: ["project", "local:proj-1"],
     });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: workspaceQueryKey });
   });

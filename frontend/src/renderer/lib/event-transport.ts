@@ -2,9 +2,9 @@ import type { QueryClient } from "@tanstack/react-query";
 import { aoBridge } from "./bridge";
 import { subscribeApiBaseUrl } from "./api-client";
 import { setEventsConnectionState } from "./events-connection";
-import { connectedHosts } from "./host-clients";
+import { connectedHosts, subscribeConnectedHosts } from "./host-clients";
 import { closeAllHostStreams, syncHostStreams } from "./host-events";
-import { LOCAL_HOST, type HostId } from "./hosts";
+import { LOCAL_HOST, parseRefKey, refKey, type HostId } from "./hosts";
 import { workspaceQueryKey } from "../hooks/useWorkspaceQuery";
 import { sessionScmSummaryQueryKey } from "../hooks/useSessionScmSummary";
 import { conversationQueryKey } from "../hooks/useConversation";
@@ -55,7 +55,7 @@ export function createEventTransport(queryClient: QueryClient): EventTransport {
 							typeof payload?.conversationId === "string" &&
 							payload.conversationId
 						) {
-							pendingConversationSessions.add(decoded.sessionId);
+							pendingConversationSessions.add(refKey({ host: host ?? LOCAL_HOST, id: decoded.sessionId }));
 							conversationOnly = true;
 						}
 					} catch {
@@ -85,9 +85,9 @@ export function createEventTransport(queryClient: QueryClient): EventTransport {
 						});
 					}
 					pendingWorkspaceHosts.clear();
-					for (const sessionId of pendingConversationSessions) {
+					for (const sessionKey of pendingConversationSessions) {
 						void queryClient.invalidateQueries({
-							queryKey: conversationQueryKey(sessionId),
+							queryKey: conversationQueryKey(parseRefKey(sessionKey)),
 						});
 					}
 					pendingConversationSessions.clear();
@@ -105,12 +105,14 @@ export function createEventTransport(queryClient: QueryClient): EventTransport {
 			// Rebind when the daemon comes back on a different port, independent of
 			// status-event ordering.
 			const removeBaseUrlListener = subscribeApiBaseUrl(connectSources);
+			const removeHostsListener = subscribeConnectedHosts(connectSources);
 			connectSources();
 
 			return () => {
 				if (debounce) clearTimeout(debounce);
 				removeDaemonListener();
 				removeBaseUrlListener();
+				removeHostsListener();
 				closeAllHostStreams();
 				setEventsConnectionState("idle");
 			};

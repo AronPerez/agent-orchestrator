@@ -60,7 +60,7 @@ export function createTrayController(options: TrayControllerOptions): TrayContro
 		const title = entry.title || t("tray.untitledSession");
 		return {
 			label: entry.projectName ? `${title}  ·  ${entry.projectName}` : title,
-			click: () => options.openSession({ projectId: entry.projectId, sessionId: entry.sessionId }),
+			click: () => options.openSession({ host: entry.host, sessionId: entry.sessionId }),
 		};
 	};
 

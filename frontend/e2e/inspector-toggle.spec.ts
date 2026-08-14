@@ -10,7 +10,7 @@ import { expect, test } from "@playwright/test";
 // the real rrp + CSS pipeline, which the mocked unit tests can't exercise.
 test("topbar button collapses and reopens the inspector rail", async ({ page }) => {
 	// A worker session from the dev:web mock dataset (lib/mock-data.ts).
-	await page.goto("/#/projects/ao-demo/sessions/demo-working");
+	await page.goto("/#/host/local/session/demo-working");
 
 	// Fresh profile: the rail must mount open, not get toggled shut by
 	// mount-time layout events.

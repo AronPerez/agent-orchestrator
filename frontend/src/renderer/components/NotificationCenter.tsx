@@ -21,6 +21,7 @@ import { useRestoreSession } from "../hooks/useRestoreSession";
 import { useWorkspaceQuery } from "../hooks/useWorkspaceQuery";
 import { flattenHostSections } from "../types/workspace";
 import { aoBridge } from "../lib/bridge";
+import { LOCAL_HOST, refKey } from "../lib/hosts";
 import { openLinkInSystemBrowser } from "../lib/external-link-policy";
 import { formatTimeCompact } from "../lib/format-time";
 import {
@@ -52,7 +53,7 @@ function useNotificationTargetNavigation() {
 			const sessionId = notification.target.sessionId || notification.sessionId;
 			if (!sessionId) return;
 			void captureRendererEvent("ao.renderer.notification_opened", { target: "session" });
-			navigateToSession(notification.projectId, sessionId);
+			navigateToSession({ host: LOCAL_HOST, id: sessionId });
 		},
 		[navigateToSession],
 	);
@@ -85,7 +86,7 @@ function useSessionTerminationLookup(): {
 		for (const workspace of flatWorkspaces) {
 			for (const session of workspace.sessions) {
 				if (session.isTerminated === true || session.status === "terminated") {
-					ids.add(session.id);
+					ids.add(refKey(session));
 				}
 			}
 		}
@@ -108,9 +109,9 @@ export function NotificationRuntime() {
 	const { openPrimary } = useNotificationTargetNavigation();
 	const unreadQuery = useNotificationsQuery("unread");
 	const unreadCount = getCachedUnreadCount(unreadQuery.data);
-	const params = useParams({ strict: false }) as { sessionId?: string };
-	const routeSessionIdRef = useRef(params.sessionId);
-	routeSessionIdRef.current = params.sessionId;
+	const params = useParams({ strict: false }) as { hostId?: string; sessionId?: string };
+	const routeSessionRef = useRef(params.hostId && params.sessionId ? { host: params.hostId, id: params.sessionId } : undefined);
+	routeSessionRef.current = params.hostId && params.sessionId ? { host: params.hostId, id: params.sessionId } : undefined;
 
 	// Being on the session route is not the same as watching the agent: its pane
 	// renders one terminal at a time, so a shell or reviewer tab hides the agent
@@ -118,9 +119,9 @@ export function NotificationRuntime() {
 	// is the one on screen. Read the store imperatively — this feeds a getter for
 	// the long-lived SSE connection, which needs the current value, not a render.
 	const getVisibleAgentSessionId = useCallback(() => {
-		const sessionId = routeSessionIdRef.current;
-		if (!sessionId) return undefined;
-		return useUiStore.getState().visibleTerminalKindBySession[sessionId] === "worker" ? sessionId : undefined;
+		const session = routeSessionRef.current;
+		if (!session || session.host !== LOCAL_HOST) return undefined;
+		return useUiStore.getState().visibleTerminalKindBySession[refKey(session)] === "worker" ? session.id : undefined;
 	}, []);
 
 	useEffect(
@@ -175,7 +176,7 @@ export function NotificationCenter({ style }: NotificationCenterProps) {
 		const map = new Map<string, { projectName: string; sessionName: string }>();
 		for (const workspace of flatWorkspaces) {
 			for (const session of workspace.sessions) {
-				map.set(session.id, { projectName: workspace.name, sessionName: session.title });
+				map.set(refKey(session), { projectName: workspace.name, sessionName: session.title });
 			}
 		}
 		return map;
@@ -262,7 +263,7 @@ export function NotificationCenter({ style }: NotificationCenterProps) {
 		setRestoringSessionId(sessionId);
 		setActionError(null);
 		try {
-			const result = await restoreSession(sessionId);
+			const result = await restoreSession({ host: LOCAL_HOST, id: sessionId });
 			if (result.status === "success") {
 				openSession(notification);
 				setPanelOpen(false);
@@ -362,7 +363,8 @@ export function NotificationCenter({ style }: NotificationCenterProps) {
 					>
 						{notifications.map((notification) => {
 							const sessionId = notification.target.sessionId || notification.sessionId;
-							const terminated = Boolean(sessionId) && terminatedIds.has(sessionId);
+							const sessionKey = sessionId ? refKey({ host: LOCAL_HOST, id: sessionId }) : undefined;
+							const terminated = sessionKey !== undefined && terminatedIds.has(sessionKey);
 							// Restoring only makes sense when an agent is actually paused waiting
 							// on input. PR outcomes (ready_to_merge, pr_merged, pr_closed_unmerged)
 							// describe work that already finished — there is nothing to resume, so
@@ -373,7 +375,7 @@ export function NotificationCenter({ style }: NotificationCenterProps) {
 								<NotificationItem
 									highlighted={highlightedIds.has(notification.id) || notification.status === "unread"}
 									key={notification.id}
-									meta={sessionId ? sessionMeta.get(sessionId) : undefined}
+									meta={sessionKey ? sessionMeta.get(sessionKey) : undefined}
 									notification={notification}
 									onOpenSession={openSessionAndDismiss}
 									onRestore={() => void restoreAndOpen(notification)}

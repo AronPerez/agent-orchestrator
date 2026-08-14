@@ -57,8 +57,8 @@ describe("shell index route", () => {
 
 		await waitFor(() =>
 			expect(routeMocks.navigate).toHaveBeenCalledWith({
-				to: "/projects/$projectId",
-				params: { projectId: "scratch" },
+				to: "/host/$hostId/project/$projectId",
+				params: { hostId: "local", projectId: "scratch" },
 				replace: true,
 			}),
 		);
@@ -73,5 +73,28 @@ describe("shell index route", () => {
 		await renderIndex();
 
 		expect(routeMocks.navigate).not.toHaveBeenCalled();
+	});
+
+	it("keeps a remote scratch workspace on its owning host", async () => {
+		routeMocks.workspaces = [
+			{
+				host: "http://192.0.2.1:3011",
+				id: "scratch",
+				name: "Scratch",
+				kind: "scratch",
+				path: "/home/me/.ao/scratch/default",
+				sessions: [],
+			},
+		];
+
+		await renderIndex();
+
+		await waitFor(() =>
+			expect(routeMocks.navigate).toHaveBeenCalledWith({
+				to: "/host/$hostId/project/$projectId",
+				params: { hostId: "http://192.0.2.1:3011", projectId: "scratch" },
+				replace: true,
+			}),
+		);
 	});
 });

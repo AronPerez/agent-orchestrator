@@ -76,23 +76,22 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import { OrchestratorIcon } from "./icons";
 import aoLogo from "../../../assets/ao-logo.svg";
 import { cn } from "../lib/utils";
-import { activeHost } from "../lib/active-host";
+import { refKey, type Ref } from "../lib/hosts";
+import { hostActionSuffix } from "../lib/host-disclosure";
 import { useUiStore } from "../stores/ui-store"
 import { useKeybindingsStore } from "../stores/keybindings-store";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { CreateProjectFlow, type CreateProjectInput } from "./CreateProjectFlow";
 import { ResizeHandle } from "./ResizeHandle";
-import { SidebarRemoteHosts } from "./SidebarRemoteHosts";
 import { isMacPlatform } from "../lib/platform";
 import { useCloudSession } from "../lib/cloud-session";
 
 // Destructive controls must say which machine they destroy on: while a remote
 // host is active nothing else in this tree distinguishes its sessions from the
 // local ones. Empty on local, so that copy stays byte-identical to before.
-function useHostSuffix(): string {
+function useHostSuffix(host: string): string {
 	const { t } = useTranslation();
-	const host = activeHost();
-	return host ? ` ${t("hosts.on", { host: host.label })}` : "";
+	return hostActionSuffix(t, host);
 }
 
 // macOS paints framed chrome: the fixed TitlebarNav cluster carries the
@@ -137,7 +136,7 @@ type SidebarProps = {
 	workspaces: WorkspaceSummary[];
 	onCreateProject: (input: CreateProjectInput) => Promise<void>;
 	onInitializeProject: (path: string) => Promise<void>;
-	onRemoveProject: (projectId: string) => Promise<void>;
+	onRemoveProject: (project: Ref) => Promise<void>;
 };
 
 // Selection state comes from the URL: which project/session is active is the
@@ -146,20 +145,27 @@ function useSelection() {
 	const navigate = useNavigate();
 	const openGlobalSettings = useUiStore((state) => state.openGlobalSettings);
 	const openProjectSettings = useUiStore((state) => state.openProjectSettings);
-	const params = useParams({ strict: false }) as { projectId?: string; sessionId?: string };
+	const params = useParams({ strict: false }) as { hostId?: string; projectId?: string; sessionId?: string };
 	const pathname = useRouterState({ select: (state) => state.location.pathname });
 	return {
 		isHome: pathname === "/",
 		activeProjectId: params.projectId,
+		activeHostId: params.hostId,
 		activeSessionId: params.sessionId,
 		goHome: () => void navigate({ to: "/" }),
 		// Settings is a modal — open it in place so the current page (session
 		// terminal, board, etc.) stays underneath.
 		goGlobalSettings: () => openGlobalSettings(),
-		goSettings: (projectId: string) => openProjectSettings(projectId),
-		goProject: (projectId: string) => void navigate({ to: "/projects/$projectId", params: { projectId } }),
-		goSession: (projectId: string, sessionId: string) =>
-			void navigate({ to: "/projects/$projectId/sessions/$sessionId", params: { projectId, sessionId } }),
+		goSettings: (project: Ref) => openProjectSettings(project),
+		goProject: (project: Ref) => void navigate({
+			to: "/host/$hostId/project/$projectId",
+			params: { hostId: project.host, projectId: project.id },
+		}),
+		goSession: (session: Ref) =>
+			void navigate({
+				to: "/host/$hostId/session/$sessionId",
+				params: { hostId: session.host, sessionId: session.id },
+			}),
 	};
 }
 
@@ -216,10 +222,10 @@ export function Sidebar({
 	// Disclosure state: projects are expanded by default; a project id present in
 	// this set is collapsed (sessions hidden).
 	const [collapsedIds, setCollapsedIds] = useState<ReadonlySet<string>>(() => new Set());
-	const toggleCollapsed = (id: string) =>
+	const toggleCollapsed = (key: string) =>
 		setCollapsedIds((prev) => {
 			const next = new Set(prev);
-			next.has(id) ? next.delete(id) : next.add(id);
+			next.has(key) ? next.delete(key) : next.add(key);
 			return next;
 		});
 	// Section disclosure: Pinned header collapses its body. Projects stays open.
@@ -355,11 +361,11 @@ export function Sidebar({
 							>
 								{pinnedSessions.map((session) => (
 									<SessionRow
-										key={session.id}
+										key={refKey(session)}
 										session={session}
-										active={selection.activeSessionId === session.id}
+										active={selection.activeHostId === session.host && selection.activeSessionId === session.id}
 										indented={false}
-										onOpen={() => selection.goSession(session.workspaceId, session.id)}
+										onOpen={() => selection.goSession(session)}
 									/>
 								))}
 							</SidebarMenuSub>
@@ -396,11 +402,11 @@ export function Sidebar({
 							<SidebarMenu className="gap-0.5 rounded-lg overflow-hidden group-data-[collapsible=icon]:gap-1 group-data-[collapsible=icon]:rounded-none group-data-[collapsible=icon]:overflow-visible">
 								{workspaces.map((workspace) => (
 									<ProjectItem
-										key={workspace.id}
+										key={refKey(workspace)}
 										workspace={workspace}
-										expanded={!collapsedIds.has(workspace.id)}
+										expanded={!collapsedIds.has(refKey(workspace))}
 										selection={selection}
-										onToggle={() => toggleCollapsed(workspace.id)}
+										onToggle={() => toggleCollapsed(refKey(workspace))}
 										onRemoveProject={onRemoveProject}
 									/>
 								))}
@@ -409,8 +415,6 @@ export function Sidebar({
 						)}
 					</SidebarGroupContent>
 				</SidebarGroup>
-				{/* The machines you are not looking at — read-only, below the tree. */}
-				<SidebarRemoteHosts />
 			</SidebarContent>
 
 			{/* Footer — Settings opens the global settings page directly.
@@ -502,12 +506,13 @@ function ProjectItem({
 	expanded: boolean;
 	selection: Selection;
 	onToggle: () => void;
-	onRemoveProject: (projectId: string) => Promise<void>;
+	onRemoveProject: (project: Ref) => Promise<void>;
 }) {
 	const { t } = useTranslation();
-	const hostSuffix = useHostSuffix();
+	const hostSuffix = useHostSuffix(workspace.host);
 	const prefersReducedMotion = useReducedMotion();
-	const activeProjectMatches = selection.activeProjectId === workspace.id;
+	const activeProjectMatches =
+		selection.activeHostId === workspace.host && selection.activeProjectId === workspace.id;
 	const dashboardActive = activeProjectMatches && !selection.activeSessionId;
 	const orchestratorActive =
 		activeProjectMatches &&
@@ -531,7 +536,7 @@ function ProjectItem({
 		return () => cancelAnimationFrame(id);
 	}, []);
 	const restartingProjectIds = useUiStore((state) => state.restartingProjectIds);
-	const isProjectRestarting = restartingProjectIds.has(workspace.id);
+	const isProjectRestarting = restartingProjectIds.has(refKey(workspace));
 	const requestNewTask = useUiStore((state) => state.requestNewTask);
 	// Keep completed PR sessions reachable while their runtime still exists.
 	// Only termination removes a worker from the sidebar; archived sessions stay
@@ -549,18 +554,18 @@ function ProjectItem({
 		if (isProjectRestarting) return;
 		if (!expanded) onToggle();
 		if (orchestrator) {
-			selection.goSession(workspace.id, orchestrator.id);
+			selection.goSession(orchestrator);
 			return;
 		}
 		if (!hasConfiguredOrchestratorAgent(workspace)) {
-			selection.goSettings(workspace.id);
+			selection.goSettings(workspace);
 			return;
 		}
 		setIsSpawning(true);
 		try {
-			const sessionId = await spawnOrchestrator(workspace.id, "sidebar");
+			const sessionId = await spawnOrchestrator(workspace, "sidebar");
 			await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
-			selection.goSession(workspace.id, sessionId);
+			selection.goSession({ host: workspace.host, id: sessionId });
 		} catch (err) {
 			console.error("Failed to spawn orchestrator:", err);
 		} finally {
@@ -575,11 +580,11 @@ function ProjectItem({
 	const onProjectClick = () => {
 		if (!expanded) {
 			onToggle();
-			selection.goProject(workspace.id);
+			selection.goProject(workspace);
 		} else if (dashboardActive) {
 			onToggle();
 		} else {
-			selection.goProject(workspace.id);
+			selection.goProject(workspace);
 		}
 	};
 
@@ -610,7 +615,7 @@ function ProjectItem({
 		// after removal while the sidebar keeps progress/error feedback visible.
 		selection.goHome();
 		try {
-			await onRemoveProject(workspace.id);
+			await onRemoveProject(workspace);
 		} catch (err) {
 			const message = err instanceof Error ? err.message : t("shell.couldNotRemoveProject");
 			setRemoveError(message);
@@ -640,7 +645,7 @@ function ProjectItem({
 			onPointerLeave={() => setProjectPressed(false)}
 			onPointerUp={() => setProjectPressed(false)}
 		>
-		<div>
+		<div data-project-ref={refKey(workspace)}>
 		{/* project-sidebar__proj-row */}
 	<SidebarMenuButton
 		aria-current={dashboardActive ? "page" : undefined}
@@ -755,12 +760,12 @@ function ProjectItem({
 					</button>
 				</DropdownMenuTrigger>
 				<DropdownMenuContent side="right" align="start" className="min-w-44">
-					<DropdownMenuItem disabled={isProjectRestarting} onSelect={() => requestNewTask(workspace.id)}>
+					<DropdownMenuItem disabled={isProjectRestarting} onSelect={() => requestNewTask(workspace)}>
 						<Plus aria-hidden="true" />
 						{t("shell.newSession")}
 					</DropdownMenuItem>
 					<DropdownMenuSeparator />
-					<DropdownMenuItem onSelect={() => selection.goSettings(workspace.id)}>
+					<DropdownMenuItem onSelect={() => selection.goSettings(workspace)}>
 						<Settings aria-hidden="true" />
 						{t("shell.projectSettings")}
 					</DropdownMenuItem>
@@ -779,7 +784,7 @@ function ProjectItem({
 		</div>{/* end outer relative */}
 		{isRemoving ? (
 			<div className="sidebar-expanded-chrome px-5 py-1 text-2xs text-muted-foreground" role="status">
-				{t("shell.removingNamed", { name: workspace.name })}
+				{t("shell.removingNamed", { name: workspace.name })}{hostSuffix}
 			</div>
 		) : removeError ? (
 			<div className="sidebar-expanded-chrome px-5 py-1 text-2xs text-destructive" role="alert">
@@ -808,10 +813,10 @@ function ProjectItem({
 						<SidebarMenuSub className="mx-0 ml-3.5 translate-x-0 gap-px border-l-0 px-0 py-1">
 							{sessions.map((session) => (
 								<SessionRow
-									key={session.id}
+									key={refKey(session)}
 									session={session}
-									active={selection.activeSessionId === session.id}
-									onOpen={() => selection.goSession(workspace.id, session.id)}
+								active={selection.activeHostId === session.host && selection.activeSessionId === session.id}
+								onOpen={() => selection.goSession(session)}
 								/>
 							))}
 						</SidebarMenuSub>
@@ -839,12 +844,12 @@ function ProjectItem({
 		</SidebarMenuItem>
 		</ContextMenuTrigger>
 		<ContextMenuContent className="min-w-44">
-			<ContextMenuItem disabled={isProjectRestarting} onSelect={() => requestNewTask(workspace.id)}>
+			<ContextMenuItem disabled={isProjectRestarting} onSelect={() => requestNewTask(workspace)}>
 				<Plus aria-hidden="true" />
 				{t("shell.newSession")}
 			</ContextMenuItem>
 			<ContextMenuSeparator />
-			<ContextMenuItem onSelect={() => selection.goSettings(workspace.id)}>
+			<ContextMenuItem onSelect={() => selection.goSettings(workspace)}>
 				<Settings aria-hidden="true" />
 				{t("shell.projectSettings")}
 			</ContextMenuItem>
@@ -877,7 +882,7 @@ function SessionRow({
 	onOpen: () => void;
 }) {
 	const { t } = useTranslation();
-	const hostSuffix = useHostSuffix();
+	const hostSuffix = useHostSuffix(session.host);
 	const [isEditing, setIsEditing] = useState(false);
 	const [draft, setDraft] = useState(session.title);
 	// Escape must not be swallowed by the blur-to-save path: the keydown handler
@@ -904,7 +909,7 @@ function SessionRow({
 		const name = draft.trim();
 		if (!name || name === session.title) return;
 		try {
-			await renameSession(session.id, name);
+			await renameSession(session, name);
 			await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
 		} catch (err) {
 			console.error("Failed to rename session:", err);
@@ -985,7 +990,9 @@ function SessionRow({
 					)}
 					onClick={(e) => {
 						e.stopPropagation();
-						session.isPinned ? unpinSession(session) : pinSession(session);
+						session.isPinned
+							? unpinSession({ host: session.host, id: session.id })
+							: pinSession({ host: session.host, id: session.id });
 					}}
 					type="button"
 				>
