@@ -440,7 +440,9 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
         ) : null}
         {showStartup ? (
           <DaemonStartupLoader />
-        ) : workspaceStartupState === "error" || workspaceQuery.isError ? (
+        ) : workspaceStartupState === "error" ||
+          workspaceQuery.isError ||
+          workspaceQuery.localFailure ? (
           <p className="py-10 text-center text-xs text-passive">
             {t("shell.couldNotLoadSessions")}
           </p>

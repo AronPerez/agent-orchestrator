@@ -79,7 +79,7 @@ function useSessionTerminationLookup(): {
 	terminatedIds: Set<string>;
 	workspaceError: boolean;
 } {
-	const { data: workspaces, isError, isSuccess, refetch } = useWorkspaceQuery();
+	const { data: workspaces, isError, isSuccess, localFailure, refetch } = useWorkspaceQuery();
 	const flatWorkspaces = useMemo(() => flattenHostSections(workspaces), [workspaces]);
 	const terminatedIds = useMemo(() => {
 		const ids = new Set<string>();
@@ -98,9 +98,9 @@ function useSessionTerminationLookup(): {
 		retryWorkspace: () => {
 			void refetch();
 		},
-		sessionsReady: isSuccess,
+		sessionsReady: isSuccess && !localFailure,
 		terminatedIds,
-		workspaceError: isError,
+		workspaceError: isError || Boolean(localFailure),
 	};
 }
 

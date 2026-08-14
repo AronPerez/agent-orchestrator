@@ -381,6 +381,7 @@ describe("useWorkspaceQuery", () => {
 
 		await waitFor(() => expect(result.current.isSuccess).toBe(true));
 		expect(result.current.data?.[0]).toMatchObject({ status: "failed", failure: "Failed to fetch" });
+		expect(result.current.localFailure).toBe("Failed to fetch");
 	});
 
 	it("reports a sessions fetch error on the local host even when projects load", async () => {
@@ -487,6 +488,38 @@ describe("useWorkspaceQuery — multi-host", () => {
 		);
 		expect(fetchCounts.get(REMOTE)).toBe(2);
 		expect(fetchCounts.get(LOCAL_HOST)).toBe(1);
+	});
+
+	it("retains last-good host data when an invalidated host refetch fails", async () => {
+		const queryClient = new QueryClient({ defaultOptions: { queries: { retryDelay: 0 } } });
+		let remoteFails = false;
+		connectedHostsMock.mockReturnValue([REMOTE]);
+		getMock.mockImplementation(async (host: HostId, url: string) => {
+			if (host === REMOTE && remoteFails) throw new Error("remote daemon dropped");
+			if (url === "/api/v1/projects") {
+				return { data: { projects: [{ id: host, name: host, path: `/${host}` }] } };
+			}
+			if (url === "/api/v1/sessions") return { data: { sessions: [] } };
+			throw new Error(`unexpected GET ${url}`);
+		});
+		const queryWrapper = ({ children }: { children: ReactNode }) => (
+			<QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+		);
+		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper: queryWrapper });
+		await waitFor(() => expect(result.current.data).toHaveLength(2));
+
+		remoteFails = true;
+		await act(async () => {
+			await queryClient.invalidateQueries({ queryKey: ["workspaces", REMOTE] });
+		});
+		await waitFor(() =>
+			expect(result.current.data?.find((section) => section.host === REMOTE)?.status).toBe("failed"),
+		);
+
+		const remote = result.current.data?.find((section) => section.host === REMOTE);
+		expect(remote).toMatchObject({ status: "failed", failure: "remote daemon dropped" });
+		expect(remote?.workspaces.map((workspace) => workspace.id)).toEqual([REMOTE]);
+		expect(result.current.data?.find((section) => section.host === LOCAL_HOST)?.workspaces).toHaveLength(1);
 	});
 
 	it("a host returning a malformed body fails that host, it does not throw", async () => {

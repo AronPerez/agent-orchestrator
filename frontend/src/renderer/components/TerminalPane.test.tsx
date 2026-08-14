@@ -493,25 +493,20 @@ describe("TerminalCacheProvider", () => {
 		}
 	});
 
-	it("retains terminals while their host workspace snapshot is failed", async () => {
+	it("retains cached workspaces and terminals when an invalidated host refetch fails", async () => {
 		const view = renderCachedPane({ session: sessionA, sessions: [sessionA, sessionB] });
 		try {
 			const terminalA = await waitFor(() => activeXterm());
 			view.show(sessionB);
 			await waitFor(() => expect(activeXterm()).not.toBe(terminalA));
-			act(() => {
-				view.queryClient.setQueryData(workspaceHostQueryKey("local"), [{
-					host: "local",
-					label: "Local",
-					status: "failed",
-					workspaces: [],
-					failure: "temporarily unavailable",
-				}]);
+			await act(async () => {
+				await view.queryClient.invalidateQueries({ queryKey: workspaceHostQueryKey("local") });
 			});
 
-			await act(async () => {
-				await new Promise((resolve) => setTimeout(resolve, 50));
-			});
+			const section = view.queryClient.getQueryData<ReturnType<typeof localSection>>(
+				workspaceHostQueryKey("local"),
+			)?.[0];
+			expect(section).toMatchObject({ status: "failed", workspaces: workspaceWithSessions([sessionA, sessionB]) });
 			expect(terminalA.isConnected).toBe(true);
 			expect(xtermUnmounts.value).toBe(0);
 		} finally {
