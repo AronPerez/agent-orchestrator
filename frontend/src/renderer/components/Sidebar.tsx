@@ -421,7 +421,7 @@ export function Sidebar({
 				) : null}
 			</div>
 
-			<SidebarContent className="gap-0 px-2 group-data-[collapsible=icon]:items-center group-data-[collapsible=icon]:px-1.5">
+			<SidebarContent className="project-sidebar-scrollbar gap-0 px-2 group-data-[collapsible=icon]:items-center group-data-[collapsible=icon]:px-1.5">
 				<SidebarGroup className="p-0">
 					{/* Tree (project-sidebar__tree) */}
 					<SidebarGroupContent>
