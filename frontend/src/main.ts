@@ -89,9 +89,10 @@ import {
 import type { DaemonStatus } from "./shared/daemon-status";
 import { attachAppShortcuts } from "./main/app-shortcuts";
 import {
-  KEYBOARD_SHORTCUTS_HELP_CHANNEL,
-  SET_CLOSE_SHELL_TERMINAL_SHORTCUT_ENABLED_CHANNEL,
-  type KeybindingOverrides,
+	KEYBOARD_SHORTCUTS_HELP_CHANNEL,
+	SET_CLOSE_SHELL_TERMINAL_SHORTCUT_ENABLED_CHANNEL,
+	SET_TERMINAL_FOCUSED_CHANNEL,
+	type KeybindingOverrides,
 } from "./shared/shortcuts";
 import { createTrayController, type TrayController } from "./main/tray";
 import { createTrayLifecycle, isTrayEnabled } from "./main/tray-lifecycle";
@@ -246,6 +247,7 @@ let browserRuntimeLinkIdentity: BrowserRuntimeIdentity | null = null;
 let keybindingOverrides: KeybindingOverrides = {};
 let keybindingRecordingActive = false;
 let closeShellTerminalShortcutEnabled = false;
+let terminalFocused = false;
 // Held for the app lifetime. Dropping it (on any exit) triggers daemon self-stop.
 let supervisorLink: SupervisorLinkHandle | null = null;
 // Guard: prevents stacking multiple flashFrame(true) calls when notifications arrive rapidly.
@@ -560,25 +562,24 @@ async function createWindowInternal(): Promise<void> {
     }
   });
 
-  // Application shortcuts are handled here so they fire no matter which web
-  // contents holds focus — the shell renderer, xterm's helper textarea, or a
-  // browser-preview view (wired per-view in the browser host).
-  const isMac = process.platform === "darwin";
-  attachAppShortcuts(
-    shellWebContents,
-    isMac,
-    shellWebContents,
-    false,
-    () => keybindingOverrides,
-    () => keybindingRecordingActive,
-    () => true,
-    (id) => {
-      if (id !== "toggle-browser-devtools") return;
-      void browserViewHost
-        ?.toggleDevToolsForLastFocused()
-        .catch(() => undefined);
-    },
-  );
+	// Application shortcuts are handled here so they fire no matter which web
+	// contents holds focus — the shell renderer, xterm's helper textarea, or a
+	// browser-preview view (wired per-view in the browser host).
+	const isMac = process.platform === "darwin";
+	attachAppShortcuts(
+		shellWebContents,
+		isMac,
+		shellWebContents,
+		false,
+		() => keybindingOverrides,
+		() => keybindingRecordingActive,
+		() => true,
+		(id) => {
+			if (id !== "toggle-browser-devtools") return;
+			void browserViewHost?.toggleDevToolsForLastFocused().catch(() => undefined);
+		},
+		() => terminalFocused,
+	);
 
   browserViewHost = createBrowserViewHost({
     mainWindow,
@@ -605,23 +606,27 @@ async function createWindowInternal(): Promise<void> {
     });
   }
 
-  // macOS: traffic lights vanish in native fullscreen, so the renderer drops
-  // the clearance pad above TitlebarNav. Push state so the sidebar can react
-  // without polling isFullScreen().
-  const pushFullScreen = () => {
-    if (!mainWindow) return;
-    getShellWebContents()?.send("window:fullscreen", mainWindow.isFullScreen());
-  };
-  mainWindow.on("enter-full-screen", pushFullScreen);
-  mainWindow.on("leave-full-screen", pushFullScreen);
-  mainWindow.on("blur", () => {
-    keybindingRecordingActive = false;
-  });
-  shellWebContents.on("render-process-gone", () => {
-    keybindingRecordingActive = false;
-  });
-  shellWebContents.on("did-start-loading", () => trayLifecycle.clear());
-  shellWebContents.on("render-process-gone", () => trayLifecycle.clear());
+	// macOS: traffic lights vanish in native fullscreen, so the renderer drops
+	// the clearance pad above TitlebarNav. Push state so the sidebar can react
+	// without polling isFullScreen().
+	const pushFullScreen = () => {
+		if (!mainWindow) return;
+		getShellWebContents()?.send("window:fullscreen", mainWindow.isFullScreen());
+	};
+	mainWindow.on("enter-full-screen", pushFullScreen);
+	mainWindow.on("leave-full-screen", pushFullScreen);
+	mainWindow.on("blur", () => {
+		keybindingRecordingActive = false;
+	});
+	shellWebContents.on("render-process-gone", () => {
+		keybindingRecordingActive = false;
+		terminalFocused = false;
+	});
+	shellWebContents.on("did-start-loading", () => {
+		terminalFocused = false;
+		trayLifecycle.clear();
+	});
+	shellWebContents.on("render-process-gone", () => trayLifecycle.clear());
 
   mainWindow.on("closed", () => {
     disposeBrowserRuntimeLink();
@@ -1782,6 +1787,11 @@ ipcMain.on(
     closeShellTerminalShortcutEnabled = enabled === true;
   },
 );
+
+ipcMain.on(SET_TERMINAL_FOCUSED_CHANNEL, (event, focused: unknown) => {
+	if (event.sender !== getShellWebContents() || typeof focused !== "boolean") return;
+	terminalFocused = focused;
+});
 
 // Backs the custom title-bar menu (WindowTitlebar). Each item maps to the same
 // action the native default menu would have performed.

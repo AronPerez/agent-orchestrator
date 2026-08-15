@@ -28,12 +28,11 @@ export type SettingsModal =
 
 /** Worker detail view toggles — Changes (Git rail) is the default. */
 export type WorkbenchTab = "changes" | "files" | "terminal";
-export type InspectorView = "summary" | "browser" | "files";
+export type InspectorView = "summary" | "reviews" | "browser" | "files";
 
 export type InspectorSessionState = {
 	isOpen: boolean;
 	view: InspectorView;
-	previewKey?: string;
 	/** The current non-empty browser content lifecycle has already been revealed. */
 	browserContentRevealed?: boolean;
 	/** Real browser activity occurred while Browser was not visible. */
@@ -94,7 +93,6 @@ type UiState = {
 	setInspectorOpen: (sessionId: string, isOpen: boolean) => void;
 	toggleInspector: (sessionId: string) => void;
 	setInspectorView: (sessionId: string, view: InspectorView) => void;
-	markInspectorPreviewSeen: (sessionId: string, previewKey: string) => void;
 	setBrowserContentRevealed: (sessionId: string, revealed: boolean) => void;
 	setBrowserUnseen: (sessionId: string, unseen: boolean) => void;
 	setCommandPaletteOpen: (open: boolean) => void;
@@ -214,16 +212,6 @@ export const useUiStore = create<UiState>((set, get) => ({
 				inspectorSessions: {
 					...state.inspectorSessions,
 					[sessionId]: { ...current, view, browserUnseen },
-				},
-			};
-		}),
-	markInspectorPreviewSeen: (sessionId, previewKey) =>
-		set((state) => {
-			const current = inspectorState(state.inspectorSessions, sessionId);
-			return {
-				inspectorSessions: {
-					...state.inspectorSessions,
-					[sessionId]: { ...current, previewKey },
 				},
 			};
 		}),

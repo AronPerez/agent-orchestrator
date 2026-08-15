@@ -26,6 +26,8 @@ import { baseUrlFor } from "../../lib/host-clients";
 
 export function SessionChatSurface({
 	session,
+	reviewerTerminal,
+	onOpenReviewerTerminal,
 	onOpenShell,
 	openingShell,
 	shellError,
@@ -33,6 +35,8 @@ export function SessionChatSurface({
 	controllerTransitioning,
 }: {
 	session: WorkspaceSession;
+	reviewerTerminal?: { handleId: string; harness: string };
+	onOpenReviewerTerminal?: (target: { handleId: string; harness: string }) => void;
 	onOpenShell?: () => void;
 	openingShell?: boolean;
 	shellError?: string;
@@ -121,6 +125,8 @@ export function SessionChatSurface({
 			onLinkOpen={openLinkInBrowser}
 			sessionTitle={session.title}
 			sessionRole={session.kind}
+			reviewerTerminal={reviewerTerminal}
+			onOpenReviewerTerminal={onOpenReviewerTerminal}
 			headerActions={headerActions}
 			controllerTransitioning={controllerTransitioning}
 			hasOlder={hasOlder}
@@ -168,6 +174,11 @@ export function SessionChatSurface({
 			// covers the window before the controller reports, and it is the last word
 			// afterwards, since the capability is a property of the driver.
 			onSteer={can(snapshot, "steer") && !commands.steerUnsupported ? commands.steer : undefined}
+			onPromoteQueuedTurn={
+				can(snapshot, "steer") && !commands.steerUnsupported
+					? commands.promoteQueuedTurn
+					: undefined
+			}
 			steerPending={commands.steerPending}
 			steerRefusal={commands.steerRefusal}
 			onReloadMcpServers={

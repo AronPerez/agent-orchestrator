@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useNavigate } from "@tanstack/react-router";
 import {
 	ProjectAgentsSettingsView,
 	ProjectGeneralSettingsView,
@@ -25,9 +26,11 @@ import { flattenHostSections } from "../types/workspace";
 import { apiErrorMessage } from "../lib/api-client";
 import { clientFor } from "../lib/host-clients";
 import { refKey, type Ref } from "../lib/hosts";
+import { captureOrchestratorReplacementFailure } from "../lib/orchestrator-replacement-telemetry";
+import { OrchestratorSpawnError, spawnOrchestrator } from "../lib/spawn-orchestrator";
 import { captureRendererEvent } from "../lib/telemetry";
-import { spawnOrchestrator } from "../lib/spawn-orchestrator";
 import { cn } from "../lib/utils";
+import { type OrchestratorReplacementFailure, useUiStore } from "../stores/ui-store";
 import { newestActiveOrchestrator } from "../types/workspace";
 import { RequiredAgentField } from "./CreateProjectAgentSheet";
 import { buildIntake, deriveGitHubRepo, IntakeFields, type IntakeForm } from "./IntakeFields";
@@ -44,6 +47,13 @@ type TrackerIntakeConfig = components["schemas"]["TrackerIntakeConfig"];
 const PERMISSION_MODE_VALUES = ["default", "accept-edits", "auto", "bypass-permissions"] as const;
 
 const projectQueryKey = (project: Ref) => ["project", refKey(project)] as const;
+
+type SettingsSaveResult = {
+	replacementError: string | null;
+	replacementSessionId: string | null;
+	replacementFailure: OrchestratorReplacementFailure | null;
+	spawnError: unknown;
+};
 
 export type ProjectSettingsSection = "general" | "agents" | "workflow" | "intake";
 export interface ProjectSettingsSaveState {
@@ -91,7 +101,11 @@ export function ProjectSettingsForm({
 				<SettingsBody
 					key={refKey(project)}
 					project={query.data}
-					onSaved={() => queryClient.invalidateQueries({ queryKey: workspaceQueryKey })}
+					onSaved={() =>
+						queryClient.invalidateQueries({ queryKey: workspaceQueryKey }).catch(() => {
+							// Saving succeeds even if the cache refresh fails.
+						})
+					}
 					projectRef={project}
 					section={section}
 					onSaveState={onSaveState}
@@ -110,12 +124,15 @@ function SettingsBody({
 }: {
 	project: Project;
 	projectRef: Ref;
-	onSaved: () => void;
+	onSaved: () => Promise<void>;
 	section?: ProjectSettingsSection;
 	onSaveState?: (state: ProjectSettingsSaveState) => void;
 }) {
 	const { t } = useTranslation();
 	const queryClient = useQueryClient();
+	const navigate = useNavigate();
+	const closeSettings = useUiStore((state) => state.closeSettings);
+	const setOrchestratorReplacementError = useUiStore((state) => state.setOrchestratorReplacementError);
 	const workspaceQuery = useWorkspaceQuery();
 	const workspaces = flattenHostSections(workspaceQuery.data);
 	const projectId = projectRef.id;
@@ -234,23 +251,61 @@ function SettingsBody({
 				(activeOrchestrator && activeOrchestrator.provider !== form.orchestratorAgent)
 			) {
 				try {
-					await spawnOrchestrator(projectRef, "settings", true);
-				} catch (error) {
+					const sessionId = await spawnOrchestrator(projectRef, "settings", true);
 					return {
-						replacementError:
+						replacementError: null,
+						replacementSessionId: sessionId,
+						replacementFailure: null,
+						spawnError: null,
+					} satisfies SettingsSaveResult;
+				} catch (error) {
+					const replacementFailure: OrchestratorReplacementFailure = {
+						message:
 							error instanceof Error ? error.message : t("settings.project.replaceOrchestratorFailed"),
+						...(error instanceof OrchestratorSpawnError
+							? { code: error.code, requestId: error.requestId }
+							: {}),
 					};
+					return {
+						replacementError: replacementFailure.message,
+						replacementSessionId: null,
+						replacementFailure,
+						spawnError: error,
+					} satisfies SettingsSaveResult;
 				}
 			}
-			return { replacementError: null };
+			return {
+				replacementError: null,
+				replacementSessionId: null,
+				replacementFailure: null,
+				spawnError: null,
+			} satisfies SettingsSaveResult;
 		},
-		onSuccess: (result) => {
+		onSuccess: async (result) => {
 			void captureRendererEvent("ao.renderer.settings_save_succeeded", { project_id: projectId });
 			setSavedAt(Date.now());
 			setReplacementError(result.replacementError);
 			setValidationError(null);
 			void queryClient.invalidateQueries({ queryKey: projectQueryKey(projectRef) });
-			onSaved();
+			const workspaceRefresh = onSaved();
+
+			if (result.replacementSessionId) {
+				await workspaceRefresh;
+				closeSettings();
+				void navigate({
+					to: "/host/$hostId/session/$sessionId",
+					params: { hostId: projectRef.host, sessionId: result.replacementSessionId },
+				});
+				return;
+			}
+
+			if (result.replacementFailure) {
+				closeSettings();
+				setOrchestratorReplacementError(projectRef, result.replacementFailure);
+				if (result.spawnError) {
+					captureOrchestratorReplacementFailure(result.spawnError, projectId);
+				}
+			}
 		},
 		onError: () => {
 			void captureRendererEvent("ao.renderer.settings_save_failed", { project_id: projectId });
@@ -763,7 +818,13 @@ function repositoryHref(repository: string): string {
 }
 
 function scratchSupportedConfig(config: ProjectConfig): ProjectConfig {
-	const { defaultBranch: _defaultBranch, reviewers: _reviewers, trackerIntake: _trackerIntake, ...supported } = config;
+	const {
+		defaultBranch: _defaultBranch,
+		reviewers: _reviewers,
+		autoReview: _legacyAutoReview,
+		trackerIntake: _trackerIntake,
+		...supported
+	} = config as ProjectConfig & { autoReview?: unknown };
 	return supported;
 }
 

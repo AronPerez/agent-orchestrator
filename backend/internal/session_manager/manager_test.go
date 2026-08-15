@@ -34,6 +34,7 @@ type fakeStore struct {
 	deleteErr     error
 	upsertWTErr   error
 	listAllErr    error
+	getProjectErr error
 	// agentSwitchStore is wired only by agent-switch tests so fakeLCM can model
 	// Lifecycle Manager's atomic ownership-boundary commands.
 	agentSwitchStore any
@@ -54,6 +55,9 @@ func newFakeStore() *fakeStore {
 	}
 }
 func (f *fakeStore) GetProject(_ context.Context, id string) (domain.ProjectRecord, bool, error) {
+	if f.getProjectErr != nil {
+		return domain.ProjectRecord{}, false, f.getProjectErr
+	}
 	r, ok := f.projects[id]
 	return r, ok, nil
 }
@@ -254,6 +258,7 @@ func (l *fakeLCM) MarkTerminated(_ context.Context, id domain.SessionID) error {
 
 type fakeRuntime struct {
 	createErr          error
+	createIDs          []string
 	destroyErr         error
 	destroyErrSequence []error
 	onDestroy          func(call int, handle ports.RuntimeHandle)
@@ -320,6 +325,10 @@ func (r *fakeRestartRuntime) Restart(_ context.Context, handle ports.RuntimeHand
 	if r.restartErr != nil {
 		return ports.RuntimeHandle{}, r.restartErr
 	}
+	if r.aliveByHandle == nil {
+		r.aliveByHandle = map[string]bool{}
+	}
+	r.aliveByHandle[handle.ID] = true
 	return handle, nil
 }
 
@@ -355,7 +364,12 @@ func (r *fakeRuntime) Create(_ context.Context, cfg ports.RuntimeConfig) (ports.
 	}
 	r.lastCfg = cfg
 	r.created++
-	handle := ports.RuntimeHandle{ID: "h1"}
+	handleID := "h1"
+	if len(r.createIDs) > 0 {
+		handleID = r.createIDs[0]
+		r.createIDs = r.createIDs[1:]
+	}
+	handle := ports.RuntimeHandle{ID: handleID}
 	if r.aliveByHandle == nil {
 		r.aliveByHandle = map[string]bool{}
 	}
@@ -1410,6 +1424,20 @@ func TestResumeAgent_RejectsConcurrentRequest(t *testing.T) {
 	close(runtime.release)
 	if err := <-firstDone; err != nil {
 		t.Fatalf("first resume: %v", err)
+	}
+}
+
+func TestResumeAgent_ReportsActiveAgentSwitch(t *testing.T) {
+	baseRuntime := &fakeRuntime{aliveByHandle: map[string]bool{"tmux-mer-1": true}}
+	agent := supervisedLaunchAgent{launchArgvAgent{argv: []string{"codex", "resume", "agent-x"}}}
+	m, _, _ := newExitedResumeManager(t, baseRuntime, agent)
+	if err := m.beginAgentSwitch(ctx, "mer-1"); err != nil {
+		t.Fatal(err)
+	}
+	defer m.endAgentSwitch("mer-1")
+
+	if _, err := m.ResumeAgentWithMode(ctx, "mer-1"); !errors.Is(err, ErrSwitchInProgress) {
+		t.Fatalf("resume during switch error = %v, want ErrSwitchInProgress", err)
 	}
 }
 

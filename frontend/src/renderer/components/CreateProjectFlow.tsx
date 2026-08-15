@@ -672,8 +672,9 @@ function CreateProjectFolderDialog({
   const [browseOpen, setBrowseOpen] = useState(false);
   const isWorkspace = kind === "workspace";
   const failedRepos =
-    scan?.repos.filter((repo) => repo.status === "error" || !repo.hasRemote) ??
-    [];
+    scan?.repos.filter(
+      (repo) => (repo.status === "error" || !repo.hasRemote) && !repo.needsGitInit,
+    ) ?? [];
   const hasScan = scan !== null;
   const footerMessage =
     failedRepos.length > 0
@@ -772,16 +773,16 @@ function CreateProjectFolderDialog({
                   </div>
                 )}
 
-                {scan.repos
-                  .filter((repo) => repo.status !== "error" && repo.hasRemote)
-                  .map((repo) => (
-                    <div
-                      key={repo.path}
-                      className="rounded-lg border border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-card)]"
-                    >
-                      <ImportRepoRow repo={repo} />
-                    </div>
-                  ))}
+							{scan.repos
+								.filter((repo) => (repo.status !== "error" && repo.hasRemote) || repo.needsGitInit)
+								.map((repo) => (
+										<div
+											key={repo.path}
+											className="rounded-lg border border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-card)]"
+										>
+											<ImportRepoRow repo={repo} />
+										</div>
+									))}
 
                 {scan.repos.length === 0 && (
                   <div className="rounded-lg border border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-card)] p-4 text-[12px] text-[var(--color-text-import-muted)]">
@@ -895,42 +896,30 @@ function CreateProjectFolderDialog({
   );
 }
 
-function ImportRepoRow({
-  failed = false,
-  repo,
-}: {
-  failed?: boolean;
-  repo: ImportFolderScan["repos"][number];
-}) {
-  const { t } = useTranslation();
-  return (
-    <div className="flex items-center gap-3 p-4">
-      {failed ? (
-        <XCircle
-          className="size-5 shrink-0 text-destructive"
-          aria-hidden="true"
-        />
-      ) : (
-        <CheckCircle2
-          className="size-5 shrink-0 text-success"
-          aria-hidden="true"
-        />
-      )}
-      <div className="min-w-0 flex-1">
-        <div className="truncate text-[14px] font-semibold text-[var(--color-text-import-title)]">
-          {repo.name}
-        </div>
-        <div className="mt-0.5 truncate font-mono text-[12px] text-[var(--color-text-import-muted)]">
-          {displayImportPath(repo.path)}
-        </div>
-      </div>
-      <div className="hidden max-w-[260px] shrink-0 truncate text-right font-mono text-[12px] text-[var(--color-text-import-muted)] sm:block">
-        {failed
-          ? (repo.reason ?? t("createProject.repoCannotImport"))
-          : `${repo.branch} ${remoteDisplay(repo.remote)}`}
-      </div>
-    </div>
-  );
+function ImportRepoRow({ failed = false, repo }: { failed?: boolean; repo: ImportFolderScan["repos"][number] }) {
+	const { t } = useTranslation();
+	return (
+		<div className="flex items-center gap-3 p-4">
+			{failed ? (
+				<XCircle className="size-5 shrink-0 text-destructive" aria-hidden="true" />
+			) : (
+				<CheckCircle2 className="size-5 shrink-0 text-success" aria-hidden="true" />
+			)}
+			<div className="min-w-0 flex-1">
+				<div className="truncate text-[14px] font-semibold text-[var(--color-text-import-title)]">{repo.name}</div>
+				<div className="mt-0.5 truncate font-mono text-[12px] text-[var(--color-text-import-muted)]">
+					{displayImportPath(repo.path)}
+				</div>
+			</div>
+			<div className="hidden max-w-[260px] shrink-0 truncate text-right font-mono text-[12px] text-[var(--color-text-import-muted)] sm:block">
+				{repo.needsGitInit
+					? "Needs git init"
+					: failed
+						? (repo.reason ?? t("createProject.repoCannotImport"))
+						: `${repo.branch} ${remoteDisplay(repo.remote)}`}
+			</div>
+		</div>
+	);
 }
 
 function displayImportPath(value: string) {

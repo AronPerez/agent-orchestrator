@@ -58,6 +58,16 @@ export function conversationQueryKey(session?: Ref) {
 	return session ? (["conversation", refKey(session)] as const) : (["conversation"] as const);
 }
 
+export function conversationModelsQueryKey(session?: Ref) {
+	return session ? (["conversation-models", refKey(session)] as const) : (["conversation-models"] as const);
+}
+
+export function conversationConfigOptionsQueryKey(session?: Ref) {
+	return session
+		? (["conversation-config-options", refKey(session)] as const)
+		: (["conversation-config-options"] as const);
+}
+
 const CONVERSATION_PAGE_SIZE = 200;
 const CONFIG_OPTIONS_POLL_INTERVAL_MS = 5_000;
 
@@ -307,6 +317,18 @@ export function useConversationCommands(session: Ref | undefined) {
 		onSuccess: invalidate,
 	});
 
+	const promoteQueuedTurn = useMutation({
+		mutationFn: async (turnId: string) => {
+			const { data, error } = await clientFor(session!.host).POST(
+				"/api/v1/sessions/{sessionId}/conversation/turns/{turnId}/steer",
+				{ params: { path: { sessionId: sessionId as string, turnId } } },
+			);
+			if (error) throw error;
+			return data;
+		},
+		onSuccess: invalidate,
+	});
+
 	/**
 	 * Restart the tool servers.
 	 *
@@ -408,6 +430,7 @@ export function useConversationCommands(session: Ref | undefined) {
 			? apiErrorMessage(activateBranch.error)
 			: undefined,
 		steer: (text: string) => steer.mutateAsync(text),
+		promoteQueuedTurn: (turnId: string) => promoteQueuedTurn.mutateAsync(turnId),
 		steerPending: steer.isPending,
 		/**
 		 * Why the last steer was refused, or undefined. Only the retryable and
@@ -474,7 +497,7 @@ function steerRefusal(error: unknown): string | undefined {
 export function useConversationModels(session: Ref | undefined, enabled: boolean) {
 	const sessionId = session?.id;
 	const query = useQuery({
-		queryKey: ["conversation-models", session ? refKey(session) : ""],
+		queryKey: conversationModelsQueryKey(session),
 		enabled: Boolean(sessionId) && enabled,
 		// The catalog changes on the scale of provider releases, not turns.
 		staleTime: 5 * 60 * 1000,
@@ -507,7 +530,7 @@ export function useConversationModels(session: Ref | undefined, enabled: boolean
 export function useConversationConfigOptions(session: Ref | undefined, enabled: boolean) {
 	const sessionId = session?.id;
 	const queryClient = useQueryClient();
-	const queryKey = ["conversation-config-options", session ? refKey(session) : ""] as const;
+	const queryKey = conversationConfigOptionsQueryKey(session);
 	const query = useQuery({
 		queryKey,
 		enabled: Boolean(sessionId) && enabled,

@@ -8,9 +8,16 @@ import {
 	sessionNeedsAttention,
 	workerSessions,
 	type AttentionZone,
+	type PullRequestFacts,
 	type WorkspaceSession,
 	type WorkspaceSummary,
 } from "../types/workspace";
+import {
+	openReviewStatesFor,
+	reviewIsRunning,
+	reviewSessionRunAction,
+	type PRReviewState,
+} from "./session-reviews";
 import { appI18n, type MessageKey } from "../i18n";
 import { refKey, type Ref } from "./hosts";
 
@@ -31,6 +38,9 @@ export type CommandAction =
 	| { kind: "open-session-actions"; session: Ref }
 	| { kind: "resume-session"; session: Ref }
 	| { kind: "copy-branch"; branch: string }
+	| { kind: "open-pr"; url: string }
+	| { kind: "copy-pr-url"; url: string }
+	| { kind: "trigger-review"; session: Ref }
 	| { kind: "toggle-theme" };
 
 export type CommandItem = {
@@ -52,6 +62,14 @@ export type CommandPaletteContext = {
 	currentHostId?: string;
 	currentSessionId?: string;
 	restartingProjectIds?: ReadonlySet<string>;
+	/**
+	 * Live review states per session, injected by the palette's queries. Omitting the
+	 * whole prop means "don't gate on review state" (callers that build items without
+	 * fetching, e.g. unit tests). Providing it but leaving a session's key absent means
+	 * that session's state is not known yet, and its review row is omitted entirely
+	 * rather than rendered with a guessed enabled state.
+	 */
+	reviewStatesBySessionId?: Readonly<Record<string, PRReviewState[]>>;
 };
 
 export const commandGroupOrder: CommandGroupId[] = ["current", "attention", "projects", "sessions", "prs", "global"];
@@ -171,7 +189,7 @@ export function findSession(workspaces: WorkspaceSummary[], ref: Ref): Workspace
 }
 
 export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n.t): CommandItem[] {
-	const { workspaces, currentHostId, currentProjectId, currentSessionId, restartingProjectIds } = ctx;
+	const { workspaces, currentHostId, currentProjectId, currentSessionId, restartingProjectIds, reviewStatesBySessionId } = ctx;
 	const items: CommandItem[] = [];
 
 	const currentProject = currentProjectId && currentHostId
@@ -225,7 +243,7 @@ export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n
 			group: "current",
 			title: t("command.copyBranch"),
 			subtitle: currentBranch,
-			keywords: ["branch", "git", currentBranch, currentSession.title],
+			keywords: ["branch", "git", "copy", currentBranch, currentSession.title],
 			action: { kind: "copy-branch", branch: currentBranch },
 		});
 	}
@@ -274,21 +292,31 @@ export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n
 
 	for (const workspace of workspaces) {
 		for (const session of workerSessions(workspace.sessions)) {
+			const sessionReviewStates = reviewStatesBySessionId?.[refKey(session)];
+			// Whole prop omitted (e.g. a test that doesn't care about review state) means
+			// "assume eligible"; a defined map with this session's key absent means the
+			// live app hasn't loaded this session's review state yet — don't expose a
+			// mutating action until we know it's safe to trigger.
+			const dataLoadedForSession = reviewStatesBySessionId === undefined || sessionReviewStates !== undefined;
+			const openReviewStates = sessionReviewStates ? openReviewStatesFor(session, sessionReviewStates) : undefined;
+			const sessionReviewRunning = openReviewStates ? reviewIsRunning(openReviewStates) : false;
 			for (const pr of openPRs(session)) {
+				const subtitle = `${session.title} · ${workspace.name}`;
+				const prKeywords = [
+					`#${pr.number}`,
+					String(pr.number),
+					pr.url,
+					session.title,
+					session.branch ?? "",
+					workspace.name,
+					pr.state,
+				];
 				items.push({
 					id: `pr:${refKey(session)}:${pr.number}`,
 					group: "prs",
 					title: `#${pr.number}`,
-					subtitle: `${session.title} · ${workspace.name}`,
-					keywords: [
-						`#${pr.number}`,
-						String(pr.number),
-						pr.url,
-						session.title,
-						session.branch ?? "",
-						workspace.name,
-						pr.state,
-					],
+					subtitle,
+					keywords: prKeywords,
 					action: {
 						kind: "navigate",
 						target: {
@@ -297,6 +325,27 @@ export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n
 						},
 					},
 				});
+				items.push({
+					id: `pr-open:${refKey(session)}:${pr.number}`,
+					group: "prs",
+					title: t("command.openPr", { number: pr.number }),
+					subtitle,
+					keywords: [...prKeywords, "open", "open pr", "github", "browser"],
+					searchOnly: true,
+					action: { kind: "open-pr", url: pr.url },
+				});
+				items.push({
+					id: `pr-copy:${refKey(session)}:${pr.number}`,
+					group: "prs",
+					title: t("command.copyPrUrl", { number: pr.number }),
+					subtitle,
+					keywords: [...prKeywords, "copy", "copy pr", "url", "link", "share"],
+					searchOnly: true,
+					action: { kind: "copy-pr-url", url: pr.url },
+				});
+				if (sessionIsActive(session) && dataLoadedForSession) {
+					items.push(prReviewCommand(session, pr, openReviewStates, sessionReviewRunning, subtitle, prKeywords, t));
+				}
 			}
 		}
 	}
@@ -324,6 +373,47 @@ export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n
 	});
 
 	return items;
+}
+
+/**
+ * Per-PR review command. The trigger endpoint is session-scoped (one run covers
+ * all of the session's eligible open PRs, same as the Reviews tab button), so
+ * the disabled state mirrors the shared ReviewPanel eligibility logic — both
+ * sides read it from `lib/session-reviews`, so the two can't drift. Callers only
+ * reach here once the session's review state is known; until then the row is
+ * omitted rather than shown with a guessed enabled state.
+ */
+function prReviewCommand(
+	session: WorkspaceSession,
+	pr: PullRequestFacts,
+	openReviewStates: PRReviewState[] | undefined,
+	sessionReviewRunning: boolean,
+	subtitle: string,
+	keywords: string[],
+	t: TFunction,
+): CommandItem {
+	const prReviewState = openReviewStates?.find((reviewState) => reviewState.prUrl === pr.url);
+	const ineligible = openReviewStates !== undefined && (!prReviewState || prReviewState.status === "ineligible");
+	const disabled = sessionReviewRunning || ineligible;
+	const disabledReason = sessionReviewRunning
+		? t("command.reviewAlreadyRunning")
+		: ineligible
+			? t("command.notEligibleForReview")
+			: undefined;
+	const runLabel = prReviewState
+		? reviewSessionRunAction([prReviewState], false)
+		: t("inspector.review.run");
+	return {
+		id: `pr-review:${refKey(session)}:${pr.number}`,
+		group: "prs",
+		title: t("command.reviewPr", { action: runLabel, number: pr.number }),
+		subtitle,
+		keywords: [...keywords, "review", "run review", "re-run review", "ao review"],
+		searchOnly: true,
+		disabled,
+		disabledReason,
+		action: { kind: "trigger-review", session },
+	};
 }
 
 function isSubsequence(query: string, haystack: string): boolean {

@@ -1,12 +1,13 @@
-import { useEffect, useRef, useState, type MouseEvent } from "react";
+import { memo, useEffect, useRef, useState, type MouseEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import {
   SessionsArchiveView,
   SessionsBoardGridView,
+  archiveToggleOffsetClassName,
 } from "@aoagents/product-ui";
-import { AlertTriangle, Plus, RotateCw } from "lucide-react";
+import { AlertTriangle, LayoutDashboard, Plus, RotateCw } from "lucide-react";
 import {
   type WorkspaceSession,
   flattenHostSections,
@@ -54,6 +55,7 @@ import {
   isMacPlatform,
   usesBoardActionsInPanel,
 } from "../lib/platform";
+import { cn } from "../lib/utils";
 import { useUiStore } from "../stores/ui-store";
 import { RestoreUnavailableDialog } from "./RestoreUnavailableDialog";
 import { DaemonStartupLoader } from "./DaemonStartupLoader";
@@ -65,6 +67,7 @@ import {
   BoardSessionCardAdapter,
   sessionsBoardLabels,
 } from "./SessionsBoardAdapters";
+import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
 type SessionsBoardProps = {
   /** When set, the board shows only this project's sessions. */
@@ -95,7 +98,6 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
   const columns: AttentionZoneView[] = boardAttentionZoneOrder.map((zone) =>
     getAttentionZoneViewForZone(zone, t),
   );
-  const restoreSessionById = useRestoreSession();
   const workspaceQuery = useWorkspaceQuery();
   const shell = useShellMaybe();
   const usageBySession =
@@ -110,8 +112,8 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
     : all;
   const workspace = project ? workspaces[0] : undefined;
   const projectKey = workspace ? refKey(workspace) : undefined;
-  // Same crumb as ShellTopbar: project name in scope, else root-board "Board".
-  const boardLabel = workspace?.name ?? (project ? "" : t("shell.board"));
+  // Board chrome stays route-oriented; project context remains in the sidebar.
+  const boardLabel = t("shell.board");
   const sessions = workspaces.flatMap((workspace) =>
     workerSessions(workspace.sessions),
   );
@@ -206,72 +208,16 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
     isLoaded &&
     workspaces.length > 0 &&
     sessions.length === 0;
-  // Archived sessions cost one quiet line under the board until expanded.
-  const [archiveExpanded, setArchiveExpanded] = useState(false);
-  const [restoringSessionId, setRestoringSessionId] = useState<
-    string | undefined
-  >();
-  const [restoreErrors, setRestoreErrors] = useState<Record<string, string>>(
-    {},
-  );
-  const [restoreUnavailableSession, setRestoreUnavailableSession] = useState<
-    WorkspaceSession | undefined
-  >();
+  const hasArchive = archived.length > 0;
   const terminateSession = useTerminateSession();
   const activeProjectKeyRef = useRef(projectKey);
   activeProjectKeyRef.current = projectKey;
-  useEffect(() => {
-    setRestoringSessionId(undefined);
-    setRestoreErrors({});
-    setRestoreUnavailableSession(undefined);
-  }, [projectKey]);
 
   const openSession = (session: WorkspaceSession) =>
     void navigate({
       to: "/host/$hostId/session/$sessionId",
       params: { hostId: session.host, sessionId: session.id },
     });
-
-  const restoreArchivedSession = async (
-    event: MouseEvent<HTMLButtonElement>,
-    session: WorkspaceSession,
-  ) => {
-    event.stopPropagation();
-    if (restoringSessionId) return;
-	const sessionKey = refKey(session);
-    const restoreProjectKey = projectKey;
-    const isStillActiveProject = () =>
-      !restoreProjectKey || activeProjectKeyRef.current === restoreProjectKey;
-    setRestoringSessionId(sessionKey);
-    setRestoreErrors((current) => {
-      const next = { ...current };
-      delete next[sessionKey];
-      return next;
-    });
-    try {
-      const result = await restoreSessionById(session);
-      if (!isStillActiveProject()) return;
-      if (result.status === "success") {
-        void navigate({
-          to: "/host/$hostId/session/$sessionId",
-          params: { hostId: session.host, sessionId: session.id },
-        });
-        return;
-      }
-      if (result.status === "not_resumable") {
-        setRestoreUnavailableSession(session);
-        return;
-      }
-      setRestoreErrors((current) => ({
-        ...current,
-        [sessionKey]: result.message,
-      }));
-    } finally {
-      if (isStillActiveProject()) {
-        setRestoringSessionId(undefined);
-      }
-    }
-  };
 
   const openOrchestrator = async (mode?: "tui") => {
 		if (!workspace || isProjectRestarting) return;
@@ -345,40 +291,63 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
           {t("newTask.createAsTui")}
         </TopbarButton>
       ) : null}
-      <TopbarButton
-        aria-label={t("shell.newTask")}
-        disabled={isProjectRestarting}
-		onClick={() => workspace && requestNewTask(workspace)}
-        variant="accent"
-      >
-        <Plus className="size-icon-md" aria-hidden="true" />
-        {t("shell.newTask")}
-      </TopbarButton>
-      <TopbarButton
-        aria-label={
-          orchestratorActivityLabel
-            ? t("shell.orchestratorWithActivity", {
-                activity: orchestratorActivityLabel,
-              })
-            : t("shell.spawnOrchestrator")
-        }
-        disabled={isSpawning || isProjectRestarting}
-        onClick={() => void openOrchestrator()}
-        variant="primary"
-      >
-        <OrchestratorIcon className="size-icon-md" aria-hidden="true" />
-        {orchestrator ? (
-          <OrchestratorActivityIndicator session={orchestrator} />
-        ) : null}
-        {isProjectRestarting
-          ? t("shell.restartingDots")
-          : isSpawning
-            ? t("shell.spawningDots")
-            : orchestrator
-              ? t("shell.orchestrator")
-              : t("shell.spawnOrchestrator")}
-      </TopbarButton>
-      {boardOwnsNotificationCenter ? <NotificationCenter /> : null}
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="inline-flex">
+            <TopbarButton
+              aria-label={t("shell.newTask")}
+              className="topbar-control--labeled"
+              data-priority="primary"
+              disabled={isProjectRestarting}
+              onClick={() => workspace && requestNewTask(workspace)}
+              variant="accent"
+            >
+              <Plus className="size-icon-md" aria-hidden="true" />
+              <span data-compact-label>{t("newTask.task")}</span>
+            </TopbarButton>
+          </span>
+        </TooltipTrigger>
+        <TooltipContent side="bottom">{t("shell.newTask")}</TooltipContent>
+      </Tooltip>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="inline-flex">
+            <TopbarButton
+              aria-label={
+                orchestratorActivityLabel
+                  ? t("shell.orchestratorWithActivity", {
+                      activity: orchestratorActivityLabel,
+                    })
+                  : t("shell.spawnOrchestrator")
+              }
+              className="topbar-control--labeled"
+              data-priority="secondary"
+              disabled={isSpawning || isProjectRestarting}
+              onClick={() => void openOrchestrator()}
+              variant="primary"
+            >
+              <OrchestratorIcon className="size-icon-md" aria-hidden="true" />
+              <span data-compact-label>{t("shell.orchestrator")}</span>
+              {orchestrator ? <OrchestratorActivityIndicator session={orchestrator} /> : null}
+            </TopbarButton>
+          </span>
+        </TooltipTrigger>
+        <TooltipContent side="bottom">
+          {isProjectRestarting
+            ? t("shell.restarting")
+            : isSpawning
+              ? t("shell.spawning")
+              : orchestrator
+                ? t("shell.openOrchestrator")
+                : t("shell.spawnOrchestrator")}
+        </TooltipContent>
+      </Tooltip>
+      {boardOwnsNotificationCenter ? (
+        <>
+          <span aria-hidden="true" className="workspace-topbar__utility-separator" />
+          <NotificationCenter />
+        </>
+      ) : null}
     </>
   ) : boardOwnsNotificationCenter ? (
     <NotificationCenter />
@@ -386,7 +355,7 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
 
   return (
     <div
-      className="flex h-full min-h-0 flex-col bg-background text-foreground"
+      className="relative flex h-full min-h-0 flex-col bg-background text-foreground"
       data-testid="board"
     >
       {/* macOS: shell topbar is hidden on board routes, so the project/"Board"
@@ -399,16 +368,22 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
       boardActionsInPanel &&
       (boardLabel || actions) ? (
         <div
-          className="center-panel-titlebar flex h-toolbar shrink-0 items-center gap-2 border-b border-border-strong pr-4"
+          className="workspace-topbar-container center-panel-titlebar flex h-toolbar shrink-0 items-center gap-2 border-b border-border-strong pr-4"
           style={dragStyle}
         >
           {boardLabel ? (
-            <span className={topbarProjectLabelClass}>{boardLabel}</span>
+            <span
+              className={cn(topbarProjectLabelClass, "inline-flex items-center gap-1.5")}
+              data-testid="board-topbar-label"
+            >
+              <LayoutDashboard aria-hidden="true" className="size-icon-md" />
+              {boardLabel}
+            </span>
           ) : null}
           <div className="min-w-0 flex-1" />
           {actions ? (
             <div
-              className="flex shrink-0 items-center gap-2"
+              className="workspace-topbar-actions flex shrink-0 items-center"
               style={noDragStyle}
             >
               {actions}
@@ -417,7 +392,7 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
         </div>
       ) : null}
 
-      <div className="min-h-0 flex-1 overflow-hidden">
+      <div className={cn("min-h-0 flex-1 overflow-hidden", hasArchive && archiveToggleOffsetClassName)}>
         {project && health.state !== "ok" ? (
           <div className="mx-3 my-3 flex items-center gap-3 rounded-md border border-border bg-surface px-3 py-2 text-xs text-muted-foreground">
             <AlertTriangle
@@ -478,31 +453,116 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
         )}
       </div>
 
+      {hasArchive ? (
+        <BoardArchivePanel
+          activeProjectKeyRef={activeProjectKeyRef}
+          projectKey={projectKey}
+          sessions={archived}
+          usageBySession={usageBySession}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+/** Keep archive expansion and restore state from re-rendering the kanban lanes. */
+const BoardArchivePanel = memo(function BoardArchivePanel({
+  activeProjectKeyRef,
+  projectKey,
+  sessions,
+  usageBySession,
+}: {
+  activeProjectKeyRef: { current: string | undefined };
+  projectKey?: string;
+  sessions: WorkspaceSession[];
+  usageBySession: UsageBySession;
+}) {
+  const { t } = useTranslation();
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const restoreSession = useRestoreSession();
+  const [restoringSessionKey, setRestoringSessionKey] = useState<string>();
+  const [restoreErrors, setRestoreErrors] = useState<Record<string, string>>({});
+  const [restoreUnavailableSession, setRestoreUnavailableSession] = useState<WorkspaceSession>();
+  const restoreGenerationRef = useRef(0);
+
+  useEffect(() => {
+    setRestoringSessionKey(undefined);
+    setRestoreErrors({});
+    setRestoreUnavailableSession(undefined);
+    restoreGenerationRef.current += 1;
+  }, [projectKey]);
+
+  useEffect(() => {
+    const generation = restoreGenerationRef.current;
+    return () => {
+      if (restoreGenerationRef.current === generation) restoreGenerationRef.current += 1;
+    };
+  }, []);
+
+  const restoreArchivedSession = async (
+    event: MouseEvent<HTMLButtonElement>,
+    session: WorkspaceSession,
+  ) => {
+    event.stopPropagation();
+    if (restoringSessionKey) return;
+    const sessionKey = refKey(session);
+    const restoreProjectKey = projectKey;
+    const generation = restoreGenerationRef.current;
+    const isStillActiveProject = () =>
+      generation === restoreGenerationRef.current &&
+      (!restoreProjectKey || activeProjectKeyRef.current === restoreProjectKey);
+    setRestoringSessionKey(sessionKey);
+    setRestoreErrors((current) => {
+      const next = { ...current };
+      delete next[sessionKey];
+      return next;
+    });
+    try {
+      const result = await restoreSession(session);
+      if (!isStillActiveProject()) return;
+      if (result.status === "success") {
+        void navigate({
+          to: "/host/$hostId/session/$sessionId",
+          params: { hostId: session.host, sessionId: session.id },
+        });
+        return;
+      }
+      if (result.status === "not_resumable") {
+        setRestoreUnavailableSession(session);
+        return;
+      }
+      setRestoreErrors((current) => ({ ...current, [sessionKey]: result.message }));
+    } finally {
+      if (isStillActiveProject()) setRestoringSessionKey(undefined);
+    }
+  };
+
+  return (
+    <>
       <SessionsArchiveView
-        archiveExpanded={archiveExpanded}
         labels={{
           archive: t("shell.archive"),
-          archiveAria: t("shell.archiveSessionsAria", {
-            count: archived.length,
-          }),
+          archiveAria: t("shell.archiveSessionsAria", { count: sessions.length }),
           archivedSessions: t("shell.archivedSessions"),
         }}
-        onArchiveExpandedChange={setArchiveExpanded}
-        renderSessionCard={(session) => (
-          <ArchivedSessionCardAdapter
-            isRestoreDisabled={restoringSessionId !== undefined}
-            isRestoring={restoringSessionId === refKey(session)}
-            restoreAction={(event) =>
-              void restoreArchivedSession(event, session)
-            }
-            restoreError={restoreErrors[refKey(session)]}
-            session={session}
-            usage={usageBySession.get(refKey(session))}
-          />
-        )}
-        sessions={archived}
+        renderSessionCard={(session) => {
+          const sessionKey = refKey(session);
+          return (
+            <ArchivedSessionCardAdapter
+              isRestoreDisabled={restoringSessionKey !== undefined}
+              isRestoring={restoringSessionKey === sessionKey}
+              restoreAction={(event) => void restoreArchivedSession(event, session)}
+              restoreError={restoreErrors[sessionKey]}
+              session={session}
+              usage={usageBySession.get(sessionKey)}
+            />
+          );
+        }}
+        resetKey={projectKey}
+        sessions={sessions}
       />
-      {restoreUnavailableSession && (
+      {restoreUnavailableSession ? (
         <RestoreUnavailableDialog
           open={true}
           session={restoreUnavailableSession}
@@ -510,12 +570,10 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
             if (!open) setRestoreUnavailableSession(undefined);
           }}
           onRecreated={async () => {
-            await queryClient.invalidateQueries({
-              queryKey: workspaceQueryKey,
-            });
+            await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
           }}
         />
-      )}
-    </div>
+      ) : null}
+    </>
   );
-}
+});
