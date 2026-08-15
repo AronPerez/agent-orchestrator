@@ -979,7 +979,7 @@ describe("SessionInspector Activity section", () => {
 				)}
 			/>,
 			undefined,
-			(client) => client.setQueryData(sessionScmSummaryQueryKey("sess-1"), summaries),
+			(client) => client.setQueryData(sessionScmSummaryQueryKey(session([])), summaries),
 		);
 
 		const section = screen.getByText("Activity").closest("[data-testid='inspector-section']") as HTMLElement;

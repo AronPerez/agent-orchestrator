@@ -325,7 +325,7 @@ describe("controller recovery", () => {
 		});
 		const invalidateSpy = vi.spyOn(QueryClient.prototype, "invalidateQueries");
 
-		const { result } = renderHook(() => useConversationCommands("ao-1"), { wrapper });
+		const { result } = renderHook(() => useConversationCommands({ host: "local", id: "ao-1" }), { wrapper });
 		act(() => {
 			result.current.interrupt();
 		});
@@ -335,7 +335,7 @@ describe("controller recovery", () => {
 				"/api/v1/sessions/{sessionId}/conversation/interrupt",
 				{ params: { path: { sessionId: "ao-1" } } },
 			);
-			expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["conversation", "ao-1"] });
+			expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["conversation", "local:ao-1"] });
 		});
 		invalidateSpy.mockRestore();
 	});

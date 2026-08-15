@@ -115,6 +115,7 @@ function humanMessage(text: string): ConversationMessage {
 }
 
 const chatSession = {
+	host: "local",
 	id: chatFixture.sessionId,
 	workspaceId: "project-1",
 	workspaceName: "agent-orchestrator",
@@ -779,7 +780,7 @@ describe("ChatWorkspace reviewer tabs", () => {
 	const reviewerTarget = {
 		kind: "reviewer" as const,
 		...reviewerTerminal,
-		sessionId: chatSession.id,
+		session: { host: chatSession.host, id: chatSession.id },
 	};
 
 	it("keeps the chat draft, attachments, edit, and scroll state mounted while Reviewer is selected", async () => {
