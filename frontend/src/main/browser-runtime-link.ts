@@ -13,6 +13,11 @@ export type BrowserRuntimeCommand = {
 	sessionId: string;
 	action: string;
 	args?: Record<string, unknown>;
+	// Opaque partition key, set by the daemon only when this session's project
+	// opted into a persistent browser profile. Absent means the default: a
+	// throwaway, memory-only profile. The app never decides this — it does not
+	// know which project a session belongs to, and must not guess.
+	profileKey?: string;
 };
 
 type BrowserRuntimeCancel = {

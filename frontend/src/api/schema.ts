@@ -1757,6 +1757,7 @@ export interface components {
             connected: boolean;
             /** Format: date-time */
             connectedAt?: string;
+            persistentProfile: boolean;
             sessionId: string;
             transport: string;
         };
@@ -2396,6 +2397,7 @@ export interface components {
             agentConfig?: components["schemas"]["AgentConfig"];
             agentRules?: string;
             agentRulesFile?: string;
+            browserPersistentProfile?: boolean;
             containerReap?: components["schemas"]["ContainerReapConfig"];
             defaultBranch?: string;
             env?: {

@@ -5266,6 +5266,8 @@ components:
         connectedAt:
           format: date-time
           type: string
+        persistentProfile:
+          type: boolean
         sessionId:
           type: string
         transport:
@@ -5274,6 +5276,7 @@ components:
       - sessionId
       - connected
       - transport
+      - persistentProfile
       type: object
     CancelReviewResponse:
       properties:
@@ -6982,6 +6985,8 @@ components:
           type: string
         agentRulesFile:
           type: string
+        browserPersistentProfile:
+          type: boolean
         containerReap:
           $ref: '#/components/schemas/ContainerReapConfig'
         defaultBranch:

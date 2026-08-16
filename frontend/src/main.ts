@@ -1039,6 +1039,7 @@ function establishBrowserRuntimeLink(): void {
         command.action,
         command.args,
         signal,
+        command.profileKey,
       );
     },
     log: (message) => console.log(`AO: ${message}`),

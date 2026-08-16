@@ -285,7 +285,7 @@ func Run() error {
 		DefaultPort: mobilebridge.DefaultPort,
 	}
 	mc := &controllers.MobileController{Bridge: bs}
-	browserService := browsersvc.New(sessionSvc, browserBroker, browserAuthority)
+	browserService := browsersvc.New(sessionSvc, projectSvc, browserBroker, browserAuthority)
 
 	// Standalone shell terminals: user-opened shells with no agent session
 	// behind them. They reuse the same runtime adapter (and therefore the same

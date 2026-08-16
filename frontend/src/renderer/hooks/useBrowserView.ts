@@ -26,6 +26,17 @@ export type { BrowserNavState };
 
 type UseBrowserViewOptions = {
 	session: Ref;
+	/**
+	 * Persistent-profile opt-in, resolved by the caller from project config
+	 * (see usePersistentBrowserProfile). Omitting it entirely keeps the default:
+	 * a throwaway memory-only profile, decided immediately.
+	 *
+	 * `pending` exists because a WebContentsView's partition is fixed at
+	 * construction and cannot be changed afterwards. Creating the view before the
+	 * project has answered would lock the session onto the wrong profile for its
+	 * whole life, so the view waits instead.
+	 */
+	persistentProfile?: { pending: true } | { pending: false; key: string };
   active: boolean;
   poppedOut: boolean;
   /**
@@ -183,8 +194,16 @@ function useNativeBrowserView({
   terminated,
   previewUrl,
   previewRevision,
+  persistentProfile,
 }: UseBrowserViewOptions): BrowserViewModel {
 	const sessionId = refKey(session);
+  // Which browser profile this session gets is a PROJECT decision. The daemon
+  // stamps the same key onto every agent command, so an agent-first session is
+  // already correct without the renderer; this covers the other order — a human
+  // opening the panel before any agent command lands. Both sides read the same
+  // project config, so they cannot disagree about the partition.
+  const profileKey = persistentProfile?.pending ? "" : (persistentProfile?.key ?? "");
+  const profileKeyResolved = persistentProfile?.pending !== true;
   const [viewId, setViewId] = useState("");
   const [navState, setNavState] = useState<BrowserNavState>(EMPTY_NAV_STATE);
   const [annotationMode, setAnnotationModeState] = useState(false);
@@ -369,7 +388,18 @@ function useNativeBrowserView({
         viewIdRef.current = "";
       };
     }
-    window.ao?.browser.ensure(sessionId).then((state) => {
+    // Deferred, not skipped: creating the view now and learning the project's
+    // answer afterwards would fix the partition to the wrong one for the life of
+    // the session, and a WebContentsView's partition cannot be changed later.
+    //
+    // The key is passed only when there IS one, so the default path's IPC call
+    // stays exactly the single-argument call it has always been.
+    const ensured = !profileKeyResolved
+      ? undefined
+      : profileKey
+        ? window.ao?.browser.ensure(sessionId, profileKey)
+        : window.ao?.browser.ensure(sessionId);
+    ensured?.then((state) => {
       if (disposed) return;
       viewIdRef.current = state.viewId;
       setViewId(state.viewId);
@@ -398,7 +428,14 @@ function useNativeBrowserView({
       }
       viewIdRef.current = "";
     };
-  }, [hasNativeBrowser, scheduleSettleMeasure, sendHiddenBounds, sessionId]);
+  }, [
+    hasNativeBrowser,
+    profileKey,
+    profileKeyResolved,
+    scheduleSettleMeasure,
+    sendHiddenBounds,
+    sessionId,
+  ]);
 
   useEffect(() => {
     return window.ao?.browser.onNavState((state) => {

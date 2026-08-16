@@ -21,6 +21,8 @@ type browserStatusDTO struct {
 	Connected   bool      `json:"connected"`
 	ConnectedAt time.Time `json:"connectedAt,omitempty"`
 	Transport   string    `json:"transport"`
+	// PersistentProfile mirrors the daemon field; see BrowserStatusResponse.
+	PersistentProfile bool `json:"persistentProfile"`
 }
 
 type browserCommandRequestDTO struct {
@@ -71,15 +73,22 @@ func newBrowserCommand(ctx *commandContext) *cobra.Command {
 			if status.Connected {
 				state = "connected"
 			}
-			// Say which browser this is. The docs do; the program never did, and at
-			// 1am people read the program. Users kept logging into a site here and
-			// finding their system browser unchanged — the panel has its own cookie
-			// jar, per worker session, discarded when the session or the app ends.
+			// Say which browser this is, and which profile mode it is on. The docs
+			// say the first part; the program never did, and at 1am people read the
+			// program. Users kept logging into a site here and finding their system
+			// browser unchanged. The second part must never be left to inference:
+			// "are my logins being kept, and who else can use them?" is not a
+			// question to answer by guessing.
+			profile := "scoped to this session and discarded when the session or app ends"
+			if status.PersistentProfile {
+				profile = "SHARED with every session on this project and kept on disk across restarts, " +
+					"because this project opted in (ao project set-config --browser-persistent-profile)"
+			}
 			_, err = fmt.Fprintf(cmd.OutOrStdout(),
 				"Browser runtime: %s (%s)\n"+
 					"This is the AO desktop app's Browser panel, not your system browser: it keeps its own\n"+
-					"cookies and logins, scoped to this session and discarded when the session or app ends.\n",
-				state, status.Transport)
+					"cookies and logins, %s.\n",
+				state, status.Transport, profile)
 			return err
 		},
 	})

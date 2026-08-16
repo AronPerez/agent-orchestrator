@@ -201,6 +201,15 @@ window for HMR-driven verification.
 Browser tabs in the same worker share a memory-only Electron profile. Different
 workers receive distinct partitions, so cookies, authentication, local storage,
 and session storage do not leak between their browser runtimes.
+A project can opt out of that isolation with
+`ao project set-config <id> --browser-persistent-profile`, which gives every
+session on that project ONE shared on-disk profile instead
+(`~/.ao/electron/Partitions/ao-browser-<projectId>`), so a login survives session
+teardown and app restart. It is off by default, and the trade-off is the reason:
+that one cookie jar is shared by every worker session on the project, so a
+prompt-injected agent in any of them can use every login in it. Other projects
+stay isolated, and permissions remain denied either way. `ao browser status`
+always states which of the two modes a session is running on.
 Network capture is disabled by default and must be started explicitly. It is
 scoped to the active tab at start time, expires after 60 seconds by default
 (maximum 300), retains at most 200 in-memory entries, and is cleared with the
