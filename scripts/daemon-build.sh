@@ -10,6 +10,16 @@ can_write_dir() {
   local dir="$1"
 
   [[ -n "${dir}" ]] || return 1
+  # Never install into a macOS .app bundle, even though it is writable. On a
+  # machine with the desktop app installed, `ao` resolves to the app's BUNDLED
+  # daemon — it is on PATH ahead of everything else in an AO worker session and
+  # in a plain login shell alike — so select_install_dir would otherwise pick
+  # that directory and install_file would replace the app's own daemon with a
+  # symlink. That breaks the bundle's code signature, and macOS then SIGKILLs
+  # the app on its next launch (OS_REASON_CODESIGNING). The only reason this has
+  # not already happened is that install-desktop-app.sh copies the fresh bundle
+  # in AFTER running `ao-svc reload`, overwriting the damage by luck of ordering.
+  [[ "${dir}" == *.app/* ]] && return 1
   mkdir -p "${dir}"
   [[ -d "${dir}" && -w "${dir}" ]]
 }
@@ -213,6 +223,11 @@ if [[ -n "${shim_path}" ]]; then
 fi
 if [[ "${resolved_path}" != "${install_abs_path}" && "${resolved_path}" != "${shim_abs_path}" ]]; then
   printf 'ao resolves to %s, expected %s\n' "${resolved}" "${install_path}" >&2
+  if [[ "${resolved_path}" == *.app/* ]]; then
+    printf 'That path is inside a macOS .app bundle — the desktop app'"'"'s own daemon. It is deliberately\n' >&2
+    printf 'not an install target (writing there breaks the bundle signature), so put %s\n' "${install_dir}" >&2
+    printf 'ahead of it on PATH, or update the app with scripts/install-desktop-app.sh instead.\n' >&2
+  fi
   exit 1
 fi
 
