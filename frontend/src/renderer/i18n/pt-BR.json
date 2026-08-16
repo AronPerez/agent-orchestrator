@@ -22,6 +22,7 @@
 	"browser.closeDevTools": "Fechar DevTools",
 	"browser.closeTab": "Fechar aba {{title}}",
 	"browser.emptyUrl": "Digite uma URL ou clique em uma no terminal.",
+	"browser.emptyProfileNote": "O navegador próprio do app AO — cookies e logins separados do seu navegador do sistema, mantidos apenas nesta sessão.",
 	"browser.forward": "Avançar",
 	"browser.newTab": "Nova aba",
 	"browser.onlyTab": "A única aba não pode ser fechada",

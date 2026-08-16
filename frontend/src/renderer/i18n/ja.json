@@ -22,6 +22,7 @@
 	"browser.closeDevTools": "DevToolsを閉じる",
 	"browser.closeTab": "タブを閉じる {{title}}",
 	"browser.emptyUrl": "URL を入力するか、ターミナル内のリンクをクリックしてください。",
+	"browser.emptyProfileNote": "AO アプリ専用のブラウザーです。Cookie とログインはシステムのブラウザーとは別で、このセッションの間だけ保持されます。",
 	"browser.forward": "進む",
 	"browser.newTab": "新しいタブ",
 	"browser.onlyTab": "最後のタブは閉じられません",

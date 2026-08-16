@@ -71,7 +71,15 @@ func newBrowserCommand(ctx *commandContext) *cobra.Command {
 			if status.Connected {
 				state = "connected"
 			}
-			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Browser runtime: %s (%s)\n", state, status.Transport)
+			// Say which browser this is. The docs do; the program never did, and at
+			// 1am people read the program. Users kept logging into a site here and
+			// finding their system browser unchanged — the panel has its own cookie
+			// jar, per worker session, discarded when the session or the app ends.
+			_, err = fmt.Fprintf(cmd.OutOrStdout(),
+				"Browser runtime: %s (%s)\n"+
+					"This is the AO desktop app's Browser panel, not your system browser: it keeps its own\n"+
+					"cookies and logins, scoped to this session and discarded when the session or app ends.\n",
+				state, status.Transport)
 			return err
 		},
 	})

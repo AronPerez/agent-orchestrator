@@ -22,6 +22,7 @@
 	"browser.closeDevTools": "DevTools schließen",
 	"browser.closeTab": "Tab {{title}} schließen",
 	"browser.emptyUrl": "Geben Sie eine URL ein oder klicken Sie eine im Terminal an.",
+	"browser.emptyProfileNote": "Der eigene Browser der AO-App — eigene Cookies und Logins, getrennt von Ihrem Systembrowser, nur für diese Sitzung.",
 	"browser.forward": "Vorwärts",
 	"browser.newTab": "Neuer Tab",
 	"browser.onlyTab": "Der einzige Tab kann nicht geschlossen werden",
