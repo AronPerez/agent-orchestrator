@@ -61,14 +61,20 @@ type daemonStatus struct {
 	Ready  string `json:"ready,omitempty"`
 	Error  string `json:"error,omitempty"`
 	owned  bool
+	// build and executable are what /healthz reported about the daemon itself.
+	// Unexported: only `ao doctor` compares them against this CLI's own build,
+	// and `ao status --json` is a stable contract that does not need them.
+	build      daemonmeta.Build
+	executable string
 }
 
 type probeResult struct {
-	Status           string `json:"status"`
-	Service          string `json:"service"`
-	PID              int    `json:"pid"`
-	ExecutablePath   string `json:"executablePath,omitempty"`
-	WorkingDirectory string `json:"workingDirectory,omitempty"`
+	Status           string           `json:"status"`
+	Service          string           `json:"service"`
+	PID              int              `json:"pid"`
+	ExecutablePath   string           `json:"executablePath,omitempty"`
+	WorkingDirectory string           `json:"workingDirectory,omitempty"`
+	Build            daemonmeta.Build `json:"build"`
 }
 
 func newStatusCommand(ctx *commandContext) *cobra.Command {
@@ -134,6 +140,8 @@ func (c *commandContext) inspectDaemon(ctx context.Context) (daemonStatus, error
 		return st, nil
 	}
 	st.owned = true
+	st.build = health.Build
+	st.executable = health.ExecutablePath
 	st.Health = health.Status
 	if health.Status != "ok" {
 		st.State = stateUnhealthy

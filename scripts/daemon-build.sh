@@ -169,7 +169,18 @@ if git_rev="$(git -C "${repo_root}" rev-parse HEAD 2>/dev/null)"; then
   fi
 fi
 stamp_pkg="github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
-(cd "${backend_dir}" && go build -ldflags "-X ${stamp_pkg}.buildStamp=${build_stamp}" -o "${binary_path}" ./cmd/ao)
+# `ao --version` printed a bare "dev" from every source build because nothing set
+# cli.Version/Commit/Date — they are declared as ldflags vars and only release
+# tooling ever filled them, so the one command a user runs to answer "which build
+# is this?" answered "dev". Same -ldflags, three more -X.
+cli_pkg="github.com/aoagents/agent-orchestrator/backend/internal/cli"
+cli_version="$(git -C "${repo_root}" describe --tags --always --dirty 2>/dev/null || echo dev)"
+build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+(cd "${backend_dir}" && go build -ldflags "\
+  -X ${stamp_pkg}.buildStamp=${build_stamp} \
+  -X ${cli_pkg}.Version=${cli_version} \
+  -X ${cli_pkg}.Commit=${build_stamp} \
+  -X ${cli_pkg}.Date=${build_date}" -o "${binary_path}" ./cmd/ao)
 
 if ! install_dir="$(select_install_dir)"; then
   printf 'Could not find a writable directory on PATH for ao\n' >&2
