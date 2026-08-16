@@ -184,8 +184,10 @@ func (c *commandContext) runDoctor(ctx context.Context) []doctorCheck {
 		if st.Error != "" {
 			msg += " (" + st.Error + ")"
 		}
-		checks = append(checks, doctorCheck{Level: level, Section: doctorSectionCore, Name: "daemon", Message: msg})
-		checks = append(checks, c.checkDaemonBuild(st, daemonmeta.CurrentBuild()))
+		checks = append(checks,
+			doctorCheck{Level: level, Section: doctorSectionCore, Name: "daemon", Message: msg},
+			c.checkDaemonBuild(st, daemonmeta.CurrentBuild()),
+		)
 	}
 
 	checks = append(checks,
