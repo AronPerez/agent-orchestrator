@@ -174,6 +174,7 @@ export function SessionInspector({
 	const { t } = useTranslation();
 	const [internalView, setInternalView] = useState<InspectorView>("summary");
 	const requestedView = viewProp ?? internalView;
+	const hasPullRequests = session ? sortedPRs(session).length > 0 : false;
 	// Badge the Browser tab when a preview target arrived without us opening it.
 	const browserUnseen = useUiStore((state) =>
 		session ? Boolean(state.inspectorSessions[refKey(session)]?.browserUnseen) : false,
@@ -184,19 +185,28 @@ export function SessionInspector({
 		onViewChange?.(next);
 		if (next === "files") onOpenFiles?.();
 	};
-	const view: InspectorView = requestedView;
-	const tabs = VIEW_DEFS.map((entry) => {
-		const label = t(entry.labelKey);
-		return {
-			...entry,
-			badge: entry.id === "browser" && browserUnseen,
-			displayLabel:
-				entry.id === "files" && filesChangedCount !== undefined
-					? t("files.tabCount", { count: filesChangedCount })
-					: label,
-			label,
-		};
-	});
+	// A persisted/controlled Reviews selection can outlive the last PR. Keep the
+	// shell on a real, visible tab instead of rendering an empty, unlabelled body.
+	const view: InspectorView = requestedView === "reviews" && !hasPullRequests ? "summary" : requestedView;
+	useEffect(() => {
+		if (view === requestedView) return;
+		setInternalView(view);
+		onViewChange?.(view);
+	}, [onViewChange, requestedView, view]);
+	const tabs = VIEW_DEFS.filter((entry) => entry.id !== "reviews" || hasPullRequests).map(
+		(entry) => {
+			const label = t(entry.labelKey);
+			return {
+				...entry,
+				badge: entry.id === "browser" && browserUnseen,
+				displayLabel:
+					entry.id === "files" && filesChangedCount !== undefined
+						? t("files.tabCount", { count: filesChangedCount })
+						: label,
+				label,
+			};
+		},
+	);
 	return (
 		<SessionInspectorShellView
 			activeView={view}
@@ -884,6 +894,7 @@ function SessionControls({ session }: { session: WorkspaceSession }) {
 	return (
 		<Section title={t("inspector.sessionControls")}>
 			<AutoInjectCIPolicyControl session={session} />
+			<AutoInjectReviewPolicyControl session={session} />
 			{session.kind === "orchestrator" ? null : canTerminateNow ? (
 				<div className="flex items-center justify-between gap-3 py-1">
 					<span className="min-w-0 text-xs font-medium text-settings-label">{t("inspector.terminateShort")}</span>
@@ -1357,15 +1368,8 @@ function ReviewsSection({
 			((pr.review?.reviews?.length ?? 0) > 0 ||
 				(pr.review?.unresolvedBy ?? []).some((reviewer) => reviewer.count > 0)),
 	);
-	const hasPRs = sortedPRs(session).length > 0;
-
 	return (
 		<div className="p-2">
-			{hasPRs ? null : (
-				<Section surface title={t("inspector.review.controls")}>
-					<AutoInjectReviewPolicyControl session={session} />
-				</Section>
-			)}
 			{/* Running a review is an action; reading them is a list. The action stays
 			    on top, then one list carrying both sources keyed by PR. */}
 			<ReviewPanel
@@ -1494,6 +1498,7 @@ function MergedReviewsSection({
 			unresolvedByReviewer.delete(entry.reviewerId);
 			return {
 				body: entry.body,
+				canRequestRereview: canRequestPRRereview(entry.verdict, github?.url),
 				id: entry.reviewUrl || `${entry.reviewerId}:${entry.submittedAt}`,
 				pullRequestUrl: github?.url,
 				inlineComments: (reviewer?.links ?? []).map((link) => ({
@@ -1515,6 +1520,7 @@ function MergedReviewsSection({
 		for (const reviewer of unresolvedByReviewer.values()) {
 			externalEntries.push({
 				body: undefined,
+				canRequestRereview: canRequestPRRereview("changes_requested", github?.url),
 				id: `unresolved:${reviewer.reviewerId}:${number}`,
 				pullRequestUrl: github?.url,
 				inlineComments: reviewer.links.map((link) => ({
@@ -1596,6 +1602,11 @@ function MergedReviewsSection({
 			renderMarkdown={renderReviewMarkdown}
 		/>
 	);
+}
+
+function canRequestPRRereview(verdict: string | undefined, pullRequestUrl: string | undefined): boolean {
+	if (!pullRequestUrl) return false;
+	return verdict !== "approved";
 }
 
 function reviewLabels(t: TFunction): InspectorReviewLabels {
@@ -1891,8 +1902,7 @@ function ReviewPanel({
 							) : null}
 						</div>
 					</div>
-					<AutoInjectReviewPolicyControl session={session} />
-					</div>
+				</div>
 				{reviewRunning ? (
 					<div className="mt-3 flex items-center gap-2 border-t border-border pt-3">
 						<Loader2 aria-hidden="true" className="size-icon-sm shrink-0 animate-spin text-muted-foreground" />

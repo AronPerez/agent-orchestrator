@@ -649,7 +649,7 @@ describe("SessionInspector PR section", () => {
     expect(screen.getByText("No pull request opened yet.")).toBeInTheDocument();
   });
 
-  it("keeps PR and session policies in Summary while review policies live in Reviews", async () => {
+  it("keeps durable session policies in Summary and operational review controls in Reviews", async () => {
     renderWithQuery(<SessionInspector session={session([pr(7, "open")])} />);
 
     expect(screen.getByText("Session controls")).toBeInTheDocument();
@@ -659,6 +659,7 @@ describe("SessionInspector PR section", () => {
         .getByRole("switch", { name })
         .closest("[data-slot='inspector-policy-row']") as HTMLElement;
     const ciRow = policyRow("Automatically send CI failures");
+    const reviewRow = policyRow("Automatically send reviews");
     const terminateRow = policyRow(
       "Terminate session when pull requests merge",
     );
@@ -673,16 +674,15 @@ describe("SessionInspector PR section", () => {
 
     expect(appearsBefore(prCard, ciRow)).toBe(true);
     expect(ciRow.className).toBe(terminateRow.className);
+    expect(reviewRow.className).toBe(terminateRow.className);
     expect(ciRow.parentElement).not.toHaveClass(
       "rounded-lg",
       "border",
       "bg-surface",
     );
-    expect(
-      screen.queryByRole("switch", { name: "Automatically send reviews" }),
-    ).not.toBeInTheDocument();
     for (const name of [
       "Automatically send CI failures",
+      "Automatically send reviews",
       "Terminate session when pull requests merge",
     ]) {
       const toggle = screen.getByRole("switch", { name });
@@ -708,8 +708,9 @@ describe("SessionInspector PR section", () => {
       await screen.findByRole("button", { name: "Run review" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("switch", { name: "Automatically send reviews" }),
-    ).toBeInTheDocument();
+      screen.queryByRole("switch", { name: "Automatically send reviews" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "Auto review" })).toBeInTheDocument();
   });
 
   it("persists the CI injection default before a PR exists", async () => {
@@ -2006,38 +2007,19 @@ describe("SessionInspector summary reviews", () => {
     expect(summary).not.toHaveTextContent("**auth validation**");
   });
 
-  // An AO pass only gets a review-comment anchor once it is submitted to
-  // GitHub, so without a fallback an unsubmitted pass is a dead end.
-  it("links a run to its GitHub review, falling back to the PR when it has none", async () => {
+  it("does not show a View on PR CTA for review summaries", async () => {
     mockCommonGets([], "reviewer-pane", [
       {
         ...reviewState(3, "up_to_date", "abc123"),
         latestRun: { ...approvedReview, githubReviewId: "98765" },
       },
     ]);
-    const { unmount } = renderWithQuery(
-      <SessionInspector session={session([pr(3, "open")])} />,
-    );
-    await openReviewsSection();
-    expect(
-      await screen.findByRole("link", { name: /View on PR/ }),
-    ).toHaveAttribute(
-      "href",
-      "https://example.com/pr/3#pullrequestreview-98765",
-    );
-    unmount();
 
-    mockCommonGets([], "reviewer-pane", [
-      {
-        ...reviewState(3, "up_to_date", "abc123"),
-        latestRun: { ...approvedReview, githubReviewId: "" },
-      },
-    ]);
     renderWithQuery(<SessionInspector session={session([pr(3, "open")])} />);
     await openReviewsSection();
-    expect(
-      await screen.findByRole("link", { name: /View on PR/ }),
-    ).toBeInTheDocument();
+
+    expect(await screen.findByTestId("review-run-summary")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /View on PR/ })).not.toBeInTheDocument();
   });
 
   it.each([
@@ -2101,10 +2083,7 @@ describe("SessionInspector summary reviews", () => {
         expect(screen.queryByText("Changes requested")).not.toBeInTheDocument();
         expect(screen.queryByText("Earlier commit")).not.toBeInTheDocument();
       }
-      expect(screen.getByRole("link", { name: "View on PR" })).toHaveAttribute(
-        "href",
-        "https://example.com/pr/3#pullrequestreview-98765",
-      );
+      expect(screen.queryByRole("link", { name: "View on PR" })).not.toBeInTheDocument();
       // A run in flight gets its own live strip naming the harness, not just a
       // word on the button.
       if (status === "running") {
@@ -2279,8 +2258,11 @@ describe("SessionInspector summary reviews", () => {
       within(externalReview).getByText("Reviewed 3d ago"),
     ).toBeInTheDocument();
     expect(
-      within(externalReview).getByRole("link", { name: "View on PR" }),
-    ).toHaveAttribute("href", "https://example.com/pr/3#pullrequestreview-456");
+      within(externalReview).queryByRole("link", { name: "View on PR" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(externalReview).queryByRole("button", { name: "Request to re-review PR" }),
+    ).not.toBeInTheDocument();
     expect(screen.getByText("External reviews")).toBeInTheDocument();
   });
 
@@ -2527,7 +2509,6 @@ describe("SessionInspector summary reviews", () => {
 
   it("persists the automatic review injection toggle", async () => {
     renderWithQuery(<SessionInspector session={session([pr(3, "open")])} />);
-    await openReviewsSection();
 
     const toggle = screen.getByRole("switch", {
       name: "Automatically send reviews",
@@ -2945,15 +2926,39 @@ describe("SessionInspector summary reviews", () => {
     );
   });
 
-  it("keeps the Reviews tab available when the session has no PRs", async () => {
+  it("hides Reviews when the session has no PR while keeping its durable preference in Summary", async () => {
     mockCommonGets();
     renderWithQuery(<SessionInspector session={session([])} />);
 
     await screen.findByRole("tab", { name: /Summary/ });
-    await userEvent.click(screen.getByRole("tab", { name: /Reviews/ }));
+    expect(screen.queryByRole("tab", { name: /Reviews/ })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("tab").map((tab) => tab.textContent?.trim())).toEqual([
+      "Summary",
+      "Browser",
+      "Files",
+    ]);
     expect(
       screen.getByRole("switch", { name: "Automatically send reviews" }),
     ).toBeInTheDocument();
     expect(screen.getByText("No pull request opened yet.")).toBeInTheDocument();
+  });
+
+  it("falls back to Summary when a controlled Reviews selection has no PR", async () => {
+    const onViewChange = vi.fn();
+    renderWithQuery(
+      <SessionInspector
+        onViewChange={onViewChange}
+        session={session([])}
+        view="reviews"
+      />,
+    );
+
+    expect(screen.getByRole("tab", { name: "Summary" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.queryByRole("tab", { name: "Reviews" })).not.toBeInTheDocument();
+    expect(screen.getByText("Session controls")).toBeInTheDocument();
+    await waitFor(() => expect(onViewChange).toHaveBeenCalledWith("summary"));
   });
 });
