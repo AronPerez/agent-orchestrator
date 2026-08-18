@@ -43,12 +43,7 @@ type BrowserPanelProps = {
 };
 
 type AnnotationStatus =
-  | "idle"
-  | "picking"
-  | "queued"
-  | "sending"
-  | "sent"
-  | "error";
+  "idle" | "picking" | "queued" | "sending" | "sent" | "error";
 
 // Docked rail visibility: collapsed (0px, tab access via the toolbar trigger) is
 // the default; pinning restores an always-visible icon rail. Persisted so it's a
@@ -67,10 +62,10 @@ export type BrowserAnnotationQueueModel = {
 };
 
 export function useBrowserAnnotationQueue({
-	session,
-	navUrl,
+  session,
+  navUrl,
 }: {
-	session?: Ref;
+  session?: Ref;
   navUrl?: string;
 }): BrowserAnnotationQueueModel {
   const [state, setState] = useState<{
@@ -84,9 +79,9 @@ export function useBrowserAnnotationQueue({
   });
   const annotationQueueRef = useRef<BrowserAnnotationSubmitPayload[]>([]);
   const annotationSendingRef = useRef(false);
-	const sessionRef = useRef<Ref | null>(session ?? null);
-	const sessionHost = session?.host;
-	const sessionId = session?.id;
+  const sessionRef = useRef<Ref | null>(session ?? null);
+  const sessionHost = session?.host;
+  const sessionId = session?.id;
   const generationRef = useRef(0);
   const sentTimerRef = useRef<number | null>(null);
 
@@ -101,7 +96,7 @@ export function useBrowserAnnotationQueue({
   }, []);
 
   const drainAnnotationQueue = useCallback(() => {
-		if (annotationSendingRef.current || !sessionRef.current) {
+    if (annotationSendingRef.current || !sessionRef.current) {
       return;
     }
 
@@ -114,7 +109,7 @@ export function useBrowserAnnotationQueue({
 
     annotationSendingRef.current = true;
     const sendGeneration = generationRef.current;
-		const sendSession = sessionRef.current;
+    const sendSession = sessionRef.current;
     setState({
       status: "sending",
       error: "",
@@ -126,10 +121,10 @@ export function useBrowserAnnotationQueue({
       let failureMessage = appI18n.t("browser.unableSendAnnotation");
       try {
         const message = formatBrowserAnnotationMessage(payload);
-				const { error } = await clientFor(sendSession.host).POST(
+        const { error } = await clientFor(sendSession.host).POST(
           "/api/v1/sessions/{sessionId}/send",
           {
-					params: { path: { sessionId: sendSession.id } },
+            params: { path: { sessionId: sendSession.id } },
             body: { message, attachment: payload.snapshot },
           },
         );
@@ -149,7 +144,8 @@ export function useBrowserAnnotationQueue({
       } finally {
         if (
           sendGeneration !== generationRef.current ||
-				!sessionRef.current || refKey(sendSession) !== refKey(sessionRef.current)
+          !sessionRef.current ||
+          refKey(sendSession) !== refKey(sessionRef.current)
         )
           return;
         annotationSendingRef.current = false;
@@ -188,9 +184,10 @@ export function useBrowserAnnotationQueue({
   }, []);
 
   useEffect(() => {
-		sessionRef.current = sessionHost && sessionId ? { host: sessionHost, id: sessionId } : null;
-		resetQueue();
-	}, [resetQueue, sessionHost, sessionId]);
+    sessionRef.current =
+      sessionHost && sessionId ? { host: sessionHost, id: sessionId } : null;
+    resetQueue();
+  }, [resetQueue, sessionHost, sessionId]);
 
   useEffect(() => {
     if (navUrl) return;
@@ -272,14 +269,14 @@ export function BrowserPanel({
   onTogglePopOut,
 }: BrowserPanelProps) {
   const browserView = useBrowserView({
-		session,
+    session,
     active,
     poppedOut,
     previewUrl: session.previewUrl,
     previewRevision: session.previewRevision,
   });
-	const annotationQueue = useBrowserAnnotationQueue({
-		session,
+  const annotationQueue = useBrowserAnnotationQueue({
+    session,
     navUrl: browserView.navState.url,
   });
   return (
@@ -572,7 +569,11 @@ export function BrowserPanelView({
               ? "browser.closeDevTools"
               : "browser.openDevTools",
           )}
-          className={cn(devtoolsState.open && "bg-accent-weak text-accent")}
+          aria-pressed={devtoolsState.open}
+          className={cn(
+            devtoolsState.open &&
+              "bg-accent-strong text-accent-foreground hover:bg-accent-strong dark:hover:bg-accent-strong",
+          )}
           disabled={!canUseDevTools}
           onClick={() =>
             void (devtoolsState.open ? closeDevTools() : openDevTools())
