@@ -244,7 +244,7 @@ function SummaryView({ onOpenReviews, session }: { onOpenReviews: () => void; se
 	const { t } = useTranslation();
 	const query = useSessionScmSummary(session);
 	const developerMode = useUiStore((state) => state.developerMode);
-	const usageQuery = useSessionUsage(session.id, developerMode);
+	const usageQuery = useSessionUsage(session, developerMode);
 	const showUsage =
 		developerMode &&
 		!usageQuery.isLoading &&
