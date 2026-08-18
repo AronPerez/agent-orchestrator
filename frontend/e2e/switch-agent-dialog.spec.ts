@@ -42,7 +42,7 @@ async function openSwitchAgentDialog(page: Page) {
 		await route.fulfill({ json: { status: "ok" } });
 	});
 
-	await page.goto(`/#/projects/${projectId}/sessions/switch-worker`);
+	await page.goto("/#/host/local/session/switch-worker");
 	await page.getByRole("button", { name: "Switch agent", exact: true }).click();
 	const dialog = page.getByRole("dialog", { name: "Switch agent" });
 	await expect(dialog).toBeVisible();
