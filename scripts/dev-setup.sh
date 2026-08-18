@@ -29,7 +29,7 @@ repo_root="$(cd "${script_dir}/.." && pwd)"
 la_dir="${HOME}/Library/LaunchAgents"
 dom="gui/$(id -u)"
 
-# 0. git hooks: enable the tracked pre-commit (prettier + gofmt checks)
+# 0. git hooks: enable the tracked pre-commit (gofmt check)
 "${script_dir}/install-hooks.sh"
 
 # 1. ao CLI: build + PATH install; also the ~/.ao/bin/ao copy that live worker

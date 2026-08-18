@@ -1,21 +1,18 @@
 #!/usr/bin/env bash
 # Pre-commit: catch formatting problems here instead of in a red PR.
 #
-# What this actually mirrors:
+# What this mirrors:
 #   .github/workflows/go.yml  → gofmt on Go files.  Mirrored exactly; a failure
 #                               here is a real CI failure.
 #
-# The prettier check below mirrors NOTHING. `.github/workflows/prettier.yml`
-# existed once and was deleted in f7a5923 ("chore: remove partial prettier
-# setup", #3090) — along with `.prettierrc` and `.prettierignore`, i.e. the whole
-# setup, config included. No workflow enforces prettier today. This hook was left
-# behind, so it now runs prettier with its BUILT-IN DEFAULTS and no ignore file,
-# against a repo that deliberately removed both. That is why it flags files you
-# never touched.
-#
-# So: a gofmt failure here predicts CI. A prettier failure here predicts nothing
-# and is advisory. Whether that half should exist at all is a decision nobody has
-# made yet — this comment only stops it claiming an enforcement that is not there.
+# That is the whole hook, on purpose. A prettier --check ran here until this
+# commit and enforced nothing: `.github/workflows/prettier.yml`, `.prettierrc`
+# and `.prettierignore` were all deleted together in f7a5923 ("chore: remove
+# partial prettier setup", #3090), so it was left running prettier's built-in
+# defaults against a repo that had removed that setup — flagging files nobody
+# touched, and disagreeing with upstream's own formatting on every sync. It also
+# made --no-verify (needed for every upstream sync merge) the only way to
+# commit, which silently switched off the gofmt check below along with it.
 #
 # Enable once per clone (scripts/dev-setup.sh and scripts/install-hooks.sh do
 # this for you):
@@ -23,7 +20,7 @@
 #
 # This checks and blocks; it never rewrites your working tree, so a
 # partially-staged file is safe. To auto-fix instead, run the printed command
-# (or flip --check→--write / gofmt -l→-w and re-stage).
+# (or flip gofmt -l→-w and re-stage).
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
@@ -36,16 +33,7 @@ while IFS= read -r -d '' f; do staged+=("$f"); done \
 
 fail=0
 
-# 1. Prettier — every staged file it has a parser for. --ignore-unknown skips
-#    the rest (Go, images, lockfiles); .prettierignore is honored automatically.
-if ! npx --yes prettier@3 --check --ignore-unknown "${staged[@]}"; then
-	echo "" >&2
-	echo "✖ Prettier found unformatted files. Fix with:" >&2
-	echo "    npx prettier@3 --write <files>   (then re-stage)" >&2
-	fail=1
-fi
-
-# 2. gofmt — Go files only (Prettier has no Go parser).
+# gofmt — Go files only.
 go_files=()
 for f in "${staged[@]}"; do
 	case "$f" in *.go) go_files+=("$f") ;; esac
