@@ -54,6 +54,8 @@ type UiState = {
 	resolvedTheme: Theme;
 	/** Named color style theme (e.g. "catppuccin", "nord") — independent of light/dark mode. */
 	themeStyle: ThemeStyle;
+	/** When true, developer-only release controls are available. Default off. */
+	developerMode: boolean;
 	restartingProjectIds: ReadonlySet<string>;
 	orchestratorReplacementErrors: Record<string, OrchestratorReplacementFailure>;
 	orchestratorStartupErrors: Record<string, string>;
@@ -84,6 +86,7 @@ type UiState = {
 	setWorkbenchTab: (tab: WorkbenchTab) => void;
 	setThemePreference: (theme: ThemePreference) => void;
 	setThemeStyle: (style: ThemeStyle) => void;
+	setDeveloperMode: (enabled: boolean) => void;
 	openGlobalSettings: () => void;
 	openProjectSettings: (project: Ref) => void;
 	closeSettings: () => void;
@@ -114,6 +117,7 @@ export type OrchestratorReplacementFailure = {
 };
 
 const sidebarStorageKey = "ao.sidebar.open";
+const developerModeStorageKey = "ao.developerMode";
 function getLocalStorage() {
 	if (typeof window === "undefined" || !window.localStorage) return null;
 	return window.localStorage;
@@ -121,6 +125,10 @@ function getLocalStorage() {
 
 function initialSidebarOpen() {
 	return getLocalStorage()?.getItem(sidebarStorageKey) !== "false";
+}
+
+function initialDeveloperMode() {
+	return getLocalStorage()?.getItem(developerModeStorageKey) === "true";
 }
 
 function inspectorState(sessions: Record<string, InspectorSessionState>, sessionId: string): InspectorSessionState {
@@ -139,6 +147,7 @@ export const useUiStore = create<UiState>((set, get) => ({
 	themePreference: initialThemePreference,
 	resolvedTheme: resolveTheme(initialThemePreference),
 	themeStyle: initialThemeStyle,
+	developerMode: initialDeveloperMode(),
 	restartingProjectIds: new Set<string>(),
 	orchestratorReplacementErrors: {},
 	orchestratorStartupErrors: {},
@@ -164,6 +173,10 @@ export const useUiStore = create<UiState>((set, get) => ({
 			applyDocumentThemeStyle(themeStyle);
 			set({ themeStyle });
 		});
+	},
+	setDeveloperMode: (developerMode) => {
+		getLocalStorage()?.setItem(developerModeStorageKey, String(developerMode));
+		set({ developerMode });
 	},
 	openGlobalSettings: () => set({ settingsModal: { scope: "global" } }),
 	openProjectSettings: (project) => set({ settingsModal: { scope: "project", project } }),

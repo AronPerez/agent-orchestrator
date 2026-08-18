@@ -31,6 +31,7 @@ export function createEventTransport(queryClient: QueryClient): EventTransport {
 			closeAllHostStreams();
 			let debounce: ReturnType<typeof setTimeout> | undefined;
 			const pendingConversationSessions = new Set<string>();
+			const pendingInterfaceTransitionSessions = new Set<string>();
 			let workspaceInvalidationPending = false;
 			const pendingWorkspaceHosts = new Set<HostId>();
 			const refreshWorkspaces = (host?: HostId, event?: Event) => {
@@ -48,8 +49,19 @@ export function createEventTransport(queryClient: QueryClient): EventTransport {
 						// sidebar but leaves a Chat timeline frozen on its pre-turn snapshot.
 						const payload =
 							typeof decoded.payload === "object" && decoded.payload !== null
-								? (decoded.payload as { conversationId?: unknown })
+								? (decoded.payload as {
+										conversationId?: unknown;
+										interfaceTransitionId?: unknown;
+								  })
 								: undefined;
+						if (
+							typeof decoded.sessionId === "string" &&
+							decoded.sessionId &&
+							typeof payload?.interfaceTransitionId === "string" &&
+							payload.interfaceTransitionId
+						) {
+							pendingInterfaceTransitionSessions.add(decoded.sessionId);
+						}
 						if (
 							typeof decoded.sessionId === "string" &&
 							decoded.sessionId &&
@@ -89,6 +101,12 @@ export function createEventTransport(queryClient: QueryClient): EventTransport {
 						});
 					}
 					pendingConversationSessions.clear();
+					for (const sessionId of pendingInterfaceTransitionSessions) {
+						void queryClient.invalidateQueries({
+							queryKey: ["session-interface-transition", sessionId],
+						});
+					}
+					pendingInterfaceTransitionSessions.clear();
 				}, INVALIDATE_DEBOUNCE_MS);
 			};
 
