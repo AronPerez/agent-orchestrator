@@ -404,6 +404,10 @@ type BrowserStatusResponse struct {
 	Connected   bool             `json:"connected"`
 	ConnectedAt time.Time        `json:"connectedAt,omitempty"`
 	Transport   string           `json:"transport"`
+	// PersistentProfile is true when this session's project opted into a shared
+	// on-disk browser profile, so logins survive session teardown and restart.
+	// False is the default: a memory-only profile, discarded with the session.
+	PersistentProfile bool `json:"persistentProfile"`
 }
 
 // BrowserCommandRequest is the stable daemon-facing command envelope. Action

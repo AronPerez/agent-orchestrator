@@ -70,6 +70,9 @@ type Command struct {
 	SessionID domain.SessionID       `json:"sessionId"`
 	Action    string                 `json:"action"`
 	Args      map[string]interface{} `json:"args,omitempty"`
+	// ProfileKey is set only when the session's project opted into a persistent
+	// browser profile. See wireMessage.ProfileKey.
+	ProfileKey string `json:"profileKey,omitempty"`
 }
 
 // CommandError is a stable browser failure returned by the Electron runtime.
@@ -99,9 +102,16 @@ type wireMessage struct {
 	SessionID domain.SessionID       `json:"sessionId,omitempty"`
 	Action    string                 `json:"action,omitempty"`
 	Args      map[string]interface{} `json:"args,omitempty"`
-	OK        bool                   `json:"ok,omitempty"`
-	Result    json.RawMessage        `json:"result,omitempty"`
-	Error     *CommandError          `json:"error,omitempty"`
+	// ProfileKey is an OPAQUE partition key for the Electron runtime. Empty is
+	// the default and means "give this session a throwaway memory-only profile";
+	// non-empty means "this project opted into a shared on-disk profile, use
+	// this key for it". The daemon is the only side that knows the session's
+	// project and that project's config, so it decides; the app never looks a
+	// project up. Empty on every command that does not create a session.
+	ProfileKey string          `json:"profileKey,omitempty"`
+	OK         bool            `json:"ok,omitempty"`
+	Result     json.RawMessage `json:"result,omitempty"`
+	Error      *CommandError   `json:"error,omitempty"`
 }
 
 type pendingResult struct {
@@ -155,7 +165,13 @@ func (b *Broker) Status() Status {
 }
 
 // Execute sends one browser command to the connected Electron runtime.
-func (b *Broker) Execute(ctx context.Context, sessionID domain.SessionID, action string, args map[string]interface{}) (Result, error) {
+func (b *Broker) Execute(
+	ctx context.Context,
+	sessionID domain.SessionID,
+	action string,
+	args map[string]interface{},
+	profileKey string,
+) (Result, error) {
 	requestID := uuid.NewString()
 	resultCh := make(chan pendingResult, 1)
 
@@ -169,11 +185,12 @@ func (b *Broker) Execute(ctx context.Context, sessionID domain.SessionID, action
 	b.mu.Unlock()
 
 	msg := wireMessage{
-		Type:      "command",
-		RequestID: requestID,
-		SessionID: sessionID,
-		Action:    action,
-		Args:      args,
+		Type:       "command",
+		RequestID:  requestID,
+		SessionID:  sessionID,
+		Action:     action,
+		Args:       args,
+		ProfileKey: profileKey,
 	}
 	if err := b.write(ctx, conn, msg); err != nil {
 		b.removePending(requestID)
@@ -203,7 +220,7 @@ func (b *Broker) Execute(ctx context.Context, sessionID domain.SessionID, action
 // public browser action allowlist but still uses the authenticated runtime
 // transport, so session teardown does not depend on a mounted renderer panel.
 func (b *Broker) DestroySession(ctx context.Context, sessionID domain.SessionID) error {
-	_, err := b.Execute(ctx, sessionID, "__destroy-session", nil)
+	_, err := b.Execute(ctx, sessionID, "__destroy-session", nil, "")
 	if errors.Is(err, ErrUnavailable) {
 		return nil
 	}

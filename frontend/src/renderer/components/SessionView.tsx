@@ -47,6 +47,7 @@ import {
 	interfaceTransitionIsActive,
 	useSessionInterfaceTransition,
 } from "../hooks/useSessionInterfaceTransition";
+import { usePersistentBrowserProfile } from "../hooks/usePersistentBrowserProfile";
 import { useWorkspaceQuery } from "../hooks/useWorkspaceQuery";
 import { flattenHostSections } from "../types/workspace";
 import { useWindowFullScreen } from "../hooks/useWindowFullScreen";
@@ -599,6 +600,7 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 		session && hasInspector && (browserPoppedOut || (isInspectorOpen && inspectorView === "browser")),
 	);
 	const terminated = session ? !sessionIsActive(session) : false;
+	const persistentProfile = usePersistentBrowserProfile(sessionRef.host, session?.workspaceId);
 	const browserView = useBrowserView({
 		session: session ?? sessionRef,
 		active: browserSlotVisible,
@@ -606,6 +608,7 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 		terminated,
 		previewUrl,
 		previewRevision,
+		persistentProfile,
 	});
 	const browserAnnotationQueue = useBrowserAnnotationQueue({
 		session,

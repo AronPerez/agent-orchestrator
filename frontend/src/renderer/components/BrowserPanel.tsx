@@ -693,7 +693,14 @@ export function BrowserPanelView({
           ) : null}
           {navState.url === "" ? (
             <div className="pointer-events-none absolute inset-0 grid place-items-center p-5 text-center font-mono text-xs text-passive">
-              <p>{t("browser.emptyUrl")}</p>
+              {/* Say which browser this is. People log into a site here, find
+                  their system browser unchanged, and assume it failed. */}
+              <div className="max-w-sm space-y-1.5">
+                <p>{t("browser.emptyUrl")}</p>
+                <p className="text-passive/70">
+                  {t("browser.emptyProfileNote")}
+                </p>
+              </div>
             </div>
           ) : null}
           {navState.error ? (

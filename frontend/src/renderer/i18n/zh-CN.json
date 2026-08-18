@@ -22,6 +22,7 @@
 	"browser.closeDevTools": "关闭开发者工具",
 	"browser.closeTab": "关闭标签 {{title}}",
 	"browser.emptyUrl": "输入网址，或在终端中点击链接。",
+	"browser.emptyProfileNote": "这是 AO 应用自带的浏览器：Cookie 和登录状态与系统浏览器分开，且仅在本会话中保留。",
 	"browser.forward": "前进",
 	"browser.newTab": "新标签",
 	"browser.onlyTab": "无法关闭唯一标签",

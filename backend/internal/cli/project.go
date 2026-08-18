@@ -118,6 +118,9 @@ type projectConfig struct {
 	Worker             roleOverride        `json:"worker,omitempty"`
 	Orchestrator       roleOverride        `json:"orchestrator,omitempty"`
 	TrackerIntake      trackerIntakeConfig `json:"trackerIntake,omitempty"`
+	// BrowserPersistentProfile is opt-in and default off. See the domain type
+	// for the security ceiling it accepts.
+	BrowserPersistentProfile bool `json:"browserPersistentProfile,omitempty"`
 }
 
 // setConfigRequest mirrors the daemon's SetConfigInput body for
@@ -143,6 +146,7 @@ type projectSetConfigOptions struct {
 	trackerIntake          bool
 	trackerRepo            string
 	trackerAssignee        string
+	browserPersistProfile  bool
 	configJSON             string
 	clear                  bool
 	json                   bool
@@ -343,6 +347,10 @@ func newProjectSetConfigCommand(ctx *commandContext) *cobra.Command {
 	f.BoolVar(&opts.trackerIntake, "tracker-intake", false, "Enable GitHub issue intake for matching issues")
 	f.StringVar(&opts.trackerRepo, "tracker-repo", "", "GitHub repo for issue intake (owner/repo; default: derive from git origin)")
 	f.StringVar(&opts.trackerAssignee, "tracker-assignee", "", "GitHub issue assignee required for intake eligibility")
+	f.BoolVar(&opts.browserPersistProfile, "browser-persistent-profile", false,
+		"Share ONE on-disk browser profile across this project's sessions so logins survive restarts. "+
+			"Off by default. Security ceiling: every worker session on this project shares that cookie jar, "+
+			"so a prompt-injected agent in any of them can use every login in it")
 	f.StringVar(&opts.configJSON, "config-json", "", "Full config as a JSON object (overrides field flags)")
 	f.BoolVar(&opts.clear, "clear", false, "Clear all config")
 	f.BoolVar(&opts.json, "json", false, "Output the updated project as JSON")
@@ -396,6 +404,7 @@ func buildProjectConfig(opts projectSetConfigOptions, orchestratorPrompt string)
 			Repo:     opts.trackerRepo,
 			Assignee: opts.trackerAssignee,
 		},
+		BrowserPersistentProfile: opts.browserPersistProfile,
 	}
 	if reflect.DeepEqual(cfg, projectConfig{}) {
 		return projectConfig{}, usageError{errors.New("usage: provide at least one config flag, --config-json, --orchestrator-prompt-file, or --clear")}

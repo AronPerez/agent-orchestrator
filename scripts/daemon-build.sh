@@ -10,6 +10,16 @@ can_write_dir() {
   local dir="$1"
 
   [[ -n "${dir}" ]] || return 1
+  # Never install into a macOS .app bundle, even though it is writable. On a
+  # machine with the desktop app installed, `ao` resolves to the app's BUNDLED
+  # daemon — it is on PATH ahead of everything else in an AO worker session and
+  # in a plain login shell alike — so select_install_dir would otherwise pick
+  # that directory and install_file would replace the app's own daemon with a
+  # symlink. That breaks the bundle's code signature, and macOS then SIGKILLs
+  # the app on its next launch (OS_REASON_CODESIGNING). The only reason this has
+  # not already happened is that install-desktop-app.sh copies the fresh bundle
+  # in AFTER running `ao-svc reload`, overwriting the damage by luck of ordering.
+  [[ "${dir}" == *.app/* ]] && return 1
   mkdir -p "${dir}"
   [[ -d "${dir}" && -w "${dir}" ]]
 }
@@ -99,11 +109,44 @@ mkdir -p "${build_dir}"
 # daemon then answers UI requests with a 503 that says the bundle was not built.
 frontend_dir="${repo_root}/frontend"
 webui_bundle="${backend_dir}/internal/httpd/webui/bundle"
+
+# node_modules existing is not the same as node_modules being CURRENT. A checkout
+# whose deps were installed before a dependency was added leaves vite resolvable
+# and the new import unresolvable, and the vite build then fails the whole daemon
+# build with a bare "Rolldown failed to resolve import" — which reads like a code
+# bug, not a stale install. npm records what it actually installed in
+# node_modules/.package-lock.json, so compare that against the committed lockfile
+# and reinstall only when it is behind. No-op cost on a current tree: one stat.
+# The renderer build compiles packages/product-ui from source (see the alias in
+# vite.renderer.config.ts), so that package's deps have to be current too.
+ensure_node_modules() {
+  local pkg_dir="$1"
+  local lock="${pkg_dir}/package-lock.json"
+  local installed="${pkg_dir}/node_modules/.package-lock.json"
+
+  [[ -f "${lock}" ]] || return 0
+  [[ ! -f "${installed}" || "${lock}" -nt "${installed}" ]] || return 0
+
+  printf 'Installing %s deps (node_modules is behind package-lock.json)…\n' "${pkg_dir}" >&2
+  (cd "${pkg_dir}" && npm ci --no-audit --no-fund)
+}
+
 if [[ -x "${frontend_dir}/node_modules/.bin/vite" ]]; then
+  # A failed vite build must not leave the tree dirty. Only .gitkeep is tracked
+  # here (the bundle itself is gitignored), so deleting it and exiting early
+  # makes git report a modified tree — and the NEXT build then stamps itself
+  # "-dirty" for a reason that has nothing to do with its own source. Restore it
+  # however this shell exits.
+  restore_gitkeep() { mkdir -p "${webui_bundle}" && : > "${webui_bundle}/.gitkeep"; }
+  trap restore_gitkeep EXIT
+
+  ensure_node_modules "${repo_root}/packages/product-ui"
+  ensure_node_modules "${frontend_dir}"
+
   rm -rf "${webui_bundle}"
   (cd "${frontend_dir}" && VITE_AO_WEB=1 ./node_modules/.bin/vite build \
     --config vite.renderer.config.ts --outDir "${webui_bundle}" --emptyOutDir)
-  mkdir -p "${webui_bundle}" && : > "${webui_bundle}/.gitkeep"
+  restore_gitkeep
   # go:embed is satisfied by .gitkeep alone, so an empty bundle would still
   # compile and install a daemon whose UI answers 503. Fail here instead.
   if [[ ! -f "${webui_bundle}/index.html" ]]; then
@@ -136,7 +179,18 @@ if git_rev="$(git -C "${repo_root}" rev-parse HEAD 2>/dev/null)"; then
   fi
 fi
 stamp_pkg="github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
-(cd "${backend_dir}" && go build -ldflags "-X ${stamp_pkg}.buildStamp=${build_stamp}" -o "${binary_path}" ./cmd/ao)
+# `ao --version` printed a bare "dev" from every source build because nothing set
+# cli.Version/Commit/Date — they are declared as ldflags vars and only release
+# tooling ever filled them, so the one command a user runs to answer "which build
+# is this?" answered "dev". Same -ldflags, three more -X.
+cli_pkg="github.com/aoagents/agent-orchestrator/backend/internal/cli"
+cli_version="$(git -C "${repo_root}" describe --tags --always --dirty 2>/dev/null || echo dev)"
+build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+(cd "${backend_dir}" && go build -ldflags "\
+  -X ${stamp_pkg}.buildStamp=${build_stamp} \
+  -X ${cli_pkg}.Version=${cli_version} \
+  -X ${cli_pkg}.Commit=${build_stamp} \
+  -X ${cli_pkg}.Date=${build_date}" -o "${binary_path}" ./cmd/ao)
 
 if ! install_dir="$(select_install_dir)"; then
   printf 'Could not find a writable directory on PATH for ao\n' >&2
@@ -169,6 +223,11 @@ if [[ -n "${shim_path}" ]]; then
 fi
 if [[ "${resolved_path}" != "${install_abs_path}" && "${resolved_path}" != "${shim_abs_path}" ]]; then
   printf 'ao resolves to %s, expected %s\n' "${resolved}" "${install_path}" >&2
+  if [[ "${resolved_path}" == *.app/* ]]; then
+    printf 'That path is inside a macOS .app bundle — the desktop app'"'"'s own daemon. It is deliberately\n' >&2
+    printf 'not an install target (writing there breaks the bundle signature), so put %s\n' "${install_dir}" >&2
+    printf 'ahead of it on PATH, or update the app with scripts/install-desktop-app.sh instead.\n' >&2
+  fi
   exit 1
 fi
 

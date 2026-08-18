@@ -45,6 +45,13 @@ case "${1:-status}" in
     # code signature and macOS SIGKILLs it (OS_REASON_CODESIGNING).
     # The running daemon is the desktop app's bundled one — to update IT, run
     # scripts/install-desktop-app.sh (rebuild + reinstall + relaunch the app).
+    # Say which tree and commit this builds. $repo is a fixed path, so whatever
+    # branch that checkout happens to be on is what lands on PATH — and an AO
+    # worktree holding the branch you meant elsewhere is invisible from here.
+    # This is how a CLI built from `main` ended up talking to a daemon built from
+    # `develop`; `ao doctor` now fails on that skew, but seeing the commit before
+    # the build beats diagnosing it after.
+    echo "reload: building $repo @ $(git -C "$repo" rev-parse --short HEAD 2>/dev/null) ($(git -C "$repo" rev-parse --abbrev-ref HEAD 2>/dev/null))"
     mkdir -p "$HOME/.ao/bin"
     "$repo/scripts/daemon-build.sh" \
       && cp -f "$cache_bin" "$HOME/.ao/bin/ao.new" \

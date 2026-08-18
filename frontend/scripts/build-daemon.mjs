@@ -38,6 +38,18 @@ if (versionResult.status !== 0 || !actualGoVersion || !meetsMinimumVersion(actua
 // tracked .gitkeep so go:embed — and therefore `go build` — works in a
 // checkout that has not run this step.
 const webuiDir = join(backendRoot, "internal", "httpd", "webui", "bundle");
+
+// A failed build must not leave the tree dirty. Only .gitkeep is tracked here
+// (the bundle itself is gitignored), so removing it and then exiting early makes
+// git report a modified tree — and the NEXT build stamps itself "-dirty" for a
+// reason that has nothing to do with its own source. Restore it on every exit
+// path, not just the happy one.
+const restoreGitkeep = () => {
+	mkdirSync(webuiDir, { recursive: true });
+	writeFileSync(join(webuiDir, ".gitkeep"), "");
+};
+process.on("exit", restoreGitkeep);
+
 rmSync(webuiDir, { recursive: true, force: true });
 
 const viteCli = join(frontendRoot, "node_modules", "vite", "bin", "vite.js");
@@ -54,8 +66,7 @@ if (webResult.error) {
 if (webResult.status !== 0) {
 	process.exit(webResult.status ?? 1);
 }
-mkdirSync(webuiDir, { recursive: true });
-writeFileSync(join(webuiDir, ".gitkeep"), "");
+restoreGitkeep();
 
 // Prove the bundle is really there before `go build` embeds it. go:embed is
 // satisfied by the tracked .gitkeep alone, so an empty bundle directory still

@@ -777,6 +777,82 @@ describe("agent browser runtime", () => {
 		expect(constructorOptions[3].webPreferences.partition).not.toBe(firstPartition);
 	});
 
+	// The opt-in path. Its ONLY difference from the default is on one axis:
+	// sessions of the SAME project share one on-disk jar. Everything else about
+	// the isolation model has to survive, so each of those properties is asserted
+	// here rather than assumed from the default-path test above.
+	it("shares one persistent profile across sessions of the same project", async () => {
+		const { constructorOptions, host } = setupTabHost();
+		await host.execute("sess-1", "tabs", {}, undefined, "proj-alpha");
+		await host.execute("sess-2", "tabs", {}, undefined, "proj-alpha");
+
+		const partition = constructorOptions[0].webPreferences.partition;
+		expect(partition).toBe("persist:ao-browser-proj-alpha");
+		// Different SESSIONS, same project: same jar. That is the whole feature.
+		expect(constructorOptions[1].webPreferences.partition).toBe(partition);
+
+		// And it must survive session teardown — the default path deliberately
+		// gets a fresh partition here, which is exactly what opting in changes.
+		host.destroy("0:sess-1");
+		await host.execute("sess-1", "tabs", {}, undefined, "proj-alpha");
+		expect(constructorOptions[2].webPreferences.partition).toBe(partition);
+	});
+
+	// The point of scoping to project rather than globally: one prompt-injected
+	// agent must not reach another project's logins.
+	it("keeps other projects out of a persistent profile", async () => {
+		const { constructorOptions, host } = setupTabHost();
+		await host.execute("sess-1", "tabs", {}, undefined, "proj-alpha");
+		await host.execute("sess-2", "tabs", {}, undefined, "proj-beta");
+		await host.execute("sess-3", "tabs");
+
+		const alpha = constructorOptions[0].webPreferences.partition;
+		const beta = constructorOptions[1].webPreferences.partition;
+		const optedOut = constructorOptions[2].webPreferences.partition;
+
+		expect(alpha).toBe("persist:ao-browser-proj-alpha");
+		expect(beta).toBe("persist:ao-browser-proj-beta");
+		expect(beta).not.toBe(alpha);
+		// A project that never opted in is untouched by one that did.
+		expect(optedOut).toMatch(/^ao-browser-/);
+		expect(optedOut).not.toMatch(/^persist:/);
+	});
+
+	it("shares one persistent profile across the tabs of one session", async () => {
+		const { constructorOptions, host } = setupTabHost();
+		await host.execute("sess-1", "tabs", {}, undefined, "proj-alpha");
+		await host.execute("sess-1", "tab-new", {}, undefined, "proj-alpha");
+
+		expect(constructorOptions[0].webPreferences.partition).toBe("persist:ao-browser-proj-alpha");
+		expect(constructorOptions[1].webPreferences.partition).toBe("persist:ao-browser-proj-alpha");
+	});
+
+	// A persistent profile must not become a MORE PRIVILEGED profile. Permission
+	// denial is asserted for the default path elsewhere; assert it here too,
+	// because "persistent" and "trusted" are exactly the two things a reader
+	// might conflate.
+	it("still denies every permission in a persistent profile", async () => {
+		const { host, setPermissionCheckHandler, setPermissionRequestHandler } = setupHost();
+		await host.execute("sess-1", "tabs", {}, undefined, "proj-alpha");
+
+		expect(setPermissionCheckHandler.mock.calls[0][0]()).toBe(false);
+		const callback = vi.fn();
+		setPermissionRequestHandler.mock.calls[0][0]({}, "camera", callback);
+		expect(callback).toHaveBeenCalledWith(false);
+	});
+
+	// A key that reaches the filesystem is rejected, never sanitized: rewriting
+	// two different keys into one directory would silently merge cookie jars.
+	it("falls back to an ephemeral profile for a key it will not trust", async () => {
+		for (const key of ["../escape", "a/b", ".", "..", "-leading", "", "   "]) {
+			const { constructorOptions, host } = setupTabHost();
+			await host.execute("sess-1", "tabs", {}, undefined, key);
+			const partition = constructorOptions[0].webPreferences.partition;
+			expect(partition, `key ${JSON.stringify(key)} must not persist`).toMatch(/^ao-browser-/);
+			expect(partition).not.toMatch(/^persist:/);
+		}
+	});
+
 	it("captures allowed popups as new tabs and protects the final tab", async () => {
 		const { host, views } = setupTabHost();
 		await host.execute("sess-1", "open", { url: "http://localhost:3000" });

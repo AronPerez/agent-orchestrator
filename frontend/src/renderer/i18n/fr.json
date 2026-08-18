@@ -22,6 +22,7 @@
 	"browser.closeDevTools": "Fermer les DevTools",
 	"browser.closeTab": "Fermer l'onglet {{title}}",
 	"browser.emptyUrl": "Saisissez une URL ou cliquez-en une dans le terminal.",
+	"browser.emptyProfileNote": "Le navigateur propre à l'app AO : cookies et connexions distincts de votre navigateur système, conservés pour cette session uniquement.",
 	"browser.forward": "Suivant",
 	"browser.newTab": "Nouvel onglet",
 	"browser.onlyTab": "L'unique onglet ne peut pas être fermé",

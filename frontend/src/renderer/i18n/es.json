@@ -22,6 +22,7 @@
 	"browser.closeDevTools": "Cerrar DevTools",
 	"browser.closeTab": "Cerrar pestaña {{title}}",
 	"browser.emptyUrl": "Introduce una URL o haz clic en una en el terminal.",
+	"browser.emptyProfileNote": "El navegador propio de la app AO: cookies e inicios de sesión separados de tu navegador del sistema y solo para esta sesión.",
 	"browser.forward": "Adelante",
 	"browser.newTab": "Nueva pestaña",
 	"browser.onlyTab": "No se puede cerrar la única pestaña",

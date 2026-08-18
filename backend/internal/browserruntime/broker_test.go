@@ -65,7 +65,7 @@ func TestBrokerExecuteRoundTrip(t *testing.T) {
 	resultCh := make(chan Result, 1)
 	errCh := make(chan error, 1)
 	go func() {
-		result, err := broker.Execute(context.Background(), "session-1", "snapshot", map[string]interface{}{"interactive": true})
+		result, err := broker.Execute(context.Background(), "session-1", "snapshot", map[string]interface{}{"interactive": true}, "proj-alpha")
 		if err != nil {
 			errCh <- err
 			return
@@ -76,6 +76,12 @@ func TestBrokerExecuteRoundTrip(t *testing.T) {
 	var command wireMessage
 	if err := dec.Decode(&command); err != nil {
 		t.Fatal(err)
+	}
+	// The profile key must actually reach the app: it is the only thing that
+	// tells the runtime to use a shared on-disk profile, and a silently dropped
+	// field would look exactly like "this project did not opt in".
+	if command.ProfileKey != "proj-alpha" {
+		t.Fatalf("profileKey = %q, want proj-alpha", command.ProfileKey)
 	}
 	if command.Type != "command" || command.SessionID != "session-1" || command.Action != "snapshot" {
 		t.Fatalf("command = %#v", command)
@@ -123,7 +129,7 @@ func TestBrokerMapsRuntimeError(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := broker.Execute(context.Background(), "session-1", "click", map[string]interface{}{"ref": "e1"})
+		_, err := broker.Execute(context.Background(), "session-1", "click", map[string]interface{}{"ref": "e1"}, "")
 		errCh <- err
 	}()
 	var command wireMessage
@@ -149,7 +155,7 @@ func TestBrokerMapsRuntimeError(t *testing.T) {
 
 func TestBrokerUnavailableWithoutElectron(t *testing.T) {
 	broker := New(nil)
-	if _, err := broker.Execute(context.Background(), "session-1", "snapshot", nil); !errors.Is(err, ErrUnavailable) {
+	if _, err := broker.Execute(context.Background(), "session-1", "snapshot", nil, ""); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("error = %v, want ErrUnavailable", err)
 	}
 }
@@ -218,7 +224,7 @@ func TestBrokerCancellationSendsCancelFrame(t *testing.T) {
 	defer cancel()
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := broker.Execute(requestCtx, "session-1", "wait", nil)
+		_, err := broker.Execute(requestCtx, "session-1", "wait", nil, "")
 		errCh <- err
 	}()
 	var command wireMessage
