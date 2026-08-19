@@ -1,9 +1,10 @@
+import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
 import net from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { connectBrowserRuntime, type BrowserRuntimeLinkHandle } from "./browser-runtime-link";
+import { connectBrowserRuntime, upgradeDial, type BrowserRuntimeLinkHandle } from "./browser-runtime-link";
 
 const handles: BrowserRuntimeLinkHandle[] = [];
-const servers: net.Server[] = [];
+const servers: (net.Server | HttpServer)[] = [];
 
 afterEach(async () => {
 	handles.splice(0).forEach((handle) => handle.dispose());
@@ -187,5 +188,56 @@ describe("browser runtime link", () => {
 		await vi.waitFor(() => expect(handle.connected).toBe(true));
 		expect(executed).not.toContain("queued");
 		expect(messages.some((message) => message.requestId === "blocked" && message.type === "result")).toBe(false);
+	});
+});
+
+describe("upgradeDial", () => {
+	it("dials through an HTTP upgrade and hands over head bytes", async () => {
+		const server = createHttpServer();
+		const upgraded: net.Socket[] = [];
+		server.on("upgrade", (req, socket) => {
+			upgraded.push(socket);
+			expect(req.url).toBe("/browser-runtime");
+			expect(req.headers.upgrade).toBe("ao-browser-runtime");
+			socket.write(
+				"HTTP/1.1 101 Switching Protocols\r\nUpgrade: ao-browser-runtime\r\nConnection: Upgrade\r\n\r\n" +
+					'{"type":"command","requestId":"r1","sessionId":"s1","action":"open"}\n',
+			);
+		});
+		servers.push(server);
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const port = (server.address() as net.AddressInfo).port;
+
+		const seen: string[] = [];
+		const handle = connectBrowserRuntime(null, {
+			dial: upgradeDial(`http://127.0.0.1:${port}`),
+			execute: async (command) => {
+				seen.push(command.requestId);
+				return { ok: true };
+			},
+		});
+		handles.push(handle);
+		await vi.waitFor(() => expect(seen).toEqual(["r1"]));
+		// An upgraded socket is detached from the server, so close() alone hangs.
+		upgraded.forEach((socket) => socket.destroy());
+	});
+
+	it("rejects a non-101 response and the link retries", async () => {
+		const server = createHttpServer((_req, res) => {
+			res.writeHead(401);
+			res.end();
+		});
+		servers.push(server);
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const port = (server.address() as net.AddressInfo).port;
+		const logs: string[] = [];
+		const handle = connectBrowserRuntime(null, {
+			dial: upgradeDial(`http://127.0.0.1:${port}`),
+			execute: async () => ({}),
+			log: (message) => logs.push(message),
+		});
+		handles.push(handle);
+		await vi.waitFor(() => expect(logs.some((entry) => entry.includes("dial failed"))).toBe(true));
+		expect(handle.connected).toBe(false);
 	});
 });
