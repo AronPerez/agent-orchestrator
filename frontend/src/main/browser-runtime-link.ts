@@ -242,7 +242,8 @@ export function connectBrowserRuntime(
 		const epoch = ++connectionEpoch;
 		if (!options.dial) {
 			if (address === null) throw new Error("connectBrowserRuntime requires an address or a dial");
-			attach(net.connect(address as string | net.TcpNetConnectOpts), epoch, undefined, false);
+			const next = typeof address === "string" ? net.connect(address) : net.connect(address);
+			attach(next, epoch, undefined, false);
 			return;
 		}
 		void options

@@ -133,6 +133,7 @@ import {
 import { buildTelemetryBootstrap } from "./shared/telemetry";
 import {
 	createBrowserViewHost,
+	scopedProfileKey,
 	type BrowserViewHost,
 } from "./main/browser-view-host";
 import {
@@ -150,6 +151,8 @@ import {
 } from "./main/supervisor-link";
 import {
 	connectBrowserRuntime,
+	upgradeDial,
+	type BrowserRuntimeCommand,
 	type BrowserRuntimeLinkHandle,
 } from "./main/browser-runtime-link";
 import { keepDaemonAlive, shouldLinkOnAttach } from "./main/daemon-owner";
@@ -1035,24 +1038,34 @@ function establishBrowserRuntimeLink(): void {
 	if (browserRuntimeLink) disposeBrowserRuntimeLink();
 	browserRuntimeLink = connectBrowserRuntime(address, {
 		token,
-		execute: (command, signal) => {
-			const host = browserViewHost;
-			if (!host) {
-				throw Object.assign(new Error("Browser target owner is unavailable"), {
-					code: "BROWSER_TARGET_UNAVAILABLE",
-				});
-			}
-			return host.execute(
-				command.sessionId,
-				command.action,
-				command.args,
-				signal,
-				command.profileKey,
-			);
-		},
+		execute: (command, signal) =>
+			executeBrowserRuntimeCommand(undefined, command, signal),
 		log: (message) => console.log(`AO: ${message}`),
 	});
 	browserRuntimeLinkIdentity = identity;
+}
+
+// Shared by the local daemon's link and every remote host's link. hostScope is
+// the remote's url (undefined for the local daemon), and it only scopes the
+// persistent profile key: browser targets stay keyed by bare sessionId.
+function executeBrowserRuntimeCommand(
+	hostScope: string | undefined,
+	command: BrowserRuntimeCommand,
+	signal: AbortSignal,
+): Promise<unknown> {
+	const host = browserViewHost;
+	if (!host) {
+		throw Object.assign(new Error("Browser target owner is unavailable"), {
+			code: "BROWSER_TARGET_UNAVAILABLE",
+		});
+	}
+	return host.execute(
+		command.sessionId,
+		command.action,
+		command.args,
+		signal,
+		scopedProfileKey(hostScope, command.profileKey),
+	);
 }
 
 function establishSupervisorLink(): void {
@@ -1944,7 +1957,18 @@ ipcMain.handle(
 		remoteRequest(await findRemote(url), init),
 );
 
-const registry = new RemoteRegistry(startRemoteProxy);
+const registry = new RemoteRegistry(startRemoteProxy, (entry, proxy) =>
+	connectBrowserRuntime(null, {
+		dial: upgradeDial(proxy.base),
+		// A remote conn is rejected while the host's own desktop app is
+		// connected (local wins); back off slowly so two apps do not saw at
+		// each other every two seconds.
+		backoffMaxMs: 15_000,
+		execute: (command, signal) =>
+			executeBrowserRuntimeCommand(entry.url, command, signal),
+		log: (message) => console.log(`AO: [${entry.label}] ${message}`),
+	}),
+);
 
 async function validatedRemote(url: string): Promise<RemoteEntry> {
 	const entry = await findRemote(url);

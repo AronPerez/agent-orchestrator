@@ -62,6 +62,35 @@ describe("RemoteRegistry", () => {
 		expect(registry.views()).toEqual([]);
 	});
 
+	it("starts one runtime link per connected host and disposes it on disconnect", async () => {
+		const { start } = rig();
+		const disposed: string[] = [];
+		const started: string[] = [];
+		const registry = new RemoteRegistry(start, (entry, proxy) => {
+			started.push(`${entry.url}|${proxy.base}`);
+			return { connected: true, dispose: () => disposed.push(entry.url) };
+		});
+		await registry.connect(a);
+		await registry.connect(a); // reuse — no second link
+		expect(started).toEqual([`${a.url}|http://127.0.0.1:9/workbox`]);
+
+		await registry.disconnect(a.url);
+		expect(disposed).toEqual([a.url]);
+	});
+
+	it("disposes every runtime link on closeAll", async () => {
+		const { start } = rig();
+		const disposed: string[] = [];
+		const registry = new RemoteRegistry(start, (entry) => ({
+			connected: true,
+			dispose: () => disposed.push(entry.url),
+		}));
+		await registry.connect(a);
+		await registry.connect(b);
+		await registry.closeAll();
+		expect(disposed.sort()).toEqual([a.url, b.url].sort());
+	});
+
 	it("closeAll tears every proxy down", async () => {
 		const { start, closes } = rig();
 		const registry = new RemoteRegistry(start);

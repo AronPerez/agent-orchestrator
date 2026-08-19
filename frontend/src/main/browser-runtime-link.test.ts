@@ -194,7 +194,7 @@ describe("browser runtime link", () => {
 describe("upgradeDial", () => {
 	it("dials through an HTTP upgrade and hands over head bytes", async () => {
 		const server = createHttpServer();
-		const upgraded: net.Socket[] = [];
+		const upgraded: import("node:stream").Duplex[] = [];
 		server.on("upgrade", (req, socket) => {
 			upgraded.push(socket);
 			expect(req.url).toBe("/browser-runtime");

@@ -1,3 +1,4 @@
+import type { BrowserRuntimeLinkHandle } from "./browser-runtime-link";
 import type { ActiveProxy } from "./remote-proxy";
 import type { RemoteEntry } from "./remotes-store";
 
@@ -9,13 +10,23 @@ export type ConnectedHostView = {
 };
 
 type StartProxy = (entry: RemoteEntry) => Promise<ActiveProxy>;
+type StartRuntimeLink = (entry: RemoteEntry, proxy: ActiveProxy) => BrowserRuntimeLinkHandle;
 
 // N hosts live at once, one proxy each, keyed by url. Replaces ActiveRemote's
 // single-slot model: the app no longer views one host, it talks to several.
 export class RemoteRegistry {
-	private readonly live = new Map<string, { view: ConnectedHostView; proxy: ActiveProxy }>();
+	private readonly live = new Map<
+		string,
+		{ view: ConnectedHostView; proxy: ActiveProxy; runtime?: BrowserRuntimeLinkHandle }
+	>();
 
-	constructor(private readonly start: StartProxy) {}
+	constructor(
+		private readonly start: StartProxy,
+		// Attaches this app as the host's browser runtime so `ao browser` inside
+		// that host's workers reaches the panel here. Optional so tests that only
+		// care about proxies stay unchanged.
+		private readonly startRuntime?: StartRuntimeLink,
+	) {}
 
 	async connect(entry: RemoteEntry): Promise<ConnectedHostView> {
 		const existing = this.live.get(entry.url);
@@ -25,7 +36,8 @@ export class RemoteRegistry {
 
 		const proxy = await this.start(entry);
 		const view = { label: entry.label, url: entry.url, base: proxy.base };
-		this.live.set(entry.url, { view, proxy });
+		const runtime = this.startRuntime?.(entry, proxy);
+		this.live.set(entry.url, { view, proxy, runtime });
 		return view;
 	}
 
@@ -33,6 +45,7 @@ export class RemoteRegistry {
 		const entry = this.live.get(url);
 		if (!entry) return;
 		this.live.delete(url);
+		entry.runtime?.dispose(); // stop reconnect attempts before the proxy dies
 		await entry.proxy.close();
 	}
 
@@ -41,8 +54,9 @@ export class RemoteRegistry {
 	}
 
 	async closeAll(): Promise<void> {
-		const proxies = [...this.live.values()];
+		const entries = [...this.live.values()];
 		this.live.clear();
-		await Promise.all(proxies.map(({ proxy }) => proxy.close()));
+		for (const { runtime } of entries) runtime?.dispose();
+		await Promise.all(entries.map(({ proxy }) => proxy.close()));
 	}
 }
