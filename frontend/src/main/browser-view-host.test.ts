@@ -5,7 +5,9 @@ import {
 	createBrowserViewHost,
 	isAllowedBrowserURL,
 	normalizeBrowserURL,
+	persistentPartition,
 	scaleBoundsForZoom,
+	scopedProfileKey,
 } from "./browser-view-host";
 import { NEW_SESSION_SHORTCUT_CHANNEL } from "../shared/shortcuts";
 
@@ -1641,5 +1643,27 @@ describe("scaleBoundsForZoom", () => {
 		expect(scaleBoundsForZoom(rect, 1)).toBe(rect);
 		expect(scaleBoundsForZoom(rect, 0)).toBe(rect);
 		expect(scaleBoundsForZoom(rect, Number.NaN)).toBe(rect);
+	});
+});
+
+describe("scopedProfileKey", () => {
+	it("passes local and empty keys through untouched", () => {
+		expect(scopedProfileKey(undefined, "agent-orchestrator")).toBe("agent-orchestrator");
+		expect(scopedProfileKey("local", "agent-orchestrator")).toBe("agent-orchestrator");
+		expect(scopedProfileKey("http://10.0.0.5:3001", "")).toBe("");
+		expect(scopedProfileKey("http://10.0.0.5:3001", undefined)).toBeUndefined();
+	});
+
+	it("scopes a remote key deterministically per host", () => {
+		const a = scopedProfileKey("http://10.0.0.5:3001", "agent-orchestrator");
+		const b = scopedProfileKey("http://10.0.0.6:3001", "agent-orchestrator");
+		expect(a).not.toBe("agent-orchestrator");
+		expect(a).not.toBe(b); // same project id on two hosts → two cookie jars
+		expect(a).toBe(scopedProfileKey("http://10.0.0.5:3001", "agent-orchestrator"));
+	});
+
+	it("always produces a partition-safe key", () => {
+		const scoped = scopedProfileKey("http://10.0.0.5:3001", "a".repeat(64));
+		expect(scoped && persistentPartition(scoped)).toMatch(/^persist:ao-browser-r[0-9a-f]{40}$/);
 	});
 });
