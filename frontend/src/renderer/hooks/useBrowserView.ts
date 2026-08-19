@@ -394,10 +394,13 @@ function useNativeBrowserView({
     //
     // The key is passed only when there IS one, so the default path's IPC call
     // stays exactly the single-argument call it has always been.
+    // The third argument is the session's host, so a remote project's key lands
+    // on a host-scoped partition ("local" is a no-op in main). It rides along
+    // with the key because it only ever modifies one.
     const ensured = !profileKeyResolved
       ? undefined
       : profileKey
-        ? window.ao?.browser.ensure(sessionId, profileKey)
+        ? window.ao?.browser.ensure(sessionId, profileKey, session.host)
         : window.ao?.browser.ensure(sessionId);
     ensured?.then((state) => {
       if (disposed) return;

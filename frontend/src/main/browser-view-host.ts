@@ -9,7 +9,7 @@ import type {
 	OpenDevToolsOptions,
 } from "electron";
 import { nativeImage } from "electron";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type {
 	BrowserAnnotationCancelPayload,
 	BrowserAnnotationContext,
@@ -418,6 +418,21 @@ export function persistentPartition(profileKey?: string): string | null {
 	const key = profileKey?.trim();
 	if (!key || key.includes("..") || !PERSISTENT_PROFILE_KEY_PATTERN.test(key)) return null;
 	return `persist:ao-browser-${key}`;
+}
+
+// A remote host's profileKey is a project id on THAT machine, and project ids
+// collide across hosts by construction (the same project checked out on two
+// machines). A partition name is a cookie jar: two hosts silently sharing one
+// is exactly the isolation failure persistentPartition refuses. So a remote
+// key is scoped by host before partition naming. Hashed rather than
+// concatenated: a URL can never pass PERSISTENT_PROFILE_KEY_PATTERN, and the
+// result must stay within the 64-char rule for any host URL and key length.
+// Local ("local"/undefined) stays unscoped so existing on-disk partitions keep
+// their logins.
+export function scopedProfileKey(host: string | undefined, profileKey: string | undefined): string | undefined {
+	if (!profileKey?.trim()) return profileKey;
+	if (!host || host === "local") return profileKey;
+	return `r${createHash("sha256").update(`${host}\n${profileKey}`).digest("hex").slice(0, 40)}`;
 }
 
 export function createBrowserViewHost(options: BrowserViewHostOptions): BrowserViewHost {
@@ -1133,8 +1148,12 @@ export function createBrowserViewHost(options: BrowserViewHostOptions): BrowserV
 		ipcDisposers.push(() => options.ipcMain.off(channel, fn));
 	};
 
-	handle("browser:ensure", (event, sessionId: string, profileKey?: string) => {
-		const session = ensureSession(sessionId, event.sender.id, profileKey);
+	// host is the session's HostId ("local" or a remote url). It scopes the
+	// persistent profile key only — main.ts already scoped the key it passes on
+	// the agent path, so ensureSession receives an already-scoped key from both
+	// entry points and must never scope twice.
+	handle("browser:ensure", (event, sessionId: string, profileKey?: string, host?: string) => {
+		const session = ensureSession(sessionId, event.sender.id, scopedProfileKey(host, profileKey));
 		pushDevToolsState(session);
 		return pushNavState(options, activeEntry(session));
 	});

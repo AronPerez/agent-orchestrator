@@ -1,3 +1,4 @@
+import { request as httpRequest } from "node:http";
 import net from "node:net";
 import { StringDecoder } from "node:string_decoder";
 
@@ -30,6 +31,12 @@ export type BrowserRuntimeCommandError = {
 	message: string;
 };
 
+// Produces a socket already speaking the broker protocol. Used for remote
+// daemons, where the transport is an HTTP upgrade through the per-host proxy
+// rather than a direct unix/tcp connect. head carries any protocol bytes the
+// server sent in the same packet as the 101 response.
+export type BrowserRuntimeDial = () => Promise<{ socket: net.Socket; head?: Buffer }>;
+
 export interface BrowserRuntimeLinkHandle {
 	readonly connected: boolean;
 	dispose(): void;
@@ -39,10 +46,14 @@ type BrowserRuntimeLinkOptions = {
 	execute: (command: BrowserRuntimeCommand, signal: AbortSignal) => Promise<unknown>;
 	token?: string;
 	log?: (message: string) => void;
+	// When set, the link obtains its socket from dial() instead of connecting to
+	// address (which may then be null).
+	dial?: BrowserRuntimeDial;
+	backoffMaxMs?: number;
 };
 
 export function connectBrowserRuntime(
-	address: string | net.TcpNetConnectOpts,
+	address: string | net.TcpNetConnectOpts | null,
 	options: BrowserRuntimeLinkOptions,
 ): BrowserRuntimeLinkHandle {
 	const log = options.log ?? (() => undefined);
@@ -186,19 +197,13 @@ export function connectBrowserRuntime(
 		if (disposed) return;
 		clearRetry();
 		const delay = backoff;
-		backoff = Math.min(backoff * 2, BACKOFF_MAX_MS);
+		backoff = Math.min(backoff * 2, options.backoffMaxMs ?? BACKOFF_MAX_MS);
 		retryTimer = setTimeout(connect, delay);
 	};
 
-	function connect() {
-		if (disposed) return;
-		destroySocket();
-		buffer = "";
-		decoder = new StringDecoder("utf8");
-		const epoch = ++connectionEpoch;
-		const next = typeof address === "string" ? net.connect(address) : net.connect(address);
+	function attach(next: net.Socket, epoch: number, head: Buffer | undefined, alreadyConnected: boolean) {
 		socket = next;
-		next.on("connect", () => {
+		const onReady = () => {
 			if (disposed) {
 				next.destroy();
 				return;
@@ -210,7 +215,7 @@ export function connectBrowserRuntime(
 				next.destroy();
 			});
 			log("browser-runtime-link: connected");
-		});
+		};
 		next.on("data", (chunk) => consume(chunk, next, epoch));
 		next.on("error", (error) => log(`browser-runtime-link: error: ${error.message}`));
 		next.on("close", () => {
@@ -221,6 +226,39 @@ export function connectBrowserRuntime(
 			cancelConnectionCommands();
 			if (!disposed) scheduleReconnect();
 		});
+		if (alreadyConnected) {
+			onReady();
+			if (head && head.length > 0) consume(head, next, epoch);
+		} else {
+			next.on("connect", onReady);
+		}
+	}
+
+	function connect() {
+		if (disposed) return;
+		destroySocket();
+		buffer = "";
+		decoder = new StringDecoder("utf8");
+		const epoch = ++connectionEpoch;
+		if (!options.dial) {
+			if (address === null) throw new Error("connectBrowserRuntime requires an address or a dial");
+			const next = typeof address === "string" ? net.connect(address) : net.connect(address);
+			attach(next, epoch, undefined, false);
+			return;
+		}
+		void options
+			.dial()
+			.then(({ socket: dialed, head }) => {
+				if (disposed || connectionEpoch !== epoch) {
+					dialed.destroy();
+					return;
+				}
+				attach(dialed, epoch, head, true);
+			})
+			.catch((error) => {
+				log(`browser-runtime-link: dial failed: ${String(error)}`);
+				if (!disposed && connectionEpoch === epoch) scheduleReconnect();
+			});
 	}
 
 	connect();
@@ -254,4 +292,27 @@ function isCommandError(error: unknown): error is BrowserRuntimeCommandError {
 		typeof (error as BrowserRuntimeCommandError).code === "string" &&
 		typeof (error as BrowserRuntimeCommandError).message === "string",
 	);
+}
+
+// Dials the daemon's /browser-runtime upgrade endpoint. baseUrl is the
+// per-host loopback proxy base (http://127.0.0.1:<port>/<token>) — the proxy
+// injects the remote credential on upgrade requests, so no auth is handled
+// here and the password never enters this module.
+export function upgradeDial(baseUrl: string): BrowserRuntimeDial {
+	return () =>
+		new Promise((resolve, reject) => {
+			const request = httpRequest(`${baseUrl}/browser-runtime`, {
+				headers: { connection: "Upgrade", upgrade: "ao-browser-runtime" },
+			});
+			request.on("upgrade", (_response, socket, head) => {
+				socket.on("error", () => undefined); // owner attaches real handlers next tick
+				resolve({ socket, head });
+			});
+			request.on("response", (response) => {
+				response.resume();
+				reject(new Error(`upgrade refused: HTTP ${response.statusCode}`));
+			});
+			request.on("error", reject);
+			request.end();
+		});
 }

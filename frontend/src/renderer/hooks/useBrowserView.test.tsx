@@ -189,6 +189,46 @@ describe("useBrowserView", () => {
     resetConsumedPreviewTriggersForTest();
   });
 
+  // A persistent profile key is a PROJECT id on its own host, and project ids
+  // collide across hosts. Main scopes the partition by host, so ensure has to
+  // say which host this session lives on — the same string the agent's commands
+  // are scoped by, or the human and the agent get two cookie jars.
+  it("passes the session's host with a persistent profile key", async () => {
+    const bridge = setupBridge();
+    createSlot();
+    renderHook(() =>
+      useBrowserView({
+        session: { host: "http://10.0.0.5:3001", id: "sess-1" },
+        active: true,
+        poppedOut: false,
+        persistentProfile: { pending: false, key: "proj" },
+      }),
+    );
+
+    await waitFor(() =>
+      expect(bridge.ensure).toHaveBeenCalledWith(
+        "http%3A%2F%2F10.0.0.5%3A3001:sess-1",
+        "proj",
+        "http://10.0.0.5:3001",
+      ),
+    );
+  });
+
+  it("marks a local session's profile key as local", async () => {
+    const bridge = setupBridge();
+    createSlot();
+    renderHook(() =>
+      useBrowserView({
+        session: { host: "local", id: "sess-1" },
+        active: true,
+        poppedOut: false,
+        persistentProfile: { pending: false, key: "proj" },
+      }),
+    );
+
+    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("local:sess-1", "proj", "local"));
+  });
+
   it("ensures a scoped browser view and reports the measured slot bounds", async () => {
     const bridge = setupBridge();
     const slot = createSlot();
