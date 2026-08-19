@@ -119,6 +119,17 @@ type pendingResult struct {
 	err   error
 }
 
+// connClass distinguishes how a runtime reached the broker. Local is the
+// desktop app on this machine (unix socket, per-launch token); remote is a
+// desktop app on another machine (HTTP upgrade, authenticated by the LAN
+// credential before the broker ever sees the connection).
+type connClass int
+
+const (
+	classLocal connClass = iota
+	classRemote
+)
+
 // Broker owns the single active Electron runtime connection. Commands are
 // correlated by request id, so independent AO sessions may use the bridge
 // concurrently without sharing browser targets or results.
@@ -127,6 +138,7 @@ type Broker struct {
 
 	mu          sync.Mutex
 	conn        net.Conn
+	connClass   connClass
 	connectedAt time.Time
 	pending     map[string]chan pendingResult
 	writeGate   chan struct{}
@@ -243,11 +255,21 @@ func (b *Broker) Serve(ctx context.Context, ln net.Listener) error {
 			}
 			return fmt.Errorf("accept browser runtime: %w", err)
 		}
-		go b.serveConn(ctx, conn)
+		go b.serveConn(ctx, conn, classLocal)
 	}
 }
 
-func (b *Broker) serveConn(ctx context.Context, conn net.Conn) {
+// ServeRemoteConn adopts one already-authenticated connection from the HTTP
+// upgrade endpoint and blocks until it closes. The HTTP layer (LAN credential,
+// or loopback ambient authority) is the authenticator, so the hello token is
+// not checked. A remote runtime never displaces a connected local one: the
+// machine that owns the daemon keeps its browser panel, and the remote app's
+// reconnect loop takes over only after the local app disconnects.
+func (b *Broker) ServeRemoteConn(ctx context.Context, conn net.Conn) {
+	b.serveConn(ctx, conn, classRemote)
+}
+
+func (b *Broker) serveConn(ctx context.Context, conn net.Conn, class connClass) {
 	_ = conn.SetReadDeadline(time.Now().Add(helloTimeout))
 	scanner := bufio.NewScanner(conn)
 	scanner.Buffer(make([]byte, 64*1024), maxRuntimeFrameBytes)
@@ -256,15 +278,22 @@ func (b *Broker) serveConn(ctx context.Context, conn net.Conn) {
 		json.Unmarshal(scanner.Bytes(), &hello) != nil ||
 		hello.Type != "hello" ||
 		hello.Version != ProtocolVersion ||
-		!validRuntimeToken(b.token, hello.Token) {
+		(class == classLocal && !validRuntimeToken(b.token, hello.Token)) {
 		_ = conn.Close()
 		return
 	}
 	_ = conn.SetReadDeadline(time.Time{})
 
 	b.mu.Lock()
+	if class == classRemote && b.conn != nil && b.connClass == classLocal {
+		b.mu.Unlock()
+		_ = conn.Close()
+		b.log.Info("browser runtime: remote runtime rejected; local runtime is connected")
+		return
+	}
 	old := b.conn
 	b.conn = conn
+	b.connClass = class
 	b.connectedAt = time.Now().UTC()
 	pending := b.takePendingLocked()
 	b.mu.Unlock()
@@ -394,6 +423,7 @@ func (b *Broker) disconnect(conn net.Conn, cause error) {
 		return
 	}
 	b.conn = nil
+	b.connClass = classLocal
 	b.connectedAt = time.Time{}
 	pending := b.takePendingLocked()
 	b.mu.Unlock()
