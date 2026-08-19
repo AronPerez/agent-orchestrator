@@ -51,8 +51,9 @@ func newBrowserCommand(ctx *commandContext) *cobra.Command {
 		Use:   "browser",
 		Short: "Inspect and control this AO session's shared desktop browser",
 		Long: "Inspect and control the target-isolated browser owned by the current AO session.\n\n" +
-			"The desktop app must be open. Commands operate the same live page the user sees,\n" +
-			"including while the Browser panel is hidden.",
+			"The desktop app must be open — for sessions on a remote host, open and attached\n" +
+			"to that host. Commands operate the same live page the user sees, including while\n" +
+			"the Browser panel is hidden.",
 		Args: noArgs,
 	}
 	cmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "print the structured response as JSON")
