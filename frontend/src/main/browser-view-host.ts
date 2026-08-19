@@ -1148,8 +1148,12 @@ export function createBrowserViewHost(options: BrowserViewHostOptions): BrowserV
 		ipcDisposers.push(() => options.ipcMain.off(channel, fn));
 	};
 
-	handle("browser:ensure", (event, sessionId: string, profileKey?: string) => {
-		const session = ensureSession(sessionId, event.sender.id, profileKey);
+	// host is the session's HostId ("local" or a remote url). It scopes the
+	// persistent profile key only — main.ts already scoped the key it passes on
+	// the agent path, so ensureSession receives an already-scoped key from both
+	// entry points and must never scope twice.
+	handle("browser:ensure", (event, sessionId: string, profileKey?: string, host?: string) => {
+		const session = ensureSession(sessionId, event.sender.id, scopedProfileKey(host, profileKey));
 		pushDevToolsState(session);
 		return pushNavState(options, activeEntry(session));
 	});

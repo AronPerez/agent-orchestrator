@@ -881,6 +881,18 @@ describe("agent browser runtime", () => {
 		expect(optedOut).not.toMatch(/^persist:/);
 	});
 
+	// The human-panel entry point. `ao browser` commands scope their profile key
+	// in main.ts; browser:ensure must land on the SAME partition for the same
+	// remote session, or the agent and the user would look at two cookie jars.
+	it("scopes the persistent partition by host on ensure", async () => {
+		const { constructorOptions, invoke } = setupTabHost();
+		await invoke("browser:ensure", "s1", "proj", undefined);
+		await invoke("browser:ensure", "s2", "proj", "http://10.0.0.5:3001");
+
+		expect(constructorOptions[0].webPreferences.partition).toBe("persist:ao-browser-proj");
+		expect(constructorOptions[1].webPreferences.partition).toMatch(/^persist:ao-browser-r[0-9a-f]{40}$/);
+	});
+
 	it("shares one persistent profile across the tabs of one session", async () => {
 		const { constructorOptions, host } = setupTabHost();
 		await host.execute("sess-1", "tabs", {}, undefined, "proj-alpha");

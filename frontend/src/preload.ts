@@ -271,11 +271,12 @@ const api = {
 	},
 	browser: {
 		nativeCompositionEnabled: true,
-		ensure: (sessionId: string, profileKey?: string) =>
+		ensure: (sessionId: string, profileKey?: string, host?: string) =>
 			ipcRenderer.invoke(
 				"browser:ensure",
 				sessionId,
 				profileKey,
+				host,
 			) as Promise<BrowserNavState>,
 		setBounds: (input: BrowserBoundsInput) =>
 			ipcRenderer.send("browser:setBounds", input),
