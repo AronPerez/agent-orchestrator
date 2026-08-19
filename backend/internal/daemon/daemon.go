@@ -432,6 +432,7 @@ func Run() error {
 			},
 		}),
 		Browser:             browserService,
+		BrowserRuntime:      browserBroker,
 		PreviewServer:       managedPreview,
 		SessionCapabilities: browserAuthority,
 	})
