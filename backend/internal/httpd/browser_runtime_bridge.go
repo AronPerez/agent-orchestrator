@@ -22,10 +22,10 @@ import (
 // route — a local process that could abuse it already owns the daemon.
 const browserRuntimePath = "/browser-runtime"
 
-// browserRuntimeUpgradeToken names the protocol in the Upgrade header. The
+// browserRuntimeUpgradeProtocol names the protocol in the Upgrade header. The
 // wire protocol and its version live in the hello frame (browserruntime
 // ProtocolVersion), not here.
-const browserRuntimeUpgradeToken = "ao-browser-runtime"
+const browserRuntimeUpgradeProtocol = "ao-browser-runtime"
 
 // BrowserRuntimeBridge adopts an authenticated, upgraded connection as the
 // daemon's Electron browser runtime. Implemented by *browserruntime.Broker.
@@ -53,7 +53,7 @@ func (c hijackedConn) Read(p []byte) (int, error) { return c.reader.Read(p) }
 
 func browserRuntimeHandler(bridge BrowserRuntimeBridge, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !strings.EqualFold(r.Header.Get("Upgrade"), browserRuntimeUpgradeToken) ||
+		if !strings.EqualFold(r.Header.Get("Upgrade"), browserRuntimeUpgradeProtocol) ||
 			!headerListContains(r.Header.Values("Connection"), "upgrade") {
 			envelope.WriteAPIError(w, r, http.StatusUpgradeRequired, "upgrade_required",
 				"BROWSER_RUNTIME_UPGRADE_REQUIRED",
@@ -73,7 +73,7 @@ func browserRuntimeHandler(bridge BrowserRuntimeBridge, log *slog.Logger) http.H
 			return
 		}
 		if _, err := rw.WriteString(
-			"HTTP/1.1 101 Switching Protocols\r\nUpgrade: " + browserRuntimeUpgradeToken +
+			"HTTP/1.1 101 Switching Protocols\r\nUpgrade: " + browserRuntimeUpgradeProtocol +
 				"\r\nConnection: Upgrade\r\n\r\n"); err != nil {
 			_ = conn.Close()
 			return
