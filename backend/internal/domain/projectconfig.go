@@ -82,6 +82,13 @@ type ProjectConfig struct {
 	// person who asked was told this. Never default it on, and never widen the
 	// scope beyond a single project.
 	BrowserPersistentProfile bool `json:"browserPersistentProfile,omitempty"`
+
+	// AutoReview controls whether new worker sessions spawned for this project
+	// have automatic PR review enabled by default. The default (false) leaves
+	// sessions with auto-review off; enabling it copies the setting into each
+	// new session at spawn time. Users can still override the per-session toggle
+	// after spawn.
+	AutoReview bool `json:"autoReview,omitempty"`
 }
 
 // ContainerReapConfig is the project-level opt-out for #2652's Docker

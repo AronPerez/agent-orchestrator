@@ -46,7 +46,13 @@ async function openHostList() {
 	// on mount; nothing here reaches it, but it still needs a client to mount at all.
 	render(
 		<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-			<CreateProjectFlow embedded mode="choose" onCreateProject={vi.fn()} onInitializeProject={vi.fn()} />
+			<CreateProjectFlow
+				embedded
+				mode="choose"
+				onCloneProject={vi.fn()}
+				onCreateProject={vi.fn()}
+				onInitializeProject={vi.fn()}
+			/>
 		</QueryClientProvider>,
 	);
 	await screen.findByRole("combobox", { name: /host/i });

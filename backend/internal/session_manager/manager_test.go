@@ -3366,6 +3366,24 @@ func TestSpawn_DefaultsBranchFromSessionID(t *testing.T) {
 	if !st.sessions[s.ID].AutoInjectReview {
 		t.Fatal("automatic review injection must default to enabled")
 	}
+	if st.sessions[s.ID].AutoReviewEnabled {
+		t.Fatal("auto review must default to disabled when project config does not enable it")
+	}
+}
+
+func TestSpawn_InheritsAutoReviewFromProjectConfig(t *testing.T) {
+	m, st, _, _ := newManager()
+	cfg := testRoleAgents()
+	cfg.AutoReview = true
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Path: "/repo/mer", Kind: domain.ProjectKindWorkspace, Config: cfg}
+
+	s, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.sessions[s.ID].AutoReviewEnabled {
+		t.Fatal("auto review must be enabled when project config enables it")
+	}
 }
 
 func TestPromptProjectContextOmitsAutomaticBranchSentinel(t *testing.T) {
@@ -3413,11 +3431,14 @@ func TestSpawn_FetchesWorkspaceChildDefaultBranchesBeforeCreatingProject(t *test
 		t.Fatal(err)
 	}
 	want := []fetchDefaultBranchCall{
-		{repoPath: "/repo/mer", remote: "origin", branch: "auto", baseRef: "refs/remotes/origin/auto"},
+		{repoPath: "/repo/mer", remote: "origin", branch: "main", baseRef: "refs/remotes/origin/main"},
 		{repoPath: filepath.Join("/repo/mer", "api"), remote: "origin", branch: "release/2026", baseRef: "refs/remotes/origin/release/2026"},
 	}
 	if !reflect.DeepEqual(ws.fetches, want) {
 		t.Fatalf("fetches = %#v, want %#v", ws.fetches, want)
+	}
+	if got, want := ws.resolves[0], (resolveDefaultBranchCall{repoPath: "/repo/mer", configuredBranch: ""}); got != want {
+		t.Fatalf("root resolution = %#v, want %#v", got, want)
 	}
 	if got, want := ws.lastProjectCfg.Repos[0].BaseRef, "refs/remotes/origin/release/2026"; got != want {
 		t.Fatalf("child create base ref = %q, want %q", got, want)

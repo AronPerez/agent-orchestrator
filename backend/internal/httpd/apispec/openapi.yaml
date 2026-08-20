@@ -1290,6 +1290,43 @@ paths:
       summary: Replace a project's per-project config
       tags:
       - projects
+  /api/v1/projects/clone:
+    post:
+      operationId: cloneProject
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CloneProjectInput'
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectResponse'
+          description: Created
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+      summary: Clone and register a project from a git repository URL
+      tags:
+      - projects
   /api/v1/projects/initialize:
     post:
       operationId: initializeProjectRepository
@@ -5529,6 +5566,28 @@ components:
       - sessionId
       - reason
       type: object
+    CloneProjectInput:
+      properties:
+        config:
+          $ref: '#/components/schemas/ProjectConfig'
+        destinationParent:
+          minLength: 1
+          type: string
+        name:
+          type:
+          - "null"
+          - string
+        projectId:
+          type:
+          - "null"
+          - string
+        remoteUrl:
+          minLength: 1
+          type: string
+      required:
+      - remoteUrl
+      - destinationParent
+      type: object
     ClosePRResponse:
       properties:
         ok:
@@ -7190,6 +7249,8 @@ components:
           type: string
         agentRulesFile:
           type: string
+        autoReview:
+          type: boolean
         browserPersistentProfile:
           type: boolean
         containerReap:
@@ -7884,6 +7945,10 @@ components:
           type: string
         hasUnresolvedHumanComments:
           type: boolean
+        resolvedBy:
+          items:
+            $ref: '#/components/schemas/SessionPRUnresolvedReviewer'
+          type: array
         reviews:
           items:
             $ref: '#/components/schemas/SessionPRReviewEntry'

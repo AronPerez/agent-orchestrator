@@ -90,6 +90,8 @@ func TestProjectConfigValidate(t *testing.T) {
 		{"tracker intake assignee with whitespace", ProjectConfig{TrackerIntake: TrackerIntakeConfig{Enabled: true, Assignee: " alice"}}, true},
 		{"orchestrator prompt ok", ProjectConfig{OrchestratorPrompt: strings.Repeat("a", 1024)}, false},
 		{"orchestrator prompt too long", ProjectConfig{OrchestratorPrompt: strings.Repeat("a", 64*1024+1)}, true},
+		{"auto review enabled", ProjectConfig{AutoReview: true}, false},
+		{"auto review disabled", ProjectConfig{AutoReview: false}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -206,5 +208,8 @@ func TestProjectConfigIsZero(t *testing.T) {
 	}
 	if (ProjectConfig{Env: map[string]string{"A": "b"}}).IsZero() {
 		t.Fatal("config with env should not be zero")
+	}
+	if (ProjectConfig{AutoReview: true}).IsZero() {
+		t.Fatal("config with autoReview enabled should not be zero")
 	}
 }

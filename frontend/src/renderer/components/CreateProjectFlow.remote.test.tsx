@@ -15,7 +15,14 @@ function renderFlow(props: Partial<Parameters<typeof CreateProjectFlow>[0]> = {}
 	const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 	render(
 		<QueryClientProvider client={queryClient}>
-			<CreateProjectFlow embedded mode="choose" onCreateProject={vi.fn()} onInitializeProject={vi.fn()} {...props} />
+			<CreateProjectFlow
+				embedded
+				mode="choose"
+				onCloneProject={vi.fn()}
+				onCreateProject={vi.fn()}
+				onInitializeProject={vi.fn()}
+				{...props}
+			/>
 		</QueryClientProvider>,
 	);
 }
@@ -29,7 +36,7 @@ describe("CreateProjectFlow — remote host", () => {
 	it("defaults to the local host and keeps the native folder picker", async () => {
 		const chooseDirectory = vi.spyOn(aoBridge.app, "chooseDirectory").mockResolvedValue(null);
 		renderFlow();
-		await userEvent.click(screen.getByRole("button", { name: "Project" }));
+		await userEvent.click(screen.getByRole("button", { name: /open local repository/i }));
 		expect(chooseDirectory).toHaveBeenCalled();
 	});
 
@@ -37,7 +44,7 @@ describe("CreateProjectFlow — remote host", () => {
 		const chooseDirectory = vi.spyOn(aoBridge.app, "chooseDirectory").mockResolvedValue(null);
 		renderFlow();
 		await selectWorkbox();
-		await userEvent.click(screen.getByRole("button", { name: "Project" }));
+		await userEvent.click(screen.getByRole("button", { name: /open local repository/i }));
 		expect(screen.getByLabelText(/path on workbox/i)).toBeInTheDocument();
 		expect(chooseDirectory).not.toHaveBeenCalled();
 	});
@@ -47,7 +54,7 @@ describe("CreateProjectFlow — remote host", () => {
 		const onCreateProject = vi.fn();
 		renderFlow({ onCreateProject });
 		await selectWorkbox();
-		await userEvent.click(screen.getByRole("button", { name: "Project" }));
+		await userEvent.click(screen.getByRole("button", { name: /open local repository/i }));
 		await userEvent.type(screen.getByLabelText(/path on workbox/i), "/srv/repo");
 		await userEvent.click(screen.getByRole("button", { name: /add project on workbox/i }));
 
@@ -65,7 +72,7 @@ describe("CreateProjectFlow — remote host", () => {
 		const request = vi.spyOn(aoBridge.remotes, "request").mockResolvedValue({ status: 201, body: { id: "p1" } });
 		renderFlow();
 		await selectWorkbox();
-		await userEvent.click(screen.getByRole("button", { name: "Workspace" }));
+		await userEvent.click(screen.getByRole("button", { name: /add a workspace folder/i }));
 		await userEvent.type(screen.getByLabelText(/path on workbox/i), "/srv/team");
 		await userEvent.click(screen.getByRole("button", { name: /add project on workbox/i }));
 
@@ -83,7 +90,7 @@ describe("CreateProjectFlow — remote host", () => {
 		});
 		renderFlow();
 		await selectWorkbox();
-		await userEvent.click(screen.getByRole("button", { name: "Project" }));
+		await userEvent.click(screen.getByRole("button", { name: /open local repository/i }));
 		await userEvent.type(screen.getByLabelText(/path on workbox/i), "~/repo");
 		await userEvent.click(screen.getByRole("button", { name: /add project on workbox/i }));
 		expect(await screen.findByRole("alert")).toHaveTextContent(/must be absolute on the daemon host/i);
@@ -98,7 +105,7 @@ describe("CreateProjectFlow — remote host", () => {
 			.mockResolvedValueOnce({ status: 200, body: { path: "/srv/repo", parent: "/srv", entries: [] } });
 		renderFlow();
 		await selectWorkbox();
-		await userEvent.click(screen.getByRole("button", { name: "Project" }));
+		await userEvent.click(screen.getByRole("button", { name: /open local repository/i }));
 		await userEvent.click(screen.getByRole("button", { name: /browse/i }));
 		// Descend into repo, then take the folder the picker is standing in.
 		await userEvent.click(await screen.findByRole("button", { name: /^repo/ }));
@@ -110,7 +117,7 @@ describe("CreateProjectFlow — remote host", () => {
 		const request = vi.spyOn(aoBridge.remotes, "request").mockResolvedValue({ status: 201, body: { id: "p1" } });
 		renderFlow();
 		await selectWorkbox();
-		await userEvent.click(screen.getByRole("button", { name: "Project" }));
+		await userEvent.click(screen.getByRole("button", { name: /open local repository/i }));
 		await userEvent.type(screen.getByLabelText(/path on workbox/i), "/srv/typed");
 		await userEvent.click(screen.getByRole("button", { name: /add project on workbox/i }));
 		expect(request).toHaveBeenCalledWith("http://192.0.2.1:3011", {
@@ -126,7 +133,7 @@ describe("CreateProjectFlow — remote host", () => {
 		vi.spyOn(aoBridge.remotes, "request").mockResolvedValue({ status: 201, body: { id: "p1" } });
 		renderFlow();
 		await selectWorkbox();
-		await userEvent.click(screen.getByRole("button", { name: "Workspace" }));
+		await userEvent.click(screen.getByRole("button", { name: /add a workspace folder/i }));
 		await userEvent.type(screen.getByLabelText(/path on workbox/i), "/srv/team");
 		await userEvent.click(screen.getByRole("button", { name: /add project on workbox/i }));
 		// Both shell out on this machine and would judge the wrong filesystem.
