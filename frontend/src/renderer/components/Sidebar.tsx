@@ -84,7 +84,7 @@ import { hostActionSuffix } from "../lib/host-disclosure";
 import { useUiStore } from "../stores/ui-store"
 import { useKeybindingsStore } from "../stores/keybindings-store";
 import { ConfirmDialog } from "./ConfirmDialog";
-import { CreateProjectFlow, type CreateProjectInput } from "./CreateProjectFlow";
+import { CreateProjectFlow, type CloneProjectInput, type CreateProjectInput } from "./CreateProjectFlow";
 import { ResizeHandle } from "./ResizeHandle";
 import { isMacPlatform, isWindowsPlatform } from "../lib/platform";
 import { useCloudSession } from "../lib/cloud-session";
@@ -138,6 +138,7 @@ type SidebarProps = {
 	onPreviewLeave?: () => void;
 	workspaceError?: string;
 	hostSections: HostSection[];
+	onCloneProject: (input: CloneProjectInput) => Promise<void>;
 	onCreateProject: (input: CreateProjectInput) => Promise<void>;
 	onInitializeProject: (path: string) => Promise<void>;
 	onRemoveProject: (project: Ref) => Promise<void>;
@@ -198,6 +199,7 @@ export function Sidebar({
 	onPreviewLeave,
 	workspaceError,
 	hostSections,
+	onCloneProject,
 	onCreateProject,
 	onInitializeProject,
 	onRemoveProject,
@@ -409,6 +411,7 @@ export function Sidebar({
 						trailing={
 							<CreateProjectButton
 								hideTrigger={allWorkspaces.length === 0}
+								onCloneProject={onCloneProject}
 								onCreateProject={onCreateProject}
 								onInitializeProject={onInitializeProject}
 							/>
@@ -1423,9 +1426,10 @@ function SidebarSearchButton({ onOpen }: { onOpen: () => void }) {
 
 function CreateProjectButton({
 	hideTrigger = false,
+	onCloneProject,
 	onCreateProject,
 	onInitializeProject,
-}: Pick<SidebarProps, "onCreateProject" | "onInitializeProject"> & { hideTrigger?: boolean }) {
+}: Pick<SidebarProps, "onCloneProject" | "onCreateProject" | "onInitializeProject"> & { hideTrigger?: boolean }) {
 	const { t } = useTranslation();
 	// Single CreateProjectFlow owner for the sidebar: the header "+" stays mounted
 	// (CSS-hidden when collapsed or on the empty start page) so it can own
@@ -1435,6 +1439,7 @@ function CreateProjectButton({
 	return (
 		<CreateProjectFlow
 			mode="choose"
+			onCloneProject={onCloneProject}
 			onCreateProject={onCreateProject}
 			onInitializeProject={onInitializeProject}
 			openSignal={createProjectNonce}

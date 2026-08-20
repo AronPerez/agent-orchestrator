@@ -118,6 +118,7 @@ type projectConfig struct {
 	Worker             roleOverride        `json:"worker,omitempty"`
 	Orchestrator       roleOverride        `json:"orchestrator,omitempty"`
 	TrackerIntake      trackerIntakeConfig `json:"trackerIntake,omitempty"`
+	AutoReview         bool                `json:"autoReview,omitempty"`
 	// BrowserPersistentProfile is opt-in and default off. See the domain type
 	// for the security ceiling it accepts.
 	BrowserPersistentProfile bool `json:"browserPersistentProfile,omitempty"`

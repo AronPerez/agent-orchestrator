@@ -298,6 +298,75 @@ function ShellLayout() {
 		[queryClient],
 	);
 
+	const completeProjectCreation = useCallback(
+		async (
+			project: components["schemas"]["Project"],
+			input: CreateProjectConfigInput,
+			source: "project_add" | "project_clone",
+		) => {
+			const workspace: WorkspaceSummary = {
+				host: LOCAL_HOST,
+				id: project.id,
+				name: project.name,
+				kind: toProjectKind(project.kind),
+				path: project.path,
+				workspaceRepos: project.workspaceRepos,
+				type: "main",
+				orchestratorAgent: input.orchestratorAgent as WorkspaceSummary["orchestratorAgent"],
+				sessions: [],
+			};
+			void captureRendererEvent(`ao.renderer.${source}_succeeded`, { project_id: workspace.id });
+			updateWorkspaces((current) => [workspace, ...current.filter((item) => item.id !== workspace.id)]);
+			setOrchestratorStartupError(workspace, null);
+			try {
+				void captureRendererEvent("ao.renderer.orchestrator_spawn_requested", {
+					project_id: workspace.id,
+					source,
+				});
+				const {
+					data: spawnData,
+					error: spawnError,
+					response: spawnResponse,
+				} = await clientFor(workspace.host).POST("/api/v1/sessions", {
+					body: {
+						projectId: workspace.id,
+						kind: "orchestrator",
+						harness: input.orchestratorAgent as components["schemas"]["SpawnSessionRequest"]["harness"],
+					},
+				});
+				if (spawnError || !spawnData?.session?.id) {
+					const message = spawnError
+						? apiErrorMessage(spawnError, `Failed to spawn orchestrator (${spawnResponse.status})`)
+						: `Failed to spawn orchestrator (${spawnResponse.status})`;
+					throw new Error(message);
+				}
+				void captureRendererEvent("ao.renderer.orchestrator_spawn_succeeded", {
+					project_id: workspace.id,
+					source,
+				});
+				const sessionId = spawnData.session.id;
+				await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
+				void navigate({
+					to: "/host/$hostId/session/$sessionId",
+					params: { hostId: workspace.host, sessionId },
+				});
+			} catch (spawnError) {
+				void captureRendererEvent("ao.renderer.orchestrator_spawn_failed", {
+					project_id: workspace.id,
+					source,
+				});
+				void navigate({
+					to: "/host/$hostId/project/$projectId",
+					params: { hostId: workspace.host, projectId: workspace.id },
+				});
+				const message = spawnError instanceof Error ? spawnError.message : "Could not start orchestrator";
+				const startupMessage = `Project added, but orchestrator did not start: ${message}`;
+				setOrchestratorStartupError(workspace, startupMessage);
+			}
+		},
+		[navigate, queryClient, setOrchestratorStartupError, updateWorkspaces],
+	);
+
 	const createProject = useCallback(
 		async (input: {
 			path: string;
@@ -334,68 +403,50 @@ function ShellLayout() {
 				throw failure;
 			}
 			if (!data?.project) throw new Error("Project creation returned no project");
-
-			const workspace: WorkspaceSummary = {
-				host: LOCAL_HOST,
-				id: data.project.id,
-				name: data.project.name,
-				kind: toProjectKind(data.project.kind),
-				path: data.project.path,
-				workspaceRepos: data.project.workspaceRepos,
-				type: "main",
-				orchestratorAgent: input.orchestratorAgent as WorkspaceSummary["orchestratorAgent"],
-				sessions: [],
-			};
-			void captureRendererEvent("ao.renderer.project_add_succeeded", { project_id: workspace.id });
-			updateWorkspaces((current) => [workspace, ...current.filter((item) => item.id !== workspace.id)]);
-			setOrchestratorStartupError(workspace, null);
-			try {
-				void captureRendererEvent("ao.renderer.orchestrator_spawn_requested", {
-					project_id: workspace.id,
-					source: "project_add",
-				});
-				const {
-					data: spawnData,
-					error: spawnError,
-					response: spawnResponse,
-				} = await clientFor(workspace.host).POST("/api/v1/sessions", {
-					body: {
-						projectId: workspace.id,
-						kind: "orchestrator",
-						harness: input.orchestratorAgent as components["schemas"]["SpawnSessionRequest"]["harness"],
-					},
-				});
-				if (spawnError || !spawnData?.session?.id) {
-					const message = spawnError
-						? apiErrorMessage(spawnError, `Failed to spawn orchestrator (${spawnResponse.status})`)
-						: `Failed to spawn orchestrator (${spawnResponse.status})`;
-					throw new Error(message);
-				}
-				void captureRendererEvent("ao.renderer.orchestrator_spawn_succeeded", {
-					project_id: workspace.id,
-					source: "project_add",
-				});
-				const sessionId = spawnData.session.id;
-				await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
-				void navigate({
-					to: "/host/$hostId/session/$sessionId",
-					params: { hostId: workspace.host, sessionId },
-				});
-			} catch (spawnError) {
-				void captureRendererEvent("ao.renderer.orchestrator_spawn_failed", {
-					project_id: workspace.id,
-					source: "project_add",
-				});
-				void navigate({
-					to: "/host/$hostId/project/$projectId",
-					params: { hostId: workspace.host, projectId: workspace.id },
-				});
-				const message = spawnError instanceof Error ? spawnError.message : "Could not start orchestrator";
-				const startupMessage = `Project added, but orchestrator did not start: ${message}`;
-				setOrchestratorStartupError(workspace, startupMessage);
-			}
+			await completeProjectCreation(data.project, input, "project_add");
 		},
-		[navigate, queryClient, setOrchestratorStartupError, updateWorkspaces],
+		[completeProjectCreation],
+	);
+
+	const cloneProject = useCallback(
+		async (input: {
+			remoteUrl: string;
+			destinationParent: string;
+			workerAgent: string;
+			orchestratorAgent: string;
+			trackerIntake?: components["schemas"]["TrackerIntakeConfig"];
+		}) => {
+			void addRendererExceptionStep("Project clone requested", {
+				source: "project-clone",
+				operation: "project_clone",
+				surface: "project_board",
+			});
+			void captureRendererEvent("ao.renderer.project_clone_requested");
+			const status = await refreshDaemonStatus();
+			if (status.state !== "ready" || !status.port) {
+				throw new Error(status.message || "AO daemon is not ready.");
+			}
+			const { data, error } = await apiClient.POST("/api/v1/projects/clone", {
+				body: {
+					remoteUrl: input.remoteUrl,
+					destinationParent: input.destinationParent,
+					config: createProjectConfig(input),
+				},
+			});
+			if (error) {
+				const failure = new Error(apiErrorMessage(error)) as Error & { code?: string };
+				failure.code = apiErrorCode(error);
+				void captureRendererException(failure, {
+					source: "project-clone",
+					operation: "project_clone",
+					surface: "project_board",
+				});
+				throw failure;
+			}
+			if (!data?.project) throw new Error("Project clone returned no project");
+			await completeProjectCreation(data.project, input, "project_clone");
+		},
+		[completeProjectCreation],
 	);
 
 	const initializeProjectRepository = useCallback(async (path: string) => {
@@ -717,7 +768,9 @@ function ShellLayout() {
 	);
 
 	return (
-		<ShellProvider value={{ daemonStatus, workspaceStartupState, createProject, initializeProjectRepository }}>
+		<ShellProvider
+			value={{ daemonStatus, workspaceStartupState, cloneProject, createProject, initializeProjectRepository }}
+		>
 			<SessionTopbarProvider>
 				<NotificationRuntime />
 				<TrayRuntime />
@@ -786,6 +839,7 @@ function ShellLayout() {
 					onPreviewLeave={scheduleSidebarPeekClose}
 					underTopbar={isMac || isWindows || isLinux}
 					topbarOffset={isWindows ? "titlebar" : hideShellTopbar ? "trafficLights" : "toolbar"}
+					onCloneProject={cloneProject}
 						onCreateProject={createProject}
 						onInitializeProject={initializeProjectRepository}
 						onRemoveProject={removeProject}

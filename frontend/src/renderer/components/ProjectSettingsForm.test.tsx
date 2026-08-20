@@ -463,8 +463,36 @@ describe("ProjectSettingsForm", () => {
 		expect(await beginEdit("Default branch")).toHaveValue("develop");
 		await userEvent.keyboard("{Escape}");
 		expect(await beginEdit("Session prefix")).toHaveValue("po");
-		const reviewerAgent = screen.getByRole("button", { name: "Default reviewer agent" });
-		expect(reviewerAgent).toHaveTextContent("Claude Code");
+	});
+
+	it("loads and saves the project auto review setting", async () => {
+		mockProject({
+			id: "proj-1",
+			name: "Project One",
+			kind: "single_repo",
+			path: "/repo/project-one",
+			repo: "git@github.com:acme/project-one.git",
+			defaultBranch: "main",
+			config: {
+				worker: { agent: "codex" },
+				orchestrator: { agent: "claude-code" },
+				autoReview: true,
+			},
+		});
+
+		renderSettings("proj-1", undefined, "agents");
+
+		const toggle = await screen.findByRole("switch", { name: "Enable for new sessions" });
+		expect(toggle).toBeChecked();
+
+		await userEvent.click(toggle);
+		expect(toggle).not.toBeChecked();
+
+		submitSettings();
+
+		await waitFor(() => expect(putMock).toHaveBeenCalledTimes(1));
+		const request = putMock.mock.calls[0]?.[1];
+		expect(request?.body.config.autoReview).toBe(false);
 	});
 
 	it("keeps the automatic default branch unpinned when saving other settings", async () => {
@@ -746,7 +774,7 @@ describe("ProjectSettingsForm", () => {
 			},
 		});
 
-		renderSettings("proj-1", undefined, "workflow");
+		renderSettings("proj-1", undefined, "agents");
 
 		const reviewerAgent = await screen.findByRole("button", { name: "Default reviewer agent" });
 		expect(reviewerAgent).toHaveTextContent("Project default");
@@ -800,7 +828,7 @@ describe("ProjectSettingsForm", () => {
 			},
 		});
 
-		renderSettings("proj-1", undefined, "workflow");
+		renderSettings("proj-1", undefined, "agents");
 		const reviewer = await screen.findByRole("button", { name: "Default reviewer agent" });
 		await userEvent.click(reviewer);
 		const labels = (await screen.findAllByRole("menuitem")).map((option) => option.textContent);
@@ -853,7 +881,7 @@ describe("ProjectSettingsForm", () => {
 			};
 		});
 
-		renderSettings("proj-1", undefined, "workflow");
+		renderSettings("proj-1", undefined, "agents");
 
 		const reviewer = await screen.findByRole("button", { name: "Default reviewer agent" });
 		await userEvent.click(reviewer);
@@ -875,7 +903,7 @@ describe("ProjectSettingsForm", () => {
 			},
 		});
 
-		renderSettings("proj-1", undefined, "workflow");
+		renderSettings("proj-1", undefined, "agents");
 
 		await userEvent.click(await screen.findByRole("button", { name: "Default reviewer agent" }));
 		const reviewerLabels = (await screen.findAllByRole("menuitem"))
@@ -935,7 +963,7 @@ describe("ProjectSettingsForm", () => {
 			return { data: { status: "ok", project }, error: undefined };
 		});
 
-		renderSettings("proj-1", undefined, "workflow");
+		renderSettings("proj-1", undefined, "agents");
 
 		const reviewer = await screen.findByRole("button", { name: "Default reviewer agent" });
 		await userEvent.click(reviewer);
@@ -988,7 +1016,7 @@ describe("ProjectSettingsForm", () => {
 			};
 		});
 
-		renderSettings("proj-1", undefined, "workflow");
+		renderSettings("proj-1", undefined, "agents");
 		await chooseOption(await screen.findByRole("button", { name: "Default reviewer agent" }), "Kimchi");
 		expect(screen.getByRole("status")).toHaveTextContent("Experimental host-trusted reviewer");
 	});
@@ -1040,7 +1068,7 @@ describe("ProjectSettingsForm", () => {
 			},
 		});
 
-		renderSettings("proj-1", undefined, "workflow");
+		renderSettings("proj-1", undefined, "agents");
 
 		const reviewer = await screen.findByRole("button", { name: "Default reviewer agent" });
 		await userEvent.click(reviewer);
@@ -1092,7 +1120,7 @@ describe("ProjectSettingsForm", () => {
 			};
 		});
 
-		renderSettings("proj-1", undefined, "workflow");
+		renderSettings("proj-1", undefined, "agents");
 
 		await userEvent.click(await screen.findByRole("button", { name: "Default reviewer agent" }));
 		const copilot = (await screen.findAllByRole("menuitem")).find((option) =>
@@ -1134,7 +1162,7 @@ describe("ProjectSettingsForm", () => {
 			};
 		});
 
-		renderSettings("proj-1", undefined, "workflow");
+		renderSettings("proj-1", undefined, "agents");
 
 		await userEvent.click(await screen.findByRole("button", { name: "Default reviewer agent" }));
 		const copilot = (await screen.findAllByRole("menuitem")).find((option) =>
@@ -1158,7 +1186,7 @@ describe("ProjectSettingsForm", () => {
 			},
 		});
 
-		renderSettings("proj-1", undefined, "workflow");
+		renderSettings("proj-1", undefined, "agents");
 
 		const reviewer = await screen.findByRole("button", { name: "Default reviewer agent" });
 		await userEvent.click(reviewer);
@@ -1190,7 +1218,7 @@ describe("ProjectSettingsForm", () => {
 			return { data: { status: "ok", project }, error: undefined };
 		});
 
-		renderSettings("proj-1", undefined, "workflow");
+		renderSettings("proj-1", undefined, "agents");
 
 		const reviewerAgent = await screen.findByRole("button", { name: "Default reviewer agent" });
 		await userEvent.click(reviewerAgent);

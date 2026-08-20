@@ -54,7 +54,7 @@ export function CommandPalette() {
 	const params = useParams({ strict: false }) as { hostId?: string; projectId?: string; sessionId?: string };
 	const workspaceSections = useWorkspaceQuery().data;
 	const workspaces = useMemo(() => flattenHostSections(workspaceSections), [workspaceSections]);
-	const { createProject, initializeProjectRepository } = useShell();
+	const { cloneProject, createProject, initializeProjectRepository } = useShell();
 	const resolvedTheme = useUiStore((s) => s.resolvedTheme);
 	const setThemePreference = useUiStore((s) => s.setThemePreference);
 	const isOpen = useUiStore((s) => s.isCommandPaletteOpen);
@@ -602,6 +602,7 @@ export function CommandPalette() {
 
 			<CreateProjectFlow
 				mode="choose"
+				onCloneProject={cloneProject}
 				onCreateProject={createProject}
 				onInitializeProject={initializeProjectRepository}
 			>
