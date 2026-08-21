@@ -19,24 +19,31 @@ export function HostSwitcher({ hosts, value, onChange }: HostSwitcherProps) {
 	const selectedLabel = selected?.host === LOCAL_HOST ? t("hosts.local") : selected?.label;
 
 	return (
-		<Select
-			value={value ?? ALL_HOSTS}
-			onValueChange={(next) => onChange(next === ALL_HOSTS ? null : next)}
-		>
-			<SelectTrigger size="sm" className="w-full" aria-label={t("hosts.label")}>
-				<SelectValue>
-					<span className="min-w-0 truncate">{selectedLabel ?? t("hosts.allHosts")}</span>
-				</SelectValue>
-			</SelectTrigger>
-			<SelectContent position="popper" className="min-w-(--radix-select-trigger-width)">
-				<SelectItem value={ALL_HOSTS}>{t("hosts.allHosts")}</SelectItem>
-				<SelectSeparator />
-				{hosts.map((host) => (
-					<SelectItem key={host.host} value={host.host}>
-						{host.host === LOCAL_HOST ? t("hosts.local") : host.label}
-					</SelectItem>
-				))}
-			</SelectContent>
-		</Select>
+		<>
+			{/* The filter's effect is the tree redrawing behind it, which a screen
+			    reader has no reason to revisit. Say where the tree now points. */}
+			<p role="status" className="sr-only">
+				{value === null ? t("hosts.allHosts") : t("hosts.viewing", { host: selectedLabel ?? value })}
+			</p>
+			<Select
+				value={value ?? ALL_HOSTS}
+				onValueChange={(next) => onChange(next === ALL_HOSTS ? null : next)}
+			>
+				<SelectTrigger size="sm" className="w-full" aria-label={t("hosts.label")}>
+					<SelectValue>
+						<span className="min-w-0 truncate">{selectedLabel ?? t("hosts.allHosts")}</span>
+					</SelectValue>
+				</SelectTrigger>
+				<SelectContent position="popper" className="min-w-(--radix-select-trigger-width)">
+					<SelectItem value={ALL_HOSTS}>{t("hosts.allHosts")}</SelectItem>
+					<SelectSeparator />
+					{hosts.map((host) => (
+						<SelectItem key={host.host} value={host.host}>
+							{host.host === LOCAL_HOST ? t("hosts.local") : host.label}
+						</SelectItem>
+					))}
+				</SelectContent>
+			</Select>
+		</>
 	);
 }

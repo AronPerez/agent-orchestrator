@@ -1,5 +1,5 @@
 import { CornerLeftUp, Folder } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { components } from "../../api/schema";
 import { remotesBridge } from "../hooks/useRemoteHosts";
@@ -71,15 +71,28 @@ export function RemoteFolderPicker({
 	const [path, setPath] = useState<string | null>(null);
 	const [listing, setListing] = useState<Listing | null>(null);
 	const [error, setError] = useState<string | null>(null);
+	// A listing off another machine can take seconds. Without this the dialog
+	// just sits there showing the folder you left, which reads as a dead dialog
+	// to everyone and as nothing at all to a screen reader.
+	const [loading, setLoading] = useState(false);
+	const list = useRef<HTMLUListElement>(null);
+	// Stepping into a folder replaces every row, so the row that had focus stops
+	// existing and focus falls back to the dialog. Move it to the new listing
+	// instead — but only after a step, never on the first open, where the focus
+	// Radix just placed is the right one.
+	const stepped = useRef(false);
 
 	useEffect(() => {
 		if (!open) {
 			setPath(null);
 			setListing(null);
 			setError(null);
+			setLoading(false);
+			stepped.current = false;
 			return;
 		}
 		let cancelled = false;
+		setLoading(true);
 		void (async () => {
 			const query = path === null ? "" : `?path=${encodeURIComponent(path)}`;
 			try {
@@ -88,6 +101,7 @@ export function RemoteFolderPicker({
 					path: `/api/v1/fs/dirs${query}`,
 				});
 				if (cancelled) return;
+				setLoading(false);
 				if (response.status === 200) {
 					const parsed = parseListing(response.body);
 					if (parsed !== null) {
@@ -104,13 +118,26 @@ export function RemoteFolderPicker({
 				// dead end, not a dead dialog.
 				setError(daemonErrorMessage(response.body) ?? t("fsBrowse.failed"));
 			} catch (err) {
-				if (!cancelled) setError(err instanceof Error ? err.message : t("fsBrowse.failed"));
+				if (cancelled) return;
+				setLoading(false);
+				setError(err instanceof Error ? err.message : t("fsBrowse.failed"));
 			}
 		})();
 		return () => {
 			cancelled = true;
 		};
 	}, [hostUrl, open, path, t]);
+
+	useEffect(() => {
+		if (listing === null || !stepped.current) return;
+		stepped.current = false;
+		list.current?.querySelector("button")?.focus();
+	}, [listing]);
+
+	const step = (next: string) => {
+		stepped.current = true;
+		setPath(next);
+	};
 
 	const canGoUp = listing !== null && listing.parent !== listing.path;
 
@@ -119,7 +146,10 @@ export function RemoteFolderPicker({
 			<DialogContent className={settingsDialogContentClass}>
 				<div className={settingsDialogHeaderClass}>
 					<DialogTitle className="settings-dialog-title">{t("fsBrowse.title", { host: hostLabel })}</DialogTitle>
-					<DialogDescription className="truncate font-mono text-control leading-4 text-settings-muted">
+					<DialogDescription
+						aria-live="polite"
+						className="truncate font-mono text-control leading-4 text-settings-muted"
+					>
 						{listing?.path ?? t("fsBrowse.hint")}
 					</DialogDescription>
 				</div>
@@ -131,10 +161,14 @@ export function RemoteFolderPicker({
 						</p>
 					) : null}
 
-					<ul className="flex flex-col gap-0.5">
+					<p role="status" className="empty:hidden text-caption leading-4 text-settings-muted">
+						{loading ? t("fsBrowse.loading") : ""}
+					</p>
+
+					<ul ref={list} className="flex flex-col gap-0.5">
 						{canGoUp && listing ? (
 							<li>
-								<FolderRow icon={CornerLeftUp} label={t("fsBrowse.up")} onClick={() => setPath(listing.parent)} />
+								<FolderRow icon={CornerLeftUp} label={t("fsBrowse.up")} onClick={() => step(listing.parent)} />
 							</li>
 						) : null}
 						{listing?.entries?.map((entry) => (
@@ -143,7 +177,7 @@ export function RemoteFolderPicker({
 									icon={Folder}
 									label={entry.name}
 									badge={entry.gitRepo ? t("fsBrowse.gitRepo") : undefined}
-									onClick={() => setPath(entry.path)}
+									onClick={() => step(entry.path)}
 								/>
 							</li>
 						))}

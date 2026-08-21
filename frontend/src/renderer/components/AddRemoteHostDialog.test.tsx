@@ -37,6 +37,24 @@ async function fillAndSubmit(address = "http://192.0.2.1:3011") {
 }
 
 describe("AddRemoteHostDialog", () => {
+	// Reaching the buttons from the last field is four Tab stops away; Enter is
+	// what everyone actually presses.
+	it("saves on Enter from a field", async () => {
+		render(<AddRemoteHostDialog open onOpenChange={vi.fn()} onSaved={vi.fn()} />);
+		await userEvent.type(screen.getByLabelText(/name/i), "workbox");
+		await userEvent.type(screen.getByLabelText(/address/i), "192.0.2.1:3011{Enter}");
+
+		expect(addMock).toHaveBeenCalledWith({ label: "workbox", url: "http://192.0.2.1:3011", password: "" });
+	});
+
+	// The close button is positioned absolutely, so moving it after the fields in
+	// source order costs nothing visually and stops Close being the first stop.
+	it("puts the first field ahead of Close in the tab order", async () => {
+		render(<AddRemoteHostDialog open onOpenChange={vi.fn()} onSaved={vi.fn()} />);
+		await userEvent.tab();
+		expect(screen.getByLabelText(/name/i)).toHaveFocus();
+	});
+
 	it.each<Behaviour>(["html-catchall", "wrong-shape"])(
 		"reports %s as a non-daemon response without throwing",
 		async (behaviour) => {

@@ -55,9 +55,9 @@ async function openHostList() {
 			/>
 		</QueryClientProvider>,
 	);
-	await screen.findByRole("combobox", { name: /host/i });
+	await screen.findByRole("button", { name: /^host:/i });
 	await waitFor(() => expect(bridge.remotes.probe).toHaveBeenCalled());
-	await userEvent.click(screen.getByRole("combobox", { name: /host/i }));
+	await userEvent.click(screen.getByRole("button", { name: /^host:/i }));
 }
 
 describe("host management from the Host dropdown", () => {

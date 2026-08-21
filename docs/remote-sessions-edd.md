@@ -515,9 +515,33 @@ a multi-second host probe otherwise reads as a dead dialog to a screen-reader us
 over corrected input.
 - Unreachable hosts are **disabled** in the picker rather than selectable-then-failing.
 
-**Not yet verified:** no formal accessibility audit or screen-reader pass has been run on the
-new host tree, filter, and folder picker. Recommend one before broad release, particularly
-for the tree's host-qualified labels and the filter's keyboard semantics.
+**Audited (AO-80).** A keyboard and screen-reader pass over the host tree, filter, add/edit
+dialogs and folder picker found and fixed:
+
+- **The host picker's row actions were unreachable by keyboard.** Connect, Edit and Remove
+sat inside a Radix `Select`, which calls `preventDefault()` on Tab within its listbox and
+moves focus only between options — so they were mouse-only, and a listbox whose children are
+buttons is not a listbox a screen reader can report faithfully. The picker is now a popover of
+plain buttons: every action is a Tab stop and announces as itself. An unreachable host is
+`aria-disabled` rather than `disabled`, so it stays focusable and its status can still be read.
+- **The add/edit dialog could only be submitted by pointing at its button.** Its fields are now
+a real `form`, so Enter saves, and the absolutely-positioned close button moved after the
+fields in source order so opening no longer lands on Close.
+- **The folder picker lost focus on every hop.** Stepping into a folder replaces every row, so
+the focused row stopped existing. Focus now moves into the new listing, the path is a live
+region, and a pending listing announces instead of leaving the dialog looking dead.
+- **Duplicate accessible names.** Each unreachable host section had a button called just
+"Retry"; each is now named for its host, as the picker's actions already were.
+- **The host filter's effect was silent.** Changing it redraws the tree behind it, which a
+screen reader has no reason to revisit; a live region now states which host is in view.
+
+**Deliberately deferred:** the sidebar tree's own disclosure semantics (a project row carries
+`aria-expanded` while its primary action navigates, with a second invisible toggle over the
+folder icon owning the same state, and no `aria-controls` linking either to the session list).
+That structure predates remote hosts and is shared with every local project, so it belongs to a
+sidebar-wide pass rather than this one. Per-host grouping in the tree is also deferred: each
+project's accessible name already carries its host via `hosts.qualified`, and there is no
+visual host boundary for a `role="group"` to mirror.
 
 ---
 
