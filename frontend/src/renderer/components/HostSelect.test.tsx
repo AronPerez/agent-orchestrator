@@ -48,7 +48,9 @@ describe("HostSelect", () => {
 		expect(offline).toHaveAttribute("aria-disabled", "true");
 		offline.focus();
 		expect(offline).toHaveFocus();
-		await userEvent.click(offline);
+		// The row is pointer-events-none like the SelectItem it replaced, so the
+		// path left to guard is the keyboard one.
+		await userEvent.keyboard("{Enter}");
 		expect(onChange).not.toHaveBeenCalled();
 	});
 

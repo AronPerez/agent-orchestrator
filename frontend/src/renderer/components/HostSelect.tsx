@@ -20,7 +20,7 @@ const statusKeys: Record<Exclude<HostStatus, "local">, MessageKey> = {
 const TRIGGER_CLASS =
 	"flex h-control-board w-full items-center justify-between gap-2 rounded-md border border-transparent bg-input/50 px-3 py-2 text-sm whitespace-nowrap transition-[color,box-shadow,background-color,border-color] outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30";
 const ROW_CLASS =
-	"relative flex min-w-0 flex-1 select-none items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-muted-foreground outline-none transition-colors hover:bg-interactive-hover hover:text-foreground focus-visible:bg-interactive-hover focus-visible:text-foreground focus-visible:ring-2 focus-visible:ring-ring/60 aria-disabled:opacity-50";
+	"relative flex min-w-0 flex-1 select-none items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-muted-foreground outline-none transition-colors hover:bg-interactive-hover hover:text-foreground focus-visible:bg-interactive-hover focus-visible:text-foreground focus-visible:ring-2 focus-visible:ring-ring/60 aria-disabled:pointer-events-none aria-disabled:opacity-50";
 
 // A host you cannot reach can only fail one step later, so it is not selectable.
 function unreachable(host: Host): boolean {
