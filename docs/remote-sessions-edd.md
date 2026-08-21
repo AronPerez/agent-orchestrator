@@ -122,24 +122,34 @@ are marked **N/A** below with the reason, rather than filled with invented conte
 
 **Renderer-side fan-out with a per-host authenticated loopback proxy.**
 
-```
-Electron main process                          remote machines
-┌────────────────────────────┐
-│ remotes.json (0600)        │
-│  {label, url, password}    │
-│                            │
-│ RemoteRegistry             │
-│  ├─ proxy A ──── Bearer ───┼────────────► daemon A  (LAN :3011)
-│  └─ proxy B ──── Bearer ───┼────────────► daemon B  (LAN :3011)
-└─────────┬──────────────────┘
-          │ loopback, token-in-path
-┌─────────▼──────────────────┐
-│ renderer (app://renderer)  │
-│  clientFor(host)           │──────────────► local daemon :3001 (direct)
-│  1 SSE stream per host     │
-│  1 terminal mux per host   │
-│  Ref = {host, id}          │
-└────────────────────────────┘
+```mermaid
+graph TB
+    subgraph Main["Electron main process"]
+        Remotes["remotes.json (0600)<br/>{label, url, password}"]
+        Registry[RemoteRegistry]
+        ProxyA["proxy A"]
+        ProxyB["proxy B"]
+        Remotes --> Registry
+        Registry --> ProxyA
+        Registry --> ProxyB
+    end
+
+    subgraph Renderer["renderer (app://renderer)"]
+        Client["clientFor(host)<br/>1 SSE stream per host<br/>1 terminal mux per host<br/>Ref = {host, id}"]
+    end
+
+    subgraph Remote["remote machines"]
+        DaemonA["daemon A (LAN :3011)"]
+        DaemonB["daemon B (LAN :3011)"]
+    end
+
+    Local["local daemon :3001"]
+
+    Client -- "loopback, token-in-path" --> ProxyA
+    Client -- "loopback, token-in-path" --> ProxyB
+    ProxyA -- Bearer --> DaemonA
+    ProxyB -- Bearer --> DaemonB
+    Client -- direct --> Local
 ```
 
 **Components**
