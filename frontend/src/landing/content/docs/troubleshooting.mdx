@@ -88,6 +88,23 @@ ao doctor --json
 	</Accordion>
 </Accordions>
 
+## Remote Hosts
+
+<Accordions>
+	<Accordion title='A remote host says "no route to host" but curl reaches it'>
+		On macOS this is **Local Network privacy**, not a network fault. Denied local-network access surfaces as `EHOSTUNREACH`, which reads as "no route to host", while Apple-signed binaries like `curl` and `nc` are exempt and keep working. Confirm it by checking that loopback works and the LAN address fails every time, then enable the connecting app under **System Settings → Privacy & Security → Local Network**. The permission is granted per app, so the desktop app and your terminal need it separately. See [Remote sessions](/docs/configuration/remote-sessions).
+	</Accordion>
+	<Accordion title='A host was added but shows "Wrong password"'>
+		The password was rotated on that machine. Read the current one from **Settings → Connect Mobile** there and edit the saved host in place — "Wrong password" is reported separately from "could not reach", so the host is up.
+	</Accordion>
+	<Accordion title='"That address answered, but it is not an AO daemon"'>
+		Something other than AO is listening on that port. Check the port shown under Connect Mobile on the remote machine: the listener falls back to another port when `3011` is taken.
+	</Accordion>
+	<Accordion title="Is the connection password enough on an untrusted network?">
+		No. It gates every data route and locks out repeated failures, but the link is plaintext HTTP, so an observer on that network reads the password and the traffic. Possession of the password is full authority on that daemon, including spawning agents. Use the Tailscale bind option instead of a network you do not control.
+	</Accordion>
+</Accordions>
+
 ## Connect Mobile
 
 <Accordions>
