@@ -35,6 +35,29 @@ describe("remoteRequest", () => {
 		});
 	});
 
+	// A path is concatenated onto the host url, and "@" turns everything before
+	// it into userinfo — so an unchecked path is a way to post this host's
+	// connection password to someone else's server.
+	it("refuses a path that redirects the credential to another host", async () => {
+		const doFetch = fakeFetch(200);
+		await expect(remoteRequest(entry, { method: "GET", path: "@evil.example/steal" }, doFetch)).rejects.toThrow(
+			/evil\.example/,
+		);
+		expect(doFetch).not.toHaveBeenCalled();
+	});
+
+	it("keeps a protocol-relative path on the saved host", async () => {
+		const doFetch = fakeFetch(200);
+		await remoteRequest(entry, { method: "GET", path: "//evil.example/x" }, doFetch);
+		expect(doFetch.mock.calls[0][0]).toBe("http://192.0.2.1:3011//evil.example/x");
+	});
+
+	it("keeps a reverse-proxy path prefix", async () => {
+		const doFetch = fakeFetch(200);
+		await remoteRequest({ ...entry, url: "http://192.0.2.1/ao" }, { method: "GET", path: "/healthz" }, doFetch);
+		expect(doFetch.mock.calls[0][0]).toBe("http://192.0.2.1/ao/healthz");
+	});
+
 	it("joins paths without doubling the slash on a trailing-slash url", async () => {
 		const doFetch = fakeFetch(200);
 		await remoteRequest({ ...entry, url: "http://192.0.2.1:3011/" }, { method: "GET", path: "/healthz" }, doFetch);

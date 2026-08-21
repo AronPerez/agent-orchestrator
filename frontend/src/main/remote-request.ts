@@ -29,7 +29,16 @@ export async function remoteRequest(
 	signal?: AbortSignal,
 ): Promise<RemoteResponse> {
 	const base = entry.url.replace(/\/+$/, "");
-	const response = await fetchImpl(`${base}${init.path}`, {
+	// The path is concatenated, and a concatenated path can leave the host: a
+	// path starting with "@" turns the base into userinfo ("http://box:3011" +
+	// "@evil.com/" is a request to evil.com) and would hand this host's
+	// connection password to whoever answers there. The renderer is the only
+	// caller today, but it is the process that renders agent output, so the
+	// origin is checked here rather than trusted upstream.
+	const target = new URL(`${base}${init.path}`);
+	if (target.origin !== new URL(base).origin)
+		throw new Error(`refusing to send ${entry.url} credentials to ${target.origin}`);
+	const response = await fetchImpl(target.href, {
 		method: init.method,
 		headers: {
 			"Content-Type": "application/json",

@@ -87,6 +87,39 @@ describe("startRemoteProxy", () => {
 		expect(seen[0].body).toBe('{"path":"/srv/repo"}');
 	});
 
+	// The add-host dialog accepts https://, so this is what a Tailscale Serve or
+	// reverse-proxy address does today: the upstream is a TLS endpoint and the
+	// proxy must not put the connection password on the wire in the clear.
+	it("never sends the credential in the clear to an https host", async () => {
+		const { port, seen } = await startUpstream(() => ({ status: 200, body: "{}" }));
+		proxy = await startRemoteProxy({
+			label: "workbox",
+			url: `https://127.0.0.1:${port}`,
+			password: "pw",
+		});
+
+		// A cleartext listener cannot complete a TLS handshake, so the honest
+		// outcome is a failed request — never a plaintext one that succeeds.
+		const res = await fetch(`${proxy.base}/api/v1/projects`);
+		expect(res.status).toBe(502);
+		expect(seen).toHaveLength(0);
+	});
+
+	// A daemon can live behind a reverse proxy at a path. The renderer's base is
+	// the loopback proxy's own root, so the upstream prefix is restored here or
+	// every credentialled request lands on whatever else that vhost serves.
+	it("restores the host's path prefix upstream", async () => {
+		const { port, seen } = await startUpstream(() => ({ status: 200, body: "{}" }));
+		proxy = await startRemoteProxy({
+			label: "workbox",
+			url: `http://127.0.0.1:${port}/ao`,
+			password: "pw",
+		});
+
+		await fetch(`${proxy.base}/api/v1/projects`);
+		expect(seen[0].url).toBe("/ao/api/v1/projects");
+	});
+
 	it("refuses a request without the token and sends nothing upstream", async () => {
 		const { port, seen } = await startUpstream(() => ({
 			status: 200,

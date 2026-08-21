@@ -32,6 +32,20 @@ describe("readRemotes", () => {
 		await expect(readRemotes(path)).rejects.toBeInstanceOf(RemotesFilePermissionError);
 		await expect(readRemotes(path)).rejects.toThrow(/chmod 600/);
 	});
+
+	// Node reports 0o666 for every writable file on Windows, so the mode check
+	// there refuses a perfectly good file and takes saved hosts down with it.
+	// The CLI exempts win32 for the same reason (cli/remote.go:154).
+	it("does not apply the mode check on windows", async () => {
+		const path = await tempFile('{"remotes":[]}', 0o644);
+		const platform = Object.getOwnPropertyDescriptor(process, "platform");
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+		try {
+			await expect(readRemotes(path)).resolves.toEqual([]);
+		} finally {
+			if (platform) Object.defineProperty(process, "platform", platform);
+		}
+	});
 });
 
 describe("addRemote", () => {
