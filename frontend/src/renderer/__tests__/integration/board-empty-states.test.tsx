@@ -8,7 +8,8 @@ import type { ReactNode } from "react";
 // first-run states, mocking only the HTTP client, the router, and the native
 // folder picker: an empty daemon shows the import chooser (no column shells), a
 // fresh project shows the task invitation, and any session brings the columns back.
-const { getMock, navigateMock, chooseDirectoryMock, spawnOrchestratorMock } = vi.hoisted(() => ({
+const { connectedHostsMock, getMock, navigateMock, chooseDirectoryMock, spawnOrchestratorMock } = vi.hoisted(() => ({
+	connectedHostsMock: vi.fn((): string[] => []),
 	getMock: vi.fn(),
 	navigateMock: vi.fn(),
 	chooseDirectoryMock: vi.fn(),
@@ -28,8 +29,8 @@ vi.mock("../../lib/api-client", () => ({
 }));
 
 vi.mock("../../lib/host-clients", () => ({
-	clientFor: () => ({ GET: getMock }),
-	connectedHosts: () => [],
+	clientFor: (host: string) => ({ GET: (url: string) => getMock(host, url) }),
+	connectedHosts: connectedHostsMock,
 	isHostReady: () => true,
 }));
 
@@ -52,7 +53,8 @@ type Project = { id: string; name: string; path: string; orchestratorAgent?: str
 type Session = Record<string, unknown>;
 
 function respondWith(projects: Project[], sessions: Session[]) {
-	getMock.mockImplementation(async (url: string) => {
+	getMock.mockImplementation(async (host: string, url: string) => {
+		if (host !== "local") throw new Error("remote daemon dropped");
 		if (url === "/api/v1/projects") return { data: { projects }, error: undefined };
 		if (url === "/api/v1/sessions") return { data: { sessions }, error: undefined };
 		return { data: undefined, error: undefined };
@@ -99,7 +101,9 @@ let lastQueryClient: QueryClient | null = null;
 let lastShell: ShellContextValue | null = null;
 
 function renderBoard(ui: ReactNode) {
-	lastQueryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+	lastQueryClient = new QueryClient({
+		defaultOptions: { queries: { retry: false, retryDelay: 0 } },
+	});
 	lastShell = {
 		daemonStatus: { state: "ready" } as ShellContextValue["daemonStatus"],
 		workspaceStartupState: "ready",
@@ -118,6 +122,7 @@ const columnCount = () => document.querySelectorAll("section").length;
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	connectedHostsMock.mockReturnValue([]);
 	createProjectMock.mockResolvedValue(undefined);
 	initializeProjectRepositoryMock.mockResolvedValue(undefined);
 	useUiStore.setState({
@@ -165,6 +170,27 @@ describe("global board first launch", () => {
 		expect(columnCount()).toBe(0);
 		// The welcome carries its own orientation — no dangling "Board" header.
 		expect(screen.queryByText("Board")).not.toBeInTheDocument();
+	});
+
+	it("shows an error instead of first-run welcome when the local host fails", async () => {
+		getMock.mockResolvedValue({
+			data: undefined,
+			error: new Error("local daemon dropped"),
+		});
+		renderBoard(<SessionsBoard />);
+
+		expect(await screen.findByText("Could not load sessions.")).toBeInTheDocument();
+		expect(screen.queryByTestId("board-welcome")).not.toBeInTheDocument();
+	});
+
+	it("keeps the local board intact when only a remote host fails", async () => {
+		connectedHostsMock.mockReturnValue(["http://192.0.2.1:3011"]);
+		respondWith([project], [workerSession]);
+		renderBoard(<SessionsBoard />);
+
+		expect(await screen.findByText("fix the bug")).toBeInTheDocument();
+		expect(screen.queryByText("Could not load sessions.")).not.toBeInTheDocument();
+		expect(columnCount()).toBe(4);
 	});
 
 	it("opens the native folder picker from the Project card", async () => {

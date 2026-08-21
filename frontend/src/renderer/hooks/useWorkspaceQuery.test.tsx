@@ -1,5 +1,5 @@
-import { renderHook, waitFor } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act, renderHook, waitFor } from "@testing-library/react";
+import { isCancelledError, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 
@@ -27,7 +27,12 @@ vi.mock("../lib/host-clients", () => ({
 
 vi.mock("../lib/telemetry", () => ({ captureRendererEvent: captureRendererEventMock }));
 
-import { useWorkspaceQuery } from "./useWorkspaceQuery";
+import {
+	fetchWorkspaceSections,
+	useWorkspaceQuery,
+	workspaceHostQueryKey,
+	workspaceQueryKey,
+} from "./useWorkspaceQuery";
 import { LOCAL_HOST, refKey, type HostId } from "../lib/hosts";
 
 function wrapper({ children }: { children: ReactNode }) {
@@ -103,7 +108,7 @@ describe("useWorkspaceQuery", () => {
 
 		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
 
-		await waitFor(() => expect(result.current.isSuccess).toBe(true));
+		await waitFor(() => expect(result.current.isError).toBe(true));
 		expect(result.current.data?.[0]).toMatchObject({
 			host: LOCAL_HOST,
 			status: "failed",
@@ -368,8 +373,12 @@ describe("useWorkspaceQuery", () => {
 
 		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
 
-		await waitFor(() => expect(result.current.isSuccess).toBe(true));
-		expect(result.current.data?.[0]).toMatchObject({ status: "failed", failure: "Failed to fetch" });
+		await waitFor(() => expect(result.current.isError).toBe(true));
+		expect(result.current.data?.[0]).toMatchObject({
+			status: "failed",
+			failure: "Failed to fetch",
+		});
+		expect(result.current.localFailure).toBe("Failed to fetch");
 	});
 
 	it("reports a sessions fetch error on the local host even when projects load", async () => {
@@ -381,8 +390,11 @@ describe("useWorkspaceQuery", () => {
 
 		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
 
-		await waitFor(() => expect(result.current.isSuccess).toBe(true));
-		expect(result.current.data?.[0]).toMatchObject({ status: "failed", failure: "sessions backend down" });
+		await waitFor(() => expect(result.current.isError).toBe(true));
+		expect(result.current.data?.[0]).toMatchObject({
+			status: "failed",
+			failure: "sessions backend down",
+		});
 	});
 });
 
@@ -421,6 +433,99 @@ describe("useWorkspaceQuery — multi-host", () => {
 		expect(failed?.status).toBe("failed");
 		expect(failed?.workspaces).toEqual([]);
 		expect(failed?.failure).toMatch(/ECONNREFUSED/);
+	});
+
+	it("retains a host's last-good snapshot when its scoped invalidation fails", async () => {
+		const queryClient = new QueryClient({
+			defaultOptions: { queries: { retryDelay: 0 } },
+		});
+		connectedHostsMock.mockReturnValue([REMOTE]);
+		let remoteFails = false;
+		getMock.mockImplementation(async (host: HostId, url: string) => {
+			if (remoteFails && host === REMOTE) throw new Error("remote daemon dropped");
+			const projectId = host === LOCAL_HOST ? "local-project" : "remote-project";
+			if (url === "/api/v1/projects") {
+				return {
+					data: {
+						projects: [{ id: projectId, name: projectId, path: `/${projectId}` }],
+					},
+				};
+			}
+			if (url === "/api/v1/sessions") return { data: { sessions: [] } };
+			throw new Error(`unexpected GET ${url}`);
+		});
+		const queryWrapper = ({ children }: { children: ReactNode }) => (
+			<QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+		);
+		const { result } = renderHook(() => useWorkspaceQuery(), {
+			wrapper: queryWrapper,
+		});
+		await waitFor(() => expect(result.current.data?.every((section) => section.status === "ready")).toBe(true));
+
+		getMock.mockClear();
+		remoteFails = true;
+		await act(async () => {
+			await queryClient.invalidateQueries({ queryKey: workspaceHostQueryKey(REMOTE) });
+		});
+		await waitFor(() =>
+			expect(result.current.data?.find((section) => section.host === REMOTE)?.status).toBe("failed"),
+		);
+
+		const remote = result.current.data?.find((section) => section.host === REMOTE);
+		expect(remote).toMatchObject({
+			status: "failed",
+			failure: "remote daemon dropped",
+			workspaces: [expect.objectContaining({ id: "remote-project" })],
+		});
+		expect(result.current.data?.find((section) => section.host === LOCAL_HOST)).toMatchObject({
+			status: "ready",
+			workspaces: [expect.objectContaining({ id: "local-project" })],
+		});
+		expect(getMock.mock.calls.every(([host]) => host === REMOTE)).toBe(true);
+	});
+
+	it("refetches only the host targeted by a host-scoped invalidation", async () => {
+		const queryClient = new QueryClient({
+			defaultOptions: { queries: { retryDelay: 0 } },
+		});
+		connectedHostsMock.mockReturnValue([REMOTE]);
+		getMock.mockImplementation(async (host: HostId, url: string) => {
+			if (url === "/api/v1/projects") {
+				return {
+					data: { projects: [{ id: host, name: host, path: `/${host}` }] },
+				};
+			}
+			if (url === "/api/v1/sessions") return { data: { sessions: [] } };
+			throw new Error(`unexpected GET ${url}`);
+		});
+		const queryWrapper = ({ children }: { children: ReactNode }) => (
+			<QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+		);
+		const { result } = renderHook(() => useWorkspaceQuery(), {
+			wrapper: queryWrapper,
+		});
+		await waitFor(() => expect(result.current.data?.every((section) => section.status === "ready")).toBe(true));
+		getMock.mockClear();
+
+		await act(async () => {
+			await queryClient.invalidateQueries({
+				queryKey: [...workspaceQueryKey, REMOTE],
+			});
+		});
+
+		expect(getMock).toHaveBeenCalledTimes(2);
+		expect(getMock.mock.calls.every(([host]) => host === REMOTE)).toBe(true);
+	});
+
+	it("propagates cancellation instead of reporting a host failure", async () => {
+		const queryClient = new QueryClient();
+		getMock.mockImplementation(() => new Promise(() => undefined));
+
+		const pending = fetchWorkspaceSections(queryClient);
+		await waitFor(() => expect(getMock).toHaveBeenCalled());
+		await queryClient.cancelQueries({ queryKey: workspaceQueryKey });
+
+		await expect(pending).rejects.toSatisfy(isCancelledError);
 	});
 
 	it("a host returning a malformed body fails that host, it does not throw", async () => {

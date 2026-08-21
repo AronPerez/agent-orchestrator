@@ -42,22 +42,22 @@ vi.mock("../lib/api-client", () => ({
 }));
 
 import { ProjectSettingsForm } from "./ProjectSettingsForm";
-import { workspaceQueryKey } from "../hooks/useWorkspaceQuery";
+import { workspaceHostQueryKey, workspaceQueryKey } from "../hooks/useWorkspaceQuery";
 import type { WorkspaceSummary } from "../types/workspace";
 
-function localSection(workspaces: WorkspaceSummary[]) {
-	return [{ host: "local", label: "Local", status: "ready", workspaces, failure: null }];
-}
-
-function renderSettings(projectId = "proj-1", workspaces?: WorkspaceSummary[], section?: "general" | "agents" | "workflow" | "intake") {
+function renderSettings(
+	projectId = "proj-1",
+	workspaces?: WorkspaceSummary[],
+	section?: "general" | "agents" | "workflow" | "intake",
+) {
 	const queryClient = new QueryClient({
 		defaultOptions: {
-			queries: { retry: false, staleTime: Infinity },
+			queries: { retry: false },
 			mutations: { retry: false },
 		},
 	});
 	if (workspaces) {
-		queryClient.setQueryData(workspaceQueryKey, localSection(workspaces));
+		queryClient.setQueryData(workspaceHostQueryKey("local"), workspaces);
 	}
 	render(
 		<QueryClientProvider client={queryClient}>

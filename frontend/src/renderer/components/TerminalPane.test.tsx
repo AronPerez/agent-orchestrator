@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { useEffect, useRef } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { shellTerminalsQueryKey, type ShellTerminal } from "../hooks/useShellTerminals";
-import { workspaceQueryKey } from "../hooks/useWorkspaceQuery";
+import { workspaceHostQueryKey } from "../hooks/useWorkspaceQuery";
 import type { AttachableTerminal } from "../hooks/useTerminalSession";
 import type { TerminalTarget } from "../types/terminal";
 import type { WorkspaceSession } from "../types/workspace";
@@ -169,18 +169,6 @@ function workspaceWithSessions(sessions: WorkspaceSession[]) {
 	];
 }
 
-function localSection(sessions: WorkspaceSession[]) {
-	return [
-		{
-			host: "local",
-			label: "Local",
-			status: "ready",
-			workspaces: workspaceWithSessions(sessions),
-			failure: null,
-		},
-	];
-}
-
 function renderCachedPane({
 	session,
 	sessions,
@@ -192,8 +180,10 @@ function renderCachedPane({
 	shellTerminals?: ShellTerminal[];
 	terminalTarget?: TerminalTarget;
 }) {
-	const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
-	queryClient.setQueryData(workspaceQueryKey, localSection(sessions));
+	const queryClient = new QueryClient({
+		defaultOptions: { queries: { retry: false } },
+	});
+	queryClient.setQueryData(workspaceHostQueryKey("local"), workspaceWithSessions(sessions));
 	queryClient.setQueryData(shellTerminalsQueryKey, shellTerminals);
 	const previousAO = window.ao;
 	window.ao = {} as typeof window.ao;
@@ -436,13 +426,38 @@ describe("TerminalCacheProvider", () => {
 		}
 	});
 
+	it("keeps retained terminals when an invalidated workspace refetch fails", async () => {
+		const view = renderCachedPane({
+			session: sessionA,
+			sessions: [sessionA, sessionB],
+		});
+		try {
+			const terminalA = await waitFor(() => activeXterm());
+			view.show(sessionB);
+			await waitFor(() => expect(activeXterm()).not.toBe(terminalA));
+
+			await act(async () => {
+				await view.queryClient.invalidateQueries({
+					queryKey: workspaceHostQueryKey("local"),
+				});
+			});
+			await waitFor(() => expect(view.queryClient.getQueryState(workspaceHostQueryKey("local"))?.status).toBe("error"));
+
+			expect(view.queryClient.getQueryData(workspaceHostQueryKey("local"))).toHaveLength(1);
+			expect(terminalA.isConnected).toBe(true);
+			expect(xtermUnmounts.value).toBe(0);
+		} finally {
+			view.restore();
+		}
+	});
+
 	it("disposes an old handle generation instead of reusing its terminal state", async () => {
 		const replacement = { ...sessionA, terminalHandleId: "handle-a-generation-2" };
 		const view = renderCachedPane({ session: sessionA, sessions: [sessionA] });
 		try {
 			const oldGeneration = await waitFor(() => activeXterm());
 			act(() => {
-				view.queryClient.setQueryData(workspaceQueryKey, localSection([replacement]));
+				view.queryClient.setQueryData(workspaceHostQueryKey("local"), workspaceWithSessions([replacement]));
 			});
 			view.show(replacement);
 
@@ -463,7 +478,7 @@ describe("TerminalCacheProvider", () => {
 			view.show(sessionB);
 			await waitFor(() => expect(activeXterm()).not.toBe(terminalA));
 			act(() => {
-				view.queryClient.setQueryData(workspaceQueryKey, localSection([sessionB]));
+				view.queryClient.setQueryData(workspaceHostQueryKey("local"), workspaceWithSessions([sessionB]));
 			});
 
 			await waitFor(() => expect(terminalA.isConnected).toBe(false));

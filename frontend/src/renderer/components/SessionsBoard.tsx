@@ -161,6 +161,7 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
 	const showStartup =
 		shell !== null &&
 		!daemonHasFailed &&
+		!workspaceQuery.localFailure &&
 		(!isDaemonReady || workspaceStartupState === "loading" || (!workspaceQuery.isSuccess && !workspaceQuery.isError));
 	const showWelcome = !projectId && isLoaded && all.length === 0;
 	const showProjectEmpty = projectId !== undefined && isLoaded && workspaces.length > 0 && sessions.length === 0;
@@ -352,7 +353,7 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
 				) : null}
 				{showStartup ? (
 					<DaemonStartupLoader />
-				) : workspaceStartupState === "error" || workspaceQuery.isError ? (
+				) : workspaceStartupState === "error" || workspaceQuery.isError || workspaceQuery.localFailure ? (
 					<p className="py-10 text-center text-xs text-passive">{t("shell.couldNotLoadSessions")}</p>
 				) : showWelcome ? (
 					<BoardWelcome />

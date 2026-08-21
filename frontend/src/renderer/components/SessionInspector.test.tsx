@@ -9,7 +9,7 @@ import type { SessionPRSummary } from "../hooks/useSessionScmSummary";
 import { sessionScmSummaryQueryKey } from "../hooks/useSessionScmSummary";
 import { sessionUsageDetailQueryKey, type SessionUsage } from "../hooks/useSessionUsage";
 import { sessionWorkspaceFilesQueryKey } from "../hooks/useSessionWorkspaceFiles";
-import { workspaceQueryKey } from "../hooks/useWorkspaceQuery";
+import { workspaceHostQueryKey } from "../hooks/useWorkspaceQuery";
 import { useUiStore } from "../stores/ui-store";
 import type { PRState, PullRequestFacts, WorkspaceSession, WorkspaceSummary } from "../types/workspace";
 
@@ -149,15 +149,11 @@ const usageTelemetry = (overrides: Partial<SessionUsage> = {}): SessionUsage => 
 	...overrides,
 });
 
-function localSection(workspaces: WorkspaceSummary[]) {
-	return [{ host: "local", label: "Local", status: "ready", workspaces, failure: null }];
-}
-
 function renderWithQuery(children: ReactNode, workspaces?: WorkspaceSummary[], seed?: (client: QueryClient) => void) {
 	const client = new QueryClient({
 		defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
 	});
-	if (workspaces) client.setQueryData(workspaceQueryKey, localSection(workspaces));
+	if (workspaces) client.setQueryData(workspaceHostQueryKey("local"), workspaces);
 	seed?.(client);
 	return {
 		...render(

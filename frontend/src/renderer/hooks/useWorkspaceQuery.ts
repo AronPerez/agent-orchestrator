@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { isCancelledError, useQueries, type QueryClient } from "@tanstack/react-query";
 import type { components } from "../../api/schema";
 import { apiErrorMessage } from "../lib/api-client";
 import { clientFor, connectedHosts, isHostReady } from "../lib/host-clients";
@@ -147,38 +147,85 @@ async function fetchWorkspaces(host: HostId): Promise<WorkspaceSummary[]> {
 	});
 }
 
-async function fetchAllHosts(): Promise<HostSection[]> {
+export function workspaceHostQueryKey(host: HostId) {
+	return [...workspaceQueryKey, host] as const;
+}
+
+function workspaceHostQueryOptions(host: HostId) {
+	return {
+		queryKey: workspaceHostQueryKey(host),
+		queryFn: () => fetchWorkspaces(host),
+		retry: 1,
+		refetchInterval: 15_000,
+	};
+}
+
+function readyHostSection(host: HostId, workspaces: WorkspaceSummary[]): HostSection {
+	return {
+		host,
+		label: host === LOCAL_HOST ? "Local" : host,
+		status: "ready",
+		workspaces,
+		failure: null,
+	};
+}
+
+function failedHostSection(host: HostId, error: unknown, workspaces: WorkspaceSummary[] = []): HostSection {
+	return {
+		host,
+		label: host === LOCAL_HOST ? "Local" : host,
+		status: "failed",
+		workspaces,
+		failure: apiErrorMessage(error, "Could not load projects"),
+	};
+}
+
+export async function fetchWorkspaceSections(client: QueryClient, staleTime?: number): Promise<HostSection[]> {
 	const hosts = [LOCAL_HOST, ...connectedHosts()];
-	const outcomes = await Promise.allSettled(hosts.map((host) => fetchWorkspaces(host)));
+	const outcomes = await Promise.allSettled(
+		hosts.map((host) =>
+			client.fetchQuery({
+				...workspaceHostQueryOptions(host),
+				...(staleTime === undefined ? {} : { staleTime }),
+			}),
+		),
+	);
+	const cancelled = outcomes.find((outcome) => outcome.status === "rejected" && isCancelledError(outcome.reason));
+	if (cancelled?.status === "rejected") throw cancelled.reason;
 	return outcomes.map((outcome, index) => {
 		const host = hosts[index];
 		return outcome.status === "fulfilled"
-			? {
-					host,
-					label: host === LOCAL_HOST ? "Local" : host,
-					status: "ready" as const,
-					workspaces: outcome.value,
-					failure: null,
-				}
-			: {
-					host,
-					label: host === LOCAL_HOST ? "Local" : host,
-					status: "failed" as const,
-					workspaces: [],
-					failure: apiErrorMessage(outcome.reason, "Could not load projects"),
-				};
+			? readyHostSection(host, outcome.value)
+			: failedHostSection(host, outcome.reason, client.getQueryData<WorkspaceSummary[]>(workspaceHostQueryKey(host)));
 	});
 }
 
-// Shared so route loaders can prefetch via queryClient.ensureQueryData (paired
-// with the router's defaultPreload: "intent") and the hook reads the same cache.
-export const workspaceQueryOptions = {
-	queryKey: workspaceQueryKey,
-	queryFn: fetchAllHosts,
-	retry: 1,
-	refetchInterval: 15_000,
-};
+export function localWorkspaceFailure(sections: readonly HostSection[] | undefined): string | undefined {
+	const local = sections?.find((section) => section.host === LOCAL_HOST);
+	return local?.status === "failed" ? (local.failure ?? "Could not load projects") : undefined;
+}
 
 export function useWorkspaceQuery() {
-	return useQuery(workspaceQueryOptions);
+	const hosts = [LOCAL_HOST, ...connectedHosts()];
+	const queries = useQueries({ queries: hosts.map(workspaceHostQueryOptions) });
+	const sections = hosts.flatMap((host, index) => {
+		const query = queries[index];
+		if (query.isPending) return [];
+		return [
+			query.isError ? failedHostSection(host, query.error, query.data) : readyHostSection(host, query.data ?? []),
+		];
+	});
+	const local = queries[0];
+	const data = local?.isPending ? undefined : sections;
+	return {
+		data,
+		dataUpdatedAt: Math.max(0, ...queries.map((query) => query.dataUpdatedAt)),
+		error: local?.error ?? null,
+		isError: local?.isError ?? false,
+		isLoading: local?.isLoading ?? true,
+		isPending: local?.isPending ?? true,
+		isSuccess: local?.isSuccess ?? false,
+		localFailure: localWorkspaceFailure(data),
+		refetch: () => Promise.all(queries.map((query) => query.refetch())),
+	};
 }

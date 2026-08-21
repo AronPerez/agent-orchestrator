@@ -23,9 +23,11 @@ import { useDaemonStatus } from "../hooks/useDaemonStatus";
 import { useOpenShellTerminal } from "../hooks/useShellTerminals";
 import { useWindowFullScreen } from "../hooks/useWindowFullScreen";
 import {
+	fetchWorkspaceSections,
 	useWorkspaceQuery,
+	localWorkspaceFailure,
+	workspaceHostQueryKey,
 	workspaceQueryKey,
-	workspaceQueryOptions,
 } from "../hooks/useWorkspaceQuery";
 import { apiClient, apiErrorCode, apiErrorMessage, hasTrustedApiBaseUrl } from "../lib/api-client";
 import { refreshDaemonStatus } from "../lib/daemon-status";
@@ -48,14 +50,7 @@ import {
 } from "../lib/platform";
 import { useUiStore } from "../stores/ui-store";
 import { matchesRendererShortcut } from "../stores/keybindings-store";
-import {
-	flattenHostSections,
-	type HostSection,
-	sessionIsActive,
-	toProjectKind,
-	updateHostWorkspaces,
-	type WorkspaceSummary,
-} from "../types/workspace";
+import { flattenHostSections, sessionIsActive, toProjectKind, type WorkspaceSummary } from "../types/workspace";
 import type { components } from "../../api/schema";
 import { useAgentInventoryTelemetry } from "../hooks/useAgentInventoryTelemetry";
 
@@ -66,7 +61,7 @@ export const Route = createFileRoute("/_shell")({
 	loader: async ({ context }) => {
 		await refreshDaemonStatus().catch(() => undefined);
 		if (!usesPreviewWorkspaceData && !hasTrustedApiBaseUrl()) return;
-		return context.queryClient.ensureQueryData(workspaceQueryOptions);
+		return fetchWorkspaceSections(context.queryClient);
 	},
 	component: ShellLayout,
 });
@@ -240,20 +235,8 @@ function ShellLayout() {
 
 	const updateWorkspaces = useCallback(
 		(updater: (workspaces: WorkspaceSummary[]) => WorkspaceSummary[]) => {
-			queryClient.setQueryData<HostSection[]>(workspaceQueryKey, (current) =>
-				updateHostWorkspaces(
-					current ?? [
-						{
-							host: LOCAL_HOST,
-							label: "Local",
-							status: "ready",
-							workspaces: [],
-							failure: null,
-						},
-					],
-					LOCAL_HOST,
-					updater,
-				),
+			queryClient.setQueryData<WorkspaceSummary[]>(workspaceHostQueryKey(LOCAL_HOST), (current) =>
+				updater(current ?? []),
 			);
 		},
 		[queryClient],
@@ -443,13 +426,17 @@ function ShellLayout() {
 			};
 		}
 
-		workspaceStartupBaselineRef.current =
-			queryClient.getQueryState(workspaceQueryKey)?.dataUpdatedAt ?? 0;
+		workspaceStartupBaselineRef.current = Math.max(
+			0,
+			...queryClient
+				.getQueryCache()
+				.findAll({ queryKey: workspaceQueryKey })
+				.map((query) => query.state.dataUpdatedAt),
+		);
 		setWorkspaceStartupState("loading");
-		void queryClient
-			.fetchQuery({ ...workspaceQueryOptions, staleTime: 0 })
-			.then(() => {
-				if (active) setWorkspaceStartupState("ready");
+		void fetchWorkspaceSections(queryClient, 0)
+			.then((sections) => {
+				if (active) setWorkspaceStartupState(localWorkspaceFailure(sections) ? "error" : "ready");
 			})
 			.catch((error) => {
 				if (active && !isCancelledError(error)) setWorkspaceStartupState("error");
@@ -465,6 +452,10 @@ function ShellLayout() {
 	// the workspace query later, so let a newer successful result recover the
 	// shell without requiring a daemon restart or port change.
 	useEffect(() => {
+		if (workspaceQuery.localFailure) {
+			setWorkspaceStartupState("error");
+			return;
+		}
 		if (
 			usesPreviewWorkspaceData ||
 			!isDaemonReady ||
@@ -479,6 +470,7 @@ function ShellLayout() {
 		daemonStatus.state,
 		workspaceQuery.dataUpdatedAt,
 		workspaceQuery.isSuccess,
+		workspaceQuery.localFailure,
 		workspaceStartupState,
 	]);
 
@@ -726,7 +718,10 @@ function ShellLayout() {
 						onCreateProject={createProject}
 						onInitializeProject={initializeProjectRepository}
 						onRemoveProject={removeProject}
-						workspaceError={workspaceQuery.isError ? errorMessage(workspaceQuery.error) : undefined}
+						workspaceError={
+							workspaceQuery.localFailure ??
+							(workspaceQuery.isError ? errorMessage(workspaceQuery.error) : undefined)
+						}
 						workspaces={workspaces}
 					/>
 					<main className={cn("flex min-w-0 flex-1 flex-col overflow-x-hidden", !isSidebarOpen && "sidebar-hidden")}>

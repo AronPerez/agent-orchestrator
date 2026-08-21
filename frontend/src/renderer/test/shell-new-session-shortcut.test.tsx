@@ -7,6 +7,7 @@ import { useUiStore } from "../stores/ui-store";
 import type { HostSection, WorkspaceSummary } from "../types/workspace";
 
 const shellMocks = vi.hoisted(() => {
+	const getQueryState = vi.fn();
 	const state = {
 		newSessionListener: undefined as (() => void) | undefined,
 		keyboardShortcutsListener: undefined as (() => void) | undefined,
@@ -23,6 +24,7 @@ const shellMocks = vi.hoisted(() => {
 			dataUpdatedAt: 0,
 			isError: false,
 			isSuccess: true,
+			localFailure: undefined as string | undefined,
 		},
 		daemonStatus: { state: "stopped" } as {
 			state: "ready" | "starting" | "stopped" | "error";
@@ -68,7 +70,13 @@ const shellMocks = vi.hoisted(() => {
 		queryClient: {
 			ensureQueryData: vi.fn(),
 			fetchQuery: vi.fn(),
-			getQueryState: vi.fn(),
+			getQueryCache: () => ({
+				findAll: () => {
+					const queryState = getQueryState();
+					return queryState ? [{ state: queryState }] : [];
+				},
+			}),
+			getQueryState,
 			invalidateQueries: vi.fn(),
 			setQueryData: vi.fn(),
 		},
@@ -119,9 +127,12 @@ vi.mock("../lib/bridge", () => ({
 }));
 
 vi.mock("../hooks/useWorkspaceQuery", () => ({
+	fetchWorkspaceSections: (_client: unknown, staleTime?: number) => shellMocks.queryClient.fetchQuery({ staleTime }),
+	localWorkspaceFailure: (sections: HostSection[] | undefined) =>
+		sections?.find((section) => section.host === "local" && section.status === "failed")?.failure ?? undefined,
 	useWorkspaceQuery: () => shellMocks.state.workspaceQuery,
+	workspaceHostQueryKey: (host: string) => ["workspaces", host],
 	workspaceQueryKey: ["workspaces"],
-	workspaceQueryOptions: {},
 }));
 
 vi.mock("../hooks/useDaemonStatus", () => ({
@@ -198,10 +209,26 @@ vi.mock("../components/GlobalNewTaskDialog", async () => {
 vi.mock("../components/Sidebar", async () => {
 	const { useUiStore: useStore } = await vi.importActual<typeof import("../stores/ui-store")>("../stores/ui-store");
 	return {
-		Sidebar: ({ isOverlay, onPreviewLeave, topbarOffset }: { isOverlay?: boolean; onPreviewLeave?: () => void; topbarOffset?: string }) => {
+		Sidebar: ({
+			isOverlay,
+			onPreviewLeave,
+			topbarOffset,
+			workspaceError,
+		}: {
+			isOverlay?: boolean;
+			onPreviewLeave?: () => void;
+			topbarOffset?: string;
+			workspaceError?: string;
+		}) => {
 			const nonce = useStore((state) => state.createProjectNonce);
 			return (
-				<div data-overlay={isOverlay ? "true" : "false"} data-testid="sidebar" data-topbar-offset={topbarOffset} onPointerLeave={onPreviewLeave}>
+				<div
+					data-overlay={isOverlay ? "true" : "false"}
+					data-testid="sidebar"
+					data-topbar-offset={topbarOffset}
+					onPointerLeave={onPreviewLeave}
+				>
+					{workspaceError ? <span data-testid="sidebar-workspace-error">{workspaceError}</span> : null}
 					{nonce > 0 ? <div data-testid="create-project-flow" /> : null}
 				</div>
 			);
@@ -234,6 +261,18 @@ const workspaces = [
 
 function localSection(items: WorkspaceSummary[]): HostSection[] {
 	return [{ host: "local", label: "Local", status: "ready", workspaces: items, failure: null }];
+}
+
+function failedLocalSection(items: WorkspaceSummary[] = []): HostSection[] {
+	return [
+		{
+			host: "local",
+			label: "Local",
+			status: "failed",
+			workspaces: items,
+			failure: "temporary failure",
+		},
+	];
 }
 
 async function renderShell() {
@@ -286,6 +325,7 @@ beforeEach(() => {
 		dataUpdatedAt: 0,
 		isError: false,
 		isSuccess: true,
+		localFailure: undefined,
 	};
 	shellMocks.state.daemonStatus = { state: "error", code: "not_ready" };
 	shellMocks.state.shellValue = undefined;
@@ -318,7 +358,7 @@ describe("shell workspace startup", () => {
 	});
 
 	it("forces a confirmed fetch and preserves a collapsed sidebar preference", async () => {
-		let resolveFetch: ((value: WorkspaceSummary[]) => void) | undefined;
+		let resolveFetch: ((value: HostSection[]) => void) | undefined;
 		useUiStore.setState({ isSidebarOpen: false });
 		shellMocks.state.daemonStatus = { state: "ready", port: 4777 };
 		shellMocks.state.workspaceQuery = {
@@ -326,10 +366,11 @@ describe("shell workspace startup", () => {
 			dataUpdatedAt: 100,
 			isError: false,
 			isSuccess: true,
+			localFailure: undefined,
 		};
 		shellMocks.queryClient.getQueryState.mockReturnValue({ dataUpdatedAt: 100 });
 		shellMocks.queryClient.fetchQuery.mockReturnValueOnce(
-			new Promise<WorkspaceSummary[]>((resolve) => {
+			new Promise<HostSection[]>((resolve) => {
 				resolveFetch = resolve;
 			}),
 		);
@@ -339,7 +380,7 @@ describe("shell workspace startup", () => {
 		expect(screen.getByTestId("sidebar-provider")).toHaveAttribute("data-open", "false");
 		expect(shellMocks.queryClient.fetchQuery).toHaveBeenCalledWith(expect.objectContaining({ staleTime: 0 }));
 
-		await act(async () => resolveFetch?.(workspaces));
+		await act(async () => resolveFetch?.(localSection(workspaces)));
 
 		await waitFor(() => expect(shellMocks.state.shellValue?.workspaceStartupState).toBe("ready"));
 		expect(screen.getByTestId("sidebar-provider")).toHaveAttribute("data-open", "false");
@@ -354,6 +395,7 @@ describe("shell workspace startup", () => {
 			dataUpdatedAt: 100,
 			isError: false,
 			isSuccess: true,
+			localFailure: undefined,
 		};
 		shellMocks.queryClient.getQueryState.mockReturnValue({ dataUpdatedAt: 100 });
 		shellMocks.queryClient.fetchQuery.mockRejectedValueOnce(new CancelledError());
@@ -368,7 +410,7 @@ describe("shell workspace startup", () => {
 
 	it("forces a workspace fetch when a daemon returns ready on the same port", async () => {
 		shellMocks.state.daemonStatus = { state: "starting", port: 4777 };
-		shellMocks.queryClient.fetchQuery.mockResolvedValue(workspaces);
+		shellMocks.queryClient.fetchQuery.mockResolvedValue(localSection(workspaces));
 
 		const view = await renderShell();
 		expect(shellMocks.state.shellValue?.workspaceStartupState).toBe("loading");
@@ -387,23 +429,29 @@ describe("shell workspace startup", () => {
 		await waitFor(() => expect(shellMocks.state.shellValue?.workspaceStartupState).toBe("ready"));
 	});
 
-	it("recovers after a newer workspace query succeeds", async () => {
-	shellMocks.state.daemonStatus = { state: "ready", port: 4777 };
-	shellMocks.state.workspaceQuery = {
-		data: localSection(workspaces),
+	it("surfaces a local host failure and recovers after a newer workspace query succeeds", async () => {
+		shellMocks.state.daemonStatus = { state: "ready", port: 4777 };
+		shellMocks.state.workspaceQuery = {
+			data: failedLocalSection(workspaces),
 			dataUpdatedAt: 100,
 			isError: false,
 			isSuccess: true,
+			localFailure: "temporary failure",
 		};
-		shellMocks.queryClient.getQueryState.mockReturnValue({ dataUpdatedAt: 100 });
-		shellMocks.queryClient.fetchQuery.mockRejectedValueOnce(new Error("temporary failure"));
+		shellMocks.queryClient.getQueryState.mockReturnValue({
+			dataUpdatedAt: 100,
+		});
+		shellMocks.queryClient.fetchQuery.mockResolvedValueOnce(failedLocalSection(workspaces));
 
 		const view = await renderShell();
 		await waitFor(() => expect(shellMocks.state.shellValue?.workspaceStartupState).toBe("error"));
+		expect(screen.getByTestId("sidebar-workspace-error")).toHaveTextContent("temporary failure");
 
 		shellMocks.state.workspaceQuery = {
 			...shellMocks.state.workspaceQuery,
+			data: localSection(workspaces),
 			dataUpdatedAt: 200,
+			localFailure: undefined,
 		};
 		view.rerender(
 			<Suspense fallback={null}>
