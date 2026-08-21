@@ -460,8 +460,8 @@ they trust (home/office LAN, or a Tailscale tailnet). It is **not** designed for
 networks, shared machines, or multi-tenant use.
 
 **Security review:** the daemon's LAN listener and origin policy were reviewed when Phase 1
-shipped. **The client-side additions here — the loopback proxy and its token — have not had a
-formal security review and should get one before this is promoted beyond internal use.**
+shipped. The client-side additions — the loopback proxy, its token, and `remotes.json` custody —
+were reviewed under **AO-79 (2026-08-21)**; findings and accepted risks are recorded below.
 
 **Attack surface and mitigations:**
 
@@ -469,8 +469,8 @@ formal security review and should get one before this is promoted beyond interna
 | --- | --- | --- |
 | LAN listener (`:3011`) | Plaintext HTTP, 8-character connection password, binds all interfaces by default | Per-source-address **lockout** on repeated failures (`auth.go`); `"bind": "tailscale"` or a specific IP narrows exposure; documented as trusted-network-only |
 | **Loopback proxy** (new) | A local listener that forwards to a *different machine* with a stored credential — i.e. ambient authority for other local processes, the same model as AO's own loopback daemon | Every request must carry a **128-bit random token** in the URL path; without it the proxy 404s and forwards nothing. This limits reach to processes that can read renderer memory rather than any local process. Proxy is bound to `127.0.0.1` only, and is torn down when the host is disconnected. |
-| Token leakage | A path-borne credential can leak via logs or referrers | Token is **stripped before forwarding**, so the remote daemon and its logs never see it; the proxy emits no logs at all today; tokens are per-activation, not persisted |
-| Stored credentials | `~/.ao/remotes.json` holds plaintext passwords | Enforced mode **0600**; the file is *refused* if group/other-readable; the password **never enters the renderer process** (only `{label, url}` and the loopback base cross the IPC boundary, enforced by test). No OS keychain is used — a known limitation. |
+| Token leakage | A path-borne credential can leak via logs or referrers | Token is **stripped before forwarding**, so the remote daemon and its logs never see it; the proxy's lifecycle logging (AO-78) never emits `req.url`, whose first segment is the token; tokens are per-activation, not persisted |
+| Stored credentials | `~/.ao/remotes.json` holds plaintext passwords | Enforced mode **0600** (except on Windows, where the CLI and the app both skip a check Node cannot make); the file is *refused* if group/other-readable; the password **never enters the renderer process** (only `{label, url}` and the loopback base cross the IPC boundary, enforced by test). No OS keychain is used — a deliberate decision, see the AO-79 review below. |
 | Remote filesystem listing (`fs/dirs`) | Reveals directory names on the remote host | Read-only, **directory names only** (no contents, sizes, or mtimes), dotfiles skipped, capped at 500 entries, and behind the same credential that already authorizes spawning agents (i.e. shell access) — so it is not an escalation |
 | CORS / origin | `app://renderer` has no standing with a remote daemon | The proxy answers preflight locally and strips the renderer origin before forwarding; the daemon's strict origin policy is untouched |
 | Wrong-machine actions | A destructive action landing on the wrong host | Every write takes a `Ref = {host,id}` routed via that host's client; destructive prompts name the host; a colliding-id test asserts the local daemon receives **no request** when a remote action fires |
@@ -490,6 +490,75 @@ exclude the password and the token.
 
 **PII deletion:** no PII is collected or transmitted by this feature. Removing a host deletes
 its stored entry; there is no server-side copy to purge.
+
+## Security review — AO-79 (2026-08-21)
+
+**Scope:** the loopback proxy (`main/remote-proxy.ts`), the per-host token model, the
+credentialled request path (`main/remote-request.ts` + the `remotes:*` IPC surface), and
+`~/.ao/remotes.json` custody (`main/remotes-store.ts`). The daemon's LAN listener and origin
+policy were out of scope — reviewed at Phase 1.
+
+**The token model holds.** 128 bits from `crypto.randomBytes`, compared in constant time,
+per-activation and never persisted, stripped before forwarding, bound to `127.0.0.1`, and torn
+down on disconnect. Preflight is answered locally and the renderer origin never reaches the
+daemon. Nothing in the remote path logs the base URL. The renderer never receives the
+connection password. Those properties were re-checked against the code and hold.
+
+### Fixed
+
+| # | Severity | Finding |
+| --- | --- | --- |
+| 1 | High | **A renderer-supplied path could redirect the credential off-host.** `remoteRequest` concatenated `init.path` onto the saved host URL, so a path beginning with `@` turned the base into userinfo — `http://box:3011` + `@evil.example/` is a request *to evil.example*, carrying `Authorization: Bearer <connection password>`. `remotes:*` is a renderer→main trust boundary and the renderer is the process that renders agent output, so the origin is now asserted before the request is made. |
+| 2 | High | **An `https://` host was talked to in cleartext.** The proxy computed port 443 for an https upstream but forwarded with `node:http` / `net.connect` regardless, putting the connection password on the wire unencrypted. The add-host dialog accepts `https://`, so a Tailscale Serve or reverse-proxy address reached this by typing it. The proxy now uses `https.request` / `tls.connect` for an https upstream (certificates validated by default). |
+| 3 | Medium | **The proxy dropped the host's URL path prefix.** A daemon behind a reverse proxy at `http://box/ao` received every credentialled request at `/api/v1/…` instead of `/ao/api/v1/…` — delivering the Bearer credential to whatever else that vhost serves. The prefix is now restored on both the request and upgrade paths. |
+| 4 | Medium | **`remotes.json` was unreadable on Windows.** Node reports `0o666` for every writable file there, so the group/other-readable check refused every file and took saved hosts down with it. The CLI already exempts win32 for this exact reason (`cli/remote.go:154`); the TS port did not. Not caught by CI — the frontend unit job is Linux-only. |
+
+Each has a falsifying test in `frontend/src/main/*.test.ts`; all four fail on the pre-fix code.
+
+### Accepted risks
+
+- **Loopback is ambient authority.** Any local process can reach the proxy port; the token is
+what stops it. That is the same model as AO's own loopback daemon, and the token narrows reach
+from "any local process" to "a process that can read renderer memory". Accepted.
+- **The token is visible in the renderer DOM.** Attachment images are `<img src>` against the
+proxy base, so the token is readable by anything that can read the DOM. This is not a new
+class — such an attacker can already call the IPC surface — but it means the token is *not* a
+defence against a compromised renderer. Accepted; the renderer has no CSP today, which is a
+separate app-wide hardening item, not a remote-sessions one.
+- **Raw request-line assembly on the upgrade path.** The WebSocket upgrade is written to the
+socket as a hand-built HTTP request, and `entry.password` is interpolated without validation.
+Node's parser rejects CR/LF in incoming headers and request targets, so the only injection
+vector is a saved password containing control characters — which an attacker can only supply
+by getting the user to save *their* password against *their* host, where header injection buys
+nothing. Not worth code. Accepted.
+- **`cookie` and `referer` are forwarded upstream.** Deliberate: the daemon uses an `ao_conn`
+cookie for browser-served preview routes, and stripping it would break that path. No document
+is ever loaded *from* a proxy base, so no `Referer` carries the token.
+- **Plaintext HTTP on the LAN path** remains the largest limitation, unchanged by this review.
+Tailscale — now actually usable end-to-end given finding 2 — is the mitigation.
+- **`remotes.json` writes are not atomic.** A crash mid-write truncates the credential file.
+Reliability, not security; noted for whoever touches the store next.
+
+### Decision: keep the 0600 file, no OS keychain
+
+**`~/.ao/remotes.json` stays a 0600 plaintext file.** The keychain does not earn its cost here:
+
+1. **It would fork state with the CLI.** The file is deliberately shared verbatim with
+`ao --url` (`cli/remote.go`) and mirrors the mobile client's store, so "which hosts exist" has
+one source of truth. Electron `safeStorage` is unreadable from Go, so a keychain move either
+splits that store in two or demands a Go keychain implementation on three platforms.
+2. **The protection is macOS-only in practice.** On macOS, keychain items are ACL'd to the
+signed app, which is a real gain. Windows DPAPI and Linux `safeStorage` are same-user
+decryptable by construction — and on Linux without libsecret/kwallet `safeStorage` degrades to
+`basic_text`, i.e. encryption in name only.
+3. **It does not shrink the blast radius that matters.** An attacker running as the user
+already has the AO worktrees, the session store, `ao` on `PATH`, and a local daemon that can
+drive every connected remote. Encrypting one credential while the process that decrypts it is
+freely attachable is defence-in-depth, not a boundary.
+
+**Revisit if** AO targets shared or multi-user machines, or if the desktop app stops sharing
+the store with the CLI. The shape then is macOS `safeStorage` plus a Go keychain shim, decided
+together rather than one client at a time.
 
 ---
 
@@ -606,7 +675,7 @@ terminals.
 | Item | Size | Priority | Parallelizable |
 | --- | --- | --- | --- |
 | ~~**Telemetry + proxy logging** (Metrics section) and surfacing `hostConnectionState` in the UI~~ — **done (AO-78)**, see Metrics & Monitoring | S–M | — | — |
-| **Security review** of the loopback proxy + token model | S | **High** before promoting beyond internal use | Yes |
+| ~~**Security review** of the loopback proxy + token model~~ | S | Done — AO-79, 2026-08-21 (four fixes; see Security & Privacy) | — |
 | **Accessibility audit** of the host tree, filter, and folder picker | S | Medium | Yes |
 | **Setup documentation**: trust boundary, Tailscale, macOS Local Network privacy caveat | S | Medium | Yes |
 | **SSH host support** — `ssh -L` tunnel into the existing proxy seam; removes plaintext LAN password entirely | M | Medium | No (after the above) |
