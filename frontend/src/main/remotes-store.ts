@@ -33,7 +33,10 @@ export async function readRemotes(path: string): Promise<RemoteEntry[]> {
 		throw error;
 	}
 	// Mirrors the CLI: a world-readable credential file is refused, not tolerated.
-	if (mode & 0o077) throw new RemotesFilePermissionError(path, mode);
+	// Windows is exempt for the same reason it is in the CLI (cli/remote.go:154):
+	// Node reports 0o666 for every writable file there, so the check would refuse
+	// every remotes.json on that platform and take saved hosts down with it.
+	if (process.platform !== "win32" && mode & 0o077) throw new RemotesFilePermissionError(path, mode);
 
 	const parsed = JSON.parse(await readFile(path, "utf8")) as { remotes?: RemoteEntry[] };
 	return parsed.remotes ?? [];

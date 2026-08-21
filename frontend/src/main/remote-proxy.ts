@@ -1,5 +1,7 @@
 import { createServer, request as httpRequest, type Server } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { connect as netConnect, type AddressInfo, type Socket } from "node:net";
+import { connect as tlsConnect } from "node:tls";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import type { RemoteEntry } from "./remotes-store";
 
@@ -61,7 +63,22 @@ function equalsToken(candidate: string, token: string): boolean {
 export async function startRemoteProxy(entry: RemoteEntry): Promise<ActiveProxy> {
 	const token = randomBytes(16).toString("hex");
 	const upstream = new URL(entry.url);
-	const upstreamPort = Number(upstream.port || (upstream.protocol === "https:" ? 443 : 80));
+	const secure = upstream.protocol === "https:";
+	const upstreamPort = Number(upstream.port || (secure ? 443 : 80));
+	// An https host must be spoken to over TLS. Forwarding it as cleartext puts
+	// the connection password on the wire in the clear — and the address bar
+	// already accepts https:// (AddRemoteHostDialog), so this is reachable by
+	// typing a Tailscale Serve or reverse-proxy URL.
+	const upstreamRequest = secure ? httpsRequest : httpRequest;
+	const dialUpstream = (onReady: () => void): Socket =>
+		secure
+			? tlsConnect(upstreamPort, upstream.hostname, { servername: upstream.hostname }, onReady)
+			: netConnect(upstreamPort, upstream.hostname, onReady);
+	// A host may be a daemon behind a reverse proxy at a path ("http://box/ao").
+	// The renderer's base is the proxy's own root, so the upstream prefix has to
+	// be restored here — without it every forwarded request, credential and all,
+	// lands on whatever else that vhost serves at /api/v1.
+	const prefix = upstream.pathname.replace(/\/+$/, "");
 	const server: Server = createServer();
 	const tunnels = new Set<() => void>();
 	// SSE connections outlive any fixed request timeout.
@@ -72,7 +89,7 @@ export async function startRemoteProxy(entry: RemoteEntry): Promise<ActiveProxy>
 		const slash = rawUrl.indexOf("/", 1);
 		const first = slash === -1 ? rawUrl.slice(1) : rawUrl.slice(1, slash);
 		if (!equalsToken(first, token)) return null;
-		return slash === -1 ? "/" : rawUrl.slice(slash);
+		return prefix + (slash === -1 ? "/" : rawUrl.slice(slash));
 	};
 
 	const forwardHeaders = (incoming: NodeJS.Dict<string | string[]>): NodeJS.Dict<string | string[]> => {
@@ -104,7 +121,7 @@ export async function startRemoteProxy(entry: RemoteEntry): Promise<ActiveProxy>
 			res.end('{"error":"unknown path"}');
 			return;
 		}
-		const proxied = httpRequest(
+		const proxied = upstreamRequest(
 			{
 				host: upstream.hostname,
 				port: upstreamPort,
@@ -143,7 +160,7 @@ export async function startRemoteProxy(entry: RemoteEntry): Promise<ActiveProxy>
 			socket.destroy();
 			return;
 		}
-		const upstreamSocket = netConnect(upstreamPort, upstream.hostname, () => {
+		const upstreamSocket = dialUpstream(() => {
 			const headers = forwardHeaders(req.headers);
 			const lines = [`${req.method} ${path} HTTP/1.1`];
 			// The WebSocket-specific headers were stripped as hop-by-hop; restore
