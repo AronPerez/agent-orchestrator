@@ -277,6 +277,8 @@
 	"hosts.qualified": "{{name}} · {{host}}",
 	"hosts.sectionFailed": "无法连接 {{host}}",
 	"hosts.retry": "重试",
+	"hosts.liveUpdatesOffline": "未收到来自 {{host}} 的实时更新",
+	"hosts.liveUpdatesOffline.hint": "其项目仍会每隔几秒刷新一次。在连接恢复前，会话可能看起来处于空闲状态。",
 	"inspector.activity": "活动",
 	"inspector.agent": "代理",
 	"inspector.aria": "会话检查器",

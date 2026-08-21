@@ -1,6 +1,7 @@
 import { baseUrlFor } from "./host-clients";
+import { reportHostStreamState } from "./host-telemetry";
 import { LOCAL_HOST, type HostId } from "./hosts";
-import { setEventsConnectionState } from "./events-connection";
+import { setEventsConnectionState, type EventsConnectionState } from "./events-connection";
 
 const SSE_RETRY_MS = 5_000;
 const EVENTSOURCE_CLOSED = 2;
@@ -26,10 +27,19 @@ type HostStream = {
 };
 
 const streams = new Map<HostId, HostStream>();
+// How many times each host's stream has dropped this session. Kept beside the
+// streams rather than on one, because a reconnect builds a new stream object
+// and the count of drops is the whole point of the signal.
+const streamDrops = new Map<HostId, number>();
 
 function setConnectionState(host: HostId, stream: HostStream, state: HostStream["state"]): void {
+	// Transitions only: onerror fires repeatedly while EventSource is CONNECTING,
+	// and one drop must report as one drop.
+	if (stream.state === state) return;
 	stream.state = state;
 	if (host === LOCAL_HOST) setEventsConnectionState(state);
+	if (state === "disconnected") streamDrops.set(host, (streamDrops.get(host) ?? 0) + 1);
+	reportHostStreamState(host, state, streamDrops.get(host) ?? 0);
 }
 
 function closeHostStream(host: HostId): void {
@@ -38,6 +48,8 @@ function closeHostStream(host: HostId): void {
 	if (stream.retryTimer) clearTimeout(stream.retryTimer);
 	stream.source.close();
 	streams.delete(host);
+	// A deliberate teardown is not a drop, so the count goes with the stream.
+	streamDrops.delete(host);
 	if (host === LOCAL_HOST) setEventsConnectionState("disconnected");
 }
 
@@ -98,8 +110,15 @@ export function syncHostStreams(hosts: HostId[], onEvent: HostEventHandler): voi
 	for (const host of wanted) connectHostStream(host, onEvent);
 }
 
-export function hostConnectionState(host: HostId): "connected" | "disconnected" {
-	return streams.get(host)?.state ?? "disconnected";
+/**
+ * Whether this host's live updates are flowing.
+ *
+ * "idle" — no stream at all (never opened, or torn down) — is deliberately
+ * distinct from "disconnected": only the second one means the board went stale
+ * on a host that is meant to be live, and only it is worth telling anyone about.
+ */
+export function hostConnectionState(host: HostId): EventsConnectionState {
+	return streams.get(host)?.state ?? "idle";
 }
 
 export function closeAllHostStreams(): void {

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { connect as netConnect, type AddressInfo } from "node:net";
 import { startRemoteProxy, type ActiveProxy } from "./remote-proxy";
@@ -12,8 +12,25 @@ type Seen = {
 
 let upstream: Server | undefined;
 let proxy: ActiveProxy | undefined;
+// Lifecycle logging is the point of these spies, not a side effect to silence:
+// every assertion below reads them, and swallowing the output keeps the suite
+// readable while the proxy narrates itself.
+let logged: string[];
+let warned: string[];
+
+beforeEach(() => {
+	logged = [];
+	warned = [];
+	vi.spyOn(console, "log").mockImplementation((message: unknown) => {
+		logged.push(String(message));
+	});
+	vi.spyOn(console, "warn").mockImplementation((message: unknown) => {
+		warned.push(String(message));
+	});
+});
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	await proxy?.close();
 	await new Promise<void>((resolve) => (upstream ? upstream.close(() => resolve()) : resolve()));
 	upstream = undefined;
@@ -157,6 +174,40 @@ describe("startRemoteProxy", () => {
 		});
 		const res = await fetch(`${proxy.base}/api/v1/projects`);
 		expect(res.status).toBe(502);
+	});
+
+	// "The app can't reach my host" had no answer anywhere before this, and the
+	// only thing that could make these lines unshippable is a secret in one.
+	it("logs its own lifecycle without the token or the password", async () => {
+		const { port } = await startUpstream(() => ({ status: 200, body: "{}" }));
+		proxy = await startRemoteProxy({ label: "workbox", url: `http://127.0.0.1:${port}`, password: "hunter2secret" });
+		const token = new URL(proxy.base).pathname.slice(1);
+
+		expect(logged.some((line) => line.includes("[remote-proxy] started on 127.0.0.1:"))).toBe(true);
+		await proxy.close();
+		proxy = undefined;
+		expect(logged.some((line) => line.includes("[remote-proxy] stopped on 127.0.0.1:"))).toBe(true);
+
+		const everything = [...logged, ...warned].join("\n");
+		expect(everything).not.toContain("hunter2secret");
+		expect(everything).not.toContain(token);
+	});
+
+	it("warns which upstream failed when it answers 502, naming no secret", async () => {
+		const { port } = await startUpstream(() => ({ status: 200, body: "{}" }));
+		await new Promise<void>((resolve) => (upstream ? upstream.close(() => resolve()) : resolve()));
+		upstream = undefined;
+		proxy = await startRemoteProxy({ label: "workbox", url: `http://127.0.0.1:${port}`, password: "hunter2secret" });
+		const token = new URL(proxy.base).pathname.slice(1);
+
+		const res = await fetch(`${proxy.base}/api/v1/projects`);
+		expect(res.status).toBe(502);
+		const warning = warned.find((line) => line.includes("answering 502"));
+		expect(warning).toContain(`127.0.0.1:${port}`);
+		// The post-strip path, which is the useful half; req.url starts with the token.
+		expect(warning).toContain("/api/v1/projects");
+		expect(warning).not.toContain("hunter2secret");
+		expect(warning).not.toContain(token);
 	});
 
 	it("listens on loopback only", async () => {

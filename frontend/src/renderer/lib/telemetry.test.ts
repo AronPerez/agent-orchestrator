@@ -160,6 +160,61 @@ describe("telemetry sanitizers", () => {
 		expect(safe).toEqual({ enabled: false });
 	});
 
+	// A host id IS a LAN address. It is the one identifier in the remote path
+	// that would name the user's machine, so every host_* event is checked for it.
+	it("reports a host connect without the address it probed", async () => {
+		const safe = await sanitizeRendererProperties("ao.renderer.host_connect", {
+			host_id: "http://192.168.1.250:3011",
+			host_kind: "remote",
+			source: "add",
+			result: "unauthorized",
+			duration_ms: 412.6,
+			// Everything the add dialog holds is in scope for leaking here.
+			label: "workbox",
+			password: "hunter2secret",
+		});
+		expect(safe).toMatchObject({ host_kind: "remote", source: "add", result: "unauthorized", duration_ms: 413 });
+		expect(safe.host_id).toBeUndefined();
+		expect(safe.label).toBeUndefined();
+		expect(safe.password).toBeUndefined();
+		expect(JSON.stringify(safe)).not.toContain("192.168.1.250");
+	});
+
+	it("drops a health and a source that are not in the probe's vocabulary", async () => {
+		const safe = await sanitizeRendererProperties("ao.renderer.host_connect", {
+			host_kind: "everywhere",
+			source: "telepathy",
+			result: "probably-fine",
+		});
+		expect(safe).toEqual({});
+	});
+
+	it("reports a host stream state with its drop count and no address", async () => {
+		const safe = await sanitizeRendererProperties("ao.renderer.host_stream_state", {
+			host_id: "http://192.168.1.250:3011",
+			host_kind: "remote",
+			state: "disconnected",
+			reconnect_count: 3,
+			base: "http://127.0.0.1:52341/2f6c9a",
+		});
+		expect(safe).toMatchObject({ host_kind: "remote", state: "disconnected", reconnect_count: 3 });
+		expect(safe.base).toBeUndefined();
+		expect(JSON.stringify(safe)).not.toContain("192.168.1.250");
+		expect(JSON.stringify(safe)).not.toContain("2f6c9a");
+	});
+
+	it("reports a host query failure as a status, never the daemon's error text", async () => {
+		const safe = await sanitizeRendererProperties("ao.renderer.host_query_failed", {
+			host_id: "local",
+			host_kind: "local",
+			status: 502,
+			failure: "dial tcp 192.168.1.250:3011: no route to host",
+		});
+		expect(safe).toMatchObject({ host_kind: "local", status: 502 });
+		expect(safe.failure).toBeUndefined();
+		expect(JSON.stringify(safe)).not.toContain("no route to host");
+	});
+
 	it("disables every billable PostHog product AO does not consume", () => {
 		const config = buildPostHogConfig("ins_stable-install-id");
 

@@ -37,6 +37,19 @@ const CORS_HEADERS: Record<string, string> = {
 	vary: "origin",
 };
 
+// Nothing in this file may log a secret. Not the connection password, not the
+// proxy token, and not `req.url` (its first segment IS the token) — only the
+// post-strip path, and the upstream address, which is a machine on the user's
+// own network named in their own console. That is the whole point: "the app
+// can't reach my host" had no answer anywhere before this.
+function log(message: string): void {
+	console.log(`[remote-proxy] ${message}`);
+}
+
+function warn(message: string): void {
+	console.warn(`[remote-proxy] ${message}`);
+}
+
 function equalsToken(candidate: string, token: string): boolean {
 	// Constant-time: the token is the only thing standing between a local
 	// process and another machine's daemon, so don't leak it a byte at a time.
@@ -112,7 +125,8 @@ export async function startRemoteProxy(entry: RemoteEntry): Promise<ActiveProxy>
 			},
 		);
 		proxied.setTimeout(0);
-		proxied.on("error", () => {
+		proxied.on("error", (error: Error) => {
+			warn(`upstream ${upstream.host} failed on ${req.method} ${path} (${error.message}); answering 502`);
 			if (!res.headersSent)
 				res.writeHead(502, {
 					"content-type": "application/json",
@@ -144,6 +158,9 @@ export async function startRemoteProxy(entry: RemoteEntry): Promise<ActiveProxy>
 			socket.pipe(upstreamSocket);
 			upstreamSocket.pipe(socket);
 		});
+		upstreamSocket.on("error", (error: Error) => {
+			warn(`upstream ${upstream.host} tunnel failed on ${path} (${error.message})`);
+		});
 		const drop = () => {
 			tunnels.delete(drop);
 			socket.destroy();
@@ -161,6 +178,7 @@ export async function startRemoteProxy(entry: RemoteEntry): Promise<ActiveProxy>
 
 	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 	const port = (server.address() as AddressInfo).port;
+	log(`started on 127.0.0.1:${port} for ${upstream.host}`);
 	return {
 		base: `http://127.0.0.1:${port}/${token}`,
 		url: entry.url,
@@ -170,7 +188,10 @@ export async function startRemoteProxy(entry: RemoteEntry): Promise<ActiveProxy>
 				// a deactivated proxy must actually stop serving.
 				for (const drop of tunnels) drop();
 				server.closeAllConnections();
-				server.close(() => resolve());
+				server.close(() => {
+					log(`stopped on 127.0.0.1:${port} for ${upstream.host}`);
+					resolve();
+				});
 			}),
 	};
 }

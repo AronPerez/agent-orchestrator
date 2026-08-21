@@ -279,6 +279,8 @@
 	"hosts.qualified": "{{name}} · {{host}}",
 	"hosts.sectionFailed": "No se puede acceder a {{host}}",
 	"hosts.retry": "Reintentar",
+	"hosts.liveUpdatesOffline": "No se reciben actualizaciones en vivo de {{host}}",
+	"hosts.liveUpdatesOffline.hint": "Sus proyectos se siguen actualizando cada pocos segundos. Las sesiones pueden parecer inactivas hasta que vuelva la conexión.",
 	"inspector.activity": "Actividad",
 	"inspector.agent": "Agente",
 	"inspector.aria": "Inspector de sesión",

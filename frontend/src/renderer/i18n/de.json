@@ -277,6 +277,8 @@
 	"hosts.qualified": "{{name}} · {{host}}",
 	"hosts.sectionFailed": "{{host}} ist nicht erreichbar",
 	"hosts.retry": "Erneut versuchen",
+	"hosts.liveUpdatesOffline": "Keine Live-Updates von {{host}}",
+	"hosts.liveUpdatesOffline.hint": "Die Projekte werden weiterhin alle paar Sekunden aktualisiert. Sitzungen können untätig wirken, bis die Verbindung zurückkehrt.",
 	"inspector.activity": "Aktivität",
 	"inspector.agent": "Agent",
 	"inspector.aria": "Sitzungs-Inspektor",

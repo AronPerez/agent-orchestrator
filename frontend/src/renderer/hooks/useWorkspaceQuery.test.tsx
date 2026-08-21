@@ -452,6 +452,25 @@ describe("useWorkspaceQuery", () => {
 		await waitFor(() => expect(result.current.isSuccess).toBe(true));
 		expect(result.current.data?.[0]).toMatchObject({ status: "failed", failure: "sessions backend down" });
 	});
+
+	// Every client here is a plain openapi-fetch client, so none of these
+	// failures reach api-client's ao.renderer.api_error. Before this the data
+	// just stopped loading, with nothing anywhere saying so.
+	it("reports a failed host fetch with the status that explains it", async () => {
+		getMock.mockImplementation(async (_host: HostId, url: string) =>
+			url === "/api/v1/projects"
+				? { data: undefined, error: { message: "unauthorized" }, response: new Response(null, { status: 401 }) }
+				: { data: { sessions: [] }, error: undefined, response: new Response(null, { status: 200 }) },
+		);
+
+		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
+		await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+		expect(captureRendererEventMock).toHaveBeenCalledWith(
+			"ao.renderer.host_query_failed",
+			expect.objectContaining({ host_kind: "local", status: 401 }),
+		);
+	});
 });
 
 describe("useWorkspaceQuery — multi-host", () => {

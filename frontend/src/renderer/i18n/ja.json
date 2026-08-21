@@ -277,6 +277,8 @@
 	"hosts.qualified": "{{name}} · {{host}}",
 	"hosts.sectionFailed": "{{host}} に接続できません",
 	"hosts.retry": "再試行",
+	"hosts.liveUpdatesOffline": "{{host}} からのライブ更新を受信していません",
+	"hosts.liveUpdatesOffline.hint": "プロジェクトは数秒ごとに更新され続けます。接続が回復するまで、セッションは停止中に見えることがあります。",
 	"inspector.activity": "アクティビティ",
 	"inspector.agent": "エージェント",
 	"inspector.aria": "セッションインスペクター",

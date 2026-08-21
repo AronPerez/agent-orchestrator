@@ -2,6 +2,7 @@ import { useEffect, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { X } from "lucide-react";
 import { remotesBridge, type RemoteHealth, type RemoteHostView } from "../hooks/useRemoteHosts";
+import { reportHostConnect } from "../lib/host-telemetry";
 import type { MessageKey } from "../i18n";
 import { Button } from "./ui/button";
 import {
@@ -119,6 +120,7 @@ export function AddRemoteHostDialog({ open, onOpenChange, host, onSaved }: AddRe
 		try {
 			// The main process probes before it saves, on both paths: a host that
 			// never answered is worse than no host, because it looks configured.
+			const startedAt = Date.now();
 			const health = editing
 				? await remotesBridge().update(editing.url, {
 						label: label.trim(),
@@ -127,6 +129,10 @@ export function AddRemoteHostDialog({ open, onOpenChange, host, onSaved }: AddRe
 						...(password === "" ? {} : { password }),
 					})
 				: await remotesBridge().add({ label: label.trim(), url: normalized, password });
+			// Which failure mode dominates here is the whole question behind
+			// "is adding a host working?" — a wrong password and an unreachable
+			// machine are the same dead dialog to a user and different bugs to us.
+			reportHostConnect(normalized, editing ? "edit" : "add", health, Date.now() - startedAt);
 			if (health === "online") {
 				onSaved(normalized);
 				onOpenChange(false);
