@@ -277,6 +277,8 @@
 	"hosts.qualified": "{{name}} · {{host}}",
 	"hosts.sectionFailed": "{{host}} is unreachable",
 	"hosts.retry": "Retry",
+	"hosts.liveUpdatesOffline": "Not receiving live updates from {{host}}",
+	"hosts.liveUpdatesOffline.hint": "Its projects still refresh every few seconds. Sessions may look idle until the connection returns.",
 	"inspector.activity": "Activity",
 	"inspector.agent": "Agent",
 	"inspector.aria": "Session inspector",

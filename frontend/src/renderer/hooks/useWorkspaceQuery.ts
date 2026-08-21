@@ -3,6 +3,8 @@ import { useSyncExternalStore } from "react";
 import type { components } from "../../api/schema";
 import { apiErrorMessage } from "../lib/api-client";
 import { clientFor, connectedHosts, hostLabelFor, isHostReady, subscribeConnectedHosts } from "../lib/host-clients";
+import { hostConnectionState } from "../lib/host-events";
+import { reportHostQueryFailed } from "../lib/host-telemetry";
 import { LOCAL_HOST, type HostId } from "../lib/hosts";
 import { mockWorkspaces } from "../lib/mock-data";
 import { usesPreviewWorkspaceData } from "../lib/preview-mode";
@@ -105,13 +107,25 @@ async function fetchWorkspaces(host: HostId): Promise<WorkspaceSummary[]> {
 	if (!isHostReady(host)) throw new Error(`host ${host} is not connected`);
 
 	const client = clientFor(host);
-	const [{ data: projectsData, error: projectsError }, { data: sessionsData, error: sessionsError }] =
-		await Promise.all([client.GET("/api/v1/projects"), client.GET("/api/v1/sessions")]).catch((error: unknown) => {
-			if (error instanceof SyntaxError) throw new Error("Host returned malformed workspace data");
-			throw error;
-		});
+	const [
+		{ data: projectsData, error: projectsError, response: projectsResponse },
+		{ data: sessionsData, error: sessionsError, response: sessionsResponse },
+	] = await Promise.all([client.GET("/api/v1/projects"), client.GET("/api/v1/sessions")]).catch((error: unknown) => {
+		if (error instanceof SyntaxError) throw new Error("Host returned malformed workspace data");
+		throw error;
+	});
 
-	if (projectsError || sessionsError) throw projectsError ?? sessionsError;
+	if (projectsError || sessionsError) {
+		// The status lives on the response and nowhere else, and it is what
+		// separates a rotated password (401) from a host the proxy cannot reach
+		// (502). Carried on the thrown error so the caller can report it; the
+		// message is precomputed from the daemon's envelope so what the user
+		// reads is unchanged.
+		const failed = projectsError ? projectsResponse : sessionsResponse;
+		throw Object.assign(new Error(apiErrorMessage(projectsError ?? sessionsError, "Could not load projects")), {
+			status: failed?.status,
+		});
+	}
 	const projects = parseResponseArray(projectsData, "projects", isProject);
 	const sessions = parseResponseArray(sessionsData, "sessions", isSession);
 	if (projects === null || sessions === null) throw new Error("Host returned malformed workspace data");
@@ -175,20 +189,29 @@ async function fetchWorkspaces(host: HostId): Promise<WorkspaceSummary[]> {
 	});
 }
 
+function errorStatus(error: unknown): number | undefined {
+	const status = (error as { status?: unknown } | null)?.status;
+	return typeof status === "number" ? status : undefined;
+}
+
 async function fetchHostSection(host: HostId, lastGoodWorkspaces: WorkspaceSummary[] = []): Promise<HostSection[]> {
+	const label = host === LOCAL_HOST ? "Local" : hostLabelFor(host);
 	try {
-		return [{
-			host,
-			label: host === LOCAL_HOST ? "Local" : hostLabelFor(host),
-			status: "ready",
-			workspaces: await fetchWorkspaces(host),
-			failure: null,
-		}];
+		const workspaces = await fetchWorkspaces(host);
+		// Read after the fetch, not before: this is what the sidebar shows when it
+		// renders these workspaces, and a stream that dropped mid-fetch is exactly
+		// the case worth catching.
+		return [{ host, label, status: "ready", streamState: hostConnectionState(host), workspaces, failure: null }];
 	} catch (error) {
+		// Remote clients are plain openapi-fetch clients, so none of this reaches
+		// api-client's ao.renderer.api_error. Without this a remote host's data
+		// simply stopped loading, silently.
+		reportHostQueryFailed(host, errorStatus(error));
 		return [{
 			host,
-			label: host === LOCAL_HOST ? "Local" : hostLabelFor(host),
+			label,
 			status: "failed",
+			streamState: hostConnectionState(host),
 			workspaces: lastGoodWorkspaces,
 			failure: apiErrorMessage(error, "Could not load projects"),
 		}];

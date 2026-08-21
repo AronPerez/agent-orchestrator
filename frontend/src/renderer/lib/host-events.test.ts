@@ -3,6 +3,11 @@ import { setApiBaseUrl } from "./api-client";
 import { forgetHost, registerHostBase } from "./host-clients";
 import { LOCAL_HOST } from "./hosts";
 import { closeAllHostStreams, hostConnectionState, syncHostStreams } from "./host-events";
+import { reportHostStreamState } from "./host-telemetry";
+
+vi.mock("./host-telemetry", () => ({ reportHostStreamState: vi.fn() }));
+
+const reportStreamState = vi.mocked(reportHostStreamState);
 
 const REMOTE = "http://192.0.2.1:3011";
 
@@ -29,6 +34,7 @@ class FakeEventSource {
 
 beforeEach(() => {
 	setApiBaseUrl("http://127.0.0.1:3001");
+	reportStreamState.mockClear();
 });
 
 afterEach(() => {
@@ -86,5 +92,51 @@ describe("host-events", () => {
 		syncHostStreams([LOCAL_HOST], vi.fn());
 		syncHostStreams([LOCAL_HOST], vi.fn());
 		expect(FakeEventSource.instances).toHaveLength(1);
+	});
+
+	// A host that never opened a stream is not a host whose stream died: only
+	// the second one means the board went stale, so only it may be reported.
+	it("separates a host with no stream from one whose stream dropped", () => {
+		vi.stubGlobal("EventSource", FakeEventSource);
+		registerHostBase(REMOTE, "http://127.0.0.1:9999/tok");
+		expect(hostConnectionState(REMOTE)).toBe("idle");
+
+		syncHostStreams([REMOTE], vi.fn());
+		FakeEventSource.instances[0].onopen?.();
+		FakeEventSource.instances[0].readyState = 2;
+		FakeEventSource.instances[0].onerror?.();
+		expect(hostConnectionState(REMOTE)).toBe("disconnected");
+
+		syncHostStreams([], vi.fn());
+		expect(hostConnectionState(REMOTE)).toBe("idle");
+	});
+
+	it("reports one event per state change, counting the drops", () => {
+		vi.stubGlobal("EventSource", FakeEventSource);
+		registerHostBase(REMOTE, "http://127.0.0.1:9999/tok");
+		syncHostStreams([REMOTE], vi.fn());
+		const source = FakeEventSource.instances[0];
+
+		source.onopen?.();
+		source.readyState = 2;
+		// EventSource fires onerror repeatedly while it retries; one drop is one drop.
+		source.onerror?.();
+		source.onerror?.();
+
+		expect(reportStreamState.mock.calls).toEqual([
+			[REMOTE, "connected", 0],
+			[REMOTE, "disconnected", 1],
+		]);
+	});
+
+	it("says nothing when a host is deliberately dropped", () => {
+		vi.stubGlobal("EventSource", FakeEventSource);
+		registerHostBase(REMOTE, "http://127.0.0.1:9999/tok");
+		syncHostStreams([REMOTE], vi.fn());
+		FakeEventSource.instances[0].onopen?.();
+		reportStreamState.mockClear();
+
+		syncHostStreams([], vi.fn());
+		expect(reportStreamState).not.toHaveBeenCalled();
 	});
 });

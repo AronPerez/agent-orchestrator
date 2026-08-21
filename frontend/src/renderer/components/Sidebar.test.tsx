@@ -426,6 +426,41 @@ describe("Sidebar — one tree across hosts", () => {
 		await userEvent.click(screen.getByRole("button", { name: "Retry" }));
 		expect(invalidate).toHaveBeenCalledWith({ queryKey: workspaceHostQueryKey(remoteHost) });
 	});
+
+	// The quiet failure: the host still answers, so its projects render from the
+	// poll and simply stop being live. Without this the board reads as "my agent
+	// did nothing" rather than as a connection that dropped.
+	it("says a host stopped sending live updates while still showing its projects", () => {
+		const remoteHost = "http://192.0.2.1:3011";
+		renderSidebar({
+			hostSections: [
+				{ host: LOCAL_HOST, label: "Local", status: "ready", streamState: "connected", workspaces: [workspace], failure: null },
+				{
+					host: remoteHost,
+					label: "workbox",
+					status: "ready",
+					streamState: "disconnected",
+					workspaces: [{ ...workspace, id: "remote-1", name: "Remote Project", host: remoteHost }],
+					failure: null,
+				},
+			],
+		});
+
+		expect(screen.getByText("Not receiving live updates from workbox")).toBeInTheDocument();
+		expect(screen.getByText("Remote Project · workbox", { selector: "[data-project-label]" })).toBeInTheDocument();
+		// The healthy host must not be accused alongside it.
+		expect(screen.queryByText("Not receiving live updates from This Mac")).not.toBeInTheDocument();
+	});
+
+	it("stays quiet for a host that never opened a stream", () => {
+		renderSidebar({
+			hostSections: [
+				{ host: LOCAL_HOST, label: "Local", status: "ready", streamState: "idle", workspaces: [workspace], failure: null },
+			],
+		});
+
+		expect(screen.queryByText(/Not receiving live updates/)).not.toBeInTheDocument();
+	});
 });
 
 describe("Sidebar", () => {

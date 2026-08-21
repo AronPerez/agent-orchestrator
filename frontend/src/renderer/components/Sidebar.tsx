@@ -435,13 +435,20 @@ export function Sidebar({
 								<p className="mt-1 text-caption text-passive">{workspaceError}</p>
 							</div>
 						) : visibleHostSections.every(
-							(section) => section.status === "ready" && section.workspaces.length === 0,
+							(section) =>
+								section.status === "ready" &&
+								section.streamState !== "disconnected" &&
+								section.workspaces.length === 0,
 						) ? null : (
 							<SidebarMenu className="gap-0.5 rounded-lg overflow-hidden group-data-[collapsible=icon]:gap-1 group-data-[collapsible=icon]:rounded-none group-data-[collapsible=icon]:overflow-visible">
 								{visibleHostSections.flatMap((section) =>
 									section.status === "failed"
 										? [<HostFailureSection key={`failed:${section.host}`} section={section} />]
-										: section.workspaces.map((workspace) => (
+										: [
+											...(section.streamState === "disconnected"
+												? [<HostStreamOfflineNotice key={`stale:${section.host}`} section={section} />]
+												: []),
+											...section.workspaces.map((workspace) => (
 											<ProjectItem
 												key={refKey(workspace)}
 												workspace={workspace}
@@ -451,7 +458,7 @@ export function Sidebar({
 												onToggle={() => toggleCollapsed(refKey(workspace))}
 												onRemoveProject={onRemoveProject}
 											/>
-										)),
+										))],
 								)}
 								{isCollapsed && <CreateProjectListItem />}
 							</SidebarMenu>
@@ -560,6 +567,28 @@ function HostFailureSection({ section }: { section: HostSection }) {
 					<RefreshCw aria-hidden="true" className="size-3" />
 					{t("hosts.retry")}
 				</button>
+			</div>
+		</SidebarMenuItem>
+	);
+}
+
+/**
+ * A host whose data still loads but whose event stream is down.
+ *
+ * The failure this catches is the quiet one: the board keeps rendering from the
+ * 15-second poll and simply stops being live, which reads as "my agent did
+ * nothing" rather than as a connection problem. role="status", not "alert" —
+ * it is degraded, not broken, and it can appear on a poll tick.
+ */
+function HostStreamOfflineNotice({ section }: { section: HostSection }) {
+	const { t } = useTranslation();
+	const label = section.host === LOCAL_HOST ? t("hosts.local") : section.label;
+
+	return (
+		<SidebarMenuItem className="sidebar-expanded-chrome px-2.5 py-2 group-data-[collapsible=icon]:hidden">
+			<div role="status">
+				<p className="text-sm font-medium text-foreground">{t("hosts.liveUpdatesOffline", { host: label })}</p>
+				<p className="mt-0.5 text-xs text-passive">{t("hosts.liveUpdatesOffline.hint")}</p>
 			</div>
 		</SidebarMenuItem>
 	);

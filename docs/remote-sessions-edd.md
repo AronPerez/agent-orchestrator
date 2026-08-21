@@ -341,39 +341,49 @@ is warranted now.
 
 # Metrics & Monitoring
 
-**This section is the weakest part of the current implementation and should be treated as
-required follow-up work, not as shipped.**
+**Shipped (AO-78).** This section was the weakest part of the implementation — the remote
+path had no telemetry and no logging at all, so "I expected my remote session to update and
+it didn't — why?" was unanswerable from anywhere. The instrumentation below is now in place.
 
-**Current state, verified:** there is **no telemetry and no logging anywhere in the remote
-path.** `main/remote-proxy.ts` emits no logs; `host-clients.ts`, `host-events.ts` and
-`active-host.ts` emit no `captureRendererEvent` calls. The app has an existing renderer
-telemetry facility (`captureRendererEvent`, used elsewhere e.g. `NotificationCenter`,
-`ShellTopbar`) and the daemon has structured `slog` logging, so the plumbing exists and is
-simply not wired up here.
+**Instrumentation:**
 
-**Concrete consequence:** `hostConnectionState` has no consumer. If a host's event stream
-fails to connect, the user sees a board that quietly stops updating and falls back to
-polling, with nothing anywhere reporting it. "I expected my remote session to update and it
-didn't — why?" is currently **not answerable** from logs or metrics.
-
-**Proposed instrumentation (recommend as a gating follow-up):**
-
-| Signal | Why |
-| --- | --- |
-| `ao.renderer.host_connect` (result: online/unauthorized/offline/not-a-daemon, duration) | Is adding a host succeeding, and which failure mode dominates? |
-| `ao.renderer.host_stream_state` (host, connected/disconnected, reconnect count) | Detect the silent no-live-updates case |
-| `ao.renderer.host_query_failed` (host, status) | Per-host data failures, currently invisible |
-| Proxy lifecycle logs in main (start/stop, upstream error, 502) — **never the token or password** | Debuggability for "the app can't reach my host" |
-| Surface `hostConnectionState` in the UI | The user is the fastest detector; a "not receiving live updates" indicator costs little |
+| Signal | Why | Where |
+| --- | --- | --- |
+| `ao.renderer.host_connect` (result: online/unauthorized/offline/not-a-daemon, duration, source: add/edit/probe) | Is adding a host succeeding, and which failure mode dominates? | `renderer/lib/host-telemetry.ts`, emitted from the add/edit dialog and the saved-host probe |
+| `ao.renderer.host_stream_state` (host, connected/disconnected, reconnect count) | Detect the silent no-live-updates case | `renderer/lib/host-events.ts`, on each state transition |
+| `ao.renderer.host_query_failed` (host, status) | Per-host data failures, previously invisible — remote clients are plain `openapi-fetch` clients and bypass `api-client`'s `ao.renderer.api_error` | `renderer/hooks/useWorkspaceQuery.ts`, in `fetchHostSection` |
+| Proxy lifecycle logs in main (start/stop, upstream error, 502) — **never the token or password** | Debuggability for "the app can't reach my host" | `main/remote-proxy.ts` |
+| `hostConnectionState` surfaced in the UI | The user is the fastest detector | Sidebar host notice: "Not receiving live updates from {host}", carried on `HostSection.streamState` |
 
 **Alerting/pages:** **N/A** — this is a locally-installed desktop app with no on-call
 surface. Detection is user-facing and telemetry is aggregate/diagnostic, not paging.
 
-**What is logged today (and must stay true):** the connection password is never logged, never
-sent to the renderer, and never crosses to the remote daemon in the URL (the proxy token is
-stripped before forwarding). Any instrumentation added must preserve all three.
+**No-secrets rules, enforced by tests:**
 
-**Cost:** small — one existing telemetry helper and a handful of `slog` calls. No new
+- The connection password is never logged, never sent to the renderer, and never crosses to
+the remote daemon in the URL (the proxy token is stripped before forwarding). All three
+were true before this work and remain true.
+- `main/remote-proxy.ts` logs the upstream address and the *post-strip* request path only.
+It must never log `req.url` — its first segment IS the proxy token — nor `entry.password`.
+- A host id IS a LAN address, so no `ao.renderer.host_*` event carries one. `host_id` is
+hashed to `host_id_hash` by `sanitizeRendererProperties`, exactly as project ids are, and
+`host_kind` (`local`/`remote`) is the only host attribute sent in the clear. Every other
+property is dropped by the allowlist.
+- `ao.renderer.host_query_failed` sends a status, never the daemon's error text, which can
+carry paths.
+
+**Volume control:** `captureRendererEvent`'s per-name rate limit is shared across hosts, so
+`host_query_failed` additionally collapses repeats of the same (host, status) inside a
+five-minute window — a host that is simply switched off refetches every 15 seconds forever
+and would otherwise spend the whole daily ceiling and hide the next host to break.
+`host_stream_state` fires on transitions only, because `EventSource` calls `onerror`
+repeatedly while it retries.
+
+**Two states, not one:** `hostConnectionState` distinguishes `idle` (no stream was ever
+opened — jsdom, preview surfaces) from `disconnected` (a stream that dropped). Only the
+second one means the board went stale, and only it is reported or shown.
+
+**Cost:** small — one existing telemetry helper and a handful of `console` calls. No new
 infrastructure, no new vendor, no storage cost beyond existing telemetry volume.
 
 ---
@@ -571,7 +581,7 @@ terminals.
 
 | Item | Size | Priority | Parallelizable |
 | --- | --- | --- | --- |
-| **Telemetry + proxy logging** (Metrics section) and surfacing `hostConnectionState` in the UI | S–M | **High** — currently no answer to "why isn't my remote updating?" | Yes |
+| ~~**Telemetry + proxy logging** (Metrics section) and surfacing `hostConnectionState` in the UI~~ — **done (AO-78)**, see Metrics & Monitoring | S–M | — | — |
 | **Security review** of the loopback proxy + token model | S | **High** before promoting beyond internal use | Yes |
 | **Accessibility audit** of the host tree, filter, and folder picker | S | Medium | Yes |
 | **Setup documentation**: trust boundary, Tailscale, macOS Local Network privacy caveat | S | Medium | Yes |
@@ -584,9 +594,9 @@ terminals.
 *Testing time is included in each estimate. The first four items are mutually independent and
 can be parallelized across owners; SSH and TLS should follow the security review.*
 
-1. Instrument the remote path (host connect result/duration, stream state, per-host query
+1. ~~Instrument the remote path (host connect result/duration, stream state, per-host query
 failure); add proxy lifecycle logging in main with an explicit no-secrets rule; surface
-stream state in the UI.
+stream state in the UI.~~ **Done — AO-78.**
 2. Security review of the loopback proxy, token handling, and `remotes.json` custody;
 decide whether OS keychain storage replaces the 0600 file.
 3. Accessibility pass (screen reader + keyboard) on the host tree, filter, add/edit dialogs
