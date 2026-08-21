@@ -28,8 +28,8 @@ function renderFlow(props: Partial<Parameters<typeof CreateProjectFlow>[0]> = {}
 }
 
 async function selectWorkbox() {
-	await userEvent.click(await screen.findByRole("combobox", { name: /host/i }));
-	await userEvent.click(await screen.findByRole("option", { name: /workbox/ }));
+	await userEvent.click(await screen.findByRole("button", { name: /^host:/i }));
+	await userEvent.click(await screen.findByRole("button", { name: /^workbox/ }));
 }
 
 describe("CreateProjectFlow — remote host", () => {

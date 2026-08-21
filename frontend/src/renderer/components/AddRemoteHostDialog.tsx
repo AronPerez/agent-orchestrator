@@ -141,6 +141,18 @@ export function AddRemoteHostDialog({ open, onOpenChange, host, onSaved }: AddRe
 	return (
 		<Dialog open={open} onOpenChange={onOpenChange}>
 			<DialogContent showCloseButton={false} className={settingsDialogContentClass}>
+				<div className={settingsDialogHeaderClass}>
+					<DialogTitle className="settings-dialog-title">
+						{editing ? t("hosts.edit.title") : t("hosts.add.title")}
+					</DialogTitle>
+					<DialogDescription className="text-control leading-4 text-settings-muted">
+						{editing ? t("hosts.edit.hint") : t("hosts.addRemote.hint")}
+					</DialogDescription>
+				</div>
+
+				{/* After the header in DOM order because it is positioned absolutely:
+				    first in the source made it the first tabbable, so opening the
+				    dialog landed on Close rather than the field you came here to fill. */}
 				<DialogClose asChild>
 					<button
 						type="button"
@@ -152,107 +164,107 @@ export function AddRemoteHostDialog({ open, onOpenChange, host, onSaved }: AddRe
 					</button>
 				</DialogClose>
 
-				<div className={settingsDialogHeaderClass}>
-					<DialogTitle className="settings-dialog-title">
-						{editing ? t("hosts.edit.title") : t("hosts.add.title")}
-					</DialogTitle>
-					<DialogDescription className="text-control leading-4 text-settings-muted">
-						{editing ? t("hosts.edit.hint") : t("hosts.addRemote.hint")}
-					</DialogDescription>
-				</div>
+				{/* A real form, so Enter in any field saves the host — the buttons are
+				    the only way through otherwise, which is a long trip from a field. */}
+				<form
+					className="flex min-h-0 flex-col"
+					onSubmit={(event) => {
+						event.preventDefault();
+						if (busy) return;
+						void submit();
+					}}
+				>
+					<div className={settingsDialogBodyClass}>
+						<div className="flex flex-col gap-1.5">
+							<label className="settings-field-label" htmlFor={nameId}>
+								{t("hosts.add.name")}
+							</label>
+							<input
+								id={nameId}
+								autoComplete="off"
+								className="settings-field-control h-(--size-settings-action-height)"
+								value={label}
+								onChange={(event) => {
+									setError(null);
+									setLabel(event.target.value);
+								}}
+							/>
+						</div>
 
-				<div className={settingsDialogBodyClass}>
-					<div className="flex flex-col gap-1.5">
-						<label className="settings-field-label" htmlFor={nameId}>
-							{t("hosts.add.name")}
-						</label>
-						<input
-							id={nameId}
-							className="settings-field-control h-(--size-settings-action-height)"
-							value={label}
-							onChange={(event) => {
-								setError(null);
-								setLabel(event.target.value);
-							}}
-						/>
-					</div>
+						<div className="flex flex-col gap-1.5">
+							<label className="settings-field-label" htmlFor={addressId}>
+								{t("hosts.add.address")}
+							</label>
+							<input
+								id={addressId}
+								autoComplete="off"
+								spellCheck={false}
+								className="settings-field-control h-(--size-settings-action-height)"
+								value={url}
+								onChange={(event) => {
+									// Typing is the fix for every error here, so the old message goes
+									// the moment it stops describing the input: a stale "Wrong
+									// password" over a corrected one reads as a second rejection.
+									setError(null);
+									setUrl(event.target.value);
+								}}
+							/>
+							{preview ? (
+								// The address that gets saved is not always the one typed, and a
+								// silent rewrite is how "but I entered the right host" starts.
+								<p className="text-caption leading-4 text-settings-muted">
+									{t("hosts.add.willConnectTo", { url: preview })}
+								</p>
+							) : null}
+						</div>
 
-					<div className="flex flex-col gap-1.5">
-						<label className="settings-field-label" htmlFor={addressId}>
-							{t("hosts.add.address")}
-						</label>
-						<input
-							id={addressId}
-							className="settings-field-control h-(--size-settings-action-height)"
-							value={url}
-							onChange={(event) => {
-								// Typing is the fix for every error here, so the old message goes
-								// the moment it stops describing the input: a stale "Wrong
-								// password" over a corrected one reads as a second rejection.
-								setError(null);
-								setUrl(event.target.value);
-							}}
-						/>
-						{preview ? (
-							// The address that gets saved is not always the one typed, and a
-							// silent rewrite is how "but I entered the right host" starts.
+						<div className="flex flex-col gap-1.5">
+							<label className="settings-field-label" htmlFor={passwordId}>
+								{t("hosts.add.password")}
+							</label>
+							<input
+								id={passwordId}
+								type="password"
+								autoComplete="new-password"
+								className="settings-field-control h-(--size-settings-action-height)"
+								value={password}
+								onChange={(event) => {
+									setError(null);
+									setPassword(event.target.value);
+								}}
+							/>
 							<p className="text-caption leading-4 text-settings-muted">
-								{t("hosts.add.willConnectTo", { url: preview })}
+								{editing ? t("hosts.edit.passwordHint") : t("hosts.add.passwordHint")}
+							</p>
+						</div>
+
+						{/* A probe can take seconds, and a button that only greys out reads as
+						    a dead dialog to everyone and as nothing at all to a screen reader.
+						    This region stays mounted because role="status" is announced far
+						    more reliably on a content change than on insertion; role="alert"
+						    below is the exception, being defined to announce when inserted. */}
+						<p role="status" className="empty:hidden text-control leading-4 text-settings-muted">
+							{busy ? t("hosts.status.checking") : ""}
+						</p>
+						{/* Set in the dialog's smallest type before, where it was easy to miss. */}
+						{!busy && error ? (
+							<p role="alert" className="text-control leading-4 font-medium text-error">
+								{error}
 							</p>
 						) : null}
 					</div>
 
-					<div className="flex flex-col gap-1.5">
-						<label className="settings-field-label" htmlFor={passwordId}>
-							{t("hosts.add.password")}
-						</label>
-						<input
-							id={passwordId}
-							type="password"
-							className="settings-field-control h-(--size-settings-action-height)"
-							value={password}
-							onChange={(event) => {
-								setError(null);
-								setPassword(event.target.value);
-							}}
-						/>
-						<p className="text-caption leading-4 text-settings-muted">
-							{editing ? t("hosts.edit.passwordHint") : t("hosts.add.passwordHint")}
-						</p>
-					</div>
-
-					{/* A probe can take seconds, and a button that only greys out reads as
-					    a dead dialog to everyone and as nothing at all to a screen reader.
-					    This region stays mounted because role="status" is announced far
-					    more reliably on a content change than on insertion; role="alert"
-					    below is the exception, being defined to announce when inserted. */}
-					<p role="status" className="empty:hidden text-control leading-4 text-settings-muted">
-						{busy ? t("hosts.status.checking") : ""}
-					</p>
-					{/* Set in the dialog's smallest type before, where it was easy to miss. */}
-					{!busy && error ? (
-						<p role="alert" className="text-control leading-4 font-medium text-error">
-							{error}
-						</p>
-					) : null}
-				</div>
-
-				<div className={settingsDialogFooterClass}>
-					<DialogClose asChild>
-						<Button type="button" variant="footer" disabled={busy}>
-							{t("confirm.cancel")}
+					<div className={settingsDialogFooterClass}>
+						<DialogClose asChild>
+							<Button type="button" variant="footer" disabled={busy}>
+								{t("confirm.cancel")}
+							</Button>
+						</DialogClose>
+						<Button type="submit" variant="footer-primary" aria-busy={busy} disabled={busy}>
+							{editing ? t("hosts.edit.submit") : t("hosts.add.submit")}
 						</Button>
-					</DialogClose>
-					<Button
-						type="button"
-						variant="footer-primary"
-						aria-busy={busy}
-						disabled={busy}
-						onClick={() => void submit()}
-					>
-						{editing ? t("hosts.edit.submit") : t("hosts.add.submit")}
-					</Button>
-				</div>
+					</div>
+				</form>
 			</DialogContent>
 		</Dialog>
 	);

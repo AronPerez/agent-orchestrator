@@ -423,7 +423,7 @@ describe("Sidebar — one tree across hosts", () => {
 		expect(screen.getByText("Project One", { selector: "[data-project-label]" })).toBeInTheDocument();
 		expect(screen.getByText("workbox is unreachable")).toBeInTheDocument();
 		expect(screen.getByText("connect ECONNREFUSED")).toBeInTheDocument();
-		await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+		await userEvent.click(screen.getByRole("button", { name: "Retry on workbox" }));
 		expect(invalidate).toHaveBeenCalledWith({ queryKey: workspaceHostQueryKey(remoteHost) });
 	});
 });

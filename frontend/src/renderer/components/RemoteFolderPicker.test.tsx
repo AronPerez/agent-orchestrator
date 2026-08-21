@@ -29,6 +29,39 @@ function renderPicker(props: Partial<Parameters<typeof RemoteFolderPicker>[0]> =
 }
 
 describe("RemoteFolderPicker", () => {
+	// Stepping in replaces every row, so whichever row had focus stops existing
+	// and focus falls back to the dialog — a keyboard user loses their place on
+	// every hop.
+	it("moves focus into the folder it just stepped into", async () => {
+		vi.spyOn(aoBridge.remotes, "request")
+			.mockResolvedValueOnce(listing("/home/dev", "/home", [{ name: "repo", path: "/home/dev/repo", gitRepo: false }]))
+			.mockResolvedValueOnce(listing("/home/dev/repo", "/home/dev", [{ name: "src", path: "/home/dev/repo/src", gitRepo: false }]));
+		renderPicker();
+
+		await userEvent.click(await screen.findByRole("button", { name: /^repo/ }));
+
+		// "Up" is the first row of the new listing.
+		expect(await screen.findByRole("button", { name: /^up$/i })).toHaveFocus();
+	});
+
+	it("says it is loading while the host answers", async () => {
+		type Answer = Awaited<ReturnType<typeof aoBridge.remotes.request>>;
+		let release: (value: Answer) => void = () => {};
+		vi.spyOn(aoBridge.remotes, "request").mockReturnValue(
+			new Promise<Answer>((resolve) => {
+				release = resolve;
+			}),
+		);
+		renderPicker();
+
+		expect(await screen.findByRole("status")).toHaveTextContent(/loading folders/i);
+		release(listing("/home/dev", "/home", []) as Answer);
+		await screen.findByText(/no subfolders/i);
+		// Stays mounted and empties: role="status" is announced far more reliably
+		// on a content change than on insertion.
+		expect(screen.getByRole("status")).toBeEmptyDOMElement();
+	});
+
 	it.each<Behaviour>(["html-catchall", "wrong-shape"])(
 		"reports a version gap without throwing when the daemon returns %s",
 		async (behaviour) => {

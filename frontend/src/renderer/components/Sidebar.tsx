@@ -546,6 +546,8 @@ function HostFailureSection({ section }: { section: HostSection }) {
 	const { t } = useTranslation();
 	const queryClient = useQueryClient();
 	const label = section.host === LOCAL_HOST ? t("hosts.local") : section.label;
+	// Two unreachable hosts put two buttons called "Retry" in the same tree.
+	const hostSuffix = useHostSuffix(section.host);
 
 	return (
 		<SidebarMenuItem className="sidebar-expanded-chrome px-2.5 py-2 group-data-[collapsible=icon]:hidden">
@@ -553,6 +555,7 @@ function HostFailureSection({ section }: { section: HostSection }) {
 				<p className="text-sm font-medium text-foreground">{t("hosts.sectionFailed", { host: label })}</p>
 				<p className="mt-0.5 text-xs text-passive">{section.failure ?? t("hosts.unreachable")}</p>
 				<button
+					aria-label={`${t("hosts.retry")}${hostSuffix}`}
 					className="mt-1 inline-flex items-center gap-1 text-xs font-medium text-accent hover:underline"
 					onClick={() => void queryClient.invalidateQueries({ queryKey: workspaceHostQueryKey(section.host) })}
 					type="button"
