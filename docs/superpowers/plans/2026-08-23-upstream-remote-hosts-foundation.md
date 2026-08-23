@@ -4,7 +4,7 @@
 
 **Goal:** Build, on top of `upstream/main`, the first five upstream-ready branches of the remote-hosts stack (flag → host primitives → saved-host store → loopback proxy → per-host clients), each one green and dark behind the flag, plus the RFC issue text and the hand-off the human needs to open them upstream one at a time.
 
-**Architecture:** Every branch is a port of code that already ships on our `develop`, re-cut against `upstream/main` in the order the spec's dependency graph dictates, with the spec's off-state semantics pinned by tests and the ponytail-audit cuts applied where they shrink the upstream diff. The chain is linear (`up-a1-flag ← up-a2-hosts ← up-a3-store ← up-a4-proxy ← up-a5-clients`), lives in a dedicated worktree off `upstream/main`, and is pushed to our fork after every task. Nothing is opened against upstream: the final task writes the exact `gh pr create` commands for the human.
+**Architecture:** Every branch is a port of code that already ships on our `develop`, re-cut against `upstream/main` in the order the spec's dependency graph dictates, with the spec's off-state semantics pinned by tests and the ponytail-audit cuts applied where they shrink the upstream diff. The RFC is written first — maintainer reaction is the longest pole in the whole effort, so its clock starts before any branch is built. The branches follow the code's real dependency DAG rather than a chain: `up-a1-flag`, `up-a2-hosts` and `up-a3-store` are cut independently from `upstream/main` (they share no code and can merge upstream in any order), `up-a4-proxy` builds on the store, and `up-a5-clients` builds on a tagged integration merge of the other three sides. Everything lives in a dedicated worktree and is pushed to our fork after every task. Nothing is opened against upstream: the final task writes the exact `gh pr create` commands for the human.
 
 **Tech Stack:** Electron main (`node:http`, `node:net`, `node:tls`, `node:crypto`, `node:fs/promises`), React 19 renderer, zustand (`ui-store`), `openapi-fetch`, Vitest 4 (jsdom for renderer, node for `src/main`), TypeScript `tsc --noEmit`.
 
@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- **Do not push to, open PRs against, or comment on `Untrivial-ai/agent-orchestrator`.** All pushes go to `origin` (`AronPerez/agent-orchestrator`). The human opens upstream PRs from Task 7's hand-off.
+- **Do not push to, open PRs against, or comment on `Untrivial-ai/agent-orchestrator`.** All pushes go to `origin` (`AronPerez/agent-orchestrator`). The human opens upstream PRs from Task 8's hand-off.
 - **Every stack branch is based on `upstream/main`** (spec §2.1 rule 1), never on `develop`. Upstream squash-merges; rebase the chain with `git rebase --onto`, never by merging.
 - **Flag off ⇒ zero remote network** (spec §2.2): no `remotes.json` read, no probe, no proxy listener, no `EventSource` beyond the local one. Off is a network boundary, not a visibility toggle.
 - **No secrets cross to the renderer**: only `{label, url}` and the loopback base ever leave main; the proxy never logs `req.url` (its first segment is the token) nor `entry.password`.
@@ -20,7 +20,7 @@
 - **Scrub before every commit** (spec §3.3): `grep -rnE "amongstar|AronPerez|/Users/|AO-[0-9]+|\(#[0-9]{2,3}\)|ponytail:"` over the branch's changed files must print nothing.
 - **Test commands** (from `$STACK/frontend`): unit `node_modules/.bin/vitest run --config vite.renderer.config.ts <files>`; typecheck `node_modules/.bin/tsc --noEmit`; e2e typecheck `node_modules/.bin/tsc --noEmit -p tsconfig.e2e.json`. Node is off-PATH: `export PATH="$HOME/.nvm/versions/node/v24.14.1/bin:$PATH"`.
 - **Fork source refs:** the flag lives at commit `b06520893` (parent `910f959db`, branch `ao/agent-orchestrator-96/remote-hosts-flag`, PR #125); everything else at `origin/develop`. If #125 has been squash-merged and the branch deleted, the same file contents are on `origin/develop`.
-- **Deviations from the spec, decided here:** `response-validation.ts` moves from A5 to Plan 2 (it has no caller until `RemoteFolderPicker`/`useWorkspaceQuery`); `applyDaemonBaseUrl` and `syncConnectedHosts` are not ported (ponytail-audit items 4–5: no production caller); the registry's optional `startRuntime` hook is not ported (it belongs to D1, browser remote sessions); the ipc layer takes a `disconnect(url)` callback instead of a `{view, deactivate}` handle (audit item 2). The proxy is ported **verbatim** — the audit's "use `http.request` for the upgrade" item was withdrawn: Node's client parser would consume the upstream 101, so the 101 would have to be hand-built for the renderer instead; nothing gets simpler.
+- **Deviations from the spec, decided here:** `response-validation.ts` moves from A5 to Plan 2 (it has no caller until `RemoteFolderPicker`/`useWorkspaceQuery`); `applyDaemonBaseUrl` and `syncConnectedHosts` are not ported (ponytail-audit items 4–5: no production caller); the registry's optional `startRuntime` hook is not ported (it belongs to D1, browser remote sessions); the ipc layer takes a `disconnect(url)` callback instead of a `{view, deactivate}` handle (audit item 2); and per the architectural review (2026-08-23) the RFC precedes the branches and A1/A2/A3 are cut as independent siblings, since maintainer latency is the long pole and the three roots share no code. The proxy is ported **verbatim** — the audit's "use `http.request` for the upgrade" item was withdrawn: Node's client parser would consume the upstream 101, so the 101 would have to be hand-built for the renderer instead; nothing gets simpler.
 
 ---
 
@@ -28,21 +28,21 @@
 
 Worktree `$STACK` = `/Users/amongstar/dev/agent-orchestrator-up-stack` (created in Task 1, sibling of the main checkout, not under AO's managed worktree dir). Paths below are relative to `$STACK`.
 
-| Branch | Creates | Modifies | Responsibility |
-| --- | --- | --- | --- |
-| `up-a1-flag` | `frontend/src/renderer/stores/ui-store.test.ts` | `stores/ui-store.ts`, `components/settings/GeneralSettingsSection.tsx`, `components/GlobalSettingsForm.test.tsx`, `i18n/*.json` ×8 | `remoteHosts` flag, persisted at `ao.remoteHosts`; the switch under Developer Mode. Nothing reads it yet. |
-| `up-a2-hosts` | `frontend/src/renderer/lib/hosts.ts`, `hosts.test.ts` | — | `HostId`, `Ref`, `LOCAL_HOST`, `isLocal`, `refKey`/`parseRefKey`. Pure. |
-| `up-a3-store` | `frontend/src/main/remotes-store.ts`, `remote-request.ts`, `remotes-ipc.ts`, `remotes-main.ts` (+ tests) | `frontend/src/preload.ts`, `frontend/src/main.ts`, `frontend/src/renderer/test/setup.ts`, `frontend/src/renderer/lib/bridge.ts`, `frontend/e2e/support/fake-bridge.ts` | `~/.ao/remotes.json` (0600) read/write, Bearer-injected request + probe, password-free views, the six list/add/update/remove/probe/request IPC handlers. |
-| `up-a4-proxy` | `frontend/src/main/remote-proxy.ts`, `remote-registry.ts` (+ tests) | `remotes-main.ts`, `preload.ts`, `main.ts`, the three bridge stubs | Token-gated loopback proxy per host; N live proxies; connect/disconnect/connected IPC; teardown on quit. |
-| `up-a5-clients` | `frontend/src/renderer/lib/host-clients.ts`, `active-host.ts` (+ tests) | `frontend/src/renderer/main.tsx` | `clientFor(host)`, connected-host registry, flag-gated `initHosts()` with live toggle. First consumer of the flag. |
-| (develop) | `docs/upstreaming-rfc-remote-hosts.md`, `docs/upstreaming-stack-status.md` | — | RFC issue text and the hand-off: per-branch PR body + the exact commands the human runs. |
+| Branch | Base | Creates | Modifies | Responsibility |
+| --- | --- | --- | --- | --- |
+| `up-a1-flag` | `upstream/main` | `frontend/src/renderer/stores/ui-store.test.ts` | `stores/ui-store.ts`, `components/settings/GeneralSettingsSection.tsx`, `components/GlobalSettingsForm.test.tsx`, `i18n/*.json` ×8 | `remoteHosts` flag, persisted at `ao.remoteHosts`; the switch under Developer Mode. Nothing reads it yet. |
+| `up-a2-hosts` | `upstream/main` | `frontend/src/renderer/lib/hosts.ts`, `hosts.test.ts` | — | `HostId`, `Ref`, `LOCAL_HOST`, `isLocal`, `refKey`/`parseRefKey`. Pure. |
+| `up-a3-store` | `upstream/main` | `frontend/src/main/remotes-store.ts`, `remote-request.ts`, `remotes-ipc.ts`, `remotes-main.ts` (+ tests) | `frontend/src/preload.ts`, `frontend/src/main.ts`, `frontend/src/renderer/test/setup.ts`, `frontend/src/renderer/lib/bridge.ts`, `frontend/e2e/support/fake-bridge.ts` | `~/.ao/remotes.json` (0600) read/write, Bearer-injected request + probe, password-free views, the six list/add/update/remove/probe/request IPC handlers. |
+| `up-a4-proxy` | `up-a3-store` | `frontend/src/main/remote-proxy.ts`, `remote-registry.ts` (+ tests) | `remotes-main.ts`, `preload.ts`, `main.ts`, the three bridge stubs | Token-gated loopback proxy per host; N live proxies; connect/disconnect/connected IPC; teardown on quit. |
+| `up-a5-clients` | merge(A1, A2, A4), tag `up-a5-base` | `frontend/src/renderer/lib/host-clients.ts`, `active-host.ts` (+ tests) | `frontend/src/renderer/main.tsx` | `clientFor(host)`, connected-host registry, flag-gated `initHosts()` with live toggle. First consumer of the flag. |
+| (develop) | `origin/develop` | `docs/upstreaming-rfc-remote-hosts.md`, `docs/upstreaming-stack-status.md` | — | RFC issue text and the hand-off: per-branch PR body + the exact commands the human runs. |
 
 Module boundaries, fixed here so tasks agree on names:
 
 - `remotes-store.ts` — `RemoteEntry {label,url,password}`, `readRemotes(path)`, `addRemote(path, entry)`, `updateRemote(path, url, changes)`, `removeRemote(path, url)`, `applyRemoteChanges(entry, changes)`, `RemoteChanges = Partial<RemoteEntry>`, `RemotesFilePermissionError`.
 - `remote-request.ts` — `remoteRequest(entry, init, fetchImpl?, signal?) → {status, body}`, `probeRemote(entry, fetchImpl?, timeoutMs?) → RemoteHealth`, types `RemoteRequestInit {method,path,body?}`, `RemoteResponse`, `RemoteHealth = "online"|"unauthorized"|"offline"|"not-a-daemon"`.
 - `remotes-ipc.ts` — `RemoteHostView {label,url}`, `toHostViews(entries)`, `findRemote(path, url)`, `updateSavedRemote(path, url, changes, disconnect, probe?)`, `removeSavedRemote(path, url, disconnect)`. `disconnect: (url: string) => Promise<void>`.
-- `remotes-main.ts` — `remotesFilePath()`, `registerRemotesIpc(ipcMain, deps)`. Task 4: `deps = { file, disconnect, probe? }`; Task 5 replaces with `deps = { file, registry, probe? }`.
+- `remotes-main.ts` — `remotesFilePath()`, `registerRemotesIpc(ipcMain, deps)`. Task 5: `deps = { file, disconnect, probe? }`; Task 6 replaces with `deps = { file, registry, probe? }`.
 - `remote-registry.ts` — `ConnectedHostView {label,url,base}`, `class RemoteRegistry { constructor(start: (entry) => Promise<ActiveProxy>); connect(entry); disconnect(url); views(); closeAll() }`.
 - `remote-proxy.ts` — `ActiveProxy {base,url,close}`, `startRemoteProxy(entry) → Promise<ActiveProxy>`.
 - `host-clients.ts` — `registerHostBase(host, base, label?)`, `forgetHost(host)`, `connectedHosts()`, `subscribeConnectedHosts(listener)`, `hostLabelFor(host)`, `baseUrlFor(host)`, `isHostReady(host)`, `clientFor(host)`, `connectHost(url)`, `disconnectHost(url)`.
@@ -56,18 +56,18 @@ Module boundaries, fixed here so tasks agree on names:
 - Create: worktree `$STACK` at `upstream/main`
 - Create: `$STACK/frontend/node_modules` (symlink, untracked — never stage it)
 
-- [ ] **Step 1: Fetch upstream and create the worktree with the first branch**
+- [ ] **Step 1: Fetch upstream and create the worktree (detached — each task cuts its own branch)**
 
 Run from this worktree (`/Users/amongstar/.ao/data/worktrees/agent-orchestrator/agent-orchestrator-96`):
 
 ```bash
 git fetch upstream --quiet && git fetch origin --quiet
 export STACK=/Users/amongstar/dev/agent-orchestrator-up-stack
-git worktree add -b ao/agent-orchestrator-96/up-a1-flag "$STACK" upstream/main
+git worktree add --detach "$STACK" upstream/main
 git -C "$STACK" log -1 --format='%h %ad %s' --date=short
 ```
 
-Expected: the last line prints upstream's tip (`3cf4df384 2026-08-23 fix: move Queue/Steer chips …` or newer). If newer, note the SHA in the hand-off (Task 7).
+Expected: the last line prints upstream's tip (`3cf4df384 2026-08-23 fix: move Queue/Steer chips …` or newer). If newer, note the SHA in the hand-off (Task 8).
 
 - [ ] **Step 2: Give the worktree a toolchain**
 
@@ -92,9 +92,96 @@ Expected: `Test Files  2 passed`, `TSC_OK`. If `tsc` fails here the environment 
 
 ---
 
-### Task 2: A1 — `feat(settings): add an experimental Remote hosts flag`
+### Task 2: A0, part 1 — the RFC text, first (lands on `develop`)
 
-Branch `ao/agent-orchestrator-96/up-a1-flag` (already checked out by Task 1). Port of fork commit `b06520893`, restricted to the files that exist upstream.
+The RFC is the highest-latency dependency in the whole effort — a maintainer reaction gates every upstream PR, and spec §4 Q1 decides whether the multi-host half proceeds as designed — so it is produced before any branch is built and handed to the human immediately. Runs in the AO worktree, not `$STACK`. Nothing is posted upstream: the human posts it.
+
+**Files:**
+- Create: `docs/upstreaming-rfc-remote-hosts.md`
+
+- [ ] **Step 1: Branch off develop in the AO worktree**
+
+```bash
+cd /Users/amongstar/.ao/data/worktrees/agent-orchestrator/agent-orchestrator-96
+git fetch origin --quiet && git checkout -q -b ao/agent-orchestrator-96/upstream-handoff origin/develop
+```
+
+- [ ] **Step 2: Write the RFC issue body**
+
+Create `docs/upstreaming-rfc-remote-hosts.md` with exactly this content (the human pastes it into a new issue on `Untrivial-ai/agent-orchestrator`, title *RFC: connect the desktop app to AO daemons on other machines (multi-host, behind a flag)*):
+
+```markdown
+## Problem
+
+Agents are long-running and machine-bound. With a laptop and a desktop (or a VM), the only ways to see both today are SSH or pointing the whole app at one host at a time. #3853 and discussion #2855 ask for this; #3883, #4084 and #4309 each propose a slice of it.
+
+## Proposal
+
+Let one desktop app connect to **N** AO daemons at once — the local one plus saved remote hosts — and show every host's projects and sessions in one tree, each remote row labelled with its host. Open, watch and type into a session on any host without a mode switch.
+
+**Mechanism (renderer-side fan-out, per-host loopback proxy):**
+
+- Remote hosts reuse the existing opt-in LAN listener and its connection password (ADR 0001). **No daemon change is required**: the listener already accepts `Authorization: Bearer`.
+- The renderer cannot set that header on `EventSource`/`WebSocket`, and `app://renderer` has no CORS standing with a remote daemon, so Electron **main** runs one loopback proxy per host: `127.0.0.1:<ephemeral>/<128-bit token>/…`, token stripped before forwarding, Bearer injected, renderer `Origin` stripped, SSE/WebSocket streamed. No token ⇒ 404 and nothing forwarded. Torn down on disconnect and on quit.
+- `~/.ao/remotes.json` (mode 0600, refused if looser) is the saved-host store, shared verbatim with `ao --url`. The password never enters the renderer process.
+- Every addressable thing becomes a `Ref = {host, id}`; ids are never rewritten. This is load-bearing: a project id is `filepath.Base(path)` on every machine, so bare ids collide by construction.
+- Hosts connect after first paint; a sleeping host is a labelled failed section with a retry, never a blank tree.
+- **Everything ships dark behind a `Remote hosts (experimental)` switch** in Settings, modelled on Developer Mode, default off. Off means no saved host is read, probed or connected — a reviewer can verify the off state from the network side.
+
+**Trust boundary:** one operator, machines they own, a trusted network (LAN or Tailscale). Plaintext HTTP on the LAN path is unchanged from Connect Mobile; https upstreams use TLS; an `ssh -N -L` recipe and `"bind": "127.0.0.1"` take the port off the network entirely.
+
+**Already built and verified** on two real machines in a fork, with a security review of the proxy/token/credential path (four fixes folded in) and an accessibility pass. ~2,400 tests.
+
+## Proposed PR series (each independently mergeable, each dark behind the flag)
+
+1. `feat(settings)`: the `remoteHosts` flag (~60 lines)
+2. `feat(hosts)`: `HostId`/`Ref` primitives (30 lines)
+3. `feat(remotes)`: saved-host store, authenticated request, password-free IPC
+4. `feat(remotes)`: token-gated loopback proxy + registry — *requests a security reviewer*
+5. `feat(hosts)`: per-host clients + flag-gated boot
+6. `feat(hosts)`: add/edit/remove hosts UI
+7. `feat(daemon)`: `GET /api/v1/fs/dirs` (read-only, names only, capped) + remote folder picker
+8. `refactor(hosts)`: thread `Ref` through reads; host-qualified routes `/host/$hostId/…`
+9. `feat(hosts)`: per-host workspace queries, SSE and terminals
+10. `refactor(hosts)`: route writes by `Ref`
+11. `feat(hosts)`: one tree across hosts, telemetry, hostile-daemon tests
+12. `docs`: setup, trust boundary, ADR 0003
+
+## Questions for maintainers
+
+1. Which remote model do you want — one active workspace over SSH (#3883), one active remote over Tailscale HTTPS (#4084), or N hosts at once (this)? This decides the back half of the series.
+2. Is a loopback proxy with a path-borne per-activation token acceptable as a standing mechanism? (Header injection via `webRequest` and CORS negotiation were rejected for concrete reasons — happy to write them up.)
+3. Flag placement: sibling of Developer Mode (proposed) or nested under it?
+4. `remotes.json` as the store shared with the CLI: accept the 0600 file, or require `safeStorage` for the app at the cost of forking the store?
+5. `GET /api/v1/fs/dirs`: acceptable as an authenticated read-only endpoint, or absolute-path entry only?
+6. Any objection to the `/host/$hostId/…` URL shape (user-visible, permanent)?
+7. Relationship to #4309 (browser client): if it merges we contribute our rebinding/credential-gating tests to it rather than a competing design.
+8. Can a maintainer own review for ~6 weeks, with a quiet window for the two mechanical `Ref` PRs?
+```
+
+- [ ] **Step 3: Scrub, commit, push, and open the PR into develop**
+
+```bash
+cd /Users/amongstar/.ao/data/worktrees/agent-orchestrator/agent-orchestrator-96
+grep -rnE "amongstar|/Users/" docs/upstreaming-rfc-remote-hosts.md ; echo "rfc scrub exit=$? (1 means clean)"
+git add docs/upstreaming-rfc-remote-hosts.md
+git commit -q -m "docs: RFC text for the upstream remote-hosts stack
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HnqdDyvae5s7L7KYwtKPd7"
+git push -q -u origin ao/agent-orchestrator-96/upstream-handoff
+gh pr create --repo AronPerez/agent-orchestrator --base develop --head ao/agent-orchestrator-96/upstream-handoff \
+  --title "docs: RFC text and hand-off for the upstream remote-hosts stack" \
+  --body "RFC body ready to post on Untrivial-ai/agent-orchestrator once approved — posting it starts the maintainer clock while Tasks 3-7 build the branches. The stack hand-off lands on this same branch in Task 8."
+```
+
+Expected: PR URL printed. **Report it to the human now** — they can post the RFC while the rest of this plan executes.
+
+---
+
+### Task 3: A1 — `feat(settings): add an experimental Remote hosts flag`
+
+Branch `ao/agent-orchestrator-96/up-a1-flag` from `upstream/main`. Port of fork commit `b06520893`, restricted to the files that exist upstream.
 
 **Files:**
 - Modify: `frontend/src/renderer/stores/ui-store.ts` (upstream lines 57, 94, 126, 137, 156, 184–187 are the `developerMode` lines the hunks attach to)
@@ -109,8 +196,10 @@ Branch `ao/agent-orchestrator-96/up-a1-flag` (already checked out by Task 1). Po
 - [ ] **Step 1: Bring over the tests only, and watch them fail**
 
 ```bash
-cd "$STACK"
+export STACK=/Users/amongstar/dev/agent-orchestrator-up-stack
 W=/Users/amongstar/.ao/data/worktrees/agent-orchestrator/agent-orchestrator-96
+export PATH="$HOME/.nvm/versions/node/v24.14.1/bin:$PATH"
+cd "$STACK" && git checkout -q -b ao/agent-orchestrator-96/up-a1-flag upstream/main
 git -C "$W" diff 910f959db b06520893 -- \
   frontend/src/renderer/stores/ui-store.test.ts \
   frontend/src/renderer/components/GlobalSettingsForm.test.tsx \
@@ -257,9 +346,9 @@ Expected: scrub prints nothing and `exit=1`; push succeeds.
 
 ---
 
-### Task 3: A2 — `feat(hosts): host identity primitives`
+### Task 4: A2 — `feat(hosts): host identity primitives`
 
-Branch `ao/agent-orchestrator-96/up-a2-hosts` from `up-a1-flag`.
+Branch `ao/agent-orchestrator-96/up-a2-hosts` from `upstream/main` — it shares no code with A1 and can merge in any order relative to it.
 
 **Files:**
 - Create: `frontend/src/renderer/lib/hosts.ts`
@@ -271,7 +360,10 @@ Branch `ao/agent-orchestrator-96/up-a2-hosts` from `up-a1-flag`.
 - [ ] **Step 1: Branch**
 
 ```bash
-cd "$STACK" && git checkout -q -b ao/agent-orchestrator-96/up-a2-hosts ao/agent-orchestrator-96/up-a1-flag
+export STACK=/Users/amongstar/dev/agent-orchestrator-up-stack
+W=/Users/amongstar/.ao/data/worktrees/agent-orchestrator/agent-orchestrator-96
+export PATH="$HOME/.nvm/versions/node/v24.14.1/bin:$PATH"
+cd "$STACK" && git checkout -q -b ao/agent-orchestrator-96/up-a2-hosts upstream/main
 ```
 
 - [ ] **Step 2: Write the failing test**
@@ -380,9 +472,9 @@ Expected: `Tests  5 passed (5)`.
 
 ---
 
-### Task 4: A3 — `feat(remotes): saved-host store, authenticated requests, password-free IPC`
+### Task 5: A3 — `feat(remotes): saved-host store, authenticated requests, password-free IPC`
 
-Branch `ao/agent-orchestrator-96/up-a3-store` from `up-a2-hosts`. Ports fork #64, #73 and the AO-79 fixes #1/#4 (all already inside the fork files), with audit cuts 2 and 9 applied.
+Branch `ao/agent-orchestrator-96/up-a3-store` from `upstream/main` — none of its modules import the flag (A1) or `hosts.ts` (A2), so it stands alone. Ports fork #64, #73 and the AO-79 fixes #1/#4 (all already inside the fork files), with audit cuts 2 and 9 applied.
 
 **Files:**
 - Create: `frontend/src/main/remotes-store.ts`, `remotes-store.test.ts` (verbatim from `origin/develop`)
@@ -400,7 +492,10 @@ Branch `ao/agent-orchestrator-96/up-a3-store` from `up-a2-hosts`. Ports fork #64
 - [ ] **Step 1: Branch, bring the verbatim modules' tests first, watch them fail**
 
 ```bash
-cd "$STACK" && git checkout -q -b ao/agent-orchestrator-96/up-a3-store ao/agent-orchestrator-96/up-a2-hosts
+export STACK=/Users/amongstar/dev/agent-orchestrator-up-stack
+W=/Users/amongstar/.ao/data/worktrees/agent-orchestrator/agent-orchestrator-96
+export PATH="$HOME/.nvm/versions/node/v24.14.1/bin:$PATH"
+cd "$STACK" && git checkout -q -b ao/agent-orchestrator-96/up-a3-store upstream/main
 for f in remotes-store remote-request; do git -C "$W" show origin/develop:frontend/src/main/$f.test.ts > frontend/src/main/$f.test.ts; done
 cd frontend && node_modules/.bin/vitest run --config vite.renderer.config.ts src/main/remotes-store.test.ts src/main/remote-request.test.ts 2>&1 | grep -E "Error|Test Files" | head -3
 ```
@@ -838,7 +933,7 @@ git push -q -u origin ao/agent-orchestrator-96/up-a3-store
 
 ---
 
-### Task 5: A4 — `feat(remotes): token-gated loopback proxy for remote daemons`
+### Task 6: A4 — `feat(remotes): token-gated loopback proxy for remote daemons`
 
 Branch `ao/agent-orchestrator-96/up-a4-proxy` from `up-a3-store`. Ports fork #67, #77, #80 and AO-79 #2/#3 (inside the fork's `remote-proxy.ts`) verbatim, and the registry without its browser-runtime hook.
 
@@ -851,12 +946,15 @@ Branch `ao/agent-orchestrator-96/up-a4-proxy` from `up-a3-store`. Ports fork #67
 - Modify: the three bridge stubs (three more entries each)
 
 **Interfaces:**
-- Consumes: `RemoteEntry`, `findRemote`, `probeRemote` from Task 4.
+- Consumes: `RemoteEntry`, `findRemote`, `probeRemote` from Task 5.
 - Produces: `startRemoteProxy(entry) → {base, url, close}`; `RemoteRegistry`; `aoBridge.remotes.{connect,disconnect,connected}`; IPC `remotes:connect|disconnect|connected`; `ConnectedHostView {label,url,base}`. `RemotesIpcDeps` becomes `{ file, registry, probe? }`.
 
 - [ ] **Step 1: Branch, bring the proxy test, watch it fail, port the proxy**
 
 ```bash
+export STACK=/Users/amongstar/dev/agent-orchestrator-up-stack
+W=/Users/amongstar/.ao/data/worktrees/agent-orchestrator/agent-orchestrator-96
+export PATH="$HOME/.nvm/versions/node/v24.14.1/bin:$PATH"
 cd "$STACK" && git checkout -q -b ao/agent-orchestrator-96/up-a4-proxy ao/agent-orchestrator-96/up-a3-store
 git -C "$W" show origin/develop:frontend/src/main/remote-proxy.test.ts > frontend/src/main/remote-proxy.test.ts
 cd frontend && node_modules/.bin/vitest run --config vite.renderer.config.ts src/main/remote-proxy.test.ts 2>&1 | grep -E "Error|Tests " | head -2
@@ -1178,12 +1276,12 @@ Expected: `Tests  14 passed (14)`.
 `frontend/src/main.ts`:
 
 ```ts
-// import line (replace the Task 4 import):
+// import line (replace the Task 5 import):
 import { registerRemotesIpc, remotesFilePath } from "./main/remotes-main";
 import { RemoteRegistry } from "./main/remote-registry";
 import { startRemoteProxy } from "./main/remote-proxy";
 
-// replace the Task 4 registerRemotesIpc call with:
+// replace the Task 5 registerRemotesIpc call with:
 const remoteRegistry = new RemoteRegistry(startRemoteProxy);
 registerRemotesIpc(ipcMain, { file: remotesFilePath(), registry: remoteRegistry });
 ```
@@ -1268,9 +1366,9 @@ Expected: every `src/main/` test file green (the proxy's 16, registry 7, ipc 8, 
 
 ---
 
-### Task 6: A5 — `feat(hosts): per-host API clients and flag-gated host boot`
+### Task 7: A5 — `feat(hosts): per-host API clients and flag-gated host boot`
 
-Branch `ao/agent-orchestrator-96/up-a5-clients` from `up-a4-proxy`. First consumer of the flag.
+Branch `ao/agent-orchestrator-96/up-a5-clients` from an integration merge of `up-a1-flag` + `up-a2-hosts` + `up-a4-proxy`, tagged `up-a5-base`. First consumer of the flag; opens upstream last, after all three sides have merged.
 
 **Files:**
 - Create: `frontend/src/renderer/lib/host-clients.ts`, `host-clients.test.ts` (fork version minus `syncConnectedHosts`)
@@ -1278,15 +1376,23 @@ Branch `ao/agent-orchestrator-96/up-a5-clients` from `up-a4-proxy`. First consum
 - Modify: `frontend/src/renderer/main.tsx` (import after line 18; call inside `renderApp` after the `render(...)` call, before line 92's closing brace)
 
 **Interfaces:**
-- Consumes: `useUiStore().remoteHosts` (Task 2), `LOCAL_HOST`, `isLocal`, `HostId` (Task 3), `aoBridge.remotes.{connect,disconnect}` (Task 5), `getApiBaseUrl`/`hasTrustedApiBaseUrl` from `lib/api-client.ts` (upstream).
+- Consumes: `useUiStore().remoteHosts` (Task 3), `LOCAL_HOST`, `isLocal`, `HostId` (Task 4), `aoBridge.remotes.{connect,disconnect}` (Task 6), `getApiBaseUrl`/`hasTrustedApiBaseUrl` from `lib/api-client.ts` (upstream).
 - Produces: the `host-clients.ts` and `active-host.ts` signatures in the File structure section.
 
-- [ ] **Step 1: Branch, bring the host-clients test (minus the sync case), watch it fail**
+- [ ] **Step 1: Cut the integration base, bring the host-clients test (minus the sync case), watch it fail**
 
 ```bash
+export STACK=/Users/amongstar/dev/agent-orchestrator-up-stack
+W=/Users/amongstar/.ao/data/worktrees/agent-orchestrator/agent-orchestrator-96
+export PATH="$HOME/.nvm/versions/node/v24.14.1/bin:$PATH"
 cd "$STACK" && git checkout -q -b ao/agent-orchestrator-96/up-a5-clients ao/agent-orchestrator-96/up-a4-proxy
+git merge -q --no-edit ao/agent-orchestrator-96/up-a1-flag ao/agent-orchestrator-96/up-a2-hosts
+git tag -f up-a5-base
+git status --porcelain | head -3
 git -C "$W" show origin/develop:frontend/src/renderer/lib/host-clients.test.ts > frontend/src/renderer/lib/host-clients.test.ts
 ```
+
+The octopus merge is clean by construction — A1 (settings/i18n), A2 (`lib/hosts`) and A4 (`src/main` + preload) touch disjoint files; a conflict here means an earlier task strayed. `up-a5-base` is what the hand-off's rebase recipe pivots on after the three sides merge upstream.
 
 Then edit the file: delete `syncConnectedHosts,` from the import list (line 16) and delete the whole `it("re-binds every proxy main already has connected", …)` case (the last test, from line 137 to the file's closing `});` of that `it`). Run:
 
@@ -1548,7 +1654,7 @@ export async function initHosts(): Promise<void> {
 cd "$STACK/frontend" && node_modules/.bin/vitest run --config vite.renderer.config.ts src/renderer/lib/active-host.test.ts 2>&1 | grep -E "×|Tests "
 ```
 
-Expected: `Tests  6 passed (6)` (verified on upstream/main 2026-08-23 with the stub from Task 4 in place).
+Expected: `Tests  6 passed (6)` (verified on upstream/main 2026-08-23 with the stub from Task 5 in place).
 
 - [ ] **Step 5: Call it at boot**
 
@@ -1589,75 +1695,22 @@ Expected: all listed suites green, `TSC_OK`.
 
 ---
 
-### Task 7: A0 — RFC text and the hand-off (lands on `develop`)
+### Task 8: A0, part 2 — the hand-off (lands on `develop`)
 
-This task produces two documents in **this** worktree on a branch off `origin/develop`, and one PR into `develop`. Nothing is posted upstream: the human posts the RFC and opens each PR from the hand-off.
+Extends the Task 2 branch and PR with the finished stack's hand-off. Runs in the AO worktree.
 
 **Files:**
-- Create: `docs/upstreaming-rfc-remote-hosts.md`
 - Create: `docs/upstreaming-stack-status.md`
+- Create: `docs/upstreaming-pr-bodies/a1-flag.md` … `a5-clients.md`
 
-- [ ] **Step 1: Branch off develop in the AO worktree**
+- [ ] **Step 1: Return to the hand-off branch**
 
 ```bash
 cd /Users/amongstar/.ao/data/worktrees/agent-orchestrator/agent-orchestrator-96
-git fetch origin --quiet && git checkout -q -b ao/agent-orchestrator-96/upstream-handoff origin/develop
+git checkout -q ao/agent-orchestrator-96/upstream-handoff
 ```
 
-- [ ] **Step 2: Write the RFC issue body**
-
-Create `docs/upstreaming-rfc-remote-hosts.md` with exactly this content (the human pastes it into a new issue on `Untrivial-ai/agent-orchestrator`, title *RFC: connect the desktop app to AO daemons on other machines (multi-host, behind a flag)*):
-
-```markdown
-## Problem
-
-Agents are long-running and machine-bound. With a laptop and a desktop (or a VM), the only ways to see both today are SSH or pointing the whole app at one host at a time. #3853 and discussion #2855 ask for this; #3883, #4084 and #4309 each propose a slice of it.
-
-## Proposal
-
-Let one desktop app connect to **N** AO daemons at once — the local one plus saved remote hosts — and show every host's projects and sessions in one tree, each remote row labelled with its host. Open, watch and type into a session on any host without a mode switch.
-
-**Mechanism (renderer-side fan-out, per-host loopback proxy):**
-
-- Remote hosts reuse the existing opt-in LAN listener and its connection password (ADR 0001). **No daemon change is required**: the listener already accepts `Authorization: Bearer`.
-- The renderer cannot set that header on `EventSource`/`WebSocket`, and `app://renderer` has no CORS standing with a remote daemon, so Electron **main** runs one loopback proxy per host: `127.0.0.1:<ephemeral>/<128-bit token>/…`, token stripped before forwarding, Bearer injected, renderer `Origin` stripped, SSE/WebSocket streamed. No token ⇒ 404 and nothing forwarded. Torn down on disconnect and on quit.
-- `~/.ao/remotes.json` (mode 0600, refused if looser) is the saved-host store, shared verbatim with `ao --url`. The password never enters the renderer process.
-- Every addressable thing becomes a `Ref = {host, id}`; ids are never rewritten. This is load-bearing: a project id is `filepath.Base(path)` on every machine, so bare ids collide by construction.
-- Hosts connect after first paint; a sleeping host is a labelled failed section with a retry, never a blank tree.
-- **Everything ships dark behind a `Remote hosts (experimental)` switch** in Settings, modelled on Developer Mode, default off. Off means no saved host is read, probed or connected — a reviewer can verify the off state from the network side.
-
-**Trust boundary:** one operator, machines they own, a trusted network (LAN or Tailscale). Plaintext HTTP on the LAN path is unchanged from Connect Mobile; https upstreams use TLS; an `ssh -N -L` recipe and `"bind": "127.0.0.1"` take the port off the network entirely.
-
-**Already built and verified** on two real machines in a fork, with a security review of the proxy/token/credential path (four fixes folded in) and an accessibility pass. ~2,400 tests.
-
-## Proposed PR series (each independently mergeable, each dark behind the flag)
-
-1. `feat(settings)`: the `remoteHosts` flag (~60 lines)
-2. `feat(hosts)`: `HostId`/`Ref` primitives (30 lines)
-3. `feat(remotes)`: saved-host store, authenticated request, password-free IPC
-4. `feat(remotes)`: token-gated loopback proxy + registry — *requests a security reviewer*
-5. `feat(hosts)`: per-host clients + flag-gated boot
-6. `feat(hosts)`: add/edit/remove hosts UI
-7. `feat(daemon)`: `GET /api/v1/fs/dirs` (read-only, names only, capped) + remote folder picker
-8. `refactor(hosts)`: thread `Ref` through reads; host-qualified routes `/host/$hostId/…`
-9. `feat(hosts)`: per-host workspace queries, SSE and terminals
-10. `refactor(hosts)`: route writes by `Ref`
-11. `feat(hosts)`: one tree across hosts, telemetry, hostile-daemon tests
-12. `docs`: setup, trust boundary, ADR 0003
-
-## Questions for maintainers
-
-1. Which remote model do you want — one active workspace over SSH (#3883), one active remote over Tailscale HTTPS (#4084), or N hosts at once (this)? This decides the back half of the series.
-2. Is a loopback proxy with a path-borne per-activation token acceptable as a standing mechanism? (Header injection via `webRequest` and CORS negotiation were rejected for concrete reasons — happy to write them up.)
-3. Flag placement: sibling of Developer Mode (proposed) or nested under it?
-4. `remotes.json` as the store shared with the CLI: accept the 0600 file, or require `safeStorage` for the app at the cost of forking the store?
-5. `GET /api/v1/fs/dirs`: acceptable as an authenticated read-only endpoint, or absolute-path entry only?
-6. Any objection to the `/host/$hostId/…` URL shape (user-visible, permanent)?
-7. Relationship to #4309 (browser client): if it merges we contribute our rebinding/credential-gating tests to it rather than a competing design.
-8. Can a maintainer own review for ~6 weeks, with a quiet window for the two mechanical `Ref` PRs?
-```
-
-- [ ] **Step 3: Write the hand-off**
+- [ ] **Step 2: Write the hand-off**
 
 Create `docs/upstreaming-stack-status.md`:
 
@@ -1666,29 +1719,42 @@ Create `docs/upstreaming-stack-status.md`:
 
 Built by Plan 1 (`docs/superpowers/plans/2026-08-23-upstream-remote-hosts-foundation.md`) against `upstream/main @ <SHA from Task 1>`. Branches live on `origin` (our fork); **no PR has been opened upstream**. The RFC text is `docs/upstreaming-rfc-remote-hosts.md`.
 
+## Branch topology
+
+A1, A2 and A3 are cut independently from `upstream/main` and share no code — they can be opened, reviewed and merged **in any order**. A4 builds on A3. A5 builds on a local integration merge of A1+A2+A4 (tagged `up-a5-base` in the stack worktree) and opens last.
+
 ## Order of operations (human)
 
-1. Post the RFC as an issue on `Untrivial-ai/agent-orchestrator`; ping Discord (daily sync 10:00 PM IST). Wait for a maintainer reaction.
-2. Open PR 1. Only after it is squash-merged, rebase the rest and open PR 2, and so on — upstream squash-merges, so a deep open stack turns into phantom conflicts.
-3. Rebase recipe after PR *n* merges (run in the stack worktree):
+1. Post the RFC as an issue on `Untrivial-ai/agent-orchestrator`; ping Discord (daily sync 10:00 PM IST). Wait for a maintainer reaction — especially on its question 1, which decides whether the multi-host half (A2, A5 and later plans) proceeds as designed.
+2. Once there is a reaction, open A1, A2 and A3 — any order, all three at once is fine; none depends on another and each is dark behind the flag.
+3. Open A4 after A3 is squash-merged (rebase first, below). Open A5 after A1, A2 and A4 have all merged.
+4. Rebase recipes (run in the stack worktree; upstream squash-merges, so always `--onto` across a merged parent, never a merge):
 
+       # A1/A2/A3 while waiting — plain drift, nothing of ours merged yet:
        git fetch upstream
-       git rebase --onto upstream/main ao/agent-orchestrator-96/up-a<n>-<topic> ao/agent-orchestrator-96/up-a<n+1>-<topic>
-       git push --force-with-lease origin ao/agent-orchestrator-96/up-a<n+1>-<topic>
+       git rebase upstream/main ao/agent-orchestrator-96/up-a1-flag
+       git push --force-with-lease origin ao/agent-orchestrator-96/up-a1-flag
+       # (same two lines for up-a2-hosts and up-a3-store)
 
-   then the same for every later branch, each onto its freshly rebased parent.
+       # A4, after A3 merges:
+       git rebase --onto upstream/main ao/agent-orchestrator-96/up-a3-store ao/agent-orchestrator-96/up-a4-proxy
+       git push --force-with-lease origin ao/agent-orchestrator-96/up-a4-proxy
+
+       # A5, after A1+A2+A4 merge:
+       git rebase --onto upstream/main up-a5-base ao/agent-orchestrator-96/up-a5-clients
+       git push --force-with-lease origin ao/agent-orchestrator-96/up-a5-clients
 
 ## The branches
 
-| # | Branch (on `origin`) | Upstream title | Non-test files | Tests it carries |
-| --- | --- | --- | --- | --- |
-| 1 | `ao/agent-orchestrator-96/up-a1-flag` | feat(settings): add an experimental Remote hosts flag | 10 | ui-store ×3, settings switch ×1 |
-| 2 | `ao/agent-orchestrator-96/up-a2-hosts` | feat(hosts): host identity primitives | 1 | hosts ×5 |
-| 3 | `ao/agent-orchestrator-96/up-a3-store` | feat(remotes): saved-host store, authenticated requests, password-free IPC | 9 | store + request suites, ipc ×8, main ×4 |
-| 4 | `ao/agent-orchestrator-96/up-a4-proxy` | feat(remotes): token-gated loopback proxy for remote daemons | 9 | proxy ×16, registry ×7, main ×6 |
-| 5 | `ao/agent-orchestrator-96/up-a5-clients` | feat(hosts): per-host API clients and flag-gated host boot | 3 | host-clients ×9, active-host ×6 |
+| # | Branch (on `origin`) | Base | Upstream title | Non-test files | Tests it carries |
+| --- | --- | --- | --- | --- | --- |
+| 1 | `ao/agent-orchestrator-96/up-a1-flag` | `upstream/main` | feat(settings): add an experimental Remote hosts flag | 10 | ui-store ×3, settings switch ×1 |
+| 2 | `ao/agent-orchestrator-96/up-a2-hosts` | `upstream/main` | feat(hosts): host identity primitives | 1 | hosts ×5 |
+| 3 | `ao/agent-orchestrator-96/up-a3-store` | `upstream/main` | feat(remotes): saved-host store, authenticated requests, password-free IPC | 9 | store + request suites, ipc ×8, main ×4 |
+| 4 | `ao/agent-orchestrator-96/up-a4-proxy` | `up-a3-store` | feat(remotes): token-gated loopback proxy for remote daemons | 9 | proxy ×16, registry ×7, main ×6 |
+| 5 | `ao/agent-orchestrator-96/up-a5-clients` | merge(A1, A2, A4), tag `up-a5-base` | feat(hosts): per-host API clients and flag-gated host boot | 3 | host-clients ×9, active-host ×6 |
 
-## Opening a PR (one at a time)
+## Opening a PR (A1/A2/A3 in any order; A4 and A5 in sequence)
 
     gh pr create --repo Untrivial-ai/agent-orchestrator --base main \
       --head AronPerez:ao/agent-orchestrator-96/up-a1-flag \
@@ -1699,10 +1765,10 @@ Bodies follow upstream's template (What / Why / How / Testing / Checklist) and a
 
 ## What a reviewer can verify with the flag off, on every branch
 
-- The Settings modal shows one new row; nothing else in the UI differs (PR 1).
-- `initHosts()` never calls `remotes.list` (`active-host.test.ts`, PR 5).
-- Main opens no socket without an IPC call (`remote-registry.test.ts` "never connected is a no-op", PR 4).
-- `connectedHosts()` is `[]` so every later fan-out is a loop of one (PR 5 onward).
+- The Settings modal shows one new row; nothing else in the UI differs (A1).
+- `initHosts()` never calls `remotes.list` (`active-host.test.ts`, A5).
+- Main opens no socket without an IPC call (`remote-registry.test.ts` "never connected is a no-op", A4).
+- `connectedHosts()` is `[]` so every later fan-out is a loop of one (A5 onward).
 ```
 
 Also create `docs/upstreaming-pr-bodies/a1-flag.md` … `a5-clients.md` — five files, each exactly:
@@ -1735,30 +1801,29 @@ Part of the remote-hosts series proposed in #RFC. This slice lands dark: with th
 
 Take each commit message with `git -C "$STACK" log -1 --format=%b <branch>`; the first paragraph is "What", the rest is "How".
 
-- [ ] **Step 4: Scrub, commit, open the PR into develop**
+
+- [ ] **Step 3: Scrub, commit, push (the Task 2 PR updates in place)**
 
 ```bash
 cd /Users/amongstar/.ao/data/worktrees/agent-orchestrator/agent-orchestrator-96
-grep -rnE "amongstar|/Users/" docs/upstreaming-rfc-remote-hosts.md docs/upstreaming-pr-bodies/ ; echo "rfc scrub exit=$? (1 means clean — the status doc may name local paths, the RFC and bodies may not)"
-git add docs/upstreaming-rfc-remote-hosts.md docs/upstreaming-stack-status.md docs/upstreaming-pr-bodies/
-git commit -q -m "docs: RFC text and hand-off for the upstream remote-hosts stack
+grep -rnE "amongstar|/Users/" docs/upstreaming-pr-bodies/ ; echo "bodies scrub exit=$? (1 means clean — the status doc may name local paths, the RFC and bodies may not)"
+git add docs/upstreaming-stack-status.md docs/upstreaming-pr-bodies/
+git commit -q -m "docs: hand-off for the upstream remote-hosts stack
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01HnqdDyvae5s7L7KYwtKPd7"
-git push -q -u origin ao/agent-orchestrator-96/upstream-handoff
-gh pr create --repo AronPerez/agent-orchestrator --base develop --head ao/agent-orchestrator-96/upstream-handoff \
-  --title "docs: RFC text and hand-off for the upstream remote-hosts stack" \
-  --body "Branches up-a1..up-a5 are built on upstream/main and pushed to origin (see docs/upstreaming-stack-status.md). Nothing opened upstream. The RFC body is ready to post once approved."
+git push -q origin ao/agent-orchestrator-96/upstream-handoff
 ```
 
-Expected: PR URL printed. Report it, the five branch names, and the upstream SHA the stack is based on.
+Expected: push succeeds. Report the PR link, the five branch names, and the upstream SHA the stack is based on.
 
 ---
 
+
 ## Self-review
 
-**Spec coverage.** §2.2 flag name/scope/default/surface → Task 2; off-state semantics and live toggle → Task 6 (`active-host.test.ts`: never reads, connects on, disconnects off); "main opens no socket without an IPC call" → Task 5 registry no-op test; A1–A5 → Tasks 2–6 in dependency order (A2 before A5, A3 before A4); A0 RFC + the questions in §4 → Task 7; §2.1 "branch from upstream/main", squash-rebase recipe → Tasks 1 and 7; §3.3 scrub list → every commit step. Not covered here, by design: `response-validation.ts` (Plan 2), `HostSelect`/`useRemoteHosts` gating (Plan 2, where those files arrive), D1's `startRuntime` hook.
+**Spec coverage.** §2.2 flag name/scope/default/surface → Task 3; off-state semantics and live toggle → Task 7 (`active-host.test.ts`: never reads, connects on, disconnects off); "main opens no socket without an IPC call" → Task 6 registry no-op test; A1–A5 → Tasks 3–7 in dependency order (A2 before A5, A3 before A4); A0 RFC + the questions in §4 → Tasks 2 and 8; §2.1 "branch from upstream/main", squash-rebase recipe → Tasks 1 and 8; §3.3 scrub list → every commit step. Topology: A1/A2/A3 are siblings because their import lists share nothing (`hosts.ts` imports nothing; A3's modules import neither `ui-store` nor `hosts.ts`); A5 consumes all three sides, so it alone sits on an integration merge. Not covered here, by design: `response-validation.ts` (Plan 2), `HostSelect`/`useRemoteHosts` gating (Plan 2, where those files arrive), D1's `startRuntime` hook.
 
 **Placeholder scan.** Every code step carries its code; every port step carries a verified command and the expected test count. The one templated spot — the PR bodies taking their What/How from the commit messages — names the exact `git log` command that produces the text.
 
-**Type consistency.** `RemotesIpcDeps` is `{file, disconnect, probe?}` in Task 4 and is *replaced* by `{file, registry, probe?}` in Task 5 — stated in both tasks and in the File structure section. `disconnect: (url: string) => Promise<void>` is the same shape in `remotes-ipc.ts` (Task 4), the Task 4 `main.ts` stub, and the `registry.disconnect` closure in Task 5. `ConnectedHostView {label,url,base}` is what `remotes:connect`/`connected` return (Task 5) and what `connectHost` consumes via `registerHostBase(view.url, view.base, view.label)` (Task 6). `RemoteHostView {label,url}` is what `remotes:list` returns (Task 4) and what `initHosts` maps over `({ url })` (Task 6).
+**Type consistency.** `RemotesIpcDeps` is `{file, disconnect, probe?}` in Task 5 and is *replaced* by `{file, registry, probe?}` in Task 6 — stated in both tasks and in the File structure section. `disconnect: (url: string) => Promise<void>` is the same shape in `remotes-ipc.ts` (Task 5), the Task 5 `main.ts` stub, and the `registry.disconnect` closure in Task 6. `ConnectedHostView {label,url,base}` is what `remotes:connect`/`connected` return (Task 6) and what `connectHost` consumes via `registerHostBase(view.url, view.base, view.label)` (Task 7). `RemoteHostView {label,url}` is what `remotes:list` returns (Task 5) and what `initHosts` maps over `({ url })` (Task 7).
