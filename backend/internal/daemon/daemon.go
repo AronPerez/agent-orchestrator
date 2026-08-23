@@ -256,6 +256,13 @@ func Run() error {
 	sessMgr.SetTerminalInputGate(termMgr)
 	lifecycleMessenger.Bind(sessionLifecycleMessenger{sessMgr})
 	lcStack.LCM.SetCompletionTerminator(sessMgr)
+	// #114 effects 3+4: lifecycle verifies a hook-reported exit against the
+	// supervisor before believing it, and delivery heals a stale exited state.
+	// A runtime without the strict inspector simply leaves both unprobed.
+	sessMgr.SetStaleExitClearer(lcStack.LCM)
+	if insp, ok := sessMgr.RuntimeExactInspector(); ok {
+		lcStack.LCM.SetExitInspector(insp)
+	}
 	lcStack.LCM.SetSessionInputLease(sessMgr)
 	lcStack.LCM.SetSessionOperationGate(sessMgr)
 	termMgr.SetSessionInputLease(sessMgr)

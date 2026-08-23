@@ -311,7 +311,7 @@ type Manager struct {
 	// assembly (#114 effect 4). Nil means delivery refuses on an exited
 	// session exactly as before.
 	staleExitMu sync.RWMutex
-	staleExit   staleExitClearer
+	staleExit   StaleExitClearer
 	agents      ports.AgentResolver
 	workspace   ports.Workspace
 	store       Store
