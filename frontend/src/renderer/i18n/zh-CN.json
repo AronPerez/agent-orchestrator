@@ -1064,6 +1064,7 @@
 	"terminal.ended": "终端已结束",
 	"terminal.error": "终端错误：{{error}}",
 	"terminal.initFailed": "终端在此 GPU/驱动上初始化失败。请重启应用后重试。",
+	"terminal.rendererLost": "终端显示在此 GPU/驱动上已停止。请重新打开会话或重启应用。",
 	"terminal.loadingOutput": "正在加载最新输出…",
 	"terminal.noSessionSelected": "尚未选择会话。请选择一个工作会话以连接其终端。",
 	"terminal.preparingOrchestrator": "正在准备编排器终端。AO 创建工作区并启动代理时可能需要片刻。",

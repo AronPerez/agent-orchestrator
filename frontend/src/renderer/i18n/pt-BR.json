@@ -1087,6 +1087,7 @@
 	"terminal.ended": "Terminal encerrado",
 	"terminal.error": "Erro do terminal: {{error}}",
 	"terminal.initFailed": "O terminal falhou ao inicializar nesta GPU/driver. Reinicie o app para tentar novamente.",
+	"terminal.rendererLost": "A exibição do terminal parou nesta GPU/driver. Reabra a sessão ou reinicie o app.",
 	"terminal.loadingOutput": "Carregando a saída mais recente…",
 	"terminal.noSessionSelected": "Nenhuma sessão selecionada. Escolha um worker para anexar o terminal.",
 	"terminal.preparingOrchestrator": "Preparando o terminal do orchestrator. Isso pode levar um momento enquanto o AO cria o workspace e inicia o agente.",

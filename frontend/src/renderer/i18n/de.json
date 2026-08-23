@@ -1076,6 +1076,7 @@
 	"terminal.ended": "Terminal beendet",
 	"terminal.error": "Terminal-Fehler: {{error}}",
 	"terminal.initFailed": "Terminal konnte auf dieser GPU/diesem Treiber nicht initialisiert werden. Starten Sie die App neu, um es erneut zu versuchen.",
+	"terminal.rendererLost": "Die Terminalanzeige wurde auf dieser GPU/diesem Treiber beendet. Öffnen Sie die Sitzung erneut oder starten Sie die App neu.",
 	"terminal.loadingOutput": "Neueste Ausgabe wird geladen…",
 	"terminal.noSessionSelected": "Keine Sitzung ausgewählt. Wählen Sie einen Worker, um sein Terminal anzubinden.",
 	"terminal.preparingOrchestrator": "Orchestrator-Terminal wird vorbereitet. Das kann einen Moment dauern, während AO den Workspace erstellt und den Agent startet.",

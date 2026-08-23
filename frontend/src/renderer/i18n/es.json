@@ -1087,6 +1087,7 @@
 	"terminal.ended": "Terminal finalizado",
 	"terminal.error": "Error del terminal: {{error}}",
 	"terminal.initFailed": "El terminal no pudo inicializarse en esta GPU/controlador. Reinicia la aplicación para reintentarlo.",
+	"terminal.rendererLost": "La pantalla del terminal se detuvo en esta GPU/controlador. Vuelve a abrir la sesión o reinicia la aplicación.",
 	"terminal.loadingOutput": "Cargando la salida más reciente…",
 	"terminal.noSessionSelected": "No hay sesión seleccionada. Elige un worker para adjuntar su terminal.",
 	"terminal.preparingOrchestrator": "Preparando el terminal del orquestador. Puede tardar un momento mientras AO crea el espacio de trabajo e inicia el agente.",

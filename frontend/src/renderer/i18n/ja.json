@@ -1076,6 +1076,7 @@
 	"terminal.ended": "ターミナルが終了しました",
 	"terminal.error": "ターミナルエラー: {{error}}",
 	"terminal.initFailed": "この GPU/ドライバーではターミナルを初期化できませんでした。アプリを再起動して再試行してください。",
+	"terminal.rendererLost": "この GPU/ドライバーでターミナルの表示が停止しました。セッションを開き直すか、アプリを再起動してください。",
 	"terminal.loadingOutput": "最新の出力を読み込み中…",
 	"terminal.noSessionSelected": "セッションが選択されていません。ワーカーを選んでターミナルを接続してください。",
 	"terminal.preparingOrchestrator": "オーケストレーターターミナルを準備中です。AO がワークスペースを作成しエージェントを起動する間、少し時間がかかることがあります。",
