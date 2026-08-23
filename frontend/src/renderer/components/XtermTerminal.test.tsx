@@ -225,6 +225,39 @@ describe("XtermTerminal", () => {
 		}
 	});
 
+	it("still reveals a retained activation when the viewport scroll throws", async () => {
+		// Every reveal routes through showLatestOutput() and performs the reveal on
+		// the next statement: prepareForActivation resolves only after it returns,
+		// and useTerminalSession calls setReplaySettled(true) right after it. A
+		// throw there used to strand the pane behind a hidden container or an
+		// unlifted cover — a terminal that never loads its text.
+		vi.useFakeTimers();
+		vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) =>
+			window.setTimeout(() => callback(performance.now()), 0),
+		);
+		vi.stubGlobal("cancelAnimationFrame", (id: number) => window.clearTimeout(id));
+		try {
+			let terminal: AttachableTerminal | undefined;
+			render(<XtermTerminal theme="dark" onReady={(ready) => { terminal = ready; }} />);
+			state.lastTerminal!.scrollToBottom.mockImplementation(() => {
+				throw new Error("renderer unavailable");
+			});
+
+			let revealed = false;
+			void terminal!.prepareForActivation().then(() => { revealed = true; });
+			await act(async () => {
+				vi.advanceTimersByTime(2000);
+				vi.runAllTimers();
+			});
+
+			expect(revealed).toBe(true);
+			expect(() => terminal!.showLatestOutput()).not.toThrow();
+		} finally {
+			vi.useRealTimers();
+			vi.unstubAllGlobals();
+		}
+	});
+
 	it("preserves the agent TUI palette without contrast remapping", () => {
 		render(<XtermTerminal theme="dark" />);
 
