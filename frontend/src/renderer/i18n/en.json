@@ -585,6 +585,7 @@
 	"settings.close": "Close settings",
 	"settings.connectMobile": "Connect Mobile",
 	"settings.developerMode": "Developer Mode",
+	"settings.remoteHosts": "Remote hosts (experimental)",
 	"settings.general": "General",
 	"settings.developer": "Developer",
 	"settings.getHelp": "Get help",
