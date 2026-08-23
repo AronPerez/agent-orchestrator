@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -440,6 +441,7 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 	s.LatestUserPrompt = strings.TrimSpace(s.LatestUserPrompt)
 	s.LatestAssistantUpdate = strings.TrimSpace(s.LatestAssistantUpdate)
 	s.TranscriptPath = strings.TrimSpace(s.TranscriptPath)
+	s.AgentCWD = strings.TrimSpace(s.AgentCWD)
 	s.LaunchID = strings.TrimSpace(s.LaunchID)
 	s.ControllerGeneration = strings.TrimSpace(s.ControllerGeneration)
 	// A response or Stop hook produced by AO's optional source handoff request
@@ -508,6 +510,26 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 		return nil
 	}
 	if rec.Metadata.RuntimeLaunchID != "" && s.LaunchID != rec.Metadata.RuntimeLaunchID {
+		m.mu.Unlock()
+		return nil
+	}
+	// A nested agent process — one an agent spawns from inside its own session —
+	// inherits AO_SESSION_ID and AO_RUNTIME_LAUNCH_ID from its parent, so the
+	// launch fence above cannot tell it apart from the session's real agent. Its
+	// hooks then speak for the session: they overwrite the resume handle
+	// (AgentSessionID / NativeTranscriptPath) with a throwaway conversation, and
+	// its SessionEnd reports the session as exited while the real agent is still
+	// alive and idle — after which AO refuses to deliver messages to it.
+	//
+	// The session's own agent is launched by AO with its cwd inside the session
+	// workspace, and a provider reports the launch cwd rather than the shell's, so
+	// a signal from outside the workspace cannot be that agent. Rejecting only
+	// those is safe by construction: it can never reject an in-workspace signal,
+	// which is the only kind a session's own agent produces.
+	//
+	// This does not catch a nested agent invoked with the workspace as its cwd;
+	// that case still needs process identity AO does not have today.
+	if !signalCWDBelongsToSession(rec.Metadata.WorkspacePath, s.AgentCWD) {
 		m.mu.Unlock()
 		return nil
 	}
@@ -1307,4 +1329,26 @@ func applyActivityMetadata(meta *domain.SessionMetadata, signal ports.ActivitySi
 	if signal.TranscriptPath != "" {
 		meta.NativeTranscriptPath = signal.TranscriptPath
 	}
+}
+
+// signalCWDBelongsToSession reports whether an activity signal's reporting agent
+// could be the session's own agent, judged by its working directory.
+//
+// Absent facts are always accepted: a harness that does not report a cwd, or a
+// session with no recorded workspace, must keep behaving exactly as before.
+func signalCWDBelongsToSession(workspacePath, agentCWD string) bool {
+	if workspacePath == "" || agentCWD == "" {
+		return true
+	}
+	workspace := filepath.Clean(workspacePath)
+	cwd := filepath.Clean(agentCWD)
+	if cwd == workspace {
+		return true
+	}
+	rel, err := filepath.Rel(workspace, cwd)
+	if err != nil {
+		// Not comparable (different volumes on Windows): do not invent a rejection.
+		return true
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }

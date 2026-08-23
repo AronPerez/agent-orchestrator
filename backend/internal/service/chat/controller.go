@@ -29,10 +29,11 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
-const (
-	nativeHistorySettlePoll  = 100 * time.Millisecond
-	nativeHistorySettleLimit = 45 * time.Second
-)
+const nativeHistorySettlePoll = 100 * time.Millisecond
+
+// nativeHistorySettleLimit is a var only so tests can exercise the deadline arm
+// of importNativeHistory without waiting it out. Production never reassigns it.
+var nativeHistorySettleLimit = 45 * time.Second
 
 // Store is the durable conversation surface the controller needs. Implemented by
 // the SQLite store.
@@ -363,17 +364,41 @@ func (p *nativeHistoryCheckpoint) captureAOHighWater(
 	}
 }
 
-func (p nativeHistoryCheckpoint) reached(events []ports.ChatEvent) bool {
-	completedTurns := make(map[string]bool)
-	coordinationTurns := make(map[string]bool)
+// completedTurns reports which replayed turns reached a turn-completed boundary,
+// and which of those are AO's own coordination turns rather than user intent.
+func nativeHistoryCompletedTurns(events []ports.ChatEvent) (completed, coordination map[string]bool) {
+	completed = make(map[string]bool)
+	coordination = make(map[string]bool)
 	for _, event := range events {
 		if event.Kind == ports.ChatEventTurnCompleted && event.ProviderTurnID != "" {
-			completedTurns[event.ProviderTurnID] = true
+			completed[event.ProviderTurnID] = true
 		}
 		if event.Kind == ports.ChatEventUserMessageCompleted && nativeHistoryCoordinationMessage(event.Text) {
-			coordinationTurns[event.ProviderTurnID] = true
+			coordination[event.ProviderTurnID] = true
 		}
 	}
+	return completed, coordination
+}
+
+// reached reports whether the replay reproduces everything AO knows about this
+// thread: both the provider-hook freshness facts and AO's own settled projection.
+//
+// The two halves are deliberately separable because they carry very different
+// evidence. See hookFactsReached and highWaterReached.
+func (p nativeHistoryCheckpoint) reached(events []ports.ChatEvent) bool {
+	return p.hookFactsReached(events) && p.highWaterReached(events)
+}
+
+// hookFactsReached checks the newest source-TUI facts AO captured from provider
+// hooks against the replay.
+//
+// These are the weak half of the checkpoint: they are a write-if-non-empty cache
+// that nothing ever reconciles, so a hook that never reached the daemon (a daemon
+// restart drops them silently — `ao hooks` exits 0 by design) leaves a value here
+// that the provider can never reproduce. importNativeHistory therefore treats a
+// failure of this half as advisory rather than fatal.
+func (p nativeHistoryCheckpoint) hookFactsReached(events []ports.ChatEvent) bool {
+	completedTurns, coordinationTurns := nativeHistoryCompletedTurns(events)
 
 	var latestUser, latestAssistant ports.ChatEvent
 	for _, event := range events {
@@ -395,6 +420,17 @@ func (p nativeHistoryCheckpoint) reached(events []ports.ChatEvent) bool {
 		!nativeHistoryTextMatches(p.latestAssistantUpdate, latestAssistant.Text) {
 		return false
 	}
+	return true
+}
+
+// highWaterReached checks AO's own last settled projection of this same provider
+// thread against the replay.
+//
+// This is the strong half: every fact in it was written by AO's projector from a
+// provider event it actually observed, so a replay that cannot reproduce it is
+// genuinely missing history AO already showed the user. It stays fatal.
+func (p nativeHistoryCheckpoint) highWaterReached(events []ports.ChatEvent) bool {
+	completedTurns, _ := nativeHistoryCompletedTurns(events)
 
 	highWater := p.aoHighWater
 	if highWater.providerTurnID == "" {
@@ -446,6 +482,45 @@ func nativeHistoryTextMatches(checkpoint, replayed string) bool {
 	return len(parts) == 2 && strings.HasPrefix(replayed, parts[0]) && strings.HasSuffix(replayed, parts[1])
 }
 
+// staleHookFactsOnly reports whether the only thing standing between this replay
+// and an import is the provider-hook half of the checkpoint.
+//
+// AO FORK DIVERGENCE from upstream (#4120 / #4186). Upstream treats every half of
+// the checkpoint as blocking. We do not, for the hook-fact half only, and only
+// where no further provider observation is possible.
+//
+// WHY: latestUserPrompt/latestAssistantUpdate are a write-if-non-empty cache that
+// nothing reconciles. Any hook that failed to reach the daemon — every hook fired
+// while the daemon is restarting is dropped, and `ao hooks` exits 0 so the agent
+// is never disrupted — leaves a value the provider cannot reproduce, and no later
+// event repairs it. Measured on a live install: 96 of 120 TUI claude-code sessions
+// held a value appearing nowhere in their own transcript, so their TUI -> Chat
+// switch could never succeed. On ACP the replay is a frozen snapshot captured
+// during Resume, so that failure is permanent rather than merely slow.
+//
+// What we accept in exchange is a replay that may lag the newest terminal-side
+// turn: degraded but usable, and strictly better than a session that can never
+// enter Chat again.
+//
+// REVERT THIS if the hook facts ever become reliable: give them a repair path
+// (re-derive from NativeTranscriptPath, or reconcile on resume) so a dropped hook
+// cannot strand them, then restore a single checkpoint.reached() gate in
+// importNativeHistory and delete hookFactsReached/highWaterReached. Fork issue #109.
+//
+// It requires that the provider itself reported a clean read — a genuinely
+// unsettled provider is not this case — and that AO's own projection high-water
+// mark is reproduced, so history AO already showed the user is never silently
+// dropped. Callers use it only where no further provider observation is possible.
+//
+// An empty replay is excluded: a provider that replays nothing at all has not
+// given us a stale thread, it has given us no thread, and importing that would
+// erase a conversation rather than lag it.
+func staleHookFactsOnly(
+	required bool, providerErr error, checkpoint nativeHistoryCheckpoint, events []ports.ChatEvent,
+) bool {
+	return required && providerErr == nil && len(events) > 0 && checkpoint.highWaterReached(events)
+}
+
 // importNativeHistory projects the settled provider thread before live event
 // consumption starts. Re-running it is safe because history events carry stable
 // identities and ProjectProviderEvent deduplicates archive+projection together.
@@ -470,7 +545,9 @@ func (c *Controller) importNativeHistory(
 	events, err := reader.ReadHistory(historyCtx)
 	refresher, refreshable := reader.(ports.ChatHistoryRefresher)
 	sawUnsettled := false
+settle:
 	for err != nil || (required && !checkpoint.reached(events)) {
+		providerErr := err
 		if err == nil {
 			err = ports.ErrChatHistoryUnsettled
 		}
@@ -486,6 +563,13 @@ func (c *Controller) importNativeHistory(
 		}
 		sawUnsettled = true
 		if !refreshable {
+			// No further provider observation is possible, so this is the last
+			// resort described above.
+			if staleHookFactsOnly(required, providerErr, checkpoint, events) {
+				c.log.Warn("importing native history despite unreachable provider hook facts",
+					"session", c.sessionID, "reason", "immutable replay settled; hook checkpoint cannot be reproduced")
+				break
+			}
 			return fmt.Errorf("native conversation history snapshot is incomplete and cannot be refreshed: %w", err)
 		}
 
@@ -493,6 +577,13 @@ func (c *Controller) importNativeHistory(
 		select {
 		case <-historyCtx.Done():
 			timer.Stop()
+			// The settle window is gone; nothing more will arrive. Labelled so the
+			// break leaves the loop rather than just this select.
+			if staleHookFactsOnly(required, providerErr, checkpoint, events) {
+				c.log.Warn("importing native history despite unreachable provider hook facts",
+					"session", c.sessionID, "reason", "settle window expired; hook checkpoint cannot be reproduced")
+				break settle
+			}
 			return fmt.Errorf("wait for settled native conversation history: %w: %w",
 				ports.ErrChatHistoryUnsettled, historyCtx.Err())
 		case <-timer.C:

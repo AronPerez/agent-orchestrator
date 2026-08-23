@@ -2920,6 +2920,8 @@ export interface components {
             totals: components["schemas"]["UsageTotalsResponse"];
         };
         SetActivityRequest: {
+            /** @description Working directory of the agent process that fired the hook. Used to reject signals from nested agents that inherited AO_SESSION_ID. */
+            agentCwd?: string;
             /** @description Native agent session identifier used to resume its transcript. */
             agentSessionId?: string;
             /** @description AO hook sub-command that produced this state (e.g. post-tool-use). */

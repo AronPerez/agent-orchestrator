@@ -1433,6 +1433,7 @@ func (c *SessionsController) activity(w http.ResponseWriter, r *http.Request) {
 		LatestUserPrompt:      capActivityText(domain.SanitizeControlChars(strings.TrimSpace(in.LatestUserPrompt)), 16<<10),
 		LatestAssistantUpdate: capActivityText(domain.SanitizeControlChars(strings.TrimSpace(in.LatestAssistantUpdate)), 16<<10),
 		TranscriptPath:        capActivityText(domain.SanitizeControlChars(strings.TrimSpace(in.TranscriptPath)), 4096),
+		AgentCWD:              capActivityText(domain.SanitizeControlChars(strings.TrimSpace(in.AgentCWD)), 4096),
 		LaunchID:              capActivityMeta(domain.SanitizeControlChars(strings.TrimSpace(in.LaunchID))),
 	}
 	if c.Activity != nil && (sig.Valid || sig.AgentSessionID != "") {
