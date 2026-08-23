@@ -74,3 +74,98 @@ func TestAgentProvablyAliveFailsOpen(t *testing.T) {
 		})
 	}
 }
+
+func exitSignal(event string) ports.ActivitySignal {
+	return ports.ActivitySignal{
+		Valid: true, State: domain.ActivityExited,
+		Event: event, LaunchID: "launch-1",
+	}
+}
+
+func sessionState(t *testing.T, store *fakeAgentSwitchLifecycleStore, id domain.SessionID) domain.ActivityState {
+	t.Helper()
+	rec, ok, err := store.GetSession(ctx, id)
+	if err != nil || !ok {
+		t.Fatalf("GetSession(%s): ok=%v err=%v", id, ok, err)
+	}
+	return rec.Activity.State
+}
+
+// A hook-reported exit for a provably-alive agent is dropped: this is the
+// nested-agent poisoning measured in #114 (session marked exited while its
+// real agent sat idle; ao send then refused with AGENT_EXITED).
+func TestHookExitDroppedWhenAgentProvablyAlive(t *testing.T) {
+	store := newFakeAgentSwitchLifecycleStore()
+	rec := supervisedRec("s1")
+	store.setSession(rec)
+	insp := &fakeExitInspector{alive: true}
+	m := New(store, &fakeMessenger{})
+	m.SetExitInspector(insp)
+
+	if err := m.ApplyActivitySignal(ctx, rec.ID, exitSignal("session-end")); err != nil {
+		t.Fatalf("ApplyActivitySignal: %v", err)
+	}
+	if got := sessionState(t, store, rec.ID); got == domain.ActivityExited {
+		t.Fatalf("a provably-alive agent was marked exited")
+	}
+	if insp.callCount() == 0 {
+		t.Fatal("the liveness probe was never consulted")
+	}
+}
+
+// Everything short of a clean "alive" applies the exit exactly as before:
+// dead probe, probe error, and no inspector at all.
+func TestHookExitAppliedUnlessProvablyAlive(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		inspector *fakeExitInspector
+	}{
+		{"probe says dead", &fakeExitInspector{alive: false}},
+		{"probe errors - fail open", &fakeExitInspector{alive: true, err: errors.New("ps failed")}},
+		{"no inspector wired - fail open", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newFakeAgentSwitchLifecycleStore()
+			rec := supervisedRec("s1")
+			store.setSession(rec)
+			m := New(store, &fakeMessenger{})
+			if tc.inspector != nil {
+				m.SetExitInspector(tc.inspector)
+			}
+			if err := m.ApplyActivitySignal(ctx, rec.ID, exitSignal("session-end")); err != nil {
+				t.Fatalf("ApplyActivitySignal: %v", err)
+			}
+			if got := sessionState(t, store, rec.ID); got != domain.ActivityExited {
+				t.Fatalf("exit not applied: state=%s", got)
+			}
+		})
+	}
+}
+
+// AO's own authorities are never probed. The supervisor's process-exited report
+// ran wait4 on the agent; the chat controller's stopped report observed its own
+// provider stream end and is already fenced by ControllerGeneration. Both ARE
+// the authority, so gating them behind a liveness probe could leave a session
+// that can never be marked exited -- the inverse bug, and the worse one.
+func TestAuthoritativeExitNeverProbed(t *testing.T) {
+	for _, event := range []string{"process-exited", "chat.controller.stopped"} {
+		t.Run(event, func(t *testing.T) {
+			store := newFakeAgentSwitchLifecycleStore()
+			rec := supervisedRec("s1")
+			store.setSession(rec)
+			insp := &fakeExitInspector{alive: true} // even a live-looking probe must not matter
+			m := New(store, &fakeMessenger{})
+			m.SetExitInspector(insp)
+
+			if err := m.ApplyActivitySignal(ctx, rec.ID, exitSignal(event)); err != nil {
+				t.Fatalf("ApplyActivitySignal: %v", err)
+			}
+			if got := sessionState(t, store, rec.ID); got != domain.ActivityExited {
+				t.Fatalf("%s exit not applied: state=%s", event, got)
+			}
+			if insp.callCount() != 0 {
+				t.Fatalf("%s was probed %d times; it is the authority", event, insp.callCount())
+			}
+		})
+	}
+}
