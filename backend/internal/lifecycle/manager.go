@@ -507,6 +507,24 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 	if !s.Valid && s.AgentSessionID == "" && s.LatestUserPrompt == "" && s.LatestAssistantUpdate == "" && s.TranscriptPath == "" {
 		return nil
 	}
+	// #114 effects 3+4: a nested agent inheriting AO_SESSION_ID can report a
+	// SessionEnd for a parent whose real agent is alive and idle -- measured on
+	// a live session, which then refused every send with AGENT_EXITED. A hook is
+	// only a claim; the supervisor is the authority. Probe before accepting a
+	// hook-driven exit, and only a hook-driven one (see isAuthoritativeExitEvent).
+	//
+	// Probing before m.mu is deliberate: the probe may shell out to ps, and this
+	// reducer must not hold its lock across that. The window between probe and
+	// write is closed by the supervisor's own process-exited report and by the
+	// reaper, both of which still land.
+	if s.Valid && s.State == domain.ActivityExited && !isAuthoritativeExitEvent(s.Event) {
+		if rec, ok, err := m.store.GetSession(ctx, id); err == nil && ok && m.agentProvablyAlive(ctx, rec) {
+			slog.Default().Warn("lifecycle: dropped hook-reported exit for a provably-alive agent",
+				"session", id, "event", s.Event, "launch", s.LaunchID,
+				"reason", "stale_exit_dropped")
+			return nil
+		}
+	}
 	if s.LaunchID != "" {
 		if err := m.stagePendingAgentSwitchNativeMetadata(ctx, id, s); err != nil {
 			return err
@@ -826,6 +844,24 @@ func isPostToolUseEvent(event string) bool {
 	// post-tool-use-fail is retained for Kimchi hook files installed before the
 	// adapter switched to AO's canonical failure event name.
 	return event == "post-tool-use" || event == "post-tool-use-failure" || event == "post-tool-use-fail"
+}
+
+// isAuthoritativeExitEvent reports the exit events AO produces itself, which
+// must never be second-guessed by a liveness probe (#114).
+//
+//   - process-exited: the supervisor's own wait4 report (cli/agent_process.go).
+//     It IS the process that reaped the agent.
+//   - chat.controller.stopped: the chat controller observing its own provider
+//     stream end (service/chat/controller.go), already fenced by
+//     ControllerGeneration.
+//
+// Everything else carrying an exited state arrives from a harness hook, and a
+// hook is a claim by whichever process happened to fire it. Add to this list
+// only events AO itself emits from a fact it observed directly -- gating one of
+// those risks a session that can never be marked exited, which is worse than
+// the nested-agent hijack this guard exists to stop.
+func isAuthoritativeExitEvent(event string) bool {
+	return event == "process-exited" || event == "chat.controller.stopped"
 }
 
 // isTurnBoundaryEvent reports the events that reliably mean the pending
