@@ -523,14 +523,19 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 	//
 	// The session's own agent is launched by AO with its cwd inside the session
 	// workspace, and a provider reports the launch cwd rather than the shell's, so
-	// a signal from outside the workspace cannot be that agent. Rejecting only
-	// those is safe by construction: it can never reject an in-workspace signal,
-	// which is the only kind a session's own agent produces.
+	// a signal from outside the workspace cannot be that agent.
 	//
 	// This does not catch a nested agent invoked with the workspace as its cwd;
-	// that case still needs process identity AO does not have today.
+	// that case still needs process identity AO does not have today (fork #114).
+	//
+	// A false rejection here would strand the session exactly as a dropped hook
+	// does, and it drops the signal rather than failing the caller, so it is
+	// logged: a guard nobody can observe rejecting is a guard nobody can debug.
 	if !signalCWDBelongsToSession(rec.Metadata.WorkspacePath, s.AgentCWD) {
 		m.mu.Unlock()
+		slog.Default().Warn("lifecycle: dropped activity signal from outside the session workspace",
+			"session", id, "workspace", rec.Metadata.WorkspacePath, "agent_cwd", s.AgentCWD,
+			"event", s.Event, "launch", s.LaunchID)
 		return nil
 	}
 	if s.ControllerGeneration != "" &&
@@ -675,6 +680,23 @@ func (m *Manager) stagePendingAgentSwitchNativeMetadata(ctx context.Context, id 
 		return err
 	}
 	if !found || sw.State != domain.AgentSwitchStartingTarget || string(sw.TargetGenerationID) != s.LaunchID || sw.TargetNativeSessionRef == nil {
+		return nil
+	}
+	// This runs before ApplyActivitySignal takes the lock, so the nested-agent cwd
+	// guard there has not had a say yet — and the resume handle staged below is
+	// precisely what that guard exists to protect. A nested agent spawned by the
+	// switch target inherits its AO_RUNTIME_LAUNCH_ID, so it clears the launch
+	// fence above; if its hook lands before the target's own, its throwaway
+	// conversation becomes the target's resume handle. Re-check the cwd here,
+	// where it costs a session read only inside that narrow window.
+	rec, foundSession, err := m.store.GetSession(ctx, id)
+	if err != nil {
+		return err
+	}
+	if foundSession && !signalCWDBelongsToSession(rec.Metadata.WorkspacePath, s.AgentCWD) {
+		slog.Default().Warn("lifecycle: refused to stage agent-switch resume handle from outside the session workspace",
+			"session", id, "workspace", rec.Metadata.WorkspacePath, "agent_cwd", s.AgentCWD,
+			"launch", s.LaunchID)
 		return nil
 	}
 	native, found, err := store.GetAgentNativeSession(ctx, *sw.TargetNativeSessionRef)
@@ -1336,10 +1358,26 @@ func applyActivityMetadata(meta *domain.SessionMetadata, signal ports.ActivitySi
 //
 // Absent facts are always accepted: a harness that does not report a cwd, or a
 // session with no recorded workspace, must keep behaving exactly as before.
+//
+// A lexical miss is not yet a rejection. AO records a workspace path, while a
+// harness reports whatever the OS hands back for its own process, and those two
+// can name the same directory in different forms — a symlinked component is the
+// common one. The tmux runtime already resolves both sides before comparing a
+// pane's cwd against the requested workspace (adapters/runtime/tmux.sameDirectory)
+// for exactly this reason. Rejecting on a form mismatch would silently drop every
+// signal a live session produces, which is a worse failure than the nested agent
+// this guard exists to catch.
 func signalCWDBelongsToSession(workspacePath, agentCWD string) bool {
 	if workspacePath == "" || agentCWD == "" {
 		return true
 	}
+	if pathContainsSignalCWD(workspacePath, agentCWD) {
+		return true
+	}
+	return pathContainsSignalCWD(resolvedForCompare(workspacePath), resolvedForCompare(agentCWD))
+}
+
+func pathContainsSignalCWD(workspacePath, agentCWD string) bool {
 	workspace := filepath.Clean(workspacePath)
 	cwd := filepath.Clean(agentCWD)
 	if cwd == workspace {
@@ -1351,4 +1389,14 @@ func signalCWDBelongsToSession(workspacePath, agentCWD string) bool {
 		return true
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// resolvedForCompare returns path with its symlinks resolved, or path unchanged
+// when it cannot be resolved — an unresolvable path simply keeps the lexical
+// verdict rather than turning into a different answer.
+func resolvedForCompare(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return path
 }
