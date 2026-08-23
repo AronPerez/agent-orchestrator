@@ -2,6 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import { probeRemote, remoteRequest, type RemoteHealth, type RemoteRequestInit } from "./remote-request";
 import { findRemote, removeSavedRemote, toHostViews, updateSavedRemote } from "./remotes-ipc";
+import type { RemoteRegistry } from "./remote-registry";
 import { addRemote, readRemotes, type RemoteChanges, type RemoteEntry } from "./remotes-store";
 
 // The CLI resolves this file through config.StateDir(), which is ~/.ao
@@ -23,8 +24,7 @@ type IpcMainLike = {
 
 export type RemotesIpcDeps = {
 	file: string;
-	/** Stop whatever is serving this url; a no-op for a host that is not connected. */
-	disconnect: (url: string) => Promise<void>;
+	registry: RemoteRegistry;
 	probe?: (entry: RemoteEntry) => Promise<RemoteHealth>;
 };
 
@@ -33,7 +33,9 @@ export type RemotesIpcDeps = {
  * renderer receives back is password-free (see remotes-ipc.ts); the plaintext
  * password only ever travels renderer -> main, on `add`.
  */
-export function registerRemotesIpc(ipcMain: IpcMainLike, { file, disconnect, probe = probeRemote }: RemotesIpcDeps): void {
+export function registerRemotesIpc(ipcMain: IpcMainLike, { file, registry, probe = probeRemote }: RemotesIpcDeps): void {
+	const disconnect = (url: string) => registry.disconnect(url);
+
 	ipcMain.handle("remotes:list", async () => toHostViews(await readRemotes(file)));
 	ipcMain.handle("remotes:add", async (_event, input: RemoteEntry) => {
 		// Probe before saving: a host that never answered is worse than no host,
@@ -50,4 +52,16 @@ export function registerRemotesIpc(ipcMain: IpcMainLike, { file, disconnect, pro
 		updateSavedRemote(file, url, changes, disconnect, probe),
 	);
 	ipcMain.handle("remotes:remove", async (_event, url: string) => removeSavedRemote(file, url, disconnect));
+
+	ipcMain.handle("remotes:connect", async (_event, url: string) => {
+		const entry = await findRemote(file, url);
+		// Probe before starting a proxy: a reachable port may serve something
+		// other than an AO daemon, and exposing it as connected can wedge the
+		// app at boot.
+		const health = await probe(entry);
+		if (health !== "online") throw new Error(`host ${url} is ${health}`);
+		return registry.connect(entry);
+	});
+	ipcMain.handle("remotes:disconnect", async (_event, url: string) => disconnect(url));
+	ipcMain.handle("remotes:connected", async () => registry.views());
 }
