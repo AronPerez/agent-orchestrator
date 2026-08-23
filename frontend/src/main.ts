@@ -27,6 +27,7 @@ import {
 	returnToHome,
 	type UpdateCheckOptions,
 } from "./main/auto-updater";
+import { toggleDevToolsForFocusedSurface } from "./main/devtools-toggle";
 import {
 	listFeatureBuilds,
 	getActiveFeatureBuild,
@@ -315,6 +316,17 @@ function getShellWebContents(): WebContents | null {
 	return windowComposition?.shellWebContents ?? null;
 }
 
+// Both DevTools entry points (the Windows menu item and the app-wide shortcut)
+// route through here so neither can leave the shell's console unreachable.
+function toggleDevTools(): void {
+	// browserViewHost is reassigned during startup/teardown, so capture it.
+	const host = browserViewHost;
+	toggleDevToolsForFocusedSurface(
+		host ? () => host.toggleDevToolsForLastFocused() : null,
+		() => getShellWebContents()?.toggleDevTools(),
+	);
+}
+
 function syncNativeWindowBackground(): void {
 	if (!windowComposition || !mainWindow || mainWindow.isDestroyed()) return;
 	mainWindow.setBackgroundColor(
@@ -471,15 +483,7 @@ function appendDaemonOutput(text: string): void {
 // Browser panel opens the same native Chromium surface as the toolbar.
 function buildWindowsAppMenu(): Menu {
 	return Menu.buildFromTemplate(
-		buildWindowsAppMenuTemplate(() => {
-			const fallback = () => getShellWebContents()?.toggleDevTools();
-			void browserViewHost
-				?.toggleDevToolsForLastFocused()
-				.then((state) => {
-					if (!state) fallback();
-				})
-				.catch(fallback);
-		}),
+		buildWindowsAppMenuTemplate(() => toggleDevTools()),
 	);
 }
 
@@ -607,9 +611,7 @@ async function createWindowInternal(): Promise<void> {
 		() => true,
 		(id) => {
 			if (id !== "toggle-browser-devtools") return;
-			void browserViewHost
-				?.toggleDevToolsForLastFocused()
-				.catch(() => undefined);
+			toggleDevTools();
 		},
 		() => terminalFocused,
 	);
