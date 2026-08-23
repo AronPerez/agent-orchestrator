@@ -6,6 +6,9 @@ import { XtermTerminal } from "./XtermTerminal";
 
 const state = vi.hoisted(() => ({
 	fit: vi.fn(),
+	canvasAddonLoads: 0,
+	webglDisposeThrows: false,
+	webglContextLoss: null as null | (() => void),
 	linkHandler: null as null | ((event: MouseEvent, uri: string) => void),
 	lastTerminal: null as null | {
 		keyHandler?: (event: KeyboardEvent) => boolean;
@@ -133,13 +136,25 @@ vi.mock("@xterm/addon-web-links", () => ({
 }));
 
 vi.mock("@xterm/addon-canvas", () => ({
-	CanvasAddon: class FakeCanvasAddon {},
+	CanvasAddon: class FakeCanvasAddon {
+		constructor() {
+			state.canvasAddonLoads += 1;
+		}
+	},
 }));
 
 vi.mock("@xterm/addon-webgl", () => ({
 	WebglAddon: class FakeWebglAddon {
-		onContextLoss() {}
-		dispose() {}
+		onContextLoss(listener: () => void) {
+			state.webglContextLoss = listener;
+		}
+		dispose() {
+			// Mirrors the real failure: xterm throws out of AddonManager's dispose
+			// chain when the GL context is already gone.
+			if (state.webglDisposeThrows) {
+				throw new TypeError("Cannot read properties of undefined (reading '_isDisposed')");
+			}
+		}
 	},
 }));
 
@@ -159,6 +174,9 @@ describe("XtermTerminal", () => {
 		state.fit.mockReset();
 		state.lastTerminal = null;
 		state.linkHandler = null;
+		state.canvasAddonLoads = 0;
+		state.webglDisposeThrows = false;
+		state.webglContextLoss = null;
 		setNavigatorPlatform("Linux x86_64");
 		window.ao!.clipboard.writeText = vi.fn().mockResolvedValue(undefined);
 		window.ao!.clipboard.readText = vi.fn().mockResolvedValue("");
@@ -255,6 +273,26 @@ describe("XtermTerminal", () => {
 		} finally {
 			vi.useRealTimers();
 			vi.unstubAllGlobals();
+		}
+	});
+
+	it("loads the canvas fallback even when disposing the lost WebGL renderer throws", () => {
+		// A lost GL context is recoverable: xterm waits ~3s for restoration, gives
+		// up, and fires onContextLoss so the app can swap in the canvas renderer.
+		// If disposing the dead addon throws and that escapes, the swap never
+		// happens and the pane renders nothing for the rest of its life while
+		// still accepting input — a terminal that "hangs and doesn't load the text".
+		state.webglDisposeThrows = true;
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+		try {
+			render(<XtermTerminal theme="dark" />);
+			expect(state.canvasAddonLoads).toBe(0);
+
+			state.webglContextLoss?.();
+
+			expect(state.canvasAddonLoads).toBe(1);
+		} finally {
+			warn.mockRestore();
 		}
 	});
 

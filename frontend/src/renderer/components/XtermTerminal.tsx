@@ -99,7 +99,17 @@ function loadRenderer(term: Terminal): void {
 	try {
 		const webgl = new WebglAddon();
 		webgl.onContextLoss(() => {
-			webgl.dispose();
+			// xterm can throw while disposing a renderer whose GL context is already
+			// gone (AddonManager._wrappedAddonDispose reaching an undefined
+			// `_isDisposed`). Letting that escape skips the fallback and leaves the
+			// terminal with no renderer at all: the buffer keeps filling and input
+			// keeps working while nothing is ever drawn again. Dispose is a courtesy;
+			// the fallback is the point.
+			try {
+				webgl.dispose();
+			} catch (error) {
+				console.warn("xterm: disposing the lost WebGL renderer failed", error);
+			}
 			loadCanvasFallback();
 		});
 		term.loadAddon(webgl);
