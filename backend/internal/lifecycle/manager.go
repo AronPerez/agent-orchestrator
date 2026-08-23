@@ -263,6 +263,49 @@ func (m *Manager) agentProvablyAlive(ctx context.Context, rec domain.SessionReco
 	return err == nil && alive
 }
 
+// ClearStaleExit revives a session whose exited state is provably false -- the
+// supervised agent is alive right now. It exists for sessions poisoned before
+// the ApplyActivitySignal gate shipped (#114 effect 4: the exited belief is
+// self-sealing, because an idle agent fires no hooks to correct it and AO
+// refuses the send that would make it act), and for the gate's probe race
+// window.
+//
+// Returns true only when it actually flipped exited -> idle. The probe runs
+// before m.mu because it may shell out; mutate re-checks under the lock, so a
+// real exit landing in between wins.
+func (m *Manager) ClearStaleExit(ctx context.Context, id domain.SessionID) (bool, error) {
+	rec, ok, err := m.store.GetSession(ctx, id)
+	if err != nil || !ok {
+		return false, err
+	}
+	if rec.IsTerminated || rec.Activity.State != domain.ActivityExited {
+		return false, nil
+	}
+	if !m.agentProvablyAlive(ctx, rec) {
+		return false, nil
+	}
+	cleared := false
+	err = m.mutate(ctx, id, func(cur domain.SessionRecord, now time.Time) (domain.SessionRecord, bool) {
+		if cur.IsTerminated || cur.Activity.State != domain.ActivityExited {
+			return cur, false
+		}
+		next := cur
+		// Idle, not active: the measured #114 canary left the real agent sitting
+		// idle, and idle is what message-delivery readiness polls for.
+		next.Activity = domain.Activity{State: domain.ActivityIdle, LastActivityAt: now}
+		cleared = true
+		return next, true
+	})
+	if err != nil {
+		return false, err
+	}
+	if cleared {
+		slog.Default().Info("lifecycle: cleared a stale exited state for a provably-alive agent",
+			"session", id, "reason", "stale_exit_cleared")
+	}
+	return cleared, nil
+}
+
 // SetUsageFinalizer wires termination and relaunches to usage collection.
 // Telemetry failures never block the lifecycle transition.
 func (m *Manager) SetUsageFinalizer(finalizer sessionUsageFinalizer) {
