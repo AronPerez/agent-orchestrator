@@ -2949,6 +2949,9 @@ func (m *Manager) send(ctx context.Context, id domain.SessionID, message, client
 	var afterWrite func(context.Context) error
 	if strings.TrimSpace(message) != "" {
 		if recorder, ok := m.store.(latestUserPromptRecorder); ok {
+			//nolint:unparam // always nil on purpose: the message was already
+			// delivered, so a failure to persist the latest-prompt fact is
+			// warned about, never surfaced as a failed send.
 			afterWrite = func(writeCtx context.Context) error {
 				if _, recordErr := recorder.RecordSessionLatestUserPrompt(writeCtx, id, boundedConversationFact(message), m.clock()); recordErr != nil {
 					m.logger.Warn("send: delivered message but failed to persist latest user prompt", "sessionID", id, "error", recordErr)
