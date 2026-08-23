@@ -678,14 +678,15 @@ terminals.
 | ~~**Security review** of the loopback proxy + token model~~ | S | Done — AO-79, 2026-08-21 (four fixes; see Security & Privacy) | — |
 | **Accessibility audit** of the host tree, filter, and folder picker | S | Medium | Yes |
 | **Setup documentation**: trust boundary, Tailscale, macOS Local Network privacy caveat | S | Medium | Yes |
-| **SSH host support** — `ssh -L` tunnel into the existing proxy seam; removes plaintext LAN password entirely | M | Medium | No (after the above) |
-| **TLS + TOFU pinning** for the LAN listener | L | Low (Tailscale covers the need) | No |
+| ~~**SSH host support** — `ssh -L` tunnel into the existing proxy seam~~ — **spiked (AO-82)**: works with no proxy change; do it, docs first. See the spike section below | S then M | Medium | Yes (step 1 is documentation) |
+| **TLS + TOFU pinning** for the LAN listener — **mobile-only** after AO-82; SSH covers the desktop leg | L | Low (Tailscale covers the need) | Yes |
 | Cross-platform verification (Windows/Linux daemon as a remote host) | M | Medium | Yes |
 
 ### Tasks
 
 *Testing time is included in each estimate. The first four items are mutually independent and
-can be parallelized across owners; SSH and TLS should follow the security review.*
+can be parallelized across owners; SSH and TLS followed the security review — SSH is spiked (AO-82) and
+its step 1 folds into item 4.*
 
 1. ~~Instrument the remote path (host connect result/duration, stream state, per-host query
 failure); add proxy lifecycle logging in main with an explicit no-secrets rule; surface
@@ -696,5 +697,166 @@ decide whether OS keychain storage replaces the 0600 file.
 and folder picker.
 4. User-facing setup documentation, including the trusted-network boundary, the Tailscale
 bind option, and the macOS Local Network privacy failure mode.
-5. SSH transport spike behind the existing proxy seam.
+5. ~~SSH transport spike behind the existing proxy seam.~~ **Done — AO-82, 2026-08-22.**
 6. Cross-platform host verification.
+
+## SSH transport spike — AO-82 (2026-08-22)
+
+**Question:** can an `ssh -L` tunnel go behind the existing loopback-proxy seam, and does
+that remove the plaintext-HTTP risk AO-79 accepted as "the largest limitation"?
+
+**Answer: yes, and the proxy needs no change at all.** The expensive part is not the
+transport — it is who spawns and owns the `ssh` child. **Recommendation: do it, in two
+steps, documentation first.**
+
+### What was measured
+
+A throwaway test drives the **unchanged** `startRemoteProxy` against a real `ssh -L`
+forward to a stand-in daemon: `frontend/src/main/remote-proxy.ssh-spike.test.ts` on
+`ao/agent-orchestrator-84/ssh-spike`. Both a credentialled REST request and a **WebSocket
+upgrade** (the terminal/SSE path) traverse renderer → proxy → ssh → far side, with
+`Authorization: Bearer` injected in main and the renderer `Origin` still stripped. 2/2 pass.
+The test is a **proof, not a starting point** — it shells out to a live `ssh` and is not
+merge material.
+
+### 1. Tunnel lifecycle
+
+`ssh` is a child process of main, one per connected SSH host, spawned before the proxy and
+killed after it. Three measured details shape the design:
+
+- **OpenSSH will not allocate the local port.** `-L 0:…` and `-L 127.0.0.1:0:…` are both
+rejected as "Bad local forwarding specification" (OpenSSH 10.2). The caller must bind a
+socket, read the port, close it, and hand the number to `ssh` — a TOCTOU race with every
+other process on the machine. `-o ExitOnForwardFailure=yes` turns losing that race into a
+clean immediate exit rather than a tunnel that silently forwards nothing.
+- **A unix-socket forward avoids the race entirely.** `-L /path/to.sock:127.0.0.1:3011`
+works, and OpenSSH creates the socket `srw-------`, which is a tighter boundary than a
+loopback port for free. Two caveats: the path is capped by `sun_path` (~104 bytes on macOS —
+a 155-char path is rejected at parse time; `~/.ao/` fits comfortably), and it needs
+`socketPath` support at the dial site, so it is a later hardening, not the first cut.
+- **A dropped tunnel is already a handled state.** When the `ssh` child dies the forwarded
+port stops listening; the proxy gets `ECONNREFUSED` and answers its existing
+502 `{"error":"remote daemon unreachable"}`. A dead tunnel is indistinguishable from a dead
+host, so **no new UI state is needed**. Sleep/suspend is the same path once
+`ServerAliveInterval`/`ServerAliveCountMax` fire; without them a suspended peer leaves a
+listening port that hangs instead of refusing, so they are not optional.
+
+Setup cost, measured to localhost: **~200–300 ms** cold, **~75–145 ms** through an existing
+`ControlMaster` via `ssh -O forward`. Cheap enough that `remotes:probe` and `remotes:add` can
+each open a throwaway tunnel for their own duration rather than sharing a refcounted one with
+`remotes:connect`. Two independent lifetimes beat one refcounted lifetime here.
+
+### 2. Store shape, and how the Go CLI stays in agreement
+
+**`RemoteEntry` is extended in place, and the CLI needs no Go change.** Verified against the
+real binary: an entry with `"url": "ssh://box"` plus unknown `kind`/`ssh` fields sits in
+`~/.ao/remotes.json` while `ao --url http://…` resolves its siblings normally. Three existing
+properties make that safe, and all three are load-bearing:
+
+- `lookupRemoteEntry` is the **only** reader and there is **no writer** in Go, so there is no
+round-trip that could drop unknown fields.
+- It already `continue`s past an entry whose URL fails `normalizeRemoteURL` — with the comment
+"a hand-edited entry must not break every other one" — and that function rejects any scheme
+but http/https.
+- Asked for an SSH entry directly, the CLI refuses accurately rather than misbehaving:
+`invalid daemon URL "ssh://box": scheme must be http or https`.
+
+So the store stays one file with one source of truth. What the CLI *cannot* do is use an SSH
+host — and it does not need to: `ssh box ao status` is strictly better than teaching the Go
+CLI to spawn its own tunnel. If that answer is ever unacceptable, the honest fix is a
+`ao remote` subcommand, not a second store.
+
+### 3. What replaces the connection password
+
+**It does not replace it — it takes it off the wire, which is exactly what AO-79 asked for.**
+There are two possible targets on the far side and only one of them works:
+
+| Forward to | Credential | Result |
+| --- | --- | --- |
+| **LAN listener `:3011`** | connection password, still required | **Works.** Measured through a tunnel: authenticated `GET` → 200, and a renderer-shaped write carrying `Sec-Fetch-Site: cross-site` passes origin policy because `servedOverLAN` exempts it. |
+| Loopback listener `:3001` | none — "the tunnel is the auth" | **Broken, and worse than broken.** |
+
+The loopback variant fails two ways, both measured:
+
+1. **Every write and every terminal 403s.** `requiresStrictOrigin` applies on the loopback
+listener, and `strictOriginOK` rejects both `cross-site` and `same-site`. Electron's Chromium
+does attach `sec-fetch-site` to a cross-origin fetch (confirmed by echoing the renderer's own
+headers back through the Browser panel: Electron 33.4.11 / Chromium 130), and
+`STRIP_REQUEST_HEADERS` does not strip `sec-fetch-*`, so it arrives verbatim. `POST` and
+`GET /mux` through the tunnel both return `403 ORIGIN_FORBIDDEN`.
+2. **It hands out every loopback-only control route.** `lanControlBlock` exists precisely to
+keep `/shutdown`, `/internal/`, `/api/v1/mobile`, `/api/v1/dev` and `/api/v1/browser` off a
+network-reachable socket. Through a tunnel to `:3001` they are all reachable with **no
+credential** — `GET /api/v1/mobile/status` returns the daemon's connection password in
+cleartext (measured; value not recorded here). On the LAN listener the same request correctly
+returns `404 ROUTE_LOOPBACK_ONLY`.
+
+Neither is fatal in isolation — an SSH login is already shell access on that box — but making
+it work means weakening the loopback listener's origin boundary for *every* local caller, not
+just the tunnel. That is a daemon policy change, decided on its own merits. **Drop the
+loopback variant.**
+
+The complement is free and worth pairing with this: `bind` already accepts a literal address
+(`BindAddress` → `net.ParseIP`), so `"bind": "127.0.0.1"` in `~/.ao/mobile/config.json` binds
+the LAN listener to loopback only. **LAN listener on loopback + SSH tunnel = the password is
+kept, and the port is on no network at all.** No code.
+
+### 4. Host-key verification
+
+**Delegate to OpenSSH; invent nothing.** The `ao-phone-proxy` prior art named in the task does
+not apply: that proxy is **retired** (ADR 0001), and its "TOFU" was IP trust-on-first-connect,
+not host-key pinning — there is no cryptographic policy here to inherit.
+
+Spawned non-interactively with `BatchMode=yes`, all three `StrictHostKeyChecking` modes behave
+correctly and, critically, **fail fast rather than hang on an absent tty** (measured):
+`yes` and the default `ask` both exit immediately with `Host key verification failed`;
+`accept-new` silently trusts and connects. Use `BatchMode=yes` with the user's own
+`~/.ssh/known_hosts` and default strictness, and surface the failure verbatim with "run
+`ssh <host>` once in a terminal to verify its key". A first connection the user has already
+made in their own shell is a better trust event than one an Electron app makes for them.
+
+### 5. Does this subsume the TLS follow-up?
+
+**No — they are independent, and neither blocks the other.** SSH covers desktop→desktop only:
+the app can spawn `ssh`, so it never needs TLS for that leg. The mobile client cannot spawn
+`ssh`, so the phone→desktop leg keeps exactly the exposure it has today, and TLS (or the
+`tailscale` bind) remains its only answer. What SSH does change is the *priority*: TLS stops
+being the fix for the desktop path and becomes a mobile-only item, which is the lower-traffic
+one.
+
+### 6. Windows
+
+Assume nothing; two things are known and two need verification on a real Windows host:
+
+- **Known:** the unix-socket forward is macOS/Linux only, so Windows takes the TCP-port form
+and inherits the port race. And any new state file must repeat the existing win32 exemption —
+Node reports `0o666` for every writable file there (the AO-79 finding #4 in `remotes-store.ts`,
+mirroring `cli/remote.go:154`).
+- **Needs verification:** `ssh.exe` ships with Windows 10+ but as an *optional feature*, so its
+presence must be probed and its absence must be a real message rather than an `ENOENT`; and
+`child.kill()` on win32 maps to `TerminateProcess`, which should drop the forward (ssh has no
+descendants here) but has not been measured.
+
+Precedent exists either way: main already owns a long-lived child process with platform
+divergence (`daemon-owner.ts`).
+
+### Recommendation
+
+**Do it — documentation first, then the small version. Size: S then M.**
+
+1. **Ship the recipe, not the feature (S, no code).** Because the proxy needs no change and the
+CLI ignores SSH entries, *the entire transport benefit is available today*: the user runs
+`ssh -N -L 3011:127.0.0.1:3011 box` and saves `http://127.0.0.1:3011` as an ordinary host. Fold
+that into the setup documentation follow-up, together with `"bind": "127.0.0.1"`. Users get
+encrypted transport this week, and it doubles as the acceptance test for step 2.
+2. **Then let the app spawn it (M).** An optional `ssh` field on `RemoteEntry`, a tunnel manager
+in main, and one `await dialable(entry)` at the four call sites that consume an entry
+(`remotes:add`, `remotes:probe`, `remotes:request`, `remotes:connect`), plus an SSH mode in the
+add-host dialog. Nothing in `remote-proxy.ts` changes.
+3. **Drop** the loopback-listener variant, for the two measured reasons above.
+4. **Unblock** the TLS item as mobile-only rather than sequencing it after this.
+
+The one honest argument against doing step 2 at all: `"bind": "tailscale"` already delivers
+encrypted transport with zero AO code, and the EDD already names it. Step 2 buys ergonomics for
+people who have SSH and do not want Tailscale — real, but it is ergonomics, not a new security
+property. Step 1 is what actually retires the accepted risk.
