@@ -8,22 +8,22 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessionguard"
 )
 
-// staleExitClearer is lifecycle.Manager's ClearStaleExit, late-bound here for
+// StaleExitClearer is lifecycle.Manager's ClearStaleExit, late-bound here for
 // the same cycle reason lifecycle late-binds its completionTerminator to this
 // package (daemon assembly wires both, side by side).
-type staleExitClearer interface {
+type StaleExitClearer interface {
 	ClearStaleExit(ctx context.Context, id domain.SessionID) (bool, error)
 }
 
 // SetStaleExitClearer wires lifecycle's stale-exit revival into delivery
 // refusal. Wired once during daemon assembly, next to SetCompletionTerminator.
-func (m *Manager) SetStaleExitClearer(c staleExitClearer) {
+func (m *Manager) SetStaleExitClearer(c StaleExitClearer) {
 	m.staleExitMu.Lock()
 	defer m.staleExitMu.Unlock()
 	m.staleExit = c
 }
 
-func (m *Manager) staleExitClearerRef() staleExitClearer {
+func (m *Manager) staleExitClearerRef() StaleExitClearer {
 	m.staleExitMu.RLock()
 	defer m.staleExitMu.RUnlock()
 	return m.staleExit
@@ -45,7 +45,7 @@ func (m *Manager) RuntimeExactInspector() (ports.ExactSupervisedProcessInspector
 // unwired clearer, a clearer error, and a refusal to clear all leave the
 // original outcome standing. A session re-poisoned between clear and retry
 // yields a second refusal -- bounded, and deliberately not a loop.
-func deliverWithStaleExitRetry(ctx context.Context, id domain.SessionID, clearer staleExitClearer,
+func deliverWithStaleExitRetry(ctx context.Context, id domain.SessionID, clearer StaleExitClearer,
 	deliver func() (sessionguard.Outcome, error)) (sessionguard.Outcome, error) {
 	outcome, err := deliver()
 	if err != nil || outcome != sessionguard.SuppressedExited || clearer == nil {

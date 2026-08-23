@@ -59,7 +59,7 @@ func TestDeliverWithStaleExitRetry(t *testing.T) {
 				delivers++
 				return out, nil
 			}
-			var clearer staleExitClearer
+			var clearer StaleExitClearer
 			if tc.clearer != nil {
 				clearer = tc.clearer
 			}

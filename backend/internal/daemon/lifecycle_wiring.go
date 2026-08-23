@@ -231,6 +231,15 @@ type sessionLifecycle interface {
 	// session's durable metadata before the next prompt routes. A later TUI
 	// rebuild reads it back so ChatUI model changes survive the handoff.
 	PersistChatModel(ctx context.Context, id domain.SessionID, model string) error
+	// SetStaleExitClearer late-binds lifecycle's stale-exit revival into
+	// delivery refusal, so a session a nested agent falsely marked exited heals
+	// on the user's next send (#114 effect 4).
+	SetStaleExitClearer(clearer sessionmanager.StaleExitClearer)
+	// RuntimeExactInspector exposes the runtime's strict supervised-liveness
+	// probe so boot can hand it to lifecycle without knowing the runtime's
+	// concrete type. Not every runtime implements it; ok=false leaves
+	// hook-reported exits unprobed, exactly as before #114.
+	RuntimeExactInspector() (ports.ExactSupervisedProcessInspector, bool)
 }
 
 // sessionLifecycleMessenger adapts sessionLifecycle to ports.AgentMessenger so

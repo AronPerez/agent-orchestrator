@@ -1011,6 +1011,12 @@ func (f *fakeSessionLifecycle) PersistChatModel(_ context.Context, _ domain.Sess
 	return nil
 }
 
+func (f *fakeSessionLifecycle) SetStaleExitClearer(sessionmanager.StaleExitClearer) {}
+
+func (f *fakeSessionLifecycle) RuntimeExactInspector() (ports.ExactSupervisedProcessInspector, bool) {
+	return nil, false
+}
+
 // TestWiring_SessionLifecycleInterfaceInvokedByDaemon asserts the
 // sessionLifecycle interface is satisfied by *sessionmanager.Manager (compile
 // check) and that Reconcile and RestoreAll dispatch correctly through the
