@@ -786,7 +786,10 @@ export function remotesFilePath(): string {
 
 // The slice of Electron's ipcMain these handlers need, so tests need no Electron.
 type IpcMainLike = {
-	handle: (channel: string, listener: (event: unknown, ...args: never[]) => Promise<unknown>) => void;
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any -- the listener
+	// args must unify Electron's IpcMain (any[]) with a test fake (unknown[]),
+	// and `never[]` rejects both; `any[]` here leaks nowhere past registration.
+	handle(channel: string, listener: (event: unknown, ...args: any[]) => Promise<unknown>): void;
 };
 
 export type RemotesIpcDeps = {
@@ -962,7 +965,7 @@ cd "$STACK" && git -C "$W" show origin/develop:frontend/src/main/remote-proxy.ts
 cd frontend && node_modules/.bin/vitest run --config vite.renderer.config.ts src/main/remote-proxy.test.ts 2>&1 | grep -E "×|Tests "
 ```
 
-Expected: first run fails to resolve `./remote-proxy`; second run `Tests  16 passed (16)` — token stripped + credential injected, https never in the clear, prefix restored, no-token 404 with nothing forwarded, near-miss token refused, preflight answered locally, CORS on real responses, 502 when unreachable, lifecycle logs carry no secret, loopback only, upgraded socket closed on `close()`, SSE delivered as written, WebSocket tunnelled, token-less upgrade destroyed. Verified on upstream/main 2026-08-23.
+Expected: first run fails to resolve `./remote-proxy`; second run `Tests  15 passed (15)` — token stripped + credential injected, https never in the clear, prefix restored, no-token 404 with nothing forwarded, near-miss token refused, preflight answered locally, CORS on real responses, 502 when unreachable, lifecycle logs carry no secret, loopback only, upgraded socket closed on `close()`, SSE delivered as written, WebSocket tunnelled, token-less upgrade destroyed. Verified on upstream/main 2026-08-23.
 
 - [ ] **Step 2: Write the registry test (no runtime-link cases, plus the no-op guarantee ipc relies on)**
 
@@ -1210,7 +1213,7 @@ describe("registerRemotesIpc", () => {
 cd "$STACK/frontend" && node_modules/.bin/vitest run --config vite.renderer.config.ts src/main/remotes-main.test.ts 2>&1 | grep -E "×|Tests "
 ```
 
-Expected: 6 failures (`registry` is not a known dep; the three channels are unregistered).
+Expected: 4 failures (the three connection channels are unregistered and the connect flow is missing; the two file-only handlers still pass).
 
 - [ ] **Step 5: Update `remotes-main.ts` to own the registry**
 
@@ -1362,7 +1365,7 @@ Claude-Session: https://claude.ai/code/session_01HnqdDyvae5s7L7KYwtKPd7"
 git push -q -u origin ao/agent-orchestrator-96/up-a4-proxy
 ```
 
-Expected: every `src/main/` test file green (the proxy's 16, registry 7, ipc 8, remotes-main 6, plus the store and request suites), both typechecks OK.
+Expected: every `src/main/` test file green (the proxy's 15, registry 7, ipc 8, remotes-main 6, plus the store and request suites), both typechecks OK.
 
 ---
 
@@ -1703,6 +1706,11 @@ Extends the Task 2 branch and PR with the finished stack's hand-off. Runs in the
 - Create: `docs/upstreaming-stack-status.md`
 - Create: `docs/upstreaming-pr-bodies/a1-flag.md` … `a5-clients.md`
 
+Per orchestrator direction during execution: publish each final SHA additionally to a
+**clean ref** (`up-a1-flag` … `up-a5-clients`) with `git push origin <sha>:refs/heads/<name>`
+and write the hand-off against those — upstream PRs must not advertise session-internal
+branch names. The namespaced refs stay for AO tracking.
+
 - [ ] **Step 1: Return to the hand-off branch**
 
 ```bash
@@ -1751,7 +1759,7 @@ A1, A2 and A3 are cut independently from `upstream/main` and share no code — t
 | 1 | `ao/agent-orchestrator-96/up-a1-flag` | `upstream/main` | feat(settings): add an experimental Remote hosts flag | 10 | ui-store ×3, settings switch ×1 |
 | 2 | `ao/agent-orchestrator-96/up-a2-hosts` | `upstream/main` | feat(hosts): host identity primitives | 1 | hosts ×5 |
 | 3 | `ao/agent-orchestrator-96/up-a3-store` | `upstream/main` | feat(remotes): saved-host store, authenticated requests, password-free IPC | 9 | store + request suites, ipc ×8, main ×4 |
-| 4 | `ao/agent-orchestrator-96/up-a4-proxy` | `up-a3-store` | feat(remotes): token-gated loopback proxy for remote daemons | 9 | proxy ×16, registry ×7, main ×6 |
+| 4 | `ao/agent-orchestrator-96/up-a4-proxy` | `up-a3-store` | feat(remotes): token-gated loopback proxy for remote daemons | 9 | proxy ×15, registry ×7, main ×6 |
 | 5 | `ao/agent-orchestrator-96/up-a5-clients` | merge(A1, A2, A4), tag `up-a5-base` | feat(hosts): per-host API clients and flag-gated host boot | 3 | host-clients ×9, active-host ×6 |
 
 ## Opening a PR (A1/A2/A3 in any order; A4 and A5 in sequence)
