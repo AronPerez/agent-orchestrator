@@ -472,6 +472,30 @@ func TestObserve_CIStates(t *testing.T) {
 			wantCI: domain.CIFailing,
 		},
 		{
+			// Shape measured on a real sha: four rows under one name, and the
+			// rollup does not return them in time order. Ordering by position
+			// would pick a cancel and report a green PR as failing.
+			name: "cancelled superseded by a later same-named run is not failing",
+			nodes: []any{
+				map[string]any{"__typename": "CheckRun", "name": "migrate", "status": "COMPLETED", "conclusion": "CANCELLED", "startedAt": "2026-08-21T18:10:42Z"},
+				map[string]any{"__typename": "CheckRun", "name": "migrate", "status": "COMPLETED", "conclusion": "CANCELLED", "startedAt": "2026-08-21T18:11:48Z"},
+				map[string]any{"__typename": "CheckRun", "name": "migrate", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "2026-08-21T18:10:45Z"},
+				map[string]any{"__typename": "CheckRun", "name": "migrate", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "2026-08-21T18:11:53Z"},
+			},
+			wantCI: domain.CIPassing,
+		},
+		{
+			// The other direction: a cancel that nothing later concluded over
+			// still fails. Without this, "ignore cancels when the name also has
+			// a success" would promote the stale 18:10 success to the verdict.
+			name: "cancelled after an earlier success still fails",
+			nodes: []any{
+				map[string]any{"__typename": "CheckRun", "name": "migrate", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "2026-08-21T18:10:45Z"},
+				map[string]any{"__typename": "CheckRun", "name": "migrate", "status": "COMPLETED", "conclusion": "CANCELLED", "startedAt": "2026-08-21T18:11:48Z"},
+			},
+			wantCI: domain.CIFailing,
+		},
+		{
 			name: "legacy statuscontext failure",
 			nodes: []any{
 				map[string]any{"__typename": "StatusContext", "context": "ci/legacy", "state": "FAILURE", "targetUrl": "https://ci"},
