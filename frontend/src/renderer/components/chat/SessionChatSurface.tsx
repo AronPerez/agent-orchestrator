@@ -39,6 +39,7 @@ import type { ConversationSnapshot } from "../../types/conversation";
 import type { TerminalTarget } from "../../types/terminal";
 import type { AgentSwitchSummary, WorkspaceSession } from "../../types/workspace";
 import { baseUrlFor } from "../../lib/host-clients";
+import { refKey } from "../../lib/hosts";
 import { AgentSwitchProgressTrack } from "../AgentSwitchProgressTrack";
 import { TerminalSwitchAgentButton } from "../TerminalSwitchAgentButton";
 import { ChatWorkspace } from "./ChatWorkspace";
@@ -200,8 +201,9 @@ export function SessionChatSurface({
 		switchPresentation?.lockAgentTerminal && !switchPresentation.allowSourceInput,
 	);
 	const renderShellFallback = Boolean(shellTarget && session);
+	const snapshotSessionMismatch = Boolean(snapshot && snapshot.sessionId !== session.id);
 	const renderSnapshot =
-		snapshot ??
+		(snapshotSessionMismatch ? undefined : snapshot) ??
 		(renderShellFallback
 			? unavailableConversationSnapshot(session)
 			: undefined);
@@ -248,6 +250,7 @@ export function SessionChatSurface({
 	return (
 		<div className="relative h-full min-h-0">
 			<ChatWorkspace
+				key={refKey(session)}
 				apiBaseUrl={baseUrlFor(session.host) ?? undefined}
 				snapshot={renderSnapshot}
 				agentInputDisabled={switchLocksChat || switchSelectorOpen}

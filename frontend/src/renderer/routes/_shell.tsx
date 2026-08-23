@@ -163,8 +163,6 @@ function ShellLayout() {
 	const handledShellNonceRef = useRef(newShellTerminalNonce);
 	const [isKeyboardShortcutsOpen, setIsKeyboardShortcutsOpen] = useState(false);
 	const [isKeyboardShortcutsSettingsOpen, setIsKeyboardShortcutsSettingsOpen] = useState(false);
-	const [isSidebarPeekOpen, setIsSidebarPeekOpen] = useState(false);
-	const sidebarPeekCloseTimerRef = useRef<number | undefined>(undefined);
 	const routeParams = useParams({ strict: false }) as { hostId?: string; projectId?: string; sessionId?: string };
 	useEffect(() => {
 		document.addEventListener("click", handleModifierLinkClick);
@@ -292,27 +290,6 @@ function ShellLayout() {
 		!usesPreviewWorkspaceData &&
 		!daemonStatus.code &&
 		(!isDaemonReady || workspaceStartupState === "loading");
-	const cancelSidebarPeekClose = useCallback(() => {
-		if (sidebarPeekCloseTimerRef.current === undefined) return;
-		window.clearTimeout(sidebarPeekCloseTimerRef.current);
-		sidebarPeekCloseTimerRef.current = undefined;
-	}, []);
-
-	const previewSidebar = useCallback(() => {
-		if (isSidebarOpen) return;
-		cancelSidebarPeekClose();
-		setIsSidebarPeekOpen(true);
-	}, [cancelSidebarPeekClose, isSidebarOpen]);
-
-	const scheduleSidebarPeekClose = useCallback(() => {
-		if (isSidebarOpen) return;
-		cancelSidebarPeekClose();
-		sidebarPeekCloseTimerRef.current = window.setTimeout(() => {
-			setIsSidebarPeekOpen(false);
-			sidebarPeekCloseTimerRef.current = undefined;
-		}, 140);
-	}, [cancelSidebarPeekClose, isSidebarOpen]);
-
 	const navigateSession = useCallback(
 		(direction: -1 | 1) => {
 			if (!scopedProjectId) return;
@@ -654,47 +631,6 @@ function ShellLayout() {
 	}, [themePreference]);
 
 	useEffect(() => {
-		if (!isSidebarOpen) return;
-		cancelSidebarPeekClose();
-		setIsSidebarPeekOpen(false);
-	}, [cancelSidebarPeekClose, isSidebarOpen]);
-
-	useEffect(() => cancelSidebarPeekClose, [cancelSidebarPeekClose]);
-
-	useEffect(() => {
-		if (!isSidebarPeekOpen || isSidebarOpen) return;
-
-		const handlePointerMove = (event: PointerEvent) => {
-			const target = event.target instanceof Element ? event.target : null;
-			const isInSidebarPortal = Boolean(target?.closest('[role="dialog"], [role="listbox"], [role="menu"]'));
-			// TitlebarNav / WindowTitlebar sit above the peek in z-order; keep the
-			// preview open while the pointer is on those controls so hover→click
-			// to pin still works.
-			const isInTitlebarChrome = Boolean(
-				target?.closest("[data-slot='titlebar-nav'], .window-titlebar"),
-			);
-			const sidebar = document.querySelector<HTMLElement>('[data-slot="sidebar-container"]');
-			const bounds = sidebar?.getBoundingClientRect();
-			const isInSidebar = Boolean(
-				bounds &&
-				event.clientX >= bounds.left &&
-				event.clientX <= bounds.right &&
-				event.clientY >= bounds.top &&
-				event.clientY <= bounds.bottom,
-			);
-
-			if (isInSidebar || isInSidebarPortal || isInTitlebarChrome) {
-				cancelSidebarPeekClose();
-				return;
-			}
-			scheduleSidebarPeekClose();
-		};
-
-		window.addEventListener("pointermove", handlePointerMove);
-		return () => window.removeEventListener("pointermove", handlePointerMove);
-	}, [cancelSidebarPeekClose, isSidebarOpen, isSidebarPeekOpen, scheduleSidebarPeekClose]);
-
-	useEffect(() => {
 		if (daemonStatus.state !== "ready" || !daemonStatus.port) return;
 		if (agentCatalogPortRef.current === daemonStatus.port) return;
 
@@ -896,7 +832,7 @@ function ShellLayout() {
 				{/* Windows-only custom title bar (sidebar toggle + File/Edit/View/…
             menu); paints the chrome the frameless window drops. Renders null on
             macOS/Linux. */}
-				<WindowTitlebar onSidebarPreviewEnter={previewSidebar} />
+				<WindowTitlebar />
 				{/* App routes render their topbar inside the framed panel, matching the board chrome across platforms while leaving OS titlebars native. */}
 				{!framedAppTopbar && !hideShellTopbar && !routeParams.sessionId ? <ShellTopbar /> : null}
 				{/* Controlled by the ui-store so TitlebarNav / Topbar toggles (which
@@ -906,11 +842,9 @@ function ShellLayout() {
 					className="min-h-0 flex-1 flex-col overflow-x-hidden"
 					keyboardShortcut={false}
 					onOpenChange={(open) => {
-						cancelSidebarPeekClose();
-						setIsSidebarPeekOpen(false);
 						if (open !== isSidebarOpen) toggleSidebar();
 					}}
-					open={!isStartupLoading && (isSidebarOpen || isSidebarPeekOpen)}
+					open={!isStartupLoading && isSidebarOpen}
 					style={
 						{
 							"--sidebar-width": "var(--ao-sidebar-w, var(--size-sidebar-default))",
@@ -924,8 +858,6 @@ function ShellLayout() {
               below its custom titlebar. */}
 				<Sidebar
 					hideEdgeBorder={isWelcomeBoard}
-					isOverlay={isSidebarPeekOpen && !isSidebarOpen}
-					onPreviewLeave={scheduleSidebarPeekClose}
 					underTopbar={isMac || isWindows || isLinux}
 					topbarOffset={isWindows ? "titlebar" : hideShellTopbar ? "trafficLights" : "toolbar"}
 					onCloneProject={cloneProject}
@@ -999,7 +931,6 @@ function ShellLayout() {
 						hasSessionTopbar={Boolean(routeParams.sessionId)}
 						historyLocked={isWelcomeBoard}
 						isFullScreen={isFullScreen}
-						onSidebarPreviewEnter={previewSidebar}
 					/>
 				</SidebarProvider>
 				<OrchestratorReplacementDialog
