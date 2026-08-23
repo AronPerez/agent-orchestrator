@@ -169,3 +169,50 @@ func TestAuthoritativeExitNeverProbed(t *testing.T) {
 		})
 	}
 }
+
+// A2 stops new poisoning; ClearStaleExit heals sessions poisoned before it
+// shipped (or in the gate's probe race window) at the moment the user acts.
+func TestClearStaleExit(t *testing.T) {
+	exited := func() domain.SessionRecord {
+		r := supervisedRec("s1")
+		r.Activity = domain.Activity{State: domain.ActivityExited}
+		return r
+	}
+	for _, tc := range []struct {
+		name        string
+		rec         domain.SessionRecord
+		inspector   *fakeExitInspector
+		wantCleared bool
+		wantState   domain.ActivityState
+	}{
+		{"stale exit, agent alive -> revived to idle", exited(), &fakeExitInspector{alive: true}, true, domain.ActivityIdle},
+		{"real exit, agent gone -> untouched", exited(), &fakeExitInspector{alive: false}, false, domain.ActivityExited},
+		{"probe error -> untouched (fail open)", exited(), &fakeExitInspector{alive: true, err: errors.New("ps failed")}, false, domain.ActivityExited},
+		{"no inspector -> untouched", exited(), nil, false, domain.ActivityExited},
+		{"not exited -> no-op", supervisedRec("s1"), &fakeExitInspector{alive: true}, false, working("s1").Activity.State},
+		{"terminated -> untouched", func() domain.SessionRecord {
+			r := exited()
+			r.IsTerminated = true
+			return r
+		}(), &fakeExitInspector{alive: true}, false, domain.ActivityExited},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newFakeAgentSwitchLifecycleStore()
+			store.setSession(tc.rec)
+			m := New(store, &fakeMessenger{})
+			if tc.inspector != nil {
+				m.SetExitInspector(tc.inspector)
+			}
+			cleared, err := m.ClearStaleExit(ctx, tc.rec.ID)
+			if err != nil {
+				t.Fatalf("ClearStaleExit: %v", err)
+			}
+			if cleared != tc.wantCleared {
+				t.Fatalf("cleared = %v, want %v", cleared, tc.wantCleared)
+			}
+			if got := sessionState(t, store, tc.rec.ID); got != tc.wantState {
+				t.Fatalf("state = %s, want %s", got, tc.wantState)
+			}
+		})
+	}
+}
