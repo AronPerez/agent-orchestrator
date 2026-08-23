@@ -1602,15 +1602,27 @@ export function XtermTerminal(props: XtermTerminalProps) {
 		shell.addEventListener("dragover", dragOverInput);
 		shell.addEventListener("drop", dropInput);
 
+		// Every reveal in the terminal routes through here and performs the reveal
+		// on the *next* statement: the settled-fit listener below resolves
+		// prepareForActivation only after this returns, and useTerminalSession's
+		// three replay-settle sites call setReplaySettled(true) right after it. A
+		// throw would therefore strand the pane for good — behind a container the
+		// cache holds at visibility:hidden until activation resolves, or behind a
+		// replay cover that never lifts. Scrolling is cosmetic; the reveal is not.
 		const showLatestOutput = () => {
-			term.scrollToBottom();
-			// Hidden output can leave the offscreen DOM scrollbar stale even
-			// after xterm's logical viewport moves. Synchronize it before either
-			// the first-load cover or retained-cache container is revealed.
-			const viewport = host.querySelector<HTMLElement>(".xterm-viewport");
-			if (!viewport) return;
-			viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
-			scheduleScrollbarUpdate();
+			try {
+				term.scrollToBottom();
+				// Hidden output can leave the offscreen DOM scrollbar stale even
+				// after xterm's logical viewport moves. Synchronize it before either
+				// the first-load cover or retained-cache container is revealed.
+				const viewport = host.querySelector<HTMLElement>(".xterm-viewport");
+				if (!viewport) return;
+				viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+				scheduleScrollbarUpdate();
+			} catch {
+				// A stale scroll position is a cosmetic flaw; a stranded reveal is a
+				// terminal that never loads its text.
+			}
 		};
 
 		let cancelActivationPreparation: (() => void) | null = null;
