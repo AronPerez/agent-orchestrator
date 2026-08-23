@@ -17,6 +17,7 @@ import {
 } from "./shared/tray";
 import type { DaemonStatus } from "./shared/daemon-status";
 import type { RemoteHostView } from "./main/remotes-ipc";
+import type { ConnectedHostView } from "./main/remote-registry";
 import type { RemoteHealth, RemoteRequestInit, RemoteResponse } from "./main/remote-request";
 import type {
 	EditorHandoffState,
@@ -510,6 +511,9 @@ const api = {
 		probe: (url: string) => ipcRenderer.invoke("remotes:probe", url) as Promise<RemoteHealth>,
 		request: (url: string, init: RemoteRequestInit) =>
 			ipcRenderer.invoke("remotes:request", url, init) as Promise<RemoteResponse>,
+		connect: (url: string) => ipcRenderer.invoke("remotes:connect", url) as Promise<ConnectedHostView>,
+		disconnect: (url: string) => ipcRenderer.invoke("remotes:disconnect", url) as Promise<void>,
+		connected: () => ipcRenderer.invoke("remotes:connected") as Promise<ConnectedHostView[]>,
 	},
 	cloud: {
 		getSession: () => ipcRenderer.invoke("cloud:getSession") as Promise<CloudAccount | null>,
