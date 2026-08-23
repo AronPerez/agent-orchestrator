@@ -26,6 +26,7 @@ const {
 	terminalState,
 	replaySettled,
 	terminalSessionOptions,
+	onErrorRef,
 	xtermMounts,
 	xtermUnmounts,
 } = vi.hoisted(
@@ -40,6 +41,7 @@ const {
 		terminalState: { value: "idle" },
 		replaySettled: { value: true },
 		terminalSessionOptions: [] as Array<{ coverInitialReplay?: boolean }>,
+		onErrorRef: { current: undefined as undefined | ((error: unknown) => void) },
 		xtermMounts: { value: 0 },
 		xtermUnmounts: { value: 0 },
 	}),
@@ -73,10 +75,12 @@ vi.mock("../lib/host-clients", () => ({
 
 vi.mock("./XtermTerminal", () => ({
 	XtermTerminal: (props: {
+		onError?: (error: unknown) => void;
 		onLinkOpen?: (uri: string) => void;
 		onReady?: (terminal: AttachableTerminal) => void;
 	}) => {
 		terminalLinkHandler = props.onLinkOpen;
+		onErrorRef.current = props.onError;
 		const instance = useRef(0);
 		if (instance.current === 0) {
 			xtermMounts.value += 1;
@@ -152,6 +156,7 @@ beforeEach(() => {
 	attachMock.mockClear();
 	prepareForActivationMock.mockReset();
 	prepareForActivationMock.mockResolvedValue(undefined);
+	onErrorRef.current = undefined;
 	xtermMounts.value = 0;
 	xtermUnmounts.value = 0;
 	useUiStore.setState({ inspectorSessions: {} });
@@ -323,6 +328,24 @@ describe("TerminalPane replay cover", () => {
 			// xterm keeps rendering underneath — covered, never unmounted, so the
 			// grid it measures stays correct.
 			expect(screen.getByTestId("xterm")).toBeInTheDocument();
+		} finally {
+			view.restore();
+		}
+	});
+
+	it("says the display stopped when the terminal loses its renderer", async () => {
+		const view = renderPane({ ...worker, terminalHandleId: "term-1" });
+		try {
+			await waitFor(() => expect(onErrorRef.current).toBeDefined());
+
+			await act(async () => {
+				onErrorRef.current?.(new Error("terminal renderer unavailable"));
+			});
+
+			expect(
+				screen.getByText("Terminal display stopped on this GPU/driver. Reopen the session or restart the app."),
+			).toBeInTheDocument();
+			expect(screen.queryByText(/failed to initialize/i)).not.toBeInTheDocument();
 		} finally {
 			view.restore();
 		}

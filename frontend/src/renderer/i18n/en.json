@@ -1080,6 +1080,7 @@
 	"terminal.ended": "Terminal ended",
 	"terminal.error": "Terminal error: {{error}}",
 	"terminal.initFailed": "Terminal failed to initialize on this GPU/driver. Restart the app to retry.",
+	"terminal.rendererLost": "Terminal display stopped on this GPU/driver. Reopen the session or restart the app.",
 	"terminal.loadingOutput": "Loading latest output…",
 	"terminal.noSessionSelected": "No session selected. Pick a worker to attach its terminal.",
 	"terminal.preparingOrchestrator": "Preparing the orchestrator terminal. This can take a moment while AO creates the workspace and starts the agent.",

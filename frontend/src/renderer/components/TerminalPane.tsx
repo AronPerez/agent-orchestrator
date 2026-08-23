@@ -447,7 +447,7 @@ export function TerminalCacheProvider({
 				removeEntry(cacheKey);
 				return;
 			}
-			// Renderer initialization failed. AttachedTerminal owns the visible
+			// The renderer never started, or stopped drawing. AttachedTerminal owns the visible
 			// error surface; mark the entry only so it is discarded when the user
 			// leaves instead of retaining an unusable renderer.
 			entry.discardOnDeactivate = true;
@@ -943,7 +943,7 @@ function AttachedTerminal({
 	// cache retains this component across route switches; a replacement handle
 	// gets a new component rather than inheriting stale screen/input state.
 	const [terminal, setTerminal] = useState<AttachableTerminal | null>(null);
-	const [initFailed, setInitFailed] = useState(false);
+	const [rendererFailure, setRendererFailure] = useState<null | "init" | "lost">(null);
 	const [isRestoring, setIsRestoring] = useState(false);
 	const [restoreError, setRestoreError] = useState<string | undefined>();
 	const [restoreUnavailable, setRestoreUnavailable] = useState(false);
@@ -997,15 +997,14 @@ function AttachedTerminal({
 		if (terminal) onTerminalReady?.(terminal);
 	}, [onTerminalReady, terminal]);
 	const handleInitError = useCallback((err: unknown) => {
-		console.error("xterm failed to initialize", err);
-		setInitFailed(true);
-	}, []);
+		console.error("xterm renderer unavailable", err);
+		// Construction never produced a terminal; a lost renderer had one and
+		// stopped drawing. Same dead pane, different remedy for the user.
+		setRendererFailure((current) => current ?? (terminal ? "lost" : "init"));
+	}, [terminal]);
 	useEffect(() => {
-		if (initFailed) {
-			onFatal?.("renderer initialization failed");
-			return;
-		}
-	}, [initFailed, onFatal]);
+		if (rendererFailure) onFatal?.("renderer unavailable");
+	}, [rendererFailure, onFatal]);
 	const handleLinkOpen = useSessionBrowserLink(session);
 	const restoreSession = useCallback(async () => {
 		if (!session?.id || !canRestoreSession || isRestoring) return;
@@ -1045,10 +1044,10 @@ function AttachedTerminal({
 		};
 	}, [terminal, handleId, attach, attachSession?.id]);
 
-	if (initFailed) {
+	if (rendererFailure) {
 		return (
 			<div className="terminal-surface grid h-full place-items-center p-4 font-mono text-xs text-muted-foreground">
-				{t("terminal.initFailed")}
+				{rendererFailure === "lost" ? t("terminal.rendererLost") : t("terminal.initFailed")}
 			</div>
 		);
 	}
