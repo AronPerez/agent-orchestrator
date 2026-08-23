@@ -22,12 +22,10 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { useTranslation } from "react-i18next";
-import { CanvasAddon } from "@xterm/addon-canvas";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import { WebglAddon } from "@xterm/addon-webgl";
 import { terminalFontSizeDelta as shortcutFontSizeDelta } from "../../shared/shortcuts";
 import type {
 	AttachableTerminal,
@@ -38,6 +36,8 @@ import { TERMINAL_FONT_SIZE_DEFAULT } from "../lib/design-tokens";
 import { isWebLink, openLinkInSystemBrowser } from "../lib/external-link-policy";
 import { isMacPlatform } from "../lib/platform";
 import { applyDocumentTheme, applyDocumentThemeStyle } from "../lib/theme";
+import { captureRendererEvent, captureRendererException } from "../lib/telemetry";
+import { loadRenderer, type TerminalRendererStatus } from "../lib/terminal-renderer";
 import { buildTerminalThemes } from "../lib/terminal-themes";
 import { useUiStore, type Theme } from "../stores/ui-store";
 import {
@@ -81,44 +81,6 @@ export type XtermTerminalProps = {
 	 */
 	onReady?: (terminal: AttachableTerminal) => void;
 };
-
-// Prefer the WebGL renderer, fall back to 2D canvas. Both rasterize box-drawing
-// glyphs themselves onto a fixed cell grid; the DOM renderer does not, so TUI
-// borders would drift. Loaded after open().
-function loadRenderer(term: Terminal): void {
-	let fallbackLoaded = false;
-	const loadCanvasFallback = () => {
-		if (fallbackLoaded) return;
-		fallbackLoaded = true;
-		try {
-			term.loadAddon(new CanvasAddon());
-		} catch (error) {
-			console.warn("xterm: WebGL and canvas renderers unavailable; box-drawing may drift", error);
-		}
-	};
-	try {
-		const webgl = new WebglAddon();
-		webgl.onContextLoss(() => {
-			// xterm can throw while disposing a renderer whose GL context is already
-			// gone (AddonManager._wrappedAddonDispose reaching an undefined
-			// `_isDisposed`). Letting that escape skips the fallback and leaves the
-			// terminal with no renderer at all: the buffer keeps filling and input
-			// keeps working while nothing is ever drawn again. Dispose is a courtesy;
-			// the fallback is the point.
-			try {
-				webgl.dispose();
-			} catch (error) {
-				console.warn("xterm: disposing the lost WebGL renderer failed", error);
-			}
-			loadCanvasFallback();
-		});
-		term.loadAddon(webgl);
-		return;
-	} catch {
-		// WebGL context unavailable — fall through to the canvas renderer.
-	}
-	loadCanvasFallback();
-}
 
 // xterm palette tracks the app theme (see lib/terminal-themes.ts + tokens.css).
 const SUPPRESS_NATIVE_PASTE_MS = 100;
@@ -477,7 +439,29 @@ export function XtermTerminal(props: XtermTerminalProps) {
 		// every width proposal, leaving a conspicuous empty strip on the right. The
 		// viewport still scrolls normally without the invisible reservation.
 		removeHiddenScrollbarReservation(term);
-		loadRenderer(term);
+		const rendererLoadedAt = Date.now();
+		loadRenderer(term, (status: TerminalRendererStatus, detail?: unknown) => {
+			// A healthy WebGL mount is the overwhelming majority and would burn the
+			// per-name rate limit (5/min) for no signal. Only downgrades are news.
+			if (status === "webgl") return;
+			void captureRendererEvent("ao.renderer.terminal_renderer", {
+				status,
+				// False while the terminal is parked off-screen. Retention re-parents
+				// hosts between the parking div and the pane slot on every session
+				// switch, so this is what tells us whether that is the trigger.
+				visible: callbacksRef.current.isVisible !== false,
+				ageMs: Date.now() - rendererLoadedAt,
+				detail: detail instanceof Error ? detail.message : typeof detail === "string" ? detail : undefined,
+			});
+			if (status !== "none") return;
+			void captureRendererException(
+				detail instanceof Error ? detail : new Error("terminal renderer unavailable"),
+				{ source: "xterm-renderer", operation: "load_renderer" },
+			);
+			// Nothing is drawing this terminal. The owner surfaces it; without this
+			// the pane just goes blank while everything else keeps working.
+			callbacksRef.current.onError?.(detail);
+		});
 		term.options.macOptionClickForcesSelection = true;
 		forceSelectionMode(term);
 

@@ -1,13 +1,20 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AttachableTerminal } from "../hooks/useTerminalSession";
+import { captureRendererEvent } from "../lib/telemetry";
 import { useUiStore } from "../stores/ui-store";
 import { XtermTerminal } from "./XtermTerminal";
+
+vi.mock("../lib/telemetry", () => ({
+	captureRendererEvent: vi.fn(async () => undefined),
+	captureRendererException: vi.fn(async () => undefined),
+}));
 
 const state = vi.hoisted(() => ({
 	fit: vi.fn(),
 	canvasAddonLoads: 0,
 	webglDisposeThrows: false,
+	canvasConstructThrows: false,
 	webglContextLoss: null as null | (() => void),
 	linkHandler: null as null | ((event: MouseEvent, uri: string) => void),
 	lastTerminal: null as null | {
@@ -138,6 +145,7 @@ vi.mock("@xterm/addon-web-links", () => ({
 vi.mock("@xterm/addon-canvas", () => ({
 	CanvasAddon: class FakeCanvasAddon {
 		constructor() {
+			if (state.canvasConstructThrows) throw new Error("canvas unavailable");
 			state.canvasAddonLoads += 1;
 		}
 	},
@@ -176,7 +184,9 @@ describe("XtermTerminal", () => {
 		state.linkHandler = null;
 		state.canvasAddonLoads = 0;
 		state.webglDisposeThrows = false;
+		state.canvasConstructThrows = false;
 		state.webglContextLoss = null;
+		vi.mocked(captureRendererEvent).mockClear();
 		setNavigatorPlatform("Linux x86_64");
 		window.ao!.clipboard.writeText = vi.fn().mockResolvedValue(undefined);
 		window.ao!.clipboard.readText = vi.fn().mockResolvedValue("");
@@ -276,24 +286,35 @@ describe("XtermTerminal", () => {
 		}
 	});
 
-	it("loads the canvas fallback even when disposing the lost WebGL renderer throws", () => {
-		// A lost GL context is recoverable: xterm waits ~3s for restoration, gives
-		// up, and fires onContextLoss so the app can swap in the canvas renderer.
-		// If disposing the dead addon throws and that escapes, the swap never
-		// happens and the pane renders nothing for the rest of its life while
-		// still accepting input — a terminal that "hangs and doesn't load the text".
-		state.webglDisposeThrows = true;
-		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-		try {
-			render(<XtermTerminal theme="dark" />);
-			expect(state.canvasAddonLoads).toBe(0);
+	it("reports a renderer downgrade to telemetry with the context that explains it", async () => {
+		render(<XtermTerminal isVisible={false} theme="dark" />);
+		// A healthy WebGL mount must not spend a rate-limit slot.
+		expect(captureRendererEvent).not.toHaveBeenCalled();
 
+		await act(async () => {
 			state.webglContextLoss?.();
+		});
 
-			expect(state.canvasAddonLoads).toBe(1);
-		} finally {
-			warn.mockRestore();
-		}
+		expect(captureRendererEvent).toHaveBeenCalledWith(
+			"ao.renderer.terminal_renderer",
+			expect.objectContaining({ status: "canvas", visible: false }),
+		);
+	});
+
+	it("tells its owner when no renderer is left to draw the terminal", async () => {
+		state.canvasConstructThrows = true;
+		const onError = vi.fn();
+		render(<XtermTerminal onError={onError} theme="dark" />);
+
+		await act(async () => {
+			state.webglContextLoss?.();
+		});
+
+		expect(onError).toHaveBeenCalledOnce();
+		expect(captureRendererEvent).toHaveBeenCalledWith(
+			"ao.renderer.terminal_renderer",
+			expect.objectContaining({ status: "none" }),
+		);
 	});
 
 	it("preserves the agent TUI palette without contrast remapping", () => {
