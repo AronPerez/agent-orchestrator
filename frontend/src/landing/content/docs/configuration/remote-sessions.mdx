@@ -10,7 +10,7 @@ Remote hosts reuse the authenticated LAN listener that [Connect Mobile](/docs/co
 ## Before you start
 
 - The remote machine must have **Connect Mobile** enabled. That is what opens its listener; without it there is nothing to connect to.
-- The two machines must be able to reach each other — the same LAN, or the same Tailscale tailnet.
+- The two machines must be able to reach each other — the same LAN, the same Tailscale tailnet, or an SSH tunnel.
 - You need the remote machine's address, its mobile port (normally `3011`), and its current connection password.
 
 ## Connect a host
@@ -73,7 +73,7 @@ The connection password is what makes the listener safe to open at all, but it i
 - **It is not stored in a keychain.** Saved host passwords sit in plaintext in `~/.ao/remotes.json`, protected by file permissions (`0600`) rather than by the OS keychain.
 
 <Callout type="warn" title="Rules of thumb">
-	Turn Connect Mobile off on machines that are not currently being used as remote hosts. Never expose the mobile port to the public internet or forward it through a router. On any network you do not fully control, use the Tailscale option below instead.
+	Turn Connect Mobile off on machines that are not currently being used as remote hosts. Never expose the mobile port to the public internet or forward it through a router. On any network you do not fully control, use one of the encrypted options below instead — bind to Tailscale, or tunnel over SSH.
 </Callout>
 
 ## Bind to Tailscale only
@@ -122,6 +122,80 @@ Find the machine's tailnet address with `tailscale ip -4` (a `100.x` address) an
 
 The connection password still applies over Tailscale. Tailscale replaces the *trusted network* assumption with an encrypted, authenticated one; it does not replace the password.
 
+## Or tunnel over SSH
+
+If you already have SSH access to the remote machine, you can carry the connection over an SSH tunnel instead of installing anything. AO needs no configuration for this: you forward a local port to the remote listener, then add `127.0.0.1:<local port>` as an ordinary remote host.
+
+<Steps>
+<Step>
+
+### Open the tunnel
+
+From this machine, forward a **local port nothing else is using** to the remote machine's mobile port. `3111` below is arbitrary — anything free will do:
+
+```bash
+ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 \
+    -L 3111:127.0.0.1:3011 you@remote-machine
+```
+
+`-N` means "no remote command, just the forward". `ServerAliveInterval` is what notices a machine that went to sleep — without it a suspended peer leaves a local port that hangs rather than refuses. `ExitOnForwardFailure` makes the command fail loudly instead of connecting and forwarding nothing; you will see `bind [127.0.0.1]:3111: Address already in use` and an exit rather than a tunnel that is silently doing nothing.
+
+Leave this running. The tunnel lives as long as the command does.
+
+<Callout type="warn" title="Do not reuse 3011 as the local port">
+	If this machine runs its own AO daemon with Connect Mobile enabled, that daemon is listening on **every** interface at `3011`. On macOS, `ssh -L 3011:…` still binds `127.0.0.1:3011` *alongside* it — a more specific address may bind over a wildcard one — so the forward succeeds, `ExitOnForwardFailure` never fires, and this machine's own connections to `127.0.0.1:3011` quietly go to the **remote** daemon instead of the local one. Pick a local port nothing else uses and the problem does not arise.
+</Callout>
+
+</Step>
+<Step>
+
+### Narrow the listener to loopback
+
+While you are on the remote machine, this pairs naturally with binding its listener to loopback only. Turn Connect Mobile **off**, set `bind` in `~/.ao/mobile/config.json`, and turn it back on:
+
+```json
+{
+  "enabled": false,
+  "bind": "127.0.0.1"
+}
+```
+
+The listener is now reachable only through your tunnel, and is on no network at all. Skip this step if the same machine also serves a phone over the LAN — that would cut it off too.
+
+</Step>
+<Step>
+
+### Add the local end as a host
+
+Add a remote host with the address `127.0.0.1:3111` — the *local* end of the tunnel, not the remote machine's address — and the remote machine's connection password. From AO's point of view this is an ordinary host that happens to be very close by.
+
+</Step>
+</Steps>
+
+### What the tunnel does and does not do
+
+**What it does:** takes your network out of the path entirely. The mobile port no longer has to be reachable from your LAN, and everything between the two machines — the connection password included — is encrypted by SSH. Machine authentication comes from the SSH host key you already verified the first time you connected.
+
+**What it does not do:**
+
+- **It does not replace the connection password.** The password is still required, still stored in `~/.ao/remotes.json`, and still sent on every request. What changes is where it travels: encrypted inside the tunnel, then across the remote machine's *own loopback interface* between the tunnel's far end and the daemon — the same hop a program running locally on that machine already makes. It never touches a network in plaintext.
+- **It does not survive a dropped connection on its own.** If the `ssh` process exits, the local port stops listening and the host simply reports as unreachable, like any host that went away. Reopen the tunnel and reconnect.
+- **It is not a reason to skip the password.** Do not point the tunnel at the daemon's loopback port (`3001`) hoping the tunnel itself will serve as authentication. That port answers a *different*, unauthenticated listener with a deliberately different policy: it refuses cross-origin writes and terminal connections, so most of the app breaks — and it serves loopback-only control routes that the network listener blocks on purpose, including one that hands out the connection password in cleartext. Forward the mobile port (`3011`), and keep the password.
+
+### Choosing between Tailscale and SSH
+
+Both close the plaintext-transport gap. Neither is better in general; they cost different things.
+
+| | Bind to Tailscale | SSH tunnel |
+| --- | --- | --- |
+| What you install | Tailscale on both machines, same tailnet | nothing new, if you already have SSH to the box |
+| Staying connected | reconnects itself, survives sleep and network changes | you keep an `ssh` process running; it dies with its terminal |
+| Address you add | the machine's `100.x` tailnet address | `127.0.0.1:<local port>` |
+| Machine authentication | tailnet identity | the SSH host key in your `known_hosts` |
+| Reaching several hosts | all of them at once, no extra work | one tunnel per host |
+
+If you are willing to install Tailscale, prefer it — it reconnects on its own and needs no attention after setup. Reach for SSH when you already have it and would rather not add another background service, or when a machine is reachable by SSH but not on your tailnet.
+
 ## macOS: "no route to host" while `curl` works
 
 On macOS, **Local Network privacy** must be granted before an app can reach other machines on the LAN. When it has not been granted, the connection fails with `EHOSTUNREACH`, which surfaces as a misleading **"no route to host"**:
@@ -149,7 +223,7 @@ The network is fine. Apple-signed binaries such as `curl` and `nc` are exempt fr
 
 ## Known limitations
 
-- The LAN link is plaintext HTTP. Tailscale is the recommended mitigation; TLS with pinning is a longer-term fix.
+- The LAN link is plaintext HTTP. Binding to Tailscale or tunnelling over SSH both remove that exposure; TLS with pinning is a longer-term fix for the clients that can do neither, notably the mobile app.
 - Saved host passwords are protected by file permissions, not by the OS keychain.
 - There is no indicator yet for a host that is connected but whose live event stream has dropped. Such a host falls back to polling and updates more slowly rather than reporting an error.
 
