@@ -306,10 +306,15 @@ type Store interface {
 // Manager coordinates internal session spawn, restore, kill, and cleanup over
 // the outbound ports. User-facing read-model assembly lives in the service package.
 type Manager struct {
-	runtime   runtimeController
-	agents    ports.AgentResolver
-	workspace ports.Workspace
-	store     Store
+	runtime runtimeController
+	// staleExit is lifecycle's ClearStaleExit, late-bound during daemon
+	// assembly (#114 effect 4). Nil means delivery refuses on an exited
+	// session exactly as before.
+	staleExitMu sync.RWMutex
+	staleExit   StaleExitClearer
+	agents      ports.AgentResolver
+	workspace   ports.Workspace
+	store       Store
 	// messenger is a sessionguard.Guard wrapping the raw messenger, so every
 	// pane write is guarded (re-read state, refuse a blocked session) without
 	// each call site re-deriving the check. Send/confirmActive use Deliver for
@@ -2944,6 +2949,9 @@ func (m *Manager) send(ctx context.Context, id domain.SessionID, message, client
 	var afterWrite func(context.Context) error
 	if strings.TrimSpace(message) != "" {
 		if recorder, ok := m.store.(latestUserPromptRecorder); ok {
+			//nolint:unparam // always nil on purpose: the message was already
+			// delivered, so a failure to persist the latest-prompt fact is
+			// warned about, never surfaced as a failed send.
 			afterWrite = func(writeCtx context.Context) error {
 				if _, recordErr := recorder.RecordSessionLatestUserPrompt(writeCtx, id, boundedConversationFact(message), m.clock()); recordErr != nil {
 					m.logger.Warn("send: delivered message but failed to persist latest user prompt", "sessionID", id, "error", recordErr)
@@ -2952,7 +2960,12 @@ func (m *Manager) send(ctx context.Context, id domain.SessionID, message, client
 			}
 		}
 	}
-	outcome, err := m.messenger.DeliverWithPostWrite(ctx, id, message, afterWrite)
+	// #114 effect 4: a refusal because the session reads exited may be a nested
+	// agent's lie. Verify liveness once, and retry only on a genuine clear.
+	outcome, err := deliverWithStaleExitRetry(ctx, id, m.staleExitClearerRef(),
+		func() (sessionguard.Outcome, error) {
+			return m.messenger.DeliverWithPostWrite(ctx, id, message, afterWrite)
+		})
 	if err != nil {
 		return fmt.Errorf("send %s: %w", id, err)
 	}
@@ -4130,11 +4143,15 @@ func (m *Manager) deliverAfterStartPrompt(ctx context.Context, agent ports.Agent
 	// into success would report a spawn/restore that never delivered its prompt.
 	var outcome sessionguard.Outcome
 	var err error
-	if m.SessionMutationInProgress(id) {
-		outcome, err = m.messenger.DeliverUnderMutation(ctx, id, prompt)
-	} else {
-		outcome, err = m.messenger.Deliver(ctx, id, prompt)
-	}
+	// #114 effect 4, as above: verify liveness once before letting an exited
+	// reading refuse the send.
+	outcome, err = deliverWithStaleExitRetry(ctx, id, m.staleExitClearerRef(),
+		func() (sessionguard.Outcome, error) {
+			if m.SessionMutationInProgress(id) {
+				return m.messenger.DeliverUnderMutation(ctx, id, prompt)
+			}
+			return m.messenger.Deliver(ctx, id, prompt)
+		})
 	if err != nil {
 		return fmt.Errorf("send %s: %w", id, err)
 	}

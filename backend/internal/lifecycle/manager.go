@@ -165,6 +165,11 @@ type Manager struct {
 	// completionTerminator is late-bound because Session Manager itself depends
 	// on this lifecycle reducer. It is required before the SCM observer starts.
 	completionTerminator sessionTerminator
+	// exitInspector is late-bound for the same dependency-cycle reason as
+	// completionTerminator: the inspector is the session runtime, which is
+	// constructed after this reducer. Nil means hook-reported exits apply
+	// unprobed, exactly as before #114.
+	exitInspector ports.ExactSupervisedProcessInspector
 	// usageFinalizer is late-bound because the usage pipeline is optional. It
 	// receives terminal intent before is_terminated makes the session ineligible
 	// for normal source discovery.
@@ -227,6 +232,78 @@ func (m *Manager) SetCompletionTerminator(terminator sessionTerminator) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.completionTerminator = terminator
+}
+
+// SetExitInspector wires the supervised-process liveness probe used to refuse
+// a hook-reported exit for an agent that is provably still alive (#114,
+// effects 3+4). Wired once during daemon assembly.
+func (m *Manager) SetExitInspector(insp ports.ExactSupervisedProcessInspector) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.exitInspector = insp
+}
+
+// agentProvablyAlive reports whether the session's exact supervised agent
+// process is confirmed alive right now. Anything short of a clean, fully
+// identified "alive" answers false: an inspection error is never a liveness
+// verdict (ports/outbound.go says exactly this for the sibling interface), and
+// a false here merely applies the exit as it always did.
+//
+// Callers must NOT hold m.mu -- the probe may shell out to ps.
+func (m *Manager) agentProvablyAlive(ctx context.Context, rec domain.SessionRecord) bool {
+	m.mu.Lock()
+	insp := m.exitInspector
+	m.mu.Unlock()
+	if insp == nil || rec.Metadata.RuntimeHandleID == "" || rec.Metadata.RuntimeLaunchID == "" {
+		return false
+	}
+	alive, err := insp.IsExactSupervisedProcessAlive(ctx,
+		ports.RuntimeHandle{ID: rec.Metadata.RuntimeHandleID},
+		ports.SupervisedProcessRef{SessionID: rec.ID, LaunchID: rec.Metadata.RuntimeLaunchID})
+	return err == nil && alive
+}
+
+// ClearStaleExit revives a session whose exited state is provably false -- the
+// supervised agent is alive right now. It exists for sessions poisoned before
+// the ApplyActivitySignal gate shipped (#114 effect 4: the exited belief is
+// self-sealing, because an idle agent fires no hooks to correct it and AO
+// refuses the send that would make it act), and for the gate's probe race
+// window.
+//
+// Returns true only when it actually flipped exited -> idle. The probe runs
+// before m.mu because it may shell out; mutate re-checks under the lock, so a
+// real exit landing in between wins.
+func (m *Manager) ClearStaleExit(ctx context.Context, id domain.SessionID) (bool, error) {
+	rec, ok, err := m.store.GetSession(ctx, id)
+	if err != nil || !ok {
+		return false, err
+	}
+	if rec.IsTerminated || rec.Activity.State != domain.ActivityExited {
+		return false, nil
+	}
+	if !m.agentProvablyAlive(ctx, rec) {
+		return false, nil
+	}
+	cleared := false
+	err = m.mutate(ctx, id, func(cur domain.SessionRecord, now time.Time) (domain.SessionRecord, bool) {
+		if cur.IsTerminated || cur.Activity.State != domain.ActivityExited {
+			return cur, false
+		}
+		next := cur
+		// Idle, not active: the measured #114 canary left the real agent sitting
+		// idle, and idle is what message-delivery readiness polls for.
+		next.Activity = domain.Activity{State: domain.ActivityIdle, LastActivityAt: now}
+		cleared = true
+		return next, true
+	})
+	if err != nil {
+		return false, err
+	}
+	if cleared {
+		slog.Default().Info("lifecycle: cleared a stale exited state for a provably-alive agent",
+			"session", id, "reason", "stale_exit_cleared")
+	}
+	return cleared, nil
 }
 
 // SetUsageFinalizer wires termination and relaunches to usage collection.
@@ -472,6 +549,24 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 	}
 	if !s.Valid && s.AgentSessionID == "" && s.LatestUserPrompt == "" && s.LatestAssistantUpdate == "" && s.TranscriptPath == "" {
 		return nil
+	}
+	// #114 effects 3+4: a nested agent inheriting AO_SESSION_ID can report a
+	// SessionEnd for a parent whose real agent is alive and idle -- measured on
+	// a live session, which then refused every send with AGENT_EXITED. A hook is
+	// only a claim; the supervisor is the authority. Probe before accepting a
+	// hook-driven exit, and only a hook-driven one (see isAuthoritativeExitEvent).
+	//
+	// Probing before m.mu is deliberate: the probe may shell out to ps, and this
+	// reducer must not hold its lock across that. The window between probe and
+	// write is closed by the supervisor's own process-exited report and by the
+	// reaper, both of which still land.
+	if s.Valid && s.State == domain.ActivityExited && !isAuthoritativeExitEvent(s.Event) {
+		if rec, ok, err := m.store.GetSession(ctx, id); err == nil && ok && m.agentProvablyAlive(ctx, rec) {
+			slog.Default().Warn("lifecycle: dropped hook-reported exit for a provably-alive agent",
+				"session", id, "event", s.Event, "launch", s.LaunchID,
+				"reason", "stale_exit_dropped")
+			return nil
+		}
 	}
 	if s.LaunchID != "" {
 		if err := m.stagePendingAgentSwitchNativeMetadata(ctx, id, s); err != nil {
@@ -792,6 +887,24 @@ func isPostToolUseEvent(event string) bool {
 	// post-tool-use-fail is retained for Kimchi hook files installed before the
 	// adapter switched to AO's canonical failure event name.
 	return event == "post-tool-use" || event == "post-tool-use-failure" || event == "post-tool-use-fail"
+}
+
+// isAuthoritativeExitEvent reports the exit events AO produces itself, which
+// must never be second-guessed by a liveness probe (#114).
+//
+//   - process-exited: the supervisor's own wait4 report (cli/agent_process.go).
+//     It IS the process that reaped the agent.
+//   - chat.controller.stopped: the chat controller observing its own provider
+//     stream end (service/chat/controller.go), already fenced by
+//     ControllerGeneration.
+//
+// Everything else carrying an exited state arrives from a harness hook, and a
+// hook is a claim by whichever process happened to fire it. Add to this list
+// only events AO itself emits from a fact it observed directly -- gating one of
+// those risks a session that can never be marked exited, which is worse than
+// the nested-agent hijack this guard exists to stop.
+func isAuthoritativeExitEvent(event string) bool {
+	return event == "process-exited" || event == "chat.controller.stopped"
 }
 
 // isTurnBoundaryEvent reports the events that reliably mean the pending
