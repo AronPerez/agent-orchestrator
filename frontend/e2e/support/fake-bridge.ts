@@ -214,6 +214,9 @@ export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}
 					remove: async () => undefined,
 					probe: async () => "offline" as const,
 					request: async () => ({ status: 0, body: null }),
+					connect: async () => ({ label: "", url: "", base: "" }),
+					disconnect: async () => undefined,
+					connected: async () => [],
 				},
 				cloud: {
 					getSession: async () => null,
@@ -659,6 +662,9 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 					remove: async () => undefined,
 					probe: async () => "offline" as const,
 					request: async () => ({ status: 0, body: null }),
+					connect: async () => ({ label: "", url: "", base: "" }),
+					disconnect: async () => undefined,
+					connected: async () => [],
 				},
 				cloud: {
 					getSession: async () => null,

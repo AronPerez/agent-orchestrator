@@ -256,6 +256,9 @@ if (typeof window !== "undefined") {
 			remove: async () => undefined,
 			probe: async () => "offline" as const,
 			request: async () => ({ status: 0, body: null }),
+			connect: async () => ({ label: "", url: "", base: "" }),
+			disconnect: async () => undefined,
+			connected: async () => [],
 		},
 		cloud: {
 			getSession: async () => null,
