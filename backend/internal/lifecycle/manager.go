@@ -165,6 +165,11 @@ type Manager struct {
 	// completionTerminator is late-bound because Session Manager itself depends
 	// on this lifecycle reducer. It is required before the SCM observer starts.
 	completionTerminator sessionTerminator
+	// exitInspector is late-bound for the same dependency-cycle reason as
+	// completionTerminator: the inspector is the session runtime, which is
+	// constructed after this reducer. Nil means hook-reported exits apply
+	// unprobed, exactly as before #114.
+	exitInspector ports.ExactSupervisedProcessInspector
 	// usageFinalizer is late-bound because the usage pipeline is optional. It
 	// receives terminal intent before is_terminated makes the session ineligible
 	// for normal source discovery.
@@ -227,6 +232,35 @@ func (m *Manager) SetCompletionTerminator(terminator sessionTerminator) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.completionTerminator = terminator
+}
+
+// SetExitInspector wires the supervised-process liveness probe used to refuse
+// a hook-reported exit for an agent that is provably still alive (#114,
+// effects 3+4). Wired once during daemon assembly.
+func (m *Manager) SetExitInspector(insp ports.ExactSupervisedProcessInspector) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.exitInspector = insp
+}
+
+// agentProvablyAlive reports whether the session's exact supervised agent
+// process is confirmed alive right now. Anything short of a clean, fully
+// identified "alive" answers false: an inspection error is never a liveness
+// verdict (ports/outbound.go says exactly this for the sibling interface), and
+// a false here merely applies the exit as it always did.
+//
+// Callers must NOT hold m.mu -- the probe may shell out to ps.
+func (m *Manager) agentProvablyAlive(ctx context.Context, rec domain.SessionRecord) bool {
+	m.mu.Lock()
+	insp := m.exitInspector
+	m.mu.Unlock()
+	if insp == nil || rec.Metadata.RuntimeHandleID == "" || rec.Metadata.RuntimeLaunchID == "" {
+		return false
+	}
+	alive, err := insp.IsExactSupervisedProcessAlive(ctx,
+		ports.RuntimeHandle{ID: rec.Metadata.RuntimeHandleID},
+		ports.SupervisedProcessRef{SessionID: rec.ID, LaunchID: rec.Metadata.RuntimeLaunchID})
+	return err == nil && alive
 }
 
 // SetUsageFinalizer wires termination and relaunches to usage collection.
