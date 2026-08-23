@@ -2168,6 +2168,7 @@ func (c *SessionsController) activity(w http.ResponseWriter, r *http.Request) {
 		ProviderTurnID:               capActivityMeta(domain.SanitizeControlChars(strings.TrimSpace(in.ProviderTurnID))),
 		SubmissionID:                 capActivityMeta(domain.SanitizeControlChars(strings.TrimSpace(in.SubmissionID))),
 		TranscriptPath:               capActivityText(domain.SanitizeControlChars(strings.TrimSpace(in.TranscriptPath)), 4096),
+		AgentCWD:                     capActivityText(domain.SanitizeControlChars(strings.TrimSpace(in.AgentCWD)), 4096),
 		LaunchID:                     capActivityMeta(domain.SanitizeControlChars(strings.TrimSpace(in.LaunchID))),
 	}
 	if in.RunningSubagentIDs != nil && len(*in.RunningSubagentIDs) <= 128 {

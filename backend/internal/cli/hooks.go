@@ -66,6 +66,7 @@ type setActivityAPIRequest struct {
 	ProviderTurnID               string                              `json:"providerTurnId,omitempty"`
 	SubmissionID                 string                              `json:"submissionId,omitempty"`
 	TranscriptPath               string                              `json:"transcriptPath,omitempty"`
+	AgentCWD                     string                              `json:"agentCwd,omitempty"`
 	LaunchID                     string                              `json:"launchId,omitempty"`
 	Usage                        *usageHookMetadata                  `json:"usage,omitempty"`
 }
@@ -252,6 +253,26 @@ func hookAgentSessionID(payload []byte) string {
 		return ""
 	}
 	return id
+}
+
+// hookAgentCWD extracts the working directory of the agent process that fired
+// the hook. Every Claude Code hook event carries it, and it is the session's cwd
+// at launch rather than the shell's — a `cd` inside a tool call does not move it.
+// That is what makes it usable as the identity of the reporting agent.
+func hookAgentCWD(payload []byte) string {
+	var p struct {
+		CWD      string `json:"cwd"`
+		CWDCamel string `json:"currentWorkingDirectory"`
+	}
+	_ = json.Unmarshal(payload, &p)
+	cwd := strings.TrimSpace(p.CWD)
+	if cwd == "" {
+		cwd = strings.TrimSpace(p.CWDCamel)
+	}
+	if len(cwd) > maxHookTranscriptPath {
+		return ""
+	}
+	return cwd
 }
 
 // hookLaunchID extracts the runtime launch id a plugin embeds in its payload.
@@ -645,6 +666,7 @@ func (c *commandContext) runHook(ctx context.Context, agent, event string) error
 			toolName = failureTool
 		}
 	}
+	agentCWD := hookAgentCWD(payload)
 	conversation := hookConversationSnapshot{}
 	switch domain.AgentHarness(agent) {
 	case domain.HarnessClaudeCode, domain.HarnessCodex, domain.HarnessContinue:
@@ -669,6 +691,7 @@ func (c *commandContext) runHook(ctx context.Context, agent, event string) error
 		CoordinationID:               conversation.CoordinationID,
 		ProviderTurnID:               conversation.ProviderTurnID,
 		TranscriptPath:               conversation.TranscriptPath,
+		AgentCWD:                     agentCWD,
 		LaunchID:                     launchID,
 		Usage:                        usage,
 	}
