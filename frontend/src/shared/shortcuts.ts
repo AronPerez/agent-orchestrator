@@ -30,7 +30,7 @@ export function terminalFontSizeDelta(chord: ShortcutChord, isMac: boolean): -1 
 }
 
 export type AppShortcutId =
-	"new-session" | "new-shell-terminal" | "close-shell-terminal" | "keyboard-shortcuts" | "toggle-sidebar" | "open-project" | "toggle-inspector" | "command-palette" | "open-settings" | "previous-session" | "next-session" | "previous-tab" | "next-tab" | "focus-terminal" | "toggle-browser-devtools";
+	"new-session" | "new-shell-terminal" | "close-shell-terminal" | "keyboard-shortcuts" | "toggle-sidebar" | "open-project" | "toggle-inspector" | "command-palette" | "find" | "open-settings" | "previous-session" | "next-session" | "previous-tab" | "next-tab" | "focus-terminal" | "toggle-browser-devtools";
 
 export type ShortcutCategory = "General" | "Navigation" | "Session";
 
@@ -81,6 +81,11 @@ export const APP_SHORTCUTS: readonly ShortcutDefinition[] = [
 	{
 		id: "command-palette",
 		label: "Open command palette",
+		category: "General",
+	},
+	{
+		id: "find",
+		label: "Find",
 		category: "General",
 	},
 	{
@@ -166,6 +171,8 @@ export function defaultShortcutBindings(id: AppShortcutId, isMac: boolean): read
 			return [isMac ? binding("b", { meta: true, shift: true }) : binding("b", { ctrl: true, shift: true })];
 		case "command-palette":
 			return [isMac ? binding("k", { meta: true }) : binding("k", { ctrl: true })];
+		case "find":
+			return [isMac ? binding("f", { meta: true }) : binding("f", { ctrl: true })];
 		case "open-settings":
 			return [isMac ? binding(",", { meta: true }) : binding(",", { ctrl: true })];
 		case "previous-session":

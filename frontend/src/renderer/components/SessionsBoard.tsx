@@ -1,5 +1,6 @@
 import { memo, useEffect, useRef, useState, type MouseEvent } from "react";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import {
@@ -20,8 +21,12 @@ import {
   boardAttentionZoneOrder,
   getAgentActivityView,
   getAttentionZoneViewForZone,
+  getSessionStatusView,
   type AttentionZoneView,
 } from "../lib/session-presentation";
+import { matchScore, type MatchTarget } from "../lib/command-palette";
+import { isDialogOrMenuOpen } from "../lib/dom-selectors";
+import { matchesRendererShortcut } from "../stores/keybindings-store";
 import {
   useSessionUsageSummaries,
   type SessionUsageSummary,
@@ -33,6 +38,7 @@ import {
   workspaceQueryKey,
 } from "../hooks/useWorkspaceQuery";
 import { NotificationCenter } from "./NotificationCenter";
+import { BoardFindBar } from "./BoardFindBar";
 import { BoardWelcome, ProjectBoardEmpty } from "./BoardEmptyStates";
 import { OrchestratorIcon } from "./icons";
 import { OrchestratorActivityIndicator } from "./OrchestratorActivityIndicator";
@@ -84,6 +90,29 @@ function isArchivedSession(session: WorkspaceSession): boolean {
   return session.isTerminated === true || session.status === "terminated";
 }
 
+// The find bar reuses the command palette's scorer rather than growing a second
+// matcher; a session only has to be shaped into what that scorer reads.
+function sessionMatchTarget(session: WorkspaceSession, t: TFunction): MatchTarget {
+  return {
+    title: session.title,
+    subtitle: session.branch,
+    keywords: [
+      session.workspaceName,
+      getSessionStatusView(session.status, t).label,
+      ...session.prs.flatMap((pr) => [`#${pr.number}`, String(pr.number)]),
+    ],
+  };
+}
+
+function filterSessions(
+  sessions: WorkspaceSession[],
+  query: string,
+  t: TFunction,
+): WorkspaceSession[] {
+  if (!query.trim()) return sessions;
+  return sessions.filter((session) => matchScore(query, sessionMatchTarget(session, t)) > 0);
+}
+
 const isMac = isMacPlatform();
 const dragStyle = isMac
   ? ({ WebkitAppRegion: "drag" } as React.CSSProperties)
@@ -125,6 +154,8 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
     ? getAgentActivityView(orchestrator.activity, t).label
     : undefined;
   const [isSpawning, setIsSpawning] = useState(false);
+  const [isFindOpen, setIsFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
   const [spawnError, setSpawnError] = useState<string | null>(null);
   const [canCreateAsTui, setCanCreateAsTui] = useState(false);
   const restartingProjectIds = useUiStore(
@@ -156,6 +187,8 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
   useEffect(() => {
     setSpawnError(null);
     setCanCreateAsTui(false);
+    setIsFindOpen(false);
+    setFindQuery("");
   }, [projectKey]);
   const previousProjectRef = useRef<Ref | undefined>(workspace);
   useEffect(() => {
@@ -176,12 +209,19 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
     workspace,
   ]);
 
-  const archived = sessions
-    .filter(isArchivedSession)
-    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
-  const activeSessions = sessions.filter(
-    (candidate) => !isArchivedSession(candidate),
+  const archived = filterSessions(
+    sessions
+      .filter(isArchivedSession)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)),
+    findQuery,
+    t,
   );
+  const activeSessions = filterSessions(
+    sessions.filter((candidate) => !isArchivedSession(candidate)),
+    findQuery,
+    t,
+  );
+  const findMatches = activeSessions.length + archived.length;
   const boardLabels = sessionsBoardLabels(t);
   // First-run orientation replaces the empty column shells (only once the
   // query has resolved, so the welcome never flashes over real data): the
@@ -217,7 +257,36 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
     isLoaded &&
     workspaces.length > 0 &&
     sessions.length === 0;
+  const boardLoadFailed = Boolean(
+    workspaceStartupState === "error" || workspaceQuery.isError || workspaceQuery.localFailure,
+  );
+  const showBoardGrid =
+    !showStartup && !boardLoadFailed && !showWelcome && !showProjectEmpty;
+  const showFindEmpty = findQuery.trim() !== "" && findMatches === 0;
   const hasArchive = archived.length > 0;
+
+  // Renderer-side listener only: neither xterm nor a native WebContentsView is
+  // mounted on the board, so the chord never needs a main-process intercept.
+  useEffect(() => {
+    if (!showBoardGrid) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      // Dialogs and the command palette own the keyboard while they are open.
+      if (isDialogOrMenuOpen()) return;
+      if (isFindOpen && event.key === "Escape") {
+        event.preventDefault();
+        setIsFindOpen(false);
+        setFindQuery("");
+        return;
+      }
+      if (!matchesRendererShortcut("find", event)) return;
+      const active = document.activeElement;
+      if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) return;
+      event.preventDefault();
+      setIsFindOpen(true);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isFindOpen, showBoardGrid]);
   const terminateSession = useTerminateSession();
   const activeProjectKeyRef = useRef(projectKey);
   activeProjectKeyRef.current = projectKey;
@@ -401,7 +470,24 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
         </div>
       ) : null}
 
-      <div className={cn("min-h-0 flex-1 overflow-hidden", hasArchive && archiveToggleOffsetClassName)}>
+      <div
+        className={cn(
+          "relative min-h-0 flex-1 overflow-hidden",
+          hasArchive && archiveToggleOffsetClassName,
+        )}
+      >
+        {showBoardGrid && isFindOpen ? (
+          <BoardFindBar
+            matches={findMatches}
+            onClose={() => {
+              setIsFindOpen(false);
+              setFindQuery("");
+            }}
+            onQueryChange={setFindQuery}
+            query={findQuery}
+            total={sessions.length}
+          />
+        ) : null}
         {project && health.state !== "ok" ? (
           <div className="mx-3 my-3 flex items-center gap-3 rounded-md border border-border bg-surface px-3 py-2 text-xs text-muted-foreground">
             <AlertTriangle
@@ -424,9 +510,7 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
         ) : null}
         {showStartup ? (
           <DaemonStartupLoader />
-        ) : workspaceStartupState === "error" ||
-          workspaceQuery.isError ||
-          workspaceQuery.localFailure ? (
+        ) : boardLoadFailed ? (
           <p className="py-10 text-center text-xs text-passive">
             {t("shell.couldNotLoadSessions")}
           </p>
@@ -444,6 +528,10 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
             }
             spawnError={visibleSpawnError}
           />
+        ) : showFindEmpty ? (
+          <p className="py-10 text-center text-xs text-passive">
+            {t("board.find.noResults")}
+          </p>
         ) : (
           <SessionsBoardGridView
             columns={columns}
