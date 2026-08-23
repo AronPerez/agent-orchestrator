@@ -62,6 +62,7 @@ import { DaemonStartupLoader } from "./DaemonStartupLoader";
 import { useShellMaybe } from "../lib/shell-context";
 import { refKey, type Ref } from "../lib/hosts";
 import { hostActionSuffix } from "../lib/host-disclosure";
+import { useSystemRequirementsGate } from "../hooks/useSystemRequirementsGate";
 import {
   ArchivedSessionCardAdapter,
   BoardSessionCardAdapter,
@@ -192,16 +193,24 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
     (shell ? shell.daemonStatus.state === "ready" : true);
   const daemonHasFailed = Boolean(shell?.daemonStatus.code);
   const workspaceStartupState = shell?.workspaceStartupState ?? "ready";
+  // Requirements blocking (missing git/tmux/coding agent) must keep the
+  // startup screen up even after the daemon and workspace query are both
+  // otherwise ready — see useSystemRequirementsGate. Without this, the gate
+  // was purely cosmetic: it would unmount on its own timer regardless of
+  // whether the machine actually satisfied the requirements it was showing.
+  const { blocked: requirementsBlocked } = useSystemRequirementsGate();
   const isLoaded =
     isDaemonReady &&
     workspaceStartupState === "ready" &&
-    workspaceQuery.isSuccess;
+    workspaceQuery.isSuccess &&
+    !requirementsBlocked;
   const showStartup =
     shell !== null &&
     !daemonHasFailed &&
     (!isDaemonReady ||
       workspaceStartupState === "loading" ||
-      (!workspaceQuery.isSuccess && !workspaceQuery.isError));
+      (!workspaceQuery.isSuccess && !workspaceQuery.isError) ||
+      requirementsBlocked);
   const showWelcome = !project && isLoaded && all.length === 0;
   const showProjectEmpty =
     project !== undefined &&

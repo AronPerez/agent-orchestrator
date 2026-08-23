@@ -67,6 +67,12 @@ type UiState = {
 	// Bumps to ask the sidebar's create-project flow to open (the ⌘N fallback
 	// when no project is in scope).
 	createProjectNonce: number;
+	// Transient "a folder was dropped onto the app window — open the
+	// create-project flow for this path" signal, mirroring newTaskRequest: the
+	// nonce always bumps so dropping the same folder twice in a row still
+	// re-fires. Consumed by the same CreateProjectFlow instance that owns
+	// openSignal for ⌘N (Sidebar's CreateProjectButton).
+	folderDropRequest: { path: string; nonce: number } | null;
 	// Bumps to ask for a new standalone shell terminal. Like newTaskRequest this
 	// is a one-shot signal, not state: the tab-strip + button and Ctrl+Shift+` both
 	// raise it so they cannot drift apart, and a repeat press re-fires because
@@ -104,6 +110,7 @@ type UiState = {
 	setOrchestratorStartupError: (project: Ref, message: string | null) => void;
 	requestNewTask: (project: Ref) => void;
 	requestCreateProject: () => void;
+	requestCreateProjectFromPath: (path: string) => void;
 	requestNewShellTerminal: () => void;
 	setActiveShellTerminal: (terminal: Ref | null) => void;
 	setVisibleTerminalKind: (sessionId: string, kind: TerminalTarget["kind"]) => void;
@@ -153,6 +160,7 @@ export const useUiStore = create<UiState>((set, get) => ({
 	orchestratorStartupErrors: {},
 	newTaskRequest: null,
 	createProjectNonce: 0,
+	folderDropRequest: null,
 	newShellTerminalNonce: 0,
 	activeShellTerminalHandleId: null,
 	visibleTerminalKindBySession: {},
@@ -291,6 +299,8 @@ export const useUiStore = create<UiState>((set, get) => ({
 	requestNewTask: (project) =>
 		set((state) => ({ newTaskRequest: { project, nonce: (state.newTaskRequest?.nonce ?? 0) + 1 } })),
 	requestCreateProject: () => set((state) => ({ createProjectNonce: state.createProjectNonce + 1 })),
+	requestCreateProjectFromPath: (path) =>
+		set((state) => ({ folderDropRequest: { path, nonce: (state.folderDropRequest?.nonce ?? 0) + 1 } })),
 	requestNewShellTerminal: () => set((state) => ({ newShellTerminalNonce: state.newShellTerminalNonce + 1 })),
 	setActiveShellTerminal: (terminal) =>
 		set({ activeShellTerminalHandleId: terminal ? refKey(terminal) : null }),

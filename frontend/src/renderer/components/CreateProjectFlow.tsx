@@ -69,6 +69,7 @@ type CreateProjectFlowMode = ProjectKind | "choose";
 // Every source converges on the same agent sheet and project-start behavior.
 export function CreateProjectFlow({
   children,
+  droppedPath,
   embedded = false,
   idleLabel,
   mode = "single_repo",
@@ -83,6 +84,10 @@ export function CreateProjectFlow({
     error: string | null;
     label: string;
   }) => ReactNode;
+  // A folder was dropped on the app window (ShellLayout owns the global
+  // listener). Mirrors openSignal but carries a path: skips straight to the
+  // mode picker with the native OS dialog step skipped.
+  droppedPath?: { path: string; nonce: number } | null;
   // When true, render the Workspace/Project chooser inline (start page) instead
   // of behind a trigger + dialog. Folder validation + agent sheet stay modal.
   embedded?: boolean;
@@ -129,6 +134,9 @@ export function CreateProjectFlow({
   const [repositorySetupWarning, setRepositorySetupWarning] = useState<
     string | null
   >(null);
+  // A path that arrived via droppedPath, staged until the user confirms
+  // Workspace vs Project. Consumed exactly once by openFolderStep.
+  const [pendingDropPath, setPendingDropPath] = useState<string | null>(null);
   const { hosts, refresh: refreshHosts } = useRemoteHosts();
   const [hostId, setHostId] = useState<string>(LOCAL_HOST_ID);
   const [addHostOpen, setAddHostOpen] = useState(false);
@@ -146,10 +154,12 @@ export function CreateProjectFlow({
       host.id === hostId && host.url !== null,
   );
 
-  const openFolderStep = (kind: ProjectKind) => {
+  const openFolderStep = (kind: ProjectKind, presetPath?: string) => {
     if (remoteHost) {
       // chooseDirectory opens a native picker on *this* machine and no remote
       // directory listing exists, so the remote path is typed, not browsed.
+      // A dropped path names a folder on *this* machine, so it is dropped too
+      // rather than guessed at on the remote filesystem.
       setError(null);
       setValidationScan(null);
       setRemotePath("");
@@ -160,13 +170,15 @@ export function CreateProjectFlow({
     }
     // Keep the selector mounted behind the native picker. Closing it first
     // exposes a blank compositor frame on Windows before Explorer takes focus.
-    void chooseDirectory(kind);
+    void chooseDirectory(kind, presetPath);
   };
 
   // Upstream's three-way source picker (clone / local folder / workspace) in
   // front of the fork's host-aware folder step. Cloning is local-only, so it
   // never reaches openFolderStep's remote branch.
   const selectSource = (source: ProjectSource) => {
+    const presetPath = pendingDropPath;
+    setPendingDropPath(null);
     setError(null);
     setValidationScan(null);
     if (source === "clone") {
@@ -175,7 +187,10 @@ export function CreateProjectFlow({
       return;
     }
     setCloneSelection(null);
-    openFolderStep(source === "workspace" ? "workspace" : "single_repo");
+    openFolderStep(
+      source === "workspace" ? "workspace" : "single_repo",
+      presetPath ?? undefined,
+    );
   };
 
   // Registering a project on a remote daemon is REST-only, which is why this
@@ -252,7 +267,7 @@ export function CreateProjectFlow({
     />
   ) : null;
 
-  const chooseDirectory = async (kind: ProjectKind) => {
+  const chooseDirectory = async (kind: ProjectKind, presetPath?: string) => {
     setError(null);
     setValidationScan(null);
     setRepositorySetup(null);
@@ -260,11 +275,13 @@ export function CreateProjectFlow({
     setSelectedKind(kind);
     setIsChoosingPath(true);
     try {
-      const path = await aoBridge.app.chooseDirectory(
-        kind === "workspace"
-          ? t("createProject.chooseWorkspace")
-          : t("createProject.chooseRepo"),
-      );
+      const path =
+        presetPath ??
+        (await aoBridge.app.chooseDirectory(
+          kind === "workspace"
+            ? t("createProject.chooseWorkspace")
+            : t("createProject.chooseRepo"),
+        ));
       if (path && kind === "single_repo") {
         const preflight = await projectRepositoryPreflight(path);
         if (preflight.blockingError) {
@@ -302,14 +319,15 @@ export function CreateProjectFlow({
     }
   };
 
-  const startFlow = () => {
+  const startFlow = (presetPath?: string) => {
+    setPendingDropPath(presetPath ?? null);
     if (hasModePicker) {
       setError(null);
       setCloneSelection(null);
       setModePickerOpen(true);
       return;
     }
-    void chooseDirectory(mode);
+    void chooseDirectory(mode, presetPath);
   };
 
   // Seed with the current value so we never open on mount; open when it changes.
@@ -320,6 +338,23 @@ export function CreateProjectFlow({
     lastOpenSignal.current = openSignal;
     startFlow();
   }, [openSignal]);
+
+  // A folder was dropped on the app window. Ignored while the flow already has
+  // UI on screen so an in-progress manual selection is never silently discarded.
+  const lastDropNonce = useRef(droppedPath?.nonce);
+  useEffect(() => {
+    if (!droppedPath || droppedPath.nonce === lastDropNonce.current) return;
+    lastDropNonce.current = droppedPath.nonce;
+    if (
+      isBusy ||
+      modePickerOpen ||
+      cloneDialogOpen ||
+      folderPickerOpen ||
+      selectedPath !== null
+    )
+      return;
+    startFlow(droppedPath.path);
+  }, [droppedPath]);
 
   const createProject = async (selection: CreateProjectAgentSelection) => {
     if (!selectedPath) return;
@@ -403,7 +438,10 @@ export function CreateProjectFlow({
     <>
       {!embedded &&
         children?.({
-          choosePath: startFlow,
+          // Zero-arg wrapper: callers wire this directly to onClick, whose
+          // SyntheticEvent would otherwise be forwarded as startFlow's
+          // presetPath and get treated as a dropped path.
+          choosePath: () => startFlow(),
           disabled: isBusy,
           error,
           label,
@@ -432,7 +470,13 @@ export function CreateProjectFlow({
             disabled={isBusy}
             hostRow={hostRow}
             open={modePickerOpen}
-            onOpenChange={(open) => !isBusy && setModePickerOpen(open)}
+            onOpenChange={(open) => {
+              if (isBusy) return;
+              setModePickerOpen(open);
+              // Dismissed without picking a kind — don't let a stale dropped
+              // path hijack the next manual "New Project" click.
+              if (!open) setPendingDropPath(null);
+            }}
             onSelect={selectSource}
           />
           {cloneDialogOpen ? (

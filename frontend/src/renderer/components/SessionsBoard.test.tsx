@@ -396,6 +396,7 @@ describe("SessionsBoard", () => {
 					"local:s-active",
 					{
 						sessionId: "s-active",
+						processedTokens: 12_300,
 						totalTokens: 12_400,
 						incomplete: false,
 					},
@@ -404,6 +405,7 @@ describe("SessionsBoard", () => {
 					"local:s-empty",
 					{
 						sessionId: "s-empty",
+						processedTokens: 0,
 						totalTokens: 0,
 						incomplete: false,
 					},
@@ -412,6 +414,7 @@ describe("SessionsBoard", () => {
 					"local:s-dead",
 					{
 						sessionId: "s-dead",
+						processedTokens: 1_900,
 						totalTokens: 2_000,
 						incomplete: true,
 					},
@@ -421,16 +424,16 @@ describe("SessionsBoard", () => {
 
 		renderBoard("p1");
 
-		const activeUsage = screen.getByText("12.4K tok");
-		expect(activeUsage).toHaveAttribute("aria-label", "12,400 tokens");
-		expect(screen.queryByText("0 tok")).not.toBeInTheDocument();
+		const activeUsage = screen.getByText("12.3K processed");
+		expect(activeUsage).toHaveAttribute("aria-label", "12,300 tokens processed");
+		expect(screen.queryByText("0 processed")).not.toBeInTheDocument();
 		expect(usageQueryMock).toHaveBeenCalledWith({ host: "local", id: "p1" });
 		await userEvent.hover(activeUsage);
-		expect((await screen.findAllByText("12,400 tokens")).length).toBeGreaterThan(0);
+		expect((await screen.findAllByText("12,300 tokens processed")).length).toBeGreaterThan(0);
 
 		const archive = await expandArchive();
-		const archivedUsage = within(archive).getByText("2K tok");
-		expect(archivedUsage).toHaveAttribute("aria-label", "2,000 tokens");
+		const archivedUsage = within(archive).getByText("1.9K processed");
+		expect(archivedUsage).toHaveAttribute("aria-label", "1,900 tokens processed");
 	});
 
 	it("pulses the shared activity indicator on an actively working session card", () => {

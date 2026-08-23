@@ -65,6 +65,7 @@ import {
 } from "./main/relocation";
 import {
 	coerceUiSettings,
+	DEFAULT_UI_SETTINGS,
 	readUiSettings,
 	writeUiSettings,
 	type UiSettings,
@@ -167,6 +168,8 @@ import {
 	openAllowedAppExternalURL,
 } from "./main/external-open";
 import {
+	dockBounceType,
+	shouldReplaceBounce,
 	shouldSignalAttention,
 	shouldToast,
 } from "./main/notification-signals";
@@ -175,6 +178,7 @@ import {
 	ancestorRepositorySetupWarning,
 	scanImportFolder,
 } from "./main/import-folder-scan";
+import { parseOpenFolderPathArg } from "./main/open-folder-arg";
 
 // Globals injected at compile time by @electron-forge/plugin-vite.
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string | undefined;
@@ -210,6 +214,18 @@ if (process.platform === "win32") {
 	app.setAppUserModelId("dev.agent-orchestrator.desktop");
 }
 
+// Escape hatch for hosts whose GPU driver stack crashes Chromium on startup
+// (Linux/Wayland in practice, #3961). Chromium still runs a GPU process; what
+// this drops is the vendor driver, falling the process back to Electron's
+// bundled SwiftShader. There is no window yet when the crashes happen, so an
+// in-app setting is unreachable and an env var is the only knob that works.
+// Truthy allowlist mirrors keepDaemonAlive() so "off"/"no" cannot accidentally
+// turn the GPU off. Must run before app ready — the call throws after that.
+const disableGpu = process.env.AO_DISABLE_GPU?.trim().toLowerCase();
+if (disableGpu === "1" || disableGpu === "true" || disableGpu === "yes" || disableGpu === "on") {
+	app.disableHardwareAcceleration();
+}
+
 // Pin ALL Electron-owned state (Chromium cache, cookies, local/session storage,
 // crash dumps) under the canonical AO home at ~/.ao instead of Electron's macOS
 // default ~/Library/Application Support/<name>. Keeps the app's entire footprint
@@ -235,6 +251,13 @@ const trayLifecycle = createTrayLifecycle({
 	getTrayController: () => trayController,
 	focusWindow: () => focusMainWindow(),
 });
+// Icon/taskbar-shortcut folder drop, mirroring VS Code: relayed to the
+// renderer's global drop handling so it opens the same create-project flow.
+const OPEN_FOLDER_PATH_CHANNEL = "app:openFolderPath";
+// Folder path from a cold-start launch (icon/shortcut drop while not running)
+// whose renderer isn't mounted yet. Flushed once the shell signals readiness
+// via TRAY_RENDERER_READY_CHANNEL — see the OPEN_FOLDER_PATH_CHANNEL handler.
+let pendingFolderPath: string | null = null;
 let daemonProcess: ChildProcess | null = null;
 let daemonStoppingProcess: ChildProcess | null = null;
 let daemonRestartAfterExitProcess: ChildProcess | null = null;
@@ -259,6 +282,14 @@ let terminalFocused = false;
 let supervisorLink: SupervisorLinkHandle | null = null;
 // Guard: prevents stacking multiple flashFrame(true) calls when notifications arrive rapidly.
 let isFlashing = false;
+// macOS: the in-flight dock bounce, cancelled once the window regains focus
+// so a "critical" bounce stops as soon as the user looks at the app. Held as
+// one object so the id and its criticality can never drift apart; a pending
+// critical bounce is not replaced by a later informational notification.
+let pendingBounce: { id: number; critical: boolean } | null = null;
+// Live mirror of the persisted `soundNotificationsEnabled` UI setting, kept in sync by the
+// uiSettings:set handler so a toggle flip takes effect without an app restart.
+let soundNotificationsEnabled = DEFAULT_UI_SETTINGS.soundNotificationsEnabled;
 
 const isDev = !app.isPackaged;
 
@@ -644,6 +675,10 @@ async function createWindowInternal(): Promise<void> {
 			composition.dispose();
 		});
 		mainWindow = null;
+		// Drop any pending dock bounce with the window it was attached to: its
+		// focus listener died with the window, so leaving the id set would make
+		// the next bounce skip attaching one to the replacement window.
+		cancelDockBounce();
 		trayLifecycle.clearPendingTarget();
 	});
 }
@@ -1848,15 +1883,12 @@ ipcMain.handle("menu:action", (_event, action: string) => {
 		case "view.reload":
 			return wc.reload();
 		case "view.devtools":
-			return (
-				browserViewHost
-					?.toggleDevToolsForLastFocused()
-					.then((state) => {
-						if (state) return state;
-						return wc.toggleDevTools();
-					})
-					.catch(() => wc.toggleDevTools()) ?? wc.toggleDevTools()
-			);
+			if (browserViewHost) {
+				return browserViewHost.toggleDevToolsForLastFocused().then((state) => {
+					if (!state) wc?.toggleDevTools();
+				}).catch(() => wc?.toggleDevTools());
+			}
+			return wc?.toggleDevTools();
 		case "view.zoomIn":
 			return wc.setZoomLevel(wc.getZoomLevel() + 0.5);
 		case "view.zoomOut":
@@ -2089,20 +2121,16 @@ ipcMain.handle(
 
 ipcMain.handle("uiSettings:get", async (): Promise<UiSettings> => {
 	const runFile = runFilePath();
-	if (!runFile) return { locale: "en" };
+	if (!runFile) return { ...DEFAULT_UI_SETTINGS };
 	return readUiSettings(path.dirname(runFile));
 });
-ipcMain.handle(
-	"uiSettings:set",
-	async (_event, settings: UiSettings): Promise<UiSettings> => {
+	ipcMain.handle("uiSettings:set", async (_event, settings: Partial<UiSettings>): Promise<UiSettings> => {
 		const runFile = runFilePath();
-		const result = !runFile
-			? coerceUiSettings(settings)
-			: await writeUiSettings(path.dirname(runFile), settings);
-		trayController?.setLocale(result.locale);
-		return result;
-	},
-);
+	const result = !runFile ? coerceUiSettings(settings) : await writeUiSettings(path.dirname(runFile), settings);
+	trayController?.setLocale(result.locale);
+	soundNotificationsEnabled = result.soundNotificationsEnabled;
+	return result;
+	});
 
 ipcMain.handle(
 	"keybindings:get",
@@ -2153,6 +2181,13 @@ ipcMain.handle("updates:install", () => {
 	quitAndInstallUpdate();
 });
 
+function cancelDockBounce(): void {
+	if (pendingBounce === null) return;
+	const { id } = pendingBounce;
+	pendingBounce = null;
+	app.dock?.cancelBounce(id);
+}
+
 ipcMain.handle(
 	"notifications:show",
 	(
@@ -2185,22 +2220,39 @@ ipcMain.handle(
 			toast.show();
 		}
 
-		// Dock (macOS) / taskbar (Windows/Linux) attention signal — only for the
-		// actionable types. A merged/closed PR still toasts above, but shouldn't
-		// bounce the dock as insistently as an agent blocked waiting on the user.
-		if (shouldSignalAttention(notification.type)) {
-			if (process.platform === "darwin" && app.dock) {
-				app.dock.bounce("informational");
-			} else if (process.platform === "win32" || process.platform === "linux") {
-				if (!isFlashing) {
-					isFlashing = true;
-					mainWindow.flashFrame(true);
-					mainWindow.once("focus", () => {
-						isFlashing = false;
-						mainWindow?.flashFrame(false);
-					});
+		// Dock (macOS) / taskbar (Windows/Linux) attention signal. On macOS every
+		// notification bounces the dock — urgency is carried by the bounce type,
+		// so a merged PR bounces once while a blocked agent keeps bouncing. On
+		// Windows/Linux only the actionable types flash (see
+		// shouldSignalAttention), preserving the pre-existing behavior there.
+		if (process.platform === "darwin" && app.dock) {
+			// A pending critical bounce (agent blocked on the user) is never
+			// replaced: a later informational notification must not downgrade it
+			// to a one-shot bounce.
+			if (shouldReplaceBounce(pendingBounce)) {
+				// A focus listener from an earlier un-cancelled bounce still works for
+				// the new id, so only attach one at a time.
+				const hadPendingBounce = pendingBounce !== null;
+				cancelDockBounce();
+				const bounceType = dockBounceType(notification.type);
+				const id = app.dock.bounce(bounceType);
+				if (typeof id === "number" && id >= 0) {
+					pendingBounce = { id, critical: bounceType === "critical" };
+					if (!hadPendingBounce) mainWindow.once("focus", cancelDockBounce);
 				}
 			}
+		} else if ((process.platform === "win32" || process.platform === "linux") && shouldSignalAttention(notification.type)) {
+			if (!isFlashing) {
+				isFlashing = true;
+				mainWindow.flashFrame(true);
+				mainWindow.once("focus", () => {
+					isFlashing = false;
+					mainWindow?.flashFrame(false);
+				});
+			}
+		}
+		if (shouldSignalAttention(notification.type) && soundNotificationsEnabled) {
+			shell.beep();
 		}
 	},
 );
@@ -2219,6 +2271,9 @@ if (!app.isPackaged) {
 			setTimeout(() => {
 				mainWindow?.flashFrame(false);
 			}, 2000);
+		}
+		if (soundNotificationsEnabled) {
+			shell.beep();
 		}
 	});
 }
@@ -2259,9 +2314,13 @@ ipcMain.on(TRAY_SET_ATTENTION_STATE_CHANNEL, (event, state) =>
 	trayLifecycle.handleSetAttentionState(event, state),
 );
 
-ipcMain.on(TRAY_RENDERER_READY_CHANNEL, (event) =>
-	trayLifecycle.handleRendererReady(event),
-);
+ipcMain.on(TRAY_RENDERER_READY_CHANNEL, (event) => {
+	trayLifecycle.handleRendererReady(event);
+	if (pendingFolderPath && event.sender === getShellWebContents()) {
+		event.sender.send(OPEN_FOLDER_PATH_CHANNEL, pendingFolderPath);
+		pendingFolderPath = null;
+	}
+});
 
 // Cloud auth IPC — cloud:getSession, cloud:signIn, cloud:signOut.
 // Data dir resolves to ~/.ao (prod) or ~/.ao/dev (dev) matching daemon conventions.
@@ -2313,6 +2372,28 @@ app.on("second-instance", (_event, argv) => {
 	const deepLink = argv.find((value) => value.startsWith("ao-app://"));
 	if (deepLink) {
 		void handleCloudDeepLinkAndFocus(deepLink);
+		return;
+	}
+	// A folder dropped on the taskbar icon/shortcut while already running.
+	// Usually the renderer is already mounted and listening, so send directly
+	// — but this can still fire while the first instance is early in
+	// app.whenReady() or creating its window, before any shell WebContents
+	// exists. Fall back to the same pendingFolderPath queue the cold-start
+	// path uses rather than silently dropping it.
+	const folderPath = parseOpenFolderPathArg(argv);
+	if (folderPath) {
+		const window = BaseWindow.getAllWindows()[0];
+		if (window) {
+			if (window.isMinimized()) window.restore();
+			window.show();
+			window.focus();
+		}
+		const contents = getShellWebContents();
+		if (contents) {
+			contents.send(OPEN_FOLDER_PATH_CHANNEL, folderPath);
+		} else {
+			pendingFolderPath = folderPath;
+		}
 		return;
 	}
 	const window = BaseWindow.getAllWindows()[0];
@@ -2443,10 +2524,11 @@ app.whenReady().then(async () => {
 
 	registerRendererProtocol();
 	applyRuntimeAppIcon();
+	const initialUiSettings = keybindingRunFile
+		? await readUiSettings(path.dirname(keybindingRunFile))
+		: { ...DEFAULT_UI_SETTINGS };
+	soundNotificationsEnabled = initialUiSettings.soundNotificationsEnabled;
 	if (isTrayEnabled(process.platform, app.isPackaged, app.getVersion())) {
-		const initialUiSettings = keybindingRunFile
-			? await readUiSettings(path.dirname(keybindingRunFile))
-			: { locale: "en" as const };
 		trayController = createTrayController({
 			focusWindow: focusMainWindow,
 			openSession: trayLifecycle.openSession,
@@ -2462,6 +2544,14 @@ app.whenReady().then(async () => {
 	const deepLinkArg = process.argv.find((a) => a.startsWith("ao-app://"));
 	if (deepLinkArg) {
 		void handleCloudDeepLinkAndFocus(deepLinkArg);
+	}
+
+	// Windows/Linux: a folder dropped on the taskbar icon/shortcut while the
+	// app was not running launches it with the folder's path in argv. The
+	// renderer isn't mounted yet — queue it, flushed on TRAY_RENDERER_READY_CHANNEL.
+	const folderPathArg = parseOpenFolderPathArg(process.argv);
+	if (folderPathArg) {
+		pendingFolderPath = folderPathArg;
 	}
 
 	app.on("activate", () => {

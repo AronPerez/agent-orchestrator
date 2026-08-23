@@ -24,8 +24,15 @@ import { workspaceHostQueryKey } from "../hooks/useWorkspaceQuery";
 import { LOCAL_HOST, refKey } from "../lib/hosts";
 import { useUiStore } from "../stores/ui-store";
 
-const { getMock, navigateMock, mockParams, renameSessionMock, spawnMock, updateStatusMock, commandPaletteEnabled } = vi.hoisted(
+const { cloudSessionState, getMock, navigateMock, mockParams, renameSessionMock, spawnMock, updateStatusMock, commandPaletteEnabled } = vi.hoisted(
 	() => ({
+		cloudSessionState: {
+			configured: false,
+			session: null as null | { user: { email: string } },
+			status: "unauthenticated" as "authenticated" | "loading" | "unauthenticated",
+			signIn: vi.fn(),
+			signOut: vi.fn().mockResolvedValue(undefined),
+		},
 		getMock: vi.fn(),
 		navigateMock: vi.fn(),
 		mockParams: {
@@ -43,6 +50,7 @@ const { getMock, navigateMock, mockParams, renameSessionMock, spawnMock, updateS
 vi.mock("../lib/rename-session", () => ({ renameSession: renameSessionMock }));
 
 vi.mock("../lib/spawn-orchestrator", () => ({ spawnOrchestrator: spawnMock }));
+vi.mock("../lib/cloud-session", () => ({ useCloudSession: () => cloudSessionState }));
 
 vi.mock("../hooks/useCommandPaletteEnabled", () => ({
 	useCommandPaletteEnabled: () => commandPaletteEnabled.current,
@@ -272,6 +280,11 @@ beforeEach(() => {
 	window.localStorage.clear();
 	document.documentElement.style.removeProperty("--ao-sidebar-w");
 	commandPaletteEnabled.current = true;
+	cloudSessionState.configured = false;
+	cloudSessionState.session = null;
+	cloudSessionState.status = "unauthenticated";
+	cloudSessionState.signIn.mockReset();
+	cloudSessionState.signOut.mockReset().mockResolvedValue(undefined);
 	useUiStore.setState({ isCommandPaletteOpen: false, settingsModal: null });
 	getMock.mockReset();
 	getMock.mockResolvedValue({
@@ -464,6 +477,23 @@ describe("Sidebar — one tree across hosts", () => {
 });
 
 describe("Sidebar", () => {
+	it("does not show cloud sign-in controls while signed out", () => {
+		cloudSessionState.configured = true;
+		renderSidebar();
+
+		expect(screen.queryByLabelText("Sign in to AO Cloud")).not.toBeInTheDocument();
+		expect(screen.queryByText("Sign in")).not.toBeInTheDocument();
+	});
+
+	it("keeps cloud account controls visible while signed in", () => {
+		cloudSessionState.configured = true;
+		cloudSessionState.status = "authenticated";
+		cloudSessionState.session = { user: { email: "user@example.com" } };
+		renderSidebar();
+
+		expect(screen.getAllByLabelText("Signed in as user@example.com")).toHaveLength(2);
+	});
+
 	it("suppresses focus chrome without removing keyboard focusability", () => {
 		renderSidebar();
 

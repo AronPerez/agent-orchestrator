@@ -47,6 +47,7 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "./
 import { subscribeWorkspaceFileChanges } from "../lib/workspace-file-events";
 import { Button } from "./ui/button";
 import { DiffSelectionMenu } from "./DiffSelectionMenu";
+import { ImageDiffView } from "./ImageDiffView";
 import { Input } from "./ui/input";
 
 type WorkspaceFileDetail = components["schemas"]["WorkspaceFileResponse"] & {
@@ -481,6 +482,7 @@ function ReviewFileCard({
 						<ReviewDiffBody
 							annotation={annotation}
 							detail={detailQuery.data}
+							detailLoadedAt={detailQuery.dataUpdatedAt}
 							filePath={file.path}
 							onActiveSelectionChange={setSelectionOrMenuActive}
 							session={session}
@@ -553,6 +555,7 @@ async function loadWorkspaceFile(session: Ref, path: string, t: TFunction) {
 function ReviewDiffBody({
 	annotation,
 	detail,
+	detailLoadedAt,
 	filePath,
 	onActiveSelectionChange,
 	session,
@@ -561,6 +564,7 @@ function ReviewDiffBody({
 }: {
 	annotation: FileAnnotationModel;
 	detail: WorkspaceFileDetail;
+	detailLoadedAt: number;
 	filePath: string;
 	onActiveSelectionChange: (active: boolean) => void;
 	session: Ref;
@@ -569,6 +573,19 @@ function ReviewDiffBody({
 }) {
 	const { t } = useTranslation();
 	const { rows, pending } = useParsedDiff(detail.diff);
+	// An image has no readable line diff, so it renders as the images themselves
+	// rather than the binary placeholder.
+	if (detail.imageMediaType) {
+		return (
+			<ImageDiffView
+				path={detail.path}
+				session={session}
+				split={split}
+				status={detail.status}
+				version={detailLoadedAt}
+			/>
+		);
+	}
 	if (detail.binary) {
 		return <PanelMessage compact>{t("files.binaryUnavailable")}</PanelMessage>;
 	}
@@ -1200,7 +1217,7 @@ function FileAnnotationComposer({ annotation }: { annotation: FileAnnotationMode
 			<textarea
 				aria-label={t("files.feedbackLabel", { target: targetLabel })}
 				autoFocus
-				className="min-h-20 w-full resize-y rounded-md border border-input bg-background px-2.5 py-2 text-sm text-foreground outline-none placeholder:text-passive focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30 disabled:opacity-60"
+				className="min-h-20 w-full resize-y rounded-md border border-input bg-background px-2.5 py-2 text-sm text-foreground outline-none placeholder:text-passive focus-visible:outline-none disabled:opacity-60"
 				disabled={annotation.status === "sending" || annotation.status === "sent"}
 				onChange={(event) => annotation.setDraft(event.target.value)}
 				onKeyDown={(event) => {
