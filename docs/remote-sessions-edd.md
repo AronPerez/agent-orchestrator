@@ -791,6 +791,12 @@ credential** — `GET /api/v1/mobile/status` returns the daemon's connection pas
 cleartext (measured; value not recorded here). On the LAN listener the same request correctly
 returns `404 ROUTE_LOOPBACK_ONLY`.
 
+   **That list grows, which is the real argument.** The upstream sync merged as #110 added a
+sixth prefix — `/api/v1/system/install`, "host-mutating installer routes" — days after this
+spike was scoped. Every loopback-only route anyone adds from here silently widens what a
+tunnel to `:3001` would expose, and nothing in the client would notice. A design whose blast
+radius is defined by a list someone else keeps appending to is the wrong design.
+
 Neither is fatal in isolation — an SSH login is already shell access on that box — but making
 it work means weakening the loopback listener's origin boundary for *every* local caller, not
 just the tunnel. That is a daemon policy change, decided on its own merits. **Drop the
