@@ -660,6 +660,7 @@
 	"settings.close": "Cerrar ajustes",
 	"settings.connectMobile": "Conectar móvil",
 	"settings.developerMode": "Modo desarrollador",
+	"settings.remoteHosts": "Hosts remotos (experimental)",
 	"settings.general": "General",
 	"settings.getHelp": "Obtener ayuda",
 	"settings.keyboardShortcuts": "Atajos de teclado",

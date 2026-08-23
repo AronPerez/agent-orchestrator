@@ -633,6 +633,7 @@
 	"settings.close": "关闭设置",
 	"settings.connectMobile": "连接手机",
 	"settings.developerMode": "开发者模式",
+	"settings.remoteHosts": "远程主机（实验性）",
 	"settings.general": "通用",
 	"settings.getHelp": "获取帮助",
 	"settings.keyboardShortcuts": "键盘快捷键",

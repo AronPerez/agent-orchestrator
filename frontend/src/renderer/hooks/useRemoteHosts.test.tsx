@@ -1,6 +1,7 @@
 import { renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { LOCAL_HOST_ID, useRemoteHosts } from "./useRemoteHosts";
+import { useUiStore } from "../stores/ui-store";
 
 const { listMock, probeMock } = vi.hoisted(() => ({
 	listMock: vi.fn(),
@@ -14,8 +15,24 @@ vi.mock("../lib/bridge", () => ({
 }));
 
 beforeEach(() => {
+	listMock.mockClear();
+	probeMock.mockClear();
 	listMock.mockResolvedValue([{ label: "workbox", url: "http://192.0.2.1:3011" }]);
 	probeMock.mockResolvedValue("online");
+	useUiStore.setState({ remoteHosts: true });
+});
+
+describe("useRemoteHosts with the Remote hosts flag off", () => {
+	it("lists only the local host and contacts no saved host", async () => {
+		useUiStore.setState({ remoteHosts: false });
+		const { result } = renderHook(() => useRemoteHosts());
+
+		await result.current.refresh();
+
+		expect(result.current.hosts.map((host) => host.id)).toEqual([LOCAL_HOST_ID]);
+		expect(listMock).not.toHaveBeenCalled();
+		expect(probeMock).not.toHaveBeenCalled();
+	});
 });
 
 describe("useRemoteHosts", () => {

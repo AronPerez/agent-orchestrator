@@ -3,12 +3,14 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { aoBridge } from "../lib/bridge";
+import { useUiStore } from "../stores/ui-store";
 import { CreateProjectFlow } from "./CreateProjectFlow";
 
 beforeEach(() => {
 	vi.restoreAllMocks();
 	vi.spyOn(aoBridge.remotes, "list").mockResolvedValue([{ label: "workbox", url: "http://192.0.2.1:3011" }]);
 	vi.spyOn(aoBridge.remotes, "probe").mockResolvedValue("online");
+	useUiStore.setState({ remoteHosts: true });
 });
 
 function renderFlow(props: Partial<Parameters<typeof CreateProjectFlow>[0]> = {}) {
