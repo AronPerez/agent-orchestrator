@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import type { RemoteHealth } from "../../main/remote-request";
 import { aoBridge } from "../lib/bridge";
 import { reportHostConnect } from "../lib/host-telemetry";
+import { useUiStore } from "../stores/ui-store";
 
 export const LOCAL_HOST_ID = "local";
 
@@ -43,8 +44,15 @@ export function useRemoteHosts(): { hosts: Host[]; refresh: () => Promise<void> 
 	const { t } = useTranslation();
 	const localHost: Host = { id: LOCAL_HOST_ID, label: t("hosts.local"), url: null, status: "local" };
 	const [remotes, setRemotes] = useState<Host[]>([]);
+	// Off means no saved host is listed or probed — the flag is a network
+	// boundary, not a visibility toggle.
+	const enabled = useUiStore((state) => state.remoteHosts);
 
 	const refresh = useCallback(async () => {
+		if (!enabled) {
+			setRemotes([]);
+			return;
+		}
 		const saved = await remotesBridge().list();
 		// Show every saved host immediately as "checking" — a host that is slow to
 		// answer must not look like a host that does not exist.
@@ -57,7 +65,7 @@ export function useRemoteHosts(): { hosts: Host[]; refresh: () => Promise<void> 
 				setRemotes((current) => current.map((row) => (row.id === host.url ? { ...row, status } : row)));
 			}),
 		);
-	}, []);
+	}, [enabled]);
 
 	useEffect(() => {
 		void refresh();

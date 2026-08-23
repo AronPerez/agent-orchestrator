@@ -1,6 +1,7 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { ProjectSourcePickerView, type ProjectSource } from "@aoagents/product-ui";
 import { useTranslation } from "react-i18next";
+import { useUiStore } from "../stores/ui-store";
 import {
   ArrowRight,
   CheckCircle2,
@@ -253,7 +254,8 @@ export function CreateProjectFlow({
     }
   };
 
-  const hostRow = hasModePicker ? (
+  const remoteHostsEnabled = useUiStore((state) => state.remoteHosts);
+  const hostRow = hasModePicker && remoteHostsEnabled ? (
     <HostSelect
       hosts={hosts}
       value={hostId}

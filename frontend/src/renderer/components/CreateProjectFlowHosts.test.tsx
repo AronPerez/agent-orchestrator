@@ -28,6 +28,7 @@ vi.mock("../lib/host-clients", () => ({
 }));
 
 import { CreateProjectFlow } from "./CreateProjectFlow";
+import { useUiStore } from "../stores/ui-store";
 
 const WORKBOX = { label: "workbox", url: "http://192.0.2.1:3011" };
 
@@ -39,6 +40,29 @@ beforeEach(() => {
 	bridge.remotes.remove.mockResolvedValue(undefined);
 	connectHostMock.mockResolvedValue(undefined);
 	disconnectHostMock.mockResolvedValue(undefined);
+	useUiStore.setState({ remoteHosts: true });
+});
+
+describe("with the Remote hosts flag off", () => {
+	it("shows no host picker and contacts no saved host", async () => {
+		useUiStore.setState({ remoteHosts: false });
+		render(
+			<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+				<CreateProjectFlow
+					embedded
+					mode="choose"
+					onCloneProject={vi.fn()}
+					onCreateProject={vi.fn()}
+					onInitializeProject={vi.fn()}
+				/>
+			</QueryClientProvider>,
+		);
+
+		expect(await screen.findByRole("button", { name: /clone/i })).toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: /^host:/i })).toBeNull();
+		expect(bridge.remotes.list).not.toHaveBeenCalled();
+		expect(bridge.remotes.probe).not.toHaveBeenCalled();
+	});
 });
 
 async function openHostList() {
