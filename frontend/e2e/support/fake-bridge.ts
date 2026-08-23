@@ -2,6 +2,7 @@ import type { Page } from "@playwright/test";
 
 import type { AoBridge } from "../../src/preload";
 import type { DaemonStatus } from "../../src/shared/daemon-status";
+import { coerceUiSettings, DEFAULT_UI_SETTINGS } from "../../src/shared/ui-locale";
 
 // The e2e suite runs the renderer under `dev:web` (VITE_NO_ELECTRON=1) with no
 // Electron preload, so `window.ao` is undefined and lib/bridge.ts falls back to
@@ -72,6 +73,8 @@ export async function installFakeBridge(
 						repos: [],
 					}),
 					checkAncestorRepo: async () => undefined,
+					getPathForFile: () => "",
+					onOpenFolderPath: () => () => undefined,
 					onNewSessionShortcut: unsubscribe,
 					onKeyboardShortcutsHelp: unsubscribe,
 					onNewShellTerminalShortcut: unsubscribe,
@@ -195,8 +198,8 @@ export async function installFakeBridge(
 					set: async () => undefined,
 				},
 				uiSettings: {
-					get: async () => ({ locale: "en" }),
-					set: async (settings) => settings,
+					get: async () => ({ ...DEFAULT_UI_SETTINGS }),
+					set: async (settings) => coerceUiSettings({ ...DEFAULT_UI_SETTINGS, ...settings }),
 				},
 				keybindings: {
 					get: async () => ({}),
@@ -353,7 +356,7 @@ export async function installFakeAgent(
 			type Session = Record<string, unknown>;
 			const makeWorker = (w: (typeof workers)[number]): Session => ({
 				id: w.id,
-				terminalHandleId: `${w.id}/terminal_0`,
+				terminalHandleId: (w.mode ?? "tui") === "tui" ? `${w.id}/terminal_0` : undefined,
 				workspaceId: projectId,
 				workspaceName: projectName,
 				title: w.title,
@@ -568,6 +571,8 @@ export async function installFakeAgent(
 						repos: [],
 					}),
 					checkAncestorRepo: async () => undefined,
+					getPathForFile: () => "",
+					onOpenFolderPath: () => () => undefined,
 					onNewSessionShortcut: unsubscribe,
 					onKeyboardShortcutsHelp: unsubscribe,
 					onNewShellTerminalShortcut: unsubscribe,
@@ -692,8 +697,8 @@ export async function installFakeAgent(
 					set: async () => undefined,
 				},
 				uiSettings: {
-					get: async () => ({ locale: "en" }),
-					set: async (settings) => settings,
+					get: async () => ({ ...DEFAULT_UI_SETTINGS }),
+					set: async (settings) => coerceUiSettings({ ...DEFAULT_UI_SETTINGS, ...settings }),
 				},
 				keybindings: {
 					get: async () => ({}),

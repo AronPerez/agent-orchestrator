@@ -48,6 +48,8 @@ type APIDeps struct {
 	Browser             controllers.BrowserService
 	PreviewServer       controllers.ManagedPreviewServer
 	SessionCapabilities controllers.SessionCapabilityValidator
+	SystemChecks        controllers.SystemChecker
+	Installer           controllers.Installer
 
 	// BrowserRuntime lets a remote desktop app attach as this daemon's browser
 	// runtime over the HTTP upgrade bridge. Nil leaves the route unmounted.
@@ -109,6 +111,8 @@ type API struct {
 	settings      *controllers.SettingsController
 	dev           *controllers.DevController
 	browser       *controllers.BrowserController
+	system        *controllers.SystemController
+	systemInstall *controllers.SystemInstallController
 	events        *EventsController
 }
 
@@ -145,6 +149,8 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 		settings:      &controllers.SettingsController{Svc: deps.Settings},
 		dev:           &controllers.DevController{Import: deps.DevImport},
 		browser:       &controllers.BrowserController{Svc: deps.Browser},
+		system:        &controllers.SystemController{Checks: deps.SystemChecks},
+		systemInstall: &controllers.SystemInstallController{Installer: deps.Installer},
 		events:        &EventsController{Source: deps.CDC, Live: deps.Events},
 	}
 }
@@ -178,6 +184,8 @@ func (a *API) Register(root chi.Router) {
 			a.settings.Register(r)
 			a.dev.Register(r)
 			a.browser.Register(r)
+			a.system.Register(r)
+			a.systemInstall.Register(r)
 			// Sibling REST controllers plug in here.
 		})
 		// Long-lived streams intentionally bypass the REST timeout middleware.
