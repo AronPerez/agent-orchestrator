@@ -9,6 +9,7 @@ export const shortcutLabelKeys: Record<AppShortcutId, MessageKey> = {
 	"close-shell-terminal": "shortcut.close-shell-terminal",
 	"keyboard-shortcuts": "shortcut.keyboard-shortcuts",
 	"command-palette": "shortcut.command-palette",
+	find: "shortcut.find",
 	"open-settings": "shortcut.open-settings",
 	"toggle-sidebar": "shortcut.toggle-sidebar",
 	"open-project": "shortcut.open-project",
