@@ -865,6 +865,41 @@ describe("SessionInspector usage", () => {
 		expect(within(details).queryByText("Cost")).not.toBeInTheDocument();
 	});
 
+	// Same wire shape as the board crash: an older daemon omits processedTokens
+	// (and the newer sibling counters) entirely. The inspector must read that as
+	// "unknown", not run it through the formatter and print NaN.
+	it("reads an absent processedTokens as unavailable rather than NaN", async () => {
+		useUiStore.getState().setDeveloperMode(true);
+		// Verbatim shape from a pre-processedTokens daemon.
+		const totals = {
+			inputTokens: 84_472_995,
+			uncachedInputTokens: 901,
+			cacheReadTokens: 82_648_063,
+			cacheWriteTokens: 1_824_031,
+			outputTokens: 447_482,
+			reasoningTokens: null,
+		};
+		getMock.mockImplementation(async (path: string) => {
+			if (path === "/api/v1/usage/sessions/{sessionId}") {
+				return {
+					data: {
+						sessionId: "sess-1",
+						incomplete: false,
+						totals,
+						harnesses: [{ harness: "claude-code", totals, models: [{ modelId: "claude-opus-5", totals }] }],
+					},
+					error: undefined,
+				};
+			}
+			return { data: undefined };
+		});
+
+		renderWithQuery(<SessionInspector session={session([])} />);
+		expect(await screen.findByText("Usage & cost")).toBeInTheDocument();
+		expect(screen.getByLabelText("Processed tokens unavailable")).toBeInTheDocument();
+		expect(screen.queryByText(/NaN/)).not.toBeInTheDocument();
+	});
+
 	it("shows icon disclosures without repeated metrics when multiple agents contributed", async () => {
 		useUiStore.getState().setDeveloperMode(true);
 		const totals = {

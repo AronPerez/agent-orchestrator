@@ -436,6 +436,63 @@ describe("SessionsBoard", () => {
 		expect(archivedUsage).toHaveAttribute("aria-label", "1,900 tokens processed");
 	});
 
+	// A daemon older than the processedTokens field omits it from the payload
+	// entirely, so the renderer sees `undefined` rather than `null`. That sails
+	// past an `=== null` guard and `undefined <= 0` is false, so an unguarded
+	// read threw on every remote card.
+	it("survives a usage payload from a daemon that omits processedTokens", async () => {
+		workspaceQueryMock.mockReturnValue({
+			data: [
+				workspaceWithSessions([
+					boardSession({ id: "s-legacy", title: "legacy worker", status: "idle" }),
+				]),
+			],
+			isError: false,
+			isSuccess: true,
+		});
+		usageQueryMock.mockReturnValue({
+			data: new Map([
+				[
+					"local:s-legacy",
+					// Exactly what an older daemon puts on the wire: no processedTokens key.
+					{ sessionId: "s-legacy", totalTokens: 84_920_477, incomplete: false },
+				],
+			]),
+		});
+
+		renderBoard("p1");
+
+		// Rendering at all is the regression guard. Showing the count is the point:
+		// totalTokens is the deprecated alias, and on this daemon it is the only
+		// figure there is, so the card keeps its reading instead of going blank.
+		const usage = await screen.findByText("84.9M processed");
+		expect(usage).toHaveAttribute("aria-label", "84,920,477 tokens processed");
+	});
+
+	// A current daemon zeroes the totalTokens alias exactly when processedTokens
+	// is null, so the alias must never resurrect a count the daemon withheld.
+	it("keeps an unknown reading blank when the daemon states processedTokens as null", async () => {
+		workspaceQueryMock.mockReturnValue({
+			data: [
+				workspaceWithSessions([
+					boardSession({ id: "s-unknown", title: "unknown worker", status: "idle" }),
+				]),
+			],
+			isError: false,
+			isSuccess: true,
+		});
+		usageQueryMock.mockReturnValue({
+			data: new Map([
+				["local:s-unknown", { sessionId: "s-unknown", processedTokens: null, totalTokens: 0, incomplete: false }],
+			]),
+		});
+
+		renderBoard("p1");
+
+		expect(await screen.findByText("unknown worker")).toBeInTheDocument();
+		expect(screen.queryByText(/processed/)).not.toBeInTheDocument();
+	});
+
 	it("pulses the shared activity indicator on an actively working session card", () => {
 		workspaceQueryMock.mockReturnValue({
 			data: [

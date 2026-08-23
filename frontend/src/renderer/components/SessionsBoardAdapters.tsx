@@ -16,6 +16,7 @@ import type { MessageKey } from "../i18n";
 import { aoBridge } from "../lib/bridge";
 import { formatTimeCompact } from "../lib/format-time";
 import { formatTokenCount } from "../lib/format-token-count";
+import { processedTokensOf } from "../lib/usage-tokens";
 import { prBrowserUrl, sessionPRDisplaySummaries } from "../lib/pr-display";
 import {
 	agentSwitchStatusVisual,
@@ -266,11 +267,12 @@ function toUsagePresentation(
 	usage: SessionUsageSummary | undefined,
 	t: TFunction,
 ): BoardUsagePresentation | undefined {
-	if (!usage || usage.processedTokens === null || usage.processedTokens <= 0) return undefined;
-	const compactCount = formatTokenCount(usage.processedTokens).replace(/ tok$/, "");
+	const processedTokens = processedTokensOf(usage);
+	if (processedTokens === null || processedTokens <= 0) return undefined;
+	const compactCount = formatTokenCount(processedTokens).replace(/ tok$/, "");
 	return {
 		accessibleLabel: t("shell.usageProcessed", {
-			count: usage.processedTokens.toLocaleString("en-US"),
+			count: processedTokens.toLocaleString("en-US"),
 		}),
 		compactLabel: t("shell.usageProcessedCompact", { count: compactCount }),
 	};

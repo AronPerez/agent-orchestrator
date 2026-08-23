@@ -53,6 +53,7 @@ import { useSessionWorkspaceFilesChangedCount } from "../hooks/useSessionWorkspa
 import { clearTerminateSessionState, useTerminateSession } from "../hooks/useTerminateSession";
 import { prBrowserUrl, prCardPresentation, prNounKeys, sessionPRDisplaySummaries } from "../lib/pr-display";
 import { formatTokenCount } from "../lib/format-token-count";
+import { processedTokensOf } from "../lib/usage-tokens";
 import {
 	findProjectOrchestrator,
 	flattenHostSections,
@@ -399,7 +400,7 @@ function InspectorPolicyRow({
 
 function UsageCostTelemetry({ usage }: { usage: SessionUsage }) {
 	const { t } = useTranslation();
-	const processedTokens = usageProcessedTokens(usage.totals);
+	const processedTokens = processedTokensOf(usage.totals);
 	const exactProcessed = processedTokens?.toLocaleString("en-US");
 
 	return (
@@ -725,7 +726,7 @@ function UsageDisclosureRow({
 	const { t } = useTranslation();
 	const [open, setOpen] = useState(false);
 	const detailID = useId();
-	const processedTokens = usageProcessedTokens(totals);
+	const processedTokens = processedTokensOf(totals);
 	const exactProcessed = processedTokens?.toLocaleString("en-US");
 
 	return (
@@ -883,10 +884,6 @@ function hasMeaningfulSessionUsage(usage?: SessionUsage): usage is SessionUsage 
 
 function formatTelemetryTokenValue(totalTokens: number): string {
 	return formatTokenCount(totalTokens).replace(/ tok$/, "");
-}
-
-function usageProcessedTokens(totals: SessionUsage["totals"]): number | null {
-	return totals.processedTokens;
 }
 
 function formatHarnessName(harness: string): string {
