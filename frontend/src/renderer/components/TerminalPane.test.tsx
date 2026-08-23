@@ -412,6 +412,30 @@ describe("TerminalCacheProvider", () => {
 	const sessionA = { ...worker, id: "sess-a", title: "session A", terminalHandleId: "handle-a" };
 	const sessionB = { ...worker, id: "sess-b", title: "session B", terminalHandleId: "handle-b" };
 
+	it("reveals a retained terminal when the user switches away and back", async () => {
+		// Returning to a session re-enters the activation phases, which hold the
+		// cached container at visibility:hidden until prepareForActivation
+		// resolves. A reveal that never lands is a terminal that renders nothing.
+		const view = renderCachedPane({ session: sessionA, sessions: [sessionA, sessionB] });
+		try {
+			const terminalA = await waitFor(() => activeXterm());
+			view.show(sessionB);
+			await waitFor(() => expect(activeXterm()).not.toBe(terminalA));
+
+			view.show(sessionA);
+
+			await waitFor(() => expect(activeXterm()).toBe(terminalA));
+			const container = document.querySelector<HTMLElement>(
+				'[data-terminal-cache-key^="session:local:sess-a:worker|"]',
+			)!;
+			await waitFor(() => expect(container.dataset.terminalActivationPhase).toBe("visible"));
+			expect(container.style.visibility).toBe("");
+			expect(container.getAttribute("aria-hidden")).toBeNull();
+		} finally {
+			view.restore();
+		}
+	});
+
 	it("removes externally-created terminal hosts when the shell provider unmounts", async () => {
 		const view = renderCachedPane({ session: sessionA, sessions: [sessionA, sessionB] });
 		try {
