@@ -16,4 +16,7 @@ Browse beside the remote path field walks the selected host's directories over `
 
 ## Artifacts (if appropriate):
 
-Evidence pending — opens draft ahead of capture; a screenshot of the folder browser mid-listing lands here before review is requested.
+![Browse demo-remote folder listing with Git-repo badges](https://raw.githubusercontent.com/AronPerez/agent-orchestrator/campaign-assets/qa-evidence/a7b-folder-picker.png)
+![Path-on-demo-remote field with the Browse button](https://raw.githubusercontent.com/AronPerez/agent-orchestrator/campaign-assets/qa-evidence/a7b-folder-picker-browse.png)
+
+*Captured on a dev build; `--disable-web-security` bridges the dev-origin CORS gap only (production origin `app://renderer` passes the same check natively) — the daemon, proxy, credential, and traffic are all real.*

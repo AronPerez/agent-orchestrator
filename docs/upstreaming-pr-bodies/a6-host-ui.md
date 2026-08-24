@@ -17,3 +17,5 @@ A Host dropdown in Add-a-project lists saved remote daemons beside This Mac with
 ## Artifacts (if appropriate):
 
 ![Add-a-project Host dropdown listing "This Mac" and a saved, connected remote host](https://raw.githubusercontent.com/AronPerez/agent-orchestrator/campaign-assets/qa-evidence/a6-host-ui.png)
+
+*Captured on a dev build; `--disable-web-security` bridges the dev-origin CORS gap only (production origin `app://renderer` passes the same check natively) — the daemon, proxy, credential, and traffic are all real.*

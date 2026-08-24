@@ -16,4 +16,4 @@ Every read now takes a `Ref = {host, id}` and dispatches through `clientFor(ref.
 
 ## Artifacts (if appropriate):
 
-Evidence pending — opens draft ahead of capture; a screenshot proving a legacy `/sessions/$id` deep link still resolves lands here before review.
+![Chat-mode session view after a legacy /sessions/demo-project-3 link resolved to /host/local/session/demo-project-3](https://raw.githubusercontent.com/AronPerez/agent-orchestrator/campaign-assets/qa-evidence/a8a-refs.png)
