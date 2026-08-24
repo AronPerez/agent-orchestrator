@@ -758,6 +758,7 @@
 	"settings.project.saving": "Saving…",
 	"settings.project.selectOrchestrator": "Select orchestrator agent",
 	"settings.project.selectWorker": "Select worker agent",
+	"settings.project.sessionInterfaceDefault": "App default",
 	"settings.project.sessionPrefix": "Session prefix",
 	"settings.sessionInterface.available": "Applies to new sessions. Chat currently supports {{harnesses}}.",
 	"settings.sessionInterface.chat": "Chat",

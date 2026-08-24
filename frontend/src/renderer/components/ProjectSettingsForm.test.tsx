@@ -15,6 +15,9 @@ const { getMock, putMock, postMock, navigateMock, closeSettingsMock, setOrchestr
 	refreshAgentsIfStaleMock: vi.fn(async () => undefined),
 }));
 const connectedHostsSnapshot = vi.hoisted(() => [] as string[]);
+// The experimental Remote hosts flag, mutable per test: it gates a control, so a
+// fixed value could only ever assert one half of the gate.
+const uiStoreState = vi.hoisted(() => ({ remoteHosts: false }));
 
 vi.mock("../hooks/useAgentsQuery", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../hooks/useAgentsQuery")>();
@@ -34,6 +37,7 @@ vi.mock("../stores/ui-store", () => ({
 		selector({
 			closeSettings: closeSettingsMock,
 			setOrchestratorReplacementError: setOrchestratorReplacementErrorMock,
+			remoteHosts: uiStoreState.remoteHosts,
 		}),
 }));
 
@@ -81,9 +85,11 @@ async function beginEdit(label: string) {
 function TestProjectSettings({
 	projectId,
 	section,
+	host = "local",
 }: {
 	projectId: string;
 	section?: ProjectSettingsSection;
+	host?: string;
 }) {
 	const [saveState, setSaveState] = useState<ProjectSettingsSaveState>({
 		isPending: false,
@@ -95,7 +101,7 @@ function TestProjectSettings({
 	});
 	return (
 		<>
-			<ProjectSettingsForm project={{ host: "local", id: projectId }} section={section} onSaveState={setSaveState} />
+			<ProjectSettingsForm project={{ host, id: projectId }} section={section} onSaveState={setSaveState} />
 			{saveState.validationError && <span>{saveState.validationError}</span>}
 			{saveState.mutationError && <span>{saveState.mutationError}</span>}
 			{saveState.saved && <span>{"Saved"}</span>}
@@ -104,7 +110,12 @@ function TestProjectSettings({
 	);
 }
 
-function renderSettings(projectId = "proj-1", workspaces?: WorkspaceSummary[], section?: ProjectSettingsSection) {
+function renderSettings(
+	projectId = "proj-1",
+	workspaces?: WorkspaceSummary[],
+	section?: ProjectSettingsSection,
+	host = "local",
+) {
 	const queryClient = new QueryClient({
 		defaultOptions: {
 			queries: { retry: false },
@@ -112,13 +123,13 @@ function renderSettings(projectId = "proj-1", workspaces?: WorkspaceSummary[], s
 		},
 	});
 	if (workspaces) {
-		queryClient.setQueryData<HostSection[]>(workspaceHostQueryKey("local"), [
-			{ host: "local", label: "Local", status: "ready", workspaces, failure: null },
+		queryClient.setQueryData<HostSection[]>(workspaceHostQueryKey(host), [
+			{ host, label: host, status: "ready", workspaces, failure: null },
 		]);
 	}
 	render(
 		<QueryClientProvider client={queryClient}>
-			<TestProjectSettings projectId={projectId} section={section} />
+			<TestProjectSettings projectId={projectId} section={section} host={host} />
 		</QueryClientProvider>,
 	);
 	return queryClient;
@@ -218,6 +229,7 @@ beforeEach(() => {
 	setOrchestratorReplacementErrorMock.mockReset();
 	captureOrchestratorReplacementFailureMock.mockReset();
 	refreshAgentsIfStaleMock.mockReset().mockResolvedValue(undefined);
+	uiStoreState.remoteHosts = false;
 	putMock.mockResolvedValue({ data: { project: {} }, error: undefined });
 	postMock.mockResolvedValue({
 		data: { orchestrator: { id: "proj-1-orch-2" } },
@@ -1530,4 +1542,88 @@ describe("ProjectSettingsForm", () => {
 			"proj-1",
 		);
 	});
+
+	// The per-project default session interface is gated on BOTH the experimental
+	// Remote hosts flag and the project actually living on a remote host. Either
+	// condition alone must not show it.
+	describe("default session interface", () => {
+		const remoteProject = {
+			id: "proj-1",
+			name: "Project One",
+			kind: "single_repo",
+			path: "/repo/project-one",
+			repo: "",
+			defaultBranch: "main",
+			config: {
+				worker: { agent: "codex" },
+				orchestrator: { agent: "claude-code" },
+			},
+		};
+
+		it("saves the chosen interface for a project on a remote host", async () => {
+			uiStoreState.remoteHosts = true;
+			mockProject(remoteProject);
+
+			renderSettings("proj-1", undefined, "agents", "https://desk.example:3001");
+
+			const control = await screen.findByRole("button", { name: "Default session interface" });
+			await chooseOption(control, "Chat");
+			submitSettings();
+
+			await waitFor(() => expect(putMock).toHaveBeenCalledOnce());
+			expect(putMock.mock.calls[0]?.[1].body.config.sessionInterface).toBe("chat");
+		});
+
+		it("hides it for a local project even with remote hosts enabled", async () => {
+			uiStoreState.remoteHosts = true;
+			mockProject(remoteProject);
+
+			renderSettings("proj-1", undefined, "agents", "local");
+
+			await screen.findByLabelText("Permission mode");
+			expect(
+				screen.queryByRole("button", { name: "Default session interface" }),
+			).not.toBeInTheDocument();
+		});
+
+		it("hides it on a remote host while the remote hosts flag is off", async () => {
+			uiStoreState.remoteHosts = false;
+			mockProject(remoteProject);
+
+			renderSettings("proj-1", undefined, "agents", "https://desk.example:3001");
+
+			await screen.findByLabelText("Permission mode");
+			expect(
+				screen.queryByRole("button", { name: "Default session interface" }),
+			).not.toBeInTheDocument();
+		});
+
+		// An older remote daemon does not know the field, so it arrives as
+		// undefined. That is "no override", not an error and not a silent pin.
+		it("treats a field the remote daemon omits as no override", async () => {
+			uiStoreState.remoteHosts = true;
+			mockProject(remoteProject);
+
+			renderSettings("proj-1", undefined, "agents", "https://desk.example:3001");
+
+			const control = await screen.findByRole("button", { name: "Default session interface" });
+			expect(control).toHaveTextContent("App default");
+
+			submitSettings();
+			await waitFor(() => expect(putMock).toHaveBeenCalledOnce());
+			expect(putMock.mock.calls[0]?.[1].body.config.sessionInterface).toBeUndefined();
+		});
+
+		it("shows the value the project already pinned", async () => {
+			uiStoreState.remoteHosts = true;
+			mockProject({ ...remoteProject, config: { ...remoteProject.config, sessionInterface: "tui" } });
+
+			renderSettings("proj-1", undefined, "agents", "https://desk.example:3001");
+
+			expect(
+				await screen.findByRole("button", { name: "Default session interface" }),
+			).toHaveTextContent("Terminal");
+		});
+	});
+
 });

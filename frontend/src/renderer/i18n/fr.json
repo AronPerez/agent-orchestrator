@@ -768,6 +768,7 @@
 	"settings.project.saving": "Enregistrement…",
 	"settings.project.selectOrchestrator": "Sélectionner l'agent orchestrateur",
 	"settings.project.selectWorker": "Sélectionner l'agent worker",
+	"settings.project.sessionInterfaceDefault": "Valeur par défaut de l'app",
 	"settings.project.sessionPrefix": "Préfixe de session",
 	"settings.sessionInterface.available": "S’applique aux nouvelles sessions. Le chat prend actuellement en charge {{harnesses}}.",
 	"settings.sessionInterface.chat": "Chat",
