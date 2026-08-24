@@ -1,5 +1,6 @@
 import type { QueryClient } from "@tanstack/react-query";
-import { getApiBaseUrl, hasTrustedApiBaseUrl, subscribeApiBaseUrl } from "./api-client";
+import { subscribeApiBaseUrl } from "./api-client";
+import { baseUrlFor } from "./host-clients";
 import { refKey, type Ref } from "./hosts";
 
 const INVALIDATE_DEBOUNCE_MS = 150;
@@ -63,13 +64,15 @@ function createWorkspaceStream(session: Ref, queryClient: QueryClient): Workspac
 	stream.disposed = false;
 	stream.connect = () => {
 		if (stream.disposed || typeof EventSource === "undefined") return;
-		if (!hasTrustedApiBaseUrl()) {
+		// The watcher follows the session's own host, so a remote session's SSE
+		// goes through that host's loopback proxy base and carries its token.
+		const baseUrl = baseUrlFor(session.host);
+		if (baseUrl === null) {
 			stream.source?.close();
 			stream.source = undefined;
 			stream.sourceBaseUrl = undefined;
 			return;
 		}
-		const baseUrl = getApiBaseUrl();
 		if (stream.source && stream.sourceBaseUrl === baseUrl && stream.source.readyState !== EVENTSOURCE_CLOSED) return;
 		stream.source?.close();
 		stream.sourceBaseUrl = baseUrl;

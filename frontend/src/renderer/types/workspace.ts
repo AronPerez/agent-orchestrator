@@ -10,6 +10,7 @@ import {
 } from "@aoagents/product-ui";
 
 import type { ReviewerHarnessId } from "../lib/reviewer-harnesses";
+import type { EventsConnectionState } from "../lib/events-connection";
 import type { HostId, Ref } from "../lib/hosts";
 
 export { toSessionActivity, toSessionStatus };
@@ -281,6 +282,35 @@ export type WorkspaceSummary = {
 	};
 	sessions: WorkspaceSession[];
 };
+
+export type HostSection = {
+	host: HostId;
+	label: string;
+	status: "ready" | "failed";
+	/**
+	 * This host's live event stream when the section was built. Absent means
+	 * unknown (no stream was ever opened — jsdom, preview surfaces); only
+	 * "disconnected" means the board is quietly falling back to polling.
+	 */
+	streamState?: EventsConnectionState;
+	workspaces: WorkspaceSummary[];
+	failure: string | null;
+};
+
+export function flattenHostSections(sections: readonly HostSection[] | undefined): WorkspaceSummary[] {
+	return sections?.flatMap((section) => section.workspaces) ?? [];
+}
+
+export function updateHostWorkspaces(
+	sections: HostSection[] | undefined,
+	host: HostId,
+	update: (workspaces: WorkspaceSummary[]) => WorkspaceSummary[],
+): HostSection[] | undefined {
+	if (!sections) return sections;
+	return sections.map((section) =>
+		section.host === host ? { ...section, workspaces: update(section.workspaces) } : section,
+	);
+}
 
 export function hasConfiguredOrchestratorAgent(
 	workspace: Pick<WorkspaceSummary, "orchestratorAgent"> | undefined,

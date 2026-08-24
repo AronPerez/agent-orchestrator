@@ -11,6 +11,7 @@ import {
 	isOrchestratorSession,
 	sessionIsActive,
 	type WorkspaceSession,
+	flattenHostSections,
 } from "../types/workspace";
 import { useWorkspaceQuery, workspaceQueryKey } from "../hooks/useWorkspaceQuery";
 import {
@@ -108,7 +109,7 @@ export function ShellTopbar({
 	const [isSpawning, setIsSpawning] = useState(false);
 	// Board-scope spawn failures surface where the board actions render.
 	const [boardSpawnError, setBoardSpawnError] = useState<string | null>(null);
-	const all = useWorkspaceQuery().data ?? [];
+	const all = flattenHostSections(useWorkspaceQuery().data);
 
 	const session = params.sessionId
 		? all.flatMap((workspace) => workspace.sessions).find((s) => s.id === params.sessionId)

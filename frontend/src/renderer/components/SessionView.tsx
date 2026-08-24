@@ -54,7 +54,7 @@ import { SHELL_PANEL_SPRING } from "../lib/motion-spring";
 import { hidesShellTopbar, isMacPlatform } from "../lib/platform";
 import { useShell } from "../lib/shell-context";
 import { cn } from "../lib/utils";
-import { isOrchestratorSession, sessionIsActive } from "../types/workspace";
+import { flattenHostSections, isOrchestratorSession, sessionIsActive } from "../types/workspace";
 import { terminalTargetBelongsToSession, type TerminalTarget } from "../types/terminal";
 import { matchesRendererShortcut } from "../stores/keybindings-store";
 import { useResolvedTheme, useUiStore, type InspectorView } from "../stores/ui-store";
@@ -244,7 +244,7 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 	const sessionId = sessionRef.id;
 	const { t } = useTranslation();
 	const workspaceQuery = useWorkspaceQuery();
-	const workspaces = workspaceQuery.data ?? [];
+	const workspaces = flattenHostSections(workspaceQuery.data);
 	const theme = useResolvedTheme();
 	const isInspectorOpen = useUiStore((state) => state.inspectorSessions[sessionId]?.isOpen ?? true);
 	const inspectorView = useUiStore((state) => state.inspectorSessions[sessionId]?.view ?? "summary");

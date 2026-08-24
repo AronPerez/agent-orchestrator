@@ -15,6 +15,7 @@ import {
 	newestActiveOrchestrator,
 	orchestratorHealth,
 	workerSessions,
+	flattenHostSections,
 } from "../types/workspace";
 import {
 	boardAttentionZoneOrder,
@@ -82,8 +83,10 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
 	const boardActionsInPanel = usesBoardActionsInPanel();
 	/** Bell lives in the board action row when the shell topbar does not host it. */
 	const boardOwnsNotificationCenter = isLinuxPlatform() || boardActionsInPanel;
-	const all = workspaceQuery.data ?? [];
-	const workspaces = projectId ? all.filter((workspace) => workspace.id === projectId) : all;
+	const all = flattenHostSections(workspaceQuery.data);
+	const workspaces = project
+		? all.filter((workspace) => workspace.host === project.host && workspace.id === project.id)
+		: all;
 	const workspace = projectId ? workspaces[0] : undefined;
 	// Board chrome stays route-oriented; project context remains in the sidebar.
 	const boardLabel = t("shell.board");

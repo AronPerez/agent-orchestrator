@@ -3,6 +3,7 @@ import { useEffect } from "react";
 import { MigrationPopup } from "../components/MigrationPopup";
 import { SessionsBoard } from "../components/SessionsBoard";
 import { useWorkspaceQuery } from "../hooks/useWorkspaceQuery";
+import { flattenHostSections } from "../types/workspace";
 
 export const Route = createFileRoute("/_shell/")({
 	component: ShellIndex,
@@ -14,7 +15,7 @@ function ShellIndex() {
 
 	useEffect(() => {
 		if (!workspaceQuery.isSuccess) return;
-		const workspaces = workspaceQuery.data ?? [];
+		const workspaces = flattenHostSections(workspaceQuery.data);
 		if (workspaces.length !== 1) return;
 		const [workspace] = workspaces;
 		if (workspace.id !== "scratch" || workspace.kind !== "scratch") return;
