@@ -5,6 +5,7 @@ import { useEffect, useRef } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { shellTerminalsQueryKey, type ShellTerminal } from "../hooks/useShellTerminals";
 import { workspaceQueryKey } from "../hooks/useWorkspaceQuery";
+import { refKey } from "../lib/hosts";
 import type { AttachableTerminal } from "../hooks/useTerminalSession";
 import type { TerminalTarget } from "../types/terminal";
 import type { WorkspaceSession } from "../types/workspace";
@@ -733,7 +734,7 @@ describe("terminal link preview", () => {
 		const view = renderPane(worker);
 		try {
 			act(() => terminalLinkHandler?.("https://example.com/pull/42"));
-			expect(useUiStore.getState().inspectorSessions[worker.id]).toMatchObject({
+			expect(useUiStore.getState().inspectorSessions[refKey(worker)]).toMatchObject({
 				isOpen: true,
 				view: "browser",
 			});

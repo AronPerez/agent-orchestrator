@@ -10,6 +10,7 @@ import {
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { refKey } from "../lib/hosts";
 import { SessionInspector } from "./SessionInspector";
 import { TooltipProvider } from "./ui/tooltip";
 import type { SessionPRSummary } from "../hooks/useSessionScmSummary";
@@ -355,12 +356,12 @@ describe("SessionInspector tabs", () => {
     ).not.toBeInTheDocument();
     view.unmount();
 
-    useUiStore.getState().setBrowserUnseen(currentSession.id, true);
+    useUiStore.getState().setBrowserUnseen(refKey(currentSession), true);
     renderWithQuery(<SessionInspector session={currentSession} />);
     expect(screen.getByTestId("browser-unseen-indicator")).toBeInTheDocument();
 
     act(() =>
-      useUiStore.getState().setInspectorView(currentSession.id, "browser"),
+      useUiStore.getState().setInspectorView(refKey(currentSession), "browser"),
     );
     expect(
       screen.queryByTestId("browser-unseen-indicator"),
@@ -2304,8 +2305,8 @@ describe("SessionInspector summary reviews", () => {
         body: { url: reviewUrl },
       }),
     );
-    expect(useUiStore.getState().inspectorSessions["sess-1"]?.view).toBe("browser");
-    expect(useUiStore.getState().inspectorSessions["sess-1"]?.isOpen).toBe(true);
+    expect(useUiStore.getState().inspectorSessions[refKey({ host: "local", id: "sess-1" })]?.view).toBe("browser");
+    expect(useUiStore.getState().inspectorSessions[refKey({ host: "local", id: "sess-1" })]?.isOpen).toBe(true);
 
     await userEvent.click(screen.getByRole("button", { name: "Send to worker agent" }));
     await waitFor(() =>
