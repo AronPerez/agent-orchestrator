@@ -1004,8 +1004,9 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 	// a worktree behind. Chat inherited from the daemon preference is best-effort:
 	// if it is unavailable for this harness or installation, fall back to TUI.
 	modeExplicitlyRequested := cfg.RequestedMode.Valid()
-	mode := m.resolveSessionMode(ctx, cfg.RequestedMode)
-	if cfg.Kind == domain.KindOrchestrator && !modeExplicitlyRequested {
+	mode := m.resolveSessionMode(ctx, cfg.RequestedMode, project.Config)
+	// Orchestrators default to Chat unless the caller or the project chose.
+	if cfg.Kind == domain.KindOrchestrator && !modeExplicitlyRequested && !project.Config.SessionInterface.Valid() {
 		mode = domain.SessionModeChat
 	}
 	if mode == domain.SessionModeChat {

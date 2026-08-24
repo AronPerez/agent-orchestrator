@@ -130,6 +130,7 @@ type projectConfig struct {
 	Worker             roleOverride         `json:"worker,omitempty"`
 	Orchestrator       roleOverride         `json:"orchestrator,omitempty"`
 	TrackerIntake      trackerIntakeConfig  `json:"trackerIntake,omitempty"`
+	SessionInterface   string               `json:"sessionInterface,omitempty"`
 	AutoReview         bool                 `json:"autoReview,omitempty"`
 	// WorkersRequestReview must round-trip through set-config so a CLI edit
 	// of another field never silently turns it off.

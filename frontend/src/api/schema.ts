@@ -5086,6 +5086,8 @@ export interface components {
             postCreate?: string[];
             preRemove?: string[];
             reviewers?: components["schemas"]["DomainReviewerConfig"][];
+            /** @enum {string} */
+            sessionInterface?: "chat" | "tui";
             sessionPrefix?: string;
             symlinks?: string[];
             trackerIntake?: components["schemas"]["TrackerIntakeConfig"];
