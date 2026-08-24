@@ -114,7 +114,11 @@ export function ShellTopbar({
 	const [isSpawning, setIsSpawning] = useState(false);
 	// Board-scope spawn failures surface where the board actions render.
 	const [boardSpawnError, setBoardSpawnError] = useState<string | null>(null);
-	const workspaceScope = useWorkspaceScope(params.projectId, params.sessionId).data;
+	// Session ids are unique per host, not across them: matching on id alone
+	// would name another host's same-id session in the crumb, pill and kill
+	// button. useWorkspaceScope matches session/project on this route host.
+	const routeHost = params.hostId ?? LOCAL_HOST;
+	const workspaceScope = useWorkspaceScope(routeHost, params.projectId, params.sessionId).data;
 	const session = workspaceScope?.session;
 	const isSessionRoute = Boolean(params.sessionId);
 	const isOrchestrator = session ? isOrchestratorSession(session) : false;
@@ -123,9 +127,10 @@ export function ShellTopbar({
 	// projectId that no longer resolves (stale route after the project was
 	// removed, or data still loading) shows an empty crumb — never the raw
 	// route slug. "Board" is the root-board crumb only.
-	const projectHost = session?.host ?? params.hostId ?? LOCAL_HOST;
 	const projectId = session?.workspaceId ?? params.projectId;
-	const projectRef: Ref | undefined = projectId ? { host: projectHost, id: projectId } : undefined;
+	// projectHost reduces to routeHost: a resolved session's host is already the
+	// route's by construction (see useWorkspaceScope above).
+	const projectRef: Ref | undefined = projectId ? { host: routeHost, id: projectId } : undefined;
 	const isProjectRestarting = useUiStore((state) =>
 		projectId ? state.restartingProjectIds.has(projectId) : false,
 	);
@@ -204,7 +209,7 @@ export function ShellTopbar({
 			await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
 			void navigate({
 				to: "/host/$hostId/session/$sessionId",
-				params: { hostId: projectHost, sessionId },
+				params: { hostId: routeHost, sessionId },
 			});
 		} catch (error) {
 			void captureRendererException(error, {

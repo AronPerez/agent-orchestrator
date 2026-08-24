@@ -24,7 +24,7 @@ type RestoreUnavailableDialogProps = {
 
 export function RestoreUnavailableDialog({ open, session, onOpenChange, onRecreated }: RestoreUnavailableDialogProps) {
 	const { t } = useTranslation();
-	const workspaceQuery = useWorkspaceScope(session.workspaceId);
+	const workspaceQuery = useWorkspaceScope(session.host, session.workspaceId);
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | undefined>();
 	const orchestrator = isOrchestratorSession(session);

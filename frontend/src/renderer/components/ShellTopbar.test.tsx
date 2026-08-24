@@ -16,7 +16,11 @@ import { TooltipProvider } from "./ui/tooltip";
 const { navigateMock, onKilledMock, paramsMock, postMock, spawnMock, useWorkspaceQueryMock } = vi.hoisted(() => ({
 	navigateMock: vi.fn(),
 	onKilledMock: vi.fn(),
-	paramsMock: { projectId: undefined as string | undefined, sessionId: undefined as string | undefined },
+	paramsMock: {
+		hostId: undefined as string | undefined,
+		projectId: undefined as string | undefined,
+		sessionId: undefined as string | undefined,
+	},
 	postMock: vi.fn(),
 	spawnMock: vi.fn(),
 	useWorkspaceQueryMock: vi.fn(),
@@ -34,10 +38,15 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
 vi.mock("../hooks/useWorkspaceQuery", () => ({
 	useWorkspaceScope: () => {
 		const query = useWorkspaceQueryMock();
-		const project = query.data?.find((workspace: WorkspaceSummary) => workspace.id === paramsMock.projectId);
+		const routeHost = paramsMock.hostId ?? "local";
+		const project = query.data?.find(
+			(workspace: WorkspaceSummary) => workspace.host === routeHost && workspace.id === paramsMock.projectId,
+		);
 		const session = query.data
 			?.flatMap((workspace: WorkspaceSummary) => workspace.sessions)
-			.find((candidate: WorkspaceSession) => candidate.id === paramsMock.sessionId);
+			.find(
+				(candidate: WorkspaceSession) => candidate.host === routeHost && candidate.id === paramsMock.sessionId,
+			);
 		return {
 			...query,
 			data: {
@@ -202,6 +211,7 @@ async function clickKillDialogConfirm() {
 beforeEach(() => {
 	navigateMock.mockReset();
 	onKilledMock.mockReset();
+	paramsMock.hostId = undefined;
 	paramsMock.projectId = undefined;
 	paramsMock.sessionId = undefined;
 	postMock.mockReset();
@@ -218,6 +228,35 @@ describe("ShellTopbar status pill", () => {
 		const header = screen.getByTestId("workspace-topbar-actions").closest("header");
 		expect(header).toHaveClass("pr-2");
 		expect(header).not.toHaveClass("pr-4");
+	});
+
+	// Regression: session ids are unique per host, not across them. Resolving the
+	// route's session by bare id names whichever host sorts first in the tree, so
+	// the crumb, status pill and kill button all describe the wrong machine.
+	it("names the session on the route's host, not the first matching id", () => {
+		const localTwin = sessionWith({ host: "local", title: "the local thing" });
+		const remoteTwin = sessionWith({ host: "remote", title: "the remote thing" });
+		useWorkspaceQueryMock.mockReturnValue({
+			data: [
+				{ host: "local", id: "proj-1", name: "my-app", path: "/repo/my-app", sessions: [localTwin] },
+				{ host: "remote", id: "proj-1", name: "my-app", path: "/repo/my-app", sessions: [remoteTwin] },
+			] satisfies WorkspaceSummary[],
+			isError: false,
+			isLoading: false,
+		});
+		paramsMock.hostId = "remote";
+		paramsMock.projectId = "proj-1";
+		paramsMock.sessionId = "sess-1";
+
+		render(
+			<QueryClientProvider client={new QueryClient()}>
+				<TooltipProvider>
+					<ShellTopbar />
+				</TooltipProvider>
+			</QueryClientProvider>,
+		);
+
+		expect(screen.getByTestId("session-topbar-identity").textContent).toContain("the remote thing");
 	});
 
 	it("shows the worker session name and activity in the full topbar identity", () => {
