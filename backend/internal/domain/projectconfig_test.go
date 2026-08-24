@@ -213,3 +213,18 @@ func TestProjectConfigIsZero(t *testing.T) {
 		t.Fatal("config with autoReview enabled should not be zero")
 	}
 }
+
+// The project-level session interface is written by the app and by
+// `ao project set-config`, so a value outside the vocabulary is refused where it
+// is set rather than at every later spawn. Unset stays legal: it means the
+// project defers to the daemon-owned default.
+func TestProjectConfigValidateSessionInterface(t *testing.T) {
+	for _, mode := range []SessionMode{"", SessionModeChat, SessionModeTUI} {
+		if err := (ProjectConfig{SessionInterface: mode}).Validate(); err != nil {
+			t.Errorf("Validate with sessionInterface %q = %v, want nil", mode, err)
+		}
+	}
+	if err := (ProjectConfig{SessionInterface: "voice"}).Validate(); err == nil {
+		t.Fatal(`Validate with sessionInterface "voice" = nil, want a rejection`)
+	}
+}

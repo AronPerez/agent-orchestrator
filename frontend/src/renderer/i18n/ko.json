@@ -759,6 +759,7 @@
 	"settings.project.saving": "저장 중…",
 	"settings.project.selectOrchestrator": "오케스트레이터 에이전트 선택",
 	"settings.project.selectWorker": "워커 에이전트 선택",
+	"settings.project.sessionInterfaceDefault": "앱 기본값",
 	"settings.project.sessionPrefix": "세션 접두사",
 	"settings.sessionInterface.available": "새 세션에 적용됩니다. 현재 채팅은 {{harnesses}}을(를) 지원합니다.",
 	"settings.sessionInterface.chat": "채팅",

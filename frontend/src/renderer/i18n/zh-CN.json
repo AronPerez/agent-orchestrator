@@ -741,6 +741,7 @@
 	"settings.project.saving": "正在保存…",
 	"settings.project.selectOrchestrator": "选择编排代理",
 	"settings.project.selectWorker": "选择 worker 代理",
+	"settings.project.sessionInterfaceDefault": "应用默认值",
 	"settings.project.sessionPrefix": "会话前缀",
 	"settings.sessionInterface.available": "适用于新会话。聊天目前支持 {{harnesses}}。",
 	"settings.sessionInterface.chat": "聊天",

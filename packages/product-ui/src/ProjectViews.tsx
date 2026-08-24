@@ -644,6 +644,7 @@ export function ProjectAgentsSettingsView({
 	orchestratorArea,
 	orchestratorModelArea,
 	permissions,
+	sessionInterfaceArea,
 	title,
 	workerArea,
 	workerModelArea,
@@ -652,6 +653,8 @@ export function ProjectAgentsSettingsView({
 	orchestratorArea: ReactNode;
 	orchestratorModelArea: ReactNode;
 	permissions: { control: ReactNode; icon?: ReactNode; label: string };
+	/** Omitted where the setting does not apply — see the caller's gate. */
+	sessionInterfaceArea?: ReactNode;
 	title: string;
 	workerArea: ReactNode;
 	workerModelArea: ReactNode;
@@ -665,6 +668,7 @@ export function ProjectAgentsSettingsView({
 			<ProjectSettingsRow icon={permissions.icon} label={permissions.label}>
 				{permissions.control}
 			</ProjectSettingsRow>
+			{sessionInterfaceArea}
 			{missingRequiredMessage && (
 				<p className="px-1 text-xs leading-row text-error" role="alert">
 					{missingRequiredMessage}

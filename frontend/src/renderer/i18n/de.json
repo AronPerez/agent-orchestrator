@@ -759,6 +759,7 @@
 	"settings.project.saving": "Wird gespeichert…",
 	"settings.project.selectOrchestrator": "Orchestrator-Agent auswählen",
 	"settings.project.selectWorker": "Worker-Agent auswählen",
+	"settings.project.sessionInterfaceDefault": "App-Standard",
 	"settings.project.sessionPrefix": "Sitzungspräfix",
 	"settings.sessionInterface.available": "Gilt für neue Sitzungen. Chat unterstützt derzeit {{harnesses}}.",
 	"settings.sessionInterface.chat": "Chat",
