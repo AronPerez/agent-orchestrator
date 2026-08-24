@@ -32,7 +32,7 @@ import { CreateProjectFlow } from "./CreateProjectFlow";
 import { TaskComposer } from "./TaskComposer";
 import { CommandDialog, CommandEmpty, CommandFooter, CommandGroup, CommandInput, CommandItem, CommandList } from "./ui/command";
 
-import { LOCAL_HOST, type Ref } from "../lib/hosts";
+import { LOCAL_HOST, refKey, type Ref } from "../lib/hosts";
 const PALETTE_REVIEW_STALE_TIME_MS = 60_000;
 type PaletteView =
 	| { mode: "root" }
@@ -298,15 +298,15 @@ export function CommandPalette() {
 		[navigate],
 	);
 
-	const blockedByRestart = useCallback((projectId: string) => {
-		if (!useUiStore.getState().restartingProjectIds.has(projectId)) return false;
+	const blockedByRestart = useCallback((project: Ref) => {
+		if (!useUiStore.getState().restartingProjectIds.has(refKey(project))) return false;
 		setError(t("command.orchestratorRestarting"));
 		return true;
 	}, [t]);
 
 	const openOrchestrator = useCallback(
 		async (project: Ref) => {
-			if (blockedByRestart(project.id)) return;
+			if (blockedByRestart(project)) return;
 			const orchestrator = findProjectOrchestrator(workspaces, project);
 			if (orchestrator) {
 				navigateToTarget({
@@ -342,7 +342,7 @@ export function CommandPalette() {
 				}
 				return;
 			}
-			const sessionId = await spawnOrchestrator(project.id, "command_palette");
+			const sessionId = await spawnOrchestrator(project, "command_palette");
 			await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
 			navigateToTarget({ to: "/host/$hostId/session/$sessionId", params: { hostId: project.host, sessionId } });
 			closePalette();
@@ -419,7 +419,7 @@ export function CommandPalette() {
 						break;
 					}
 					case "open-new-task":
-						if (blockedByRestart(action.project.id)) break;
+						if (blockedByRestart(action.project)) break;
 						pushView({ mode: "new-task", project: action.project });
 						break;
 					case "open-new-project":

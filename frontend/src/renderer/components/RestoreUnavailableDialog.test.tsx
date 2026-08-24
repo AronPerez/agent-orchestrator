@@ -87,7 +87,7 @@ describe("RestoreUnavailableDialog", () => {
 		await userEvent.click(screen.getByRole("button", { name: "Create new orchestrator" }));
 
 		await waitFor(() => expect(onRecreated).toHaveBeenCalledWith("orch-new"));
-		expect(spawnMock).toHaveBeenCalledWith("proj-1", "restore_dialog", true);
+		expect(spawnMock).toHaveBeenCalledWith({ host: "local", id: "proj-1" }, "restore_dialog", true);
 		expect(onOpenChange).toHaveBeenCalledWith(false);
 	});
 });

@@ -1,9 +1,9 @@
 import type { QueryClient } from "@tanstack/react-query";
-import type { Ref } from "./hosts";
 import { workspaceQueryKey } from "../hooks/useWorkspaceQuery";
 import type { SessionMode } from "../types/conversation";
 import { OrchestratorSpawnError, spawnOrchestrator } from "./spawn-orchestrator";
 import type { OrchestratorReplacementFailure } from "../stores/ui-store";
+import type { Ref } from "./hosts";
 
 type NavigateToSession = (options: {
 	to: "/host/$hostId/session/$sessionId";
@@ -14,7 +14,7 @@ type RestartProjectOrchestratorOptions = {
 	project: Ref;
 	queryClient: QueryClient;
 	navigate: NavigateToSession;
-	setProjectRestarting: (projectId: string, restarting: boolean) => void;
+	setProjectRestarting: (project: Ref, restarting: boolean) => void;
 	setOrchestratorReplacementError: (project: Ref, failure: OrchestratorReplacementFailure | null) => void;
 	onError?: (error: unknown) => void;
 	mode?: SessionMode;
@@ -38,10 +38,10 @@ export async function restartProjectOrchestrator({
 	onError,
 	mode,
 }: RestartProjectOrchestratorOptions) {
-	setProjectRestarting(project.id, true);
+	setProjectRestarting(project, true);
 	setOrchestratorReplacementError(project, null);
 	try {
-		const sessionId = await spawnOrchestrator(project.id, "restart", true, mode);
+		const sessionId = await spawnOrchestrator(project, "restart", true, mode);
 		await refreshWorkspaceState(queryClient);
 		void navigate({
 			to: "/host/$hostId/session/$sessionId",
@@ -57,6 +57,6 @@ export async function restartProjectOrchestrator({
 		});
 		onError?.(error);
 	} finally {
-		setProjectRestarting(project.id, false);
+		setProjectRestarting(project, false);
 	}
 }

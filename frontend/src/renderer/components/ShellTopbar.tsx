@@ -40,7 +40,7 @@ import {
 } from "../lib/agent-switch-presentation";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
-import { LOCAL_HOST, type Ref } from "../lib/hosts";
+import { LOCAL_HOST, refKey, type Ref } from "../lib/hosts";
 const isMac = isMacPlatform();
 const boardActionsInPanel = usesBoardActionsInPanel();
 const dragStyle = isMac ? ({ WebkitAppRegion: "drag" } as React.CSSProperties) : undefined;
@@ -131,9 +131,8 @@ export function ShellTopbar({
 	// projectHost reduces to routeHost: a resolved session's host is already the
 	// route's by construction (see useWorkspaceScope above).
 	const projectRef: Ref | undefined = projectId ? { host: routeHost, id: projectId } : undefined;
-	const isProjectRestarting = useUiStore((state) =>
-		projectId ? state.restartingProjectIds.has(projectId) : false,
-	);
+	const restartingProjectIds = useUiStore((state) => state.restartingProjectIds);
+	const isProjectRestarting = projectRef ? restartingProjectIds.has(refKey(projectRef)) : false;
 	const isProjectBoardRoute = !isSessionRoute && Boolean(projectId);
 	const isRootBoardRoute = !isSessionRoute && !isProjectBoardRoute;
 	const project = workspaceScope?.project;
@@ -161,7 +160,7 @@ export function ShellTopbar({
 	};
 
 	const openOrchestrator = async () => {
-		if (!projectId) return;
+		if (!projectId || !projectRef) return;
 		setBoardSpawnError(null);
 		void addRendererExceptionStep("Orchestrator open requested", {
 			source: "orchestrator-open",
@@ -205,7 +204,7 @@ export function ShellTopbar({
 		}
 		setIsSpawning(true);
 		try {
-			const sessionId = await spawnOrchestrator(projectId, "topbar");
+			const sessionId = await spawnOrchestrator(projectRef, "topbar");
 			await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
 			void navigate({
 				to: "/host/$hostId/session/$sessionId",
