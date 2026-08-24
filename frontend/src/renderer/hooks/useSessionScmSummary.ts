@@ -2,6 +2,8 @@ import { useQuery } from "@tanstack/react-query";
 import type { components } from "../../api/schema";
 import { clientFor } from "../lib/host-clients";
 import { refKey, type Ref } from "../lib/hosts";
+import { mockSessionScmSummaries } from "../lib/mock-data";
+import { usesPreviewWorkspaceData } from "../lib/preview-mode";
 
 export type SessionPRSummary = components["schemas"]["SessionPRSummary"];
 
@@ -20,7 +22,10 @@ export function sessionScmSummaryQueryOptions(session: Ref) {
 	return {
 		queryKey: sessionScmSummaryQueryKey(session),
 		enabled: Boolean(session.id),
-		queryFn: () => fetchSessionScmSummary(session),
+		queryFn: () =>
+			usesPreviewWorkspaceData
+				? Promise.resolve(mockSessionScmSummaries[session.id] ?? [])
+				: fetchSessionScmSummary(session),
 		retry: 1,
 	};
 }
@@ -29,7 +34,10 @@ export function useSessionScmSummary(session?: Ref) {
 	return useQuery({
 		queryKey: sessionScmSummaryQueryKey(session),
 		enabled: Boolean(session),
-		queryFn: () => fetchSessionScmSummary(session!),
+		queryFn: () =>
+			usesPreviewWorkspaceData
+				? Promise.resolve(mockSessionScmSummaries[session!.id] ?? [])
+				: fetchSessionScmSummary(session!),
 		retry: 1,
 	});
 }

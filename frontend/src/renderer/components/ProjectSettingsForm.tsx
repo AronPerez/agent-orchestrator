@@ -171,6 +171,8 @@ function SettingsBody({
 		enabled: form.workerAgent !== "" || form.orchestratorAgent !== "" || form.reviewerHarness !== "",
 	});
 	const agentCatalog = agentsQuery.data;
+	const initialReviewerHarness = config.reviewers?.[0]?.harness ?? "";
+	const initialAutoReview = config.autoReview ?? false;
 
 	const intakeForm: IntakeForm = {
 		enabled: form.intakeEnabled,
@@ -186,6 +188,10 @@ function SettingsBody({
 		}));
 	const effectiveIntakeRepo = form.intakeRepo.trim() || deriveRepoPath(project.repo);
 	const reviewerWarning = reviewerTrustWarning(form.reviewerHarness);
+	// Compared against the values this form opened with, so a save that leaves the
+	// review controls alone is not reported as a review decision.
+	const reviewSettingsChanged =
+		form.autoReview !== initialAutoReview || form.reviewerHarness !== initialReviewerHarness;
 	const mutation = useMutation({
 		mutationFn: async () => {
 			void captureRendererEvent("ao.renderer.settings_save_requested", { project_id: projectRef.id });
@@ -298,6 +304,18 @@ function SettingsBody({
 		},
 		onSuccess: async (result) => {
 			void captureRendererEvent("ao.renderer.settings_save_succeeded", { project_id: projectRef.id });
+			// Reported only when a review control actually changed, so the event
+			// counts decisions about reviews rather than every unrelated save.
+			if (reviewSettingsChanged) {
+				void captureRendererEvent("ao.renderer.review_settings_changed", {
+					project_id: projectRef.id,
+					auto_review: form.autoReview,
+					reviewer_harness: form.reviewerHarness,
+					harness_is_default: form.reviewerHarness === "",
+					auto_review_changed: form.autoReview !== initialAutoReview,
+					reviewer_harness_changed: form.reviewerHarness !== initialReviewerHarness,
+				});
+			}
 			setSavedAt(Date.now());
 			setReplacementError(result.replacementError);
 			setValidationError(null);
