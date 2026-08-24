@@ -250,17 +250,24 @@ function ShellLayout() {
 	// Project in scope for a new-session shortcut: the route's project, or the
 	// workspace owning the open session (so the shortcut works from a worker's
 	// detail view, where the URL carries only a sessionId).
+	const routeHost = routeParams.hostId ?? LOCAL_HOST;
 	const scopedProject: Ref | undefined = routeParams.projectId
-		? { host: routeParams.hostId ?? LOCAL_HOST, id: routeParams.projectId }
+		? { host: routeHost, id: routeParams.projectId }
 		: routeParams.sessionId
 			? (() => {
+					// Session ids repeat across hosts, so the owner search is scoped to
+					// the route's host — otherwise the shortcut opens a shell, or a new
+					// task, on whichever machine sorts first in the tree.
 					const owner = workspaces.find((workspace) =>
-						workspace.sessions.some((session) => session.id === routeParams.sessionId),
+						workspace.sessions.some(
+							(session) => session.host === routeHost && session.id === routeParams.sessionId,
+						),
 					);
 					return owner ? { host: owner.host, id: owner.id } : undefined;
 				})()
 			: undefined;
 	const scopedProjectId = scopedProject?.id;
+	const scopedProjectHost = scopedProject?.host;
 	// Warms the New Task composer's model-catalog cache while the user is just
 	// looking at the project, so the picker never shows a loading flash the
 	// first time they actually open the dialog.
@@ -315,9 +322,12 @@ function ShellLayout() {
 	const navigateSession = useCallback(
 		(direction: -1 | 1) => {
 			if (!scopedProjectId) return;
-			const sessions = (workspaces.find((workspace) => workspace.id === scopedProjectId)?.sessions ?? []).filter(
-				sessionIsActive,
-			);
+			// Project ids repeat across hosts too: cycling through the wrong host's
+			// project would navigate to a session on a machine the user left.
+			const sessions = (
+				workspaces.find((workspace) => workspace.host === scopedProjectHost && workspace.id === scopedProjectId)
+					?.sessions ?? []
+			).filter(sessionIsActive);
 			if (sessions.length === 0) return;
 			const currentIndex = sessions.findIndex((session) => session.id === routeParams.sessionId);
 			const nextIndex =
@@ -333,7 +343,7 @@ function ShellLayout() {
 				params: { hostId: session.host, sessionId: session.id },
 			});
 		},
-		[navigate, routeParams.sessionId, scopedProjectId, workspaces],
+		[navigate, routeParams.sessionId, scopedProjectHost, scopedProjectId, workspaces],
 	);
 
 	const updateWorkspaces = useCallback(
