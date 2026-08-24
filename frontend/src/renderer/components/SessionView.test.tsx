@@ -170,7 +170,7 @@ const { workspaces, workspaceQueryState, shellTerminalsState } = vi.hoisted(() =
 	};
 	const shellTerminalsState: {
 		data: Array<{
-			host: "local",
+			host: string;
 			handleId: string;
 			projectId?: string;
 			sessionId?: string;
@@ -519,7 +519,12 @@ vi.mock("../hooks/useWorkspaceQuery", () => ({
 // Standalone shell terminals are orthogonal to the split under test, and their
 // real hooks would need a QueryClientProvider this suite deliberately omits.
 vi.mock("../hooks/useShellTerminals", () => ({
-	useShellTerminals: () => ({ data: shellTerminalsState.data, isLoading: false }),
+	// Per host, like the real hook: a call that omits the host gets the local
+	// shells, which is exactly the defect a host-blind call site would hide.
+	useShellTerminals: (host = "local") => ({
+		data: shellTerminalsState.data.filter((shell) => shell.host === host),
+		isLoading: false,
+	}),
 	useOpenShellTerminal: () => ({ mutate: openShellTerminalMock }),
 	useCloseShellTerminal: () => ({ mutate: closeShellTerminalMock }),
 	useRenameShellTerminal: () => ({ mutate: vi.fn() }),
@@ -622,6 +627,41 @@ describe("SessionView", () => {
 			}
 			return { data: { reviewerHandleId: "", reviews: [], runs: [] }, error: undefined };
 		});
+	});
+
+	// A session's shells live on the session's host. Asking the local host for a
+	// remote session's shells returns another machine's list — and leaves the
+	// session's own shells with no tab strip to appear in.
+	it("reads the shell terminals of the session's own host", () => {
+		const remoteTwin: WorkspaceSession = { ...workspaces[0].sessions[0], host: "remote" };
+		workspaceQueryState.data = [
+			...workspaces,
+			{ host: "remote", id: "proj-1", name: "my-app", path: "/p", type: "main", sessions: [remoteTwin] },
+		];
+		shellTerminalsState.data = [
+			{
+				host: "local",
+				handleId: "sh-local",
+				sessionId: "sess-1",
+				title: "local-shell",
+				workingDir: "/p",
+				createdAt: "2026-07-24T00:00:00Z",
+			},
+			{
+				host: "remote",
+				handleId: "sh-remote",
+				sessionId: "sess-1",
+				title: "remote-shell",
+				workingDir: "/p",
+				createdAt: "2026-07-24T00:00:00Z",
+			},
+		];
+
+		render(<SessionView sessionRef={{ host: "remote", id: "sess-1" }} />);
+
+		const tabs = screen.getByTestId("shell-tabs");
+		expect(tabs).toHaveTextContent("remote-shell");
+		expect(tabs).not.toHaveTextContent("local-shell");
 	});
 
 	// Regression: shell terminals are an app-wide list, so without a per-session
