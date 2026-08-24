@@ -25,7 +25,7 @@ export function probeFailed(status: HostStatus): boolean {
 }
 
 /** What the main process is allowed to hand the renderer — never the password. */
-export type RemoteHostView = { label: string; url: string };
+export type RemoteHostView = { label: string; url: string; sshDestination?: string };
 
 export type Host = {
 	id: string;

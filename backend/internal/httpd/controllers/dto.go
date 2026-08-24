@@ -344,9 +344,9 @@ type WorkspaceFileResponse struct {
 	CompareMode      sessionsvc.WorkspaceCompareMode `json:"compareMode,omitempty" enum:"base,head_fallback"`
 }
 
-// DesktopWorkspaceLocationResponse is returned only by the LAN-blocked desktop
-// handoff route. Electron main consumes the absolute path and never exposes it
-// through the preload bridge.
+// DesktopWorkspaceLocationResponse is returned by the LAN-blocked desktop
+// handoff route and by its credential-gated twin under /sessions. Electron main
+// consumes the absolute path and never exposes it through the preload bridge.
 type DesktopWorkspaceLocationResponse struct {
 	SessionID     domain.SessionID `json:"sessionId"`
 	WorkspacePath string           `json:"workspacePath"`

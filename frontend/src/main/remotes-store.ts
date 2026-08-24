@@ -7,6 +7,13 @@ export type RemoteEntry = {
 	label: string;
 	url: string;
 	password: string;
+	/**
+	 * Optional `user@host` the desktop app uses to SSH-attach a local editor to
+	 * this host's workspaces. Uses the user's own ssh config/keys — no credential
+	 * is stored here. The Go CLI tolerates and ignores unknown fields in this
+	 * file (verified in the AO-82 spike; cli/remote.go has no writer to drop it).
+	 */
+	sshDestination?: string;
 };
 
 export class RemotesFilePermissionError extends Error {
@@ -51,7 +58,8 @@ async function writeRemotes(path: string, remotes: RemoteEntry[]): Promise<void>
 
 export async function addRemote(path: string, entry: RemoteEntry): Promise<void> {
 	const existing = await readRemotes(path);
-	await writeRemotes(path, [...existing.filter((candidate) => candidate.url !== entry.url), entry]);
+	const normalized = { ...entry, sshDestination: entry.sshDestination?.trim() || undefined };
+	await writeRemotes(path, [...existing.filter((candidate) => candidate.url !== entry.url), normalized]);
 }
 
 /** An edit: only the fields it carries change. */
@@ -68,6 +76,7 @@ export function applyRemoteChanges(entry: RemoteEntry, changes: RemoteChanges): 
 		label: changes.label ?? entry.label,
 		url: changes.url ?? entry.url,
 		password: changes.password ?? entry.password,
+		sshDestination: (changes.sshDestination ?? entry.sshDestination)?.trim() || undefined,
 	};
 }
 

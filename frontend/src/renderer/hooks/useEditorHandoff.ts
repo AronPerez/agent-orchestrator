@@ -3,19 +3,20 @@ import { isEditorId, type EditorHandoffState, type OpenTargetId } from "../../sh
 import { aoBridge } from "../lib/bridge";
 import { captureRendererEvent } from "../lib/telemetry";
 
-export const editorHandoffQueryKey = (sessionId: string) => ["editor-handoff", sessionId] as const;
+export const editorHandoffQueryKey = (host: string, sessionId: string) => ["editor-handoff", host, sessionId] as const;
 
-export function useEditorHandoffState(sessionId: string) {
+export function useEditorHandoffState(host: string, sessionId: string) {
 	return useQuery({
-		queryKey: editorHandoffQueryKey(sessionId),
+		queryKey: editorHandoffQueryKey(host, sessionId),
 		enabled: Boolean(sessionId),
 		staleTime: 10_000,
 		retry: false,
-		queryFn: () => aoBridge.editorHandoff.getState(sessionId),
+		queryFn: () => aoBridge.editorHandoff.getState({ host, sessionId }),
 	});
 }
 
 export type OpenSessionTargetMutationInput = {
+	host: string;
 	sessionId: string;
 	projectId: string;
 	targetId?: OpenTargetId;
@@ -24,17 +25,17 @@ export type OpenSessionTargetMutationInput = {
 export function useOpenSessionTarget() {
 	const queryClient = useQueryClient();
 	return useMutation({
-		mutationFn: async ({ sessionId, projectId, targetId }: OpenSessionTargetMutationInput) => {
+		mutationFn: async ({ host, sessionId, projectId, targetId }: OpenSessionTargetMutationInput) => {
 			void captureRendererEvent("ao.renderer.open_in_editor_requested", {
 				project_id: projectId,
 				target_kind: targetId === "file-manager" ? "file_manager" : targetId === "terminal" ? "terminal" : "editor",
 				...(targetId && isEditorId(targetId) ? { editor_id: targetId } : {}),
 			});
-			return aoBridge.editorHandoff.open({ sessionId, ...(targetId ? { targetId } : {}) });
+			return aoBridge.editorHandoff.open({ host, sessionId, ...(targetId ? { targetId } : {}) });
 		},
 		onSuccess: (result, input) => {
 			if (result.kind === "editor" && isEditorId(result.id)) {
-				queryClient.setQueryData<EditorHandoffState>(editorHandoffQueryKey(input.sessionId), (state) =>
+				queryClient.setQueryData<EditorHandoffState>(editorHandoffQueryKey(input.host, input.sessionId), (state) =>
 					state ? { ...state, preferredEditorId: result.id as typeof state.preferredEditorId } : state,
 				);
 			}

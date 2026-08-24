@@ -13,10 +13,12 @@ import type { ConnectedHostView } from "./remote-registry";
 export type RemoteHostView = {
 	label: string;
 	url: string;
+	/** Present when the user configured SSH-attach for this host. Not a secret. */
+	sshDestination?: string;
 };
 
 export function toHostViews(entries: RemoteEntry[]): RemoteHostView[] {
-	return entries.map(({ label, url }) => ({ label, url }));
+	return entries.map(({ label, url, sshDestination }) => ({ label, url, ...(sshDestination ? { sshDestination } : {}) }));
 }
 
 // The proxy the app is currently talking through, as much of it as these need.

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { probeRemote } from "../../main/remote-request";
@@ -44,7 +44,7 @@ describe("AddRemoteHostDialog", () => {
 		await userEvent.type(screen.getByLabelText(/name/i), "workbox");
 		await userEvent.type(screen.getByLabelText(/address/i), "192.0.2.1:3011{Enter}");
 
-		expect(addMock).toHaveBeenCalledWith({ label: "workbox", url: "http://192.0.2.1:3011", password: "" });
+		expect(addMock).toHaveBeenCalledWith({ label: "workbox", url: "http://192.0.2.1:3011", password: "", sshDestination: "" });
 	});
 
 	// The close button is positioned absolutely, so moving it after the fields in
@@ -87,7 +87,7 @@ describe("AddRemoteHostDialog", () => {
 		const onSaved = vi.fn();
 		render(<AddRemoteHostDialog open onOpenChange={vi.fn()} onSaved={onSaved} />);
 		await fillAndSubmit();
-		expect(addMock).toHaveBeenCalledWith({ label: "workbox", url: "http://192.0.2.1:3011", password: "pw" });
+		expect(addMock).toHaveBeenCalledWith({ label: "workbox", url: "http://192.0.2.1:3011", password: "pw", sshDestination: "" });
 		expect(onSaved).toHaveBeenCalledWith("http://192.0.2.1:3011");
 	});
 
@@ -126,7 +126,7 @@ describe("AddRemoteHostDialog", () => {
 				const onSaved = vi.fn();
 				render(<AddRemoteHostDialog open onOpenChange={vi.fn()} onSaved={onSaved} />);
 				await fillAndSubmit(typed);
-				expect(addMock).toHaveBeenCalledWith({ label: "workbox", url: expected, password: "pw" });
+				expect(addMock).toHaveBeenCalledWith({ label: "workbox", url: expected, password: "pw", sshDestination: "" });
 				expect(onSaved).toHaveBeenCalledWith(expected);
 			});
 		}
@@ -217,6 +217,7 @@ describe("AddRemoteHostDialog", () => {
 			expect(updateMock).toHaveBeenCalledWith("http://192.0.2.1:3011", {
 				label: "the workbox",
 				url: "http://192.0.2.1:3011",
+				sshDestination: "",
 			});
 			expect(onSaved).toHaveBeenCalledWith("http://192.0.2.1:3011");
 			expect(addMock).not.toHaveBeenCalled();
@@ -230,6 +231,7 @@ describe("AddRemoteHostDialog", () => {
 				label: "workbox",
 				url: "http://192.0.2.1:3011",
 				password: "rotated",
+				sshDestination: "",
 			});
 		});
 
@@ -243,6 +245,7 @@ describe("AddRemoteHostDialog", () => {
 			expect(updateMock).toHaveBeenCalledWith("http://192.0.2.1:3011", {
 				label: "workbox",
 				url: "http://192.0.2.5:3011",
+				sshDestination: "",
 			});
 			// The caller needs the url that was written, not the one it passed in.
 			expect(onSaved).toHaveBeenCalledWith("http://192.0.2.5:3011");
@@ -277,5 +280,30 @@ describe("AddRemoteHostDialog", () => {
 		await userEvent.click(screen.getByRole("button", { name: /connect/i }));
 		expect(await screen.findByRole("alert")).toHaveTextContent(/must not carry a username or password/i);
 		expect(addMock).not.toHaveBeenCalled();
+	});
+
+	it("saves an SSH destination with the host and prefills it on edit", async () => {
+		const { unmount } = render(<AddRemoteHostDialog open onOpenChange={vi.fn()} onSaved={vi.fn()} />);
+		await userEvent.type(screen.getByLabelText(/name/i), "Mini");
+		await userEvent.type(screen.getByLabelText(/address/i), "192.0.2.1:3011");
+		await userEvent.type(screen.getByLabelText(/password/i), "pw");
+		await userEvent.type(screen.getByLabelText(/ssh destination/i), "aron@mini.local");
+		await userEvent.click(screen.getByRole("button", { name: /^connect$/i }));
+		await waitFor(() =>
+			expect(addMock).toHaveBeenCalledWith(
+				expect.objectContaining({ url: "http://192.0.2.1:3011", sshDestination: "aron@mini.local" }),
+			),
+		);
+		unmount();
+
+		render(
+			<AddRemoteHostDialog
+				open
+				host={{ label: "Mini", url: "http://192.0.2.1:3011", sshDestination: "aron@mini.local" }}
+				onOpenChange={vi.fn()}
+				onSaved={vi.fn()}
+			/>,
+		);
+		expect(screen.getByLabelText(/ssh destination/i)).toHaveValue("aron@mini.local");
 	});
 });

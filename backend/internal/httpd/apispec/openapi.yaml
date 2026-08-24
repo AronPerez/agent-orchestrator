@@ -4781,6 +4781,45 @@ paths:
       summary: Switch a logical AO session to another agent harness
       tags:
       - sessions
+  /api/v1/sessions/{sessionId}/workspace-location:
+    get:
+      operationId: getSessionWorkspaceLocation
+      parameters:
+      - description: Session identifier, e.g. project-1.
+        in: path
+        name: sessionId
+        required: true
+        schema:
+          description: Session identifier, e.g. project-1.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DesktopWorkspaceLocationResponse'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Resolve a session workspace location over the authenticated API
+      tags:
+      - sessions
   /api/v1/sessions/{sessionId}/workspace/events:
     get:
       operationId: streamSessionWorkspaceChanges

@@ -81,10 +81,12 @@ export function AddRemoteHostDialog({ open, onOpenChange, host, onSaved }: AddRe
 	const nameId = useId();
 	const addressId = useId();
 	const passwordId = useId();
+	const sshId = useId();
 	const editing = host ?? null;
 	const [label, setLabel] = useState("");
 	const [url, setUrl] = useState("");
 	const [password, setPassword] = useState("");
+	const [sshDestination, setSshDestination] = useState("");
 	const [error, setError] = useState<string | null>(null);
 	const [busy, setBusy] = useState(false);
 
@@ -95,9 +97,10 @@ export function AddRemoteHostDialog({ open, onOpenChange, host, onSaved }: AddRe
 		setLabel(open ? (editing?.label ?? "") : "");
 		setUrl(open ? (editing?.url ?? "") : "");
 		setPassword("");
+		setSshDestination(open ? (editing?.sshDestination ?? "") : "");
 		setError(null);
 		setBusy(false);
-	}, [open, editing?.label, editing?.url]);
+	}, [open, editing?.label, editing?.url, editing?.sshDestination]);
 
 	const address = url.trim();
 	const normalized = normalizeHostUrl(address);
@@ -127,8 +130,16 @@ export function AddRemoteHostDialog({ open, onOpenChange, host, onSaved }: AddRe
 						url: normalized,
 						// Omitted, not "": an empty string would wipe a working password.
 						...(password === "" ? {} : { password }),
+						// Always sent, unlike the password: "" is how the field clears a
+						// saved destination, and the store normalizes it back to absent.
+						sshDestination: sshDestination.trim(),
 					})
-				: await remotesBridge().add({ label: label.trim(), url: normalized, password });
+				: await remotesBridge().add({
+						label: label.trim(),
+						url: normalized,
+						password,
+						sshDestination: sshDestination.trim(),
+					});
 			// Which failure mode dominates here is the whole question behind
 			// "is adding a host working?" — a wrong password and an unreachable
 			// machine are the same dead dialog to a user and different bugs to us.
@@ -241,6 +252,26 @@ export function AddRemoteHostDialog({ open, onOpenChange, host, onSaved }: AddRe
 							/>
 							<p className="text-caption leading-4 text-settings-muted">
 								{editing ? t("hosts.edit.passwordHint") : t("hosts.add.passwordHint")}
+							</p>
+						</div>
+
+						<div className="flex flex-col gap-1.5">
+							<label className="settings-field-label" htmlFor={sshId}>
+								{t("hosts.add.ssh")}
+							</label>
+							<input
+								id={sshId}
+								autoComplete="off"
+								spellCheck={false}
+								className="settings-field-control h-(--size-settings-action-height) font-mono"
+								value={sshDestination}
+								onChange={(event) => {
+									setError(null);
+									setSshDestination(event.target.value);
+								}}
+							/>
+							<p className="text-caption leading-4 text-settings-muted">
+								{t("hosts.add.sshHint")}
 							</p>
 						</div>
 

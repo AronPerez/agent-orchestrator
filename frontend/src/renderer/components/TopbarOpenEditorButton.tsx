@@ -62,16 +62,18 @@ function TargetIcon({ target, className }: { target?: OpenTarget; className?: st
 // workspace path, launches the native target, and persists editor preference.
 // This renderer receives only safe target metadata and availability status.
 export function TopbarOpenEditorButton({
+	host,
 	sessionId,
 	projectId,
 	style,
 }: {
+	host: string;
 	sessionId: string;
 	projectId: string;
 	style?: React.CSSProperties;
 }) {
 	const { t } = useTranslation();
-	const stateQuery = useEditorHandoffState(sessionId);
+	const stateQuery = useEditorHandoffState(host, sessionId);
 	const open = useOpenSessionTarget();
 	const state = stateQuery.data;
 	const targets = state?.targets ?? [];
@@ -87,16 +89,27 @@ export function TopbarOpenEditorButton({
 
 	const launch = (targetId?: OpenTargetId) => {
 		open.reset();
-		open.mutate({ sessionId, projectId, ...(targetId ? { targetId } : {}) });
+		open.mutate({ host, sessionId, projectId, ...(targetId ? { targetId } : {}) });
 	};
 	const launchError = open.error instanceof Error ? open.error.message : null;
-	const guidance = !stateQuery.isPending && !workspaceAvailable
-		? state?.unavailableReason ?? t("editor.workspaceUnavailable")
-		: !stateQuery.isPending && editors.length === 0
+	const remote = state?.remote ?? null;
+	// A remote workspace nothing can open yet is information, not an error:
+	// it gets a title, never the red TopbarActionError.
+	const remoteNotice = remote && !workspaceAvailable
+		? remote.sshConfigured
+			? null // the host itself said the workspace is gone — fall through to red guidance
+			: targets.length > 0
+				? t("editor.remoteNeedsSsh", { host: remote.hostLabel })
+				: t("editor.remoteOn", { host: remote.hostLabel })
+		: null;
+	const guidance = !stateQuery.isPending && !workspaceAvailable && (!remote || remote.sshConfigured)
+		? (state?.unavailableReason ?? (remote ? null : t("editor.workspaceUnavailable")))
+		: !stateQuery.isPending && !remote && editors.length === 0
 			? t("editor.noEditorGuidance", { fileManager: fileManagerName, terminal: terminalName })
 			: null;
 	const mainLabel = open.isPending ? t("editor.opening") : preferred ? t("editor.open") : t("editor.chooseEditor");
-	const mainTitle = guidance
+	const mainTitle = remoteNotice
+		?? guidance
 		?? (preferred ? t("editor.openWorkspaceInTitle", { name: preferred.name }) : t("editor.chooseEditorTitle"));
 
 	return (

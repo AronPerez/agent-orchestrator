@@ -61,6 +61,7 @@ import {
 } from "./main/keybinding-settings";
 import { readEditorSettings, writeEditorPreference } from "./main/editor-settings";
 import { createEditorHandoff } from "./main/editor-handoff";
+import type { OpenSessionTargetInput, OpenTargetId } from "./shared/editor-handoff";
 import { launchCommand } from "./main/launch-command";
 import {
 	decideRelocation,
@@ -757,17 +758,24 @@ function editorStateDir(): string {
 	return path.dirname(runFile);
 }
 
-async function resolveSessionWorkspaceForDesktop(sessionId: string): Promise<string> {
-	if (daemonStatus.state !== "ready" || !daemonStatus.port) {
-		throw new Error("AO daemon is not ready.");
+async function resolveSessionWorkspaceForDesktop(host: string, sessionId: string): Promise<string> {
+	let target: string;
+	if (host === "local") {
+		if (daemonStatus.state !== "ready" || !daemonStatus.port) {
+			throw new Error("AO daemon is not ready.");
+		}
+		target = `http://127.0.0.1:${daemonStatus.port}/api/v1/desktop/sessions/${encodeURIComponent(sessionId)}/workspace`;
+	} else {
+		// The remote daemon LAN-blocks /desktop; its gated twin is served with
+		// auth, and the per-host proxy injects the Bearer on the way through.
+		const view = registry.views().find((candidate) => candidate.url === host);
+		if (!view) throw new Error("That host is not connected.");
+		target = `${view.base}/api/v1/sessions/${encodeURIComponent(sessionId)}/workspace-location`;
 	}
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), DAEMON_PROBE_TIMEOUT_MS);
 	try {
-		const response = await net.fetch(
-			`http://127.0.0.1:${daemonStatus.port}/api/v1/desktop/sessions/${encodeURIComponent(sessionId)}/workspace`,
-			{ signal: controller.signal },
-		);
+		const response = await net.fetch(target, { signal: controller.signal });
 		const body = await response.json() as Record<string, unknown>;
 		if (!response.ok) {
 			const message = typeof body.message === "string" ? body.message : "Session workspace is not available.";
@@ -793,6 +801,18 @@ const editorHandoff = createEditorHandoff({
 	env: process.env,
 	homeDir: os.homedir(),
 	resolveWorkspace: resolveSessionWorkspaceForDesktop,
+	// null ⇔ local. The "local" sentinel is the renderer's LOCAL_HOST
+	// (renderer/lib/hosts.ts); it crosses the IPC as a plain string.
+	remoteHost: async (host: string) => {
+		if (host === "local") return null;
+		const view = registry.views().find((candidate) => candidate.url === host);
+		const entry = (await readRemotes(remotesFilePath()).catch(() => []))
+			.find((candidate) => candidate.url === host);
+		return {
+			label: view?.label ?? entry?.label ?? host,
+			...(entry?.sshDestination ? { sshDestination: entry.sshDestination } : {}),
+		};
+	},
 	readPreference: async () => (await readEditorSettings(editorStateDir())).preferredEditorId,
 	writePreference: async (editorId) => {
 		await writeEditorPreference(editorStateDir(), editorId);
@@ -1881,13 +1901,22 @@ ipcMain.handle("daemon:restart", async () => {
 		return reportDaemonRestartFailure(error);
 	}
 });
-ipcMain.handle("editorHandoff:getState", (event, sessionId: string) => {
+ipcMain.handle("editorHandoff:getState", (event, input) => {
 	if (event.sender !== getShellWebContents()) throw new Error("Untrusted editor handoff request.");
-	return editorHandoff.getState(typeof sessionId === "string" ? sessionId : "");
+	const shaped = input && typeof input === "object" ? input as { host?: unknown; sessionId?: unknown } : {};
+	return editorHandoff.getState({
+		host: typeof shaped.host === "string" ? shaped.host : "local",
+		sessionId: typeof shaped.sessionId === "string" ? shaped.sessionId : "",
+	});
 });
 ipcMain.handle("editorHandoff:open", (event, input) => {
 	if (event.sender !== getShellWebContents()) throw new Error("Untrusted editor handoff request.");
-	return editorHandoff.open(input && typeof input === "object" ? input : { sessionId: "" });
+	const shaped = input && typeof input === "object" ? input as Record<string, unknown> : {};
+	return editorHandoff.open({
+		host: typeof shaped.host === "string" ? shaped.host : "local",
+		sessionId: typeof shaped.sessionId === "string" ? shaped.sessionId : "",
+		...(typeof shaped.targetId === "string" ? { targetId: shaped.targetId as OpenTargetId } : {}),
+	} as OpenSessionTargetInput);
 });
 ipcMain.handle("app:getVersion", () => app.getVersion());
 ipcMain.handle("app:openExternal", async (_event, url: string) => {
