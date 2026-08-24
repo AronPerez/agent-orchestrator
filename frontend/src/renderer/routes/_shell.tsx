@@ -372,7 +372,7 @@ function ShellLayout() {
 			};
 			void captureRendererEvent(`ao.renderer.${source}_succeeded`, { project_id: workspace.id });
 			updateWorkspaces((current) => [workspace, ...current.filter((item) => item.id !== workspace.id)]);
-			setOrchestratorStartupError(workspace.id, null);
+			setOrchestratorStartupError(workspace, null);
 			try {
 				void captureRendererEvent("ao.renderer.orchestrator_spawn_requested", {
 					project_id: workspace.id,
@@ -382,7 +382,7 @@ function ShellLayout() {
 					data: spawnData,
 					error: spawnError,
 					response: spawnResponse,
-				} = await apiClient.POST("/api/v1/sessions", {
+				} = await clientFor(workspace.host).POST("/api/v1/sessions", {
 					body: {
 						projectId: workspace.id,
 						kind: "orchestrator",
@@ -416,7 +416,7 @@ function ShellLayout() {
 				});
 				const message = spawnError instanceof Error ? spawnError.message : "Could not start orchestrator";
 				const startupMessage = `Project added, but orchestrator did not start: ${message}`;
-				setOrchestratorStartupError(workspace.id, startupMessage);
+				setOrchestratorStartupError(workspace, startupMessage);
 			}
 		},
 		[navigate, queryClient, setOrchestratorStartupError, updateWorkspaces],
@@ -516,16 +516,17 @@ function ShellLayout() {
 	}, []);
 
 	const removeProject = useCallback(
-		async (projectId: string) => {
+		async (project: Ref) => {
+			const projectId = project.id;
 			const isLastWorkspace =
-              workspaces.length === 1 && workspaces[0]?.id === projectId;
+				workspaces.length === 1 && workspaces[0]?.host === project.host && workspaces[0]?.id === projectId;
 			void addRendererExceptionStep("Project removal requested", {
 				source: "project-remove",
 				operation: "project_remove",
 				surface: "project_board",
 				project_id: projectId,
 			});
-			const { error } = await apiClient.DELETE("/api/v1/projects/{id}", {
+			const { error } = await clientFor(project.host).DELETE("/api/v1/projects/{id}", {
 				params: { path: { id: projectId } },
 			});
 			if (error) {

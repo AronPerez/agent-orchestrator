@@ -22,7 +22,7 @@ import {
 } from "../hooks/useAgentModelsQuery";
 import { agentsQueryKeyFor, agentsQueryOptionsFor, refreshAgentsIfStale } from "../hooks/useAgentsQuery";
 import { useWorkspaceQuery, workspaceQueryKey } from "../hooks/useWorkspaceQuery";
-import { apiClient, apiErrorMessage } from "../lib/api-client";
+import { apiErrorMessage } from "../lib/api-client";
 import { clientFor } from "../lib/host-clients";
 import { captureOrchestratorReplacementFailure } from "../lib/orchestrator-replacement-telemetry";
 import { OrchestratorSpawnError, spawnOrchestrator } from "../lib/spawn-orchestrator";
@@ -251,7 +251,7 @@ function SettingsBody({
 						trackerIntake: buildIntake(intakeForm),
 						autoReview: form.autoReview,
 					};
-			const { error } = await apiClient.PUT("/api/v1/projects/{id}", {
+			const { error } = await clientFor(projectRef.host).PUT("/api/v1/projects/{id}", {
 				params: { path: { id: projectRef.id } },
 				body: { displayName, config: next },
 			});
@@ -261,7 +261,7 @@ function SettingsBody({
 				(activeOrchestrator && activeOrchestrator.provider !== form.orchestratorAgent)
 			) {
 				try {
-					const sessionId = await spawnOrchestrator(projectRef.id, "settings", true);
+					const sessionId = await spawnOrchestrator(projectRef, "settings", true);
 					return {
 						replacementError: null,
 						replacementSessionId: sessionId,

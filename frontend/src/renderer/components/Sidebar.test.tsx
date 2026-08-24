@@ -13,6 +13,7 @@ vi.mock("motion/react", async (importOriginal) => {
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Ref } from "../lib/hosts";
 import {
 	Sidebar,
 	SIDEBAR_DEFAULT_WIDTH,
@@ -240,7 +241,7 @@ type CloneProjectHandler = (input: {
 	trackerIntake?: unknown;
 }) => Promise<void>;
 type InitializeProjectHandler = (path: string) => Promise<void>;
-type RemoveProjectHandler = (projectId: string) => Promise<void>;
+type RemoveProjectHandler = (project: Ref) => Promise<void>;
 
 function renderSidebar({
 	onCloneProject = vi.fn().mockResolvedValue(undefined) as CloneProjectHandler,
