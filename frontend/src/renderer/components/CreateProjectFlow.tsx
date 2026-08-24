@@ -532,6 +532,11 @@ export function CreateProjectFlow({
             onSaved={(url) => {
               void refreshHosts();
               setHostId(url);
+              // Saving only writes the entry. Without this the host is
+              // reachable for a project POST but absent from connectedHosts(),
+              // so it has no section in the tree and nothing can open a project
+              // on it until the next launch connects every saved host.
+              void connectHost(url);
             }}
           />
           {/* Its own mount rather than a mode on the add dialog: `host` is what
