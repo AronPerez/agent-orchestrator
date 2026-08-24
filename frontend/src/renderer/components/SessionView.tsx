@@ -532,8 +532,10 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 	const reviewerTerminal = session && sessionIsActive(session) ? availableReviewerTerminal : undefined;
 
 	// Shell terminals opened inside a session live beside its pane as extra tabs,
-	// scoped to the session on screen so each session has its own shell set.
-	const allShellTerminals = useShellTerminals().data ?? [];
+	// scoped to the session on screen so each session has its own shell set. They
+	// live on that session's host, so that is the host that gets asked — and
+	// filtering the answer by bare session id is then unambiguous.
+	const allShellTerminals = useShellTerminals(sessionRef.host).data ?? [];
 	const shellTerminals = useMemo(
 		() => allShellTerminals.filter((shell) => shell.sessionId === sessionId),
 		[allShellTerminals, sessionId],
