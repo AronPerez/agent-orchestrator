@@ -770,7 +770,8 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 	// Resolve the effective agent config (project base + role override + spawn
 	// override) and validate the model before any durable state is created. A
 	// model the harness cannot honor should not leave a seed row behind.
-	agentConfig := applySpawnAgentConfig(effectiveAgentConfig(cfg.Kind, project.Config), cfg.AgentConfig)
+	agentConfig := applySpawnAgentConfig(
+		effectiveAgentConfig(cfg.Harness, cfg.Kind, project.Config), cfg.AgentConfig)
 	if err := validateSpawnModel(cfg.Harness, agentConfig.Model); err != nil {
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w: %s", ErrUnsupportedModel, err.Error())
 	}
@@ -1314,9 +1315,22 @@ func roleConfigName(kind domain.SessionKind) string {
 
 // effectiveAgentConfig merges the role override's agent config over the
 // project's base agent config; set override fields win.
-func effectiveAgentConfig(kind domain.SessionKind, cfg domain.ProjectConfig) ports.AgentConfig {
+//
+// Model and Mode are then dropped unless the session's harness is the one the
+// role configures. A model id belongs to exactly one agent — `opus` means nothing
+// to Codex, `gpt-5.6-terra` means nothing to Claude Code — so a session running a
+// different agent than its role names (an explicit `--agent`, a completed agent
+// switch, or the role's agent edited afterwards) must fall back to that agent's
+// own default rather than be handed a foreign id. Permissions are harness-neutral
+// and always survive.
+func effectiveAgentConfig(
+	harness domain.AgentHarness,
+	kind domain.SessionKind,
+	cfg domain.ProjectConfig,
+) ports.AgentConfig {
 	merged := cfg.AgentConfig
-	override := roleOverride(kind, cfg).AgentConfig
+	role := roleOverride(kind, cfg)
+	override := role.AgentConfig
 	if override.Model != "" {
 		merged.Model = override.Model
 	}
@@ -1325,6 +1339,10 @@ func effectiveAgentConfig(kind domain.SessionKind, cfg domain.ProjectConfig) por
 	}
 	if override.Permissions != "" {
 		merged.Permissions = override.Permissions
+	}
+	if role.Harness != harness {
+		merged.Model = ""
+		merged.Mode = ""
 	}
 	return merged
 }
@@ -1980,7 +1998,7 @@ func (m *Manager) relaunchSessionWithPolicy(ctx context.Context, operation strin
 
 	// Restore re-applies the project's resolved agent config so a configured
 	// model/permissions carry across a restore, matching fresh spawn.
-	agentConfig := effectiveAgentConfig(rec.Kind, project.Config)
+	agentConfig := effectiveAgentConfig(rec.Harness, rec.Kind, project.Config)
 	env, browserCapabilityVerifier, err := m.launchRuntimeEnv(rec.ID, rec.ProjectID, rec.IssueID, project.Config.Env)
 	if err != nil {
 		return RestoreResult{}, fmt.Errorf("%s %s: browser capability: %w", operation, rec.ID, err)

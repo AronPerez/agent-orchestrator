@@ -44,16 +44,18 @@ type fakeAgent struct {
 	modeNotFound        bool // SetSessionMode returns -32601
 	configNotFound      bool // SetSessionConfigOption returns -32601
 	configErr           error
-	newSessionUpdates   []acpsdk.SessionUpdate
-	options             map[string]string
-	newConfig           []acpsdk.SessionConfigOption
-	setConfig           []acpsdk.SessionConfigOption
-	setCalls            int
-	steering            bool
-	steerText           string
-	steerPrompt         []acpsdk.ContentBlock
-	steerMeta           map[string]any
-	steerOut            string
+	// configErrOption scopes configErr to one option id. Empty fails every option.
+	configErrOption   string
+	newSessionUpdates []acpsdk.SessionUpdate
+	options           map[string]string
+	newConfig         []acpsdk.SessionConfigOption
+	setConfig         []acpsdk.SessionConfigOption
+	setCalls          int
+	steering          bool
+	steerText         string
+	steerPrompt       []acpsdk.ContentBlock
+	steerMeta         map[string]any
+	steerOut          string
 }
 
 var _ acpsdk.Agent = (*fakeAgent)(nil)
@@ -164,7 +166,7 @@ func (a *fakeAgent) LoadSession(ctx context.Context, params acpsdk.LoadSessionRe
 func (a *fakeAgent) SetSessionConfigOption(_ context.Context, params acpsdk.SetSessionConfigOptionRequest) (acpsdk.SetSessionConfigOptionResponse, error) {
 	a.mu.Lock()
 	a.setCalls++
-	if a.configErr != nil {
+	if a.configErr != nil && (a.configErrOption == "" || a.configErrOption == requestedConfigID(params)) {
 		err := a.configErr
 		a.mu.Unlock()
 		return acpsdk.SetSessionConfigOptionResponse{}, err
@@ -1639,5 +1641,109 @@ func TestACPDriverPreservesEarlyConfigOptionUpdates(t *testing.T) {
 	}
 	if options[0].ID != "model" {
 		t.Fatalf("option id = %q, want %q", options[0].ID, "model")
+	}
+}
+
+func requestedConfigID(params acpsdk.SetSessionConfigOptionRequest) string {
+	if params.ValueId != nil {
+		return string(params.ValueId.ConfigId)
+	}
+	if params.Boolean != nil {
+		return string(params.Boolean.ConfigId)
+	}
+	return ""
+}
+
+// rejectsModelOption builds a driver whose agent refuses exactly the model option
+// the way claude-agent-acp does when handed an id from another agent's catalog:
+// -32603 "Invalid value for config option model: gpt-5.6-terra".
+func rejectsModelOption(t *testing.T) (*Driver, *fakeAgent) {
+	t.Helper()
+	agent := &fakeAgent{
+		capabilities: &acpsdk.AgentCapabilities{LoadSession: true},
+		configErr: acpsdk.NewInternalError(map[string]any{
+			"details": "Invalid value for config option model: gpt-5.6-terra",
+		}),
+		configErrOption: "model",
+	}
+	driver := New(Config{
+		Harness:      domain.HarnessClaudeCode,
+		Capabilities: ports.ChatCapabilities{ports.ChatCapabilityStreaming: true},
+		Probe:        func(context.Context) error { return nil },
+		Launch:       func(context.Context, LaunchConfig) (Launch, error) { return Launch{Command: "fake"}, nil },
+		SessionOptions: func(settings ports.ChatTurnSettings) []SessionOption {
+			options := make([]SessionOption, 0, 2)
+			if settings.Model != "" {
+				options = append(options, SessionOption{ID: "model", Value: settings.Model})
+			}
+			return append(options, SessionOption{ID: "effort", Value: "high"})
+		},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	driver.spawn = fakeSpawn(agent)
+	return driver, agent
+}
+
+// The failure this fixes: an interface switch died whole because the agent refused
+// a model preference — "switch interface …: resume chat: chat conversation resume
+// failed: configure ACP session: set ACP session option "model": Invalid value for
+// config option model: gpt-5.6-terra".
+//
+// A model is an optional preference on a conversation that already exists. The
+// provider still holds the history and resumes perfectly on its own default, so
+// refusing the preference must not destroy the resume and strand the session
+// between two interfaces. The preference is dropped and reported instead.
+func TestACPResumeDegradesWhenAgentRejectsTheModelOption(t *testing.T) {
+	driver, agent := rejectsModelOption(t)
+
+	conv, err := driver.Resume(context.Background(), ports.ChatResumeConfig{
+		ProviderConversationID: "provider-session-1",
+		WorkspacePath:          t.TempDir(),
+		Model:                  "gpt-5.6-terra",
+	})
+	if err != nil {
+		t.Fatalf("Resume failed the whole session over an optional model preference: %v", err)
+	}
+	defer conv.Close()
+
+	// Everything queued behind the model still applies: the options loop stops at
+	// the first refusal, so dropping the model has to re-run the rest.
+	agent.mu.Lock()
+	effort := agent.options["effort"]
+	agent.mu.Unlock()
+	if effort != "high" {
+		t.Errorf("effort option = %q, want high: settings after the rejected model were never applied", effort)
+	}
+
+	// And the user is told, on the timeline, that their choice was not honored —
+	// otherwise the session silently runs on a model nobody picked.
+	warning := ""
+	for range 4 {
+		event := nextEvent(t, conv.Events())
+		if event.Kind == ports.ChatEventActivityCompleted && event.ActivityKind == domain.ActivityKindSystem {
+			warning = event.Summary
+			break
+		}
+	}
+	if !strings.Contains(warning, "gpt-5.6-terra") {
+		t.Errorf("warning summary = %q, want a system activity naming the model that was dropped", warning)
+	}
+}
+
+// Spawn is the other half of the contract. A model chosen for a conversation that
+// does not exist yet is an explicit choice, not a stale preference, and quietly
+// starting it on a different model would misattribute everything that follows.
+func TestACPStartFailsWhenAgentRejectsTheModelOption(t *testing.T) {
+	driver, _ := rejectsModelOption(t)
+
+	conv, err := driver.Start(context.Background(), ports.ChatStartConfig{
+		WorkspacePath: t.TempDir(),
+		Model:         "gpt-5.6-terra",
+	})
+	if err == nil {
+		_ = conv.Close()
+		t.Fatal("Start accepted a model the agent refused; an explicit spawn-time choice must fail fast")
+	}
+	if !strings.Contains(err.Error(), "configure ACP session") {
+		t.Errorf("Start error = %v, want the configure-session failure", err)
 	}
 }
