@@ -2,6 +2,13 @@ import { describe, expect, it } from "vitest";
 import { fakeDaemon } from "./fake-daemon";
 
 describe("fakeDaemon", () => {
+	it("healthy answers the routes the app actually calls", async () => {
+		const fetch = fakeDaemon("healthy");
+		expect((await fetch("http://x/healthz")).status).toBe(200);
+		expect(await (await fetch("http://x/api/v1/projects")).json()).toHaveProperty("projects");
+		expect((await fetch("http://x/unknown")).status).toBe(404);
+	});
+
 	it("html-catchall answers every path with a 200 HTML page", async () => {
 		const fetch = fakeDaemon("html-catchall");
 		for (const path of ["/healthz", "/api/v1/projects", "/unknown"]) {
@@ -12,30 +19,30 @@ describe("fakeDaemon", () => {
 	});
 
 	it("wrong-shape returns valid JSON that is not the expected schema", async () => {
-		const response = await fakeDaemon("wrong-shape")(
-			"http://x/api/v1/projects",
-		);
+		const response = await fakeDaemon("wrong-shape")("http://x/api/v1/projects");
 		expect(response.status).toBe(200);
 		expect(await response.json()).not.toHaveProperty("projects");
 	});
 
 	it("unauthorized returns the daemon's real 401 envelope", async () => {
-		const response = await fakeDaemon("unauthorized")(
-			"http://x/api/v1/projects",
-		);
+		const response = await fakeDaemon("unauthorized")("http://x/api/v1/projects");
 		expect(response.status).toBe(401);
 		expect((await response.json()).code).toBe("BAD_PASSWORD");
 	});
 
 	it("unreachable rejects the way the network does", async () => {
-		await expect(
-			fakeDaemon("unreachable")("http://x/healthz"),
-		).rejects.toThrow(/fetch failed/);
+		await expect(fakeDaemon("unreachable")("http://x/healthz")).rejects.toThrow(/fetch failed/);
 	});
-
-	it("route-missing 404s unknown routes but serves known ones", async () => {
+	it("route-missing 404s the route the app is checking for, and serves the rest", async () => {
 		const fetch = fakeDaemon("route-missing");
 		expect((await fetch("http://x/api/v1/fs/dirs")).status).toBe(404);
 		expect((await fetch("http://x/api/v1/projects")).status).toBe(200);
+	});
+
+	it("slow never answers until the caller aborts", async () => {
+		const controller = new AbortController();
+		const pending = fakeDaemon("slow")("http://x/api/v1/projects", { signal: controller.signal });
+		controller.abort();
+		await expect(pending).rejects.toThrow();
 	});
 });
