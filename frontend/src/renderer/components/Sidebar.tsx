@@ -4,7 +4,7 @@ import {
 } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useParams, useRouterState } from "@tanstack/react-router";
-import { LOCAL_HOST, type Ref } from "../lib/hosts";
+import { LOCAL_HOST, refKey, type Ref } from "../lib/hosts";
 import {
 	ChevronRight,
 	Download,
@@ -128,7 +128,7 @@ type SidebarProps = {
 	onCloneProject: (input: CloneProjectInput) => Promise<void>;
 	onCreateProject: (input: CreateProjectInput) => Promise<void>;
 	onInitializeProject: (path: string) => Promise<void>;
-	onRemoveProject: (projectId: string) => Promise<void>;
+	onRemoveProject: (project: Ref) => Promise<void>;
 };
 
 // Selection state comes from the URL: which project/session is active is the
@@ -502,7 +502,7 @@ function ProjectItem({
 	expanded: boolean;
 	selection: Selection;
 	onToggle: () => void;
-	onRemoveProject: (projectId: string) => Promise<void>;
+	onRemoveProject: (project: Ref) => Promise<void>;
 }) {
 	const { t } = useTranslation();
 	const prefersReducedMotion = useReducedMotion();
@@ -530,7 +530,7 @@ function ProjectItem({
 		return () => cancelAnimationFrame(id);
 	}, []);
 	const restartingProjectIds = useUiStore((state) => state.restartingProjectIds);
-	const isProjectRestarting = restartingProjectIds.has(workspace.id);
+	const isProjectRestarting = restartingProjectIds.has(refKey(workspace));
 	const requestNewTask = useUiStore((state) => state.requestNewTask);
 	// Keep completed PR sessions reachable while their runtime still exists.
 	// Only termination removes a worker from the sidebar; archived sessions stay
@@ -557,7 +557,7 @@ function ProjectItem({
 		}
 		setIsSpawning(true);
 		try {
-			const sessionId = await spawnOrchestrator(workspace.id, "sidebar");
+			const sessionId = await spawnOrchestrator(workspace, "sidebar");
 			await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
 			selection.goSession({ host: workspace.host, id: sessionId });
 		} catch (err) {
@@ -609,7 +609,7 @@ function ProjectItem({
 		// after removal while the sidebar keeps progress/error feedback visible.
 		selection.goHome();
 		try {
-			await onRemoveProject(workspace.id);
+			await onRemoveProject(workspace);
 		} catch (err) {
 			const message = err instanceof Error ? err.message : t("shell.couldNotRemoveProject");
 			setRemoveError(message);

@@ -596,7 +596,7 @@ describe("CommandPalette actions", () => {
 		await screen.findByPlaceholderText(/search projects/i);
 		fireEvent.click(screen.getByText("Open orchestrator"));
 		expect(await screen.findByRole("alert")).toHaveTextContent("daemon down");
-		expect(spawnMock).toHaveBeenCalledWith("proj-2", "command_palette");
+		expect(spawnMock).toHaveBeenCalledWith(expect.objectContaining({ host: "local", id: "proj-2" }), "command_palette");
 		expect(useUiStore.getState().isCommandPaletteOpen).toBe(true);
 	});
 

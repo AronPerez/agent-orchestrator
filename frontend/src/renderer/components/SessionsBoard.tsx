@@ -95,13 +95,13 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
 	const [canCreateAsTui, setCanCreateAsTui] = useState(false);
 	const restartingProjectIds = useUiStore((state) => state.restartingProjectIds);
 	const orchestratorStartupError = useUiStore((state) =>
-		projectId ? (state.orchestratorStartupErrors[projectId] ?? null) : null,
+		project ? (state.orchestratorStartupErrors[refKey(project)] ?? null) : null,
 	);
 	const setProjectRestarting = useUiStore((state) => state.setProjectRestarting);
 	const setOrchestratorReplacementError = useUiStore((state) => state.setOrchestratorReplacementError);
 	const setOrchestratorStartupError = useUiStore((state) => state.setOrchestratorStartupError);
 	const requestNewTask = useUiStore((state) => state.requestNewTask);
-	const isProjectRestarting = projectId ? restartingProjectIds.has(projectId) : false;
+	const isProjectRestarting = project ? restartingProjectIds.has(refKey(project)) : false;
 	const health = workspace ? orchestratorHealth(workspace, isProjectRestarting) : { state: "ok" as const };
 	const visibleSpawnError = spawnError ?? orchestratorStartupError;
 
@@ -111,17 +111,17 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
 		setSpawnError(null);
 		setCanCreateAsTui(false);
 	}, [projectId]);
-	const previousProjectIdRef = useRef(projectId);
+	const previousProjectRef = useRef(project);
 	useEffect(() => {
-		const previousProjectId = previousProjectIdRef.current;
-		if (previousProjectId && previousProjectId !== projectId) {
-			setOrchestratorStartupError(previousProjectId, null);
+		const previousProject = previousProjectRef.current;
+		if (previousProject && (previousProject.host !== project?.host || previousProject.id !== project?.id)) {
+			setOrchestratorStartupError(previousProject, null);
 		}
-		previousProjectIdRef.current = projectId;
-	}, [projectId, setOrchestratorStartupError]);
+		previousProjectRef.current = project;
+	}, [project, setOrchestratorStartupError]);
 	useEffect(() => {
 		if (projectId && orchestrator && orchestratorStartupError) {
-			setOrchestratorStartupError(projectId, null);
+			if (project) setOrchestratorStartupError(project, null);
 		}
 	}, [orchestrator, orchestratorStartupError, projectId, setOrchestratorStartupError]);
 
@@ -181,12 +181,12 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
 		}
 		setSpawnError(null);
 		setCanCreateAsTui(false);
-		setOrchestratorStartupError(projectId, null);
+		if (project) setOrchestratorStartupError(project, null);
 		setIsSpawning(true);
 		try {
-			const sessionId = await spawnOrchestrator(projectId, "board", false, mode);
+			const sessionId = await spawnOrchestrator(project, "board", false, mode);
 			await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
-			setOrchestratorStartupError(projectId, null);
+			if (project) setOrchestratorStartupError(project, null);
 			void navigate({
 				to: "/host/$hostId/session/$sessionId",
 				params: { hostId: project?.host ?? LOCAL_HOST, sessionId },

@@ -39,7 +39,7 @@ import {
 } from "../lib/agent-switch-presentation";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
-import { LOCAL_HOST, type Ref } from "../lib/hosts";
+import { LOCAL_HOST, refKey, type Ref } from "../lib/hosts";
 const isMac = isMacPlatform();
 const boardActionsInPanel = usesBoardActionsInPanel();
 const dragStyle = isMac ? ({ WebkitAppRegion: "drag" } as React.CSSProperties) : undefined;
@@ -129,7 +129,7 @@ export function ShellTopbar({
 	const projectLabel = project?.name ?? session?.workspaceName ?? (projectId ? "" : t("shell.board"));
 	const orchestrator = projectRef ? findProjectOrchestrator(all, projectRef) : undefined;
 	const orchestratorActivityLabel = orchestrator ? getAgentActivityView(orchestrator.activity, t).label : undefined;
-	const isProjectRestarting = projectId ? restartingProjectIds.has(projectId) : false;
+	const isProjectRestarting = projectRef ? restartingProjectIds.has(refKey(projectRef)) : false;
 	const orchestratorActionLabel = orchestrator ? t("shell.openOrchestrator") : t("shell.spawnOrchestrator");
 	const orchestratorTooltip = isProjectRestarting
 		? t("shell.restarting")
@@ -151,7 +151,7 @@ export function ShellTopbar({
 	};
 
 	const openOrchestrator = async () => {
-		if (!projectId) return;
+		if (!projectId || !projectRef) return;
 		setBoardSpawnError(null);
 		void addRendererExceptionStep("Orchestrator open requested", {
 			source: "orchestrator-open",
@@ -175,7 +175,7 @@ export function ShellTopbar({
 		}
 		setIsSpawning(true);
 		try {
-			const sessionId = await spawnOrchestrator(projectId, "topbar");
+			const sessionId = await spawnOrchestrator(projectRef, "topbar");
 			await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
 			void navigate({
 				to: "/host/$hostId/session/$sessionId",

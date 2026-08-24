@@ -299,8 +299,8 @@ describe("project board with no sessions", () => {
 		await userEvent.click(spawnButton);
 		await userEvent.click(await screen.findByRole("button", { name: "Create as Terminal UI" }));
 
-		expect(spawnOrchestratorMock).toHaveBeenNthCalledWith(1, "proj-1", "board", false, undefined);
-		expect(spawnOrchestratorMock).toHaveBeenNthCalledWith(2, "proj-1", "board", false, "tui");
+		expect(spawnOrchestratorMock).toHaveBeenNthCalledWith(1, { host: "local", id: "proj-1" }, "board", false, undefined);
+		expect(spawnOrchestratorMock).toHaveBeenNthCalledWith(2, { host: "local", id: "proj-1" }, "board", false, "tui");
 	});
 
 	it("opens project settings instead of spawning when no orchestrator agent is configured", async () => {
@@ -322,7 +322,7 @@ describe("project board with no sessions", () => {
 		useUiStore
 			.getState()
 			.setOrchestratorStartupError(
-				"proj-1",
+				{ host: "local", id: "proj-1" },
 				"Project added, but orchestrator did not start: branch is already checked out in another worktree",
 			);
 		renderBoard(<SessionsBoard project={{ host: "local", id: "proj-1" }} />);
@@ -336,7 +336,7 @@ describe("project board with no sessions", () => {
 		useUiStore
 			.getState()
 			.setOrchestratorStartupError(
-				"proj-1",
+				{ host: "local", id: "proj-1" },
 				"Project added, but orchestrator did not start: branch is already checked out in another worktree",
 			);
 		spawnOrchestratorMock.mockResolvedValue("proj-1-orchestrator");
@@ -358,7 +358,7 @@ describe("project board with no sessions", () => {
 		useUiStore
 			.getState()
 			.setOrchestratorStartupError(
-				"proj-1",
+				{ host: "local", id: "proj-1" },
 				"Project added, but orchestrator did not start: branch is already checked out in another worktree",
 			);
 		const { rerender } = renderBoard(<SessionsBoard project={{ host: "local", id: "proj-1" }} />);
@@ -382,7 +382,7 @@ describe("project board with no sessions", () => {
 		useUiStore
 			.getState()
 			.setOrchestratorStartupError(
-				"proj-1",
+				{ host: "local", id: "proj-1" },
 				"Project added, but orchestrator did not start: branch is already checked out in another worktree",
 			);
 		renderBoard(<SessionsBoard project={{ host: "local", id: "proj-1" }} />);
