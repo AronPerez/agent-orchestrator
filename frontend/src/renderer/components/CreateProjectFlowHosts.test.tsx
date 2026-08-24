@@ -133,6 +133,24 @@ describe("host management from the Host dropdown", () => {
 		expect(connectHostMock).toHaveBeenCalledWith("http://192.0.2.5:3011");
 	});
 
+	// Saving a host and connecting to it are separate registries: `remotes:add`
+	// only writes the saved entry, which is enough to POST a project to that host
+	// but leaves it out of connectedHosts() — so it has no section in the tree
+	// and no client to open a project through, until the next app launch.
+	it("connects a newly added host so it enters the tree", async () => {
+		bridge.remotes.add.mockResolvedValue("online");
+		await openHostList();
+		await userEvent.click(screen.getByRole("button", { name: /add remote host/i }));
+
+		await userEvent.type(await screen.findByLabelText(/name/i), "Air");
+		await userEvent.type(screen.getByLabelText(/address/i), "192.0.2.9:3011");
+		await userEvent.type(screen.getByLabelText(/password/i), "hunter2");
+		await userEvent.click(screen.getByRole("button", { name: /^connect$/i }));
+
+		await waitFor(() => expect(bridge.remotes.add).toHaveBeenCalled());
+		await waitFor(() => expect(connectHostMock).toHaveBeenCalledWith("http://192.0.2.9:3011"));
+	});
+
 	it("reconnects after a password fix, whose proxy main just dropped", async () => {
 		await openHostList();
 		await userEvent.click(screen.getByRole("button", { name: /edit workbox/i }));
