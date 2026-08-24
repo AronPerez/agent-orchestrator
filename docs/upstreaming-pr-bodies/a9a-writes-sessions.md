@@ -16,4 +16,7 @@ Session and terminal writes take a `Ref = {host, id}` and dispatch through `clie
 
 ## Artifacts (if appropriate):
 
-Evidence pending — opens draft ahead of capture; a screenshot renaming a session on a specific host, with no cross-host effect, lands here before review.
+![Before: local and remote hosts each holding a session named scratch-session-1](https://raw.githubusercontent.com/AronPerez/agent-orchestrator/campaign-assets/qa-evidence/a9a-writes-sessions-before.png)
+![After: only the local session renamed to renamed-this-mac; the remote one is untouched](https://raw.githubusercontent.com/AronPerez/agent-orchestrator/campaign-assets/qa-evidence/a9a-writes-sessions.png)
+
+*Captured on a dev build; `--disable-web-security` bridges the dev-origin CORS gap only (production origin `app://renderer` passes the same check natively) — the daemon, proxy, credential, and traffic are all real.*
