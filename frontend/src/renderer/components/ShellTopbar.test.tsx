@@ -49,6 +49,7 @@ vi.mock("../lib/api-client", () => ({
 }));
 vi.mock("../lib/host-clients", () => ({
 	clientFor: () => ({ POST: postMock }),
+	hostLabelFor: (host: string) => (host === "local" ? "Local" : "Remote"),
 }));
 
 vi.mock("../lib/spawn-orchestrator", () => ({ spawnOrchestrator: spawnMock }));
@@ -630,5 +631,53 @@ describe("TopbarKillButton", () => {
 		view.rerenderTopbar();
 		expect(await screen.findByText("worker one failed")).toBeInTheDocument();
 		expect(screen.getByRole("button", { name: "Kill session" })).toBeEnabled();
+	});
+});
+
+describe("ShellTopbar open-in-editor identity", () => {
+	function renderTwoHostTopbar(hostId: string) {
+		const workspaceFor = (host: string, title: string): WorkspaceSummary => ({
+			host,
+			id: "proj-1",
+			name: "my-app",
+			path: "/repo/my-app",
+			orchestratorAgent: "claude-code",
+			sessions: [{ ...worker, host, title }],
+		});
+		useWorkspaceQueryMock.mockReturnValue({
+			data: [
+				{ host: "local", label: "Local", status: "ready", workspaces: [workspaceFor("local", "the local thing")], failure: null },
+				{ host: "remote", label: "Remote", status: "ready", workspaces: [workspaceFor("remote", "the remote thing")], failure: null },
+			],
+			isError: false,
+			isLoading: false,
+		});
+		paramsMock.hostId = hostId;
+		paramsMock.projectId = "proj-1";
+		paramsMock.sessionId = "sess-1";
+		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+		const topbar = () => (
+			<QueryClientProvider client={queryClient}>
+				<TooltipProvider>
+					<ShellTopbar />
+				</TooltipProvider>
+			</QueryClientProvider>
+		);
+		const result = render(topbar());
+		return { ...result, rerenderTopbar: () => result.rerender(topbar()) };
+	}
+
+	it("drops a launch failure when the route moves to the same session id on another host", async () => {
+		window.ao!.editorHandoff.open = vi.fn().mockRejectedValue(new Error("could not reach the workspace"));
+		const view = renderTwoHostTopbar("local");
+
+		await userEvent.click(await screen.findByRole("button", { name: "Open in Cursor" }));
+		expect(await screen.findByText("could not reach the workspace")).toBeInTheDocument();
+
+		paramsMock.hostId = "remote";
+		view.rerenderTopbar();
+
+		expect(screen.getByTestId("session-topbar-identity").textContent).toContain("the remote thing");
+		await waitFor(() => expect(screen.queryByText("could not reach the workspace")).not.toBeInTheDocument());
 	});
 });
