@@ -14,6 +14,10 @@ PR/review actions, diff-selection "send to agent" calls, the palette's review tr
 
 `cd frontend && npm run typecheck && npm run typecheck:e2e && npx vitest run src/renderer` on the current `main` (`c9a0adb2`): 142 files / 2045 tests, identical to base. Existing suites are the regression check; changed tests assert a call shape or a store key.
 
+## Known gap
+
+**The claim above does not fully hold yet.** QA against two real daemons found that `SessionView.tsx` still resolves "the open session" by bare id across every host (`workspaces.flatMap(w => w.sessions).find(s => s.id === sessionId)`, no host check) — a gap in A8a's read conversion that survived because `.id === sessionId` typechecks without a `Ref`. With two hosts holding a same-id session, opening the remote one currently renders the local one's content, which this PR's own `inspectorSessions`/`refKey` keying inherits. A fix is in progress on top of A8a; this PR will drop this note once it lands and evidence is captured.
+
 ## Artifacts (if appropriate):
 
-Evidence pending — opens draft ahead of capture; a screenshot of two hosts' inspectors staying independent for a shared session id lands here.
+Held — will not screenshot inspector independence while the identity bug above makes it false. Lands once the fix is folded in.
