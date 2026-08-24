@@ -175,6 +175,99 @@ func lookupRemoteEntry(base string) (*remoteEntry, error) {
 	return nil, nil
 }
 
+// checkRemoteProjectPath refuses a host-relative path aimed at a remote daemon.
+//
+// Refuse rather than warn: "~/repo" and "./repo" are resolved by the daemon
+// against its own home and its own working directory, so against a remote
+// target they silently name a directory on someone else's machine. There is no
+// reading under which the operator meant the remote daemon's home — and unlike
+// an absolute path, which may legitimately exist on either host, a host-relative
+// path cannot be checked by the operator after the fact. A warning on stderr
+// would be missed exactly when it matters, in a script or a busy terminal.
+//
+// Absolute paths are deliberately still allowed: they are meaningful on the
+// remote host, and refusing them would make a remote target useless.
+func (c *commandContext) checkRemoteProjectPath(path string) error {
+	if c.remote == nil {
+		return nil
+	}
+	trimmed := strings.TrimSpace(path)
+	switch {
+	case strings.HasPrefix(trimmed, "~"):
+		return usageError{fmt.Errorf(
+			"--path %q is relative to a home directory, and %s targets the remote daemon at %s, "+
+				"where it would mean that host's home — pass an absolute path as it exists on that host",
+			path, c.remote.source, c.remote.baseURL)}
+	case !isAbsForSomeHost(trimmed):
+		return usageError{fmt.Errorf(
+			"--path %q is relative, and %s targets the remote daemon at %s, where it would be resolved "+
+				"against that daemon's working directory — pass an absolute path as it exists on that host",
+			path, c.remote.source, c.remote.baseURL)}
+	}
+	return nil
+}
+
+// isAbsForSomeHost reports whether p is an absolute path on ANY host AO might
+// talk to, rather than on the machine running the CLI.
+//
+// filepath.IsAbs is the wrong question here and shipping it was a bug: it
+// judges by the local OS, so on Windows it calls "/srv/repo" relative — and a
+// Windows operator targeting a Linux remote host, which is exactly what remote
+// execution creates, was refused a perfectly valid path on that host. The
+// destination filesystem is the remote daemon's, so the CLI must accept every
+// absolute form and let the daemon judge its own.
+//
+// Deliberately NOT accepted, because both are host-relative even on Windows:
+// a bare drive-relative path ("C:foo") and a single leading backslash
+// ("\foo", relative to the current drive).
+func isAbsForSomeHost(p string) bool {
+	if strings.HasPrefix(p, "/") {
+		return true // POSIX absolute
+	}
+	if strings.HasPrefix(p, `\\`) {
+		return true // Windows UNC: \\server\share
+	}
+	// Windows drive-absolute: C:\foo or C:/foo (a slash after the colon is
+	// what separates this from drive-RELATIVE "C:foo").
+	if len(p) >= 3 && p[1] == ':' && (p[2] == '\\' || p[2] == '/') {
+		return (p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z')
+	}
+	return false
+}
+
+// checkRemoteImplicitProject refuses to resolve a project from a local signal
+// when the command targets a remote daemon.
+//
+// Refuse rather than guess, for the same reason as checkRemoteProjectPath:
+// AO_PROJECT_ID, AO_SESSION_ID and the current directory all describe THIS
+// machine, but with a remote target they are matched against the remote
+// daemon's projects. Measured: `ao spawn --url <remote>` run inside any AO
+// session inherits an AO_PROJECT_ID the operator never typed and spawns
+// against whatever project on the remote host happens to share that id — and
+// cwd matching picks a remote project whenever the two machines' paths
+// coincide. A session started on the wrong machine cannot be caught after the
+// fact from the output, which names only the session it created.
+//
+// So --project is required for a remote target: it is the one input that means
+// the same thing on both hosts.
+func (c *commandContext) checkRemoteImplicitProject(explicit string) error {
+	if c.remote == nil || strings.TrimSpace(explicit) != "" {
+		return nil
+	}
+	signal := "the current directory"
+	switch {
+	case strings.TrimSpace(os.Getenv("AO_PROJECT_ID")) != "":
+		signal = "AO_PROJECT_ID"
+	case strings.TrimSpace(os.Getenv("AO_SESSION_ID")) != "":
+		signal = "AO_SESSION_ID"
+	}
+	return usageError{fmt.Errorf(
+		"%s describes this machine, and %s targets the remote daemon at %s, where it would select "+
+			"a project on that host — pass --project <id> as it exists on that host "+
+			"(list them with `ao project ls --url %s`)",
+		signal, c.remote.source, c.remote.baseURL, c.remote.baseURL)}
+}
+
 // authorize presents the remote connection password. Loopback calls carry no
 // credential: the local daemon's loopback listener has no auth at all.
 func (c *commandContext) authorize(req *http.Request) {
