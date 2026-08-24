@@ -360,11 +360,13 @@ export function ShellTopbar({
 						    reports whether this session has a live workspace. */}
 						{session ? (
 							// Keyed per session so a stale launch error does not carry over
-							// when switching sessions. The prefix keeps it distinct from the
-							// kill button's key: identical sibling keys make React duplicate
-							// the nodes.
+							// when switching sessions. Keyed by ref, not bare id: two hosts
+							// can hold the same session id, and a bare id would leave one
+							// host's launch failure on screen under the other host's session.
+							// The prefix keeps it distinct from the kill button's key:
+							// identical sibling keys make React duplicate the nodes.
 							<TopbarOpenEditorButton
-								key={`open-workspace-${session.id}`}
+								key={`open-workspace-${refKey(session)}`}
 								host={session.host}
 								sessionId={session.id}
 								projectId={session.workspaceId}
