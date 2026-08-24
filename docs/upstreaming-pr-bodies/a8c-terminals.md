@@ -12,12 +12,10 @@ The terminal mux pool holds one current socket for the whole app. With two hosts
 
 ## How Has This Been Tested?
 
-`cd frontend && npm run typecheck && npm run typecheck:e2e && npx vitest run src/renderer` on the current `main` (`c9a0adb2`): 143 files / 2066 tests, all green (base was 143/2063). New cases: each host's mux URL keeps its token segment; the pool keeps one live socket per host; closing one host's mux leaves the other open.
+`cd frontend && npm run typecheck && npm run typecheck:e2e && npx vitest run src/renderer` on the current `main` (`c9a0adb2`): 143 files / 2077 tests, all green (base was 143/2063). New cases: each host's mux URL keeps its token segment; the pool keeps one live socket per host; closing one host's mux leaves the other open.
 
-## Known gap
-
-**"`useShellTerminals` becomes per host in full" overstates the UI's current reach.** The hook itself does take a host, and `useConnectedShellTerminals()` exists for the multi-host case — but neither of this PR's own two consumers (`ShellTerminalsView`, `SessionView`) calls it; both call `useShellTerminals()` with no host, which defaults to local. `useConnectedShellTerminals()` has zero call sites anywhere in `src/renderer`. So today there is no UI surface that displays a remote host's shell terminal at all, colliding session ids or not. A colliding-id session additionally fails outright — "+ New terminal" errors `shell target hosts do not match` — because of the `SessionView.tsx` gap tracked on A8a. Both are being addressed together.
+**Update:** QA found "`useShellTerminals` becomes per host in full" overstated the UI's reach — `useConnectedShellTerminals()` existed but had zero consumers, so no surface actually showed a remote host's shell terminal. Fixed: `ShellTerminalsView` now uses it for the standalone list, and `SessionView` calls `useShellTerminals(sessionRef.host)`. Two lines of production code; the test count above includes the RED-then-GREEN coverage.
 
 ## Artifacts (if appropriate):
 
-Held — will not screenshot "two hosts each holding an open terminal" while no consumer wires the multi-host hook up. Lands once the fix is folded in.
+Evidence pending — the fix above just landed; a screenshot of two hosts each holding an open terminal lands here once captured against this build.

@@ -151,6 +151,58 @@ folded in via one more deliberate cascade once delivered. **A8c and A9c hold the
 evidence** until that lands — screenshots are not produced for a claim already known to be
 false.
 
+## Third cascade — session-identity fix folded in (2026-08-24)
+
+A dedicated fix worker delivered two branches (never pushed; folded in directly): the shared
+fix (`SessionView.tsx`, `ShellTopbar.tsx`, `findSession` + its three callers, `_shell.tsx`)
+on top of `up-a8a-refs`, and the A8c-specific terminal-UI wiring
+(`useConnectedShellTerminals` given real consumers, plus an A8c-only refinement to the
+`_shell.tsx` fix) on top of `up-a8c-terminals`. Folded into A8a (`7694e336`, verified
+141 files / 2047 tests, matching the fix worker's own report exactly) and cascaded through
+every descendant a third time — A8b, A9a, A8c (plus its extra fix), A9b, A9c, A10 (integration
+base rebuilt again, tag `up-a10-base` → `4de7dab09`). Full conflict-by-conflict detail is in
+the campaign ledger, Entry 18.
+
+**One conflict resolution was wrong, found and fixed before this cascade closed.** Resolving
+`ShellTopbar.test.tsx`'s conflict on A9c, `hostId: undefined` was kept over A9c's own
+`hostId: "local"` — plausible-looking (`beforeEach` resets it either way, or so the reasoning
+went) but wrong: `ShellTopbar.tsx`'s inspector-state lookup gates on `params.hostId` being
+truthy *directly*, not on the `?? LOCAL_HOST`-defaulted value used everywhere else in the
+file, so an unset default silently skipped the lookup. Three tests failed identically on both
+A9c and A10 — the same-failure-twice pattern that reads as a real bug rather than the
+campaign's usual different-test-every-run machine-load flake, which is what triggered a
+second look instead of trusting the (buggy) automated flake-clearance check that had waved it
+through. `hostId: "local"` restored as both the literal default and the `beforeEach` reset;
+`ShellTopbar.test.tsx` 34/34 and `.linux.test.tsx` 2/2 confirmed clean in isolation before
+re-verifying the full suites and re-pushing A9c and A10. Ledger Entry 19 has the full
+bisection and the verification-script bug (a path-prefix mismatch that made its "zero
+overlap with the branch's own diff" gate a silent no-op) that let it through initially.
+
+A8a's, A8c's and A9c's session-identity "Known gap" sections are retired — the claims they
+qualified are true again. A8c's and A9c's QA evidence, held since the bug was found, is being
+re-shot against the fixed build.
+
+**A fourth instance of the same defect class surfaced during evidence capture, not fixed
+here:** `SessionsBoard.tsx`'s spawn-error reset effect keys on bare `projectId`, so a real
+remote-side failure stays visible after navigating to the identically-id'd local project.
+Disclosed on A9b (#4375). Combined with the three sites the fix worker deliberately deferred
+(`CommandItem` ids across hosts, `reviewStatesBySessionId` by bare id,
+`buildCommands`/`ShellTopbar`'s project-by-bare-id — all already fixed on `develop`, see
+below) and a duplicate-React-key console warning under colliding ids, these are queued for
+one follow-up fix pass, `develop`-first, rather than another stack cascade.
+
+**`develop` is a ready-made oracle for this whole defect class.** The fix worker's audit
+found `develop` host-aware on every site the up-* stack still gets wrong — the up-* branches
+are a re-slice of already-shipped work, and host-awareness was lost in the re-slicing, not
+never written. `git diff origin/develop <up-branch> -- <file>` on any renderer file the
+stack touches surfaces the rest of this class faster than re-auditing from scratch.
+
+**Hard rule for QA capture sessions, effective now:** capture sessions never mutate real
+`~/.ao` state. `~/.ao/remotes.json` is untouchable — a capture session's test hosts are wired
+inside its own isolated `AO_DATA_DIR`, never the shared file the installed app also reads.
+(One capture session's mid-run termination left the user's real saved hosts briefly missing
+from that file; restored from its own documented backup — see ledger Entry 18. Not a repeat.)
+
 ## Open PRs (draft, `AronPerez` → `Untrivial-ai/agent-orchestrator`, stacked-drafts mode)
 
 All 21 are open as drafts, in dependency order, using cumulative diffs for chained branches
@@ -207,13 +259,13 @@ descriptions in this document as historical design record, not the literal PR te
 | 6 | `up-a6-host-ui` | `13125a9c3` | `up-a5-clients` | feat(hosts): add, edit and remove remote hosts | 14 | useRemoteHosts ×5, HostSelect ×12, AddRemoteHostDialog ×20, CreateProjectFlowHosts ×6, fake-daemon ×5 |
 | 7 | `up-a7a-fs-dirs` | `eb9f8dd8c` | `upstream/main` | feat(daemon): read-only directory listing at GET /api/v1/fs/dirs | 6 | fs ×4 (Go), LAN policy assertion |
 | 8 | `up-a7b-folder-picker` | `70b778f6f` | merge(A6, A7a), tag `up-a7b-base` | feat(projects): browse a remote host's folders when adding a project | 11 | RemoteFolderPicker ×9, CreateProjectFlow.remote ×8 |
-| 9 | `up-a8a-refs` | `758a05347` | `up-a5-clients` | refactor(hosts): thread Ref through reads and host-qualified routes | 50 | `src/renderer` 140 files / 2025 tests (base 139 / 2019) |
-| 10 | `up-a8b-fanout` | `05888d052` | `up-a8a-refs` | feat(hosts): fan out workspace queries and event streams per host | 21 | 142 / 2048; adds host-events ×8, fake-daemon ×7, rewritten useWorkspaceQuery |
-| 11 | `up-a8c-terminals` | `b32688663` | `up-a8b-fanout` | feat(hosts): one terminal mux per host | 9 | 142 / 2051; adds mux-across-hosts ×3 |
-| 12 | `up-a9a-writes-sessions` | `5ddd1203c` | `up-a8a-refs` | refactor(hosts): route session and terminal writes by Ref | 22 | 141 / 2030; adds session-writes-by-ref ×5 |
-| 13 | `up-a9b-writes-projects` | `d2f0afff4` | `up-a9a-writes-sessions` | refactor(hosts): route project and orchestrator writes by Ref | 11 | 141 / 2030 |
-| 14 | `up-a9c-writes-reviews` | `f8deecf15` | `up-a9b-writes-projects` | refactor(hosts): route pull request and review writes by Ref | 12 | 141 / 2030 |
-| 15 | `up-a10-one-tree` | `5a8193c5d` | merge(A6, A8c, A9c), tag `up-a10-base` | feat(hosts): one tree across every connected host | 17 | 147 / 2113; adds Sidebar-across-hosts ×5, host_connect telemetry ×1 |
+| 9 | `up-a8a-refs` | `7694e3361` | `up-a5-clients` | refactor(hosts): thread Ref through reads and host-qualified routes | 50 | `src/renderer` 140 files / 2025 tests (base 139 / 2019) |
+| 10 | `up-a8b-fanout` | `4f08639c2` | `up-a8a-refs` | feat(hosts): fan out workspace queries and event streams per host | 21 | 142 / 2048; adds host-events ×8, fake-daemon ×7, rewritten useWorkspaceQuery |
+| 11 | `up-a8c-terminals` | `8a867d3cb` | `up-a8b-fanout` | feat(hosts): one terminal mux per host | 9 | 142 / 2051; adds mux-across-hosts ×3 |
+| 12 | `up-a9a-writes-sessions` | `f8d90826e` | `up-a8a-refs` | refactor(hosts): route session and terminal writes by Ref | 22 | 141 / 2030; adds session-writes-by-ref ×5 |
+| 13 | `up-a9b-writes-projects` | `f74ec0a12` | `up-a9a-writes-sessions` | refactor(hosts): route project and orchestrator writes by Ref | 11 | 141 / 2030 |
+| 14 | `up-a9c-writes-reviews` | `b9ec0ca30` | `up-a9b-writes-projects` | refactor(hosts): route pull request and review writes by Ref | 12 | 141 / 2030 |
+| 15 | `up-a10-one-tree` | `225e46c62` | merge(A6, A8c, A9c), tag `up-a10-base` | feat(hosts): one tree across every connected host | 17 | 148 / 2139; adds Sidebar-across-hosts ×5, host_connect telemetry ×1 |
 | 16 | `up-a11-docs` | `79ba70131` | `upstream/main` | docs(remote-hosts): setup, trust boundary, ADR | 5 | none — documentation only |
 
 Verified on the upstream base at build time: every listed suite green, `tsc --noEmit` and
