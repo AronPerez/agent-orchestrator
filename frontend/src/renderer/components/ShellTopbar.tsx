@@ -365,6 +365,7 @@ export function ShellTopbar({
 							// the nodes.
 							<TopbarOpenEditorButton
 								key={`open-workspace-${session.id}`}
+								host={session.host}
 								sessionId={session.id}
 								projectId={session.workspaceId}
 								style={noDragStyle}

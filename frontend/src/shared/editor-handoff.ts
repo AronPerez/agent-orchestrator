@@ -36,9 +36,25 @@ export type EditorHandoffState = {
 	preferredEditorId: EditorId;
 	workspaceAvailable: boolean;
 	unavailableReason?: string;
+	/**
+	 * Present when the session lives on a remote host. The renderer renders
+	 * remote-ness from this block — it never receives a filesystem path.
+	 */
+	remote?: {
+		hostLabel: string;
+		/** An SSH destination is saved for the host, so remote open can work. */
+		sshConfigured: boolean;
+	};
+};
+
+export type EditorHandoffStateInput = {
+	/** "local" for the local daemon, else the saved host url. */
+	host: string;
+	sessionId: string;
 };
 
 export type OpenSessionTargetInput = {
+	host: string;
 	sessionId: string;
 	targetId?: OpenTargetId;
 };

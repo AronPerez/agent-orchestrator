@@ -30,11 +30,11 @@ function setState(state: EditorHandoffState) {
 	window.ao!.editorHandoff.open = openMock;
 }
 
-function renderButton() {
+function renderButton(host = "local") {
 	const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
 	return render(
 		<QueryClientProvider client={client}>
-			<TopbarOpenEditorButton sessionId="sess-1" projectId="proj-1" />
+			<TopbarOpenEditorButton host={host} sessionId="sess-1" projectId="proj-1" />
 		</QueryClientProvider>,
 	);
 }
@@ -57,7 +57,7 @@ describe("TopbarOpenEditorButton", () => {
 		expect(button).toHaveAttribute("data-priority", "primary");
 		expect(button.querySelector("[data-compact-label]")).toHaveTextContent("Open");
 		await userEvent.click(button);
-		await waitFor(() => expect(openMock).toHaveBeenCalledWith({ sessionId: "sess-1" }));
+		await waitFor(() => expect(openMock).toHaveBeenCalledWith({ host: "local", sessionId: "sess-1" }));
 	});
 
 	it("keeps the no-editor state visible and offers Finder and Terminal", async () => {
@@ -95,7 +95,7 @@ describe("TopbarOpenEditorButton", () => {
 		renderButton();
 		await userEvent.click(await screen.findByRole("button", { name: "Open workspace options" }));
 		await userEvent.click(await screen.findByRole("menuitem", { name: "Open in Finder" }));
-		await waitFor(() => expect(openMock).toHaveBeenCalledWith({ sessionId: "sess-1", targetId: "file-manager" }));
+		await waitFor(() => expect(openMock).toHaveBeenCalledWith({ host: "local", sessionId: "sess-1", targetId: "file-manager" }));
 	});
 
 	it("updates the primary target after a chosen editor succeeds", async () => {
@@ -122,5 +122,19 @@ describe("TopbarOpenEditorButton", () => {
 		renderButton();
 		await userEvent.click(await screen.findByRole("button", { name: "Open in Cursor" }));
 		expect(await screen.findByRole("alert")).toHaveTextContent("Could not open Cursor");
+	});
+
+	it("renders a remote session as informational, not as an error", async () => {
+		setState({
+			...availableState,
+			workspaceAvailable: false,
+			remote: { hostLabel: "Mini", sshConfigured: false },
+		});
+		renderButton("http://192.0.2.1:3011");
+		const button = await screen.findByRole("button", { name: "Open in Cursor" });
+		expect(button).toBeDisabled();
+		expect(button).toHaveAttribute("title", "Workspace is on Mini");
+		// The old dead end: a red topbar error on every remote session.
+		expect(screen.queryByText(/session workspace is not available/i)).not.toBeInTheDocument();
 	});
 });

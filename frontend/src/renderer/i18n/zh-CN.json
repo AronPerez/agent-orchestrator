@@ -308,6 +308,8 @@
 	"editor.openWorkspaceInTitle": "在 {{name}} 中打开此会话的工作区",
 	"editor.terminal": "终端",
 	"editor.workspaceUnavailable": "会话工作区不可用。",
+	"editor.remoteOn": "工作区位于 {{host}}",
+	"editor.remoteNeedsSsh": "要在此处打开，请在主机设置中为 {{host}} 添加 SSH 目标。",
 	"inspector.activity": "活动",
 	"inspector.agent": "代理",
 	"inspector.aria": "会话检查器",

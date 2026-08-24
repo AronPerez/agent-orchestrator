@@ -308,6 +308,8 @@
 	"editor.openWorkspaceInTitle": "このセッションのワークスペースを {{name}} で開く",
 	"editor.terminal": "ターミナル",
 	"editor.workspaceUnavailable": "セッションのワークスペースを利用できません。",
+	"editor.remoteOn": "ワークスペースは {{host}} 上にあります",
+	"editor.remoteNeedsSsh": "ここで開くには、ホスト設定で {{host}} の SSH 接続先を追加してください。",
 	"inspector.activity": "アクティビティ",
 	"inspector.agent": "エージェント",
 	"inspector.aria": "セッションインスペクター",

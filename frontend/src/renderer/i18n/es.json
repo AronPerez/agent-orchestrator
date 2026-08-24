@@ -310,6 +310,8 @@
 	"editor.openWorkspaceInTitle": "Abrir el espacio de trabajo de esta sesión en {{name}}",
 	"editor.terminal": "Terminal",
 	"editor.workspaceUnavailable": "El espacio de trabajo de la sesión no está disponible.",
+	"editor.remoteOn": "El espacio de trabajo está en {{host}}",
+	"editor.remoteNeedsSsh": "Para abrirlo aquí, añade un destino SSH para {{host}} en su configuración de host.",
 	"inspector.activity": "Actividad",
 	"inspector.agent": "Agente",
 	"inspector.aria": "Inspector de sesión",

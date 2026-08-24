@@ -3,6 +3,7 @@ import path from "node:path";
 import {
 	isEditorId,
 	type EditorHandoffState,
+	type EditorHandoffStateInput,
 	type EditorId,
 	type OpenSessionTargetInput,
 	type OpenSessionTargetResult,
@@ -15,6 +16,12 @@ type Platform = NodeJS.Platform;
 type ResolvedCommand = {
 	command: string;
 	argsBeforeWorkspace?: string[];
+};
+
+/** What main knows about a saved remote host; null means the local daemon. */
+export type RemoteHostInfo = {
+	label: string;
+	sshDestination?: string;
 };
 
 type EditorCandidate = {
@@ -51,7 +58,8 @@ export type EditorHandoffDeps = {
 	platform: Platform;
 	env: NodeJS.ProcessEnv;
 	homeDir: string;
-	resolveWorkspace: (sessionId: string) => Promise<string>;
+	resolveWorkspace: (host: string, sessionId: string) => Promise<string>;
+	remoteHost: (host: string) => Promise<RemoteHostInfo | null>;
 	readPreference: () => Promise<EditorId>;
 	writePreference: (editorId: EditorId) => Promise<void>;
 	launch: (command: string, args: readonly string[], cwd: string) => Promise<void>;
@@ -62,7 +70,7 @@ export type EditorHandoffDeps = {
 };
 
 export type EditorHandoff = {
-	getState(sessionId: string): Promise<EditorHandoffState>;
+	getState(input: EditorHandoffStateInput): Promise<EditorHandoffState>;
 	open(input: OpenSessionTargetInput): Promise<OpenSessionTargetResult>;
 };
 
@@ -180,10 +188,22 @@ export function createEditorHandoff(deps: EditorHandoffDeps): EditorHandoff {
 		error instanceof Error && error.message.trim() ? error.message : "Session workspace is not available.";
 
 	return {
-		async getState(sessionId) {
+		async getState({ host, sessionId }) {
+			void sessionId;
 			const preferredEditorId = await deps.readPreference();
+			const remote = await deps.remoteHost(host);
+			if (remote) {
+				// A remote workspace is a place, not a failure: no unavailableReason,
+				// so the renderer has nothing to paint red. Nothing can open it yet.
+				return {
+					targets,
+					preferredEditorId,
+					workspaceAvailable: false,
+					remote: { hostLabel: remote.label, sshConfigured: false },
+				};
+			}
 			try {
-				await deps.resolveWorkspace(sessionId);
+				await deps.resolveWorkspace(host, sessionId);
 				return { targets, preferredEditorId, workspaceAvailable: true };
 			} catch (error) {
 				return {
@@ -198,6 +218,8 @@ export function createEditorHandoff(deps: EditorHandoffDeps): EditorHandoff {
 		async open(input) {
 			const sessionId = input.sessionId.trim();
 			if (!sessionId) throw new Error("Session is required.");
+			const remote = await deps.remoteHost(input.host);
+			if (remote) throw new Error(`The workspace for this session is on ${remote.label}.`);
 			const preferredEditorId = await deps.readPreference();
 			const targetId = input.targetId ?? preferredEditorId;
 			if (input.targetId && input.targetId !== "file-manager" && input.targetId !== "terminal" && !isEditorId(input.targetId)) {
@@ -208,7 +230,7 @@ export function createEditorHandoff(deps: EditorHandoffDeps): EditorHandoff {
 				if (isEditorId(targetId)) throw new Error("That editor is not installed. Choose another option.");
 				throw new Error("That open target is not available.");
 			}
-			const workspacePath = await deps.resolveWorkspace(sessionId);
+			const workspacePath = await deps.resolveWorkspace(input.host, sessionId);
 			try {
 				if (target.kind === "file_manager") {
 					await deps.openDirectory(workspacePath);

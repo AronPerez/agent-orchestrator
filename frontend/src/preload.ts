@@ -25,6 +25,7 @@ import type {
 } from "./main/remote-request";
 import type {
 	EditorHandoffState,
+	EditorHandoffStateInput,
 	OpenSessionTargetInput,
 	OpenSessionTargetResult,
 } from "./shared/editor-handoff";
@@ -304,8 +305,8 @@ const api = {
 		},
 	},
 	editorHandoff: {
-		getState: (sessionId: string) =>
-			ipcRenderer.invoke("editorHandoff:getState", sessionId) as Promise<EditorHandoffState>,
+		getState: (input: EditorHandoffStateInput) =>
+			ipcRenderer.invoke("editorHandoff:getState", input) as Promise<EditorHandoffState>,
 		open: (input: OpenSessionTargetInput) =>
 			ipcRenderer.invoke("editorHandoff:open", input) as Promise<OpenSessionTargetResult>,
 	},

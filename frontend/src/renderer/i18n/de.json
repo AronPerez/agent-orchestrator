@@ -308,6 +308,8 @@
 	"editor.openWorkspaceInTitle": "Arbeitsbereich dieser Sitzung in {{name}} öffnen",
 	"editor.terminal": "Terminal",
 	"editor.workspaceUnavailable": "Der Sitzungsarbeitsbereich ist nicht verfügbar.",
+	"editor.remoteOn": "Arbeitsbereich liegt auf {{host}}",
+	"editor.remoteNeedsSsh": "Zum Öffnen hier ein SSH-Ziel für {{host}} in den Host-Einstellungen hinterlegen.",
 	"inspector.activity": "Aktivität",
 	"inspector.agent": "Agent",
 	"inspector.aria": "Sitzungs-Inspektor",
