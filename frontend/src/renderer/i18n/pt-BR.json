@@ -1449,5 +1449,19 @@
 	"hosts.remotePath": "Caminho em {{host}}",
 	"hosts.remotePathHint": "Caminho absoluto nessa máquina.",
 	"hosts.addProjectOn": "Adicionar projeto em {{host}}",
-	"hosts.switcher": "Host: {{host}}"
+	"hosts.switcher": "Host: {{host}}",
+	"hosts.viewing": "Vendo {{host}}",
+	"hosts.backToLocal": "Voltar para este Mac",
+	"hosts.passwordChanged": "{{host}} recusou a senha salva",
+	"hosts.on": "em {{host}}",
+	"hosts.remoteSection": "Hosts remotos",
+	"hosts.open": "Abrir {{host}}",
+	"hosts.unreachable": "Inacessível",
+	"hosts.peekEmpty": "Nenhum projeto",
+	"hosts.allHosts": "Todos os hosts",
+	"hosts.qualified": "{{name}} · {{host}}",
+	"hosts.sectionFailed": "{{host}} está inacessível",
+	"hosts.retry": "Tentar novamente",
+	"hosts.liveUpdatesOffline": "Sem atualizações ao vivo de {{host}}",
+	"hosts.liveUpdatesOffline.hint": "Os projetos continuam sendo atualizados a cada poucos segundos. As sessões podem parecer ociosas até a conexão voltar."
 }

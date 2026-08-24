@@ -1413,5 +1413,19 @@
 	"hosts.remotePath": "Path on {{host}}",
 	"hosts.remotePathHint": "Absolute path on that machine.",
 	"hosts.addProjectOn": "Add project on {{host}}",
-	"hosts.switcher": "Host: {{host}}"
+	"hosts.switcher": "Host: {{host}}",
+	"hosts.viewing": "Viewing {{host}}",
+	"hosts.backToLocal": "Back to This Mac",
+	"hosts.passwordChanged": "{{host}} rejected the saved password",
+	"hosts.on": "on {{host}}",
+	"hosts.remoteSection": "Remote hosts",
+	"hosts.open": "Open {{host}}",
+	"hosts.unreachable": "Unreachable",
+	"hosts.peekEmpty": "No projects",
+	"hosts.allHosts": "All hosts",
+	"hosts.qualified": "{{name}} · {{host}}",
+	"hosts.sectionFailed": "{{host}} is unreachable",
+	"hosts.retry": "Retry",
+	"hosts.liveUpdatesOffline": "Not receiving live updates from {{host}}",
+	"hosts.liveUpdatesOffline.hint": "Its projects still refresh every few seconds. Sessions may look idle until the connection returns."
 }

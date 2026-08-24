@@ -1431,5 +1431,19 @@
 	"hosts.remotePath": "{{host}} 上のパス",
 	"hosts.remotePathHint": "そのマシン上の絶対パス。",
 	"hosts.addProjectOn": "{{host}} にプロジェクトを追加",
-	"hosts.switcher": "ホスト: {{host}}"
+	"hosts.switcher": "ホスト: {{host}}",
+	"hosts.viewing": "{{host}} を表示中",
+	"hosts.backToLocal": "このMacに戻る",
+	"hosts.passwordChanged": "{{host}} が保存されたパスワードを拒否しました",
+	"hosts.on": "（{{host}} 上）",
+	"hosts.remoteSection": "リモートホスト",
+	"hosts.open": "{{host}} を開く",
+	"hosts.unreachable": "接続できません",
+	"hosts.peekEmpty": "プロジェクトなし",
+	"hosts.allHosts": "すべてのホスト",
+	"hosts.qualified": "{{name}} · {{host}}",
+	"hosts.sectionFailed": "{{host}} に接続できません",
+	"hosts.retry": "再試行",
+	"hosts.liveUpdatesOffline": "{{host}} からのライブ更新を受信していません",
+	"hosts.liveUpdatesOffline.hint": "プロジェクトは数秒ごとに更新され続けます。接続が回復するまで、セッションは停止中に見えることがあります。"
 }

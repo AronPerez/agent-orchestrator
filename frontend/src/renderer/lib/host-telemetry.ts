@@ -1,3 +1,4 @@
+import type { RemoteHealth } from "../../main/remote-request";
 import { LOCAL_HOST, type HostId } from "./hosts";
 import { captureRendererEvent } from "./telemetry";
 
@@ -10,10 +11,26 @@ import { captureRendererEvent } from "./telemetry";
 // SHA-256 digest — sanitizeRendererProperties in telemetry.ts does the hashing
 // and drops everything not on its allowlist.
 
+type HostConnectSource = "add" | "edit" | "probe";
 type HostStreamState = "connected" | "disconnected";
 
 function hostFields(host: HostId) {
 	return { host_id: host, host_kind: host === LOCAL_HOST ? "local" : "remote" };
+}
+
+/** Result and latency of a reachability probe: adding, editing, or re-checking a host. */
+export function reportHostConnect(
+	host: HostId,
+	source: HostConnectSource,
+	result: RemoteHealth,
+	durationMs: number,
+): void {
+	void captureRendererEvent("ao.renderer.host_connect", {
+		...hostFields(host),
+		source,
+		result,
+		duration_ms: Math.round(durationMs),
+	});
 }
 
 /** A host's live event stream opening or dropping, with how often it has dropped this session. */

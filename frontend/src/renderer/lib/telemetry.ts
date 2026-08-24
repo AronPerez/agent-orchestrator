@@ -442,6 +442,7 @@ async function sanitizeRendererContextProperties(properties?: TelemetryPropertie
 }
 
 const ORCHESTRATOR_SPAWN_SOURCE_SET = new Set<string>(ORCHESTRATOR_SPAWN_SOURCES);
+const HOST_CONNECT_RESULTS = new Set(["online", "unauthorized", "offline", "not-a-daemon"]);
 
 /**
  * Host identity for the ao.renderer.host_* events.
@@ -610,6 +611,19 @@ export async function sanitizeRendererProperties(
 			}
 			if (properties?.outcome === "succeeded" || properties?.outcome === "failed") safe.outcome = properties.outcome;
 			break;
+		case "ao.renderer.host_connect": {
+			// Closed vocabularies on both: the four healths a probe can report and
+			// the three places one is run from. Duration is a latency, not data.
+			Object.assign(safe, await sanitizeHostProperties(properties));
+			if (typeof properties?.result === "string" && HOST_CONNECT_RESULTS.has(properties.result)) {
+				safe.result = properties.result;
+			}
+			if (properties?.source === "add" || properties?.source === "edit" || properties?.source === "probe") {
+				safe.source = properties.source;
+			}
+			if (typeof properties?.duration_ms === "number") safe.duration_ms = Math.round(properties.duration_ms);
+			break;
+		}
 		case "ao.renderer.host_stream_state": {
 			// An event with no case here emits with every property stripped, so the
 			// allowlist is what makes this signal exist at all.

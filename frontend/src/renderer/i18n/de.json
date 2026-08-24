@@ -1431,5 +1431,19 @@
 	"hosts.remotePath": "Pfad auf {{host}}",
 	"hosts.remotePathHint": "Absoluter Pfad auf diesem Rechner.",
 	"hosts.addProjectOn": "Projekt auf {{host}} hinzufügen",
-	"hosts.switcher": "Host: {{host}}"
+	"hosts.switcher": "Host: {{host}}",
+	"hosts.viewing": "{{host}} wird angezeigt",
+	"hosts.backToLocal": "Zurück zu diesem Mac",
+	"hosts.passwordChanged": "{{host}} hat das gespeicherte Passwort abgelehnt",
+	"hosts.on": "auf {{host}}",
+	"hosts.remoteSection": "Remote-Hosts",
+	"hosts.open": "{{host}} öffnen",
+	"hosts.unreachable": "Nicht erreichbar",
+	"hosts.peekEmpty": "Keine Projekte",
+	"hosts.allHosts": "Alle Hosts",
+	"hosts.qualified": "{{name}} · {{host}}",
+	"hosts.sectionFailed": "{{host}} ist nicht erreichbar",
+	"hosts.retry": "Erneut versuchen",
+	"hosts.liveUpdatesOffline": "Keine Live-Updates von {{host}}",
+	"hosts.liveUpdatesOffline.hint": "Die Projekte werden weiterhin alle paar Sekunden aktualisiert. Sitzungen können untätig wirken, bis die Verbindung zurückkehrt."
 }

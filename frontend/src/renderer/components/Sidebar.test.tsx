@@ -13,7 +13,11 @@ vi.mock("motion/react", async (importOriginal) => {
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Ref } from "../lib/hosts";
+import { LOCAL_HOST, refKey, type Ref } from "../lib/hosts";
+import { workspaceHostQueryKey } from "../hooks/useWorkspaceQuery";
+import type { HostSection } from "../types/workspace";
+
+const REMOTE_HOST = "http://192.0.2.1:3011";
 import {
 	Sidebar,
 	SIDEBAR_DEFAULT_WIDTH,
@@ -178,6 +182,7 @@ vi.mock("../lib/host-clients", () => ({
 	subscribeConnectedHosts: () => () => undefined,
 	isHostReady: () => true,
 	clientFor: () => ({ GET: getMock }),
+	hostLabelFor: (host: string) => (host === "http://192.0.2.1:3011" ? "workbox" : host),
 }));
 
 const workspace: WorkspaceSummary = {
@@ -255,10 +260,14 @@ function renderSidebar({
 	onRemoveProject = vi.fn().mockResolvedValue(undefined) as RemoveProjectHandler,
 	seedAgents = true,
 	workspaces = [workspace],
+	hostSections,
 	initialOpen = true,
 	autoCompact = false,
 	topbarOffset = "toolbar",
 	expandedProjectIds,
+	queryClient = new QueryClient({
+		defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+	}),
 }: {
 	onCloneProject?: CloneProjectHandler;
 	onCreateProject?: CreateProjectHandler;
@@ -266,20 +275,28 @@ function renderSidebar({
 	onRemoveProject?: RemoveProjectHandler;
 	seedAgents?: boolean;
 	workspaces?: WorkspaceSummary[];
+	hostSections?: HostSection[];
 	initialOpen?: boolean;
 	autoCompact?: boolean;
 	topbarOffset?: "toolbar" | "titlebar" | "trafficLights" | "session";
 	expandedProjectIds?: string[];
+	queryClient?: QueryClient;
 } = {}) {
 	// Most legacy sidebar tests exercise session rows and assume their fixture
 	// project was previously open. Tests for the empty-store behavior opt out.
 	window.localStorage.setItem(
 		"ao.sidebar.expanded-projects",
-		JSON.stringify(expandedProjectIds ?? workspaces.map(({ id }) => id)),
+		JSON.stringify(expandedProjectIds ?? workspaces.map(refKey)),
 	);
-	const queryClient = new QueryClient({
-		defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-	});
+	const sections =
+		hostSections ??
+		[...new Set(workspaces.map(({ host }) => host))].map((host) => ({
+			host,
+			label: host === LOCAL_HOST ? "Local" : host === REMOTE_HOST ? "workbox" : host,
+			status: "ready" as const,
+			workspaces: workspaces.filter((candidate) => candidate.host === host),
+			failure: null,
+		}));
 	if (seedAgents) {
 		queryClient.setQueryData(agentsQueryKey, {
 			supported: [
@@ -306,7 +323,7 @@ function renderSidebar({
 					onCreateProject={onCreateProject}
 					onInitializeProject={onInitializeProject}
 					onRemoveProject={onRemoveProject}
-					workspaces={workspaces}
+					hostSections={sections}
 				/>
 			</SidebarProvider>
 		</QueryClientProvider>,
@@ -410,6 +427,98 @@ beforeEach(() => {
 
 afterEach(() => {
 	vi.restoreAllMocks();
+});
+
+describe("Sidebar across hosts", () => {
+	it("filters the tree without changing host routing", async () => {
+		const local = { ...workspace, name: "Local Project" };
+		const remote = { ...workspace, host: REMOTE_HOST, name: "Remote Project" };
+		renderSidebar({ workspaces: [local, remote] });
+
+		await userEvent.click(screen.getByRole("combobox", { name: "Host" }));
+		expect(screen.getByRole("option", { name: "All hosts" })).toBeInTheDocument();
+		expect(screen.getByRole("option", { name: "This Mac" })).toBeInTheDocument();
+		await userEvent.click(screen.getByRole("option", { name: "workbox" }));
+
+		expect(screen.queryByText("Local Project", { selector: "[data-project-label]" })).not.toBeInTheDocument();
+		expect(screen.getByText("Remote Project · workbox", { selector: "[data-project-label]" })).toBeInTheDocument();
+		// A view filter, not a connection: nothing navigates and nothing reconnects.
+		expect(navigateMock).not.toHaveBeenCalled();
+	});
+
+	// The failure this exists for is one host going quiet and taking every other
+	// host's projects off screen with it.
+	it("keeps ready rows visible beside a failed host and retries only that host", async () => {
+		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		const invalidate = vi.spyOn(queryClient, "invalidateQueries").mockResolvedValue(undefined);
+		renderSidebar({
+			queryClient,
+			hostSections: [
+				{ host: LOCAL_HOST, label: "Local", status: "ready", workspaces: [workspace], failure: null },
+				{ host: REMOTE_HOST, label: "workbox", status: "failed", workspaces: [], failure: "connect ECONNREFUSED" },
+			],
+		});
+
+		expect(screen.getByText("Project One", { selector: "[data-project-label]" })).toBeInTheDocument();
+		expect(screen.getByText("workbox is unreachable")).toBeInTheDocument();
+		expect(screen.getByText("connect ECONNREFUSED")).toBeInTheDocument();
+		await userEvent.click(screen.getByRole("button", { name: "Retry on workbox" }));
+		expect(invalidate).toHaveBeenCalledWith({ queryKey: workspaceHostQueryKey(REMOTE_HOST) });
+	});
+
+	// A local failure that hides itself is the same bug wearing a friendlier name.
+	it("reports a failed local host as loudly as a failed remote one", () => {
+		renderSidebar({
+			hostSections: [
+				{ host: LOCAL_HOST, label: "Local", status: "failed", workspaces: [], failure: "Could not load projects" },
+			],
+		});
+
+		expect(screen.getByRole("alert")).toHaveTextContent("This Mac is unreachable");
+		expect(screen.getByText("Could not load projects")).toBeInTheDocument();
+	});
+
+	// The quiet failure: the host still answers, so its projects render from the
+	// poll and simply stop being live.
+	it("says a host stopped sending live updates while still showing its projects", () => {
+		renderSidebar({
+			hostSections: [
+				{
+					host: LOCAL_HOST,
+					label: "Local",
+					status: "ready",
+					streamState: "connected",
+					workspaces: [workspace],
+					failure: null,
+				},
+				{
+					host: REMOTE_HOST,
+					label: "workbox",
+					status: "ready",
+					streamState: "disconnected",
+					workspaces: [{ ...workspace, id: "remote-1", name: "Remote Project", host: REMOTE_HOST }],
+					failure: null,
+				},
+			],
+		});
+
+		expect(screen.getByText("Not receiving live updates from workbox")).toBeInTheDocument();
+		expect(screen.getByText("Remote Project · workbox", { selector: "[data-project-label]" })).toBeInTheDocument();
+		// The healthy host must not be accused alongside it.
+		expect(screen.queryByText("Not receiving live updates from This Mac")).not.toBeInTheDocument();
+	});
+
+	// "idle" is a host that never opened a stream (jsdom, preview surfaces); only
+	// "disconnected" means a live board went stale.
+	it("stays quiet for a host that never opened a stream", () => {
+		renderSidebar({
+			hostSections: [
+				{ host: LOCAL_HOST, label: "Local", status: "ready", streamState: "idle", workspaces: [workspace], failure: null },
+			],
+		});
+
+		expect(screen.queryByText(/Not receiving live updates/)).not.toBeInTheDocument();
+	});
 });
 
 describe("Sidebar", () => {
@@ -1931,7 +2040,7 @@ describe("Sidebar", () => {
 			sessions: [{ ...session, id: "proj-2-1", title: "second task" }],
 		};
 		renderSidebar({
-			expandedProjectIds: [workspace.id],
+			expandedProjectIds: [refKey(workspace)],
 			workspaces: [{ ...workspace, sessions: [session] }, secondWorkspace],
 		});
 
@@ -2080,7 +2189,7 @@ describe("Sidebar", () => {
 			],
 		});
 
-		act(() => dragEnds.get("sidebar-projects")?.({ active: { id: "bravo" }, over: { id: "alpha" } }));
+		act(() => dragEnds.get("sidebar-projects")?.({ active: { id: refKey({ host: LOCAL_HOST, id: "bravo" }) }, over: { id: refKey({ host: LOCAL_HOST, id: "alpha" }) } }));
 
 		expect(Array.from(document.querySelectorAll("[data-project-label]"), (node) => node.textContent)).toEqual(["Bravo", "Alpha"]);
 	});
@@ -2096,7 +2205,7 @@ describe("Sidebar", () => {
 			}],
 		});
 
-		act(() => dragEnds.get("sidebar-sessions-proj-1")?.({ active: { id: "second" }, over: { id: "first" } }));
+		act(() => dragEnds.get(`sidebar-sessions-${refKey(workspace)}`)?.({ active: { id: "second" }, over: { id: "first" } }));
 
 		expect(Array.from(document.querySelectorAll('[data-testid="session-list-proj-1"] button[aria-label^="Open "]'), (node) => node.getAttribute("aria-label"))).toEqual([
 			"Open Second",
@@ -2111,7 +2220,7 @@ describe("Sidebar", () => {
 			const projectRow = screen.getByText("Alpha").closest("button");
 			const initialDisclosure = projectRow?.getAttribute("aria-expanded");
 
-			act(() => dragEnds.get("sidebar-projects")?.({ active: { id: "alpha" }, over: null }));
+			act(() => dragEnds.get("sidebar-projects")?.({ active: { id: refKey({ host: LOCAL_HOST, id: "alpha" }) }, over: null }));
 			act(() => fireEvent.click(screen.getByRole("button", { name: "Toggle Alpha sessions" })));
 
 			expect(projectRow).toHaveAttribute("aria-expanded", initialDisclosure ?? "false");
@@ -2131,8 +2240,8 @@ describe("Sidebar", () => {
 			}],
 		});
 
-		act(() => dragEnds.get("sidebar-sessions-proj-1")?.({ active: { id: "second" }, over: { id: "first" } }));
-		act(() => dragStarts.get("sidebar-projects")?.({ active: { id: "proj-1" } }));
+		act(() => dragEnds.get(`sidebar-sessions-${refKey(workspace)}`)?.({ active: { id: "second" }, over: { id: "first" } }));
+		act(() => dragStarts.get("sidebar-projects")?.({ active: { id: refKey(workspace) } }));
 
 		expect(document.querySelector("[data-project-drag-overlay]")).toHaveTextContent(/Project One.*Second.*First/);
 	});
@@ -2144,7 +2253,7 @@ describe("Sidebar", () => {
 			workspaces: [{ ...workspace, sessions: [session] }],
 		});
 
-		act(() => dragStarts.get("sidebar-projects")?.({ active: { id: "proj-1" } }));
+		act(() => dragStarts.get("sidebar-projects")?.({ active: { id: refKey(workspace) } }));
 
 		const overlay = document.querySelector("[data-project-drag-overlay]");
 		expect(overlay).toHaveTextContent("Project One");
@@ -2164,12 +2273,12 @@ describe("Sidebar", () => {
 			act(() => dragStarts.get("sidebar-projects")?.({ active: { id: "bravo" } }));
 			act(() => dragOvers.get("sidebar-projects")?.({
 				active: {
-					id: "bravo",
+					id: refKey({ host: LOCAL_HOST, id: "bravo" }),
 					rect: { current: { initial: null, translated: null } },
 				},
 				activatorEvent: null,
 				delta: { x: 0, y: 0 },
-				over: { id: "alpha", rect: { height: 32, top: 0 } },
+				over: { id: refKey({ host: LOCAL_HOST, id: "alpha" }), rect: { height: 32, top: 0 } },
 			}));
 
 			const indicator = document.querySelector("[data-project-drop-indicator]");

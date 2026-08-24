@@ -5,10 +5,13 @@ import { probeRemote } from "../../main/remote-request";
 import { fakeDaemon, type Behaviour } from "../test/fake-daemon";
 import { AddRemoteHostDialog } from "./AddRemoteHostDialog";
 
-const { addMock, updateMock } = vi.hoisted(() => ({
+const { addMock, updateMock, captureRendererEventMock } = vi.hoisted(() => ({
 	addMock: vi.fn(),
 	updateMock: vi.fn(),
+	captureRendererEventMock: vi.fn().mockResolvedValue(undefined),
 }));
+
+vi.mock("../lib/telemetry", () => ({ captureRendererEvent: captureRendererEventMock }));
 
 // The bridge's `remotes` surface lands with the IPC task; mock the module
 // rather than spying on a stub that does not exist yet.
@@ -21,6 +24,7 @@ beforeEach(() => {
 	addMock.mockResolvedValue("online");
 	updateMock.mockReset();
 	updateMock.mockResolvedValue("online");
+	captureRendererEventMock.mockClear();
 });
 
 async function fillAndSubmit(address = "http://192.0.2.1:3011") {
@@ -63,6 +67,21 @@ describe("AddRemoteHostDialog", () => {
 			expect(await screen.findByRole("alert")).toHaveTextContent(/not an AO daemon/i);
 		},
 	);
+
+	// "Is adding a host working, and which way does it fail?" was unanswerable:
+	// a wrong password and an unreachable machine are one dead dialog to a user.
+	it("reports which way an add failed, and never the address or the password", async () => {
+		addMock.mockResolvedValue("unauthorized");
+		render(<AddRemoteHostDialog open onOpenChange={vi.fn()} onSaved={vi.fn()} />);
+		await fillAndSubmit();
+
+		const [event, properties] = captureRendererEventMock.mock.calls.at(-1) ?? [];
+		expect(event).toBe("ao.renderer.host_connect");
+		expect(properties).toMatchObject({ source: "add", result: "unauthorized", host_kind: "remote" });
+		expect(typeof properties.duration_ms).toBe("number");
+		// The raw id is what the sanitizer hashes; nothing else may carry a secret.
+		expect(JSON.stringify({ ...properties, host_id: undefined })).not.toContain("pw");
+	});
 
 	it("saves and reports the new host when it answers", async () => {
 		const onSaved = vi.fn();

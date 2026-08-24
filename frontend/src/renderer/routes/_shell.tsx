@@ -888,7 +888,7 @@ function ShellLayout() {
 						onInitializeProject={initializeProjectRepository}
 						onRemoveProject={removeProject}
 						workspaceError={workspaceQuery.isError ? errorMessage(workspaceQuery.error) : undefined}
-						workspaces={workspaces}
+						hostSections={workspaceQuery.data ?? []}
 					/>
 					<main className={cn("flex min-w-0 flex-1 flex-col overflow-x-hidden", !sidebarHasLayout && "sidebar-hidden")}>
 						<div className="min-h-0 flex-1 overflow-x-hidden">

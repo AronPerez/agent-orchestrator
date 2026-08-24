@@ -21,7 +21,7 @@ import {
 	useTerminateSessionState,
 } from "../hooks/useTerminateSession";
 import { spawnCloudOrchestrator } from "../lib/cloud-orchestrator";
-import { refKey } from "../lib/hosts";
+import { LOCAL_HOST, refKey, type Ref } from "../lib/hosts";
 import { spawnOrchestrator } from "../lib/spawn-orchestrator";
 import { addRendererExceptionStep, captureRendererEvent, captureRendererException } from "../lib/telemetry";
 import { sidebarOccupiesLayout, useUiStore } from "../stores/ui-store";
@@ -42,7 +42,7 @@ import {
 } from "../lib/agent-switch-presentation";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
-import { LOCAL_HOST, refKey, type Ref } from "../lib/hosts";
+import { hostActionSuffix } from "../lib/host-disclosure";
 const isMac = isMacPlatform();
 const boardActionsInPanel = usesBoardActionsInPanel();
 const dragStyle = isMac ? ({ WebkitAppRegion: "drag" } as React.CSSProperties) : undefined;
@@ -513,6 +513,8 @@ export function TopbarKillButton({
 
 function ProjectTerminationFeedback({ project }: { project: Ref | undefined }) {
 	const { t } = useTranslation();
+	// Two hosts can be terminating a session called the same thing; say which.
+	const hostSuffix = project ? hostActionSuffix(t, project.host) : "";
 	const states = useProjectTerminateSessionStates(project);
 	if (states.length === 0) return null;
 
@@ -528,9 +530,10 @@ function ProjectTerminationFeedback({ project }: { project: Ref | undefined }) {
 						className="max-w-40 truncate text-caption text-muted-foreground"
 						key={state.session.id}
 						role="status"
-						title={t("shell.killingNamed", { title: state.session.title })}
+						title={`${t("shell.killingNamed", { title: state.session.title })}${hostSuffix}`}
 					>
 						{t("shell.killingNamed", { title: state.session.title })}
+						{hostSuffix}
 					</span>
 				),
 			)}
