@@ -380,6 +380,44 @@ describe("Sidebar — one tree across hosts", () => {
 		expect(rows[1]).toHaveAttribute("data-active", "true");
 	});
 
+	// Colliding ids across hosts are by construction: two machines can each hold
+	// a "skyvern-cloud". Nothing may dedupe, hide, or cross-highlight them.
+	it("renders one row per host for the same project id", () => {
+		const first = "http://192.0.2.1:3011";
+		const second = "http://192.0.2.2:3011";
+		const id = "skyvern-cloud";
+		const projects = [
+			{ ...workspace, host: LOCAL_HOST, id, name: id },
+			{ ...workspace, host: first, id, name: id },
+			{ ...workspace, host: second, id, name: id },
+		];
+		const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+		// Only the second remote is selected; the two other rows share its id.
+		mockParams.hostId = second;
+		mockParams.projectId = id;
+		renderSidebar({
+			hostSections: [
+				{ host: LOCAL_HOST, label: "Local", status: "ready", workspaces: [projects[0]], failure: null },
+				{ host: first, label: "workbox", status: "ready", workspaces: [projects[1]], failure: null },
+				{ host: second, label: "buildbox", status: "ready", workspaces: [projects[2]], failure: null },
+			],
+		});
+
+		const rows = projects.map((project) =>
+			document.querySelector<HTMLElement>(`[data-project-ref="${refKey(project)}"] [data-sidebar="menu-button"]`),
+		);
+		expect(rows.every(Boolean)).toBe(true);
+		// Duplicate React keys would collapse three rows into fewer.
+		expect(document.querySelectorAll("[data-project-ref]")).toHaveLength(3);
+		expect(consoleError).not.toHaveBeenCalled();
+		expect(screen.getByText(id, { selector: "[data-project-label]" })).toBeInTheDocument();
+		expect(screen.getByText(`${id} \u00b7 workbox`, { selector: "[data-project-label]" })).toBeInTheDocument();
+		expect(screen.getByText(`${id} \u00b7 buildbox`, { selector: "[data-project-label]" })).toBeInTheDocument();
+		expect(rows[0]).not.toHaveAttribute("data-active", "true");
+		expect(rows[1]).not.toHaveAttribute("data-active", "true");
+		expect(rows[2]).toHaveAttribute("data-active", "true");
+	});
+
 	it("opens a remote project in place without reloading", async () => {
 		const remoteHost = "http://192.0.2.1:3011";
 		const remote = { ...workspace, host: remoteHost };

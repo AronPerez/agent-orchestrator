@@ -1,4 +1,5 @@
 import * as Dialog from "@radix-ui/react-dialog";
+import { useNavigate } from "@tanstack/react-router";
 import { ProjectSourcePickerView, type ProjectSource } from "@aoagents/product-ui";
 import { useTranslation } from "react-i18next";
 import { useUiStore } from "../stores/ui-store";
@@ -33,7 +34,7 @@ import {
 } from "../hooks/useRemoteHosts";
 import { aoBridge } from "../lib/bridge";
 import { connectHost, disconnectHost } from "../lib/host-clients";
-import { daemonErrorMessage } from "../lib/daemon-error";
+import { alreadyRegisteredProjectId, daemonErrorMessage } from "../lib/daemon-error";
 import { cn } from "../lib/utils";
 import type { ProjectKind } from "../types/workspace";
 import { AddRemoteHostDialog } from "./AddRemoteHostDialog";
@@ -103,6 +104,7 @@ export function CreateProjectFlow({
   openSignal?: number;
 }) {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const resolvedIdleLabel = idleLabel ?? t("createProject.newProject");
   const [error, setError] = useState<string | null>(null);
   const [modePickerOpen, setModePickerOpen] = useState(false);
@@ -145,6 +147,11 @@ export function CreateProjectFlow({
   const [removingHost, setRemovingHost] = useState<RemoteHostView | null>(null);
   const [removingHostBusy, setRemovingHostBusy] = useState(false);
   const [remotePath, setRemotePath] = useState("");
+  // The project the remote host already has at this path. Not an error: the
+  // import is a no-op because the thing being imported is already there.
+  const [existingRemoteProjectId, setExistingRemoteProjectId] = useState<
+    string | null
+  >(null);
 
   const hasModePicker = mode === "choose";
   const isBusy = isChoosingPath || isCreating || isInitializing;
@@ -162,6 +169,7 @@ export function CreateProjectFlow({
       // A dropped path names a folder on *this* machine, so it is dropped too
       // rather than guessed at on the remote filesystem.
       setError(null);
+      setExistingRemoteProjectId(null);
       setValidationScan(null);
       setRemotePath("");
       setSelectedKind(kind);
@@ -200,6 +208,7 @@ export function CreateProjectFlow({
   const createRemoteProject = async () => {
     if (!remoteHost) return;
     setError(null);
+    setExistingRemoteProjectId(null);
     setIsCreating(true);
     try {
       const response = await remotesBridge().request(remoteHost.url, {
@@ -213,6 +222,11 @@ export function CreateProjectFlow({
       if (response.status >= 200 && response.status < 300) {
         setFolderPickerOpen(false);
         setRemotePath("");
+        return;
+      }
+      const existing = alreadyRegisteredProjectId(response.body);
+      if (existing !== null) {
+        setExistingRemoteProjectId(existing);
         return;
       }
       // The daemon owns the verdict on its own filesystem — judging the path
@@ -559,15 +573,32 @@ export function CreateProjectFlow({
           <CreateProjectFolderDialog
             disabled={isBusy}
             error={error}
+            existingProjectId={existingRemoteProjectId}
             kind={selectedKind}
             open={folderPickerOpen}
             remoteHost={remoteHost ?? null}
             remotePath={remotePath}
             scan={validationScan}
-            onRemotePathChange={setRemotePath}
+            onOpenExisting={() => {
+              if (!remoteHost || existingRemoteProjectId === null) return;
+              setFolderPickerOpen(false);
+              void navigate({
+                to: "/host/$hostId/project/$projectId",
+                params: {
+                  hostId: remoteHost.url,
+                  projectId: existingRemoteProjectId,
+                },
+              });
+            }}
+            onRemotePathChange={(path) => {
+              // Editing the path retracts the verdict about the old one.
+              setExistingRemoteProjectId(null);
+              setRemotePath(path);
+            }}
             onSubmitRemote={() => void createRemoteProject()}
             onBack={() => {
               setError(null);
+              setExistingRemoteProjectId(null);
               setValidationScan(null);
               setFolderPickerOpen(false);
               if (!embedded) {
@@ -580,6 +611,7 @@ export function CreateProjectFlow({
                 setFolderPickerOpen(open);
                 if (!open) {
                   setError(null);
+                  setExistingRemoteProjectId(null);
                   setValidationScan(null);
                 }
               }
@@ -830,10 +862,12 @@ function CloneRepositoryDialogSkeleton() {
 function CreateProjectFolderDialog({
   disabled,
   error,
+  existingProjectId,
   kind,
   onBack,
   onChooseFolder,
   onOpenChange,
+  onOpenExisting,
   onRemotePathChange,
   onSubmitRemote,
   open,
@@ -843,10 +877,13 @@ function CreateProjectFolderDialog({
 }: {
   disabled: boolean;
   error: string | null;
+  /** The project the remote host already has at this path, if it has one. */
+  existingProjectId: string | null;
   kind: ProjectKind;
   onBack: () => void;
   onChooseFolder: () => void;
   onOpenChange: (open: boolean) => void;
+  onOpenExisting: () => void;
   onRemotePathChange: (path: string) => void;
   onSubmitRemote: () => void;
   open: boolean;
@@ -864,12 +901,15 @@ function CreateProjectFolderDialog({
       (repo) => (repo.status === "error" || !repo.hasRemote) && !repo.needsGitInit,
     ) ?? [];
   const hasScan = scan !== null;
+  const alreadyRegistered = existingProjectId !== null && remoteHost !== null;
   const footerMessage =
     failedRepos.length > 0
       ? t("createProject.footerResolve", { count: failedRepos.length })
-      : hasScan
-        ? t("createProject.footerReview")
-        : t("createProject.footerChoose");
+      : alreadyRegistered
+        ? t("hosts.alreadyRegisteredHint")
+        : hasScan
+          ? t("createProject.footerReview")
+          : t("createProject.footerChoose");
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
@@ -1039,6 +1079,20 @@ function CreateProjectFolderDialog({
                     : t("createProject.pickerProjectHint")}
                 </span>
               </button>
+            )}
+            {alreadyRegistered && (
+              <div
+                role="status"
+                className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-card)] px-3 py-3 text-[12px] leading-5 text-[var(--color-text-import-title)]"
+              >
+                <span className="flex min-w-0 items-center gap-2">
+                  <CheckCircle2 className="size-4 shrink-0" aria-hidden="true" />
+                  {t("hosts.alreadyRegistered", { host: remoteHost.label })}
+                </span>
+                <Button type="button" variant="footer" onClick={onOpenExisting}>
+                  {t("hosts.viewProject")}
+                </Button>
+              </div>
             )}
             {error && !hasScan && (
               <div

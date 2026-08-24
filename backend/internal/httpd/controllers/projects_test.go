@@ -280,6 +280,18 @@ func TestProjectsAPI_AddValidationAndConflicts(t *testing.T) {
 
 	assertErrorCode(t, body, status, http.StatusConflict, "PATH_ALREADY_REGISTERED")
 
+	// The app turns this conflict into "already registered — view it" rather
+	// than a dead-end error, which only works if the envelope names the project.
+	var conflict errorBody
+
+	mustJSON(t, body, &conflict)
+
+	if got := conflict.Details["existingProjectId"]; got != "shared" {
+
+		t.Fatalf("details.existingProjectId = %v, want %q\nbody=%s", got, "shared", body)
+
+	}
+
 	body, status, _ = doRequest(t, srv, "POST", "/api/v1/projects", `{"path":`+quote(repoB)+`,"projectId":"shared"}`)
 
 	assertErrorCode(t, body, status, http.StatusConflict, "ID_ALREADY_REGISTERED")
