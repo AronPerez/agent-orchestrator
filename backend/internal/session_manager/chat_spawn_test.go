@@ -770,6 +770,63 @@ func TestSendRefusedForTerminatedChatSession(t *testing.T) {
 	}
 }
 
+// The reported failure: switching a claude-code chat session's interface died with
+//
+//	set ACP session option "model": Invalid value for config option model: gpt-5.6-terra
+//
+// gpt-5.6-terra is a codex model. The session's harness and the harness its project
+// role configures a model for had diverged — an explicit --agent at spawn, a completed
+// agent switch, or the role's agent edited afterwards all produce that — and every
+// launch path except the agent-switch one re-applied the role's model regardless of
+// which agent was actually going to receive it.
+func TestChatLaunchDoesNotApplyAnotherHarnessModel(t *testing.T) {
+	launcher := &recordingLauncher{}
+	mgr, store, _ := newChatManager(launcher)
+	store.projects[string(chatTestProject)] = domain.ProjectRecord{
+		ID: string(chatTestProject),
+		Config: domain.ProjectConfig{
+			Worker: domain.RoleOverride{
+				Harness:     domain.HarnessCodex,
+				AgentConfig: domain.AgentConfig{Model: "gpt-5.6-terra"},
+			},
+			Orchestrator: domain.RoleOverride{Harness: domain.HarnessClaudeCode},
+		},
+	}
+	ctx := context.Background()
+
+	rec, _, _, err := mgr.Spawn(ctx, ports.SpawnConfig{
+		ProjectID:     chatTestProject,
+		Kind:          domain.KindWorker,
+		Harness:       domain.HarnessClaudeCode,
+		RequestedMode: domain.SessionModeChat,
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if len(launcher.started) != 1 {
+		t.Fatalf("spawn starts = %d, want 1", len(launcher.started))
+	}
+	if got := launcher.started[0].Model; got != "" {
+		t.Errorf("spawn passed model %q to a claude-code session; it is configured for codex", got)
+	}
+
+	// The resume path is the one the interface switch and every daemon restore go
+	// through, and it rebuilds the config from the project rather than reusing what
+	// spawn resolved — so it has to make the same decision independently.
+	if _, err := mgr.Kill(ctx, rec.ID); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+	if _, err := mgr.RestoreWithMode(ctx, rec.ID); err != nil {
+		t.Fatalf("RestoreWithMode: %v", err)
+	}
+	if len(launcher.started) != 2 {
+		t.Fatalf("restore starts = %d, want 2", len(launcher.started))
+	}
+	if got := launcher.started[1].Model; got != "" {
+		t.Errorf("resume passed model %q to a claude-code session; it is configured for codex", got)
+	}
+}
+
 // A project may pin the interface its sessions are born with. The tier sits
 // between the two that already existed, so this pins all three at once: an
 // explicit --mode still wins, and a project that pins nothing still inherits the
