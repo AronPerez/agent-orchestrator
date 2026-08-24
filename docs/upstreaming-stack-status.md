@@ -180,16 +180,25 @@ overlap with the branch's own diff" gate a silent no-op) that let it through ini
 
 A8a's, A8c's and A9c's session-identity "Known gap" sections are retired — the claims they
 qualified are true again. A8c's and A9c's QA evidence, held since the bug was found, is being
-re-shot against the fixed build.
+re-shot against the fixed build — **done**: both embedded, all 10 frontend PRs now carry
+real evidence, and no PR in the series holds a placeholder or a claim known to be false.
 
 **A fourth instance of the same defect class surfaced during evidence capture, not fixed
 here:** `SessionsBoard.tsx`'s spawn-error reset effect keys on bare `projectId`, so a real
 remote-side failure stays visible after navigating to the identically-id'd local project.
-Disclosed on A9b (#4375). Combined with the three sites the fix worker deliberately deferred
-(`CommandItem` ids across hosts, `reviewStatesBySessionId` by bare id,
-`buildCommands`/`ShellTopbar`'s project-by-bare-id — all already fixed on `develop`, see
-below) and a duplicate-React-key console warning under colliding ids, these are queued for
-one follow-up fix pass, `develop`-first, rather than another stack cascade.
+Disclosed on A9b (#4375). **A fifth surfaced capturing A9c's own evidence:**
+`Sidebar.tsx:379,917` keys its active-row highlight by bare session id
+(`active={selection.activeSessionId === session.id}`), so opening either host's session
+lights up both hosts' same-id rows in the tree — visible in the delivered A9c frames, and
+disclosed there so it isn't mistaken for A9c's own claim being false (it isn't: the
+inspector state in those same frames is correctly host-scoped). Combined with the three
+sites the fix worker deliberately deferred (`CommandItem` ids across hosts,
+`reviewStatesBySessionId` by bare id, `buildCommands`/`ShellTopbar`'s project-by-bare-id —
+all already fixed on `develop`, see below) and a duplicate-React-key console warning under
+colliding ids, these five are queued for one follow-up fix pass, `develop`-first, rather
+than another stack cascade. (Separately, not this defect class: A8c's terminal tab strip
+doesn't name which host a shell belongs to — a real UX gap, disclosed in A8c's own
+Artifacts caption.)
 
 **`develop` is a ready-made oracle for this whole defect class.** The fix worker's audit
 found `develop` host-aware on every site the up-* stack still gets wrong — the up-* branches
