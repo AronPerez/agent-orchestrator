@@ -826,3 +826,50 @@ func TestChatLaunchDoesNotApplyAnotherHarnessModel(t *testing.T) {
 		t.Errorf("resume passed model %q to a claude-code session; it is configured for codex", got)
 	}
 }
+
+// A project may pin the interface its sessions are born with. The tier sits
+// between the two that already existed, so this pins all three at once: an
+// explicit --mode still wins, and a project that pins nothing still inherits the
+// daemon-owned default.
+func TestSpawnSessionModePrecedenceExplicitThenProjectThenDaemon(t *testing.T) {
+	tests := []struct {
+		name      string
+		requested domain.SessionMode
+		project   domain.SessionMode
+		daemon    domain.SessionMode
+		want      domain.SessionMode
+	}{
+		{name: "explicit chat beats project tui", requested: domain.SessionModeChat, project: domain.SessionModeTUI, daemon: domain.SessionModeTUI, want: domain.SessionModeChat},
+		{name: "explicit tui beats project chat", requested: domain.SessionModeTUI, project: domain.SessionModeChat, daemon: domain.SessionModeChat, want: domain.SessionModeTUI},
+		{name: "project chat beats daemon tui", project: domain.SessionModeChat, daemon: domain.SessionModeTUI, want: domain.SessionModeChat},
+		{name: "project tui beats daemon chat", project: domain.SessionModeTUI, daemon: domain.SessionModeChat, want: domain.SessionModeTUI},
+		{name: "unset project inherits daemon chat", daemon: domain.SessionModeChat, want: domain.SessionModeChat},
+		{name: "unset project inherits daemon tui", daemon: domain.SessionModeTUI, want: domain.SessionModeTUI},
+		// A value this build does not know — written by a newer daemon into the
+		// same project row — is "no override", not an error and not a silent
+		// downgrade to TUI over a daemon default of Chat.
+		{name: "unknown project value is no override", project: "voice", daemon: domain.SessionModeChat, want: domain.SessionModeChat},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mgr, store, _ := newChatManager(&recordingLauncher{})
+			mgr.defaults = fixedSessionModeDefaults(tt.daemon)
+			project := store.projects[string(chatTestProject)]
+			project.Config.SessionInterface = tt.project
+			store.projects[string(chatTestProject)] = project
+
+			rec, _, _, err := mgr.Spawn(context.Background(), ports.SpawnConfig{
+				ProjectID:     chatTestProject,
+				Kind:          domain.KindWorker,
+				Harness:       domain.HarnessCodex,
+				RequestedMode: tt.requested,
+			})
+			if err != nil {
+				t.Fatalf("Spawn: %v", err)
+			}
+			if rec.Mode != tt.want {
+				t.Fatalf("mode = %q, want %q", rec.Mode, tt.want)
+			}
+		})
+	}
+}

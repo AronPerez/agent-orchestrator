@@ -768,6 +768,7 @@
 	"settings.project.saving": "Guardando…",
 	"settings.project.selectOrchestrator": "Seleccionar agente orquestador",
 	"settings.project.selectWorker": "Seleccionar agente de trabajo",
+	"settings.project.sessionInterfaceDefault": "Valor predeterminado de la app",
 	"settings.project.sessionPrefix": "Prefijo de sesión",
 	"settings.sessionInterface.available": "Se aplica a sesiones nuevas. El chat admite actualmente {{harnesses}}.",
 	"settings.sessionInterface.chat": "Chat",

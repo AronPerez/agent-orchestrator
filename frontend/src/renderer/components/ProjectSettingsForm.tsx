@@ -28,7 +28,7 @@ import { useWorkspaceQuery, workspaceQueryKey } from "../hooks/useWorkspaceQuery
 import { flattenHostSections } from "../types/workspace";
 import { apiErrorMessage } from "../lib/api-client";
 import { clientFor } from "../lib/host-clients";
-import { refKey, type Ref } from "../lib/hosts";
+import { isLocal, refKey, type Ref } from "../lib/hosts";
 import { captureOrchestratorReplacementFailure } from "../lib/orchestrator-replacement-telemetry";
 import { OrchestratorSpawnError, spawnOrchestrator } from "../lib/spawn-orchestrator";
 import { captureRendererEvent } from "../lib/telemetry";
@@ -39,7 +39,7 @@ import { buildIntake, deriveGitHubRepo, IntakeFields, type IntakeForm } from "./
 import { ProductExternalLink } from "./ProductExternalLink";
 import { ReviewerSelect, reviewerTrustWarning } from "./ReviewerSelect";
 import { AgentModelCombobox } from "./settings/AgentModelCombobox";
-import { SettingsOptionMenu } from "./settings/SettingsOptionMenu";
+import { SettingsOptionMenu, type SettingsOption } from "./settings/SettingsOptionMenu";
 import { SettingsRow } from "./settings/SettingsRow";
 import { Switch } from "./ui/switch";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
@@ -47,9 +47,14 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/t
 type Project = components["schemas"]["Project"];
 type ProjectConfig = components["schemas"]["ProjectConfig"];
 type TrackerIntakeConfig = components["schemas"]["TrackerIntakeConfig"];
+/** The pinned interface, or "" for the project pinning nothing. */
+type SessionInterfaceValue = NonNullable<ProjectConfig["sessionInterface"]> | "";
 
 const PERMISSION_MODE_VALUES = ["default", "accept-edits", "auto", "bypass-permissions"] as const;
 const DEFAULT_BRANCH_AUTO = "auto";
+// The menu needs a value for "pin nothing"; the wire representation of that is
+// the field being absent, so the sentinel never leaves this file.
+const SESSION_INTERFACE_INHERIT = "__default__";
 
 const projectQueryKey = (project: Ref) => ["project", refKey(project)] as const;
 
@@ -146,6 +151,11 @@ function SettingsBody({
 	const workspace = workspaces.find((item) => item.host === projectRef.host && item.id === projectId);
 	const activeOrchestrator = newestActiveOrchestrator(workspace?.sessions ?? []);
 	const intake: TrackerIntakeConfig = config.trackerIntake ?? {};
+	// A remote daemon that predates this field omits it, so it arrives as
+	// undefined — the same thing as a project that pinned nothing. Annotated
+	// rather than inferred: a bare literal in the form object below widens to
+	// string and stops matching ProjectConfig.
+	const initialSessionInterface: SessionInterfaceValue = config.sessionInterface ?? "";
 	const [form, setForm] = useState({
 		displayName: project.name,
 		defaultBranch: config.defaultBranch ?? DEFAULT_BRANCH_AUTO,
@@ -159,6 +169,7 @@ function SettingsBody({
 		permissions: config.agentConfig?.permissions ?? "",
 		reviewerHarness: config.reviewers?.[0]?.harness ?? "",
 		autoReview: config.autoReview ?? false,
+		sessionInterface: initialSessionInterface,
 		intakeEnabled: intake.enabled ?? false,
 		intakeRepo: intake.repo ?? "",
 		intakeAssignee: intake.assignee ?? "",
@@ -169,6 +180,10 @@ function SettingsBody({
 	const [validationError, setValidationError] = useState<string | null>(null);
 	const initialOrchestratorAgent = config.orchestrator?.agent ?? "";
 	const missingRequiredAgent = form.workerAgent === "" || form.orchestratorAgent === "";
+	// Both halves of the gate are required: the experimental flag alone is not
+	// enough, and a local project has no remote daemon to hold the setting.
+	const remoteHostsEnabled = useUiStore((state) => state.remoteHosts);
+	const showSessionInterface = remoteHostsEnabled && !isLocal(projectRef.host);
 	const agentsQuery = useQuery(agentsQueryOptionsFor(projectRef.host));
 	const agentCatalog = agentsQuery.data;
 	const agentsHost = projectRef.host;
@@ -202,9 +217,15 @@ function SettingsBody({
 				mode: _legacyMode,
 				...sharedAgentConfig
 			} = config.agentConfig ?? {};
+			// Left out entirely where the control is hidden, so the config spread
+			// below keeps whatever the project already had.
+			const sessionInterfacePatch = showSessionInterface
+				? { sessionInterface: form.sessionInterface || undefined }
+				: {};
 			const next: ProjectConfig = isScratchProject
 				? {
 						...scratchSupportedConfig(config),
+						...sessionInterfacePatch,
 						worker: {
 							...config.worker,
 							agent: form.workerAgent,
@@ -226,6 +247,7 @@ function SettingsBody({
 					}
 				: {
 						...config,
+						...sessionInterfacePatch,
 						defaultBranch:
 							form.defaultBranch.trim() === DEFAULT_BRANCH_AUTO
 								? undefined
@@ -493,6 +515,16 @@ function SettingsBody({
 							),
 							label: t("settings.project.permissionMode"),
 						}}
+						sessionInterfaceArea={
+							showSessionInterface ? (
+								<SettingsRow label={t("settings.sessionInterface.label")}>
+									<SessionInterfaceSelect
+										value={form.sessionInterface}
+										onChange={(sessionInterface) => setForm((f) => ({ ...f, sessionInterface }))}
+									/>
+								</SettingsRow>
+							) : undefined
+						}
 						missingRequiredMessage={
 							missingRequiredAgent ? t("settings.project.agentsRequired") : null
 						}
@@ -738,6 +770,36 @@ function AgentModelField({
 			</SettingsRow>
 			{warning && <p className="px-1 text-xs leading-row text-warning">{warning}</p>}
 		</>
+	);
+}
+
+/**
+ * The interface every session spawned in this project is born with.
+ *
+ * Unset is a real, selectable state: it defers to the daemon-owned default, and
+ * an explicit `--mode` on a spawn still wins over both.
+ */
+function SessionInterfaceSelect({
+	value,
+	onChange,
+}: {
+	value: SessionInterfaceValue;
+	onChange: (value: SessionInterfaceValue) => void;
+}) {
+	const { t } = useTranslation();
+	const options: SettingsOption<Exclude<SessionInterfaceValue, ""> | typeof SESSION_INTERFACE_INHERIT>[] = [
+		{ value: SESSION_INTERFACE_INHERIT, label: t("settings.project.sessionInterfaceDefault") },
+		{ value: "chat", label: t("settings.sessionInterface.chat") },
+		{ value: "tui", label: t("settings.sessionInterface.terminal") },
+	];
+
+	return (
+		<SettingsOptionMenu
+			aria-label={t("settings.sessionInterface.label")}
+			value={value || SESSION_INTERFACE_INHERIT}
+			options={options}
+			onChange={(next) => onChange(next === SESSION_INTERFACE_INHERIT ? "" : next)}
+		/>
 	);
 }
 

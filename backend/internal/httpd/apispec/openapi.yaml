@@ -7664,6 +7664,11 @@ components:
           items:
             $ref: '#/components/schemas/DomainReviewerConfig'
           type: array
+        sessionInterface:
+          enum:
+          - chat
+          - tui
+          type: string
         sessionPrefix:
           type: string
         symlinks:

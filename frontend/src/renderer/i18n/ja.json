@@ -759,6 +759,7 @@
 	"settings.project.saving": "保存中…",
 	"settings.project.selectOrchestrator": "オーケストレーターエージェントを選択",
 	"settings.project.selectWorker": "ワーカーエージェントを選択",
+	"settings.project.sessionInterfaceDefault": "アプリのデフォルト",
 	"settings.project.sessionPrefix": "セッション接頭辞",
 	"settings.sessionInterface.available": "新しいセッションに適用されます。現在チャットに対応しているのは {{harnesses}} です。",
 	"settings.sessionInterface.chat": "チャット",
