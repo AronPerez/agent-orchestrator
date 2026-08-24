@@ -130,6 +130,27 @@ knowing about: A9c's rebase dropped a one-line edit inside `routes/_shell.tsx`'s
 `agentCatalogPortRef` effect, because upstream's `48045a10f` deleted that effect entirely —
 A9c's edit is obsolete by construction, not lost.
 
+## Second cascade — SSE header-flush fix (2026-08-24, after Phase 2 opened)
+
+QA-evidence capture against two real daemons found `frontend/src/main/remote-proxy.ts` never
+flushed SSE response headers before the first body byte (`res.writeHead(...)` then
+`upstreamRes.pipe(res)`, no `res.flushHeaders()`), so a remote host's live-updates stream sat
+in `CONNECTING` forever. Fixed on A4 with one `res.flushHeaders()` call plus a pinned timing
+regression test, then cascaded through every descendant a second time: rebuilt `up-a5-base`
+(now `e84c1a44c`), `up-a7b-base` (now `52cad6dfa`), `up-a10-base` (now `9dd6718e2`), and
+re-rebased A5 → A6/A8a → A7b/A8b/A9a → A8c/A9b → A9c → A10 in dependency order. Full detail —
+the false-positive regression test that needed its own fix before it caught the bug, the
+minimal repro proving the fix, and every ground-truth-verified push — is in the campaign
+ledger, Entries 13–16. A4's own PR body carries an "Update" note disclosing the fix.
+
+A second, larger bug surfaced during the same QA pass: `SessionView.tsx` and `ShellTopbar.tsx`
+resolve a session by bare id across every host, with no `Ref` check — a gap in A8a's read
+conversion. Disclosed as a "Known gap" on A8a (#4372), A8c (#4376) and A9c (#4377); a
+dedicated fix worker is TDD-ing both call sites on a branch cut from `up-a8a-refs`, to be
+folded in via one more deliberate cascade once delivered. **A8c and A9c hold their QA
+evidence** until that lands — screenshots are not produced for a claim already known to be
+false.
+
 ## Open PRs (draft, `AronPerez` → `Untrivial-ai/agent-orchestrator`, stacked-drafts mode)
 
 All 21 are open as drafts, in dependency order, using cumulative diffs for chained branches
@@ -181,18 +202,18 @@ descriptions in this document as historical design record, not the literal PR te
 | 1 | `up-a1-flag` | `4a2970469` | `upstream/main` | feat(settings): add an experimental Remote hosts flag | 10 | ui-store ×3, settings switch ×1 |
 | 2 | `up-a2-hosts` | `881a65c78` | `upstream/main` | feat(hosts): host identity primitives | 1 | hosts ×5 |
 | 3 | `up-a3-store` | `0d94b9e92` | `upstream/main` | feat(remotes): saved-host store, authenticated requests, password-free IPC | 9 | store + request ×30, ipc ×8, remotes-main ×4 |
-| 4 | `up-a4-proxy` | `11e54ccce` | `up-a3-store` | feat(remotes): token-gated loopback proxy for remote daemons | 9 | proxy ×15, registry ×7, remotes-main ×6 |
-| 5 | `up-a5-clients` | `7874bea65` | merge(A1, A2, A4), tag `up-a5-base` | feat(hosts): per-host API clients and flag-gated host boot | 3 | host-clients ×9, active-host ×6 |
-| 6 | `up-a6-host-ui` | `11f79b300` | `up-a5-clients` | feat(hosts): add, edit and remove remote hosts | 14 | useRemoteHosts ×5, HostSelect ×12, AddRemoteHostDialog ×20, CreateProjectFlowHosts ×6, fake-daemon ×5 |
+| 4 | `up-a4-proxy` | `67c76da38` | `up-a3-store` | feat(remotes): token-gated loopback proxy for remote daemons | 9 | proxy ×15, registry ×7, remotes-main ×6 |
+| 5 | `up-a5-clients` | `3f93b7a32` | merge(A1, A2, A4), tag `up-a5-base` | feat(hosts): per-host API clients and flag-gated host boot | 3 | host-clients ×9, active-host ×6 |
+| 6 | `up-a6-host-ui` | `13125a9c3` | `up-a5-clients` | feat(hosts): add, edit and remove remote hosts | 14 | useRemoteHosts ×5, HostSelect ×12, AddRemoteHostDialog ×20, CreateProjectFlowHosts ×6, fake-daemon ×5 |
 | 7 | `up-a7a-fs-dirs` | `eb9f8dd8c` | `upstream/main` | feat(daemon): read-only directory listing at GET /api/v1/fs/dirs | 6 | fs ×4 (Go), LAN policy assertion |
-| 8 | `up-a7b-folder-picker` | `e5ca2d51f` | merge(A6, A7a), tag `up-a7b-base` | feat(projects): browse a remote host's folders when adding a project | 11 | RemoteFolderPicker ×9, CreateProjectFlow.remote ×8 |
-| 9 | `up-a8a-refs` | `0a1c6b5f2` | `up-a5-clients` | refactor(hosts): thread Ref through reads and host-qualified routes | 50 | `src/renderer` 140 files / 2025 tests (base 139 / 2019) |
-| 10 | `up-a8b-fanout` | `8dd10d053` | `up-a8a-refs` | feat(hosts): fan out workspace queries and event streams per host | 21 | 142 / 2048; adds host-events ×8, fake-daemon ×7, rewritten useWorkspaceQuery |
-| 11 | `up-a8c-terminals` | `dc8e54c94` | `up-a8b-fanout` | feat(hosts): one terminal mux per host | 9 | 142 / 2051; adds mux-across-hosts ×3 |
-| 12 | `up-a9a-writes-sessions` | `fb3dec718` | `up-a8a-refs` | refactor(hosts): route session and terminal writes by Ref | 22 | 141 / 2030; adds session-writes-by-ref ×5 |
-| 13 | `up-a9b-writes-projects` | `52976f778` | `up-a9a-writes-sessions` | refactor(hosts): route project and orchestrator writes by Ref | 11 | 141 / 2030 |
-| 14 | `up-a9c-writes-reviews` | `407096036` | `up-a9b-writes-projects` | refactor(hosts): route pull request and review writes by Ref | 12 | 141 / 2030 |
-| 15 | `up-a10-one-tree` | `10503094a` | merge(A6, A8c, A9c), tag `up-a10-base` | feat(hosts): one tree across every connected host | 17 | 147 / 2113; adds Sidebar-across-hosts ×5, host_connect telemetry ×1 |
+| 8 | `up-a7b-folder-picker` | `70b778f6f` | merge(A6, A7a), tag `up-a7b-base` | feat(projects): browse a remote host's folders when adding a project | 11 | RemoteFolderPicker ×9, CreateProjectFlow.remote ×8 |
+| 9 | `up-a8a-refs` | `758a05347` | `up-a5-clients` | refactor(hosts): thread Ref through reads and host-qualified routes | 50 | `src/renderer` 140 files / 2025 tests (base 139 / 2019) |
+| 10 | `up-a8b-fanout` | `05888d052` | `up-a8a-refs` | feat(hosts): fan out workspace queries and event streams per host | 21 | 142 / 2048; adds host-events ×8, fake-daemon ×7, rewritten useWorkspaceQuery |
+| 11 | `up-a8c-terminals` | `b32688663` | `up-a8b-fanout` | feat(hosts): one terminal mux per host | 9 | 142 / 2051; adds mux-across-hosts ×3 |
+| 12 | `up-a9a-writes-sessions` | `5ddd1203c` | `up-a8a-refs` | refactor(hosts): route session and terminal writes by Ref | 22 | 141 / 2030; adds session-writes-by-ref ×5 |
+| 13 | `up-a9b-writes-projects` | `d2f0afff4` | `up-a9a-writes-sessions` | refactor(hosts): route project and orchestrator writes by Ref | 11 | 141 / 2030 |
+| 14 | `up-a9c-writes-reviews` | `f8deecf15` | `up-a9b-writes-projects` | refactor(hosts): route pull request and review writes by Ref | 12 | 141 / 2030 |
+| 15 | `up-a10-one-tree` | `5a8193c5d` | merge(A6, A8c, A9c), tag `up-a10-base` | feat(hosts): one tree across every connected host | 17 | 147 / 2113; adds Sidebar-across-hosts ×5, host_connect telemetry ×1 |
 | 16 | `up-a11-docs` | `79ba70131` | `upstream/main` | docs(remote-hosts): setup, trust boundary, ADR | 5 | none — documentation only |
 
 Verified on the upstream base at build time: every listed suite green, `tsc --noEmit` and

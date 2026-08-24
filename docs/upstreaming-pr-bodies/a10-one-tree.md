@@ -16,4 +16,6 @@ The sidebar draws every connected host as its own section; a host switcher filte
 
 ## Artifacts (if appropriate):
 
-Evidence pending — opens draft ahead of capture; a screenshot of the multi-host sidebar with one host in a failed, retryable state lands here.
+![Host switcher dropdown open, listing All hosts / This Mac / demo-remote](https://raw.githubusercontent.com/AronPerez/agent-orchestrator/campaign-assets/qa-evidence/a10-one-tree-switcher.png)
+
+*Captured on a dev build; `--disable-web-security` bridges the dev-origin CORS gap only (production origin `app://renderer` passes the same check natively) — the daemon, proxy, credential, and traffic are all real.*
