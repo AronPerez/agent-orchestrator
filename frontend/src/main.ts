@@ -759,17 +759,23 @@ function editorStateDir(): string {
 }
 
 async function resolveSessionWorkspaceForDesktop(host: string, sessionId: string): Promise<string> {
-	if (host !== "local") throw new Error("Remote workspaces are resolved through the host's own daemon.");
-	if (daemonStatus.state !== "ready" || !daemonStatus.port) {
-		throw new Error("AO daemon is not ready.");
+	let target: string;
+	if (host === "local") {
+		if (daemonStatus.state !== "ready" || !daemonStatus.port) {
+			throw new Error("AO daemon is not ready.");
+		}
+		target = `http://127.0.0.1:${daemonStatus.port}/api/v1/desktop/sessions/${encodeURIComponent(sessionId)}/workspace`;
+	} else {
+		// The remote daemon LAN-blocks /desktop; its gated twin is served with
+		// auth, and the per-host proxy injects the Bearer on the way through.
+		const view = registry.views().find((candidate) => candidate.url === host);
+		if (!view) throw new Error("That host is not connected.");
+		target = `${view.base}/api/v1/sessions/${encodeURIComponent(sessionId)}/workspace-location`;
 	}
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), DAEMON_PROBE_TIMEOUT_MS);
 	try {
-		const response = await net.fetch(
-			`http://127.0.0.1:${daemonStatus.port}/api/v1/desktop/sessions/${encodeURIComponent(sessionId)}/workspace`,
-			{ signal: controller.signal },
-		);
+		const response = await net.fetch(target, { signal: controller.signal });
 		const body = await response.json() as Record<string, unknown>;
 		if (!response.ok) {
 			const message = typeof body.message === "string" ? body.message : "Session workspace is not available.";
