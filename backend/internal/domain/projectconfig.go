@@ -83,6 +83,11 @@ type ProjectConfig struct {
 	// scope beyond a single project.
 	BrowserPersistentProfile bool `json:"browserPersistentProfile,omitempty"`
 
+	// SessionInterface pins the interface new sessions in this project are born
+	// with. Empty means the project defers to the daemon-owned default; an
+	// explicit spawn mode still wins over both (see resolveSessionMode).
+	SessionInterface SessionMode `json:"sessionInterface,omitempty" enum:"chat,tui"`
+
 	// AutoReview controls whether new worker sessions spawned for this project
 	// have automatic PR review enabled by default. The default (false) leaves
 	// sessions with auto-review off; enabling it copies the setting into each
@@ -205,6 +210,11 @@ func (c ProjectConfig) Validate() error {
 		if err := ro.AgentConfig.Validate(); err != nil {
 			return fmt.Errorf("%s.%w", role, err)
 		}
+	}
+	// ParseSessionMode already draws the line in the right place: empty is "no
+	// override" and anything else unrecognized is refused.
+	if _, err := ParseSessionMode(string(c.SessionInterface)); err != nil {
+		return fmt.Errorf("sessionInterface: %w", err)
 	}
 	for _, s := range c.Symlinks {
 		if err := validateRepoRelative(s); err != nil {

@@ -2647,6 +2647,8 @@ export interface components {
             orchestratorRules?: string;
             postCreate?: string[];
             reviewers?: components["schemas"]["DomainReviewerConfig"][];
+            /** @enum {string} */
+            sessionInterface?: "chat" | "tui";
             sessionPrefix?: string;
             symlinks?: string[];
             trackerIntake?: components["schemas"]["TrackerIntakeConfig"];

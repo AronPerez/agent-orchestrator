@@ -568,3 +568,26 @@ func TestProjectRemoveNamesTheDaemon(t *testing.T) {
 		}
 	})
 }
+
+// The CLI mirrors the daemon's config DTO by hand, so a field missing from the
+// mirror is dropped silently — the caller sees "updated config" for a setting
+// that never left the process.
+func TestProjectSetConfig_SessionInterfaceJSONReachesTheDaemon(t *testing.T) {
+	cfg := setConfigEnv(t)
+	srv, capture := projectServer(t, http.StatusOK, `{"project":{"id":"demo","path":"/repo/demo"}}`)
+	writeRunFileFor(t, cfg, srv)
+
+	_, errOut, err := executeCLI(t, Deps{
+		ProcessAlive: func(int) bool { return true },
+	}, "project", "set-config", "demo", "--config-json", `{"sessionInterface":"chat"}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v\nstderr=%s", err, errOut)
+	}
+	var got setConfigRequest
+	if err := json.Unmarshal(capture.body, &got); err != nil {
+		t.Fatalf("decode request: %v\nbody=%s", err, capture.body)
+	}
+	if got.Config.SessionInterface != "chat" {
+		t.Fatalf("sessionInterface = %q, want %q", got.Config.SessionInterface, "chat")
+	}
+}
