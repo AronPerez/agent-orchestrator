@@ -44,7 +44,7 @@ import { OrchestratorIcon } from "./icons";
 import { OrchestratorActivityIndicator } from "./OrchestratorActivityIndicator";
 import {
   TopbarButton,
-  TopbarKillError,
+  TopbarActionError,
   topbarProjectLabelClass,
 } from "./TopbarButton";
 import {
@@ -354,12 +354,12 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
   const actions = project ? (
     <>
       {visibleSpawnError && !showProjectEmpty && (
-        <TopbarKillError
+        <TopbarActionError
           className="max-w-content-max truncate"
           title={visibleSpawnError}
         >
           {visibleSpawnError}
-        </TopbarKillError>
+        </TopbarActionError>
       )}
       {visibleSpawnError && canCreateAsTui && !showProjectEmpty ? (
         <TopbarButton

@@ -334,6 +334,45 @@ paths:
       summary: Check whether the desktop browser runtime is connected for a session
       tags:
       - browser
+  /api/v1/desktop/sessions/{sessionId}/workspace:
+    get:
+      operationId: getDesktopSessionWorkspace
+      parameters:
+      - description: Session identifier, e.g. project-1.
+        in: path
+        name: sessionId
+        required: true
+        schema:
+          description: Session identifier, e.g. project-1.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DesktopWorkspaceLocationResponse'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Resolve a session workspace for the loopback desktop supervisor
+      tags:
+      - sessions
   /api/v1/dev/import-projects:
     post:
       operationId: runDevImportProjects
@@ -6114,6 +6153,7 @@ components:
           enum:
           - running
           - completed
+          - recovered
           - failed
           - cancelled
           - pending
@@ -6607,6 +6647,7 @@ components:
           - queued
           - running
           - completed
+          - recovered
           - interrupted
           - failed
           type: string
@@ -6718,6 +6759,13 @@ components:
           - autohand
           - fake
           type: string
+        approvalMode:
+          enum:
+          - default
+          - accept-edits
+          - auto
+          - bypass-permissions
+          type: string
         attachments:
           items:
             $ref: '#/components/schemas/AttachmentInput'
@@ -6750,6 +6798,16 @@ components:
       required:
       - ok
       - workerId
+      type: object
+    DesktopWorkspaceLocationResponse:
+      properties:
+        sessionId:
+          type: string
+        workspacePath:
+          type: string
+      required:
+      - sessionId
+      - workspacePath
       type: object
     DevImportProjectsConflict:
       properties:
@@ -6852,6 +6910,7 @@ components:
           - queued
           - running
           - completed
+          - recovered
           - interrupted
           - failed
           type: string
@@ -7944,6 +8003,7 @@ components:
           - queued
           - running
           - completed
+          - recovered
           - interrupted
           - failed
           type: string
@@ -8192,6 +8252,8 @@ components:
           type: string
         line:
           type: integer
+        reviewId:
+          type: string
         url:
           type: string
       required:
