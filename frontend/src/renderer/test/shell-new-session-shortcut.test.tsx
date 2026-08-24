@@ -594,6 +594,37 @@ describe("shell new-shell-terminal shortcut subscription", () => {
 		);
 	});
 
+	// Session ids repeat across hosts, so finding the session's owning project by
+	// bare id can name a project on the wrong machine — and the shell then opens
+	// there, silently, on a daemon the user is not looking at.
+	it("scopes the terminal to the session's own host when two hosts share the id", async () => {
+		shellMocks.state.workspaceQuery = {
+			...shellMocks.state.workspaceQuery,
+			data: [
+				...workspaces,
+				{
+					host: "remote",
+					id: "proj-1",
+					name: "Project One",
+					path: "/one",
+					sessions: [{ host: "remote", id: "sess-1", workspaceId: "proj-1", status: "working" }],
+				},
+			] as unknown as WorkspaceSummary[],
+		};
+		shellMocks.state.routeParams = { hostId: "remote", sessionId: "sess-1" };
+		await renderShell();
+
+		pressNewShellTerminal();
+
+		expect(shellMocks.openShellTerminal).toHaveBeenCalledWith(
+			expect.objectContaining({
+				project: { host: "remote", id: "proj-1" },
+				session: { host: "remote", id: "sess-1" },
+			}),
+			expect.anything(),
+		);
+	});
+
 	it("re-fires on a repeat press so a second terminal can be opened", async () => {
 		await renderShell();
 
