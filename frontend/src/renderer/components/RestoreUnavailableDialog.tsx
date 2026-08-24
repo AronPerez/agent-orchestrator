@@ -36,7 +36,7 @@ export function RestoreUnavailableDialog({ open, session, onOpenChange, onRecrea
 		if (checkingProject) return;
 		if (!hasOrchestratorAgent) {
 			onOpenChange(false);
-			useUiStore.getState().openProjectSettings(session.workspaceId);
+			useUiStore.getState().openProjectSettings({ host: session.host, id: session.workspaceId });
 			return;
 		}
 		setBusy(true);

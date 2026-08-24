@@ -40,6 +40,7 @@ import {
 } from "../lib/agent-switch-presentation";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
+import { LOCAL_HOST, type Ref } from "../lib/hosts";
 const isMac = isMacPlatform();
 const boardActionsInPanel = usesBoardActionsInPanel();
 const dragStyle = isMac ? ({ WebkitAppRegion: "drag" } as React.CSSProperties) : undefined;
@@ -82,7 +83,7 @@ export function ShellTopbar({
 	const { t } = useTranslation();
 	const navigate = useNavigate();
 	const queryClient = useQueryClient();
-	const params = useParams({ strict: false }) as { projectId?: string; sessionId?: string };
+	const params = useParams({ strict: false }) as { hostId?: string; projectId?: string; sessionId?: string };
 	const currentSessionId = params.sessionId;
 	const isInspectorOpen = useUiStore((state) =>
 		currentSessionId ? (state.inspectorSessions[currentSessionId]?.isOpen ?? true) : false,
@@ -122,7 +123,9 @@ export function ShellTopbar({
 	// projectId that no longer resolves (stale route after the project was
 	// removed, or data still loading) shows an empty crumb — never the raw
 	// route slug. "Board" is the root-board crumb only.
+	const projectHost = session?.host ?? params.hostId ?? LOCAL_HOST;
 	const projectId = session?.workspaceId ?? params.projectId;
+	const projectRef: Ref | undefined = projectId ? { host: projectHost, id: projectId } : undefined;
 	const isProjectRestarting = useUiStore((state) =>
 		projectId ? state.restartingProjectIds.has(projectId) : false,
 	);
@@ -140,11 +143,16 @@ export function ShellTopbar({
 			: orchestratorActionLabel;
 
 	const openBoard = () =>
-		projectId ? void navigate({ to: "/projects/$projectId", params: { projectId } }) : void navigate({ to: "/" });
+		projectRef
+			? void navigate({
+					to: "/host/$hostId/project/$projectId",
+					params: { hostId: projectRef.host, projectId: projectRef.id },
+				})
+			: void navigate({ to: "/" });
 
 	const openNewTask = () => {
 		if (!projectId || isProjectRestarting) return;
-		requestNewTask(projectId);
+		if (projectRef) requestNewTask(projectRef);
 	};
 
 	const openOrchestrator = async () => {
@@ -159,8 +167,8 @@ export function ShellTopbar({
 		void captureRendererEvent("ao.renderer.orchestrator_open_requested", { project_id: projectId });
 		if (orchestrator) {
 			void navigate({
-				to: "/projects/$projectId/sessions/$sessionId",
-				params: { projectId, sessionId: orchestrator.id },
+				to: "/host/$hostId/session/$sessionId",
+				params: { hostId: orchestrator.host, sessionId: orchestrator.id },
 			});
 			return;
 		}
@@ -186,7 +194,7 @@ export function ShellTopbar({
 		}
 		if (!hasConfiguredOrchestratorAgent(project)) {
 			if (project) {
-				useUiStore.getState().openProjectSettings(projectId);
+				if (projectRef) useUiStore.getState().openProjectSettings(projectRef);
 			}
 			return;
 		}
@@ -195,8 +203,8 @@ export function ShellTopbar({
 			const sessionId = await spawnOrchestrator(projectId, "topbar");
 			await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
 			void navigate({
-				to: "/projects/$projectId/sessions/$sessionId",
-				params: { projectId, sessionId },
+				to: "/host/$hostId/session/$sessionId",
+				params: { hostId: projectHost, sessionId },
 			});
 		} catch (error) {
 			void captureRendererException(error, {
@@ -391,12 +399,15 @@ export function ShellTopbar({
 										onKilled={(workspaceId, orchestratorId) => {
 											if (orchestratorId) {
 												void navigate({
-													to: "/projects/$projectId/sessions/$sessionId",
-													params: { projectId: workspaceId, sessionId: orchestratorId },
+													to: "/host/$hostId/session/$sessionId",
+													params: { hostId: session.host, sessionId: orchestratorId },
 												});
 												return;
 											}
-											void navigate({ to: "/projects/$projectId", params: { projectId: workspaceId } });
+											void navigate({
+												to: "/host/$hostId/project/$projectId",
+												params: { hostId: session.host, projectId: workspaceId },
+											});
 										}}
 									/>
 								) : null}
