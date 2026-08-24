@@ -138,6 +138,13 @@ parent to merge, per the human's explicit stacked-drafts choice). Frontend-surfa
 before their QA-evidence screenshot is captured and are held from ready/review-request until
 it is embedded — see the ledger for the evidence-capture plan and status per PR.
 
+**QA-evidence images live on the orphan branch `campaign-assets`** (this fork, no shared
+history with `main` — `git checkout --orphan`), under `qa-evidence/<pr-slug>.png`, linked
+into each PR's Artifacts section via `raw.githubusercontent.com/AronPerez/agent-orchestrator/
+campaign-assets/qa-evidence/<file>.png`. **`campaign-assets` must never be deleted while any
+of #4358–#4378 are open** — every embedded screenshot resolves through it, and deleting the
+branch breaks every image in every open PR's body simultaneously.
+
 | Branch | PR |
 | --- | --- |
 | `up-a1-flag` | [#4366](https://github.com/Untrivial-ai/agent-orchestrator/pull/4366) |

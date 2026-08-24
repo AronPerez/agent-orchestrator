@@ -16,4 +16,4 @@ A Remote hosts switch directly below Developer Mode in Settings, modelled on it:
 
 ## Artifacts (if appropriate):
 
-Evidence pending — opens draft ahead of capture; a screenshot of the new Settings row with the flag on lands here before review is requested.
+![Settings modal with the Remote hosts (experimental) toggle on](https://raw.githubusercontent.com/AronPerez/agent-orchestrator/campaign-assets/qa-evidence/a1-flag.png)
