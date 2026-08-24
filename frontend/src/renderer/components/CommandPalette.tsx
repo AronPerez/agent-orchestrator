@@ -32,7 +32,7 @@ import { CreateProjectFlow } from "./CreateProjectFlow";
 import { TaskComposer } from "./TaskComposer";
 import { CommandDialog, CommandEmpty, CommandFooter, CommandGroup, CommandInput, CommandItem, CommandList } from "./ui/command";
 
-import type { Ref } from "../lib/hosts";
+import { LOCAL_HOST, type Ref } from "../lib/hosts";
 const PALETTE_REVIEW_STALE_TIME_MS = 60_000;
 type PaletteView =
 	| { mode: "root" }
@@ -51,7 +51,8 @@ export function CommandPalette() {
 	const navigate = useNavigate();
 	const queryClient = useQueryClient();
 	const restoreSessionById = useRestoreSession();
-	const params = useParams({ strict: false }) as { projectId?: string; sessionId?: string };
+	const params = useParams({ strict: false }) as { hostId?: string; projectId?: string; sessionId?: string };
+	const routeHost = params.hostId ?? LOCAL_HOST;
 	const { cloneProject, createProject, initializeProjectRepository } = useShell();
 	const resolvedTheme = useUiStore((s) => s.resolvedTheme);
 	const setThemePreference = useUiStore((s) => s.setThemePreference);
@@ -79,7 +80,9 @@ export function CommandPalette() {
 	viewRef.current = view;
 	const closeResetTimerRef = useRef<number | null>(null);
 
-	const currentSession = params.sessionId ? findSession(workspaces, params.sessionId)?.session : undefined;
+	const currentSession = params.sessionId
+		? findSession(workspaces, { host: routeHost, id: params.sessionId })?.session
+		: undefined;
 	const currentProjectId = currentSession?.workspaceId ?? params.projectId;
 
 	const sessionsWithOpenPRs = useMemo(
@@ -135,15 +138,16 @@ export function CommandPalette() {
 		() =>
 			buildCommands({
 				workspaces,
+				currentHostId: routeHost,
 				currentProjectId,
 				currentSessionId: params.sessionId,
 				restartingProjectIds,
 				reviewStatesBySessionId: reviewStatesSnapshot,
 			}, t),
-		[workspaces, currentProjectId, params.sessionId, restartingProjectIds, reviewStatesSnapshot, t, i18n.resolvedLanguage],
+		[workspaces, routeHost, currentProjectId, params.sessionId, restartingProjectIds, reviewStatesSnapshot, t, i18n.resolvedLanguage],
 	);
 	const scoped = useMemo(
-		() => (view.mode === "session-actions" ? findSession(workspaces, view.session.id) : undefined),
+		() => (view.mode === "session-actions" ? findSession(workspaces, view.session) : undefined),
 		[view, workspaces],
 	);
 	const sessionActionItems = useMemo(
