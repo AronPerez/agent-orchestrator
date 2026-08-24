@@ -174,6 +174,7 @@ beforeEach(() => {
 describe("CenterPane toolbar session label", () => {
 	const makeShells = (count: number) =>
 		Array.from({ length: count }, (_, i) => ({
+			host: "local",
 			handleId: `h-${i}`,
 			title: `agent-orchestrator-${i}`,
 			workingDir: "/tmp/ws",
@@ -373,7 +374,7 @@ describe("CenterPane toolbar session label", () => {
 			onSelectSessionTerminal,
 			session: { ...worker, activeAgentSwitch: activeSwitch },
 			shellTerminals: [shell],
-			terminalTarget: { generation: shell.createdAt, kind: "shell", handleId: shell.handleId, title: shell.title },
+			terminalTarget: { generation: shell.createdAt, host: "local", kind: "shell", handleId: shell.handleId, session: { host: "local", id: worker.id }, title: shell.title },
 		});
 
 		expect(screen.getByTestId("terminal-interaction-surface")).not.toHaveAttribute("inert");
@@ -399,7 +400,7 @@ describe("CenterPane toolbar session label", () => {
 			onSelectSessionTerminal,
 			session: sourceSession,
 			shellTerminals: [shell],
-			terminalTarget: { generation: shell.createdAt, kind: "shell", handleId: shell.handleId, title: shell.title },
+			terminalTarget: { generation: shell.createdAt, host: "local", kind: "shell", handleId: shell.handleId, session: { host: "local", id: worker.id }, title: shell.title },
 		});
 
 		expect(onSelectSessionTerminal).toHaveBeenCalledOnce();
@@ -604,6 +605,7 @@ describe("CenterPane toolbar session label", () => {
 			shellTerminals: [shell],
 			terminalTarget: {
 				generation: shell.createdAt,
+				host: "local",
 				kind: "shell",
 				handleId: shell.handleId,
 				title: shell.title,
@@ -656,6 +658,7 @@ describe("CenterPane toolbar session label", () => {
 			shellTerminals: [shell],
 			terminalTarget: {
 				generation: shell.createdAt,
+				host: "local",
 				kind: "shell",
 				handleId: shell.handleId,
 				title: shell.title,
@@ -690,7 +693,7 @@ describe("CenterPane toolbar session label", () => {
 		renderCenterPane({
 			session: worker,
 			shellTerminals: [shell],
-			terminalTarget: { generation: shell.createdAt, kind: "shell", handleId: shell.handleId, title: shell.title },
+			terminalTarget: { generation: shell.createdAt, host: "local", kind: "shell", handleId: shell.handleId, session: { host: "local", id: worker.id }, title: shell.title },
 			onSelectSessionTerminal,
 		});
 
@@ -705,6 +708,7 @@ describe("CenterPane toolbar session label", () => {
 			shellTerminals: [shell],
 			terminalTarget: {
 				generation: shell.createdAt,
+				host: "local",
 				kind: "shell",
 				handleId: shell.handleId,
 				title: shell.title,
@@ -723,7 +727,7 @@ describe("CenterPane toolbar session label", () => {
 			session: worker,
 			reviewerTerminal: { handleId: "review-sess-1", harness: "codex" },
 			shellTerminals: [shell],
-			terminalTarget: { kind: "reviewer", handleId: "review-sess-1", harness: "codex", sessionId: worker.id },
+			terminalTarget: { kind: "reviewer", handleId: "review-sess-1", harness: "codex", session: { host: "local", id: worker.id } },
 		});
 
 		const reviewerTab = screen.getByRole("tab", { name: "Reviewer" });
@@ -1008,6 +1012,7 @@ describe("CenterPane toolbar session label", () => {
 					terminalTarget={{
 						generation: shell.createdAt,
 						handleId: shell.handleId,
+						host: "local",
 						kind: "shell",
 						title: shell.title,
 					}}

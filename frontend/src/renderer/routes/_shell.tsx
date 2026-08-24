@@ -739,7 +739,12 @@ function ShellLayout() {
 		if (handledShellNonceRef.current === newShellTerminalNonce) return;
 		handledShellNonceRef.current = newShellTerminalNonce;
 		openShellTerminal.mutate(
-			{ projectId: scopedProjectId, sessionId: routeParams.sessionId },
+			{
+				project: scopedProject,
+				session: routeParams.sessionId
+					? { host: scopedProject?.host ?? LOCAL_HOST, id: routeParams.sessionId }
+					: undefined,
+			},
 			{
 				onSuccess: (shell) => {
 					setActiveShellTerminal(shell.handleId);

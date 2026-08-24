@@ -1805,7 +1805,7 @@ describe("ChatWorkspace reviewer tabs", () => {
 	const reviewerTarget = {
 		kind: "reviewer" as const,
 		...reviewerTerminal,
-		sessionId: chatSession.id,
+		session: { host: chatSession.host, id: chatSession.id },
 	};
 
 	it("makes each full-height tile its semantic click target", () => {
@@ -2039,6 +2039,7 @@ describe("promptSpacerHeight", () => {
 describe("ChatWorkspace shell tabs", () => {
 	const shells = [
 		{
+			host: "local",
 			handleId: "shell-1",
 			sessionId: chatFixture.sessionId,
 			title: "chat worktree shell",
@@ -2046,6 +2047,7 @@ describe("ChatWorkspace shell tabs", () => {
 			createdAt: "2026-08-04T00:00:00Z",
 		},
 		{
+			host: "local",
 			handleId: "shell-2",
 			sessionId: chatFixture.sessionId,
 			title: "second shell",
@@ -2058,8 +2060,9 @@ describe("ChatWorkspace shell tabs", () => {
 		return {
 			kind: "shell" as const,
 			generation: shell.createdAt,
+			host: "local",
 			handleId,
-			sessionId: chatFixture.sessionId,
+			session: { host: "local", id: chatFixture.sessionId },
 			title: shell.title,
 		};
 	};
@@ -2140,7 +2143,7 @@ describe("ChatWorkspace shell tabs", () => {
 					kind: "reviewer",
 					handleId: "review-1",
 					harness: "codex",
-					sessionId: chatFixture.sessionId,
+					session: { host: "local", id: chatFixture.sessionId },
 				}}
 			/>,
 		);
@@ -2200,7 +2203,7 @@ describe("ChatWorkspace shell tabs", () => {
 					kind: "reviewer",
 					handleId: "review-1",
 					harness: "codex",
-					sessionId: chatFixture.sessionId,
+					session: { host: "local", id: chatFixture.sessionId },
 				}}
 			/>,
 		);
