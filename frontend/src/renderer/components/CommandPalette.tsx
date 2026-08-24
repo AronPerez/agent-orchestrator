@@ -315,8 +315,8 @@ export function CommandPalette() {
 	);
 
 	const resumeSession = useCallback(
-		async (sessionId: string) => {
-			const result = await restoreSessionById(sessionId);
+		async (session: Ref) => {
+			const result = await restoreSessionById(session);
 			if (result.status === "success") return null;
 			if (result.status === "not_resumable") return t("command.resumeNotResumable");
 			return result.message;
@@ -379,7 +379,7 @@ export function CommandPalette() {
 					pushView({ mode: "session-actions", session: action.session });
 					break;
 				case "resume-session": {
-					const message = await resumeSession(action.session.id);
+					const message = await resumeSession(action.session);
 					if (!isCurrentRun()) break;
 					if (message) {
 						setError(message);

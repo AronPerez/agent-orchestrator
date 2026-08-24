@@ -1692,7 +1692,7 @@ function SessionRow({
 		const name = draft.trim();
 		if (!name || name === session.title) return;
 		try {
-			await renameSession(session.id, name);
+			await renameSession(session, name);
 			await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
 		} catch (err) {
 			console.error("Failed to rename session:", err);

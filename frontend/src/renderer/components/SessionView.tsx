@@ -481,7 +481,7 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 	const session = workspaces
 		.flatMap((workspace) => workspace.sessions)
 		.find((candidate) => candidate.host === sessionRef.host && candidate.id === sessionId);
-	const interfaceSwitch = useSessionInterfaceTransition(session?.id);
+	const interfaceSwitch = useSessionInterfaceTransition(session);
 	const reviewerQuery = useQuery({
 		queryKey: ["session-reviews", refKey(sessionRef)],
 		enabled: Boolean(
@@ -968,7 +968,7 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 		(nextOpen: boolean) => {
 			setHandoffDialogOpen(nextOpen);
 			if (!nextOpen && handoffSwitchError && session) {
-				clearSwitchAgentState(queryClient, session.id);
+				clearSwitchAgentState(queryClient, session);
 			}
 		},
 		[handoffSwitchError, queryClient, session],

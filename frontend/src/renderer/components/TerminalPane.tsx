@@ -1032,7 +1032,7 @@ function AttachedTerminal({
 		setIsRestoring(true);
 		setRestoreError(undefined);
 		try {
-			const result = await restoreSessionById(session.id);
+			const result = await restoreSessionById(session);
 			if (result.status === "not_resumable") {
 				setRestoreUnavailable(true);
 				return;

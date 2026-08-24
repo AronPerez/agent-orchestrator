@@ -260,7 +260,7 @@ export function NotificationCenter({ style }: NotificationCenterProps) {
 		setRestoringSessionId(sessionId);
 		setActionError(null);
 		try {
-			const result = await restoreSession(sessionId);
+			const result = await restoreSession({ host: LOCAL_HOST, id: sessionId });
 			if (result.status === "success") {
 				openSession(notification);
 				setPanelOpen(false);

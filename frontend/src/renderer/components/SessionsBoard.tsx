@@ -450,7 +450,7 @@ const BoardArchivePanel = memo(function BoardArchivePanel({
 			return next;
 		});
 		try {
-			const result = await restoreSessionById(session.id);
+			const result = await restoreSessionById(session);
 			if (!isStillActiveProject()) return;
 			if (result.status === "success") {
 				void navigate({
