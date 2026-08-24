@@ -4,6 +4,7 @@ import {
 } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useParams, useRouterState } from "@tanstack/react-router";
+import { LOCAL_HOST, type Ref } from "../lib/hosts";
 import {
 	ChevronRight,
 	Download,
@@ -136,20 +137,22 @@ function useSelection() {
 	const navigate = useNavigate();
 	const openGlobalSettings = useUiStore((state) => state.openGlobalSettings);
 	const openProjectSettings = useUiStore((state) => state.openProjectSettings);
-	const params = useParams({ strict: false }) as { projectId?: string; sessionId?: string };
+	const params = useParams({ strict: false }) as { hostId?: string; projectId?: string; sessionId?: string };
 	const pathname = useRouterState({ select: (state) => state.location.pathname });
 	return {
 		isHome: pathname === "/",
+		activeHostId: params.hostId ?? LOCAL_HOST,
 		activeProjectId: params.projectId,
 		activeSessionId: params.sessionId,
 		goHome: () => void navigate({ to: "/" }),
 		// Settings is a modal — open it in place so the current page (session
 		// terminal, board, etc.) stays underneath.
 		goGlobalSettings: () => openGlobalSettings(),
-		goSettings: (projectId: string) => openProjectSettings(projectId),
-		goProject: (projectId: string) => void navigate({ to: "/projects/$projectId", params: { projectId } }),
-		goSession: (projectId: string, sessionId: string) =>
-			void navigate({ to: "/projects/$projectId/sessions/$sessionId", params: { projectId, sessionId } }),
+		goSettings: (project: Ref) => openProjectSettings(project),
+		goProject: (project: Ref) =>
+			void navigate({ to: "/host/$hostId/project/$projectId", params: { hostId: project.host, projectId: project.id } }),
+		goSession: (session: Ref) =>
+			void navigate({ to: "/host/$hostId/session/$sessionId", params: { hostId: session.host, sessionId: session.id } }),
 	};
 }
 
@@ -353,7 +356,7 @@ export function Sidebar({
 										session={session}
 										active={selection.activeSessionId === session.id}
 										indented={false}
-										onOpen={() => selection.goSession(session.workspaceId, session.id)}
+										onOpen={() => selection.goSession({ host: session.host, id: session.id })}
 									/>
 								))}
 							</SidebarMenuSub>
@@ -545,18 +548,18 @@ function ProjectItem({
 		if (isProjectRestarting) return;
 		if (!expanded) onToggle();
 		if (orchestrator) {
-			selection.goSession(workspace.id, orchestrator.id);
+			selection.goSession({ host: orchestrator.host, id: orchestrator.id });
 			return;
 		}
 		if (!hasConfiguredOrchestratorAgent(workspace)) {
-			selection.goSettings(workspace.id);
+			selection.goSettings({ host: workspace.host, id: workspace.id });
 			return;
 		}
 		setIsSpawning(true);
 		try {
 			const sessionId = await spawnOrchestrator(workspace.id, "sidebar");
 			await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
-			selection.goSession(workspace.id, sessionId);
+			selection.goSession({ host: workspace.host, id: sessionId });
 		} catch (err) {
 			console.error("Failed to spawn orchestrator:", err);
 		} finally {
@@ -571,11 +574,11 @@ function ProjectItem({
 	const onProjectClick = () => {
 		if (!expanded) {
 			onToggle();
-			selection.goProject(workspace.id);
+			selection.goProject({ host: workspace.host, id: workspace.id });
 		} else if (dashboardActive) {
 			onToggle();
 		} else {
-			selection.goProject(workspace.id);
+			selection.goProject({ host: workspace.host, id: workspace.id });
 		}
 	};
 
@@ -751,12 +754,12 @@ function ProjectItem({
 					</button>
 				</DropdownMenuTrigger>
 				<DropdownMenuContent side="right" align="start" className="min-w-44">
-					<DropdownMenuItem disabled={isProjectRestarting} onSelect={() => requestNewTask(workspace.id)}>
+					<DropdownMenuItem disabled={isProjectRestarting} onSelect={() => requestNewTask({ host: workspace.host, id: workspace.id })}>
 						<Plus aria-hidden="true" />
 						{t("shell.newSession")}
 					</DropdownMenuItem>
 					<DropdownMenuSeparator />
-					<DropdownMenuItem onSelect={() => selection.goSettings(workspace.id)}>
+					<DropdownMenuItem onSelect={() => selection.goSettings({ host: workspace.host, id: workspace.id })}>
 						<Settings aria-hidden="true" />
 						{t("shell.projectSettings")}
 					</DropdownMenuItem>
@@ -807,7 +810,7 @@ function ProjectItem({
 									key={session.id}
 									session={session}
 									active={selection.activeSessionId === session.id}
-									onOpen={() => selection.goSession(workspace.id, session.id)}
+									onOpen={() => selection.goSession({ host: session.host, id: session.id })}
 								/>
 							))}
 						</SidebarMenuSub>
@@ -834,12 +837,12 @@ function ProjectItem({
 		</SidebarMenuItem>
 		</ContextMenuTrigger>
 		<ContextMenuContent className="min-w-44">
-			<ContextMenuItem disabled={isProjectRestarting} onSelect={() => requestNewTask(workspace.id)}>
+			<ContextMenuItem disabled={isProjectRestarting} onSelect={() => requestNewTask({ host: workspace.host, id: workspace.id })}>
 				<Plus aria-hidden="true" />
 				{t("shell.newSession")}
 			</ContextMenuItem>
 			<ContextMenuSeparator />
-			<ContextMenuItem onSelect={() => selection.goSettings(workspace.id)}>
+			<ContextMenuItem onSelect={() => selection.goSettings({ host: workspace.host, id: workspace.id })}>
 				<Settings aria-hidden="true" />
 				{t("shell.projectSettings")}
 			</ContextMenuItem>

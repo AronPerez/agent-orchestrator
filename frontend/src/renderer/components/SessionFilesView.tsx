@@ -31,6 +31,8 @@ import {
 import type { components } from "../../api/schema";
 import { formatFileAnnotationMessage, type FileAnnotationTarget } from "../../shared/file-annotations";
 import { apiClient, apiErrorMessage } from "../lib/api-client";
+import { clientFor } from "../lib/host-clients";
+import { refKey, type Ref } from "../lib/hosts";
 import {
 	isChangedWorkspaceFile,
 	sessionWorkspaceFilesQueryOptions,
@@ -74,7 +76,7 @@ type FileAnnotationModel = {
 };
 
 type SessionFilesViewProps = {
-	sessionId: string;
+	session: Ref;
 	isMaximized?: boolean;
 	onToggleMaximized?: (next: boolean) => void;
 	revealFile?: ReviewFileTarget;
@@ -113,7 +115,7 @@ function canSplitCompare(status: WorkspaceFileStatus): boolean {
 }
 
 export function SessionFilesView({
-	sessionId,
+	session,
 	isMaximized = false,
 	onToggleMaximized,
 	revealFile,
@@ -133,8 +135,11 @@ export function SessionFilesView({
 	const annotationSentTimerRef = useRef<number | null>(null);
 	const rootRef = useRef<HTMLElement>(null);
 
-	const filesQuery = useQuery(sessionWorkspaceFilesQueryOptions(sessionId, t("files.error.loadWorkspace")));
-	useEffect(() => subscribeWorkspaceFileChanges(sessionId, queryClient), [queryClient, sessionId]);
+	const filesQuery = useQuery(sessionWorkspaceFilesQueryOptions(session, t("files.error.loadWorkspace")));
+	useEffect(
+		() => subscribeWorkspaceFileChanges(session, queryClient),
+		[queryClient, session.host, session.id],
+	);
 	const files = filesQuery.data?.files ?? emptyFiles;
 	const changedFiles = useMemo(() => files.filter(isChangedWorkspaceFile), [files]);
 
@@ -168,7 +173,7 @@ export function SessionFilesView({
 		setAnnotationDraft("");
 		setAnnotationStatus("idle");
 		setAnnotationError("");
-	}, [sessionId]);
+	}, [session.id]);
 
 	// Chat (and similar) can ask the Files rail to open on a specific path. Match
 	// by exact path first, then by basename when the turn diff only carried a
@@ -251,7 +256,7 @@ export function SessionFilesView({
 		setAnnotationError("");
 		try {
 			const { error } = await apiClient.POST("/api/v1/sessions/{sessionId}/send", {
-				params: { path: { sessionId } },
+				params: { path: { sessionId: session.id } },
 				body: { message: formatFileAnnotationMessage(sendTarget, sendFeedback) },
 			});
 			if (sendGeneration !== annotationGenerationRef.current) return;
@@ -404,7 +409,7 @@ export function SessionFilesView({
 						onExpandedPathsChange={setExpandedPaths}
 						onRetry={() => void filesQuery.refetch()}
 						revealFile={revealFile}
-						sessionId={sessionId}
+						session={session}
 						split={split}
 						wrap={true}
 					/>
@@ -424,7 +429,7 @@ function ReviewFileList({
 	onExpandedPathsChange,
 	onRetry,
 	revealFile,
-	sessionId,
+	session,
 	split,
 	wrap,
 }: {
@@ -437,7 +442,7 @@ function ReviewFileList({
 	onExpandedPathsChange: (next: Set<string>) => void;
 	onRetry: () => void;
 	revealFile?: ReviewFileTarget;
-	sessionId: string;
+	session: Ref;
 	split: boolean;
 	wrap: boolean;
 }) {
@@ -473,7 +478,7 @@ function ReviewFileList({
 								? { line: revealFile.line, requestId: revealFile.requestId }
 								: undefined
 						}
-						sessionId={sessionId}
+						session={session}
 						split={split}
 						wrap={wrap}
 					/>
@@ -488,7 +493,7 @@ function ReviewFileCard({
 	expanded,
 	file,
 	revealLine,
-	sessionId,
+	session,
 	split,
 	wrap,
 }: {
@@ -496,7 +501,7 @@ function ReviewFileCard({
 	expanded: boolean;
 	file: WorkspaceFileSummary;
 	revealLine?: ReviewLineTarget;
-	sessionId: string;
+	session: Ref;
 	split: boolean;
 	wrap: boolean;
 }) {
@@ -506,9 +511,9 @@ function ReviewFileCard({
 	// out from under them and blow away the browser's native selection.
 	const [selectionOrMenuActive, setSelectionOrMenuActive] = useState(false);
 	const detailQuery = useQuery({
-		queryKey: ["session-workspace-file", sessionId, file.path],
+		queryKey: ["session-workspace-file", refKey(session), file.path],
 		enabled: expanded && !selectionOrMenuActive,
-		queryFn: () => loadWorkspaceFile(sessionId, file.path, t),
+		queryFn: () => loadWorkspaceFile(session, file.path, t),
 	});
 
 	return (
@@ -555,7 +560,7 @@ function ReviewFileCard({
 							filePath={file.path}
 							onActiveSelectionChange={setSelectionOrMenuActive}
 							revealLine={revealLine}
-							sessionId={sessionId}
+							session={session}
 							split={split && canSplitCompare(file.status)}
 							wrap={wrap}
 						/>
@@ -613,9 +618,9 @@ function emptyDiffMessage(compareMode: WorkspaceCompareMode | undefined, t: TFun
 	return compareMode === "base" ? t("files.noChangesBase") : t("files.noChangesHead");
 }
 
-async function loadWorkspaceFile(sessionId: string, path: string, t: TFunction) {
-	const { data, error } = await apiClient.GET("/api/v1/sessions/{sessionId}/workspace/file", {
-		params: { path: { sessionId }, query: { path } },
+async function loadWorkspaceFile(session: Ref, path: string, t: TFunction) {
+	const { data, error } = await clientFor(session.host).GET("/api/v1/sessions/{sessionId}/workspace/file", {
+		params: { path: { sessionId: session.id }, query: { path } },
 	});
 	if (error) throw new Error(apiErrorMessage(error, t("files.error.loadWorkspaceFile")));
 	if (!data) throw new Error(t("files.error.emptyResponse"));
@@ -629,7 +634,7 @@ function ReviewDiffBody({
 	filePath,
 	onActiveSelectionChange,
 	revealLine,
-	sessionId,
+	session,
 	split,
 	wrap,
 }: {
@@ -639,7 +644,7 @@ function ReviewDiffBody({
 	filePath: string;
 	onActiveSelectionChange: (active: boolean) => void;
 	revealLine?: ReviewLineTarget;
-	sessionId: string;
+	session: Ref;
 	split: boolean;
 	wrap: boolean;
 }) {
@@ -651,7 +656,7 @@ function ReviewDiffBody({
 		return (
 			<ImageDiffView
 				path={detail.path}
-				sessionId={sessionId}
+				session={session}
 				split={split}
 				status={detail.status}
 				version={detailLoadedAt}
@@ -676,7 +681,7 @@ function ReviewDiffBody({
 			previousPath={detail.previousPath}
 			revealLine={revealLine}
 			rows={rows}
-			sessionId={sessionId}
+			session={session}
 			split={split}
 			truncated={detail.diffTruncated}
 			wrap={wrap}
@@ -822,7 +827,7 @@ function DiffView({
 	previousPath,
 	revealLine,
 	rows,
-	sessionId,
+	session,
 	split,
 	truncated,
 	wrap,
@@ -834,7 +839,7 @@ function DiffView({
 	previousPath?: string;
 	revealLine?: ReviewLineTarget;
 	rows: DiffRow[];
-	sessionId: string;
+	session: Ref;
 	split: boolean;
 	truncated?: boolean;
 	wrap: boolean;
@@ -1014,7 +1019,7 @@ function DiffView({
 				open={menuOpen}
 				position={menuState?.position ?? { x: 0, y: 0 }}
 				selectedText={menuState?.selectedText ?? ""}
-				sessionId={sessionId}
+				session={session}
 			/>
 		</div>
 	);

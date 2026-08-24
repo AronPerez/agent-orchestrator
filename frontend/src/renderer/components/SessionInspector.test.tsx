@@ -69,6 +69,21 @@ vi.mock("../lib/api-client", () => ({
   },
 }));
 
+// clientFor(LOCAL_HOST) is the client apiClient already was, so the local
+// host resolves to the same fake the api-client mock installs.
+vi.mock("../lib/host-clients", () => ({
+	baseUrlFor: () => "http://127.0.0.1:3001",
+	connectedHosts: () => [],
+	subscribeConnectedHosts: () => () => undefined,
+	isHostReady: () => true,
+	clientFor: () => ({
+    GET: getMock,
+    PATCH: patchMock,
+    POST: postMock,
+    PUT: putMock,
+  }),
+}));
+
 const pr = (
   n: number,
   state: PRState,
@@ -89,6 +104,7 @@ const session = (
   prs: PullRequestFacts[],
   overrides: Partial<WorkspaceSession> = {},
 ): WorkspaceSession => ({
+	host: "local",
   id: "sess-1",
   workspaceId: "ws-1",
   workspaceName: "my-app",
@@ -364,7 +380,7 @@ describe("SessionInspector tabs", () => {
       <SessionInspector session={session([])} />,
       undefined,
       (client) => {
-        client.setQueryData(sessionWorkspaceFilesQueryKey("sess-1"), {
+        client.setQueryData(sessionWorkspaceFilesQueryKey({ host: "local", id: "sess-1" }), {
           sessionId: "sess-1",
           truncated: false,
           files: [
@@ -400,7 +416,7 @@ describe("SessionInspector tabs", () => {
       <SessionInspector session={session([])} />,
       undefined,
       (client) => {
-        client.setQueryData(sessionWorkspaceFilesQueryKey("sess-1"), {
+        client.setQueryData(sessionWorkspaceFilesQueryKey({ host: "local", id: "sess-1" }), {
           sessionId: "sess-1",
           truncated: false,
           files: [
@@ -465,7 +481,7 @@ describe("SessionInspector PR section", () => {
       <SessionInspector session={session([pr(7, "open")])} />,
       undefined,
       (client) => {
-        client.setQueryData(sessionScmSummaryQueryKey("sess-1"), [
+        client.setQueryData(sessionScmSummaryQueryKey({ host: "local", id: "sess-1" }), [
           prSummary(7, "open", {
             review: {
               decision: "approved",
@@ -516,7 +532,7 @@ describe("SessionInspector PR section", () => {
       <SessionInspector session={session([pr(7, "open")])} />,
       undefined,
       (client) => {
-        client.setQueryData(sessionScmSummaryQueryKey("sess-1"), [readyPR]);
+        client.setQueryData(sessionScmSummaryQueryKey({ host: "local", id: "sess-1" }), [readyPR]);
       },
     );
 
@@ -560,7 +576,7 @@ describe("SessionInspector PR section", () => {
         <SessionInspector session={session([pr(7, "open")])} />,
         undefined,
         (client) => {
-          client.setQueryData(sessionScmSummaryQueryKey("sess-1"), [
+          client.setQueryData(sessionScmSummaryQueryKey({ host: "local", id: "sess-1" }), [
             prSummary(7, "open", {
               ci: { autoInjectCI: true, state: "passing", failingChecks: [] },
               review: { decision: "approved", hasUnresolvedHumanComments: false, unresolvedBy: [] },
@@ -578,7 +594,7 @@ describe("SessionInspector PR section", () => {
       <SessionInspector session={session([pr(7, "open")])} />,
       undefined,
       (client) => {
-        client.setQueryData(sessionScmSummaryQueryKey("sess-1"), [
+        client.setQueryData(sessionScmSummaryQueryKey({ host: "local", id: "sess-1" }), [
           prSummary(7, "open", {
             headSha: "",
             ci: { autoInjectCI: true, state: "passing", failingChecks: [] },
@@ -746,7 +762,7 @@ describe("SessionInspector PR section", () => {
       <SessionInspector session={session([pr(7, "open")])} />,
       undefined,
       (client) => {
-        client.setQueryData(sessionScmSummaryQueryKey("sess-1"), [failingPR]);
+        client.setQueryData(sessionScmSummaryQueryKey({ host: "local", id: "sess-1" }), [failingPR]);
       },
     );
 
@@ -909,7 +925,7 @@ describe("SessionInspector completion controls", () => {
       title: "orchestrator",
     });
     renderWithQuery(<SessionInspector session={worker} />, [
-      {
+      { host: "local",
         id: "ws-1",
         name: "my-app",
         path: "/repo",
@@ -939,8 +955,8 @@ describe("SessionInspector completion controls", () => {
     });
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(navigateMock).toHaveBeenCalledWith({
-      to: "/projects/$projectId/sessions/$sessionId",
-      params: { projectId: "ws-1", sessionId: "orch-1" },
+      to: "/host/$hostId/session/$sessionId",
+      params: { hostId: "local", sessionId: "orch-1" },
     });
   });
 
@@ -967,8 +983,8 @@ describe("SessionInspector completion controls", () => {
     await waitFor(() => expect(postMock).toHaveBeenCalledTimes(1));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(navigateMock).toHaveBeenCalledWith({
-      to: "/projects/$projectId",
-      params: { projectId: "ws-1" },
+      to: "/host/$hostId/project/$projectId",
+      params: { hostId: "local", projectId: "ws-1" },
     });
   });
 
@@ -1488,7 +1504,7 @@ describe("SessionInspector Activity section", () => {
       />,
       undefined,
       (client) =>
-        client.setQueryData(sessionScmSummaryQueryKey("sess-1"), summaries),
+        client.setQueryData(sessionScmSummaryQueryKey({ host: "local", id: "sess-1" }), summaries),
     );
 
     const section = screen

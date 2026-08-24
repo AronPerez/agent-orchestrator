@@ -19,8 +19,8 @@ function ShellIndex() {
 		const [workspace] = workspaces;
 		if (workspace.id !== "scratch" || workspace.kind !== "scratch") return;
 		void navigate({
-			to: "/projects/$projectId",
-			params: { projectId: "scratch" },
+			to: "/host/$hostId/project/$projectId",
+			params: { hostId: workspace.host, projectId: "scratch" },
 			replace: true,
 		});
 	}, [navigate, workspaceQuery.data, workspaceQuery.isSuccess]);

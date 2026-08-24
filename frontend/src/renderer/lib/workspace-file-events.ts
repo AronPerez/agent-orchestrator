@@ -1,5 +1,6 @@
 import type { QueryClient } from "@tanstack/react-query";
 import { getApiBaseUrl, hasTrustedApiBaseUrl, subscribeApiBaseUrl } from "./api-client";
+import { refKey, type Ref } from "./hosts";
 
 const INVALIDATE_DEBOUNCE_MS = 150;
 const SSE_RETRY_MS = 5_000;
@@ -22,31 +23,33 @@ const streams = new Map<string, WorkspaceStream>();
 // Shares one daemon watcher between the rail and maximized copies of a Files
 // view. The daemon sends only invalidation edges; Git status and visible diffs
 // are then refetched through the existing typed queries.
-export function subscribeWorkspaceFileChanges(sessionId: string, queryClient: QueryClient): () => void {
-	let stream = streams.get(sessionId);
+export function subscribeWorkspaceFileChanges(session: Ref, queryClient: QueryClient): () => void {
+	const sessionKey = refKey(session);
+	let stream = streams.get(sessionKey);
 	if (!stream) {
-		stream = createWorkspaceStream(sessionId, queryClient);
-		streams.set(sessionId, stream);
+		stream = createWorkspaceStream(session, queryClient);
+		streams.set(sessionKey, stream);
 	}
 	stream.refs += 1;
 
 	return () => {
-		const current = streams.get(sessionId);
+		const current = streams.get(sessionKey);
 		if (!current) return;
 		current.refs -= 1;
 		if (current.refs > 0) return;
 		current.dispose();
-		streams.delete(sessionId);
+		streams.delete(sessionKey);
 	};
 }
 
-function createWorkspaceStream(sessionId: string, queryClient: QueryClient): WorkspaceStream {
+function createWorkspaceStream(session: Ref, queryClient: QueryClient): WorkspaceStream {
+	const sessionKey = refKey(session);
 	const stream = {} as WorkspaceStream;
 	const invalidate = () => {
 		if (stream.debounce) clearTimeout(stream.debounce);
 		stream.debounce = setTimeout(() => {
-			void queryClient.invalidateQueries({ queryKey: ["session-workspace-files", sessionId] });
-			void queryClient.invalidateQueries({ queryKey: ["session-workspace-file", sessionId] });
+			void queryClient.invalidateQueries({ queryKey: ["session-workspace-files", sessionKey] });
+			void queryClient.invalidateQueries({ queryKey: ["session-workspace-file", sessionKey] });
 		}, INVALIDATE_DEBOUNCE_MS);
 	};
 	const scheduleRetry = () => {
@@ -72,7 +75,7 @@ function createWorkspaceStream(sessionId: string, queryClient: QueryClient): Wor
 		stream.sourceBaseUrl = baseUrl;
 		try {
 			const source = new EventSource(
-				`${baseUrl.replace(/\/+$/, "")}/api/v1/sessions/${encodeURIComponent(sessionId)}/workspace/events`,
+				`${baseUrl.replace(/\/+$/, "")}/api/v1/sessions/${encodeURIComponent(session.id)}/workspace/events`,
 			);
 			stream.source = source;
 			source.onopen = () => {

@@ -24,6 +24,19 @@ vi.mock("../lib/api-client", () => ({
 	},
 }));
 
+// clientFor(LOCAL_HOST) is the client apiClient already was, so the local
+// host resolves to the same fake the api-client mock installs.
+vi.mock("../lib/host-clients", () => ({
+	baseUrlFor: () => "http://127.0.0.1:3001",
+	connectedHosts: () => [],
+	subscribeConnectedHosts: () => () => undefined,
+	isHostReady: () => true,
+	clientFor: () => ({
+		GET: getMock,
+		POST: postMock,
+	}),
+}));
+
 function renderWithQuery(children: ReactNode) {
 	const client = new QueryClient({
 		defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -199,7 +212,7 @@ describe("SessionFilesView", () => {
 
 	it("shows a loading search state instead of a false zero while the first file request is pending", () => {
 		getMock.mockImplementation(() => new Promise(() => {}));
-		const { unmount } = renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+		const { unmount } = renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 
 		expect(screen.getByPlaceholderText("Loading files...")).toBeInTheDocument();
 		expect(screen.queryByPlaceholderText("Search 0 files")).not.toBeInTheDocument();
@@ -207,7 +220,7 @@ describe("SessionFilesView", () => {
 	});
 
 	it("loads the workspace files and requests detail for the selected file", async () => {
-		renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+		renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 
 		const firstFile = await screen.findByRole("button", { name: "Expand src/App.tsx" });
 		expect(screen.getByPlaceholderText("Search 2 files")).toBeInTheDocument();
@@ -252,7 +265,7 @@ describe("SessionFilesView", () => {
 						onFocusPathConsumed();
 						setFocusPath(null);
 					}}
-					sessionId="sess-1"
+					session={{ host: "local", id: "sess-1" }}
 				/>
 			);
 		}
@@ -294,7 +307,7 @@ describe("SessionFilesView", () => {
 
 	it("reveals and focuses a file requested by a review comment", async () => {
 		const focus = vi.spyOn(HTMLElement.prototype, "focus");
-		renderWithQuery(<SessionFilesView revealFile={{ path: "docs/guide.md", line: 7, requestId: 1 }} sessionId="sess-1" />);
+		renderWithQuery(<SessionFilesView revealFile={{ path: "docs/guide.md", line: 7, requestId: 1 }} session={{ host: "local", id: "sess-1" }} />);
 
 		expect(await screen.findByRole("button", { name: "Collapse docs/guide.md" })).toBeInTheDocument();
 		await waitFor(() =>
@@ -358,7 +371,7 @@ describe("SessionFilesView", () => {
 			return { data: undefined };
 		});
 
-		renderWithQuery(<SessionFilesView revealFile={{ path: "src/App.tsx", line: 11, requestId: 1 }} sessionId="sess-1" />);
+		renderWithQuery(<SessionFilesView revealFile={{ path: "src/App.tsx", line: 11, requestId: 1 }} session={{ host: "local", id: "sess-1" }} />);
 
 		const target = await waitFor(() => {
 			const row = document.querySelector<HTMLElement>('[data-diff-row][data-new-no="11"]');
@@ -420,12 +433,12 @@ describe("SessionFilesView", () => {
 			return { data: undefined };
 		});
 
-		const { rerender } = renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+		const { rerender } = renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 		await userEvent.click(await screen.findByRole("button", { name: "Expand src/App.tsx" }));
 		await screen.findByText(diffLine("line twelve"));
 		await userEvent.click(screen.getByRole("button", { name: "Split diff view" }));
 
-		rerender(<SessionFilesView revealFile={{ path: "src/App.tsx", line: 11, requestId: 1 }} sessionId="sess-1" />);
+		rerender(<SessionFilesView revealFile={{ path: "src/App.tsx", line: 11, requestId: 1 }} session={{ host: "local", id: "sess-1" }} />);
 
 		const matchingRows = await waitFor(() => {
 			const rows = document.querySelectorAll<HTMLElement>('[data-diff-row][data-new-no="11"]');
@@ -480,7 +493,7 @@ describe("SessionFilesView", () => {
 			return { data: undefined };
 		});
 
-		renderWithQuery(<SessionFilesView revealFile={{ path: "src/OldName.tsx", requestId: 1 }} sessionId="sess-1" />);
+		renderWithQuery(<SessionFilesView revealFile={{ path: "src/OldName.tsx", requestId: 1 }} session={{ host: "local", id: "sess-1" }} />);
 
 		expect(await screen.findByRole("button", { name: "Collapse src/OldName.tsx -> src/NewName.tsx" })).toBeInTheDocument();
 		await waitFor(() =>
@@ -491,7 +504,7 @@ describe("SessionFilesView", () => {
 	});
 
 	it("does not expand an unrelated file when a review path is missing", async () => {
-		renderWithQuery(<SessionFilesView revealFile={{ path: "src/Missing.tsx", requestId: 1 }} sessionId="sess-1" />);
+		renderWithQuery(<SessionFilesView revealFile={{ path: "src/Missing.tsx", requestId: 1 }} session={{ host: "local", id: "sess-1" }} />);
 
 		expect(await screen.findByRole("button", { name: "Expand src/App.tsx" })).toBeInTheDocument();
 		expect(screen.getByRole("button", { name: "Expand docs/guide.md" })).toBeInTheDocument();
@@ -500,7 +513,7 @@ describe("SessionFilesView", () => {
 	});
 
 	it("filters and expands a changed file from the review list", async () => {
-		renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+		renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 
 		await userEvent.type(await screen.findByPlaceholderText("Search 2 files"), "guide");
 		expect(screen.queryByRole("button", { name: /src\/App\.tsx/ })).not.toBeInTheDocument();
@@ -515,7 +528,7 @@ describe("SessionFilesView", () => {
 	});
 
 	it("keeps multiple files expanded at once", async () => {
-		renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+		renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 
 		await userEvent.click(await screen.findByRole("button", { name: "Expand src/App.tsx" }));
 		await userEvent.click(await screen.findByRole("button", { name: "Expand docs/guide.md" }));
@@ -566,7 +579,7 @@ describe("SessionFilesView", () => {
 			};
 		});
 
-		renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+		renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 
 		expect(await screen.findByText("src/OldName.tsx")).toBeInTheDocument();
 		expect(screen.getByText("src/NewName.tsx")).toBeInTheDocument();
@@ -587,14 +600,14 @@ describe("SessionFilesView", () => {
 			return { data: undefined };
 		});
 
-		renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+		renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 
 		expect(await screen.findByText("No changes against HEAD.")).toBeInTheDocument();
 		expect(screen.queryByLabelText(/changed files?$/)).not.toBeInTheDocument();
 	});
 
 	it("uses the terminal foreground color for diff content", async () => {
-		renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+		renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 
 		await userEvent.click(await screen.findByRole("button", { name: "Expand src/App.tsx" }));
 
@@ -634,7 +647,7 @@ describe("SessionFilesView", () => {
 			};
 		});
 
-		renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+		renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 		await userEvent.click(await screen.findByRole("button", { name: "Expand src/App.tsx" }));
 
 		// Content renders without the leading +/- marker (it lives in the gutter).
@@ -651,7 +664,7 @@ describe("SessionFilesView", () => {
 	});
 
 	it("wraps long diff lines by default without a toggle", async () => {
-		renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+		renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 
 		await userEvent.click(await screen.findByRole("button", { name: "Expand src/App.tsx" }));
 		expect(await screen.findByText(diffLine("const value = 1;"))).toHaveClass("whitespace-pre-wrap");
@@ -688,7 +701,7 @@ describe("SessionFilesView", () => {
 			};
 		});
 
-		const { container } = renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+		const { container } = renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 		await userEvent.click(await screen.findByRole("button", { name: "Expand src/App.tsx" }));
 		await screen.findByText(diffLine("const value = 1;"));
 
@@ -698,7 +711,7 @@ describe("SessionFilesView", () => {
 	});
 
 	it("switches between unified and side-by-side split diff", async () => {
-		const { container } = renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+		const { container } = renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 		await userEvent.click(await screen.findByRole("button", { name: "Expand src/App.tsx" }));
 		await screen.findByText(diffLine("const value = 1;"));
 		expect(container.querySelector(".grid-cols-2")).toBeNull();
@@ -727,7 +740,7 @@ describe("SessionFilesView", () => {
 	});
 
 	it("ignores split view for an added file — there is no old side to compare", async () => {
-		renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+		renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 		await userEvent.click(await screen.findByRole("button", { name: "Expand src/App.tsx" }));
 		await screen.findByText(diffLine("const value = 1;"));
 
@@ -748,7 +761,7 @@ describe("SessionFilesView", () => {
 	});
 
 	it("sends inline line feedback to the session agent with precise diff context", async () => {
-		renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+		renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 		await userEvent.click(await screen.findByRole("button", { name: "Expand src/App.tsx" }));
 		await screen.findByText(diffLine("const value = 1;"));
 
@@ -774,7 +787,7 @@ describe("SessionFilesView", () => {
 	});
 
 	it("opens whole-file feedback and cancels it with Escape", async () => {
-		renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+		renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 		await screen.findByRole("button", { name: "Expand src/App.tsx" });
 
 		await userEvent.click(screen.getByRole("button", { name: "Add feedback for file src/App.tsx" }));
@@ -787,7 +800,7 @@ describe("SessionFilesView", () => {
 	});
 
 	it("moves focus between file rows with j and k", async () => {
-		renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+		renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 		const first = await screen.findByRole("button", { name: "Expand src/App.tsx" });
 		const second = screen.getByRole("button", { name: "Expand docs/guide.md" });
 
@@ -800,7 +813,7 @@ describe("SessionFilesView", () => {
 	});
 
 	it("renders changed files as one integrated review list instead of boxed cards", async () => {
-		renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+		renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 
 		const activeRowButton = await screen.findByRole("button", { name: "Expand src/App.tsx" });
 		const list = screen.getByRole("list");
@@ -820,7 +833,7 @@ describe("SessionFilesView", () => {
 	});
 
 	it("uses one vertical scroller for the file list and expanded diffs", async () => {
-		const { container } = renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+		const { container } = renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 		await userEvent.click(await screen.findByRole("button", { name: "Expand src/App.tsx" }));
 		await screen.findByText(diffLine("const value = 1;"));
 
@@ -833,7 +846,7 @@ describe("SessionFilesView", () => {
 	});
 
 	it("routes vertical wheel gestures over a diff to the Files scroller immediately", async () => {
-		const { container } = renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+		const { container } = renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 		await userEvent.click(await screen.findByRole("button", { name: "Expand src/App.tsx" }));
 		await screen.findByText(diffLine("const value = 1;"));
 
@@ -879,7 +892,7 @@ describe("SessionFilesView", () => {
 			};
 		});
 
-		renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+		renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 		await userEvent.click(await screen.findByRole("button", { name: "Expand screenshot.png" }));
 
 		expect((await screen.findByText("Binary file preview is not available.")).parentElement?.parentElement).toHaveClass(
@@ -889,19 +902,19 @@ describe("SessionFilesView", () => {
 	});
 
 	it("uses the full session panel width while maximized", async () => {
-		const { unmount } = renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+		const { unmount } = renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 		const railList = await screen.findByRole("list");
 		expect(railList.parentElement).toHaveClass("max-w-[1200px]");
 		unmount();
 
-		renderWithQuery(<SessionFilesView isMaximized sessionId="sess-1" />);
+		renderWithQuery(<SessionFilesView isMaximized session={{ host: "local", id: "sess-1" }} />);
 		const maximizedList = await screen.findByRole("list");
 		expect(maximizedList.parentElement).not.toHaveClass("max-w-[1200px]");
 	});
 
 	it("lets the caller toggle between rail and maximized layouts", async () => {
 		const onToggleMaximized = vi.fn();
-		renderWithQuery(<SessionFilesView onToggleMaximized={onToggleMaximized} sessionId="sess-1" />);
+		renderWithQuery(<SessionFilesView onToggleMaximized={onToggleMaximized} session={{ host: "local", id: "sess-1" }} />);
 
 		await userEvent.click(await screen.findByRole("button", { name: "Maximize files" }));
 		expect(onToggleMaximized).toHaveBeenCalledWith(true);
@@ -910,7 +923,7 @@ describe("SessionFilesView", () => {
 	it("shows a minimize action while maximized", async () => {
 		const onToggleMaximized = vi.fn();
 		renderWithQuery(
-			<SessionFilesView isMaximized onToggleMaximized={onToggleMaximized} sessionId="sess-1" />,
+			<SessionFilesView isMaximized onToggleMaximized={onToggleMaximized} session={{ host: "local", id: "sess-1" }} />,
 		);
 
 		await userEvent.click(await screen.findByRole("button", { name: "Minimize files" }));
@@ -918,7 +931,7 @@ describe("SessionFilesView", () => {
 	});
 
 	it("does not render a redundant close button in the Files toolbar", async () => {
-		renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+		renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 
 		await screen.findByRole("button", { name: "Expand src/App.tsx" });
 		expect(screen.queryByRole("button", { name: "Close files" })).not.toBeInTheDocument();
@@ -926,7 +939,7 @@ describe("SessionFilesView", () => {
 
 	describe("diff selection -> send to agent", () => {
 		it("removes the selectionchange listener when the diff view unmounts", async () => {
-			const { unmount } = renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+			const { unmount } = renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 			await userEvent.click(await screen.findByRole("button", { name: "Expand src/App.tsx" }));
 			await screen.findByText(diffLine("const value = 1;"));
 
@@ -938,7 +951,7 @@ describe("SessionFilesView", () => {
 		});
 
 		it("opens the custom menu for a real drag selection across diff rows and suppresses the native menu", async () => {
-			const { container } = renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+			const { container } = renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 			await userEvent.click(await screen.findByRole("button", { name: "Expand src/App.tsx" }));
 			await screen.findByText(diffLine("const value = 1;"));
 
@@ -958,7 +971,7 @@ describe("SessionFilesView", () => {
 		});
 
 		it("leaves the native context menu untouched when there is no active selection", async () => {
-			renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+			renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 			await userEvent.click(await screen.findByRole("button", { name: "Expand src/App.tsx" }));
 			const contentSpan = await screen.findByText(diffLine("const value = 1;"));
 			window.getSelection()?.removeAllRanges();
@@ -999,7 +1012,7 @@ describe("SessionFilesView", () => {
 				};
 			});
 
-			const { container } = renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+			const { container } = renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 			await userEvent.click(await screen.findByRole("button", { name: "Expand src/App.tsx" }));
 			await screen.findByText(diffLine("line twelve"));
 
@@ -1033,7 +1046,7 @@ describe("SessionFilesView", () => {
 		});
 
 		it("maps a single-side selection in split view to only that side's line", async () => {
-			renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+			renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 			await userEvent.click(await screen.findByRole("button", { name: "Expand src/App.tsx" }));
 			await screen.findByText(diffLine("const value = 1;"));
 
@@ -1098,7 +1111,7 @@ describe("SessionFilesView", () => {
 		it("renders both sides of a changed image instead of the binary placeholder", async () => {
 			mockImageFile("modified");
 
-			renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+			renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 			await userEvent.click(await screen.findByRole("button", { name: "Expand docs/logo.png" }));
 
 			const before = await screen.findByAltText("Before version of docs/logo.png");
@@ -1117,7 +1130,7 @@ describe("SessionFilesView", () => {
 		it("shows only the after side for an added image", async () => {
 			mockImageFile("added");
 
-			renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+			renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 			await userEvent.click(await screen.findByRole("button", { name: "Expand docs/logo.png" }));
 
 			expect(await screen.findByAltText("After version of docs/logo.png")).toBeInTheDocument();
@@ -1127,7 +1140,7 @@ describe("SessionFilesView", () => {
 		it("shows only the before side for a deleted image", async () => {
 			mockImageFile("deleted");
 
-			renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+			renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 			await userEvent.click(await screen.findByRole("button", { name: "Expand docs/logo.png" }));
 
 			expect(await screen.findByAltText("Before version of docs/logo.png")).toBeInTheDocument();
@@ -1137,7 +1150,7 @@ describe("SessionFilesView", () => {
 		it("falls back to a message when an image side fails to load", async () => {
 			mockImageFile("modified");
 
-			renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+			renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 			await userEvent.click(await screen.findByRole("button", { name: "Expand docs/logo.png" }));
 			fireEvent.error(await screen.findByAltText("Before version of docs/logo.png"));
 
@@ -1231,7 +1244,7 @@ describe("SessionFilesView", () => {
 			const lineCount = 400;
 			mockBigFile(bigModifiedDiff(lineCount), lineCount);
 
-			renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+			renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 			await userEvent.click(await screen.findByRole("button", { name: "Expand big.txt" }));
 
 			await waitFor(() =>
@@ -1254,7 +1267,7 @@ describe("SessionFilesView", () => {
 			const lineCount = 400;
 			mockBigFile(bigModifiedDiff(lineCount), lineCount);
 
-			renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+			renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 			await userEvent.click(await screen.findByRole("button", { name: "Expand big.txt" }));
 			await waitFor(() =>
 				expect(screen.getByText(diffLine("new line 0 with some different content entirely"))).toBeInTheDocument(),
@@ -1287,7 +1300,7 @@ describe("SessionFilesView", () => {
 			expect(diff.length).toBeGreaterThan(50_000);
 			mockBigFile(diff, lineCount);
 
-			renderWithQuery(<SessionFilesView sessionId="sess-1" />);
+			renderWithQuery(<SessionFilesView session={{ host: "local", id: "sess-1" }} />);
 			await userEvent.click(await screen.findByRole("button", { name: "Expand big.txt" }));
 
 			await waitFor(() =>

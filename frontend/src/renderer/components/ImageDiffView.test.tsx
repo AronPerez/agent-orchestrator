@@ -6,10 +6,16 @@ vi.mock("../lib/api-client", () => ({
 	getApiBaseUrl: () => "",
 }));
 
+// The image URL is derived from the session's own host base; with one host
+// that is the same empty base getApiBaseUrl returns.
+vi.mock("../lib/host-clients", () => ({
+	baseUrlFor: () => "",
+}));
+
 describe("ImageDiffView", () => {
 	it("clears a side's load failure once the image version changes", async () => {
 		const { rerender } = render(
-			<ImageDiffView path="docs/logo.png" sessionId="sess-1" split status="modified" version={1} />,
+			<ImageDiffView path="docs/logo.png" session={{ host: "local", id: "sess-1" }} split status="modified" version={1} />,
 		);
 
 		fireEvent.error(await screen.findByAltText("Before version of docs/logo.png"));
@@ -18,7 +24,7 @@ describe("ImageDiffView", () => {
 		// Re-saving the file bumps the detail load timestamp, which is what makes
 		// the blob URL change. The pane has to retry that new URL instead of
 		// staying stuck on the previous failure.
-		rerender(<ImageDiffView path="docs/logo.png" sessionId="sess-1" split status="modified" version={2} />);
+		rerender(<ImageDiffView path="docs/logo.png" session={{ host: "local", id: "sess-1" }} split status="modified" version={2} />);
 
 		const before = await screen.findByAltText("Before version of docs/logo.png");
 		expect(before).toHaveAttribute("src", expect.stringContaining("side=before&v=2"));

@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { refKey, type Ref } from "../lib/hosts";
 import { PanelRight, Plus } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
 import {
@@ -47,7 +48,8 @@ import {
 } from "../hooks/useSessionInterfaceTransition";
 import { useWorkspaceQuery } from "../hooks/useWorkspaceQuery";
 import { useWindowFullScreen } from "../hooks/useWindowFullScreen";
-import { apiClient, apiErrorMessage } from "../lib/api-client";
+import { apiErrorMessage } from "../lib/api-client";
+import { clientFor } from "../lib/host-clients";
 import { SHELL_PANEL_SPRING } from "../lib/motion-spring";
 import { hidesShellTopbar, isMacPlatform } from "../lib/platform";
 import { useShell } from "../lib/shell-context";
@@ -119,7 +121,7 @@ function reviewerTerminalFromReviews(data?: ReviewsResponse): ReviewerTerminalTa
 }
 
 type SessionViewProps = {
-	sessionId: string;
+	sessionRef: Ref;
 };
 
 // Mirrors the left sidebar: a Motion gap takes layout width while a sibling
@@ -238,7 +240,8 @@ function SessionInspectorRail({
 // only the explicit controls (topbar button / ⌘⇧B) collapse it. The preferred
 // 280px floor is clamped to the 50% maximum on narrow session splits, where
 // the inspector tabs compact to icons.
-export function SessionView({ sessionId }: SessionViewProps) {
+export function SessionView({ sessionRef }: SessionViewProps) {
+	const sessionId = sessionRef.id;
 	const { t } = useTranslation();
 	const workspaceQuery = useWorkspaceQuery();
 	const workspaces = workspaceQuery.data ?? [];
@@ -300,7 +303,7 @@ export function SessionView({ sessionId }: SessionViewProps) {
 	const session = workspaces.flatMap((workspace) => workspace.sessions).find((s) => s.id === sessionId);
 	const interfaceSwitch = useSessionInterfaceTransition(session?.id);
 	const reviewerQuery = useQuery({
-		queryKey: ["session-reviews", sessionId],
+		queryKey: ["session-reviews", refKey(sessionRef)],
 		enabled: Boolean(
 			window.ao && session && sessionIsActive(session) && !isOrchestratorSession(session) && session.prs.length > 0,
 		),
@@ -309,7 +312,7 @@ export function SessionView({ sessionId }: SessionViewProps) {
 			return data?.reviews?.some((review) => review.status === "running") ? 2500 : false;
 		},
 		queryFn: async () => {
-			const { data, error } = await apiClient.GET("/api/v1/sessions/{sessionId}/reviews", {
+			const { data, error } = await clientFor(sessionRef.host).GET("/api/v1/sessions/{sessionId}/reviews", {
 				params: { path: { sessionId } },
 			});
 			if (error) throw new Error(apiErrorMessage(error, "Unable to load reviews"));
@@ -940,7 +943,7 @@ export function SessionView({ sessionId }: SessionViewProps) {
 										onFocusPathConsumed={handleFilesFocusConsumed}
 										onToggleMaximized={handleToggleFilesPopOut}
 										revealFile={reviewFileTarget}
-										sessionId={session.id}
+										session={session}
 									/>
 								) : null
 							}
@@ -994,7 +997,7 @@ export function SessionView({ sessionId }: SessionViewProps) {
 								isMaximized
 								onToggleMaximized={handleToggleFilesPopOut}
 								revealFile={reviewFileTarget}
-								sessionId={session.id}
+								session={session}
 							/>
 						</div>,
 						document.body,

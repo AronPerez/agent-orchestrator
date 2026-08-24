@@ -196,7 +196,7 @@ export function SwitchAgentDialog({ container, open, session, onOpenChange }: Sw
 		setRefreshingRecovery(true);
 		try {
 			await Promise.all([
-				queryClient.invalidateQueries({ queryKey: agentSwitchesQueryKey(session.id) }),
+				queryClient.invalidateQueries({ queryKey: agentSwitchesQueryKey(session) }),
 				queryClient.invalidateQueries({ queryKey: workspaceQueryKey }),
 			]);
 		} finally {
@@ -266,7 +266,7 @@ export function SwitchAgentDialog({ container, open, session, onOpenChange }: Sw
 									disabled={recoverAgentSwitch.isPending}
 									onClick={() =>
 										recoverAgentSwitch.mutate({
-											sessionId: session.id,
+											session: { host: session.host, id: session.id },
 											switchId: durableSwitch.id,
 										})
 									}
@@ -334,7 +334,7 @@ export function SwitchAgentDialog({ container, open, session, onOpenChange }: Sw
 											setMode("");
 										}}
 										onWarningChange={setModelWarning}
-										projectId={session.workspaceId}
+										project={{ host: session.host, id: session.workspaceId }}
 										value={model}
 									/>
 								</div>

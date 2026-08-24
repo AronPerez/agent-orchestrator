@@ -90,7 +90,7 @@ export function SettingsDialog() {
 		keyboardShortcutsRestoreRef.current = null;
 		if (!previousSettings) return;
 		if (previousSettings.scope === "global") openGlobalSettings();
-		else openProjectSettings(previousSettings.projectId);
+		else openProjectSettings(previousSettings.project);
 	};
 
 	const openConnectMobile = () => {
@@ -105,7 +105,7 @@ export function SettingsDialog() {
 		connectMobileRestoreRef.current = null;
 		if (!previousSettings) return;
 		if (previousSettings.scope === "global") openGlobalSettings();
-		else openProjectSettings(previousSettings.projectId);
+		else openProjectSettings(previousSettings.project);
 	};
 
 	const closeSettingsDialog = () => {
@@ -216,7 +216,7 @@ export function SettingsDialog() {
 						<div className={cn(settingsDialogBodyClass, "flex-1")}>
 							{displaySettings?.scope === "project" ? (
 								<ProjectSettingsForm
-									projectId={displaySettings.projectId}
+									projectRef={displaySettings.project}
 									section={activeProjectSection}
 									onSaveState={setProjectSaveState}
 								/>

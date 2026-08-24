@@ -147,7 +147,9 @@ vi.mock("../hooks/useShellTerminals", () => ({
 
 vi.mock("../hooks/useAgentsQuery", () => ({
 	agentsQueryKey: ["agents"],
+	agentsQueryKeyFor: () => ["agents"],
 	agentsQueryOptions: {},
+	agentsQueryOptionsFor: () => ({}),
 	refreshAgents: vi.fn(),
 	// The shell reports the install's agent inventory once per launch, so the
 	// mock has to answer this too. Undefined data means the hook reports nothing,
@@ -199,7 +201,7 @@ vi.mock("../components/GlobalNewTaskDialog", async () => {
 	return {
 		GlobalNewTaskDialog: () => {
 			const request = useStore((state) => state.newTaskRequest);
-			return request ? <div data-testid="new-task-flow" data-project={request.projectId} /> : null;
+			return request ? <div data-testid="new-task-flow" data-project={request.project.id} /> : null;
 		},
 	};
 });
@@ -226,21 +228,23 @@ const ShellRoute = Route.options.component as ComponentType;
 
 const workspaces = [
 	{
+		host: "local",
 		id: "proj-1",
 		name: "Project One",
 		path: "/one",
 		sessions: [
-			{ id: "sess-1", workspaceId: "proj-1", status: "working" },
-			{ id: "sess-2", workspaceId: "proj-1", status: "terminated" },
-			{ id: "sess-merged-terminated", workspaceId: "proj-1", status: "merged", isTerminated: true },
-			{ id: "sess-3", workspaceId: "proj-1", status: "idle" },
+			{ host: "local", id: "sess-1", workspaceId: "proj-1", status: "working" },
+			{ host: "local", id: "sess-2", workspaceId: "proj-1", status: "terminated" },
+			{ host: "local", id: "sess-merged-terminated", workspaceId: "proj-1", status: "merged", isTerminated: true },
+			{ host: "local", id: "sess-3", workspaceId: "proj-1", status: "idle" },
 		],
 	},
 	{
+		host: "local",
 		id: "proj-2",
 		name: "Project Two",
 		path: "/two",
-		sessions: [{ id: "sess-cross", workspaceId: "proj-2", status: "working" }],
+		sessions: [{ host: "local", id: "sess-cross", workspaceId: "proj-2", status: "working" }],
 	},
 ] as unknown as WorkspaceSummary[];
 
@@ -580,8 +584,8 @@ describe("shell application shortcut subscriptions", () => {
 		act(() => shellMocks.state.nextSessionListener?.());
 
 		expect(shellMocks.navigate).toHaveBeenCalledWith({
-			to: "/projects/$projectId/sessions/$sessionId",
-			params: { projectId: "proj-1", sessionId: "sess-3" },
+			to: "/host/$hostId/session/$sessionId",
+			params: { hostId: "local", sessionId: "sess-3" },
 		});
 	});
 
@@ -592,8 +596,8 @@ describe("shell application shortcut subscriptions", () => {
 		act(() => shellMocks.state.previousSessionListener?.());
 
 		expect(shellMocks.navigate).toHaveBeenCalledWith({
-			to: "/projects/$projectId/sessions/$sessionId",
-			params: { projectId: "proj-1", sessionId: "sess-3" },
+			to: "/host/$hostId/session/$sessionId",
+			params: { hostId: "local", sessionId: "sess-3" },
 		});
 	});
 

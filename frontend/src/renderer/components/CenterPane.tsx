@@ -172,7 +172,7 @@ export function CenterPane({
 		return [...ordered, ...byKey.values()];
 	}, [auxiliaryTerminals, sessionId, terminalOrder]);
 	const tabOverflowWatch = `${sessionId ?? ""}|${availableAuxiliaryKeys.join("|")}`;
-	const agentSwitchesQuery = useAgentSwitches(session?.id ?? "");
+	const agentSwitchesQuery = useAgentSwitches(session);
 	const agentSwitches = agentSwitchesQuery.data ?? [];
 	const switchMutation = useSwitchAgentState(session?.id ?? "");
 	const mountedSessionIdRef = useRef(session?.id);

@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { LOCAL_HOST } from "../lib/hosts";
 import type { components } from "../../api/schema";
 import { apiClient, hasTrustedApiBaseUrl } from "../lib/api-client";
 import { mockWorkspaces } from "../lib/mock-data";
@@ -80,6 +81,7 @@ async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
 	return (projectsData?.projects ?? []).map((project) => {
 		const kind = toProjectKind(project.kind);
 		return {
+			host: LOCAL_HOST,
 			id: project.id,
 			name: project.name,
 			kind,
@@ -96,6 +98,7 @@ async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
 						reportUnknownSessionField("activity", session.activity?.state);
 					}
 					return {
+						host: LOCAL_HOST,
 						id: session.id,
 						terminalHandleId: session.terminalHandleId,
 						workspaceId: project.id,

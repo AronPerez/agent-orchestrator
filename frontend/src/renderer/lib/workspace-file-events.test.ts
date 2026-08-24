@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { refKey } from "./hosts";
 
 const { getApiBaseUrlMock, hasTrustedApiBaseUrlMock, subscribeApiBaseUrlMock, unsubscribeBaseUrlMock } = vi.hoisted(
 	() => ({
@@ -68,8 +69,8 @@ afterEach(() => {
 describe("subscribeWorkspaceFileChanges", () => {
 	it("shares one daemon stream until the final Files view unmounts", () => {
 		const queryClient = fakeQueryClient();
-		const unsubscribeRail = subscribeWorkspaceFileChanges("session/a", queryClient);
-		const unsubscribeMaximized = subscribeWorkspaceFileChanges("session/a", queryClient);
+		const unsubscribeRail = subscribeWorkspaceFileChanges({ host: "local", id: "session/a" }, queryClient);
+		const unsubscribeMaximized = subscribeWorkspaceFileChanges({ host: "local", id: "session/a" }, queryClient);
 
 		expect(EventSourceStub.instances).toHaveLength(1);
 		expect(EventSourceStub.instances[0].url).toBe(
@@ -86,7 +87,7 @@ describe("subscribeWorkspaceFileChanges", () => {
 	it("coalesces filesystem events and invalidates the list plus visible details", () => {
 		vi.useFakeTimers();
 		const queryClient = fakeQueryClient();
-		const unsubscribe = subscribeWorkspaceFileChanges("sess-1", queryClient);
+		const unsubscribe = subscribeWorkspaceFileChanges({ host: "local", id: "sess-1" }, queryClient);
 		const source = EventSourceStub.instances[0];
 
 		source.dispatch("workspace_changed");
@@ -96,8 +97,8 @@ describe("subscribeWorkspaceFileChanges", () => {
 		vi.advanceTimersByTime(1);
 
 		expect(queryClient.invalidateQueries).toHaveBeenCalledTimes(2);
-		expect(queryClient.invalidateQueries).toHaveBeenCalledWith({ queryKey: ["session-workspace-files", "sess-1"] });
-		expect(queryClient.invalidateQueries).toHaveBeenCalledWith({ queryKey: ["session-workspace-file", "sess-1"] });
+		expect(queryClient.invalidateQueries).toHaveBeenCalledWith({ queryKey: ["session-workspace-files", refKey({ host: "local", id: "sess-1" })] });
+		expect(queryClient.invalidateQueries).toHaveBeenCalledWith({ queryKey: ["session-workspace-file", refKey({ host: "local", id: "sess-1" })] });
 		unsubscribe();
 	});
 });

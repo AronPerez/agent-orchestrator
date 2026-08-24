@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { getApiBaseUrl } from "../lib/api-client";
+import { baseUrlFor } from "../lib/host-clients";
+import type { Ref } from "../lib/hosts";
 import { cn } from "../lib/utils";
 import type { WorkspaceFileSummary } from "../hooks/useSessionWorkspaceFiles";
 
@@ -16,9 +18,13 @@ const CHECKERBOARD =
 // route sets no-store, so `version` — the file detail's load timestamp — is what
 // makes an edited image reload: without a changing URL the element never
 // refetches at all.
-function workspaceImageUrl(sessionId: string, path: string, side: ImageDiffSide, version: number): string {
+// The <img> talks to the session's OWN host, not whichever daemon happens to
+// be local: for a remote session that base is the main-process loopback proxy,
+// which carries the host credential an <img> element cannot send itself.
+function workspaceImageUrl(session: Ref, path: string, side: ImageDiffSide, version: number): string {
 	const query = new URLSearchParams({ path, side, v: String(version) });
-	return `${getApiBaseUrl()}/api/v1/sessions/${encodeURIComponent(sessionId)}/workspace/file/blob?${query}`;
+	const base = baseUrlFor(session.host) ?? getApiBaseUrl();
+	return `${base}/api/v1/sessions/${encodeURIComponent(session.id)}/workspace/file/blob?${query}`;
 }
 
 /**
@@ -33,13 +39,13 @@ function workspaceImageUrl(sessionId: string, path: string, side: ImageDiffSide,
  */
 export function ImageDiffView({
 	path,
-	sessionId,
+	session,
 	split,
 	status,
 	version,
 }: {
 	path: string;
-	sessionId: string;
+	session: Ref;
 	split: boolean;
 	status: WorkspaceFileStatus;
 	version: number;
@@ -59,7 +65,7 @@ export function ImageDiffView({
 					label={t("files.imageBefore")}
 					path={path}
 					side="before"
-					sessionId={sessionId}
+					session={session}
 					version={version}
 				/>
 			) : null}
@@ -69,7 +75,7 @@ export function ImageDiffView({
 					label={t("files.imageAfter")}
 					path={path}
 					side="after"
-					sessionId={sessionId}
+					session={session}
 					version={version}
 				/>
 			) : null}
@@ -81,13 +87,13 @@ function ImageDiffPane({
 	label,
 	path,
 	side,
-	sessionId,
+	session,
 	version,
 }: {
 	label: string;
 	path: string;
 	side: ImageDiffSide;
-	sessionId: string;
+	session: Ref;
 	version: number;
 }) {
 	const { t } = useTranslation();
@@ -116,7 +122,7 @@ function ImageDiffPane({
 						onLoad={(event) =>
 							setSize({ height: event.currentTarget.naturalHeight, width: event.currentTarget.naturalWidth })
 						}
-						src={workspaceImageUrl(sessionId, path, side, version)}
+						src={workspaceImageUrl(session, path, side, version)}
 					/>
 				)}
 			</div>

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "re
 import { useTranslation } from "react-i18next";
 import { formatDiffSelectionMessage, type DiffSelectionLine } from "../../shared/diff-selection";
 import { apiClient, apiErrorMessage } from "../lib/api-client";
+import type { Ref } from "../lib/hosts";
 import { cn } from "../lib/utils";
 import {
 	DropdownMenu,
@@ -13,7 +14,7 @@ import {
 import { Input } from "./ui/input";
 
 export type DiffSelectionMenuProps = {
-	sessionId: string;
+	session: Ref;
 	filePath: string;
 	/** Ordered lines from `frontend/src/shared/diff-selection.ts`. */
 	lines: DiffSelectionLine[];
@@ -32,7 +33,7 @@ type SendStatus = "idle" | "sending" | "sent" | "error";
 const SENT_AUTO_CLOSE_MS = 2_000;
 
 export function DiffSelectionMenu({
-	sessionId,
+	session,
 	filePath,
 	lines,
 	selectedText,
@@ -97,7 +98,7 @@ export function DiffSelectionMenu({
 			const message = formatDiffSelectionMessage({ instruction, filePath, lines });
 			try {
 				const { error } = await apiClient.POST("/api/v1/sessions/{sessionId}/send", {
-					params: { path: { sessionId } },
+					params: { path: { sessionId: session.id } },
 					body: { message },
 				});
 				if (openGeneration !== openGenerationRef.current) return;
@@ -117,7 +118,7 @@ export function DiffSelectionMenu({
 				setErrorMessage(apiErrorMessage(thrown, t("diffSelection.error.send")));
 			}
 		},
-		[clearSentTimer, filePath, lines, onOpenChange, sessionId, t],
+		[clearSentTimer, filePath, lines, onOpenChange, session.id, t],
 	);
 
 	const handleCopy = useCallback(() => {
