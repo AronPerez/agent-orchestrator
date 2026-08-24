@@ -476,7 +476,11 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 
 	useEffect(() => stopTerminalLiveResize, [stopTerminalLiveResize]);
 
-	const session = workspaces.flatMap((workspace) => workspace.sessions).find((s) => s.id === sessionId);
+	// Session ids are unique per host, not across them: matching on id alone
+	// renders another host's same-id session under this route.
+	const session = workspaces
+		.flatMap((workspace) => workspace.sessions)
+		.find((candidate) => candidate.host === sessionRef.host && candidate.id === sessionId);
 	const interfaceSwitch = useSessionInterfaceTransition(session?.id);
 	const reviewerQuery = useQuery({
 		queryKey: ["session-reviews", refKey(sessionRef)],

@@ -711,6 +711,25 @@ describe("SessionView", () => {
 		expect(screen.getByTestId("chat-surface")).not.toBe(firstSurface);
 	});
 
+	// Regression: two hosts can hold sessions that share an id, so resolving the
+	// route's session by bare id renders whichever host sorts first in the tree —
+	// i.e. the wrong machine's session under the right URL.
+	it("resolves the session on the ref's host, not the first matching id", () => {
+		const remoteTwin: WorkspaceSession = {
+			...workspaces[0].sessions[0],
+			host: "remote",
+			title: "the remote thing",
+		};
+		workspaceQueryState.data = [
+			...workspaces,
+			{ host: "remote", id: "proj-1", name: "my-app", path: "/p", type: "main", sessions: [remoteTwin] },
+		];
+
+		render(<SessionView sessionRef={{ host: "remote", id: "sess-1" }} />);
+
+		expect(screen.getByTestId("session-tab")).toHaveTextContent("the remote thing");
+	});
+
 	// The strip only ever shows the session on screen — pinning another session's
 	// terminal as a tab (and the cross-project picker that did it) is gone (#3208).
 	it("shows only the session on screen in the tab strip", () => {
