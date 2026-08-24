@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import type { components } from "../../api/schema";
-import { apiClient, apiErrorMessage } from "../lib/api-client";
+import { apiErrorMessage } from "../lib/api-client";
 import { clientFor } from "../lib/host-clients";
 import { LOCAL_HOST, type HostId } from "../lib/hosts";
 
@@ -18,8 +18,8 @@ async function fetchAgents(host: HostId): Promise<AgentCatalog> {
 	return data as AgentCatalog;
 }
 
-export async function refreshAgents(): Promise<AgentCatalog> {
-	const { data, error } = await apiClient.POST("/api/v1/agents/refresh");
+export async function refreshAgents(host: HostId = LOCAL_HOST): Promise<AgentCatalog> {
+	const { data, error } = await clientFor(host).POST("/api/v1/agents/refresh");
 	if (error) throw new Error(apiErrorMessage(error));
 	return data as AgentCatalog;
 }

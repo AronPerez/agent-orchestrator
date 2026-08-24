@@ -6,7 +6,8 @@ import { useTranslation } from "react-i18next";
 import { useCommandPaletteEnabled } from "../hooks/useCommandPaletteEnabled";
 import { useRestoreSession } from "../hooks/useRestoreSession";
 import { useWorkspaceQuery, workspaceQueryKey } from "../hooks/useWorkspaceQuery";
-import { apiClient, apiErrorMessage } from "../lib/api-client";
+import { apiErrorMessage } from "../lib/api-client";
+import { clientFor } from "../lib/host-clients";
 import { aoBridge } from "../lib/bridge";
 import {
 	buildCommands,
@@ -337,11 +338,11 @@ export function CommandPalette() {
 					closePalette();
 					break;
 				case "trigger-review": {
-					const { error: triggerError } = await apiClient.POST("/api/v1/sessions/{sessionId}/reviews/trigger", {
-						params: { path: { sessionId: action.sessionId } },
+					const { error: triggerError } = await clientFor(action.session.host).POST("/api/v1/sessions/{sessionId}/reviews/trigger", {
+						params: { path: { sessionId: action.session.id } },
 					});
 					if (triggerError) throw new Error(apiErrorMessage(triggerError, "Unable to start review"));
-					await queryClient.invalidateQueries({ queryKey: ["session-reviews", action.sessionId] });
+					await queryClient.invalidateQueries({ queryKey: ["session-reviews", refKey(action.session)] });
 					await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
 					closePalette();
 					break;

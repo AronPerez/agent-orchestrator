@@ -30,7 +30,7 @@ import {
 } from "lucide-react";
 import type { components } from "../../api/schema";
 import { formatFileAnnotationMessage, type FileAnnotationTarget } from "../../shared/file-annotations";
-import { apiClient, apiErrorMessage } from "../lib/api-client";
+import { apiErrorMessage } from "../lib/api-client";
 import { clientFor } from "../lib/host-clients";
 import { refKey, type Ref } from "../lib/hosts";
 import {
@@ -255,7 +255,7 @@ export function SessionFilesView({
 		setAnnotationStatus("sending");
 		setAnnotationError("");
 		try {
-			const { error } = await apiClient.POST("/api/v1/sessions/{sessionId}/send", {
+			const { error } = await clientFor(session.host).POST("/api/v1/sessions/{sessionId}/send", {
 				params: { path: { sessionId: session.id } },
 				body: { message: formatFileAnnotationMessage(sendTarget, sendFeedback) },
 			});

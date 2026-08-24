@@ -78,8 +78,10 @@ export function ShellTopbar({
 	const queryClient = useQueryClient();
 	const params = useParams({ strict: false }) as { hostId?: string; projectId?: string; sessionId?: string };
 	const currentSessionId = params.sessionId;
+	const currentSessionKey =
+		params.hostId && currentSessionId ? refKey({ host: params.hostId, id: currentSessionId }) : undefined;
 	const isInspectorOpen = useUiStore((state) =>
-		currentSessionId ? (state.inspectorSessions[currentSessionId]?.isOpen ?? true) : false,
+		currentSessionKey ? (state.inspectorSessions[currentSessionKey]?.isOpen ?? true) : false,
 	);
 	const restartingProjectIds = useUiStore((state) => state.restartingProjectIds);
 	const requestNewTask = useUiStore((state) => state.requestNewTask);

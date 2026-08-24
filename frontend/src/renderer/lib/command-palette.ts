@@ -39,7 +39,7 @@ export type CommandAction =
 	| { kind: "copy-branch"; branch: string }
 	| { kind: "open-pr"; url: string }
 	| { kind: "copy-pr-url"; url: string }
-	| { kind: "trigger-review"; sessionId: string }
+	| { kind: "trigger-review"; session: Ref }
 	| { kind: "toggle-theme" };
 
 export type CommandItem = {
@@ -414,7 +414,7 @@ function prReviewCommand(
 		searchOnly: true,
 		disabled,
 		disabledReason,
-		action: { kind: "trigger-review", sessionId: session.id },
+		action: { kind: "trigger-review", session: { host: session.host, id: session.id } },
 	};
 }
 

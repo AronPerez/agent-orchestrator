@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { formatDiffSelectionMessage, type DiffSelectionLine } from "../../shared/diff-selection";
-import { apiClient, apiErrorMessage } from "../lib/api-client";
+import { apiErrorMessage } from "../lib/api-client";
+import { clientFor } from "../lib/host-clients";
 import type { Ref } from "../lib/hosts";
 import { cn } from "../lib/utils";
 import {
@@ -97,7 +98,7 @@ export function DiffSelectionMenu({
 			setErrorMessage("");
 			const message = formatDiffSelectionMessage({ instruction, filePath, lines });
 			try {
-				const { error } = await apiClient.POST("/api/v1/sessions/{sessionId}/send", {
+				const { error } = await clientFor(session.host).POST("/api/v1/sessions/{sessionId}/send", {
 					params: { path: { sessionId: session.id } },
 					body: { message },
 				});

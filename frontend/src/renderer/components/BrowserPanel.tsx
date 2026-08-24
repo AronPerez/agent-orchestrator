@@ -17,7 +17,9 @@ import {
 	Tablet,
 	X,
 } from "lucide-react";
-import { apiClient, apiErrorMessage } from "../lib/api-client";
+import { apiErrorMessage } from "../lib/api-client";
+import { clientFor } from "../lib/host-clients";
+import { refKey, type Ref } from "../lib/hosts";
 import { useBrowserView, type BrowserViewModel } from "../hooks/useBrowserView";
 import { formatBrowserAnnotationMessage, type BrowserAnnotationSubmitPayload } from "../../shared/browser-annotations";
 import { MAX_BROWSER_TABS } from "../../shared/browser-tabs";
@@ -102,10 +104,10 @@ export type BrowserAnnotationQueueModel = {
 };
 
 export function useBrowserAnnotationQueue({
-	sessionId,
+	session,
 	navUrl,
 }: {
-	sessionId?: string;
+	session?: Ref;
 	navUrl?: string;
 }): BrowserAnnotationQueueModel {
 	const [state, setState] = useState<{ status: AnnotationStatus; error: string; queuedCount: number }>({
@@ -115,7 +117,10 @@ export function useBrowserAnnotationQueue({
 	});
 	const annotationQueueRef = useRef<BrowserAnnotationSubmitPayload[]>([]);
 	const annotationSendingRef = useRef(false);
-	const sessionIdRef = useRef(sessionId ?? "");
+	const sessionHost = session?.host;
+	const sessionId = session?.id;
+	const sessionRef = useRef<Ref | null>(session ?? null);
+	sessionRef.current = session ?? null;
 	const generationRef = useRef(0);
 	const sentTimerRef = useRef<number | null>(null);
 
@@ -129,7 +134,7 @@ export function useBrowserAnnotationQueue({
 	}, []);
 
 	const drainAnnotationQueue = useCallback(() => {
-		if (annotationSendingRef.current || !sessionIdRef.current) {
+		if (annotationSendingRef.current || !sessionRef.current) {
 			return;
 		}
 
@@ -139,7 +144,7 @@ export function useBrowserAnnotationQueue({
 
 		annotationSendingRef.current = true;
 		const sendGeneration = generationRef.current;
-		const sendSessionId = sessionIdRef.current;
+		const sendSession = sessionRef.current;
 		setState({ status: "sending", error: "", queuedCount: annotationQueueRef.current.length });
 
 		void (async () => {
@@ -147,8 +152,8 @@ export function useBrowserAnnotationQueue({
 			let failureMessage = appI18n.t("browser.unableSendAnnotation");
 			try {
 				const message = formatBrowserAnnotationMessage(payload);
-				const { error } = await apiClient.POST("/api/v1/sessions/{sessionId}/send", {
-					params: { path: { sessionId: sendSessionId } },
+				const { error } = await clientFor(sendSession.host).POST("/api/v1/sessions/{sessionId}/send", {
+					params: { path: { sessionId: sendSession.id } },
 					body: { message, attachment: payload.snapshot },
 				});
 				if (error) {
@@ -159,7 +164,12 @@ export function useBrowserAnnotationQueue({
 			} catch (error) {
 				failureMessage = apiErrorMessage(error, appI18n.t("browser.unableSendAnnotation"));
 			} finally {
-				if (sendGeneration !== generationRef.current || sendSessionId !== sessionIdRef.current) return;
+				if (
+					sendGeneration !== generationRef.current ||
+					!sessionRef.current ||
+					refKey(sendSession) !== refKey(sessionRef.current)
+				)
+					return;
 				annotationSendingRef.current = false;
 				if (!sent) {
 					annotationQueueRef.current.unshift(payload);
@@ -188,10 +198,12 @@ export function useBrowserAnnotationQueue({
 		})();
 	}, []);
 
+	// Reset on the identity of the session, not on the prop object: the panel
+	// re-renders with a fresh session object on every status change, and a queue
+	// cleared there would drop annotations mid-flight.
 	useEffect(() => {
-		sessionIdRef.current = sessionId ?? "";
 		resetQueue();
-	}, [resetQueue, sessionId]);
+	}, [resetQueue, sessionHost, sessionId]);
 
 	useEffect(() => {
 		if (navUrl) return;
@@ -257,7 +269,7 @@ export function BrowserPanel({ session, active, poppedOut, onTogglePopOut }: Bro
 		previewRevision: session.previewRevision,
 	});
 	const annotationQueue = useBrowserAnnotationQueue({
-		sessionId: session.id,
+		session,
 		navUrl: browserView.navState.url,
 	});
 	return (

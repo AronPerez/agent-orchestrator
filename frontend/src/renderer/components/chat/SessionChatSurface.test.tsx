@@ -3,6 +3,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { refKey } from "../../lib/hosts";
 import { agentSwitchesQueryKey } from "../../hooks/useAgentSwitches";
 import type { ConversationSnapshot } from "../../types/conversation";
 import type { AgentSwitchSummary, WorkspaceSession } from "../../types/workspace";
@@ -182,7 +183,7 @@ describe("SessionChatSurface link routing", () => {
 		);
 		await user.click(screen.getByRole("button", { name: "Open chat link" }));
 
-		expect(useUiStore.getState().inspectorSessions[session.id]).toMatchObject({
+		expect(useUiStore.getState().inspectorSessions[refKey(session)]).toMatchObject({
 			isOpen: true,
 			view: "browser",
 		});

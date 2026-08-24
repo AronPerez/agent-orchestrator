@@ -107,9 +107,9 @@ function previewRevealKey(previewUrl?: string, previewRevision?: number): string
 	return `url:${target}`;
 }
 
-function browserIsVisible(sessionId: string, browserPoppedOut: boolean): boolean {
+function browserIsVisible(sessionKey: string, browserPoppedOut: boolean): boolean {
 	if (browserPoppedOut) return true;
-	const current = useUiStore.getState().inspectorSessions[sessionId];
+	const current = useUiStore.getState().inspectorSessions[sessionKey];
 	return (current?.isOpen ?? true) && (current?.view ?? "summary") === "browser";
 }
 
@@ -242,12 +242,15 @@ function SessionInspectorRail({
 // the inspector tabs compact to icons.
 export function SessionView({ sessionRef }: SessionViewProps) {
 	const sessionId = sessionRef.id;
+	// Per-session UI state is keyed by ref: two hosts can hand out the same
+	// session id, and an inspector opened on one must not open on the other.
+	const sessionKey = refKey(sessionRef);
 	const { t } = useTranslation();
 	const workspaceQuery = useWorkspaceQuery();
 	const workspaces = workspaceQuery.data ?? [];
 	const theme = useResolvedTheme();
-	const isInspectorOpen = useUiStore((state) => state.inspectorSessions[sessionId]?.isOpen ?? true);
-	const inspectorView = useUiStore((state) => state.inspectorSessions[sessionId]?.view ?? "summary");
+	const isInspectorOpen = useUiStore((state) => state.inspectorSessions[sessionKey]?.isOpen ?? true);
+	const inspectorView = useUiStore((state) => state.inspectorSessions[sessionKey]?.view ?? "summary");
 	const setInspectorOpenForSession = useUiStore((state) => state.setInspectorOpen);
 	const toggleInspector = useUiStore((state) => state.toggleInspector);
 	const setInspectorViewForSession = useUiStore((state) => state.setInspectorView);
@@ -583,7 +586,7 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 		previewRevision,
 	});
 	const browserAnnotationQueue = useBrowserAnnotationQueue({
-		sessionId: session?.id,
+		session,
 		navUrl: browserView.navState.url,
 	});
 	const browserUrl = browserView.navState.url.trim();
@@ -600,10 +603,10 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 		if (!session || initializedInspectorSessionIdRef.current === sessionId) return;
 		initializedInspectorSessionIdRef.current = sessionId;
 		if (!hasInspector) return;
-		const current = useUiStore.getState().inspectorSessions[sessionId];
-		setInspectorViewForSession(sessionId, "summary");
+		const current = useUiStore.getState().inspectorSessions[sessionKey];
+		setInspectorViewForSession(sessionKey, "summary");
 		if (current?.browserContentRevealed === undefined) {
-			setBrowserContentRevealed(sessionId, hasBrowserContent);
+			setBrowserContentRevealed(sessionKey, hasBrowserContent);
 		}
 	}, [
 		hasBrowserContent,
@@ -645,24 +648,24 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 	// Publish which one is showing: the notification runtime lives outside this
 	// subtree and must not treat "on the session route" as "watching the agent".
 	useEffect(() => {
-		setVisibleTerminalKind(sessionId, routedTerminalTarget.kind);
-		return () => clearVisibleTerminalKind(sessionId);
-	}, [clearVisibleTerminalKind, routedTerminalTarget.kind, sessionId, setVisibleTerminalKind]);
+		setVisibleTerminalKind(sessionKey, routedTerminalTarget.kind);
+		return () => clearVisibleTerminalKind(sessionKey);
+	}, [clearVisibleTerminalKind, routedTerminalTarget.kind, sessionKey, setVisibleTerminalKind]);
 
 	const handleOpenFiles = useCallback(() => {
 		setBrowserPopOutState({ sessionId, poppedOut: false });
 		setFilesPoppedOut(false);
-		setInspectorViewForSession(sessionId, "files");
-		setInspectorOpenForSession(sessionId, true);
-	}, [sessionId, setInspectorOpenForSession, setInspectorViewForSession]);
+		setInspectorViewForSession(sessionKey, "files");
+		setInspectorOpenForSession(sessionKey, true);
+	}, [sessionId, sessionKey, setInspectorOpenForSession, setInspectorViewForSession]);
 
 	const handleOpenReviewFile = useCallback((target: { line?: number; path: string }) => {
 		setReviewFileTarget((current) => ({ ...target, requestId: (current?.requestId ?? 0) + 1 }));
 		setBrowserPopOutState({ sessionId, poppedOut: false });
 		setFilesPoppedOut(false);
-		setInspectorViewForSession(sessionId, "files");
-		setInspectorOpenForSession(sessionId, true);
-	}, [sessionId, setInspectorOpenForSession, setInspectorViewForSession]);
+		setInspectorViewForSession(sessionKey, "files");
+		setInspectorOpenForSession(sessionKey, true);
+	}, [sessionId, sessionKey, setInspectorOpenForSession, setInspectorViewForSession]);
 
 	const handleOpenFile = useCallback(
 		(path: string) => {
@@ -678,10 +681,10 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 		(next: boolean) => {
 			if (next) setBrowserPopOutState({ sessionId, poppedOut: false });
 			setFilesPoppedOut(next);
-			setInspectorViewForSession(sessionId, "files");
-			setInspectorOpenForSession(sessionId, true);
+			setInspectorViewForSession(sessionKey, "files");
+			setInspectorOpenForSession(sessionKey, true);
 		},
-		[sessionId, setInspectorOpenForSession, setInspectorViewForSession],
+		[sessionId, sessionKey, setInspectorOpenForSession, setInspectorViewForSession],
 	);
 
 	const handleToggleBrowserPopOut = useCallback(
@@ -694,14 +697,14 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 
 	useEffect(() => {
 		if (!hasInspector) return;
-		const current = useUiStore.getState().inspectorSessions[sessionId];
+		const current = useUiStore.getState().inspectorSessions[sessionKey];
 		if (!hasBrowserContent) {
-			if (current?.browserContentRevealed) setBrowserContentRevealed(sessionId, false);
-			else if (current?.browserUnseen) setBrowserUnseen(sessionId, false);
+			if (current?.browserContentRevealed) setBrowserContentRevealed(sessionKey, false);
+			else if (current?.browserUnseen) setBrowserUnseen(sessionKey, false);
 			return;
 		}
 		if (current?.browserContentRevealed) return;
-		setBrowserContentRevealed(sessionId, true);
+		setBrowserContentRevealed(sessionKey, true);
 	}, [
 		hasBrowserContent,
 		hasInspector,
@@ -723,9 +726,9 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 		if (baseline.key === previewKey) return;
 		previewBaselineRef.current = { sessionId, key: previewKey };
 		if (!previewKey) return;
-		setBrowserContentRevealed(sessionId, true);
-		if (browserIsVisible(sessionId, browserPoppedOut)) {
-			setBrowserUnseen(sessionId, false);
+		setBrowserContentRevealed(sessionKey, true);
+		if (browserIsVisible(sessionKey, browserPoppedOut)) {
+			setBrowserUnseen(sessionKey, false);
 			return;
 		}
 		// A new preview target used to force-switch the inspector to the Browser
@@ -734,7 +737,7 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 		// chat). Match the agent-activity effect below: badge it as unseen and
 		// let the user open Browser themselves when they're ready, instead of
 		// grabbing focus out from under them.
-		setBrowserUnseen(sessionId, true);
+		setBrowserUnseen(sessionKey, true);
 	}, [
 		browserPoppedOut,
 		hasInspector,
@@ -752,7 +755,7 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 	// on hasBrowserContent/browserContentRevealed missed exactly that case.
 	useEffect(() => {
 		if (!hasInspector || terminated || !browserView.agentBrowserActive) return;
-		if (!browserIsVisible(sessionId, browserPoppedOut)) setBrowserUnseen(sessionId, true);
+		if (!browserIsVisible(sessionKey, browserPoppedOut)) setBrowserUnseen(sessionKey, true);
 	}, [
 		browserPoppedOut,
 		browserView.agentBrowserActive,
@@ -767,21 +770,21 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 	// Opening Browser consumes the pending activity indicator, including the
 	// case where the inspector was collapsed while already parked on Browser.
 	useEffect(() => {
-		if (hasInspector && browserIsVisible(sessionId, browserPoppedOut)) {
-			setBrowserUnseen(sessionId, false);
+		if (hasInspector && browserIsVisible(sessionKey, browserPoppedOut)) {
+			setBrowserUnseen(sessionKey, false);
 		}
-	}, [browserPoppedOut, hasInspector, inspectorView, isInspectorOpen, sessionId, setBrowserUnseen]);
+	}, [browserPoppedOut, hasInspector, inspectorView, isInspectorOpen, sessionKey, setBrowserUnseen]);
 
 	useEffect(() => {
 		if (!hasInspector) return;
 		const handleKeyDown = (event: KeyboardEvent) => {
 			if (!matchesRendererShortcut("toggle-inspector", event)) return;
 			event.preventDefault();
-			toggleInspector(sessionId);
+			toggleInspector(sessionKey);
 		};
 		window.addEventListener("keydown", handleKeyDown);
 		return () => window.removeEventListener("keydown", handleKeyDown);
-	}, [hasInspector, sessionId, toggleInspector]);
+	}, [hasInspector, sessionKey, toggleInspector]);
 
 	const inspectorMotionReadyRef = useRef(false);
 	const handleInspectorCloseAnimationComplete = useCallback(() => {
@@ -929,7 +932,7 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 					<SessionInspectorRail
 						isOpen={isInspectorOpen}
 						onCloseAnimationComplete={handleInspectorCloseAnimationComplete}
-						onExpand={() => setInspectorOpenForSession(sessionId, true)}
+						onExpand={() => setInspectorOpenForSession(sessionKey, true)}
 						settledClosed={!isInspectorOpen && inspectorSettledClosed}
 						splitRef={sessionSplitRef}
 					>
@@ -952,7 +955,7 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 							onOpenReviewFile={handleOpenReviewFile}
 							onOpenReviewerTerminal={selectReviewerTerminal}
 							onToggleBrowserPopOut={handleToggleBrowserPopOut}
-							onViewChange={(next: InspectorView) => setInspectorViewForSession(sessionId, next)}
+							onViewChange={(next: InspectorView) => setInspectorViewForSession(sessionKey, next)}
 							view={inspectorView}
 							browserView={browserView}
 							session={session}
@@ -965,7 +968,7 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 					<TopbarButton
 						aria-label={isInspectorOpen ? t("shell.closeInspector") : t("shell.openInspector")}
 						aria-pressed={isInspectorOpen}
-						onClick={() => toggleInspector(sessionId)}
+						onClick={() => toggleInspector(sessionKey)}
 						style={noDragStyle}
 						title={isInspectorOpen ? t("shell.closeInspectorTitle") : t("shell.openInspectorTitle")}
 						variant="icon"

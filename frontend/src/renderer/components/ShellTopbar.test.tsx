@@ -3,6 +3,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { refKey } from "../lib/hosts";
 import { useUiStore } from "../stores/ui-store";
 import type { SessionActivityState, WorkspaceSession, WorkspaceSummary } from "../types/workspace";
 import { ShellTopbar, TopbarKillButton } from "./ShellTopbar";
@@ -11,7 +12,11 @@ import { TooltipProvider } from "./ui/tooltip";
 const { navigateMock, onKilledMock, paramsMock, postMock, spawnMock, useWorkspaceQueryMock } = vi.hoisted(() => ({
 	navigateMock: vi.fn(),
 	onKilledMock: vi.fn(),
-	paramsMock: { projectId: undefined as string | undefined, sessionId: undefined as string | undefined },
+	paramsMock: {
+		hostId: "local" as string | undefined,
+		projectId: undefined as string | undefined,
+		sessionId: undefined as string | undefined,
+	},
 	postMock: vi.fn(),
 	spawnMock: vi.fn(),
 	useWorkspaceQueryMock: vi.fn(),
@@ -428,8 +433,8 @@ describe("ShellTopbar inspector state", () => {
 	it("sizes the pinned-action reserve for the current worker inspector state", () => {
 		useUiStore.setState({
 			inspectorSessions: {
-				"sess-1": { isOpen: true, view: "summary" },
-				"sess-2": { isOpen: false, view: "summary" },
+				[refKey({ host: "local", id: "sess-1" })]: { isOpen: true, view: "summary" },
+				[refKey({ host: "local", id: "sess-2" })]: { isOpen: false, view: "summary" },
 			},
 		});
 		const view = renderTopbarSessions([worker, secondWorker], "sess-1");
@@ -443,11 +448,11 @@ describe("ShellTopbar inspector state", () => {
 	});
 
 	it("keeps one reserve mounted while the inspector changes state", () => {
-		useUiStore.setState({ inspectorSessions: { "sess-1": { isOpen: false, view: "summary" } } });
+		useUiStore.setState({ inspectorSessions: { [refKey({ host: "local", id: "sess-1" })]: { isOpen: false, view: "summary" } } });
 		const view = renderTopbarSessions([worker], "sess-1");
 		const reserve = screen.getByTestId("session-pinned-actions-reserve");
 
-		useUiStore.setState({ inspectorSessions: { "sess-1": { isOpen: true, view: "summary" } } });
+		useUiStore.setState({ inspectorSessions: { [refKey({ host: "local", id: "sess-1" })]: { isOpen: true, view: "summary" } } });
 		view.rerenderTopbar();
 
 		expect(screen.getByTestId("session-pinned-actions-reserve")).toBe(reserve);

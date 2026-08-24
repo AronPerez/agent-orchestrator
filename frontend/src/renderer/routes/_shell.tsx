@@ -596,7 +596,7 @@ function ShellLayout() {
 
 		agentCatalogPortRef.current = daemonStatus.port;
 		void queryClient.invalidateQueries({ queryKey: agentsQueryKey });
-		void queryClient.fetchQuery({ ...agentsQueryOptions, queryFn: refreshAgents });
+		void queryClient.fetchQuery({ ...agentsQueryOptions, queryFn: () => refreshAgents() });
 	}, [daemonStatus.port, daemonStatus.state, queryClient]);
 
 	// Follow OS appearance while the user keeps Theme on System — updates
