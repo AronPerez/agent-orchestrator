@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import type { TraySessionEntry } from "../../shared/tray";
 import { useMemo } from "react";
-import { LOCAL_HOST } from "../lib/hosts";
+import { LOCAL_HOST, type Ref } from "../lib/hosts";
 import type { components } from "../../api/schema";
 import { apiClient, hasTrustedApiBaseUrl } from "../lib/api-client";
 import type { CloudCpProject, CloudCpSession } from "../lib/cloud-cp";
@@ -296,11 +296,15 @@ export function useWorkspaceQuery(options: WorkspaceSubscriptionOptions = {}) {
  * tree. TanStack Query applies structural sharing to the selected value, so an
  * activity update elsewhere no longer redraws the open session workspace.
  */
-export function useWorkspaceSession(sessionId: string) {
+export function useWorkspaceSession(session: Ref) {
 	const selectLocalSession = useMemo(
 		() => (workspaces: WorkspaceSummary[]) =>
-			workspaces.flatMap((workspace) => workspace.sessions).find((session) => session.id === sessionId),
-		[sessionId],
+			// Session ids are unique per host, not across them: matching on id
+			// alone would resolve another host's same-id session here.
+			workspaces
+				.flatMap((workspace) => workspace.sessions)
+				.find((candidate) => candidate.host === session.host && candidate.id === session.id),
+		[session.host, session.id],
 	);
 	const local = useQuery({ ...workspaceQueryOptions, select: selectLocalSession });
 	const cloud = useCloudProjectsQuery();
@@ -308,11 +312,13 @@ export function useWorkspaceSession(sessionId: string) {
 	const { org, ready } = useCloudOrg();
 	const cloudSession = useMemo(() => {
 		if (!ready || !org?.id || !cloud.data || !cloudSessions.data) return undefined;
-		const session = cloudSessions.data.find((candidate) => candidate.id === sessionId);
-		if (!session) return undefined;
-		const project = cloud.data.find((candidate) => candidate.id === session.projectId);
-		return project ? toCloudWorkspaceSession(session, project, org.id) : undefined;
-	}, [cloud.data, cloudSessions.data, org?.id, ready, sessionId]);
+		// Cloud sessions always carry LOCAL_HOST (see toCloudWorkspaceSession), so
+		// a bare-id match is safe here regardless of the requested session's host.
+		const found = cloudSessions.data.find((candidate) => candidate.id === session.id);
+		if (!found) return undefined;
+		const project = cloud.data.find((candidate) => candidate.id === found.projectId);
+		return project ? toCloudWorkspaceSession(found, project, org.id) : undefined;
+	}, [cloud.data, cloudSessions.data, org?.id, ready, session.id]);
 	return { ...local, data: local.data ?? cloudSession };
 }
 

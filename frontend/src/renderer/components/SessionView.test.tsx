@@ -551,10 +551,10 @@ vi.mock("../hooks/useWorkspaceQuery", () => ({
 		data: workspaceQueryState.data,
 		isLoading: workspaceQueryState.isLoading,
 	}),
-	useWorkspaceSession: (sessionId: string) => ({
+	useWorkspaceSession: (session: { host: string; id: string }) => ({
 		data: workspaceQueryState.data
 			?.flatMap((workspace) => workspace.sessions)
-			.find((session) => session.id === sessionId),
+			.find((candidate) => candidate.host === session.host && candidate.id === session.id),
 		isLoading: workspaceQueryState.isLoading,
 	}),
 }));
@@ -768,6 +768,25 @@ describe("SessionView", () => {
 		view.rerender(<SessionView sessionRef={{ host: "local", id: "sess-2" }} />);
 
 		expect(screen.getByTestId("chat-surface")).not.toBe(firstSurface);
+	});
+
+	// Regression: two hosts can hold sessions that share an id, so resolving the
+	// route's session by bare id renders whichever host sorts first in the tree —
+	// i.e. the wrong machine's session under the right URL.
+	it("resolves the session on the ref's host, not the first matching id", () => {
+		const remoteTwin: WorkspaceSession = {
+			...workspaces[0].sessions[0],
+			host: "remote",
+			title: "the remote thing",
+		};
+		workspaceQueryState.data = [
+			...workspaces,
+			{ host: "remote", id: "proj-1", name: "my-app", path: "/p", type: "main", sessions: [remoteTwin] },
+		];
+
+		render(<SessionView sessionRef={{ host: "remote", id: "sess-1" }} />);
+
+		expect(screen.getByTestId("session-tab")).toHaveTextContent("the remote thing");
 	});
 
 	// The strip only ever shows the session on screen — pinning another session's
