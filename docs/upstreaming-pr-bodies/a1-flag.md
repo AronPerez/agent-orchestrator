@@ -1,26 +1,19 @@
-## What
+## Ticket
 
-A Remote hosts switch directly below Developer Mode, modelled on it:
-remoteHosts in ui-store, persisted at ao.remoteHosts, default off.
-Nothing reads the flag yet; the remote-host feature lands behind it in
-the following PRs, so with it off there is no behaviour change at all.
+No upstream issue yet. Design note: [remote hosts RFC](https://github.com/AronPerez/agent-orchestrator/blob/plan/2026-08-24-wave3/docs/upstreaming-rfc-remote-hosts.md).
 
-## Why
+## Problem
 
-Part of the remote-hosts series proposed in #RFC. This slice lands dark: with the Remote hosts flag off there is no behaviour change.
+The remote-hosts series below this PR needs a way to land its early, dark slices safely: primitives, a saved-host store, and per-host clients all have to merge before there is anything a user can see or reach, and there is currently no flag to keep that work invisible while it lands in small, reviewable pieces.
 
-## How
+## Solution
 
-See the commit body.
+A Remote hosts switch directly below Developer Mode in Settings, modelled on it: `remoteHosts` in `ui-store`, persisted at `ao.remoteHosts`, default off. Nothing reads the flag yet — every later PR in the series checks it, so with it off there is no behaviour change at all beyond the one new settings row.
 
-## Testing
+## How Has This Been Tested?
 
-`cd frontend && npm run typecheck && npx vitest run src/renderer/stores/ui-store.test.ts src/renderer/components/GlobalSettingsForm.test.tsx` — counts as in the table in `docs/upstreaming-stack-status.md`. No Go or OpenAPI surface is touched, so the `go` and `api-drift` CI jobs are unaffected.
+`cd frontend && npm run typecheck && npx vitest run src/renderer/stores/ui-store.test.ts src/renderer/components/GeneralSettingsSection.test.tsx` on the current `main` (`c9a0adb2`): both suites green. Full `vitest run src/renderer` on this base: 2013/2014 passing, one unrelated failure in `Sidebar.test.tsx` reproduced identically on unmodified `main` under the same machine load — not caused by this change. No Go or OpenAPI surface is touched.
 
-## Checklist
+## Artifacts (if appropriate):
 
-- [x] Branched from `main`
-- [x] One focused change; links the related issue
-- [x] Follows AGENTS.md conventions and PR hygiene
-- [x] Tests added for user-visible behavior
-- [x] Relevant CI checks pass for the area touched
+Evidence pending — opens draft ahead of capture; a screenshot of the new Settings row with the flag on lands here before review is requested.

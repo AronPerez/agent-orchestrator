@@ -1,26 +1,25 @@
-## What
+## Ticket
 
-The documentation for remote hosts: a setup page with the trust boundary
-it assumes, an ADR recording the design, and one `AGENTS.md` rule.
+No upstream issue yet. Design note: [remote hosts RFC](https://github.com/AronPerez/agent-orchestrator/blob/plan/2026-08-24-wave3/docs/upstreaming-rfc-remote-hosts.md).
 
-## Why
+## Problem
 
-Part of the remote-hosts series proposed in #RFC. It imports nothing, so it can be reviewed at any point — but it *describes* behaviour that only exists once the one-tree PR merges, so it is the last one to open.
+The remote-hosts feature has no user-facing documentation and no written trust boundary. Someone turning the flag on has to infer from the UI what a saved host is, what credential it uses, where that credential lives, and what the plaintext-HTTP LAN listener does and does not protect. Undocumented security properties get assumed rather than checked.
 
-The setup page exists because the honest version of "connect a second machine" needs the boundary stated plainly. The connection password gates every data route on the LAN listener; it does **not** encrypt anything, does not authenticate the remote machine to you, and does not limit what a holder can do. That is why the assumed boundary is a trusted network, and why both encrypted alternatives are written out end to end rather than mentioned.
+## Solution
 
-## How
+Setup documentation for connecting a remote host, a written statement of the trust boundary (what the connection password authorises, why the loopback proxy exists, what stays on the machine), and an ADR recording the design decision. Documentation only — no product code, so nothing here changes behaviour with the flag on or off.
 
-`configuration/remote-sessions.mdx` covers connecting a host, the trust boundary, binding the listener to Tailscale, tunnelling over SSH, and the macOS Local Network privacy failure.
+## How Has This Been Tested?
 
-Two things in it are worth the space. The SSH section calls out the local-port trap: on macOS, `ssh -L 3011:…` binds `127.0.0.1:3011` *alongside* a daemon already listening on every interface, so the forward succeeds, `ExitOnForwardFailure` never fires, and this machine's own connections quietly go to the **remote** daemon. And the macOS section gives a conclusive way to tell Local Network privacy apart from a real network problem — `curl` keeps working against the same address, which is exactly what makes it confusing.
+Documentation only: five files, no code. `git diff --stat` against the current `main` (`c9a0adb2`) shows changes confined to `docs/`, `AGENTS.md` and three landing-site `.mdx` pages; no test, no build target and no CI job covers behaviour here. Prose was proofread against the shipped behaviour of the branches it describes rather than against the plan documents.
 
-`docs/adr/0003-remote-hosts-renderer-fanout.md` records the design and, more usefully, the alternatives and why each was rejected: hub federation in the daemon (moves peer credentials behind a socket every local process can reach), one-active-host-at-a-time (shipped as an interim state and rejected on use), global id namespacing (breaks parity with each daemon's own CLI and URLs). It carries the security review's four fixed findings and its accepted risks, the decision to keep saved hosts in a `0600` file rather than an OS keychain, and the SSH spike's conclusion that a tunnel needs no proxy change and therefore ships as a recipe first.
+## Artifacts (if appropriate):
 
-`0001` and `0002` are taken and another proposal in flight also claims `0002`, so this claims `0003` and says so — renumber on merge if that one lands first.
+No renderable surface: documentation and one `AGENTS.md` paragraph. The landing pages render through the existing docs pipeline unchanged.
 
-The `AGENTS.md` addition is one bullet, and it is the invariant a future change could quietly break: the remote-host proxy binds `127.0.0.1` only, requires a per-activation token carried in the URL path, strips that token before forwarding, never logs the request path, and never hands a connection password to the renderer.
+## Implementation notes
 
-## Testing
+This PR describes behaviour that only exists once the rest of the series has merged, so it is deliberately last in the order even though it imports nothing and could technically be reviewed at any point.
 
-Documentation only — no code, no suites, no CI surface. The landing page uses only MDX components already used elsewhere in `content/docs`.
+Content: how to save a host and connect to it; what the connection password authorises and what it does not; why the desktop app proxies remote traffic through a loopback listener rather than letting the renderer authenticate directly; and the ADR that records the decision so the next person does not re-litigate it from scratch.

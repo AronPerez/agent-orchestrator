@@ -97,49 +97,96 @@ Wave 3 forks into two lines that rejoin once. A8a builds on A5 — **not on A2**
    `cd backend && go generate ./internal/httpd/apispec/... && cd ../frontend && npm run api:ts` —
    or `api-drift` fails on a spec built from an older tree.
 
-## Upstream has moved since the stack was cut
+## Upstream drift — rebased and closed out (2026-08-24)
 
-Every branch here is built on `upstream/main @ 6cba6344c`. As of **2026-08-24**, upstream is at
-`346b53336` — four commits ahead:
+The stack was originally cut against `upstream/main @ 6cba6344c`. By the time the campaign
+began executing this runbook, upstream had moved to **`c9a0adb21`** — 9 commits ahead, not
+the 4 recorded above when this note was first written (upstream kept moving between
+hand-offs):
 
+    c9a0adb21 fix(desktop): bundle tmux on macOS and Linux (#4293)
+    1880498c8 fix(session): escape inconclusive agent switch recovery (#4269)
+    75dfa21e8 feat(observability): Sentry-ready error capture + triage classification (mobile) (#4181)
+    9df8862dc feat(observability): daemon Sentry — capture 5xx and panics with Go stacks (#4346)
+    48045a10f fix(desktop): make startup layout render together (#4330)
     346b53336 fix(usage): accept switch-sized Codex metadata (#4345)
     2fa9672c7 feat: add native Kimi ACP chat driver (#4193)
     f20411d14 feat: add OMP ACP chat driver (#4196)
     0fed9c46a fix: align sidebar status dots with board lanes (#4026)
 
-Most of it is backend and does not touch this stack. **Three renderer files collide**, and one
-of them is the file the one-tree PR rewrites most:
+**All 21 branches have been rebased onto `c9a0adb21`, re-verified, and pushed.** The SHAs in
+the tables below are current as of that rebase. Full detail — every conflict and its
+resolution, the re-verification methodology (including two load-flake false failures caught
+by A/B and fully-isolated re-runs before trusting a "clean" result), and the scrub pass that
+removed `Claude-Session:` trailers from every commit message — is in the campaign ledger:
+`/Users/amongstar/.ao/data/briefs/agentic-devops/upstream-campaign-ledger.md`, Entries 3–4.
+Three integration tags were rebuilt: `up-a5-base` → `71a515d85`, `up-a7b-base` → `43b217500`,
+`up-a10-base` → `6e0a0c175`.
 
-| File | Upstream change | Stack branch that also touches it |
-| --- | --- | --- |
-| `components/Sidebar.tsx` | status-dot alignment (`0fed9c46a`), ~17 lines | A10 (host sections, switcher, per-project host label) |
-| `components/Sidebar.test.tsx` | the same change's tests, ~49 lines | A10 |
-| `lib/session-presentation.test.ts` | new cases for the shared presentation helper | A8a (fixture `host` field only) |
+The predicted `Sidebar.tsx` conflict on A10 did not occur — A8a and A9a absorbed that file
+first via their own conflicts, and by the time A10's rebase ran, `0fed9c46a`'s change and the
+host-section rewrite no longer touched the same lines. The one substantive resolution worth
+knowing about: A9c's rebase dropped a one-line edit inside `routes/_shell.tsx`'s
+`agentCatalogPortRef` effect, because upstream's `48045a10f` deleted that effect entirely —
+A9c's edit is obsolete by construction, not lost.
 
-Rebase A10 before opening it, and expect a real conflict in `Sidebar.tsx` — resolve it by
-keeping both changes, never by taking a side. Nothing else in the stack is affected, and no
-branch needs rebasing until it is opened.
+## Open PRs (draft, `AronPerez` → `Untrivial-ai/agent-orchestrator`, stacked-drafts mode)
+
+All 21 are open as drafts, in dependency order, using cumulative diffs for chained branches
+(each stacked PR's body names "Stacked on #N" for its parent(s) rather than waiting for the
+parent to merge, per the human's explicit stacked-drafts choice). Frontend-surface PRs open
+before their QA-evidence screenshot is captured and are held from ready/review-request until
+it is embedded — see the ledger for the evidence-capture plan and status per PR.
+
+| Branch | PR |
+| --- | --- |
+| `up-a1-flag` | [#4366](https://github.com/Untrivial-ai/agent-orchestrator/pull/4366) |
+| `up-a2-hosts` | [#4365](https://github.com/Untrivial-ai/agent-orchestrator/pull/4365) |
+| `up-a3-store` | [#4367](https://github.com/Untrivial-ai/agent-orchestrator/pull/4367) |
+| `up-a4-proxy` | [#4368](https://github.com/Untrivial-ai/agent-orchestrator/pull/4368) |
+| `up-a5-clients` | [#4369](https://github.com/Untrivial-ai/agent-orchestrator/pull/4369) |
+| `up-a6-host-ui` | [#4370](https://github.com/Untrivial-ai/agent-orchestrator/pull/4370) |
+| `up-a7a-fs-dirs` | [#4359](https://github.com/Untrivial-ai/agent-orchestrator/pull/4359) |
+| `up-a7b-folder-picker` | [#4371](https://github.com/Untrivial-ai/agent-orchestrator/pull/4371) |
+| `up-a8a-refs` | [#4372](https://github.com/Untrivial-ai/agent-orchestrator/pull/4372) |
+| `up-a8b-fanout` | [#4374](https://github.com/Untrivial-ai/agent-orchestrator/pull/4374) |
+| `up-a8c-terminals` | [#4376](https://github.com/Untrivial-ai/agent-orchestrator/pull/4376) |
+| `up-a9a-writes-sessions` | [#4373](https://github.com/Untrivial-ai/agent-orchestrator/pull/4373) |
+| `up-a9b-writes-projects` | [#4375](https://github.com/Untrivial-ai/agent-orchestrator/pull/4375) |
+| `up-a9c-writes-reviews` | [#4377](https://github.com/Untrivial-ai/agent-orchestrator/pull/4377) |
+| `up-a10-one-tree` | [#4378](https://github.com/Untrivial-ai/agent-orchestrator/pull/4378) |
+| `up-a11-docs` | [#4360](https://github.com/Untrivial-ai/agent-orchestrator/pull/4360) |
+| `up-c1-url` | [#4358](https://github.com/Untrivial-ai/agent-orchestrator/pull/4358) |
+| `up-c2a-refuse-local` | [#4361](https://github.com/Untrivial-ai/agent-orchestrator/pull/4361) |
+| `up-c2b-remote-path` | [#4362](https://github.com/Untrivial-ai/agent-orchestrator/pull/4362) |
+| `up-c2c-name-daemon` | [#4363](https://github.com/Untrivial-ai/agent-orchestrator/pull/4363) |
+| `up-c3-route-loopback` | [#4364](https://github.com/Untrivial-ai/agent-orchestrator/pull/4364) |
+
+PR bodies now follow the skyvern-cloud template (Ticket / Problem / Solution / How Has This
+Been Tested / Artifacts) instead of the What/Why/How/Testing/Checklist shape below — the
+files in `docs/upstreaming-pr-bodies/` are the current, validated versions; treat the
+descriptions in this document as historical design record, not the literal PR text.
 
 ## The branches
 
 | # | Branch (on `origin`) | SHA | Base | Upstream title | Non-test files | Tests it carries |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | `up-a1-flag` | `616dd08af` | `upstream/main` | feat(settings): add an experimental Remote hosts flag | 10 | ui-store ×3, settings switch ×1 |
-| 2 | `up-a2-hosts` | `9c0010aad` | `upstream/main` | feat(hosts): host identity primitives | 1 | hosts ×5 |
-| 3 | `up-a3-store` | `4c4e7e9d1` | `upstream/main` | feat(remotes): saved-host store, authenticated requests, password-free IPC | 9 | store + request ×30, ipc ×8, remotes-main ×4 |
-| 4 | `up-a4-proxy` | `825dfde92` | `up-a3-store` | feat(remotes): token-gated loopback proxy for remote daemons | 9 | proxy ×15, registry ×7, remotes-main ×6 |
-| 5 | `up-a5-clients` | `39fa64f23` | merge(A1, A2, A4), tag `up-a5-base` | feat(hosts): per-host API clients and flag-gated host boot | 3 | host-clients ×9, active-host ×6 |
-| 6 | `up-a6-host-ui` | `d00d3cd2b` | `up-a5-clients` | feat(hosts): add, edit and remove remote hosts | 14 | useRemoteHosts ×5, HostSelect ×12, AddRemoteHostDialog ×20, CreateProjectFlowHosts ×6, fake-daemon ×5 |
-| 7 | `up-a7a-fs-dirs` | `98604953b` | `upstream/main` | feat(daemon): read-only directory listing at GET /api/v1/fs/dirs | 6 | fs ×4 (Go), LAN policy assertion |
-| 8 | `up-a7b-folder-picker` | `26d0c5db2` | merge(A6, A7a), tag `up-a7b-base` | feat(projects): browse a remote host's folders when adding a project | 11 | RemoteFolderPicker ×9, CreateProjectFlow.remote ×8 |
-| 9 | `up-a8a-refs` | `2d58b559a` | `up-a5-clients` | refactor(hosts): thread Ref through reads and host-qualified routes | 50 | `src/renderer` 140 files / 2025 tests (base 139 / 2019) |
-| 10 | `up-a8b-fanout` | `17e2e98f0` | `up-a8a-refs` | feat(hosts): fan out workspace queries and event streams per host | 21 | 142 / 2048; adds host-events ×8, fake-daemon ×7, rewritten useWorkspaceQuery |
-| 11 | `up-a8c-terminals` | `330bcffc4` | `up-a8b-fanout` | feat(hosts): one terminal mux per host | 9 | 142 / 2051; adds mux-across-hosts ×3 |
-| 12 | `up-a9a-writes-sessions` | `a2b10f97f` | `up-a8a-refs` | refactor(hosts): route session and terminal writes by Ref | 22 | 141 / 2030; adds session-writes-by-ref ×5 |
-| 13 | `up-a9b-writes-projects` | `e93a11444` | `up-a9a-writes-sessions` | refactor(hosts): route project and orchestrator writes by Ref | 11 | 141 / 2030 |
-| 14 | `up-a9c-writes-reviews` | `f5cdb2554` | `up-a9b-writes-projects` | refactor(hosts): route pull request and review writes by Ref | 12 | 141 / 2030 |
-| 15 | `up-a10-one-tree` | `e16a55e49` | merge(A6, A8c, A9c), tag `up-a10-base` | feat(hosts): one tree across every connected host | 17 | 147 / 2113; adds Sidebar-across-hosts ×5, host_connect telemetry ×1 |
-| 16 | `up-a11-docs` | `0dd65c265` | `upstream/main` | docs(remote-hosts): setup, trust boundary, ADR | 5 | none — documentation only |
+| 1 | `up-a1-flag` | `4a2970469` | `upstream/main` | feat(settings): add an experimental Remote hosts flag | 10 | ui-store ×3, settings switch ×1 |
+| 2 | `up-a2-hosts` | `881a65c78` | `upstream/main` | feat(hosts): host identity primitives | 1 | hosts ×5 |
+| 3 | `up-a3-store` | `0d94b9e92` | `upstream/main` | feat(remotes): saved-host store, authenticated requests, password-free IPC | 9 | store + request ×30, ipc ×8, remotes-main ×4 |
+| 4 | `up-a4-proxy` | `11e54ccce` | `up-a3-store` | feat(remotes): token-gated loopback proxy for remote daemons | 9 | proxy ×15, registry ×7, remotes-main ×6 |
+| 5 | `up-a5-clients` | `7874bea65` | merge(A1, A2, A4), tag `up-a5-base` | feat(hosts): per-host API clients and flag-gated host boot | 3 | host-clients ×9, active-host ×6 |
+| 6 | `up-a6-host-ui` | `11f79b300` | `up-a5-clients` | feat(hosts): add, edit and remove remote hosts | 14 | useRemoteHosts ×5, HostSelect ×12, AddRemoteHostDialog ×20, CreateProjectFlowHosts ×6, fake-daemon ×5 |
+| 7 | `up-a7a-fs-dirs` | `eb9f8dd8c` | `upstream/main` | feat(daemon): read-only directory listing at GET /api/v1/fs/dirs | 6 | fs ×4 (Go), LAN policy assertion |
+| 8 | `up-a7b-folder-picker` | `e5ca2d51f` | merge(A6, A7a), tag `up-a7b-base` | feat(projects): browse a remote host's folders when adding a project | 11 | RemoteFolderPicker ×9, CreateProjectFlow.remote ×8 |
+| 9 | `up-a8a-refs` | `0a1c6b5f2` | `up-a5-clients` | refactor(hosts): thread Ref through reads and host-qualified routes | 50 | `src/renderer` 140 files / 2025 tests (base 139 / 2019) |
+| 10 | `up-a8b-fanout` | `8dd10d053` | `up-a8a-refs` | feat(hosts): fan out workspace queries and event streams per host | 21 | 142 / 2048; adds host-events ×8, fake-daemon ×7, rewritten useWorkspaceQuery |
+| 11 | `up-a8c-terminals` | `dc8e54c94` | `up-a8b-fanout` | feat(hosts): one terminal mux per host | 9 | 142 / 2051; adds mux-across-hosts ×3 |
+| 12 | `up-a9a-writes-sessions` | `fb3dec718` | `up-a8a-refs` | refactor(hosts): route session and terminal writes by Ref | 22 | 141 / 2030; adds session-writes-by-ref ×5 |
+| 13 | `up-a9b-writes-projects` | `52976f778` | `up-a9a-writes-sessions` | refactor(hosts): route project and orchestrator writes by Ref | 11 | 141 / 2030 |
+| 14 | `up-a9c-writes-reviews` | `407096036` | `up-a9b-writes-projects` | refactor(hosts): route pull request and review writes by Ref | 12 | 141 / 2030 |
+| 15 | `up-a10-one-tree` | `10503094a` | merge(A6, A8c, A9c), tag `up-a10-base` | feat(hosts): one tree across every connected host | 17 | 147 / 2113; adds Sidebar-across-hosts ×5, host_connect telemetry ×1 |
+| 16 | `up-a11-docs` | `79ba70131` | `upstream/main` | docs(remote-hosts): setup, trust boundary, ADR | 5 | none — documentation only |
 
 Verified on the upstream base at build time: every listed suite green, `tsc --noEmit` and
 `tsc -p tsconfig.e2e.json` clean on each branch; A5's full run was 72 files / 871 passed.
@@ -231,11 +278,11 @@ The branch names below are the only refs — there are no AO session-namespaced 
 
 | # | Branch (on `origin`) | SHA | Base | Upstream title | Non-test files | Tests it carries |
 | --- | --- | --- | --- | --- | --- | --- |
-| C1 | `up-c1-url` | `37ff47ed0` | `upstream/main` | feat(cli): target a remote daemon with --url / AO_URL | 6 + `docs/cli/README.md` | remote ×15 |
-| C2a | `up-c2a-refuse-local` | `a54519dad` | `up-c1-url` | fix(cli): refuse --url on commands that only ever act on this machine | 9 | remote ×3, callbacks ×4, dev ×1 |
-| C2b | `up-c2b-remote-path` | `5e952b35f` | `up-c1-url` | fix(cli): judge a remote --path and a remote project by the remote host's rules | 4 | remote ×3, project ×1, pr_ref ×4 |
-| C2c | `up-c2c-name-daemon` | `6aa8b6352` | `up-c1-url` | fix(cli): name the daemon in destructive prompts and success lines | 3 | remote ×1, project ×1, session ×2 |
-| C3 | `up-c3-route-loopback` | `69f68463c` | `up-c1-url` | fix(daemon): distinguish a LAN policy block from a missing route | 1 | lan_listener ×3, cli end-to-end ×1 |
+| C1 | `up-c1-url` | `6edda5648` | `upstream/main` | feat(cli): target a remote daemon with --url / AO_URL | 6 + `docs/cli/README.md` | remote ×15 |
+| C2a | `up-c2a-refuse-local` | `75accf4a7` | `up-c1-url` | fix(cli): refuse --url on commands that only ever act on this machine | 9 | remote ×3, callbacks ×4, dev ×1 |
+| C2b | `up-c2b-remote-path` | `ee42b9114` | `up-c1-url` | fix(cli): judge a remote --path and a remote project by the remote host's rules | 4 | remote ×3, project ×1, pr_ref ×4 |
+| C2c | `up-c2c-name-daemon` | `ac5982054` | `up-c1-url` | fix(cli): name the daemon in destructive prompts and success lines | 3 | remote ×1, project ×1, session ×2 |
+| C3 | `up-c3-route-loopback` | `399525e27` | `up-c1-url` | fix(daemon): distinguish a LAN policy block from a missing route | 1 | lan_listener ×3, cli end-to-end ×1 |
 
 Verified on the upstream base at build time, on every branch: `go build ./...`, `go vet ./...`, `go test ./...` and `go test -race` over the touched packages all green, `gofmt -l` empty, and the branch's own named tests confirmed RED before the implementation went in.
 

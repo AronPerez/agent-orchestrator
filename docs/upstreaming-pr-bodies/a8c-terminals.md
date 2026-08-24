@@ -1,32 +1,19 @@
-## What
+## Ticket
 
-The terminal mux pool is keyed by host instead of holding one current
-socket, and each socket's URL is derived from that host's own base.
-Retained terminals are keyed by ref, and shell terminals become per host.
+No upstream issue. [RFC](https://github.com/AronPerez/agent-orchestrator/blob/plan/2026-08-24-wave3/docs/upstreaming-rfc-remote-hosts.md). Stacked on #4374.
 
-## Why
+## Problem
 
-Part of the remote-hosts series proposed in #RFC. With one host this is what the app already did: one pool entry, one socket, one shell-terminals query.
+The terminal mux pool holds one current socket for the whole app. With two hosts, opening a terminal on the second machine silently retires the first machine's connection, and a remote host's mux URL loses its loopback-proxy path prefix — dropping the token the proxy authenticates on.
 
-Two cases make it worth the change:
+## Solution
 
-- **Two hosts need two sockets.** A single "current" connection means opening a terminal on the second machine silently retires the first machine's.
-- **A remote host's mux URL must keep its path prefix.** A remote's base is the loopback proxy's `http://127.0.0.1:<port>/<token>/`. Dropping the prefix sends the socket to a 404 and — worse — drops the token the proxy authenticates on.
+`createTerminalMuxPool` holds a `Map<HostId, Connection>` instead of one `current`; `muxUrlForHost(host)` derives from that host's own base, so the proxy token survives in the path. Retained terminals are keyed by `Ref`, and `useShellTerminals` becomes per host in full, mutations included.
 
-## How
+## How Has This Been Tested?
 
-`createTerminalMuxPool` holds a `Map<HostId, Connection>` rather than one `current`, and `acquire(host)` defaults to `LOCAL_HOST`. A socket-level failure retires only that host's client, so reconnecting leases for that host converge on one replacement socket and other hosts are untouched.
+`cd frontend && npm run typecheck && npm run typecheck:e2e && npx vitest run src/renderer` on the current `main` (`c9a0adb2`): 143 files / 2066 tests, all green (base was 143/2063). New cases: each host's mux URL keeps its token segment; the pool keeps one live socket per host; closing one host's mux leaves the other open.
 
-`muxUrlForHost(host)` derives from `baseUrlFor(host)`, which is the whole point: the token is in the path, so the path survives.
+## Artifacts (if appropriate):
 
-The terminal cache records the host each entry belongs to, and keys sessions by `refKey`. Only a host that actually answered is authoritative about its own sessions and shells — a failed section no longer evicts terminals it could not report on.
-
-`useShellTerminals` becomes per host in full, mutations included. That is not scope creep: `shellTerminalsQueryKey` becomes `(host) => [...]`, so every invalidation has to name a host, and `ShellTerminal` gains `host`, so closing or renaming one can no longer be addressed by a bare handle id.
-
-## Testing
-
-`cd frontend && npm run typecheck && npm run typecheck:e2e && npx vitest run src/renderer` — 142 files, 2051 tests, against 142 / 2048 on the base.
-
-The three new cases are the ones that matter: each host's mux URL is built from that host's base with the token segment intact (`ws://127.0.0.1:9999/tok/mux`); the pool keeps one live socket per host rather than one globally; and closing one host's mux leaves the other open.
-
-No Go or OpenAPI surface is touched.
+Evidence pending — opens draft ahead of capture; a screenshot of two hosts each holding an open terminal lands here before review.
