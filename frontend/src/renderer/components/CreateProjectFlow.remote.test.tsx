@@ -6,8 +6,16 @@ import { aoBridge } from "../lib/bridge";
 import { useUiStore } from "../stores/ui-store";
 import { CreateProjectFlow } from "./CreateProjectFlow";
 
+const { navigateMock } = vi.hoisted(() => ({ navigateMock: vi.fn() }));
+
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+	...(await importOriginal<typeof import("@tanstack/react-router")>()),
+	useNavigate: () => navigateMock,
+}));
+
 beforeEach(() => {
 	vi.restoreAllMocks();
+	navigateMock.mockReset();
 	vi.spyOn(aoBridge.remotes, "list").mockResolvedValue([{ label: "workbox", url: "http://192.0.2.1:3011" }]);
 	vi.spyOn(aoBridge.remotes, "probe").mockResolvedValue("online");
 	useUiStore.setState({ remoteHosts: true });
@@ -141,5 +149,69 @@ describe("CreateProjectFlow — remote host", () => {
 		// Both shell out on this machine and would judge the wrong filesystem.
 		expect(scanImportFolder).not.toHaveBeenCalled();
 		expect(checkAncestorRepo).not.toHaveBeenCalled();
+	});
+	// A path the host already knows is not a failure — it is the project the user
+	// is looking for. The dead end was "A project at this path is already
+	// registered" + "Choose a different folder to try again", with nowhere to go.
+	it("recognizes an already-registered path instead of failing the import", async () => {
+		vi.spyOn(aoBridge.remotes, "request").mockResolvedValue({
+			status: 409,
+			body: {
+				error: "conflict",
+				code: "PATH_ALREADY_REGISTERED",
+				message: "A project at this path is already registered",
+				details: { existingProjectId: "skyvern-cloud", suggestedProjectId: "skyvern-cloud-2" },
+			},
+		});
+		renderFlow();
+		await selectWorkbox();
+		await userEvent.click(screen.getByRole("button", { name: /open local repository/i }));
+		await userEvent.type(screen.getByLabelText(/path on workbox/i), "/srv/skyvern");
+		await userEvent.click(screen.getByRole("button", { name: /add project on workbox/i }));
+
+		expect(await screen.findByText(/already registered on workbox/i)).toBeInTheDocument();
+		expect(screen.queryByText(/choose a different folder to try again/i)).not.toBeInTheDocument();
+		expect(screen.queryByText(/a project at this path is already registered/i)).not.toBeInTheDocument();
+	});
+
+	it("opens the project the remote host already has", async () => {
+		vi.spyOn(aoBridge.remotes, "request").mockResolvedValue({
+			status: 409,
+			body: {
+				code: "PATH_ALREADY_REGISTERED",
+				message: "A project at this path is already registered",
+				details: { existingProjectId: "skyvern-cloud" },
+			},
+		});
+		renderFlow();
+		await selectWorkbox();
+		await userEvent.click(screen.getByRole("button", { name: /open local repository/i }));
+		await userEvent.type(screen.getByLabelText(/path on workbox/i), "/srv/skyvern");
+		await userEvent.click(screen.getByRole("button", { name: /add project on workbox/i }));
+		await userEvent.click(await screen.findByRole("button", { name: /view project/i }));
+
+		// The host id is the saved host url, so the same project id on another
+		// host cannot be the one that opens.
+		expect(navigateMock).toHaveBeenCalledWith({
+			to: "/host/$hostId/project/$projectId",
+			params: { hostId: "http://192.0.2.1:3011", projectId: "skyvern-cloud" },
+		});
+	});
+
+	// An older daemon answers the same conflict without details. There is no
+	// project to point at, so the honest fallback is the daemon's own sentence.
+	it("falls back to the daemon message when the conflict names no project", async () => {
+		vi.spyOn(aoBridge.remotes, "request").mockResolvedValue({
+			status: 409,
+			body: { code: "PATH_ALREADY_REGISTERED", message: "A project at this path is already registered" },
+		});
+		renderFlow();
+		await selectWorkbox();
+		await userEvent.click(screen.getByRole("button", { name: /open local repository/i }));
+		await userEvent.type(screen.getByLabelText(/path on workbox/i), "/srv/skyvern");
+		await userEvent.click(screen.getByRole("button", { name: /add project on workbox/i }));
+
+		expect(await screen.findByRole("alert")).toHaveTextContent(/a project at this path is already registered/i);
+		expect(screen.queryByRole("button", { name: /view project/i })).not.toBeInTheDocument();
 	});
 });
