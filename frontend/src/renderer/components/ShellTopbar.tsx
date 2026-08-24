@@ -117,8 +117,13 @@ export function ShellTopbar({
 	const [boardSpawnError, setBoardSpawnError] = useState<string | null>(null);
 	const all = useWorkspaceQuery().data ?? [];
 
+	// Session ids are unique per host, not across them: matching on id alone
+	// names another host's same-id session in the crumb, pill and kill button.
+	const routeHost = params.hostId ?? LOCAL_HOST;
 	const session = params.sessionId
-		? all.flatMap((workspace) => workspace.sessions).find((s) => s.id === params.sessionId)
+		? all
+				.flatMap((workspace) => workspace.sessions)
+				.find((candidate) => candidate.host === routeHost && candidate.id === params.sessionId)
 		: undefined;
 	const isSessionRoute = Boolean(params.sessionId);
 	const isOrchestrator = session ? isOrchestratorSession(session) : false;
@@ -127,9 +132,8 @@ export function ShellTopbar({
 	// projectId that no longer resolves (stale route after the project was
 	// removed, or data still loading) shows an empty crumb — never the raw
 	// route slug. "Board" is the root-board crumb only.
-	const projectHost = session?.host ?? params.hostId ?? LOCAL_HOST;
 	const projectId = session?.workspaceId ?? params.projectId;
-	const projectRef: Ref | undefined = projectId ? { host: projectHost, id: projectId } : undefined;
+	const projectRef: Ref | undefined = projectId ? { host: routeHost, id: projectId } : undefined;
 	const isProjectBoardRoute = !isSessionRoute && Boolean(projectId);
 	const isRootBoardRoute = !isSessionRoute && !isProjectBoardRoute;
 	const project = projectId ? all.find((workspace) => workspace.id === projectId) : undefined;
@@ -206,7 +210,7 @@ export function ShellTopbar({
 			await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
 			void navigate({
 				to: "/host/$hostId/session/$sessionId",
-				params: { hostId: projectHost, sessionId },
+				params: { hostId: routeHost, sessionId },
 			});
 		} catch (error) {
 			void captureRendererException(error, {
