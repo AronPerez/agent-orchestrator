@@ -97,11 +97,13 @@ export function TopbarOpenEditorButton({
 	// it gets a title, never the red TopbarActionError.
 	const remoteNotice = remote && !workspaceAvailable
 		? remote.sshConfigured
-			? null
-			: t("editor.remoteOn", { host: remote.hostLabel })
+			? null // the host itself said the workspace is gone — fall through to red guidance
+			: targets.length > 0
+				? t("editor.remoteNeedsSsh", { host: remote.hostLabel })
+				: t("editor.remoteOn", { host: remote.hostLabel })
 		: null;
-	const guidance = !stateQuery.isPending && !workspaceAvailable && !remote
-		? state?.unavailableReason ?? t("editor.workspaceUnavailable")
+	const guidance = !stateQuery.isPending && !workspaceAvailable && (!remote || remote.sshConfigured)
+		? (state?.unavailableReason ?? (remote ? null : t("editor.workspaceUnavailable")))
 		: !stateQuery.isPending && !remote && editors.length === 0
 			? t("editor.noEditorGuidance", { fileManager: fileManagerName, terminal: terminalName })
 			: null;

@@ -127,6 +127,7 @@ describe("host management from the Host dropdown", () => {
 			expect(bridge.remotes.update).toHaveBeenCalledWith(WORKBOX.url, {
 				label: "workbox",
 				url: "http://192.0.2.5:3011",
+				sshDestination: "",
 			}),
 		);
 		await waitFor(() => expect(disconnectHostMock).toHaveBeenCalledWith(WORKBOX.url));

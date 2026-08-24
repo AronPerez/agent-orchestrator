@@ -806,7 +806,12 @@ const editorHandoff = createEditorHandoff({
 	remoteHost: async (host: string) => {
 		if (host === "local") return null;
 		const view = registry.views().find((candidate) => candidate.url === host);
-		return { label: view?.label ?? host };
+		const entry = (await readRemotes(remotesFilePath()).catch(() => []))
+			.find((candidate) => candidate.url === host);
+		return {
+			label: view?.label ?? entry?.label ?? host,
+			...(entry?.sshDestination ? { sshDestination: entry.sshDestination } : {}),
+		};
 	},
 	readPreference: async () => (await readEditorSettings(editorStateDir())).preferredEditorId,
 	writePreference: async (editorId) => {

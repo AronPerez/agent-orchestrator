@@ -85,9 +85,61 @@ describe("editor handoff", () => {
 		expect(state.unavailableReason).toBeUndefined();
 	});
 
-	it("refuses to open a remote workspace while nothing can open it, naming the host", async () => {
-		const handoff = createEditorHandoff(deps({ remoteHost: vi.fn().mockResolvedValue({ label: "Mini" }) }));
-		await expect(handoff.open({ host: "http://192.0.2.1:3011", sessionId: "adopt-14732", targetId: "vscode" }))
-			.rejects.toThrow("The workspace for this session is on Mini.");
+	const MINI = { label: "Mini", sshDestination: "aron@mini.local" };
+	const REMOTE_HOST = "http://192.0.2.1:3011";
+
+	it("offers only CLI-resolved VS Code-family editors for a remote host", async () => {
+		// Fixture: vscode resolves via /bin/code (CLI), cursor via /Applications
+		// (open -a) — only the CLI one can take --folder-uri.
+		const handoff = createEditorHandoff(deps({ remoteHost: vi.fn().mockResolvedValue(MINI) }));
+		const state = await handoff.getState({ host: REMOTE_HOST, sessionId: "adopt-14732" });
+		expect(state.targets.map(({ id }) => id)).toEqual(["vscode"]);
+		expect(state.remote).toEqual({ hostLabel: "Mini", sshConfigured: true });
+		expect(state.workspaceAvailable).toBe(true);
+	});
+
+	it("opens a remote workspace as an ssh-remote folder URI from the home directory", async () => {
+		const input = deps({
+			remoteHost: vi.fn().mockResolvedValue(MINI),
+			resolveWorkspace: vi.fn().mockResolvedValue("/Users/stormbreaker/Desktop/skyvern-cloud"),
+		});
+		const handoff = createEditorHandoff(input);
+		await expect(handoff.open({ host: REMOTE_HOST, sessionId: "adopt-14732", targetId: "vscode" }))
+			.resolves.toMatchObject({ id: "vscode", kind: "editor" });
+		expect(input.resolveWorkspace).toHaveBeenCalledWith(REMOTE_HOST, "adopt-14732");
+		expect(input.launch).toHaveBeenCalledWith(
+			"/bin/code",
+			["--folder-uri", "vscode-remote://ssh-remote+aron@mini.local/Users/stormbreaker/Desktop/skyvern-cloud"],
+			"/Users/tester", // a remote path cannot be a local cwd
+		);
+		expect(input.writePreference).toHaveBeenCalledWith("vscode");
+	});
+
+	it("keeps remote state neutral when no SSH destination is configured", async () => {
+		const input = deps({ remoteHost: vi.fn().mockResolvedValue({ label: "Mini" }) });
+		const handoff = createEditorHandoff(input);
+		const state = await handoff.getState({ host: REMOTE_HOST, sessionId: "adopt-14732" });
+		expect(state.remote).toEqual({ hostLabel: "Mini", sshConfigured: false });
+		expect(state.workspaceAvailable).toBe(false);
+		expect(state.unavailableReason).toBeUndefined();
+		expect(input.resolveWorkspace).not.toHaveBeenCalled();
+		await expect(handoff.open({ host: REMOTE_HOST, sessionId: "adopt-14732", targetId: "vscode" }))
+			.rejects.toThrow("Add an SSH destination for Mini to open its workspaces here.");
+	});
+
+	it("refuses non-attachable targets on a remote host", async () => {
+		const handoff = createEditorHandoff(deps({ remoteHost: vi.fn().mockResolvedValue(MINI) }));
+		await expect(handoff.open({ host: REMOTE_HOST, sessionId: "adopt-14732", targetId: "file-manager" }))
+			.rejects.toThrow("That open target is not available on Mini.");
+	});
+
+	it("reports a workspace the remote daemon cannot confirm as unavailable, in red", async () => {
+		const handoff = createEditorHandoff(deps({
+			remoteHost: vi.fn().mockResolvedValue(MINI),
+			resolveWorkspace: vi.fn().mockRejectedValue(new Error("Session workspace is not available")),
+		}));
+		const state = await handoff.getState({ host: REMOTE_HOST, sessionId: "adopt-14732" });
+		expect(state.workspaceAvailable).toBe(false);
+		expect(state.unavailableReason).toBe("Session workspace is not available");
 	});
 });

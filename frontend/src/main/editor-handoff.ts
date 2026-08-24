@@ -168,6 +168,15 @@ function resolveTerminal(
 	return undefined;
 }
 
+// VS Code-family CLIs accept --folder-uri with a vscode-remote ssh URI; the
+// flag needs the real CLI binary, so a Dock-only install (resolved through
+// `open -a`, i.e. argsBeforeWorkspace present) does not qualify.
+const REMOTE_CAPABLE_EDITORS = new Set<EditorId>(["vscode", "vscode-insiders", "vscodium", "cursor", "windsurf"]);
+
+function supportsRemoteOpen(id: OpenTargetId, command: ResolvedCommand): boolean {
+	return REMOTE_CAPABLE_EDITORS.has(id as EditorId) && !command.argsBeforeWorkspace;
+}
+
 export function createEditorHandoff(deps: EditorHandoffDeps): EditorHandoff {
 	const isExecutable = deps.isExecutable ?? ((candidatePath) => defaultIsExecutable(candidatePath, deps.platform));
 	const isDirectory = deps.isDirectory ?? defaultIsDirectory;
@@ -193,14 +202,27 @@ export function createEditorHandoff(deps: EditorHandoffDeps): EditorHandoff {
 			const preferredEditorId = await deps.readPreference();
 			const remote = await deps.remoteHost(host);
 			if (remote) {
-				// A remote workspace is a place, not a failure: no unavailableReason,
-				// so the renderer has nothing to paint red. Nothing can open it yet.
-				return {
-					targets,
-					preferredEditorId,
-					workspaceAvailable: false,
-					remote: { hostLabel: remote.label, sshConfigured: false },
-				};
+				const remoteTargets = editors
+					.filter(({ target, command }) => supportsRemoteOpen(target.id, command))
+					.map(({ target }) => target);
+				const remoteState = { hostLabel: remote.label, sshConfigured: Boolean(remote.sshDestination) };
+				if (!remote.sshDestination) {
+					// Not an error: nothing is broken, one setting is absent.
+					return { targets: remoteTargets, preferredEditorId, workspaceAvailable: false, remote: remoteState };
+				}
+				try {
+					await deps.resolveWorkspace(host, sessionId);
+					return { targets: remoteTargets, preferredEditorId, workspaceAvailable: true, remote: remoteState };
+				} catch (error) {
+					// The host itself says the workspace is gone — that IS an error.
+					return {
+						targets: remoteTargets,
+						preferredEditorId,
+						workspaceAvailable: false,
+						unavailableReason: workspaceUnavailable(error),
+						remote: remoteState,
+					};
+				}
 			}
 			try {
 				await deps.resolveWorkspace(host, sessionId);
@@ -219,11 +241,29 @@ export function createEditorHandoff(deps: EditorHandoffDeps): EditorHandoff {
 			const sessionId = input.sessionId.trim();
 			if (!sessionId) throw new Error("Session is required.");
 			const remote = await deps.remoteHost(input.host);
-			if (remote) throw new Error(`The workspace for this session is on ${remote.label}.`);
 			const preferredEditorId = await deps.readPreference();
 			const targetId = input.targetId ?? preferredEditorId;
 			if (input.targetId && input.targetId !== "file-manager" && input.targetId !== "terminal" && !isEditorId(input.targetId)) {
 				throw new Error("That open target is not supported.");
+			}
+			if (remote) {
+				if (!remote.sshDestination) {
+					throw new Error(`Add an SSH destination for ${remote.label} to open its workspaces here.`);
+				}
+				const capable = editors.find(({ target: candidate, command }) =>
+					candidate.id === targetId && supportsRemoteOpen(candidate.id, command));
+				if (!capable) throw new Error(`That open target is not available on ${remote.label}.`);
+				const workspacePath = await deps.resolveWorkspace(input.host, sessionId);
+				const folderUri = `vscode-remote://ssh-remote+${remote.sshDestination}${workspacePath}`;
+				try {
+					// cwd is home: the workspace path exists on the other machine.
+					await deps.launch(capable.command.command, ["--folder-uri", folderUri], deps.homeDir);
+				} catch (error) {
+					deps.logError?.(`failed to open remote session target ${capable.target.id}`, error);
+					throw new Error(`Could not open ${capable.target.name}. Check that it is installed and try again.`);
+				}
+				await deps.writePreference(capable.target.id as EditorId);
+				return capable.target;
 			}
 			const target = resolveTarget(targetId);
 			if (!target) {
