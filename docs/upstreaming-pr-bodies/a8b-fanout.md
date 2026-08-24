@@ -16,4 +16,6 @@ The board only ever reads one host. With more than one connected, a sleeping hos
 
 ## Artifacts (if appropriate):
 
-Evidence pending — opens draft ahead of capture; a two-host board screenshot showing independent sections lands here before review.
+![Board showing both hosts' sections fanned out side by side, each with its own sessions](https://raw.githubusercontent.com/AronPerez/agent-orchestrator/campaign-assets/qa-evidence/a8b-fanout.png)
+
+*Captured on a dev build; `--disable-web-security` bridges the dev-origin CORS gap only (production origin `app://renderer` passes the same check natively) — the daemon, proxy, credential, and traffic are all real.*
