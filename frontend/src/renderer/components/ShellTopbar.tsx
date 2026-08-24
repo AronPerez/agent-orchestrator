@@ -326,7 +326,7 @@ export function ShellTopbar({
 					<>
 						{isOrchestrator ? (
 							<>
-								<ProjectTerminationFeedback projectId={projectId} />
+								<ProjectTerminationFeedback project={projectRef} />
 								{sessionAction ? (
 									<div className="inline-flex shrink-0 items-center" style={noDragStyle}>
 										{sessionAction}
@@ -475,7 +475,7 @@ export function TopbarKillButton({
 	const [confirmOpen, setConfirmOpen] = useState(false);
 	const queryClient = useQueryClient();
 	const kill = useTerminateSession();
-	const { error, isPending } = useTerminateSessionState(session.id);
+	const { error, isPending } = useTerminateSessionState(session);
 
 	const confirmKill = () => {
 		setConfirmOpen(false);
@@ -498,7 +498,7 @@ export function TopbarKillButton({
 									aria-label={isPending ? t("shell.killing") : t("shell.killSession")}
 									disabled={isPending}
 									onClick={() => {
-										clearTerminateSessionState(queryClient, session.id);
+										clearTerminateSessionState(queryClient, session);
 									}}
 									variant="killIcon"
 								>
@@ -515,9 +515,9 @@ export function TopbarKillButton({
 	);
 }
 
-function ProjectTerminationFeedback({ projectId }: { projectId: string | undefined }) {
+function ProjectTerminationFeedback({ project }: { project: Ref | undefined }) {
 	const { t } = useTranslation();
-	const states = useProjectTerminateSessionStates(projectId);
+	const states = useProjectTerminateSessionStates(project);
 	if (states.length === 0) return null;
 
 	return (

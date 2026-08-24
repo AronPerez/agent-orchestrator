@@ -510,7 +510,7 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 	useEffect(() => stopTerminalLiveResize, [stopTerminalLiveResize]);
 
 	const session = workspaceQuery.data;
-	const interfaceSwitch = useSessionInterfaceTransition(session?.id);
+	const interfaceSwitch = useSessionInterfaceTransition(session);
 	const reviewerQuery = useQuery({
 		queryKey: ["session-reviews", refKey(sessionRef)],
 		enabled: Boolean(
@@ -1108,7 +1108,7 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 		(nextOpen: boolean) => {
 			setHandoffDialogOpen(nextOpen);
 			if (!nextOpen && handoffSwitchError && session) {
-				clearSwitchAgentState(queryClient, session.id);
+				clearSwitchAgentState(queryClient, session);
 			}
 		},
 		[handoffSwitchError, queryClient, session],

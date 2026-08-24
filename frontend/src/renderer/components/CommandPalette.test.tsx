@@ -472,7 +472,7 @@ describe("CommandPalette drill-in + Enter", () => {
 		await screen.findByPlaceholderText(/search actions/i);
 
 		fireEvent.click(screen.getByText("Resume agent"));
-		await waitFor(() => expect(restoreMock).toHaveBeenCalledWith("w-archived"));
+		await waitFor(() => expect(restoreMock).toHaveBeenCalledWith(expect.objectContaining({ host: "local", id: "w-archived" })));
 		await waitFor(() =>
 			expect(navigateMock).toHaveBeenCalledWith({
 				to: "/host/$hostId/session/$sessionId",

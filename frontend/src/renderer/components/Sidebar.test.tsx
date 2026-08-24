@@ -1456,7 +1456,7 @@ describe("Sidebar", () => {
 		await user.clear(input);
 		await user.type(input, "polish login{Enter}");
 
-		await waitFor(() => expect(renameSessionMock).toHaveBeenCalledWith("proj-1-1", "polish login"));
+		await waitFor(() => expect(renameSessionMock).toHaveBeenCalledWith(expect.objectContaining({ host: "local", id: "proj-1-1" }), "polish login"));
 	});
 
 	it("caps the inline rename input at 20 characters", async () => {

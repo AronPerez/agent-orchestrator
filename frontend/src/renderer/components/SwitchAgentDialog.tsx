@@ -126,7 +126,7 @@ export function SwitchAgentDialog({ agentSwitch, container, open, session, onOpe
 	const [modelWarning, setModelWarning] = useState<string | undefined>();
 	const switchAgent = useSwitchAgent();
 	const recoverAgentSwitch = useRecoverAgentSwitch();
-	const switchMutation = useSwitchAgentState(session.id);
+	const switchMutation = useSwitchAgentState(session);
 	const admissionPending = switchMutation.isPending;
 	// Agent-switch history has its own bounded polling fallback. Prefer that
 	// observation over the compact workspace projection so a settled recovery
@@ -172,7 +172,7 @@ export function SwitchAgentDialog({ agentSwitch, container, open, session, onOpe
 	}, [durableSwitching, onOpenChange, open]);
 	const clearFailedAttempt = () => {
 		if (!switchMutation.error) return;
-		clearSwitchAgentState(queryClient, session.id);
+		clearSwitchAgentState(queryClient, session);
 	};
 
 	const changeTarget = (nextTarget: SwitchAgentHarness) => {
