@@ -1,32 +1,19 @@
-## What
+## Ticket
 
-The renderer cannot authenticate to a remote daemon itself: EventSource
-and WebSocket cannot set Authorization, and app://renderer has no CORS
-standing there. Main starts one loopback proxy per connected host bound
-to 127.0.0.1 on an ephemeral port; the renderer addresses it as
-http://127.0.0.1:<port>/<128-bit token>/, the proxy strips the token and
-the renderer Origin, injects the saved Bearer credential, restores the
-host's path prefix, speaks TLS to an https host, and streams SSE and
-WebSocket frames as they arrive. A request without the token is answered
-404 and forwarded nowhere. Proxies are torn down on disconnect and on
-quit (tunnelled sockets included, so quit cannot hang on one).
+No upstream issue. [RFC](https://github.com/AronPerez/agent-orchestrator/blob/plan/2026-08-24-wave3/docs/upstreaming-rfc-remote-hosts.md). Stacked on #4367.
 
-## Why
+## Problem
 
-Part of the remote-hosts series proposed in #RFC. This slice lands dark: with the Remote hosts flag off there is no behaviour change.
+The renderer cannot authenticate to a remote daemon on its own: `EventSource` and `WebSocket` cannot set an `Authorization` header, and `app://renderer` has no CORS standing with a remote host, so there is no way for the UI to stream from or call a saved host once one exists.
 
-## How
+## Solution
 
-Still dark: nothing in the renderer connects a host yet.
+Main starts one loopback proxy per connected host bound to `127.0.0.1` on an ephemeral port; the renderer addresses it as `http://127.0.0.1:<port>/<token>/`, and the proxy strips the token, injects the saved Bearer credential, and streams SSE/WebSocket frames as they arrive. A request without the token gets a 404. Proxies are torn down on disconnect and on quit, tunnelled sockets included. Still dark: nothing connects a host yet.
 
-## Testing
+## How Has This Been Tested?
 
-`cd frontend && npm run typecheck && npx vitest run src/main/remote-proxy.test.ts src/main/remote-registry.test.ts src/main/remotes-main.test.ts` — counts as in the table in `docs/upstreaming-stack-status.md`. No Go or OpenAPI surface is touched, so the `go` and `api-drift` CI jobs are unaffected.
+`cd frontend && npm run typecheck && npx vitest run src/main/remote-proxy.test.ts src/main/remote-registry.test.ts src/main/remotes-main.test.ts` on the current `main` (`c9a0adb2`): green, 28 tests including "never connected is a no-op" and the token-mismatch 404 case. No Go or OpenAPI surface is touched.
 
-## Checklist
+## Artifacts (if appropriate):
 
-- [x] Branched from `main`
-- [x] One focused change; links the related issue
-- [x] Follows AGENTS.md conventions and PR hygiene
-- [x] Tests added for user-visible behavior
-- [x] Relevant CI checks pass for the area touched
+No renderable surface: an Electron main-process loopback proxy with no renderer UI in this PR. Covered by the unit tests above.

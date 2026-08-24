@@ -1,34 +1,31 @@
-## What
+## Ticket
 
-A client connected to a daemon on another machine has no way to see that
-machine's filesystem, so a project path there has to be typed blind. This
-answers with the subdirectories of one absolute path: names, paths, and
-whether each carries a `.git` entry (a directory for a clone, a file for a
-worktree checkout). Dotted names are skipped, files are not listed, and a
-listing is capped at 500 entries with `truncated` set.
+No upstream issue yet. Design note: [remote hosts RFC](https://github.com/AronPerez/agent-orchestrator/blob/plan/2026-08-24-wave3/docs/upstreaming-rfc-remote-hosts.md).
 
-## Why
+## Problem
 
-Part of the remote-hosts series proposed in #RFC, and the only PR in it that touches Go. It has no dependency on the rest of the series and can be reviewed and merged on its own, in any order relative to the others.
+A client connected to a daemon on another machine cannot see that machine's filesystem, so an absolute project path over there has to be typed blind — with no way to tell a typo from a folder that is really missing, and no way to know whether a directory is already a checkout. Anyone adding a project on a second machine is guessing.
 
-**Is this an escalation?** No. It sits behind the same connection credential that already authorises spawning an agent — that is, a shell — on the host, so it grants no reach that credential did not already have. It reads directory names and nothing else: no file contents, no sizes, no timestamps, no dotted names. The alternative is what the client does without it, which is ask people to type an absolute path for a filesystem they cannot see.
+## Solution
 
-## How
+A read-only `GET /api/v1/fs/dirs` answers with the subdirectories of one absolute path: names, paths, and whether each carries a `.git` entry (a directory for a clone, a file for a worktree checkout). Dotted names are skipped, files are never listed, and a listing is capped at 500 entries with `truncated` set. It is additive and sits behind the connection credential that already exists.
 
-The daemon judges the path by its own OS's rules — a remote client cannot know what a valid absolute path looks like over there, so a relative path is refused here (`FS_PATH_NOT_ABSOLUTE`) rather than pre-judged client-side. `ENOENT`, `EACCES` and `ENOTDIR` are separated into 404 / 403 / 400 so a caller can tell "no such folder" from "may not read it" from "that is a file".
+## How Has This Been Tested?
 
-The route is declared in `specgen` beside the others and the spec and `schema.ts` are regenerated, so `TestRouteSpecParity` and `api-drift` both hold; regeneration is idempotent.
+`cd backend && go build ./... && go vet ./... && go test ./...` on the current `main` (`c9a0adb2`): 158 packages ok, 0 failures, `gofmt -l` empty. That includes `TestListDirs` x4 and the LAN policy assertion. Regeneration is idempotent on this base: `go generate ./internal/httpd/apispec/...` followed by `npm run api:ts` leaves the working tree clean, so `TestRouteSpecParity` and the `api-drift` job both hold.
 
-The LAN test pins both halves of its policy: credential-gated like every other data route, and specifically **not** on `lanControlBlockedPrefixes`. That second half is the one worth having — a `ROUTE_LOOPBACK_ONLY` answer would kill remote browsing silently, and no loopback-side test could catch it. The assertion was falsified before it was trusted: adding `/api/v1/fs` to the blocked prefixes makes it fail.
+## Artifacts (if appropriate):
 
-## Testing
+No renderable surface: Go plus two generated API files. The only `frontend/src` change is the regenerated `api/schema.ts`.
 
-`cd backend && go build ./... && go vet ./internal/httpd/... && go test ./internal/httpd/...` — all green, including `TestListDirs*` ×4 and the LAN policy assertion. `npm run api` produces no diff (`api-drift`).
+## Implementation notes
 
-## Checklist
+**Is this an escalation?** No. It sits behind the same connection credential that already authorises spawning an agent — that is, a shell — on the host, so it grants no reach that credential did not already have. It reads directory names and nothing else: no file contents, no sizes, no timestamps, no dotted names.
 
-- [x] Branched from `main`
-- [x] One focused change; links the related issue
-- [x] Follows AGENTS.md conventions and PR hygiene
-- [x] Tests added for user-visible behavior
-- [x] Relevant CI checks pass for the area touched
+The daemon judges the path by its own OS's rules. A remote client cannot know what a valid absolute path looks like over there, so a relative path is refused by the daemon (`FS_PATH_NOT_ABSOLUTE`) rather than pre-judged client-side. `ENOENT`, `EACCES` and `ENOTDIR` are separated into 404 / 403 / 400 so a caller can tell "no such folder" from "may not read it" from "that is a file".
+
+The route is declared in `specgen` beside the others and the spec and `schema.ts` are regenerated rather than hand-written.
+
+The LAN test pins both halves of the policy: credential-gated like every other data route, and specifically **not** on `lanControlBlockedPrefixes`. That second half is the one worth having — a `ROUTE_LOOPBACK_ONLY` answer would kill remote browsing silently, and no loopback-side test could catch it. The assertion was falsified before it was trusted: adding `/api/v1/fs` to the blocked prefixes makes it fail.
+
+Follow-up, not included here: nothing calls this endpoint yet. The client that uses it is a separate PR in the same series.

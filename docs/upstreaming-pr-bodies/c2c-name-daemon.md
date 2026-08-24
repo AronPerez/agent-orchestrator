@@ -1,29 +1,19 @@
-## What
+## Ticket
 
-`ao session kill`, `ao session cleanup` and `ao project rm` hit the right daemon, but say nothing about which one. Their prompts and success lines — plus the `registered project … at …` echo — now name the daemon when one was given.
+No upstream issue. [RFC](https://github.com/AronPerez/agent-orchestrator/blob/plan/2026-08-24-wave3/docs/upstreaming-rfc-remote-hosts.md). Stacked on #4358.
 
-## Why
+## Problem
 
-Part of the CLI half of the remote-hosts series proposed in #RFC, on top of the `--url` flag. "Remove project `"api"`? Type the project id to confirm:" and "Clean 2 terminated sessions across all projects?" both beg the question "on whose machine?", and neither a session id nor a project id is host-qualified — the same id can exist on two daemons. For a destructive verb, being unable to tell where you are about to act is the defect.
+`ao session kill`, `ao session cleanup` and `ao project rm` hit the right daemon but say nothing about which one. Neither a session id nor a project id is host-qualified — the same id can exist on two daemons — so a destructive prompt like "Remove project `api`?" cannot answer "on whose machine?", and a successful `project add` echo looks identical whether it resolved locally or remotely.
 
-## How
+## Solution
 
-One helper, `resolvedBySuffix()`, returns `" on the remote daemon at <url>"` for a remote target and `""` for a local one. `confirmProjectRemoval` and `confirmSessionCleanup` become methods so the prompt can carry it; `session kill` (both the freed and workspace-preserved lines), `session cleanup` (the prompt, the dry-run line and the completion summary) and `project rm` carry it on output.
+One helper, `resolvedBySuffix()`, returns `" on the remote daemon at <url>"` for a remote target and `""` for a local one. The three destructive prompts and their success lines, plus the `project add` path echo, carry it. Because the suffix is empty locally, local output is unchanged — tests assert the local forms as exact literals so a future change that appends anything fails here rather than drifting silently.
 
-The `project add` path echo needed it most: for an absolute path the echoed string is byte-identical to what the operator typed, so it carried no information at all about which machine resolved it. That echo is the one moment a wrong host is still catchable.
+## How Has This Been Tested?
 
-Because the suffix is empty for a local daemon, local output is unchanged. The tests assert the local forms as **exact literals** rather than substrings, so a future change that appends anything to a local line fails here rather than silently drifting.
+`cd backend && go build ./... && go vet ./... && go test ./... && go test -race ./internal/cli/` on the current `main` (`c9a0adb2`): 158 packages ok, `gofmt -l` clean. Four new tests cover the helper itself and the prompt-plus-output pairs for all three commands, each asserting both the remote form and the exact local literal.
 
-## Testing
+## Artifacts (if appropriate):
 
-`cd backend && go build ./... && go vet ./... && go test ./... && go test -race ./internal/cli/`; `gofmt -l` clean. Four new tests: the helper itself (empty locally, names the daemon remotely), and the prompt-plus-output pairs for `project rm`, `session kill` and `session cleanup`, each covering the remote form and the exact local literal. Path-free by design so they assert identically on every runner OS.
-
-No frontend file and no OpenAPI surface is touched, so the `frontend`, `renderer-smoke` and `api-drift` CI jobs are unaffected.
-
-## Checklist
-
-- [x] Branched from `main`
-- [x] One focused change; links the related issue
-- [x] Follows AGENTS.md conventions and PR hygiene
-- [x] Tests added for user-visible behavior
-- [x] Relevant CI checks pass for the area touched
+No renderable surface: Go CLI code only, no files under `frontend/src`. Behaviour is covered by the tests above.

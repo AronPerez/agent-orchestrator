@@ -1,33 +1,19 @@
-## What
+## Ticket
 
-The LAN listener blocks loopback-only control prefixes (`/shutdown`, `/internal/`, `/api/v1/mobile`, `/api/v1/dev`, `/api/v1/system/install`) before auth and before the router. It answered `ROUTE_NOT_FOUND`; it now answers `ROUTE_LOOPBACK_ONLY`, still at status 404.
+No upstream issue. [RFC](https://github.com/AronPerez/agent-orchestrator/blob/plan/2026-08-24-wave3/docs/upstreaming-rfc-remote-hosts.md). Stacked on #4358.
 
-## Why
+## Problem
 
-Part of the CLI half of the remote-hosts series proposed in #RFC. A deliberate policy block was reported with the code that means "this endpoint does not exist" — so an operator who hits one goes and audits daemon builds and finds nothing wrong, because nothing is wrong. With the CLI able to target a daemon over the network, that misdiagnosis is now reachable by anyone running `ao … --url`.
+The LAN listener blocks loopback-only control prefixes (`/shutdown`, `/internal/`, `/api/v1/mobile`, `/api/v1/dev`, `/api/v1/system/install`) before auth, but answers with the same code that means "this endpoint does not exist." An operator who hits a deliberate policy block goes and audits daemon builds and finds nothing wrong — a misdiagnosis now reachable by anyone running `ao … --url`.
 
-## How
+## Solution
 
-`loopbackOnlyJSON` writes the same locked envelope at the same status with a code and a message that say the route is served on the loopback listener only and where to run the command instead. The status stays 404 deliberately: the route genuinely is not mounted on this listener — the LAN handler chain is a different one — and holding the status keeps every existing client's error handling working. The code and the message carry the diagnosis.
+The block now answers `ROUTE_LOOPBACK_ONLY` at the same 404 status, naming the diagnosis and where to run the command instead. The block stays outermost, in front of auth, so no code below runs for a blocked path regardless of forged headers; an unauthenticated caller learns only a constant of the AO build, never a fact about this machine.
 
-The block stays outermost, in front of `authMiddleware`, and that placement is load-bearing: no code below — not auth, not the router's middleware stack — runs for a blocked path, whatever headers the caller forged. A message only an authenticated caller could see would mean moving the block inside auth or evaluating the credential twice, trading a structural guarantee for wording.
+## How Has This Been Tested?
 
-What an unauthenticated caller learns is a constant of the AO build (the prefix list, which is in the source), never a fact about this machine. Every path under a blocked prefix gets the identical response whether or not a handler exists behind it, so the block is not a route-table oracle for anyone who can reach the socket. A test pins exactly that: a registered blocked route and an absent path under the same prefix differ only where the message echoes the caller's own path back.
+`cd backend && go build ./... && go vet ./... && go test ./... && go test -race ./internal/httpd/ ./internal/cli/` on the current `main` (`c9a0adb2`): 158 packages ok, `gofmt -l` clean. Four new tests: a blocked route vs. a genuinely absent route vs. an ordinary 200; unchanged behaviour over the loopback listener; indistinguishability of blocked-vs-absent to an unauthenticated caller; and one end-to-end case driving the real CLI through `--url` against the real LAN listener.
 
-The loopback listener serves the shared router directly and is untouched.
+## Artifacts (if appropriate):
 
-`ao preview` also renders this block; the one-sentence comment update in `cli/preview.go` rides with the `--url` refusal PR instead, so this PR stays daemon-side.
-
-## Testing
-
-`cd backend && go build ./... && go vet ./... && go test ./... && go test -race ./internal/httpd/ ./internal/cli/`; `gofmt -l` clean. Four new tests: a blocked route answers 404 `ROUTE_LOOPBACK_ONLY` while a genuinely absent route still answers 404 `ROUTE_NOT_FOUND` and an ordinary route still answers 200; the same route over the loopback listener is unchanged; an unauthenticated caller cannot tell a registered blocked route from an absent path under the same prefix, and outside the prefixes is still 401; and one end-to-end case that stands up the real LAN listener and drives the real CLI through `--url`, so the daemon's wire format and the CLI's rendering cannot drift apart — it also asserts the blocked request never reached the router. The existing `TestLANManagerBlocksLoopbackOnlyControlRoutes` continues to pass unchanged.
-
-No frontend file and no OpenAPI surface is touched, so the `frontend`, `renderer-smoke` and `api-drift` CI jobs are unaffected.
-
-## Checklist
-
-- [x] Branched from `main`
-- [x] One focused change; links the related issue
-- [x] Follows AGENTS.md conventions and PR hygiene
-- [x] Tests added for user-visible behavior
-- [x] Relevant CI checks pass for the area touched
+No renderable surface: Go daemon code only, no files under `frontend/src`. Behaviour is covered by the tests above.
