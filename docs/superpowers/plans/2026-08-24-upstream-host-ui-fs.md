@@ -38,6 +38,11 @@ Four, each because the spec's file list does not survive contact with what the c
 3. **Registering a project on a remote host moves from A7b into A6.** §2.4 gives A6 "one mount point in `CreateProjectFlow.tsx`" and A7b the host choice's effect. Split that way, A6 ships a host dropdown where picking *workbox* then *Open local repository* opens the **local** native folder dialog and registers the project on the **local** daemon — a control that silently acts on the wrong machine. So A6 carries the picker *and* what picking does (`openFolderStep`'s remote branch, the absolute-path field, `createRemoteProject`, `lib/daemon-error.ts`), and A7b is exactly what its title says: browsing that host's folders instead of typing the path. A6 lands at 14 non-test files, inside the ≤15 rule; §2.4 already flagged A6 as the stack's largest UI PR at ~700 lines and offered to split add/edit from remove if reviewers ask.
 4. **`lib/response-validation.ts` lands in A7b, not A6.** Plan 1 deferred it out of A5 for having no caller; its only caller anywhere is `RemoteFolderPicker.parseListing`, so it ships with it.
 
+Two more, found at RED during execution rather than during reading, and recorded here so a re-run does not rediscover them:
+
+5. **`frontend/src/renderer/test/fake-daemon.ts` ships with A6.** `AddRemoteHostDialog.test.tsx` imports it — two `it.each` cases prove a 200-HTML or wrong-shape body from an older daemon surfaces as "not an AO daemon" instead of throwing. §2.4 puts the hostile-daemon *harness* (fork #87) in A10, but the fixture is a 60-line `fetch` stub with no production import, and A6 is where the first test needs it. It ships **trimmed to the behaviours wave 2 exercises** (`healthy`, `html-catchall`, `wrong-shape`, `unauthorized`, `unreachable`), dropping `route-missing` and the `/api/v1/fs/dirs` case — both name a route A6 has not introduced — and `slow`, which has no consumer before Plan 3. Its own `fake-daemon.test.ts` ships with it, trimmed the same way, so no behaviour is shipped untested.
+6. **One test case leaves `AddRemoteHostDialog.test.tsx` with the telemetry.** `it("reports which way an add failed, and never the address or the password")` asserts `captureRendererEvent` was called with `ao.renderer.host_connect`; with `reportHostConnect` removed (deviation 2) it has no subject. The case, the `vi.mock("../lib/telemetry", …)` and the `captureRendererEventMock` handle move to A10 together. The UI half of what it covered stays pinned by "distinguishes a wrong password from an unreachable host" and "says the host is unreachable when it does not answer". Evidence for deviation 2, gathered here: upstream's `sanitizeRendererProperties` (`lib/telemetry.ts:448`) is a per-event `switch` with an explicit allowlist, so `ao.renderer.host_connect` shipped in A6 would emit an event with **every** property stripped — adding its case is exactly the telemetry review §2.4 assigns to A10.
+
 One spec path correction, not a deviation: §2.4 A7a names `specgen/build.go`; the file is `backend/internal/httpd/apispec/specgen/build.go`.
 
 ---
@@ -103,6 +108,8 @@ node_modules/.bin/tsc --noEmit -p tsconfig.e2e.json && echo E2E_TSC_OK
 
 Expected: `Test Files  3 passed (3)`, `TSC_OK`, `E2E_TSC_OK`. A failure here is the environment or a Plan 1 regression, not this plan — fix it before Task 2.
 
+**A whole-suite run is not a clean baseline and must not be used as one.** Measured 2026-08-24 on untouched `upstream/main`: `vitest run` over all 227 files reports `11 failed | 216 passed`, `5 tests failed`, every failure in `src/landing/**` or `src/annotate-preload.test.ts` and every one an `ERR_MODULE_NOT_FOUND` — the landing app is a separate package and this worktree never installed it (the no-npm-workspaces trap). "Green" in this plan therefore means the named suites plus both typechecks. If a whole-suite run is wanted as a cross-check, A/B it: run the same file list on `upstream/main` and require the failure sets to be identical, which they were for A7b.
+
 - [ ] **Step 3: Baseline the A7a base — prove upstream's Go tree is green**
 
 ```bash
@@ -150,7 +157,9 @@ cd frontend && node_modules/.bin/vitest run --config vite.renderer.config.ts \
   src/renderer/components/AddRemoteHostDialog.test.tsx src/renderer/components/CreateProjectFlowHosts.test.tsx 2>&1 | grep -E "Error|Tests |Test Files" | head -6
 ```
 
-Expected: three suites fail to resolve (`Failed to resolve import "../hooks/useRemoteHosts"` / `"./HostSelect"` / `"./AddRemoteHostDialog"`); `CreateProjectFlowHosts.test.tsx` collects but its cases fail on the missing `host:` button. Nothing passes that should not.
+Expected: three suites fail to resolve (`Failed to resolve import "../hooks/useRemoteHosts"` / `"./HostSelect"` / `"./AddRemoteHostDialog"`); `CreateProjectFlowHosts.test.tsx` collects but its five cases fail on the missing `host:` button. Nothing passes that should not.
+
+`AddRemoteHostDialog.test.tsx` also fails to resolve `../test/fake-daemon` — that is deviation 5, and Step 2b writes the trimmed fixture. Note too that both `HostSelect.test.tsx` and `AddRemoteHostDialog.test.tsx` stay red after their modules exist and only go green once Step 5 lands the i18n keys: they match on rendered labels, and `t()` returns the bare key until the catalogue has it. Do not go hunting for a component bug in between.
 
 The four suites are 5 + 12 + 21 + 6 = 44 cases. What they pin, in one line each: the flag off means `remotes.list`/`remotes.probe` are never called and no host row renders; every saved host shows as `checking` before its probe answers, so a slow host never looks like a missing one; an unreachable host stays focusable but is not selectable and says why in text, not colour; the add dialog refuses a URL carrying userinfo and refuses an unparseable address with a *different* sentence than an unreachable host; a blank password on an edit keeps the saved one; a probe is announced through `role="status"` and its failure through `role="alert"` that clears on retype; removing a host names the machine in the confirmation, and both edit and remove drop the renderer's client for the old base.
 
@@ -229,6 +238,18 @@ Verify no telemetry import survives:
 ```bash
 grep -rn "host-telemetry\|reportHostConnect" "$STACK/frontend/src/renderer" ; echo "telemetry refs exit=$? (1 means clean)"
 ```
+
+- [ ] **Step 2b: Write the trimmed fake-daemon fixture, and drop the telemetry-only test case**
+
+Per deviations 5 and 6. Write `frontend/src/renderer/test/fake-daemon.ts` exporting `type Behaviour = "healthy" | "html-catchall" | "wrong-shape" | "unauthorized" | "unreachable"` and `fakeDaemon(behaviour): typeof fetch` — `healthy` answers `/healthz`, `/readyz`, `/api/v1/projects`, `/api/v1/sessions` and 404s the rest; `html-catchall` answers every path `200 text/html`; `wrong-shape` answers `200 {"ok":true}`; `unauthorized` answers the daemon's real `401 {error,code:"BAD_PASSWORD",message,requestId}` envelope; `unreachable` throws `TypeError("fetch failed")`. Write `fake-daemon.test.ts` with one case per behaviour.
+
+Then in `AddRemoteHostDialog.test.tsx`, delete `captureRendererEventMock` from the `vi.hoisted` block, the `vi.mock("../lib/telemetry", …)` line, the `captureRendererEventMock.mockClear();` in `beforeEach`, and the whole `it("reports which way an add failed, and never the address or the password", …)` case. Confirm:
+
+```bash
+grep -c "captureRendererEvent\|telemetry" "$STACK/frontend/src/renderer/components/AddRemoteHostDialog.test.tsx"
+```
+
+Expected: `0`.
 
 - [ ] **Step 3: Add the `hostRow` slot to `product-ui` (three lines, tabs)**
 
@@ -745,10 +766,12 @@ and its registration in `operations()`, after `importOperations()`:
 ```
 
 ```bash
-cd "$STACK/backend" && go build ./... && go test ./internal/httpd/apispec/ -run TestRouteSpecParity 2>&1 | tail -3
+cd "$STACK/backend" && gofmt -l internal/httpd/ && go build ./... && echo BUILD_OK
 ```
 
-Expected: `ok`. `TestRouteSpecParity` walks the real chi router against `operations()`, so it fails loudly if the mount and the declaration disagree — which is exactly the check that the three `api.go` lines landed.
+Expected: `BUILD_OK` and no `gofmt` output (the repo's pre-commit hook is gofmt-only, so this is the check that matters).
+
+**Do not run `TestRouteSpecParity` yet.** It walks the real chi router against the **embedded** `openapi.yaml`, not against `operations()` in memory, so until Step 5 regenerates the spec it fails with `mounted route GET /api/v1/fs/dirs has no OpenAPI operation` — which looks like a mount bug and is not one. Step 5 runs the generators, and Step 5's own parity run is the check that the three `api.go` lines landed.
 
 - [ ] **Step 4: Pin the LAN policy — gated, but not blocked**
 
@@ -784,6 +807,17 @@ cd "$STACK/backend" && go test ./internal/httpd/ -run TestLANManager 2>&1 | tail
 
 Expected: `ok`. If the authenticated request returns 404, the route was mounted outside the group the LAN listener serves — fix Step 3's `Register` placement, do not exempt the test.
 
+A passing assertion is not yet a guarding one — the listener wraps a stub handler that answers everything, so confirm it bites before trusting it:
+
+```bash
+cd "$STACK" && cp backend/internal/httpd/lan_listener.go /tmp/lan.bak
+python3 -c "import pathlib;p=pathlib.Path('backend/internal/httpd/lan_listener.go');s=p.read_text();p.write_text(s.replace('var lanControlBlockedPrefixes = []string{','var lanControlBlockedPrefixes = []string{\n\t\"/api/v1/fs\",',1))"
+cd backend && go test ./internal/httpd/ -run TestLANManagerBlocksLoopbackOnlyControlRoutes 2>&1 | grep -E "FAIL|remote folder browsing"
+cd "$STACK" && cp /tmp/lan.bak backend/internal/httpd/lan_listener.go && git diff --stat backend/internal/httpd/lan_listener.go
+```
+
+Expected: the run **fails** with `/api/v1/fs/dirs: got 404 — remote folder browsing needs it reachable over the LAN`, and the restore leaves `lan_listener.go` with an empty diff (this branch must not modify it — only its test).
+
 - [ ] **Step 5: Regenerate the API surface (the `api-drift` gate)**
 
 ```bash
@@ -792,9 +826,10 @@ cd "$STACK/frontend" && export PATH="$HOME/.nvm/versions/node/v24.14.1/bin:$PATH
 cd "$STACK" && git diff --stat backend/internal/httpd/apispec/openapi.yaml frontend/src/api/schema.ts
 grep -n "fs/dirs" backend/internal/httpd/apispec/openapi.yaml
 grep -n "ListDirsResponse\|FSEntry" frontend/src/api/schema.ts | head -4
+cd "$STACK/backend" && go test ./internal/httpd/apispec/... 2>&1 | tail -3
 ```
 
-Expected: both files changed and nothing else; `/api/v1/fs/dirs` present in the YAML; `ListDirsResponse` and `FSEntry` present in `schema.ts`. Re-running both generators must then produce **no** further diff — that is what `api-drift` asserts:
+Expected: both files changed and nothing else (verified 2026-08-24: `openapi.yaml +88`, `schema.ts +94`); `/api/v1/fs/dirs` present in the YAML; `ListDirsResponse` and `FSEntry` present in `schema.ts`; `apispec` and `apispec/specgen` both `ok`, which is `TestRouteSpecParity` passing now that the spec exists. Re-running both generators must then produce **no** further diff — that is what `api-drift` asserts:
 
 ```bash
 cd "$STACK/backend" && go generate ./internal/httpd/apispec/... && cd ../frontend && npm run api:ts && cd .. && git diff --stat | tail -3
