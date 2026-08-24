@@ -93,6 +93,29 @@ Wave 3 forks into two lines that rejoin once. A8a builds on A5 — **not on A2**
    `cd backend && go generate ./internal/httpd/apispec/... && cd ../frontend && npm run api:ts` —
    or `api-drift` fails on a spec built from an older tree.
 
+## Upstream has moved since the stack was cut
+
+Every branch here is built on `upstream/main @ 6cba6344c`. As of **2026-08-24**, upstream is at
+`346b53336` — four commits ahead:
+
+    346b53336 fix(usage): accept switch-sized Codex metadata (#4345)
+    2fa9672c7 feat: add native Kimi ACP chat driver (#4193)
+    f20411d14 feat: add OMP ACP chat driver (#4196)
+    0fed9c46a fix: align sidebar status dots with board lanes (#4026)
+
+Most of it is backend and does not touch this stack. **Three renderer files collide**, and one
+of them is the file the one-tree PR rewrites most:
+
+| File | Upstream change | Stack branch that also touches it |
+| --- | --- | --- |
+| `components/Sidebar.tsx` | status-dot alignment (`0fed9c46a`), ~17 lines | A10 (host sections, switcher, per-project host label) |
+| `components/Sidebar.test.tsx` | the same change's tests, ~49 lines | A10 |
+| `lib/session-presentation.test.ts` | new cases for the shared presentation helper | A8a (fixture `host` field only) |
+
+Rebase A10 before opening it, and expect a real conflict in `Sidebar.tsx` — resolve it by
+keeping both changes, never by taking a side. Nothing else in the stack is affected, and no
+branch needs rebasing until it is opened.
+
 ## The branches
 
 | # | Branch (on `origin`) | SHA | Base | Upstream title | Non-test files | Tests it carries |
