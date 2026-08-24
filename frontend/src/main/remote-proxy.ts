@@ -137,7 +137,12 @@ export async function startRemoteProxy(entry: RemoteEntry): Promise<ActiveProxy>
 				delete headers.connection;
 				delete headers["keep-alive"];
 				res.writeHead(upstreamRes.statusCode ?? 502, headers);
-				// pipe streams SSE chunk-by-chunk; node performs no extra buffering.
+				// Node holds the header block until the first body byte or an explicit
+				// flush. An SSE upstream (GET /api/v1/events) can go arbitrarily long
+				// before its first byte, so without this the client's EventSource sits
+				// in CONNECTING forever — flush headers on their own, then pipe.
+				res.flushHeaders();
+				// pipe streams SSE chunk-by-chunk once headers are already on the wire.
 				upstreamRes.pipe(res);
 			},
 		);
