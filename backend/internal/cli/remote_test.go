@@ -445,3 +445,21 @@ func TestPostLoopbackJSONSkippedForRemote(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// The "registered project ... at <path>" echo is the only moment the operator
+// can catch a wrong host, and for an absolute path the path alone is identical
+// to what they typed. Name the daemon for a remote target; stay byte-identical
+// for a local one.
+func TestResolvedBySuffix(t *testing.T) {
+	local := &commandContext{deps: Deps{}.withDefaults()}
+	if got := local.resolvedBySuffix(); got != "" {
+		t.Fatalf("local suffix = %q, want empty (output must not change)", got)
+	}
+	remote := &commandContext{
+		deps:   Deps{}.withDefaults(),
+		remote: &remoteTarget{baseURL: "http://host:3011", token: "tok", source: "--url"},
+	}
+	if got := remote.resolvedBySuffix(); !strings.Contains(got, "http://host:3011") {
+		t.Fatalf("remote suffix = %q, want it to name the daemon", got)
+	}
+}
