@@ -2,6 +2,7 @@ import { renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { refKey } from "../lib/hosts";
 import type { ReactNode } from "react";
 
 const { getMock, postMock, apiErrorCodeMock, apiErrorMessageMock } = vi.hoisted(() => ({
@@ -15,6 +16,19 @@ vi.mock("../lib/api-client", () => ({
 	apiClient: { GET: getMock, POST: postMock, PATCH: vi.fn() },
 	apiErrorCode: apiErrorCodeMock,
 	apiErrorMessage: apiErrorMessageMock,
+}));
+
+// clientFor(LOCAL_HOST) is the client apiClient already was, so the local
+// host resolves to the same fake the api-client mock installs.
+vi.mock("../lib/host-clients", () => ({
+	baseUrlFor: () => "http://127.0.0.1:3001",
+	connectedHosts: (() => {
+		const hosts: string[] = [];
+		return () => hosts;
+	})(),
+	subscribeConnectedHosts: () => () => undefined,
+	isHostReady: () => true,
+	clientFor: () => ({ GET: getMock, POST: postMock, PATCH: vi.fn() }),
 }));
 
 import { useConversation, useConversationCommands } from "./useConversation";
@@ -117,7 +131,7 @@ describe("useConversation snapshot mapping", () => {
 			error: undefined,
 		});
 
-		const { result } = renderHook(() => useConversation("ao-1"), { wrapper });
+		const { result } = renderHook(() => useConversation({ host: "local", id: "ao-1" }), { wrapper });
 		await waitFor(() => expect(result.current.snapshot).toBeDefined());
 
 		expect(result.current.snapshot).toMatchObject({
@@ -137,7 +151,7 @@ describe("useConversation snapshot mapping", () => {
 	it("maps the provider state the timeline cannot express", async () => {
 		getMock.mockResolvedValue({ data: WIRE, error: undefined });
 
-		const { result } = renderHook(() => useConversation("ao-1"), { wrapper });
+		const { result } = renderHook(() => useConversation({ host: "local", id: "ao-1" }), { wrapper });
 		await waitFor(() => expect(result.current.snapshot).toBeDefined());
 		const snapshot = result.current.snapshot!;
 
@@ -170,7 +184,7 @@ describe("useConversation snapshot mapping", () => {
 			error: undefined,
 		});
 
-		const { result } = renderHook(() => useConversation("ao-1"), { wrapper });
+		const { result } = renderHook(() => useConversation({ host: "local", id: "ao-1" }), { wrapper });
 		await waitFor(() => expect(result.current.snapshot).toBeDefined());
 
 		expect(result.current.snapshot!.modelReroute).toBeUndefined();
@@ -183,7 +197,7 @@ describe("useConversation snapshot mapping", () => {
 describe("conversation branching commands", () => {
 	it("edits through the dedicated endpoint without rolling back", async () => {
 		postMock.mockResolvedValue({ data: {}, error: undefined });
-		const { result } = renderHook(() => useConversationCommands("ao-1"), { wrapper });
+		const { result } = renderHook(() => useConversationCommands({ host: "local", id: "ao-1" }), { wrapper });
 
 		await act(async () => {
 			await result.current.editMessage("turn-2", "edited prompt");
@@ -203,7 +217,7 @@ describe("conversation branching commands", () => {
 
 	it("activates an existing branch", async () => {
 		postMock.mockResolvedValue({ data: {}, error: undefined });
-		const { result } = renderHook(() => useConversationCommands("ao-1"), { wrapper });
+		const { result } = renderHook(() => useConversationCommands({ host: "local", id: "ao-1" }), { wrapper });
 
 		await act(async () => {
 			await result.current.activateBranch("branch-previous");
@@ -222,7 +236,7 @@ describe("steering refusals", () => {
 			data: { sourceTurnId: "queued-2", providerTurnId: "provider-1", activityId: "activity-1" },
 			error: undefined,
 		});
-		const { result } = renderHook(() => useConversationCommands("ao-1"), { wrapper });
+		const { result } = renderHook(() => useConversationCommands({ host: "local", id: "ao-1" }), { wrapper });
 		await act(async () => {
 			await result.current.promoteQueuedTurn("queued-2");
 		});
@@ -237,7 +251,7 @@ describe("steering refusals", () => {
 		apiErrorMessageMock.mockReturnValue("a compaction turn is running.");
 		postMock.mockResolvedValue({ data: undefined, error: { code } });
 
-		const { result } = renderHook(() => useConversationCommands("ao-1"), { wrapper });
+		const { result } = renderHook(() => useConversationCommands({ host: "local", id: "ao-1" }), { wrapper });
 		await act(async () => {
 			await result.current.steer("go left").catch(() => {});
 		});
@@ -276,7 +290,7 @@ describe("tool server reload refusals", () => {
 		apiErrorCodeMock.mockReturnValue("CHAT_MCP_RELOAD_UNSUPPORTED");
 		postMock.mockResolvedValue({ data: undefined, error: { code: "CHAT_MCP_RELOAD_UNSUPPORTED" } });
 
-		const { result } = renderHook(() => useConversationCommands("ao-1"), { wrapper });
+		const { result } = renderHook(() => useConversationCommands({ host: "local", id: "ao-1" }), { wrapper });
 		await act(async () => {
 			await result.current.reloadMcpServers().catch(() => {});
 		});
@@ -293,7 +307,7 @@ describe("tool server reload refusals", () => {
 		apiErrorMessageMock.mockReturnValue("a turn is running");
 		postMock.mockResolvedValue({ data: undefined, error: { code: "CHAT_TURN_RUNNING" } });
 
-		const { result } = renderHook(() => useConversationCommands("ao-1"), { wrapper });
+		const { result } = renderHook(() => useConversationCommands({ host: "local", id: "ao-1" }), { wrapper });
 		await act(async () => {
 			await result.current.reloadMcpServers().catch(() => {});
 		});
@@ -314,7 +328,7 @@ describe("controller recovery", () => {
 		});
 		const invalidateSpy = vi.spyOn(QueryClient.prototype, "invalidateQueries");
 
-		const { result } = renderHook(() => useConversationCommands("ao-1"), { wrapper });
+		const { result } = renderHook(() => useConversationCommands({ host: "local", id: "ao-1" }), { wrapper });
 		act(() => {
 			result.current.interrupt();
 		});
@@ -324,7 +338,7 @@ describe("controller recovery", () => {
 				"/api/v1/sessions/{sessionId}/conversation/interrupt",
 				{ params: { path: { sessionId: "ao-1" } } },
 			);
-			expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["conversation", "ao-1"] });
+			expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["conversation", refKey({ host: "local", id: "ao-1" })] });
 		});
 		invalidateSpy.mockRestore();
 	});
@@ -333,7 +347,7 @@ describe("controller recovery", () => {
 		postMock.mockResolvedValue({ data: {}, error: undefined, response: { status: 200 } });
 		const invalidateSpy = vi.spyOn(QueryClient.prototype, "invalidateQueries");
 
-		const { result } = renderHook(() => useConversationCommands("ao-1"), { wrapper });
+		const { result } = renderHook(() => useConversationCommands({ host: "local", id: "ao-1" }), { wrapper });
 		await act(async () => {
 			await result.current.resumeAgent();
 		});
@@ -341,7 +355,7 @@ describe("controller recovery", () => {
 		expect(postMock).toHaveBeenCalledWith("/api/v1/sessions/{sessionId}/resume-agent", {
 			params: { path: { sessionId: "ao-1" } },
 		});
-		expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["conversation", "ao-1"] });
+		expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["conversation", refKey({ host: "local", id: "ao-1" })] });
 		expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: workspaceQueryKey });
 		invalidateSpy.mockRestore();
 	});

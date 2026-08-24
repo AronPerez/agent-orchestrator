@@ -11,6 +11,19 @@ vi.mock("../lib/api-client", () => ({
 	hasTrustedApiBaseUrl: () => true,
 }));
 
+// clientFor(LOCAL_HOST) is the client apiClient already was, so the local
+// host resolves to the same fake the api-client mock installs.
+vi.mock("../lib/host-clients", () => ({
+	baseUrlFor: () => "http://127.0.0.1:3001",
+	connectedHosts: (() => {
+		const hosts: string[] = [];
+		return () => hosts;
+	})(),
+	subscribeConnectedHosts: () => () => undefined,
+	isHostReady: () => true,
+	clientFor: () => ({ GET: getMock, POST: vi.fn(), PUT: putMock, DELETE: vi.fn() }),
+}));
+
 import { useSessionInterfaceTransition } from "./useSessionInterfaceTransition";
 
 function wrapper({ children }: { children: ReactNode }) {
@@ -44,7 +57,7 @@ describe("interface switch readiness", () => {
 					error: undefined,
 				});
 
-			const { result } = renderHook(() => useSessionInterfaceTransition("session-1"), {
+			const { result } = renderHook(() => useSessionInterfaceTransition({ host: "local", id: "session-1" }), {
 				wrapper,
 			});
 
@@ -67,7 +80,7 @@ describe("interface switch readiness", () => {
 			error: undefined,
 		});
 
-		const { result } = renderHook(() => useSessionInterfaceTransition("session-1"), {
+		const { result } = renderHook(() => useSessionInterfaceTransition({ host: "local", id: "session-1" }), {
 			wrapper,
 		});
 
@@ -102,7 +115,7 @@ describe("interface switch readiness", () => {
 			error: undefined,
 		});
 
-		const { result } = renderHook(() => useSessionInterfaceTransition("session-1"), {
+		const { result } = renderHook(() => useSessionInterfaceTransition({ host: "local", id: "session-1" }), {
 			wrapper,
 		});
 		await waitFor(() => expect(result.current.transition?.id).toBe("transition-1"));

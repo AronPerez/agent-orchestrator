@@ -1051,7 +1051,7 @@ function SessionControls({ session }: { session: WorkspaceSession }) {
 							<button
 								aria-label={t("inspector.terminate")}
 								className="inline-flex size-control-md items-center justify-center rounded-sm text-passive transition-colors hover:bg-error/10 hover:text-error focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
-								onClick={() => clearTerminateSessionState(queryClient, session.id)}
+								onClick={() => clearTerminateSessionState(queryClient, session)}
 								type="button"
 							>
 								<Trash2 className="size-icon-sm" aria-hidden="true" />

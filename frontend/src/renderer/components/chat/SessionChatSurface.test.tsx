@@ -64,11 +64,11 @@ vi.mock("../../lib/host-clients", () => ({
 }));
 
 vi.mock("../../hooks/useConversation", () => ({
-	useConversation: (sessionId: string) => ({
+	useConversation: (session: { id: string }) => ({
 		...conversationState,
 		snapshot: conversationState.snapshot
-			? { ...snapshotFor(sessionId), ...conversationState.snapshot }
-			: snapshotFor(sessionId),
+			? { ...snapshotFor(session.id), ...conversationState.snapshot }
+			: snapshotFor(session.id),
 	}),
 	useConversationCommands: () => ({}),
 	useConversationConfigOptions: () => ({ options: [] }),

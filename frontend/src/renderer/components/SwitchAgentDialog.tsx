@@ -123,7 +123,7 @@ export function SwitchAgentDialog({ container, open, session, onOpenChange }: Sw
 	const [modelWarning, setModelWarning] = useState<string | undefined>();
 	const switchAgent = useSwitchAgent();
 	const recoverAgentSwitch = useRecoverAgentSwitch();
-	const switchMutation = useSwitchAgentState(session.id);
+	const switchMutation = useSwitchAgentState(session);
 	const admissionPending = switchMutation.isPending;
 	const durableSwitch = session.activeAgentSwitch;
 	const recoveryRequired = durableSwitch ? agentSwitchNeedsRecovery(durableSwitch) : false;
@@ -166,7 +166,7 @@ export function SwitchAgentDialog({ container, open, session, onOpenChange }: Sw
 	}, [durableSwitching, onOpenChange, open]);
 	const clearFailedAttempt = () => {
 		if (!switchMutation.error) return;
-		clearSwitchAgentState(queryClient, session.id);
+		clearSwitchAgentState(queryClient, session);
 	};
 
 	const changeTarget = (nextTarget: SwitchAgentHarness) => {

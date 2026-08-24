@@ -301,7 +301,7 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 	useEffect(() => stopTerminalLiveResize, [stopTerminalLiveResize]);
 
 	const session = workspaces.flatMap((workspace) => workspace.sessions).find((s) => s.id === sessionId);
-	const interfaceSwitch = useSessionInterfaceTransition(session?.id);
+	const interfaceSwitch = useSessionInterfaceTransition(session);
 	const reviewerQuery = useQuery({
 		queryKey: ["session-reviews", refKey(sessionRef)],
 		enabled: Boolean(
