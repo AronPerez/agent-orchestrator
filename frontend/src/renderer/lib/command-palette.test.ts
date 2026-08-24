@@ -18,6 +18,7 @@ import { appI18n } from "../i18n";
 
 function session(overrides: Partial<WorkspaceSession> & { id: string }): WorkspaceSession {
 	return {
+		host: "local",
 		workspaceId: "proj-1",
 		workspaceName: "app",
 		title: overrides.id,
@@ -45,6 +46,7 @@ const pr = (number: number, url = `https://github.com/o/r/pull/${number}`): Pull
 function workspaces(): WorkspaceSummary[] {
 	return [
 		{
+			host: "local",
 			id: "proj-1",
 			name: "app",
 			path: "/repos/app",
@@ -182,6 +184,7 @@ describe("buildCommands pull requests", () => {
 		const closed: PullRequestFacts = { ...pr(8), state: "closed" };
 		const ws: WorkspaceSummary[] = [
 			{
+				host: "local",
 				id: "proj-1",
 				name: "app",
 				path: "/repos/app",
@@ -322,6 +325,7 @@ describe("buildCommands PR actions", () => {
 
 		const draftWorkspaces: WorkspaceSummary[] = [
 			{
+				host: "local",
 				id: "proj-1",
 				name: "app",
 				path: "/repos/app",
@@ -341,6 +345,7 @@ describe("buildCommands PR actions", () => {
 	it("emits per-PR action items for every open PR of a multi-PR session, all triggering the session", () => {
 		const multiWorkspaces: WorkspaceSummary[] = [
 			{
+				host: "local",
 				id: "proj-1",
 				name: "app",
 				path: "/repos/app",
@@ -360,6 +365,7 @@ describe("buildCommands PR actions", () => {
 		const closed: PullRequestFacts = { ...pr(8), state: "closed" };
 		const ws: WorkspaceSummary[] = [
 			{
+				host: "local",
 				id: "proj-1",
 				name: "app",
 				path: "/repos/app",
@@ -397,6 +403,7 @@ describe("buildCommands finished sessions", () => {
 	function withFinished(): WorkspaceSummary[] {
 		return [
 			{
+				host: "local",
 				id: "proj-1",
 				name: "app",
 				path: "/repos/app",
@@ -428,6 +435,7 @@ describe("buildCommands finished sessions", () => {
 describe("result caps", () => {
 	const manyProjects = (n: number): WorkspaceSummary[] =>
 		Array.from({ length: n }, (_, i) => ({
+			host: "local",
 			id: `p${i}`,
 			name: `project-${i}`,
 			path: `/repos/p${i}`,
@@ -454,7 +462,7 @@ describe("result caps", () => {
 			session({ id: `deploy-hot-${i}`, title: `deploy hot ${i}`, status: "needs_input" }),
 		);
 		const workspaces: WorkspaceSummary[] = [
-			{ id: "deploy", name: "deploy proj", path: "/repos/deploy", type: "main", sessions: attentionSessions },
+			{ host: "local", id: "deploy", name: "deploy proj", path: "/repos/deploy", type: "main", sessions: attentionSessions },
 		];
 		const groups = displayGroups(buildCommands({ workspaces }), "deploy");
 		const total = groups.reduce((n, g) => n + g.items.length, 0);
@@ -464,6 +472,7 @@ describe("result caps", () => {
 	it("keeps search hits under category headings, best-matching category first", () => {
 		const workspaces: WorkspaceSummary[] = [
 			{
+				host: "local",
 				id: "alpha",
 				name: "alpha",
 				path: "/repos/alpha",
@@ -490,6 +499,7 @@ describe("result caps", () => {
 	it("floats attention matches into their own category during search", () => {
 		const workspaces: WorkspaceSummary[] = [
 			{
+				host: "local",
 				id: "alpha",
 				name: "alpha",
 				path: "/repos/alpha",
@@ -515,6 +525,7 @@ describe("result caps", () => {
 		const manyPrs = Array.from({ length: 30 }, (_, i) => pr(i + 1));
 		const workspaces: WorkspaceSummary[] = [
 			{
+				host: "local",
 				id: "proj-deploy",
 				name: "proj-deploy",
 				path: "/repos/deploy",
@@ -532,6 +543,7 @@ describe("result caps", () => {
 
 	it("never lets a flood of attention matches crowd out an exact non-attention match", () => {
 		const floodedWorkspace: WorkspaceSummary = {
+			host: "local",
 			id: "proj-deploy",
 			name: "proj-deploy",
 			path: "/repos/deploy",
@@ -541,6 +553,7 @@ describe("result caps", () => {
 			),
 		};
 		const exactMatchWorkspace: WorkspaceSummary = {
+			host: "local",
 			id: "deploy",
 			name: "deploy",
 			path: "/repos/deploy-exact",
@@ -561,6 +574,7 @@ describe("result caps", () => {
 
 	it("still surfaces the exact match when every attention title also prefix-matches (tied score)", () => {
 		const floodedWorkspace: WorkspaceSummary = {
+			host: "local",
 			id: "proj-1",
 			name: "proj-1",
 			path: "/repos/proj-1",
@@ -570,6 +584,7 @@ describe("result caps", () => {
 			),
 		};
 		const exactMatchWorkspace: WorkspaceSummary = {
+			host: "local",
 			id: "deploy",
 			name: "deploy",
 			path: "/repos/deploy-exact",
@@ -615,13 +630,13 @@ describe("session rows open the actions panel", () => {
 	it("emits open-session-actions for session rows while PR rows stay navigate", () => {
 		const items = buildCommands({ workspaces: workspaces() });
 		const map = byId(items);
-		expect(map.get("attention:w-merge")?.action).toEqual({ kind: "open-session-actions", sessionId: "w-merge" });
+		expect(map.get("attention:w-merge")?.action).toEqual({ kind: "open-session-actions", session: { host: "local", id: "w-merge" } });
 		expect(map.get("pr:w-pr:42")?.action?.kind).toBe("navigate");
 		expect(map.get("project:proj-1")?.action?.kind).toBe("navigate");
 	});
 });
 
-const workspace: WorkspaceSummary = { id: "proj-1", name: "app", path: "/repos/app", type: "main", sessions: [] };
+const workspace: WorkspaceSummary = { host: "local", id: "proj-1", name: "app", path: "/repos/app", type: "main", sessions: [] };
 const actionKinds = (items: CommandItem[]) => items.map((item) => item.action?.kind ?? "none");
 
 describe("buildSessionActions", () => {
@@ -630,7 +645,7 @@ describe("buildSessionActions", () => {
 		expect(items.map((i) => i.title)).toEqual(["Jump to session", "Copy branch name"]);
 		expect(items[0].action).toEqual({
 			kind: "navigate",
-			target: { to: "/projects/$projectId/sessions/$sessionId", params: { projectId: "proj-1", sessionId: "live" } },
+			target: { to: "/host/$hostId/session/$sessionId", params: { hostId: "local", sessionId: "live" } },
 		});
 	});
 
@@ -638,8 +653,7 @@ describe("buildSessionActions", () => {
 		const terminated = buildSessionActions(workspace, session({ id: "gone", status: "terminated" }));
 		expect(terminated.find((i) => i.action?.kind === "resume-session")?.action).toEqual({
 			kind: "resume-session",
-			projectId: "proj-1",
-			sessionId: "gone",
+			session: { host: "local", id: "gone" },
 		});
 		for (const status of ["working", "needs_input", "no_signal", "mergeable"] as const) {
 			const items = buildSessionActions(workspace, session({ id: `s-${status}`, status }));

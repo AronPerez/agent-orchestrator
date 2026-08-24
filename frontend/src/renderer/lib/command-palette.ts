@@ -22,21 +22,22 @@ import {
 } from "./session-reviews";
 import { appI18n, type MessageKey } from "../i18n";
 
+import type { Ref } from "./hosts";
 export type CommandGroupId = "current" | "attention" | "projects" | "sessions" | "prs" | "global";
 
 export type NavigateTarget =
 	| { to: "/settings" }
-	| { to: "/projects/$projectId"; params: { projectId: string } }
-	| { to: "/projects/$projectId/settings"; params: { projectId: string } }
-	| { to: "/projects/$projectId/sessions/$sessionId"; params: { projectId: string; sessionId: string } };
+	| { to: "/host/$hostId/project/$projectId"; params: { hostId: string; projectId: string } }
+	| { to: "/host/$hostId/project/$projectId/settings"; params: { hostId: string; projectId: string } }
+	| { to: "/host/$hostId/session/$sessionId"; params: { hostId: string; sessionId: string } };
 
 export type CommandAction =
 	| { kind: "navigate"; target: NavigateTarget }
-	| { kind: "open-new-task"; projectId: string }
+	| { kind: "open-new-task"; project: Ref }
 	| { kind: "open-new-project" }
-	| { kind: "open-orchestrator"; projectId: string }
-	| { kind: "open-session-actions"; sessionId: string }
-	| { kind: "resume-session"; projectId: string; sessionId: string }
+	| { kind: "open-orchestrator"; project: Ref }
+	| { kind: "open-session-actions"; session: Ref }
+	| { kind: "resume-session"; session: Ref }
 	| { kind: "copy-branch"; branch: string }
 	| { kind: "open-pr"; url: string }
 	| { kind: "copy-pr-url"; url: string }
@@ -117,10 +118,10 @@ export type WorkspaceSessionContext = {
 	session: WorkspaceSession;
 };
 
-function jumpTarget(workspace: WorkspaceSummary, session: WorkspaceSession): NavigateTarget {
+function jumpTarget(_workspace: WorkspaceSummary, session: WorkspaceSession): NavigateTarget {
 	return {
-		to: "/projects/$projectId/sessions/$sessionId",
-		params: { projectId: workspace.id, sessionId: session.id },
+		to: "/host/$hostId/session/$sessionId",
+		params: { hostId: session.host, sessionId: session.id },
 	};
 }
 
@@ -136,7 +137,7 @@ function sessionCommand(
 		subtitle: workspace.name,
 		zone: attentionZone(session),
 		keywords: [workspace.name, session.branch ?? "", session.issueId ?? ""],
-		action: { kind: "open-session-actions", sessionId: session.id },
+		action: { kind: "open-session-actions", session: { host: session.host, id: session.id } },
 	};
 }
 
@@ -162,7 +163,7 @@ export function buildSessionActions(
 			title: t("command.resumeAgent"),
 			subtitle: t("command.resumeAgentSubtitle"),
 			keywords: ["restore", "restart", "retry", "resume", session.title],
-			action: { kind: "resume-session", projectId: workspace.id, sessionId: session.id },
+			action: { kind: "resume-session", session: { host: session.host, id: session.id } },
 		});
 	}
 
@@ -210,7 +211,7 @@ export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n
 			: isProjectRestarting
 				? t("command.orchestratorRestarting")
 				: undefined,
-		...(currentProject ? { action: { kind: "open-new-task" as const, projectId: currentProject.id } } : {}),
+		...(currentProject ? { action: { kind: "open-new-task" as const, project: { host: currentProject.host, id: currentProject.id } } } : {}),
 	});
 
 	if (currentProject) {
@@ -222,7 +223,7 @@ export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n
 			keywords: ["orchestrator", "spawn", currentProject.name],
 			disabled: isProjectRestarting,
 			disabledReason: isProjectRestarting ? t("command.orchestratorRestarting") : undefined,
-			action: { kind: "open-orchestrator", projectId: currentProject.id },
+			action: { kind: "open-orchestrator", project: { host: currentProject.host, id: currentProject.id } },
 		});
 		items.push({
 			id: "current-project-settings",
@@ -232,7 +233,10 @@ export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n
 			keywords: ["settings", "config", currentProject.name],
 			action: {
 				kind: "navigate",
-				target: { to: "/projects/$projectId/settings", params: { projectId: currentProject.id } },
+				target: {
+					to: "/host/$hostId/project/$projectId/settings",
+					params: { hostId: currentProject.host, projectId: currentProject.id },
+				},
 			},
 		});
 	}
@@ -272,7 +276,13 @@ export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n
 			group: "projects",
 			title: workspace.name,
 			keywords: [workspace.path],
-			action: { kind: "navigate", target: { to: "/projects/$projectId", params: { projectId: workspace.id } } },
+			action: {
+				kind: "navigate",
+				target: {
+					to: "/host/$hostId/project/$projectId",
+					params: { hostId: workspace.host, projectId: workspace.id },
+				},
+			},
 		});
 	}
 
@@ -314,8 +324,8 @@ export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n
 					action: {
 						kind: "navigate",
 						target: {
-							to: "/projects/$projectId/sessions/$sessionId",
-							params: { projectId: workspace.id, sessionId: session.id },
+							to: "/host/$hostId/session/$sessionId",
+							params: { hostId: session.host, sessionId: session.id },
 						},
 					},
 				});

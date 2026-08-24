@@ -19,6 +19,7 @@ const restoreMock = vi.hoisted(() => vi.fn());
 const ctx = vi.hoisted(() => {
 	const workspaces: WorkspaceSummary[] = [
 		{
+			host: "local",
 			id: "proj-1",
 			name: "app",
 			path: "/repos/app",
@@ -26,6 +27,7 @@ const ctx = vi.hoisted(() => {
 			orchestratorAgent: "codex",
 			sessions: [
 				{
+					host: "local",
 					id: "w-merge",
 					workspaceId: "proj-1",
 					workspaceName: "app",
@@ -38,6 +40,7 @@ const ctx = vi.hoisted(() => {
 					prs: [],
 				},
 				{
+					host: "local",
 					id: "w-fix",
 					workspaceId: "proj-1",
 					workspaceName: "app",
@@ -50,6 +53,7 @@ const ctx = vi.hoisted(() => {
 					prs: [],
 				},
 				{
+					host: "local",
 					id: "w-archived",
 					workspaceId: "proj-1",
 					workspaceName: "app",
@@ -62,6 +66,7 @@ const ctx = vi.hoisted(() => {
 					prs: [],
 				},
 				{
+					host: "local",
 					id: "orch",
 					workspaceId: "proj-1",
 					workspaceName: "app",
@@ -76,6 +81,7 @@ const ctx = vi.hoisted(() => {
 			],
 		},
 		{
+			host: "local",
 			id: "proj-2",
 			name: "lib",
 			path: "/repos/lib",
@@ -127,6 +133,19 @@ vi.mock("../lib/api-client", () => ({
 }));
 
 vi.mock("../lib/telemetry", () => ({ captureRendererEvent: captureEventMock }));
+
+// clientFor(LOCAL_HOST) is the client apiClient already was, so the local
+// host resolves to the same fake the api-client mock installs.
+vi.mock("../lib/host-clients", () => ({
+	baseUrlFor: () => "http://127.0.0.1:3001",
+	connectedHosts: () => [],
+	subscribeConnectedHosts: () => () => undefined,
+	isHostReady: () => true,
+	clientFor: () => ({
+		GET: getMock,
+		POST: postMock,
+	}),
+}));
 
 vi.mock("../lib/bridge", () => ({
 	aoBridge: {

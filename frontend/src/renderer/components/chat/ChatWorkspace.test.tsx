@@ -172,6 +172,7 @@ const chatSession = {
 	status: "working",
 	updatedAt: "2026-08-15T00:00:00Z",
 	prs: [],
+	host: "local",
 } satisfies WorkspaceSession;
 
 describe("HumanMessage attachments", () => {
@@ -179,8 +180,7 @@ describe("HumanMessage attachments", () => {
 		render(
 			<HumanMessage
 				message={humanMessage(`check again\n\n${header}\n- .ao/attachments/${name}`)}
-				sessionId="ao session/1"
-			/>,
+				sessionId="ao session/1" />,
 		);
 
 		const image = screen.getByRole("img", { name });
@@ -223,8 +223,7 @@ describe("HumanMessage attachments", () => {
 				message={humanMessage(
 					`${authoredBody}\n\nAttached files (read these files in the workspace):\n- .ao/attachments/attachment-ab12.png`,
 				)}
-				sessionId="ao-1"
-			/>,
+				sessionId="ao-1" />,
 		);
 
 		expect(container.querySelector(".cursor-chat-human-message > p")?.textContent).toBe(
@@ -238,8 +237,7 @@ describe("HumanMessage attachments", () => {
 				message={humanMessage(
 					"inspect these\n\nAttached files (read these files in the workspace):\n- .ao/attachments/attachment-ab12.png\n- .ao/attachments/attachment-cd34.pdf",
 				)}
-				sessionId="ao-1"
-			/>,
+				sessionId="ao-1" />,
 		);
 
 		expect(screen.getByRole("img", { name: "attachment-ab12.png" })).toBeInTheDocument();

@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
+import { LOCAL_HOST } from "../lib/hosts";
 import type { components } from "../../api/schema";
 import { apiClient, hasTrustedApiBaseUrl } from "../lib/api-client";
 import type { CloudCpProject, CloudCpSession } from "../lib/cloud-cp";
@@ -85,6 +86,7 @@ async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
 	return (projectsData?.projects ?? []).map((project) => {
 		const kind = toProjectKind(project.kind);
 		return {
+			host: LOCAL_HOST,
 			id: project.id,
 			name: project.name,
 			kind,
@@ -101,6 +103,7 @@ async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
 						reportUnknownSessionField("activity", session.activity?.state);
 					}
 					return {
+						host: LOCAL_HOST,
 						id: session.id,
 						terminalHandleId: session.terminalHandleId,
 						workspaceId: project.id,
@@ -165,6 +168,7 @@ function toCloudWorkspaceSession(
 	orgId: string,
 ): WorkspaceSession {
 	return {
+		host: LOCAL_HOST,
 		id: session.id,
 		// The terminal pane only mounts for a session that has a terminal handle.
 		// A cloud session's PTY is addressed by the session id over its ticketed
@@ -194,6 +198,7 @@ function toCloudWorkspace(
 	orgId: string,
 ): WorkspaceSummary {
 	return {
+		host: LOCAL_HOST,
 		id: project.id,
 		name: project.displayName,
 		kind: "cloud",

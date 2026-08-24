@@ -5,6 +5,7 @@ import { useNavigateToSession } from "../lib/navigate-to-session";
 import { attentionZone, workerSessions } from "../types/workspace";
 import type { TraySessionEntry } from "../../shared/tray";
 
+import { LOCAL_HOST } from "../lib/hosts";
 export function TrayRuntime() {
 	const workspaces = useWorkspaceQuery().data ?? [];
 	const navigateToSession = useNavigateToSession();
@@ -38,7 +39,7 @@ export function TrayRuntime() {
 
 	useEffect(() => {
 		return aoBridge.tray.onOpenSession((target) => {
-			navigateToSession(target.projectId, target.sessionId);
+			navigateToSession({ host: LOCAL_HOST, id: target.sessionId });
 		});
 	}, [navigateToSession]);
 

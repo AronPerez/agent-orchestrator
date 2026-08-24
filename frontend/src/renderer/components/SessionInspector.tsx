@@ -40,6 +40,8 @@ import type { components } from "../../api/schema";
 import { apiClient, apiErrorMessage } from "../lib/api-client";
 import { workspaceQueryKey } from "../hooks/useWorkspaceQuery";
 import { captureRendererEvent } from "../lib/telemetry";
+import { refKey, type Ref } from "../lib/hosts";
+import { clientFor } from "../lib/host-clients";
 import { formatTimeCompact } from "../lib/format-time";
 import { AgentAvatar } from "./AgentAvatar";
 import { ProductExternalLink } from "./ProductExternalLink";
@@ -67,7 +69,7 @@ import { cn } from "../lib/utils";
 import { SessionTerminationPopover } from "./SessionTerminationPopover";
 import { ReviewerSelect } from "./ReviewerSelect";
 import { agentLabel } from "../lib/agent-options";
-import { agentsQueryOptions } from "../hooks/useAgentsQuery";
+import { agentsQueryOptionsFor } from "../hooks/useAgentsQuery";
 import { Switch } from "./ui/switch";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 import { appI18n } from "../i18n";
@@ -272,9 +274,9 @@ function SummaryView({
 	session: WorkspaceSession;
 }) {
 	const { t } = useTranslation();
-	const query = useSessionScmSummary(session.id);
+	const query = useSessionScmSummary(session);
 	const developerMode = useUiStore((state) => state.developerMode);
-	const usageQuery = useSessionUsage(session.id, developerMode);
+	const usageQuery = useSessionUsage(session, developerMode);
 	const showUsage =
 		developerMode &&
 		!usageQuery.isLoading &&
@@ -303,7 +305,7 @@ function SummaryView({
 								key={pr.url || pr.htmlUrl || pr.number}
 								onOpenReviews={onOpenReviews}
 								pr={pr}
-								sessionId={session.id}
+								session={session}
 							/>
 						))
 					) : (
@@ -1093,17 +1095,20 @@ function SessionControls({ session }: { session: WorkspaceSession }) {
 
 	const confirmTermination = () => {
 		const workspaces = queryClient.getQueryData<WorkspaceSummary[]>(workspaceQueryKey) ?? [];
-		const orchestrator = findProjectOrchestrator(workspaces, session.workspaceId);
+		const orchestrator = findProjectOrchestrator(workspaces, { host: session.host, id: session.workspaceId });
 		setConfirmOpen(false);
 		terminate.mutate(session);
 		if (orchestrator) {
 			void navigate({
-				to: "/projects/$projectId/sessions/$sessionId",
-				params: { projectId: session.workspaceId, sessionId: orchestrator.id },
+				to: "/host/$hostId/session/$sessionId",
+				params: { hostId: orchestrator.host, sessionId: orchestrator.id },
 			});
 			return;
 		}
-		void navigate({ to: "/projects/$projectId", params: { projectId: session.workspaceId } });
+		void navigate({
+			to: "/host/$hostId/project/$projectId",
+			params: { hostId: session.host, projectId: session.workspaceId },
+		});
 	};
 
 	if (session.isTerminated === true) return null;
@@ -1172,12 +1177,12 @@ function PRSummaryCard({
 	canOpenReviews,
 	onOpenReviews,
 	pr,
-	sessionId,
+	session,
 }: {
 	canOpenReviews: boolean;
 	onOpenReviews: () => void;
 	pr: SessionPRSummary;
-	sessionId: string;
+	session: Ref;
 }) {
 	const { t } = useTranslation();
 	const queryClient = useQueryClient();
@@ -1199,7 +1204,7 @@ function PRSummaryCard({
 		},
 		onSuccess: async () => {
 			await Promise.all([
-				queryClient.invalidateQueries({ queryKey: sessionScmSummaryQueryKey(sessionId) }),
+				queryClient.invalidateQueries({ queryKey: sessionScmSummaryQueryKey(session) }),
 				queryClient.invalidateQueries({ queryKey: workspaceQueryKey }),
 			]);
 		},
@@ -1474,13 +1479,13 @@ function ReviewsSection({
 			return session.autoReviewEnabled === true ? 10_000 : false;
 		},
 	});
-	const agentsQuery = useQuery(agentsQueryOptions);
+	const agentsQuery = useQuery(agentsQueryOptionsFor(session.host));
 	const projectConfigQuery = useQuery({
-		queryKey: ["project-config", session.workspaceId],
+		queryKey: ["project-config", refKey({ host: session.host, id: session.workspaceId })],
 		enabled: hasPr,
 		queryFn: async () => {
 			if (usePreviewData) return mockProjectConfig();
-			const { data, error } = await apiClient.GET("/api/v1/projects/{id}", {
+			const { data, error } = await clientFor(session.host).GET("/api/v1/projects/{id}", {
 				params: { path: { id: session.workspaceId } },
 			});
 			if (error) return undefined;
@@ -1589,7 +1594,7 @@ function ReviewsSection({
 	});
 	const reviewStates = reviewsQuery.data?.reviews ?? [];
 	const autoReviewEnabled = session.autoReviewEnabled === true;
-	const scmSummary = useSessionScmSummary(session.id);
+	const scmSummary = useSessionScmSummary(session);
 	const prSummaries = sessionPRDisplaySummaries(session, scmSummary.data);
 	const githubReviews = prSummaries.filter(
 		(pr) =>
@@ -1698,7 +1703,7 @@ function MergedReviewsSection({
 			body: { pullRequestUrl: comment.pullRequestUrl, commentUrl: comment.url ?? "" },
 		});
 		if (error) throw new Error(apiErrorMessage(error, "Unable to resolve review comment"));
-		void queryClient.invalidateQueries({ queryKey: sessionScmSummaryQueryKey(session.id) });
+		void queryClient.invalidateQueries({ queryKey: sessionScmSummaryQueryKey(session) });
 		void queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
 	};
 	const sendInlineCommentToWorker = async (comment: InspectorInlineComment & { reviewerId?: string }) => {

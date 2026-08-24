@@ -1,4 +1,5 @@
 import { memo, useEffect, useRef, useState, type MouseEvent } from "react";
+import { LOCAL_HOST, refKey, type Ref } from "../lib/hosts";
 import { useTranslation } from "react-i18next";
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
@@ -53,7 +54,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
 type SessionsBoardProps = {
 	/** When set, the board shows only this project's sessions. */
-	projectId?: string;
+	project?: Ref;
 };
 
 type UsageBySession = ReadonlyMap<string, SessionUsageSummary>;
@@ -69,14 +70,15 @@ const isMac = isMacPlatform();
 const dragStyle = isMac ? ({ WebkitAppRegion: "drag" } as React.CSSProperties) : undefined;
 const noDragStyle = isMac ? ({ WebkitAppRegion: "no-drag" } as React.CSSProperties) : undefined;
 
-export function SessionsBoard({ projectId }: SessionsBoardProps) {
+export function SessionsBoard({ project }: SessionsBoardProps) {
+	const projectId = project?.id;
 	const { t } = useTranslation();
 	const navigate = useNavigate();
 	const queryClient = useQueryClient();
 	const columns: AttentionZoneView[] = boardAttentionZoneOrder.map((zone) => getAttentionZoneViewForZone(zone, t));
 	const workspaceQuery = useWorkspaceQuery();
 	const shell = useShellMaybe();
-	const usageBySession = useSessionUsageSummaries(projectId).data ?? emptyUsageBySession;
+	const usageBySession = useSessionUsageSummaries(project).data ?? emptyUsageBySession;
 	// Evaluated at render so platform mocks in tests can flip the in-panel chrome.
 	const boardActionsInPanel = usesBoardActionsInPanel();
 	/** Bell lives in the board action row when the shell topbar does not host it. */
@@ -155,16 +157,16 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
 
 	const openSession = (session: WorkspaceSession) =>
 		void navigate({
-			to: "/projects/$projectId/sessions/$sessionId",
-			params: { projectId: session.workspaceId, sessionId: session.id },
+			to: "/host/$hostId/session/$sessionId",
+			params: { hostId: session.host, sessionId: session.id },
 		});
 
 	const openOrchestrator = async (mode?: "tui") => {
 		if (!projectId || isProjectRestarting) return;
 		if (orchestrator) {
 			void navigate({
-				to: "/projects/$projectId/sessions/$sessionId",
-				params: { projectId, sessionId: orchestrator.id },
+				to: "/host/$hostId/session/$sessionId",
+				params: { hostId: orchestrator.host, sessionId: orchestrator.id },
 			});
 			return;
 		}
@@ -191,7 +193,7 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
 		}
 		if (!hasConfiguredOrchestratorAgent(workspace)) {
 			if (workspace) {
-				useUiStore.getState().openProjectSettings(projectId);
+				if (project) useUiStore.getState().openProjectSettings(project);
 			}
 			return;
 		}
@@ -204,8 +206,8 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
 			await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
 			setOrchestratorStartupError(projectId, null);
 			void navigate({
-				to: "/projects/$projectId/sessions/$sessionId",
-				params: { projectId, sessionId },
+				to: "/host/$hostId/session/$sessionId",
+				params: { hostId: project?.host ?? LOCAL_HOST, sessionId },
 			});
 		} catch (error) {
 			// Never fail silently: the daemon's message (e.g. a worktree/branch
@@ -219,9 +221,9 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
 	};
 
 	const restartOrchestrator = async () => {
-		if (!projectId) return;
+		if (!project) return;
 		await restartProjectOrchestrator({
-			projectId,
+			project,
 			queryClient,
 			navigate,
 			setProjectRestarting,
@@ -249,7 +251,7 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
 							className="topbar-control--labeled"
 							data-priority="primary"
 							disabled={isProjectRestarting}
-							onClick={() => projectId && requestNewTask(projectId)}
+							onClick={() => project && requestNewTask(project)}
 							variant="accent"
 						>
 							<Plus className="size-icon-md" aria-hidden="true" />
@@ -354,7 +356,7 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
 						hasOrchestrator={orchestrator !== undefined}
 						isSpawning={isSpawning}
 						isProjectRestarting={isProjectRestarting}
-						onNewTask={() => projectId && requestNewTask(projectId)}
+						onNewTask={() => project && requestNewTask(project)}
 						onOpenOrchestrator={() => void openOrchestrator()}
 						onOpenOrchestratorAsTui={canCreateAsTui ? () => void openOrchestrator("tui") : undefined}
 						spawnError={visibleSpawnError}
@@ -369,7 +371,7 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
 								onOpen={() => openSession(session)}
 								onTerminate={() => terminateSession.mutate(session)}
 								session={session}
-								usage={usageBySession.get(session.id)}
+								usage={usageBySession.get(refKey(session))}
 							/>
 						)}
 						sessions={activeSessions}
@@ -452,8 +454,8 @@ const BoardArchivePanel = memo(function BoardArchivePanel({
 			if (!isStillActiveProject()) return;
 			if (result.status === "success") {
 				void navigate({
-					to: "/projects/$projectId/sessions/$sessionId",
-					params: { projectId: session.workspaceId, sessionId: session.id },
+					to: "/host/$hostId/session/$sessionId",
+					params: { hostId: session.host, sessionId: session.id },
 				});
 				return;
 			}
@@ -484,7 +486,7 @@ const BoardArchivePanel = memo(function BoardArchivePanel({
 						restoreAction={(event) => void restoreArchivedSession(event, session)}
 						restoreError={restoreErrors[session.id]}
 						session={session}
-						usage={usageBySession.get(session.id)}
+						usage={usageBySession.get(refKey(session))}
 					/>
 				)}
 				resetKey={projectId}

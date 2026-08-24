@@ -113,6 +113,7 @@ const worker = {
 	status: "working",
 	updatedAt: "2026-06-10T00:00:00Z",
 	prs: [],
+	host: "local",
 } satisfies WorkspaceSession;
 
 const orchestrator = {
@@ -120,6 +121,7 @@ const orchestrator = {
 	id: "sess-orch",
 	title: "orchestrate",
 	kind: "orchestrator",
+	host: "local",
 } satisfies WorkspaceSession;
 
 beforeEach(() => {
@@ -594,6 +596,7 @@ describe("terminal restore", () => {
 			...worker,
 			status: "terminated",
 			terminalHandleId: "term-1",
+			host: "local",
 		} satisfies WorkspaceSession;
 		const view = renderCachedPane({ session: terminated, sessions: [terminated] });
 		try {

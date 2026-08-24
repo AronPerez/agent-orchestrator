@@ -56,6 +56,7 @@ vi.mock("./NotificationCenter", () => ({
 }));
 
 const worker: WorkspaceSession = {
+	host: "local",
 	id: "sess-1",
 	workspaceId: "proj-1",
 	workspaceName: "my-app",
@@ -76,6 +77,7 @@ const secondWorker: WorkspaceSession = {
 };
 
 const orchestrator: WorkspaceSession = {
+	host: "local",
 	id: "orch-1",
 	workspaceId: "proj-1",
 	workspaceName: "my-app",
@@ -121,6 +123,7 @@ function renderTopbarSessions(
 ) {
 	const data: WorkspaceSummary[] = [
 		{
+			host: "local",
 			id: sessions[0].workspaceId,
 			name: sessions[0].workspaceName,
 			path: "/repo/my-app",
@@ -368,8 +371,8 @@ describe("ShellTopbar orchestrator actions", () => {
 		expect(screen.queryByText("my-app")).not.toBeInTheDocument();
 		await userEvent.click(kanbanButton);
 		expect(navigateMock).toHaveBeenCalledWith({
-			to: "/projects/$projectId",
-			params: { projectId: "proj-1" },
+			to: "/host/$hostId/project/$projectId",
+			params: { hostId: "local", projectId: "proj-1" },
 		});
 	});
 
@@ -382,8 +385,8 @@ describe("ShellTopbar orchestrator actions", () => {
 		expect(screen.getByRole("button", { name: "New task" })).toHaveClass("bg-raised");
 		await userEvent.click(kanbanButton);
 		expect(navigateMock).toHaveBeenCalledWith({
-			to: "/projects/$projectId",
-			params: { projectId: "proj-1" },
+			to: "/host/$hostId/project/$projectId",
+			params: { hostId: "local", projectId: "proj-1" },
 		});
 	});
 
@@ -391,6 +394,7 @@ describe("ShellTopbar orchestrator actions", () => {
 		useWorkspaceQueryMock.mockReturnValue({
 			data: [
 				{
+					host: "local",
 					id: "proj-1",
 					name: "my-app",
 					path: "/repo/my-app",
@@ -412,7 +416,7 @@ describe("ShellTopbar orchestrator actions", () => {
 
 		await userEvent.click(screen.getByRole("button", { name: "Open orchestrator" }));
 
-		expect(useUiStore.getState().settingsModal).toEqual({ scope: "project", projectId: "proj-1" });
+		expect(useUiStore.getState().settingsModal).toEqual({ scope: "project", project: { host: "local", id: "proj-1" } });
 		expect(navigateMock).not.toHaveBeenCalled();
 		expect(spawnMock).not.toHaveBeenCalled();
 	});
@@ -425,8 +429,8 @@ describe("ShellTopbar orchestrator actions", () => {
 		await clickKillDialogConfirm();
 
 		expect(navigateMock).toHaveBeenCalledWith({
-			to: "/projects/$projectId/sessions/$sessionId",
-			params: { projectId: "proj-1", sessionId: "orch-1" },
+			to: "/host/$hostId/session/$sessionId",
+			params: { hostId: "local", sessionId: "orch-1" },
 		});
 	});
 });
