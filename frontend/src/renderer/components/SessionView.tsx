@@ -559,7 +559,8 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 	const setVisibleTerminalKind = useUiStore((state) => state.setVisibleTerminalKind);
 	const clearVisibleTerminalKind = useUiStore((state) => state.clearVisibleTerminalKind);
 	const renameShellTerminalByHandle = useCallback(
-		(handleId: string, title: string) => renameShellTerminal.mutate({ handleId, title }),
+		(handleId: string, title: string) =>
+			renameShellTerminal.mutate({ terminal: { host: sessionRef.host, id: handleId }, title }),
 		[renameShellTerminal],
 	);
 
@@ -568,7 +569,10 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 	// workspace can no longer be resolved).
 	const addShellTerminal = useCallback(() => {
 		const shell = openShellTerminal.open(
-			{ projectId: session?.workspaceId, sessionId },
+			{
+				project: session ? { host: session.host, id: session.workspaceId } : undefined,
+				session: sessionRef,
+			},
 			{
 				onSuccess: (openedShell) => {
 					setActiveShellTerminal(openedShell.handleId);
@@ -578,9 +582,10 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 					}));
 					setTerminalTarget({
 						generation: openedShell.createdAt,
+						host: openedShell.host,
 						kind: "shell",
 						handleId: openedShell.handleId,
-						sessionId,
+						session: sessionRef,
 						title: openedShell.title,
 					});
 				},
@@ -594,12 +599,13 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 		setActiveShellTerminal(shell.handleId);
 		setTerminalTarget({
 			generation: shell.createdAt,
+			host: shell.host,
 			kind: "shell",
 			handleId: shell.handleId,
-			sessionId,
+			session: sessionRef,
 			title: shell.title,
 		});
-	}, [openShellTerminal, sessionId, session?.workspaceId, setActiveShellTerminal]);
+	}, [openShellTerminal, sessionId, session, sessionRef, setActiveShellTerminal]);
 
 	const activateAuxiliaryTab = useCallback(
 		(key?: string) => {
@@ -672,9 +678,10 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 			}));
 			setTerminalTarget({
 				generation: shell.createdAt,
+				host: shell.host,
 				kind: "shell",
 				handleId: shell.handleId,
-				sessionId,
+				session: sessionRef,
 				title: shell.title,
 			});
 		},
@@ -689,12 +696,15 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 			} else if (activeShellTerminalHandleId === handleId) {
 				setActiveShellTerminal(null);
 			}
-			closeShellTerminal.mutate(handleId, {
-				onSuccess: () => removeAuxiliaryTab(handleId),
-				onError: (error) => {
-					if (apiErrorCode(error) === "SHELL_TERMINAL_NOT_FOUND") removeAuxiliaryTab(handleId);
+			closeShellTerminal.mutate(
+				{ host: sessionRef.host, id: handleId },
+				{
+					onSuccess: () => removeAuxiliaryTab(handleId),
+					onError: (error) => {
+						if (apiErrorCode(error) === "SHELL_TERMINAL_NOT_FOUND") removeAuxiliaryTab(handleId);
+					},
 				},
-			});
+			);
 		},
 		[
 			activeShellTerminalHandleId,
@@ -702,6 +712,7 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 			adjacentAuxiliaryTab,
 			closeShellTerminal,
 			removeAuxiliaryTab,
+			sessionRef,
 			setActiveShellTerminal,
 			terminalTarget,
 		],
@@ -719,12 +730,12 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 	}, [sessionId, setActiveShellTerminal]);
 	const selectReviewerTerminal = useCallback((target: ReviewerTerminalTarget) => {
 		setActiveShellTerminal(null);
-		setTerminalTarget({ kind: "reviewer", handleId: target.handleId, harness: target.harness, sessionId });
+		setTerminalTarget({ kind: "reviewer", handleId: target.handleId, harness: target.harness, session: sessionRef });
 		setFileTabsBySession((current) => ({
 			...current,
 			[sessionId]: activateSessionFile(current[sessionId] ?? EMPTY_SESSION_FILE_TABS, null),
 		}));
-	}, [sessionId, setActiveShellTerminal]);
+	}, [sessionId, sessionRef, setActiveShellTerminal]);
 	const openCenterFile = useCallback((path: string) => {
 		setFileTabsBySession((current) => ({
 			...current,
@@ -777,9 +788,10 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 				? current
 				: {
 						generation: shell.createdAt,
+						host: shell.host,
 						kind: "shell",
 						handleId: shell.handleId,
-						sessionId,
+						session: sessionRef,
 						title: shell.title,
 					},
 		);
@@ -1084,7 +1096,7 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 	// Route props change one render before the passive reset above. Reject the
 	// previous session's shell/reviewer synchronously so its handle can never be
 	// cached under the destination session.
-	const routedTerminalTarget = terminalTargetBelongsToSession(terminalTarget, sessionId)
+	const routedTerminalTarget = terminalTargetBelongsToSession(terminalTarget, sessionRef)
 		? terminalTarget
 		: ({ kind: "worker" } satisfies TerminalTarget);
 	// Chat surface stays mounted in chat mode for worker, reviewer, and shell

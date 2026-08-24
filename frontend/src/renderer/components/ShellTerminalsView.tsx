@@ -63,7 +63,7 @@ export function ShellTerminalsView() {
 	useEffect(
 		() =>
 			aoBridge.app.onCloseShellTerminalShortcut(() => {
-				if (active) closeShellTerminal.mutate(active.handleId);
+				if (active) closeShellTerminal.mutate({ host: active.host, id: active.handleId });
 			}),
 		[active, closeShellTerminal],
 	);
@@ -122,8 +122,8 @@ export function ShellTerminalsView() {
 							<ShellTerminalTab
 								key={shell.handleId}
 								isActive={isActive}
-								onClose={() => closeShellTerminal.mutate(shell.handleId)}
-								onRename={(title) => renameShellTerminal.mutate({ handleId: shell.handleId, title })}
+								onClose={() => closeShellTerminal.mutate({ host: shell.host, id: shell.handleId })}
+								onRename={(title) => renameShellTerminal.mutate({ terminal: { host: shell.host, id: shell.handleId }, title })}
 								onSelect={() => setActiveShellTerminal(shell.handleId)}
 								shell={shell}
 							/>
@@ -170,9 +170,10 @@ export function ShellTerminalsView() {
 						fontSize={12}
 						terminalTarget={{
 							generation: active.createdAt,
+							host: active.host,
 							kind: "shell",
 							handleId: active.handleId,
-							sessionId: active.sessionId,
+							session: active.sessionId ? { host: active.host, id: active.sessionId } : undefined,
 							title: active.title,
 						}}
 						theme={theme}

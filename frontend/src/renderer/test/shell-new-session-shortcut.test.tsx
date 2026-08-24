@@ -167,6 +167,11 @@ vi.mock("../hooks/useCloudCp", () => ({
 // shortcut subscriptions, so the mutation is stubbed rather than driven.
 vi.mock("../hooks/useShellTerminals", () => ({
 	useShellTerminals: () => ({ data: [], isSuccess: true }),
+	shellTerminalsQueryKey: (host: string) => ["shell-terminals", host],
+	shellTerminalsQueryOptions: (host: string) => ({
+		queryKey: ["shell-terminals", host],
+		queryFn: () => [],
+	}),
 	useOpenShellTerminal: () => ({ mutate: shellMocks.openShellTerminal }),
 }));
 
@@ -555,7 +560,7 @@ describe("shell new-shell-terminal shortcut subscription", () => {
 		pressNewShellTerminal();
 
 		expect(shellMocks.openShellTerminal).toHaveBeenCalledWith(
-			expect.objectContaining({ projectId: "proj-1" }),
+			expect.objectContaining({ project: { host: "local", id: "proj-1" } }),
 			expect.anything(),
 		);
 	});
@@ -570,7 +575,7 @@ describe("shell new-shell-terminal shortcut subscription", () => {
 		pressNewShellTerminal();
 
 		expect(shellMocks.openShellTerminal).toHaveBeenCalledWith(
-			expect.objectContaining({ projectId: "proj-1", sessionId: "sess-1" }),
+			expect.objectContaining({ project: { host: "local", id: "proj-1" }, session: { host: "local", id: "sess-1" } }),
 			expect.anything(),
 		);
 	});
@@ -584,7 +589,7 @@ describe("shell new-shell-terminal shortcut subscription", () => {
 		pressNewShellTerminal();
 
 		expect(shellMocks.openShellTerminal).toHaveBeenCalledWith(
-			expect.objectContaining({ projectId: "proj-2", sessionId: "sess-cross" }),
+			expect.objectContaining({ project: { host: "local", id: "proj-2" }, session: { host: "local", id: "sess-cross" } }),
 			expect.anything(),
 		);
 	});
