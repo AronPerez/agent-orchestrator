@@ -16,7 +16,7 @@ const shellMocks = vi.hoisted(() => {
 		nextSessionListener: undefined as (() => void) | undefined,
 		focusTerminalListener: undefined as (() => void) | undefined,
 		openFolderPathListener: undefined as ((path: string) => void) | undefined,
-		routeParams: {} as { projectId?: string; sessionId?: string },
+		routeParams: {} as { hostId?: string; projectId?: string; sessionId?: string },
 		routeSearch: {} as Record<string, unknown>,
 		workspaces: [] as WorkspaceSummary[],
 		workspaceQuery: {
@@ -644,6 +644,37 @@ describe("shell application shortcut subscriptions", () => {
 		expect(shellMocks.navigate).toHaveBeenCalledWith({
 			to: "/host/$hostId/session/$sessionId",
 			params: { hostId: "local", sessionId: "sess-3" },
+		});
+	});
+
+	// Session and project ids both repeat across hosts, so resolving the route's
+	// session by bare id can pick the wrong machine's project — and the next /
+	// previous shortcut then walks that machine's sessions.
+	it("cycles within the route host's project when two hosts share the ids", async () => {
+		shellMocks.state.workspaceQuery = {
+			...shellMocks.state.workspaceQuery,
+			data: [
+				...workspaces,
+				{
+					host: "remote",
+					id: "proj-1",
+					name: "Project One",
+					path: "/one",
+					sessions: [
+						{ host: "remote", id: "sess-1", workspaceId: "proj-1", status: "working" },
+						{ host: "remote", id: "sess-remote-next", workspaceId: "proj-1", status: "idle" },
+					],
+				},
+			] as unknown as WorkspaceSummary[],
+		};
+		shellMocks.state.routeParams = { hostId: "remote", sessionId: "sess-1" };
+		await renderShell();
+
+		act(() => shellMocks.state.nextSessionListener?.());
+
+		expect(shellMocks.navigate).toHaveBeenCalledWith({
+			to: "/host/$hostId/session/$sessionId",
+			params: { hostId: "remote", sessionId: "sess-remote-next" },
 		});
 	});
 
