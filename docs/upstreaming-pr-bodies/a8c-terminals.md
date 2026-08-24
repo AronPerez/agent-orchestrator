@@ -18,4 +18,9 @@ The terminal mux pool holds one current socket for the whole app. With two hosts
 
 ## Artifacts (if appropriate):
 
-Evidence pending — the fix above just landed; a screenshot of two hosts each holding an open terminal lands here once captured against this build.
+![Standalone terminals list, remote host's shell active — cwd is the remote checkout](https://raw.githubusercontent.com/AronPerez/agent-orchestrator/campaign-assets/qa-evidence/a8c-terminals.png)
+![Same tab strip, local shell active — cwd is the local checkout](https://raw.githubusercontent.com/AronPerez/agent-orchestrator/campaign-assets/qa-evidence/a8c-terminals-2.png)
+
+Real PTYs on two real daemons (`cwd` in-frame is the discriminator). One caveat visible above: the tab strip doesn't name which host a shell belongs to — both default to the project title. Real UX gap, not a capture artifact.
+
+*Captured on a dev build; `--disable-web-security` bridges the dev-origin CORS gap only (production origin `app://renderer` passes the same check natively) — the daemon, proxy, credential, and traffic are all real.*

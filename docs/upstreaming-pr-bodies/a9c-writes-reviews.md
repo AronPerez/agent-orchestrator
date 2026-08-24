@@ -18,4 +18,10 @@ PR/review actions, diff-selection "send to agent" calls, the palette's review tr
 
 ## Artifacts (if appropriate):
 
-Evidence pending — the fix above just landed; a screenshot of two hosts' inspectors staying independent for a shared session id lands here once captured against this build.
+![Local demo-project-2, inspector open on Files](https://raw.githubusercontent.com/AronPerez/agent-orchestrator/campaign-assets/qa-evidence/a9c-writes-reviews.png)
+![Remote demo-project-2 (same id, other host), inspector on its own default then closed](https://raw.githubusercontent.com/AronPerez/agent-orchestrator/campaign-assets/qa-evidence/a9c-writes-reviews-2.png)
+![Back on local demo-project-2, inspector still open on Files, unaffected](https://raw.githubusercontent.com/AronPerez/agent-orchestrator/campaign-assets/qa-evidence/a9c-writes-reviews-3.png)
+
+Both hosts hold a session with the same id; open state and selected tab stay host-scoped across all three frames. One unrelated leak is visible in these frames, not a falsification of this PR's claim: the sidebar's active-row highlight (`Sidebar.tsx:379,917`) is keyed by bare session id and lights up both hosts' same-id rows — a separate defect, same class, not fixed here.
+
+*Captured on a dev build; `--disable-web-security` bridges the dev-origin CORS gap only (production origin `app://renderer` passes the same check natively) — the daemon, proxy, credential, and traffic are all real.*
