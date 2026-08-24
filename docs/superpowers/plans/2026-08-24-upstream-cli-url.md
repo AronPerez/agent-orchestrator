@@ -12,7 +12,9 @@
 
 ## Global Constraints
 
+- **Every PR is opened as a draft** (`gh pr create --draft`; convert an existing one with `gh pr ready --undo <n>`) — human directive 2026-08-24: this is a stack, and nothing signals mergeable until the order is settled.
 - **Do not push to, open PRs against, or comment on `Untrivial-ai/agent-orchestrator`.** `upstream` is fetch-only. All pushes go to `origin` (`AronPerez/agent-orchestrator`). The human opens upstream PRs from Task 7's hand-off. Do not merge any PR.
+- **Branch names are the clean refs only** (`up-c1-url` …). AO's session-namespaced twin (`plan/2026-08-24-cli/up-c1-url`) is impossible here: `plan/2026-08-24-cli` already exists as a branch, so git rejects a nested ref under it with `directory file conflict`. The five branches are therefore outside this session's AO namespace — record their SHAs in the hand-off (Task 7) so nothing is lost.
 - **Every stack branch is based on `upstream/main`** (spec §2.1 rule 1), never on `develop`. Upstream squash-merges, so rebase the siblings with `git rebase --onto`, never by merging.
 - **Off-state is a construction, not a flag** (spec §2.5): with no `--url` and no `AO_URL`, behaviour is byte-identical to upstream. Every branch carries at least one test that pins the local path unchanged, and the local paths' output strings are asserted as exact literals, not substrings.
 - **No credential ever reaches an error message or a log line.** `normalizeRemoteURL` rejects userinfo textually, before `url.Parse`, so no parse error can echo it; `remotes.json` must be 0600 (win32 exempt); CLI telemetry (`/internal/*`) is dropped for a remote target rather than sent off-box.
@@ -259,7 +261,6 @@ path above is the one it has always been.
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Fj6tXz23Rgd29JHowjDLbk"
 git push -q -u origin up-c1-url
-git push -q origin up-c1-url:refs/heads/plan/2026-08-24-cli/up-c1-url
 git log -1 --format=%h
 ```
 
@@ -427,7 +428,6 @@ and each of these commands behaves exactly as before.
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Fj6tXz23Rgd29JHowjDLbk"
 git push -q -u origin up-c2a-refuse-local
-git push -q origin up-c2a-refuse-local:refs/heads/plan/2026-08-24-cli/up-c2a-refuse-local
 git log -1 --format=%h
 ```
 
@@ -578,7 +578,6 @@ local behaviour is unchanged.
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Fj6tXz23Rgd29JHowjDLbk"
 git push -q -u origin up-c2b-remote-path
-git push -q origin up-c2b-remote-path:refs/heads/plan/2026-08-24-cli/up-c2b-remote-path
 git log -1 --format=%h
 ```
 
@@ -725,7 +724,6 @@ substrings to keep it that way.
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Fj6tXz23Rgd29JHowjDLbk"
 git push -q -u origin up-c2c-name-daemon
-git push -q origin up-c2c-name-daemon:refs/heads/plan/2026-08-24-cli/up-c2c-name-daemon
 git log -1 --format=%h
 ```
 
@@ -893,7 +891,6 @@ caller.
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Fj6tXz23Rgd29JHowjDLbk"
 git push -q -u origin up-c3-route-loopback
-git push -q origin up-c3-route-loopback:refs/heads/plan/2026-08-24-cli/up-c3-route-loopback
 git log -1 --format=%h
 ```
 
@@ -923,7 +920,7 @@ Append to `docs/upstreaming-stack-status.md`, after the existing Track A materia
 
 Built by Plan C (`docs/superpowers/plans/2026-08-24-upstream-cli-url.md`) against the same `upstream/main @ <SHA>`. Go only: `backend/internal/cli/**` plus one function in `backend/internal/httpd/lan_listener.go`. It shares no code with Track A and can be opened in parallel with it — same reviewers, different files.
 
-The public branch names are the clean refs below. The `plan/2026-08-24-cli/up-c*` twins on origin point at the same commits and are AO session bookkeeping only — never open an upstream PR from a namespaced ref.
+The branch names below are the only refs — there are no AO session-namespaced twins for Track C, because `plan/2026-08-24-cli` exists as a branch and git refuses a nested ref under it.
 
 ## Branch topology
 
@@ -964,10 +961,13 @@ Verified on the upstream base at build time: on every branch `go build ./...`, `
 
 ## Opening a PR (C1 first; the other four in any order after it merges)
 
-    gh pr create --repo Untrivial-ai/agent-orchestrator --base main \
+    gh pr create --repo Untrivial-ai/agent-orchestrator --base main --draft \
       --head AronPerez:up-c1-url \
       --title "feat(cli): target a remote daemon with --url / AO_URL" \
       --body-file docs/upstreaming-pr-bodies/c1-url.md
+
+`--draft` per the 2026-08-24 directive: this is a stack, and nothing signals mergeable until
+the order is settled. Mark ready with `gh pr ready <n>` when a PR is genuinely up for review.
 
 Bodies follow upstream's template (What / Why / How / Testing / Checklist) and are in `docs/upstreaming-pr-bodies/`. Each body's "Why" links the RFC issue number once it exists — fill `#RFC` in before opening.
 
