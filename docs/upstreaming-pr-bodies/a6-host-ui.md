@@ -16,4 +16,4 @@ A Host dropdown in Add-a-project lists saved remote daemons beside This Mac with
 
 ## Artifacts (if appropriate):
 
-Evidence pending — opens draft ahead of capture; a Host-dropdown screenshot with a saved remote host lands here before review is requested.
+![Add-a-project Host dropdown listing "This Mac" and a saved, connected remote host](https://raw.githubusercontent.com/AronPerez/agent-orchestrator/campaign-assets/qa-evidence/a6-host-ui.png)
