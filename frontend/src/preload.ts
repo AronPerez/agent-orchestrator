@@ -543,14 +543,14 @@ const api = {
 	// plaintext password only ever travels renderer -> main, on `add`.
 	remotes: {
 		list: () => ipcRenderer.invoke("remotes:list") as Promise<RemoteHostView[]>,
-		add: (input: { label: string; url: string; password: string }) =>
+		add: (input: { label: string; url: string; password: string; sshDestination?: string }) =>
 			ipcRenderer.invoke("remotes:add", input) as Promise<RemoteHealth>,
 		// An edit carries only what changed: an omitted password keeps the saved
 		// one, so a rotated credential is fixed without the renderer ever holding
 		// the old one.
 		update: (
 			url: string,
-			changes: { label?: string; url?: string; password?: string },
+			changes: { label?: string; url?: string; password?: string; sshDestination?: string },
 		) =>
 			ipcRenderer.invoke(
 				"remotes:update",

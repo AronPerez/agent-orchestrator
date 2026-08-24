@@ -250,6 +250,8 @@
 	"hosts.add.name": "Name",
 	"hosts.add.password": "Connection password",
 	"hosts.add.passwordHint": "Shown on that machine under Settings → Connect Mobile.",
+	"hosts.add.ssh": "SSH destination (optional)",
+	"hosts.add.sshHint": "user@host for opening this host's workspaces in your editor. Uses your own SSH keys; verify the host once with ssh in a terminal first.",
 	"hosts.add.submit": "Connect",
 	"hosts.add.title": "Add a remote host",
 	"hosts.add.willConnectTo": "Will connect to {{url}}",

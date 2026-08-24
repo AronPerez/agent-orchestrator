@@ -252,6 +252,8 @@
 	"hosts.add.name": "Nome",
 	"hosts.add.password": "Senha de conexão",
 	"hosts.add.passwordHint": "Exibida nessa máquina em Configurações → Conectar celular.",
+	"hosts.add.ssh": "Destino SSH (opcional)",
+	"hosts.add.sshHint": "user@host para abrir os workspaces deste host no seu editor. Usa suas próprias chaves SSH; verifique o host uma vez com ssh em um terminal.",
 	"hosts.add.submit": "Conectar",
 	"hosts.add.title": "Adicionar um host remoto",
 	"hosts.add.willConnectTo": "Vai conectar a {{url}}",

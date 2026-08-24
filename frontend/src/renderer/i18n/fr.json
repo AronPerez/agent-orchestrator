@@ -252,6 +252,8 @@
 	"hosts.add.name": "Nom",
 	"hosts.add.password": "Mot de passe de connexion",
 	"hosts.add.passwordHint": "Affiché sur cette machine dans Réglages → Connecter le mobile.",
+	"hosts.add.ssh": "Destination SSH (facultatif)",
+	"hosts.add.sshHint": "user@host pour ouvrir les espaces de travail de cet hôte dans votre éditeur. Utilise vos clés SSH ; vérifiez l'hôte une fois avec ssh dans un terminal.",
 	"hosts.add.submit": "Connecter",
 	"hosts.add.title": "Ajouter un hôte distant",
 	"hosts.add.willConnectTo": "Connexion à {{url}}",

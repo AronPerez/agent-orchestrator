@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { chmod, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { addRemote, readRemotes, removeRemote, RemotesFilePermissionError, updateRemote } from "./remotes-store";
+import { addRemote, applyRemoteChanges, readRemotes, removeRemote, RemotesFilePermissionError, updateRemote } from "./remotes-store";
 
 async function tempFile(contents?: string, mode = 0o600): Promise<string> {
 	const dir = await mkdtemp(join(tmpdir(), "ao-remotes-"));
@@ -169,5 +169,28 @@ describe("removeRemote", () => {
 		const path = await tempFile(TWO_HOSTS, 0o644);
 		await expect(removeRemote(path, "http://192.0.2.1:1")).rejects.toBeInstanceOf(RemotesFilePermissionError);
 		expect(await readFile(path, "utf8")).toBe(TWO_HOSTS);
+	});
+});
+
+describe("sshDestination", () => {
+	it("round-trips an SSH destination and keeps hosts without one unchanged", async () => {
+		const file = await tempFile(JSON.stringify({
+			remotes: [
+				{ label: "Mini", url: "http://192.0.2.1:3011", password: "pw", sshDestination: "aron@mini.local" },
+				{ label: "Plain", url: "http://192.0.2.2:3011", password: "pw" },
+			],
+		}));
+		const remotes = await readRemotes(file);
+		expect(remotes[0].sshDestination).toBe("aron@mini.local");
+		expect(remotes[1].sshDestination).toBeUndefined();
+	});
+
+	it("edits, keeps, and clears the SSH destination independently of other fields", async () => {
+		const entry = { label: "Mini", url: "http://192.0.2.1:3011", password: "pw", sshDestination: "aron@mini.local" };
+		expect(applyRemoteChanges(entry, { label: "Mini2" }).sshDestination).toBe("aron@mini.local");
+		expect(applyRemoteChanges(entry, { sshDestination: "aron@10.0.0.9" }).sshDestination).toBe("aron@10.0.0.9");
+		// Empty string is the dialog's "remove it" — stored as absent, not "".
+		expect(applyRemoteChanges(entry, { sshDestination: "" }).sshDestination).toBeUndefined();
+		expect(applyRemoteChanges(entry, { sshDestination: "  aron@mini.local  " }).sshDestination).toBe("aron@mini.local");
 	});
 });

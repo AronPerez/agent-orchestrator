@@ -252,6 +252,8 @@
 	"hosts.add.name": "Nombre",
 	"hosts.add.password": "Contraseña de conexión",
 	"hosts.add.passwordHint": "Se muestra en esa máquina en Ajustes → Conectar móvil.",
+	"hosts.add.ssh": "Destino SSH (opcional)",
+	"hosts.add.sshHint": "user@host para abrir los espacios de trabajo de este host en tu editor. Usa tus propias claves SSH; verifica el host una vez con ssh en una terminal.",
 	"hosts.add.submit": "Conectar",
 	"hosts.add.title": "Añadir un host remoto",
 	"hosts.add.willConnectTo": "Se conectará a {{url}}",

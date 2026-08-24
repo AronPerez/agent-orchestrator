@@ -250,6 +250,8 @@
 	"hosts.add.name": "名前",
 	"hosts.add.password": "接続パスワード",
 	"hosts.add.passwordHint": "対象のマシンの「設定 → モバイル接続」に表示されます。",
+	"hosts.add.ssh": "SSH 接続先（任意）",
+	"hosts.add.sshHint": "このホストのワークスペースをエディターで開くための user@host。自分の SSH 鍵を使用します。最初に一度ターミナルの ssh でホストを確認してください。",
 	"hosts.add.submit": "接続",
 	"hosts.add.title": "リモートホストを追加",
 	"hosts.add.willConnectTo": "{{url}} に接続します",

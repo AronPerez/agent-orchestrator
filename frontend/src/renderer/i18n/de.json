@@ -250,6 +250,8 @@
 	"hosts.add.name": "Name",
 	"hosts.add.password": "Verbindungspasswort",
 	"hosts.add.passwordHint": "Wird auf dem Gerät unter Einstellungen → Mobil verbinden angezeigt.",
+	"hosts.add.ssh": "SSH-Ziel (optional)",
+	"hosts.add.sshHint": "user@host, um Arbeitsbereiche dieses Hosts im Editor zu öffnen. Nutzt deine eigenen SSH-Schlüssel; den Host zuerst einmal per ssh im Terminal verifizieren.",
 	"hosts.add.submit": "Verbinden",
 	"hosts.add.title": "Remote-Host hinzufügen",
 	"hosts.add.willConnectTo": "Verbindet mit {{url}}",
