@@ -382,6 +382,32 @@ describe("Sidebar — one tree across hosts", () => {
 
 	// Colliding ids across hosts are by construction: two machines can each hold
 	// a "skyvern-cloud". Nothing may dedupe, hide, or cross-highlight them.
+	// The pinned strip is the one list that mixes hosts in a single flat array,
+	// so a bare-id active match lights up every host's copy of the same session.
+	it("highlights only the routed host's row when two hosts pin the same session id", () => {
+		const remoteHost = "http://192.0.2.1:3011";
+		const id = "proj-1-1";
+		const pinnedOn = (host: string, title: string) => ({
+			...workspace,
+			host,
+			sessions: [{ ...session, host, id, title, isPinned: true, pinnedAt: "2026-06-30T00:00:00Z" }],
+		});
+		// Only the remote is routed; the local row shares its session id.
+		mockParams.hostId = remoteHost;
+		mockParams.projectId = workspace.id;
+		mockParams.sessionId = id;
+		renderSidebar({
+			hostSections: [
+				{ host: LOCAL_HOST, label: "Local", status: "ready", workspaces: [pinnedOn(LOCAL_HOST, "local work")], failure: null },
+				{ host: remoteHost, label: "workbox", status: "ready", workspaces: [pinnedOn(remoteHost, "remote work")], failure: null },
+			],
+		});
+
+		const pinned = screen.getByTestId("pinned-session-list");
+		expect(within(pinned).getByRole("button", { name: "Open local work" })).not.toHaveAttribute("aria-current");
+		expect(within(pinned).getByRole("button", { name: "Open remote work" })).toHaveAttribute("aria-current", "page");
+	});
+
 	it("renders one row per host for the same project id", () => {
 		const first = "http://192.0.2.1:3011";
 		const second = "http://192.0.2.2:3011";
