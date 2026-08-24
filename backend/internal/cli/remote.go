@@ -175,6 +175,81 @@ func lookupRemoteEntry(base string) (*remoteEntry, error) {
 	return nil, nil
 }
 
+// refuseLocalOnly refuses a command that acts on the machine running the CLI
+// and therefore cannot honour a remote target.
+//
+// These commands do not fail against --url: they succeed, on the wrong machine,
+// and say nothing about it. `ao doctor --url` reports the laptop's git, tmux and
+// data dir; `ao import --url` opens the laptop's database; `ao start --url`
+// opens the laptop's desktop app. A command that acts on the wrong host is
+// undetectable after the fact, which is the defect class the other --url
+// refusals cover — so the message names the flag (--url or AO_URL), names the URL
+// it points at, and says where to run the command instead. It never guesses at
+// a remote equivalent.
+//
+// Exit code 2 (usage), like every other --url refusal: passing --url to a command that
+// cannot use it is misuse of a flag, not a runtime failure.
+func (c *commandContext) refuseLocalOnly(command, why string) error {
+	if c.remote == nil {
+		return nil
+	}
+	return usageError{fmt.Errorf("%s targets the remote daemon at %s, but `%s` %s",
+		c.remote.source, c.remote.baseURL, command, why)}
+}
+
+// refuseDaemonURLFlag is refuseLocalOnly for `ao daemon`, narrowed to an
+// explicit --url and deliberately ignoring AO_URL.
+//
+// The one asymmetry among the local-only refusals. An explicit --url is a
+// keystroke and always misuse. AO_URL is an exported shell variable — the very
+// foot-gun a remote-access guide creates — and `ao daemon` is spawned by the
+// desktop app, not typed. Refusing it on AO_URL would take an operator's
+// working remote setup and turn it into a dead desktop app on their own
+// machine, which is worse than the ignored flag this refuses.
+func (c *commandContext) refuseDaemonURLFlag() error {
+	if c.remote == nil || c.remote.source != "--url" {
+		return nil
+	}
+	return c.refuseLocalOnly("ao daemon",
+		"runs a daemon process on the machine executing it and makes no outbound call — "+
+			"there is nothing it could do with that URL. Start the daemon on that host")
+}
+
+// pinToLocalDaemon keeps a daemon-local callback on the local daemon.
+//
+// `ao hooks` and `ao agent-process supervise` are hidden commands an agent
+// process fires at the daemon that started it: they report activity for a
+// session that exists on THIS machine. Sending that to a remote daemon is never
+// right — measured, it reports SESSION_NOT_FOUND and exits 0, so the local UI's
+// activity feed simply goes dead while the agent keeps working.
+//
+// The split is the same one refuseDaemonURLFlag makes, for the same reason, and
+// it is the whole point of this helper:
+//
+//   - AO_URL is ignored. These commands are spawned by the harness, not typed,
+//     and an operator who exports AO_URL in a shell profile — the natural thing
+//     to do after reading the remote-access guide — must not have every local
+//     agent broken by it. Refusing here would break the user's agent, the exact
+//     thing hooks are designed never to do. The ignore is logged to hooks.log so
+//     it is discoverable rather than silent.
+//   - An explicit --url is refused (exit 2). A typed flag on a hidden,
+//     agent-invoked command is misuse, and nothing in AO constructs one:
+//     session_manager builds the supervise argv itself, with fixed arguments.
+func (c *commandContext) pinToLocalDaemon(command string) error {
+	if c.remote == nil {
+		return nil
+	}
+	if c.remote.source == "--url" {
+		return c.refuseLocalOnly(command,
+			"reports on a session owned by the daemon that started it, so it can only ever mean the local "+
+				"daemon — there is no remote form. Drop the flag")
+	}
+	target := c.remote.baseURL
+	c.remote = nil
+	noteIgnoredRemoteTarget(command, target)
+	return nil
+}
+
 // authorize presents the remote connection password. Loopback calls carry no
 // credential: the local daemon's loopback listener has no auth at all.
 func (c *commandContext) authorize(req *http.Request) {

@@ -197,7 +197,7 @@ func NewRootCommand(deps Deps) *cobra.Command {
 		return usageError{err}
 	})
 
-	root.AddCommand(newDaemonCommand())
+	root.AddCommand(newDaemonCommand(ctx))
 	root.AddCommand(newStartCommand(ctx))
 	root.AddCommand(newStopCommand(ctx))
 	root.AddCommand(newStatusCommand(ctx))
@@ -333,13 +333,17 @@ func atMostOneArg(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func newDaemonCommand() *cobra.Command {
+func newDaemonCommand(ctx *commandContext) *cobra.Command {
 	return &cobra.Command{
 		Use:    "daemon",
 		Short:  "Run the AO backend daemon",
 		Hidden: true,
 		Args:   noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Flag-only, not AO_URL — see refuseDaemonURLFlag.
+			if err := ctx.refuseDaemonURLFlag(); err != nil {
+				return err
+			}
 			return daemon.Run()
 		},
 	}
