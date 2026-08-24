@@ -129,9 +129,26 @@ vi.mock("../lib/bridge", () => ({
 	},
 }));
 
+// useWorkspaceQuery returns one section per host now; these fixtures still
+// describe the local host's workspaces, so wrap them in its section — cached by
+// the fixture array, since a fresh section object every render would look like
+// new data to the shell's startup effect.
+const localSections = new WeakMap<object, unknown>();
+function asLocalSections(result: { data?: unknown }) {
+	if (!result.data) return { ...result, data: undefined };
+	const key = result.data as object;
+	if (!localSections.has(key)) {
+		localSections.set(key, [
+			{ host: "local", label: "Local", status: "ready", workspaces: result.data, failure: null },
+		]);
+	}
+	return { ...result, data: localSections.get(key) };
+}
+
 vi.mock("../hooks/useWorkspaceQuery", () => ({
-	useWorkspaceQuery: () => shellMocks.state.workspaceQuery,
+	useWorkspaceQuery: () => asLocalSections(shellMocks.state.workspaceQuery),
 	workspaceQueryKey: ["workspaces"],
+	workspaceHostQueryKey: (host: string) => ["workspaces", host],
 	workspaceQueryOptions: {},
 }));
 

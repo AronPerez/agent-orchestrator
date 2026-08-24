@@ -10,7 +10,7 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock("../hooks/useWorkspaceQuery", () => ({
-	useWorkspaceQuery: () => ({ data: h.workspaces }),
+	useWorkspaceQuery: () => ({ data: [{ host: "local", label: "Local", status: "ready", workspaces: h.workspaces, failure: null }] }),
 	workspaceQueryKey: ["workspaces"],
 }));
 

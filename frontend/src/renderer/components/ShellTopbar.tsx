@@ -11,6 +11,7 @@ import {
 	isOrchestratorSession,
 	sessionIsActive,
 	type WorkspaceSession,
+	flattenHostSections,
 } from "../types/workspace";
 import { cloudSessionsQueryKey, useWorkspaceQuery, workspaceQueryKey } from "../hooks/useWorkspaceQuery";
 import {
@@ -115,7 +116,7 @@ export function ShellTopbar({
 	const [isSpawning, setIsSpawning] = useState(false);
 	// Board-scope spawn failures surface where the board actions render.
 	const [boardSpawnError, setBoardSpawnError] = useState<string | null>(null);
-	const all = useWorkspaceQuery().data ?? [];
+	const all = flattenHostSections(useWorkspaceQuery().data);
 
 	// Session ids are unique per host, not across them: matching on id alone
 	// names another host's same-id session in the crumb, pill and kill button.

@@ -17,7 +17,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 
 vi.mock("../hooks/useWorkspaceQuery", () => ({
 	useWorkspaceQuery: () => ({
-		data: routeMocks.workspaces,
+		data: [{ host: "local", label: "Local", status: "ready", workspaces: routeMocks.workspaces, failure: null }],
 		isSuccess: routeMocks.queryState === "success",
 	}),
 }));

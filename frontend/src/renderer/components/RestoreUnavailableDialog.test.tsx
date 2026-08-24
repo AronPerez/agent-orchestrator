@@ -11,7 +11,17 @@ const { spawnMock, workspaceQueryMock } = vi.hoisted(() => ({
 }));
 
 vi.mock("../hooks/useWorkspaceQuery", () => ({
-	useWorkspaceQuery: () => workspaceQueryMock(),
+	useWorkspaceQuery: () => (() => {
+		// useWorkspaceQuery returns one section per host now; these fixtures still
+		// describe the local host's workspaces, so wrap them in its section.
+		const result = workspaceQueryMock();
+		return {
+			...result,
+			data: result.data
+				? [{ host: "local", label: "Local", status: "ready", workspaces: result.data, failure: null }]
+				: undefined,
+		};
+	})(),
 }));
 
 vi.mock("../lib/spawn-orchestrator", () => ({
