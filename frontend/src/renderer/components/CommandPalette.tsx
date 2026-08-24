@@ -6,7 +6,8 @@ import { useTranslation } from "react-i18next";
 import { useCommandPaletteEnabled } from "../hooks/useCommandPaletteEnabled";
 import { useRestoreSession } from "../hooks/useRestoreSession";
 import { cloudSessionsQueryKey, useWorkspaceQuery, workspaceQueryKey } from "../hooks/useWorkspaceQuery";
-import { apiClient, apiErrorMessage } from "../lib/api-client";
+import { apiErrorMessage } from "../lib/api-client";
+import { clientFor } from "../lib/host-clients";
 import { aoBridge } from "../lib/bridge";
 import { spawnCloudOrchestrator } from "../lib/cloud-orchestrator";
 import {
@@ -33,7 +34,7 @@ import { CreateProjectFlow } from "./CreateProjectFlow";
 import { TaskComposer } from "./TaskComposer";
 import { CommandDialog, CommandEmpty, CommandFooter, CommandGroup, CommandInput, CommandItem, CommandList } from "./ui/command";
 
-import { LOCAL_HOST, type Ref } from "../lib/hosts";
+import { LOCAL_HOST, refKey, type Ref } from "../lib/hosts";
 const PALETTE_REVIEW_STALE_TIME_MS = 60_000;
 type PaletteView =
 	| { mode: "root" }
@@ -366,11 +367,11 @@ export function CommandPalette() {
 						has_override: false,
 						source: "command_palette",
 					});
-					const { error: triggerError } = await apiClient.POST("/api/v1/sessions/{sessionId}/reviews/trigger", {
-						params: { path: { sessionId: action.sessionId } },
+					const { error: triggerError } = await clientFor(action.session.host).POST("/api/v1/sessions/{sessionId}/reviews/trigger", {
+						params: { path: { sessionId: action.session.id } },
 					});
 					if (triggerError) throw new Error(apiErrorMessage(triggerError, "Unable to start review"));
-					await queryClient.invalidateQueries({ queryKey: ["session-reviews", action.sessionId] });
+					await queryClient.invalidateQueries({ queryKey: ["session-reviews", refKey(action.session)] });
 					await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
 					closePalette();
 					break;

@@ -1,6 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useCallback } from "react";
 import { clientFor } from "../lib/host-clients";
+import { refKey } from "../lib/hosts";
 import { useUiStore } from "../stores/ui-store";
 import { sessionIsActive, type WorkspaceSession } from "../types/workspace";
 import { workspaceQueryKey } from "./useWorkspaceQuery";
@@ -23,10 +24,9 @@ export function useSessionBrowserLink(session?: WorkspaceSession): (uri: string)
 			}
 
 			const sessionId = session.id;
-			// The inspector store is still keyed by bare session id; qualifying it
-			// belongs with the panel work, not with this request's routing.
-			setInspectorView(sessionId, "browser");
-			setInspectorOpen(sessionId, true);
+			const sessionKey = refKey(session);
+			setInspectorView(sessionKey, "browser");
+			setInspectorOpen(sessionKey, true);
 			void (async () => {
 				try {
 					const { error } = await clientFor(session.host).POST("/api/v1/sessions/{sessionId}/preview", {

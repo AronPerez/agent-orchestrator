@@ -20,6 +20,7 @@ import {
 	useTerminateSessionState,
 } from "../hooks/useTerminateSession";
 import { spawnCloudOrchestrator } from "../lib/cloud-orchestrator";
+import { refKey } from "../lib/hosts";
 import { spawnOrchestrator } from "../lib/spawn-orchestrator";
 import { addRendererExceptionStep, captureRendererEvent, captureRendererException } from "../lib/telemetry";
 import { sidebarOccupiesLayout, useUiStore } from "../stores/ui-store";
@@ -85,8 +86,10 @@ export function ShellTopbar({
 	const queryClient = useQueryClient();
 	const params = useParams({ strict: false }) as { hostId?: string; projectId?: string; sessionId?: string };
 	const currentSessionId = params.sessionId;
+	const currentSessionKey =
+		params.hostId && currentSessionId ? refKey({ host: params.hostId, id: currentSessionId }) : undefined;
 	const isInspectorOpen = useUiStore((state) =>
-		currentSessionId ? (state.inspectorSessions[currentSessionId]?.isOpen ?? true) : false,
+		currentSessionKey ? (state.inspectorSessions[currentSessionKey]?.isOpen ?? true) : false,
 	);
 	const restartingProjectIds = useUiStore((state) => state.restartingProjectIds);
 	const requestNewTask = useUiStore((state) => state.requestNewTask);

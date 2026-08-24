@@ -306,7 +306,11 @@ describe("buildCommands PR actions", () => {
 		const review = byId(buildCommands({ workspaces: workspaces() })).get("pr-review:w-pr:42");
 		expect(review?.group).toBe("prs");
 		expect(review?.title).toBe("Run review #42");
-		expect(review?.action).toEqual({ kind: "trigger-review", reviewAction: "run", sessionId: "w-pr" });
+		expect(review?.action).toEqual({
+			kind: "trigger-review",
+			reviewAction: "run",
+			session: { host: "local", id: "w-pr" },
+		});
 		expect(review?.disabled).toBeFalsy();
 		expect(review?.disabledReason).toBeUndefined();
 		expect(review?.searchOnly).toBe(true);
@@ -355,7 +359,7 @@ describe("buildCommands PR actions", () => {
 			expect(map.get("pr-review:w-pr:42")?.action).toEqual({
 				kind: "trigger-review",
 				reviewAction: expected,
-				sessionId: "w-pr",
+				session: { host: "local", id: "w-pr" },
 			});
 		}
 	});
@@ -412,8 +416,16 @@ describe("buildCommands PR actions", () => {
 		const map = byId(buildCommands({ workspaces: multiWorkspaces }));
 		expect(map.get("pr-open:w-multi:1")?.action).toEqual({ kind: "open-pr", url: "https://github.com/o/r/pull/1" });
 		expect(map.get("pr-open:w-multi:2")?.action).toEqual({ kind: "open-pr", url: "https://github.com/o/r/pull/2" });
-		expect(map.get("pr-review:w-multi:1")?.action).toEqual({ kind: "trigger-review", reviewAction: "run", sessionId: "w-multi" });
-		expect(map.get("pr-review:w-multi:2")?.action).toEqual({ kind: "trigger-review", reviewAction: "run", sessionId: "w-multi" });
+		expect(map.get("pr-review:w-multi:1")?.action).toEqual({
+			kind: "trigger-review",
+			reviewAction: "run",
+			session: { host: "local", id: "w-multi" },
+		});
+		expect(map.get("pr-review:w-multi:2")?.action).toEqual({
+			kind: "trigger-review",
+			reviewAction: "run",
+			session: { host: "local", id: "w-multi" },
+		});
 	});
 
 	it("does not create action items for merged or closed PRs", () => {
