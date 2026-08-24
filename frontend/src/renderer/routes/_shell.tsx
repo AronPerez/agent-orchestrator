@@ -741,9 +741,7 @@ function ShellLayout() {
 		openShellTerminal.mutate(
 			{
 				project: scopedProject,
-				session: routeParams.sessionId
-					? { host: scopedProject?.host ?? LOCAL_HOST, id: routeParams.sessionId }
-					: undefined,
+				session: routeParams.sessionId ? { host: routeHost, id: routeParams.sessionId } : undefined,
 			},
 			{
 				onSuccess: (shell) => {
