@@ -1539,5 +1539,16 @@
 	"hosts.remotePath": "Path on {{host}}",
 	"hosts.remotePathHint": "Absolute path on that machine.",
 	"hosts.addProjectOn": "Add project on {{host}}",
-	"hosts.switcher": "Host: {{host}}"
+	"hosts.switcher": "Host: {{host}}",
+	"fsBrowse.title": "Browse {{host}}",
+	"fsBrowse.hint": "Pick a folder on that machine.",
+	"fsBrowse.loading": "Loading folders…",
+	"fsBrowse.up": "Up",
+	"fsBrowse.gitRepo": "Git repo",
+	"fsBrowse.chooseThis": "Choose this folder",
+	"fsBrowse.empty": "No subfolders",
+	"fsBrowse.truncated": "Showing the first {{limit}} folders",
+	"fsBrowse.failed": "Could not list folders on that host.",
+	"fsBrowse.unsupported": "That host did not return a folder listing. It may be running an older build without folder browsing.",
+	"fsBrowse.browse": "Browse…"
 }

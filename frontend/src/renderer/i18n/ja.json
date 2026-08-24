@@ -1557,5 +1557,16 @@
 	"hosts.remotePath": "{{host}} 上のパス",
 	"hosts.remotePathHint": "そのマシン上の絶対パス。",
 	"hosts.addProjectOn": "{{host}} にプロジェクトを追加",
-	"hosts.switcher": "ホスト: {{host}}"
+	"hosts.switcher": "ホスト: {{host}}",
+	"fsBrowse.title": "{{host}} を参照",
+	"fsBrowse.hint": "そのマシン上のフォルダーを選択します。",
+	"fsBrowse.loading": "フォルダーを読み込み中…",
+	"fsBrowse.up": "上へ",
+	"fsBrowse.gitRepo": "Git リポジトリ",
+	"fsBrowse.chooseThis": "このフォルダーを選択",
+	"fsBrowse.empty": "サブフォルダーはありません",
+	"fsBrowse.truncated": "最初の {{limit}} 件のフォルダーを表示しています",
+	"fsBrowse.failed": "そのホストのフォルダーを一覧表示できませんでした。",
+	"fsBrowse.unsupported": "そのホストはフォルダー一覧を返しませんでした。フォルダー参照に対応していない古いビルドが動作している可能性があります。",
+	"fsBrowse.browse": "参照…"
 }

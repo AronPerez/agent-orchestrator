@@ -1557,5 +1557,16 @@
 	"hosts.remotePath": "Pfad auf {{host}}",
 	"hosts.remotePathHint": "Absoluter Pfad auf diesem Rechner.",
 	"hosts.addProjectOn": "Projekt auf {{host}} hinzufügen",
-	"hosts.switcher": "Host: {{host}}"
+	"hosts.switcher": "Host: {{host}}",
+	"fsBrowse.title": "{{host}} durchsuchen",
+	"fsBrowse.hint": "Wähle einen Ordner auf diesem Rechner.",
+	"fsBrowse.loading": "Ordner werden geladen…",
+	"fsBrowse.up": "Nach oben",
+	"fsBrowse.gitRepo": "Git-Repository",
+	"fsBrowse.chooseThis": "Diesen Ordner wählen",
+	"fsBrowse.empty": "Keine Unterordner",
+	"fsBrowse.truncated": "Es werden die ersten {{limit}} Ordner angezeigt",
+	"fsBrowse.failed": "Die Ordner auf diesem Host konnten nicht aufgelistet werden.",
+	"fsBrowse.unsupported": "Dieser Host hat keine Ordnerliste zurückgegeben. Möglicherweise läuft dort eine ältere Version ohne Ordnersuche.",
+	"fsBrowse.browse": "Durchsuchen…"
 }

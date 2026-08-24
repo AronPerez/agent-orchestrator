@@ -35,6 +35,7 @@ import { AddRemoteHostDialog } from "./AddRemoteHostDialog";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { CreateProjectAgentSheet, type CreateProjectAgentSelection } from "./CreateProjectAgentSheet";
 import { HostSelect } from "./HostSelect";
+import { RemoteFolderPicker } from "./RemoteFolderPicker";
 import type { CloneRepositoryDetails, CloneRepositorySelection } from "./CloneRepositoryDialog";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -1066,6 +1067,7 @@ function CreateProjectFolderDialog({
 }) {
 	const { t } = useTranslation();
 	const remotePathId = useId();
+	const [browseOpen, setBrowseOpen] = useState(false);
 	const isWorkspace = kind === "workspace";
 	const failedRepos = scan?.repos.filter((repo) => (repo.status === "error" || !repo.hasRemote) && !repo.needsGitInit) ?? [];
 	const hasScan = scan !== null;
@@ -1170,16 +1172,30 @@ function CreateProjectFolderDialog({
 								>
 									{t("hosts.remotePath", { host: remoteHost.label })}
 								</label>
-								<input
-									id={remotePathId}
-									autoComplete="off"
-									spellCheck={false}
-									className="settings-field-control h-(--size-settings-action-height) min-w-0 flex-1 font-mono"
-									disabled={disabled}
-									value={remotePath}
-									onChange={(event) => onRemotePathChange(event.target.value)}
-								/>
+								{/* Browse is an assist, not a replacement: a typed path still wins,
+								    and it is the only way in when the host refuses to list. */}
+								<div className="flex items-center gap-2">
+									<input
+										id={remotePathId}
+										autoComplete="off"
+										spellCheck={false}
+										className="settings-field-control h-(--size-settings-action-height) min-w-0 flex-1 font-mono"
+										disabled={disabled}
+										value={remotePath}
+										onChange={(event) => onRemotePathChange(event.target.value)}
+									/>
+									<Button type="button" variant="footer" disabled={disabled} onClick={() => setBrowseOpen(true)}>
+										{t("fsBrowse.browse")}
+									</Button>
+								</div>
 								<p className="text-[12px] text-[var(--color-text-import-muted)]">{t("hosts.remotePathHint")}</p>
+								<RemoteFolderPicker
+									hostLabel={remoteHost.label}
+									hostUrl={remoteHost.url}
+									open={browseOpen}
+									onOpenChange={setBrowseOpen}
+									onSelect={onRemotePathChange}
+								/>
 							</div>
 						) : (
 							<button

@@ -1574,5 +1574,16 @@
 	"hosts.remotePath": "Ruta en {{host}}",
 	"hosts.remotePathHint": "Ruta absoluta en esa máquina.",
 	"hosts.addProjectOn": "Añadir proyecto en {{host}}",
-	"hosts.switcher": "Host: {{host}}"
+	"hosts.switcher": "Host: {{host}}",
+	"fsBrowse.title": "Explorar {{host}}",
+	"fsBrowse.hint": "Elige una carpeta en esa máquina.",
+	"fsBrowse.loading": "Cargando carpetas…",
+	"fsBrowse.up": "Subir",
+	"fsBrowse.gitRepo": "Repo Git",
+	"fsBrowse.chooseThis": "Elegir esta carpeta",
+	"fsBrowse.empty": "Sin subcarpetas",
+	"fsBrowse.truncated": "Mostrando las primeras {{limit}} carpetas",
+	"fsBrowse.failed": "No se pudieron listar las carpetas de ese host.",
+	"fsBrowse.unsupported": "Ese host no devolvió una lista de carpetas. Puede que esté ejecutando una versión anterior sin exploración de carpetas.",
+	"fsBrowse.browse": "Explorar…"
 }

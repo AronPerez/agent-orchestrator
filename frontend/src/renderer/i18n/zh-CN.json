@@ -1539,5 +1539,16 @@
 	"hosts.remotePath": "{{host}} 上的路径",
 	"hosts.remotePathHint": "该机器上的绝对路径。",
 	"hosts.addProjectOn": "在 {{host}} 上添加项目",
-	"hosts.switcher": "主机：{{host}}"
+	"hosts.switcher": "主机：{{host}}",
+	"fsBrowse.title": "浏览 {{host}}",
+	"fsBrowse.hint": "选择该机器上的文件夹。",
+	"fsBrowse.loading": "正在加载文件夹…",
+	"fsBrowse.up": "上一级",
+	"fsBrowse.gitRepo": "Git 仓库",
+	"fsBrowse.chooseThis": "选择此文件夹",
+	"fsBrowse.empty": "没有子文件夹",
+	"fsBrowse.truncated": "仅显示前 {{limit}} 个文件夹",
+	"fsBrowse.failed": "无法列出该主机上的文件夹。",
+	"fsBrowse.unsupported": "该主机没有返回文件夹列表。它可能运行着不支持文件夹浏览的旧版本。",
+	"fsBrowse.browse": "浏览…"
 }

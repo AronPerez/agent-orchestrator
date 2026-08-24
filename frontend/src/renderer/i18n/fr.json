@@ -1574,5 +1574,16 @@
 	"hosts.remotePath": "Chemin sur {{host}}",
 	"hosts.remotePathHint": "Chemin absolu sur cette machine.",
 	"hosts.addProjectOn": "Ajouter le projet sur {{host}}",
-	"hosts.switcher": "Hôte : {{host}}"
+	"hosts.switcher": "Hôte : {{host}}",
+	"fsBrowse.title": "Parcourir {{host}}",
+	"fsBrowse.hint": "Choisissez un dossier sur cette machine.",
+	"fsBrowse.loading": "Chargement des dossiers…",
+	"fsBrowse.up": "Remonter",
+	"fsBrowse.gitRepo": "Dépôt Git",
+	"fsBrowse.chooseThis": "Choisir ce dossier",
+	"fsBrowse.empty": "Aucun sous-dossier",
+	"fsBrowse.truncated": "Affichage des {{limit}} premiers dossiers",
+	"fsBrowse.failed": "Impossible de lister les dossiers de cet hôte.",
+	"fsBrowse.unsupported": "Cet hôte n'a pas renvoyé de liste de dossiers. Il exécute peut-être une version plus ancienne sans navigation dans les dossiers.",
+	"fsBrowse.browse": "Parcourir…"
 }

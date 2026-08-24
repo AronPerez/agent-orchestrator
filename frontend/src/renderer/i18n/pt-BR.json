@@ -1574,5 +1574,16 @@
 	"hosts.remotePath": "Caminho em {{host}}",
 	"hosts.remotePathHint": "Caminho absoluto nessa máquina.",
 	"hosts.addProjectOn": "Adicionar projeto em {{host}}",
-	"hosts.switcher": "Host: {{host}}"
+	"hosts.switcher": "Host: {{host}}",
+	"fsBrowse.title": "Navegar em {{host}}",
+	"fsBrowse.hint": "Escolha uma pasta nessa máquina.",
+	"fsBrowse.loading": "Carregando pastas…",
+	"fsBrowse.up": "Acima",
+	"fsBrowse.gitRepo": "Repositório Git",
+	"fsBrowse.chooseThis": "Escolher esta pasta",
+	"fsBrowse.empty": "Sem subpastas",
+	"fsBrowse.truncated": "Mostrando as primeiras {{limit}} pastas",
+	"fsBrowse.failed": "Não foi possível listar as pastas nesse host.",
+	"fsBrowse.unsupported": "Esse host não retornou uma lista de pastas. Ele pode estar executando uma versão mais antiga sem navegação de pastas.",
+	"fsBrowse.browse": "Navegar…"
 }
