@@ -65,13 +65,69 @@ function workspaces(): WorkspaceSummary[] {
 
 const byId = (items: CommandItem[]) => new Map(items.map((item) => [item.id, item]));
 
+// A second host running the same project: ids repeat across hosts, so every
+// fixture here has a same-id twin on "remote" to catch host-blind lookups.
+function remoteTwin(): WorkspaceSummary {
+	return {
+		host: "remote",
+		id: "proj-1",
+		name: "app",
+		path: "/repos/app",
+		type: "main",
+		sessions: [
+			session({ id: "w-pr", host: "remote", title: "remote cache", branch: "feature/remote-cache", status: "pr_open", prs: [pr(7)] }),
+			session({ id: "w-action", host: "remote", title: "remote flake", branch: "feature/remote-flake", status: "needs_input" }),
+		],
+	};
+}
+
+function bothHosts(): WorkspaceSummary[] {
+	return [...workspaces(), remoteTwin()];
+}
+
 describe("findSession", () => {
 	it("returns the workspace and session together", () => {
-		const result = findSession(workspaces(), "w-pr");
+		const result = findSession(workspaces(), { host: "local", id: "w-pr" });
 
 		expect(result?.workspace.id).toBe("proj-1");
 		expect(result?.session.id).toBe("w-pr");
-		expect(findSession(workspaces(), "missing")).toBeUndefined();
+		expect(findSession(workspaces(), { host: "local", id: "missing" })).toBeUndefined();
+	});
+
+	// Session ids are unique per host, not across them. A bare-id lookup returns
+	// whichever host sorts first in the tree — the wrong machine's session.
+	it("resolves on the ref's host when two hosts share a session id", () => {
+		expect(findSession(bothHosts(), { host: "remote", id: "w-pr" })?.session.title).toBe("remote cache");
+		expect(findSession(bothHosts(), { host: "local", id: "w-pr" })?.session.title).toBe("add cache");
+		expect(findSession(bothHosts(), { host: "other", id: "w-pr" })).toBeUndefined();
+	});
+});
+
+describe("buildCommands across hosts", () => {
+	it("scopes the current session to the current host", () => {
+		const items = buildCommands({
+			workspaces: bothHosts(),
+			currentHostId: "remote",
+			currentProjectId: "proj-1",
+			currentSessionId: "w-pr",
+		});
+
+		expect(byId(items).get("current-copy-branch")?.subtitle).toBe("feature/remote-cache");
+	});
+
+	// Excluding "the current session" by bare id also hides the other host's
+	// same-id session, so a machine's session vanishes from the palette.
+	it("keeps the other host's same-id session listed", () => {
+		const items = buildCommands({
+			workspaces: bothHosts(),
+			currentHostId: "local",
+			currentProjectId: "proj-1",
+			currentSessionId: "w-pr",
+		});
+		const listed = items.filter((item) => item.group === "sessions" || item.group === "attention").map((item) => item.title);
+
+		expect(listed).toContain("remote cache");
+		expect(listed).not.toContain("add cache");
 	});
 });
 
@@ -85,7 +141,7 @@ describe("buildCommands grouping", () => {
 	});
 
 	it("puts current-scoped actions in the Current group when the project is valid", () => {
-		const items = buildCommands({ workspaces: workspaces(), currentProjectId: "proj-1", currentSessionId: "w-pr" });
+		const items = buildCommands({ workspaces: workspaces(), currentHostId: "local", currentProjectId: "proj-1", currentSessionId: "w-pr" });
 		const map = byId(items);
 		expect(map.get("current-new-task")?.group).toBe("current");
 		expect(map.get("current-open-orchestrator")?.group).toBe("current");
@@ -95,7 +151,7 @@ describe("buildCommands grouping", () => {
 	});
 
 	it("disables New task with a reason when the route project is absent from workspaces", () => {
-		const items = buildCommands({ workspaces: workspaces(), currentProjectId: "missing", currentSessionId: undefined });
+		const items = buildCommands({ workspaces: workspaces(), currentHostId: "local", currentProjectId: "missing", currentSessionId: undefined });
 		const newTask = byId(items).get("current-new-task");
 		expect(newTask?.disabled).toBe(true);
 		expect(newTask?.disabledReason).toBe("No current project");
@@ -119,16 +175,16 @@ describe("buildCommands grouping", () => {
 	});
 
 	it("omits Copy branch for a synthetic (session/<id>) branch and for orchestrators", () => {
-		const synthetic = buildCommands({ workspaces: workspaces(), currentSessionId: "w-synthetic" });
+		const synthetic = buildCommands({ workspaces: workspaces(), currentHostId: "local", currentSessionId: "w-synthetic" });
 		expect(byId(synthetic).has("current-copy-branch")).toBe(false);
-		const orch = buildCommands({ workspaces: workspaces(), currentSessionId: "orch" });
+		const orch = buildCommands({ workspaces: workspaces(), currentHostId: "local", currentSessionId: "orch" });
 		expect(byId(orch).has("current-copy-branch")).toBe(false);
 	});
 
 	it("recognises an orchestrator by its id suffix, not just its kind", () => {
 		const rows = workspaces();
 		rows[0].sessions.push(session({ id: "proj-1-orchestrator", title: "legacy orch", branch: "main" }));
-		const items = buildCommands({ workspaces: rows, currentSessionId: "proj-1-orchestrator" });
+		const items = buildCommands({ workspaces: rows, currentHostId: "local", currentSessionId: "proj-1-orchestrator" });
 		expect(byId(items).has("current-copy-branch")).toBe(false);
 	});
 });
@@ -145,7 +201,7 @@ describe("buildCommands attention", () => {
 	});
 
 	it("omits the current session from Needs attention (already in view)", () => {
-		const items = buildCommands({ workspaces: workspaces(), currentSessionId: "w-merge" });
+		const items = buildCommands({ workspaces: workspaces(), currentHostId: "local", currentSessionId: "w-merge" });
 		const ids = new Set(items.map((item) => item.id));
 		expect(ids.has("attention:w-merge")).toBe(false);
 		expect(ids.has("attention:w-action")).toBe(true);
@@ -154,7 +210,7 @@ describe("buildCommands attention", () => {
 
 describe("buildCommands sessions", () => {
 	it("does not repeat attention or current sessions in the flat Sessions list", () => {
-		const items = buildCommands({ workspaces: workspaces(), currentSessionId: "w-working" });
+		const items = buildCommands({ workspaces: workspaces(), currentHostId: "local", currentSessionId: "w-working" });
 		const ids = new Set(items.map((item) => item.id));
 		expect(ids.has("attention:w-merge")).toBe(true);
 		expect(ids.has("session:w-merge")).toBe(false);
@@ -392,7 +448,7 @@ describe("buildCommands PR actions", () => {
 	});
 
 	it("discovers Copy branch name via git and copy keywords", () => {
-		const items = buildCommands({ workspaces: workspaces(), currentProjectId: "proj-1", currentSessionId: "w-pr" });
+		const items = buildCommands({ workspaces: workspaces(), currentHostId: "local", currentProjectId: "proj-1", currentSessionId: "w-pr" });
 		const keywords = byId(items).get("current-copy-branch")?.keywords ?? [];
 		expect(keywords).toContain("copy");
 		expect(keywords).toContain("git");

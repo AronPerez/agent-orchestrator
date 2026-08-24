@@ -22,7 +22,7 @@ import {
 } from "./session-reviews";
 import { appI18n, type MessageKey } from "../i18n";
 
-import type { Ref } from "./hosts";
+import { refKey, type HostId, type Ref } from "./hosts";
 export type CommandGroupId = "current" | "attention" | "projects" | "sessions" | "prs" | "global";
 
 export type NavigateTarget =
@@ -59,6 +59,8 @@ export type CommandItem = {
 
 export type CommandPaletteContext = {
 	workspaces: WorkspaceSummary[];
+	/** Host the route is on; without it the current session cannot be resolved. */
+	currentHostId?: HostId;
 	currentProjectId?: string;
 	currentSessionId?: string;
 	restartingProjectIds?: ReadonlySet<string>;
@@ -181,22 +183,28 @@ export function buildSessionActions(
 	return items;
 }
 
-export function findSession(workspaces: WorkspaceSummary[], sessionId: string): WorkspaceSessionContext | undefined {
+// Takes a Ref, not a bare id: session ids are unique per host, not across them,
+// so an id alone matches whichever host sorts first in the tree.
+export function findSession(workspaces: WorkspaceSummary[], ref: Ref): WorkspaceSessionContext | undefined {
 	for (const workspace of workspaces) {
-		const match = workspace.sessions.find((session) => session.id === sessionId);
+		const match = workspace.sessions.find((session) => session.host === ref.host && session.id === ref.id);
 		if (match) return { workspace, session: match };
 	}
 	return undefined;
 }
 
 export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n.t): CommandItem[] {
-	const { workspaces, currentProjectId, currentSessionId, restartingProjectIds, reviewStatesBySessionId } = ctx;
+	const { workspaces, currentHostId, currentProjectId, currentSessionId, restartingProjectIds, reviewStatesBySessionId } =
+		ctx;
 	const items: CommandItem[] = [];
 
 	const currentProject = currentProjectId
 		? workspaces.find((workspace) => workspace.id === currentProjectId)
 		: undefined;
-	const currentSession = currentSessionId ? findSession(workspaces, currentSessionId)?.session : undefined;
+	const currentRef: Ref | undefined =
+		currentHostId && currentSessionId ? { host: currentHostId, id: currentSessionId } : undefined;
+	const currentSessionKey = currentRef ? refKey(currentRef) : undefined;
+	const currentSession = currentRef ? findSession(workspaces, currentRef)?.session : undefined;
 	const isProjectRestarting = Boolean(currentProject && restartingProjectIds?.has(currentProject.id));
 
 	items.push({
@@ -257,14 +265,14 @@ export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n
 		.flatMap((workspace) => workerSessions(workspace.sessions).map((session) => ({ workspace, session })))
 		.filter(
 			({ session }) =>
-				session.id !== currentSessionId && (attentionZone(session) === "merge" || sessionNeedsAttention(session)),
+				refKey(session) !== currentSessionKey && (attentionZone(session) === "merge" || sessionNeedsAttention(session)),
 		)
 		.sort(
 			(a, b) =>
 				attentionZoneOrder.indexOf(attentionZone(a.session)) - attentionZoneOrder.indexOf(attentionZone(b.session)),
 		);
 
-	const attentionIds = new Set(attentionSessions.map(({ session }) => session.id));
+	const attentionKeys = new Set(attentionSessions.map(({ session }) => refKey(session)));
 
 	for (const { workspace, session } of attentionSessions) {
 		items.push(sessionCommand(workspace, session, "attention"));
@@ -288,7 +296,7 @@ export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n
 
 	for (const workspace of workspaces) {
 		for (const session of workerSessions(workspace.sessions).filter(
-			(session) => !attentionIds.has(session.id) && session.id !== currentSessionId,
+			(session) => !attentionKeys.has(refKey(session)) && refKey(session) !== currentSessionKey,
 		)) {
 			items.push({ ...sessionCommand(workspace, session, "sessions"), searchOnly: !sessionIsActive(session) });
 		}
