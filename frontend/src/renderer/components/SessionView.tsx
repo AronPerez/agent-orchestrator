@@ -54,7 +54,7 @@ import { SHELL_PANEL_SPRING } from "../lib/motion-spring";
 import { hidesShellTopbar, isMacPlatform } from "../lib/platform";
 import { useShell } from "../lib/shell-context";
 import { cn } from "../lib/utils";
-import { isOrchestratorSession, sessionIsActive } from "../types/workspace";
+import { flattenHostSections, isOrchestratorSession, sessionIsActive } from "../types/workspace";
 import { terminalTargetBelongsToSession, type TerminalTarget } from "../types/terminal";
 import { matchesRendererShortcut } from "../stores/keybindings-store";
 import { useResolvedTheme, useUiStore, type InspectorView } from "../stores/ui-store";
@@ -247,7 +247,7 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 	const sessionKey = refKey(sessionRef);
 	const { t } = useTranslation();
 	const workspaceQuery = useWorkspaceQuery();
-	const workspaces = workspaceQuery.data ?? [];
+	const workspaces = flattenHostSections(workspaceQuery.data);
 	const theme = useResolvedTheme();
 	const isInspectorOpen = useUiStore((state) => state.inspectorSessions[sessionKey]?.isOpen ?? true);
 	const inspectorView = useUiStore((state) => state.inspectorSessions[sessionKey]?.view ?? "summary");
@@ -340,7 +340,8 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 	const setVisibleTerminalKind = useUiStore((state) => state.setVisibleTerminalKind);
 	const clearVisibleTerminalKind = useUiStore((state) => state.clearVisibleTerminalKind);
 	const renameShellTerminalByHandle = useCallback(
-		(handleId: string, title: string) => renameShellTerminal.mutate({ handleId, title }),
+		(handleId: string, title: string) =>
+			renameShellTerminal.mutate({ terminal: { host: sessionRef.host, id: handleId }, title }),
 		[renameShellTerminal],
 	);
 
@@ -349,15 +350,19 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 	// workspace can no longer be resolved).
 	const addShellTerminal = useCallback(() => {
 		openShellTerminal.mutate(
-			{ projectId: session?.workspaceId, sessionId },
+			{
+				project: session ? { host: session.host, id: session.workspaceId } : undefined,
+				session: sessionRef,
+			},
 			{
 				onSuccess: (shell) => {
 					setActiveShellTerminal(shell.handleId);
 					setTerminalTarget({
 						generation: shell.createdAt,
+						host: shell.host,
 						kind: "shell",
 						handleId: shell.handleId,
-						sessionId,
+						session: sessionRef,
 						title: shell.title,
 					});
 				},
@@ -372,9 +377,10 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 			setActiveShellTerminal(shell.handleId);
 			setTerminalTarget({
 				generation: shell.createdAt,
+				host: shell.host,
 				kind: "shell",
 				handleId: shell.handleId,
-				sessionId,
+				session: sessionRef,
 				title: shell.title,
 			});
 		},
@@ -393,9 +399,10 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 					setActiveShellTerminal(nextShell.handleId);
 					setTerminalTarget({
 						generation: nextShell.createdAt,
+						host: nextShell.host,
 						kind: "shell",
 						handleId: nextShell.handleId,
-						sessionId,
+						session: sessionRef,
 						title: nextShell.title,
 					});
 				} else {
@@ -405,7 +412,7 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 			} else if (activeShellTerminalHandleId === handleId) {
 				setActiveShellTerminal(null);
 			}
-			closeShellTerminal.mutate(handleId);
+			closeShellTerminal.mutate({ host: sessionRef.host, id: handleId });
 		},
 		[
 			activeShellTerminalHandleId,
@@ -425,8 +432,8 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 	}, [setActiveShellTerminal]);
 	const selectReviewerTerminal = useCallback((target: ReviewerTerminalTarget) => {
 		setActiveShellTerminal(null);
-		setTerminalTarget({ kind: "reviewer", handleId: target.handleId, harness: target.harness, sessionId });
-	}, [sessionId, setActiveShellTerminal]);
+		setTerminalTarget({ kind: "reviewer", handleId: target.handleId, harness: target.harness, session: sessionRef });
+	}, [sessionRef, setActiveShellTerminal]);
 
 	// The shell layout owns opening (it is mounted on every route, so the button
 	// and ⌘T / Ctrl+T work everywhere); this view only follows the result. When a new
@@ -444,9 +451,10 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 				? current
 				: {
 						generation: shell.createdAt,
+						host: shell.host,
 						kind: "shell",
 						handleId: shell.handleId,
-						sessionId,
+						session: sessionRef,
 						title: shell.title,
 					},
 		);
@@ -627,7 +635,7 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 	// Route props change one render before the passive reset above. Reject the
 	// previous session's shell/reviewer synchronously so its handle can never be
 	// cached under the destination session.
-	const routedTerminalTarget = terminalTargetBelongsToSession(terminalTarget, sessionId)
+	const routedTerminalTarget = terminalTargetBelongsToSession(terminalTarget, sessionRef)
 		? terminalTarget
 		: ({ kind: "worker" } satisfies TerminalTarget);
 	// Chat surface stays mounted in chat mode for worker, reviewer, and shell

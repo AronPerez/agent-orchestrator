@@ -32,7 +32,17 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
 });
 
 vi.mock("../hooks/useWorkspaceQuery", () => ({
-	useWorkspaceQuery: () => useWorkspaceQueryMock(),
+	useWorkspaceQuery: () => (() => {
+		// useWorkspaceQuery returns one section per host now; these fixtures still
+		// describe the local host's workspaces, so wrap them in its section.
+		const result = useWorkspaceQueryMock();
+		return {
+			...result,
+			data: result.data
+				? [{ host: "local", label: "Local", status: "ready", workspaces: result.data, failure: null }]
+				: undefined,
+		};
+	})(),
 	workspaceQueryKey: ["workspaces"],
 }));
 

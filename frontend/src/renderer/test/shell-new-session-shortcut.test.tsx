@@ -128,9 +128,26 @@ vi.mock("../lib/bridge", () => ({
 	},
 }));
 
+// useWorkspaceQuery returns one section per host now; these fixtures still
+// describe the local host's workspaces, so wrap them in its section — cached by
+// the fixture array, since a fresh section object every render would look like
+// new data to the shell's startup effect.
+const localSections = new WeakMap<object, unknown>();
+function asLocalSections(result: { data?: unknown }) {
+	if (!result.data) return { ...result, data: undefined };
+	const key = result.data as object;
+	if (!localSections.has(key)) {
+		localSections.set(key, [
+			{ host: "local", label: "Local", status: "ready", workspaces: result.data, failure: null },
+		]);
+	}
+	return { ...result, data: localSections.get(key) };
+}
+
 vi.mock("../hooks/useWorkspaceQuery", () => ({
-	useWorkspaceQuery: () => shellMocks.state.workspaceQuery,
+	useWorkspaceQuery: () => asLocalSections(shellMocks.state.workspaceQuery),
 	workspaceQueryKey: ["workspaces"],
+	workspaceHostQueryKey: (host: string) => ["workspaces", host],
 	workspaceQueryOptions: {},
 }));
 
@@ -142,6 +159,11 @@ vi.mock("../hooks/useDaemonStatus", () => ({
 // shortcut subscriptions, so the mutation is stubbed rather than driven.
 vi.mock("../hooks/useShellTerminals", () => ({
 	useShellTerminals: () => ({ data: [], isSuccess: true }),
+	shellTerminalsQueryKey: (host: string) => ["shell-terminals", host],
+	shellTerminalsQueryOptions: (host: string) => ({
+		queryKey: ["shell-terminals", host],
+		queryFn: () => [],
+	}),
 	useOpenShellTerminal: () => ({ mutate: shellMocks.openShellTerminal }),
 }));
 
@@ -480,7 +502,7 @@ describe("shell new-shell-terminal shortcut subscription", () => {
 		pressNewShellTerminal();
 
 		expect(shellMocks.openShellTerminal).toHaveBeenCalledWith(
-			expect.objectContaining({ projectId: "proj-1" }),
+			expect.objectContaining({ project: { host: "local", id: "proj-1" } }),
 			expect.anything(),
 		);
 	});
@@ -495,7 +517,7 @@ describe("shell new-shell-terminal shortcut subscription", () => {
 		pressNewShellTerminal();
 
 		expect(shellMocks.openShellTerminal).toHaveBeenCalledWith(
-			expect.objectContaining({ projectId: "proj-1", sessionId: "sess-1" }),
+			expect.objectContaining({ project: { host: "local", id: "proj-1" }, session: { host: "local", id: "sess-1" } }),
 			expect.anything(),
 		);
 	});
@@ -509,7 +531,7 @@ describe("shell new-shell-terminal shortcut subscription", () => {
 		pressNewShellTerminal();
 
 		expect(shellMocks.openShellTerminal).toHaveBeenCalledWith(
-			expect.objectContaining({ projectId: "proj-2", sessionId: "sess-cross" }),
+			expect.objectContaining({ project: { host: "local", id: "proj-2" }, session: { host: "local", id: "sess-cross" } }),
 			expect.anything(),
 		);
 	});

@@ -442,6 +442,24 @@ async function sanitizeRendererContextProperties(properties?: TelemetryPropertie
 
 const ORCHESTRATOR_SPAWN_SOURCE_SET = new Set<string>(ORCHESTRATOR_SPAWN_SOURCES);
 
+/**
+ * Host identity for the ao.renderer.host_* events.
+ *
+ * A host id IS a LAN address — "http://192.168.1.250:3011" — so it is never
+ * sent. Only its digest goes out, exactly as project ids do, which keeps hosts
+ * countable without naming a machine. `host_kind` stays in the clear because
+ * "the local daemon's stream dropped" and "a remote's did" are different bugs.
+ */
+async function sanitizeHostProperties(properties?: TelemetryProperties): Promise<TelemetryProperties> {
+	const safe: TelemetryProperties = {};
+	const hostIDHash = await hashedTelemetryID(properties?.host_id);
+	if (hostIDHash) safe.host_id_hash = hostIDHash;
+	if (properties?.host_kind === "local" || properties?.host_kind === "remote") {
+		safe.host_kind = properties.host_kind;
+	}
+	return safe;
+}
+
 const EDITOR_ID_SET = new Set<string>(EDITOR_IDS);
 const OPEN_TARGET_KIND_SET = new Set(["editor", "file_manager", "terminal"]);
 
@@ -591,6 +609,22 @@ export async function sanitizeRendererProperties(
 			}
 			if (properties?.outcome === "succeeded" || properties?.outcome === "failed") safe.outcome = properties.outcome;
 			break;
+		case "ao.renderer.host_stream_state": {
+			// An event with no case here emits with every property stripped, so the
+			// allowlist is what makes this signal exist at all.
+			Object.assign(safe, await sanitizeHostProperties(properties));
+			if (properties?.state === "connected" || properties?.state === "disconnected") safe.state = properties.state;
+			if (typeof properties?.reconnect_count === "number") safe.reconnect_count = properties.reconnect_count;
+			break;
+		}
+		case "ao.renderer.host_query_failed": {
+			// The failure message is deliberately absent: it is the daemon's own
+			// error text and can carry paths. A status separates a rotated
+			// password (401) from a host the proxy cannot reach (502).
+			Object.assign(safe, await sanitizeHostProperties(properties));
+			if (typeof properties?.status === "number") safe.status = properties.status;
+			break;
+		}
 		case "ao.renderer.mobile_bridge_toggled":
 			// The host, port, and connection password in the QR never leave the
 			// machine: only the direction of the switch and whether it worked.

@@ -37,7 +37,17 @@ vi.mock("@tanstack/react-router", () => ({
 
 vi.mock("../hooks/useWorkspaceQuery", () => ({
 	workspaceQueryKey: ["workspaces"],
-	useWorkspaceQuery: workspaceQueryMock,
+	useWorkspaceQuery: () => (() => {
+		// useWorkspaceQuery returns one section per host now; these fixtures still
+		// describe the local host's workspaces, so wrap them in its section.
+		const result = workspaceQueryMock();
+		return {
+			...result,
+			data: result.data
+				? [{ host: "local", label: "Local", status: "ready", workspaces: result.data, failure: null }]
+				: undefined,
+		};
+	})(),
 }));
 
 vi.mock("../hooks/useSessionUsageSummaries", () => ({
@@ -53,7 +63,12 @@ vi.mock("../lib/api-client", () => ({
 // host resolves to the same fake the api-client mock installs.
 vi.mock("../lib/host-clients", () => ({
 	baseUrlFor: () => "http://127.0.0.1:3001",
-	connectedHosts: () => [],
+	connectedHosts: (() => {
+		// useSyncExternalStore requires a stable snapshot: a fresh [] each call
+		// re-renders forever.
+		const hosts: string[] = [];
+		return () => hosts;
+	})(),
 	subscribeConnectedHosts: () => () => undefined,
 	isHostReady: () => true,
 	clientFor: () => ({ POST: (...args: unknown[]) => postMock(...args) }),
@@ -164,11 +179,13 @@ describe("SessionsBoard", () => {
 		workspaceQueryMock.mockReturnValue({
 			data: [
 				{
+					host: "local",
 					id: "p1",
 					name: "solkit-ui",
 					path: "/tmp/solkit-ui",
 					sessions: [
 						{
+							host: "local",
 							id: "s1",
 							workspaceId: "p1",
 							workspaceName: "solkit-ui",
@@ -207,11 +224,13 @@ describe("SessionsBoard", () => {
 		workspaceQueryMock.mockReturnValue({
 			data: [
 				{
+					host: "local",
 					id: "p1",
 					name: "solkit-ui",
 					path: "/tmp/solkit-ui",
 					sessions: [
 						{
+							host: "local",
 							id: "orch-1",
 							workspaceId: "p1",
 							workspaceName: "solkit-ui",
@@ -247,6 +266,7 @@ describe("SessionsBoard", () => {
 		workspaceQueryMock.mockReturnValue({
 			data: [
 				{
+					host: "local",
 					id: "p1",
 					name: "solkit-ui",
 					path: "/tmp/solkit-ui",
@@ -266,11 +286,13 @@ describe("SessionsBoard", () => {
 		workspaceQueryMock.mockReturnValue({
 			data: [
 				{
+					host: "local",
 					id: "p1",
 					name: "radic",
 					path: "/tmp/radic",
 					sessions: [
 						{
+							host: "local",
 							id: "s1",
 							workspaceId: "p1",
 							workspaceName: "radic",
@@ -433,11 +455,13 @@ describe("SessionsBoard", () => {
 		workspaceQueryMock.mockReturnValue({
 			data: [
 				{
+					host: "local",
 					id: "p1",
 					name: "radic",
 					path: "/tmp/radic",
 					sessions: [
 						{
+							host: "local",
 							id: "s0",
 							workspaceId: "p1",
 							workspaceName: "radic",
@@ -450,6 +474,7 @@ describe("SessionsBoard", () => {
 							prs: [],
 						},
 						{
+							host: "local",
 							id: "s1",
 							workspaceId: "p1",
 							workspaceName: "radic",
@@ -462,6 +487,7 @@ describe("SessionsBoard", () => {
 							prs: [],
 						},
 						{
+							host: "local",
 							id: "s2",
 							workspaceId: "p1",
 							workspaceName: "radic",
@@ -706,11 +732,13 @@ describe("SessionsBoard", () => {
 		workspaceQueryMock.mockReturnValue({
 			data: [
 				{
+					host: "local",
 					id: "p1",
 					name: "radic",
 					path: "/tmp/radic",
 					sessions: [
 						{
+							host: "local",
 							id: "p1-active",
 							workspaceId: "p1",
 							workspaceName: "radic",
@@ -723,6 +751,7 @@ describe("SessionsBoard", () => {
 							prs: [],
 						},
 						{
+							host: "local",
 							id: "p1-idle",
 							workspaceId: "p1",
 							workspaceName: "radic",
@@ -737,11 +766,13 @@ describe("SessionsBoard", () => {
 					],
 				},
 				{
+					host: "local",
 					id: "p2",
 					name: "other",
 					path: "/tmp/other",
 					sessions: [
 						{
+							host: "local",
 							id: "p2-active",
 							workspaceId: "p2",
 							workspaceName: "other",
@@ -754,6 +785,7 @@ describe("SessionsBoard", () => {
 							prs: [],
 						},
 						{
+							host: "local",
 							id: "p2-idle",
 							workspaceId: "p2",
 							workspaceName: "other",
@@ -1055,6 +1087,7 @@ describe("SessionsBoard", () => {
 			data: [
 				workspaceWithSessions([terminatedSession()]),
 				{
+					host: "local",
 					id: "p2",
 					name: "other",
 					path: "/tmp/other",
@@ -1096,6 +1129,7 @@ describe("SessionsBoard", () => {
 			data: [
 				workspaceWithSessions([terminatedSession()]),
 				{
+					host: "local",
 					id: "p2",
 					name: "other",
 					path: "/tmp/other",

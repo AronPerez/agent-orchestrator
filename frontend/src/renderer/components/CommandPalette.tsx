@@ -24,7 +24,7 @@ import { isMacPlatform } from "../lib/platform";
 import { sessionReviewsQueryOptions, type PRReviewState } from "../lib/session-reviews";
 import { spawnOrchestrator } from "../lib/spawn-orchestrator";
 import { useShell } from "../lib/shell-context";
-import { findProjectOrchestrator, hasConfiguredOrchestratorAgent, openPRs, workerSessions } from "../types/workspace";
+import { flattenHostSections, findProjectOrchestrator, hasConfiguredOrchestratorAgent, openPRs, workerSessions } from "../types/workspace";
 import { useUiStore } from "../stores/ui-store";
 import { matchesRendererShortcut } from "../stores/keybindings-store";
 import { Button } from "./ui/button";
@@ -52,7 +52,7 @@ export function CommandPalette() {
 	const queryClient = useQueryClient();
 	const restoreSessionById = useRestoreSession();
 	const params = useParams({ strict: false }) as { projectId?: string; sessionId?: string };
-	const workspaces = useWorkspaceQuery().data ?? [];
+	const workspaces = flattenHostSections(useWorkspaceQuery().data);
 	const { cloneProject, createProject, initializeProjectRepository } = useShell();
 	const resolvedTheme = useUiStore((s) => s.resolvedTheme);
 	const setThemePreference = useUiStore((s) => s.setThemePreference);
