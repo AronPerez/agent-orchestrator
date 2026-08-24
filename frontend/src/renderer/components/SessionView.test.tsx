@@ -159,6 +159,7 @@ const { workspaces, workspaceQueryState, shellTerminalsState } = vi.hoisted(() =
 	};
 	const shellTerminalsState: {
 		data: Array<{
+			host: "local",
 			handleId: string;
 			projectId?: string;
 			sessionId?: string;
@@ -514,6 +515,7 @@ describe("SessionView", () => {
 	it("shows only the current session's shell terminals as tabs", () => {
 		shellTerminalsState.data = [
 			{
+				host: "local",
 				handleId: "sh-a",
 				sessionId: "sess-1",
 				title: "sess-1-shell",
@@ -521,13 +523,14 @@ describe("SessionView", () => {
 				createdAt: "2026-07-24T00:00:00Z",
 			},
 			{
+				host: "local",
 				handleId: "sh-b",
 				sessionId: "sess-2",
 				title: "sess-2-shell",
 				workingDir: "/q",
 				createdAt: "2026-07-24T00:00:00Z",
 			},
-			{ handleId: "sh-c", title: "loose-shell", workingDir: "/r", createdAt: "2026-07-24T00:00:00Z" },
+			{ host: "local", handleId: "sh-c", title: "loose-shell", workingDir: "/r", createdAt: "2026-07-24T00:00:00Z" },
 		];
 		render(<SessionView sessionRef={{ host: "local", id: "sess-1" }} />);
 		const tabs = screen.getByTestId("shell-tabs");
@@ -543,6 +546,7 @@ describe("SessionView", () => {
 	it("publishes which terminal the session pane is showing", () => {
 		shellTerminalsState.data = [
 			{
+				host: "local",
 				handleId: "sh-a",
 				sessionId: "sess-1",
 				title: "sess-1-shell",
@@ -569,6 +573,7 @@ describe("SessionView", () => {
 		workspaces[0].sessions[0].mode = "chat";
 		shellTerminalsState.data = [
 			{
+				host: "local",
 				handleId: "chat-shell",
 				sessionId: "sess-1",
 				title: "chat worktree shell",
@@ -609,7 +614,10 @@ describe("SessionView", () => {
 		const newTerminalButton = screen.getByRole("button", { name: "New terminal" });
 		expect(newTerminalButton).toHaveAttribute("title", "New terminal (Ctrl+T)");
 		fireEvent.click(newTerminalButton);
-		expect(openShellTerminalMock).toHaveBeenCalledWith({ projectId: "proj-1", sessionId: "sess-2" }, expect.anything());
+		expect(openShellTerminalMock).toHaveBeenCalledWith(
+			{ project: { host: "local", id: "proj-1" }, session: { host: "local", id: "sess-2" } },
+			expect.anything(),
+		);
 	});
 
 	it("does not offer a new terminal for orchestrator sessions", () => {
@@ -622,6 +630,7 @@ describe("SessionView", () => {
 		const session = workspaces[0]!.sessions.find((candidate) => candidate.id === "sess-1")!;
 		session.mode = "chat";
 		const shell = {
+			host: "local" as const,
 			handleId: "sh-chat",
 			projectId: "proj-1",
 			sessionId: "sess-1",
@@ -864,6 +873,7 @@ describe("SessionView", () => {
 	it("walks backward through auxiliary terminals before returning to the permanent terminal", () => {
 		shellTerminalsState.data = [
 			{
+				host: "local",
 				handleId: "sh-a",
 				sessionId: "sess-1",
 				title: "first shell",
@@ -871,6 +881,7 @@ describe("SessionView", () => {
 				createdAt: "2026-07-24T00:00:00Z",
 			},
 			{
+				host: "local",
 				handleId: "sh-b",
 				sessionId: "sess-1",
 				title: "second shell",
@@ -884,14 +895,14 @@ describe("SessionView", () => {
 		expect(screen.getByTestId("terminal-target")).toHaveTextContent("sh-b");
 
 		fireEvent.click(screen.getByRole("button", { name: "close second shell" }));
-		expect(closeShellTerminalMock).toHaveBeenCalledWith("sh-b");
+		expect(closeShellTerminalMock).toHaveBeenCalledWith({ host: "local", id: "sh-b" });
 		expect(screen.getByTestId("terminal-target")).toHaveTextContent("sh-a");
 		expect(useUiStore.getState().activeShellTerminalHandleId).toBe("sh-a");
 
 		shellTerminalsState.data = shellTerminalsState.data.filter((shell) => shell.handleId !== "sh-b");
 		view.rerender(<SessionView sessionRef={{ host: "local", id: "sess-1" }} />);
 		fireEvent.click(screen.getByRole("button", { name: "close first shell" }));
-		expect(closeShellTerminalMock).toHaveBeenCalledWith("sh-a");
+		expect(closeShellTerminalMock).toHaveBeenCalledWith({ host: "local", id: "sh-a" });
 		expect(screen.getByTestId("terminal-target")).toHaveTextContent("worker");
 		expect(useUiStore.getState().activeShellTerminalHandleId).toBeNull();
 	});

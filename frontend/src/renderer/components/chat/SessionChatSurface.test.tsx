@@ -469,9 +469,10 @@ describe("SessionChatSurface link routing", () => {
 				<SessionChatSurface
 					session={session}
 					shellTarget={{
+						host: "local",
 						kind: "shell",
 						handleId: "shell-1",
-						sessionId: session.id,
+						session: { host: "local", id: session.id },
 						title: "shell",
 						generation: "2026-08-16T00:00:00Z",
 					}}
