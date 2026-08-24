@@ -293,6 +293,61 @@ describe("startRemoteProxy streams", () => {
 		expect(result).toBe("closed");
 	});
 
+	// Regression for the connection-status hang: the previous test's upstream
+	// writes its first chunk synchronously, so headers and that chunk reach the
+	// client together even without an explicit flush — it never exercised the
+	// gap. A real SSE upstream (GET /api/v1/events) can hold its first byte
+	// indefinitely; a client's EventSource must still see the response headers
+	// right away; otherwise it reports CONNECTING forever, which is exactly what
+	// "not receiving live updates" looked like before this was found.
+	it("flushes response headers before the first SSE byte arrives", async () => {
+		upstream = createServer((_req, res) => {
+			res.writeHead(200, { "content-type": "text/event-stream" });
+			// The real daemon flushes its own headers immediately (confirmed by a
+			// direct curl against it) — this upstream must too, or the test would
+			// measure the fake upstream's header delay instead of the proxy's.
+			res.flushHeaders();
+			// The body is what's withheld for 500ms, like a daemon with nothing to
+			// say yet.
+			setTimeout(() => {
+				res.write("data: first\n\n");
+				res.end();
+			}, 500);
+		});
+		await new Promise<void>((resolve) => upstream?.listen(0, "127.0.0.1", resolve));
+		const port = (upstream.address() as AddressInfo).port;
+		proxy = await startRemoteProxy({
+			label: "workbox",
+			url: `http://127.0.0.1:${port}`,
+			password: "pw",
+		});
+
+		const proxyUrl = new URL(proxy.base);
+		const started = Date.now();
+		const head = await new Promise<string>((resolve) => {
+			const socket = netConnect(Number(proxyUrl.port), "127.0.0.1", () => {
+				socket.write(`GET ${proxyUrl.pathname}/api/v1/events HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n`);
+			});
+			socket.on("error", () => undefined);
+			let buf = "";
+			socket.on("data", (chunk: Buffer) => {
+				buf += chunk.toString();
+				if (buf.includes("\r\n\r\n")) {
+					socket.destroy();
+					resolve(buf);
+				}
+			});
+		});
+		const headersArrivedAfterMs = Date.now() - started;
+
+		expect(head).toContain("200");
+		expect(head.toLowerCase()).toContain("content-type: text/event-stream");
+		// The upstream withholds its first byte for 500ms; seeing the header
+		// block well before that proves the proxy flushes headers on their own
+		// rather than only when they can piggyback on the first body write.
+		expect(headersArrivedAfterMs).toBeLessThan(300);
+	});
+
 	it("delivers SSE chunks as they are written, not on close", async () => {
 		upstream = createServer((_req, res) => {
 			res.writeHead(200, { "content-type": "text/event-stream" });
