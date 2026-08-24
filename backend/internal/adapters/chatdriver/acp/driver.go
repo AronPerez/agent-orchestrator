@@ -511,11 +511,9 @@ func (d *Driver) resumeSession(
 	// conversation must receive it again even though the provider recovers the
 	// messages itself.
 	conv.setSessionPreamble(d.sessionPreamble(launchCfg))
-	if err := conv.applyTurnSettings(ctx, ports.ChatTurnSettings{Model: cfg.Model, Effort: cfg.Effort, Approval: cfg.Permissions}); err != nil {
-		if !errors.Is(err, ErrACPSetterUnsupported) {
-			conv.discard()
-			return nil, fmt.Errorf("%w: configure ACP session: %w", ports.ErrChatResumeFailed, err)
-		}
+	if err := applyResumeSettings(ctx, conv, cfg); err != nil {
+		conv.discard()
+		return nil, fmt.Errorf("%w: configure ACP session: %w", ports.ErrChatResumeFailed, err)
 	}
 	if historyConversation != nil {
 		return historyConversation, nil
@@ -545,6 +543,38 @@ func (d *Driver) resumeFresh(
 	d.log.Info("chat: ACP session missing; started fresh",
 		"sessionID", cfg.SessionID, "harness", d.cfg.Harness)
 	return conv, nil
+}
+
+// modelOptionID is the ACP config option every binding uses to carry the model
+// selection. It is the one setting AO treats as optional on resume.
+const modelOptionID = "model"
+
+// applyResumeSettings configures a resumed conversation, degrading rather than
+// failing when the agent refuses the model preference.
+//
+// A model is optional on a conversation that already exists: the provider still
+// holds the history and resumes on its own default, so a refused preference is not
+// a reason to lose the conversation. Failing the whole resume over it stranded a
+// session mid-interface-switch whenever it carried a model id belonging to another
+// agent. The preference is dropped, the settings queued behind it are applied, and
+// the user is told on the timeline. Start keeps the opposite contract: a model
+// chosen for a conversation that does not exist yet is an explicit choice, and
+// starting it on a different model would misattribute everything that follows.
+func applyResumeSettings(ctx context.Context, conv *conversation, cfg ports.ChatResumeConfig) error {
+	settings := ports.ChatTurnSettings{Model: cfg.Model, Effort: cfg.Effort, Approval: cfg.Permissions}
+	err := conv.applyTurnSettings(ctx, settings)
+	if err == nil || errors.Is(err, ErrACPSetterUnsupported) {
+		return nil
+	}
+	if cfg.Model == "" || rejectedOption(err) != modelOptionID {
+		return err
+	}
+	conv.reportUnavailableModel(cfg.Model, err)
+	settings.Model = ""
+	if retry := conv.applyTurnSettings(ctx, settings); retry != nil && !errors.Is(retry, ErrACPSetterUnsupported) {
+		return retry
+	}
+	return nil
 }
 
 func (d *Driver) connect(
