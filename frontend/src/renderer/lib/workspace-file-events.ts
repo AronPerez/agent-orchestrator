@@ -5,21 +5,55 @@ import { refKey, type Ref } from "./hosts";
 
 const INVALIDATE_DEBOUNCE_MS = 150;
 const SSE_RETRY_MS = 5_000;
+const SSE_RETRY_JITTER_MS = 1_000;
 const EVENTSOURCE_CLOSED = 2;
+
+export type WorkspaceFileConnectionState = "connecting" | "connected" | "degraded";
+type ConnectionPhase = "idle" | "connecting" | "open" | "waiting";
 
 type WorkspaceStream = {
 	refs: number;
 	disposed: boolean;
+	phase: ConnectionPhase;
+	generation: number;
+	failures: number;
 	source?: EventSource;
 	sourceBaseUrl?: string;
 	debounce?: ReturnType<typeof setTimeout>;
 	retry?: ReturnType<typeof setTimeout>;
 	disconnectBaseUrl: () => void;
-	connect: () => void;
+	ensureConnected: () => void;
 	dispose: () => void;
 };
 
 const streams = new Map<string, WorkspaceStream>();
+const connectionStates = new Map<string, WorkspaceFileConnectionState>();
+const connectionStateListeners = new Map<string, Set<() => void>>();
+
+export function getWorkspaceFileConnectionState(session: Ref): WorkspaceFileConnectionState {
+	return connectionStates.get(refKey(session)) ?? "connecting";
+}
+
+export function subscribeWorkspaceFileConnectionState(session: Ref, listener: () => void): () => void {
+	const sessionKey = refKey(session);
+	let listeners = connectionStateListeners.get(sessionKey);
+	if (!listeners) {
+		listeners = new Set();
+		connectionStateListeners.set(sessionKey, listeners);
+	}
+	listeners.add(listener);
+	return () => {
+		listeners?.delete(listener);
+		if (listeners?.size === 0) connectionStateListeners.delete(sessionKey);
+		if (!streams.has(sessionKey) && !connectionStateListeners.has(sessionKey)) connectionStates.delete(sessionKey);
+	};
+}
+
+function setWorkspaceFileConnectionState(sessionId: string, next: WorkspaceFileConnectionState): void {
+	if (connectionStates.get(sessionId) === next) return;
+	connectionStates.set(sessionId, next);
+	connectionStateListeners.get(sessionId)?.forEach((listener) => listener());
+}
 
 // Shares one daemon watcher between the rail and maximized copies of a Files
 // view. The daemon sends only invalidation edges; Git status and visible diffs
@@ -40,6 +74,7 @@ export function subscribeWorkspaceFileChanges(session: Ref, queryClient: QueryCl
 		if (current.refs > 0) return;
 		current.dispose();
 		streams.delete(sessionKey);
+		if (!connectionStateListeners.has(sessionKey)) connectionStates.delete(sessionKey);
 	};
 }
 
@@ -53,54 +88,98 @@ function createWorkspaceStream(session: Ref, queryClient: QueryClient): Workspac
 			void queryClient.invalidateQueries({ queryKey: ["session-workspace-file", sessionKey] });
 		}, INVALIDATE_DEBOUNCE_MS);
 	};
-	const scheduleRetry = () => {
+	const scheduleRetry = (generation: number) => {
 		if (stream.disposed || stream.retry) return;
+		stream.phase = "waiting";
+		const delay = SSE_RETRY_MS + (Math.random() * 2 - 1) * SSE_RETRY_JITTER_MS;
 		stream.retry = setTimeout(() => {
 			stream.retry = undefined;
-			stream.connect();
-		}, SSE_RETRY_MS);
+			if (stream.disposed || generation !== stream.generation) return;
+			stream.phase = "idle";
+			stream.ensureConnected();
+		}, delay);
+	};
+	const resetConnection = () => {
+		stream.generation += 1;
+		if (stream.retry) clearTimeout(stream.retry);
+		stream.retry = undefined;
+		stream.source?.close();
+		stream.source = undefined;
+		stream.sourceBaseUrl = undefined;
+		stream.phase = "idle";
+	};
+	const handleTerminalFailure = (generation: number) => {
+		if (stream.disposed || generation !== stream.generation) return;
+		stream.source?.close();
+		stream.source = undefined;
+		stream.failures += 1;
+		setWorkspaceFileConnectionState(sessionKey, stream.failures >= 3 ? "degraded" : "connecting");
+		scheduleRetry(generation);
 	};
 	stream.refs = 0;
 	stream.disposed = false;
-	stream.connect = () => {
-		if (stream.disposed || typeof EventSource === "undefined") return;
-		const baseUrl = baseUrlFor(session.host);
-		if (baseUrl === null) {
-			stream.source?.close();
-			stream.source = undefined;
-			stream.sourceBaseUrl = undefined;
+	stream.phase = "idle";
+	stream.generation = 0;
+	stream.failures = 0;
+	setWorkspaceFileConnectionState(sessionKey, "connecting");
+	stream.ensureConnected = () => {
+		if (stream.disposed) return;
+		if (typeof EventSource === "undefined") {
+			setWorkspaceFileConnectionState(sessionKey, "degraded");
 			return;
 		}
-		if (stream.source && stream.sourceBaseUrl === baseUrl && stream.source.readyState !== EVENTSOURCE_CLOSED) return;
-		stream.source?.close();
+		const baseUrl = baseUrlFor(session.host);
+		if (baseUrl === null) {
+			resetConnection();
+			setWorkspaceFileConnectionState(sessionKey, "connecting");
+			return;
+		}
+		if (stream.sourceBaseUrl && stream.sourceBaseUrl !== baseUrl) {
+			resetConnection();
+			stream.failures = 0;
+			setWorkspaceFileConnectionState(sessionKey, "connecting");
+		}
+		if (stream.phase !== "idle") return;
+
 		stream.sourceBaseUrl = baseUrl;
+		stream.phase = "connecting";
+		const generation = ++stream.generation;
 		try {
 			const source = new EventSource(
 				`${baseUrl.replace(/\/+$/, "")}/api/v1/sessions/${encodeURIComponent(session.id)}/workspace/events`,
 			);
 			stream.source = source;
 			source.onopen = () => {
-				if (!stream.disposed && stream.source === source) invalidate();
+				if (stream.disposed || generation !== stream.generation || stream.source !== source) return;
+				stream.phase = "open";
+				stream.failures = 0;
+				setWorkspaceFileConnectionState(sessionKey, "connected");
+				invalidate();
 			};
 			source.onerror = () => {
-				if (!stream.disposed && stream.source === source && source.readyState === EVENTSOURCE_CLOSED) scheduleRetry();
+				if (stream.disposed || generation !== stream.generation || stream.source !== source) return;
+				if (source.readyState === EVENTSOURCE_CLOSED) {
+					handleTerminalFailure(generation);
+					return;
+				}
+				stream.failures += 1;
+				setWorkspaceFileConnectionState(sessionKey, stream.failures >= 3 ? "degraded" : "connecting");
 			};
 			source.addEventListener("workspace_changed", () => {
-				if (!stream.disposed && stream.source === source) invalidate();
+				if (!stream.disposed && generation === stream.generation && stream.source === source) invalidate();
 			});
 		} catch {
 			stream.source = undefined;
-			scheduleRetry();
+			handleTerminalFailure(generation);
 		}
 	};
-	stream.disconnectBaseUrl = subscribeApiBaseUrl(stream.connect);
+	stream.disconnectBaseUrl = subscribeApiBaseUrl(stream.ensureConnected);
 	stream.dispose = () => {
 		stream.disposed = true;
 		if (stream.debounce) clearTimeout(stream.debounce);
-		if (stream.retry) clearTimeout(stream.retry);
 		stream.disconnectBaseUrl();
-		stream.source?.close();
+		resetConnection();
 	};
-	stream.connect();
+	stream.ensureConnected();
 	return stream;
 }

@@ -179,6 +179,8 @@ function SettingsBody({
 	const [replacementError, setReplacementError] = useState<string | null>(null);
 	const [validationError, setValidationError] = useState<string | null>(null);
 	const initialOrchestratorAgent = config.orchestrator?.agent ?? "";
+	const initialReviewerHarness = config.reviewers?.[0]?.harness ?? "";
+	const initialAutoReview = config.autoReview ?? false;
 	const missingRequiredAgent = form.workerAgent === "" || form.orchestratorAgent === "";
 	// Both halves of the gate are required: the experimental flag alone is not
 	// enough, and a local project has no remote daemon to hold the setting.
@@ -207,6 +209,10 @@ function SettingsBody({
 		}));
 	const effectiveIntakeRepo = form.intakeRepo.trim() || deriveGitHubRepo(project.repo);
 	const reviewerWarning = reviewerTrustWarning(form.reviewerHarness);
+	// Compared against the values this form opened with, so a save that leaves the
+	// review controls alone is not reported as a review decision.
+	const reviewSettingsChanged =
+		form.autoReview !== initialAutoReview || form.reviewerHarness !== initialReviewerHarness;
 
 	const mutation = useMutation({
 		mutationFn: async () => {
@@ -317,6 +323,18 @@ function SettingsBody({
 		},
 		onSuccess: async (result) => {
 			void captureRendererEvent("ao.renderer.settings_save_succeeded", { project_id: projectId });
+			// Reported only when a review control actually changed, so the event
+			// counts decisions about reviews rather than every unrelated save.
+			if (reviewSettingsChanged) {
+				void captureRendererEvent("ao.renderer.review_settings_changed", {
+					project_id: projectId,
+					auto_review: form.autoReview,
+					reviewer_harness: form.reviewerHarness,
+					harness_is_default: form.reviewerHarness === "",
+					auto_review_changed: form.autoReview !== initialAutoReview,
+					reviewer_harness_changed: form.reviewerHarness !== initialReviewerHarness,
+				});
+			}
 			setSavedAt(Date.now());
 			setReplacementError(result.replacementError);
 			setValidationError(null);

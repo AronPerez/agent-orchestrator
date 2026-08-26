@@ -7,7 +7,7 @@ import { closeAllHostStreams, syncHostStreams } from "./host-events";
 import { LOCAL_HOST, parseRefKey, refKey, type HostId } from "./hosts";
 import { workspaceQueryKey } from "../hooks/useWorkspaceQuery";
 import { sessionScmSummaryQueryKey } from "../hooks/useSessionScmSummary";
-import { conversationQueryKey } from "../hooks/useConversation";
+import { conversationQueryKey, conversationQueryRoot } from "../hooks/useConversation";
 import { agentSwitchesQueryRoot } from "../hooks/useAgentSwitches";
 import { sessionUsageQueryRoot } from "../hooks/useSessionUsageSummaries";
 
@@ -33,9 +33,11 @@ export function createEventTransport(queryClient: QueryClient): EventTransport {
 			const pendingConversationSessions = new Set<string>();
 			const pendingInterfaceTransitionSessions = new Set<string>();
 			let workspaceInvalidationPending = false;
+			let allConversationsInvalidationPending = false;
 			const pendingWorkspaceHosts = new Set<HostId>();
 			const refreshWorkspaces = (host?: HostId, event?: Event) => {
 				let conversationOnly = false;
+				if (event === undefined) allConversationsInvalidationPending = true;
 				if (event && "data" in event) {
 					try {
 						const decoded = JSON.parse(String((event as MessageEvent).data)) as {
@@ -82,6 +84,10 @@ export function createEventTransport(queryClient: QueryClient): EventTransport {
 				}
 				if (debounce) clearTimeout(debounce);
 				debounce = setTimeout(() => {
+					if (allConversationsInvalidationPending) {
+						void queryClient.invalidateQueries({ queryKey: conversationQueryRoot });
+						allConversationsInvalidationPending = false;
+					}
 					if (workspaceInvalidationPending) {
 						void queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
 						void queryClient.invalidateQueries({ queryKey: agentSwitchesQueryRoot });

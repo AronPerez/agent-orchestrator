@@ -30,15 +30,7 @@ vi.mock("./ProjectSettingsForm", () => ({
 }));
 
 vi.mock("./GlobalSettingsForm", () => ({
-	GlobalSettingsForm: () => <div>Global settings</div>,
-}));
-
-vi.mock("./settings/KeyboardShortcutsSettingsDialog", () => ({
-	KeyboardShortcutsSettingsDialog: () => null,
-}));
-
-vi.mock("./ConnectMobileModal", () => ({
-	ConnectMobileModal: () => null,
+	GlobalSettingsForm: ({ section }: { section: string }) => <div data-testid="global-settings-section">{section}</div>,
 }));
 
 describe("SettingsDialog", () => {
@@ -59,5 +51,13 @@ describe("SettingsDialog", () => {
 			scope: "project",
 			project: { host: "local", id: "proj-1" },
 		});
+	});
+
+	it("opens the requested global settings page", async () => {
+		useUiStore.getState().openGlobalSettings("mobile");
+		render(<SettingsDialog />);
+
+		expect(await screen.findByTestId("global-settings-section")).toHaveTextContent("mobile");
+		expect(screen.getByRole("button", { name: "Mobile" })).toHaveAttribute("aria-current", "page");
 	});
 });

@@ -251,7 +251,11 @@ describe("buildCommands PR actions", () => {
 		const review = byId(buildCommands({ workspaces: workspaces() })).get("pr-review:local:w-pr:42");
 		expect(review?.group).toBe("prs");
 		expect(review?.title).toBe("Run review #42");
-		expect(review?.action).toMatchObject({ kind: "trigger-review", session: { host: "local", id: "w-pr" } });
+		expect(review?.action).toMatchObject({
+			kind: "trigger-review",
+			reviewAction: "run",
+			session: { host: "local", id: "w-pr" },
+		});
 		expect(review?.disabled).toBeFalsy();
 		expect(review?.disabledReason).toBeUndefined();
 		expect(review?.searchOnly).toBe(true);
@@ -283,6 +287,26 @@ describe("buildCommands PR actions", () => {
 		const item = byId(upToDate).get("pr-review:local:w-pr:42");
 		expect(item?.title).toBe("Re-run review #42");
 		expect(item?.disabled).toBeFalsy();
+	});
+
+	// The palette is a manual on-ramp in its own right, and its telemetry reports
+	// the action kind carried on the action rather than the translated title. The
+	// kind has to track review state, or every palette run is reported as a first
+	// run.
+	it("carries the offered action kind on the review action", () => {
+		const cases: Array<[PRReviewState[], string]> = [
+			[[reviewState(42, "needs_review")], "run_latest"],
+			[[reviewState(42, "changes_requested")], "rerun"],
+			[[reviewState(42, "up_to_date", { latestRun: reviewRun(42) })], "rerun"],
+		];
+		for (const [states, expected] of cases) {
+			const map = byId(buildCommands({ workspaces: workspaces(), reviewStatesBySessionId: { "local:w-pr": states } }));
+			expect(map.get("pr-review:local:w-pr:42")?.action).toEqual({
+				kind: "trigger-review",
+				reviewAction: expected,
+				session: { host: "local", id: "w-pr" },
+			});
+		}
 	});
 
 	it("disables the review item with Review already running when a session review is running", () => {
@@ -337,8 +361,16 @@ describe("buildCommands PR actions", () => {
 		const map = byId(buildCommands({ workspaces: multiWorkspaces }));
 		expect(map.get("pr-open:local:w-multi:1")?.action).toEqual({ kind: "open-pr", url: "https://github.com/o/r/pull/1" });
 		expect(map.get("pr-open:local:w-multi:2")?.action).toEqual({ kind: "open-pr", url: "https://github.com/o/r/pull/2" });
-		expect(map.get("pr-review:local:w-multi:1")?.action).toMatchObject({ kind: "trigger-review", session: { host: "local", id: "w-multi" } });
-		expect(map.get("pr-review:local:w-multi:2")?.action).toMatchObject({ kind: "trigger-review", session: { host: "local", id: "w-multi" } });
+		expect(map.get("pr-review:local:w-multi:1")?.action).toMatchObject({
+			kind: "trigger-review",
+			reviewAction: "run",
+			session: { host: "local", id: "w-multi" },
+		});
+		expect(map.get("pr-review:local:w-multi:2")?.action).toMatchObject({
+			kind: "trigger-review",
+			reviewAction: "run",
+			session: { host: "local", id: "w-multi" },
+		});
 	});
 
 	it("does not create action items for merged or closed PRs", () => {

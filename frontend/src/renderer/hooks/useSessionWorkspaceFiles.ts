@@ -1,42 +1,69 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect } from "react";
+import { useCallback, useEffect, useSyncExternalStore } from "react";
 import type { components } from "../../api/schema";
 import { apiErrorMessage } from "../lib/api-client";
 import { clientFor } from "../lib/host-clients";
 import { LOCAL_HOST, refKey, type Ref } from "../lib/hosts";
-import { subscribeWorkspaceFileChanges } from "../lib/workspace-file-events";
+import {
+	getWorkspaceFileConnectionState,
+	subscribeWorkspaceFileChanges,
+	subscribeWorkspaceFileConnectionState,
+	type WorkspaceFileConnectionState,
+} from "../lib/workspace-file-events";
 
 export type WorkspaceCompareMode = "base" | "head_fallback";
 export type WorkspaceFileSummary = components["schemas"]["WorkspaceFileSummary"] & {
 	previousPath?: string;
 };
+export type WorkspaceFileSections = components["schemas"]["WorkspaceFileSections"];
+export type WorkspaceCommitSummary = components["schemas"]["WorkspaceCommitSummary"];
+export type WorkspaceSummary = components["schemas"]["WorkspaceSummary"];
 export type WorkspaceFilesResponse = components["schemas"]["ListWorkspaceFilesResponse"] & {
 	compareMode?: WorkspaceCompareMode;
 };
 const emptySessionRef: Ref = { host: LOCAL_HOST, id: "" };
 
 export const sessionWorkspaceFilesQueryKey = (session: Ref) => ["session-workspace-files", refKey(session)] as const;
+const WORKSPACE_FILES_DEGRADED_REFETCH_MS = 30_000;
 
 async function fetchSessionWorkspaceFiles(session: Ref, errorMessage: string): Promise<WorkspaceFilesResponse> {
 	const { data, error } = await clientFor(session.host).GET("/api/v1/sessions/{sessionId}/workspace/files", {
 		params: { path: { sessionId: session.id } },
 	});
 	if (error) throw new Error(apiErrorMessage(error, errorMessage));
-	return (data ?? { sessionId: session.id, files: [], truncated: false }) as WorkspaceFilesResponse;
+	return (data ?? {
+		sessionId: session.id,
+		files: [],
+		truncated: false,
+		sections: { staged: [], unstaged: [], untracked: [], committed: [] },
+		commits: [],
+		summary: { files: 0, additions: 0, deletions: 0 },
+	}) as WorkspaceFilesResponse;
 }
 
-// Shared so SessionFilesView (full fetch + polling) and SessionInspector
-// (eager fetch + live invalidation) always resolve to the same cache entry.
+// Shared so SessionFilesView and SessionInspector resolve to the same cache
+// entry while SSE invalidation remains the normal refresh path.
 export function sessionWorkspaceFilesQueryOptions(session: Ref, errorMessage = "Unable to load workspace files") {
 	return {
 		queryKey: sessionWorkspaceFilesQueryKey(session),
 		queryFn: () => fetchSessionWorkspaceFiles(session, errorMessage),
-		// SSE (subscribeWorkspaceFileChanges) already invalidates this query
-		// immediately on real filesystem changes and on reconnect, triggering
-		// an instant refetch regardless of this interval. Polling is only a
-		// safety net for missed/dropped SSE events, so it can stay slow.
-		refetchInterval: 30_000,
 	};
+}
+
+export function workspaceFilesRefetchInterval(state: WorkspaceFileConnectionState): false | number {
+	return state === "degraded" ? WORKSPACE_FILES_DEGRADED_REFETCH_MS : false;
+}
+
+export function useWorkspaceFileConnectionState(session: Ref): WorkspaceFileConnectionState {
+	const subscribe = useCallback(
+		(listener: () => void) => subscribeWorkspaceFileConnectionState(session, listener),
+		[session.host, session.id],
+	);
+	const getSnapshot = useCallback(
+		() => getWorkspaceFileConnectionState(session),
+		[session.host, session.id],
+	);
+	return useSyncExternalStore(subscribe, getSnapshot);
 }
 
 export function isChangedWorkspaceFile(file: WorkspaceFileSummary): boolean {

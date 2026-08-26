@@ -1,19 +1,16 @@
 import createClient from "openapi-fetch";
 import type { paths } from "../../api/schema";
 import type { DaemonStatus } from "../../shared/daemon-status";
+import { reportUnauthorized } from "./auth-gate";
 import { daemonFailureMessage } from "./daemon-failure";
 import { isDaemonServedWeb } from "./preview-mode";
-import { reportUnauthorized } from "./auth-gate";
 import { captureRendererEvent } from "./telemetry";
+import { captureApiErrorToSentry } from "./sentry";
 
 function devApiBaseUrl(): string {
 	return typeof window === "undefined" ? "http://127.0.0.1:3001" : window.location.origin;
 }
 
-// The daemon-served web build has no Electron supervisor to report a port, and
-// needs none: the daemon that sent this page is the daemon it talks to, on
-// whichever address the user reached it by. Resolved at runtime rather than
-// baked in, so one bundle works over loopback and over the LAN.
 const explicitApiBaseUrl =
 	isDaemonServedWeb && typeof window !== "undefined" ? window.location.origin : import.meta.env.VITE_AO_API_BASE_URL;
 const initialApiBaseUrl = explicitApiBaseUrl ?? (import.meta.env.DEV ? devApiBaseUrl() : "http://127.0.0.1:3001");
@@ -188,7 +185,13 @@ type ApiErrorCategory = "daemon_unavailable" | "network_error" | "http_4xx" | "h
 const API_ERROR_DEDUPE_MS = 30_000;
 const lastApiErrorAt = new Map<string, number>();
 
-function reportApiError(operation: string, category: ApiErrorCategory, status?: number): void {
+function reportApiError(
+	operation: string,
+	category: ApiErrorCategory,
+	status?: number,
+	code?: string,
+	requestId?: string,
+): void {
 	const key = `${operation}|${category}|${status ?? ""}`;
 	const now = Date.now();
 	const last = lastApiErrorAt.get(key);
@@ -199,6 +202,11 @@ function reportApiError(operation: string, category: ApiErrorCategory, status?: 
 		error_category: category,
 		status,
 	});
+	// Mirror into Sentry (no-op unless a DSN is configured). The daemon `code`
+	// is what drives the fine-grained severity/owner classification; `requestId`
+	// (when present) is tagged so a client event pivots to the daemon's own
+	// capture of the same request, which carries the matching request_id.
+	captureApiErrorToSentry(operation, category, status, code, requestId);
 }
 
 async function runtimeFetch(input: Request): Promise<Response> {
@@ -260,11 +268,19 @@ async function runtimeFetch(input: Request): Promise<Response> {
 		throw error;
 	}
 	if (!response.ok) {
-		// A 401 means the daemon wants the LAN connection password. Only the
-		// browser build can see one — the loopback listener has no auth — and it
-		// is the signal that the login prompt has to come up.
 		if (response.status === 401) reportUnauthorized();
-		reportApiError(operation, response.status >= 500 ? "http_5xx" : "http_4xx", response.status);
+		// Best-effort read the daemon error envelope's `code` (via a clone so the
+		// caller still gets an unconsumed body) to drive classification.
+		let code: string | undefined;
+		let requestId: string | undefined;
+		try {
+			const body = (await response.clone().json()) as { code?: unknown; requestId?: unknown };
+			if (typeof body?.code === "string" && body.code !== "") code = body.code;
+			if (typeof body?.requestId === "string" && body.requestId !== "") requestId = body.requestId;
+		} catch {
+			// Non-JSON or empty body: fall back to status-only classification.
+		}
+		reportApiError(operation, response.status >= 500 ? "http_5xx" : "http_4xx", response.status, code, requestId);
 	}
 	return response;
 }

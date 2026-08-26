@@ -15,8 +15,10 @@ import {
 import {
 	openReviewStatesFor,
 	reviewIsRunning,
+	reviewRunActionKind,
 	reviewSessionRunAction,
 	type PRReviewState,
+	type ReviewRunActionKind,
 } from "./session-reviews";
 import { appI18n, type MessageKey } from "../i18n";
 import { refKey, type Ref } from "./hosts";
@@ -40,7 +42,7 @@ export type CommandAction =
 	| { kind: "copy-branch"; branch: string }
 	| { kind: "open-pr"; url: string }
 	| { kind: "copy-pr-url"; url: string }
-	| { kind: "trigger-review"; session: Ref }
+	| { kind: "trigger-review"; reviewAction: ReviewRunActionKind; session: Ref }
 	| { kind: "toggle-theme" };
 
 export type CommandItem = {
@@ -400,8 +402,9 @@ function prReviewCommand(
 		: ineligible
 			? t("command.notEligibleForReview")
 			: undefined;
+	const states = prReviewState ? [prReviewState] : [];
 	const runLabel = prReviewState
-		? reviewSessionRunAction([prReviewState], false)
+		? reviewSessionRunAction(states, false)
 		: t("inspector.review.run");
 	return {
 		id: `pr-review:${refKey(session)}:${pr.number}`,
@@ -412,7 +415,11 @@ function prReviewCommand(
 		searchOnly: true,
 		disabled,
 		disabledReason,
-		action: { kind: "trigger-review", session },
+		action: {
+			kind: "trigger-review",
+			reviewAction: reviewRunActionKind(states, false),
+			session: { host: session.host, id: session.id },
+		},
 	};
 }
 

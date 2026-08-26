@@ -260,8 +260,7 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
   const boardLoadFailed = Boolean(
     workspaceStartupState === "error" || workspaceQuery.isError || workspaceQuery.localFailure,
   );
-  const showBoardGrid =
-    !showStartup && !boardLoadFailed && !showWelcome && !showProjectEmpty;
+  const showBoardGrid = !boardLoadFailed && !showWelcome && !showProjectEmpty;
   const showFindEmpty = findQuery.trim() !== "" && findMatches === 0;
   const hasArchive = archived.length > 0;
 
@@ -442,7 +441,6 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
 			    Welcome skips the row — a dangling "Board" above the import
 			    chooser was review feedback on #2432. */}
       {!showWelcome &&
-      !showStartup &&
       boardActionsInPanel &&
       (boardLabel || actions) ? (
         <div
@@ -508,9 +506,7 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
             ) : null}
           </div>
         ) : null}
-        {showStartup ? (
-          <DaemonStartupLoader />
-        ) : boardLoadFailed ? (
+        {boardLoadFailed ? (
           <p className="py-10 text-center text-xs text-passive">
             {t("shell.couldNotLoadSessions")}
           </p>
@@ -557,7 +553,8 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
           sessions={archived}
           usageBySession={usageBySession}
         />
-      ) : null}
+        ) : null}
+        {showStartup ? <DaemonStartupLoader /> : null}
     </div>
   );
 }
