@@ -25,6 +25,13 @@ Open **Settings → Connect Mobile** on the remote machine and enable mobile acc
 </Step>
 <Step>
 
+### Enable remote hosts on this machine
+
+Open **Settings → General** and enable **Remote hosts (experimental)**. Remote hosts are off by default, and the host selector is hidden until this setting is enabled.
+
+</Step>
+<Step>
+
 ### Open the host selector
 
 On this machine, start **Add project** and open the host selector at the top of the dialog.
@@ -50,7 +57,7 @@ Saved hosts are written to `~/.ao/remotes.json` at mode `0600` — the same file
 
 Once a host is connected, its projects appear as their own section in the sidebar, and **Add project** can browse directories on that machine. Removing a host only deletes your saved entry: sessions on that machine keep running.
 
-Failure states are reported separately and are all recoverable in place. "Wrong password" is never conflated with "could not reach", an unreachable host fails on its own without blanking the rest of the tree, and an unreachable host at startup does not delay or block the app.
+"Wrong password" is reported separately from "could not reach", and one connected host failing does not blank the rest of the tree. There is a current startup limitation: only hosts that connect successfully during remote-host initialization appear in the sidebar. A newly saved host, or a saved host whose startup connection fails, is omitted instead of appearing there with **Retry**. Once the host is reachable, restart the app or switch **Remote hosts (experimental)** off and on to connect it.
 
 ## The trust boundary
 
@@ -73,54 +80,8 @@ The connection password is what makes the listener safe to open at all, but it i
 - **It is not stored in a keychain.** Saved host passwords sit in plaintext in `~/.ao/remotes.json`, protected by file permissions (`0600`) rather than by the OS keychain.
 
 <Callout type="warn" title="Rules of thumb">
-	Turn Connect Mobile off on machines that are not currently being used as remote hosts. Never expose the mobile port to the public internet or forward it through a router. On any network you do not fully control, use one of the encrypted options below instead — bind to Tailscale, or tunnel over SSH.
+	Turn Connect Mobile off on machines that are not currently being used as remote hosts. Never expose the mobile port to the public internet or forward it through a router. On any network you do not fully control, use the encrypted SSH tunnel below instead.
 </Callout>
-
-## Bind to Tailscale only
-
-By default the listener binds every interface, which is what makes it reachable from your LAN. Binding it to Tailscale instead makes it reachable **only** over your tailnet, with WireGuard encryption on the wire — which removes the plaintext-transport problem without waiting for TLS.
-
-<Steps>
-<Step>
-
-### Join both machines to a tailnet
-
-Install Tailscale on both machines and sign in to the same tailnet.
-
-</Step>
-<Step>
-
-### Set the bind mode
-
-On the remote machine, turn Connect Mobile **off**, then edit `~/.ao/mobile/config.json` and set `bind`:
-
-```json
-{
-  "enabled": false,
-  "bind": "tailscale"
-}
-```
-
-`bind` accepts `"all"` (or omitted) for every interface, `"tailscale"` for the Tailscale interface only, or a literal IP address to pin one interface. There is no setting for it in the UI yet, so this file is the only way to change it.
-
-</Step>
-<Step>
-
-### Re-enable Connect Mobile
-
-Turn Connect Mobile back on. If Tailscale is not running or not signed in, enabling fails with an explicit error rather than quietly falling back to every interface — narrowing your exposure never silently widens again.
-
-</Step>
-<Step>
-
-### Add the tailnet address as a host
-
-Find the machine's tailnet address with `tailscale ip -4` (a `100.x` address) and add it as a remote host with the mobile port and the connection password.
-
-</Step>
-</Steps>
-
-The connection password still applies over Tailscale. Tailscale replaces the *trusted network* assumption with an encrypted, authenticated one; it does not replace the password.
 
 ## Or tunnel over SSH
 
@@ -149,22 +110,6 @@ Leave this running. The tunnel lives as long as the command does.
 </Step>
 <Step>
 
-### Narrow the listener to loopback
-
-While you are on the remote machine, this pairs naturally with binding its listener to loopback only. Turn Connect Mobile **off**, set `bind` in `~/.ao/mobile/config.json`, and turn it back on:
-
-```json
-{
-  "enabled": false,
-  "bind": "127.0.0.1"
-}
-```
-
-The listener is now reachable only through your tunnel, and is on no network at all. Skip this step if the same machine also serves a phone over the LAN — that would cut it off too.
-
-</Step>
-<Step>
-
 ### Add the local end as a host
 
 Add a remote host with the address `127.0.0.1:3111` — the *local* end of the tunnel, not the remote machine's address — and the remote machine's connection password. From AO's point of view this is an ordinary host that happens to be very close by.
@@ -174,27 +119,13 @@ Add a remote host with the address `127.0.0.1:3111` — the *local* end of the t
 
 ### What the tunnel does and does not do
 
-**What it does:** takes your network out of the path entirely. The mobile port no longer has to be reachable from your LAN, and everything between the two machines — the connection password included — is encrypted by SSH. Machine authentication comes from the SSH host key you already verified the first time you connected.
+**What it does:** keeps remote-host traffic out of the plaintext LAN path. Everything between the two machines — the connection password included — is encrypted by SSH. Machine authentication comes from the SSH host key you already verified the first time you connected.
 
 **What it does not do:**
 
 - **It does not replace the connection password.** The password is still required, still stored in `~/.ao/remotes.json`, and still sent on every request. What changes is where it travels: encrypted inside the tunnel, then across the remote machine's *own loopback interface* between the tunnel's far end and the daemon — the same hop a program running locally on that machine already makes. It never touches a network in plaintext.
 - **It does not survive a dropped connection on its own.** If the `ssh` process exits, the local port stops listening and the host simply reports as unreachable, like any host that went away. Reopen the tunnel and reconnect.
 - **It is not a reason to skip the password.** Do not point the tunnel at the daemon's loopback port (`3001`) hoping the tunnel itself will serve as authentication. That port answers a *different*, unauthenticated listener with a deliberately different policy: it refuses cross-origin writes and terminal connections, so most of the app breaks — and it serves loopback-only control routes that the network listener blocks on purpose, including one that hands out the connection password in cleartext. Forward the mobile port (`3011`), and keep the password.
-
-### Choosing between Tailscale and SSH
-
-Both close the plaintext-transport gap. Neither is better in general; they cost different things.
-
-| | Bind to Tailscale | SSH tunnel |
-| --- | --- | --- |
-| What you install | Tailscale on both machines, same tailnet | nothing new, if you already have SSH to the box |
-| Staying connected | reconnects itself, survives sleep and network changes | you keep an `ssh` process running; it dies with its terminal |
-| Address you add | the machine's `100.x` tailnet address | `127.0.0.1:<local port>` |
-| Machine authentication | tailnet identity | the SSH host key in your `known_hosts` |
-| Reaching several hosts | all of them at once, no extra work | one tunnel per host |
-
-If you are willing to install Tailscale, prefer it — it reconnects on its own and needs no attention after setup. Reach for SSH when you already have it and would rather not add another background service, or when a machine is reachable by SSH but not on your tailnet.
 
 ## macOS: "no route to host" while `curl` works
 
@@ -223,7 +154,7 @@ The network is fine. Apple-signed binaries such as `curl` and `nc` are exempt fr
 
 ## Known limitations
 
-- The LAN link is plaintext HTTP. Binding to Tailscale or tunnelling over SSH both remove that exposure; TLS with pinning is a longer-term fix for the clients that can do neither, notably the mobile app.
+- The LAN link is plaintext HTTP. Tunnelling over SSH encrypts the remote-host connection; TLS with pinning is a longer-term fix for clients that cannot use a tunnel, notably the mobile app.
 - Saved host passwords are protected by file permissions, not by the OS keychain.
 
 <Cards>

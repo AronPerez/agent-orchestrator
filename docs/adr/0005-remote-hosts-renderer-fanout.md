@@ -38,13 +38,15 @@ process.** No daemon ever talks to another daemon.
 1. **Local is a host.** `LOCAL_HOST` is a host id like any other — the one whose
    requests skip the proxy. No code path asks "is this remote?".
 
-2. **Everything addressable is a `Ref = {host, id}`.** Ids are never rewritten; they
-   are qualified only where an action is routed. Every read and every write takes a
-   `Ref` and dispatches through `clientFor(ref.host)`, so acting on the wrong machine
-   is a type error rather than a runtime accident. Routes are host-qualified —
-   `/host/$hostId/session/$sessionId`, `/host/$hostId/project/$projectId` — so a
-   reload or a restored window reopens the same session on the same machine. Cache
-   keys carry `refKey(ref)`, never a bare id.
+2. **Host-qualified refs are the target addressing rule.** Ids are never rewritten;
+   renderer reads and writes should take a `Ref = {host, id}` and dispatch through
+   `clientFor(ref.host)`. Routes are host-qualified — `/host/$hostId/session/$sessionId`,
+   `/host/$hostId/project/$projectId` — and cache keys carry `refKey(ref)`. This is not
+   fully enforced by the current types: `HostId` is a plain string, and some IPC paths
+   still accept bare ids. In particular, editor handoff sends only `sessionId`, which
+   the main process resolves against the local daemon. Until those paths take a
+   host-qualified ref, wrong-host routing remains a runtime risk rather than a type
+   error.
 
 3. **The proxy solves the header problem.** Electron's main process is not a browser:
    it can set `Authorization` and is not subject to CORS. The renderer talks to
@@ -60,13 +62,16 @@ process.** No daemon ever talks to another daemon.
    mux URL is derived from that host's own base — keeping the path prefix, which is
    what carries the token.
 
-5. **Failure is data, not an exception.** Each host carries its own status. A failed
-   host renders as a labelled section with a retry; it never blanks the tree and
-   never discards another host's data. Hosts connect **after** first paint and probes
-   are bounded, so a sleeping host cannot delay startup.
+5. **Failure as data is the target.** Once a host is connected, a failed workspace
+   query renders as a labelled section with a retry and never discards another host's
+   data. Hosts connect **after** first paint and probes are bounded, so a sleeping host
+   cannot delay startup. The current initialization path still omits a saved host when
+   its initial connection fails, so that case has no section or in-place retry yet.
 
-6. **Credential containment.** Only `{label, url}` and the loopback proxy base ever
-   cross to the renderer. The connection password never does.
+6. **Saved credential containment.** Add and edit forms necessarily hold the password
+   the user types in renderer state and send it to the main process over IPC. The main
+   process never sends a saved password back: saved-host views contain only
+   `{label, url}`, and connecting returns the loopback proxy base.
 
 ## Trade-offs
 
@@ -108,7 +113,7 @@ reviewed separately, with ADR 0001.
 **The token model holds.** 128 bits from a CSPRNG, compared in constant time,
 per-activation and never persisted, stripped before forwarding, bound to `127.0.0.1`,
 and torn down on disconnect. Nothing in the remote path logs a base URL, and the
-renderer never receives a connection password.
+main process never sends a saved connection password to the renderer.
 
 Four issues were found and fixed, each with a test that fails on the pre-fix code:
 
