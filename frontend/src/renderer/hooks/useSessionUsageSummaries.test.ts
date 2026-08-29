@@ -6,8 +6,10 @@ vi.mock("../lib/host-clients", () => ({
 	clientFor: () => ({ GET: (...args: unknown[]) => getMock(...args) }),
 }));
 
+import { sessionUsageDetailQueryKey } from "./useSessionUsage";
 import {
 	fetchSessionUsageSummaries,
+	sessionUsageQueryRoot,
 	sessionUsageQueryOptions,
 } from "./useSessionUsageSummaries";
 
@@ -25,5 +27,16 @@ describe("session usage summaries", () => {
 			params: { query: { projectId: "reverb" } },
 		});
 		expect(sessionUsageQueryOptions(project)).not.toHaveProperty("refetchInterval");
+	});
+
+	// The detail query lives in useSessionUsage.ts and must stay beneath this
+	// root, or a usage event invalidates the board summaries without touching
+	// the inspector's open session.
+	it("keeps the detail query beneath the shared usage query root", () => {
+		expect(sessionUsageDetailQueryKey({ host: "local", id: "sess-1" })).toEqual([
+			...sessionUsageQueryRoot,
+			"detail",
+			"local:sess-1",
+		]);
 	});
 });

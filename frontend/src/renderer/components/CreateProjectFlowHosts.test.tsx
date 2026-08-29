@@ -16,6 +16,12 @@ const { bridge, connectHostMock, disconnectHostMock } = vi.hoisted(() => ({
 			update: vi.fn(),
 			remove: vi.fn(),
 		},
+		cloud: {
+			getSession: vi.fn().mockResolvedValue(null),
+			signIn: vi.fn(),
+			signOut: vi.fn(),
+			onSessionChanged: vi.fn(() => () => undefined),
+		},
 	},
 	connectHostMock: vi.fn(),
 	disconnectHostMock: vi.fn(),

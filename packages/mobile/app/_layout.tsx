@@ -5,6 +5,7 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import { OnboardingGate } from "../lib/OnboardingGate";
 import { TelemetryManager } from "../lib/TelemetryManager";
 import { PushManager } from "../lib/PushManager";
+import { UpdatesManager } from "../lib/UpdatesManager";
 import { MinimalBackButton } from "../lib/MinimalBackButton";
 import { AppProvider } from "../lib/store";
 import { ThemeProvider, useTheme, useThemeState } from "../lib/ThemeProvider";
@@ -74,6 +75,7 @@ function Shell() {
 			<TelemetryManager />
 			{/* expo-notifications response APIs are not implemented on web. */}
 			{Platform.OS !== "web" ? <PushManager /> : null}
+			<UpdatesManager />
 			<OnboardingGate />
 			<Stack
 				screenOptions={{

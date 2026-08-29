@@ -1621,7 +1621,7 @@ const makeStyles = (t: Theme) =>
 	},
 	headerActions: { flexDirection: "row", alignItems: "center" },
 	interfaceOverlay: {
-		...StyleSheet.absoluteFillObject,
+		...StyleSheet.absoluteFill,
 		alignItems: "center",
 		justifyContent: "center",
 		paddingHorizontal: 24,
@@ -1664,7 +1664,7 @@ const makeStyles = (t: Theme) =>
 		borderWidth: 1,
 		borderColor: t.bgSurface,
 	},
-	browserOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: t.bgBase },
+	browserOverlay: { ...StyleSheet.absoluteFill, backgroundColor: t.bgBase },
 	browserBar: {
 		flexDirection: "row",
 		alignItems: "center",
@@ -1690,7 +1690,7 @@ const makeStyles = (t: Theme) =>
 	},
 	restoreText: { color: t.blue, fontWeight: "700", fontSize: 12 },
 	deadOverlay: {
-		...StyleSheet.absoluteFillObject,
+		...StyleSheet.absoluteFill,
 		alignItems: "center",
 		justifyContent: "center",
 		padding: 32,

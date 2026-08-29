@@ -61,6 +61,7 @@ export async function installFakeBridge(
 	await page.addInitScript(
 		({ version, daemonState, daemonPort, updateStatus, updateSettings }) => {
 			const unsubscribe = () => () => undefined;
+			let currentUpdateSettings = updateSettings;
 			const status: DaemonStatus =
 				daemonState === "ready"
 					? { state: "ready", port: daemonPort }
@@ -215,8 +216,10 @@ export async function installFakeBridge(
 					setMigration: async () => undefined,
 				},
 				updateSettings: {
-					get: async () => updateSettings,
-					set: async () => undefined,
+					get: async () => currentUpdateSettings,
+					set: async (next: UpdateSettings) => {
+						currentUpdateSettings = next;
+					},
 				},
 				uiSettings: {
 					get: async () => ({ ...DEFAULT_UI_SETTINGS }),
@@ -258,6 +261,12 @@ export async function installFakeBridge(
 					signIn: async () => undefined,
 					signOut: async () => undefined,
 					onSessionChanged: unsubscribe,
+				},
+				cloudCp: {
+					request: async () => ({ status: 401, headers: {}, body: "" }),
+					openStream: async () => ({ streamId: "stream_test" }),
+					closeStream: () => undefined,
+					onStreamEvent: unsubscribe,
 				},
 			} satisfies AoBridge;
 			(window as unknown as { ao: unknown }).ao = ao;
@@ -769,6 +778,12 @@ export async function installFakeAgent(
 					signIn: async () => undefined,
 					signOut: async () => undefined,
 					onSessionChanged: unsubscribe,
+				},
+				cloudCp: {
+					request: async () => ({ status: 401, headers: {}, body: "" }),
+					openStream: async () => ({ streamId: "stream_test" }),
+					closeStream: () => undefined,
+					onStreamEvent: unsubscribe,
 				},
 			} satisfies AoBridge;
 			(window as unknown as { ao: unknown }).ao = ao;

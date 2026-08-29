@@ -1,17 +1,24 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { useNavigate } from "@tanstack/react-router";
-import { ProjectSourcePickerView, type ProjectSource } from "@aoagents/product-ui";
+import {
+  ProjectSourcePickerView,
+  type ProjectSource,
+} from "@aoagents/product-ui";
+import { useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { useUiStore } from "../stores/ui-store";
 import {
   ArrowRight,
   CheckCircle2,
   ChevronRight,
+  Cloud,
   Folder,
   FolderOpen,
   FolderPlus,
   Folders,
+  GitBranch,
   GitFork,
+  Link2,
   X,
   XCircle,
 } from "lucide-react";
@@ -22,9 +29,14 @@ import {
   useId,
   useRef,
   useState,
+  type FormEvent,
   type ReactNode,
 } from "react";
 import type { ImportFolderScan } from "../../preload";
+import { useCloudCp } from "../hooks/useCloudCp";
+import { useCloudGate } from "../hooks/useCloudGate";
+import { useCloudOrg } from "../hooks/useCloudOrg";
+import { cloudProjectsQueryKey } from "../hooks/useWorkspaceQuery";
 import {
   LOCAL_HOST_ID,
   remotesBridge,
@@ -33,8 +45,12 @@ import {
   type RemoteHostView,
 } from "../hooks/useRemoteHosts";
 import { aoBridge } from "../lib/bridge";
+import { useCloudSession } from "../lib/cloud-session";
 import { connectHost, disconnectHost } from "../lib/host-clients";
-import { alreadyRegisteredProjectId, daemonErrorMessage } from "../lib/daemon-error";
+import {
+  alreadyRegisteredProjectId,
+  daemonErrorMessage,
+} from "../lib/daemon-error";
 import { cn } from "../lib/utils";
 import type { ProjectKind } from "../types/workspace";
 import { AddRemoteHostDialog } from "./AddRemoteHostDialog";
@@ -50,6 +66,9 @@ import type {
   CloneRepositorySelection,
 } from "./CloneRepositoryDialog";
 import { Button } from "./ui/button";
+import { Input } from "./ui/input";
+import { Label } from "./ui/label";
+import { Tabs, TabsList, TabsTrigger } from "./ui/tabs";
 
 export type CreateProjectInput = {
   path: string;
@@ -65,6 +84,9 @@ const CloneRepositoryDialog = lazy(() => import("./CloneRepositoryDialog"));
 const LAST_CLONE_DESTINATION_KEY = "ao.clone.lastDestinationParent";
 
 type CreateProjectFlowMode = ProjectKind | "choose";
+
+/** Where the new project should live: on this machine or in AO Cloud. */
+type ProjectOffering = "local" | "cloud";
 
 // Shared create-project flow. Local projects/workspaces use the native folder
 // picker; remote projects progressively reveal a lazily loaded clone form.
@@ -153,10 +175,12 @@ export function CreateProjectFlow({
     string | null
   >(null);
 
+  const { cloudEnabled } = useCloudGate();
+  const { status: cloudSessionStatus, signIn: cloudSignIn } = useCloudSession();
+  const cloudAvailable = cloudEnabled && cloudSessionStatus === "authenticated";
+  const [offering, setOffering] = useState<ProjectOffering>("local");
   const hasModePicker = mode === "choose";
   const isBusy = isChoosingPath || isCreating || isInitializing;
-  // The selected host when it is not "This Mac". Undefined while a just-added
-  // host is still being listed, so the flow is never pointed at nothing.
   const remoteHost = hosts.find(
     (host): host is Host & { url: string } =>
       host.id === hostId && host.url !== null,
@@ -269,19 +293,20 @@ export function CreateProjectFlow({
   };
 
   const remoteHostsEnabled = useUiStore((state) => state.remoteHosts);
-  const hostRow = hasModePicker && remoteHostsEnabled ? (
-    <HostSelect
-      hosts={hosts}
-      value={hostId}
-      onChange={setHostId}
-      onAddHost={() => setAddHostOpen(true)}
-      // ponytail: re-probes every host, not just this one. Fine for a handful;
-      // add a single-host probe if the list ever grows.
-      onReconnect={() => void refreshHosts()}
-      onEditHost={setEditingHost}
-      onRemoveHost={setRemovingHost}
-    />
-  ) : null;
+  const hostRow =
+    hasModePicker && remoteHostsEnabled ? (
+      <HostSelect
+        hosts={hosts}
+        value={hostId}
+        onChange={setHostId}
+        onAddHost={() => setAddHostOpen(true)}
+        // ponytail: re-probes every host, not just this one. Fine for a handful;
+        // add a single-host probe if the list ever grows.
+        onReconnect={() => void refreshHosts()}
+        onEditHost={setEditingHost}
+        onRemoveHost={setRemovingHost}
+      />
+    ) : null;
 
   const chooseDirectory = async (kind: ProjectKind, presetPath?: string) => {
     setError(null);
@@ -337,6 +362,7 @@ export function CreateProjectFlow({
 
   const startFlow = (presetPath?: string) => {
     setPendingDropPath(presetPath ?? null);
+    setOffering("local");
     if (hasModePicker) {
       setError(null);
       setCloneSelection(null);
@@ -344,6 +370,11 @@ export function CreateProjectFlow({
       return;
     }
     void chooseDirectory(mode, presetPath);
+  };
+
+  const onCloudProjectCreated = () => {
+    setModePickerOpen(false);
+    setOffering("local");
   };
 
   // Seed with the current value so we never open on mount; open when it changes.
@@ -467,31 +498,55 @@ export function CreateProjectFlow({
         !modePickerOpen &&
         !cloneDialogOpen &&
         selectedPath === null && (
-        <div className="flex w-full flex-col items-center gap-3">
-          <ImportSourcePicker
-            disabled={isBusy}
-            hostRow={hostRow}
-            onSelect={selectSource}
-          />
-          {error && !folderPickerOpen && selectedPath === null && (
-            <p className="text-caption leading-body text-error" role="status">
-              {error}
-            </p>
-          )}
-        </div>
-      )}
+          <div className="flex w-full flex-col items-center gap-3">
+            {cloudEnabled && (
+              <ProjectOfferingTabs
+                disabled={isBusy}
+                offering={offering}
+                onOfferingChange={setOffering}
+              />
+            )}
+            {cloudEnabled && offering === "cloud" ? (
+              cloudAvailable ? (
+                <CloudProjectCard onCreated={onCloudProjectCreated} />
+              ) : (
+                <CloudSignInPanel disabled={isBusy} onSignIn={cloudSignIn} />
+              )
+            ) : (
+              <ImportSourcePicker
+                disabled={isBusy}
+                hostRow={hostRow}
+                onSelect={selectSource}
+              />
+            )}
+            {error && !folderPickerOpen && selectedPath === null && (
+              <p className="text-caption leading-body text-error" role="status">
+                {error}
+              </p>
+            )}
+          </div>
+        )}
       {hasModePicker && (
         <>
           <CreateProjectSourceDialog
+            cloudAvailable={cloudAvailable}
+            cloudEnabled={cloudEnabled}
             disabled={isBusy}
             hostRow={hostRow}
+            offering={offering}
+            onCloudCreated={onCloudProjectCreated}
+            onOfferingChange={setOffering}
+            onSignIn={cloudSignIn}
             open={modePickerOpen}
             onOpenChange={(open) => {
               if (isBusy) return;
               setModePickerOpen(open);
               // Dismissed without picking a kind — don't let a stale dropped
               // path hijack the next manual "New Project" click.
-              if (!open) setPendingDropPath(null);
+              if (!open) {
+                setPendingDropPath(null);
+                setOffering("local");
+              }
             }}
             onSelect={selectSource}
           />
@@ -740,14 +795,26 @@ function shouldScanCreateFailure(message: string): boolean {
 }
 
 function CreateProjectSourceDialog({
+  cloudAvailable,
+  cloudEnabled,
   disabled,
   hostRow,
+  offering,
+  onCloudCreated,
+  onOfferingChange,
+  onSignIn,
   onOpenChange,
   onSelect,
   open,
 }: {
+  cloudAvailable: boolean;
+  cloudEnabled: boolean;
   disabled: boolean;
   hostRow?: ReactNode;
+  offering: ProjectOffering;
+  onCloudCreated: () => void;
+  onOfferingChange: (offering: ProjectOffering) => void;
+  onSignIn: () => void;
   onOpenChange: (open: boolean) => void;
   onSelect: (source: ProjectSource) => void;
   open: boolean;
@@ -757,16 +824,387 @@ function CreateProjectSourceDialog({
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay data-[state=open]:animate-overlay-in" />
         <Dialog.Content className="fixed left-1/2 top-1/2 z-overlay w-[min(var(--size-import-modal-max),calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2 border-0 bg-transparent p-0 shadow-none outline-none data-[state=open]:animate-modal-in">
-          <ImportSourcePicker
-            dialog
-            disabled={disabled}
-            hostRow={hostRow}
-            onClose={() => onOpenChange(false)}
-            onSelect={onSelect}
-          />
+          <div className="flex w-full flex-col items-center gap-3">
+            {cloudEnabled && (
+              <ProjectOfferingTabs
+                disabled={disabled}
+                offering={offering}
+                onOfferingChange={onOfferingChange}
+              />
+            )}
+            {cloudEnabled && offering === "cloud" ? (
+              cloudAvailable ? (
+                <CloudProjectCard
+                  dialog
+                  onClose={() => onOpenChange(false)}
+                  onCreated={onCloudCreated}
+                />
+              ) : (
+                <CloudSignInPanel
+                  dialog
+                  disabled={disabled}
+                  onSignIn={onSignIn}
+                />
+              )
+            ) : (
+              <ImportSourcePicker
+                hostRow={hostRow}
+                disabled={disabled}
+                onClose={() => onOpenChange(false)}
+                onSelect={onSelect}
+                dialog
+              />
+            )}
+          </div>
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
+  );
+}
+
+/**
+ * Local | Cloud segmented choice, shown whenever this deployment offers cloud.
+ * A caption below spells out what each choice means (sessions on this machine
+ * vs. each session in its own cloud sandbox) so the decision is explicit rather
+ * than a subtle toggle that is easy to miss.
+ */
+function ProjectOfferingTabs({
+  disabled,
+  offering,
+  onOfferingChange,
+}: {
+  disabled: boolean;
+  offering: ProjectOffering;
+  onOfferingChange: (offering: ProjectOffering) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="flex w-full flex-col items-center gap-1.5">
+      <Tabs
+        value={offering}
+        onValueChange={(value) =>
+          onOfferingChange(value === "cloud" ? "cloud" : "local")
+        }
+      >
+        <TabsList aria-label={t("createProject.kindChoice")}>
+          <TabsTrigger disabled={disabled} value="local">
+            {t("createProject.kindLocal")}
+          </TabsTrigger>
+          <TabsTrigger disabled={disabled} value="cloud">
+            <Cloud className="size-3.5" aria-hidden="true" />
+            {t("createProject.kindCloud")}
+          </TabsTrigger>
+        </TabsList>
+      </Tabs>
+      <p
+        className="text-caption leading-body text-secondary text-center"
+        role="status"
+      >
+        {offering === "cloud"
+          ? t("createProject.kindCloudHint")
+          : t("createProject.kindLocalHint")}
+      </p>
+    </div>
+  );
+}
+
+/**
+ * Shown when the user picks Cloud but is not signed in yet. Keeps the Cloud
+ * option discoverable and actionable from the create-project flow instead of
+ * silently hiding it: a single button starts the WorkOS sign-in.
+ */
+function CloudSignInPanel({
+  disabled,
+  onSignIn,
+}: {
+  dialog?: boolean;
+  disabled: boolean;
+  onSignIn: () => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="flex w-full max-w-(--size-import-modal-max) flex-col items-center gap-4 rounded-welcome-panel border border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-modal)] p-(--size-import-modal-padding) text-center shadow-[var(--shadow-import-modal)]">
+      <Cloud
+        className="size-6 text-[var(--color-text-import-title)]"
+        aria-hidden="true"
+      />
+      <p className="text-[13px] leading-5 text-[var(--color-text-import-subtitle)]">
+        {t("createProject.cloudSignInPrompt")}
+      </p>
+      <Button disabled={disabled} onClick={onSignIn} type="button">
+        {t("shell.signInToAOCloud")}
+      </Button>
+    </div>
+  );
+}
+
+function isHttpsRepositoryUrl(raw: string): boolean {
+  try {
+    const parsed = new URL(raw.trim());
+    return parsed.protocol === "https:" && parsed.host !== "";
+  } catch {
+    return false;
+  }
+}
+
+// Cloud project creation goes straight to the control plane
+// (client.createProject) instead of the daemon POST the local flow uses; the
+// repository is cloned in a cloud sandbox, so no folder picker or agent sheet.
+function CloudProjectCard({
+  dialog = false,
+  onClose,
+  onCreated,
+}: {
+  dialog?: boolean;
+  onClose?: () => void;
+  onCreated: () => void;
+}) {
+  const { t } = useTranslation();
+  const { client } = useCloudCp();
+  const { org, error: orgError } = useCloudOrg();
+  const queryClient = useQueryClient();
+  const [repositoryUrl, setRepositoryUrl] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [defaultBranch, setDefaultBranch] = useState("main");
+  const [submitted, setSubmitted] = useState(false);
+  const [isCreating, setIsCreating] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
+  const urlError =
+    submitted && !isHttpsRepositoryUrl(repositoryUrl)
+      ? t("createProject.cloudInvalidUrl")
+      : null;
+  const nameError =
+    submitted && displayName.trim() === ""
+      ? t("createProject.cloudDisplayNameRequired")
+      : null;
+  const branchError =
+    submitted && defaultBranch.trim() === ""
+      ? t("createProject.cloudDefaultBranchRequired")
+      : null;
+  const orgFailure = orgError
+    ? orgError instanceof Error
+      ? orgError.message
+      : String(orgError)
+    : null;
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setSubmitted(true);
+    if (isCreating || org === undefined) return;
+    if (
+      !isHttpsRepositoryUrl(repositoryUrl) ||
+      displayName.trim() === "" ||
+      defaultBranch.trim() === ""
+    )
+      return;
+    setSubmitError(null);
+    setIsCreating(true);
+    try {
+      await client.createProject(org.id, {
+        displayName: displayName.trim(),
+        repositoryUrl: repositoryUrl.trim(),
+        defaultBranch: defaultBranch.trim(),
+      });
+      await queryClient.invalidateQueries({ queryKey: cloudProjectsQueryKey });
+      onCreated();
+    } catch (err) {
+      setSubmitError(
+        err instanceof Error ? err.message : t("createProject.couldNotAdd"),
+      );
+    } finally {
+      setIsCreating(false);
+    }
+  };
+
+  const title = (
+    <h2 className="import-title text-balance">
+      {t("createProject.cloudTitle")}
+    </h2>
+  );
+  const description = (
+    <p className="import-description text-pretty">
+      {t("createProject.cloudDescription")}
+    </p>
+  );
+
+  return (
+    <div className="relative isolate flex w-full max-w-(--size-import-modal-max) flex-col items-stretch gap-6 rounded-welcome-panel border border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-modal)] p-(--size-import-modal-padding) shadow-[var(--shadow-import-modal)]">
+      <div
+        className={cn(
+          "flex flex-col items-start gap-1",
+          dialog && onClose && "pr-10",
+        )}
+      >
+        {dialog ? (
+          <>
+            <Dialog.Title asChild>{title}</Dialog.Title>
+            <Dialog.Description asChild>{description}</Dialog.Description>
+          </>
+        ) : (
+          <>
+            {title}
+            {description}
+          </>
+        )}
+      </div>
+      {dialog && onClose ? (
+        <button
+          type="button"
+          className="settings-close-button absolute right-4 top-4"
+          aria-label={t("createProject.closeDialog")}
+          disabled={isCreating}
+          onClick={onClose}
+        >
+          <X className="size-4" aria-hidden="true" />
+        </button>
+      ) : null}
+      <form
+        className="flex flex-col gap-5"
+        onSubmit={(event) => void submit(event)}
+      >
+        {(submitError ?? orgFailure) ? (
+          <div
+            className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-pretty text-[12px] leading-5 text-destructive"
+            role="alert"
+          >
+            {submitError ?? orgFailure}
+          </div>
+        ) : null}
+        <div className="space-y-2">
+          <Label
+            htmlFor="cloudRepositoryUrl"
+            className="text-[13px] font-semibold text-[var(--color-text-import-title)]"
+          >
+            {t("createProject.cloneRepositoryUrl")}
+          </Label>
+          <div className="relative">
+            <span className="pointer-events-none absolute inset-y-0 left-3 flex w-4 items-center justify-center text-[var(--color-text-import-muted)]">
+              <Link2 className="size-4" aria-hidden="true" />
+            </span>
+            <Input
+              id="cloudRepositoryUrl"
+              autoFocus
+              autoCapitalize="none"
+              autoComplete="off"
+              aria-describedby={
+                urlError ? "cloudRepositoryUrlError" : undefined
+              }
+              aria-invalid={urlError ? true : undefined}
+              className="bg-[var(--color-bg-import-card)] pl-10 font-mono text-[13px]"
+              disabled={isCreating}
+              placeholder={t("createProject.cloneRepositoryUrlPlaceholder")}
+              spellCheck={false}
+              value={repositoryUrl}
+              onChange={(event) => setRepositoryUrl(event.target.value)}
+            />
+          </div>
+          {urlError ? (
+            <p
+              id="cloudRepositoryUrlError"
+              className="text-pretty text-[12px] leading-5 text-destructive"
+              role="alert"
+            >
+              {urlError}
+            </p>
+          ) : null}
+        </div>
+        <div className="grid gap-5 sm:grid-cols-2">
+          <div className="space-y-2">
+            <Label
+              htmlFor="cloudDisplayName"
+              className="text-[13px] font-semibold text-[var(--color-text-import-title)]"
+            >
+              {t("createProject.cloudDisplayName")}
+            </Label>
+            <div className="relative">
+              <span className="pointer-events-none absolute inset-y-0 left-3 flex w-4 items-center justify-center text-[var(--color-text-import-muted)]">
+                <Folder className="size-4" aria-hidden="true" />
+              </span>
+              <Input
+                id="cloudDisplayName"
+                autoComplete="off"
+                aria-describedby={
+                  nameError ? "cloudDisplayNameError" : undefined
+                }
+                aria-invalid={nameError ? true : undefined}
+                className="bg-[var(--color-bg-import-card)] pl-10 text-[13px]"
+                disabled={isCreating}
+                placeholder="web-app"
+                spellCheck={false}
+                value={displayName}
+                onChange={(event) => setDisplayName(event.target.value)}
+              />
+            </div>
+            {nameError ? (
+              <p
+                id="cloudDisplayNameError"
+                className="text-pretty text-[12px] leading-5 text-destructive"
+                role="alert"
+              >
+                {nameError}
+              </p>
+            ) : null}
+          </div>
+          <div className="space-y-2">
+            <Label
+              htmlFor="cloudDefaultBranch"
+              className="text-[13px] font-semibold text-[var(--color-text-import-title)]"
+            >
+              {t("createProject.cloudDefaultBranch")}
+            </Label>
+            <div className="relative">
+              <span className="pointer-events-none absolute inset-y-0 left-3 flex w-4 items-center justify-center text-[var(--color-text-import-muted)]">
+                <GitBranch className="size-4" aria-hidden="true" />
+              </span>
+              <Input
+                id="cloudDefaultBranch"
+                autoCapitalize="none"
+                autoComplete="off"
+                aria-describedby={
+                  branchError ? "cloudDefaultBranchError" : undefined
+                }
+                aria-invalid={branchError ? true : undefined}
+                className="bg-[var(--color-bg-import-card)] pl-10 font-mono text-[13px]"
+                disabled={isCreating}
+                placeholder="main"
+                spellCheck={false}
+                value={defaultBranch}
+                onChange={(event) => setDefaultBranch(event.target.value)}
+              />
+            </div>
+            {branchError ? (
+              <p
+                id="cloudDefaultBranchError"
+                className="text-pretty text-[12px] leading-5 text-destructive"
+                role="alert"
+              >
+                {branchError}
+              </p>
+            ) : null}
+          </div>
+        </div>
+        <div className="flex items-center justify-end gap-3">
+          {org === undefined && orgFailure === null ? (
+            <p
+              className="mr-auto text-pretty text-[12px] leading-5 text-[var(--color-text-import-muted)]"
+              role="status"
+            >
+              {t("createProject.cloudWorkspaceConnecting")}
+            </p>
+          ) : null}
+          <Button
+            type="submit"
+            variant="footer-primary"
+            disabled={isCreating || org === undefined}
+          >
+            {isCreating
+              ? t("createProject.creating")
+              : t("createProject.cloudCreate")}
+          </Button>
+        </div>
+      </form>
+    </div>
   );
 }
 
@@ -816,7 +1254,9 @@ function ImportSourcePicker({
           <X className="size-5" aria-hidden="true" strokeWidth={1.67} />
         }
         arrowIcon={<ArrowRight className="size-4" aria-hidden="true" />}
-        cloneIcon={<GitFork className="size-[14px] shrink-0" aria-hidden="true" />}
+        cloneIcon={
+          <GitFork className="size-[14px] shrink-0" aria-hidden="true" />
+        }
         folderIcon={
           <FolderOpen className="size-[14px] shrink-0" aria-hidden="true" />
         }
@@ -842,26 +1282,30 @@ function ImportSourcePicker({
 }
 
 function CloneRepositoryDialogSkeleton() {
-	const { t } = useTranslation();
-	return (
-		<Dialog.Root open>
-			<Dialog.Portal>
-				<Dialog.Overlay className="dialog-overlay" />
-				<Dialog.Content className="fixed left-1/2 top-1/2 z-overlay w-[min(var(--size-import-folder-dialog),calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-welcome-panel border border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-modal)] p-0 shadow-[var(--shadow-import-modal)]">
-					<Dialog.Title className="sr-only">{t("createProject.cloneTitle")}</Dialog.Title>
-					<Dialog.Description className="sr-only">{t("createProject.cloneDescription")}</Dialog.Description>
-					<div className="border-b border-[var(--color-border-import-modal)] p-(--size-import-dialog-padding)">
-						<div className="h-5 w-40 rounded bg-[var(--color-bg-import-chip)]" />
-						<div className="mt-2 h-3 w-72 max-w-full rounded bg-[var(--color-bg-import-chip)]" />
-					</div>
-					<div className="space-y-5 p-(--size-import-dialog-padding)">
-						<div className="h-11 rounded-md bg-[var(--color-bg-import-card)]" />
-						<div className="h-11 rounded-md bg-[var(--color-bg-import-card)]" />
-					</div>
-				</Dialog.Content>
-			</Dialog.Portal>
-		</Dialog.Root>
-	);
+  const { t } = useTranslation();
+  return (
+    <Dialog.Root open>
+      <Dialog.Portal>
+        <Dialog.Overlay className="dialog-overlay" />
+        <Dialog.Content className="fixed left-1/2 top-1/2 z-overlay w-[min(var(--size-import-folder-dialog),calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-welcome-panel border border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-modal)] p-0 shadow-[var(--shadow-import-modal)]">
+          <Dialog.Title className="sr-only">
+            {t("createProject.cloneTitle")}
+          </Dialog.Title>
+          <Dialog.Description className="sr-only">
+            {t("createProject.cloneDescription")}
+          </Dialog.Description>
+          <div className="border-b border-[var(--color-border-import-modal)] p-(--size-import-dialog-padding)">
+            <div className="h-5 w-40 rounded bg-[var(--color-bg-import-chip)]" />
+            <div className="mt-2 h-3 w-72 max-w-full rounded bg-[var(--color-bg-import-chip)]" />
+          </div>
+          <div className="space-y-5 p-(--size-import-dialog-padding)">
+            <div className="h-11 rounded-md bg-[var(--color-bg-import-card)]" />
+            <div className="h-11 rounded-md bg-[var(--color-bg-import-card)]" />
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
 }
 
 function CreateProjectFolderDialog({
@@ -903,7 +1347,8 @@ function CreateProjectFolderDialog({
   const isWorkspace = kind === "workspace";
   const failedRepos =
     scan?.repos.filter(
-      (repo) => (repo.status === "error" || !repo.hasRemote) && !repo.needsGitInit,
+      (repo) =>
+        (repo.status === "error" || !repo.hasRemote) && !repo.needsGitInit,
     ) ?? [];
   const hasScan = scan !== null;
   const alreadyRegistered = existingProjectId !== null && remoteHost !== null;
@@ -1006,16 +1451,20 @@ function CreateProjectFolderDialog({
                   </div>
                 )}
 
-							{scan.repos
-								.filter((repo) => (repo.status !== "error" && repo.hasRemote) || repo.needsGitInit)
-								.map((repo) => (
-										<div
-											key={repo.path}
-											className="rounded-lg border border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-card)]"
-										>
-											<ImportRepoRow repo={repo} />
-										</div>
-									))}
+                {scan.repos
+                  .filter(
+                    (repo) =>
+                      (repo.status !== "error" && repo.hasRemote) ||
+                      repo.needsGitInit,
+                  )
+                  .map((repo) => (
+                    <div
+                      key={repo.path}
+                      className="rounded-lg border border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-card)]"
+                    >
+                      <ImportRepoRow repo={repo} />
+                    </div>
+                  ))}
 
                 {scan.repos.length === 0 && (
                   <div className="rounded-lg border border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-card)] p-4 text-[12px] text-[var(--color-text-import-muted)]">
@@ -1091,7 +1540,10 @@ function CreateProjectFolderDialog({
                 className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-card)] px-3 py-3 text-[12px] leading-5 text-[var(--color-text-import-title)]"
               >
                 <span className="flex min-w-0 items-center gap-2">
-                  <CheckCircle2 className="size-4 shrink-0" aria-hidden="true" />
+                  <CheckCircle2
+                    className="size-4 shrink-0"
+                    aria-hidden="true"
+                  />
                   {t("hosts.alreadyRegistered", { host: remoteHost.label })}
                 </span>
                 <Button type="button" variant="footer" onClick={onOpenExisting}>
@@ -1143,30 +1595,44 @@ function CreateProjectFolderDialog({
   );
 }
 
-function ImportRepoRow({ failed = false, repo }: { failed?: boolean; repo: ImportFolderScan["repos"][number] }) {
-	const { t } = useTranslation();
-	return (
-		<div className="flex items-center gap-3 p-4">
-			{failed ? (
-				<XCircle className="size-5 shrink-0 text-destructive" aria-hidden="true" />
-			) : (
-				<CheckCircle2 className="size-5 shrink-0 text-success" aria-hidden="true" />
-			)}
-			<div className="min-w-0 flex-1">
-				<div className="truncate text-[14px] font-semibold text-[var(--color-text-import-title)]">{repo.name}</div>
-				<div className="mt-0.5 truncate font-mono text-[12px] text-[var(--color-text-import-muted)]">
-					{displayImportPath(repo.path)}
-				</div>
-			</div>
-			<div className="hidden max-w-[260px] shrink-0 truncate text-right font-mono text-[12px] text-[var(--color-text-import-muted)] sm:block">
-				{repo.needsGitInit
-					? "Needs git init"
-					: failed
-						? (repo.reason ?? t("createProject.repoCannotImport"))
-						: `${repo.branch} ${remoteDisplay(repo.remote)}`}
-			</div>
-		</div>
-	);
+function ImportRepoRow({
+  failed = false,
+  repo,
+}: {
+  failed?: boolean;
+  repo: ImportFolderScan["repos"][number];
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="flex items-center gap-3 p-4">
+      {failed ? (
+        <XCircle
+          className="size-5 shrink-0 text-destructive"
+          aria-hidden="true"
+        />
+      ) : (
+        <CheckCircle2
+          className="size-5 shrink-0 text-success"
+          aria-hidden="true"
+        />
+      )}
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-[14px] font-semibold text-[var(--color-text-import-title)]">
+          {repo.name}
+        </div>
+        <div className="mt-0.5 truncate font-mono text-[12px] text-[var(--color-text-import-muted)]">
+          {displayImportPath(repo.path)}
+        </div>
+      </div>
+      <div className="hidden max-w-[260px] shrink-0 truncate text-right font-mono text-[12px] text-[var(--color-text-import-muted)] sm:block">
+        {repo.needsGitInit
+          ? "Needs git init"
+          : failed
+            ? (repo.reason ?? t("createProject.repoCannotImport"))
+            : `${repo.branch} ${remoteDisplay(repo.remote)}`}
+      </div>
+    </div>
+  );
 }
 
 function displayImportPath(value: string) {

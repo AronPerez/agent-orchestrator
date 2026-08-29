@@ -19,9 +19,9 @@ import type {
   BrowserAnnotationCancelPayload,
   BrowserAnnotationSubmitPayload,
 } from "../../shared/browser-annotations";
-import { MAX_BROWSER_TABS } from "../../shared/browser-tabs";
 import { OPEN_BROWSER_OVERLAY_SELECTOR } from "../lib/dom-selectors";
 import { refKey, type Ref } from "../lib/hosts";
+import { MAX_BROWSER_TABS } from "../lib/browser-tab-order";
 
 export type { BrowserNavState };
 
@@ -43,18 +43,18 @@ function isBlankTabUrl(url: string): boolean {
 }
 
 type UseBrowserViewOptions = {
-	session: Ref;
-	/**
-	 * Persistent-profile opt-in, resolved by the caller from project config
-	 * (see usePersistentBrowserProfile). Omitting it entirely keeps the default:
-	 * a throwaway memory-only profile, decided immediately.
-	 *
-	 * `pending` exists because a WebContentsView's partition is fixed at
-	 * construction and cannot be changed afterwards. Creating the view before the
-	 * project has answered would lock the session onto the wrong profile for its
-	 * whole life, so the view waits instead.
-	 */
-	persistentProfile?: { pending: true } | { pending: false; key: string };
+  session: Ref;
+  /**
+   * Persistent-profile opt-in, resolved by the caller from project config
+   * (see usePersistentBrowserProfile). Omitting it entirely keeps the default:
+   * a throwaway memory-only profile, decided immediately.
+   *
+   * `pending` exists because a WebContentsView's partition is fixed at
+   * construction and cannot be changed afterwards. Creating the view before the
+   * project has answered would lock the session onto the wrong profile for its
+   * whole life, so the view waits instead.
+   */
+  persistentProfile?: { pending: true } | { pending: false; key: string };
   active: boolean;
   poppedOut: boolean;
   /**
@@ -233,7 +233,7 @@ function hiddenByFullscreen(node: HTMLElement): boolean {
 }
 
 function useNativeBrowserView({
-	session,
+  session,
   active,
   poppedOut,
   terminated,
@@ -241,13 +241,15 @@ function useNativeBrowserView({
   previewRevision,
   persistentProfile,
 }: UseBrowserViewOptions): BrowserViewModel {
-	const sessionId = refKey(session);
+  const sessionId = refKey(session);
   // Which browser profile this session gets is a PROJECT decision. The daemon
   // stamps the same key onto every agent command, so an agent-first session is
   // already correct without the renderer; this covers the other order — a human
   // opening the panel before any agent command lands. Both sides read the same
   // project config, so they cannot disagree about the partition.
-  const profileKey = persistentProfile?.pending ? "" : (persistentProfile?.key ?? "");
+  const profileKey = persistentProfile?.pending
+    ? ""
+    : (persistentProfile?.key ?? "");
   const profileKeyResolved = persistentProfile?.pending !== true;
   const [viewId, setViewId] = useState("");
   const [navState, setNavState] = useState<BrowserNavState>(EMPTY_NAV_STATE);
@@ -396,29 +398,31 @@ function useNativeBrowserView({
     }, 280);
   }, [measureAndSend, scheduleMeasure]);
 
-	const slotRef = useCallback(
-		(node: HTMLDivElement | null) => {
-			observerRef.current?.disconnect();
-			slotNodeRef.current = node;
-			if (!node) {
-				sendHiddenBounds();
-				return;
-			}
-			const observer = new ResizeObserver(scheduleMeasure);
-			observer.observe(node);
-			// The inspector column keeps a stable width and slides on `x`; the
-			// layout gap's width is what actually changes every spring frame.
-			// Observing it re-measures through the whole animation so the native
-			// view tracks the sliding rail instead of lagging at the last size.
-			const column = node.closest("[data-panel]");
-			if (column) observer.observe(column);
-			const gap = node.closest(".session-split")?.querySelector("[data-slot='inspector-gap']");
-			if (gap) observer.observe(gap);
-			observerRef.current = observer;
-			scheduleMeasure();
-		},
-		[scheduleMeasure, sendHiddenBounds],
-	);
+  const slotRef = useCallback(
+    (node: HTMLDivElement | null) => {
+      observerRef.current?.disconnect();
+      slotNodeRef.current = node;
+      if (!node) {
+        sendHiddenBounds();
+        return;
+      }
+      const observer = new ResizeObserver(scheduleMeasure);
+      observer.observe(node);
+      // The inspector column keeps a stable width and slides on `x`; the
+      // layout gap's width is what actually changes every spring frame.
+      // Observing it re-measures through the whole animation so the native
+      // view tracks the sliding rail instead of lagging at the last size.
+      const column = node.closest("[data-panel]");
+      if (column) observer.observe(column);
+      const gap = node
+        .closest(".session-split")
+        ?.querySelector("[data-slot='inspector-gap']");
+      if (gap) observer.observe(gap);
+      observerRef.current = observer;
+      scheduleMeasure();
+    },
+    [scheduleMeasure, sendHiddenBounds],
+  );
 
   useEffect(() => {
     let disposed = false;
@@ -1030,10 +1034,10 @@ export function normalizeWebPreviewURL(raw: string): string {
 // URL bar reflects only what we navigated to. `enabled` is false in Electron so
 // this hook stays inert while the native one drives the real view.
 function useWebBrowserView(
-	{ session, previewUrl, previewRevision }: UseBrowserViewOptions,
+  { session, previewUrl, previewRevision }: UseBrowserViewOptions,
   enabled: boolean,
 ): BrowserViewModel {
-	const sessionId = refKey(session);
+  const sessionId = refKey(session);
   const [url, setUrl] = useState("");
   const [iframeKey, setIframeKey] = useState(0);
   const previewTriggerRef = useRef<{
