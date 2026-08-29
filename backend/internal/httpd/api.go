@@ -35,6 +35,7 @@ type APIDeps struct {
 	NotificationStream controllers.NotificationStream
 	Push               controllers.PushRegistry
 	Import             controllers.ImportService
+	Directories        controllers.DirectoryBrowserService
 	ShellTerminals     controllers.ShellTerminalService
 	// Conversations is nil until a Chat driver is wired; the controller then
 	// answers 501 rather than panicking, matching the other optional surfaces.
@@ -151,7 +152,7 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 		notifications: &controllers.NotificationsController{Svc: deps.Notifications, Stream: deps.NotificationStream},
 		push:          &controllers.PushController{Registry: deps.Push},
 		imports:       &controllers.ImportController{Svc: deps.Import},
-		fs:            &controllers.FSController{},
+		fs:            &controllers.FSController{Svc: deps.Directories},
 		shellTerms:    &controllers.ShellTerminalsController{Svc: deps.ShellTerminals},
 		conversations: &controllers.ConversationsController{Svc: deps.Conversations},
 		settings:      &controllers.SettingsController{Svc: deps.Settings},
