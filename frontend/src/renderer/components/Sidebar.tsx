@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { useCanGoBack, useNavigate, useParams, useRouter, useRouterState } from "@tanstack/react-router";
-import { LOCAL_HOST, type Ref } from "../lib/hosts";
+import { LOCAL_HOST, refKey, type Ref } from "../lib/hosts";
 import {
 	DndContext,
 	DragOverlay,
@@ -340,7 +340,7 @@ type SidebarProps = {
 	onCloneProject: (input: CloneProjectInput) => Promise<void>;
 	onCreateProject: (input: CreateProjectInput) => Promise<void>;
 	onInitializeProject: (path: string) => Promise<void>;
-	onRemoveProject: (projectId: string) => Promise<void>;
+	onRemoveProject: (project: Ref) => Promise<void>;
 };
 
 // Selection state comes from the URL: which project/session is active is the
@@ -977,7 +977,7 @@ type ProjectItemProps = {
 	consumeDragClick: (id: string) => boolean;
 	onSessionOrderChange: (projectId: string, order: string[]) => void;
 	onToggle: () => void;
-	onRemoveProject: (projectId: string) => Promise<void>;
+	onRemoveProject: (project: Ref) => Promise<void>;
 	suppressInitialExpandAnimation: boolean;
 };
 
@@ -1050,7 +1050,8 @@ const ProjectItemContent = memo(function ProjectItemContent({
 		const id = requestAnimationFrame(() => setAnimReady(true));
 		return () => cancelAnimationFrame(id);
 	}, []);
-	const isProjectRestarting = useUiStore((state) => state.restartingProjectIds.has(workspace.id));
+	const restartingProjectIds = useUiStore((state) => state.restartingProjectIds);
+	const isProjectRestarting = restartingProjectIds.has(refKey(workspace));
 	const requestNewTask = useUiStore((state) => state.requestNewTask);
 	const projectIsDragging = draggingProjectId === workspace.id;
 	// Keep completed PR sessions reachable while their runtime still exists.
@@ -1150,7 +1151,7 @@ const ProjectItemContent = memo(function ProjectItemContent({
 		}
 		setIsSpawning(true);
 		try {
-			const sessionId = await spawnOrchestrator(workspace.id, "sidebar");
+			const sessionId = await spawnOrchestrator(workspace, "sidebar");
 			await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
 			selection.goSession({ host: workspace.host, id: sessionId });
 		} catch (err) {
@@ -1199,7 +1200,7 @@ const ProjectItemContent = memo(function ProjectItemContent({
 		// after removal while the sidebar keeps progress/error feedback visible.
 		selection.goHome();
 		try {
-			await onRemoveProject(workspace.id);
+			await onRemoveProject(workspace);
 		} catch (err) {
 			const message = err instanceof Error ? err.message : t("shell.couldNotRemoveProject");
 			setRemoveError(message);
@@ -1692,7 +1693,7 @@ function SessionRow({
 		const name = draft.trim();
 		if (!name || name === session.title) return;
 		try {
-			await renameSession(session.id, name);
+			await renameSession(session, name);
 			await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
 		} catch (err) {
 			console.error("Failed to rename session:", err);

@@ -41,7 +41,7 @@ import {
 } from "../lib/agent-switch-presentation";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
-import { LOCAL_HOST, type Ref } from "../lib/hosts";
+import { LOCAL_HOST, refKey, type Ref } from "../lib/hosts";
 const isMac = isMacPlatform();
 const boardActionsInPanel = usesBoardActionsInPanel();
 const dragStyle = isMac ? ({ WebkitAppRegion: "drag" } as React.CSSProperties) : undefined;
@@ -141,7 +141,7 @@ export function ShellTopbar({
 	const projectLabel = project?.name ?? session?.workspaceName ?? (projectId ? "" : t("shell.board"));
 	const orchestrator = projectRef ? findProjectOrchestrator(all, projectRef) : undefined;
 	const orchestratorActivityLabel = orchestrator ? getAgentActivityView(orchestrator.activity, t).label : undefined;
-	const isProjectRestarting = projectId ? restartingProjectIds.has(projectId) : false;
+	const isProjectRestarting = projectRef ? restartingProjectIds.has(refKey(projectRef)) : false;
 	const orchestratorActionLabel = orchestrator ? t("shell.openOrchestrator") : t("shell.spawnOrchestrator");
 	const orchestratorTooltip = isProjectRestarting
 		? t("shell.restarting")
@@ -163,7 +163,7 @@ export function ShellTopbar({
 	};
 
 	const openOrchestrator = async () => {
-		if (!projectId) return;
+		if (!projectId || !projectRef) return;
 		setBoardSpawnError(null);
 		void addRendererExceptionStep("Orchestrator open requested", {
 			source: "orchestrator-open",
@@ -207,7 +207,7 @@ export function ShellTopbar({
 		}
 		setIsSpawning(true);
 		try {
-			const sessionId = await spawnOrchestrator(projectId, "topbar");
+			const sessionId = await spawnOrchestrator(projectRef, "topbar");
 			await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
 			void navigate({
 				to: "/host/$hostId/session/$sessionId",
@@ -328,7 +328,7 @@ export function ShellTopbar({
 					<>
 						{isOrchestrator ? (
 							<>
-								<ProjectTerminationFeedback projectId={projectId} />
+								<ProjectTerminationFeedback project={projectRef} />
 								{sessionAction ? (
 									<div className="inline-flex shrink-0 items-center" style={noDragStyle}>
 										{sessionAction}
@@ -474,7 +474,7 @@ export function TopbarKillButton({
 	const [confirmOpen, setConfirmOpen] = useState(false);
 	const queryClient = useQueryClient();
 	const kill = useTerminateSession();
-	const { error, isPending } = useTerminateSessionState(session.id);
+	const { error, isPending } = useTerminateSessionState(session);
 
 	const confirmKill = () => {
 		setConfirmOpen(false);
@@ -494,7 +494,7 @@ export function TopbarKillButton({
 						aria-label={isPending ? t("shell.killing") : t("shell.killSession")}
 						disabled={isPending}
 						onClick={() => {
-							clearTerminateSessionState(queryClient, session.id);
+							clearTerminateSessionState(queryClient, session);
 						}}
 						title={t("shell.killSession")}
 						variant="killIcon"
@@ -508,9 +508,9 @@ export function TopbarKillButton({
 	);
 }
 
-function ProjectTerminationFeedback({ projectId }: { projectId: string | undefined }) {
+function ProjectTerminationFeedback({ project }: { project: Ref | undefined }) {
 	const { t } = useTranslation();
-	const states = useProjectTerminateSessionStates(projectId);
+	const states = useProjectTerminateSessionStates(project);
 	if (states.length === 0) return null;
 
 	return (

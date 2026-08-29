@@ -467,7 +467,7 @@ describe("CommandPalette drill-in + Enter", () => {
 		await screen.findByPlaceholderText(/search actions/i);
 
 		fireEvent.click(screen.getByText("Resume agent"));
-		await waitFor(() => expect(restoreMock).toHaveBeenCalledWith("w-archived"));
+		await waitFor(() => expect(restoreMock).toHaveBeenCalledWith(expect.objectContaining({ host: "local", id: "w-archived" })));
 		await waitFor(() =>
 			expect(navigateMock).toHaveBeenCalledWith({
 				to: "/host/$hostId/session/$sessionId",
@@ -605,7 +605,7 @@ describe("CommandPalette actions", () => {
 		await screen.findByPlaceholderText(/search projects/i);
 		fireEvent.click(screen.getByText("Open orchestrator"));
 		expect(await screen.findByRole("alert")).toHaveTextContent("daemon down");
-		expect(spawnMock).toHaveBeenCalledWith("proj-2", "command_palette");
+		expect(spawnMock).toHaveBeenCalledWith(expect.objectContaining({ host: "local", id: "proj-2" }), "command_palette");
 		expect(useUiStore.getState().isCommandPaletteOpen).toBe(true);
 	});
 

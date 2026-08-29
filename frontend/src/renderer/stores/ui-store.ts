@@ -133,9 +133,9 @@ export type UiState = {
 	setBrowserUnseen: (sessionId: string, unseen: boolean) => void;
 	setFilesChangedOnly: (sessionId: string, changedOnly: boolean) => void;
 	setCommandPaletteOpen: (open: boolean) => void;
-	setProjectRestarting: (projectId: string, restarting: boolean) => void;
+	setProjectRestarting: (project: Ref, restarting: boolean) => void;
 	setOrchestratorReplacementError: (project: Ref, failure: OrchestratorReplacementFailure | null) => void;
-	setOrchestratorStartupError: (projectId: string, message: string | null) => void;
+	setOrchestratorStartupError: (project: Ref, message: string | null) => void;
 	requestNewTask: (project: Ref) => void;
 	requestCreateProject: () => void;
 	requestCreateProjectFromPath: (path: string) => void;
@@ -382,13 +382,14 @@ export const useUiStore = create<UiState>((set, get) => ({
 			};
 		}),
 	setCommandPaletteOpen: (isCommandPaletteOpen) => set({ isCommandPaletteOpen }),
-	setProjectRestarting: (projectId, restarting) =>
+	setProjectRestarting: (project, restarting) =>
 		set((state) => {
 			const restartingProjectIds = new Set(state.restartingProjectIds);
+			const projectKey = refKey(project);
 			if (restarting) {
-				restartingProjectIds.add(projectId);
+				restartingProjectIds.add(projectKey);
 			} else {
-				restartingProjectIds.delete(projectId);
+				restartingProjectIds.delete(projectKey);
 			}
 			return { restartingProjectIds };
 		}),
@@ -402,13 +403,14 @@ export const useUiStore = create<UiState>((set, get) => ({
 			}
 			return { orchestratorReplacementErrors };
 		}),
-	setOrchestratorStartupError: (projectId, message) =>
+	setOrchestratorStartupError: (project, message) =>
 		set((state) => {
 			const orchestratorStartupErrors = { ...state.orchestratorStartupErrors };
+			const projectKey = refKey(project);
 			if (message) {
-				orchestratorStartupErrors[projectId] = message;
+				orchestratorStartupErrors[projectKey] = message;
 			} else {
-				delete orchestratorStartupErrors[projectId];
+				delete orchestratorStartupErrors[projectKey];
 			}
 			return { orchestratorStartupErrors };
 		}),

@@ -590,7 +590,7 @@ describe("NotificationCenter", () => {
 		expect(restoreSessionMock).not.toHaveBeenCalled();
 
 		await userEvent.click(screen.getByRole("button", { name: "Restore session" }));
-		await waitFor(() => expect(restoreSessionMock).toHaveBeenCalledWith("sess-dead"));
+		await waitFor(() => expect(restoreSessionMock).toHaveBeenCalledWith({ host: "local", id: "sess-dead" }));
 		expect(navigateMock).toHaveBeenCalledWith({
 			to: "/host/$hostId/session/$sessionId",
 			params: { hostId: "local", sessionId: "sess-dead" },

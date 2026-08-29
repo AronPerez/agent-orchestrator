@@ -11,7 +11,7 @@ import { useTranslation } from "react-i18next";
 import { Loader2 } from "lucide-react";
 import { RequiredAgentField } from "./CreateProjectAgentSheet";
 import type { components } from "../../api/schema";
-import { apiClient, apiErrorCode, apiErrorMessage } from "../lib/api-client";
+import { apiErrorCode, apiErrorMessage } from "../lib/api-client";
 import { clientFor } from "../lib/host-clients";
 import { captureRendererEvent } from "../lib/telemetry";
 import { agentsQueryKeyFor, agentsQueryOptionsFor, refreshAgentsIfStale } from "../hooks/useAgentsQuery";
@@ -150,7 +150,7 @@ export function TaskComposer({
 		async (input: CreateTaskInput): Promise<string> => {
 			void captureRendererEvent("ao.renderer.task_create_requested", { project_id: input.project.id });
 			try {
-				const { data, error } = await apiClient.POST("/api/v1/orchestrators/delegate", {
+				const { data, error } = await clientFor(input.project.host).POST("/api/v1/orchestrators/delegate", {
 					body: {
 						projectId: input.project.id,
 						brief: input.brief,

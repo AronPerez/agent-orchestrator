@@ -4,7 +4,7 @@ import { subscribeApiBaseUrl } from "./api-client";
 import { setEventsConnectionState } from "./events-connection";
 import { connectedHosts, subscribeConnectedHosts } from "./host-clients";
 import { closeAllHostStreams, syncHostStreams } from "./host-events";
-import { LOCAL_HOST, type HostId } from "./hosts";
+import { LOCAL_HOST, refKey, type HostId, type Ref } from "./hosts";
 import { workspaceQueryKey } from "../hooks/useWorkspaceQuery";
 import { sessionScmSummaryQueryKey } from "../hooks/useSessionScmSummary";
 import { conversationQueryKey, conversationQueryRoot } from "../hooks/useConversation";
@@ -30,7 +30,7 @@ export function createEventTransport(queryClient: QueryClient): EventTransport {
 		connect() {
 			closeAllHostStreams();
 			let debounce: ReturnType<typeof setTimeout> | undefined;
-			const pendingConversationSessions = new Set<string>();
+			const pendingConversationSessions = new Map<string, Ref>();
 			const pendingInterfaceTransitionSessions = new Set<string>();
 			let workspaceInvalidationPending = false;
 			let allConversationsInvalidationPending = false;
@@ -72,7 +72,8 @@ export function createEventTransport(queryClient: QueryClient): EventTransport {
 							typeof payload?.conversationId === "string" &&
 							payload.conversationId
 						) {
-							pendingConversationSessions.add(decoded.sessionId);
+							const session = { host: host ?? LOCAL_HOST, id: decoded.sessionId };
+							pendingConversationSessions.set(refKey(session), session);
 							conversationOnly = true;
 						}
 					} catch {
@@ -103,8 +104,10 @@ export function createEventTransport(queryClient: QueryClient): EventTransport {
 						});
 					}
 					pendingWorkspaceHosts.clear();
-					for (const sessionId of pendingConversationSessions) {
-						void queryClient.invalidateQueries({ queryKey: conversationQueryKey(sessionId) });
+					for (const session of pendingConversationSessions.values()) {
+						void queryClient.invalidateQueries({
+							queryKey: conversationQueryKey(session),
+						});
 					}
 					pendingConversationSessions.clear();
 					for (const sessionId of pendingInterfaceTransitionSessions) {
