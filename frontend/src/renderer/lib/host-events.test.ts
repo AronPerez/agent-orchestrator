@@ -52,7 +52,7 @@ describe("host-events", () => {
 		syncHostStreams([LOCAL_HOST, REMOTE], vi.fn());
 		expect(FakeEventSource.instances.map((source) => source.url)).toEqual([
 			expect.stringContaining("/api/v1/events"),
-			"http://127.0.0.1:9999/tok/api/v1/events",
+			"http://127.0.0.1:9999/tok/api/v1/events?after=9223372036854775807",
 		]);
 	});
 

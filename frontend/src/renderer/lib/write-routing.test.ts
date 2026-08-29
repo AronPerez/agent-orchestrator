@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, renderHook } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createElement, type ReactNode } from "react";
@@ -58,6 +58,29 @@ describe("write routing", () => {
 		// Output cannot prove the safety property: only an empty local request log
 		// proves the same-named local session was never touched.
 		expect(local.requests).toEqual([]);
+	});
+
+	it("finishes a successful kill without waiting for the workspace refetch", async () => {
+		const remote = await recordingDaemon();
+		registerHostBase(REMOTE, `${remote.base}/proxy-token`);
+		const queryClient = new QueryClient();
+		let finishRefetch = () => {};
+		const refetch = new Promise<void>((resolve) => {
+			finishRefetch = resolve;
+		});
+		const invalidate = vi.spyOn(queryClient, "invalidateQueries").mockReturnValue(refetch);
+		const { result } = renderHook(() => useTerminateSession(), {
+			wrapper: ({ children }) => createElement(QueryClientProvider, { client: queryClient }, children),
+		});
+
+		act(() => result.current.mutate({ host: REMOTE, id: "same-id" }));
+
+		await waitFor(() => expect(result.current.isSuccess).toBe(true));
+		expect(invalidate).toHaveBeenCalledWith(
+			{ queryKey: ["workspaces"] },
+			{ cancelRefetch: false },
+		);
+		finishRefetch();
 	});
 
 	it("refuses a write to a host that is not connected", async () => {

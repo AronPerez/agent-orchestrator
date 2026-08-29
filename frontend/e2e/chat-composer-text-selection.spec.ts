@@ -95,7 +95,7 @@ test("typed chat composer text is visibly selected with a pointer drag @T0", asy
 		await route.fulfill({ json: { status: "ok" } });
 	});
 
-	await page.goto(`/#/projects/${projectId}/sessions/${sessionId}`);
+	await page.goto(`/#/host/local/session/${sessionId}`);
 	const composer = page.getByRole("combobox", { name: "Message the agent" });
 	await expect(composer).toBeVisible();
 	await composer.fill(draft);

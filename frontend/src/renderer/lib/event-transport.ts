@@ -96,9 +96,12 @@ export function createEventTransport(queryClient: QueryClient): EventTransport {
 						workspaceInvalidationPending = false;
 					}
 					for (const pendingHost of pendingWorkspaceHosts) {
-						void queryClient.invalidateQueries({
-							queryKey: [...workspaceQueryKey, pendingHost],
-						});
+						// CDC is a refetch hint; replacing an in-flight snapshot only piles up
+						// uncancelled remote requests. The next event/interval catches up.
+						void queryClient.invalidateQueries(
+							{ queryKey: [...workspaceQueryKey, pendingHost] },
+							{ cancelRefetch: false },
+						);
 					}
 					pendingWorkspaceHosts.clear();
 					for (const sessionKey of pendingConversationSessions) {
