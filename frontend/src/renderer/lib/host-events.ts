@@ -5,6 +5,7 @@ import { setEventsConnectionState, type EventsConnectionState } from "./events-c
 
 const SSE_RETRY_MS = 5_000;
 const EVENTSOURCE_CLOSED = 2;
+const LIVE_EVENTS_CURSOR = "9223372036854775807";
 
 const CDC_EVENT_TYPES = [
 	"session_created",
@@ -73,7 +74,10 @@ function connectHostStream(host: HostId, onEvent: HostEventHandler): void {
 	closeHostStream(host);
 
 	try {
-		const source = new EventSource(`${base.replace(/\/+$/, "")}/api/v1/events`);
+		// The board snapshots on open, so it needs only subsequent CDC events.
+		const source = new EventSource(
+			`${base.replace(/\/+$/, "")}/api/v1/events?after=${LIVE_EVENTS_CURSOR}`,
+		);
 		const stream: HostStream = { source, base, state: "disconnected", onEvent };
 		streams.set(host, stream);
 

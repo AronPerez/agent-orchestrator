@@ -68,11 +68,16 @@ export function useTerminateSession() {
 				throw new Error(apiErrorMessage(error, fallback));
 			}
 		},
-		onSuccess: async (_data, session) => {
+		onSuccess: (_data, session) => {
 			void captureRendererEvent("ao.renderer.session_kill_succeeded", {
 				...(session.workspaceId ? { project_id: session.workspaceId } : {}),
 			});
-			await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
+			// The server-side mutation is complete; a slow snapshot refresh must not
+			// keep the destructive action pending in the UI.
+			void queryClient.invalidateQueries(
+				{ queryKey: workspaceQueryKey },
+				{ cancelRefetch: false },
+			);
 		},
 		onError: (_error, session) => {
 			void captureRendererEvent("ao.renderer.session_kill_failed", {

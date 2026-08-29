@@ -45,6 +45,7 @@ import { getEventsConnectionState, setEventsConnectionState } from "./events-con
 import { forgetHost, registerHostBase } from "./host-clients";
 
 const REMOTE = "http://192.0.2.10:3011";
+const eventURL = (base: string) => `${base}/api/v1/events?after=9223372036854775807`;
 
 class EventSourceStub {
 	static instances: EventSourceStub[] = [];
@@ -102,7 +103,7 @@ describe("createEventTransport", () => {
 		createEventTransport(fakeQueryClient()).connect();
 
 		expect(EventSourceStub.instances).toHaveLength(1);
-		expect(EventSourceStub.instances[0].url).toBe("http://127.0.0.1:3001/api/v1/events");
+		expect(EventSourceStub.instances[0].url).toBe(eventURL("http://127.0.0.1:3001"));
 		// All CDC event types plus onmessage are wired up.
 		expect(EventSourceStub.instances[0].listeners).toContain("session_updated");
 		expect(EventSourceStub.instances[0].listeners).toContain("review_run_created");
@@ -115,7 +116,7 @@ describe("createEventTransport", () => {
 
 		createEventTransport(fakeQueryClient()).connect();
 
-		expect(EventSourceStub.instances[0].url).toBe("http://127.0.0.1:62220/proxy-token/api/v1/events");
+		expect(EventSourceStub.instances[0].url).toBe(eventURL("http://127.0.0.1:62220/proxy-token"));
 	});
 
 	it("does not reconnect when a daemon status keeps the same base URL", () => {
@@ -137,7 +138,7 @@ describe("createEventTransport", () => {
 
 		expect(first.closed).toBe(true);
 		expect(EventSourceStub.instances).toHaveLength(2);
-		expect(EventSourceStub.instances[1].url).toBe("http://127.0.0.1:3099/api/v1/events");
+		expect(EventSourceStub.instances[1].url).toBe(eventURL("http://127.0.0.1:3099"));
 	});
 
 	it("closes the source and skips reconnecting when the base URL is untrusted", () => {
@@ -203,6 +204,26 @@ describe("createEventTransport", () => {
 			expect(queryClient.invalidateQueries).not.toHaveBeenCalledWith({
 				queryKey: ["session-scm-summary"],
 			});
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("does not replace an in-flight host snapshot for another CDC event", () => {
+		vi.useFakeTimers();
+		try {
+			registerHostBase(REMOTE, "http://127.0.0.1:4556/proxy-token");
+			connectedHostsMock.mockReturnValue([REMOTE]);
+			const queryClient = fakeQueryClient();
+			createEventTransport(queryClient).connect();
+			EventSourceStub.instances[1].emit("session_updated", "{}");
+
+			vi.advanceTimersByTime(200);
+
+			expect(queryClient.invalidateQueries).toHaveBeenCalledWith(
+				{ queryKey: ["workspaces", REMOTE] },
+				{ cancelRefetch: false },
+			);
 		} finally {
 			vi.useRealTimers();
 		}
@@ -283,7 +304,7 @@ describe("createEventTransport", () => {
 			expect(EventSourceStub.instances).toHaveLength(1);
 			vi.advanceTimersByTime(5_000);
 			expect(EventSourceStub.instances).toHaveLength(2);
-			expect(EventSourceStub.instances[1].url).toBe("http://127.0.0.1:3001/api/v1/events");
+			expect(EventSourceStub.instances[1].url).toBe(eventURL("http://127.0.0.1:3001"));
 		} finally {
 			vi.useRealTimers();
 		}
@@ -300,7 +321,7 @@ describe("createEventTransport", () => {
 
 		expect(first.closed).toBe(true);
 		expect(EventSourceStub.instances).toHaveLength(2);
-		expect(EventSourceStub.instances[1].url).toBe("http://127.0.0.1:4555/api/v1/events");
+		expect(EventSourceStub.instances[1].url).toBe(eventURL("http://127.0.0.1:4555"));
 	});
 
 	it("opens an event stream when a remote host connects after mount", () => {
@@ -312,9 +333,7 @@ describe("createEventTransport", () => {
 		onHostsChanged();
 
 		expect(EventSourceStub.instances).toHaveLength(2);
-		expect(EventSourceStub.instances[1].url).toBe(
-			"http://127.0.0.1:4556/proxy-token/api/v1/events",
-		);
+		expect(EventSourceStub.instances[1].url).toBe(eventURL("http://127.0.0.1:4556/proxy-token"));
 	});
 
 	it("resets the connection state and unsubscribes on disconnect", () => {
