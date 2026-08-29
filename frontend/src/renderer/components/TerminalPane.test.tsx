@@ -689,7 +689,7 @@ describe("terminal link preview", () => {
 		const view = renderPane(worker);
 		try {
 			act(() => terminalLinkHandler?.("https://example.com/pull/42"));
-			expect(useUiStore.getState().inspectorSessions[worker.id]).toMatchObject({
+			expect(useUiStore.getState().inspectorSessions[refKey(worker)]).toMatchObject({
 				isOpen: true,
 				view: "browser",
 			});

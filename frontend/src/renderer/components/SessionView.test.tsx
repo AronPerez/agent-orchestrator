@@ -537,11 +537,11 @@ function workerSession(sessionId: string): WorkspaceSession {
 }
 
 function inspectorOpen(sessionId: string): boolean {
-	return useUiStore.getState().inspectorSessions[sessionId]?.isOpen ?? true;
+	return useUiStore.getState().inspectorSessions[refKey({ host: "local", id: sessionId })]?.isOpen ?? true;
 }
 
 function browserUnseen(sessionId: string): boolean {
-	return Boolean(useUiStore.getState().inspectorSessions[sessionId]?.browserUnseen);
+	return Boolean(useUiStore.getState().inspectorSessions[refKey({ host: "local", id: sessionId })]?.browserUnseen);
 }
 
 function inspectorButton(): HTMLElement {
@@ -711,18 +711,18 @@ describe("SessionView", () => {
 			},
 		];
 		const view = render(<SessionView sessionRef={{ host: "local", id: "sess-1" }} />);
-		expect(useUiStore.getState().visibleTerminalKindBySession["sess-1"]).toBe("worker");
+		expect(useUiStore.getState().visibleTerminalKindBySession[refKey({ host: "local", id: "sess-1" })]).toBe("worker");
 
 		fireEvent.click(screen.getByRole("button", { name: "select sess-1-shell" }));
-		expect(useUiStore.getState().visibleTerminalKindBySession["sess-1"]).toBe("shell");
+		expect(useUiStore.getState().visibleTerminalKindBySession[refKey({ host: "local", id: "sess-1" })]).toBe("shell");
 
 		fireEvent.click(screen.getByRole("button", { name: "select agent tab" }));
-		expect(useUiStore.getState().visibleTerminalKindBySession["sess-1"]).toBe("worker");
+		expect(useUiStore.getState().visibleTerminalKindBySession[refKey({ host: "local", id: "sess-1" })]).toBe("worker");
 
 		// Leaving the session drops the entry rather than leaving a stale "worker"
 		// behind for a pane that is no longer mounted.
 		view.unmount();
-		expect(useUiStore.getState().visibleTerminalKindBySession["sess-1"]).toBeUndefined();
+		expect(useUiStore.getState().visibleTerminalKindBySession[refKey({ host: "local", id: "sess-1" })]).toBeUndefined();
 	});
 
 	it("keeps a session-scoped shell reachable from a Chat session", () => {
@@ -1485,7 +1485,7 @@ describe("SessionView", () => {
 	});
 
 	it("mounts collapsed and inert when the store says closed", () => {
-		act(() => useUiStore.getState().setInspectorOpen("sess-1", false));
+		act(() => useUiStore.getState().setInspectorOpen(refKey({ host: "local", id: "sess-1" }), false));
 		render(<SessionView sessionRef={{ host: "local", id: "sess-1" }} />);
 
 		const pane = screen.getByTestId("panel-inspector");
@@ -1498,11 +1498,11 @@ describe("SessionView", () => {
 	});
 
 	it("keeps inspector chrome visible from the first render of the opening transition", () => {
-		act(() => useUiStore.getState().setInspectorOpen("sess-1", false));
+		act(() => useUiStore.getState().setInspectorOpen(refKey({ host: "local", id: "sess-1" }), false));
 		render(<SessionView sessionRef={{ host: "local", id: "sess-1" }} />);
 		const renderCountBeforeOpening = inspectorVisibilityRenders.length;
 
-		act(() => useUiStore.getState().setInspectorOpen("sess-1", true));
+		act(() => useUiStore.getState().setInspectorOpen(refKey({ host: "local", id: "sess-1" }), true));
 
 		const openingRenders = inspectorVisibilityRenders.slice(renderCountBeforeOpening);
 		expect(openingRenders.length).toBeGreaterThan(0);
@@ -1559,10 +1559,10 @@ describe("SessionView", () => {
 	it("keeps inspector labels expanded at the default width throughout the opening transition", () => {
 		vi.useFakeTimers();
 		try {
-			act(() => useUiStore.getState().setInspectorOpen("sess-1", false));
+			act(() => useUiStore.getState().setInspectorOpen(refKey({ host: "local", id: "sess-1" }), false));
 			render(<SessionView sessionRef={{ host: "local", id: "sess-1" }} />);
 
-			act(() => useUiStore.getState().setInspectorOpen("sess-1", true));
+			act(() => useUiStore.getState().setInspectorOpen(refKey({ host: "local", id: "sess-1" }), true));
 
 			const split = screen.getByTestId("panel-group");
 			expect(split).toHaveAttribute("data-terminal-live-resize", "true");
@@ -1589,10 +1589,10 @@ describe("SessionView", () => {
 				return this.dataset.testid === "panel-group" ? 640 : 640;
 			});
 		try {
-			act(() => useUiStore.getState().setInspectorOpen("sess-1", false));
+			act(() => useUiStore.getState().setInspectorOpen(refKey({ host: "local", id: "sess-1" }), false));
 			render(<SessionView sessionRef={{ host: "local", id: "sess-1" }} />);
 
-			act(() => useUiStore.getState().setInspectorOpen("sess-1", true));
+			act(() => useUiStore.getState().setInspectorOpen(refKey({ host: "local", id: "sess-1" }), true));
 
 			const split = screen.getByTestId("panel-group");
 			expect(split).toHaveAttribute("data-inspector-label-mode", "compact");
@@ -1604,7 +1604,7 @@ describe("SessionView", () => {
 	});
 
 	it("keeps StrictMode mount from expanding, then expands on the first user toggle", () => {
-		act(() => useUiStore.getState().setInspectorOpen("sess-1", false));
+		act(() => useUiStore.getState().setInspectorOpen(refKey({ host: "local", id: "sess-1" }), false));
 		render(
 			<StrictMode>
 				<SessionView sessionRef={{ host: "local", id: "sess-1" }} />
@@ -1620,7 +1620,7 @@ describe("SessionView", () => {
 	});
 
 	it("toggles the inspector with mod+shift+B", () => {
-		act(() => useUiStore.getState().setInspectorOpen("sess-1", true));
+		act(() => useUiStore.getState().setInspectorOpen(refKey({ host: "local", id: "sess-1" }), true));
 		render(<SessionView sessionRef={{ host: "local", id: "sess-1" }} />);
 
 		fireEvent.keyDown(window, { key: "B", ctrlKey: true, shiftKey: true });
@@ -1637,7 +1637,7 @@ describe("SessionView", () => {
 	});
 
 	it("keeps the inspector toggle and trailing notification pinned while the panel changes state", () => {
-		act(() => useUiStore.getState().setInspectorOpen("sess-1", true));
+		act(() => useUiStore.getState().setInspectorOpen(refKey({ host: "local", id: "sess-1" }), true));
 		render(<SessionView sessionRef={{ host: "local", id: "sess-1" }} />);
 		const actions = screen.getByTestId("session-pinned-actions");
 		const toggle = within(actions).getByRole("button", { name: "Close inspector panel" });
@@ -1660,7 +1660,9 @@ describe("SessionView", () => {
 			isSidebarOpen: true,
 			isSidebarAutoCollapsed: true,
 			sidebarAutoCollapseOverride: false,
-			inspectorSessions: { "sess-1": { initialized: true, isOpen: true, view: "browser" } },
+			inspectorSessions: {
+				[refKey({ host: "local", id: "sess-1" })]: { initialized: true, isOpen: true, view: "browser" },
+			},
 		});
 
 		render(<SessionView sessionRef={{ host: "local", id: "sess-1" }} />);
@@ -1675,7 +1677,7 @@ describe("SessionView", () => {
 
 	it("restores and clamps the persisted inspector width in pixels", () => {
 		window.localStorage.setItem("ao.inspector.widthPx", "240");
-		act(() => useUiStore.getState().setInspectorOpen("sess-1", true));
+		act(() => useUiStore.getState().setInspectorOpen(refKey({ host: "local", id: "sess-1" }), true));
 		render(<SessionView sessionRef={{ host: "local", id: "sess-1" }} />);
 		expect(document.documentElement.style.getPropertyValue("--ao-inspector-w")).toBe("340px");
 	});
@@ -1685,7 +1687,7 @@ describe("SessionView", () => {
 		expect(screen.getByTestId("panel-group")).toHaveAttribute("data-workspace-mode", "utility");
 		expect(document.documentElement.style.getPropertyValue("--ao-inspector-w")).toBe("500px");
 
-		act(() => useUiStore.getState().setInspectorView("sess-1", "browser"));
+		act(() => useUiStore.getState().setInspectorView(refKey({ host: "local", id: "sess-1" }), "browser"));
 		await waitFor(() => {
 			expect(screen.getByTestId("panel-group")).toHaveAttribute("data-workspace-mode", "browser");
 			expect(document.documentElement.style.getPropertyValue("--ao-inspector-w")).toBe("900px");
@@ -1694,7 +1696,7 @@ describe("SessionView", () => {
 			).toBe("min(68%, max(300px, calc(100% - 440px)))");
 		});
 
-		act(() => useUiStore.getState().setInspectorView("sess-1", "files"));
+		act(() => useUiStore.getState().setInspectorView(refKey({ host: "local", id: "sess-1" }), "files"));
 		await waitFor(() => {
 			expect(screen.getByTestId("panel-group")).toHaveAttribute("data-workspace-mode", "files");
 			expect(document.documentElement.style.getPropertyValue("--ao-inspector-w")).toBe("500px");
@@ -1764,7 +1766,7 @@ describe("SessionView", () => {
 		const { rerender } = render(<SessionView sessionRef={{ host: "local", id: "sess-orch" }} />);
 		expect(screen.queryByTestId("panel-inspector")).not.toBeInTheDocument();
 
-		act(() => useUiStore.getState().setInspectorOpen("sess-1", true));
+		act(() => useUiStore.getState().setInspectorOpen(refKey({ host: "local", id: "sess-1" }), true));
 		rerender(<SessionView sessionRef={{ host: "local", id: "sess-1" }} />);
 
 		expect(screen.getByTestId("panel-inspector")).toHaveAttribute("data-state", "expanded");
@@ -1772,14 +1774,14 @@ describe("SessionView", () => {
 	});
 
 	it("expands on the first toggle after a closed worker inspector remounts", () => {
-		act(() => useUiStore.getState().setInspectorOpen("sess-1", false));
+		act(() => useUiStore.getState().setInspectorOpen(refKey({ host: "local", id: "sess-1" }), false));
 		const { rerender } = render(<SessionView sessionRef={{ host: "local", id: "sess-1" }} />);
 
-		act(() => useUiStore.getState().setInspectorOpen("sess-2", false));
+		act(() => useUiStore.getState().setInspectorOpen(refKey({ host: "local", id: "sess-2" }), false));
 		rerender(<SessionView sessionRef={{ host: "local", id: "sess-orch" }} />);
 		expect(screen.queryByTestId("panel-inspector")).not.toBeInTheDocument();
 
-		act(() => useUiStore.getState().setInspectorOpen("sess-2", false));
+		act(() => useUiStore.getState().setInspectorOpen(refKey({ host: "local", id: "sess-2" }), false));
 		rerender(<SessionView sessionRef={{ host: "local", id: "sess-2" }} />);
 		expect(screen.getByTestId("panel-inspector")).toHaveAttribute("data-state", "collapsed");
 
@@ -1798,7 +1800,7 @@ describe("SessionView", () => {
 
 		// The shortcut is inactive without an inspector.
 		fireEvent.keyDown(window, { key: "B", metaKey: true, shiftKey: true });
-		expect(useUiStore.getState().inspectorSessions["sess-orch"]).toBeUndefined();
+		expect(useUiStore.getState().inspectorSessions[refKey({ host: "local", id: "sess-orch" })]).toBeUndefined();
 	});
 
 	it("smoothly morphs the browser over the whole app window and back to its dock", async () => {
@@ -1814,7 +1816,7 @@ describe("SessionView", () => {
 			toJSON: () => ({}),
 		} as DOMRect;
 		const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(dockRect);
-		act(() => useUiStore.getState().setInspectorOpen("sess-1", true));
+		act(() => useUiStore.getState().setInspectorOpen(refKey({ host: "local", id: "sess-1" }), true));
 		try {
 			render(<SessionView sessionRef={{ host: "local", id: "sess-1" }} />);
 
@@ -1851,7 +1853,7 @@ describe("SessionView", () => {
 
 	it("does not reserve the traffic-light band during native macOS fullscreen", () => {
 		nativeFullScreenMock.mockReturnValue(true);
-		act(() => useUiStore.getState().setInspectorOpen("sess-1", true));
+		act(() => useUiStore.getState().setInspectorOpen(refKey({ host: "local", id: "sess-1" }), true));
 		render(<SessionView sessionRef={{ host: "local", id: "sess-1" }} />);
 
 		fireEvent.click(screen.getByRole("button", { name: "pop browser" }));
@@ -1860,7 +1862,7 @@ describe("SessionView", () => {
 	});
 
 	it("does not carry popped-out browser visibility into the next session", () => {
-		act(() => useUiStore.getState().setInspectorView("sess-1", "browser"));
+		act(() => useUiStore.getState().setInspectorView(refKey({ host: "local", id: "sess-1" }), "browser"));
 		const { rerender } = render(<SessionView sessionRef={{ host: "local", id: "sess-1" }} />);
 
 		fireEvent.click(screen.getByRole("button", { name: "pop browser" }));
@@ -1872,7 +1874,7 @@ describe("SessionView", () => {
 	});
 
 	it("opens the files view in the inspector rail first", () => {
-		act(() => useUiStore.getState().setInspectorOpen("sess-1", true));
+		act(() => useUiStore.getState().setInspectorOpen(refKey({ host: "local", id: "sess-1" }), true));
 		render(<SessionView sessionRef={{ host: "local", id: "sess-1" }} />);
 
 		fireEvent.click(screen.getByRole("button", { name: "open files" }));
@@ -1885,7 +1887,7 @@ describe("SessionView", () => {
 	});
 
 	it("opens docked files as center tabs while preserving the agent surface", () => {
-		act(() => useUiStore.getState().setInspectorOpen("sess-1", true));
+		act(() => useUiStore.getState().setInspectorOpen(refKey({ host: "local", id: "sess-1" }), true));
 		render(<SessionView sessionRef={{ host: "local", id: "sess-1" }} />);
 
 		fireEvent.click(screen.getByRole("button", { name: "open files" }));
@@ -1901,7 +1903,7 @@ describe("SessionView", () => {
 	});
 
 	it("opens a review file target in a center tab and keeps the Files inspector visible", async () => {
-		act(() => useUiStore.getState().setInspectorOpen("sess-1", true));
+		act(() => useUiStore.getState().setInspectorOpen(refKey({ host: "local", id: "sess-1" }), true));
 		render(<SessionView sessionRef={{ host: "local", id: "sess-1" }} />);
 
 		fireEvent.click(screen.getByRole("button", { name: "view review file" }));
@@ -1910,7 +1912,7 @@ describe("SessionView", () => {
 			expect(screen.getByRole("tab", { name: "panel.tsx" })).toHaveAttribute("aria-selected", "true");
 			expect(screen.getByTestId("session-file-workspace")).toHaveTextContent("src/panel.tsx");
 		});
-		expect(useUiStore.getState().inspectorSessions["sess-1"]?.view).toBe("files");
+		expect(useUiStore.getState().inspectorSessions[refKey({ host: "local", id: "sess-1" })]?.view).toBe("files");
 		expect(screen.queryByRole("button", { name: "files center" })).not.toBeInTheDocument();
 	});
 
@@ -1941,7 +1943,7 @@ describe("SessionView", () => {
 			return { data: { reviewerHandleId: "", reviews: [], runs: [] }, error: undefined };
 		});
 
-		act(() => useUiStore.getState().setInspectorOpen("sess-1", true));
+		act(() => useUiStore.getState().setInspectorOpen(refKey({ host: "local", id: "sess-1" }), true));
 		render(<SessionView sessionRef={{ host: "local", id: "sess-1" }} />);
 
 		fireEvent.click(screen.getByRole("button", { name: "view review basename" }));
@@ -1979,7 +1981,7 @@ describe("SessionView", () => {
 			return { data: { reviewerHandleId: "", reviews: [], runs: [] }, error: undefined };
 		});
 
-		act(() => useUiStore.getState().setInspectorOpen("sess-1", true));
+		act(() => useUiStore.getState().setInspectorOpen(refKey({ host: "local", id: "sess-1" }), true));
 		render(<SessionView sessionRef={{ host: "local", id: "sess-1" }} />);
 
 		fireEvent.click(screen.getByRole("button", { name: "open chat basename" }));
@@ -1990,7 +1992,7 @@ describe("SessionView", () => {
 	});
 
 	it("maximizes files over the whole app window and returns to the rail", () => {
-		act(() => useUiStore.getState().setInspectorOpen("sess-1", true));
+		act(() => useUiStore.getState().setInspectorOpen(refKey({ host: "local", id: "sess-1" }), true));
 		render(<SessionView sessionRef={{ host: "local", id: "sess-1" }} />);
 
 		fireEvent.click(screen.getByRole("button", { name: "open files" }));
@@ -2012,7 +2014,7 @@ describe("SessionView", () => {
 
 	it("does not reserve the traffic-light band for maximized files during native macOS fullscreen", () => {
 		nativeFullScreenMock.mockReturnValue(true);
-		act(() => useUiStore.getState().setInspectorOpen("sess-1", true));
+		act(() => useUiStore.getState().setInspectorOpen(refKey({ host: "local", id: "sess-1" }), true));
 		render(<SessionView sessionRef={{ host: "local", id: "sess-1" }} />);
 
 		fireEvent.click(screen.getByRole("button", { name: "open files" }));
@@ -2039,7 +2041,7 @@ describe("SessionView", () => {
 
 	it("badges Browser as unseen without opening a collapsed inspector when a new live preview arrives", () => {
 		const worker = workerSession("sess-1");
-		act(() => useUiStore.getState().setInspectorOpen("sess-1", false));
+		act(() => useUiStore.getState().setInspectorOpen(refKey({ host: "local", id: "sess-1" }), false));
 		const { rerender } = render(<SessionView sessionRef={{ host: "local", id: "sess-1" }} />);
 
 		worker.previewUrl = "http://localhost:5173/";
@@ -2137,7 +2139,7 @@ describe("SessionView", () => {
 		rerender(<SessionView sessionRef={{ host: "local", id: "sess-1" }} />);
 		expect(inspectorButton()).toHaveAttribute("data-view", "summary");
 
-		act(() => useUiStore.getState().setInspectorView("sess-1", "browser"));
+		act(() => useUiStore.getState().setInspectorView(refKey({ host: "local", id: "sess-1" }), "browser"));
 
 		browserViewState.agentBrowserActive = true;
 		rerender(<SessionView sessionRef={{ host: "local", id: "sess-1" }} />);
@@ -2145,7 +2147,7 @@ describe("SessionView", () => {
 
 		// Switching away during an already-running command must still mark the
 		// Browser as unseen; it should not wait for another command transition.
-		act(() => useUiStore.getState().setInspectorView("sess-1", "summary"));
+		act(() => useUiStore.getState().setInspectorView(refKey({ host: "local", id: "sess-1" }), "summary"));
 
 		expect(inspectorButton()).toHaveAttribute("data-view", "summary");
 		expect(browserUnseen("sess-1")).toBe(true);
@@ -2159,7 +2161,7 @@ describe("SessionView", () => {
 
 		fireEvent.click(screen.getByRole("button", { name: "pop browser" }));
 		expect(screen.getByRole("button", { name: "browser center" })).toBeInTheDocument();
-		act(() => useUiStore.getState().setInspectorOpen("sess-1", false));
+		act(() => useUiStore.getState().setInspectorOpen(refKey({ host: "local", id: "sess-1" }), false));
 
 		worker.previewRevision = 2;
 		browserViewState.agentBrowserActive = true;
@@ -2175,7 +2177,7 @@ describe("SessionView", () => {
 		act(() => {
 			useUiStore.setState({
 				inspectorSessions: {
-					"sess-2": {
+					[refKey({ host: "local", id: "sess-2" })]: {
 						isOpen: true,
 						view: "summary",
 						browserContentRevealed: true,
@@ -2204,8 +2206,8 @@ describe("SessionView", () => {
 		expect(browserUnseen("sess-1")).toBe(true);
 
 		act(() => {
-			useUiStore.getState().setInspectorView("sess-1", "summary");
-			useUiStore.getState().setInspectorOpen("sess-1", false);
+			useUiStore.getState().setInspectorView(refKey({ host: "local", id: "sess-1" }), "summary");
+			useUiStore.getState().setInspectorOpen(refKey({ host: "local", id: "sess-1" }), false);
 		});
 
 		worker.previewUrl = undefined;
@@ -2238,7 +2240,7 @@ describe("SessionView", () => {
 		render(<SessionView sessionRef={{ host: "local", id: "sess-1" }} />);
 
 		expect(inspectorButton()).toHaveAttribute("data-view", "summary");
-		expect(useUiStore.getState().inspectorSessions["sess-1"]?.browserContentRevealed).toBeFalsy();
+		expect(useUiStore.getState().inspectorSessions[refKey({ host: "local", id: "sess-1" })]?.browserContentRevealed).toBeFalsy();
 	});
 
 	// Regression: agent-browser commands (fill, click, snapshot, …) are real

@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { refKey } from "../lib/hosts";
 import { aoBridge } from "../lib/bridge";
 import type { NotificationDTO, NotificationListStatus } from "../lib/notifications";
 import { useUiStore } from "../stores/ui-store";
@@ -219,22 +220,22 @@ describe("NotificationRuntime", () => {
 	}
 
 	it("reports the session while its agent terminal is the one on screen", () => {
-		paramsMock.mockReturnValue({ sessionId: "sess-1" });
-		useUiStore.setState({ visibleTerminalKindBySession: { "sess-1": "worker" } });
+		paramsMock.mockReturnValue({ hostId: "local", sessionId: "sess-1" });
+		useUiStore.setState({ visibleTerminalKindBySession: { [refKey({ host: "local", id: "sess-1" })]: "worker" } });
 
 		expect(renderRuntime()()).toBe("sess-1");
 	});
 
 	it.each(["shell", "reviewer"] as const)("reports nothing while a %s terminal covers the agent", (kind) => {
-		paramsMock.mockReturnValue({ sessionId: "sess-1" });
-		useUiStore.setState({ visibleTerminalKindBySession: { "sess-1": kind } });
+		paramsMock.mockReturnValue({ hostId: "local", sessionId: "sess-1" });
+		useUiStore.setState({ visibleTerminalKindBySession: { [refKey({ host: "local", id: "sess-1" })]: kind } });
 
 		expect(renderRuntime()()).toBeUndefined();
 	});
 
 	it("reports nothing off a session route", () => {
 		paramsMock.mockReturnValue({});
-		useUiStore.setState({ visibleTerminalKindBySession: { "sess-1": "worker" } });
+		useUiStore.setState({ visibleTerminalKindBySession: { [refKey({ host: "local", id: "sess-1" })]: "worker" } });
 
 		expect(renderRuntime()()).toBeUndefined();
 	});
@@ -242,14 +243,14 @@ describe("NotificationRuntime", () => {
 	// The transport connects once and outlives navigation, so the getter has to
 	// read live state rather than close over the value it was created with.
 	it("tracks tab switches without reconnecting the stream", () => {
-		paramsMock.mockReturnValue({ sessionId: "sess-1" });
-		useUiStore.setState({ visibleTerminalKindBySession: { "sess-1": "worker" } });
+		paramsMock.mockReturnValue({ hostId: "local", sessionId: "sess-1" });
+		useUiStore.setState({ visibleTerminalKindBySession: { [refKey({ host: "local", id: "sess-1" })]: "worker" } });
 		const getVisibleAgentSessionId = renderRuntime();
 
-		useUiStore.setState({ visibleTerminalKindBySession: { "sess-1": "shell" } });
+		useUiStore.setState({ visibleTerminalKindBySession: { [refKey({ host: "local", id: "sess-1" })]: "shell" } });
 		expect(getVisibleAgentSessionId()).toBeUndefined();
 
-		useUiStore.setState({ visibleTerminalKindBySession: { "sess-1": "worker" } });
+		useUiStore.setState({ visibleTerminalKindBySession: { [refKey({ host: "local", id: "sess-1" })]: "worker" } });
 		expect(getVisibleAgentSessionId()).toBe("sess-1");
 		expect(connectMock).toHaveBeenCalledTimes(1);
 	});
