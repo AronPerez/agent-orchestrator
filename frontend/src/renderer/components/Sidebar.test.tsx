@@ -164,7 +164,23 @@ vi.mock("../lib/api-client", () => ({
 	},
 }));
 
+// clientFor(LOCAL_HOST) is the client apiClient already was, so the local
+// host resolves to the same fake the api-client mock installs.
+vi.mock("../lib/host-clients", () => ({
+	baseUrlFor: () => "http://127.0.0.1:3001",
+	connectedHosts: (() => {
+		// useSyncExternalStore requires a stable snapshot: a fresh [] each call
+		// re-renders forever.
+		const hosts: string[] = [];
+		return () => hosts;
+	})(),
+	subscribeConnectedHosts: () => () => undefined,
+	isHostReady: () => true,
+	clientFor: () => ({ GET: getMock }),
+}));
+
 const workspace: WorkspaceSummary = {
+	host: "local",
 	id: "proj-1",
 	name: "Project One",
 	path: "/repo/project-one",
@@ -173,6 +189,7 @@ const workspace: WorkspaceSummary = {
 };
 
 const session: WorkspaceSession = {
+	host: "local",
 	id: "proj-1-1",
 	workspaceId: "proj-1",
 	workspaceName: "Project One",
@@ -486,7 +503,7 @@ describe("Sidebar", () => {
 
 		await user.click(screen.getByRole("button", { name: "Spawn Project One orchestrator" }));
 
-		expect(useUiStore.getState().settingsModal).toEqual({ scope: "project", projectId: "proj-1" });
+		expect(useUiStore.getState().settingsModal).toEqual({ scope: "project", project: { host: "local", id: "proj-1" } });
 		expect(navigateMock).not.toHaveBeenCalled();
 		expect(spawnMock).not.toHaveBeenCalled();
 	});
@@ -572,7 +589,7 @@ describe("Sidebar", () => {
 		await user.click(await screen.findByRole("menuitem", { name: /New session/ }));
 
 		const request = useUiStore.getState().newTaskRequest;
-		expect(request?.projectId).toBe("proj-1");
+		expect(request?.project.id).toBe("proj-1");
 		expect(request?.nonce ?? 0).toBeGreaterThan(before);
 	});
 
@@ -695,6 +712,7 @@ describe("Sidebar", () => {
 	it("toggles project sessions from the folder icon without selecting the project first", async () => {
 		const user = userEvent.setup();
 		const other: WorkspaceSummary = {
+			host: "local",
 			id: "proj-2",
 			name: "Project Two",
 			path: "/repo/project-two",
@@ -776,7 +794,7 @@ describe("Sidebar", () => {
 		// Click the project name text — it's inside SidebarMenuButton and bubbles up to onProjectClick.
 		await user.click(screen.getByText("Project One"));
 
-		expect(navigateMock).toHaveBeenCalledWith({ to: "/projects/$projectId", params: { projectId: "proj-1" } });
+		expect(navigateMock).toHaveBeenCalledWith({ to: "/host/$hostId/project/$projectId", params: { hostId: "local", projectId: "proj-1" } });
 	});
 
 	it("returns to the project board from an orchestrator session without collapsing", async () => {
@@ -797,7 +815,7 @@ describe("Sidebar", () => {
 
 		await user.click(screen.getByText("Project One"));
 
-		expect(navigateMock).toHaveBeenCalledWith({ to: "/projects/$projectId", params: { projectId: "proj-1" } });
+		expect(navigateMock).toHaveBeenCalledWith({ to: "/host/$hostId/project/$projectId", params: { hostId: "local", projectId: "proj-1" } });
 		expect(screen.getByLabelText("Open fix login")).toBeInTheDocument();
 		expect(screen.getByText("Project One").closest("button")).toHaveAttribute("aria-expanded", "true");
 	});
@@ -838,8 +856,8 @@ describe("Sidebar", () => {
 		await user.click(screen.getByRole("button", { name: "Open Project One orchestrator" }));
 
 		expect(navigateMock).toHaveBeenCalledWith({
-			to: "/projects/$projectId/sessions/$sessionId",
-			params: { projectId: "proj-1", sessionId: "proj-1-orc" },
+			to: "/host/$hostId/session/$sessionId",
+			params: { hostId: "local", sessionId: "proj-1-orc" },
 		});
 		expect(screen.getByLabelText("Open fix login")).toBeInTheDocument();
 		expect(screen.getByText("Project One").closest("button")).toHaveAttribute("aria-expanded", "true");

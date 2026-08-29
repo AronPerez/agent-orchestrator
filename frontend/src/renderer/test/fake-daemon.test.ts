@@ -19,18 +19,30 @@ describe("fakeDaemon", () => {
 	});
 
 	it("wrong-shape returns valid JSON that is not the expected schema", async () => {
-		const response = await fakeDaemon("wrong-shape")("http://x/api/v1/projects");
+		const response = await fakeDaemon("wrong-shape")(
+			"http://x/api/v1/projects",
+		);
 		expect(response.status).toBe(200);
 		expect(await response.json()).not.toHaveProperty("projects");
 	});
 
 	it("unauthorized returns the daemon's real 401 envelope", async () => {
-		const response = await fakeDaemon("unauthorized")("http://x/api/v1/projects");
+		const response = await fakeDaemon("unauthorized")(
+			"http://x/api/v1/projects",
+		);
 		expect(response.status).toBe(401);
 		expect((await response.json()).code).toBe("BAD_PASSWORD");
 	});
 
 	it("unreachable rejects the way the network does", async () => {
-		await expect(fakeDaemon("unreachable")("http://x/healthz")).rejects.toThrow(/fetch failed/);
+		await expect(
+			fakeDaemon("unreachable")("http://x/healthz"),
+		).rejects.toThrow(/fetch failed/);
+	});
+
+	it("route-missing 404s unknown routes but serves known ones", async () => {
+		const fetch = fakeDaemon("route-missing");
+		expect((await fetch("http://x/api/v1/fs/dirs")).status).toBe(404);
+		expect((await fetch("http://x/api/v1/projects")).status).toBe(200);
 	});
 });

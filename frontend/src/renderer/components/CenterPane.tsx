@@ -189,7 +189,7 @@ export function CenterPane({
 		showRightFade,
 	} = useTabScrollEdges([tabOverflowWatch]);
 	const previousShellCountRef = useRef(shellTerminals.length);
-	const agentSwitchesQuery = useAgentSwitches(session?.id ?? "");
+	const agentSwitchesQuery = useAgentSwitches(session);
 	const agentSwitches = agentSwitchesQuery.data ?? [];
 	const switchMutation = useSwitchAgentState(session?.id ?? "");
 	const mountedSessionIdRef = useRef(session?.id);

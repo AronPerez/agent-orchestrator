@@ -19,6 +19,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMarkAllNotificationsReadMutation, useNotificationsQuery } from "../hooks/useNotificationsQuery";
 import { useRestoreSession } from "../hooks/useRestoreSession";
 import { useWorkspaceQuery } from "../hooks/useWorkspaceQuery";
+import { flattenHostSections } from "../types/workspace";
 import { aoBridge } from "../lib/bridge";
 import { openLinkInSystemBrowser } from "../lib/external-link-policy";
 import { formatTimeCompact } from "../lib/format-time";
@@ -40,6 +41,7 @@ import { TopbarButton } from "./TopbarButton";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
+import { LOCAL_HOST } from "../lib/hosts";
 type NotificationCenterProps = {
 	style?: React.CSSProperties;
 };
@@ -51,7 +53,7 @@ function useNotificationTargetNavigation() {
 			const sessionId = notification.target.sessionId || notification.sessionId;
 			if (!sessionId) return;
 			void captureRendererEvent("ao.renderer.notification_opened", { target: "session" });
-			navigateToSession(notification.projectId, sessionId);
+			navigateToSession({ host: LOCAL_HOST, id: sessionId });
 		},
 		[navigateToSession],
 	);
@@ -77,7 +79,8 @@ function useSessionTerminationLookup(): {
 	terminatedIds: Set<string>;
 	workspaceError: boolean;
 } {
-	const { data: workspaces, isError, isSuccess, refetch } = useWorkspaceQuery();
+	const { data: sections, isError, isSuccess, refetch } = useWorkspaceQuery();
+	const workspaces = flattenHostSections(sections);
 	const terminatedIds = useMemo(() => {
 		const ids = new Set<string>();
 		for (const workspace of workspaces ?? []) {
@@ -165,7 +168,8 @@ export function NotificationCenter({ style }: NotificationCenterProps) {
 	const markAllRead = useMarkAllNotificationsReadMutation();
 	const restoreSession = useRestoreSession();
 	const { retryWorkspace, sessionsReady, terminatedIds, workspaceError } = useSessionTerminationLookup();
-	const { data: workspaces } = useWorkspaceQuery();
+	const { data: sections } = useWorkspaceQuery();
+	const workspaces = flattenHostSections(sections);
 	// Resolve the human project + session names for each notification so the row
 	// can show where it came from (the DTO only carries opaque ids).
 	const sessionMeta = useMemo(() => {
