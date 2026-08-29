@@ -2122,6 +2122,37 @@ describe("ChatWorkspace reviewer tabs", () => {
 		act(() => [...previousTabListeners][0]?.());
 		expect(onSelectChat).toHaveBeenCalledOnce();
 	});
+
+	it("keeps reviewer and shell tabs in the auxiliary scroll strip", () => {
+		const shells = [
+			{
+				handleId: "shell-1",
+				host: "local",
+				sessionId: chatFixture.sessionId,
+				title: "chat worktree shell",
+				workingDir: "/p",
+				createdAt: "2026-08-04T00:00:00Z",
+			},
+		];
+		render(
+			<ChatWorkspace
+				snapshot={idleSnapshot()}
+				session={chatSession}
+				reviewerTerminal={reviewerTerminal}
+				shellTerminals={shells}
+			/>,
+		);
+
+		const tabList = screen.getByRole("tablist", { name: "Chat tabs" });
+		const scrollRegion = tabList.querySelector(".overflow-x-auto");
+		const chatTab = screen.getByRole("tab", { name: /^Codex/ });
+		const reviewerTab = screen.getByRole("tab", { name: "Reviewer" });
+		const shellTab = screen.getByRole("tab", { name: "chat worktree shell" });
+
+		expect(scrollRegion?.contains(chatTab)).toBe(false);
+		expect(scrollRegion?.contains(reviewerTab)).toBe(true);
+		expect(scrollRegion?.contains(shellTab)).toBe(true);
+	});
 });
 
 describe("promptSpacerHeight", () => {
