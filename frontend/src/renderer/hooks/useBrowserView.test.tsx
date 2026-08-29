@@ -228,17 +228,29 @@ describe("useBrowserView", () => {
       }),
     );
 
-    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("local:sess-1", "proj", "local"));
+    await waitFor(() =>
+      expect(bridge.ensure).toHaveBeenCalledWith(
+        "local:sess-1",
+        "proj",
+        "local",
+      ),
+    );
   });
 
   it("ensures a scoped browser view and reports the measured slot bounds", async () => {
     const bridge = setupBridge();
     const slot = createSlot();
     const { result } = renderHook(() =>
-      useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }),
+      useBrowserView({
+        session: { host: "local", id: "sess-1" },
+        active: true,
+        poppedOut: false,
+      }),
     );
 
-    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("local:sess-1"));
+    await waitFor(() =>
+      expect(bridge.ensure).toHaveBeenCalledWith("local:sess-1"),
+    );
     // Simulate the real IPC flow: after ensure, a navigate call sends a nav
     // state with a URL so the positioning effect considers the view visible.
     act(() =>
@@ -267,7 +279,11 @@ describe("useBrowserView", () => {
     const bridge = setupBridge();
     const slot = createSlot();
     const { result } = renderHook(() =>
-      useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }),
+      useBrowserView({
+        session: { host: "local", id: "sess-1" },
+        active: true,
+        poppedOut: false,
+      }),
     );
 
     await waitFor(() => expect(result.current.viewId).toBe("42:local:sess-1"));
@@ -285,7 +301,11 @@ describe("useBrowserView", () => {
   it("tracks popup tabs and routes manual select and close actions", async () => {
     const bridge = setupBridge();
     const { result } = renderHook(() =>
-      useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }),
+      useBrowserView({
+        session: { host: "local", id: "sess-1" },
+        active: true,
+        poppedOut: false,
+      }),
     );
 
     await waitFor(() =>
@@ -330,26 +350,54 @@ describe("useBrowserView", () => {
 
   it("remembers a closed tab so it can be reopened, and forgets it once reopened", async () => {
     const bridge = setupBridge();
-    const { result } = renderHook(() => useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }));
+    const { result } = renderHook(() =>
+      useBrowserView({
+        session: { host: "local", id: "sess-1" },
+        active: true,
+        poppedOut: false,
+      }),
+    );
 
-    await waitFor(() => expect(result.current.tabs.map((tab) => tab.id)).toEqual(["t1"]));
+    await waitFor(() =>
+      expect(result.current.tabs.map((tab) => tab.id)).toEqual(["t1"]),
+    );
     act(() =>
       bridge.emitTabs({
         viewId: "42:local:sess-1",
         activeTabId: "t2",
         tabs: [
-          { id: "t1", url: "http://localhost:3000/", title: "First", active: false },
-          { id: "t2", url: "http://localhost:4173/", title: "Second", active: true },
+          {
+            id: "t1",
+            url: "http://localhost:3000/",
+            title: "First",
+            active: false,
+          },
+          {
+            id: "t2",
+            url: "http://localhost:4173/",
+            title: "Second",
+            active: true,
+          },
         ],
         change: { kind: "popup", tabId: "t2" },
       }),
     );
 
     await act(() => result.current.closeTab("t2"));
-    expect(result.current.closedTabs).toEqual([{ id: "t2", url: "http://localhost:4173/", title: "Second", favicon: undefined }]);
+    expect(result.current.closedTabs).toEqual([
+      {
+        id: "t2",
+        url: "http://localhost:4173/",
+        title: "Second",
+        favicon: undefined,
+      },
+    ]);
 
     await act(() => result.current.reopenClosedTab("t2"));
-    expect(bridge.openTab).toHaveBeenCalledWith({ viewId: "42:local:sess-1", url: "http://localhost:4173/" });
+    expect(bridge.openTab).toHaveBeenCalledWith({
+      viewId: "42:local:sess-1",
+      url: "http://localhost:4173/",
+    });
     expect(result.current.closedTabs).toEqual([]);
   });
 
@@ -358,16 +406,34 @@ describe("useBrowserView", () => {
   // entry with no rollback and opening nothing.
   it("refuses to reopen a closed tab at the tab cap, keeping the entry instead of losing it", async () => {
     const bridge = setupBridge();
-    const { result } = renderHook(() => useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }));
+    const { result } = renderHook(() =>
+      useBrowserView({
+        session: { host: "local", id: "sess-1" },
+        active: true,
+        poppedOut: false,
+      }),
+    );
 
-    await waitFor(() => expect(result.current.tabs.map((tab) => tab.id)).toEqual(["t1"]));
+    await waitFor(() =>
+      expect(result.current.tabs.map((tab) => tab.id)).toEqual(["t1"]),
+    );
     act(() =>
       bridge.emitTabs({
         viewId: "42:local:sess-1",
         activeTabId: "t2",
         tabs: [
-          { id: "t1", url: "http://localhost:3000/", title: "First", active: false },
-          { id: "t2", url: "http://localhost:4173/", title: "Second", active: true },
+          {
+            id: "t1",
+            url: "http://localhost:3000/",
+            title: "First",
+            active: false,
+          },
+          {
+            id: "t2",
+            url: "http://localhost:4173/",
+            title: "Second",
+            active: true,
+          },
         ],
         change: { kind: "popup", tabId: "t2" },
       }),
@@ -402,16 +468,34 @@ describe("useBrowserView", () => {
   // rendering and the click) — restore it instead.
   it("restores a closed-tab entry if reopening it fails", async () => {
     const bridge = setupBridge();
-    const { result } = renderHook(() => useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }));
+    const { result } = renderHook(() =>
+      useBrowserView({
+        session: { host: "local", id: "sess-1" },
+        active: true,
+        poppedOut: false,
+      }),
+    );
 
-    await waitFor(() => expect(result.current.tabs.map((tab) => tab.id)).toEqual(["t1"]));
+    await waitFor(() =>
+      expect(result.current.tabs.map((tab) => tab.id)).toEqual(["t1"]),
+    );
     act(() =>
       bridge.emitTabs({
         viewId: "42:local:sess-1",
         activeTabId: "t2",
         tabs: [
-          { id: "t1", url: "http://localhost:3000/", title: "First", active: false },
-          { id: "t2", url: "http://localhost:4173/", title: "Second", active: true },
+          {
+            id: "t1",
+            url: "http://localhost:3000/",
+            title: "First",
+            active: false,
+          },
+          {
+            id: "t2",
+            url: "http://localhost:4173/",
+            title: "Second",
+            active: true,
+          },
         ],
         change: { kind: "popup", tabId: "t2" },
       }),
@@ -419,7 +503,11 @@ describe("useBrowserView", () => {
     await act(() => result.current.closeTab("t2"));
     expect(result.current.closedTabs).toHaveLength(1);
 
-    bridge.openTab.mockRejectedValueOnce(Object.assign(new Error("Browser tab limit reached"), { code: "BROWSER_TAB_LIMIT" }));
+    bridge.openTab.mockRejectedValueOnce(
+      Object.assign(new Error("Browser tab limit reached"), {
+        code: "BROWSER_TAB_LIMIT",
+      }),
+    );
     await act(() => result.current.reopenClosedTab("t2"));
 
     expect(result.current.closedTabs).toHaveLength(1);
@@ -431,15 +519,27 @@ describe("useBrowserView", () => {
   // silent unhandled rejection with zero user feedback.
   it("surfaces a notice instead of throwing when closing or selecting a tab fails", async () => {
     const bridge = setupBridge();
-    const { result } = renderHook(() => useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }));
-    await waitFor(() => expect(result.current.tabs.map((tab) => tab.id)).toEqual(["t1"]));
+    const { result } = renderHook(() =>
+      useBrowserView({
+        session: { host: "local", id: "sess-1" },
+        active: true,
+        poppedOut: false,
+      }),
+    );
+    await waitFor(() =>
+      expect(result.current.tabs.map((tab) => tab.id)).toEqual(["t1"]),
+    );
 
     bridge.closeTab.mockRejectedValueOnce(new Error("boom"));
-    await expect(act(() => result.current.closeTab("t1"))).resolves.toBeUndefined();
+    await expect(
+      act(() => result.current.closeTab("t1")),
+    ).resolves.toBeUndefined();
     expect(result.current.tabNotice).toBe("Couldn't close that tab");
 
     bridge.selectTab.mockRejectedValueOnce(new Error("boom"));
-    await expect(act(() => result.current.selectTab("t1"))).resolves.toBeUndefined();
+    await expect(
+      act(() => result.current.selectTab("t1")),
+    ).resolves.toBeUndefined();
     expect(result.current.tabNotice).toBe("Couldn't switch to that tab");
   });
 
@@ -450,15 +550,33 @@ describe("useBrowserView", () => {
   // identically since the main process had nothing left to close.
   it("resyncs tab state from the main process after a failed close, instead of leaving a ghost row", async () => {
     const bridge = setupBridge();
-    const { result } = renderHook(() => useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }));
-    await waitFor(() => expect(result.current.tabs.map((tab) => tab.id)).toEqual(["t1"]));
+    const { result } = renderHook(() =>
+      useBrowserView({
+        session: { host: "local", id: "sess-1" },
+        active: true,
+        poppedOut: false,
+      }),
+    );
+    await waitFor(() =>
+      expect(result.current.tabs.map((tab) => tab.id)).toEqual(["t1"]),
+    );
     act(() =>
       bridge.emitTabs({
         viewId: "42:local:sess-1",
         activeTabId: "t2",
         tabs: [
-          { id: "t1", url: "http://localhost:3000/", title: "First", active: false },
-          { id: "t2", url: "http://localhost:4173/", title: "Second", active: true },
+          {
+            id: "t1",
+            url: "http://localhost:3000/",
+            title: "First",
+            active: false,
+          },
+          {
+            id: "t2",
+            url: "http://localhost:4173/",
+            title: "Second",
+            active: true,
+          },
         ],
         change: { kind: "popup", tabId: "t2" },
       }),
@@ -466,16 +584,27 @@ describe("useBrowserView", () => {
 
     // The close call rejects, but the main process actually removed t2
     // already — getTabs reflects that reality.
-    bridge.closeTab.mockRejectedValueOnce(new Error("agent-browser lost the connection mid-command"));
+    bridge.closeTab.mockRejectedValueOnce(
+      new Error("agent-browser lost the connection mid-command"),
+    );
     bridge.getTabs.mockResolvedValueOnce({
       viewId: "42:local:sess-1",
       activeTabId: "t1",
-      tabs: [{ id: "t1", url: "http://localhost:3000/", title: "First", active: true }],
+      tabs: [
+        {
+          id: "t1",
+          url: "http://localhost:3000/",
+          title: "First",
+          active: true,
+        },
+      ],
     });
 
     await act(() => result.current.closeTab("t2"));
 
-    await waitFor(() => expect(result.current.tabs.map((tab) => tab.id)).toEqual(["t1"]));
+    await waitFor(() =>
+      expect(result.current.tabs.map((tab) => tab.id)).toEqual(["t1"]),
+    );
   });
 
   // Regression: closeTab can silently no-op — the underlying native close
@@ -484,16 +613,34 @@ describe("useBrowserView", () => {
   // visibly failed to close still showed up as "closed" anyway.
   it("does not remember a tab as closed when the main process reports it is still open", async () => {
     const bridge = setupBridge();
-    const { result } = renderHook(() => useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }));
+    const { result } = renderHook(() =>
+      useBrowserView({
+        session: { host: "local", id: "sess-1" },
+        active: true,
+        poppedOut: false,
+      }),
+    );
 
-    await waitFor(() => expect(result.current.tabs.map((tab) => tab.id)).toEqual(["t1"]));
+    await waitFor(() =>
+      expect(result.current.tabs.map((tab) => tab.id)).toEqual(["t1"]),
+    );
     act(() =>
       bridge.emitTabs({
         viewId: "42:local:sess-1",
         activeTabId: "t2",
         tabs: [
-          { id: "t1", url: "http://localhost:3000/", title: "First", active: false },
-          { id: "t2", url: "http://localhost:4173/", title: "Second", active: true },
+          {
+            id: "t1",
+            url: "http://localhost:3000/",
+            title: "First",
+            active: false,
+          },
+          {
+            id: "t2",
+            url: "http://localhost:4173/",
+            title: "Second",
+            active: true,
+          },
         ],
         change: { kind: "popup", tabId: "t2" },
       }),
@@ -503,8 +650,18 @@ describe("useBrowserView", () => {
       viewId: "42:local:sess-1",
       activeTabId: "t2",
       tabs: [
-        { id: "t1", url: "http://localhost:3000/", title: "First", active: false },
-        { id: "t2", url: "http://localhost:4173/", title: "Second", active: true },
+        {
+          id: "t1",
+          url: "http://localhost:3000/",
+          title: "First",
+          active: false,
+        },
+        {
+          id: "t2",
+          url: "http://localhost:4173/",
+          title: "Second",
+          active: true,
+        },
       ],
     });
     await act(() => result.current.closeTab("t2"));
@@ -515,16 +672,29 @@ describe("useBrowserView", () => {
 
   it("does not remember a closed blank tab, since there is nothing to reopen", async () => {
     const bridge = setupBridge();
-    const { result } = renderHook(() => useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }));
+    const { result } = renderHook(() =>
+      useBrowserView({
+        session: { host: "local", id: "sess-1" },
+        active: true,
+        poppedOut: false,
+      }),
+    );
 
-    await waitFor(() => expect(result.current.tabs.map((tab) => tab.id)).toEqual(["t1"]));
+    await waitFor(() =>
+      expect(result.current.tabs.map((tab) => tab.id)).toEqual(["t1"]),
+    );
     act(() =>
       bridge.emitTabs({
         viewId: "42:local:sess-1",
         activeTabId: "t2",
         tabs: [
           { id: "t1", url: "", title: "", active: false },
-          { id: "t2", url: "http://localhost:4173/", title: "Second", active: true },
+          {
+            id: "t2",
+            url: "http://localhost:4173/",
+            title: "Second",
+            active: true,
+          },
         ],
         change: { kind: "popup", tabId: "t2" },
       }),
@@ -533,7 +703,14 @@ describe("useBrowserView", () => {
     bridge.closeTab.mockResolvedValueOnce({
       viewId: "42:local:sess-1",
       activeTabId: "t2",
-      tabs: [{ id: "t2", url: "http://localhost:4173/", title: "Second", active: true }],
+      tabs: [
+        {
+          id: "t2",
+          url: "http://localhost:4173/",
+          title: "Second",
+          active: true,
+        },
+      ],
     });
     await act(() => result.current.closeTab("t1"));
     expect(result.current.closedTabs).toEqual([]);
@@ -546,16 +723,29 @@ describe("useBrowserView", () => {
   // closing a tab nobody had navigated in showed up in Recently Closed.
   it("does not remember a closed about:blank tab, since there is nothing to reopen", async () => {
     const bridge = setupBridge();
-    const { result } = renderHook(() => useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }));
+    const { result } = renderHook(() =>
+      useBrowserView({
+        session: { host: "local", id: "sess-1" },
+        active: true,
+        poppedOut: false,
+      }),
+    );
 
-    await waitFor(() => expect(result.current.tabs.map((tab) => tab.id)).toEqual(["t1"]));
+    await waitFor(() =>
+      expect(result.current.tabs.map((tab) => tab.id)).toEqual(["t1"]),
+    );
     act(() =>
       bridge.emitTabs({
         viewId: "42:local:sess-1",
         activeTabId: "t2",
         tabs: [
           { id: "t1", url: "about:blank", title: "", active: false },
-          { id: "t2", url: "http://localhost:4173/", title: "Second", active: true },
+          {
+            id: "t2",
+            url: "http://localhost:4173/",
+            title: "Second",
+            active: true,
+          },
         ],
         change: { kind: "popup", tabId: "t2" },
       }),
@@ -564,7 +754,14 @@ describe("useBrowserView", () => {
     bridge.closeTab.mockResolvedValueOnce({
       viewId: "42:local:sess-1",
       activeTabId: "t2",
-      tabs: [{ id: "t2", url: "http://localhost:4173/", title: "Second", active: true }],
+      tabs: [
+        {
+          id: "t2",
+          url: "http://localhost:4173/",
+          title: "Second",
+          active: true,
+        },
+      ],
     });
     await act(() => result.current.closeTab("t1"));
     expect(result.current.closedTabs).toEqual([]);
@@ -577,23 +774,47 @@ describe("useBrowserView", () => {
   it("keeps a session's Recently Closed list across switching away and back", async () => {
     const bridge = setupBridge();
     const { result, rerender } = renderHook(
-      ({ id }) => useBrowserView({ session: { host: "local", id }, active: true, poppedOut: false }),
+      ({ id }) =>
+        useBrowserView({
+          session: { host: "local", id },
+          active: true,
+          poppedOut: false,
+        }),
       { initialProps: { id: "sess-1" } },
     );
-    await waitFor(() => expect(result.current.tabs.map((tab) => tab.id)).toEqual(["t1"]));
+    await waitFor(() =>
+      expect(result.current.tabs.map((tab) => tab.id)).toEqual(["t1"]),
+    );
     act(() =>
       bridge.emitTabs({
         viewId: "42:local:sess-1",
         activeTabId: "t2",
         tabs: [
-          { id: "t1", url: "http://localhost:3000/", title: "First", active: false },
-          { id: "t2", url: "http://localhost:4173/", title: "Second", active: true },
+          {
+            id: "t1",
+            url: "http://localhost:3000/",
+            title: "First",
+            active: false,
+          },
+          {
+            id: "t2",
+            url: "http://localhost:4173/",
+            title: "Second",
+            active: true,
+          },
         ],
         change: { kind: "popup", tabId: "t2" },
       }),
     );
     await act(() => result.current.closeTab("t2"));
-    expect(result.current.closedTabs).toEqual([{ id: "t2", url: "http://localhost:4173/", title: "Second", favicon: undefined }]);
+    expect(result.current.closedTabs).toEqual([
+      {
+        id: "t2",
+        url: "http://localhost:4173/",
+        title: "Second",
+        favicon: undefined,
+      },
+    ]);
 
     rerender({ id: "sess-2" });
     await waitFor(() => expect(result.current.viewId).toBe("42:local:sess-2"));
@@ -601,23 +822,48 @@ describe("useBrowserView", () => {
 
     rerender({ id: "sess-1" });
     await waitFor(() => expect(result.current.viewId).toBe("42:local:sess-1"));
-    expect(result.current.closedTabs).toEqual([{ id: "t2", url: "http://localhost:4173/", title: "Second", favicon: undefined }]);
+    expect(result.current.closedTabs).toEqual([
+      {
+        id: "t2",
+        url: "http://localhost:4173/",
+        title: "Second",
+        favicon: undefined,
+      },
+    ]);
   });
 
   it("forgets a session's Recently Closed list once the session is genuinely terminated", async () => {
     const bridge = setupBridge();
     const { result, rerender } = renderHook(
-      ({ terminated }) => useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false, terminated }),
+      ({ terminated }) =>
+        useBrowserView({
+          session: { host: "local", id: "sess-1" },
+          active: true,
+          poppedOut: false,
+          terminated,
+        }),
       { initialProps: { terminated: false } },
     );
-    await waitFor(() => expect(result.current.tabs.map((tab) => tab.id)).toEqual(["t1"]));
+    await waitFor(() =>
+      expect(result.current.tabs.map((tab) => tab.id)).toEqual(["t1"]),
+    );
     act(() =>
       bridge.emitTabs({
         viewId: "42:local:sess-1",
         activeTabId: "t2",
         tabs: [
-          { id: "t1", url: "http://localhost:3000/", title: "First", active: false },
-          { id: "t2", url: "http://localhost:4173/", title: "Second", active: true },
+          {
+            id: "t1",
+            url: "http://localhost:3000/",
+            title: "First",
+            active: false,
+          },
+          {
+            id: "t2",
+            url: "http://localhost:4173/",
+            title: "Second",
+            active: true,
+          },
         ],
         change: { kind: "popup", tabId: "t2" },
       }),
@@ -628,8 +874,16 @@ describe("useBrowserView", () => {
     rerender({ terminated: true });
     await waitFor(() => expect(result.current.viewId).toBe(""));
 
-    const revived = renderHook(() => useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }));
-    await waitFor(() => expect(revived.result.current.tabs.map((tab) => tab.id)).toEqual(["t1"]));
+    const revived = renderHook(() =>
+      useBrowserView({
+        session: { host: "local", id: "sess-1" },
+        active: true,
+        poppedOut: false,
+      }),
+    );
+    await waitFor(() =>
+      expect(revived.result.current.tabs.map((tab) => tab.id)).toEqual(["t1"]),
+    );
     expect(revived.result.current.closedTabs).toEqual([]);
   });
 
@@ -638,7 +892,11 @@ describe("useBrowserView", () => {
     const slot = createSlot();
     const { result, rerender } = renderHook(
       ({ poppedOut }) =>
-        useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut }),
+        useBrowserView({
+          session: { host: "local", id: "sess-1" },
+          active: true,
+          poppedOut,
+        }),
       { initialProps: { poppedOut: false } },
     );
     await waitFor(() => expect(result.current.viewId).toBe("42:local:sess-1"));
@@ -698,9 +956,15 @@ describe("useBrowserView", () => {
     document.body.appendChild(column);
 
     const { result } = renderHook(() =>
-      useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }),
+      useBrowserView({
+        session: { host: "local", id: "sess-1" },
+        active: true,
+        poppedOut: false,
+      }),
     );
-    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("local:sess-1"));
+    await waitFor(() =>
+      expect(bridge.ensure).toHaveBeenCalledWith("local:sess-1"),
+    );
     act(() =>
       bridge.emit({
         viewId: "42:local:sess-1",
@@ -737,7 +1001,11 @@ describe("useBrowserView", () => {
       const slot = createSlot();
       const { result, rerender } = renderHook(
         ({ poppedOut }) =>
-          useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut }),
+          useBrowserView({
+            session: { host: "local", id: "sess-1" },
+            active: true,
+            poppedOut,
+          }),
         { initialProps: { poppedOut: false } },
       );
       // ensure() resolves on a microtask; flush it without advancing timers.
@@ -798,7 +1066,11 @@ describe("useBrowserView", () => {
     const slot = createSlot();
     const { result, rerender, unmount } = renderHook(
       ({ active }) =>
-        useBrowserView({ session: { host: "local", id: "sess-1" }, active, poppedOut: false }),
+        useBrowserView({
+          session: { host: "local", id: "sess-1" },
+          active,
+          poppedOut: false,
+        }),
       { initialProps: { active: true } },
     );
     await waitFor(() => expect(result.current.viewId).toBe("42:local:sess-1"));
@@ -826,10 +1098,16 @@ describe("useBrowserView", () => {
     const bridge = setupBridge();
     const slot = createSlot();
     const { result } = renderHook(() =>
-      useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }),
+      useBrowserView({
+        session: { host: "local", id: "sess-1" },
+        active: true,
+        poppedOut: false,
+      }),
     );
 
-    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("local:sess-1"));
+    await waitFor(() =>
+      expect(bridge.ensure).toHaveBeenCalledWith("local:sess-1"),
+    );
     act(() =>
       bridge.emit({
         viewId: "42:local:sess-1",
@@ -870,10 +1148,16 @@ describe("useBrowserView", () => {
     const bridge = setupBridge();
     const slot = createSlot();
     const { result } = renderHook(() =>
-      useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }),
+      useBrowserView({
+        session: { host: "local", id: "sess-1" },
+        active: true,
+        poppedOut: false,
+      }),
     );
 
-    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("local:sess-1"));
+    await waitFor(() =>
+      expect(bridge.ensure).toHaveBeenCalledWith("local:sess-1"),
+    );
     act(() =>
       bridge.emit({
         viewId: "42:local:sess-1",
@@ -911,9 +1195,15 @@ describe("useBrowserView", () => {
     const bridge = setupBridge();
     const slot = createSlot();
     const { result } = renderHook(() =>
-      useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }),
+      useBrowserView({
+        session: { host: "local", id: "sess-1" },
+        active: true,
+        poppedOut: false,
+      }),
     );
-    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("local:sess-1"));
+    await waitFor(() =>
+      expect(bridge.ensure).toHaveBeenCalledWith("local:sess-1"),
+    );
     act(() =>
       bridge.emit({
         viewId: "42:local:sess-1",
@@ -946,10 +1236,16 @@ describe("useBrowserView", () => {
     const bridge = setupBridge();
     const slot = createSlot();
     const { result } = renderHook(() =>
-      useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }),
+      useBrowserView({
+        session: { host: "local", id: "sess-1" },
+        active: true,
+        poppedOut: false,
+      }),
     );
 
-    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("local:sess-1"));
+    await waitFor(() =>
+      expect(bridge.ensure).toHaveBeenCalledWith("local:sess-1"),
+    );
     act(() =>
       bridge.emit({
         viewId: "42:local:sess-1",
@@ -996,10 +1292,16 @@ describe("useBrowserView", () => {
     const bridge = setupBridge();
     const slot = createSlot();
     const { result } = renderHook(() =>
-      useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }),
+      useBrowserView({
+        session: { host: "local", id: "sess-1" },
+        active: true,
+        poppedOut: false,
+      }),
     );
 
-    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("local:sess-1"));
+    await waitFor(() =>
+      expect(bridge.ensure).toHaveBeenCalledWith("local:sess-1"),
+    );
     act(() =>
       bridge.emit({
         viewId: "42:local:sess-1",
@@ -1042,7 +1344,11 @@ describe("useBrowserView", () => {
   it("updates nav state only for the current view", async () => {
     const bridge = setupBridge();
     const { result } = renderHook(() =>
-      useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }),
+      useBrowserView({
+        session: { host: "local", id: "sess-1" },
+        active: true,
+        poppedOut: false,
+      }),
     );
     await waitFor(() => expect(result.current.viewId).toBe("42:local:sess-1"));
 
@@ -1099,7 +1405,9 @@ describe("useBrowserView", () => {
     const { rerender } = renderHook(({ sessionId }) => useProbe(sessionId), {
       initialProps: { sessionId: "sess-1" },
     });
-    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("local:sess-1"));
+    await waitFor(() =>
+      expect(bridge.ensure).toHaveBeenCalledWith("local:sess-1"),
+    );
     act(() =>
       bridge.emit({
         viewId: "42:local:sess-1",
@@ -1113,7 +1421,9 @@ describe("useBrowserView", () => {
 
     observedUrls.length = 0;
     rerender({ sessionId: "sess-2" });
-    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("local:sess-2"));
+    await waitFor(() =>
+      expect(bridge.ensure).toHaveBeenCalledWith("local:sess-2"),
+    );
 
     expect(observedUrls).not.toContain("http://localhost:3000/");
   });
@@ -1268,7 +1578,9 @@ describe("useBrowserView", () => {
         previewRevision: 1,
       }),
     );
-    await waitFor(() => expect(second.result.current.viewId).toBe("42:local:sess-1"));
+    await waitFor(() =>
+      expect(second.result.current.viewId).toBe("42:local:sess-1"),
+    );
     expect(bridge.navigate).toHaveBeenCalledTimes(1);
     second.unmount();
   });
@@ -1368,7 +1680,9 @@ describe("useBrowserView", () => {
     );
 
     rerender({ sessionId: "sess-2", previewUrl: "http://127.0.0.1:5173/" });
-    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("local:sess-2"));
+    await waitFor(() =>
+      expect(bridge.ensure).toHaveBeenCalledWith("local:sess-2"),
+    );
     await waitFor(() =>
       expect(bridge.navigate).toHaveBeenCalledWith({
         viewId: "42:local:sess-2",
@@ -1439,14 +1753,20 @@ describe("useBrowserView", () => {
 
     // `ao preview clear` empties previewUrl and bumps the revision.
     rerender({ previewUrl: undefined, previewRevision: 2 });
-    await waitFor(() => expect(bridge.clear).toHaveBeenCalledWith("42:local:sess-1"));
+    await waitFor(() =>
+      expect(bridge.clear).toHaveBeenCalledWith("42:local:sess-1"),
+    );
     expect(bridge.navigate).toHaveBeenCalledTimes(1);
   });
 
   it("does not navigate or clear without a preview URL at revision zero", async () => {
     const bridge = setupBridge();
     const { result } = renderHook(() =>
-      useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }),
+      useBrowserView({
+        session: { host: "local", id: "sess-1" },
+        active: true,
+        poppedOut: false,
+      }),
     );
     await waitFor(() => expect(result.current.viewId).toBe("42:local:sess-1"));
     expect(bridge.navigate).not.toHaveBeenCalled();
@@ -1494,7 +1814,11 @@ describe("useBrowserView", () => {
       document.body.appendChild(terminalPane);
 
       const { result } = renderHook(() =>
-        useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }),
+        useBrowserView({
+          session: { host: "local", id: "sess-1" },
+          active: true,
+          poppedOut: false,
+        }),
       );
       await act(async () => {
         await Promise.resolve();
@@ -1562,9 +1886,15 @@ describe("useBrowserView", () => {
     host.appendChild(slot);
 
     const { result } = renderHook(() =>
-      useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }),
+      useBrowserView({
+        session: { host: "local", id: "sess-1" },
+        active: true,
+        poppedOut: false,
+      }),
     );
-    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("local:sess-1"));
+    await waitFor(() =>
+      expect(bridge.ensure).toHaveBeenCalledWith("local:sess-1"),
+    );
     act(() =>
       bridge.emit({
         viewId: "42:local:sess-1",
@@ -1622,7 +1952,11 @@ describe("useBrowserView (web fallback, no window.ao)", () => {
 
   it("runs in web mode and loads a manually entered URL into the iframe", async () => {
     const { result } = renderHook(() =>
-      useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }),
+      useBrowserView({
+        session: { host: "local", id: "sess-1" },
+        active: true,
+        poppedOut: false,
+      }),
     );
     expect(result.current.mode).toBe("web");
     expect(result.current.iframeSrc).toBe("");
@@ -1651,7 +1985,11 @@ describe("useBrowserView (web fallback, no window.ao)", () => {
 
   it("remounts the iframe with a fresh key on reload", async () => {
     const { result } = renderHook(() =>
-      useBrowserView({ session: { host: "local", id: "sess-1" }, active: true, poppedOut: false }),
+      useBrowserView({
+        session: { host: "local", id: "sess-1" },
+        active: true,
+        poppedOut: false,
+      }),
     );
     await act(async () => {
       await result.current.navigate("localhost:5173");

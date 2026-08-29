@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -78,9 +79,11 @@ type nestedMessageState struct {
 }
 
 type conversation struct {
-	conn *acpsdk.ClientSideConnection
-	proc *process
-	log  *slog.Logger
+	conn            *acpsdk.ClientSideConnection
+	legacyWire      *legacyACPTransport
+	proc            *process
+	log             *slog.Logger
+	providerScopeID string
 
 	mu                sync.Mutex
 	sessionID         string
@@ -108,6 +111,8 @@ type conversation struct {
 	validateSettings  TurnSettingsValidator
 	extensionFor      ClientExtensionHandler
 	extensionMethods  map[string]string
+	legacyModel       bool
+	legacyMode        bool
 
 	eventMu      sync.RWMutex
 	events       chan ports.ChatEvent
@@ -135,6 +140,7 @@ var _ acpsdk.ExtensionMethodHandler = (*conversation)(nil)
 func newConversation(
 	proc *process,
 	log *slog.Logger,
+	providerScopeID string,
 	extensionFor ClientExtensionHandler,
 	extensionAliases map[string]string,
 ) *conversation {
@@ -145,6 +151,7 @@ func newConversation(
 	c := &conversation{
 		proc:             proc,
 		log:              log,
+		providerScopeID:  providerScopeID,
 		pending:          make(map[string]*parkedPermission),
 		pendingInputs:    make(map[string]*parkedInput),
 		capabilities:     make(ports.ChatCapabilities),
@@ -156,12 +163,71 @@ func newConversation(
 		extensionFor:     extensionFor,
 		extensionMethods: reverseAliases,
 	}
+	legacyWire, sdkWriter, sdkReader := newLegacyACPTransport(proc.stdin, proc.stdout)
+	c.legacyWire = legacyWire
 	c.conn = acpsdk.NewClientSideConnection(
-		c, proc.stdin, newExtensionMethodReader(proc.stdout, extensionAliases),
+		c, sdkWriter, newExtensionMethodReader(sdkReader, extensionAliases),
 	)
 	c.conn.SetLogger(log)
 	go c.watchConnection()
 	return c
+}
+
+// providerItemID makes ACP's session-scoped opaque item ids safe to use in
+// AO's conversation-wide indexes. ACP only promises ids such as toolCallId are
+// unique inside one provider session, while reconstructed branches deliberately
+// create new sessions that may reuse those values.
+func (c *conversation) providerItemID(id string) string {
+	if id == "" || c.providerScopeID == "" {
+		return id
+	}
+	return "acp:" + lengthPrefixedTuple(c.providerScopeID, id)
+}
+
+// lengthPrefixedTuple encodes opaque strings injectively. ACP identifiers are
+// allowed to contain delimiters (including NUL), and AO provider scopes contain
+// colons, so delimiter-joining cannot safely define a durable identity.
+func lengthPrefixedTuple(parts ...string) string {
+	var encoded strings.Builder
+	for _, part := range parts {
+		encoded.WriteString(strconv.Itoa(len(part)))
+		encoded.WriteByte(':')
+		encoded.WriteString(part)
+	}
+	return encoded.String()
+}
+
+func decodeLengthPrefixedTuple(encoded string, count int) ([]string, bool) {
+	parts := make([]string, 0, count)
+	for range count {
+		separator := strings.IndexByte(encoded, ':')
+		if separator <= 0 {
+			return nil, false
+		}
+		lengthText := encoded[:separator]
+		length, err := strconv.Atoi(lengthText)
+		if err != nil || length < 0 || strconv.Itoa(length) != lengthText {
+			return nil, false
+		}
+		encoded = encoded[separator+1:]
+		if len(encoded) < length {
+			return nil, false
+		}
+		parts = append(parts, encoded[:length])
+		encoded = encoded[length:]
+	}
+	return parts, encoded == ""
+}
+
+func (c *conversation) legacyProviderItemAlias(id string) (string, bool) {
+	if c.providerScopeID == "" || !strings.HasPrefix(id, "acp:") {
+		return "", false
+	}
+	parts, ok := decodeLengthPrefixedTuple(strings.TrimPrefix(id, "acp:"), 2)
+	if !ok || parts[0] != c.providerScopeID || parts[1] == "" {
+		return "", false
+	}
+	return parts[1], true
 }
 
 func (c *conversation) start(
@@ -173,6 +239,8 @@ func (c *conversation) start(
 	initialPermission ports.PermissionMode,
 	validateSettings TurnSettingsValidator,
 	configOptions []acpsdk.SessionConfigOption,
+	models *legacySessionModelState,
+	modes *acpsdk.SessionModeState,
 ) {
 	c.mu.Lock()
 	c.sessionID = sessionID
@@ -181,8 +249,8 @@ func (c *conversation) start(
 	// An agent may send config_option_update before start() runs; only overwrite
 	// the catalog when the response actually carries one, so an early update is
 	// not lost to an empty response snapshot.
-	if len(configOptions) > 0 {
-		c.configOptions = normalizeConfigOptions(configOptions)
+	if len(configOptions) > 0 || models != nil || modes != nil {
+		c.configOptions = normalizeSessionOptions(configOptions, models, modes)
 	}
 	if len(c.configOptions) > 0 {
 		c.capabilities[ports.ChatCapabilityConfigOptions] = true
@@ -196,6 +264,8 @@ func (c *conversation) start(
 	c.initialPermission = ports.NormalizePermissionMode(initialPermission)
 	c.permissionMode = c.initialPermission
 	c.validateSettings = validateSettings
+	c.legacyModel = models != nil
+	c.legacyMode = modes != nil
 	c.mu.Unlock()
 	c.emit(ports.ChatEvent{Kind: ports.ChatEventControllerState, ControllerState: ports.ChatControllerReady})
 }
@@ -302,6 +372,8 @@ func (c *conversation) applyTurnSettings(ctx context.Context, settings ports.Cha
 	optionsFor := c.optionsFor
 	initialPermission := c.initialPermission
 	validateSettings := c.validateSettings
+	legacyModel := c.legacyModel
+	legacyMode := c.legacyMode
 	c.mu.Unlock()
 	if sessionID == "" {
 		return errors.New("ACP session is not open")
@@ -310,6 +382,15 @@ func (c *conversation) applyTurnSettings(ctx context.Context, settings ports.Cha
 		if err := validateSettings(initialPermission, settings); err != nil {
 			return err
 		}
+	}
+	if legacyModel && settings.Model != "" {
+		if err := c.legacyWire.setModel(ctx, sessionID, settings.Model); err != nil {
+			if isACPMethodNotFound(err) {
+				return fmt.Errorf("%w: session/set_model %q", ErrACPSetterUnsupported, settings.Model)
+			}
+			return fmt.Errorf("set ACP session model %q: %w", settings.Model, err)
+		}
+		c.applyAcceptedConfigOption("model", ports.ChatConfigOptionValue{Select: settings.Model})
 	}
 	if modeFor != nil {
 		if mode := modeFor(settings.Approval); mode != "" {
@@ -326,6 +407,9 @@ func (c *conversation) applyTurnSettings(ctx context.Context, settings ports.Cha
 	if optionsFor != nil {
 		for _, option := range optionsFor(settings) {
 			if option.ID == "" || option.Value == "" {
+				continue
+			}
+			if (option.ID == "model" && legacyModel) || (option.ID == "mode" && legacyMode) {
 				continue
 			}
 			resp, err := c.conn.SetSessionConfigOption(ctx, acpsdk.SetSessionConfigOptionRequest{
@@ -722,10 +806,14 @@ func (c *conversation) promptContent(message ports.ChatUserMessage) ([]acpsdk.Co
 			if item.MIMEType != "" {
 				mimeType = pointer(item.MIMEType)
 			}
+			resource := &acpsdk.TextResourceContents{
+				Uri: item.URI, Text: item.Text, MimeType: mimeType,
+			}
+			if item.Internal {
+				resource.Meta = map[string]any{aoInternalReplayMetaKey: true}
+			}
 			prompt = append(prompt, acpsdk.ResourceBlock(acpsdk.EmbeddedResourceResource{
-				TextResourceContents: &acpsdk.TextResourceContents{
-					Uri: item.URI, Text: item.Text, MimeType: mimeType,
-				},
+				TextResourceContents: resource,
 			}))
 		default:
 			return nil, fmt.Errorf("unsupported chat content type %q", item.Type)

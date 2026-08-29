@@ -62,6 +62,7 @@ func startLifecycle(ctx context.Context, store *sqlite.Store, runtime ports.Runt
 		lifecycle.WithTelemetry(telemetry),
 		lifecycle.WithContainerReaper(dockerreap.New(), store),
 		lifecycle.WithActiveSteering(activeTurnSteering(agents)),
+		lifecycle.WithStartupSignalGate(startupSignalGatesInput(agents)),
 	)
 	rp := reaper.New(lcm, store, runtime, reaper.Config{Logger: logger})
 	activityPoller := activityobserver.New(store, lcm, runtime, agents, activityobserver.Config{Logger: logger})
@@ -70,6 +71,23 @@ func startLifecycle(ctx context.Context, store *sqlite.Store, runtime ports.Runt
 		runtimeReaper: rp,
 		reaperDone:    rp.Start(ctx),
 		activityDone:  activityPoller.Start(ctx),
+	}
+}
+
+// startupSignalGatesInput resolves whether an adapter promises that its first
+// hook proves native TUI startup dialogs have cleared. Unknown and hookless
+// adapters remain ungated.
+func startupSignalGatesInput(agents ports.AgentResolver) func(domain.AgentHarness) bool {
+	return func(harness domain.AgentHarness) bool {
+		if agents == nil {
+			return false
+		}
+		agent, ok := agents.Agent(harness)
+		if !ok {
+			return false
+		}
+		signaler, ok := agent.(ports.StartupInputReadinessSignaler)
+		return ok && signaler.FirstSignalProvesInputReady()
 	}
 }
 
@@ -127,6 +145,8 @@ func (l *lifecycleStack) Stop() {
 // the method here is a visible, reviewable interface change.
 type sessionLifecycle interface {
 	Reconcile(ctx context.Context) error
+	ReconcileStartupSafety(ctx context.Context) error
+	ReconcileBackground(ctx context.Context) error
 	RestoreAll(ctx context.Context) error
 	WaitAgentSwitchWorkers(ctx context.Context) error
 	Kill(ctx context.Context, id domain.SessionID) (bool, error)
@@ -235,9 +255,9 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 		Telemetry:         telemetry,
 		Logger:            log,
 		BackgroundContext: ctx,
-		// no_signal only makes sense for harnesses whose adapters install
-		// activity hooks; the deriver registry is the source of truth for that.
-		SignalCapable: activitydispatch.SupportsHarness,
+		// no_signal only makes sense for harnesses with complete lifecycle signal
+		// coverage; partial callbacks cannot prove that silence is abnormal.
+		SignalCapable: activitydispatch.FullySupportsHarness,
 	})
 	// Triggering a review spawns a reviewer over the worker's worktree, resolved
 	// from the reviewer registry (distinct from the worker agent set). The
@@ -489,6 +509,7 @@ func (c chatLauncher) StartChat(ctx context.Context, cfg sessionmanager.ChatStar
 		SystemPrompt:            cfg.SystemPrompt,
 		AdditionalDirectories:   cfg.AdditionalDirectories,
 		ProviderConversationID:  cfg.ProviderConversationID,
+		ProviderScopeID:         cfg.ProviderScopeID,
 		ControllerGeneration:    cfg.ControllerGeneration,
 		RequireNativeHistory:    cfg.RequireNativeHistory,
 		SkipNativeHistoryImport: cfg.SkipNativeHistoryImport,
@@ -500,6 +521,8 @@ func (c chatLauncher) StartChat(ctx context.Context, cfg sessionmanager.ChatStar
 				ProviderConversationID: out.ProviderConversationID,
 				ControllerGeneration:   out.ControllerGeneration,
 				Conversation:           out.Conversation,
+				ProviderBoundary:       out.ProviderBoundary,
+				CommitProviderHistory:  out.CommitProviderHistory,
 			})
 			return chatsvc.ControllerCommit{Conversation: commit.Conversation}, err
 		},

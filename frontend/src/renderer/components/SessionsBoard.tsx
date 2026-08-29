@@ -34,6 +34,7 @@ import {
 import { useRestoreSession } from "../hooks/useRestoreSession";
 import { useTerminateSession } from "../hooks/useTerminateSession";
 import {
+  cloudSessionsQueryKey,
   useWorkspaceQuery,
   workspaceQueryKey,
 } from "../hooks/useWorkspaceQuery";
@@ -43,10 +44,11 @@ import { BoardWelcome, ProjectBoardEmpty } from "./BoardEmptyStates";
 import { OrchestratorIcon } from "./icons";
 import { OrchestratorActivityIndicator } from "./OrchestratorActivityIndicator";
 import {
-  TopbarButton,
   TopbarActionError,
+  TopbarButton,
   topbarProjectLabelClass,
 } from "./TopbarButton";
+import { spawnCloudOrchestrator } from "../lib/cloud-orchestrator";
 import {
   isChatPreflightError,
   spawnOrchestrator,
@@ -92,7 +94,10 @@ function isArchivedSession(session: WorkspaceSession): boolean {
 
 // The find bar reuses the command palette's scorer rather than growing a second
 // matcher; a session only has to be shaped into what that scorer reads.
-function sessionMatchTarget(session: WorkspaceSession, t: TFunction): MatchTarget {
+function sessionMatchTarget(
+  session: WorkspaceSession,
+  t: TFunction,
+): MatchTarget {
   return {
     title: session.title,
     subtitle: session.branch,
@@ -110,7 +115,9 @@ function filterSessions(
   t: TFunction,
 ): WorkspaceSession[] {
   if (!query.trim()) return sessions;
-  return sessions.filter((session) => matchScore(query, sessionMatchTarget(session, t)) > 0);
+  return sessions.filter(
+    (session) => matchScore(query, sessionMatchTarget(session, t)) > 0,
+  );
 }
 
 const isMac = isMacPlatform();
@@ -138,7 +145,10 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
   const boardOwnsNotificationCenter = isLinuxPlatform() || boardActionsInPanel;
   const all = flattenHostSections(workspaceQuery.data);
   const workspaces = project
-    ? all.filter((workspace) => workspace.host === project.host && workspace.id === project.id)
+    ? all.filter(
+        (workspace) =>
+          workspace.host === project.host && workspace.id === project.id,
+      )
     : all;
   const workspace = project ? workspaces[0] : undefined;
   const projectKey = workspace ? refKey(workspace) : undefined;
@@ -258,10 +268,11 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
     workspaces.length > 0 &&
     sessions.length === 0;
   const boardLoadFailed = Boolean(
-    workspaceStartupState === "error" || workspaceQuery.isError || workspaceQuery.localFailure,
+    workspaceStartupState === "error" ||
+    workspaceQuery.isError ||
+    workspaceQuery.localFailure,
   );
-  const showBoardGrid =
-    !showStartup && !boardLoadFailed && !showWelcome && !showProjectEmpty;
+  const showBoardGrid = !boardLoadFailed && !showWelcome && !showProjectEmpty;
   const showFindEmpty = findQuery.trim() !== "" && findMatches === 0;
   const hasArchive = archived.length > 0;
 
@@ -280,7 +291,11 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
       }
       if (!matchesRendererShortcut("find", event)) return;
       const active = document.activeElement;
-      if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) return;
+      if (
+        active instanceof HTMLInputElement ||
+        active instanceof HTMLTextAreaElement
+      )
+        return;
       event.preventDefault();
       setIsFindOpen(true);
     };
@@ -298,7 +313,7 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
     });
 
   const openOrchestrator = async (mode?: "tui") => {
-		if (!workspace || isProjectRestarting) return;
+    if (!workspace || isProjectRestarting) return;
     if (orchestrator) {
       void navigate({
         to: "/host/$hostId/session/$sessionId",
@@ -306,26 +321,51 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
       });
       return;
     }
+    if (workspace.kind === "cloud") {
+      setSpawnError(null);
+      setIsSpawning(true);
+      try {
+        const sessionId = await spawnCloudOrchestrator(
+          queryClient,
+          workspace.id,
+        );
+        await queryClient.invalidateQueries({
+          queryKey: cloudSessionsQueryKey,
+        });
+        void navigate({
+          to: "/host/$hostId/session/$sessionId",
+          params: { hostId: workspace.host, sessionId },
+        });
+      } catch (error) {
+        console.error("Failed to spawn cloud orchestrator:", error);
+        setSpawnError(
+          error instanceof Error ? error.message : t("shell.couldNotSpawn"),
+        );
+      } finally {
+        setIsSpawning(false);
+      }
+      return;
+    }
     if (!hasConfiguredOrchestratorAgent(workspace)) {
-		if (workspace) useUiStore.getState().openProjectSettings(workspace);
+      if (workspace) useUiStore.getState().openProjectSettings(workspace);
       return;
     }
     setSpawnError(null);
     setCanCreateAsTui(false);
-		setOrchestratorStartupError(workspace, null);
+    setOrchestratorStartupError(workspace, null);
     setIsSpawning(true);
     try {
-		const sessionId = await spawnOrchestrator(
-			workspace,
+      const sessionId = await spawnOrchestrator(
+        workspace,
         "board",
         false,
         mode,
       );
       await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
-		setOrchestratorStartupError(workspace, null);
+      setOrchestratorStartupError(workspace, null);
       void navigate({
         to: "/host/$hostId/session/$sessionId",
-		params: { hostId: workspace.host, sessionId },
+        params: { hostId: workspace.host, sessionId },
       });
     } catch (error) {
       // Never fail silently: the daemon's message (e.g. a worktree/branch
@@ -341,9 +381,9 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
   };
 
   const restartOrchestrator = async () => {
-		if (!workspace) return;
+    if (!workspace) return;
     await restartProjectOrchestrator({
-		project: workspace,
+      project: workspace,
       queryClient,
       navigate,
       setProjectRestarting,
@@ -406,7 +446,9 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
             >
               <OrchestratorIcon className="size-icon-md" aria-hidden="true" />
               <span data-compact-label>{t("shell.orchestrator")}</span>
-              {orchestrator ? <OrchestratorActivityIndicator session={orchestrator} /> : null}
+              {orchestrator ? (
+                <OrchestratorActivityIndicator session={orchestrator} />
+              ) : null}
             </TopbarButton>
           </span>
         </TooltipTrigger>
@@ -422,7 +464,10 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
       </Tooltip>
       {boardOwnsNotificationCenter ? (
         <>
-          <span aria-hidden="true" className="workspace-topbar__utility-separator" />
+          <span
+            aria-hidden="true"
+            className="workspace-topbar__utility-separator"
+          />
           <NotificationCenter />
         </>
       ) : null}
@@ -441,17 +486,17 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
 			    Win/Linux keep the crumb and actions in the framed ShellTopbar.
 			    Welcome skips the row — a dangling "Board" above the import
 			    chooser was review feedback on #2432. */}
-      {!showWelcome &&
-      !showStartup &&
-      boardActionsInPanel &&
-      (boardLabel || actions) ? (
+      {!showWelcome && boardActionsInPanel && (boardLabel || actions) ? (
         <div
           className="workspace-topbar-container center-panel-titlebar flex h-toolbar shrink-0 items-center gap-2 border-b border-border-strong pr-4"
           style={dragStyle}
         >
           {boardLabel ? (
             <span
-              className={cn(topbarProjectLabelClass, "inline-flex items-center gap-1.5")}
+              className={cn(
+                topbarProjectLabelClass,
+                "inline-flex items-center gap-1.5",
+              )}
               data-testid="board-topbar-label"
             >
               <LayoutDashboard aria-hidden="true" className="size-icon-md" />
@@ -503,14 +548,13 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
                 variant="primary"
               >
                 <RotateCw className="size-3.5" aria-hidden="true" />
-                {t("shell.restart")}{workspace ? hostActionSuffix(t, workspace.host) : ""}
+                {t("shell.restart")}
+                {workspace ? hostActionSuffix(t, workspace.host) : ""}
               </TopbarButton>
             ) : null}
           </div>
         ) : null}
-        {showStartup ? (
-          <DaemonStartupLoader />
-        ) : boardLoadFailed ? (
+        {boardLoadFailed ? (
           <p className="py-10 text-center text-xs text-passive">
             {t("shell.couldNotLoadSessions")}
           </p>
@@ -521,7 +565,7 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
             hasOrchestrator={orchestrator !== undefined}
             isSpawning={isSpawning}
             isProjectRestarting={isProjectRestarting}
-			onNewTask={() => workspace && requestNewTask(workspace)}
+            onNewTask={() => workspace && requestNewTask(workspace)}
             onOpenOrchestrator={() => void openOrchestrator()}
             onOpenOrchestratorAsTui={
               canCreateAsTui ? () => void openOrchestrator("tui") : undefined
@@ -558,6 +602,7 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
           usageBySession={usageBySession}
         />
       ) : null}
+      {showStartup ? <DaemonStartupLoader /> : null}
     </div>
   );
 }
@@ -579,8 +624,11 @@ const BoardArchivePanel = memo(function BoardArchivePanel({
   const queryClient = useQueryClient();
   const restoreSession = useRestoreSession();
   const [restoringSessionKey, setRestoringSessionKey] = useState<string>();
-  const [restoreErrors, setRestoreErrors] = useState<Record<string, string>>({});
-  const [restoreUnavailableSession, setRestoreUnavailableSession] = useState<WorkspaceSession>();
+  const [restoreErrors, setRestoreErrors] = useState<Record<string, string>>(
+    {},
+  );
+  const [restoreUnavailableSession, setRestoreUnavailableSession] =
+    useState<WorkspaceSession>();
   const restoreGenerationRef = useRef(0);
 
   useEffect(() => {
@@ -593,7 +641,8 @@ const BoardArchivePanel = memo(function BoardArchivePanel({
   useEffect(() => {
     const generation = restoreGenerationRef.current;
     return () => {
-      if (restoreGenerationRef.current === generation) restoreGenerationRef.current += 1;
+      if (restoreGenerationRef.current === generation)
+        restoreGenerationRef.current += 1;
     };
   }, []);
 
@@ -629,7 +678,10 @@ const BoardArchivePanel = memo(function BoardArchivePanel({
         setRestoreUnavailableSession(session);
         return;
       }
-      setRestoreErrors((current) => ({ ...current, [sessionKey]: result.message }));
+      setRestoreErrors((current) => ({
+        ...current,
+        [sessionKey]: result.message,
+      }));
     } finally {
       if (isStillActiveProject()) setRestoringSessionKey(undefined);
     }
@@ -640,7 +692,9 @@ const BoardArchivePanel = memo(function BoardArchivePanel({
       <SessionsArchiveView
         labels={{
           archive: t("shell.archive"),
-          archiveAria: t("shell.archiveSessionsAria", { count: sessions.length }),
+          archiveAria: t("shell.archiveSessionsAria", {
+            count: sessions.length,
+          }),
           archivedSessions: t("shell.archivedSessions"),
         }}
         renderSessionCard={(session) => {
@@ -649,7 +703,9 @@ const BoardArchivePanel = memo(function BoardArchivePanel({
             <ArchivedSessionCardAdapter
               isRestoreDisabled={restoringSessionKey !== undefined}
               isRestoring={restoringSessionKey === sessionKey}
-              restoreAction={(event) => void restoreArchivedSession(event, session)}
+              restoreAction={(event) =>
+                void restoreArchivedSession(event, session)
+              }
               restoreError={restoreErrors[sessionKey]}
               session={session}
               usage={usageBySession.get(sessionKey)}
@@ -667,7 +723,9 @@ const BoardArchivePanel = memo(function BoardArchivePanel({
             if (!open) setRestoreUnavailableSession(undefined);
           }}
           onRecreated={async () => {
-            await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
+            await queryClient.invalidateQueries({
+              queryKey: workspaceQueryKey,
+            });
           }}
         />
       ) : null}

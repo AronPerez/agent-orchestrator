@@ -33,13 +33,14 @@ type Launch struct {
 // construct its process. It intentionally contains no install mechanism: binary
 // ownership stays with the existing agent plugin.
 type LaunchConfig struct {
-	SessionID     domain.SessionID
-	DataDir       string
-	WorkspacePath string
-	Env           map[string]string
-	Model         string
-	Permissions   ports.PermissionMode
-	SystemPrompt  string
+	SessionID       domain.SessionID
+	DataDir         string
+	WorkspacePath   string
+	Env             map[string]string
+	Model           string
+	Permissions     ports.PermissionMode
+	SystemPrompt    string
+	ProviderScopeID string
 }
 
 // Config binds one harness to an ACP agent implementation.
@@ -130,9 +131,17 @@ func (d *Driver) Start(ctx context.Context, cfg ports.ChatStartConfig) (ports.Ch
 	if !filepath.IsAbs(cfg.WorkspacePath) {
 		return nil, fmt.Errorf("workspace path must be absolute, got %q", cfg.WorkspacePath)
 	}
+	if d.cfg.ValidateTurnSettings != nil {
+		if err := d.cfg.ValidateTurnSettings(cfg.Permissions, ports.ChatTurnSettings{
+			Model: cfg.Model, Approval: cfg.Permissions,
+		}); err != nil {
+			return nil, fmt.Errorf("validate ACP session settings: %w", err)
+		}
+	}
 	launchCfg := LaunchConfig{
 		SessionID: cfg.SessionID, DataDir: cfg.DataDir, WorkspacePath: cfg.WorkspacePath,
 		Env: cfg.Env, Model: cfg.Model, Permissions: cfg.Permissions, SystemPrompt: cfg.SystemPrompt,
+		ProviderScopeID: cfg.ProviderScopeID,
 	}
 	conv, init, err := d.connect(ctx, launchCfg)
 	if err != nil {
@@ -178,6 +187,7 @@ func (d *Driver) Start(ctx context.Context, cfg ports.ChatStartConfig) (ports.Ch
 		string(resp.SessionId), conversationCapabilities(d.cfg.Capabilities, init),
 		d.cfg.SessionMode, d.cfg.SessionOptions, d.cfg.PermissionPolicy,
 		cfg.Permissions, d.cfg.ValidateTurnSettings, resp.ConfigOptions,
+		conv.legacyWire.modelState(), resp.Modes,
 	)
 	if err := conv.applyTurnSettings(ctx, ports.ChatTurnSettings{Model: cfg.Model, Approval: cfg.Permissions}); err != nil {
 		// Initial model and permission mode may have been applied via launch-time
@@ -203,9 +213,17 @@ func (d *Driver) Resume(ctx context.Context, cfg ports.ChatResumeConfig) (ports.
 	if !filepath.IsAbs(cfg.WorkspacePath) {
 		return nil, fmt.Errorf("workspace path must be absolute, got %q", cfg.WorkspacePath)
 	}
+	if d.cfg.ValidateTurnSettings != nil {
+		if err := d.cfg.ValidateTurnSettings(cfg.Permissions, ports.ChatTurnSettings{
+			Model: cfg.Model, Approval: cfg.Permissions,
+		}); err != nil {
+			return nil, fmt.Errorf("%w: validate ACP session settings: %w", ports.ErrChatResumeFailed, err)
+		}
+	}
 	launchCfg := LaunchConfig{
 		SessionID: cfg.SessionID, DataDir: cfg.DataDir, WorkspacePath: cfg.WorkspacePath,
 		Env: cfg.Env, Model: cfg.Model, Permissions: cfg.Permissions, SystemPrompt: cfg.SystemPrompt,
+		ProviderScopeID: cfg.ProviderScopeID,
 	}
 	conv, init, err := d.connect(ctx, launchCfg)
 	if err != nil {
@@ -237,6 +255,7 @@ func (d *Driver) Resume(ctx context.Context, cfg ports.ChatResumeConfig) (ports.
 		meta = d.cfg.SessionMeta(launchCfg)
 	}
 	var configOptions []acpsdk.SessionConfigOption
+	var modes *acpsdk.SessionModeState
 	if init.AgentCapabilities.LoadSession {
 		conv.beginHistoryReplay(cfg.ProviderConversationID)
 		resp, err := conv.conn.LoadSession(resumeCtx, acpsdk.LoadSessionRequest{
@@ -253,6 +272,7 @@ func (d *Driver) Resume(ctx context.Context, cfg ports.ChatResumeConfig) (ports.
 		}
 		conv.finishHistoryReplay()
 		configOptions = resp.ConfigOptions
+		modes = resp.Modes
 	} else {
 		resp, err := conv.conn.ResumeSession(resumeCtx, acpsdk.ResumeSessionRequest{
 			Meta:                  meta,
@@ -266,11 +286,13 @@ func (d *Driver) Resume(ctx context.Context, cfg ports.ChatResumeConfig) (ports.
 			return nil, fmt.Errorf("%w: %w", ports.ErrChatResumeFailed, err)
 		}
 		configOptions = resp.ConfigOptions
+		modes = resp.Modes
 	}
 	conv.start(
 		cfg.ProviderConversationID, conversationCapabilities(d.cfg.Capabilities, init),
 		d.cfg.SessionMode, d.cfg.SessionOptions, d.cfg.PermissionPolicy,
 		cfg.Permissions, d.cfg.ValidateTurnSettings, configOptions,
+		conv.legacyWire.modelState(), modes,
 	)
 	if err := applyResumeSettings(ctx, conv, cfg); err != nil {
 		_ = conv.Close()
@@ -326,7 +348,9 @@ func (d *Driver) connect(
 	if err != nil {
 		return nil, acpsdk.InitializeResponse{}, fmt.Errorf("%w: launch ACP agent: %w", ports.ErrChatDriverUnavailable, err)
 	}
-	conv := newConversation(proc, d.log, d.cfg.ClientExtension, d.cfg.ClientExtensionAliases)
+	conv := newConversation(
+		proc, d.log, cfg.ProviderScopeID, d.cfg.ClientExtension, d.cfg.ClientExtensionAliases,
+	)
 
 	initCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
@@ -389,6 +413,9 @@ func conversationCapabilities(
 	}
 	caps[ports.ChatCapabilityImages] = init.AgentCapabilities.PromptCapabilities.Image
 	caps[ports.ChatCapabilityEmbeddedContext] = init.AgentCapabilities.PromptCapabilities.EmbeddedContext
+	// ResourceLink is a baseline ACP content block rather than an optional prompt
+	// capability. Every ACP conversation preserves it natively.
+	caps[ports.ChatCapabilityResourceLinks] = true
 	// These are facilities AO itself negotiated as the ACP client. An agent that
 	// never uses them simply produces no matching events.
 	caps[ports.ChatCapabilityElicitation] = true

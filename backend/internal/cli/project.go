@@ -101,6 +101,11 @@ type trackerIntakeConfig struct {
 	Assignee string `json:"assignee,omitempty"`
 }
 
+// reviewerConfig mirrors domain.ReviewerConfig.
+type reviewerConfig struct {
+	Harness string `json:"harness"`
+}
+
 // projectConfig mirrors the daemon's typed domain.ProjectConfig for the CLI
 // client. The CLI sets common fields via flags and the whole object via
 // --config-json.
@@ -122,7 +127,8 @@ type projectConfig struct {
 	AutoReview         bool                `json:"autoReview,omitempty"`
 	// BrowserPersistentProfile is opt-in and default off. See the domain type
 	// for the security ceiling it accepts.
-	BrowserPersistentProfile bool `json:"browserPersistentProfile,omitempty"`
+	BrowserPersistentProfile bool             `json:"browserPersistentProfile,omitempty"`
+	Reviewers                []reviewerConfig `json:"reviewers,omitempty"`
 }
 
 // setConfigRequest mirrors the daemon's SetConfigInput body for
@@ -149,6 +155,7 @@ type projectSetConfigOptions struct {
 	trackerRepo            string
 	trackerAssignee        string
 	browserPersistProfile  bool
+	reviewers              []string
 	configJSON             string
 	clear                  bool
 	json                   bool
@@ -297,7 +304,7 @@ func newProjectSetConfigCommand(ctx *commandContext) *cobra.Command {
 		Use:   "set-config <id>",
 		Short: "Set the per-project config",
 		Long: "Replace a project's per-project config (branch, session prefix, env, " +
-			"symlinks, post-create, rules, agent model/permissions, role overrides, tracker intake). The config " +
+			"symlinks, post-create, rules, agent model/permissions, role overrides, tracker intake, reviewers). The config " +
 			"is resolved when a session spawns.\n\n" +
 			"Set fields via flags, pass the whole object with --config-json, or --clear " +
 			"to remove all config.",
@@ -353,6 +360,7 @@ func newProjectSetConfigCommand(ctx *commandContext) *cobra.Command {
 		"Share ONE on-disk browser profile across this project's sessions so logins survive restarts. "+
 			"Off by default. Security ceiling: every worker session on this project shares that cookie jar, "+
 			"so a prompt-injected agent in any of them can use every login in it")
+	f.StringArrayVar(&opts.reviewers, "reviewer", nil, "Reviewer harness that reviews worker PRs (repeatable; e.g. claude-code)")
 	f.StringVar(&opts.configJSON, "config-json", "", "Full config as a JSON object (overrides field flags)")
 	f.BoolVar(&opts.clear, "clear", false, "Clear all config")
 	f.BoolVar(&opts.json, "json", false, "Output the updated project as JSON")
@@ -407,6 +415,7 @@ func buildProjectConfig(opts projectSetConfigOptions, orchestratorPrompt string)
 			Assignee: opts.trackerAssignee,
 		},
 		BrowserPersistentProfile: opts.browserPersistProfile,
+		Reviewers:                reviewersForFlags(opts.reviewers),
 	}
 	if reflect.DeepEqual(cfg, projectConfig{}) {
 		return projectConfig{}, usageError{errors.New("usage: provide at least one config flag, --config-json, --orchestrator-prompt-file, or --clear")}
@@ -440,6 +449,26 @@ func readOrchestratorPrompt(in io.Reader, path string) (string, error) {
 		return "", usageError{fmt.Errorf("read orchestrator prompt: %w", err)}
 	}
 	return string(raw), nil
+}
+
+// reviewersForFlags turns repeated --reviewer harness values into the config
+// shape. The daemon validates the harness vocabulary.
+func reviewersForFlags(harnesses []string) []reviewerConfig {
+	if len(harnesses) == 0 {
+		return nil
+	}
+	reviewers := make([]reviewerConfig, 0, len(harnesses))
+	for _, harness := range harnesses {
+		harness = strings.TrimSpace(harness)
+		if harness == "" {
+			continue
+		}
+		reviewers = append(reviewers, reviewerConfig{Harness: harness})
+	}
+	if len(reviewers) == 0 {
+		return nil
+	}
+	return reviewers
 }
 
 // parseEnvPairs turns repeated KEY=VALUE flags into a map.
