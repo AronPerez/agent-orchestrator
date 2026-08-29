@@ -451,7 +451,9 @@ export function TaskComposer({
         authorized: agentCatalog?.authorized,
         installed: agentCatalog?.installed,
         supported: agentCatalog?.supported,
-        disabled: agentsQuery.isFetching && agentCatalog === undefined,
+        disabled:
+          isSubmitting ||
+          (agentsQuery.isFetching && agentCatalog === undefined),
         onChange: (value) => {
           setAgent(value);
           setAgentTouched(true);
@@ -464,6 +466,7 @@ export function TaskComposer({
         agentId: selectedAgent,
         agentLabel: selectedAgentLabel,
         projectId: project?.id ?? "",
+        disabled: isSubmitting,
         value: model,
         mode,
         catalog: modelCatalog,
@@ -526,6 +529,7 @@ function TaskModelPicker({
   agentId,
   agentLabel,
   catalog,
+  disabled,
   fetching,
   loading,
   value,
@@ -574,6 +578,7 @@ function TaskModelPicker({
     return (
       <SettingsOptionMenu
         aria-label={t("newTask.model")}
+        disabled={disabled}
         value={mode || "__default__"}
         options={options}
         triggerClassName="composer-chip composer-toolbar-option w-full justify-between"
@@ -622,6 +627,7 @@ function TaskModelPicker({
         value={value}
         models={displayModels}
         allowCustom={catalog.allowCustom}
+        disabled={disabled}
         emptyLabel={noOverrideLabel}
         onChange={selectCatalogModel}
         onCustom={selectCustomModel}
@@ -655,7 +661,7 @@ function TaskModelPicker({
           !hasCatalog && "rounded-r-md!",
         )}
         value={value}
-        disabled={agentId === ""}
+        disabled={disabled || agentId === ""}
         onChange={(event) => onModelChange(event.target.value)}
         placeholder={fetching ? t("settings.models.loading") : noOverrideLabel}
       />
@@ -668,6 +674,7 @@ function TaskModelPicker({
           value={value}
           models={displayModels}
           allowCustom={catalog.allowCustom}
+          disabled={disabled}
           emptyLabel={noOverrideLabel}
           onChange={selectCatalogModel}
           onCustom={selectCustomModel}

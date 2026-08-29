@@ -36,6 +36,8 @@ export type DashboardPR = {
 export type DashboardSession = {
 	id: string;
 	projectId: string;
+	/** Opaque daemon runtime handle used only for terminal mux operations. */
+	terminalHandleId?: string;
 	status: string | null;
 	attentionLevel?: AttentionLevel | string | null;
 	activity?: string | null;
@@ -71,6 +73,8 @@ export type DashboardSession = {
 export type OrchestratorLink = {
 	id: string;
 	projectId: string;
+	/** Opaque daemon runtime handle used only for terminal mux operations. */
+	terminalHandleId?: string;
 	projectName: string;
 	status?: string | null;
 	activity?: string | null;
@@ -146,6 +150,7 @@ type WirePR = {
 type WireSession = {
 	id: string;
 	projectId: string;
+	terminalHandleId?: string;
 	issueId?: string;
 	kind?: string; // worker | orchestrator
 	harness?: string;
@@ -244,6 +249,7 @@ function mapSession(s: WireSession): DashboardSession {
 	return {
 		id: s.id,
 		projectId: s.projectId,
+		terminalHandleId: s.terminalHandleId,
 		status: s.status ?? null,
 		activity: activityString(s.activity),
 		harness: s.harness ?? null,
@@ -269,6 +275,7 @@ function mapOrchestrator(s: WireSession, projectName: string): OrchestratorLink 
 	return {
 		id: s.id,
 		projectId: s.projectId,
+		terminalHandleId: s.terminalHandleId,
 		projectName,
 		status: s.status ?? null,
 		activity: activityString(s.activity),

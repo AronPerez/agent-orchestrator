@@ -85,6 +85,7 @@ import {
 	type ConversationItem,
 	type TurnDiff,
 } from "../../types/conversation";
+import { resolveTurnFilePath, turnFileOpenPath, turnPathHints } from "../../lib/turn-file-open-path";
 
 const timeFormatter = new Intl.DateTimeFormat(undefined, {
 	hour: "2-digit",
@@ -2222,20 +2223,19 @@ export function TurnChangedFiles({
 					const tooltipOldPath = file.oldPath
 						? resolveTurnFilePath(file.oldPath, pathHints)
 						: undefined;
+					const openPath = turnFileOpenPath(file.path, pathHints);
+					const location = fileLocationLabel(tooltipPath, tooltipOldPath);
 
 					const body = (
 						<>
 							<span className="sr-only">{status.label}</span>
 							<FileIcon aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
-							{/* Same path tooltip as mid-turn Edited rows — not a native
-							    ellipsis title of the basename. */}
-							<FileLocationLabel
-								path={file.path}
-								oldPath={file.oldPath}
-								locationPath={tooltipPath}
-								locationOldPath={tooltipOldPath}
+							<span
 								className="min-w-0 flex-1 truncate text-[12px] text-foreground/80"
-							/>
+								title=""
+							>
+								{fileBasename(file.path)}
+							</span>
 							{file.additions > 0 ? (
 								<span className="shrink-0 font-mono text-[11px] tabular-nums text-success">
 									+{file.additions}
@@ -2257,16 +2257,53 @@ export function TurnChangedFiles({
 					return (
 						<li key={`${file.status}-${file.oldPath ?? ""}-${file.path}`}>
 							{onOpenFile ? (
-								<button
-									type="button"
-									onClick={() => onOpenFile(file.path)}
-									aria-label={`Open ${file.path} in Files`}
-									className={rowClass}
-								>
-									{body}
-								</button>
+								<TooltipProvider delayDuration={200}>
+									<Tooltip>
+										<TooltipTrigger asChild>
+											<button
+												type="button"
+												onClick={() => onOpenFile(openPath)}
+												aria-label={`Open ${openPath} in Files`}
+												className={rowClass}
+											>
+												{body}
+											</button>
+										</TooltipTrigger>
+										<TooltipContent
+											side="top"
+											className="max-w-[min(28rem,90vw)] border-border bg-popover px-2.5 py-1.5 font-mono text-[11px] font-normal text-muted-foreground shadow-none"
+										>
+											{location}
+										</TooltipContent>
+									</Tooltip>
+								</TooltipProvider>
 							) : (
-								<div className={rowClass}>{body}</div>
+								<div className={rowClass}>
+									<span className="sr-only">{status.label}</span>
+									<FileIcon aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
+									<FileLocationLabel
+										path={file.path}
+										oldPath={file.oldPath}
+										locationPath={tooltipPath}
+										locationOldPath={tooltipOldPath}
+										className="min-w-0 flex-1 truncate text-[12px] text-foreground/80"
+									/>
+									{file.additions > 0 ? (
+										<span className="shrink-0 font-mono text-[11px] tabular-nums text-success">
+											+{file.additions}
+										</span>
+									) : null}
+									{file.deletions > 0 ? (
+										<span className="shrink-0 font-mono text-[11px] tabular-nums text-destructive">
+											&minus;{file.deletions}
+										</span>
+									) : null}
+									{file.additions === 0 && file.deletions === 0 ? (
+										<span className="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground/50">
+											0
+										</span>
+									) : null}
+								</div>
 							)}
 						</li>
 					);
@@ -2343,57 +2380,6 @@ function FileLocationLabel({
 
 function fileLocationLabel(path: string, oldPath?: string): string {
 	return oldPath ? `${shortenPaths(oldPath)} → ${shortenPaths(path)}` : shortenPaths(path);
-}
-
-/**
- * Absolute paths and a worktree cwd gathered from the same turn's activities, so a
- * turn-diff basename can be shown like the Edited tooltip.
- */
-type TurnPathHints = {
-	byBase: Map<string, string | undefined>;
-	cwd?: string;
-};
-
-function rememberTurnPathHint(byBase: Map<string, string | undefined>, absolutePath: string) {
-	const base = fileBasename(absolutePath);
-	if (!byBase.has(base)) {
-		byBase.set(base, absolutePath);
-		return;
-	}
-	if (byBase.get(base) !== absolutePath) byBase.set(base, undefined);
-}
-
-function turnPathHints(items: ConversationItem[] | undefined): TurnPathHints {
-	const byBase = new Map<string, string | undefined>();
-	let cwd: string | undefined;
-	if (!items?.length) return { byBase, cwd };
-
-	for (const item of items) {
-		if (item.kind !== "activity") continue;
-		if (!cwd && item.detail?.cwd) cwd = item.detail.cwd;
-		if (item.activityKind !== "file_change") continue;
-		for (const file of fileChangeFiles(item)) {
-			if (looksAbsolutePath(file.path)) rememberTurnPathHint(byBase, file.path);
-			if (file.oldPath && looksAbsolutePath(file.oldPath)) rememberTurnPathHint(byBase, file.oldPath);
-		}
-	}
-	return { byBase, cwd };
-}
-
-function looksAbsolutePath(path: string): boolean {
-	return path.startsWith("/") || path.startsWith("~") || /^[A-Za-z]:[\\/]/.test(path);
-}
-
-/** Prefer an absolute path from the turn; otherwise join the worktree cwd. */
-function resolveTurnFilePath(path: string, hints: TurnPathHints): string {
-	if (looksAbsolutePath(path)) return path;
-	const fromBasename = hints.byBase.get(fileBasename(path));
-	if (fromBasename) return fromBasename;
-	if (hints.cwd) {
-		const rel = path.replace(/^\.\//, "");
-		return `${hints.cwd.replace(/\/$/, "")}/${rel}`;
-	}
-	return path;
 }
 
 /** Basename only — the row is too narrow for a full path; the tooltip carries that. */
