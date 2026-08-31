@@ -113,7 +113,10 @@ export async function installFakeBridge(
 					isFullScreen: async () => false,
 					onFullScreen: () => () => undefined,
 				},
-				theme: { set: async () => undefined },
+				theme: {
+					set: async () => undefined,
+					persistTerminal: async () => undefined,
+				},
 				menu: {
 					action: async () => undefined,
 					notifyShellFocus: () => undefined,
@@ -626,7 +629,10 @@ export async function installFakeAgent(
 					isFullScreen: async () => false,
 					onFullScreen: () => () => undefined,
 				},
-				theme: { set: async () => undefined },
+				theme: {
+					set: async () => undefined,
+					persistTerminal: async () => undefined,
+				},
 				menu: {
 					action: async () => undefined,
 					notifyShellFocus: () => undefined,

@@ -280,6 +280,8 @@ const api = {
 		// with the shell. "system" lets both follow the OS.
 		set: (preference: "light" | "dark" | "system") =>
 			ipcRenderer.invoke("theme:set", preference) as Promise<void>,
+		persistTerminal: (scheme: "light" | "dark") =>
+			ipcRenderer.invoke("theme:persist-terminal", scheme) as Promise<void>,
 	},
 	menu: {
 		action: (action: string) =>

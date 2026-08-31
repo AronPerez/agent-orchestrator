@@ -4109,6 +4109,62 @@ func (m *Manager) launchRuntimeEnv(id domain.SessionID, project domain.ProjectID
 	return env, verifier, nil
 }
 
+// prepareWorkerLaunchEnv couples capability issuance with durable verifier
+// persistence. Callers receive the bearer only after authorization can validate
+// it, so an eager worker cannot race its own launch bookkeeping.
+func (m *Manager) prepareWorkerLaunchEnv(
+	ctx context.Context,
+	rec domain.SessionRecord,
+	projectEnv map[string]string,
+) (domain.SessionRecord, map[string]string, error) {
+	env, verifier, err := m.launchRuntimeEnv(rec.ID, rec.ProjectID, rec.IssueID, projectEnv)
+	if err != nil {
+		return rec, nil, err
+	}
+	rec, err = m.persistBrowserCapabilityVerifier(ctx, rec, verifier)
+	if err != nil {
+		return rec, nil, fmt.Errorf("persist browser capability verifier: %w", err)
+	}
+	return rec, env, nil
+}
+
+// prepareChatControllerEnv is the Chat launch variant: the service supplies the
+// exact durable owner selected under its controller gate, while Session Manager
+// retains responsibility for issuing and persisting the split credential.
+func (m *Manager) prepareChatControllerEnv(
+	ctx context.Context,
+	rec domain.SessionRecord,
+	projectEnv map[string]string,
+	expected domain.SessionControllerOwner,
+) (domain.SessionRecord, map[string]string, error) {
+	env, verifier, err := m.launchRuntimeEnv(rec.ID, rec.ProjectID, rec.IssueID, projectEnv)
+	if err != nil {
+		return rec, nil, err
+	}
+	_, _ = expected, expected // preserve intent for future owner-scoped persistence implementations
+	rec, err = m.persistBrowserCapabilityVerifier(ctx, rec, verifier)
+	if err != nil {
+		return rec, nil, fmt.Errorf("persist browser capability verifier: %w", err)
+	}
+	return rec, env, nil
+}
+
+func chatControllerOwner(
+	rec domain.SessionRecord,
+	harness domain.AgentHarness,
+	providerConversationID string,
+	controllerGeneration string,
+) domain.SessionControllerOwner {
+	owner := rec.ControllerOwner()
+	owner.Harness = harness
+	owner.Mode = domain.SessionModeChat
+	owner.IsTerminated = false
+	owner.RuntimeLaunchID = ""
+	owner.ProviderConversationID = providerConversationID
+	owner.ControllerGeneration = controllerGeneration
+	return owner
+}
+
 // persistBrowserCapabilityVerifier runs before the worker runtime starts. This
 // closes the launch race where an eager worker could present its freshly
 // injected token before the daemon had stored the verifier needed to validate
