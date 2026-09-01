@@ -25,11 +25,11 @@ import {
   workerSessions,
 } from "../types/workspace";
 import {
-  boardAttentionZoneOrder,
+  boardKanbanColumnOrder,
   getAgentActivityView,
-  getAttentionZoneViewForZone,
+  getKanbanColumnView,
   getSessionStatusView,
-  type AttentionZoneView,
+  type KanbanColumnView,
 } from "../lib/session-presentation";
 import { matchScore, type MatchTarget } from "../lib/command-palette";
 import { isDialogOrMenuOpen } from "../lib/dom-selectors";
@@ -139,8 +139,8 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const columns: AttentionZoneView[] = boardAttentionZoneOrder.map((zone) =>
-    getAttentionZoneViewForZone(zone, t),
+  const columns: KanbanColumnView[] = boardKanbanColumnOrder.map((column) =>
+    getKanbanColumnView(column, t),
   );
   const workspaceQuery = useWorkspaceQuery();
   const shell = useShellMaybe();

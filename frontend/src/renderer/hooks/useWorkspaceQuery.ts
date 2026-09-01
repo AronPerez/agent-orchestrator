@@ -39,6 +39,7 @@ import {
   type HostSection,
   flattenHostSections,
   toAgentProvider,
+  toKanbanColumn,
   toProjectKind,
   toSessionActivity,
   toSessionStatus,
@@ -204,6 +205,7 @@ async function fetchWorkspaces(host: HostId): Promise<WorkspaceSummary[]> {
           const scmStatus = session.scmStatus
             ? toSessionStatus(session.scmStatus)
             : undefined;
+          const kanbanColumn = toKanbanColumn(session.kanbanColumn, status);
           const activity = toSessionActivity(session.activity);
           if (status === "unknown")
             reportUnknownSessionField("status", session.status);
@@ -234,6 +236,8 @@ async function fetchWorkspaces(host: HostId): Promise<WorkspaceSummary[]> {
             branch: session.branch || undefined,
             status,
             scmStatus,
+            kanbanColumn,
+            displayStatus: session.displayStatus || undefined,
             isTerminated: session.isTerminated,
             terminateOnPrMerge: session.terminateOnPrMerge ?? false,
             autoInjectReview: session.autoInjectReview ?? true,

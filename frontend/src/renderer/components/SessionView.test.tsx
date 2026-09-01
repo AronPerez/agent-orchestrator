@@ -946,6 +946,12 @@ describe("SessionView", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("keeps the git branch out of the session top bar", () => {
+    render(<SessionView sessionRef={sessionRef("sess-1")} />);
+
+    expect(screen.queryByText("ao/sess-1")).not.toBeInTheDocument();
+  });
+
   it("shows a shell opened from chat and returns to the chat agent tab", () => {
     const session = workspaces[0]!.sessions.find(
       (candidate) => candidate.id === "sess-1",

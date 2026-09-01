@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
@@ -357,10 +357,23 @@ describe("global board first launch", () => {
   });
 
   it("keeps the columns once a project exists", async () => {
-    respondWith([project], [workerSession]);
+    respondWith([
+      project,
+    ], [
+      {
+        ...workerSession,
+        kanbanColumn: "needs_review",
+        displayStatus: "Needs human review",
+      },
+    ]);
     renderBoard(<SessionsBoard />);
 
-    expect(await screen.findByText("fix the bug")).toBeInTheDocument();
+    const reviewColumn = document.querySelector(
+      '[data-column="needs_review"]',
+    ) as HTMLElement | null;
+    expect(reviewColumn).not.toBeNull();
+    expect(await within(reviewColumn!).findByText("fix the bug")).toBeInTheDocument();
+    expect(within(reviewColumn!).getByText("Needs human review")).toBeInTheDocument();
     expect(
       screen.queryByText("Add code to Agent Orchestrator"),
     ).not.toBeInTheDocument();

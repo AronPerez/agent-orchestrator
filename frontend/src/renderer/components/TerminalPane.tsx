@@ -1221,6 +1221,7 @@ function AttachedTerminal({
           onToggleFullscreen={onToggleFullscreen}
           onVisibleSize={syncVisibleSize}
           paneScrollsByKeyboard={providerScrollsByKeyboard(provider)}
+          supportsCursorColorScheme={provider === "cursor"}
           theme={theme}
         />
         {showEmptyState && (
