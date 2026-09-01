@@ -26,7 +26,7 @@ test("renderer: new session card appears in the spawning/working state @T0 @SES"
 	// spawning→working transition lands here. The card must not exist until the
 	// fake agent creates it.
 	await installFakeAgent(page);
-	await page.goto("/#/projects/fake-proj");
+	await page.goto("/#/host/local/project/fake-proj");
 	await expect(page.getByTestId("board")).toBeVisible();
 	await expect(page.locator(card("fake-spawn"))).toHaveCount(0);
 

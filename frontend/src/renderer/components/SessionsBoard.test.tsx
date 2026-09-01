@@ -118,6 +118,7 @@ vi.mock("../lib/platform", async (importOriginal) => {
 import {
   archiveToggleHeightClassName,
   archiveToggleOffsetClassName,
+  toKanbanColumn,
 } from "@aoagents/product-ui";
 import { SessionsBoard } from "./SessionsBoard";
 import { toBoardSessionPresentation } from "./SessionsBoardAdapters";
@@ -902,7 +903,7 @@ describe("SessionsBoard", () => {
     );
   });
 
-  it("places an exited live session in Needs you with an Exited badge", () => {
+  it("keeps a PR-less exited session in Building with an Exited badge", () => {
     workspaceQueryMock.mockReturnValue({
       data: [
         workspaceWithSessions([
@@ -915,6 +916,7 @@ describe("SessionsBoard", () => {
             provider: "codex",
             branch: "ao/exited",
             status: "exited",
+            kanbanColumn: "building",
             activity: {
               state: "exited",
               lastActivityAt: "2026-01-01T00:00:00Z",
@@ -930,19 +932,19 @@ describe("SessionsBoard", () => {
 
     renderBoard("p1");
 
-    const needsYouColumn = screen
-      .getByText("Needs you")
-      .closest("section") as HTMLElement;
-    expect(needsYouColumn.firstElementChild).toHaveClass("h-12");
+    const buildingColumn = screen.getByRole("region", {
+      name: "Building sessions",
+    });
+    expect(buildingColumn.firstElementChild).toHaveClass("h-12");
     expect(
-      within(needsYouColumn).getByText("agent-exited-task"),
+      within(buildingColumn).getByText("agent-exited-task"),
     ).toBeInTheDocument();
     expect(
-      within(needsYouColumn).getByText("Exited").parentElement,
-    ).toHaveClass("text-status-exited");
+      within(buildingColumn).getByText("Exited").parentElement,
+    ).toHaveAttribute("data-kanban-column", "building");
   });
 
-  it("renders an idle-first work lane with a separate lower working section", () => {
+  it("keeps idle and active sessions together in a flat Building lane", () => {
     workspaceQueryMock.mockReturnValue({
       data: [
         workspaceWithSessions([
@@ -971,6 +973,7 @@ describe("SessionsBoard", () => {
             id: "s-review",
             title: "idle-with-pr-task",
             status: "pr_open",
+            kanbanColumn: "needs_review",
             activity: { state: "idle", lastActivityAt: "2026-01-01T00:00:00Z" },
             prs: [
               {
@@ -992,56 +995,31 @@ describe("SessionsBoard", () => {
 
     renderBoard("p1");
 
-    const workLane = screen.getByRole("region", {
-      name: "Idle / Working sessions",
-    });
-    const idleRegion = within(workLane).getByRole("region", {
-      name: "Idle sessions",
-    });
-    const workingRegion = within(workLane).getByRole("region", {
-      name: "Working sessions",
+    const buildingLane = screen.getByRole("region", {
+      name: "Building sessions",
     });
     const reviewRegion = screen.getByRole("region", {
       name: "In review sessions",
     });
-    const workSummary = within(workLane).getByRole("group", {
-      name: "Idle / Working lane summary",
-    });
-
+    expect(within(buildingLane).getAllByTestId("board-session-card")).toHaveLength(
+      3,
+    );
+    expect(buildingLane.querySelectorAll(".overflow-y-auto")).toHaveLength(1);
+    expect(within(buildingLane).queryByRole("region")).not.toBeInTheDocument();
     expect(
-      within(workSummary).getByText("Idle").querySelector("span"),
-    ).toHaveClass("bg-status-idle");
-    expect(
-      within(workSummary).getByText("Working").querySelector("span"),
-    ).toHaveClass("bg-status-working");
-    expect(workSummary).toHaveClass("font-mono", "text-2xs", "uppercase");
-    expect(workSummary.parentElement).toHaveClass("h-12");
-    expect(workingRegion.firstElementChild).toHaveClass("py-2.5");
-    expect(
-      within(workLane).getByLabelText("2 idle sessions"),
-    ).toHaveTextContent("2");
-    expect(
-      within(workLane).getByLabelText("1 working session"),
-    ).toHaveTextContent("1");
-    expect(
-      screen.queryByRole("button", { name: /idle sessions/i }),
-    ).not.toBeInTheDocument();
-    expect(workLane.querySelectorAll(".overflow-y-auto")).toHaveLength(1);
-    expect(idleRegion).toHaveClass("flex-none");
-    expect(idleRegion).not.toHaveClass("overflow-y-auto", "board-scrollbar");
-    expect(workingRegion).toHaveClass("flex-1", "border-t");
-    expect(workingRegion.className).not.toContain("rounded-t");
-    expect(workingRegion).not.toHaveClass("overflow-y-auto", "board-scrollbar");
-    expect(within(idleRegion).getByText("idle-no-pr-task")).toBeInTheDocument();
-    expect(
-      within(idleRegion).getByText("second-idle-task"),
+      within(buildingLane).getByText("idle-no-pr-task"),
     ).toBeInTheDocument();
-    expect(within(workingRegion).getByText("active-task")).toBeInTheDocument();
+    expect(
+      within(buildingLane).getByText("second-idle-task"),
+    ).toBeInTheDocument();
+    expect(
+      within(buildingLane).getByText("active-task"),
+    ).toBeInTheDocument();
     expect(
       within(reviewRegion).getByText("idle-with-pr-task"),
     ).toBeInTheDocument();
     expect(
-      within(workLane).queryByText("idle-with-pr-task"),
+      within(buildingLane).queryByText("idle-with-pr-task"),
     ).not.toBeInTheDocument();
 
     const idleCard = screen
@@ -1052,7 +1030,7 @@ describe("SessionsBoard", () => {
     expect(badge).not.toHaveClass("text-status-working");
   });
 
-  it("uses one shared scrollbar when a short idle section sits above many working sessions", () => {
+  it("uses one scrollbar for mixed idle and working cards in Building", () => {
     workspaceQueryMock.mockReturnValue({
       data: [
         workspaceWithSessions([
@@ -1080,40 +1058,24 @@ describe("SessionsBoard", () => {
 
     renderBoard("p1");
 
-    const workLane = screen.getByRole("region", {
-      name: "Idle / Working sessions",
-    });
-    const idleRegion = within(workLane).getByRole("region", {
-      name: "Idle sessions",
-    });
-    const workingRegion = within(workLane).getByRole("region", {
-      name: "Working sessions",
+    const buildingLane = screen.getByRole("region", {
+      name: "Building sessions",
     });
     const laneScrollers = Array.from(
-      workLane.querySelectorAll<HTMLElement>(".overflow-y-auto"),
+      buildingLane.querySelectorAll<HTMLElement>(".overflow-y-auto"),
     );
 
     expect(laneScrollers).toHaveLength(1);
     expect(laneScrollers[0]).toHaveClass("board-scrollbar", "overflow-y-auto");
-    expect(laneScrollers[0]).toContainElement(idleRegion);
-    expect(laneScrollers[0]).toContainElement(workingRegion);
-    expect(idleRegion).toHaveClass("flex-none");
-    expect(workingRegion).toHaveClass("flex-1");
     expect(
-      idleRegion.querySelector(".overflow-y-auto"),
-    ).not.toBeInTheDocument();
-    expect(
-      workingRegion.querySelector(".overflow-y-auto"),
-    ).not.toBeInTheDocument();
-    expect(
-      within(idleRegion).getByText("single-idle-task"),
+      within(buildingLane).getByText("single-idle-task"),
     ).toBeInTheDocument();
     expect(
-      within(workingRegion).getAllByTestId("board-session-card"),
-    ).toHaveLength(7);
+      within(buildingLane).getAllByTestId("board-session-card"),
+    ).toHaveLength(8);
   });
 
-  it("lets idle sessions fill the lane when no working sessions exist", () => {
+  it("lets an idle-only Building lane use its full scroller", () => {
     workspaceQueryMock.mockReturnValue({
       data: [
         workspaceWithSessions([
@@ -1130,26 +1092,16 @@ describe("SessionsBoard", () => {
 
     renderBoard("p1");
 
-    const workLane = screen.getByRole("region", {
-      name: "Idle / Working sessions",
+    const buildingLane = screen.getByRole("region", {
+      name: "Building sessions",
     });
-    const idleRegion = within(workLane).getByRole("region", {
-      name: "Idle sessions",
-    });
-    expect(within(workLane).getByLabelText("1 idle session")).toHaveTextContent(
-      "1",
-    );
-    expect(
-      within(workLane).getByLabelText("0 working sessions"),
-    ).toHaveTextContent("0");
-    expect(idleRegion).toHaveClass("flex-1");
-    expect(within(idleRegion).getByText("idle-task")).toBeInTheDocument();
-    expect(
-      within(workLane).queryByRole("region", { name: "Working sessions" }),
-    ).not.toBeInTheDocument();
+    const scroller = buildingLane.querySelector<HTMLElement>(".overflow-y-auto");
+    expect(scroller).toHaveClass("board-scrollbar", "flex-1");
+    expect(within(buildingLane).getByText("idle-task")).toBeInTheDocument();
+    expect(within(buildingLane).queryByRole("region")).not.toBeInTheDocument();
   });
 
-  it("lets working sessions fill the lane when no idle sessions exist", () => {
+  it("keeps working-only cards in one flat Building lane", () => {
     workspaceQueryMock.mockReturnValue({
       data: [
         workspaceWithSessions([
@@ -1178,33 +1130,23 @@ describe("SessionsBoard", () => {
 
     renderBoard("p1");
 
-    const workLane = screen.getByRole("region", {
-      name: "Idle / Working sessions",
+    const buildingLane = screen.getByRole("region", {
+      name: "Building sessions",
     });
-    const workingRegion = within(workLane).getByRole("region", {
-      name: "Working sessions",
-    });
+    expect(buildingLane.querySelectorAll(".overflow-y-auto")).toHaveLength(1);
+    expect(within(buildingLane).getAllByTestId("board-session-card")).toHaveLength(
+      2,
+    );
     expect(
-      within(workLane).getByLabelText("0 idle sessions"),
-    ).toHaveTextContent("0");
-    expect(
-      within(workLane).getByLabelText("2 working sessions"),
-    ).toHaveTextContent("2");
-    expect(
-      within(workLane).queryByRole("region", { name: "Idle sessions" }),
-    ).not.toBeInTheDocument();
-    expect(workingRegion).toHaveClass("flex-1");
-    expect(workingRegion).not.toHaveClass("flex-[2]", "border-t");
-    expect(workLane.querySelectorAll(".overflow-y-auto")).toHaveLength(1);
-    expect(
-      within(workingRegion).getByText("first-working-task"),
+      within(buildingLane).getByText("first-working-task"),
     ).toBeInTheDocument();
     expect(
-      within(workingRegion).getByText("second-working-task"),
+      within(buildingLane).getByText("second-working-task"),
     ).toBeInTheDocument();
+    expect(within(buildingLane).queryByRole("region")).not.toBeInTheDocument();
   });
 
-  it("keeps idle and working sections visible when navigating between project boards", () => {
+  it("swaps the Building lane's cards when navigating between project boards", () => {
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },
     });
@@ -1223,6 +1165,7 @@ describe("SessionsBoard", () => {
               provider: "claude-code",
               branch: "ao/radic-active",
               status: "working",
+              kanbanColumn: "building",
               activity: {
                 state: "active",
                 lastActivityAt: "2026-01-01T00:00:00Z",
@@ -1238,6 +1181,7 @@ describe("SessionsBoard", () => {
               provider: "claude-code",
               branch: "ao/radic-idle",
               status: "idle",
+              kanbanColumn: "building",
               activity: {
                 state: "idle",
                 lastActivityAt: "2026-01-01T00:00:00Z",
@@ -1260,6 +1204,7 @@ describe("SessionsBoard", () => {
               provider: "claude-code",
               branch: "ao/other-active",
               status: "working",
+              kanbanColumn: "building",
               activity: {
                 state: "active",
                 lastActivityAt: "2026-01-01T00:00:00Z",
@@ -1275,6 +1220,7 @@ describe("SessionsBoard", () => {
               provider: "claude-code",
               branch: "ao/other-idle",
               status: "idle",
+              kanbanColumn: "building",
               activity: {
                 state: "idle",
                 lastActivityAt: "2026-01-01T00:00:00Z",
@@ -1289,15 +1235,9 @@ describe("SessionsBoard", () => {
     });
     const view = renderBoardWithClient(queryClient, "p1");
 
-    const p1Lane = screen.getByRole("region", {
-      name: "Idle / Working sessions",
-    });
-    expect(
-      within(p1Lane).getByRole("region", { name: "Idle sessions" }),
-    ).toHaveTextContent("p1 idle");
-    expect(
-      within(p1Lane).getByRole("region", { name: "Working sessions" }),
-    ).toHaveTextContent("p1 active");
+    const p1Lane = screen.getByRole("region", { name: "Building sessions" });
+    expect(p1Lane).toHaveTextContent("p1 idle");
+    expect(p1Lane).toHaveTextContent("p1 active");
 
     view.rerender(
       <QueryClientProvider client={queryClient}>
@@ -1307,16 +1247,10 @@ describe("SessionsBoard", () => {
       </QueryClientProvider>,
     );
 
-    const p2Lane = screen.getByRole("region", {
-      name: "Idle / Working sessions",
-    });
+    const p2Lane = screen.getByRole("region", { name: "Building sessions" });
     expect(screen.queryByText("p1 idle")).not.toBeInTheDocument();
-    expect(
-      within(p2Lane).getByRole("region", { name: "Idle sessions" }),
-    ).toHaveTextContent("p2 idle");
-    expect(
-      within(p2Lane).getByRole("region", { name: "Working sessions" }),
-    ).toHaveTextContent("p2 active");
+    expect(p2Lane).toHaveTextContent("p2 idle");
+    expect(p2Lane).toHaveTextContent("p2 active");
   });
 
   it("shows a static archive card with a persistent restore action", async () => {
@@ -1754,7 +1688,7 @@ describe("SessionsBoard", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("shows a merged-only lane and opens its card without showing restore", async () => {
+  it("keeps a live merged session in Ready and opens it without restore", async () => {
     workspaceQueryMock.mockReturnValue({
       data: [
         workspaceWithSessions([
@@ -1771,34 +1705,12 @@ describe("SessionsBoard", () => {
 
     renderBoard("p1");
 
-    const mergeLane = screen.getByRole("region", {
-      name: "Ready to merge / Merged sessions",
-    });
-    const mergedRegion = within(mergeLane).getByRole("region", {
-      name: "Merged sessions",
-    });
-    const mergeSummary = within(mergeLane).getByRole("group", {
-      name: "Ready to merge / Merged lane summary",
-    });
-    expect(
-      within(mergeSummary).getByText("Ready to merge").querySelector("span"),
-    ).toHaveClass("bg-status-ready");
-    expect(
-      within(mergeSummary).getByText("Merged").querySelector("span"),
-    ).toHaveClass("bg-status-merged");
-    expect(
-      within(mergeLane).getByLabelText("0 ready to merge sessions"),
-    ).toHaveTextContent("0");
-    expect(
-      within(mergeLane).getByLabelText("1 merged session"),
-    ).toHaveTextContent("1");
-    expect(
-      within(mergeLane).queryByRole("region", {
-        name: "Ready to merge sessions",
-      }),
-    ).not.toBeInTheDocument();
-    expect(mergedRegion).toHaveClass("flex-1");
-    expect(within(mergedRegion).getByText("merged worker")).toBeInTheDocument();
+    const readyLane = screen.getByRole("region", { name: "Ready sessions" });
+    expect(within(readyLane).getByText("merged worker")).toBeInTheDocument();
+    expect(within(readyLane).getByText("Merged").parentElement).toHaveAttribute(
+      "data-kanban-column",
+      "ready",
+    );
     expect(
       screen.queryByRole("button", { name: /archive/i }),
     ).not.toBeInTheDocument();
@@ -1815,7 +1727,7 @@ describe("SessionsBoard", () => {
     });
   });
 
-  it("splits ready and merged sessions into upper and lower regions", () => {
+  it("renders mergeable and merged sessions in one flat Ready lane", () => {
     workspaceQueryMock.mockReturnValue({
       data: [
         workspaceWithSessions([
@@ -1837,29 +1749,12 @@ describe("SessionsBoard", () => {
 
     renderBoard("p1");
 
-    const mergeLane = screen.getByRole("region", {
-      name: "Ready to merge / Merged sessions",
-    });
-    const readyRegion = within(mergeLane).getByRole("region", {
-      name: "Ready to merge sessions",
-    });
-    const mergedRegion = within(mergeLane).getByRole("region", {
-      name: "Merged sessions",
-    });
-    expect(
-      within(mergeLane).getByLabelText("1 ready to merge session"),
-    ).toHaveTextContent("1");
-    expect(
-      within(mergeLane).getByLabelText("1 merged session"),
-    ).toHaveTextContent("1");
-    expect(mergeLane.querySelectorAll(".overflow-y-auto")).toHaveLength(1);
-    expect(readyRegion).toHaveClass("flex-none");
-    expect(readyRegion).not.toHaveClass("overflow-y-auto", "board-scrollbar");
-    expect(mergedRegion).toHaveClass("flex-1", "border-t");
-    expect(mergedRegion.className).not.toContain("rounded-t");
-    expect(mergedRegion).not.toHaveClass("overflow-y-auto", "board-scrollbar");
-    expect(within(readyRegion).getByText("ready worker")).toBeInTheDocument();
-    expect(within(mergedRegion).getByText("merged worker")).toBeInTheDocument();
+    const readyLane = screen.getByRole("region", { name: "Ready sessions" });
+    expect(readyLane.querySelectorAll(".overflow-y-auto")).toHaveLength(1);
+    expect(within(readyLane).getAllByTestId("board-session-card")).toHaveLength(2);
+    expect(within(readyLane).getByText("ready worker")).toBeInTheDocument();
+    expect(within(readyLane).getByText("merged worker")).toBeInTheDocument();
+    expect(within(readyLane).queryByRole("region")).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /archive/i }),
     ).not.toBeInTheDocument();
@@ -1914,7 +1809,7 @@ describe("SessionsBoard", () => {
     }
   });
 
-  it("archives a terminated merged runtime without duplicating it in the merged lane", async () => {
+  it("archives a terminated merged runtime without duplicating it in Ready", async () => {
     workspaceQueryMock.mockReturnValue({
       data: [
         workspaceWithSessions([
@@ -1936,14 +1831,12 @@ describe("SessionsBoard", () => {
 
     renderBoard("p1");
 
-    const mergedRegion = screen.getByRole("region", {
-      name: "Merged sessions",
-    });
+    const readyLane = screen.getByRole("region", { name: "Ready sessions" });
     expect(
-      within(mergedRegion).getByText("live merged worker"),
+      within(readyLane).getByText("live merged worker"),
     ).toBeInTheDocument();
     expect(
-      within(mergedRegion).queryByText("archived merged worker"),
+      within(readyLane).queryByText("archived merged worker"),
     ).not.toBeInTheDocument();
 
     await expandArchive();
@@ -1964,7 +1857,7 @@ describe("SessionsBoard", () => {
     ).not.toBeInTheDocument();
     expect(
       within(archivedMergedCard!).getByText("Merged").parentElement,
-    ).toHaveClass("text-status-merged");
+    ).toHaveAttribute("data-kanban-column", "archive");
     expect(
       within(archive).getByRole("button", {
         name: "Restore archived merged worker",
@@ -2146,6 +2039,7 @@ function boardSession(
     workspaceName: "radic",
     provider: "claude-code",
     branch: `ao/${overrides.id}`,
+    kanbanColumn: toKanbanColumn(undefined, overrides.status),
     updatedAt: "2026-01-01T00:00:00Z",
     prs: [],
     ...overrides,
@@ -2180,6 +2074,7 @@ function terminatedSession(
     kind: "worker",
     branch: "ao/dead-worker",
     status: "terminated",
+    kanbanColumn: "archive",
     isTerminated: true,
     updatedAt: "2026-01-01T00:00:00Z",
     prs: [
