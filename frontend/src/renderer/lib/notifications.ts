@@ -22,12 +22,7 @@ export const NOTIFICATION_PAGE_SIZE = 100;
 const SSE_RETRY_MS = 5_000;
 const EVENTSOURCE_CLOSED = 2;
 
-/**
- * Only these two kinds describe something still waiting on the user.
- * `pr_merged` / `pr_closed_unmerged` report something that already happened.
- * Mirrors NotificationType.NeedsResolution on the backend — used here only to
- * keep `unresolvedCount` accurate on the unread/all caches.
- */
+/** Mirrors NotificationType.NeedsResolution for live cache updates. */
 const UNRESOLVABLE_TYPES = new Set(["needs_input", "ready_to_merge"]);
 
 type NotificationsQueryKey = typeof unreadNotificationsQueryKey | typeof recentNotificationsQueryKey;
@@ -47,20 +42,7 @@ function notificationHosts(): HostId[] {
 type HostCursor = [host: HostId, cursor: string];
 
 function decodeHostCursors(cursor: string): HostCursor[] {
-	const decoded: unknown = JSON.parse(cursor);
-	if (
-		!Array.isArray(decoded) ||
-		!decoded.every(
-			(entry) =>
-				Array.isArray(entry) &&
-				entry.length === 2 &&
-				typeof entry[0] === "string" &&
-				typeof entry[1] === "string",
-		)
-	) {
-		throw new Error("Invalid notifications cursor");
-	}
-	return decoded as HostCursor[];
+	return JSON.parse(cursor) as HostCursor[];
 }
 
 export async function fetchNotificationsPage(status: NotificationListStatus, cursor = ""): Promise<NotificationsPage> {
@@ -78,14 +60,14 @@ export async function fetchNotificationsPage(status: NotificationListStatus, cur
 					},
 				},
 			});
-			if (error) throw new Error(apiErrorMessage(error, "Could not load notifications"));
-			const notifications = (data?.notifications ?? []).map((notification) => ({ ...notification, host }));
+			if (error || !data) throw new Error(apiErrorMessage(error, "Could not load notifications"));
+			const notifications = data.notifications.map((notification) => ({ ...notification, host }));
 			return {
 				host,
-				nextCursor: data?.nextCursor,
+				nextCursor: data.nextCursor,
 				notifications,
-				unreadCount: data?.unreadCount ?? notifications.filter((item) => item.status === "unread").length,
-				unresolvedCount: data?.unresolvedCount ?? notifications.filter(isUnresolved).length,
+				unreadCount: data.unreadCount,
+				unresolvedCount: data.unresolvedCount,
 			};
 		}),
 	);
@@ -108,29 +90,19 @@ export async function fetchNotificationsPage(status: NotificationListStatus, cur
 	};
 }
 
-/**
- * Fired when the panel opens — seeing the notifications is the acknowledgement.
- *
- * Empty `keys` marks every unread row on every host (the all-history panel still
- * shows them). Non-empty host-qualified keys mark exactly those rows so
- * incremental clients can keep later unread pages reachable.
- */
+/** Fired when the panel opens — seeing the loaded notifications is the acknowledgement. */
 export async function markAllNotificationsRead(keys: string[]): Promise<number> {
 	const idsByHost = new Map<HostId, string[]>();
-	if (keys.length === 0) {
-		for (const host of notificationHosts()) idsByHost.set(host, []);
-	} else {
-		for (const key of keys) {
-			const { host, id } = parseRefKey(key);
-			const ids = idsByHost.get(host);
-			if (ids) ids.push(id);
-			else idsByHost.set(host, [id]);
-		}
+	for (const key of keys) {
+		const { host, id } = parseRefKey(key);
+		const ids = idsByHost.get(host);
+		if (ids) ids.push(id);
+		else idsByHost.set(host, [id]);
 	}
 	const updatedCounts = await Promise.all(
 		[...idsByHost].map(async ([host, ids]) => {
 			const { data, error } = await clientFor(host).POST("/api/v1/notifications/read-all", {
-				body: ids.length === 0 ? {} : { ids },
+				body: { ids },
 			});
 			if (error) throw new Error(apiErrorMessage(error, "Could not mark notifications read"));
 			return data?.updatedCount ?? 0;
@@ -223,11 +195,8 @@ function mergeNotificationIntoCache(
 /**
  * Marks notifications read in the React Query caches.
  *
- * Empty `keys` means every unread row — matching `POST /read-all` with no body.
- * That is safe for the all-history panel: read rows remain visible there.
- *
- * Non-empty host-qualified keys mark exactly those rows and keep unread pagination cursors
- * intact so later pages stay reachable when a client acknowledges incrementally.
+ * Host-qualified keys mark exactly those rows and keep unread pagination cursors intact so
+ * later pages stay reachable when a client acknowledges incrementally.
  *
  * `updatedCount` is the mutation's server tally. Prefer it over locally cleared
  * rows: later all-list pages can acknowledge unread ids that were never loaded
@@ -238,38 +207,6 @@ export function markAllCachedNotificationsRead(
 	keys: string[],
 	updatedCount?: number,
 ): void {
-	if (keys.length === 0) {
-		queryClient.setQueryData<NotificationsCache>(unreadNotificationsQueryKey, (current) => {
-			if (!current) {
-				return { pageParams: [""], pages: [{ notifications: [], unreadCount: 0, unresolvedCount: 0 }] };
-			}
-			return {
-				pageParams: [""],
-				pages: [
-					{
-						notifications: [],
-						unreadCount: 0,
-						unresolvedCount: current.pages[0]?.unresolvedCount ?? 0,
-					},
-				],
-			};
-		});
-		queryClient.setQueryData<NotificationsCache>(recentNotificationsQueryKey, (current) => {
-			if (!current) return current;
-			return {
-				...current,
-				pages: current.pages.map((page) => ({
-					...page,
-					notifications: page.notifications.map((item) =>
-						item.status === "read" ? item : { ...item, status: "read" as const },
-					),
-					unreadCount: 0,
-				})),
-			};
-		});
-		return;
-	}
-
 	const acknowledged = new Set(keys);
 	for (const queryKey of [unreadNotificationsQueryKey, recentNotificationsQueryKey] as const) {
 		queryClient.setQueryData<NotificationsCache>(queryKey, (current) => {
@@ -310,9 +247,7 @@ export function getCachedNotifications(cache: NotificationsCache | undefined): N
 }
 
 export function getCachedUnreadCount(cache: NotificationsCache | undefined): number {
-	return (
-		cache?.pages[0]?.unreadCount ?? getCachedNotifications(cache).filter((item) => item.status === "unread").length
-	);
+	return cache?.pages[0]?.unreadCount ?? 0;
 }
 
 export function keepLatestNotificationsPage(
@@ -452,18 +387,13 @@ export function createNotificationsTransport(
 				for (const host of wanted) connectHostStream(host);
 			};
 
-			const removeDaemonListener = aoBridge.daemon.onStatus(() => {
+			const syncAndInvalidate = () => {
 				syncSources();
 				invalidateNotifications();
-			});
-			const removeBaseUrlListener = subscribeApiBaseUrl(() => {
-				syncSources();
-				invalidateNotifications();
-			});
-			const removeHostsListener = subscribeConnectedHosts(() => {
-				syncSources();
-				invalidateNotifications();
-			});
+			};
+			const removeDaemonListener = aoBridge.daemon.onStatus(syncAndInvalidate);
+			const removeBaseUrlListener = subscribeApiBaseUrl(syncAndInvalidate);
+			const removeHostsListener = subscribeConnectedHosts(syncAndInvalidate);
 			syncSources();
 
 			return () => {

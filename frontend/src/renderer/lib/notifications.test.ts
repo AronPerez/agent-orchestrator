@@ -259,20 +259,6 @@ describe("notification cache helpers", () => {
 		});
 	});
 
-	it("marks all notifications read on every connected host when no refs are supplied", async () => {
-		connectedHostsMock.mockReturnValue([REMOTE]);
-		const localPost = vi.fn().mockResolvedValue({ data: { updatedCount: 1 } });
-		const remotePost = vi.fn().mockResolvedValue({ data: { updatedCount: 2 } });
-		clientForMock.mockImplementation((host: HostId) => ({
-			GET: apiGetMock,
-			POST: host === LOCAL_HOST ? localPost : remotePost,
-		}));
-
-		await expect(markAllNotificationsRead([])).resolves.toBe(3);
-		expect(localPost).toHaveBeenCalledWith("/api/v1/notifications/read-all", { body: {} });
-		expect(remotePost).toHaveBeenCalledWith("/api/v1/notifications/read-all", { body: {} });
-	});
-
 	it("merges unread notifications by host-qualified id", () => {
 		const qc = queryClient();
 
@@ -304,34 +290,6 @@ describe("notification cache helpers", () => {
 		expect(getCachedNotifications(qc.getQueryData<NotificationsCache>(recentNotificationsQueryKey))).toEqual([
 			expect.objectContaining({ id: "ntf_1", status: "read" }),
 		]);
-	});
-
-	it("clears every unread row when acknowledging with no ids", () => {
-		const qc = queryClient();
-		mergeUnreadNotification(qc, notification({ id: "ntf_1" }));
-		mergeUnreadNotification(qc, notification({ id: "ntf_2" }));
-		qc.setQueryData<NotificationsCache>(recentNotificationsQueryKey, {
-			pageParams: [""],
-			pages: [
-				{
-					notifications: [notification({ id: "ntf_1" }), notification({ id: "ntf_2" })],
-					unreadCount: 2,
-					unresolvedCount: 2,
-				},
-			],
-		});
-
-		markAllCachedNotificationsRead(qc, []);
-
-		expect(getCachedNotifications(qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey))).toEqual([]);
-		expect(getCachedUnreadCount(qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey))).toBe(0);
-		expect(getCachedNotifications(qc.getQueryData<NotificationsCache>(recentNotificationsQueryKey))).toEqual(
-			expect.arrayContaining([
-				expect.objectContaining({ id: "ntf_1", status: "read" }),
-				expect.objectContaining({ id: "ntf_2", status: "read" }),
-			]),
-		);
-		expect(getCachedNotifications(qc.getQueryData<NotificationsCache>(recentNotificationsQueryKey))).toHaveLength(2);
 	});
 
 	// Acknowledging must never discard the cursor to rows the panel has not

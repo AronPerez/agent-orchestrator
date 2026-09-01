@@ -5,7 +5,6 @@ import {
 	markAllNotificationsRead,
 	notificationsQueryKey,
 	type NotificationListStatus,
-	unreadNotificationsQueryKey,
 } from "../lib/notifications";
 
 export function useNotificationsQuery(status: NotificationListStatus, enabled = true) {
@@ -29,13 +28,6 @@ export function useMarkAllNotificationsReadMutation() {
 		mutationFn: markAllNotificationsRead,
 		onSuccess: (updatedCount, keys) => {
 			markAllCachedNotificationsRead(queryClient, keys, updatedCount);
-			// Do not invalidate recent/all here: a refetch would drop loaded pages
-			// and the cursor to unread rows the panel has not reached yet. The
-			// cache is already correct for the ids we sent; updatedCount keeps the
-			// unread badge in sync even when those ids only exist in the all list.
-			if (keys.length === 0) {
-				void queryClient.invalidateQueries({ queryKey: unreadNotificationsQueryKey });
-			}
 		},
 	});
 }
