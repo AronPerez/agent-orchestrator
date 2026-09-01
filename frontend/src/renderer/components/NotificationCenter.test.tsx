@@ -31,6 +31,7 @@ const {
 const allNotifications: NotificationDTO[] = [
 	{
 		id: "ntf_2",
+		host: "local",
 		sessionId: "sess-2",
 		projectId: "proj-1",
 		prUrl: "https://github.com/acme/app/pull/67",
@@ -43,6 +44,7 @@ const allNotifications: NotificationDTO[] = [
 	},
 	{
 		id: "ntf_1",
+		host: "local",
 		sessionId: "sess-1",
 		projectId: "proj-1",
 		prUrl: "",
@@ -55,6 +57,7 @@ const allNotifications: NotificationDTO[] = [
 	},
 	{
 		id: "ntf_4",
+		host: "local",
 		sessionId: "sess-4",
 		projectId: "proj-1",
 		prUrl: "",
@@ -67,6 +70,7 @@ const allNotifications: NotificationDTO[] = [
 	},
 	{
 		id: "ntf_dead",
+		host: "local",
 		sessionId: "sess-dead",
 		projectId: "proj-1",
 		prUrl: "",
@@ -226,14 +230,21 @@ describe("NotificationRuntime", () => {
 				<NotificationRuntime />
 			</QueryClientProvider>,
 		);
-		return connectMock.mock.calls[0][1] as () => string | undefined;
+		return connectMock.mock.calls[0][1] as () => { host: string; id: string } | undefined;
 	}
 
 	it("reports the session while its agent terminal is the one on screen", () => {
 		paramsMock.mockReturnValue({ hostId: "local", sessionId: "sess-1" });
 		useUiStore.setState({ visibleTerminalKindBySession: { "local:sess-1": "worker" } });
 
-		expect(renderRuntime()()).toBe("sess-1");
+		expect(renderRuntime()()).toEqual({ host: "local", id: "sess-1" });
+	});
+
+	it("reports a remote session while its agent terminal is on screen", () => {
+		paramsMock.mockReturnValue({ hostId: "http://192.0.2.1:3011", sessionId: "sess-1" });
+		useUiStore.setState({ visibleTerminalKindBySession: { "http%3A%2F%2F192.0.2.1%3A3011:sess-1": "worker" } });
+
+		expect(renderRuntime()()).toEqual({ host: "http://192.0.2.1:3011", id: "sess-1" });
 	});
 
 	it.each(["shell", "reviewer"] as const)("reports nothing while a %s terminal covers the agent", (kind) => {
@@ -261,7 +272,7 @@ describe("NotificationRuntime", () => {
 		expect(getVisibleAgentSessionId()).toBeUndefined();
 
 		useUiStore.setState({ visibleTerminalKindBySession: { "local:sess-1": "worker" } });
-		expect(getVisibleAgentSessionId()).toBe("sess-1");
+		expect(getVisibleAgentSessionId()).toEqual({ host: "local", id: "sess-1" });
 		expect(connectMock).toHaveBeenCalledTimes(1);
 	});
 });
@@ -339,7 +350,7 @@ describe("NotificationCenter", () => {
 		renderNotificationCenter();
 		await clickOpen();
 
-		expect(markAllMock.mock.calls[0][0]).toEqual(expect.arrayContaining(["ntf_1", "ntf_2"]));
+		expect(markAllMock.mock.calls[0][0]).toEqual(expect.arrayContaining(["local:ntf_1", "local:ntf_2"]));
 		expect(markAllMock.mock.calls[0][0]).toHaveLength(2);
 		expect(screen.queryByRole("button", { name: "Mark all notifications read" })).not.toBeInTheDocument();
 		expect(screen.queryByRole("button", { name: "Mark notification read" })).not.toBeInTheDocument();
@@ -360,7 +371,7 @@ describe("NotificationCenter", () => {
 		await userEvent.click(screen.getByRole("button", { name: "Retry" }));
 
 		await waitFor(() => expect(markAllMock).toHaveBeenCalledTimes(2));
-		expect(markAllMock.mock.calls[1][0]).toEqual(expect.arrayContaining(["ntf_1", "ntf_2"]));
+		expect(markAllMock.mock.calls[1][0]).toEqual(expect.arrayContaining(["local:ntf_1", "local:ntf_2"]));
 		expect(markAllMock.mock.calls[1][0]).toHaveLength(2);
 		await waitFor(() => expect(screen.queryByText("network down")).not.toBeInTheDocument());
 		expect(screen.getByText("Checkout flow needs input").className).toContain("font-medium");
@@ -369,6 +380,7 @@ describe("NotificationCenter", () => {
 	it("keeps later unread pages highlighted when they load after open", async () => {
 		const laterUnread: NotificationDTO = {
 			id: "ntf_later",
+			host: "local",
 			sessionId: "sess-1",
 			projectId: "proj-1",
 			prUrl: "",
@@ -455,7 +467,7 @@ describe("NotificationCenter", () => {
 			</QueryClientProvider>,
 		);
 		await clickOpen();
-		expect(markAllMock.mock.calls[0][0]).toEqual(expect.arrayContaining(["ntf_1", "ntf_2"]));
+		expect(markAllMock.mock.calls[0][0]).toEqual(expect.arrayContaining(["local:ntf_1", "local:ntf_2"]));
 		expect(markAllMock.mock.calls[0][0]).toHaveLength(2);
 		await waitFor(() => expect(screen.getByRole("button", { name: "1 unread notifications" })).toBeInTheDocument());
 		markAllMock.mockClear();
@@ -478,7 +490,7 @@ describe("NotificationCenter", () => {
 		);
 
 		expect(await screen.findByText("Later unread needs input")).toHaveClass("font-medium");
-		await waitFor(() => expect(markAllMock).toHaveBeenCalledWith(["ntf_later"]));
+		await waitFor(() => expect(markAllMock).toHaveBeenCalledWith(["local:ntf_later"]));
 		await waitFor(() => expect(screen.getByRole("button", { name: "Notifications" })).toBeInTheDocument());
 		expect(screen.queryByRole("button", { name: /unread notifications/ })).not.toBeInTheDocument();
 	});
@@ -515,6 +527,29 @@ describe("NotificationCenter", () => {
 		expect(navigateMock).toHaveBeenCalledWith({
 			to: "/host/$hostId/session/$sessionId",
 			params: { hostId: "local", sessionId: "sess-1" },
+		});
+	});
+
+	it("navigates a remote notification to its originating host", async () => {
+		const remoteNotification = {
+			...allNotifications[1],
+			host: "http://192.0.2.1:3011",
+			title: "Remote checkout needs input",
+		};
+		notificationQueryMock.mockImplementation((status: NotificationListStatus) => ({
+			...notificationQueryResult(status),
+			data: {
+				pageParams: [""],
+				pages: [{ notifications: [remoteNotification], unreadCount: 1, unresolvedCount: 1 }],
+			},
+		}));
+		renderNotificationCenter();
+		await clickOpen();
+
+		await userEvent.click(screen.getByText("Remote checkout needs input"));
+		expect(navigateMock).toHaveBeenCalledWith({
+			to: "/host/$hostId/session/$sessionId",
+			params: { hostId: "http://192.0.2.1:3011", sessionId: "sess-1" },
 		});
 	});
 
@@ -631,6 +666,7 @@ describe("NotificationCenter", () => {
 									notifications: [
 										{
 											id: "ntf_dead_pr",
+											host: "local",
 											sessionId: "sess-dead",
 											projectId: "proj-1",
 											prUrl: "https://github.com/acme/app/pull/9",

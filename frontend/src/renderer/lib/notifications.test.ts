@@ -4,27 +4,42 @@ import type { NotificationDTO, NotificationsCache } from "./notifications";
 
 const {
 	apiGetMock,
-	getApiBaseUrlMock,
+	apiPostMock,
+	baseUrlForMock,
+	clientForMock,
+	connectedHostsMock,
 	onStatusMock,
 	removeStatusMock,
 	showNotificationMock,
 	subscribeApiBaseUrlMock,
+	subscribeConnectedHostsMock,
 	unsubscribeBaseUrlMock,
+	unsubscribeConnectedHostsMock,
 } = vi.hoisted(() => ({
 	apiGetMock: vi.fn(),
-	getApiBaseUrlMock: vi.fn(() => "http://127.0.0.1:3001"),
+	apiPostMock: vi.fn(),
+	baseUrlForMock: vi.fn(),
+	clientForMock: vi.fn(),
+	connectedHostsMock: vi.fn(),
 	onStatusMock: vi.fn(),
 	removeStatusMock: vi.fn(),
 	showNotificationMock: vi.fn(),
 	subscribeApiBaseUrlMock: vi.fn(),
+	subscribeConnectedHostsMock: vi.fn(),
 	unsubscribeBaseUrlMock: vi.fn(),
+	unsubscribeConnectedHostsMock: vi.fn(),
 }));
 
 vi.mock("./api-client", () => ({
-	apiClient: { GET: apiGetMock },
 	apiErrorMessage: () => "Request failed",
-	getApiBaseUrl: getApiBaseUrlMock,
 	subscribeApiBaseUrl: subscribeApiBaseUrlMock,
+}));
+
+vi.mock("./host-clients", () => ({
+	baseUrlFor: baseUrlForMock,
+	clientFor: clientForMock,
+	connectedHosts: connectedHostsMock,
+	subscribeConnectedHosts: subscribeConnectedHostsMock,
 }));
 
 vi.mock("./bridge", () => ({
@@ -42,11 +57,15 @@ import {
 	getCachedUnreadCount,
 	keepLatestNotificationsPage,
 	markAllCachedNotificationsRead,
+	markAllNotificationsRead,
 	mergeUnreadNotification,
 	NOTIFICATION_PAGE_SIZE,
 	recentNotificationsQueryKey,
 	unreadNotificationsQueryKey,
 } from "./notifications";
+import { LOCAL_HOST, refKey, type HostId } from "./hosts";
+
+const REMOTE = "http://192.0.2.1:3011";
 
 class EventSourceStub {
 	static instances: EventSourceStub[] = [];
@@ -79,6 +98,7 @@ class EventSourceStub {
 function notification(overrides: Partial<NotificationDTO> = {}): NotificationDTO {
 	return {
 		id: "ntf_1",
+		host: LOCAL_HOST,
 		sessionId: "mer-1",
 		projectId: "mer",
 		prUrl: "",
@@ -105,15 +125,26 @@ function setWindowState({ focused, visible }: { focused: boolean; visible: boole
 
 beforeEach(() => {
 	apiGetMock.mockReset();
+	apiPostMock.mockReset();
 	EventSourceStub.instances = [];
-	getApiBaseUrlMock.mockReset().mockReturnValue("http://127.0.0.1:3001");
+	baseUrlForMock.mockReset().mockImplementation((host: HostId) =>
+		host === LOCAL_HOST ? "http://127.0.0.1:3001" : "http://127.0.0.1:9999/tok",
+	);
+	clientForMock.mockReset().mockImplementation(() => ({ GET: apiGetMock, POST: apiPostMock }));
+	connectedHostsMock.mockReset().mockReturnValue([]);
 	onStatusMock.mockReset().mockReturnValue(removeStatusMock);
 	removeStatusMock.mockReset();
 	showNotificationMock.mockReset().mockResolvedValue(undefined);
 	subscribeApiBaseUrlMock.mockReset().mockReturnValue(unsubscribeBaseUrlMock);
+	subscribeConnectedHostsMock.mockReset().mockReturnValue(unsubscribeConnectedHostsMock);
 	unsubscribeBaseUrlMock.mockReset();
+	unsubscribeConnectedHostsMock.mockReset();
 	(globalThis as unknown as { EventSource: unknown }).EventSource = EventSourceStub;
 });
+
+function key(id: string, host = LOCAL_HOST): string {
+	return refKey({ host, id });
+}
 
 afterEach(() => {
 	delete (globalThis as unknown as { EventSource?: unknown }).EventSource;
@@ -122,16 +153,22 @@ afterEach(() => {
 
 describe("notification cache helpers", () => {
 	it.each([
-		{ cursor: "previous", nextCursor: "older", status: "all" as const, unreadCount: 4 },
-		{ cursor: "", nextCursor: undefined, status: "unread" as const, unreadCount: 1 },
-	])("requests a bounded $status page", async ({ cursor, nextCursor, status, unreadCount }) => {
+		{
+			cursor: JSON.stringify([[LOCAL_HOST, "previous"]]),
+			hostCursor: "previous",
+			nextCursor: "older",
+			status: "all" as const,
+			unreadCount: 4,
+		},
+		{ cursor: "", hostCursor: "", nextCursor: undefined, status: "unread" as const, unreadCount: 1 },
+	])("requests a bounded $status page", async ({ cursor, hostCursor, nextCursor, status, unreadCount }) => {
 		apiGetMock.mockResolvedValue({
 			data: { notifications: [notification()], nextCursor, unreadCount, unresolvedCount: 3 },
 		});
 
 		await expect(fetchNotificationsPage(status, cursor)).resolves.toEqual({
 			notifications: [notification()],
-			nextCursor,
+			nextCursor: nextCursor ? JSON.stringify([[LOCAL_HOST, nextCursor]]) : undefined,
 			unreadCount,
 			unresolvedCount: 3,
 		});
@@ -139,7 +176,7 @@ describe("notification cache helpers", () => {
 		expect(apiGetMock).toHaveBeenCalledWith("/api/v1/notifications", {
 			params: {
 				query: {
-					cursor: cursor || undefined,
+					cursor: hostCursor || undefined,
 					limit: NOTIFICATION_PAGE_SIZE,
 					status,
 				},
@@ -147,14 +184,109 @@ describe("notification cache helpers", () => {
 		});
 	});
 
-	it("merges unread notifications by id", () => {
+	it("fans notification history across hosts and merges counts and cursors", async () => {
+		connectedHostsMock.mockReturnValue([REMOTE]);
+		const localGet = vi.fn().mockResolvedValue({
+			data: {
+				notifications: [notification({ id: "same", createdAt: "2026-06-16T10:00:00Z" })],
+				nextCursor: "local-older",
+				unreadCount: 2,
+				unresolvedCount: 1,
+			},
+		});
+		const remoteGet = vi.fn().mockResolvedValue({
+			data: {
+				notifications: [notification({ id: "same", createdAt: "2026-06-16T11:00:00Z" })],
+				nextCursor: "remote-older",
+				unreadCount: 3,
+				unresolvedCount: 2,
+			},
+		});
+		clientForMock.mockImplementation((host: HostId) => ({
+			GET: host === LOCAL_HOST ? localGet : remoteGet,
+			POST: apiPostMock,
+		}));
+
+		const page = await fetchNotificationsPage("all");
+
+		expect(page.notifications.map(({ host, id }) => ({ host, id }))).toEqual([
+			{ host: REMOTE, id: "same" },
+			{ host: LOCAL_HOST, id: "same" },
+		]);
+		expect(page.unreadCount).toBe(5);
+		expect(page.unresolvedCount).toBe(3);
+		expect(JSON.parse(page.nextCursor ?? "")).toEqual([
+			[LOCAL_HOST, "local-older"],
+			[REMOTE, "remote-older"],
+		]);
+	});
+
+	it("keeps reachable hosts' notification history when another host is down", async () => {
+		connectedHostsMock.mockReturnValue([REMOTE]);
+		clientForMock.mockImplementation((host: HostId) => ({
+			GET:
+				host === LOCAL_HOST
+					? vi.fn().mockResolvedValue({
+							data: { notifications: [notification()], unreadCount: 1, unresolvedCount: 1 },
+						})
+					: vi.fn().mockRejectedValue(new Error("host unavailable")),
+			POST: apiPostMock,
+		}));
+
+		await expect(fetchNotificationsPage("unread")).resolves.toEqual({
+			notifications: [notification()],
+			nextCursor: undefined,
+			unreadCount: 1,
+			unresolvedCount: 1,
+		});
+	});
+
+	it("fans read acknowledgements to the notification's originating host", async () => {
+		connectedHostsMock.mockReturnValue([REMOTE]);
+		const localPost = vi.fn().mockResolvedValue({ data: { updatedCount: 1 } });
+		const remotePost = vi.fn().mockResolvedValue({ data: { updatedCount: 2 } });
+		clientForMock.mockImplementation((host: HostId) => ({
+			GET: apiGetMock,
+			POST: host === LOCAL_HOST ? localPost : remotePost,
+		}));
+
+		await expect(
+			markAllNotificationsRead([key("local-1"), key("remote-1", REMOTE), key("remote-2", REMOTE)]),
+		).resolves.toBe(3);
+		expect(localPost).toHaveBeenCalledWith("/api/v1/notifications/read-all", { body: { ids: ["local-1"] } });
+		expect(remotePost).toHaveBeenCalledWith("/api/v1/notifications/read-all", {
+			body: { ids: ["remote-1", "remote-2"] },
+		});
+	});
+
+	it("marks all notifications read on every connected host when no refs are supplied", async () => {
+		connectedHostsMock.mockReturnValue([REMOTE]);
+		const localPost = vi.fn().mockResolvedValue({ data: { updatedCount: 1 } });
+		const remotePost = vi.fn().mockResolvedValue({ data: { updatedCount: 2 } });
+		clientForMock.mockImplementation((host: HostId) => ({
+			GET: apiGetMock,
+			POST: host === LOCAL_HOST ? localPost : remotePost,
+		}));
+
+		await expect(markAllNotificationsRead([])).resolves.toBe(3);
+		expect(localPost).toHaveBeenCalledWith("/api/v1/notifications/read-all", { body: {} });
+		expect(remotePost).toHaveBeenCalledWith("/api/v1/notifications/read-all", { body: {} });
+	});
+
+	it("merges unread notifications by host-qualified id", () => {
 		const qc = queryClient();
 
 		expect(mergeUnreadNotification(qc, notification())).toBe(true);
 		expect(mergeUnreadNotification(qc, notification())).toBe(false);
+		expect(mergeUnreadNotification(qc, notification({ host: REMOTE }))).toBe(true);
 
-		expect(getCachedNotifications(qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey))).toHaveLength(1);
-		expect(getCachedUnreadCount(qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey))).toBe(1);
+		expect(getCachedNotifications(qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey))).toHaveLength(2);
+		expect(getCachedUnreadCount(qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey))).toBe(2);
+
+		markAllCachedNotificationsRead(qc, [key("ntf_1", REMOTE)]);
+		const cached = getCachedNotifications(qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey));
+		expect(cached.find((item) => item.host === REMOTE)?.status).toBe("read");
+		expect(cached.find((item) => item.host === LOCAL_HOST)?.status).toBe("unread");
 	});
 
 	// Opening the panel acknowledges what it rendered; history keeps the rows.
@@ -166,7 +298,7 @@ describe("notification cache helpers", () => {
 			pages: [{ notifications: [notification()], unreadCount: 1, unresolvedCount: 1 }],
 		});
 
-		markAllCachedNotificationsRead(qc, ["ntf_1"]);
+		markAllCachedNotificationsRead(qc, [key("ntf_1")]);
 
 		expect(getCachedUnreadCount(qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey))).toBe(0);
 		expect(getCachedNotifications(qc.getQueryData<NotificationsCache>(recentNotificationsQueryKey))).toEqual([
@@ -224,7 +356,7 @@ describe("notification cache helpers", () => {
 
 		markAllCachedNotificationsRead(
 			qc,
-			loaded.map((item) => item.id),
+			loaded.map((item) => refKey(item)),
 		);
 
 		const cache = qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey);
@@ -278,7 +410,7 @@ describe("notification cache helpers", () => {
 			],
 		});
 
-		markAllCachedNotificationsRead(qc, ["ntf_101"], 1);
+		markAllCachedNotificationsRead(qc, [key("ntf_101")], 1);
 
 		const unread = qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey);
 		expect(unread?.pages[0]?.nextCursor).toBe("older-unread");
@@ -379,7 +511,7 @@ describe("notification cache helpers", () => {
 
 describe("createNotificationsTransport", () => {
 	it("opens the notification stream and invalidates unread notifications on open", () => {
-		getApiBaseUrlMock.mockReturnValue("http://127.0.0.1:62220/proxy-token/");
+		baseUrlForMock.mockReturnValue("http://127.0.0.1:62220/proxy-token/");
 		const qc = queryClient();
 		const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
 
@@ -394,6 +526,20 @@ describe("createNotificationsTransport", () => {
 		expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: recentNotificationsQueryKey });
 	});
 
+	it("opens one notification stream at each connected host's base", () => {
+		connectedHostsMock.mockReturnValue([REMOTE]);
+		baseUrlForMock.mockImplementation((host: HostId) =>
+			host === LOCAL_HOST ? "http://127.0.0.1:3001" : "http://127.0.0.1:9999/tok",
+		);
+
+		createNotificationsTransport(queryClient()).connect();
+
+		expect(EventSourceStub.instances.map((source) => source.url)).toEqual([
+			"http://127.0.0.1:3001/api/v1/notifications/stream",
+			"http://127.0.0.1:9999/tok/api/v1/notifications/stream",
+		]);
+	});
+
 	it("merges live notifications and shows one toast for a new id", () => {
 		const qc = queryClient();
 		createNotificationsTransport(qc).connect();
@@ -406,7 +552,7 @@ describe("createNotificationsTransport", () => {
 		expect(getCachedNotifications(qc.getQueryData<NotificationsCache>(recentNotificationsQueryKey))).toHaveLength(1);
 		expect(showNotificationMock).toHaveBeenCalledTimes(1);
 		expect(showNotificationMock).toHaveBeenCalledWith({
-			id: "ntf_1",
+			id: key("ntf_1"),
 			title: "checkout-flow needs input",
 			body: "The agent is waiting for your response.",
 			type: "needs_input",
@@ -434,7 +580,7 @@ describe("createNotificationsTransport", () => {
 	it("suppresses the needs_input toast for the session the user is already watching", () => {
 		setWindowState({ focused: true, visible: true });
 		const qc = queryClient();
-		createNotificationsTransport(qc, () => "mer-1").connect();
+		createNotificationsTransport(qc, () => ({ host: LOCAL_HOST, id: "mer-1" })).connect();
 
 		EventSourceStub.instances[0].dispatch("notification_created", notification());
 
@@ -442,19 +588,34 @@ describe("createNotificationsTransport", () => {
 		expect(showNotificationMock).not.toHaveBeenCalled();
 	});
 
+	it("does not suppress a remote toast when a local session has the same id", () => {
+		setWindowState({ focused: true, visible: true });
+		connectedHostsMock.mockReturnValue([REMOTE]);
+		createNotificationsTransport(queryClient(), () => ({ host: LOCAL_HOST, id: "mer-1" })).connect();
+
+		EventSourceStub.instances[1].dispatch("notification_created", notification());
+
+		expect(showNotificationMock).toHaveBeenCalledWith(expect.objectContaining({ id: key("ntf_1", REMOTE) }));
+	});
+
 	it.each([
 		{
-			activeSessionId: "other-session",
+			activeSession: { host: LOCAL_HOST, id: "other-session" },
 			focused: true,
 			reason: "the notification is for a different session",
 			visible: true,
 		},
-		{ activeSessionId: "mer-1", focused: true, reason: "the window is hidden", visible: false },
-		{ activeSessionId: "mer-1", focused: false, reason: "the window is visible but unfocused", visible: true },
-		{ activeSessionId: undefined, focused: true, reason: "no session is open", visible: true },
-	])("still shows the needs_input toast when $reason", ({ activeSessionId, focused, visible }) => {
+		{ activeSession: { host: LOCAL_HOST, id: "mer-1" }, focused: true, reason: "the window is hidden", visible: false },
+		{
+			activeSession: { host: LOCAL_HOST, id: "mer-1" },
+			focused: false,
+			reason: "the window is visible but unfocused",
+			visible: true,
+		},
+		{ activeSession: undefined, focused: true, reason: "no session is open", visible: true },
+	])("still shows the needs_input toast when $reason", ({ activeSession, focused, visible }) => {
 		setWindowState({ focused, visible });
-		createNotificationsTransport(queryClient(), () => activeSessionId).connect();
+		createNotificationsTransport(queryClient(), () => activeSession).connect();
 
 		EventSourceStub.instances[0].dispatch("notification_created", notification());
 
@@ -465,7 +626,7 @@ describe("createNotificationsTransport", () => {
 		"still shows the %s toast for the focused active session",
 		(type) => {
 			setWindowState({ focused: true, visible: true });
-			createNotificationsTransport(queryClient(), () => "mer-1").connect();
+			createNotificationsTransport(queryClient(), () => ({ host: LOCAL_HOST, id: "mer-1" })).connect();
 
 			EventSourceStub.instances[0].dispatch("notification_created", notification({ type }));
 
@@ -478,11 +639,47 @@ describe("createNotificationsTransport", () => {
 		const onBaseUrlChange = subscribeApiBaseUrlMock.mock.calls[0][0] as () => void;
 		const first = EventSourceStub.instances[0];
 
-		getApiBaseUrlMock.mockReturnValue("http://127.0.0.1:4555");
+		baseUrlForMock.mockReturnValue("http://127.0.0.1:4555");
 		onBaseUrlChange();
 
 		expect(first.closed).toBe(true);
 		expect(EventSourceStub.instances).toHaveLength(2);
 		expect(EventSourceStub.instances[1].url).toBe("http://127.0.0.1:4555/api/v1/notifications/stream");
+	});
+
+	it("opens and closes a remote stream as the connected hosts change", () => {
+		createNotificationsTransport(queryClient()).connect();
+		const onHostsChanged = subscribeConnectedHostsMock.mock.calls[0][0] as () => void;
+		const local = EventSourceStub.instances[0];
+
+		connectedHostsMock.mockReturnValue([REMOTE]);
+		onHostsChanged();
+		const remote = EventSourceStub.instances[1];
+		expect(remote.url).toBe("http://127.0.0.1:9999/tok/api/v1/notifications/stream");
+
+		connectedHostsMock.mockReturnValue([]);
+		onHostsChanged();
+		expect(remote.closed).toBe(true);
+		expect(local.closed).toBe(false);
+	});
+
+	it("retries only the host whose EventSource closes", () => {
+		vi.useFakeTimers();
+		try {
+			connectedHostsMock.mockReturnValue([REMOTE]);
+			createNotificationsTransport(queryClient()).connect();
+			const local = EventSourceStub.instances[0];
+			const remote = EventSourceStub.instances[1];
+
+			remote.readyState = 2;
+			remote.onerror?.();
+			vi.advanceTimersByTime(5_000);
+
+			expect(EventSourceStub.instances).toHaveLength(3);
+			expect(EventSourceStub.instances[2].url).toBe(remote.url);
+			expect(local.closed).toBe(false);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

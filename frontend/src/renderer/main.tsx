@@ -11,6 +11,7 @@ import {
   mergeUnreadNotification,
   unreadNotificationsQueryKey,
 } from "./lib/notifications";
+import { LOCAL_HOST } from "./lib/hosts";
 import { createAppRouter } from "./router";
 import { LoginGate } from "./components/LoginGate";
 import { TelemetryBoundary } from "./components/TelemetryBoundary";
@@ -51,6 +52,7 @@ if (import.meta.env.DEV) {
     await queryClient.cancelQueries({ queryKey: key });
     mergeUnreadNotification(queryClient, {
       id,
+      host: LOCAL_HOST,
       type,
       title: testNotifTitles[type] ?? "Notification",
       body: "Test notification",

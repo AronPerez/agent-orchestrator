@@ -1,10 +1,17 @@
 import type { InfiniteData, QueryClient } from "@tanstack/react-query";
 import type { components } from "../../api/schema";
 import { aoBridge } from "./bridge";
-import { apiClient, apiErrorMessage, getApiBaseUrl, subscribeApiBaseUrl } from "./api-client";
+import { apiErrorMessage, subscribeApiBaseUrl } from "./api-client";
+import { baseUrlFor, clientFor, connectedHosts, subscribeConnectedHosts } from "./host-clients";
+import { LOCAL_HOST, parseRefKey, refKey, type HostId, type Ref } from "./hosts";
 
-export type NotificationDTO = components["schemas"]["NotificationResponse"];
-export type NotificationsPage = components["schemas"]["ListNotificationsResponse"];
+type NotificationResponse = components["schemas"]["NotificationResponse"];
+type ListNotificationsResponse = components["schemas"]["ListNotificationsResponse"];
+
+export type NotificationDTO = NotificationResponse & { host: HostId };
+export type NotificationsPage = Omit<ListNotificationsResponse, "notifications"> & {
+	notifications: NotificationDTO[];
+};
 export type NotificationsCache = InfiniteData<NotificationsPage>;
 export type NotificationListStatus = "unread" | "all";
 
@@ -33,39 +40,103 @@ function isUnresolved(notification: NotificationDTO): boolean {
 	return UNRESOLVABLE_TYPES.has(notification.type) && !notification.resolvedAt;
 }
 
+function notificationHosts(): HostId[] {
+	return [LOCAL_HOST, ...connectedHosts()];
+}
+
+type HostCursor = [host: HostId, cursor: string];
+
+function decodeHostCursors(cursor: string): HostCursor[] {
+	const decoded: unknown = JSON.parse(cursor);
+	if (
+		!Array.isArray(decoded) ||
+		!decoded.every(
+			(entry) =>
+				Array.isArray(entry) &&
+				entry.length === 2 &&
+				typeof entry[0] === "string" &&
+				typeof entry[1] === "string",
+		)
+	) {
+		throw new Error("Invalid notifications cursor");
+	}
+	return decoded as HostCursor[];
+}
+
 export async function fetchNotificationsPage(status: NotificationListStatus, cursor = ""): Promise<NotificationsPage> {
-	const { data, error } = await apiClient.GET("/api/v1/notifications", {
-		params: {
-			query: {
-				status,
-				limit: NOTIFICATION_PAGE_SIZE,
-				cursor: cursor || undefined,
-			},
-		},
-	});
-	if (error) throw new Error(apiErrorMessage(error, "Could not load notifications"));
-	const notifications = sortNotifications(data?.notifications ?? []);
+	const requests = cursor
+		? decodeHostCursors(cursor)
+		: notificationHosts().map((host): HostCursor => [host, ""]);
+	const settled = await Promise.allSettled(
+		requests.map(async ([host, hostCursor]) => {
+			const { data, error } = await clientFor(host).GET("/api/v1/notifications", {
+				params: {
+					query: {
+						status,
+						limit: NOTIFICATION_PAGE_SIZE,
+						cursor: hostCursor || undefined,
+					},
+				},
+			});
+			if (error) throw new Error(apiErrorMessage(error, "Could not load notifications"));
+			const notifications = (data?.notifications ?? []).map((notification) => ({ ...notification, host }));
+			return {
+				host,
+				nextCursor: data?.nextCursor,
+				notifications,
+				unreadCount: data?.unreadCount ?? notifications.filter((item) => item.status === "unread").length,
+				unresolvedCount: data?.unresolvedCount ?? notifications.filter(isUnresolved).length,
+			};
+		}),
+	);
+	const pages = settled.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+	if (pages.length === 0) {
+		const failed = settled.find((result) => result.status === "rejected");
+		throw failed?.status === "rejected" && failed.reason instanceof Error
+			? failed.reason
+			: new Error("Could not load notifications");
+	}
+	const notifications = sortNotifications(pages.flatMap((page) => page.notifications));
+	const nextCursors = pages.flatMap((page): HostCursor[] =>
+		page.nextCursor ? [[page.host, page.nextCursor]] : [],
+	);
 	return {
 		notifications,
-		nextCursor: data?.nextCursor,
-		unreadCount: data?.unreadCount ?? notifications.filter((item) => item.status === "unread").length,
-		unresolvedCount: data?.unresolvedCount ?? notifications.filter(isUnresolved).length,
+		nextCursor: nextCursors.length > 0 ? JSON.stringify(nextCursors) : undefined,
+		unreadCount: pages.reduce((count, page) => count + page.unreadCount, 0),
+		unresolvedCount: pages.reduce((count, page) => count + page.unresolvedCount, 0),
 	};
 }
 
 /**
  * Fired when the panel opens — seeing the notifications is the acknowledgement.
  *
- * Empty `ids` marks every unread row (the all-history panel still shows them).
- * Non-empty `ids` marks exactly those rows so incremental clients can keep later
- * unread pages reachable.
+ * Empty `keys` marks every unread row on every host (the all-history panel still
+ * shows them). Non-empty host-qualified keys mark exactly those rows so
+ * incremental clients can keep later unread pages reachable.
  */
-export async function markAllNotificationsRead(ids: string[]): Promise<number> {
-	const { data, error } = await apiClient.POST("/api/v1/notifications/read-all", {
-		body: ids.length === 0 ? {} : { ids },
-	});
-	if (error) throw new Error(apiErrorMessage(error, "Could not mark notifications read"));
-	return data?.updatedCount ?? 0;
+export async function markAllNotificationsRead(keys: string[]): Promise<number> {
+	const idsByHost = new Map<HostId, string[]>();
+	if (keys.length === 0) {
+		for (const host of notificationHosts()) idsByHost.set(host, []);
+	} else {
+		for (const key of keys) {
+			const { host, id } = parseRefKey(key);
+			const ids = idsByHost.get(host);
+			if (ids) ids.push(id);
+			else idsByHost.set(host, [id]);
+		}
+	}
+	const updatedCounts = await Promise.all(
+		[...idsByHost].map(async ([host, ids]) => {
+			const { data, error } = await clientFor(host).POST("/api/v1/notifications/read-all", {
+				body: ids.length === 0 ? {} : { ids },
+			});
+			if (error) throw new Error(apiErrorMessage(error, "Could not mark notifications read"));
+			return data?.updatedCount ?? 0;
+		}),
+	);
+	return updatedCounts.reduce((count, updated) => count + updated, 0);
 }
 
 export function mergeUnreadNotification(queryClient: QueryClient, notification: NotificationDTO): boolean {
@@ -86,6 +157,7 @@ function mergeRecentNotification(queryClient: QueryClient, notification: Notific
  * caches; the seen state is a separate axis and is deliberately left untouched.
  */
 export function applyResolvedNotification(queryClient: QueryClient, notification: NotificationDTO): void {
+	const key = refKey(notification);
 	for (const queryKey of [unreadNotificationsQueryKey, recentNotificationsQueryKey] as const) {
 		queryClient.setQueryData<NotificationsCache>(queryKey, (current) => {
 			if (!current) return current;
@@ -93,7 +165,7 @@ export function applyResolvedNotification(queryClient: QueryClient, notification
 				...current,
 				pages: current.pages.map((page) => ({
 					...page,
-					notifications: page.notifications.map((item) => (item.id === notification.id ? notification : item)),
+					notifications: page.notifications.map((item) => (refKey(item) === key ? notification : item)),
 					unresolvedCount: Math.max(0, page.unresolvedCount - 1),
 				})),
 			};
@@ -107,6 +179,7 @@ function mergeNotificationIntoCache(
 	notification: NotificationDTO,
 ): boolean {
 	let inserted = false;
+	const key = refKey(notification);
 	queryClient.setQueryData<NotificationsCache>(queryKey, (current) => {
 		if (!current || current.pages.length === 0) {
 			inserted = true;
@@ -122,13 +195,13 @@ function mergeNotificationIntoCache(
 			};
 		}
 
-		const existing = getCachedNotifications(current).find((item) => item.id === notification.id);
+		const existing = getCachedNotifications(current).find((item) => refKey(item) === key);
 		const unreadDelta = (notification.status === "unread" ? 1 : 0) - (existing?.status === "unread" ? 1 : 0);
 		const unresolvedDelta =
 			(isUnresolved(notification) ? 1 : 0) - (existing && isUnresolved(existing) ? 1 : 0);
 		const pages = current.pages.map((page) => ({
 			...page,
-			notifications: page.notifications.map((item) => (item.id === notification.id ? notification : item)),
+			notifications: page.notifications.map((item) => (refKey(item) === key ? notification : item)),
 			unreadCount: Math.max(0, page.unreadCount + unreadDelta),
 			unresolvedCount: Math.max(0, page.unresolvedCount + unresolvedDelta),
 		}));
@@ -150,10 +223,10 @@ function mergeNotificationIntoCache(
 /**
  * Marks notifications read in the React Query caches.
  *
- * Empty `ids` means every unread row — matching `POST /read-all` with no body.
+ * Empty `keys` means every unread row — matching `POST /read-all` with no body.
  * That is safe for the all-history panel: read rows remain visible there.
  *
- * Non-empty `ids` marks exactly those rows and keeps unread pagination cursors
+ * Non-empty host-qualified keys mark exactly those rows and keep unread pagination cursors
  * intact so later pages stay reachable when a client acknowledges incrementally.
  *
  * `updatedCount` is the mutation's server tally. Prefer it over locally cleared
@@ -162,10 +235,10 @@ function mergeNotificationIntoCache(
  */
 export function markAllCachedNotificationsRead(
 	queryClient: QueryClient,
-	ids: string[],
+	keys: string[],
 	updatedCount?: number,
 ): void {
-	if (ids.length === 0) {
+	if (keys.length === 0) {
 		queryClient.setQueryData<NotificationsCache>(unreadNotificationsQueryKey, (current) => {
 			if (!current) {
 				return { pageParams: [""], pages: [{ notifications: [], unreadCount: 0, unresolvedCount: 0 }] };
@@ -197,7 +270,7 @@ export function markAllCachedNotificationsRead(
 		return;
 	}
 
-	const acknowledged = new Set(ids);
+	const acknowledged = new Set(keys);
 	for (const queryKey of [unreadNotificationsQueryKey, recentNotificationsQueryKey] as const) {
 		queryClient.setQueryData<NotificationsCache>(queryKey, (current) => {
 			if (!current) return current;
@@ -205,13 +278,13 @@ export function markAllCachedNotificationsRead(
 			let clearedAcrossPages = 0;
 			const pages = current.pages.map((page) => {
 				const notifications = page.notifications.map((item) => {
-					if (!acknowledged.has(item.id) || item.status === "read") return item;
+					if (!acknowledged.has(refKey(item)) || item.status === "read") return item;
 					clearedAcrossPages++;
 					return { ...item, status: "read" as const };
 				});
 				return { ...page, notifications };
 			});
-			const delta = updatedCount ?? clearedAcrossPages;
+			const delta = Math.max(updatedCount ?? 0, clearedAcrossPages);
 
 			return {
 				...current,
@@ -226,13 +299,14 @@ export function markAllCachedNotificationsRead(
 
 export function getCachedNotifications(cache: NotificationsCache | undefined): NotificationDTO[] {
 	if (!cache) return [];
-	const byID = new Map<string, NotificationDTO>();
+	const byRef = new Map<string, NotificationDTO>();
 	for (const page of cache.pages) {
 		for (const notification of page.notifications) {
-			if (!byID.has(notification.id)) byID.set(notification.id, notification);
+			const key = refKey(notification);
+			if (!byRef.has(key)) byRef.set(key, notification);
 		}
 	}
-	return sortNotifications([...byID.values()]);
+	return sortNotifications([...byRef.values()]);
 }
 
 export function getCachedUnreadCount(cache: NotificationsCache | undefined): number {
@@ -273,58 +347,84 @@ export function keepLatestNotificationsPage(
  */
 function suppressToastForWatchedSession(
 	notification: NotificationDTO,
-	visibleAgentSessionId: string | undefined,
+	visibleAgentSession: Ref | undefined,
 ): boolean {
 	if (notification.type !== "needs_input") return false;
-	if (!notification.sessionId || notification.sessionId !== visibleAgentSessionId) return false;
+	if (
+		!notification.sessionId ||
+		!visibleAgentSession ||
+		refKey({ host: notification.host, id: notification.sessionId }) !== refKey(visibleAgentSession)
+	) {
+		return false;
+	}
 	return document.visibilityState === "visible" && document.hasFocus();
 }
 
 export function createNotificationsTransport(
 	queryClient: QueryClient,
 	/** The session whose agent terminal is currently on screen, if any. */
-	getVisibleAgentSessionId: () => string | undefined = () => undefined,
+	getVisibleAgentSession: () => Ref | undefined = () => undefined,
 ) {
 	return {
 		connect() {
-			let retryTimer: ReturnType<typeof setTimeout> | undefined;
-			let source: EventSource | undefined;
-			let sourceBaseUrl: string | undefined;
+			type HostStream = {
+				base: string;
+				source: EventSource;
+				retryTimer?: ReturnType<typeof setTimeout>;
+			};
+			const streams = new Map<HostId, HostStream>();
 
 			const invalidateNotifications = () => {
 				void queryClient.invalidateQueries({ queryKey: unreadNotificationsQueryKey });
 				void queryClient.invalidateQueries({ queryKey: recentNotificationsQueryKey });
 			};
 
-			const scheduleRetry = () => {
-				if (retryTimer) return;
-				retryTimer = setTimeout(() => {
-					retryTimer = undefined;
-					connectSource();
-				}, SSE_RETRY_MS);
+			const closeHostStream = (host: HostId) => {
+				const stream = streams.get(host);
+				if (!stream) return;
+				if (stream.retryTimer) clearTimeout(stream.retryTimer);
+				stream.source.close();
+				streams.delete(host);
 			};
 
-			const connectSource = () => {
+			const connectHostStream = (host: HostId) => {
 				if (typeof EventSource === "undefined") return;
-				const baseUrl = getApiBaseUrl();
-				if (source && sourceBaseUrl === baseUrl && source.readyState !== EVENTSOURCE_CLOSED) return;
-				source?.close();
-				source = undefined;
-				sourceBaseUrl = baseUrl;
+				const base = baseUrlFor(host);
+				if (base === null) {
+					closeHostStream(host);
+					return;
+				}
+				const current = streams.get(host);
+				if (current && current.base === base && current.source.readyState !== EVENTSOURCE_CLOSED) return;
+				closeHostStream(host);
 				try {
-					source = new EventSource(`${baseUrl.replace(/\/+$/, "")}/api/v1/notifications/stream`);
-					source.onopen = invalidateNotifications;
+					const source = new EventSource(`${base.replace(/\/+$/, "")}/api/v1/notifications/stream`);
+					const stream: HostStream = { base, source };
+					streams.set(host, stream);
+					source.onopen = () => {
+						if (streams.get(host) === stream) invalidateNotifications();
+					};
 					source.onerror = () => {
-						if (source?.readyState === EVENTSOURCE_CLOSED) scheduleRetry();
+						if (
+							streams.get(host) !== stream ||
+							source.readyState !== EVENTSOURCE_CLOSED ||
+							stream.retryTimer
+						) {
+							return;
+						}
+						stream.retryTimer = setTimeout(() => {
+							stream.retryTimer = undefined;
+							if (streams.get(host) === stream) connectHostStream(host);
+						}, SSE_RETRY_MS);
 					};
 					source.addEventListener("notification_created", (event) => {
-						const notification = parseNotificationEvent(event);
+						const notification = parseNotificationEvent(host, event);
 						if (!notification) return;
 						const inserted = mergeUnreadNotification(queryClient, notification);
 						mergeRecentNotification(queryClient, notification);
-						if (inserted && !suppressToastForWatchedSession(notification, getVisibleAgentSessionId())) {
+						if (inserted && !suppressToastForWatchedSession(notification, getVisibleAgentSession())) {
 							void aoBridge.notifications.show({
-								id: notification.id,
+								id: refKey(notification),
 								title: notification.title,
 								body: notification.body || undefined,
 								type: notification.type,
@@ -335,40 +435,52 @@ export function createNotificationsTransport(
 					// PR stopped waiting on a merge). Patch the row live so an open
 					// panel reflects that without waiting for a refetch.
 					source.addEventListener("notification_resolved", (event) => {
-						const notification = parseNotificationEvent(event);
+						const notification = parseNotificationEvent(host, event);
 						if (!notification) return;
 						applyResolvedNotification(queryClient, notification);
 					});
 				} catch {
-					source = undefined;
+					closeHostStream(host);
 				}
 			};
 
+			const syncSources = () => {
+				const wanted = new Set(notificationHosts());
+				for (const host of streams.keys()) {
+					if (!wanted.has(host)) closeHostStream(host);
+				}
+				for (const host of wanted) connectHostStream(host);
+			};
+
 			const removeDaemonListener = aoBridge.daemon.onStatus(() => {
-				connectSource();
+				syncSources();
 				invalidateNotifications();
 			});
 			const removeBaseUrlListener = subscribeApiBaseUrl(() => {
-				connectSource();
+				syncSources();
 				invalidateNotifications();
 			});
-			connectSource();
+			const removeHostsListener = subscribeConnectedHosts(() => {
+				syncSources();
+				invalidateNotifications();
+			});
+			syncSources();
 
 			return () => {
-				if (retryTimer) clearTimeout(retryTimer);
 				removeDaemonListener();
 				removeBaseUrlListener();
-				source?.close();
+				removeHostsListener();
+				for (const host of [...streams.keys()]) closeHostStream(host);
 			};
 		},
 	};
 }
 
-function parseNotificationEvent(event: Event): NotificationDTO | null {
+function parseNotificationEvent(host: HostId, event: Event): NotificationDTO | null {
 	const data = (event as MessageEvent<string>).data;
 	if (typeof data !== "string" || data === "") return null;
 	try {
-		return JSON.parse(data) as NotificationDTO;
+		return { ...(JSON.parse(data) as NotificationResponse), host };
 	} catch {
 		return null;
 	}
@@ -377,13 +489,14 @@ function parseNotificationEvent(event: Event): NotificationDTO | null {
 function sortNotifications(notifications: NotificationDTO[]): NotificationDTO[] {
 	return [...notifications].sort((a, b) => {
 		const byTime = Date.parse(b.createdAt) - Date.parse(a.createdAt);
-		return byTime || b.id.localeCompare(a.id);
+		return byTime || refKey(b).localeCompare(refKey(a));
 	});
 }
 
 function rebaseOversizedFirstPage(queryClient: QueryClient, queryKey: NotificationsQueryKey): void {
 	const cache = queryClient.getQueryData<NotificationsCache>(queryKey);
-	if (!cache || cache.pages[0]?.notifications.length <= NOTIFICATION_PAGE_SIZE) return;
+	const maxSize = NOTIFICATION_PAGE_SIZE * notificationHosts().length;
+	if (!cache || cache.pages[0]?.notifications.length <= maxSize) return;
 	const query = queryClient.getQueryCache().find({ queryKey, exact: true });
 	if (!query?.isActive()) {
 		queryClient.setQueryData<NotificationsCache>(queryKey, (current) => {
@@ -393,7 +506,7 @@ function rebaseOversizedFirstPage(queryClient: QueryClient, queryKey: Notificati
 				pages: [
 					{
 						...current.pages[0],
-						notifications: current.pages[0].notifications.slice(0, NOTIFICATION_PAGE_SIZE),
+						notifications: current.pages[0].notifications.slice(0, maxSize),
 					},
 					...current.pages.slice(1),
 				],
