@@ -17,11 +17,11 @@ test("renderer: notification center shows the correct unread count @T0 @NTF", as
 
 	// The daemon's initial unread list (two, one of them a needs-input alert).
 	await page.route(/\/api\/v1\/notifications\?/, (route) =>
-			route.fulfill({
-				json: {
-					unreadCount: 2,
-					unresolvedCount: 2,
-					notifications: [
+		route.fulfill({
+			json: {
+				unreadCount: 2,
+				unresolvedCount: 2,
+				notifications: [
 					{
 						id: "n1",
 						type: "needs_input",
