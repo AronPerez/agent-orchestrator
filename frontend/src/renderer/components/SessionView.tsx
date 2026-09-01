@@ -32,6 +32,7 @@ import { SessionFileExplorer } from "./SessionFileExplorer";
 import { SessionFileTab, SessionFileTabActions } from "./SessionFileTabs";
 import { SessionFileWorkspace } from "./SessionFileWorkspace";
 import { SessionInspector } from "./SessionInspector";
+import { SessionActionsMenu } from "./SessionActionsMenu";
 import {
   SessionInterfaceActionGroup,
   SessionInterfaceSwitchButton,
@@ -40,6 +41,8 @@ import {
 } from "./SessionInterfaceSwitch";
 import { ShellTopbar } from "./ShellTopbar";
 import { SessionTopbarHost } from "./SessionTopbarPortal";
+import { SwitchAgentDialog } from "./SwitchAgentDialog";
+import { TerminalSwitchAgentButton } from "./TerminalSwitchAgentButton";
 import { TopbarButton } from "./TopbarButton";
 import { Sheet, SheetContent, SheetTitle } from "./ui/sheet";
 import { useIsMobile } from "../hooks/use-mobile";
@@ -58,7 +61,9 @@ import {
   useSessionInterfaceTransition,
 } from "../hooks/useSessionInterfaceTransition";
 import { usePersistentBrowserProfile } from "../hooks/usePersistentBrowserProfile";
+import { useSessionHandoffMenu } from "../hooks/useSessionHandoffMenu";
 import { sessionWorkspaceFilesQueryOptions } from "../hooks/useSessionWorkspaceFiles";
+import { clearSwitchAgentState } from "../hooks/useSwitchAgent";
 import { useWorkspaceSession } from "../hooks/useWorkspaceQuery";
 import { useWindowFullScreen } from "../hooks/useWindowFullScreen";
 import { apiErrorCode, apiErrorMessage } from "../lib/api-client";
@@ -564,6 +569,9 @@ export function SessionView({ sessionRef }: SessionViewProps) {
       ? browserPopOutState.phase
       : "docked";
   const browserPoppedOut = browserPopOutPhase !== "docked";
+  const [handoffDialogOpen, setHandoffDialogOpen] = useState(false);
+  const [handoffDialogContainer, setHandoffDialogContainer] =
+    useState<HTMLDivElement | null>(null);
   const [interfaceSwitchDialogScope, setInterfaceSwitchDialogScope] =
     useState<InterfaceSwitchDialogScope>();
   const [chatConversationWork, setChatConversationWork] = useState<
@@ -1268,6 +1276,50 @@ export function SessionView({ sessionRef }: SessionViewProps) {
         }}
       />
     ) : null;
+  const {
+    agentSwitch: handoffAgentSwitch,
+    switchControlPresentation: handoffControlPresentation,
+    switchError: handoffSwitchError,
+  } = useSessionHandoffMenu(session?.cloud ? undefined : session);
+  const handleHandoffDialogOpenChange = useCallback(
+    (nextOpen: boolean) => {
+      setHandoffDialogOpen(nextOpen);
+      if (!nextOpen && handoffSwitchError && session) {
+        clearSwitchAgentState(queryClient, session);
+      }
+    },
+    [handoffSwitchError, queryClient, session],
+  );
+  useEffect(() => {
+    if (handoffSwitchError) setHandoffDialogOpen(true);
+  }, [handoffSwitchError]);
+  useLayoutEffect(() => {
+    setHandoffDialogOpen(false);
+  }, [sessionKey]);
+  const sessionTabActions = session && !session.cloud ? (
+    <SessionActionsMenu>
+      <TerminalSwitchAgentButton
+        key={sessionKey}
+        variant="menu-item"
+        agentSwitch={handoffAgentSwitch}
+        onOpenChange={handleHandoffDialogOpenChange}
+        open={handoffDialogOpen}
+        presentation={handoffControlPresentation}
+        session={session}
+        switchError={handoffSwitchError}
+      />
+    </SessionActionsMenu>
+  ) : null;
+  const handoffDialog =
+    session && !session.cloud && handoffDialogContainer ? (
+      <SwitchAgentDialog
+        agentSwitch={handoffAgentSwitch}
+        container={handoffDialogContainer}
+        onOpenChange={handleHandoffDialogOpenChange}
+        open={handoffDialogOpen}
+        session={session}
+      />
+    ) : null;
   const newTerminalError = openShellTerminal.error
     ? apiErrorMessage(openShellTerminal.error)
     : undefined;
@@ -1818,7 +1870,13 @@ export function SessionView({ sessionRef }: SessionViewProps) {
   if (isMobile) {
     return (
       <div className="flex h-full min-h-0 flex-col bg-background text-foreground">
-        <div className="min-h-0 flex-1">{centerPane}</div>
+        <div
+          className="relative min-h-0 flex-1"
+          ref={setHandoffDialogContainer}
+        >
+          {handoffDialog}
+          {centerPane}
+        </div>
         {hasInspector ? (
           <Sheet
             open={isInspectorOpen}
@@ -1891,7 +1949,11 @@ export function SessionView({ sessionRef }: SessionViewProps) {
               className="relative z-chrome flex h-inspector-tabs w-full shrink-0 overflow-hidden"
               data-testid="session-topbar-host"
             />
-            <div className="relative min-h-0 flex-1">
+            <div
+              className="relative min-h-0 flex-1"
+              ref={setHandoffDialogContainer}
+            >
+              {handoffDialog}
               {/* The committed mode owns the agent surface. Auxiliary shell and
 							    reviewer targets remain terminal surfaces in either mode. */}
               <div
@@ -1925,6 +1987,8 @@ export function SessionView({ sessionRef }: SessionViewProps) {
                     daemonReady={daemonStatus.state === "ready"}
                     theme={theme}
                     headerActions={sessionHeaderActions}
+                    sessionTabAction={sessionTabActions}
+                    handoffDialogOpen={handoffDialogOpen}
                     workspaceTabs={centerFileTabs}
 									workspaceTabActions={centerFileTabActions}
 									workspaceActiveTabKey={activeWorkspaceTabKey}
@@ -1963,6 +2027,8 @@ export function SessionView({ sessionRef }: SessionViewProps) {
                     terminalTarget={routedTerminalTarget}
                     theme={theme}
                     topbarActions={sessionHeaderActions}
+                    sessionTabAction={sessionTabActions}
+                    handoffDialogOpen={handoffDialogOpen}
                     workspaceTabs={centerFileTabs}
 									workspaceTabActions={centerFileTabActions}
 									workspaceActiveTabKey={activeWorkspaceTabKey}

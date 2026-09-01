@@ -111,7 +111,7 @@ test("renderer: daemon health reflected with a hydrated board @T0 @DMN", async (
 		daemonPort: 8080,
 		workers: [{ id: "dmn002", title: "Active worker", status: "working" }],
 	});
-	await page.goto("/#/projects/fake-proj");
+	await page.goto("/#/host/local/project/fake-proj");
 	await expect(page.getByTestId("daemon-status")).toHaveAttribute("data-state", "ready");
 	await expect(page.getByTestId("board-session-card").first()).toBeVisible();
 });
@@ -123,7 +123,7 @@ test("renderer: daemon stop surfaced cleanly with no renderer crash @T0 @DMN", a
 	// is surfaced as a stopped status and the app stays alive (no crash/blank),
 	// which is the visible half of a clean shutdown.
 	await installFakeBridge(page, { daemonState: "stopped" });
-	await page.goto("/#/projects/fake-proj");
+	await page.goto("/#/host/local/project/fake-proj");
 	await expect(page.getByTestId("daemon-status")).toHaveAttribute("data-state", "stopped");
 	await expect(page.getByTestId("board")).toBeVisible();
 });
@@ -144,7 +144,7 @@ test("renderer: board state rehydrates after a renderer relaunch @T0 @DMN", asyn
 		daemonPort: 8080,
 		workers: [{ id: "dmn009", title: "Persisted worker", status: "working" }],
 	});
-	await page.goto("/#/projects/fake-proj");
+	await page.goto("/#/host/local/project/fake-proj");
 	const firstCard = page.getByTestId("board-session-card").first();
 	await expect(firstCard).toBeVisible();
 	const before = await firstCard.textContent();
@@ -159,7 +159,7 @@ test("renderer: board state rehydrates after a renderer relaunch @T0 @DMN", asyn
 
 // #2483 BRD-001.
 test("renderer: board renders all status columns @T0 @BRD", async ({ page }) => {
-	await page.goto("/#/projects/ao-demo");
+	await page.goto("/#/host/local/project/ao-demo");
 	const columns = page.getByTestId("board-column");
 	await expect(columns).toHaveCount(4);
 	// Left→right delivery flow: building → validating → in review → ready.
