@@ -7,6 +7,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type AnimationEvent,
   type MutableRefObject,
 } from "react";
 import { useTranslation } from "react-i18next";
@@ -86,7 +87,8 @@ export function CommandPalette() {
     projectId?: string;
     sessionId?: string;
   };
-  const workspaceSections = useWorkspaceQuery().data;
+  const isOpen = useUiStore((s) => s.isCommandPaletteOpen);
+  const workspaceSections = useWorkspaceQuery({ subscribed: isOpen }).data;
   const workspaces = useMemo(
     () => flattenHostSections(workspaceSections),
     [workspaceSections],
@@ -95,10 +97,8 @@ export function CommandPalette() {
     useShell();
   const resolvedTheme = useUiStore((s) => s.resolvedTheme);
   const setThemePreference = useUiStore((s) => s.setThemePreference);
-  const isOpen = useUiStore((s) => s.isCommandPaletteOpen);
   const setOpen = useUiStore((s) => s.setCommandPaletteOpen);
   const restartingProjectIds = useUiStore((s) => s.restartingProjectIds);
-
   const [view, setView] = useState<PaletteView>({ mode: "root" });
   const [query, setQuery] = useState("");
   const [selectedValue, setSelectedValue] = useState("");
@@ -116,6 +116,7 @@ export function CommandPalette() {
   const composerBusyRef = useRef(false);
   const viewRef = useRef(view);
   viewRef.current = view;
+  const closeResetTimerRef = useRef<number | null>(null);
 
   const currentSession =
     params.hostId && params.sessionId
@@ -136,6 +137,7 @@ export function CommandPalette() {
   // Review states are fetched only while the palette is open; the shared query
   // key means sessions already viewed in the inspector reuse the cached data.
   const reviewQuerySummary = useQueries({
+		subscribed: isOpen,
     queries: sessionsWithOpenPRs.map((session) =>
       sessionReviewsQueryOptions(session, isOpen, PALETTE_REVIEW_STALE_TIME_MS),
     ),
@@ -251,11 +253,40 @@ export function CommandPalette() {
   }, []);
 
   const closePalette = useCallback(() => {
+    runGenerationRef.current += 1;
     setOpen(false);
     setView({ mode: "root" });
     setPendingDismiss(null);
-    resetTransient();
+    if (closeResetTimerRef.current !== null)
+      window.clearTimeout(closeResetTimerRef.current);
+    closeResetTimerRef.current = window.setTimeout(() => {
+      closeResetTimerRef.current = null;
+      if (!useUiStore.getState().isCommandPaletteOpen) resetTransient();
+    }, 150);
   }, [setOpen, resetTransient]);
+
+  const resetAfterClose = useCallback(() => {
+    if (closeResetTimerRef.current !== null) {
+      window.clearTimeout(closeResetTimerRef.current);
+      closeResetTimerRef.current = null;
+    }
+    if (!useUiStore.getState().isCommandPaletteOpen) resetTransient();
+  }, [resetTransient]);
+
+  useEffect(
+    () => () => {
+      if (closeResetTimerRef.current !== null)
+        window.clearTimeout(closeResetTimerRef.current);
+    },
+    [],
+  );
+
+  const handlePaletteAnimationEnd = useCallback(
+    (event: AnimationEvent<HTMLDivElement>) => {
+      if (event.target === event.currentTarget) resetAfterClose();
+    },
+    [resetAfterClose],
+  );
 
   const popToRoot = useCallback(() => {
     setView({ mode: "root" });
@@ -607,6 +638,7 @@ export function CommandPalette() {
           open ? setOpen(true) : requestDismiss("close")
         }
         contentProps={{
+          onAnimationEnd: handlePaletteAnimationEnd,
           onEscapeKeyDown: (event) => {
             event.preventDefault();
             if (event.isComposing) return;

@@ -1,4 +1,11 @@
-import { memo, useEffect, useRef, useState, type MouseEvent } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type MouseEvent,
+} from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { useQueryClient } from "@tanstack/react-query";
@@ -306,11 +313,11 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
   const activeProjectKeyRef = useRef(projectKey);
   activeProjectKeyRef.current = projectKey;
 
-  const openSession = (session: WorkspaceSession) =>
+  const openSession = useCallback((session: WorkspaceSession) =>
     void navigate({
       to: "/host/$hostId/session/$sessionId",
       params: { hostId: session.host, sessionId: session.id },
-    });
+    }), [navigate]);
 
   const openOrchestrator = async (mode?: "tui") => {
     if (!workspace || isProjectRestarting) return;
@@ -583,8 +590,8 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
             labels={boardLabels}
             renderSessionCard={(session) => (
               <BoardSessionCardAdapter
-                onOpen={() => openSession(session)}
-                onTerminate={() => terminateSession.mutate(session)}
+                onOpenSession={openSession}
+                onTerminateSession={terminateSession.mutate}
                 session={session}
                 usage={usageBySession.get(refKey(session))}
               />

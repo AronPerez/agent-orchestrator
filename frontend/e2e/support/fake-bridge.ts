@@ -187,11 +187,11 @@ export async function installFakeBridge(
 						activeTabId: "t1",
 						tabs: [{ id: "t1", url: "", title: "", active: true }],
 					}),
-					devtools: async (input: { viewId: string }) => ({
-						viewId: input.viewId,
-						open: false,
-						activeTabId: "",
-					}),
+					notifyPanelUsed: () => undefined,
+					notifyPanelBlur: () => undefined,
+					onFocusLocation: unsubscribe,
+					onReopenClosedTab: unsubscribe,
+					devtools: async (input: { viewId: string }) => ({ viewId: input.viewId, open: false, activeTabId: "" }),
 					destroy: () => undefined,
 					// Annotation contract (mirrors src/preload.ts): useBrowserView subscribes
 					// to these whenever SessionView mounts with window.ao.browser present, so
@@ -203,6 +203,7 @@ export async function installFakeBridge(
 					onTabsState: unsubscribe,
 					onAgentActivity: unsubscribe,
 					onDevToolsState: unsubscribe,
+					onPageFocus: unsubscribe,
 				},
 				notifications: {
 					show: async () => undefined,
@@ -704,11 +705,11 @@ export async function installFakeAgent(
 						activeTabId: "t1",
 						tabs: [{ id: "t1", url: "", title: "", active: true }],
 					}),
-					devtools: async (input: { viewId: string }) => ({
-						viewId: input.viewId,
-						open: false,
-						activeTabId: "",
-					}),
+					notifyPanelUsed: () => undefined,
+					notifyPanelBlur: () => undefined,
+					onFocusLocation: unsubscribe,
+					onReopenClosedTab: unsubscribe,
+					devtools: async (input: { viewId: string }) => ({ viewId: input.viewId, open: false, activeTabId: "" }),
 					destroy: () => undefined,
 					// Annotation contract (mirrors src/preload.ts): useBrowserView subscribes
 					// to these whenever SessionView mounts with window.ao.browser present, so
@@ -720,6 +721,7 @@ export async function installFakeAgent(
 					onTabsState: unsubscribe,
 					onAgentActivity: unsubscribe,
 					onDevToolsState: unsubscribe,
+					onPageFocus: unsubscribe,
 				},
 				notifications: {
 					show: async () => undefined,

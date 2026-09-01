@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
-import { useEffect, useId, useState, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useId, useState, type ReactNode } from "react";
 import type { TFunction } from "i18next";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -234,11 +234,12 @@ export function SessionInspector({
   const filesChangedCount = useSessionWorkspaceFilesChangedCount(
     filesAvailable ? session : undefined,
   );
-  const setView = (next: InspectorView) => {
+  const setView = useCallback((next: InspectorView) => {
     setInternalView(next);
     onViewChange?.(next);
     if (next === "files") onOpenFiles?.();
-  };
+  }, [onOpenFiles, onViewChange]);
+  const openReviews = useCallback(() => setView("reviews"), [setView]);
   // A persisted/controlled Reviews selection can outlive the last reviewable PR.
   // Keep the shell on a real, visible tab instead of rendering an empty, unlabelled body.
   const reviewsAvailable = reviewsTabVisible(session);
@@ -320,7 +321,7 @@ export function SessionInspector({
           session ? (
             <SummaryView
               canOpenReviews={reviewsAvailable}
-              onOpenReviews={() => setView("reviews")}
+              onOpenReviews={openReviews}
               session={session}
             />
           ) : undefined
@@ -351,7 +352,7 @@ function normalizeReviewerId(value: string | undefined): string {
   return value?.trim().replace(/^@+/, "").toLowerCase() ?? "";
 }
 
-function SummaryView({
+const SummaryView = memo(function SummaryView({
   canOpenReviews,
   onOpenReviews,
   session,
@@ -419,9 +420,9 @@ function SummaryView({
       }
     />
   );
-}
+});
 
-function ReviewsView({
+const ReviewsView = memo(function ReviewsView({
   session,
   onOpenReviewFile,
   onOpenReviewerTerminal,
@@ -439,7 +440,7 @@ function ReviewsView({
       />
     </div>
   );
-}
+});
 
 function InspectorPolicyRow({
   id,

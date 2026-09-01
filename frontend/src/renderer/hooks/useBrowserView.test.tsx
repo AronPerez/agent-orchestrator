@@ -119,6 +119,10 @@ function setupBridge() {
         { id: "t2", url: "", title: "", active: true },
       ],
     })),
+		notifyPanelUsed: vi.fn(),
+		notifyPanelBlur: vi.fn(),
+		onFocusLocation: vi.fn(() => () => undefined),
+		onReopenClosedTab: vi.fn(() => () => undefined),
     devtools: vi.fn(
       async ({
         viewId,
@@ -141,6 +145,7 @@ function setupBridge() {
       listeners.add(listener);
       return () => listeners.delete(listener);
     }),
+    onPageFocus: vi.fn(() => () => undefined),
     onTabsState: vi.fn((listener: TabsListener) => {
       tabsListeners.add(listener);
       return () => tabsListeners.delete(listener);

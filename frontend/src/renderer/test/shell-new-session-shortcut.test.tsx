@@ -133,6 +133,7 @@ vi.mock("../hooks/useWorkspaceQuery", () => ({
 	localWorkspaceFailure: (sections: Array<{ host: string; status?: string; failure?: string | null }> | undefined) =>
 		sections?.find((section) => section.host === "local" && section.status === "failed")?.failure ?? undefined,
 	useWorkspaceQuery: () => shellMocks.state.workspaceQuery,
+	useWorkspaceTraySessions: () => ({ data: [] }),
 	workspaceQueryKey: ["workspaces"],
 	workspaceQueryOptions: {},
 }));

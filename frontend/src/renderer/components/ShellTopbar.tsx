@@ -12,6 +12,7 @@ import {
 } from "motion/react";
 import { NotificationCenter } from "./NotificationCenter";
 import {
+  CLOUD_PROJECT_KIND,
   flattenHostSections,
   hasConfiguredOrchestratorAgent,
   isOrchestratorSession,
@@ -103,9 +104,11 @@ const PADDING_CLEARANCE_LINUX = 114;
 export function ShellTopbar({
   embedded = false,
   sessionAction,
+  compactActions = false,
 }: {
   embedded?: boolean;
   sessionAction?: ReactNode;
+  compactActions?: boolean;
 } = {}) {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -292,7 +295,11 @@ export function ShellTopbar({
         className={
           embedded
             ? "contents"
-            : cn(topbarHeaderClass, "workspace-topbar-container")
+            : cn(
+                topbarHeaderClass,
+                "workspace-topbar-container",
+                isSessionRoute && "pr-2",
+              )
         }
         style={embedded ? undefined : { ...dragStyle, paddingLeft }}
       >
@@ -364,6 +371,7 @@ export function ShellTopbar({
 
         <div
           className="workspace-topbar-actions flex shrink-0 items-center"
+          data-compact-actions={compactActions ? "true" : "false"}
           data-testid="workspace-topbar-actions"
         >
           {!boardActionsInPanel && isProjectBoardRoute ? (
@@ -490,7 +498,7 @@ export function ShellTopbar({
 						    non-destructive one, and it must sit left of Kill. Kept outside
 						    the local-actions group because Electron main independently
 						    reports whether this session has a live workspace. */}
-              {session ? (
+              {session && project?.kind !== CLOUD_PROJECT_KIND ? (
                 // Keyed per session so a stale launch error does not carry over
                 // when switching sessions. Keyed by ref, not bare id: two hosts
                 // can hold the same session id, and a bare id would leave one
@@ -511,7 +519,10 @@ export function ShellTopbar({
               session &&
               (sessionAction || sessionIsActive(session)) ? (
                 <div
-                  className="mr-0.5 inline-flex shrink-0 items-center gap-px"
+                  className={cn(
+                    "inline-flex shrink-0 items-center",
+                    embedded ? "gap-1" : "mr-0.5 gap-px",
+                  )}
                   data-testid="session-local-actions"
                   style={noDragStyle}
                 >

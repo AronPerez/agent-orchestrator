@@ -36,7 +36,23 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
 });
 
 vi.mock("../hooks/useWorkspaceQuery", () => ({
-	useWorkspaceQuery: () => useWorkspaceQueryMock(),
+	useWorkspaceQuery: useWorkspaceQueryMock,
+	useWorkspaceScope: () => {
+		const query = useWorkspaceQueryMock();
+		const workspaces = query.data?.flatMap((section: { workspaces: WorkspaceSummary[] }) => section.workspaces);
+		const project = workspaces?.find((workspace: WorkspaceSummary) => workspace.id === paramsMock.projectId);
+		const session = workspaces
+			?.flatMap((workspace: WorkspaceSummary) => workspace.sessions)
+			.find((candidate: WorkspaceSession) => candidate.id === paramsMock.sessionId);
+		return {
+			...query,
+			data: {
+				project,
+				session,
+				orchestrator: project?.sessions.find((candidate: WorkspaceSession) => candidate.kind === "orchestrator"),
+			},
+		};
+	},
 	workspaceQueryKey: ["workspaces"],
 }));
 

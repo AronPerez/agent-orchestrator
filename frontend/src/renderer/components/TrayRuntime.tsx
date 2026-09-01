@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useRef } from "react";
 import { useWorkspaceQuery } from "../hooks/useWorkspaceQuery";
-import { flattenHostSections } from "../types/workspace";
+import {
+	attentionZone,
+	flattenHostSections,
+	workerSessions,
+} from "../types/workspace";
 import { aoBridge } from "../lib/bridge";
 import { useNavigateToSession } from "../lib/navigate-to-session";
-import { attentionZone, workerSessions } from "../types/workspace";
 import type { TraySessionEntry } from "../../shared/tray";
 
 export function TrayRuntime() {

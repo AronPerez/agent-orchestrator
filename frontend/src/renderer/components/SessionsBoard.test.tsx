@@ -1395,7 +1395,7 @@ describe("SessionsBoard", () => {
     expect(openPrStatus.parentElement).toBe(prStatus.parentElement);
     expect(prStatus.parentElement).toHaveClass("flex-wrap");
     expect(
-      within(terminatedCard!).getByRole("link", { name: "#42" }),
+      within(terminatedCard!).getByRole("link", { name: "PR #42 merged" }),
     ).toHaveAttribute("href", "https://github.com/example/radic/pull/42");
     expect(
       within(terminatedCard!).getByRole("button", {

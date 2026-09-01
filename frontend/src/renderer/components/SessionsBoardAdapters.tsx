@@ -1,4 +1,5 @@
 import {
+  memo,
   useEffect,
   useRef,
   useState,
@@ -37,7 +38,10 @@ import {
 } from "../lib/agent-switch-presentation";
 import type { WorkspaceSession } from "../types/workspace";
 import { canonicalTrackerIssueId } from "../types/workspace";
-import { useSessionScmSummary } from "../hooks/useSessionScmSummary";
+import {
+  useSessionScmSummary,
+  type SessionPRSummary,
+} from "../hooks/useSessionScmSummary";
 import type { SessionUsageSummary } from "../hooks/useSessionUsageSummaries";
 import {
   clearTerminateSessionState,
@@ -77,6 +81,7 @@ export function toBoardSessionPresentation(
         : undefined,
     title: session.title,
     trackerIssueId: canonicalTrackerIssueId(session.issueId),
+    updatedAt: session.updatedAt,
     lastUserMessageAt: session.lastUserMessageAt,
   };
 }
@@ -115,26 +120,26 @@ export function sessionsBoardLabels(t: TFunction): BoardSplitLaneLabels {
   };
 }
 
-export function BoardSessionCardAdapter({
-  onOpen,
-  onTerminate,
+export const BoardSessionCardAdapter = memo(function BoardSessionCardAdapter({
+  onOpenSession,
+  onTerminateSession,
   session,
   usage,
 }: {
-  onOpen: () => void;
-  onTerminate: () => void;
+  onOpenSession: (session: WorkspaceSession) => void;
+  onTerminateSession: (session: WorkspaceSession) => void;
   session: WorkspaceSession;
   usage?: SessionUsageSummary;
 }) {
   return (
     <DesktopSessionCard
-      onOpen={onOpen}
-      onTerminate={onTerminate}
+      onOpen={() => onOpenSession(session)}
+      onTerminate={() => onTerminateSession(session)}
       session={session}
       usage={usage}
     />
   );
-}
+});
 
 export function ArchivedSessionCardAdapter({
   isRestoreDisabled,
@@ -175,7 +180,7 @@ export function ArchivedSessionCardAdapter({
   );
 }
 
-function DesktopSessionCard({
+const DesktopSessionCard = memo(function DesktopSessionCard({
   action,
   branchAction,
   footer,
@@ -267,16 +272,26 @@ function DesktopSessionCard({
       externalLink={ProductExternalLink}
       footer={footer}
       interactive={interactive}
+      compactPullRequestLabels
       labels={{
         formatTime: formatTimeCompact,
         intakeIssue: (id) => t("shell.intakeIssue", { id }),
         pr: pullRequestLabels(t),
-        lastUserMessageAt: (time) => t("shell.lastMessageAt", { time }),
+        updatedAt: (timestamp) =>
+          t("shell.lastMessageAt", { time: formatTimeCompact(timestamp) }),
       }}
       onOpen={onOpen}
       overlay={terminationOverlay}
       prs={summaries.map((pr) => ({
+        commentCount: pr.review.unresolvedBy.reduce(
+          (count, reviewer) => count + reviewer.count,
+          0,
+        ),
         number: pr.number,
+        reviewerAvatars: (pr.review.reviews ?? []).map((review) => ({
+          login: review.reviewerId,
+          url: reviewerAvatarUrl(pr, review.reviewerId),
+        })),
         state: pr.state,
         url: prBrowserUrl(pr),
       }))}
@@ -284,11 +299,12 @@ function DesktopSessionCard({
         <AgentAvatar className="mt-0.5" provider={provider} />
       )}
       session={toBoardSessionPresentation(session, t)}
+      showTrackerIssue
       translate={translate}
       usage={usagePresentation}
     />
   );
-}
+});
 
 function pullRequestLabels(t: TFunction): BoardPullRequestLabels {
   return {
@@ -300,6 +316,24 @@ function pullRequestLabels(t: TFunction): BoardPullRequestLabels {
       open: t("pr.state.open"),
     },
   };
+}
+
+function reviewerAvatarUrl(
+  pr: SessionPRSummary,
+  reviewerId: string,
+): string | undefined {
+  let origin: string;
+  try {
+    origin = new URL(prBrowserUrl(pr)).origin;
+  } catch {
+    return undefined;
+  }
+
+  const encodedReviewer = encodeURIComponent(reviewerId);
+  if (pr.provider === "github") return `${origin}/${encodedReviewer}.png`;
+  if (pr.provider === "gitlab")
+    return `${origin}/-/avatar?username=${encodedReviewer}`;
+  return undefined;
 }
 
 // toUsagePresentation builds the card's single usage line: cost, tokens, or

@@ -353,9 +353,9 @@ func newProjectSetConfigCommand(ctx *commandContext) *cobra.Command {
 	f.StringArrayVar(&opts.env, "env", nil, "Env var KEY=VALUE forwarded into sessions (repeatable)")
 	f.StringArrayVar(&opts.symlink, "symlink", nil, "Repo-relative path to symlink into workspaces (repeatable)")
 	f.StringArrayVar(&opts.postCreate, "post-create", nil, "Command to run after workspace creation (repeatable)")
-	f.BoolVar(&opts.trackerIntake, "tracker-intake", false, "Enable GitHub issue intake for matching issues")
-	f.StringVar(&opts.trackerRepo, "tracker-repo", "", "GitHub repo for issue intake (owner/repo; default: derive from git origin)")
-	f.StringVar(&opts.trackerAssignee, "tracker-assignee", "", "GitHub issue assignee required for intake eligibility")
+	f.BoolVar(&opts.trackerIntake, "tracker-intake", false, "Enable issue intake for matching issues (GitHub or GitLab; provider inferred from git origin)")
+	f.StringVar(&opts.trackerRepo, "tracker-repo", "", "Provider-native repo for issue intake (owner/repo or group/subgroup/repo; default: derive from git origin)")
+	f.StringVar(&opts.trackerAssignee, "tracker-assignee", "", "Issue assignee required for intake eligibility")
 	f.BoolVar(&opts.browserPersistProfile, "browser-persistent-profile", false,
 		"Share ONE on-disk browser profile across this project's sessions so logins survive restarts. "+
 			"Off by default. Security ceiling: every worker session on this project shares that cookie jar, "+
@@ -410,7 +410,6 @@ func buildProjectConfig(opts projectSetConfigOptions, orchestratorPrompt string)
 		Orchestrator:       roleOverride{Agent: opts.orchestratorAgent},
 		TrackerIntake: trackerIntakeConfig{
 			Enabled:  opts.trackerIntake,
-			Provider: trackerProviderForFlags(opts),
 			Repo:     opts.trackerRepo,
 			Assignee: opts.trackerAssignee,
 		},
@@ -421,13 +420,6 @@ func buildProjectConfig(opts projectSetConfigOptions, orchestratorPrompt string)
 		return projectConfig{}, usageError{errors.New("usage: provide at least one config flag, --config-json, --orchestrator-prompt-file, or --clear")}
 	}
 	return cfg, nil
-}
-
-func trackerProviderForFlags(opts projectSetConfigOptions) string {
-	if opts.trackerIntake || opts.trackerRepo != "" || opts.trackerAssignee != "" {
-		return "github"
-	}
-	return ""
 }
 
 // readOrchestratorPrompt resolves --orchestrator-prompt-file: "" -> no prompt,

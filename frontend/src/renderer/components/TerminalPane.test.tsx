@@ -112,7 +112,7 @@ vi.mock("./XtermTerminal", () => ({
 vi.mock("../hooks/useTerminalSession", () => ({
 	useTerminalSession: (
 		_session: WorkspaceSession | undefined,
-		options: { coverInitialReplay?: boolean },
+		options: { coverInitialReplay?: boolean; shellTerminalHandleId?: string },
 	) => {
 		terminalSessionOptions.push(options);
 		return {
@@ -307,6 +307,40 @@ describe("TerminalPane empty states", () => {
 				),
 			).toBeInTheDocument();
 			expect(screen.queryByText(/worker terminal/i)).not.toBeInTheDocument();
+		} finally {
+			view.restore();
+		}
+	});
+
+	it("selects a temporary shell without attaching xterm to its temporary handle", () => {
+		const shell = {
+			host: "local",
+			handleId: "pending-shell:test",
+			sessionId: worker.id,
+			workingDir: "",
+			title: "Terminal 1",
+			createdAt: "2026-08-31T00:00:00Z",
+			optimistic: true,
+		} satisfies ShellTerminal;
+		const view = renderCachedPane({
+			session: worker,
+			sessions: [worker],
+			// The authoritative shell can replace the optimistic cache row before
+			// the selected target changes. A pending handle itself is the contract.
+			shellTerminals: [],
+			terminalTarget: {
+				generation: shell.createdAt,
+				host: "local",
+				kind: "shell",
+				handleId: shell.handleId,
+				session: { host: "local", id: worker.id },
+				title: shell.title,
+			},
+		});
+		try {
+			expect(screen.getByTestId("optimistic-terminal")).toBeInTheDocument();
+			expect(screen.queryByTestId("xterm")).not.toBeInTheDocument();
+			expect(terminalSessionOptions).toHaveLength(0);
 		} finally {
 			view.restore();
 		}
@@ -509,6 +543,25 @@ describe("TerminalCacheProvider", () => {
 			view.show(sessions[0]);
 			await waitFor(() => expect(activeXterm()).toBe(oldest));
 			expect(xtermMounts.value).toBe(7);
+		} finally {
+			view.restore();
+		}
+	});
+
+	it("reveals a cached terminal immediately while its activation preparation is still pending", async () => {
+		prepareForActivationMock.mockImplementation(() => new Promise<void>(() => undefined));
+		const view = renderCachedPane({ session: sessionA, sessions: [sessionA, sessionB] });
+		try {
+			const terminalA = await waitFor(() => activeXterm());
+			view.show(sessionB);
+			await waitFor(() => expect(activeXterm()).not.toBe(terminalA));
+
+			view.show(sessionA);
+			const host = document.querySelector<HTMLElement>(
+				`[data-terminal-cache-key^="session:local:${sessionA.id}:worker|"]`,
+			);
+			expect(host).toHaveAttribute("data-terminal-activation-phase", "visible");
+			expect(host?.style.visibility).not.toBe("hidden");
 		} finally {
 			view.restore();
 		}

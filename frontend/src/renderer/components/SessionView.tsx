@@ -29,9 +29,8 @@ import {
 import { NotificationCenter } from "./NotificationCenter";
 import { ResizeHandle } from "./ResizeHandle";
 import { SessionFileExplorer } from "./SessionFileExplorer";
-import { SessionFileTabs } from "./SessionFileTabs";
+import { SessionFileTab, SessionFileTabActions } from "./SessionFileTabs";
 import { SessionFileWorkspace } from "./SessionFileWorkspace";
-import { SessionBranchBadge } from "./SessionBranchBadge";
 import { SessionInspector } from "./SessionInspector";
 import {
   SessionInterfaceActionGroup,
@@ -60,10 +59,9 @@ import {
 } from "../hooks/useSessionInterfaceTransition";
 import { usePersistentBrowserProfile } from "../hooks/usePersistentBrowserProfile";
 import { sessionWorkspaceFilesQueryOptions } from "../hooks/useSessionWorkspaceFiles";
-import { useWorkspaceQuery } from "../hooks/useWorkspaceQuery";
-import { flattenHostSections } from "../types/workspace";
+import { useWorkspaceSession } from "../hooks/useWorkspaceQuery";
 import { useWindowFullScreen } from "../hooks/useWindowFullScreen";
-import { apiErrorMessage } from "../lib/api-client";
+import { apiErrorCode, apiErrorMessage } from "../lib/api-client";
 import { clientFor } from "../lib/host-clients";
 import { matchWorkspaceFilePath } from "../lib/workspace-file-path";
 import { SHELL_PANEL_SPRING } from "../lib/motion-spring";
@@ -112,6 +110,7 @@ const BROWSER_CHAT_MIN_PX = 440;
 const BROWSER_CHAT_COMFORT_PX = 720;
 const WORKSPACE_ABSOLUTE_MIN_PX = 300;
 const INSPECTOR_SEPARATOR_RESERVE_PX = 8;
+const EMPTY_AUXILIARY_TAB_ORDER: string[] = [];
 // The inspector tab labels respond to the tablist's remaining width. The
 // 239px tablist breakpoint plus the 76px pinned-action reserve and 10px leading
 // inset gives a 325px inspector breakpoint for the animation lock.
@@ -471,8 +470,8 @@ export function SessionView({ sessionRef }: SessionViewProps) {
   const sessionId = sessionRef.id;
   const sessionKey = refKey(sessionRef);
   const { t } = useTranslation();
-  const workspaceQuery = useWorkspaceQuery();
-  const workspaces = flattenHostSections(workspaceQuery.data);
+  const queryClient = useQueryClient();
+  const workspaceQuery = useWorkspaceSession(sessionRef);
   const theme = useResolvedTheme();
   const prefersReducedMotion = useReducedMotion();
   const isInspectorOpen = useUiStore(
@@ -492,7 +491,6 @@ export function SessionView({ sessionRef }: SessionViewProps) {
   const initializeInspectorSession = useUiStore(
     (state) => state.initializeInspectorSession,
   );
-  const queryClient = useQueryClient();
   const setBrowserContentRevealed = useUiStore(
     (state) => state.setBrowserContentRevealed,
   );
@@ -525,6 +523,42 @@ export function SessionView({ sessionRef }: SessionViewProps) {
     Record<string, SessionFileTabState>
   >({});
   const fileTabs = fileTabsBySession[sessionKey] ?? EMPTY_SESSION_FILE_TABS;
+  const [auxiliaryTabOrderBySession, setAuxiliaryTabOrderBySession] = useState<
+    Record<string, string[]>
+  >({});
+  const auxiliaryTabOrder =
+    auxiliaryTabOrderBySession[sessionKey] ?? EMPTY_AUXILIARY_TAB_ORDER;
+  const setAuxiliaryTabOrder = useCallback(
+    (nextOrder: string[]) => {
+      setAuxiliaryTabOrderBySession((current) => {
+        const currentOrder = current[sessionKey] ?? [];
+        const visibleKeys = new Set(nextOrder);
+        let nextIndex = 0;
+        const mergedOrder = currentOrder.map((key) =>
+          visibleKeys.has(key) ? nextOrder[nextIndex++]! : key,
+        );
+        while (nextIndex < nextOrder.length)
+          mergedOrder.push(nextOrder[nextIndex++]!);
+        return { ...current, [sessionKey]: mergedOrder };
+      });
+    },
+    [sessionKey],
+  );
+  const removeAuxiliaryTab = useCallback(
+    (key: string) => {
+      setAuxiliaryTabOrderBySession((current) => {
+        const currentOrder = current[sessionKey];
+        if (!currentOrder?.includes(key)) return current;
+        const nextOrder = currentOrder.filter((candidate) => candidate !== key);
+        if (nextOrder.length === 0) {
+          const { [sessionKey]: _removed, ...rest } = current;
+          return rest;
+        }
+        return { ...current, [sessionKey]: nextOrder };
+      });
+    },
+    [sessionKey],
+  );
   const browserPopOutPhase =
     browserPopOutState.sessionKey === sessionKey
       ? browserPopOutState.phase
@@ -592,12 +626,7 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 
   useEffect(() => stopTerminalLiveResize, [stopTerminalLiveResize]);
 
-  const session = workspaces
-    .flatMap((workspace) => workspace.sessions)
-    .find(
-      (candidate) =>
-        candidate.host === sessionRef.host && candidate.id === sessionId,
-    );
+  const session = workspaceQuery.data;
   const interfaceSwitch = useSessionInterfaceTransition(session);
   const reviewerQuery = useQuery({
     queryKey: ["session-reviews", sessionKey],
@@ -646,6 +675,19 @@ export function SessionView({ sessionRef }: SessionViewProps) {
     () => allShellTerminals.filter((shell) => shell.sessionId === sessionId),
     [allShellTerminals, sessionId],
   );
+	const resolvedAuxiliaryTabOrder = useMemo(() => {
+		const available = [
+			...(reviewerTerminal ? [`reviewer:${reviewerTerminal.handleId}`] : []),
+			...shellTerminals.map((shell) => shell.handleId),
+			...fileTabs.openPaths.map((path) => `file:${path}`),
+		];
+		const availableKeys = new Set(available);
+		const resolved = auxiliaryTabOrder.filter((key) => availableKeys.has(key));
+		for (const key of available) {
+			if (!resolved.includes(key)) resolved.push(key);
+		}
+		return resolved;
+	}, [auxiliaryTabOrder, fileTabs.openPaths, reviewerTerminal, shellTerminals]);
   const openShellTerminal = useOpenShellTerminal();
   const closeShellTerminal = useCloseShellTerminal();
   const renameShellTerminal = useRenameShellTerminal();
@@ -674,34 +716,105 @@ export function SessionView({ sessionRef }: SessionViewProps) {
   // session's worktree (the project id is only the fallback when the session's
   // workspace can no longer be resolved).
   const addShellTerminal = useCallback(() => {
-    openShellTerminal.mutate(
+    const setOpenedShell = (shell: (typeof shellTerminals)[number]) => {
+      setActiveShellTerminal({ host: shell.host, id: shell.handleId });
+      setFileTabsBySession((current) => ({
+        ...current,
+        [sessionKey]: activateSessionFile(
+          current[sessionKey] ?? EMPTY_SESSION_FILE_TABS,
+          null,
+        ),
+      }));
+      setTerminalTarget({
+        generation: shell.createdAt,
+        kind: "shell",
+        host: shell.host,
+        handleId: shell.handleId,
+        session: sessionRef,
+        title: shell.title,
+      });
+    };
+    const shell = openShellTerminal.open(
       {
         project: session
           ? { host: session.host, id: session.workspaceId }
           : undefined,
         session: sessionRef,
       },
-      {
-        onSuccess: (shell) => {
-          setActiveShellTerminal({ host: shell.host, id: shell.handleId });
-          setTerminalTarget({
-            generation: shell.createdAt,
-            kind: "shell",
-            host: shell.host,
-            handleId: shell.handleId,
-            session: { host: sessionRef.host, id: sessionId },
-            title: shell.title,
-          });
-        },
-      },
+      { onSuccess: setOpenedShell },
     );
+    setOpenedShell(shell);
   }, [
     openShellTerminal,
-    sessionId,
     session?.workspaceId,
+    session?.host,
+    sessionKey,
+    sessionRef,
     sessionRef.host,
+    shellTerminals,
     setActiveShellTerminal,
   ]);
+
+	const activateAuxiliaryTab = useCallback(
+		(key?: string) => {
+			if (key?.startsWith("file:")) {
+				const path = key.slice("file:".length);
+				setActiveShellTerminal(null);
+				setTerminalTarget({ kind: "worker" });
+				setFileTabsBySession((current) => ({
+					...current,
+					[sessionKey]: activateSessionFile(current[sessionKey] ?? EMPTY_SESSION_FILE_TABS, path),
+				}));
+				return;
+			}
+			if (reviewerTerminal && key === `reviewer:${reviewerTerminal.handleId}`) {
+				setActiveShellTerminal(null);
+				setTerminalTarget({
+					kind: "reviewer",
+					handleId: reviewerTerminal.handleId,
+					harness: reviewerTerminal.harness,
+					session: sessionRef,
+				});
+				setFileTabsBySession((current) => ({
+					...current,
+					[sessionKey]: activateSessionFile(current[sessionKey] ?? EMPTY_SESSION_FILE_TABS, null),
+				}));
+				return;
+			}
+			const shell = shellTerminals.find((candidate) => candidate.handleId === key);
+			if (shell) {
+				setActiveShellTerminal({ host: shell.host, id: shell.handleId });
+				setTerminalTarget({
+					generation: shell.createdAt,
+					kind: "shell",
+					host: shell.host,
+					handleId: shell.handleId,
+					session: sessionRef,
+					title: shell.title,
+				});
+				setFileTabsBySession((current) => ({
+					...current,
+					[sessionKey]: activateSessionFile(current[sessionKey] ?? EMPTY_SESSION_FILE_TABS, null),
+				}));
+				return;
+			}
+			setActiveShellTerminal(null);
+			setTerminalTarget({ kind: "worker" });
+			setFileTabsBySession((current) => ({
+				...current,
+				[sessionKey]: activateSessionFile(current[sessionKey] ?? EMPTY_SESSION_FILE_TABS, null),
+			}));
+		},
+		[reviewerTerminal, sessionKey, sessionRef, shellTerminals, setActiveShellTerminal],
+	);
+	const adjacentAuxiliaryTab = useCallback(
+		(closingKey: string) => {
+			const closingIndex = resolvedAuxiliaryTabOrder.indexOf(closingKey);
+			if (closingIndex < 0) return undefined;
+			return resolvedAuxiliaryTabOrder[closingIndex - 1] ?? resolvedAuxiliaryTabOrder[closingIndex + 1];
+		},
+		[resolvedAuxiliaryTabOrder],
+	);
 
   const selectShellTerminal = useCallback(
     (handleId: string) => {
@@ -735,50 +848,34 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 
   const closeShellTerminalByHandle = useCallback(
     (handleId: string) => {
-      if (
-        terminalTarget.kind === "shell" &&
-        terminalTarget.handleId === handleId
-      ) {
-        const closingIndex = shellTerminals.findIndex(
-          (shell) => shell.handleId === handleId,
-        );
-        // Match browser-tab ergonomics: closing the selected auxiliary terminal
-        // reveals its nearest predecessor, then the next tab when the first one
-        // closes. The permanent agent terminal is only the final fallback.
-        const nextShell =
-          shellTerminals[closingIndex - 1] ?? shellTerminals[closingIndex + 1];
-        if (nextShell) {
-          setActiveShellTerminal({
-            host: nextShell.host,
-            id: nextShell.handleId,
-          });
-          setTerminalTarget({
-            generation: nextShell.createdAt,
-            kind: "shell",
-            host: nextShell.host,
-            handleId: nextShell.handleId,
-            session: { host: sessionRef.host, id: sessionId },
-            title: nextShell.title,
-          });
-        } else {
-          setActiveShellTerminal(null);
-          setTerminalTarget({ kind: "worker" });
-        }
-      } else if (
-        activeShellTerminalHandleId ===
-        refKey({ host: sessionRef.host, id: handleId })
-      ) {
-        setActiveShellTerminal(null);
-      }
-      closeShellTerminal.mutate({ host: sessionRef.host, id: handleId });
+			if (terminalTarget.kind === "shell" && terminalTarget.handleId === handleId) {
+				// Match the visible mixed strip, not the shell-only creation order.
+				activateAuxiliaryTab(adjacentAuxiliaryTab(handleId));
+			} else if (
+				activeShellTerminalHandleId ===
+				refKey({ host: sessionRef.host, id: handleId })
+			) {
+				setActiveShellTerminal(null);
+			}
+			closeShellTerminal.mutate(
+				{ host: sessionRef.host, id: handleId },
+				{
+					onSuccess: () => removeAuxiliaryTab(handleId),
+					onError: (error) => {
+						if (apiErrorCode(error) === "SHELL_TERMINAL_NOT_FOUND")
+							removeAuxiliaryTab(handleId);
+					},
+				},
+			);
     },
     [
       activeShellTerminalHandleId,
+			activateAuxiliaryTab,
+			adjacentAuxiliaryTab,
       closeShellTerminal,
-      setActiveShellTerminal,
-      sessionId,
+			removeAuxiliaryTab,
       sessionRef.host,
-      shellTerminals,
+      setActiveShellTerminal,
       terminalTarget,
     ],
   );
@@ -848,14 +945,34 @@ export function SessionView({ sessionRef }: SessionViewProps) {
           path,
         ),
       }));
+      if (fileTabs.activePath === path) {
+        activateAuxiliaryTab(adjacentAuxiliaryTab(`file:${path}`));
+      }
+      removeAuxiliaryTab(`file:${path}`);
     },
-    [sessionKey],
+    [
+      activateAuxiliaryTab,
+      adjacentAuxiliaryTab,
+      fileTabs.activePath,
+      removeAuxiliaryTab,
+      sessionKey,
+    ],
   );
   const closeAllCenterFiles = useCallback(() => {
     setFileTabsBySession((current) => ({
       ...current,
       [sessionKey]: closeAllSessionFiles(),
     }));
+    setAuxiliaryTabOrderBySession((current) => {
+      const currentOrder = current[sessionKey];
+      if (!currentOrder?.some((key) => key.startsWith("file:"))) return current;
+      const nextOrder = currentOrder.filter((key) => !key.startsWith("file:"));
+      if (nextOrder.length === 0) {
+        const { [sessionKey]: _removed, ...rest } = current;
+        return rest;
+      }
+      return { ...current, [sessionKey]: nextOrder };
+    });
   }, [sessionKey]);
 
   // The shell layout owns opening (it is mounted on every route, so the button
@@ -1159,7 +1276,6 @@ export function SessionView({ sessionRef }: SessionViewProps) {
       {!isOrchestrator ? (
         <TopbarButton
           aria-label={t("shortcut.new-shell-terminal")}
-          disabled={openShellTerminal.isPending}
           onClick={addShellTerminal}
           title={
             newTerminalError ??
@@ -1177,22 +1293,45 @@ export function SessionView({ sessionRef }: SessionViewProps) {
     </SessionInterfaceActionGroup>
   ) : null;
   const sessionHeaderActions = (
-    <>
-      <SessionBranchBadge branch={session?.branch} />
-      <ShellTopbar embedded sessionAction={sessionLocalActions} />
-    </>
+    <ShellTopbar embedded sessionAction={sessionLocalActions} />
   );
   const fileAnnotation = useFileAnnotation(sessionRef);
   const filesAvailable = Boolean(session && !session.cloud);
-  const centerFileTabs = filesAvailable ? (
-    <SessionFileTabs
-      state={fileTabs}
-      onAddFeedback={(path) => fileAnnotation.begin({ path, side: "file" })}
-      onActivateFile={activateCenterFile}
-      onCloseFile={closeCenterFile}
-      onCloseAll={closeAllCenterFiles}
-    />
-  ) : undefined;
+  const centerFileTabs = useMemo(
+    () =>
+      filesAvailable
+        ? fileTabs.openPaths.map((path) => ({
+            key: `file:${path}`,
+            content: (
+              <SessionFileTab
+                active={fileTabs.activePath === path}
+                onActivate={() => activateCenterFile(path)}
+                onAddFeedback={() =>
+                  fileAnnotation.begin({ path, side: "file" })
+                }
+                onClose={() => closeCenterFile(path)}
+                path={path}
+              />
+            ),
+            onSelect: () => activateCenterFile(path),
+          }))
+        : [],
+    [
+      activateCenterFile,
+      closeCenterFile,
+      fileAnnotation,
+      fileTabs.activePath,
+      fileTabs.openPaths,
+      filesAvailable,
+    ],
+  );
+  const centerFileTabActions =
+    filesAvailable && fileTabs.openPaths.length > 0 ? (
+      <SessionFileTabActions onCloseAll={closeAllCenterFiles} />
+    ) : undefined;
+  const activeWorkspaceTabKey = fileTabs.activePath
+    ? `file:${fileTabs.activePath}`
+    : undefined;
   const previewUrl = session?.previewUrl?.trim() || undefined;
   const previewRevision = session?.previewRevision;
   const browserSlotVisible = Boolean(
@@ -1787,7 +1926,10 @@ export function SessionView({ sessionRef }: SessionViewProps) {
                     theme={theme}
                     headerActions={sessionHeaderActions}
                     workspaceTabs={centerFileTabs}
-                    workspaceFileActive={Boolean(fileTabs.activePath)}
+									workspaceTabActions={centerFileTabActions}
+									workspaceActiveTabKey={activeWorkspaceTabKey}
+									auxiliaryTabOrder={resolvedAuxiliaryTabOrder}
+									onAuxiliaryTabOrderChange={setAuxiliaryTabOrder}
                     controllerTransitioning={chatControllerTransitioning}
                     newWorkDisabled={chatNewWorkDisabled}
                     onConversationWorkChange={handleConversationWorkChange}
@@ -1822,7 +1964,10 @@ export function SessionView({ sessionRef }: SessionViewProps) {
                     theme={theme}
                     topbarActions={sessionHeaderActions}
                     workspaceTabs={centerFileTabs}
-                    workspaceFileActive={Boolean(fileTabs.activePath)}
+									workspaceTabActions={centerFileTabActions}
+									workspaceActiveTabKey={activeWorkspaceTabKey}
+									auxiliaryTabOrder={resolvedAuxiliaryTabOrder}
+									onAuxiliaryTabOrderChange={setAuxiliaryTabOrder}
                   />
                 )}
               </div>

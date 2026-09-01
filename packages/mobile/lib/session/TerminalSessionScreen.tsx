@@ -648,7 +648,7 @@ export default function TerminalSessionScreen() {
 	const previewWebRef = useRef<WebView>(null);
 	const webIframeRef = useRef<HTMLIFrameElement | null>(null);
 
-	const { sessions, orchestrators, restore, refresh, config } = useApp();
+	const { sessions, orchestrators, restore, refresh, config: activeConfig } = useApp();
 	const known = sessions.find((s) => s.id === sessionId) ?? orchestrators.find((o) => o.id === sessionId) ?? null;
 	// Runtime handles are opaque. Native macOS PTYs are versioned (ptyhost-v1:),
 	// so using the session id here would incorrectly route the attach to legacy
@@ -771,10 +771,21 @@ export default function TerminalSessionScreen() {
 	}, [navigation, id, leave, params.title, shellOnly]);
 
 	// Load config, then connect the mux socket.
+	// Rebuilt whenever the active endpoint changes, not only when the session
+	// does. The app re-races its endpoints when the network moves — losing
+	// Wi-Fi hands the session to Tailscale or the tunnel — and a mux still
+	// pointed at the previous address stays disconnected on a blank screen
+	// until the screen is closed and reopened.
+	const activeBaseUrl = activeConfig
+		? `${activeConfig.secure ? "https" : "http"}://${activeConfig.host}:${activeConfig.httpPort}`
+		: "";
+
 	useEffect(() => {
 		let disposed = false;
 		(async () => {
-			const config = await loadConfig();
+			// Prefer the endpoint the race settled on; fall back to storage on the
+			// first render, before the store has resolved one.
+			const config = activeConfig ?? (await loadConfig());
 			if (disposed) return;
 			setCfg(config);
 			if (!isConfigured(config)) return;
@@ -854,7 +865,11 @@ export default function TerminalSessionScreen() {
 			xtermReadyRef.current = false;
 			pendingOutputRef.current = [];
 		};
-	}, [terminalHandleId, projectId]);
+		// activeBaseUrl, not activeConfig: the object identity changes on every
+		// resolve, and rebuilding the mux on each one would tear down a healthy
+		// terminal for no reason.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [terminalHandleId, projectId, activeBaseUrl]);
 
 	useLayoutEffect(() => {
 		xtermReadyRef.current = false;
@@ -889,11 +904,11 @@ export default function TerminalSessionScreen() {
 	// Switching to another node while a terminal is open: this session id belongs
 	// to the daemon we just left and does not exist on the new one, so the screen
 	// can only sit there failing to attach. Pop back to the board instead. `cfg`
-	// is the node this screen connected to; `config` is the app's active one.
+	// is the node this screen connected to; `activeConfig` is the app's active one.
 	useEffect(() => {
-		if (!cfg || !config || !isConfigured(cfg)) return;
-		if (config.host !== cfg.host || config.httpPort !== cfg.httpPort) leave();
-	}, [cfg, config, leave]);
+		if (!cfg || !activeConfig || !isConfigured(cfg)) return;
+		if (activeConfig.host !== cfg.host || activeConfig.httpPort !== cfg.httpPort) leave();
+	}, [cfg, activeConfig, leave]);
 
 	// The WebView reports the phone's NATURAL fit (proposeDimensions, measure-only).
 	// We forward it to the daemon as this client's requested size — used only when

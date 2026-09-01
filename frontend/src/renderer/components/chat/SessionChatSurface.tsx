@@ -72,8 +72,14 @@ export function SessionChatSurface({
   onOpenFiles,
   onOpenFile,
   headerActions,
+  sessionTabAction,
+  tabStripAction,
+  handoffDialogOpen = false,
   workspaceTabs,
-  workspaceFileActive,
+	workspaceTabActions,
+	workspaceActiveTabKey,
+	auxiliaryTabOrder,
+	onAuxiliaryTabOrderChange,
   controllerTransitioning,
   newWorkDisabled,
   onConversationWorkChange,
@@ -103,8 +109,15 @@ export function SessionChatSurface({
   /** Opens the Files inspector focused on one changed path. */
   onOpenFile?: (path: string) => void;
   headerActions?: ReactNode;
-  workspaceTabs?: ReactNode;
-  workspaceFileActive?: boolean;
+  sessionTabAction?: ReactNode;
+  tabStripAction?: ReactNode;
+  handoffDialogOpen?: boolean;
+  workspaceTabs?: Array<{ key: string; content: ReactNode; onSelect: () => void }>;
+  workspaceTabActions?: ReactNode;
+  workspaceActiveTabKey?: string;
+  /** Session-owned order shared with the terminal UI surface. */
+  auxiliaryTabOrder?: string[];
+  onAuxiliaryTabOrderChange?: (keys: string[]) => void;
   /** The target controller is being installed by an interface handoff. */
   controllerTransitioning?: boolean;
   /** An interface handoff fences new agent work while current-turn decisions remain available. */
@@ -359,7 +372,9 @@ export function SessionChatSurface({
         key={refKey(session)}
         apiBaseUrl={baseUrlFor(session.host) ?? undefined}
         snapshot={renderSnapshot}
-        agentInputDisabled={switchLocksChat || switchSelectorOpen}
+        agentInputDisabled={
+          switchLocksChat || switchSelectorOpen || handoffDialogOpen
+        }
         newWorkDisabled={newWorkDisabled}
         onLinkOpen={openLinkInBrowser}
         sessionTitle={session.title}
@@ -390,8 +405,13 @@ export function SessionChatSurface({
         daemonReady={daemonReady}
         theme={theme}
         headerActions={headerActions}
+        sessionTabAction={sessionTabAction}
+        tabStripAction={tabStripAction}
         workspaceTabs={workspaceTabs}
-        workspaceFileActive={workspaceFileActive}
+				workspaceTabActions={workspaceTabActions}
+				workspaceActiveTabKey={workspaceActiveTabKey}
+				auxiliaryTabOrder={auxiliaryTabOrder}
+				onAuxiliaryTabOrderChange={onAuxiliaryTabOrderChange}
         controllerTransitioning={controllerTransitioning}
         hasOlder={hasOlder}
         loadingOlder={isLoadingOlder}
@@ -445,8 +465,23 @@ export function SessionChatSurface({
             ? commands.steer
             : undefined
         }
+        sendPending={commands.sendPending}
         steerPending={commands.steerPending}
         steerRefusal={commands.steerRefusal}
+        onPromoteQueuedTurn={
+          can(renderSnapshot, "steer") && !commands.steerUnsupported
+            ? commands.promoteQueuedTurn
+            : undefined
+        }
+        onEditQueuedTurn={commands.editQueuedTurn}
+        onCancelQueuedTurn={commands.cancelQueuedTurn}
+        promoteQueuedTurnPendingTurnId={
+          commands.promoteQueuedTurnPendingTurnId
+        }
+        cancelQueuedTurnPendingTurnId={
+          commands.cancelQueuedTurnPendingTurnId
+        }
+        editQueuedTurnPendingTurnId={commands.editQueuedTurnPendingTurnId}
         onReloadMcpServers={
           !can(renderSnapshot, "mcp_reload") || commands.mcpReloadUnsupported
             ? undefined

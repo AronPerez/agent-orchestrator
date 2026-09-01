@@ -605,6 +605,37 @@ export function useConversationCommands(session: Ref | undefined) {
     onSuccess: invalidate,
   });
 
+  const cancelQueuedTurn = useMutation({
+    mutationFn: async (turnId: string) => {
+      const { error } = await daemonConversationClient(session!).POST(
+        "/api/v1/sessions/{sessionId}/conversation/turns/{turnId}/cancel",
+        {
+          params: {
+            path: { sessionId: sessionId as string, turnId },
+          },
+        },
+      );
+      if (error) throw error;
+    },
+    onSuccess: invalidate,
+  });
+
+  const editQueuedTurn = useMutation({
+    mutationFn: async ({ turnId, text }: { turnId: string; text: string }) => {
+      const { error } = await daemonConversationClient(session!).POST(
+        "/api/v1/sessions/{sessionId}/conversation/turns/{turnId}/queue/edit",
+        {
+          params: {
+            path: { sessionId: sessionId as string, turnId },
+          },
+          body: { text },
+        },
+      );
+      if (error) throw error;
+    },
+    onSuccess: invalidate,
+  });
+
   /**
    * Restart the tool servers.
    *
@@ -929,6 +960,24 @@ export function useConversationCommands(session: Ref | undefined) {
     steer: (text: string) => steer.mutateAsync(text),
     promoteQueuedTurn: (turnId: string) =>
       promoteQueuedTurn.mutateAsync(turnId),
+    cancelQueuedTurn: (turnId: string) => cancelQueuedTurn.mutateAsync(turnId),
+    editQueuedTurn: (turnId: string, text: string) => {
+      if (!sessionId)
+        return Promise.reject(
+          new Error("No conversation session is selected."),
+        );
+      return editQueuedTurn.mutateAsync({ turnId, text });
+    },
+    promoteQueuedTurnPendingTurnId: promoteQueuedTurn.isPending
+      ? promoteQueuedTurn.variables
+      : undefined,
+    cancelQueuedTurnPendingTurnId: cancelQueuedTurn.isPending
+      ? cancelQueuedTurn.variables
+      : undefined,
+    editQueuedTurnPendingTurnId: editQueuedTurn.isPending
+      ? editQueuedTurn.variables?.turnId
+      : undefined,
+    sendPending: send.isPending && sendTargetsCurrentSession,
     steerPending: steer.isPending,
     /**
      * Why the last steer was refused, or undefined. Only the retryable and

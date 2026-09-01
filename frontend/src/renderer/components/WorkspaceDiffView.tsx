@@ -70,6 +70,7 @@ export function ReviewDiffBody({
   annotation,
   detail,
   detailLoadedAt,
+	emptyFallback,
   filePath,
   onActiveSelectionChange,
   session,
@@ -79,6 +80,7 @@ export function ReviewDiffBody({
   annotation: FileAnnotationModel;
   detail: WorkspaceFileDetail;
   detailLoadedAt: number;
+	emptyFallback?: ReactNode;
   filePath: string;
   onActiveSelectionChange: (active: boolean) => void;
   session: Ref;
@@ -108,9 +110,11 @@ export function ReviewDiffBody({
   }
   if (rows.length === 0) {
     return (
-      <PanelMessage compact>
-        {emptyDiffMessage(detail.compareMode, t)}
-      </PanelMessage>
+      emptyFallback ?? (
+        <PanelMessage compact>
+          {emptyDiffMessage(detail.compareMode, t)}
+        </PanelMessage>
+      )
     );
   }
   return (

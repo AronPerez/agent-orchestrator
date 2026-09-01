@@ -1,4 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import type { EndpointKind } from "./endpoints";
 import { useCallback, useEffect, useState } from "react";
 import { secureDeleteItem, secureGetItem, secureSetItem } from "./secure-store";
 
@@ -16,16 +17,26 @@ export type ServerConfig = {
 	secure?: boolean; // use https/wss instead of http/ws (TLS / Tailscale funnel)
 	password: string; // daemon connection password for Authorization header
 	label?: string; // display name for the node; defaults to the host
+	/**
+	 * The machine's stable identity, when known. Used to key per-machine state
+	 * (the chat event cursor) so it survives the address changing as the app
+	 * races between LAN, Tailscale and the tunnel. Absent for a pairing migrated
+	 * from the single-server config until its first connect.
+	 */
+	hostId?: string;
+	/**
+	 * Which kind of endpoint won the race. Drives how often we poll: the
+	 * conversation event stream cannot deliver over a Cloudflare quick tunnel
+	 * (it forwards the body in ~128 KB chunks), so polling is the only live
+	 * signal on that path. Absent for a config that predates the race.
+	 */
+	endpointKind?: EndpointKind;
 };
 
 /** A saved node, as persisted. Never holds the password — see PW_PREFIX. */
-export type ServerEntry = {
+export type ServerEntry = Omit<ServerConfig, "password"> & {
 	id: string;
 	label: string;
-	host: string;
-	httpPort: string;
-	muxPort: string;
-	secure?: boolean;
 };
 
 export const DEFAULT_CONFIG: ServerConfig = {
@@ -140,6 +151,8 @@ function configOf(entry: ServerEntry, password: string): ServerConfig {
 		secure: entry.secure,
 		password,
 		label: entry.label,
+		hostId: entry.hostId,
+		endpointKind: entry.endpointKind,
 	};
 }
 
@@ -185,6 +198,8 @@ export async function saveConfig(cfg: ServerConfig): Promise<void> {
 		httpPort: cfg.httpPort,
 		muxPort: cfg.muxPort,
 		secure: cfg.secure,
+		hostId: cfg.hostId,
+		endpointKind: cfg.endpointKind,
 	};
 	await writeServers(
 		existing ? servers.map((s) => (s.id === id ? entry : s)) : [...servers, entry],

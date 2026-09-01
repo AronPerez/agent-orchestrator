@@ -267,6 +267,39 @@ func TestLANManagerStartStopIdempotent(t *testing.T) {
 	_ = m.Stop(ctx) // second stop is a no-op
 }
 
+// End-to-end through the real LAN stack: the identity probe answers without a
+// credential, while every other registered data route stays password-gated.
+func TestLANManagerServesIdentityProbeWithoutAPassword(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	})
+	st := &authState{}
+	st.setHash(mobilebridge.HashPassword("secret12"))
+	m := NewLANManager(inner, st, 0, slog.Default(), nil)
+	port, err := m.Start(0, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = m.Stop(context.Background()) }()
+
+	get := func(path string) int {
+		t.Helper()
+		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d%s", port, path))
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		return resp.StatusCode
+	}
+
+	if code := get("/api/v1/identity"); code != http.StatusOK {
+		t.Errorf("unauthenticated GET /api/v1/identity got %d, want 200", code)
+	}
+	if code := get("/api/v1/sessions"); code != http.StatusUnauthorized {
+		t.Errorf("unauthenticated GET /api/v1/sessions got %d, want 401", code)
+	}
+}
+
 // The bind mode narrows the listening socket. Binding 127.0.0.1 is the
 // observable stand-in for the tailscale case (a real tailnet address is not
 // available in CI): the listener must answer on the address it was given and
@@ -425,11 +458,12 @@ func TestDaemonServedUIOnLANNeedsNoAllowlistEntry(t *testing.T) {
 	}
 }
 
-// unauthenticatedLANRoutes names the routes that are allowed to answer an
-// unauthenticated request on the LAN listener. It is EMPTY on purpose.
+// unauthenticatedLANRoutes names the registered routes allowed to answer an
+// unauthenticated request on the LAN listener. The identity probe is the one
+// deliberate exception; it returns only an opaque host id and contract version.
 //
-// The LAN listener's exemption from hostGuard (see cors.go) rests entirely on
-// every route there being credential-gated: a DNS-rebinding page reaching the
+// Apart from that narrowly documented probe, the LAN listener's exemption from
+// hostGuard (see cors.go) rests on every route being credential-gated: a DNS-rebinding page reaching the
 // LAN socket carries no Bearer and no ao_conn cookie — the browser scopes the
 // cookie to the host the daemon actually served — so it gets nothing. Add one
 // unauthenticated route that returns data or has a side effect and that argument
@@ -453,7 +487,7 @@ func TestDaemonServedUIOnLANNeedsNoAllowlistEntry(t *testing.T) {
 // The walk below is therefore still exhaustive over registered routes, which is
 // the property that matters: webui.IsUIRequest excludes every daemon prefix, so
 // nothing chi serves can slip through the bypass.
-var unauthenticatedLANRoutes = map[string]struct{}{}
+var unauthenticatedLANRoutes = map[string]struct{}{identityProbePath: {}}
 
 // TestEveryLANRouteIsCredentialGated walks the real router and proves each route
 // either authenticates or is not served at all on the LAN listener. Prose in
