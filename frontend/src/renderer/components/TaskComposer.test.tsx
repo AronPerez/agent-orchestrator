@@ -116,7 +116,7 @@ describe("TaskComposer", () => {
 	it("ensures display readiness for every harness when the composer opens", async () => {
 		render(
 			<Wrap>
-				<TaskComposer projectId="proj-1" onCreated={vi.fn()} />
+				<TaskComposer project={{ host: "local", id: "proj-1" }} onCreated={vi.fn()} />
 			</Wrap>,
 		);
 
@@ -126,7 +126,7 @@ describe("TaskComposer", () => {
 	it("ensures the selected harness when agent selection changes", async () => {
 		render(
 			<Wrap>
-				<TaskComposer projectId="proj-1" onCreated={vi.fn()} />
+				<TaskComposer project={{ host: "local", id: "proj-1" }} onCreated={vi.fn()} />
 			</Wrap>,
 		);
 
@@ -163,7 +163,7 @@ describe("TaskComposer", () => {
 
 		render(
 			<Wrap queryClient={queryClient}>
-				<TaskComposer projectId="proj-1" onCreated={vi.fn()} />
+				<TaskComposer project={{ host: "local", id: "proj-1" }} onCreated={vi.fn()} />
 			</Wrap>,
 		);
 		await waitFor(() => expect(screen.getByTestId("agent-field")).toHaveAttribute("data-value", "codex"));
