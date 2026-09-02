@@ -18,6 +18,7 @@ type fakeConn struct {
 	in     chan clientMsg
 	out    chan serverMsg
 	pings  int32
+	ping   func(context.Context) error
 	once   sync.Once
 	closed chan struct{}
 }
@@ -43,8 +44,11 @@ func (c *fakeConn) WriteJSON(_ context.Context, v any) error {
 	return nil
 }
 
-func (c *fakeConn) Ping(context.Context) error {
+func (c *fakeConn) Ping(ctx context.Context) error {
 	atomic.AddInt32(&c.pings, 1)
+	if c.ping != nil {
+		return c.ping(ctx)
+	}
 	return nil
 }
 
@@ -456,6 +460,47 @@ func TestServeHeartbeatPings(t *testing.T) {
 	go mgr.Serve(ctx, conn)
 
 	eventually(t, time.Second, func() bool { return atomic.LoadInt32(&conn.pings) >= 2 })
+}
+
+func TestServeHeartbeatToleratesTwoMissedPongs(t *testing.T) {
+	mgr := NewManager(&fakeSource{}, nil, testLogger(), WithHeartbeat(10*time.Millisecond))
+	defer mgr.Close()
+	conn := newFakeConn()
+	conn.ping = func(context.Context) error {
+		if atomic.LoadInt32(&conn.pings) <= 2 {
+			return context.DeadlineExceeded
+		}
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go mgr.Serve(ctx, conn)
+
+	eventually(t, time.Second, func() bool { return atomic.LoadInt32(&conn.pings) >= 3 })
+	select {
+	case <-conn.closed:
+		t.Fatal("heartbeat closed connection after a recoverable missed pong")
+	default:
+	}
+}
+
+func TestServeHeartbeatClosesAfterThreeMissedPongs(t *testing.T) {
+	mgr := NewManager(&fakeSource{}, nil, testLogger(), WithHeartbeat(10*time.Millisecond))
+	defer mgr.Close()
+	conn := newFakeConn()
+	conn.ping = func(context.Context) error { return context.DeadlineExceeded }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go mgr.Serve(ctx, conn)
+
+	select {
+	case <-conn.closed:
+	case <-time.After(time.Second):
+		t.Fatal("heartbeat did not close connection after three missed pongs")
+	}
+	if got := atomic.LoadInt32(&conn.pings); got != 3 {
+		t.Fatalf("pings = %d, want 3", got)
+	}
 }
 
 func TestServeClosesConnOnReadEnd(t *testing.T) {

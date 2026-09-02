@@ -3,6 +3,7 @@ package terminal
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -33,6 +34,7 @@ type wsConn interface {
 
 const (
 	defaultHeartbeat   = 15 * time.Second
+	maxMissedPongs     = 3
 	defaultWriteBuffer = 1024
 )
 
@@ -554,6 +556,7 @@ func (c *connState) heartbeatLoop(ctx context.Context, interval time.Duration) {
 	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
+	missedPongs := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -562,7 +565,16 @@ func (c *connState) heartbeatLoop(ctx context.Context, interval time.Duration) {
 			pctx, cancel := context.WithTimeout(ctx, interval)
 			err := c.conn.Ping(pctx)
 			cancel()
-			if err != nil {
+			if err == nil {
+				missedPongs = 0
+				continue
+			}
+			if ctx.Err() != nil || !errors.Is(err, context.DeadlineExceeded) {
+				c.cancel()
+				return
+			}
+			missedPongs++
+			if missedPongs >= maxMissedPongs {
 				c.cancel()
 				return
 			}
