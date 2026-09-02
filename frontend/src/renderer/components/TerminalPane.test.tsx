@@ -5,7 +5,7 @@ import { useEffect, useRef } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { shellTerminalsQueryKey, type ShellTerminal } from "../hooks/useShellTerminals";
 import { workspaceHostQueryKey } from "../hooks/useWorkspaceQuery";
-import type { AttachableTerminal } from "../hooks/useTerminalSession";
+import type { AttachableTerminal, UseTerminalSessionOptions } from "../hooks/useTerminalSession";
 import type { TerminalTarget } from "../types/terminal";
 import type { WorkspaceSession } from "../types/workspace";
 import { useUiStore } from "../stores/ui-store";
@@ -42,7 +42,7 @@ const {
 		terminalState: { value: "idle" },
 		replaySettled: { value: true },
 		hasAttached: { value: false },
-		terminalSessionOptions: [] as Array<{ coverInitialReplay?: boolean }>,
+		terminalSessionOptions: [] as UseTerminalSessionOptions[],
 		onErrorRef: { current: undefined as undefined | ((error: unknown) => void) },
 		xtermMounts: { value: 0 },
 		xtermUnmounts: { value: 0 },
@@ -112,7 +112,7 @@ vi.mock("./XtermTerminal", () => ({
 vi.mock("../hooks/useTerminalSession", () => ({
 	useTerminalSession: (
 		_session: WorkspaceSession | undefined,
-		options: { coverInitialReplay?: boolean; shellTerminalHandleId?: string },
+		options: UseTerminalSessionOptions,
 	) => {
 		terminalSessionOptions.push(options);
 		return {
@@ -341,6 +341,32 @@ describe("TerminalPane empty states", () => {
 			expect(screen.getByTestId("optimistic-terminal")).toBeInTheDocument();
 			expect(screen.queryByTestId("xterm")).not.toBeInTheDocument();
 			expect(terminalSessionOptions).toHaveLength(0);
+		} finally {
+			view.restore();
+		}
+	});
+
+	it("routes a remote session's shell attachment through its owning host", async () => {
+		const remote = "http://192.0.2.10:3011";
+		const remoteSession = { ...worker, host: remote };
+		const view = renderCachedPane({
+			session: remoteSession,
+			sessions: [remoteSession],
+			terminalTarget: {
+				generation: "2026-09-02T00:00:00Z",
+				host: remote,
+				kind: "shell",
+				handleId: "remote-shell",
+				session: remoteSession,
+				title: "Terminal 1",
+			},
+		});
+		try {
+			await waitFor(() => expect(terminalSessionOptions).not.toHaveLength(0));
+			expect(terminalSessionOptions.at(-1)).toMatchObject({
+				shellTerminalHandleId: "remote-shell",
+				shellTerminalHost: remote,
+			});
 		} finally {
 			view.restore();
 		}

@@ -84,6 +84,8 @@ export type UseTerminalSessionOptions = {
 	 * source and the session-specific side effects differ.
 	 */
 	shellTerminalHandleId?: string;
+	/** Host that owns shellTerminalHandleId; standalone shells have no session to supply it. */
+	shellTerminalHost?: HostId;
 };
 
 const RETRY_BASE_MS = 500;
@@ -355,7 +357,9 @@ export function useTerminalSession(session: WorkspaceSession | undefined, option
 		r.inputReady = false;
 		teardownMux();
 
-		const mux = (optionsRef.current.createMux ?? defaultCreateMux)(sessionRef.current?.host ?? LOCAL_HOST);
+		const mux = (optionsRef.current.createMux ?? defaultCreateMux)(
+			optionsRef.current.shellTerminalHost ?? sessionRef.current?.host ?? LOCAL_HOST,
+		);
 		r.mux = mux;
 
 		let pendingReplayWrites = 0;

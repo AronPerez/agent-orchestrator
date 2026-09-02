@@ -1044,6 +1044,8 @@ function AttachedTerminal({
       inputDisabled,
       isVisible,
       shellTerminalHandleId,
+      shellTerminalHost:
+        terminalTarget?.kind === "shell" ? terminalTarget.host : undefined,
     });
   // xterm's write callback means the replay has been parsed, not that the
   // browser has painted its final viewport. Keep the first-load cover mounted
