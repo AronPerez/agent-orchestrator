@@ -19,7 +19,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode
 import { useMarkAllNotificationsReadMutation, useNotificationsQuery } from "../hooks/useNotificationsQuery";
 import { useRestoreSession } from "../hooks/useRestoreSession";
 import { useWorkspaceQuery } from "../hooks/useWorkspaceQuery";
-import type { WorkspaceSummary } from "../types/workspace";
+import { flattenHostSections, type WorkspaceSummary } from "../types/workspace";
 import { aoBridge } from "../lib/bridge";
 import { openLinkInSystemBrowser } from "../lib/external-link-policy";
 import { formatTimeCompact } from "../lib/format-time";
@@ -122,24 +122,25 @@ function NotificationWorkspaceState({
 	}) => ReactNode;
 }) {
 	const workspaceQuery = useWorkspaceQuery();
+	const workspaces = flattenHostSections(workspaceQuery.data);
 	const retryWorkspace = useCallback(() => {
 		void workspaceQuery.refetch();
 	}, [workspaceQuery.refetch]);
 	const { sessionsReady, terminatedIds, workspaceError } = useSessionTerminationLookup(
-		workspaceQuery.data,
+		workspaces,
 		workspaceQuery.isError,
 		workspaceQuery.isSuccess,
 		retryWorkspace,
 	);
 	const sessionMeta = useMemo(() => {
 		const map = new Map<string, { projectName: string; sessionName: string }>();
-		for (const workspace of workspaceQuery.data ?? []) {
+		for (const workspace of workspaces) {
 			for (const session of workspace.sessions) {
 				map.set(session.id, { projectName: workspace.name, sessionName: session.title });
 			}
 		}
 		return map;
-	}, [workspaceQuery.data]);
+	}, [workspaces]);
 	return <>{children({ retryWorkspace, sessionMeta, sessionsReady, terminatedIds, workspaceError })}</>;
 }
 

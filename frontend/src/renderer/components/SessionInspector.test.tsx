@@ -15,8 +15,9 @@ import { TooltipProvider } from "./ui/tooltip";
 import type { SessionPRSummary } from "../hooks/useSessionScmSummary";
 import { sessionScmSummaryQueryKey } from "../hooks/useSessionScmSummary";
 import { sessionWorkspaceFilesQueryKey } from "../hooks/useSessionWorkspaceFiles";
-import { workspaceQueryKey } from "../hooks/useWorkspaceQuery";
+import { workspaceHostQueryKey } from "../hooks/useWorkspaceQuery";
 import { agentReadiness } from "../test/agent-readiness-fixtures";
+import { LOCAL_HOST } from "../lib/hosts";
 import { useUiStore } from "../stores/ui-store";
 import type {
   PRState,
@@ -78,7 +79,12 @@ vi.mock("../lib/api-client", () => ({
 // host resolves to the same fake the api-client mock installs.
 vi.mock("../lib/host-clients", () => ({
 	baseUrlFor: () => "http://127.0.0.1:3001",
-	connectedHosts: () => [],
+	connectedHosts: (() => {
+		// useSyncExternalStore requires a stable snapshot: a fresh [] each call
+		// re-renders forever.
+		const hosts: string[] = [];
+		return () => hosts;
+	})(),
 	subscribeConnectedHosts: () => () => undefined,
 	isHostReady: () => true,
 	clientFor: () => ({
@@ -179,7 +185,10 @@ function renderWithQuery(
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  if (workspaces) client.setQueryData(workspaceQueryKey, workspaces);
+  if (workspaces)
+    client.setQueryData(workspaceHostQueryKey(LOCAL_HOST), [
+      { host: LOCAL_HOST, label: "Local", status: "ready", workspaces, failure: null },
+    ]);
   seed?.(client);
   return {
     ...render(

@@ -28,7 +28,7 @@ import { captureOrchestratorReplacementFailure } from "../lib/orchestrator-repla
 import { OrchestratorSpawnError, spawnOrchestrator } from "../lib/spawn-orchestrator";
 import { captureRendererEvent } from "../lib/telemetry";
 import { type OrchestratorReplacementFailure, useUiStore } from "../stores/ui-store";
-import { newestActiveOrchestrator } from "../types/workspace";
+import { flattenHostSections, newestActiveOrchestrator } from "../types/workspace";
 import { RequiredAgentField } from "./CreateProjectAgentSheet";
 import { buildIntake, deriveRepoPath, deriveRepoHost, IntakeFields, type IntakeForm } from "./IntakeFields";
 import { ProductExternalLink } from "./ProductExternalLink";
@@ -134,9 +134,10 @@ function SettingsBody({
 	const closeSettings = useUiStore((state) => state.closeSettings);
 	const setOrchestratorReplacementError = useUiStore((state) => state.setOrchestratorReplacementError);
 	const workspaceQuery = useWorkspaceQuery();
+	const workspaces = flattenHostSections(workspaceQuery.data);
 	const config = project.config ?? {};
 	const isScratchProject = project.kind === "scratch";
-	const workspace = workspaceQuery.data?.find((item) => item.host === projectRef.host && item.id === projectRef.id);
+	const workspace = workspaces.find((item) => item.host === projectRef.host && item.id === projectRef.id);
 	const activeOrchestrator = newestActiveOrchestrator(workspace?.sessions ?? []);
 	const intake: TrackerIntakeConfig = config.trackerIntake ?? {};
 	const [form, setForm] = useState({

@@ -170,7 +170,12 @@ vi.mock("../lib/api-client", () => ({
 // host resolves to the same fake the api-client mock installs.
 vi.mock("../lib/host-clients", () => ({
 	baseUrlFor: () => "http://127.0.0.1:3001",
-	connectedHosts: () => [],
+	connectedHosts: (() => {
+		// useSyncExternalStore requires a stable snapshot: a fresh [] each call
+		// re-renders forever.
+		const hosts: string[] = [];
+		return () => hosts;
+	})(),
 	subscribeConnectedHosts: () => () => undefined,
 	isHostReady: () => true,
 	clientFor: () => ({ GET: getMock }),

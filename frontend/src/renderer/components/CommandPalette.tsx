@@ -24,7 +24,7 @@ import { isMacPlatform } from "../lib/platform";
 import { sessionReviewsQueryOptions, type PRReviewState } from "../lib/session-reviews";
 import { spawnOrchestrator } from "../lib/spawn-orchestrator";
 import { useShell } from "../lib/shell-context";
-import { findProjectOrchestrator, hasConfiguredOrchestratorAgent, openPRs, workerSessions } from "../types/workspace";
+import { flattenHostSections, findProjectOrchestrator, hasConfiguredOrchestratorAgent, openPRs, workerSessions } from "../types/workspace";
 import { useUiStore } from "../stores/ui-store";
 import { matchesRendererShortcut } from "../stores/keybindings-store";
 import { Button } from "./ui/button";
@@ -62,7 +62,7 @@ export function CommandPalette() {
 	// The palette stays mounted to preserve its close animation and global
 	// shortcut. While closed, commands are invisible, so retain the cached
 	// snapshot without subscribing this hidden surface to streamed updates.
-	const workspaces = useWorkspaceQuery({ subscribed: isOpen }).data ?? [];
+	const workspaces = flattenHostSections(useWorkspaceQuery({ subscribed: isOpen }).data);
 
 	const [view, setView] = useState<PaletteView>({ mode: "root" });
 	const [query, setQuery] = useState("");

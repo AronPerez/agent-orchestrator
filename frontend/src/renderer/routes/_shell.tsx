@@ -25,7 +25,12 @@ import { agentModelsQueryOptions } from "../hooks/useAgentModelsQuery";
 import { useDaemonStatus } from "../hooks/useDaemonStatus";
 import { useOpenShellTerminal } from "../hooks/useShellTerminals";
 import { useWindowFullScreen } from "../hooks/useWindowFullScreen";
-import { useWorkspaceQuery, workspaceQueryKey, workspaceQueryOptions } from "../hooks/useWorkspaceQuery";
+import {
+	useWorkspaceQuery,
+	workspaceHostQueryKey,
+	workspaceQueryKey,
+	workspaceQueryOptions,
+} from "../hooks/useWorkspaceQuery";
 import { apiClient, apiErrorCode, apiErrorMessage, hasTrustedApiBaseUrl } from "../lib/api-client";
 import { clientFor } from "../lib/host-clients";
 import { refreshDaemonStatus } from "../lib/daemon-status";
@@ -48,7 +53,14 @@ import {
 } from "../lib/platform";
 import { sidebarIsCompact, sidebarIsVisible, sidebarOccupiesLayout, useUiStore } from "../stores/ui-store";
 import { matchesRendererShortcut } from "../stores/keybindings-store";
-import { sessionIsActive, toProjectKind, type WorkspaceSummary } from "../types/workspace";
+import {
+	flattenHostSections,
+	sessionIsActive,
+	toProjectKind,
+	updateHostWorkspaces,
+	type HostSection,
+	type WorkspaceSummary,
+} from "../types/workspace";
 import type { components } from "../../api/schema";
 import { useAgentInventoryTelemetry } from "../hooks/useAgentInventoryTelemetry";
 
@@ -151,7 +163,7 @@ function ShellLayout() {
 	const matchRoute = useMatchRoute();
 	const queryClient = useQueryClient();
 	const workspaceQuery = useWorkspaceQuery();
-	const workspaces = workspaceQuery.data ?? [];
+	const workspaces = useMemo(() => flattenHostSections(workspaceQuery.data), [workspaceQuery.data]);
 	// Global shortcut listeners need the latest workspace list, but recreating
 	// those subscriptions for every streamed activity update is avoidable.
 	const workspacesRef = useRef(workspaces);
@@ -399,7 +411,15 @@ function ShellLayout() {
 
 	const updateWorkspaces = useCallback(
 		(updater: (workspaces: WorkspaceSummary[]) => WorkspaceSummary[]) => {
-			queryClient.setQueryData<WorkspaceSummary[]>(workspaceQueryKey, (current = []) => updater(current));
+			// The cache is per host now, so an optimistic edit has to name the host
+			// it belongs to; these are all local-project edits.
+			queryClient.setQueryData<HostSection[]>(workspaceHostQueryKey(LOCAL_HOST), (current) =>
+				updateHostWorkspaces(
+					current ?? [{ host: LOCAL_HOST, label: "Local", status: "ready", workspaces: [], failure: null }],
+					LOCAL_HOST,
+					updater,
+				),
+			);
 		},
 		[queryClient],
 	);
@@ -646,7 +666,7 @@ function ShellLayout() {
 		}
 
 		workspaceStartupBaselineRef.current =
-			queryClient.getQueryState(workspaceQueryKey)?.dataUpdatedAt ?? 0;
+			queryClient.getQueryState(workspaceHostQueryKey(LOCAL_HOST))?.dataUpdatedAt ?? 0;
 		setWorkspaceStartupState("loading");
 		void queryClient
 			.fetchQuery({ ...workspaceQueryOptions, staleTime: 0 })
