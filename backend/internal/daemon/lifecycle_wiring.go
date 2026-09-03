@@ -255,6 +255,10 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 		// no_signal only makes sense for harnesses with complete lifecycle signal
 		// coverage; partial callbacks cannot prove that silence is abnormal.
 		SignalCapable: activitydispatch.FullySupportsHarness,
+		// The reducer already receives every runtime probe; this is the read
+		// side, so `ao session ls` stops reporting idle for a session whose
+		// runtime AO cannot reach.
+		RuntimeUnreachable: lcm.RuntimeUnreachable,
 	})
 	// Triggering a review spawns a reviewer over the worker's worktree, resolved
 	// from the reviewer registry (distinct from the worker agent set). The
