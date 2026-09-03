@@ -3620,6 +3620,8 @@ func TestToAPIErrorMapsWorkspaceBranchSentinels(t *testing.T) {
 		{"runtime workspace cwd mismatch", fmt.Errorf("spawn mer-1: runtime: %w: session mer-1 started in \"/deleted/shipit\", want \"/tmp/ws\"", ports.ErrRuntimeWorkspaceCwdMismatch), apierr.KindConflict, "WORKSPACE_CWD_MISMATCH"},
 		{"workspace locked", fmt.Errorf("restore mer-1: %w: \"/tmp/ws\" (branch \"ao/mer-1\") is registered but its directory is missing", ports.ErrWorkspaceLocked), apierr.KindConflict, "WORKSPACE_LOCKED"},
 		{"cleanup script failed", fmt.Errorf("kill mer-1: %w: secret output", sessionmanager.ErrCleanupScript), apierr.KindConflict, "WORKSPACE_CLEANUP_FAILED"},
+		{"runtime unavailable", fmt.Errorf("send mer-1: guard mer-1: send: tmux runtime: session mer-1: %w: no server running on /private/tmp/tmux-501/ao", ports.ErrRuntimeUnavailable), apierr.KindConflict, "RUNTIME_UNREACHABLE"},
+		{"runtime probe inconclusive", fmt.Errorf("send mer-1: guard mer-1: send: tmux runtime: session mer-1: %w: error connecting to /private/tmp/tmux-501/default", ports.ErrRuntimeProbeInconclusive), apierr.KindConflict, "RUNTIME_UNREACHABLE"},
 		{"unknown harness", fmt.Errorf("spawn: %w: %q", sessionmanager.ErrUnknownHarness, "bogus"), apierr.KindInvalid, "UNKNOWN_HARNESS"},
 		{"missing harness", fmt.Errorf("spawn: %w: configure project worker.agent or pass --harness", sessionmanager.ErrMissingHarness), apierr.KindInvalid, "AGENT_REQUIRED"},
 		{"artifact output unavailable", fmt.Errorf("spawn: %w", sessionmanager.ErrArtifactOutputUnavailable), apierr.KindInvalid, "ARTIFACT_OUTPUT_UNAVAILABLE"},
@@ -3669,6 +3671,20 @@ func TestToAPIErrorMapsWorkspaceBranchSentinels(t *testing.T) {
 				t.Fatalf("mapped message leaked script output: %q", e.Message)
 			}
 		})
+	}
+}
+
+// The whole point of the mapping is that the operator no longer has to read the
+// daemon log: the adapter's own diagnosis has to reach the client message.
+func TestUnreachableRuntimeErrorCarriesTheCause(t *testing.T) {
+	err := fmt.Errorf("send mer-1: guard mer-1: send: tmux runtime: session mer-1: %w: exit status 1: no server running on /private/tmp/tmux-501/ao",
+		ports.ErrRuntimeUnavailable)
+	var e *apierr.Error
+	if !errors.As(toAPIError(err), &e) {
+		t.Fatalf("toAPIError did not produce a typed error: %v", err)
+	}
+	if !strings.Contains(e.Message, "no server running on /private/tmp/tmux-501/ao") {
+		t.Fatalf("message lost the cause: %q", e.Message)
 	}
 }
 

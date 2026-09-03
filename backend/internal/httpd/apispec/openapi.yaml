@@ -12197,6 +12197,8 @@ components:
           - cline
           - autohand
           type: string
+        runtimeUnreachable:
+          type: boolean
         scmStatus:
           enum:
           - pr_open

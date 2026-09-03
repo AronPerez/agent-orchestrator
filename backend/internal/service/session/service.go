@@ -221,6 +221,9 @@ type Service struct {
 	// normal, not a broken pipeline. nil means "unknown": never downgrade.
 	signalCapable         func(domain.AgentHarness) bool
 	chatProviderPreserved func(domain.SessionID) bool
+	// runtimeUnreachable reports whether AO's last liveness probe could reach a
+	// session's runtime. nil means "unknown": no session is ever flagged.
+	runtimeUnreachable func(domain.SessionID) bool
 	// githubIdentity optionally resolves the operator's authenticated GitHub
 	// account so the handle rides along with product telemetry. Nil disables it
 	// and the emitter degrades to anonymous.
@@ -285,6 +288,10 @@ type Deps struct {
 	// ArtifactDeleter deletes a session's artifacts; daemon wiring passes the
 	// shared *artifactversions.Capturer so a delete cannot race a capture.
 	ArtifactDeleter artifactDeleter
+	// RuntimeUnreachable surfaces the lifecycle reducer's last runtime
+	// reachability observation on the read model; daemon wiring passes
+	// lifecycle.Manager.RuntimeUnreachable. Left nil, no session is flagged.
+	RuntimeUnreachable func(domain.SessionID) bool
 }
 
 // NewWithDeps wires a session service with optional PR-claim dependencies.
@@ -293,7 +300,7 @@ func NewWithDeps(d Deps) *Service {
 	if backgroundContext == nil {
 		backgroundContext = context.Background()
 	}
-	s := &Service{manager: d.Manager, store: d.Store, prClaimer: d.PRClaimer, scm: d.SCM, tracker: d.Tracker, clock: d.Clock, dataDir: d.DataDir, signalCapable: d.SignalCapable, telemetry: d.Telemetry, logger: d.Logger, backgroundContext: backgroundContext, agentReadiness: d.AgentReadiness, githubIdentity: d.GithubIdentity, titleRefinementSlots: make(chan struct{}, delegatedTaskTitleConcurrency), titleRefinementCancels: map[domain.SessionID]context.CancelFunc{}, outputTypeReconciler: d.OutputTypeReconciler, artifactDeleter: d.ArtifactDeleter}
+	s := &Service{manager: d.Manager, store: d.Store, prClaimer: d.PRClaimer, scm: d.SCM, tracker: d.Tracker, clock: d.Clock, dataDir: d.DataDir, signalCapable: d.SignalCapable, runtimeUnreachable: d.RuntimeUnreachable, telemetry: d.Telemetry, logger: d.Logger, backgroundContext: backgroundContext, agentReadiness: d.AgentReadiness, githubIdentity: d.GithubIdentity, titleRefinementSlots: make(chan struct{}, delegatedTaskTitleConcurrency), titleRefinementCancels: map[domain.SessionID]context.CancelFunc{}, outputTypeReconciler: d.OutputTypeReconciler, artifactDeleter: d.ArtifactDeleter}
 	if s.prClaimer == nil {
 		if w, ok := d.Store.(ports.PRClaimer); ok {
 			s.prClaimer = w
@@ -1321,13 +1328,16 @@ func (s *Service) toSessionWithFacts(ctx context.Context, rec domain.SessionReco
 		StatusReadiness:  readiness,
 		ChatProviderPreserved: rec.Mode == domain.SessionModeChat && !rec.IsTerminated &&
 			s.chatProviderPreserved != nil && s.chatProviderPreserved(rec.ID),
-		Status:           deriveStatus(rec, prs, now, s.harnessSignals(rec.Harness)),
-		SCMStatus:        deriveSCMStatus(prs),
-		KanbanColumn:     presentation.Column,
-		DisplayStatus:    presentation.DisplayStatus,
-		TerminalHandleID: rec.Metadata.RuntimeHandleID,
-		ArtifactFiles:    artifactFiles,
-		PRs:              prs,
+		Status:        deriveStatus(rec, prs, now, s.harnessSignals(rec.Harness)),
+		SCMStatus:     deriveSCMStatus(prs),
+		KanbanColumn:  presentation.Column,
+		DisplayStatus: presentation.DisplayStatus,
+		// Terminated sessions are no longer probed, so a leftover flag would
+		// outlive the fact; a terminated session's status is already definitive.
+		RuntimeUnreachable: !rec.IsTerminated && s.runtimeIsUnreachable(rec.ID),
+		TerminalHandleID:   rec.Metadata.RuntimeHandleID,
+		ArtifactFiles:      artifactFiles,
+		PRs:                prs,
 	}, nil
 }
 
@@ -1507,6 +1517,12 @@ func mapSessionError(err error) error {
 		return apierr.Invalid("MODEL_CAPABILITIES_UNAVAILABLE", err.Error(), nil)
 	case errors.Is(err, ports.ErrRuntimeWorkspaceCwdMismatch):
 		return apierr.Conflict("WORKSPACE_CWD_MISMATCH", err.Error(), nil)
+	// A runtime AO cannot reach is a knowable state, not an internal fault:
+	// without this the cause ("no server running on ...") existed only in the
+	// daemon log while `ao send` printed INTERNAL_ERROR. err.Error() carries the
+	// adapter's own diagnosis, exactly as WORKSPACE_CWD_MISMATCH does above.
+	case errors.Is(err, ports.ErrRuntimeUnavailable), errors.Is(err, ports.ErrRuntimeProbeInconclusive):
+		return apierr.Conflict("RUNTIME_UNREACHABLE", err.Error(), nil)
 	case errors.Is(err, ports.ErrWorkspaceLocked):
 		return apierr.Conflict("WORKSPACE_LOCKED", err.Error(), nil)
 	case errors.Is(err, sessionmanager.ErrCleanupScript):
@@ -1629,6 +1645,16 @@ func (s *Service) now() time.Time {
 		return time.Now().UTC()
 	}
 	return s.clock().UTC()
+}
+
+// runtimeIsUnreachable tolerates a zero-value Service and a nil predicate the
+// same way harnessSignals does: with no reachability source the service never
+// claims a runtime is unreachable.
+func (s *Service) runtimeIsUnreachable(id domain.SessionID) bool {
+	if s.runtimeUnreachable == nil {
+		return false
+	}
+	return s.runtimeUnreachable(id)
 }
 
 // harnessSignals tolerates a zero-value Service the same way now does. Without
