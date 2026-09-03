@@ -224,6 +224,15 @@ type Manager struct {
 	// This coordination is intentionally memory-only: a daemon crash leaves the
 	// durable session exited, so the user can safely retry the resume.
 	pendingLaunches map[domain.SessionID]pendingLaunch
+	// unreachableRuntimes holds the sessions whose most recent runtime probe
+	// could not reach the runtime at all. The reducer deliberately writes no
+	// durable fact for such a probe (a failed probe is not proof of death), but
+	// discarding it entirely left every reader — `ao session ls`, the desktop
+	// board — reporting a confident `idle` for a session whose runtime was
+	// gone, seconds before a send to it failed. This is the read side of that
+	// same fact, and it is intentionally memory-only like pendingLaunches: the
+	// reaper re-establishes it within one probe interval of a daemon restart.
+	unreachableRuntimes map[domain.SessionID]struct{}
 	// steerActive reports whether a harness can safely receive a write during an
 	// active turn (input steers the run) rather than only while idle. Supplied by
 	// the agent adapter via WithActiveSteering; the default answers false, so an
@@ -246,6 +255,7 @@ func New(store sessionStore, messenger ports.AgentMessenger, opts ...Option) *Ma
 		react:                   newReactionState(),
 		flights:                 map[domain.SessionID]*toolFlight{},
 		pendingLaunches:         map[domain.SessionID]pendingLaunch{},
+		unreachableRuntimes:     map[domain.SessionID]struct{}{},
 		steerActive:             func(domain.AgentHarness) bool { return false },
 		startupSignalGatesInput: func(domain.AgentHarness) bool { return false },
 	}
@@ -484,7 +494,14 @@ func (m *Manager) ApplyRuntimeObservation(ctx context.Context, id domain.Session
 	)
 	if err := m.mutate(ctx, id, func(cur domain.SessionRecord, now time.Time) (domain.SessionRecord, bool) {
 		if cur.IsTerminated || !matchesLaunch(cur) {
+			// mutate holds m.mu across this callback, so the map is guarded.
+			delete(m.unreachableRuntimes, id)
 			return cur, false
+		}
+		if f.Runtime == ports.ProbeFailed {
+			m.unreachableRuntimes[id] = struct{}{}
+		} else {
+			delete(m.unreachableRuntimes, id)
 		}
 		currentLaunch := cur.Metadata.RuntimeLaunchID
 		if currentLaunch != "" && f.Runtime == ports.ProbeAlive && f.Workload == ports.ProbeDead {
@@ -543,6 +560,17 @@ func (m *Manager) ApplyRuntimeObservation(ctx context.Context, id domain.Session
 		m.reapSessionContainers(ctx, id)
 	}
 	return nil
+}
+
+// RuntimeUnreachable reports whether the last runtime observation for id failed
+// to reach its runtime. It is a reachability fact, never a death conclusion:
+// callers may tell the user AO cannot see the session, but must not terminate,
+// recreate, or archive it on this alone.
+func (m *Manager) RuntimeUnreachable(id domain.SessionID) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, unreachable := m.unreachableRuntimes[id]
+	return unreachable
 }
 
 // ApplyActivitySignal records an authoritative agent activity signal and any

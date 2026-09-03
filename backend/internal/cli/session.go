@@ -53,6 +53,10 @@ type sessionDTO struct {
 	CreatedAt    time.Time       `json:"createdAt"`
 	UpdatedAt    time.Time       `json:"updatedAt"`
 	Status       string          `json:"status"`
+	// RuntimeUnreachable means AO's last liveness probe could not reach the
+	// session's runtime, so its reported status describes a session AO can no
+	// longer see.
+	RuntimeUnreachable bool `json:"runtimeUnreachable,omitempty"`
 }
 
 type sessionActivity struct {
@@ -747,8 +751,8 @@ func sessionLineParts(sess sessionDTO) []string {
 	if !sess.Activity.LastActivityAt.IsZero() {
 		parts = append(parts, "("+formatSessionAge(time.Since(sess.Activity.LastActivityAt))+")")
 	}
-	if sess.Status != "" {
-		parts = append(parts, "["+sess.Status+"]")
+	if label := sessionStatusLabel(sess); label != "" {
+		parts = append(parts, label)
 	}
 	if sess.Kind != "" {
 		parts = append(parts, sess.Kind)
@@ -759,6 +763,30 @@ func sessionLineParts(sess sessionDTO) []string {
 	return parts
 }
 
+// sessionRuntimeField names an unreachable runtime on `ao session get`, and is
+// empty otherwise so writeSessionDetails skips the row (like every other
+// optional field there).
+func sessionRuntimeField(sess sessionDTO) string {
+	if sess.RuntimeUnreachable {
+		return "unreachable (AO cannot reach this session's runtime)"
+	}
+	return ""
+}
+
+// sessionStatusLabel is the bracketed status both listings print. An
+// unreachable runtime replaces the status rather than annotating it: the
+// derived status describes a session AO can no longer see, so printing
+// "[idle]" there states more than AO knows.
+func sessionStatusLabel(sess sessionDTO) string {
+	if sess.RuntimeUnreachable {
+		return "[unreachable]"
+	}
+	if sess.Status == "" {
+		return ""
+	}
+	return "[" + sess.Status + "]"
+}
+
 func writeSessionDetails(cmd *cobra.Command, sess sessionDTO) error {
 	out := cmd.OutOrStdout()
 	fields := [][2]string{
@@ -767,6 +795,7 @@ func writeSessionDetails(cmd *cobra.Command, sess sessionDTO) error {
 		{"name", sess.DisplayName},
 		{"role", sessionRole(sess)},
 		{"status", sess.Status},
+		{"runtime", sessionRuntimeField(sess)},
 		{"activity", sess.Activity.State},
 		{"harness", sess.Harness},
 		{"issue", sess.IssueID},

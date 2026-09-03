@@ -663,19 +663,12 @@ func (r *Runtime) IsAlive(ctx context.Context, handle ports.RuntimeHandle) (bool
 	out, err := r.runForSession(ctx, id, hasSessionArgs(id)...)
 	if err != nil {
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			if sessionMissingOutput(string(out)) {
-				return false, nil
-			}
-			if serverNotRunningOutput(string(out)) {
-				return false, fmt.Errorf("tmux runtime: probe session %s: %w: %s",
-					id, ports.ErrRuntimeUnavailable, strings.TrimSpace(string(out)))
-			}
-			if transientServerFailureOutput(string(out)) {
-				return false, fmt.Errorf("tmux runtime: probe session %s: %w: %s",
-					id, ports.ErrRuntimeProbeInconclusive, strings.TrimSpace(string(out)))
-			}
+		if errors.As(err, &exitErr) && sessionMissingOutput(string(out)) {
+			return false, nil
 		}
+		// runForSession already tagged an unreachable/absent server with the
+		// shared runtime sentinels; anything else is a plain probe error, which
+		// is likewise never per-session death.
 		return false, fmt.Errorf("tmux runtime: probe session %s: %w", id, err)
 	}
 	return true, nil
@@ -992,7 +985,41 @@ func (r *Runtime) runForSession(ctx context.Context, id string, args ...string) 
 	if err != nil {
 		return nil, err
 	}
-	return r.runOnSocket(ctx, socketName, args...)
+	out, err := r.runOnSocket(ctx, socketName, args...)
+	if err != nil {
+		return out, classifyRuntimeFailure(out, err)
+	}
+	return out, nil
+}
+
+// classifyRuntimeFailure tags a failed per-session tmux command with the shared
+// runtime sentinels. It lives on runForSession — the chokepoint every
+// per-session command goes through — rather than on IsAlive alone, because a
+// vanished tmux server is exactly as knowable when SendMessage hits it as when
+// the liveness probe does. Without it a send into a dead server returned a bare
+// `exit status 1`, which the session service could only render as an opaque 500
+// (the same class as the typed mapping added for #2775).
+//
+// Output, not exit status, is the evidence: tmux exits 1 for both "no server"
+// and ordinary command errors. An unrecognised failure is returned unchanged so
+// only knowable runtime absence is ever labelled as such.
+func classifyRuntimeFailure(out []byte, err error) error {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return err
+	}
+	text := strings.TrimSpace(string(out))
+	// Both the sentinel and the original error are wrapped: callers such as
+	// Destroy still match the *exec.ExitError underneath to tell an already-gone
+	// session from a real teardown failure, and commandError already carries
+	// tmux's own output, so nothing needs restating here.
+	switch {
+	case serverNotRunningOutput(text):
+		return fmt.Errorf("%w: %w", ports.ErrRuntimeUnavailable, err)
+	case transientServerFailureOutput(text):
+		return fmt.Errorf("%w: %w", ports.ErrRuntimeProbeInconclusive, err)
+	}
+	return err
 }
 
 func (r *Runtime) socketForSession(ctx context.Context, id string) (string, error) {
