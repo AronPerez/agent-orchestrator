@@ -1856,6 +1856,7 @@ export function SessionView({ sessionRef }: SessionViewProps) {
   const inspector = (
     <SessionInspector
       browserPoppedOut={browserPoppedOut}
+      filesPoppedOut={filesPoppedOut}
       isInspectorVisible={isInspectorOpen}
       onOpenReviewerTerminal={selectReviewerTerminal}
       onToggleBrowserPopOut={handleToggleBrowserPopOut}
