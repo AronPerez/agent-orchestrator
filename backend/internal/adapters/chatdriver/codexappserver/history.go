@@ -1,6 +1,7 @@
 package codexappserver
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -225,7 +226,7 @@ func historicalUserText(item codexproto.ThreadItem) string {
 					parts = append(parts, "[Skill]")
 				}
 			case codexproto.UserInputTypeMention:
-				mention := firstNonEmpty(deref(input.Name), deref(input.Path))
+				mention := cmp.Or(deref(input.Name), deref(input.Path))
 				if mention == "" {
 					parts = append(parts, "[Mention]")
 				} else {

@@ -16,6 +16,7 @@ package chat
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -2575,7 +2576,7 @@ func (c *Controller) apply(ctx context.Context, event ports.ChatEvent) error {
 				Kind:   domain.ActivityKindSystem,
 				Status: domain.ActivityStatusCompleted,
 				Summary: fmt.Sprintf("Provider answered with %s instead of %s",
-					event.Reroute.ToModel, firstNonEmpty(event.Reroute.FromModel, "the selected model")),
+					event.Reroute.ToModel, cmp.Or(event.Reroute.FromModel, "the selected model")),
 				Detail:         rerouteDetail(*event.Reroute),
 				ProviderItemID: rerouteItemID(event.ProviderTurnID),
 			}, now)
@@ -2615,7 +2616,7 @@ func (c *Controller) apply(ctx context.Context, event ports.ChatEvent) error {
 				Status: domain.ActivityStatusCompleted,
 				// Falls back to a plain label rather than an empty row: a driver that
 				// reports a compaction without a summary still happened.
-				Summary: firstNonEmpty(event.Summary, "Compacted the conversation history"),
+				Summary: cmp.Or(event.Summary, "Compacted the conversation history"),
 				Detail:  compactionDetail(event),
 				// The provider's own item id, so a compaction replayed across a
 				// reconnect updates the existing row instead of adding a second.
@@ -2663,7 +2664,7 @@ func (c *Controller) apply(ctx context.Context, event ports.ChatEvent) error {
 				ID:             c.newID(),
 				Kind:           domain.ActivityKindUserInput,
 				Status:         domain.ActivityStatusPending,
-				Summary:        firstNonEmpty(event.Input.Message, "The agent needs more information"),
+				Summary:        cmp.Or(event.Input.Message, "The agent needs more information"),
 				Detail:         detail,
 				RequestID:      event.RequestID,
 				ProviderItemID: event.ProviderItemID,
@@ -2865,7 +2866,7 @@ func (c *Controller) applyAccount(
 			Detail:  detail,
 			// Keyed on the reason so a provider retrying its demand updates one row
 			// instead of filling the timeline with the same notice.
-			ProviderItemID: "ao-reauth-" + firstNonEmpty(update.ReauthReason, "unknown"),
+			ProviderItemID: "ao-reauth-" + cmp.Or(update.ReauthReason, "unknown"),
 		}, now)
 }
 
@@ -3131,15 +3132,6 @@ func compactionDetail(event ports.ChatEvent) []byte {
 		return event.Detail
 	}
 	return encoded
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return ""
 }
 
 func nonEmptyJSON(raw []byte) []byte {

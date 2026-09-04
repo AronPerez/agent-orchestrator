@@ -2,6 +2,7 @@
 package codex
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -113,8 +114,8 @@ func codexReadOnlyArgs(inv ports.ReviewInvocation) ([]string, error) {
 	// the AO location overrides the reviewer needs to submit to this daemon.
 	values := map[string]string{
 		"AO_PORT":     os.Getenv("AO_PORT"),
-		"AO_DATA_DIR": firstNonEmpty(inv.DataDir, os.Getenv("AO_DATA_DIR")),
-		"AO_RUN_FILE": firstNonEmpty(inv.RunFilePath, os.Getenv("AO_RUN_FILE")),
+		"AO_DATA_DIR": cmp.Or(inv.DataDir, os.Getenv("AO_DATA_DIR")),
+		"AO_RUN_FILE": cmp.Or(inv.RunFilePath, os.Getenv("AO_RUN_FILE")),
 	}
 	for _, name := range []string{"AO_PORT", "AO_DATA_DIR", "AO_RUN_FILE"} {
 		value := values[name]
@@ -128,13 +129,4 @@ func codexReadOnlyArgs(inv ports.ReviewInvocation) ([]string, error) {
 		extra = append(extra, "-c", "shell_environment_policy.set."+name+"="+string(encoded))
 	}
 	return extra, nil
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return ""
 }

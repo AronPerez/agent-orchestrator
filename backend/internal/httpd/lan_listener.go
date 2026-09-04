@@ -201,7 +201,7 @@ func loopbackOnlyJSON(w http.ResponseWriter, r *http.Request) {
 // never confirms that a specific route exists — see loopbackOnlyJSON.
 func lanControlBlock(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isLANControlBlockedPath(r.URL.Path) {
+		if IsLANControlBlockedPath(r.URL.Path) {
 			loopbackOnlyJSON(w, r)
 			return
 		}
@@ -209,11 +209,11 @@ func lanControlBlock(next http.Handler) http.Handler {
 	})
 }
 
-// isLANControlBlockedPath reports whether path matches a blocked prefix on an
+// IsLANControlBlockedPath reports whether path matches a blocked prefix on an
 // exact segment boundary: "/api/v1/mobile" blocks itself and everything
 // beneath it ("/api/v1/mobile/status") but must not catch unrelated siblings
 // such as "/api/v1/mobileapp".
-func isLANControlBlockedPath(path string) bool {
+func IsLANControlBlockedPath(path string) bool {
 	if strings.HasPrefix(path, "/api/v1/sessions/") && strings.HasSuffix(strings.TrimSuffix(path, "/"), "/preview/server") {
 		return true
 	}
@@ -228,10 +228,6 @@ func isLANControlBlockedPath(path string) bool {
 	}
 	return false
 }
-
-// IsLANControlBlockedPathForTest exposes the LAN block check to package-external
-// tests so route-level invariants can be asserted without a live listener.
-func IsLANControlBlockedPathForTest(path string) bool { return isLANControlBlockedPath(path) }
 
 // NewMobileLAN constructs a LANManager with its own private authState. Callers
 // outside this package (the daemon) cannot construct an authState directly
