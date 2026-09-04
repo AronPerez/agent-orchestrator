@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +26,7 @@ type Store interface {
 	GetSession(ctx context.Context, id domain.SessionID) (domain.SessionRecord, bool, error)
 	ListSessions(ctx context.Context, project domain.ProjectID) ([]domain.SessionRecord, error)
 	ListAllSessions(ctx context.Context) ([]domain.SessionRecord, error)
+	ListSessionsPage(ctx context.Context, query ports.SessionPageQuery) ([]domain.SessionRecord, error)
 	GetActiveAgentSwitch(ctx context.Context, sessionID domain.SessionID) (domain.AgentSwitch, bool, error)
 	ListActiveAgentSwitches(ctx context.Context) ([]domain.AgentSwitch, error)
 	RenameSession(ctx context.Context, id domain.SessionID, displayName string, updatedAt time.Time) (bool, error)
@@ -56,6 +58,24 @@ type ListFilter struct {
 	OrchestratorOnly bool
 	Fresh            bool
 }
+
+// ListPageRequest is ListFilter plus the page: PageSize rows, resuming after
+// PageToken when set. Pagination is opt-in; List keeps the return-all contract.
+type ListPageRequest struct {
+	ListFilter
+	PageSize  int
+	PageToken string
+}
+
+// Page is one page of sessions, newest first, and the token for the
+// next page, empty on the last one.
+type Page struct {
+	Sessions      []domain.Session
+	NextPageToken string
+}
+
+// ErrInvalidPageToken reports a page token this daemon did not mint.
+var ErrInvalidPageToken = errors.New("invalid page token")
 
 // commander is the command-side surface Service delegates to: the
 // *sessionmanager.Manager in production, a fake in tests.
@@ -862,6 +882,94 @@ func (s *Service) List(ctx context.Context, filter ListFilter) ([]domain.Session
 	if err != nil {
 		return nil, err
 	}
+	filtered := make([]domain.SessionRecord, 0, len(recs))
+	for _, rec := range recs {
+		if matchesSessionFilter(rec, filter) {
+			filtered = append(filtered, rec)
+		}
+	}
+	return s.enrichRecords(ctx, filtered)
+}
+
+// ListPage is List with the page applied in SQL: newest first by
+// (updated_at, id), PageSize rows, and a NextPageToken while more exist. The
+// store is asked for one row past the page so "is there a next page" costs
+// no second query.
+func (s *Service) ListPage(ctx context.Context, req ListPageRequest) (Page, error) {
+	if req.PageSize <= 0 {
+		return Page{}, fmt.Errorf("page size must be positive, got %d", req.PageSize)
+	}
+	query := ports.SessionPageQuery{
+		Project:          req.ProjectID,
+		OrchestratorOnly: req.OrchestratorOnly,
+		Limit:            req.PageSize + 1,
+	}
+	// Same semantics as matchesSessionFilter: Fresh means live, Active flips on
+	// IsTerminated, and asking for terminated-and-fresh is the empty set.
+	if req.Fresh {
+		live := false
+		query.Terminated = &live
+	}
+	if req.Active != nil {
+		terminated := !*req.Active
+		if query.Terminated != nil && *query.Terminated != terminated {
+			return Page{Sessions: []domain.Session{}}, nil
+		}
+		query.Terminated = &terminated
+	}
+	if req.PageToken != "" {
+		cursor, err := DecodePageToken(req.PageToken)
+		if err != nil {
+			return Page{}, err
+		}
+		query.Before = &cursor
+	}
+	recs, err := s.store.ListSessionsPage(ctx, query)
+	if err != nil {
+		return Page{}, fmt.Errorf("list sessions page: %w", err)
+	}
+	var next string
+	if len(recs) > req.PageSize {
+		recs = recs[:req.PageSize]
+		last := recs[len(recs)-1]
+		next = EncodePageToken(ports.SessionPageCursor{UpdatedAt: last.UpdatedAt, ID: last.ID})
+	}
+	sessions, err := s.enrichRecords(ctx, recs)
+	if err != nil {
+		return Page{}, err
+	}
+	return Page{Sessions: sessions, NextPageToken: next}, nil
+}
+
+// EncodePageToken makes a page token: the keyset of a page's last row,
+// base64url so it survives a query string. Tokens are opaque to clients and
+// unsigned on purpose — a forged one can only move the window, never widen
+// the filter.
+func EncodePageToken(cursor ports.SessionPageCursor) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(cursor.UpdatedAt.UTC().Format(time.RFC3339Nano) + "\n" + string(cursor.ID)))
+}
+
+// DecodePageToken inverts EncodePageToken; anything else is ErrInvalidPageToken.
+func DecodePageToken(token string) (ports.SessionPageCursor, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil {
+		return ports.SessionPageCursor{}, ErrInvalidPageToken
+	}
+	at, id, ok := strings.Cut(string(raw), "\n")
+	if !ok || id == "" {
+		return ports.SessionPageCursor{}, ErrInvalidPageToken
+	}
+	updatedAt, err := time.Parse(time.RFC3339Nano, at)
+	if err != nil {
+		return ports.SessionPageCursor{}, ErrInvalidPageToken
+	}
+	return ports.SessionPageCursor{UpdatedAt: updatedAt, ID: domain.SessionID(id)}, nil
+}
+
+// enrichRecords turns records into the display read model: active agent
+// switches, PR facts and current-head review runs, each fetched in one batched
+// read for the whole slice.
+func (s *Service) enrichRecords(ctx context.Context, recs []domain.SessionRecord) ([]domain.Session, error) {
 	activeSwitches, err := s.store.ListActiveAgentSwitches(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list active agent switches: %w", err)
@@ -870,13 +978,9 @@ func (s *Service) List(ctx context.Context, filter ListFilter) ([]domain.Session
 	for _, agentSwitch := range activeSwitches {
 		activeBySession[agentSwitch.SessionID] = agentSwitch
 	}
-	filtered := make([]domain.SessionRecord, 0, len(recs))
 	ids := make([]domain.SessionID, 0, len(recs))
 	for _, rec := range recs {
-		if matchesSessionFilter(rec, filter) {
-			filtered = append(filtered, rec)
-			ids = append(ids, rec.ID)
-		}
+		ids = append(ids, rec.ID)
 	}
 	prsBySession, err := s.store.ListPRFactsForSessions(ctx, ids)
 	if err != nil {
@@ -886,8 +990,8 @@ func (s *Service) List(ctx context.Context, filter ListFilter) ([]domain.Session
 	if err != nil {
 		return nil, fmt.Errorf("list review runs: %w", err)
 	}
-	out := make([]domain.Session, 0, len(filtered))
-	for _, rec := range filtered {
+	out := make([]domain.Session, 0, len(recs))
+	for _, rec := range recs {
 		sess, err := s.toSessionWithFacts(rec, prsBySession[rec.ID], runsBySession[rec.ID])
 		if err != nil {
 			return nil, err

@@ -1857,6 +1857,25 @@ paths:
           type:
           - "null"
           - boolean
+      - description: Page size. Absent returns every matching session; present pages
+          the list newest first by update time, and the response carries nextPageToken
+          while more remain. Values above 500 are clamped to 500.
+        in: query
+        name: pageSize
+        schema:
+          description: Page size. Absent returns every matching session; present pages
+            the list newest first by update time, and the response carries nextPageToken
+            while more remain. Values above 500 are clamped to 500.
+          minimum: 1
+          type:
+          - "null"
+          - integer
+      - description: Opaque cursor from a previous page's nextPageToken.
+        in: query
+        name: pageToken
+        schema:
+          description: Opaque cursor from a previous page's nextPageToken.
+          type: string
       responses:
         "200":
           content:
@@ -7940,6 +7959,8 @@ components:
       type: object
     ListSessionsResponse:
       properties:
+        nextPageToken:
+          type: string
         sessions:
           items:
             $ref: '#/components/schemas/ControllersSessionView'

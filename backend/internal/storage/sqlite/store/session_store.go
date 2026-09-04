@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/gen"
 )
 
@@ -659,4 +660,41 @@ func normalActivity(a domain.Activity, fallback time.Time) domain.Activity {
 	// rather than trusting each caller's clock.
 	a.LastActivityAt = a.LastActivityAt.UTC()
 	return a
+}
+
+// ListSessionsPage returns one page of sessions, newest first by
+// (updated_at, id), with every predicate applied in SQL so a page is a page.
+// See ports.SessionPageQuery for what each field means. The unpaginated lists
+// above keep their (project_id, num) order, which the CLI displays.
+func (s *Store) ListSessionsPage(ctx context.Context, q ports.SessionPageQuery) ([]domain.SessionRecord, error) {
+	params := gen.ListSessionsPageParams{
+		Project:    q.Project,
+		Terminated: -1,
+		PageLimit:  int64(q.Limit),
+	}
+	if q.Terminated != nil {
+		params.Terminated = 0
+		if *q.Terminated {
+			params.Terminated = 1
+		}
+	}
+	if q.OrchestratorOnly {
+		params.OrchestratorOnly = 1
+	}
+	if q.Before != nil {
+		params.HasCursor = 1
+		params.BeforeUpdatedAt = q.Before.UpdatedAt
+		params.BeforeID = q.Before.ID
+	}
+	rows, err := s.qr.ListSessionsPage(ctx, params)
+	if err != nil {
+		return nil, fmt.Errorf("list sessions page: %w", err)
+	}
+	out := make([]domain.SessionRecord, 0, len(rows))
+	for _, r := range rows {
+		// Same column list as ListAllSessions, so the generated row types are
+		// identical and the conversion is free; one mapper serves both.
+		out = append(out, listAllSessionsRowToRecord(gen.ListAllSessionsRow(r)))
+	}
+	return out, nil
 }

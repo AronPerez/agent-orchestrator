@@ -136,6 +136,31 @@ SELECT id, project_id, num, issue_id, kind, harness,
     latest_user_prompt, latest_user_prompt_at, latest_assistant_update, native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model
 FROM sessions ORDER BY project_id, num;
 
+-- name: ListSessionsPage :many
+-- One page of sessions, newest first, with every filter applied in SQL so a
+-- page is a page. terminated: -1 any, 0 live only, 1 terminated only.
+-- has_cursor 0 lists from the top; otherwise the keyset (before_updated_at,
+-- before_id) is the last row of the previous page.
+SELECT id, project_id, num, issue_id, kind, harness,
+    activity_state, activity_last_at, is_terminated, branch, workspace_path,
+    runtime_handle_id, agent_session_id, agent_session_id_launch_id, prompt,
+    created_at, updated_at, display_name, first_signal_at, preview_url,
+    preview_revision, cleanup_generation, runtime_launch_id,
+    workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
+    reviewer_harness, reviewer_agent_config, is_pinned, pinned_at,
+    session_mode, provider_conversation_id, controller_generation, browser_capability_verifier,
+    latest_user_prompt, latest_user_prompt_at, latest_assistant_update, native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model
+FROM sessions
+WHERE (project_id = sqlc.arg(project) OR sqlc.arg(project) = '')
+  AND (CAST(sqlc.arg(terminated) AS INTEGER) = -1
+       OR is_terminated = (CAST(sqlc.arg(terminated) AS INTEGER) = 1))
+  AND (CAST(sqlc.arg(orchestrator_only) AS INTEGER) = 0 OR kind = 'orchestrator')
+  AND (CAST(sqlc.arg(has_cursor) AS INTEGER) = 0
+       OR updated_at < sqlc.arg(before_updated_at)
+       OR (updated_at = sqlc.arg(before_updated_at) AND id < sqlc.arg(before_id)))
+ORDER BY updated_at DESC, id DESC
+LIMIT sqlc.arg(page_limit);
+
 
 -- name: RenameSession :execrows
 UPDATE sessions SET display_name = ?, updated_at = ? WHERE id = ?;

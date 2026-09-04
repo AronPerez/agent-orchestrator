@@ -4712,3 +4712,110 @@ func TestSpawnTelemetryCarriesRequestID(t *testing.T) {
 		})
 	}
 }
+
+// Mirrors the SQL: every predicate applied, newest first by (updated_at, id),
+// resumable from the keyset, capped at Limit.
+func (f *fakeStore) ListSessionsPage(_ context.Context, q ports.SessionPageQuery) ([]domain.SessionRecord, error) {
+	var recs []domain.SessionRecord
+	for _, rec := range f.sessions {
+		if q.Project != "" && rec.ProjectID != q.Project {
+			continue
+		}
+		if q.Terminated != nil && rec.IsTerminated != *q.Terminated {
+			continue
+		}
+		if q.OrchestratorOnly && rec.Kind != domain.KindOrchestrator {
+			continue
+		}
+		if q.Before != nil && !pageNewer(domain.SessionRecord{UpdatedAt: q.Before.UpdatedAt, ID: q.Before.ID}, rec) {
+			continue
+		}
+		recs = append(recs, rec)
+	}
+	for i := 1; i < len(recs); i++ {
+		for j := i; j > 0 && pageNewer(recs[j], recs[j-1]); j-- {
+			recs[j], recs[j-1] = recs[j-1], recs[j]
+		}
+	}
+	if q.Limit > 0 && len(recs) > q.Limit {
+		recs = recs[:q.Limit]
+	}
+	return recs, nil
+}
+
+func pageNewer(a, b domain.SessionRecord) bool {
+	if !a.UpdatedAt.Equal(b.UpdatedAt) {
+		return a.UpdatedAt.After(b.UpdatedAt)
+	}
+	return a.ID > b.ID
+}
+
+func pageIDs(sessions []domain.Session) []domain.SessionID {
+	out := make([]domain.SessionID, 0, len(sessions))
+	for _, s := range sessions {
+		out = append(out, s.ID)
+	}
+	return out
+}
+
+func sameIDs(a, b []domain.SessionID) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestListPagePaginatesNewestFirstWithAResumableToken(t *testing.T) {
+	st := newFakeStore()
+	base := time.Unix(1700000000, 0).UTC()
+	for i, id := range []domain.SessionID{"mer-1", "mer-2", "mer-3"} {
+		st.sessions[id] = domain.SessionRecord{ID: id, ProjectID: "mer", IsTerminated: true, UpdatedAt: base.Add(time.Duration(i) * time.Minute)}
+	}
+	svc := &Service{store: st}
+	active := false
+
+	first, err := svc.ListPage(context.Background(), ListPageRequest{ListFilter: ListFilter{Active: &active}, PageSize: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := pageIDs(first.Sessions), []domain.SessionID{"mer-3", "mer-2"}; !sameIDs(got, want) {
+		t.Fatalf("first page = %v, want newest first %v", got, want)
+	}
+	if first.NextPageToken == "" {
+		t.Fatal("a third row exists, so the first page must carry a next-page token")
+	}
+	if st.listPRFactsCalls != 1 {
+		t.Fatalf("ListPRFacts calls = %d, want 1 batched call for the page", st.listPRFactsCalls)
+	}
+
+	rest, err := svc.ListPage(context.Background(), ListPageRequest{ListFilter: ListFilter{Active: &active}, PageSize: 2, PageToken: first.NextPageToken})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := pageIDs(rest.Sessions), []domain.SessionID{"mer-1"}; !sameIDs(got, want) {
+		t.Fatalf("second page = %v, want %v", got, want)
+	}
+	if rest.NextPageToken != "" {
+		t.Fatalf("last page must not carry a token, got %q", rest.NextPageToken)
+	}
+}
+
+func TestListPageRejectsAMalformedToken(t *testing.T) {
+	_, err := (&Service{store: newFakeStore()}).ListPage(context.Background(), ListPageRequest{PageSize: 1, PageToken: "not-a-token"})
+	if !errors.Is(err, ErrInvalidPageToken) {
+		t.Fatalf("err = %v, want ErrInvalidPageToken", err)
+	}
+}
+
+func TestPageTokenRoundTrips(t *testing.T) {
+	want := ports.SessionPageCursor{UpdatedAt: time.Unix(1700000000, 123456789).UTC(), ID: "mer-7"}
+	got, err := DecodePageToken(EncodePageToken(want))
+	if err != nil || !got.UpdatedAt.Equal(want.UpdatedAt) || got.ID != want.ID {
+		t.Fatalf("round trip = %+v, %v; want %+v", got, err, want)
+	}
+}

@@ -130,6 +130,10 @@ type ListSessionsQuery struct {
 	Active           *bool  `query:"active,omitempty" description:"When true, return non-terminated sessions; when false, return terminated sessions."`
 	OrchestratorOnly *bool  `query:"orchestratorOnly,omitempty" description:"When true, return only orchestrator sessions."`
 	Fresh            *bool  `query:"fresh,omitempty" description:"When true, return only fresh non-terminated sessions."`
+	// Pagination is opt-in so the original return-everything contract holds
+	// for callers that never send pageSize (AIP-158/180).
+	PageSize  *int64 `query:"pageSize,omitempty" minimum:"1" description:"Page size. Absent returns every matching session; present pages the list newest first by update time, and the response carries nextPageToken while more remain. Values above 500 are clamped to 500."`
+	PageToken string `query:"pageToken,omitempty" description:"Opaque cursor from a previous page's nextPageToken."`
 }
 
 // CleanupSessionsQuery is the query string accepted by POST /api/v1/sessions/cleanup.
@@ -218,6 +222,9 @@ type SessionView struct {
 // ListSessionsResponse is the body of GET /api/v1/sessions.
 type ListSessionsResponse struct {
 	Sessions []SessionView `json:"sessions"`
+	// NextPageToken is set only on a paginated request that has more rows;
+	// pass it back as pageToken to continue.
+	NextPageToken string `json:"nextPageToken,omitempty"`
 }
 
 // SpawnSessionRequest is the body of POST /api/v1/sessions.
