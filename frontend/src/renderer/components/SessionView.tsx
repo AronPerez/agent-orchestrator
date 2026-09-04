@@ -44,6 +44,7 @@ import { SessionTopbarHost } from "./SessionTopbarPortal";
 import { SwitchAgentDialog } from "./SwitchAgentDialog";
 import { TerminalSwitchAgentButton } from "./TerminalSwitchAgentButton";
 import { TopbarButton } from "./TopbarButton";
+import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import { Sheet, SheetContent, SheetTitle } from "./ui/sheet";
 import { useIsMobile } from "../hooks/use-mobile";
 import { useBrowserView } from "../hooks/useBrowserView";
@@ -1326,20 +1327,24 @@ export function SessionView({ sessionRef }: SessionViewProps) {
   const sessionLocalActions = session ? (
     <SessionInterfaceActionGroup>
       {!isOrchestrator ? (
-        <TopbarButton
-          aria-label={t("shortcut.new-shell-terminal")}
-          onClick={addShellTerminal}
-          title={
-            newTerminalError ??
-            t("terminal.newWithShortcut", {
-              shortcut: newTerminalShortcutLabel,
-            })
-          }
-          type="button"
-          variant="icon"
-        >
-          <Plus aria-hidden="true" className="size-icon-md" />
-        </TopbarButton>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <TopbarButton
+              aria-label={t("shortcut.new-shell-terminal")}
+              onClick={addShellTerminal}
+              type="button"
+              variant="icon"
+            >
+              <Plus aria-hidden="true" className="size-icon-md" />
+            </TopbarButton>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">
+            {newTerminalError ??
+              t("terminal.newWithShortcut", {
+                shortcut: newTerminalShortcutLabel,
+              })}
+          </TooltipContent>
+        </Tooltip>
       ) : null}
       {interfaceSwitchAction}
     </SessionInterfaceActionGroup>
@@ -2116,24 +2121,28 @@ export function SessionView({ sessionRef }: SessionViewProps) {
           data-testid="session-pinned-actions"
           style={noDragStyle}
         >
-          <TopbarButton
-            aria-label={
-              isInspectorOpen
-                ? t("shell.closeInspector")
-                : t("shell.openInspector")
-            }
-            aria-pressed={isInspectorOpen}
-            onClick={handleToggleInspector}
-            style={noDragStyle}
-            title={
-              isInspectorOpen
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <TopbarButton
+                aria-label={
+                  isInspectorOpen
+                    ? t("shell.closeInspector")
+                    : t("shell.openInspector")
+                }
+                aria-pressed={isInspectorOpen}
+                onClick={handleToggleInspector}
+                style={noDragStyle}
+                variant="icon"
+              >
+                <PanelRight className="size-icon-md" aria-hidden="true" />
+              </TopbarButton>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">
+              {isInspectorOpen
                 ? t("shell.closeInspectorTitle")
-                : t("shell.openInspectorTitle")
-            }
-            variant="icon"
-          >
-            <PanelRight className="size-icon-md" aria-hidden="true" />
-          </TopbarButton>
+                : t("shell.openInspectorTitle")}
+            </TooltipContent>
+          </Tooltip>
           {/* Keep the global notification action trailing at the window edge. */}
           <NotificationCenter style={noDragStyle} />
         </div>

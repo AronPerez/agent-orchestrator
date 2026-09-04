@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionFileExplorer } from "./SessionFileExplorer";
+import { TooltipProvider } from "./ui/tooltip";
 import { useUiStore } from "../stores/ui-store";
 
 const { getMock, postMock } = vi.hoisted(() => ({
@@ -61,7 +62,9 @@ function renderWithQuery(children: ReactNode) {
     defaultOptions: { queries: { retry: false } },
   });
   return render(
-    <QueryClientProvider client={client}>{children}</QueryClientProvider>,
+    <QueryClientProvider client={client}>
+      <TooltipProvider>{children}</TooltipProvider>
+    </QueryClientProvider>,
   );
 }
 

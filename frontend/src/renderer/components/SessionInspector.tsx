@@ -94,7 +94,10 @@ import { cn } from "../lib/utils";
 import { SessionTerminationPopover } from "./SessionTerminationPopover";
 import { ReviewerSelect } from "./ReviewerSelect";
 import { agentLabel } from "../lib/agent-options";
-import { agentsQueryOptionsFor } from "../hooks/useAgentsQuery";
+import {
+  useAgentReadinessQuery,
+  useEnsureAgentReadiness,
+} from "../hooks/useAgentReadinessQuery";
 import { Switch } from "./ui/switch";
 import {
   Tooltip,
@@ -1402,22 +1405,29 @@ function SessionControls({ session }: { session: WorkspaceSession }) {
           <span className="min-w-0 text-xs font-medium text-settings-label">
             {t("inspector.terminateShort")}
           </span>
-          <SessionTerminationPopover
-            onConfirm={confirmTermination}
-            onOpenChange={setConfirmOpen}
-            open={confirmOpen}
-            session={session}
-            trigger={
-              <button
-                aria-label={t("inspector.terminate")}
-                className="inline-flex size-control-md items-center justify-center rounded-sm text-passive transition-colors hover:bg-error/10 hover:text-error focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
-                onClick={() => clearTerminateSessionState(queryClient, session)}
-                type="button"
-              >
-                <Trash2 className="size-icon-sm" aria-hidden="true" />
-              </button>
-            }
-          />
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="inline-flex">
+                <SessionTerminationPopover
+                  onConfirm={confirmTermination}
+                  onOpenChange={setConfirmOpen}
+                  open={confirmOpen}
+                  session={session}
+                  trigger={
+                    <button
+                      aria-label={t("inspector.terminate")}
+                      className="inline-flex size-control-md items-center justify-center rounded-sm text-passive transition-colors hover:bg-error/10 hover:text-error focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
+                      onClick={() => clearTerminateSessionState(queryClient, session)}
+                      type="button"
+                    >
+                      <Trash2 className="size-icon-sm" aria-hidden="true" />
+                    </button>
+                  }
+                />
+              </span>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">{t("inspector.terminate")}</TooltipContent>
+          </Tooltip>
         </div>
       ) : (
         <>
@@ -1805,12 +1815,7 @@ function scmTimelineStates(session: WorkspaceSession): ScmTimelineState[] {
 type ReviewerHarness = NonNullable<
   components["schemas"]["TriggerReviewRequest"]["harness"]
 >;
-type AgentInfo = components["schemas"]["AgentInfo"];
-type AgentCatalog = {
-  supported?: AgentInfo[];
-  installed?: AgentInfo[];
-  authorized?: AgentInfo[];
-};
+type AgentCatalog = components["schemas"]["AgentReadinessResponse"];
 
 const WORKER_DEFAULT_REVIEWERS: Partial<
   Record<WorkspaceSession["provider"], ReviewerHarness>
@@ -1859,7 +1864,8 @@ function ReviewsSection({
       return session.autoReviewEnabled === true ? 10_000 : false;
     },
   });
-  const agentsQuery = useQuery(agentsQueryOptionsFor(session.host));
+  const agentsQuery = useAgentReadinessQuery(true, session.host);
+  useEnsureAgentReadiness({ host: session.host });
   const projectConfigQuery = useQuery({
     queryKey: ["project-config", projectKey],
     enabled: hasPr,
@@ -1878,19 +1884,68 @@ function ReviewsSection({
   // The reviewer preference belongs to the worker session, not this component
   // or the whole project. Keep local state responsive while the daemon persists
   // it, and resync when the inspector moves to another session.
+  const currentDefaultReviewerHarness = resolveDefaultReviewerHarness(
+    projectConfigQuery.data,
+    session.provider,
+  );
   const [reviewerOverride, setReviewerOverride] = useState<
     ReviewerHarness | ""
   >(session.reviewerHarness ?? "");
+  const [reviewerModel, setReviewerModel] = useState(
+    session.reviewerConfig?.model ?? "",
+  );
+  const [reviewerMode, setReviewerMode] = useState(
+    session.reviewerConfig?.mode ?? "",
+  );
+  useEnsureAgentReadiness({
+    agentIds: reviewerOverride ? [reviewerOverride] : [],
+    enabled: reviewerOverride !== "",
+    host: session.host,
+  });
   useEffect(() => {
     setReviewerOverride(session.reviewerHarness ?? "");
-  }, [sessionKey, session.reviewerHarness]);
+    setReviewerModel(session.reviewerConfig?.model ?? "");
+    setReviewerMode(session.reviewerConfig?.mode ?? "");
+  }, [
+    sessionKey,
+    session.reviewerConfig?.mode,
+    session.reviewerConfig?.model,
+    session.reviewerHarness,
+  ]);
   const saveReviewer = useMutation({
-    mutationFn: async (harness: ReviewerHarness | "") => {
+    mutationFn: async ({
+      harness,
+      model,
+      mode,
+    }: {
+      harness: ReviewerHarness | "";
+      model: string;
+      mode: string;
+    }) => {
+      const clearingToProjectDefault =
+        harness === "" && model === "" && mode === "";
+      const currentEffectiveReviewerHarness =
+        (session.reviewerHarness ?? "") || currentDefaultReviewerHarness;
+      const nextEffectiveReviewerHarness =
+        harness || currentDefaultReviewerHarness;
+      const existingReviewerConfig =
+        !clearingToProjectDefault &&
+        currentEffectiveReviewerHarness === nextEffectiveReviewerHarness
+          ? session.reviewerConfig
+          : undefined;
+      const nextReviewerConfig = buildReviewerAgentConfig(
+        existingReviewerConfig,
+        model,
+        mode,
+      );
       const { data, error } = await clientFor(session.host).POST(
         "/api/v1/sessions/{sessionId}/reviews/switch",
         {
           params: { path: { sessionId: session.id } },
-          body: { harness: harness || undefined },
+          body: {
+            harness: harness || undefined,
+            agentConfig: nextReviewerConfig,
+          },
         },
       );
       if (error)
@@ -1906,6 +1961,8 @@ function ReviewsSection({
   });
   const saveAutoReview = useMutation({
     mutationFn: async (enabled: boolean) => {
+      // Intent, not effect: emitted before the PUT, so a failed save still
+      // counts as the user reaching for the switch.
       void captureRendererEvent("ao.renderer.review_auto_review_toggled", {
         enabled,
       });
@@ -1937,11 +1994,25 @@ function ReviewsSection({
       });
       // No override sends no body at all, leaving the default path on the wire
       // exactly as it was.
+      const reviewerConfig =
+        reviewerModel || reviewerMode
+          ? {
+              ...(reviewerModel ? { model: reviewerModel } : {}),
+              ...(reviewerMode ? { mode: reviewerMode } : {}),
+            }
+          : undefined;
       const { data, error, response } = await clientFor(session.host).POST(
         "/api/v1/sessions/{sessionId}/reviews/trigger",
         {
           params: { path: { sessionId: session.id } },
-          ...(reviewerOverride ? { body: { harness: reviewerOverride } } : {}),
+          ...(reviewerOverride || reviewerConfig
+            ? {
+                body: {
+                  ...(reviewerOverride ? { harness: reviewerOverride } : {}),
+                  ...(reviewerConfig ? { agentConfig: reviewerConfig } : {}),
+                },
+              }
+            : {}),
         },
       );
       if (error)
@@ -2028,7 +2099,7 @@ function ReviewsSection({
   return (
     <div className="p-2">
       {/* Running a review is an action; reading them is a list. The action stays
-			    on top, then one list carrying both sources keyed by PR. */}
+				    on top, then one list carrying both sources keyed by PR. */}
       <ReviewPanel
         autoReviewEnabled={autoReviewEnabled}
         config={projectConfigQuery.data}
@@ -2055,9 +2126,22 @@ function ReviewsSection({
         notice={reviewNotice}
         agentCatalog={agentsQuery.data}
         reviewerOverride={reviewerOverride}
-        onReviewerOverrideChange={(next) => {
+        reviewerModel={reviewerModel}
+        reviewerMode={reviewerMode}
+        onReviewerOverrideChange={(next, config) => {
           setReviewerOverride(next);
-          saveReviewer.mutate(next);
+          setReviewerModel(config.model ?? "");
+          setReviewerMode(config.mode ?? "");
+          saveReviewer.mutate({
+            harness: next,
+            model: config.model ?? "",
+            mode: config.mode ?? "",
+          });
+        }}
+        onReviewerHarnessPreviewChange={(next) => {
+          setReviewerOverride(next);
+          setReviewerModel("");
+          setReviewerMode("");
         }}
         session={session}
       />
@@ -2537,6 +2621,19 @@ function renderReviewMarkdown(body: string) {
   );
 }
 
+function buildReviewerAgentConfig(
+  existing: WorkspaceSession["reviewerConfig"] | undefined,
+  model: string,
+  mode: string,
+): { model?: string; mode?: string; permissions?: string } | undefined {
+  const next = { ...existing };
+  if (model) next.model = model;
+  else delete next.model;
+  if (mode) next.mode = mode;
+  else delete next.mode;
+  return Object.keys(next).length > 0 ? next : undefined;
+}
+
 function formatInlineReviewCommentMessage(
   comment: InspectorInlineComment & { reviewerId?: string },
 ): string {
@@ -2627,7 +2724,10 @@ function ReviewPanel({
   notice,
   agentCatalog,
   reviewerOverride,
+  reviewerModel,
+  reviewerMode,
   onReviewerOverrideChange,
+  onReviewerHarnessPreviewChange,
   onTrigger,
   onCancel,
   onAutoReviewChange,
@@ -2647,7 +2747,13 @@ function ReviewPanel({
   notice: string | null;
   agentCatalog?: AgentCatalog;
   reviewerOverride: ReviewerHarness | "";
-  onReviewerOverrideChange: (next: ReviewerHarness | "") => void;
+  reviewerModel: string;
+  reviewerMode: string;
+  onReviewerOverrideChange: (
+    next: ReviewerHarness | "",
+    config: { model?: string; mode?: string },
+  ) => void;
+  onReviewerHarnessPreviewChange: (next: ReviewerHarness | "") => void;
   onTrigger: () => void;
   onCancel: () => void;
   onAutoReviewChange: (enabled: boolean) => void;
@@ -2791,7 +2897,7 @@ function ReviewPanel({
             </span>
             <ReviewerSelect
               ariaLabel={t("inspector.selectReviewerAgent")}
-              authorized={agentCatalog?.authorized}
+              agents={agentCatalog?.agents}
               contentAlign="end"
               defaultHarness={resolvedDefaultHarness}
               defaultOptionLabel={agentLabel(resolvedDefaultHarness)}
@@ -2803,11 +2909,15 @@ function ReviewPanel({
                 isTriggering ||
                 isCancelling
               }
-              installed={agentCatalog?.installed}
               onChange={(next) =>
-                onReviewerOverrideChange(next as ReviewerHarness | "")
+                onReviewerHarnessPreviewChange(next as ReviewerHarness | "")
               }
-              supported={agentCatalog?.supported}
+              onConfigChange={(harness, config) =>
+                onReviewerOverrideChange(harness as ReviewerHarness | "", config)
+              }
+              model={reviewerModel}
+              mode={reviewerMode}
+              project={{ host: session.host, id: session.workspaceId }}
               triggerClassName="review-run-agent-select ml-auto h-control-md w-auto min-w-0 max-w-[11rem] shrink-0 justify-end px-2 text-right text-xs"
               value={reviewerOverride}
               excludedHarness={resolvedDefaultHarness}
@@ -2864,26 +2974,32 @@ function ReviewPanel({
                 </TooltipContent>
               </Tooltip>
               {hasReviewerSession ? (
-                <Button
-                  aria-label={
-                    isKilling
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="inline-flex">
+                      <Button
+                        aria-label={
+                          isKilling
+                            ? t("inspector.review.killingSession")
+                            : t("inspector.review.killSession")
+                        }
+                        className="h-control-md w-control-md shrink-0 p-0 text-error [&_svg]:size-icon-sm"
+                        disabled={killDisabled}
+                        onClick={onKill}
+                        size="sm"
+                        type="button"
+                        variant="ghost"
+                      >
+                        <Trash2 aria-hidden="true" />
+                      </Button>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">
+                    {isKilling
                       ? t("inspector.review.killingSession")
-                      : t("inspector.review.killSession")
-                  }
-                  className="h-control-md w-control-md shrink-0 p-0 text-error [&_svg]:size-icon-sm"
-                  disabled={killDisabled}
-                  onClick={onKill}
-                  size="sm"
-                  title={
-                    isKilling
-                      ? t("inspector.review.killingSession")
-                      : t("inspector.review.killSession")
-                  }
-                  type="button"
-                  variant="ghost"
-                >
-                  <Trash2 aria-hidden="true" />
-                </Button>
+                      : t("inspector.review.killSession")}
+                  </TooltipContent>
+                </Tooltip>
               ) : null}
             </div>
           </div>

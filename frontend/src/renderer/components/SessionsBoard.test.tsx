@@ -652,9 +652,14 @@ describe("SessionsBoard", () => {
 
     within(card).getByRole("button", { name: "keyboard worker" }).focus();
     await userEvent.tab();
-    expect(
-      within(card).getByRole("button", { name: "Terminate keyboard worker" }),
-    ).toHaveFocus();
+    const terminateButton = within(card).getByRole("button", {
+      name: "Terminate keyboard worker",
+    });
+    expect(terminateButton).toHaveFocus();
+    // The terminate control now offers its own tooltip on focus; blur it
+    // before hovering the usage metric so its tooltip has closed and this
+    // assertion is about the usage metric alone.
+    terminateButton.blur();
 
     await userEvent.hover(usage);
     expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();

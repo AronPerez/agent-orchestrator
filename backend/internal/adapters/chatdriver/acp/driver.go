@@ -215,7 +215,7 @@ func (d *Driver) Resume(ctx context.Context, cfg ports.ChatResumeConfig) (ports.
 	}
 	if d.cfg.ValidateTurnSettings != nil {
 		if err := d.cfg.ValidateTurnSettings(cfg.Permissions, ports.ChatTurnSettings{
-			Model: cfg.Model, Approval: cfg.Permissions,
+			Model: cfg.Model, Effort: cfg.Effort, Approval: cfg.Permissions,
 		}); err != nil {
 			return nil, fmt.Errorf("%w: validate ACP session settings: %w", ports.ErrChatResumeFailed, err)
 		}
@@ -317,7 +317,7 @@ const modelOptionID = "model"
 // chosen for a conversation that does not exist yet is an explicit choice, and
 // starting it on a different model would misattribute everything that follows.
 func applyResumeSettings(ctx context.Context, conv *conversation, cfg ports.ChatResumeConfig) error {
-	settings := ports.ChatTurnSettings{Model: cfg.Model, Approval: cfg.Permissions}
+	settings := ports.ChatTurnSettings{Model: cfg.Model, Effort: cfg.Effort, Approval: cfg.Permissions}
 	err := conv.applyTurnSettings(ctx, settings)
 	if err == nil || errors.Is(err, ErrACPSetterUnsupported) {
 		return nil

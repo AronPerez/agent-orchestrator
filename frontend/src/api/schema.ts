@@ -64,8 +64,42 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Run a fresh local readiness probe for one agent adapter */
+        /** Ensure launch-fresh readiness for one agent adapter */
         post: operations["probeAgent"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/agents/readiness": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Return cached normalized agent readiness without running native checks */
+        get: operations["getAgentReadiness"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/agents/readiness/ensure": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Ensure normalized readiness for selected agent adapters */
+        post: operations["ensureAgentReadiness"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1066,6 +1100,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{sessionId}/conversation/queue/reorder": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Rewrite the durable queue order for undispatched turns */
+        post: operations["reorderQueuedSessionConversationTurns"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{sessionId}/conversation/settings": {
         parameters: {
             query?: never;
@@ -1971,6 +2022,18 @@ export interface components {
             path: string;
             projectId?: null | string;
         };
+        AgentAuthenticationObservation: {
+            /** Format: date-time */
+            attemptedAt: null | string;
+            /** Format: date-time */
+            checkedAt: null | string;
+            /** @enum {string} */
+            freshness: "fresh" | "stale" | "checking";
+            reason: string;
+            reasonCode: string;
+            /** @enum {string} */
+            state: "authorized" | "unauthorized" | "unknown" | "not_applicable";
+        };
         AgentConfig: {
             mode?: string;
             model?: string;
@@ -1991,6 +2054,18 @@ export interface components {
             lastUsedAt?: null | string;
             /** @description Number of retained sessions currently attributed to this agent. */
             usageCount?: number;
+        };
+        AgentInstallationObservation: {
+            /** Format: date-time */
+            attemptedAt: null | string;
+            /** Format: date-time */
+            checkedAt: null | string;
+            /** @enum {string} */
+            freshness: "fresh" | "stale" | "checking";
+            reason: string;
+            reasonCode: string;
+            /** @enum {string} */
+            state: "installed" | "not_installed" | "unknown";
         };
         AgentModelInfo: {
             id: string;
@@ -2013,6 +2088,20 @@ export interface components {
             /** Format: date-time */
             validatedAt?: string;
             warning?: string;
+        };
+        AgentReadinessResponse: {
+            agents: components["schemas"]["AgentReadinessSnapshot"][];
+        };
+        AgentReadinessSnapshot: {
+            authentication: components["schemas"]["AgentAuthenticationObservation"];
+            /** @enum {string} */
+            effectiveReadiness: "ready" | "not_ready" | "unknown";
+            id: string;
+            installation: components["schemas"]["AgentInstallationObservation"];
+            label: string;
+            /** Format: date-time */
+            lastUsedAt?: null | string;
+            usageCount: number;
         };
         AgentSwitch: {
             /** @enum {string} */
@@ -2181,6 +2270,7 @@ export interface components {
             previewUrl?: string;
             projectId: string;
             prs: components["schemas"]["SessionPRFacts"][];
+            reviewerConfig?: components["schemas"]["AgentConfig"];
             /** @enum {string} */
             reviewerHarness?: "claude-code" | "codex" | "copilot" | "cursor" | "kilocode" | "opencode" | "kiro" | "pi" | "qwen" | "agy" | "continue" | "goose" | "vibe" | "devin" | "droid" | "kimi" | "kimchi" | "muse" | "amp" | "aider" | "grok" | "crush" | "auggie" | "cline" | "autohand";
             runtimeUnreachable?: boolean;
@@ -2501,6 +2591,7 @@ export interface components {
             state: string;
         };
         DomainReviewerConfig: {
+            agentConfig?: components["schemas"]["AgentConfig"];
             harness: string;
         };
         EditConversationMessageRequest: {
@@ -2520,6 +2611,11 @@ export interface components {
         };
         EndpointsResponse: {
             endpoints: components["schemas"]["MobileEndpoint"][];
+        };
+        EnsureAgentReadinessRequest: {
+            agentIds?: string[];
+            /** @enum {string} */
+            purpose: "display" | "launch";
         };
         EstimatedCostResponse: {
             /** Format: int64 */
@@ -2925,6 +3021,9 @@ export interface components {
             ok: boolean;
             sessionId: string;
         };
+        ReorderQueuedConversationTurnsRequest: {
+            turnIds: string[];
+        };
         ResolveCommentsResponse: {
             ok: boolean;
             resolved: number;
@@ -3269,6 +3368,7 @@ export interface components {
             url?: string;
         };
         SetSessionReviewerRequest: {
+            agentConfig?: components["schemas"]["AgentConfig"];
             /** @enum {string} */
             harness?: "claude-code" | "codex" | "copilot" | "cursor" | "kilocode" | "opencode" | "kiro" | "pi" | "qwen" | "agy" | "continue" | "goose" | "vibe" | "devin" | "droid" | "kimi" | "kimchi" | "muse" | "amp" | "aider" | "grok" | "crush" | "auggie" | "cline" | "autohand";
         };
@@ -3423,6 +3523,7 @@ export interface components {
             repo?: string;
         };
         TriggerReviewRequest: {
+            agentConfig?: components["schemas"]["AgentConfig"];
             /** @enum {string} */
             harness?: "claude-code" | "codex" | "copilot" | "cursor" | "kilocode" | "opencode" | "kiro" | "pi" | "qwen" | "agy" | "continue" | "goose" | "vibe" | "devin" | "droid" | "kimi" | "kimchi" | "muse" | "amp" | "aider" | "grok" | "crush" | "auggie" | "cline" | "autohand";
         };
@@ -3744,6 +3845,95 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ProbeAgentResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getAgentReadiness: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentReadinessResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    ensureAgentReadiness: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EnsureAgentReadinessRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentReadinessResponse"];
                 };
             };
             /** @description Bad Request */
@@ -7226,6 +7416,76 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ConversationModelsResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    reorderQueuedSessionConversationTurns: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Session identifier, e.g. project-1. */
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReorderQueuedConversationTurnsRequest"];
+            };
+        };
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
                 };
             };
             /** @description Not Found */

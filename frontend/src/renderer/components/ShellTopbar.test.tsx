@@ -191,11 +191,13 @@ function renderKill(session: WorkspaceSession = worker, orchestratorId?: string)
 	});
 	const killButton = (currentSession: WorkspaceSession, currentOrchestratorId?: string) => (
 		<QueryClientProvider client={queryClient}>
-			<TopbarKillButton
-				session={currentSession}
-				orchestrator={currentOrchestratorId ? orchestrator : undefined}
-				onKilled={onKilledMock}
-			/>
+			<TooltipProvider>
+				<TopbarKillButton
+					session={currentSession}
+					orchestrator={currentOrchestratorId ? orchestrator : undefined}
+					onKilled={onKilledMock}
+				/>
+			</TooltipProvider>
 		</QueryClientProvider>
 	);
 	const result = render(killButton(session, orchestratorId));

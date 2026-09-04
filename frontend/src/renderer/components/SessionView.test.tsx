@@ -921,13 +921,16 @@ describe("SessionView", () => {
 
   // The daemon roots a shell in the session's worktree when it is given that
   // session's id, so a new terminal must name the session actually on screen.
-  it("opens new terminals in the on-screen session's worktree", () => {
+  it("opens new terminals in the on-screen session's worktree", async () => {
     render(<SessionView sessionRef={sessionRef("sess-2")} />);
 
     const newTerminalButton = screen.getByRole("button", {
       name: "New terminal",
     });
-    expect(newTerminalButton).toHaveAttribute("title", "New terminal (Ctrl+T)");
+    fireEvent.focus(newTerminalButton);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "New terminal (Ctrl+T)",
+    );
     fireEvent.click(newTerminalButton);
     expect(openShellTerminalMock).toHaveBeenCalledWith(
       {

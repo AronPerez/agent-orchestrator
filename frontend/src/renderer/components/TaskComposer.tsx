@@ -15,10 +15,11 @@ import { clientFor } from "../lib/host-clients";
 import { isCloudHost, LOCAL_HOST, refKey, type Ref } from "../lib/hosts";
 import { captureRendererEvent } from "../lib/telemetry";
 import {
-  agentsQueryKeyFor,
-  agentsQueryOptionsFor,
-  refreshAgentsIfStale,
-} from "../hooks/useAgentsQuery";
+  cacheAgentReadiness,
+  ensureAgentReadiness,
+  useAgentReadinessQuery,
+  useEnsureAgentReadiness,
+} from "../hooks/useAgentReadinessQuery";
 import {
   type FileAttachmentPayload,
   useFileAttachments,
@@ -55,6 +56,8 @@ const CHAT_PREFLIGHT_CODES = new Set([
   "CHAT_DRIVER_INCOMPATIBLE",
   "CHAT_AUTH_REQUIRED",
 ]);
+
+const READINESS_RECONCILE_CODES = new Set(["AGENT_BINARY_NOT_FOUND", "CHAT_AUTH_REQUIRED"]);
 
 class TaskCreateError extends Error {
   constructor(
@@ -206,9 +209,23 @@ export function TaskComposer({
         void captureRendererEvent("ao.renderer.task_create_failed", {
           project_id: input.project.id,
         });
-        void queryClient.invalidateQueries({
-          queryKey: agentsQueryKeyFor(input.project.host),
-        });
+        if (
+          err instanceof TaskCreateError &&
+          err.code &&
+          READINESS_RECONCILE_CODES.has(err.code) &&
+          input.agent
+        ) {
+          try {
+            const completed = await ensureAgentReadiness(
+              [input.agent],
+              "launch",
+              input.project.host,
+            );
+            cacheAgentReadiness(queryClient, completed, input.project.host);
+          } catch {
+            // Preserve the launch error when opportunistic reconciliation fails.
+          }
+        }
         throw err instanceof Error
           ? err
           : new Error(t("newTask.unableToStart"));
@@ -241,15 +258,8 @@ export function TaskComposer({
       return data.project as Project;
     },
   });
-  const agentsQuery = useQuery(agentsQueryOptionsFor(projectHost));
+  const agentsQuery = useAgentReadinessQuery(true, projectHost);
   const { settings } = useSettings();
-  // Freshen the inventory on open so a just-installed or just-authenticated agent
-  // is present without the user asking for it.
-  useEffect(() => {
-    void refreshAgentsIfStale(projectHost).then((next) => {
-      if (next) queryClient.setQueryData(agentsQueryKeyFor(projectHost), next);
-    });
-  }, [projectHost, queryClient]);
   // The composer preselects the agent and model a spawn would actually use
   // instead of parking the controls on a "default" label the user has to
   // remember. Both resolved values remain directly editable.
@@ -257,6 +267,13 @@ export function TaskComposer({
   const globalDefaultAgent = projectQuery.data?.agent ?? "";
   const defaultWorkerAgent = projectWorkerAgent || globalDefaultAgent;
   const selectedAgent = agent || defaultWorkerAgent;
+  useEnsureAgentReadiness({ host: projectHost });
+  useEnsureAgentReadiness({
+    agentIds: selectedAgent ? [selectedAgent] : [],
+    enabled: selectedAgent !== "",
+    purpose: "launch",
+    host: projectHost,
+  });
   const defaultWorkerModel =
     projectQuery.data?.config?.worker?.agentConfig?.model ??
     projectQuery.data?.config?.agentConfig?.model ??
@@ -328,7 +345,7 @@ export function TaskComposer({
     (catalogUsesModes ? catalogDefaultOption : "");
 
   const selectedAgentLabel =
-    agentCatalog?.supported?.find((item) => item.id === selectedAgent)?.label ||
+    agentCatalog?.agents.find((item) => item.id === selectedAgent)?.label ||
     selectedAgent;
   const requiresTuiFallback =
     selectedAgent !== "" &&
@@ -448,9 +465,7 @@ export function TaskComposer({
         label: t("newTask.agent"),
         placeholder: t("newTask.selectAgent"),
         value: selectedAgent,
-        authorized: agentCatalog?.authorized,
-        installed: agentCatalog?.installed,
-        supported: agentCatalog?.supported,
+        agents: agentCatalog?.agents,
         disabled:
           isSubmitting ||
           (agentsQuery.isFetching && agentCatalog === undefined),

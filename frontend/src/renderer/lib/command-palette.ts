@@ -403,9 +403,7 @@ function prReviewCommand(
 			? t("command.notEligibleForReview")
 			: undefined;
 	const states = prReviewState ? [prReviewState] : [];
-	const runLabel = prReviewState
-		? reviewSessionRunAction(states, false)
-		: t("inspector.review.run");
+	const runLabel = prReviewState ? reviewSessionRunAction(states, false) : t("inspector.review.run");
 	return {
 		id: `pr-review:${refKey(session)}:${pr.number}`,
 		group: "prs",

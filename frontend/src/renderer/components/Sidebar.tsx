@@ -1,6 +1,12 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { useNavigate, useParams, useRouterState } from "@tanstack/react-router";
+import {
+  useCanGoBack,
+  useNavigate,
+  useParams,
+  useRouter,
+  useRouterState,
+} from "@tanstack/react-router";
 import {
   DndContext,
   DragOverlay,
@@ -26,6 +32,8 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import {
   AlertTriangle,
+  ArrowLeft,
+  ArrowRight,
   ChevronRight,
   Download,
   Folder,
@@ -33,6 +41,7 @@ import {
   LogIn,
   LogOut,
   MoreVertical,
+  PanelLeft,
   Pin,
   PinOff,
   Plus,
@@ -139,9 +148,10 @@ import {
   type CreateProjectInput,
 } from "./CreateProjectFlow";
 import { ResizeHandle } from "./ResizeHandle";
-import { isMacPlatform, isWindowsPlatform } from "../lib/platform";
+import { isLinuxPlatform, isMacPlatform, isWindowsPlatform } from "../lib/platform";
 import { useCloudSession } from "../lib/cloud-session";
 import { HostSwitcher } from "./HostSwitcher";
+import { useCanGoForward } from "./TitlebarNav";
 
 // Destructive controls name the machine they act on even though remote rows
 // are labelled. Empty on local, so that copy stays byte-identical to before.
@@ -155,6 +165,7 @@ function useHostSuffix(host: string): string {
 // under its custom titlebar.
 const isMac = isMacPlatform();
 const isWindows = isWindowsPlatform();
+const isLinux = isLinuxPlatform();
 const noDragStyle = isMac
   ? ({ WebkitAppRegion: "no-drag" } as React.CSSProperties)
   : undefined;
@@ -527,10 +538,15 @@ export function Sidebar({
 }: SidebarProps) {
   const { t } = useTranslation();
   const selection = useSelection();
-  const { state, setOpen } = useSidebar();
+  const { state, setOpen, toggleSidebar } = useSidebar();
   const isCollapsed = state === "collapsed";
   const [expandedChromeVisible, setExpandedChromeVisible] =
     useState(!isCollapsed);
+  const router = useRouter();
+  const canGoBack = useCanGoBack();
+  const canGoForward = useCanGoForward();
+  const showCompactRailHistory =
+    autoCompact && isCollapsed && (isMac || isLinux) && !isWindows;
   // One IPC subscription for both footer variants of the restart-to-update prompt.
   const updateStatus = useUpdateStatus();
 	const availableUpdateVersion = updateStatus.state === "available" ? updateStatus.version : undefined;
@@ -872,16 +888,67 @@ export function Sidebar({
 						<span
 							className="sidebar-expanded-chrome min-w-0 flex-1 truncate text-sm font-bold leading-tight tracking-tight-lg text-foreground group-data-[collapsible=icon]:hidden"
 						>
-              Agent Orchestrator
-            </span>
-          )}
-          {isNightly && (
-            <span className="sidebar-expanded-chrome shrink-0 rounded-full bg-purple-subtle px-1.5 py-0.5 text-micro font-semibold leading-none text-purple-accent group-data-[collapsible=icon]:hidden">
-              {t("shell.nightly")}
-            </span>
-          )}
-        </div>
-      </SidebarHeader>
+							Agent Orchestrator
+						</span>
+					)}
+					{isNightly && (
+						<span className="sidebar-expanded-chrome shrink-0 rounded-full bg-purple-subtle px-1.5 py-0.5 text-micro font-semibold leading-none text-purple-accent group-data-[collapsible=icon]:hidden">
+							{t("shell.nightly")}
+						</span>
+					)}
+				</div>
+				<Tooltip>
+					<TooltipTrigger asChild>
+						<button
+							aria-label={isCollapsed ? t("shell.expandSidebar") : t("shell.collapseSidebar")}
+							className="hidden size-control-board place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-interactive-hover hover:text-foreground group-data-[collapsible=icon]:grid [&_svg]:size-icon-base"
+							onClick={toggleSidebar}
+							type="button"
+						>
+							<PanelLeft aria-hidden="true" />
+						</button>
+					</TooltipTrigger>
+					<TooltipContent side="right">
+						{isCollapsed ? t("shell.expandSidebar") : t("shell.collapseSidebar")}
+					</TooltipContent>
+				</Tooltip>
+				{showCompactRailHistory ? (
+					<div className="flex flex-col items-center gap-1 pb-2">
+						<Tooltip>
+							<TooltipTrigger asChild>
+								<span className="inline-flex">
+									<button
+										aria-label={t("titlebar.goBack")}
+										className="grid size-control-board place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-interactive-hover hover:text-foreground disabled:cursor-not-allowed disabled:opacity-55 disabled:hover:bg-transparent disabled:hover:text-muted-foreground [&_svg]:size-icon-base"
+										disabled={!canGoBack}
+										onClick={() => router.history.back()}
+										type="button"
+									>
+										<ArrowLeft aria-hidden="true" />
+									</button>
+								</span>
+							</TooltipTrigger>
+							<TooltipContent side="right">{t("titlebar.goBack")}</TooltipContent>
+						</Tooltip>
+						<Tooltip>
+							<TooltipTrigger asChild>
+								<span className="inline-flex">
+									<button
+										aria-label={t("titlebar.goForward")}
+										className="grid size-control-board place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-interactive-hover hover:text-foreground disabled:cursor-not-allowed disabled:opacity-55 disabled:hover:bg-transparent disabled:hover:text-muted-foreground [&_svg]:size-icon-base"
+										disabled={!canGoForward}
+										onClick={() => router.history.forward()}
+										type="button"
+									>
+										<ArrowRight aria-hidden="true" />
+									</button>
+								</span>
+							</TooltipTrigger>
+							<TooltipContent side="right">{t("titlebar.goForward")}</TooltipContent>
+						</Tooltip>
+					</div>
+				) : null}
+			</SidebarHeader>
 
       {/* Keep Search + section chrome fixed; only the project tree scrolls. */}
       <div className="flex shrink-0 flex-col gap-0 px-2 group-data-[collapsible=icon]:items-center group-data-[collapsible=icon]:px-1.5">
@@ -1740,17 +1807,26 @@ const ProjectItemContent = memo(function ProjectItemContent({
                   </TooltipContent>
                 </Tooltip>
                 <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <button
-                      aria-label={t("shell.projectActions", {
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <DropdownMenuTrigger asChild>
+                        <button
+                          aria-label={t("shell.projectActions", {
+                            name: workspace.name,
+                          })}
+                          className={HOVER_ACTION_CLASS}
+                          type="button"
+                        >
+                          <MoreVertical aria-hidden="true" />
+                        </button>
+                      </DropdownMenuTrigger>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      {t("shell.projectActions", {
                         name: workspace.name,
                       })}
-                      className={HOVER_ACTION_CLASS}
-                      type="button"
-                    >
-                      <MoreVertical aria-hidden="true" />
-                    </button>
-                  </DropdownMenuTrigger>
+                    </TooltipContent>
+                  </Tooltip>
                   <DropdownMenuContent
                     side="right"
                     align="start"
@@ -2968,18 +3044,20 @@ function CreateProjectButton({
       {({ disabled, choosePath, label }) => (
         <Tooltip>
           <TooltipTrigger asChild>
-            <button
-              aria-label={t("shell.newProject")}
-              className={cn(
-                "grid size-icon-xl shrink-0 place-items-center rounded-sm text-passive transition-colors hover:bg-interactive-hover hover:text-foreground",
-                hideTrigger && "hidden",
-              )}
-              disabled={disabled}
-              onClick={choosePath}
-              type="button"
-            >
-              <Plus className="size-icon-sm" aria-hidden="true" />
-            </button>
+            <span className="inline-flex">
+              <button
+                aria-label={t("shell.newProject")}
+                className={cn(
+                  "grid size-icon-xl shrink-0 place-items-center rounded-sm text-passive transition-colors hover:bg-interactive-hover hover:text-foreground",
+                  hideTrigger && "hidden",
+                )}
+                disabled={disabled}
+                onClick={choosePath}
+                type="button"
+              >
+                <Plus className="size-icon-sm" aria-hidden="true" />
+              </button>
+            </span>
           </TooltipTrigger>
           <TooltipContent>{label}</TooltipContent>
         </Tooltip>

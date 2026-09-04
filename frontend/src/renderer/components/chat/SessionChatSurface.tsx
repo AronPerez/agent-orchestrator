@@ -475,6 +475,7 @@ export function SessionChatSurface({
         }
         onEditQueuedTurn={commands.editQueuedTurn}
         onCancelQueuedTurn={commands.cancelQueuedTurn}
+        onReorderQueuedTurns={commands.reorderQueuedTurns}
         promoteQueuedTurnPendingTurnId={
           commands.promoteQueuedTurnPendingTurnId
         }

@@ -2,7 +2,6 @@ import posthog from "posthog-js/dist/module.full.no-external";
 import { aoBridge } from "./bridge";
 import { isLoopbackHostname } from "./loopback";
 import { ORCHESTRATOR_SPAWN_SOURCES } from "./orchestrator-spawn-sources";
-import { KNOWN_REVIEWER_HARNESS_IDS } from "./reviewer-harnesses";
 import { DEFAULT_POSTHOG_HOST, DEFAULT_POSTHOG_PROJECT_KEY } from "../../shared/posthog-config";
 import { EDITOR_IDS } from "../../shared/editor-handoff";
 import { captureExceptionToSentry, initSentry } from "./sentry";
@@ -617,25 +616,6 @@ export async function sanitizeRendererProperties(
 			}
 			if (properties?.outcome === "succeeded" || properties?.outcome === "failed") safe.outcome = properties.outcome;
 			break;
-		case "ao.renderer.review_settings_changed": {
-			// Which review controls a user actually touches is the question behind
-			// simplifying this surface: a dropdown nobody changes is a checkpoint
-			// that can become a default. Harness ids come from AO's own reviewer
-			// registry (see reviewer-harnesses.ts), never from user input.
-			const projectIDHash = await hashedTelemetryID(properties?.project_id);
-			if (projectIDHash) safe.project_id_hash = projectIDHash;
-			if (typeof properties?.auto_review === "boolean") safe.auto_review = properties.auto_review;
-			if (typeof properties?.reviewer_harness === "string" && KNOWN_REVIEWER_HARNESS_IDS.has(properties.reviewer_harness)) {
-				safe.reviewer_harness = properties.reviewer_harness;
-			}
-			if (typeof properties?.harness_is_default === "boolean") {
-				safe.harness_is_default = properties.harness_is_default;
-			}
-			for (const key of ["auto_review_changed", "reviewer_harness_changed"] as const) {
-				if (typeof properties?.[key] === "boolean") safe[key] = properties[key];
-			}
-			break;
-		}
 		case "ao.renderer.review_auto_review_toggled":
 			// The session-scoped switch duplicates a project-level setting, so
 			// whether anyone reaches for it decides if it stays a separate control.

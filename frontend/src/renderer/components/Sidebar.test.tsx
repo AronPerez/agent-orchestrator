@@ -1,4 +1,5 @@
 import { SidebarProvider } from "@/components/ui/sidebar";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 // Disable motion animations so AnimatePresence unmounts children immediately
@@ -32,7 +33,8 @@ import type {
   WorkspaceSession,
   WorkspaceSummary,
 } from "../types/workspace";
-import { agentsQueryKey } from "../hooks/useAgentsQuery";
+import { agentReadinessQueryKey } from "../hooks/useAgentReadinessQuery";
+import { agentReadiness } from "../test/agent-readiness-fixtures";
 import { workspaceHostQueryKey } from "../hooks/useWorkspaceQuery";
 import { cloudHost, LOCAL_HOST, refKey } from "../lib/hosts";
 import { useUiStore } from "../stores/ui-store";
@@ -50,10 +52,14 @@ type DragOverTestEvent = {
 const {
   cloudGateState,
   cloudSessionState,
+  compactRailCanGoBack,
+  compactRailCanGoForward,
   dragEnds,
   dragOvers,
   dragStarts,
   getMock,
+  historyBackMock,
+  historyForwardMock,
   navigateMock,
   mockParams,
   renameSessionMock,
@@ -75,6 +81,8 @@ const {
     signIn: vi.fn(),
     signOut: vi.fn().mockResolvedValue(undefined),
   },
+  compactRailCanGoBack: { current: false },
+  compactRailCanGoForward: { current: false },
   dragEnds: new Map<
     string,
     (event: { active: { id: string }; over: { id: string } | null }) => void
@@ -82,6 +90,8 @@ const {
   dragOvers: new Map<string, (event: DragOverTestEvent) => void>(),
   dragStarts: new Map<string, (event: { active: { id: string } }) => void>(),
   getMock: vi.fn(),
+  historyBackMock: vi.fn(),
+  historyForwardMock: vi.fn(),
   navigateMock: vi.fn(),
   mockParams: {
     hostId: undefined as string | undefined,
@@ -142,13 +152,28 @@ vi.mock("../hooks/useCommandPaletteEnabled", () => ({
   useCommandPaletteEnabled: () => commandPaletteEnabled.current,
 }));
 
+vi.mock("../lib/platform", () => ({
+  isLinuxPlatform: () => false,
+  isMacPlatform: () => true,
+  isWindowsPlatform: () => false,
+}));
+
 vi.mock("@tanstack/react-router", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("@tanstack/react-router")>();
   return {
     ...actual,
+    useCanGoBack: () => compactRailCanGoBack.current,
     useNavigate: () => navigateMock,
     useParams: () => ({ ...mockParams }),
+    useRouter: () => ({
+      history: {
+        back: historyBackMock,
+        forward: historyForwardMock,
+        location: { state: { __TSR_index: 0 } },
+        subscribe: vi.fn(() => () => undefined),
+      },
+    }),
     useRouterState: ({
       select,
     }: {
@@ -156,6 +181,10 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
     }) => select({ location: { pathname: "/" } }),
   };
 });
+
+vi.mock("./TitlebarNav", () => ({
+  useCanGoForward: () => compactRailCanGoForward.current,
+}));
 
 vi.mock("../lib/bridge", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/bridge")>();
@@ -290,6 +319,7 @@ function renderSidebar({
   hostSections,
   initialOpen = true,
   autoCompact = false,
+  topbarOffset,
   expandedProjectIds,
   queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -304,6 +334,7 @@ function renderSidebar({
   hostSections?: HostSection[];
   initialOpen?: boolean;
   autoCompact?: boolean;
+  topbarOffset?: "toolbar" | "titlebar" | "trafficLights" | "session";
   expandedProjectIds?: string[];
   queryClient?: QueryClient;
 } = {}) {
@@ -328,33 +359,28 @@ function renderSidebar({
     JSON.stringify(expandedProjectIds ?? workspaces.map(refKey)),
   );
   if (seedAgents) {
-    queryClient.setQueryData(agentsQueryKey, {
-      supported: [
-        { id: "claude-code", label: "Claude Code" },
-        { id: "codex", label: "Codex" },
-      ],
-      installed: [
-        { id: "claude-code", label: "Claude Code" },
-        { id: "codex", label: "Codex" },
-      ],
-      authorized: [
-        { id: "claude-code", label: "Claude Code", authStatus: "authorized" },
-        { id: "codex", label: "Codex", authStatus: "authorized" },
+    queryClient.setQueryData(agentReadinessQueryKey, {
+      agents: [
+        agentReadiness("claude-code", "Claude Code"),
+        agentReadiness("codex", "Codex"),
       ],
     });
   }
   render(
     <QueryClientProvider client={queryClient}>
-      <SidebarProvider defaultOpen={initialOpen}>
-        <Sidebar
-          autoCompact={autoCompact}
-          onCloneProject={onCloneProject}
-          onCreateProject={onCreateProject}
-          onInitializeProject={onInitializeProject}
-          onRemoveProject={onRemoveProject}
-          hostSections={sections}
-        />
-      </SidebarProvider>
+      <TooltipProvider>
+        <SidebarProvider defaultOpen={initialOpen}>
+          <Sidebar
+            autoCompact={autoCompact}
+            topbarOffset={topbarOffset}
+            onCloneProject={onCloneProject}
+            onCreateProject={onCreateProject}
+            onInitializeProject={onInitializeProject}
+            onRemoveProject={onRemoveProject}
+            hostSections={sections}
+          />
+        </SidebarProvider>
+      </TooltipProvider>
     </QueryClientProvider>,
   );
   return onRemoveProject;
@@ -434,6 +460,8 @@ beforeEach(() => {
   dragStarts.clear();
   document.documentElement.style.removeProperty("--ao-sidebar-w");
   commandPaletteEnabled.current = true;
+  compactRailCanGoBack.current = false;
+  compactRailCanGoForward.current = false;
   cloudGateState.cloudEnabled = true;
   cloudGateState.localEnabled = true;
   cloudGateState.client = "";
@@ -442,21 +470,15 @@ beforeEach(() => {
   cloudSessionState.status = "unauthenticated";
   cloudSessionState.signIn.mockReset();
   cloudSessionState.signOut.mockReset().mockResolvedValue(undefined);
+  historyBackMock.mockReset();
+  historyForwardMock.mockReset();
   useUiStore.setState({ isCommandPaletteOpen: false, settingsModal: null });
   getMock.mockReset();
   getMock.mockResolvedValue({
     data: {
-      supported: [
-        { id: "claude-code", label: "Claude Code" },
-        { id: "codex", label: "Codex" },
-      ],
-      installed: [
-        { id: "claude-code", label: "Claude Code" },
-        { id: "codex", label: "Codex" },
-      ],
-      authorized: [
-        { id: "claude-code", label: "Claude Code", authStatus: "authorized" },
-        { id: "codex", label: "Codex", authStatus: "authorized" },
+      agents: [
+        agentReadiness("claude-code", "Claude Code"),
+        agentReadiness("codex", "Codex"),
       ],
     },
     error: undefined,
@@ -1688,26 +1710,12 @@ describe("Sidebar", () => {
       .mockResolvedValue("/repo/new-project");
     getMock.mockResolvedValueOnce({
       data: {
-        supported: [
-          { id: "goose", label: "Goose" },
-          { id: "devin", label: "Devin" },
-          { id: "aider", label: "Aider" },
-          { id: "opencode", label: "OpenCode" },
-          { id: "cursor", label: "Cursor" },
-        ],
-        installed: [
-          { id: "goose", label: "Goose", authStatus: "authorized" },
-          { id: "devin", label: "Devin", authStatus: "authorized" },
-          { id: "aider", label: "Aider", authStatus: "authorized" },
-          { id: "opencode", label: "OpenCode", authStatus: "authorized" },
-          { id: "cursor", label: "Cursor", authStatus: "authorized" },
-        ],
-        authorized: [
-          { id: "goose", label: "Goose", authStatus: "authorized" },
-          { id: "devin", label: "Devin", authStatus: "authorized" },
-          { id: "aider", label: "Aider", authStatus: "authorized" },
-          { id: "opencode", label: "OpenCode", authStatus: "authorized" },
-          { id: "cursor", label: "Cursor", authStatus: "authorized" },
+        agents: [
+          agentReadiness("goose", "Goose"),
+          agentReadiness("devin", "Devin"),
+          agentReadiness("aider", "Aider"),
+          agentReadiness("opencode", "OpenCode"),
+          agentReadiness("cursor", "Cursor"),
         ],
       },
       error: undefined,
@@ -2230,17 +2238,13 @@ describe("Sidebar", () => {
       .mockResolvedValue("/repo/new-project");
     getMock.mockResolvedValueOnce({
       data: {
-        supported: [
-          { id: "claude-code", label: "Claude Code" },
-          { id: "cursor", label: "Cursor" },
-          { id: "aider", label: "Aider" },
-        ],
-        installed: [
-          { id: "claude-code", label: "Claude Code", authStatus: "authorized" },
-          { id: "cursor", label: "Cursor", authStatus: "unauthorized" },
-        ],
-        authorized: [
-          { id: "claude-code", label: "Claude Code", authStatus: "authorized" },
+        agents: [
+          agentReadiness("claude-code", "Claude Code"),
+          agentReadiness("cursor", "Cursor", { authentication: "unauthorized" }),
+          agentReadiness("aider", "Aider", {
+            installation: "not_installed",
+            authentication: "unknown",
+          }),
         ],
       },
       error: undefined,
@@ -2284,11 +2288,7 @@ describe("Sidebar", () => {
       .fn()
       .mockResolvedValue("/repo/new-project");
     let resolveAgents!: (value: {
-      data: {
-        supported: { id: string; label: string }[];
-        installed: { id: string; label: string }[];
-        authorized: { id: string; label: string; authStatus: "authorized" }[];
-      };
+      data: { agents: ReturnType<typeof agentReadiness>[] };
       error: undefined;
     }) => void;
     getMock.mockReturnValueOnce(
@@ -2309,17 +2309,9 @@ describe("Sidebar", () => {
 
     resolveAgents({
       data: {
-        supported: [
-          { id: "claude-code", label: "Claude Code" },
-          { id: "codex", label: "Codex" },
-        ],
-        installed: [
-          { id: "claude-code", label: "Claude Code" },
-          { id: "codex", label: "Codex" },
-        ],
-        authorized: [
-          { id: "claude-code", label: "Claude Code", authStatus: "authorized" },
-          { id: "codex", label: "Codex", authStatus: "authorized" },
+        agents: [
+          agentReadiness("claude-code", "Claude Code"),
+          agentReadiness("codex", "Codex"),
         ],
       },
       error: undefined,
@@ -2611,6 +2603,52 @@ describe("Sidebar", () => {
     expect(document.querySelector('[data-slot="sidebar-gap"]')).toHaveStyle({
       width: "var(--sidebar-width-icon)",
     });
+  });
+
+  it("keeps the compact icon rail below the macOS traffic-light band", () => {
+    renderSidebar({
+      autoCompact: true,
+      initialOpen: false,
+      topbarOffset: "trafficLights",
+    });
+
+    const sidebar = document.querySelector(
+      '[data-slot="sidebar"][data-state="collapsed"]',
+    );
+    expect(sidebar).toHaveAttribute("data-collapsible", "icon");
+    const compactToggle = document.querySelector(
+      '[data-slot="sidebar-header"] button[aria-label="Expand sidebar"]',
+    );
+    expect(compactToggle).toBeInTheDocument();
+    expect(compactToggle?.querySelector("svg")).toBeInTheDocument();
+    expect(
+      screen.getByText("Connect Mobile").closest('[aria-hidden="true"]'),
+    ).not.toBeNull();
+    expect(
+      screen.getByText("Settings").closest('[aria-hidden="true"]'),
+    ).not.toBeNull();
+    expect(
+      document.querySelector('[data-slot="sidebar-container"]'),
+    ).toHaveAttribute("data-topbar-offset", "trafficLights");
+    expect(document.querySelector('[data-slot="sidebar-gap"]')).toHaveStyle({
+      width: "var(--sidebar-width-icon)",
+    });
+  });
+
+  it("keeps back and forward accessible from the compact rail on macOS/Linux", async () => {
+    compactRailCanGoBack.current = true;
+    compactRailCanGoForward.current = true;
+    renderSidebar({
+      autoCompact: true,
+      initialOpen: false,
+      topbarOffset: "trafficLights",
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "Go back" }));
+    await userEvent.click(screen.getByRole("button", { name: "Go forward" }));
+
+    expect(historyBackMock).toHaveBeenCalledTimes(1);
+    expect(historyForwardMock).toHaveBeenCalledTimes(1);
   });
 
   it("flushes any queued rAF frame on pointer-up and persists the clamped width", async () => {
