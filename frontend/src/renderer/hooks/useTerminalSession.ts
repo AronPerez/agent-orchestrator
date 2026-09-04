@@ -138,7 +138,13 @@ const CLOUD_CONNECT_MAX_FAILURES = 8;
 // or its own 20s ready deadline closes the socket, which the client already
 // handles as onConnectionChange("closed") -> scheduleReattach. A client-side
 // cloud open timeout only manufactured reconnect storms (the 3s/30s band-aids).
-const OPEN_TIMEOUT_MS = 3_000;
+//
+// The deadline is derived, not chosen: a dead PTY only yields a definitive
+// `exited` after the daemon's attach-retry ladder — 5 sleeps of
+// 200/400/600/800/1000 = 3000 ms (backend/internal/terminal/attachment.go) —
+// plus a round trip. Equal to the ladder is the bug: the client tears down one
+// RTT before the answer and reattaches forever. 2x the ladder is headroom.
+const OPEN_TIMEOUT_MS = 6_000;
 // Initial-replay gate. On attach the runtime replays the pane's state, and the
 // daemon pumps it in 32KB reads (attachment.go copyOut) — so the renderer gets
 // N WebSocket frames, N `write()` calls, and N separate event-loop turns. xterm
@@ -862,7 +868,7 @@ export function useTerminalSession(session: WorkspaceSession | undefined, option
 		setReplaySettled(!coverInitialReplay);
 		// The cap is armed from `opened`, NOT from here. A slow attach — the
 		// daemon runs a liveness probe and spawns the runtime client before the
-		// first byte, which is why OPEN_TIMEOUT_MS budgets 3s — would otherwise
+		// first byte, which is why OPEN_TIMEOUT_MS budgets whole seconds — would otherwise
 		// burn the whole cap on the handshake, flush an empty buffer, and leave
 		// `replayBuffering` false for the rest of the attachment. The replay
 		// would then land frame-by-frame with the bug fully intact, behind a
