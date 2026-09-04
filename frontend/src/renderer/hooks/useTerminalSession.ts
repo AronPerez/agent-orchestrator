@@ -96,7 +96,14 @@ const RETRY_MAX_MS = 8_000;
 // Exponential backoff here only adds dead seconds between "worker ready" and
 // "terminal attached" (a worker ready at 17s would wait for the 23s attempt).
 const CLOUD_CONNECT_RETRY_MS = 1_000;
-const OPEN_TIMEOUT_MS = 3_000;
+// Deadline for `opened` after `open`. Derived, not chosen: a dead PTY only
+// yields a definitive `exited` after the daemon's attach-retry ladder —
+// 5 sleeps of 200/400/600/800/1000 = 3000 ms (attachment.go, pinned by
+// TestReattachLadderSum) — plus a round trip (measured ≤ 230 ms on LAN).
+// 2× the ladder is headroom for a slow host. Equal to the ladder is the bug:
+// the client tears down one RTT before the answer and reattaches forever.
+// This is the floor for daemons that don't advertise an attach budget.
+export const OPEN_TIMEOUT_MS = 6_000;
 // Trailing debounce on grid changes: a pane drag emits a burst of intermediate
 // sizes; the attached program should get one SIGWINCH when the drag settles,
 // not dozens (yyork's terminal-panel does the same at its socket layer).
@@ -727,7 +734,7 @@ export function useTerminalSession(session: WorkspaceSession | undefined, option
 		setReplaySettled(!coverInitialReplay);
 		// The cap is armed from `opened`, NOT from here. A slow attach — the
 		// daemon runs a liveness probe and spawns the runtime client before the
-		// first byte, which is why OPEN_TIMEOUT_MS budgets 3s — would otherwise
+		// first byte, which is why OPEN_TIMEOUT_MS budgets whole seconds — would otherwise
 		// burn the whole cap on the handshake, flush an empty buffer, and leave
 		// `replayBuffering` false for the rest of the attachment. The replay
 		// would then land frame-by-frame with the bug fully intact, behind a
