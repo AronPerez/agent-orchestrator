@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CLOSE_SHELL_TERMINAL_SHORTCUT_CHANNEL, FOCUS_TERMINAL_SHORTCUT_CHANNEL, KEYBOARD_SHORTCUTS_HELP_CHANNEL, NEXT_SESSION_SHORTCUT_CHANNEL, NEXT_TAB_SHORTCUT_CHANNEL, NEW_SESSION_SHORTCUT_CHANNEL, NEW_SHELL_TERMINAL_SHORTCUT_CHANNEL, OPEN_SETTINGS_SHORTCUT_CHANNEL, PREVIOUS_SESSION_SHORTCUT_CHANNEL, PREVIOUS_TAB_SHORTCUT_CHANNEL, SET_CLOSE_SHELL_TERMINAL_SHORTCUT_ENABLED_CHANNEL } from "./shared/shortcuts";
 import type { AoBridge } from "./preload";
+import mainSource from "./main.ts?raw";
+import preloadSource from "./preload.ts?raw";
 
 const electronMocks = vi.hoisted(() => {
 	const listeners = new Map<string, (...args: unknown[]) => void>();
@@ -210,5 +212,18 @@ describe("preload uiSettings bridge", () => {
 
 		expect(electronMocks.invoke).toHaveBeenNthCalledWith(1, "uiSettings:get");
 		expect(electronMocks.invoke).toHaveBeenNthCalledWith(2, "uiSettings:set", { locale: "zh-CN" });
+	});
+});
+
+describe("preload theme bridge", () => {
+	it("registers a main-process handler for every exposed theme invoke", () => {
+		const channels = [...preloadSource.matchAll(/ipcRenderer\.invoke\(\s*["'](theme:[^"']+)["']/g)].map(
+			(match) => match[1],
+		);
+
+		expect(channels).toEqual(["theme:set", "theme:persist-terminal"]);
+		for (const channel of channels) {
+			expect(mainSource).toMatch(new RegExp(`ipcMain\\.handle\\(\\s*["']${channel}["']`));
+		}
 	});
 });
