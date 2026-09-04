@@ -99,7 +99,7 @@ func (c *MobileController) SecurePairing(w http.ResponseWriter, r *http.Request)
 // LANController is the runtime hook set the concrete bridge needs. httpd's
 // LANManager + authState satisfy it (adapter wired in daemon.go).
 type LANController interface {
-	Start(port int) (int, error)
+	Start(port int, bind string) (int, error)
 	Stop(ctx context.Context) error
 	Running() bool
 	BoundPort() int
@@ -169,6 +169,13 @@ type BridgeService struct {
 func (b *BridgeService) lanHosts() []string {
 	if b.PickLANHosts != nil {
 		return b.PickLANHosts()
+	}
+	// A narrowed listener must only advertise the address it actually bound.
+	// Advertising every local interface here would hand the phone endpoints
+	// that cannot reach this socket.
+	st, _ := mobilebridge.Load(b.ConfigPath)
+	if host, err := mobilebridge.BindAddress(st.Bind); err == nil && host != "0.0.0.0" {
+		return []string{host}
 	}
 	return mobilebridge.LocalPrivateIPv4s()
 }
@@ -371,18 +378,19 @@ func (b *BridgeService) enableWithPassword(pw string) (MobileStatusResponse, err
 	// password while persisted state/UI still say the bridge is off.
 	prevHash := b.LAN.PasswordHash()
 	wasRunning := b.LAN.Running()
-	prevSt, _ := mobilebridge.Load(b.ConfigPath)
 
+	// Load first so the persisted bind mode survives the write below — it is
+	// user-set config, not something enable/regenerate owns.
+	st, _ := mobilebridge.Load(b.ConfigPath)
 	// The persisted password is plaintext; the auth hash is derived in memory.
 	b.LAN.SetPasswordHash(mobilebridge.HashPassword(pw))
-	port, err := b.LAN.Start(b.DefaultPort)
+	port, err := b.LAN.Start(b.DefaultPort, st.Bind)
 	if err != nil {
 		b.LAN.SetPasswordHash(prevHash) // Start failed: undo the hash swap.
 		return MobileStatusResponse{}, err
 	}
-	// Preserve the persisted SecurePairing flag — this Save is not the place a
-	// user's secure-pairing choice changes, only where enabled/password/port do.
-	if err := mobilebridge.Save(b.ConfigPath, mobilebridge.State{Enabled: true, Password: pw, LastPort: port, SecurePairing: prevSt.SecurePairing}); err != nil {
+	st.Enabled, st.Password, st.LastPort = true, pw, port
+	if err := mobilebridge.Save(b.ConfigPath, st); err != nil {
 		// Persist failed after the listener came up. Roll back so reality matches
 		// the unchanged persisted state (and the UI's "enable failed"). A rotate on
 		// an already-running listener (wasRunning) keeps serving on the prior hash;
@@ -431,7 +439,7 @@ func (b *BridgeService) enableWithPassword(pw string) (MobileStatusResponse, err
 // best-effort and must never block daemon boot on it.
 func (b *BridgeService) RestoreOnBoot(state mobilebridge.State) error {
 	b.LAN.SetPasswordHash(mobilebridge.HashPassword(state.Password))
-	port, err := b.LAN.Start(state.LastPort)
+	port, err := b.LAN.Start(state.LastPort, state.Bind)
 	if err != nil {
 		return err
 	}

@@ -5,6 +5,7 @@ import {
 	openReviewStatesFor,
 	reviewIsRunning,
 	reviewRunDisabled,
+	reviewRunActionKind,
 	reviewSessionRunAction,
 	sessionReviewsQueryOptions,
 	type PRReviewState,
@@ -12,6 +13,7 @@ import {
 
 function session(overrides: Partial<WorkspaceSession> = {}): WorkspaceSession {
 	return {
+		host: "local",
 		workspaceId: "proj-1",
 		workspaceName: "app",
 		title: "review work",
@@ -30,7 +32,7 @@ describe("sessionReviewsQueryOptions", () => {
 	it("owns the shared reviews query key", () => {
 		expect(sessionReviewsQueryOptions(session(), true).queryKey).toEqual([
 			"session-reviews",
-			"session-1",
+			"local:session-1",
 		]);
 	});
 
@@ -104,5 +106,15 @@ describe("shared review eligibility helpers", () => {
 		expect(reviewSessionRunAction([reviewState(1, "needs_review")], false)).toBe(
 			appI18n.t("inspector.review.runLatest"),
 		);
+	});
+
+	// Telemetry reports the action a user took, and it must not depend on the
+	// translated label they happened to see.
+	it("names the offered run action as a stable enum", () => {
+		expect(reviewRunActionKind([reviewState(1, "needs_review")], true)).toBe("reviewing");
+		expect(reviewRunActionKind([reviewState(1, "running")], false)).toBe("reviewing");
+		expect(reviewRunActionKind([reviewState(1, "needs_review")], false)).toBe("run_latest");
+		expect(reviewRunActionKind([reviewState(1, "changes_requested")], false)).toBe("rerun");
+		expect(reviewRunActionKind([], false)).toBe("run");
 	});
 });

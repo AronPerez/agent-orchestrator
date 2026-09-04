@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@react-native-async-storage/async-storage", () => ({ default: { getItem: vi.fn(), setItem: vi.fn(), removeItem: vi.fn() } }));
 vi.mock("expo-secure-store", () => ({ getItemAsync: vi.fn(), setItemAsync: vi.fn(), deleteItemAsync: vi.fn() }));
+// The fork routes keystore access through ./secure-store, which imports
+// react-native's Platform — unparseable (Flow) under vitest, so mock the seam.
+vi.mock("./secure-store", () => ({ secureGetItem: vi.fn(), secureSetItem: vi.fn(), secureDeleteItem: vi.fn() }));
 vi.mock("expo/fetch", () => ({ fetch: vi.fn() }));
 
 import { fetch as expoFetch } from "expo/fetch";

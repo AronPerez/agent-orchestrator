@@ -8,9 +8,11 @@ import {
 	createBrowserViewHost,
 	isAllowedBrowserURL,
 	normalizeBrowserURL,
+	persistentPartition,
 	sanitizeBrowserTitle,
 	sanitizeBrowserURL,
 	scaleBoundsForZoom,
+	scopedProfileKey,
 } from "./browser-view-host";
 import {
 	FOCUS_TERMINAL_SHORTCUT_CHANNEL,
@@ -1596,6 +1598,94 @@ describe("agent browser runtime", () => {
 		expect(constructorOptions[3].webPreferences.partition).not.toBe(firstPartition);
 	});
 
+	// The opt-in path. Its ONLY difference from the default is on one axis:
+	// sessions of the SAME project share one on-disk jar. Everything else about
+	// the isolation model has to survive, so each of those properties is asserted
+	// here rather than assumed from the default-path test above.
+	it("shares one persistent profile across sessions of the same project", async () => {
+		const { constructorOptions, host } = setupTabHost();
+		await host.execute("sess-1", "tabs", {}, undefined, "proj-alpha");
+		await host.execute("sess-2", "tabs", {}, undefined, "proj-alpha");
+
+		const partition = constructorOptions[0].webPreferences.partition;
+		expect(partition).toBe("persist:ao-browser-proj-alpha");
+		// Different SESSIONS, same project: same jar. That is the whole feature.
+		expect(constructorOptions[1].webPreferences.partition).toBe(partition);
+
+		// And it must survive session teardown — the default path deliberately
+		// gets a fresh partition here, which is exactly what opting in changes.
+		host.destroy("0:sess-1");
+		await host.execute("sess-1", "tabs", {}, undefined, "proj-alpha");
+		expect(constructorOptions[2].webPreferences.partition).toBe(partition);
+	});
+
+	// The point of scoping to project rather than globally: one prompt-injected
+	// agent must not reach another project's logins.
+	it("keeps other projects out of a persistent profile", async () => {
+		const { constructorOptions, host } = setupTabHost();
+		await host.execute("sess-1", "tabs", {}, undefined, "proj-alpha");
+		await host.execute("sess-2", "tabs", {}, undefined, "proj-beta");
+		await host.execute("sess-3", "tabs");
+
+		const alpha = constructorOptions[0].webPreferences.partition;
+		const beta = constructorOptions[1].webPreferences.partition;
+		const optedOut = constructorOptions[2].webPreferences.partition;
+
+		expect(alpha).toBe("persist:ao-browser-proj-alpha");
+		expect(beta).toBe("persist:ao-browser-proj-beta");
+		expect(beta).not.toBe(alpha);
+		// A project that never opted in is untouched by one that did.
+		expect(optedOut).toMatch(/^ao-browser-/);
+		expect(optedOut).not.toMatch(/^persist:/);
+	});
+
+	// The human-panel entry point. `ao browser` commands scope their profile key
+	// in main.ts; browser:ensure must land on the SAME partition for the same
+	// remote session, or the agent and the user would look at two cookie jars.
+	it("scopes the persistent partition by host on ensure", async () => {
+		const { constructorOptions, invoke } = setupTabHost();
+		await invoke("browser:ensure", "s1", "proj", undefined);
+		await invoke("browser:ensure", "s2", "proj", "http://10.0.0.5:3001");
+
+		expect(constructorOptions[0].webPreferences.partition).toBe("persist:ao-browser-proj");
+		expect(constructorOptions[1].webPreferences.partition).toMatch(/^persist:ao-browser-r[0-9a-f]{40}$/);
+	});
+
+	it("shares one persistent profile across the tabs of one session", async () => {
+		const { constructorOptions, host } = setupTabHost();
+		await host.execute("sess-1", "tabs", {}, undefined, "proj-alpha");
+		await host.execute("sess-1", "tab-new", {}, undefined, "proj-alpha");
+
+		expect(constructorOptions[0].webPreferences.partition).toBe("persist:ao-browser-proj-alpha");
+		expect(constructorOptions[1].webPreferences.partition).toBe("persist:ao-browser-proj-alpha");
+	});
+
+	// A persistent profile must not become a MORE PRIVILEGED profile. Permission
+	// denial is asserted for the default path elsewhere; assert it here too,
+	// because "persistent" and "trusted" are exactly the two things a reader
+	// might conflate.
+	it("still denies every permission in a persistent profile", async () => {
+		const { host, setPermissionCheckHandler, setPermissionRequestHandler } = setupHost();
+		await host.execute("sess-1", "tabs", {}, undefined, "proj-alpha");
+
+		expect(setPermissionCheckHandler.mock.calls[0][0]()).toBe(false);
+		const callback = vi.fn();
+		setPermissionRequestHandler.mock.calls[0][0]({}, "camera", callback);
+		expect(callback).toHaveBeenCalledWith(false);
+	});
+
+	// A key that reaches the filesystem is rejected, never sanitized: rewriting
+	// two different keys into one directory would silently merge cookie jars.
+	it("falls back to an ephemeral profile for a key it will not trust", async () => {
+		for (const key of ["../escape", "a/b", ".", "..", "-leading", "", "   "]) {
+			const { constructorOptions, host } = setupTabHost();
+			await host.execute("sess-1", "tabs", {}, undefined, key);
+			const partition = constructorOptions[0].webPreferences.partition;
+			expect(partition, `key ${JSON.stringify(key)} must not persist`).toMatch(/^ao-browser-/);
+			expect(partition).not.toMatch(/^persist:/);
+		}
+	});
+
 	it("captures allowed popups as new tabs and protects the final tab", async () => {
 		const { host, views } = setupTabHost();
 		await host.execute("sess-1", "open", { url: "http://localhost:3000" });
@@ -2734,5 +2824,27 @@ describe("scaleBoundsForZoom", () => {
 		expect(scaleBoundsForZoom(rect, 1)).toBe(rect);
 		expect(scaleBoundsForZoom(rect, 0)).toBe(rect);
 		expect(scaleBoundsForZoom(rect, Number.NaN)).toBe(rect);
+	});
+});
+
+describe("scopedProfileKey", () => {
+	it("passes local and empty keys through untouched", () => {
+		expect(scopedProfileKey(undefined, "agent-orchestrator")).toBe("agent-orchestrator");
+		expect(scopedProfileKey("local", "agent-orchestrator")).toBe("agent-orchestrator");
+		expect(scopedProfileKey("http://10.0.0.5:3001", "")).toBe("");
+		expect(scopedProfileKey("http://10.0.0.5:3001", undefined)).toBeUndefined();
+	});
+
+	it("scopes a remote key deterministically per host", () => {
+		const a = scopedProfileKey("http://10.0.0.5:3001", "agent-orchestrator");
+		const b = scopedProfileKey("http://10.0.0.6:3001", "agent-orchestrator");
+		expect(a).not.toBe("agent-orchestrator");
+		expect(a).not.toBe(b); // same project id on two hosts → two cookie jars
+		expect(a).toBe(scopedProfileKey("http://10.0.0.5:3001", "agent-orchestrator"));
+	});
+
+	it("always produces a partition-safe key", () => {
+		const scoped = scopedProfileKey("http://10.0.0.5:3001", "a".repeat(64));
+		expect(scoped && persistentPartition(scoped)).toMatch(/^persist:ao-browser-r[0-9a-f]{40}$/);
 	});
 });

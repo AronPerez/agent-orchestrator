@@ -70,7 +70,7 @@ func newTestRuntime(chunkSize int) (*Runtime, *fakeRunner) {
 	fr := &fakeRunner{}
 	r := New(Options{Binary: "tmux-test", Timeout: time.Second, Shell: "/bin/sh", ChunkSize: chunkSize})
 	r.runner = fr
-	r.enterDelay = 0                           // tests must not pay the real 300ms pre-Enter pause
+	r.enterDelay = 0                           // keep the send-message tests instant; delay is covered explicitly below
 	r.reapSessions = (&recordingReaper{}).reap // never signal real processes from unit tests
 	return r, fr
 }
@@ -78,6 +78,19 @@ func newTestRuntime(chunkSize int) (*Runtime, *fakeRunner) {
 // countCalls returns how many of fr's recorded calls invoked the given tmux
 // subcommand (args[0]), e.g. "display-message" for pane cwd verification
 // probes.
+// countPaneCwdProbes counts only the pane-cwd verification probes. panePIDArgs
+// is a display-message call too, so Destroy resolving the pane's process group
+// during teardown would otherwise inflate a plain display-message count.
+func countPaneCwdProbes(fr *fakeRunner) int {
+	n := 0
+	for _, c := range fr.calls {
+		if len(c.args) > 0 && c.args[len(c.args)-1] == "#{pane_current_path}" {
+			n++
+		}
+	}
+	return n
+}
+
 func countCalls(fr *fakeRunner, subcommand string) int {
 	n := 0
 	for _, c := range fr.calls {
@@ -357,10 +370,11 @@ func TestCreateIssuesNewSessionAndStatusOff(t *testing.T) {
 	if h.ID != "sess-1" {
 		t.Fatalf("handle ID = %q, want sess-1", h.ID)
 	}
-	// Expect 6 calls: new-session, display-message cwd verification,
-	// set-option status, set-option mouse, set-option window-size, has-session.
-	if len(fr.calls) != 6 {
-		t.Fatalf("calls = %d, want 6", len(fr.calls))
+	// Expect 8 calls: new-session, display-message cwd verification, set-option
+	// status, set-option mouse, set-option window-size, set-option
+	// destroy-unattached, set-option history-limit, has-session.
+	if len(fr.calls) != 8 {
+		t.Fatalf("calls = %d, want 8", len(fr.calls))
 	}
 
 	// Call 0: new-session
@@ -401,9 +415,53 @@ func TestCreateIssuesNewSessionAndStatusOff(t *testing.T) {
 		t.Fatalf("call[4] = %#v, want %#v", got, want)
 	}
 
-	// Call 5: has-session (IsAlive, uses exact-match target =sess-1).
-	if got, want := fr.calls[5].args, hasSessionArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	// Call 5: set-option destroy-unattached off — pinned so a host tmux config
+	// cannot destroy the session on the last client detach.
+	if got, want := fr.calls[5].args, setDestroyUnattachedOffArgs("sess-1"); !reflect.DeepEqual(got, want) {
 		t.Fatalf("call[5] = %#v, want %#v", got, want)
+	}
+
+	// Call 6: set-option history-limit — pinned so scrollback does not depend on
+	// the host's tmux config.
+	if got, want := fr.calls[6].args, setHistoryLimitArgs("sess-1"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("call[6] = %#v, want %#v", got, want)
+	}
+
+	// Call 7: has-session (IsAlive, uses exact-match target =sess-1).
+	if got, want := fr.calls[7].args, hasSessionArgs("sess-1"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("call[7] = %#v, want %#v", got, want)
+	}
+}
+
+// TestSurvivalOptionArgs pins the argv for the two options AO must not inherit
+// from the host's tmux config.
+func TestSurvivalOptionArgs(t *testing.T) {
+	if got, want := setDestroyUnattachedOffArgs("sess-1"),
+		[]string{"set-option", "-t", "sess-1", "destroy-unattached", "off"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("setDestroyUnattachedOffArgs = %#v, want %#v", got, want)
+	}
+	if got, want := setHistoryLimitArgs("sess-1"),
+		[]string{"set-option", "-t", "sess-1", "history-limit", "2000"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("setHistoryLimitArgs = %#v, want %#v", got, want)
+	}
+}
+
+// TestRestartDoesNotResetSessionOptions guards the adoption contract: Restart
+// respawns the pane and must not re-issue set-option, so a session AO re-adopts
+// after a daemon restart is never reconfigured underneath a live agent.
+func TestRestartDoesNotResetSessionOptions(t *testing.T) {
+	r, fr := newTestRuntime(0)
+	if _, err := r.Restart(context.Background(), ports.RuntimeHandle{ID: "sess-1"}, ports.RuntimeConfig{
+		SessionID:     "sess-1",
+		WorkspacePath: "/tmp/ws",
+		Argv:          []string{"echo", "hi"},
+	}); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	for i, c := range fr.calls {
+		if len(c.args) > 0 && c.args[0] == "set-option" {
+			t.Fatalf("Restart issued set-option at call[%d]: %#v", i, c.args)
+		}
 	}
 }
 
@@ -514,7 +572,7 @@ func TestCreateDestroysAndReturnsErrorWhenPaneCWDDoesNotMatch(t *testing.T) {
 	if !errors.Is(err, ports.ErrRuntimeWorkspaceCwdMismatch) {
 		t.Fatalf("Create err = %v, want wrapped ports.ErrRuntimeWorkspaceCwdMismatch", err)
 	}
-	if got := countCalls(fr, "display-message"); got != paneCwdVerifyAttempts {
+	if got := countPaneCwdProbes(fr); got != paneCwdVerifyAttempts {
 		t.Fatalf("pane cwd verification attempts = %d, want %d", got, paneCwdVerifyAttempts)
 	}
 	if countCalls(fr, "kill-session") == 0 {
@@ -569,7 +627,7 @@ func TestVerifyPaneWorkingDirectoryRetriesUntilMatch(t *testing.T) {
 	if h.ID != "sess-1" {
 		t.Fatalf("handle ID = %q, want sess-1", h.ID)
 	}
-	if got := countCalls(fr, "display-message"); got != 2 {
+	if got := countPaneCwdProbes(fr); got != 2 {
 		t.Fatalf("pane cwd verification attempts = %d, want 2 (stale then matching)", got)
 	}
 }
@@ -592,7 +650,7 @@ func TestVerifyPaneWorkingDirectoryHonorsCancellation(t *testing.T) {
 	// verification call happens even though ctx is already canceled; the
 	// second attempt's select must observe ctx.Done() rather than waiting out
 	// paneCwdVerifyRetryDelay.
-	if got := countCalls(fr, "display-message"); got != 1 {
+	if got := countPaneCwdProbes(fr); got != 1 {
 		t.Fatalf("pane cwd verification attempts = %d, want 1 (canceled before the first retry)", got)
 	}
 }
@@ -931,22 +989,24 @@ func TestIsAliveReportsTransientLegacyConnectionAsProbeInconclusive(t *testing.T
 
 func TestDestroyIsIdempotentWhenSessionMissing(t *testing.T) {
 	r, fr := newTestRuntime(0)
-	// First output feeds list-panes (which also errors here → no sids); the
-	// missing-session marker must land on the kill-session call.
-	fr.outputs = [][]byte{nil, []byte("can't find session: sess-1")}
+	// Destroy resolves the pane pid (display-message), lists pane sessions
+	// (list-panes), then kill-session. All fail here; the missing-session marker
+	// on the kill-session call makes Destroy succeed anyway (idempotent).
+	fr.outputs = [][]byte{nil, nil, []byte("can't find session: sess-1")}
 	fr.err = &exec.ExitError{}
 
 	if err := r.Destroy(context.Background(), ports.RuntimeHandle{ID: "sess-1"}); err != nil {
 		t.Fatalf("Destroy: %v", err)
 	}
-	if len(fr.calls) != 2 || fr.calls[0].args[0] != "list-panes" || fr.calls[1].args[0] != "kill-session" {
-		t.Fatalf("calls = %#v, want list-panes then kill-session", fr.calls)
+	if len(fr.calls) != 3 || fr.calls[0].args[0] != "display-message" || fr.calls[1].args[0] != "list-panes" || fr.calls[2].args[0] != "kill-session" {
+		t.Fatalf("calls = %#v, want display-message, list-panes, then kill-session", fr.calls)
 	}
 }
 
 func TestDestroyIsIdempotentWhenNoServer(t *testing.T) {
 	r, fr := newTestRuntime(0)
-	fr.outputs = [][]byte{nil, []byte("no server running on /tmp/tmux-1000/default")}
+	// The dead-server marker must land on the kill-session call (call 3).
+	fr.outputs = [][]byte{nil, nil, []byte("no server running on /tmp/tmux-1000/default")}
 	fr.err = &exec.ExitError{}
 
 	if err := r.Destroy(context.Background(), ports.RuntimeHandle{ID: "sess-1"}); err != nil {
@@ -956,7 +1016,9 @@ func TestDestroyIsIdempotentWhenNoServer(t *testing.T) {
 
 func TestDestroyReportsUnexpectedFailures(t *testing.T) {
 	r, fr := newTestRuntime(0)
-	fr.outputs = [][]byte{nil, []byte("permission denied")}
+	// kill-session fails with a non-missing error: Destroy must surface it, not
+	// swallow it. The marker lands on the kill-session call (call 3).
+	fr.outputs = [][]byte{nil, nil, []byte("permission denied")}
 	fr.err = &exec.ExitError{}
 
 	if err := r.Destroy(context.Background(), ports.RuntimeHandle{ID: "sess-1"}); err == nil {
@@ -966,18 +1028,24 @@ func TestDestroyReportsUnexpectedFailures(t *testing.T) {
 
 func TestDestroyArgs(t *testing.T) {
 	r, fr := newTestRuntime(0)
-	fr.outputs = [][]byte{nil, nil}
+	// Non-numeric pane-pid output makes resolvePaneGroup give up (no group to
+	// confirm), but Destroy still issues display-message, list-panes, and
+	// kill-session in order and returns nil.
+	fr.outputs = [][]byte{nil, nil, nil}
 
 	if err := r.Destroy(context.Background(), ports.RuntimeHandle{ID: "sess-1"}); err != nil {
 		t.Fatalf("Destroy: %v", err)
 	}
-	// list-panes discovers pane sessions; kill-session (exact-match target
-	// =<id>) tears the session down.
-	if got, want := fr.calls[0].args, listPanePIDsArgs("sess-1"); !reflect.DeepEqual(got, want) {
-		t.Fatalf("list-panes args = %#v, want %#v", got, want)
+	if got, want := fr.calls[0].args, panePIDArgs("sess-1"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("destroy call[0] = %#v, want %#v (pane-pid resolution first)", got, want)
 	}
-	if got, want := fr.calls[1].args, killSessionArgs("sess-1"); !reflect.DeepEqual(got, want) {
-		t.Fatalf("destroy args = %#v, want %#v", got, want)
+	// list-panes discovers pane sessions for reaping.
+	if got, want := fr.calls[1].args, listPanePIDsArgs("sess-1"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("destroy call[1] = %#v, want %#v", got, want)
+	}
+	// killSessionArgs uses exact-match target =<id>.
+	if got, want := fr.calls[2].args, killSessionArgs("sess-1"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("destroy call[2] = %#v, want %#v", got, want)
 	}
 }
 
@@ -1077,9 +1145,10 @@ func TestIsSupervisedProcessAliveRejectsInvalidPanePID(t *testing.T) {
 // dev servers do not outlive the session.
 func TestDestroyReapsDiscoveredPaneSessions(t *testing.T) {
 	r, fr := newTestRuntime(0)
-	// list-panes lists two pane pids (one per line, plus noise the parser must
-	// drop); kill-session then succeeds.
-	fr.outputs = [][]byte{[]byte("4242\n4243\n\n1\n"), nil}
+	// Destroy calls display-message (call 0), then list-panes (call 1) which
+	// lists two pane pids (one per line, plus noise the parser must drop), then
+	// kill-session (call 2).
+	fr.outputs = [][]byte{nil, []byte("4242\n4243\n\n1\n"), nil}
 	reaper := &recordingReaper{}
 	r.reapSessions = reaper.reap
 
@@ -1211,6 +1280,18 @@ func TestSendMessageUsesLiteralFlag(t *testing.T) {
 	// First call must use -l so "Enter" is sent literally, not as a key binding.
 	if fr.calls[0].args[3] != "-l" {
 		t.Fatalf("send-keys args[3] = %q, want -l", fr.calls[0].args[3])
+	}
+}
+
+func TestNewEnterDelayDefaultsAndDisable(t *testing.T) {
+	if got := New(Options{}).enterDelay; got != defaultEnterDelay {
+		t.Fatalf("default enterDelay = %v, want %v", got, defaultEnterDelay)
+	}
+	if got := New(Options{EnterDelay: -1}).enterDelay; got != 0 {
+		t.Fatalf("negative EnterDelay = %v, want 0 (disabled)", got)
+	}
+	if got := New(Options{EnterDelay: 7 * time.Millisecond}).enterDelay; got != 7*time.Millisecond {
+		t.Fatalf("explicit EnterDelay = %v, want 7ms", got)
 	}
 }
 

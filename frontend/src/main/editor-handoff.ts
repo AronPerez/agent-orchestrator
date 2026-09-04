@@ -3,6 +3,7 @@ import path from "node:path";
 import {
 	isEditorId,
 	type EditorHandoffState,
+	type EditorHandoffStateInput,
 	type EditorId,
 	type OpenSessionTargetInput,
 	type OpenSessionTargetResult,
@@ -15,6 +16,12 @@ type Platform = NodeJS.Platform;
 type ResolvedCommand = {
 	command: string;
 	argsBeforeWorkspace?: string[];
+};
+
+/** What main knows about a saved remote host; null means the local daemon. */
+export type RemoteHostInfo = {
+	label: string;
+	sshDestination?: string;
 };
 
 type EditorCandidate = {
@@ -51,7 +58,8 @@ export type EditorHandoffDeps = {
 	platform: Platform;
 	env: NodeJS.ProcessEnv;
 	homeDir: string;
-	resolveWorkspace: (sessionId: string) => Promise<string>;
+	resolveWorkspace: (host: string, sessionId: string) => Promise<string>;
+	remoteHost: (host: string) => Promise<RemoteHostInfo | null>;
 	readPreference: () => Promise<EditorId>;
 	writePreference: (editorId: EditorId) => Promise<void>;
 	launch: (command: string, args: readonly string[], cwd: string) => Promise<void>;
@@ -62,7 +70,7 @@ export type EditorHandoffDeps = {
 };
 
 export type EditorHandoff = {
-	getState(sessionId: string): Promise<EditorHandoffState>;
+	getState(input: EditorHandoffStateInput): Promise<EditorHandoffState>;
 	open(input: OpenSessionTargetInput): Promise<OpenSessionTargetResult>;
 };
 
@@ -160,6 +168,15 @@ function resolveTerminal(
 	return undefined;
 }
 
+// VS Code-family CLIs accept --folder-uri with a vscode-remote ssh URI; the
+// flag needs the real CLI binary, so a Dock-only install (resolved through
+// `open -a`, i.e. argsBeforeWorkspace present) does not qualify.
+const REMOTE_CAPABLE_EDITORS = new Set<EditorId>(["vscode", "vscode-insiders", "vscodium", "cursor", "windsurf"]);
+
+function supportsRemoteOpen(id: OpenTargetId, command: ResolvedCommand): boolean {
+	return REMOTE_CAPABLE_EDITORS.has(id as EditorId) && !command.argsBeforeWorkspace;
+}
+
 export function createEditorHandoff(deps: EditorHandoffDeps): EditorHandoff {
 	const isExecutable = deps.isExecutable ?? ((candidatePath) => defaultIsExecutable(candidatePath, deps.platform));
 	const isDirectory = deps.isDirectory ?? defaultIsDirectory;
@@ -180,10 +197,35 @@ export function createEditorHandoff(deps: EditorHandoffDeps): EditorHandoff {
 		error instanceof Error && error.message.trim() ? error.message : "Session workspace is not available.";
 
 	return {
-		async getState(sessionId) {
+		async getState({ host, sessionId }) {
+			void sessionId;
 			const preferredEditorId = await deps.readPreference();
+			const remote = await deps.remoteHost(host);
+			if (remote) {
+				const remoteTargets = editors
+					.filter(({ target, command }) => supportsRemoteOpen(target.id, command))
+					.map(({ target }) => target);
+				const remoteState = { hostLabel: remote.label, sshConfigured: Boolean(remote.sshDestination) };
+				if (!remote.sshDestination) {
+					// Not an error: nothing is broken, one setting is absent.
+					return { targets: remoteTargets, preferredEditorId, workspaceAvailable: false, remote: remoteState };
+				}
+				try {
+					await deps.resolveWorkspace(host, sessionId);
+					return { targets: remoteTargets, preferredEditorId, workspaceAvailable: true, remote: remoteState };
+				} catch (error) {
+					// The host itself says the workspace is gone — that IS an error.
+					return {
+						targets: remoteTargets,
+						preferredEditorId,
+						workspaceAvailable: false,
+						unavailableReason: workspaceUnavailable(error),
+						remote: remoteState,
+					};
+				}
+			}
 			try {
-				await deps.resolveWorkspace(sessionId);
+				await deps.resolveWorkspace(host, sessionId);
 				return { targets, preferredEditorId, workspaceAvailable: true };
 			} catch (error) {
 				return {
@@ -198,17 +240,37 @@ export function createEditorHandoff(deps: EditorHandoffDeps): EditorHandoff {
 		async open(input) {
 			const sessionId = input.sessionId.trim();
 			if (!sessionId) throw new Error("Session is required.");
+			const remote = await deps.remoteHost(input.host);
 			const preferredEditorId = await deps.readPreference();
 			const targetId = input.targetId ?? preferredEditorId;
 			if (input.targetId && input.targetId !== "file-manager" && input.targetId !== "terminal" && !isEditorId(input.targetId)) {
 				throw new Error("That open target is not supported.");
+			}
+			if (remote) {
+				if (!remote.sshDestination) {
+					throw new Error(`Add an SSH destination for ${remote.label} to open its workspaces here.`);
+				}
+				const capable = editors.find(({ target: candidate, command }) =>
+					candidate.id === targetId && supportsRemoteOpen(candidate.id, command));
+				if (!capable) throw new Error(`That open target is not available on ${remote.label}.`);
+				const workspacePath = await deps.resolveWorkspace(input.host, sessionId);
+				const folderUri = `vscode-remote://ssh-remote+${remote.sshDestination}${workspacePath}`;
+				try {
+					// cwd is home: the workspace path exists on the other machine.
+					await deps.launch(capable.command.command, ["--folder-uri", folderUri], deps.homeDir);
+				} catch (error) {
+					deps.logError?.(`failed to open remote session target ${capable.target.id}`, error);
+					throw new Error(`Could not open ${capable.target.name}. Check that it is installed and try again.`);
+				}
+				await deps.writePreference(capable.target.id as EditorId);
+				return capable.target;
 			}
 			const target = resolveTarget(targetId);
 			if (!target) {
 				if (isEditorId(targetId)) throw new Error("That editor is not installed. Choose another option.");
 				throw new Error("That open target is not available.");
 			}
-			const workspacePath = await deps.resolveWorkspace(sessionId);
+			const workspacePath = await deps.resolveWorkspace(input.host, sessionId);
 			try {
 				if (target.kind === "file_manager") {
 					await deps.openDirectory(workspacePath);

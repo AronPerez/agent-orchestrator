@@ -20,6 +20,7 @@ import {
 	settingsDialogHeaderClass,
 } from "./ui/dialog";
 import { type GlobalSettingsSection, type SettingsModal, useUiStore } from "../stores/ui-store";
+import { hostActionSuffix } from "../lib/host-disclosure";
 import { cn } from "../lib/utils";
 import { Button } from "./ui/button";
 
@@ -69,6 +70,7 @@ export function SettingsDialog() {
 	];
 
 	const isProjectSettings = displaySettings?.scope === "project";
+	const projectHostSuffix = isProjectSettings ? hostActionSuffix(t, displaySettings.project.host) : "";
 	const [activeSection, setActiveSection] = useState<GlobalSettingsSection>("general");
 	const [activeProjectSection, setActiveProjectSection] = useState<ProjectSettingsSection>("general");
 	const [projectSaveState, setProjectSaveState] = useState<ProjectSettingsSaveState>(initialProjectSaveState);
@@ -146,21 +148,21 @@ export function SettingsDialog() {
 									}
 								>
 									{projectSaveState.showSaving ? (
-										t("settings.project.saving")
+										<>{t("settings.project.saving")}{projectHostSuffix}</>
 									) : projectSaveState.saved ? (
-										t("settings.project.saved")
+										<>{t("settings.project.saved")}{projectHostSuffix}</>
 									) : projectSaveState.validationError || projectSaveState.mutationError ? (
 										<>
 											<TriangleAlert className="size-4" aria-hidden="true" />
-											{t("settings.project.saveFailed")}
+											{t("settings.project.saveFailed")}{projectHostSuffix}
 										</>
 									) : (
-										t("settings.project.saveChanges")
+										<>{t("settings.project.saveChanges")}{projectHostSuffix}</>
 									)}
 								</Button>
 								<span className="sr-only" role="status" aria-live="polite">
 									{projectSaveState.validationError ?? projectSaveState.mutationError ??
-										(projectSaveState.saved ? t("settings.project.saved") : "")}
+										(projectSaveState.saved ? `${t("settings.project.saved")}${projectHostSuffix}` : "")}
 								</span>
 							</div>
 						)}
@@ -184,7 +186,7 @@ export function SettingsDialog() {
 						<div className={cn(settingsDialogBodyClass, "flex-1")}>
 							{displaySettings?.scope === "project" ? (
 								<ProjectSettingsForm
-									projectId={displaySettings.projectId}
+									project={displaySettings.project}
 									section={activeProjectSection}
 									onSaveState={setProjectSaveState}
 								/>

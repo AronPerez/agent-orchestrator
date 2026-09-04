@@ -56,6 +56,11 @@ type ProjectConfig struct {
 	// tracker is not commented on or transitioned.
 	TrackerIntake TrackerIntakeConfig `json:"trackerIntake,omitempty"`
 
+	// OrchestratorPrompt, when set, replaces the built-in orchestrator standing
+	// instructions for this project's orchestrator sessions. The confidentiality
+	// guard is still appended. Empty = built-in default. Used literally.
+	OrchestratorPrompt string `json:"orchestratorPrompt,omitempty"`
+
 	// ContainerReap controls whether AO reaps a worker session's ao.session-
 	// labeled Docker containers on terminal state / kill. Enabled by default;
 	// set Disabled to opt a project out entirely. Per-container sparing uses
@@ -63,6 +68,25 @@ type ProjectConfig struct {
 	// opt-out travels with the container at `docker run` time rather than
 	// drifting out of sync with a project-config list.
 	ContainerReap ContainerReapConfig `json:"containerReap,omitempty"`
+
+	// BrowserPersistentProfile makes every worker session on this project share
+	// ONE on-disk browser profile instead of the default per-session memory-only
+	// one, so a login in the AO Browser panel survives session teardown and app
+	// restart.
+	//
+	// Opt-in, and default off, because it is a real security trade-off rather
+	// than a convenience toggle: one shared cookie jar means a prompt-injected
+	// agent in ANY session on this project can spend every login in it, and the
+	// panel classifies every byte it returns as untrusted injection-bearing
+	// content. Blast radius is one project, it is off unless asked for, and the
+	// person who asked was told this. Never default it on, and never widen the
+	// scope beyond a single project.
+	BrowserPersistentProfile bool `json:"browserPersistentProfile,omitempty"`
+
+	// SessionInterface pins the interface new sessions in this project are born
+	// with. Empty means the project defers to the daemon-owned default; an
+	// explicit spawn mode still wins over both (see resolveSessionMode).
+	SessionInterface SessionMode `json:"sessionInterface,omitempty" enum:"chat,tui"`
 
 	// AutoReview controls whether new worker sessions spawned for this project
 	// have automatic PR review enabled by default. The default (false) leaves
@@ -130,6 +154,10 @@ const (
 	DefaultBranchName = "main"
 )
 
+// maxOrchestratorPromptBytes bounds the per-project orchestrator prompt so it
+// stays well within process-arg limits when injected into an agent launch.
+const maxOrchestratorPromptBytes = 64 * 1024
+
 // DefaultProjectConfig returns the config a project has when it sets nothing:
 // automatic per-repository branch resolution. Every other field defaults to
 // its zero value (no env/symlinks/post-create, agent + role defaults).
@@ -184,6 +212,11 @@ func (c ProjectConfig) Validate() error {
 			return fmt.Errorf("%s.%w", role, err)
 		}
 	}
+	// ParseSessionMode already draws the line in the right place: empty is "no
+	// override" and anything else unrecognized is refused.
+	if _, err := ParseSessionMode(string(c.SessionInterface)); err != nil {
+		return fmt.Errorf("sessionInterface: %w", err)
+	}
 	for _, s := range c.Symlinks {
 		if err := validateRepoRelative(s); err != nil {
 			return fmt.Errorf("symlink %q: %w", s, err)
@@ -202,6 +235,9 @@ func (c ProjectConfig) Validate() error {
 	}
 	if err := c.TrackerIntake.Validate(); err != nil {
 		return err
+	}
+	if n := len(c.OrchestratorPrompt); n > maxOrchestratorPromptBytes {
+		return fmt.Errorf("orchestratorPrompt: %d bytes exceeds max %d", n, maxOrchestratorPromptBytes)
 	}
 	return nil
 }

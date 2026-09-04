@@ -167,6 +167,15 @@ type sessionLifecycle interface {
 	// SetReviewerTerminator late-binds worker lifecycle teardown to the review
 	// service, which is built alongside the controller-facing service below.
 	SetReviewerTerminator(terminator sessionmanager.ReviewerTerminator)
+	// SetStaleExitClearer late-binds lifecycle's stale-exit revival into
+	// delivery refusal, so a session a nested agent falsely marked exited heals
+	// on the user's next send (#114 effect 4).
+	SetStaleExitClearer(clearer sessionmanager.StaleExitClearer)
+	// RuntimeExactInspector exposes the runtime's strict supervised-liveness
+	// probe so boot can hand it to lifecycle without knowing the runtime's
+	// concrete type. Not every runtime implements it; ok=false leaves
+	// hook-reported exits unprobed, exactly as before #114.
+	RuntimeExactInspector() (ports.ExactSupervisedProcessInspector, bool)
 }
 
 // sessionLifecycleMessenger adapts sessionLifecycle to ports.AgentMessenger so
@@ -248,6 +257,10 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 		// no_signal only makes sense for harnesses with complete lifecycle signal
 		// coverage; partial callbacks cannot prove that silence is abnormal.
 		SignalCapable: activitydispatch.FullySupportsHarness,
+		// The reducer already receives every runtime probe; this is the read
+		// side, so `ao session ls` stops reporting idle for a session whose
+		// runtime AO cannot reach.
+		RuntimeUnreachable: lcm.RuntimeUnreachable,
 	})
 	// Triggering a review spawns a reviewer over the worker's worktree, resolved
 	// from the reviewer registry (distinct from the worker agent set). The

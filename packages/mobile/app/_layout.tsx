@@ -75,7 +75,8 @@ function Shell() {
 			{/* Light content on a dark app, dark content on a light one. */}
 			<StatusBar style={scheme === "dark" ? "light" : "dark"} />
 			<TelemetryManager />
-			<PushManager />
+			{/* expo-notifications response APIs are not implemented on web. */}
+			{Platform.OS !== "web" ? <PushManager /> : null}
 			<UpdatesManager />
 			<StoreUpdateManager />
 			<OnboardingGate />

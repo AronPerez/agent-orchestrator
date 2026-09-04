@@ -36,6 +36,7 @@ const summary = (overrides: Partial<SessionPRSummary> = {}): SessionPRSummary =>
 });
 
 const session = (prs: WorkspaceSession["prs"]): WorkspaceSession => ({
+	host: "local",
 	id: "sess-1",
 	workspaceId: "ws-1",
 	workspaceName: "repo",
@@ -49,6 +50,7 @@ const session = (prs: WorkspaceSession["prs"]): WorkspaceSession => ({
 
 function sessionWith(overrides: Partial<WorkspaceSession> = {}): WorkspaceSession {
 	return {
+		host: "local",
 		id: "sess-1",
 		workspaceId: "ws-1",
 		workspaceName: "my-app",

@@ -101,6 +101,12 @@ function contentSecurityPolicy(mode: "build" | "serve"): string {
 	].join("; ");
 }
 
+// The daemon-served web build (VITE_AO_WEB=1) gets its CSP as a response header
+// from backend/internal/httpd/webui instead, because the one source that cannot
+// be known at build time — the terminal mux WebSocket origin — is whichever
+// address the user reached the daemon by, loopback or LAN.
+const isWebBuild = process.env.VITE_AO_WEB === "1";
+
 const injectCspMeta: Plugin = {
 	name: "inject-csp-meta",
 	transformIndexHtml(_html, ctx) {
@@ -190,7 +196,7 @@ export default defineConfig({
 		productUiReactBoundary,
 		react(),
 		tailwindcss(),
-		injectCspMeta,
+		...(isWebBuild ? [] : [injectCspMeta]),
 	],
 	test: {
 		environment: "jsdom",

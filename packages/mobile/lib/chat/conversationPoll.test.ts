@@ -3,8 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("@react-native-async-storage/async-storage", () => ({
 	default: { getItem: vi.fn(), setItem: vi.fn(), removeItem: vi.fn() },
 }));
-vi.mock("expo-secure-store", () => ({
-	getItemAsync: vi.fn(), setItemAsync: vi.fn(), deleteItemAsync: vi.fn(),
+vi.mock("../secure-store", () => ({
+	secureGetItem: vi.fn(), secureSetItem: vi.fn(), secureDeleteItem: vi.fn(),
 }));
 
 import { DEFAULT_CONFIG, type ServerConfig } from "../config";

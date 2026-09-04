@@ -65,7 +65,7 @@ func TestSwitchAgentRouteUsesOrdinaryTimeoutAndReturnsAccepted(t *testing.T) {
 	)
 
 	genericResponse := httptest.NewRecorder()
-	router.ServeHTTP(genericResponse, httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil))
+	router.ServeHTTP(genericResponse, httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/v1/sessions", nil))
 	if genericResponse.Code != http.StatusOK {
 		t.Fatalf("GET sessions status = %d, want 200", genericResponse.Code)
 	}
@@ -73,7 +73,7 @@ func TestSwitchAgentRouteUsesOrdinaryTimeoutAndReturnsAccepted(t *testing.T) {
 
 	switchRequest := httptest.NewRequest(
 		http.MethodPost,
-		"/api/v1/sessions/ao-1/switch-agent",
+		"http://127.0.0.1/api/v1/sessions/ao-1/switch-agent",
 		bytes.NewBufferString(`{"targetHarness":"codex"}`),
 	)
 	switchRequest.Header.Set("Content-Type", "application/json")

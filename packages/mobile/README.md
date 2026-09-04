@@ -58,6 +58,8 @@ This package is **not** part of an npm workspace — install from inside it:
 ```bash
 cd packages/mobile
 npm install       # .npmrc sets legacy-peer-deps; postinstall runs patch-package
+npm start          # then press i (iOS), a (Android), w (web), or scan the QR in Expo Go
+npm run web        # real terminal in a desktop browser (http://localhost:8081)
 ```
 
 Two rules worth knowing before you fight an install:
@@ -66,6 +68,24 @@ Two rules worth knowing before you fight an install:
   and the app crashes on launch. Plain `npm install` in this directory is correct.
 - `metro.config.js` pins `react` and `react-native` to this package's copies. Don't remove
   that — two React instances kill the app at startup with _"main has not been registered"_.
+
+## Web
+
+`npm run web` serves the same app to a desktop browser via react-native-web.
+The session screen renders a real xterm.js terminal (`lib/WebTerminal.web.tsx`,
+a port of the desktop renderer's terminal) against the daemon's `/mux` socket -
+keyboard, paste, copy-on-select, wheel scroll (SGR reports into the pane),
+zoom, and Restore all work.
+
+- **Browser on the same machine as the daemon:** set Host `localhost`, API
+  Port `3001` in Settings. Zero daemon config - the CORS guard allows
+  loopback origins.
+- **Browser on a different machine:** open the Connect Mobile listener directly
+  — `http://<machine>:3011` — and log in with the connection password. The daemon
+  serves its own web UI there, same-origin with the API, so no allowlist entry and
+  no bridge is involved. Only a UI you host _elsewhere_ (the Expo web build on
+  `:8081`, a Vite dev server) still needs `AO_ALLOWED_ORIGINS=http://<web-host>:8081`
+  on the daemon.
 
 ## Step 1 — Turn on Connect Mobile on the desktop
 
@@ -399,7 +419,7 @@ lib/
   pairing.ts         pairing-QR payload parser
   store.tsx          app state + connection polling
   theme.ts, ui.tsx   design primitives
-scripts/             ao-phone-proxy.js — superseded by Connect Mobile, kept for reference
+scripts/             icon generation and preview helpers
 ```
 
 ## Verify

@@ -55,7 +55,7 @@ async function setupSwitchAgentDialogTest(page: Page): Promise<{
 		await route.fulfill({ json: { status: "ok" } });
 	});
 
-	await page.goto(`/#/projects/${projectId}/sessions/switch-worker`);
+	await page.goto("/#/host/local/session/switch-worker");
 	const primaryTerminalTab = page.locator('[data-terminal-role="primary"]');
 	const primaryTabBox = await primaryTerminalTab.boundingBox();
 	const terminalRegionBox = await page.getByTestId("session-terminal-region").boundingBox();

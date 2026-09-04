@@ -133,7 +133,7 @@ func (m *Manager) executeChatAgentSwitch(
 	if err := m.chat.PreflightChat(
 		ctx,
 		cfg.TargetHarness,
-		effectiveAgentConfig(rec.Kind, project.Config).Permissions,
+		effectiveAgentConfig(cfg.TargetHarness, rec.Kind, project.Config).Permissions,
 	); err != nil {
 		return result, fmt.Errorf("switch Chat agent %s: target preflight: %w", id, err)
 	}
@@ -147,11 +147,7 @@ func (m *Manager) executeChatAgentSwitch(
 		return result, fmt.Errorf("switch Chat agent %s: system prompt: %w", id, err)
 	}
 	systemPrompt = appendAgentContinuationProtocol(systemPrompt)
-	agentConfig := effectiveAgentConfig(rec.Kind, project.Config)
-	if roleOverride(rec.Kind, project.Config).Harness != cfg.TargetHarness {
-		agentConfig.Model = ""
-		agentConfig.Mode = ""
-	}
+	agentConfig := effectiveAgentConfig(cfg.TargetHarness, rec.Kind, project.Config)
 	if model := strings.TrimSpace(cfg.Model); model != "" {
 		agentConfig.Model = model
 	}
@@ -534,7 +530,7 @@ func (m *Manager) rollbackStoppedChatAgentSwitchSource(
 	if err != nil {
 		return err
 	}
-	agentConfig := effectiveAgentConfig(rec.Kind, project.Config)
+	agentConfig := effectiveAgentConfig(rec.Harness, rec.Kind, project.Config)
 	env := m.runtimeEnv(rec.ID, rec.ProjectID, rec.IssueID, project.Config.Env)
 	m.augmentAgentRuntimeEnv(sourceAgent, env)
 	if err := m.prepareWorkspace(

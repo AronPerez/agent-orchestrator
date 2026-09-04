@@ -24,6 +24,7 @@ import {
 	type SendTarget,
 } from "./sendRoute";
 import { useApp } from "../store";
+import { WebTerminal, type WebTerminalHandle } from "../WebTerminal";
 import { useVoiceInput } from "../voice/useVoiceInput";
 import { useTheme, useThemedStyles, useThemeState } from "../ThemeProvider";
 import { closeShellTerminal } from "../chat/api";
@@ -36,6 +37,12 @@ import { terminalInterfaceFailureRecovery } from "./terminalInterfaceRecovery";
 import { adjustTerminalViewport } from "./terminalViewport";
 
 const FONT_SIZE = 12;
+
+// Platform seam: on web the native WebView can't run (react-native-webview
+// resolves to a stub), so the screen swaps in the DOM terminal
+// (lib/WebTerminal.web.tsx) and an <iframe> preview. Platform.OS is constant
+// for the app's lifetime, so branching hooks/refs/JSX on it is safe.
+const isWeb = Platform.OS === "web";
 
 // Injected into the xterm WebView after load. xterm has its own touch handlers
 // that scroll by discrete lines (the janky "1 line per swipe"). We intercept in
@@ -91,16 +98,12 @@ const TERMINAL_ENHANCE_JS = `
 
   // ---- Zoom & pan -----------------------------------------------------------
   // The daemon may hold the grid wider than the phone (a co-viewing desktop
-  // drives the size). Start at 1:1 so a desktop-sized grid remains readable on
-  // the phone and is locally cropped instead of becoming a tiny overview. Pinch
-  // and the native +/- controls zoom between fit-to-width and 2x; while zoomed,
-  // one finger pans the viewport (vertical overshoot spills into scrollback) and
-  // double-tap toggles overview <-> 1:1.
-  // While zoomed we auto-pan to keep the cursor framed, so the prompt/output
-  // stays in view without chasing it by hand.
+  // drives the size). The resting view keeps the fork's readability floor instead
+  // of shrinking to a tiny overview. Pinch and the native +/- controls zoom from
+  // fit-to-width through 2x; one finger pans overflow and double-tap toggles the
+  // readable resting view with 1:1.
   function term() { return window.terminal; }
-  var Z = { s: 1, min: 1, max: 2, tx: 0, ty: 0,
-            zoomed: false, followFit: false, lastPan: 0 };
+  var Z = { s: 1, min: 1, max: 2, tx: 0, ty: 0, zoomed: false, lastPan: 0 };
   function box() {
     var root = document.querySelector('.xterm');
     var screen = document.querySelector('.xterm-screen');
@@ -120,20 +123,33 @@ const TERMINAL_ENHANCE_JS = `
     b.root.style.transformOrigin = 'top left';
     b.root.style.transform = 'translate(' + Z.tx + 'px,' + Z.ty + 'px) scale(' + Z.s + ')';
   }
-  // Fit-to-width baseline, re-run on grid/container changes. followFit records
-  // an explicit overview choice; otherwise authoritative grid resizes preserve
-  // the default/user-selected actual-size crop and only re-clamp its pan.
+  // Readability floor for the RESTING view. At pure fit-to-width the on-screen
+  // text size is contW/cols — it does not depend on the xterm font size (a bigger
+  // font just shrinks harder), so a wide daemon grid rendered whole gives ~4px
+  // text and the font buttons can't fix it. So rest no smaller than MIN_TEXT_PX
+  // and let the extra width be panned. An explicit pinch/double-tap still reaches
+  // the true fit (Z.min) when you want the whole-screen birds-eye.
+  var MIN_TEXT_PX = 9;
+  function restScale(b) {
+    var fs = 12; try { fs = term().options.fontSize || fs; } catch (_) {}
+    return Math.min(1, Math.max(Math.min(1, b.contW / b.natW), MIN_TEXT_PX / fs));
+  }
+  // Content bigger than the container at the current scale: true while zoomed in,
+  // and also at rest when the floor above holds the grid wider than the screen.
+  // Gates panning + cursor-follow, which both exist to reach off-screen content.
+  function overflows(b) { return b.natW * Z.s > b.contW + 1 || b.natH * Z.s > b.contH + 1; }
+  // Fit-to-width baseline, re-run on grid/container changes. Tracks the resting
+  // scale while at overview; preserves (re-clamps) the user's zoom otherwise.
   function applyScale() {
     try {
       var b = box(); if (!b || !b.natW || !b.contW) return;
       Z.min = Math.min(1, b.contW / b.natW);
-      if (Z.followFit) { Z.s = Z.min; Z.tx = 0; Z.ty = 0; }
+      if (!Z.zoomed) { Z.s = restScale(b); Z.tx = 0; Z.ty = 0; }
       else {
         if (Z.s < Z.min) Z.s = Z.min;
         if (Z.s > Z.max) Z.s = Z.max;
         clampT(b);
       }
-      Z.zoomed = Z.s > Z.min + 0.001;
       applyTransform(b);
     } catch (_) {}
   }
@@ -144,7 +160,6 @@ const TERMINAL_ENHANCE_JS = `
     var px = (ax - Z.tx) / Z.s, py = (ay - Z.ty) / Z.s;
     Z.s = s; Z.tx = ax - px * s; Z.ty = ay - py * s;
     Z.zoomed = s > Z.min + 0.001;
-    Z.followFit = !Z.zoomed;
     if (!Z.zoomed) { Z.s = Z.min; Z.tx = 0; Z.ty = 0; }
     clampT(b); applyTransform(b);
   }
@@ -161,8 +176,9 @@ const TERMINAL_ENHANCE_JS = `
   // the live screen — not while the user is reading scrollback.
   function followCursor() {
     try {
-      if (!Z.zoomed || Date.now() - Z.lastPan < 4000) return;
+      if (Date.now() - Z.lastPan < 4000) return;
       var T = term(); var b = box(); if (!T || !b || !T.cols || !T.rows) return;
+      if (!overflows(b)) return;
       var buf = T.buffer && T.buffer.active; if (!buf) return;
       if (buf.viewportY !== buf.baseY) return;
       var cx = (buf.cursorX + 0.5) * (b.natW / T.cols) * Z.s;
@@ -358,29 +374,30 @@ const TERMINAL_ENHANCE_JS = `
           for (var i = 0; i < Math.abs(diff); i++) wheelTick(up, t.clientX, t.clientY);
           altLines = want;
         }
-        // While zoomed, the horizontal component still pans the magnified grid.
-        if (Z.zoomed) {
-          var bz = box();
-          if (bz) { Z.tx += t.clientX - lX; clampT(bz); applyTransform(bz); Z.lastPan = Date.now(); }
-        }
+        // When the grid is wider than the screen, the horizontal component still
+        // pans it (zoomed in, or held oversized by the readability floor).
+        var bz = box();
+        if (bz && overflows(bz)) { Z.tx += t.clientX - lX; clampT(bz); applyTransform(bz); Z.lastPan = Date.now(); }
         lX = t.clientX; lY = t.clientY;
         return;
       }
-      if (Z.zoomed) {
-        // Zoomed in: one finger pans the viewport over the big grid. Vertical
-        // overshoot past the grid edge spills into scrollback scrolling (divide
-        // by scale: scrollTop is in unscaled content px, the finger in screen px).
+      var b = box();
+      if (b && overflows(b)) {
+        // Grid bigger than the screen (zoomed in, or the readability floor): one
+        // finger pans the viewport over it. Overshoot past an edge spills into
+        // scrollback scrolling (divide by scale: scrollTop is in unscaled content
+        // px, the finger in screen px) - so with only horizontal overflow the
+        // vertical drag is pure scrollback, same as the overview below.
+        // ponytail: this costs iOS momentum scrolling at rest (we preventDefault
+        // instead of letting native fling). Restore per-axis if it grates.
         if (e.cancelable) e.preventDefault();
-        var b = box();
-        if (b) {
-          Z.tx += t.clientX - lX;
-          var wantTy = Z.ty + (t.clientY - lY);
-          Z.ty = wantTy;
-          clampT(b);
-          var spill = wantTy - Z.ty;
-          if (spill !== 0 && _vp) _vp.scrollTop -= spill / Z.s;
-          applyTransform(b);
-        }
+        Z.tx += t.clientX - lX;
+        var wantTy = Z.ty + (t.clientY - lY);
+        Z.ty = wantTy;
+        clampT(b);
+        var spill = wantTy - Z.ty;
+        if (spill !== 0 && _vp) _vp.scrollTop -= spill / Z.s;
+        applyTransform(b);
         Z.lastPan = Date.now();
         lX = t.clientX; lY = t.clientY;
         return;
@@ -414,7 +431,9 @@ const TERMINAL_ENHANCE_JS = `
       var now = Date.now();
       if (now - lastTap < DBLTAP && Math.abs(sX - ltX) < 40 && Math.abs(sY - ltY) < 40) {
         lastTap = 0;
-        if (Z.zoomed) setZoom(Z.min, 0, 0);
+        // Out goes back to the RESTING view (floored, readable), not the true
+        // fit - the whole-grid birds-eye stays a deliberate pinch away.
+        if (Z.zoomed) { Z.zoomed = false; applyScale(); }
         else { setZoom(1, sX, sY); Z.lastPan = Date.now(); }
       } else { lastTap = now; ltX = sX; ltY = sY; }
     }
@@ -548,7 +567,7 @@ function terminalInterfacePhaseLabel(phase?: string): string {
 	}
 }
 
-export default function TerminalScreen() {
+export default function TerminalSessionScreen() {
 	const t = useTheme();
 	const { scheme } = useThemeState();
 	const styles = useThemedStyles(makeStyles);
@@ -592,6 +611,14 @@ export default function TerminalScreen() {
 	// THIS grid, not the phone's own fit, so the display matches the PTY and a
 	// full-screen TUI doesn't mis-render. The WebView crops/scales it locally.
 	const authRef = useRef<{ cols: number; rows: number } | null>(null);
+	// Web target: the real xterm.js surface (native uses the WebView instead).
+	const webTermRef = useRef<WebTerminalHandle | null>(null);
+	// Trailing debounce for web grid changes: a window drag emits a burst of
+	// onResize events; the PTY should get one resize when the burst settles,
+	// then one re-assert frame (mirrors the renderer's 100ms/250ms pair in
+	// useTerminalSession - the re-assert recovers a resize the pane client
+	// lost mid-attach).
+	const webResizeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
 	const [cfg, setCfg] = useState<ServerConfig | null>(null);
 	const [status, setStatus] = useState<MuxStatus>("connecting");
@@ -602,6 +629,9 @@ export default function TerminalScreen() {
 	const [msg, setMsg] = useState("");
 	const [sending, setSending] = useState(false);
 	const [sendTarget, setSendTarget] = useState<SendTarget>(shellOnly ? "terminal" : "agent");
+	// Web owns a DOM xterm and still changes its font/grid on zoom. Native keeps
+	// the shared PTY grid stable and zooms only its local viewport.
+	const [fontSize, setFontSize] = useState(FONT_SIZE);
 	// A terminated session has no live PTY (the mux answers "Session not found").
 	// Track that + the known status so we can offer Restore instead of a dead term.
 	const [notFound, setNotFound] = useState(false);
@@ -616,6 +646,7 @@ export default function TerminalScreen() {
 	const [browserOpen, setBrowserOpen] = useState(false);
 	const [preview, setPreview] = useState<{ entry: string; url: string } | null>(null);
 	const previewWebRef = useRef<WebView>(null);
+	const webIframeRef = useRef<HTMLIFrameElement | null>(null);
 
 	const { sessions, orchestrators, restore, refresh, config: activeConfig } = useApp();
 	const known = sessions.find((s) => s.id === sessionId) ?? orchestrators.find((o) => o.id === sessionId) ?? null;
@@ -760,9 +791,27 @@ export default function TerminalScreen() {
 			if (!isConfigured(config)) return;
 
 			const mux = new MuxClient(config, {
-				onStatus: (s) => setStatus(s),
+				onStatus: (s) => {
+					setStatus(s);
+					// After a reconnect MuxClient re-opens the terminal but sends no
+					// size; re-assert the last known grid so the fresh attach and the
+					// PTY agree. Deferred one tick because onStatus fires BEFORE the
+					// open frames are replayed (mux.ts ws.onopen), and the daemon
+					// ignores a resize for a pane that isn't open yet. Clear the web
+					// terminal so the attach repaint lands on a blank grid instead of
+					// interleaving with stale cells.
+					if (s === "open" && openedRef.current) {
+						if (isWeb) webTermRef.current?.clear();
+						const d = lastDimsRef.current;
+						if (d) setTimeout(() => muxRef.current?.resize(terminalHandleId, d.cols, d.rows, projectId), 0);
+					}
+				},
 				onTerminalData: (tid, bytes) => {
 					if (tid !== terminalHandleId) return;
+					if (isWeb) {
+						webTermRef.current?.write(bytes);
+						return;
+					}
 					if (!xtermReadyRef.current || !xtermRef.current) {
 						pendingOutputRef.current.push(bytes.slice());
 						return;
@@ -792,10 +841,25 @@ export default function TerminalScreen() {
 				},
 			});
 			muxRef.current = mux;
+			// The web terminal mounts synchronously and its onReady always fires
+			// before this async config load resolves (loadConfig yields at least
+			// one microtask, and WebTerminal's mount effect - a child effect -
+			// always commits before this parent effect), so onWebReady's own
+			// openTerminal attempt no-ops on a still-null muxRef. Finish the
+			// attach here instead, once the terminal side is the one already done.
+			if (isWeb && webTermRef.current && !openedRef.current) {
+				openedRef.current = true;
+				mux.openTerminal(terminalHandleId, projectId);
+				applyDims(webTermRef.current.cols, webTermRef.current.rows);
+			}
 			mux.connect();
 		})();
 		return () => {
 			disposed = true;
+			if (webResizeTimer.current) {
+				clearTimeout(webResizeTimer.current);
+				webResizeTimer.current = null;
+			}
 			muxRef.current?.disconnect();
 			muxRef.current = null;
 			xtermReadyRef.current = false;
@@ -805,7 +869,7 @@ export default function TerminalScreen() {
 		// resolve, and rebuilding the mux on each one would tear down a healthy
 		// terminal for no reason.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [terminalHandleId, activeBaseUrl]);
+	}, [terminalHandleId, projectId, activeBaseUrl]);
 
 	useLayoutEffect(() => {
 		xtermReadyRef.current = false;
@@ -836,6 +900,15 @@ export default function TerminalScreen() {
 			if (timer) clearTimeout(timer);
 		};
 	}, [cfg, id, shellOnly]);
+
+	// Switching to another node while a terminal is open: this session id belongs
+	// to the daemon we just left and does not exist on the new one, so the screen
+	// can only sit there failing to attach. Pop back to the board instead. `cfg`
+	// is the node this screen connected to; `activeConfig` is the app's active one.
+	useEffect(() => {
+		if (!cfg || !activeConfig || !isConfigured(cfg)) return;
+		if (activeConfig.host !== cfg.host || activeConfig.httpPort !== cfg.httpPort) leave();
+	}, [cfg, activeConfig, leave]);
 
 	// The WebView reports the phone's NATURAL fit (proposeDimensions, measure-only).
 	// We forward it to the daemon as this client's requested size — used only when
@@ -877,7 +950,7 @@ export default function TerminalScreen() {
 		const pending = pendingOutputRef.current;
 		pendingOutputRef.current = [];
 		for (const bytes of pending) xtermRef.current?.write(bytes);
-		// A fresh xterm (first mount, or a remount after a font-zoom) starts at its
+		// A fresh xterm (first mount, or a remount after a theme change) starts at its
 		// default grid — restore the daemon's authoritative grid onto it so it keeps
 		// mirroring the shared PTY rather than snapping to the default.
 		if (authRef.current) xtermRef.current?.resize(authRef.current);
@@ -890,6 +963,39 @@ export default function TerminalScreen() {
 		const d = lastDimsRef.current;
 		if (d) muxRef.current?.resize(terminalHandleId, d.cols, d.rows, projectId);
 	}, [terminalHandleId, projectId]);
+
+	// Web: the DOM terminal is mounted and ready - wire its I/O to the mux and
+	// attach. Mirrors onInitialized (native) plus the renderer's binding:
+	// input forwards to the PTY; grid changes report a debounced resize (one
+	// settled frame + one re-assert). If the socket isn't open yet, MuxClient
+	// queues the open in its openTerminals map and replays it on connect; the
+	// onStatus handler then re-asserts the size.
+	const onWebReady = useCallback(
+		(handle: WebTerminalHandle) => {
+			webTermRef.current = handle;
+			handle.onUserInput((data) => muxRef.current?.sendInput(terminalHandleId, data, projectId));
+			handle.onResize(({ cols, rows }) => {
+				if (webResizeTimer.current) clearTimeout(webResizeTimer.current);
+				webResizeTimer.current = setTimeout(() => {
+					applyDims(cols, rows);
+					webResizeTimer.current = setTimeout(() => {
+						webResizeTimer.current = null;
+						if (openedRef.current) muxRef.current?.resize(terminalHandleId, cols, rows, projectId);
+					}, 250);
+				}, 100);
+			});
+			// muxRef may still be null here (see the mux effect's fallback
+			// attach above) - in that case leave openedRef false so that
+			// fallback is the one that performs the actual attach.
+			if (openedRef.current || !muxRef.current) return;
+			openedRef.current = true;
+			muxRef.current.openTerminal(terminalHandleId, projectId);
+			// The open frame carries no size; report the real grid immediately
+			// (applyDims records it, updates the dims chip, and sends the resize).
+			applyDims(handle.cols, handle.rows);
+		},
+		[terminalHandleId, projectId, applyDims],
+	);
 
 	const onData = useCallback(
 		(data: string) => {
@@ -1006,6 +1112,16 @@ export default function TerminalScreen() {
 		}
 		setBrowserOpen(true);
 	}, [browserOpen, hasPreview]);
+
+	// Reload the preview: native reloads the WebView; web re-assigns the iframe src.
+	const reloadPreview = useCallback(() => {
+		if (Platform.OS === "web") {
+			const f = webIframeRef.current;
+			if (f) f.src = f.src;
+		} else {
+			previewWebRef.current?.reload();
+		}
+	}, []);
 
 	const startInterfaceSwitch = useCallback(
 		async (policy: "drain" | "interrupt") => {
@@ -1167,9 +1283,13 @@ export default function TerminalScreen() {
 		[scheme],
 	);
 
-	// Adjust only the phone's CSS viewport. The xterm renderer, mux attachment,
-	// replay buffer, and daemon-owned PTY dimensions all remain untouched.
+	// Web keeps its DOM-terminal font zoom. Native changes only the local viewport,
+	// preserving the renderer, replay buffer, mux attachment, and shared PTY grid.
 	const zoom = useCallback((delta: number) => {
+		if (isWeb) {
+			setFontSize((current) => Math.min(20, Math.max(7, current + delta)));
+			return;
+		}
 		adjustTerminalViewport(xtermRef.current, delta > 0 ? 1 : -1);
 	}, []);
 
@@ -1305,19 +1425,28 @@ export default function TerminalScreen() {
 			) : null}
 
 			<View style={styles.termWrap}>
-				<XtermJsWebView
-					// Remount only on theme changes: xterm applies its palette at
-					// construction, so already-painted rows otherwise keep old colours.
-					key={`term-${scheme}`}
-					ref={xtermRef}
-					autoFit={false}
-					xtermOptions={xtermOptions}
-					webViewOptions={webViewOptions}
-					logger={logger}
-					onInitialized={onInitialized}
-					onData={onData}
-					style={{ flex: 1, backgroundColor: t.bgBase }}
-				/>
+				{isWeb ? (
+					<WebTerminal
+						ariaLabel={`Terminal for ${id}`}
+						fontSize={fontSize}
+						onReady={onWebReady}
+						onError={(e) => setBanner(`Terminal failed: ${e instanceof Error ? e.message : String(e)}`)}
+					/>
+				) : (
+					<XtermJsWebView
+						// Remount only on theme changes: xterm applies its palette at
+						// construction, so already-painted rows otherwise keep old colours.
+						key={`term-${scheme}`}
+						ref={xtermRef}
+						autoFit={false}
+						xtermOptions={xtermOptions}
+						webViewOptions={webViewOptions}
+						logger={logger}
+						onInitialized={onInitialized}
+						onData={onData}
+						style={{ flex: 1, backgroundColor: t.bgBase }}
+					/>
+				)}
 				{interfaceTransitionActive ? (
 					<View style={styles.interfaceOverlay}>
 						<View style={styles.interfaceCard}>
@@ -1364,24 +1493,33 @@ export default function TerminalScreen() {
 							<Text style={styles.browserPath} numberOfLines={1}>
 								{preview.entry}
 							</Text>
-							<Pressable hitSlop={8} onPress={() => { haptics.tap(); previewWebRef.current?.reload(); }} style={styles.browserAction}>
+							<Pressable hitSlop={8} onPress={() => { haptics.tap(); reloadPreview(); }} style={styles.browserAction}>
 								<Feather name="rotate-cw" size={15} color={t.blue} />
 							</Pressable>
 							<Pressable hitSlop={8} onPress={() => { haptics.tap(); setBrowserOpen(false); }} style={styles.browserAction}>
 								<Feather name="x" size={17} color={t.textSecondary} />
 							</Pressable>
 						</View>
-						<WebView
-							ref={previewWebRef}
-							// The preview route lives behind the daemon's connection-password
-							// auth (Bearer). Without this header the WebView's request 401s and
-							// renders the JSON error body instead of the page. cfg carries the
-							// password we paired with; authHeaders() turns it into the Bearer.
-							source={{ uri: preview.url, headers: cfg ? authHeaders(cfg) : undefined }}
-							originWhitelist={["*"]}
-							style={styles.browserWeb}
-							onError={() => setBanner("Preview failed to load.")}
-						/>
+						{isWeb ? (
+							<iframe
+								ref={webIframeRef}
+								title="preview"
+								src={preview.url}
+								style={{ flex: 1, width: "100%", border: "none", backgroundColor: "#ffffff" }}
+							/>
+						) : (
+							<WebView
+								ref={previewWebRef}
+								// The preview route lives behind the daemon's connection-password
+								// auth (Bearer). Without this header the WebView's request 401s and
+								// renders the JSON error body instead of the page. cfg carries the
+								// password we paired with; authHeaders() turns it into the Bearer.
+								source={{ uri: preview.url, headers: cfg ? authHeaders(cfg) : undefined }}
+								originWhitelist={["*"]}
+								style={styles.browserWeb}
+								onError={() => setBanner("Preview failed to load.")}
+							/>
+						)}
 					</View>
 				)}
 			</View>

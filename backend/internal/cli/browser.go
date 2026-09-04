@@ -21,6 +21,8 @@ type browserStatusDTO struct {
 	Connected   bool      `json:"connected"`
 	ConnectedAt time.Time `json:"connectedAt,omitempty"`
 	Transport   string    `json:"transport"`
+	// PersistentProfile mirrors the daemon field; see BrowserStatusResponse.
+	PersistentProfile bool `json:"persistentProfile"`
 }
 
 type browserCommandRequestDTO struct {
@@ -56,8 +58,9 @@ func newBrowserCommand(ctx *commandContext) *cobra.Command {
 		Use:   "browser",
 		Short: "Inspect and control this AO session's shared desktop browser",
 		Long: "Inspect and control the target-isolated browser owned by the current AO session.\n\n" +
-			"The desktop app must be open. Commands operate the same live page the user sees,\n" +
-			"including while the Browser panel is hidden.",
+			"The desktop app must be open — for sessions on a remote host, open and attached\n" +
+			"to that host. Commands operate the same live page the user sees, including while\n" +
+			"the Browser panel is hidden.",
 		Args: noArgs,
 	}
 	cmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "print the structured response as JSON")
@@ -78,7 +81,22 @@ func newBrowserCommand(ctx *commandContext) *cobra.Command {
 			if status.Connected {
 				state = "connected"
 			}
-			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Browser runtime: %s (%s)\n", state, status.Transport)
+			// Say which browser this is, and which profile mode it is on. The docs
+			// say the first part; the program never did, and at 1am people read the
+			// program. Users kept logging into a site here and finding their system
+			// browser unchanged. The second part must never be left to inference:
+			// "are my logins being kept, and who else can use them?" is not a
+			// question to answer by guessing.
+			profile := "scoped to this session and discarded when the session or app ends"
+			if status.PersistentProfile {
+				profile = "SHARED with every session on this project and kept on disk across restarts, " +
+					"because this project opted in (ao project set-config --browser-persistent-profile)"
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(),
+				"Browser runtime: %s (%s)\n"+
+					"This is the AO desktop app's Browser panel, not your system browser: it keeps its own\n"+
+					"cookies and logins, %s.\n",
+				state, status.Transport, profile)
 			return err
 		},
 	})

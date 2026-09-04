@@ -9,7 +9,8 @@
  * turned into a URL against that same blob route.
  */
 
-import { getApiBaseUrl } from "./api-client";
+import { baseUrlFor } from "./host-clients";
+import type { Ref } from "./hosts";
 
 const ABSOLUTE_SRC = /^[a-z][a-z0-9+.-]*:/i;
 
@@ -67,19 +68,21 @@ export function resolveMarkdownAssetPath(markdownFilePath: string, rawSrc: strin
  * all. Pass the file detail's load timestamp so an image the agent rewrites
  * actually reloads instead of sitting on the copy the browser already has.
  */
-export function buildWorkspaceBlobUrl(sessionId: string, path: string, version: number): string {
+export function buildWorkspaceBlobUrl(session: Ref, path: string, version: number): string | undefined {
+	const baseUrl = baseUrlFor(session.host);
+	if (baseUrl === null) return undefined;
 	const query = new URLSearchParams({ path, side: "after", v: String(version) });
-	return `${getApiBaseUrl()}/api/v1/sessions/${encodeURIComponent(sessionId)}/workspace/file/blob?${query}`;
+	return `${baseUrl}/api/v1/sessions/${encodeURIComponent(session.id)}/workspace/file/blob?${query}`;
 }
 
 /** `undefined` for an empty src or an absolute one that should pass through untouched. */
 export function resolveMarkdownImageSrc(
-	sessionId: string,
+	session: Ref,
 	markdownFilePath: string,
 	rawSrc: string | undefined,
 	version: number,
 ): string | undefined {
 	if (!rawSrc) return undefined;
 	if (isAbsoluteMarkdownAssetSrc(rawSrc)) return rawSrc;
-	return buildWorkspaceBlobUrl(sessionId, resolveMarkdownAssetPath(markdownFilePath, rawSrc), version);
+	return buildWorkspaceBlobUrl(session, resolveMarkdownAssetPath(markdownFilePath, rawSrc), version);
 }

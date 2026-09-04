@@ -1,0 +1,65 @@
+#!/bin/zsh
+# Stop/start the AO web/mobile UI launchd jobs. Reversible.
+# The AO daemon is app-owned since the 2026-08 upstream sync: the desktop app
+# spawns its bundled daemon (:3001) and replaces any running one on every
+# launch (per-launch browser-runtime token). AO_KEEP_DAEMON=1 keeps the spawned
+# daemon alive after the app quits (dev.agent-orchestrator.env re-applies that
+# to the GUI session at login). There is no launchd daemon job anymore — after
+# a reboot, open the desktop app (or run `ao start` from a terminal) to bring
+# the daemon back. Never auto-start a second daemon: on a port collision it
+# silently falls back to an ephemeral port and clobbers ~/.ao/running.json.
+#   ao-svc down     # bootout all jobs (clean stop, no respawn)
+#   ao-svc up       # bootstrap all jobs
+#   ao-svc status   # show which jobs are loaded
+#   ao-svc reload   # rebuild the ao CLI from source (for the daemon, reinstall the app)
+set -u
+dom="gui/$(id -u)"
+LA="$HOME/Library/LaunchAgents"
+repo="$HOME/dev/ag-orc"                                                  # symlink to the checkout (dev-setup.sh)
+cache_bin="${XDG_CACHE_HOME:-$HOME/.cache}/aoagents/agent-orchestrator/bin/ao"
+# lan-web and phone-bridge were retired once the daemon started serving the
+# browser UI from its own LAN origin: the second Vite server had nothing left to
+# serve, and the phone proxy existed only to launder Origin headers. Their
+# launchd jobs are booted out by scripts/dev-setup.sh.
+services=(dev.agent-orchestrator.env dev.agent-orchestrator.mobile-web)
+
+case "${1:-status}" in
+  down)
+    for s in $services; do
+      launchctl bootout "$dom/$s" 2>/dev/null && echo "down: $s" || echo "down: $s (not loaded)"
+    done
+    ;;
+  up)
+    for s in $services; do
+      launchctl bootstrap "$dom" "$LA/$s.plist" 2>/dev/null && echo "up:   $s" || echo "up:   $s (already loaded / failed)"
+    done
+    ;;
+  status)
+    launchctl list | grep agent-orchestrator || echo "(no agent-orchestrator jobs loaded)"
+    ;;
+  reload)
+    # rebuild the source-built ao CLI; the PATH symlink follows the cache binary.
+    # Also refresh ~/.ao/bin/ao — live worker sessions pin ~/.ao/bin first on
+    # PATH (hooks + `ao agent-process supervise`), so it must track the build.
+    # Atomic cp (.new + mv): an in-place cp over a running binary corrupts its
+    # code signature and macOS SIGKILLs it (OS_REASON_CODESIGNING).
+    # The running daemon is the desktop app's bundled one — to update IT, run
+    # scripts/install-desktop-app.sh (rebuild + reinstall + relaunch the app).
+    # Say which tree and commit this builds. $repo is a fixed path, so whatever
+    # branch that checkout happens to be on is what lands on PATH — and an AO
+    # worktree holding the branch you meant elsewhere is invisible from here.
+    # This is how a CLI built from `main` ended up talking to a daemon built from
+    # `develop`; `ao doctor` now fails on that skew, but seeing the commit before
+    # the build beats diagnosing it after.
+    echo "reload: building $repo @ $(git -C "$repo" rev-parse --short HEAD 2>/dev/null) ($(git -C "$repo" rev-parse --abbrev-ref HEAD 2>/dev/null))"
+    mkdir -p "$HOME/.ao/bin"
+    "$repo/scripts/daemon-build.sh" \
+      && cp -f "$cache_bin" "$HOME/.ao/bin/ao.new" \
+      && mv -f "$HOME/.ao/bin/ao.new" "$HOME/.ao/bin/ao" \
+      && echo "reload: ao CLI + ~/.ao/bin/ao rebuilt (daemon is app-bundled; scripts/install-desktop-app.sh updates it)" \
+      || { echo "reload: FAILED" >&2; exit 1; }
+    ;;
+  *)
+    echo "usage: ao-svc {up|down|status|reload}" >&2; exit 2
+    ;;
+esac

@@ -220,8 +220,49 @@ export class AgentBrowserRuntime {
 		provider: AgentBrowserTargetProvider,
 		signal?: AbortSignal,
 	): Promise<AgentBrowserJSONResult> {
-		const nativeArgs = nativeArgumentsForAction(action, args);
-		const result = await this.run(sessionId, [...nativeArgs, "--json"], provider, signal);
+		if (action === "type") return this.typeByAppend(sessionId, args, provider, signal);
+		const result = await this.run(sessionId, [...nativeArgumentsForAction(action, args), "--json"], provider, signal);
+		return parseAgentBrowserJSON(result.stdout);
+	}
+
+	/**
+	 * `type` appends by rewriting the whole field, because on a React controlled
+	 * input the caret is pinned at 0 and cannot be moved.
+	 *
+	 * agent-browser 0.33.1 inserts at the caret. On a controlled input the caret
+	 * never advances after an insertion — measured: it is already 0 at the `input`
+	 * event, which fires synchronously during the insertion and before React's own
+	 * listener runs. So every insertion lands at position 0. Typing character by
+	 * character therefore produced REVERSED text, and a single whole-string
+	 * insertion (the previous fix) still PREPENDED onto whatever was already there:
+	 * `type "abcd"` then `type "efgh"` gave "efghabcd".
+	 *
+	 * Reading the field and filling it with `existing + text` sidesteps the caret
+	 * entirely, which is the only thing that works when the caret cannot be
+	 * positioned. Plain inputs are unaffected either way — their caret advances
+	 * normally — so this is chosen for correctness on controlled inputs, not
+	 * because the old path failed everywhere.
+	 *
+	 * This is the SECOND workaround over the same upstream defect. The bug is in
+	 * agent-browser (pinned 0.33.1), not in AO, and still deserves an upstream
+	 * report — that is the fix that would let this be deleted.
+	 */
+	private async typeByAppend(
+		sessionId: string,
+		args: Record<string, unknown>,
+		provider: AgentBrowserTargetProvider,
+		signal?: AbortSignal,
+	): Promise<AgentBrowserJSONResult> {
+		const ref = nativeRef(stringValue(args.ref, "ref is required"));
+		const text = stringValue(args.text, "text is required", true);
+		const read = await this.run(sessionId, ["get", "value", ref, "--json"], provider, signal);
+		const existing = parseAgentBrowserJSON(read.stdout).value;
+		const result = await this.run(
+			sessionId,
+			["fill", ref, `${typeof existing === "string" ? existing : ""}${text}`, "--json"],
+			provider,
+			signal,
+		);
 		return parseAgentBrowserJSON(result.stdout);
 	}
 

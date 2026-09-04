@@ -1314,7 +1314,13 @@ func (c *SessionsController) cleanup(w http.ResponseWriter, r *http.Request) {
 	for _, skip := range out.Skipped {
 		skipped = append(skipped, CleanupSkippedSession{SessionID: skip.SessionID, Reason: skip.Reason})
 	}
-	envelope.WriteJSON(w, http.StatusOK, CleanupSessionsResponse{OK: true, Cleaned: out.Cleaned, Skipped: skipped})
+	// ok reports whether cleanup did everything it was asked to, so a caller can
+	// branch on one field. It was previously hardcoded true, which made a
+	// declined teardown indistinguishable from a completed one: cleanup refuses a
+	// worktree with uncommitted changes — the normal state of a session an agent
+	// worked in — and still answered {"ok":true}. A caller checking ok saw
+	// success while the workspace, and anything in it, stayed on disk.
+	envelope.WriteJSON(w, http.StatusOK, CleanupSessionsResponse{OK: len(skipped) == 0, Cleaned: out.Cleaned, Skipped: skipped})
 }
 
 func (c *SessionsController) send(w http.ResponseWriter, r *http.Request) {
@@ -1453,6 +1459,7 @@ func (c *SessionsController) activity(w http.ResponseWriter, r *http.Request) {
 		LatestUserPrompt:      capActivityText(domain.SanitizeControlChars(strings.TrimSpace(in.LatestUserPrompt)), 16<<10),
 		LatestAssistantUpdate: capActivityText(domain.SanitizeControlChars(strings.TrimSpace(in.LatestAssistantUpdate)), 16<<10),
 		TranscriptPath:        capActivityText(domain.SanitizeControlChars(strings.TrimSpace(in.TranscriptPath)), 4096),
+		AgentCWD:              capActivityText(domain.SanitizeControlChars(strings.TrimSpace(in.AgentCWD)), 4096),
 		LaunchID:              capActivityMeta(domain.SanitizeControlChars(strings.TrimSpace(in.LaunchID))),
 	}
 	if c.Activity != nil && (sig.Valid || sig.AgentSessionID != "") {

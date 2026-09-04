@@ -6,7 +6,7 @@ import { expect, test } from "@playwright/test";
 // an in-memory shell list — enough to cover the parts that live in the renderer:
 // which tab is current, and that opening/closing updates the strip.
 test("opens, selects, and closes standalone shell terminals from the tab strip", async ({ page }) => {
-	await page.goto("/#/projects/ao-demo/sessions/demo-working");
+	await page.goto("/#/host/local/session/demo-working");
 	await expect(page.getByRole("button", { name: "New terminal" })).toBeVisible();
 
 	const closeButtons = page.getByRole("button", { name: /^Close terminal / });
@@ -39,7 +39,7 @@ test("opens, selects, and closes standalone shell terminals from the tab strip",
 // listening. Both silently did nothing. The shell layout owns it now, and
 // routes to the standalone terminals view when there is no session on screen.
 test("opens a terminal from the board, where no session view is mounted", async ({ page }) => {
-	await page.goto("/#/projects/ao-demo");
+	await page.goto("/#/host/local/project/ao-demo");
 	await expect(page.getByRole("button", { name: "New terminal" })).toBeVisible();
 
 	await page.getByRole("button", { name: "New terminal" }).click();

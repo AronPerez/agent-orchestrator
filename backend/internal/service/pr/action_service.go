@@ -19,6 +19,7 @@ var (
 
 type actionStore interface {
 	GetPR(ctx context.Context, url string) (domain.PullRequest, bool, error)
+	GetPRByNumber(ctx context.Context, number int) (domain.PullRequest, bool, error)
 }
 
 type actionReader interface {
@@ -30,6 +31,7 @@ type actionReader interface {
 type ActionDeps struct {
 	Store  actionStore
 	Merger ports.SCMMerger
+	Closer ports.SCMCloser
 	Reader actionReader
 }
 
@@ -37,6 +39,7 @@ type ActionDeps struct {
 type ActionService struct {
 	store  actionStore
 	merger ports.SCMMerger
+	closer ports.SCMCloser
 	reader actionReader
 }
 
@@ -44,7 +47,7 @@ var _ ActionManager = (*ActionService)(nil)
 
 // NewActionService builds the guarded pull request action service.
 func NewActionService(deps ActionDeps) *ActionService {
-	return &ActionService{store: deps.Store, merger: deps.Merger, reader: deps.Reader}
+	return &ActionService{store: deps.Store, merger: deps.Merger, closer: deps.Closer, reader: deps.Reader}
 }
 
 // Merge re-fetches authoritative SCM state and then squash-merges only the
@@ -192,6 +195,40 @@ func scmRepoForPR(pr domain.PullRequest) (ports.SCMRepo, bool) {
 		Name:     parts[len(parts)-1],
 		Repo:     pr.Repo,
 	}, true
+}
+
+// Close closes a tracked pull request without merging it. Unlike Merge there is
+// no head-SHA guard: closing is reversible and does not depend on the reviewed
+// state, so the number the caller saw is enough.
+func (s *ActionService) Close(ctx context.Context, prID string) (CloseResult, error) {
+	prNumber, err := parsePRNumber(prID)
+	if err != nil {
+		return CloseResult{}, fmt.Errorf("%w: invalid pull request identity", ErrInvalidPR)
+	}
+	if s.store == nil || s.closer == nil {
+		return CloseResult{}, errors.New("pr: close action is not configured")
+	}
+
+	tracked, ok, err := s.store.GetPRByNumber(ctx, prNumber)
+	if err != nil {
+		return CloseResult{}, fmt.Errorf("load pull request: %w", err)
+	}
+	if !ok {
+		return CloseResult{}, ErrPRNotFound
+	}
+	repo, ok := scmRepoForPR(tracked)
+	if !ok {
+		return CloseResult{}, fmt.Errorf("%w: pull request repository is unknown", ErrPRPreconditions)
+	}
+
+	ref := ports.SCMPRRef{Repo: repo, Number: tracked.Number, URL: tracked.URL}
+	if err := s.closer.ClosePullRequest(ctx, ref); err != nil {
+		if errors.Is(err, ports.ErrSCMNotFound) {
+			return CloseResult{}, fmt.Errorf("%w: %w", ErrPRNotFound, err)
+		}
+		return CloseResult{}, fmt.Errorf("close pull request: %w", err)
+	}
+	return CloseResult{PRNumber: tracked.Number}, nil
 }
 
 // ResolveComments is not implemented by the current provider action service.

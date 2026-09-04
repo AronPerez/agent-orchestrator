@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -195,6 +196,11 @@ type Manager struct {
 	// completionTerminator is late-bound because Session Manager itself depends
 	// on this lifecycle reducer. It is required before the SCM observer starts.
 	completionTerminator sessionTerminator
+	// exitInspector is late-bound for the same dependency-cycle reason as
+	// completionTerminator: the inspector is the session runtime, which is
+	// constructed after this reducer. Nil means hook-reported exits apply
+	// unprobed, exactly as before #114.
+	exitInspector ports.ExactSupervisedProcessInspector
 	// usageFinalizer is late-bound because the usage pipeline is optional. It
 	// receives terminal intent before is_terminated makes the session ineligible
 	// for normal source discovery.
@@ -219,6 +225,15 @@ type Manager struct {
 	// This coordination is intentionally memory-only: a daemon crash leaves the
 	// durable session exited, so the user can safely retry the resume.
 	pendingLaunches map[domain.SessionID]pendingLaunch
+	// unreachableRuntimes holds the sessions whose most recent runtime probe
+	// could not reach the runtime at all. The reducer deliberately writes no
+	// durable fact for such a probe (a failed probe is not proof of death), but
+	// discarding it entirely left every reader — `ao session ls`, the desktop
+	// board — reporting a confident `idle` for a session whose runtime was
+	// gone, seconds before a send to it failed. This is the read side of that
+	// same fact, and it is intentionally memory-only like pendingLaunches: the
+	// reaper re-establishes it within one probe interval of a daemon restart.
+	unreachableRuntimes map[domain.SessionID]struct{}
 	// steerActive reports whether a harness can safely receive a write during an
 	// active turn (input steers the run) rather than only while idle. Supplied by
 	// the agent adapter via WithActiveSteering; the default answers false, so an
@@ -241,6 +256,7 @@ func New(store sessionStore, messenger ports.AgentMessenger, opts ...Option) *Ma
 		react:                   newReactionState(),
 		flights:                 map[domain.SessionID]*toolFlight{},
 		pendingLaunches:         map[domain.SessionID]pendingLaunch{},
+		unreachableRuntimes:     map[domain.SessionID]struct{}{},
 		steerActive:             func(domain.AgentHarness) bool { return false },
 		startupSignalGatesInput: func(domain.AgentHarness) bool { return false },
 	}
@@ -262,6 +278,78 @@ func (m *Manager) SetCompletionTerminator(terminator sessionTerminator) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.completionTerminator = terminator
+}
+
+// SetExitInspector wires the supervised-process liveness probe used to refuse
+// a hook-reported exit for an agent that is provably still alive (#114,
+// effects 3+4). Wired once during daemon assembly.
+func (m *Manager) SetExitInspector(insp ports.ExactSupervisedProcessInspector) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.exitInspector = insp
+}
+
+// agentProvablyAlive reports whether the session's exact supervised agent
+// process is confirmed alive right now. Anything short of a clean, fully
+// identified "alive" answers false: an inspection error is never a liveness
+// verdict (ports/outbound.go says exactly this for the sibling interface), and
+// a false here merely applies the exit as it always did.
+//
+// Callers must NOT hold m.mu -- the probe may shell out to ps.
+func (m *Manager) agentProvablyAlive(ctx context.Context, rec domain.SessionRecord) bool {
+	m.mu.Lock()
+	insp := m.exitInspector
+	m.mu.Unlock()
+	if insp == nil || rec.Metadata.RuntimeHandleID == "" || rec.Metadata.RuntimeLaunchID == "" {
+		return false
+	}
+	alive, err := insp.IsExactSupervisedProcessAlive(ctx,
+		ports.RuntimeHandle{ID: rec.Metadata.RuntimeHandleID},
+		ports.SupervisedProcessRef{SessionID: rec.ID, LaunchID: rec.Metadata.RuntimeLaunchID})
+	return err == nil && alive
+}
+
+// ClearStaleExit revives a session whose exited state is provably false -- the
+// supervised agent is alive right now. It exists for sessions poisoned before
+// the ApplyActivitySignal gate shipped (#114 effect 4: the exited belief is
+// self-sealing, because an idle agent fires no hooks to correct it and AO
+// refuses the send that would make it act), and for the gate's probe race
+// window.
+//
+// Returns true only when it actually flipped exited -> idle. The probe runs
+// before m.mu because it may shell out; mutate re-checks under the lock, so a
+// real exit landing in between wins.
+func (m *Manager) ClearStaleExit(ctx context.Context, id domain.SessionID) (bool, error) {
+	rec, ok, err := m.store.GetSession(ctx, id)
+	if err != nil || !ok {
+		return false, err
+	}
+	if rec.IsTerminated || rec.Activity.State != domain.ActivityExited {
+		return false, nil
+	}
+	if !m.agentProvablyAlive(ctx, rec) {
+		return false, nil
+	}
+	cleared := false
+	err = m.mutate(ctx, id, func(cur domain.SessionRecord, now time.Time) (domain.SessionRecord, bool) {
+		if cur.IsTerminated || cur.Activity.State != domain.ActivityExited {
+			return cur, false
+		}
+		next := cur
+		// Idle, not active: the measured #114 canary left the real agent sitting
+		// idle, and idle is what message-delivery readiness polls for.
+		next.Activity = domain.Activity{State: domain.ActivityIdle, LastActivityAt: now}
+		cleared = true
+		return next, true
+	})
+	if err != nil {
+		return false, err
+	}
+	if cleared {
+		slog.Default().Info("lifecycle: cleared a stale exited state for a provably-alive agent",
+			"session", id, "reason", "stale_exit_cleared")
+	}
+	return cleared, nil
 }
 
 // SetUsageFinalizer wires termination and relaunches to usage collection.
@@ -407,7 +495,14 @@ func (m *Manager) ApplyRuntimeObservation(ctx context.Context, id domain.Session
 	)
 	if err := m.mutate(ctx, id, func(cur domain.SessionRecord, now time.Time) (domain.SessionRecord, bool) {
 		if cur.IsTerminated || !matchesLaunch(cur) {
+			// mutate holds m.mu across this callback, so the map is guarded.
+			delete(m.unreachableRuntimes, id)
 			return cur, false
+		}
+		if f.Runtime == ports.ProbeFailed {
+			m.unreachableRuntimes[id] = struct{}{}
+		} else {
+			delete(m.unreachableRuntimes, id)
 		}
 		currentLaunch := cur.Metadata.RuntimeLaunchID
 		if currentLaunch != "" && f.Runtime == ports.ProbeAlive && f.Workload == ports.ProbeDead {
@@ -468,6 +563,17 @@ func (m *Manager) ApplyRuntimeObservation(ctx context.Context, id domain.Session
 	return nil
 }
 
+// RuntimeUnreachable reports whether the last runtime observation for id failed
+// to reach its runtime. It is a reachability fact, never a death conclusion:
+// callers may tell the user AO cannot see the session, but must not terminate,
+// recreate, or archive it on this alone.
+func (m *Manager) RuntimeUnreachable(id domain.SessionID) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, unreachable := m.unreachableRuntimes[id]
+	return unreachable
+}
+
 // ApplyActivitySignal records an authoritative agent activity signal and any
 // native agent session id carried alongside it. Metadata-only hooks leave the
 // existing activity and first-signal facts untouched.
@@ -476,6 +582,7 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 	s.LatestUserPrompt = strings.TrimSpace(s.LatestUserPrompt)
 	s.LatestAssistantUpdate = strings.TrimSpace(s.LatestAssistantUpdate)
 	s.TranscriptPath = strings.TrimSpace(s.TranscriptPath)
+	s.AgentCWD = strings.TrimSpace(s.AgentCWD)
 	s.LaunchID = strings.TrimSpace(s.LaunchID)
 	s.ControllerGeneration = strings.TrimSpace(s.ControllerGeneration)
 	// A response or Stop hook produced by AO's optional source handoff request
@@ -506,6 +613,24 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 	}
 	if !s.Valid && s.AgentSessionID == "" && s.LatestUserPrompt == "" && s.LatestAssistantUpdate == "" && s.TranscriptPath == "" {
 		return nil
+	}
+	// #114 effects 3+4: a nested agent inheriting AO_SESSION_ID can report a
+	// SessionEnd for a parent whose real agent is alive and idle -- measured on
+	// a live session, which then refused every send with AGENT_EXITED. A hook is
+	// only a claim; the supervisor is the authority. Probe before accepting a
+	// hook-driven exit, and only a hook-driven one (see isAuthoritativeExitEvent).
+	//
+	// Probing before m.mu is deliberate: the probe may shell out to ps, and this
+	// reducer must not hold its lock across that. The window between probe and
+	// write is closed by the supervisor's own process-exited report and by the
+	// reaper, both of which still land.
+	if s.Valid && s.State == domain.ActivityExited && !isAuthoritativeExitEvent(s.Event) {
+		if rec, ok, err := m.store.GetSession(ctx, id); err == nil && ok && m.agentProvablyAlive(ctx, rec) {
+			slog.Default().Warn("lifecycle: dropped hook-reported exit for a provably-alive agent",
+				"session", id, "event", s.Event, "launch", s.LaunchID,
+				"reason", "stale_exit_dropped")
+			return nil
+		}
 	}
 	if s.LaunchID != "" {
 		if err := m.stagePendingAgentSwitchNativeMetadata(ctx, id, s); err != nil {
@@ -545,6 +670,31 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 	}
 	if rec.Metadata.RuntimeLaunchID != "" && s.LaunchID != rec.Metadata.RuntimeLaunchID {
 		m.mu.Unlock()
+		return nil
+	}
+	// A nested agent process — one an agent spawns from inside its own session —
+	// inherits AO_SESSION_ID and AO_RUNTIME_LAUNCH_ID from its parent, so the
+	// launch fence above cannot tell it apart from the session's real agent. Its
+	// hooks then speak for the session: they overwrite the resume handle
+	// (AgentSessionID / NativeTranscriptPath) with a throwaway conversation, and
+	// its SessionEnd reports the session as exited while the real agent is still
+	// alive and idle — after which AO refuses to deliver messages to it.
+	//
+	// The session's own agent is launched by AO with its cwd inside the session
+	// workspace, and a provider reports the launch cwd rather than the shell's, so
+	// a signal from outside the workspace cannot be that agent.
+	//
+	// This does not catch a nested agent invoked with the workspace as its cwd;
+	// that case still needs process identity AO does not have today (fork #114).
+	//
+	// A false rejection here would strand the session exactly as a dropped hook
+	// does, and it drops the signal rather than failing the caller, so it is
+	// logged: a guard nobody can observe rejecting is a guard nobody can debug.
+	if !signalCWDBelongsToSession(rec.Metadata.WorkspacePath, s.AgentCWD) {
+		m.mu.Unlock()
+		slog.Default().Warn("lifecycle: dropped activity signal from outside the session workspace",
+			"session", id, "workspace", rec.Metadata.WorkspacePath, "agent_cwd", s.AgentCWD,
+			"event", s.Event, "launch", s.LaunchID)
 		return nil
 	}
 	if s.ControllerGeneration != "" &&
@@ -693,6 +843,23 @@ func (m *Manager) stagePendingAgentSwitchNativeMetadata(ctx context.Context, id 
 	if !found || sw.State != domain.AgentSwitchStartingTarget || string(sw.TargetGenerationID) != s.LaunchID || sw.TargetNativeSessionRef == nil {
 		return nil
 	}
+	// This runs before ApplyActivitySignal takes the lock, so the nested-agent cwd
+	// guard there has not had a say yet — and the resume handle staged below is
+	// precisely what that guard exists to protect. A nested agent spawned by the
+	// switch target inherits its AO_RUNTIME_LAUNCH_ID, so it clears the launch
+	// fence above; if its hook lands before the target's own, its throwaway
+	// conversation becomes the target's resume handle. Re-check the cwd here,
+	// where it costs a session read only inside that narrow window.
+	rec, foundSession, err := m.store.GetSession(ctx, id)
+	if err != nil {
+		return err
+	}
+	if foundSession && !signalCWDBelongsToSession(rec.Metadata.WorkspacePath, s.AgentCWD) {
+		slog.Default().Warn("lifecycle: refused to stage agent-switch resume handle from outside the session workspace",
+			"session", id, "workspace", rec.Metadata.WorkspacePath, "agent_cwd", s.AgentCWD,
+			"launch", s.LaunchID)
+		return nil
+	}
 	native, found, err := store.GetAgentNativeSession(ctx, *sw.TargetNativeSessionRef)
 	if err != nil {
 		return err
@@ -791,6 +958,24 @@ func isPostToolUseEvent(event string) bool {
 	// post-tool-use-fail is retained for Kimchi hook files installed before the
 	// adapter switched to AO's canonical failure event name.
 	return event == "post-tool-use" || event == "post-tool-use-failure" || event == "post-tool-use-fail"
+}
+
+// isAuthoritativeExitEvent reports the exit events AO produces itself, which
+// must never be second-guessed by a liveness probe (#114).
+//
+//   - process-exited: the supervisor's own wait4 report (cli/agent_process.go).
+//     It IS the process that reaped the agent.
+//   - chat.controller.stopped: the chat controller observing its own provider
+//     stream end (service/chat/controller.go), already fenced by
+//     ControllerGeneration.
+//
+// Everything else carrying an exited state arrives from a harness hook, and a
+// hook is a claim by whichever process happened to fire it. Add to this list
+// only events AO itself emits from a fact it observed directly -- gating one of
+// those risks a session that can never be marked exited, which is worse than
+// the nested-agent hijack this guard exists to stop.
+func isAuthoritativeExitEvent(event string) bool {
+	return event == "process-exited" || event == "chat.controller.stopped"
 }
 
 func cursorBeforeExecutionKey(s ports.ActivitySignal) (string, bool) {
@@ -1478,4 +1663,52 @@ func applyActivityMetadata(meta *domain.SessionMetadata, signal ports.ActivitySi
 	if signal.TranscriptPath != "" {
 		meta.NativeTranscriptPath = signal.TranscriptPath
 	}
+}
+
+// signalCWDBelongsToSession reports whether an activity signal's reporting agent
+// could be the session's own agent, judged by its working directory.
+//
+// Absent facts are always accepted: a harness that does not report a cwd, or a
+// session with no recorded workspace, must keep behaving exactly as before.
+//
+// A lexical miss is not yet a rejection. AO records a workspace path, while a
+// harness reports whatever the OS hands back for its own process, and those two
+// can name the same directory in different forms — a symlinked component is the
+// common one. The tmux runtime already resolves both sides before comparing a
+// pane's cwd against the requested workspace (adapters/runtime/tmux.sameDirectory)
+// for exactly this reason. Rejecting on a form mismatch would silently drop every
+// signal a live session produces, which is a worse failure than the nested agent
+// this guard exists to catch.
+func signalCWDBelongsToSession(workspacePath, agentCWD string) bool {
+	if workspacePath == "" || agentCWD == "" {
+		return true
+	}
+	if pathContainsSignalCWD(workspacePath, agentCWD) {
+		return true
+	}
+	return pathContainsSignalCWD(resolvedForCompare(workspacePath), resolvedForCompare(agentCWD))
+}
+
+func pathContainsSignalCWD(workspacePath, agentCWD string) bool {
+	workspace := filepath.Clean(workspacePath)
+	cwd := filepath.Clean(agentCWD)
+	if cwd == workspace {
+		return true
+	}
+	rel, err := filepath.Rel(workspace, cwd)
+	if err != nil {
+		// Not comparable (different volumes on Windows): do not invent a rejection.
+		return true
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// resolvedForCompare returns path with its symlinks resolved, or path unchanged
+// when it cannot be resolved — an unresolvable path simply keeps the lexical
+// verdict rather than turning into a different answer.
+func resolvedForCompare(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return path
 }

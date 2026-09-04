@@ -84,7 +84,7 @@ test("chat minimap does not make the session pane scroll horizontally", async ({
 		await route.fulfill({ status: 404, json: { error: { code: "NOT_FOUND", message: "not found" } } });
 	});
 
-	await page.goto(`/#/projects/fake-proj/sessions/${sessionId}`);
+	await page.goto(`/#/host/local/session/${sessionId}`);
 	await expect(page.getByRole("log", { name: "Conversation" })).toBeVisible();
 
 	// Minimap markers only render when the inspector rail is closed.

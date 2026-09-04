@@ -89,19 +89,27 @@ if (typeof window !== "undefined") {
 		value: localStorageStub,
 	});
 
-	HTMLCanvasElement.prototype.getContext = (() => ({})) as unknown as typeof HTMLCanvasElement.prototype.getContext;
+	HTMLCanvasElement.prototype.getContext =
+		(() => ({})) as unknown as typeof HTMLCanvasElement.prototype.getContext;
 
-	Element.prototype.hasPointerCapture = (() => false) as typeof Element.prototype.hasPointerCapture;
-	Element.prototype.setPointerCapture = (() => undefined) as typeof Element.prototype.setPointerCapture;
-	Element.prototype.releasePointerCapture = (() => undefined) as typeof Element.prototype.releasePointerCapture;
-	Element.prototype.scrollIntoView = (() => undefined) as typeof Element.prototype.scrollIntoView;
+	Element.prototype.hasPointerCapture = (() =>
+		false) as typeof Element.prototype.hasPointerCapture;
+	Element.prototype.setPointerCapture = (() =>
+		undefined) as typeof Element.prototype.setPointerCapture;
+	Element.prototype.releasePointerCapture = (() =>
+		undefined) as typeof Element.prototype.releasePointerCapture;
+	Element.prototype.scrollIntoView = (() =>
+		undefined) as typeof Element.prototype.scrollIntoView;
 
 	window.ao = {
 		app: {
 			getVersion: async () => "0.0.0-test",
 			chooseDirectory: async () => null,
 			openExternal: async () => undefined,
-			scanImportFolder: async ({ path }: { path: string }) => ({ path, repos: [] }),
+			scanImportFolder: async ({ path }: { path: string }) => ({
+				path,
+				repos: [],
+			}),
 			checkAncestorRepo: async () => undefined,
 			getPathForFile: () => "",
 			onOpenFolderPath: () => () => undefined,
@@ -226,8 +234,16 @@ if (typeof window !== "undefined") {
 				canGoForward: false,
 				isLoading: false,
 			}),
-			getTabs: async (viewId: string) => ({ viewId, activeTabId: "t1", tabs: [] }),
-			selectTab: async ({ viewId, tabId }) => ({ viewId, activeTabId: tabId, tabs: [] }),
+			getTabs: async (viewId: string) => ({
+				viewId,
+				activeTabId: "t1",
+				tabs: [],
+			}),
+			selectTab: async ({ viewId, tabId }) => ({
+				viewId,
+				activeTabId: tabId,
+				tabs: [],
+			}),
 			closeTab: async ({ viewId }) => ({ viewId, activeTabId: "", tabs: [] }),
 			openTab: async ({ viewId }) => ({ viewId, activeTabId: "", tabs: [] }),
 			notifyPanelUsed: () => undefined,
@@ -264,7 +280,12 @@ if (typeof window !== "undefined") {
 			setMigration: async () => undefined,
 		},
 		updateSettings: {
-			get: async () => ({ enabled: false, channel: "latest", nightlyAck: false, feature: null }),
+			get: async () => ({
+				enabled: false,
+				channel: "latest",
+				nightlyAck: false,
+				feature: null,
+			}),
 			set: async () => undefined,
 		},
 		uiSettings: {
@@ -283,11 +304,22 @@ if (typeof window !== "undefined") {
 			download: async () => undefined,
 			install: async () => undefined,
 			onStatus: () => () => undefined,
-		onTelemetry: () => () => undefined,
+			onTelemetry: () => () => undefined,
 		},
 		featureBuilds: {
 			list: async () => [],
 			getActive: async () => null,
+		},
+		remotes: {
+			list: async () => [],
+			add: async () => "offline" as const,
+			update: async () => "offline" as const,
+			remove: async () => undefined,
+			probe: async () => "offline" as const,
+			request: async () => ({ status: 0, body: null }),
+			connect: async () => ({ label: "", url: "", base: "" }),
+			disconnect: async () => undefined,
+			connected: async () => [],
 		},
 		cloud: {
 			getSession: async () => null,

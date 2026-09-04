@@ -18,6 +18,10 @@ func (f *fakeActionStore) GetPR(context.Context, string) (domain.PullRequest, bo
 	return f.pr, f.ok, nil
 }
 
+func (f *fakeActionStore) GetPRByNumber(context.Context, int) (domain.PullRequest, bool, error) {
+	return f.pr, f.ok, nil
+}
+
 type fakeSCMAction struct {
 	observation ports.SCMObservation
 	review      ports.SCMReviewObservation

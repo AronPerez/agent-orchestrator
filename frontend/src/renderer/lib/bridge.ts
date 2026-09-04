@@ -53,7 +53,8 @@ export const aoBridge: AoBridge =
 					await navigator.clipboard.writeText(text);
 				}
 			},
-			readText: async () => (navigator.clipboard?.readText ? navigator.clipboard.readText() : ""),
+			readText: async () =>
+				navigator.clipboard?.readText ? navigator.clipboard.readText() : "",
 		},
 		daemon: {
 			getStatus: async () => ({
@@ -139,8 +140,16 @@ export const aoBridge: AoBridge =
 				canGoForward: false,
 				isLoading: false,
 			}),
-			getTabs: async (viewId: string) => ({ viewId, activeTabId: "t1", tabs: [] }),
-			selectTab: async ({ viewId, tabId }) => ({ viewId, activeTabId: tabId, tabs: [] }),
+			getTabs: async (viewId: string) => ({
+				viewId,
+				activeTabId: "t1",
+				tabs: [],
+			}),
+			selectTab: async ({ viewId, tabId }) => ({
+				viewId,
+				activeTabId: tabId,
+				tabs: [],
+			}),
 			closeTab: async ({ viewId }) => ({ viewId, activeTabId: "", tabs: [] }),
 			openTab: async ({ viewId }) => ({ viewId, activeTabId: "", tabs: [] }),
 			notifyPanelUsed: () => undefined,
@@ -177,7 +186,12 @@ export const aoBridge: AoBridge =
 			setMigration: async () => undefined,
 		},
 		updateSettings: {
-			get: async () => ({ enabled: false, channel: "latest", nightlyAck: false, feature: null }),
+			get: async () => ({
+				enabled: false,
+				channel: "latest",
+				nightlyAck: false,
+				feature: null,
+			}),
 			set: async () => undefined,
 		},
 		uiSettings: {
@@ -201,6 +215,22 @@ export const aoBridge: AoBridge =
 		featureBuilds: {
 			list: async () => [],
 			getActive: async () => null,
+		},
+		// The daemon-served web build has no Electron bridge and so no access to
+		// ~/.ao/remotes.json. Reporting no hosts leaves the UI showing local only,
+		// which is the truth there — anything else would throw at the host row.
+		remotes: {
+			list: async () => [],
+			add: async () => "offline" as const,
+			update: async () => "offline" as const,
+			remove: async () => undefined,
+			probe: async () => "offline" as const,
+			request: async () => ({ status: 0, body: null }),
+			connect: async () => {
+				throw new Error("remote hosts need the desktop app");
+			},
+			disconnect: async () => undefined,
+			connected: async () => [],
 		},
 		cloud: {
 			getSession: async () => null,

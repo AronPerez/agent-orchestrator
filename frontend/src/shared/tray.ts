@@ -1,6 +1,7 @@
 export type TrayAttentionZone = "action" | "merge";
 
 export type TraySessionEntry = {
+	host: string;
 	projectId: string;
 	projectName: string;
 	sessionId: string;
@@ -13,7 +14,7 @@ export type TrayAttentionState = {
 };
 
 export type TrayOpenSessionTarget = {
-	projectId: string;
+	host: string;
 	sessionId: string;
 };
 

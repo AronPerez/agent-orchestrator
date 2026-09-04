@@ -172,6 +172,7 @@ function humanMessage(text: string): ConversationMessage {
 }
 
 const chatSession = {
+	host: "local",
 	id: chatFixture.sessionId,
 	workspaceId: "project-1",
 	workspaceName: "agent-orchestrator",
@@ -209,6 +210,23 @@ describe("HumanMessage attachments", () => {
 		renderImageAttachment(
 			"Attached files (read these files in the workspace):",
 			"attachment-d9014f798f.png",
+		);
+	});
+
+	it("keeps the proxy path prefix in attachment image URLs", () => {
+		render(
+			<HumanMessage
+				message={humanMessage(
+					"inspect this\n\nAttached files (read these files in the workspace):\n- .ao/attachments/attachment-ab12.png",
+				)}
+				sessionId="ao-1"
+				apiBaseUrl="http://127.0.0.1:62220/proxy-token/"
+			/>,
+		);
+
+		expect(screen.getByRole("img", { name: "attachment-ab12.png" })).toHaveAttribute(
+			"src",
+			"http://127.0.0.1:62220/proxy-token/api/v1/sessions/ao-1/preview/files/.ao/attachments/attachment-ab12.png",
 		);
 	});
 
@@ -1922,7 +1940,7 @@ describe("ChatWorkspace reviewer tabs", () => {
 	const reviewerTarget = {
 		kind: "reviewer" as const,
 		...reviewerTerminal,
-		sessionId: chatSession.id,
+		session: { host: chatSession.host, id: chatSession.id },
 	};
 
 	it("makes each full-height tile its semantic click target", () => {
@@ -2156,6 +2174,7 @@ describe("promptSpacerHeight", () => {
 describe("ChatWorkspace shell tabs", () => {
 	const shells = [
 		{
+			host: "local",
 			handleId: "shell-1",
 			sessionId: chatFixture.sessionId,
 			title: "chat worktree shell",
@@ -2163,6 +2182,7 @@ describe("ChatWorkspace shell tabs", () => {
 			createdAt: "2026-08-04T00:00:00Z",
 		},
 		{
+			host: "local",
 			handleId: "shell-2",
 			sessionId: chatFixture.sessionId,
 			title: "second shell",
@@ -2175,8 +2195,9 @@ describe("ChatWorkspace shell tabs", () => {
 		return {
 			kind: "shell" as const,
 			generation: shell.createdAt,
+			host: "local",
 			handleId,
-			sessionId: chatFixture.sessionId,
+			session: { host: "local", id: chatFixture.sessionId },
 			title: shell.title,
 		};
 	};
@@ -2257,7 +2278,7 @@ describe("ChatWorkspace shell tabs", () => {
 					kind: "reviewer",
 					handleId: "review-1",
 					harness: "codex",
-					sessionId: chatFixture.sessionId,
+					session: { host: "local", id: chatFixture.sessionId },
 				}}
 			/>,
 		);
@@ -2317,7 +2338,7 @@ describe("ChatWorkspace shell tabs", () => {
 					kind: "reviewer",
 					handleId: "review-1",
 					harness: "codex",
-					sessionId: chatFixture.sessionId,
+					session: { host: "local", id: chatFixture.sessionId },
 				}}
 			/>,
 		);

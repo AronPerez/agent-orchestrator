@@ -204,13 +204,26 @@ func TestEffectiveHarnessAndAgentConfig(t *testing.T) {
 	}
 
 	// Role override merges over the base agent config (set fields win; unset keep base).
-	got := effectiveAgentConfig(domain.KindWorker, cfg)
+	got := effectiveAgentConfig(domain.HarnessCodex, domain.KindWorker, cfg)
 	if got.Model != "worker" || got.Mode != "high" || got.Permissions != domain.PermissionModeAuto {
 		t.Fatalf("merged worker config = %#v, want model=worker mode=high permissions=auto", got)
 	}
 	// Orchestrator has no agent-config override, so the base config is used as-is.
-	if got := effectiveAgentConfig(domain.KindOrchestrator, cfg); got.Model != "base" {
+	if got := effectiveAgentConfig(domain.HarnessClaudeCode, domain.KindOrchestrator, cfg); got.Model != "base" {
 		t.Fatalf("orchestrator config = %#v, want base", got)
+	}
+
+	// A model is only meaningful to the harness it was configured for. When the
+	// session runs a different agent than the role names, the model and mode are
+	// dropped so the agent uses its own default; permissions are harness-neutral
+	// and survive. Without this an OpenAI model id reached a claude-code session
+	// and the agent rejected the whole launch.
+	foreign := effectiveAgentConfig(domain.HarnessClaudeCode, domain.KindWorker, cfg)
+	if foreign.Model != "" || foreign.Mode != "" {
+		t.Fatalf("worker config for claude-code = %#v, want model/mode dropped: they are configured for codex", foreign)
+	}
+	if foreign.Permissions != domain.PermissionModeAuto {
+		t.Fatalf("worker permissions for claude-code = %q, want auto: permissions are not harness-specific", foreign.Permissions)
 	}
 }
 

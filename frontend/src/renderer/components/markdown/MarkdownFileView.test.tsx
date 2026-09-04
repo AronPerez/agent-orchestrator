@@ -5,6 +5,7 @@ import { MarkdownFileView } from "./MarkdownFileView";
 
 vi.mock("../../lib/api-client", () => ({
 	getApiBaseUrl: () => "http://127.0.0.1:4567",
+	hasTrustedApiBaseUrl: () => true,
 }));
 
 afterEach(() => {
@@ -13,10 +14,10 @@ afterEach(() => {
 
 function view(content: string, filePath = "docs/README.md", truncated = false) {
 	return (
-		<MarkdownFileView
+			<MarkdownFileView
 			content={content}
 			filePath={filePath}
-			sessionId="sess-1"
+				session={{ host: "local", id: "sess-1" }}
 			truncated={truncated}
 			version={7}
 		/>

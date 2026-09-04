@@ -43,6 +43,7 @@ export type ProjectSourcePickerViewProps = {
 	dialog?: boolean;
 	disabled: boolean;
 	folderIcon?: ReactNode;
+	hostRow?: ReactNode;
 	labels: ProjectSourcePickerLabels;
 	onClose?: () => void;
 	onSelect: (source: ProjectSource) => void;
@@ -56,6 +57,7 @@ export function ProjectSourcePickerView({
 	dialog = false,
 	disabled,
 	folderIcon,
+	hostRow,
 	labels,
 	onClose,
 	onSelect,
@@ -71,6 +73,7 @@ export function ProjectSourcePickerView({
 				<h2 className="import-title text-balance">{labels.title}</h2>
 				<p className="import-description text-pretty">{labels.description}</p>
 			</div>
+			{hostRow}
 			<div className="relative z-[2] grid grid-cols-1 gap-4 self-stretch sm:grid-cols-2 sm:gap-6">
 				<ProjectSourceButton
 					description={labels.cloneDescription}
@@ -195,7 +198,11 @@ export function ProjectSetupHeaderView({
 	path,
 	title,
 }: {
-	CloseButton: ComponentType<{ "aria-label": string; children: ReactNode; disabled: boolean }>;
+	CloseButton: ComponentType<{
+		"aria-label": string;
+		children: ReactNode;
+		disabled: boolean;
+	}>;
 	Description: ComponentType<ProjectSetupHeaderTextProps>;
 	Title: ComponentType<ProjectSetupHeaderTextProps>;
 	closeIcon: ReactNode;
@@ -268,14 +275,20 @@ export function ProjectSetupFormView({
 		if (canSubmit) onSubmit();
 	};
 	return (
-		<form className="space-y-5 p-(--size-import-dialog-padding)" onSubmit={submit}>
+		<form
+			className="space-y-5 p-(--size-import-dialog-padding)"
+			onSubmit={submit}
+		>
 			<div className="grid gap-4 sm:grid-cols-2">
 				{agentControls.worker}
 				{agentControls.orchestrator}
 			</div>
 
 			{agents.loading && (
-				<p className="text-xs leading-row text-[var(--color-text-agents-sheet-description)]" role="status">
+				<p
+					className="text-xs leading-row text-[var(--color-text-agents-sheet-description)]"
+					role="status"
+				>
 					{agents.loadingMessage}
 				</p>
 			)}
@@ -303,12 +316,16 @@ export function ProjectSetupFormView({
 				</div>
 			)}
 
-			<div className="border-t border-[var(--color-border-agents-sheet)] pt-5">{intakeControl}</div>
+			<div className="border-t border-[var(--color-border-agents-sheet)] pt-5">
+				{intakeControl}
+			</div>
 
 			{setupNotice && (
 				<div className="rounded-lg border border-[var(--color-border-agents-sheet)] bg-[var(--color-bg-agents-sheet-control)]/80 px-3 py-2.5 text-xs leading-body-md text-[var(--color-text-agents-sheet-description)]">
 					<p>{setupNotice.message}</p>
-					{setupNotice.warning && <p className="mt-2 text-warning">{setupNotice.warning}</p>}
+					{setupNotice.warning && (
+						<p className="mt-2 text-warning">{setupNotice.warning}</p>
+					)}
 				</div>
 			)}
 
@@ -332,7 +349,9 @@ export function ProjectSetupFormView({
 						>
 							{alert.title}
 						</p>
-						<p className="text-[var(--color-text-agents-sheet-description)]">{alert.message}</p>
+						<p className="text-[var(--color-text-agents-sheet-description)]">
+							{alert.message}
+						</p>
 					</div>
 				</div>
 			)}
@@ -405,9 +424,13 @@ export function ProjectSettingsRow({
 		<div className={cn("settings-row-bar", className)}>
 			<div className="flex shrink-0 items-center gap-(--size-settings-row-icon-gap)">
 				{icon}
-				<span className="whitespace-nowrap text-sm leading-5 text-settings-label">{label}</span>
+				<span className="whitespace-nowrap text-sm leading-5 text-settings-label">
+					{label}
+				</span>
 			</div>
-			<div className="flex min-w-0 flex-1 items-center justify-end">{children}</div>
+			<div className="flex min-w-0 flex-1 items-center justify-end">
+				{children}
+			</div>
 		</div>
 	);
 }
@@ -525,7 +548,12 @@ export function ProjectGeneralSettingsView({
 }: {
 	displayName: string;
 	externalLink?: ProjectExternalLink;
-	icons?: Partial<Record<"edit" | "name" | "id" | "kind" | "path" | "repo" | "workspaceRepo", ReactNode>>;
+	icons?: Partial<
+		Record<
+			"edit" | "name" | "id" | "kind" | "path" | "repo" | "workspaceRepo",
+			ReactNode
+		>
+	>;
 	labels: {
 		title: string;
 		name: string;
@@ -560,16 +588,40 @@ export function ProjectGeneralSettingsView({
 					value={displayName}
 					onChange={onDisplayNameChange}
 				/>
-				<ProjectSettingsValueRow icon={icons?.id} label={labels.id} value={project.id} />
-				<ProjectSettingsValueRow icon={icons?.kind} label={labels.kind} value={project.kindLabel} />
-				<ProjectSettingsValueRow externalLink={externalLink} href={project.pathHref} icon={icons?.path} label={labels.path} value={project.path} />
-				<ProjectSettingsValueRow externalLink={externalLink} href={project.repoHref} icon={icons?.repo} label={labels.repo} value={project.repo || "—"} />
+				<ProjectSettingsValueRow
+					icon={icons?.id}
+					label={labels.id}
+					value={project.id}
+				/>
+				<ProjectSettingsValueRow
+					icon={icons?.kind}
+					label={labels.kind}
+					value={project.kindLabel}
+				/>
+				<ProjectSettingsValueRow
+					externalLink={externalLink}
+					href={project.pathHref}
+					icon={icons?.path}
+					label={labels.path}
+					value={project.path}
+				/>
+				<ProjectSettingsValueRow
+					externalLink={externalLink}
+					href={project.repoHref}
+					icon={icons?.repo}
+					label={labels.repo}
+					value={project.repo || "—"}
+				/>
 			</ProjectSettingsSection>
 			{project.workspaceRepos && (
 				<ProjectSettingsSection title={labels.workspaceRepos} grouped>
 					{project.workspaceRepos.length > 0 ? (
 						project.workspaceRepos.map((repo) => (
-							<ProjectSettingsRow key={repo.name} icon={icons?.workspaceRepo} label={repo.name}>
+							<ProjectSettingsRow
+								key={repo.name}
+								icon={icons?.workspaceRepo}
+								label={repo.name}
+							>
 								<span className="settings-row-value">
 									{repo.relativePath}
 									{repo.repo ? ` · ${repo.repo}` : ""}
@@ -577,7 +629,9 @@ export function ProjectGeneralSettingsView({
 							</ProjectSettingsRow>
 						))
 					) : (
-						<p className="px-1 text-xs text-settings-muted">{labels.workspaceReposEmpty}</p>
+						<p className="px-1 text-xs text-settings-muted">
+							{labels.workspaceReposEmpty}
+						</p>
 					)}
 				</ProjectSettingsSection>
 			)}
@@ -590,6 +644,7 @@ export function ProjectAgentsSettingsView({
 	orchestratorArea,
 	orchestratorModelArea,
 	permissions,
+	sessionInterfaceArea,
 	title,
 	workerArea,
 	workerModelArea,
@@ -598,6 +653,8 @@ export function ProjectAgentsSettingsView({
 	orchestratorArea: ReactNode;
 	orchestratorModelArea: ReactNode;
 	permissions: { control: ReactNode; icon?: ReactNode; label: string };
+	/** Omitted where the setting does not apply — see the caller's gate. */
+	sessionInterfaceArea?: ReactNode;
 	title: string;
 	workerArea: ReactNode;
 	workerModelArea: ReactNode;
@@ -611,8 +668,11 @@ export function ProjectAgentsSettingsView({
 			<ProjectSettingsRow icon={permissions.icon} label={permissions.label}>
 				{permissions.control}
 			</ProjectSettingsRow>
+			{sessionInterfaceArea}
 			{missingRequiredMessage && (
-				<p className="px-1 text-xs leading-row text-error" role="alert">{missingRequiredMessage}</p>
+				<p className="px-1 text-xs leading-row text-error" role="alert">
+					{missingRequiredMessage}
+				</p>
 			)}
 		</ProjectSettingsSection>
 	);
@@ -685,7 +745,10 @@ export function ProjectWorkflowSettingsView({
 	);
 }
 
-export type ProjectSettingsFormProps = Omit<HTMLAttributes<HTMLFormElement>, "onSubmit"> & {
+export type ProjectSettingsFormProps = Omit<
+	HTMLAttributes<HTMLFormElement>,
+	"onSubmit"
+> & {
 	onSubmit: () => void;
 };
 
@@ -698,7 +761,10 @@ export function ProjectSettingsFormView({
 	return (
 		<form
 			{...props}
-			className={cn("flex w-full flex-col gap-(--size-settings-section-gap)", className)}
+			className={cn(
+				"flex w-full flex-col gap-(--size-settings-section-gap)",
+				className,
+			)}
 			onSubmit={(event) => {
 				event.preventDefault();
 				onSubmit();

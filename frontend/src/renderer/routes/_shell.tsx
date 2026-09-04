@@ -24,19 +24,27 @@ import { agentModelsQueryOptions } from "../hooks/useAgentModelsQuery";
 import { useDaemonStatus } from "../hooks/useDaemonStatus";
 import { useOpenShellTerminal } from "../hooks/useShellTerminals";
 import { useWindowFullScreen } from "../hooks/useWindowFullScreen";
-import { useWorkspaceQuery, workspaceQueryKey, workspaceQueryOptions } from "../hooks/useWorkspaceQuery";
+import {
+	localWorkspaceFailure,
+	useWorkspaceQuery,
+	workspaceHostQueryKey,
+	workspaceQueryKey,
+	workspaceQueryOptions,
+} from "../hooks/useWorkspaceQuery";
 import { apiClient, apiErrorCode, apiErrorMessage, hasTrustedApiBaseUrl } from "../lib/api-client";
 import { refreshDaemonStatus } from "../lib/daemon-status";
-import { usesPreviewWorkspaceData } from "../lib/preview-mode";
+import { hasBrowserDaemon, usesPreviewWorkspaceData } from "../lib/preview-mode";
 import { addRendererExceptionStep, captureRendererEvent, captureRendererException } from "../lib/telemetry";
 import { ShellProvider } from "../lib/shell-context";
 import { restartProjectOrchestrator } from "../lib/restart-orchestrator";
 import { captureOrchestratorReplacementFailure } from "../lib/orchestrator-replacement-telemetry";
 import { applyDocumentTheme, applyDocumentThemeStyle } from "../lib/theme";
 import { aoBridge } from "../lib/bridge";
+import { adaptiveSidebarShouldCompact } from "../lib/adaptive-sidebar";
 import { handleModifierLinkClick } from "../lib/external-link-policy";
 import { cn } from "../lib/utils";
-import { adaptiveSidebarShouldCompact } from "../lib/adaptive-sidebar";
+import { LOCAL_HOST, parseRefKey, refKey, type Ref } from "../lib/hosts";
+import { clientFor } from "../lib/host-clients";
 import {
 	isLinuxPlatform,
 	isMacPlatform,
@@ -46,7 +54,14 @@ import {
 } from "../lib/platform";
 import { sidebarIsCompact, sidebarIsVisible, sidebarOccupiesLayout, useUiStore } from "../stores/ui-store";
 import { matchesRendererShortcut } from "../stores/keybindings-store";
-import { sessionIsActive, toProjectKind, type WorkspaceSummary } from "../types/workspace";
+import {
+	flattenHostSections,
+	type HostSection,
+	sessionIsActive,
+	toProjectKind,
+	updateHostWorkspaces,
+	type WorkspaceSummary,
+} from "../types/workspace";
 import type { components } from "../../api/schema";
 import { useAgentInventoryTelemetry } from "../hooks/useAgentInventoryTelemetry";
 
@@ -149,12 +164,18 @@ function ShellLayout() {
 	const matchRoute = useMatchRoute();
 	const queryClient = useQueryClient();
 	const workspaceQuery = useWorkspaceQuery();
-	const workspaces = workspaceQuery.data ?? [];
+	const workspaces = useMemo(() => flattenHostSections(workspaceQuery.data), [workspaceQuery.data]);
 	// Global shortcut listeners need the latest workspace list, but recreating
 	// those subscriptions for every streamed activity update is avoidable.
 	const workspacesRef = useRef(workspaces);
 	workspacesRef.current = workspaces;
 	const daemonStatus = useDaemonStatus(queryClient);
+	// Daemon lifecycle is an Electron-bridge signal: without a preload it stays
+	// "stopped" forever, which would pin the whole shell on the startup splash.
+	// A browser-served build has no lifecycle to report and no daemon to wait
+	// for — the one that served this page is already up. Same escape hatch
+	// SessionView and TerminalPane use.
+	const isDaemonReady = daemonStatus.state === "ready" || hasBrowserDaemon;
 	const [workspaceStartupState, setWorkspaceStartupState] = useState<"loading" | "ready" | "error">("loading");
 	const workspaceStartupBaselineRef = useRef(0);
 	const themePreference = useUiStore((state) => state.themePreference);
@@ -234,7 +255,7 @@ function ShellLayout() {
 	const handledShellNonceRef = useRef(newShellTerminalNonce);
 	const [isKeyboardShortcutsOpen, setIsKeyboardShortcutsOpen] = useState(false);
 	const [isKeyboardShortcutsSettingsOpen, setIsKeyboardShortcutsSettingsOpen] = useState(false);
-	const routeParams = useParams({ strict: false }) as { projectId?: string; sessionId?: string };
+	const routeParams = useParams({ strict: false }) as { hostId?: string; projectId?: string; sessionId?: string };
 	useEffect(() => {
 		document.addEventListener("click", handleModifierLinkClick);
 		return () => document.removeEventListener("click", handleModifierLinkClick);
@@ -298,22 +319,29 @@ function ShellLayout() {
 	// Project in scope for a new-session shortcut: the route's project, or the
 	// workspace owning the open session (so the shortcut works from a worker's
 	// detail view, where the URL carries only a sessionId).
-	const scopedProjectId = routeParams.projectId
-		? routeParams.projectId
-		: routeParams.sessionId
-			? workspaces.find((workspace) => workspace.sessions.some((session) => session.id === routeParams.sessionId))?.id
+	const scopedWorkspace = routeParams.sessionId
+		? workspaces.find((workspace) =>
+				workspace.sessions.some(
+					(session) => session.host === routeParams.hostId && session.id === routeParams.sessionId,
+				),
+			)
+		: routeParams.projectId
+			? workspaces.find(
+					(workspace) => workspace.host === routeParams.hostId && workspace.id === routeParams.projectId,
+				)
 			: undefined;
+	const scopedProjectId = scopedWorkspace?.id;
 	// Warms the New Task composer's model-catalog cache while the user is just
 	// looking at the project, so the picker never shows a loading flash the
 	// first time they actually open the dialog.
 	useEffect(() => {
 		if (!scopedProjectId) return;
-		const projectQueryKey = ["project", scopedProjectId];
+		const projectQueryKey = ["project", refKey(scopedWorkspace)];
 		void queryClient
 			.prefetchQuery({
 				queryKey: projectQueryKey,
 				queryFn: async () => {
-					const { data, error: apiError } = await apiClient.GET("/api/v1/projects/{id}", {
+					const { data, error: apiError } = await clientFor(scopedWorkspace.host).GET("/api/v1/projects/{id}", {
 						params: { path: { id: scopedProjectId } },
 					});
 					if (apiError) throw new Error(apiErrorMessage(apiError));
@@ -325,16 +353,16 @@ function ShellLayout() {
 				const project = queryClient.getQueryData<components["schemas"]["Project"]>(projectQueryKey);
 				const defaultWorkerAgent = project?.config?.worker?.agent || project?.agent || "";
 				if (defaultWorkerAgent) {
-					void queryClient.prefetchQuery(agentModelsQueryOptions(defaultWorkerAgent, scopedProjectId));
+					void queryClient.prefetchQuery(agentModelsQueryOptions(defaultWorkerAgent, scopedWorkspace));
 				}
 			});
-	}, [queryClient, scopedProjectId]);
+	}, [queryClient, scopedProjectId, scopedWorkspace]);
 	// The root route is the intentionally minimal home surface, regardless of
 	// whether projects have already been registered.
 	const isHomeRoute = Boolean(matchRoute({ to: "/" }));
 	const isSettingsRoute =
 		Boolean(matchRoute({ to: "/settings", fuzzy: true })) ||
-		Boolean(matchRoute({ to: "/projects/$projectId/settings", fuzzy: true }));
+		Boolean(matchRoute({ to: "/host/$hostId/project/$projectId/settings", fuzzy: true }));
 	// Welcome/settings always self-frame. Platforms that hide the shell-owned
 	// topbar (macOS) use the same full-height inset; session actions mount
 	// inside SessionView.
@@ -347,15 +375,20 @@ function ShellLayout() {
 	const orchestratorReplacementErrors = useUiStore((state) => state.orchestratorReplacementErrors);
 	const setOrchestratorReplacementError = useUiStore((state) => state.setOrchestratorReplacementError);
 	const setOrchestratorStartupError = useUiStore((state) => state.setOrchestratorStartupError);
-	const replacementErrorProjectId = Object.keys(orchestratorReplacementErrors)[0] ?? null;
+	const replacementErrorProjectKey = Object.keys(orchestratorReplacementErrors)[0] ?? null;
+	const replacementErrorProject = replacementErrorProjectKey ? parseRefKey(replacementErrorProjectKey) : null;
 	const isStartupLoading =
 		!usesPreviewWorkspaceData &&
 		!daemonStatus.code &&
-		(daemonStatus.state !== "ready" || workspaceStartupState === "loading");
+		(!isDaemonReady || workspaceStartupState === "loading");
 	const navigateSession = useCallback(
 		(direction: -1 | 1) => {
 			if (!scopedProjectId) return;
-			const sessions = (workspacesRef.current.find((workspace) => workspace.id === scopedProjectId)?.sessions ?? []).filter(
+			const sessions = (
+				workspacesRef.current.find(
+					(workspace) => workspace.host === routeParams.hostId && workspace.id === scopedProjectId,
+				)?.sessions ?? []
+			).filter(
 				sessionIsActive,
 			);
 			if (sessions.length === 0) return;
@@ -369,16 +402,30 @@ function ShellLayout() {
 			const session = sessions[nextIndex];
 			if (!session || session.id === routeParams.sessionId) return;
 			void navigate({
-				to: "/projects/$projectId/sessions/$sessionId",
-				params: { projectId: scopedProjectId, sessionId: session.id },
+				to: "/host/$hostId/session/$sessionId",
+				params: { hostId: session.host, sessionId: session.id },
 			});
 		},
-		[navigate, routeParams.sessionId, scopedProjectId],
+		[navigate, routeParams.hostId, routeParams.sessionId, scopedProjectId],
 	);
 
 	const updateWorkspaces = useCallback(
 		(updater: (workspaces: WorkspaceSummary[]) => WorkspaceSummary[]) => {
-			queryClient.setQueryData<WorkspaceSummary[]>(workspaceQueryKey, (current = []) => updater(current));
+			queryClient.setQueryData<HostSection[]>(workspaceHostQueryKey(LOCAL_HOST), (current) =>
+				updateHostWorkspaces(
+					current ?? [
+						{
+							host: LOCAL_HOST,
+							label: "Local",
+							status: "ready",
+							workspaces: [],
+							failure: null,
+						},
+					],
+					LOCAL_HOST,
+					updater,
+				),
+			);
 		},
 		[queryClient],
 	);
@@ -390,6 +437,7 @@ function ShellLayout() {
 			source: "project_add" | "project_clone",
 		) => {
 			const workspace: WorkspaceSummary = {
+				host: LOCAL_HOST,
 				id: project.id,
 				name: project.name,
 				kind: toProjectKind(project.kind),
@@ -401,7 +449,7 @@ function ShellLayout() {
 			};
 			void captureRendererEvent(`ao.renderer.${source}_succeeded`, { project_id: workspace.id });
 			updateWorkspaces((current) => [workspace, ...current.filter((item) => item.id !== workspace.id)]);
-			setOrchestratorStartupError(workspace.id, null);
+			setOrchestratorStartupError(workspace, null);
 			try {
 				void captureRendererEvent("ao.renderer.orchestrator_spawn_requested", {
 					project_id: workspace.id,
@@ -411,7 +459,7 @@ function ShellLayout() {
 					data: spawnData,
 					error: spawnError,
 					response: spawnResponse,
-				} = await apiClient.POST("/api/v1/sessions", {
+				} = await clientFor(workspace.host).POST("/api/v1/sessions", {
 					body: {
 						projectId: workspace.id,
 						kind: "orchestrator",
@@ -431,18 +479,21 @@ function ShellLayout() {
 				const sessionId = spawnData.session.id;
 				await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
 				void navigate({
-					to: "/projects/$projectId/sessions/$sessionId",
-					params: { projectId: workspace.id, sessionId },
+					to: "/host/$hostId/session/$sessionId",
+					params: { hostId: workspace.host, sessionId },
 				});
 			} catch (spawnError) {
 				void captureRendererEvent("ao.renderer.orchestrator_spawn_failed", {
 					project_id: workspace.id,
 					source,
 				});
-				void navigate({ to: "/projects/$projectId", params: { projectId: workspace.id } });
+				void navigate({
+					to: "/host/$hostId/project/$projectId",
+					params: { hostId: workspace.host, projectId: workspace.id },
+				});
 				const message = spawnError instanceof Error ? spawnError.message : "Could not start orchestrator";
 				const startupMessage = `Project added, but orchestrator did not start: ${message}`;
-				setOrchestratorStartupError(workspace.id, startupMessage);
+				setOrchestratorStartupError(workspace, startupMessage);
 			}
 		},
 		[navigate, queryClient, setOrchestratorStartupError, updateWorkspaces],
@@ -480,8 +531,8 @@ function ShellLayout() {
 					source: "project-add",
 					operation: "project_add",
 					surface: "project_board",
-					});
-					throw failure;
+				});
+				throw failure;
 			}
 			if (!data?.project) throw new Error("Project creation returned no project");
 			await completeProjectCreation(data.project, input, "project_add");
@@ -542,16 +593,17 @@ function ShellLayout() {
 	}, []);
 
 	const removeProject = useCallback(
-		async (projectId: string) => {
+		async (project: Ref) => {
+			const projectId = project.id;
 			const isLastWorkspace =
-              workspaces.length === 1 && workspaces[0]?.id === projectId;
+				workspaces.length === 1 && workspaces[0]?.host === project.host && workspaces[0]?.id === projectId;
 			void addRendererExceptionStep("Project removal requested", {
 				source: "project-remove",
 				operation: "project_remove",
 				surface: "project_board",
 				project_id: projectId,
 			});
-			const { error } = await apiClient.DELETE("/api/v1/projects/{id}", {
+			const { error } = await clientFor(project.host).DELETE("/api/v1/projects/{id}", {
 				params: { path: { id: projectId } },
 			});
 			if (error) {
@@ -566,25 +618,25 @@ function ShellLayout() {
 				throw failure;
 			}
 			void captureRendererEvent("ao.renderer.project_removed", { project_id: projectId });
-			updateWorkspaces((current) => current.filter((item) => item.id !== projectId));
-			if (isLastWorkspace) {
-              void navigate({ to: "/" });
-}
+			queryClient.setQueryData<HostSection[]>(workspaceHostQueryKey(project.host), (current) =>
+				updateHostWorkspaces(current, project.host, (items) => items.filter((item) => item.id !== projectId)),
+			);
+			if (isLastWorkspace) void navigate({ to: "/" });
 		},
-		[navigate, updateWorkspaces, workspaces],
+		[navigate, queryClient, workspaces],
 	);
 
 	const restartOrchestrator = useCallback(
-		async (projectId: string, mode?: "chat" | "tui") => {
+		async (project: Ref, mode?: "chat" | "tui") => {
 			await restartProjectOrchestrator({
-				projectId,
+				project,
 				queryClient,
 				navigate,
 				setProjectRestarting,
 				setOrchestratorReplacementError,
 				mode,
 				onError: (error) => {
-					captureOrchestratorReplacementFailure(error, projectId);
+					captureOrchestratorReplacementFailure(error, project.id);
 				},
 			});
 		},
@@ -612,7 +664,9 @@ function ShellLayout() {
 				active = false;
 			};
 		}
-		if (daemonStatus.state !== "ready" || !daemonStatus.port) {
+		// The port is Electron's cue that it knows where to point REST. A
+		// browser-served build is already same-origin, so it has nothing to wait for.
+		if (!hasBrowserDaemon && (daemonStatus.state !== "ready" || !daemonStatus.port)) {
 			workspaceStartupBaselineRef.current = 0;
 			setWorkspaceStartupState("loading");
 			return () => {
@@ -621,12 +675,12 @@ function ShellLayout() {
 		}
 
 		workspaceStartupBaselineRef.current =
-			queryClient.getQueryState(workspaceQueryKey)?.dataUpdatedAt ?? 0;
+			queryClient.getQueryState(workspaceQueryOptions.queryKey)?.dataUpdatedAt ?? 0;
 		setWorkspaceStartupState("loading");
 		void queryClient
 			.fetchQuery({ ...workspaceQueryOptions, staleTime: 0 })
-			.then(() => {
-				if (active) setWorkspaceStartupState("ready");
+			.then((sections) => {
+				if (active) setWorkspaceStartupState(localWorkspaceFailure(sections) ? "error" : "ready");
 			})
 			.catch((error) => {
 				if (active && !isCancelledError(error)) setWorkspaceStartupState("error");
@@ -642,9 +696,12 @@ function ShellLayout() {
 	// the workspace query later, so let a newer successful result recover the
 	// shell without requiring a daemon restart or port change.
 	useEffect(() => {
+		if (usesPreviewWorkspaceData || !isDaemonReady) return;
+		if (workspaceQuery.localFailure) {
+			setWorkspaceStartupState("error");
+			return;
+		}
 		if (
-			usesPreviewWorkspaceData ||
-			daemonStatus.state !== "ready" ||
 			workspaceStartupState === "ready" ||
 			!workspaceQuery.isSuccess ||
 			workspaceQuery.dataUpdatedAt <= workspaceStartupBaselineRef.current
@@ -656,6 +713,7 @@ function ShellLayout() {
 		daemonStatus.state,
 		workspaceQuery.dataUpdatedAt,
 		workspaceQuery.isSuccess,
+		workspaceQuery.localFailure,
 		workspaceStartupState,
 	]);
 
@@ -695,7 +753,10 @@ function ShellLayout() {
 				const workspace = workspacesRef.current[Number(event.key) - 1];
 				if (workspace) {
 					event.preventDefault();
-					void navigate({ to: "/projects/$projectId", params: { projectId: workspace.id } });
+					void navigate({
+						to: "/host/$hostId/project/$projectId",
+						params: { hostId: workspace.host, projectId: workspace.id },
+					});
 				}
 			}
 		};
@@ -710,13 +771,13 @@ function ShellLayout() {
 	useEffect(
 		() =>
 			aoBridge.app.onNewSessionShortcut(() => {
-				if (scopedProjectId) {
-					requestNewTask(scopedProjectId);
+				if (scopedWorkspace) {
+					requestNewTask(scopedWorkspace);
 				} else {
 					requestCreateProject();
 				}
 			}),
-		[scopedProjectId, requestNewTask, requestCreateProject],
+		[scopedWorkspace, requestNewTask, requestCreateProject],
 	);
 
 	useEffect(() => aoBridge.app.onKeyboardShortcutsHelp(() => setIsKeyboardShortcutsOpen(true)), []);
@@ -748,10 +809,16 @@ function ShellLayout() {
 		if (handledShellNonceRef.current === newShellTerminalNonce) return;
 		handledShellNonceRef.current = newShellTerminalNonce;
 		openShellTerminal.mutate(
-			{ projectId: scopedProjectId, sessionId: routeParams.sessionId },
+			{
+				project: scopedWorkspace,
+				session:
+					routeParams.hostId && routeParams.sessionId
+						? { host: routeParams.hostId, id: routeParams.sessionId }
+						: undefined,
+			},
 			{
 				onSuccess: (shell) => {
-					setActiveShellTerminal(shell.handleId);
+					setActiveShellTerminal({ host: shell.host, id: shell.handleId });
 					if (!routeParams.sessionId) {
 						void navigate({ to: "/terminals" });
 					}
@@ -762,6 +829,8 @@ function ShellLayout() {
 		newShellTerminalNonce,
 		openShellTerminal,
 		scopedProjectId,
+		scopedWorkspace,
+		routeParams.hostId,
 		routeParams.sessionId,
 		navigate,
 		setActiveShellTerminal,
@@ -848,7 +917,7 @@ function ShellLayout() {
 					onOpenChange={setIsKeyboardShortcutsSettingsOpen}
 				/>
 				<TerminalCacheProvider
-					daemonReady={daemonStatus.state === "ready"}
+					daemonReady={isDaemonReady}
 					theme={resolvedTheme}
 				>
 
@@ -903,13 +972,16 @@ function ShellLayout() {
 					autoCompact={isSidebarCompact}
 					hideEdgeBorder={isHomeRoute}
 					underTopbar={isMac || isWindows || isLinux}
-						topbarOffset={isWindows ? "titlebar" : hideShellTopbar ? "trafficLights" : "toolbar"}
-						onCloneProject={cloneProject}
+					topbarOffset={isWindows ? "titlebar" : hideShellTopbar ? "trafficLights" : "toolbar"}
+					onCloneProject={cloneProject}
 						onCreateProject={createProject}
 						onInitializeProject={initializeProjectRepository}
 						onRemoveProject={removeProject}
-						workspaceError={workspaceQuery.isError ? errorMessage(workspaceQuery.error) : undefined}
-						workspaces={workspaces}
+						workspaceError={
+							workspaceQuery.localFailure ??
+							(workspaceQuery.isError ? errorMessage(workspaceQuery.error) : undefined)
+						}
+						hostSections={workspaceQuery.data ?? []}
 					/>
 					<main className={cn("flex min-w-0 flex-1 flex-col overflow-x-hidden", !sidebarHasLayout && "sidebar-hidden")}>
 						<div className="min-h-0 flex-1 overflow-x-hidden">
@@ -953,13 +1025,13 @@ function ShellLayout() {
 					/>
 				</SidebarProvider>
 				<OrchestratorReplacementDialog
-					error={replacementErrorProjectId ? orchestratorReplacementErrors[replacementErrorProjectId] : undefined}
+					error={replacementErrorProjectKey ? orchestratorReplacementErrors[replacementErrorProjectKey] : undefined}
 					onOpenChange={(open) => {
-						if (!open && replacementErrorProjectId) setOrchestratorReplacementError(replacementErrorProjectId, null);
+						if (!open && replacementErrorProject) setOrchestratorReplacementError(replacementErrorProject, null);
 					}}
-					onRetry={(projectId) => void restartOrchestrator(projectId)}
-					onRetryAsTui={(projectId) => void restartOrchestrator(projectId, "tui")}
-					projectId={replacementErrorProjectId}
+					onRetry={(project) => void restartOrchestrator(project)}
+					onRetryAsTui={(project) => void restartOrchestrator(project, "tui")}
+					project={replacementErrorProject}
 					workspaces={workspaces}
 				/>
 					<CommandPalette />

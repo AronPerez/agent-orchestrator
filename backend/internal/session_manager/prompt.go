@@ -35,7 +35,11 @@ type systemPromptConfig struct {
 	OrchestratorSessionID string
 	ProjectRules          string
 	OrchestratorRules     string
-	AdditionalSections    []string
+	// OrchestratorOverride, when set, replaces the built-in orchestrator role
+	// prompt (project.Config.OrchestratorPrompt). OrchestratorRules and the
+	// standing guards still apply on top of it.
+	OrchestratorOverride string
+	AdditionalSections   []string
 }
 
 type projectRulesConfig struct {
@@ -71,7 +75,11 @@ func buildSystemPromptText(cfg systemPromptConfig) string {
 	sections := make([]string, 0, 6)
 	switch cfg.Role {
 	case sessionPromptRoleOrchestrator:
-		sections = append(sections, orchestratorSystemPrompt(cfg.Project))
+		if override := strings.TrimSpace(cfg.OrchestratorOverride); override != "" {
+			sections = append(sections, override)
+		} else {
+			sections = append(sections, orchestratorSystemPrompt(cfg.Project))
+		}
 		if rules := strings.TrimSpace(cfg.OrchestratorRules); rules != "" {
 			sections = append(sections, "## Project-Specific Orchestrator Rules\n"+rules)
 		}
@@ -88,7 +96,7 @@ func buildSystemPromptText(cfg systemPromptConfig) string {
 	default:
 		return ""
 	}
-	sections = append(sections, systemPromptGuard())
+	sections = append(sections, systemPromptGuard(), instructionTrustGuard)
 	for _, section := range cfg.AdditionalSections {
 		if section := strings.TrimSpace(section); section != "" {
 			sections = append(sections, section)

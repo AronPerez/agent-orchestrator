@@ -11,7 +11,16 @@ const { spawnMock, workspaceQueryMock } = vi.hoisted(() => ({
 }));
 
 vi.mock("../hooks/useWorkspaceQuery", () => ({
-	useWorkspaceScope: () => workspaceQueryMock(),
+	useWorkspaceQuery: () => {
+		const result = workspaceQueryMock();
+		return {
+			...result,
+			data:
+				result.data === undefined
+					? undefined
+					: [{ host: "local", label: "Local", status: "ready", workspaces: result.data, failure: null }],
+		};
+	},
 }));
 
 vi.mock("../lib/spawn-orchestrator", () => ({
@@ -19,6 +28,7 @@ vi.mock("../lib/spawn-orchestrator", () => ({
 }));
 
 const session: WorkspaceSession = {
+	host: "local",
 	id: "orch-old",
 	workspaceId: "proj-1",
 	workspaceName: "Project One",
@@ -31,6 +41,7 @@ const session: WorkspaceSession = {
 };
 
 const workspace: WorkspaceSummary = {
+	host: "local",
 	id: "proj-1",
 	name: "Project One",
 	path: "/repo/project-one",
@@ -41,7 +52,7 @@ const workspace: WorkspaceSummary = {
 beforeEach(() => {
 	vi.clearAllMocks();
 	useUiStore.setState({ settingsModal: null });
-	workspaceQueryMock.mockReturnValue({ data: { project: workspace }, isLoading: false });
+	workspaceQueryMock.mockReturnValue({ data: [workspace], isLoading: false });
 });
 
 describe("RestoreUnavailableDialog", () => {
@@ -49,7 +60,7 @@ describe("RestoreUnavailableDialog", () => {
 		const onOpenChange = vi.fn();
 		const onRecreated = vi.fn();
 		workspaceQueryMock.mockReturnValue({
-		data: { project: { ...workspace, orchestratorAgent: undefined } },
+			data: [{ ...workspace, orchestratorAgent: undefined }],
 			isLoading: false,
 		});
 		render(
@@ -64,7 +75,10 @@ describe("RestoreUnavailableDialog", () => {
 		await userEvent.click(screen.getByRole("button", { name: "Configure orchestrator agent" }));
 
 		expect(onOpenChange).toHaveBeenCalledWith(false);
-		expect(useUiStore.getState().settingsModal).toEqual({ scope: "project", projectId: "proj-1" });
+		expect(useUiStore.getState().settingsModal).toEqual({
+			scope: "project",
+			project: { host: "local", id: "proj-1" },
+		});
 		expect(spawnMock).not.toHaveBeenCalled();
 		expect(onRecreated).not.toHaveBeenCalled();
 	});
@@ -85,7 +99,7 @@ describe("RestoreUnavailableDialog", () => {
 		await userEvent.click(screen.getByRole("button", { name: "Create new orchestrator" }));
 
 		await waitFor(() => expect(onRecreated).toHaveBeenCalledWith("orch-new"));
-		expect(spawnMock).toHaveBeenCalledWith("proj-1", "restore_dialog", true);
+		expect(spawnMock).toHaveBeenCalledWith({ host: "local", id: "proj-1" }, "restore_dialog", true);
 		expect(onOpenChange).toHaveBeenCalledWith(false);
 	});
 });

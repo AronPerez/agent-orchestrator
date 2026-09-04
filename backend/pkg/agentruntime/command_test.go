@@ -118,7 +118,7 @@ func TestBuildRestoreCommands(t *testing.T) {
 			},
 			want: []string{
 				"claude",
-				"--permission-mode", "bypassPermissions",
+				"--dangerously-skip-permissions",
 				"--resume", ClaudeSessionID("session-1"),
 				"--", "continue",
 			},

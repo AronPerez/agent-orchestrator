@@ -1,8 +1,10 @@
 import { queryOptions } from "@tanstack/react-query";
 import type { components } from "../../api/schema";
-import { appI18n } from "../i18n";
+import { appI18n, type MessageKey } from "../i18n";
 import { sortedPRs, type WorkspaceSession } from "../types/workspace";
-import { apiClient, apiErrorMessage } from "./api-client";
+import { apiErrorMessage } from "./api-client";
+import { clientFor } from "./host-clients";
+import { refKey } from "./hosts";
 import { usesPreviewWorkspaceData as usePreviewData } from "./preview-mode";
 
 export type PRReviewState = components["schemas"]["PRReviewState"];
@@ -17,7 +19,7 @@ export type ReviewRunFacts = components["schemas"]["ReviewRun"];
  */
 export function sessionReviewsQueryOptions(session: WorkspaceSession, enabled: boolean, staleTime?: number) {
 	return queryOptions({
-		queryKey: ["session-reviews", session.id] as const,
+		queryKey: ["session-reviews", refKey(session)] as const,
 		enabled,
 		...(staleTime !== undefined ? { staleTime } : {}),
 		refetchInterval: (query) => {
@@ -27,7 +29,7 @@ export function sessionReviewsQueryOptions(session: WorkspaceSession, enabled: b
 		},
 		queryFn: async () => {
 			if (usePreviewData) return mockReviewsResponse(session);
-			const { data, error } = await apiClient.GET("/api/v1/sessions/{sessionId}/reviews", {
+			const { data, error } = await clientFor(session.host).GET("/api/v1/sessions/{sessionId}/reviews", {
 				params: { path: { sessionId: session.id } },
 			});
 			if (error) throw new Error(apiErrorMessage(error, "Unable to load reviews"));
@@ -58,17 +60,35 @@ export function reviewRunDisabled(openReviewStates: PRReviewState[], isTriggerin
 	);
 }
 
-export function reviewSessionRunAction(reviewStates: PRReviewState[], isTriggering: boolean): string {
+/**
+ * Which action the session-level review button currently offers, as a stable
+ * enum. Split out of reviewSessionRunAction so telemetry can report the action
+ * a user took without depending on the translated label they saw.
+ */
+export type ReviewRunActionKind = "reviewing" | "run_latest" | "rerun" | "run";
+
+export function reviewRunActionKind(reviewStates: PRReviewState[], isTriggering: boolean): ReviewRunActionKind {
 	if (isTriggering || reviewStates.some((reviewState) => reviewState.status === "running")) {
-		return appI18n.t("inspector.review.reviewing");
+		return "reviewing";
 	}
 	if (reviewStates.some((reviewState) => reviewState.status === "needs_review")) {
-		return appI18n.t("inspector.review.runLatest");
+		return "run_latest";
 	}
 	if (reviewStates.some((reviewState) => reviewState.status === "changes_requested" || reviewState.latestRun)) {
-		return appI18n.t("inspector.review.rerun");
+		return "rerun";
 	}
-	return appI18n.t("inspector.review.run");
+	return "run";
+}
+
+const REVIEW_RUN_ACTION_LABELS: Record<ReviewRunActionKind, MessageKey> = {
+	reviewing: "inspector.review.reviewing",
+	run_latest: "inspector.review.runLatest",
+	rerun: "inspector.review.rerun",
+	run: "inspector.review.run",
+};
+
+export function reviewSessionRunAction(reviewStates: PRReviewState[], isTriggering: boolean): string {
+	return appI18n.t(REVIEW_RUN_ACTION_LABELS[reviewRunActionKind(reviewStates, isTriggering)]);
 }
 
 // Preview-only pins so the reviews section can be seen mid-run and with a verdict

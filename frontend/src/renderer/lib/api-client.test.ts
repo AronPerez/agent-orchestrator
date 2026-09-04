@@ -43,6 +43,24 @@ describe("apiClient runtime base URL", () => {
 		expect(seenUrls).toEqual(["http://127.0.0.1:3037/api/v1/projects"]);
 	});
 
+	it("keeps a proxy path prefix when rewriting GETs without a double slash", async () => {
+		const seenUrls: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+			seenUrls.push(input instanceof Request ? input.url : input.toString());
+			return new Response(JSON.stringify({ projects: [] }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		});
+
+		setApiBaseUrl("http://127.0.0.1:62220/proxy-token/");
+
+		const { error } = await apiClient.GET("/api/v1/projects");
+
+		expect(error).toBeUndefined();
+		expect(seenUrls).toEqual(["http://127.0.0.1:62220/proxy-token/api/v1/projects"]);
+	});
+
 	it("rebases POSTs without Request-as-init, preserving method, body, and headers", async () => {
 		// Regression: `new Request(target, input)` needs the source request's
 		// `duplex` getter, which Electron's Chromium lacks — every request with a
@@ -62,7 +80,7 @@ describe("apiClient runtime base URL", () => {
 			});
 		});
 
-		setApiBaseUrl("http://127.0.0.1:3037");
+		setApiBaseUrl("http://127.0.0.1:3037/proxy-token");
 
 		const { error } = await apiClient.POST("/api/v1/sessions", {
 			body: { projectId: "p1", prompt: "hello" },
@@ -70,10 +88,28 @@ describe("apiClient runtime base URL", () => {
 
 		expect(error).toBeUndefined();
 		expect(seen).toHaveLength(1);
-		expect(seen[0].url).toBe("http://127.0.0.1:3037/api/v1/sessions");
+		expect(seen[0].url).toBe("http://127.0.0.1:3037/proxy-token/api/v1/sessions");
 		expect(seen[0].method).toBe("POST");
 		expect(seen[0].contentType).toBe("application/json");
 		expect(JSON.parse(seen[0].body ?? "{}")).toEqual({ projectId: "p1", prompt: "hello" });
+	});
+
+	it("keeps a proxy path prefix with the request query string and hash", async () => {
+		const seenUrls: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+			seenUrls.push(input instanceof Request ? input.url : input.toString());
+			return new Response(JSON.stringify({ projects: [] }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		});
+
+		setApiBaseUrl("http://127.0.0.1:62220/proxy-token");
+
+		const { error } = await apiClient.GET("/api/v1/projects?state=active#results" as "/api/v1/projects");
+
+		expect(error).toBeUndefined();
+		expect(seenUrls).toEqual(["http://127.0.0.1:62220/proxy-token/api/v1/projects?state=active#results"]);
 	});
 
 	it("skips the rebase when the request already targets the runtime base URL", async () => {

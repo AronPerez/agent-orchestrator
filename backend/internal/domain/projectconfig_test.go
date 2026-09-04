@@ -1,6 +1,31 @@
 package domain
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
+
+func TestProjectConfig_OrchestratorPromptRoundTrips(t *testing.T) {
+	in := ProjectConfig{OrchestratorPrompt: "## Orchestrator role\nbe nice"}
+	b, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"orchestratorPrompt":`) {
+		t.Fatalf("marshaled config missing orchestratorPrompt: %s", b)
+	}
+	var out ProjectConfig
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.OrchestratorPrompt != in.OrchestratorPrompt {
+		t.Fatalf("round-trip = %q, want %q", out.OrchestratorPrompt, in.OrchestratorPrompt)
+	}
+	if (ProjectConfig{OrchestratorPrompt: "x"}).IsZero() {
+		t.Fatal("config with a prompt must not be IsZero")
+	}
+}
 
 func TestProjectConfigValidate(t *testing.T) {
 	tests := []struct {
@@ -63,6 +88,8 @@ func TestProjectConfigValidate(t *testing.T) {
 		{"tracker intake unknown provider", ProjectConfig{TrackerIntake: TrackerIntakeConfig{Enabled: true, Provider: "linear", Assignee: "alice"}}, true},
 		{"tracker intake repo with whitespace", ProjectConfig{TrackerIntake: TrackerIntakeConfig{Enabled: true, Repo: " acme/demo", Assignee: "alice"}}, true},
 		{"tracker intake assignee with whitespace", ProjectConfig{TrackerIntake: TrackerIntakeConfig{Enabled: true, Assignee: " alice"}}, true},
+		{"orchestrator prompt ok", ProjectConfig{OrchestratorPrompt: strings.Repeat("a", 1024)}, false},
+		{"orchestrator prompt too long", ProjectConfig{OrchestratorPrompt: strings.Repeat("a", 64*1024+1)}, true},
 		{"auto review enabled", ProjectConfig{AutoReview: true}, false},
 		{"auto review disabled", ProjectConfig{AutoReview: false}, false},
 	}
@@ -213,5 +240,20 @@ func TestProjectConfigIsZero(t *testing.T) {
 	}
 	if (ProjectConfig{AutoReview: true}).IsZero() {
 		t.Fatal("config with autoReview enabled should not be zero")
+	}
+}
+
+// The project-level session interface is written by the app and by
+// `ao project set-config`, so a value outside the vocabulary is refused where it
+// is set rather than at every later spawn. Unset stays legal: it means the
+// project defers to the daemon-owned default.
+func TestProjectConfigValidateSessionInterface(t *testing.T) {
+	for _, mode := range []SessionMode{"", SessionModeChat, SessionModeTUI} {
+		if err := (ProjectConfig{SessionInterface: mode}).Validate(); err != nil {
+			t.Errorf("Validate with sessionInterface %q = %v, want nil", mode, err)
+		}
+	}
+	if err := (ProjectConfig{SessionInterface: "voice"}).Validate(); err == nil {
+		t.Fatal(`Validate with sessionInterface "voice" = nil, want a rejection`)
 	}
 }

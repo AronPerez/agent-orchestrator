@@ -1,4 +1,12 @@
-import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -35,6 +43,59 @@ if (versionResult.status !== 0 || !actualGoVersion || !meetsMinimumVersion(actua
 	process.exit(1);
 }
 
+// Build the browser bundle the daemon embeds and serves at its own origin
+// (backend/internal/httpd/webui), so a machine with only a browser gets the
+// full UI. Generated here rather than committed: it is a megabyte of hashed
+// assets that would churn on every renderer change. The directory keeps a
+// tracked .gitkeep so go:embed — and therefore `go build` — works in a
+// checkout that has not run this step.
+const webuiDir = join(backendRoot, "internal", "httpd", "webui", "bundle");
+
+// A failed build must not leave the tree dirty. Only .gitkeep is tracked here
+// (the bundle itself is gitignored), so removing it and then exiting early makes
+// git report a modified tree — and the NEXT build stamps itself "-dirty" for a
+// reason that has nothing to do with its own source. Restore it on every exit
+// path, not just the happy one.
+const restoreGitkeep = () => {
+	mkdirSync(webuiDir, { recursive: true });
+	writeFileSync(join(webuiDir, ".gitkeep"), "");
+};
+process.on("exit", restoreGitkeep);
+
+rmSync(webuiDir, { recursive: true, force: true });
+
+const viteCli = join(frontendRoot, "node_modules", "vite", "bin", "vite.js");
+const webResult = spawnSync(
+	process.execPath,
+	[viteCli, "build", "--config", "vite.renderer.config.ts", "--outDir", webuiDir, "--emptyOutDir"],
+	{ cwd: frontendRoot, stdio: "inherit", env: { ...process.env, VITE_AO_WEB: "1" } },
+);
+
+if (webResult.error) {
+	console.error(`failed to start the web UI build: ${webResult.error.message}`);
+	process.exit(1);
+}
+if (webResult.status !== 0) {
+	process.exit(webResult.status ?? 1);
+}
+restoreGitkeep();
+
+// Prove the bundle is really there before `go build` embeds it. go:embed is
+// satisfied by the tracked .gitkeep alone, so an empty bundle directory still
+// compiles, still passes CI, and still ships — producing a daemon whose UI
+// answers 503 to the first person who opens the URL. That is a silent ship, and
+// this is the only place that can catch it: a Go test cannot, because CI checks
+// out .gitkeep and nothing else, so asserting the bundle exists there would
+// fail by design.
+if (!existsSync(join(webuiDir, "index.html"))) {
+	console.error(
+		`web UI bundle missing: ${join(webuiDir, "index.html")} does not exist after the vite build.\n` +
+			"The daemon would compile and ship with no UI (503 on every page request).\n" +
+			"Check the `vite build` step above — do not skip or reorder it.",
+	);
+	process.exit(1);
+}
+
 if (isWindowsDev) {
 	mkdirSync(windowsDevOutDir, { recursive: true });
 } else if (process.platform === "win32") {
@@ -51,11 +112,28 @@ if (isWindowsDev) {
 	mkdirSync(outDir, { recursive: true });
 }
 
-const result = spawnSync("go", ["build", "-o", buildOutPath, "./cmd/ao"], {
-	cwd: backendRoot,
-	stdio: "inherit",
-	windowsHide: true,
-});
+// Link-time build stamp. Go's own VCS stamping is silently absent when the build
+// runs inside a linked git worktree — even with -buildvcs=true, which exits 0 and
+// stamps nothing — and the app-bundled daemon shipped with no build identity for
+// exactly that reason. `git rev-parse` works in a worktree, so ask git directly.
+//
+// DO NOT "simplify" this back to -buildvcs. It is a silent no-op in a worktree:
+// the build succeeds, the app ships, and /healthz reports source "unknown"
+// forever — which is precisely the bug this replaced.
+const stampPkg = "github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta";
+const gitOutput = (args) => {
+	const r = spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" });
+	return r.status === 0 ? r.stdout.trim() : "";
+};
+const head = gitOutput(["rev-parse", "HEAD"]);
+const dirty = head && spawnSync("git", ["diff", "--quiet", "HEAD"], { cwd: repoRoot }).status !== 0;
+const buildStamp = head ? `${head}${dirty ? "-dirty" : ""}` : "";
+
+const result = spawnSync(
+	"go",
+	["build", "-ldflags", `-X ${stampPkg}.buildStamp=${buildStamp}`, "-o", buildOutPath, "./cmd/ao"],
+	{ cwd: backendRoot, stdio: "inherit", windowsHide: true },
+);
 
 if (result.error) {
 	console.error(`failed to start go build: ${result.error.message}`);

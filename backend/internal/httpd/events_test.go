@@ -149,6 +149,7 @@ func TestEventsStreamRejectsInvalidAfter(t *testing.T) {
 		Events: &fakeEventSubscriber{},
 	}, ControlDeps{})
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/events?after=nope", nil)
+	req.Host = "127.0.0.1:3001" // hostGuard: a request must name an address the daemon answers to
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)

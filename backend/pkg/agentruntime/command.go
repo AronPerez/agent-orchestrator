@@ -178,7 +178,7 @@ func ClaudePermissionArgs(policy PermissionPolicy) []string {
 	case PermissionAuto:
 		return []string{"--permission-mode", "auto"}
 	case PermissionBypassPermissions:
-		return []string{"--permission-mode", "bypassPermissions"}
+		return []string{"--dangerously-skip-permissions"}
 	default:
 		return nil
 	}

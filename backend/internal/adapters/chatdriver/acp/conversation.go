@@ -325,6 +325,47 @@ func (c *conversation) DiscardDeferredTurn(providerTurnID string) {
 	c.mu.Unlock()
 }
 
+// optionRejectedError names the ACP config option an agent refused. An option is
+// one preference among several, so a caller that can proceed without it needs to
+// tell that apart from a setup failure that leaves the session unusable.
+type optionRejectedError struct {
+	id  string
+	err error
+}
+
+func (e *optionRejectedError) Error() string {
+	return fmt.Sprintf("set ACP session option %q: %v", e.id, e.err)
+}
+
+func (e *optionRejectedError) Unwrap() error { return e.err }
+
+// rejectedOption reports which option a failed applyTurnSettings refused, or ""
+// when the failure was something else.
+func rejectedOption(err error) string {
+	var rejected *optionRejectedError
+	if errors.As(err, &rejected) {
+		return rejected.id
+	}
+	return ""
+}
+
+// reportUnavailableModel puts a dropped model preference on the timeline. A
+// session silently running on a model nobody picked misattributes everything that
+// follows, so the fact is recorded where the conversation records everything else.
+func (c *conversation) reportUnavailableModel(model string, cause error) {
+	c.log.Warn("ACP agent refused the configured model; continuing on its default",
+		"model", model, "error", cause)
+	c.emit(ports.ChatEvent{
+		Kind:           ports.ChatEventActivityCompleted,
+		ProviderItemID: "ao-model-unavailable-" + model,
+		ActivityKind:   domain.ActivityKindSystem,
+		ActivityStatus: domain.ActivityStatusCompleted,
+		Summary: fmt.Sprintf(
+			"Model %q is not available for this agent. Continuing with the agent's default model.",
+			model),
+	})
+}
+
 func (c *conversation) applyTurnSettings(ctx context.Context, settings ports.ChatTurnSettings) error {
 	c.mu.Lock()
 	sessionID := c.sessionID
@@ -382,7 +423,7 @@ func (c *conversation) applyTurnSettings(ctx context.Context, settings ports.Cha
 				if isACPMethodNotFound(err) {
 					return fmt.Errorf("%w: session/set_config_option %q", ErrACPSetterUnsupported, option.ID)
 				}
-				return fmt.Errorf("set ACP session option %q: %w", option.ID, err)
+				return &optionRejectedError{id: option.ID, err: err}
 			}
 			c.replaceConfigOptions(resp.ConfigOptions)
 		}

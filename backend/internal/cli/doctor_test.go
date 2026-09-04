@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
 )
 
 func TestDoctorChecksGitVersion(t *testing.T) {
@@ -693,5 +695,66 @@ func writeHooksLogLines(t *testing.T, dataDir string, lines ...string) {
 	content := strings.Join(lines, "\n") + "\n"
 	if err := os.WriteFile(filepath.Join(dataDir, hooksLogName), []byte(content), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The skew this guards against is invisible: `ao doctor` reported zero failures
+// on a machine whose CLI and daemon were built from different branches.
+func TestDoctorDaemonBuildCheck(t *testing.T) {
+	stamped := func(id string) daemonmeta.Build {
+		return daemonmeta.Build{Identity: id, Source: daemonmeta.BuildSourceStamp}
+	}
+	unknown := daemonmeta.Build{Source: daemonmeta.BuildSourceUnknown}
+	healthy := func(b daemonmeta.Build) daemonStatus {
+		return daemonStatus{State: stateReady, owned: true, build: b, executable: "/app/daemon/ao"}
+	}
+
+	for _, tc := range []struct {
+		name     string
+		st       daemonStatus
+		cli      daemonmeta.Build
+		want     doctorLevel
+		contains []string
+	}{
+		{
+			name: "matching builds pass",
+			st:   healthy(stamped("abc123")), cli: stamped("abc123"),
+			want: doctorPass, contains: []string{"abc123"},
+		},
+		{
+			name: "different commits fail, naming both sides",
+			st:   healthy(stamped("daemondef")), cli: stamped("cliabc"),
+			want: doctorFail, contains: []string{"cliabc", "daemondef", "/app/daemon/ao", "different commits"},
+		},
+		{
+			// Two unknowns are two unanswered questions, not a match. Comparing
+			// their empty Identity strings would silently report a pass.
+			name: "both unknown warns rather than passing",
+			st:   healthy(unknown), cli: unknown,
+			want: doctorWarn,
+		},
+		{
+			name: "unknown daemon build warns",
+			st:   healthy(unknown), cli: stamped("cliabc"),
+			want: doctorWarn, contains: []string{"no build identity"},
+		},
+		{
+			name: "no healthy daemon warns",
+			st:   daemonStatus{State: stateStopped}, cli: stamped("cliabc"),
+			want: doctorWarn, contains: []string{"no healthy local daemon"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := doctorContext(t, map[string]string{}, nil)
+			check := c.checkDaemonBuild(tc.st, tc.cli)
+			if check.Level != tc.want {
+				t.Fatalf("level = %s, want %s (message: %s)", check.Level, tc.want, check.Message)
+			}
+			for _, want := range tc.contains {
+				if !strings.Contains(check.Message, want) {
+					t.Fatalf("message %q does not contain %q", check.Message, want)
+				}
+			}
+		})
 	}
 }

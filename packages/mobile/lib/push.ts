@@ -5,10 +5,10 @@
 import Constants from "expo-constants";
 import * as Device from "expo-device";
 import * as Notifications from "expo-notifications";
-import * as SecureStore from "expo-secure-store";
 import { Linking, Platform } from "react-native";
 import { ApiError, registerPushDevice, unpairFromDaemon, unregisterPushDevice } from "./api";
 import { getInstallId } from "./installId";
+import { secureDeleteItem, secureGetItem, secureSetItem } from "./secure-store";
 import type { ServerConfig } from "./config";
 import { classifyServerFailure, hasServer, type PushRegisterResult, type PushStatus } from "./pushStatus";
 
@@ -37,7 +37,7 @@ type Registration = {
 
 async function loadRegistration(): Promise<Registration | null> {
 	try {
-		const raw = await SecureStore.getItemAsync(REGISTRATION_KEY);
+		const raw = await secureGetItem(REGISTRATION_KEY);
 		return raw ? (JSON.parse(raw) as Registration) : null;
 	} catch {
 		return null;
@@ -45,16 +45,16 @@ async function loadRegistration(): Promise<Registration | null> {
 }
 
 async function saveRegistration(reg: Registration): Promise<void> {
-	await SecureStore.setItemAsync(REGISTRATION_KEY, JSON.stringify(reg));
+	await secureSetItem(REGISTRATION_KEY, JSON.stringify(reg));
 }
 
 async function clearRegistration(): Promise<void> {
-	await SecureStore.deleteItemAsync(REGISTRATION_KEY);
+	await secureDeleteItem(REGISTRATION_KEY);
 }
 
 async function loadPendingUnregisters(): Promise<Registration[]> {
 	try {
-		const raw = await SecureStore.getItemAsync(PENDING_UNREG_KEY);
+		const raw = await secureGetItem(PENDING_UNREG_KEY);
 		return raw ? (JSON.parse(raw) as Registration[]) : [];
 	} catch {
 		return [];
@@ -63,10 +63,10 @@ async function loadPendingUnregisters(): Promise<Registration[]> {
 
 async function savePendingUnregisters(list: Registration[]): Promise<void> {
 	if (list.length === 0) {
-		await SecureStore.deleteItemAsync(PENDING_UNREG_KEY);
+		await secureDeleteItem(PENDING_UNREG_KEY);
 		return;
 	}
-	await SecureStore.setItemAsync(PENDING_UNREG_KEY, JSON.stringify(list.slice(-MAX_PENDING_UNREG)));
+	await secureSetItem(PENDING_UNREG_KEY, JSON.stringify(list.slice(-MAX_PENDING_UNREG)));
 }
 
 // Queue a registration for a later unregister retry (deduped by token+host).
@@ -161,8 +161,10 @@ export async function registerForPush(
 	// holds a config object — it just has an empty host).
 	if (!hasServer(cfg)) return { ok: false, reason: "not-configured" };
 
-	// Remote push tokens are only issued on physical devices.
-	if (!Device.isDevice) return { ok: false, reason: "unsupported" };
+	// Remote push tokens are only issued on physical devices, and never on the
+	// web target — expo-notifications' token/permission APIs are native-only
+	// (Device.isDevice can be true in a browser, so guard the platform too).
+	if (Platform.OS === "web" || !Device.isDevice) return { ok: false, reason: "unsupported" };
 
 	// Ensure the Android channel exists BEFORE the permission prompt and before
 	// any notification could arrive, so a notification is never mis-filed onto an
@@ -240,6 +242,12 @@ export async function registerForPush(
 
 // Reads the live permission + registration state without prompting.
 export async function getPushStatus(): Promise<PushStatus> {
+	// The web target has no push: getPermissionsAsync is native-only, so report
+	// an unsupported status (the Settings section then shows "Not available"
+	// with no action) instead of throwing.
+	if (Platform.OS === "web") {
+		return { supported: false, granted: false, canAskAgain: false, registered: false };
+	}
 	const perm = await Notifications.getPermissionsAsync();
 	const reg = await loadRegistration();
 	return {

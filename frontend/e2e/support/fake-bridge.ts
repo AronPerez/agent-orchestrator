@@ -41,21 +41,31 @@ export type FakeBridgeOptions = {
 	updateSettings?: UpdateSettings;
 };
 
-export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}): Promise<void> {
+export async function installFakeBridge(
+	page: Page,
+	opts: FakeBridgeOptions = {},
+): Promise<void> {
 	const version = opts.version ?? "9.9.9-test";
 	const daemonState = opts.daemonState ?? "ready";
 	const daemonPort = opts.daemonPort ?? 8080;
 	const updateStatus = opts.updateStatus ?? ({ state: "idle" } satisfies UpdateStatus);
 	const updateSettings =
 		opts.updateSettings ??
-		({ enabled: false, channel: "latest", nightlyAck: false, feature: null } satisfies UpdateSettings);
+		({
+			enabled: false,
+			channel: "latest",
+			nightlyAck: false,
+			feature: null,
+		} satisfies UpdateSettings);
 
 	await page.addInitScript(
 		({ version, daemonState, daemonPort, updateStatus, updateSettings }) => {
 			const unsubscribe = () => () => undefined;
 			let currentUpdateSettings = updateSettings;
 			const status: DaemonStatus =
-				daemonState === "ready" ? { state: "ready", port: daemonPort } : { state: daemonState };
+				daemonState === "ready"
+					? { state: "ready", port: daemonPort }
+					: { state: daemonState };
 			const navState = (viewId: string) => ({
 				viewId,
 				url: "",
@@ -73,7 +83,10 @@ export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}
 					getVersion: async () => version,
 					chooseDirectory: async () => null,
 					openExternal: async () => undefined,
-					scanImportFolder: async ({ path }: { path: string }) => ({ path, repos: [] }),
+					scanImportFolder: async ({ path }: { path: string }) => ({
+						path,
+						repos: [],
+					}),
 					checkAncestorRepo: async () => undefined,
 					getPathForFile: () => "",
 					onOpenFolderPath: () => () => undefined,
@@ -104,7 +117,10 @@ export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}
 					set: async () => undefined,
 					persistTerminal: async () => undefined,
 				},
-				menu: { action: async () => undefined, notifyShellFocus: () => undefined },
+				menu: {
+					action: async () => undefined,
+					notifyShellFocus: () => undefined,
+				},
 				clipboard: {
 					writeText: async () => undefined,
 					readText: async () => "",
@@ -150,7 +166,13 @@ export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}
 						activeTabId: "t1",
 						tabs: [{ id: "t1", url: "", title: "", active: true }],
 					}),
-					selectTab: async ({ viewId, tabId }: { viewId: string; tabId: string }) => ({
+					selectTab: async ({
+						viewId,
+						tabId,
+					}: {
+						viewId: string;
+						tabId: string;
+					}) => ({
 						viewId,
 						activeTabId: tabId,
 						tabs: [{ id: tabId, url: "", title: "", active: true }],
@@ -226,6 +248,17 @@ export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}
 				featureBuilds: {
 					list: async () => [],
 					getActive: async () => null,
+				},
+				remotes: {
+					list: async () => [],
+					add: async () => "offline" as const,
+					update: async () => "offline" as const,
+					remove: async () => undefined,
+					probe: async () => "offline" as const,
+					request: async () => ({ status: 0, body: null }),
+					connect: async () => ({ label: "", url: "", base: "" }),
+					disconnect: async () => undefined,
+					connected: async () => [],
 				},
 				cloud: {
 					getSession: async () => null,
@@ -303,9 +336,19 @@ export type FakeAgentController = {
 	removeWorker: (id: string) => void;
 	setStatus: (id: string, status: string, activity?: string) => void;
 	setTerminalHandle: (id: string, handleId: string) => void;
-	setPreview: (id: string, previewUrl: string, previewRevision?: number) => void;
+	setPreview: (
+		id: string,
+		previewUrl: string,
+		previewRevision?: number,
+	) => void;
 	setBrowserError: (message: string | null) => void;
-	notify: (n: { id: string; type: string; title: string; body?: string; sessionId?: string }) => void;
+	notify: (n: {
+		id: string;
+		type: string;
+		title: string;
+		body?: string;
+		sessionId?: string;
+	}) => void;
 };
 
 declare global {
@@ -319,7 +362,10 @@ declare global {
  * Drive the timeline from specs with
  * `page.evaluate(() => window.__aoFakeAgent!.setStatus(...))`.
  */
-export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}): Promise<void> {
+export async function installFakeAgent(
+	page: Page,
+	opts: FakeAgentOptions = {},
+): Promise<void> {
 	const version = opts.version ?? "9.9.9-test";
 	const daemonPort = opts.daemonPort ?? 8080;
 	const projectId = opts.projectId ?? "fake-proj";
@@ -331,7 +377,10 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 		({ version, daemonPort, projectId, projectName, platform, workers }) => {
 			if (platform) {
 				try {
-					Object.defineProperty(navigator, "platform", { get: () => platform, configurable: true });
+					Object.defineProperty(navigator, "platform", {
+						get: () => platform,
+						configurable: true,
+					});
 				} catch {
 					/* ignore */
 				}
@@ -339,30 +388,6 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 
 			const nowIso = new Date().toISOString();
 			type Session = Record<string, unknown>;
-			// The daemon derives the board lane; the fake stands in for it so
-			// driving a spec's status through setStatus still moves the card.
-			const kanbanColumnFor = (status: string): string => {
-				switch (status) {
-					case "merged":
-					case "approved":
-					case "mergeable":
-						return "ready";
-					case "terminated":
-						return "archive";
-					case "review_pending":
-					case "pr_open":
-					case "draft":
-						return "validating";
-					case "needs_input":
-					case "exited":
-					case "no_signal":
-					case "ci_failed":
-					case "changes_requested":
-						return "needs_review";
-					default:
-						return "building";
-				}
-			};
 			const makeWorker = (w: (typeof workers)[number]): Session => ({
 				id: w.id,
 				terminalHandleId: (w.mode ?? "tui") === "tui" ? `${w.id}/terminal_0` : undefined,
@@ -374,10 +399,12 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 				mode: w.mode ?? "tui",
 				branch: w.branch ?? `session/${w.id}`,
 				status: w.status ?? "working",
-				kanbanColumn: kanbanColumnFor(w.status ?? "working"),
 				createdAt: nowIso,
 				updatedAt: new Date().toISOString(),
-				activity: { state: w.activity ?? "active", lastActivityAt: new Date().toISOString() },
+				activity: {
+					state: w.activity ?? "active",
+					lastActivityAt: new Date().toISOString(),
+				},
 				previewUrl: w.previewUrl,
 				previewRevision: w.previewRevision,
 				prs: [],
@@ -401,7 +428,6 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 						kind: "orchestrator",
 						branch: "main",
 						status: "working",
-						kanbanColumn: "building",
 						createdAt: nowIso,
 						updatedAt: nowIso,
 						activity: { state: "active", lastActivityAt: nowIso },
@@ -428,7 +454,8 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 				workspaces: [project],
 			};
 
-			const findSession = (id: string) => (project.sessions as Session[]).find((s) => s.id === id);
+			const findSession = (id: string) =>
+				(project.sessions as Session[]).find((s) => s.id === id);
 			const touch = (s: Session) => {
 				s.updatedAt = new Date().toISOString();
 			};
@@ -452,7 +479,8 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 					// event-transport assigns `.onopen` right after construction; fire on
 					// the next tick so it is already wired.
 					setTimeout(() => {
-						if (this.readyState === 1 && this.onopen) this.onopen({ type: "open" });
+						if (this.readyState === 1 && this.onopen)
+							this.onopen({ type: "open" });
 					}, 0);
 				}
 				addEventListener(t: string, cb: (ev: unknown) => void) {
@@ -479,7 +507,8 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 					}
 				}
 			}
-			(window as unknown as { EventSource: unknown }).EventSource = FakeEventSource;
+			(window as unknown as { EventSource: unknown }).EventSource =
+				FakeEventSource;
 
 			const emit = (match: string, type: string, data?: string) => {
 				for (const es of state.eventSources) {
@@ -488,12 +517,14 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 					es._dispatch(type, data);
 				}
 			};
-			const pushWorkspaces = (type = "session_updated") => emit("/api/v1/events", type);
+			const pushWorkspaces = (type = "session_updated") =>
+				emit("/api/v1/events", type);
 
 			const controller: FakeAgentController = {
 				snapshot: () => JSON.parse(JSON.stringify(state.workspaces)),
 				createWorker: (w) => {
-					if (!findSession(w.id)) (project.sessions as Session[]).push(makeWorker(w));
+					if (!findSession(w.id))
+						(project.sessions as Session[]).push(makeWorker(w));
 					pushWorkspaces("session_created");
 				},
 				removeWorker: (id) => {
@@ -506,9 +537,12 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 					const s = findSession(id);
 					if (!s) return;
 					s.status = status;
-					s.kanbanColumn = kanbanColumnFor(status);
 					s.displayStatus = undefined;
-					if (activity) s.activity = { state: activity, lastActivityAt: new Date().toISOString() };
+					if (activity)
+						s.activity = {
+							state: activity,
+							lastActivityAt: new Date().toISOString(),
+						};
 					touch(s);
 					pushWorkspaces();
 				},
@@ -523,7 +557,9 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 					const s = findSession(id);
 					if (!s) return;
 					s.previewUrl = previewUrl;
-					s.previewRevision = previewRevision ?? (typeof s.previewRevision === "number" ? s.previewRevision : 0) + 1;
+					s.previewRevision =
+						previewRevision ??
+						(typeof s.previewRevision === "number" ? s.previewRevision : 0) + 1;
 					touch(s);
 					pushWorkspaces();
 				},
@@ -545,7 +581,8 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 					emit("/api/v1/notifications/stream", "notification_created", payload);
 				},
 			};
-			(window as unknown as { __aoFakeAgent: unknown }).__aoFakeAgent = controller;
+			(window as unknown as { __aoFakeAgent: unknown }).__aoFakeAgent =
+				controller;
 
 			const unsubscribe = () => () => undefined;
 			const status: DaemonStatus = { state: "ready", port: daemonPort };
@@ -563,7 +600,10 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 					getVersion: async () => version,
 					chooseDirectory: async () => null,
 					openExternal: async () => undefined,
-					scanImportFolder: async ({ path }: { path: string }) => ({ path, repos: [] }),
+					scanImportFolder: async ({ path }: { path: string }) => ({
+						path,
+						repos: [],
+					}),
 					checkAncestorRepo: async () => undefined,
 					getPathForFile: () => "",
 					onOpenFolderPath: () => () => undefined,
@@ -594,8 +634,14 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 					set: async () => undefined,
 					persistTerminal: async () => undefined,
 				},
-				menu: { action: async () => undefined, notifyShellFocus: () => undefined },
-				clipboard: { writeText: async () => undefined, readText: async () => "" },
+				menu: {
+					action: async () => undefined,
+					notifyShellFocus: () => undefined,
+				},
+				clipboard: {
+					writeText: async () => undefined,
+					readText: async () => "",
+				},
 				daemon: {
 					getStatus: async () => status,
 					start: async () => status,
@@ -625,7 +671,9 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 					setBounds: () => undefined,
 					setOverlayOpen: () => undefined,
 					navigate: async ({ viewId, url }: { viewId: string; url: string }) =>
-						state.browserError ? navState(viewId, "", state.browserError) : navState(viewId, url),
+						state.browserError
+							? navState(viewId, "", state.browserError)
+							: navState(viewId, url),
 					clear: async (viewId: string) => navState(viewId),
 					goBack: async (viewId: string) => navState(viewId),
 					goForward: async (viewId: string) => navState(viewId),
@@ -636,7 +684,13 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 						activeTabId: "t1",
 						tabs: [{ id: "t1", url: "", title: "", active: true }],
 					}),
-					selectTab: async ({ viewId, tabId }: { viewId: string; tabId: string }) => ({
+					selectTab: async ({
+						viewId,
+						tabId,
+					}: {
+						viewId: string;
+						tabId: string;
+					}) => ({
 						viewId,
 						activeTabId: tabId,
 						tabs: [{ id: tabId, url: "", title: "", active: true }],
@@ -675,10 +729,21 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 					devBounce: async () => undefined,
 					onClick: unsubscribe,
 				},
-				tray: { setAttentionState: () => undefined, onOpenSession: unsubscribe },
-				appState: { getMigration: async () => ({ status: "completed" }), setMigration: async () => undefined },
+				tray: {
+					setAttentionState: () => undefined,
+					onOpenSession: unsubscribe,
+				},
+				appState: {
+					getMigration: async () => ({ status: "completed" }),
+					setMigration: async () => undefined,
+				},
 				updateSettings: {
-					get: async () => ({ enabled: false, channel: "latest", nightlyAck: false, feature: null }),
+					get: async () => ({
+						enabled: false,
+						channel: "latest",
+						nightlyAck: false,
+						feature: null,
+					}),
 					set: async () => undefined,
 				},
 				uiSettings: {
@@ -704,6 +769,17 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 				featureBuilds: {
 					list: async () => [],
 					getActive: async () => null,
+				},
+				remotes: {
+					list: async () => [],
+					add: async () => "offline" as const,
+					update: async () => "offline" as const,
+					remove: async () => undefined,
+					probe: async () => "offline" as const,
+					request: async () => ({ status: 0, body: null }),
+					connect: async () => ({ label: "", url: "", base: "" }),
+					disconnect: async () => undefined,
+					connected: async () => [],
 				},
 				cloud: {
 					getSession: async () => null,

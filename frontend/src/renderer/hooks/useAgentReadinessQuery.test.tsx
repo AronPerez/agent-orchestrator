@@ -14,6 +14,10 @@ vi.mock("../lib/api-client", () => ({
 	apiErrorMessage: () => "request failed",
 }));
 
+vi.mock("../lib/host-clients", () => ({
+	clientFor: () => ({ GET: getMock, POST: postMock }),
+}));
+
 import {
 	agentReadinessQueryOptions,
 	agentReadinessQueryKey,

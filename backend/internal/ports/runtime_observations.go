@@ -56,6 +56,12 @@ type ActivitySignal struct {
 	// TranscriptPath is a read-only provider-native transcript reference when
 	// the hook exposes one. AO stores the path, never rewrites the transcript.
 	TranscriptPath string
+	// AgentCWD is the working directory of the agent process that fired the
+	// hook. A session's own agent always runs inside that session's workspace,
+	// so a signal from anywhere else is not that session's agent — see the
+	// nested-agent guard in lifecycle.ApplyActivitySignal. Empty when the
+	// harness does not report it, which keeps older CLIs working unchanged.
+	AgentCWD string
 	// LaunchID is set by AO's process supervisor. Lifecycle rejects a signal
 	// from an older process generation of the same session.
 	LaunchID string

@@ -52,6 +52,7 @@ type setActivityAPIRequest struct {
 	LatestUserPrompt      string             `json:"latestUserPrompt,omitempty"`
 	LatestAssistantUpdate string             `json:"latestAssistantUpdate,omitempty"`
 	TranscriptPath        string             `json:"transcriptPath,omitempty"`
+	AgentCWD              string             `json:"agentCwd,omitempty"`
 	LaunchID              string             `json:"launchId,omitempty"`
 	Usage                 *usageHookMetadata `json:"usage,omitempty"`
 }
@@ -132,6 +133,26 @@ func hookAgentSessionID(payload []byte) string {
 		return ""
 	}
 	return id
+}
+
+// hookAgentCWD extracts the working directory of the agent process that fired
+// the hook. Every Claude Code hook event carries it, and it is the session's cwd
+// at launch rather than the shell's — a `cd` inside a tool call does not move it.
+// That is what makes it usable as the identity of the reporting agent.
+func hookAgentCWD(payload []byte) string {
+	var p struct {
+		CWD      string `json:"cwd"`
+		CWDCamel string `json:"currentWorkingDirectory"`
+	}
+	_ = json.Unmarshal(payload, &p)
+	cwd := strings.TrimSpace(p.CWD)
+	if cwd == "" {
+		cwd = strings.TrimSpace(p.CWDCamel)
+	}
+	if len(cwd) > maxHookTranscriptPath {
+		return ""
+	}
+	return cwd
 }
 
 // hookLaunchID extracts the runtime launch id a plugin embeds in its payload.
@@ -336,6 +357,11 @@ func newHooksCommand(ctx *commandContext) *cobra.Command {
 }
 
 func (c *commandContext) runHook(ctx context.Context, agent, event string) error {
+	// Before anything else, including reading stdin: a hook reports on a session
+	// owned by the local daemon, so AO_URL is ignored and --url is refused.
+	if err := c.pinToLocalDaemon("ao hooks"); err != nil {
+		return err
+	}
 	if isAgyModernHookEvent(agent, event) {
 		// AGY requires every modern hook handler to return a JSON object, even
 		// when the command is running outside an AO-managed session.
@@ -391,6 +417,7 @@ func (c *commandContext) runHook(ctx context.Context, agent, event string) error
 	}
 
 	toolName, toolUseID := activityMeta(payload)
+	agentCWD := hookAgentCWD(payload)
 	if domain.AgentHarness(agent) == domain.HarnessCursor && event == "post-tool-use-failure" {
 		if failureEvent, failureTool, ok := cursor.TerminalFailureCorrelation(payload); ok {
 			event = failureEvent
@@ -411,6 +438,7 @@ func (c *commandContext) runHook(ctx context.Context, agent, event string) error
 		LatestUserPrompt:      conversation.LatestUserPrompt,
 		LatestAssistantUpdate: conversation.LatestAssistantUpdate,
 		TranscriptPath:        conversation.TranscriptPath,
+		AgentCWD:              agentCWD,
 		LaunchID:              launchID,
 		Usage:                 usage,
 	}
@@ -578,6 +606,21 @@ func (c *commandContext) reportHookFailure(agent, event, sessionID string, cause
 	}
 	line := fmt.Sprintf("%s session=%s %s\n", time.Now().UTC().Format(time.RFC3339), sessionID, msg)
 	appendHooksLog(dataDir, line)
+}
+
+// noteIgnoredRemoteTarget records an AO_URL that pinToLocalDaemon ignored, so
+// an operator debugging a dead activity feed has one place that says so.
+//
+// hooks.log only, deliberately not stderr: an agent's hook runner swallows
+// stderr, and `ao agent-process supervise` shares the user's terminal, where a
+// line on every agent launch would be noise.
+func noteIgnoredRemoteTarget(command, target string) {
+	dataDir := strings.TrimSpace(os.Getenv("AO_DATA_DIR"))
+	if dataDir == "" {
+		return
+	}
+	appendHooksLog(dataDir, fmt.Sprintf("%s %s: AO_URL=%s ignored — daemon-local callback, reported to the local daemon\n",
+		time.Now().UTC().Format(time.RFC3339), command, target))
 }
 
 // appendHooksLog appends one line to the hooks log, truncating first when the

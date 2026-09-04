@@ -20,6 +20,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/codex"
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
+	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
 	"github.com/aoagents/agent-orchestrator/backend/internal/tmuxbin"
 )
 
@@ -77,6 +78,21 @@ func newDoctorCommand(ctx *commandContext) *cobra.Command {
 		Short: "Run local AO health checks",
 		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Refuse rather than label. Every check but `daemon` reads this
+			// machine's config, filesystem and PATH, so a labelled report
+			// against a remote target is a page of answers to a question the
+			// operator did not ask — and `doctor` is precisely the command they
+			// reach for to ask "is the remote host set up right?". Labelling
+			// would also have to add a host field to --json, changing an output
+			// scripts parse, to keep a report whose one honest line
+			// `ao status --url` already gives.
+			if err := ctx.refuseLocalOnly("ao doctor",
+				"probes the machine running the CLI — its config, data directory, PATH, git, "+
+					"terminal runtime and agent harnesses all describe THIS host, so every check but "+
+					"`daemon` would answer about the wrong machine. Run `ao doctor` on the host running "+
+					"that daemon; to check that daemon's health from here, use `ao status --url`"); err != nil {
+				return err
+			}
 			checks := ctx.runDoctor(cmd.Context())
 			failures := 0
 			for _, check := range checks {
@@ -169,7 +185,10 @@ func (c *commandContext) runDoctor(ctx context.Context) []doctorCheck {
 		if st.Error != "" {
 			msg += " (" + st.Error + ")"
 		}
-		checks = append(checks, doctorCheck{Level: level, Section: doctorSectionCore, Name: "daemon", Message: msg})
+		checks = append(checks,
+			doctorCheck{Level: level, Section: doctorSectionCore, Name: "daemon", Message: msg},
+			c.checkDaemonBuild(st, daemonmeta.CurrentBuild()),
+		)
 	}
 
 	checks = append(checks,
@@ -182,6 +201,76 @@ func (c *commandContext) runDoctor(ctx context.Context) []doctorCheck {
 	}
 	checks = append(checks, c.checkCodexLaunchFlags(ctx), c.checkGitHubToken(ctx), c.checkGitLabToken(ctx))
 	return checks
+}
+
+// checkDaemonBuild compares the running daemon's build identity against this
+// CLI's own. The daemon has published its build on /healthz since daemonmeta
+// landed and the desktop app already refuses to adopt a daemon from a different
+// build — the CLI was the only side that never looked. It cost an afternoon:
+// doctor reported zero failures on a machine whose `ao` came from one branch and
+// whose daemon came from another, so every fork-only CLI behaviour was silently
+// absent while every check said the setup was fine.
+//
+// Read Source before Identity. Two builds that both report "unknown" are not a
+// match, they are two unanswered questions, and comparing their empty Identity
+// strings would call that a pass.
+//
+// Local daemon only, and that needs no guard here: `ao doctor` already refuses a
+// remote target outright (refuseLocalOnly, above).
+//
+// cliBuild is passed in rather than read from daemonmeta so the comparison is
+// testable: a test binary has no link-time stamp, and whether Go's VCS stamping
+// answers at all depends on running from a checkout or a worktree.
+func (c *commandContext) checkDaemonBuild(st daemonStatus, cliBuild daemonmeta.Build) doctorCheck {
+	const name = "daemon-build"
+	self, err := c.deps.Executable()
+	if err != nil || self == "" {
+		self = "this ao binary"
+	}
+	daemonPath := st.executable
+	if daemonPath == "" {
+		daemonPath = "the running daemon"
+	}
+
+	switch {
+	case !st.owned:
+		return doctorCheck{
+			Level: doctorWarn, Section: doctorSectionCore, Name: name,
+			Message: "no healthy local daemon to compare against",
+		}
+	case cliBuild.Source == daemonmeta.BuildSourceUnknown:
+		return doctorCheck{
+			Level: doctorWarn, Section: doctorSectionCore, Name: name,
+			Message: fmt.Sprintf(
+				"this ao (%s) cannot identify its own build, so skew against the daemon cannot be detected; rebuild it with scripts/daemon-build.sh, which stamps the commit at link time",
+				self,
+			),
+		}
+	case st.build.Source == daemonmeta.BuildSourceUnknown:
+		return doctorCheck{
+			Level: doctorWarn, Section: doctorSectionCore, Name: name,
+			Message: fmt.Sprintf(
+				"the daemon (%s) reports no build identity, so skew against this ao (%s, %s) cannot be detected",
+				daemonPath, self, cliBuild.Identity,
+			),
+		}
+	case st.build.Identity != cliBuild.Identity:
+		return doctorCheck{
+			Level: doctorFail, Section: doctorSectionCore, Name: name,
+			Message: fmt.Sprintf(
+				"build skew: this ao is %s (%s, source %s) but the daemon is %s (%s, source %s); "+
+					"they are from different commits, so CLI behaviour that exists on only one side is silently missing. "+
+					"Rebuild both from the same tree",
+				cliBuild.Identity, self, cliBuild.Source,
+				st.build.Identity, daemonPath, st.build.Source,
+			),
+		}
+	default:
+		return doctorCheck{
+			Level: doctorPass, Section: doctorSectionCore, Name: name,
+			Message: fmt.Sprintf("ao and the daemon are both %s", cliBuild.Identity),
+		}
+	}
 }
 
 // checkStore inspects the SQLite store WITHOUT opening or migrating it. The

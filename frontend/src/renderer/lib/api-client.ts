@@ -1,7 +1,9 @@
 import createClient from "openapi-fetch";
 import type { paths } from "../../api/schema";
 import type { DaemonStatus } from "../../shared/daemon-status";
+import { reportUnauthorized } from "./auth-gate";
 import { daemonFailureMessage } from "./daemon-failure";
+import { isDaemonServedWeb } from "./preview-mode";
 import { captureRendererEvent } from "./telemetry";
 import { captureApiErrorToSentry } from "./sentry";
 
@@ -9,7 +11,8 @@ function devApiBaseUrl(): string {
 	return typeof window === "undefined" ? "http://127.0.0.1:3001" : window.location.origin;
 }
 
-const explicitApiBaseUrl = import.meta.env.VITE_AO_API_BASE_URL;
+const explicitApiBaseUrl =
+	isDaemonServedWeb && typeof window !== "undefined" ? window.location.origin : import.meta.env.VITE_AO_API_BASE_URL;
 const initialApiBaseUrl = explicitApiBaseUrl ?? (import.meta.env.DEV ? devApiBaseUrl() : "http://127.0.0.1:3001");
 
 let runtimeApiBaseUrl: string | null = explicitApiBaseUrl ?? null;
@@ -225,7 +228,12 @@ async function runtimeFetch(input: Request): Promise<Response> {
 		}
 
 		const url = new URL(input.url);
-		const target = new URL(url.pathname + url.search + url.hash, baseUrl);
+		const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
+		const target = new URL(
+			input.url.startsWith(`${normalizedBaseUrl}/`)
+				? input.url
+				: `${normalizedBaseUrl}/${url.pathname.replace(/^\/+/, "")}${url.search}${url.hash}`,
+		);
 		if (target.href === input.url) {
 			return fetch(input);
 		}
@@ -262,6 +270,7 @@ async function runtimeFetch(input: Request): Promise<Response> {
 		throw error;
 	}
 	if (!response.ok) {
+		if (response.status === 401) reportUnauthorized();
 		// Best-effort read the daemon error envelope's `code` (via a clone so the
 		// caller still gets an unconsumed body) to drive classification.
 		let code: string | undefined;

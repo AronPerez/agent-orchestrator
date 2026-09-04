@@ -23,7 +23,7 @@ test("renderer: added project appears in the sidebar and board @T0 @PRJ", async 
 
 	// Opening it renders that project's board with its session cards.
 	await projectRow.click();
-	await expect(page).toHaveURL(/projects\/ao-demo/);
+	await expect(page).toHaveURL(/host\/local\/project\/ao-demo/);
 	await expect(page.getByTestId("board")).toBeVisible();
 	await expect(page.getByTestId("board-session-card").first()).toBeVisible();
 });

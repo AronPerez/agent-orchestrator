@@ -15,7 +15,7 @@ import { TooltipProvider } from "./ui/tooltip";
 import type { SessionPRSummary } from "../hooks/useSessionScmSummary";
 import { sessionScmSummaryQueryKey } from "../hooks/useSessionScmSummary";
 import { sessionWorkspaceFilesQueryKey } from "../hooks/useSessionWorkspaceFiles";
-import { workspaceQueryKey } from "../hooks/useWorkspaceQuery";
+import { workspaceHostQueryKey } from "../hooks/useWorkspaceQuery";
 import { agentReadiness } from "../test/agent-readiness-fixtures";
 import { useUiStore } from "../stores/ui-store";
 import type {
@@ -73,6 +73,15 @@ vi.mock("../lib/api-client", () => ({
     return fallback;
   },
 }));
+vi.mock("../lib/host-clients", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/host-clients")>()),
+  clientFor: () => ({
+    GET: getMock,
+    PATCH: patchMock,
+    POST: postMock,
+    PUT: putMock,
+  }),
+}));
 
 const pr = (
   n: number,
@@ -94,6 +103,7 @@ const session = (
   prs: PullRequestFacts[],
   overrides: Partial<WorkspaceSession> = {},
 ): WorkspaceSession => ({
+  host: "local",
   id: "sess-1",
   workspaceId: "ws-1",
   workspaceName: "my-app",
@@ -163,7 +173,17 @@ function renderWithQuery(
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  if (workspaces) client.setQueryData(workspaceQueryKey, workspaces);
+  if (workspaces) {
+    client.setQueryData(workspaceHostQueryKey("local"), [
+      {
+        host: "local",
+        label: "Local",
+        status: "ready",
+        workspaces,
+        failure: null,
+      },
+    ]);
+  }
   seed?.(client);
   return {
     ...render(
@@ -319,17 +339,16 @@ describe("SessionInspector tabs", () => {
     );
   });
 
-  it("keeps rail tabs square instead of stretching across the inspector", () => {
+  it("sizes rail tabs to their labels instead of stretching across the inspector", () => {
     renderWithQuery(<SessionInspector session={session([])} />);
 
     const summaryTab = screen.getByRole("tab", { name: "Summary" });
 
-
-		expect(summaryTab).not.toHaveClass("flex-1");
+    expect(summaryTab).not.toHaveClass("flex-1");
 		expect(summaryTab).toHaveClass("size-control-md", "p-0", "shrink-0");
 		expect(summaryTab).not.toHaveClass("h-control-md", "px-1");
-		expect(summaryTab).toHaveAttribute("title", "Summary");
-	});
+    expect(summaryTab).toHaveAttribute("title", "Summary");
+  });
 
   it("shows the glow only while real browser activity is unseen", () => {
     const currentSession = session([]);
@@ -339,12 +358,12 @@ describe("SessionInspector tabs", () => {
     ).not.toBeInTheDocument();
     view.unmount();
 
-    useUiStore.getState().setBrowserUnseen(currentSession.id, true);
+    useUiStore.getState().setBrowserUnseen("local:sess-1", true);
     renderWithQuery(<SessionInspector session={currentSession} />);
     expect(screen.getByTestId("browser-unseen-indicator")).toBeInTheDocument();
 
     act(() =>
-      useUiStore.getState().setInspectorView(currentSession.id, "browser"),
+      useUiStore.getState().setInspectorView("local:sess-1", "browser"),
     );
     expect(
       screen.queryByTestId("browser-unseen-indicator"),
@@ -387,7 +406,7 @@ describe("SessionInspector tabs", () => {
       <SessionInspector session={session([])} />,
       undefined,
       (client) => {
-        client.setQueryData(sessionWorkspaceFilesQueryKey("sess-1"), {
+        client.setQueryData(sessionWorkspaceFilesQueryKey(session([])), {
           sessionId: "sess-1",
           truncated: false,
           files: [
@@ -423,7 +442,7 @@ describe("SessionInspector tabs", () => {
       <SessionInspector session={session([])} />,
       undefined,
       (client) => {
-        client.setQueryData(sessionWorkspaceFilesQueryKey("sess-1"), {
+        client.setQueryData(sessionWorkspaceFilesQueryKey(session([])), {
           sessionId: "sess-1",
           truncated: false,
           files: [
@@ -488,7 +507,7 @@ describe("SessionInspector PR section", () => {
       <SessionInspector session={session([pr(7, "open")])} />,
       undefined,
       (client) => {
-        client.setQueryData(sessionScmSummaryQueryKey("sess-1"), [
+        client.setQueryData(sessionScmSummaryQueryKey(session([])), [
           prSummary(7, "open", {
             review: {
               decision: "approved",
@@ -506,7 +525,9 @@ describe("SessionInspector PR section", () => {
     expect(
       prSection("Pull request").getByText("Mergeable"),
     ).toBeInTheDocument();
-    expect(prSection("Pull request").getByText("PR approved")).toBeInTheDocument();
+    expect(
+      prSection("Pull request").getByText("PR approved"),
+    ).toBeInTheDocument();
     expect(
       prSection("Pull request").getByText("Checks passing"),
     ).toBeInTheDocument();
@@ -539,7 +560,7 @@ describe("SessionInspector PR section", () => {
       <SessionInspector session={session([pr(7, "open")])} />,
       undefined,
       (client) => {
-        client.setQueryData(sessionScmSummaryQueryKey("sess-1"), [readyPR]);
+        client.setQueryData(sessionScmSummaryQueryKey(session([])), [readyPR]);
       },
     );
 
@@ -583,16 +604,26 @@ describe("SessionInspector PR section", () => {
         <SessionInspector session={session([pr(7, "open")])} />,
         undefined,
         (client) => {
-          client.setQueryData(sessionScmSummaryQueryKey("sess-1"), [
+          client.setQueryData(sessionScmSummaryQueryKey(session([])), [
             prSummary(7, "open", {
               ci: { autoInjectCI: true, state: "passing", failingChecks: [] },
-              review: { decision: "approved", hasUnresolvedHumanComments: false, unresolvedBy: [] },
-              mergeability: { state: mergeability, reasons: [], prUrl: "https://example.com/pr/7" },
+              review: {
+                decision: "approved",
+                hasUnresolvedHumanComments: false,
+                unresolvedBy: [],
+              },
+              mergeability: {
+                state: mergeability,
+                reasons: [],
+                prUrl: "https://example.com/pr/7",
+              },
             }),
           ]);
         },
       );
-      expect(screen.queryByRole("button", { name: "Merge PR #7" })).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Merge PR #7" }),
+      ).not.toBeInTheDocument();
     },
   );
 
@@ -601,17 +632,27 @@ describe("SessionInspector PR section", () => {
       <SessionInspector session={session([pr(7, "open")])} />,
       undefined,
       (client) => {
-        client.setQueryData(sessionScmSummaryQueryKey("sess-1"), [
+        client.setQueryData(sessionScmSummaryQueryKey(session([])), [
           prSummary(7, "open", {
             headSha: "",
             ci: { autoInjectCI: true, state: "passing", failingChecks: [] },
-            review: { decision: "approved", hasUnresolvedHumanComments: false, unresolvedBy: [] },
-            mergeability: { state: "mergeable", reasons: [], prUrl: "https://example.com/pr/7" },
+            review: {
+              decision: "approved",
+              hasUnresolvedHumanComments: false,
+              unresolvedBy: [],
+            },
+            mergeability: {
+              state: "mergeable",
+              reasons: [],
+              prUrl: "https://example.com/pr/7",
+            },
           }),
         ]);
       },
     );
-    expect(screen.queryByRole("button", { name: "Merge PR #7" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Merge PR #7" }),
+    ).not.toBeInTheDocument();
   });
 
   it("uses the state chip as the single merged-state indicator", () => {
@@ -769,7 +810,9 @@ describe("SessionInspector PR section", () => {
       <SessionInspector session={session([pr(7, "open")])} />,
       undefined,
       (client) => {
-        client.setQueryData(sessionScmSummaryQueryKey("sess-1"), [failingPR]);
+        client.setQueryData(sessionScmSummaryQueryKey(session([])), [
+          failingPR,
+        ]);
       },
     );
 
@@ -777,7 +820,9 @@ describe("SessionInspector PR section", () => {
       .getByText("PR #7")
       .closest("article") as HTMLElement;
     expect(within(card).getByText("Checks failing")).toBeInTheDocument();
-    expect(within(card).queryByText("CI failures not injected")).not.toBeInTheDocument();
+    expect(
+      within(card).queryByText("CI failures not injected"),
+    ).not.toBeInTheDocument();
   });
 
   it("links each PR to its url", () => {
@@ -866,6 +911,41 @@ describe("SessionInspector usage", () => {
 		expect(within(details).queryByText("2 models")).not.toBeInTheDocument();
 		expect(within(details).queryByText("Processed")).not.toBeInTheDocument();
 		expect(within(details).queryByText("Cost")).not.toBeInTheDocument();
+	});
+
+	// Same wire shape as the board crash: an older daemon omits processedTokens
+	// (and the newer sibling counters) entirely. The inspector must read that as
+	// "unknown", not run it through the formatter and print NaN.
+	it("reads an absent processedTokens as unavailable rather than NaN", async () => {
+		useUiStore.getState().setDeveloperMode(true);
+		// Verbatim shape from a pre-processedTokens daemon.
+		const totals = {
+			inputTokens: 84_472_995,
+			uncachedInputTokens: 901,
+			cacheReadTokens: 82_648_063,
+			cacheWriteTokens: 1_824_031,
+			outputTokens: 447_482,
+			reasoningTokens: null,
+		};
+		getMock.mockImplementation(async (path: string) => {
+			if (path === "/api/v1/usage/sessions/{sessionId}") {
+				return {
+					data: {
+						sessionId: "sess-1",
+						incomplete: false,
+						totals,
+						harnesses: [{ harness: "claude-code", totals, models: [{ modelId: "claude-opus-5", totals }] }],
+					},
+					error: undefined,
+				};
+			}
+			return { data: undefined };
+		});
+
+		renderWithQuery(<SessionInspector session={session([])} />);
+		expect(await screen.findByText("Usage & cost")).toBeInTheDocument();
+		expect(screen.getByLabelText("Processed tokens unavailable")).toBeInTheDocument();
+		expect(screen.queryByText(/NaN/)).not.toBeInTheDocument();
 	});
 
 	it("shows icon disclosures without repeated metrics when multiple agents contributed", async () => {
@@ -1113,6 +1193,7 @@ describe("SessionInspector completion controls", () => {
     });
     renderWithQuery(<SessionInspector session={worker} />, [
       {
+        host: "local",
         id: "ws-1",
         name: "my-app",
         path: "/repo",
@@ -1142,8 +1223,8 @@ describe("SessionInspector completion controls", () => {
     });
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(navigateMock).toHaveBeenCalledWith({
-      to: "/projects/$projectId/sessions/$sessionId",
-      params: { projectId: "ws-1", sessionId: "orch-1" },
+      to: "/host/$hostId/session/$sessionId",
+      params: { hostId: "local", sessionId: "orch-1" },
     });
   });
 
@@ -1170,8 +1251,8 @@ describe("SessionInspector completion controls", () => {
     await waitFor(() => expect(postMock).toHaveBeenCalledTimes(1));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(navigateMock).toHaveBeenCalledWith({
-      to: "/projects/$projectId",
-      params: { projectId: "ws-1" },
+      to: "/host/$hostId/project/$projectId",
+      params: { hostId: "local", projectId: "ws-1" },
     });
   });
 
@@ -1691,7 +1772,7 @@ describe("SessionInspector Activity section", () => {
       />,
       undefined,
       (client) =>
-        client.setQueryData(sessionScmSummaryQueryKey("sess-1"), summaries),
+        client.setQueryData(sessionScmSummaryQueryKey(session([])), summaries),
     );
 
     const section = screen
@@ -2288,8 +2369,8 @@ describe("SessionInspector summary reviews", () => {
         body: { url: reviewUrl },
       }),
     );
-    expect(useUiStore.getState().inspectorSessions["sess-1"]?.view).toBe("browser");
-    expect(useUiStore.getState().inspectorSessions["sess-1"]?.isOpen).toBe(true);
+    expect(useUiStore.getState().inspectorSessions["local:sess-1"]?.view).toBe("browser");
+    expect(useUiStore.getState().inspectorSessions["local:sess-1"]?.isOpen).toBe(true);
 
     await userEvent.click(screen.getByRole("button", { name: "Send to worker agent" }));
     await waitFor(() =>
@@ -2586,9 +2667,9 @@ describe("SessionInspector summary reviews", () => {
     expect(
       (await screen.findAllByText("Reviewable change 3")).length,
     ).toBeGreaterThan(0);
-    expect(screen.getAllByText(/2 unresolved comments/).length).toBeGreaterThanOrEqual(
-      1,
-    );
+    expect(
+      screen.getAllByText(/2 unresolved comments/).length,
+    ).toBeGreaterThanOrEqual(1);
     expect(
       screen.queryByTestId("github-inline-comments"),
     ).not.toBeInTheDocument();

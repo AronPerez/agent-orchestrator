@@ -310,6 +310,13 @@ func Run() error {
 	sessMgr.SetTerminalInputGate(termMgr)
 	lifecycleMessenger.Bind(sessionLifecycleMessenger{sessMgr})
 	lcStack.LCM.SetCompletionTerminator(sessMgr)
+	// #114 effects 3+4: lifecycle verifies a hook-reported exit against the
+	// supervisor before believing it, and delivery heals a stale exited state.
+	// A runtime without the strict inspector simply leaves both unprobed.
+	sessMgr.SetStaleExitClearer(lcStack.LCM)
+	if insp, ok := sessMgr.RuntimeExactInspector(); ok {
+		lcStack.LCM.SetExitInspector(insp)
+	}
 	lcStack.LCM.SetSessionInputLease(sessMgr)
 	lcStack.LCM.SetSessionOperationGate(sessMgr)
 	termMgr.SetSessionInputLease(sessMgr)
@@ -349,7 +356,7 @@ func Run() error {
 	}
 	// HostID is assigned below, once the identity file has been read.
 	mc := &controllers.MobileController{Bridge: bs}
-	browserService := browsersvc.New(sessionSvc, browserBroker, browserAuthority)
+	browserService := browsersvc.New(sessionSvc, projectSvc, browserBroker, browserAuthority)
 
 	// Standalone shell terminals: user-opened shells with no agent session
 	// behind them. They reuse the same runtime adapter (and therefore the same
@@ -423,7 +430,11 @@ func Run() error {
 	if prReader != nil && prMerger != nil {
 		prActions = prsvc.NewActionService(prsvc.ActionDeps{Store: store, Merger: prMerger, Reader: prReader})
 	} else {
-		log.Warn("pr action service disabled: no usable SCM provider")
+		var prCloser ports.SCMCloser
+		if githubProvider, err := newGitHubSCMProvider(log); err == nil {
+			prCloser = githubProvider
+		}
+		prActions = prsvc.NewActionService(prsvc.ActionDeps{Store: store, Merger: prMerger, Closer: prCloser, Reader: prReader})
 	}
 
 	// Durable agent-switch and interface-transition recovery is the startup
@@ -560,6 +571,7 @@ func Run() error {
 			},
 		}),
 		Browser:             browserService,
+		BrowserRuntime:      browserBroker,
 		PreviewServer:       managedPreview,
 		SessionCapabilities: browserAuthority,
 	})

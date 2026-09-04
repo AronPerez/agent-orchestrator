@@ -23,6 +23,7 @@ Start with [architecture.md](architecture.md) for the current backend model and
 | [stack.md](stack.md)                                   | Accepted library/runtime choices, pending stack decisions, and dependencies explicitly avoided for V1.                |
 | [telemetry.md](telemetry.md)                           | User-facing overview of product telemetry, privacy safeguards, and opt-out controls.                                    |
 | [posthog-cost-controls.md](posthog-cost-controls.md)   | PostHog event-name migration, ingestion drop rules, and dashboard queries for reducing telemetry spend.              |
+| [remote-sessions-edd.md](remote-sessions-edd.md)       | EDD for shipped multi-host federation: one app driving N daemons, the loopback proxy, and LAN credential containment. |
 
 ## Mental model
 

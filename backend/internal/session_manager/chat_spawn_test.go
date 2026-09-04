@@ -1294,3 +1294,107 @@ func TestSendRefusedForTerminatedChatSession(t *testing.T) {
 		t.Errorf("a terminated session still received %v", launcher.relayed)
 	}
 }
+
+// The reported failure: switching a claude-code chat session's interface died with
+//
+//	set ACP session option "model": Invalid value for config option model: gpt-5.6-terra
+//
+// gpt-5.6-terra is a codex model. The session's harness and the harness its project
+// role configures a model for had diverged — an explicit --agent at spawn, a completed
+// agent switch, or the role's agent edited afterwards all produce that — and every
+// launch path except the agent-switch one re-applied the role's model regardless of
+// which agent was actually going to receive it.
+func TestChatLaunchDoesNotApplyAnotherHarnessModel(t *testing.T) {
+	launcher := &recordingLauncher{}
+	mgr, store, _ := newChatManager(launcher)
+	store.projects[string(chatTestProject)] = domain.ProjectRecord{
+		ID: string(chatTestProject),
+		Config: domain.ProjectConfig{
+			Worker: domain.RoleOverride{
+				Harness:     domain.HarnessCodex,
+				AgentConfig: domain.AgentConfig{Model: "gpt-5.6-terra"},
+			},
+			Orchestrator: domain.RoleOverride{Harness: domain.HarnessClaudeCode},
+		},
+	}
+	ctx := context.Background()
+
+	rec, _, _, err := mgr.Spawn(ctx, ports.SpawnConfig{
+		ProjectID:     chatTestProject,
+		Kind:          domain.KindWorker,
+		Harness:       domain.HarnessClaudeCode,
+		RequestedMode: domain.SessionModeChat,
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if len(launcher.started) != 1 {
+		t.Fatalf("spawn starts = %d, want 1", len(launcher.started))
+	}
+	if got := launcher.started[0].Model; got != "" {
+		t.Errorf("spawn passed model %q to a claude-code session; it is configured for codex", got)
+	}
+
+	// The resume path is the one the interface switch and every daemon restore go
+	// through, and it rebuilds the config from the project rather than reusing what
+	// spawn resolved — so it has to make the same decision independently.
+	if _, err := mgr.Kill(ctx, rec.ID); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+	if _, err := mgr.RestoreWithMode(ctx, rec.ID); err != nil {
+		t.Fatalf("RestoreWithMode: %v", err)
+	}
+	if len(launcher.started) != 2 {
+		t.Fatalf("restore starts = %d, want 2", len(launcher.started))
+	}
+	if got := launcher.started[1].Model; got != "" {
+		t.Errorf("resume passed model %q to a claude-code session; it is configured for codex", got)
+	}
+}
+
+// A project may pin the interface its sessions are born with. The tier sits
+// between the two that already existed, so this pins all three at once: an
+// explicit --mode still wins, and a project that pins nothing still inherits the
+// daemon-owned default.
+func TestSpawnSessionModePrecedenceExplicitThenProjectThenDaemon(t *testing.T) {
+	tests := []struct {
+		name      string
+		requested domain.SessionMode
+		project   domain.SessionMode
+		daemon    domain.SessionMode
+		want      domain.SessionMode
+	}{
+		{name: "explicit chat beats project tui", requested: domain.SessionModeChat, project: domain.SessionModeTUI, daemon: domain.SessionModeTUI, want: domain.SessionModeChat},
+		{name: "explicit tui beats project chat", requested: domain.SessionModeTUI, project: domain.SessionModeChat, daemon: domain.SessionModeChat, want: domain.SessionModeTUI},
+		{name: "project chat beats daemon tui", project: domain.SessionModeChat, daemon: domain.SessionModeTUI, want: domain.SessionModeChat},
+		{name: "project tui beats daemon chat", project: domain.SessionModeTUI, daemon: domain.SessionModeChat, want: domain.SessionModeTUI},
+		{name: "unset project inherits daemon chat", daemon: domain.SessionModeChat, want: domain.SessionModeChat},
+		{name: "unset project inherits daemon tui", daemon: domain.SessionModeTUI, want: domain.SessionModeTUI},
+		// A value this build does not know — written by a newer daemon into the
+		// same project row — is "no override", not an error and not a silent
+		// downgrade to TUI over a daemon default of Chat.
+		{name: "unknown project value is no override", project: "voice", daemon: domain.SessionModeChat, want: domain.SessionModeChat},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mgr, store, _ := newChatManager(&recordingLauncher{})
+			mgr.defaults = fixedSessionModeDefaults(tt.daemon)
+			project := store.projects[string(chatTestProject)]
+			project.Config.SessionInterface = tt.project
+			store.projects[string(chatTestProject)] = project
+
+			rec, _, _, err := mgr.Spawn(context.Background(), ports.SpawnConfig{
+				ProjectID:     chatTestProject,
+				Kind:          domain.KindWorker,
+				Harness:       domain.HarnessCodex,
+				RequestedMode: tt.requested,
+			})
+			if err != nil {
+				t.Fatalf("Spawn: %v", err)
+			}
+			if rec.Mode != tt.want {
+				t.Fatalf("mode = %q, want %q", rec.Mode, tt.want)
+			}
+		})
+	}
+}

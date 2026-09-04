@@ -9,7 +9,7 @@ import type {
 	OpenDevToolsOptions,
 } from "electron";
 import { nativeImage } from "electron";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type {
 	BrowserAnnotationCancelPayload,
 	BrowserAnnotationContext,
@@ -300,7 +300,13 @@ export type BrowserViewHost = {
 	dispose: () => Promise<void>;
 	destroy: (viewId: string) => void;
 	destroyAll: () => void;
-	execute: (sessionId: string, action: string, args?: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>;
+	execute: (
+		sessionId: string,
+		action: string,
+		args?: Record<string, unknown>,
+		signal?: AbortSignal,
+		profileKey?: string,
+	) => Promise<unknown>;
 	// webContents of the most recently focused browser panel (or null); the titlebar menu targets it for Edit/Reload/Zoom/DevTools.
 	getLastFocusedPanelContents: () => WebContents | null;
 	/** Toggle Chromium DevTools for the last focused AO browser panel. */
@@ -514,6 +520,36 @@ export function scaleBoundsForZoom(rect: BrowserRect, zoomFactor: number): Brows
 	};
 }
 
+// A persist: partition name becomes a DIRECTORY under userData/Partitions, so
+// this key reaches the filesystem. Mirror the daemon's project-id rule exactly
+// (^[A-Za-z0-9][A-Za-z0-9._-]*$, no ".." run) and REJECT anything else outright.
+// Deliberately not sanitized: rewriting a bad key into a valid one could map two
+// different projects onto one directory, and two projects silently sharing a
+// cookie jar is precisely the isolation failure this feature must not have.
+// Rejecting falls back to the ephemeral default, which is always the safe answer.
+const PERSISTENT_PROFILE_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+export function persistentPartition(profileKey?: string): string | null {
+	const key = profileKey?.trim();
+	if (!key || key.includes("..") || !PERSISTENT_PROFILE_KEY_PATTERN.test(key)) return null;
+	return `persist:ao-browser-${key}`;
+}
+
+// A remote host's profileKey is a project id on THAT machine, and project ids
+// collide across hosts by construction (the same project checked out on two
+// machines). A partition name is a cookie jar: two hosts silently sharing one
+// is exactly the isolation failure persistentPartition refuses. So a remote
+// key is scoped by host before partition naming. Hashed rather than
+// concatenated: a URL can never pass PERSISTENT_PROFILE_KEY_PATTERN, and the
+// result must stay within the 64-char rule for any host URL and key length.
+// Local ("local"/undefined) stays unscoped so existing on-disk partitions keep
+// their logins.
+export function scopedProfileKey(host: string | undefined, profileKey: string | undefined): string | undefined {
+	if (!profileKey?.trim()) return profileKey;
+	if (!host || host === "local") return profileKey;
+	return `r${createHash("sha256").update(`${host}\n${profileKey}`).digest("hex").slice(0, 40)}`;
+}
+
 export function createBrowserViewHost(options: BrowserViewHostOptions): BrowserViewHost {
 	const entries = new Map<string, BrowserSessionEntry>();
 	const shellWebContents = options.shellWebContents ?? options.mainWindow.webContents;
@@ -716,7 +752,10 @@ export function createBrowserViewHost(options: BrowserViewHostOptions): BrowserV
 		return entry;
 	};
 
-	const ensureSession = (sessionId: string, rendererId?: number): BrowserSessionEntry => {
+	// profileKey is an OPAQUE, project-scoped key supplied by the daemon (or
+	// relayed by the renderer from the same source). Absent — the default, and
+	// the default must stay this way — means a memory-only partition.
+	const ensureSession = (sessionId: string, rendererId?: number, profileKey?: string): BrowserSessionEntry => {
 		const existingViewId = viewIdsBySessionId.get(sessionId);
 		const viewId = existingViewId ?? `${rendererId ?? 0}:${sessionId}`;
 		let session = entries.get(viewId);
@@ -724,10 +763,16 @@ export function createBrowserViewHost(options: BrowserViewHostOptions): BrowserV
 			session = {
 				sessionId,
 				viewId,
-				// A non-persist: Electron partition is memory-only. Every tab in
-				// this worker shares it, while a fresh worker runtime receives a
-				// different partition even if a session ID is ever reused.
-				profilePartition: `ao-browser-${randomUUID()}`,
+				// Default: a non-persist: Electron partition is memory-only. Every
+				// tab in this worker shares it, while a fresh worker runtime receives
+				// a different partition even if a session ID is ever reused.
+				//
+				// With a profileKey, the project opted into a shared on-disk profile
+				// instead, so a login survives session teardown and app restart. The
+				// key is per PROJECT, so sessions of other projects still get their
+				// own jar. Electron stores it under userData/Partitions/<name>, and
+				// main.ts pins userData to ~/.ao (AGENTS.md hard rule).
+				profilePartition: persistentPartition(profileKey) ?? `ao-browser-${randomUUID()}`,
 				tabs: new Map(),
 				activeTabId: "",
 				nextTabNumber: 1,
@@ -1497,8 +1542,12 @@ export function createBrowserViewHost(options: BrowserViewHostOptions): BrowserV
 		ipcDisposers.push(() => options.ipcMain.off(channel, fn));
 	};
 
-	handle("browser:ensure", (event, sessionId: string) => {
-		const session = ensureSession(sessionId, event.sender.id);
+	// host is the session's HostId ("local" or a remote url). It scopes the
+	// persistent profile key only — main.ts already scoped the key it passes on
+	// the agent path, so ensureSession receives an already-scoped key from both
+	// entry points and must never scope twice.
+	handle("browser:ensure", (event, sessionId: string, profileKey?: string, host?: string) => {
+		const session = ensureSession(sessionId, event.sender.id, scopedProfileKey(host, profileKey));
 		pushDevToolsState(session);
 		return pushNavState(options, activeEntry(session));
 	});
@@ -1627,7 +1676,7 @@ export function createBrowserViewHost(options: BrowserViewHostOptions): BrowserV
 	on("browser:annotation:draft", (event, draft: BrowserAnnotationDraft) => updateAnnotationDraft(event, draft));
 
 	return {
-		execute: async (sessionId, action, args = {}, signal) => {
+		execute: async (sessionId, action, args = {}, signal, profileKey) => {
 			throwIfAborted(signal);
 			if (!sessionId.trim()) throw browserError("INVALID_ARGUMENT", "sessionId is required");
 			if (action === "__destroy-session") {
@@ -1636,7 +1685,7 @@ export function createBrowserViewHost(options: BrowserViewHostOptions): BrowserV
 				if (viewId) destroy(viewId);
 				return { destroyed: Boolean(viewId) };
 			}
-			const session = ensureSession(sessionId);
+			const session = ensureSession(sessionId, undefined, profileKey);
 			const commandId = randomUUID();
 			setAgentBrowserActivity(session, action, true, commandId, "started");
 			try {

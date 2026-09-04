@@ -176,6 +176,9 @@ type Service struct {
 	// the no_signal downgrade: a hook-less harness staying silent forever is
 	// normal, not a broken pipeline. nil means "unknown": never downgrade.
 	signalCapable func(domain.AgentHarness) bool
+	// runtimeUnreachable reports whether AO's last liveness probe could reach a
+	// session's runtime. nil means "unknown": no session is ever flagged.
+	runtimeUnreachable func(domain.SessionID) bool
 }
 
 // New wires a controller-facing session service over an internal session Manager.
@@ -206,6 +209,10 @@ type Deps struct {
 	// wiring passes activitydispatch.SupportsHarness. Left nil, no session is
 	// ever downgraded to no_signal.
 	SignalCapable func(domain.AgentHarness) bool
+	// RuntimeUnreachable surfaces the lifecycle reducer's last runtime
+	// reachability observation on the read model; daemon wiring passes
+	// lifecycle.Manager.RuntimeUnreachable. Left nil, no session is flagged.
+	RuntimeUnreachable func(domain.SessionID) bool
 }
 
 // NewWithDeps wires a session service with optional PR-claim dependencies.
@@ -214,7 +221,7 @@ func NewWithDeps(d Deps) *Service {
 	if backgroundContext == nil {
 		backgroundContext = context.Background()
 	}
-	s := &Service{manager: d.Manager, store: d.Store, prClaimer: d.PRClaimer, scm: d.SCM, tracker: d.Tracker, clock: d.Clock, dataDir: d.DataDir, signalCapable: d.SignalCapable, telemetry: d.Telemetry, logger: d.Logger, backgroundContext: backgroundContext, agentReadiness: d.AgentReadiness}
+	s := &Service{manager: d.Manager, store: d.Store, prClaimer: d.PRClaimer, scm: d.SCM, tracker: d.Tracker, clock: d.Clock, dataDir: d.DataDir, signalCapable: d.SignalCapable, runtimeUnreachable: d.RuntimeUnreachable, telemetry: d.Telemetry, logger: d.Logger, backgroundContext: backgroundContext, agentReadiness: d.AgentReadiness}
 	if s.prClaimer == nil {
 		if w, ok := d.Store.(ports.PRClaimer); ok {
 			s.prClaimer = w
@@ -954,13 +961,16 @@ func (s *Service) toSessionWithFacts(rec domain.SessionRecord, prs []domain.PRFa
 	now := s.now()
 	presentation := deriveKanbanPresentation(rec, prs, runs, now, s.harnessSignals(rec.Harness))
 	return domain.Session{
-		SessionRecord:    rec,
-		Status:           deriveStatus(rec, prs, now, s.harnessSignals(rec.Harness)),
-		SCMStatus:        deriveSCMStatus(prs),
-		KanbanColumn:     presentation.Column,
-		DisplayStatus:    presentation.DisplayStatus,
-		TerminalHandleID: rec.Metadata.RuntimeHandleID,
-		PRs:              prs,
+		SessionRecord: rec,
+		Status:        deriveStatus(rec, prs, now, s.harnessSignals(rec.Harness)),
+		SCMStatus:     deriveSCMStatus(prs),
+		KanbanColumn:  presentation.Column,
+		DisplayStatus: presentation.DisplayStatus,
+		// Terminated sessions are no longer probed, so a leftover flag would
+		// outlive the fact; a terminated session's status is already definitive.
+		RuntimeUnreachable: !rec.IsTerminated && s.runtimeIsUnreachable(rec.ID),
+		TerminalHandleID:   rec.Metadata.RuntimeHandleID,
+		PRs:                prs,
 	}, nil
 }
 
@@ -1106,6 +1116,12 @@ func toAPIError(err error) error {
 		return apierr.Conflict("CHAT_AUTH_REQUIRED", "The agent is installed but not authenticated", nil)
 	case errors.Is(err, ports.ErrRuntimeWorkspaceCwdMismatch):
 		return apierr.Conflict("WORKSPACE_CWD_MISMATCH", err.Error(), nil)
+	// A runtime AO cannot reach is a knowable state, not an internal fault:
+	// without this the cause ("no server running on ...") existed only in the
+	// daemon log while `ao send` printed INTERNAL_ERROR. err.Error() carries the
+	// adapter's own diagnosis, exactly as WORKSPACE_CWD_MISMATCH does above.
+	case errors.Is(err, ports.ErrRuntimeUnavailable), errors.Is(err, ports.ErrRuntimeProbeInconclusive):
+		return apierr.Conflict("RUNTIME_UNREACHABLE", err.Error(), nil)
 	case errors.Is(err, ports.ErrWorkspaceLocked):
 		return apierr.Conflict("WORKSPACE_LOCKED", err.Error(), nil)
 	default:
@@ -1205,6 +1221,16 @@ func (s *Service) now() time.Time {
 		return time.Now().UTC()
 	}
 	return s.clock().UTC()
+}
+
+// runtimeIsUnreachable tolerates a zero-value Service and a nil predicate the
+// same way harnessSignals does: with no reachability source the service never
+// claims a runtime is unreachable.
+func (s *Service) runtimeIsUnreachable(id domain.SessionID) bool {
+	if s.runtimeUnreachable == nil {
+		return false
+	}
+	return s.runtimeUnreachable(id)
 }
 
 // harnessSignals tolerates a zero-value Service the same way now does. Without

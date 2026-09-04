@@ -30,8 +30,12 @@ vi.mock("../lib/api-client", () => ({
 		return fallback;
 	},
 }));
+vi.mock("../lib/host-clients", () => ({
+	clientFor: () => ({ GET: getMock, POST: postMock }),
+}));
 
 const worker: WorkspaceSession = {
+	host: "local",
 	activity: { state: "active", lastActivityAt: "2026-06-10T00:00:00Z" },
 	branch: "ao/sess-1",
 	id: "sess-1",

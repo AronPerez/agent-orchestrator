@@ -1,6 +1,13 @@
 # ao browser
 
-Inspect and control the current AO session's target-isolated browser. The desktop app must be open. The agent and user share the same live page, cookies, navigation state, and `WebContentsView`; the runtime remains usable while the Browser panel is hidden. Tabs in this worker share an ephemeral browser profile, while other AO workers use isolated profiles.
+Inspect and control the current AO session's target-isolated browser. The desktop app must be open. The agent and user share the same live page, cookies, navigation state, and `WebContentsView`; the runtime remains usable while the Browser panel is hidden. Tabs in this worker share an ephemeral browser profile, while other AO workers use isolated profiles. If the project opted into a persistent profile, that profile is instead shared with every session on the project and kept on disk; `ao browser status` says which mode is in effect.
+
+Sessions on a remote host are supported: the desktop app attaches as the
+browser runtime for every host it is connected to, so `ao browser` inside a
+remote worker drives the Browser panel in the user's app. If the host's own
+machine also runs the desktop app, that local app keeps the runtime and remote
+commands wait until it disconnects. `BROWSER_RUNTIME_UNAVAILABLE` on a remote
+session means no desktop app is currently attached to this host.
 
 `AO_SESSION_ID` selects the target, so run these commands from inside an AO worker session.
 

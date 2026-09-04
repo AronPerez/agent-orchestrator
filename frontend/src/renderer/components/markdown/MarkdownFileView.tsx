@@ -41,6 +41,7 @@ import "github-markdown-css/github-markdown.css";
 import { MarkdownFileContext } from "./markdown-file-context";
 import { MarkdownImage } from "./MarkdownImage";
 import { MarkdownExternalLink } from "./MarkdownExternalLink";
+import type { Ref } from "../../lib/hosts";
 
 const REMARK_PLUGINS = [remarkGfm];
 
@@ -62,13 +63,13 @@ const REHYPE_PLUGINS: PluggableList = [
 
 
 export function MarkdownFileView({
-	sessionId,
+	session,
 	filePath,
 	content,
 	truncated,
 	version,
 }: {
-	sessionId: string;
+	session: Ref;
 	filePath: string;
 	content: string;
 	/** The daemon capped the file it sent; what renders below is a prefix of it. */
@@ -78,7 +79,7 @@ export function MarkdownFileView({
 }) {
 	const { t } = useTranslation();
 	const bodyRef = useRef<HTMLDivElement>(null);
-	const contextValue = useMemo(() => ({ sessionId, filePath, version }), [sessionId, filePath, version]);
+	const contextValue = useMemo(() => ({ session, filePath, version }), [session, filePath, version]);
 
 	// Heading slugs are unique per rendered file, not per document, and the Files
 	// tab expands many files at once — two open READMEs both containing

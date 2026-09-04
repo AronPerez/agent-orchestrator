@@ -121,6 +121,73 @@ describe("agent-browser runtime lifecycle", () => {
 		await rm(dataDir, { recursive: true, force: true });
 	}
 
+	// Regression for the reversal/prepend defect. agent-browser 0.33.1 inserts at
+	// the caret, and on a React controlled input the caret is pinned at 0 — so
+	// per-character typing arrived REVERSED ("abcdefgh" as "hgfedcba"), and a
+	// single whole-string insertion still PREPENDED onto existing content
+	// ("abcd" then "efgh" gave "efghabcd"). Both were measured against a real
+	// controlled input, both are silent, and the field that surfaced it was a
+	// masked password.
+	//
+	// These assert the native command SEQUENCE, which is what fails if someone
+	// routes `type` back to a caret-relative primitive. They cannot prove the text
+	// arrives correctly — that was verified end to end against a desktop build and
+	// is recorded in the PR. Note each assertion states the EXPECTED value rather
+	// than the absence of a known-bad one: predicting the wrong failure direction
+	// is exactly how prepend slipped past the first fix.
+	async function typeFixture(existingValue: string) {
+		const issued: string[][] = [];
+		const { dataDir, runtime } = await fixture({
+			processRunner: async (...callArgs: unknown[]) => {
+				const argv = callArgs[1] as string[];
+				issued.push(argv);
+				if (argv[0] === "get") {
+					return { stdout: JSON.stringify({ success: true, data: existingValue }), stderr: "", exitCode: 0 };
+				}
+				return { stdout: JSON.stringify({ success: true, data: {} }), stderr: "", exitCode: 0 };
+			},
+		});
+		return { dataDir, runtime, issued: () => issued.filter((argv) => argv[0] !== "stream") };
+	}
+
+	it("types by reading the field and refilling it, never inserting at the caret", async () => {
+		const { dataDir, runtime, issued } = await typeFixture("abcd");
+		try {
+			await runtime.runAction("s1", "type", { ref: "e3", text: "efgh" }, provider);
+			expect(issued()).toEqual([
+				["get", "value", "@e3", "--json"],
+				// Appended to what the field already held. Not "efgh" alone (that is
+				// replacement) and not caret-relative (that prepends: "efghabcd").
+				["fill", "@e3", "abcdefgh", "--json"],
+			]);
+		} finally {
+			await runtime.dispose();
+			await cleanup(dataDir);
+		}
+	});
+
+	it("appends to an empty field without inventing content", async () => {
+		const { dataDir, runtime, issued } = await typeFixture("");
+		try {
+			await runtime.runAction("s1", "type", { ref: "e3", text: "abcdefgh" }, provider);
+			expect(issued().at(-1)).toEqual(["fill", "@e3", "abcdefgh", "--json"]);
+		} finally {
+			await runtime.dispose();
+			await cleanup(dataDir);
+		}
+	});
+
+	it("leaves fill alone — it inserts once and never reproduced the defect", async () => {
+		const { dataDir, runtime, issued } = await typeFixture("ignored");
+		try {
+			await runtime.runAction("s1", "fill", { ref: "e3", text: "abc" }, provider);
+			expect(issued()).toEqual([["fill", "@e3", "abc", "--json"]]);
+		} finally {
+			await runtime.dispose();
+			await cleanup(dataDir);
+		}
+	});
+
 	it("serializes concurrent initialization and removes the owned run root", async () => {
 		const { dataDir, bridge, runtime } = await fixture();
 		try {

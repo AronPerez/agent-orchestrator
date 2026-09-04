@@ -41,6 +41,11 @@ type SCMMerger interface {
 	MergePullRequest(ctx context.Context, request SCMMergeRequest) (SCMMergeResult, error)
 }
 
+// SCMCloser closes pull requests without merging them.
+type SCMCloser interface {
+	ClosePullRequest(ctx context.Context, ref SCMPRRef) error
+}
+
 // SCMReviewRequest asks the provider to request another review from Reviewer.
 type SCMReviewRequest struct {
 	PR       SCMPRRef

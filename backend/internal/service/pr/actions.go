@@ -5,6 +5,7 @@ import "context"
 // ActionManager is the controller-facing contract for guarded PR mutations.
 type ActionManager interface {
 	Merge(ctx context.Context, request MergeRequest) (MergeResult, error)
+	Close(ctx context.Context, prID string) (CloseResult, error)
 	ResolveComments(ctx context.Context, prID string, commentIDs []string) (ResolveResult, error)
 }
 
@@ -21,6 +22,11 @@ type MergeResult struct {
 	PRNumber       int
 	Method         string
 	MergeCommitSHA string
+}
+
+// CloseResult is the successful outcome of closing a PR without merging.
+type CloseResult struct {
+	PRNumber int
 }
 
 // ResolveResult is the successful outcome of a resolve-comments operation.

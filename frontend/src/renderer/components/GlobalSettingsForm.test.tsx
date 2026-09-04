@@ -9,6 +9,7 @@ import { useSoundNotificationsStore } from "../stores/sound-notifications-store"
 import { useTerminalShellStore } from "../stores/terminal-shell-store";
 import { useUiStore } from "../stores/ui-store";
 import { TooltipProvider } from "./ui/tooltip";
+import { settingsQueryKey, type Settings } from "../hooks/useSettings";
 
 const {
 	getUpdate,
@@ -91,8 +92,9 @@ vi.mock("../lib/bridge", () => ({
 	},
 }));
 
-function renderForm() {
+function renderForm(settings?: Settings) {
 	const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+	if (settings) qc.setQueryData(settingsQueryKey, settings);
 	render(
 		<QueryClientProvider client={qc}>
 			<TooltipProvider>
@@ -162,7 +164,7 @@ beforeEach(async () => {
 		saving: false,
 		saveError: false,
 	});
-	useUiStore.setState({ developerMode: false });
+	useUiStore.setState({ developerMode: false, remoteHosts: false });
 	document.documentElement.lang = "en";
 });
 
@@ -189,6 +191,61 @@ describe("GlobalSettingsForm", () => {
 		expect(window.localStorage.getItem("ao.developerMode")).toBe("true");
 		await user.click(screen.getByLabelText("Updates channel"));
 		expect(await screen.findByRole("menuitem", { name: "Feature Releases" })).toBeInTheDocument();
+	});
+
+	it("offers Remote hosts as a switch right below Developer Mode and persists it", async () => {
+		const user = userEvent.setup();
+		renderForm();
+		const developerMode = await screen.findByRole("switch", { name: "Developer Mode" });
+		const remoteHosts = screen.getByRole("switch", { name: "Remote hosts (experimental)" });
+		expect(remoteHosts).toHaveAttribute("aria-checked", "false");
+		// "Underneath Developer Mode": the next switch in document order.
+		expect(developerMode.compareDocumentPosition(remoteHosts) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+		expect(screen.getAllByRole("switch").indexOf(remoteHosts)).toBe(screen.getAllByRole("switch").indexOf(developerMode) + 1);
+
+		await user.click(remoteHosts);
+		expect(window.localStorage.getItem("ao.remoteHosts")).toBe("true");
+		expect(useUiStore.getState().remoteHosts).toBe(true);
+	});
+
+	it("keeps the cloud offering unchanged when Remote hosts is toggled", async () => {
+		const user = userEvent.setup();
+		useUiStore.setState({ developerMode: true, remoteHosts: false });
+		renderForm({
+			defaultSessionMode: "tui",
+			chatHarnesses: [],
+			client: "",
+			localEnabled: true,
+			cloudOffering: true,
+			cloudEnabled: false,
+			cloudControlPlaneUrl: "https://cloud.example.test",
+		});
+
+		const remoteHosts = await screen.findByRole("switch", { name: "Remote hosts (experimental)" });
+		const cloud = screen.getByRole("switch", { name: "Cloud" });
+		expect(cloud).toBeChecked();
+		await user.click(remoteHosts);
+		expect(cloud).toBeChecked();
+	});
+
+	it("keeps Remote hosts unchanged when the cloud offering is toggled", async () => {
+		const user = userEvent.setup();
+		useUiStore.setState({ developerMode: true, remoteHosts: true });
+		renderForm({
+			defaultSessionMode: "tui",
+			chatHarnesses: [],
+			client: "",
+			localEnabled: true,
+			cloudOffering: false,
+			cloudEnabled: false,
+			cloudControlPlaneUrl: "https://cloud.example.test",
+		});
+
+		const remoteHosts = await screen.findByRole("switch", { name: "Remote hosts (experimental)" });
+		await user.click(screen.getByRole("switch", { name: "Cloud" }));
+		expect(await screen.findByRole("dialog")).toBeInTheDocument();
+		expect(remoteHosts).toBeChecked();
+		expect(useUiStore.getState().remoteHosts).toBe(true);
 	});
 
 	it("shows the available feature builds after choosing Feature Releases", async () => {

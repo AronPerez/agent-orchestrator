@@ -34,6 +34,7 @@ vi.mock("../hooks/useSwitchAgent", async (importOriginal) => {
 });
 
 const worker: WorkspaceSession = {
+	host: "local",
 	activity: { state: "active", lastActivityAt: "2026-06-10T00:00:00Z" },
 	branch: "ao/sess-1",
 	id: "sess-1",
@@ -57,7 +58,7 @@ function renderDialog(
 		defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
 	});
 	for (const agentId of ["claude-code", "codex"]) {
-		queryClient.setQueryData(agentModelsQueryKey(agentId, session.workspaceId), {
+		queryClient.setQueryData(agentModelsQueryKey(agentId, { host: session.host, id: session.workspaceId }), {
 			agentId,
 			allowCustom: false,
 			fetchedAt: "2026-06-10T00:00:00Z",
@@ -252,7 +253,9 @@ describe("SwitchAgentDialog", () => {
 		expect(within(dialog).queryByRole("button", { name: "Target agent" })).not.toBeInTheDocument();
 		await userEvent.click(within(dialog).getByRole("button", { name: "Refresh" }));
 
-		expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: ["session-agent-switches", "sess-1"] });
+		expect(invalidateQueries).toHaveBeenCalledWith({
+			queryKey: ["session-agent-switches", "local:sess-1"],
+		});
 		expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: ["workspaces"] });
 	});
 
@@ -274,7 +277,7 @@ describe("SwitchAgentDialog", () => {
 		expect(within(dialog).getByText("Claude Code could not be restored")).toBeInTheDocument();
 		await userEvent.click(within(dialog).getByRole("button", { name: "Restore Claude Code" }));
 		expect(switchMocks.recoverMutate).toHaveBeenCalledWith({
-			sessionId: "sess-1",
+			session: recoverySession,
 			switchId: "switch-source-recovery",
 		});
 		expect(within(dialog).queryByRole("button", { name: "Target agent" })).not.toBeInTheDocument();
@@ -298,7 +301,7 @@ describe("SwitchAgentDialog", () => {
 		expect(within(dialog).getByText("Claude Code status could not be confirmed")).toBeInTheDocument();
 		await userEvent.click(within(dialog).getByRole("button", { name: "Check Claude Code" }));
 		expect(switchMocks.recoverMutate).toHaveBeenCalledWith({
-			sessionId: "sess-1",
+			session: recoverySession,
 			switchId: "switch-source-stop-recovery",
 		});
 	});

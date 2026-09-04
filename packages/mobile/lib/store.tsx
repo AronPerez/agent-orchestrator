@@ -7,6 +7,7 @@ import { AppState as RNAppState } from "react-native";
 import { shouldPoll } from "./appStatePoll";
 import {
 	ApiError,
+	closePR as apiClosePR,
 	delegateTask,
 	getNotifications,
 	getSessions,
@@ -39,10 +40,12 @@ import { mobileTelemetry, trackFeature } from "./telemetry/runtime";
 import { useConversationEventTransport } from "./chat/conversationEvents";
 
 const ACTIVE_PROJECT_KEY = "ao.activeProject";
+const PR_DENSITY_KEY = "ao.prDensity";
 
 // Board-level connection state is derived from the REST poll. The session screen
 // tracks its own terminal mux connection separately.
 export type ConnStatus = "closed" | "connecting" | "open";
+export type PRDensity = "cards" | "table";
 
 // An options object rather than four optional positionals: `spawn(a, b, c, d)`
 // with every argument optional and same-typed is where call-site mistakes live.
@@ -68,6 +71,7 @@ type AppState = {
 	orchestratorId: string | null;
 	stats: DashboardStats;
 	activeProjectId: string; // 'all' or a projectId
+	prDensity: PRDensity;
 	connection: ConnStatus;
 	/** Unread notification count, for the board's bell badge. 0 when unknown. */
 	notificationsUnread: number;
@@ -79,9 +83,11 @@ type AppState = {
 	reloadConfig: () => Promise<void>;
 	refresh: () => Promise<void>;
 	setActiveProject: (id: string) => void;
+	setPRDensity: (density: PRDensity) => void;
 	spawn: (opts: SpawnOptions) => Promise<DashboardSession>;
 	launchConductor: (projectId: string, clean?: boolean, mode?: SessionMode) => Promise<OrchestratorLink>;
 	merge: (pr: DashboardPR) => Promise<void>;
+	close: (pr: DashboardPR) => Promise<void>;
 	kill: (id: string) => Promise<void>;
 	restore: (id: string) => Promise<void>;
 	send: (id: string, message: string) => Promise<void>;
@@ -124,6 +130,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 	const [orchestratorId, setOrchestratorId] = useState<string | null>(null);
 	const [stats, setStats] = useState<DashboardStats>({});
 	const [activeProjectId, setActiveProjectId] = useState<string>("all");
+	const [prDensity, setPRDensityState] = useState<PRDensity>("cards");
 	const [connection, setConnection] = useState<ConnStatus>("closed");
 	const [notificationsUnread, setNotificationsUnread] = useState(0);
 	const [loading, setLoading] = useState(true);
@@ -185,6 +192,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
 	useEffect(() => {
 		AsyncStorage.getItem(ACTIVE_PROJECT_KEY).then((v) => {
 			if (v) setActiveProjectId(v);
+		});
+		AsyncStorage.getItem(PR_DENSITY_KEY).then((v) => {
+			if (v === "cards" || v === "table") setPRDensityState(v);
 		});
 	}, []);
 
@@ -414,6 +424,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
 		AsyncStorage.setItem(ACTIVE_PROJECT_KEY, id).catch(() => {});
 	}, []);
 
+	const setPRDensity = useCallback((density: PRDensity) => {
+		setPRDensityState(density);
+		AsyncStorage.setItem(PR_DENSITY_KEY, density).catch(() => {});
+	}, []);
+
 	// Pick a sensible project for actions that need one (spawn / conductor).
 	const targetProject = useCallback((): string | null => {
 		if (activeProjectId !== "all") return activeProjectId;
@@ -460,6 +475,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
 		[fetchAll],
 	);
 
+	const close = useCallback(
+		async (pr: DashboardPR) => {
+			await apiClosePR(cfgRef.current!, pr);
+			await fetchAll();
+		},
+		[fetchAll],
+	);
+
 	const kill = useCallback(
 		async (id: string) =>
 			trackFeature("kill", async () => {
@@ -498,6 +521,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 			orchestratorId,
 			stats,
 			activeProjectId,
+			prDensity,
 			connection,
 			notificationsUnread,
 			loading,
@@ -506,9 +530,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
 			reloadConfig,
 			refresh,
 			setActiveProject,
+			setPRDensity,
 			spawn,
 			launchConductor,
 			merge,
+			close,
 			kill,
 			restore,
 			send,
@@ -521,6 +547,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 			orchestratorId,
 			stats,
 			activeProjectId,
+			prDensity,
 			connection,
 			notificationsUnread,
 			loading,
@@ -529,9 +556,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
 			reloadConfig,
 			refresh,
 			setActiveProject,
+			setPRDensity,
 			spawn,
 			launchConductor,
 			merge,
+			close,
 			kill,
 			restore,
 			send,

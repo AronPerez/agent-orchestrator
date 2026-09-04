@@ -35,12 +35,23 @@ vi.mock("../lib/api-client", () => ({
 			: undefined,
 }));
 
+vi.mock("../lib/host-clients", () => ({
+	baseUrlFor: () => "http://127.0.0.1:3001",
+	connectedHosts: (() => {
+		const hosts: string[] = [];
+		return () => hosts;
+	})(),
+	subscribeConnectedHosts: () => () => undefined,
+	isHostReady: () => true,
+	clientFor: () => ({ GET: getMock, POST: postMock }),
+}));
+
 function renderDialog() {
 	const onCreated = vi.fn();
 	const onOpenChange = vi.fn();
 	render(
 		<QueryClientProvider client={new QueryClient()}>
-			<NewTaskDialog open projectId="proj-1" onCreated={onCreated} onOpenChange={onOpenChange} />
+			<NewTaskDialog open project={{ host: "local", id: "proj-1" }} onCreated={onCreated} onOpenChange={onOpenChange} />
 		</QueryClientProvider>,
 	);
 	return { onCreated, onOpenChange };

@@ -344,6 +344,11 @@ function normalizeException(reason: unknown): Error {
 function routeSurface(pathname: string): string {
 	if (pathname === "/") return "home";
 	if (/^\/settings(?:\/|$)/.test(pathname)) return "global_settings";
+	if (/^\/host\/[^/]+\/session\/[^/]+$/.test(pathname)) return "session_detail";
+	if (/^\/host\/[^/]+\/project\/[^/]+(?:\/|$)/.test(pathname)) {
+		if (/\/settings$/.test(pathname)) return "project_settings";
+		return "project_board";
+	}
 	if (/^\/projects\/[^/]+\/sessions\/[^/]+$/.test(pathname)) return "session_detail";
 	if (/^\/projects\/[^/]+(?:\/|$)/.test(pathname)) {
 		if (/\/settings$/.test(pathname)) return "project_settings";
@@ -442,6 +447,25 @@ async function sanitizeRendererContextProperties(properties?: TelemetryPropertie
 }
 
 const ORCHESTRATOR_SPAWN_SOURCE_SET = new Set<string>(ORCHESTRATOR_SPAWN_SOURCES);
+const HOST_CONNECT_RESULTS = new Set(["online", "unauthorized", "offline", "not-a-daemon"]);
+
+/**
+ * Host identity for the ao.renderer.host_* events.
+ *
+ * A host id IS a LAN address — "http://192.168.1.250:3011" — so it is never
+ * sent. Only its digest goes out, exactly as project ids do, which keeps hosts
+ * countable without naming a machine. `host_kind` stays in the clear because
+ * "the local daemon's stream dropped" and "a remote's did" are different bugs.
+ */
+async function sanitizeHostProperties(properties?: TelemetryProperties): Promise<TelemetryProperties> {
+	const safe: TelemetryProperties = {};
+	const hostIDHash = await hashedTelemetryID(properties?.host_id);
+	if (hostIDHash) safe.host_id_hash = hostIDHash;
+	if (properties?.host_kind === "local" || properties?.host_kind === "remote") {
+		safe.host_kind = properties.host_kind;
+	}
+	return safe;
+}
 
 const EDITOR_ID_SET = new Set<string>(EDITOR_IDS);
 const OPEN_TARGET_KIND_SET = new Set(["editor", "file_manager", "terminal"]);
@@ -597,6 +621,53 @@ export async function sanitizeRendererProperties(
 			// whether anyone reaches for it decides if it stays a separate control.
 			if (typeof properties?.enabled === "boolean") safe.enabled = properties.enabled;
 			break;
+		case "ao.renderer.review_triggered":
+			// Manual review is the low-commitment on-ramp for users who will not
+			// enable the automatic pass, so its volume relative to auto runs is the
+			// adoption signal. action mirrors the button's own label.
+			//
+			// All four values reviewRunActionKind can return are accepted, "reviewing"
+			// included: a trigger that lands while a pass is already running is a real
+			// thing to report, and narrowing this list to three would drop the
+			// property silently rather than record what happened.
+			if (
+				properties?.action === "run" ||
+				properties?.action === "rerun" ||
+				properties?.action === "run_latest" ||
+				properties?.action === "reviewing"
+			) {
+				safe.action = properties.action;
+			}
+			if (typeof properties?.has_override === "boolean") safe.has_override = properties.has_override;
+			// Which surface the user reached for. The command palette and the
+			// inspector are separate on-ramps, and only one of them was instrumented
+			// before, so palette runs went uncounted.
+			if (properties?.source === "inspector" || properties?.source === "command_palette") {
+				safe.source = properties.source;
+			}
+			break;
+		case "ao.renderer.host_connect": {
+			Object.assign(safe, await sanitizeHostProperties(properties));
+			if (typeof properties?.result === "string" && HOST_CONNECT_RESULTS.has(properties.result)) {
+				safe.result = properties.result;
+			}
+			if (properties?.source === "add" || properties?.source === "edit" || properties?.source === "probe") {
+				safe.source = properties.source;
+			}
+			if (typeof properties?.duration_ms === "number") safe.duration_ms = Math.round(properties.duration_ms);
+			break;
+		}
+		case "ao.renderer.host_stream_state": {
+			Object.assign(safe, await sanitizeHostProperties(properties));
+			if (properties?.state === "connected" || properties?.state === "disconnected") safe.state = properties.state;
+			if (typeof properties?.reconnect_count === "number") safe.reconnect_count = properties.reconnect_count;
+			break;
+		}
+		case "ao.renderer.host_query_failed": {
+			Object.assign(safe, await sanitizeHostProperties(properties));
+			if (typeof properties?.status === "number") safe.status = properties.status;
+			break;
+		}
 		case "ao.renderer.mobile_bridge_toggled":
 			// The host, port, and connection password in the QR never leave the
 			// machine: only the direction of the switch and whether it worked.

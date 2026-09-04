@@ -1,5 +1,10 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render as rtlRender, screen, waitFor } from "@testing-library/react";
+import {
+	render as rtlRender,
+	screen,
+	waitFor,
+	within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
@@ -17,102 +22,166 @@ function render(ui: ReactNode) {
 // first-run states, mocking only the HTTP client, the router, and the native
 // folder picker: an empty daemon shows the import chooser (no column shells), a
 // fresh project shows the task invitation, and any session brings the columns back.
-const { getMock, navigateMock, chooseDirectoryMock, spawnOrchestratorMock } = vi.hoisted(() => ({
-	getMock: vi.fn(),
-	navigateMock: vi.fn(),
-	chooseDirectoryMock: vi.fn(),
-	spawnOrchestratorMock: vi.fn(),
+const {
+  connectedHostsMock,
+  getMock,
+  navigateMock,
+  chooseDirectoryMock,
+  spawnOrchestratorMock,
+} = vi.hoisted(() => ({
+  connectedHostsMock: vi.fn((): string[] => []),
+  getMock: vi.fn(),
+  navigateMock: vi.fn(),
+  chooseDirectoryMock: vi.fn(),
+  spawnOrchestratorMock: vi.fn(),
 }));
 
 vi.mock("../../lib/spawn-orchestrator", () => ({
-	isChatPreflightError: (error: unknown) =>
-		error instanceof Error && (error as Error & { code?: string }).code === "CHAT_DRIVER_UNAVAILABLE",
-	spawnOrchestrator: spawnOrchestratorMock,
+  isChatPreflightError: (error: unknown) =>
+    error instanceof Error &&
+    (error as Error & { code?: string }).code === "CHAT_DRIVER_UNAVAILABLE",
+  spawnOrchestrator: spawnOrchestratorMock,
 }));
 
 vi.mock("../../lib/api-client", () => ({
-	apiClient: { GET: getMock, POST: vi.fn() },
-	apiErrorMessage: (e: unknown) => (e instanceof Error ? e.message : "error"),
-	hasTrustedApiBaseUrl: () => true,
+  apiClient: { GET: getMock, POST: vi.fn() },
+  apiErrorMessage: (e: unknown) => (e instanceof Error ? e.message : "error"),
+  hasTrustedApiBaseUrl: () => true,
+}));
+
+vi.mock("../../lib/host-clients", () => ({
+  clientFor: (host: string) => ({ GET: (url: string) => getMock(host, url) }),
+  connectedHosts: connectedHostsMock,
+  subscribeConnectedHosts: () => () => undefined,
+  isHostReady: () => true,
 }));
 
 vi.mock("../../lib/bridge", () => ({
-	aoBridge: {
-		app: { chooseDirectory: chooseDirectoryMock },
-		// CreateProjectFlow reads the cloud session (Local | Cloud gating);
-		// signed-out keeps these tests on the local-only flow.
-		cloud: {
-			getSession: async () => null,
-			signIn: async () => undefined,
-			signOut: async () => undefined,
-			onSessionChanged: () => () => undefined,
-		},
-	},
+  // The welcome panel's host row lists saved AO daemons on mount; an omitted
+  // namespace surfaces as an unhandled rejection, not a failed assertion.
+  aoBridge: {
+    app: { chooseDirectory: chooseDirectoryMock },
+    remotes: { list: async () => [] },
+    // CreateProjectFlow reads the cloud session (Local | Cloud gating);
+    // signed-out keeps these tests on the local-only flow.
+    cloud: {
+      getSession: async () => null,
+      signIn: async () => undefined,
+      signOut: async () => undefined,
+      onSessionChanged: () => () => undefined,
+    },
+  },
 }));
 
 vi.mock("@tanstack/react-router", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("@tanstack/react-router")>();
-	return { ...actual, useNavigate: () => navigateMock };
+  const actual =
+    await importOriginal<typeof import("@tanstack/react-router")>();
+  return { ...actual, useNavigate: () => navigateMock };
 });
 
 import { SessionsBoard } from "../../components/SessionsBoard";
 import { ShellProvider, type ShellContextValue } from "../../lib/shell-context";
 import { useUiStore } from "../../stores/ui-store";
 
-type Project = { id: string; name: string; path: string; orchestratorAgent?: string };
+type Project = {
+  id: string;
+  name: string;
+  path: string;
+  orchestratorAgent?: string;
+};
 type Session = Record<string, unknown>;
 
+// clientFor(host).GET calls getMock(host, url); the host-agnostic apiClient.GET
+// (system requirements) calls getMock(url). Read both off the same tail arg so a
+// mock written for one shape does not silently mismatch the other.
+function requestedUrl(args: string[]): string {
+  return args[args.length - 1];
+}
+
+function requestedHost(args: string[]): string {
+  return args.length > 1 ? args[0] : "local";
+}
+
 function respondWith(projects: Project[], sessions: Session[]) {
-	getMock.mockImplementation(async (url: string) => {
-		if (url === "/api/v1/projects") return { data: { projects }, error: undefined };
-		if (url === "/api/v1/sessions") return { data: { sessions }, error: undefined };
-		if (url === "/api/v1/system/requirements") {
-			return {
-				data: {
-					ready: true,
-					requirements: [
-						{ id: "git", label: "git", satisfied: true, required: true, detail: "/usr/bin/git" },
-						{ id: "tmux", label: "tmux", satisfied: true, required: true, detail: "/usr/bin/tmux" },
-						{ id: "harness", label: "agent harness", satisfied: true, required: true, detail: "Claude Code" },
-						{ id: "gh", label: "gh", satisfied: true, required: false, detail: "/usr/bin/gh" },
-					],
-				},
-				error: undefined,
-			};
-		}
-		return { data: undefined, error: undefined };
-	});
+  getMock.mockImplementation(async (...args: string[]) => {
+    const host = requestedHost(args);
+    const url = requestedUrl(args);
+    if (host !== "local") throw new Error("remote daemon dropped");
+    if (url === "/api/v1/projects")
+      return { data: { projects }, error: undefined };
+    if (url === "/api/v1/sessions")
+      return { data: { sessions }, error: undefined };
+    if (url === "/api/v1/system/requirements") {
+      return {
+        data: {
+          ready: true,
+          requirements: [
+            {
+              id: "git",
+              label: "git",
+              satisfied: true,
+              required: true,
+              detail: "/usr/bin/git",
+            },
+            {
+              id: "tmux",
+              label: "tmux",
+              satisfied: true,
+              required: true,
+              detail: "/usr/bin/tmux",
+            },
+            {
+              id: "harness",
+              label: "agent harness",
+              satisfied: true,
+              required: true,
+              detail: "Claude Code",
+            },
+            {
+              id: "gh",
+              label: "gh",
+              satisfied: true,
+              required: false,
+              detail: "/usr/bin/gh",
+            },
+          ],
+        },
+        error: undefined,
+      };
+    }
+    return { data: undefined, error: undefined };
+  });
 }
 
 const project: Project = {
-	id: "proj-1",
-	name: "my-app",
-	path: "/repo/my-app",
-	orchestratorAgent: "claude-code",
+  id: "proj-1",
+  name: "my-app",
+  path: "/repo/my-app",
+  orchestratorAgent: "claude-code",
 };
 
 const workerSession: Session = {
-	id: "sess-1",
-	projectId: "proj-1",
-	displayName: "fix the bug",
-	harness: "claude-code",
-	kind: "worker",
-	status: "working",
-	isTerminated: false,
-	updatedAt: "2026-07-04T10:00:00Z",
-	prs: [],
+  id: "sess-1",
+  projectId: "proj-1",
+  displayName: "fix the bug",
+  harness: "claude-code",
+  kind: "worker",
+  status: "working",
+  isTerminated: false,
+  updatedAt: "2026-07-04T10:00:00Z",
+  prs: [],
 };
 
 const orchestratorSession: Session = {
-	id: "proj-1-orchestrator",
-	projectId: "proj-1",
-	displayName: "orchestrator",
-	harness: "claude-code",
-	kind: "orchestrator",
-	status: "working",
-	isTerminated: false,
-	updatedAt: "2026-07-04T10:00:00Z",
-	prs: [],
+  id: "proj-1-orchestrator",
+  projectId: "proj-1",
+  displayName: "orchestrator",
+  harness: "claude-code",
+  kind: "orchestrator",
+  status: "working",
+  isTerminated: false,
+  updatedAt: "2026-07-04T10:00:00Z",
+  prs: [],
 };
 
 const createProjectMock = vi.fn().mockResolvedValue(undefined);
@@ -125,308 +194,478 @@ let lastQueryClient: QueryClient | null = null;
 let lastShell: ShellContextValue | null = null;
 
 function renderBoard(ui: ReactNode) {
-	lastQueryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-	lastShell = {
-		daemonStatus: { state: "ready" } as ShellContextValue["daemonStatus"],
-		workspaceStartupState: "ready",
-		cloneProject: cloneProjectMock,
-		createProject: createProjectMock,
-		initializeProjectRepository: initializeProjectRepositoryMock,
-	};
-	return render(
-		<QueryClientProvider client={lastQueryClient}>
-			<ShellProvider value={lastShell}>{ui}</ShellProvider>
-		</QueryClientProvider>,
-	);
+  lastQueryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  lastShell = {
+    daemonStatus: { state: "ready" } as ShellContextValue["daemonStatus"],
+    workspaceStartupState: "ready",
+    cloneProject: cloneProjectMock,
+    createProject: createProjectMock,
+    initializeProjectRepository: initializeProjectRepositoryMock,
+  };
+  return render(
+    <QueryClientProvider client={lastQueryClient}>
+      <ShellProvider value={lastShell}>{ui}</ShellProvider>
+    </QueryClientProvider>,
+  );
 }
 
 // The kanban columns render as <section> elements; the empty states render none.
 const columnCount = () => document.querySelectorAll("section").length;
 
 beforeEach(() => {
-	vi.clearAllMocks();
-	cloneProjectMock.mockResolvedValue(undefined);
-	createProjectMock.mockResolvedValue(undefined);
-	initializeProjectRepositoryMock.mockResolvedValue(undefined);
-	useUiStore.setState({
-		orchestratorReplacementErrors: {},
-		orchestratorStartupErrors: {},
-		restartingProjectIds: new Set(),
-		settingsModal: null,
-	});
+  vi.clearAllMocks();
+  connectedHostsMock.mockReturnValue([]);
+  cloneProjectMock.mockResolvedValue(undefined);
+  createProjectMock.mockResolvedValue(undefined);
+  initializeProjectRepositoryMock.mockResolvedValue(undefined);
+  useUiStore.setState({
+    orchestratorReplacementErrors: {},
+    orchestratorStartupErrors: {},
+    restartingProjectIds: new Set(),
+    settingsModal: null,
+  });
 });
 
 describe("global board first launch", () => {
-	it("runs the lightweight requirements preflight while loading the board", async () => {
-		respondWith([], []);
-		renderBoard(<SessionsBoard />);
+  it("runs the lightweight requirements preflight while loading the board", async () => {
+    respondWith([], []);
+    renderBoard(<SessionsBoard />);
 
-		await waitFor(() => {
-			expect(getMock.mock.calls.some(([url]) => url === "/api/v1/projects")).toBe(true);
-			expect(getMock.mock.calls.some(([url]) => url === "/api/v1/sessions")).toBe(true);
-		});
-		expect(await screen.findByText("Add code to Agent Orchestrator")).toBeInTheDocument();
-		expect(getMock.mock.calls.some(([url]) => url === "/api/v1/system/requirements")).toBe(true);
-	});
+    await waitFor(() => {
+      expect(
+        getMock.mock.calls.some(
+          (call) => requestedUrl(call) === "/api/v1/projects",
+        ),
+      ).toBe(true);
+      expect(
+        getMock.mock.calls.some(
+          (call) => requestedUrl(call) === "/api/v1/sessions",
+        ),
+      ).toBe(true);
+    });
+    expect(
+      await screen.findByText("Add code to Agent Orchestrator"),
+    ).toBeInTheDocument();
+    expect(
+      getMock.mock.calls.some(
+        (call) => requestedUrl(call) === "/api/v1/system/requirements",
+      ),
+    ).toBe(true);
+  });
 
-	it("renders the board shell while the daemon is booting", async () => {
-		respondWith([], []);
-		lastQueryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-		lastShell = {
-			daemonStatus: { state: "starting" } as ShellContextValue["daemonStatus"],
-			workspaceStartupState: "loading",
-			cloneProject: cloneProjectMock,
-			createProject: createProjectMock,
-			initializeProjectRepository: initializeProjectRepositoryMock,
-		};
-		render(
-			<QueryClientProvider client={lastQueryClient}>
-				<ShellProvider value={lastShell}>
-					<SessionsBoard />
-				</ShellProvider>
-			</QueryClientProvider>,
-		);
+  it("renders the board shell while the daemon is booting", async () => {
+    respondWith([], []);
+    lastQueryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    lastShell = {
+      daemonStatus: { state: "starting" } as ShellContextValue["daemonStatus"],
+      workspaceStartupState: "loading",
+      cloneProject: cloneProjectMock,
+      createProject: createProjectMock,
+      initializeProjectRepository: initializeProjectRepositoryMock,
+    };
+    render(
+      <QueryClientProvider client={lastQueryClient}>
+        <ShellProvider value={lastShell}>
+          <SessionsBoard />
+        </ShellProvider>
+      </QueryClientProvider>,
+    );
 
-		expect(await screen.findByTestId("board")).toBeInTheDocument();
-		expect(screen.getByTestId("daemon-startup-loader")).toBeInTheDocument();
-	});
+    expect(await screen.findByTestId("board")).toBeInTheDocument();
+    expect(screen.getByTestId("daemon-startup-loader")).toBeInTheDocument();
+  });
 
-	it("shows the import chooser instead of empty columns when no projects exist", async () => {
-		respondWith([], []);
-		renderBoard(<SessionsBoard />);
+  it("shows the import chooser instead of empty columns when no projects exist", async () => {
+    respondWith([], []);
+    renderBoard(<SessionsBoard />);
 
-		expect(await screen.findByText("Add code to Agent Orchestrator")).toBeInTheDocument();
-		expect(screen.getByText("Clone a repository or open code that is already on this computer.")).toBeInTheDocument();
-		expect(screen.getByRole("button", { name: "Clone from Git" })).toBeInTheDocument();
-		expect(screen.getByRole("button", { name: "Add a workspace folder" })).toBeInTheDocument();
-		expect(screen.getByRole("button", { name: "Open local repository" })).toBeInTheDocument();
-		expect(columnCount()).toBe(0);
-		// The welcome carries its own orientation — no dangling "Board" header.
-		expect(screen.queryByText("Board")).not.toBeInTheDocument();
-	});
+    expect(
+      await screen.findByText("Add code to Agent Orchestrator"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Clone a repository or open code that is already on this computer.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Clone from Git" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Add a workspace folder" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Open local repository" }),
+    ).toBeInTheDocument();
+    expect(columnCount()).toBe(0);
+    // The welcome carries its own orientation — no dangling "Board" header.
+    expect(screen.queryByText("Board")).not.toBeInTheDocument();
+  });
 
-	it("opens the native folder picker from the Project card", async () => {
-		respondWith([], []);
-		chooseDirectoryMock.mockResolvedValue(null);
-		renderBoard(<SessionsBoard />);
+  it("shows an error instead of first-run welcome when the local host fails", async () => {
+    getMock.mockResolvedValue({
+      data: undefined,
+      error: new Error("local daemon dropped"),
+    });
+    renderBoard(<SessionsBoard />);
 
-		await userEvent.click(await screen.findByRole("button", { name: "Open local repository" }));
-		expect(chooseDirectoryMock).toHaveBeenCalledTimes(1);
-		expect(chooseDirectoryMock).toHaveBeenCalledWith("Choose a project repository");
-	});
+    expect(
+      await screen.findByText("Could not load sessions."),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("board-welcome")).not.toBeInTheDocument();
+  });
 
-	it("opens the native folder picker from the Workspace card", async () => {
-		respondWith([], []);
-		chooseDirectoryMock.mockResolvedValue(null);
-		renderBoard(<SessionsBoard />);
+  it("keeps the local board intact when only a remote host fails", async () => {
+    connectedHostsMock.mockReturnValue(["http://192.0.2.1:3011"]);
+    respondWith([project], [workerSession]);
+    renderBoard(<SessionsBoard />);
 
-		await userEvent.click(await screen.findByRole("button", { name: "Add a workspace folder" }));
-		expect(chooseDirectoryMock).toHaveBeenCalledTimes(1);
-		expect(chooseDirectoryMock).toHaveBeenCalledWith("Choose a workspace folder");
-	});
+    expect(await screen.findByText("fix the bug")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Could not load sessions."),
+    ).not.toBeInTheDocument();
+    expect(columnCount()).toBe(4);
+  });
 
-	it("shows a visible error when the folder picker fails", async () => {
-		respondWith([], []);
-		chooseDirectoryMock.mockRejectedValue(new Error("dialog unavailable"));
-		renderBoard(<SessionsBoard />);
+  it("opens the native folder picker from the Project card", async () => {
+    respondWith([], []);
+    chooseDirectoryMock.mockResolvedValue(null);
+    renderBoard(<SessionsBoard />);
 
-		await userEvent.click(await screen.findByRole("button", { name: "Open local repository" }));
-		const messages = await screen.findAllByText("dialog unavailable");
-		expect(messages.some((el) => !el.classList.contains("sr-only"))).toBe(true);
-	});
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Open local repository" }),
+    );
+    expect(chooseDirectoryMock).toHaveBeenCalledTimes(1);
+    expect(chooseDirectoryMock).toHaveBeenCalledWith(
+      "Choose a project repository",
+    );
+  });
 
-	it("keeps the columns once a project exists", async () => {
-		respondWith([project], [workerSession]);
-		renderBoard(<SessionsBoard />);
+  it("opens the native folder picker from the Workspace card", async () => {
+    respondWith([], []);
+    chooseDirectoryMock.mockResolvedValue(null);
+    renderBoard(<SessionsBoard />);
 
-		expect(await screen.findByText("fix the bug")).toBeInTheDocument();
-		expect(screen.queryByText("Add code to Agent Orchestrator")).not.toBeInTheDocument();
-		expect(columnCount()).toBe(4);
-	});
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Add a workspace folder" }),
+    );
+    expect(chooseDirectoryMock).toHaveBeenCalledTimes(1);
+    expect(chooseDirectoryMock).toHaveBeenCalledWith(
+      "Choose a workspace folder",
+    );
+  });
 
-	it("keeps populated columns visible after the daemon reports a startup failure", async () => {
-		respondWith([project], [workerSession]);
-		lastQueryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-		lastShell = {
-			daemonStatus: { state: "stopped", code: "exited" } as ShellContextValue["daemonStatus"],
-			workspaceStartupState: "loading",
-			cloneProject: cloneProjectMock,
-			createProject: createProjectMock,
-			initializeProjectRepository: initializeProjectRepositoryMock,
-		};
-		render(
-			<QueryClientProvider client={lastQueryClient}>
-				<ShellProvider value={lastShell}>
-					<SessionsBoard />
-				</ShellProvider>
-			</QueryClientProvider>,
-		);
+  it("shows a visible error when the folder picker fails", async () => {
+    respondWith([], []);
+    chooseDirectoryMock.mockRejectedValue(new Error("dialog unavailable"));
+    renderBoard(<SessionsBoard />);
 
-		expect(await screen.findByText("fix the bug")).toBeInTheDocument();
-		expect(screen.queryByTestId("daemon-startup-loader")).not.toBeInTheDocument();
-		expect(columnCount()).toBe(4);
-	});
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Open local repository" }),
+    );
+    const messages = await screen.findAllByText("dialog unavailable");
+    expect(messages.some((el) => !el.classList.contains("sr-only"))).toBe(true);
+  });
+
+  it("keeps the columns once a project exists", async () => {
+    respondWith([
+      project,
+    ], [
+      {
+        ...workerSession,
+        kanbanColumn: "needs_review",
+        displayStatus: "Needs human review",
+      },
+    ]);
+    renderBoard(<SessionsBoard />);
+
+    const reviewColumn = document.querySelector(
+      '[data-column="needs_review"]',
+    ) as HTMLElement | null;
+    expect(reviewColumn).not.toBeNull();
+    expect(await within(reviewColumn!).findByText("fix the bug")).toBeInTheDocument();
+    expect(within(reviewColumn!).getByText("Needs human review")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Add code to Agent Orchestrator"),
+    ).not.toBeInTheDocument();
+    expect(columnCount()).toBe(4);
+  });
+
+  it("keeps populated columns visible after the daemon reports a startup failure", async () => {
+    respondWith([project], [workerSession]);
+    lastQueryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    lastShell = {
+      daemonStatus: {
+        state: "stopped",
+        code: "exited",
+      } as ShellContextValue["daemonStatus"],
+      workspaceStartupState: "loading",
+      cloneProject: cloneProjectMock,
+      createProject: createProjectMock,
+      initializeProjectRepository: initializeProjectRepositoryMock,
+    };
+    render(
+      <QueryClientProvider client={lastQueryClient}>
+        <ShellProvider value={lastShell}>
+          <SessionsBoard />
+        </ShellProvider>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText("fix the bug")).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("daemon-startup-loader"),
+    ).not.toBeInTheDocument();
+    expect(columnCount()).toBe(4);
+  });
 });
 
 describe("project board with no sessions", () => {
-	it("shows the task invitation instead of empty columns", async () => {
-		respondWith([project], []);
-		renderBoard(<SessionsBoard projectId="proj-1" />);
+  it("shows the task invitation instead of empty columns", async () => {
+    respondWith([project], []);
+    renderBoard(<SessionsBoard project={{ host: "local", id: "proj-1" }} />);
 
-		expect(await screen.findByText("No worker sessions yet")).toBeInTheDocument();
-		// Board header + empty state each offer the pair; the orchestrator is primary in both.
-		expect(screen.getAllByRole("button", { name: "Spawn Orchestrator" }).length).toBeGreaterThan(0);
-		expect(screen.getAllByRole("button", { name: "New task" }).length).toBeGreaterThan(0);
-		expect(screen.queryByText("Add code to Agent Orchestrator")).not.toBeInTheDocument();
-		expect(columnCount()).toBe(0);
-	});
+    expect(
+      await screen.findByText("No worker sessions yet"),
+    ).toBeInTheDocument();
+    // Board header + empty state each offer the pair; the orchestrator is primary in both.
+    expect(
+      screen.getAllByRole("button", { name: "Spawn Orchestrator" }).length,
+    ).toBeGreaterThan(0);
+    expect(
+      screen.getAllByRole("button", { name: "New task" }).length,
+    ).toBeGreaterThan(0);
+    expect(
+      screen.queryByText("Add code to Agent Orchestrator"),
+    ).not.toBeInTheDocument();
+    expect(columnCount()).toBe(0);
+  });
 
-	it("surfaces the daemon error when spawning the orchestrator fails", async () => {
-		respondWith([project], []);
-		spawnOrchestratorMock.mockRejectedValue(new Error("branch is already checked out in another worktree"));
-		renderBoard(<SessionsBoard projectId="proj-1" />);
+  it("surfaces the daemon error when spawning the orchestrator fails", async () => {
+    respondWith([project], []);
+    spawnOrchestratorMock.mockRejectedValue(
+      new Error("branch is already checked out in another worktree"),
+    );
+    renderBoard(<SessionsBoard project={{ host: "local", id: "proj-1" }} />);
 
-		await screen.findByText("No worker sessions yet");
-		const [spawnButton] = screen.getAllByRole("button", { name: "Spawn Orchestrator" });
-		await userEvent.click(spawnButton);
+    await screen.findByText("No worker sessions yet");
+    const [spawnButton] = screen.getAllByRole("button", {
+      name: "Spawn Orchestrator",
+    });
+    await userEvent.click(spawnButton);
 
-		expect(await screen.findByText(/branch is already checked out/)).toBeInTheDocument();
-	});
+    expect(
+      await screen.findByText(/branch is already checked out/),
+    ).toBeInTheDocument();
+  });
 
-	it("offers an explicit Terminal UI fallback when Chat preflight fails", async () => {
-		respondWith([project], []);
-		const preflightError = Object.assign(new Error("Claude Code is unavailable"), {
-			code: "CHAT_DRIVER_UNAVAILABLE",
-		});
-		spawnOrchestratorMock.mockRejectedValueOnce(preflightError).mockResolvedValueOnce("proj-1-orchestrator");
-		renderBoard(<SessionsBoard projectId="proj-1" />);
+  it("offers an explicit Terminal UI fallback when Chat preflight fails", async () => {
+    respondWith([project], []);
+    const preflightError = Object.assign(
+      new Error("Claude Code is unavailable"),
+      {
+        code: "CHAT_DRIVER_UNAVAILABLE",
+      },
+    );
+    spawnOrchestratorMock
+      .mockRejectedValueOnce(preflightError)
+      .mockResolvedValueOnce("proj-1-orchestrator");
+    renderBoard(<SessionsBoard project={{ host: "local", id: "proj-1" }} />);
 
-		await screen.findByText("No worker sessions yet");
-		const [spawnButton] = screen.getAllByRole("button", { name: "Spawn Orchestrator" });
-		await userEvent.click(spawnButton);
-		await userEvent.click(await screen.findByRole("button", { name: "Create as Terminal UI" }));
+    await screen.findByText("No worker sessions yet");
+    const [spawnButton] = screen.getAllByRole("button", {
+      name: "Spawn Orchestrator",
+    });
+    await userEvent.click(spawnButton);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Create as Terminal UI" }),
+    );
 
-		expect(spawnOrchestratorMock).toHaveBeenNthCalledWith(1, "proj-1", "board", false, undefined);
-		expect(spawnOrchestratorMock).toHaveBeenNthCalledWith(2, "proj-1", "board", false, "tui");
-	});
+    expect(spawnOrchestratorMock).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ host: "local", id: "proj-1" }),
+      "board",
+      false,
+      undefined,
+    );
+    expect(spawnOrchestratorMock).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ host: "local", id: "proj-1" }),
+      "board",
+      false,
+      "tui",
+    );
+  });
 
-	it("opens project settings instead of spawning when no orchestrator agent is configured", async () => {
-		const unconfiguredProject = { ...project, orchestratorAgent: undefined };
-		respondWith([unconfiguredProject], []);
-		renderBoard(<SessionsBoard projectId="proj-1" />);
+  it("opens project settings instead of spawning when no orchestrator agent is configured", async () => {
+    const unconfiguredProject = { ...project, orchestratorAgent: undefined };
+    respondWith([unconfiguredProject], []);
+    renderBoard(<SessionsBoard project={{ host: "local", id: "proj-1" }} />);
 
-		await screen.findByText("No worker sessions yet");
-		const [spawnButton] = screen.getAllByRole("button", { name: "Spawn Orchestrator" });
-		await userEvent.click(spawnButton);
+    await screen.findByText("No worker sessions yet");
+    const [spawnButton] = screen.getAllByRole("button", {
+      name: "Spawn Orchestrator",
+    });
+    await userEvent.click(spawnButton);
 
-		expect(useUiStore.getState().settingsModal).toEqual({ scope: "project", projectId: "proj-1" });
-		expect(navigateMock).not.toHaveBeenCalled();
-		expect(spawnOrchestratorMock).not.toHaveBeenCalled();
-	});
+    expect(useUiStore.getState().settingsModal).toEqual({
+      scope: "project",
+      project: expect.objectContaining({ host: "local", id: "proj-1" }),
+    });
+    expect(navigateMock).not.toHaveBeenCalled();
+    expect(spawnOrchestratorMock).not.toHaveBeenCalled();
+  });
 
-	it("shows the project creation startup error after navigating to the project board", async () => {
-		respondWith([project], []);
-		useUiStore
-			.getState()
-			.setOrchestratorStartupError(
-				"proj-1",
-				"Project added, but orchestrator did not start: branch is already checked out in another worktree",
-			);
-		renderBoard(<SessionsBoard projectId="proj-1" />);
+  it("shows the project creation startup error after navigating to the project board", async () => {
+    respondWith([project], []);
+    useUiStore
+      .getState()
+      .setOrchestratorStartupError(
+        { host: "local", id: "proj-1" },
+        "Project added, but orchestrator did not start: branch is already checked out in another worktree",
+      );
+    renderBoard(<SessionsBoard project={{ host: "local", id: "proj-1" }} />);
 
-		expect(await screen.findByText(/Project added, but orchestrator did not start/)).toBeInTheDocument();
-		expect(screen.getByText(/branch is already checked out/)).toBeInTheDocument();
-	});
+    expect(
+      await screen.findByText(/Project added, but orchestrator did not start/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/branch is already checked out/),
+    ).toBeInTheDocument();
+  });
 
-	it("clears the project creation startup error when retrying orchestrator spawn", async () => {
-		respondWith([project], []);
-		useUiStore
-			.getState()
-			.setOrchestratorStartupError(
-				"proj-1",
-				"Project added, but orchestrator did not start: branch is already checked out in another worktree",
-			);
-		spawnOrchestratorMock.mockResolvedValue("proj-1-orchestrator");
-		renderBoard(<SessionsBoard projectId="proj-1" />);
+  it("clears the project creation startup error when retrying orchestrator spawn", async () => {
+    respondWith([project], []);
+    useUiStore
+      .getState()
+      .setOrchestratorStartupError(
+        { host: "local", id: "proj-1" },
+        "Project added, but orchestrator did not start: branch is already checked out in another worktree",
+      );
+    spawnOrchestratorMock.mockResolvedValue("proj-1-orchestrator");
+    renderBoard(<SessionsBoard project={{ host: "local", id: "proj-1" }} />);
 
-		await screen.findByText(/Project added, but orchestrator did not start/);
-		const [spawnButton] = screen.getAllByRole("button", { name: "Spawn Orchestrator" });
-		await userEvent.click(spawnButton);
+    await screen.findByText(/Project added, but orchestrator did not start/);
+    const [spawnButton] = screen.getAllByRole("button", {
+      name: "Spawn Orchestrator",
+    });
+    await userEvent.click(spawnButton);
 
-		await waitFor(() =>
-			expect(screen.queryByText(/Project added, but orchestrator did not start/)).not.toBeInTheDocument(),
-		);
-		expect(useUiStore.getState().orchestratorStartupErrors["proj-1"]).toBeUndefined();
-	});
+    await waitFor(() =>
+      expect(
+        screen.queryByText(/Project added, but orchestrator did not start/),
+      ).not.toBeInTheDocument(),
+    );
+    expect(
+      useUiStore.getState().orchestratorStartupErrors["local:proj-1"],
+    ).toBeUndefined();
+  });
 
-	it("clears a project creation startup error when switching projects", async () => {
-		const otherProject: Project = { id: "proj-2", name: "other-app", path: "/repo/other-app" };
-		respondWith([project, otherProject], []);
-		useUiStore
-			.getState()
-			.setOrchestratorStartupError(
-				"proj-1",
-				"Project added, but orchestrator did not start: branch is already checked out in another worktree",
-			);
-		const { rerender } = renderBoard(<SessionsBoard projectId="proj-1" />);
+  it("clears a project creation startup error when switching projects", async () => {
+    const otherProject: Project = {
+      id: "proj-2",
+      name: "other-app",
+      path: "/repo/other-app",
+    };
+    respondWith([project, otherProject], []);
+    useUiStore
+      .getState()
+      .setOrchestratorStartupError(
+        { host: "local", id: "proj-1" },
+        "Project added, but orchestrator did not start: branch is already checked out in another worktree",
+      );
+    const { rerender } = renderBoard(
+      <SessionsBoard project={{ host: "local", id: "proj-1" }} />,
+    );
 
-		await screen.findByText(/Project added, but orchestrator did not start/);
-		rerender(
-			<QueryClientProvider client={lastQueryClient!}>
-				<ShellProvider value={lastShell!}>
-					<SessionsBoard projectId="proj-2" />
-				</ShellProvider>
-			</QueryClientProvider>,
-		);
+    await screen.findByText(/Project added, but orchestrator did not start/);
+    rerender(
+      <QueryClientProvider client={lastQueryClient!}>
+        <ShellProvider value={lastShell!}>
+          <SessionsBoard project={{ host: "local", id: "proj-2" }} />
+        </ShellProvider>
+      </QueryClientProvider>,
+    );
 
-		await screen.findByText("No worker sessions yet");
-		await waitFor(() => expect(useUiStore.getState().orchestratorStartupErrors["proj-1"]).toBeUndefined());
-		expect(screen.queryByText(/Project added, but orchestrator did not start/)).not.toBeInTheDocument();
-	});
+    await screen.findByText("No worker sessions yet");
+    await waitFor(() =>
+      expect(
+        useUiStore.getState().orchestratorStartupErrors["local:proj-1"],
+      ).toBeUndefined(),
+    );
+    expect(
+      screen.queryByText(/Project added, but orchestrator did not start/),
+    ).not.toBeInTheDocument();
+  });
 
-	it("clears a project creation startup error once an orchestrator exists", async () => {
-		respondWith([project], [orchestratorSession]);
-		useUiStore
-			.getState()
-			.setOrchestratorStartupError(
-				"proj-1",
-				"Project added, but orchestrator did not start: branch is already checked out in another worktree",
-			);
-		renderBoard(<SessionsBoard projectId="proj-1" />);
+  it("clears a project creation startup error once an orchestrator exists", async () => {
+    respondWith([project], [orchestratorSession]);
+    useUiStore
+      .getState()
+      .setOrchestratorStartupError(
+        { host: "local", id: "proj-1" },
+        "Project added, but orchestrator did not start: branch is already checked out in another worktree",
+      );
+    renderBoard(<SessionsBoard project={{ host: "local", id: "proj-1" }} />);
 
-		await screen.findByText("No worker sessions yet");
-		await waitFor(() => expect(useUiStore.getState().orchestratorStartupErrors["proj-1"]).toBeUndefined());
-		expect(screen.queryByText(/Project added, but orchestrator did not start/)).not.toBeInTheDocument();
-	});
+    await screen.findByText("No worker sessions yet");
+    await waitFor(() =>
+      expect(
+        useUiStore.getState().orchestratorStartupErrors["local:proj-1"],
+      ).toBeUndefined(),
+    );
+    expect(
+      screen.queryByText(/Project added, but orchestrator did not start/),
+    ).not.toBeInTheDocument();
+  });
 
-	it("clears a stale spawn error when switching projects", async () => {
-		const otherProject: Project = { id: "proj-2", name: "other-app", path: "/repo/other-app" };
-		respondWith([project, otherProject], []);
-		spawnOrchestratorMock.mockRejectedValue(new Error("branch is already checked out in another worktree"));
-		const { rerender } = renderBoard(<SessionsBoard projectId="proj-1" />);
+  it("clears a stale spawn error when switching projects", async () => {
+    const otherProject: Project = {
+      id: "proj-2",
+      name: "other-app",
+      path: "/repo/other-app",
+    };
+    respondWith([project, otherProject], []);
+    spawnOrchestratorMock.mockRejectedValue(
+      new Error("branch is already checked out in another worktree"),
+    );
+    const { rerender } = renderBoard(
+      <SessionsBoard project={{ host: "local", id: "proj-1" }} />,
+    );
 
-		await screen.findByText("No worker sessions yet");
-		const [spawnButton] = screen.getAllByRole("button", { name: "Spawn Orchestrator" });
-		await userEvent.click(spawnButton);
-		await screen.findByText(/branch is already checked out/);
+    await screen.findByText("No worker sessions yet");
+    const [spawnButton] = screen.getAllByRole("button", {
+      name: "Spawn Orchestrator",
+    });
+    await userEvent.click(spawnButton);
+    await screen.findByText(/branch is already checked out/);
 
-		rerender(
-			<QueryClientProvider client={lastQueryClient!}>
-				<ShellProvider value={lastShell!}>
-					<SessionsBoard projectId="proj-2" />
-				</ShellProvider>
-			</QueryClientProvider>,
-		);
-		await screen.findByText("No worker sessions yet");
-		expect(screen.queryByText(/branch is already checked out/)).not.toBeInTheDocument();
-	});
+    rerender(
+      <QueryClientProvider client={lastQueryClient!}>
+        <ShellProvider value={lastShell!}>
+          <SessionsBoard project={{ host: "local", id: "proj-2" }} />
+        </ShellProvider>
+      </QueryClientProvider>,
+    );
+    await screen.findByText("No worker sessions yet");
+    expect(
+      screen.queryByText(/branch is already checked out/),
+    ).not.toBeInTheDocument();
+  });
 
-	it("keeps the columns once the project has a session", async () => {
-		respondWith([project], [workerSession]);
-		renderBoard(<SessionsBoard projectId="proj-1" />);
+  it("keeps the columns once the project has a session", async () => {
+    respondWith([project], [workerSession]);
+    renderBoard(<SessionsBoard project={{ host: "local", id: "proj-1" }} />);
 
-		expect(await screen.findByText("fix the bug")).toBeInTheDocument();
-		expect(screen.queryByText("No worker sessions yet")).not.toBeInTheDocument();
-		expect(columnCount()).toBe(4);
-	});
+    expect(await screen.findByText("fix the bug")).toBeInTheDocument();
+    expect(
+      screen.queryByText("No worker sessions yet"),
+    ).not.toBeInTheDocument();
+    expect(columnCount()).toBe(4);
+  });
 });

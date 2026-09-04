@@ -423,9 +423,9 @@ type WorkspaceFileResponse struct {
 	CompareMode      sessionsvc.WorkspaceCompareMode `json:"compareMode,omitempty" enum:"base,head_fallback"`
 }
 
-// DesktopWorkspaceLocationResponse is returned only by the LAN-blocked desktop
-// handoff route. Electron main consumes the absolute path and never exposes it
-// through the preload bridge.
+// DesktopWorkspaceLocationResponse is returned by the LAN-blocked desktop
+// handoff route and by its credential-gated twin under /sessions. Electron main
+// consumes the absolute path and never exposes it through the preload bridge.
 type DesktopWorkspaceLocationResponse struct {
 	SessionID     domain.SessionID `json:"sessionId"`
 	WorkspacePath string           `json:"workspacePath"`
@@ -518,6 +518,10 @@ type BrowserStatusResponse struct {
 	Connected   bool             `json:"connected"`
 	ConnectedAt time.Time        `json:"connectedAt,omitempty"`
 	Transport   string           `json:"transport"`
+	// PersistentProfile is true when this session's project opted into a shared
+	// on-disk browser profile, so logins survive session teardown and restart.
+	// False is the default: a memory-only profile, discarded with the session.
+	PersistentProfile bool `json:"persistentProfile"`
 }
 
 // BrowserCommandRequest is the stable daemon-facing command envelope. Action
@@ -683,6 +687,10 @@ type CleanupSkippedSession struct {
 
 // CleanupSessionsResponse is the body of POST /api/v1/sessions/cleanup.
 type CleanupSessionsResponse struct {
+	// OK reports whether every candidate was cleaned. It is false when any
+	// session appears in Skipped — a declined teardown is not a completed one,
+	// and the request itself still succeeds (200), so this is the only field
+	// that distinguishes them.
 	OK      bool                    `json:"ok"`
 	Cleaned []domain.SessionID      `json:"cleaned"`
 	Skipped []CleanupSkippedSession `json:"skipped"`
@@ -962,6 +970,7 @@ type SetActivityRequest struct {
 	LatestUserPrompt      string             `json:"latestUserPrompt,omitempty" maxLength:"16384" description:"Latest real user prompt exposed by the provider hook."`
 	LatestAssistantUpdate string             `json:"latestAssistantUpdate,omitempty" maxLength:"16384" description:"Latest assistant update exposed by the provider hook."`
 	TranscriptPath        string             `json:"transcriptPath,omitempty" maxLength:"4096" description:"Read-only provider-native transcript path exposed by the hook."`
+	AgentCWD              string             `json:"agentCwd,omitempty" maxLength:"4096" description:"Working directory of the agent process that fired the hook. Used to reject signals from nested agents that inherited AO_SESSION_ID."`
 	LaunchID              string             `json:"launchId,omitempty" description:"AO process generation that produced the signal."`
 	Usage                 *UsageHookMetadata `json:"usage,omitempty" description:"Provider transcript metadata used by the local usage pipeline."`
 }
@@ -1296,6 +1305,26 @@ type ImportRunResponse struct {
 	Report legacyimport.Report `json:"report"`
 }
 
+// ListDirsQuery is the query string accepted by GET /api/v1/fs/dirs.
+type ListDirsQuery struct {
+	Path string `query:"path,omitempty" description:"Absolute directory on the daemon host to list. When omitted, the daemon user's home directory."`
+}
+
+// FSEntry is one directory in a /api/v1/fs/dirs listing.
+type FSEntry struct {
+	Name    string `json:"name" description:"Directory name."`
+	Path    string `json:"path" description:"Absolute path of the directory on the daemon host."`
+	GitRepo bool   `json:"gitRepo" description:"True when the directory carries a .git entry (clone or worktree checkout)."`
+}
+
+// ListDirsResponse is the body of GET /api/v1/fs/dirs.
+type ListDirsResponse struct {
+	Path      string    `json:"path" description:"Absolute path that was listed."`
+	Parent    string    `json:"parent" description:"Absolute path of the listed directory's parent; equals path at the filesystem root."`
+	Entries   []FSEntry `json:"entries" description:"Subdirectories, excluding dotted names."`
+	Truncated bool      `json:"truncated,omitempty" description:"True when the listing hit the entry cap and more subdirectories exist."`
+}
+
 // DevImportProjectsRequest is the body of POST /api/v1/dev/import-projects.
 type DevImportProjectsRequest struct {
 	SourceDataDir string `json:"sourceDataDir" minLength:"1"`
@@ -1323,6 +1352,12 @@ type MergePRResponse struct {
 	OK       bool   `json:"ok"`
 	PRNumber int    `json:"prNumber"`
 	Method   string `json:"method"`
+}
+
+// ClosePRResponse is the body of POST /api/v1/prs/{id}/close (200).
+type ClosePRResponse struct {
+	OK       bool `json:"ok"`
+	PRNumber int  `json:"prNumber"`
 }
 
 // ResolveCommentsRequest is the optional body of POST /api/v1/prs/{id}/resolve-comments.

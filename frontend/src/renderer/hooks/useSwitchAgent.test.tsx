@@ -7,13 +7,16 @@ import type { WorkspaceSession } from "../types/workspace";
 const { postMock } = vi.hoisted(() => ({ postMock: vi.fn() }));
 
 vi.mock("../lib/api-client", () => ({
-	apiClient: { POST: postMock },
 	apiErrorMessage: () => "request failed",
+}));
+vi.mock("../lib/host-clients", () => ({
+	clientFor: () => ({ POST: postMock }),
 }));
 
 import { useSwitchAgent } from "./useSwitchAgent";
 
 const session = {
+	host: "local",
 	activity: { state: "active", lastActivityAt: "2026-06-10T00:00:00Z" },
 	branch: "ao/sess-1",
 	id: "sess-1",
@@ -74,9 +77,11 @@ describe("useSwitchAgent", () => {
 			},
 		);
 		await waitFor(() => {
-			expect(invalidate).toHaveBeenCalledWith({ queryKey: ["conversation", "sess-1"] });
-			expect(invalidate).toHaveBeenCalledWith({ queryKey: ["conversation-models", "sess-1"] });
-			expect(invalidate).toHaveBeenCalledWith({ queryKey: ["conversation-config-options", "sess-1"] });
+			expect(invalidate).toHaveBeenCalledWith({ queryKey: ["conversation", "local:sess-1"] });
+			expect(invalidate).toHaveBeenCalledWith({ queryKey: ["conversation-models", "local:sess-1"] });
+			expect(invalidate).toHaveBeenCalledWith({
+				queryKey: ["conversation-config-options", "local:sess-1"],
+			});
 		});
 	});
 });

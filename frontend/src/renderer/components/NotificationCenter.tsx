@@ -19,8 +19,9 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode
 import { useMarkAllNotificationsReadMutation, useNotificationsQuery } from "../hooks/useNotificationsQuery";
 import { useRestoreSession } from "../hooks/useRestoreSession";
 import { useWorkspaceQuery } from "../hooks/useWorkspaceQuery";
-import type { WorkspaceSummary } from "../types/workspace";
+import { flattenHostSections, type HostSection } from "../types/workspace";
 import { aoBridge } from "../lib/bridge";
+import { refKey } from "../lib/hosts";
 import { openLinkInSystemBrowser } from "../lib/external-link-policy";
 import { formatTimeCompact } from "../lib/format-time";
 import {
@@ -52,7 +53,7 @@ function useNotificationTargetNavigation() {
 			const sessionId = notification.target.sessionId || notification.sessionId;
 			if (!sessionId) return;
 			void captureRendererEvent("ao.renderer.notification_opened", { target: "session" });
-			navigateToSession(notification.projectId, sessionId);
+			navigateToSession({ host: notification.host, id: sessionId });
 		},
 		[navigateToSession],
 	);
@@ -73,9 +74,10 @@ function useNotificationTargetNavigation() {
 }
 
 function useSessionTerminationLookup(
-	workspaces: WorkspaceSummary[] | undefined,
+	sections: HostSection[] | undefined,
 	isError: boolean,
 	isSuccess: boolean,
+	localFailure: string | null | undefined,
 	refetch: () => void,
 ): {
 	retryWorkspace: () => void;
@@ -83,24 +85,27 @@ function useSessionTerminationLookup(
 	terminatedIds: Set<string>;
 	workspaceError: boolean;
 } {
+	const flatWorkspaces = useMemo(() => flattenHostSections(sections), [sections]);
 	const terminatedIds = useMemo(() => {
 		const ids = new Set<string>();
-		for (const workspace of workspaces ?? []) {
+		for (const workspace of flatWorkspaces) {
 			for (const session of workspace.sessions) {
 				if (session.isTerminated === true || session.status === "terminated") {
-					ids.add(session.id);
+					ids.add(refKey(session));
 				}
 			}
 		}
 		return ids;
-	}, [workspaces]);
+	}, [flatWorkspaces]);
 	// Only successful workspace data is trustworthy. Pending and error both leave
 	// sessions non-navigable — a failed query must not treat terminated rows as live.
 	return {
-		retryWorkspace: refetch,
-		sessionsReady: isSuccess,
+		retryWorkspace: () => {
+			void refetch();
+		},
+		sessionsReady: isSuccess && !localFailure,
 		terminatedIds,
-		workspaceError: isError,
+		workspaceError: isError || Boolean(localFailure),
 	};
 }
 
@@ -128,13 +133,14 @@ function NotificationWorkspaceState({
 		workspaceQuery.data,
 		workspaceQuery.isError,
 		workspaceQuery.isSuccess,
+		workspaceQuery.localFailure,
 		retryWorkspace,
 	);
 	const sessionMeta = useMemo(() => {
 		const map = new Map<string, { projectName: string; sessionName: string }>();
-		for (const workspace of workspaceQuery.data ?? []) {
+		for (const workspace of flattenHostSections(workspaceQuery.data)) {
 			for (const session of workspace.sessions) {
-				map.set(session.id, { projectName: workspace.name, sessionName: session.title });
+				map.set(refKey(session), { projectName: workspace.name, sessionName: session.title });
 			}
 		}
 		return map;
@@ -147,24 +153,24 @@ export function NotificationRuntime() {
 	const { openPrimary } = useNotificationTargetNavigation();
 	const unreadQuery = useNotificationsQuery("unread");
 	const unreadCount = getCachedUnreadCount(unreadQuery.data);
-	const params = useParams({ strict: false }) as { sessionId?: string };
-	const routeSessionIdRef = useRef(params.sessionId);
-	routeSessionIdRef.current = params.sessionId;
+	const params = useParams({ strict: false }) as { hostId?: string; sessionId?: string };
+	const routeSessionRef = useRef(params.hostId && params.sessionId ? { host: params.hostId, id: params.sessionId } : undefined);
+	routeSessionRef.current = params.hostId && params.sessionId ? { host: params.hostId, id: params.sessionId } : undefined;
 
 	// Being on the session route is not the same as watching the agent: its pane
 	// renders one terminal at a time, so a shell or reviewer tab hides the agent
 	// while the route is unchanged. Only report the session whose agent terminal
 	// is the one on screen. Read the store imperatively — this feeds a getter for
 	// the long-lived SSE connection, which needs the current value, not a render.
-	const getVisibleAgentSessionId = useCallback(() => {
-		const sessionId = routeSessionIdRef.current;
-		if (!sessionId) return undefined;
-		return useUiStore.getState().visibleTerminalKindBySession[sessionId] === "worker" ? sessionId : undefined;
+	const getVisibleAgentSession = useCallback(() => {
+		const session = routeSessionRef.current;
+		if (!session) return undefined;
+		return useUiStore.getState().visibleTerminalKindBySession[refKey(session)] === "worker" ? session : undefined;
 	}, []);
 
 	useEffect(
-		() => createNotificationsTransport(queryClient, getVisibleAgentSessionId).connect(),
-		[getVisibleAgentSessionId, queryClient],
+		() => createNotificationsTransport(queryClient, getVisibleAgentSession).connect(),
+		[getVisibleAgentSession, queryClient],
 	);
 
 	// Keep the OS launcher badge in sync here rather than in NotificationCenter:
@@ -179,7 +185,7 @@ export function NotificationRuntime() {
 			const unread = queryClient.getQueryData<NotificationsCache>(unreadNotificationsQueryKey);
 			const recent = queryClient.getQueryData<NotificationsCache>(recentNotificationsQueryKey);
 			const notification = [...getCachedNotifications(unread), ...getCachedNotifications(recent)].find(
-				(item) => item.id === id,
+				(item) => refKey(item) === id,
 			);
 			if (notification) openPrimary(notification);
 		});
@@ -194,13 +200,13 @@ export function NotificationCenter({ style }: NotificationCenterProps) {
 	const [actionError, setActionError] = useState<string | null>(null);
 	const [markReadError, setMarkReadError] = useState<string | null>(null);
 	// Bumped by the mark-read Retry control so a failed ack can run again even
-	// when visibleUnreadKey is unchanged (removing ids from the ref alone does not).
+	// when visibleUnreadKey is unchanged (removing keys from the ref alone does not).
 	const [ackRetryNonce, setAckRetryNonce] = useState(0);
 	const [open, setOpen] = useState(false);
 	// Opening marks unread as read, which would drop the highlight under the
-	// cursor. Keep the open-time unread ids highlighted until the panel closes.
-	const [highlightedIds, setHighlightedIds] = useState<Set<string>>(() => new Set());
-	const [restoringSessionId, setRestoringSessionId] = useState<string | undefined>();
+	// cursor. Keep the open-time unread refs highlighted until the panel closes.
+	const [highlightedKeys, setHighlightedKeys] = useState<Set<string>>(() => new Set());
+	const [restoringSessionKey, setRestoringSessionKey] = useState<string | undefined>();
 	const unreadQuery = useNotificationsQuery("unread");
 	const allQuery = useNotificationsQuery("all", open);
 	const markAllRead = useMarkAllNotificationsReadMutation();
@@ -210,43 +216,43 @@ export function NotificationCenter({ style }: NotificationCenterProps) {
 	const { openSession } = useNotificationTargetNavigation();
 	const markAllMutate = markAllRead.mutateAsync;
 
-	// Concrete ids only — never `[]` — so unread pages past the first stay
+	// Concrete refs only — never `[]` — so unread pages past the first stay
 	// reachable and arrive as unread (still highlighted) when the all-list loads them.
-	const acknowledgedIdsRef = useRef<Set<string>>(new Set());
-	const visibleUnreadIds = useMemo(() => {
-		const ids = new Set<string>();
+	const acknowledgedKeysRef = useRef<Set<string>>(new Set());
+	const visibleUnreadKeys = useMemo(() => {
+		const keys = new Set<string>();
 		for (const item of getCachedNotifications(unreadQuery.data)) {
-			if (item.status === "unread") ids.add(item.id);
+			if (item.status === "unread") keys.add(refKey(item));
 		}
 		for (const item of notifications) {
-			if (item.status === "unread") ids.add(item.id);
+			if (item.status === "unread") keys.add(refKey(item));
 		}
-		return [...ids];
+		return [...keys];
 	}, [notifications, unreadQuery.data]);
-	const visibleUnreadKey = visibleUnreadIds.join("|");
+	const visibleUnreadKey = visibleUnreadKeys.join("|");
 
 	// Opening the panel acknowledges what has actually been loaded. Later unread
 	// rows are acknowledged as they appear, keeping the unread pagination cursor.
 	useEffect(() => {
 		if (!open) {
-			setHighlightedIds(new Set());
+			setHighlightedKeys(new Set());
 			setMarkReadError(null);
-			acknowledgedIdsRef.current = new Set();
+			acknowledgedKeysRef.current = new Set();
 			return;
 		}
 		if (unreadQuery.isLoading) return;
 
-		const visibleIds = visibleUnreadKey === "" ? [] : visibleUnreadKey.split("|");
-		const newly = visibleIds.filter((id) => !acknowledgedIdsRef.current.has(id));
+		const visibleKeys = visibleUnreadKey === "" ? [] : visibleUnreadKey.split("|");
+		const newly = visibleKeys.filter((key) => !acknowledgedKeysRef.current.has(key));
 		if (newly.length === 0) return;
 
-		for (const id of newly) acknowledgedIdsRef.current.add(id);
-		setHighlightedIds((current) => {
+		for (const key of newly) acknowledgedKeysRef.current.add(key);
+		setHighlightedKeys((current) => {
 			const next = new Set(current);
 			let changed = false;
-			for (const id of newly) {
-				if (next.has(id)) continue;
-				next.add(id);
+			for (const key of newly) {
+				if (next.has(key)) continue;
+				next.add(key);
 				changed = true;
 			}
 			return changed ? next : current;
@@ -258,7 +264,7 @@ export function NotificationCenter({ style }: NotificationCenterProps) {
 			.then(() => captureRendererEvent("ao.renderer.notification_mark_read_succeeded", { scope: "all" }))
 			.catch((error: unknown) => {
 				void captureRendererEvent("ao.renderer.notification_mark_read_failed", { scope: "all" });
-				for (const id of newly) acknowledgedIdsRef.current.delete(id);
+				for (const key of newly) acknowledgedKeysRef.current.delete(key);
 				setMarkReadError(error instanceof Error ? error.message : t("notify.couldNotMarkAllRead"));
 			});
 	}, [ackRetryNonce, markAllMutate, open, t, unreadQuery.isLoading, visibleUnreadKey]);
@@ -283,11 +289,12 @@ export function NotificationCenter({ style }: NotificationCenterProps) {
 
 	const restoreAndOpen = useCallback(async (notification: NotificationDTO) => {
 		const sessionId = notification.target.sessionId || notification.sessionId;
-		if (!sessionId || restoringSessionId) return;
-		setRestoringSessionId(sessionId);
+		if (!sessionId || restoringSessionKey) return;
+		const session = { host: notification.host, id: sessionId };
+		setRestoringSessionKey(refKey(session));
 		setActionError(null);
 		try {
-			const result = await restoreSession(sessionId);
+			const result = await restoreSession(session);
 			if (result.status === "success") {
 				openSession(notification);
 				setPanelOpen(false);
@@ -295,9 +302,9 @@ export function NotificationCenter({ style }: NotificationCenterProps) {
 			}
 			setActionError(result.status === "not_resumable" ? t("notify.restoreUnavailable") : result.message);
 		} finally {
-			setRestoringSessionId(undefined);
+			setRestoringSessionKey(undefined);
 		}
-	}, [openSession, restoreSession, restoringSessionId, setPanelOpen, t]);
+	}, [openSession, restoreSession, restoringSessionKey, setPanelOpen, t]);
 
 	const loadEarlierOnScroll = (event: React.UIEvent<HTMLDivElement>) => {
 		const list = event.currentTarget;
@@ -341,7 +348,7 @@ export function NotificationCenter({ style }: NotificationCenterProps) {
 				<NotificationWorkspaceState>
 					{({ retryWorkspace, sessionMeta, sessionsReady, terminatedIds, workspaceError }) => (
 						<>
-							{markReadError ? (
+				{markReadError ? (
 					<div
 						aria-live="polite"
 						className="flex items-center justify-between gap-2 border-b border-border bg-error/5 px-4 py-2 text-caption text-error"
@@ -389,8 +396,11 @@ export function NotificationCenter({ style }: NotificationCenterProps) {
 					>
 						{notifications.map((notification) => {
 							const sessionId = notification.target.sessionId || notification.sessionId;
-							const meta = sessionId ? sessionMeta.get(sessionId) : undefined;
-							const terminated = Boolean(sessionId) && terminatedIds.has(sessionId);
+							const sessionKey = sessionId
+								? refKey({ host: notification.host, id: sessionId })
+								: undefined;
+							const meta = sessionKey ? sessionMeta.get(sessionKey) : undefined;
+							const terminated = sessionKey !== undefined && terminatedIds.has(sessionKey);
 							// Restoring only makes sense when an agent is actually paused waiting
 							// on input. PR outcomes (ready_to_merge, pr_merged, pr_closed_unmerged)
 							// describe work that already finished — there is nothing to resume, so
@@ -399,13 +409,13 @@ export function NotificationCenter({ style }: NotificationCenterProps) {
 							const offerRestore = terminated && notification.type === "needs_input";
 							return (
 								<NotificationItem
-									highlighted={highlightedIds.has(notification.id) || notification.status === "unread"}
-									key={notification.id}
+									highlighted={highlightedKeys.has(refKey(notification)) || notification.status === "unread"}
+									key={refKey(notification)}
 									notification={notification}
 									onOpenSession={openSessionAndDismiss}
 									onRestore={restoreAndOpen}
-									restoring={restoringSessionId === sessionId}
-									restoreDisabled={restoringSessionId !== undefined}
+									restoring={restoringSessionKey === sessionKey}
+									restoreDisabled={restoringSessionKey !== undefined}
 									projectName={meta?.projectName}
 									sessionName={meta?.sessionName}
 									sessionsReady={sessionsReady}

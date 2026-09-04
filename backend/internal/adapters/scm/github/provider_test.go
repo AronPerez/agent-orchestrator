@@ -472,6 +472,30 @@ func TestObserve_CIStates(t *testing.T) {
 			wantCI: domain.CIFailing,
 		},
 		{
+			// Shape measured on a real sha: four rows under one name, and the
+			// rollup does not return them in time order. Ordering by position
+			// would pick a cancel and report a green PR as failing.
+			name: "cancelled superseded by a later same-named run is not failing",
+			nodes: []any{
+				map[string]any{"__typename": "CheckRun", "name": "migrate", "status": "COMPLETED", "conclusion": "CANCELLED", "startedAt": "2026-08-21T18:10:42Z"},
+				map[string]any{"__typename": "CheckRun", "name": "migrate", "status": "COMPLETED", "conclusion": "CANCELLED", "startedAt": "2026-08-21T18:11:48Z"},
+				map[string]any{"__typename": "CheckRun", "name": "migrate", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "2026-08-21T18:10:45Z"},
+				map[string]any{"__typename": "CheckRun", "name": "migrate", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "2026-08-21T18:11:53Z"},
+			},
+			wantCI: domain.CIPassing,
+		},
+		{
+			// The other direction: a cancel that nothing later concluded over
+			// still fails. Without this, "ignore cancels when the name also has
+			// a success" would promote the stale 18:10 success to the verdict.
+			name: "cancelled after an earlier success still fails",
+			nodes: []any{
+				map[string]any{"__typename": "CheckRun", "name": "migrate", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "2026-08-21T18:10:45Z"},
+				map[string]any{"__typename": "CheckRun", "name": "migrate", "status": "COMPLETED", "conclusion": "CANCELLED", "startedAt": "2026-08-21T18:11:48Z"},
+			},
+			wantCI: domain.CIFailing,
+		},
+		{
 			name: "legacy statuscontext failure",
 			nodes: []any{
 				map[string]any{"__typename": "StatusContext", "context": "ci/legacy", "state": "FAILURE", "targetUrl": "https://ci"},
@@ -1025,6 +1049,62 @@ func TestObserve_TokenInjectedAsBearer(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer tkn-test" {
 			t.Fatalf("Authorization header on %s %s = %q, want Bearer tkn-test", r.Method, r.Path, got)
 		}
+	}
+}
+
+func TestClosePullRequest_UsesGitHubRESTPatchEndpoint(t *testing.T) {
+	f := newFakeGH(t)
+	f.on(http.MethodPatch, "/repos/octocat/hello/pulls/42", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer tkn-test" {
+			t.Fatalf("Authorization = %q, want Bearer token", got)
+		}
+		var body struct {
+			State string `json:"state"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if body.State != "closed" {
+			t.Fatalf("state = %q, want closed", body.State)
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	p := newProviderForTest(t, f)
+
+	ref := ports.SCMPRRef{Repo: ports.SCMRepo{Owner: "octocat", Name: "hello"}, Number: 42}
+	if err := p.ClosePullRequest(ctx(), ref); err != nil {
+		t.Fatalf("ClosePullRequest: %v", err)
+	}
+	if got := f.callsTo(http.MethodPatch, "/repos/octocat/hello/pulls/42"); got != 1 {
+		t.Fatalf("close endpoint calls = %d, want 1", got)
+	}
+}
+
+func TestClosePullRequest_StatusErrorsMapToSCMSentinels(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		want   error
+	}{
+		{name: "not found", status: http.StatusNotFound, want: ports.ErrSCMNotFound},
+		{name: "method not allowed", status: http.StatusMethodNotAllowed, want: ports.ErrSCMNotMergeable},
+		{name: "preconditions", status: http.StatusUnprocessableEntity, want: ports.ErrSCMNotMergeable},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFakeGH(t)
+			f.on(http.MethodPatch, "/repos/octocat/hello/pulls/42", func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.status)
+				_, _ = w.Write([]byte(`{"message":"nope"}`))
+			})
+			p := newProviderForTest(t, f)
+
+			ref := ports.SCMPRRef{Repo: ports.SCMRepo{Owner: "octocat", Name: "hello"}, Number: 42}
+			err := p.ClosePullRequest(ctx(), ref)
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("err = %v, want %v", err, tt.want)
+			}
+		})
 	}
 }
 

@@ -18,6 +18,10 @@ vi.mock("../lib/bridge", () => ({
 			chooseDirectory: bridgeMocks.chooseDirectory,
 			scanImportFolder: bridgeMocks.scanImportFolder,
 		},
+		// The host selector lists saved AO daemons on mount; omitting this
+		// namespace surfaces as an unhandled rejection rather than a failed
+		// assertion, and leaks across test files.
+		remotes: { list: async () => [] },
 	},
 }));
 

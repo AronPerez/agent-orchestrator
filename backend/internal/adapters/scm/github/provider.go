@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -259,7 +260,7 @@ const prObservationQuery = `query($owner:String!,$repo:String!,$number:Int!){
           contexts(first:CONTEXT_LIMIT){
             nodes{
               __typename
-              ... on CheckRun  { name status conclusion detailsUrl url databaseId }
+              ... on CheckRun  { name status conclusion detailsUrl url databaseId startedAt }
               ... on StatusContext { context state targetUrl }
             }
             pageInfo{ hasNextPage }
@@ -315,7 +316,9 @@ func (p *Provider) fetchJobLogTail(ctx context.Context, owner, repo string, jobI
 // ---------------------------------------------------------------------------
 
 // ciSummaryFromGraphQL maps the per-PR status rollup onto domain.CIState.
-// If ANY visible context concluded failure-class we return CIFailing.
+// If ANY visible context concluded failure-class we return CIFailing,
+// except for a CANCELLED run a later same-named run concluded over — that
+// cancel carries no verdict and its successor is already in the list.
 // Otherwise any pending context wins over passing. An empty rollup is
 // CIUnknown. When the rollup is paginated (pageInfo.hasNextPage=true)
 // the verdict is conservative: a known failure is still safe — failures
@@ -336,8 +339,12 @@ func ciSummaryFromGraphQL(pr map[string]any) domain.CIState {
 		return mapRollupState(str(roll["state"]))
 	}
 	pending, passing := false, false
+	concluded := latestConcludedCheckRun(rawNodes)
 	for _, n := range rawNodes {
 		st := checkStatusFromGraphQL(n)
+		if st == domain.PRCheckCancelled && cancelSuperseded(n, concluded) {
+			continue
+		}
 		switch st {
 		case domain.PRCheckFailed, domain.PRCheckCancelled:
 			return domain.CIFailing
@@ -623,6 +630,56 @@ func checkStatusFromGraphQL(n map[string]any) domain.PRCheckStatus {
 		return domain.PRCheckUnknown
 	}
 	return domain.PRCheckUnknown
+}
+
+// latestConcludedCheckRun maps a CheckRun name to the startedAt of the newest
+// same-named run that reached a conclusion other than CANCELLED. Only rows
+// carrying a parseable startedAt count: without one there is no way to order
+// them, and the conservative existing behaviour (a cancel is failing) has to
+// stand rather than be guessed away.
+func latestConcludedCheckRun(rawNodes []map[string]any) map[string]time.Time {
+	out := make(map[string]time.Time)
+	for _, n := range rawNodes {
+		if str(n["__typename"]) != "CheckRun" {
+			continue
+		}
+		switch strings.ToUpper(strings.TrimSpace(str(n["conclusion"]))) {
+		case "", "CANCELLED":
+			continue
+		}
+		name := str(n["name"])
+		ts, ok := checkRunStartedAt(n)
+		if name == "" || !ok {
+			continue
+		}
+		if prev, seen := out[name]; !seen || ts.After(prev) {
+			out[name] = ts
+		}
+	}
+	return out
+}
+
+// cancelSuperseded reports whether a CANCELLED run was replaced by a later
+// same-named run that actually concluded. GitHub re-runs a workflow under one
+// name (a push, a PR body edit), so a single sha carries several rows per name
+// — measured on one commit: 61 contexts, 11 names repeated, one of them four
+// times — and the rollup does NOT return them in time order, so the comparison
+// must be on startedAt and never on position in the list.
+func cancelSuperseded(n map[string]any, concluded map[string]time.Time) bool {
+	ts, ok := checkRunStartedAt(n)
+	if !ok {
+		return false
+	}
+	newer, seen := concluded[str(n["name"])]
+	return seen && newer.After(ts)
+}
+
+func checkRunStartedAt(n map[string]any) (time.Time, bool) {
+	ts, err := time.Parse(time.RFC3339, strings.TrimSpace(str(n["startedAt"])))
+	if err != nil {
+		return time.Time{}, false
+	}
+	return ts, true
 }
 
 func isFailingCheckStatus(s domain.PRCheckStatus) bool {

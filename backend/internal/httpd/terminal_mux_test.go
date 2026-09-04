@@ -3,6 +3,7 @@ package httpd
 import (
 	"context"
 	"encoding/base64"
+	"net/http"
 	"net/http/httptest"
 	"runtime"
 	"strings"
@@ -62,6 +63,70 @@ func dialMux(t *testing.T, mgr *terminal.Manager) (*websocket.Conn, func()) {
 	}
 }
 
+// A page served by ANY other local dev server — http://localhost:8080, a
+// different port than the daemon's — could open an unauthenticated terminal on
+// the no-auth loopback listener as long as loopback origins were blanket
+// trusted. This dials /mux exactly the way such a page would; it must be
+// refused before the upgrade, while the daemon's own origin still connects.
+func TestMuxRejectsForeignLoopbackOrigin(t *testing.T) {
+	router := newTestRouter(config.Config{AllowedOrigins: []string{"app://renderer"}}, discardLogger(), nil)
+	ts := httptest.NewServer(router)
+	defer ts.Close()
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + terminalMuxPath
+
+	for _, tc := range []struct {
+		name, origin string
+		wantOK       bool
+	}{
+		{"foreign localhost dev server", "http://localhost:8080", false},
+		{"foreign loopback IP", "http://127.0.0.1:5173", false},
+		{"workspace preview subdomain", "http://ao-preview.abc123.localhost:5181", false},
+		{"unrelated site", "http://evil.example", false},
+		{"packaged renderer (allowlisted)", "app://renderer", true},
+		{"the daemon's own origin", ts.URL, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// mgr is nil above, so /mux is not even mounted: a request that
+			// passes the origin boundary reaches the 404, one that fails it is
+			// stopped with 403. That difference is the whole assertion, and it
+			// needs no PTY.
+			req, err := http.NewRequest(http.MethodGet, ts.URL+terminalMuxPath, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Origin", tc.origin)
+			resp, err := ts.Client().Do(req)
+			if err != nil {
+				t.Fatalf("GET %s: %v", wsURL, err)
+			}
+			defer resp.Body.Close()
+			forbidden := resp.StatusCode == http.StatusForbidden
+			if forbidden == tc.wantOK {
+				t.Fatalf("origin %q: got %d, want %s", tc.origin, resp.StatusCode,
+					map[bool]string{true: "not 403", false: "403"}[tc.wantOK])
+			}
+		})
+	}
+}
+
+// The same hole, end to end against a mounted mux: the WebSocket handshake
+// itself must fail, not merely return a body the page cannot read.
+func TestMuxUpgradeRefusedFromForeignLoopbackOrigin(t *testing.T) {
+	mgr := terminal.NewManager(&stubSource{argv: []string{"/bin/sh", "-c", "exit 0"}}, nil, discardLogger())
+	defer mgr.Close()
+	ts := httptest.NewServer(newTestRouter(config.Config{}, discardLogger(), mgr))
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(ts.URL, "http")+terminalMuxPath,
+		&websocket.DialOptions{HTTPHeader: http.Header{"Origin": {"http://localhost:8080"}}})
+	if err == nil {
+		_ = c.Close(websocket.StatusNormalClosure, "")
+		t.Fatal("a page on another loopback origin opened a terminal WebSocket")
+	}
+}
+
 func readFrame(t *testing.T, c *websocket.Conn, ch, typ string, d time.Duration) terminalMuxFrame {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), d)
@@ -105,6 +170,32 @@ func TestMuxUpgradeStreamsTerminal(t *testing.T) {
 
 	// The shell exits; the pane is reported gone (IsAlive=false) so we get exited.
 	readFrame(t, c, "terminal", "exited", 5*time.Second)
+}
+
+// A browser web client requests ["ao.auth", "ao.bearer.<pw>"] to carry the
+// connection token (see wsProtocolPrefix in auth.go) and fails the handshake
+// unless the server echoes a requested entry. Pin that the negotiated protocol
+// is the marker — and only ever the marker, never the credential entry.
+func TestMuxNegotiatesAuthSubprotocol(t *testing.T) {
+	mgr := terminal.NewManager(&stubSource{argv: []string{"/bin/sh"}}, nil, discardLogger())
+	defer mgr.Close()
+
+	router := newTestRouter(config.Config{}, discardLogger(), mgr)
+	ts := httptest.NewServer(router)
+	defer ts.Close()
+	url := "ws" + strings.TrimPrefix(ts.URL, "http") + "/mux"
+
+	c, _, err := websocket.Dial(context.Background(), url, &websocket.DialOptions{
+		Subprotocols: []string{"ao.auth", "ao.bearer.secret12"},
+	})
+	if err != nil {
+		t.Fatalf("dial /mux with subprotocols: %v", err)
+	}
+	defer func() { _ = c.Close(websocket.StatusNormalClosure, "test done") }()
+
+	if got := c.Subprotocol(); got != muxAuthSubprotocol {
+		t.Fatalf("negotiated subprotocol = %q, want %q", got, muxAuthSubprotocol)
+	}
 }
 
 func TestMuxSystemPingPong(t *testing.T) {

@@ -17,6 +17,11 @@ import (
 // still bounding memory per message.
 const terminalMuxReadLimit = 1 << 20
 
+// terminalMuxPath is where the mux WebSocket is mounted. corsMiddleware names it
+// too: /mux hands out live terminals, so it is origin-checked like a
+// state-changing route rather than like a read (see requiresStrictOrigin).
+const terminalMuxPath = "/mux"
+
 // mountTerminalMux registers the long-lived terminal-multiplexing WebSocket at /mux. It
 // is intentionally outside the per-request Timeout middleware (the connection is
 // long-lived). When mgr is nil the route is not mounted — the daemon simply has
@@ -25,18 +30,36 @@ func mountTerminalMux(r chi.Router, mgr *terminal.Manager, log *slog.Logger) {
 	if mgr == nil {
 		return
 	}
-	r.Get("/mux", terminalMuxHandler(mgr, log))
+	r.Get(terminalMuxPath, terminalMuxHandler(mgr, log))
 }
+
+// muxAuthSubprotocol is the marker the server negotiates and echoes so a
+// browser client can request subprotocols at all: the web client sends
+// ["ao.auth", "ao.bearer.<pw>"] to carry the connection token (see
+// wsProtocolPrefix in auth.go), and browsers fail the handshake unless the
+// server echoes one requested entry. Only this marker is in the negotiable
+// list, so the credential entry can never be reflected back. Clients that
+// request no subprotocols (the phone, the desktop renderer) get no echo and
+// are unaffected.
+const muxAuthSubprotocol = "ao.auth"
 
 // terminalMuxHandler upgrades the request to a WebSocket and hands the connection to the
 // terminal manager. httpd owns only the upgrade and the transport adaptation;
 // all stream logic lives in internal/terminal.
 func terminalMuxHandler(mgr *terminal.Manager, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// InsecureSkipVerify disables coder/websocket's same-origin check: the
-		// daemon binds loopback only and the desktop renderer's origin differs
-		// from the loopback host, mirroring the legacy Node mux server.
-		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		// InsecureSkipVerify disables coder/websocket's own same-origin check
+		// because it is too blunt for this daemon: the packaged renderer's
+		// app://renderer origin and the mobile client's pinned http://localhost
+		// both fail it, and it has no notion of the connection password. Origin
+		// policy is enforced upstream instead, uniformly for /mux and every
+		// state-changing route, by corsMiddleware (requiresStrictOrigin) on the
+		// loopback listener and by authMiddleware's cookie rule on the LAN
+		// listener. /mux is mounted only on routers carrying that middleware.
+		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+			InsecureSkipVerify: true,
+			Subprotocols:       []string{muxAuthSubprotocol},
+		})
 		if err != nil {
 			log.Warn("terminal mux: websocket upgrade failed", "err", err)
 			return

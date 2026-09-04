@@ -225,6 +225,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/fs/dirs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List the subdirectories of a directory on the daemon host */
+        get: operations["listDirs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/identity": {
         parameters: {
             query?: never;
@@ -599,6 +616,23 @@ export interface paths {
         put?: never;
         /** Initialize a selected folder as a Git repository with an initial commit */
         post: operations["initializeProjectRepository"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/prs/{id}/close": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Close a pull request */
+        post: operations["closePR"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1685,6 +1719,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{sessionId}/workspace-location": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Resolve a session workspace location over the authenticated API */
+        get: operations["getSessionWorkspaceLocation"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{sessionId}/workspace/events": {
         parameters: {
             query?: never;
@@ -2097,6 +2148,7 @@ export interface components {
             connected: boolean;
             /** Format: date-time */
             connectedAt?: string;
+            persistentProfile: boolean;
             sessionId: string;
             transport: string;
         };
@@ -2134,6 +2186,10 @@ export interface components {
             name?: null | string;
             projectId?: null | string;
             remoteUrl: string;
+        };
+        ClosePRResponse: {
+            ok: boolean;
+            prNumber: number;
         };
         CompactConversationResponse: {
             /** Format: int64 */
@@ -2217,6 +2273,7 @@ export interface components {
             reviewerConfig?: components["schemas"]["AgentConfig"];
             /** @enum {string} */
             reviewerHarness?: "claude-code" | "codex" | "copilot" | "cursor" | "kilocode" | "opencode" | "kiro" | "pi" | "qwen" | "agy" | "continue" | "goose" | "vibe" | "devin" | "droid" | "kimi" | "kimchi" | "muse" | "amp" | "aider" | "grok" | "crush" | "auggie" | "cline" | "autohand";
+            runtimeUnreachable?: boolean;
             /** @enum {string} */
             scmStatus?: "pr_open" | "draft" | "ci_failed" | "review_pending" | "changes_requested" | "approved" | "mergeable" | "merged";
             /** @enum {string} */
@@ -2580,6 +2637,14 @@ export interface components {
             /** Format: int64 */
             totalNanos: number;
         };
+        FSEntry: {
+            /** @description True when the directory carries a .git entry (clone or worktree checkout). */
+            gitRepo: boolean;
+            /** @description Directory name. */
+            name: string;
+            /** @description Absolute path of the directory on the daemon host. */
+            path: string;
+        };
         IdentityResponse: {
             apiVersion: number;
             hostId: string;
@@ -2652,6 +2717,16 @@ export interface components {
         };
         ListCompactSessionUsageResponse: {
             sessions: components["schemas"]["CompactSessionUsageResponse"][];
+        };
+        ListDirsResponse: {
+            /** @description Subdirectories, excluding dotted names. */
+            entries: components["schemas"]["FSEntry"][];
+            /** @description Absolute path of the listed directory's parent; equals path at the filesystem root. */
+            parent: string;
+            /** @description Absolute path that was listed. */
+            path: string;
+            /** @description True when the listing hit the entry cap and more subdirectories exist. */
+            truncated?: boolean;
         };
         ListNotificationsResponse: {
             nextCursor?: string;
@@ -2864,15 +2939,19 @@ export interface components {
             agentRules?: string;
             agentRulesFile?: string;
             autoReview?: boolean;
+            browserPersistentProfile?: boolean;
             containerReap?: components["schemas"]["ContainerReapConfig"];
             defaultBranch?: string;
             env?: {
                 [key: string]: string;
             };
             orchestrator?: components["schemas"]["RoleOverride"];
+            orchestratorPrompt?: string;
             orchestratorRules?: string;
             postCreate?: string[];
             reviewers?: components["schemas"]["DomainReviewerConfig"][];
+            /** @enum {string} */
+            sessionInterface?: "chat" | "tui";
             sessionPrefix?: string;
             symlinks?: string[];
             trackerIntake?: components["schemas"]["TrackerIntakeConfig"];
@@ -3196,6 +3275,8 @@ export interface components {
             totals: components["schemas"]["UsageTotalsResponse"];
         };
         SetActivityRequest: {
+            /** @description Working directory of the agent process that fired the hook. Used to reject signals from nested agents that inherited AO_SESSION_ID. */
+            agentCwd?: string;
             /** @description Native agent session identifier used to resume its transcript. */
             agentSessionId?: string;
             /** @description AO hook sub-command that produced this state (e.g. post-tool-use). */
@@ -4254,6 +4335,65 @@ export interface operations {
             };
             /** @description Not Implemented */
             501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listDirs: {
+        parameters: {
+            query?: {
+                /** @description Absolute directory on the daemon host to list. When omitted, the daemon user's home directory. */
+                path?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListDirsResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -5531,6 +5671,65 @@ export interface operations {
             };
             /** @description Internal Server Error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    closePR: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description PR number. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClosePRResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -9914,6 +10113,56 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getSessionWorkspaceLocation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Session identifier, e.g. project-1. */
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DesktopWorkspaceLocationResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

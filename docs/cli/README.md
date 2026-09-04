@@ -17,6 +17,48 @@ go build -o ./bin/ao ./cmd/ao
 ./bin/ao agent ls
 ```
 
+## Targeting a remote daemon
+
+By default every command talks to the local daemon: it reads `running.json`,
+checks the PID is alive, and calls `127.0.0.1`. The global `--url` flag (or
+`AO_URL`) points the same commands at another machine's LAN listener instead
+(see [ADR 0001](../adr/0001-lan-listener-for-mobile.md)), skipping the run-file
+and the local liveness check entirely — so it works on a machine that has never
+run AO:
+
+```bash
+ao status --url http://100.64.0.1:3011
+AO_URL=http://100.64.0.1:3011 ao agent ls
+```
+
+The credential is the daemon's connection password — the same one the mobile app
+pairs with — sent as `Authorization: Bearer <password>`. It comes from `AO_TOKEN`,
+or from `~/.ao/remotes.json`, which mirrors the mobile app's saved-node list and
+must be mode `0600` (the CLI refuses to read it otherwise):
+
+```json
+{
+  "remotes": [
+    { "label": "desk", "url": "http://100.64.0.1:3011", "password": "abcd1234" }
+  ]
+}
+```
+
+Notes:
+
+- The link is plain HTTP by design (ADR 0001, home network / Tailscale only).
+  There is no TLS or certificate pinning.
+- The URL must not carry a username or password. A credential belongs in
+  `AO_TOKEN` or the `remotes.json` entry, so `--url http://user:pw@host:3011` is
+  rejected rather than silently stripped.
+- `ao stop` only ever stops the local daemon it found through `running.json`. A
+  `--url` / `AO_URL` target is refused — including one that names loopback, so
+  the single destructive verb never changes behavior based on how the URL looks.
+- CLI telemetry (`/internal/*`) is never sent to a remote daemon.
+- Repeated bad passwords lock your source address out of the LAN listener for a
+  minute. `ao status` reports that as `locked_out` rather than `unhealthy` — the
+  daemon is fine; wait and retry. This state cannot occur against a local daemon.
+
 ## Current commands
 
 Every product command resolves to a daemon HTTP route. Run `ao <command>
@@ -164,6 +206,15 @@ window for HMR-driven verification.
 Browser tabs in the same worker share a memory-only Electron profile. Different
 workers receive distinct partitions, so cookies, authentication, local storage,
 and session storage do not leak between their browser runtimes.
+A project can opt out of that isolation with
+`ao project set-config <id> --browser-persistent-profile`, which gives every
+session on that project ONE shared on-disk profile instead
+(`~/.ao/electron/Partitions/ao-browser-<projectId>`), so a login survives session
+teardown and app restart. It is off by default, and the trade-off is the reason:
+that one cookie jar is shared by every worker session on the project, so a
+prompt-injected agent in any of them can use every login in it. Other projects
+stay isolated, and permissions remain denied either way. `ao browser status`
+always states which of the two modes a session is running on.
 Network capture is disabled by default and must be started explicitly. It is
 scoped to the active tab at start time, expires after 60 seconds by default
 (maximum 300), retains at most 200 in-memory entries, and is cleared with the

@@ -19,9 +19,15 @@ import {
 	revalidateAgentModels,
 	type AgentModelCatalog,
 } from "../hooks/useAgentModelsQuery";
-import { useAgentReadinessQuery, useEnsureAgentReadiness } from "../hooks/useAgentReadinessQuery";
+import {
+	useAgentReadinessQuery,
+	useEnsureAgentReadiness,
+} from "../hooks/useAgentReadinessQuery";
 import { useWorkspaceQuery, workspaceQueryKey } from "../hooks/useWorkspaceQuery";
-import { apiClient, apiErrorMessage } from "../lib/api-client";
+import { flattenHostSections } from "../types/workspace";
+import { apiErrorMessage } from "../lib/api-client";
+import { clientFor } from "../lib/host-clients";
+import { isLocal, refKey, type Ref } from "../lib/hosts";
 import { captureOrchestratorReplacementFailure } from "../lib/orchestrator-replacement-telemetry";
 import { OrchestratorSpawnError, spawnOrchestrator } from "../lib/spawn-orchestrator";
 import { captureRendererEvent } from "../lib/telemetry";
@@ -32,7 +38,7 @@ import { buildIntake, deriveRepoPath, deriveRepoHost, IntakeFields, type IntakeF
 import { ProductExternalLink } from "./ProductExternalLink";
 import { ReviewerSelect, reviewerTrustWarning } from "./ReviewerSelect";
 import { AgentModelCombobox } from "./settings/AgentModelCombobox";
-import { SettingsOptionMenu } from "./settings/SettingsOptionMenu";
+import { SettingsOptionMenu, type SettingsOption } from "./settings/SettingsOptionMenu";
 import { SettingsRow } from "./settings/SettingsRow";
 import { Switch } from "./ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
@@ -40,11 +46,16 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 type Project = components["schemas"]["Project"];
 type ProjectConfig = components["schemas"]["ProjectConfig"];
 type TrackerIntakeConfig = components["schemas"]["TrackerIntakeConfig"];
+/** The pinned interface, or "" for the project pinning nothing. */
+type SessionInterfaceValue = NonNullable<ProjectConfig["sessionInterface"]> | "";
 
 const PERMISSION_MODE_VALUES = ["default", "accept-edits", "auto", "bypass-permissions"] as const;
 const DEFAULT_BRANCH_AUTO = "auto";
+// The menu needs a value for "pin nothing"; the wire representation of that is
+// the field being absent, so the sentinel never leaves this file.
+const SESSION_INTERFACE_INHERIT = "__default__";
 
-const projectQueryKey = (id: string) => ["project", id] as const;
+const projectQueryKey = (project: Ref) => ["project", refKey(project)] as const;
 
 type SettingsSaveResult = {
 	replacementError: string | null;
@@ -64,11 +75,11 @@ export interface ProjectSettingsSaveState {
 }
 
 export function ProjectSettingsForm({
-	projectId,
+	project,
 	section = "general",
 	onSaveState,
 }: {
-	projectId: string;
+	project: Ref;
 	section?: ProjectSettingsSection;
 	onSaveState?: (state: ProjectSettingsSaveState) => void;
 }) {
@@ -76,10 +87,10 @@ export function ProjectSettingsForm({
 	const queryClient = useQueryClient();
 
 	const query = useQuery({
-		queryKey: projectQueryKey(projectId),
+		queryKey: projectQueryKey(project),
 		queryFn: async () => {
-			const { data, error } = await apiClient.GET("/api/v1/projects/{id}", {
-				params: { path: { id: projectId } },
+			const { data, error } = await clientFor(project.host).GET("/api/v1/projects/{id}", {
+				params: { path: { id: project.id } },
 			});
 			if (error) throw new Error(apiErrorMessage(error));
 			if (data?.status !== "ok") throw new Error(t("settings.project.degraded"));
@@ -97,14 +108,14 @@ export function ProjectSettingsForm({
 				</p>
 			) : (
 				<SettingsBody
-					key={projectId}
+					key={refKey(project)}
 					project={query.data}
 					onSaved={() =>
 						queryClient.invalidateQueries({ queryKey: workspaceQueryKey }).catch(() => {
 							// Saving succeeds even if the cache refresh fails.
 						})
 					}
-					projectId={projectId}
+					projectRef={project}
 					section={section}
 					onSaveState={onSaveState}
 				/>
@@ -115,13 +126,13 @@ export function ProjectSettingsForm({
 
 function SettingsBody({
 	project,
-	projectId,
+	projectRef,
 	onSaved,
 	section = "general",
 	onSaveState,
 }: {
 	project: Project;
-	projectId: string;
+	projectRef: Ref;
 	onSaved: () => Promise<void>;
 	section?: ProjectSettingsSection;
 	onSaveState?: (state: ProjectSettingsSaveState) => void;
@@ -132,11 +143,18 @@ function SettingsBody({
 	const closeSettings = useUiStore((state) => state.closeSettings);
 	const setOrchestratorReplacementError = useUiStore((state) => state.setOrchestratorReplacementError);
 	const workspaceQuery = useWorkspaceQuery();
+	const workspaces = flattenHostSections(workspaceQuery.data);
+	const projectId = projectRef.id;
 	const config = project.config ?? {};
 	const isScratchProject = project.kind === "scratch";
-	const workspace = workspaceQuery.data?.find((item) => item.id === projectId);
+	const workspace = workspaces.find((item) => item.host === projectRef.host && item.id === projectId);
 	const activeOrchestrator = newestActiveOrchestrator(workspace?.sessions ?? []);
 	const intake: TrackerIntakeConfig = config.trackerIntake ?? {};
+	// A remote daemon that predates this field omits it, so it arrives as
+	// undefined — the same thing as a project that pinned nothing. Annotated
+	// rather than inferred: a bare literal in the form object below widens to
+	// string and stops matching ProjectConfig.
+	const initialSessionInterface: SessionInterfaceValue = config.sessionInterface ?? "";
 	const [form, setForm] = useState({
 		displayName: project.name,
 		defaultBranch: config.defaultBranch ?? DEFAULT_BRANCH_AUTO,
@@ -152,6 +170,7 @@ function SettingsBody({
 		reviewerModel: config.reviewers?.[0]?.agentConfig?.model ?? "",
 		reviewerMode: config.reviewers?.[0]?.agentConfig?.mode ?? "",
 		autoReview: config.autoReview ?? false,
+		sessionInterface: initialSessionInterface,
 		intakeEnabled: intake.enabled ?? false,
 		intakeRepo: intake.repo ?? "",
 		intakeAssignee: intake.assignee ?? "",
@@ -162,11 +181,17 @@ function SettingsBody({
 	const [validationError, setValidationError] = useState<string | null>(null);
 	const initialOrchestratorAgent = config.orchestrator?.agent ?? "";
 	const missingRequiredAgent = form.workerAgent === "" || form.orchestratorAgent === "";
-	const agentsQuery = useAgentReadinessQuery();
-	useEnsureAgentReadiness();
+	// Both halves of the gate are required: the experimental flag alone is not
+	// enough, and a local project has no remote daemon to hold the setting.
+	const remoteHostsEnabled = useUiStore((state) => state.remoteHosts);
+	const showSessionInterface = remoteHostsEnabled && !isLocal(projectRef.host);
+	const agentsHost = projectRef.host;
+	const agentsQuery = useAgentReadinessQuery(true, agentsHost);
+	useEnsureAgentReadiness({ host: agentsHost });
 	useEnsureAgentReadiness({
 		agentIds: [form.workerAgent, form.orchestratorAgent, form.reviewerHarness],
 		enabled: form.workerAgent !== "" || form.orchestratorAgent !== "" || form.reviewerHarness !== "",
+		host: agentsHost,
 	});
 	const agentCatalog = agentsQuery.data;
 
@@ -196,9 +221,15 @@ function SettingsBody({
 			const existingReviewer = config.reviewers?.[0];
 			const existingReviewerAgentConfig =
 				existingReviewer?.harness === form.reviewerHarness ? existingReviewer.agentConfig : undefined;
+			// Left out entirely where the control is hidden, so the config spread
+			// below keeps whatever the project already had.
+			const sessionInterfacePatch = showSessionInterface
+				? { sessionInterface: form.sessionInterface || undefined }
+				: {};
 			const next: ProjectConfig = isScratchProject
 				? {
 						...scratchSupportedConfig(config),
+						...sessionInterfacePatch,
 						worker: {
 							...config.worker,
 							agent: form.workerAgent,
@@ -220,6 +251,7 @@ function SettingsBody({
 					}
 				: {
 						...config,
+						...sessionInterfacePatch,
 						defaultBranch:
 							form.defaultBranch.trim() === DEFAULT_BRANCH_AUTO
 								? undefined
@@ -254,7 +286,7 @@ function SettingsBody({
 						trackerIntake: buildIntake(intakeForm),
 						autoReview: form.autoReview,
 					};
-			const { error } = await apiClient.PUT("/api/v1/projects/{id}", {
+			const { error } = await clientFor(projectRef.host).PUT("/api/v1/projects/{id}", {
 				params: { path: { id: projectId } },
 				body: { displayName, config: next },
 			});
@@ -264,7 +296,7 @@ function SettingsBody({
 				(activeOrchestrator && activeOrchestrator.provider !== form.orchestratorAgent)
 			) {
 				try {
-					const sessionId = await spawnOrchestrator(projectId, "settings", true);
+					const sessionId = await spawnOrchestrator(projectRef, "settings", true);
 					return {
 						replacementError: null,
 						replacementSessionId: sessionId,
@@ -299,22 +331,22 @@ function SettingsBody({
 			setSavedAt(Date.now());
 			setReplacementError(result.replacementError);
 			setValidationError(null);
-			void queryClient.invalidateQueries({ queryKey: ["project", projectId] });
+			void queryClient.invalidateQueries({ queryKey: projectQueryKey(projectRef) });
 			const workspaceRefresh = onSaved();
 
 			if (result.replacementSessionId) {
 				await workspaceRefresh;
 				closeSettings();
 				void navigate({
-					to: "/projects/$projectId/sessions/$sessionId",
-					params: { projectId, sessionId: result.replacementSessionId },
+					to: "/host/$hostId/session/$sessionId",
+					params: { hostId: projectRef.host, sessionId: result.replacementSessionId },
 				});
 				return;
 			}
 
 			if (result.replacementFailure) {
 				closeSettings();
-				setOrchestratorReplacementError(projectId, result.replacementFailure);
+				setOrchestratorReplacementError(projectRef, result.replacementFailure);
 				if (result.spawnError) {
 					captureOrchestratorReplacementFailure(result.spawnError, projectId);
 				}
@@ -443,7 +475,7 @@ function SettingsBody({
 							<AgentModelField
 								role="worker"
 								agentId={form.workerAgent}
-								projectId={projectId}
+								project={projectRef}
 								model={form.workerModel}
 								mode={form.workerMode}
 								onModelChange={(workerModel) => setForm((f) => ({ ...f, workerModel }))}
@@ -474,7 +506,7 @@ function SettingsBody({
 							<AgentModelField
 								role="orchestrator"
 								agentId={form.orchestratorAgent}
-								projectId={projectId}
+								project={projectRef}
 								model={form.orchestratorModel}
 								mode={form.orchestratorMode}
 								onModelChange={(orchestratorModel) => setForm((f) => ({ ...f, orchestratorModel }))}
@@ -490,6 +522,16 @@ function SettingsBody({
 							),
 							label: t("settings.project.permissionMode"),
 						}}
+						sessionInterfaceArea={
+							showSessionInterface ? (
+								<SettingsRow label={t("settings.sessionInterface.label")}>
+									<SessionInterfaceSelect
+										value={form.sessionInterface}
+										onChange={(sessionInterface) => setForm((f) => ({ ...f, sessionInterface }))}
+									/>
+								</SettingsRow>
+							) : undefined
+						}
 						missingRequiredMessage={
 							missingRequiredAgent ? t("settings.project.agentsRequired") : null
 						}
@@ -515,7 +557,7 @@ function SettingsBody({
 								}
 								model={form.reviewerModel}
 								mode={form.reviewerMode}
-								projectId={projectId}
+								project={projectRef}
 								ariaLabel={t("settings.project.defaultReviewer")}
 								agents={agentCatalog?.agents}
 								defaultOptionLabel={t("settings.project.default")}
@@ -619,7 +661,7 @@ function SettingsBody({
 function AgentModelField({
 	role,
 	agentId,
-	projectId,
+	project,
 	model,
 	mode,
 	onModelChange,
@@ -627,7 +669,7 @@ function AgentModelField({
 }: {
 	role: "worker" | "orchestrator";
 	agentId: string;
-	projectId: string;
+	project: Ref;
 	model: string;
 	mode: string;
 	onModelChange: (value: string) => void;
@@ -636,20 +678,20 @@ function AgentModelField({
 	const { t } = useTranslation();
 	const queryClient = useQueryClient();
 	const [customAgentId, setCustomAgentId] = useState<string | null>(null);
-	const query = useQuery(agentModelsQueryOptions(agentId, projectId));
+	const query = useQuery(agentModelsQueryOptions(agentId, project));
 	const catalog: AgentModelCatalog | undefined = query.data;
 	const revalidationQuery = useQuery({
-		queryKey: ["agent-model-revalidation", agentId, projectId, catalog?.validatedAt ?? ""],
-		queryFn: () => revalidateAgentModels(agentId, projectId),
+		queryKey: ["agent-model-revalidation", agentId, refKey(project), catalog?.validatedAt ?? ""],
+		queryFn: () => revalidateAgentModels(agentId, project),
 		enabled: agentId !== "" && catalog?.refreshRecommended === true,
 		staleTime: Number.POSITIVE_INFINITY,
 		retry: false,
 	});
 	useEffect(() => {
 		if (revalidationQuery.data) {
-			queryClient.setQueryData(agentModelsQueryKey(agentId, projectId), revalidationQuery.data);
+			queryClient.setQueryData(agentModelsQueryKey(agentId, project), revalidationQuery.data);
 		}
-	}, [agentId, projectId, queryClient, revalidationQuery.data]);
+	}, [agentId, project, queryClient, revalidationQuery.data]);
 	const isMode = catalog?.selectionMode === "mode";
 	const label = t(`settings.models.${role}${isMode ? "Mode" : "Model"}`);
 	const datalistID = `${role}-model-options`;
@@ -747,6 +789,36 @@ function AgentModelField({
 			</SettingsRow>
 			{warning && <p className="px-1 text-xs leading-row text-warning">{warning}</p>}
 		</>
+	);
+}
+
+/**
+ * The interface every session spawned in this project is born with.
+ *
+ * Unset is a real, selectable state: it defers to the daemon-owned default, and
+ * an explicit `--mode` on a spawn still wins over both.
+ */
+function SessionInterfaceSelect({
+	value,
+	onChange,
+}: {
+	value: SessionInterfaceValue;
+	onChange: (value: SessionInterfaceValue) => void;
+}) {
+	const { t } = useTranslation();
+	const options: SettingsOption<Exclude<SessionInterfaceValue, ""> | typeof SESSION_INTERFACE_INHERIT>[] = [
+		{ value: SESSION_INTERFACE_INHERIT, label: t("settings.project.sessionInterfaceDefault") },
+		{ value: "chat", label: t("settings.sessionInterface.chat") },
+		{ value: "tui", label: t("settings.sessionInterface.terminal") },
+	];
+
+	return (
+		<SettingsOptionMenu
+			aria-label={t("settings.sessionInterface.label")}
+			value={value || SESSION_INTERFACE_INHERIT}
+			options={options}
+			onChange={(next) => onChange(next === SESSION_INTERFACE_INHERIT ? "" : next)}
+		/>
 	);
 }
 

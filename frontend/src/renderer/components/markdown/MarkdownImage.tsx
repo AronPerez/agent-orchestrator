@@ -18,7 +18,7 @@ export function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
 	// the same reference, and that one deserves its own attempt.
 	const [failedSrc, setFailedSrc] = useState<string | null>(null);
 	const resolvedSrc = context
-		? resolveMarkdownImageSrc(context.sessionId, context.filePath, src, context.version)
+		? resolveMarkdownImageSrc(context.session, context.filePath, src, context.version)
 		: src;
 	if (!resolvedSrc || resolvedSrc === failedSrc) return <span className="text-muted-foreground">{alt ?? ""}</span>;
 	return <img src={resolvedSrc} alt={alt ?? ""} onError={() => setFailedSrc(resolvedSrc)} />;

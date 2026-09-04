@@ -8,6 +8,7 @@ import { useTerminalSession, type AttachableTerminal } from "./useTerminalSessio
 import { workspaceQueryKey } from "./useWorkspaceQuery";
 
 const session: WorkspaceSession = {
+	host: "local",
 	id: "sess-1",
 	terminalHandleId: "handle-1",
 	workspaceId: "ws-1",
@@ -153,11 +154,23 @@ function setup({
 	attachedSession = session as WorkspaceSession | undefined,
 	isVisible = true,
 	inputDisabled = false,
+	shellTerminalHandleId,
+	shellTerminalHost,
+}: {
+	coverInitialReplay?: boolean;
+	daemonReady?: boolean;
+	attachedSession?: WorkspaceSession;
+	isVisible?: boolean;
+	inputDisabled?: boolean;
+	shellTerminalHandleId?: string;
+	shellTerminalHost?: string;
 } = {}) {
 	const muxes: FakeMux[] = [];
-	const createMux = () => {
+	const muxHosts: string[] = [];
+	const createMux = (host: string) => {
 		const fake = createFakeMux();
 		muxes.push(fake);
+		muxHosts.push(host);
 		return fake.mux;
 	};
 	const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -178,6 +191,8 @@ function setup({
 				createMux,
 				inputDisabled: blocked,
 				isVisible: visible,
+				shellTerminalHandleId,
+				shellTerminalHost,
 			}),
 		{ initialProps, wrapper },
 	);
@@ -186,7 +201,7 @@ function setup({
 	act(() => {
 		detach = view.result.current.attach(terminal);
 	});
-	return { view, terminal, muxes, invalidateSpy, detach: () => detach() };
+	return { view, terminal, muxes, muxHosts, invalidateSpy, detach: () => detach() };
 }
 
 beforeEach(() => {
@@ -212,6 +227,18 @@ describe("useTerminalSession", () => {
 		const { view, muxes } = setup({ attachedSession: { ...session, terminalHandleId: undefined } });
 		expect(view.result.current.state).toBe("idle");
 		expect(muxes).toHaveLength(0);
+	});
+
+	it("opens a standalone shell on the host that created its handle", () => {
+		const remote = "http://192.0.2.10:3011";
+		const { muxes, muxHosts } = setup({
+			attachedSession: undefined,
+			shellTerminalHandleId: "remote-shell",
+			shellTerminalHost: remote,
+		});
+
+		expect(muxHosts).toEqual([remote]);
+		expect(muxes[0].opens).toEqual([["remote-shell", 80, 24]]);
 	});
 
 	it("forwards PTY output, keystrokes, and resizes across the attachment", () => {
