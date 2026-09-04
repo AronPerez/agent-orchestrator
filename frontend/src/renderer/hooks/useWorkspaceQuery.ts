@@ -1,6 +1,7 @@
 import {
   useQueries,
   useQuery,
+  type QueryClient,
   type QueryFunctionContext,
   type UseQueryResult,
 } from "@tanstack/react-query";
@@ -140,7 +141,152 @@ function tagWorkspaces(
   }));
 }
 
-async function fetchWorkspaces(host: HostId): Promise<WorkspaceSummary[]> {
+const MALFORMED_WORKSPACE_DATA = "Host returned malformed workspace data";
+
+// The status lives on the response and nowhere else, and it is what separates
+// a rotated password (401) from a host the proxy cannot reach (502). Carried
+// on the thrown error so the caller can report it; the message is precomputed
+// from the daemon's envelope so what the user reads is unchanged.
+function hostFailure(error: unknown, response: Response | undefined): Error {
+  return Object.assign(
+    new Error(apiErrorMessage(error, "Could not load projects")),
+    { status: response?.status },
+  );
+}
+
+function malformedOnSyntaxError(error: unknown): never {
+  if (error instanceof SyntaxError) throw new Error(MALFORMED_WORKSPACE_DATA);
+  throw error;
+}
+
+function toWorkspaceSession(
+  host: HostId,
+  project: ProjectSummaryDTO,
+  session: SessionDTO,
+): WorkspaceSession {
+  const status = toSessionStatus(session.status, session.isTerminated);
+  const scmStatus = session.scmStatus
+    ? toSessionStatus(session.scmStatus)
+    : undefined;
+  const kanbanColumn = toKanbanColumn(session.kanbanColumn, status);
+  const activity = toSessionActivity(session.activity);
+  if (status === "unknown")
+    reportUnknownSessionField("status", session.status);
+  if (!activity || activity.state === "unknown") {
+    reportUnknownSessionField("activity", session.activity?.state);
+  }
+  return {
+    host,
+    id: session.id,
+    terminalHandleId: session.terminalHandleId,
+    workspaceId: project.id,
+    workspaceName: project.name,
+    title: session.displayName ?? session.issueId ?? session.id,
+    issueId: session.issueId,
+    provider: toAgentProvider(session.harness),
+    reviewerHarness: toReviewerHarnessId(session.reviewerHarness),
+    reviewerConfig: session.reviewerConfig
+      ? {
+          model: session.reviewerConfig.model ?? undefined,
+          mode: session.reviewerConfig.mode ?? undefined,
+          permissions: session.reviewerConfig.permissions ?? undefined,
+        }
+      : undefined,
+    autoReviewEnabled: session.autoReviewEnabled ?? false,
+    kind:
+      session.kind === "orchestrator"
+        ? "orchestrator"
+        : session.kind === "worker"
+          ? "worker"
+          : undefined,
+    // Carried through verbatim: the session surface must render from
+    // the mode this session was created with, not from whatever the
+    // current default happens to be.
+    mode: session.mode === "chat" ? "chat" : "tui",
+    branch: session.branch || undefined,
+    status,
+    scmStatus,
+    kanbanColumn,
+    displayStatus: session.displayStatus || undefined,
+    isTerminated: session.isTerminated,
+    terminateOnPrMerge: session.terminateOnPrMerge ?? false,
+    autoInjectReview: session.autoInjectReview ?? true,
+    autoInjectCI: session.autoInjectCI ?? true,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    lastUserMessageAt: session.lastUserMessageAt ?? undefined,
+    activity,
+    activeAgentSwitch: session.activeAgentSwitch
+      ? toAgentSwitchSummary(session.activeAgentSwitch)
+      : undefined,
+    previewUrl: session.previewUrl,
+    previewRevision: session.previewRevision,
+    isPinned: session.isPinned ?? false,
+    pinnedAt: session.pinnedAt ?? undefined,
+    prs: (session.prs ?? []).map(toPullRequestFacts),
+  };
+}
+
+// Terminated sessions are ~99% of a long-lived host's list (2,661 rows /
+// 1.8 MB locally with 3 active) and nothing on the CDC stream's cadence
+// changes them, so they live under their own key and the host fetch reads them
+// from the cache: fresh for ARCHIVE_STALE_MS, revalidated in the background
+// past that, and refetched on the same pass when a session leaves the active
+// set, so a just-killed session reaches the Archived column at once rather
+// than a minute later.
+//
+// The key sits under the workspaces root but not under the host key: the root
+// invalidation every mutation site issues (kill, restore, cleanup, pin)
+// refreshes the archive too, while the host-scoped invalidation each CDC
+// event triggers (event-transport.ts, 150 ms debounce) refetches only the
+// active set. "archive" occupies the slot a host id would, so the prefixes
+// cannot overlap.
+const ARCHIVE_STALE_MS = 60_000;
+export function workspaceArchiveQueryKey(host: HostId) {
+  return [...workspaceQueryKey, "archive", host] as const;
+}
+
+async function fetchArchivedSessions(host: HostId): Promise<SessionDTO[]> {
+  const { data, error, response } = await clientFor(host)
+    .GET("/api/v1/sessions", { params: { query: { active: false } } })
+    .catch(malformedOnSyntaxError);
+  if (error) throw hostFailure(error, response);
+  const sessions = parseResponseArray(data, "sessions", isSession);
+  if (sessions === null) throw new Error(MALFORMED_WORKSPACE_DATA);
+  return sessions;
+}
+
+function workspaceArchiveQueryOptions(host: HostId) {
+  return {
+    queryKey: workspaceArchiveQueryKey(host),
+    queryFn: () => fetchArchivedSessions(host),
+    staleTime: ARCHIVE_STALE_MS,
+    retry: 1,
+  };
+}
+
+async function archivedSessions(
+  host: HostId,
+  client: QueryClient,
+  active: SessionDTO[],
+  lastGood: WorkspaceSummary[],
+): Promise<SessionDTO[]> {
+  const options = workspaceArchiveQueryOptions(host);
+  const activeIds = new Set(active.map((session) => session.id));
+  const left = lastGood.some((workspace) =>
+    workspace.sessions.some(
+      (session) => session.isTerminated !== true && !activeIds.has(session.id),
+    ),
+  );
+  if (left) return client.fetchQuery({ ...options, staleTime: 0 });
+  return client.ensureQueryData({ ...options, revalidateIfStale: true });
+}
+
+async function fetchWorkspaces(
+  host: HostId,
+  client: QueryClient,
+  lastGood: WorkspaceSummary[],
+): Promise<WorkspaceSummary[]> {
   if (usesPreviewWorkspaceData && host === LOCAL_HOST) {
     const fake =
       typeof window !== "undefined"
@@ -150,121 +296,48 @@ async function fetchWorkspaces(host: HostId): Promise<WorkspaceSummary[]> {
   }
   if (!isHostReady(host)) throw new Error(`host ${host} is not connected`);
 
-  const client = clientFor(host);
+  const api = clientFor(host);
   const [
     { data: projectsData, error: projectsError, response: projectsResponse },
     { data: sessionsData, error: sessionsError, response: sessionsResponse },
   ] = await Promise.all([
-    client.GET("/api/v1/projects"),
-    client.GET("/api/v1/sessions"),
-  ]).catch((error: unknown) => {
-    if (error instanceof SyntaxError)
-      throw new Error("Host returned malformed workspace data");
-    throw error;
-  });
+    api.GET("/api/v1/projects"),
+    // The active set only; the archive rides on its own query below.
+    api.GET("/api/v1/sessions", { params: { query: { active: true } } }),
+  ]).catch(malformedOnSyntaxError);
 
   if (projectsError || sessionsError) {
-    // The status lives on the response and nowhere else, and it is what
-    // separates a rotated password (401) from a host the proxy cannot reach
-    // (502). Carried on the thrown error so the caller can report it; the
-    // message is precomputed from the daemon's envelope so what the user
-    // reads is unchanged.
-    const failed = projectsError ? projectsResponse : sessionsResponse;
-    throw Object.assign(
-      new Error(
-        apiErrorMessage(
-          projectsError ?? sessionsError,
-          "Could not load projects",
-        ),
-      ),
-      {
-        status: failed?.status,
-      },
+    throw hostFailure(
+      projectsError ?? sessionsError,
+      projectsError ? projectsResponse : sessionsResponse,
     );
   }
   const projects = parseResponseArray(projectsData, "projects", isProject);
-  const sessions = parseResponseArray(sessionsData, "sessions", isSession);
-  if (projects === null || sessions === null)
-    throw new Error("Host returned malformed workspace data");
+  const active = parseResponseArray(sessionsData, "sessions", isSession);
+  if (projects === null || active === null)
+    throw new Error(MALFORMED_WORKSPACE_DATA);
 
-  return projects.map((project) => {
-    const kind = toProjectKind(project.kind);
-    return {
-      host,
-      id: project.id,
-      name: project.name,
-      kind,
-      path: project.path,
-      orchestratorAgent: project.orchestratorAgent
-        ? toAgentProvider(project.orchestratorAgent)
-        : undefined,
-      sessions: sessions
-        .filter((session) => session.projectId === project.id)
-        .map((session) => {
-          const status = toSessionStatus(session.status, session.isTerminated);
-          const scmStatus = session.scmStatus
-            ? toSessionStatus(session.scmStatus)
-            : undefined;
-          const kanbanColumn = toKanbanColumn(session.kanbanColumn, status);
-          const activity = toSessionActivity(session.activity);
-          if (status === "unknown")
-            reportUnknownSessionField("status", session.status);
-          if (!activity || activity.state === "unknown") {
-            reportUnknownSessionField("activity", session.activity?.state);
-          }
-          return {
-            host,
-            id: session.id,
-            terminalHandleId: session.terminalHandleId,
-            workspaceId: project.id,
-            workspaceName: project.name,
-            title: session.displayName ?? session.issueId ?? session.id,
-            issueId: session.issueId,
-            provider: toAgentProvider(session.harness),
-            reviewerHarness: toReviewerHarnessId(session.reviewerHarness),
-            reviewerConfig: session.reviewerConfig
-              ? {
-                  model: session.reviewerConfig.model ?? undefined,
-                  mode: session.reviewerConfig.mode ?? undefined,
-                  permissions: session.reviewerConfig.permissions ?? undefined,
-                }
-              : undefined,
-            autoReviewEnabled: session.autoReviewEnabled ?? false,
-            kind:
-              session.kind === "orchestrator"
-                ? "orchestrator"
-                : session.kind === "worker"
-                  ? "worker"
-                  : undefined,
-            // Carried through verbatim: the session surface must render from
-            // the mode this session was created with, not from whatever the
-            // current default happens to be.
-            mode: session.mode === "chat" ? "chat" : "tui",
-            branch: session.branch || undefined,
-            status,
-            scmStatus,
-            kanbanColumn,
-            displayStatus: session.displayStatus || undefined,
-            isTerminated: session.isTerminated,
-            terminateOnPrMerge: session.terminateOnPrMerge ?? false,
-            autoInjectReview: session.autoInjectReview ?? true,
-            autoInjectCI: session.autoInjectCI ?? true,
-            createdAt: session.createdAt,
-            updatedAt: session.updatedAt,
-            lastUserMessageAt: session.lastUserMessageAt ?? undefined,
-            activity,
-            activeAgentSwitch: session.activeAgentSwitch
-              ? toAgentSwitchSummary(session.activeAgentSwitch)
-              : undefined,
-            previewUrl: session.previewUrl,
-            previewRevision: session.previewRevision,
-            isPinned: session.isPinned ?? false,
-            pinnedAt: session.pinnedAt ?? undefined,
-            prs: (session.prs ?? []).map(toPullRequestFacts),
-          };
-        }),
-    };
-  });
+  const archived = await archivedSessions(host, client, active, lastGood);
+  const activeIds = new Set(active.map((session) => session.id));
+  return projects.map((project) => ({
+    host,
+    id: project.id,
+    name: project.name,
+    kind: toProjectKind(project.kind),
+    path: project.path,
+    orchestratorAgent: project.orchestratorAgent
+      ? toAgentProvider(project.orchestratorAgent)
+      : undefined,
+    sessions: [
+      ...active.filter((session) => session.projectId === project.id),
+      // Active wins: a restored session is in both lists until the archive
+      // refreshes, and must not render twice.
+      ...archived.filter(
+        (session) =>
+          session.projectId === project.id && !activeIds.has(session.id),
+      ),
+    ].map((session) => toWorkspaceSession(host, project, session)),
+  }));
 }
 
 function errorStatus(error: unknown): number | undefined {
@@ -274,11 +347,12 @@ function errorStatus(error: unknown): number | undefined {
 
 async function fetchHostSection(
   host: HostId,
+  client: QueryClient,
   lastGoodWorkspaces: WorkspaceSummary[] = [],
 ): Promise<HostSection[]> {
   const label = host === LOCAL_HOST ? "Local" : hostLabelFor(host);
   try {
-    const workspaces = await fetchWorkspaces(host);
+    const workspaces = await fetchWorkspaces(host, client, lastGoodWorkspaces);
     // Read after the fetch, not before: this is what the sidebar shows when it
     // renders these workspaces, and a stream that dropped mid-fetch is exactly
     // the case worth catching.
@@ -317,6 +391,7 @@ function workspaceHostQueryOptions(host: HostId) {
     queryFn: ({ client }: QueryFunctionContext<typeof queryKey>) =>
       fetchHostSection(
         host,
+        client,
         client.getQueryData<HostSection[]>(queryKey)?.[0]?.workspaces,
       ),
     retry: 1,

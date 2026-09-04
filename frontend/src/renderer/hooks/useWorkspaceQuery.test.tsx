@@ -35,7 +35,7 @@ vi.mock("../lib/api-client", () => ({
 }));
 
 vi.mock("../lib/host-clients", () => ({
-  clientFor: (host: string) => ({ GET: (url: string) => getMock(host, url) }),
+  clientFor: (host: string) => ({ GET: (url: string, init?: unknown) => getMock(host, url, init) }),
   connectedHosts: connectedHostsMock,
   hostLabelFor: (host: string) =>
     host === "http://192.0.2.1:3011" ? "workbox" : host,
@@ -510,6 +510,127 @@ describe("useWorkspaceQuery", () => {
     expect(
       result.current.data?.[0].workspaces[0].sessions[0].isTerminated,
     ).toBe(true);
+  });
+
+  describe("active/archive split", () => {
+    // The daemon already accepts ?active=; the hook must ask for the active set
+    // on the hot path and keep the archive (terminated sessions, ~99% of a
+    // long-lived host's list) on its own query that CDC events never refetch.
+    type Init = { params?: { query?: { active?: boolean } } };
+    const at = "2026-06-10T16:15:04Z";
+    const project = { id: "proj-1", name: "my-app", path: "/p" };
+
+    function feed(state: { active: unknown[]; archived: unknown[] }) {
+      const counts = { active: 0, archived: 0, unfiltered: 0 };
+      getMock.mockImplementation(async (_host: HostId, url: string, init?: Init) => {
+        if (url === "/api/v1/projects") return { data: { projects: [project] }, error: undefined };
+        if (url !== "/api/v1/sessions") throw new Error(`unexpected GET ${url}`);
+        const active = init?.params?.query?.active;
+        if (active === true) {
+          counts.active += 1;
+          return { data: { sessions: state.active }, error: undefined };
+        }
+        if (active === false) {
+          counts.archived += 1;
+          return { data: { sessions: state.archived }, error: undefined };
+        }
+        counts.unfiltered += 1;
+        throw new Error("sessions fetched without an active filter");
+      });
+      return counts;
+    }
+
+    function renderWithClient() {
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retryDelay: 0 } } });
+      const queryWrapper = ({ children }: { children: ReactNode }) => (
+        <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+      );
+      const { result } = renderHook(() => useWorkspaceQuery(), { wrapper: queryWrapper });
+      return { queryClient, result };
+    }
+
+    it("fetches only active sessions on the host key and merges the archive from its own query", async () => {
+      const counts = feed({
+        active: [{ id: "live", projectId: "proj-1", isTerminated: false, updatedAt: at }],
+        archived: [{ id: "dead", projectId: "proj-1", isTerminated: true, status: "terminated", updatedAt: at }],
+      });
+      const { result } = renderWithClient();
+      await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+      expect(result.current.data?.[0].status).toBe("ready");
+      expect(
+        result.current.data?.[0].workspaces[0].sessions.map((session) => [session.id, session.isTerminated]),
+      ).toEqual([
+        ["live", false],
+        ["dead", true],
+      ]);
+      expect(counts).toEqual({ active: 1, archived: 1, unfiltered: 0 });
+    });
+
+    it("refetches the active set on a host invalidation, never the archive", async () => {
+      const counts = feed({ active: [], archived: [] });
+      const { queryClient, result } = renderWithClient();
+      await waitFor(() => expect(result.current.isSuccess).toBe(true));
+      expect(counts).toEqual({ active: 1, archived: 1, unfiltered: 0 });
+
+      // What every CDC event does, debounced: invalidate the host key.
+      await act(async () => {
+        await queryClient.invalidateQueries({ queryKey: ["workspaces", LOCAL_HOST] });
+      });
+
+      await waitFor(() => expect(counts.active).toBe(2));
+      expect(counts.archived).toBe(1);
+    });
+
+    it("refetches the archive on the same pass when a session leaves the active set", async () => {
+      const live = { id: "sess-1", projectId: "proj-1", isTerminated: false, updatedAt: at };
+      const state = { active: [live] as unknown[], archived: [] as unknown[] };
+      const counts = feed(state);
+      const { queryClient, result } = renderWithClient();
+      await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+      // Killed between passes: gone from the active set, now in the archive. It
+      // must reach the Archived column on this pass, not at the next stale refresh.
+      state.active = [];
+      state.archived = [{ ...live, isTerminated: true, status: "terminated" }];
+      await act(async () => {
+        await queryClient.invalidateQueries({ queryKey: ["workspaces", LOCAL_HOST] });
+      });
+
+      await waitFor(() =>
+        expect(result.current.data?.[0].workspaces[0].sessions[0]?.isTerminated).toBe(true),
+      );
+      expect(counts).toEqual({ active: 2, archived: 2, unfiltered: 0 });
+    });
+
+    it("keeps a restored session once, as active, while the archive still lists it", async () => {
+      feed({
+        active: [{ id: "sess-1", projectId: "proj-1", isTerminated: false, status: "working", updatedAt: at }],
+        archived: [{ id: "sess-1", projectId: "proj-1", isTerminated: true, status: "terminated", updatedAt: at }],
+      });
+      const { result } = renderWithClient();
+      await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+      expect(
+        result.current.data?.[0].workspaces[0].sessions.map((session) => [session.id, session.status]),
+      ).toEqual([["sess-1", "working"]]);
+    });
+
+    it("refreshes the archive on a root invalidation, which every mutation site issues", async () => {
+      const counts = feed({ active: [], archived: [] });
+      const { queryClient, result } = renderWithClient();
+      await waitFor(() => expect(result.current.isSuccess).toBe(true));
+      expect(counts).toEqual({ active: 1, archived: 1, unfiltered: 0 });
+
+      // Kill, restore, cleanup, pin: they all invalidate the workspaces root,
+      // and a cleanup of terminated sessions must not leave them on the board.
+      await act(async () => {
+        await queryClient.invalidateQueries({ queryKey: ["workspaces"] });
+      });
+
+      await waitFor(() => expect(counts.archived).toBe(2));
+      expect(counts.active).toBe(2);
+    });
   });
 
   it("reports a projects fetch error on the local host", async () => {
