@@ -2967,7 +2967,7 @@ func TestSessionsAPI_ClaimPRErrors(t *testing.T) {
 
 // Mirrors the daemon's ListPage on the fake: newest first by (updated_at, id),
 // resumed from the real page token, one row past the page decides the token.
-func (f *fakeSessionService) ListPage(ctx context.Context, req sessionsvc.ListPageRequest) (sessionsvc.SessionPage, error) {
+func (f *fakeSessionService) ListPage(ctx context.Context, req sessionsvc.ListPageRequest) (sessionsvc.Page, error) {
 	all, _ := f.List(ctx, req.ListFilter)
 	newer := func(a, b domain.Session) bool {
 		if !a.UpdatedAt.Equal(b.UpdatedAt) {
@@ -2983,7 +2983,7 @@ func (f *fakeSessionService) ListPage(ctx context.Context, req sessionsvc.ListPa
 	if req.PageToken != "" {
 		cursor, err := sessionsvc.DecodePageToken(req.PageToken)
 		if err != nil {
-			return sessionsvc.SessionPage{}, err
+			return sessionsvc.Page{}, err
 		}
 		kept := all[:0]
 		for _, s := range all {
@@ -2993,7 +2993,7 @@ func (f *fakeSessionService) ListPage(ctx context.Context, req sessionsvc.ListPa
 		}
 		all = kept
 	}
-	page := sessionsvc.SessionPage{Sessions: all}
+	page := sessionsvc.Page{Sessions: all}
 	if len(all) > req.PageSize {
 		page.Sessions = all[:req.PageSize]
 		last := page.Sessions[len(page.Sessions)-1]

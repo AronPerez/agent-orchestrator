@@ -67,9 +67,9 @@ type ListPageRequest struct {
 	PageToken string
 }
 
-// SessionPage is one page of sessions, newest first, and the token for the
+// Page is one page of sessions, newest first, and the token for the
 // next page, empty on the last one.
-type SessionPage struct {
+type Page struct {
 	Sessions      []domain.Session
 	NextPageToken string
 }
@@ -895,9 +895,9 @@ func (s *Service) List(ctx context.Context, filter ListFilter) ([]domain.Session
 // (updated_at, id), PageSize rows, and a NextPageToken while more exist. The
 // store is asked for one row past the page so "is there a next page" costs
 // no second query.
-func (s *Service) ListPage(ctx context.Context, req ListPageRequest) (SessionPage, error) {
+func (s *Service) ListPage(ctx context.Context, req ListPageRequest) (Page, error) {
 	if req.PageSize <= 0 {
-		return SessionPage{}, fmt.Errorf("page size must be positive, got %d", req.PageSize)
+		return Page{}, fmt.Errorf("page size must be positive, got %d", req.PageSize)
 	}
 	query := ports.SessionPageQuery{
 		Project:          req.ProjectID,
@@ -913,20 +913,20 @@ func (s *Service) ListPage(ctx context.Context, req ListPageRequest) (SessionPag
 	if req.Active != nil {
 		terminated := !*req.Active
 		if query.Terminated != nil && *query.Terminated != terminated {
-			return SessionPage{Sessions: []domain.Session{}}, nil
+			return Page{Sessions: []domain.Session{}}, nil
 		}
 		query.Terminated = &terminated
 	}
 	if req.PageToken != "" {
 		cursor, err := DecodePageToken(req.PageToken)
 		if err != nil {
-			return SessionPage{}, err
+			return Page{}, err
 		}
 		query.Before = &cursor
 	}
 	recs, err := s.store.ListSessionsPage(ctx, query)
 	if err != nil {
-		return SessionPage{}, fmt.Errorf("list sessions page: %w", err)
+		return Page{}, fmt.Errorf("list sessions page: %w", err)
 	}
 	var next string
 	if len(recs) > req.PageSize {
@@ -936,14 +936,15 @@ func (s *Service) ListPage(ctx context.Context, req ListPageRequest) (SessionPag
 	}
 	sessions, err := s.enrichRecords(ctx, recs)
 	if err != nil {
-		return SessionPage{}, err
+		return Page{}, err
 	}
-	return SessionPage{Sessions: sessions, NextPageToken: next}, nil
+	return Page{Sessions: sessions, NextPageToken: next}, nil
 }
 
-// Page tokens are opaque to clients: the keyset of a page's last row, base64url
-// so it survives a query string. Unsigned on purpose — a forged token can only
-// move the window, never widen the filter.
+// EncodePageToken makes a page token: the keyset of a page's last row,
+// base64url so it survives a query string. Tokens are opaque to clients and
+// unsigned on purpose — a forged one can only move the window, never widen
+// the filter.
 func EncodePageToken(cursor ports.SessionPageCursor) string {
 	return base64.RawURLEncoding.EncodeToString([]byte(cursor.UpdatedAt.UTC().Format(time.RFC3339Nano) + "\n" + string(cursor.ID)))
 }

@@ -81,7 +81,7 @@ var (
 // SessionService is the controller-facing session service contract.
 type SessionService interface {
 	List(ctx context.Context, filter sessionsvc.ListFilter) ([]domain.Session, error)
-	ListPage(ctx context.Context, req sessionsvc.ListPageRequest) (sessionsvc.SessionPage, error)
+	ListPage(ctx context.Context, req sessionsvc.ListPageRequest) (sessionsvc.Page, error)
 	Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Session, int, int, error)
 	SpawnOrchestrator(ctx context.Context, projectID domain.ProjectID, clean bool, requestedMode domain.SessionMode) (domain.Session, error)
 	Get(ctx context.Context, id domain.SessionID) (domain.Session, error)
