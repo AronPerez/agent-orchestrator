@@ -516,12 +516,12 @@ describe("useWorkspaceQuery", () => {
     // The daemon already accepts ?active=; the hook must ask for the active set
     // on the hot path and keep the archive (terminated sessions, ~99% of a
     // long-lived host's list) on its own query that CDC events never refetch.
-    type Init = { params?: { query?: { active?: boolean } } };
+    type Init = { params?: { query?: { active?: boolean; pageSize?: number } } };
     const at = "2026-06-10T16:15:04Z";
     const project = { id: "proj-1", name: "my-app", path: "/p" };
 
     function feed(state: { active: unknown[]; archived: unknown[] }) {
-      const counts = { active: 0, archived: 0, unfiltered: 0 };
+      const counts = { active: 0, archived: 0, unfiltered: 0, archivedPageSize: undefined as number | undefined };
       getMock.mockImplementation(async (_host: HostId, url: string, init?: Init) => {
         if (url === "/api/v1/projects") return { data: { projects: [project] }, error: undefined };
         if (url !== "/api/v1/sessions") throw new Error(`unexpected GET ${url}`);
@@ -532,6 +532,7 @@ describe("useWorkspaceQuery", () => {
         }
         if (active === false) {
           counts.archived += 1;
+          counts.archivedPageSize = init?.params?.query?.pageSize;
           return { data: { sessions: state.archived }, error: undefined };
         }
         counts.unfiltered += 1;
@@ -564,14 +565,14 @@ describe("useWorkspaceQuery", () => {
         ["live", false],
         ["dead", true],
       ]);
-      expect(counts).toEqual({ active: 1, archived: 1, unfiltered: 0 });
+      expect(counts).toMatchObject({ active: 1, archived: 1, unfiltered: 0 });
     });
 
     it("refetches the active set on a host invalidation, never the archive", async () => {
       const counts = feed({ active: [], archived: [] });
       const { queryClient, result } = renderWithClient();
       await waitFor(() => expect(result.current.isSuccess).toBe(true));
-      expect(counts).toEqual({ active: 1, archived: 1, unfiltered: 0 });
+      expect(counts).toMatchObject({ active: 1, archived: 1, unfiltered: 0 });
 
       // What every CDC event does, debounced: invalidate the host key.
       await act(async () => {
@@ -600,7 +601,7 @@ describe("useWorkspaceQuery", () => {
       await waitFor(() =>
         expect(result.current.data?.[0].workspaces[0].sessions[0]?.isTerminated).toBe(true),
       );
-      expect(counts).toEqual({ active: 2, archived: 2, unfiltered: 0 });
+      expect(counts).toMatchObject({ active: 2, archived: 2, unfiltered: 0 });
     });
 
     it("keeps a restored session once, as active, while the archive still lists it", async () => {
@@ -616,11 +617,21 @@ describe("useWorkspaceQuery", () => {
       ).toEqual([["sess-1", "working"]]);
     });
 
+    it("fetches the archive as its most recent page, never the whole history", async () => {
+      // The daemon pages newest first (PR #158); the Archived column shows
+      // the most recent terminated sessions and nothing pays for the rest.
+      const counts = feed({ active: [], archived: [] });
+      const { result } = renderWithClient();
+      await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+      expect(counts.archivedPageSize).toBe(200);
+    });
+
     it("refreshes the archive on a root invalidation, which every mutation site issues", async () => {
       const counts = feed({ active: [], archived: [] });
       const { queryClient, result } = renderWithClient();
       await waitFor(() => expect(result.current.isSuccess).toBe(true));
-      expect(counts).toEqual({ active: 1, archived: 1, unfiltered: 0 });
+      expect(counts).toMatchObject({ active: 1, archived: 1, unfiltered: 0 });
 
       // Kill, restore, cleanup, pin: they all invalidate the workspaces root,
       // and a cleanup of terminated sessions must not leave them on the board.

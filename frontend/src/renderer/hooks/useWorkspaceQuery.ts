@@ -242,13 +242,20 @@ function toWorkspaceSession(
 // active set. "archive" occupies the slot a host id would, so the prefixes
 // cannot overlap.
 const ARCHIVE_STALE_MS = 60_000;
+// The daemon pages newest first, so the archive is bounded to its most recent
+// page: what the Archived column shows, at ~80 KB instead of the 1.8 MB whole
+// history. Older rows are reachable through the response's nextPageToken when
+// a load-more control wants them.
+const ARCHIVE_PAGE_SIZE = 200;
 export function workspaceArchiveQueryKey(host: HostId) {
   return [...workspaceQueryKey, "archive", host] as const;
 }
 
 async function fetchArchivedSessions(host: HostId): Promise<SessionDTO[]> {
   const { data, error, response } = await clientFor(host)
-    .GET("/api/v1/sessions", { params: { query: { active: false } } })
+    .GET("/api/v1/sessions", {
+      params: { query: { active: false, pageSize: ARCHIVE_PAGE_SIZE } },
+    })
     .catch(malformedOnSyntaxError);
   if (error) throw hostFailure(error, response);
   const sessions = parseResponseArray(data, "sessions", isSession);
