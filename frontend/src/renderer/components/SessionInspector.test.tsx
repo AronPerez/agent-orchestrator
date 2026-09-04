@@ -386,6 +386,23 @@ describe("SessionInspector tabs", () => {
     expect(screen.getByText("workspace file review")).toBeInTheDocument();
   });
 
+  it("does not mount the docked files view while the full-window view is open", async () => {
+    renderWithQuery(
+      <SessionInspector
+        filesPoppedOut
+        filesView={<div>workspace file review</div>}
+        session={session([])}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("tab", { name: "Files" }));
+
+    expect(screen.queryByText("workspace file review")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Files are not available for this session."),
+    ).not.toBeInTheDocument();
+  });
+
   it("warms the workspace files cache before the Files tab opens", async () => {
     renderWithQuery(<SessionInspector session={session([])} />);
 

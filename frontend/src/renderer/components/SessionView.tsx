@@ -2090,6 +2090,7 @@ export function SessionView({ sessionRef }: SessionViewProps) {
               browserAnnotationQueue={browserAnnotationQueue}
               browserPoppedOut={browserPoppedOut}
               filesAvailable={filesAvailable}
+              filesPoppedOut={filesPoppedOut}
               filesView={
                 filesAvailable && session ? (
                   <SessionFileExplorer

@@ -199,6 +199,7 @@ export function SessionInspector({
   session,
   onOpenReviewerTerminal,
   browserPoppedOut = false,
+  filesPoppedOut = false,
   browserAnnotationQueue,
   isInspectorVisible = true,
   onToggleBrowserPopOut,
@@ -213,6 +214,7 @@ export function SessionInspector({
   session?: WorkspaceSession;
   onOpenReviewerTerminal?: OpenReviewerTerminal;
   browserPoppedOut?: boolean;
+  filesPoppedOut?: boolean;
   browserAnnotationQueue?: BrowserAnnotationQueueModel;
   isInspectorVisible?: boolean;
   onToggleBrowserPopOut?: (next: boolean, sourceRect?: DOMRectReadOnly) => void;
@@ -298,7 +300,7 @@ export function SessionInspector({
           ) : undefined
         }
         filesView={
-          filesAvailable && session ? (
+          filesAvailable && session && !filesPoppedOut ? (
             <FilesView filesView={filesView} onOpenFiles={onOpenFiles} />
           ) : undefined
         }
