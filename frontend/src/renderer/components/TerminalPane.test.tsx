@@ -289,6 +289,7 @@ describe("TerminalPane empty states", () => {
 
 	it("selects a temporary shell without attaching xterm to its temporary handle", () => {
 		const shell = {
+			host: worker.host,
 			handleId: "pending-shell:test",
 			sessionId: worker.id,
 			workingDir: "",
@@ -304,9 +305,10 @@ describe("TerminalPane empty states", () => {
 			shellTerminals: [],
 			terminalTarget: {
 				generation: shell.createdAt,
+				host: shell.host,
 				kind: "shell",
 				handleId: shell.handleId,
-				sessionId: worker.id,
+				session: { host: worker.host, id: worker.id },
 				title: shell.title,
 			},
 		});
@@ -490,7 +492,7 @@ describe("TerminalCacheProvider", () => {
 			await waitFor(() => expect(activeXterm()).not.toBe(terminalA));
 
 			view.show(sessionA);
-			const host = document.querySelector<HTMLElement>(`[data-terminal-cache-key^="session:${sessionA.id}:worker|"]`);
+			const host = document.querySelector<HTMLElement>(`[data-terminal-cache-key^="session:${refKey(sessionA)}:worker|"]`);
 			expect(host).toHaveAttribute("data-terminal-activation-phase", "visible");
 			expect(host?.style.visibility).not.toBe("hidden");
 		} finally {

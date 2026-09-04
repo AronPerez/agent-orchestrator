@@ -627,7 +627,7 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 					kind: "reviewer",
 					handleId: reviewerTerminal.handleId,
 					harness: reviewerTerminal.harness,
-					sessionId,
+					session: sessionRef,
 				});
 				setFileTabsBySession((current) => ({
 					...current,
@@ -640,9 +640,10 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 				setActiveShellTerminal(shell.handleId);
 				setTerminalTarget({
 					generation: shell.createdAt,
+					host: shell.host,
 					kind: "shell",
 					handleId: shell.handleId,
-					sessionId,
+					session: sessionRef,
 					title: shell.title,
 				});
 				setFileTabsBySession((current) => ({
@@ -658,7 +659,7 @@ export function SessionView({ sessionRef }: SessionViewProps) {
 				[sessionId]: activateSessionFile(current[sessionId] ?? EMPTY_SESSION_FILE_TABS, null),
 			}));
 		},
-		[reviewerTerminal, sessionId, shellTerminals, setActiveShellTerminal],
+		[reviewerTerminal, sessionId, sessionRef, shellTerminals, setActiveShellTerminal],
 	);
 	const adjacentAuxiliaryTab = useCallback(
 		(closingKey: string) => {

@@ -2145,7 +2145,7 @@ describe("ChatWorkspace reviewer tabs", () => {
 
 		const tabList = screen.getByRole("tablist", { name: "Chat tabs" });
 		const scrollRegion = tabList.querySelector(".overflow-x-auto");
-		const chatTab = screen.getByRole("tab", { name: /^Codex/ });
+		const chatTab = screen.getByRole("tab", { name: /^Reviewer chat/ });
 		const reviewerTab = screen.getByRole("tab", { name: "Reviewer" });
 		const shellTab = screen.getByRole("tab", { name: "chat worktree shell" });
 

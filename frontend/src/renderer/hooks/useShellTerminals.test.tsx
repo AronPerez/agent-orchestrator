@@ -116,7 +116,7 @@ describe("useOpenShellTerminal", () => {
 		const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
 		const { result } = renderHook(() => useOpenShellTerminal(), { wrapper: wrapper(queryClient) });
 
-		await act(async () => result.current.mutateAsync({ projectId: "project-1" }));
+		await act(async () => result.current.mutateAsync({ project: { host: "local", id: "project-1" } }));
 
 		expect(shellStoreMock.load).toHaveBeenCalledOnce();
 		expect(postMock).toHaveBeenCalledWith("/api/v1/shell-terminals", {
