@@ -582,6 +582,163 @@ func (q *Queries) ListSessionsByProject(ctx context.Context, projectID domain.Pr
 	return items, nil
 }
 
+const listSessionsPage = `-- name: ListSessionsPage :many
+SELECT id, project_id, num, issue_id, kind, harness,
+    activity_state, activity_last_at, is_terminated, branch, workspace_path,
+    runtime_handle_id, agent_session_id, agent_session_id_launch_id, prompt,
+    created_at, updated_at, display_name, first_signal_at, preview_url,
+    preview_revision, cleanup_generation, runtime_launch_id,
+    workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
+    reviewer_harness, reviewer_agent_config, is_pinned, pinned_at,
+    session_mode, provider_conversation_id, controller_generation, browser_capability_verifier,
+    latest_user_prompt, latest_user_prompt_at, latest_assistant_update, native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model
+FROM sessions
+WHERE (project_id = ?1 OR ?1 = '')
+  AND (CAST(?2 AS INTEGER) = -1
+       OR is_terminated = (CAST(?2 AS INTEGER) = 1))
+  AND (CAST(?3 AS INTEGER) = 0 OR kind = 'orchestrator')
+  AND (CAST(?4 AS INTEGER) = 0
+       OR updated_at < ?5
+       OR (updated_at = ?5 AND id < ?6))
+ORDER BY updated_at DESC, id DESC
+LIMIT ?7
+`
+
+type ListSessionsPageParams struct {
+	Project          domain.ProjectID
+	Terminated       int64
+	OrchestratorOnly int64
+	HasCursor        int64
+	BeforeUpdatedAt  time.Time
+	BeforeID         domain.SessionID
+	PageLimit        int64
+}
+
+type ListSessionsPageRow struct {
+	ID                        domain.SessionID
+	ProjectID                 domain.ProjectID
+	Num                       int64
+	IssueID                   domain.IssueID
+	Kind                      domain.SessionKind
+	Harness                   domain.AgentHarness
+	ActivityState             domain.ActivityState
+	ActivityLastAt            time.Time
+	IsTerminated              bool
+	Branch                    string
+	WorkspacePath             string
+	RuntimeHandleID           string
+	AgentSessionID            string
+	AgentSessionIDLaunchID    string
+	Prompt                    string
+	CreatedAt                 time.Time
+	UpdatedAt                 time.Time
+	DisplayName               string
+	FirstSignalAt             sql.NullTime
+	PreviewURL                string
+	PreviewRevision           int64
+	CleanupGeneration         int64
+	RuntimeLaunchID           string
+	WorkspaceRepoPath         string
+	TerminateOnPRMerge        bool
+	DiffBaseSha               string
+	DiffBaseRef               string
+	ReviewerHarness           domain.ReviewerHarness
+	ReviewerAgentConfig       string
+	IsPinned                  bool
+	PinnedAt                  sql.NullTime
+	SessionMode               domain.SessionMode
+	ProviderConversationID    string
+	ControllerGeneration      string
+	BrowserCapabilityVerifier string
+	LatestUserPrompt          string
+	LatestUserPromptAt        sql.NullTime
+	LatestAssistantUpdate     string
+	NativeTranscriptPath      string
+	AutoInjectReview          bool
+	AutoInjectCI              bool
+	AutoReviewEnabled         bool
+	Model                     string
+}
+
+// One page of sessions, newest first, with every filter applied in SQL so a
+// page is a page. terminated: -1 any, 0 live only, 1 terminated only.
+// has_cursor 0 lists from the top; otherwise the keyset (before_updated_at,
+// before_id) is the last row of the previous page.
+func (q *Queries) ListSessionsPage(ctx context.Context, arg ListSessionsPageParams) ([]ListSessionsPageRow, error) {
+	rows, err := q.db.QueryContext(ctx, listSessionsPage,
+		arg.Project,
+		arg.Terminated,
+		arg.OrchestratorOnly,
+		arg.HasCursor,
+		arg.BeforeUpdatedAt,
+		arg.BeforeID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListSessionsPageRow{}
+	for rows.Next() {
+		var i ListSessionsPageRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProjectID,
+			&i.Num,
+			&i.IssueID,
+			&i.Kind,
+			&i.Harness,
+			&i.ActivityState,
+			&i.ActivityLastAt,
+			&i.IsTerminated,
+			&i.Branch,
+			&i.WorkspacePath,
+			&i.RuntimeHandleID,
+			&i.AgentSessionID,
+			&i.AgentSessionIDLaunchID,
+			&i.Prompt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.DisplayName,
+			&i.FirstSignalAt,
+			&i.PreviewURL,
+			&i.PreviewRevision,
+			&i.CleanupGeneration,
+			&i.RuntimeLaunchID,
+			&i.WorkspaceRepoPath,
+			&i.TerminateOnPRMerge,
+			&i.DiffBaseSha,
+			&i.DiffBaseRef,
+			&i.ReviewerHarness,
+			&i.ReviewerAgentConfig,
+			&i.IsPinned,
+			&i.PinnedAt,
+			&i.SessionMode,
+			&i.ProviderConversationID,
+			&i.ControllerGeneration,
+			&i.BrowserCapabilityVerifier,
+			&i.LatestUserPrompt,
+			&i.LatestUserPromptAt,
+			&i.LatestAssistantUpdate,
+			&i.NativeTranscriptPath,
+			&i.AutoInjectReview,
+			&i.AutoInjectCI,
+			&i.AutoReviewEnabled,
+			&i.Model,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const nextSessionNum = `-- name: NextSessionNum :one
 SELECT COALESCE(MAX(num), 0) + 1 AS next FROM sessions WHERE project_id = ?
 `

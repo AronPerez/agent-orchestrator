@@ -2,6 +2,7 @@ package ports
 
 import (
 	"errors"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
@@ -57,4 +58,23 @@ type SpawnAttachment struct {
 	// inferred from the attachment's declared MIME type, or ".bin" for unknown types.
 	Ext  string
 	Data []byte
+}
+
+// SessionPageQuery selects one page of sessions, newest first by
+// (updated_at, id). Every predicate is applied in SQL so a page is a page:
+// Terminated nil lists both states, true only terminated, false only live.
+// Before resumes after the row a previous page ended on. Limit is the page
+// size; callers wanting to know whether a next page exists ask for one more.
+type SessionPageQuery struct {
+	Project          domain.ProjectID
+	Terminated       *bool
+	OrchestratorOnly bool
+	Before           *SessionPageCursor
+	Limit            int
+}
+
+// SessionPageCursor is the keyset position of the last row of a page.
+type SessionPageCursor struct {
+	UpdatedAt time.Time
+	ID        domain.SessionID
 }

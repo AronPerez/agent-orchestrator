@@ -2964,3 +2964,118 @@ func TestSessionsAPI_ClaimPRErrors(t *testing.T) {
 		})
 	}
 }
+
+// Mirrors the daemon's ListPage on the fake: newest first by (updated_at, id),
+// resumed from the real page token, one row past the page decides the token.
+func (f *fakeSessionService) ListPage(ctx context.Context, req sessionsvc.ListPageRequest) (sessionsvc.SessionPage, error) {
+	all, _ := f.List(ctx, req.ListFilter)
+	newer := func(a, b domain.Session) bool {
+		if !a.UpdatedAt.Equal(b.UpdatedAt) {
+			return a.UpdatedAt.After(b.UpdatedAt)
+		}
+		return a.ID > b.ID
+	}
+	for i := 1; i < len(all); i++ {
+		for j := i; j > 0 && newer(all[j], all[j-1]); j-- {
+			all[j], all[j-1] = all[j-1], all[j]
+		}
+	}
+	if req.PageToken != "" {
+		cursor, err := sessionsvc.DecodePageToken(req.PageToken)
+		if err != nil {
+			return sessionsvc.SessionPage{}, err
+		}
+		kept := all[:0]
+		for _, s := range all {
+			if s.UpdatedAt.Before(cursor.UpdatedAt) || (s.UpdatedAt.Equal(cursor.UpdatedAt) && s.ID < cursor.ID) {
+				kept = append(kept, s)
+			}
+		}
+		all = kept
+	}
+	page := sessionsvc.SessionPage{Sessions: all}
+	if len(all) > req.PageSize {
+		page.Sessions = all[:req.PageSize]
+		last := page.Sessions[len(page.Sessions)-1]
+		page.NextPageToken = sessionsvc.EncodePageToken(ports.SessionPageCursor{UpdatedAt: last.UpdatedAt, ID: last.ID})
+	}
+	return page, nil
+}
+
+func samePageIDs(sessions []sessionBody, want []string) bool {
+	if len(sessions) != len(want) {
+		return false
+	}
+	for i := range want {
+		if sessions[i].ID != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestSessionsAPI_ListPaginatesNewestFirst(t *testing.T) {
+	svc := newFakeSessionService()
+	base := time.Unix(1700000000, 0).UTC()
+	for i, id := range []domain.SessionID{"old", "mid", "new"} {
+		at := base.Add(time.Duration(i) * time.Minute)
+		svc.sessions[id] = domain.Session{
+			SessionRecord: domain.SessionRecord{
+				ID: id, ProjectID: "ao", Kind: domain.KindWorker, IsTerminated: true,
+				Activity:  domain.Activity{State: domain.ActivityIdle, LastActivityAt: at},
+				CreatedAt: at, UpdatedAt: at,
+			},
+			Status: domain.StatusIdle,
+		}
+	}
+	srv := newSessionTestServer(t, svc)
+	type page struct {
+		Sessions      []sessionBody `json:"sessions"`
+		NextPageToken string        `json:"nextPageToken"`
+	}
+
+	body, status, _ := doRequest(t, srv, "GET", "/api/v1/sessions?active=false&pageSize=2", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET page 1 = %d, want 200; body=%s", status, body)
+	}
+	var first page
+	mustJSON(t, body, &first)
+	if !samePageIDs(first.Sessions, []string{"new", "mid"}) {
+		t.Fatalf("page 1 = %s, want newest first [new mid]", body)
+	}
+	if first.NextPageToken == "" {
+		t.Fatalf("a third row exists, so page 1 must carry nextPageToken; body=%s", body)
+	}
+
+	body, status, _ = doRequest(t, srv, "GET", "/api/v1/sessions?active=false&pageSize=2&pageToken="+first.NextPageToken, "")
+	if status != http.StatusOK {
+		t.Fatalf("GET page 2 = %d, want 200; body=%s", status, body)
+	}
+	var second page
+	mustJSON(t, body, &second)
+	if !samePageIDs(second.Sessions, []string{"old"}) || second.NextPageToken != "" {
+		t.Fatalf("page 2 = %s, want [old] and no token", body)
+	}
+
+	// Absent pageSize keeps the return-all contract, with no token on the wire.
+	body, status, _ = doRequest(t, srv, "GET", "/api/v1/sessions?active=false", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET unpaginated = %d, want 200; body=%s", status, body)
+	}
+	var raw map[string]any
+	mustJSON(t, body, &raw)
+	if _, ok := raw["nextPageToken"]; ok {
+		t.Fatalf("unpaginated list must not carry nextPageToken: %s", body)
+	}
+	if got := len(raw["sessions"].([]any)); got != 3 {
+		t.Fatalf("unpaginated list = %d sessions, want all 3", got)
+	}
+
+	if _, status, _ = doRequest(t, srv, "GET", "/api/v1/sessions?pageSize=0", ""); status != http.StatusBadRequest {
+		t.Fatalf("pageSize=0 = %d, want 400", status)
+	}
+	body, status, _ = doRequest(t, srv, "GET", "/api/v1/sessions?pageSize=1&pageToken=nope", "")
+	if status != http.StatusBadRequest || !strings.Contains(string(body), "INVALID_PAGE_TOKEN") {
+		t.Fatalf("bad token = %d %s, want 400 INVALID_PAGE_TOKEN", status, body)
+	}
+}

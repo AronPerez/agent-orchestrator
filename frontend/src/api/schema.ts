@@ -2748,6 +2748,7 @@ export interface components {
             sessionId: string;
         };
         ListSessionsResponse: {
+            nextPageToken?: string;
             sessions: components["schemas"]["ControllersSessionView"][];
         };
         ListShellTerminalsResponse: {
@@ -6066,6 +6067,10 @@ export interface operations {
                 orchestratorOnly?: null | boolean;
                 /** @description When true, return only fresh non-terminated sessions. */
                 fresh?: null | boolean;
+                /** @description Page size. Absent returns every matching session; present pages the list newest first by update time, and the response carries nextPageToken while more remain. Values above 500 are clamped to 500. */
+                pageSize?: null | number;
+                /** @description Opaque cursor from a previous page's nextPageToken. */
+                pageToken?: string;
             };
             header?: never;
             path?: never;
