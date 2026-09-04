@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MuxConnectionState, TerminalMux } from "../lib/terminal-mux";
 import type { WorkspaceSession } from "../types/workspace";
-import { useTerminalSession, type AttachableTerminal } from "./useTerminalSession";
+import { OPEN_TIMEOUT_MS, useTerminalSession, type AttachableTerminal } from "./useTerminalSession";
 import { workspaceQueryKey } from "./useWorkspaceQuery";
 
 const session: WorkspaceSession = {
@@ -619,7 +619,7 @@ describe("useTerminalSession", () => {
 			const { view, terminal, muxes } = setup();
 
 			// The daemon probes liveness and spawns the runtime client before the
-			// first byte — OPEN_TIMEOUT_MS budgets 3s for it. If the cap ran from
+			// first byte — OPEN_TIMEOUT_MS budgets for it. If the cap ran from
 			// connect() it would expire here, flush nothing, and leave the gate
 			// permanently off, so the replay would land frame-by-frame.
 			act(() => void vi.advanceTimersByTime(1200));
@@ -744,7 +744,7 @@ describe("useTerminalSession", () => {
 			// Well past REPLAY_CAP_MS and REPLAY_FIRST_BYTE_MS, and still covered:
 			// both are armed from `opened`, so neither is running. This is what
 			// fails if either one is ever moved back to connect().
-			act(() => void vi.advanceTimersByTime(2_999));
+			act(() => void vi.advanceTimersByTime(OPEN_TIMEOUT_MS - 1));
 			expect(view.result.current.replaySettled).toBe(false);
 
 			act(() => void vi.advanceTimersByTime(1)); // OPEN_TIMEOUT_MS
@@ -977,7 +977,7 @@ describe("useTerminalSession", () => {
 
 	it("hard-reconnects when the server never acknowledges open", () => {
 		const { view, muxes } = setup();
-		act(() => void vi.advanceTimersByTime(2_999));
+		act(() => void vi.advanceTimersByTime(OPEN_TIMEOUT_MS - 1));
 		expect(muxes).toHaveLength(1);
 		act(() => void vi.advanceTimersByTime(1));
 		expect(view.result.current.state).toBe("reattaching");
@@ -1022,5 +1022,30 @@ describe("useTerminalSession", () => {
 		act(() => muxes[0].emitConnection("closed"));
 		act(() => void vi.advanceTimersByTime(60_000));
 		expect(muxes).toHaveLength(1);
+	});
+
+	describe("open deadline vs the daemon's attach ladder", () => {
+		// Mirror of backend/internal/terminal/attachment.go: an attach that keeps
+		// failing is retried defaultMaxReattach (5) times, sleeping
+		// reattachBackoff(n) = min(n × 200 ms, 1 s) between attempts, before the
+		// daemon gives up and sends a definitive `exited`. TestReattachLadderSum
+		// pins the daemon side; this pins the client side against it.
+		const DAEMON_ATTACH_LADDER_MS = 200 + 400 + 600 + 800 + 1000;
+
+		it("still hears the daemon's definitive exited after its whole attach ladder", () => {
+			const { view, muxes } = setup();
+
+			// A dead legacy PTY: no `opened` ever, and `exited` only once the ladder
+			// has run, plus one round trip. With a deadline that merely equals the
+			// ladder the client tears down at 3000 ms, drops this frame as stale,
+			// and reattaches forever ("Terminal disconnected — reattaching…").
+			act(() => void vi.advanceTimersByTime(DAEMON_ATTACH_LADDER_MS + 1));
+			act(() => muxes[0].emitExit("handle-1"));
+
+			expect(view.result.current.state).toBe("exited");
+			// The deadline is the assumed-oldest floor for daemons that do not
+			// advertise an attach budget: strictly greater, never equal.
+			expect(OPEN_TIMEOUT_MS).toBeGreaterThan(DAEMON_ATTACH_LADDER_MS);
+		});
 	});
 });

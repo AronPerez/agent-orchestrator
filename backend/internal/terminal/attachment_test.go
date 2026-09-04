@@ -432,3 +432,19 @@ func TestAttachmentCloseClosesPTYBeforeCancel(t *testing.T) {
 		t.Fatal("run must return after close")
 	}
 }
+
+// TestReattachLadderSum pins the worst-case delay before run() gives up on an
+// attach that keeps failing: defaultMaxReattach sleeps of reattachBackoff. That
+// is the daemon's definitive-answer bound for a dead PTY, and the desktop
+// client's OPEN_TIMEOUT_MS (frontend/src/renderer/hooks/useTerminalSession.ts)
+// is derived from it and must stay strictly greater. Changing the ladder means
+// changing that constant and its mirror in useTerminalSession.test.tsx too.
+func TestReattachLadderSum(t *testing.T) {
+	var sum time.Duration
+	for failures := 1; failures <= defaultMaxReattach; failures++ {
+		sum += reattachBackoff(failures)
+	}
+	if want := 3 * time.Second; sum != want {
+		t.Fatalf("attach ladder sums to %v, want %v; re-derive OPEN_TIMEOUT_MS on the desktop client", sum, want)
+	}
+}
