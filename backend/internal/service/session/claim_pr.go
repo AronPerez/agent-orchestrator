@@ -1,6 +1,7 @@
 package session
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -221,15 +222,15 @@ func claimRowsFromSCM(sessionID domain.SessionID, obs ports.SCMObservation, now 
 		observedAt = now
 	}
 	pr := domain.PullRequest{
-		URL:                      firstNonEmpty(obs.PR.URL, obs.PR.HTMLURL),
+		URL:                      cmp.Or(obs.PR.URL, obs.PR.HTMLURL),
 		SessionID:                sessionID,
 		Number:                   obs.PR.Number,
 		Draft:                    obs.PR.Draft,
 		Merged:                   obs.PR.Merged,
 		Closed:                   obs.PR.Closed,
-		CI:                       domain.CIState(firstNonEmpty(obs.CI.Summary, string(domain.CIUnknown))),
-		Review:                   domain.ReviewDecision(firstNonEmpty(obs.Review.Decision, string(domain.ReviewNone))),
-		Mergeability:             domain.Mergeability(firstNonEmpty(obs.Mergeability.State, string(domain.MergeUnknown))),
+		CI:                       domain.CIState(cmp.Or(obs.CI.Summary, string(domain.CIUnknown))),
+		Review:                   domain.ReviewDecision(cmp.Or(obs.Review.Decision, string(domain.ReviewNone))),
+		Mergeability:             domain.Mergeability(cmp.Or(obs.Mergeability.State, string(domain.MergeUnknown))),
 		UpdatedAt:                now,
 		Provider:                 obs.Provider,
 		Host:                     obs.Host,
@@ -269,7 +270,7 @@ func claimRowsFromSCM(sessionID domain.SessionID, obs ports.SCMObservation, now 
 		reviews = append(reviews, domain.PullRequestReview{
 			ID:               review.ID,
 			Author:           review.Author,
-			State:            domain.ReviewDecision(firstNonEmpty(review.State, string(domain.ReviewNone))),
+			State:            domain.ReviewDecision(cmp.Or(review.State, string(domain.ReviewNone))),
 			URL:              review.URL,
 			Body:             review.Body,
 			IsBot:            review.IsBot,
@@ -495,13 +496,4 @@ func repoFromURL(raw string) (host, owner, name string, err error) {
 	name = strings.TrimSuffix(parts[len(parts)-1], ".git")
 	owner = strings.Join(parts[:len(parts)-1], "/")
 	return host, owner, name, nil
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
 }

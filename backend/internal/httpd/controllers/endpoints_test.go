@@ -58,7 +58,7 @@ func TestGetEndpointsReturnsTheAdvertisedList(t *testing.T) {
 
 func TestGetEndpointsIsReachableFromTheLANListener(t *testing.T) {
 	// The whole point of not putting it under /api/v1/mobile.
-	if httpd.IsLANControlBlockedPathForTest("/api/v1/endpoints") {
+	if httpd.IsLANControlBlockedPath("/api/v1/endpoints") {
 		t.Fatal("/api/v1/endpoints is blocked on the LAN listener, so the phone can never refresh")
 	}
 }

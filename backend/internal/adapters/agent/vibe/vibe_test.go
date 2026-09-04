@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -75,7 +76,7 @@ func TestVibeAPIKeyEnvVarsReadsConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !containsString(got, vibeDefaultAPIKeyEnvVar) || !containsString(got, "CUSTOM_VIBE_KEY") {
+	if !slices.Contains(got, vibeDefaultAPIKeyEnvVar) || !slices.Contains(got, "CUSTOM_VIBE_KEY") {
 		t.Fatalf("vibeAPIKeyEnvVars = %#v, want default and custom key", got)
 	}
 }

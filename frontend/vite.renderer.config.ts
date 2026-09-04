@@ -201,11 +201,11 @@ export default defineConfig({
 	test: {
 		environment: "jsdom",
 		testTimeout: 20_000,
-		// Anchor node_modules at any depth: a bare "node_modules/**" replaces
-		// vitest's default "**/node_modules/**" and only matches the root, so the
-		// tracked src/landing preview app's nested node_modules would otherwise
-		// have its vendored third-party test suites collected and run.
-		exclude: ["**/node_modules/**", "dist/**", "dist-electron/**", "e2e/**"],
+		// Anchor node_modules at any depth: a bare "node_modules/**" only matches
+		// the root. src/landing and src/docs are separate Next.js deployables with
+		// their own node_modules and CI (deploy-landing.yml); their suites are not
+		// this app's and need dependencies this job does not install.
+		exclude: ["**/node_modules/**", "dist/**", "dist-electron/**", "e2e/**", "src/landing/**", "src/docs/**"],
 		globals: true,
 		setupFiles: "./src/renderer/test/setup.ts",
 	},
