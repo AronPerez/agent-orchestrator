@@ -225,7 +225,7 @@ The network is fine. Apple-signed binaries such as `curl` and `nc` are exempt fr
 
 - The LAN link is plaintext HTTP. Binding to Tailscale or tunnelling over SSH both remove that exposure; TLS with pinning is a longer-term fix for the clients that can do neither, notably the mobile app.
 - Saved host passwords are protected by file permissions, not by the OS keychain.
-- There is no indicator yet for a host that is connected but whose live event stream has dropped. Such a host falls back to polling and updates more slowly rather than reporting an error.
+- If a connected host loses its live event stream, the sidebar shows an offline-updates notice and workspace polling continues. A saved host that fails its initial connection still does not get a tree section; reconnect it through the host controls.
 
 <Cards>
 	<Card title="Connect Mobile" href="/docs/configuration/remote-access" description="Enable the listener that remote hosts connect to." />

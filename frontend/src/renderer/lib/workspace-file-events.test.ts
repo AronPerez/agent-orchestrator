@@ -6,7 +6,11 @@ const {
   hasTrustedApiBaseUrlMock,
   subscribeApiBaseUrlMock,
   unsubscribeBaseUrlMock,
+  subscribeConnectedHostsMock,
+  unsubscribeHostsMock,
 } = vi.hoisted(() => ({
+  subscribeConnectedHostsMock: vi.fn(),
+  unsubscribeHostsMock: vi.fn(),
   baseUrlForMock: vi.fn(),
   getApiBaseUrlMock: vi.fn(() => "http://127.0.0.1:3001"),
   hasTrustedApiBaseUrlMock: vi.fn(() => true),
@@ -19,7 +23,10 @@ vi.mock("./api-client", () => ({
   hasTrustedApiBaseUrl: hasTrustedApiBaseUrlMock,
   subscribeApiBaseUrl: subscribeApiBaseUrlMock,
 }));
-vi.mock("./host-clients", () => ({ baseUrlFor: baseUrlForMock }));
+vi.mock("./host-clients", () => ({
+  baseUrlFor: baseUrlForMock,
+  subscribeConnectedHosts: subscribeConnectedHostsMock,
+}));
 
 import {
   getWorkspaceFileConnectionState,
@@ -27,6 +34,7 @@ import {
 } from "./workspace-file-events";
 
 let baseUrlListener: (() => void) | undefined;
+let hostsListener: (() => void) | undefined;
 
 class EventSourceStub {
   static instances: EventSourceStub[] = [];
@@ -73,6 +81,12 @@ beforeEach(() => {
   EventSourceStub.instances = [];
   EventSourceStub.throwNext = false;
   baseUrlListener = undefined;
+  hostsListener = undefined;
+  unsubscribeHostsMock.mockReset();
+  subscribeConnectedHostsMock.mockReset().mockImplementation((listener: () => void) => {
+    hostsListener = listener;
+    return unsubscribeHostsMock;
+  });
   getApiBaseUrlMock.mockReset().mockReturnValue("http://127.0.0.1:3001");
   baseUrlForMock
     .mockReset()
@@ -250,4 +264,28 @@ describe("subscribeWorkspaceFileChanges", () => {
     expect(getWorkspaceFileConnectionState(session)).toBe("degraded");
     unsubscribe();
   });
+});
+
+it("rebinds a remote Files stream when its proxy changes without touching local streams", () => {
+  const queryClient = fakeQueryClient();
+  baseUrlForMock.mockImplementation((host: string) => host === "local" ? "http://127.0.0.1:3001" : null);
+  const closeLocal = subscribeWorkspaceFileChanges({ host: "local", id: "same" }, queryClient);
+  const closeRemote = subscribeWorkspaceFileChanges({ host: "remote", id: "same" }, queryClient);
+  try {
+    expect(subscribeConnectedHostsMock).toHaveBeenCalledTimes(1);
+    const local = EventSourceStub.instances[0];
+    baseUrlForMock.mockImplementation((host: string) => host === "local" ? "http://127.0.0.1:3001" : "http://127.0.0.1:9001/token");
+    hostsListener?.();
+    const remote = EventSourceStub.instances[1];
+    expect(remote.url).toBe("http://127.0.0.1:9001/token/api/v1/sessions/same/workspace/events");
+    baseUrlForMock.mockImplementation((host: string) => host === "local" ? "http://127.0.0.1:3001" : "http://127.0.0.1:9002/new-token");
+    hostsListener?.();
+    expect(remote.closed).toBe(true);
+    expect(local.closed).toBe(false);
+    expect(EventSourceStub.instances[2].url).toContain(":9002/new-token/");
+  } finally {
+    closeRemote();
+    closeLocal();
+  }
+  expect(unsubscribeHostsMock).toHaveBeenCalledTimes(1);
 });

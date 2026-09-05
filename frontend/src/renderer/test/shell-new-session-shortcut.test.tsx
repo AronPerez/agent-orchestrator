@@ -600,6 +600,39 @@ describe("shell new-shell-terminal shortcut subscription", () => {
 		);
 	});
 
+	// Session ids repeat across hosts, so finding the session's owning project by
+	// bare id can name a project on the wrong machine — and the shell then opens
+	// there, silently, on a daemon the user is not looking at.
+	it("scopes the terminal to the session's own host when two hosts share the id", async () => {
+		shellMocks.state.workspaceQuery = {
+			...shellMocks.state.workspaceQuery,
+			data: [
+				...localSection(workspaces),
+				{ host: "remote", label: "Remote", status: "ready", failure: null, workspaces: [
+				{
+					host: "remote",
+					id: "proj-1",
+					name: "Project One",
+					path: "/one",
+					sessions: [{ host: "remote", id: "sess-1", workspaceId: "proj-1", status: "working" }],
+				},
+				] as unknown as WorkspaceSummary[] },
+			],
+		};
+		shellMocks.state.routeParams = { hostId: "remote", sessionId: "sess-1" };
+		await renderShell();
+
+		pressNewShellTerminal();
+
+		expect(shellMocks.openShellTerminal).toHaveBeenCalledWith(
+			expect.objectContaining({
+				project: expect.objectContaining({ host: "remote", id: "proj-1" }),
+				session: { host: "remote", id: "sess-1" },
+			}),
+			expect.anything(),
+		);
+	});
+
 	it("re-fires on a repeat press so a second terminal can be opened", async () => {
 		await renderShell();
 
@@ -672,6 +705,39 @@ describe("shell application shortcut subscriptions", () => {
 		expect(shellMocks.navigate).toHaveBeenCalledWith({
 			to: "/host/$hostId/session/$sessionId",
 			params: { hostId: "local", sessionId: "sess-3" },
+		});
+	});
+
+	// Session and project ids both repeat across hosts, so resolving the route's
+	// session by bare id can pick the wrong machine's project — and the next /
+	// previous shortcut then walks that machine's sessions.
+	it("cycles within the route host's project when two hosts share the ids", async () => {
+		shellMocks.state.workspaceQuery = {
+			...shellMocks.state.workspaceQuery,
+			data: [
+				...localSection(workspaces),
+				{ host: "remote", label: "Remote", status: "ready", failure: null, workspaces: [
+				{
+					host: "remote",
+					id: "proj-1",
+					name: "Project One",
+					path: "/one",
+					sessions: [
+						{ host: "remote", id: "sess-1", workspaceId: "proj-1", status: "working" },
+						{ host: "remote", id: "sess-remote-next", workspaceId: "proj-1", status: "idle" },
+					],
+				},
+				] as unknown as WorkspaceSummary[] },
+			],
+		};
+		shellMocks.state.routeParams = { hostId: "remote", sessionId: "sess-1" };
+		await renderShell();
+
+		act(() => shellMocks.state.nextSessionListener?.());
+
+		expect(shellMocks.navigate).toHaveBeenCalledWith({
+			to: "/host/$hostId/session/$sessionId",
+			params: { hostId: "remote", sessionId: "sess-remote-next" },
 		});
 	});
 

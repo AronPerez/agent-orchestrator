@@ -1005,3 +1005,49 @@ describe("CommandPalette inline task composer", () => {
 		);
 	});
 });
+
+describe("CommandPalette across hosts", () => {
+	// A second host running the same project: session ids repeat across hosts, so
+	// the palette must scope the route's session to the route's host.
+	beforeEach(() => {
+		ctx.workspaces.push({
+			host: "remote",
+			id: "proj-1",
+			name: "app",
+			path: "/repos/app",
+			type: "main",
+			orchestratorAgent: "codex",
+			sessions: [
+				{
+					host: "remote",
+					id: "w-merge",
+					workspaceId: "proj-1",
+					workspaceName: "app",
+					title: "remote banner",
+					provider: "codex",
+					kind: "worker",
+					branch: "feature/remote-banner",
+					status: "mergeable",
+					updatedAt: "2026-06-10T00:00:00Z",
+					prs: [],
+				},
+			],
+		});
+	});
+
+	afterEach(() => {
+		ctx.workspaces.length = 2;
+	});
+
+	it("copies the branch of the session on the route's host", async () => {
+		ctx.params = { hostId: "remote", sessionId: "w-merge" };
+		renderPalette();
+		act(() => useUiStore.getState().setCommandPaletteOpen(true));
+		const input = await screen.findByPlaceholderText(/search projects/i);
+
+		fireEvent.change(input, { target: { value: "copy branch" } });
+
+		await waitFor(() => expect(screen.getByText("feature/remote-banner")).toBeInTheDocument());
+		expect(screen.queryByText("feature/ship")).toBeNull();
+	});
+});

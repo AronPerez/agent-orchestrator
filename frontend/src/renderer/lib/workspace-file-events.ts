@@ -1,7 +1,7 @@
 import type { QueryClient } from "@tanstack/react-query";
 import { subscribeApiBaseUrl } from "./api-client";
-import { baseUrlFor } from "./host-clients";
-import { refKey, type Ref } from "./hosts";
+import { baseUrlFor, subscribeConnectedHosts } from "./host-clients";
+import { isLocal, refKey, type Ref } from "./hosts";
 
 const INVALIDATE_DEBOUNCE_MS = 150;
 const SSE_RETRY_MS = 5_000;
@@ -218,7 +218,9 @@ function createWorkspaceStream(
       handleTerminalFailure(generation);
     }
   };
-  stream.disconnectBaseUrl = subscribeApiBaseUrl(stream.ensureConnected);
+  stream.disconnectBaseUrl = (isLocal(session.host) ? subscribeApiBaseUrl : subscribeConnectedHosts)(
+    stream.ensureConnected,
+  );
   stream.dispose = () => {
     stream.disposed = true;
     if (stream.debounce) clearTimeout(stream.debounce);
