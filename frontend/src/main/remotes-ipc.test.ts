@@ -3,7 +3,7 @@ import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RemoteRegistry } from "./remote-registry";
-import { removeSavedRemote, toHostViews, updateSavedRemote } from "./remotes-ipc";
+import { findRemote, removeSavedRemote, toHostViews, updateSavedRemote } from "./remotes-ipc";
 import type { RemoteEntry } from "./remotes-store";
 
 const TWO_HOSTS =
@@ -28,7 +28,7 @@ function connectedOn(url: string, label = "workbox") {
 	}));
 	const connected = {
 		view: async () => registry.views().find((view) => view.url === url) ?? null,
-		deactivate: async () => registry.disconnect(url),
+		deactivate: async (target: string) => registry.disconnect(target),
 	};
 	return {
 		connected,
@@ -38,7 +38,7 @@ function connectedOn(url: string, label = "workbox") {
 }
 
 // No proxy has been started, so nothing is connected.
-const idleProxy = () => ({ view: async () => null, deactivate: async () => undefined });
+const idleProxy = () => async () => undefined;
 
 const online = async () => "online" as const;
 
@@ -94,7 +94,7 @@ describe("updateSavedRemote", () => {
 		const path = await tempFile();
 		const { connected, close, connection } = connectedOn("http://192.0.2.1:1");
 		await connection;
-		await updateSavedRemote(path, "http://192.0.2.1:1", { url: "http://192.0.2.5:5" }, connected, online);
+		await updateSavedRemote(path, "http://192.0.2.1:1", { url: "http://192.0.2.5:5" }, connected.deactivate, online);
 		expect(close).toHaveBeenCalled();
 		await expect(connected.view()).resolves.toBeNull();
 	});
@@ -103,7 +103,7 @@ describe("updateSavedRemote", () => {
 		const path = await tempFile();
 		const { connected, close, connection } = connectedOn("http://192.0.2.9:9", "mini");
 		await connection;
-		await updateSavedRemote(path, "http://192.0.2.1:1", { password: "rotated" }, connected, online);
+		await updateSavedRemote(path, "http://192.0.2.1:1", { password: "rotated" }, connected.deactivate, online);
 		expect(close).not.toHaveBeenCalled();
 		await expect(connected.view()).resolves.not.toBeNull();
 	});
@@ -122,7 +122,7 @@ describe("removeSavedRemote", () => {
 		const path = await tempFile();
 		const { connected, close, connection } = connectedOn("http://192.0.2.1:1");
 		await connection;
-		await removeSavedRemote(path, "http://192.0.2.1:1", connected);
+		await removeSavedRemote(path, "http://192.0.2.1:1", connected.deactivate);
 		expect(close).toHaveBeenCalled();
 		// Nothing left pointing at a host that no longer exists.
 		await expect(connected.view()).resolves.toBeNull();
@@ -132,7 +132,7 @@ describe("removeSavedRemote", () => {
 		const path = await tempFile();
 		const { connected, close, connection } = connectedOn("http://192.0.2.9:9", "mini");
 		await connection;
-		await removeSavedRemote(path, "http://192.0.2.1:1", connected);
+		await removeSavedRemote(path, "http://192.0.2.1:1", connected.deactivate);
 		expect(close).not.toHaveBeenCalled();
 	});
 
@@ -140,4 +140,14 @@ describe("removeSavedRemote", () => {
 		const path = await tempFile(TWO_HOSTS, 0o644);
 		await expect(removeSavedRemote(path, "http://192.0.2.1:1", idleProxy())).rejects.toThrow(/chmod 600/);
 	});
+});
+
+describe("findRemote", () => {
+  it("finds saved hosts and refuses unknown URLs", async () => {
+    const path = await tempFile();
+    await expect(findRemote(path, "http://192.0.2.9:9")).resolves.toEqual({
+      label: "mini", url: "http://192.0.2.9:9", password: "m",
+    });
+    await expect(findRemote(path, "http://192.0.2.5:5")).rejects.toThrow(/no saved host/);
+  });
 });

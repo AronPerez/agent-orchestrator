@@ -33,22 +33,8 @@ import {
   getActiveFeatureBuild,
 } from "./main/feature-builds";
 import { initMainSentry } from "./main/sentry-main";
-import {
-  addRemote,
-  readRemotes,
-  type RemoteChanges,
-  type RemoteEntry,
-} from "./main/remotes-store";
-import {
-  probeRemote,
-  remoteRequest,
-  type RemoteRequestInit,
-} from "./main/remote-request";
-import {
-  removeSavedRemote,
-  toHostViews,
-  updateSavedRemote,
-} from "./main/remotes-ipc";
+import { readRemotes } from "./main/remotes-store";
+import { registerRemotesIpc, remotesFilePath } from "./main/remotes-main";
 import { startRemoteProxy } from "./main/remote-proxy";
 import { RemoteRegistry } from "./main/remote-registry";
 import {
@@ -2277,45 +2263,6 @@ ipcMain.handle("app:chooseDirectory", async (_event, title?: string) => {
       : "Choose a git repository",
   );
 });
-// The CLI resolves this file through config.StateDir(), which is ~/.ao
-// unconditionally — it does NOT honour AO_DATA_DIR (that points at ~/.ao/data,
-// the daemon's data dir). Following AO_DATA_DIR here would make the app read a
-// different file than `ao --url` writes, which defeats the whole point of
-// sharing one host list and one credential store.
-function remotesFilePath(): string {
-  return path.join(os.homedir(), ".ao", "remotes.json");
-}
-
-async function findRemote(url: string): Promise<RemoteEntry> {
-  const entry = (await readRemotes(remotesFilePath())).find(
-    (candidate) => candidate.url === url,
-  );
-  if (!entry) throw new Error(`no saved host for ${url}`);
-  return entry;
-}
-
-ipcMain.handle("remotes:list", async () =>
-  toHostViews(await readRemotes(remotesFilePath())),
-);
-
-ipcMain.handle("remotes:add", async (_event, input: RemoteEntry) => {
-  // Probe before saving: a host that never answered is worse than no host,
-  // because it looks configured.
-  const health = await probeRemote(input);
-  if (health === "online") await addRemote(remotesFilePath(), input);
-  return health;
-});
-
-ipcMain.handle("remotes:probe", async (_event, url: string) =>
-  probeRemote(await findRemote(url)),
-);
-
-ipcMain.handle(
-  "remotes:request",
-  async (_event, url: string, init: RemoteRequestInit) =>
-    remoteRequest(await findRemote(url), init),
-);
-
 const registry = new RemoteRegistry(startRemoteProxy, (entry, proxy) =>
   connectBrowserRuntime(null, {
     dial: upgradeDial(proxy.base),
@@ -2329,41 +2276,7 @@ const registry = new RemoteRegistry(startRemoteProxy, (entry, proxy) =>
   }),
 );
 
-async function validatedRemote(url: string): Promise<RemoteEntry> {
-  const entry = await findRemote(url);
-  // Probe before starting a proxy: a reachable port may serve something other
-  // than an AO daemon, and exposing it as connected can wedge the app at boot.
-  const health = await probeRemote(entry);
-  if (health !== "online") throw new Error(`host ${url} is ${health}`);
-  return entry;
-}
-
-function connectedRemote(url: string) {
-  return {
-    view: async () => registry.views().find((view) => view.url === url) ?? null,
-    deactivate: async () => registry.disconnect(url),
-  };
-}
-
-ipcMain.handle("remotes:connect", async (_event, url: string) =>
-  registry.connect(await validatedRemote(url)),
-);
-
-ipcMain.handle("remotes:disconnect", async (_event, url: string) =>
-  connectedRemote(url).deactivate(),
-);
-
-ipcMain.handle("remotes:connected", async () => registry.views());
-
-ipcMain.handle(
-  "remotes:update",
-  async (_event, url: string, changes: RemoteChanges) =>
-    updateSavedRemote(remotesFilePath(), url, changes, connectedRemote(url)),
-);
-
-ipcMain.handle("remotes:remove", async (_event, url: string) =>
-  removeSavedRemote(remotesFilePath(), url, connectedRemote(url)),
-);
+registerRemotesIpc(ipcMain, { file: remotesFilePath(), registry });
 
 ipcMain.handle(
   "app:scanImportFolder",
