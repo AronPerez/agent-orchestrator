@@ -9,6 +9,8 @@ import {
 	type AgentSwitchPresentation,
 } from "../lib/agent-switch-presentation";
 import type { AgentSwitchSummary, WorkspaceSession } from "../types/workspace";
+import { SessionActionsMenu } from "./SessionActionsMenu";
+import { SwitchAgentDialog } from "./SwitchAgentDialog";
 import { TerminalSwitchAgentButton } from "./TerminalSwitchAgentButton";
 import { TooltipProvider } from "./ui/tooltip";
 
@@ -99,6 +101,41 @@ function SwitchControlHarness({
 				switchError={null}
 			/>
 		</div>
+	);
+}
+
+// Mirrors SessionView: menu-item variant in the actions menu, dialog as a sibling.
+function SwitchMenuHarness() {
+	const [container, setContainer] = useState<HTMLDivElement | null>(null);
+	const [open, setOpen] = useState(false);
+	return (
+		<div className="relative" data-testid="terminal-container" ref={setContainer}>
+			<SessionActionsMenu>
+				<TerminalSwitchAgentButton
+					onOpenChange={setOpen}
+					open={open}
+					session={worker}
+					switchError={null}
+					variant="menu-item"
+				/>
+			</SessionActionsMenu>
+			{container ? (
+				<SwitchAgentDialog container={container} onOpenChange={setOpen} open={open} session={worker} />
+			) : null}
+		</div>
+	);
+}
+
+function renderMenuControl() {
+	const queryClient = new QueryClient({
+		defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+	});
+	return render(
+		<QueryClientProvider client={queryClient}>
+			<TooltipProvider>
+				<SwitchMenuHarness />
+			</TooltipProvider>
+		</QueryClientProvider>,
 	);
 }
 
@@ -348,5 +385,18 @@ describe("TerminalSwitchAgentButton", () => {
 		expect(retryIdempotencyKey).toEqual(expect.any(String));
 		expect(retryIdempotencyKey).not.toBe(firstIdempotencyKey);
 		expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+	});
+
+	it("survives the actions menu returning focus to its trigger", async () => {
+		renderMenuControl();
+
+		await userEvent.click(await screen.findByRole("button", { name: "Session actions" }));
+		await userEvent.click(await screen.findByRole("menuitem", { name: "Switch agent" }));
+
+		const dialog = await screen.findByRole("dialog", { name: "Switch agent" });
+		await waitFor(() =>
+			expect(screen.getByRole("button", { name: "Session actions" })).toHaveFocus(),
+		);
+		expect(dialog).toBeInTheDocument();
 	});
 });

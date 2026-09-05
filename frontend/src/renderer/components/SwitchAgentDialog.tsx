@@ -220,6 +220,8 @@ export function SwitchAgentDialog({ agentSwitch, container, open, session, onOpe
 			open={open}
 		>
 			<DialogContent
+				// Non-modal: the actions menu closing refocuses its trigger.
+				onFocusOutside={(event) => event.preventDefault()}
 				portalContainer={container}
 				overlay={
 					<div
