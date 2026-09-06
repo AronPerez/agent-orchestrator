@@ -47,7 +47,7 @@ vi.mock("./useCloudCp", () => ({
   }),
 }));
 
-import { useConversation, useConversationCommands } from "./useConversation";
+import { conversationQueryKey, useConversation, useConversationCommands } from "./useConversation";
 import { workspaceQueryKey } from "./useWorkspaceQuery";
 
 const localRef = (id: string) => ({ host: "local", id });
@@ -1125,5 +1125,37 @@ describe("host-qualified conversation commands", () => {
     );
     expect(cloudCancelMock).toHaveBeenCalledWith("org-1", "same", "turn-1");
     expect(clientForMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("queued conversation actions across host switches", () => {
+  it.each(["cancel", "edit"] as const)("keeps a pending %s action on its original host", async (operation) => {
+    const pending = deferred<{ data: {}; error: undefined }>();
+    postMock.mockReturnValue(pending.promise);
+    const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries").mockResolvedValue();
+    const Wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    );
+    const { result, rerender } = renderHook(
+      ({ host }) => useConversationCommands({ host, id: "same" }),
+      { initialProps: { host: "node-a" }, wrapper: Wrapper },
+    );
+    let request!: Promise<unknown>;
+    act(() => {
+      request = operation === "cancel"
+        ? result.current.cancelQueuedTurn("queued-1")
+        : result.current.editQueuedTurn("queued-1", "updated");
+    });
+    await waitFor(() => expect(postMock).toHaveBeenCalledTimes(1));
+    rerender({ host: "node-b" });
+    expect(result.current.cancelQueuedTurnPendingTurnId).toBeUndefined();
+    expect(result.current.editQueuedTurnPendingTurnId).toBeUndefined();
+    await act(async () => {
+      pending.resolve({ data: {}, error: undefined });
+      await request;
+    });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: conversationQueryKey({ host: "node-a", id: "same" }) });
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: conversationQueryKey({ host: "node-b", id: "same" }) });
   });
 });

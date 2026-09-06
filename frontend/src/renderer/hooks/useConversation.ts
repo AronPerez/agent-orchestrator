@@ -75,6 +75,11 @@ interface ConversationSessionMutationInput {
   turnId?: string;
 }
 
+interface ConversationQueuedTurnMutationInput {
+  targetSession: Ref;
+  turnId: string;
+}
+
 interface ConversationRetryMutationInput extends ConversationSessionMutationInput {
   requestId: string;
   sourceTurnId: string;
@@ -607,34 +612,41 @@ export function useConversationCommands(session: Ref | undefined) {
   });
 
   const cancelQueuedTurn = useMutation({
-    mutationFn: async (turnId: string) => {
-      const { error } = await daemonConversationClient(session!).POST(
+    mutationFn: async ({
+      targetSession,
+      turnId,
+    }: ConversationQueuedTurnMutationInput) => {
+      const { error } = await daemonConversationClient(targetSession).POST(
         "/api/v1/sessions/{sessionId}/conversation/turns/{turnId}/cancel",
         {
           params: {
-            path: { sessionId: sessionId as string, turnId },
+            path: { sessionId: targetSession.id, turnId },
           },
         },
       );
       if (error) throw error;
     },
-    onSuccess: invalidate,
+    onSuccess: (_data, { targetSession }) => invalidateSession(targetSession),
   });
 
   const editQueuedTurn = useMutation({
-    mutationFn: async ({ turnId, text }: { turnId: string; text: string }) => {
-      const { error } = await daemonConversationClient(session!).POST(
+    mutationFn: async ({
+      targetSession,
+      turnId,
+      text,
+    }: ConversationQueuedTurnMutationInput & { text: string }) => {
+      const { error } = await daemonConversationClient(targetSession).POST(
         "/api/v1/sessions/{sessionId}/conversation/turns/{turnId}/queue/edit",
         {
           params: {
-            path: { sessionId: sessionId as string, turnId },
+            path: { sessionId: targetSession.id, turnId },
           },
           body: { text },
         },
       );
       if (error) throw error;
     },
-    onSuccess: invalidate,
+    onSuccess: (_data, { targetSession }) => invalidateSession(targetSession),
   });
 
   const reorderQueuedTurns = useMutation({
@@ -996,13 +1008,17 @@ export function useConversationCommands(session: Ref | undefined) {
     steer: (text: string) => steer.mutateAsync(text),
     promoteQueuedTurn: (turnId: string) =>
       promoteQueuedTurn.mutateAsync(turnId),
-    cancelQueuedTurn: (turnId: string) => cancelQueuedTurn.mutateAsync(turnId),
+    cancelQueuedTurn: (turnId: string) => {
+      if (!session)
+        return Promise.reject(new Error("No conversation session is selected."));
+      return cancelQueuedTurn.mutateAsync({ targetSession: session, turnId });
+    },
     editQueuedTurn: (turnId: string, text: string) => {
-      if (!sessionId)
+      if (!session?.id)
         return Promise.reject(
           new Error("No conversation session is selected."),
         );
-      return editQueuedTurn.mutateAsync({ turnId, text });
+      return editQueuedTurn.mutateAsync({ targetSession: session, turnId, text });
     },
     reorderQueuedTurns: (turnIds: string[]) => {
       if (!sessionId)
@@ -1014,12 +1030,18 @@ export function useConversationCommands(session: Ref | undefined) {
     promoteQueuedTurnPendingTurnId: promoteQueuedTurn.isPending
       ? promoteQueuedTurn.variables
       : undefined,
-    cancelQueuedTurnPendingTurnId: cancelQueuedTurn.isPending
-      ? cancelQueuedTurn.variables
-      : undefined,
-    editQueuedTurnPendingTurnId: editQueuedTurn.isPending
-      ? editQueuedTurn.variables?.turnId
-      : undefined,
+    cancelQueuedTurnPendingTurnId:
+      cancelQueuedTurn.isPending &&
+      cancelQueuedTurn.variables &&
+      refKey(cancelQueuedTurn.variables.targetSession) === sessionKey
+        ? cancelQueuedTurn.variables.turnId
+        : undefined,
+    editQueuedTurnPendingTurnId:
+      editQueuedTurn.isPending &&
+      editQueuedTurn.variables &&
+      refKey(editQueuedTurn.variables.targetSession) === sessionKey
+        ? editQueuedTurn.variables.turnId
+        : undefined,
     sendPending: send.isPending && sendTargetsCurrentSession,
     steerPending: steer.isPending,
     /**

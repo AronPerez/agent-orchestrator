@@ -65,6 +65,26 @@ function workspaces(): WorkspaceSummary[] {
 
 const byId = (items: CommandItem[]) => new Map(items.map((item) => [item.id, item]));
 
+// A second host running the same project: ids repeat across hosts, so every
+// fixture here has a same-id twin on "remote" to catch host-blind lookups.
+function remoteTwin(): WorkspaceSummary {
+	return {
+		host: "remote",
+		id: "proj-1",
+		name: "app",
+		path: "/repos/app",
+		type: "main",
+		sessions: [
+			session({ id: "w-pr", host: "remote", title: "remote cache", branch: "feature/remote-cache", status: "pr_open", prs: [pr(7)] }),
+			session({ id: "w-action", host: "remote", title: "remote flake", branch: "feature/remote-flake", status: "needs_input" }),
+		],
+	};
+}
+
+function bothHosts(): WorkspaceSummary[] {
+	return [...workspaces(), remoteTwin()];
+}
+
 describe("findSession", () => {
 	it("returns the workspace and session together", () => {
 		const result = findSession(workspaces(), { host: "local", id: "w-pr" });
@@ -72,6 +92,42 @@ describe("findSession", () => {
 		expect(result?.workspace.id).toBe("proj-1");
 		expect(result?.session.id).toBe("w-pr");
 		expect(findSession(workspaces(), { host: "local", id: "missing" })).toBeUndefined();
+	});
+
+	// Session ids are unique per host, not across them. A bare-id lookup returns
+	// whichever host sorts first in the tree — the wrong machine's session.
+	it("resolves on the ref's host when two hosts share a session id", () => {
+		expect(findSession(bothHosts(), { host: "remote", id: "w-pr" })?.session.title).toBe("remote cache");
+		expect(findSession(bothHosts(), { host: "local", id: "w-pr" })?.session.title).toBe("add cache");
+		expect(findSession(bothHosts(), { host: "other", id: "w-pr" })).toBeUndefined();
+	});
+});
+
+describe("buildCommands across hosts", () => {
+	it("scopes the current session to the current host", () => {
+		const items = buildCommands({
+			workspaces: bothHosts(),
+			currentHostId: "remote",
+			currentProjectId: "proj-1",
+			currentSessionId: "w-pr",
+		});
+
+		expect(byId(items).get("current-copy-branch")?.subtitle).toBe("feature/remote-cache");
+	});
+
+	// Excluding "the current session" by bare id also hides the other host's
+	// same-id session, so a machine's session vanishes from the palette.
+	it("keeps the other host's same-id session listed", () => {
+		const items = buildCommands({
+			workspaces: bothHosts(),
+			currentHostId: "local",
+			currentProjectId: "proj-1",
+			currentSessionId: "w-pr",
+		});
+		const listed = items.filter((item) => item.group === "sessions" || item.group === "attention").map((item) => item.title);
+
+		expect(listed).toContain("remote cache");
+		expect(listed).not.toContain("add cache");
 	});
 });
 
