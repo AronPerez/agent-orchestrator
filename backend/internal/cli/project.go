@@ -103,28 +103,35 @@ type trackerIntakeConfig struct {
 
 // reviewerConfig mirrors domain.ReviewerConfig.
 type reviewerConfig struct {
-	Harness string `json:"harness"`
+	Harness     string       `json:"harness"`
+	AgentConfig *agentConfig `json:"agentConfig,omitempty"`
+}
+
+type containerReapConfig struct {
+	Disabled bool `json:"disabled,omitempty"`
 }
 
 // projectConfig mirrors the daemon's typed domain.ProjectConfig for the CLI
 // client. The CLI sets common fields via flags and the whole object via
 // --config-json.
 type projectConfig struct {
-	DefaultBranch      string              `json:"defaultBranch,omitempty"`
-	SessionPrefix      string              `json:"sessionPrefix,omitempty"`
-	Env                map[string]string   `json:"env,omitempty"`
-	Symlinks           []string            `json:"symlinks,omitempty"`
-	PostCreate         []string            `json:"postCreate,omitempty"`
-	AgentRules         string              `json:"agentRules,omitempty"`
-	AgentRulesFile     string              `json:"agentRulesFile,omitempty"`
-	OrchestratorRules  string              `json:"orchestratorRules,omitempty"`
-	OrchestratorPrompt string              `json:"orchestratorPrompt,omitempty"`
-	AgentConfig        agentConfig         `json:"agentConfig,omitempty"`
-	Worker             roleOverride        `json:"worker,omitempty"`
-	Orchestrator       roleOverride        `json:"orchestrator,omitempty"`
-	TrackerIntake      trackerIntakeConfig `json:"trackerIntake,omitempty"`
-	SessionInterface   string              `json:"sessionInterface,omitempty"`
-	AutoReview         bool                `json:"autoReview,omitempty"`
+	ContainerReap      *containerReapConfig `json:"containerReap,omitempty"`
+	CanonicalRepoURL   string               `json:"canonicalRepoURL,omitempty"`
+	DefaultBranch      string               `json:"defaultBranch,omitempty"`
+	SessionPrefix      string               `json:"sessionPrefix,omitempty"`
+	Env                map[string]string    `json:"env,omitempty"`
+	Symlinks           []string             `json:"symlinks,omitempty"`
+	PostCreate         []string             `json:"postCreate,omitempty"`
+	AgentRules         string               `json:"agentRules,omitempty"`
+	AgentRulesFile     string               `json:"agentRulesFile,omitempty"`
+	OrchestratorRules  string               `json:"orchestratorRules,omitempty"`
+	OrchestratorPrompt string               `json:"orchestratorPrompt,omitempty"`
+	AgentConfig        agentConfig          `json:"agentConfig,omitempty"`
+	Worker             roleOverride         `json:"worker,omitempty"`
+	Orchestrator       roleOverride         `json:"orchestrator,omitempty"`
+	TrackerIntake      trackerIntakeConfig  `json:"trackerIntake,omitempty"`
+	SessionInterface   string               `json:"sessionInterface,omitempty"`
+	AutoReview         bool                 `json:"autoReview,omitempty"`
 	// BrowserPersistentProfile is opt-in and default off. See the domain type
 	// for the security ceiling it accepts.
 	BrowserPersistentProfile bool             `json:"browserPersistentProfile,omitempty"`
@@ -138,27 +145,28 @@ type setConfigRequest struct {
 }
 
 type projectSetConfigOptions struct {
-	defaultBranch          string
-	sessionPrefix          string
-	model                  string
-	permission             string
-	workerAgent            string
-	orchestratorAgent      string
-	agentRules             string
-	agentRulesFile         string
-	orchestratorRules      string
+	canonicalRepoURL      string
+	defaultBranch         string
+	sessionPrefix         string
+	model                 string
+	permission            string
+	workerAgent           string
+	orchestratorAgent     string
+	agentRules            string
+	agentRulesFile        string
+	orchestratorRules     string
 	orchestratorPromptFile string
-	env                    []string
-	symlink                []string
-	postCreate             []string
-	trackerIntake          bool
-	trackerRepo            string
-	trackerAssignee        string
-	browserPersistProfile  bool
-	reviewers              []string
-	configJSON             string
-	clear                  bool
-	json                   bool
+	env                   []string
+	symlink               []string
+	postCreate            []string
+	trackerIntake         bool
+	trackerRepo           string
+	trackerAssignee       string
+	browserPersistProfile bool
+	reviewers             []string
+	configJSON            string
+	clear                 bool
+	json                  bool
 }
 
 type projectListResult struct {
@@ -341,6 +349,7 @@ func newProjectSetConfigCommand(ctx *commandContext) *cobra.Command {
 	}
 	f := cmd.Flags()
 	f.StringVar(&opts.defaultBranch, "default-branch", "", "Base branch for new worktrees; auto infers each repository's Git default")
+	f.StringVar(&opts.canonicalRepoURL, "canonical-repo-url", "", "Explicit upstream HTTPS repository URL for PR claims (same provider, host, and port as origin)")
 	f.StringVar(&opts.sessionPrefix, "session-prefix", "", "Displayed session-id prefix")
 	f.StringVar(&opts.model, "model", "", "Agent model override (e.g. claude-opus-4-5)")
 	f.StringVar(&opts.permission, "permission", "", "Permission mode: default, accept-edits, auto, bypass-permissions")
@@ -396,6 +405,7 @@ func buildProjectConfig(opts projectSetConfigOptions, orchestratorPrompt string)
 		return projectConfig{}, err
 	}
 	cfg := projectConfig{
+		CanonicalRepoURL:   opts.canonicalRepoURL,
 		DefaultBranch:      opts.defaultBranch,
 		SessionPrefix:      opts.sessionPrefix,
 		Env:                env,

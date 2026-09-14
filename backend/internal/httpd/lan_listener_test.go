@@ -902,3 +902,61 @@ func TestBuildSignalReadableOnlyWithCredential(t *testing.T) {
 	}
 	t.Logf("build signal over the wire: source=%q identity=%q", got.Build.Source, got.Build.Identity)
 }
+
+func TestLANListenerServesCodexModelRoutesFromRealRouter(t *testing.T) {
+	catalog := &lanFakeAgentCatalog{}
+	router := chi.NewRouter()
+	router.Route("/api/v1", func(r chi.Router) {
+		(&controllers.AgentsController{Catalog: catalog}).Register(r)
+	})
+
+	st := &authState{}
+	st.setHash(mobilebridge.HashPassword("secret12"))
+	m := NewLANManager(router, st, 0, slog.Default(), nil)
+	port, err := m.Start(0)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer m.Stop(context.Background())
+
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/agents/codex/models?projectId=project%20one"},
+		{http.MethodPost, "/api/v1/agents/codex/models/refresh"},
+		{http.MethodPost, "/api/v1/agents/codex/probe"},
+	} {
+		req, _ := http.NewRequest(tc.method, fmt.Sprintf("http://127.0.0.1:%d%s", port, tc.path), nil)
+		req.Header.Set("Authorization", "Bearer secret12")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: request failed: %v", tc.method, tc.path, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s %s: got %d (%s) want 200 — LAN block must not swallow Codex model routes", tc.method, tc.path, resp.StatusCode, body)
+		}
+	}
+	if catalog.calls != 3 {
+		t.Fatalf("catalog calls = %d, want 3 — requests never reached the real handler", catalog.calls)
+	}
+
+	// The credential surface stays unreachable over LAN, even with a spoofed
+	// loopback Host and valid auth.
+	for _, path := range []string{
+		"/api/v1/agents/codex/accounts",
+		"/api/v1/agents/codex/accounts/events",
+		"/api/v1/agents/codex/account-switches",
+	} {
+		req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d%s", port, path), nil)
+		req.Host = "127.0.0.1"
+		req.Header.Set("Authorization", "Bearer secret12")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s: request failed: %v", path, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("%s: got %d want 404", path, resp.StatusCode)
+		}
+	}
+}
