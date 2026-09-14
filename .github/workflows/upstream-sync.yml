@@ -5,8 +5,8 @@
 # GitHub conflict resolution writes to the head branch and would corrupt the
 # mirror.
 #
-# Reuse the open sync branch while a PR is in flight. This avoids a pile of
-# branch-per-run PRs while keeping all conflict-resolution commits off `main`.
+# Reuse the one reserved sync branch. This avoids a pile of branches and PRs
+# while keeping all conflict-resolution commits off `main`.
 #
 # HOW TO MERGE THIS PR: use "Create a merge commit". Do NOT squash.
 # Squashing drops main's parentage, so develop stops recording which upstream
@@ -38,14 +38,18 @@ env:
   # nothing there, and `gh pr create` failed "Resource not accessible by
   # integration" because the token has no write access to it.
   GH_REPO: ${{ github.repository }}
+  SYNC_BRANCH: sync/automated-upstream
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
+      # Persist SYNC_PAT for the later sync-branch push. The fallback can mirror
+      # main, but Require SYNC_PAT below stops before any branch push without it.
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          token: ${{ secrets.SYNC_PAT || secrets.GITHUB_TOKEN }}
 
       - name: Fetch upstream
         run: |
@@ -88,12 +92,22 @@ jobs:
           git log --no-merges --format='- %s' "origin/$BASE..upstream/main" | head -25 > /tmp/commits.txt || true
           echo "$COUNT upstream commits not in $BASE"
 
+      - name: Require SYNC_PAT to push sync branches
+        if: steps.drift.outputs.count != '0'
+        env:
+          SYNC_PAT: ${{ secrets.SYNC_PAT }}
+        run: |
+          if [ -z "$SYNC_PAT" ]; then
+            echo "::error::SYNC_PAT with workflow scope is required to push a sync branch containing .github/workflows changes. main was mirrored safely; no sync branch was pushed."
+            exit 1
+          fi
+
       - name: Close the sync PR when drift is gone
         if: steps.drift.outputs.count == '0'
         env:
           GH_TOKEN: ${{ secrets.SYNC_PAT || secrets.GITHUB_TOKEN }}
         run: |
-          mapfile -t PR_NUMS < <(gh pr list --base "$BASE" --state open --json number,headRefName --jq '.[] | select(.headRefName | startswith("sync/automated-upstream-")) | .number')
+          mapfile -t PR_NUMS < <(gh pr list --base "$BASE" --head "$SYNC_BRANCH" --state open --limit 1000 --json number,headRepository --jq '.[] | select(.headRepository != null and .headRepository.nameWithOwner == env.GH_REPO) | .number')
           if [ "${#PR_NUMS[@]}" -gt 1 ]; then
             echo "::error::multiple open upstream sync PRs; refusing to choose one"
             exit 1
@@ -110,20 +124,18 @@ jobs:
           GH_TOKEN: ${{ secrets.SYNC_PAT || secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          mapfile -t OPEN_BRANCHES < <(gh pr list --base "$BASE" --state open --json headRefName --jq '.[] | select(.headRefName | startswith("sync/automated-upstream-")) | .headRefName')
-          if [ "${#OPEN_BRANCHES[@]}" -gt 1 ]; then
+          mapfile -t OPEN_PR_NUMS < <(gh pr list --base "$BASE" --head "$SYNC_BRANCH" --state open --limit 1000 --json number,headRepository --jq '.[] | select(.headRepository != null and .headRepository.nameWithOwner == env.GH_REPO) | .number')
+          if [ "${#OPEN_PR_NUMS[@]}" -gt 1 ]; then
             echo "::error::multiple open upstream sync PRs; refusing to choose one"
             exit 1
           fi
 
-          NEW_BRANCH=false
-          if [ "${#OPEN_BRANCHES[@]}" -eq 1 ]; then
-            SYNC_BRANCH="${OPEN_BRANCHES[0]}"
+          BRANCH_EXISTS=false
+          if git ls-remote --exit-code --heads origin "refs/heads/$SYNC_BRANCH" >/dev/null; then
+            BRANCH_EXISTS=true
             git fetch origin "$SYNC_BRANCH"
             git switch --force-create "$SYNC_BRANCH" "origin/$SYNC_BRANCH"
           else
-            SYNC_BRANCH="sync/automated-upstream-${HEAD_SHA}-${GITHUB_RUN_ID}"
-            NEW_BRANCH=true
             git switch --create "$SYNC_BRANCH" "origin/$BASE"
           fi
 
@@ -142,30 +154,26 @@ jobs:
           }
 
           NEEDS_RESOLUTION=false
-          if [ "$NEW_BRANCH" = false ] && ! merge_ref "origin/$BASE" "sync: update from $BASE"; then
+          if [ "$BRANCH_EXISTS" = true ] && ! merge_ref "origin/$BASE" "sync: update from $BASE"; then
             NEEDS_RESOLUTION=true
           fi
           if [ "$NEEDS_RESOLUTION" = false ] && ! merge_ref upstream/main "sync: merge upstream main ($COUNT commits behind)"; then
             NEEDS_RESOLUTION=true
           fi
-          if [ "$NEEDS_RESOLUTION" = true ] && [ "$NEW_BRANCH" = true ]; then
+          if [ "$NEEDS_RESOLUTION" = true ] && [ "$BRANCH_EXISTS" = false ]; then
             # GitHub cannot open a PR for a branch identical to its base. This
             # marker creates the develop-based PR where the real merge is resolved.
             git commit --allow-empty -m "sync: prepare upstream main ($COUNT commits behind)"
           fi
 
           git push origin "HEAD:refs/heads/$SYNC_BRANCH"
-          {
-            echo "branch=$SYNC_BRANCH"
-            echo "needs_resolution=$NEEDS_RESOLUTION"
-          } >> "$GITHUB_OUTPUT"
+          echo "needs_resolution=$NEEDS_RESOLUTION" >> "$GITHUB_OUTPUT"
 
       - name: Open or refresh the sync PR
         id: pr
         if: steps.drift.outputs.count != '0'
         env:
           GH_TOKEN: ${{ secrets.SYNC_PAT || secrets.GITHUB_TOKEN }}
-          SYNC_BRANCH: ${{ steps.sync.outputs.branch }}
           NEEDS_RESOLUTION: ${{ steps.sync.outputs.needs_resolution }}
         run: |
           TITLE="sync: merge upstream main ($COUNT commits behind)"
@@ -204,13 +212,23 @@ jobs:
             echo "<sub>Opened and refreshed by \`.github/workflows/upstream-sync.yml\`.</sub>"
           } > /tmp/body.md
 
-          NUM=$(gh pr list --base "$BASE" --head "$SYNC_BRANCH" --state open --json number --jq '.[0].number // empty')
-          if [ -n "$NUM" ]; then
+          mapfile -t PR_NUMS < <(gh pr list --base "$BASE" --head "$SYNC_BRANCH" --state open --limit 1000 --json number,headRepository --jq '.[] | select(.headRepository != null and .headRepository.nameWithOwner == env.GH_REPO) | .number')
+          if [ "${#PR_NUMS[@]}" -gt 1 ]; then
+            echo "::error::multiple open upstream sync PRs; refusing to choose one"
+            exit 1
+          fi
+          if [ "${#PR_NUMS[@]}" -eq 1 ]; then
+            NUM="${PR_NUMS[0]}"
             gh pr edit "$NUM" --title "$TITLE" --body-file /tmp/body.md
             echo "refreshed PR #$NUM"
           else
             gh pr create --base "$BASE" --head "$SYNC_BRANCH" --title "$TITLE" --body-file /tmp/body.md
-            NUM=$(gh pr list --base "$BASE" --head "$SYNC_BRANCH" --state open --json number --jq '.[0].number // empty')
+            mapfile -t PR_NUMS < <(gh pr list --base "$BASE" --head "$SYNC_BRANCH" --state open --limit 1000 --json number,headRepository --jq '.[] | select(.headRepository != null and .headRepository.nameWithOwner == env.GH_REPO) | .number')
+            if [ "${#PR_NUMS[@]}" -ne 1 ]; then
+              echo "::error::expected one open upstream sync PR after creation"
+              exit 1
+            fi
+            NUM="${PR_NUMS[0]}"
             echo "opened sync PR #$NUM"
           fi
           echo "number=$NUM" >> "$GITHUB_OUTPUT"
@@ -222,7 +240,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.SYNC_PAT || secrets.GITHUB_TOKEN }}
           PR_NUM: ${{ steps.pr.outputs.number }}
-          SYNC_BRANCH: ${{ steps.sync.outputs.branch }}
         run: |
           MARK="copilot-asked:$HEAD_SHA"
           if gh pr view "$PR_NUM" --json comments --jq '.comments[].body' | grep -qF "$MARK"; then
