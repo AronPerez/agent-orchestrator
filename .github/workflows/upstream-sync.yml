@@ -98,7 +98,7 @@ jobs:
           SYNC_PAT: ${{ secrets.SYNC_PAT }}
         run: |
           if [ -z "$SYNC_PAT" ]; then
-            echo "::error::SYNC_PAT with workflow scope is required to push a sync branch containing .github/workflows changes. main was mirrored safely; no sync branch was pushed."
+            echo "::error::SYNC_PAT is missing. A repository admin must add Actions secret SYNC_PAT containing a classic PAT authorized for this repository with repo and workflow scopes. main was mirrored safely; no sync branch was pushed."
             exit 1
           fi
 
