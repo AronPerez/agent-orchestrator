@@ -220,10 +220,6 @@ type ChatStartConfig struct {
 	// shell commands the agent runs. AO passes a HookPATH-augmented copy so the
 	// agent can invoke `ao` — that is how an orchestrator delegates.
 	Env map[string]string
-	// PrepareEnv rotates launch-only credentials. Persistent drivers defer it
-	// until they know a new provider process is required; live adoption must keep
-	// the verifier for the bearer already held by the surviving process.
-	PrepareEnv func(context.Context) (map[string]string, error)
 	// Model is optional; empty defers to the provider's configured default.
 	Model string
 	// Permissions is AO's existing per-session approval policy. Drivers map it
@@ -241,6 +237,12 @@ type ChatStartConfig struct {
 	// MCPServers are client-supplied tool servers for this provider conversation.
 	// User/provider configuration still loads normally; these are additive.
 	MCPServers []ChatMCPServerConfig
+	// AllowConcurrentHostReplacement is set only by the idle branch-handoff
+	// coordinator, which deliberately stages a replacement before destroying the
+	// source. Ordinary startup/reconciliation must leave this false so a second
+	// daemon can never mistake an attached persistent host for permission to
+	// launch a competing provider.
+	AllowConcurrentHostReplacement bool
 }
 
 // ChatResumeConfig reattaches to a provider conversation after a restart.
@@ -250,8 +252,6 @@ type ChatResumeConfig struct {
 	DataDir                string
 	WorkspacePath          string
 	Env                    map[string]string
-	// See ChatStartConfig.PrepareEnv.
-	PrepareEnv func(context.Context) (map[string]string, error)
 	// Model is optional; empty keeps the provider conversation's current model.
 	Model string
 	// Effort is optional; empty keeps the provider conversation's current effort.
@@ -265,6 +265,8 @@ type ChatResumeConfig struct {
 	ProviderScopeID       string
 	AdditionalDirectories []string
 	MCPServers            []ChatMCPServerConfig
+	// See ChatStartConfig.AllowConcurrentHostReplacement.
+	AllowConcurrentHostReplacement bool
 }
 
 // ChatMCPServerConfig is the provider-neutral session-setup shape for a tool
@@ -395,12 +397,11 @@ type ChatConfigOptionValue struct {
 // agent's organization without making grouped menus a protocol concern above
 // the adapter.
 type ChatConfigOptionChoice struct {
-	PermissionMode PermissionMode
-	Value          string
-	Name           string
-	Description    string
-	Group          string
-	GroupName      string
+	Value       string
+	Name        string
+	Description string
+	Group       string
+	GroupName   string
 }
 
 // ChatConfigOption is one live provider-owned session control.
@@ -466,10 +467,6 @@ type ChatRateLimits struct {
 	SecondaryResetsInSeconds int64
 	// PlanLabel is the provider's name for the account tier, when it says.
 	PlanLabel string
-	// CodexCapacity carries the normalized full/sparse provider observation to
-	// the daemon-owned account coordinator. It is never persisted with the
-	// conversation quota projection.
-	CodexCapacity *CodexCapacityObservation
 }
 
 // ChatTurnDiff is the running diff of what a turn changed on disk.
@@ -950,18 +947,6 @@ type ChatProviderTerminator interface {
 // process, as distinct from native resume in a replacement process.
 type ChatLiveReconnector interface {
 	ReconnectedLive() bool
-}
-
-// ChatLiveReconnectActivator releases provider replay only after the service
-// has restored the durable active-turn correlation for the same live process.
-type ChatLiveReconnectActivator interface {
-	ActivateLiveReconnect(ctx context.Context, providerTurnID string) error
-}
-
-// ChatProviderEventAcknowledger lets a persistent provider discard replay
-// state only after the controller commits the matching event.
-type ChatProviderEventAcknowledger interface {
-	AcknowledgeProviderEvent(ctx context.Context, providerEventID string) error
 }
 
 // ChatHistoryReader is optionally implemented by a conversation whose native

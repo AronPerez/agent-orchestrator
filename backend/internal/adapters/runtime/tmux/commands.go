@@ -20,13 +20,11 @@ func newSessionArgs(id, cwd, shellPath, launchCmd string) []string {
 }
 
 // respawnPaneArgs replaces the process in the session's only pane while keeping
-// the tmux session and terminal handle intact. The bare session target resolves
-// to the active window/pane regardless of the user's base-index /
-// pane-base-index (a hardcoded :0.0 misses when either is 1, see #4656).
+// the tmux session and terminal handle intact.
 func respawnPaneArgs(id, cwd, shellPath, launchCmd string) []string {
 	return []string{
 		"respawn-pane", "-k",
-		"-t", id,
+		"-t", id + ":0.0",
 		"-c", cwd,
 		shellPath, "-c", launchCmd,
 	}
@@ -98,17 +96,11 @@ func setDestroyUnattachedOffArgs(id string) []string {
 
 // panePIDArgs returns the pid of tmux's direct pane process. AO walks its
 // descendants to find the exact supervisor for the current launch, and Destroy
-// uses it to resolve the agent's process group before teardown. The bare session
-// target keeps this independent of base-index / pane-base-index (see
-// respawnPaneArgs, #4656).
+// uses it to resolve the agent's process group before teardown. display-message
+// is pane-targeting, so it takes a plain session name (no `=` prefix; see
+// setStatusOffArgs).
 func panePIDArgs(id string) []string {
-	return []string{"display-message", "-p", "-t", id, "#{pane_pid}"}
-}
-
-// paneDeadArgs includes every pane so a retained dead pane cannot hide another
-// running child in the same runtime. Session targeting requires an exact match.
-func paneDeadArgs(id string) []string {
-	return []string{"list-panes", "-s", "-t", exactSessionTarget(id), "-F", "#{pane_dead}"}
+	return []string{"display-message", "-p", "-t", id + ":0.0", "#{pane_pid}"}
 }
 
 // paneCurrentPathArgs prints tmux's cwd for the session's active pane. Create

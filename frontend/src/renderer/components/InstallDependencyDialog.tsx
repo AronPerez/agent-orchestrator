@@ -3,7 +3,7 @@ import { Check, Copy, XCircle } from "lucide-react";
 import type { TFunction } from "i18next";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { components, operations } from "../../api/schema";
+import type { components } from "../../api/schema";
 import type { MessageKey } from "../i18n";
 import { apiClient, apiErrorMessage } from "../lib/api-client";
 import { aoBridge } from "../lib/bridge";
@@ -21,7 +21,7 @@ import {
 } from "./ui/dialog";
 
 type InstallJob = components["schemas"]["InstallJob"];
-type InstallTarget = operations["getSystemInstallStatus"]["parameters"]["path"]["target"];
+type InstallTarget = InstallJob["target"];
 type AgentInstallTarget = Extract<InstallTarget, "claude" | "codex" | "opencode" | "copilot">;
 
 // Labels are the CLIs' own product names — not translated, same treatment as
@@ -42,10 +42,6 @@ const AGENT_INSTALL_DESCRIPTION_KEYS: Record<AgentInstallTarget, MessageKey> = {
 };
 
 const POLL_INTERVAL_MS = 1_000;
-
-export function isActiveInstallJob(job: InstallJob | undefined): boolean {
-	return job?.status === "running" || job?.status === "installing" || job?.status === "verifying";
-}
 
 /** Sequential single-target install job runner: POST to start, GET on an
  *  interval while running. One target is ever in flight at a time — this
@@ -80,7 +76,7 @@ function useInstallRunner(onSucceeded: () => void) {
 				});
 				if (error || !data) return; // transient — try again next tick
 				setJob(data);
-				if (isActiveInstallJob(data)) return;
+				if (data.status === "running") return;
 				stopPolling();
 				if (data.status === "succeeded") onSucceededRef.current();
 			})();
@@ -119,7 +115,7 @@ function useInstallRunner(onSucceeded: () => void) {
 			});
 			if (error || !data) throw new Error(apiErrorMessage(error, "Could not start the install."));
 			setJob(data);
-			if (isActiveInstallJob(data)) poll(nextTarget);
+			if (data.status === "running") poll(nextTarget);
 			else if (data.status === "succeeded") onSucceededRef.current();
 		} catch (err) {
 			setStartError(err instanceof Error ? err.message : "Could not start the install.");
@@ -128,7 +124,7 @@ function useInstallRunner(onSucceeded: () => void) {
 		}
 	};
 
-	const running = isStarting || isActiveInstallJob(job);
+	const running = isStarting || job?.status === "running";
 	const jobFor = (nextTarget: InstallTarget) => (target === nextTarget ? job : previews[nextTarget]);
 	const inspectionFinished = (nextTarget: InstallTarget) => inspectedTargets[nextTarget] === true;
 	return { target, startError, running, start, inspect, jobFor, inspectionFinished };
@@ -350,7 +346,7 @@ function InstallAction({
 	onInstall: () => void;
 	t: TFunction;
 }) {
-	const running = isActiveInstallJob(job);
+	const running = job?.status === "running";
 	const failed = job?.status === "failed";
 	const unsupported = job?.status === "unsupported";
 

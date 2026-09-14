@@ -18,7 +18,10 @@ func spawnDetached(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(exe, hostArgs(cfg)...)
+	args := make([]string, 0, 5+len(cfg.Argv))
+	args = append(args, "chat-host", cfg.SessionID, cfg.DataDir, cfg.Workdir, "--")
+	args = append(args, cfg.Argv...)
+	cmd := exec.Command(exe, args...)
 	cmd.Dir = cfg.Workdir
 	cmd.Env = cfg.Env
 	cmd.Stdin = nil

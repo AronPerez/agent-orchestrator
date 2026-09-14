@@ -12,8 +12,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	aoprocess "github.com/aoagents/agent-orchestrator/backend/internal/process"
 )
 
 // The hostname of a quick tunnel is only ever available by scraping
@@ -207,7 +205,7 @@ func LocalCloudflaredLookup(dataDir string) CloudflaredLookup {
 		Version: func(p string) (CloudflaredVersion, bool) {
 			ctx, cancel := context.WithTimeout(context.Background(), cloudflaredVersionTimeout)
 			defer cancel()
-			out, err := aoprocess.CommandContext(ctx, p, "--version").CombinedOutput()
+			out, err := exec.CommandContext(ctx, p, "--version").CombinedOutput()
 			if err != nil {
 				return CloudflaredVersion{}, false
 			}

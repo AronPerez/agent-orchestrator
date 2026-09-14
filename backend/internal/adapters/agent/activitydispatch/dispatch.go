@@ -22,7 +22,6 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/fake"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/kimchi"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/muse"
-	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/omp"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/opencode"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/pi"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/primeagent"
@@ -42,7 +41,6 @@ var Derivers = map[string]DeriveFunc{
 	"claude-code": claudecode.DeriveActivityState,
 	"grok":        claudecode.DeriveActivityState,
 	"muse":        muse.DeriveActivityState,
-	"omp":         omp.DeriveActivityState,
 	"codex":       codex.DeriveActivityState,
 	"continue":    continueagent.DeriveActivityState,
 	"droid":       droid.DeriveActivityState,

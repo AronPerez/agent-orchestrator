@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -17,9 +16,6 @@ func (c *commandContext) resolvePRRef(ctx context.Context, ref string, project p
 	}
 	if isNumericPRRef(ref) {
 		repo := strings.TrimSpace(project.Repo)
-		if project.Config != nil && project.Config.CanonicalRepoURL != "" {
-			repo = project.Config.CanonicalRepoURL
-		}
 		if repo == "" {
 			// The gh fallback below is local-only in the same sense as `ao doctor`,
 			// but it is a fallback inside a command that otherwise works remotely,
@@ -86,14 +82,14 @@ func cliParsePRURL(raw string) (host, owner, name string, number int, err error)
 	if err != nil {
 		return "", "", "", 0, err
 	}
-	if !strings.EqualFold(u.Scheme, "https") || u.Hostname() == "" || u.User != nil || u.RawPath != "" {
+	if !strings.EqualFold(u.Scheme, "https") {
 		return "", "", "", 0, errors.New("not https")
 	}
-	host = u.Host
+	host = u.Hostname()
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
 
 	// GitHub: /owner/repo/pull/N → 4 parts, parts[2] == "pull"
-	if isCLIGitHubHost(host) && len(parts) == 4 && parts[2] == "pull" {
+	if len(parts) == 4 && parts[2] == "pull" {
 		n, parseErr := strconv.Atoi(parts[3])
 		if parseErr != nil || n <= 0 {
 			return "", "", "", 0, errors.New("bad number")
@@ -103,7 +99,7 @@ func cliParsePRURL(raw string) (host, owner, name string, number int, err error)
 
 	// GitLab: /owner/repo/-/merge_requests/N
 	// Supports nested groups: /group/subgroup/repo/-/merge_requests/N
-	if !isCLIGitHubHost(host) && len(parts) >= 5 && parts[len(parts)-2] == "merge_requests" && parts[len(parts)-3] == "-" {
+	if len(parts) >= 5 && parts[len(parts)-2] == "merge_requests" && parts[len(parts)-3] == "-" {
 		n, parseErr := strconv.Atoi(parts[len(parts)-1])
 		if parseErr != nil || n <= 0 {
 			return "", "", "", 0, errors.New("bad number")
@@ -150,7 +146,7 @@ func cliRepoFromURL(raw string) (host, owner, name string, err error) {
 	if err != nil {
 		return "", "", "", err
 	}
-	host = u.Host
+	host = u.Hostname()
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
 	if len(parts) < 2 {
 		return "", "", "", errors.New("bad repo")
@@ -166,9 +162,6 @@ func cliRepoFromURL(raw string) (host, owner, name string, err error) {
 }
 
 func isCLIGitHubHost(host string) bool {
-	if hostname, _, err := net.SplitHostPort(host); err == nil {
-		host = hostname
-	}
 	host = strings.ToLower(host)
 	return host == "github.com" || host == "www.github.com" || host == "api.github.com" ||
 		strings.HasSuffix(host, ".github.com") || strings.HasSuffix(host, ".ghe.io")

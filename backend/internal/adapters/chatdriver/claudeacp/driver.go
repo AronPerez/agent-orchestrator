@@ -47,7 +47,6 @@ func New(plugin claudePlugin, log *slog.Logger) ports.ChatDriver {
 			ports.ChatCapabilityUsage:        true,
 			ports.ChatCapabilityDiffs:        true,
 			ports.ChatCapabilityPlans:        true,
-			ports.ChatCapabilityCompaction:   true,
 		},
 		Probe: func(ctx context.Context) error {
 			if _, err := resolveRuntime(ctx); err != nil {

@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
 	"time"
 
@@ -20,21 +19,9 @@ const (
 	maxOutstandingWorkerRequests    = 10
 	maxOutstandingWorkspaceRequests = 6
 	maxTerminalOutputBytes          = 4 << 20
-	maxActiveTerminalSessions       = 8
 	// interactiveSessionLease prevents the idle scanner from pausing a sandbox
-	// while an explicit resume or fresh terminal input is still active.
+	// while a user is connecting to either terminal surface.
 	interactiveSessionLease = 2 * time.Minute
-	// unconsumedTicketThreshold is the number of unconsumed tickets minted in
-	// the last interactiveSessionLease window above which we stop refreshing
-	// the sandbox's interactive lease. A broken client that loops minting
-	// tickets but never opening a WebSocket would otherwise keep a sandbox
-	// awake — and billed — indefinitely.
-	unconsumedTicketThreshold = 10
-	// interactionRefreshThrottle bounds how often active terminal input rewrites
-	// the interactive lease. Within one lease window the lease is refreshed at
-	// most once per (interactiveSessionLease - interactionRefreshThrottle), so a
-	// fast typist does not rewrite ao_sandboxes on every keystroke.
-	interactionRefreshThrottle = 30 * time.Second
 )
 
 func (s *Store) CreateWorkspaceRequest(
@@ -122,15 +109,7 @@ func createWorkerRequest(
 			response, error_code, error_message, attempt_count, expires_at`,
 		orgID, sessionID, epoch, kind, payload, intervalString(ttl),
 	), &request)
-	if err != nil {
-		return request, normalizeConstraintError(err)
-	}
-	// Wake a worker blocked in WaitForWork so it claims this request without
-	// busy-polling. Delivered on commit; the durable queue stays authoritative.
-	if _, err := tx.Exec(ctx, `SELECT pg_notify('ao_worker_work', $1)`, sessionID); err != nil {
-		return request, err
-	}
-	return request, nil
+	return request, normalizeConstraintError(err)
 }
 
 func (s *Store) GetWorkspaceRequest(
@@ -354,38 +333,6 @@ func (s *Store) IssueTerminalTicket(
 	// wake while the browser waits for the worker. The browser retries ticket
 	// creation while the reconciler resumes the provider and the worker
 	// heartbeats again.
-	// Count unconsumed tickets minted in the last interactiveSessionLease
-	// window. A legitimate viewer mints ≤1 ticket per connect; a broken
-	// client that loops WebSocket-attach failures produces O(100+) in the
-	// same window. Above the threshold we skip the interactive_until refresh
-	// so the idle scanner can eventually pause — and stop billing — the
-	// sandbox. We still wake a paused sandbox and insert the ticket so the
-	// client receives a normal 201; the suppression is invisible to the
-	// caller and does not block a real viewer whose policy fixes mid-session.
-	var unconsumedRecent int
-	if err := s.withSessionAccess(ctx, principal, orgID, sessionID, func(tx pgx.Tx, _ sessionAccess) error {
-		return tx.QueryRow(ctx,
-			`SELECT COUNT(*) FROM ao_access_tickets
-			WHERE org_id = $1 AND session_id = $2
-			  AND purpose LIKE 'terminal:%'
-			  AND consumed_at IS NULL
-			  AND created_at > now() - $3::interval`,
-			orgID, sessionID, intervalString(interactiveSessionLease),
-		).Scan(&unconsumedRecent)
-	}); err != nil {
-		// Non-fatal: if the count query fails, default to refreshing the
-		// lease (safe path) and let the ticket flow proceed normally.
-		unconsumedRecent = 0
-	}
-	leaseThrottled := unconsumedRecent >= unconsumedTicketThreshold
-	if leaseThrottled {
-		slog.Default().Warn("terminal ticket lease suppressed: too many unconsumed tickets",
-			"org_id", orgID,
-			"session_id", sessionID,
-			"unconsumed_count", unconsumedRecent,
-			"threshold", unconsumedTicketThreshold,
-		)
-	}
 	if err := s.withSessionAccess(ctx, principal, orgID, sessionID, func(tx pgx.Tx, _ sessionAccess) error {
 		_, err := tx.Exec(ctx,
 			`UPDATE ao_sandboxes
@@ -396,14 +343,13 @@ func (s *Store) IssueTerminalTicket(
 					ELSE startup_started_at
 				END,
 				interactive_until = CASE
-					WHEN $3 THEN interactive_until
-					WHEN interactive_until IS NULL OR interactive_until < now() + $4::interval
-						THEN now() + $4::interval
+					WHEN interactive_until IS NULL OR interactive_until < now() + $3::interval
+						THEN now() + $3::interval
 					ELSE interactive_until
 				END,
 				updated_at = now()
 			WHERE org_id = $1 AND session_id = $2`,
-			orgID, sessionID, leaseThrottled, intervalString(interactiveSessionLease),
+			orgID, sessionID, intervalString(interactiveSessionLease),
 		)
 		return err
 	}); err != nil {
@@ -433,8 +379,10 @@ func (s *Store) IssueTerminalTicket(
 			  ON worker.org_id = session.org_id
 			 AND worker.session_id = session.id
 			 AND worker.disconnected_at IS NULL
+			 AND worker.ready_at IS NOT NULL
 			WHERE session.org_id = $1 AND session.id = $2
-			  AND sandbox.desired_state = 'running'`,
+			  AND sandbox.desired_state = 'running'
+			  AND sandbox.observed_state = 'running'`,
 			orgID, sessionID,
 		).Scan(&epoch, &mode, &terminated, &deniedCommands)
 		if errors.Is(err, pgx.ErrNoRows) || terminated {
@@ -470,24 +418,27 @@ func (s *Store) IssueTerminalTicket(
 	return token, scopes, nil
 }
 
-// RefreshTerminalInteraction extends the short wake lease after actual user
-// input. Merely opening or retaining either terminal stream is not activity.
+// RefreshTerminalInteraction extends the short wake lease for a visible
+// workspace terminal. Agent streams are retained in the browser for output
+// continuity, so they deliberately do not prevent normal idle pause.
 func (s *Store) RefreshTerminalInteraction(
 	ctx context.Context,
 	terminal domain.TerminalSession,
 	ttl time.Duration,
 ) error {
+	if terminal.Kind != "workspace" {
+		return nil
+	}
 	return s.withOrg(ctx, terminal.OrgID, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx,
 			`UPDATE ao_sandboxes
-			SET interactive_until = now() + $1::interval,
-				reconcile_after = now(), updated_at = now()
+			SET interactive_until = now() + $1::interval, updated_at = now()
 			WHERE org_id = $2 AND session_id = $3
 			  AND desired_state = 'running'
 			  AND EXISTS (
 				SELECT 1 FROM ao_terminal_sessions
 				WHERE org_id = $2 AND session_id = $3 AND id = $4
-				  AND worker_epoch = $5
+				  AND worker_epoch = $5 AND kind = 'workspace'
 				  AND state IN ('opening', 'open') AND expires_at > now()
 			  )`,
 			intervalString(ttl), terminal.OrgID, terminal.SessionID,
@@ -619,7 +570,7 @@ func (s *Store) OpenTerminal(
 				return err
 			}
 		}
-		if kind == "agent" {
+		if kind == "workspace" || kind == "agent" {
 			var retiredIDs []string
 			if err := tx.QueryRow(ctx,
 				`WITH retired AS (
@@ -666,7 +617,7 @@ func (s *Store) OpenTerminal(
 		).Scan(&active); err != nil {
 			return err
 		}
-		if active >= maxActiveTerminalSessions {
+		if active >= 2 {
 			return ErrConflict
 		}
 		if err := tx.QueryRow(ctx,
@@ -758,37 +709,6 @@ func (s *Store) queueTerminalRequest(
 	payload []byte,
 ) error {
 	return s.withOrg(ctx, terminal.OrgID, func(tx pgx.Tx) error {
-		// Typing or resizing a terminal is active proof of life for BOTH terminal
-		// surfaces (workspace and agent): keep an in-use sandbox awake, and wake a
-		// paused one so the keystroke that arrives after an idle pause resumes the
-		// box instead of being silently dropped. Idle-but-open output streams never
-		// reach here, so they still pause normally. The lease rewrite is throttled
-		// so a fast typist does not rewrite ao_sandboxes on every keystroke. This
-		// mirrors the wake in IssueTerminalTicket for the in-session case where the
-		// box paused underneath an already-open terminal.
-		if kind == "terminal.input" || kind == "terminal.resize" {
-			if _, err := tx.Exec(ctx,
-				`UPDATE ao_sandboxes
-				SET desired_state = CASE WHEN desired_state = 'paused' THEN 'running' ELSE desired_state END,
-					reconcile_after = CASE WHEN desired_state = 'paused' THEN now() ELSE reconcile_after END,
-					startup_started_at = CASE WHEN desired_state = 'paused' THEN now() ELSE startup_started_at END,
-					interactive_until = now() + $3::interval,
-					updated_at = now()
-				WHERE org_id = $1 AND session_id = $2
-				  AND desired_state IN ('running', 'paused')
-				  AND (
-					desired_state = 'paused'
-					OR interactive_until IS NULL
-					OR interactive_until < now() + $4::interval
-				  )`,
-				terminal.OrgID, terminal.SessionID,
-				intervalString(interactiveSessionLease),
-				intervalString(interactiveSessionLease-interactionRefreshThrottle),
-			); err != nil {
-				return err
-			}
-		}
-
 		var current bool
 		if err := tx.QueryRow(ctx,
 			`SELECT EXISTS (
@@ -826,88 +746,11 @@ func (s *Store) queueTerminalRequest(
 				return nil
 			}
 		}
-		if _, err := createWorkerRequest(
+		_, err := createWorkerRequest(
 			ctx, tx, terminal.OrgID, terminal.SessionID, kind, payload, 15*time.Second, "",
-		); err != nil {
-			return err
-		}
-		if kind == "terminal.input" {
-			// Wake the replica holding this terminal's worker stream so it can
-			// claim and push the keystroke immediately instead of waiting for
-			// the worker's next transport poll. The queue row above stays the
-			// durable fallback either way.
-			if _, err := tx.Exec(ctx,
-				`SELECT pg_notify('ao_terminal_input', $1)`, terminal.ID,
-			); err != nil {
-				return err
-			}
-		}
-		return nil
+		)
+		return err
 	})
-}
-
-// ClaimTerminalInput claims the oldest pending terminal.input request for one
-// terminal on behalf of its worker, so a control-plane replica holding the
-// worker's terminal stream can push it down immediately. It uses the same
-// lease semantics as ClaimWorkerRequest, so it never races the worker's own
-// transport poll into a double delivery.
-func (s *Store) ClaimTerminalInput(
-	ctx context.Context,
-	orgID, sessionID, workerID string,
-	epoch int64,
-	terminalID string,
-	lease time.Duration,
-) (domain.WorkerRequest, bool, error) {
-	var request domain.WorkerRequest
-	var found bool
-	err := s.withOrg(ctx, orgID, func(tx pgx.Tx) error {
-		current, err := workerConnectionCurrent(ctx, tx, orgID, sessionID, workerID, epoch)
-		if err != nil {
-			return err
-		}
-		if !current {
-			return ErrStaleWorker
-		}
-		err = scanWorkerRequest(tx.QueryRow(ctx,
-			`WITH candidate AS (
-				SELECT id
-				FROM ao_worker_requests
-				WHERE org_id = $1 AND session_id = $2 AND worker_epoch = $3
-				  AND kind = 'terminal.input'
-				  AND payload->>'terminalId' = $4
-				  AND expires_at > now()
-				  AND (
-					status = 'pending'
-					OR (status = 'claimed' AND lease_until < now())
-				  )
-				  AND attempt_count < 3
-				ORDER BY created_at, id
-				FOR UPDATE SKIP LOCKED
-				LIMIT 1
-			)
-			UPDATE ao_worker_requests request
-			SET status = 'claimed',
-				attempt_count = request.attempt_count + 1,
-				lease_until = now() + $5::interval,
-				updated_at = now()
-			FROM candidate
-			WHERE request.id = candidate.id
-			RETURNING request.id, request.org_id, request.session_id,
-				request.worker_epoch, request.kind, request.payload, request.status,
-				request.response, request.error_code, request.error_message,
-				request.attempt_count, request.expires_at`,
-			orgID, sessionID, epoch, terminalID, intervalString(lease),
-		), &request)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		found = true
-		return nil
-	})
-	return request, found, err
 }
 
 func (s *Store) CloseTerminal(ctx context.Context, terminal domain.TerminalSession) error {
@@ -935,11 +778,6 @@ func (s *Store) CloseTerminal(ctx context.Context, terminal domain.TerminalSessi
 			)`,
 			terminal.OrgID, terminal.SessionID, terminal.WorkerEpoch, payload,
 		)
-		if err != nil {
-			return err
-		}
-		// Wake a worker blocked in WaitForWork so it claims this terminal.close.
-		_, err = tx.Exec(ctx, `SELECT pg_notify('ao_worker_work', $1)`, terminal.SessionID)
 		return err
 	})
 }
@@ -993,12 +831,6 @@ func (s *Store) AppendTerminalOutput(
 			) VALUES ($1, $2, $3, $4, $5)`,
 			terminalID, orgID, sessionID, sequence, data,
 		)
-		if err != nil {
-			return err
-		}
-		// Wake any control-plane replica streaming this terminal to a client.
-		// Delivered on commit, so subscribers always find the row.
-		_, err = tx.Exec(ctx, `SELECT pg_notify('ao_terminal_output', $1)`, terminalID)
 		return err
 	})
 	return sequence, err

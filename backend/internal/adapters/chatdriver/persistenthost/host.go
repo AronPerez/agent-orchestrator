@@ -1,7 +1,7 @@
 // Package persistenthost keeps a provider stdio process alive while AO's daemon
-// is replaced. Raw protocols are forwarded unchanged. ACP uses a small relay
-// that preserves connection-scoped initialization, session, request-correlation,
-// and in-flight prompt state across daemon attachments.
+// is replaced. The host is deliberately provider-neutral: it forwards newline-
+// delimited protocol frames and knows only how to authenticate one controller,
+// replay output produced while detached, and terminate explicitly.
 package persistenthost
 
 import (
@@ -35,39 +35,13 @@ const (
 	handshakeTimeout = time.Second
 )
 
-// Protocol selects the provider-wire behavior owned by the host.
-type Protocol string
-
-const (
-	// ProtocolRaw preserves the original newline-delimited forwarding profile.
-	ProtocolRaw Protocol = ""
-	// ProtocolACP enables the host-owned ACP correlation and replay profile.
-	ProtocolACP Protocol = "acp"
-
-	// ACPPromptResultMethod is an AO-private notification emitted when an ACP
-	// prompt finishes after the daemon attachment that issued it has gone away.
-	ACPPromptResultMethod = "_ao/persistent_prompt_result"
-	// ACPPromptAckMethod acknowledges that AO durably committed a replayed prompt
-	// result, allowing the host to discard its prompt journal.
-	ACPPromptAckMethod = "_ao/persistent_prompt_ack"
-	// ACPInteractionCommandMethod records a user interaction decision in the host
-	// before the daemon releases the blocked ACP responder.
-	ACPInteractionCommandMethod = "_ao/persistent_interaction_command"
-	// ACPRequestIDMetaKey carries one host-stable identity on replayable
-	// provider-to-client requests such as permissions and elicitations.
-	ACPRequestIDMetaKey = "ao.persistentRequestId"
-	// ACPInitialPermissionsMetaKey records the process-launch approval policy,
-	// which can differ from mutable session settings after reconnect.
-	ACPInitialPermissionsMetaKey = "ao.initialPermissions"
-)
-
 var (
 	// ErrAttached reports that another daemon controller owns the host.
 	ErrAttached = errors.New("chat host already has a controller")
 	// ErrUnauthorized reports an invalid host capability.
 	ErrUnauthorized = errors.New("chat host authentication failed")
-	// ErrIncompatible reports a control-plane or provider-ownership mismatch.
-	ErrIncompatible = errors.New("chat host incompatible")
+	// ErrIncompatible reports a control-plane protocol version mismatch.
+	ErrIncompatible = errors.New("chat host protocol incompatible")
 	// ErrHostExists reports an atomic per-session launch-lock conflict.
 	ErrHostExists = errors.New("chat host already exists")
 	// ErrOwnershipInconclusive means a descriptor or live host exists, but this
@@ -78,45 +52,21 @@ var (
 
 // Descriptor is the private connection record published by a running host.
 type Descriptor struct {
-	Version              int       `json:"version"`
-	SessionID            string    `json:"sessionId"`
-	Protocol             Protocol  `json:"protocol,omitempty"`
-	OwnershipFingerprint string    `json:"ownershipFingerprint,omitempty"`
-	Address              string    `json:"address"`
-	Token                string    `json:"token"`
-	PID                  int       `json:"pid"`
-	StartedAt            time.Time `json:"startedAt"`
+	Version   int       `json:"version"`
+	SessionID string    `json:"sessionId"`
+	Address   string    `json:"address"`
+	Token     string    `json:"token"`
+	PID       int       `json:"pid"`
+	StartedAt time.Time `json:"startedAt"`
 }
 
 // Config identifies one provider process and its AO session ownership.
 type Config struct {
-	SessionID            string
-	DataDir              string
-	Workdir              string
-	Env                  []string
-	Argv                 []string
-	Protocol             Protocol
-	OwnershipFingerprint string
-	Prepare              func(context.Context) (PreparedProvider, error)
-}
-
-// PreparedProvider is resolved only when no compatible live host can be
-// adopted. This keeps launch-only credential rotation out of reconnects.
-type PreparedProvider struct {
-	Env  []string
-	Argv []string
-}
-
-// ACPState is the connection-scoped state needed to reconstruct an ACP client
-// without initializing or resuming the same live provider a second time.
-type ACPState struct {
-	InitialPermissions   string          `json:"initialPermissions,omitempty"`
-	InitializeResult     json.RawMessage `json:"initializeResult,omitempty"`
-	SessionResult        json.RawMessage `json:"sessionResult,omitempty"`
-	SessionID            string          `json:"sessionId,omitempty"`
-	ActivePrompt         bool            `json:"activePrompt,omitempty"`
-	ActiveCompaction     bool            `json:"activeCompaction,omitempty"`
-	PendingResultEventID string          `json:"pendingResultEventId,omitempty"`
+	SessionID string
+	DataDir   string
+	Workdir   string
+	Env       []string
+	Argv      []string
 }
 
 // Transport is one authenticated attachment to a persistent provider host.
@@ -125,7 +75,6 @@ type Transport struct {
 	Stdout        io.Reader
 	Reconnected   bool
 	NextRequestID int64
-	ACPState      *ACPState
 }
 
 type hello struct {
@@ -135,10 +84,9 @@ type hello struct {
 }
 
 type helloResponse struct {
-	OK            bool      `json:"ok"`
-	Error         string    `json:"error,omitempty"`
-	NextRequestID int64     `json:"nextRequestId,omitempty"`
-	ACPState      *ACPState `json:"acpState,omitempty"`
+	OK            bool   `json:"ok"`
+	Error         string `json:"error,omitempty"`
+	NextRequestID int64  `json:"nextRequestId,omitempty"`
 }
 
 func hostDir(dataDir, sessionID string) (string, error) {
@@ -266,28 +214,10 @@ func randomToken() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
-func validateDescriptor(cfg Config, d Descriptor) error {
-	if d.Protocol != cfg.Protocol {
-		return fmt.Errorf("%w: host protocol=%q requested=%q", ErrIncompatible, d.Protocol, cfg.Protocol)
-	}
-	// Codex raw hosts predate this ACP compatibility contract and retain their
-	// existing version/protocol fencing.
-	if d.Protocol == ProtocolRaw {
-		return nil
-	}
-	if cfg.OwnershipFingerprint == "" || d.OwnershipFingerprint != cfg.OwnershipFingerprint {
-		return fmt.Errorf("%w: provider launch configuration changed", ErrIncompatible)
-	}
-	return nil
-}
-
 // ConnectOrStart attaches to an existing compatible host or starts one with the
 // current AO executable. Failed/incompatible probes never terminate that host.
 func ConnectOrStart(ctx context.Context, cfg Config) (*Transport, error) {
 	if d, err := readDescriptor(cfg.DataDir, cfg.SessionID); err == nil {
-		if err := validateDescriptor(cfg, d); err != nil && processalive.Alive(d.PID) {
-			return nil, err
-		}
 		transport, attachErr := attach(ctx, d, true)
 		if attachErr == nil {
 			return transport, nil
@@ -329,19 +259,8 @@ func ConnectOrStart(ctx context.Context, cfg Config) (*Transport, error) {
 		// exists. Fail closed instead of launching a competing process.
 		return nil, fmt.Errorf("%w: %w", ErrOwnershipInconclusive, err)
 	}
-	if !filepath.IsAbs(cfg.Workdir) {
-		return nil, errors.New("chat host start requires an absolute workdir")
-	}
-	if cfg.Prepare != nil {
-		prepared, err := cfg.Prepare(ctx)
-		if err != nil {
-			return nil, err
-		}
-		cfg.Env = prepared.Env
-		cfg.Argv = prepared.Argv
-	}
-	if len(cfg.Argv) == 0 {
-		return nil, errors.New("chat host start requires provider argv")
+	if len(cfg.Argv) == 0 || !filepath.IsAbs(cfg.Workdir) {
+		return nil, errors.New("chat host start requires provider argv and absolute workdir")
 	}
 	if err := spawnDetached(ctx, cfg); err != nil {
 		return nil, err
@@ -354,9 +273,6 @@ func ConnectOrStart(ctx context.Context, cfg Config) (*Transport, error) {
 		}
 		d, err := readDescriptor(cfg.DataDir, cfg.SessionID)
 		if err == nil {
-			if compatibleErr := validateDescriptor(cfg, d); compatibleErr != nil {
-				return nil, compatibleErr
-			}
 			transport, attachErr := attach(ctx, d, false)
 			if attachErr == nil {
 				return transport, nil
@@ -463,10 +379,7 @@ func attach(ctx context.Context, d Descriptor, reconnected bool) (*Transport, er
 			return nil, errors.New(response.Error)
 		}
 	}
-	return &Transport{
-		Stdin: conn, Stdout: reader, Reconnected: reconnected,
-		NextRequestID: response.NextRequestID, ACPState: response.ACPState,
-	}, nil
+	return &Transport{Stdin: conn, Stdout: reader, Reconnected: reconnected, NextRequestID: response.NextRequestID}, nil
 }
 
 func bindConnToContext(ctx context.Context, conn net.Conn) func(error) error {
@@ -481,9 +394,8 @@ func bindConnToContext(ctx context.Context, conn net.Conn) func(error) error {
 	}
 }
 
-// Shutdown terminates current session ownership and waits for it to end.
-// Missing/dead hosts are harmless; unknown live owners fail closed.
-// The protocol acknowledgement only confirms that shutdown was requested.
+// Shutdown terminates an authenticated host. Missing or unreachable hosts are
+// harmless; callers use this only for explicit session destruction/orphan reap.
 func Shutdown(ctx context.Context, dataDir, sessionID string) error {
 	d, err := readDescriptor(dataDir, sessionID)
 	if errors.Is(err, os.ErrNotExist) {
@@ -492,16 +404,10 @@ func Shutdown(ctx context.Context, dataDir, sessionID string) error {
 	if err != nil {
 		return err
 	}
-	if d.Version != ProtocolVersion {
-		return ErrIncompatible
-	}
 	handshakeCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
 	conn, err := (&net.Dialer{}).DialContext(handshakeCtx, "tcp", d.Address)
 	if err != nil {
-		if !processalive.Alive(d.PID) {
-			return nil
-		}
 		return err
 	}
 	defer func() { _ = conn.Close() }()
@@ -519,31 +425,7 @@ func Shutdown(ctx context.Context, dataDir, sessionID string) error {
 	if !response.OK {
 		return errors.New(response.Error)
 	}
-	waitCtx, stop := context.WithTimeout(ctx, 5*time.Second)
-	defer stop()
-	ticker := time.NewTicker(20 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		current, readErr := readDescriptor(dataDir, sessionID)
-		if readErr == nil && current.Token != d.Token {
-			return nil // A new owner could only publish after the old lock released.
-		}
-		if errors.Is(readErr, os.ErrNotExist) {
-			path, _ := lockPath(dataDir, sessionID)
-			if _, lockErr := os.Stat(path); errors.Is(lockErr, os.ErrNotExist) {
-				return nil
-			} else if lockErr != nil {
-				return lockErr
-			}
-		} else if readErr != nil {
-			return readErr
-		}
-		select {
-		case <-waitCtx.Done():
-			return fmt.Errorf("wait for chat host shutdown: %w", waitCtx.Err())
-		case <-ticker.C:
-		}
-	}
+	return nil
 }
 
 // Run owns the provider until it exits or an authenticated shutdown arrives.
@@ -569,7 +451,6 @@ func Run(ctx context.Context, cfg Config) error {
 	child := exec.Command(cfg.Argv[0], cfg.Argv[1:]...) //nolint:gosec // provider argv is constructed by AO's driver.
 	child.Dir = cfg.Workdir
 	child.Env = cfg.Env
-	configureProviderProcess(child)
 	stdin, err := child.StdinPipe()
 	if err != nil {
 		return err
@@ -583,30 +464,18 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 
-	d := Descriptor{
-		Version: ProtocolVersion, SessionID: cfg.SessionID, Protocol: cfg.Protocol,
-		OwnershipFingerprint: cfg.OwnershipFingerprint,
-		Address:              listener.Addr().String(), Token: token, PID: os.Getpid(), StartedAt: time.Now().UTC(),
-	}
+	d := Descriptor{Version: ProtocolVersion, SessionID: cfg.SessionID, Address: listener.Addr().String(), Token: token, PID: os.Getpid(), StartedAt: time.Now().UTC()}
 	if err := writeDescriptor(cfg.DataDir, d); err != nil {
-		_ = killProviderProcess(context.WithoutCancel(ctx), child)
+		_ = child.Process.Kill()
 		return err
 	}
 	path, _ := descriptorPath(cfg.DataDir, cfg.SessionID)
 	defer func() { _ = os.Remove(path) }()
 
 	h := &host{
-		ctx: ctx, listener: listener, child: child, stdin: stdin, token: token,
+		listener: listener, child: child, stdin: stdin, token: token,
 		detached: make([][]byte, 0, 64), pendingRequests: make(map[string]*pendingRequest),
 		shutdown: make(chan struct{}),
-	}
-	if cfg.Protocol == ProtocolACP {
-		h.acp, err = newACPRelay(ctx, filepath.Join(filepath.Dir(path), "acp-prompt.journal"))
-		if err != nil {
-			_ = killProviderProcess(context.WithoutCancel(ctx), child)
-			return err
-		}
-		defer func() { _ = h.acp.close(context.WithoutCancel(ctx)) }()
 	}
 	h.cond = sync.NewCond(&h.mu)
 	providerDone := make(chan error, 1)
@@ -618,18 +487,13 @@ func Run(ctx context.Context, cfg Config) error {
 		_ = stdin.Close()
 		select {
 		case <-providerDone:
-			// Wrapper adapters may exit before their provider child. The hosted
-			// process group is the ownership boundary, so explicit shutdown reaps
-			// any descendant that did not follow stdin closure.
-			_ = killProviderProcess(context.WithoutCancel(ctx), child)
 		case <-time.After(3 * time.Second):
-			_ = killProviderProcess(context.WithoutCancel(ctx), child)
+			_ = child.Process.Kill()
 		}
 	}
 	var runErr error
 	select {
-	case runErr = <-providerDone:
-		_ = killProviderProcess(context.WithoutCancel(ctx), child)
+	case <-providerDone:
 	case <-h.shutdown:
 		stopProvider()
 	case <-ctx.Done():
@@ -637,7 +501,7 @@ func Run(ctx context.Context, cfg Config) error {
 		stopProvider()
 	case err := <-acceptDone:
 		if err != nil && !errors.Is(err, net.ErrClosed) {
-			_ = killProviderProcess(context.WithoutCancel(ctx), child)
+			_ = child.Process.Kill()
 			return err
 		}
 	}
@@ -647,24 +511,21 @@ func Run(ctx context.Context, cfg Config) error {
 }
 
 type host struct {
-	ctx      context.Context
 	listener net.Listener
 	child    *exec.Cmd
 	stdin    io.WriteCloser
 	token    string
-	acp      *acpRelay
 
-	mu               sync.Mutex
-	cond             *sync.Cond
-	client           net.Conn
-	clientGeneration uint64
-	detached         [][]byte
-	detachedBytes    int
-	pendingRequests  map[string]*pendingRequest
-	pendingOrder     []string
-	maxRequestID     int64
-	shutdown         chan struct{}
-	shutdownOnce     sync.Once
+	mu              sync.Mutex
+	cond            *sync.Cond
+	client          net.Conn
+	detached        [][]byte
+	detachedBytes   int
+	pendingRequests map[string]*pendingRequest
+	pendingOrder    []string
+	maxRequestID    int64
+	shutdown        chan struct{}
+	shutdownOnce    sync.Once
 }
 
 type pendingRequest struct {
@@ -719,16 +580,7 @@ func (h *host) handle(conn net.Conn) {
 		return
 	}
 	h.client = conn
-	h.clientGeneration++
-	generation := h.clientGeneration
-	response := helloResponse{OK: true, NextRequestID: h.maxRequestID}
-	if h.acp != nil {
-		response.ACPState = h.acp.snapshot()
-	}
-	writeErr := json.NewEncoder(conn).Encode(response)
-	if writeErr == nil && h.acp != nil {
-		writeErr = h.acp.replayTo(h.ctx, conn)
-	}
+	writeErr := json.NewEncoder(conn).Encode(helloResponse{OK: true, NextRequestID: h.maxRequestID})
 	if writeErr == nil {
 		for _, frame := range h.detached {
 			if _, writeErr = conn.Write(frame); writeErr != nil {
@@ -753,34 +605,10 @@ func (h *host) handle(conn net.Conn) {
 	for {
 		frame, readErr := reader.ReadBytes('\n')
 		if len(frame) > 0 {
-			providerFrame := frame
-			var clientFrame []byte
-			h.mu.Lock()
-			if h.acp != nil {
-				var relayErr error
-				var relayed acpClientFrames
-				relayed, relayErr = h.acp.clientFrame(h.ctx, frame, generation)
-				providerFrame = relayed.provider
-				clientFrame = relayed.client
-				if relayErr != nil {
-					h.shutdownOnce.Do(func() { close(h.shutdown) })
-					h.mu.Unlock()
-					h.detach(conn)
-					return
-				}
-			}
-			h.mu.Unlock()
-			if len(providerFrame) > 0 {
-				if _, err := h.stdin.Write(providerFrame); err != nil {
-					readErr = err
-				} else {
-					h.observeClientFrame(providerFrame)
-				}
-			}
-			if readErr == nil && len(clientFrame) > 0 {
-				if _, err := conn.Write(clientFrame); err != nil {
-					readErr = err
-				}
+			if _, err := h.stdin.Write(frame); err != nil {
+				readErr = err
+			} else {
+				h.observeClientFrame(frame)
 			}
 		}
 		if readErr != nil {
@@ -835,25 +663,7 @@ func (h *host) forwardProvider(stdout io.Reader) error {
 		frame, err := reader.ReadBytes('\n')
 		if len(frame) > 0 {
 			h.mu.Lock()
-			retainedByACP := false
-			if h.acp != nil {
-				var relayErr error
-				frame, retainedByACP, relayErr = h.acp.providerFrame(
-					h.ctx, frame, h.clientGeneration, h.client != nil,
-				)
-				if relayErr != nil {
-					h.mu.Unlock()
-					return relayErr
-				}
-			}
-			if len(frame) == 0 {
-				h.mu.Unlock()
-				if err != nil {
-					return err
-				}
-				continue
-			}
-			if requestID, ok := serverRequestID(frame); ok && !retainedByACP {
+			if requestID, ok := serverRequestID(frame); ok {
 				if _, exists := h.pendingRequests[requestID]; !exists {
 					h.pendingRequests[requestID] = &pendingRequest{frame: append([]byte(nil), frame...)}
 					h.pendingOrder = append(h.pendingOrder, requestID)
@@ -867,11 +677,11 @@ func (h *host) forwardProvider(stdout io.Reader) error {
 					_ = h.client.Close()
 					h.client = nil
 					h.bufferPendingRequestsLocked()
-					if _, pending := serverRequestID(frame); !pending && !retainedByACP {
+					if _, pending := serverRequestID(frame); !pending {
 						h.bufferFrameLocked(frame)
 					}
 				}
-			} else if !retainedByACP {
+			} else {
 				if requestID, pending := serverRequestID(frame); !pending || !h.pendingRequests[requestID].buffered {
 					h.bufferFrameLocked(frame)
 					if pending {
@@ -912,13 +722,4 @@ func (h *host) bufferPendingRequestsLocked() {
 func (h *host) bufferFrameLocked(frame []byte) {
 	h.detached = append(h.detached, append([]byte(nil), frame...))
 	h.detachedBytes += len(frame)
-}
-
-// hostArgs keeps the Unix and Windows detached entry points on one wire format.
-func hostArgs(cfg Config) []string {
-	args := []string{"chat-host", cfg.SessionID, cfg.DataDir, cfg.Workdir}
-	if cfg.Protocol != ProtocolRaw {
-		args = append(args, string(cfg.Protocol), cfg.OwnershipFingerprint)
-	}
-	return append(append(args, "--"), cfg.Argv...)
 }

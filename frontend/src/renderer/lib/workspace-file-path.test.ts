@@ -3,8 +3,8 @@ import { matchWorkspaceFilePath } from "./workspace-file-path";
 
 describe("matchWorkspaceFilePath", () => {
 	const files = [
-		{ path: "src/a.ts", status: "modified" as const, additions: 1, deletions: 0, binary: false, editable: true, fileFingerprint: "src-a", size: 12 },
-		{ path: "docs/report.md", status: "added" as const, additions: 10, deletions: 0, binary: false, editable: true, fileFingerprint: "report", size: 40 },
+		{ path: "src/a.ts", status: "modified" as const, additions: 1, deletions: 0, binary: false, size: 12 },
+		{ path: "docs/report.md", status: "added" as const, additions: 10, deletions: 0, binary: false, size: 40 },
 	];
 
 	it("matches an exact workspace path", () => {
@@ -30,8 +30,8 @@ describe("matchWorkspaceFilePath", () => {
 	it("disambiguates duplicate basenames with a path suffix", () => {
 		const duplicateFiles = [
 			...files,
-			{ path: "frontend/index.ts", status: "modified" as const, additions: 1, deletions: 0, binary: false, editable: true, fileFingerprint: "frontend-index", size: 12 },
-			{ path: "backend/index.ts", status: "modified" as const, additions: 1, deletions: 0, binary: false, editable: true, fileFingerprint: "backend-index", size: 12 },
+			{ path: "frontend/index.ts", status: "modified" as const, additions: 1, deletions: 0, binary: false, size: 12 },
+			{ path: "backend/index.ts", status: "modified" as const, additions: 1, deletions: 0, binary: false, size: 12 },
 		];
 		expect(matchWorkspaceFilePath("frontend/index.ts", duplicateFiles)).toBe("frontend/index.ts");
 		expect(matchWorkspaceFilePath("backend/index.ts", duplicateFiles)).toBe("backend/index.ts");

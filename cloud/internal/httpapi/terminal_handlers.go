@@ -30,8 +30,6 @@ const (
 	agentTerminalTTL           = 24 * time.Hour
 	terminalInteractionTTL     = 2 * time.Minute
 	terminalInteractionRefresh = 30 * time.Second
-	terminalPingInterval       = 20 * time.Second
-	terminalPingTimeout        = 5 * time.Second
 )
 
 var errTerminalProcessUnavailable = errors.New("terminal process unavailable")
@@ -66,13 +64,8 @@ func (s *Server) createTerminalTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	// routingKey is the terminal's stable affinity shard. An affinity-aware
-	// entry can use it to co-locate this client's socket with the worker's
-	// terminal stream on one replica, making the same-replica fast path the
-	// norm. Inert until such routing is deployed; safe for clients to ignore.
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"ticket": token, "expiresIn": int(terminalTicketTTL.Seconds()),
-		"scopes": scopes, "routingKey": routingKeyString(sessionID),
+		"ticket": token, "expiresIn": int(terminalTicketTTL.Seconds()), "scopes": scopes,
 	})
 }
 
@@ -120,14 +113,6 @@ func (s *Server) connectTerminal(w http.ResponseWriter, r *http.Request) {
 		s.closeTerminal(r, terminal)
 		return
 	}
-	if s.logger != nil {
-		s.logger.Info("browser terminal attached",
-			"session_id", terminal.SessionID,
-			"terminal_id", terminal.ID,
-			"kind", terminal.Kind,
-			"worker_epoch", terminal.WorkerEpoch,
-		)
-	}
 	connection.SetReadLimit(maxTerminalFrame)
 	defer func() {
 		if terminal.Kind != "agent" {
@@ -161,15 +146,10 @@ func (s *Server) connectTerminal(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		writeResult <- s.writeTerminalOutput(ctx, connection, terminal, after, structured, &writeMu)
 	}()
-	pingResult := make(chan error, 1)
-	go func() {
-		pingResult <- keepTerminalAlive(ctx, connection)
-	}()
 
 	select {
 	case err = <-readResult:
 	case err = <-writeResult:
-	case err = <-pingResult:
 	case <-ctx.Done():
 		err = ctx.Err()
 	}
@@ -180,30 +160,6 @@ func (s *Server) connectTerminal(w http.ResponseWriter, r *http.Request) {
 	}
 	status, reason := terminalStreamClose(err, terminal.Kind)
 	_ = connection.Close(status, reason)
-}
-
-// keepTerminalAlive sends protocol-level pings often enough to keep idle
-// terminal connections active through the public load balancer. Browsers
-// answer WebSocket pings automatically while readTerminalInput continuously
-// reads the corresponding pong control frames. Ping serializes with Write on
-// the coder/websocket connection's internal writeFrameMu, so it is safe to call
-// here without the writeMu that guards writeTerminalOutput.
-func keepTerminalAlive(ctx context.Context, connection *websocket.Conn) error {
-	ticker := time.NewTicker(terminalPingInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-			pingCtx, cancel := context.WithTimeout(ctx, terminalPingTimeout)
-			err := connection.Ping(pingCtx)
-			cancel()
-			if err != nil {
-				return err
-			}
-		}
-	}
 }
 
 func (s *Server) refreshTerminalInteraction(ctx context.Context, terminal domain.TerminalSession) {
@@ -287,17 +243,7 @@ func (s *Server) readTerminalInput(
 		if len(data) == 0 {
 			continue
 		}
-		// Same-replica fast path: when this control-plane task also holds the
-		// worker's terminal stream, hand the keystroke to it in memory and skip
-		// the durable queue's insert + NOTIFY + claim round trip (~15-20ms of
-		// intra-region Postgres latency off the hot path). Falls back to the
-		// durable path when the worker stream lives on another replica, is
-		// absent, or its buffer is full — so delivery is never dropped silently.
-		if s.terminalStreamEnabled && s.terminalStreams.pushInput(terminal.ID, data) {
-			// Delivered in memory. The open terminal WebSocket already refreshes
-			// the interaction lease on its own timer, so no durable row is
-			// needed to keep the session from idle-pausing.
-		} else if err := retryTerminalRequest(ctx, func() error {
+		if err := retryTerminalRequest(ctx, func() error {
 			return s.store.QueueTerminalInput(ctx, terminal, message.InputID, data)
 		}); err != nil {
 			return err
@@ -351,15 +297,6 @@ func (s *Server) writeTerminalOutput(
 	defer ticker.Stop()
 	startupDeadline := time.NewTimer(terminalReadyTimeout)
 	defer startupDeadline.Stop()
-	// With the stream enabled, a Postgres NOTIFY wakes this loop the moment a
-	// new output row commits; the ticker stays as the cross-replica and
-	// missed-notification fallback.
-	var wake chan struct{}
-	if s.terminalStreamEnabled {
-		var cancelWake func()
-		wake, cancelWake = s.terminalStreams.subscribeOutput(terminal.ID)
-		defer cancelWake()
-	}
 	replayComplete := false
 	startingSent := false
 	ready := false
@@ -374,14 +311,6 @@ func (s *Server) writeTerminalOutput(
 			if state == "open" {
 				messageType = "ready"
 				ready = true
-				if s.logger != nil {
-					s.logger.Info("browser terminal ready",
-						"session_id", terminal.SessionID,
-						"terminal_id", terminal.ID,
-						"kind", terminal.Kind,
-						"worker_epoch", terminal.WorkerEpoch,
-					)
-				}
 			} else {
 				startingSent = true
 			}
@@ -439,7 +368,6 @@ func (s *Server) writeTerminalOutput(
 			if !ready {
 				return errTerminalProcessUnavailable
 			}
-		case <-wake:
 		case <-ticker.C:
 		}
 	}

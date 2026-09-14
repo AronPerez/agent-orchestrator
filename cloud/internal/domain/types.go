@@ -70,9 +70,6 @@ type Session struct {
 	ActivityState    contract.ActivityState
 	IsTerminated     bool
 	RuntimeConnected bool
-	SandboxProvider  string
-	DesiredState     string
-	ObservedState    string
 	RuntimeState     string
 	RuntimeError     string
 	CreatedAt        time.Time
@@ -108,12 +105,6 @@ type CreateSession struct {
 	ResourceProfile  json.RawMessage
 	BootstrapContext json.RawMessage
 	Release          string
-	// ParentSessionID links a top-level worker to a project's active
-	// orchestrator so the orchestrator sees, drives, and receives reports from
-	// it exactly as it would a worker it spawned itself. Empty for an
-	// orchestrator, a standalone worker, or a worker created for a project that
-	// has no active orchestrator.
-	ParentSessionID string
 }
 
 type ClientEvent struct {

@@ -22,12 +22,9 @@ import { cardShell, cardShellPressed, Dot } from "./ui";
 export function SessionCard({
 	session,
 	showProject = false,
-	now,
 }: {
 	session: DashboardSession;
 	showProject?: boolean;
-	/** The board's clock, so the list owns one interval instead of one per card. */
-	now: number;
 }) {
 	const t = useTheme();
 	const styles = useThemedStyles(makeStyles);
@@ -37,7 +34,7 @@ export function SessionCard({
 	const title = sessionTitle(session);
 	const branch = showBranch(session.branch, title) ? session.branch : null;
 	const prs = prLine(session);
-	const when = relativeTime(session.lastActivityAt, now);
+	const when = relativeTime(session.lastActivityAt);
 	// Only a real tracker reference earns a chip; a hand-typed task name does
 	// not, matching desktop.
 	const issue = trackerIssueId(session.issueId);

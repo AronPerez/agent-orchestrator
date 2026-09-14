@@ -58,17 +58,7 @@ func TestRunProjectsImportsIntoTarget(t *testing.T) {
 	sourceDir := filepath.Join(t.TempDir(), "source")
 	targetDir := filepath.Join(t.TempDir(), "target")
 	registeredAt := time.Unix(200, 0).UTC()
-	source := writeProject(t, sourceDir, "alpha", "/repos/alpha", registeredAt)
-	original, ok, err := source.GetProject(ctx, "alpha")
-	if err != nil || !ok {
-		t.Fatalf("source project: %v", err)
-	}
-	original.RepoOriginURL = "https://gitlab.com/alice/repo"
-	original.Config.CanonicalRepoURL = "https://gitlab.com/group/subgroup/repo"
-	if err := source.UpsertProject(ctx, original); err != nil {
-		t.Fatal(err)
-	}
-
+	writeProject(t, sourceDir, "alpha", "/repos/alpha", registeredAt)
 	target := openStore(t, targetDir)
 	svc := New(Deps{Store: target, TargetDataDir: targetDir, OpenSource: openReadOnlySource})
 
@@ -90,10 +80,6 @@ func TestRunProjectsImportsIntoTarget(t *testing.T) {
 	if !ok || !got.RegisteredAt.Equal(registeredAt) {
 		t.Fatalf("target project = %#v, want registered_at %s", got, registeredAt)
 	}
-	if got.Config.CanonicalRepoURL != original.Config.CanonicalRepoURL {
-		t.Fatalf("canonical identity lost during native import: %+v", got.Config)
-	}
-
 }
 
 func TestRunProjectsRejectsSameSourceAndTarget(t *testing.T) {
@@ -139,7 +125,7 @@ func openReadOnlySource(ctx context.Context, dataDir string) (SourceStore, error
 	return sqlite.OpenReadOnly(ctx, dataDir)
 }
 
-func writeProject(t *testing.T, dataDir string, id string, path string, registeredAt time.Time) *sqlite.Store {
+func writeProject(t *testing.T, dataDir string, id string, path string, registeredAt time.Time) {
 	t.Helper()
 	store := openStore(t, dataDir)
 	project := domain.ProjectRecord{
@@ -154,5 +140,4 @@ func writeProject(t *testing.T, dataDir string, id string, path string, register
 	if err := store.UpsertWorkspaceProject(context.Background(), project, nil); err != nil {
 		t.Fatal(err)
 	}
-	return store
 }
