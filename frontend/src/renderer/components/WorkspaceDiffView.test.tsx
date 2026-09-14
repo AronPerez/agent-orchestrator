@@ -87,10 +87,13 @@ function baseDetail(
     size: 120,
     binary: false,
     deleted: false,
+    editable: true,
+    fileFingerprint: "file-1",
     content: "",
     contentTruncated: false,
     diff: "diff --git a/src/App.tsx b/src/App.tsx\nindex 111..222 100644\n--- a/src/App.tsx\n+++ b/src/App.tsx\n@@ -1,1 +1,1 @@\n-const value = 0;\n+const value = 1;\n",
     diffTruncated: false,
+    workspaceVersion: "workspace-1",
     ...overrides,
   };
 }

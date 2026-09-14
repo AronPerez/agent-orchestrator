@@ -96,12 +96,16 @@ environments plus the local worker image, starts PostgreSQL on
 role, grants only runtime DML privileges to the separate non-superuser
 `ao_cloud_app` role, disables login for the image-bootstrap superuser, and
 exposes the API on
-`http://127.0.0.1:8081` (avoiding the desktop daemon's usual port). Local auth
-is enabled. The command then starts the Cloud UI on `http://127.0.0.1:3000`;
-create a development account with email/password on its sign-in screen. The
-browser receives only an HttpOnly session cookie. The Docker socket is mounted
-only into the control-plane container so it can create sibling workers; worker
-containers never receive the socket. Local Docker workers do not auto-pause.
+`http://127.0.0.1:8081` (avoiding the desktop daemon's usual port), and leaves
+the stack running. Local auth is enabled; point the desktop app at it with
+`AO_CLOUD_OFFERING=on AO_CLOUD_CONTROL_PLANE_URL=http://127.0.0.1:8081 npm run dev`
+from `frontend/` and register a development email/password account in-app to
+sign in. The optional private Next.js Cloud UI on `http://127.0.0.1:3000`
+requires the (uninitialized) `private/ao-cloud` submodule and is not needed for
+desktop-app testing; when run it receives only an HttpOnly session cookie. The
+Docker socket is mounted only into the control-plane container so it can create
+sibling workers; worker containers never receive the socket. Local Docker
+workers do not auto-pause.
 
 Use `npm run cloud:local:down` to stop containers while retaining data and
 `npm run cloud:local:reset` to stop them and delete the local database
@@ -194,10 +198,12 @@ If a production migration fails, promotion stops and the existing production
 API keeps running. Application rollback does not reverse an applied migration,
 so migrations must remain compatible with the previous API release.
 
-Only migration code and the tested application artifacts are promoted. NodeOps
-and worker settings come from the target environment's `nodeops` and `worker`
-Secrets Manager JSON entries; deployment validates every required field before
-registering ECS tasks. No provider auto-pause value is set by deployment.
+Only migration code and the tested application artifacts are promoted. Sandbox
+provider and worker settings come from the target environment's `nodeops` or
+`coder` document and its `worker` Secrets Manager JSON entry; deployment
+validates every required field before registering ECS tasks. Production uses
+the provider verified in staging. No provider auto-pause value is set by
+deployment.
 Staging database rows are never copied to production: users, organizations,
 projects, sessions, events, credentials, and all other data remain isolated in
 their respective databases. The AWS instances are named
@@ -237,6 +243,7 @@ All resource routes use `/api/cloud/v1`. Project and session creation require an
 | `POST` | `/orgs/{orgId}/projects/scratch` | Idempotently create a private repository, project, and orchestrator session |
 | `GET/POST` | `/orgs/{orgId}/sessions` | List or create sessions |
 | `GET` | `/orgs/{orgId}/sessions/{sessionId}` | Read a session |
+| `POST` | `/orgs/{orgId}/sessions/{sessionId}/resume` | Record explicit per-session resume intent |
 | `POST` | `/orgs/{orgId}/sessions/{sessionId}/messages` | Durably queue a message |
 | `GET` | `/orgs/{orgId}/sessions/{sessionId}/chat-events` | Replay committed client events |
 | `GET` | `/orgs/{orgId}/sessions/{sessionId}/events` | Replay and stream client events over SSE |
