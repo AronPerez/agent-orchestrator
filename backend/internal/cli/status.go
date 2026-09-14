@@ -47,18 +47,13 @@ type probeHTTPError struct {
 func (e probeHTTPError) Error() string { return fmt.Sprintf("%s: HTTP %d", e.path, e.status) }
 
 type daemonStatus struct {
-	State daemonState `json:"state"`
-	PID   int         `json:"pid,omitempty"`
-	Port  int         `json:"port,omitempty"`
-	// ExecutablePath is the binary the running daemon reports for itself, read
-	// from its own /healthz. It is the authority on which `ao` the app uses,
-	// which the CLI's own os.Executable is not: `ao doctor` may itself be a
-	// different install than the daemon the app started.
-	ExecutablePath string     `json:"executablePath,omitempty"`
-	StartedAt      *time.Time `json:"startedAt,omitempty"`
-	Uptime         string     `json:"uptime,omitempty"`
-	RunFile        string     `json:"runFile,omitempty"`
-	DataDir        string     `json:"dataDir,omitempty"`
+	State     daemonState `json:"state"`
+	PID       int         `json:"pid,omitempty"`
+	Port      int         `json:"port,omitempty"`
+	StartedAt *time.Time  `json:"startedAt,omitempty"`
+	Uptime    string      `json:"uptime,omitempty"`
+	RunFile   string      `json:"runFile,omitempty"`
+	DataDir   string      `json:"dataDir,omitempty"`
 	// URL is set only for a remote target, where there is no local run-file or
 	// data dir to report.
 	URL    string `json:"url,omitempty"`
@@ -67,7 +62,8 @@ type daemonStatus struct {
 	Error  string `json:"error,omitempty"`
 	owned  bool
 	// build and executable are what /healthz reported about the daemon itself.
-	// Unexported: only `ao doctor` compares them against this CLI's own build.
+	// Unexported: only `ao doctor` compares them against this CLI's own build,
+	// and `ao status --json` is a stable contract that does not need them.
 	build      daemonmeta.Build
 	executable string
 }
@@ -146,7 +142,6 @@ func (c *commandContext) inspectDaemon(ctx context.Context) (daemonStatus, error
 	st.owned = true
 	st.build = health.Build
 	st.executable = health.ExecutablePath
-	st.ExecutablePath = health.ExecutablePath
 	st.Health = health.Status
 	if health.Status != "ok" {
 		st.State = stateUnhealthy
@@ -194,9 +189,6 @@ func (c *commandContext) inspectRemoteDaemon(ctx context.Context) daemonStatus {
 		return st
 	}
 	st.PID = health.PID
-	st.ExecutablePath = health.ExecutablePath
-	st.executable = health.ExecutablePath
-	st.build = health.Build
 	st.Health = health.Status
 	if health.Status != "ok" {
 		st.State = stateUnhealthy

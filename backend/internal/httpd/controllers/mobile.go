@@ -3,7 +3,6 @@ package controllers
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"sync"
 	"time"
@@ -160,18 +159,10 @@ type BridgeService struct {
 	// until AO was restarted. Nil in tests that set Tunnel directly.
 	ResolveTunnel func() TunnelController
 
-	// transitionMu serializes every operation that changes persisted bridge
-	// state, listener state, or connector state. Status deliberately does not
-	// take it, so a slow listener or connector operation cannot freeze polling.
-	transitionMu sync.Mutex
-
 	// Guards Tunnel, which ensureTunnel may replace while HTTP handlers read it.
 	tunnelMu sync.RWMutex
 
-	// stateMu protects only the short-lived in-memory status snapshot below. No
-	// listener, filesystem, or connector call may run while it is held.
-	stateMu sync.RWMutex
-	// serveErr records the last Apply/Clear failure for Status.
+	// serveErr records the last Apply failure so Status can report serve_failed.
 	serveErr error
 }
 
@@ -265,27 +256,19 @@ func (b *BridgeService) ensureTunnel() TunnelController {
 	if b.ResolveTunnel == nil {
 		return nil
 	}
-	// Resolution may inspect the filesystem. Keep it outside tunnelMu so Status
-	// can continue reporting the currently known connector snapshot while that
-	// work is slow. transitionMu ensures only one mutator resolves at a time.
-	resolved := b.ResolveTunnel()
-	if resolved == nil {
-		return nil
-	}
 	b.tunnelMu.Lock()
 	defer b.tunnelMu.Unlock()
 	if b.Tunnel == nil {
-		b.Tunnel = resolved
+		b.Tunnel = b.ResolveTunnel()
 	}
 	return b.Tunnel
 }
 
 func (b *BridgeService) tunnelEndpoint() *mobilebridge.TunnelEndpoint {
-	t := b.tunnel()
-	if t == nil {
+	if b.tunnel() == nil {
 		return nil
 	}
-	return t.Endpoint()
+	return b.tunnel().Endpoint()
 }
 
 func (b *BridgeService) tunnelStatus() mobilebridge.TunnelStatus {
@@ -326,28 +309,15 @@ func (b *BridgeService) serveTarget() int {
 	return mobilebridge.NewServe().Target(context.Background())
 }
 
-func (b *BridgeService) serveError() error {
-	b.stateMu.RLock()
-	defer b.stateMu.RUnlock()
-	return b.serveErr
-}
-
-func (b *BridgeService) setServeError(err error) {
-	b.stateMu.Lock()
-	defer b.stateMu.Unlock()
-	b.serveErr = err
-}
-
 // securePairingStatus assembles the SecurePairing block of Status from the
 // persisted mode flag and current bridge/proxy state.
 func (b *BridgeService) securePairingStatus(on, bridgeUp bool) SecurePairingStatus {
-	serveErr := b.serveError()
 	sp := SecurePairingStatus{Enabled: on}
 	if !on {
 		// The mode is off, but a failed Clear may have left the proxy live —
 		// report that without touching the network (no queryTS/serveTarget
 		// calls when the mode is off).
-		if serveErr != nil {
+		if b.serveErr != nil {
 			sp.Reason = "clear_failed"
 		}
 		return sp
@@ -366,7 +336,7 @@ func (b *BridgeService) securePairingStatus(on, bridgeUp bool) SecurePairingStat
 	if !bridgeUp {
 		return sp
 	}
-	if serveErr != nil {
+	if b.serveErr != nil {
 		sp.Reason = "serve_failed"
 		return sp
 	}
@@ -382,31 +352,26 @@ func (b *BridgeService) securePairingStatus(on, bridgeUp bool) SecurePairingStat
 // choice. Turning it on applies the proxy immediately when the bridge is
 // already running; turning it off always tears the proxy down.
 func (b *BridgeService) SetSecurePairing(on bool) (MobileStatusResponse, error) {
-	b.transitionMu.Lock()
-	defer b.transitionMu.Unlock()
-
 	st, _ := mobilebridge.Load(b.ConfigPath)
 	st.SecurePairing = on
 	if err := mobilebridge.Save(b.ConfigPath, st); err != nil {
 		return MobileStatusResponse{}, err
 	}
-	b.setServeError(nil)
+	b.serveErr = nil
 	if on {
 		if b.LAN.Running() {
-			b.setServeError(b.applyServe(b.LAN.BoundPort()))
+			b.serveErr = b.applyServe(b.LAN.BoundPort())
 		}
 	} else {
 		// Record rather than return: the flag is already persisted off, so a
 		// failure here means the proxy may still be live and the user needs to
 		// be told — the same contract the enable path uses for applyServe.
-		b.setServeError(b.clearServe())
+		b.serveErr = b.clearServe()
 	}
 	return b.Status(), nil
 }
 
-// enableWithPasswordLocked performs an enable or password rotation while the
-// caller owns transitionMu.
-func (b *BridgeService) enableWithPasswordLocked(pw string) (MobileStatusResponse, error) {
+func (b *BridgeService) enableWithPassword(pw string) (MobileStatusResponse, error) {
 	// Snapshot state so we can roll back the in-memory side effects (armed hash,
 	// running listener) if we fail before durable state is written. Otherwise a
 	// failed enable would leave a LAN listener open on 0.0.0.0 with the new
@@ -445,16 +410,9 @@ func (b *BridgeService) enableWithPasswordLocked(pw string) (MobileStatusRespons
 	// method (it has no password to rotate); see RestoreOnBoot, which mirrors
 	// this same post-Start apply. A failure is recorded, never fatal: the
 	// bridge stays up in plaintext mode and Status reports serve_failed.
-	b.startConnectorsLocked(port, st.SecurePairing)
-	return b.Status(), nil
-}
-
-// startConnectorsLocked is the shared post-Start step for fresh enables,
-// password rotations, and boot restoration. The caller owns transitionMu.
-func (b *BridgeService) startConnectorsLocked(port int, securePairing bool) {
-	b.setServeError(nil)
-	if securePairing {
-		b.setServeError(b.applyServe(port))
+	b.serveErr = nil
+	if st, _ := mobilebridge.Load(b.ConfigPath); st.SecurePairing {
+		b.serveErr = b.applyServe(port)
 	}
 	// Point the connector at the port Start actually bound, not DefaultPort:
 	// Start falls back to an ephemeral port when the default is taken, and a
@@ -466,6 +424,7 @@ func (b *BridgeService) startConnectorsLocked(port int, securePairing bool) {
 	if t := b.ensureTunnel(); t != nil {
 		t.Start(port)
 	}
+	return b.Status(), nil
 }
 
 // RestoreOnBoot re-arms the LAN listener from persisted state across a daemon
@@ -479,31 +438,33 @@ func (b *BridgeService) startConnectorsLocked(port int, securePairing bool) {
 // serveErr, never returned — the caller (restoreMobileOnBoot) treats this as
 // best-effort and must never block daemon boot on it.
 func (b *BridgeService) RestoreOnBoot(state mobilebridge.State) error {
-	b.transitionMu.Lock()
-	defer b.transitionMu.Unlock()
-
-	prevHash := b.LAN.PasswordHash()
 	b.LAN.SetPasswordHash(mobilebridge.HashPassword(state.Password))
 	port, err := b.LAN.Start(state.LastPort, state.Bind)
 	if err != nil {
-		b.LAN.SetPasswordHash(prevHash)
 		return err
 	}
-	b.startConnectorsLocked(port, state.SecurePairing)
+	b.serveErr = nil
+	if state.SecurePairing {
+		b.serveErr = b.applyServe(port)
+	}
+	// A restart does not go through enableWithPassword — there is no password to
+	// rotate — so the connector has to be started here too. Without it the
+	// bridge comes back LAN-only and the UI shows Connect Mobile enabled while
+	// remote access is silently gone until the user toggles it off and on.
+	if t := b.ensureTunnel(); t != nil {
+		t.Start(port)
+	}
 	return nil
 }
 
 // Enable generates a fresh password, arms the auth hash, and starts the LAN
 // listener, persisting the enabled state.
 func (b *BridgeService) Enable() (MobileStatusResponse, error) {
-	b.transitionMu.Lock()
-	defer b.transitionMu.Unlock()
-
 	pw, err := mobilebridge.GeneratePassword()
 	if err != nil {
 		return MobileStatusResponse{}, err
 	}
-	return b.enableWithPasswordLocked(pw)
+	return b.enableWithPassword(pw)
 }
 
 // StartRemoteAccess looks for a connector again and starts it against the port
@@ -519,9 +480,6 @@ func (b *BridgeService) Enable() (MobileStatusResponse, error) {
 // and enabling is the user's decision to make, not a side effect of installing
 // a binary.
 func (b *BridgeService) StartRemoteAccess() (MobileStatusResponse, error) {
-	b.transitionMu.Lock()
-	defer b.transitionMu.Unlock()
-
 	st, err := mobilebridge.Load(b.ConfigPath)
 	if err != nil {
 		return MobileStatusResponse{}, err
@@ -538,21 +496,15 @@ func (b *BridgeService) StartRemoteAccess() (MobileStatusResponse, error) {
 // Regenerate rotates the connection password on the running listener, which
 // drops the currently paired phone (it authenticates against the new hash).
 func (b *BridgeService) Regenerate() (MobileStatusResponse, error) {
-	b.transitionMu.Lock()
-	defer b.transitionMu.Unlock()
-
 	pw, err := mobilebridge.GeneratePassword()
 	if err != nil {
 		return MobileStatusResponse{}, err
 	}
-	return b.enableWithPasswordLocked(pw) // rotate → drops current phone (new hash)
+	return b.enableWithPassword(pw) // rotate → drops current phone (new hash)
 }
 
 // Disable stops the LAN listener and persists the disabled state.
 func (b *BridgeService) Disable() error {
-	b.transitionMu.Lock()
-	defer b.transitionMu.Unlock()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	// Stop the connector first. Leaving it up after the user turned Connect
@@ -561,12 +513,9 @@ func (b *BridgeService) Disable() error {
 	if t := b.tunnel(); t != nil {
 		t.Stop()
 	}
-	stopErr := b.LAN.Stop(ctx)
-	if stopErr != nil && b.LAN.Running() {
-		return stopErr
+	if err := b.LAN.Stop(ctx); err != nil {
+		return err
 	}
-	// Forced cleanup can finish after the graceful-shutdown deadline. Persist
-	// the disabled preference once stopped, while still returning that error.
 	st, _ := mobilebridge.Load(b.ConfigPath)
 	// Only touch the tailnet proxy when this bridge actually installed one.
 	// `tailscale serve --https=443 off` is node-global state: clearing it
@@ -577,7 +526,7 @@ func (b *BridgeService) Disable() error {
 		_ = b.clearServe()
 	}
 	st.Enabled = false
-	return errors.Join(stopErr, mobilebridge.Save(b.ConfigPath, st))
+	return mobilebridge.Save(b.ConfigPath, st)
 }
 
 // ShutdownTunnel stops the managed connector on the way out.
@@ -593,9 +542,6 @@ func (b *BridgeService) Disable() error {
 // restore brings the connector back on the next start. This ends the process,
 // not the user's preference.
 func (b *BridgeService) ShutdownTunnel() {
-	b.transitionMu.Lock()
-	defer b.transitionMu.Unlock()
-
 	t := b.tunnel()
 	if t == nil {
 		return // Remote access is optional; nothing to stop without cloudflared.
@@ -611,9 +557,6 @@ func (b *BridgeService) ShutdownTunnel() {
 // place. The persisted SecurePairing preference is deliberately left set, so
 // RestoreOnBoot re-applies the proxy against the next bound port.
 func (b *BridgeService) ShutdownServe() {
-	b.transitionMu.Lock()
-	defer b.transitionMu.Unlock()
-
 	st, _ := mobilebridge.Load(b.ConfigPath)
 	if !st.Enabled || !st.SecurePairing {
 		return

@@ -190,7 +190,6 @@ function releaseConversationDispatch(
 
 const CONVERSATION_PAGE_SIZE = 200;
 const CONFIG_OPTIONS_POLL_INTERVAL_MS = 5_000;
-const SKILLS_POLL_INTERVAL_MS = 60_000;
 
 /**
  * Answers that will never change on a retry. SESSION_MODE_MISMATCH is permanent
@@ -1256,13 +1255,8 @@ export function useConversationSkills(
     // second renderer event channel solely for ephemeral provider metadata. The
     // catalog can be large and changes rarely, so it intentionally refreshes much
     // less often than conversation state.
-    staleTime: SKILLS_POLL_INTERVAL_MS,
-    // A cached catalog can outlive its controller. Stop polling a readiness
-    // conflict until the controller-gated query is re-enabled or invalidated.
-    refetchInterval: (query) =>
-      apiErrorCode(query.state.error) === "CHAT_CONTROLLER_NOT_READY"
-        ? false
-        : SKILLS_POLL_INTERVAL_MS,
+    staleTime: 60 * 1000,
+    refetchInterval: 60 * 1000,
     retry: false,
     queryFn: async () => {
       const { data, error } = await daemonConversationClient(session!).GET(

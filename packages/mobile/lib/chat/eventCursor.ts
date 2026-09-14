@@ -1,5 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { DEFAULT_CONFIG, machineIdentity, type ServerConfig } from "../config";
+import { DEFAULT_CONFIG, type ServerConfig } from "../config";
 import type { HostMetadata } from "../hosts";
 
 /**
@@ -23,13 +23,17 @@ export const HEAD_CURSOR = Number.MAX_SAFE_INTEGER;
 /**
  * Storage key for a machine's event cursor.
  *
- * Keyed on the machine's identity, not the address it happened to answer on —
- * see machineIdentity, which owns that rule. Keying by address gave one daemon
- * a cursor per path, so every network change started from zero and replayed the
- * entire backlog. The prefix keeps the key shape this shipped with.
+ * Keyed on the machine's identity, not the address it happened to answer on.
+ * The same daemon is reachable over LAN, Tailscale and the tunnel, and keying
+ * by address gave each of those its own cursor — so every network change
+ * started from zero and replayed the entire backlog.
+ *
+ * A pairing migrated from the single-server config has no identity until it
+ * connects once, so it falls back to the address.
  */
 export function eventCursorKey(cfg: ServerConfig): string {
-	return `ao.chat.events.${machineIdentity(cfg)}`;
+	if (cfg.hostId) return `ao.chat.events.host.${cfg.hostId}`;
+	return `ao.chat.events.${cfg.secure ? "https" : "http"}.${cfg.host}.${cfg.httpPort}`;
 }
 
 /** Remove every replay key a machine may have used. Identified hosts converge

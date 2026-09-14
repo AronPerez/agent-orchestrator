@@ -11,10 +11,10 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as ShellRouteImport } from './routes/_shell'
 import { Route as ShellIndexRouteImport } from './routes/_shell.index'
-import { Route as ShellSettingsRouteImport } from './routes/_shell.settings'
 import { Route as ShellTerminalsRouteImport } from './routes/_shell.terminals'
-import { Route as ShellHostHostIdProjectProjectIdRouteImport } from './routes/_shell.host.$hostId.project.$projectId'
+import { Route as ShellSettingsRouteImport } from './routes/_shell.settings'
 import { Route as ShellHostHostIdSessionSessionIdRouteImport } from './routes/_shell.host.$hostId.session.$sessionId'
+import { Route as ShellHostHostIdProjectProjectIdRouteImport } from './routes/_shell.host.$hostId.project.$projectId'
 import { Route as ShellHostHostIdProjectProjectIdSettingsRouteImport } from './routes/_shell.host.$hostId.project.$projectId_.settings'
 
 const ShellRoute = ShellRouteImport.update({
@@ -26,26 +26,26 @@ const ShellIndexRoute = ShellIndexRouteImport.update({
   path: '/',
   getParentRoute: () => ShellRoute,
 } as any)
-const ShellSettingsRoute = ShellSettingsRouteImport.update({
-  id: '/settings',
-  path: '/settings',
-  getParentRoute: () => ShellRoute,
-} as any)
 const ShellTerminalsRoute = ShellTerminalsRouteImport.update({
   id: '/terminals',
   path: '/terminals',
   getParentRoute: () => ShellRoute,
 } as any)
-const ShellHostHostIdProjectProjectIdRoute =
-  ShellHostHostIdProjectProjectIdRouteImport.update({
-    id: '/host/$hostId/project/$projectId',
-    path: '/host/$hostId/project/$projectId',
-    getParentRoute: () => ShellRoute,
-  } as any)
+const ShellSettingsRoute = ShellSettingsRouteImport.update({
+  id: '/settings',
+  path: '/settings',
+  getParentRoute: () => ShellRoute,
+} as any)
 const ShellHostHostIdSessionSessionIdRoute =
   ShellHostHostIdSessionSessionIdRouteImport.update({
     id: '/host/$hostId/session/$sessionId',
     path: '/host/$hostId/session/$sessionId',
+    getParentRoute: () => ShellRoute,
+  } as any)
+const ShellHostHostIdProjectProjectIdRoute =
+  ShellHostHostIdProjectProjectIdRouteImport.update({
+    id: '/host/$hostId/project/$projectId',
+    path: '/host/$hostId/project/$projectId',
     getParentRoute: () => ShellRoute,
   } as any)
 const ShellHostHostIdProjectProjectIdSettingsRoute =
@@ -129,13 +129,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ShellIndexRouteImport
       parentRoute: typeof ShellRoute
     }
-    '/_shell/settings': {
-      id: '/_shell/settings'
-      path: '/settings'
-      fullPath: '/settings'
-      preLoaderRoute: typeof ShellSettingsRouteImport
-      parentRoute: typeof ShellRoute
-    }
     '/_shell/terminals': {
       id: '/_shell/terminals'
       path: '/terminals'
@@ -143,11 +136,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ShellTerminalsRouteImport
       parentRoute: typeof ShellRoute
     }
-    '/_shell/host/$hostId/project/$projectId': {
-      id: '/_shell/host/$hostId/project/$projectId'
-      path: '/host/$hostId/project/$projectId'
-      fullPath: '/host/$hostId/project/$projectId'
-      preLoaderRoute: typeof ShellHostHostIdProjectProjectIdRouteImport
+    '/_shell/settings': {
+      id: '/_shell/settings'
+      path: '/settings'
+      fullPath: '/settings'
+      preLoaderRoute: typeof ShellSettingsRouteImport
       parentRoute: typeof ShellRoute
     }
     '/_shell/host/$hostId/session/$sessionId': {
@@ -155,6 +148,13 @@ declare module '@tanstack/react-router' {
       path: '/host/$hostId/session/$sessionId'
       fullPath: '/host/$hostId/session/$sessionId'
       preLoaderRoute: typeof ShellHostHostIdSessionSessionIdRouteImport
+      parentRoute: typeof ShellRoute
+    }
+    '/_shell/host/$hostId/project/$projectId': {
+      id: '/_shell/host/$hostId/project/$projectId'
+      path: '/host/$hostId/project/$projectId'
+      fullPath: '/host/$hostId/project/$projectId'
+      preLoaderRoute: typeof ShellHostHostIdProjectProjectIdRouteImport
       parentRoute: typeof ShellRoute
     }
     '/_shell/host/$hostId/project/$projectId_/settings': {

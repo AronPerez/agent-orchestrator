@@ -72,27 +72,13 @@ func (q *Queries) ClearReviewerHandleByHarness(ctx context.Context, arg ClearRev
 }
 
 const getReviewByID = `-- name: GetReviewByID :one
-SELECT id, session_id, project_id, harness, pr_url, reviewer_handle_id, agent_session_id, reviewer_activity_state, reviewer_launch_id, created_at, updated_at
+SELECT id, session_id, project_id, harness, pr_url, reviewer_handle_id, agent_session_id, created_at, updated_at
 FROM review WHERE id = ?
 `
 
-type GetReviewByIDRow struct {
-	ID                    string
-	SessionID             domain.SessionID
-	ProjectID             domain.ProjectID
-	Harness               domain.ReviewerHarness
-	PRURL                 string
-	ReviewerHandleID      string
-	AgentSessionID        string
-	ReviewerActivityState string
-	ReviewerLaunchID      string
-	CreatedAt             time.Time
-	UpdatedAt             time.Time
-}
-
-func (q *Queries) GetReviewByID(ctx context.Context, id string) (GetReviewByIDRow, error) {
+func (q *Queries) GetReviewByID(ctx context.Context, id string) (Review, error) {
 	row := q.db.QueryRowContext(ctx, getReviewByID, id)
-	var i GetReviewByIDRow
+	var i Review
 	err := row.Scan(
 		&i.ID,
 		&i.SessionID,
@@ -101,8 +87,6 @@ func (q *Queries) GetReviewByID(ctx context.Context, id string) (GetReviewByIDRo
 		&i.PRURL,
 		&i.ReviewerHandleID,
 		&i.AgentSessionID,
-		&i.ReviewerActivityState,
-		&i.ReviewerLaunchID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -110,27 +94,13 @@ func (q *Queries) GetReviewByID(ctx context.Context, id string) (GetReviewByIDRo
 }
 
 const getReviewBySession = `-- name: GetReviewBySession :one
-SELECT id, session_id, project_id, harness, pr_url, reviewer_handle_id, agent_session_id, reviewer_activity_state, reviewer_launch_id, created_at, updated_at
+SELECT id, session_id, project_id, harness, pr_url, reviewer_handle_id, agent_session_id, created_at, updated_at
 FROM review WHERE session_id = ? ORDER BY updated_at DESC, created_at DESC, id DESC LIMIT 1
 `
 
-type GetReviewBySessionRow struct {
-	ID                    string
-	SessionID             domain.SessionID
-	ProjectID             domain.ProjectID
-	Harness               domain.ReviewerHarness
-	PRURL                 string
-	ReviewerHandleID      string
-	AgentSessionID        string
-	ReviewerActivityState string
-	ReviewerLaunchID      string
-	CreatedAt             time.Time
-	UpdatedAt             time.Time
-}
-
-func (q *Queries) GetReviewBySession(ctx context.Context, sessionID domain.SessionID) (GetReviewBySessionRow, error) {
+func (q *Queries) GetReviewBySession(ctx context.Context, sessionID domain.SessionID) (Review, error) {
 	row := q.db.QueryRowContext(ctx, getReviewBySession, sessionID)
-	var i GetReviewBySessionRow
+	var i Review
 	err := row.Scan(
 		&i.ID,
 		&i.SessionID,
@@ -139,8 +109,6 @@ func (q *Queries) GetReviewBySession(ctx context.Context, sessionID domain.Sessi
 		&i.PRURL,
 		&i.ReviewerHandleID,
 		&i.AgentSessionID,
-		&i.ReviewerActivityState,
-		&i.ReviewerLaunchID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -148,7 +116,7 @@ func (q *Queries) GetReviewBySession(ctx context.Context, sessionID domain.Sessi
 }
 
 const getReviewBySessionAndHarness = `-- name: GetReviewBySessionAndHarness :one
-SELECT id, session_id, project_id, harness, pr_url, reviewer_handle_id, agent_session_id, reviewer_activity_state, reviewer_launch_id, created_at, updated_at
+SELECT id, session_id, project_id, harness, pr_url, reviewer_handle_id, agent_session_id, created_at, updated_at
 FROM review WHERE session_id = ? AND harness = ?
 `
 
@@ -157,23 +125,9 @@ type GetReviewBySessionAndHarnessParams struct {
 	Harness   domain.ReviewerHarness
 }
 
-type GetReviewBySessionAndHarnessRow struct {
-	ID                    string
-	SessionID             domain.SessionID
-	ProjectID             domain.ProjectID
-	Harness               domain.ReviewerHarness
-	PRURL                 string
-	ReviewerHandleID      string
-	AgentSessionID        string
-	ReviewerActivityState string
-	ReviewerLaunchID      string
-	CreatedAt             time.Time
-	UpdatedAt             time.Time
-}
-
-func (q *Queries) GetReviewBySessionAndHarness(ctx context.Context, arg GetReviewBySessionAndHarnessParams) (GetReviewBySessionAndHarnessRow, error) {
+func (q *Queries) GetReviewBySessionAndHarness(ctx context.Context, arg GetReviewBySessionAndHarnessParams) (Review, error) {
 	row := q.db.QueryRowContext(ctx, getReviewBySessionAndHarness, arg.SessionID, arg.Harness)
-	var i GetReviewBySessionAndHarnessRow
+	var i Review
 	err := row.Scan(
 		&i.ID,
 		&i.SessionID,
@@ -182,8 +136,6 @@ func (q *Queries) GetReviewBySessionAndHarness(ctx context.Context, arg GetRevie
 		&i.PRURL,
 		&i.ReviewerHandleID,
 		&i.AgentSessionID,
-		&i.ReviewerActivityState,
-		&i.ReviewerLaunchID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -561,33 +513,19 @@ func (q *Queries) ListReviewRunsBySession(ctx context.Context, sessionID domain.
 }
 
 const listReviewsBySession = `-- name: ListReviewsBySession :many
-SELECT id, session_id, project_id, harness, pr_url, reviewer_handle_id, agent_session_id, reviewer_activity_state, reviewer_launch_id, created_at, updated_at
+SELECT id, session_id, project_id, harness, pr_url, reviewer_handle_id, agent_session_id, created_at, updated_at
 FROM review WHERE session_id = ? ORDER BY updated_at DESC, created_at DESC, id DESC
 `
 
-type ListReviewsBySessionRow struct {
-	ID                    string
-	SessionID             domain.SessionID
-	ProjectID             domain.ProjectID
-	Harness               domain.ReviewerHarness
-	PRURL                 string
-	ReviewerHandleID      string
-	AgentSessionID        string
-	ReviewerActivityState string
-	ReviewerLaunchID      string
-	CreatedAt             time.Time
-	UpdatedAt             time.Time
-}
-
-func (q *Queries) ListReviewsBySession(ctx context.Context, sessionID domain.SessionID) ([]ListReviewsBySessionRow, error) {
+func (q *Queries) ListReviewsBySession(ctx context.Context, sessionID domain.SessionID) ([]Review, error) {
 	rows, err := q.db.QueryContext(ctx, listReviewsBySession, sessionID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []ListReviewsBySessionRow{}
+	items := []Review{}
 	for rows.Next() {
-		var i ListReviewsBySessionRow
+		var i Review
 		if err := rows.Scan(
 			&i.ID,
 			&i.SessionID,
@@ -596,8 +534,6 @@ func (q *Queries) ListReviewsBySession(ctx context.Context, sessionID domain.Ses
 			&i.PRURL,
 			&i.ReviewerHandleID,
 			&i.AgentSessionID,
-			&i.ReviewerActivityState,
-			&i.ReviewerLaunchID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -699,44 +635,6 @@ func (q *Queries) SupersedeStaleRunningReviewRuns(ctx context.Context, arg Super
 	return result.RowsAffected()
 }
 
-const updateReviewActivity = `-- name: UpdateReviewActivity :execrows
-UPDATE review SET
-    agent_session_id = CASE WHEN ? != '' THEN ? ELSE agent_session_id END,
-    reviewer_activity_state = CASE WHEN ? != '' THEN ? ELSE reviewer_activity_state END,
-    updated_at = CURRENT_TIMESTAMP
-WHERE id = ?
-  AND ((? != '' AND reviewer_launch_id = ?)
-    OR (? = '' AND reviewer_launch_id = ''))
-`
-
-type UpdateReviewActivityParams struct {
-	Column1               interface{}
-	AgentSessionID        string
-	Column3               interface{}
-	ReviewerActivityState string
-	ID                    string
-	Column6               interface{}
-	ReviewerLaunchID      string
-	Column8               interface{}
-}
-
-func (q *Queries) UpdateReviewActivity(ctx context.Context, arg UpdateReviewActivityParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, updateReviewActivity,
-		arg.Column1,
-		arg.AgentSessionID,
-		arg.Column3,
-		arg.ReviewerActivityState,
-		arg.ID,
-		arg.Column6,
-		arg.ReviewerLaunchID,
-		arg.Column8,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
-}
-
 const updateReviewAgentSessionID = `-- name: UpdateReviewAgentSessionID :execrows
 UPDATE review SET agent_session_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
 `
@@ -783,30 +681,26 @@ func (q *Queries) UpdateReviewRunResult(ctx context.Context, arg UpdateReviewRun
 }
 
 const upsertReview = `-- name: UpsertReview :exec
-INSERT INTO review (id, session_id, project_id, harness, pr_url, reviewer_handle_id, agent_session_id, reviewer_activity_state, reviewer_launch_id, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO review (id, session_id, project_id, harness, pr_url, reviewer_handle_id, agent_session_id, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (session_id, harness) DO UPDATE SET
     project_id = excluded.project_id,
     pr_url = excluded.pr_url,
     reviewer_handle_id = excluded.reviewer_handle_id,
     agent_session_id = CASE WHEN excluded.agent_session_id != '' THEN excluded.agent_session_id ELSE review.agent_session_id END,
-    reviewer_activity_state = CASE WHEN excluded.reviewer_activity_state != '' THEN excluded.reviewer_activity_state ELSE review.reviewer_activity_state END,
-    reviewer_launch_id = CASE WHEN excluded.reviewer_launch_id != '' THEN excluded.reviewer_launch_id ELSE review.reviewer_launch_id END,
     updated_at = excluded.updated_at
 `
 
 type UpsertReviewParams struct {
-	ID                    string
-	SessionID             domain.SessionID
-	ProjectID             domain.ProjectID
-	Harness               domain.ReviewerHarness
-	PRURL                 string
-	ReviewerHandleID      string
-	AgentSessionID        string
-	ReviewerActivityState string
-	ReviewerLaunchID      string
-	CreatedAt             time.Time
-	UpdatedAt             time.Time
+	ID               string
+	SessionID        domain.SessionID
+	ProjectID        domain.ProjectID
+	Harness          domain.ReviewerHarness
+	PRURL            string
+	ReviewerHandleID string
+	AgentSessionID   string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }
 
 func (q *Queries) UpsertReview(ctx context.Context, arg UpsertReviewParams) error {
@@ -818,8 +712,6 @@ func (q *Queries) UpsertReview(ctx context.Context, arg UpsertReviewParams) erro
 		arg.PRURL,
 		arg.ReviewerHandleID,
 		arg.AgentSessionID,
-		arg.ReviewerActivityState,
-		arg.ReviewerLaunchID,
 		arg.CreatedAt,
 		arg.UpdatedAt,
 	)

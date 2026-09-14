@@ -41,8 +41,8 @@ export function usePRSummaries(sessionIds: string[]): PRSummaryLookup {
 	const [generation, setGeneration] = useState(0);
 	const fetchedGeneration = useRef(-1);
 
-	// Keyed on the ids, not the array: a tick that changes any session field
-	// yields a new array even when the id set is unchanged.
+	// The array identity changes on every 8s poll, so the effect keys on the
+	// contents. Without this it would re-run continuously.
 	const key = sessionIds.join(",");
 
 	useEffect(() => {

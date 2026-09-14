@@ -3,13 +3,12 @@ package mobilebridge
 import (
 	"context"
 	"os"
+	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
-
-	aoprocess "github.com/aoagents/agent-orchestrator/backend/internal/process"
 )
 
 // processProbeTimeout bounds the shell-out used to identify a process. A hung
@@ -31,7 +30,7 @@ func IsLiveCloudflared(pid int) bool {
 	defer cancel()
 
 	if runtime.GOOS == "windows" {
-		out, err := aoprocess.CommandContext(ctx, "tasklist",
+		out, err := exec.CommandContext(ctx, "tasklist",
 			"/FI", "PID eq "+strconv.Itoa(pid), "/NH", "/FO", "CSV").Output()
 		if err != nil {
 			return false
@@ -39,7 +38,7 @@ func IsLiveCloudflared(pid int) bool {
 		return strings.Contains(strings.ToLower(string(out)), "cloudflared")
 	}
 
-	out, err := aoprocess.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
+	out, err := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
 	if err != nil {
 		return false // no such process, or ps unavailable
 	}
@@ -54,7 +53,7 @@ func KillProcess(pid int) error {
 		defer cancel()
 		// Windows has no signals; /T takes the child tree with it, which
 		// matters because cloudflared may have spawned helpers.
-		return aoprocess.CommandContext(ctx, "taskkill", "/PID", strconv.Itoa(pid), "/T", "/F").Run()
+		return exec.CommandContext(ctx, "taskkill", "/PID", strconv.Itoa(pid), "/T", "/F").Run()
 	}
 	p, err := os.FindProcess(pid)
 	if err != nil {

@@ -106,7 +106,7 @@ func DeriveStatus(
 	noSignalGrace time.Duration,
 ) SessionStatus {
 	if session.IsTerminated {
-		if len(openPRs(prs)) == 0 && anyMerged(prs) {
+		if anyMerged(prs) {
 			return StatusMerged
 		}
 		return StatusTerminated

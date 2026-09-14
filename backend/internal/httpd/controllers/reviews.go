@@ -19,10 +19,9 @@ import (
 // reviewerHandleId is the live reviewer pane's runtime handle, for the UI to
 // attach its terminal over /mux (empty when no reviewer has run).
 type ListReviewsResponse struct {
-	ReviewerHandleID      string                     `json:"reviewerHandleId"`
-	ReviewerHarness       domain.ReviewerHarness     `json:"reviewerHarness,omitempty"`
-	ReviewerActivityState string                     `json:"reviewerActivityState,omitempty" enum:"active,idle,waiting_input,blocked,exited"`
-	Reviews               []reviewcore.PRReviewState `json:"reviews"`
+	ReviewerHandleID string                     `json:"reviewerHandleId"`
+	ReviewerHarness  domain.ReviewerHarness     `json:"reviewerHarness,omitempty"`
+	Reviews          []reviewcore.PRReviewState `json:"reviews"`
 	// Runs is every recorded pass for this session, newest first. Reviews only
 	// carries the current and previous run per PR, which cannot answer "what did
 	// the other reviewer say" once a third pass has run — so the client cannot
@@ -123,27 +122,14 @@ func (c *ReviewsController) activity(w http.ResponseWriter, r *http.Request) {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
 		return
 	}
-	state := domain.ActivityState(strings.TrimSpace(in.State))
-	if state != "" {
-		switch state {
-		case domain.ActivityActive, domain.ActivityIdle, domain.ActivityWaitingInput, domain.ActivityBlocked, domain.ActivityExited:
-		default:
-			// Reviewer hooks are best-effort. If a reviewer CLI stops emitting one
-			// of AO's known activity states, degrade to a no-op instead of turning
-			// review-run polling into a surfaced hook failure.
-			state = ""
-		}
-	}
 	agentSessionID := capActivityMeta(domain.SanitizeControlChars(strings.TrimSpace(in.AgentSessionID)))
-	if state == "" && agentSessionID == "" {
-		envelope.WriteJSON(w, http.StatusOK, SetReviewActivityResponse{OK: true, ReviewSessionID: reviewSessionID})
+	if strings.TrimSpace(in.State) == "" && agentSessionID == "" {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "REVIEW_ACTIVITY_OR_SESSION_ID_REQUIRED", "Reviewer activity state or agent session ID is required", nil)
 		return
 	}
 	if err := c.Svc.ApplyReviewActivitySignal(r.Context(), reviewSessionID, reviewsvc.ActivitySignal{
 		Event:          capActivityMeta(domain.SanitizeControlChars(in.Event)),
-		State:          state,
 		AgentSessionID: agentSessionID,
-		LaunchID:       capActivityMeta(domain.SanitizeControlChars(strings.TrimSpace(in.LaunchID))),
 	}); err != nil {
 		if errors.Is(err, reviewsvc.ErrNotFound) {
 			envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "REVIEW_NOT_FOUND", "Unknown review session", nil)
@@ -352,11 +338,10 @@ func reviewsResponse(res reviewcore.SessionReviews, reviews []reviewcore.PRRevie
 		runs = []domain.ReviewRun{}
 	}
 	return ListReviewsResponse{
-		ReviewerHandleID:      res.ReviewerHandleID,
-		ReviewerHarness:       res.ReviewerHarness,
-		ReviewerActivityState: string(res.ReviewerActivityState),
-		Reviews:               reviews,
-		Runs:                  runs,
+		ReviewerHandleID: res.ReviewerHandleID,
+		ReviewerHarness:  res.ReviewerHarness,
+		Reviews:          reviews,
+		Runs:             runs,
 	}
 }
 

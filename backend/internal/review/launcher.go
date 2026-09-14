@@ -2,7 +2,6 @@ package review
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -62,32 +61,26 @@ type Launcher interface {
 
 // LaunchSpec is the engine's request to (re)launch a reviewer for one pass.
 type LaunchSpec struct {
-	RunID                string
-	BatchID              string
-	ReviewSessionID      string
-	LaunchID             string
-	WorkerID             domain.SessionID
-	ProjectID            domain.ProjectID
-	Harness              domain.ReviewerHarness
-	AgentConfig          domain.AgentConfig
-	WorkspacePath        string
-	AgentSessionID       string
-	RequireNativeHistory bool
-	PreviousRuns         []domain.ReviewRun
-	PRURL                string
-	TargetSHA            string
-	ReviewQueue          []ports.ReviewTask
-	ReviewIndex          int
+	RunID           string
+	BatchID         string
+	ReviewSessionID string
+	WorkerID        domain.SessionID
+	ProjectID       domain.ProjectID
+	Harness         domain.ReviewerHarness
+	AgentConfig     domain.AgentConfig
+	WorkspacePath   string
+	AgentSessionID  string
+	PreviousRuns    []domain.ReviewRun
+	PRURL           string
+	TargetSHA       string
+	ReviewQueue     []ports.ReviewTask
+	ReviewIndex     int
 }
 
 // LaunchResult is the terminal/runtime state created by a reviewer launch.
 type LaunchResult struct {
 	HandleID       string
-	LaunchID       string
 	AgentSessionID string
-	// NativeResumed reports whether the launch resumed the provider-native
-	// conversation instead of falling back to a fresh reviewer process.
-	NativeResumed bool
 }
 
 // reviewerRuntime is the runtime surface the launcher needs: create a pane,
@@ -385,11 +378,7 @@ func (l *agentLauncher) Spawn(ctx context.Context, spec LaunchSpec) (LaunchResul
 	if err != nil {
 		return LaunchResult{}, err
 	}
-	// A retained native id means this stable reviewer has provider-owned
-	// history even though its terminal process is gone. Recreate the pane by
-	// resuming that conversation; a first launch has no id and still pins the
-	// adapter's deterministic fresh identity through ReviewCommand.
-	return l.launchReviewerTerminalWithMode(ctx, spec, inv, strings.TrimSpace(spec.AgentSessionID) != "")
+	return l.launchReviewerTerminal(ctx, spec, inv)
 }
 
 func (l *agentLauncher) RestoreTerminal(ctx context.Context, spec LaunchSpec) (LaunchResult, error) {
@@ -398,6 +387,10 @@ func (l *agentLauncher) RestoreTerminal(ctx context.Context, spec LaunchSpec) (L
 		return LaunchResult{}, err
 	}
 	return l.launchReviewerTerminalWithMode(ctx, spec, inv, true)
+}
+
+func (l *agentLauncher) launchReviewerTerminal(ctx context.Context, spec LaunchSpec, inv ports.ReviewInvocation) (LaunchResult, error) {
+	return l.launchReviewerTerminalWithMode(ctx, spec, inv, false)
 }
 
 func (l *agentLauncher) launchReviewerTerminalWithMode(ctx context.Context, spec LaunchSpec, inv ports.ReviewInvocation, restoring bool) (LaunchResult, error) {
@@ -411,7 +404,6 @@ func (l *agentLauncher) launchReviewerTerminalWithMode(ctx context.Context, spec
 		}
 	}
 	var cmd ports.ReviewCommandSpec
-	nativeResumed := false
 	if restoring {
 		if restorer, ok := reviewer.(ports.ReviewerRestorer); ok {
 			restoreCmd, restoreOK, err := restorer.ReviewRestoreCommand(ctx, inv)
@@ -420,12 +412,8 @@ func (l *agentLauncher) launchReviewerTerminalWithMode(ctx context.Context, spec
 			}
 			if restoreOK {
 				cmd = restoreCmd
-				nativeResumed = restoreCmd.NativeResumed
 			}
 		}
-	}
-	if restoring && spec.RequireNativeHistory && len(cmd.Argv) == 0 {
-		return LaunchResult{}, errors.New("reviewer native history resume is unavailable")
 	}
 	if len(cmd.Argv) == 0 {
 		var err error
@@ -469,7 +457,7 @@ func (l *agentLauncher) launchReviewerTerminalWithMode(ctx context.Context, spec
 	if agentSessionID == "" {
 		agentSessionID = strings.TrimSpace(spec.AgentSessionID)
 	}
-	return LaunchResult{HandleID: handle.ID, LaunchID: strings.TrimSpace(spec.LaunchID), AgentSessionID: agentSessionID, NativeResumed: nativeResumed}, nil
+	return LaunchResult{HandleID: handle.ID, AgentSessionID: agentSessionID}, nil
 }
 
 func (l *agentLauncher) waitForPromptReadiness(ctx context.Context, reviewer ports.Reviewer, handle ports.RuntimeHandle) error {
@@ -541,29 +529,20 @@ func (l *agentLauncher) runtimeEnv(ctx context.Context, spec LaunchSpec, argv []
 	env["AO_REVIEW_SESSION_ID"] = spec.ReviewSessionID
 	env["AO_REVIEW_WORKER_SESSION_ID"] = string(spec.WorkerID)
 	env["AO_REVIEW_HARNESS"] = string(spec.Harness)
-	if strings.TrimSpace(spec.LaunchID) != "" {
-		env[sessionmanager.EnvRuntimeLaunchID] = spec.LaunchID
-	}
 	env[sessionmanager.EnvProjectID] = string(spec.ProjectID)
 	env[sessionmanager.EnvDataDir] = l.dataDir
 	if strings.TrimSpace(l.runFile) != "" {
 		env[EnvRunFile] = l.runFile
 	}
-	// pinnedDir is whichever directory ends up at the head of PATH here, so the
-	// launch-binary prepend below can put it back rather than letting a foreign
-	// `ao` beside the agent binary win a bare `ao` inside the reviewer pane.
-	pinnedDir := ""
-	path, err := sessionmanager.HookPATH(l.executable, os.Getenv, env, l.dataDir)
+	path, err := sessionmanager.HookPATH(l.executable, os.Getenv, env)
 	if err == nil {
 		env["PATH"] = path
-		pinnedDir = sessionmanager.PinnedHookDir(l.executable, l.dataDir)
 	} else if shimDir, shimErr := l.ensureAOShimDir(); shimErr == nil {
 		env["PATH"] = prependPathDir(shimDir, env["PATH"])
-		pinnedDir = shimDir
 	} else {
 		env[EnvAOCommandWarning] = fmt.Sprintf("PATH pin failed: %v; AO shim fallback failed: %v", err, shimErr)
 	}
-	sessionmanager.AugmentRuntimePATHForLaunchBinary(ctx, env, argv, exec.LookPath, pinnedDir)
+	sessionmanager.AugmentRuntimePATHForLaunchBinary(ctx, env, argv, exec.LookPath)
 	return env
 }
 

@@ -328,9 +328,9 @@ export function TaskComposer({
       : undefined);
   const modelCatalog: TaskComposerModelCatalog | undefined =
     modelCatalogQuery.data
-        ? {
-            allowCustom: modelCatalogQuery.data.allowCustom,
-            models: modelCatalogQuery.data.models,
+      ? {
+          allowCustom: modelCatalogQuery.data.allowCustom,
+          models: modelCatalogQuery.data.models,
           selectionMode: modelCatalogQuery.data.selectionMode,
         }
       : undefined;

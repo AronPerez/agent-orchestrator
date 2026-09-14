@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/gen"
 )
@@ -192,13 +190,7 @@ func (s *Store) CommitSessionControllerEpoch(
 ) (bool, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	tx, err := s.writeDB.BeginTx(ctx, nil)
-	if err != nil {
-		return false, fmt.Errorf("begin controller epoch for %s: %w", id, err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	q := s.qw.WithTx(tx)
-	rows, err := q.CommitSessionControllerEpoch(ctx, gen.CommitSessionControllerEpochParams{
+	rows, err := s.qw.CommitSessionControllerEpoch(ctx, gen.CommitSessionControllerEpochParams{
 		SessionMode:            target,
 		AgentSessionID:         nativeID,
 		ProviderConversationID: nativeID,
@@ -210,28 +202,7 @@ func (s *Store) CommitSessionControllerEpoch(
 	if err != nil {
 		return false, fmt.Errorf("commit controller epoch for %s: %w", id, err)
 	}
-	if rows == 0 {
-		return false, nil
-	}
-	if source == domain.SessionModeChat && target == domain.SessionModeTUI && nativeID == "" {
-		// A fresh TUI will choose its own native identity. Release the unused
-		// Chat reservation and event namespace in the same transaction, so a
-		// later return can bind that identity without inventing inherited history.
-		released, err := q.ReleaseUntouchedConversationProvider(ctx, gen.ReleaseUntouchedConversationProviderParams{
-			SessionID:       sql.NullString{String: string(id), Valid: true},
-			ProviderScopeID: uuid.NewString(),
-		})
-		if err != nil {
-			return false, fmt.Errorf("release untouched Chat provider for %s: %w", id, err)
-		}
-		if released != 1 {
-			return false, fmt.Errorf("release untouched Chat provider for %s: empty root proof changed", id)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("commit controller epoch transaction for %s: %w", id, err)
-	}
-	return true, nil
+	return rows > 0, nil
 }
 
 // EnqueueSessionInterfaceTransitionMessage queues a user message while an interface transition is active.

@@ -24,7 +24,6 @@ func (s *Store) InsertShellTerminal(ctx context.Context, rec shelltermsvc.ShellT
 		WorkingDir: rec.WorkingDir,
 		Title:      rec.Title,
 		AppRunID:   rec.AppRunID,
-		Transient:  rec.Transient,
 		CreatedAt:  rec.CreatedAt,
 	})
 	if err != nil {
@@ -70,8 +69,8 @@ func (s *Store) SelectShellTerminalsBySessionID(ctx context.Context, sessionID d
 }
 
 // SelectShellTerminalsFromPreviousAppRuns returns shell terminals left behind
-// by any app run other than the one given. Boot reconciliation preserves live
-// durable shells and destroys only abandoned transient commands.
+// by any app run other than the one given — the orphans the boot-time reaper
+// destroys.
 func (s *Store) SelectShellTerminalsFromPreviousAppRuns(ctx context.Context, appRunID string) ([]shelltermsvc.ShellTerminalRecord, error) {
 	rows, err := s.qr.SelectShellTerminalsFromPreviousAppRuns(ctx, appRunID)
 	if err != nil {
@@ -145,7 +144,6 @@ func shellTerminalFromGen(row gen.ShellTerminal) shelltermsvc.ShellTerminalRecor
 		WorkingDir: row.WorkingDir,
 		Title:      row.Title,
 		AppRunID:   row.AppRunID,
-		Transient:  row.Transient,
 		CreatedAt:  row.CreatedAt,
 	}
 	if row.ProjectID != nil {
@@ -163,14 +161,4 @@ func shellTerminalsFromGen(rows []gen.ShellTerminal) []shelltermsvc.ShellTermina
 		out = append(out, shellTerminalFromGen(row))
 	}
 	return out
-}
-
-// SelectRestorableShellTerminals includes durable shells from all app launches
-// and trusted command terminals belonging to the current launch.
-func (s *Store) SelectRestorableShellTerminals(ctx context.Context, appRunID string) ([]shelltermsvc.ShellTerminalRecord, error) {
-	rows, err := s.qr.SelectRestorableShellTerminals(ctx, appRunID)
-	if err != nil {
-		return nil, fmt.Errorf("select restorable shell terminals: %w", err)
-	}
-	return shellTerminalsFromGen(rows), nil
 }

@@ -19,11 +19,13 @@ const REVIEWER_HARNESS_IDS = [
 	"claude-code",
 	"codex",
 	"cline",
+	"continue",
 	"copilot",
 	"crush",
 	"cursor",
 	"devin",
 	"droid",
+	"goose",
 	"grok",
 	"kilocode",
 	"kiro",
@@ -32,6 +34,8 @@ const REVIEWER_HARNESS_IDS = [
 	"muse",
 	"opencode",
 	"pi",
+	"qwen",
+	"vibe",
 ] as const satisfies readonly ReviewerHarnessId[];
 
 type UnlistedReviewerHarness = Exclude<ReviewerHarnessId, (typeof REVIEWER_HARNESS_IDS)[number]>;
