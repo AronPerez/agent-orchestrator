@@ -692,7 +692,7 @@
   "pr.merge.conflictsWithBase": "Conflits avec la branche de base",
   "pr.merge.mergeable": "Fusionnable",
   "pr.merge.openConflicts": "Ouvrir les conflits de fusion",
-  "pr.merge.providerBlocked": "GitHub indique que cette pull request ne peut pas être fusionnée pour le moment.",
+  "pr.merge.providerBlocked": "{{provider}} indique que cette pull request ne peut pas être fusionnée pour le moment.",
   "pr.merge.unstable": "Instable",
   "pr.noPRYet": "pas encore de PR",
   "pr.noun.check_one": "vérification",
@@ -2111,5 +2111,7 @@
   "terminal.rendererLost": "L'affichage du terminal s'est arrêté sur ce GPU/pilote. Rouvrez la session ou redémarrez l'application.",
   "browser.previewTitle": "Aperçu du navigateur",
   "inspector.title": "Inspecteur",
-  "shell.openNavigation": "Ouvrir la navigation"
+  "shell.openNavigation": "Ouvrir la navigation",
+  "pr.review.notRequired": "Aucune revue requise",
+  "pr.merge.reasonComments": "Unresolved review comments must be resolved before this PR can merge."
 }

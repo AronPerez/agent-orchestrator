@@ -690,7 +690,7 @@
   "pr.merge.conflictsWithBase": "Konflikte mit dem Basis-Branch",
   "pr.merge.mergeable": "Mergebar",
   "pr.merge.openConflicts": "Merge-Konflikte öffnen",
-  "pr.merge.providerBlocked": "GitHub meldet derzeit, dass dieser Pull Request nicht gemergt werden kann.",
+  "pr.merge.providerBlocked": "{{provider}} meldet derzeit, dass dieser Pull Request nicht gemergt werden kann.",
   "pr.merge.unstable": "Instabil",
   "pr.noPRYet": "noch kein PR",
   "pr.noun.check_one": "Check",
@@ -2082,5 +2082,7 @@
   "terminal.rendererLost": "Die Terminalanzeige wurde auf dieser GPU/diesem Treiber beendet. Öffnen Sie die Sitzung erneut oder starten Sie die App neu.",
   "browser.previewTitle": "Browser-Vorschau",
   "inspector.title": "Inspektor",
-  "shell.openNavigation": "Navigation öffnen"
+  "shell.openNavigation": "Navigation öffnen",
+  "pr.review.notRequired": "Kein Review erforderlich",
+  "pr.merge.reasonComments": "Unresolved review comments must be resolved before this PR can merge."
 }

@@ -690,7 +690,7 @@
   "pr.merge.conflictsWithBase": "ベースブランチとコンフリクトしています",
   "pr.merge.mergeable": "マージ可能",
   "pr.merge.openConflicts": "マージコンフリクトを開く",
-  "pr.merge.providerBlocked": "現在、GitHub はこのプルリクエストをマージできないと報告しています。",
+  "pr.merge.providerBlocked": "現在、{{provider}} はこのプルリクエストをマージできないと報告しています。",
   "pr.merge.unstable": "不安定",
   "pr.noPRYet": "PR はまだありません",
   "pr.noun.check_one": "チェック",
@@ -2082,5 +2082,7 @@
   "terminal.rendererLost": "この GPU/ドライバーでターミナルの表示が停止しました。セッションを開き直すか、アプリを再起動してください。",
   "browser.previewTitle": "ブラウザプレビュー",
   "inspector.title": "インスペクター",
-  "shell.openNavigation": "ナビゲーションを開く"
+  "shell.openNavigation": "ナビゲーションを開く",
+  "pr.review.notRequired": "レビュー不要",
+  "pr.merge.reasonComments": "Unresolved review comments must be resolved before this PR can merge."
 }

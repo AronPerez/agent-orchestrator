@@ -672,7 +672,7 @@
   "pr.merge.conflictsWithBase": "与目标分支存在冲突",
   "pr.merge.mergeable": "可合并",
   "pr.merge.openConflicts": "打开合并冲突",
-  "pr.merge.providerBlocked": "GitHub 当前报告此拉取请求无法合并。",
+  "pr.merge.providerBlocked": "{{provider}} 当前报告此拉取请求无法合并。",
   "pr.merge.unstable": "不稳定",
   "pr.noPRYet": "尚无 PR",
   "pr.noun.check_one": "项检查",
@@ -2064,5 +2064,7 @@
   "terminal.rendererLost": "终端显示在此 GPU/驱动上已停止。请重新打开会话或重启应用。",
   "browser.previewTitle": "浏览器预览",
   "inspector.title": "检查器",
-  "shell.openNavigation": "打开导航"
+  "shell.openNavigation": "打开导航",
+  "pr.review.notRequired": "无需评审",
+  "pr.merge.reasonComments": "Unresolved review comments must be resolved before this PR can merge."
 }
