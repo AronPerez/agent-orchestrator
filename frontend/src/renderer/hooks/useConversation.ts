@@ -109,6 +109,40 @@ export function conversationConfigOptionsQueryKey(session?: Ref) {
     : (["conversation-config-options"] as const);
 }
 
+export function conversationSkillsQueryKey(session?: Ref) {
+  return session
+    ? (["conversation-skills", refKey(session)] as const)
+    : (["conversation-skills"] as const);
+}
+
+// Provider capability lists are controller-epoch scoped. An agent switch must
+// discard, not merely refetch, catalogs from the former provider.
+export function clearConversationProviderCatalogs(
+  queryClient: QueryClient,
+  session: Ref,
+) {
+  queryClient.removeQueries({ queryKey: conversationModelsQueryKey(session) });
+  queryClient.removeQueries({
+    queryKey: conversationConfigOptionsQueryKey(session),
+  });
+  queryClient.removeQueries({ queryKey: conversationSkillsQueryKey(session) });
+}
+
+export function invalidateConversationProviderCatalogs(
+  queryClient: QueryClient,
+  session: Ref,
+) {
+  void queryClient.invalidateQueries({
+    queryKey: conversationModelsQueryKey(session),
+  });
+  void queryClient.invalidateQueries({
+    queryKey: conversationConfigOptionsQueryKey(session),
+  });
+  void queryClient.invalidateQueries({
+    queryKey: conversationSkillsQueryKey(session),
+  });
+}
+
 const conversationDispatchTrackingQueryKey = [
   "conversation-dispatch-tracking",
 ] as const;
@@ -660,13 +694,17 @@ export function useConversationCommands(session: Ref | undefined) {
           body: { turnIds },
         },
       );
-      if (error) throw new Error(apiErrorMessage(error, "Could not reorder queued messages"));
+      if (error)
+        throw new Error(
+          apiErrorMessage(error, "Could not reorder queued messages"),
+        );
     },
     onMutate: async (turnIds) => {
       if (!session) return;
       const queryKey = conversationQueryKey(session);
       await queryClient.cancelQueries({ queryKey });
-      const previous = queryClient.getQueryData<InfiniteData<ConversationSnapshot>>(queryKey);
+      const previous =
+        queryClient.getQueryData<InfiniteData<ConversationSnapshot>>(queryKey);
       if (previous) {
         queryClient.setQueryData<InfiniteData<ConversationSnapshot>>(
           queryKey,
@@ -1010,7 +1048,9 @@ export function useConversationCommands(session: Ref | undefined) {
       promoteQueuedTurn.mutateAsync(turnId),
     cancelQueuedTurn: (turnId: string) => {
       if (!session)
-        return Promise.reject(new Error("No conversation session is selected."));
+        return Promise.reject(
+          new Error("No conversation session is selected."),
+        );
       return cancelQueuedTurn.mutateAsync({ targetSession: session, turnId });
     },
     editQueuedTurn: (turnId: string, text: string) => {
@@ -1018,7 +1058,11 @@ export function useConversationCommands(session: Ref | undefined) {
         return Promise.reject(
           new Error("No conversation session is selected."),
         );
-      return editQueuedTurn.mutateAsync({ targetSession: session, turnId, text });
+      return editQueuedTurn.mutateAsync({
+        targetSession: session,
+        turnId,
+        text,
+      });
     },
     reorderQueuedTurns: (turnIds: string[]) => {
       if (!sessionId)
@@ -1248,7 +1292,7 @@ export function useConversationSkills(
 ) {
   const sessionId = session?.id;
   const query = useQuery({
-    queryKey: ["conversation-skills", session ? refKey(session) : ""],
+    queryKey: conversationSkillsQueryKey(session),
     enabled: Boolean(session && !isCloudHost(session.host)) && enabled,
     // ACP agents publish this catalog asynchronously and may replace it later.
     // Polling also keeps Codex project skills current without introducing a
@@ -1419,14 +1463,12 @@ function toSnapshot(wire: WireSnapshot): ConversationSnapshot {
         }
       : undefined,
     mcpServers: wire.mcpServers?.length
-      ? wire.mcpServers.map(
-          (server): McpServer => ({
-            name: server.name,
-            status: server.status as McpServer["status"],
-            error: server.error || undefined,
-            failureReason: server.failureReason || undefined,
-          }),
-        )
+      ? wire.mcpServers.map((server): McpServer => ({
+          name: server.name,
+          status: server.status as McpServer["status"],
+          error: server.error || undefined,
+          failureReason: server.failureReason || undefined,
+        }))
       : undefined,
     capabilities: wire.capabilities?.length ? wire.capabilities : undefined,
     activeBranchId: wire.activeBranchId || undefined,
@@ -1474,12 +1516,10 @@ function toSnapshot(wire: WireSnapshot): ConversationSnapshot {
       plan: turn.plan
         ? {
             explanation: turn.plan.explanation || undefined,
-            steps: (turn.plan.steps ?? []).map(
-              (step): PlanStep => ({
-                text: step.text,
-                status: step.status as PlanStepStatus,
-              }),
-            ),
+            steps: (turn.plan.steps ?? []).map((step): PlanStep => ({
+              text: step.text,
+              status: step.status as PlanStepStatus,
+            })),
           }
         : undefined,
       rolledBack: turn.rolledBack ?? undefined,
@@ -1489,45 +1529,45 @@ function toSnapshot(wire: WireSnapshot): ConversationSnapshot {
 }
 
 function applyQueuedTurnOrder(
-	snapshot: ConversationSnapshot,
-	fifoTurnIds: readonly string[],
+  snapshot: ConversationSnapshot,
+  fifoTurnIds: readonly string[],
 ): ConversationSnapshot {
-	const queuedTurns = snapshot.turns.filter((turn) => turn.state === "queued");
-	if (queuedTurns.length !== fifoTurnIds.length) return snapshot;
+  const queuedTurns = snapshot.turns.filter((turn) => turn.state === "queued");
+  if (queuedTurns.length !== fifoTurnIds.length) return snapshot;
 
-	const queuedById = new Map(queuedTurns.map((turn) => [turn.id, turn]));
-	const requestedAts = [...queuedTurns]
-		.sort((left, right) => left.requestedAt.localeCompare(right.requestedAt))
-		.map((turn) => turn.requestedAt);
-	const reorderedQueued = fifoTurnIds.flatMap((turnId, index) => {
-		const turn = queuedById.get(turnId);
-		return turn
-			? [{ ...turn, requestedAt: requestedAts[index] ?? turn.requestedAt }]
-			: [];
-	});
-	if (reorderedQueued.length !== queuedTurns.length) return snapshot;
+  const queuedById = new Map(queuedTurns.map((turn) => [turn.id, turn]));
+  const requestedAts = [...queuedTurns]
+    .sort((left, right) => left.requestedAt.localeCompare(right.requestedAt))
+    .map((turn) => turn.requestedAt);
+  const reorderedQueued = fifoTurnIds.flatMap((turnId, index) => {
+    const turn = queuedById.get(turnId);
+    return turn
+      ? [{ ...turn, requestedAt: requestedAts[index] ?? turn.requestedAt }]
+      : [];
+  });
+  if (reorderedQueued.length !== queuedTurns.length) return snapshot;
 
-	const queuedIds = new Set(fifoTurnIds);
-	const otherTurns = snapshot.turns.filter((turn) => !queuedIds.has(turn.id));
-	return {
-		...snapshot,
-		turns: [...otherTurns, ...reorderedQueued].sort((left, right) =>
-			left.requestedAt.localeCompare(right.requestedAt),
-		),
-	};
+  const queuedIds = new Set(fifoTurnIds);
+  const otherTurns = snapshot.turns.filter((turn) => !queuedIds.has(turn.id));
+  return {
+    ...snapshot,
+    turns: [...otherTurns, ...reorderedQueued].sort((left, right) =>
+      left.requestedAt.localeCompare(right.requestedAt),
+    ),
+  };
 }
 
 function applyQueuedTurnOrderToPages(
-	data: InfiniteData<ConversationSnapshot>,
-	fifoTurnIds: readonly string[],
+  data: InfiniteData<ConversationSnapshot>,
+  fifoTurnIds: readonly string[],
 ): InfiniteData<ConversationSnapshot> {
-	if (data.pages.length === 0) return data;
-	return {
-		...data,
-		pages: data.pages.map((page, index) =>
-			index === 0 ? applyQueuedTurnOrder(page, fifoTurnIds) : page,
-		),
-	};
+  if (data.pages.length === 0) return data;
+  return {
+    ...data,
+    pages: data.pages.map((page, index) =>
+      index === 0 ? applyQueuedTurnOrder(page, fifoTurnIds) : page,
+    ),
+  };
 }
 
 /** Merge the newest live page with any older pages loaded on demand. */

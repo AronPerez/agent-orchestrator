@@ -60,6 +60,7 @@ describe("useSwitchAgent", () => {
 			defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
 		});
 		const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+		const removeQueries = vi.spyOn(queryClient, "removeQueries");
 		const { result } = renderHook(() => useSwitchAgent(), { wrapper: wrapper(queryClient) });
 
 		await result.current.mutateAsync({
@@ -78,10 +79,11 @@ describe("useSwitchAgent", () => {
 		);
 		await waitFor(() => {
 			expect(invalidate).toHaveBeenCalledWith({ queryKey: ["conversation", "local:sess-1"] });
-			expect(invalidate).toHaveBeenCalledWith({ queryKey: ["conversation-models", "local:sess-1"] });
-			expect(invalidate).toHaveBeenCalledWith({
+			expect(removeQueries).toHaveBeenCalledWith({ queryKey: ["conversation-models", "local:sess-1"] });
+			expect(removeQueries).toHaveBeenCalledWith({
 				queryKey: ["conversation-config-options", "local:sess-1"],
 			});
+			expect(removeQueries).toHaveBeenCalledWith({ queryKey: ["conversation-skills", "local:sess-1"] });
 		});
 	});
 });

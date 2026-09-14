@@ -1,4 +1,9 @@
-import { type QueryClient, useMutation, useMutationState, useQueryClient } from "@tanstack/react-query";
+import {
+  type QueryClient,
+  useMutation,
+  useMutationState,
+  useQueryClient,
+} from "@tanstack/react-query";
 import type { components } from "../../api/schema";
 import { apiErrorMessage } from "../lib/api-client";
 import { clientFor } from "../lib/host-clients";
@@ -6,157 +11,185 @@ import { refKey, type Ref } from "../lib/hosts";
 import type { WorkspaceSession } from "../types/workspace";
 import { agentSwitchesQueryKey, type AgentSwitch } from "./useAgentSwitches";
 import {
-	conversationConfigOptionsQueryKey,
-	conversationModelsQueryKey,
-	conversationQueryKey,
+  clearConversationProviderCatalogs,
+  conversationQueryKey,
 } from "./useConversation";
 import { workspaceQueryKey } from "./useWorkspaceQuery";
 
-export type SwitchAgentHarness = components["schemas"]["SwitchAgentRequest"]["targetHarness"];
+export type SwitchAgentHarness =
+  components["schemas"]["SwitchAgentRequest"]["targetHarness"];
 
 export type SwitchAgentInput = {
-	session: WorkspaceSession;
-	targetHarness: SwitchAgentHarness;
-	model: string;
-	idempotencyKey: string;
+  session: WorkspaceSession;
+  targetHarness: SwitchAgentHarness;
+  model: string;
+  idempotencyKey: string;
 };
 
 export const switchAgentMutationKey = ["switch-agent"] as const;
 export const recoverAgentSwitchMutationKey = ["recover-agent-switch"] as const;
 
 type SwitchAgentMutationState = {
-	error: unknown;
-	input?: SwitchAgentInput;
-	status: "error" | "idle" | "pending" | "success";
-	submittedAt: number;
+  error: unknown;
+  input?: SwitchAgentInput;
+  status: "error" | "idle" | "pending" | "success";
+  submittedAt: number;
 };
 
 function useSwitchAgentMutations() {
-	return useMutationState<SwitchAgentMutationState>({
-		filters: { mutationKey: switchAgentMutationKey },
-		select: (mutation) => ({
-			error: mutation.state.error,
-			input: mutation.state.variables as SwitchAgentInput | undefined,
-			status: mutation.state.status,
-			submittedAt: mutation.state.submittedAt,
-		}),
-	});
+  return useMutationState<SwitchAgentMutationState>({
+    filters: { mutationKey: switchAgentMutationKey },
+    select: (mutation) => ({
+      error: mutation.state.error,
+      input: mutation.state.variables as SwitchAgentInput | undefined,
+      status: mutation.state.status,
+      submittedAt: mutation.state.submittedAt,
+    }),
+  });
 }
 
 export function useSwitchAgentState(session: Ref | undefined) {
-	const mutations = useSwitchAgentMutations();
-	let latest: SwitchAgentMutationState | undefined;
-	let pending: SwitchAgentMutationState | undefined;
-	for (const mutation of mutations) {
-		if (!session || !mutation.input || refKey(mutation.input.session) !== refKey(session)) continue;
-		if (!latest || mutation.submittedAt > latest.submittedAt) latest = mutation;
-		if (
-			mutation.status === "pending" &&
-			(!pending || mutation.submittedAt > pending.submittedAt)
-		) {
-			pending = mutation;
-		}
-	}
+  const mutations = useSwitchAgentMutations();
+  let latest: SwitchAgentMutationState | undefined;
+  let pending: SwitchAgentMutationState | undefined;
+  for (const mutation of mutations) {
+    if (
+      !session ||
+      !mutation.input ||
+      refKey(mutation.input.session) !== refKey(session)
+    )
+      continue;
+    if (!latest || mutation.submittedAt > latest.submittedAt) latest = mutation;
+    if (
+      mutation.status === "pending" &&
+      (!pending || mutation.submittedAt > pending.submittedAt)
+    ) {
+      pending = mutation;
+    }
+  }
 
-	return {
-		error:
-			!pending &&
-			latest?.status === "error" &&
-			latest.error instanceof Error
-				? latest.error.message
-				: null,
-		input: pending?.input,
-		isPending: Boolean(pending),
-	};
+  return {
+    error:
+      !pending && latest?.status === "error" && latest.error instanceof Error
+        ? latest.error.message
+        : null,
+    input: pending?.input,
+    isPending: Boolean(pending),
+  };
 }
 
 export function clearSwitchAgentState(queryClient: QueryClient, session: Ref) {
-	const mutationCache = queryClient.getMutationCache();
-	for (const mutation of mutationCache.findAll({ mutationKey: switchAgentMutationKey })) {
-		const input = mutation.state.variables as SwitchAgentInput | undefined;
-		if (input && refKey(input.session) === refKey(session) && mutation.state.status !== "pending") {
-			mutationCache.remove(mutation);
-		}
-	}
+  const mutationCache = queryClient.getMutationCache();
+  for (const mutation of mutationCache.findAll({
+    mutationKey: switchAgentMutationKey,
+  })) {
+    const input = mutation.state.variables as SwitchAgentInput | undefined;
+    if (
+      input &&
+      refKey(input.session) === refKey(session) &&
+      mutation.state.status !== "pending"
+    ) {
+      mutationCache.remove(mutation);
+    }
+  }
 }
 
 export function createSwitchAgentIdempotencyKey(): string {
-	return crypto.randomUUID();
+  return crypto.randomUUID();
 }
 
 export function useSwitchAgent() {
-	const queryClient = useQueryClient();
-	return useMutation({
-		mutationKey: switchAgentMutationKey,
-		mutationFn: async ({ session, targetHarness, model, idempotencyKey }: SwitchAgentInput) => {
-			const body: {
-				targetHarness: SwitchAgentHarness;
-				model?: string;
-				idempotencyKey: string;
-			} = { targetHarness, idempotencyKey };
-			const normalizedModel = model.trim();
-			if (normalizedModel) body.model = normalizedModel;
-
-			const { data, error, response } = await clientFor(session.host).POST(
-				"/api/v1/sessions/{sessionId}/switch-agent",
-				{
-					params: { path: { sessionId: session.id } },
-					body,
-				},
-			);
-			if (error || response.status !== 202 || !data?.switch) {
-				const fallback = response
-					? `Failed to switch agent (${response.status})`
-					: "Failed to switch agent";
-				throw new Error(apiErrorMessage(error, fallback));
-			}
-			return data.switch;
-		},
-		onSuccess: (agentSwitch, variables) => {
-			if (!agentSwitch) return;
-			queryClient.setQueryData<AgentSwitch[]>(
-				agentSwitchesQueryKey(variables.session),
-				(current = []) => [agentSwitch, ...current.filter((entry) => entry.id !== agentSwitch.id)],
-			);
-			void queryClient.invalidateQueries({ queryKey: conversationQueryKey(variables.session) });
-			void queryClient.invalidateQueries({ queryKey: conversationModelsQueryKey(variables.session) });
-			void queryClient.invalidateQueries({
-				queryKey: conversationConfigOptionsQueryKey(variables.session),
-			});
-		},
-		onSettled: (_data, _error, variables) => {
-			void queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
-			void queryClient.invalidateQueries({ queryKey: agentSwitchesQueryKey(variables.session) });
-		},
-	});
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationKey: switchAgentMutationKey,
+    mutationFn: async ({
+      session,
+      targetHarness,
+      model,
+      idempotencyKey,
+    }: SwitchAgentInput) => {
+      const body: {
+        targetHarness: SwitchAgentHarness;
+        model?: string;
+        idempotencyKey: string;
+      } = { targetHarness, idempotencyKey };
+      const normalizedModel = model.trim();
+      if (normalizedModel) body.model = normalizedModel;
+      const { data, error, response } = await clientFor(session.host).POST(
+        "/api/v1/sessions/{sessionId}/switch-agent",
+        {
+          params: { path: { sessionId: session.id } },
+          body,
+        },
+      );
+      if (error || response.status !== 202 || !data?.switch) {
+        const fallback = response
+          ? `Failed to switch agent (${response.status})`
+          : "Failed to switch agent";
+        throw new Error(apiErrorMessage(error, fallback));
+      }
+      return data.switch;
+    },
+    onSuccess: (agentSwitch, variables) => {
+      if (!agentSwitch) return;
+      queryClient.setQueryData<AgentSwitch[]>(
+        agentSwitchesQueryKey(variables.session),
+        (current = []) => [
+          agentSwitch,
+          ...current.filter((entry) => entry.id !== agentSwitch.id),
+        ],
+      );
+      clearConversationProviderCatalogs(queryClient, variables.session);
+      void queryClient.invalidateQueries({
+        queryKey: conversationQueryKey(variables.session),
+      });
+    },
+    onSettled: (_data, _error, variables) => {
+      void queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
+      void queryClient.invalidateQueries({
+        queryKey: agentSwitchesQueryKey(variables.session),
+      });
+    },
+  });
 }
 
 export function useRecoverAgentSwitch() {
-	const queryClient = useQueryClient();
-	return useMutation({
-		mutationKey: recoverAgentSwitchMutationKey,
-		mutationFn: async ({ session, switchId }: { session: Ref; switchId: string }) => {
-			const { data, error, response } = await clientFor(session.host).POST(
-				"/api/v1/sessions/{sessionId}/agent-switches/{switchId}/recover",
-				{ params: { path: { sessionId: session.id, switchId } } },
-			);
-			if (error || response.status !== 202 || !data?.switch) {
-				const fallback = response
-					? `Failed to recover agent switch (${response.status})`
-					: "Failed to recover agent switch";
-				throw new Error(apiErrorMessage(error, fallback));
-			}
-			return data.switch;
-		},
-		onSuccess: (agentSwitch, variables) => {
-			queryClient.setQueryData<AgentSwitch[]>(
-				agentSwitchesQueryKey(variables.session),
-				(current = []) => [agentSwitch, ...current.filter((entry) => entry.id !== agentSwitch.id)],
-			);
-		},
-		onSettled: (_data, _error, variables) => {
-			void queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
-			void queryClient.invalidateQueries({ queryKey: agentSwitchesQueryKey(variables.session) });
-		},
-	});
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationKey: recoverAgentSwitchMutationKey,
+    mutationFn: async ({
+      session,
+      switchId,
+    }: {
+      session: Ref;
+      switchId: string;
+    }) => {
+      const { data, error, response } = await clientFor(session.host).POST(
+        "/api/v1/sessions/{sessionId}/agent-switches/{switchId}/recover",
+        { params: { path: { sessionId: session.id, switchId } } },
+      );
+      if (error || response.status !== 202 || !data?.switch) {
+        const fallback = response
+          ? `Failed to recover agent switch (${response.status})`
+          : "Failed to recover agent switch";
+        throw new Error(apiErrorMessage(error, fallback));
+      }
+      return data.switch;
+    },
+    onSuccess: (agentSwitch, variables) => {
+      queryClient.setQueryData<AgentSwitch[]>(
+        agentSwitchesQueryKey(variables.session),
+        (current = []) => [
+          agentSwitch,
+          ...current.filter((entry) => entry.id !== agentSwitch.id),
+        ],
+      );
+    },
+    onSettled: (_data, _error, variables) => {
+      void queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
+      void queryClient.invalidateQueries({
+        queryKey: agentSwitchesQueryKey(variables.session),
+      });
+    },
+  });
 }

@@ -71,7 +71,13 @@ export type TreeNode = {
 export function buildChangedOnlyTree(
   files: WorkspaceFileSummary[],
 ): TreeNode[] {
-  const changed = files.filter(isChangedWorkspaceFile);
+  return buildWorkspaceFileTree(files.filter(isChangedWorkspaceFile));
+}
+
+/** Builds a compact nested tree from a flat, already-filtered file result set. */
+export function buildWorkspaceFileTree(
+  files: Array<Pick<WorkspaceFileSummary, "path" | "status" | "binary">>,
+): TreeNode[] {
   const root: TreeNode[] = [];
   const dirs = new Map<string, TreeNode>();
 
@@ -94,7 +100,7 @@ export function buildChangedOnlyTree(
     return node;
   };
 
-  for (const file of changed) {
+  for (const file of files) {
     const segments = file.path.split("/");
     const name = segments[segments.length - 1];
     const parentPath = segments.slice(0, -1).join("/");

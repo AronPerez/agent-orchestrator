@@ -2,10 +2,9 @@ import type { QueryClient } from "@tanstack/react-query";
 import { subscribeApiBaseUrl } from "./api-client";
 import { baseUrlFor, subscribeConnectedHosts } from "./host-clients";
 import { isLocal, refKey, type Ref } from "./hosts";
+import { computeSseRetryDelayMs } from "./sse-backoff";
 
 const INVALIDATE_DEBOUNCE_MS = 150;
-const SSE_RETRY_MS = 5_000;
-const SSE_RETRY_JITTER_MS = 1_000;
 const EVENTSOURCE_CLOSED = 2;
 
 export type WorkspaceFileConnectionState =
@@ -18,6 +17,8 @@ type WorkspaceStream = {
   phase: ConnectionPhase;
   generation: number;
   failures: number;
+  /** Scheduled reconnects since the last successful open. */
+  retries: number;
   source?: EventSource;
   sourceBaseUrl?: string;
   debounce?: ReturnType<typeof setTimeout>;
@@ -108,6 +109,15 @@ function createWorkspaceStream(
         queryKey: ["session-workspace-file", sessionKey],
       });
       void queryClient.invalidateQueries({
+        queryKey: ["session-workspace-file-revision", sessionKey],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["session-workspace-diffs", sessionKey],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["session-workspace-search", sessionKey],
+      });
+      void queryClient.invalidateQueries({
         queryKey: ["session-workspace-tree", sessionKey],
       });
     }, INVALIDATE_DEBOUNCE_MS);
@@ -115,7 +125,8 @@ function createWorkspaceStream(
   const scheduleRetry = (generation: number) => {
     if (stream.disposed || stream.retry) return;
     stream.phase = "waiting";
-    const delay = SSE_RETRY_MS + (Math.random() * 2 - 1) * SSE_RETRY_JITTER_MS;
+    stream.retries += 1;
+    const delay = computeSseRetryDelayMs(stream.retries);
     stream.retry = setTimeout(() => {
       stream.retry = undefined;
       if (stream.disposed || generation !== stream.generation) return;
@@ -148,6 +159,7 @@ function createWorkspaceStream(
   stream.phase = "idle";
   stream.generation = 0;
   stream.failures = 0;
+  stream.retries = 0;
   setWorkspaceFileConnectionState(sessionKey, "connecting");
   stream.ensureConnected = () => {
     if (stream.disposed) return;
@@ -164,6 +176,7 @@ function createWorkspaceStream(
     if (stream.sourceBaseUrl && stream.sourceBaseUrl !== baseUrl) {
       resetConnection();
       stream.failures = 0;
+      stream.retries = 0;
       setWorkspaceFileConnectionState(sessionKey, "connecting");
     }
     if (stream.phase !== "idle") return;
@@ -185,6 +198,7 @@ function createWorkspaceStream(
           return;
         stream.phase = "open";
         stream.failures = 0;
+        stream.retries = 0;
         setWorkspaceFileConnectionState(sessionKey, "connected");
         invalidate();
       };
@@ -218,9 +232,9 @@ function createWorkspaceStream(
       handleTerminalFailure(generation);
     }
   };
-  stream.disconnectBaseUrl = (isLocal(session.host) ? subscribeApiBaseUrl : subscribeConnectedHosts)(
-    stream.ensureConnected,
-  );
+  stream.disconnectBaseUrl = (
+    isLocal(session.host) ? subscribeApiBaseUrl : subscribeConnectedHosts
+  )(stream.ensureConnected);
   stream.dispose = () => {
     stream.disposed = true;
     if (stream.debounce) clearTimeout(stream.debounce);

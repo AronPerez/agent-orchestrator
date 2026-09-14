@@ -44,9 +44,9 @@ import {
   toProjectKind,
   toSessionActivity,
   toSessionStatus,
-	newestActiveOrchestrator,
-	attentionZone,
-	workerSessions,
+  newestActiveOrchestrator,
+  attentionZone,
+  workerSessions,
   type WorkspaceSession,
   type WorkspaceSummary,
 } from "../types/workspace";
@@ -170,8 +170,7 @@ function toWorkspaceSession(
     : undefined;
   const kanbanColumn = toKanbanColumn(session.kanbanColumn, status);
   const activity = toSessionActivity(session.activity);
-  if (status === "unknown")
-    reportUnknownSessionField("status", session.status);
+  if (status === "unknown") reportUnknownSessionField("status", session.status);
   if (!activity || activity.state === "unknown") {
     reportUnknownSessionField("activity", session.activity?.state);
   }
@@ -179,6 +178,7 @@ function toWorkspaceSession(
     host,
     id: session.id,
     terminalHandleId: session.terminalHandleId,
+    terminalGeneration: session.terminalGeneration,
     workspaceId: project.id,
     workspaceName: project.name,
     title: session.displayName ?? session.issueId ?? session.id,
@@ -209,6 +209,7 @@ function toWorkspaceSession(
     kanbanColumn,
     displayStatus: session.displayStatus || undefined,
     isTerminated: session.isTerminated,
+    chatProviderPreserved: session.chatProviderPreserved,
     terminateOnPrMerge: session.terminateOnPrMerge ?? false,
     autoInjectReview: session.autoInjectReview ?? true,
     autoInjectCI: session.autoInjectCI ?? true,
@@ -332,6 +333,7 @@ async function fetchWorkspaces(
     name: project.name,
     kind: toProjectKind(project.kind),
     path: project.path,
+    folderMissing: project.folderMissing,
     orchestratorAgent: project.orchestratorAgent
       ? toAgentProvider(project.orchestratorAgent)
       : undefined,
@@ -499,17 +501,19 @@ function toCloudWorkspace(
 }
 
 type WorkspaceSubscriptionOptions = {
-	subscribed?: boolean;
+  subscribed?: boolean;
 };
 
-export function useCloudProjectsQuery(options: WorkspaceSubscriptionOptions = {}) {
+export function useCloudProjectsQuery(
+  options: WorkspaceSubscriptionOptions = {},
+) {
   const { client, ready, baseUrl } = useCloudCp();
   const { org } = useCloudOrg();
   const orgId = org?.id;
   return useQuery({
     queryKey: [...cloudProjectsQueryKey, baseUrl, orgId ?? ""],
     enabled: ready && orgId !== undefined,
-		subscribed: options.subscribed,
+    subscribed: options.subscribed,
     retry: 1,
     queryFn: async (): Promise<CloudCpProject[]> => {
       if (orgId === undefined) return [];
@@ -521,14 +525,16 @@ export function useCloudProjectsQuery(options: WorkspaceSubscriptionOptions = {}
   });
 }
 
-export function useCloudSessionsQuery(options: WorkspaceSubscriptionOptions = {}) {
+export function useCloudSessionsQuery(
+  options: WorkspaceSubscriptionOptions = {},
+) {
   const { client, ready, baseUrl } = useCloudCp();
   const { org } = useCloudOrg();
   const orgId = org?.id;
   return useQuery({
     queryKey: [...cloudSessionsQueryKey, baseUrl, orgId ?? ""],
     enabled: ready && orgId !== undefined,
-		subscribed: options.subscribed,
+    subscribed: options.subscribed,
     retry: 1,
     // A provisioning sandbox changes state without a client action, so poll to
     // reflect requested -> running -> ready the same way local sessions stream.
@@ -598,68 +604,107 @@ export function useWorkspaceQuery(options: WorkspaceSubscriptionOptions = {}) {
  * activity update elsewhere no longer redraws the open session workspace.
  */
 export function useWorkspaceSession(sessionRef: Ref) {
-	const selectLocalSession = useMemo(
-		() => (sections: HostSection[]) =>
-			flattenHostSections(sections)
-				.flatMap((workspace) => workspace.sessions)
-				.find((session) => session.host === sessionRef.host && session.id === sessionRef.id),
-		[sessionRef.host, sessionRef.id],
-	);
-	const local = useQuery({
-		...workspaceHostQueryOptions(sessionRef.host),
-		enabled: !isCloudHost(sessionRef.host),
-		select: selectLocalSession,
-	});
-	const cloud = useCloudProjectsQuery();
-	const cloudSessions = useCloudSessionsQuery();
-	const { org, ready } = useCloudOrg();
-	const cloudSession = useMemo(() => {
-		if (!ready || !org?.id || sessionRef.host !== cloudHost(org.id) || !cloud.data || !cloudSessions.data)
-			return undefined;
-		const session = cloudSessions.data.find((candidate) => candidate.id === sessionRef.id);
-		if (!session) return undefined;
-		const project = cloud.data.find((candidate) => candidate.id === session.projectId);
-		return project ? toCloudWorkspaceSession(session, project, org.id) : undefined;
-	}, [cloud.data, cloudSessions.data, org?.id, ready, sessionRef.host, sessionRef.id]);
-	return { ...local, data: local.data ?? cloudSession };
+  const selectLocalSession = useMemo(
+    () => (sections: HostSection[]) =>
+      flattenHostSections(sections)
+        .flatMap((workspace) => workspace.sessions)
+        .find(
+          (session) =>
+            session.host === sessionRef.host && session.id === sessionRef.id,
+        ),
+    [sessionRef.host, sessionRef.id],
+  );
+  const local = useQuery({
+    ...workspaceHostQueryOptions(sessionRef.host),
+    enabled: !isCloudHost(sessionRef.host),
+    select: selectLocalSession,
+  });
+  const cloud = useCloudProjectsQuery();
+  const cloudSessions = useCloudSessionsQuery();
+  const { org, ready } = useCloudOrg();
+  const cloudSession = useMemo(() => {
+    if (
+      !ready ||
+      !org?.id ||
+      sessionRef.host !== cloudHost(org.id) ||
+      !cloud.data ||
+      !cloudSessions.data
+    )
+      return undefined;
+    const session = cloudSessions.data.find(
+      (candidate) => candidate.id === sessionRef.id,
+    );
+    if (!session) return undefined;
+    const project = cloud.data.find(
+      (candidate) => candidate.id === session.projectId,
+    );
+    return project
+      ? toCloudWorkspaceSession(session, project, org.id)
+      : undefined;
+  }, [
+    cloud.data,
+    cloudSessions.data,
+    org?.id,
+    ready,
+    sessionRef.host,
+    sessionRef.id,
+  ]);
+  return { ...local, data: local.data ?? cloudSession };
 }
 
 export type WorkspaceScope = {
-	project?: Pick<WorkspaceSummary, "id" | "kind" | "name" | "orchestratorAgent">;
-	session?: WorkspaceSession;
-	orchestrator?: WorkspaceSession;
+  project?: Pick<
+    WorkspaceSummary,
+    "id" | "kind" | "name" | "orchestratorAgent"
+  >;
+  session?: WorkspaceSession;
+  orchestrator?: WorkspaceSession;
 };
 
 function selectWorkspaceScope(
-	workspaces: WorkspaceSummary[],
-	projectId: string | undefined,
-	sessionId: string | undefined,
+  workspaces: WorkspaceSummary[],
+  projectId: string | undefined,
+  sessionId: string | undefined,
 ): WorkspaceScope {
-	const session = sessionId
-		? workspaces.flatMap((workspace) => workspace.sessions).find((candidate) => candidate.id === sessionId)
-		: undefined;
-	const resolvedProjectId = session?.workspaceId ?? projectId;
-	const workspace = resolvedProjectId ? workspaces.find((candidate) => candidate.id === resolvedProjectId) : undefined;
-	// Do not carry the project's complete sessions array into shell chrome. With
-	// React Query's structural sharing, this small metadata projection retains
-	// its identity when another session in the same project streams an update.
-	const project = workspace
-		? {
-				id: workspace.id,
-				kind: workspace.kind,
-				name: workspace.name,
-				orchestratorAgent: workspace.orchestratorAgent,
-			}
-		: undefined;
-	return { project, session, orchestrator: workspace ? newestActiveOrchestrator(workspace.sessions) : undefined };
+  const session = sessionId
+    ? workspaces
+        .flatMap((workspace) => workspace.sessions)
+        .find((candidate) => candidate.id === sessionId)
+    : undefined;
+  const resolvedProjectId = session?.workspaceId ?? projectId;
+  const workspace = resolvedProjectId
+    ? workspaces.find((candidate) => candidate.id === resolvedProjectId)
+    : undefined;
+  // Do not carry the project's complete sessions array into shell chrome. With
+  // React Query's structural sharing, this small metadata projection retains
+  // its identity when another session in the same project streams an update.
+  const project = workspace
+    ? {
+        id: workspace.id,
+        kind: workspace.kind,
+        name: workspace.name,
+        orchestratorAgent: workspace.orchestratorAgent,
+      }
+    : undefined;
+  return {
+    project,
+    session,
+    orchestrator: workspace
+      ? newestActiveOrchestrator(workspace.sessions)
+      : undefined,
+  };
 }
 
 function selectHostWorkspaceScope(
-	sections: HostSection[],
-	projectId: string | undefined,
-	sessionId: string | undefined,
+  sections: HostSection[],
+  projectId: string | undefined,
+  sessionId: string | undefined,
 ): WorkspaceScope {
-	return selectWorkspaceScope(flattenHostSections(sections), projectId, sessionId);
+  return selectWorkspaceScope(
+    flattenHostSections(sections),
+    projectId,
+    sessionId,
+  );
 }
 
 /**
@@ -667,45 +712,60 @@ function selectHostWorkspaceScope(
  * redrawing the topbar for streamed activity from every other project.
  */
 export function useWorkspaceScope(projectId?: string, sessionId?: string) {
-	const selectLocalScope = useMemo(
-		() => (sections: HostSection[]) => selectHostWorkspaceScope(sections, projectId, sessionId),
-		[projectId, sessionId],
-	);
-	const local = useQuery({ ...workspaceQueryOptions, select: selectLocalScope });
-	const cloud = useCloudProjectsQuery();
-	const cloudSessions = useCloudSessionsQuery();
-	const { org, ready } = useCloudOrg();
-	const cloudScope = useMemo(() => {
-		if (!ready || !org?.id || !cloud.data) return undefined;
-		const workspaces = cloud.data.map((project) => toCloudWorkspace(project, cloudSessions.data ?? [], org.id));
-		return selectWorkspaceScope(workspaces, projectId, sessionId);
-	}, [cloud.data, cloudSessions.data, org?.id, projectId, ready, sessionId]);
-	// Match useWorkspaceQuery's local-first semantics: do not reveal cloud
-	// records before the local workspace query has resolved successfully.
-	return { ...local, data: local.data ?? (local.isSuccess ? cloudScope : undefined) };
+  const selectLocalScope = useMemo(
+    () => (sections: HostSection[]) =>
+      selectHostWorkspaceScope(sections, projectId, sessionId),
+    [projectId, sessionId],
+  );
+  const local = useQuery({
+    ...workspaceQueryOptions,
+    select: selectLocalScope,
+  });
+  const cloud = useCloudProjectsQuery();
+  const cloudSessions = useCloudSessionsQuery();
+  const { org, ready } = useCloudOrg();
+  const cloudScope = useMemo(() => {
+    if (!ready || !org?.id || !cloud.data) return undefined;
+    const workspaces = cloud.data.map((project) =>
+      toCloudWorkspace(project, cloudSessions.data ?? [], org.id),
+    );
+    return selectWorkspaceScope(workspaces, projectId, sessionId);
+  }, [cloud.data, cloudSessions.data, org?.id, projectId, ready, sessionId]);
+  // Match useWorkspaceQuery's local-first semantics: do not reveal cloud
+  // records before the local workspace query has resolved successfully.
+  return {
+    ...local,
+    data: local.data ?? (local.isSuccess ? cloudScope : undefined),
+  };
 }
 
-function selectTraySessions(workspaces: WorkspaceSummary[]): TraySessionEntry[] {
-	const entries: TraySessionEntry[] = [];
-	for (const workspace of workspaces) {
-		for (const session of workerSessions(workspace.sessions)) {
-			const zone = attentionZone(session);
-			if ((zone === "merge" && session.status === "merged") || (zone !== "action" && zone !== "merge")) continue;
-				entries.push({
-					host: session.host,
-					projectId: workspace.id,
-				projectName: workspace.name,
-				sessionId: session.id,
-				title: session.title,
-				zone,
-			});
-		}
-	}
-	return entries;
+function selectTraySessions(
+  workspaces: WorkspaceSummary[],
+): TraySessionEntry[] {
+  const entries: TraySessionEntry[] = [];
+  for (const workspace of workspaces) {
+    for (const session of workerSessions(workspace.sessions)) {
+      const zone = attentionZone(session);
+      if (
+        (zone === "merge" && session.status === "merged") ||
+        (zone !== "action" && zone !== "merge")
+      )
+        continue;
+      entries.push({
+        host: session.host,
+        projectId: workspace.id,
+        projectName: workspace.name,
+        sessionId: session.id,
+        title: session.title,
+        zone,
+      });
+    }
+  }
+  return entries;
 }
 
 function selectHostTraySessions(sections: HostSection[]): TraySessionEntry[] {
-	return selectTraySessions(flattenHostSections(sections));
+  return selectTraySessions(flattenHostSections(sections));
 }
 
 /**
@@ -714,17 +774,26 @@ function selectHostTraySessions(sections: HostSection[]): TraySessionEntry[] {
  * query boundary so ordinary streamed activity does not wake the runtime.
  */
 export function useWorkspaceTraySessions() {
-	const local = useQuery({ ...workspaceQueryOptions, select: selectHostTraySessions });
-	const cloud = useCloudProjectsQuery();
-	const cloudSessions = useCloudSessionsQuery();
-	const { org, ready } = useCloudOrg();
-	const cloudEntries = useMemo(() => {
-		if (!ready || !org?.id || !cloud.data) return [];
-		return selectTraySessions(cloud.data.map((project) => toCloudWorkspace(project, cloudSessions.data ?? [], org.id)));
-	}, [cloud.data, cloudSessions.data, org?.id, ready]);
-	const data = useMemo(() => {
-		if (local.data === undefined) return undefined;
-		return cloudEntries.length === 0 ? local.data : [...local.data, ...cloudEntries];
-	}, [cloudEntries, local.data]);
-	return { ...local, data };
+  const local = useQuery({
+    ...workspaceQueryOptions,
+    select: selectHostTraySessions,
+  });
+  const cloud = useCloudProjectsQuery();
+  const cloudSessions = useCloudSessionsQuery();
+  const { org, ready } = useCloudOrg();
+  const cloudEntries = useMemo(() => {
+    if (!ready || !org?.id || !cloud.data) return [];
+    return selectTraySessions(
+      cloud.data.map((project) =>
+        toCloudWorkspace(project, cloudSessions.data ?? [], org.id),
+      ),
+    );
+  }, [cloud.data, cloudSessions.data, org?.id, ready]);
+  const data = useMemo(() => {
+    if (local.data === undefined) return undefined;
+    return cloudEntries.length === 0
+      ? local.data
+      : [...local.data, ...cloudEntries];
+  }, [cloudEntries, local.data]);
+  return { ...local, data };
 }

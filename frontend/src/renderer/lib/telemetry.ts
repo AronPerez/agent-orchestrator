@@ -503,6 +503,24 @@ export async function sanitizeRendererProperties(
 			if (projectIDHash) safe.project_id_hash = projectIDHash;
 			break;
 		}
+		case "ao.renderer.cloud_orchestrator_spawn_succeeded":
+		case "ao.renderer.cloud_orchestrator_spawn_failed": {
+			// Cloud orchestrator spawns are the adoption signal for the hosted
+			// offering's core loop; only a hashed project id rides along.
+			const cloudProjectIDHash = await hashedTelemetryID(properties?.project_id);
+			if (cloudProjectIDHash) safe.project_id_hash = cloudProjectIDHash;
+			break;
+		}
+		case "ao.renderer.cloud_workers_viewed":
+			// How many workers an orchestrator is coordinating when the human
+			// looks: the count alone answers "do people use one worker or many".
+			if (typeof properties?.worker_count === "number") safe.worker_count = properties.worker_count;
+			break;
+		case "ao.renderer.cloud_worker_opened":
+			// Whether the click-through happens before or after a PR exists
+			// separates "checking on a worker" from "reviewing its output".
+			if (typeof properties?.has_pr === "boolean") safe.has_pr = properties.has_pr;
+			break;
 		case "ao.renderer.orchestrator_spawn_requested":
 		case "ao.renderer.orchestrator_spawn_succeeded":
 		case "ao.renderer.orchestrator_spawn_failed": {
@@ -769,7 +787,8 @@ export async function initTelemetry(): Promise<boolean> {
 			...telemetryContext,
 			surface: "renderer",
 		});
-		// Same consent gate as PostHog. No-op unless VITE_AO_SENTRY_DSN is set.
+		// Typed renderer fault intake has its own main-owned policy gate. PostHog
+		// product analytics are intentionally independent of that preference.
 		void initSentry({
 			release: bootstrap.appVersion,
 			channel,
@@ -816,6 +835,17 @@ export async function initTelemetry(): Promise<boolean> {
 	initPromise = attempt;
 	return attempt;
 }
+
+/**
+ * Acknowledges the renderer part of failure-reporting cleanup. Renderer fault
+ * intake forwards directly through preload and owns no durable or retry queue;
+ * PostHog product-analytics queues are deliberately outside this policy.
+ */
+export function clearRendererTelemetryQueues(): void {}
+
+// Failure-reporting enablement is enforced in preload/main. It never opts the
+// independent PostHog client in or out.
+export function applyRendererTelemetryPolicy(_enabled: boolean): void {}
 
 export async function captureRendererEvent(event: string, properties?: Record<string, unknown>): Promise<void> {
 	// Checked before the reservations so a silenced stream does not consume a
