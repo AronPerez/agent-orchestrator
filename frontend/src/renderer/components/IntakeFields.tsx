@@ -1,11 +1,11 @@
-import { Info, TriangleAlert } from "lucide-react";
+import { AppLink } from "./AppLink";
+import { TriangleAlert } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { components } from "../../api/schema";
 import { cn } from "../lib/utils";
 import { Label } from "./ui/label";
 import { SettingsInlineInput, SettingsRow } from "./settings/SettingsRow";
 import { Switch } from "./ui/switch";
-import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
 type TrackerIntakeConfig = components["schemas"]["TrackerIntakeConfig"];
 
@@ -35,10 +35,13 @@ export function intakeNeedsRule(form: IntakeForm): boolean {
 // buildIntake produces the payload field, scrubbing empties so a disabled or
 // blank intake serializes to `undefined` (omit) rather than an empty object the
 // daemon would persist.
-export function buildIntake(form: IntakeForm): TrackerIntakeConfig | undefined {
+export function buildIntake(
+	form: IntakeForm,
+	existing?: TrackerIntakeConfig,
+): TrackerIntakeConfig | undefined {
 	const next: TrackerIntakeConfig = {
+		...existing,
 		enabled: form.enabled || undefined,
-		provider: undefined,
 		repo: form.repo.trim() || undefined,
 		assignee: form.assignee.trim() || undefined,
 	};
@@ -135,14 +138,14 @@ export function IntakeFields({
 						{repoPreview && (
 							<SettingsRow label={t("settings.project.repository")}>
 								{repoPreview.value ? (
-									<a
+									<AppLink
 										href={`https://${repoPreview.host ?? "github.com"}/${repoPreview.value}`}
 										target="_blank"
 										rel="noopener noreferrer"
 										className="settings-row-value text-settings-accent hover:underline"
 									>
 										{repoPreview.value}
-									</a>
+									</AppLink>
 								) : (
 									<span className="settings-row-value">
 										{t("settings.project.repoNotDetected")}
@@ -172,29 +175,29 @@ export function IntakeFields({
 						{t("settings.project.intakeDescription")}
 				</p>
 			)}
-			<div className="flex items-center gap-2">
-				<label className="flex items-center gap-2.5 text-control text-foreground">
-					<input
-						type="checkbox"
-						className="size-icon-base accent-accent"
-						checked={form.enabled}
-						onChange={(e) => onChange({ enabled: e.target.checked })}
-					/>
-					{t("settings.project.enableIssueIntake")}
-				</label>
-				{compact && (
-					<Tooltip>
-						<TooltipTrigger asChild>
-							<button
-								type="button"
-								className="grid size-icon-base place-items-center rounded-full text-muted-foreground hover:text-foreground focus-visible:outline-none"
-								aria-label={t("settings.project.intakeHelpAria")}
-							>
-								<Info className="size-3.5" aria-hidden="true" />
-							</button>
-						</TooltipTrigger>
-						<TooltipContent>{t("settings.project.intakeTooltip")}</TooltipContent>
-					</Tooltip>
+			<div className={cn("flex items-center", compact ? "justify-between gap-3" : "gap-2")}>
+				{compact ? (
+					<>
+						<label htmlFor="intakeEnabled" className="text-control text-foreground">
+							{t("createProject.workOnAssignedIssues")}
+						</label>
+						<Switch
+							id="intakeEnabled"
+							aria-label={t("createProject.workOnAssignedIssues")}
+							checked={form.enabled}
+							onCheckedChange={(enabled) => onChange({ enabled })}
+						/>
+					</>
+				) : (
+					<label className="flex items-center gap-2.5 text-control text-foreground">
+						<input
+							type="checkbox"
+							className="size-icon-base accent-accent"
+							checked={form.enabled}
+							onChange={(e) => onChange({ enabled: e.target.checked })}
+						/>
+						{t("settings.project.enableIssueIntake")}
+					</label>
 				)}
 			</div>
 			{form.enabled && (
@@ -202,14 +205,14 @@ export function IntakeFields({
 					{repoPreview && (
 						<IntakeField label={t("settings.project.repository")} labelClassName={labelClassName}>
 							{repoPreview.value ? (
-								<a
+								<AppLink
 									href={`https://${repoPreview.host ?? "github.com"}/${repoPreview.value}`}
 									target="_blank"
 									rel="noopener noreferrer"
 									className="text-control text-accent hover:underline"
 								>
 									{repoPreview.value}
-								</a>
+								</AppLink>
 							) : (
 								<span className="text-control text-muted-foreground">
 									{t("settings.project.repoNotDetected")}

@@ -60,12 +60,15 @@ export type AgentSwitchSummary = {
 	id: string;
 	state: string;
 	targetHarness: string;
+	updatedAt?: string;
 };
 
 export type WorkspaceSession = {
 	host: HostId;
 	id: string;
 	terminalHandleId?: string;
+	/** Opaque controller generation; changes even when a restarted PTY reuses its handle. */
+	terminalGeneration?: string;
 	workspaceId: string;
 	workspaceName: string;
 	title: string;
@@ -113,6 +116,9 @@ export type WorkspaceSession = {
 	displayStatus?: string;
 	/** Durable runtime fact from the daemon; independent of the derived SCM-aware status. */
 	isTerminated?: boolean;
+	/** Whether the cloud worker has a current control-plane connection. */
+	runtimeConnected?: boolean;
+	chatProviderPreserved?: boolean;
 	/** User preference to tear down this session when its PR set completes through a merge. */
 	terminateOnPrMerge?: boolean;
 	/** Whether SCM review feedback is automatically injected into the worker. */
@@ -156,7 +162,12 @@ export type WorkspaceSession = {
 	 * org the session is scoped to so its terminal can be opened against the CP;
 	 * absent for local sessions, which route through the local daemon.
 	 */
-	cloud?: { orgId: string };
+	cloud?: {
+		orgId: string;
+		sandboxProvider?: string;
+		desiredState?: string;
+		observedState?: string;
+	};
 };
 
 // Tracker providers whose ids the intake daemon stamps sessions with, in
@@ -316,6 +327,7 @@ export type WorkspaceSummary = {
 	kind?: ProjectKind | typeof CLOUD_PROJECT_KIND;
 	/** Local checkout path; empty string for cloud projects (no local folder). */
 	path: string;
+	folderMissing?: boolean;
 	workspaceRepos?: WorkspaceRepoSummary[];
 	type?: "main" | "worktree";
 	orchestratorAgent?: AgentProvider;
