@@ -308,7 +308,12 @@ describe("NotificationCenter", () => {
 		await clickOpen();
 
 		expect(screen.queryByText(/last 7 days/i)).not.toBeInTheDocument();
+		// Radix installs its document-level outside-pointer listener after the
+		// opening interaction completes, so let that registration run first.
+		await new Promise((resolve) => setTimeout(resolve, 0));
 		fireEvent.pointerDown(document.body);
+		fireEvent.pointerUp(document.body);
+		fireEvent.click(document.body);
 		await waitFor(() => expect(screen.queryByRole("dialog", { name: "Notifications" })).not.toBeInTheDocument());
 	});
 

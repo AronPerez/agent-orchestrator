@@ -28,10 +28,13 @@ function baseDetail(
     size: 20,
     binary: false,
     deleted: false,
+    editable: true,
+    fileFingerprint: "file-1",
     content: "hello world\n",
     contentTruncated: false,
     diff: "",
     diffTruncated: false,
+    workspaceVersion: "workspace-1",
     ...overrides,
   };
 }

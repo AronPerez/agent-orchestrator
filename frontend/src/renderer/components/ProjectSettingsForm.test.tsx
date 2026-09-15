@@ -1113,14 +1113,13 @@ describe("ProjectSettingsForm", () => {
 			"Cursor",
 			"OpenCode",
 			"GitHub Copilot",
-			"Goose",
 			"Kilo Code",
 			"Pi",
 			"KiroAuth unknown",
 		]);
 	});
 
-	it("offers the experimental host-trusted reviewer set", async () => {
+	it("offers only the supported host-trusted reviewer set", async () => {
 		const project = {
 			id: "proj-1",
 			name: "Project One",
@@ -1128,9 +1127,8 @@ describe("ProjectSettingsForm", () => {
 			path: "/repo/project-one",
 			repo: "",
 			defaultBranch: "main",
-			config: { worker: { agent: "qwen" }, orchestrator: { agent: "claude-code" } },
+			config: { worker: { agent: "kimchi" }, orchestrator: { agent: "claude-code" } },
 		};
-		const qwen = agentReadiness("qwen", "Qwen Code");
 		const devin = agentReadiness("devin", "Devin");
 		const droid = agentReadiness("droid", "Droid");
 		const kimi = agentReadiness("kimi", "Kimi");
@@ -1150,7 +1148,7 @@ describe("ProjectSettingsForm", () => {
 			if (path === "/api/v1/agents/readiness") {
 				return {
 					data: {
-						agents: [...agentCatalogResponse.data.agents, qwen, devin, droid, kimi, aider, amp, ...experimental],
+					agents: [...agentCatalogResponse.data.agents, devin, droid, kimi, aider, amp, ...experimental],
 					},
 					error: undefined,
 				};
@@ -1164,11 +1162,7 @@ describe("ProjectSettingsForm", () => {
 		await userEvent.click(reviewer);
 		const options = await screen.findAllByRole("menuitem");
 		const labels = options.map((option) => option.textContent);
-		expect(labels).toContain("Qwen Code");
 		expect(labels).toContain("Agy");
-		expect(labels).toContain("Continue");
-		expect(labels).toContain("Goose");
-		expect(labels).toContain("Vibe");
 		expect(labels).toContain("Devin");
 		expect(labels).toContain("Droid");
 		expect(labels).toContain("Kimi");
@@ -1179,6 +1173,8 @@ describe("ProjectSettingsForm", () => {
 		expect(labels).toContain("Cline");
 		expect(labels).toContain("Crush");
 		expect(labels).toContain("Grok");
+		expect(labels).not.toContain("Continue");
+		expect(labels).not.toContain("Vibe");
 	});
 
 	it("warns when an experimental reviewer is selected", async () => {

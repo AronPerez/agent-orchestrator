@@ -416,7 +416,8 @@ lib/
   session/           existing TUI/xterm surface and terminal controls
   mux.ts             /mux WebSocket terminal transport
   config.ts          server config — password in SecureStore, the rest in AsyncStorage
-  pairing.ts         pairing-QR payload parser
+  pairingCode.ts     pairing-QR payload parser
+  pairFlow.ts        applies a scanned code — race endpoints, verify, store the host
   store.tsx          app state + connection polling
   theme.ts, ui.tsx   design primitives
 scripts/             icon generation and preview helpers

@@ -47,7 +47,12 @@ vi.mock("./useCloudCp", () => ({
   }),
 }));
 
-import { conversationQueryKey, useConversation, useConversationCommands } from "./useConversation";
+import {
+  conversationQueryKey,
+  useConversation,
+  useConversationCommands,
+  useConversationSkills,
+} from "./useConversation";
 import { workspaceQueryKey } from "./useWorkspaceQuery";
 
 const localRef = (id: string) => ({ host: "local", id });
@@ -1157,5 +1162,66 @@ describe("queued conversation actions across host switches", () => {
     });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: conversationQueryKey({ host: "node-a", id: "same" }) });
     expect(invalidate).not.toHaveBeenCalledWith({ queryKey: conversationQueryKey({ host: "node-b", id: "same" }) });
+  });
+});
+
+describe("useConversationSkills polling", () => {
+  function skillsWrapper(queryClient: QueryClient) {
+    return function Wrapper({ children }: { children: ReactNode }) {
+      return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+    };
+  }
+
+  it("stops polling while the controller is not ready", async () => {
+    vi.useFakeTimers();
+    try {
+      apiErrorCodeMock.mockReturnValue("CHAT_CONTROLLER_NOT_READY");
+      getMock.mockResolvedValue({ error: { code: "CHAT_CONTROLLER_NOT_READY" } });
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+
+      renderHook(() => useConversationSkills(localRef("ao-skills"), true), {
+        wrapper: skillsWrapper(queryClient),
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(getMock).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5 * 60_000);
+      });
+      expect(getMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps polling once the catalog loads", async () => {
+    vi.useFakeTimers();
+    try {
+      getMock.mockResolvedValue({ data: { skills: [] } });
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+
+      renderHook(() => useConversationSkills(localRef("ao-skills-ok"), true), {
+        wrapper: skillsWrapper(queryClient),
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(getMock).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+      expect(getMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
