@@ -171,16 +171,24 @@ func (m *Manager) executeChatAgentSwitch(
 	if !ok {
 		return result, fmt.Errorf("switch Chat agent %s: %w", id, ErrInterfaceHandoffUnsupported)
 	}
+	// resolveChatAgentConfig drops role tuning configured for another agent.
+	agentConfig, err := m.resolveChatAgentConfig(ctx, ports.SpawnConfig{
+		ProjectID: rec.ProjectID,
+		Kind:      rec.Kind,
+		Harness:   cfg.TargetHarness,
+		AgentConfig: ports.AgentConfig{
+			Model: strings.TrimSpace(cfg.Model),
+		},
+	}, project.Config)
+	if err != nil {
+		return result, fmt.Errorf("switch Chat agent %s: target config: %w", id, err)
+	}
 
 	systemPrompt, err := m.buildSystemPrompt(ctx, rec.Kind, rec.ProjectID)
 	if err != nil {
 		return result, fmt.Errorf("switch Chat agent %s: system prompt: %w", id, err)
 	}
 	systemPrompt = appendAgentContinuationProtocol(systemPrompt)
-	agentConfig := effectiveAgentConfig(cfg.TargetHarness, rec.Kind, project.Config)
-	if model := strings.TrimSpace(cfg.Model); model != "" {
-		agentConfig.Model = model
-	}
 	targetConfigDir, err := nativeConfigDir(ctx, targetAgent, targetSetupEnv)
 	if err != nil {
 		return result, fmt.Errorf("switch Chat agent %s: target config: %w", id, err)
@@ -370,6 +378,10 @@ func (m *Manager) executeChatAgentSwitch(
 	} else {
 		recorder.boundary(domain.AgentSwitchFailureChatProviderStart)
 	}
+	historyMode := ports.ChatHistoryImport
+	if resumable {
+		historyMode = ports.ChatHistoryDeferred
+	}
 	_, err = m.chat.StartChat(ctx, ChatStart{
 		SessionID:               id,
 		ProjectID:               rec.ProjectID,
@@ -379,6 +391,7 @@ func (m *Manager) executeChatAgentSwitch(
 		WorkspacePath:           rec.Metadata.WorkspacePath,
 		Env:                     targetLaunchEnv,
 		Model:                   agentConfig.Model,
+		Effort:                  agentConfig.Effort,
 		Permissions:             agentConfig.Permissions,
 		SystemPrompt:            finalSystemPrompt,
 		AdditionalDirectories:   additionalDirectories,
@@ -394,10 +407,10 @@ func (m *Manager) executeChatAgentSwitch(
 			m.augmentAgentRuntimeEnv(targetAgent, launchEnv)
 			return launchEnv, nil
 		},
-		ProviderConversationID:  providerConversationID,
-		ProviderScopeID:         chatSwitchProviderBoundaryID(result.ID),
-		ControllerGeneration:    string(targetGeneration),
-		SkipNativeHistoryImport: resumable,
+		ProviderConversationID: providerConversationID,
+		ProviderScopeID:        chatSwitchProviderBoundaryID(result.ID),
+		ControllerGeneration:   string(targetGeneration),
+		HistoryMode:            historyMode,
 		ControllerReady: func(started ChatStarted) (ChatControllerCommit, error) {
 			emptyCommit := ChatControllerCommit{}
 			targetControllerOwner := chatControllerOwner(
@@ -623,7 +636,7 @@ func (m *Manager) rollbackStoppedChatAgentSwitchSource(
 	}
 	_, err = m.resumeChatController(
 		ctx, "restore failed agent switch", current, project,
-		workspaceInfo(current), false, "",
+		workspaceInfo(current), false, "", domain.SessionInterfaceTransitionHistoryStrict,
 	)
 	return err
 }
@@ -732,7 +745,7 @@ func (m *Manager) recoverActivatedChatAgentSwitch(
 		}
 		if _, err := m.resumeChatController(
 			ctx, "recover Chat agent switch", rec, project, workspaceInfo(rec), false,
-			string(sw.TargetGenerationID),
+			string(sw.TargetGenerationID), domain.SessionInterfaceTransitionHistoryStrict,
 		); err != nil {
 			return false, err
 		}

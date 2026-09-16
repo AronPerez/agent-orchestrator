@@ -230,7 +230,7 @@ func TestRuntimeIntegrationAdoptsLegacyDefaultWhenNamedSocketDoesNotExist(t *tes
 	if missingErr == nil {
 		t.Fatal("test setup unexpectedly found a named AO server")
 	}
-	if !migrationSocketAbsentOutput(string(missingOut)) {
+	if !serverSocketAbsentOutput(string(missingOut)) {
 		t.Fatalf("named AO probe = %q, want missing-socket diagnostic", missingOut)
 	}
 
