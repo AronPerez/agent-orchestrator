@@ -4,12 +4,10 @@ package daemon
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
 	agentsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/agent"
 )
 
@@ -28,11 +26,9 @@ func TestCodexAccountRootsResolveSymlinkedStateDir(t *testing.T) {
 		CodexAccountRoot: accounts, CodexPendingRoot: pending, CodexSwitchStagingRoot: staging,
 		CodexGlobalHome: t.TempDir(),
 	})
-	// No account client factory is wired, so bootstrap still fails, but only
-	// after the storage checks pass.
-	err := svc.WaitCodexAccountBootstrap(context.Background())
-	var apiErr *apierr.Error
-	if !errors.As(err, &apiErr) || apiErr.Details["reasonCode"] != "account_discovery_unavailable" {
-		t.Fatalf("bootstrap error = %#v, want account_discovery_unavailable", err)
+	// Unresolved, these roots sit under a symlinked ancestor and setup fails
+	// account_storage_unsafe with retryable=false, blocking Codex until restart.
+	if err := svc.WaitCodexAccountStoreReady(context.Background()); err != nil {
+		t.Fatalf("account store setup failed: %#v", err)
 	}
 }

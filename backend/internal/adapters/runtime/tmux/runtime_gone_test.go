@@ -43,7 +43,9 @@ func TestSendMessageOnUnreachableSocketReportsProbeInconclusive(t *testing.T) {
 	r.runner = &fakeRunnerSequence{results: []fakeRunnerResult{
 		{}, // socket discovery: session lives on the private socket
 		{
-			out: []byte("error connecting to /private/tmp/tmux-501/ao (No such file or directory)"),
+			// A missing socket file is conclusive absence (tmux >= 3.4); a refused
+			// connection means the socket exists but nothing answered yet.
+			out: []byte("error connecting to /private/tmp/tmux-501/ao (Connection refused)"),
 			err: &exec.ExitError{},
 		},
 	}}

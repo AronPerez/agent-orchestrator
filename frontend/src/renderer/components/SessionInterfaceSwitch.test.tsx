@@ -27,6 +27,7 @@ function transition(phase: SessionInterfaceTransition["phase"]): SessionInterfac
 		sourceMode: "tui",
 		targetMode: "chat",
 		policy: "drain",
+		historyPolicy: "strict",
 		phase,
 		createdAt: "2026-08-05T10:00:00Z",
 		updatedAt: "2026-08-05T10:00:01Z",
