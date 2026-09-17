@@ -479,11 +479,12 @@ func Run() error {
 		return fmt.Errorf("resolve device-global Codex home: %w", err)
 	}
 	codexOperationGate := codexops.NewGate()
+	codexAccountRoot, codexPendingRoot, codexSwitchStagingRoot := codexAccountRoots(cfg.StateDir)
 	agentDeps := agentsvc.Deps{
 		Cache: store, Discoverer: modelDiscoverer, Projects: store, Sessions: store, Context: ctx, Logger: log,
-		CodexAccountRoot:       filepath.Join(cfg.StateDir, "harnesses", "codex", "accounts"),
-		CodexPendingRoot:       filepath.Join(cfg.StateDir, "harnesses", "codex", "pending-accounts"),
-		CodexSwitchStagingRoot: filepath.Join(cfg.StateDir, "harnesses", "codex", "switch-staging"),
+		CodexAccountRoot:       codexAccountRoot,
+		CodexPendingRoot:       codexPendingRoot,
+		CodexSwitchStagingRoot: codexSwitchStagingRoot,
 		CodexGlobalHome:        codexHome,
 		CodexAccountSwitches:   store,
 		CodexAccounts: codexappserver.NewAccountFactoryWithResolver(func(resolveCtx context.Context) (string, error) {
@@ -975,6 +976,18 @@ func installedAgentHarness(target systeminstall.Target) (string, bool) {
 		return string(target), true
 	}
 	return "", false
+}
+
+// codexAccountRoots resolves a relocated AO home (for example ~/.ao symlinked
+// to another directory) once here, because Codex credential storage rejects
+// every symlinked ancestor and would otherwise block Codex launches for good.
+// Symlinks below the state directory are still rejected.
+func codexAccountRoots(stateDir string) (accounts, pending, staging string) {
+	if resolved, err := filepath.EvalSymlinks(stateDir); err == nil {
+		stateDir = resolved
+	}
+	base := filepath.Join(stateDir, "harnesses", "codex")
+	return filepath.Join(base, "accounts"), filepath.Join(base, "pending-accounts"), filepath.Join(base, "switch-staging")
 }
 
 func usagePipelineWatchRoots(roots usagesvc.SourceRoots) []string {
