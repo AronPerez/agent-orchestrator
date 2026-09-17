@@ -1115,6 +1115,7 @@
   "settings.updates.updateToLatest": "Auf neueste Version aktualisieren",
   "session.notFound": "Sitzung nicht gefunden. Sie wurde möglicherweise bereinigt — wählen Sie eine andere in der Seitenleiste.",
   "session.actionsMenu": "Sitzungsaktionen",
+  "session.noActions": "Für diese Sitzung sind keine Aktionen verfügbar.",
   "settings.updates.updateFailed": "Update fehlgeschlagen.",
   "switchAgent.action": "Agent wechseln",
   "switchAgent.checkingStatus": "Wechselstatus wird geprüft…",

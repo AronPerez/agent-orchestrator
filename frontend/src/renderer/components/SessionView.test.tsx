@@ -8,6 +8,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionView } from "./SessionView";
 import { SessionTopbarProvider } from "./SessionTopbarPortal";
@@ -215,6 +216,7 @@ vi.mock("./NotificationCenter", () => ({
   NotificationCenter: () => <button type="button">Notifications</button>,
 }));
 vi.mock("./TerminalSwitchAgentButton", () => ({
+  canSwitchAgent: (session: WorkspaceSession) => session.kind === "worker",
   TerminalSwitchAgentButton: () => (
     <button aria-label="Switch agent" type="button" />
   ),
@@ -332,7 +334,7 @@ vi.mock("./chat/SessionChatSurface", () => ({
 						</button>
 					</div>
         ))}
-      </div>
+			</div>
       {shellTarget ? <div data-testid="terminal-target">shell</div> : null}
       {shellTarget ? (
         <button type="button" onClick={onSelectChat}>
@@ -359,6 +361,7 @@ vi.mock("./CenterPane", () => ({
     onSelectShellTerminal,
     onSelectSessionTerminal,
     onSelectReviewerTerminal,
+    sessionTabAction,
     topbarActions,
     workspaceTabs,
 		workspaceTabActions,
@@ -375,6 +378,7 @@ vi.mock("./CenterPane", () => ({
       handleId: string;
       harness: string;
     }) => void;
+    sessionTabAction?: ReactNode;
     topbarActions?: ReactNode;
 		workspaceTabs?: Array<{ key: string; content: ReactNode; onSelect: () => void }>;
 		workspaceTabActions?: ReactNode;
@@ -386,8 +390,9 @@ vi.mock("./CenterPane", () => ({
       terminal center
 			<div data-testid={`auxiliary-tab-order-tui-${session?.id ?? "none"}`}>
 				{auxiliaryTabOrder?.join("|") ?? ""}
-			</div>
+      </div>
       {topbarActions}
+			{sessionTabAction}
 			<div role="tablist">
 				{workspaceTabs?.map((tab) => <div key={tab.key}>{tab.content}</div>)}
 			</div>
@@ -947,6 +952,17 @@ describe("SessionView", () => {
     expect(
       screen.queryByRole("button", { name: "New terminal" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("shows an empty state instead of a blank actions menu for orchestrator sessions", async () => {
+    render(<SessionView sessionRef={sessionRef("sess-orch")} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Session actions" }));
+    expect(
+      await screen.findByRole("menuitem", {
+        name: "No session actions are available.",
+      }),
+    ).toHaveAttribute("data-disabled");
   });
 
   it("keeps the git branch out of the session top bar", () => {
