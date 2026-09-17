@@ -47,15 +47,19 @@ describe("mux across hosts", () => {
 		expect(muxUrlForHost(REMOTE_HOST)).toBe("ws://127.0.0.1:9999/tok/mux");
 	});
 
+	it("does not fall back to the browser's mux when a remote host disconnects", () => {
+		expect(muxUrlForHost(REMOTE_HOST)).toBeNull();
+	});
+
 	it("keeps one live socket per host, not one globally", () => {
 		const made: string[] = [];
 		const pool = createTerminalMuxPool((host) => {
 			made.push(host);
 			return fakeMux();
 		});
-		const local = pool.acquire(LOCAL_HOST);
-		const remote = pool.acquire(REMOTE_HOST);
-		const secondLocal = pool.acquire(LOCAL_HOST);
+		const local = pool.acquire(LOCAL_HOST)!;
+		const remote = pool.acquire(REMOTE_HOST)!;
+		const secondLocal = pool.acquire(LOCAL_HOST)!;
 
 		expect(made).toEqual([LOCAL_HOST, REMOTE_HOST]);
 
@@ -67,9 +71,9 @@ describe("mux across hosts", () => {
 	it("closing one host's mux leaves the other open", () => {
 		const closed: string[] = [];
 		const pool = createTerminalMuxPool((host) => fakeMux(() => closed.push(host)));
-		const local = pool.acquire(LOCAL_HOST);
-		const remote = pool.acquire(REMOTE_HOST);
-		const secondLocal = pool.acquire(LOCAL_HOST);
+		const local = pool.acquire(LOCAL_HOST)!;
+		const remote = pool.acquire(REMOTE_HOST)!;
+		const secondLocal = pool.acquire(LOCAL_HOST)!;
 
 		remote.dispose();
 		expect(closed).toEqual([REMOTE_HOST]);
@@ -275,8 +279,8 @@ describe("createTerminalMuxPool", () => {
 		const pool = createTerminalMuxPool(() =>
 			createTerminalMux("ws://x/mux", FakeSocket as unknown as typeof WebSocket),
 		);
-		const first = pool.acquire();
-		const second = pool.acquire();
+		const first = pool.acquire()!;
+		const second = pool.acquire()!;
 		expect(FakeSocket.instances).toHaveLength(1);
 		const socket = FakeSocket.instances[0];
 		socket.emitOpen();
@@ -295,8 +299,8 @@ describe("createTerminalMuxPool", () => {
 		const pool = createTerminalMuxPool(() =>
 			createTerminalMux("ws://x/mux", FakeSocket as unknown as typeof WebSocket),
 		);
-		const first = pool.acquire();
-		const second = pool.acquire();
+		const first = pool.acquire()!;
+		const second = pool.acquire()!;
 		const firstStates: string[] = [];
 		const secondStates: string[] = [];
 		first.onConnectionChange((state) => firstStates.push(state));
@@ -308,8 +312,8 @@ describe("createTerminalMuxPool", () => {
 
 		first.dispose();
 		second.dispose();
-		const replacementA = pool.acquire();
-		const replacementB = pool.acquire();
+		const replacementA = pool.acquire()!;
+		const replacementB = pool.acquire()!;
 		expect(FakeSocket.instances).toHaveLength(2);
 		replacementA.dispose();
 		replacementB.dispose();
@@ -319,7 +323,7 @@ describe("createTerminalMuxPool", () => {
 		const pool = createTerminalMuxPool(() =>
 			createTerminalMux("ws://x/mux", FakeSocket as unknown as typeof WebSocket),
 		);
-		const lease = pool.acquire();
+		const lease = pool.acquire()!;
 		const data: string[] = [];
 		lease.onData("a", (bytes) => data.push(new TextDecoder().decode(bytes)));
 		const socket = FakeSocket.instances[0];

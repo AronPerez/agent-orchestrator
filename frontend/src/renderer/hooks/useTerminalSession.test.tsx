@@ -2,6 +2,7 @@ import { act, renderHook } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { forgetHost, registerHostBase } from "../lib/host-clients";
 import type { MuxConnectionState, TerminalMux } from "../lib/terminal-mux";
 import type { WorkspaceSession } from "../types/workspace";
 import { OPEN_TIMEOUT_MS, useTerminalSession, type AttachableTerminal } from "./useTerminalSession";
@@ -20,6 +21,8 @@ const session: WorkspaceSession = {
 	updatedAt: "now",
 	prs: [],
 };
+
+const REMOTE_HOST = "http://192.0.2.10:3011";
 
 type FakeMux = {
 	mux: TerminalMux;
@@ -209,6 +212,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	forgetHost(REMOTE_HOST);
 	vi.useRealTimers();
 	vi.restoreAllMocks();
 });
@@ -230,14 +234,14 @@ describe("useTerminalSession", () => {
 	});
 
 	it("opens a standalone shell on the host that created its handle", () => {
-		const remote = "http://192.0.2.10:3011";
+		registerHostBase(REMOTE_HOST, "http://127.0.0.1:9999/token");
 		const { muxes, muxHosts } = setup({
 			attachedSession: undefined,
 			shellTerminalHandleId: "remote-shell",
-			shellTerminalHost: remote,
+			shellTerminalHost: REMOTE_HOST,
 		});
 
-		expect(muxHosts).toEqual([remote]);
+		expect(muxHosts).toEqual([REMOTE_HOST]);
 		expect(muxes[0].opens).toEqual([["remote-shell", 80, 24]]);
 	});
 
@@ -959,6 +963,29 @@ describe("useTerminalSession", () => {
 		expect(muxes[0].disposed).toBe(true);
 		expect(muxes[1].opens).toEqual([["handle-1", 80, 24]]);
 		act(() => muxes[1].emitOpened("handle-1"));
+		expect(view.result.current.state).toBe("attached");
+	});
+
+	it("waits for a remote proxy and delivers input typed during the reconnect", () => {
+		registerHostBase(REMOTE_HOST, "http://127.0.0.1:9999/first");
+		const { view, terminal, muxes, muxHosts } = setup({
+			attachedSession: { ...session, host: REMOTE_HOST },
+		});
+		act(() => muxes[0].emitOpened("handle-1"));
+
+		act(() => forgetHost(REMOTE_HOST));
+		act(() => muxes[0].emitConnection("closed"));
+		terminal.typeKeys("continue\r");
+		act(() => void vi.advanceTimersByTime(60_000));
+
+		expect(view.result.current.state).toBe("reattaching");
+		expect(muxes).toHaveLength(1);
+
+		act(() => registerHostBase(REMOTE_HOST, "http://127.0.0.1:9999/second"));
+		expect(muxHosts).toEqual([REMOTE_HOST, REMOTE_HOST]);
+		act(() => muxes[1].emitOpened("handle-1"));
+
+		expect(muxes[1].inputs).toEqual([["handle-1", "continue\r"]]);
 		expect(view.result.current.state).toBe("attached");
 	});
 

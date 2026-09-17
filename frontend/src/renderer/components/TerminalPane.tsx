@@ -65,7 +65,7 @@ type TerminalPaneProps = {
   /** Focus the terminal when an in-flight controller asks for human input. */
   focusRequested?: boolean;
   /** Provider-owned shared transport lease factory. */
-  createMux?: (host: HostId) => TerminalMux;
+  createMux?: (host: HostId) => TerminalMux | null;
 };
 
 type TerminalCacheDescriptor = {
@@ -311,9 +311,10 @@ export function TerminalCacheProvider({
   const parkingRef = useRef<HTMLDivElement | null>(null);
   const muxPoolRef = useRef<TerminalMuxPool | null>(null);
   if (!muxPoolRef.current) {
-    muxPoolRef.current = createTerminalMuxPool((host) =>
-      createTerminalMux(muxUrlForHost(host)),
-    );
+    muxPoolRef.current = createTerminalMuxPool((host) => {
+      const url = muxUrlForHost(host);
+      return url === null ? null : createTerminalMux(url);
+    });
   }
   const muxPool = muxPoolRef.current;
   // Cloud sessions do not share the pooled local-daemon socket: each runs in its
@@ -329,9 +330,11 @@ export function TerminalCacheProvider({
   // connect time rather than whatever was resolved on first render.
   const cloudCpRef = useRef({ client: cloudClient, baseUrl: cloudBaseUrl });
   cloudCpRef.current = { client: cloudClient, baseUrl: cloudBaseUrl };
-  const cloudMuxFactoriesRef = useRef(new Map<string, () => TerminalMux>());
+  const cloudMuxFactoriesRef = useRef(
+    new Map<string, (host: HostId) => TerminalMux>(),
+  );
   const resolveCreateMux = useCallback(
-    (paneSession?: WorkspaceSession): (() => TerminalMux) => {
+    (paneSession?: WorkspaceSession): ((host: HostId) => TerminalMux | null) => {
       const cloud = paneSession?.cloud;
       if (!cloud) return muxPool.acquire;
       const sessionKey = refKey(paneSession);
@@ -339,7 +342,7 @@ export function TerminalCacheProvider({
       if (cached) return cached;
       const sessionId = paneSession.id;
       const orgId = cloud.orgId;
-      const factory = () =>
+      const factory = (_host: HostId) =>
         createCloudTerminalMux({
           wsBaseUrl: `${cloudCpRef.current.baseUrl.replace(/^http/i, "ws").replace(/\/+$/, "")}/api/cloud/v1`,
           kind: "agent",
