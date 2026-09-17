@@ -58,7 +58,7 @@ func startHandoff(t *testing.T, conv ports.ChatConversation, st *sqlite.Store) e
 	t.Cleanup(func() { _ = svc.Stop(context.Background(), testSession) })
 	_, err := svc.Start(context.Background(), chatsvc.StartConfig{
 		SessionID: testSession, ProjectID: testProject, Harness: domain.HarnessClaudeCode,
-		WorkspacePath: t.TempDir(), ProviderConversationID: "thread-1", RequireNativeHistory: true,
+		WorkspacePath: t.TempDir(), ProviderConversationID: "thread-1", HistoryMode: ports.ChatHistoryRequired,
 	})
 	return err
 }
@@ -121,7 +121,7 @@ func TestInterfaceHandoffStillRejectsUnreachableAOHighWater(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateConversation: %v", err)
 	}
-	if err := st.ClaimChatControllerGeneration(ctx, testSession, "old-generation", now); err != nil {
+	if err := st.ClaimChatControllerGeneration(ctx, testSession, "old-generation"); err != nil {
 		t.Fatalf("ClaimChatControllerGeneration: %v", err)
 	}
 	created, err := st.AppendUserMessage(ctx, existing.ID, testSession, "old-generation",
@@ -213,7 +213,7 @@ func TestInterfaceHandoffImportsAfterSettleWindowExpiresOnStaleHookFact(t *testi
 
 	if _, err := svc.Start(context.Background(), chatsvc.StartConfig{
 		SessionID: testSession, ProjectID: testProject, Harness: domain.HarnessCodex,
-		WorkspacePath: t.TempDir(), ProviderConversationID: "thread-1", RequireNativeHistory: true,
+		WorkspacePath: t.TempDir(), ProviderConversationID: "thread-1", HistoryMode: ports.ChatHistoryRequired,
 	}); err != nil {
 		t.Fatalf("Start = %v, want the handoff to import once the settle window expired", err)
 	}

@@ -685,10 +685,12 @@ func (r *Runtime) paneSessionIDs(ctx context.Context, id string) []int {
 // IsAlive reports whether the handle's session still exists via `tmux
 // has-session`. Exit 0 means alive. A non-zero exit with output naming this
 // session as missing is a definitive false, nil. A conclusively absent server
-// wraps ports.ErrRuntimeUnavailable so recovery may recreate it. A transient
-// connection or protocol/client failure wraps ErrRuntimeProbeInconclusive so
-// no caller can treat a possibly-live session as absent. Any other non-zero
-// exit is a plain probe error, which is likewise never per-session death.
+// — tmux ≥ 3.4 words it "error connecting … (No such file or directory)"
+// rather than "no server running" — wraps ports.ErrRuntimeUnavailable so
+// recovery may recreate it. A transient connection or protocol/client failure
+// wraps ErrRuntimeProbeInconclusive so no caller can treat a possibly-live
+// session as absent. Any other non-zero exit is a plain probe error, which is
+// likewise never per-session death.
 func (r *Runtime) IsAlive(ctx context.Context, handle ports.RuntimeHandle) (bool, error) {
 	id, err := handleID(handle)
 	if err != nil {
@@ -934,7 +936,7 @@ func (r *Runtime) Interrupt(ctx context.Context, handle ports.RuntimeHandle) err
 		// Other connection failures may hide a target that never received Ctrl-C.
 		if errors.Is(err, ports.ErrRuntimeUnavailable) ||
 			errors.As(err, &exitErr) && (sessionMissingOutput(string(out)) ||
-				serverNotRunningOutput(string(out)) || migrationSocketAbsentOutput(string(out))) {
+				serverNotRunningOutput(string(out)) || serverSocketAbsentOutput(string(out))) {
 			r.forgetSessionSocket(id)
 			return nil
 		}
@@ -1131,7 +1133,9 @@ func classifyRuntimeFailure(out []byte, err error) error {
 	// session from a real teardown failure, and commandError already carries
 	// tmux's own output, so nothing needs restating here.
 	switch {
-	case serverNotRunningOutput(text):
+	// tmux >= 3.4 reports an absent server as a missing socket file; check it
+	// before the transient "error connecting" family it also matches.
+	case serverNotRunningOutput(text) || serverSocketAbsentOutput(text):
 		return fmt.Errorf("%w: %w", ports.ErrRuntimeUnavailable, err)
 	case transientServerFailureOutput(text):
 		return fmt.Errorf("%w: %w", ports.ErrRuntimeProbeInconclusive, err)
@@ -1160,7 +1164,7 @@ func (r *Runtime) socketForSession(ctx context.Context, id string) (string, erro
 	// transient error cannot redirect a live session elsewhere.
 	if !sessionMissingOutput(string(out)) &&
 		!serverNotRunningOutput(string(out)) &&
-		!migrationSocketAbsentOutput(string(out)) {
+		!serverSocketAbsentOutput(string(out)) {
 		return r.socketName, nil
 	}
 	if r.legacyBinary == "" {
@@ -1178,21 +1182,13 @@ func (r *Runtime) socketForSession(ctx context.Context, id string) (string, erro
 	if ctx.Err() != nil {
 		return "", ctx.Err()
 	}
-	// The private lookup already missed before reaching the legacy probe. A
-	// missing legacy socket proves control-endpoint absence, not process death:
-	// keep liveness fail-closed while allowing explicit teardown to recover.
-	if migrationSocketAbsentOutput(string(legacyOut)) {
-		return "", fmt.Errorf(
-			"%w: system tmux %q could not reach legacy default-socket session %s: %w",
-			ports.ErrRuntimeUnavailable,
-			r.legacyBinary,
-			id,
-			legacyErr,
-		)
-	}
-	if sessionMissingOutput(string(legacyOut)) || serverNotRunningOutput(string(legacyOut)) {
+	if sessionMissingOutput(string(legacyOut)) ||
+		serverNotRunningOutput(string(legacyOut)) ||
+		serverSocketAbsentOutput(string(legacyOut)) {
 		// Both known sockets definitively lack the session. Return the private
-		// target so IsAlive's ordinary exact-session handling reports false.
+		// target so IsAlive's ordinary exact-session handling resolves it: a
+		// live private server reports the session missing, an absent one
+		// reports ErrRuntimeUnavailable so recovery may recreate it.
 		return r.socketName, nil
 	}
 	return "", fmt.Errorf(
@@ -1426,11 +1422,14 @@ func serverNotRunningOutput(out string) bool {
 	return strings.Contains(s, "no server running")
 }
 
-// migrationSocketAbsentOutput identifies a named migration target whose Unix
-// socket does not exist. This is definitive only for choosing whether to
-// inspect the legacy default socket; it must not become per-session evidence
-// of death, because the session may still be alive on that legacy server.
-func migrationSocketAbsentOutput(out string) bool {
+// serverSocketAbsentOutput identifies tmux output meaning the target's Unix
+// socket file does not exist, so no server is listening there. tmux ≥ 3.4
+// reports an absent server this way instead of "no server running". Like
+// "no server running" this is definitive at the server level only; it must
+// not become per-session evidence of death, because liveness callers still
+// distinguish it from a conclusive "can't find session" and recovery paths
+// may recreate the missing server.
+func serverSocketAbsentOutput(out string) bool {
 	s := strings.ToLower(out)
 	return strings.Contains(s, "error connecting") &&
 		strings.Contains(s, "no such file or directory")
