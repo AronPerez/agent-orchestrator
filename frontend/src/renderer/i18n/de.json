@@ -1995,6 +1995,7 @@
   "hosts.label": "Host",
   "hosts.status.checking": "Verbinde…",
   "hosts.status.offline": "Getrennt",
+  "hosts.contentUnavailable": "Dieser Remote-Host ist getrennt. Verbinden Sie ihn erneut, um seinen aktuellen Inhalt anzuzeigen.",
   "hosts.status.online": "Verbunden",
   "hosts.status.notADaemon": "Kein AO-Daemon",
   "hosts.status.unauthorized": "Falsches Passwort",

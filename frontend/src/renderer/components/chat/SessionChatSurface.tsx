@@ -125,6 +125,7 @@ export function SessionChatSurface({
   /** Reports accepted Chat work that must inform an interface-switch policy choice. */
   onConversationWorkChange?: (state: ConversationWorkState) => void;
 }) {
+  const { t } = useTranslation();
   const {
     snapshot: queriedSnapshot,
     isLoading,
@@ -315,6 +316,19 @@ export function SessionChatSurface({
     (renderShellFallback
       ? unavailableConversationSnapshot(session)
       : undefined);
+  const apiBaseUrl = baseUrlFor(session.host);
+
+  if (apiBaseUrl === null) {
+    return (
+      <Centered>
+        <AlertTriangle aria-hidden="true" className="size-4 text-warning" />
+        <strong className="text-sm text-foreground">{t("hosts.status.offline")}</strong>
+        <p className="max-w-sm text-center text-xs leading-relaxed text-muted-foreground">
+          {t("hosts.contentUnavailable")}
+        </p>
+      </Centered>
+    );
+  }
 
   if (isLoading && !renderShellFallback) {
     return (
@@ -370,7 +384,7 @@ export function SessionChatSurface({
     <div className="relative h-full min-h-0">
       <ChatWorkspace
         key={refKey(session)}
-        apiBaseUrl={baseUrlFor(session.host) ?? undefined}
+        apiBaseUrl={apiBaseUrl}
         snapshot={renderSnapshot}
         agentInputDisabled={
           switchLocksChat || switchSelectorOpen || handoffDialogOpen

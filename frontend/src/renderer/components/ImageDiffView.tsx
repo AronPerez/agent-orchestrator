@@ -1,8 +1,7 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { getApiBaseUrl } from "../lib/api-client";
-import { baseUrlFor } from "../lib/host-clients";
 import type { Ref } from "../lib/hosts";
+import { buildWorkspaceBlobUrl } from "../lib/markdown-image-resolver";
 import { cn } from "../lib/utils";
 import type { WorkspaceFileSummary } from "../hooks/useSessionWorkspaceFiles";
 
@@ -13,19 +12,6 @@ type ImageDiffSide = "before" | "after";
 // borrowing the panel background.
 const CHECKERBOARD =
 	"repeating-conic-gradient(color-mix(in srgb, currentColor 8%, transparent) 0% 25%, transparent 0% 50%) 0 0 / 16px 16px";
-
-// workspaceImageUrl points an <img> straight at the daemon's blob route. The
-// route sets no-store, so `version` — the file detail's load timestamp — is what
-// makes an edited image reload: without a changing URL the element never
-// refetches at all.
-// The <img> talks to the session's OWN host, not whichever daemon happens to be
-// local: for a remote session that base is the main-process loopback proxy, which
-// is what carries the host credential an <img> element cannot send itself.
-function workspaceImageUrl(session: Ref, path: string, side: ImageDiffSide, version: number): string {
-	const query = new URLSearchParams({ path, side, v: String(version) });
-	const base = baseUrlFor(session.host) ?? getApiBaseUrl();
-	return `${base}/api/v1/sessions/${encodeURIComponent(session.id)}/workspace/file/blob?${query}`;
-}
 
 /**
  * ImageDiffView renders an image file's change as the images themselves —
@@ -99,6 +85,7 @@ function ImageDiffPane({
 	const { t } = useTranslation();
 	const [size, setSize] = useState<{ width: number; height: number } | null>(null);
 	const [failed, setFailed] = useState(false);
+	const src = buildWorkspaceBlobUrl(session, path, version, side);
 	return (
 		<figure className="min-w-0 overflow-hidden rounded-md border border-border/60">
 			<figcaption className="flex items-center justify-between gap-2 border-b border-border/60 bg-background/60 px-2 py-1">
@@ -112,7 +99,9 @@ function ImageDiffPane({
 				</span>
 			</figcaption>
 			<div className="grid min-h-24 place-items-center p-3 text-passive" style={{ background: CHECKERBOARD }}>
-				{failed ? (
+				{src === undefined ? (
+					<p className="text-center text-xs text-muted-foreground">{t("hosts.contentUnavailable")}</p>
+				) : failed ? (
 					<p className="text-center text-xs text-muted-foreground">{t("files.imagePreviewFailed")}</p>
 				) : (
 					<img
@@ -122,7 +111,7 @@ function ImageDiffPane({
 						onLoad={(event) =>
 							setSize({ height: event.currentTarget.naturalHeight, width: event.currentTarget.naturalWidth })
 						}
-						src={workspaceImageUrl(session, path, side, version)}
+						src={src}
 					/>
 				)}
 			</div>

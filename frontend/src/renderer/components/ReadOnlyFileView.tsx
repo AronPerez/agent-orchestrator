@@ -1,7 +1,6 @@
 import { useTranslation } from "react-i18next";
-import { getApiBaseUrl } from "../lib/api-client";
-import { baseUrlFor } from "../lib/host-clients";
 import type { Ref } from "../lib/hosts";
+import { buildWorkspaceBlobUrl } from "../lib/markdown-image-resolver";
 import type { WorkspaceFileDetail } from "../hooks/useSessionWorkspaceFiles";
 import { canonicalLanguage } from "../lib/code-highlight";
 import { HighlightedCode } from "./chat/HighlightedCode";
@@ -11,12 +10,6 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function workspaceRawImageUrl(session: Ref, path: string): string {
-  const query = new URLSearchParams({ path, side: "after" });
-  const base = baseUrlFor(session.host) ?? getApiBaseUrl();
-  return `${base}/api/v1/sessions/${encodeURIComponent(session.id)}/workspace/file/blob?${query}`;
 }
 
 // Renders an untouched (unmodified) workspace file: an agent didn't write
@@ -32,12 +25,14 @@ export function ReadOnlyFileView({
   const { t } = useTranslation();
   if (detail.binary) {
     if (detail.imageMediaType) {
+      const src = buildWorkspaceBlobUrl(session, detail.path);
+      if (src === undefined) return <PanelMessage>{t("hosts.contentUnavailable")}</PanelMessage>;
       return (
         <div className="grid place-items-center p-3">
           <img
             alt={detail.path}
             className="max-h-[70vh] max-w-full object-contain"
-            src={workspaceRawImageUrl(session, detail.path)}
+            src={src}
           />
         </div>
       );

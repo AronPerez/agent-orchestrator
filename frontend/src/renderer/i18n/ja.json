@@ -1995,6 +1995,7 @@
   "hosts.label": "ホスト",
   "hosts.status.checking": "接続中…",
   "hosts.status.offline": "切断済み",
+  "hosts.contentUnavailable": "このリモートホストは切断されています。再接続して現在の内容を表示してください。",
   "hosts.status.online": "接続済み",
   "hosts.status.notADaemon": "AO デーモンではありません",
   "hosts.status.unauthorized": "パスワードが違います",
