@@ -42,7 +42,7 @@ import {
 import { ShellTopbar } from "./ShellTopbar";
 import { SessionTopbarHost } from "./SessionTopbarPortal";
 import { SwitchAgentDialog } from "./SwitchAgentDialog";
-import { TerminalSwitchAgentButton } from "./TerminalSwitchAgentButton";
+import { canSwitchAgent, TerminalSwitchAgentButton } from "./TerminalSwitchAgentButton";
 import { TopbarButton } from "./TopbarButton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import { Sheet, SheetContent, SheetTitle } from "./ui/sheet";
@@ -1298,18 +1298,24 @@ export function SessionView({ sessionRef }: SessionViewProps) {
     setHandoffDialogOpen(false);
   }, [sessionKey]);
   const sessionTabActions = session && !session.cloud ? (
-    <SessionActionsMenu>
-      <TerminalSwitchAgentButton
-        key={sessionKey}
-        variant="menu-item"
-        agentSwitch={handoffAgentSwitch}
-        onOpenChange={handleHandoffDialogOpenChange}
-        open={handoffDialogOpen}
-        presentation={handoffControlPresentation}
-        session={session}
-        switchError={handoffSwitchError}
-      />
-    </SessionActionsMenu>
+    <SessionActionsMenu
+      items={
+        canSwitchAgent(session, handoffControlPresentation)
+          ? [
+              <TerminalSwitchAgentButton
+                key={sessionKey}
+                variant="menu-item"
+                agentSwitch={handoffAgentSwitch}
+                onOpenChange={handleHandoffDialogOpenChange}
+                open={handoffDialogOpen}
+                presentation={handoffControlPresentation}
+                session={session}
+                switchError={handoffSwitchError}
+              />,
+            ]
+          : []
+      }
+    />
   ) : null;
   const handoffDialog =
     session && !session.cloud && handoffDialogContainer ? (

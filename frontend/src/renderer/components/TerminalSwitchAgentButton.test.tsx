@@ -110,15 +110,18 @@ function SwitchMenuHarness() {
 	const [open, setOpen] = useState(false);
 	return (
 		<div className="relative" data-testid="terminal-container" ref={setContainer}>
-			<SessionActionsMenu>
-				<TerminalSwitchAgentButton
-					onOpenChange={setOpen}
-					open={open}
-					session={worker}
-					switchError={null}
-					variant="menu-item"
-				/>
-			</SessionActionsMenu>
+			<SessionActionsMenu
+				items={[
+					<TerminalSwitchAgentButton
+						key="switch-agent"
+						onOpenChange={setOpen}
+						open={open}
+						session={worker}
+						switchError={null}
+						variant="menu-item"
+					/>,
+				]}
+			/>
 			{container ? (
 				<SwitchAgentDialog container={container} onOpenChange={setOpen} open={open} session={worker} />
 			) : null}
