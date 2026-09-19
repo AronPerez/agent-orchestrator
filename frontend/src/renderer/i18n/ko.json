@@ -1996,6 +1996,7 @@
   "hosts.label": "호스트",
   "hosts.status.checking": "연결 중…",
   "hosts.status.offline": "연결 끊김",
+  "hosts.contentUnavailable": "이 원격 호스트의 연결이 끊겼습니다. 다시 연결하여 현재 콘텐츠를 확인하세요.",
   "hosts.status.online": "연결됨",
   "hosts.status.notADaemon": "AO 데몬이 아님",
   "hosts.status.unauthorized": "비밀번호가 올바르지 않음",

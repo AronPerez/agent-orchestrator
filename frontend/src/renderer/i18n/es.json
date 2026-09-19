@@ -2024,6 +2024,7 @@
   "hosts.label": "Host",
   "hosts.status.checking": "Conectando…",
   "hosts.status.offline": "Desconectado",
+  "hosts.contentUnavailable": "Este host remoto está desconectado. Vuelve a conectarlo para ver su contenido actual.",
   "hosts.status.online": "Conectado",
   "hosts.status.notADaemon": "No es un daemon de AO",
   "hosts.status.unauthorized": "Contraseña incorrecta",

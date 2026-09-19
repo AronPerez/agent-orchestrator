@@ -1977,6 +1977,7 @@
   "hosts.label": "Host",
   "hosts.status.checking": "Connecting…",
   "hosts.status.offline": "Disconnected",
+  "hosts.contentUnavailable": "This remote host is disconnected. Reconnect to view its current content.",
   "hosts.status.online": "Connected",
   "hosts.status.notADaemon": "Not an AO daemon",
   "hosts.status.unauthorized": "Wrong password",

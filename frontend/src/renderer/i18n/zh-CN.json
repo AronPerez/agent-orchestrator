@@ -1978,6 +1978,7 @@
   "hosts.label": "主机",
   "hosts.status.checking": "正在连接…",
   "hosts.status.offline": "已断开",
+  "hosts.contentUnavailable": "此远程主机已断开连接。请重新连接以查看其当前内容。",
   "hosts.status.online": "已连接",
   "hosts.status.notADaemon": "不是 AO 守护进程",
   "hosts.status.unauthorized": "密码错误",

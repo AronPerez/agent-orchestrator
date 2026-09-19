@@ -1,10 +1,11 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ReadOnlyFileView } from "./ReadOnlyFileView";
 import type { WorkspaceFileDetail } from "../hooks/useSessionWorkspaceFiles";
 
-vi.mock("../lib/api-client", () => ({ getApiBaseUrl: () => "" }));
-vi.mock("../lib/host-clients", () => ({ baseUrlFor: () => "" }));
+const hostBase = vi.hoisted(() => ({ value: "http://127.0.0.1:3001" as string | null }));
+
+vi.mock("../lib/host-clients", () => ({ baseUrlFor: () => hostBase.value }));
 
 vi.mock("./chat/HighlightedCode", () => ({
   HighlightedCode: ({
@@ -40,6 +41,10 @@ function baseDetail(
 }
 
 describe("ReadOnlyFileView", () => {
+  beforeEach(() => {
+    hostBase.value = "http://127.0.0.1:3001";
+  });
+
   it("renders plain content through the shared syntax renderer", () => {
     render(
       <ReadOnlyFileView
@@ -84,6 +89,24 @@ describe("ReadOnlyFileView", () => {
       expect.stringContaining("/api/v1/sessions/sess-1/workspace/file/blob"),
     );
     expect(img).toHaveAttribute("src", expect.stringContaining("side=after"));
+  });
+
+  it("does not read a disconnected remote image from the local daemon", () => {
+    hostBase.value = null;
+    render(
+      <ReadOnlyFileView
+        detail={baseDetail({
+          binary: true,
+          content: "",
+          path: "logo.png",
+          imageMediaType: "image/png",
+        })}
+        session={{ host: "http://192.0.2.1:3011", id: "sess-remote" }}
+      />,
+    );
+
+    expect(screen.queryByRole("img")).not.toBeInTheDocument();
+    expect(screen.getByText("This remote host is disconnected. Reconnect to view its current content.")).toBeInTheDocument();
   });
 
   it("shows a binary placeholder for a non-image binary file", () => {

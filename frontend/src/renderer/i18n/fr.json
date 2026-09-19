@@ -2024,6 +2024,7 @@
   "hosts.label": "Hôte",
   "hosts.status.checking": "Connexion…",
   "hosts.status.offline": "Déconnecté",
+  "hosts.contentUnavailable": "Cet hôte distant est déconnecté. Reconnectez-le pour voir son contenu actuel.",
   "hosts.status.online": "Connecté",
   "hosts.status.notADaemon": "Pas un daemon AO",
   "hosts.status.unauthorized": "Mot de passe incorrect",

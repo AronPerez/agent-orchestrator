@@ -42,6 +42,7 @@ const {
   conversationState,
   conversationCommandState,
   agentSwitchState,
+  hostBase,
 } = vi.hoisted(() => ({
   getMock: vi.fn(),
   postMock: vi.fn(),
@@ -51,6 +52,7 @@ const {
     pendingAcceptedTurnId: undefined as string | undefined,
     acknowledgeAcceptedTurn: vi.fn(),
   },
+  hostBase: { value: "http://127.0.0.1:3001" as string | null },
   conversationState: {
     snapshot: { capabilities: [] } as
       | (Partial<ConversationSnapshot> & { capabilities: string[] })
@@ -70,7 +72,7 @@ vi.mock("../../lib/api-client", () => ({
 }));
 
 vi.mock("../../lib/host-clients", () => ({
-  baseUrlFor: () => "http://127.0.0.1:3001",
+  baseUrlFor: () => hostBase.value,
   // useAgentSwitches reads through the host client too, not the host-agnostic
   // apiClient — without GET here the switch history query just rejects.
   clientFor: () => ({ GET: getMock, POST: postMock }),
@@ -196,6 +198,7 @@ beforeEach(() => {
   conversationCommandState.pendingAcceptedTurnId = undefined;
   conversationCommandState.acknowledgeAcceptedTurn.mockReset();
   agentSwitchState.data = [];
+  hostBase.value = "http://127.0.0.1:3001";
   useUiStore.setState({ inspectorSessions: {} });
 });
 
@@ -204,6 +207,26 @@ afterEach(() => {
 });
 
 describe("SessionChatSurface link routing", () => {
+  it("shows an unavailable state rather than passing a missing remote base to chat", () => {
+    hostBase.value = null;
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+        mutations: { retry: false },
+      },
+    });
+
+    render(
+      <Wrapper client={queryClient}>
+        <SessionChatSurface session={{ ...session, host: "http://192.0.2.1:3011" }} />
+      </Wrapper>,
+    );
+
+    expect(screen.getByText("Disconnected")).toBeInTheDocument();
+    expect(screen.getByText("This remote host is disconnected. Reconnect to view its current content.")).toBeInTheDocument();
+    expect(screen.queryByText("Rendered sess-1")).not.toBeInTheDocument();
+  });
+
   it("does not report idle work before the conversation snapshot loads", () => {
     conversationState.snapshot = undefined;
     conversationState.isLoading = true;
