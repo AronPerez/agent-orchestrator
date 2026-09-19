@@ -13,7 +13,8 @@
 // derived status flow back (docs/architecture.md).
 
 import { useQueryClient } from "@tanstack/react-query";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
+import { connectedHosts, subscribeConnectedHosts } from "../lib/host-clients";
 import { LOCAL_HOST, type HostId } from "../lib/hosts";
 import { captureRendererEvent } from "../lib/telemetry";
 import { createTerminalMux, muxUrlForHost, type TerminalMux } from "../lib/terminal-mux";
@@ -71,8 +72,8 @@ export type UseTerminalSessionOptions = {
 	 * recovery continue, but hidden panes cannot send user input or PTY resizes.
 	 */
 	isVisible?: boolean;
-	/** Test seam: build the mux client. Defaults to a fresh socket against the session's host. */
-	createMux?: (host: HostId) => TerminalMux;
+	/** Test seam: build the mux client. Null leaves the pane reconnecting until its host is ready. */
+	createMux?: (host: HostId) => TerminalMux | null;
 	/**
 	 * Attach to a standalone shell terminal (POST /api/v1/shell-terminals)
 	 * instead of a session's pane. When set it wins over `session`, which
@@ -157,13 +158,27 @@ const REPLAY_WRITE_BATCH_BYTES = 256 * 1024;
 // QUIET_MS would uncover panes that were about to draw.
 const REPLAY_FIRST_BYTE_MS = 250;
 
-function defaultCreateMux(host: HostId): TerminalMux {
+function defaultCreateMux(host: HostId): TerminalMux | null {
 	// Resolved per connect, not per hook: a daemon restart can change the port.
-	return createTerminalMux(muxUrlForHost(host));
+	const url = muxUrlForHost(host);
+	return url === null ? null : createTerminalMux(url);
 }
 
 export function useTerminalSession(session: WorkspaceSession | undefined, options: UseTerminalSessionOptions) {
 	const queryClient = useQueryClient();
+	const connectedRemoteHosts = useSyncExternalStore(
+		subscribeConnectedHosts,
+		connectedHosts,
+		connectedHosts,
+	);
+	const terminalHost = options.shellTerminalHost ?? session?.host ?? LOCAL_HOST;
+	const transportReady =
+		Boolean(session?.cloud) ||
+		(terminalHost === LOCAL_HOST
+			? options.daemonReady
+			: connectedRemoteHosts.includes(terminalHost));
+	const transportReadyRef = useRef(transportReady);
+	transportReadyRef.current = transportReady;
 	const [state, setState] = useState<TerminalSessionState>("idle");
 	const [error, setError] = useState<string | undefined>(undefined);
 	// False only while the initial replay is being buffered — the pane keeps a
@@ -220,6 +235,9 @@ export function useTerminalSession(session: WorkspaceSession | undefined, option
 		replayTailCapTimer: null as ReturnType<typeof setTimeout> | null,
 		replayTailPending: false,
 		queuedProtocolInputs: [] as string[],
+		// Retained only across a reconnect to this same handle; an actual exit,
+		// pane error, or ownership change drops the bytes instead.
+		queuedUserInputs: [] as string[],
 		// The current attachment's flush, published so teardown can land buffered
 		// bytes instead of discarding them (the closure lives inside connect).
 		flushReplay: null as ((preserveBeforeTeardown?: boolean) => void) | null,
@@ -327,10 +345,9 @@ export function useTerminalSession(session: WorkspaceSession | undefined, option
 			return;
 		}
 		transition("reattaching");
-		// Not ready → no timer; the daemonReady effect reconnects when it flips.
-		// A cloud pane targets its sandbox worker, not the local daemon, so it
-		// keeps retrying on its own backoff regardless of local daemon state.
-		if (!optionsRef.current.daemonReady && !sessionRef.current?.cloud) {
+		// Not ready → no timer; the transport-ready effect reconnects as soon as
+		// this host's daemon or proxy is available again.
+		if (!transportReadyRef.current) {
 			return;
 		}
 		if (r.retryTimer) {
@@ -367,6 +384,10 @@ export function useTerminalSession(session: WorkspaceSession | undefined, option
 		const mux = (optionsRef.current.createMux ?? defaultCreateMux)(
 			optionsRef.current.shellTerminalHost ?? sessionRef.current?.host ?? LOCAL_HOST,
 		);
+		if (mux === null) {
+			scheduleReattach();
+			return;
+		}
 		r.mux = mux;
 
 		let pendingReplayWrites = 0;
@@ -597,6 +618,7 @@ export function useTerminalSession(session: WorkspaceSession | undefined, option
 				transition("attached");
 				terminal.notifyCursorColorScheme();
 				flushQueuedProtocolInputs();
+				flushQueuedUserInputs();
 				// Bound the gate from here: the daemon fires onOpen from setPTY and
 				// starts copyOut immediately after, so the replay is imminent and
 				// the cap now measures the burst rather than the connect handshake.
@@ -621,6 +643,7 @@ export function useTerminalSession(session: WorkspaceSession | undefined, option
 				if (!isCurrentAttachment(generation, handle, mux)) return;
 				clearOpenTimer(generation);
 				r.inputReady = false;
+				r.queuedUserInputs = [];
 				// Land whatever was buffered before the notice, and lift the cover:
 				// a pane that exits mid-replay must never be left behind it.
 				flushReplay(false, true);
@@ -635,6 +658,7 @@ export function useTerminalSession(session: WorkspaceSession | undefined, option
 				if (!isCurrentAttachment(generation, handle, mux)) return;
 				clearOpenTimer(generation);
 				r.inputReady = false;
+				r.queuedUserInputs = [];
 				flushReplay(false, true);
 				terminal.writeln(`\r\n\x1b[2m[terminal error] ${message}\x1b[0m`);
 				setError(message);
@@ -670,6 +694,18 @@ export function useTerminalSession(session: WorkspaceSession | undefined, option
 			}
 			r.queuedProtocolInputs = [];
 		};
+		const flushQueuedUserInputs = () => {
+			if (!isCurrentAttachment(generation, handle, mux) || !r.inputReady) return;
+			if (optionsRef.current.inputDisabled || optionsRef.current.isVisible === false) {
+				r.queuedUserInputs = [];
+				terminal.writeln("\r\n\x1b[2m[terminal reconnected; queued input was not sent]\x1b[0m");
+				return;
+			}
+			for (const queued of r.queuedUserInputs) {
+				mux.sendInput(handle, queued);
+			}
+			r.queuedUserInputs = [];
+		};
 		const input = terminal.onUserInput((data, source) => {
 			if (!isCurrentAttachment(generation, handle, mux)) {
 				return;
@@ -684,6 +720,16 @@ export function useTerminalSession(session: WorkspaceSession | undefined, option
 				return;
 			}
 			if (!r.inputReady) {
+				// The server-side attachment already preserves input during its own
+				// attach handshake. Preserve visible human input across this client-side
+				// reconnect too, rather than silently losing a command to a dead stream.
+				if (
+					stateRef.current === "reattaching" &&
+					!optionsRef.current.inputDisabled &&
+					optionsRef.current.isVisible !== false
+				) {
+					r.queuedUserInputs.push(data);
+				}
 				return;
 			}
 			// Agent color-scheme bytes are not human input — forwarding them must not
@@ -790,12 +836,13 @@ export function useTerminalSession(session: WorkspaceSession | undefined, option
 			r.detached = false;
 			r.attempts = 0;
 			r.hasAttachedOnce = false;
+			r.queuedUserInputs = [];
 			setError(undefined);
 			setHasAttached(false);
 			if (handle) {
-				// A cloud pane connects to its sandbox worker directly, so it must
-				// not wait on the LOCAL daemon being ready; only local panes do.
-				if (optionsRef.current.daemonReady || Boolean(sessionRef.current?.cloud)) {
+				// Cloud panes target their sandbox worker directly; remote panes wait
+				// for their own proxy, never the local daemon.
+				if (transportReadyRef.current) {
 					transition("connecting");
 					connect();
 				} else {
@@ -815,6 +862,7 @@ export function useTerminalSession(session: WorkspaceSession | undefined, option
 				r.terminal = null;
 				r.handle = null;
 				r.inputReady = false;
+				r.queuedUserInputs = [];
 				r.needsVisibleSizeSync = false;
 				setError(undefined);
 				// Detaching ends any pending replay: never leave the next mount of
@@ -855,16 +903,19 @@ export function useTerminalSession(session: WorkspaceSession | undefined, option
 		r.lastPublishedGrid = { cols, rows };
 	}, []);
 
-	// Daemon came back while we were waiting: reconnect immediately, without
-	// backoff debt from attempts made against the dead daemon.
-	const daemonReady = options.daemonReady;
+	// The selected host came back while we were waiting: reconnect immediately,
+	// without backoff debt from attempts made against a dead daemon or proxy.
 	useEffect(() => {
 		const r = runtime.current;
-		if (!daemonReady || r.detached) return;
-		if (stateRef.current !== "reattaching" || r.retryTimer) return;
+		if (!transportReady || r.detached) return;
+		if (stateRef.current !== "reattaching") return;
+		if (r.retryTimer) {
+			clearTimeout(r.retryTimer);
+			r.retryTimer = null;
+		}
 		r.attempts = 0;
 		connect();
-	}, [daemonReady, connect]);
+	}, [connect, transportReady]);
 
 	// A parked cache entry keeps parsing output, but it must be inert as a PTY
 	// client. Cancel resize work queued while it was visible and remember that a
@@ -897,7 +948,7 @@ export function useTerminalSession(session: WorkspaceSession | undefined, option
 		}
 		if (r.handle !== handle) return;
 		if (stateRef.current !== "exited" && stateRef.current !== "error") return;
-		if (optionsRef.current.daemonReady) {
+		if (transportReadyRef.current) {
 			transition("connecting");
 			connect();
 		} else {
@@ -922,6 +973,7 @@ export function useTerminalSession(session: WorkspaceSession | undefined, option
 			r.generation += 1;
 			r.detached = true;
 			r.inputReady = false;
+			r.queuedUserInputs = [];
 			teardownMux();
 		},
 		[teardownMux],

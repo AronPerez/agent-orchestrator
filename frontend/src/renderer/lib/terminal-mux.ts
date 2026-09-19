@@ -10,8 +10,9 @@
 //     server → opened{id} | data{id,data} | exited{id} | error{id?,error}
 //   ch "system"   — ping/pong liveness
 //
-// The renderer connects directly to the loopback daemon (same host/port as the
-// REST API, path `/mux`); it is not proxied through the Electron main process.
+// The renderer connects to the daemon (same host/port as the REST API, path
+// `/mux`). Remote hosts use the Electron main-process loopback proxy, whose
+// token path prefix must survive this conversion.
 
 import { baseUrlFor } from "./host-clients";
 import { LOCAL_HOST, type HostId } from "./hosts";
@@ -86,8 +87,9 @@ export function muxUrlFromApiBase(apiBaseUrl: string): string {
 	return `${ws.replace(/\/+$/, "")}/mux`;
 }
 
-export function muxUrlForHost(host: HostId): string {
-	return muxUrlFromApiBase(baseUrlFor(host) ?? "");
+export function muxUrlForHost(host: HostId): string | null {
+	const base = baseUrlFor(host);
+	return base === null ? null : muxUrlFromApiBase(base);
 }
 
 type DataListener = (bytes: Uint8Array) => void;
@@ -127,7 +129,7 @@ export type TerminalMuxPool = {
 	 * Acquire an independently disposable attachment lease over the shared
 	 * browser-to-daemon mux socket for one host.
 	 */
-	acquire: (host?: HostId) => TerminalMux;
+	acquire: (host?: HostId) => TerminalMux | null;
 	/** Release every shared socket and listener (the pool stays reusable). */
 	dispose: () => void;
 };
@@ -277,7 +279,7 @@ export function createTerminalMux(url: string, WebSocketImpl: typeof WebSocket =
  * closes its underlying client. A socket-level failure retires that client so
  * reconnecting leases for that host converge on one replacement socket.
  */
-export function createTerminalMuxPool(createMux: (host: HostId) => TerminalMux): TerminalMuxPool {
+export function createTerminalMuxPool(createMux: (host: HostId) => TerminalMux | null): TerminalMuxPool {
 	type Connection = {
 		closed: boolean;
 		disposed: boolean;
@@ -300,8 +302,9 @@ export function createTerminalMuxPool(createMux: (host: HostId) => TerminalMux):
 		connection.mux.dispose();
 	};
 
-	const newConnection = (host: HostId): Connection => {
+	const newConnection = (host: HostId): Connection | null => {
 		const mux = createMux(host);
+		if (mux === null) return null;
 		const connection: Connection = {
 			closed: false,
 			disposed: false,
@@ -321,9 +324,10 @@ export function createTerminalMuxPool(createMux: (host: HostId) => TerminalMux):
 		return connection;
 	};
 
-	const acquire = (host: HostId = LOCAL_HOST): TerminalMux => {
+	const acquire = (host: HostId = LOCAL_HOST): TerminalMux | null => {
 		const existing = current.get(host);
 		const connection = existing && !existing.closed && !existing.disposed ? existing : newConnection(host);
+		if (connection === null) return null;
 		connection.refs += 1;
 		let released = false;
 		const subscriptions = new Set<() => void>();
