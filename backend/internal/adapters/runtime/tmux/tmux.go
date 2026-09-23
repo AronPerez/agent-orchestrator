@@ -430,21 +430,19 @@ func (r *Runtime) Create(ctx context.Context, cfg ports.RuntimeConfig) (ports.Ru
 		return ports.RuntimeHandle{}, r.failedCreatedRuntime(handle, fmt.Errorf("tmux runtime: set window-size %s: %w", id, err))
 	}
 
-	// Pin the options session survival depends on rather than inheriting them
-	// from a tmux config AO does not control (this adapter shares the operator's
-	// tmux server — there is no -L/-S). A host with `destroy-unattached on`
-	// destroys the session on the last client detach, which is precisely the
-	// event a detached agent session exists to survive; and an inherited
-	// history-limit silently sets how much scrollback GetOutput can reach back
-	// through. Set on create only: a session AO re-adopts on restart is never
-	// re-created, so adoption stays a no-op (see Manager.reconcileLive).
-	if _, err := r.run(ctx, setDestroyUnattachedOffArgs(id)...); err != nil {
-		_ = r.Destroy(context.Background(), ports.RuntimeHandle{ID: id})
-		return ports.RuntimeHandle{}, fmt.Errorf("tmux runtime: set destroy-unattached %s: %w", id, err)
-	}
-	if _, err := r.run(ctx, setHistoryLimitArgs(id)...); err != nil {
-		_ = r.Destroy(context.Background(), ports.RuntimeHandle{ID: id})
-		return ports.RuntimeHandle{}, fmt.Errorf("tmux runtime: set history-limit %s: %w", id, err)
+	// Pin every session option AO relies on instead of inheriting the user's
+	// global tmux configuration.
+	for _, option := range []struct {
+		name string
+		args []string
+	}{
+		{name: "destroy-unattached", args: setDestroyUnattachedOffArgs(id)},
+		{name: "history-limit", args: setHistoryLimitArgs(id)},
+		{name: "detach-on-destroy", args: setDetachOnDestroyOnArgs(id)},
+	} {
+		if _, err := r.run(ctx, option.args...); err != nil {
+			return ports.RuntimeHandle{}, r.failedCreatedRuntime(handle, fmt.Errorf("tmux runtime: set %s %s: %w", option.name, id, err))
+		}
 	}
 
 	alive, err := r.IsAlive(ctx, handle)
@@ -578,6 +576,20 @@ func (r *Runtime) Destroy(ctx context.Context, handle ports.RuntimeHandle) error
 	// not block the kill-session below.
 	sessionIDs := r.paneSessionIDs(ctx, id)
 
+	// Re-assert detach-on-destroy immediately before kill-session too. This is
+	// belt-and-suspenders alongside enforceDetachOnDestroy (which now covers
+	// the same guard at legacy-socket adoption time, before Attach can ever
+	// reach the session — see socketForSession): Create also sets this for
+	// every session it starts (see setDetachOnDestroyOnArgs), but re-asserting
+	// here costs one extra call and catches the option ever having been
+	// changed back in between. Fail closed on any other error: kill-session
+	// must not run while the guard is unconfirmed, because a session that dies
+	// with detach-on-destroy still off can hand AO's terminal, and its input,
+	// to one of the user's own sessions (issue #4223).
+	if out, setErr := r.runForSession(ctx, id, setDetachOnDestroyOnArgs(id)...); setErr != nil && !confirmedAbsentOutput(setErr, string(out)) {
+		return fmt.Errorf("tmux runtime: set detach-on-destroy %s: %w", id, setErr)
+	}
+
 	out, err := r.runForSession(ctx, id, killSessionArgs(id)...)
 	// Reap regardless of the kill-session result: orphaned children outlive the
 	// session, so they must be cleaned up even when the session was already
@@ -585,14 +597,11 @@ func (r *Runtime) Destroy(ctx context.Context, handle ports.RuntimeHandle) error
 	r.reapSessions(ctx, sessionIDs, r.reapGrace)
 
 	if err != nil {
-		// Socket discovery can classify the control endpoint as unavailable before
-		// kill-session runs. Explicit teardown already accepts that as idempotent.
-		if errors.Is(err, ports.ErrRuntimeUnavailable) {
-			r.forgetSessionSocket(id)
-			return nil
-		}
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && killSessionMissingOutput(string(out)) {
+		// Only confirmed session/server/socket absence is safe to read as
+		// "already gone". Transient failures leave teardown retryable and keep
+		// the cached socket mapping intact.
+		if confirmedAbsentOutput(err, string(out)) {
+
 			r.forgetSessionSocket(id)
 			return nil
 		}
@@ -1046,7 +1055,12 @@ func (r *Runtime) attachCommandForSocket(id, socketName string) []string {
 		// socket named by an inherited TMUX from an AO worker or nested shell.
 		argv = append(argv, "-L", "default")
 	}
-	return append(argv, "-u", "-T", "RGB", "attach-session", "-t", id)
+	// Exact-match target: a plain session name falls back to tmux's unique-
+	// prefix matching once this exact session is gone, which can attach the
+	// client onto a different, unrelated session that happens to share the
+	// prefix (see setDetachOnDestroyOnArgs). attach-session accepts the bare
+	// `=<id>` form directly, unlike the pane-targeting set-option calls.
+	return append(argv, "-u", "-T", "RGB", "attach-session", "-t", exactSessionTarget(id))
 }
 
 func attachEnv(base []string) []string {
@@ -1176,6 +1190,21 @@ func (r *Runtime) socketForSession(ctx context.Context, id string) (string, erro
 	}
 	legacyOut, legacyErr := r.runOnSocket(ctx, "", hasSessionArgs(id)...)
 	if legacyErr == nil {
+		// This session predates AO's private socket, so it never ran through
+		// Create and never got detach-on-destroy set (see setDetachOnDestroyOnArgs).
+		// Destroy's own pre-kill reassertion is too late on its own: AO can
+		// Attach to this adopted session immediately, and the session can then
+		// be destroyed by something Destroy never sees — the user exiting the
+		// retained shell, or an external `kill-session` run directly against
+		// the default socket. Enforce (and confirm) the guard right here, the
+		// first moment AO's daemon learns this session exists, so it is in
+		// place before any caller (Attach included) can reach the session.
+		// Fail closed and leave the session uncached on either socket so a
+		// transient failure here stays retryable instead of caching an
+		// unconfirmed adoption.
+		if err := r.enforceDetachOnDestroy(ctx, "", id); err != nil {
+			return "", err
+		}
 		r.rememberSessionSocket(id, "")
 		return "", nil
 	}
@@ -1410,13 +1439,6 @@ func sessionMissingOutput(out string) bool {
 		strings.Contains(s, "session not found")
 }
 
-// serverUnreachableOutput reports whether a non-zero tmux exit means the
-// server itself could not be reached, which is inconclusive for any single
-// session's liveness.
-func serverUnreachableOutput(out string) bool {
-	return serverNotRunningOutput(out) || transientServerFailureOutput(out)
-}
-
 func serverNotRunningOutput(out string) bool {
 	s := strings.ToLower(out)
 	return strings.Contains(s, "no server running")
@@ -1442,12 +1464,51 @@ func transientServerFailureOutput(out string) bool {
 		strings.Contains(s, "server exited unexpectedly")
 }
 
-// killSessionMissingOutput reports whether a non-zero `tmux kill-session`
-// failed because the session was already gone. Teardown stays generous: a
-// missing server also means there is nothing left to kill, so it shares the
-// server-level patterns that liveness probing must not use.
-func killSessionMissingOutput(out string) bool {
-	return sessionMissingOutput(out) || serverUnreachableOutput(out)
+// confirmedAbsentOutput reports whether a non-zero tmux exit definitively
+// means the session or its server is gone, as opposed to a merely transient
+// failure (transientServerFailureOutput's "connection refused" / protocol-
+// mismatch / unexpected-exit cases) that leaves the session's actual state
+// unknown. Every caller that decides whether it is safe to treat a tmux
+// failure as "already gone" — Destroy's own kill-session result, its pre-kill
+// detach-on-destroy reassertion, and enforceDetachOnDestroy's legacy-adoption
+// enforcement — uses this and nothing broader: a transient failure proves
+// nothing ran, so treating it as success let a caller believe teardown (or
+// the detach-on-destroy guard) succeeded when it might not have, which could
+// mean deleting a still-running session's worktree, or reopening the
+// terminal/input transfer this guard exists to prevent (issue #4223).
+func confirmedAbsentOutput(err error, out string) bool {
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr) &&
+		(sessionMissingOutput(out) || serverNotRunningOutput(out) || serverSocketAbsentOutput(out))
+}
+
+// enforceDetachOnDestroy sets and reads back the session-scoped
+// detach-on-destroy option for id on socketName, so a session AO did not
+// create (currently only a legacy-socket adoption, see socketForSession) is
+// guarded before anything — Attach included — can reach it. Setting alone is
+// not trusted: it is verified with a second read so a target that silently
+// resolved to the wrong session (see setDetachOnDestroyOnArgs) cannot pass
+// unnoticed. Fails closed on any unconfirmed error; a definitively missing
+// session/server is treated as nothing left to guard, matching Destroy's
+// own handling, and is not cached, so a transient failure stays retryable.
+func (r *Runtime) enforceDetachOnDestroy(ctx context.Context, socketName, id string) error {
+	if out, err := r.runOnSocket(ctx, socketName, setDetachOnDestroyOnArgs(id)...); err != nil {
+		if confirmedAbsentOutput(err, string(out)) {
+			return nil
+		}
+		return fmt.Errorf("tmux runtime: set detach-on-destroy for adopted session %s: %w", id, err)
+	}
+	out, err := r.runOnSocket(ctx, socketName, showDetachOnDestroyArgs(id)...)
+	if err != nil {
+		if confirmedAbsentOutput(err, string(out)) {
+			return nil
+		}
+		return fmt.Errorf("tmux runtime: verify detach-on-destroy for adopted session %s: %w", id, err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "on" {
+		return fmt.Errorf("tmux runtime: detach-on-destroy for adopted session %s reports %q, want \"on\"", id, got)
+	}
+	return nil
 }
 
 // -- text helpers --

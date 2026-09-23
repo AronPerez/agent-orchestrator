@@ -66,6 +66,19 @@ func (q *Queries) ClearPRProviderIdentity(ctx context.Context, url string) error
 	return err
 }
 
+const countActivePRsByNumber = `-- name: CountActivePRsByNumber :one
+SELECT COUNT(*)
+FROM pr
+WHERE number = ? AND pr_state NOT IN ('merged', 'closed')
+`
+
+func (q *Queries) CountActivePRsByNumber(ctx context.Context, number int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countActivePRsByNumber, number)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const deletePRAlias = `-- name: DeletePRAlias :exec
 DELETE FROM pr_url_alias WHERE alias_url = ?
 `
@@ -266,6 +279,9 @@ ORDER BY
 LIMIT 1
 `
 
+// /prs/{id} carries the provider pull-request number. Numbers can repeat
+// across tracked repositories, so prefer an active row and then the newest
+// observation when choosing the path target.
 func (q *Queries) GetPRByNumber(ctx context.Context, number int64) (PR, error) {
 	row := q.db.QueryRowContext(ctx, getPRByNumber, number)
 	var i PR
