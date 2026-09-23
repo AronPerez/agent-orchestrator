@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -677,6 +678,30 @@ func TestAgentVendorScriptInstallPersistsInstallVerifySuccessLifecycle(t *testin
 	}
 }
 
+func TestAgentVendorScriptInstallPreservesPlanEnvironment(t *testing.T) {
+	s := newTestService("windows", "pwsh.exe")
+	captured := make(chan ports.InstallScriptCommand, 1)
+	s.installScripts = installScriptRunnerFunc(func(_ context.Context, command ports.InstallScriptCommand, _, _ io.Writer) (ports.InstallScriptResult, error) {
+		captured <- command
+		return ports.InstallScriptResult{}, nil
+	})
+	s.verifier = harnessVerifierFunc(func(context.Context, Target) (VerifyResult, error) {
+		return VerifyResult{ResolvedPath: `C:\Users\test\.local\bin\goose.exe`}, nil
+	})
+
+	if _, err := s.StartAgent(context.Background(), TargetGoose, "official-installer"); err != nil {
+		t.Fatalf("StartAgent: %v", err)
+	}
+	waitForStatus(t, s, TargetGoose, StatusSucceeded)
+	command := <-captured
+	if !slices.Contains(command.Env, "CONFIGURE=false") {
+		t.Fatalf("installer env = %v, want CONFIGURE=false", command.Env)
+	}
+	if !slices.Contains(command.Env, "NONINTERACTIVE=1") {
+		t.Fatalf("installer env = %v, want AO noninteractive environment", command.Env)
+	}
+}
+
 func TestAgentVendorScriptInstallFailsWithoutRunner(t *testing.T) {
 	s := newTestService("linux", "bash")
 	if _, err := s.StartAgent(context.Background(), TargetCursor, "official-installer"); err != nil {
@@ -1107,14 +1132,20 @@ func TestStartRefusesLinuxRootInstall(t *testing.T) {
 // Resolve is the seam the CLI consumes; it must agree with the Service's own
 // planner rather than being a second implementation of the same table.
 func TestResolveMatchesServicePlan(t *testing.T) {
-	lookPath := lookPathFound("brew")
-	got := Resolve("darwin", lookPath, TargetTmux)
-	want := (&Service{goos: "darwin", executables: executableFinderFunc(lookPath)}).planFor(TargetTmux)
-	if strings.Join(got.Command, " ") != strings.Join(want.Command, " ") {
-		t.Fatalf("Resolve Command = %v, want %v", got.Command, want.Command)
-	}
-	if got.Unsupported != want.Unsupported {
-		t.Fatalf("Resolve Unsupported = %v, want %v", got.Unsupported, want.Unsupported)
+	lookPath := lookPathFound("brew", "curl", "bash")
+	service := &Service{goos: "darwin", executables: executableFinderFunc(lookPath)}
+	for _, target := range []Target{TargetTmux, TargetCursor} {
+		got := Resolve("darwin", lookPath, target)
+		want := service.resolvePlan(target)
+		if strings.Join(got.Command, " ") != strings.Join(want.Command, " ") {
+			t.Fatalf("Resolve(%q) Command = %v, want %v", target, got.Command, want.Command)
+		}
+		if got.Unsupported != want.Unsupported {
+			t.Fatalf("Resolve(%q) Unsupported = %v, want %v", target, got.Unsupported, want.Unsupported)
+		}
+		if got.Method != want.Method {
+			t.Fatalf("Resolve(%q) Method = %q, want %q", target, got.Method, want.Method)
+		}
 	}
 	if unknown := Resolve("linux", lookPath, Target("nope")); !unknown.Unsupported {
 		t.Fatal("Resolve of an unknown target must be Unsupported")

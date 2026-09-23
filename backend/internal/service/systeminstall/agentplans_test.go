@@ -3,6 +3,7 @@ package systeminstall
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -58,7 +59,6 @@ func (s installCapabilitiesStub) Probe(ctx context.Context) (ports.InstallCapabi
 			Prefix: homebrewPrefix, PrefixWritable: s.writable,
 			Formulae: formulae, Casks: casks, Err: s.homebrewErr,
 		},
-		MacApplicationsWritable: true,
 	}, nil
 }
 
@@ -156,7 +156,9 @@ func TestOfficialInstallerPlansAreAutomaticAndServerOwned(t *testing.T) {
 		{"linux", TargetAider, []string{"sh"}, "https://aider.chat/install.sh", "sh"},
 		{"linux", TargetGrok, []string{"bash"}, "https://x.ai/cli/install.sh", "bash"},
 		{"linux", TargetKimi, []string{"bash"}, "https://code.kimi.com/kimi-code/install.sh", "bash"},
+		{"darwin", TargetGoose, []string{"bash"}, "https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh", "bash"},
 		{"linux", TargetGoose, []string{"bash"}, "https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh", "bash"},
+		{"windows", TargetGoose, []string{"pwsh.exe"}, "https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1", "pwsh.exe"},
 		{"linux", TargetDevin, []string{"bash"}, "https://cli.devin.ai/install.sh", "bash"},
 		{"windows", TargetKiro, []string{"powershell.exe"}, "https://cli.kiro.dev/install.ps1", "powershell.exe"},
 		{"linux", TargetMuse, []string{"bash"}, "https://dev.meta.ai/install.sh", "bash"},
@@ -213,7 +215,24 @@ func TestOfficialInstallersRejectUnsupportedOperatingSystems(t *testing.T) {
 	}
 }
 
-func TestPackageManagerMethodsStayPreferredBeforeOfficialInstaller(t *testing.T) {
+func TestGooseWindowsUsesPowerShellInstallerCommand(t *testing.T) {
+	plan := newTestService("windows", "pwsh.exe").planAgent(TargetGoose)
+	if plan.Unsupported || plan.Method != "official-installer" || plan.Script == nil {
+		t.Fatalf("Goose Windows plan = %+v, want available official installer", plan)
+	}
+	if plan.Script.URL != "https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1" {
+		t.Fatalf("Goose Windows installer URL = %q", plan.Script.URL)
+	}
+	wantInterpreter := "/usr/bin/pwsh.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File"
+	if got := strings.Join(plan.Script.Interpreter, " "); got != wantInterpreter {
+		t.Fatalf("Goose Windows installer interpreter = %q, want %q", got, wantInterpreter)
+	}
+	if !slices.Equal(plan.Script.Env, []string{"CONFIGURE=false"}) {
+		t.Fatalf("Goose Windows installer env = %v, want CONFIGURE=false", plan.Script.Env)
+	}
+}
+
+func TestOfficialInstallerIsPreferredOverPackageManagers(t *testing.T) {
 	s := newTestService("darwin", "brew", "npm", "sh")
 	s.installCapabilities = installCapabilitiesStub{
 		prefix: "/Users/test/.npm", homebrewPrefix: "/opt/homebrew", writable: true,
@@ -226,12 +245,15 @@ func TestPackageManagerMethodsStayPreferredBeforeOfficialInstaller(t *testing.T)
 		if plan.AgentID != string(TargetCodex) {
 			continue
 		}
+		if plan.Method != "official-installer" {
+			t.Fatalf("recommended method = %q, want official-installer", plan.Method)
+		}
 		if len(plan.Methods) != 3 {
 			t.Fatalf("methods = %+v", plan.Methods)
 		}
 		want := []string{"homebrew", "npm", "official-installer"}
 		for i, method := range plan.Methods {
-			if method.ID != want[i] || method.Recommended != (i == 0) {
+			if method.ID != want[i] || method.Recommended != (i == 2) {
 				t.Fatalf("method[%d] = %+v", i, method)
 			}
 		}
@@ -295,7 +317,7 @@ func TestHomebrewReinstallRepairsThroughInstallWhenPackageIsNotOwned(t *testing.
 }
 
 func TestKiroReinstallIsUnavailableWithoutVerifiedHeadlessRecipe(t *testing.T) {
-	s := newTestService("darwin", "bash", "kiro-cli")
+	s := newTestService("windows", "powershell.exe", "kiro-cli")
 	planner, err := s.newRequestPlanner(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -317,17 +339,13 @@ func TestKiroReinstallIsUnavailableWithoutVerifiedHeadlessRecipe(t *testing.T) {
 	}
 }
 
-func TestKiroFreshInstallRequiresWritableApplications(t *testing.T) {
-	s := newTestService("darwin", "bash")
-	planner, err := s.newRequestPlanner(context.Background())
-	if err != nil {
-		t.Fatal(err)
+func TestKiroMacOSInstallRequiresInteractiveVendorFlow(t *testing.T) {
+	plan := newTestService("darwin", "bash").planAgent(TargetKiro)
+	if !plan.Unsupported || plan.Method != "manual" || plan.Script != nil || len(plan.Command) != 0 {
+		t.Fatalf("Kiro macOS plan = %+v, want manual interactive installation", plan)
 	}
-	planner.capabilities.MacApplicationsWritable = false
-
-	_, err = planner.resolveAgentMethod(TargetKiro, "official-installer", AgentOperationInstall)
-	if !errors.Is(err, ErrInstallMethod) || !strings.Contains(err.Error(), "/Applications") {
-		t.Fatalf("fresh Kiro install error = %v", err)
+	if !strings.Contains(plan.Reason, "must be run interactively") || plan.DocsURL == "" {
+		t.Fatalf("Kiro macOS guidance = %+v, want interactive reason and documentation", plan)
 	}
 }
 
@@ -487,7 +505,7 @@ func TestKimchiUsesOnlyDocumentedInstallMethods(t *testing.T) {
 		if agent.DocumentationURL != "https://docs.kimchi.dev/docs/coding-getting-started" {
 			t.Fatalf("documentation URL = %q", agent.DocumentationURL)
 		}
-		if agent.Method != "homebrew" || agent.Command != "brew install getkimchi/tap/kimchi" {
+		if agent.Method != "official-installer" || agent.Command != "/usr/bin/sh <downloaded from https://github.com/getkimchi/kimchi/releases/latest/download/install.sh>" {
 			t.Fatalf("recommended Kimchi plan = %+v", agent)
 		}
 		for _, method := range agent.Methods {

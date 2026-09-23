@@ -23,6 +23,7 @@ describe("remoteRequest", () => {
 
 		const [url, init] = doFetch.mock.calls[0] as unknown as [string, RequestInit];
 		expect(url).toBe("http://192.0.2.1:3011/api/v1/projects");
+		expect(init.redirect).toBe("error");
 		expect(new Headers(init.headers).get("Authorization")).toBe("Bearer pw");
 		expect(init.body).toBe('{"path":"/srv/repo"}');
 	});
@@ -62,6 +63,12 @@ describe("remoteRequest", () => {
 		const doFetch = fakeFetch(200);
 		await remoteRequest({ ...entry, url: "http://192.0.2.1:3011/" }, { method: "GET", path: "/healthz" }, doFetch);
 		expect(doFetch.mock.calls[0][0]).toBe("http://192.0.2.1:3011/healthz");
+	});
+
+	it("accepts a scheme-less URL saved for the CLI", async () => {
+		const doFetch = fakeFetch(200);
+		await remoteRequest({ ...entry, url: "workbox:3011" }, { method: "GET", path: "/healthz" }, doFetch);
+		expect(doFetch.mock.calls[0][0]).toBe("http://workbox:3011/healthz");
 	});
 });
 

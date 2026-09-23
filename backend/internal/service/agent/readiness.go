@@ -82,11 +82,21 @@ func (s *Service) EnsureAgentReadiness(ctx context.Context, agentID string, purp
 // InvalidateAgentInstallation marks an agent's installation observation stale.
 func (s *Service) InvalidateAgentInstallation(agentID string) {
 	s.readiness.Invalidate(agentID, readinessInvalidateInstallation)
+	if item, ok := s.agent(agentID); ok {
+		if invalidator, ok := item.Agent.(ports.AgentBinaryResolutionInvalidator); ok {
+			invalidator.InvalidateBinaryResolution()
+		}
+	}
 }
 
 // InvalidateAgentAuthentication marks an agent's authentication observation stale.
 func (s *Service) InvalidateAgentAuthentication(agentID string) {
 	s.readiness.Invalidate(agentID, readinessInvalidateAuthentication)
+	if agentID == string(domain.HarnessCodex) && s.codexAccounts != nil {
+		if accountID := s.codexAccounts.activeAccountID(); accountID != "" {
+			s.codexAccounts.invalidate(accountID)
+		}
+	}
 }
 
 // RecheckAgent schedules a non-blocking display readiness ensure.
@@ -179,7 +189,9 @@ type sessionUsage struct {
 	lastUsedAt time.Time
 }
 
-// Probe is the legacy projection of a targeted launch ensure.
+// Probe is the legacy projection of a targeted launch ensure. Explicit probes
+// always invalidate authentication first so a user checking immediately after
+// login cannot receive the cached pre-login observation.
 func (s *Service) Probe(ctx context.Context, agentID string) (ProbeResult, error) {
 	if err := ctx.Err(); err != nil {
 		return ProbeResult{}, err
@@ -187,6 +199,7 @@ func (s *Service) Probe(ctx context.Context, agentID string) (ProbeResult, error
 	if _, ok := s.agent(agentID); !ok {
 		return ProbeResult{Agent: Info{ID: agentID}, Supported: false, Installed: false}, nil
 	}
+	s.InvalidateAgentAuthentication(agentID)
 	readiness, err := s.EnsureReadiness(ctx, []string{agentID}, domain.AgentReadinessPurposeLaunch)
 	if err != nil {
 		return ProbeResult{}, err

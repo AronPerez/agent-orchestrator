@@ -28,7 +28,8 @@ export async function remoteRequest(
 	fetchImpl: FetchImpl = fetch,
 	signal?: AbortSignal,
 ): Promise<RemoteResponse> {
-	const base = entry.url.replace(/\/+$/, "");
+	// The CLI also accepts saved URLs without a scheme, defaulting them to HTTP.
+	const base = (entry.url.includes("://") ? entry.url : `http://${entry.url}`).replace(/\/+$/, "");
 	// The path is concatenated, and a concatenated path can leave the host: a
 	// path starting with "@" turns the base into userinfo ("http://box:3011" +
 	// "@evil.com/" is a request to evil.com) and would hand this host's
@@ -40,6 +41,7 @@ export async function remoteRequest(
 		throw new Error(`refusing to send ${entry.url} credentials to ${target.origin}`);
 	const response = await fetchImpl(target.href, {
 		method: init.method,
+		redirect: "error",
 		headers: {
 			"Content-Type": "application/json",
 			// Same credential presentation as the CLI (cli/remote.go:374).

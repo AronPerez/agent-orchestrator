@@ -70,6 +70,13 @@ type spawnFunc func(ctx context.Context, bin, workdir string, env []string) (*pr
 type versionProbeFunc func(context.Context, string) (string, error)
 type persistentConnectFunc func(context.Context, persistenthost.Config) (*persistenthost.Transport, error)
 
+type fixedCodexPlugin string
+
+func (p fixedCodexPlugin) ResolveBinary(context.Context) (string, error) { return string(p), nil }
+func (fixedCodexPlugin) AuthStatus(context.Context) (ports.AgentAuthStatus, error) {
+	return ports.AgentAuthStatusUnknown, nil
+}
+
 // Driver opens Codex conversations over `codex app-server`.
 type Driver struct {
 	plugin       codexPlugin
@@ -89,6 +96,18 @@ func New(plugin codexPlugin, log *slog.Logger) *Driver {
 		plugin: plugin, log: log, spawn: spawnAppServer,
 		versionProbe: installedCodexVersion, persistent: true, connectHost: persistenthost.ConnectOrStart,
 	}
+}
+
+// DiscoverModels performs the same bounded app-server model/list read as a live
+// conversation without creating a provider thread.
+func DiscoverModels(ctx context.Context, binary, workdir string, env map[string]string) ([]ports.ChatModel, error) {
+	driver := New(fixedCodexPlugin(binary), slog.New(slog.DiscardHandler))
+	conv, err := driver.connect(ctx, workdir, env, "")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = conv.Close() }()
+	return conv.ListModels(ctx)
 }
 
 var _ ports.ChatDriver = (*Driver)(nil)
@@ -149,15 +168,9 @@ func (d *Driver) Probe(ctx context.Context) (ports.ChatCapabilities, error) {
 		return nil, fmt.Errorf("%w: %w", ports.ErrChatDriverUnavailable, err)
 	}
 
-	// An unknown auth result is not proof of failure — the same rule AO already
-	// applies to runtime probes. Only an explicit unauthorized blocks creation.
-	status, err := d.plugin.AuthStatus(ctx)
-	if err == nil && status == ports.AgentAuthStatusUnauthorized {
-		return nil, ports.ErrChatAuthRequired
-	}
-	if err != nil {
-		d.log.Debug("codex auth probe inconclusive; continuing", "error", err)
-	}
+	// Authentication is owned by the daemon's active-account readiness check.
+	// Probing the ambient device home here would reject a valid AO account (or
+	// admit a different device account) before the managed runtime is launched.
 	versionProbe := d.versionProbe
 	if versionProbe == nil {
 		versionProbe = installedCodexVersion
@@ -189,7 +202,7 @@ func (d *Driver) Probe(ctx context.Context) (ports.ChatCapabilities, error) {
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
-	conv, err := d.connect(probeCtx, workdir, nil)
+	conv, err := d.connect(probeCtx, workdir, nil, "")
 	if err != nil {
 		return nil, err
 	}
@@ -202,6 +215,25 @@ func (d *Driver) Probe(ctx context.Context) (ports.ChatCapabilities, error) {
 	}
 
 	return capabilities(), nil
+}
+
+// DiscoverModels reads the account's current provider catalog without opening
+// a Codex thread. The caller supplies the same project directory and environment
+// overlay used for a normal launch so project-scoped Codex configuration applies.
+func (d *Driver) DiscoverModels(ctx context.Context, workdir string, env map[string]string) ([]ports.ChatModel, error) {
+	if !filepath.IsAbs(workdir) {
+		var err error
+		workdir, err = os.Getwd()
+		if err != nil || !filepath.IsAbs(workdir) {
+			workdir = os.TempDir()
+		}
+	}
+	conv, err := d.connect(ctx, workdir, env, "")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = conv.Close() }()
+	return listModels(ctx, conv.conn)
 }
 
 type codexVersion [3]int
@@ -249,13 +281,18 @@ func installedCodexVersion(ctx context.Context, bin string) (string, error) {
 
 // Start opens a new Codex thread in the session worktree.
 func (d *Driver) Start(ctx context.Context, cfg ports.ChatStartConfig) (ports.ChatConversation, error) {
+	if !cfg.ProviderIDsScoped {
+		cfg.ProviderScopeID = ""
+	}
 	if !filepath.IsAbs(cfg.WorkspacePath) {
 		// app-server resolves a relative cwd against its own process directory,
 		// which would silently put the agent in the wrong tree.
 		return nil, fmt.Errorf("workspace path must be absolute, got %q", cfg.WorkspacePath)
 	}
 
-	conv, reconnected, err := d.connectSession(ctx, cfg.SessionID, cfg.DataDir, cfg.WorkspacePath, cfg.Env, cfg.AllowConcurrentHostReplacement)
+	conv, reconnected, err := d.connectSession(
+		ctx, cfg.SessionID, cfg.DataDir, cfg.WorkspacePath, cfg.Env, cfg.PrepareEnv, cfg.ProviderScopeID,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -266,15 +303,22 @@ func (d *Driver) Start(ctx context.Context, cfg ports.ChatStartConfig) (ports.Ch
 		return nil, errors.New("persistent chat host already owns a provider conversation for a fresh session")
 	}
 
-	policy, sandbox := approvalSettings(cfg.Permissions)
+	policy, sandbox, reviewer := launchApprovalSettings(cfg.Permissions, cfg.ReadOnly)
+	conv.readOnly = cfg.ReadOnly
 	params := map[string]any{
 		"cwd":               cfg.WorkspacePath,
 		"approvalPolicy":    policy,
-		"approvalsReviewer": approvalReviewer(cfg.Permissions),
+		"approvalsReviewer": reviewer,
 		"sandbox":           sandbox,
 	}
 	if cfg.Model != "" {
 		params["model"] = cfg.Model
+	}
+	// thread/start has no top-level effort field either; carry the durable AO
+	// choice as a config override like thread/resume does, so a fresh thread
+	// does not silently fall back to the provider default.
+	if cfg.Effort != "" {
+		params["config"] = map[string]any{"model_reasoning_effort": cfg.Effort}
 	}
 	if cfg.SystemPrompt != "" {
 		params["developerInstructions"] = cfg.SystemPrompt
@@ -305,6 +349,9 @@ func (d *Driver) Start(ctx context.Context, cfg ports.ChatStartConfig) (ports.Ch
 // Resume reattaches to a stored Codex thread after a daemon or app-server
 // restart. A thread that is still running is rejoined rather than restarted.
 func (d *Driver) Resume(ctx context.Context, cfg ports.ChatResumeConfig) (ports.ChatConversation, error) {
+	if !cfg.ProviderIDsScoped {
+		cfg.ProviderScopeID = ""
+	}
 	if cfg.ProviderConversationID == "" {
 		return nil, fmt.Errorf("%w: no stored thread id", ports.ErrChatResumeFailed)
 	}
@@ -312,7 +359,9 @@ func (d *Driver) Resume(ctx context.Context, cfg ports.ChatResumeConfig) (ports.
 		return nil, fmt.Errorf("workspace path must be absolute, got %q", cfg.WorkspacePath)
 	}
 
-	conv, reconnected, err := d.connectSession(ctx, cfg.SessionID, cfg.DataDir, cfg.WorkspacePath, cfg.Env, cfg.AllowConcurrentHostReplacement)
+	conv, reconnected, err := d.connectSession(
+		ctx, cfg.SessionID, cfg.DataDir, cfg.WorkspacePath, cfg.Env, cfg.PrepareEnv, cfg.ProviderScopeID,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -320,16 +369,18 @@ func (d *Driver) Resume(ctx context.Context, cfg ports.ChatResumeConfig) (ports.
 		// The host preserved the already-initialized app-server connection and its
 		// loaded thread. Host replay bridges output and unresolved server requests
 		// across the daemon detach without waiting for the active turn to settle.
-		conv.start(cfg.ProviderConversationID, cfg.Model, "")
+		conv.readOnly = cfg.ReadOnly
+		conv.start(cfg.ProviderConversationID, cfg.Model, cfg.Effort)
 		return conv, nil
 	}
 
-	policy, sandbox := approvalSettings(cfg.Permissions)
+	policy, sandbox, reviewer := launchApprovalSettings(cfg.Permissions, cfg.ReadOnly)
+	conv.readOnly = cfg.ReadOnly
 	params := map[string]any{
 		"threadId":          cfg.ProviderConversationID,
 		"cwd":               cfg.WorkspacePath,
 		"approvalPolicy":    policy,
-		"approvalsReviewer": approvalReviewer(cfg.Permissions),
+		"approvalsReviewer": reviewer,
 		"sandbox":           sandbox,
 	}
 	if cfg.Model != "" {
@@ -366,7 +417,7 @@ func (d *Driver) Resume(ctx context.Context, cfg ports.ChatResumeConfig) (ports.
 }
 
 // connect spawns app-server and completes the initialize handshake.
-func (d *Driver) connect(ctx context.Context, workdir string, env map[string]string) (*conversation, error) {
+func (d *Driver) connect(ctx context.Context, workdir string, env map[string]string, providerScopeID string) (*conversation, error) {
 	bin, err := d.plugin.ResolveBinary(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ports.ErrChatDriverUnavailable, err)
@@ -377,7 +428,7 @@ func (d *Driver) connect(ctx context.Context, workdir string, env map[string]str
 		return nil, fmt.Errorf("%w: launch app-server: %w", ports.ErrChatDriverUnavailable, err)
 	}
 
-	conv := newConversation(proc, d.log)
+	conv := newConversation(proc, d.log, providerScopeID)
 	if err := d.initialize(ctx, conv); err != nil {
 		_ = conv.Close()
 		return nil, err
@@ -390,35 +441,46 @@ func (d *Driver) connectSession(
 	sessionID domain.SessionID,
 	dataDir, workdir string,
 	env map[string]string,
-	allowConcurrentHostReplacement bool,
+	prepareEnv func(context.Context) (map[string]string, error),
+	providerScopeID string,
 ) (*conversation, bool, error) {
 	// Injected driver tests intentionally retain the direct pipe launcher. The
 	// shipped driver uses spawnAppServer and therefore the persistent host.
 	if !d.persistent {
-		conv, err := d.connect(ctx, workdir, env)
+		if prepareEnv != nil {
+			var err error
+			env, err = prepareEnv(ctx)
+			if err != nil {
+				return nil, false, err
+			}
+		}
+		conv, err := d.connect(ctx, workdir, env, providerScopeID)
 		return conv, false, err
 	}
 	bin, err := d.plugin.ResolveBinary(ctx)
 	if err != nil {
 		return nil, false, fmt.Errorf("%w: %w", ports.ErrChatDriverUnavailable, err)
 	}
-	transport, err := d.connectHost(ctx, persistenthost.Config{
+	hostConfig := persistenthost.Config{
 		SessionID: string(sessionID),
 		DataDir:   dataDir,
 		Workdir:   workdir,
 		Env:       envSlice(env),
 		Argv:      []string{bin, "app-server"},
-	})
-	if err != nil {
-		// Branch activation intentionally stages a replacement controller before
-		// terminating the source. The persistent host correctly refuses that second
-		// owner; retain the established safe handoff by staging this replacement in
-		// a direct app-server. On the next daemon reconciliation it is resumed into a
-		// persistent host. Other host failures fail closed and never spawn a rival.
-		if allowConcurrentHostReplacement && errors.Is(err, persistenthost.ErrAttached) {
-			conv, directErr := d.connect(ctx, workdir, env)
-			return conv, false, directErr
+	}
+	if prepareEnv != nil {
+		hostConfig.Prepare = func(prepareCtx context.Context) (persistenthost.PreparedProvider, error) {
+			preparedEnv, prepareErr := prepareEnv(prepareCtx)
+			if prepareErr != nil {
+				return persistenthost.PreparedProvider{}, prepareErr
+			}
+			return persistenthost.PreparedProvider{
+				Env: envSlice(preparedEnv), Argv: []string{bin, "app-server"},
+			}, nil
 		}
+	}
+	transport, err := d.connectHost(ctx, hostConfig)
+	if err != nil {
 		if errors.Is(err, persistenthost.ErrOwnershipInconclusive) ||
 			errors.Is(err, persistenthost.ErrAttached) ||
 			errors.Is(err, persistenthost.ErrIncompatible) ||
@@ -440,7 +502,7 @@ func (d *Driver) connectSession(
 			return persistenthost.Shutdown(shutdownCtx, dataDir, string(sessionID))
 		},
 	}
-	conv := newConversation(proc, d.log)
+	conv := newConversation(proc, d.log, providerScopeID)
 	if transport.Reconnected {
 		return conv, true, nil
 	}
@@ -452,15 +514,19 @@ func (d *Driver) connectSession(
 }
 
 func (d *Driver) initialize(ctx context.Context, conv *conversation) error {
+	return initializeConnection(ctx, conv.conn)
+}
+
+func initializeConnection(ctx context.Context, connection *conn) error {
 	initCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
-	if err := conv.conn.request(initCtx, "initialize", map[string]any{
+	if err := connection.request(initCtx, "initialize", map[string]any{
 		"clientInfo":   map[string]any{"name": clientName, "title": clientTitle, "version": clientVersion},
 		"capabilities": map[string]any{"experimentalApi": true, "optOutNotificationMethods": nil},
 	}, nil); err != nil {
 		return fmt.Errorf("%w: initialize: %w", ports.ErrChatDriverIncompatible, err)
 	}
-	if err := conv.conn.notify("initialized", nil); err != nil {
+	if err := connection.notify("initialized", nil); err != nil {
 		return fmt.Errorf("notify initialized: %w", err)
 	}
 	return nil
@@ -494,9 +560,18 @@ func approvalReviewer(mode ports.PermissionMode) string {
 	return "user"
 }
 
+func launchApprovalSettings(mode ports.PermissionMode, readOnly bool) (policy, sandbox, reviewer string) {
+	if readOnly {
+		return "never", "read-only", "user"
+	}
+	policy, sandbox = approvalSettings(mode)
+	return policy, sandbox, approvalReviewer(mode)
+}
+
 // spawnAppServer is the real launcher.
 func spawnAppServer(ctx context.Context, bin, workdir string, env []string) (*process, error) {
-	cmd := aoprocess.Command(bin, "app-server")
+	args := []string{"app-server"}
+	cmd := aoprocess.Command(bin, args...)
 	cmd.Dir = workdir
 	if len(env) > 0 {
 		cmd.Env = env
@@ -576,6 +651,6 @@ func codexProcessEnv(ctx context.Context, bin string, env map[string]string) []s
 	if _, ok := overlay["PATH"]; !ok {
 		overlay["PATH"] = os.Getenv("PATH")
 	}
-	agentlaunch.AugmentRuntimePATHForLaunchBinary(ctx, overlay, []string{bin}, exec.LookPath)
+	agentlaunch.AugmentRuntimePATHForLaunchBinary(ctx, overlay, []string{bin}, exec.LookPath, agentlaunch.PinnedDir(os.Executable, overlay["AO_DATA_DIR"]))
 	return envSlice(overlay)
 }

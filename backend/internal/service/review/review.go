@@ -20,6 +20,11 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/telemetrymeta"
 )
 
+// errRunSuperseded marks a run that became terminal before its result arrived.
+// SubmitMany treats it as stale input so it cannot strand valid sibling results
+// in the same reviewer submission.
+var errRunSuperseded = errors.New("review: run is no longer running")
+
 // ErrInvalid and ErrNotFound re-export the engine sentinels so the HTTP
 // controller maps service failures to 422/404 without importing the core.
 var (
@@ -52,6 +57,7 @@ func reviewErrorKind(err error) string {
 
 // Manager is the reviews surface the HTTP controller depends on.
 type Manager interface {
+	RecoverChatReviewers(ctx context.Context) error
 	Trigger(ctx context.Context, workerID domain.SessionID, harness domain.ReviewerHarness, config domain.AgentConfig) (reviewcore.TriggerResult, error)
 	RequestRereview(ctx context.Context, workerID domain.SessionID, prURL, reviewer string) error
 	ResolveReviewComment(ctx context.Context, workerID domain.SessionID, prURL, commentURL string) error
@@ -69,13 +75,14 @@ type Manager interface {
 
 // Service is the API-facing review service. It delegates to the core engine.
 type Service struct {
-	engine    *reviewcore.Engine
-	store     Store
-	requester ports.SCMReviewRequester
-	resolver  ports.SCMReviewResolver
-	lifecycle Reducer
-	clock     func() time.Time
-	telemetry ports.EventSink
+	engine             *reviewcore.Engine
+	store              Store
+	requester          ports.SCMReviewRequester
+	resolver           ports.SCMReviewResolver
+	lifecycle          Reducer
+	clock              func() time.Time
+	telemetry          ports.EventSink
+	codexOperationGate ports.CodexOperationGate
 	// engineTrigger indirects the engine's source-tagged trigger so the
 	// instrumented path can be exercised without standing up a full engine and
 	// its eighteen-method store. Defaulted in New; only tests replace it.
@@ -84,10 +91,17 @@ type Service struct {
 
 var _ Manager = (*Service)(nil)
 
+// RecoverChatReviewers restores durable reviewer-owned Chat controllers after
+// daemon startup. It is intentionally part of the required manager contract so
+// startup wiring cannot silently omit it.
+func (s *Service) RecoverChatReviewers(ctx context.Context) error {
+	return s.engine.RecoverChatReviewers(ctx)
+}
+
 // Store is the review_run persistence surface owned by the service submit path.
 type Store interface {
 	GetReviewByID(ctx context.Context, id string) (domain.Review, bool, error)
-	UpdateReviewAgentSessionID(ctx context.Context, id, agentSessionID string) (bool, error)
+	UpdateReviewActivity(ctx context.Context, id string, state domain.ActivityState, agentSessionID, launchID string) (bool, error)
 	GetReviewRun(ctx context.Context, id string) (domain.ReviewRun, bool, error)
 	GetSession(ctx context.Context, id domain.SessionID) (domain.SessionRecord, bool, error)
 	UpdateReviewRunResult(ctx context.Context, id string, status domain.ReviewRunStatus, verdict domain.ReviewVerdict, body, githubReviewID string, autoInjectReview bool) (bool, error)
@@ -135,6 +149,12 @@ func WithReviewResolver(resolver ports.SCMReviewResolver) Option {
 // is how every existing test constructs it.
 func WithTelemetry(sink ports.EventSink) Option {
 	return func(s *Service) { s.telemetry = sink }
+}
+
+// WithCodexAccountOperationGate prevents new Codex reviewer controllers from
+// entering while the device-global Codex credential is changing.
+func WithCodexAccountOperationGate(gate ports.CodexOperationGate) Option {
+	return func(s *Service) { s.codexOperationGate = gate }
 }
 
 // emit reports an event when a sink is wired.
@@ -425,6 +445,16 @@ func (s *Service) triggerWithSource(
 		s.emit(ctx, "ao.review.triggered", workerID, triggeredPayload)
 		return reviewcore.TriggerResult{}, err
 	}
+	usesCodex := s.codexReviewUsesCodex(ctx, workerID, harness)
+	var release func()
+	if usesCodex && s.codexOperationGate != nil {
+		var err error
+		release, err = s.codexOperationGate.AcquireSharedWait(ctx)
+		if err != nil {
+			return reviewcore.TriggerResult{}, err
+		}
+		defer release()
+	}
 	result, err := s.engineTrigger(ctx, workerID, harness, config, source)
 	if err != nil {
 		s.emit(ctx, "ao.review.trigger_failed", workerID, map[string]any{
@@ -475,22 +505,50 @@ func (s *Service) TeardownReviewerTerminal(ctx context.Context, workerID domain.
 
 // RestoreReviewer relaunches an idle reviewer pane after its worker has been restored.
 func (s *Service) RestoreReviewer(ctx context.Context, workerID domain.SessionID) error {
-	_, err := s.engine.RestoreReviewer(ctx, workerID)
+	release, err := s.acquireReviewerCodexAdmission(ctx, workerID, "")
+	if err != nil {
+		return err
+	}
+	defer release()
+	_, err = s.engine.RestoreReviewer(ctx, workerID)
 	return err
 }
 
 // SwitchReviewer atomically persists a worker's reviewer preference and returns
 // the authoritative post-switch review state.
 func (s *Service) SwitchReviewer(ctx context.Context, workerID domain.SessionID, harness domain.ReviewerHarness, config domain.AgentConfig) (reviewcore.SessionReviews, error) {
+	release, err := s.acquireReviewerCodexAdmission(ctx, workerID, harness)
+	if err != nil {
+		return reviewcore.SessionReviews{}, err
+	}
+	defer release()
 	return s.engine.SwitchReviewer(ctx, workerID, harness, config)
 }
 
-// ActivitySignal is reviewer-owned hook metadata. It deliberately does not
-// model activity state for session/Kanban display; for now hooks only keep the
-// reviewer native conversation id up to date for restore.
+func (s *Service) codexReviewUsesCodex(ctx context.Context, workerID domain.SessionID, harness domain.ReviewerHarness) bool {
+	if harness == domain.ReviewerCodex {
+		return true
+	}
+	if harness != "" {
+		return false
+	}
+	rec, ok, err := s.store.GetSession(ctx, workerID)
+	return err == nil && ok && (rec.Harness == domain.HarnessCodex || rec.ReviewerHarness == domain.ReviewerCodex)
+}
+
+func (s *Service) acquireReviewerCodexAdmission(ctx context.Context, workerID domain.SessionID, harness domain.ReviewerHarness) (func(), error) {
+	if s.codexOperationGate == nil || !s.codexReviewUsesCodex(ctx, workerID, harness) {
+		return func() {}, nil
+	}
+	return s.codexOperationGate.AcquireSharedWait(ctx)
+}
+
+// ActivitySignal is reviewer-owned hook metadata.
 type ActivitySignal struct {
 	Event          string
+	State          domain.ActivityState
 	AgentSessionID string
+	LaunchID       string
 }
 
 // ApplyReviewActivitySignal records reviewer-owned hook facts without touching
@@ -499,19 +557,26 @@ func (s *Service) ApplyReviewActivitySignal(ctx context.Context, reviewSessionID
 	if reviewSessionID == "" {
 		return fmt.Errorf("%w: review session id is required", ErrInvalid)
 	}
-	if _, ok, err := s.store.GetReviewByID(ctx, reviewSessionID); err != nil {
+	review, ok, err := s.store.GetReviewByID(ctx, reviewSessionID)
+	if err != nil {
 		return err
 	} else if !ok {
 		return fmt.Errorf("%w: review session %q", ErrNotFound, reviewSessionID)
 	}
-	if signal.AgentSessionID == "" {
+	if signal.AgentSessionID == "" && signal.State == "" {
 		return nil
 	}
-	updated, err := s.store.UpdateReviewAgentSessionID(ctx, reviewSessionID, signal.AgentSessionID)
+	updated, err := s.store.UpdateReviewActivity(ctx, reviewSessionID, signal.State, signal.AgentSessionID, signal.LaunchID)
 	if err != nil {
 		return err
 	}
 	if !updated {
+		// A live reviewer row is reused across launches. Once it carries a launch
+		// generation, a delayed hook from an older reviewer must not clobber the
+		// replacement's activity state. Treat that as a successful no-op.
+		if review.ReviewerLaunchID != "" && signal.LaunchID != review.ReviewerLaunchID {
+			return nil
+		}
 		return fmt.Errorf("%w: review session %q", ErrNotFound, reviewSessionID)
 	}
 	return nil
@@ -556,12 +621,26 @@ func (s *Service) SubmitMany(ctx context.Context, workerID domain.SessionID, rev
 		return nil, fmt.Errorf("review service store is not configured")
 	}
 	runs := make([]domain.ReviewRun, 0, len(reviews))
+	var supersededRunIDs []string
 	for _, review := range reviews {
 		run, err := s.submitOne(ctx, workerID, review)
 		if err != nil {
+			// A newer trigger or lifecycle cancellation may have made one queued
+			// run terminal while the reviewer was working. That run is no longer
+			// submittable, but it must not prevent valid siblings from delivery.
+			if errors.Is(err, errRunSuperseded) {
+				supersededRunIDs = append(supersededRunIDs, review.RunID)
+				continue
+			}
 			return nil, err
 		}
 		runs = append(runs, run)
+	}
+	if len(runs) == 0 {
+		if len(supersededRunIDs) > 0 {
+			return nil, fmt.Errorf("%w: no submittable review runs in submission (superseded: %s)", ErrInvalid, strings.Join(supersededRunIDs, ", "))
+		}
+		return nil, fmt.Errorf("%w: no submittable review runs in submission", ErrInvalid)
 	}
 	if s.lifecycle == nil {
 		return runs, nil
@@ -621,7 +700,7 @@ func (s *Service) submitOne(ctx context.Context, workerID domain.SessionID, revi
 			return domain.ReviewRun{}, err
 		}
 		if !updated {
-			return domain.ReviewRun{}, fmt.Errorf("%w: review run %q is not running", ErrInvalid, runID)
+			return domain.ReviewRun{}, fmt.Errorf("%w: review run %q is not running", errRunSuperseded, runID)
 		}
 		run.Status = domain.ReviewRunComplete
 		run.Verdict = verdict
@@ -661,7 +740,7 @@ func (s *Service) submitOne(ctx context.Context, workerID domain.SessionID, revi
 	case domain.ReviewRunDelivered:
 		return run, nil
 	default:
-		return domain.ReviewRun{}, fmt.Errorf("%w: review run %q is not running", ErrInvalid, runID)
+		return domain.ReviewRun{}, fmt.Errorf("%w: review run %q is not running", errRunSuperseded, runID)
 	}
 	return run, nil
 }

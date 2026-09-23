@@ -2,9 +2,11 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"sync"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters"
@@ -63,6 +65,7 @@ func startLifecycle(ctx context.Context, store *sqlite.Store, runtime ports.Runt
 		lifecycle.WithContainerReaper(dockerreap.New(), store),
 		lifecycle.WithActiveSteering(activeTurnSteering(agents)),
 		lifecycle.WithStartupSignalGate(startupSignalGatesInput(agents)),
+		lifecycle.WithUrgentNudgeGate(urgentNudgeWaitingInputSafe(agents)),
 	)
 	rp := reaper.New(lcm, store, runtime, reaper.Config{Logger: logger})
 	activityPoller := activityobserver.New(store, lcm, runtime, agents, activityobserver.Config{Logger: logger})
@@ -88,6 +91,27 @@ func startupSignalGatesInput(agents ports.AgentResolver) func(domain.AgentHarnes
 		}
 		signaler, ok := agent.(ports.StartupInputReadinessSignaler)
 		return ok && signaler.FirstSignalProvesInputReady()
+	}
+}
+
+// urgentNudgeWaitingInputSafe resolves whether an adapter reports a permission
+// dialog AS blocked (ports.BlockedActivitySignaler) rather than as
+// waiting_input. Only then is an urgent merge-conflict nudge safe to paste at a
+// waiting_input prompt — a harness like codex, which maps permission-request to
+// waiting_input and opts out of the signal, must not receive that unsolicited
+// write while it could be sitting on a masked decision. Unknown and opted-out
+// adapters answer false, so lifecycle withholds the urgent nudge there.
+func urgentNudgeWaitingInputSafe(agents ports.AgentResolver) func(domain.AgentHarness) bool {
+	return func(harness domain.AgentHarness) bool {
+		if agents == nil {
+			return false
+		}
+		agent, ok := agents.Agent(harness)
+		if !ok {
+			return false
+		}
+		signaler, ok := agent.(ports.BlockedActivitySignaler)
+		return ok && signaler.EmitsBlockedActivity()
 	}
 }
 
@@ -170,6 +194,10 @@ type sessionLifecycle interface {
 	// SetHarnessUseGate prevents lifecycle operations from racing a harness
 	// executable replacement.
 	SetHarnessUseGate(gate sessionmanager.HarnessUseGate)
+	// PersistChatModel records the model the user picked in ChatUI onto the
+	// session's durable metadata before the next prompt routes. A later TUI
+	// rebuild reads it back so ChatUI model changes survive the handoff.
+	PersistChatModel(ctx context.Context, id domain.SessionID, model string) error
 }
 
 // sessionLifecycleMessenger adapts sessionLifecycle to ports.AgentMessenger so
@@ -185,6 +213,19 @@ func (m sessionLifecycleMessenger) Send(ctx context.Context, id domain.SessionID
 	return m.sessionLifecycle.Send(ctx, id, message, nil)
 }
 
+// telemetryEmitsSpawned reports whether the ao.session.spawned carrier event can
+// reach a sink under this config: product telemetry on and the event not on the
+// kill switch. When it cannot, session wiring leaves the GitHub identity resolver
+// nil so a spawn never makes a GitHub call whose only purpose is a dropped event.
+// This mirrors newTelemetrySink, which returns a NoopSink under the same off
+// condition, so the non-nil NoopSink never reaches an unnecessary resolve.
+func telemetryEmitsSpawned(cfg config.Config) bool {
+	if !cfg.Telemetry.Events {
+		return false
+	}
+	return !slices.Contains(cfg.Telemetry.DisabledEvents, "ao.session.spawned")
+}
+
 // startSession builds the controller-facing session service: a session manager
 // over the selected runtime, routed git/scratch workspaces, the shared store +
 // LCM, the per-session agent resolver, and the agent messenger. The tracker is
@@ -193,7 +234,7 @@ func (m sessionLifecycleMessenger) Send(ctx context.Context, id domain.SessionID
 // (issue #2685). The returned service is mounted at httpd APIDeps.Sessions.
 // It also returns the manager so the caller can wire Reconcile into the boot
 // sequence.
-func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.Runtime, store *sqlite.Store, lcm *lifecycle.Manager, messenger ports.AgentMessenger, telemetry ports.EventSink, agents ports.AgentResolver, agentReadiness ports.AgentReadinessProvider, previewLifecycle sessionmanager.PreviewLifecycle, browserLifecycle sessionmanager.BrowserLifecycle, browserCapabilities sessionmanager.BrowserCapabilityIssuer, chat sessionmanager.ChatLauncher, defaults sessionmanager.SessionModeDefaults, tracker ports.Tracker, log *slog.Logger) (*sessionsvc.Service, reviewsvc.Manager, sessionLifecycle, error) {
+func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.Runtime, store *sqlite.Store, lcm *lifecycle.Manager, messenger ports.AgentMessenger, telemetry ports.EventSink, agents ports.AgentResolver, agentReadiness ports.AgentReadinessProvider, previewLifecycle sessionmanager.PreviewLifecycle, browserLifecycle sessionmanager.BrowserLifecycle, browserCapabilities sessionmanager.BrowserCapabilityIssuer, chat sessionmanager.ChatLauncher, defaults sessionmanager.SessionModeDefaults, reportingPolicy ports.AgentSwitchReportingPolicy, tracker ports.Tracker, codexOperationGate ports.CodexOperationGate, log *slog.Logger) (*sessionsvc.Service, reviewsvc.Manager, sessionLifecycle, error) {
 	gitWS, err := gitworktree.New(gitworktree.Options{
 		// Per-session worktrees live under the data dir, so a single AO_DATA_DIR
 		// override moves all durable per-user state together.
@@ -202,6 +243,7 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 		// session spawned for a registered project materialises its worktree off
 		// that repo. Unregistered projects fail loudly.
 		RepoResolver: projectRepoResolver{store: store},
+		Logger:       log,
 	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("session workspace: %w", err)
@@ -222,6 +264,8 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 		Agents:              agents,
 		Workspace:           ws,
 		Store:               store,
+		ReportingPolicy:     reportingPolicy,
+		DaemonRunID:         cfg.AppRunID,
 		Messenger:           messenger,
 		Chat:                chat,
 		Defaults:            defaults,
@@ -234,9 +278,18 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 		BackgroundContext:   ctx,
 		Logger:              log,
 		ReconcileWorkers:    startupReconcileWorkers,
+		CodexOperationGate:  codexOperationGate,
 	})
 	mgr.SetAgentReadiness(agentReadiness)
 	scmProvider := newMultiSCMProvider(cfg.GitLab, log)
+	// Attach the operator's GitHub login to product telemetry only when its carrier
+	// event can actually be sent, and guard the typed nil from newMultiSCMProvider
+	// so the interface stays nil (degrading to anonymous) rather than wrapping a
+	// nil pointer.
+	var githubIdentity ports.ScopedIdentityResolver
+	if scmProvider != nil && telemetryEmitsSpawned(cfg) {
+		githubIdentity = scmProvider
+	}
 	sessionSvc := sessionsvc.NewWithDeps(sessionsvc.Deps{
 		Manager:           mgr,
 		Store:             store,
@@ -248,6 +301,7 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 		Logger:            log,
 		BackgroundContext: ctx,
 		AgentReadiness:    agentReadiness,
+		GithubIdentity:    githubIdentity,
 		// no_signal only makes sense for harnesses with complete lifecycle signal
 		// coverage; partial callbacks cannot prove that silence is abnormal.
 		SignalCapable: activitydispatch.FullySupportsHarness,
@@ -260,6 +314,7 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("reviewer resolver: %w", err)
 	}
+	reviewerChat, _ := chat.(reviewcore.ReviewerChatController)
 	reviewEngine := reviewcore.New(reviewcore.Deps{
 		Store:    store,
 		Sessions: store,
@@ -267,11 +322,13 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 		Projects: store,
 		Launcher: reviewcore.NewLauncher(reviewers, runtime, cfg.DataDir,
 			reviewcore.WithRunFilePath(cfg.RunFilePath),
-			reviewcore.WithAgentAuth(reviewerAgentAuth{readiness: agentReadiness})),
+			reviewcore.WithAgentAuth(reviewerAgentAuth{readiness: agentReadiness}),
+			reviewcore.WithReviewerChat(reviewerChat)),
 	})
 	reviewOpts := []reviewsvc.Option{
 		reviewsvc.WithLifecycleReducer(lcm),
 		reviewsvc.WithTelemetry(telemetry),
+		reviewsvc.WithCodexAccountOperationGate(codexOperationGate),
 	}
 	if scmProvider != nil {
 		reviewOpts = append(reviewOpts,
@@ -490,50 +547,61 @@ func (c chatLauncher) PreflightChat(
 	return c.svc.PreflightChat(ctx, harness, permissions)
 }
 
-func (c chatLauncher) StartChat(ctx context.Context, cfg sessionmanager.ChatStart) (sessionmanager.ChatStarted, error) {
-	out, err := c.svc.StartChat(ctx, chatsvc.StartRequest{
-		SessionID:               cfg.SessionID,
-		ProjectID:               cfg.ProjectID,
-		Kind:                    cfg.Kind,
-		Harness:                 cfg.Harness,
-		DataDir:                 cfg.DataDir,
-		WorkspacePath:           cfg.WorkspacePath,
-		Env:                     cfg.Env,
-		Model:                   cfg.Model,
-		Permissions:             cfg.Permissions,
-		SystemPrompt:            cfg.SystemPrompt,
-		AdditionalDirectories:   cfg.AdditionalDirectories,
-		ExpectedControllerOwner: cfg.ExpectedControllerOwner,
-		PrepareControllerEnv:    cfg.PrepareControllerEnv,
-		ProviderConversationID:  cfg.ProviderConversationID,
-		ProviderScopeID:         cfg.ProviderScopeID,
-		ControllerGeneration:    cfg.ControllerGeneration,
-		RequireNativeHistory:    cfg.RequireNativeHistory,
-		SkipNativeHistoryImport: cfg.SkipNativeHistoryImport,
-		ControllerReady: func(out chatsvc.StartResult) (chatsvc.ControllerCommit, error) {
-			if cfg.ControllerReady == nil {
-				return chatsvc.ControllerCommit{}, nil
-			}
-			commit, err := cfg.ControllerReady(sessionmanager.ChatStarted{
-				ProviderConversationID: out.ProviderConversationID,
-				ControllerGeneration:   out.ControllerGeneration,
-				Conversation:           out.Conversation,
-				ProviderBoundary:       out.ProviderBoundary,
-				CommitProviderHistory:  out.CommitProviderHistory,
-			})
-			return chatsvc.ControllerCommit{
-				Conversation:    commit.Conversation,
-				ControllerOwner: commit.ControllerOwner,
-			}, err
-		},
-	})
+func (c chatLauncher) SupportsReviewChat(harness domain.AgentHarness) bool {
+	return c.svc.SupportsChat(harness)
+}
+
+func (c chatLauncher) PreflightReviewChat(ctx context.Context, harness domain.AgentHarness) error {
+	return c.svc.PreflightChat(ctx, harness, ports.PermissionModeAuto)
+}
+
+func (c chatLauncher) StartReviewChat(ctx context.Context, cfg reviewcore.ReviewerChatStart) (string, error) {
+	return c.startReviewChat(ctx, cfg, true)
+}
+
+func (c chatLauncher) RestoreReviewChat(ctx context.Context, cfg reviewcore.ReviewerChatStart) (string, error) {
+	return c.startReviewChat(ctx, cfg, false)
+}
+
+func (c chatLauncher) startReviewChat(ctx context.Context, cfg reviewcore.ReviewerChatStart, sendPrompt bool) (string, error) {
+	owner := domain.ReviewConversationOwner(cfg.ReviewID)
+	started, err := c.svc.StartChat(ctx, chatsvc.StartConfig{Owner: owner, SessionID: cfg.WorkerID, ProjectID: cfg.ProjectID, Kind: domain.KindWorker, Harness: cfg.Harness, DataDir: cfg.DataDir, WorkspacePath: cfg.WorkspacePath, Env: cfg.Env, Permissions: ports.PermissionModeAuto, SystemPrompt: cfg.SystemPrompt, ProviderConversationID: cfg.ProviderConversationID})
 	if err != nil {
-		return sessionmanager.ChatStarted{}, err
+		return "", err
 	}
-	return sessionmanager.ChatStarted{
-		ProviderConversationID: out.ProviderConversationID,
-		ControllerGeneration:   out.ControllerGeneration,
-	}, nil
+	if !sendPrompt {
+		return started.ProviderConversationID, nil
+	}
+	if _, err := c.svc.SendForOwner(ctx, owner, ports.ChatUserMessage{Text: cfg.Prompt, Origin: domain.MessageOriginHuman}); err != nil {
+		_ = c.svc.StopForOwner(context.Background(), owner)
+		return "", err
+	}
+	return started.ProviderConversationID, nil
+}
+
+func (c chatLauncher) SendReviewChat(ctx context.Context, reviewID, message string) error {
+	_, err := c.svc.SendForOwner(ctx, domain.ReviewConversationOwner(reviewID), ports.ChatUserMessage{Text: message, Origin: domain.MessageOriginDaemon})
+	return err
+}
+
+func (c chatLauncher) ReviewChatAlive(reviewID string) bool {
+	return c.svc.HasLiveControllerForOwner(domain.ReviewConversationOwner(reviewID))
+}
+
+func (c chatLauncher) InterruptReviewChat(ctx context.Context, reviewID string) error {
+	err := c.svc.InterruptForOwner(ctx, domain.ReviewConversationOwner(reviewID))
+	if errors.Is(err, chatsvc.ErrNoActiveTurn) || errors.Is(err, ports.ErrChatNoActiveTurn) {
+		return nil
+	}
+	return err
+}
+
+func (c chatLauncher) StopReviewChat(ctx context.Context, reviewID string) error {
+	return c.svc.StopForOwner(ctx, domain.ReviewConversationOwner(reviewID))
+}
+
+func (c chatLauncher) StartChat(ctx context.Context, cfg sessionmanager.ChatStart) (sessionmanager.ChatStarted, error) {
+	return c.svc.StartChat(ctx, cfg)
 }
 
 func (c chatLauncher) StartChatTurn(ctx context.Context, id domain.SessionID, text string) (string, error) {

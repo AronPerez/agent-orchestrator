@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { chmod, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { addRemote, readRemotes, removeRemote, RemotesFilePermissionError, updateRemote } from "./remotes-store";
 
 async function tempFile(contents?: string, mode = 0o600): Promise<string> {
@@ -54,6 +54,16 @@ describe("addRemote", () => {
 		await addRemote(path, { label: "workbox", url: "http://192.0.2.1:3011", password: "pw" });
 		expect((await stat(path)).mode & 0o777).toBe(0o600);
 		expect(JSON.parse(await readFile(path, "utf8")).remotes).toHaveLength(1);
+		expect(await readdir(dirname(path))).toEqual(["remotes.json"]);
+	});
+
+	it("keeps both hosts when adds overlap", async () => {
+		const path = await tempFile();
+		await Promise.all([
+			addRemote(path, { label: "a", url: "http://192.0.2.1:1", password: "x" }),
+			addRemote(path, { label: "b", url: "http://192.0.2.2:2", password: "y" }),
+		]);
+		expect((await readRemotes(path)).map(({ label }) => label)).toEqual(["a", "b"]);
 	});
 
 	it("appends without dropping existing entries", async () => {

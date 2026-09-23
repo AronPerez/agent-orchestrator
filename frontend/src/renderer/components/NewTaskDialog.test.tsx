@@ -64,18 +64,45 @@ const agentInventory = {
 	],
 };
 
+const directModelCatalog = {
+	agentId: "claude-code",
+	models: [],
+	selectionMode: "catalog",
+	allowCustom: true,
+	customModelEntry: "direct",
+	source: "command",
+	fetchedAt: "2026-08-31T00:00:00Z",
+	refreshRecommended: false,
+	stale: false,
+};
+
 async function waitForAgentCatalog() {
 	await waitFor(() => expect(screen.getAllByText("Claude Code").length).toBeGreaterThan(0));
 }
 
 beforeEach(() => {
+	window.localStorage.removeItem("ao.taskComposer.preferences.v1");
 	ensureAgentReadinessMock.mockReset();
 	getMock.mockReset().mockImplementation(async (path: string) => {
 		if (path === "/api/v1/agents/readiness") {
 			return { data: agentInventory, error: undefined };
 		}
+		if (path === "/api/v1/agents/{agent}/models") {
+			return { data: directModelCatalog, error: undefined };
+		}
 		return {
-			data: { status: "ok", project: { id: "proj-1", config: { worker: { agent: "claude-code" } } } },
+			data: {
+				status: "ok",
+				project: {
+					id: "proj-1",
+					name: "careerops",
+					repo: "github.com/team/careerops",
+					defaultBranch: "main",
+					path: "/work/careerops",
+					workspaceRepos: [{ name: "api", relativePath: "api", repo: "github.com/team/careerops-api" }],
+					config: { worker: { agent: "claude-code" }, orchestrator: { agent: "codex" } },
+				},
+			},
 			error: undefined,
 		};
 	});
@@ -99,7 +126,15 @@ describe("NewTaskDialog", () => {
 		expect(screen.queryByRole("button", { name: "Close new task dialog" })).not.toBeInTheDocument();
 		expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
 		expect(screen.getByRole("button", { name: "Agent" })).toHaveTextContent("Claude Code");
-		expect(await screen.findByLabelText("Model")).toHaveValue("");
+		expect(screen.getByTestId("execution-context")).toHaveTextContent("careerops");
+		expect(screen.getByTestId("execution-context")).toHaveTextContent("main");
+		expect(screen.getByTestId("execution-context")).toHaveTextContent("/work/careerops");
+		expect(screen.getByTestId("execution-context")).not.toHaveAttribute("open");
+		expect(screen.getByTestId("execution-context-toggle")).toHaveTextContent("careerops");
+		expect(screen.getByTestId("execution-context-toggle")).toHaveTextContent("main");
+		await userEvent.click(screen.getByTestId("execution-context-toggle"));
+		expect(screen.getByTestId("execution-context")).toHaveAttribute("open");
+		expect(await screen.findByRole("button", { name: "Model" })).toHaveTextContent("Use Claude Code's default");
 		expect(screen.getByRole("button", { name: "Add file" })).toBeInTheDocument();
 		expect(screen.getByLabelText("Task").getAttribute("placeholder")).toBeTruthy();
 		expect(screen.queryByLabelText("Title")).not.toBeInTheDocument();
@@ -123,7 +158,9 @@ describe("NewTaskDialog", () => {
 		await waitForAgentCatalog();
 
 		await user.type(screen.getByLabelText("Task"), brief);
-		await user.type(screen.getByLabelText("Model"), "placeholder-model");
+		await user.click(await screen.findByRole("button", { name: "Model" }));
+		await user.type(screen.getByRole("searchbox", { name: "Search model" }), "placeholder-model");
+		await user.click(screen.getByRole("menuitem", { name: "Use “placeholder-model” as a custom model" }));
 		await user.click(screen.getByRole("button", { name: "Start task" }));
 
 		await waitFor(() => expect(requestBody).not.toThrow());
@@ -190,22 +227,22 @@ describe("NewTaskDialog", () => {
 		expect(requestBody().agent).toBe("cursor");
 	});
 
-	it("allows selecting an installed agent with unknown auth", async () => {
+	it("hides agents with unknown auth and offers agent management without changing the selection", async () => {
 		renderDialog();
 		const user = userEvent.setup();
 		await waitForAgentCatalog();
 
 		await user.click(screen.getByRole("button", { name: "Agent" }));
 		const options = await screen.findAllByRole("menuitem");
-		expect(options.map((option) => option.textContent)).toEqual(["Claude Code", "Cursor", "KiroAuth unknown"]);
-		expect(options[2]).not.toHaveAttribute("aria-disabled", "true");
-		await user.click(options[2]);
+		expect(options.map((option) => option.textContent)).toEqual(["Claude Code", "Cursor", "Manage agents…"]);
+		expect(screen.queryByRole("menuitem", { name: /Kiro/ })).not.toBeInTheDocument();
+		await user.keyboard("{Escape}");
 
 		await user.type(screen.getByLabelText("Task"), "B");
 		await user.click(screen.getByRole("button", { name: "Start task" }));
 
 		await waitFor(() => expect(requestBody).not.toThrow());
-		expect(requestBody().agent).toBe("kiro");
+		expect(requestBody().agent).toBe("claude-code");
 	});
 
 	it("starts an untitled task without an initial prompt", async () => {
@@ -235,6 +272,9 @@ describe("NewTaskDialog", () => {
 					error: undefined,
 				};
 			}
+			if (path === "/api/v1/agents/{agent}/models") {
+				return { data: directModelCatalog, error: undefined };
+			}
 			return {
 				data: {
 					status: "ok",
@@ -249,7 +289,7 @@ describe("NewTaskDialog", () => {
 		await waitForAgentCatalog();
 
 		expect(screen.queryByLabelText("Branch")).not.toBeInTheDocument();
-		expect(await screen.findByLabelText("Model")).toHaveValue("");
+		expect(await screen.findByRole("button", { name: "Model" })).toHaveTextContent("Use Claude Code's default");
 
 		await user.type(screen.getByLabelText("Task"), "Build a quick prototype in scratch.");
 		await user.click(screen.getByRole("button", { name: "Start task" }));

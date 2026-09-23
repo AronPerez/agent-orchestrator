@@ -1,4 +1,5 @@
-import { readFile, stat, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 
 // The CLI's saved-remote store, shared verbatim so the UI and `ao --url` agree
 // on which hosts exist and never hold two copies of a connection password.
@@ -42,16 +43,38 @@ export async function readRemotes(path: string): Promise<RemoteEntry[]> {
 	return parsed.remotes ?? [];
 }
 
-// Every write goes through here: mode on writeFile only applies at creation;
-// chmod-on-write would race, and readRemotes — which each of these calls first —
-// refuses anything looser on the next read regardless.
+// Write beside the existing file so interruption never truncates the only
+// saved copy. The temporary file is 0600 before its contents are written.
 async function writeRemotes(path: string, remotes: RemoteEntry[]): Promise<void> {
-	await writeFile(path, `${JSON.stringify({ remotes }, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+	const temporary = `${path}.${randomUUID()}.tmp`;
+	let renamed = false;
+	try {
+		await writeFile(temporary, `${JSON.stringify({ remotes }, null, 2)}\n`, {
+			encoding: "utf8",
+			mode: 0o600,
+			flag: "wx",
+		});
+		await rename(temporary, path);
+		renamed = true;
+	} finally {
+		if (!renamed) await rm(temporary, { force: true });
+	}
+}
+
+// A concurrent add/update/remove must not overwrite another call's read-modify-write.
+let mutationQueue: Promise<void> = Promise.resolve();
+
+function serializeMutation<T>(operation: () => Promise<T>): Promise<T> {
+	const queued = mutationQueue.then(operation, operation);
+	mutationQueue = queued.then(() => undefined, () => undefined);
+	return queued;
 }
 
 export async function addRemote(path: string, entry: RemoteEntry): Promise<void> {
-	const existing = await readRemotes(path);
-	await writeRemotes(path, [...existing.filter((candidate) => candidate.url !== entry.url), entry]);
+	return serializeMutation(async () => {
+		const existing = await readRemotes(path);
+		await writeRemotes(path, [...existing.filter((candidate) => candidate.url !== entry.url), entry]);
+	});
 }
 
 /** An edit: only the fields it carries change. */
@@ -72,23 +95,27 @@ export function applyRemoteChanges(entry: RemoteEntry, changes: RemoteChanges): 
 }
 
 export async function updateRemote(path: string, url: string, changes: RemoteChanges): Promise<RemoteEntry> {
-	const existing = await readRemotes(path);
-	const current = existing.find((candidate) => candidate.url === url);
-	if (!current) throw new Error(`no saved host for ${url}`);
-	const updated = applyRemoteChanges(current, changes);
-	// Re-pointing a host MOVES its entry: the row keeps its place, and any other
-	// row already sitting on the new url is absorbed rather than left as a twin.
-	const remotes = existing
-		.map((candidate) => (candidate === current ? updated : candidate))
-		.filter((candidate) => candidate === updated || candidate.url !== updated.url);
-	await writeRemotes(path, remotes);
-	return updated;
+	return serializeMutation(async () => {
+		const existing = await readRemotes(path);
+		const current = existing.find((candidate) => candidate.url === url);
+		if (!current) throw new Error(`no saved host for ${url}`);
+		const updated = applyRemoteChanges(current, changes);
+		// Re-pointing a host MOVES its entry: the row keeps its place, and any other
+		// row already sitting on the new url is absorbed rather than left as a twin.
+		const remotes = existing
+			.map((candidate) => (candidate === current ? updated : candidate))
+			.filter((candidate) => candidate === updated || candidate.url !== updated.url);
+		await writeRemotes(path, remotes);
+		return updated;
+	});
 }
 
 export async function removeRemote(path: string, url: string): Promise<void> {
-	const existing = await readRemotes(path);
-	const remaining = existing.filter((candidate) => candidate.url !== url);
-	// Removing what is not there is not an error, but it is not a write either.
-	if (remaining.length === existing.length) return;
-	await writeRemotes(path, remaining);
+	return serializeMutation(async () => {
+		const existing = await readRemotes(path);
+		const remaining = existing.filter((candidate) => candidate.url !== url);
+		// Removing what is not there is not an error, but it is not a write either.
+		if (remaining.length === existing.length) return;
+		await writeRemotes(path, remaining);
+	});
 }

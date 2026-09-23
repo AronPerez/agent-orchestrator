@@ -5,6 +5,7 @@ import type { AppLocale } from "../../i18n";
 import { useLocaleStore } from "../../stores/locale-store";
 import { useSoundNotificationsStore } from "../../stores/sound-notifications-store";
 import { useUiStore } from "../../stores/ui-store";
+import { useTelemetryPolicyStore } from "../../stores/telemetry-policy-store";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { useTerminalShellStore } from "../../stores/terminal-shell-store";
 import { SettingsOptionMenu, type SettingsOption } from "./SettingsOptionMenu";
@@ -152,6 +153,8 @@ export function GeneralSettingsSection({
 	const soundNotificationsSaveError = useSoundNotificationsStore((state) => state.saveError);
 	const developerMode = useUiStore((state) => state.developerMode);
 	const setDeveloperMode = useUiStore((state) => state.setDeveloperMode);
+	const remoteHosts = useUiStore((state) => state.remoteHosts);
+	const setRemoteHosts = useUiStore((state) => state.setRemoteHosts);
 
 	const themeOptions = [
 		{ value: "light", label: t("settings.theme.light") },
@@ -229,6 +232,10 @@ export function GeneralSettingsSection({
 				) : null}
 			</SettingsSection>
 
+			<SettingsSection title={t("settings.privacy")} grouped>
+				<TelemetryEventsRow />
+			</SettingsSection>
+
 			{/* Advanced */}
 			<SettingsSection title={t("settings.advanced")} grouped>
 				<SettingsRow label={t("settings.developerMode")}>
@@ -238,10 +245,43 @@ export function GeneralSettingsSection({
 						onCheckedChange={setDeveloperMode}
 					/>
 				</SettingsRow>
+				<SettingsRow label={t("settings.remoteHosts")}>
+					<Switch
+						aria-label={t("settings.remoteHosts")}
+						checked={remoteHosts}
+						onCheckedChange={setRemoteHosts}
+					/>
+				</SettingsRow>
 				{developerMode && <CloudOfferingRow />}
 			</SettingsSection>
 		</>
 	);
+}
+
+function TelemetryEventsRow() {
+	const { t } = useTranslation();
+	const view = useTelemetryPolicyStore((state) => state.view);
+	const saving = useTelemetryPolicyStore((state) => state.saving);
+	const saveError = useTelemetryPolicyStore((state) => state.saveError);
+	const setEnabled = useTelemetryPolicyStore((state) => state.setEnabled);
+	const checked = view?.eventsEnabled ?? false;
+	const blockedEnable = !checked && (view?.environmentVeto || !view?.durabilitySupported);
+	const status = saveError ? "failed"
+		: !view ? null
+		: !view.durabilitySupported ? "unsupported"
+		: view.state === "cleanup_failed" ? "failed"
+		: view.state === "cleanup_pending" ? "pending"
+		: view.reason === "environment_veto" ? "veto"
+		: view.reason === "release_blocked" ? "releaseBlocked"
+		: null;
+	return <div className="flex w-full flex-col">
+		<SettingsRow label={t("settings.telemetryEvents.label")}>
+			<Switch aria-label={t("settings.telemetryEvents.label")} checked={checked} disabled={saving || !view || blockedEnable} onCheckedChange={(enabled) => { void setEnabled(enabled); }} />
+		</SettingsRow>
+		<p className={cn("pb-2 text-xs leading-relaxed", status === "failed" ? "text-destructive" : "text-muted-foreground")} role={status === "failed" ? "alert" : undefined}>
+			{t(status ? `settings.telemetryEvents.${status}` : "settings.telemetryEvents.description")}
+		</p>
+	</div>;
 }
 
 /**
