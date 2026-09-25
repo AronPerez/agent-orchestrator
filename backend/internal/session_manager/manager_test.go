@@ -9028,6 +9028,107 @@ func TestReconcileLive_InterruptedSpawnSeedRowIsRemoved(t *testing.T) {
 	}
 }
 
+func TestReconcile_LivePassUsesConfiguredConcurrency(t *testing.T) {
+	st := newFakeStore()
+	st.projects["p1"] = domain.ProjectRecord{ID: "p1", Config: testRoleAgents()}
+	ids := []domain.SessionID{"s1", "s2", "s3"}
+	for _, id := range ids {
+		st.sessions[id] = domain.SessionRecord{
+			ID: id, ProjectID: "p1", Harness: domain.HarnessClaudeCode,
+			Metadata: domain.SessionMetadata{
+				Branch: "ao/" + string(id) + "/root", WorkspacePath: "/wt/" + string(id), RuntimeHandleID: string(id),
+			},
+		}
+	}
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseAll()
+	rt := &blockingAliveRuntime{
+		fakeRuntime: &fakeRuntime{},
+		entered:     make(chan domain.SessionID, 2),
+		release:     release,
+	}
+	m := New(Deps{
+		Runtime: rt, Agents: fakeAgents{}, Workspace: &fakeWorkspace{}, Store: st,
+		Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath:         func(string) (string, error) { return "/bin/true", nil },
+		ReconcileWorkers: 2,
+	})
+	done := make(chan error, 1)
+	go func() { done <- m.Reconcile(context.Background()) }()
+
+	seen := map[domain.SessionID]bool{}
+	for len(seen) < 2 {
+		select {
+		case id := <-rt.entered:
+			seen[id] = true
+		case <-time.After(time.Second):
+			t.Fatalf("live probes did not overlap; entered = %v", seen)
+		}
+	}
+	// The third session is still queued behind the two blocked probes. It must
+	// already be fenced so neither input nor the periodic reaper can mutate it.
+	for _, id := range ids {
+		if !m.SessionMutationInProgress(id) {
+			t.Fatalf("session %s was not lifecycle-fenced during startup reconcile", id)
+		}
+	}
+	releaseAll()
+	if err := <-done; err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	for _, id := range ids {
+		if m.SessionMutationInProgress(id) {
+			t.Fatalf("session %s reconcile fence leaked after completion", id)
+		}
+	}
+}
+
+func TestReconcileStartupSafetyDefersRuntimeReconciliation(t *testing.T) {
+	st := newFakeStore()
+	st.projects["p1"] = domain.ProjectRecord{ID: "p1", Config: testRoleAgents()}
+	st.sessions["s1"] = domain.SessionRecord{
+		ID: "s1", ProjectID: "p1", Harness: domain.HarnessClaudeCode,
+		Metadata: domain.SessionMetadata{Branch: "ao/s1/root", WorkspacePath: "/wt/s1", RuntimeHandleID: "s1"},
+	}
+	release := make(chan struct{})
+	rt := &blockingAliveRuntime{
+		fakeRuntime: &fakeRuntime{},
+		entered:     make(chan domain.SessionID, 1),
+		release:     release,
+	}
+	m := New(Deps{
+		Runtime: rt, Agents: fakeAgents{}, Workspace: &fakeWorkspace{}, Store: st,
+		Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+
+	if err := m.ReconcileStartupSafety(context.Background()); err != nil {
+		t.Fatalf("ReconcileStartupSafety: %v", err)
+	}
+	select {
+	case id := <-rt.entered:
+		t.Fatalf("startup safety unexpectedly probed runtime %s", id)
+	default:
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- m.ReconcileBackground(context.Background()) }()
+	select {
+	case id := <-rt.entered:
+		if id != "s1" {
+			t.Fatalf("runtime probe = %s, want s1", id)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("background reconciliation did not probe the live runtime")
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("ReconcileBackground: %v", err)
+	}
+}
+
 func TestReconcileLive_ProbeErrorIsNotDeath(t *testing.T) {
 	st := newFakeStore()
 	rt := &fakeRuntime{aliveErr: errors.New("probe boom")}
