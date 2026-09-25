@@ -250,6 +250,7 @@ func TestUnauthenticatedLANCallerLearnsNoRouteTable(t *testing.T) {
 	// Outside the blocked prefixes nothing changed: no credential, no answer.
 	if status, _ := lanGet(t, port, "/api/v1/no-such-route", ""); status != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated ordinary path: got %d, want 401", status)
+
 	}
 }
 

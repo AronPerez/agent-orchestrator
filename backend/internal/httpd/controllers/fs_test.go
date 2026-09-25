@@ -8,21 +8,25 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
+	fsbrowsersvc "github.com/aoagents/agent-orchestrator/backend/internal/service/fsbrowser"
 )
 
-func newFSRig(t *testing.T, home string) *httptest.Server {
+func newFSRig(t *testing.T) *httptest.Server {
 	t.Helper()
 	r := chi.NewRouter()
-	(&FSController{Home: func() (string, error) { return home, nil }}).Register(r)
+	(&FSController{Svc: fsbrowsersvc.New()}).Register(r)
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
 	return srv
 }
 
-func listDirs(t *testing.T, srv *httptest.Server, path string) (int, ListDirsResponse) {
+func listDirs(t *testing.T, srv *httptest.Server, path string) (int, ListDirsResponse, envelope.APIError) {
 	t.Helper()
 	q := ""
 	if path != "" {
@@ -34,12 +38,15 @@ func listDirs(t *testing.T, srv *httptest.Server, path string) (int, ListDirsRes
 	}
 	defer resp.Body.Close()
 	var body ListDirsResponse
+	var apiErr envelope.APIError
 	if resp.StatusCode == http.StatusOK {
 		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
+	} else if err := json.NewDecoder(resp.Body).Decode(&apiErr); err != nil {
+		t.Fatal(err)
 	}
-	return resp.StatusCode, body
+	return resp.StatusCode, body, apiErr
 }
 
 // padName zero-pads so the cap test's directory names sort deterministically.
@@ -62,7 +69,7 @@ func TestListDirsShowsDirectoriesOnlyWithGitDetection(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	status, body := listDirs(t, newFSRig(t, home), home)
+	status, body, _ := listDirs(t, newFSRig(t), home)
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
@@ -85,15 +92,15 @@ func TestListDirsShowsDirectoriesOnlyWithGitDetection(t *testing.T) {
 }
 
 func TestListDirsDefaultsToHome(t *testing.T) {
-	home := t.TempDir()
-	if err := os.Mkdir(filepath.Join(home, "sub"), 0o755); err != nil {
+	home, err := os.UserHomeDir()
+	if err != nil {
 		t.Fatal(err)
 	}
-	status, body := listDirs(t, newFSRig(t, home), "")
+	status, body, _ := listDirs(t, newFSRig(t), "")
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
-	if body.Path != home {
+	if body.Path != filepath.Clean(home) {
 		t.Errorf("path = %q, want home %q", body.Path, home)
 	}
 	if body.Parent != filepath.Dir(home) {
@@ -103,32 +110,60 @@ func TestListDirsDefaultsToHome(t *testing.T) {
 
 func TestListDirsRejectsRelativeAndMissingPaths(t *testing.T) {
 	home := t.TempDir()
-	srv := newFSRig(t, home)
-
-	if status, _ := listDirs(t, srv, "relative/path"); status != http.StatusBadRequest {
-		t.Errorf("relative path status = %d, want 400", status)
-	}
-	if status, _ := listDirs(t, srv, filepath.Join(home, "nope")); status != http.StatusNotFound {
-		t.Errorf("missing path status = %d, want 404", status)
-	}
+	srv := newFSRig(t)
 	// A file is not browsable.
 	f := filepath.Join(home, "f.txt")
 	if err := os.WriteFile(f, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if status, _ := listDirs(t, srv, f); status != http.StatusBadRequest {
-		t.Errorf("file path status = %d, want 400", status)
+
+	for _, tc := range []struct {
+		name       string
+		path       string
+		wantStatus int
+		wantCode   string
+	}{
+		{name: "relative", path: "relative/path", wantStatus: http.StatusBadRequest, wantCode: "FS_PATH_NOT_ABSOLUTE"},
+		{name: "missing", path: filepath.Join(home, "nope"), wantStatus: http.StatusNotFound, wantCode: "FS_NOT_FOUND"},
+		{name: "file", path: f, wantStatus: http.StatusBadRequest, wantCode: "FS_NOT_A_DIRECTORY"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, _, apiErr := listDirs(t, srv, tc.path)
+			if status != tc.wantStatus || apiErr.Code != tc.wantCode {
+				t.Fatalf("status/code = %d/%q, want %d/%q", status, apiErr.Code, tc.wantStatus, tc.wantCode)
+			}
+		})
+	}
+}
+
+func TestListDirsRejectsPermissionDenied(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not enforce Unix directory mode bits")
+	}
+	dir := filepath.Join(t.TempDir(), "forbidden")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	status, _, apiErr := listDirs(t, newFSRig(t), dir)
+	if status != http.StatusForbidden || apiErr.Code != "FS_FORBIDDEN" {
+		t.Fatalf("status/code = %d/%q, want 403/FS_FORBIDDEN", status, apiErr.Code)
 	}
 }
 
 func TestListDirsCapsEntries(t *testing.T) {
+	const maxDirEntries = 500
 	home := t.TempDir()
 	for i := 0; i < maxDirEntries+10; i++ {
 		if err := os.Mkdir(filepath.Join(home, "d"+padName(i)), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	status, body := listDirs(t, newFSRig(t, home), home)
+	status, body, _ := listDirs(t, newFSRig(t), home)
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
