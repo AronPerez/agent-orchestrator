@@ -18,6 +18,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/pricing"
+	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
 )
 
 type activityCapture struct {
@@ -631,6 +632,16 @@ func TestHooks_UserPromptSubmitReportsOnlyMainUserCheckpoint(t *testing.T) {
 	}
 }
 
+func TestHookConversationFactsCorrelatesAcceptedReportDelivery(t *testing.T) {
+	prompt := domain.WrapReportDelivery("report-batch:abc123", "Reports since your previous turn:")
+	payload := []byte(`{"prompt":` + mustJSONString(t, prompt) + `,"prompt_id":"native-turn"}`)
+	got := hookConversationFacts(domain.HarnessClaudeCode, "user-prompt-submit", payload)
+	if got.CheckpointOrigin != domain.ConversationCheckpointOriginCoordination ||
+		got.CoordinationID != "report-batch:abc123" || got.LatestUserPrompt != "" {
+		t.Fatalf("conversation facts = %+v", got)
+	}
+}
+
 func TestHooks_SubagentStopCannotReportMainConversationCheckpoint(t *testing.T) {
 	t.Setenv("AO_SESSION_ID", "ao-7")
 	t.Setenv("AO_RUNTIME_LAUNCH_ID", "launch-3")
@@ -746,6 +757,38 @@ func TestHooks_NonSwitchingHarnessDoesNotReportConversationFacts(t *testing.T) {
 	}
 	if req.LatestUserPrompt != "" || req.LatestAssistantUpdate != "" || req.TranscriptPath != "" {
 		t.Fatalf("non-switching harness reported conversation facts: %#v", req)
+	}
+}
+
+func TestHookSemanticAcceptanceFacts(t *testing.T) {
+	wrapped := domain.WrapReportDelivery("report-batch:abc123", "worker finished")
+	for _, harness := range []domain.AgentHarness{
+		domain.HarnessOpenCode,
+		domain.HarnessGrok,
+		domain.HarnessKilocode,
+		domain.HarnessOMP,
+		domain.HarnessPi,
+		domain.HarnessAmp,
+		domain.HarnessPrimeAgent,
+	} {
+		t.Run(string(harness), func(t *testing.T) {
+			got := hookSemanticAcceptanceFacts(
+				"user-prompt-submit",
+				[]byte(`{"prompt":`+mustJSONString(t, wrapped)+`}`),
+			)
+			if got.CoordinationID != "report-batch:abc123" ||
+				got.CheckpointOrigin != domain.ConversationCheckpointOriginCoordination {
+				t.Fatalf("semantic acceptance = %#v", got)
+			}
+			if got.LatestUserPrompt != "" {
+				t.Fatalf("accepted report leaked into user prompt: %#v", got)
+			}
+		})
+	}
+
+	ordinary := hookSemanticAcceptanceFacts("user-prompt-submit", []byte(`{"prompt":"private prompt"}`))
+	if ordinary != (hookConversationSnapshot{}) {
+		t.Fatalf("ordinary prompt became a semantic checkpoint: %#v", ordinary)
 	}
 }
 
@@ -1126,7 +1169,7 @@ func TestHooks_MuseUserPromptReportsActive(t *testing.T) {
 }
 
 func TestHooks_RegisteredHarnessSessionStartReportsAgentSessionID(t *testing.T) {
-	for _, agent := range []string{"opencode", "qwen", "kimi", "kilocode", "goose"} {
+	for _, agent := range []string{"opencode", "qwen", "gemini", "kimi", "kilocode", "goose"} {
 		t.Run(agent, func(t *testing.T) {
 			t.Setenv("AO_SESSION_ID", "ao-7")
 			cfg := setConfigEnv(t)
@@ -1150,6 +1193,38 @@ func TestHooks_RegisteredHarnessSessionStartReportsAgentSessionID(t *testing.T) 
 			want := setActivityAPIRequest{State: "active", Event: "session-start", AgentSessionID: agent + "-native-1"}
 			assertActivityRequest(t, req, want)
 		})
+	}
+}
+
+func TestHooks_GeminiBeforeAgentReturnsStandingInstructions(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "ao-7")
+	cfg := setConfigEnv(t)
+	dir := filepath.Join(cfg.dataDir, "prompts", "ao-7")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "system.md"), []byte("Follow AO instructions."), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv, capture := activityServer(t, http.StatusOK, `{"ok":true}`)
+	writeRunFileFor(t, cfg, srv)
+	out, _, err := executeCLI(t, Deps{In: strings.NewReader(`{"session_id":"gemini-native-1"}`), ProcessAlive: func(int) bool { return true }}, "hooks", "gemini", "user-prompt-submit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response sessionStartHookOutput
+	if err := json.Unmarshal([]byte(out), &response); err != nil {
+		t.Fatalf("invalid Gemini hook output %q: %v", out, err)
+	}
+	if response.HookSpecificOutput.HookEventName != "BeforeAgent" || response.HookSpecificOutput.AdditionalContext != "Follow AO instructions." {
+		t.Fatalf("response = %+v", response)
+	}
+	var req setActivityAPIRequest
+	if err := json.Unmarshal([]byte(capture.body), &req); err != nil {
+		t.Fatal(err)
+	}
+	if req.AgentSessionID != "gemini-native-1" || req.State != "active" {
+		t.Fatalf("request = %+v", req)
 	}
 }
 
@@ -1775,6 +1850,58 @@ func TestHooks_CursorTerminalFailureReportsCorrelatedCompletion(t *testing.T) {
 			}
 			if req.State != "active" || req.Event != tt.wantEvent || req.ToolName != tt.wantTool {
 				t.Fatalf("terminal-failure activity = %+v, want state=active event=%q toolName=%q", req, tt.wantEvent, tt.wantTool)
+			}
+		})
+	}
+}
+
+func TestHooks_DaemonNotRunningStaysOutOfStderr(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, cfg testConfig)
+		alive func(int) bool
+	}{
+		{
+			name: "stale run-file",
+			setup: func(t *testing.T, cfg testConfig) {
+				if err := runfile.Write(cfg.runFile, runfile.Info{
+					PID: 999999, Port: 3001, StartedAt: time.Unix(100, 0).UTC(),
+				}); err != nil {
+					t.Fatalf("write run-file: %v", err)
+				}
+			},
+			alive: func(int) bool { return false },
+		},
+		{
+			name:  "no run-file",
+			setup: func(t *testing.T, cfg testConfig) {},
+			alive: func(int) bool { return true },
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AO_SESSION_ID", "ao-7")
+			cfg := setConfigEnv(t)
+			tc.setup(t, cfg)
+
+			_, errOut, err := executeCLI(t, Deps{
+				In:           strings.NewReader(`{"reason":"logout"}`),
+				ProcessAlive: tc.alive,
+			}, "hooks", "claude-code", "session-end")
+			if err != nil {
+				t.Fatalf("hooks must exit 0 when the daemon is down, got: %v", err)
+			}
+			if errOut != "" {
+				t.Errorf("daemon-down must not reach the agent's stderr, got %q", errOut)
+			}
+
+			logged, err := os.ReadFile(filepath.Join(cfg.dataDir, hooksLogName))
+			if err != nil {
+				t.Fatalf("daemon-down must still be recorded in hooks.log: %v", err)
+			}
+			if !strings.Contains(string(logged), "daemon is not running") {
+				t.Errorf("hooks.log missing the daemon-down notice, got %q", logged)
 			}
 		})
 	}

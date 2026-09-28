@@ -356,6 +356,10 @@ func TestServeRemoteConnAcceptsTokenlessHelloAndExecutes(t *testing.T) {
 		if err := dec.Decode(&command); err != nil {
 			return
 		}
+		// net.Pipe is unbuffered and Go 1.27's Decoder stops before the
+		// encoder's trailing newline, so keep reading or the broker's write
+		// never completes.
+		go func() { _, _ = io.Copy(io.Discard, client) }()
 		_ = json.NewEncoder(client).Encode(wireMessage{
 			Type:      "result",
 			RequestID: command.RequestID,

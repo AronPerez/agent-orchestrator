@@ -194,7 +194,14 @@ func mountControl(r chi.Router, deps ControlDeps) {
 			"service": daemonmeta.ServiceName,
 			"pid":     os.Getpid(),
 		})
-		deps.RequestShutdown()
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		// Start shutdown only after the accepted response has had a chance to
+		// leave this handler. Otherwise http.Server.Shutdown can observe the
+		// /shutdown request itself as still active and wait until its graceful
+		// deadline under the race detector.
+		time.AfterFunc(10*time.Millisecond, deps.RequestShutdown)
 	})
 }
 
@@ -218,6 +225,7 @@ func mountMobile(r chi.Router, c *controllers.MobileController) {
 	r.Post("/api/v1/mobile/disable", c.Disable)
 	r.Post("/api/v1/mobile/regenerate", c.Regenerate)
 	r.Post("/api/v1/mobile/secure-pairing", c.SecurePairing)
+	r.Post("/api/v1/mobile/keep-awake", c.KeepAwake)
 }
 
 // mountMobileDevices registers the desktop-only mobile device roster. These sit
