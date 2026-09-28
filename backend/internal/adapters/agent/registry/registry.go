@@ -21,6 +21,8 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/cursor"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/devin"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/droid"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/fx"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/gemini"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/goose"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/grok"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/kilocode"
@@ -33,6 +35,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/pi"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/primeagent"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/qwen"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/unrealagent"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/vibe"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -50,6 +53,7 @@ func Constructors() []adapters.Adapter {
 		grok.New(),
 		cursor.New(),
 		qwen.New(),
+		gemini.New(),
 		copilot.New(),
 		kimi.New(),
 		muse.New(),
@@ -71,6 +75,8 @@ func Constructors() []adapters.Adapter {
 		kimchi.New(),
 		primeagent.New(),
 		autohand.New(),
+		fx.New(),
+		unrealagent.New(),
 	}
 }
 
