@@ -141,6 +141,9 @@ func TestSpawnAsyncChatSeedsEffortBeforeBackgroundTitle(t *testing.T) {
 			deferred := deferredBackground(m)
 			project := st.projects[string(chatTestProject)]
 			project.Config.AgentConfig.Effort = "high"
+			// The fork drops tuning pinned for another agent, so pin the role
+			// to the harness this spawn uses.
+			project.Config.Worker.Harness = domain.HarnessCodex
 			st.projects[string(chatTestProject)] = project
 
 			cfg := asyncChatSpawnConfig("do the thing")
