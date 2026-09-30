@@ -1,13 +1,13 @@
 package httpd
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/requestscope"
 )
 
 // TestCORS exercises the allowlist boundary on a real router: trusted origins
@@ -473,7 +473,7 @@ func TestHostGuardExemptsLANListener(t *testing.T) {
 			r := httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil)
 			r.Host = tc.host
 			if tc.lan {
-				r = r.WithContext(context.WithValue(r.Context(), lanListenerCtxKey{}, true))
+				r = r.WithContext(requestscope.WithLAN(r.Context()))
 			}
 			w := httptest.NewRecorder()
 			guarded.ServeHTTP(w, r)

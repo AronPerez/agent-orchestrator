@@ -16,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/requestscope"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/webui"
 	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -157,18 +158,11 @@ var lanControlBlockedPrefixes = []string{
 	"/api/v1/agents/codex/account-switches",
 }
 
-// lanListenerCtxKey marks a request as having arrived on the physical LAN
-// socket. Unlike Host or X-Forwarded-For it cannot be spoofed by the client:
-// only lanControlBlock sets it, and lanControlBlock wraps the LAN-served
-// handler only.
-type lanListenerCtxKey struct{}
-
 // servedOverLAN reports whether r arrived on the LAN listener (and is therefore
 // credential-gated by authMiddleware) rather than the no-auth loopback
 // listener. Origin policy differs between the two — see requiresStrictOrigin.
 func servedOverLAN(r *http.Request) bool {
-	v, _ := r.Context().Value(lanListenerCtxKey{}).(bool)
-	return v
+	return requestscope.IsLAN(r.Context())
 }
 
 // loopbackOnlyJSON answers a request for a route this daemon serves, but not on
@@ -213,7 +207,7 @@ func lanControlBlock(next http.Handler) http.Handler {
 			loopbackOnlyJSON(w, r)
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), lanListenerCtxKey{}, true)))
+		next.ServeHTTP(w, r.WithContext(requestscope.WithLAN(r.Context())))
 	})
 }
 
