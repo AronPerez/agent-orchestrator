@@ -145,7 +145,7 @@ func verifyCheckpointTranscript(ctx context.Context, input io.Reader, request po
 			if record.Meta && record.TurnCompanion {
 				continue
 			}
-			if checkpointToolResults(record.Message.Content) {
+			if checkpointToolResults(record.Message.Content) || checkpointLocalCommand(record.Message.Content) {
 				continue
 			}
 			if record.PromptID == "" {
@@ -242,6 +242,22 @@ func checkpointToolResults(raw json.RawMessage) bool {
 		}
 	}
 	return true
+}
+
+// Local slash commands (/login, /model, /clear) are logged as user records that
+// never reach the model: no promptId before the first prompt, no answer after it.
+// Prompt commands (skills) start with <command-message> and remain turns.
+func checkpointLocalCommand(raw json.RawMessage) bool {
+	var text string
+	if json.Unmarshal(raw, &text) != nil {
+		return false
+	}
+	for _, tag := range []string{"<command-name>", "<local-command-stdout>", "<local-command-stderr>", "<local-command-caveat>"} {
+		if strings.HasPrefix(text, tag) {
+			return true
+		}
+	}
+	return false
 }
 
 func checkpointContent(raw json.RawMessage) (string, error) {
