@@ -146,8 +146,14 @@ export async function startRemoteProxy(entry: RemoteEntry): Promise<ActiveProxy>
 				upstreamRes.pipe(res);
 			},
 		);
+		// An abandoned SSE response must cancel the upstream request too;
+		// otherwise the daemon keeps its workspace watcher (and file fds) alive.
+		res.on("close", () => {
+			if (!res.writableFinished) proxied.destroy();
+		});
 		proxied.setTimeout(0);
 		proxied.on("error", (error: Error) => {
+			if (res.destroyed) return;
 			warn(`upstream ${upstream.host} failed on ${req.method} ${path} (${error.message}); answering 502`);
 			if (!res.headersSent)
 				res.writeHead(502, {
