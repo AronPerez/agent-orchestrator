@@ -255,6 +255,58 @@ describe("startRemoteProxy", () => {
 });
 
 describe("startRemoteProxy streams", () => {
+	it.each([
+		{ flushHeaders: false, closeProxy: false },
+		{ flushHeaders: true, closeProxy: false },
+		{ flushHeaders: false, closeProxy: true },
+		{ flushHeaders: true, closeProxy: true },
+	])("cancels abandoned upstream SSE requests (%j)", async ({ flushHeaders, closeProxy }) => {
+		let upstreamClosed = false;
+		const received = new Promise<void>((resolve) => {
+			upstream = createServer((_req, res) => {
+				res.on("close", () => { upstreamClosed = true; });
+				if (flushHeaders) {
+					res.writeHead(200, { "content-type": "text/event-stream" });
+					res.flushHeaders();
+				}
+				resolve();
+			});
+		});
+		await new Promise<void>((resolve) => upstream?.listen(0, "127.0.0.1", resolve));
+		const port = (upstream!.address() as AddressInfo).port;
+		proxy = await startRemoteProxy({ label: "workbox", url: `http://127.0.0.1:${port}`, password: "pw" });
+		const proxyUrl = new URL(proxy.base);
+		const socket = netConnect(Number(proxyUrl.port), "127.0.0.1", () => {
+			socket.write(`GET ${proxyUrl.pathname}/api/v1/sessions/s1/workspace/events HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n`);
+		});
+		socket.on("error", () => undefined);
+		const headersReceived = new Promise<void>((resolve) => {
+			let headers = "";
+			socket.on("data", (chunk: Buffer) => {
+				headers += chunk.toString();
+				if (headers.includes("\r\n\r\n")) resolve();
+			});
+		});
+		try {
+			await received;
+			if (flushHeaders) await headersReceived;
+			if (closeProxy) {
+				await proxy.close();
+				proxy = undefined;
+			} else {
+				socket.destroy();
+			}
+			// A real daemon releases its workspace watcher only when this
+			// upstream connection closes, even after the renderer is gone.
+			await vi.waitFor(() => expect(upstreamClosed).toBe(true));
+			expect(warned).toEqual([]);
+		} finally {
+			socket.destroy();
+			// Keep a failing regression from hanging the suite's server teardown.
+			upstream!.closeAllConnections();
+		}
+	});
+
 	it("closes while an upgraded socket is still open", async () => {
 		upstream = createServer();
 		const upgraded = new Promise<void>((resolve) => {
