@@ -152,7 +152,7 @@ export function HostSelect({
 												aria-label={t("hosts.edit", { host: host.label })}
 												onClick={() => {
 													setOpen(false);
-													onEditHost({ label: host.label, url });
+													onEditHost({ label: host.label, url, sshDestination: host.sshDestination });
 												}}
 											>
 												<Pencil aria-hidden="true" />

@@ -36,7 +36,8 @@ vi.mock("../lib/host-clients", () => ({
 import { CreateProjectFlow } from "./CreateProjectFlow";
 import { useUiStore } from "../stores/ui-store";
 
-const WORKBOX = { label: "workbox", url: "http://192.0.2.1:3011" };
+// Carries an SSH destination so an edit that does not touch it proves it survives.
+const WORKBOX = { label: "workbox", url: "http://192.0.2.1:3011", sshDestination: "me@workbox" };
 
 beforeEach(() => {
 	vi.clearAllMocks();
@@ -133,7 +134,8 @@ describe("host management from the Host dropdown", () => {
 			expect(bridge.remotes.update).toHaveBeenCalledWith(WORKBOX.url, {
 				label: "workbox",
 				url: "http://192.0.2.5:3011",
-				sshDestination: "",
+				// Re-pointing the address must not silently drop the saved SSH destination.
+				sshDestination: "me@workbox",
 			}),
 		);
 		await waitFor(() => expect(disconnectHostMock).toHaveBeenCalledWith(WORKBOX.url));
