@@ -249,10 +249,11 @@ jobs:
           gh pr comment "$PR_NUM" --body "$(cat <<EOF
           @copilot check out \`$SYNC_BRANCH\`, merge \`origin/$BASE\` if it has advanced, then merge \`origin/main\` and resolve the conflicts there. Never commit to \`main\` or use GitHub's conflict editor on a PR headed by \`main\`.
 
-          Read \`.github/workflows/upstream-sync.yml\` and the repo's AGENTS.md first. Two rules specific to this fork:
+          Read \`.github/workflows/upstream-sync.yml\` and the repo's AGENTS.md first. Three rules specific to this fork:
 
-          1. Where upstream has reimplemented something this fork also built, prefer upstream's version — but check whether the fork's variant is still referenced anywhere before deleting it. \`packages/mobile\` calls daemon endpoints that upstream does not have, and dropping one silently breaks the mobile app.
-          2. When upstream adds locales or config keys, carry this fork's added keys into the new files rather than dropping them.
+          1. Backend, \`cloud/\`, \`scripts/\` and \`docs/\`: where upstream has reimplemented something this fork also built, prefer upstream's version — but check whether the fork's variant is still referenced anywhere before deleting it. \`packages/mobile\` calls daemon endpoints that upstream does not have, and dropping one silently breaks the mobile app.
+          2. \`frontend/\`, \`packages/mobile/\` and \`packages/product-ui/\`: keep this fork's version wholesale; the one exception is \`frontend/src/api/schema.ts\`, which is regenerated from the merged OpenAPI contract. Upstream UI is ported feature by feature in separate PRs, never during a sync — the fork's renderer, its Ref-keyed host model and its mobile app diverge too far for file-level merges. This is the policy PR #177 applied.
+          3. When upstream adds locales or config keys, carry this fork's added keys into the new files rather than dropping them.
 
           Verify with \`go build ./...\`, \`go test ./...\`, and in \`frontend/\`: \`npm run typecheck\` and \`npx vitest run\`. Leave anything you are unsure about conflicted and say so in a comment.
 

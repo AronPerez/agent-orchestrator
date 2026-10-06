@@ -22,6 +22,10 @@ Remote hosts reuse the authenticated LAN listener that [Connect Mobile](/docs/co
 
 Open **Settings → Connect Mobile** on the remote machine and enable mobile access. Note the displayed address, port, and connection password. Use the port actually shown — the listener falls back to another port when `3011` is taken.
 
+A headless machine with no desktop app opens the same listener from its shell: `ao remote-host enable` (or `enable --tunnel-only` for a Cloudflare quick tunnel), or the installer in `scripts/setup-self-hosted.sh` — see `docs/self-hosted-remote.md` in the repository. Both print the address and password to pair with. Their closing hint names a **Settings → Remote hosts** page that exists only in upstream AO; on this fork, add the host from the host selector in **Add project**, as the next steps describe.
+
+When you add a host, the app records the daemon's own host ID and sends it on every request, so a saved address that later reaches a different machine is refused rather than obeyed. A host saved before this existed is bound the first time it connects.
+
 </Step>
 <Step>
 
@@ -92,7 +96,7 @@ Install Tailscale on both machines and sign in to the same tailnet.
 
 ### Set the bind mode
 
-On the remote machine, turn Connect Mobile **off**, then edit `~/.ao/mobile/config.json` and set `bind`:
+On the remote machine, turn Connect Mobile **off**, then edit `~/.ao/data/mobile/config.json` and set `bind`:
 
 ```json
 {
@@ -151,7 +155,7 @@ Leave this running. The tunnel lives as long as the command does.
 
 ### Narrow the listener to loopback
 
-While you are on the remote machine, this pairs naturally with binding its listener to loopback only. Turn Connect Mobile **off**, set `bind` in `~/.ao/mobile/config.json`, and turn it back on:
+While you are on the remote machine, this pairs naturally with binding its listener to loopback only. Turn Connect Mobile **off**, set `bind` in `~/.ao/data/mobile/config.json`, and turn it back on:
 
 ```json
 {
