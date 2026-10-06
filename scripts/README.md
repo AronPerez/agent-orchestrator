@@ -84,6 +84,25 @@ match. Don't mutate the tree mid-run: a running daemon with a _different_
 "different build" error instead of a clean takeover. The script also rebuilds
 the `ao` CLI to the same commit unless `--no-daemon`.
 
+**Update feed.** `forge.config.ts` bakes the GitHub repo the app's updater
+polls from `AO_RELEASE_REPO`, defaulting to upstream — so a plain
+`npm run make` builds a fork app that checks **upstream's** releases. The script
+sets `AO_RELEASE_REPO` from this checkout's `origin` remote (an explicit
+`AO_RELEASE_REPO=owner/repo` wins; `--print-release-repo` shows what it will
+bake). This fork publishes no releases, so the updater stays quiet instead of
+offering upstream's app.
+
+**Updating the client on another Mac.** There is no release channel; rebuild
+from source there (it needs Go, Node and the Xcode CLT):
+
+```sh
+ssh -t user@othermac 'cd ~/dev/agent-orchestrator && git pull --ff-only && scripts/install-desktop-app.sh'
+```
+
+It quits the running app, installs, re-signs, and launches in that Mac's GUI
+session. A Mac that is only a browser client needs nothing — the host's daemon
+serves the UI.
+
 Full runbook (403 mux gotcha, TCC/Desktop override, session-restore behavior):
 `~/.ao/FEREADME.md`. Agent-facing guide: `skills/local-services/SKILL.md`.
 
