@@ -447,7 +447,7 @@ async function sanitizeRendererContextProperties(properties?: TelemetryPropertie
 }
 
 const ORCHESTRATOR_SPAWN_SOURCE_SET = new Set<string>(ORCHESTRATOR_SPAWN_SOURCES);
-const HOST_CONNECT_RESULTS = new Set(["online", "unauthorized", "offline", "not-a-daemon"]);
+const HOST_CONNECT_RESULTS = new Set(["online", "unauthorized", "offline", "not-a-daemon", "incompatible", "wrong-host"]);
 
 /**
  * Host identity for the ao.renderer.host_* events.

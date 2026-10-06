@@ -13,6 +13,8 @@ const statusKeys: Record<Exclude<HostStatus, "local">, MessageKey> = {
 	offline: "hosts.status.offline",
 	unauthorized: "hosts.status.unauthorized",
 	"not-a-daemon": "hosts.status.notADaemon",
+	incompatible: "hosts.status.incompatible",
+	"wrong-host": "hosts.status.wrongHost",
 };
 
 // Copied from SelectTrigger/SelectItem so the picker still looks like every

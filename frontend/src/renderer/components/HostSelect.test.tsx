@@ -60,6 +60,18 @@ describe("HostSelect", () => {
 		expect(screen.getByRole("button", { name: /^mini/ })).toHaveTextContent(/disconnected/i);
 	});
 
+	// A saved address that now reaches a different machine (the daemon answered
+	// 421) is neither offline nor a bad password; the row has to say which it is,
+	// because the remedy — re-pair — is different.
+	it("says when a host's address now points at a different machine, and keeps it unselectable", async () => {
+		const moved: Host = { id: "http://192.0.2.5:3011", label: "moved", url: "http://192.0.2.5:3011", status: "wrong-host" };
+		render(<HostSelect hosts={[...hosts, moved]} value={LOCAL_HOST_ID} onChange={vi.fn()} onAddHost={vi.fn()} />);
+		await userEvent.click(trigger());
+		const row = screen.getByRole("button", { name: /^moved/ });
+		expect(row).toHaveTextContent(/different host/i);
+		expect(row).toHaveAttribute("aria-disabled", "true");
+	});
+
 	it("offers Edit and Remove on each saved host, naming which one", async () => {
 		const onEditHost = vi.fn();
 		const onRemoveHost = vi.fn();
