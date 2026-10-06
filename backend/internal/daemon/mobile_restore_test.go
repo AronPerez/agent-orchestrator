@@ -32,6 +32,9 @@ func (f *fakeLAN) Start(port int, bind string) (int, error) {
 	f.bind = bind
 	return port, nil
 }
+func (f *fakeLAN) StartLoopback(port int) (int, error) {
+	return f.Start(port, "127.0.0.1")
+}
 func (f *fakeLAN) Stop(ctx context.Context) error { return nil }
 func (f *fakeLAN) Running() bool                  { return f.started }
 func (f *fakeLAN) BoundPort() int                 { return f.port }

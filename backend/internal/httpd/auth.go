@@ -14,49 +14,78 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
 )
 
-// authState holds the current password hash for the LAN listener. Swapped
-// atomically on regenerate so an in-flight request never sees a torn value.
-type authState struct{ hash atomic.Pointer[string] }
+// authState keeps previously valid hashes so a client retrying an old password
+// after rotation cannot lock out a newly paired client behind the same address.
+type authState struct{ hashes atomic.Pointer[authHashes] }
+type authHashes struct {
+	current string
+	retired []string
+}
 
-func (a *authState) setHash(h string) { a.hash.Store(&h) }
+func (a *authState) setHash(h string) {
+	for {
+		previous := a.hashes.Load()
+		if previous != nil && previous.current == h {
+			return
+		}
+		next := &authHashes{current: h}
+		if previous != nil {
+			next.retired = append(next.retired, previous.retired...)
+			if previous.current != "" {
+				next.retired = append(next.retired, previous.current)
+			}
+		}
+		if a.hashes.CompareAndSwap(previous, next) {
+			return
+		}
+	}
+}
 func (a *authState) currentHash() string {
-	if p := a.hash.Load(); p != nil {
-		return *p
+	if hashes := a.hashes.Load(); hashes != nil {
+		return hashes.current
 	}
 	return ""
 }
 
-// lockout throttles password guessing per source address.
-type lockout struct {
-	mu       sync.Mutex
-	limit    int
-	cooldown time.Duration
-	now      func() time.Time
-	fails    map[string]int
-	until    map[string]time.Time
+func (a *authState) retiredPasswordMatches(token string) bool {
+	if hashes := a.hashes.Load(); hashes != nil {
+		for _, hash := range hashes.retired {
+			if mobilebridge.PasswordMatches(hash, token) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
-func newLockout(limit int, cooldown time.Duration, now func() time.Time) *lockout {
-	return &lockout{limit: limit, cooldown: cooldown, now: now, fails: map[string]int{}, until: map[string]time.Time{}}
+// lockout throttles password guessing per source address.
+type lockout struct {
+	mu        sync.Mutex
+	now       func() time.Time
+	attempts  map[string]authAttempts
+	lastSweep time.Time
+}
+
+type authAttempts struct {
+	fails   int
+	expires time.Time
+}
+
+func newLockout(now func() time.Time) *lockout {
+	return &lockout{now: now, attempts: map[string]authAttempts{}}
 }
 
 func (l *lockout) blocked(src string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	t, ok := l.until[src]
+	a, ok := l.attempts[src]
 	if !ok {
 		return false
 	}
-	if l.now().Before(t) {
-		return true
+	if l.now().Before(a.expires) {
+		return a.fails >= 5
 	}
-	// Cooldown elapsed: clear the lockout AND the fail counter so the source
-	// starts a fresh window. Without this the counter stays at the limit and the
-	// very next failure would immediately re-lock for another full cooldown —
-	// and a client that keeps polling would stay locked out forever. This also
-	// bounds map growth, since expired entries are pruned on the next request.
-	delete(l.until, src)
-	delete(l.fails, src)
+	delete(l.attempts, src)
 	return false
 }
 
@@ -66,19 +95,35 @@ func (l *lockout) blocked(src string) bool {
 func (l *lockout) fail(src string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.fails[src]++
-	if l.fails[src] >= l.limit {
-		l.until[src] = l.now().Add(l.cooldown)
-		return l.fails[src] == l.limit
+	now := l.now()
+	if now.Sub(l.lastSweep) >= time.Minute {
+		for key, a := range l.attempts {
+			if !now.Before(a.expires) {
+				delete(l.attempts, key)
+			}
+		}
+		l.lastSweep = now
 	}
-	return false
+	a := l.attempts[src]
+	if !now.Before(a.expires) {
+		a.fails = 0
+	}
+	a.fails++
+	a.expires = now.Add(time.Minute)
+	l.attempts[src] = a
+	return a.fails == 5
 }
 
 func (l *lockout) reset(src string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	delete(l.fails, src)
-	delete(l.until, src)
+	delete(l.attempts, src)
+}
+
+func (l *lockout) resetAll() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.attempts = map[string]authAttempts{}
 }
 
 func sourceKey(r *http.Request) string {
@@ -230,7 +275,7 @@ func maybeSetPreviewAuthCookie(w http.ResponseWriter, r *http.Request, tok strin
 // credential a browser will attach to requests a hostile page initiates, so
 // handing one out to a cross-origin caller would be handing out CSRF. That is
 // checked here, and again on every request the cookie authenticates.
-func handleLogin(w http.ResponseWriter, r *http.Request, state *authState, lock *lockout, log *slog.Logger, connected *mobileConnectReporter) {
+func handleLogin(w http.ResponseWriter, r *http.Request, state *authState, lock *lockout, log *slog.Logger, connected *mobileConnectReporter, src, remoteSrc string) {
 	if r.Method != http.MethodPost {
 		methodNotAllowedJSON(w, r)
 		return
@@ -251,9 +296,8 @@ func handleLogin(w http.ResponseWriter, r *http.Request, state *authState, lock 
 			"request body must be JSON of the form {\"password\":\"...\"}", nil)
 		return
 	}
-	src := sourceKey(r)
 	if body.Password == "" || !mobilebridge.PasswordMatches(state.currentHash(), body.Password) {
-		if body.Password != "" && lock.fail(src) {
+		if body.Password != "" && !state.retiredPasswordMatches(body.Password) && lock.fail(src) {
 			log.Warn("LAN auth lockout tripped", "src", src)
 		}
 		envelope.WriteAPIError(w, r, http.StatusUnauthorized, "unauthorized", "BAD_PASSWORD",
@@ -261,7 +305,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request, state *authState, lock 
 		return
 	}
 	lock.reset(src)
-	connected.report(src)
+	connected.report(remoteSrc)
 	//nolint:gosec // Secure is intentionally omitted, exactly as for the preview
 	// cookie: the LAN bridge is plaintext http by design (ADR 0001), and a Secure
 	// cookie would never be sent over it. The password already travels the same
@@ -327,7 +371,7 @@ func authMiddleware(state *authState, lock *lockout, log *slog.Logger, connected
 			// opaque "CORS error", and the real request is never sent — so every
 			// cross-origin browser client (the Expo web build reaching the LAN
 			// listener from another machine) is locked out regardless of password.
-			// Worse, counting it as a failed attempt means `limit` preflights trip
+			// Worse, counting it as a failed attempt means repeated preflights trip
 			// the per-source lockout for a client holding the CORRECT password.
 			//
 			// Pass it through to corsMiddleware, which answers it with 204 and no
@@ -339,14 +383,24 @@ func authMiddleware(state *authState, lock *lockout, log *slog.Logger, connected
 				next.ServeHTTP(w, r)
 				return
 			}
-			src := sourceKey(r)
+			remoteSrc := sourceKey(r)
+			src := remoteSrc
+			// Cloudflared connects from loopback, so use its visitor IP for lockout
+			// only. A LAN client must not be able to spoof its source with this header.
+			if ip := net.ParseIP(remoteSrc); ip != nil && ip.IsLoopback() {
+				if forwarded := r.Header.Values("CF-Connecting-IP"); len(forwarded) == 1 {
+					if visitor := net.ParseIP(forwarded[0]); visitor != nil {
+						src = visitor.String()
+					}
+				}
+			}
 			if lock.blocked(src) {
 				envelope.WriteAPIError(w, r, http.StatusTooManyRequests, "too_many_requests", "LOCKED_OUT",
 					"too many failed attempts; try again shortly", nil)
 				return
 			}
 			if r.URL.Path == authLoginPath {
-				handleLogin(w, r, state, lock, log, connected)
+				handleLogin(w, r, state, lock, log, connected, src, remoteSrc)
 				return
 			}
 			tok, viaCookie, ok := credential(state.currentHash(), r)
@@ -363,7 +417,7 @@ func authMiddleware(state *authState, lock *lockout, log *slog.Logger, connected
 					return
 				}
 				lock.reset(src)
-				connected.report(src)
+				connected.report(remoteSrc)
 				maybeSetPreviewAuthCookie(w, r, tok)
 				next.ServeHTTP(w, r)
 				return
@@ -374,7 +428,7 @@ func authMiddleware(state *authState, lock *lockout, log *slog.Logger, connected
 			// would 429 every request from that IP, including authenticated REST.
 			// The trip Warn is the only trace a lockout leaves: auth runs outside
 			// requestLogger, so these 401/429s never reach the access log.
-			if tok != "" && lock.fail(src) {
+			if tok != "" && !state.retiredPasswordMatches(tok) && lock.fail(src) {
 				log.Warn("LAN auth lockout tripped", "src", src)
 			}
 			envelope.WriteAPIError(w, r, http.StatusUnauthorized, "unauthorized", "BAD_PASSWORD",

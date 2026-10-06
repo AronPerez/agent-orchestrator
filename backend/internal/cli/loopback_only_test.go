@@ -35,7 +35,7 @@ func TestRemoteRendersLoopbackOnlyBlockNotMissingRoute(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"sessionId":"ao-1","connected":true,"transport":"electron-webcontents-debugger"}`)
 	})
-	lan := httpd.NewMobileLAN(inner, 0, slog.Default(), nil)
+	lan := httpd.NewMobileLAN(inner, "", 0, slog.Default(), nil)
 	lan.SetPasswordHash(mobilebridge.HashPassword("s3cret12"))
 	port, err := lan.Start(0, "127.0.0.1")
 	if err != nil {

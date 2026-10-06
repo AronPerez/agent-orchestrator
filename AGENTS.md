@@ -4,11 +4,11 @@ Operational guidance for coding agents working in this repository. Keep changes 
 
 ## Repo layout
 
-- `backend/` — Go rewrite of Agent Orchestrator: Cobra `ao` CLI, loopback HTTP daemon, services, SQLite storage, lifecycle/reaper, runtime/workspace/agent/tracker adapters, terminal mux, and tests.
-- `frontend/` — Electron + React supervisor wired to the daemon via the generated typed client. Treat it as a thin supervisor/UI surface; do not move daemon logic into it.
-- `docs/` — current architecture/status notes. Start here before changing lifecycle, CLI, agents, storage, or daemon behavior.
-- `test/` — external smoke/e2e assets, including the CLI fresh-install container check.
-- `.github/workflows/` — CI definitions. Mirror these commands locally when possible.
+- `backend/`: Go rewrite of Agent Orchestrator with the Cobra `ao` CLI, loopback HTTP daemon, services, SQLite storage, lifecycle/reaper, runtime/workspace/agent/tracker adapters, terminal mux, and tests.
+- `frontend/`: Electron + React supervisor wired to the daemon through the generated typed client. Treat it as a thin supervisor/UI surface; do not move daemon logic into it.
+- `docs/`: Current architecture and status notes. Start here before changing lifecycle, CLI, agents, storage, or daemon behavior.
+- `test/`: External smoke/e2e assets, including the CLI fresh-install container check.
+- `.github/workflows/`: CI definitions. Mirror these commands locally when possible.
 
 ## Commands
 
@@ -63,13 +63,13 @@ AO_DATA_DIR=/tmp/ao-lab-data ./node_modules/.bin/electron-forge start
 
 ## Where to look first
 
-- `README.md` — current run/config/test quickstart.
-- `docs/README.md` — docs index.
-- `docs/documentation-map.md` — which artifacts are the machine-readable contract layer (`openapi.yaml`, `AGENTS.md`, `skills/`, sqlc `gen/`), what each is source of truth for, and how CI keeps them from drifting.
-- `docs/architecture.md` — backend mental model, package layout, lifecycle/session/service boundaries, and load-bearing rules.
-- `docs/STATUS.md` — what is shipped on `main` today and what is still in flight.
-- `docs/cli/README.md` — intended CLI shape: thin Cobra client over daemon HTTP, never direct storage/runtime access.
-- `CLAUDE.md` — compatibility pointer for Claude Code; it directs agents back to `AGENTS.md`.
+- `README.md`: Current run/config/test quickstart.
+- `docs/README.md`: Docs index.
+- `docs/documentation-map.md`: Which artifacts are the machine-readable contract layer (`openapi.yaml`, `AGENTS.md`, `skills/`, sqlc `gen/`), what each is source of truth for, and how CI keeps them from drifting.
+- `docs/architecture.md`: Backend mental model, package layout, lifecycle/session/service boundaries, and load-bearing rules.
+- `docs/STATUS.md`: What is shipped on `main` today and what is still in flight.
+- `docs/cli/README.md`: Intended CLI shape, a thin Cobra client over daemon HTTP with no direct storage/runtime access.
+- `CLAUDE.md`: Compatibility pointer for Claude Code. It directs agents back to `AGENTS.md`.
 
 For code entry points:
 
@@ -125,12 +125,12 @@ For code entry points:
 
 ## API contract changes
 
-The daemon API is code-first. The OpenAPI spec and frontend TypeScript types are generated artifacts — edit the source, then regenerate.
+The daemon API is code-first. The OpenAPI spec and frontend TypeScript types are generated artifacts. Edit the source, then regenerate.
 
 **Source files to edit:**
 
-- `backend/internal/httpd/controllers/dto.go` — request/response shapes.
-- `backend/internal/httpd/apispec/specgen/build.go` — operation registry; add a `schemaNames` entry for any new named type.
+- `backend/internal/httpd/controllers/dto.go`: request/response shapes.
+- `backend/internal/httpd/apispec/specgen/build.go`: operation registry. Add a `schemaNames` entry for any new named type.
 
 **Regenerate after editing:**
 
@@ -148,7 +148,7 @@ npm run api:ts       # npx openapi-typescript@7.4.4 backend/internal/httpd/apisp
 **Verify:**
 
 ```bash
-cd backend && go test ./internal/httpd/...    # spec drift + route/spec parity tests (does not cover schema.ts — that is checked by the api-drift CI job)
+cd backend && go test ./internal/httpd/...    # spec drift + route/spec parity tests (does not cover schema.ts; the api-drift CI job checks it)
 ```
 
 Commit `openapi.yaml` and `frontend/src/api/schema.ts` together with the Go changes. CI will regenerate both files and fail if the committed versions are out of date. The CLI hand-mirrored DTOs remain a deliberate manual boundary and are not generated.
