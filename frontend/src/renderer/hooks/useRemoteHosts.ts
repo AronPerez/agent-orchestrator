@@ -33,6 +33,11 @@ export type Host = {
 	/** null for the local daemon — the app already knows how to reach it. */
 	url: string | null;
 	status: HostStatus;
+	/**
+	 * Carried so the Edit dialog can prefill it; dropping it here is how an edit
+	 * that never touched the field used to wipe the saved destination.
+	 */
+	sshDestination?: string;
 };
 
 /** The preload bridge's saved-host surface: list, add, probe, request. */
@@ -56,7 +61,15 @@ export function useRemoteHosts(): { hosts: Host[]; refresh: () => Promise<void> 
 		const saved = await remotesBridge().list();
 		// Show every saved host immediately as "checking" — a host that is slow to
 		// answer must not look like a host that does not exist.
-		setRemotes(saved.map((host) => ({ id: host.url, label: host.label, url: host.url, status: "checking" })));
+		setRemotes(
+			saved.map((host) => ({
+				id: host.url,
+				label: host.label,
+				url: host.url,
+				status: "checking",
+				sshDestination: host.sshDestination,
+			})),
+		);
 		await Promise.all(
 			saved.map(async (host) => {
 				const startedAt = Date.now();

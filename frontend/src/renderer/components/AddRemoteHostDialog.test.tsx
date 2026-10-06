@@ -107,6 +107,32 @@ describe("AddRemoteHostDialog", () => {
 		expect(await screen.findByRole("alert")).toHaveTextContent(/could not reach/i);
 	});
 
+	// The daemon refused (421) because the saved address now reaches a different
+	// machine. Network and password both worked, so neither of those messages
+	// would be true — and the fix is to pair the new machine, not to retry.
+	it("says the address answers as a different host, and how to re-pair", async () => {
+		updateMock.mockResolvedValue("wrong-host");
+		render(
+			<AddRemoteHostDialog
+				open
+				host={{ label: "workbox", url: "http://192.0.2.1:3011" }}
+				onOpenChange={vi.fn()}
+				onSaved={vi.fn()}
+			/>,
+		);
+		await userEvent.click(screen.getByRole("button", { name: /save/i }));
+		const alert = await screen.findByRole("alert");
+		expect(alert).toHaveTextContent(/different AO host/i);
+		expect(alert).toHaveTextContent(/add it again/i);
+	});
+
+	it("says the AO versions are incompatible and to update both ends", async () => {
+		addMock.mockResolvedValue("incompatible");
+		render(<AddRemoteHostDialog open onOpenChange={vi.fn()} onSaved={vi.fn()} />);
+		await fillAndSubmit();
+		expect(await screen.findByRole("alert")).toHaveTextContent(/incompatible.*update AO/i);
+	});
+
 	// A bare "host:port" is what people type. It used to reach fetch() unparsed,
 	// throw, and come back as "could not reach that host" — sending someone to
 	// debug a network when they had only omitted a scheme.

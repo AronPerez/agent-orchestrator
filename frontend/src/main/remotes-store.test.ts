@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chmod, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { addRemote, applyRemoteChanges, readRemotes, removeRemote, RemotesFilePermissionError, updateRemote } from "./remotes-store";
@@ -192,5 +192,58 @@ describe("sshDestination", () => {
 		// Empty string is the dialog's "remove it" — stored as absent, not "".
 		expect(applyRemoteChanges(entry, { sshDestination: "" }).sshDestination).toBeUndefined();
 		expect(applyRemoteChanges(entry, { sshDestination: "  aron@mini.local  " }).sshDestination).toBe("aron@mini.local");
+	});
+});
+
+// The host id a daemon reports at /api/v1/identity. Saved beside the password
+// so every later request can tell the daemon which machine it expects.
+describe("hostId", () => {
+	it("survives an edit that does not mention it", () => {
+		const entry = { label: "Mini", url: "http://192.0.2.1:3011", password: "pw", hostId: "h_1" };
+		expect(applyRemoteChanges(entry, { label: "Mini2" }).hostId).toBe("h_1");
+		expect(applyRemoteChanges(entry, { hostId: "h_2" }).hostId).toBe("h_2");
+	});
+
+	// Hosts are keyed by url everywhere in this app (Ref.host IS the address), and
+	// one daemon saved under two addresses — its LAN IP and its tailnet IP — is a
+	// supported setup. The id names the machine behind an address; it is not a
+	// second key that collapses rows.
+	it("keeps two addresses for the same daemon as two rows", async () => {
+		const path = await tempFile(
+			'{"remotes":[{"label":"lan","url":"http://192.0.2.1:1","password":"x","hostId":"h_1"}]}',
+		);
+		await addRemote(path, { label: "tailnet", url: "http://100.64.0.9:1", password: "x", hostId: "h_1" });
+		expect(await savedRemotes(path)).toHaveLength(2);
+	});
+
+	it("backfilling an id never absorbs a sibling row for the same daemon", async () => {
+		const path = await tempFile(TWO_HOSTS);
+		await updateRemote(path, "http://192.0.2.1:1", { hostId: "h_1" });
+		await updateRemote(path, "http://192.0.2.9:9", { hostId: "h_1" });
+		expect(await savedRemotes(path)).toEqual([
+			{ label: "workbox", url: "http://192.0.2.1:1", password: "old", hostId: "h_1" },
+			{ label: "mini", url: "http://192.0.2.9:9", password: "m", hostId: "h_1" },
+		]);
+	});
+});
+
+describe("writeRemotes", () => {
+	it("creates a missing parent directory and leaves only the file behind", async () => {
+		const dir = join(await mkdtemp(join(tmpdir(), "ao-remotes-")), "nested", "deeper");
+		const path = join(dir, "remotes.json");
+		await addRemote(path, { label: "workbox", url: "http://192.0.2.1:3011", password: "pw" });
+		expect(await readdir(dir)).toEqual(["remotes.json"]);
+		expect(await savedRemotes(path)).toHaveLength(1);
+	});
+
+	// Two adds racing on one file must not let the second read-modify-write
+	// overwrite the first.
+	it("serializes concurrent adds so neither entry is lost", async () => {
+		const path = await tempFile();
+		await Promise.all([
+			addRemote(path, { label: "a", url: "http://192.0.2.1:1", password: "x" }),
+			addRemote(path, { label: "b", url: "http://192.0.2.2:2", password: "y" }),
+		]);
+		expect(await savedRemotes(path)).toHaveLength(2);
 	});
 });

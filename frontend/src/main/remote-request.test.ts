@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { probeRemote, remoteRequest } from "./remote-request";
+import { IncompatibleRemoteVersionError, probeRemote, readRemoteIdentity, remoteRequest } from "./remote-request";
 
 const entry = { label: "workbox", url: "http://192.0.2.1:3011", password: "pw" };
 
@@ -103,5 +103,71 @@ describe("probeRemote", () => {
 		await expect(probeRemote(entry, fakeFetch(200, { ...daemonProbe, service: "grafana" }))).resolves.toBe(
 			"not-a-daemon",
 		);
+	});
+
+	// The daemon answers 421 when the X-AO-Expected-Host-ID it was sent is not
+	// its own: the saved address now reaches a different machine. That is neither
+	// "offline" nor "unauthorized" — the network and the password both worked.
+	it("reports wrong-host on a 421 identity mismatch", async () => {
+		await expect(probeRemote({ ...entry, hostId: "h_1" }, fakeFetch(421, { error: "HOST_ID_MISMATCH" }))).resolves.toBe(
+			"wrong-host",
+		);
+	});
+});
+
+describe("expected host id", () => {
+	it("names the saved host id on every request so the daemon can refuse a stranger", async () => {
+		const doFetch = fakeFetch(200, daemonProbe);
+		await remoteRequest({ ...entry, hostId: "h_1" }, { method: "GET", path: "/healthz" }, doFetch);
+		const [, init] = doFetch.mock.calls[0] as unknown as [string, RequestInit];
+		expect(new Headers(init.headers).get("X-AO-Expected-Host-ID")).toBe("h_1");
+	});
+
+	// An entry saved before identities existed, or against a daemon too old to
+	// report one, must keep working exactly as it did: no header at all.
+	it("sends no header for an unbound entry", async () => {
+		const doFetch = fakeFetch(200, daemonProbe);
+		await remoteRequest(entry, { method: "GET", path: "/healthz" }, doFetch);
+		const [, init] = doFetch.mock.calls[0] as unknown as [string, RequestInit];
+		expect(new Headers(init.headers).has("X-AO-Expected-Host-ID")).toBe(false);
+	});
+});
+
+describe("readRemoteIdentity", () => {
+	it("returns the daemon's host id from the unauthenticated identity route", async () => {
+		const doFetch = fakeFetch(200, { hostId: "h_1", apiVersion: 1 });
+		await expect(readRemoteIdentity(entry, doFetch)).resolves.toBe("h_1");
+		const [url, init] = doFetch.mock.calls[0] as unknown as [string, RequestInit];
+		expect(url).toBe("http://192.0.2.1:3011/api/v1/identity");
+		// A redirect could hand the follow-up request to another origin.
+		expect(init.redirect).toBe("error");
+		// This is the one probe allowed before a password is sent — so none goes.
+		expect(new Headers(init.headers).has("Authorization")).toBe(false);
+	});
+
+	it("accepts a bare host:port the way the address field is typed", async () => {
+		const doFetch = fakeFetch(200, { hostId: "h_1", apiVersion: 1 });
+		await readRemoteIdentity({ url: "192.0.2.1:3011" }, doFetch);
+		expect(doFetch.mock.calls[0][0]).toBe("http://192.0.2.1:3011/api/v1/identity");
+	});
+
+	it("refuses a daemon speaking a different API version, by its own error type", async () => {
+		await expect(readRemoteIdentity(entry, fakeFetch(200, { hostId: "h_1", apiVersion: 2 }))).rejects.toBeInstanceOf(
+			IncompatibleRemoteVersionError,
+		);
+	});
+
+	it("refuses the reserved local host id and a missing one", async () => {
+		await expect(readRemoteIdentity(entry, fakeFetch(200, { hostId: "local", apiVersion: 1 }))).rejects.toThrow(/local/);
+		await expect(readRemoteIdentity(entry, fakeFetch(200, { apiVersion: 1 }))).rejects.toThrow(/host ID/);
+	});
+
+	// A daemon from before the identity route answers 404: not an identity, and
+	// not the incompatible-version error either — the caller decides what an
+	// unknown identity means.
+	it("throws a plain error on a non-OK answer", async () => {
+		const result = readRemoteIdentity(entry, fakeFetch(404, { error: "not found" }));
+		await expect(result).rejects.toThrow(/404/);
+		await expect(result).rejects.not.toBeInstanceOf(IncompatibleRemoteVersionError);
 	});
 });

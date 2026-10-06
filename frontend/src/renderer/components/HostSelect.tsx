@@ -13,6 +13,8 @@ const statusKeys: Record<Exclude<HostStatus, "local">, MessageKey> = {
 	offline: "hosts.status.offline",
 	unauthorized: "hosts.status.unauthorized",
 	"not-a-daemon": "hosts.status.notADaemon",
+	incompatible: "hosts.status.incompatible",
+	"wrong-host": "hosts.status.wrongHost",
 };
 
 // Copied from SelectTrigger/SelectItem so the picker still looks like every
@@ -150,7 +152,7 @@ export function HostSelect({
 												aria-label={t("hosts.edit", { host: host.label })}
 												onClick={() => {
 													setOpen(false);
-													onEditHost({ label: host.label, url });
+													onEditHost({ label: host.label, url, sshDestination: host.sshDestination });
 												}}
 											>
 												<Pencil aria-hidden="true" />

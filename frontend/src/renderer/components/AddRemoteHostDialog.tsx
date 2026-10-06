@@ -61,6 +61,8 @@ const healthErrorKeys: Record<Exclude<RemoteHealth, "online">, MessageKey> = {
 	unauthorized: "hosts.add.errorUnauthorized",
 	offline: "hosts.add.errorOffline",
 	"not-a-daemon": "hosts.add.errorNotADaemon",
+	incompatible: "hosts.add.errorIncompatible",
+	"wrong-host": "hosts.add.errorWrongHost",
 };
 
 type AddRemoteHostDialogProps = {

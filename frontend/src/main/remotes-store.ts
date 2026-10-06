@@ -1,4 +1,6 @@
-import { readFile, stat, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 
 // The CLI's saved-remote store, shared verbatim so the UI and `ao --url` agree
 // on which hosts exist and never hold two copies of a connection password.
@@ -7,6 +9,14 @@ export type RemoteEntry = {
 	label: string;
 	url: string;
 	password: string;
+	/**
+	 * The daemon's own id from GET /api/v1/identity, learned when the host is
+	 * added. Sent back as X-AO-Expected-Host-ID so a saved address that now
+	 * answers as a different machine is refused (421) instead of obeyed. Absent
+	 * on entries saved before this field existed and for a daemon too old to
+	 * report one; those stay reachable, just unbound.
+	 */
+	hostId?: string;
 	/**
 	 * Optional `user@host` the desktop app uses to SSH-attach a local editor to
 	 * this host's workspaces. Uses the user's own ssh config/keys — no credential
@@ -49,17 +59,49 @@ export async function readRemotes(path: string): Promise<RemoteEntry[]> {
 	return parsed.remotes ?? [];
 }
 
-// Every write goes through here: mode on writeFile only applies at creation;
-// chmod-on-write would race, and readRemotes — which each of these calls first —
-// refuses anything looser on the next read regardless.
+// Every write goes through here. Write beside the existing file and rename over
+// it so an interruption never truncates the only saved copy of the passwords;
+// the temporary file is 0600 before its contents are written, and readRemotes —
+// which each caller runs first — refuses anything looser on the next read.
 async function writeRemotes(path: string, remotes: RemoteEntry[]): Promise<void> {
-	await writeFile(path, `${JSON.stringify({ remotes }, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+	await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+	const temporary = `${path}.${randomUUID()}.tmp`;
+	let renamed = false;
+	try {
+		await writeFile(temporary, `${JSON.stringify({ remotes }, null, 2)}\n`, {
+			encoding: "utf8",
+			mode: 0o600,
+			flag: "wx",
+		});
+		await rename(temporary, path);
+		renamed = true;
+	} finally {
+		if (!renamed) await rm(temporary, { force: true });
+	}
+}
+
+// A concurrent add/update/remove must not overwrite another call's read-modify-write.
+let mutationQueue: Promise<void> = Promise.resolve();
+
+function serializeMutation<T>(operation: () => Promise<T>): Promise<T> {
+	const queued = mutationQueue.then(operation, operation);
+	mutationQueue = queued.then(
+		() => undefined,
+		() => undefined,
+	);
+	return queued;
 }
 
 export async function addRemote(path: string, entry: RemoteEntry): Promise<void> {
-	const existing = await readRemotes(path);
-	const normalized = { ...entry, sshDestination: entry.sshDestination?.trim() || undefined };
-	await writeRemotes(path, [...existing.filter((candidate) => candidate.url !== entry.url), normalized]);
+	return serializeMutation(async () => {
+		const existing = await readRemotes(path);
+		const normalized = { ...entry, sshDestination: entry.sshDestination?.trim() || undefined };
+		// The url is the only key. hostId names the machine behind an address and is
+		// deliberately NOT a second key: one daemon saved under two addresses (its
+		// LAN IP and its tailnet IP) is two hosts to this app, and collapsing them
+		// here would delete a row the renderer and the registry still hold.
+		await writeRemotes(path, [...existing.filter((candidate) => candidate.url !== entry.url), normalized]);
+	});
 }
 
 /** An edit: only the fields it carries change. */
@@ -76,28 +118,34 @@ export function applyRemoteChanges(entry: RemoteEntry, changes: RemoteChanges): 
 		label: changes.label ?? entry.label,
 		url: changes.url ?? entry.url,
 		password: changes.password ?? entry.password,
+		hostId: changes.hostId ?? entry.hostId,
 		sshDestination: (changes.sshDestination ?? entry.sshDestination)?.trim() || undefined,
 	};
 }
 
 export async function updateRemote(path: string, url: string, changes: RemoteChanges): Promise<RemoteEntry> {
-	const existing = await readRemotes(path);
-	const current = existing.find((candidate) => candidate.url === url);
-	if (!current) throw new Error(`no saved host for ${url}`);
-	const updated = applyRemoteChanges(current, changes);
-	// Re-pointing a host MOVES its entry: the row keeps its place, and any other
-	// row already sitting on the new url is absorbed rather than left as a twin.
-	const remotes = existing
-		.map((candidate) => (candidate === current ? updated : candidate))
-		.filter((candidate) => candidate === updated || candidate.url !== updated.url);
-	await writeRemotes(path, remotes);
-	return updated;
+	return serializeMutation(async () => {
+		const existing = await readRemotes(path);
+		const current = existing.find((candidate) => candidate.url === url);
+		if (!current) throw new Error(`no saved host for ${url}`);
+		const updated = applyRemoteChanges(current, changes);
+		// Re-pointing a host MOVES its entry: the row keeps its place, and any other
+		// row already sitting on the new url is absorbed rather than left as a twin.
+		// Only the url decides that — see addRemote on why hostId must not.
+		const remotes = existing
+			.map((candidate) => (candidate === current ? updated : candidate))
+			.filter((candidate) => candidate === updated || candidate.url !== updated.url);
+		await writeRemotes(path, remotes);
+		return updated;
+	});
 }
 
 export async function removeRemote(path: string, url: string): Promise<void> {
-	const existing = await readRemotes(path);
-	const remaining = existing.filter((candidate) => candidate.url !== url);
-	// Removing what is not there is not an error, but it is not a write either.
-	if (remaining.length === existing.length) return;
-	await writeRemotes(path, remaining);
+	return serializeMutation(async () => {
+		const existing = await readRemotes(path);
+		const remaining = existing.filter((candidate) => candidate.url !== url);
+		// Removing what is not there is not an error, but it is not a write either.
+		if (remaining.length === existing.length) return;
+		await writeRemotes(path, remaining);
+	});
 }

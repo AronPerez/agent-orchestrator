@@ -99,6 +99,9 @@ export async function startRemoteProxy(entry: RemoteEntry): Promise<ActiveProxy>
 		}
 		out.host = upstream.host;
 		out.authorization = `Bearer ${entry.password}`;
+		// The daemon answers 421 when this is not its own id (see RemoteEntry.hostId).
+		// Set for the WebSocket handshake too: this helper builds both.
+		if (entry.hostId) out["x-ao-expected-host-id"] = entry.hostId;
 		return out;
 	};
 

@@ -7,6 +7,7 @@ type Seen = {
 	url: string;
 	auth: string | undefined;
 	origin: string | undefined;
+	expectedHost: string | undefined;
 	body: string;
 };
 
@@ -49,6 +50,7 @@ async function startUpstream(
 				url: req.url ?? "",
 				auth: req.headers.authorization,
 				origin: req.headers.origin,
+				expectedHost: req.headers["x-ao-expected-host-id"] as string | undefined,
 				body,
 			});
 			const out = handler(req, seen);
@@ -85,6 +87,23 @@ describe("startRemoteProxy", () => {
 		expect(seen[0].auth).toBe("Bearer pw");
 		expect(seen[0].origin).toBeUndefined(); // app://renderer never reaches the daemon
 		expect(seen[0].body).toBe('{"path":"/srv/repo"}');
+	});
+
+	// The proxy is how the renderer's requests reach the daemon, so the saved
+	// host id has to ride along here too — or the daemon's 421 guard never sees a
+	// request it could refuse.
+	it("names the saved host id on forwarded requests", async () => {
+		const { port, seen } = await startUpstream(() => ({ status: 200, body: "{}" }));
+		proxy = await startRemoteProxy({ label: "workbox", url: `http://127.0.0.1:${port}`, password: "pw", hostId: "h_1" });
+		await fetch(`${proxy.base}/healthz`, { headers: { origin: "app://renderer" } });
+		expect(seen[0].expectedHost).toBe("h_1");
+	});
+
+	it("sends no host id header for an unbound host", async () => {
+		const { port, seen } = await startUpstream(() => ({ status: 200, body: "{}" }));
+		proxy = await startRemoteProxy({ label: "workbox", url: `http://127.0.0.1:${port}`, password: "pw" });
+		await fetch(`${proxy.base}/healthz`, { headers: { origin: "app://renderer" } });
+		expect(seen[0].expectedHost).toBeUndefined();
 	});
 
 	// The add-host dialog accepts https://, so this is what a Tailscale Serve or

@@ -810,7 +810,7 @@ just the tunnel. That is a daemon policy change, decided on its own merits. **Dr
 loopback variant.**
 
 The complement is free and worth pairing with this: `bind` already accepts a literal address
-(`BindAddress` → `net.ParseIP`), so `"bind": "127.0.0.1"` in `~/.ao/mobile/config.json` binds
+(`BindAddress` → `net.ParseIP`), so `"bind": "127.0.0.1"` in `~/.ao/data/mobile/config.json` binds
 the LAN listener to loopback only. **LAN listener on loopback + SSH tunnel = the password is
 kept, and the port is on no network at all.** No code.
 

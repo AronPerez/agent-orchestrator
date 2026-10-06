@@ -64,7 +64,7 @@ Security posture:
   **home-network-only** and the UI says so. The Pairing QR therefore carries only
   host+port (non-secret); the Connection Password is delivered out-of-band (read off
   the desktop screen, typed into the phone), so a captured QR alone cannot connect.
-- State persists to `~/.ao/mobile/config.json` (atomic write), honoring the
+- State persists to `~/.ao/data/mobile/config.json` (atomic write), honoring the
   "all state under `~/.ao`" rule. The listener re-binds on the default port with an
   ephemeral fallback; the QR always reflects the actually-bound port.
 
@@ -122,7 +122,7 @@ failed — leaves **no entry in the daemon access log**. Do not read that silenc
 "the request never arrived"; instrument the handler or look at the client.
 
 TLS remains deferred exactly as decided above. The bind host may now be _narrowed_
-(`bind: all | tailscale | <ip>` in `~/.ao/mobile/config.json`); binding the
+(`bind: all | tailscale | <ip>` in `~/.ao/data/mobile/config.json`); binding the
 Tailscale interface yields WireGuard-encrypted transport without any TLS work,
 which is a mitigation for the plaintext consequence above, not a replacement for
 the deferred TLS decision.

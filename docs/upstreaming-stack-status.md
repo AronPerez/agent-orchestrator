@@ -1,10 +1,22 @@
 # Upstream remote-hosts stack — status and hand-off
 
+> **Status 2026-10-06.** All 21 PRs (#4358–#4378) were opened upstream as drafts on
+> 2026-08-24. **Merged:** #4359 (fs/dirs), #4365 (host identity primitives), #4366 (Remote
+> hosts flag), #4367 (saved-host store). **Closed unmerged** between 2026-09-23 and 10-02:
+> #4358, #4360–#4364, #4369–#4375, #4377, #4378. **Still open:** #4368 (token-gated loopback
+> proxy — its code shipped inside upstream #5921, uncredited) and #4376 (per-host terminal
+> mux — supersession unverified). Upstream then shipped its own multi-host client plus
+> headless host tooling as #5921 (`5976aaa98`). The fork's sync PR #177 (2026-10-05) took
+> #5921's backend, scripts and docs and kept this fork's client; the follow-up PR that adds
+> host identity to the desktop client (`hostId` in `remotes.json`, `X-AO-Expected-Host-ID`,
+> restored `build:host`) closes the pairing-protocol gap that split left behind.
+> Everything below is the 2026-08-24 hand-off, kept for history.
+
 Two independent stacks: **Track A** (desktop multi-host, TypeScript) below, and **Track C**
 (the CLI's `--url` / `AO_URL` remote target, Go) at the end of this document. They share no
 code — only reviewers — and can be opened in parallel.
 
-Built by Plan 1 (`docs/superpowers/plans/2026-08-23-upstream-remote-hosts-foundation.md`, branches A1–A5), Plan 2 (`docs/superpowers/plans/2026-08-24-upstream-host-ui-fs.md`, branches A6–A7b) and Plan 3 (`docs/superpowers/plans/2026-08-24-upstream-hosts-wave3.md`, branches A8a–A11) against `upstream/main @ 6cba6344c` (2026-08-24). Branches live on `origin` (our fork); **no PR has been opened upstream**. The RFC text is `docs/upstreaming-rfc-remote-hosts.md`.
+Built by Plan 1 (`docs/superpowers/plans/2026-08-23-upstream-remote-hosts-foundation.md`, branches A1–A5), Plan 2 (`docs/superpowers/plans/2026-08-24-upstream-host-ui-fs.md`, branches A6–A7b) and Plan 3 (`docs/superpowers/plans/2026-08-24-upstream-hosts-wave3.md`, branches A8a–A11) against `upstream/main @ 6cba6344c` (2026-08-24). Branches live on `origin` (our fork); every branch was opened upstream as a draft PR on 2026-08-24 — see the status block above for their outcome. The RFC text is `docs/upstreaming-rfc-remote-hosts.md`.
 
 There are **sixteen** branches in Track A. The public names are the clean refs below (`up-a1-flag` … `up-a11-docs`). The
 `ao/agent-orchestrator-96/up-a*` twins on origin point at the same commits and are AO

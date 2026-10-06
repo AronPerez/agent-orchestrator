@@ -17,10 +17,50 @@ export type RemoteResponse = {
 
 // "not-a-daemon" is its own answer because the honest sentence differs: the
 // address replied, so telling someone it is unreachable sends them to debug a
-// network that is working.
-export type RemoteHealth = "online" | "unauthorized" | "offline" | "not-a-daemon";
+// network that is working. "wrong-host" likewise: network and password both
+// worked, but the daemon at this address is not the one that was saved (421).
+// "incompatible" is a daemon whose identity route speaks another API version.
+export type RemoteHealth = "online" | "unauthorized" | "offline" | "not-a-daemon" | "incompatible" | "wrong-host";
+
+export class IncompatibleRemoteVersionError extends Error {
+	constructor() {
+		super("AO versions are incompatible. Update AO on this computer and the remote host.");
+		this.name = "IncompatibleRemoteVersionError";
+	}
+}
 
 type FetchImpl = typeof fetch;
+
+// Accepts what the address field accepts: a bare host:port means http.
+function identityUrl(url: string): URL {
+	const base = (url.includes("://") ? url : `http://${url}`).replace(/\/+$/, "");
+	const target = new URL(`${base}/api/v1/identity`);
+	if (!["http:", "https:"].includes(target.protocol) || target.username || target.password)
+		throw new Error("remote host must use an HTTP(S) URL without embedded credentials");
+	return target;
+}
+
+/**
+ * The daemon's id from its unauthenticated identity route — the one probe made
+ * before any password is sent, so a saved entry can be bound to the machine it
+ * was paired with (ADR 0003; the mobile app does the same in connectRuntime.ts).
+ * A daemon from before that route answers 404 and lands in the plain Error
+ * branch: the caller decides what an unknown identity means.
+ */
+export async function readRemoteIdentity(
+	entry: Pick<RemoteEntry, "url">,
+	fetchImpl: FetchImpl = fetch,
+	signal: AbortSignal = AbortSignal.timeout(5_000),
+): Promise<string> {
+	// redirect: "error" — a redirect could hand the follow-up to another origin.
+	const response = await fetchImpl(identityUrl(entry.url).href, { method: "GET", redirect: "error", signal });
+	if (!response.ok) throw new Error(`remote identity probe returned ${response.status}`);
+	const body = (await response.json()) as { hostId?: unknown; apiVersion?: unknown };
+	if (typeof body.hostId !== "string" || body.hostId === "") throw new Error("remote identity probe returned no host ID");
+	if (body.hostId === "local") throw new Error("remote identity probe returned the reserved local host ID");
+	if (body.apiVersion !== 1) throw new IncompatibleRemoteVersionError();
+	return body.hostId;
+}
 
 export async function remoteRequest(
 	entry: RemoteEntry,
@@ -44,6 +84,8 @@ export async function remoteRequest(
 			"Content-Type": "application/json",
 			// Same credential presentation as the CLI (cli/remote.go:374).
 			Authorization: `Bearer ${entry.password}`,
+			// The daemon answers 421 when this is not its own id (see RemoteEntry.hostId).
+			...(entry.hostId ? { "X-AO-Expected-Host-ID": entry.hostId } : {}),
 		},
 		body: init.body === undefined ? undefined : JSON.stringify(init.body),
 		signal,
@@ -72,6 +114,7 @@ export async function probeRemote(
 			AbortSignal.timeout(timeoutMs),
 		);
 		if (status === 401 || status === 403) return "unauthorized";
+		if (status === 421) return "wrong-host";
 		if (status < 200 || status >= 300) return "offline";
 		// A status code proves something replied, not that it is a daemon. An SPA
 		// catch-all (an Expo dev server on a mistyped port, say) answers every path

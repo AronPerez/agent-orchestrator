@@ -36,7 +36,8 @@ vi.mock("../lib/host-clients", () => ({
 import { CreateProjectFlow } from "./CreateProjectFlow";
 import { useUiStore } from "../stores/ui-store";
 
-const WORKBOX = { label: "workbox", url: "http://192.0.2.1:3011" };
+// Carries an SSH destination so an edit that does not touch it proves it survives.
+const WORKBOX = { label: "workbox", url: "http://192.0.2.1:3011", sshDestination: "me@workbox" };
 
 beforeEach(() => {
 	vi.clearAllMocks();
@@ -120,6 +121,25 @@ describe("host management from the Host dropdown", () => {
 		expect(connectHostMock).not.toHaveBeenCalled();
 	});
 
+	// Adding an address that is already saved and connected replaces its password
+	// in the file, but the live proxy keeps injecting the old one. The renderer
+	// must drop that client before connecting again — the edit path already does.
+	it("re-adding a saved address replaces its renderer client", async () => {
+		bridge.remotes.add.mockResolvedValue("online");
+		await openHostList();
+		await userEvent.click(screen.getByRole("button", { name: /add remote host/i }));
+
+		await userEvent.type(await screen.findByLabelText(/name/i), "workbox");
+		await userEvent.type(screen.getByLabelText(/address/i), "192.0.2.1:3011");
+		await userEvent.type(screen.getByLabelText(/password/i), "rotated");
+		await userEvent.click(screen.getByRole("button", { name: /^connect$/i }));
+
+		await waitFor(() => expect(bridge.remotes.add).toHaveBeenCalled());
+		await waitFor(() => expect(disconnectHostMock).toHaveBeenCalledWith(WORKBOX.url));
+		await waitFor(() => expect(connectHostMock).toHaveBeenCalledWith(WORKBOX.url));
+		expect(disconnectHostMock.mock.invocationCallOrder[0]).toBeLessThan(connectHostMock.mock.invocationCallOrder[0]);
+	});
+
 	it("replaces the renderer client when a host is re-pointed", async () => {
 		await openHostList();
 		await userEvent.click(screen.getByRole("button", { name: /edit workbox/i }));
@@ -133,7 +153,8 @@ describe("host management from the Host dropdown", () => {
 			expect(bridge.remotes.update).toHaveBeenCalledWith(WORKBOX.url, {
 				label: "workbox",
 				url: "http://192.0.2.5:3011",
-				sshDestination: "",
+				// Re-pointing the address must not silently drop the saved SSH destination.
+				sshDestination: "me@workbox",
 			}),
 		);
 		await waitFor(() => expect(disconnectHostMock).toHaveBeenCalledWith(WORKBOX.url));
