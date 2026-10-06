@@ -198,7 +198,7 @@ func testACPProcessDetach(t *testing.T, harness domain.AgentHarness) {
 		return Launch{}, errors.New("new provider installation is unavailable")
 	}
 	secondDriver := New(cfg, log)
-	second, err := secondDriver.Resume(context.Background(), ports.ChatResumeConfig{
+	second, err := secondDriver.Reconnect(context.Background(), ports.ChatResumeConfig{
 		SessionID: "persistent-acp-e2e", DataDir: dataDir, WorkspacePath: workdir,
 		ProviderConversationID: "persistent-provider-session", ProviderScopeID: "scope",
 		PrepareEnv: prepareEnv, Model: "changed-model", Permissions: ports.PermissionModeAuto,
@@ -658,6 +658,7 @@ type fakeAgent struct {
 	resumeParams        acpsdk.ResumeSessionRequest
 	loadUpdates         []acpsdk.SessionUpdate
 	loadUpdateBatches   [][]acpsdk.SessionUpdate
+	loadUpdateDelay     time.Duration
 	blockLoadCall       int
 	loadStarted         chan struct{}
 	failLoadFrom        int   // LoadSession calls >= this number return failLoadErr
@@ -920,6 +921,7 @@ func (a *fakeAgent) LoadSession(ctx context.Context, params acpsdk.LoadSessionRe
 	a.loadCalls++
 	loadCall := a.loadCalls
 	updates := append([]acpsdk.SessionUpdate(nil), a.loadUpdates...)
+	updateDelay := a.loadUpdateDelay
 	if batch := a.loadCalls - 1; batch < len(a.loadUpdateBatches) {
 		updates = append([]acpsdk.SessionUpdate(nil), a.loadUpdateBatches[batch]...)
 	}
@@ -941,6 +943,9 @@ func (a *fakeAgent) LoadSession(ctx context.Context, params acpsdk.LoadSessionRe
 	for _, update := range updates {
 		if err := a.conn.SessionUpdate(ctx, acpsdk.SessionNotification{SessionId: params.SessionId, Update: update}); err != nil {
 			return acpsdk.LoadSessionResponse{}, err
+		}
+		if updateDelay > 0 {
+			time.Sleep(updateDelay)
 		}
 	}
 	return acpsdk.LoadSessionResponse{}, nil
@@ -4343,4 +4348,20 @@ func TestACPInterruptCancelsTheLocalPromptAfterNotifyingTheAgent(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("ACP cancel notification was not handled")
+}
+func TestReconnectMissingHostNeverLaunchesProvider(t *testing.T) {
+	driver := New(Config{Harness: domain.HarnessClaudeCode, Launch: func(context.Context, LaunchConfig) (Launch, error) {
+		t.Fatal("health check tried to launch ACP provider")
+		return Launch{}, nil
+	}}, nil)
+	_, err := driver.Reconnect(context.Background(), ports.ChatResumeConfig{
+		SessionID: "stopped", ProviderConversationID: "native", DataDir: t.TempDir(), WorkspacePath: t.TempDir(),
+		PrepareEnv: func(context.Context) (map[string]string, error) {
+			t.Fatal("health check rotated launch credentials")
+			return nil, nil
+		},
+	})
+	if !errors.Is(err, ports.ErrChatHostNotRunning) {
+		t.Fatalf("error=%v", err)
+	}
 }

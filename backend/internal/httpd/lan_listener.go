@@ -21,6 +21,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/preview"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/systeminstall"
 )
 
 // LANManager owns the daemon's second, network-facing HTTP listener. It binds
@@ -32,6 +33,7 @@ type LANManager struct {
 	defaultPort int
 	log         *slog.Logger
 	state       *authState // shared with authMiddleware; SetPasswordHash writes through here
+	lock        *lockout
 
 	transitionMu sync.Mutex // serializes Start and Stop without blocking status reads
 	mu           sync.Mutex
@@ -39,20 +41,29 @@ type LANManager struct {
 	ln           *lanListener
 	cancel       context.CancelFunc
 	bound        int
+	bindHost     string
 }
 
 // NewLANManager wraps handler in the LAN control-block and authMiddleware
 // (backed by the shared state) and returns a manager that can start/stop the
 // network-facing listener. Most callers want NewMobileLAN, which owns the state.
 func NewLANManager(handler http.Handler, state *authState, defaultPort int, log *slog.Logger, sink ports.EventSink) *LANManager {
+	return newLANManager(handler, handler, state, defaultPort, log, sink)
+}
+
+// Keep the route-matching router separate from middleware that guards its
+// authenticated path; wrapping the router would disable the UI's fail-closed
+// route check and make the password prompt unreachable.
+func newLANManager(router, authedHandler http.Handler, state *authState, defaultPort int, log *slog.Logger, sink ports.EventSink) *LANManager {
 	log = loggerOrDefault(log)
-	lock := newLockout(5, time.Minute, time.Now)
-	authed := authMiddleware(state, lock, log, newMobileConnectReporter(sink, time.Now))(handler)
+	lock := newLockout(time.Now)
+	authed := authMiddleware(state, lock, log, newMobileConnectReporter(sink, time.Now))(authedHandler)
 	return &LANManager{
-		handler:     lanControlBlock(webUIBypass(handler, webui.Handler(http.HandlerFunc(notFoundJSON)), authed, log)),
+		handler:     lanControlBlock(webUIBypass(router, webui.Handler(http.HandlerFunc(notFoundJSON)), authed, log)),
 		defaultPort: defaultPort,
 		log:         log,
 		state:       state,
+		lock:        lock,
 	}
 }
 
@@ -213,9 +224,11 @@ func lanControlBlock(next http.Handler) http.Handler {
 
 func isLANControlBlockedRequest(method, path string) bool {
 	trimmed := strings.TrimSuffix(path, "/")
-	return method == http.MethodPost &&
-		strings.HasPrefix(trimmed, "/api/v1/agents/") &&
-		strings.HasSuffix(trimmed, "/install")
+	if method != http.MethodPost || !strings.HasPrefix(trimmed, "/api/v1/agents/") || !strings.HasSuffix(trimmed, "/install") {
+		return false
+	}
+	target := strings.TrimSuffix(strings.TrimPrefix(trimmed, "/api/v1/agents/"), "/install")
+	return !systeminstall.IsAgentTarget(systeminstall.Target(target))
 }
 
 // IsLANControlBlockedPath reports whether path matches a blocked prefix on an
@@ -242,15 +255,44 @@ func IsLANControlBlockedPath(path string) bool {
 // outside this package (the daemon) cannot construct an authState directly
 // since it is unexported; this gives them a LANManager that owns one, and the
 // daemon rotates the connection password exclusively via SetPasswordHash.
-func NewMobileLAN(handler http.Handler, defaultPort int, log *slog.Logger, sink ports.EventSink) *LANManager {
-	return NewLANManager(handler, &authState{}, defaultPort, log, sink)
+func NewMobileLAN(handler http.Handler, hostID string, defaultPort int, log *slog.Logger, sink ports.EventSink) *LANManager {
+	return newLANManager(handler, expectedHostGuard(hostID)(handler), &authState{}, defaultPort, log, sink)
 }
 
-// SetPasswordHash stores the current connection password hash on the shared
-// authState so the auth middleware (already wrapping handler) validates
-// against it. Satisfies controllers.LANController.
+// expectedHostGuard prevents a saved address from sending work to a different
+// AO installation after that address is reassigned. Older clients omit the
+// header; auth still applies to them as before.
+func expectedHostGuard(hostID string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if expected := r.Header.Get("X-AO-Expected-Host-ID"); expected != "" && expected != hostID {
+				envelope.WriteAPIError(w, r, http.StatusMisdirectedRequest, "conflict", "HOST_ID_MISMATCH", "This address belongs to another AO host; reconnect to the intended host.", nil)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// SetPasswordHash rotates the connection password, clears lockouts inherited
+// from the old credential, and closes existing LAN connections (including
+// upgraded WebSockets). Satisfies controllers.LANController.
 func (m *LANManager) SetPasswordHash(hash string) {
+	m.transitionMu.Lock()
+	defer m.transitionMu.Unlock()
+	if m.state.currentHash() == hash {
+		return
+	}
 	m.state.setHash(hash)
+	m.lock.resetAll()
+	m.mu.Lock()
+	ln := m.ln
+	m.mu.Unlock()
+	if ln != nil {
+		if err := ln.closeConnections(); err != nil {
+			m.log.Warn("close LAN connections after password rotation", "err", err)
+		}
+	}
 }
 
 // PasswordHash returns the current connection password hash. Used to snapshot the
@@ -268,11 +310,24 @@ func (m *LANManager) Start(port int, bind string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("bind LAN: %w", err)
 	}
+	return m.start(port, host)
+}
+
+// StartLoopback binds the same authenticated handler only where a local tunnel
+// connector can reach it. A running listener cannot silently change bind mode.
+func (m *LANManager) StartLoopback(port int) (int, error) {
+	return m.start(port, "127.0.0.1")
+}
+
+func (m *LANManager) start(port int, host string) (int, error) {
 	m.transitionMu.Lock()
 	defer m.transitionMu.Unlock()
 	m.mu.Lock()
 	if m.srv != nil {
 		defer m.mu.Unlock()
+		if m.bindHost != host {
+			return 0, fmt.Errorf("authenticated listener already bound to %s; disable it before changing modes", m.bindHost)
+		}
 		return m.bound, nil // idempotent
 	}
 	if port == 0 {
@@ -288,7 +343,7 @@ func (m *LANManager) Start(port int, bind string) (int, error) {
 		//nolint:gosec // G102: see above — same bind host, ephemeral port.
 		if ln, err = net.Listen("tcp", net.JoinHostPort(host, "0")); err != nil {
 			m.mu.Unlock()
-			return 0, fmt.Errorf("bind LAN ephemeral: %w", err)
+			return 0, fmt.Errorf("bind authenticated listener ephemeral on %s: %w", host, err)
 		}
 		m.log.Warn("LAN port in use; bound ephemeral", "wanted", port, "bound", ln.Addr())
 	}
@@ -302,6 +357,7 @@ func (m *LANManager) Start(port int, bind string) (int, error) {
 	tracked := &lanListener{Listener: ln, conns: make(map[*lanConn]struct{})}
 	m.ln, m.cancel = tracked, cancel
 	m.bound = tcpAddr.Port
+	m.bindHost = host
 	m.srv = &http.Server{
 		Handler:           m.handler,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -343,7 +399,7 @@ func (m *LANManager) Stop(ctx context.Context) error {
 	// listener owns them until their actual Close, even after HTTP's handoff.
 	err = errors.Join(err, ln.closeConnections())
 	m.mu.Lock()
-	m.srv, m.ln, m.cancel, m.bound = nil, nil, nil, 0
+	m.srv, m.ln, m.cancel, m.bound, m.bindHost = nil, nil, nil, 0, ""
 	m.mu.Unlock()
 	return err
 }

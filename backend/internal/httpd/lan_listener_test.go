@@ -44,6 +44,40 @@ func TestLANControlBlockMarksRequestContext(t *testing.T) {
 	}
 }
 
+func TestMobileLANRejectsReassignedAddressWithSamePassword(t *testing.T) {
+	calls := 0
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusAccepted)
+	})
+	// The address formerly belonged to h_A; h_B now answers there and happens
+	// to use the same connection password.
+	m := NewMobileLAN(inner, "h_B", 0, nil, nil)
+	m.SetPasswordHash(mobilebridge.HashPassword("same-secret"))
+	request := func(expectedHostID, password string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/orchestrators/delegate", nil)
+		req.Header.Set("Authorization", "Bearer "+password)
+		if expectedHostID != "" {
+			req.Header.Set("X-AO-Expected-Host-ID", expectedHostID)
+		}
+		recorder := httptest.NewRecorder()
+		m.handler.ServeHTTP(recorder, req)
+		return recorder
+	}
+	if got := request("h_A", "same-secret"); got.Code != http.StatusMisdirectedRequest || !strings.Contains(got.Body.String(), `"code":"HOST_ID_MISMATCH"`) || calls != 0 {
+		t.Fatalf("stale h_A request: status=%d body=%q calls=%d", got.Code, got.Body.String(), calls)
+	}
+	if got := request("h_B", "same-secret"); got.Code != http.StatusAccepted || calls != 1 {
+		t.Fatalf("matching h_B request: status=%d calls=%d", got.Code, calls)
+	}
+	if got := request("", "same-secret"); got.Code != http.StatusAccepted || calls != 2 {
+		t.Fatalf("legacy request: status=%d calls=%d", got.Code, calls)
+	}
+	if got := request("h_A", "wrong"); got.Code != http.StatusUnauthorized || calls != 2 {
+		t.Fatalf("unauthenticated request: status=%d calls=%d", got.Code, calls)
+	}
+}
+
 func TestLANManagerAuthGatesSharedHandler(t *testing.T) {
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, "ok")
@@ -74,6 +108,21 @@ func TestLANManagerAuthGatesSharedHandler(t *testing.T) {
 	resp2, _ := http.DefaultClient.Do(req)
 	if resp2.StatusCode != http.StatusOK {
 		t.Fatalf("auth: got %d want 200", resp2.StatusCode)
+	}
+}
+
+func TestLANManagerTunnelOnlyBindsLoopback(t *testing.T) {
+	m := NewMobileLAN(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), "h_test", 0, nil, nil)
+	m.SetPasswordHash(mobilebridge.HashPassword("secret12"))
+	if _, err := m.StartLoopback(0); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Stop(context.Background())
+	if addr := m.ln.Addr().(*net.TCPAddr); !addr.IP.IsLoopback() {
+		t.Fatalf("tunnel-only listener bound %s, want loopback", addr)
+	}
+	if _, err := m.Start(0, ""); err == nil {
+		t.Fatal("LAN start silently reused a loopback-only listener")
 	}
 }
 
@@ -160,7 +209,94 @@ func TestLANManagerBlocksLoopbackOnlyControlRoutes(t *testing.T) {
 			t.Fatalf("%s: got %d want 404 (Host-spoof + valid auth must not reach control routes)", path, resp.StatusCode)
 		}
 	}
+	for _, method := range []string{http.MethodPost, http.MethodDelete} {
+		req, _ := http.NewRequest(method, fmt.Sprintf("http://127.0.0.1:%d/api/v1/sessions/ao-1/preview/server", port), nil)
+		req.Host = "127.0.0.1"
+		req.Header.Set("Authorization", "Bearer secret12")
+		req.Header.Set("X-AO-Preview-Capability", "shell-preview-token")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("LAN %s preview/server = %d, want 404", method, resp.StatusCode)
+		}
+	}
+	{
+		req, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/api/v1/mobile/enable-lan-only", port), nil)
+		req.Header.Set("Authorization", "Bearer secret12")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("LAN-only control route on LAN listener: got %d want 404", resp.StatusCode)
+		}
+	}
 
+	{
+		// Paired clients can request the daemon's fixed harness installer.
+		req, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/api/v1/agents/cursor/install", port), nil)
+		req.Host = "127.0.0.1"
+		req.Header.Set("Authorization", "Bearer secret12")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("agent install request failed: %v", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("agent install: got %d want 200", resp.StatusCode)
+		}
+		for _, path := range []string{"/api/v1/agents/unknown/install", "/api/v1/agents/cursor/other/install"} {
+			blockedInstall, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d%s", port, path), nil)
+			blockedInstall.Header.Set("Authorization", "Bearer secret12")
+			blockedResp, err := http.DefaultClient.Do(blockedInstall)
+			if err != nil {
+				t.Fatalf("%s: %v", path, err)
+			}
+			if blockedResp.StatusCode != http.StatusNotFound {
+				t.Fatalf("%s: got %d want 404", path, blockedResp.StatusCode)
+			}
+		}
+		unauthenticatedInstall, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/api/v1/agents/cursor/install", port), nil)
+		unauthenticatedResp, err := http.DefaultClient.Do(unauthenticatedInstall)
+		if err != nil {
+			t.Fatalf("unauthenticated agent install: %v", err)
+		}
+		if unauthenticatedResp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("unauthenticated agent install: got %d want 401", unauthenticatedResp.StatusCode)
+		}
+		previewReq, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/api/v1/sessions/ao-1/preview/app/index.html", port), nil)
+		previewReq.Header.Set("Authorization", "Bearer secret12")
+		previewResp, err := http.DefaultClient.Do(previewReq)
+		if err != nil {
+			t.Fatalf("preview app: %v", err)
+		}
+		if previewResp.StatusCode != http.StatusOK {
+			t.Fatalf("preview app: got %d want 200", previewResp.StatusCode)
+		}
+
+		// The read-only Codex model routes are not credential surfaces and must
+		// stay reachable so mobile can list and refresh models.
+		for _, tc := range []struct {
+			method string
+			path   string
+		}{
+			{http.MethodGet, "/api/v1/agents/codex/models"},
+			{http.MethodPost, "/api/v1/agents/codex/models/refresh"},
+		} {
+			req, _ := http.NewRequest(tc.method, fmt.Sprintf("http://127.0.0.1:%d%s", port, tc.path), nil)
+			req.Header.Set("Authorization", "Bearer secret12")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("%s: request failed: %v", tc.path, err)
+			}
+			if resp.StatusCode == http.StatusNotFound {
+				t.Fatalf("%s: got 404, must not be blocked by the control-route filter", tc.path)
+			}
+		}
+
+	}
 	// A normal app route must still be reachable through the LAN listener
 	// (not swallowed by the control-route filter). Auth-gating, not the
 	// control filter, decides its fate.
@@ -658,6 +794,64 @@ func TestLANManagerServesWebUIWithoutPassword(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("POST /anything: got %d want 401", resp.StatusCode)
+	}
+}
+
+func TestMobileLANKeepsUIBypassWithHostGuard(t *testing.T) {
+	router := chi.NewRouter()
+	router.Get("/api/v1/sessions", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	m := NewMobileLAN(router, "h_test", 0, nil, nil)
+	m.SetPasswordHash(mobilebridge.HashPassword("secret12"))
+	port, err := m.Start(0, "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Stop(context.Background())
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	shell, err := http.Get(base + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = shell.Body.Close()
+	// A local test binary may lack the embedded bundle (503), but the request
+	// must reach the UI handler rather than being stopped by auth (401).
+	if shell.StatusCode != http.StatusOK && shell.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("GET /: got %d, want UI shell or missing-bundle response", shell.StatusCode)
+	}
+
+	for _, tc := range []struct {
+		path, expectedHost string
+		want               int
+	}{
+		{"/api/v1/sessions", "", http.StatusUnauthorized},
+		{"/api/v1/sessions", "h_other", http.StatusUnauthorized},
+		{"/api/v1/sessions", "h_test", http.StatusUnauthorized},
+	} {
+		req, _ := http.NewRequest(http.MethodGet, base+tc.path, nil)
+		if tc.expectedHost != "" {
+			req.Header.Set("X-AO-Expected-Host-ID", tc.expectedHost)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != tc.want {
+			t.Errorf("GET %s expectedHost=%q: got %d, want %d", tc.path, tc.expectedHost, resp.StatusCode, tc.want)
+		}
+	}
+	req, _ := http.NewRequest(http.MethodGet, base+"/api/v1/sessions", nil)
+	req.Header.Set("Authorization", "Bearer secret12")
+	req.Header.Set("X-AO-Expected-Host-ID", "h_other")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusMisdirectedRequest {
+		t.Fatalf("wrong host ID: got %d, want 421", resp.StatusCode)
 	}
 }
 

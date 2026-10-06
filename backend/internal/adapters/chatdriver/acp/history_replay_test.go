@@ -264,7 +264,9 @@ func TestACPReplayLoadLargeHistoryThroughSDK(t *testing.T) {
 	conv := replayConversation()
 	clientR, clientW := io.Pipe()
 	agentR, agentW := io.Pipe()
-	agent := &fakeAgent{loadUpdates: updates}
+	// Keep the synthetic producer below the SDK's bounded notification queue;
+	// this test exercises large replay delivery, not SDK queue saturation.
+	agent := &fakeAgent{loadUpdates: updates, loadUpdateDelay: time.Millisecond}
 	agent.conn = acpsdk.NewAgentSideConnection(agent, agentW, clientR)
 	conv.conn = acpsdk.NewClientSideConnection(conv, clientW, agentR)
 	t.Cleanup(func() { _ = clientR.Close(); _ = clientW.Close(); _ = agentR.Close(); _ = agentW.Close() })
@@ -273,8 +275,8 @@ func TestACPReplayLoadLargeHistoryThroughSDK(t *testing.T) {
 	defer cancel()
 	conv.beginHistoryReplay("session-1")
 	// Hold the normalization mutex until the SDK response barrier returns.
-	// An inline handler cannot finish even its first update, fills the SDK
-	// queue, and disconnects. Capturing must deliver the complete burst anyway.
+	// An inline handler cannot finish even its first update while this lock is
+	// held. Capturing must deliver the complete history without normalizing it.
 	func() {
 		conv.mu.Lock()
 		defer conv.mu.Unlock()
