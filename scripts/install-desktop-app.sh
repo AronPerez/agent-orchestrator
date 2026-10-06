@@ -25,10 +25,15 @@
 #   --no-daemon      Don't rebuild the ao CLI (skip `ao-svc reload`).
 #   --no-launch      Install but don't open the app.
 #   --dest DIR       Install directory (default: /Applications).
+#   --print-release-repo  Print the GitHub owner/repo the build would bake into
+#                    the app's updater, then exit.
 #   -h, --help       Show this help.
 #
 # Notes:
 #   * macOS only (needs codesign / xattr / open).
+#   * The app's updater polls the GitHub repo baked at build time (AO_RELEASE_REPO;
+#     forge defaults to upstream). Unset, this script derives owner/repo from this
+#     checkout's origin remote, so a fork build never offers upstream's releases.
 #   * If APPLE_SIGNING_IDENTITY is set, `npm run make` already signs with a real
 #     identity, so the ad-hoc re-sign is skipped (it would clobber that).
 #   * The app and the daemon must be built from the SAME commit for the identity
@@ -40,6 +45,7 @@ set -euo pipefail
 skip_build=0
 reload_daemon=1
 launch=1
+print_release_repo=0
 dest="/Applications"
 
 while [ $# -gt 0 ]; do
@@ -48,17 +54,43 @@ while [ $# -gt 0 ]; do
     --no-daemon)  reload_daemon=0 ;;
     --no-launch)  launch=0 ;;
     --dest)       dest="${2:?--dest needs a directory}"; shift ;;
-    -h|--help)    sed -n '3,35p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --print-release-repo) print_release_repo=1 ;;
+    -h|--help)    sed -n '3,41p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1 (try --help)" >&2; exit 2 ;;
   esac
   shift
 done
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "${script_dir}/.." && pwd)"
+
+# --- update feed -----------------------------------------------------------
+# forge.config.ts bakes the updater's GitHub repo from AO_RELEASE_REPO and
+# defaults to upstream, so a plain `npm run make` builds an app that polls
+# upstream's releases. Derive owner/repo from this checkout's origin remote
+# instead; an explicit AO_RELEASE_REPO still wins. Always returns 0: an
+# unrecognized remote prints nothing and forge keeps its own default.
+release_repo_from_remote() {
+  local url="$1" path
+  case "$url" in
+    git@github.com:*) path="${url#git@github.com:}" ;;
+    https://github.com/*|http://github.com/*|ssh://git@github.com/*) path="${url#*github.com/}" ;;
+    *) return 0 ;;
+  esac
+  path="${path%/}"
+  path="${path%.git}"
+  if [[ "$path" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then printf '%s' "$path"; fi
+}
+if [ -z "${AO_RELEASE_REPO:-}" ]; then
+  AO_RELEASE_REPO="$(release_repo_from_remote "$(git -C "$repo_root" remote get-url origin 2>/dev/null || true)")"
+  [ -n "$AO_RELEASE_REPO" ] || echo "warning: could not derive owner/repo from the origin remote; forge will use its default release repo (upstream)." >&2
+fi
+if [ "$print_release_repo" -eq 1 ]; then printf '%s\n' "$AO_RELEASE_REPO"; exit 0; fi
+[ -z "$AO_RELEASE_REPO" ] || export AO_RELEASE_REPO
+
 # --- guards ----------------------------------------------------------------
 [ "$(uname -s)" = "Darwin" ] || { echo "error: macOS only (uses codesign/xattr/open)." >&2; exit 1; }
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "${script_dir}/.." && pwd)"
 frontend="${repo_root}/frontend"
 [ -d "$frontend" ] || { echo "error: no frontend/ under ${repo_root}." >&2; exit 1; }
 
@@ -73,7 +105,7 @@ log() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 
 # --- 1. build --------------------------------------------------------------
 if [ "$skip_build" -eq 0 ]; then
-  log "Building app + daemon (npm run make)…"
+  log "Building app + daemon (npm run make; update feed: ${AO_RELEASE_REPO:-forge default})…"
   ( cd "$frontend" && npm run make )
 else
   log "Skipping build (--skip-build)."
