@@ -591,7 +591,10 @@ export function CreateProjectFlow({
               // reachable for a project POST but absent from connectedHosts(),
               // so it has no section in the tree and nothing can open a project
               // on it until the next launch connects every saved host.
-              void connectHost(url);
+              // Re-adding an address that is already connected replaced its saved
+              // password, but the live proxy still injects the old one: drop that
+              // client first, as an edit does. A no-op for a genuinely new host.
+              void disconnectHost(url).then(() => connectHost(url));
             }}
           />
           {/* Its own mount rather than a mode on the add dialog: `host` is what

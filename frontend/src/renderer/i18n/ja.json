@@ -2000,7 +2000,7 @@
   "hosts.status.online": "接続済み",
   "hosts.status.notADaemon": "AO デーモンではありません",
   "hosts.status.unauthorized": "パスワードが違います",
-  "hosts.status.incompatible": "AO のバージョンが互換していません",
+  "hosts.status.incompatible": "AO のバージョンに互換性がありません",
   "hosts.status.wrongHost": "アドレスが別のホストを指しています",
   "hosts.add.address": "アドレス",
   "hosts.add.errorCredentialInUrl": "アドレスにユーザー名やパスワードを含めることはできません — 接続パスワードは下の欄に入力してください。",

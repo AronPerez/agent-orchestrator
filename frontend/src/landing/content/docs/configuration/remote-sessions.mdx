@@ -24,7 +24,7 @@ Open **Settings → Connect Mobile** on the remote machine and enable mobile acc
 
 A headless machine with no desktop app opens the same listener from its shell: `ao remote-host enable` (or `enable --tunnel-only` for a Cloudflare quick tunnel), or the installer in `scripts/setup-self-hosted.sh` — see `docs/self-hosted-remote.md` in the repository. Both print the address and password to pair with. Their closing hint names a **Settings → Remote hosts** page that exists only in upstream AO; on this fork, add the host from the host selector in **Add project**, as the next steps describe.
 
-When you add a host, the app records the daemon's own host ID and sends it on every request, so a saved address that later reaches a different machine is refused rather than obeyed. A host saved before this existed is bound the first time it connects.
+When you add a host, the desktop app records the daemon's own host ID and sends it on every request (the `ao --url` CLI reads the same file but does not), so a saved address that later reaches a different machine is refused rather than obeyed. A host saved before this existed is bound the first time it connects. Both need a daemon new enough to report an identity; an older daemon stays unbound and gets no such check.
 
 </Step>
 <Step>

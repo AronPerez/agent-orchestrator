@@ -48,13 +48,23 @@ export function registerRemotesIpc(
 ): void {
 	const disconnect = (url: string) => registry.disconnect(url);
 
+	// Pairing without an id is right for a daemon too old to report one, and a
+	// silent loss of the wrong-host check for anything else (a timeout, a redirect,
+	// a non-JSON answer). The log is the one place that difference shows — address
+	// and reason only, never the password.
+	const warnUnbound = (url: string, error: unknown) =>
+		console.warn(
+			`[remotes] identity for ${url} unavailable; host stays unbound: ${error instanceof Error ? error.message : String(error)}`,
+		);
+
 	// An entry saved before host ids existed binds on its next connect — the same
 	// trust-on-first-use its pairing had. Best-effort: a daemon too old for the
 	// identity route stays unbound and keeps working exactly as it always did.
 	const bindIdentity = async (entry: RemoteEntry): Promise<RemoteEntry> => {
 		try {
 			return await updateRemote(file, entry.url, { hostId: await identity(entry) });
-		} catch {
+		} catch (error) {
+			warnUnbound(entry.url, error);
 			return entry;
 		}
 	};
@@ -73,6 +83,7 @@ export function registerRemotesIpc(
 		} catch (error) {
 			if (error instanceof IncompatibleRemoteVersionError) return "incompatible" satisfies RemoteHealth;
 			// A daemon from before the identity route: pair it unbound, as before.
+			warnUnbound(input.url, error);
 		}
 		await addRemote(file, { ...input, hostId });
 		return health;

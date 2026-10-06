@@ -146,6 +146,30 @@ describe("host identity", () => {
 		expect(saved).not.toHaveProperty("hostId");
 	});
 
+	// Pairing without an id is right for a daemon too old to report one, and a
+	// silent loss of the wrong-host check for anything else. The main-process log
+	// is the one place that difference becomes visible.
+	it("add logs why a host paired without an id, naming the address and never the password", async () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+		try {
+			const ipc = fakeIpc();
+			const file = await tempFile();
+			const identity = vi.fn(async () => {
+				throw new Error("remote identity probe returned 404");
+			});
+			registerRemotesIpc(ipc.ipcMain, { file, registry: registryOf(), probe: async () => "online", identity });
+			await ipc.invoke("remotes:add", { ...mini, password: "s3cr3t-pass" });
+
+			const line = warn.mock.calls.map((call) => String(call[0])).find((text) => text.includes("identity"));
+			expect(line).toBeDefined();
+			expect(line).toContain(mini.url);
+			expect(line).toContain("404");
+			expect(line).not.toContain("s3cr3t-pass");
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
 	it("add refuses a daemon that speaks a different API version and saves nothing", async () => {
 		const ipc = fakeIpc();
 		const file = await tempFile();
