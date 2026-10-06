@@ -204,14 +204,26 @@ describe("hostId", () => {
 		expect(applyRemoteChanges(entry, { hostId: "h_2" }).hostId).toBe("h_2");
 	});
 
-	// The same daemon reached at a new address is one host, not two rows that
-	// both answer for it.
-	it("replaces an entry with the same hostId at a different url", async () => {
+	// Hosts are keyed by url everywhere in this app (Ref.host IS the address), and
+	// one daemon saved under two addresses — its LAN IP and its tailnet IP — is a
+	// supported setup. The id names the machine behind an address; it is not a
+	// second key that collapses rows.
+	it("keeps two addresses for the same daemon as two rows", async () => {
 		const path = await tempFile(
-			'{"remotes":[{"label":"old","url":"http://192.0.2.1:1","password":"x","hostId":"h_1"}]}',
+			'{"remotes":[{"label":"lan","url":"http://192.0.2.1:1","password":"x","hostId":"h_1"}]}',
 		);
-		await addRemote(path, { label: "new", url: "http://192.0.2.5:5", password: "z", hostId: "h_1" });
-		expect(await savedRemotes(path)).toEqual([{ label: "new", url: "http://192.0.2.5:5", password: "z", hostId: "h_1" }]);
+		await addRemote(path, { label: "tailnet", url: "http://100.64.0.9:1", password: "x", hostId: "h_1" });
+		expect(await savedRemotes(path)).toHaveLength(2);
+	});
+
+	it("backfilling an id never absorbs a sibling row for the same daemon", async () => {
+		const path = await tempFile(TWO_HOSTS);
+		await updateRemote(path, "http://192.0.2.1:1", { hostId: "h_1" });
+		await updateRemote(path, "http://192.0.2.9:9", { hostId: "h_1" });
+		expect(await savedRemotes(path)).toEqual([
+			{ label: "workbox", url: "http://192.0.2.1:1", password: "old", hostId: "h_1" },
+			{ label: "mini", url: "http://192.0.2.9:9", password: "m", hostId: "h_1" },
+		]);
 	});
 });
 

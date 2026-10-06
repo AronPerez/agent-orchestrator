@@ -74,13 +74,7 @@ export function registerRemotesIpc(
 			if (error instanceof IncompatibleRemoteVersionError) return "incompatible" satisfies RemoteHealth;
 			// A daemon from before the identity route: pair it unbound, as before.
 		}
-		// The same daemon reached at a new address replaces its old row (the store
-		// dedupes by hostId), and whatever proxy served the old address must go too.
-		const previous = hostId
-			? (await readRemotes(file)).find((saved) => saved.hostId === hostId && saved.url !== input.url)
-			: undefined;
 		await addRemote(file, { ...input, hostId });
-		if (previous) await disconnect(previous.url);
 		return health;
 	});
 	ipcMain.handle("remotes:probe", async (_event, url: string) => probe(await findRemote(file, url)));

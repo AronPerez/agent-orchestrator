@@ -173,6 +173,30 @@ describe("host identity", () => {
 		expect(identity).toHaveBeenCalledTimes(1);
 	});
 
+	// Boot connects every saved host (active-host.ts). A daemon saved under two
+	// addresses must come out of that with both rows bound and both still there.
+	it("connect backfills every address a daemon is saved under and keeps them all", async () => {
+		const ipc = fakeIpc();
+		const dir = await mkdtemp(join(tmpdir(), "ao-remotes-main-"));
+		const file = join(dir, "remotes.json");
+		await writeFile(
+			file,
+			'{"remotes":[{"label":"lan","url":"http://192.0.2.1:1","password":"pw"},{"label":"tailnet","url":"http://100.64.0.9:1","password":"pw"}]}',
+			"utf8",
+		);
+		await chmod(file, 0o600);
+		registerRemotesIpc(ipc.ipcMain, { file, registry: registryOf(), probe: async () => "online", identity: async () => "h_work" });
+
+		await ipc.invoke("remotes:connect", "http://192.0.2.1:1");
+		await ipc.invoke("remotes:connect", "http://100.64.0.9:1");
+
+		expect((await savedRemotes(file)).map((entry) => [entry.url, entry.hostId])).toEqual([
+			["http://192.0.2.1:1", "h_work"],
+			["http://100.64.0.9:1", "h_work"],
+		]);
+		expect(await ipc.invoke("remotes:connected")).toHaveLength(2);
+	});
+
 	it("update probes a re-pointed address with the saved host id and keeps the file when it is a stranger", async () => {
 		const ipc = fakeIpc();
 		const file = await tempFile();

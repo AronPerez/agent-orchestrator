@@ -96,14 +96,11 @@ export async function addRemote(path: string, entry: RemoteEntry): Promise<void>
 	return serializeMutation(async () => {
 		const existing = await readRemotes(path);
 		const normalized = { ...entry, sshDestination: entry.sshDestination?.trim() || undefined };
-		// One row per machine: the same url, or the same daemon identity reached
-		// at a new address, replaces the old row rather than sitting beside it.
-		await writeRemotes(path, [
-			...existing.filter(
-				(candidate) => candidate.url !== entry.url && (!entry.hostId || candidate.hostId !== entry.hostId),
-			),
-			normalized,
-		]);
+		// The url is the only key. hostId names the machine behind an address and is
+		// deliberately NOT a second key: one daemon saved under two addresses (its
+		// LAN IP and its tailnet IP) is two hosts to this app, and collapsing them
+		// here would delete a row the renderer and the registry still hold.
+		await writeRemotes(path, [...existing.filter((candidate) => candidate.url !== entry.url), normalized]);
 	});
 }
 
@@ -133,15 +130,11 @@ export async function updateRemote(path: string, url: string, changes: RemoteCha
 		if (!current) throw new Error(`no saved host for ${url}`);
 		const updated = applyRemoteChanges(current, changes);
 		// Re-pointing a host MOVES its entry: the row keeps its place, and any other
-		// row already sitting on the new url (or carrying the same daemon identity)
-		// is absorbed rather than left as a twin.
+		// row already sitting on the new url is absorbed rather than left as a twin.
+		// Only the url decides that — see addRemote on why hostId must not.
 		const remotes = existing
 			.map((candidate) => (candidate === current ? updated : candidate))
-			.filter(
-				(candidate) =>
-					candidate === updated ||
-					(candidate.url !== updated.url && (!updated.hostId || candidate.hostId !== updated.hostId)),
-			);
+			.filter((candidate) => candidate === updated || candidate.url !== updated.url);
 		await writeRemotes(path, remotes);
 		return updated;
 	});
