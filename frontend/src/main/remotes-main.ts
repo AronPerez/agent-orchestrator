@@ -1,9 +1,16 @@
 import os from "node:os";
 import path from "node:path";
-import { probeRemote, remoteRequest, type RemoteHealth, type RemoteRequestInit } from "./remote-request";
+import {
+	IncompatibleRemoteVersionError,
+	probeRemote,
+	readRemoteIdentity,
+	remoteRequest,
+	type RemoteHealth,
+	type RemoteRequestInit,
+} from "./remote-request";
 import { findRemote, removeSavedRemote, toHostViews, updateSavedRemote } from "./remotes-ipc";
 import type { RemoteRegistry } from "./remote-registry";
-import { addRemote, readRemotes, type RemoteChanges, type RemoteEntry } from "./remotes-store";
+import { addRemote, readRemotes, updateRemote, type RemoteChanges, type RemoteEntry } from "./remotes-store";
 
 // The CLI resolves this file through config.StateDir(), which is ~/.ao
 // unconditionally — it does NOT honour AO_DATA_DIR (that points at the daemon's
@@ -26,6 +33,8 @@ export type RemotesIpcDeps = {
 	file: string;
 	registry: RemoteRegistry;
 	probe?: (entry: RemoteEntry) => Promise<RemoteHealth>;
+	/** The daemon's own id from GET /api/v1/identity; injectable for tests. */
+	identity?: (entry: Pick<RemoteEntry, "url">) => Promise<string>;
 };
 
 /**
@@ -33,15 +42,45 @@ export type RemotesIpcDeps = {
  * renderer receives back is password-free (see remotes-ipc.ts); the plaintext
  * password only ever travels renderer -> main, on `add` or `update`.
  */
-export function registerRemotesIpc(ipcMain: IpcMainLike, { file, registry, probe = probeRemote }: RemotesIpcDeps): void {
+export function registerRemotesIpc(
+	ipcMain: IpcMainLike,
+	{ file, registry, probe = probeRemote, identity = readRemoteIdentity }: RemotesIpcDeps,
+): void {
 	const disconnect = (url: string) => registry.disconnect(url);
+
+	// An entry saved before host ids existed binds on its next connect — the same
+	// trust-on-first-use its pairing had. Best-effort: a daemon too old for the
+	// identity route stays unbound and keeps working exactly as it always did.
+	const bindIdentity = async (entry: RemoteEntry): Promise<RemoteEntry> => {
+		try {
+			return await updateRemote(file, entry.url, { hostId: await identity(entry) });
+		} catch {
+			return entry;
+		}
+	};
 
 	ipcMain.handle("remotes:list", async () => toHostViews(await readRemotes(file)));
 	ipcMain.handle("remotes:add", async (_event, input: RemoteEntry) => {
 		// Probe before saving: a host that never answered is worse than no host,
-		// because it looks configured.
+		// because it looks configured. The probe keeps its own vocabulary
+		// (unauthorized, not-a-daemon, offline); identity is read only once the
+		// host has answered as a daemon.
 		const health = await probe(input);
-		if (health === "online") await addRemote(file, input);
+		if (health !== "online") return health;
+		let hostId: string | undefined;
+		try {
+			hostId = await identity(input);
+		} catch (error) {
+			if (error instanceof IncompatibleRemoteVersionError) return "incompatible" satisfies RemoteHealth;
+			// A daemon from before the identity route: pair it unbound, as before.
+		}
+		// The same daemon reached at a new address replaces its old row (the store
+		// dedupes by hostId), and whatever proxy served the old address must go too.
+		const previous = hostId
+			? (await readRemotes(file)).find((saved) => saved.hostId === hostId && saved.url !== input.url)
+			: undefined;
+		await addRemote(file, { ...input, hostId });
+		if (previous) await disconnect(previous.url);
 		return health;
 	});
 	ipcMain.handle("remotes:probe", async (_event, url: string) => probe(await findRemote(file, url)));
@@ -60,7 +99,7 @@ export function registerRemotesIpc(ipcMain: IpcMainLike, { file, registry, probe
 		// app at boot.
 		const health = await probe(entry);
 		if (health !== "online") throw new Error(`host ${url} is ${health}`);
-		return registry.connect(entry);
+		return registry.connect(entry.hostId ? entry : await bindIdentity(entry));
 	});
 	ipcMain.handle("remotes:disconnect", async (_event, url: string) => disconnect(url));
 	ipcMain.handle("remotes:connected", async () => registry.views());
