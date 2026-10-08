@@ -497,7 +497,7 @@ export function ShellTopbar({
 						    remains a separate visual target in the outer top-bar row. */}
               {!isOrchestrator &&
               session &&
-              (sessionAction || sessionIsActive(session)) ? (
+              (sessionAction || sessionIsActive(session) || isStandaloneSession(session)) ? (
                 <div
                   className={cn(
                     "inline-flex shrink-0 items-center",
@@ -511,7 +511,7 @@ export function ShellTopbar({
                       {sessionAction}
                     </div>
                   ) : null}
-                  {sessionIsActive(session) ? (
+                  {sessionIsActive(session) || isStandaloneSession(session) ? (
                     <TopbarKillButton
                       key={refKey(session)}
                       session={session}
@@ -621,6 +621,9 @@ export function TopbarKillButton({
     kill.mutate(session);
     onKilled(session.workspaceId, orchestrator);
   };
+
+  // Keep the standalone mutation observer mounted across early termination refreshes.
+  if (!sessionIsActive(session) && !isPending && !error) return null;
 
   return (
     <div className="inline-flex items-center gap-1.5" style={noDragStyle}>
