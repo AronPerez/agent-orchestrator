@@ -318,6 +318,8 @@ export type FakeAgentOptions = {
 	daemonPort?: number;
 	projectId?: string;
 	projectName?: string;
+	/** Renderer-only group for CLI-created projectless agents, not shell terminals. */
+	standalone?: boolean;
 	/** Override navigator.platform (e.g. "Linux …") so platform-gated UI mounts. */
 	platform?: string;
 	/** Worker sessions present at first paint. */
@@ -371,9 +373,10 @@ export async function installFakeAgent(
 	const projectName = opts.projectName ?? "fake-proj";
 	const platform = opts.platform ?? null;
 	const workers = opts.workers ?? [];
+	const standalone = opts.standalone ?? false;
 
 	await page.addInitScript(
-		({ version, daemonPort, projectId, projectName, platform, workers }) => {
+		({ version, daemonPort, projectId, projectName, platform, workers, standalone }) => {
 			if (platform) {
 				try {
 					Object.defineProperty(navigator, "platform", {
@@ -437,6 +440,11 @@ export async function installFakeAgent(
 					...workers.map(makeWorker),
 				],
 			};
+			if (standalone) {
+				project.kind = "standalone";
+				project.path = "";
+				project.sessions = workers.map(makeWorker);
+			}
 
 			interface FakeEventSourceLike {
 				url: string;
@@ -795,6 +803,6 @@ export async function installFakeAgent(
 			} satisfies AoBridge;
 			(window as unknown as { ao: unknown }).ao = ao;
 		},
-		{ version, daemonPort, projectId, projectName, platform, workers },
+		{ version, daemonPort, projectId, projectName, platform, workers, standalone },
 	);
 }

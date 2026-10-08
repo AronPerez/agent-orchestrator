@@ -1348,6 +1348,7 @@
   "shell.pinned": "Pinned",
   "shell.pinSession": "Pin session",
   "shell.unpinSession": "Unpin session",
+  "shell.standaloneAgents": "Standalone agents",
   "shell.projects": "Projects",
   "shell.projectActions": "Project actions for {{name}}",
   "shell.projectSettings": "Project settings",

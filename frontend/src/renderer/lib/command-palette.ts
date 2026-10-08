@@ -3,6 +3,7 @@ import {
 	attentionZone,
 	attentionZoneOrder,
 	isOrchestratorSession,
+	isStandaloneSession,
 	openPRs,
 	sessionIsActive,
 	sessionNeedsAttention,
@@ -106,7 +107,7 @@ export const commandGroupLabel: Record<CommandGroupId, string> = {
 };
 
 function isSyntheticBranch(session: WorkspaceSession): boolean {
-	return session.branch === `session/${session.id}`;
+	return isStandaloneSession(session) || session.branch === `session/${session.id}`;
 }
 
 type SessionCommandGroup = Extract<CommandGroupId, "attention" | "sessions">;
@@ -193,7 +194,7 @@ export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n
 	const items: CommandItem[] = [];
 
 	const currentProject = currentProjectId && currentHostId
-		? workspaces.find((workspace) => workspace.id === currentProjectId && workspace.host === currentHostId)
+		? workspaces.find((workspace) => workspace.kind !== "standalone" && workspace.id === currentProjectId && workspace.host === currentHostId)
 		: undefined;
 	const currentSession = currentHostId && currentSessionId
 		? findSession(workspaces, { host: currentHostId, id: currentSessionId })?.session
@@ -266,7 +267,7 @@ export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n
 		items.push(sessionCommand(workspace, session, "attention"));
 	}
 
-	for (const workspace of workspaces) {
+	for (const workspace of workspaces.filter((workspace) => workspace.kind !== "standalone")) {
 		items.push({
 			id: `project:${refKey(workspace)}`,
 			group: "projects",

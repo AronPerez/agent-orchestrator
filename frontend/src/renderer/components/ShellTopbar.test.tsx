@@ -174,7 +174,14 @@ function renderTopbarSessions(
 		</QueryClientProvider>
 	);
 	const result = render(topbar());
-	return { ...result, queryClient, rerenderTopbar: () => result.rerender(topbar()) };
+	return {
+		...result,
+		queryClient,
+		rerenderTopbar: (nextSessions?: WorkspaceSession[]) => {
+			if (nextSessions) data[0].sessions = nextSessions;
+			result.rerender(topbar());
+		},
+	};
 }
 
 function renderKill(session: WorkspaceSession = worker, orchestratorId?: string) {
@@ -542,6 +549,50 @@ describe("ShellTopbar open-in-editor control", () => {
 });
 
 describe("TopbarKillButton", () => {
+	it.each([false, true])("returns a standalone session to Home only after success (early terminated refresh: %s)", async (refreshBeforeResponse) => {
+		let resolveKill!: (value: { data: { ok: boolean }; error: undefined }) => void;
+		postMock.mockReturnValue(new Promise((resolve) => { resolveKill = resolve; }));
+		const standalone = { ...worker, workspaceId: "@standalone", workspaceName: "Standalone agents" };
+		const view = renderTopbarSessions([standalone], standalone.id, false, undefined, "standalone");
+		expect(screen.queryByRole("button", { name: "Open orchestrator" })).not.toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "New task" })).not.toBeInTheDocument();
+
+		await userEvent.click(screen.getByRole("button", { name: "Kill session" }));
+		await clickKillDialogConfirm();
+
+		expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+		expect(await screen.findByRole("button", { name: "Killing..." })).toBeDisabled();
+		expect(navigateMock).not.toHaveBeenCalled();
+		if (refreshBeforeResponse) {
+			view.rerenderTopbar([{ ...standalone, isTerminated: true, status: "terminated" }]);
+		}
+		resolveKill({ data: { ok: true }, error: undefined });
+		await waitFor(() => expect(navigateMock).toHaveBeenCalledExactlyOnceWith({ to: "/" }));
+	});
+
+	it("does not offer a kill control for an already terminated standalone session", () => {
+		const standalone = { ...worker, workspaceId: "@standalone", isTerminated: true };
+		renderTopbarSessions([standalone], standalone.id, false, undefined, "standalone");
+		expect(screen.queryByRole("button", { name: "Kill session" })).not.toBeInTheDocument();
+	});
+
+	it.each(["daemon rejection", "connection failure"])("keeps standalone kill %s visible without navigating", async (failure) => {
+		if (failure === "daemon rejection") {
+			postMock.mockResolvedValue({ data: undefined, error: { message: "runtime teardown failed" } });
+		} else {
+			postMock.mockRejectedValue(new Error("runtime teardown failed"));
+		}
+		const standalone = { ...worker, workspaceId: "@standalone", workspaceName: "Standalone agents" };
+		renderTopbarSessions([standalone], standalone.id, false, undefined, "standalone");
+
+		await userEvent.click(screen.getByRole("button", { name: "Kill session" }));
+		await clickKillDialogConfirm();
+
+		expect(await screen.findByRole("alert")).toHaveTextContent("runtime teardown failed");
+		expect(navigateMock).not.toHaveBeenCalled();
+		expect(screen.getByRole("button", { name: "Kill session" })).toBeEnabled();
+	});
+
 	it("opens a compact confirmation card below the kill control", async () => {
 		renderKill();
 

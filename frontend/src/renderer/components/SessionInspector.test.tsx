@@ -1320,6 +1320,13 @@ describe("SessionInspector completion controls", () => {
     });
   });
 
+  it("terminates a standalone session back to Home instead of its synthetic group", async () => {
+    renderWithQuery(<SessionInspector session={session([pr(7, "merged")], { status: "merged", workspaceId: "@standalone" })} />);
+    await userEvent.click(screen.getByRole("button", { name: "Terminate session" }));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Yes, terminate session" }));
+    expect(navigateMock).toHaveBeenCalledWith({ to: "/" });
+  });
+
   it("hides completion controls after the session is terminated", () => {
     renderWithQuery(
       <SessionInspector

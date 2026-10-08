@@ -61,7 +61,7 @@ vi.mock("./useCloudOrg", () => ({
   }),
 }));
 
-import { useWorkspaceQuery, useWorkspaceTraySessions } from "./useWorkspaceQuery";
+import { useWorkspaceQuery, useWorkspaceSession, useWorkspaceTraySessions } from "./useWorkspaceQuery";
 import { cloudHost, LOCAL_HOST, refKey, type HostId } from "../lib/hosts";
 
 function wrapper({ children }: { children: ReactNode }) {
@@ -105,7 +105,7 @@ beforeEach(() => {
 type HostFixture = {
   host: HostId;
   projects?: Array<{ id: string; name: string; path?: string }>;
-  sessions?: Array<{ id: string; projectId: string }>;
+  sessions?: Array<{ id: string; projectId?: string; mode?: "chat" | "tui"; status?: string; activity?: { state: string } }>;
   fail?: string;
   body?: unknown;
 };
@@ -210,7 +210,24 @@ describe("useWorkspaceQuery", () => {
         id: workspace.id,
         sessions: workspace.sessions.map((session) => session.id),
       })),
-    ).toEqual([{ id: "proj-1", sessions: ["sess-1"] }]);
+    ).toEqual([
+      { id: "proj-1", sessions: ["sess-1"] },
+      { id: "@standalone", sessions: ["standalone-1"] },
+    ]);
+  });
+
+  it("resolves projectless sessions directly on hosts with no projects, without ID collisions", async () => {
+    const remote = "http://192.0.2.1:3011";
+    const sections = await fetchAllForTest([
+      { host: LOCAL_HOST, sessions: [{ id: "same", mode: "chat", status: "working", activity: { state: "idle" } }] },
+      { host: remote, sessions: [{ id: "same", projectId: "", mode: "tui", status: "working", activity: { state: "idle" } }] },
+    ]);
+    expect(sections.map((section) => section.workspaces[0])).toMatchObject([
+      { host: LOCAL_HOST, id: "@standalone", kind: "standalone", sessions: [{ id: "same", mode: "chat", status: "working", activity: { state: "idle" } }] },
+      { host: remote, id: "@standalone", kind: "standalone", sessions: [{ id: "same", mode: "tui" }] },
+    ]);
+    const { result } = renderHook(() => useWorkspaceSession({ host: remote, id: "same" }), { wrapper });
+    await waitFor(() => expect(result.current.data).toMatchObject({ host: remote, id: "same", mode: "tui", workspaceId: "@standalone" }));
   });
 
   it("reports the local host as failed while the daemon client is not ready", async () => {
@@ -400,22 +417,25 @@ describe("useWorkspaceQuery", () => {
     });
   });
 
-  it("preserves daemon artifact URLs separately from workspace paths", async () => {
+  it.each(["proj-1", undefined])("preserves daemon artifact URLs and provider state for project %s", async (projectId) => {
     const artifactFiles = [{
       path: "report.md", name: "report.md", kind: "markdown", size: 42,
       updatedAt: "2026-10-08T00:00:00Z",
       rawUrl: "http://ao-preview-artifact.onxxe3df.localhost:3000/report.md?raw=true",
     }];
     respondWith({
-      projects: { data: { projects: [{ id: "proj-1", name: "App", path: "/app" }] } },
+      projects: { data: { projects: projectId ? [{ id: projectId, name: "App", path: "/app" }] : [] } },
       sessions: { data: { sessions: [{
-        id: "sess-1", projectId: "proj-1", status: "working", isTerminated: false,
+        id: "sess-1", projectId, status: "working", isTerminated: false,
+        chatProviderPreserved: true,
         updatedAt: "2026-10-08T00:00:00Z", artifactFiles,
       }] } },
     });
     const { result } = renderWorkspaceQuery();
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(result.current.data?.[0].workspaces[0].sessions[0]).toMatchObject({ artifactFiles });
+    expect(result.current.data?.[0].workspaces[0].sessions[0]).toMatchObject({
+      workspaceId: projectId ?? "@standalone", artifactFiles, chatProviderPreserved: true,
+    });
   });
 
   it("maps each session's prs straight from the session list", async () => {
@@ -582,6 +602,22 @@ describe("useWorkspaceQuery", () => {
       const { result } = renderHook(() => useWorkspaceQuery(), { wrapper: queryWrapper });
       return { queryClient, result };
     }
+
+    it("retains projectless archive records, with active sessions winning on restore", async () => {
+      feed({
+        active: [{ id: "restored", status: "working", mode: "chat", isTerminated: false }],
+        archived: [
+          { id: "restored", status: "terminated", isTerminated: true },
+          { id: "old", status: "terminated", isTerminated: true },
+        ],
+      });
+      const { result } = renderWithClient();
+      await waitFor(() => expect(result.current.isSuccess).toBe(true));
+      const group = result.current.data?.[0].workspaces.find((workspace) => workspace.kind === "standalone");
+      expect(group?.sessions.map(({ id, isTerminated }) => ({ id, isTerminated }))).toEqual([
+        { id: "restored", isTerminated: false }, { id: "old", isTerminated: true },
+      ]);
+    });
 
     it("fetches only active sessions on the host key and merges the archive from its own query", async () => {
       const counts = feed({

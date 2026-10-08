@@ -9,6 +9,7 @@ import type { TraySessionEntry } from "../../shared/tray";
 import { useMemo, useSyncExternalStore } from "react";
 import type { components } from "../../api/schema";
 import { apiErrorMessage } from "../lib/api-client";
+import { appI18n } from "../i18n";
 import type { CloudCpProject, CloudCpSession } from "../lib/cloud-cp";
 import {
   clientFor,
@@ -37,6 +38,7 @@ import {
   type PullRequestFacts,
   type HostSection,
   flattenHostSections,
+  STANDALONE_WORKSPACE_ID,
   toAgentProvider,
   toKanbanColumn,
   toProjectKind,
@@ -108,9 +110,7 @@ function isProject(value: unknown): value is ProjectSummaryDTO {
 function isSession(value: unknown): value is SessionDTO {
   if (typeof value !== "object" || value === null) return false;
   const session = value as Partial<SessionDTO>;
-  // projectId is absent on standalone sessions; they match no project below.
-  // ponytail: they stay hidden here; port upstream's "Ad hoc agents" workspace
-  // (#4851) if this fork wants them in the sidebar.
+  // projectId is absent on standalone sessions.
   return (
     typeof session.id === "string" &&
     (session.projectId === undefined || typeof session.projectId === "string")
@@ -148,7 +148,7 @@ function malformedOnSyntaxError(error: unknown): never {
 
 function toWorkspaceSession(
   host: HostId,
-  project: ProjectSummaryDTO,
+  project: Pick<ProjectSummaryDTO, "id" | "name">,
   session: SessionDTO,
 ): WorkspaceSession {
   const status = toSessionStatus(session.status, session.isTerminated);
@@ -310,7 +310,12 @@ async function fetchWorkspaces(
 
   const archived = await archivedSessions(host, client, active, lastGood);
   const activeIds = new Set(active.map((session) => session.id));
-  return projects.map((project) => ({
+  // Active wins while a restored session is still in the cached archive.
+  const sessions = [
+    ...active,
+    ...archived.filter((session) => !activeIds.has(session.id)),
+  ];
+  const workspaces: WorkspaceSummary[] = projects.map((project) => ({
     host,
     id: project.id,
     name: project.name,
@@ -319,16 +324,25 @@ async function fetchWorkspaces(
     orchestratorAgent: project.orchestratorAgent
       ? toAgentProvider(project.orchestratorAgent)
       : undefined,
-    sessions: [
-      ...active.filter((session) => session.projectId === project.id),
-      // Active wins: a restored session is in both lists until the archive
-      // refreshes, and must not render twice.
-      ...archived.filter(
-        (session) =>
-          session.projectId === project.id && !activeIds.has(session.id),
-      ),
-    ].map((session) => toWorkspaceSession(host, project, session)),
+    sessions: sessions
+      .filter((session) => session.projectId === project.id)
+      .map((session) => toWorkspaceSession(host, project, session)),
   }));
+  const standalone = sessions.filter((session) => !session.projectId);
+  if (standalone.length > 0) {
+    const group = {
+      id: STANDALONE_WORKSPACE_ID,
+      name: appI18n.t("shell.standaloneAgents"),
+    };
+    workspaces.push({
+      ...group,
+      host,
+      kind: "standalone",
+      path: "",
+      sessions: standalone.map((session) => toWorkspaceSession(host, group, session)),
+    });
+  }
+  return workspaces;
 }
 
 async function fetchHostSection(
@@ -618,7 +632,7 @@ function selectWorkspaceScope(
 	// Do not carry the project's complete sessions array into shell chrome. With
 	// React Query's structural sharing, this small metadata projection retains
 	// its identity when another session in the same project streams an update.
-	const project = workspace
+	const project = workspace && workspace.kind !== "standalone"
 		? {
 				id: workspace.id,
 				kind: workspace.kind,

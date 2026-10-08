@@ -315,7 +315,7 @@ function ShellLayout() {
 	// Project in scope for a new-session shortcut: the route's project, or the
 	// workspace owning the open session (so the shortcut works from a worker's
 	// detail view, where the URL carries only a sessionId).
-	const scopedWorkspace = routeParams.sessionId
+	const scopedGroup = routeParams.sessionId
 		? workspaces.find((workspace) =>
 				workspace.sessions.some(
 					(session) => session.host === routeParams.hostId && session.id === routeParams.sessionId,
@@ -326,6 +326,8 @@ function ShellLayout() {
 					(workspace) => workspace.host === routeParams.hostId && workspace.id === routeParams.projectId,
 				)
 			: undefined;
+	const scopedGroupId = scopedGroup?.id;
+	const scopedWorkspace = scopedGroup?.kind === "standalone" ? undefined : scopedGroup;
 	const scopedProjectId = scopedWorkspace?.id;
 	// Warms the New Task composer's model-catalog cache while the user is just
 	// looking at the project, so the picker never shows a loading flash the
@@ -379,10 +381,10 @@ function ShellLayout() {
 		(!isDaemonReady || workspaceStartupState === "loading");
 	const navigateSession = useCallback(
 		(direction: -1 | 1) => {
-			if (!scopedProjectId) return;
+			if (!scopedGroupId) return;
 			const sessions = (
 				workspacesRef.current.find(
-					(workspace) => workspace.host === routeParams.hostId && workspace.id === scopedProjectId,
+					(workspace) => workspace.host === routeParams.hostId && workspace.id === scopedGroupId,
 				)?.sessions ?? []
 			).filter(
 				sessionIsActive,
@@ -402,7 +404,7 @@ function ShellLayout() {
 				params: { hostId: session.host, sessionId: session.id },
 			});
 		},
-		[navigate, routeParams.hostId, routeParams.sessionId, scopedProjectId],
+		[navigate, routeParams.hostId, routeParams.sessionId, scopedGroupId],
 	);
 
 	const updateWorkspaces = useCallback(
@@ -694,7 +696,7 @@ function ShellLayout() {
 				return;
 			}
 			if (matchesRendererShortcut("open-project", event)) {
-				const workspace = workspacesRef.current[Number(event.key) - 1];
+				const workspace = workspacesRef.current.filter((workspace) => workspace.kind !== "standalone")[Number(event.key) - 1];
 				if (workspace) {
 					event.preventDefault();
 					void navigate({

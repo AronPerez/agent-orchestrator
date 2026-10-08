@@ -71,6 +71,7 @@ import { formatTokenCount } from "../lib/format-token-count";
 import { processedTokensOf } from "../lib/usage-tokens";
 import {
   findProjectOrchestrator,
+  isStandaloneSession,
   flattenHostSections,
   sortedPRs,
   type HostSection,
@@ -1382,6 +1383,10 @@ function SessionControls({ session }: { session: WorkspaceSession }) {
     });
     setConfirmOpen(false);
     terminate.mutate(session);
+    if (isStandaloneSession(session)) {
+      void navigate({ to: "/" });
+      return;
+    }
     if (orchestrator) {
       void navigate({
         to: "/host/$hostId/session/$sessionId",
@@ -1864,7 +1869,7 @@ function ReviewsSection({
   useEnsureAgentReadiness({ host: session.host });
   const projectConfigQuery = useQuery({
     queryKey: ["project-config", projectKey],
-    enabled: hasPr,
+    enabled: hasPr && !isStandaloneSession(session),
     queryFn: async () => {
       if (usePreviewData) return mockProjectConfig();
       const { data, error } = await clientFor(session.host).GET(

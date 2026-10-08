@@ -11,6 +11,7 @@ import { useTerminalShellStore } from "../stores/terminal-shell-store";
 import { useUiStore } from "../stores/ui-store";
 import { TooltipProvider } from "./ui/tooltip";
 import { settingsQueryKey, type Settings } from "../hooks/useSettings";
+import { codexAccountsFixture } from "../test/codex-accounts-fixture";
 
 const {
 	getUpdate,
@@ -71,7 +72,10 @@ vi.mock("../lib/platform", async (importOriginal) => {
 
 vi.mock("../lib/host-clients", () => ({
 	baseUrlFor: () => "http://localhost:3001",
-	clientFor: () => ({ GET: async () => ({ data: { sessions: [] } }) }),
+	clientFor: () => ({ GET: async (path: string) => ({
+		data: path === "/api/v1/agents/codex/accounts" ? codexAccountsFixture() : { sessions: [] },
+		response: { status: 200 },
+	}) }),
 }));
 
 vi.mock("../lib/bridge", () => ({
@@ -182,6 +186,7 @@ describe("GlobalSettingsForm", () => {
 		expect(screen.getByText("Appearance")).toBeInTheDocument();
 		expect(screen.getByText("Language")).toBeInTheDocument();
 		expect(await screen.findByText("Updates")).toBeInTheDocument();
+		expect(await screen.findByText("Personal")).toBeInTheDocument();
 		expect(screen.getByText("Advanced")).toBeInTheDocument();
 		expect(screen.getByText("Report a problem")).toBeInTheDocument();
 		// Report form is inline — no dialog, fields directly present.

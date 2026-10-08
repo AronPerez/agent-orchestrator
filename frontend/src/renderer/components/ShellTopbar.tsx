@@ -16,6 +16,7 @@ import {
   flattenHostSections,
   hasConfiguredOrchestratorAgent,
   isOrchestratorSession,
+  isStandaloneSession,
   newestActiveOrchestrator,
   sessionIsActive,
   type WorkspaceSession,
@@ -170,7 +171,7 @@ export function ShellTopbar({
   // projectId that no longer resolves (stale route after the project was
   // removed, or data still loading) shows an empty crumb — never the raw
   // route slug. "Board" is the root-board crumb only.
-  const projectId = session?.workspaceId ?? params.projectId;
+  const projectId = session && isStandaloneSession(session) ? undefined : session?.workspaceId ?? params.projectId;
   const projectHostId = session?.host ?? params.hostId;
   const isProjectBoardRoute = !isSessionRoute && Boolean(projectId);
   const isRootBoardRoute = !isSessionRoute && !isProjectBoardRoute;
@@ -496,7 +497,7 @@ export function ShellTopbar({
 						    remains a separate visual target in the outer top-bar row. */}
               {!isOrchestrator &&
               session &&
-              (sessionAction || sessionIsActive(session)) ? (
+              (sessionAction || sessionIsActive(session) || isStandaloneSession(session)) ? (
                 <div
                   className={cn(
                     "inline-flex shrink-0 items-center",
@@ -510,12 +511,16 @@ export function ShellTopbar({
                       {sessionAction}
                     </div>
                   ) : null}
-                  {sessionIsActive(session) ? (
+                  {sessionIsActive(session) || isStandaloneSession(session) ? (
                     <TopbarKillButton
                       key={refKey(session)}
                       session={session}
                       orchestrator={orchestrator}
                       onKilled={(workspaceId, orchestratorSession) => {
+                        if (isStandaloneSession(session)) {
+                          void navigate({ to: "/" });
+                          return;
+                        }
                         if (orchestratorSession) {
                           void navigate({
                             to: "/host/$hostId/session/$sessionId",
@@ -538,7 +543,7 @@ export function ShellTopbar({
                   ) : null}
                 </div>
               ) : null}
-              {!isOrchestrator ? (
+              {!isOrchestrator && project ? (
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <span className="inline-flex" style={noDragStyle}>
@@ -587,6 +592,7 @@ export function ShellTopbar({
 
 // Confirmation is modal, but teardown progress is not: confirming closes the
 // dialog and returns to the project's orchestrator while the daemon finishes.
+// Standalone sessions stay here until success so failures remain visible.
 // Mutation-cache state is filtered by worker ID so rapid route switches never
 // carry another worker's Killing/error state into the current topbar.
 export function TopbarKillButton({
@@ -606,9 +612,18 @@ export function TopbarKillButton({
 
   const confirmKill = () => {
     setConfirmOpen(false);
+    if (isStandaloneSession(session)) {
+      kill.mutate(session, {
+        onSuccess: () => onKilled(session.workspaceId, orchestrator),
+      });
+      return;
+    }
     kill.mutate(session);
     onKilled(session.workspaceId, orchestrator);
   };
+
+  // Keep the standalone mutation observer mounted across early termination refreshes.
+  if (!sessionIsActive(session) && !isPending && !error) return null;
 
   return (
     <div className="inline-flex items-center gap-1.5" style={noDragStyle}>
