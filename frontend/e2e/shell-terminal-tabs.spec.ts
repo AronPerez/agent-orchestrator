@@ -34,6 +34,8 @@ test("opens, selects, and closes standalone shell terminals from the tab strip",
 });
 
 test("selects inactive tabs from the blank space above their action controls", async ({ page }) => {
+	// Keep the desktop tab strip clear of the narrow-layout traffic-light overlay.
+	await page.setViewportSize({ width: 1400, height: 950 });
 	await page.goto("/#/host/local/session/demo-working");
 	await page.getByRole("button", { name: "New terminal" }).click();
 	const agentTab = page.getByRole("tab", { name: /^Build screenshot-ready dashboard data/ });
