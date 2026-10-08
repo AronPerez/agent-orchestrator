@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import fs, { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import type { ForgeHookFn, ResolvedForgeConfig } from "@electron-forge/shared-types";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MachOParseError } from "./makers/macho-archs";
@@ -317,5 +318,38 @@ describe("packaged native dependencies", () => {
 		expect(ignore("/node_modules/react/index.js")).toBe(true);
 		expect(ignore("/src/main.ts")).toBe(true);
 		expect(config.hooks?.prePackage).toBeTypeOf("function");
+	});
+});
+
+describe("desktop release feed", () => {
+	afterEach(() => {
+		vi.unstubAllEnvs();
+		vi.restoreAllMocks();
+	});
+
+	it.each([
+		[undefined, "AronPerez", "agent-orchestrator"],
+		["", "AronPerez", "agent-orchestrator"],
+		["invalid", "AronPerez", "agent-orchestrator"],
+		["custom-owner/custom-repo", "custom-owner", "custom-repo"],
+	])("uses AO_RELEASE_REPO=%s for the updater and publisher", async (repo, owner, name) => {
+		vi.stubEnv("AO_RELEASE_REPO", repo);
+		vi.resetModules();
+		const writeFile = vi.spyOn(fs, "writeFileSync").mockImplementation(() => {});
+		const { default: releaseConfig } = await import("./forge.config");
+		const prePackage = releaseConfig.hooks!.prePackage as ForgeHookFn<"prePackage">;
+		await prePackage(releaseConfig as ResolvedForgeConfig, "darwin", "arm64");
+
+		expect(writeFile).toHaveBeenCalledWith("app-update.yml", [
+			"provider: github",
+			`owner: ${owner}`,
+			`repo: ${name}`,
+			"updaterCacheDirName: agent-orchestrator-updater",
+			"",
+		].join("\n"));
+		expect(releaseConfig.publishers).toContainEqual(expect.objectContaining({
+			name: "@electron-forge/publisher-github",
+			config: expect.objectContaining({ repository: { owner, name } }),
+		}));
 	});
 });
