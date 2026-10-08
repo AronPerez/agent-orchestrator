@@ -82,7 +82,9 @@ done
 rm -f "${HOME}/.ao/lan-web-server.sh" "${HOME}/.ao/phone-bridge.sh"
 
 # 4b. one-shot login job: AO_KEEP_DAEMON=1 for the GUI session, so Dock/Finder
-# app launches spawn a persistent daemon (survives app quit; stops on `ao stop`).
+# app launches spawn a persistent daemon (survives app quit; stops on `ao stop`),
+# and AO_DAEMON_COMMAND so that daemon is the ~/.ao/host/current binary that
+# scripts/install-desktop-app.sh installs, not the app bundle's copy.
 cat > "${la_dir}/dev.agent-orchestrator.env.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -92,10 +94,9 @@ cat > "${la_dir}/dev.agent-orchestrator.env.plist" <<PLIST
 	<string>dev.agent-orchestrator.env</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/bin/launchctl</string>
-		<string>setenv</string>
-		<string>AO_KEEP_DAEMON</string>
-		<string>1</string>
+		<string>/bin/sh</string>
+		<string>-c</string>
+		<string>launchctl setenv AO_KEEP_DAEMON 1; launchctl setenv AO_DAEMON_COMMAND "exec '\$HOME/.ao/host/current/resources/daemon/ao' daemon"</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>

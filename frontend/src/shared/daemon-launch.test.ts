@@ -14,6 +14,13 @@ describe("resolveDaemonLaunch", () => {
 		});
 	});
 
+	it("runs a configured command from ~/.ao in a packaged app, not from app.asar", () => {
+		expect(
+			resolveDaemonLaunch({ AO_DAEMON_COMMAND: "/tmp/ao daemon" }, true, "/resources", "/resources/app.asar", "/home/user", "darwin")
+				?.cwd,
+		).toBe("/home/user/.ao");
+	});
+
 	it("uses the prebuilt daemon binary in non-Windows dev", () => {
 		expect(resolveDaemonLaunch({}, false, "/resources", "/repo/frontend", "/home/user", "darwin")).toEqual({
 			command: "/repo/frontend/daemon/ao",

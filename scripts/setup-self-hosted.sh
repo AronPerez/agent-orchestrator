@@ -304,13 +304,21 @@ if [[ "$platform" == Linux ]]; then
 else
 	plist="$HOME/Library/LaunchAgents/dev.aoagents.self-hosted.plist"
 	mkdir -p "$(dirname "$plist")" "$host_root/logs"
-	AO_HOST_PLIST="$plist" AO_HOST_RUNNER="$runner" AO_HOST_LOG_DIR="$host_root/logs" python3 - <<'PY'
+	# With --app the desktop app replaces any daemon it did not start (per-launch
+	# browser token), so KeepAlive would respawn into "already running" forever.
+	# Start at login only, and have the app spawn this same binary.
+	keep_alive=true
+	if [[ -n "$app" ]]; then
+		keep_alive=false
+		launchctl setenv AO_DAEMON_COMMAND "exec $(printf '%q' "$host_root/current/resources/daemon/ao") daemon"
+	fi
+	AO_HOST_PLIST="$plist" AO_HOST_RUNNER="$runner" AO_HOST_LOG_DIR="$host_root/logs" AO_HOST_KEEP_ALIVE="$keep_alive" python3 - <<'PY'
 import os, plistlib
 data = {
     'Label': 'dev.aoagents.self-hosted',
     'ProgramArguments': [os.environ['AO_HOST_RUNNER']],
     'RunAtLoad': True,
-    'KeepAlive': True,
+    'KeepAlive': os.environ['AO_HOST_KEEP_ALIVE'] == 'true',
     'StandardOutPath': os.path.join(os.environ['AO_HOST_LOG_DIR'], 'daemon.log'),
     'StandardErrorPath': os.path.join(os.environ['AO_HOST_LOG_DIR'], 'daemon.err'),
 }
