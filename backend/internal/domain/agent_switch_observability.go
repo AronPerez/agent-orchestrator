@@ -1303,7 +1303,7 @@ func contains[T comparable](values []T, target T) bool {
 	return false
 }
 
-// StableAgentSwitchEventID derives a Sentry-compatible EventID from an opaque
+// StableAgentSwitchEventID derives a stable EventID from an opaque
 // local incident key. It exists so retries and response-loss use one identity.
 func StableAgentSwitchEventID(dedupeKey string) string {
 	digest := sha256.Sum256([]byte(dedupeKey))

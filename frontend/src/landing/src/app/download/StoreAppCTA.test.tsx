@@ -4,7 +4,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const platform = { platform: "unknown", mobileOS: null as string | null };
 
-vi.mock("../../lib/analytics", () => ({ track: vi.fn() }));
 vi.mock("../hooks/useOS", () => ({
   Platform: { Mobile: "mobile", Unknown: "unknown" },
   usePlatform: () => platform,

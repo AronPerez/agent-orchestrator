@@ -1,4 +1,3 @@
-import { useEffect } from "react";
 import { useRouter } from "expo-router";
 import { Image, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -9,8 +8,6 @@ import MASCOT from "../assets/mascot.png";
 import { useThemedStyles } from "../lib/ThemeProvider";
 import type { Theme } from "../lib/theme";
 import { haptics } from "../lib/haptics";
-import { MOBILE_EVENTS } from "../lib/telemetry/events";
-import { mobileTelemetry } from "../lib/telemetry/runtime";
 
 export default function OnboardingScreen() {
 	const styles = useThemedStyles(makeStyles);
@@ -18,12 +15,7 @@ export default function OnboardingScreen() {
 	const insets = useSafeAreaInsets();
 	const { reloadConfig } = useApp();
 
-	useEffect(() => {
-		mobileTelemetry()?.capture(MOBILE_EVENTS.onboardingStarted);
-	}, []);
-
 	async function skip() {
-		mobileTelemetry()?.capture(MOBILE_EVENTS.onboardingSkipped);
 		await setOnboardingSkipped();
 		await reloadConfig();
 		router.replace("/");

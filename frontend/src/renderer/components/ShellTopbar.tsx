@@ -34,11 +34,6 @@ import {
 } from "../hooks/useTerminateSession";
 import { spawnCloudOrchestrator } from "../lib/cloud-orchestrator";
 import { spawnOrchestrator } from "../lib/spawn-orchestrator";
-import {
-  addRendererExceptionStep,
-  captureRendererEvent,
-  captureRendererException,
-} from "../lib/telemetry";
 import { sidebarOccupiesLayout, useUiStore } from "../stores/ui-store";
 import { OrchestratorIcon } from "./icons";
 import { OrchestratorActivityIndicator } from "./OrchestratorActivityIndicator";
@@ -222,15 +217,6 @@ export function ShellTopbar({
   const openOrchestrator = async () => {
     if (!project) return;
     setBoardSpawnError(null);
-    void addRendererExceptionStep("Orchestrator open requested", {
-      source: "orchestrator-open",
-      operation: "open_orchestrator",
-      surface: isSessionRoute ? "session_detail" : "project_board",
-      project_id: projectId,
-    });
-    void captureRendererEvent("ao.renderer.orchestrator_open_requested", {
-      project_id: projectId,
-    });
     if (orchestrator) {
       void navigate({
         to: "/host/$hostId/session/$sessionId",
@@ -268,19 +254,13 @@ export function ShellTopbar({
     }
     setIsSpawning(true);
     try {
-      const sessionId = await spawnOrchestrator(project, "topbar");
+      const sessionId = await spawnOrchestrator(project);
       await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
       void navigate({
         to: "/host/$hostId/session/$sessionId",
         params: { hostId: project.host, sessionId },
       });
     } catch (error) {
-      void captureRendererException(error, {
-        source: "orchestrator-open",
-        operation: "open_orchestrator",
-        surface: isSessionRoute ? "session_detail" : "project_board",
-        project_id: projectId,
-      });
       console.error("Failed to spawn orchestrator:", error);
       setBoardSpawnError(
         error instanceof Error ? error.message : t("shell.couldNotSpawn"),
@@ -510,7 +490,6 @@ export function ShellTopbar({
                   key={`open-workspace-${refKey(session)}`}
                   host={session.host}
                   sessionId={session.id}
-                  projectId={isStandaloneSession(session) ? "" : session.workspaceId}
                   style={noDragStyle}
                 />
               ) : null}

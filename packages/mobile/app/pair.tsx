@@ -33,8 +33,6 @@ import { useApp } from "../lib/store";
 import { Button, NumberedStep } from "../lib/ui";
 import { useTheme, useThemedStyles } from "../lib/ThemeProvider";
 import { MinimalBackButton } from "../lib/MinimalBackButton";
-import { MOBILE_EVENTS } from "../lib/telemetry/events";
-import { mobileTelemetry } from "../lib/telemetry/runtime";
 
 export default function PairScreen() {
   const t = useTheme();
@@ -133,8 +131,6 @@ export default function PairScreen() {
 		// The rest of the app still runs off ServerConfig, so the winning
 		// endpoint is written there as well as into the host list.
 		await saveConfig(result.config);
-		mobileTelemetry()?.capture(MOBILE_EVENTS.paired, { method: "qr", from_onboarding: fromOnboarding });
-		if (fromOnboarding) mobileTelemetry()?.capture(MOBILE_EVENTS.onboardingCompleted);
       haptics.success();
       await finish();
   }

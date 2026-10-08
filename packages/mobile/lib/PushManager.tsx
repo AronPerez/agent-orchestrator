@@ -12,8 +12,6 @@ import { getInstallId } from "./installId";
 import { notificationTarget } from "./notificationView";
 import { configurePushHandler, ensureAndroidChannel, registerForPush, unpairFromServer } from "./push";
 import { useApp } from "./store";
-import { MOBILE_EVENTS } from "./telemetry/events";
-import { mobileTelemetry } from "./telemetry/runtime";
 
 // Set the foreground presentation policy before any notification can arrive.
 configurePushHandler();
@@ -101,28 +99,23 @@ export function PushManager(): null {
 	useEffect(() => {
 		if (!navState?.key) return; // wait until navigation is ready to accept routes
 
-		const handle = (resp: Notifications.NotificationResponse | null, coldStart: boolean) => {
+		const handle = (resp: Notifications.NotificationResponse | null) => {
 			if (!resp) return;
-			route((resp.notification.request.content.data ?? {}) as PushData, coldStart);
+			route((resp.notification.request.content.data ?? {}) as PushData);
 		};
 
 		if (!handledColdStart.current) {
 			handledColdStart.current = true;
-			void Notifications.getLastNotificationResponseAsync().then((r) => handle(r, true));
+			void Notifications.getLastNotificationResponseAsync().then(handle);
 		}
-		const sub = Notifications.addNotificationResponseReceivedListener((r) => handle(r, false));
+		const sub = Notifications.addNotificationResponseReceivedListener(handle);
 		return () => sub.remove();
 		// route() reads the latest config via ref-free closure; re-bind when it changes.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [navState?.key, config]);
 
-	function route(data: PushData, coldStart = false) {
-		// Reuse the one routing rule so the reported target can't disagree with
-		// where the tap actually lands: notificationTarget returns /session/:id
-		// only for a needs_input with a sessionId, and /prs for everything else.
+	function route(data: PushData) {
 		const destination = notificationTarget({ type: data.type ?? "", sessionId: data.sessionId });
-		const target = destination.startsWith("/session") ? "session" : "prs";
-		mobileTelemetry()?.capture(MOBILE_EVENTS.notificationOpened, { target, cold_start: coldStart });
 		// Best-effort mark-read so unread counts stay consistent with the dashboard.
 		if (config && data.notificationId) {
 			markNotificationRead(config, data.notificationId).catch(() => {});

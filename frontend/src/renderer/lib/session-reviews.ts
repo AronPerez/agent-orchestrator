@@ -62,8 +62,7 @@ export function reviewRunDisabled(openReviewStates: PRReviewState[], isTriggerin
 
 /**
  * Which action the session-level review button currently offers, as a stable
- * enum. Split out of reviewSessionRunAction so telemetry can report the action
- * a user took without depending on the translated label they saw.
+ * enum independent of the translated label.
  */
 export type ReviewRunActionKind = "reviewing" | "run_latest" | "rerun" | "run";
 

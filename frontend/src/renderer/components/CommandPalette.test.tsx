@@ -142,7 +142,6 @@ vi.mock("../lib/host-clients", async (importOriginal) => ({
 	clientFor: () => ({ GET: getMock, POST: postMock }),
 }));
 
-
 vi.mock("../lib/bridge", () => ({
 	aoBridge: {
 		app: { openExternal: openExternalMock },
@@ -617,7 +616,6 @@ describe("CommandPalette actions", () => {
 		expect(await screen.findByRole("alert")).toHaveTextContent("daemon down");
 		expect(spawnMock).toHaveBeenCalledWith(
 			expect.objectContaining({ host: "local", id: "proj-2" }),
-			"command_palette",
 		);
 		expect(useUiStore.getState().isCommandPaletteOpen).toBe(true);
 	});

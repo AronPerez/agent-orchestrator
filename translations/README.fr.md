@@ -225,7 +225,7 @@ Rejoignez [Discord](https://discord.com/invite/UZv7JjxbwG) pour obtenir de l'aid
 
 ## Télémétrie produit
 
-Orchestrator.inc collecte des métriques d'usage et de fiabilité sans contenu des projets. Le propriétaire GitHub d'un projet et le nom d'utilisateur GitHub connecté peuvent toutefois identifier une personne; la télémétrie n'est donc pas anonyme. La désactiver arrête aussi l'envoi de ces identifiants. [Détails et réglages](../docs/telemetry.md).
+Ce fork n’envoie ni statistiques d’utilisation ni rapports de plantage. Les diagnostics locaux et les fonctions réseau, dont la recherche de mises à jour, sont conservés. [Détails](../docs/telemetry.md).
 
 ## Licence
 

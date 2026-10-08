@@ -225,7 +225,7 @@ Komm auf unseren [Discord](https://discord.com/invite/UZv7JjxbwG), wenn du Hilfe
 
 ## Produkttelemetrie
 
-Orchestrator.inc erfasst Nutzungs- und Zuverlässigkeitsdaten ohne Projektinhalte. Der GitHub-Projektinhaber und der angemeldete GitHub-Nutzername können jedoch Personen identifizieren; die Telemetrie ist daher nicht anonym. Beim Abschalten werden auch diese Angaben nicht mehr gesendet. [Details und Einstellungen](../docs/telemetry.md).
+Dieser Fork sendet keine Produktanalysen oder Absturzberichte. Lokale Diagnosen und funktionale Netzwerkzugriffe, einschließlich Update-Prüfungen, bleiben erhalten. [Details](../docs/telemetry.md).
 
 ## Lizenz
 

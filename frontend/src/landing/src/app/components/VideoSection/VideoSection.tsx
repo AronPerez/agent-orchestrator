@@ -1,21 +1,13 @@
 "use client";
 
 import Image from "next/image";
-import dynamic from "next/dynamic";
-import { useRef, useState } from "react";
-import { track } from "@/lib/analytics";
-import { newVideoProgressState, reportVideoProgress } from "@/lib/analytics/video-progress";
-
-// Loaded on demand, not with the page. The player is ~1.1MB and the section is
-// below the fold behind a click, so a static import put it on the critical path
-// of every homepage visit for a video most visitors never play. It is only
-// rendered once `playing` is true, so there is nothing to show until then.
-const MuxPlayer = dynamic(() => import("@mux/mux-player-react"), { ssr: false });
+import { useEffect, useRef, useState } from "react";
 
 const MUX_PLAYBACK_ID =
 	process.env.NEXT_PUBLIC_MUX_PLAYBACK_ID ??
 	"cpmHxjRygocH1rPeKq6jk4UYxGghl8B8ABcop4Gc01b8";
 const VIDEO_TITLE = "AO Demo";
+const VIDEO_SOURCE = `https://stream.mux.com/${MUX_PLAYBACK_ID}.m3u8`;
 
 function PlayIcon({ className = "" }: { className?: string }) {
 	return (
@@ -32,14 +24,41 @@ function PlayIcon({ className = "" }: { className?: string }) {
 
 export function VideoSection() {
 	const [playing, setPlaying] = useState(false);
-	// One view's reported milestones. Lives in a ref so a re-render never resets
-	// it and re-reports a milestone the visitor already passed.
-	// Lazy ref init: passing newVideoProgressState() as the useRef argument would
-	// build a fresh Set on every render and immediately discard it. Build it once,
-	// on first render, and read the stable value out for the rest of the render.
-	const progressRef = useRef<ReturnType<typeof newVideoProgressState> | null>(null);
-	progressRef.current ??= newVideoProgressState();
-	const progress = progressRef.current;
+	const [playbackError, setPlaybackError] = useState(false);
+	const videoRef = useRef<HTMLVideoElement>(null);
+
+	useEffect(() => {
+		const video = videoRef.current;
+		if (!playing || !video) return;
+		if (video.canPlayType("application/vnd.apple.mpegurl")) {
+			video.src = VIDEO_SOURCE;
+			return;
+		}
+
+		// Load only the HLS playback engine, without the vendor analytics client.
+		let disposed = false;
+		let destroy: (() => void) | undefined;
+		void import("hls.js").then(({ default: Hls }) => {
+			if (disposed) return;
+			if (!Hls.isSupported()) {
+				setPlaybackError(true);
+				return;
+			}
+			const hls = new Hls();
+			destroy = () => hls.destroy();
+			hls.on(Hls.Events.ERROR, (_event, data) => {
+				if (!disposed && data.fatal) setPlaybackError(true);
+			});
+			hls.loadSource(VIDEO_SOURCE);
+			hls.attachMedia(video);
+		}).catch(() => {
+			if (!disposed) setPlaybackError(true);
+		});
+		return () => {
+			disposed = true;
+			destroy?.();
+		};
+	}, [playing]);
 
 	return (
 		<section id="see-it" className="relative px-4 py-16 sm:px-8 sm:py-20 lg:px-[30px] lg:py-24">
@@ -59,34 +78,19 @@ export function VideoSection() {
 						className="relative aspect-video overflow-hidden bg-black"
 					>
 						{playing ? (
-							// An in-page player rather than the player.mux.com iframe this
-							// replaced: playback position is not readable across that origin, so
-							// watch-through could not be measured at all through the embed.
-							<MuxPlayer
-								playbackId={MUX_PLAYBACK_ID}
+							<video
+								ref={videoRef}
+								controls
 								autoPlay
-								metadata={{ video_title: VIDEO_TITLE }}
-								title={VIDEO_TITLE}
+								playsInline
+								aria-label={VIDEO_TITLE}
 								className="absolute inset-0 h-full w-full"
-								onTimeUpdate={(event) => {
-									const player = event.currentTarget as { currentTime?: number; duration?: number };
-									reportVideoProgress(progress, player.currentTime ?? 0, player.duration ?? 0);
-								}}
-								onEnded={() => {
-									// currentTime rarely lands exactly on duration, so without this the
-									// 100% milestone would be missed by the people who watched it all.
-									reportVideoProgress(progress, 1, 1);
-								}}
+								onError={() => setPlaybackError(true)}
 							/>
 						) : (
 							<button
 								type="button"
-								onClick={() => {
-									// Only the start. Watch time lives inside the Mux iframe and is not
-									// readable from this page, so a duration here would be invented.
-									track("video_started", { video: "demo", placement: "see_it" });
-									setPlaying(true);
-								}}
+								onClick={() => setPlaying(true)}
 								aria-label={`Play video: ${VIDEO_TITLE}`}
 								className="group absolute inset-0 cursor-pointer"
 							>
@@ -103,6 +107,11 @@ export function VideoSection() {
 							</button>
 						)}
 					</div>
+					{playbackError && (
+						<p role="alert" className="mt-3 text-sm text-muted-foreground">
+							Unable to play the demo video. Please reload and try again.
+						</p>
+					)}
 				</div>
 			</div>
 		</section>

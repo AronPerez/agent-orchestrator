@@ -228,10 +228,11 @@ Start with the [development guide](docs/development.md) for prerequisites, local
 
 Join [Discord](https://discord.com/invite/UZv7JjxbwG) for help and contributor discussion, follow [@useOrchestrator](https://x.com/useOrchestrator) for updates, or start a conversation in [GitHub Issues](https://github.com/OrchestratorInc/agent-orchestrator/issues).
 
-## Product telemetry
+## Privacy
 
-Product telemetry is designed to exclude your code, prompts, agent conversations, and credentials.\
-Orchestrator.inc collects limited usage and reliability telemetry to improve the product. [Learn what we collect and how to turn off desktop telemetry](docs/telemetry.md).
+This fork does not send product analytics or crash reports. Local diagnostics and
+functional network features, including update checks, remain. See
+[privacy and retained networking](docs/telemetry.md).
 
 ## License
 

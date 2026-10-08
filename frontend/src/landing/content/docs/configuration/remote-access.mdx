@@ -30,7 +30,7 @@ Do not use `tailscale serve` to expose the primary loopback daemon. The native a
 - The mobile listener uses plaintext HTTP by design and is intended for a trusted home network or private tailnet.
 - Every REST and terminal connection requires the rotating password.
 - Repeated failed authentication is locked out per source.
-- `/shutdown`, telemetry controls, and mobile-control routes remain loopback-only.
+- `/shutdown`, and mobile-control routes remain loopback-only.
 - Mobile settings are persisted in a mode-`0600` file under `~/.ao/data/mobile/config.json`. The rotating password is stored there so the desktop can redisplay it; authentication comparisons use its in-memory hash.
 
 Anyone who can observe traffic on an untrusted network may read the password and session traffic. Turn Connect Mobile off when it is not needed, and do not expose its port to the public internet.

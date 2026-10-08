@@ -3,7 +3,6 @@ import { StatusBar } from "expo-status-bar";
 import { Platform } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { OnboardingGate } from "../lib/OnboardingGate";
-import { TelemetryManager } from "../lib/TelemetryManager";
 import { PushManager } from "../lib/PushManager";
 import { UpdatesManager } from "../lib/UpdatesManager";
 import { StoreUpdateManager } from "../lib/StoreUpdateManager";
@@ -74,7 +73,6 @@ function Shell() {
 		<>
 			{/* Light content on a dark app, dark content on a light one. */}
 			<StatusBar style={scheme === "dark" ? "light" : "dark"} />
-			<TelemetryManager />
 			{/* expo-notifications response APIs are not implemented on web. */}
 			{Platform.OS !== "web" ? <PushManager /> : null}
 			<UpdatesManager />

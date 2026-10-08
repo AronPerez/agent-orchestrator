@@ -32,6 +32,11 @@ export function TerminalTabFrame({
 	"data-terminal-role": terminalRole,
 }: TerminalTabFrameProps) {
 	const { className: buttonClassName, ...restButtonProps } = buttonProps ?? {};
+	const selectFromChrome = (event: ReactMouseEvent<HTMLElement>) => {
+		if (event.target !== event.currentTarget || restButtonProps.disabled || editingContent) return;
+		// Empty action-wrapper space belongs to the tab, not the overlaid control.
+		restButtonProps.onClick?.(event as ReactMouseEvent<HTMLButtonElement>);
+	};
 	return (
 		<span
 			className={cn(
@@ -41,10 +46,7 @@ export function TerminalTabFrame({
 			)}
 			data-terminal-role={terminalRole}
 			data-terminal-tab-frame
-			onClick={(event) => {
-				if (event.target !== event.currentTarget) return;
-				restButtonProps.onClick?.(event as unknown as ReactMouseEvent<HTMLButtonElement>);
-			}}
+			onClick={selectFromChrome}
 		>
 			<span className="relative inline-flex h-[calc(100%-2px)] min-w-0 flex-1 self-stretch">
 				{editingContent ?? (
@@ -69,6 +71,7 @@ export function TerminalTabFrame({
 							actionPosition === "leading" ? "left-2" : "right-1",
 						)}
 						data-terminal-tab-action
+						onClick={selectFromChrome}
 					>
 						{action}
 					</div>
@@ -77,6 +80,7 @@ export function TerminalTabFrame({
 					<div
 						className="absolute inset-y-0 right-1 z-10 flex items-center"
 						data-terminal-tab-action
+						onClick={selectFromChrome}
 					>
 						{trailingAction}
 					</div>

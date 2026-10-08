@@ -34,7 +34,6 @@ describe("restartProjectOrchestrator", () => {
 		const navigate = vi.fn();
 		const setProjectRestarting = vi.fn();
 		const setOrchestratorReplacementError = vi.fn();
-		const onError = vi.fn();
 		const failure = new Error("missing goose binary");
 		spawnMock.mockRejectedValue(failure);
 
@@ -44,10 +43,9 @@ describe("restartProjectOrchestrator", () => {
 			navigate,
 			setProjectRestarting,
 			setOrchestratorReplacementError,
-			onError,
 		});
 
-		expect(spawnMock).toHaveBeenCalledWith({ host: "local", id: "proj-1" }, "restart", true, undefined);
+		expect(spawnMock).toHaveBeenCalledWith({ host: "local", id: "proj-1" }, true, undefined);
 		expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: workspaceQueryKey });
 		expect(setOrchestratorReplacementError).toHaveBeenNthCalledWith(1, { host: "local", id: "proj-1" }, null);
 		expect(setOrchestratorReplacementError).toHaveBeenNthCalledWith(2, { host: "local", id: "proj-1" }, {
@@ -55,7 +53,6 @@ describe("restartProjectOrchestrator", () => {
 		});
 		expect(setProjectRestarting).toHaveBeenNthCalledWith(1, { host: "local", id: "proj-1" }, true);
 		expect(setProjectRestarting).toHaveBeenLastCalledWith({ host: "local", id: "proj-1" }, false);
-		expect(onError).toHaveBeenCalledWith(failure);
 		expect(navigate).not.toHaveBeenCalled();
 	});
 
@@ -65,7 +62,6 @@ describe("restartProjectOrchestrator", () => {
 		const navigate = vi.fn();
 		const setProjectRestarting = vi.fn();
 		const setOrchestratorReplacementError = vi.fn();
-		const onError = vi.fn();
 		const failure = new Error("missing goose binary");
 		spawnMock.mockRejectedValue(failure);
 
@@ -75,14 +71,12 @@ describe("restartProjectOrchestrator", () => {
 			navigate,
 			setProjectRestarting,
 			setOrchestratorReplacementError,
-			onError,
 		});
 
 		expect(setOrchestratorReplacementError).toHaveBeenLastCalledWith({ host: "local", id: "proj-1" }, {
 			message: "missing goose binary",
 		});
 		expect(setProjectRestarting).toHaveBeenLastCalledWith({ host: "local", id: "proj-1" }, false);
-		expect(onError).toHaveBeenCalledWith(failure);
 		expect(navigate).not.toHaveBeenCalled();
 	});
 
@@ -108,7 +102,7 @@ describe("restartProjectOrchestrator", () => {
 			mode: "tui",
 		});
 
-		expect(spawnMock).toHaveBeenCalledWith({ host: "local", id: "proj-1" }, "restart", true, "tui");
+		expect(spawnMock).toHaveBeenCalledWith({ host: "local", id: "proj-1" }, true, "tui");
 		expect(setOrchestratorReplacementError).toHaveBeenLastCalledWith({ host: "local", id: "proj-1" }, {
 			message: "Claude Code is unavailable",
 			code: "CHAT_DRIVER_UNAVAILABLE",

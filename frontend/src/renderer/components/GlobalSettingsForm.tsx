@@ -1,6 +1,7 @@
 import { lazy, Suspense } from "react";
 import { useTranslation } from "react-i18next";
 import type { GlobalSettingsSection as GlobalSettingsPage } from "../stores/ui-store";
+import { CodexAccountsSection } from "./settings/CodexAccountsSection";
 import { GeneralSettingsSection } from "./settings/GeneralSettingsSection";
 import { CloudCredentialsSection } from "./settings/CloudCredentialsSection";
 import { ConnectMobileContent } from "./settings/ConnectMobileContent";
@@ -24,8 +25,10 @@ function SettingsContentPanel({ children }: { children: React.ReactNode }) {
 
 export function GlobalSettingsForm({
 	section = "all",
+	active = true,
 }: {
 	section?: GlobalSettingsSection;
+	active?: boolean;
 }) {
 	const { t } = useTranslation();
 	const all = section === "all";
@@ -40,6 +43,8 @@ export function GlobalSettingsForm({
 			data-testid="settings-page"
 		>
 			{(all || section === "general") && <GeneralSettingsSection titleHidden={titleHidden} />}
+
+			{(all || section === "accounts") && <CodexAccountsSection active={active} titleHidden={titleHidden} />}
 
 			{(all || section === "cloud") && <CloudCredentialsSection titleHidden={titleHidden} />}
 

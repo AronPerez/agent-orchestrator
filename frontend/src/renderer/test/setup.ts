@@ -171,9 +171,6 @@ if (typeof window !== "undefined") {
 				return { id: targetId ?? "cursor", name: "Cursor", kind: "editor" };
 			},
 		},
-		telemetry: {
-			getBootstrap: async () => null,
-		},
 		browser: {
 			nativeCompositionEnabled: true,
 			ensure: async (sessionId: string) => ({
@@ -304,7 +301,6 @@ if (typeof window !== "undefined") {
 			download: async () => undefined,
 			install: async () => undefined,
 			onStatus: () => () => undefined,
-			onTelemetry: () => () => undefined,
 		},
 		featureBuilds: {
 			list: async () => [],

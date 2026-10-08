@@ -70,7 +70,7 @@ The daemon also exposes pull-request merge and comment-resolution actions plus r
 
 The primary daemon listener binds `127.0.0.1:3001` and is unauthenticated. It serves the desktop app and CLI and is never configurable to a public bind.
 
-Connect Mobile creates a second listener only when explicitly enabled. It binds the LAN interface behind bearer-password authentication and serves the app API and authenticated terminal mux, but excludes shutdown, telemetry, mobile-control, and browser-control routes. Transport is plaintext and intended only for a trusted home network.
+Connect Mobile creates a second listener only when explicitly enabled. It binds the LAN interface behind bearer-password authentication and serves the app API and authenticated terminal mux, but excludes shutdown, mobile-control, and browser-control routes. Transport is plaintext and intended only for a trusted home network.
 
 ## Terminal And Browser Bridges
 
