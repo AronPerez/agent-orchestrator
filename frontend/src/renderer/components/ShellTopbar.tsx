@@ -592,6 +592,7 @@ export function ShellTopbar({
 
 // Confirmation is modal, but teardown progress is not: confirming closes the
 // dialog and returns to the project's orchestrator while the daemon finishes.
+// Standalone sessions stay here until success so failures remain visible.
 // Mutation-cache state is filtered by worker ID so rapid route switches never
 // carry another worker's Killing/error state into the current topbar.
 export function TopbarKillButton({
@@ -611,6 +612,12 @@ export function TopbarKillButton({
 
   const confirmKill = () => {
     setConfirmOpen(false);
+    if (isStandaloneSession(session)) {
+      kill.mutate(session, {
+        onSuccess: () => onKilled(session.workspaceId, orchestrator),
+      });
+      return;
+    }
     kill.mutate(session);
     onKilled(session.workspaceId, orchestrator);
   };
