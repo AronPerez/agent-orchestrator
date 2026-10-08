@@ -12,17 +12,19 @@
 # So local installs have to be done by hand: build, copy into /Applications,
 # deep ad-hoc re-sign, strip the quarantine flag, launch. This wraps that.
 #
-# It also (by default, if scripts/ao-svc is present) rebuilds the source-built
-# ao CLI from the same commit (ao-svc reload). The daemon itself is bundled in
-# the app and spawned by it on launch, so the app+daemon pair always match; the
-# CLI rebuild keeps `ao` on PATH at the same commit too. Skip with --no-daemon.
+# It also (by default) installs the app's bundled daemon as THE daemon:
+# setup-self-hosted.sh --app copies it into ~/.ao/host/current, restarts the
+# dev.aoagents.self-hosted LaunchAgent, and points ~/.ao/bin/ao and
+# ~/.local/bin/ao at it. The app attaches to that same-build daemon instead of
+# spawning its own copy, so app, daemon and CLI all run one commit. Skip with
+# --no-daemon.
 #
 # Usage:
 #   scripts/install-desktop-app.sh [options]
 #
 # Options:
 #   --skip-build     Use the existing build in frontend/out (don't run `npm run make`).
-#   --no-daemon      Don't rebuild the ao CLI (skip `ao-svc reload`).
+#   --no-daemon      Don't install the daemon into ~/.ao/host (app-only update).
 #   --no-launch      Install but don't open the app.
 #   --dest DIR       Install directory (default: /Applications).
 #   --print-release-repo  Print the GitHub owner/repo the build would bake into
@@ -55,7 +57,7 @@ while [ $# -gt 0 ]; do
     --no-launch)  launch=0 ;;
     --dest)       dest="${2:?--dest needs a directory}"; shift ;;
     --print-release-repo) print_release_repo=1 ;;
-    -h|--help)    sed -n '3,41p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)    sed -n '3,43p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1 (try --help)" >&2; exit 2 ;;
   esac
   shift
@@ -146,12 +148,14 @@ if [ -n "$bundle_id" ] && pgrep -f "${app_dest}/Contents/MacOS/" >/dev/null 2>&1
   pkill -f "${app_dest}/Contents/MacOS/" 2>/dev/null || true
 fi
 
-# --- 4. rebuild the ao CLI from the same commit (optional) -----------------
-if [ "$reload_daemon" -eq 1 ] && [ -x "${repo_root}/scripts/ao-svc" ]; then
-  log "Rebuilding the ao CLI from this tree (ao-svc reload)…"
-  "${repo_root}/scripts/ao-svc" reload || echo "warning: ao-svc reload failed; \`ao\` on PATH may lag this build." >&2
-elif [ "$reload_daemon" -eq 1 ]; then
-  echo "note: scripts/ao-svc not found — skipping ao CLI rebuild." >&2
+# --- 4. stop a daemon the old app left behind ------------------------------
+# Under AO_KEEP_DAEMON the old bundle's daemon outlives the app and keeps :3001,
+# which would make the host install below refuse to start its own. Sessions
+# survive: their pty-hosts are adopted by the next daemon.
+old_daemon="${app_dest}/Contents/Resources/daemon/ao"
+if [ "$reload_daemon" -eq 1 ] && pgrep -f "${old_daemon} daemon" >/dev/null 2>&1; then
+  log "Stopping the old app-bundled daemon…"
+  "$old_daemon" stop || { echo "error: could not stop ${old_daemon}." >&2; exit 1; }
 fi
 
 # --- 5. install ------------------------------------------------------------
@@ -175,7 +179,13 @@ fi
 # Strip com.apple.quarantine so Gatekeeper doesn't block a locally-built app.
 xattr -dr com.apple.quarantine "$app_dest" 2>/dev/null || true
 
-# --- 8. launch -------------------------------------------------------------
+# --- 8. install the daemon into ~/.ao/host --------------------------------
+if [ "$reload_daemon" -eq 1 ]; then
+  log "Installing the bundled daemon into ~/.ao/host (setup-self-hosted.sh --app)…"
+  "${script_dir}/setup-self-hosted.sh" --app "$app_dest"
+fi
+
+# --- 9. launch -------------------------------------------------------------
 if [ "$launch" -eq 1 ]; then
   log "Launching…"
   open "$app_dest"

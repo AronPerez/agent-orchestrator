@@ -3,12 +3,14 @@
 set -euo pipefail
 
 usage() {
-	printf '%s\n' 'Usage: setup-self-hosted.sh [--nightly | --bundle PATH] [--tunnel] [--install-only]'
+	printf '%s\n' 'Usage: setup-self-hosted.sh [--nightly | --bundle PATH | --app PATH] [--tunnel] [--install-only]'
 	printf '%s\n' 'Installs AO under ~/.ao/host, starts a user service, and prints pairing details.'
 	printf '%s\n' 'Downloads stable by default; --nightly downloads the newest published nightly.'
+	printf '%s\n' '--app installs the daemon from a locally built Agent Orchestrator.app instead.'
 }
 
 bundle=""
+app=""
 nightly=false
 tunnel=false
 install_only=false
@@ -16,14 +18,19 @@ while (($#)); do
 	case "$1" in
 		--nightly) nightly=true; shift ;;
 		--bundle) bundle="${2:?--bundle needs a path}"; shift 2 ;;
+		--app) app="${2:?--app needs a path}"; shift 2 ;;
 		--tunnel) tunnel=true; shift ;;
 		--install-only) install_only=true; shift ;;
 		-h|--help) usage; exit 0 ;;
 		*) usage >&2; exit 2 ;;
 	esac
 done
-if "$nightly" && [[ -n "$bundle" ]]; then
-	printf '%s\n' '--nightly cannot be combined with --bundle.' >&2; exit 2
+sources=0
+"$nightly" && sources=$((sources + 1))
+[[ -n "$bundle" ]] && sources=$((sources + 1))
+[[ -n "$app" ]] && sources=$((sources + 1))
+if ((sources > 1)); then
+	printf '%s\n' '--nightly, --bundle and --app are mutually exclusive.' >&2; exit 2
 fi
 
 if [[ "$(id -u)" == 0 ]]; then
@@ -79,7 +86,7 @@ case "$platform:$arch" in
 	Darwin:arm64) asset='agent-orchestrator-darwin-arm64.zip' ;;
 	Darwin:x86_64) asset='agent-orchestrator-darwin-x64.zip' ;;
 	Linux:x86_64) asset='agent-orchestrator-linux-x64.AppImage' ;;
-	Linux:aarch64|Linux:arm64) if [[ -z "$bundle" ]]; then
+	Linux:aarch64|Linux:arm64) if [[ -z "$bundle$app" ]]; then
 		printf 'No published desktop artifact for %s/%s; pass --bundle from a native build.\n' "$platform" "$arch" >&2
 		exit 1
 	fi ;;
@@ -87,7 +94,10 @@ case "$platform:$arch" in
 esac
 command -v git >/dev/null || { printf '%s\n' 'git is required for AO projects and worktrees.' >&2; exit 1; }
 
-if [[ -n "$bundle" ]]; then
+if [[ -n "$app" ]]; then
+	resources="$app/Contents/Resources"
+	[[ -d "$resources/daemon" ]] || { printf 'No daemon inside app bundle: %s\n' "$app" >&2; exit 1; }
+elif [[ -n "$bundle" ]]; then
 	[[ -f "$bundle" ]] || { printf 'Bundle not found: %s\n' "$bundle" >&2; exit 1; }
 	python3 - "$bundle" <<'PY'
 import posixpath, sys, tarfile
@@ -221,15 +231,21 @@ prune_old_releases() {
 }
 printf 'Installed AO host at %s\n' "$release"
 
+# Point every `ao` on PATH at the installed daemon so the CLI, worker hooks
+# (~/.ao/bin is first on their PATH) and the service never drift apart.
+# ~/.ao/bin/ao is AO-owned and always replaced; ~/.local/bin/ao only when it
+# is absent or a symlink, so a user's own binary there is left alone.
 install_cli_link() {
 	[[ -z "${AO_HOST_INSTALL_DIR:-}" ]] || return 0
-	local link="$HOME/.local/bin/ao" target="$host_root/current/resources/daemon/ao"
-	mkdir -p "$(dirname "$link")"
-	if [[ ! -e "$link" && ! -L "$link" ]] || [[ -L "$link" && "$(readlink "$link")" == "$target" ]]; then
-		ln -sfn "$target" "$link"
-	else
-		printf 'Existing %s left unchanged; use %s directly.\n' "$link" "$target" >&2
-	fi
+	local link target="$host_root/current/resources/daemon/ao"
+	for link in "$HOME/.ao/bin/ao" "$HOME/.local/bin/ao"; do
+		mkdir -p "$(dirname "$link")"
+		if [[ "$link" == "$HOME/.ao/bin/ao" || -L "$link" || ! -e "$link" ]]; then
+			ln -sfn "$target" "$link"
+		else
+			printf 'Existing %s left unchanged; use %s directly.\n' "$link" "$target" >&2
+		fi
+	done
 }
 
 if "$install_only"; then
