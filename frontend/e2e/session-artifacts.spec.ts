@@ -120,6 +120,7 @@ for (const theme of ["dark", "light"] as const) {
     if (process.env.S03_SCREENSHOT_DIR && theme === "dark") {
       await mkdir(process.env.S03_SCREENSHOT_DIR, { recursive: true });
       await page.screenshot({
+        animations: "disabled",
         path: join(process.env.S03_SCREENSHOT_DIR, "s03-artifacts-list.png"),
       });
     }
@@ -136,6 +137,7 @@ for (const theme of ["dark", "light"] as const) {
     if (process.env.S03_SCREENSHOT_DIR) {
       await mkdir(process.env.S03_SCREENSHOT_DIR, { recursive: true });
       await page.screenshot({
+        animations: "disabled",
         path: join(
           process.env.S03_SCREENSHOT_DIR,
           `s03-artifacts-${theme}.png`,
