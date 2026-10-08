@@ -59,6 +59,15 @@ describe("SettingsDialog", () => {
 		});
 	});
 
+	it("opens Accounts from the global settings navigation using the keyboard", async () => {
+		useUiStore.getState().openGlobalSettings();
+		render(<SettingsDialog />);
+		screen.getByRole("button", { name: "Accounts" }).focus();
+		await userEvent.keyboard("{Enter}");
+		expect(screen.getByTestId("global-settings-section")).toHaveTextContent("accounts");
+		expect(screen.getByRole("button", { name: "Accounts" })).toHaveAttribute("aria-current", "page");
+	});
+
 	it("opens the requested global settings page", async () => {
 		useUiStore.getState().openGlobalSettings("mobile");
 		render(<SettingsDialog />);

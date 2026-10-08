@@ -19,7 +19,7 @@ import {
 export type { Theme, ThemePreference, ThemeStyle } from "../lib/theme";
 export { readStoredThemePreference, readStoredThemeStyle, resolveTheme } from "../lib/theme";
 
-export type GlobalSettingsSection = "general" | "cloud" | "mobile" | "shortcuts" | "updates" | "help";
+export type GlobalSettingsSection = "general" | "cloud" | "accounts" | "mobile" | "shortcuts" | "updates" | "help";
 
 export type SettingsModal =
 	| { scope: "global"; section?: GlobalSettingsSection }

@@ -1,4 +1,4 @@
-import { Bot, CircleHelp, Cloud, GitBranch, Inbox, Keyboard, MonitorCog, RefreshCw, Settings2, Smartphone, TriangleAlert, X } from "lucide-react";
+import { Bot, CircleHelp, Cloud, GitBranch, Inbox, Keyboard, MonitorCog, RefreshCw, Settings2, Smartphone, TriangleAlert, Users, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useCloudGate } from "../hooks/useCloudGate";
@@ -54,6 +54,7 @@ export function SettingsDialog() {
 
 	const globalSections: Array<{ id: GlobalSettingsSection; label: string; icon: typeof Settings2 }> = [
 		{ id: "general", label: t("settings.general"), icon: Settings2 },
+		{ id: "accounts", label: t("settings.codexAccounts.title"), icon: Users },
 		// Only deployments with the cloud offering get the Cloud page.
 		...(cloudEnabled ? [{ id: "cloud" as const, label: t("settings.cloud"), icon: Cloud }] : []),
 		{ id: "mobile", label: t("settings.mobile"), icon: Smartphone },
@@ -97,7 +98,7 @@ export function SettingsDialog() {
 			<DialogContent
 				className={cn(
 					settingsDialogContentClass,
-					"h-(--size-settings-dialog-height) w-(--size-settings-dialog-wide) max-h-none origin-center overflow-hidden p-0",
+					"h-(--size-settings-dialog-height) w-[min(var(--size-settings-dialog-wide),calc(100vw-var(--space-8)))] origin-center overflow-hidden p-0",
 				)}
 				showCloseButton={false}
 			>
@@ -193,6 +194,7 @@ export function SettingsDialog() {
 							) : (
 								<GlobalSettingsForm
 									section={activeSection}
+									active={settingsModal !== null}
 								/>
 							)}
 						</div>
@@ -219,7 +221,7 @@ function SettingsNavItem({
 		<button
 			aria-current={active ? "page" : undefined}
 			className={cn(
-				"flex h-9 w-full items-center gap-2 rounded-md px-2.5 text-left text-sm font-medium transition-[background-color,color,transform] duration-fast ease-out active:scale-press focus:outline-none focus-visible:outline-none focus-visible:ring-0",
+				"flex h-9 w-full items-center gap-2 rounded-md px-2.5 text-left text-sm font-medium transition-[background-color,color,transform] duration-fast ease-out active:scale-press focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
 				active
 					? "bg-interactive-active text-foreground"
 					: "text-muted-foreground hover:bg-interactive-hover hover:text-foreground",
