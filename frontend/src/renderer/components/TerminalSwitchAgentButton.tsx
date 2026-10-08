@@ -1,14 +1,24 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { LoaderCircle, Repeat2, TriangleAlert } from "lucide-react";
+import { Check, ChevronRight, LoaderCircle, Repeat2, TriangleAlert } from "lucide-react";
 import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
-import { clearSwitchAgentState } from "../hooks/useSwitchAgent";
+import {
+	clearSwitchAgentState,
+	createSwitchAgentIdempotencyKey,
+	useSwitchAgent,
+} from "../hooks/useSwitchAgent";
 import type { AgentSwitchPresentation } from "../lib/agent-switch-presentation";
 import { cn } from "../lib/utils";
 import { sessionIsActive, type AgentSwitchSummary, type WorkspaceSession } from "../types/workspace";
-import { canSwitchAgentHarness, SwitchAgentDialog } from "./SwitchAgentDialog";
+import { AgentAvatar } from "./AgentAvatar";
+import { canSwitchAgentHarness, SWITCH_AGENT_OPTIONS, SwitchAgentDialog } from "./SwitchAgentDialog";
 import { TopbarButton } from "./TopbarButton";
-import { DropdownMenuItem } from "./ui/dropdown-menu";
+import {
+	DropdownMenuItem,
+	DropdownMenuSub,
+	DropdownMenuSubContent,
+	DropdownMenuSubTrigger,
+} from "./ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
 type TerminalSwitchAgentButtonProps = {
@@ -46,10 +56,11 @@ export function TerminalSwitchAgentButton({
 }: TerminalSwitchAgentButtonProps) {
 	const { t } = useTranslation();
 	const queryClient = useQueryClient();
+	const switchAgent = useSwitchAgent();
 	const controlPresentation = presentation?.outcome === "success" ? undefined : presentation;
 	const switching = controlPresentation?.outcome === "in_progress";
 	const warning = controlPresentation?.outcome === "failure" || controlPresentation?.outcome === "recovery";
-	const blocksNewSwitch = switching || disabled;
+	const blocksNewSwitch = switching || disabled || switchAgent.isPending;
 
 	useEffect(() => {
 		if (switchError) onOpenChange?.(true);
@@ -79,7 +90,43 @@ export function TerminalSwitchAgentButton({
 
 	return (
 		<>
-			{variant === "menu-item" ? (
+			{variant === "menu-item" && !controlPresentation ? (
+				<DropdownMenuSub>
+					<DropdownMenuSubTrigger disabled={blocksNewSwitch}>
+						{icon}
+						{label}
+						<ChevronRight aria-hidden="true" className="ml-auto !size-icon-sm" />
+					</DropdownMenuSubTrigger>
+					<DropdownMenuSubContent>
+						{SWITCH_AGENT_OPTIONS.map((option) => {
+							const current = option.value === session.provider;
+							return (
+								<DropdownMenuItem
+									key={option.value}
+									disabled={current || blocksNewSwitch}
+									onSelect={() =>
+										switchAgent.mutate({
+											session,
+											targetHarness: option.value,
+											model: "",
+											idempotencyKey: createSwitchAgentIdempotencyKey(),
+										})
+									}
+								>
+									<AgentAvatar className="size-icon-base" decorative provider={option.value} />
+									<span className="flex-1">{option.label}</span>
+									{current ? (
+										<>
+											<Check aria-hidden="true" className="!size-icon-sm" />
+											{t("switchAgent.current")}
+										</>
+									) : null}
+								</DropdownMenuItem>
+							);
+						})}
+					</DropdownMenuSubContent>
+				</DropdownMenuSub>
+			) : variant === "menu-item" ? (
 				<DropdownMenuItem
 					className={cn(warning && "text-warning focus:text-warning [&_svg]:text-warning")}
 					disabled={blocksNewSwitch}
