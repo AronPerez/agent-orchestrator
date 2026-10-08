@@ -2131,6 +2131,7 @@
   "files.artifacts.source": "Origen de archivos",
   "files.artifacts.workspace": "Espacio de trabajo",
   "files.artifacts.title": "Artefactos",
+  "files.artifacts.webUnavailable": "Los artefactos no están disponibles en la aplicación web.",
   "files.artifacts.localOnly": "Los artefactos solo están disponibles en este equipo.",
   "files.artifacts.missing": "El artefacto ya no está disponible.",
   "files.artifacts.noMatches": "No hay artefactos coincidentes.",

@@ -144,6 +144,17 @@ for (const theme of ["dark", "light"] as const) {
         ),
       });
     }
+    for (const [action, state] of [["Maximize files", "maximized"], ["Minimize files", "restored"]]) {
+      await page.getByRole("button", { name: action, exact: true }).click();
+      await expect(page.getByRole("tab", { name: "Artifacts", exact: true })).toHaveAttribute("aria-selected", "true");
+      await expect(page.getByRole("heading", { name: "Delivery report" })).toBeVisible();
+      if (process.env.S03_SCREENSHOT_DIR) {
+        await page.screenshot({
+          animations: "disabled",
+          path: join(process.env.S03_SCREENSHOT_DIR, `s03-artifacts-${state}-${theme}.png`),
+        });
+      }
+    }
     await page
       .getByRole("button", { name: "Expand sidebar", exact: true })
       .first()
@@ -191,5 +202,18 @@ for (const theme of ["dark", "light"] as const) {
     await expect(page.getByPlaceholder("localhost:5173")).toHaveValue(
       `${origin}/report.html`,
     );
+
+    const requestCount = rawRequests.length;
+    await page.evaluate(() => Reflect.deleteProperty(window, "ao"));
+    await page.getByRole("tab", { name: "Files", exact: true }).click();
+    await expect(page.getByText("Artifacts are unavailable in the web app.")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Open in Browser" })).toHaveCount(0);
+    expect(rawRequests).toHaveLength(requestCount);
+    if (process.env.S03_SCREENSHOT_DIR) {
+      await page.screenshot({
+        animations: "disabled",
+        path: join(process.env.S03_SCREENSHOT_DIR, `s03-artifacts-web-${theme}.png`),
+      });
+    }
   });
 }

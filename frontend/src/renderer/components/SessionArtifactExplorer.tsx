@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { ChevronLeft, ExternalLink } from "lucide-react";
@@ -8,6 +7,7 @@ import {
   MAX_ARTIFACT_TEXT_BYTES,
   readArtifactText,
 } from "../lib/session-artifacts";
+import { useUiStore } from "../stores/ui-store";
 import type { SessionArtifact } from "../types/workspace";
 import { Button } from "./ui/button";
 import { WorkspaceEntryIcon } from "./WorkspaceEntryIcon";
@@ -24,6 +24,8 @@ type Props = {
 
 export function SessionArtifactExplorer(props: Props) {
   const { t } = useTranslation();
+  if (!window.ao)
+    return <PanelMessage>{t("files.artifacts.webUnavailable")}</PanelMessage>;
   if (!isLocal(props.session.host))
     return <PanelMessage>{t("files.artifacts.localOnly")}</PanelMessage>;
   return <ArtifactList key={refKey(props.session)} {...props} />;
@@ -31,7 +33,11 @@ export function SessionArtifactExplorer(props: Props) {
 
 function ArtifactList({ session, artifacts, filter, onOpenPreview }: Props) {
   const { t } = useTranslation();
-  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const sessionKey = refKey(session);
+  const selectedPath = useUiStore((state) =>
+    state.inspectorSessions[sessionKey]?.selectedArtifactPath ?? null,
+  );
+  const setSelectedArtifactPath = useUiStore((state) => state.setSelectedArtifactPath);
   const selected = artifacts.find((artifact) => artifact.path === selectedPath);
   if (selectedPath !== null) {
     return (
@@ -39,7 +45,7 @@ function ArtifactList({ session, artifacts, filter, onOpenPreview }: Props) {
         <div className="flex h-8 shrink-0 items-center gap-1 border-b border-border px-1">
           <Button
             aria-label={t("files.explorer.backToTree")}
-            onClick={() => setSelectedPath(null)}
+            onClick={() => setSelectedArtifactPath(sessionKey, null)}
             size="icon-sm"
             variant="ghost"
           >
@@ -86,7 +92,7 @@ function ArtifactList({ session, artifacts, filter, onOpenPreview }: Props) {
             key={artifact.path}
             variant="ghost"
             className="h-8 w-full justify-start gap-2 px-2 text-xs font-normal"
-            onClick={() => setSelectedPath(artifact.path)}
+            onClick={() => setSelectedArtifactPath(sessionKey, artifact.path)}
             title={artifact.path}
           >
             <WorkspaceEntryIcon

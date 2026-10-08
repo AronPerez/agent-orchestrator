@@ -2102,6 +2102,7 @@
   "files.artifacts.source": "ファイルの場所",
   "files.artifacts.workspace": "ワークスペース",
   "files.artifacts.title": "成果物",
+  "files.artifacts.webUnavailable": "ウェブアプリでは成果物を利用できません。",
   "files.artifacts.localOnly": "成果物はこのコンピューターでのみ利用できます。",
   "files.artifacts.missing": "成果物は利用できなくなりました。",
   "files.artifacts.noMatches": "一致する成果物はありません。",

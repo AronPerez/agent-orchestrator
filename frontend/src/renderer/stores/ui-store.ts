@@ -41,6 +41,9 @@ export type InspectorSessionState = {
 	browserUnseen?: boolean;
 	/** Files tab: show only files the agent has touched. Defaults to false (full tree). */
 	filesChangedOnly?: boolean;
+	/** Shared by the docked Files view and its maximized replacement. */
+	filesSource?: "workspace" | "artifacts";
+	selectedArtifactPath?: string | null;
 	/** The session-entry defaulting (Summary tab, baseline browser reveal) has already run once for this session's lifetime. */
 	initialized?: boolean;
 };
@@ -132,6 +135,8 @@ export type UiState = {
 	setBrowserContentRevealed: (sessionId: string, revealed: boolean) => void;
 	setBrowserUnseen: (sessionId: string, unseen: boolean) => void;
 	setFilesChangedOnly: (sessionId: string, changedOnly: boolean) => void;
+	setFilesSource: (sessionId: string, source: "workspace" | "artifacts") => void;
+	setSelectedArtifactPath: (sessionId: string, path: string | null) => void;
 	setCommandPaletteOpen: (open: boolean) => void;
 	setProjectRestarting: (project: Ref, restarting: boolean) => void;
 	setOrchestratorReplacementError: (project: Ref, failure: OrchestratorReplacementFailure | null) => void;
@@ -381,6 +386,20 @@ export const useUiStore = create<UiState>((set, get) => ({
 				},
 			};
 		}),
+	setFilesSource: (sessionId, filesSource) =>
+		set((state) => ({
+			inspectorSessions: {
+				...state.inspectorSessions,
+				[sessionId]: { ...inspectorState(state.inspectorSessions, sessionId), filesSource },
+			},
+		})),
+	setSelectedArtifactPath: (sessionId, selectedArtifactPath) =>
+		set((state) => ({
+			inspectorSessions: {
+				...state.inspectorSessions,
+				[sessionId]: { ...inspectorState(state.inspectorSessions, sessionId), selectedArtifactPath },
+			},
+		})),
 	setCommandPaletteOpen: (isCommandPaletteOpen) => set({ isCommandPaletteOpen }),
 	setProjectRestarting: (project, restarting) =>
 		set((state) => {

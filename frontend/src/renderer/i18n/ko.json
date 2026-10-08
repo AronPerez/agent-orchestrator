@@ -2102,6 +2102,7 @@
   "files.artifacts.source": "파일 위치",
   "files.artifacts.workspace": "작업 공간",
   "files.artifacts.title": "결과물",
+  "files.artifacts.webUnavailable": "웹 앱에서는 결과물을 사용할 수 없습니다.",
   "files.artifacts.localOnly": "결과물은 이 컴퓨터에서만 사용할 수 있습니다.",
   "files.artifacts.missing": "결과물을 더 이상 사용할 수 없습니다.",
   "files.artifacts.noMatches": "일치하는 결과물이 없습니다.",
