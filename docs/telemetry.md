@@ -31,10 +31,10 @@ mechanism, not treated as evidence of an identifier-free or offline application.
 Servers also receive ordinary connection metadata such as source IP addresses.
 Mobile store/update mechanisms are likewise retained.
 
-Update-feed routing is unchanged: release builds default to
-`Untrivial-ai/agent-orchestrator` unless `AO_RELEASE_REPO` is set. A fork build
-using that upstream feed can later install upstream behavior, including reporting
-that this change removes; choose the fork release feed when distributing it.
+Release builds default to the fork feed, `AronPerez/agent-orchestrator`.
+`AO_RELEASE_REPO` can still override the feed at build time. Pointing a build
+back at the upstream feed can reinstall upstream behavior, including reporting
+that this fork removes.
 
 The optional CI pod runner uses the Daytona SDK, whose transitive OpenTelemetry
 packages remain installed. AO does not initialize that exporter or configure a
