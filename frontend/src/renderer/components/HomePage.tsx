@@ -39,7 +39,7 @@ export function HomePage() {
 	const { t } = useTranslation();
 	const workspaceQuery = useWorkspaceQuery();
 	const projects = flattenHostSections(workspaceQuery.data)
-		.slice()
+		.filter((project) => project.kind !== "standalone")
 		.sort((left, right) => latestProjectTimestamp(right).localeCompare(latestProjectTimestamp(left)))
 		.slice(0, 3);
 

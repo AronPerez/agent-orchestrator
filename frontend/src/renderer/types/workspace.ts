@@ -177,6 +177,13 @@ export function canonicalTrackerIssueId(issueId?: string): string | undefined {
 
 export type ProjectKind = "single_repo" | "workspace" | "scratch";
 
+// Renderer-only grouping; '@' cannot occur in a daemon project ID.
+export const STANDALONE_WORKSPACE_ID = "@standalone";
+
+export function isStandaloneSession(session: Pick<WorkspaceSession, "workspaceId">): boolean {
+	return session.workspaceId === STANDALONE_WORKSPACE_ID;
+}
+
 /** Sentinel `kind` value for projects hosted by the AO cloud control plane. */
 export const CLOUD_PROJECT_KIND = "cloud" as const;
 
@@ -311,9 +318,10 @@ export type WorkspaceSummary = {
 	 * Discriminator for where the project lives. Local projects carry the
 	 * daemon's ProjectKind (or undefined for older daemons); projects hosted by
 	 * the AO cloud control plane carry CLOUD_PROJECT_KIND — branch on
-	 * `kind === CLOUD_PROJECT_KIND`.
+	 * `kind === CLOUD_PROJECT_KIND`. Standalone is a renderer-only session
+	 * group, never a project that can be configured or spawned into.
 	 */
-	kind?: ProjectKind | typeof CLOUD_PROJECT_KIND;
+	kind?: ProjectKind | typeof CLOUD_PROJECT_KIND | "standalone";
 	/** Local checkout path; empty string for cloud projects (no local folder). */
 	path: string;
 	workspaceRepos?: WorkspaceRepoSummary[];

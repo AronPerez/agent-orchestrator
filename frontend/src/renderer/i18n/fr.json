@@ -1238,6 +1238,7 @@
   "shell.orchestratorBoard": "Tableau de l'orchestrateur",
   "shell.orchestratorWithActivity": "Orchestrateur, {{activity}}",
   "shell.pinned": "Épinglés",
+  "shell.standaloneAgents": "Agents autonomes",
   "shell.projects": "Projets",
   "shell.projectActions": "Actions du projet {{name}}",
   "shell.projectSettings": "Paramètres du projet",

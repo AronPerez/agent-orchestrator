@@ -86,6 +86,16 @@ function bothHosts(): WorkspaceSummary[] {
 }
 
 describe("findSession", () => {
+  it("keeps standalone session navigation but never offers project or branch actions", () => {
+    const standalone = session({ id: "adhoc", workspaceId: "@standalone" });
+    const group: WorkspaceSummary = { host: "local", id: "@standalone", name: "Standalone agents", path: "", kind: "standalone", sessions: [standalone] };
+    const items = buildCommands({ workspaces: [group], currentHostId: "local", currentProjectId: group.id, currentSessionId: standalone.id });
+    expect(items.find((item) => item.id === "current-new-task")?.disabled).toBe(true);
+    expect(items.some((item) => item.group === "projects" || item.id === "current-project-settings" || item.id === "current-open-orchestrator" || item.id === "current-copy-branch")).toBe(false);
+    const actions = buildSessionActions(standalone);
+    expect(actions.some((item) => item.action?.kind === "copy-branch")).toBe(false);
+    expect(actions.find((item) => item.action?.kind === "navigate")?.action).toMatchObject({ target: { params: { hostId: "local", sessionId: "adhoc" } } });
+  });
 	it("returns the workspace and session together", () => {
 		const result = findSession(workspaces(), { host: "local", id: "w-pr" });
 

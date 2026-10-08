@@ -946,6 +946,18 @@ describe("SessionView", () => {
     );
   });
 
+  it.each(["chat", "tui"] as const)("opens a standalone %s session and scopes shells only to that session", (mode) => {
+    const session = workerSession("sess-1");
+    session.workspaceId = "@standalone";
+    session.mode = mode;
+    render(<SessionView sessionRef={sessionRef("sess-1")} />);
+    if (mode === "chat") expect(screen.getByTestId("chat-surface")).toBeInTheDocument();
+    else expect(screen.getByTestId("session-tab")).toHaveTextContent(session.title);
+    fireEvent.click(screen.getByRole("button", { name: "New terminal" }));
+    expect(openShellTerminalMock).toHaveBeenCalledWith({ project: undefined, session: { host: "local", id: "sess-1" } }, expect.anything());
+    expect(reviewGetMock.mock.calls.some(([, input]) => input?.params?.path?.id === "@standalone")).toBe(false);
+  });
+
   it("does not offer a new terminal for orchestrator sessions", () => {
     render(<SessionView sessionRef={sessionRef("sess-orch")} />);
 

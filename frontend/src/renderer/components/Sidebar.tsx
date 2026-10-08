@@ -34,6 +34,7 @@ import {
   AlertTriangle,
   ArrowLeft,
   ArrowRight,
+  Bot,
   ChevronRight,
   Download,
   Folder,
@@ -657,7 +658,10 @@ export function Sidebar({
     Record<string, string[]>
   >({});
   const orderedWorkspaces = useMemo(
-    () => applyOrder(workspaces, refKey, projectOrder, "end"),
+    () => applyOrder(
+      workspaces.filter((workspace) => workspace.kind !== "standalone"),
+      refKey, projectOrder, "end",
+    ),
     [projectOrder, workspaces],
   );
   const projectIds = useMemo(
@@ -1100,6 +1104,16 @@ export function Sidebar({
                                 />
                               );
                             }),
+                          ...section.workspaces
+                            .filter((workspace) => workspace.kind === "standalone")
+                            .map((workspace) => (
+                              <StandaloneAgentsItem
+                                key={refKey(workspace)}
+                                workspace={workspace}
+                                hostLabel={section.label}
+                                selection={selection}
+                              />
+                            )),
                         ],
                   )}
                   {isCollapsed && <CreateProjectListItem />}
@@ -2112,6 +2126,56 @@ const ProjectDragPreview = memo(function ProjectDragPreview({
         </div>
       ) : null}
     </div>
+  );
+});
+
+const StandaloneAgentsItem = memo(function StandaloneAgentsItem({ workspace, hostLabel, selection }: {
+  workspace: WorkspaceSummary;
+  hostLabel: string;
+  selection: ReturnType<typeof useSelection>;
+}) {
+  const { t } = useTranslation();
+  const { state, setOpen } = useSidebar();
+  const [expanded, setExpanded] = useState(true);
+  const sessions = useMemo(
+    () => sortedWorkerSessions(workspace.sessions).filter((session) => session.isTerminated !== true),
+    [workspace.sessions],
+  );
+  const label = workspace.host === LOCAL_HOST
+    ? t("shell.standaloneAgents")
+    : t("hosts.qualified", { name: t("shell.standaloneAgents"), host: hostLabel });
+  if (sessions.length === 0) return null;
+  return (
+    <SidebarMenuItem>
+      <SidebarMenuButton
+        aria-label={label}
+        aria-expanded={state !== "collapsed" && expanded}
+        tooltip={label}
+        onClick={() => {
+          if (state === "collapsed") {
+            setOpen(true);
+            setExpanded(true);
+          } else {
+            setExpanded(!expanded);
+          }
+        }}
+      >
+        <Bot className="size-icon-md" aria-hidden="true" />
+        <span className="truncate">{label}</span>
+      </SidebarMenuButton>
+      {state !== "collapsed" && expanded && (
+        <SidebarMenuSub className="mx-0 ml-3.5 translate-x-0 gap-px border-l-0 px-0 py-1">
+          {sessions.map((session) => (
+            <SessionRow
+              key={refKey(session)}
+              session={session}
+              active={selection.activeHostId === session.host && selection.activeSessionId === session.id}
+              onOpen={() => selection.goSession(session)}
+            />
+          ))}
+        </SidebarMenuSub>
+      )}
+    </SidebarMenuItem>
   );
 });
 

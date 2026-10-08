@@ -84,7 +84,7 @@ import { hasBrowserDaemon } from "../lib/preview-mode";
 import { useShell } from "../lib/shell-context";
 import { cn } from "../lib/utils";
 import { refKey, type Ref } from "../lib/hosts";
-import { isOrchestratorSession, sessionIsActive } from "../types/workspace";
+import { isOrchestratorSession, isStandaloneSession, sessionIsActive } from "../types/workspace";
 import {
   terminalTargetBelongsToSession,
   type TerminalTarget,
@@ -746,7 +746,7 @@ export function SessionView({ sessionRef }: SessionViewProps) {
     };
     const shell = openShellTerminal.open(
       {
-        project: session
+        project: session && !isStandaloneSession(session)
           ? { host: session.host, id: session.workspaceId }
           : undefined,
         session: sessionRef,
@@ -1406,7 +1406,7 @@ export function SessionView({ sessionRef }: SessionViewProps) {
   const terminated = session ? !sessionIsActive(session) : false;
   const persistentProfile = usePersistentBrowserProfile(
     sessionRef.host,
-    session?.cloud ? undefined : session?.workspaceId,
+    session && !session.cloud && !isStandaloneSession(session) ? session.workspaceId : undefined,
   );
   const browserView = useBrowserView({
     session: session ?? sessionRef,

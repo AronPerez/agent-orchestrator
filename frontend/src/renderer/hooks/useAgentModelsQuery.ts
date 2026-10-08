@@ -4,6 +4,8 @@ import { apiErrorMessage } from "../lib/api-client";
 import { clientFor } from "../lib/host-clients";
 import { LOCAL_HOST, refKey, type Ref } from "../lib/hosts";
 
+import { STANDALONE_WORKSPACE_ID } from "../types/workspace";
+
 export type AgentModelCatalog = components["schemas"]["AgentModelsResponse"];
 
 const MODEL_CATALOG_VALIDATION_INTERVAL_MS = 10 * 60 * 1_000;
@@ -18,7 +20,7 @@ async function requestAgentModels(
 ): Promise<AgentModelCatalog> {
 	const path = { agent: agentId };
 	const client = clientFor(project?.host ?? LOCAL_HOST);
-	const projectId = project?.id;
+	const projectId = project?.id === STANDALONE_WORKSPACE_ID ? undefined : project?.id;
 	const result =
 		mode === "cached"
 			? await client.GET("/api/v1/agents/{agent}/models", {

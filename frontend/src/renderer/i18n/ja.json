@@ -1217,6 +1217,7 @@
   "shell.orchestratorBoard": "オーケストレーターボード",
   "shell.orchestratorWithActivity": "オーケストレーター、{{activity}}",
   "shell.pinned": "ピン留め",
+  "shell.standaloneAgents": "スタンドアロンエージェント",
   "shell.projects": "プロジェクト",
   "shell.projectActions": "{{name}} のプロジェクト操作",
   "shell.projectSettings": "プロジェクト設定",

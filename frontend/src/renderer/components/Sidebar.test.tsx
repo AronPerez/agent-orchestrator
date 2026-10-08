@@ -253,6 +253,19 @@ const session: WorkspaceSession = {
   prs: [],
 };
 
+it("opens standalone agents on their own host without exposing project actions", async () => {
+  const remote = "http://192.0.2.1:3011";
+  const workspaces = [LOCAL_HOST, remote].map((host): WorkspaceSummary => ({
+    host, id: "@standalone", name: "Standalone agents", path: "", kind: "standalone",
+    sessions: [{ ...session, host, id: "same", workspaceId: "@standalone", title: `${host} task` }],
+  }));
+  renderSidebar({ workspaces });
+  await userEvent.click(screen.getByRole("button", { name: "Open http://192.0.2.1:3011 task" }));
+  expect(navigateMock).toHaveBeenCalledWith({ to: "/host/$hostId/session/$sessionId", params: { hostId: remote, sessionId: "same" } });
+  expect(screen.queryByRole("button", { name: /Project actions.*Standalone/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /[Oo]rchestrator.*Standalone/ })).not.toBeInTheDocument();
+});
+
 function activeAgentSwitch(
   overrides: Partial<NonNullable<WorkspaceSession["activeAgentSwitch"]>> = {},
 ): NonNullable<WorkspaceSession["activeAgentSwitch"]> {

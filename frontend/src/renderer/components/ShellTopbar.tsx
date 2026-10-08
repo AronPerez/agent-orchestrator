@@ -16,6 +16,7 @@ import {
   flattenHostSections,
   hasConfiguredOrchestratorAgent,
   isOrchestratorSession,
+  isStandaloneSession,
   newestActiveOrchestrator,
   sessionIsActive,
   type WorkspaceSession,
@@ -175,7 +176,7 @@ export function ShellTopbar({
   // projectId that no longer resolves (stale route after the project was
   // removed, or data still loading) shows an empty crumb — never the raw
   // route slug. "Board" is the root-board crumb only.
-  const projectId = session?.workspaceId ?? params.projectId;
+  const projectId = session && isStandaloneSession(session) ? undefined : session?.workspaceId ?? params.projectId;
   const projectHostId = session?.host ?? params.hostId;
   const isProjectBoardRoute = !isSessionRoute && Boolean(projectId);
   const isRootBoardRoute = !isSessionRoute && !isProjectBoardRoute;
@@ -509,7 +510,7 @@ export function ShellTopbar({
                   key={`open-workspace-${refKey(session)}`}
                   host={session.host}
                   sessionId={session.id}
-                  projectId={session.workspaceId}
+                  projectId={isStandaloneSession(session) ? "" : session.workspaceId}
                   style={noDragStyle}
                 />
               ) : null}
@@ -537,6 +538,10 @@ export function ShellTopbar({
                       session={session}
                       orchestrator={orchestrator}
                       onKilled={(workspaceId, orchestratorSession) => {
+                        if (isStandaloneSession(session)) {
+                          void navigate({ to: "/" });
+                          return;
+                        }
                         if (orchestratorSession) {
                           void navigate({
                             to: "/host/$hostId/session/$sessionId",
@@ -559,7 +564,7 @@ export function ShellTopbar({
                   ) : null}
                 </div>
               ) : null}
-              {!isOrchestrator ? (
+              {!isOrchestrator && project ? (
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <span className="inline-flex" style={noDragStyle}>
