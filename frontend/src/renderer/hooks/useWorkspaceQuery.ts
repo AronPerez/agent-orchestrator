@@ -125,8 +125,12 @@ function isProject(value: unknown): value is ProjectSummaryDTO {
 function isSession(value: unknown): value is SessionDTO {
   if (typeof value !== "object" || value === null) return false;
   const session = value as Partial<SessionDTO>;
+  // projectId is absent on standalone sessions; they match no project below.
+  // ponytail: they stay hidden here; port upstream's "Ad hoc agents" workspace
+  // (#4851) if this fork wants them in the sidebar.
   return (
-    typeof session.id === "string" && typeof session.projectId === "string"
+    typeof session.id === "string" &&
+    (session.projectId === undefined || typeof session.projectId === "string")
   );
 }
 

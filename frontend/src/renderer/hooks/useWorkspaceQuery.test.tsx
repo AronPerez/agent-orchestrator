@@ -186,6 +186,42 @@ describe("useWorkspaceQuery", () => {
     },
   );
 
+  it("loads projects when the host also has a standalone session with no projectId", async () => {
+    // Known status/activity so this test doesn't spend the once-per-module
+    // "unknown session field" telemetry a later test asserts on.
+    const knownState = {
+      status: "mergeable",
+      isTerminated: false,
+      activity: { state: "idle", lastActivityAt: "2026-06-10T15:30:00Z" },
+    };
+    respondWith({
+      projects: {
+        data: { projects: [{ id: "proj-1", name: "my-app", path: "/my-app" }] },
+        error: undefined,
+      },
+      sessions: {
+        data: {
+          sessions: [
+            { id: "sess-1", projectId: "proj-1", ...knownState },
+            { id: "standalone-1", ...knownState },
+          ],
+        },
+        error: undefined,
+      },
+    });
+
+    const { result } = renderWorkspaceQuery();
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.[0]).toMatchObject({ failure: null });
+    expect(
+      result.current.data?.[0]?.workspaces.map((workspace) => ({
+        id: workspace.id,
+        sessions: workspace.sessions.map((session) => session.id),
+      })),
+    ).toEqual([{ id: "proj-1", sessions: ["sess-1"] }]);
+  });
+
   it("reports the local host as failed while the daemon client is not ready", async () => {
     isHostReadyMock.mockReturnValue(false);
 
