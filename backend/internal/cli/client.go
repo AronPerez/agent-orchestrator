@@ -129,16 +129,6 @@ func (c *commandContext) doJSON(ctx context.Context, method, path string, body, 
 	return c.doJSONPath(ctx, method, "/api/v1/"+path, body, out)
 }
 
-func (c *commandContext) postLoopbackJSON(ctx context.Context, path string, body any) error {
-	// These are loopback-only control routes (/internal/*), 404'd at the LAN
-	// socket by design — and CLI telemetry has no business reaching a daemon on
-	// someone else's machine. Drop them when a remote target is set.
-	if c.remote != nil {
-		return nil
-	}
-	return c.doJSONPath(ctx, http.MethodPost, path, body, nil)
-}
-
 // daemonBase returns the base URL every daemon call targets. With a remote
 // target it is the given URL; otherwise it is the loopback daemon discovered
 // through the run-file, gated on a live local PID as before.
@@ -225,7 +215,7 @@ func (c *commandContext) doJSONPathWithHeadersAndTimeout(
 		return apiResponseError{StatusCode: resp.StatusCode, ErrorBody: e}
 	}
 	if out == nil {
-		// Explicitly bodyless call (telemetry/activity hooks, fire-and-forget
+		// Explicitly bodyless call (activity hooks, fire-and-forget
 		// posts). Drain only a bounded remainder so the connection can be
 		// reused without an unbounded read.
 		_, _ = io.CopyN(io.Discard, resp.Body, maxDrainedBodyBytes)

@@ -6,8 +6,6 @@ import type { EditorHandoffState, OpenSessionTargetInput } from "../../shared/ed
 import { TopbarOpenEditorButton } from "./TopbarOpenEditorButton";
 import { TooltipProvider } from "./ui/tooltip";
 
-vi.mock("../lib/telemetry", () => ({ captureRendererEvent: vi.fn() }));
-
 const openMock = vi.fn(async ({ targetId }: OpenSessionTargetInput) => {
 	if (targetId === "file-manager") return { id: "file-manager" as const, name: "Finder", kind: "file_manager" as const };
 	if (targetId === "terminal") return { id: "terminal" as const, name: "Terminal", kind: "terminal" as const };
@@ -36,7 +34,7 @@ function renderButton(host = "local") {
 	return render(
 		<QueryClientProvider client={client}>
 			<TooltipProvider>
-				<TopbarOpenEditorButton host={host} sessionId="sess-1" projectId="proj-1" />
+				<TopbarOpenEditorButton host={host} sessionId="sess-1" />
 			</TooltipProvider>
 		</QueryClientProvider>,
 	);
@@ -84,7 +82,6 @@ describe("TopbarOpenEditorButton", () => {
 		expect(alert).toHaveTextContent("Session workspace is not available");
 		expect(alert.textContent).not.toContain("Error invoking remote method");
 	});
-
 
 	beforeEach(() => {
 		openMock.mockClear();

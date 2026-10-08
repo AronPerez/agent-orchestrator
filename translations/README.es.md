@@ -225,7 +225,7 @@ Empieza por la [guía de desarrollo](../docs/development.md), donde encontrarás
 
 ## Telemetría del producto
 
-Orchestrator.inc recopila métricas de uso y fiabilidad sin contenido de los proyectos. El propietario de un proyecto en GitHub y el nombre de usuario conectado pueden identificar a una persona; la telemetría no es anónima. Desactivarla también detiene el envío de esos datos. [Detalles y controles](../docs/telemetry.md).
+Este fork no envía análisis de uso ni informes de fallos. Conserva los diagnósticos locales y las funciones de red, incluidas las comprobaciones de actualizaciones. [Detalles](../docs/telemetry.md).
 
 ## Licencia
 

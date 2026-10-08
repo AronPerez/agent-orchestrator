@@ -108,8 +108,6 @@ describe("shared review eligibility helpers", () => {
 		);
 	});
 
-	// Telemetry reports the action a user took, and it must not depend on the
-	// translated label they happened to see.
 	it("names the offered run action as a stable enum", () => {
 		expect(reviewRunActionKind([reviewState(1, "needs_review")], true)).toBe("reviewing");
 		expect(reviewRunActionKind([reviewState(1, "running")], false)).toBe("reviewing");

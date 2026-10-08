@@ -795,7 +795,7 @@ describe("Sidebar — one tree across hosts", () => {
       }),
     );
     await waitFor(() =>
-      expect(spawnMock).toHaveBeenCalledWith(remote, "sidebar"),
+      expect(spawnMock).toHaveBeenCalledWith(remote),
     );
     expect(navigateMock).toHaveBeenCalledWith({
       to: "/host/$hostId/session/$sessionId",

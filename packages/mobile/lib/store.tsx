@@ -37,8 +37,6 @@ import { shouldKeepPolling } from "./connectionError";
 import { primeInstallId } from "./installId";
 import { collectPRs } from "./prView";
 import { ALL_PROJECTS, NO_PROJECTS_KNOWN, projectsForMachine, resolveActiveProject, retainProjects, type KnownProjects } from "./projectFilter";
-import { MOBILE_EVENTS } from "./telemetry/events";
-import { mobileTelemetry, trackFeature } from "./telemetry/runtime";
 import { useConversationEventTransport } from "./chat/conversationEvents";
 
 const ACTIVE_PROJECT_KEY = "ao.activeProject";
@@ -153,17 +151,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
 	useConversationEventTransport(connection === "open" ? config : null);
 
 	const cfgRef = useRef<ServerConfig | null>(null);
-	// Gate for the connected event: emit only on the not-open -> open transition,
-	// never on every poll tick. openRef tracks the current state; everConnectedRef
-	// tells a fresh launch apart from a later reconnect.
-	const openRef = useRef(false);
-	// Whether the most recent poll reached the daemon. Distinct from openRef,
-	// which latches on first connect and never clears.
+	// Whether the most recent poll reached the daemon.
 	const lastTickOkRef = useRef(false);
 	// Whether the last failure had no HTTP status — nothing answered at all,
 	// which is what leaving a network looks like.
 	const lastFailUnreachableRef = useRef(false);
-	const everConnectedRef = useRef(false);
 	// Mirrors appActive for code that runs mid-flight, where reading the state
 	// value would see a stale closure. fetchAll consults it between requests so a
 	// poll interrupted by backgrounding does not fire its remaining calls — each
@@ -344,12 +336,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
 			setErrorStatus(null);
 			setConnection("open");
 			lastTickOkRef.current = true;
-			if (!openRef.current) {
-				openRef.current = true;
-				const trigger = everConnectedRef.current ? "reconnect" : "launch";
-				everConnectedRef.current = true;
-				mobileTelemetry()?.capture(MOBILE_EVENTS.connected, { trigger });
-			}
 			// Badge count for the board's bell. Deliberately after the session fetch
 			// and separately caught: an older daemon without /notifications must not
 			// knock the board offline. limit:1 because we only read unreadCount.
@@ -377,7 +363,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
 			// race again immediately rather than ride out another poll.
 			lastFailUnreachableRef.current = status === undefined;
 			setErrorStatus(status ?? null);
-			openRef.current = false;
 			setConnection("closed");
 			// Auth failures are not transient — don't keep polling into a lockout.
 			// Network/other errors are transient, so keep polling for recovery.
@@ -391,9 +376,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
 	// (Re)start the REST poll whenever the config changes. Stops polling on an
 	// auth failure so the phone can't lock itself out by hammering a bad password.
 	useEffect(() => {
-		// A config change (unpair / re-pair / new host) restarts polling; reset the
-		// connected gate so the first open of the new session is a real transition.
-		openRef.current = false;
 		if (!config || !isConfigured(config)) {
 			setConnection("closed");
 			// Not simply false: until resolution has finished this is "still
@@ -484,50 +466,37 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
 	const spawn = useCallback(
 		async ({ projectId, prompt, harness, model, mode }: SpawnOptions) => {
-			const resolvedMode = mode ?? "chat";
-			return trackFeature(
-				"spawn",
-				async () => {
-					const c = cfgRef.current;
-					const proj = projectId ?? targetProject();
-					if (!c || !proj) throw new Error("Pick a project first");
-					const session = await delegateTask(c, {
-						projectId: proj,
-						brief: prompt ?? "",
-						agent: harness,
-						model,
-						mode: resolvedMode,
-					});
-					await fetchAll();
-					return session;
-				},
-				{ mode: resolvedMode },
-			);
+			const c = cfgRef.current;
+			const proj = projectId ?? targetProject();
+			if (!c || !proj) throw new Error("Pick a project first");
+			const session = await delegateTask(c, {
+				projectId: proj,
+				brief: prompt ?? "",
+				agent: harness,
+				model,
+				mode: mode ?? "chat",
+			});
+			await fetchAll();
+			return session;
 		},
 		[targetProject, fetchAll],
 	);
 
 	const launchConductor = useCallback(
-		async (projectId: string, clean = false, mode: SessionMode = "chat") =>
-			trackFeature(
-				"conductor",
-				async () => {
-					const c = cfgRef.current!;
-					const link = await apiLaunchOrchestrator(c, projectId, clean, mode);
-					await fetchAll();
-					return link;
-				},
-				{ mode },
-			),
+		async (projectId: string, clean = false, mode: SessionMode = "chat") => {
+			const c = cfgRef.current!;
+			const link = await apiLaunchOrchestrator(c, projectId, clean, mode);
+			await fetchAll();
+			return link;
+		},
 		[fetchAll],
 	);
 
 	const merge = useCallback(
-		async (pr: DashboardPR) =>
-			trackFeature("merge", async () => {
-				await apiMergePR(cfgRef.current!, pr);
-				await fetchAll();
-			}),
+		async (pr: DashboardPR) => {
+			await apiMergePR(cfgRef.current!, pr);
+			await fetchAll();
+		},
 		[fetchAll],
 	);
 
@@ -540,25 +509,23 @@ export function AppProvider({ children }: { children: ReactNode }) {
 	);
 
 	const kill = useCallback(
-		async (id: string) =>
-			trackFeature("kill", async () => {
-				await killSession(cfgRef.current!, id);
-				await fetchAll();
-			}),
+		async (id: string) => {
+			await killSession(cfgRef.current!, id);
+			await fetchAll();
+		},
 		[fetchAll],
 	);
 
 	const restore = useCallback(
-		async (id: string) =>
-			trackFeature("restore", async () => {
-				await restoreSession(cfgRef.current!, id);
-				await fetchAll();
-			}),
+		async (id: string) => {
+			await restoreSession(cfgRef.current!, id);
+			await fetchAll();
+		},
 		[fetchAll],
 	);
 
 	const send = useCallback(async (id: string, message: string) => {
-		await trackFeature("send", () => sendMessage(cfgRef.current!, id, message));
+		await sendMessage(cfgRef.current!, id, message);
 	}, []);
 	const refresh = useCallback(async () => {
 		await fetchAll();

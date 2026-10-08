@@ -10,6 +10,7 @@ on:
   pull_request:
     paths:
       - "frontend/**"
+      - "scripts/disable-tool-telemetry*"
       - ".github/workflows/**"
       - "contracts/cloud/**"
       - "packages/cloud-client/**"
@@ -37,6 +38,9 @@ jobs:
             frontend/src/landing/package-lock.json
             packages/cloud-client/package-lock.json
             packages/product-ui/package-lock.json
+
+      - name: Verify build tool telemetry stays disabled
+        run: node --test ../scripts/disable-tool-telemetry.test.cjs
 
       - name: Install frontend dependencies
         run: |

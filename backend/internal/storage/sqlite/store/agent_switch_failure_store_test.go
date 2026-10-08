@@ -5,13 +5,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
-	"github.com/aoagents/agent-orchestrator/backend/internal/observe/sentryobs"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/sqlitetest"
@@ -49,7 +49,7 @@ func openAgentSwitchFailureFixtureWithMetadata(t *testing.T, configureMetadata b
 		t.Fatalf("open fixture database: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	if err := st.ConfigureAgentSwitchFailureEventEncoder(context.Background(), sentryobs.AgentSwitchEventEncoder{}); err != nil {
+	if err := st.ConfigureAgentSwitchFailureEventEncoder(context.Background(), localFailureEventEncoder{}); err != nil {
 		t.Fatalf("configure event encoder: %v", err)
 	}
 
@@ -993,4 +993,11 @@ func TestAmbiguousCommitFailureHasNoDirectSenderFallback(t *testing.T) {
 	if got := countFailureRows(t, f.db, "agent_switch_failure_outbox"); got != 0 {
 		t.Fatalf("outbox rows after ambiguous database failure = %d, want 0", got)
 	}
+}
+
+type localFailureEventEncoder struct{}
+
+func (localFailureEventEncoder) EncodeAgentSwitchFailureEvent(input domain.AgentSwitchEventBuildInput) (ports.AgentSwitchFailureEncodedEvent, error) {
+	payload, err := json.Marshal(map[string]any{"event_id": input.EventID, "release": input.Release, "environment": input.Environment, "channel": input.Channel, "os": input.OS})
+	return ports.AgentSwitchFailureEncodedEvent{EnvelopeEncodingVersion: 1, Payload: payload}, err
 }

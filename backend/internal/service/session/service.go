@@ -239,12 +239,8 @@ type Service struct {
 	signalCapable func(domain.AgentHarness) bool
 	// runtimeUnreachable reports whether AO's last liveness probe could reach a
 	// session's runtime. nil means "unknown": no session is ever flagged.
-	runtimeUnreachable    func(domain.SessionID) bool
-	chatProviderPreserved func(domain.SessionID) bool
-	// githubIdentity optionally resolves the operator's authenticated GitHub
-	// account so the handle rides along with product telemetry. Nil disables it
-	// and the emitter degrades to anonymous.
-	githubIdentity         ports.ScopedIdentityResolver
+	runtimeUnreachable     func(domain.SessionID) bool
+	chatProviderPreserved  func(domain.SessionID) bool
 	titleRefinementSlots   chan struct{}
 	titleRefinementMu      sync.Mutex
 	titleRefinementCancels map[domain.SessionID]context.CancelFunc
@@ -295,9 +291,6 @@ type Deps struct {
 	// reachability observation on the read model; daemon wiring passes
 	// lifecycle.Manager.RuntimeUnreachable. Left nil, no session is flagged.
 	RuntimeUnreachable func(domain.SessionID) bool
-	// GithubIdentity resolves the operator's authenticated GitHub account so the
-	// handle rides along with product telemetry.
-	GithubIdentity ports.ScopedIdentityResolver
 	// OutputTypeReconciler persists the durable OutputType column; daemon
 	// wiring passes the shared *lifecycle.Manager. Left nil, ClaimPR still
 	// succeeds but the pr OutputType only lands on the next artifact-output
@@ -311,7 +304,7 @@ func NewWithDeps(d Deps) *Service {
 	if backgroundContext == nil {
 		backgroundContext = context.Background()
 	}
-	s := &Service{manager: d.Manager, store: d.Store, prClaimer: d.PRClaimer, scm: d.SCM, tracker: d.Tracker, clock: d.Clock, dataDir: d.DataDir, signalCapable: d.SignalCapable, runtimeUnreachable: d.RuntimeUnreachable, telemetry: d.Telemetry, logger: d.Logger, backgroundContext: backgroundContext, agentReadiness: d.AgentReadiness, githubIdentity: d.GithubIdentity, titleRefinementSlots: make(chan struct{}, delegatedTaskTitleConcurrency), titleRefinementCancels: map[domain.SessionID]context.CancelFunc{}, outputTypeReconciler: d.OutputTypeReconciler}
+	s := &Service{manager: d.Manager, store: d.Store, prClaimer: d.PRClaimer, scm: d.SCM, tracker: d.Tracker, clock: d.Clock, dataDir: d.DataDir, signalCapable: d.SignalCapable, runtimeUnreachable: d.RuntimeUnreachable, telemetry: d.Telemetry, logger: d.Logger, backgroundContext: backgroundContext, agentReadiness: d.AgentReadiness, titleRefinementSlots: make(chan struct{}, delegatedTaskTitleConcurrency), titleRefinementCancels: map[domain.SessionID]context.CancelFunc{}, outputTypeReconciler: d.OutputTypeReconciler}
 	if s.prClaimer == nil {
 		if w, ok := d.Store.(ports.PRClaimer); ok {
 			s.prClaimer = w
@@ -488,9 +481,6 @@ func (s *Service) emitSpawned(ctx context.Context, rec domain.SessionRecord, dur
 		"harness":     string(rec.Harness),
 		"duration_ms": durationMs,
 	}
-	if actor, ok := s.githubActor(ctx); ok {
-		payload["github_actor"] = actor
-	}
 	s.telemetry.Emit(context.Background(), ports.TelemetryEvent{
 		Name:       "ao.session.spawned",
 		Source:     "session_service",
@@ -501,22 +491,6 @@ func (s *Service) emitSpawned(ctx context.Context, rec domain.SessionRecord, dur
 		RequestID:  reqid.FromContext(ctx),
 		Payload:    payload,
 	})
-}
-
-// githubActor returns the operator's GitHub login when the authenticated
-// account resolves to a human, and ("", false) for every failure mode (resolver
-// unset, no token, GET /user failure, offline, org or bot account, empty login)
-// so the event stays anonymous. Host is left empty because GitHub identity is
-// not host-scoped.
-func (s *Service) githubActor(ctx context.Context) (string, bool) {
-	if s.githubIdentity == nil {
-		return "", false
-	}
-	identity, err := s.githubIdentity.AuthenticatedIdentityForProvider(ctx, "github", "")
-	if err != nil || !identity.Human || identity.Login == "" {
-		return "", false
-	}
-	return identity.Login, true
 }
 
 func (s *Service) emitFirstSessionSpawned(ctx context.Context, rec domain.SessionRecord, project domain.ProjectRecord) {

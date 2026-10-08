@@ -19,7 +19,6 @@ export const COMPANY = {
 } as const;
 
 export const THEME_STORAGE_KEY = "ao-theme";
-export const POSTHOG_COOKIE_NAME = "ph_phc_";
 
 export const OPEN_ROLES = [] as { title: string; url: string; location: string }[];
 

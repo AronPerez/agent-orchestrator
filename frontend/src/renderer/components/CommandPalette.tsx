@@ -40,7 +40,6 @@ import {
 } from "../lib/command-palette";
 import { iconForCommand } from "../lib/command-palette-icons";
 import { isDialogOrMenuOpen } from "../lib/dom-selectors";
-import { captureRendererEvent } from "../lib/telemetry";
 import { isMacPlatform } from "../lib/platform";
 import {
   sessionReviewsQueryOptions,
@@ -425,7 +424,7 @@ export function CommandPalette() {
         }
         return;
       }
-      const sessionId = await spawnOrchestrator(project, "command_palette");
+      const sessionId = await spawnOrchestrator(project);
       await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
       navigateToTarget({
         to: "/host/$hostId/session/$sessionId",
@@ -479,11 +478,6 @@ export function CommandPalette() {
             closePalette();
             break;
           case "trigger-review": {
-            void captureRendererEvent("ao.renderer.review_triggered", {
-              action: action.reviewAction,
-              has_override: false,
-              source: "command_palette",
-            });
             const { error: triggerError } = await clientFor(
               action.session.host,
             ).POST("/api/v1/sessions/{sessionId}/reviews/trigger", {

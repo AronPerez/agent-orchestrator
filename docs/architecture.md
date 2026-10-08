@@ -979,7 +979,7 @@ The daemon runs two independent HTTP listeners sharing the same chi router:
 2. **LAN Listener (Connect Mobile):** An opt-in second listener that binds
    `0.0.0.0:3011` (or an ephemeral fallback) **only when explicitly enabled**
    through desktop settings. Bearer-password middleware protects the app API.
-   Loopback-gated shutdown, telemetry, mobile-control, and browser-control routes
+   Loopback-gated shutdown, mobile-control, and browser-control routes
    remain unavailable. Exactly `GET /api/v1/identity` is public for host and
    contract verification. Direct LAN transport is plaintext for trusted
    networks. A managed cloudflared HTTPS endpoint wraps the authenticated mobile

@@ -1,7 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { isChatPreflightError, OrchestratorSpawnError, spawnOrchestrator } from "./spawn-orchestrator";
 import { apiClient } from "./api-client";
-import { captureRendererEvent } from "./telemetry";
 
 const { postMock } = vi.hoisted(() => ({ postMock: vi.fn() }));
 
@@ -29,12 +28,6 @@ vi.mock("./host-clients", () => ({
 	clientFor: () => ({ POST: postMock }),
 }));
 
-vi.mock("./telemetry", () => ({
-	captureRendererEvent: vi.fn().mockResolvedValue(undefined),
-}));
-
-const captureMock = vi.mocked(captureRendererEvent);
-
 describe("spawnOrchestrator", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
@@ -46,7 +39,7 @@ describe("spawnOrchestrator", () => {
 			error: undefined,
 			response: { status: 201 },
 		});
-		const id = await spawnOrchestrator({ host: "local", id: "proj" }, "restore_dialog", true);
+		const id = await spawnOrchestrator({ host: "local", id: "proj" }, true);
 		expect(id).toBe("proj-9");
 		expect(apiClient.POST).toHaveBeenCalledWith("/api/v1/orchestrators", {
 			body: { projectId: "proj", clean: true },
@@ -59,7 +52,7 @@ describe("spawnOrchestrator", () => {
 			error: undefined,
 			response: { status: 201 },
 		});
-		await spawnOrchestrator({ host: "local", id: "proj" }, "board");
+		await spawnOrchestrator({ host: "local", id: "proj" });
 		expect(apiClient.POST).toHaveBeenCalledWith("/api/v1/orchestrators", {
 			body: { projectId: "proj", clean: false },
 		});
@@ -71,41 +64,19 @@ describe("spawnOrchestrator", () => {
 			error: undefined,
 			response: { status: 201 },
 		});
-		await spawnOrchestrator({ host: "local", id: "proj" }, "board", false, "tui");
+		await spawnOrchestrator({ host: "local", id: "proj" }, false, "tui");
 		expect(apiClient.POST).toHaveBeenCalledWith("/api/v1/orchestrators", {
 			body: { projectId: "proj", clean: false, mode: "tui" },
 		});
 	});
 
-	it("emits the requested + succeeded triad keyed by source", async () => {
-		(apiClient.POST as ReturnType<typeof vi.fn>).mockResolvedValue({
-			data: { orchestrator: { id: "proj-7" } },
-			error: undefined,
-			response: { status: 201 },
-		});
-		await spawnOrchestrator({ host: "local", id: "proj" }, "sidebar");
-		expect(captureMock).toHaveBeenCalledWith("ao.renderer.orchestrator_spawn_requested", {
-			project_id: "proj",
-			source: "sidebar",
-		});
-		expect(captureMock).toHaveBeenCalledWith("ao.renderer.orchestrator_spawn_succeeded", {
-			project_id: "proj",
-			source: "sidebar",
-		});
-	});
-
-	it("emits the failed event and rethrows when the daemon rejects the spawn", async () => {
+	it("rethrows when the daemon rejects the spawn", async () => {
 		(apiClient.POST as ReturnType<typeof vi.fn>).mockResolvedValue({
 			data: undefined,
 			error: { message: "boom" },
 			response: { status: 500 },
 		});
-		await expect(spawnOrchestrator({ host: "local", id: "proj" }, "topbar")).rejects.toThrow("boom");
-		expect(captureMock).toHaveBeenCalledWith("ao.renderer.orchestrator_spawn_failed", {
-			project_id: "proj",
-			source: "topbar",
-		});
-		expect(captureMock).not.toHaveBeenCalledWith("ao.renderer.orchestrator_spawn_succeeded", expect.anything());
+		await expect(spawnOrchestrator({ host: "local", id: "proj" })).rejects.toThrow("boom");
 	});
 
 	it("surfaces daemon spawn error messages and codes", async () => {
@@ -119,7 +90,7 @@ describe("spawnOrchestrator", () => {
 			response: { status: 400 },
 		});
 
-		const error = await spawnOrchestrator({ host: "local", id: "proj" }, "board").catch((caught: unknown) => caught);
+		const error = await spawnOrchestrator({ host: "local", id: "proj" }).catch((caught: unknown) => caught);
 		expect(error).toBeInstanceOf(OrchestratorSpawnError);
 		expect(error).toMatchObject({
 			code: "CHAT_DRIVER_UNAVAILABLE",

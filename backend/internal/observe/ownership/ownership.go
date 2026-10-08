@@ -4,7 +4,7 @@
 // another.
 package ownership
 
-// Owner identifies the layer responsible for reporting an error to Sentry.
+// Owner identifies the layer responsible for recording an error.
 type Owner string
 
 // Owner values identify the layer responsible for reporting a failure.

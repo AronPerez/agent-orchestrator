@@ -433,19 +433,6 @@ func TestStopRefusesLoopbackURLToo(t *testing.T) {
 	}
 }
 
-// CLI telemetry posts to loopback-only /internal routes, which are 404'd at the
-// LAN socket — and must not be sent to another machine's daemon regardless.
-func TestPostLoopbackJSONSkippedForRemote(t *testing.T) {
-	aoHome(t)
-	c := &commandContext{
-		deps:   Deps{ProcessAlive: func(int) bool { t.Fatal("telemetry must not reach a remote daemon"); return false }}.withDefaults(),
-		remote: &remoteTarget{baseURL: "http://host:3011", token: "tok"},
-	}
-	if err := c.postLoopbackJSON(context.Background(), "/internal/telemetry/cli-invoked", map[string]string{}); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // A host-relative path aimed at a remote daemon is refused, because the daemon
 // resolves it against ITS OWN home/cwd — silently naming a directory on another
 // machine. Measured: `ao project add --path '~/repo' --url <remote>` registers

@@ -29,7 +29,6 @@ import type {
 	OpenSessionTargetInput,
 	OpenSessionTargetResult,
 } from "./shared/editor-handoff";
-import type { TelemetryBootstrap } from "./shared/telemetry";
 import type { MigrationState } from "./main/app-state";
 import type { UpdateSettings, UpdateStatus } from "./main/update-settings";
 import type { CloudAccount } from "./shared/cloud-account";
@@ -38,7 +37,6 @@ import type {
 	CloudCpProxyResponse,
 	CloudCpStreamEvent,
 } from "./main/cloud-cp-proxy";
-import type { UpdateOutcome } from "./shared/update-telemetry";
 import type { UiSettings } from "./main/ui-settings";
 import type { UpdateCheckOptions } from "./main/auto-updater";
 import type { FeatureBuild } from "./main/feature-builds";
@@ -317,12 +315,6 @@ const api = {
 		open: (input: OpenSessionTargetInput) =>
 			ipcRenderer.invoke("editorHandoff:open", input) as Promise<OpenSessionTargetResult>,
 	},
-	telemetry: {
-		getBootstrap: () =>
-			ipcRenderer.invoke(
-				"telemetry:getBootstrap",
-			) as Promise<TelemetryBootstrap | null>,
-	},
 	browser: {
 		nativeCompositionEnabled: true,
 		ensure: (sessionId: string, profileKey?: string, host?: string) =>
@@ -546,18 +538,6 @@ const api = {
 			ipcRenderer.on("updates:status", wrapped);
 			return () => {
 				ipcRenderer.off("updates:status", wrapped);
-			};
-		},
-		// Separate from onStatus: the main process suppresses the *status* for
-		// automatic failures but still reports the outcome here.
-		onTelemetry: (listener: (outcome: UpdateOutcome) => void) => {
-			const wrapped = (
-				_event: Electron.IpcRendererEvent,
-				outcome: UpdateOutcome,
-			) => listener(outcome);
-			ipcRenderer.on("updates:telemetry", wrapped);
-			return () => {
-				ipcRenderer.off("updates:telemetry", wrapped);
 			};
 		},
 	},

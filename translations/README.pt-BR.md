@@ -225,7 +225,7 @@ Participe do [Discord](https://discord.com/invite/UZv7JjxbwG) para receber ajuda
 
 ## Telemetria do produto
 
-O Orchestrator.inc coleta métricas de uso e confiabilidade sem o conteúdo dos projetos. O proprietário de um projeto no GitHub e o usuário conectado podem identificar uma pessoa; portanto, a telemetria não é anônima. Desativá-la também interrompe o envio desses dados. [Detalhes e controles](../docs/telemetry.md).
+Este fork não envia análises de uso nem relatórios de falhas. Os diagnósticos locais e as funções de rede, incluindo verificações de atualização, são mantidos. [Detalhes](../docs/telemetry.md).
 
 ## Licença
 

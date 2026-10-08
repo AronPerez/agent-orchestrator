@@ -2,7 +2,6 @@ import type { AoBridge } from "../../preload";
 import { coerceUiSettings, DEFAULT_UI_SETTINGS } from "../../shared/ui-locale";
 export type { FeatureBuild } from "../../main/feature-builds";
 
-
 export const aoBridge: AoBridge =
 	window.ao ??
 	({
@@ -76,9 +75,6 @@ export const aoBridge: AoBridge =
 			open: async () => {
 				throw new Error("Desktop app is required to open a workspace.");
 			},
-		},
-		telemetry: {
-			getBootstrap: async () => null,
 		},
 		browser: {
 			nativeCompositionEnabled: false,
@@ -210,7 +206,6 @@ export const aoBridge: AoBridge =
 			download: async () => undefined,
 			install: async () => undefined,
 			onStatus: () => () => undefined,
-			onTelemetry: () => () => undefined,
 		},
 		featureBuilds: {
 			list: async () => [],

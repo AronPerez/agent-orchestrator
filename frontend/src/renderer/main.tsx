@@ -14,11 +14,8 @@ import {
 import { LOCAL_HOST } from "./lib/hosts";
 import { createAppRouter } from "./router";
 import { LoginGate } from "./components/LoginGate";
-import { TelemetryBoundary } from "./components/TelemetryBoundary";
+import { AppBoundary } from "./components/AppBoundary";
 import { CloudOnboardingGate } from "./components/CloudOnboardingGate";
-import { initTelemetry } from "./lib/telemetry";
-import { startDaemonFailureTelemetry } from "./lib/daemon-telemetry";
-import { startUpdateTelemetry } from "./lib/update-telemetry";
 import { appI18n } from "./i18n";
 import { initHosts } from "./lib/active-host";
 import { useLocaleStore } from "./stores/locale-store";
@@ -74,10 +71,6 @@ if (import.meta.env.DEV) {
   };
 }
 
-void initTelemetry();
-startDaemonFailureTelemetry();
-startUpdateTelemetry();
-
 declare module "@tanstack/react-router" {
   interface Register {
     router: typeof router;
@@ -95,13 +88,13 @@ async function renderApp(): Promise<void> {
   createRoot(document.getElementById("root") as HTMLElement).render(
     <React.StrictMode>
       <I18nextProvider i18n={appI18n}>
-        <TelemetryBoundary>
+        <AppBoundary>
           <QueryClientProvider client={queryClient}>
             <RouterProvider router={router} />
             <LoginGate />
             <CloudOnboardingGate />
           </QueryClientProvider>
-        </TelemetryBoundary>
+        </AppBoundary>
       </I18nextProvider>
     </React.StrictMode>,
   );

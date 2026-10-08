@@ -55,10 +55,6 @@ import {
   type OscTerminalColors,
 } from "../lib/osc-color-report";
 import {
-  captureRendererEvent,
-  captureRendererException,
-} from "../lib/telemetry";
-import {
   loadRenderer,
   type TerminalRendererStatus,
 } from "../lib/terminal-renderer";
@@ -533,32 +529,8 @@ export function XtermTerminal(props: XtermTerminalProps) {
     }
     // Keep xterm's private reservation aligned with the app-owned scrollbar.
     configureScrollbarReservation(term);
-    const rendererLoadedAt = Date.now();
     loadRenderer(term, (status: TerminalRendererStatus, detail?: unknown) => {
-      // A healthy WebGL mount is the overwhelming majority and would burn the
-      // per-name rate limit (5/min) for no signal. Only downgrades are news.
-      if (status === "webgl") return;
-      void captureRendererEvent("ao.renderer.terminal_renderer", {
-        status,
-        // False while the terminal is parked off-screen. Retention re-parents
-        // hosts between the parking div and the pane slot on every session
-        // switch, so this is what tells us whether that is the trigger.
-        visible: callbacksRef.current.isVisible !== false,
-        ageMs: Date.now() - rendererLoadedAt,
-        detail:
-          detail instanceof Error
-            ? detail.message
-            : typeof detail === "string"
-              ? detail
-              : undefined,
-      });
       if (status !== "none") return;
-      void captureRendererException(
-        detail instanceof Error
-          ? detail
-          : new Error("terminal renderer unavailable"),
-        { source: "xterm-renderer", operation: "load_renderer" },
-      );
       // Nothing is drawing this terminal. The owner surfaces it; without this
       // the pane just goes blank while everything else keeps working.
       callbacksRef.current.onError?.(detail);

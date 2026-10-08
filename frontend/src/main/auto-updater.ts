@@ -15,13 +15,6 @@ import {
 } from "./update-settings";
 import { reconcileFeaturePin } from "./feature-builds";
 import { evaluateEscalation } from "./escalation-evaluator";
-import {
-  isNetErrorMessage,
-  updateFailureOutcome,
-  type UpdateOutcome,
-  type UpdatePhase,
-  type UpdateTrigger,
-} from "../shared/update-telemetry";
 
 // reconcileAndPersist clears a pinned feature build whose PR has been retired
 // (merged/closed/deleted/expired) and persists the change, so the next check
@@ -132,33 +125,12 @@ let automaticCheckNetFailureCounted = false;
 // Which stage the active operation reached, and what it was fetching. Tracked
 // here because the renderer cannot know either: automatic failures never
 // broadcast a status, and error statuses carry no version.
-let activeUpdaterPhase: UpdatePhase = "check";
+let activeUpdaterPhase: "check" | "download" = "check";
 let pendingUpdateVersion: string | undefined;
 // Session-scoped time of the most recent completed feed check. Packaged apps
 // check the selected channel at launch regardless of whether automatic
 // downloading is enabled.
 let lastCheckedAtMs: number | undefined;
-
-// emitUpdateOutcome pushes an update outcome to renderers on a channel separate
-// from "updates:status", so suppressing a status for UI reasons (as the
-// automatic path does) never suppresses the telemetry for it.
-function emitUpdateOutcome(outcome: UpdateOutcome): void {
-  for (const win of BrowserWindow.getAllWindows()) {
-    if (!win.isDestroyed()) win.webContents.send("updates:telemetry", outcome);
-  }
-}
-
-function activeUpdateTrigger(): UpdateTrigger {
-  return activeUpdaterOperation === "automatic-check" ? "automatic" : "manual";
-}
-
-function emitUpdateFailure(err: unknown): void {
-  const message =
-    err instanceof Error ? err.message : err === undefined ? undefined : String(err);
-  emitUpdateOutcome(
-    updateFailureOutcome(message, activeUpdaterPhase, activeUpdateTrigger(), pendingUpdateVersion),
-  );
-}
 
 // broadcast pushes the latest update status to every renderer window so the
 // Global Settings Updates section can reflect check/download progress live.
@@ -535,9 +507,8 @@ async function runRetirementPoll(stateDir: string): Promise<void> {
 // (net::ERR_*). When the network stack wedges, every updater request fails
 // this way until the app restarts (#3526).
 function isNetError(err: unknown): boolean {
-  return isNetErrorMessage(
-    err instanceof Error ? err.message : err === undefined ? undefined : String(err),
-  );
+  const message = err instanceof Error ? err.message : err === undefined ? "" : String(err);
+  return /^net::/i.test(message);
 }
 
 // recordAutomaticNetFailure counts one net-level automatic-check failure,
@@ -671,12 +642,6 @@ function wireUpdaterEvents(): void {
     });
   });
   autoUpdater.on("update-downloaded", (info) => {
-    emitUpdateOutcome({
-      event: "ao.renderer.update_downloaded",
-      phase: "download",
-      trigger: activeUpdateTrigger(),
-      ...(info?.version ? { to_version: info.version } : {}),
-    });
     stagedVersion = info?.version;
     stagedAtMs = Date.now();
     stagedEscalated = false;
@@ -697,12 +662,6 @@ function wireUpdaterEvents(): void {
     escalationTimer.unref?.();
   });
   autoUpdater.on("error", (err) => {
-    // Never crash on update failure (offline, unsigned macOS, etc.).
-    // A one-off automatic failure restores the previous status so the UI does
-    // not flash an error the user never asked for. That suppression is a UI
-    // decision and must not suppress the telemetry: automatic checks are the
-    // main way an install goes silently stale.
-    emitUpdateFailure(err);
     if (activeUpdaterOperation === "automatic-check") {
       console.error("auto-update check failed:", err);
       recordAutomaticCheckFailure(err);
@@ -919,12 +878,6 @@ export async function checkForUpdatesNow(
   escalationStateDir = stateDir;
   wireUpdaterEvents();
 	if (!app.isPackaged) {
-    emitUpdateOutcome({
-      event: "ao.renderer.update_unsupported",
-      phase: activeUpdaterPhase,
-      trigger: activeUpdateTrigger(),
-      error_category: "not_supported",
-    });
     broadcast({
       state: "unsupported",
       message: "Updates are only available in the installed app.",
@@ -990,12 +943,6 @@ export async function returnToHome(
   escalationStateDir = stateDir;
   wireUpdaterEvents();
   if (!app.isPackaged) {
-    emitUpdateOutcome({
-      event: "ao.renderer.update_unsupported",
-      phase: activeUpdaterPhase,
-      trigger: activeUpdateTrigger(),
-      error_category: "not_supported",
-    });
     broadcast({
       state: "unsupported",
       message: "Updates are only available in the installed app.",
@@ -1033,12 +980,6 @@ export async function returnToHome(
 export async function downloadUpdateNow(requestId?: string): Promise<void> {
   wireUpdaterEvents();
 	if (!app.isPackaged) {
-    emitUpdateOutcome({
-      event: "ao.renderer.update_unsupported",
-      phase: activeUpdaterPhase,
-      trigger: activeUpdateTrigger(),
-      error_category: "not_supported",
-    });
     broadcast({
       state: "unsupported",
       message: "Updates are only available in the installed app.",

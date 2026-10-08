@@ -7,7 +7,6 @@ import type { paths } from "../../api/schema";
 import { fakeDaemon, type Behaviour } from "../test/fake-daemon";
 
 const {
-  captureRendererEventMock,
   cloudState,
   connectedHostsMock,
   getMock,
@@ -16,7 +15,6 @@ const {
   listProjectsMock,
   listSessionsMock,
 } = vi.hoisted(() => ({
-  captureRendererEventMock: vi.fn().mockResolvedValue(undefined),
   cloudState: {
     ready: false,
     org: undefined as { id: string; displayName: string } | undefined,
@@ -44,10 +42,6 @@ vi.mock("../lib/host-clients", () => ({
     hostListeners.add(listener);
     return () => hostListeners.delete(listener);
   },
-}));
-
-vi.mock("../lib/telemetry", () => ({
-  captureRendererEvent: captureRendererEventMock,
 }));
 
 vi.mock("./useCloudCp", () => ({
@@ -98,7 +92,6 @@ function respondWith(payload: {
 }
 
 beforeEach(() => {
-  captureRendererEventMock.mockClear();
   getMock.mockReset();
   connectedHostsMock.mockReset().mockReturnValue([]);
   hostListeners.clear();
@@ -187,8 +180,6 @@ describe("useWorkspaceQuery", () => {
   );
 
   it("loads projects when the host also has a standalone session with no projectId", async () => {
-    // Known status/activity so this test doesn't spend the once-per-module
-    // "unknown session field" telemetry a later test asserts on.
     const knownState = {
       status: "mergeable",
       isTerminated: false,
@@ -360,20 +351,6 @@ describe("useWorkspaceQuery", () => {
       autoInjectReview: true,
       autoInjectCI: true,
     });
-    expect(captureRendererEventMock).toHaveBeenCalledWith(
-      "ao.renderer.session_state_unknown",
-      {
-        field: "status",
-        reason: "unrecognized",
-      },
-    );
-    expect(captureRendererEventMock).toHaveBeenCalledWith(
-      "ao.renderer.session_state_unknown",
-      {
-        field: "activity",
-        reason: "missing",
-      },
-    );
   });
 
   it("preserves scratch projects and leaves branchless scratch sessions branchless", async () => {
@@ -713,10 +690,7 @@ describe("useWorkspaceQuery", () => {
     });
   });
 
-  // Every client here is a plain openapi-fetch client, so none of these
-  // failures reach api-client's ao.renderer.api_error. Before this the data
-  // just stopped loading, with nothing anywhere saying so.
-  it("reports a failed host fetch with the status that explains it", async () => {
+  it("surfaces an unauthorized host fetch", async () => {
     getMock.mockImplementation(async (_host: HostId, url: string) =>
       url === "/api/v1/projects"
         ? {
@@ -733,11 +707,10 @@ describe("useWorkspaceQuery", () => {
 
     const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-
-    expect(captureRendererEventMock).toHaveBeenCalledWith(
-      "ao.renderer.host_query_failed",
-      expect.objectContaining({ host_kind: "local", status: 401 }),
-    );
+    expect(result.current.data?.[0]).toMatchObject({
+      status: "failed",
+      failure: "Could not load projects",
+    });
   });
 });
 

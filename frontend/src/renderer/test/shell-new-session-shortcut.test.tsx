@@ -158,9 +158,6 @@ vi.mock("../hooks/useShellTerminals", () => ({
 
 vi.mock("../hooks/useAgentReadinessQuery", () => ({
 	agentReadinessQueryKey: ["agent-readiness"],
-	// The shell reports the install's agent inventory once per launch, so the
-	// mock has to answer this too. Undefined data means the hook reports nothing,
-	// which keeps these shortcut tests free of telemetry side effects.
 	useAgentReadinessQuery: () => ({ data: undefined }),
 	useEnsureAgentReadiness: vi.fn(),
 }));
