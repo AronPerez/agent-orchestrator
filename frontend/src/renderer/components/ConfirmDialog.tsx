@@ -24,6 +24,7 @@ type ConfirmDialogProps = {
 	error?: string | null;
 	onConfirm: () => void;
 	onOpenChange: (open: boolean) => void;
+	onCloseAutoFocus?: React.ComponentProps<typeof DialogContent>["onCloseAutoFocus"];
 };
 
 // Shared confirmation modal styled exactly like the settings dialogs — same
@@ -40,6 +41,7 @@ export function ConfirmDialog({
 	error,
 	onConfirm,
 	onOpenChange,
+	onCloseAutoFocus,
 }: ConfirmDialogProps) {
 	const { t } = useTranslation();
 	// Sized for a two-line prompt, not a settings form: the shared settings
@@ -50,6 +52,7 @@ export function ConfirmDialog({
 	return (
 		<Dialog open={open} onOpenChange={onOpenChange}>
 			<DialogContent
+				onCloseAutoFocus={onCloseAutoFocus}
 				showCloseButton={false}
 				className={cn(settingsDialogContentClass, "w-[min(420px,calc(100vw-24px))]")}
 			>
