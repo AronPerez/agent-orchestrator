@@ -1,3 +1,4 @@
+import type { components } from "../../api/schema";
 import { attentionZone as presentationAttentionZone } from "../lib/session-presentation";
 import {
 	AGENT_OPTIONS,
@@ -62,7 +63,10 @@ export type AgentSwitchSummary = {
 	targetHarness: string;
 };
 
+export type SessionArtifact = components["schemas"]["SessionArtifact"];
+
 export type WorkspaceSession = {
+	artifactFiles?: SessionArtifact[];
 	host: HostId;
 	id: string;
 	terminalHandleId?: string;
@@ -113,6 +117,7 @@ export type WorkspaceSession = {
 	displayStatus?: string;
 	/** Durable runtime fact from the daemon; independent of the derived SCM-aware status. */
 	isTerminated?: boolean;
+	chatProviderPreserved?: boolean;
 	/** User preference to tear down this session when its PR set completes through a merge. */
 	terminateOnPrMerge?: boolean;
 	/** Whether SCM review feedback is automatically injected into the worker. */

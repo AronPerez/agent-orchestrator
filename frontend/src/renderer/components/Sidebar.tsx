@@ -99,6 +99,7 @@ import { useResizable } from "../hooks/useResizable";
 import { useCloudGate } from "../hooks/useCloudGate";
 import { useShellMaybe } from "../lib/shell-context";
 import { useSidebarUpdateDismissal } from "../hooks/useSidebarUpdateDismissal";
+import { useRequestUpdateInstall } from "../hooks/useRequestUpdateInstall";
 import { useUpdateStatus } from "../hooks/useUpdateStatus";
 import {
   effectiveShortcutBindings,
@@ -2721,6 +2722,7 @@ function UpdateStatusRow({
   tabIndex: number;
 }) {
   const { t } = useTranslation();
+  const { requestInstall, busy } = useRequestUpdateInstall();
   if (status.state === "available") {
 		if (availableDismissed) return null;
     // A manual check leaves autoDownload off, so without this the row would
@@ -2819,7 +2821,8 @@ function UpdateStatusRow({
 					"border-working/35 bg-working/12 text-working hover:bg-working/18 [&_svg]:text-working",
       )}
 			data-testid="sidebar-update-ready"
-      onClick={() => void aoBridge.updates.install()}
+      onClick={requestInstall}
+      disabled={busy}
       tabIndex={tabIndex}
       type="button"
     >
@@ -2848,6 +2851,7 @@ function UpdateStatusRail({
   tabIndex: number;
 }) {
   const { t } = useTranslation();
+  const { requestInstall, busy } = useRequestUpdateInstall();
   if (status.state === "available") {
 		if (availableDismissed) return null;
 		const label = t("settings.updates.available", { version: status.version ? ` (v${status.version})` : "" });
@@ -2932,7 +2936,8 @@ function UpdateStatusRail({
               ? "bg-working/12 text-working hover:bg-working/18"
               : "text-passive hover:bg-interactive-hover hover:text-foreground",
           )}
-          onClick={() => void aoBridge.updates.install()}
+          onClick={requestInstall}
+          disabled={busy}
           tabIndex={tabIndex}
           type="button"
         >

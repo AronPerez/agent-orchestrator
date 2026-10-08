@@ -27,11 +27,16 @@ import {
   ResizablePanel,
   ResizablePanelGroup,
 } from "./ui/resizable";
+import type { SessionArtifact } from "../types/workspace";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
+import { SessionArtifactExplorer } from "./SessionArtifactExplorer";
 import { FileTree } from "./FileTree";
 import { FileContentPane } from "./FileContentPane";
 
 type SessionFileExplorerProps = {
   session: Ref;
+  artifacts?: SessionArtifact[];
+  onOpenArtifactPreview?: (url: string) => void;
   isMaximized?: boolean;
   activePath?: string | null;
   onOpenFile?: (path: string) => void;
@@ -40,12 +45,15 @@ type SessionFileExplorerProps = {
 
 export function SessionFileExplorer({
   session,
+  artifacts = [],
+  onOpenArtifactPreview,
   isMaximized = false,
   activePath,
   onOpenFile,
   onToggleMaximized,
 }: SessionFileExplorerProps) {
   const { t } = useTranslation();
+  const [source, setSource] = useState("workspace");
   const [filter, setFilter] = useState("");
   const [split, setSplit] = useState(false);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -63,7 +71,7 @@ export function SessionFileExplorer({
       session,
       t("files.error.loadWorkspace"),
     ),
-    enabled: changedOnly,
+    enabled: changedOnly && source === "workspace",
   });
   const changedOnlyData = useMemo(
     () => (filesQuery.data ? buildChangedOnlyTree(filesQuery.data.files) : []),
@@ -72,6 +80,7 @@ export function SessionFileExplorer({
 
   useEffect(() => {
     setSelectedPath(null);
+    setSource("workspace");
     setFilter("");
   }, [session.host, session.id]);
 
@@ -128,6 +137,7 @@ export function SessionFileExplorer({
     !isMaximized && onOpenFile ? (activePath ?? null) : selectedPath;
 
   return (
+    <Tabs value={source} onValueChange={setSource} asChild>
     <section
       ref={rootRef}
       className="flex h-full min-h-0 flex-col bg-background text-foreground"
@@ -148,6 +158,7 @@ export function SessionFileExplorer({
           <Switch
             aria-label={t("files.explorer.changedOnly")}
             checked={changedOnly}
+            disabled={source === "artifacts"}
             onCheckedChange={(next) => setFilesChangedOnly(sessionKey, next)}
             size="sm"
           />
@@ -158,6 +169,7 @@ export function SessionFileExplorer({
             <Button
               aria-label={split ? t("files.unifiedDiff") : t("files.splitDiff")}
               aria-pressed={split}
+              disabled={source === "artifacts"}
               className="shrink-0"
               onClick={() => setSplit((current) => !current)}
               size="icon-sm"
@@ -195,6 +207,16 @@ export function SessionFileExplorer({
           </Tooltip>
         ) : null}
       </header>
+      <div className="shrink-0 border-b border-border px-2 py-1">
+        <TabsList aria-label={t("files.artifacts.source")} className="h-8">
+          <TabsTrigger value="workspace" className="text-xs focus-visible:ring-2 focus-visible:ring-ring">{t("files.artifacts.workspace")}</TabsTrigger>
+          <TabsTrigger value="artifacts" className="text-xs focus-visible:ring-2 focus-visible:ring-ring">{t("files.artifacts.title")}</TabsTrigger>
+        </TabsList>
+      </div>
+      <TabsContent value="artifacts" className="flex min-h-0 flex-1 flex-col">
+        <SessionArtifactExplorer session={session} artifacts={artifacts} filter={filter} onOpenPreview={onOpenArtifactPreview} />
+      </TabsContent>
+      <TabsContent value="workspace" className="flex min-h-0 flex-1 flex-col">
       {isMaximized ? (
         // Maximized gives the explorer the full window — plenty of room for
         // the tree and the content side by side, like a real editor.
@@ -278,7 +300,9 @@ export function SessionFileExplorer({
           ) : null}
         </div>
       )}
+      </TabsContent>
     </section>
+    </Tabs>
   );
 }
 

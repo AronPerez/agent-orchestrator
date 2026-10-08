@@ -51,7 +51,7 @@ export function ReadOnlyFileView({
 
 // Reuse AO's CSP-compatible highlight.js pipeline so file previews and code
 // shown elsewhere in the renderer share grammars, colors, and caching.
-function HighlightedContent({
+export function HighlightedContent({
   content,
   path,
 }: {

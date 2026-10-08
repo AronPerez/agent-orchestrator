@@ -191,6 +191,7 @@ function toWorkspaceSession(
     kanbanColumn,
     displayStatus: session.displayStatus || undefined,
     isTerminated: session.isTerminated,
+    chatProviderPreserved: session.chatProviderPreserved,
     terminateOnPrMerge: session.terminateOnPrMerge ?? false,
     autoInjectReview: session.autoInjectReview ?? true,
     autoInjectCI: session.autoInjectCI ?? true,
@@ -201,6 +202,7 @@ function toWorkspaceSession(
     activeAgentSwitch: session.activeAgentSwitch
       ? toAgentSwitchSummary(session.activeAgentSwitch)
       : undefined,
+    artifactFiles: session.artifactFiles ?? [],
     previewUrl: session.previewUrl,
     previewRevision: session.previewRevision,
     isPinned: session.isPinned ?? false,

@@ -83,7 +83,7 @@ import { hidesShellTopbar, isMacPlatform } from "../lib/platform";
 import { hasBrowserDaemon } from "../lib/preview-mode";
 import { useShell } from "../lib/shell-context";
 import { cn } from "../lib/utils";
-import { refKey, type Ref } from "../lib/hosts";
+import { isLocal, refKey, type Ref } from "../lib/hosts";
 import { isOrchestratorSession, isStandaloneSession, sessionIsActive } from "../types/workspace";
 import {
   terminalTargetBelongsToSession,
@@ -525,6 +525,7 @@ export function SessionView({ sessionRef }: SessionViewProps) {
       phase: "docked",
     });
   const [filesPoppedOut, setFilesPoppedOut] = useState(false);
+  const [artifactPreview, setArtifactPreview] = useState<{ sessionKey: string; url: string; revision: number }>();
   const [fileTabsBySession, setFileTabsBySession] = useState<
     Record<string, SessionFileTabState>
   >({});
@@ -1396,8 +1397,18 @@ export function SessionView({ sessionRef }: SessionViewProps) {
   const activeWorkspaceTabKey = fileTabs.activePath
     ? `file:${fileTabs.activePath}`
     : undefined;
-  const previewUrl = session?.previewUrl?.trim() || undefined;
-  const previewRevision = session?.previewRevision;
+  const artifactPreviewUrl = isLocal(sessionRef.host) && artifactPreview?.sessionKey === sessionKey
+    ? artifactPreview.url : undefined;
+  const previewUrl = artifactPreviewUrl ?? (session?.previewUrl?.trim() || undefined);
+  const openArtifactPreview = useCallback((url: string) => {
+    if (!isLocal(sessionRef.host)) return;
+    // User selections must not collide with the daemon's nonnegative revisions.
+    setArtifactPreview((current) => ({ sessionKey, url, revision: (current?.revision ?? 0) - 1 }));
+    setFilesPoppedOut(false);
+    transitionInspectorView("browser");
+    setInspectorOpenForSession(sessionKey, true);
+  }, [sessionKey, sessionRef.host, setInspectorOpenForSession, transitionInspectorView]);
+  const previewRevision = artifactPreviewUrl ? artifactPreview?.revision : session?.previewRevision;
   const browserSlotVisible = Boolean(
     session &&
     hasInspector &&
@@ -1412,7 +1423,7 @@ export function SessionView({ sessionRef }: SessionViewProps) {
     session: session ?? sessionRef,
     active: browserSlotVisible,
     poppedOut: browserPoppedOut,
-    terminated,
+    terminated: terminated && !artifactPreviewUrl,
     previewUrl,
     previewRevision,
     persistentProfile,
@@ -1426,7 +1437,8 @@ export function SessionView({ sessionRef }: SessionViewProps) {
   // suppresses and destroys the live preview for it, so it must not count as
   // content here either — otherwise a merged/terminated session with an old
   // preview auto-opens Browser onto a view the hook has already torn down.
-  const hasBrowserContent = !terminated && Boolean(previewUrl || browserUrl);
+  // An explicit artifact selection is read-only and also works after termination.
+  const hasBrowserContent = (!terminated || Boolean(artifactPreviewUrl)) && Boolean(previewUrl || browserUrl);
 
   // Entering a session for the first time ever always starts on Summary. This
   // must fire exactly once per session's *lifetime*, not once per "was this
@@ -1453,6 +1465,9 @@ export function SessionView({ sessionRef }: SessionViewProps) {
     setBrowserPopOutState({ sessionKey, phase: "docked" });
     setFilesPoppedOut(false);
   }, [sessionKey]);
+  useEffect(() => {
+    setArtifactPreview(undefined);
+  }, [sessionKey, session?.previewUrl, session?.previewRevision]);
 
   // Route props change one render before the passive reset above. Reject the
   // previous session's shell/reviewer synchronously so its handle can never be
@@ -2102,6 +2117,8 @@ export function SessionView({ sessionRef }: SessionViewProps) {
               filesView={
                 filesAvailable && session ? (
                   <SessionFileExplorer
+                    artifacts={session.artifactFiles}
+                    onOpenArtifactPreview={openArtifactPreview}
                     activePath={fileTabs.activePath}
                     onOpenFile={openCenterFile}
                     onToggleMaximized={handleToggleFilesPopOut}
@@ -2178,6 +2195,8 @@ export function SessionView({ sessionRef }: SessionViewProps) {
               )}
             >
               <SessionFileExplorer
+                artifacts={session.artifactFiles}
+                onOpenArtifactPreview={openArtifactPreview}
                 isMaximized
                 onToggleMaximized={handleToggleFilesPopOut}
                 session={session}

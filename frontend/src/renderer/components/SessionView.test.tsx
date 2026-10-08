@@ -468,13 +468,16 @@ vi.mock("./SessionFileExplorer", () => ({
   SessionFileExplorer: ({
     isMaximized,
     onOpenFile,
+    onOpenArtifactPreview,
     onToggleMaximized,
   }: {
     isMaximized?: boolean;
     onOpenFile?: (path: string) => void;
+    onOpenArtifactPreview?: (url: string) => void;
     onToggleMaximized?: (next: boolean) => void;
   }) => (
     <div>
+      <button onClick={() => onOpenArtifactPreview?.("http://ao-preview-artifact.onxxe3df.localhost:3000/report.html")}>open artifact</button>
       <button type="button" onClick={() => onToggleMaximized?.(!isMaximized)}>
         {isMaximized ? "files center" : "files rail"}
       </button>
@@ -500,6 +503,7 @@ const { browserDestroy, browserViewOptions, browserViewState } = vi.hoisted(
             active: boolean;
             session: { host: string; id: string };
             terminated: boolean;
+            previewUrl?: string;
           }
         | undefined,
     },
@@ -511,6 +515,7 @@ vi.mock("../hooks/useBrowserView", () => ({
     active: boolean;
     session: { host: string; id: string };
     terminated: boolean;
+    previewUrl?: string;
   }) => {
     browserViewOptions.current = options;
     return {
@@ -3086,6 +3091,28 @@ describe("SessionView", () => {
       useUiStore.getState().inspectorSessions["local:sess-1"]
         ?.browserContentRevealed,
     ).toBeFalsy();
+  });
+
+  it.each(["proj-1", "@standalone"])("opens an archived HTML artifact for %s without reviving a stale session preview", (workspaceId) => {
+    const worker = workerSession("sess-1");
+    worker.workspaceId = workspaceId;
+    worker.status = "merged";
+    worker.isTerminated = true;
+    worker.previewUrl = "http://localhost:5173/stale";
+    const { rerender } = render(<SessionView sessionRef={sessionRef("sess-1")} />);
+    expect(browserViewOptions.current?.terminated).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "open files" }));
+    fireEvent.click(screen.getByRole("button", { name: "open artifact" }));
+    expect(inspectorButton()).toHaveAttribute("data-view", "browser");
+    expect(browserViewOptions.current).toMatchObject({
+      terminated: false, active: true,
+      previewUrl: "http://ao-preview-artifact.onxxe3df.localhost:3000/report.html",
+    });
+    worker.previewUrl = "http://localhost:5173/new";
+    worker.previewRevision = 2;
+    rerender(<SessionView sessionRef={sessionRef("sess-1")} />);
+    expect(browserViewOptions.current?.previewUrl).toBe(worker.previewUrl);
+    expect(browserViewOptions.current?.terminated).toBe(true);
   });
 
   // Regression: agent-browser commands (fill, click, snapshot, …) are real

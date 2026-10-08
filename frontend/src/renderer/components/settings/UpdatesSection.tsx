@@ -6,6 +6,7 @@ import { useTranslation } from "react-i18next";
 import { aoBridge } from "../../lib/bridge";
 import { cn } from "../../lib/utils";
 import { useUiStore } from "../../stores/ui-store";
+import { useRequestUpdateInstall } from "../../hooks/useRequestUpdateInstall";
 import { useUpdateStatus } from "../../hooks/useUpdateStatus";
 import type { UpdateChannel, UpdateSettings, UpdateState, UpdateStatus } from "../../../main/update-settings";
 import { Badge } from "../ui/badge";
@@ -33,6 +34,7 @@ function nextUpdateRequestId(prefix = "feature-update"): string {
 export function UpdatesSection({ titleHidden }: { titleHidden?: boolean } = {}) {
 	const { t } = useTranslation();
 	const queryClient = useQueryClient();
+	const { requestInstall } = useRequestUpdateInstall();
 	const query = useQuery({
 		queryKey: updateSettingsQueryKey,
 		queryFn: () => aoBridge.updateSettings.get(),
@@ -106,12 +108,12 @@ export function UpdatesSection({ titleHidden }: { titleHidden?: boolean } = {}) 
 		if (status.state === "available") {
 			void aoBridge.updates.download(requestId);
 		} else if (status.state === "downloaded") {
-			void aoBridge.updates.install();
+			requestInstall();
 			autoProgressRef.current = null;
 		} else if (status.state === "error" || status.state === "unsupported" || status.state === "not-available") {
 			autoProgressRef.current = null;
 		}
-	}, [status]);
+	}, [status, requestInstall]);
 
 	const save = useMutation({
 		mutationFn: async (next: UpdateSettings) => {
@@ -341,6 +343,7 @@ function UpdateActions({
 	channelSwitch: { channel: UpdateChannel; requestId: string } | null;
 }) {
 	const { t, i18n } = useTranslation();
+	const { requestInstall, busy: installBusy } = useRequestUpdateInstall();
 	const version = useQuery({ queryKey: ["app-version"], queryFn: () => aoBridge.app.getVersion() });
 	const installedChannel = installedUpdateChannel(version.data);
 	const effectiveStatus = status;
@@ -456,7 +459,7 @@ function UpdateActions({
 						</Button>
 					)}
 					{!checking && effectiveStatus.state === "downloaded" && (
-						<Button type="button" variant="primary" size="sm" onClick={() => void aoBridge.updates.install()}>
+						<Button type="button" variant="primary" size="sm" onClick={requestInstall} disabled={installBusy}>
 							{t("settings.updates.restartInstall")}
 						</Button>
 					)}

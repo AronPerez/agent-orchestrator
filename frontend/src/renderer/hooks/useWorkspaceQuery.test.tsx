@@ -266,6 +266,7 @@ describe("useWorkspaceQuery", () => {
               id: "sess-1",
               projectId: "proj-1",
               terminalHandleId: "term-1",
+              chatProviderPreserved: true,
               displayName: "fix-bug",
               issueId: "github:acme/project-one#42",
               harness: "claude-code",
@@ -338,6 +339,7 @@ describe("useWorkspaceQuery", () => {
     expect(workspace.sessions[0]).toMatchObject({
       id: "sess-1",
       terminalHandleId: "term-1",
+      chatProviderPreserved: true,
       title: "fix-bug",
       issueId: "github:acme/project-one#42",
       provider: "claude-code",
@@ -412,6 +414,27 @@ describe("useWorkspaceQuery", () => {
     expect(result.current.data?.[0].workspaces[0].sessions[0]).toMatchObject({
       id: "scratch-worker-1",
       branch: undefined,
+    });
+  });
+
+  it.each(["proj-1", undefined])("preserves daemon artifact URLs and provider state for project %s", async (projectId) => {
+    const artifactFiles = [{
+      path: "report.md", name: "report.md", kind: "markdown", size: 42,
+      updatedAt: "2026-10-08T00:00:00Z",
+      rawUrl: "http://ao-preview-artifact.onxxe3df.localhost:3000/report.md?raw=true",
+    }];
+    respondWith({
+      projects: { data: { projects: projectId ? [{ id: projectId, name: "App", path: "/app" }] : [] } },
+      sessions: { data: { sessions: [{
+        id: "sess-1", projectId, status: "working", isTerminated: false,
+        chatProviderPreserved: true,
+        updatedAt: "2026-10-08T00:00:00Z", artifactFiles,
+      }] } },
+    });
+    const { result } = renderWorkspaceQuery();
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.[0].workspaces[0].sessions[0]).toMatchObject({
+      workspaceId: projectId ?? "@standalone", artifactFiles, chatProviderPreserved: true,
     });
   });
 
