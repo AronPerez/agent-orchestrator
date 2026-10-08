@@ -37,14 +37,15 @@ open the host:port it shows. `dev-setup.sh` boots out both jobs and deletes thei
 plists on its next run. This needs a daemon built at or after `2399595db` — an
 older one answers a browser navigation with a JSON 401.
 
-**There is no launchd daemon job.** The desktop app spawns its bundled daemon on
-`:3001` and replaces any running one on every launch (per-launch browser-runtime
-token). `AO_KEEP_DAEMON=1` (set for the GUI session at login by the one-shot
-`dev.agent-orchestrator.env` job, and exported in `~/.zshrc`) makes app-spawned
-daemons persistent — they survive app
-quit. After a reboot, open the app (or run `ao start`) to bring the daemon back.
-Never add an auto-started daemon job: a colliding daemon silently falls back to
-an ephemeral port and clobbers `~/.ao/running.json`.
+**One daemon binary: `~/.ao/host/current/resources/daemon/ao`.**
+`install-desktop-app.sh` installs it from the freshly built app
+(`setup-self-hosted.sh --app`), which also points `~/.ao/bin/ao` and
+`~/.local/bin/ao` at it. The `dev.aoagents.self-hosted` LaunchAgent starts it at
+login only (no KeepAlive). The desktop app replaces any daemon it did not start
+(per-launch browser-runtime token), so the one-shot `dev.agent-orchestrator.env`
+job sets `AO_DAEMON_COMMAND` to that same binary, plus `AO_KEEP_DAEMON=1` so
+app-spawned daemons survive app quit. Never give a daemon job KeepAlive: once
+the app takes over it would respawn into "daemon already running" forever.
 
 ## Deploy after editing a script
 

@@ -27,7 +27,8 @@ export function resolveDaemonLaunch(
 		return {
 			command: configuredCommand,
 			args: [],
-			cwd: appPath,
+			// A packaged appPath is app.asar, a file: spawn cannot chdir into it.
+			cwd: isPackaged ? joinPath(homeDir, ".ao") : appPath,
 			shell: true,
 			source: "configured",
 		};
