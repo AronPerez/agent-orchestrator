@@ -201,6 +201,7 @@ function toWorkspaceSession(
     activeAgentSwitch: session.activeAgentSwitch
       ? toAgentSwitchSummary(session.activeAgentSwitch)
       : undefined,
+    artifactFiles: session.artifactFiles ?? [],
     previewUrl: session.previewUrl,
     previewRevision: session.previewRevision,
     isPinned: session.isPinned ?? false,

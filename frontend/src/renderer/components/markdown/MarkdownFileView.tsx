@@ -68,6 +68,7 @@ export function MarkdownFileView({
 	content,
 	truncated,
 	version,
+	artifactUrl,
 }: {
 	session: Ref;
 	filePath: string;
@@ -76,10 +77,12 @@ export function MarkdownFileView({
 	truncated: boolean;
 	/** The file detail's load timestamp, for cache-busting relative images. */
 	version: number;
+	/** Artifact-origin URL; relative images must never resolve in the worktree. */
+	artifactUrl?: string;
 }) {
 	const { t } = useTranslation();
 	const bodyRef = useRef<HTMLDivElement>(null);
-	const contextValue = useMemo(() => ({ session, filePath, version }), [session, filePath, version]);
+	const contextValue = useMemo(() => ({ session, filePath, version, artifactUrl }), [session, filePath, version, artifactUrl]);
 
 	// Heading slugs are unique per rendered file, not per document, and the Files
 	// tab expands many files at once — two open READMEs both containing

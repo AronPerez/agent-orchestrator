@@ -2126,5 +2126,17 @@
   "inspector.title": "Inspecteur",
   "shell.openNavigation": "Ouvrir la navigation",
   "pr.review.notRequired": "Aucune revue requise",
-  "pr.merge.reasonComments": "Unresolved review comments must be resolved before this PR can merge."
+  "pr.merge.reasonComments": "Unresolved review comments must be resolved before this PR can merge.",
+  "files.artifacts.source": "Source des fichiers",
+  "files.artifacts.workspace": "Espace de travail",
+  "files.artifacts.title": "Artefacts",
+  "files.artifacts.localOnly": "Les artefacts sont disponibles uniquement sur cet ordinateur.",
+  "files.artifacts.missing": "Cet artefact n’est plus disponible.",
+  "files.artifacts.noMatches": "Aucun artefact correspondant.",
+  "files.artifacts.empty": "Aucun artefact pour le moment.",
+  "files.artifacts.openBrowser": "Ouvrir dans le navigateur",
+  "files.artifacts.noUrl": "L’URL de l’artefact est indisponible.",
+  "files.artifacts.tooLarge": "L’artefact est trop volumineux pour l’aperçu (limite : 1 Mo).",
+  "files.artifacts.loading": "Chargement de l’artefact…",
+  "files.artifacts.loadError": "Impossible de charger l’artefact ({{reason}})."
 }

@@ -2097,5 +2097,17 @@
   "inspector.title": "인스펙터",
   "shell.openNavigation": "탐색 열기",
   "pr.review.notRequired": "리뷰 필요 없음",
-  "pr.merge.reasonComments": "Unresolved review comments must be resolved before this PR can merge."
+  "pr.merge.reasonComments": "Unresolved review comments must be resolved before this PR can merge.",
+  "files.artifacts.source": "파일 위치",
+  "files.artifacts.workspace": "작업 공간",
+  "files.artifacts.title": "결과물",
+  "files.artifacts.localOnly": "결과물은 이 컴퓨터에서만 사용할 수 있습니다.",
+  "files.artifacts.missing": "결과물을 더 이상 사용할 수 없습니다.",
+  "files.artifacts.noMatches": "일치하는 결과물이 없습니다.",
+  "files.artifacts.empty": "아직 결과물이 없습니다.",
+  "files.artifacts.openBrowser": "브라우저에서 열기",
+  "files.artifacts.noUrl": "결과물 URL을 사용할 수 없습니다.",
+  "files.artifacts.tooLarge": "결과물이 너무 커서 미리 볼 수 없습니다(최대 1 MB).",
+  "files.artifacts.loading": "결과물 로딩 중…",
+  "files.artifacts.loadError": "결과물을 불러올 수 없습니다({{reason}})."
 }

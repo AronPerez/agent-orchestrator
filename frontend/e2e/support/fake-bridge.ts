@@ -1,3 +1,4 @@
+import type { SessionArtifact } from "../../src/renderer/types/workspace";
 import type { Page } from "@playwright/test";
 
 import type { UpdateSettings, UpdateStatus } from "../../src/main/update-settings";
@@ -308,6 +309,8 @@ export type FakeWorker = {
 	activity?: "active" | "idle" | "waiting_input" | "exited";
 	previewUrl?: string;
 	previewRevision?: number;
+	artifactFiles?: SessionArtifact[];
+	isTerminated?: boolean;
 };
 
 export type FakeAgentOptions = {
@@ -401,6 +404,8 @@ export async function installFakeAgent(
 					state: w.activity ?? "active",
 					lastActivityAt: new Date().toISOString(),
 				},
+				artifactFiles: w.artifactFiles,
+				isTerminated: w.isTerminated,
 				previewUrl: w.previewUrl,
 				previewRevision: w.previewRevision,
 				prs: [],

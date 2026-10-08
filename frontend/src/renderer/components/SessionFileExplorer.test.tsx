@@ -165,6 +165,24 @@ describe("SessionFileExplorer", () => {
     widthSpy.mockRestore();
   });
 
+  it("keeps artifact paths separate from identically named workspace files", async () => {
+    const onOpenFile = vi.fn();
+    const onOpenArtifactPreview = vi.fn();
+    renderWithQuery(<SessionFileExplorer session={{ host: "local", id: "collision" }}
+      onOpenFile={onOpenFile} onOpenArtifactPreview={onOpenArtifactPreview}
+      artifacts={[{ name: "App.tsx", path: "src/App.tsx", kind: "html", size: 12,
+        updatedAt: "2026-10-08T00:00:00Z",
+        previewUrl: "http://ao-preview-artifact.onxxe3df.localhost:3000/App.html" }]} />);
+    await userEvent.click(screen.getByRole("button", { name: "select src/App.tsx" }));
+    expect(onOpenFile).toHaveBeenCalledWith("src/App.tsx");
+    await userEvent.click(screen.getByRole("tab", { name: "Artifacts" }));
+    await userEvent.click(screen.getByRole("button", { name: "src/App.tsx" }));
+    await userEvent.click(screen.getByRole("button", { name: "Open in Browser" }));
+    expect(onOpenArtifactPreview).toHaveBeenCalledWith("http://ao-preview-artifact.onxxe3df.localhost:3000/App.html");
+    expect(onOpenFile).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("switch", { name: "Changed only" })).toBeDisabled();
+  });
+
   it("toggles the changed-only setting in the ui store and reflects it in the tree", async () => {
     const sessionId = "sess-explorer-2";
     renderWithQuery(

@@ -1778,6 +1778,22 @@ describe("useBrowserView", () => {
     expect(bridge.clear).not.toHaveBeenCalled();
   });
 
+  it("recreates a destroyed view when an archived artifact is explicitly opened", async () => {
+    const bridge = setupBridge();
+    const { result, rerender } = renderHook(({ terminated }) => useBrowserView({
+      session: { host: "local", id: "artifact-session" }, active: true, poppedOut: false,
+      terminated, previewUrl: "http://ao-preview-artifact.onxxe3df.localhost:3000/report.html", previewRevision: 1,
+    }), { initialProps: { terminated: true } });
+    await waitFor(() => expect(bridge.destroy).toHaveBeenCalled());
+    expect(result.current.viewId).toBe("");
+    expect(bridge.navigate).not.toHaveBeenCalled();
+    rerender({ terminated: false });
+    await waitFor(() => expect(bridge.ensure).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bridge.navigate).toHaveBeenCalledWith({
+      viewId: "42:local:artifact-session", url: "http://ao-preview-artifact.onxxe3df.localhost:3000/report.html",
+    }));
+  });
+
   it("destroys the complete browser target when the session is terminated", async () => {
     const bridge = setupBridge();
     const { rerender, result } = renderHook(
