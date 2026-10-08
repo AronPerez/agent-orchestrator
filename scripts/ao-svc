@@ -53,9 +53,11 @@ case "${1:-status}" in
     # the build beats diagnosing it after.
     echo "reload: building $repo @ $(git -C "$repo" rev-parse --short HEAD 2>/dev/null) ($(git -C "$repo" rev-parse --abbrev-ref HEAD 2>/dev/null))"
     mkdir -p "$HOME/.ao/bin"
+    # A symlinked ~/.ao/bin/ao belongs to setup-self-hosted.sh (it tracks
+    # ~/.ao/host/current); leave it, or this would fork the CLI off the daemon.
     "$repo/scripts/daemon-build.sh" \
-      && cp -f "$cache_bin" "$HOME/.ao/bin/ao.new" \
-      && mv -f "$HOME/.ao/bin/ao.new" "$HOME/.ao/bin/ao" \
+      && { [[ -L "$HOME/.ao/bin/ao" ]] || { cp -f "$cache_bin" "$HOME/.ao/bin/ao.new" \
+        && mv -f "$HOME/.ao/bin/ao.new" "$HOME/.ao/bin/ao"; }; } \
       && echo "reload: ao CLI + ~/.ao/bin/ao rebuilt (daemon is app-bundled; scripts/install-desktop-app.sh updates it)" \
       || { echo "reload: FAILED" >&2; exit 1; }
     ;;
