@@ -1,6 +1,6 @@
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useUiStore } from "../stores/ui-store";
 import type { ProjectSettingsSaveState } from "./ProjectSettingsForm";
 import { SettingsDialog } from "./SettingsDialog";
@@ -40,6 +40,12 @@ vi.mock("../hooks/useCloudGate", () => ({
 }));
 
 describe("SettingsDialog", () => {
+	afterEach(async () => {
+		cleanup();
+		// Let Radix restore focus before Vitest tears down this DOM's Event globals.
+		await new Promise((resolve) => setTimeout(resolve, 0));
+	});
+
 	beforeEach(() => {
 		useUiStore.setState({ settingsModal: null });
 	});
