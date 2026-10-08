@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { useUpdateInstallStore } from "../hooks/useRequestUpdateInstall";
 import { appI18n } from "../i18n";
 import { GlobalSettingsForm } from "./GlobalSettingsForm";
 import { useLocaleStore } from "../stores/locale-store";
@@ -68,6 +69,11 @@ vi.mock("../lib/platform", async (importOriginal) => {
 	return { ...actual, isWindowsPlatform: () => true };
 });
 
+vi.mock("../lib/host-clients", () => ({
+	baseUrlFor: () => "http://localhost:3001",
+	clientFor: () => ({ GET: async () => ({ data: { sessions: [] } }) }),
+}));
+
 vi.mock("../lib/bridge", () => ({
 	aoBridge: {
 		app: { getVersion, openExternal },
@@ -106,6 +112,7 @@ function renderForm(settings?: Settings) {
 }
 
 beforeEach(async () => {
+	useUpdateInstallStore.setState({ phase: "idle", promptOpen: false, failed: false });
 	for (const m of [
 		getUpdate,
 		setUpdate,
@@ -553,7 +560,7 @@ describe("GlobalSettingsForm", () => {
 		act(() => emit({ state: "downloaded", version: "1.2.3" }));
 		const installBtn = await screen.findByRole("button", { name: /Restart & install/ });
 		await userEvent.click(installBtn);
-		expect(updInstall).toHaveBeenCalled();
+		await waitFor(() => expect(updInstall).toHaveBeenCalled());
 	});
 
 	it("shows a non-error restart nudge when automatic checks keep failing on the network", async () => {
