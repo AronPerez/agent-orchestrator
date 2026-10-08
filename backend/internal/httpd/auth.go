@@ -19,6 +19,7 @@ import (
 type authState struct{ hashes atomic.Pointer[authHashes] }
 type authHashes struct {
 	current string
+	account string
 	retired []string
 }
 
@@ -30,6 +31,7 @@ func (a *authState) setHash(h string) {
 		}
 		next := &authHashes{current: h}
 		if previous != nil {
+			next.account = previous.account
 			next.retired = append(next.retired, previous.retired...)
 			if previous.current != "" {
 				next.retired = append(next.retired, previous.current)
@@ -39,6 +41,25 @@ func (a *authState) setHash(h string) {
 			return
 		}
 	}
+}
+func (a *authState) setAccountHash(h string) {
+	for {
+		previous := a.hashes.Load()
+		next := &authHashes{account: h}
+		if previous != nil {
+			next.current = previous.current
+			next.retired = previous.retired
+		}
+		if a.hashes.CompareAndSwap(previous, next) {
+			return
+		}
+	}
+}
+func (a *authState) accountHash() string {
+	if hashes := a.hashes.Load(); hashes != nil {
+		return hashes.account
+	}
+	return ""
 }
 func (a *authState) currentHash() string {
 	if hashes := a.hashes.Load(); hashes != nil {
@@ -189,7 +210,7 @@ func previewFilesCookiePath(urlPath string) string {
 // exchange; on the no-auth loopback listener it is simply not a route.
 const authLoginPath = "/api/v1/auth/login"
 
-// credential returns the token authenticating r against hash, whether it
+// credential returns the token authenticating r against either hash, whether it
 // arrived in a cookie, and whether it is valid.
 //
 // It comes from the Authorization: Bearer header (the mobile API client and a
@@ -206,19 +227,22 @@ const authLoginPath = "/api/v1/auth/login"
 // A cookie authenticating on its own is deliberately narrower than it looks —
 // authMiddleware additionally requires a strict origin whenever the cookie is
 // what authenticated, because cookies ride cross-site and a Bearer never does.
-func credential(hash string, r *http.Request) (tok string, viaCookie, ok bool) {
+func credential(currentHash, accountHash string, r *http.Request) (tok string, viaCookie, ok bool) {
+	matches := func(token string) bool {
+		return mobilebridge.PasswordMatches(currentHash, token) || mobilebridge.PasswordMatches(accountHash, token)
+	}
 	if t := bearerToken(r); t != "" {
-		return t, false, mobilebridge.PasswordMatches(hash, t)
+		return t, false, matches(t)
 	}
 	if t := wsProtocolToken(r); t != "" {
-		return t, false, mobilebridge.PasswordMatches(hash, t)
+		return t, false, matches(t)
 	}
 	var seen string
 	for _, c := range r.Cookies() {
 		if c.Name != authCookieName {
 			continue
 		}
-		if mobilebridge.PasswordMatches(hash, c.Value) {
+		if matches(c.Value) {
 			return c.Value, true, true
 		}
 		seen = c.Value
@@ -403,7 +427,16 @@ func authMiddleware(state *authState, lock *lockout, log *slog.Logger, connected
 				handleLogin(w, r, state, lock, log, connected, src, remoteSrc)
 				return
 			}
-			tok, viaCookie, ok := credential(state.currentHash(), r)
+			conn, _ := r.Context().Value(lanConnContextKey{}).(*lanConn)
+			if conn != nil {
+				conn.owner.mu.Lock()
+			}
+			hashes := state.hashes.Load()
+			var tok string
+			var viaCookie, ok bool
+			if hashes != nil {
+				tok, viaCookie, ok = credential(hashes.current, hashes.account, r)
+			}
 			if ok {
 				// A cookie rides along on cross-site requests; a Bearer or the
 				// ao.bearer.* subprotocol can only be attached by code that was
@@ -412,10 +445,22 @@ func authMiddleware(state *authState, lock *lockout, log *slog.Logger, connected
 				// network could drive this daemon through the user's browser
 				// (classic CSRF, and CSWSH on the /mux upgrade).
 				if viaCookie && !strictOriginOK(nil, r) {
+					if conn != nil {
+						conn.owner.mu.Unlock()
+					}
 					envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "ORIGIN_FORBIDDEN",
 						"cookie credentials are accepted only from this daemon's own pages", nil)
 					return
 				}
+				if conn != nil {
+					// Record auth atomically with rotation's connection close.
+					conn.tokenHash = mobilebridge.HashPassword(tok)
+				}
+			}
+			if conn != nil {
+				conn.owner.mu.Unlock()
+			}
+			if ok {
 				lock.reset(src)
 				connected.report(remoteSrc)
 				maybeSetPreviewAuthCookie(w, r, tok)

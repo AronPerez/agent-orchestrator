@@ -20,6 +20,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/reqid"
 	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
+	"github.com/aoagents/agent-orchestrator/backend/internal/sessionartifacts"
 	"github.com/aoagents/agent-orchestrator/backend/internal/telemetrymeta"
 )
 
@@ -192,6 +193,14 @@ type scmProvider interface {
 	FetchReviewThreads(ctx context.Context, ref ports.SCMPRRef) (ports.SCMReviewObservation, error)
 }
 
+// outputTypeReconciler recomputes and persists a session's durable OutputType
+// column. Production wiring supplies *lifecycle.Manager; declaring the
+// capability locally (rather than importing lifecycle) keeps this package
+// from depending on the reducer that already depends on it transitively.
+type outputTypeReconciler interface {
+	ReconcileSessionOutputType(ctx context.Context, id domain.SessionID) error
+}
+
 // Service is the controller-facing session service. It delegates command-side
 // session operations to the internal sessionmanager.Manager and owns read-model
 // assembly, including user-facing display status derivation.
@@ -219,6 +228,10 @@ type Service struct {
 	// independently spawn its own git subprocesses for identical work.
 	workspaceGroup singleflight.Group
 	manifestGroup  singleflight.Group
+	// branchStateMu serializes branch-state reconciles and guards branchTips,
+	// each session's last reconciled branch, remote, and base tips.
+	branchStateMu sync.Mutex
+	branchTips    map[domain.SessionID]string
 	// signalCapable reports whether a harness has a hook pipeline that can
 	// deliver activity signals at all. Only capable harnesses are eligible for
 	// the no_signal downgrade: a hook-less harness staying silent forever is
@@ -235,6 +248,13 @@ type Service struct {
 	titleRefinementSlots   chan struct{}
 	titleRefinementMu      sync.Mutex
 	titleRefinementCancels map[domain.SessionID]context.CancelFunc
+	// outputTypeReconciler lets ClaimPR persist the pr OutputType immediately
+	// instead of waiting for the next artifact-output poll tick, so raising a
+	// PR on a session that already produced artifacts flips its Kanban
+	// placement with the same latency claiming a PR always had. Nil in
+	// service tests that construct Service directly; ClaimPR degrades to
+	// relying on the poller in that case.
+	outputTypeReconciler outputTypeReconciler
 }
 
 // SetChatProviderPreserver wires the live Chat lifetime observation after both
@@ -278,6 +298,11 @@ type Deps struct {
 	// GithubIdentity resolves the operator's authenticated GitHub account so the
 	// handle rides along with product telemetry.
 	GithubIdentity ports.ScopedIdentityResolver
+	// OutputTypeReconciler persists the durable OutputType column; daemon
+	// wiring passes the shared *lifecycle.Manager. Left nil, ClaimPR still
+	// succeeds but the pr OutputType only lands on the next artifact-output
+	// poll tick.
+	OutputTypeReconciler outputTypeReconciler
 }
 
 // NewWithDeps wires a session service with optional PR-claim dependencies.
@@ -286,7 +311,7 @@ func NewWithDeps(d Deps) *Service {
 	if backgroundContext == nil {
 		backgroundContext = context.Background()
 	}
-	s := &Service{manager: d.Manager, store: d.Store, prClaimer: d.PRClaimer, scm: d.SCM, tracker: d.Tracker, clock: d.Clock, dataDir: d.DataDir, signalCapable: d.SignalCapable, runtimeUnreachable: d.RuntimeUnreachable, telemetry: d.Telemetry, logger: d.Logger, backgroundContext: backgroundContext, agentReadiness: d.AgentReadiness, githubIdentity: d.GithubIdentity, titleRefinementSlots: make(chan struct{}, delegatedTaskTitleConcurrency), titleRefinementCancels: map[domain.SessionID]context.CancelFunc{}}
+	s := &Service{manager: d.Manager, store: d.Store, prClaimer: d.PRClaimer, scm: d.SCM, tracker: d.Tracker, clock: d.Clock, dataDir: d.DataDir, signalCapable: d.SignalCapable, runtimeUnreachable: d.RuntimeUnreachable, telemetry: d.Telemetry, logger: d.Logger, backgroundContext: backgroundContext, agentReadiness: d.AgentReadiness, githubIdentity: d.GithubIdentity, titleRefinementSlots: make(chan struct{}, delegatedTaskTitleConcurrency), titleRefinementCancels: map[domain.SessionID]context.CancelFunc{}, outputTypeReconciler: d.OutputTypeReconciler}
 	if s.prClaimer == nil {
 		if w, ok := d.Store.(ports.PRClaimer); ok {
 			s.prClaimer = w
@@ -1169,7 +1194,7 @@ func (s *Service) enrichRecords(ctx context.Context, recs []domain.SessionRecord
 	}
 	out := make([]domain.Session, 0, len(recs))
 	for _, rec := range recs {
-		sess, err := s.toSessionWithFacts(rec, prsBySession[rec.ID], runsBySession[rec.ID])
+		sess, err := s.toSessionWithFacts(ctx, rec, prsBySession[rec.ID], runsBySession[rec.ID])
 		if err != nil {
 			return nil, err
 		}
@@ -1255,13 +1280,61 @@ func (s *Service) Get(ctx context.Context, id domain.SessionID) (domain.Session,
 	return sess, nil
 }
 
-func (s *Service) toSessionWithFacts(rec domain.SessionRecord, prs []domain.PRFacts, runs []domain.CurrentHeadReviewRun) (domain.Session, error) {
+func (s *Service) toSessionWithFacts(ctx context.Context, rec domain.SessionRecord, prs []domain.PRFacts, runs []domain.CurrentHeadReviewRun) (domain.Session, error) {
+	// A row created before artifact_dir existed carries it as '' (the
+	// migration's default) even though session_manager always prompts the
+	// agent to write into the deterministic dataDir/artifacts/<id> path.
+	// Fall back to that derived path here so the file listing and preview
+	// root (sess.Metadata.ArtifactDir, read directly by the preview
+	// controller) are correct on this read, rather than waiting for
+	// lifecycle.Manager.ReconcileSessionOutputType's next poll tick to
+	// persist the backfill.
+	//
+	// The artifact-output poller skips terminated sessions (nothing more can
+	// happen to a session that is done), so a terminated row would never get
+	// durably repaired through that path alone. Trigger the same reconcile
+	// here, on read, unconditionally of IsTerminated, in two cases: a legacy
+	// row whose ArtifactDir was empty, and a row whose persisted type does not
+	// yet record artifact files that exist on disk (the agent wrote output and
+	// the session ended before any reconcile ran). Both are one-time
+	// self-healing writes, not a recurring per-read cost.
+	backfilledArtifactDir := false
+	if rec.Metadata.ArtifactDir == "" {
+		if dir := sessionartifacts.Dir(s.dataDir, rec.ID); dir != "" {
+			rec.Metadata.ArtifactDir = dir
+			backfilledArtifactDir = true
+		}
+	}
+	artifactFiles, err := sessionartifacts.List(rec.Metadata.ArtifactDir)
+	if err != nil {
+		// An unwalkable artifact root must not fail the session read (and with
+		// it the whole board); the artifact list is simply empty for this read.
+		if s.logger != nil {
+			s.logger.Warn("list session artifacts", "session", rec.ID, "err", err)
+		}
+		artifactFiles = nil
+	}
+	if backfilledArtifactDir || (len(artifactFiles) > 0) != rec.OutputType.HasArtifact() {
+		// Reflect the repair in this response's OutputType too, not just
+		// future ones: the persisted write below lands asynchronously
+		// relative to this read.
+		rec.OutputType = sessionartifacts.DeriveOutputType(len(prs), len(artifactFiles))
+		if s.outputTypeReconciler != nil {
+			if err := s.outputTypeReconciler.ReconcileSessionOutputType(ctx, rec.ID); err != nil && s.logger != nil {
+				s.logger.Warn("reconcile output type on read", "session", rec.ID, "err", err)
+			}
+		}
+	}
 	runs = canonicalizeCurrentHeadReviewRuns(prs, runs)
 	prs = deduplicatePRFacts(prs)
 	// Both derivations read the clock once, from the same instant: they share
 	// the no-signal rule, and two reads could put them either side of its grace
 	// period and have the card contradict its own status.
 	now := s.now()
+	// rec.OutputType is the persisted column (lifecycle.Manager.
+	// ReconcileSessionOutputType is the sole writer); it is deliberately not
+	// recomputed here so the API and Kanban see the same durable
+	// classification rather than a value that can differ read to read.
 	presentation := deriveKanbanPresentation(rec, prs, runs, now, s.harnessSignals(rec.Harness))
 	readiness := "ready"
 	if recovery, ok := s.manager.(interface {
@@ -1282,6 +1355,7 @@ func (s *Service) toSessionWithFacts(rec domain.SessionRecord, prs []domain.PRFa
 		// outlive the fact; a terminated session's status is already definitive.
 		RuntimeUnreachable: !rec.IsTerminated && s.runtimeIsUnreachable(rec.ID),
 		TerminalHandleID:   rec.Metadata.RuntimeHandleID,
+		ArtifactFiles:      artifactFiles,
 		PRs:                prs,
 	}, nil
 }
@@ -1554,7 +1628,7 @@ func (s *Service) toSession(ctx context.Context, rec domain.SessionRecord) (doma
 	if err != nil {
 		return domain.Session{}, err
 	}
-	return s.toSessionWithFacts(rec, prs, runs)
+	return s.toSessionWithFacts(ctx, rec, prs, runs)
 }
 
 // currentHeadReviewRuns reads the session's AO review passes for the Kanban

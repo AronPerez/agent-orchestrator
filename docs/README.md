@@ -35,6 +35,8 @@ in [gemini-cli.md](gemini-cli.md).
 | [posthog-cost-controls.md](posthog-cost-controls.md)   | PostHog event-name migration, ingestion drop rules, and dashboard queries for reducing telemetry spend.              |
 | [remote-sessions-edd.md](remote-sessions-edd.md)       | EDD for shipped multi-host federation: one app driving N daemons, the loopback proxy, and LAN credential containment. |
 
+See [startup-cues.md](startup-cues.md) for command cues that gate a new worktree’s opening turn.
+
 ## Mental model
 
 Persist durable facts, derive display status:

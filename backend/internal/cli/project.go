@@ -134,8 +134,11 @@ type projectConfig struct {
 	AutoReview         bool                 `json:"autoReview,omitempty"`
 	// BrowserPersistentProfile is opt-in and default off. See the domain type
 	// for the security ceiling it accepts.
-	BrowserPersistentProfile bool             `json:"browserPersistentProfile,omitempty"`
-	Reviewers                []reviewerConfig `json:"reviewers,omitempty"`
+	BrowserPersistentProfile bool `json:"browserPersistentProfile,omitempty"`
+	// WorkersRequestReview must round-trip through set-config so a CLI edit
+	// of another field never silently turns it off.
+	WorkersRequestReview bool             `json:"workersRequestReview,omitempty"`
+	Reviewers            []reviewerConfig `json:"reviewers,omitempty"`
 }
 
 // setConfigRequest mirrors the daemon's SetConfigInput body for

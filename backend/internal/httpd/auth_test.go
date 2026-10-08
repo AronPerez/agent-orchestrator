@@ -38,6 +38,33 @@ func reqFrom(remoteAddr, auth string) *http.Request {
 	return r
 }
 
+func TestAccountTokenAuthenticatesWithoutReplacingPairingPassword(t *testing.T) {
+	state := &authState{}
+	state.setHash(mobilebridge.HashPassword("password"))
+	state.setAccountHash(mobilebridge.HashPassword("scoped-token"))
+	h := authMiddleware(state, newLockout(time.Now), discardLogger(), nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	for _, token := range []string{"password", "scoped-token"} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req("Bearer "+token))
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s rejected: %d", token, w.Code)
+		}
+	}
+	r := reqPathCookie(http.MethodPost, "/api/v1/sessions/abc/kill", "", "scoped-token")
+	r.Header.Set("Origin", "http://evil.example")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin account-token cookie accepted: %d", w.Code)
+	}
+	state.setAccountHash(mobilebridge.HashPassword("replacement"))
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req("Bearer scoped-token"))
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("retired account token accepted: %d", w.Code)
+	}
+}
+
 func TestAuthLockoutResetsAfterCooldown(t *testing.T) {
 	nowP := time.Now()
 	h, _ := newAuthUnderTest("secret12", func() time.Time { return nowP })

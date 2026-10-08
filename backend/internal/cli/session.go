@@ -58,9 +58,16 @@ type sessionDTO struct {
 	// RuntimeUnreachable means AO's last liveness probe could not reach the
 	// session's runtime, so its reported status describes a session AO can no
 	// longer see.
-	RuntimeUnreachable bool           `json:"runtimeUnreachable,omitempty"`
-	Branch             string         `json:"branch,omitempty"`
-	PRs                []sessionPRDTO `json:"prs"`
+	RuntimeUnreachable bool            `json:"runtimeUnreachable,omitempty"`
+	Branch             string          `json:"branch,omitempty"`
+	BranchState        *branchStateDTO `json:"branchState,omitempty"`
+	PRs                []sessionPRDTO  `json:"prs"`
+}
+
+type branchStateDTO struct {
+	Commits      int    `json:"commits"`
+	RemoteBranch string `json:"remoteBranch,omitempty"`
+	Unpushed     int    `json:"unpushed"`
 }
 
 type sessionActivity struct {
@@ -1040,6 +1047,7 @@ func writeSessionDetails(cmd *cobra.Command, sess sessionDTO) error {
 		{"activity", sess.Activity.State},
 		{"harness", sess.Harness},
 		{"issue", sess.IssueID},
+		{"branch", formatBranchState(sess)},
 		{"terminated", fmt.Sprintf("%t", sess.IsTerminated)},
 	}
 	for _, field := range fields {
@@ -1061,6 +1069,30 @@ func writeSessionDetails(cmd *cobra.Command, sess sessionDTO) error {
 		}
 	}
 	return nil
+}
+
+// formatBranchState renders the daemon's observed branch facts, for example
+// "feat/x (3 commits, 1 not pushed to origin/feat/x)".
+func formatBranchState(sess sessionDTO) string {
+	state := sess.BranchState
+	if sess.Branch == "" || state == nil {
+		return sess.Branch
+	}
+	commits := fmt.Sprintf("%d commit", state.Commits)
+	if state.Commits != 1 {
+		commits += "s"
+	}
+	switch {
+	case state.RemoteBranch == "":
+		if state.Commits == 0 {
+			return fmt.Sprintf("%s (%s)", sess.Branch, commits)
+		}
+		return fmt.Sprintf("%s (%s, not pushed)", sess.Branch, commits)
+	case state.Unpushed > 0:
+		return fmt.Sprintf("%s (%s, %d not pushed to %s)", sess.Branch, commits, state.Unpushed, state.RemoteBranch)
+	default:
+		return fmt.Sprintf("%s (%s, pushed to %s)", sess.Branch, commits, state.RemoteBranch)
+	}
 }
 
 func sessionRole(sess sessionDTO) string {

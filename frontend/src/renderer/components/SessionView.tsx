@@ -664,6 +664,7 @@ export function SessionView({ sessionRef }: SessionViewProps) {
       return (
         data ??
         ({
+          activeReviewers: [],
           reviewerHandleId: "",
           reviews: [],
           runs: [],
