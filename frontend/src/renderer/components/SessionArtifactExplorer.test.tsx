@@ -1,7 +1,8 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionArtifact } from "../types/workspace";
+import { useUiStore } from "../stores/ui-store";
 import { SessionArtifactExplorer } from "./SessionArtifactExplorer";
 
 const session = { host: "local", id: "sess-1" };
@@ -16,6 +17,7 @@ const artifact: SessionArtifact = {
   rawUrl,
 };
 const fetchMock = vi.fn();
+beforeEach(() => useUiStore.setState({ inspectorSessions: {} }));
 afterEach(() => {
   vi.unstubAllGlobals();
   fetchMock.mockReset();
@@ -44,6 +46,14 @@ function select(name = "reports/report.md") {
 }
 
 describe("SessionArtifactExplorer", () => {
+  it("does not read local artifacts without the Electron preload bridge", () => {
+    vi.stubGlobal("ao", undefined);
+    setup();
+    expect(screen.getByText("Artifacts are unavailable in the web app.")).toBeVisible();
+    expect(screen.queryByRole("button", { name: artifact.path })).not.toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("loads Markdown from rawUrl and resolves images only against the artifact origin", async () => {
     fetchMock.mockResolvedValue(
       new Response("# Delivered report\n![Chart](./chart.png)"),

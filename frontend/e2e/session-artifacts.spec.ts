@@ -56,6 +56,61 @@ test.afterAll(async () => {
   if (fixtureDir) await rm(fixtureDir, { recursive: true, force: true });
 });
 
+test("chat Review opens Workspace after Artifacts and Summary @P0", async ({ page }) => {
+  const sessionId = "artifact-review";
+  const now = "2026-10-08T00:00:00Z";
+  await page.setViewportSize({ width: 1280, height: 860 });
+  await installFakeAgent(page, {
+    workers: [{ id: sessionId, title: "Review workspace changes", mode: "chat", artifactFiles: artifacts }],
+  });
+  await page.route(`**/api/v1/sessions/${sessionId}/**`, async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/conversation")) {
+      await route.fulfill({ json: {
+        conversationId: "conversation-artifact-review",
+        sessionId,
+        harness: "codex",
+        mode: "chat",
+        controller: "ready",
+        latestSequence: 1,
+        oldestSequence: 1,
+        hasMoreBefore: false,
+        turns: [{
+          id: "turn-1", state: "completed", requestedAt: now, completedAt: now,
+          diff: { files: [{ path: "src/app.ts", status: "modified", additions: 1, deletions: 0 }] },
+        }],
+        messages: [{
+          kind: "message", id: "message-1", turnId: "turn-1", sequence: 1, revision: 0,
+          role: "assistant", origin: "provider", text: "Updated the app.", streaming: false, createdAt: now,
+        }],
+        activities: [],
+        settings: {},
+      } });
+    } else if (path.endsWith("/workspace/files")) {
+      await route.fulfill({ json: { files: [], truncated: false } });
+    } else if (path.endsWith("/conversation/models")) {
+      await route.fulfill({ json: { models: [], selected: {} } });
+    } else if (path.endsWith("/conversation/skills")) {
+      await route.fulfill({ json: { skills: [] } });
+    } else {
+      await route.fulfill({ status: 404, json: { error: { code: "NOT_FOUND", message: "Unused mock endpoint" } } });
+    }
+  });
+  await page.goto(`/#/host/local/session/${sessionId}`);
+  await page.getByRole("tab", { name: "Files", exact: true }).click();
+  await page.getByRole("tab", { name: "Artifacts", exact: true }).click();
+  await expect(page.getByRole("button", { name: "report.md", exact: true })).toBeVisible();
+
+  // Ordinary Files navigation restores the source; explicit Review must not.
+  await page.getByRole("tab", { name: "Summary", exact: true }).click();
+  await page.getByRole("tab", { name: "Files", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "Artifacts", exact: true })).toHaveAttribute("aria-selected", "true");
+  await page.getByRole("tab", { name: "Summary", exact: true }).click();
+  await page.getByRole("button", { name: "Review", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "Workspace", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("button", { name: "report.md", exact: true })).toHaveCount(0);
+});
+
 for (const theme of ["dark", "light"] as const) {
   test(`local artifacts: Markdown, text, missing, binary and HTML in ${theme} @P0`, async ({
     page,
@@ -144,6 +199,17 @@ for (const theme of ["dark", "light"] as const) {
         ),
       });
     }
+    for (const [action, state] of [["Maximize files", "maximized"], ["Minimize files", "restored"]]) {
+      await page.getByRole("button", { name: action, exact: true }).click();
+      await expect(page.getByRole("tab", { name: "Artifacts", exact: true })).toHaveAttribute("aria-selected", "true");
+      await expect(page.getByRole("heading", { name: "Delivery report" })).toBeVisible();
+      if (process.env.S03_SCREENSHOT_DIR) {
+        await page.screenshot({
+          animations: "disabled",
+          path: join(process.env.S03_SCREENSHOT_DIR, `s03-artifacts-${state}-${theme}.png`),
+        });
+      }
+    }
     await page
       .getByRole("button", { name: "Expand sidebar", exact: true })
       .first()
@@ -191,5 +257,18 @@ for (const theme of ["dark", "light"] as const) {
     await expect(page.getByPlaceholder("localhost:5173")).toHaveValue(
       `${origin}/report.html`,
     );
+
+    const requestCount = rawRequests.length;
+    await page.evaluate(() => Reflect.deleteProperty(window, "ao"));
+    await page.getByRole("tab", { name: "Files", exact: true }).click();
+    await expect(page.getByText("Artifacts are unavailable in the web app.")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Open in Browser" })).toHaveCount(0);
+    expect(rawRequests).toHaveLength(requestCount);
+    if (process.env.S03_SCREENSHOT_DIR) {
+      await page.screenshot({
+        animations: "disabled",
+        path: join(process.env.S03_SCREENSHOT_DIR, `s03-artifacts-web-${theme}.png`),
+      });
+    }
   });
 }

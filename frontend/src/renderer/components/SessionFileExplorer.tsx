@@ -53,13 +53,16 @@ export function SessionFileExplorer({
   onToggleMaximized,
 }: SessionFileExplorerProps) {
   const { t } = useTranslation();
-  const [source, setSource] = useState("workspace");
   const [filter, setFilter] = useState("");
   const [split, setSplit] = useState(false);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const rootRef = useRef<HTMLElement>(null);
   const sessionKey = refKey(session);
   const annotation = useFileAnnotation(session);
+  const source = useUiStore((state) =>
+    state.inspectorSessions[sessionKey]?.filesSource ?? "workspace",
+  );
+  const setFilesSource = useUiStore((state) => state.setFilesSource);
 
   const changedOnly = useUiStore((state) =>
     Boolean(state.inspectorSessions[sessionKey]?.filesChangedOnly),
@@ -80,7 +83,6 @@ export function SessionFileExplorer({
 
   useEffect(() => {
     setSelectedPath(null);
-    setSource("workspace");
     setFilter("");
   }, [session.host, session.id]);
 
@@ -137,7 +139,13 @@ export function SessionFileExplorer({
     !isMaximized && onOpenFile ? (activePath ?? null) : selectedPath;
 
   return (
-    <Tabs value={source} onValueChange={setSource} asChild>
+    <Tabs
+      value={source}
+      onValueChange={(value) => {
+        if (value === "workspace" || value === "artifacts") setFilesSource(sessionKey, value);
+      }}
+      asChild
+    >
     <section
       ref={rootRef}
       className="flex h-full min-h-0 flex-col bg-background text-foreground"

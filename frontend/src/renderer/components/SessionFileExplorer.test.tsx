@@ -1,8 +1,9 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { ReactNode } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionFileExplorer } from "./SessionFileExplorer";
 import { TooltipProvider } from "./ui/tooltip";
 import { useUiStore } from "../stores/ui-store";
@@ -69,7 +70,10 @@ function renderWithQuery(children: ReactNode) {
 }
 
 describe("SessionFileExplorer", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
   beforeEach(() => {
+    useUiStore.setState({ inspectorSessions: {} });
     getMock
       .mockReset()
       .mockResolvedValue({
@@ -163,6 +167,75 @@ describe("SessionFileExplorer", () => {
     expect(panels[0]).toHaveStyle({ flexGrow: "26" });
     expect(panels[1]).toHaveStyle({ flexGrow: "74" });
     widthSpy.mockRestore();
+  });
+
+  it.each(["markdown", "file"] as const)(
+    "preserves a selected %s artifact across maximize and minimize remounts",
+    async (kind) => {
+      vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response("Delivered report"))));
+      function Harness() {
+        const [maximized, setMaximized] = useState(false);
+        const explorer = (
+          <SessionFileExplorer
+            session={{ host: "local", id: "artifact-remount" }}
+            artifacts={[{
+              name: "report.md", path: "report.md", kind, size: 20,
+              updatedAt: "2026-10-08T00:00:00Z",
+              rawUrl: "http://ao-preview-artifact.onxxe3df.localhost:3000/report.md?raw=true",
+            }]}
+            isMaximized={maximized}
+            onToggleMaximized={setMaximized}
+          />
+        );
+        return maximized ? createPortal(explorer, document.body) : explorer;
+      }
+      renderWithQuery(<Harness />);
+      await userEvent.click(screen.getByRole("tab", { name: "Artifacts" }));
+      await userEvent.click(screen.getByRole("button", { name: "report.md" }));
+      expect(await screen.findByText("Delivered report")).toBeVisible();
+
+      for (const name of ["Maximize files", "Minimize files"]) {
+        const previous = screen.getByRole("region", { name: "Session files" });
+        await userEvent.click(screen.getByRole("button", { name }));
+        expect(previous).not.toBeInTheDocument();
+        expect(screen.getByRole("tab", { name: "Artifacts" })).toHaveAttribute("aria-selected", "true");
+        expect(await screen.findByText("Delivered report")).toBeVisible();
+      }
+    },
+  );
+
+  it.each([
+    { host: "local", id: "other-session" },
+    { host: "remote", id: "selected-session" },
+  ])("keeps artifact source and selection scoped to $host:$id", async (otherSession) => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response("Selected report"))));
+    const selectedSession = { host: "local", id: "selected-session" };
+    function Harness() {
+      const [session, setSession] = useState(selectedSession);
+      return <>
+        <button onClick={() => setSession(otherSession)}>Other session</button>
+        <button onClick={() => setSession(selectedSession)}>Original session</button>
+        <SessionFileExplorer session={session} artifacts={[{
+          name: "report.md", path: "report.md", kind: "markdown", size: 20,
+          updatedAt: "2026-10-08T00:00:00Z",
+          rawUrl: "http://ao-preview-artifact.onxxe3df.localhost:3000/report.md?raw=true",
+        }]} />
+      </>;
+    }
+    renderWithQuery(<Harness />);
+    await userEvent.click(screen.getByRole("tab", { name: "Artifacts" }));
+    await userEvent.click(screen.getByRole("button", { name: "report.md" }));
+    expect(await screen.findByText("Selected report")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Other session" }));
+    expect(screen.getByRole("tab", { name: "Workspace" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.queryByText("Selected report")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("tab", { name: "Artifacts" }));
+    expect(screen.queryByText("Selected report")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Original session" }));
+    expect(screen.getByRole("tab", { name: "Artifacts" })).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByText("Selected report")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Back to file tree" }));
+    expect(screen.getByRole("button", { name: "report.md" })).toBeVisible();
   });
 
   it("keeps artifact paths separate from identically named workspace files", async () => {

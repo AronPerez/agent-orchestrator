@@ -2083,6 +2083,7 @@
   "files.artifacts.source": "File source",
   "files.artifacts.workspace": "Workspace",
   "files.artifacts.title": "Artifacts",
+  "files.artifacts.webUnavailable": "Artifacts are unavailable in the web app.",
   "files.artifacts.localOnly": "Artifacts are available on this computer only.",
   "files.artifacts.missing": "Artifact is no longer available.",
   "files.artifacts.noMatches": "No matching artifacts.",

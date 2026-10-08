@@ -494,6 +494,7 @@ export function SessionView({ sessionRef }: SessionViewProps) {
     (state) => state.setInspectorView,
   );
   const setFilesChangedOnly = useUiStore((state) => state.setFilesChangedOnly);
+  const setFilesSource = useUiStore((state) => state.setFilesSource);
   const initializeInspectorSession = useUiStore(
     (state) => state.initializeInspectorSession,
   );
@@ -1547,6 +1548,12 @@ export function SessionView({ sessionRef }: SessionViewProps) {
     void fetchWorkspaceFiles();
   }, [fetchWorkspaceFiles, prepareFilesInspector]);
 
+  const handleReviewFiles = useCallback(() => {
+    if (!prepareFilesInspector()) return;
+    setFilesSource(sessionKey, "workspace");
+    void fetchWorkspaceFiles();
+  }, [fetchWorkspaceFiles, prepareFilesInspector, sessionKey, setFilesSource]);
+
   const handleOpenReviewFile = useCallback(
     (target: { line?: number; path: string }) => {
       if (!prepareFilesInspector()) return;
@@ -2032,7 +2039,7 @@ export function SessionView({ sessionRef }: SessionViewProps) {
                         ? apiErrorMessage(openShellTerminal.error)
                         : undefined
                     }
-                    onOpenFiles={filesAvailable ? handleOpenFiles : undefined}
+                    onOpenFiles={filesAvailable ? handleReviewFiles : undefined}
                     onOpenFile={filesAvailable ? handleOpenFile : undefined}
                   />
                 ) : (

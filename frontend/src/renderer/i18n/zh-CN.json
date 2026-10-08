@@ -2084,6 +2084,7 @@
   "files.artifacts.source": "文件来源",
   "files.artifacts.workspace": "工作区",
   "files.artifacts.title": "产物",
+  "files.artifacts.webUnavailable": "网页版无法使用产物。",
   "files.artifacts.localOnly": "产物仅在本机可用。",
   "files.artifacts.missing": "产物已不可用。",
   "files.artifacts.noMatches": "没有匹配的产物。",

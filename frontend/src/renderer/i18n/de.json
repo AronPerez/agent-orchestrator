@@ -2102,6 +2102,7 @@
   "files.artifacts.source": "Dateiquelle",
   "files.artifacts.workspace": "Arbeitsbereich",
   "files.artifacts.title": "Artefakte",
+  "files.artifacts.webUnavailable": "Artefakte sind in der Web-App nicht verfügbar.",
   "files.artifacts.localOnly": "Artefakte sind nur auf diesem Computer verfügbar.",
   "files.artifacts.missing": "Das Artefakt ist nicht mehr verfügbar.",
   "files.artifacts.noMatches": "Keine passenden Artefakte.",

@@ -226,6 +226,7 @@ vi.mock("./chat/SessionChatSurface", () => ({
 		session,
     onOpenShell,
     onOpenFile,
+    onOpenFiles,
     headerActions,
     reviewerTerminal,
     onOpenReviewerTerminal,
@@ -245,6 +246,7 @@ vi.mock("./chat/SessionChatSurface", () => ({
 		session: WorkspaceSession;
     onOpenShell?: () => void;
     onOpenFile?: (path: string) => void;
+    onOpenFiles?: () => void;
     headerActions?: ReactNode;
     reviewerTerminal?: { handleId: string; harness: string };
     onOpenReviewerTerminal?: (target: {
@@ -298,6 +300,9 @@ vi.mock("./chat/SessionChatSurface", () => ({
 				reorder visible tabs
 			</button>
       {headerActions}
+      {onOpenFiles ? (
+        <button type="button" onClick={onOpenFiles}>Review</button>
+      ) : null}
 			<div role="tablist">
 				{workspaceTabs?.map((tab) => <div key={tab.key}>{tab.content}</div>)}
 			</div>
@@ -2632,6 +2637,29 @@ describe("SessionView", () => {
       screen.queryByRole("tab", { name: /\.tsx$/ }),
     ).not.toBeInTheDocument();
     expect(clientForMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["open files", "artifacts"],
+    ["Review", "workspace"],
+  ])("opens %s from Summary with the %s source", (action, source) => {
+    workerSession("sess-1").mode = "chat";
+    act(() => {
+      useUiStore.getState().setInspectorOpen("local:sess-1", true);
+      useUiStore.getState().setFilesSource("local:sess-1", "artifacts");
+      useUiStore.getState().setInspectorView("local:sess-1", "files");
+    });
+    render(<SessionView sessionRef={sessionRef("sess-1")} />);
+
+    fireEvent.click(screen.getByRole("tab", { name: "Summary" }));
+    fireEvent.click(screen.getByRole("button", { name: action }));
+
+    expect(useUiStore.getState().inspectorSessions["local:sess-1"]).toMatchObject({
+      view: "files",
+      filesSource: source,
+      filesChangedOnly: true,
+    });
+    expect(screen.getByRole("button", { name: "files rail" })).toBeInTheDocument();
   });
 
   it("opens docked files as center tabs while preserving the agent surface", () => {
