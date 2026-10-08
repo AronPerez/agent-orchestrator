@@ -2097,5 +2097,17 @@
   "inspector.title": "Inspektor",
   "shell.openNavigation": "Navigation öffnen",
   "pr.review.notRequired": "Kein Review erforderlich",
-  "pr.merge.reasonComments": "Unresolved review comments must be resolved before this PR can merge."
+  "pr.merge.reasonComments": "Unresolved review comments must be resolved before this PR can merge.",
+  "files.artifacts.source": "Dateiquelle",
+  "files.artifacts.workspace": "Arbeitsbereich",
+  "files.artifacts.title": "Artefakte",
+  "files.artifacts.localOnly": "Artefakte sind nur auf diesem Computer verfügbar.",
+  "files.artifacts.missing": "Das Artefakt ist nicht mehr verfügbar.",
+  "files.artifacts.noMatches": "Keine passenden Artefakte.",
+  "files.artifacts.empty": "Noch keine Artefakte.",
+  "files.artifacts.openBrowser": "Im Browser öffnen",
+  "files.artifacts.noUrl": "Die Artefakt-URL ist nicht verfügbar.",
+  "files.artifacts.tooLarge": "Das Artefakt ist zu groß für die Vorschau (Limit: 1 MB).",
+  "files.artifacts.loading": "Artefakt wird geladen…",
+  "files.artifacts.loadError": "Artefakt konnte nicht geladen werden ({{reason}})."
 }

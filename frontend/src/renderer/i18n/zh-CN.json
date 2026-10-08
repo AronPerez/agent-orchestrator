@@ -2079,5 +2079,17 @@
   "inspector.title": "检查器",
   "shell.openNavigation": "打开导航",
   "pr.review.notRequired": "无需评审",
-  "pr.merge.reasonComments": "Unresolved review comments must be resolved before this PR can merge."
+  "pr.merge.reasonComments": "Unresolved review comments must be resolved before this PR can merge.",
+  "files.artifacts.source": "文件来源",
+  "files.artifacts.workspace": "工作区",
+  "files.artifacts.title": "产物",
+  "files.artifacts.localOnly": "产物仅在本机可用。",
+  "files.artifacts.missing": "产物已不可用。",
+  "files.artifacts.noMatches": "没有匹配的产物。",
+  "files.artifacts.empty": "暂无产物。",
+  "files.artifacts.openBrowser": "在浏览器中打开",
+  "files.artifacts.noUrl": "产物 URL 不可用。",
+  "files.artifacts.tooLarge": "产物过大，无法预览（上限 1 MB）。",
+  "files.artifacts.loading": "正在加载产物…",
+  "files.artifacts.loadError": "无法加载产物（{{reason}}）。"
 }

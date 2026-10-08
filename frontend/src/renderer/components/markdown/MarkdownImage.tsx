@@ -17,9 +17,17 @@ export function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
 	// The failed URL rather than a boolean: a version bump hands us a new URL for
 	// the same reference, and that one deserves its own attempt.
 	const [failedSrc, setFailedSrc] = useState<string | null>(null);
-	const resolvedSrc = context
-		? resolveMarkdownImageSrc(context.session, context.filePath, src, context.version)
-		: src;
+	let resolvedSrc = src;
+	if (context?.artifactUrl && src) {
+		try {
+			const url = new URL(src, context.artifactUrl);
+			// Artifact images stay on the isolated artifact origin, never the API.
+			url.searchParams.set("v", String(context.version));
+			resolvedSrc = url.origin === new URL(context.artifactUrl).origin ? url.href : undefined;
+		} catch { resolvedSrc = undefined; }
+	} else if (context) {
+		resolvedSrc = resolveMarkdownImageSrc(context.session, context.filePath, src, context.version);
+	}
 	if (!resolvedSrc || resolvedSrc === failedSrc) return <span className="text-muted-foreground">{alt ?? ""}</span>;
 	return <img src={resolvedSrc} alt={alt ?? ""} onError={() => setFailedSrc(resolvedSrc)} />;
 }

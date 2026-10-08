@@ -4,6 +4,7 @@ import type { Ref } from "../../lib/hosts";
 export type MarkdownFileContextValue = {
 	session: Ref;
 	filePath: string;
+	artifactUrl?: string;
 	/**
 	 * The file detail's load timestamp. The blob route sets `no-store`, so this is
 	 * what makes a rewritten image reload — see `buildWorkspaceBlobUrl`.

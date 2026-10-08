@@ -251,6 +251,16 @@ function useNativeBrowserView({
     ? ""
     : (persistentProfile?.key ?? "");
   const profileKeyResolved = persistentProfile?.pending !== true;
+  // An explicit artifact preview can reopen a browser destroyed on termination.
+  const [reopenGeneration, setReopenGeneration] = useState(0);
+  const previousLifetime = useRef({ sessionId, terminated });
+  useEffect(() => {
+    const previous = previousLifetime.current;
+    previousLifetime.current = { sessionId, terminated };
+    if (previous.sessionId === sessionId && previous.terminated && !terminated) {
+      setReopenGeneration((generation) => generation + 1);
+    }
+  }, [sessionId, terminated]);
   const [viewId, setViewId] = useState("");
   const [navState, setNavState] = useState<BrowserNavState>(EMPTY_NAV_STATE);
   const [annotationMode, setAnnotationModeState] = useState(false);
@@ -517,6 +527,7 @@ function useNativeBrowserView({
     hasNativeBrowser,
     profileKey,
     profileKeyResolved,
+    reopenGeneration,
     scheduleSettleMeasure,
     sendHiddenBounds,
     sessionId,

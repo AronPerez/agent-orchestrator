@@ -400,6 +400,24 @@ describe("useWorkspaceQuery", () => {
     });
   });
 
+  it("preserves daemon artifact URLs separately from workspace paths", async () => {
+    const artifactFiles = [{
+      path: "report.md", name: "report.md", kind: "markdown", size: 42,
+      updatedAt: "2026-10-08T00:00:00Z",
+      rawUrl: "http://ao-preview-artifact.onxxe3df.localhost:3000/report.md?raw=true",
+    }];
+    respondWith({
+      projects: { data: { projects: [{ id: "proj-1", name: "App", path: "/app" }] } },
+      sessions: { data: { sessions: [{
+        id: "sess-1", projectId: "proj-1", status: "working", isTerminated: false,
+        updatedAt: "2026-10-08T00:00:00Z", artifactFiles,
+      }] } },
+    });
+    const { result } = renderWorkspaceQuery();
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.[0].workspaces[0].sessions[0]).toMatchObject({ artifactFiles });
+  });
+
   it("maps each session's prs straight from the session list", async () => {
     respondWith({
       projects: {

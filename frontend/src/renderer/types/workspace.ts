@@ -1,3 +1,4 @@
+import type { components } from "../../api/schema";
 import { attentionZone as presentationAttentionZone } from "../lib/session-presentation";
 import {
 	AGENT_OPTIONS,
@@ -62,7 +63,10 @@ export type AgentSwitchSummary = {
 	targetHarness: string;
 };
 
+export type SessionArtifact = components["schemas"]["SessionArtifact"];
+
 export type WorkspaceSession = {
+	artifactFiles?: SessionArtifact[];
 	host: HostId;
 	id: string;
 	terminalHandleId?: string;

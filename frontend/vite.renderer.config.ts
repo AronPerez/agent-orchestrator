@@ -46,12 +46,14 @@ function contentSecurityPolicy(mode: "build" | "serve"): string {
 		// impractical because the preamble changes with the plugin version.
 		mode === "serve" ? "script-src 'self' 'unsafe-inline'" : "script-src 'self'",
 		"style-src 'self' 'unsafe-inline'",
-		"img-src 'self' data: http://127.0.0.1:*",
+		"img-src 'self' data: http://127.0.0.1:* http://*.localhost:*",
 		"font-src 'self' data:",
 		[
 			"connect-src",
 			"'self'",
 			"http://127.0.0.1:*",
+			// Daemon-isolated artifact origins (ao-preview-artifact.<session>.localhost).
+			"http://*.localhost:*",
 			"ws://127.0.0.1:*",
 			// Vite serves on localhost, which 'self' does not cover for the ws://
 			// HMR socket.
