@@ -32,7 +32,6 @@ import {
   listFeatureBuilds,
   getActiveFeatureBuild,
 } from "./main/feature-builds";
-import { initMainSentry } from "./main/sentry-main";
 import { readRemotes } from "./main/remotes-store";
 import { registerRemotesIpc, remotesFilePath } from "./main/remotes-main";
 import { startRemoteProxy } from "./main/remote-proxy";
@@ -153,12 +152,6 @@ import {
 } from "./main/cloud-auth";
 import { installCloudCpProxy } from "./main/cloud-cp-proxy";
 import {
-  DEFAULT_POSTHOG_HOST,
-  DEFAULT_POSTHOG_PROJECT_KEY,
-} from "./shared/posthog-config";
-import { DEFAULT_SENTRY_DSN } from "./shared/sentry-config";
-import { buildTelemetryBootstrap } from "./shared/telemetry";
-import {
   createBrowserViewHost,
   scopedProfileKey,
   shouldHandleAppShortcutInBrowserContext,
@@ -277,12 +270,6 @@ app.setPath(
     ? path.join(os.homedir(), ".ao", "electron")
     : path.join(os.homedir(), ".ao", "dev", "electron"),
 );
-
-// Init main-process Sentry as early as possible so startup crashes are caught,
-// and after userData is pinned so its cache resolves under ~/.ao/electron. The
-// renderer SDK forwards over IPC to this main process, so this is required for
-// any desktop event to upload. No-op unless AO_SENTRY_DSN is set.
-void initMainSentry(app.getVersion());
 
 let mainWindow: BaseWindow | null = null;
 let trayController: TrayController | null = null;
@@ -909,43 +896,6 @@ let cachedShellEnv: Record<string, string> | null = null;
 let shellEnvPromise: Promise<void> | null = null;
 let terminalShellPreference: TerminalShellPreference = { ...DEFAULT_TERMINAL_SHELL };
 
-// Telemetry defaults stamped on the daemon env on every platform; explicit env
-// always wins.
-//
-// Unpackaged builds keep local event recording but never export to PostHog: a
-// dev loop or a CI job driving the real app would otherwise bill production
-// events and inflate install/DAU counts. Set AO_TELEMETRY_REMOTE explicitly to
-// exercise the export path from a dev build.
-function telemetryOverrides(): Record<string, string> {
-  return {
-    AO_TELEMETRY_EVENTS: process.env.AO_TELEMETRY_EVENTS ?? "on",
-    AO_TELEMETRY_REMOTE:
-      process.env.AO_TELEMETRY_REMOTE ?? (isDev ? "off" : "posthog"),
-    AO_TELEMETRY_POSTHOG_KEY:
-      process.env.AO_TELEMETRY_POSTHOG_KEY ?? DEFAULT_POSTHOG_PROJECT_KEY,
-    AO_TELEMETRY_POSTHOG_HOST:
-      process.env.AO_TELEMETRY_POSTHOG_HOST ?? DEFAULT_POSTHOG_HOST,
-    // Daemon-side Sentry (5xx + panics with Go stacks). Stamped on the daemon
-    // env so the spawned daemon inherits the DSN; off in dev to match the
-    // PostHog remote gate, and an explicit env always wins. A blank value
-    // leaves the daemon's Sentry a no-op.
-    AO_SENTRY_DSN:
-      process.env.AO_SENTRY_DSN ?? (isDev ? "" : DEFAULT_SENTRY_DSN),
-    // The daemon binary has no version of its own that release tooling sets,
-    // so without this every daemon event lands unattributable to a release.
-    AO_TELEMETRY_APP_VERSION:
-      process.env.AO_TELEMETRY_APP_VERSION ?? app.getVersion(),
-    // Kill switch: forwarded so a noisy stream can be silenced by env on an
-    // install that already exists, without shipping a new build.
-    ...(process.env.AO_TELEMETRY_DISABLED_EVENTS
-      ? {
-          AO_TELEMETRY_DISABLED_EVENTS:
-            process.env.AO_TELEMETRY_DISABLED_EVENTS,
-        }
-      : {}),
-  };
-}
-
 // Run the user's login shell to dump its env. stdin is ignored so an rc that
 // reads input hits EOF instead of hanging; stderr is ignored to drop banner
 // noise. Never rejects: resolves null on spawn error, non-zero exit, or timeout
@@ -1164,13 +1114,11 @@ function daemonEnv(
       ...process.env,
       ...(cachedShellEnv ?? {}),
       ...devExtras,
-      ...telemetryOverrides(),
       ...ownerTag,
     };
   }
   return buildDaemonEnv(process.env, cachedShellEnv, {
     ...devExtras,
-    ...telemetryOverrides(),
     ...ownerTag,
   });
 }
@@ -1941,10 +1889,7 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
     if (daemonProcess !== child) return;
     daemonProcess = null;
     // An explicit stopDaemon() already set a clean `{ state: "stopped" }`.
-    // daemon-telemetry reports any status carrying a `code` as
-    // ao.renderer.daemon_failure, so don't stamp `code: "exited"` on a stop
-    // the user or app asked for — that would count intentional stops as
-    // failures. Preserve the clean stopped status instead.
+    // Preserve that clean stopped status rather than reporting an exit failure.
     if (daemonStoppingProcess === child) {
       daemonStoppingProcess = null;
       if (daemonRestartAfterExitProcess === child) {
@@ -2232,15 +2177,6 @@ ipcMain.handle("menu:action", (_event, action: string) => {
       return;
   }
 });
-ipcMain.handle("telemetry:getBootstrap", () =>
-  buildTelemetryBootstrap(
-    process.env,
-    app.getVersion(),
-    process.platform,
-    os.homedir(),
-    app.isPackaged,
-  ),
-);
 async function chooseDirectory(title: string): Promise<string | null> {
   const options: OpenDialogOptions = {
     properties: ["openDirectory"],

@@ -147,9 +147,6 @@ export async function installFakeBridge(
 					}),
 					open: async () => ({ id: "cursor" as const, name: "Cursor", kind: "editor" as const }),
 				},
-				telemetry: {
-					getBootstrap: async () => null,
-				},
 				browser: {
 					nativeCompositionEnabled: true,
 					ensure: async (sessionId: string) => navState(`preview:${sessionId}`),
@@ -241,7 +238,6 @@ export async function installFakeBridge(
 					download: async () => undefined,
 					install: async () => undefined,
 					onStatus: unsubscribe,
-					onTelemetry: unsubscribe,
 				},
 				// UpdatesSection calls featureBuilds.getActive() immediately on mount; an
 				// omitted namespace would surface as a swallowed React Query error.
@@ -664,7 +660,6 @@ export async function installFakeAgent(
 					}),
 					open: async () => ({ id: "cursor" as const, name: "Cursor", kind: "editor" as const }),
 				},
-				telemetry: { getBootstrap: async () => null },
 				browser: {
 					nativeCompositionEnabled: true,
 					ensure: async (sessionId: string) => navState(`preview:${sessionId}`),
@@ -762,7 +757,6 @@ export async function installFakeAgent(
 					download: async () => undefined,
 					install: async () => undefined,
 					onStatus: unsubscribe,
-					onTelemetry: unsubscribe,
 				},
 				// UpdatesSection calls featureBuilds.getActive() immediately on mount; an
 				// omitted namespace would surface as a swallowed React Query error.

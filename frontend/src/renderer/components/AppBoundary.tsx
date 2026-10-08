@@ -1,6 +1,5 @@
 import React from "react";
 import { useTranslation } from "react-i18next";
-import { captureRendererException } from "../lib/telemetry";
 
 type Props = {
 	children: React.ReactNode;
@@ -15,19 +14,11 @@ type State = {
 	hasError: boolean;
 };
 
-class TelemetryErrorBoundary extends React.Component<BoundaryProps, State> {
+class AppErrorBoundary extends React.Component<BoundaryProps, State> {
 	state: State = { hasError: false };
 
 	static getDerivedStateFromError() {
 		return { hasError: true };
-	}
-
-	componentDidCatch(error: Error, info: React.ErrorInfo) {
-		void captureRendererException(error, {
-			source: "react-error-boundary",
-			operation: "react_render",
-		});
-		void info;
 	}
 
 	render() {
@@ -45,11 +36,11 @@ class TelemetryErrorBoundary extends React.Component<BoundaryProps, State> {
 	}
 }
 
-export function TelemetryBoundary({ children }: Props) {
+export function AppBoundary({ children }: Props) {
 	const { t } = useTranslation();
 	return (
-		<TelemetryErrorBoundary fallbackBody={t("appError.body")} fallbackTitle={t("appError.title")}>
+		<AppErrorBoundary fallbackBody={t("appError.body")} fallbackTitle={t("appError.title")}>
 			{children}
-		</TelemetryErrorBoundary>
+		</AppErrorBoundary>
 	);
 }

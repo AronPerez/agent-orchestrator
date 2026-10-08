@@ -40,8 +40,6 @@ const { mobileStatus } = vi.hoisted(() => ({
 		},
 	},
 }));
-
-vi.mock("../lib/telemetry", () => ({ captureRendererEvent: vi.fn() }));
 vi.mock("../lib/api-client", () => ({
 	apiClient: {
 		GET: async (path: string) =>
@@ -357,7 +355,6 @@ test("does not retry enabling secure pairing when it is unavailable", async () =
 	await waitFor(() => expect(screen.getByTestId("secure-pairing-reason")).toBeInTheDocument());
 	expect(apiClient.POST).not.toHaveBeenCalledWith("/api/v1/mobile/secure-pairing", { body: { enabled: true } });
 });
-
 
 // The QR value is the wire contract with the phone.
 test("emits a v2 deep link carrying every endpoint once the daemon advertises them", () => {

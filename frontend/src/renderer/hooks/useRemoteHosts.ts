@@ -2,7 +2,6 @@ import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { RemoteHealth } from "../../main/remote-request";
 import { aoBridge } from "../lib/bridge";
-import { reportHostConnect } from "../lib/host-telemetry";
 import { useUiStore } from "../stores/ui-store";
 
 export const LOCAL_HOST_ID = "local";
@@ -72,9 +71,7 @@ export function useRemoteHosts(): { hosts: Host[]; refresh: () => Promise<void> 
 		);
 		await Promise.all(
 			saved.map(async (host) => {
-				const startedAt = Date.now();
 				const status = await remotesBridge().probe(host.url);
-				reportHostConnect(host.url, "probe", status, Date.now() - startedAt);
 				setRemotes((current) => current.map((row) => (row.id === host.url ? { ...row, status } : row)));
 			}),
 		);

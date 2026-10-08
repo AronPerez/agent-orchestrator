@@ -66,7 +66,7 @@ The connection password is what makes the listener safe to open at all, but it i
 
 - Gates every data route on the LAN listener. Nothing reads or writes without it.
 - Locks out a source address after repeated failed attempts, per source, so one hostile device on the network cannot lock out your real one.
-- Leaves daemon-control routes (`/shutdown`, telemetry controls, mobile controls) loopback-only. They are not reachable over the network at any password.
+- Leaves daemon-control routes (`/shutdown`, mobile controls) loopback-only. They are not reachable over the network at any password.
 - Rotates on demand. Regenerating it immediately drops whatever is connected.
 
 **What the connection password does not do:**

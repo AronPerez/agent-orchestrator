@@ -66,12 +66,10 @@ function TargetIcon({ target, className }: { target?: OpenTarget; className?: st
 export function TopbarOpenEditorButton({
 	host,
 	sessionId,
-	projectId,
 	style,
 }: {
 	host: string;
 	sessionId: string;
-	projectId: string;
 	style?: React.CSSProperties;
 }) {
 	const { t } = useTranslation();
@@ -92,7 +90,7 @@ export function TopbarOpenEditorButton({
 
 	const launch = (targetId?: OpenTargetId) => {
 		open.reset();
-		open.mutate({ host, sessionId, projectId, ...(targetId ? { targetId } : {}) });
+		open.mutate({ host, sessionId, ...(targetId ? { targetId } : {}) });
 	};
 	const launchError = open.error instanceof Error ? open.error.message : null;
 	const remote = state?.remote ?? null;

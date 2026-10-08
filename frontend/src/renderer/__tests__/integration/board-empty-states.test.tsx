@@ -489,14 +489,12 @@ describe("project board with no sessions", () => {
     expect(spawnOrchestratorMock).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({ host: "local", id: "proj-1" }),
-      "board",
       false,
       undefined,
     );
     expect(spawnOrchestratorMock).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({ host: "local", id: "proj-1" }),
-      "board",
       false,
       "tui",
     );

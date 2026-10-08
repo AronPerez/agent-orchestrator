@@ -7,15 +7,9 @@ import {
 } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AttachableTerminal } from "../hooks/useTerminalSession";
-import { captureRendererEvent } from "../lib/telemetry";
 import { useUiStore } from "../stores/ui-store";
 import { safeTerminalFind } from "./TerminalSearch";
 import { XtermTerminal } from "./XtermTerminal";
-
-vi.mock("../lib/telemetry", () => ({
-  captureRendererEvent: vi.fn(async () => undefined),
-  captureRendererException: vi.fn(async () => undefined),
-}));
 
 const state = vi.hoisted(() => ({
   fit: vi.fn(),
@@ -256,7 +250,6 @@ describe("XtermTerminal", () => {
     state.webglDisposeThrows = false;
     state.canvasConstructThrows = false;
     state.webglContextLoss = null;
-    vi.mocked(captureRendererEvent).mockClear();
     state.searchAddon = null;
     setNavigatorPlatform("Linux x86_64");
     window.ao!.clipboard.writeText = vi.fn().mockResolvedValue(undefined);
@@ -377,21 +370,6 @@ describe("XtermTerminal", () => {
     }
   });
 
-  it("reports a renderer downgrade to telemetry with the context that explains it", async () => {
-    render(<XtermTerminal isVisible={false} theme="dark" />);
-    // A healthy WebGL mount must not spend a rate-limit slot.
-    expect(captureRendererEvent).not.toHaveBeenCalled();
-
-    await act(async () => {
-      state.webglContextLoss?.();
-    });
-
-    expect(captureRendererEvent).toHaveBeenCalledWith(
-      "ao.renderer.terminal_renderer",
-      expect.objectContaining({ status: "canvas", visible: false }),
-    );
-  });
-
   it("tells its owner when no renderer is left to draw the terminal", async () => {
     state.canvasConstructThrows = true;
     const onError = vi.fn();
@@ -402,10 +380,6 @@ describe("XtermTerminal", () => {
     });
 
     expect(onError).toHaveBeenCalledOnce();
-    expect(captureRendererEvent).toHaveBeenCalledWith(
-      "ao.renderer.terminal_renderer",
-      expect.objectContaining({ status: "none" }),
-    );
   });
 
   it("preserves the agent TUI palette without contrast remapping", () => {

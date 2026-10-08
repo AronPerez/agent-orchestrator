@@ -21,6 +21,8 @@ concurrency:
 
 jobs:
   draft:
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
     if: ${{ !github.event.repository.fork }}
     runs-on: ubuntu-latest
     steps:

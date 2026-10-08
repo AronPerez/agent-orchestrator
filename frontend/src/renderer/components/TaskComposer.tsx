@@ -13,7 +13,6 @@ import type { components } from "../../api/schema";
 import { apiErrorCode, apiErrorMessage } from "../lib/api-client";
 import { clientFor } from "../lib/host-clients";
 import { isCloudHost, LOCAL_HOST, refKey, type Ref } from "../lib/hosts";
-import { captureRendererEvent } from "../lib/telemetry";
 import {
   cacheAgentReadiness,
   ensureAgentReadiness,
@@ -137,9 +136,6 @@ export function TaskComposer({
 
   const createCloudTask = useCallback(
     async (input: CreateTaskInput): Promise<string> => {
-      void captureRendererEvent("ao.renderer.task_create_requested", {
-        project_id: input.project.id,
-      });
       if (!cloudOrg?.id) throw new Error(t("newTask.unableToStart"));
       try {
         const { session } = await cloudClient.createSession(cloudOrg.id, {
@@ -153,14 +149,8 @@ export function TaskComposer({
         // The control plane provisions the sandbox asynchronously; surface the
         // new session on the board immediately.
         void queryClient.invalidateQueries({ queryKey: cloudSessionsQueryKey });
-        void captureRendererEvent("ao.renderer.task_create_succeeded", {
-          project_id: input.project.id,
-        });
         return session.id;
       } catch (err) {
-        void captureRendererEvent("ao.renderer.task_create_failed", {
-          project_id: input.project.id,
-        });
         throw err instanceof Error
           ? err
           : new Error(t("newTask.unableToStart"));
@@ -171,9 +161,6 @@ export function TaskComposer({
 
   const createLocalTask = useCallback(
     async (input: CreateTaskInput): Promise<string> => {
-      void captureRendererEvent("ao.renderer.task_create_requested", {
-        project_id: input.project.id,
-      });
       try {
         const { data, error } = await clientFor(input.project.host).POST(
           "/api/v1/orchestrators/delegate",
@@ -201,14 +188,8 @@ export function TaskComposer({
           );
         }
         if (!data?.workerId) throw new Error(t("newTask.noSession"));
-        void captureRendererEvent("ao.renderer.task_create_succeeded", {
-          project_id: input.project.id,
-        });
         return data.workerId;
       } catch (err) {
-        void captureRendererEvent("ao.renderer.task_create_failed", {
-          project_id: input.project.id,
-        });
         if (
           err instanceof TaskCreateError &&
           err.code &&

@@ -1,5 +1,4 @@
 import { baseUrlFor } from "./host-clients";
-import { reportHostStreamState } from "./host-telemetry";
 import { LOCAL_HOST, type HostId } from "./hosts";
 import { setEventsConnectionState, type EventsConnectionState } from "./events-connection";
 
@@ -30,10 +29,6 @@ type HostStream = {
 };
 
 const streams = new Map<HostId, HostStream>();
-// How many times each host's stream has dropped this session. Kept beside the
-// streams rather than on one, because a reconnect builds a new stream object
-// and the count of drops is the whole point of the signal.
-const streamDrops = new Map<HostId, number>();
 
 function setConnectionState(host: HostId, stream: HostStream, state: HostStream["state"]): void {
 	// Transitions only: onerror fires repeatedly while EventSource is CONNECTING,
@@ -41,8 +36,6 @@ function setConnectionState(host: HostId, stream: HostStream, state: HostStream[
 	if (stream.state === state) return;
 	stream.state = state;
 	if (host === LOCAL_HOST) setEventsConnectionState(state);
-	if (state === "disconnected") streamDrops.set(host, (streamDrops.get(host) ?? 0) + 1);
-	reportHostStreamState(host, state, streamDrops.get(host) ?? 0);
 }
 
 function closeHostStream(host: HostId): void {
@@ -51,8 +44,6 @@ function closeHostStream(host: HostId): void {
 	if (stream.retryTimer) clearTimeout(stream.retryTimer);
 	stream.source.close();
 	streams.delete(host);
-	// A deliberate teardown is not a drop, so the count goes with the stream.
-	streamDrops.delete(host);
 	if (host === LOCAL_HOST) setEventsConnectionState("disconnected");
 }
 

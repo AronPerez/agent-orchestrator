@@ -18,7 +18,6 @@ import {
   subscribeConnectedHosts,
 } from "../lib/host-clients";
 import { hostConnectionState } from "../lib/host-events";
-import { reportHostQueryFailed } from "../lib/host-telemetry";
 import {
   cloudHost,
   isCloudHost,
@@ -32,7 +31,6 @@ import { mockWorkspaces } from "../lib/mock-data";
 import { usesPreviewWorkspaceData } from "../lib/preview-mode";
 import { parseResponseArray } from "../lib/response-validation";
 import { toReviewerHarnessId } from "../lib/reviewer-harnesses";
-import { captureRendererEvent } from "../lib/telemetry";
 import {
   type AgentSwitchSummary,
   type PRState,
@@ -82,24 +80,9 @@ function toPullRequestFacts(
 }
 
 export const workspaceQueryKey = ["workspaces"] as const;
-const reportedUnknownSessionFields = new Set<string>();
 
 export function workspaceHostQueryKey(host: HostId) {
   return [...workspaceQueryKey, host] as const;
-}
-
-function reportUnknownSessionField(
-  field: "status" | "activity",
-  value?: string,
-): void {
-  const reason = value ? "unrecognized" : "missing";
-  const key = `${field}:${reason}`;
-  if (reportedUnknownSessionFields.has(key)) return;
-  reportedUnknownSessionFields.add(key);
-  void captureRendererEvent("ao.renderer.session_state_unknown", {
-    field,
-    reason,
-  });
 }
 
 // e2e seam (dev:web only): the Playwright fake-agent harness injects
@@ -174,11 +157,6 @@ function toWorkspaceSession(
     : undefined;
   const kanbanColumn = toKanbanColumn(session.kanbanColumn, status);
   const activity = toSessionActivity(session.activity);
-  if (status === "unknown")
-    reportUnknownSessionField("status", session.status);
-  if (!activity || activity.state === "unknown") {
-    reportUnknownSessionField("activity", session.activity?.state);
-  }
   return {
     host,
     id: session.id,
@@ -351,11 +329,6 @@ async function fetchWorkspaces(
   }));
 }
 
-function errorStatus(error: unknown): number | undefined {
-  const status = (error as { status?: unknown } | null)?.status;
-  return typeof status === "number" ? status : undefined;
-}
-
 async function fetchHostSection(
   host: HostId,
   client: QueryClient,
@@ -378,10 +351,6 @@ async function fetchHostSection(
       },
     ];
   } catch (error) {
-    // Remote clients are plain openapi-fetch clients, so none of this reaches
-    // api-client's ao.renderer.api_error. Without this a remote host's data
-    // simply stopped loading, silently.
-    reportHostQueryFailed(host, errorStatus(error));
     return [
       {
         host,

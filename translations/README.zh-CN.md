@@ -225,7 +225,7 @@ cd agent-orchestrator
 
 ## 产品遥测
 
-Orchestrator.inc 收集不包含项目内容的使用和可靠性指标。但项目的 GitHub 所有者及已登录的 GitHub 用户名可能识别个人，因此这些遥测数据并非匿名。关闭遥测也会停止发送这些信息。[查看详情和设置](../docs/telemetry.md)。
+此分支不会发送使用分析数据或崩溃报告。保留本地诊断和网络功能，包括更新检查。[详细信息](../docs/telemetry.md)。
 
 ## 许可证
 

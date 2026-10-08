@@ -34,10 +34,8 @@ import {
 import { apiClient, apiErrorCode, apiErrorMessage, hasTrustedApiBaseUrl } from "../lib/api-client";
 import { refreshDaemonStatus } from "../lib/daemon-status";
 import { hasBrowserDaemon, usesPreviewWorkspaceData } from "../lib/preview-mode";
-import { addRendererExceptionStep, captureRendererEvent, captureRendererException } from "../lib/telemetry";
 import { ShellProvider } from "../lib/shell-context";
 import { restartProjectOrchestrator } from "../lib/restart-orchestrator";
-import { captureOrchestratorReplacementFailure } from "../lib/orchestrator-replacement-telemetry";
 import { applyDocumentTheme, applyDocumentThemeStyle } from "../lib/theme";
 import { aoBridge } from "../lib/bridge";
 import { adaptiveSidebarShouldCompact } from "../lib/adaptive-sidebar";
@@ -63,7 +61,6 @@ import {
 	type WorkspaceSummary,
 } from "../types/workspace";
 import type { components } from "../../api/schema";
-import { useAgentInventoryTelemetry } from "../hooks/useAgentInventoryTelemetry";
 
 export const Route = createFileRoute("/_shell")({
 	// Prefetch the workspace list for the whole shell (parent loaders run before
@@ -157,8 +154,6 @@ const ShellCenter = memo(function ShellCenter({
 // the old single <App>, with selection now owned by the router (route params)
 // instead of Zustand. The daemon-status effect runs here exactly once.
 function ShellLayout() {
-	// Reports how many agents this install has available, once per launch.
-	useAgentInventoryTelemetry();
 	const { t } = useTranslation();
 	const navigate = useNavigate();
 	const matchRoute = useMatchRoute();
@@ -434,7 +429,6 @@ function ShellLayout() {
 		async (
 			project: components["schemas"]["Project"],
 			input: CreateProjectConfigInput,
-			source: "project_add" | "project_clone",
 		) => {
 			const workspace: WorkspaceSummary = {
 				host: LOCAL_HOST,
@@ -447,14 +441,9 @@ function ShellLayout() {
 				orchestratorAgent: input.orchestratorAgent as WorkspaceSummary["orchestratorAgent"],
 				sessions: [],
 			};
-			void captureRendererEvent(`ao.renderer.${source}_succeeded`, { project_id: workspace.id });
 			updateWorkspaces((current) => [workspace, ...current.filter((item) => item.id !== workspace.id)]);
 			setOrchestratorStartupError(workspace, null);
 			try {
-				void captureRendererEvent("ao.renderer.orchestrator_spawn_requested", {
-					project_id: workspace.id,
-					source,
-				});
 				const {
 					data: spawnData,
 					error: spawnError,
@@ -472,10 +461,6 @@ function ShellLayout() {
 						: `Failed to spawn orchestrator (${spawnResponse.status})`;
 					throw new Error(message);
 				}
-				void captureRendererEvent("ao.renderer.orchestrator_spawn_succeeded", {
-					project_id: workspace.id,
-					source,
-				});
 				const sessionId = spawnData.session.id;
 				await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
 				void navigate({
@@ -483,10 +468,6 @@ function ShellLayout() {
 					params: { hostId: workspace.host, sessionId },
 				});
 			} catch (spawnError) {
-				void captureRendererEvent("ao.renderer.orchestrator_spawn_failed", {
-					project_id: workspace.id,
-					source,
-				});
 				void navigate({
 					to: "/host/$hostId/project/$projectId",
 					params: { hostId: workspace.host, projectId: workspace.id },
@@ -507,12 +488,6 @@ function ShellLayout() {
 			trackerIntake?: components["schemas"]["TrackerIntakeConfig"];
 			asWorkspace?: boolean;
 		}) => {
-			void addRendererExceptionStep("Project add requested", {
-				source: "project-add",
-				operation: "project_add",
-				surface: "project_board",
-			});
-			void captureRendererEvent("ao.renderer.project_add_requested");
 			const status = await refreshDaemonStatus();
 			if (status.state !== "ready" || !status.port) {
 				throw new Error(status.message || "AO daemon is not ready.");
@@ -527,15 +502,10 @@ function ShellLayout() {
 			if (error) {
 				const failure = new Error(apiErrorMessage(error)) as Error & { code?: string };
 				failure.code = apiErrorCode(error);
-				void captureRendererException(failure, {
-					source: "project-add",
-					operation: "project_add",
-					surface: "project_board",
-				});
 				throw failure;
 			}
 			if (!data?.project) throw new Error("Project creation returned no project");
-			await completeProjectCreation(data.project, input, "project_add");
+			await completeProjectCreation(data.project, input);
 		},
 		[completeProjectCreation],
 	);
@@ -548,12 +518,6 @@ function ShellLayout() {
 			orchestratorAgent: string;
 			trackerIntake?: components["schemas"]["TrackerIntakeConfig"];
 		}) => {
-			void addRendererExceptionStep("Project clone requested", {
-				source: "project-clone",
-				operation: "project_clone",
-				surface: "project_board",
-			});
-			void captureRendererEvent("ao.renderer.project_clone_requested");
 			const status = await refreshDaemonStatus();
 			if (status.state !== "ready" || !status.port) {
 				throw new Error(status.message || "AO daemon is not ready.");
@@ -568,15 +532,10 @@ function ShellLayout() {
 			if (error) {
 				const failure = new Error(apiErrorMessage(error)) as Error & { code?: string };
 				failure.code = apiErrorCode(error);
-				void captureRendererException(failure, {
-					source: "project-clone",
-					operation: "project_clone",
-					surface: "project_board",
-				});
 				throw failure;
 			}
 			if (!data?.project) throw new Error("Project clone returned no project");
-			await completeProjectCreation(data.project, input, "project_clone");
+			await completeProjectCreation(data.project, input);
 		},
 		[completeProjectCreation],
 	);
@@ -597,27 +556,14 @@ function ShellLayout() {
 			const projectId = project.id;
 			const isLastWorkspace =
 				workspaces.length === 1 && workspaces[0]?.host === project.host && workspaces[0]?.id === projectId;
-			void addRendererExceptionStep("Project removal requested", {
-				source: "project-remove",
-				operation: "project_remove",
-				surface: "project_board",
-				project_id: projectId,
-			});
 			const { error } = await clientFor(project.host).DELETE("/api/v1/projects/{id}", {
 				params: { path: { id: projectId } },
 			});
 			if (error) {
 				const failure = new Error(apiErrorMessage(error)) as Error & { code?: string };
 				failure.code = apiErrorCode(error);
-				void captureRendererException(failure, {
-					source: "project-remove",
-					operation: "project_remove",
-					surface: "project_board",
-					project_id: projectId,
-				});
 				throw failure;
 			}
-			void captureRendererEvent("ao.renderer.project_removed", { project_id: projectId });
 			queryClient.setQueryData<HostSection[]>(workspaceHostQueryKey(project.host), (current) =>
 				updateHostWorkspaces(current, project.host, (items) => items.filter((item) => item.id !== projectId)),
 			);
@@ -635,9 +581,6 @@ function ShellLayout() {
 				setProjectRestarting,
 				setOrchestratorReplacementError,
 				mode,
-				onError: (error) => {
-					captureOrchestratorReplacementFailure(error, project.id);
-				},
 			});
 		},
 		[navigate, queryClient, setOrchestratorReplacementError, setProjectRestarting],

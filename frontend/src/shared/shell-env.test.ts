@@ -65,11 +65,11 @@ describe("buildDaemonEnv", () => {
 
 	it("lets overrides win over both shell and process env", () => {
 		const env = buildDaemonEnv(
-			{ ...minimalProcessEnv, AO_TELEMETRY_EVENTS: "off" },
-			{ PATH: "/opt/homebrew/bin", AO_TELEMETRY_EVENTS: "shell" },
-			{ AO_TELEMETRY_EVENTS: "on" },
+			{ ...minimalProcessEnv, AO_DATA_DIR: "/process/data" },
+			{ PATH: "/opt/homebrew/bin", AO_DATA_DIR: "/shell/data" },
+			{ AO_DATA_DIR: "/override/data" },
 		);
-		expect(env.AO_TELEMETRY_EVENTS).toBe("on");
+		expect(env.AO_DATA_DIR).toBe("/override/data");
 	});
 
 	it("keeps a credential present only in the shell env", () => {

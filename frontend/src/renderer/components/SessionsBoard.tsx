@@ -364,7 +364,6 @@ export function SessionsBoard({ project }: SessionsBoardProps) {
     try {
       const sessionId = await spawnOrchestrator(
         workspace,
-        "board",
         false,
         mode,
       );

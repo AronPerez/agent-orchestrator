@@ -4,7 +4,6 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { ArrowUpRight, Check, Copy, Loader2, RotateCcw } from "lucide-react";
 import { apiClient, apiErrorMessage } from "../../lib/api-client";
 import { aoBridge } from "../../lib/bridge";
-import { captureRendererEvent } from "../../lib/telemetry";
 import { ANDROID_PLAY_STORE_URL, IOS_APP_STORE_URL } from "./ConnectMobileGetApp";
 import { reasonMessage, type SetupMode } from "./ConnectMobileSetup";
 // Returns with the commented-out connection picker below.
@@ -36,7 +35,6 @@ const STORE_LINKS = [
 		testId: "android-play-qr",
 	},
 ] as const;
-
 
 import {
 	buildPairingOffer,
@@ -241,18 +239,9 @@ export function ConnectMobileContent({ active }: { active: boolean }) {
 		refetchInterval: (q) => mobileStatusRefetchInterval(q.state.data),
 	});
 
-	const reportedOpen = useRef(false);
-	const initialEnabled = query.data?.enabled;
 	useEffect(() => {
-		if (!active) {
-			reportedOpen.current = false;
-			setMode("lan");
-			return;
-		}
-		if (initialEnabled === undefined || reportedOpen.current) return;
-		reportedOpen.current = true;
-		void captureRendererEvent("ao.renderer.mobile_connect_opened", { bridge_enabled: initialEnabled });
-	}, [active, initialEnabled]);
+		if (!active) setMode("lan");
+	}, [active]);
 
 	const invalidate = () => {
 		void queryClient.invalidateQueries({ queryKey: mobileStatusQueryKey });
@@ -369,17 +358,10 @@ export function ConnectMobileContent({ active }: { active: boolean }) {
 		}
 	};
 
-	const reportToggle = (next: boolean, outcome: "succeeded" | "failed") => {
-		void captureRendererEvent("ao.renderer.mobile_bridge_toggled", { enabled: next, outcome });
-	};
-
 	const startBridge = () => {
 		if (busy || enabled) return;
 		clearActionErrors();
-		enable.mutate(undefined, {
-			onSuccess: () => reportToggle(true, "succeeded"),
-			onError: () => reportToggle(true, "failed"),
-		});
+		enable.mutate();
 	};
 
 	const actionError =

@@ -16,7 +16,6 @@ type RestartProjectOrchestratorOptions = {
 	navigate: NavigateToSession;
 	setProjectRestarting: (project: Ref, restarting: boolean) => void;
 	setOrchestratorReplacementError: (project: Ref, failure: OrchestratorReplacementFailure | null) => void;
-	onError?: (error: unknown) => void;
 	mode?: SessionMode;
 };
 
@@ -35,13 +34,12 @@ export async function restartProjectOrchestrator({
 	navigate,
 	setProjectRestarting,
 	setOrchestratorReplacementError,
-	onError,
 	mode,
 }: RestartProjectOrchestratorOptions) {
 	setProjectRestarting(project, true);
 	setOrchestratorReplacementError(project, null);
 	try {
-		const sessionId = await spawnOrchestrator(project, "restart", true, mode);
+		const sessionId = await spawnOrchestrator(project, true, mode);
 		await refreshWorkspaceState(queryClient);
 		void navigate({
 			to: "/host/$hostId/session/$sessionId",
@@ -55,7 +53,6 @@ export async function restartProjectOrchestrator({
 				? { code: error.code, requestId: error.requestId }
 				: {}),
 		});
-		onError?.(error);
 	} finally {
 		setProjectRestarting(project, false);
 	}

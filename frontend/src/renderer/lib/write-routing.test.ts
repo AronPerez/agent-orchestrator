@@ -8,10 +8,6 @@ import { useTerminateSession } from "../hooks/useTerminateSession";
 import { setApiBaseUrl } from "./api-client";
 import { forgetHost, registerHostBase } from "./host-clients";
 
-vi.mock("./telemetry", () => ({
-	captureRendererEvent: vi.fn().mockResolvedValue(undefined),
-}));
-
 const REMOTE = "http://192.0.2.1:3011";
 const servers: Server[] = [];
 

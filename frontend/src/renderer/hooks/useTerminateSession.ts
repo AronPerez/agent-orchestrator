@@ -4,7 +4,6 @@ import { workspaceQueryKey } from "./useWorkspaceQuery";
 import { apiErrorMessage } from "../lib/api-client";
 import { clientFor } from "../lib/host-clients";
 import { refKey, type Ref } from "../lib/hosts";
-import { captureRendererEvent } from "../lib/telemetry";
 
 type TerminateSessionTarget = Ref & Partial<WorkspaceSession>;
 
@@ -57,9 +56,6 @@ export function useTerminateSession() {
 	return useMutation({
 		mutationKey: terminateSessionMutationKey,
 		mutationFn: async (session: TerminateSessionTarget) => {
-			void captureRendererEvent("ao.renderer.session_kill_requested", {
-				...(session.workspaceId ? { project_id: session.workspaceId } : {}),
-			});
 			const { error, response } = await clientFor(session.host).POST("/api/v1/sessions/{sessionId}/kill", {
 				params: { path: { sessionId: session.id } },
 			});
@@ -68,21 +64,13 @@ export function useTerminateSession() {
 				throw new Error(apiErrorMessage(error, fallback));
 			}
 		},
-		onSuccess: (_data, session) => {
-			void captureRendererEvent("ao.renderer.session_kill_succeeded", {
-				...(session.workspaceId ? { project_id: session.workspaceId } : {}),
-			});
+		onSuccess: () => {
 			// The server-side mutation is complete; a slow snapshot refresh must not
 			// keep the destructive action pending in the UI.
 			void queryClient.invalidateQueries(
 				{ queryKey: workspaceQueryKey },
 				{ cancelRefetch: false },
 			);
-		},
-		onError: (_error, session) => {
-			void captureRendererEvent("ao.renderer.session_kill_failed", {
-				...(session.workspaceId ? { project_id: session.workspaceId } : {}),
-			});
 		},
 	});
 }

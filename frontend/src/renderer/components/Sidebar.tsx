@@ -1557,7 +1557,7 @@ const ProjectItemContent = memo(function ProjectItemContent({
     }
     setIsSpawning(true);
     try {
-      const sessionId = await spawnOrchestrator(workspace, "sidebar");
+      const sessionId = await spawnOrchestrator(workspace);
       await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
       selection.goSession({ host: workspace.host, id: sessionId });
     } catch (err) {
