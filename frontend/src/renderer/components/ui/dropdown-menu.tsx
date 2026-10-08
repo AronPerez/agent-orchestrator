@@ -11,6 +11,7 @@ export const DropdownMenu = DropdownMenuPrimitive.Root;
 export const DropdownMenuTrigger = DropdownMenuPrimitive.Trigger;
 export const DropdownMenuGroup = DropdownMenuPrimitive.Group;
 export const DropdownMenuPortal = DropdownMenuPrimitive.Portal;
+export const DropdownMenuSub = DropdownMenuPrimitive.Sub;
 
 export function DropdownMenuContent({
 	className,
@@ -50,6 +51,30 @@ export function DropdownMenuItem({
 			)}
 			{...props}
 		/>
+	);
+}
+
+export function DropdownMenuSubTrigger({
+	className,
+	...props
+}: React.ComponentProps<typeof DropdownMenuPrimitive.SubTrigger>) {
+	return <DropdownMenuPrimitive.SubTrigger className={cn(actionMenuItemClass, className)} {...props} />;
+}
+
+export function DropdownMenuSubContent({
+	className,
+	sideOffset = 6,
+	...props
+}: React.ComponentProps<typeof DropdownMenuPrimitive.SubContent>) {
+	return (
+		<DropdownMenuPrimitive.Portal>
+			<DropdownMenuPrimitive.SubContent
+				sideOffset={sideOffset}
+				collisionPadding={16}
+				className={cn(actionMenuContentClass, "data-[state=open]:animate-popover-in", className)}
+				{...props}
+			/>
+		</DropdownMenuPrimitive.Portal>
 	);
 }
 
