@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@ao/response-selection": "file:./native/response-selection",
+    "@bacons/apple-targets": "5.0.0",
     "@bsky.app/react-native-uitextview": "2.4.0",
     "@expo-google-fonts/geist": "^0.4.2",
     "@expo-google-fonts/geist-mono": "^0.4.3",
