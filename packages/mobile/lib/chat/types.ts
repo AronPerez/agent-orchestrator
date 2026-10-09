@@ -96,6 +96,8 @@ export type ActivityDetail = {
 	exitCode?: number;
 	durationMs?: number;
 	reason?: string;
+	/** Set by the Codex adapter only when the approval detail is the request's whole scope. */
+	scopeComplete?: boolean;
 	terminalInput?: string;
 	terminalInputTruncated?: boolean;
 	processId?: number;

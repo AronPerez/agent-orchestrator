@@ -67,6 +67,9 @@ final class PhoneWatchBridge: NSObject, WCSessionDelegate {
     }
     func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) { DispatchQueue.main.async { self.flush() } }
     func sessionWatchStateDidChange(_ session: WCSession) { DispatchQueue.main.async { self.flush() } }
-    func sessionDidBecomeInactive(_ session: WCSession) { DispatchQueue.main.async { self.ready = false } }
+    // `ready` is the JS listener + foreground handshake from WatchManager, not WCSession state.
+    // A paired-Watch switch (inactive -> deactivate -> activate) must leave it intact, since
+    // no AppState change follows to re-assert it; the foreground check is in `isActive`.
+    func sessionDidBecomeInactive(_ session: WCSession) {}
     func sessionDidDeactivate(_ session: WCSession) { session.activate() }
 }

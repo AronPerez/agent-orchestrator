@@ -539,7 +539,10 @@ bound, expire after 60s, and the phone re-fetches current pending context before
   inferred from a label/ID), its exact offered ID, complete short scope and wrist review.
   **Initial conservative support:** Codex command approvals for literal `pwd`, `git status`,
   `git status --short`, `git status --short --branch`, `git log -1 --oneline`, with cwd
-  and any reason displayed in full. Wrapped/other/destructive commands, unknown detail
+  and any reason displayed in full. The daemon must mark the detail `scopeComplete`
+  (the Codex adapter does so only when it dropped no request field such as network
+  context or environment); older daemons and partial projections defer to iPhone.
+  Wrapped/other/destructive commands, unknown detail
   fields, missing consent kinds, broad-only grants and non-command permissions defer
   to iPhone. Do not expand this to a shell denylist; add structured scope evidence/tests.
 - Reply supports one plain string input property with supported length constraints, or

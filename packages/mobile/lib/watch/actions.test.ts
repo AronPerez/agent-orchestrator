@@ -6,7 +6,7 @@ import { actionContext, createWatchActionHandler } from "./actions";
 const cfg = { hostId: "alpha", password: "SYNTHETIC_ONLY" } as ServerConfig;
 const approval = (over: Partial<ConversationActivity> = {}): ConversationActivity => ({
 	kind: "activity", id: "activity-1", requestId: "request-1", revision: 1, sequence: 1, createdAt: "2026-10-09T00:00:00Z", status: "pending", activityKind: "approval", summary: "Run status",
-	detail: { method: "item/commandExecution/requestApproval", command: "git status", rawCommand: "git status", cwd: "/demo", reason: "Check worktree" },
+	detail: { method: "item/commandExecution/requestApproval", command: "git status", rawCommand: "git status", cwd: "/demo", reason: "Check worktree", scopeComplete: true },
 	decisions: [{ id: "opaque-allow", label: "Allow once", kind: "allow_once" }, { id: "opaque-deny", label: "Deny", kind: "reject_once" }, { id: "broad", label: "Allow session", kind: "allow_always" }], ...over,
 });
 const snapshot = (items: ConversationActivity[] = [approval()], over: Partial<ConversationSnapshot> = {}): ConversationSnapshot => ({ conversationId: "c-1", sessionId: "worker", harness: "codex", mode: "chat", controller: { state: "ready" }, latestSequence: 1, oldestSequence: 1, hasMoreBefore: false, turns: [], items, settings: {}, ...over });
@@ -35,6 +35,11 @@ describe("Watch action scope", () => {
 			expect(actionContext(snapshot([approval({ detail: { ...approval().detail, ...detail } })]))).toBeNull();
 		}
 		expect(actionContext(snapshot([approval({ decisions: [{ id: "accept", label: "Allow once" }] })]))).toBeNull();
+		// Partial adapter projection (e.g. networkApprovalContext dropped) or an older daemon: no completeness proof.
+		const { scopeComplete: _, ...partial } = approval().detail!;
+		for (const detail of [partial, { ...partial, scopeComplete: false }]) {
+			expect(actionContext(snapshot([approval({ detail })]))).toBeNull();
+		}
 		expect(actionContext(snapshot([approval({ decisions: [{ id: "all", label: "Allow", kind: "allow_always" }] })]))).toBeNull();
 		expect(actionContext(snapshot([], { mode: "tui" }))).toBeNull();
 	});
