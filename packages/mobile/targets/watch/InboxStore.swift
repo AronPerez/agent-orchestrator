@@ -22,6 +22,31 @@ final class InboxStore: NSObject, ObservableObject, WCSessionDelegate {
         WCSession.default.activate()
     }
 
+    func request(_ payload: [String: String], completion: @escaping (WatchActionResult) -> Void) {
+        let session = WCSession.default
+        guard session.activationState == .activated, session.isReachable,
+              let data = try? JSONSerialization.data(withJSONObject: payload), data.count < 4_000,
+              let json = String(data: data, encoding: .utf8) else {
+            completion(WatchActionResult(status: "open_phone", message: "Open AO on iPhone. Nothing was queued.")); return
+        }
+        var finished = false
+        let finish: (WatchActionResult) -> Void = { result in
+            DispatchQueue.main.async {
+                guard !finished else { return }
+                finished = true
+                completion(result)
+            }
+        }
+        let uncertain = WatchActionResult(status: "uncertain", message: "Delivery unknown. Check AO on iPhone before trying again.")
+        session.sendMessage(["payload": json], replyHandler: { reply in
+            guard let json = reply["result"] as? String, json.utf8.count < 12_000,
+                  let data = json.data(using: .utf8), let result = try? JSONDecoder().decode(WatchActionResult.self, from: data) else { finish(uncertain); return }
+            finish(result)
+        }, errorHandler: { _ in finish(uncertain) })
+        // No transferUserInfo, application-context actions, or automatic retries.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 25) { finish(uncertain) }
+    }
+
     private func receive(_ context: [String: Any]) {
         guard let json = context["snapshot"] as? String, json.utf8.count < 48_000,
               let data = json.data(using: .utf8),

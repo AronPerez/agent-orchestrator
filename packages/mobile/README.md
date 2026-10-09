@@ -505,6 +505,53 @@ not a compiled app. Native simulator build and physical paired-device QA are mer
 6. Add each complication family and a Smart Stack widget. Inspect after two minutes,
    after a day, and after reconnecting; compare last-known count/age with the inbox.
    Check wrist-down privacy, widget refresh delays, battery use and VoiceOver.
-7. Native wrist actions arrive in the stacked follow-up; then also verify duplicate
-   and expired approvals, unoffered decisions, offline action rejection and replies
-   with uncertain delivery before considering the companion device-verified.
+7. In a Chat worker, open **Wrist actions**, choose an offered one-time decision and
+   inspect the entire command, cwd, reason, host and worker before **Confirm and send**.
+   Cancel once (no request), confirm once, then answer the same request on the phone
+   before confirming on Watch: expect **Already handled**, not Watch approval success.
+   Change the offered decisions/scope or let the 60-second review expire: no write.
+8. Test an unoffered decision using sanitized request fixtures: preserve HTTP 400
+   `CHAT_DECISION_NOT_OFFERED`; HTTP 409 `CHAT_REQUEST_NOT_PENDING` is already handled.
+   Open a TUI prompt, long/wrapped command, broad grant and complex/URL input: no wrist
+   decision buttons; use iPhone. There are no merge, spawn, kill or terminal controls.
+9. Try each canned reply and dictation, review the full text, cancel, edit and send.
+   Check one-property input is answered as input, never as a normal message. Repeated
+   delivery of the same message ID must create one message. Drop connectivity during
+   send: **Delivery unknown**, no success haptic and no automatic retry; inspect phone
+   history before composing again. Successful sends may use the system success haptic.
+10. Repeat actions with phone locked, suspended, force-quit, daemon offline and revoked
+    credentials. Expect **Open on iPhone**/authorization failure or explicit uncertainty,
+    never a deferred approval after reconnecting. Reopen AO in the foreground and retry
+    only after reviewing current context.
+
+
+### Wrist action boundaries (stack 2/2)
+
+Actions use reachable `sendMessage` only. The native bridge accepts one live request
+only while phone AO and its JS listener are foreground-ready; it times out after 20s.
+The Watch times out after 25s. A lost response after a write is **uncertain**, not failed
+or successful. No background action service, `transferUserInfo`, delayed decisions,
+automatic retries, or watch-to-daemon network access. Locking the phone is intentionally
+not advertised as supporting actions. Tokens are phone-memory-only, identity/config
+bound, expire after 60s, and the phone re-fetches current pending context before writing.
+
+- Approve/deny require the provider's semantic `allow_once` / `reject_once` kind (never
+  inferred from a label/ID), its exact offered ID, complete short scope and wrist review.
+  **Initial conservative support:** Codex command approvals for literal `pwd`, `git status`,
+  `git status --short`, `git status --short --branch`, `git log -1 --oneline`, with cwd
+  and any reason displayed in full. Wrapped/other/destructive commands, unknown detail
+  fields, missing consent kinds, broad-only grants and non-command permissions defer
+  to iPhone. Do not expand this to a shell denylist; add structured scope evidence/tests.
+- Reply supports one plain string input property with supported length constraints, or
+  an ordinary message when a complete read proves no pending approval/input. Long or
+  paginated ambiguous context, multiple requests, structured forms, URL handshakes and
+  unsupported constraints defer to iPhone. Reply length is at most 500 Unicode scalars.
+- Existing routes only: Chat `/approvals/{request}/resolve` with `{decisionId}`,
+  `/inputs/{request}/resolve` with `{action,content}`, or `/messages` with a stable
+  `clientMessageId` per reviewed draft. Auth, endpoint selection and expected-host
+  identity stay in the normal phone client. No resume/spawn side effect is used to
+  make a stopped controller actionable.
+
+Both TS action boundaries and Foundation review state have regression checks. Native
+WatchConnectivity/SwiftUI/dictation behavior remains subject to native build + physical
+pair QA; Node tests and Swift Foundation assertions are not evidence of wrist delivery.

@@ -3,6 +3,7 @@ import Foundation
 @main
 struct SnapshotTests {
     static func main() {
+        ActionTests.run()
         let tests = SnapshotTests()
         tests.testOnlyFreshCompleteSnapshotCanShowZero()
         tests.testLastKnownAttentionStaysVisibleButNotCurrent()

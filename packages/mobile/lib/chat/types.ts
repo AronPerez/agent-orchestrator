@@ -59,7 +59,7 @@ export type ConversationMessage = {
 	createdAt: string;
 };
 
-export type DecisionOption = { id: string; label: string };
+export type DecisionOption = { id: string; label: string; kind?: "allow_once" | "allow_always" | "reject_once" | "reject_always" };
 export type FileChange = DiffFile & { patch?: string; patchTruncated?: boolean };
 export type InputProperty = {
 	type?: "string" | "number" | "integer" | "boolean" | "array";
