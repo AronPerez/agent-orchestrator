@@ -9,4 +9,4 @@ declare class WatchBridge extends NativeModule<{ onWatchRequest: (event: WatchRe
 	completeRequest(id: string, json: string): Promise<void>;
 }
 // Older phone binaries and Android remain usable; new native code requires a rebuild.
-export const watchBridge = Platform.OS === "ios" ? requireOptionalNativeModule<WatchBridge>("AOWatch") : null;
+export const watchBridge = Platform.OS === "ios" ? requireOptionalNativeModule<WatchBridge>("AOWatchBridge") : null;

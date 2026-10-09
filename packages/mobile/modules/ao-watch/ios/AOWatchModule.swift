@@ -4,7 +4,7 @@ import WatchConnectivity
 
 public final class AOWatchModule: Module {
     public func definition() -> ModuleDefinition {
-        Name("AOWatch")
+        Name("AOWatchBridge")
         Events("onWatchRequest")
         OnCreate {
             DispatchQueue.main.async {
