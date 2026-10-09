@@ -1,5 +1,5 @@
 Pod::Spec.new do |s|
-  s.name = 'AOWatch'
+  s.name = 'AOWatchBridge'
   s.version = '1.0.0'
   s.summary = 'Phone-mediated AO Watch connectivity'
   s.description = s.summary

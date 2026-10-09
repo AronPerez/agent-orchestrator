@@ -3,7 +3,7 @@ import WatchConnectivity
 
 public final class AOWatchModule: Module {
     public func definition() -> ModuleDefinition {
-        Name("AOWatch")
+        Name("AOWatchBridge")
         OnCreate { DispatchQueue.main.async { PhoneWatchBridge.shared.activate() } }
         AsyncFunction("publishSnapshot") { (json: String) in
             guard json.utf8.count < 48_000 else { return }
