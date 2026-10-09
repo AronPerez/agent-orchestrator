@@ -35,8 +35,9 @@ const onlyKeys = (value: object, keys: string[]) => Object.keys(value).every((ke
 
 function permissionContext(request: ConversationActivity): ActionContext | null {
 	const d = request.detail;
-	if (!d || !onlyKeys(d, ["method", "command", "rawCommand", "cwd", "reason", "itemId", "decisions"]) ||
-		d.method !== "item/commandExecution/requestApproval" || !short(d.command) || !short(d.cwd, 80) ||
+	// The adapter projects a subset of the provider request; scopeComplete is its proof nothing else was dropped.
+	if (!d || !onlyKeys(d, ["method", "command", "rawCommand", "cwd", "reason", "itemId", "decisions", "scopeComplete"]) ||
+		d.scopeComplete !== true || d.method !== "item/commandExecution/requestApproval" || !short(d.command) || !short(d.cwd, 80) ||
 		(d.reason !== undefined && !short(d.reason)) || (d.rawCommand !== undefined && d.rawCommand !== d.command)) return null;
 	// shortcut: only literal read-only commands, expand with structured scope evidence, not shell heuristics.
 	if (!["pwd", "git status", "git status --short", "git status --short --branch", "git log -1 --oneline"].includes(d.command)) return null;
