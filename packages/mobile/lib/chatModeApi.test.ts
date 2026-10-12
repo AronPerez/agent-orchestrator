@@ -28,7 +28,7 @@ describe("mobile Chat API boundaries", () => {
 	afterEach(() => vi.unstubAllGlobals());
 
 	it("keeps Watch actions on existing authenticated Chat routes and preserves message dedup IDs", async () => {
-		vi.mocked(fetch).mockResolvedValue(response({ duplicate: false }));
+		vi.mocked(fetch).mockImplementation(async () => response({ duplicate: false }));
 		const hostConfig = { ...cfg, hostId: "host-alpha" };
 		await chatApi.resolveApproval(hostConfig, "worker/one", "request/one", "provider-choice");
 		await chatApi.resolveInput(hostConfig, "worker/one", "input/one", "accept", { answer: "Please summarize." });
