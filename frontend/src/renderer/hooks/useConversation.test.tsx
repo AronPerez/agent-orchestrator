@@ -696,6 +696,49 @@ describe("session-scoped conversation commands", () => {
 });
 
 describe("useConversation snapshot mapping", () => {
+  it("refreshes a remote controller after attach without CDC or a local send", async () => {
+    vi.useFakeTimers();
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const Wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    );
+    const remote = { host: "http://192.0.2.10:3011", id: "ao-1" };
+    getMock
+      .mockResolvedValueOnce({ data: { ...WIRE, controller: "stopped" } })
+      .mockResolvedValue({ data: { ...WIRE, controller: "busy" } });
+    const { result, unmount } = renderHook(() => useConversation(remote), {
+      wrapper: Wrapper,
+    });
+    try {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(result.current.snapshot?.controller.state).toBe("stopped");
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_001);
+      });
+      expect(result.current.snapshot?.controller.state).toBe("busy");
+      expect(clientForMock).toHaveBeenLastCalledWith(remote.host);
+      expect(getMock).toHaveBeenLastCalledWith(
+        "/api/v1/sessions/{sessionId}/conversation",
+        {
+          params: {
+            path: { sessionId: remote.id },
+            query: { beforeSequence: undefined, limit: 200 },
+          },
+        },
+      );
+      expect(postMock).not.toHaveBeenCalled();
+    } finally {
+      unmount();
+      queryClient.clear();
+      vi.useRealTimers();
+    }
+  });
+
   it("maps branch metadata and lightweight prompt content", async () => {
     getMock.mockResolvedValue({
       data: {
