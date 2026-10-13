@@ -104,8 +104,9 @@ type sessionResponse struct {
 }
 
 type killSessionResponse struct {
-	SessionID string `json:"sessionId"`
-	Freed     bool   `json:"freed"`
+	SessionID      string `json:"sessionId"`
+	Freed          bool   `json:"freed"`
+	CleanupPending bool   `json:"cleanupPending"`
 }
 
 type restoreSessionResponse struct {
@@ -170,6 +171,7 @@ type sessionListEntry struct {
 	ID             string          `json:"id"`
 	ProjectID      string          `json:"projectId"`
 	Role           string          `json:"role"`
+	DisplayName    string          `json:"displayName,omitempty"`
 	Status         string          `json:"status,omitempty"`
 	Activity       string          `json:"activity,omitempty"`
 	IssueID        string          `json:"issueId,omitempty"`
@@ -624,6 +626,10 @@ func (c *commandContext) killSession(ctx context.Context, cmd *cobra.Command, id
 	if err := c.postJSON(ctx, "sessions/"+url.PathEscape(id)+"/kill", struct{}{}, &res); err != nil {
 		return err
 	}
+	if res.CleanupPending {
+		_, err := fmt.Fprintf(cmd.OutOrStdout(), "session %s killed (workspace cleanup pending)\n", res.SessionID)
+		return err
+	}
 	if res.Freed {
 		_, err := fmt.Fprintf(cmd.OutOrStdout(), "session %s killed%s\n", res.SessionID, c.resolvedBySuffix())
 		return err
@@ -859,6 +865,7 @@ func sessionListEntries(sessions []sessionDTO, summaries map[string][]sessionPRS
 			ID:             sess.ID,
 			ProjectID:      sess.ProjectID,
 			Role:           sessionRole(sess),
+			DisplayName:    sess.DisplayName,
 			Status:         sessionStatusValue(sess),
 			Activity:       sess.Activity.State,
 			IssueID:        sess.IssueID,

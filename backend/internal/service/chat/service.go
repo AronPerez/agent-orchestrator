@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -26,6 +27,22 @@ var ErrNoController = errors.New("no live chat controller for session")
 // controller is currently TUI. An explicit interface transition may change that
 // fact later, but callers must route from the persisted mode they read now.
 var ErrNotChatMode = errors.New("session is not in chat mode")
+
+var (
+	// ErrExcerptInvalid reports malformed or unauthorized excerpt references.
+	ErrExcerptInvalid = errors.New("chat excerpt is invalid")
+	// ErrExcerptStale reports excerpt references whose source changed or disappeared.
+	ErrExcerptStale = errors.New("chat excerpt is stale")
+)
+
+const (
+	maxExcerptReferences = 8
+	maxExcerptTextBytes  = 24 * 1024
+	// Each excerpt carries its source turn so a short selection keeps its
+	// meaning. Long turns are truncated so eight excerpts cannot flood the
+	// provider prompt or the durable delivery row.
+	maxExcerptPairedTextBytes = 16 * 1024
+)
 
 // SessionReader is the session-fact surface the service needs. It reads the
 // persisted mode rather than trusting the caller, so a client cannot talk its way
@@ -49,9 +66,17 @@ type Service struct {
 	onCodexCapacityChanged func(domain.SessionID, string, ports.CodexCapacityObservation)
 	// onModelChanged syncs ChatUI's model override (including clearing it) to
 	// session metadata before the next prompt routes or a later TUI rebuild.
-	onModelChanged     func(domain.SessionID, string)
-	stopProviderHost   func(context.Context, domain.SessionID) error
-	reports            *reportsvc.Coordinator
+	onModelChanged   func(domain.SessionID, string)
+	stopProviderHost func(context.Context, domain.SessionID) error
+	reports          *reportsvc.Coordinator
+	renders          RenderFiles
+	dataDir          string
+	reconcileOutput  func(context.Context, domain.SessionID) error
+	renderCheck      RenderCheck
+	renderMeasure    RenderMeasure
+	// renderMeasures tracks background measures, so tests can wait for them.
+	renderMeasures     sync.WaitGroup
+	sides              *sideManager
 	wakeChat           func(context.Context, domain.SessionID) error
 	hibernationEnabled func() bool
 	viewMu             sync.Mutex
@@ -105,6 +130,7 @@ func (g controllerGate) unlock() { <-g }
 // Options configures a Service. The id factory and clock are injected so tests
 // are deterministic.
 type Options struct {
+	AppRunID   string
 	Store      Store
 	Reader     SnapshotReader
 	PageReader SnapshotPageReader
@@ -129,6 +155,14 @@ type Options struct {
 	// StopProviderHost destroys current ownership on explicit teardown or failed hibernation,
 	// even if its daemon attachment already failed. Never used by StopAll.
 	StopProviderHost func(context.Context, domain.SessionID) error
+	// Renders stores agent HTML renders. Nil refuses PublishRender.
+	Renders RenderFiles
+	// DataDir locates a session's artifact directory when its record names
+	// none, for a render kept as an artifact.
+	DataDir string
+	// ReconcileOutputType updates a session's output type at once after a
+	// render is kept as an artifact. Nil leaves it to the artifact observer.
+	ReconcileOutputType func(context.Context, domain.SessionID) error
 	// HibernationEnabled reads the daemon-owned feature gate. Nil is disabled.
 	HibernationEnabled func() bool
 }
@@ -143,7 +177,7 @@ func New(opts Options) *Service {
 	if now == nil {
 		now = func() time.Time { return time.Now().UTC() }
 	}
-	return &Service{
+	svc := &Service{
 		store:                  opts.Store,
 		reader:                 opts.Reader,
 		pageReader:             opts.PageReader,
@@ -157,6 +191,9 @@ func New(opts Options) *Service {
 		onCodexCapacityChanged: opts.OnCodexCapacityChanged,
 		onModelChanged:         opts.OnModelChanged,
 		stopProviderHost:       opts.StopProviderHost,
+		renders:                opts.Renders,
+		dataDir:                opts.DataDir,
+		reconcileOutput:        opts.ReconcileOutputType,
 		hibernationEnabled:     opts.HibernationEnabled,
 		controllers:            make(map[domain.SessionID]*Controller),
 		ownerControllers:       make(map[domain.ConversationOwner]*Controller),
@@ -167,6 +204,8 @@ func New(opts Options) *Service {
 		wakeRuns:               make(map[domain.SessionID]*wakeRun),
 		backgroundWakes:        make(map[domain.SessionID]bool),
 	}
+	svc.sides = newSideManager(svc, newMemorySideStore(), opts.AppRunID)
+	return svc
 }
 
 func (s *Service) controllerGate(owner domain.ConversationOwner) controllerGate {
@@ -1125,6 +1164,16 @@ func (s *Service) Send(
 	if err != nil {
 		return domain.ConversationTurn{}, err
 	}
+	if msg.ClientMessageID != "" && len(msg.Excerpts) > 0 {
+		if controller, controllerErr := s.Controller(id); controllerErr == nil {
+			if existing, found, lookupErr := controller.store.ConversationMessageByClientID(ctx, controller.conversation.ID, msg.ClientMessageID); lookupErr != nil {
+				return domain.ConversationTurn{}, fmt.Errorf("read message delivery: %w", lookupErr)
+			} else if found {
+				msg.ClientPayloadHash = existing.ClientPayloadHash
+				return controller.Send(ctx, msg)
+			}
+		}
+	}
 	msg.ClientPayloadHash, err = clientPayloadHash(msg)
 	if err != nil {
 		return domain.ConversationTurn{}, err
@@ -1152,7 +1201,11 @@ func (s *Service) Send(
 				var release func()
 				controller, release, err = s.workingController(ctx, id)
 				if err == nil {
-					turn, err = controller.Send(ctx, msg)
+					if hydrateErr := hydrateExcerptReferences(ctx, controller, &msg); hydrateErr != nil {
+						err = hydrateErr
+					} else {
+						turn, err = controller.Send(ctx, msg)
+					}
 					release()
 				}
 			}
@@ -1165,7 +1218,11 @@ func (s *Service) Send(
 		var release func()
 		controller, release, err = s.workingController(ctx, id)
 		if err == nil {
-			turn, err = controller.Send(ctx, msg)
+			if hydrateErr := hydrateExcerptReferences(ctx, controller, &msg); hydrateErr != nil {
+				err = hydrateErr
+			} else {
+				turn, err = controller.Send(ctx, msg)
+			}
 			release()
 		}
 	}
@@ -1194,7 +1251,117 @@ func (s *Service) SendForOwner(ctx context.Context, owner domain.ConversationOwn
 	if err != nil {
 		return domain.ConversationTurn{}, err
 	}
+	// A crash-safe retry may arrive after its source message changed. Once this
+	// client id is already durable, the controller's existing idempotency path is
+	// authoritative and must not be blocked by re-validating old selection text.
+	if msg.ClientMessageID != "" && len(msg.Excerpts) > 0 {
+		if existing, found, lookupErr := controller.store.ConversationMessageByClientID(
+			ctx, controller.conversation.ID, msg.ClientMessageID,
+		); lookupErr != nil {
+			return domain.ConversationTurn{}, fmt.Errorf("read message delivery: %w", lookupErr)
+		} else if found {
+			msg.ClientPayloadHash = existing.ClientPayloadHash
+			return controller.Send(ctx, msg)
+		}
+	}
+	if err := hydrateExcerptReferences(ctx, controller, &msg); err != nil {
+		return domain.ConversationTurn{}, err
+	}
 	return controller.Send(ctx, msg)
+}
+
+func hydrateExcerptReferences(ctx context.Context, controller *Controller, msg *ports.ChatUserMessage) error {
+	if len(msg.Excerpts) == 0 {
+		return nil
+	}
+	if err := validateExcerptReferences(msg.Excerpts, controller.conversation.ID); err != nil {
+		return err
+	}
+	messages, err := controller.store.ConversationMessages(ctx, controller.conversation.ID)
+	if err != nil {
+		return fmt.Errorf("read excerpt transcript: %w", err)
+	}
+	for _, excerpt := range msg.Excerpts {
+		text := strings.TrimSpace(excerpt.Text)
+		var source domain.ConversationMessage
+		found := false
+		for _, candidate := range messages {
+			if candidate.ID == excerpt.MessageID {
+				source, found = candidate, true
+				break
+			}
+		}
+		if !found || source.Revision != excerpt.Revision || source.Streaming || source.TurnID == "" || !sourceContainsExcerptSelection(source, text) || (source.Role != domain.MessageRoleUser && source.Role != domain.MessageRoleAssistant) {
+			return fmt.Errorf("%w: source message changed or no longer contains the selection; reselect it", ErrExcerptStale)
+		}
+		turn, err := controller.store.TurnByID(ctx, source.TurnID)
+		if err != nil || turn.ConversationID != controller.conversation.ID || turn.State != domain.TurnStateCompleted || turn.RolledBackAt != nil {
+			return fmt.Errorf("%w: source turn is not complete", ErrExcerptStale)
+		}
+		var userText, assistantText string
+		for _, candidate := range messages {
+			if candidate.TurnID != source.TurnID || candidate.Streaming {
+				continue
+			}
+			switch candidate.Role {
+			case domain.MessageRoleUser:
+				if userText != "" {
+					userText += "\n\n"
+				}
+				userText += candidate.Text
+			case domain.MessageRoleAssistant:
+				if assistantText != "" {
+					assistantText += "\n\n"
+				}
+				assistantText += candidate.Text
+			}
+		}
+		if userText == "" || assistantText == "" {
+			return fmt.Errorf("%w: source turn has no complete user and assistant messages", ErrExcerptStale)
+		}
+		msg.Content = append(msg.Content, ports.ChatContent{
+			Type: "excerpt", URI: ports.ChatExcerptResourceURIPrefix + source.ID,
+			Name: fmt.Sprintf("%s message", source.Role), MIMEType: "text/plain", Text: text,
+			Excerpt: &ports.ChatExcerptContext{
+				Reference: excerpt, SelectedText: text,
+				UserMessage:      truncateExcerptContext(userText),
+				AssistantMessage: truncateExcerptContext(assistantText),
+			},
+		})
+	}
+	msg.Excerpts = nil
+	return nil
+}
+
+// validateExcerptReferences checks what can be checked without the transcript,
+// so a send queued before its controller starts is bounded the same way.
+func validateExcerptReferences(excerpts []ports.ChatExcerptReference, conversationID string) error {
+	if len(excerpts) > maxExcerptReferences {
+		return fmt.Errorf("%w: at most %d excerpts may be attached", ErrExcerptInvalid, maxExcerptReferences)
+	}
+	total := 0
+	for _, excerpt := range excerpts {
+		text := strings.TrimSpace(excerpt.Text)
+		if excerpt.ConversationID != conversationID || excerpt.MessageID == "" || text == "" || excerpt.Revision < 0 {
+			return fmt.Errorf("%w: source conversation, message, revision, and text are required", ErrExcerptInvalid)
+		}
+		total += len(text)
+		if total > maxExcerptTextBytes {
+			return fmt.Errorf("%w: attached excerpts exceed %d bytes", ErrExcerptInvalid, maxExcerptTextBytes)
+		}
+	}
+	return nil
+}
+
+func truncateExcerptContext(text string) string {
+	if len(text) <= maxExcerptPairedTextBytes {
+		return text
+	}
+	cut := maxExcerptPairedTextBytes
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut] + "\n[truncated]"
 }
 
 // Resolve answers a pending approval.
@@ -1334,6 +1501,12 @@ func (s *Service) Stop(ctx context.Context, id domain.SessionID) error {
 		return err
 	}
 	defer gate.unlock()
+	// Each side is marked closed before its host stops, and a host that fails to
+	// stop stays queued for the periodic cleanup retry. Stopping the main chat
+	// (Exit agent, agent switch, spawn rollback) must not depend on it.
+	if err := s.closeSessionSides(ctx, id); err != nil {
+		s.log.Warn("side chat cleanup deferred while stopping session", "session", id, "error", err)
+	}
 	s.viewMu.Lock()
 	delete(s.viewClosedAt, id)
 	delete(s.viewLeases, id)
@@ -1394,6 +1567,9 @@ func (s *Service) Stop(ctx context.Context, id domain.SessionID) error {
 // StopForOwner closes a typed-owner controller without touching its parent
 // worker's Chat controller.
 func (s *Service) StopForOwner(ctx context.Context, owner domain.ConversationOwner) error {
+	if owner.Kind == domain.ConversationOwnerSession {
+		return s.Stop(ctx, domain.SessionID(owner.ID))
+	}
 	gate := s.controllerGate(owner)
 	if err := gate.lock(ctx); err != nil {
 		return err
@@ -1429,6 +1605,9 @@ func (s *Service) StopForOwner(ctx context.Context, owner domain.ConversationOwn
 
 // StopAll closes every controller, for daemon shutdown.
 func (s *Service) StopAll(ctx context.Context) {
+	if s.sides != nil {
+		s.sides.stopAll()
+	}
 	s.mu.Lock()
 	type shutdownTarget struct {
 		owner      domain.ConversationOwner
@@ -2296,6 +2475,19 @@ func permissionConfigOptions(harness domain.AgentHarness, options []ports.ChatCo
 	out := append([]ports.ChatConfigOption(nil), options...)
 	for i := range out {
 		out[i].Choices = append([]ports.ChatConfigOptionChoice(nil), out[i].Choices...)
+		if harness == domain.HarnessCommandCode && out[i].ID == "mode" {
+			choices := out[i].Choices[:0]
+			for _, choice := range out[i].Choices {
+				mode, ok := commandCodeApprovalMode(choice.Value)
+				if !ok {
+					continue
+				}
+				choice.PermissionMode = mode
+				choices = append(choices, choice)
+			}
+			out[i].Choices = choices
+			continue
+		}
 		for j := range out[i].Choices {
 			choice := &out[i].Choices[j]
 			choice.PermissionMode = ""
@@ -2327,6 +2519,19 @@ func permissionConfigOptions(harness domain.AgentHarness, options []ports.ChatCo
 		}
 	}
 	return out
+}
+
+func commandCodeApprovalMode(value string) (domain.PermissionMode, bool) {
+	switch value {
+	case "default":
+		return domain.PermissionModeDefault, true
+	case "auto-accept":
+		return domain.PermissionModeAuto, true
+	case "bypass":
+		return domain.PermissionModeBypassPermissions, true
+	default:
+		return "", false
+	}
 }
 
 func openCodeApprovalTier(value string) (domain.PermissionMode, string, bool) {
