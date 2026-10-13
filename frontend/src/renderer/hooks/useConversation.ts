@@ -5,8 +5,9 @@
  * the wire shape onto the view model and does not re-sort, re-derive turn state,
  * or decide which approvals are actionable. Those are daemon decisions.
  *
- * Live changes arrive through the daemon event channel. Older history is fetched
- * in bounded pages only when the reader asks for it.
+ * Live changes arrive through the daemon event channel, with polling for volatile
+ * controller health that does not emit durable change events. Older history is
+ * fetched in bounded pages only when the reader asks for it.
  */
 
 import {
@@ -257,6 +258,9 @@ export function useConversation(
     getNextPageParam: (page) =>
       page.hasMoreBefore ? page.oldestSequence : undefined,
     select: (data) => mergeConversationPages(data.pages),
+    // Controller reattachment/health is daemon-memory state, not conversation CDC.
+    // A second client must recover a stale stopped snapshot without sending work.
+    refetchInterval: (query) => (query.state.error ? false : 5_000),
     // A mode mismatch is authoritative for this committed controller epoch, so
     // retrying the same request cannot help and would leave the surface loading
     // instead of explaining why there is no conversation. Only genuinely
