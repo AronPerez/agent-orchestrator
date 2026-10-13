@@ -6,8 +6,8 @@ import { actionContext, createWatchActionHandler } from "./actions";
 const cfg = { hostId: "alpha", password: "SYNTHETIC_ONLY" } as ServerConfig;
 const approval = (over: Partial<ConversationActivity> = {}): ConversationActivity => ({
 	kind: "activity", id: "activity-1", requestId: "request-1", revision: 1, sequence: 1, createdAt: "2026-10-09T00:00:00Z", status: "pending", activityKind: "approval", summary: "Run status",
-	detail: { method: "item/commandExecution/requestApproval", command: "git status", rawCommand: "git status", cwd: "/demo", reason: "Check worktree", scopeComplete: true },
-	decisions: [{ id: "opaque-allow", label: "Allow once", kind: "allow_once" }, { id: "opaque-deny", label: "Deny", kind: "reject_once" }, { id: "broad", label: "Allow session", kind: "allow_always" }], ...over,
+	detail: { method: "item/commandExecution/requestApproval", command: "git status", rawCommand: "/bin/zsh -lc 'git status'", cwd: "/demo", reason: "Check worktree", scopeComplete: true },
+	decisions: [{ id: "accept", label: "Approve", kind: "allow_once" }, { id: "decline", label: "Decline", kind: "reject_once" }, { id: "cancel", label: "Cancel", kind: "reject_once" }, { id: "acceptForSession", label: "Approve for this session", kind: "allow_always" }], ...over,
 });
 const snapshot = (items: ConversationActivity[] = [approval()], over: Partial<ConversationSnapshot> = {}): ConversationSnapshot => ({ conversationId: "c-1", sessionId: "worker", harness: "codex", mode: "chat", controller: { state: "ready" }, latestSequence: 1, oldestSequence: 1, hasMoreBefore: false, turns: [], items, settings: {}, ...over });
 const inspect = { kind: "inspect", hostId: "alpha", sessionId: "worker" };
@@ -28,10 +28,10 @@ function setup(initial = snapshot()) {
 describe("Watch action scope", () => {
 	it("offers only provider-semantic one-time decisions and shows the complete scope", () => {
 		const result = actionContext(snapshot());
-		expect(result).toMatchObject({ kind: "approval", requestId: "request-1", scope: "git status\nIn: /demo\nCheck worktree", decisions: [{ id: "opaque-allow", label: "Allow once", kind: "allow_once" }, { id: "opaque-deny", label: "Deny", kind: "reject_once" }] });
+		expect(result).toMatchObject({ kind: "approval", requestId: "request-1", scope: "/bin/zsh -lc 'git status'\nIn: /demo\nCheck worktree", decisions: [{ id: "accept", label: "Approve", kind: "allow_once" }, { id: "decline", label: "Decline", kind: "reject_once" }] });
 	});
 	it("fails closed for long, truncated, ambiguous, destructive, broad-only and TUI requests", () => {
-		for (const detail of [{ command: "x".repeat(300) }, { textTruncated: true }, { rawCommand: "git status; rm -rf /demo" }, { command: "rm -rf /demo", rawCommand: "rm -rf /demo" }, { networkPolicyAmendment: {} }]) {
+		for (const detail of [{ command: "x".repeat(300) }, { textTruncated: true }, { rawCommand: "git status; rm -rf /demo" }, { rawCommand: "/bin/zsh -lc 'git status'; rm -rf /demo" }, { rawCommand: "/bin/zsh -c 'git status' && x" }, { command: "rm -rf /demo", rawCommand: "rm -rf /demo" }, { networkPolicyAmendment: {} }]) {
 			expect(actionContext(snapshot([approval({ detail: { ...approval().detail, ...detail } })]))).toBeNull();
 		}
 		expect(actionContext(snapshot([approval({ decisions: [{ id: "accept", label: "Allow once" }] })]))).toBeNull();
@@ -57,27 +57,27 @@ describe("Watch action dispatcher", () => {
 	it("binds exact host/session/token, refreshes pending context and never trusts a watch scope", async () => {
 		const { run, deps } = setup();
 		expect(await run(inspect)).toMatchObject({ status: "context", context: { token: "token" } });
-		expect(await run({ ...inspect, kind: "decide", token: "token", decisionId: "opaque-allow" })).toMatchObject({ status: "sent" });
+		expect(await run({ ...inspect, kind: "decide", token: "token", decisionId: "accept" })).toMatchObject({ status: "sent" });
 		expect(deps.read).toHaveBeenCalledTimes(2);
-		expect(deps.approve).toHaveBeenCalledWith(cfg, "worker", "request-1", "opaque-allow");
+		expect(deps.approve).toHaveBeenCalledWith(cfg, "worker", "request-1", "accept");
 		expect(await run({ ...inspect, hostId: "beta" })).toMatchObject({ status: "open_phone" });
-		expect(await run({ ...inspect, sessionId: "other", kind: "decide", token: "token", decisionId: "opaque-allow" })).toMatchObject({ status: "open_phone" });
+		expect(await run({ ...inspect, sessionId: "other", kind: "decide", token: "token", decisionId: "accept" })).toMatchObject({ status: "open_phone" });
 	});
 	it("rejects unoffered decisions and stale/changed confirmation without writes", async () => {
 		const { run, deps, setLive, setTime } = setup();
 		await run(inspect);
-		expect(await run({ ...inspect, kind: "decide", token: "token", decisionId: "broad" })).toMatchObject({ status: "error", code: "CHAT_DECISION_NOT_OFFERED", httpStatus: 400 });
+		expect(await run({ ...inspect, kind: "decide", token: "token", decisionId: "acceptForSession" })).toMatchObject({ status: "error", code: "CHAT_DECISION_NOT_OFFERED", httpStatus: 400 });
 		setLive(snapshot([approval({ detail: { ...approval().detail, cwd: "/other" } })]));
-		expect(await run({ ...inspect, kind: "decide", token: "token", decisionId: "opaque-allow" })).toMatchObject({ status: "open_phone" });
+		expect(await run({ ...inspect, kind: "decide", token: "token", decisionId: "accept" })).toMatchObject({ status: "open_phone" });
 		setTime(70_000);
-		expect(await run({ ...inspect, kind: "decide", token: "token", decisionId: "opaque-allow" })).toMatchObject({ status: "open_phone" });
+		expect(await run({ ...inspect, kind: "decide", token: "token", decisionId: "accept" })).toMatchObject({ status: "open_phone" });
 		expect(deps.approve).not.toHaveBeenCalled();
 	});
 	it("never starts a late or offline approval and does not queue it for recovery", async () => {
 		const { run, deps, setActive } = setup();
 		await run(inspect);
 		setActive(false);
-		expect(await run({ ...inspect, kind: "decide", token: "token", decisionId: "opaque-allow" })).toMatchObject({ status: "open_phone" });
+		expect(await run({ ...inspect, kind: "decide", token: "token", decisionId: "accept" })).toMatchObject({ status: "open_phone" });
 		setActive(true);
 		expect(deps.approve).not.toHaveBeenCalled();
 	});
@@ -85,23 +85,23 @@ describe("Watch action dispatcher", () => {
 		const { run, deps, setActive } = setup();
 		await run(inspect);
 		deps.read.mockImplementation(async () => { setActive(false); return snapshot(); });
-		expect(await run({ ...inspect, kind: "decide", token: "token", decisionId: "opaque-deny" })).toMatchObject({ status: "open_phone" });
+		expect(await run({ ...inspect, kind: "decide", token: "token", decisionId: "decline" })).toMatchObject({ status: "open_phone" });
 		expect(deps.approve).not.toHaveBeenCalled();
 	});
 	it("shows expired/resolved as already handled, not as Watch approval success", async () => {
 		const { run, deps, setLive } = setup();
 		await run(inspect);
 		setLive(snapshot([]));
-		expect(await run({ ...inspect, kind: "decide", token: "token", decisionId: "opaque-allow" })).toMatchObject({ status: "already_handled" });
+		expect(await run({ ...inspect, kind: "decide", token: "token", decisionId: "accept" })).toMatchObject({ status: "already_handled" });
 		setLive(snapshot());
 		deps.approve.mockRejectedValue({ status: 409, code: "CHAT_REQUEST_NOT_PENDING" });
-		expect(await run({ ...inspect, kind: "decide", token: "token", decisionId: "opaque-allow" })).toMatchObject({ status: "already_handled", httpStatus: 409 });
+		expect(await run({ ...inspect, kind: "decide", token: "token", decisionId: "accept" })).toMatchObject({ status: "already_handled", httpStatus: 409 });
 	});
 	it("does not write after a late native readiness answer or swapped phone credentials", async () => {
 		const { run, deps, setTime } = setup();
 		await run(inspect);
 		deps.isActive = async () => { setTime(31_000); return true; };
-		expect(await run({ ...inspect, kind: "decide", token: "token", decisionId: "opaque-allow" })).toMatchObject({ status: "open_phone" });
+		expect(await run({ ...inspect, kind: "decide", token: "token", decisionId: "accept" })).toMatchObject({ status: "open_phone" });
 		expect(deps.approve).not.toHaveBeenCalled();
 	});
 	it("rejects an ambiguous duplicate decision ID before filtering out broad options", () => {
@@ -113,27 +113,30 @@ describe("Watch action dispatcher", () => {
 		const { run, deps } = setup();
 		await run(inspect);
 		deps.approve.mockRejectedValueOnce({ status: 400, code: "CHAT_DECISION_NOT_OFFERED" });
-		expect(await run({ ...inspect, kind: "decide", token: "token", decisionId: "opaque-allow" })).toMatchObject({ status: "error", code: "CHAT_DECISION_NOT_OFFERED", httpStatus: 400 });
+		expect(await run({ ...inspect, kind: "decide", token: "token", decisionId: "accept" })).toMatchObject({ status: "error", code: "CHAT_DECISION_NOT_OFFERED", httpStatus: 400 });
+		await run(inspect);
 		deps.approve.mockRejectedValueOnce(new Error("offline"));
-		expect(await run({ ...inspect, kind: "decide", token: "token", decisionId: "opaque-allow" })).toMatchObject({ status: "uncertain" });
+		expect(await run({ ...inspect, kind: "decide", token: "token", decisionId: "accept" })).toMatchObject({ status: "uncertain" });
 	});
-	it("uses messages with the same clientMessageId for repeated sends, never converts approvals to replies", async () => {
+	it("spends the token on the first write and never converts approvals to replies", async () => {
 		const { run, deps, setLive } = setup(snapshot([]));
 		await run(inspect);
 		const reply = { ...inspect, kind: "reply", token: "token", text: "Please summarize.", clientMessageId: "watch-draft-1" };
-		await run(reply); await run(reply);
-		expect(deps.message).toHaveBeenNthCalledWith(2, cfg, "worker", { text: reply.text, clientMessageId: reply.clientMessageId });
-		setLive(snapshot());
+		expect(await run(reply)).toMatchObject({ status: "sent" });
 		expect(await run(reply)).toMatchObject({ status: "open_phone" });
-		expect(deps.message).toHaveBeenCalledTimes(2);
+		expect(deps.message).toHaveBeenCalledWith(cfg, "worker", { text: reply.text, clientMessageId: reply.clientMessageId });
+		setLive(snapshot());
+		await run(inspect);
+		expect(await run(reply)).toMatchObject({ status: "open_phone" });
+		expect(deps.message).toHaveBeenCalledTimes(1);
 	});
 	it("routes structured input to its request endpoint, preserving field/length validation", async () => {
 		const input = approval({ activityKind: "user_input", detail: { inputMode: "form", url: "", message: "What should I check?", schema: { type: "object", properties: { answer: { type: "string", minLength: 3, maxLength: 40 } }, required: ["answer"] } } });
 		const { run, deps } = setup(snapshot([input])); await run(inspect);
 		const reply = { ...inspect, kind: "reply", token: "token", text: "The tests, please.", clientMessageId: "watch-draft-2" };
+		expect(await run({ ...reply, text: "x" })).toMatchObject({ status: "error" });
 		expect(await run(reply)).toMatchObject({ status: "sent" });
 		expect(deps.input).toHaveBeenCalledWith(cfg, "worker", "request-1", "accept", { answer: reply.text });
-		expect(await run({ ...reply, text: "x" })).toMatchObject({ status: "error" });
 		expect(deps.message).not.toHaveBeenCalled();
 	});
 	it("rejects malformed payloads, credentials changes and foreign conversation identity", async () => {

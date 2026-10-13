@@ -31,6 +31,7 @@ const openPhone: WatchActionResult = { status: "open_phone", message: "Open AO o
 const notOffered: WatchActionResult = { status: "error", httpStatus: 400, code: "CHAT_DECISION_NOT_OFFERED", message: "That decision is not offered. Refresh on iPhone." };
 const handled: WatchActionResult = { status: "already_handled", httpStatus: 409, code: "CHAT_REQUEST_NOT_PENDING", message: "Already handled or no longer pending. This does not confirm a Watch approval." };
 const short = (value: unknown, max = 120): value is string => typeof value === "string" && value.trim().length > 0 && value.length <= max && !/[\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069]|…|\.{3}/u.test(value);
+const shellWrappers = ["/bin/zsh", "/bin/bash", "zsh", "bash"];
 const onlyKeys = (value: object, keys: string[]) => Object.keys(value).every((key) => keys.includes(key));
 
 function permissionContext(request: ConversationActivity): ActionContext | null {
@@ -38,14 +39,17 @@ function permissionContext(request: ConversationActivity): ActionContext | null 
 	// The adapter projects a subset of the provider request; scopeComplete is its proof nothing else was dropped.
 	if (!d || !onlyKeys(d, ["method", "command", "rawCommand", "cwd", "reason", "itemId", "decisions", "scopeComplete"]) ||
 		d.scopeComplete !== true || d.method !== "item/commandExecution/requestApproval" || !short(d.command) || !short(d.cwd, 80) ||
-		(d.reason !== undefined && !short(d.reason)) || (d.rawCommand !== undefined && d.rawCommand !== d.command)) return null;
+		(d.reason !== undefined && !short(d.reason))) return null;
 	// shortcut: only literal read-only commands, expand with structured scope evidence, not shell heuristics.
 	if (!["pwd", "git status", "git status --short", "git status --short --branch", "git log -1 --oneline"].includes(d.command)) return null;
+	// Codex wraps every command as `/bin/zsh -lc '<cmd>'`. Accept only that exact form of the allowlisted literal (no quotes or shell syntax to hide anything).
+	if (d.rawCommand !== undefined && !shellWrappers.some((shell) => d.rawCommand === `${shell} -lc '${d.command}'`) && d.rawCommand !== d.command) return null;
 	const scope = `${d.rawCommand ?? d.command}\nIn: ${d.cwd}${d.reason ? `\n${d.reason}` : ""}`;
 	if (scope.length > 240) return null;
 	if (new Set(request.decisions?.map((option) => option.id)).size !== request.decisions?.length) return null;
+	// Codex `cancel` is also reject_once but interrupts the whole turn; only `decline` skips just this command.
 	const decisions = request.decisions?.filter((option) =>
-		(option.kind === "allow_once" || option.kind === "reject_once") && short(option.id, 160) && short(option.label, 48));
+		((option.kind === "allow_once" && option.id === "accept") || (option.kind === "reject_once" && option.id === "decline")) && short(option.label, 48));
 	if (!decisions?.length || decisions.length > 4 || new Set(decisions.map((d) => d.id)).size !== decisions.length) return null;
 	return { kind: "approval", requestId: request.requestId, scope, decisions };
 }
@@ -119,15 +123,16 @@ export function createWatchActionHandler(deps: Dependencies) {
 			if (!issued || issued.expiresAt <= deps.now()) return openPhone;
 			if (issued.context.requestId && !snapshot.items.some((item) => item.kind === "activity" && item.requestId === issued.context.requestId && item.status === "pending")) return handled;
 			if (!context || JSON.stringify(context) !== JSON.stringify(issued.context)) return openPhone;
+			const write = () => { writing = true; contexts.delete(p.token as string); };
 			if (p.kind === "decide") {
 				if (context.kind !== "approval" || !context.requestId) return openPhone;
 				if (typeof p.decisionId !== "string" || !context.decisions?.some((option) => option.id === p.decisionId)) return notOffered;
-				writing = true;
+				write();
 				await deps.approve(cfg, sessionId, context.requestId, p.decisionId);
 			} else {
 				if (context.kind === "approval") return openPhone;
 				if (typeof p.text !== "string" || !p.text.trim() || Array.from(p.text).length < (context.minLength ?? 1) || Array.from(p.text).length > (context.maxLength ?? 500) || !short(p.clientMessageId, 160)) return { status: "error", message: "Reply length is invalid. Review it again." };
-				writing = true;
+				write();
 				if (context.kind === "input" && context.requestId && context.field) await deps.input(cfg, sessionId, context.requestId, "accept", { [context.field]: p.text });
 				else await deps.message(cfg, sessionId, { text: p.text, clientMessageId: p.clientMessageId });
 			}
