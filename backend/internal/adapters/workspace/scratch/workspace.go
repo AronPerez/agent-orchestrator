@@ -116,7 +116,6 @@ func (w *Workspace) ForceDestroy(ctx context.Context, info ports.WorkspaceInfo) 
 	return w.Destroy(ctx, info)
 }
 
-// StashUncommitted is a no-op for scratch because there is no git object store.
 // Exists reports whether the scratch directory is still present on disk.
 func (w *Workspace) Exists(_ context.Context, info ports.WorkspaceInfo) (bool, error) {
 	path, err := w.validateManagedPath(info.Path)
@@ -133,6 +132,7 @@ func (w *Workspace) Exists(_ context.Context, info ports.WorkspaceInfo) (bool, e
 	return fi.IsDir(), nil
 }
 
+// StashUncommitted is a no-op for scratch because there is no git object store.
 func (w *Workspace) StashUncommitted(context.Context, ports.WorkspaceInfo) (string, error) {
 	return "", nil
 }

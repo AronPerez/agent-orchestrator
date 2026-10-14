@@ -3773,32 +3773,6 @@ func (m *Manager) preserveFailedReconcileRelaunch(ctx context.Context, before do
 	return false, errors.New("session changed while recording failed relaunch")
 }
 
-// markSavedAndTeardown records the shutdown-saved marker (carrying preserveRef,
-// which may be empty), marks the session terminated, and force-removes its
-// worktree so RestoreAll re-creates it clean and replays the ref. It mirrors the
-// tail of saveAndTeardownOne and is shared by reconcileLive's two teardown
-// branches (dead runtime, and live runtime whose worktree vanished).
-func (m *Manager) markSavedAndTeardown(ctx context.Context, rec domain.SessionRecord, ws ports.WorkspaceInfo, preserveRef string) error {
-	row := domain.SessionWorktreeRecord{
-		SessionID:    rec.ID,
-		RepoName:     domain.RootWorkspaceRepoName,
-		Branch:       rec.Metadata.Branch,
-		WorktreePath: rec.Metadata.WorkspacePath,
-		PreservedRef: preserveRef,
-		State:        "removed",
-	}
-	if err := m.store.UpsertSessionWorktree(ctx, row); err != nil {
-		return fmt.Errorf("reconcile %s: upsert worktree marker: %w", rec.ID, err)
-	}
-	if err := m.lcm.MarkTerminated(ctx, rec.ID); err != nil {
-		return fmt.Errorf("reconcile %s: mark terminated: %w", rec.ID, err)
-	}
-	if err := m.workspace.ForceDestroy(ctx, ws); err != nil {
-		m.logger.Warn("reconcile: force destroy failed after marker", "sessionID", rec.ID, "error", err)
-	}
-	return nil
-}
-
 // reconcileReap kills the leaked tmux session of a session the DB already marks
 // terminated. This covers the teardown that marked the row terminated but failed
 // to kill the runtime (e.g. ForceDestroy/Destroy errored after MarkTerminated).

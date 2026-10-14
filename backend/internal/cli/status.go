@@ -69,7 +69,7 @@ type daemonStatus struct {
 	// build is what /healthz reported about the daemon itself.
 	// Unexported: only `ao doctor` compares them against this CLI's own build,
 	// and `ao status --json` is a stable contract that does not need them.
-	build      daemonmeta.Build
+	build daemonmeta.Build
 }
 
 type probeResult struct {
