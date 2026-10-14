@@ -19,6 +19,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/gitworktree"
 	workspacerouter "github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/router"
 	scratchworkspace "github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/scratch"
+	"github.com/aoagents/agent-orchestrator/backend/internal/artifactversions"
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/lifecycle"
@@ -47,16 +48,19 @@ type lifecycleStack struct {
 	// LCM is the Lifecycle Manager (the canonical write path). It is exposed so
 	// startSession can share the same reducer the reaper drives, rather than
 	// standing up a second store+LCM pair that would diverge under writes.
-	LCM            *lifecycle.Manager
-	runtimeReaper  *reaper.Reaper
-	reaperDone     <-chan struct{}
-	activityDone   <-chan struct{}
-	artifactsDone  <-chan struct{}
-	autoReviewDone <-chan struct{}
-	scmDone        <-chan struct{}
-	trackerDone    <-chan struct{}
-	herdr          *herdr.Server
-	automationDone <-chan struct{}
+	LCM *lifecycle.Manager
+	// ArtifactVersions is the one artifact version capturer. The session
+	// service deletes artifacts through it so a delete holds the capture lock.
+	ArtifactVersions *artifactversions.Capturer
+	runtimeReaper    *reaper.Reaper
+	reaperDone       <-chan struct{}
+	activityDone     <-chan struct{}
+	artifactsDone    <-chan struct{}
+	autoReviewDone   <-chan struct{}
+	scmDone          <-chan struct{}
+	trackerDone      <-chan struct{}
+	herdr            *herdr.Server
+	automationDone   <-chan struct{}
 }
 
 // startLifecycle constructs the Lifecycle Manager over the store and starts the
@@ -81,14 +85,16 @@ func startLifecycle(ctx context.Context, dataDir string, store *sqlite.Store, ru
 		// must not prevent the daemon or ordinary agent sessions from starting.
 		logger.Warn("fx Herdr listener unavailable", "error", err)
 	}
-	artifactsPoller := artifactsobserver.New(store, lcm, artifactsobserver.Config{Logger: logger})
+	artifactVersions := artifactversions.New(store, dataDir, logger)
+	artifactsPoller := artifactsobserver.New(store, lcm, artifactVersions, artifactsobserver.Config{Logger: logger})
 	return &lifecycleStack{
-		LCM:           lcm,
-		runtimeReaper: rp,
-		reaperDone:    rp.Start(ctx),
-		activityDone:  activityPoller.Start(ctx),
-		herdr:         herdrServer,
-		artifactsDone: artifactsPoller.Start(ctx),
+		LCM:              lcm,
+		ArtifactVersions: artifactVersions,
+		runtimeReaper:    rp,
+		reaperDone:       rp.Start(ctx),
+		activityDone:     activityPoller.Start(ctx),
+		herdr:            herdrServer,
+		artifactsDone:    artifactsPoller.Start(ctx),
 	}
 }
 
@@ -256,7 +262,7 @@ func (m sessionLifecycleMessenger) Send(ctx context.Context, id domain.SessionID
 // (issue #2685). The returned service is mounted at httpd APIDeps.Sessions.
 // It also returns the manager so the caller can wire Reconcile into the boot
 // sequence.
-func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.Runtime, store *sqlite.Store, lcm *lifecycle.Manager, messenger ports.AgentMessenger, telemetry ports.EventSink, notifications notificationSink, agents ports.AgentResolver, agentReadiness ports.AgentReadinessProvider, previewLifecycle sessionmanager.PreviewLifecycle, browserLifecycle sessionmanager.BrowserLifecycle, browserCapabilities sessionmanager.BrowserCapabilityIssuer, chat sessionmanager.ChatLauncher, reviewerRecoveryDone <-chan struct{}, defaults sessionmanager.SessionModeDefaults, tracker ports.Tracker, codexOperationGate ports.CodexOperationGate, log *slog.Logger) (*sessionsvc.Service, reviewsvc.Manager, sessionLifecycle, error) {
+func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.Runtime, store *sqlite.Store, lcm *lifecycle.Manager, artifactVersions *artifactversions.Capturer, messenger ports.AgentMessenger, telemetry ports.EventSink, notifications notificationSink, agents ports.AgentResolver, agentReadiness ports.AgentReadinessProvider, previewLifecycle sessionmanager.PreviewLifecycle, browserLifecycle sessionmanager.BrowserLifecycle, browserCapabilities sessionmanager.BrowserCapabilityIssuer, chat sessionmanager.ChatLauncher, reviewerRecoveryDone <-chan struct{}, defaults sessionmanager.SessionModeDefaults, tracker ports.Tracker, codexOperationGate ports.CodexOperationGate, log *slog.Logger) (*sessionsvc.Service, reviewsvc.Manager, sessionLifecycle, error) {
 	gitWS, err := gitworktree.New(gitworktree.Options{
 		// Per-session worktrees live under the data dir, so a single AO_DATA_DIR
 		// override moves all durable per-user state together.
@@ -322,6 +328,7 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 		// runtime AO cannot reach.
 		RuntimeUnreachable:   lcm.RuntimeUnreachable,
 		OutputTypeReconciler: lcm,
+		ArtifactDeleter:      artifactVersions,
 	})
 	// Triggering a review spawns a reviewer over the worker's worktree, resolved
 	// from the reviewer registry (distinct from the worker agent set). The
