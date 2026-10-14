@@ -16,6 +16,7 @@
 		"test": "vitest run"
 	},
 	"dependencies": {
+		"@bacons/apple-targets": "5.0.0",
 		"@expo/metro-runtime": "~6.1.2",
 		"@expo/vector-icons": "^15.0.3",
 		"@fressh/react-native-xtermjs-webview": "^0.0.8",

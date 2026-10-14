@@ -2,6 +2,7 @@ import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { Platform } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
+import { WatchManager } from "../lib/watch/WatchManager";
 import { OnboardingGate } from "../lib/OnboardingGate";
 import { PushManager } from "../lib/PushManager";
 import { UpdatesManager } from "../lib/UpdatesManager";
@@ -75,6 +76,7 @@ function Shell() {
 			<StatusBar style={scheme === "dark" ? "light" : "dark"} />
 			{/* expo-notifications response APIs are not implemented on web. */}
 			{Platform.OS !== "web" ? <PushManager /> : null}
+			<WatchManager />
 			<UpdatesManager />
 			<StoreUpdateManager />
 			<OnboardingGate />

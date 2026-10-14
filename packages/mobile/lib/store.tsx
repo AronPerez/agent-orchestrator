@@ -59,9 +59,14 @@ export type SpawnOptions = {
 	mode?: SessionMode;
 };
 
+export type SessionPoll = { config: ServerConfig; sessions: DashboardSession[]; capturedAt: number };
+
 type AppState = {
 	config: ServerConfig | null;
 	configured: boolean;
+	configResolved: boolean;
+	/** Original successful poll, kept together so Watch data cannot cross host identities. */
+	getSessionPoll: () => SessionPoll | null;
 	/** Every way the active machine says it can be reached, for telling a
 	 *  rotated tunnel hostname apart from being simply out of range. */
 	activeEndpoints: Endpoint[];
@@ -151,6 +156,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
 	useConversationEventTransport(connection === "open" ? config : null);
 
 	const cfgRef = useRef<ServerConfig | null>(null);
+	const sessionPollRef = useRef<SessionPoll | null>(null);
+	const getSessionPoll = useCallback(() => sessionPollRef.current, []);
 	// Whether the most recent poll reached the daemon.
 	const lastTickOkRef = useRef(false);
 	// Whether the last failure had no HTTP status — nothing answered at all,
@@ -306,6 +313,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 			// getSessions returns projects, so don't fetch /projects again alongside
 			// it — that duplicate doubled the auth attempts spent per failing tick.
 			const sess = await getSessions(c, "all");
+			sessionPollRef.current = { config: c, sessions: sess.sessions, capturedAt: Date.now() };
 			// Most ticks bring back the fleet exactly as it was; keep the previous
 			// value so React bails out of the render — see keepUnchanged.
 			//
@@ -537,6 +545,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
 		() => ({
 			config,
 			configured: !!config && isConfigured(config),
+			configResolved,
+			getSessionPoll,
 			activeEndpoints,
 			projects,
 			projectsKnown,
@@ -565,6 +575,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
 		}),
 		[
 			config,
+			configResolved,
+			getSessionPoll,
 			activeEndpoints,
 			projects,
 			projectsKnown,
