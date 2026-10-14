@@ -280,16 +280,17 @@ func TestEffectiveHarnessAndAgentConfig(t *testing.T) {
 	if got := effectiveAgentConfig(domain.HarnessClaudeCode, domain.KindOrchestrator, cfg); got.Model != "base" {
 		t.Fatalf("orchestrator config = %#v, want base", got)
 	}
-
-	// Provider tuning is never sent to a different pinned harness.
-	foreign := effectiveAgentConfig(domain.HarnessClaudeCode, domain.KindWorker, cfg)
-	if foreign.Model != "" || foreign.Effort != "" || foreign.Mode != "" {
-		t.Fatalf("worker config for claude-code = %#v, want provider tuning dropped", foreign)
+	// A launch harness that differs from the role's configured harness drops the
+	// role's model/mode — they were tuned for the other agent — but keeps the
+	// harness-neutral permissions.
+	if got := effectiveAgentConfig(domain.HarnessAider, domain.KindWorker, cfg); got.Model != "base" || got.Mode != "low" || got.Permissions != domain.PermissionModeAuto {
+		t.Fatalf("mismatched-harness worker config = %#v, want model=base mode=low permissions=auto", got)
 	}
-	if foreign.Permissions != domain.PermissionModeAuto {
-		t.Fatalf("worker permissions for claude-code = %q, want auto", foreign.Permissions)
-	}
-	// An unpinned role deliberately applies to any harness.
+	// A role override with no harness pinned is deliberately treated as
+	// "applies to any harness", so its model/mode are inherited whichever
+	// harness the session launches with. This is a behavior decision, not a
+	// side effect: assert it across two unrelated harnesses so it cannot
+	// silently flip back to the old drop-on-every-switch behavior.
 	unpinned := domain.ProjectConfig{
 		AgentConfig: domain.AgentConfig{Model: "base", Mode: "low"},
 		Worker:      domain.RoleOverride{AgentConfig: domain.AgentConfig{Model: "worker", Mode: "high"}},
@@ -299,7 +300,6 @@ func TestEffectiveHarnessAndAgentConfig(t *testing.T) {
 		if got.Model != "worker" || got.Mode != "high" {
 			t.Fatalf("unpinned worker config for %q = %#v, want model=worker mode=high", harness, got)
 		}
-
 	}
 }
 
@@ -321,7 +321,7 @@ func TestResolveChatAgentConfigValidatesAndResetsDependentTuning(t *testing.T) {
 		{ID: "old", Efforts: []string{"high"}},
 		{ID: "new", Efforts: []string{"low"}},
 	}}}}
-	project := domain.ProjectConfig{Worker: domain.RoleOverride{Harness: domain.HarnessCodex, AgentConfig: domain.AgentConfig{Model: "old", Effort: "high"}}}
+	project := domain.ProjectConfig{Worker: domain.RoleOverride{AgentConfig: domain.AgentConfig{Model: "old", Effort: "high"}}}
 	resolved, err := m.resolveAgentConfig(context.Background(), ports.SpawnConfig{
 		ProjectID: "p", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
 		AgentConfig: ports.AgentConfig{Model: "new"},
@@ -583,18 +583,14 @@ func TestSpawnPermissionPrecedence(t *testing.T) {
 		} {
 			t.Run(string(kind)+"/"+tc.name, func(t *testing.T) {
 				cfg := domain.ProjectConfig{AgentConfig: domain.AgentConfig{Permissions: tc.base}, Worker: domain.RoleOverride{AgentConfig: domain.AgentConfig{Permissions: tc.role}}, Orchestrator: domain.RoleOverride{AgentConfig: domain.AgentConfig{Permissions: tc.role}}}
-
-				got := applySpawnAgentConfig(effectiveAgentConfig(effectiveHarness("", kind, cfg), kind, cfg), domain.AgentConfig{Permissions: tc.spawn})
-
+				got := applySpawnAgentConfig(effectiveAgentConfig(domain.HarnessCodex, kind, cfg), domain.AgentConfig{Permissions: tc.spawn})
 				if got.Permissions != tc.want {
 					t.Fatalf("got %q want %q", got.Permissions, tc.want)
 				}
 			})
 		}
 	}
-
-	if got := effectiveAgentConfig(effectiveHarness("", domain.KindWorker, domain.ProjectConfig{}), domain.KindWorker, domain.ProjectConfig{}); got.Permissions != "" {
-
+	if got := effectiveAgentConfig(domain.HarnessCodex, domain.KindWorker, domain.ProjectConfig{}); got.Permissions != "" {
 		t.Fatalf("non-spawn resolution changed: %q", got.Permissions)
 	}
 }

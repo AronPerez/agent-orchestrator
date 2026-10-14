@@ -1,7 +1,7 @@
-import { classifyConnectionFailure } from "../connectionError";
+import { classifyConnectionFailure, isSessionGone } from "../connectionError";
 import type { SessionInterfaceTransitionStatus } from "../chat/api";
 
-type InterfaceTransition = { phase: string };
+type InterfaceTransition = { phase: string; errorCode?: string; errorDetail?: string };
 
 type InterfaceTransitionStatus = Pick<SessionInterfaceTransitionStatus, "reasonCode" | "reason"> & {
 	transition?: InterfaceTransition;
@@ -44,6 +44,15 @@ export function mobileInterfaceTransitionIsActive(transition?: InterfaceTransiti
 	return Boolean(transition && activePhases.has(transition.phase));
 }
 
+export function mobileInterfaceTransitionRecoveryMessage(transition?: InterfaceTransition): string | undefined {
+	if (!mobileInterfaceTransitionIsActive(transition) || transition?.errorCode !== "TARGET_STOP_UNCONFIRMED") return undefined;
+	return transition.errorDetail || "Orchestrator could not confirm the target controller stopped. Restart Orchestrator on your computer to retry recovery. This session remains blocked; other sessions can still be used.";
+}
+
+export function mobileInterfaceTransitionIsBusy(transition?: InterfaceTransition): boolean {
+	return mobileInterfaceTransitionIsActive(transition) && !mobileInterfaceTransitionRecoveryMessage(transition);
+}
+
 export function mobileInterfaceTransitionIsCancellable(transition?: InterfaceTransition): boolean {
 	return Boolean(
 		transition && ["requested", "preflighting", "draining"].includes(transition.phase),
@@ -61,23 +70,12 @@ export function interfaceTransitionPollInterval(
 	status?: InterfaceTransitionStatus,
 	readinessAttempts = 0,
 ): number | undefined {
+	if (mobileInterfaceTransitionRecoveryMessage(status?.transition)) return undefined;
 	if (mobileInterfaceTransitionIsActive(status?.transition)) return 300;
 	if (nativeSessionReadinessPending(status) && readinessAttempts < nativeSessionReadinessAttempts) {
 		return nativeSessionReadinessPoll;
 	}
 	return undefined;
-}
-
-// A failed request never advances `status`, so a poll rescheduled from the last
-// known status re-arms on it: a session deleted mid-transition would 404 at
-// 300ms indefinitely. But only a 404 or 410 is the daemon's word that the
-// session is gone. A timeout, a refused connection or a 5xx is a fact about the
-// link, not the session, and a link comes back.
-//
-// 401/403/429 never reach the scheduler: the hook stops polling on those (see
-// `shouldKeepPolling`), because retrying a rejected password arms the lockout.
-export function interfaceTransitionSessionGone(status: number | undefined): boolean {
-	return status === 404 || status === 410;
 }
 
 const failureBackoff = [1_000, 2_000, 4_000, 8_000];
@@ -131,9 +129,15 @@ export function interfaceTransitionNextPoll(args: {
 	consecutiveFailures?: number;
 	failureStatus?: number;
 }): number | undefined {
+	if (mobileInterfaceTransitionRecoveryMessage(args.status?.transition)) return undefined;
 	const failures = args.consecutiveFailures ?? 0;
 	if (failures > 0) {
-		if (interfaceTransitionSessionGone(args.failureStatus)) return undefined;
+		// A failed request never advances `status`, so a poll rescheduled from the
+		// last known status re-arms on it: a session deleted mid-transition would
+		// 404 at 300ms indefinitely. 401/403/429 never reach the scheduler: the hook
+		// stops polling on those (see `shouldKeepPolling`), because retrying a
+		// rejected password arms the lockout.
+		if (isSessionGone(args.failureStatus)) return undefined;
 		// A live handoff is retried for as long as the screen is open; anything
 		// else is speculative and stops. See speculativeFailureAttempts.
 		const live = mobileInterfaceTransitionIsActive(args.status?.transition);
@@ -187,32 +191,32 @@ export function interfaceSwitchAlert(
 	if (recheck.outcome === "not-attempted") {
 		return {
 			title: "Not connected yet",
-			message: "AO has not finished loading this phone's connection settings. Try again in a moment.",
+			message: "Orchestrator has not finished loading this phone's connection settings. Try again in a moment.",
 		};
 	}
 	if (recheck.outcome === "failed") {
 		switch (classifyConnectionFailure(recheck.status)) {
 			case "auth":
 				return {
-					title: "AO rejected this phone",
+					title: "Orchestrator rejected this phone",
 					message:
-						"The connection password has changed, so this phone can no longer talk to AO. Open Settings \u2192 Connect Mobile on your computer and scan the code again.",
+						"The connection password has changed, so this phone can no longer talk to Orchestrator. Open Settings \u2192 Connect Mobile on your computer and scan the code again.",
 				};
 			case "rate-limited":
 				return {
-					title: "AO is not accepting requests",
+					title: "Orchestrator is not accepting requests",
 					message:
-						"AO has paused this phone for a minute. That usually means the connection password changed \u2014 re-scan the code in Settings \u2192 Connect Mobile on your computer.",
+						"Orchestrator has paused this phone for a minute. That usually means the connection password changed \u2014 re-scan the code in Settings \u2192 Connect Mobile on your computer.",
 				};
 			case "server-error":
 				return {
-					title: "AO could not answer",
-					message: `AO was reached but could not say whether this session can switch to Chat. ${recheck.error}`,
+					title: "Orchestrator could not answer",
+					message: `Orchestrator was reached but could not say whether this session can switch to Chat. ${recheck.error}`,
 				};
 			default:
 				return {
-					title: "Could not reach AO",
-					message: `This phone could not reach AO to check whether this session can switch to Chat. ${recheck.error}`,
+					title: "Couldn't reach Orchestrator",
+					message: `This phone could not reach Orchestrator to check whether this session can switch to Chat. ${recheck.error}`,
 				};
 		}
 	}

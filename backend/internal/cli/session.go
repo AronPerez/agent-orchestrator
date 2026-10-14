@@ -55,13 +55,13 @@ type sessionDTO struct {
 	CreatedAt    time.Time       `json:"createdAt"`
 	UpdatedAt    time.Time       `json:"updatedAt"`
 	Status       string          `json:"status"`
+	Branch       string          `json:"branch,omitempty"`
+	BranchState  *branchStateDTO `json:"branchState,omitempty"`
+	PRs          []sessionPRDTO  `json:"prs"`
 	// RuntimeUnreachable means AO's last liveness probe could not reach the
 	// session's runtime, so its reported status describes a session AO can no
 	// longer see.
-	RuntimeUnreachable bool            `json:"runtimeUnreachable,omitempty"`
-	Branch             string          `json:"branch,omitempty"`
-	BranchState        *branchStateDTO `json:"branchState,omitempty"`
-	PRs                []sessionPRDTO  `json:"prs"`
+	RuntimeUnreachable bool `json:"runtimeUnreachable,omitempty"`
 }
 
 type branchStateDTO struct {
@@ -950,7 +950,7 @@ func writeSessionList(cmd *cobra.Command, sessions []sessionDTO, summaries map[s
 				}
 			}
 			pr, ci, review, threads := sessionPRColumns(sess, summaries[sess.ID])
-			if _, err := fmt.Fprintf(table, "  %s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", sess.ID, sessionRole(sess), emptyDash(sess.Branch), pr, ci, review, threads, emptyDash(sess.Activity.State), sessionAge(now, sess.Activity.LastActivityAt)); err != nil {
+			if _, err := fmt.Fprintf(table, "  %s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", sess.ID, sessionRole(sess), emptyDash(sess.Branch), pr, ci, review, threads, emptyDash(sessionActivityValue(sess)), sessionAge(now, sess.Activity.LastActivityAt)); err != nil {
 				return err
 			}
 		}
@@ -1021,18 +1021,17 @@ func sessionRuntimeField(sess sessionDTO) string {
 	return ""
 }
 
-// sessionStatusLabel is the bracketed status both listings print. An
-// unreachable runtime replaces the status rather than annotating it: the
-// derived status describes a session AO can no longer see, so printing
-// "[idle]" there states more than AO knows.
-func sessionStatusLabel(sess sessionDTO) string {
+// sessionStatusValue is the status the listings print. An unreachable runtime
+// replaces the status rather than annotating it: the derived status describes a
+// session AO can no longer see, so printing "idle" there states more than AO
+// knows.
+// sessionActivityValue is the activity the session table prints. An
+// unreachable runtime replaces it for the same reason as sessionStatusValue.
+func sessionActivityValue(sess sessionDTO) string {
 	if sess.RuntimeUnreachable {
-		return "[unreachable]"
+		return "unreachable"
 	}
-	if sess.Status == "" {
-		return ""
-	}
-	return "[" + sess.Status + "]"
+	return sess.Activity.State
 }
 
 func sessionStatusValue(sess sessionDTO) string {

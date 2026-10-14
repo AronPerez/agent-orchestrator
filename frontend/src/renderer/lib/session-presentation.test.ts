@@ -13,7 +13,6 @@ import type { WorkspaceSession } from "../types/workspace";
 
 function sessionWith(overrides: Partial<WorkspaceSession>): WorkspaceSession {
 	return {
-		host: "local",
 		id: "sess-1",
 		workspaceId: "ws-1",
 		workspaceName: "my-app",
@@ -114,7 +113,7 @@ describe("session presentation", () => {
 		["idle", "bg-status-idle"],
 		["working", "bg-status-working"],
 		["needs_input", "bg-status-needs-you"],
-		["exited", "bg-status-needs-you"],
+		["exited", "bg-passive"],
 		["no_signal", "bg-status-needs-you"],
 		["ci_failed", "bg-status-needs-you"],
 		["changes_requested", "bg-status-needs-you"],
@@ -161,6 +160,14 @@ describe("session presentation", () => {
 				sessionWith({ status: "idle", activity: { state: "active", lastActivityAt: "" } }),
 			),
 		).toEqual({ className: "bg-status-working", breathe: true });
+	});
+
+	it("paints a closed-without-merge session red", () => {
+		expect(
+			getSessionStatusDotView(
+				sessionWith({ status: "idle", displayStatus: "Closed without merge" }),
+			),
+		).toEqual({ className: "bg-status-exited", breathe: false });
 	});
 
 	it("keeps activity indicator color independent from PR and CI presentation", () => {

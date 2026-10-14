@@ -10,7 +10,6 @@ vi.mock("../lib/platform", () => ({ isWindowsPlatform }));
 afterEach(() => isWindowsPlatform.mockReturnValue(false));
 
 const shell: ShellTerminal = {
-	host: "local",
 	handleId: "shellterm-1",
 	projectId: "ao",
 	workingDir: "/repos/ao",
@@ -45,6 +44,14 @@ describe("ShellTerminalTab rename", () => {
 		fireEvent.change(input, { target: { value: "deploy" } });
 		fireEvent.keyDown(input, { key: "Enter" });
 		expect(onRename).toHaveBeenCalledWith("deploy");
+	});
+
+	it("starts rename from the keyboard with F2", () => {
+		renderTab();
+		const tab = screen.getByRole("tab", { name: "ao" });
+		expect(tab).toHaveAttribute("aria-keyshortcuts", "F2");
+		fireEvent.keyDown(tab, { key: "F2" });
+		expect(screen.getByRole("textbox", { name: /rename terminal/i })).toBeInTheDocument();
 	});
 
 	it("commits on blur", () => {
@@ -95,11 +102,11 @@ describe("ShellTerminalTab rename", () => {
 		expect(onSelect).toHaveBeenCalledOnce();
 	});
 
-	it("swaps the terminal glyph for close on hover without reserving a trailing close column", () => {
+	it("reveals close in the terminal glyph's slot on hover", () => {
 		renderTab({ appearance: "connected", isActive: true });
 
 		const closeButton = screen.getByRole("button", { name: "Close terminal ao" });
-		expect(closeButton.parentElement).toHaveClass("absolute", "left-2", "inset-y-0");
+		expect(closeButton.parentElement).toHaveClass("absolute", "inset-y-0", "left-2");
 		expect(closeButton).toHaveClass(
 			"opacity-0",
 			"pointer-events-none",
@@ -107,9 +114,7 @@ describe("ShellTerminalTab rename", () => {
 		);
 		expect(closeButton).not.toHaveClass("transition-opacity", "transition-[opacity,background,color]");
 		expect(closeButton).not.toHaveClass("w-control-sm");
-		expect(screen.getByRole("tab", { name: "ao" }).querySelector("svg")).toHaveClass(
-			"group-hover:opacity-0",
-		);
+		expect(screen.getByRole("tab", { name: "ao" }).querySelector("svg")).toHaveClass("group-hover:opacity-0");
 		expect(screen.getByRole("tab", { name: "ao" })).toHaveAttribute("aria-selected", "true");
 	});
 

@@ -29,11 +29,6 @@ type State struct {
 	Enabled  bool   `json:"enabled"`
 	Password string `json:"password"`
 	LastPort int    `json:"lastPort"`
-	// Bind narrows which interface the LAN listener binds: "" / "all"
-	// (every interface, the default), "tailscale", or a literal IP. See
-	// BindAddress. There is no API for it yet — edit config.json and
-	// re-enable the bridge.
-	Bind string `json:"bind,omitempty"`
 	// The last rotated credential stays recognizable as stale after restart.
 	RetiredPasswordHash string `json:"retiredPasswordHash,omitempty"`
 	// AccountTokenHash permits a separate, machine-scoped credential to be

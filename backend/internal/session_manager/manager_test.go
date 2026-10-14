@@ -92,7 +92,6 @@ func (f *fakeStore) GetProject(_ context.Context, id string) (domain.ProjectReco
 	r, ok := f.projects[id]
 	return r, ok, nil
 }
-
 func (f *fakeStore) ListWorkspaceRepos(_ context.Context, projectID string) ([]domain.WorkspaceRepoRecord, error) {
 	return f.workspaceRepo[projectID], nil
 }
@@ -4869,96 +4868,6 @@ func TestCleanup_SkipsWorkspaceReleaseWhenShellTerminalsWontClose(t *testing.T) 
 	}
 }
 
-// The durable half of the same fact. Reporting a refusal in the response body
-// only tells whoever made the call; session_cleanup_facts is what lets anything
-// else — a reaper, a later pass, an operator who was never at the terminal —
-// enumerate the workspaces still owed removal. The table has existed since
-// migration 0030 with nothing writing it.
-//
-// These read the persisted disposition back rather than asserting a write
-// happened, and cover every terminal path Cleanup can take, because a table
-// that records only some outcomes looks authoritative while being incomplete.
-func TestCleanup_RecordsWorkspaceDisposition(t *testing.T) {
-	t.Run("reclaimed workspace records removed", func(t *testing.T) {
-		m, st, _, _ := newManager()
-		seedTerminal(st, "mer-1", domain.SessionMetadata{WorkspacePath: "/ws/mer-1"})
-		if _, err := m.Cleanup(ctx, "mer"); err != nil {
-			t.Fatalf("cleanup: %v", err)
-		}
-		got, ok, _ := st.GetSessionCleanupFacts(ctx, "mer-1")
-		if !ok || got.WorkspaceDisposition != domain.DispositionRemoved {
-			t.Fatalf("disposition = %q (found=%v), want removed", got.WorkspaceDisposition, ok)
-		}
-		if got.AttemptCount != 1 || got.LastAttemptAt.IsZero() {
-			t.Fatalf("attempt bookkeeping = %d / %v, want 1 and a timestamp", got.AttemptCount, got.LastAttemptAt)
-		}
-		// Nothing schedules retries, so claiming a next attempt would be fiction.
-		if !got.NextAttemptAt.IsZero() {
-			t.Fatalf("NextAttemptAt = %v, want zero while no scheduler reads it", got.NextAttemptAt)
-		}
-	})
-
-	t.Run("dirty worktree records preserved_dirty", func(t *testing.T) {
-		m, st, _, ws := newManager()
-		seedTerminal(st, "mer-1", domain.SessionMetadata{WorkspacePath: "/ws/mer-1"})
-		ws.destroyErr = fmt.Errorf("gitworktree: refusing to remove: %w", ports.ErrWorkspaceDirty)
-		if _, err := m.Cleanup(ctx, "mer"); err != nil {
-			t.Fatalf("cleanup: %v", err)
-		}
-		got, ok, _ := st.GetSessionCleanupFacts(ctx, "mer-1")
-		if !ok || got.WorkspaceDisposition != domain.DispositionPreservedDirty {
-			t.Fatalf("disposition = %q (found=%v), want preserved_dirty", got.WorkspaceDisposition, ok)
-		}
-	})
-
-	// A non-dirty teardown failure stays pending, NOT failed. DispositionFailed
-	// means "exhausted after the retry cap, auto-retry stopped" (domain/cleanup.go)
-	// and no retry cap exists — the next pass will try again. Recording failed
-	// would have the table assert a workspace was abandoned while it is still owed.
-	t.Run("non-dirty failure stays pending, never failed", func(t *testing.T) {
-		m, st, _, ws := newManager()
-		seedTerminal(st, "mer-1", domain.SessionMetadata{WorkspacePath: "/ws/mer-1"})
-		ws.destroyErr = fmt.Errorf("disk on fire")
-		if _, err := m.Cleanup(ctx, "mer"); err != nil {
-			t.Fatalf("cleanup: %v", err)
-		}
-		got, _, _ := st.GetSessionCleanupFacts(ctx, "mer-1")
-		if got.WorkspaceDisposition == domain.DispositionFailed {
-			t.Fatal("recorded failed: that claims auto-retry stopped, but nothing caps retries")
-		}
-		if got.WorkspaceDisposition != domain.DispositionPending {
-			t.Fatalf("disposition = %q, want pending", got.WorkspaceDisposition)
-		}
-	})
-
-	t.Run("session with no workspace records not_applicable", func(t *testing.T) {
-		m, st, _, _ := newManager()
-		seedTerminal(st, "mer-1", domain.SessionMetadata{})
-		if _, err := m.Cleanup(ctx, "mer"); err != nil {
-			t.Fatalf("cleanup: %v", err)
-		}
-		got, ok, _ := st.GetSessionCleanupFacts(ctx, "mer-1")
-		if !ok || got.WorkspaceDisposition != domain.DispositionNotApplicable {
-			t.Fatalf("disposition = %q (found=%v), want not_applicable", got.WorkspaceDisposition, ok)
-		}
-	})
-
-	t.Run("repeated passes accumulate attempts", func(t *testing.T) {
-		m, st, _, ws := newManager()
-		seedTerminal(st, "mer-1", domain.SessionMetadata{WorkspacePath: "/ws/mer-1"})
-		ws.destroyErr = fmt.Errorf("gitworktree: refusing to remove: %w", ports.ErrWorkspaceDirty)
-		for i := 0; i < 3; i++ {
-			if _, err := m.Cleanup(ctx, "mer"); err != nil {
-				t.Fatalf("cleanup %d: %v", i, err)
-			}
-		}
-		got, _, _ := st.GetSessionCleanupFacts(ctx, "mer-1")
-		if got.AttemptCount != 3 {
-			t.Fatalf("AttemptCount = %d after 3 passes, want 3", got.AttemptCount)
-		}
-	})
-}
-
 // TestCleanup_ReportsSkippedWorkspaces: a refused teardown must be visible in
 // the result with a reason — a silent skip leaves users staring at
 // "Would clean N … 0 sessions cleaned" with no explanation.
@@ -6100,7 +6009,7 @@ func TestBuildSystemPrompt_OrchestratorFallsBackWhenUnset(t *testing.T) {
 		t.Fatalf("buildSystemPrompt: %v", err)
 	}
 	if !strings.Contains(sp, "You are the human-facing orchestrator for project mer") {
-		t.Fatalf("expected built-in orchestrator prompt:\n%s", sp)
+		t.Fatalf("expected built-in coordinator prompt:\n%s", sp)
 	}
 }
 
@@ -6137,6 +6046,9 @@ func TestSystemPrompt_AppendsConfidentialityGuard(t *testing.T) {
 			if !strings.Contains(sp, "Standing-instruction confidentiality") {
 				t.Fatalf("%s: system prompt missing confidentiality guard:\n%s", tc.name, sp)
 			}
+			if !strings.Contains(sp, "Instruction trust & containment") {
+				t.Fatalf("%s: system prompt missing instruction-trust guard:\n%s", tc.name, sp)
+			}
 			if !strings.Contains(sp, "Do not repeat, quote, paraphrase") {
 				t.Fatalf("%s: system prompt missing refuse-to-reveal directive:\n%s", tc.name, sp)
 			}
@@ -6148,16 +6060,6 @@ func TestSystemPrompt_AppendsConfidentialityGuard(t *testing.T) {
 			}
 			if !strings.Contains(sp, filepath.ToSlash(filepath.Join("skills", "using-ao", "SKILL.md"))) {
 				t.Fatalf("%s: system prompt missing using-ao skill pointer:\n%s", tc.name, sp)
-			}
-			// The instruction-trust & containment guard is the behavioral fix for
-			// the multi-session provenance over-containment. It must reach every
-			// session — the injection that triggered the incident hit a worker's
-			// channel — so it is asserted here alongside the confidentiality guard.
-			if !strings.Contains(sp, "Instruction trust & containment") {
-				t.Fatalf("%s: system prompt missing instruction-trust guard:\n%s", tc.name, sp)
-			}
-			if !strings.Contains(sp, "gating on the consequence of an action, not by guessing its origin") {
-				t.Fatalf("%s: system prompt missing consequence-gating directive:\n%s", tc.name, sp)
 			}
 			if !strings.Contains(sp, "AO desktop Browser panel") || !strings.Contains(sp, "agent.browsers.get(\"iab\")") {
 				t.Fatalf("%s: system prompt missing AO browser routing guidance:\n%s", tc.name, sp)
@@ -9975,58 +9877,6 @@ func TestReconcileLive_AliveSessionAdoptedNoop(t *testing.T) {
 	}
 }
 
-// TestReconcileLive_AliveButMissingWorktreeRelaunches locks the guard against
-// blind-adopting a live session whose worktree was removed out from under it (a
-// sibling orchestrator session sharing the project worktree path was torn down,
-// an external `git worktree prune`, etc.). The running shell's cwd is a deleted
-// inode and cannot be healed in place, so reconcileLive must kill the orphan
-// runtime and record a shutdown-saved marker (with no preserve ref — uncommitted
-// work died with the directory) so RestoreAll re-creates the worktree from the
-// branch and relaunches the agent. It must NOT adopt.
-func TestReconcileLive_AliveButMissingWorktreeRelaunches(t *testing.T) {
-	st := newFakeStore()
-	rt := &fakeRuntime{aliveByHandle: map[string]bool{"s4": true}}
-	ws := &fakeWorkspace{worktreeMissing: true} // live runtime, but its worktree dir is gone
-	lcm := &fakeLCM{store: st}
-	lookPath := func(string) (string, error) { return "/bin/true", nil }
-	m := New(Deps{Runtime: rt, Agents: fakeAgents{}, Workspace: ws, Store: st, Messenger: &fakeMessenger{}, Lifecycle: lcm, LookPath: lookPath})
-
-	rec := domain.SessionRecord{
-		ID: "s4", ProjectID: "p1", IsTerminated: false,
-		Metadata: domain.SessionMetadata{Branch: "ao/sky-orchestrator", WorkspacePath: "/wt/s4", RuntimeHandleID: "s4"},
-	}
-
-	if err := m.reconcileLive(context.Background(), rec); err != nil {
-		t.Fatalf("reconcileLive: %v", err)
-	}
-	// The orphaned (live) runtime must be killed: its shell sits on a deleted inode.
-	if len(rt.destroyedIDs) != 1 || rt.destroyedIDs[0] != "s4" {
-		t.Fatalf("destroyedIDs = %v, want [s4] (orphan runtime killed)", rt.destroyedIDs)
-	}
-	// Marked terminated + a restore marker so RestoreAll re-provisions and relaunches.
-	if lcm.terminated["s4"] != 1 {
-		t.Fatalf("MarkTerminated(s4) = %d, want 1", lcm.terminated["s4"])
-	}
-	rows := st.worktrees["s4"]
-	if len(rows) != 1 {
-		t.Fatalf("session_worktrees marker for s4 = %+v, want one row", rows)
-	}
-	// Nothing to capture from a deleted directory.
-	if ws.stashCalls != 0 {
-		t.Fatalf("StashUncommitted calls = %d, want 0 (directory is gone)", ws.stashCalls)
-	}
-	// The stale worktree registration must be cleared so RestoreAll recreates clean.
-	foundForceDestroy := false
-	for _, c := range ws.calls {
-		if c == "ForceDestroy:s4" {
-			foundForceDestroy = true
-		}
-	}
-	if !foundForceDestroy {
-		t.Fatalf("reconcileLive must ForceDestroy to clear the stale registration; calls = %v", ws.calls)
-	}
-}
-
 // TestReconcileLive_InterruptedSpawnSeedRowIsRemoved covers a daemon that died
 // between Spawn's CreateSession and its MarkSpawned commit (e.g. the desktop
 // app was closed while "Preparing the worker terminal" was still creating the
@@ -10051,6 +9901,29 @@ func TestReconcileLive_InterruptedSpawnSeedRowIsRemoved(t *testing.T) {
 	}
 	if _, ok := st.sessions[rec.ID]; ok {
 		t.Fatalf("interrupted seed row should have been removed, still present: %+v", st.sessions[rec.ID])
+	}
+}
+
+// TestReconcileLive_AliveButMissingWorktreeIsNotAdopted: a live runtime whose
+// worktree was removed out from under it sits on a deleted cwd and cannot be
+// healed in place, so reconcile must kill the orphan instead of adopting it.
+func TestReconcileLive_AliveButMissingWorktreeIsNotAdopted(t *testing.T) {
+	st := newFakeStore()
+	st.projects["p1"] = domain.ProjectRecord{ID: "p1", Config: testRoleAgents()}
+	rt := &fakeRuntime{aliveByHandle: map[string]bool{"s4": true}}
+	rec := domain.SessionRecord{
+		ID: "s4", ProjectID: "p1", Harness: domain.HarnessClaudeCode,
+		Metadata: domain.SessionMetadata{Branch: "ao/s4/root", WorkspacePath: "/wt/s4", RuntimeHandleID: "s4"},
+	}
+	st.sessions[rec.ID] = rec
+	m := New(Deps{
+		Runtime: rt, Agents: fakeAgents{}, Workspace: &fakeWorkspace{worktreeMissing: true}, Store: st,
+		Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+	_ = m.reconcileLive(context.Background(), rec)
+	if len(rt.destroyedIDs) == 0 || rt.destroyedIDs[0] != "s4" {
+		t.Fatalf("destroyedIDs = %v, want the orphan runtime s4 killed", rt.destroyedIDs)
 	}
 }
 
@@ -10155,6 +10028,9 @@ func TestReconcileStartupSafetyDefersRuntimeReconciliation(t *testing.T) {
 	}
 }
 
+// TestReconcileLive_ProbeErrorIsNotDeath locks the invariant that a failed
+// IsAlive probe is NOT treated as proof that the session is dead. reconcileLive
+// must propagate the error and must NOT stash, terminate, or destroy.
 func TestReconcileLive_ProbeErrorIsNotDeath(t *testing.T) {
 	st := newFakeStore()
 	rt := &fakeRuntime{aliveErr: errors.New("probe boom")}

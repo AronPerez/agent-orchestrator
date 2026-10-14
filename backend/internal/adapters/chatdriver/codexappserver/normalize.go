@@ -1,7 +1,6 @@
 package codexappserver
 
 import (
-	"cmp"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -139,7 +138,7 @@ func normalizeNotification(n notification, now time.Time) []ports.ChatEvent {
 		}
 		return []ports.ChatEvent{{
 			Kind:                   ports.ChatEventTurnStarted,
-			ProviderTurnID:         cmp.Or(p.Turn.ID, turnIDFallback(n.Params)),
+			ProviderTurnID:         firstNonEmpty(p.Turn.ID, turnIDFallback(n.Params)),
 			ProviderConversationID: p.ThreadID,
 		}}
 
@@ -150,7 +149,7 @@ func normalizeNotification(n notification, now time.Time) []ports.ChatEvent {
 		}
 		ev := ports.ChatEvent{
 			Kind:                   ports.ChatEventTurnCompleted,
-			ProviderTurnID:         cmp.Or(p.Turn.ID, turnIDFallback(n.Params)),
+			ProviderTurnID:         firstNonEmpty(p.Turn.ID, turnIDFallback(n.Params)),
 			ProviderConversationID: p.ThreadID,
 			TurnState:              turnStateFrom(string(p.Turn.Status)),
 		}
@@ -1068,7 +1067,7 @@ func activityFor(it threadItem) (domain.ActivityKind, string, bool) {
 		}
 		return domain.ActivityKindCommand, "Searched the web", true
 	case itemError:
-		return domain.ActivityKindError, cmp.Or(it.Message, "Provider error"), true
+		return domain.ActivityKindError, firstNonEmpty(it.Message, "Provider error"), true
 	default:
 		return "", "", false
 	}
@@ -1389,6 +1388,15 @@ func rawID(raw json.RawMessage) string {
 		return ""
 	}
 	return strings.Trim(s, `"`)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // deref reads an optional string the generated types declare as a pointer.

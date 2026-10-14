@@ -786,6 +786,31 @@ retryProjection:
 		m.mu.Unlock()
 		return nil
 	}
+	// A nested agent process — one an agent spawns from inside its own session —
+	// inherits AO_SESSION_ID and AO_RUNTIME_LAUNCH_ID from its parent, so the
+	// launch fence above cannot tell it apart from the session's real agent. Its
+	// hooks then speak for the session: they overwrite the resume handle
+	// (AgentSessionID / NativeTranscriptPath) with a throwaway conversation, and
+	// its SessionEnd reports the session as exited while the real agent is still
+	// alive and idle — after which AO refuses to deliver messages to it.
+	//
+	// The session's own agent is launched by AO with its cwd inside the session
+	// workspace, and a provider reports the launch cwd rather than the shell's, so
+	// a signal from outside the workspace cannot be that agent.
+	//
+	// This does not catch a nested agent invoked with the workspace as its cwd;
+	// that case still needs process identity AO does not have today (fork #114).
+	//
+	// A false rejection here would strand the session exactly as a dropped hook
+	// does, and it drops the signal rather than failing the caller, so it is
+	// logged: a guard nobody can observe rejecting is a guard nobody can debug.
+	if !signalCWDBelongsToSession(rec.Metadata.WorkspacePath, s.AgentCWD) {
+		m.mu.Unlock()
+		slog.Default().Warn("lifecycle: dropped activity signal from outside the session workspace",
+			"session", id, "workspace", rec.Metadata.WorkspacePath, "agent_cwd", s.AgentCWD,
+			"event", s.Event, "launch", s.LaunchID)
+		return nil
+	}
 	mode := domain.NormalizeSessionMode(rec.Mode)
 	// Rollback restores the TUI mode before its replacement runtime has a launch
 	// generation. While the durable transition remains active, an untagged hook
@@ -818,15 +843,6 @@ retryProjection:
 		(s.LaunchID != "" || rec.Metadata.RuntimeLaunchID != "") &&
 		s.LaunchID != rec.Metadata.RuntimeLaunchID {
 		m.mu.Unlock()
-		return nil
-	}
-	// A nested agent process inherits its parent's launch credentials. Its cwd
-	// must still be inside the session workspace before its hook can mutate it.
-	if !signalCWDBelongsToSession(rec.Metadata.WorkspacePath, s.AgentCWD) {
-		m.mu.Unlock()
-		slog.Default().Warn("lifecycle: dropped activity signal from outside the session workspace",
-			"session", id, "workspace", rec.Metadata.WorkspacePath, "agent_cwd", s.AgentCWD,
-			"event", s.Event, "launch", s.LaunchID)
 		return nil
 	}
 	if (mode == domain.SessionModeChat && !currentChatController) ||

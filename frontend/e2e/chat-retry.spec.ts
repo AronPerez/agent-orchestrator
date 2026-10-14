@@ -101,7 +101,7 @@ async function installRetryConversation(page: Page, running: boolean) {
 		}
 		await route.fulfill({ status: 404, json: { error: { code: "NOT_FOUND", message: "not found" } } });
 	});
-	await page.goto(`/#/host/local/session/${sessionId}`);
+	await page.goto(`/#/projects/fake-proj/sessions/${sessionId}`);
 	await expect(page.getByRole("log", { name: "Conversation" })).toBeVisible();
 }
 
@@ -120,7 +120,7 @@ test("retry stays disabled while another turn is running @T0", async ({ page }) 
 test("retry refusal is visible beside the failed turn @T0", async ({ page }) => {
 	await installRetryConversation(page, false);
 	await page.getByRole("button", { name: "Retry this turn" }).click();
-	const refusal = page.getByRole("alert");
+	const refusal = page.getByText("stop the current turn before retrying this one");
 	await expect(refusal).toContainText("stop the current turn before retrying this one");
 	await capture(page, "retry-visible-error");
 });

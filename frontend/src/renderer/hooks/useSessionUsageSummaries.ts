@@ -1,32 +1,38 @@
 import { useQuery } from "@tanstack/react-query";
 import type { components } from "../../api/schema";
-import { clientFor } from "../lib/host-clients";
-import { LOCAL_HOST, refKey, type Ref } from "../lib/hosts";
+import { apiClient } from "../lib/api-client";
+import { clientForHost } from "../lib/host-clients";
+import { LOCAL_HOST } from "../lib/hosts";
 
 export type SessionUsageSummary = components["schemas"]["CompactSessionUsageResponse"];
 
 export const sessionUsageQueryRoot = ["session-usage"] as const;
-export const sessionUsageQueryKey = (project?: Ref) =>
-	[...sessionUsageQueryRoot, project ? refKey(project) : "all"] as const;
+export const sessionUsageQueryKey = (projectId?: string, hostId?: string) =>
+	[...sessionUsageQueryRoot, hostId ?? LOCAL_HOST, projectId ?? "all"] as const;
 
-export async function fetchSessionUsageSummaries(project?: Ref): Promise<SessionUsageSummary[]> {
-	const { data, error } = await clientFor(project?.host ?? LOCAL_HOST).GET("/api/v1/usage/sessions", {
-		params: { query: project ? { projectId: project.id } : {} },
+export async function fetchSessionUsageSummaries(projectId?: string, hostId?: string): Promise<SessionUsageSummary[]> {
+	const { data, error } = await (hostId ? clientForHost(hostId) : apiClient).GET("/api/v1/usage/sessions", {
+		params: { query: projectId ? { projectId } : {} },
 	});
 	if (error) throw error;
 	return data?.sessions ?? [];
 }
 
-export function sessionUsageQueryOptions(project?: Ref) {
+export function sessionUsageQueryOptions(projectId?: string, hostId?: string) {
 	return {
-		queryKey: sessionUsageQueryKey(project),
-		queryFn: () => fetchSessionUsageSummaries(project),
+		queryKey: sessionUsageQueryKey(projectId, hostId),
+		queryFn: () => fetchSessionUsageSummaries(projectId, hostId),
 		retry: 1,
-		select: (items: SessionUsageSummary[]) =>
-			new Map(items.map((item) => [refKey({ host: project?.host ?? LOCAL_HOST, id: item.sessionId }), item] as const)),
+		...(hostId ? { refetchInterval: 15_000 } : {}),
+		select: summariesById,
 	};
 }
 
-export function useSessionUsageSummaries(project?: Ref) {
-	return useQuery(sessionUsageQueryOptions(project));
+// Module-level so the Map keeps its identity between renders.
+function summariesById(items: SessionUsageSummary[]) {
+	return new Map(items.map((item) => [item.sessionId, item] as const));
+}
+
+export function useSessionUsageSummaries(projectId?: string, hostId?: string) {
+	return useQuery(sessionUsageQueryOptions(projectId, hostId));
 }

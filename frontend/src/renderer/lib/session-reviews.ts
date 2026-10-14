@@ -1,15 +1,15 @@
 import { queryOptions } from "@tanstack/react-query";
 import type { components } from "../../api/schema";
-import { appI18n, type MessageKey } from "../i18n";
+import { appI18n } from "../i18n";
 import { sortedPRs, type WorkspaceSession } from "../types/workspace";
 import { apiErrorMessage } from "./api-client";
-import { clientFor } from "./host-clients";
-import { refKey } from "./hosts";
+import { clientForSessionHost } from "./host-clients";
 import { usesPreviewWorkspaceData as usePreviewData } from "./preview-mode";
 
 export type PRReviewState = components["schemas"]["PRReviewState"];
 export type ReviewsResponse = components["schemas"]["ListReviewsResponse"];
 export type ReviewRunFacts = components["schemas"]["ReviewRun"];
+export type ReviewerActivityState = ReviewsResponse["reviewerActivityState"];
 
 /**
  * Shared query options for a session's AO review states. The query key is the
@@ -17,9 +17,12 @@ export type ReviewRunFacts = components["schemas"]["ReviewRun"];
  * and the command palette both subscribe through this, so React Query shares
  * one cache entry per session and one fetch path (including the preview mock).
  */
-export function sessionReviewsQueryOptions(session: WorkspaceSession, enabled: boolean, staleTime?: number) {
+export const sessionReviewsQueryKey = (sessionId: string, hostId?: string) =>
+	hostId ? ["session-reviews", hostId, sessionId] as const : ["session-reviews", sessionId] as const;
+
+export function sessionReviewsQueryOptions(session: WorkspaceSession, enabled: boolean, staleTime?: number, hostId = session.hostId) {
 	return queryOptions({
-		queryKey: ["session-reviews", refKey(session)] as const,
+		queryKey: sessionReviewsQueryKey(session.id, hostId),
 		enabled,
 		...(staleTime !== undefined ? { staleTime } : {}),
 		refetchInterval: (query) => {
@@ -29,11 +32,11 @@ export function sessionReviewsQueryOptions(session: WorkspaceSession, enabled: b
 		},
 		queryFn: async () => {
 			if (usePreviewData) return mockReviewsResponse(session);
-			const { data, error } = await clientFor(session.host).GET("/api/v1/sessions/{sessionId}/reviews", {
+			const { data, error } = await clientForSessionHost(hostId).GET("/api/v1/sessions/{sessionId}/reviews", {
 				params: { path: { sessionId: session.id } },
 			});
 			if (error) throw new Error(apiErrorMessage(error, "Unable to load reviews"));
-			return data ?? ({ activeReviewers: [], reviewerHandleId: "", reviews: [], runs: [] } satisfies ReviewsResponse);
+			return data ?? ({ reviewerHandleId: "", reviews: [], runs: [], activeReviewers: [] } satisfies ReviewsResponse);
 		},
 	});
 }
@@ -52,6 +55,28 @@ export function reviewIsRunning(openReviewStates: PRReviewState[]): boolean {
 	return openReviewStates.some((reviewState) => reviewState.status === "running");
 }
 
+export function reviewHasLiveActivity(
+	openReviewStates: PRReviewState[],
+	reviewerActivityState: ReviewerActivityState | undefined,
+	hasReviewerSession: boolean,
+): boolean {
+	if (!reviewIsRunning(openReviewStates)) return false;
+	if (!hasReviewerSession) return false;
+	switch (reviewerActivityState) {
+		case "idle":
+		case "waiting_input":
+		case "exited":
+			return false;
+		case "active":
+		case "blocked":
+			return true;
+		default:
+			// Older daemons do not return reviewer activity state. Keep today's
+			// running-run semantics until a hook says otherwise.
+			return true;
+	}
+}
+
 export function reviewRunDisabled(openReviewStates: PRReviewState[], isTriggering: boolean): boolean {
 	return (
 		isTriggering ||
@@ -60,34 +85,17 @@ export function reviewRunDisabled(openReviewStates: PRReviewState[], isTriggerin
 	);
 }
 
-/**
- * Which action the session-level review button currently offers, as a stable
- * enum independent of the translated label.
- */
-export type ReviewRunActionKind = "reviewing" | "run_latest" | "rerun" | "run";
-
-export function reviewRunActionKind(reviewStates: PRReviewState[], isTriggering: boolean): ReviewRunActionKind {
+export function reviewSessionRunAction(reviewStates: PRReviewState[], isTriggering: boolean): string {
 	if (isTriggering || reviewStates.some((reviewState) => reviewState.status === "running")) {
-		return "reviewing";
+		return appI18n.t("inspector.review.reviewing");
 	}
 	if (reviewStates.some((reviewState) => reviewState.status === "needs_review")) {
-		return "run_latest";
+		return appI18n.t("inspector.review.runLatest");
 	}
 	if (reviewStates.some((reviewState) => reviewState.status === "changes_requested" || reviewState.latestRun)) {
-		return "rerun";
+		return appI18n.t("inspector.review.rerun");
 	}
-	return "run";
-}
-
-const REVIEW_RUN_ACTION_LABELS: Record<ReviewRunActionKind, MessageKey> = {
-	reviewing: "inspector.review.reviewing",
-	run_latest: "inspector.review.runLatest",
-	rerun: "inspector.review.rerun",
-	run: "inspector.review.run",
-};
-
-export function reviewSessionRunAction(reviewStates: PRReviewState[], isTriggering: boolean): string {
-	return appI18n.t(REVIEW_RUN_ACTION_LABELS[reviewRunActionKind(reviewStates, isTriggering)]);
+	return appI18n.t("inspector.review.run");
 }
 
 // Preview-only pins so the reviews section can be seen mid-run and with a verdict
@@ -218,7 +226,7 @@ function mockReviewsResponse(session: WorkspaceSession): ReviewsResponse {
 			},
 		];
 	});
-	return { activeReviewers: [], reviewerHandleId: `${session.id}-reviewer`, reviews: states, runs };
+	return { reviewerHandleId: `${session.id}-reviewer`, reviews: states, runs, activeReviewers: [] };
 }
 
 function mockReviewTitle(prNumber: number): string {

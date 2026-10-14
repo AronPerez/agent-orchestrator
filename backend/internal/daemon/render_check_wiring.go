@@ -11,7 +11,7 @@ import (
 
 // renderCheckBroker is the slice of the browser-runtime broker a render check needs.
 type renderCheckBroker interface {
-	Execute(ctx context.Context, id domain.SessionID, action string, args map[string]interface{}, profileKey string) (browserruntime.Result, error)
+	Execute(ctx context.Context, id domain.SessionID, action string, args map[string]interface{}) (browserruntime.Result, error)
 }
 
 // renderViaDesktop sends a render action ("__render-check" or
@@ -21,7 +21,7 @@ type renderCheckBroker interface {
 // action is unavailable rather than failed.
 func renderViaDesktop(broker renderCheckBroker, action string) func(context.Context, domain.SessionID, map[string]any) (any, error) {
 	return func(ctx context.Context, id domain.SessionID, args map[string]any) (any, error) {
-		result, err := broker.Execute(ctx, id, action, args, "")
+		result, err := broker.Execute(ctx, id, action, args)
 		var commandErr browserruntime.CommandError
 		if errors.Is(err, browserruntime.ErrUnavailable) ||
 			(errors.As(err, &commandErr) && commandErr.Code == "BROWSER_TARGET_UNAVAILABLE") {

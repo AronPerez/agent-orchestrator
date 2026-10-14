@@ -23,10 +23,16 @@ function appBuildIdentity(): string {
 	}
 }
 
-// Forge's VitePlugin handles all main-process build configuration.
-// Add overrides here only if needed (e.g. custom externals or aliases).
+// better-sqlite3 is a native module rebuilt for Electron by Forge. Keep it out
+// of Vite's bundle so the packaged app loads the rebuilt binary from
+// node_modules (the auto-unpack plugin moves that binary outside app.asar).
 export default defineConfig({
 	define: {
 		__AO_BUILD_IDENTITY__: JSON.stringify(appBuildIdentity()),
+	},
+	build: {
+		rollupOptions: {
+			external: ["better-sqlite3"],
+		},
 	},
 });

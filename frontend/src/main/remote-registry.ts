@@ -1,62 +1,85 @@
-import type { BrowserRuntimeLinkHandle } from "./browser-runtime-link";
 import type { ActiveProxy } from "./remote-proxy";
 import type { RemoteEntry } from "./remotes-store";
 
-/** What the renderer may know about a connected host. Password stays here. */
 export type ConnectedHostView = {
+	hostId: string;
 	label: string;
 	url: string;
 	base: string;
 };
 
 type StartProxy = (entry: RemoteEntry) => Promise<ActiveProxy>;
-type StartRuntimeLink = (entry: RemoteEntry, proxy: ActiveProxy) => BrowserRuntimeLinkHandle;
 
-// N hosts live at once, one proxy each, keyed by url. Replaces ActiveRemote's
-// single-slot model: the app no longer views one host, it talks to several.
+/** One loopback proxy per connected host. */
 export class RemoteRegistry {
-	private readonly live = new Map<
-		string,
-		{ view: ConnectedHostView; proxy: ActiveProxy; runtime?: BrowserRuntimeLinkHandle }
-	>();
+	private readonly live = new Map<string, { view: ConnectedHostView; proxy: ActiveProxy; password: string }>();
+	// ponytail: one queue serializes five-host startup; split by host if connect latency becomes measurable.
+	private tail: Promise<void> = Promise.resolve();
+	private closing = false;
 
-	constructor(
-		private readonly start: StartProxy,
-		// Attaches this app as the host's browser runtime so `ao browser` inside
-		// that host's workers reaches the panel here. Optional so tests that only
-		// care about proxies stay unchanged.
-		private readonly startRuntime?: StartRuntimeLink,
-	) {}
+	constructor(private readonly start: StartProxy) {}
 
-	async connect(entry: RemoteEntry): Promise<ConnectedHostView> {
+	connected(entry: RemoteEntry): ConnectedHostView | undefined {
 		const existing = this.live.get(entry.url);
-		// Reuse rather than restart: a second connect would strand the first
-		// proxy's port with the renderer still holding streams against it.
-		if (existing) return existing.view;
-
-		const proxy = await this.start(entry);
-		const view = { label: entry.label, url: entry.url, base: proxy.base };
-		const runtime = this.startRuntime?.(entry, proxy);
-		this.live.set(entry.url, { view, proxy, runtime });
-		return view;
+		return existing && existing.view.hostId === entry.hostId && existing.password === entry.password ? existing.view : undefined;
 	}
 
-	async disconnect(url: string): Promise<void> {
-		const entry = this.live.get(url);
-		if (!entry) return;
-		this.live.delete(url);
-		entry.runtime?.dispose(); // stop reconnect attempts before the proxy dies
-		await entry.proxy.close();
+	private enqueue<T>(action: () => Promise<T>): Promise<T> {
+		const result = this.tail.then(action, action);
+		this.tail = result.then(() => undefined, () => undefined);
+		return result;
 	}
 
-	views(): ConnectedHostView[] {
-		return [...this.live.values()].map(({ view }) => view);
+	connect(entry: RemoteEntry): Promise<ConnectedHostView> {
+		if (this.closing) return Promise.reject(new Error("remote connections are closing"));
+		return this.enqueue(async () => {
+			if (!entry.hostId) throw new Error("remote host must be paired again to record its identity");
+			const existing = this.connected(entry);
+			if (existing) return existing;
+			for (const [url, connected] of this.live) {
+				if (url !== entry.url && connected.view.hostId !== entry.hostId) continue;
+				this.live.delete(url);
+				await connected.proxy.close();
+			}
+			const proxy = await this.start(entry);
+			const view = { hostId: entry.hostId, label: entry.label, url: entry.url, base: proxy.base };
+			this.live.set(entry.url, { view, proxy, password: entry.password });
+			return view;
+		});
 	}
 
-	async closeAll(): Promise<void> {
-		const entries = [...this.live.values()];
-		this.live.clear();
-		for (const { runtime } of entries) runtime?.dispose();
-		await Promise.all(entries.map(({ proxy }) => proxy.close()));
+	previewUrl(hostId: string, sessionId: string, sourceUrl: string): string {
+		const connected = [...this.live.values()].find(({ view }) => view.hostId === hostId);
+		if (!connected) throw new Error(`Host ${hostId} is not connected`);
+		return connected.proxy.previewUrl(sessionId, sourceUrl);
+	}
+
+	resolvePreviewUrl(hostId: string, sessionId: string, viewedUrl: string): string {
+		const connected = [...this.live.values()].find(({ view }) => view.hostId === hostId);
+		if (!connected) throw new Error(`Host ${hostId} is not connected`);
+		return connected.proxy.resolvePreviewUrl(sessionId, viewedUrl);
+	}
+
+	disconnect(url: string): Promise<void> {
+		return this.enqueue(async () => {
+			const entry = this.live.get(url);
+			if (!entry) return;
+			this.live.delete(url);
+			await entry.proxy.close();
+		});
+	}
+
+	/** Retire all proxies on account sign-out without disabling later sign-in. */
+	disconnectAll(): Promise<void> {
+		return this.enqueue(async () => {
+			const entries = [...this.live.values()];
+			this.live.clear();
+			await Promise.all(entries.map(({ proxy }) => proxy.close()));
+		});
+	}
+
+	closeAll(): Promise<void> {
+		this.closing = true;
+		return this.disconnectAll();
 	}
 }

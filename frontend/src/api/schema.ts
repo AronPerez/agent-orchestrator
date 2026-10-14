@@ -1261,23 +1261,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/prs/{id}/close": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Close a pull request */
-        post: operations["closePR"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/prs/{id}/merge": {
         parameters: {
             query?: never;
@@ -2979,23 +2962,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/sessions/{sessionId}/workspace-location": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Resolve a session workspace location over the authenticated API */
-        get: operations["getSessionWorkspaceLocation"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/sessions/{sessionId}/workspace/diffs": {
         parameters: {
             query?: never;
@@ -3797,7 +3763,6 @@ export interface components {
             connected: boolean;
             /** Format: date-time */
             connectedAt?: string;
-            persistentProfile: boolean;
             sessionId: string;
             transport: string;
         };
@@ -3857,10 +3822,6 @@ export interface components {
             name?: null | string;
             projectId?: null | string;
             remoteUrl: string;
-        };
-        ClosePRResponse: {
-            ok: boolean;
-            prNumber: number;
         };
         CodewhaleLifecycleEvent: {
             /** Format: date-time */
@@ -4893,7 +4854,6 @@ export interface components {
             sessionId: string;
         };
         ListSessionsResponse: {
-            nextPageToken?: string;
             sessions: components["schemas"]["ControllersSessionView"][];
         };
         ListShellTerminalsResponse: {
@@ -5116,7 +5076,6 @@ export interface components {
             agentRules?: string;
             agentRulesFile?: string;
             autoReview?: boolean;
-            browserPersistentProfile?: boolean;
             canonicalRepoURL?: string;
             containerReap?: components["schemas"]["ContainerReapConfig"];
             defaultBranch?: string;
@@ -10875,65 +10834,6 @@ export interface operations {
             };
         };
     };
-    closePR: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description PR number. */
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description OK */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ClosePRResponse"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["APIError"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["APIError"];
-                };
-            };
-            /** @description Unprocessable Entity */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["APIError"];
-                };
-            };
-            /** @description Not Implemented */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["APIError"];
-                };
-            };
-        };
-    };
     mergePR: {
         parameters: {
             query?: never;
@@ -11877,10 +11777,6 @@ export interface operations {
                 orchestratorOnly?: null | boolean;
                 /** @description When true, return only fresh non-terminated sessions. */
                 fresh?: null | boolean;
-                /** @description Page size. Absent returns every matching session; present pages the list newest first by update time, and the response carries nextPageToken while more remain. Values above 500 are clamped to 500. */
-                pageSize?: null | number;
-                /** @description Opaque cursor from a previous page's nextPageToken. */
-                pageToken?: string;
             };
             header?: never;
             path?: never;
@@ -17654,56 +17550,6 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["APIError"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["APIError"];
-                };
-            };
-            /** @description Not Implemented */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["APIError"];
-                };
-            };
-        };
-    };
-    getSessionWorkspaceLocation: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description Session identifier, e.g. project-1. */
-                sessionId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description OK */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["DesktopWorkspaceLocationResponse"];
-                };
-            };
-            /** @description Not Found */
-            404: {
                 headers: {
                     [name: string]: unknown;
                 };

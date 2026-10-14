@@ -1,41 +1,22 @@
 import createClient from "openapi-fetch";
 import type { paths } from "../../api/schema";
-import { getApiBaseUrl, hasTrustedApiBaseUrl } from "./api-client";
 import { aoBridge } from "./bridge";
-import { isLocal, type HostId } from "./hosts";
+import { apiClient } from "./api-client";
+import { LOCAL_HOST, type HostId } from "./hosts";
 
-// One client per host. Local reads the live daemon base (which still moves when
-// the daemon restarts on a new port); a remote reads the loopback proxy base its
-// main-process proxy is listening on.
-const remoteBases = new Map<HostId, string>();
-const remoteLabels = new Map<HostId, string>();
+type ConnectedHost = { hostId: HostId; label: string; url: string; base: string };
+const hosts = new Map<HostId, ConnectedHost>();
 const clients = new Map<HostId, ReturnType<typeof createClient<paths>>>();
 const listeners = new Set<() => void>();
-let connectedSnapshot: HostId[] = [];
+let snapshot: HostId[] = [];
 
-function publishConnectedHosts(): void {
-	connectedSnapshot = [...remoteBases.keys()];
+function publish(): void {
+	snapshot = [...hosts.keys()];
 	for (const listener of listeners) listener();
 }
 
-export function registerHostBase(host: HostId, base: string, label = host): void {
-	remoteLabels.set(host, label);
-	if (remoteBases.get(host) === base) return;
-	remoteBases.set(host, base);
-	// A changed base invalidates the cached client bound to the old one.
-	clients.delete(host);
-	publishConnectedHosts();
-}
-
-export function forgetHost(host: HostId): void {
-	const removed = remoteBases.delete(host);
-	remoteLabels.delete(host);
-	clients.delete(host);
-	if (removed) publishConnectedHosts();
-}
-
 export function connectedHosts(): HostId[] {
-	return connectedSnapshot;
+	return snapshot;
 }
 
 export function subscribeConnectedHosts(listener: () => void): () => void {
@@ -43,45 +24,63 @@ export function subscribeConnectedHosts(listener: () => void): () => void {
 	return () => listeners.delete(listener);
 }
 
-export function hostLabelFor(host: HostId): string {
-	return remoteLabels.get(host) ?? host;
+export function baseUrlForHost(hostId: HostId): string | undefined {
+	return hosts.get(hostId)?.base;
 }
 
-export function baseUrlFor(host: HostId): string | null {
-	if (isLocal(host)) return hasTrustedApiBaseUrl() ? getApiBaseUrl() : null;
-	return remoteBases.get(host) ?? null;
+export function connectedHost(hostId: HostId): Readonly<ConnectedHost> | undefined {
+	return hosts.get(hostId);
 }
 
-export function isHostReady(host: HostId): boolean {
-	return baseUrlFor(host) !== null;
+export function isQuickTunnelHost(hostId: HostId): boolean {
+	const url = hosts.get(hostId)?.url;
+	return Boolean(url && new URL(url).hostname.endsWith(".trycloudflare.com"));
 }
 
-export function clientFor(host: HostId) {
-	const base = baseUrlFor(host);
-	if (base === null) throw new Error(`host ${host} is not connected`);
-	// The local client is not cached: its base follows the daemon across restarts
-	// and a stale cached client would keep talking to a dead port.
-	if (isLocal(host)) return createClient<paths>({ baseUrl: base });
-	const cached = clients.get(host);
-	if (cached) return cached;
-	const client = createClient<paths>({ baseUrl: base });
-	clients.set(host, client);
+export function labelForHost(hostId: HostId): string | undefined {
+	return hosts.get(hostId)?.label;
+}
+
+export function clientForHost(hostId: HostId) {
+	if (hostId === LOCAL_HOST) throw new Error("local is not a remote host");
+	const host = hosts.get(hostId);
+	if (!host) throw new Error(`Host ${hostId} is not connected`);
+	let client = clients.get(hostId);
+	if (!client) {
+		client = createClient<paths>({ baseUrl: host.base });
+		clients.set(hostId, client);
+	}
 	return client;
 }
 
-/** Start (or reuse) a proxy for a saved host and bind a client to its base. */
-export async function connectHost(url: HostId): Promise<void> {
-	const view = await aoBridge.remotes.connect(url);
-	registerHostBase(view.url, view.base, view.label);
+/** Resolve the daemon that owns a session at the point a request is made. */
+export function clientForSessionHost(hostId?: HostId) {
+	return hostId && hostId !== LOCAL_HOST ? clientForHost(hostId) : apiClient;
 }
 
-export async function disconnectHost(url: HostId): Promise<void> {
-	forgetHost(url);
-	await aoBridge.remotes.disconnect(url);
+export async function connectHost(url: string, hostId?: HostId, shouldAdopt: () => boolean = () => true): Promise<ConnectedHost> {
+	const host = await aoBridge.remotes.connect(url, hostId);
+	if (!shouldAdopt()) return host;
+	let replaced = false;
+	for (const [oldId, oldHost] of hosts) {
+		if (oldId !== host.hostId && oldHost.url === host.url) {
+			hosts.delete(oldId);
+			clients.delete(oldId);
+			replaced = true;
+		}
+	}
+	const previous = hosts.get(host.hostId);
+	if (previous?.base !== host.base) clients.delete(host.hostId);
+	hosts.set(host.hostId, host);
+	if (replaced || !previous || previous.base !== host.base || previous.label !== host.label || previous.url !== host.url) publish();
+	return host;
 }
 
-/** Re-bind clients to proxies main already has live (e.g. after a reload). */
-export async function syncConnectedHosts(): Promise<void> {
-	for (const view of await aoBridge.remotes.connected())
-		registerHostBase(view.url, view.base, view.label);
+export async function disconnectHost(hostId: HostId): Promise<void> {
+	const host = hosts.get(hostId);
+	if (!host) return;
+	hosts.delete(hostId);
+	clients.delete(hostId);
+	publish();
+	await aoBridge.remotes.disconnect(host.url);
 }

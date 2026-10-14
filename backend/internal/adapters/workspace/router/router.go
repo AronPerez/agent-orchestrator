@@ -129,8 +129,8 @@ func (w *Workspace) ForceDestroy(ctx context.Context, info ports.WorkspaceInfo) 
 	return adapter.ForceDestroy(ctx, info)
 }
 
-// Exists delegates the on-disk workspace presence check to the
-// project-appropriate workspace adapter.
+// Exists delegates the on-disk presence probe to the project-appropriate
+// workspace adapter.
 func (w *Workspace) Exists(ctx context.Context, info ports.WorkspaceInfo) (bool, error) {
 	adapter, err := w.adapterForProject(ctx, info.ProjectID)
 	if err != nil {

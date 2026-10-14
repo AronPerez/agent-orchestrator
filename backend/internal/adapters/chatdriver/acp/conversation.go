@@ -7,8 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"maps"
-	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1191,19 +1190,19 @@ func (c *conversation) settleOpenItems(turnID string, turnState ...domain.TurnSt
 	if recovered {
 		activityStatus = domain.ActivityStatusRecovered
 	}
-	messageIDs := slices.Sorted(maps.Keys(messages))
+	messageIDs := sortedKeys(messages)
 	for _, id := range messageIDs {
 		text := messages[id]
 		c.emit(ports.ChatEvent{Kind: ports.ChatEventMessageCompleted, ProviderTurnID: turnID, ProviderItemID: id, Text: text})
 	}
-	thoughtIDs := slices.Sorted(maps.Keys(thoughts))
+	thoughtIDs := sortedKeys(thoughts)
 	for _, id := range thoughtIDs {
 		text := thoughts[id]
 		c.emit(ports.ChatEvent{Kind: ports.ChatEventActivityCompleted, ProviderTurnID: turnID,
 			ProviderItemID: id, ActivityKind: domain.ActivityKindReasoning,
 			ActivityStatus: activityStatus, Summary: "Reasoning", Text: text})
 	}
-	nestedIDs := slices.Sorted(maps.Keys(nestedMessages))
+	nestedIDs := sortedKeys(nestedMessages)
 	for _, id := range nestedIDs {
 		item := nestedMessages[id]
 		detail, _ := json.Marshal(map[string]any{"parentProviderItemId": item.parentID, "nestedAgent": true})
@@ -1212,7 +1211,7 @@ func (c *conversation) settleOpenItems(turnID string, turnState ...domain.TurnSt
 			ActivityStatus: activityStatus, Summary: "Subagent response",
 			Text: item.text, Detail: detail})
 	}
-	toolIDs := slices.Sorted(maps.Keys(tools))
+	toolIDs := sortedKeys(tools)
 	for _, id := range toolIDs {
 		tool := tools[id]
 		if tool.status == acpsdk.ToolCallStatusPending || tool.status == acpsdk.ToolCallStatusInProgress || tool.status == "" {
@@ -1225,6 +1224,15 @@ func (c *conversation) settleOpenItems(turnID string, turnState ...domain.TurnSt
 			c.emit(event)
 		}
 	}
+}
+
+func sortedKeys[T any](values map[string]T) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func (c *conversation) failPendingPermissions() {

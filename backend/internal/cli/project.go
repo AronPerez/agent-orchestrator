@@ -132,9 +132,6 @@ type projectConfig struct {
 	TrackerIntake      trackerIntakeConfig  `json:"trackerIntake,omitempty"`
 	SessionInterface   string               `json:"sessionInterface,omitempty"`
 	AutoReview         bool                 `json:"autoReview,omitempty"`
-	// BrowserPersistentProfile is opt-in and default off. See the domain type
-	// for the security ceiling it accepts.
-	BrowserPersistentProfile bool `json:"browserPersistentProfile,omitempty"`
 	// WorkersRequestReview must round-trip through set-config so a CLI edit
 	// of another field never silently turns it off.
 	WorkersRequestReview bool             `json:"workersRequestReview,omitempty"`
@@ -165,7 +162,6 @@ type projectSetConfigOptions struct {
 	trackerIntake          bool
 	trackerRepo            string
 	trackerAssignee        string
-	browserPersistProfile  bool
 	reviewers              []string
 	configJSON             string
 	clear                  bool
@@ -368,10 +364,6 @@ func newProjectSetConfigCommand(ctx *commandContext) *cobra.Command {
 	f.BoolVar(&opts.trackerIntake, "tracker-intake", false, "Opt this project into issue intake (GitHub or GitLab; provider inferred from git origin). Inert unless the daemon also has AO_TRACKER_INTAKE=on")
 	f.StringVar(&opts.trackerRepo, "tracker-repo", "", "Provider-native repo for issue intake (owner/repo or group/subgroup/repo; default: derive from git origin)")
 	f.StringVar(&opts.trackerAssignee, "tracker-assignee", "", "Issue assignee required for intake eligibility")
-	f.BoolVar(&opts.browserPersistProfile, "browser-persistent-profile", false,
-		"Share ONE on-disk browser profile across this project's sessions so logins survive restarts. "+
-			"Off by default. Security ceiling: every worker session on this project shares that cookie jar, "+
-			"so a prompt-injected agent in any of them can use every login in it")
 	f.StringArrayVar(&opts.reviewers, "reviewer", nil, "Reviewer harness that reviews worker PRs (repeatable; e.g. claude-code)")
 	f.StringVar(&opts.configJSON, "config-json", "", "Full config as a JSON object (overrides field flags)")
 	f.BoolVar(&opts.clear, "clear", false, "Clear all config")
@@ -426,13 +418,32 @@ func buildProjectConfig(opts projectSetConfigOptions, orchestratorPrompt string)
 			Repo:     opts.trackerRepo,
 			Assignee: opts.trackerAssignee,
 		},
-		BrowserPersistentProfile: opts.browserPersistProfile,
-		Reviewers:                reviewersForFlags(opts.reviewers),
+		Reviewers: reviewersForFlags(opts.reviewers),
 	}
 	if reflect.DeepEqual(cfg, projectConfig{}) {
 		return projectConfig{}, usageError{errors.New("usage: provide at least one config flag, --config-json, --orchestrator-prompt-file, or --clear")}
 	}
 	return cfg, nil
+}
+
+// reviewersForFlags turns repeated --reviewer harness values into the config
+// shape. The daemon validates the harness vocabulary.
+func reviewersForFlags(harnesses []string) []reviewerConfig {
+	if len(harnesses) == 0 {
+		return nil
+	}
+	reviewers := make([]reviewerConfig, 0, len(harnesses))
+	for _, harness := range harnesses {
+		harness = strings.TrimSpace(harness)
+		if harness == "" {
+			continue
+		}
+		reviewers = append(reviewers, reviewerConfig{Harness: harness})
+	}
+	if len(reviewers) == 0 {
+		return nil
+	}
+	return reviewers
 }
 
 // readOrchestratorPrompt resolves --orchestrator-prompt-file: "" -> no prompt,
@@ -454,26 +465,6 @@ func readOrchestratorPrompt(in io.Reader, path string) (string, error) {
 		return "", usageError{fmt.Errorf("read orchestrator prompt: %w", err)}
 	}
 	return string(raw), nil
-}
-
-// reviewersForFlags turns repeated --reviewer harness values into the config
-// shape. The daemon validates the harness vocabulary.
-func reviewersForFlags(harnesses []string) []reviewerConfig {
-	if len(harnesses) == 0 {
-		return nil
-	}
-	reviewers := make([]reviewerConfig, 0, len(harnesses))
-	for _, harness := range harnesses {
-		harness = strings.TrimSpace(harness)
-		if harness == "" {
-			continue
-		}
-		reviewers = append(reviewers, reviewerConfig{Harness: harness})
-	}
-	if len(reviewers) == 0 {
-		return nil
-	}
-	return reviewers
 }
 
 // parseEnvPairs turns repeated KEY=VALUE flags into a map.

@@ -1,90 +1,261 @@
-import {
-  useQueries,
-  useQuery,
-  type QueryClient,
-  type QueryFunctionContext,
-  type UseQueryResult,
-} from "@tanstack/react-query";
+import { useQueries, useQuery, useQueryClient, type Query } from "@tanstack/react-query";
 import type { TraySessionEntry } from "../../shared/tray";
-import { useMemo, useSyncExternalStore } from "react";
+import { useEffect, useMemo } from "react";
 import type { components } from "../../api/schema";
-import { apiErrorMessage } from "../lib/api-client";
-import { appI18n } from "../i18n";
+import { apiClient, apiErrorCode, hasTrustedApiBaseUrl } from "../lib/api-client";
 import type { CloudCpProject, CloudCpSession } from "../lib/cloud-cp";
-import {
-  clientFor,
-  connectedHosts,
-  hostLabelFor,
-  isHostReady,
-  subscribeConnectedHosts,
-} from "../lib/host-clients";
-import { hostConnectionState } from "../lib/host-events";
-import {
-  cloudHost,
-  isCloudHost,
-  LOCAL_HOST,
-  type HostId,
-  type Ref,
-} from "../lib/hosts";
 import { useCloudCp } from "./useCloudCp";
 import { useCloudOrg } from "./useCloudOrg";
 import { mockWorkspaces } from "../lib/mock-data";
 import { usesPreviewWorkspaceData } from "../lib/preview-mode";
-import { parseResponseArray } from "../lib/response-validation";
 import { toReviewerHarnessId } from "../lib/reviewer-harnesses";
+import { captureRendererEvent } from "../lib/telemetry";
+import { agentSwitchVisibility } from "../lib/agent-switch-visibility";
+import { aoBridge } from "../lib/bridge";
+import { clientForHost } from "../lib/host-clients";
+import { useConnectedHosts } from "./useHostConnection";
+import { requestRemoteHostsRefresh } from "./useRemoteHosts";
+import { applyOptimisticSessionKills } from "./optimistic-session-kills";
+import { appI18n } from "../i18n";
 import {
-  type AgentSwitchSummary,
-  type PRState,
-  type PullRequestFacts,
-  type HostSection,
-  flattenHostSections,
-  STANDALONE_WORKSPACE_ID,
-  toAgentProvider,
-  toKanbanColumn,
-  toProjectKind,
-  toSessionActivity,
-  toSessionStatus,
+	type AgentSwitchSummary,
+	type PRState,
+	type PullRequestFacts,
+	type SessionArtifact,
+	toAgentProvider,
+	toKanbanColumn,
+	toProjectKind,
+	toSessionActivity,
+	toSessionStatus,
 	newestActiveOrchestrator,
 	attentionZone,
 	workerSessions,
-  type WorkspaceSession,
-  type WorkspaceSummary,
+	type WorkspaceSession,
+	type WorkspaceSummary,
+	STANDALONE_PROJECT_KIND,
+	STANDALONE_WORKSPACE_ID,
 } from "../types/workspace";
 
-export type { HostSection } from "../types/workspace";
-
-function toAgentSwitchSummary(
-  agentSwitch: components["schemas"]["AgentSwitch"],
-): AgentSwitchSummary {
-  return {
-    agentHandoffStatus: agentSwitch.agentHandoffStatus,
-    errorCode: agentSwitch.errorCode,
-    fromHarness: agentSwitch.fromHarness,
-    id: agentSwitch.id,
-    state: agentSwitch.state,
-    targetHarness: agentSwitch.targetHarness,
-  };
+function standaloneWorkspaceName(): string {
+	return appI18n.t("standalone.workspaceName");
 }
 
-function toPullRequestFacts(
-  pr: components["schemas"]["SessionPRFacts"],
-): PullRequestFacts {
-  return {
-    url: pr.url,
-    number: pr.number,
-    state: pr.state as PRState,
-    ci: pr.ci,
-    review: pr.review,
-    mergeability: pr.mergeability,
-    reviewComments: pr.reviewComments,
-    updatedAt: pr.updatedAt,
-  };
+function placeStandaloneWorkspaceLast(workspaces: WorkspaceSummary[]): WorkspaceSummary[] {
+	const standalone = workspaces.find((workspace) => workspace.id === STANDALONE_WORKSPACE_ID);
+	if (!standalone) return workspaces;
+	return [...workspaces.filter((workspace) => workspace.id !== STANDALONE_WORKSPACE_ID), standalone];
+}
+
+function toAgentSwitchSummary(agentSwitch: components["schemas"]["AgentSwitch"]): AgentSwitchSummary {
+	return {
+		agentHandoffStatus: agentSwitch.agentHandoffStatus,
+		errorCode: agentSwitch.errorCode,
+		fromHarness: agentSwitch.fromHarness,
+		id: agentSwitch.id,
+		state: agentSwitch.state,
+		targetHarness: agentSwitch.targetHarness,
+		updatedAt: agentSwitch.updatedAt,
+	};
+}
+
+function toPullRequestFacts(pr: components["schemas"]["SessionPRFacts"]): PullRequestFacts {
+	return {
+		url: pr.url,
+		number: pr.number,
+		state: pr.state as PRState,
+		ci: pr.ci,
+		review: pr.review,
+		mergeability: pr.mergeability,
+		reviewComments: pr.reviewComments,
+		updatedAt: pr.updatedAt,
+	};
+}
+
+function toSessionArtifact(artifact: components["schemas"]["SessionArtifact"]): SessionArtifact {
+	return {
+		kind: artifact.kind,
+		name: artifact.name,
+		path: artifact.path,
+		previewUrl: artifact.previewUrl,
+		rawUrl: artifact.rawUrl,
+		inlineUrl: artifact.inlineUrl,
+		size: artifact.size,
+		updatedAt: artifact.updatedAt,
+	};
+}
+
+export function toWorkspaceSession(
+	session: components["schemas"]["ControllersSessionView"],
+	project: Pick<WorkspaceSummary, "id" | "name">,
+): WorkspaceSession {
+	const statusReadiness = session.statusReadiness ?? "ready";
+	const status = statusReadiness === "ready" ? toSessionStatus(session.status, session.isTerminated) : "unknown";
+	const scmStatus = session.scmStatus ? toSessionStatus(session.scmStatus) : undefined;
+	const kanbanColumn = toKanbanColumn(session.kanbanColumn, status);
+	const activity = statusReadiness === "ready" ? toSessionActivity(session.activity) : undefined;
+	if (statusReadiness === "ready" && status === "unknown") reportUnknownSessionField("status", session.status);
+	if (statusReadiness === "ready" && (!activity || activity.state === "unknown")) {
+		reportUnknownSessionField("activity", session.activity?.state);
+	}
+	return {
+		id: session.id,
+		terminalHandleId: session.terminalHandleId,
+		terminalGeneration: session.terminalGeneration,
+		workspaceId: project.id,
+		workspaceName: project.name,
+		title: session.displayName ?? session.issueId ?? session.id,
+		issueId: session.issueId,
+		provider: toAgentProvider(session.harness),
+		reviewerHarness: toReviewerHarnessId(session.reviewerHarness),
+		reviewerConfig: session.reviewerConfig
+			? {
+					model: session.reviewerConfig.model ?? undefined,
+					mode: session.reviewerConfig.mode ?? undefined,
+					permissions: session.reviewerConfig.permissions ?? undefined,
+				}
+			: undefined,
+		autoReviewEnabled: session.autoReviewEnabled ?? false,
+		kind: session.kind === "orchestrator" ? "orchestrator" : session.kind === "worker" ? "worker" : undefined,
+		mode: session.mode === "chat" ? "chat" : "tui",
+		branch: session.branch || undefined,
+		status,
+		scmStatus,
+		kanbanColumn,
+		displayStatus: session.displayStatus || undefined,
+		statusReadiness,
+		provisionState: session.provisionState,
+		provisionError: session.provisionError || undefined,
+		provisionSteps: session.provisionSteps?.map((step) => ({
+			id: step.id,
+			status: step.status,
+			startedAt: step.startedAt ?? undefined,
+			endedAt: step.endedAt ?? undefined,
+		})),
+		branchState: session.branchState,
+		isTerminated: session.isTerminated,
+		workspaceCleanup: session.workspaceCleanup,
+		chatProviderPreserved: session.chatProviderPreserved,
+		terminateOnPrMerge: session.terminateOnPrMerge ?? false,
+		autoInjectReview: session.autoInjectReview ?? true,
+		autoInjectCI: session.autoInjectCI ?? true,
+		createdAt: session.createdAt,
+		updatedAt: session.updatedAt,
+		lastUserMessageAt: session.lastUserMessageAt ?? undefined,
+		lastInteractionAt: session.lastInteractionAt ?? undefined,
+		activity,
+		activeAgentSwitch: session.activeAgentSwitch ? toAgentSwitchSummary(session.activeAgentSwitch) : undefined,
+		previewUrl: session.previewUrl,
+		previewRevision: session.previewRevision,
+		isPinned: session.isPinned ?? false,
+		pinnedAt: session.pinnedAt ?? undefined,
+		prs: (session.prs ?? []).map(toPullRequestFacts),
+		outputType: session.outputType,
+		...(session.requestedOutput ? { requestedOutput: session.requestedOutput } : {}),
+		artifactFiles: session.artifactFiles?.map(toSessionArtifact),
+	};
 }
 
 export const workspaceQueryKey = ["workspaces"] as const;
+export const remoteWorkspaceQueryKey = (hostId: string) => ["remote-workspaces", hostId] as const;
+export const workspaceQueryKeyForHost = (hostId?: string) => hostId ? remoteWorkspaceQueryKey(hostId) : workspaceQueryKey;
+const remoteProjectsQueryKey = (hostId: string) => [...remoteWorkspaceQueryKey(hostId), "projects"] as const;
+const remoteSessionsQueryKey = (hostId: string) => [...remoteWorkspaceQueryKey(hostId), "sessions"] as const;
+const lastRemoteHealthRecheck = new Map<string, number>();
 
-export function workspaceHostQueryKey(host: HostId) {
-  return [...workspaceQueryKey, host] as const;
+function recheckRemoteHost(hostId: string, status: number): void {
+	if (![401, 403, 426, 502, 503].includes(status)) return;
+	const now = Date.now();
+	const last = lastRemoteHealthRecheck.get(hostId);
+	if (last !== undefined && now >= last && now - last < 15_000) return;
+	lastRemoteHealthRecheck.set(hostId, now);
+	requestRemoteHostsRefresh();
+}
+export function workspaceStatusesChecking(workspaces: WorkspaceSummary[] | undefined): boolean {
+	return (
+		workspaces?.some((workspace) => workspace.sessions.some((session) => session.statusReadiness === "checking")) ??
+		false
+	);
+}
+const reportedUnknownSessionFields = new Set<string>();
+
+function reportUnknownSessionField(field: "status" | "activity", value?: string): void {
+	const reason = value ? "unrecognized" : "missing";
+	const key = `${field}:${reason}`;
+	if (reportedUnknownSessionFields.has(key)) return;
+	reportedUnknownSessionFields.add(key);
+	void captureRendererEvent("ao.renderer.session_state_unknown", {
+		field,
+		reason,
+	});
+}
+
+function toLocalWorkspaceSession(
+	session: components["schemas"]["ControllersSessionView"],
+	workspaceId: string,
+	workspaceName: string,
+): WorkspaceSession {
+	const status = toSessionStatus(session.status, session.isTerminated);
+	const scmStatus = session.scmStatus ? toSessionStatus(session.scmStatus) : undefined;
+	const kanbanColumn = toKanbanColumn(session.kanbanColumn, status);
+	const activity = toSessionActivity(session.activity);
+	if (status === "unknown") reportUnknownSessionField("status", session.status);
+	if (!activity || activity.state === "unknown") reportUnknownSessionField("activity", session.activity?.state);
+	return {
+		id: session.id,
+		terminalHandleId: session.terminalHandleId,
+		terminalGeneration: session.terminalGeneration,
+		workspaceId,
+		workspaceName,
+		title: session.displayName ?? session.issueId ?? session.id,
+		issueId: session.issueId,
+		provider: toAgentProvider(session.harness),
+		reviewerHarness: toReviewerHarnessId(session.reviewerHarness),
+		reviewerConfig: session.reviewerConfig
+			? {
+					model: session.reviewerConfig.model ?? undefined,
+					mode: session.reviewerConfig.mode ?? undefined,
+					permissions: session.reviewerConfig.permissions ?? undefined,
+				}
+			: undefined,
+		autoReviewEnabled: session.autoReviewEnabled ?? false,
+		kind: session.kind === "orchestrator" ? "orchestrator" : session.kind === "worker" ? "worker" : undefined,
+		// Carried through verbatim: the session surface must render from
+		// the mode this session was created with, not from the current default.
+		mode: session.mode === "chat" ? "chat" : "tui",
+		branch: session.branch || undefined,
+		status,
+		scmStatus,
+		kanbanColumn,
+		displayStatus: session.displayStatus || undefined,
+		provisionState: session.provisionState,
+		provisionError: session.provisionError || undefined,
+		provisionSteps: session.provisionSteps?.map((step) => ({
+			id: step.id,
+			status: step.status,
+			startedAt: step.startedAt ?? undefined,
+			endedAt: step.endedAt ?? undefined,
+		})),
+		branchState: session.branchState,
+		isTerminated: session.isTerminated,
+		workspaceCleanup: session.workspaceCleanup,
+		terminateOnPrMerge: session.terminateOnPrMerge ?? false,
+		autoInjectReview: session.autoInjectReview ?? true,
+		autoInjectCI: session.autoInjectCI ?? true,
+		createdAt: session.createdAt,
+		updatedAt: session.updatedAt,
+		lastUserMessageAt: session.lastUserMessageAt ?? undefined,
+		lastInteractionAt: session.lastInteractionAt ?? undefined,
+		activity,
+		activeAgentSwitch: session.activeAgentSwitch ? toAgentSwitchSummary(session.activeAgentSwitch) : undefined,
+		previewUrl: session.previewUrl,
+		previewRevision: session.previewRevision,
+		isPinned: session.isPinned ?? false,
+		pinnedAt: session.pinnedAt ?? undefined,
+		prs: (session.prs ?? []).map(toPullRequestFacts),
+		outputType: session.outputType,
+		...(session.requestedOutput ? { requestedOutput: session.requestedOutput } : {}),
+		artifactFiles: session.artifactFiles?.map(toSessionArtifact),
+	};
 }
 
 // e2e seam (dev:web only): the Playwright fake-agent harness injects
@@ -94,340 +265,149 @@ export function workspaceHostQueryKey(host: HostId) {
 // and always hits the real daemon.
 type FakeAgentSeam = { snapshot: () => WorkspaceSummary[] };
 
-type ProjectSummaryDTO = components["schemas"]["ProjectSummary"];
-type SessionDTO = components["schemas"]["ControllersSessionView"];
+async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
+	if (usesPreviewWorkspaceData) {
+		const fake =
+			typeof window !== "undefined"
+				? (window as unknown as { __aoFakeAgent?: FakeAgentSeam }).__aoFakeAgent
+				: undefined;
+		const snapshot = fake ? fake.snapshot() : mockWorkspaces;
+		return applyOptimisticSessionKills(snapshot) ?? snapshot;
+	}
+	if (!hasTrustedApiBaseUrl()) {
+		throw new Error("AO daemon API is not ready");
+	}
 
-function isProject(value: unknown): value is ProjectSummaryDTO {
-  if (typeof value !== "object" || value === null) return false;
-  const project = value as Partial<ProjectSummaryDTO>;
-  return (
-    typeof project.id === "string" &&
-    typeof project.name === "string" &&
-    typeof project.path === "string"
-  );
+	const [{ data: projectsData, error: projectsError }, { data: sessionsData, error: sessionsError }] =
+		await Promise.all([apiClient.GET("/api/v1/projects"), apiClient.GET("/api/v1/sessions")]);
+
+	if (projectsError || sessionsError) {
+		agentSwitchVisibility.setQueryHealthy("active", false, "workspaces");
+		agentSwitchVisibility.setQueryHealthy("history", false, "workspaces");
+		throw projectsError ?? sessionsError;
+	}
+	agentSwitchVisibility.setQueryHealthy("active", true, "workspaces");
+	agentSwitchVisibility.setQueryHealthy("history", true, "workspaces");
+
+	const sessions = sessionsData?.sessions ?? [];
+	const standaloneName = standaloneWorkspaceName();
+	const projects = (projectsData?.projects ?? []).map((project) => {
+		const kind = toProjectKind(project.kind);
+		return {
+			id: project.id,
+			name: project.name,
+			kind,
+			path: project.path,
+			folderMissing: project.folderMissing,
+			orchestratorAgent: project.orchestratorAgent ? toAgentProvider(project.orchestratorAgent) : undefined,
+			sessions: sessions
+				.filter((session) => session.projectId === project.id)
+				.map((session) => toWorkspaceSession(session, project)),
+		};
+	});
+	const standalone: WorkspaceSummary = {
+		id: STANDALONE_WORKSPACE_ID,
+		name: standaloneName,
+		kind: STANDALONE_PROJECT_KIND,
+		path: "Not attached to a project",
+		sessions: sessions
+			.filter((session) => !session.projectId)
+			.map((session) => toLocalWorkspaceSession(session, STANDALONE_WORKSPACE_ID, standaloneName)),
+	};
+	const workspaces =
+		standalone.sessions.length > 0 ? placeStandaloneWorkspaceLast([...projects, standalone]) : projects;
+	// Pending optimistic kills must survive CDC/refetch while the daemon kill is in flight.
+	return applyOptimisticSessionKills(workspaces) ?? workspaces;
 }
 
-function isSession(value: unknown): value is SessionDTO {
-  if (typeof value !== "object" || value === null) return false;
-  const session = value as Partial<SessionDTO>;
-  // projectId is absent on standalone sessions.
-  return (
-    typeof session.id === "string" &&
-    (session.projectId === undefined || typeof session.projectId === "string")
-  );
+async function fetchRemoteProjects(hostId: string) {
+	const { data, error, response } = await clientForHost(hostId).GET("/api/v1/projects");
+	if (error) {
+		recheckRemoteHost(hostId, response.status);
+		throw error;
+	}
+	return data?.projects ?? [];
 }
 
-function tagWorkspaces(
-  host: HostId,
-  workspaces: WorkspaceSummary[],
+async function fetchRemoteSessions(hostId: string) {
+	const { data, error, response } = await clientForHost(hostId).GET("/api/v1/sessions");
+	if (error) {
+		recheckRemoteHost(hostId, response.status);
+		throw error;
+	}
+	return Promise.all((data?.sessions ?? []).map(async (session) => ({
+		...session,
+		artifactFiles: await Promise.all((session.artifactFiles ?? []).map(async (artifact) => ({
+			...artifact,
+			rawUrl: artifact.rawUrl ? await aoBridge.remotes.previewUrl(hostId, session.id, artifact.rawUrl) : undefined,
+			// The remote daemon's inline origin is a localhost name, which here
+			// would mean this computer; a remote chat shows no frame anyway.
+			inlineUrl: undefined,
+		}))),
+	})));
+}
+
+function toRemoteWorkspaces(
+	hostId: string,
+	remoteProjects: Awaited<ReturnType<typeof fetchRemoteProjects>>,
+	sessions: Awaited<ReturnType<typeof fetchRemoteSessions>>,
 ): WorkspaceSummary[] {
-  return workspaces.map((workspace) => ({
-    ...workspace,
-    host,
-    sessions: workspace.sessions.map((session) => ({ ...session, host })),
-  }));
+	const projects: WorkspaceSummary[] = remoteProjects.map((project) => ({
+		hostId,
+		id: project.id,
+		name: project.name,
+		kind: toProjectKind(project.kind),
+		path: project.path,
+		folderMissing: project.folderMissing,
+		orchestratorAgent: project.orchestratorAgent ? toAgentProvider(project.orchestratorAgent) : undefined,
+		sessions: sessions.filter((session) => session.projectId === project.id).map((session) => ({
+			...toWorkspaceSession(session, project),
+			hostId,
+		})),
+	}));
+	const standalone = sessions.filter((session) => !session.projectId).map((session) => ({
+		...toWorkspaceSession(session, { id: STANDALONE_WORKSPACE_ID, name: standaloneWorkspaceName() }),
+		hostId,
+	}));
+	if (standalone.length > 0) projects.push({
+		hostId,
+		id: STANDALONE_WORKSPACE_ID,
+		name: standaloneWorkspaceName(),
+		kind: STANDALONE_PROJECT_KIND,
+		path: "Not attached to a project",
+		sessions: standalone,
+	});
+	return applyOptimisticSessionKills(projects) ?? projects;
 }
 
-const MALFORMED_WORKSPACE_DATA = "Host returned malformed workspace data";
-
-// The status lives on the response and nowhere else, and it is what separates
-// a rotated password (401) from a host the proxy cannot reach (502). Carried
-// on the thrown error so the caller can report it; the message is precomputed
-// from the daemon's envelope so what the user reads is unchanged.
-function hostFailure(error: unknown, response: Response | undefined): Error {
-  return Object.assign(
-    new Error(apiErrorMessage(error, "Could not load projects")),
-    { status: response?.status },
-  );
+async function fetchRemoteWorkspaces(hostId: string): Promise<WorkspaceSummary[]> {
+	const [projects, sessions] = await Promise.all([fetchRemoteProjects(hostId), fetchRemoteSessions(hostId)]);
+	return toRemoteWorkspaces(hostId, projects, sessions);
 }
 
-function malformedOnSyntaxError(error: unknown): never {
-  if (error instanceof SyntaxError) throw new Error(MALFORMED_WORKSPACE_DATA);
-  throw error;
+// Shared so route loaders can prefetch via queryClient.ensureQueryData (paired
+// with the router's defaultPreload: "intent") and the hook reads the same cache.
+// No refetchInterval here: every observer that carries one runs its own timer,
+// and timers started at different mount times do not dedupe. With ~18
+// subscribers that meant several /projects + /sessions fetches per tick.
+// useWorkspacePolling() is the single owner of the interval.
+export const workspaceQueryOptions = {
+	queryKey: workspaceQueryKey,
+	queryFn: fetchWorkspaces,
+	retry: 1,
+	staleTime: 10_000,
+};
+
+export const workspaceRefetchInterval = (query: Query<WorkspaceSummary[]>) =>
+	workspaceStatusesChecking(query.state.data) ? 300 : 15_000;
+
+/**
+ * Drives the workspace poll from one place. Mounted once by the shell; it never
+ * re-renders its host (notifyOnChangeProps: []), it only keeps the timer.
+ */
+export function useWorkspacePolling(enabled = true) {
+	useQuery({ ...workspaceQueryOptions, refetchInterval: workspaceRefetchInterval, notifyOnChangeProps: [], enabled });
 }
-
-function toWorkspaceSession(
-  host: HostId,
-  project: Pick<ProjectSummaryDTO, "id" | "name">,
-  session: SessionDTO,
-): WorkspaceSession {
-  const status = toSessionStatus(session.status, session.isTerminated);
-  const scmStatus = session.scmStatus
-    ? toSessionStatus(session.scmStatus)
-    : undefined;
-  const kanbanColumn = toKanbanColumn(session.kanbanColumn, status);
-  const activity = toSessionActivity(session.activity);
-  return {
-    host,
-    id: session.id,
-    terminalHandleId: session.terminalHandleId,
-    workspaceId: project.id,
-    workspaceName: project.name,
-    title: session.displayName ?? session.issueId ?? session.id,
-    issueId: session.issueId,
-    provider: toAgentProvider(session.harness),
-    reviewerHarness: toReviewerHarnessId(session.reviewerHarness),
-    reviewerConfig: session.reviewerConfig
-      ? {
-          model: session.reviewerConfig.model ?? undefined,
-          mode: session.reviewerConfig.mode ?? undefined,
-          permissions: session.reviewerConfig.permissions ?? undefined,
-        }
-      : undefined,
-    autoReviewEnabled: session.autoReviewEnabled ?? false,
-    kind:
-      session.kind === "orchestrator"
-        ? "orchestrator"
-        : session.kind === "worker"
-          ? "worker"
-          : undefined,
-    // Carried through verbatim: the session surface must render from
-    // the mode this session was created with, not from whatever the
-    // current default happens to be.
-    mode: session.mode === "chat" ? "chat" : "tui",
-    branch: session.branch || undefined,
-    status,
-    scmStatus,
-    kanbanColumn,
-    displayStatus: session.displayStatus || undefined,
-    isTerminated: session.isTerminated,
-    chatProviderPreserved: session.chatProviderPreserved,
-    terminateOnPrMerge: session.terminateOnPrMerge ?? false,
-    autoInjectReview: session.autoInjectReview ?? true,
-    autoInjectCI: session.autoInjectCI ?? true,
-    createdAt: session.createdAt,
-    updatedAt: session.updatedAt,
-    lastUserMessageAt: session.lastUserMessageAt ?? undefined,
-    activity,
-    activeAgentSwitch: session.activeAgentSwitch
-      ? toAgentSwitchSummary(session.activeAgentSwitch)
-      : undefined,
-    artifactFiles: session.artifactFiles ?? [],
-    previewUrl: session.previewUrl,
-    previewRevision: session.previewRevision,
-    isPinned: session.isPinned ?? false,
-    pinnedAt: session.pinnedAt ?? undefined,
-    prs: (session.prs ?? []).map(toPullRequestFacts),
-  };
-}
-
-// Terminated sessions are ~99% of a long-lived host's list (2,661 rows /
-// 1.8 MB locally with 3 active) and nothing on the CDC stream's cadence
-// changes them, so they live under their own key and the host fetch reads them
-// from the cache: fresh for ARCHIVE_STALE_MS, revalidated in the background
-// past that, and refetched on the same pass when a session leaves the active
-// set, so a just-killed session reaches the Archived column at once rather
-// than a minute later.
-//
-// The key sits under the workspaces root but not under the host key: the root
-// invalidation every mutation site issues (kill, restore, cleanup, pin)
-// refreshes the archive too, while the host-scoped invalidation each CDC
-// event triggers (event-transport.ts, 150 ms debounce) refetches only the
-// active set. "archive" occupies the slot a host id would, so the prefixes
-// cannot overlap.
-const ARCHIVE_STALE_MS = 60_000;
-// The daemon pages newest first, so the archive is bounded to its most recent
-// page: what the Archived column shows, at ~80 KB instead of the 1.8 MB whole
-// history. Older rows are reachable through the response's nextPageToken when
-// a load-more control wants them.
-const ARCHIVE_PAGE_SIZE = 200;
-export function workspaceArchiveQueryKey(host: HostId) {
-  return [...workspaceQueryKey, "archive", host] as const;
-}
-
-async function fetchArchivedSessions(host: HostId): Promise<SessionDTO[]> {
-  const { data, error, response } = await clientFor(host)
-    .GET("/api/v1/sessions", {
-      params: { query: { active: false, pageSize: ARCHIVE_PAGE_SIZE } },
-    })
-    .catch(malformedOnSyntaxError);
-  if (error) throw hostFailure(error, response);
-  const sessions = parseResponseArray(data, "sessions", isSession);
-  if (sessions === null) throw new Error(MALFORMED_WORKSPACE_DATA);
-  return sessions;
-}
-
-function workspaceArchiveQueryOptions(host: HostId) {
-  return {
-    queryKey: workspaceArchiveQueryKey(host),
-    queryFn: () => fetchArchivedSessions(host),
-    staleTime: ARCHIVE_STALE_MS,
-    retry: 1,
-  };
-}
-
-async function archivedSessions(
-  host: HostId,
-  client: QueryClient,
-  active: SessionDTO[],
-  lastGood: WorkspaceSummary[],
-): Promise<SessionDTO[]> {
-  const options = workspaceArchiveQueryOptions(host);
-  const activeIds = new Set(active.map((session) => session.id));
-  const left = lastGood.some((workspace) =>
-    workspace.sessions.some(
-      (session) => session.isTerminated !== true && !activeIds.has(session.id),
-    ),
-  );
-  if (left) return client.fetchQuery({ ...options, staleTime: 0 });
-  return client.ensureQueryData({ ...options, revalidateIfStale: true });
-}
-
-async function fetchWorkspaces(
-  host: HostId,
-  client: QueryClient,
-  lastGood: WorkspaceSummary[],
-): Promise<WorkspaceSummary[]> {
-  if (usesPreviewWorkspaceData && host === LOCAL_HOST) {
-    const fake =
-      typeof window !== "undefined"
-        ? (window as unknown as { __aoFakeAgent?: FakeAgentSeam }).__aoFakeAgent
-        : undefined;
-    return tagWorkspaces(host, fake ? fake.snapshot() : mockWorkspaces);
-  }
-  if (!isHostReady(host)) throw new Error(`host ${host} is not connected`);
-
-  const api = clientFor(host);
-  const [
-    { data: projectsData, error: projectsError, response: projectsResponse },
-    { data: sessionsData, error: sessionsError, response: sessionsResponse },
-  ] = await Promise.all([
-    api.GET("/api/v1/projects"),
-    // The active set only; the archive rides on its own query below.
-    api.GET("/api/v1/sessions", { params: { query: { active: true } } }),
-  ]).catch(malformedOnSyntaxError);
-
-  if (projectsError || sessionsError) {
-    throw hostFailure(
-      projectsError ?? sessionsError,
-      projectsError ? projectsResponse : sessionsResponse,
-    );
-  }
-  const projects = parseResponseArray(projectsData, "projects", isProject);
-  const active = parseResponseArray(sessionsData, "sessions", isSession);
-  if (projects === null || active === null)
-    throw new Error(MALFORMED_WORKSPACE_DATA);
-
-  const archived = await archivedSessions(host, client, active, lastGood);
-  const activeIds = new Set(active.map((session) => session.id));
-  // Active wins while a restored session is still in the cached archive.
-  const sessions = [
-    ...active,
-    ...archived.filter((session) => !activeIds.has(session.id)),
-  ];
-  const workspaces: WorkspaceSummary[] = projects.map((project) => ({
-    host,
-    id: project.id,
-    name: project.name,
-    kind: toProjectKind(project.kind),
-    path: project.path,
-    orchestratorAgent: project.orchestratorAgent
-      ? toAgentProvider(project.orchestratorAgent)
-      : undefined,
-    sessions: sessions
-      .filter((session) => session.projectId === project.id)
-      .map((session) => toWorkspaceSession(host, project, session)),
-  }));
-  const standalone = sessions.filter((session) => !session.projectId);
-  if (standalone.length > 0) {
-    const group = {
-      id: STANDALONE_WORKSPACE_ID,
-      name: appI18n.t("shell.standaloneAgents"),
-    };
-    workspaces.push({
-      ...group,
-      host,
-      kind: "standalone",
-      path: "",
-      sessions: standalone.map((session) => toWorkspaceSession(host, group, session)),
-    });
-  }
-  return workspaces;
-}
-
-async function fetchHostSection(
-  host: HostId,
-  client: QueryClient,
-  lastGoodWorkspaces: WorkspaceSummary[] = [],
-): Promise<HostSection[]> {
-  const label = host === LOCAL_HOST ? "Local" : hostLabelFor(host);
-  try {
-    const workspaces = await fetchWorkspaces(host, client, lastGoodWorkspaces);
-    // Read after the fetch, not before: this is what the sidebar shows when it
-    // renders these workspaces, and a stream that dropped mid-fetch is exactly
-    // the case worth catching.
-    return [
-      {
-        host,
-        label,
-        status: "ready",
-        streamState: hostConnectionState(host),
-        workspaces,
-        failure: null,
-      },
-    ];
-  } catch (error) {
-    return [
-      {
-        host,
-        label,
-        status: "failed",
-        streamState: hostConnectionState(host),
-        workspaces: lastGoodWorkspaces,
-        failure: apiErrorMessage(error, "Could not load projects"),
-      },
-    ];
-  }
-}
-
-function workspaceHostQueryOptions(host: HostId) {
-  const queryKey = workspaceHostQueryKey(host);
-  return {
-    queryKey,
-    queryFn: ({ client }: QueryFunctionContext<typeof queryKey>) =>
-      fetchHostSection(
-        host,
-        client,
-        client.getQueryData<HostSection[]>(queryKey)?.[0]?.workspaces,
-      ),
-    retry: 1,
-    refetchInterval: 15_000,
-  };
-}
-
-export function localWorkspaceFailure(
-  sections: readonly HostSection[] | undefined,
-): string | undefined {
-  const local = sections?.find((section) => section.host === LOCAL_HOST);
-  return local?.status === "failed"
-    ? (local.failure ?? "Could not load projects")
-    : undefined;
-}
-
-function combineWorkspaceQueries(results: UseQueryResult<HostSection[]>[]) {
-  const local = results[0];
-  const isSuccess = local?.isSuccess ?? false;
-  const data = isSuccess
-    ? results.flatMap((result) => result.data ?? [])
-    : undefined;
-  return {
-    data,
-    dataUpdatedAt: Math.max(
-      0,
-      ...results.map((result) => result.dataUpdatedAt),
-    ),
-    error: local?.error ?? null,
-    isError: local?.isError ?? false,
-    isLoading: local?.isLoading ?? true,
-    isSuccess,
-    localFailure: localWorkspaceFailure(data),
-    refetch: () => Promise.all(results.map((result) => result.refetch())),
-  };
-}
-
-// Shared so route loaders can prefetch the local host via
-// queryClient.ensureQueryData and the hook reads the same cache.
-export const workspaceQueryOptions = workspaceHostQueryOptions(LOCAL_HOST);
 
 // Cloud projects are a separate query so a control-plane failure can never
 // break the local list: on error TanStack keeps this query's last known data,
@@ -439,146 +419,222 @@ export const cloudSessionsQueryKey = ["cloud-sessions"] as const;
 // Maps one control-plane session onto the board's session shape. Cloud sessions
 // carry the same status/activity/harness vocabulary as local ones, so the same
 // product-ui mappers apply; fields with no cloud analogue take safe defaults.
-function toCloudWorkspaceSession(
-  session: CloudCpSession,
-  project: CloudCpProject,
-  orgId: string,
+export function toCloudWorkspaceSession(
+	session: CloudCpSession,
+	project: Pick<CloudCpProject, "id" | "displayName">,
+	orgId: string,
 ): WorkspaceSession {
-  return {
-    host: cloudHost(orgId),
-    id: session.id,
-    // The terminal pane only mounts for a session that has a terminal handle.
-    // A cloud session's PTY is addressed by the session id over its ticketed
-    // CP WebSocket, so the session id is its handle.
-    terminalHandleId: session.id,
-    workspaceId: project.id,
-    workspaceName: project.displayName,
-    title: session.displayName || session.id,
-    provider: toAgentProvider(session.harness),
-    kind: session.kind === "orchestrator" ? "orchestrator" : "worker",
-    branch: session.branch || undefined,
-    status: toSessionStatus(session.status, session.isTerminated),
-    isTerminated: session.isTerminated,
-    createdAt: session.createdAt,
-    updatedAt: session.updatedAt,
-    activity: toSessionActivity({ state: session.activityState }),
-    prs: [],
-    // Marks this as a control-plane session so the terminal opens against the
-    // CP (ticket + sandbox WebSocket) instead of the local daemon mux.
-    cloud: { orgId },
-  };
+	return {
+		id: session.id,
+		// The terminal pane only mounts for a session that has a terminal handle.
+		// A cloud session's PTY is addressed by the session id over its ticketed
+		// CP WebSocket, so the session id is its handle.
+		terminalHandleId: session.id,
+		// The worker epoch advances on every fresh worker connection (resume from
+		// idle-pause, restore, re-provision). Folding it into the terminal
+		// generation makes the terminal pane re-mint against the new epoch and
+		// attach to the live agent, instead of clinging to the previous epoch's
+		// exited terminal (the "connected but TERMINAL ENDED / can't type" loop,
+		// which then idle-pauses the session again because nothing attached).
+		// Stable within an epoch, so it does not churn the pane between resumes.
+		terminalGeneration: session.workerEpoch ? String(session.workerEpoch) : undefined,
+		workspaceId: project.id,
+		workspaceName: project.displayName,
+		title: session.displayName || session.id,
+		provider: toAgentProvider(session.harness),
+		reviewerHarness: toReviewerHarnessId(session.reviewerHarness),
+		autoReviewEnabled: session.autoReviewEnabled ?? false,
+		kind: session.kind === "orchestrator" ? "orchestrator" : "worker",
+		mode: session.interfaceMode ?? "tui",
+		branch: session.branch || undefined,
+		status: toSessionStatus(session.status, session.isTerminated),
+		isTerminated: session.isTerminated,
+		autoInjectCI: session.autoInjectCI ?? true,
+		autoInjectReview: session.autoInjectReview ?? true,
+		terminateOnPrMerge: session.terminateOnPrMerge ?? true,
+		runtimeConnected: session.runtimeConnected,
+		createdAt: session.createdAt,
+		updatedAt: session.updatedAt,
+		activity: toSessionActivity({ state: session.activityState }),
+		prs: (session.prs ?? []).map((pr) => ({
+			url: pr.url,
+			number: pr.number,
+			state: pr.state as PRState,
+			ci: pr.ci,
+			review: pr.review,
+			mergeability: pr.mergeability,
+			failingChecks: pr.failingChecks,
+			reviewComments: pr.reviewComments,
+			updatedAt: pr.updatedAt,
+		})),
+		// Marks this as a control-plane session so the terminal opens against the
+		// CP (ticket + sandbox WebSocket) instead of the local daemon mux.
+		cloud: {
+			orgId,
+			permissionMode: session.mode === "read-only" || session.mode === "standard" || session.mode === "trusted" ? session.mode : undefined,
+			sandboxProvider: session.sandboxProvider,
+			desiredState: session.desiredState,
+			observedState: session.observedState,
+			runtimeState: session.runtimeState,
+			runtimeError: session.runtimeError,
+			startupError: session.startupError,
+			coderWorkspaceUrl: session.coderWorkspaceUrl,
+		},
+	};
 }
 
-function toCloudWorkspace(
-  project: CloudCpProject,
-  sessions: CloudCpSession[],
-  orgId: string,
-): WorkspaceSummary {
-  return {
-    host: cloudHost(orgId),
-    id: project.id,
-    name: project.displayName,
-    kind: "cloud",
-    // Cloud projects run in control-plane sandboxes; there is no local folder.
-    path: "",
-    sessions: sessions
-      .filter((session) => session.projectId === project.id)
-      .map((session) => toCloudWorkspaceSession(session, project, orgId)),
-  };
+export function toCloudWorkspace(project: CloudCpProject, sessions: CloudCpSession[], orgId: string): WorkspaceSummary {
+	return {
+		id: project.id,
+		cloudOrgId: orgId,
+		name: project.displayName,
+		kind: "cloud",
+		// Cloud projects run in control-plane sandboxes; there is no local folder.
+		path: "",
+		sessions: sessions
+			.filter((session) => session.projectId === project.id)
+			.map((session) => toCloudWorkspaceSession(session, project, orgId)),
+	};
 }
 
 type WorkspaceSubscriptionOptions = {
 	subscribed?: boolean;
+	enabled?: boolean;
+	includeCloud?: boolean;
 };
 
 export function useCloudProjectsQuery(options: WorkspaceSubscriptionOptions = {}) {
-  const { client, ready, baseUrl } = useCloudCp();
-  const { org } = useCloudOrg();
-  const orgId = org?.id;
-  return useQuery({
-    queryKey: [...cloudProjectsQueryKey, baseUrl, orgId ?? ""],
-    enabled: ready && orgId !== undefined,
+	const { client, ready, baseUrl } = useCloudCp();
+	const { org } = useCloudOrg();
+	const orgId = org?.id;
+	return useQuery({
+		queryKey: [...cloudProjectsQueryKey, baseUrl, orgId ?? ""],
+		enabled: options.enabled !== false && ready && orgId !== undefined,
 		subscribed: options.subscribed,
-    retry: 1,
-    queryFn: async (): Promise<CloudCpProject[]> => {
-      if (orgId === undefined) return [];
-      // First page only (control-plane max page size); pagination UI is a
-      // later phase alongside cloud sessions.
-      const response = await client.listProjects(orgId, { limit: 100 });
-      return response.items;
-    },
-  });
+		retry: 1,
+		queryFn: async (): Promise<CloudCpProject[]> => {
+			if (orgId === undefined) return [];
+			// First page only (control-plane max page size); pagination UI is a
+			// later phase alongside cloud sessions.
+			const response = await client.listProjects(orgId, { limit: 100 });
+			return response.items;
+		},
+	});
 }
 
 export function useCloudSessionsQuery(options: WorkspaceSubscriptionOptions = {}) {
-  const { client, ready, baseUrl } = useCloudCp();
-  const { org } = useCloudOrg();
-  const orgId = org?.id;
-  return useQuery({
-    queryKey: [...cloudSessionsQueryKey, baseUrl, orgId ?? ""],
-    enabled: ready && orgId !== undefined,
+	const { client, ready, baseUrl } = useCloudCp();
+	const { org } = useCloudOrg();
+	const orgId = org?.id;
+	return useQuery({
+		queryKey: [...cloudSessionsQueryKey, baseUrl, orgId ?? ""],
+		enabled: options.enabled !== false && ready && orgId !== undefined,
 		subscribed: options.subscribed,
-    retry: 1,
-    // A provisioning sandbox changes state without a client action, so poll to
-    // reflect requested -> running -> ready the same way local sessions stream.
-    refetchInterval: 5000,
-    queryFn: async (): Promise<CloudCpSession[]> => {
-      if (orgId === undefined) return [];
-      const response = await client.listSessions(orgId, { limit: 100 });
-      return response.items;
-    },
-  });
+		retry: 1,
+		// A provisioning sandbox changes state without a client action, so poll to
+		// reflect requested -> running -> ready the same way local sessions stream.
+		refetchInterval: 5000,
+		queryFn: async (): Promise<CloudCpSession[]> => {
+			if (orgId === undefined) return [];
+			const response = await client.listSessions(orgId, { limit: 100 });
+			return response.items;
+		},
+	});
+}
+
+export function useRemoteWorkspaces(options: WorkspaceSubscriptionOptions = {}) {
+	const connected = useConnectedHosts();
+	const projects = useQueries({
+		queries: connected.map((hostId) => ({
+			queryKey: remoteProjectsQueryKey(hostId),
+			queryFn: () => fetchRemoteProjects(hostId),
+			retry: 1,
+			refetchInterval: 15_000,
+			subscribed: options.subscribed,
+		})),
+	});
+	const sessions = useQueries({
+		queries: connected.map((hostId) => ({
+			queryKey: remoteSessionsQueryKey(hostId),
+			queryFn: () => fetchRemoteSessions(hostId),
+			retry: 1,
+			refetchInterval: 15_000,
+			subscribed: options.subscribed,
+		})),
+	});
+	return {
+		data: connected.flatMap((hostId, index) => projects[index]?.data
+			? toRemoteWorkspaces(hostId, projects[index].data, sessions[index]?.data ?? [])
+			: []),
+		loadedProjectHostIds: connected.filter((_, index) => projects[index]?.data !== undefined),
+		loadedSessionHostIds: connected.filter((_, index) => sessions[index]?.data !== undefined),
+		failedHostIds: connected.filter((_, index) => projects[index]?.isError || sessions[index]?.isError),
+		refetch: () => Promise.all([...projects, ...sessions].map((query) => query.refetch())),
+	};
+}
+
+/** A host-qualified project detail query for the board. It shares the remote
+ * session query's key, so session mutations refresh both detail surfaces. */
+export function useRemoteProjectQuery(hostId: string, projectId: string) {
+	return useQuery({
+		queryKey: remoteWorkspaceQueryKey(hostId),
+		queryFn: () => fetchRemoteWorkspaces(hostId),
+		select: (workspaces) => workspaces.find((workspace) => workspace.id === projectId),
+		enabled: Boolean(hostId && projectId),
+		retry: 1,
+	});
+}
+
+// Route-level recovery for a Cloud session that has just been created or whose
+// list cache is stale. The session screen must resolve it through the control
+// plane, never try the local daemon just because the list query has not caught
+// up yet.
+export function useCloudSessionQuery(
+	orgId: string | undefined,
+	sessionId: string,
+	enabled = true,
+) {
+	const { client, ready, baseUrl } = useCloudCp();
+	return useQuery({
+		queryKey: ["cloud-session", baseUrl, orgId ?? "", sessionId],
+		enabled: enabled && ready && orgId !== undefined && sessionId !== "",
+		retry: 1,
+		queryFn: async (): Promise<CloudCpSession | undefined> => {
+			if (orgId === undefined) return undefined;
+			const response = await client.getSession(orgId, sessionId);
+			return response.session;
+		},
+	});
 }
 
 export function useWorkspaceQuery(options: WorkspaceSubscriptionOptions = {}) {
-  const remotes = useSyncExternalStore(
-    subscribeConnectedHosts,
-    connectedHosts,
-    connectedHosts,
-  );
-  const daemon = useQueries({
-    queries: [LOCAL_HOST, ...remotes].map((host) => ({
-      ...workspaceHostQueryOptions(host),
-      subscribed: options.subscribed,
-    })),
-    combine: combineWorkspaceQueries,
-  });
-  const cloud = useCloudProjectsQuery(options);
-  const cloudSessions = useCloudSessionsQuery(options);
-  const { org, ready } = useCloudOrg();
-  const orgId = org?.id;
-  const localData = daemon.data;
-  const cloudData = cloud.data;
-  const cloudSessionData = cloudSessions.data;
-  const data = useMemo(() => {
-    // Local stays authoritative for loading/error semantics: cloud items only
-    // render once the local list exists, and never replace it.
-    if (
-      localData === undefined ||
-      cloudData === undefined ||
-      cloudData.length === 0
-    )
-      return localData;
-    // Signing out (or turning the offering off) disables the cloud queries,
-    // but react-query keeps their last data; without this gate the stale
-    // cloud projects would keep rendering for a signed-out user.
-    if (!ready || orgId === undefined) return localData;
-    const host = cloudHost(orgId);
-    const sessions = cloudSessionData ?? [];
-    return [
-      ...localData,
-      {
-        host,
-        label: org?.displayName ?? "Cloud",
-        status: "ready" as const,
-        workspaces: cloudData.map((project) =>
-          toCloudWorkspace(project, sessions, orgId),
-        ),
-        failure: null,
-      },
-    ];
-  }, [localData, cloudData, cloudSessionData, orgId, org?.displayName, ready]);
-  return { ...daemon, data };
+	const local = useQuery({ ...workspaceQueryOptions, subscribed: options.subscribed, enabled: options.enabled });
+	const includeCloud = options.includeCloud !== false;
+	const cloudOptions = { ...options, enabled: includeCloud && options.enabled !== false };
+	const cloud = useCloudProjectsQuery(cloudOptions);
+	const cloudSessions = useCloudSessionsQuery(cloudOptions);
+	const { org, ready } = useCloudOrg();
+	const orgId = org?.id;
+	const localData = local.data;
+	const cloudData = cloud.data;
+	const cloudSessionData = cloudSessions.data;
+	const data = useMemo(() => {
+		if (!includeCloud) return localData;
+		// Local stays authoritative for loading/error semantics: cloud items only
+		// render once the local list exists, and never replace it.
+		if (localData === undefined) return localData;
+		if (cloudData === undefined || cloudData.length === 0) return localData;
+		// Signing out (or turning the offering off) disables the cloud queries,
+		// but react-query keeps their last data; without this gate the stale
+		// cloud projects would keep rendering for a signed-out user.
+		if (!ready || orgId === undefined) return localData;
+		const sessions = cloudSessionData ?? [];
+		return placeStandaloneWorkspaceLast([
+			...localData,
+			...cloudData.map((project) => toCloudWorkspace(project, sessions, orgId)),
+		]);
+	}, [localData, cloudData, cloudSessionData, includeCloud, orgId, ready]);
+	return { ...local, data };
 }
 
 /**
@@ -586,35 +642,92 @@ export function useWorkspaceQuery(options: WorkspaceSubscriptionOptions = {}) {
  * tree. TanStack Query applies structural sharing to the selected value, so an
  * activity update elsewhere no longer redraws the open session workspace.
  */
-export function useWorkspaceSession(sessionRef: Ref) {
-	const selectLocalSession = useMemo(
-		() => (sections: HostSection[]) =>
-			flattenHostSections(sections)
-				.flatMap((workspace) => workspace.sessions)
-				.find((session) => session.host === sessionRef.host && session.id === sessionRef.id),
-		[sessionRef.host, sessionRef.id],
+export function useWorkspaceSession(sessionId: string, hostId?: string, localLookupEnabled = true) {
+	const queryClient = useQueryClient();
+	const selectRemoteSession = useMemo(
+		() => (workspaces: WorkspaceSummary[]) => workspaces.flatMap((workspace) => workspace.sessions).find((session) => session.id === sessionId),
+		[sessionId],
 	);
-	const local = useQuery({
-		...workspaceHostQueryOptions(sessionRef.host),
-		enabled: !isCloudHost(sessionRef.host),
-		select: selectLocalSession,
+	const remote = useQuery({
+		queryKey: remoteWorkspaceQueryKey(hostId ?? ""),
+		queryFn: () => fetchRemoteWorkspaces(hostId ?? ""),
+		select: selectRemoteSession,
+		enabled: Boolean(hostId && sessionId),
 	});
-	const cloud = useCloudProjectsQuery();
-	const cloudSessions = useCloudSessionsQuery();
+	const selectLocalSession = useMemo(
+		() => (workspaces: WorkspaceSummary[]) =>
+			workspaces.flatMap((workspace) => workspace.sessions).find((session) => session.id === sessionId),
+		[sessionId],
+	);
+	const local = useQuery({ ...workspaceQueryOptions, select: selectLocalSession, enabled: localLookupEnabled && !hostId });
+	const localWorkspaces = useQuery({ ...workspaceQueryOptions, subscribed: false, enabled: localLookupEnabled && Boolean(sessionId) && !hostId });
+	const direct = useQuery({
+		queryKey: ["session", sessionId],
+		enabled: localLookupEnabled && Boolean(sessionId) && !hostId && local.data === undefined,
+		retry: (attempt, error) => apiErrorCode(error) === "SESSION_NOT_FOUND" && attempt < 4,
+		retryDelay: 250,
+		queryFn: async () => {
+			const { data, error } = await apiClient.GET("/api/v1/sessions/{sessionId}", {
+				params: { path: { sessionId } },
+			});
+			if (error) throw error;
+			const session = data?.session;
+			if (!session) return undefined;
+			const project = session.projectId
+				? (localWorkspaces.data?.find((workspace) => workspace.id === session.projectId) ??
+					({ id: session.projectId, name: "" } satisfies Pick<WorkspaceSummary, "id" | "name">))
+				: ({
+						id: STANDALONE_WORKSPACE_ID,
+						name: standaloneWorkspaceName(),
+					} satisfies Pick<WorkspaceSummary, "id" | "name">);
+			return toWorkspaceSession(session, project);
+		},
+	});
+	const cloud = useCloudProjectsQuery({ enabled: !hostId });
+	const cloudSessions = useCloudSessionsQuery({ enabled: !hostId });
 	const { org, ready } = useCloudOrg();
+	const resolvedDirectSession = useMemo(() => {
+		if (!direct.data) return undefined;
+		const workspace = localWorkspaces.data?.find((candidate) => candidate.id === direct.data?.workspaceId);
+		if (!workspace || direct.data.workspaceName === workspace.name) return direct.data;
+		return { ...direct.data, workspaceName: workspace.name };
+	}, [direct.data, localWorkspaces.data]);
 	const cloudSession = useMemo(() => {
-		if (!ready || !org?.id || sessionRef.host !== cloudHost(org.id) || !cloud.data || !cloudSessions.data)
-			return undefined;
-		const session = cloudSessions.data.find((candidate) => candidate.id === sessionRef.id);
+		if (!ready || !org?.id || !cloud.data || !cloudSessions.data) return undefined;
+		const session = cloudSessions.data.find((candidate) => candidate.id === sessionId);
 		if (!session) return undefined;
 		const project = cloud.data.find((candidate) => candidate.id === session.projectId);
 		return project ? toCloudWorkspaceSession(session, project, org.id) : undefined;
-	}, [cloud.data, cloudSessions.data, org?.id, ready, sessionRef.host, sessionRef.id]);
-	return { ...local, data: local.data ?? cloudSession };
+	}, [cloud.data, cloudSessions.data, org?.id, ready, sessionId]);
+	useEffect(() => {
+		if (hostId || !localLookupEnabled) return;
+		if (!resolvedDirectSession) return;
+		queryClient.setQueryData<WorkspaceSummary[]>(workspaceQueryKey, (current) => {
+			if (!current) return current;
+			let changed = false;
+			const next = current.map((workspace) => {
+				if (workspace.id !== resolvedDirectSession.workspaceId) return workspace;
+				if (workspace.sessions.some((session) => session.id === resolvedDirectSession.id)) return workspace;
+				changed = true;
+				return {
+					...workspace,
+					sessions: [...workspace.sessions, resolvedDirectSession],
+				};
+			});
+			return changed ? next : current;
+		});
+	}, [queryClient, resolvedDirectSession, hostId, localLookupEnabled]);
+	if (hostId) return remote;
+	return {
+		...local,
+		data: local.data ?? resolvedDirectSession ?? cloudSession,
+		isLoading: local.isLoading || direct.isLoading,
+	};
 }
 
 export type WorkspaceScope = {
 	project?: Pick<WorkspaceSummary, "id" | "kind" | "name" | "orchestratorAgent">;
+	hasWorkerSessions: boolean;
 	session?: WorkspaceSession;
 	orchestrator?: WorkspaceSession;
 };
@@ -632,7 +745,7 @@ function selectWorkspaceScope(
 	// Do not carry the project's complete sessions array into shell chrome. With
 	// React Query's structural sharing, this small metadata projection retains
 	// its identity when another session in the same project streams an update.
-	const project = workspace && workspace.kind !== "standalone"
+	const project = workspace
 		? {
 				id: workspace.id,
 				kind: workspace.kind,
@@ -640,29 +753,27 @@ function selectWorkspaceScope(
 				orchestratorAgent: workspace.orchestratorAgent,
 			}
 		: undefined;
-	return { project, session, orchestrator: workspace ? newestActiveOrchestrator(workspace.sessions) : undefined };
-}
-
-function selectHostWorkspaceScope(
-	sections: HostSection[],
-	projectId: string | undefined,
-	sessionId: string | undefined,
-): WorkspaceScope {
-	return selectWorkspaceScope(flattenHostSections(sections), projectId, sessionId);
+	return {
+		project,
+		session,
+		hasWorkerSessions: workspace ? workerSessions(workspace.sessions).length > 0 : false,
+		orchestrator: workspace ? newestActiveOrchestrator(workspace.sessions) : undefined,
+	};
 }
 
 /**
  * Subscribe shell chrome to just the routed project and session. This avoids
  * redrawing the topbar for streamed activity from every other project.
  */
-export function useWorkspaceScope(projectId?: string, sessionId?: string) {
+export function useWorkspaceScope(projectId?: string, sessionId?: string, hostId?: string) {
 	const selectLocalScope = useMemo(
-		() => (sections: HostSection[]) => selectHostWorkspaceScope(sections, projectId, sessionId),
+		() => (workspaces: WorkspaceSummary[]) => selectWorkspaceScope(workspaces, projectId, sessionId),
 		[projectId, sessionId],
 	);
-	const local = useQuery({ ...workspaceQueryOptions, select: selectLocalScope });
-	const cloud = useCloudProjectsQuery();
-	const cloudSessions = useCloudSessionsQuery();
+	const local = useQuery({ ...workspaceQueryOptions, select: selectLocalScope, enabled: !hostId });
+	const remote = useQuery({ queryKey: remoteWorkspaceQueryKey(hostId ?? ""), queryFn: () => fetchRemoteWorkspaces(hostId ?? ""), select: selectLocalScope, enabled: Boolean(hostId) });
+	const cloud = useCloudProjectsQuery({ enabled: !hostId });
+	const cloudSessions = useCloudSessionsQuery({ enabled: !hostId });
 	const { org, ready } = useCloudOrg();
 	const cloudScope = useMemo(() => {
 		if (!ready || !org?.id || !cloud.data) return undefined;
@@ -671,7 +782,10 @@ export function useWorkspaceScope(projectId?: string, sessionId?: string) {
 	}, [cloud.data, cloudSessions.data, org?.id, projectId, ready, sessionId]);
 	// Match useWorkspaceQuery's local-first semantics: do not reveal cloud
 	// records before the local workspace query has resolved successfully.
-	return { ...local, data: local.data ?? (local.isSuccess ? cloudScope : undefined) };
+	const data = local.data?.project || local.data?.session || !local.isSuccess
+		? local.data
+		: cloudScope ?? local.data;
+	return hostId ? remote : { ...local, data };
 }
 
 function selectTraySessions(workspaces: WorkspaceSummary[]): TraySessionEntry[] {
@@ -680,9 +794,8 @@ function selectTraySessions(workspaces: WorkspaceSummary[]): TraySessionEntry[] 
 		for (const session of workerSessions(workspace.sessions)) {
 			const zone = attentionZone(session);
 			if ((zone === "merge" && session.status === "merged") || (zone !== "action" && zone !== "merge")) continue;
-				entries.push({
-					host: session.host,
-					projectId: workspace.id,
+			entries.push({
+				projectId: session.workspaceId,
 				projectName: workspace.name,
 				sessionId: session.id,
 				title: session.title,
@@ -693,17 +806,16 @@ function selectTraySessions(workspaces: WorkspaceSummary[]): TraySessionEntry[] 
 	return entries;
 }
 
-function selectHostTraySessions(sections: HostSection[]): TraySessionEntry[] {
-	return selectTraySessions(flattenHostSections(sections));
-}
-
 /**
  * The tray lives for the whole app lifetime, but only attention-worthy worker
  * sessions affect its native payload. Select that compact projection at the
  * query boundary so ordinary streamed activity does not wake the runtime.
  */
 export function useWorkspaceTraySessions() {
-	const local = useQuery({ ...workspaceQueryOptions, select: selectHostTraySessions });
+	const local = useQuery({
+		...workspaceQueryOptions,
+		select: selectTraySessions,
+	});
 	const cloud = useCloudProjectsQuery();
 	const cloudSessions = useCloudSessionsQuery();
 	const { org, ready } = useCloudOrg();

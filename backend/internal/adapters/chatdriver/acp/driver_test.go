@@ -789,7 +789,6 @@ type fakeAgent struct {
 	deletedForks        []string
 	loadUpdates         []acpsdk.SessionUpdate
 	loadUpdateBatches   [][]acpsdk.SessionUpdate
-	loadUpdateDelay     time.Duration
 	blockLoadCall       int
 	loadStarted         chan struct{}
 	failLoadFrom        int   // LoadSession calls >= this number return failLoadErr
@@ -1082,7 +1081,6 @@ func (a *fakeAgent) LoadSession(ctx context.Context, params acpsdk.LoadSessionRe
 	a.loadCalls++
 	loadCall := a.loadCalls
 	updates := append([]acpsdk.SessionUpdate(nil), a.loadUpdates...)
-	updateDelay := a.loadUpdateDelay
 	if batch := a.loadCalls - 1; batch < len(a.loadUpdateBatches) {
 		updates = append([]acpsdk.SessionUpdate(nil), a.loadUpdateBatches[batch]...)
 	}
@@ -1104,9 +1102,6 @@ func (a *fakeAgent) LoadSession(ctx context.Context, params acpsdk.LoadSessionRe
 	for _, update := range updates {
 		if err := a.conn.SessionUpdate(ctx, acpsdk.SessionNotification{SessionId: params.SessionId, Update: update}); err != nil {
 			return acpsdk.LoadSessionResponse{}, err
-		}
-		if updateDelay > 0 {
-			time.Sleep(updateDelay)
 		}
 	}
 	return acpsdk.LoadSessionResponse{}, nil
@@ -4630,281 +4625,6 @@ func TestACPCompactionRestoredOnLiveReconnect(t *testing.T) {
 	}
 }
 
-func requestedConfigID(params acpsdk.SetSessionConfigOptionRequest) string {
-	if params.ValueId != nil {
-		return string(params.ValueId.ConfigId)
-	}
-	if params.Boolean != nil {
-		return string(params.Boolean.ConfigId)
-	}
-	return ""
-}
-
-func rejectsModelOption(t *testing.T) (*Driver, *fakeAgent) {
-	t.Helper()
-	agent := &fakeAgent{
-		capabilities: &acpsdk.AgentCapabilities{LoadSession: true},
-		configErr: acpsdk.NewInternalError(map[string]any{
-			"details": "Invalid value for config option model: gpt-5.6-terra",
-		}),
-		configErrOption: "model",
-	}
-	driver := New(Config{
-		Harness:      domain.HarnessClaudeCode,
-		Capabilities: ports.ChatCapabilities{ports.ChatCapabilityStreaming: true},
-		Probe:        func(context.Context) error { return nil },
-		Launch:       func(context.Context, LaunchConfig) (Launch, error) { return Launch{Command: "fake"}, nil },
-		SessionOptions: func(settings ports.ChatTurnSettings) []SessionOption {
-			options := make([]SessionOption, 0, 2)
-			if settings.Model != "" {
-				options = append(options, SessionOption{ID: "model", Value: settings.Model})
-			}
-			return append(options, SessionOption{ID: "effort", Value: "high"})
-		},
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	driver.useTestProcess(fakeSpawn(agent))
-	return driver, agent
-}
-
-func TestACPResumeDegradesWhenAgentRejectsTheModelOption(t *testing.T) {
-	driver, agent := rejectsModelOption(t)
-
-	conv, err := driver.Resume(context.Background(), ports.ChatResumeConfig{
-		ProviderConversationID: "provider-session-1",
-		WorkspacePath:          t.TempDir(),
-		Model:                  "gpt-5.6-terra",
-	})
-	if err != nil {
-		t.Fatalf("Resume failed the whole session over an optional model preference: %v", err)
-	}
-	defer conv.Close()
-
-	// Everything queued behind the model still applies: the options loop stops at
-	// the first refusal, so dropping the model has to re-run the rest.
-	agent.mu.Lock()
-	effort := agent.options["effort"]
-	agent.mu.Unlock()
-	if effort != "high" {
-		t.Errorf("effort option = %q, want high: settings after the rejected model were never applied", effort)
-	}
-
-	// And the user is told, on the timeline, that their choice was not honored —
-	// otherwise the session silently runs on a model nobody picked.
-	warning := ""
-	for range 4 {
-		event := nextEvent(t, conv.Events())
-		if event.Kind == ports.ChatEventActivityCompleted && event.ActivityKind == domain.ActivityKindSystem {
-			warning = event.Summary
-			break
-		}
-	}
-	if !strings.Contains(warning, "gpt-5.6-terra") {
-		t.Errorf("warning summary = %q, want a system activity naming the model that was dropped", warning)
-	}
-}
-
-func TestACPStartFailsWhenAgentRejectsTheModelOption(t *testing.T) {
-	driver, _ := rejectsModelOption(t)
-
-	conv, err := driver.Start(context.Background(), ports.ChatStartConfig{
-		WorkspacePath: t.TempDir(),
-		Model:         "gpt-5.6-terra",
-	})
-	if err == nil {
-		_ = conv.Close()
-		t.Fatal("Start accepted a model the agent refused; an explicit spawn-time choice must fail fast")
-	}
-	if !strings.Contains(err.Error(), "configure ACP session") {
-		t.Errorf("Start error = %v, want the configure-session failure", err)
-	}
-}
-
-func TestACPDriverClosesReplayTurnsAsRecoveredWithoutBlockingResume(t *testing.T) {
-	userOneID := "11111111-1111-4111-8111-111111111111"
-	answerOneID := "22222222-2222-4222-8222-222222222222"
-	userTwoID := "33333333-3333-4333-8333-333333333333"
-	answerTwoID := "44444444-4444-4444-8444-444444444444"
-	userOne := acpsdk.UpdateUserMessageText("Inspect the repository")
-	userOne.UserMessageChunk.MessageId = &userOneID
-	replayBlock := acpsdk.ResourceBlock(acpsdk.EmbeddedResourceResource{
-		TextResourceContents: &acpsdk.TextResourceContents{
-			Uri: ports.ChatInternalReplayResourceURI, Text: `{"kind":"approximate_conversation_context"}`,
-			Meta: map[string]any{aoInternalReplayMetaKey: true},
-		},
-	})
-	replaySeed := acpsdk.UpdateUserMessage(replayBlock)
-	replaySeed.UserMessageChunk.MessageId = &userOneID
-	answerOneA := acpsdk.UpdateAgentMessageText("The repository ")
-	answerOneA.AgentMessageChunk.MessageId = &answerOneID
-	answerOneB := acpsdk.UpdateAgentMessageText("is ready.")
-	answerOneB.AgentMessageChunk.MessageId = &answerOneID
-	userTwo := acpsdk.UpdateUserMessageText("Run the tests")
-	userTwo.UserMessageChunk.MessageId = &userTwoID
-	answerTwo := acpsdk.UpdateAgentMessageText("All tests pass.")
-	answerTwo.AgentMessageChunk.MessageId = &answerTwoID
-	pendingTool := acpsdk.SessionUpdate{ToolCall: &acpsdk.SessionUpdateToolCall{
-		SessionUpdate: "tool_call", ToolCallId: "history-tool", Title: "Run tests",
-		Kind: acpsdk.ToolKindExecute, Status: acpsdk.ToolCallStatusInProgress,
-	}}
-
-	agent := &fakeAgent{
-		capabilities: &acpsdk.AgentCapabilities{
-			LoadSession: true,
-		},
-		loadUpdates: []acpsdk.SessionUpdate{
-			userOne, replaySeed, answerOneA, answerOneB, userTwo, answerTwo, pendingTool,
-		},
-	}
-	driver := New(Config{
-		Harness:      domain.HarnessClaudeCode,
-		Capabilities: ports.ChatCapabilities{ports.ChatCapabilityStreaming: true},
-		Probe:        func(context.Context) error { return nil },
-		Launch:       func(context.Context, LaunchConfig) (Launch, error) { return Launch{Command: "fake"}, nil },
-		SessionMeta: func(cfg LaunchConfig) map[string]any {
-			return map[string]any{"systemPrompt": map[string]any{"append": cfg.SystemPrompt}}
-		},
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	driver.useTestProcess(fakeSpawn(agent))
-
-	conv, err := driver.Resume(context.Background(), ports.ChatResumeConfig{
-		ProviderConversationID: "provider-session-1",
-		WorkspacePath:          t.TempDir(),
-		SystemPrompt:           "AO load instructions",
-		ProviderScopeID:        "history-scope",
-	})
-	if err != nil {
-		t.Fatalf("Resume: %v", err)
-	}
-	defer conv.Close()
-	if _, ok := conv.(ports.ChatHistoryRefresher); !ok {
-		t.Fatal("ACP session/load replay must expose refreshable history")
-	}
-
-	agent.mu.Lock()
-	loadCalls, resumeCalls := agent.loadCalls, agent.resumeCalls
-	loadedSession := string(agent.loadParams.SessionId)
-	loadMeta := agent.loadParams.Meta
-	agent.mu.Unlock()
-	if loadCalls != 1 || resumeCalls != 0 || loadedSession != "provider-session-1" {
-		t.Fatalf("load calls = %d, resume calls = %d, session = %q", loadCalls, resumeCalls, loadedSession)
-	}
-	prompt, ok := loadMeta["systemPrompt"].(map[string]any)
-	if !ok || prompt["append"] != "AO load instructions" {
-		t.Fatalf("session/load metadata = %#v, want recomputed system prompt", loadMeta)
-	}
-
-	history, err := conv.(ports.ChatHistoryReader).ReadHistory(context.Background())
-	if err != nil {
-		t.Fatalf("ReadHistory: %v", err)
-	}
-	var states []domain.TurnState
-	var recoveredActivity bool
-	for _, event := range history {
-		if event.Kind == ports.ChatEventTurnCompleted {
-			states = append(states, event.TurnState)
-		}
-		if event.ProviderItemID == (&conversation{providerScopeID: "history-scope"}).providerItemID("history-tool") &&
-			event.Kind == ports.ChatEventActivityCompleted {
-			recoveredActivity = event.ActivityStatus == domain.ActivityStatusRecovered
-		}
-	}
-	if len(states) != 2 || states[0] != domain.TurnStateRecovered ||
-		states[1] != domain.TurnStateRecovered {
-		t.Fatalf("replayed turn states = %v, want [recovered recovered]", states)
-	}
-	if !recoveredActivity {
-		t.Fatalf("history = %#v, want pending replay tool settled as recovered", history)
-	}
-	if history[0].ProviderTurnID != historyTurnID("history-scope", userOneID) ||
-		history[1].ProviderItemID != (&conversation{providerScopeID: "history-scope"}).providerItemID(userOneID) ||
-		history[1].ClientMessageID != (&conversation{providerScopeID: "history-scope"}).providerItemID(userOneID) ||
-		history[2].ProviderItemID != (&conversation{providerScopeID: "history-scope"}).providerItemID(answerOneID) {
-		t.Fatalf("history ids do not use the durable provider scope: %#v", history[:3])
-	}
-	if len(history[1].ProviderItemAliases) != 1 || history[1].ProviderItemAliases[0] != userOneID ||
-		len(history[2].ProviderItemAliases) != 1 || history[2].ProviderItemAliases[0] != answerOneID {
-		t.Fatalf("history does not preserve legacy raw item aliases: %#v", history[:3])
-	}
-	if !conv.Capabilities().Has(ports.ChatCapabilityHistory) {
-		t.Fatal("session/load conversation did not advertise replayable history")
-	}
-
-	ready := nextEvent(t, conv.Events())
-	if ready.Kind != ports.ChatEventControllerState || ready.ControllerState != ports.ChatControllerReady {
-		t.Fatalf("first live event = %#v, want controller ready", ready)
-	}
-	select {
-	case event := <-conv.Events():
-		t.Fatalf("history leaked onto the live event stream: %#v", event)
-	case <-time.After(30 * time.Millisecond):
-	}
-}
-
-func TestACPInterruptCancelsTheLocalPromptAfterNotifyingTheAgent(t *testing.T) {
-	agent := &fakeAgent{promptBlock: true, promptStarted: make(chan struct{}, 1)}
-	driver := New(Config{
-		Harness: domain.HarnessOpenCode,
-		Capabilities: ports.ChatCapabilities{
-			ports.ChatCapabilityStreaming: true,
-			ports.ChatCapabilityInterrupt: true,
-		},
-		Probe: func(context.Context) error { return nil },
-		Launch: func(context.Context, LaunchConfig) (Launch, error) {
-			return Launch{Command: "fake"}, nil
-		},
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	driver.useTestProcess(fakeSpawn(agent))
-
-	conversation, err := driver.Start(context.Background(), ports.ChatStartConfig{
-		WorkspacePath: t.TempDir(),
-	})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer conversation.Close()
-	_ = nextEvent(t, conversation.Events()) // controller.ready
-	ref, err := conversation.SendTurn(context.Background(), ports.ChatUserMessage{Text: "wait"})
-	if err != nil {
-		t.Fatalf("SendTurn: %v", err)
-	}
-	if err := conversation.(ports.ChatDeferredTurnStarter).StartDeferredTurn(ref.ProviderTurnID); err != nil {
-		t.Fatalf("StartDeferredTurn: %v", err)
-	}
-	select {
-	case <-agent.promptStarted:
-	case <-time.After(time.Second):
-		t.Fatal("Prompt did not start")
-	}
-	if err := conversation.Interrupt(context.Background(), ref.ProviderTurnID); err != nil {
-		t.Fatalf("Interrupt: %v", err)
-	}
-
-	for {
-		event := nextEvent(t, conversation.Events())
-		if event.Kind == ports.ChatEventTurnCompleted {
-			if event.TurnState != domain.TurnStateInterrupted {
-				t.Fatalf("turn state = %q, want interrupted", event.TurnState)
-			}
-			break
-		}
-	}
-	// The SDK may emit a second idempotent session/cancel while unwinding the
-	// locally cancelled Prompt request. What matters is that the explicit
-	// notification was sent and the local request settled. Notification handling
-	// is asynchronous, so observe it rather than assuming it ran before the turn
-	// completion event.
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		agent.mu.Lock()
-		cancelCalls := agent.cancelCalls
-		agent.mu.Unlock()
-		if cancelCalls >= 1 {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatal("ACP cancel notification was not handled")
-}
 func TestReconnectMissingHostNeverLaunchesProvider(t *testing.T) {
 	driver := New(Config{Harness: domain.HarnessClaudeCode, Launch: func(context.Context, LaunchConfig) (Launch, error) {
 		t.Fatal("health check tried to launch ACP provider")
@@ -4977,5 +4697,111 @@ func TestACPDriverResumeStartsFreshOnlyForMissingSessionWhenAllowed(t *testing.T
 				t.Fatalf("provider conversation = %q, want the fresh session", got)
 			}
 		})
+	}
+}
+
+func requestedConfigID(params acpsdk.SetSessionConfigOptionRequest) string {
+	if params.ValueId != nil {
+		return string(params.ValueId.ConfigId)
+	}
+	if params.Boolean != nil {
+		return string(params.Boolean.ConfigId)
+	}
+	return ""
+}
+
+// rejectsModelOption builds a driver whose agent refuses exactly the model option
+// the way claude-agent-acp does when handed an id from another agent's catalog:
+// -32603 "Invalid value for config option model: gpt-5.6-terra".
+func rejectsModelOption(t *testing.T) (*Driver, *fakeAgent) {
+	t.Helper()
+	agent := &fakeAgent{
+		capabilities: &acpsdk.AgentCapabilities{LoadSession: true},
+		configErr: acpsdk.NewInternalError(map[string]any{
+			"details": "Invalid value for config option model: gpt-5.6-terra",
+		}),
+		configErrOption: "model",
+	}
+	driver := New(Config{
+		Harness:      domain.HarnessClaudeCode,
+		Capabilities: ports.ChatCapabilities{ports.ChatCapabilityStreaming: true},
+		Probe:        func(context.Context) error { return nil },
+		Launch:       func(context.Context, LaunchConfig) (Launch, error) { return Launch{Command: "fake"}, nil },
+		SessionOptions: func(settings ports.ChatTurnSettings) []SessionOption {
+			options := make([]SessionOption, 0, 2)
+			if settings.Model != "" {
+				options = append(options, SessionOption{ID: "model", Value: settings.Model})
+			}
+			return append(options, SessionOption{ID: "effort", Value: "high"})
+		},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	driver.useTestProcess(fakeSpawn(agent))
+	return driver, agent
+}
+
+// The failure this fixes: an interface switch died whole because the agent refused
+// a model preference — "switch interface …: resume chat: chat conversation resume
+// failed: configure ACP session: set ACP session option "model": Invalid value for
+// config option model: gpt-5.6-terra".
+//
+// A model is an optional preference on a conversation that already exists. The
+// provider still holds the history and resumes perfectly on its own default, so
+// refusing the preference must not destroy the resume and strand the session
+// between two interfaces. The preference is dropped and reported instead.
+func TestACPResumeDegradesWhenAgentRejectsTheModelOption(t *testing.T) {
+	driver, agent := rejectsModelOption(t)
+
+	conv, err := driver.Resume(context.Background(), ports.ChatResumeConfig{
+		SessionID:              "worker-1",
+		ProviderConversationID: "provider-session-1",
+		WorkspacePath:          t.TempDir(),
+		Model:                  "gpt-5.6-terra",
+	})
+	if err != nil {
+		t.Fatalf("Resume failed the whole session over an optional model preference: %v", err)
+	}
+	defer conv.Close()
+
+	// Everything queued behind the model still applies: the options loop stops at
+	// the first refusal, so dropping the model has to re-run the rest.
+	agent.mu.Lock()
+	effort := agent.options["effort"]
+	agent.mu.Unlock()
+	if effort != "high" {
+		t.Errorf("effort option = %q, want high: settings after the rejected model were never applied", effort)
+	}
+
+	// And the user is told, on the timeline, that their choice was not honored —
+	// otherwise the session silently runs on a model nobody picked.
+	warning := ""
+	for range 4 {
+		event := nextEvent(t, conv.Events())
+		if event.Kind == ports.ChatEventActivityCompleted && event.ActivityKind == domain.ActivityKindSystem {
+			warning = event.Summary
+			break
+		}
+	}
+	if !strings.Contains(warning, "gpt-5.6-terra") {
+		t.Errorf("warning summary = %q, want a system activity naming the model that was dropped", warning)
+	}
+}
+
+// Spawn is the other half of the contract. A model chosen for a conversation that
+// does not exist yet is an explicit choice, not a stale preference, and quietly
+// starting it on a different model would misattribute everything that follows.
+func TestACPStartFailsWhenAgentRejectsTheModelOption(t *testing.T) {
+	driver, _ := rejectsModelOption(t)
+
+	conv, err := driver.Start(context.Background(), ports.ChatStartConfig{
+		SessionID:     "worker-1",
+		WorkspacePath: t.TempDir(),
+		Model:         "gpt-5.6-terra",
+	})
+	if err == nil {
+		_ = conv.Close()
+		t.Fatal("Start accepted a model the agent refused; an explicit spawn-time choice must fail fast")
+	}
+	if !strings.Contains(err.Error(), "configure ACP session") {
+		t.Errorf("Start error = %v, want the configure-session failure", err)
 	}
 }

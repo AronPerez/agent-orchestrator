@@ -74,20 +74,6 @@ type ProjectConfig struct {
 	// drifting out of sync with a project-config list.
 	ContainerReap ContainerReapConfig `json:"containerReap,omitempty"`
 
-	// BrowserPersistentProfile makes every worker session on this project share
-	// ONE on-disk browser profile instead of the default per-session memory-only
-	// one, so a login in the AO Browser panel survives session teardown and app
-	// restart.
-	//
-	// Opt-in, and default off, because it is a real security trade-off rather
-	// than a convenience toggle: one shared cookie jar means a prompt-injected
-	// agent in ANY session on this project can spend every login in it, and the
-	// panel classifies every byte it returns as untrusted injection-bearing
-	// content. Blast radius is one project, it is off unless asked for, and the
-	// person who asked was told this. Never default it on, and never widen the
-	// scope beyond a single project.
-	BrowserPersistentProfile bool `json:"browserPersistentProfile,omitempty"`
-
 	// SessionInterface pins the interface new sessions in this project are born
 	// with. Empty means the project defers to the daemon-owned default; an
 	// explicit spawn mode still wins over both (see resolveSessionMode).

@@ -171,7 +171,7 @@ func (m *Manager) executeChatAgentSwitch(
 	if !ok {
 		return result, fmt.Errorf("switch Chat agent %s: %w", id, ErrInterfaceHandoffUnsupported)
 	}
-	// resolveAgentConfig drops role tuning configured for another agent.
+	baseAgentConfig := effectiveAgentConfig(cfg.TargetHarness, rec.Kind, project.Config)
 	agentConfig, err := m.resolveAgentConfig(ctx, ports.SpawnConfig{
 		ProjectID: rec.ProjectID,
 		Kind:      rec.Kind,
@@ -179,7 +179,7 @@ func (m *Manager) executeChatAgentSwitch(
 		AgentConfig: ports.AgentConfig{
 			Model: strings.TrimSpace(cfg.Model),
 		},
-	}, project.Config)
+	}, domain.ProjectConfig{AgentConfig: baseAgentConfig})
 	if err != nil {
 		return result, fmt.Errorf("switch Chat agent %s: target config: %w", id, err)
 	}

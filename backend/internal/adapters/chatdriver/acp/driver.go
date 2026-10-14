@@ -507,7 +507,9 @@ func (d *Driver) resumeSession(
 		conv.legacyWire.modelState(), modes,
 	)
 	conv.setReportedProviderConversationID(reportedProviderConversationID)
-	// Standing context is process input and must be restored with the native session.
+	// Standing context is process input, not transcript history, so a resumed
+	// conversation must receive it again even though the provider recovers the
+	// messages itself.
 	conv.setSessionPreamble(d.sessionPreamble(launchCfg))
 	if err := applyResumeSettings(ctx, conv, cfg); err != nil {
 		conv.discard()
@@ -516,6 +518,30 @@ func (d *Driver) resumeSession(
 	if historyConversation != nil {
 		return historyConversation, nil
 	}
+	return conv, nil
+}
+
+// resumeFresh opens a new provider session in place of a stored one the
+// provider reports does not exist. Only a newly spawned provider reaches it: a
+// surviving host that still holds the session is reattached before any reload.
+// The caller's FreshIfMissing asserts the stored conversation never started, so
+// no history is lost; the returned conversation reports the new id.
+func (d *Driver) resumeFresh(
+	ctx context.Context,
+	conv *conversation,
+	init acpsdk.InitializeResponse,
+	launchCfg LaunchConfig,
+	cfg ports.ChatResumeConfig,
+	additional []string,
+	mcpServers []acpsdk.McpServer,
+) (ports.ChatConversation, error) {
+	settings := ports.ChatTurnSettings{Model: cfg.Model, Effort: cfg.Effort, Approval: cfg.Permissions}
+	if err := d.openNewSession(ctx, conv, init, launchCfg, settings, additional, mcpServers); err != nil {
+		conv.discard()
+		return nil, fmt.Errorf("%w: start fresh in place of missing ACP session: %w", ports.ErrChatResumeFailed, err)
+	}
+	d.log.Info("chat: ACP session missing; started fresh",
+		"sessionID", cfg.SessionID, "harness", d.cfg.Harness)
 	return conv, nil
 }
 
@@ -549,30 +575,6 @@ func applyResumeSettings(ctx context.Context, conv *conversation, cfg ports.Chat
 		return retry
 	}
 	return nil
-}
-
-// resumeFresh opens a new provider session in place of a stored one the
-// provider reports does not exist. Only a newly spawned provider reaches it: a
-// surviving host that still holds the session is reattached before any reload.
-// The caller's FreshIfMissing asserts the stored conversation never started, so
-// no history is lost; the returned conversation reports the new id.
-func (d *Driver) resumeFresh(
-	ctx context.Context,
-	conv *conversation,
-	init acpsdk.InitializeResponse,
-	launchCfg LaunchConfig,
-	cfg ports.ChatResumeConfig,
-	additional []string,
-	mcpServers []acpsdk.McpServer,
-) (ports.ChatConversation, error) {
-	settings := ports.ChatTurnSettings{Model: cfg.Model, Effort: cfg.Effort, Approval: cfg.Permissions}
-	if err := d.openNewSession(ctx, conv, init, launchCfg, settings, additional, mcpServers); err != nil {
-		conv.discard()
-		return nil, fmt.Errorf("%w: start fresh in place of missing ACP session: %w", ports.ErrChatResumeFailed, err)
-	}
-	d.log.Info("chat: ACP session missing; started fresh",
-		"sessionID", cfg.SessionID, "harness", d.cfg.Harness)
-	return conv, nil
 }
 
 func (d *Driver) connect(

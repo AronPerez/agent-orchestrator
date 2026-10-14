@@ -88,7 +88,6 @@ var (
 // SessionService is the controller-facing session service contract.
 type SessionService interface {
 	List(ctx context.Context, filter sessionsvc.ListFilter) ([]domain.Session, error)
-	ListPage(ctx context.Context, req sessionsvc.ListPageRequest) (sessionsvc.Page, error)
 	Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Session, int, int, error)
 	SpawnOrchestrator(ctx context.Context, projectID domain.ProjectID, clean bool, requestedMode domain.SessionMode, approval domain.PermissionMode) (domain.Session, error)
 	Get(ctx context.Context, id domain.SessionID) (domain.Session, error)
@@ -277,33 +276,17 @@ func (c *SessionsController) list(w http.ResponseWriter, r *http.Request) {
 		apispec.NotImplemented(w, r, "GET", "/api/v1/sessions")
 		return
 	}
-	req, err := parseSessionListFilter(r)
+	filter, err := parseSessionListFilter(r)
 	if err != nil {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_QUERY", err.Error(), nil)
 		return
 	}
-	if req.PageSize == 0 {
-		sessions, err := c.Svc.List(r.Context(), req.ListFilter)
-		if err != nil {
-			envelope.WriteError(w, r, err)
-			return
-		}
-		envelope.WriteJSON(w, http.StatusOK, ListSessionsResponse{Sessions: sessionViews(r, sessions)})
-		return
-	}
-	page, err := c.Svc.ListPage(r.Context(), req)
+	sessions, err := c.Svc.List(r.Context(), filter)
 	if err != nil {
-		if errors.Is(err, sessionsvc.ErrInvalidPageToken) {
-			envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_PAGE_TOKEN", "Page token is not valid", nil)
-			return
-		}
 		envelope.WriteError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusOK, ListSessionsResponse{
-		Sessions:      sessionViews(r, page.Sessions),
-		NextPageToken: page.NextPageToken,
-	})
+	envelope.WriteJSON(w, http.StatusOK, ListSessionsResponse{Sessions: sessionViews(r, sessions)})
 }
 
 func (c *SessionsController) spawn(w http.ResponseWriter, r *http.Request) {
@@ -1953,8 +1936,9 @@ func (c *SessionsController) cleanup(w http.ResponseWriter, r *http.Request) {
 	for _, skip := range out.Skipped {
 		skipped = append(skipped, CleanupSkippedSession{SessionID: skip.SessionID, Reason: skip.Reason})
 	}
-	// A skipped dirty worktree remains on disk, so this successful request is
-	// not a completed cleanup from the caller's perspective.
+	// ok reports whether cleanup did everything it was asked to, so a caller can
+	// branch on one field: a declined teardown (e.g. a worktree with
+	// uncommitted changes) is listed in skipped and is not success.
 	envelope.WriteJSON(w, http.StatusOK, CleanupSessionsResponse{
 		OK: len(skipped) == 0, Cleaned: out.Cleaned, AlreadyGone: out.AlreadyGone, Skipped: skipped,
 	})
@@ -2453,46 +2437,31 @@ func orchestratorID(r *http.Request) domain.SessionID {
 	return domain.SessionID(chi.URLParam(r, "id"))
 }
 
-// maxSessionPageSize caps a requested page; larger requests are clamped, not
-// rejected (AIP-158).
-const maxSessionPageSize = 500
-
-func parseSessionListFilter(r *http.Request) (sessionsvc.ListPageRequest, error) {
+func parseSessionListFilter(r *http.Request) (sessionsvc.ListFilter, error) {
 	q := r.URL.Query()
-	req := sessionsvc.ListPageRequest{ListFilter: sessionsvc.ListFilter{ProjectID: domain.ProjectID(q.Get("project"))}}
+	filter := sessionsvc.ListFilter{ProjectID: domain.ProjectID(q.Get("project"))}
 	if raw := q.Get("active"); raw != "" {
 		active, err := strconv.ParseBool(raw)
 		if err != nil {
-			return sessionsvc.ListPageRequest{}, errors.New("active must be a boolean")
+			return sessionsvc.ListFilter{}, errors.New("active must be a boolean")
 		}
-		req.Active = &active
+		filter.Active = &active
 	}
 	if raw := q.Get("orchestratorOnly"); raw != "" {
 		orchestratorOnly, err := strconv.ParseBool(raw)
 		if err != nil {
-			return sessionsvc.ListPageRequest{}, errors.New("orchestratorOnly must be a boolean")
+			return sessionsvc.ListFilter{}, errors.New("orchestratorOnly must be a boolean")
 		}
-		req.OrchestratorOnly = orchestratorOnly
+		filter.OrchestratorOnly = orchestratorOnly
 	}
 	if raw := q.Get("fresh"); raw != "" {
 		fresh, err := strconv.ParseBool(raw)
 		if err != nil {
-			return sessionsvc.ListPageRequest{}, errors.New("fresh must be a boolean")
+			return sessionsvc.ListFilter{}, errors.New("fresh must be a boolean")
 		}
-		req.Fresh = fresh
+		filter.Fresh = fresh
 	}
-	if raw := q.Get("pageSize"); raw != "" {
-		size, err := strconv.Atoi(raw)
-		if err != nil || size < 1 {
-			return sessionsvc.ListPageRequest{}, errors.New("pageSize must be a positive integer")
-		}
-		if size > maxSessionPageSize {
-			size = maxSessionPageSize
-		}
-		req.PageSize = size
-	}
-	req.PageToken = q.Get("pageToken")
-	return req, nil
+	return filter, nil
 }
 
 func writeSessionPRError(w http.ResponseWriter, r *http.Request, err error) {

@@ -1,1086 +1,691 @@
-import { act, renderHook, waitFor } from "@testing-library/react";
+import { renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import createClient from "openapi-fetch";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
-import type { paths } from "../../api/schema";
-import { fakeDaemon, type Behaviour } from "../test/fake-daemon";
+import { appI18n } from "../i18n";
+import type { WorkspaceSummary } from "../types/workspace";
 
-const {
-  cloudState,
-  connectedHostsMock,
-  getMock,
-  hostListeners,
-  isHostReadyMock,
-  listProjectsMock,
-  listSessionsMock,
-} = vi.hoisted(() => ({
-  cloudState: {
-    ready: false,
-    org: undefined as { id: string; displayName: string } | undefined,
-  },
-  connectedHostsMock: vi.fn((): string[] => []),
-  getMock: vi.fn(),
-  hostListeners: new Set<() => void>(),
-  isHostReadyMock: vi.fn(() => true),
-  listProjectsMock: vi.fn(),
-  listSessionsMock: vi.fn(),
-}));
+const { captureRendererEventMock, cloudState, getMock, hasTrustedApiBaseUrlMock, listProjectsMock, listSessionsMock, remoteGetMock, setQueryHealthyMock } = vi.hoisted(
+	() => ({
+		captureRendererEventMock: vi.fn().mockResolvedValue(undefined),
+		cloudState: { ready: false, org: undefined as { id: string } | undefined },
+		getMock: vi.fn(),
+		hasTrustedApiBaseUrlMock: vi.fn(() => true),
+		listProjectsMock: vi.fn(),
+		listSessionsMock: vi.fn(),
+		remoteGetMock: vi.fn(),
+		setQueryHealthyMock: vi.fn(),
+	}),
+);
 
 vi.mock("../lib/api-client", () => ({
-  apiErrorMessage: (error: unknown, fallback: string) =>
-    error instanceof Error ? error.message : fallback,
+	apiClient: { GET: getMock },
+	hasTrustedApiBaseUrl: hasTrustedApiBaseUrlMock,
 }));
 
-vi.mock("../lib/host-clients", () => ({
-  clientFor: (host: string) => ({ GET: (url: string, init?: unknown) => getMock(host, url, init) }),
-  connectedHosts: connectedHostsMock,
-  hostLabelFor: (host: string) =>
-    host === "http://192.0.2.1:3011" ? "workbox" : host,
-  isHostReady: isHostReadyMock,
-  subscribeConnectedHosts: (listener: () => void) => {
-    hostListeners.add(listener);
-    return () => hostListeners.delete(listener);
-  },
-}));
+vi.mock("../lib/telemetry", () => ({ captureRendererEvent: captureRendererEventMock }));
+vi.mock("../lib/agent-switch-visibility", () => ({ agentSwitchVisibility: { setQueryHealthy: setQueryHealthyMock } }));
+vi.mock("../lib/host-clients", () => ({ clientForHost: () => ({ GET: remoteGetMock }), connectedHosts: () => [], subscribeConnectedHosts: () => () => undefined }));
 
 vi.mock("./useCloudCp", () => ({
-  useCloudCp: () => ({
-    client: { listProjects: listProjectsMock, listSessions: listSessionsMock },
-    ready: cloudState.ready,
-    baseUrl: "https://cp.example.com",
-  }),
+	useCloudCp: () => ({
+		client: { listProjects: listProjectsMock, listSessions: listSessionsMock },
+		ready: cloudState.ready,
+		baseUrl: "https://cp.example.com",
+	}),
 }));
 
 vi.mock("./useCloudOrg", () => ({
-  useCloudOrg: () => ({
-    org: cloudState.org,
-    isLoading: false,
-    error: undefined,
-    ready: cloudState.ready,
-  }),
+	useCloudOrg: () => ({ org: cloudState.org, isLoading: false, error: undefined, ready: cloudState.ready }),
 }));
 
-import { useWorkspaceQuery, useWorkspaceSession, useWorkspaceTraySessions } from "./useWorkspaceQuery";
-import { cloudHost, LOCAL_HOST, refKey, type HostId } from "../lib/hosts";
+import { useWorkspacePolling, useWorkspaceQuery, useWorkspaceScope, useWorkspaceSession, useWorkspaceTraySessions, workspaceQueryKey, workspaceQueryKeyForHost } from "./useWorkspaceQuery";
+
+it("preserves the existing local and remote workspace cache keys", () => {
+	expect(workspaceQueryKeyForHost()).toBe(workspaceQueryKey);
+	expect(workspaceQueryKeyForHost("box-a")).toEqual(["remote-workspaces", "box-a"]);
+});
 
 function wrapper({ children }: { children: ReactNode }) {
-  // The hook pins its own retry policy; retryDelay 0 keeps the error tests fast.
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retryDelay: 0 } },
-  });
-  return (
-    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
-  );
-}
-
-function renderWorkspaceQuery() {
-  return renderHook(() => useWorkspaceQuery(), { wrapper });
+	// The hook pins its own retry policy; retryDelay 0 keeps the error tests fast.
+	const queryClient = new QueryClient({ defaultOptions: { queries: { retryDelay: 0 } } });
+	return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
 }
 
 function respondWith(payload: {
-  projects?: { data?: unknown; error?: unknown };
-  sessions?: { data?: unknown; error?: unknown };
+	projects?: { data?: unknown; error?: unknown };
+	sessions?: { data?: unknown; error?: unknown };
 }) {
-  getMock.mockImplementation(async (_host: HostId, url: string) => {
-    if (url === "/api/v1/projects")
-      return payload.projects ?? { data: { projects: [] }, error: undefined };
-    if (url === "/api/v1/sessions")
-      return payload.sessions ?? { data: { sessions: [] }, error: undefined };
-    throw new Error(`unexpected GET ${url}`);
-  });
+	getMock.mockImplementation(async (url: string) => {
+		if (url === "/api/v1/projects") return payload.projects ?? { data: { projects: [] }, error: undefined };
+		if (url === "/api/v1/sessions") return payload.sessions ?? { data: { sessions: [] }, error: undefined };
+		throw new Error(`unexpected GET ${url}`);
+	});
 }
 
 beforeEach(() => {
-  getMock.mockReset();
-  connectedHostsMock.mockReset().mockReturnValue([]);
-  hostListeners.clear();
-  isHostReadyMock.mockReset().mockReturnValue(true);
-  cloudState.ready = false;
-  cloudState.org = undefined;
-  listProjectsMock.mockReset();
-  listSessionsMock.mockReset();
+	captureRendererEventMock.mockClear();
+	getMock.mockReset();
+	hasTrustedApiBaseUrlMock.mockReset().mockReturnValue(true);
+	cloudState.ready = false;
+	cloudState.org = undefined;
+	listProjectsMock.mockReset();
+	listSessionsMock.mockReset().mockResolvedValue({ items: [] });
+	remoteGetMock.mockReset();
+	setQueryHealthyMock.mockReset();
 });
-
-type HostFixture = {
-  host: HostId;
-  projects?: Array<{ id: string; name: string; path?: string }>;
-  sessions?: Array<{ id: string; projectId?: string; mode?: "chat" | "tui"; status?: string; activity?: { state: string } }>;
-  fail?: string;
-  body?: unknown;
-};
-
-async function fetchAllForTest(fixtures: HostFixture[]) {
-  connectedHostsMock.mockReturnValue(
-    fixtures.map(({ host }) => host).filter((host) => host !== LOCAL_HOST),
-  );
-  getMock.mockImplementation(async (host: HostId, url: string) => {
-    const fixture = fixtures.find((candidate) => candidate.host === host);
-    if (!fixture) throw new Error(`unexpected host ${host}`);
-    if (fixture.fail) throw new Error(fixture.fail);
-    if (fixture.body !== undefined)
-      return { data: fixture.body, error: undefined };
-    if (url === "/api/v1/projects") {
-      return {
-        data: {
-          projects: (fixture.projects ?? []).map((project) => ({
-            path: `/${project.id}`,
-            ...project,
-          })),
-        },
-        error: undefined,
-      };
-    }
-    if (url === "/api/v1/sessions") {
-      return {
-        data: {
-          sessions: (fixture.sessions ?? []).map((session) => ({
-            isTerminated: false,
-            updatedAt: "2026-08-11T00:00:00Z",
-            ...session,
-          })),
-        },
-        error: undefined,
-      };
-    }
-    throw new Error(`unexpected GET ${url}`);
-  });
-
-  const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
-  await waitFor(() => expect(result.current.isSuccess).toBe(true));
-  return result.current.data ?? [];
-}
 
 describe("useWorkspaceQuery", () => {
-  it.each<Behaviour>(["html-catchall", "wrong-shape"])(
-    "reports %s workspace responses as malformed instead of throwing",
-    async (behaviour) => {
-      const client = createClient<paths>({
-        baseUrl: "http://x",
-        fetch: fakeDaemon(behaviour),
-      });
-      getMock.mockImplementation(
-        (_host: HostId, url: "/api/v1/projects" | "/api/v1/sessions") =>
-          client.GET(url),
-      );
-
-      let rendered: ReturnType<typeof renderWorkspaceQuery> | undefined;
-      expect(() => {
-        rendered = renderWorkspaceQuery();
-      }).not.toThrow();
-      if (!rendered) throw new Error("workspace query did not render");
-      const { result } = rendered;
-
-      await waitFor(() => expect(result.current.isSuccess).toBe(true));
-      expect(result.current.data?.[0]).toMatchObject({
-        status: "failed",
-        failure: "Host returned malformed workspace data",
-      });
-    },
-  );
-
-  it("loads projects when the host also has a standalone session with no projectId", async () => {
-    const knownState = {
-      status: "mergeable",
-      isTerminated: false,
-      activity: { state: "idle", lastActivityAt: "2026-06-10T15:30:00Z" },
-    };
-    respondWith({
-      projects: {
-        data: { projects: [{ id: "proj-1", name: "my-app", path: "/my-app" }] },
-        error: undefined,
-      },
-      sessions: {
-        data: {
-          sessions: [
-            { id: "sess-1", projectId: "proj-1", ...knownState },
-            { id: "standalone-1", ...knownState },
-          ],
-        },
-        error: undefined,
-      },
-    });
-
-    const { result } = renderWorkspaceQuery();
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(result.current.data?.[0]).toMatchObject({ failure: null });
-    expect(
-      result.current.data?.[0]?.workspaces.map((workspace) => ({
-        id: workspace.id,
-        sessions: workspace.sessions.map((session) => session.id),
-      })),
-    ).toEqual([
-      { id: "proj-1", sessions: ["sess-1"] },
-      { id: "@standalone", sessions: ["standalone-1"] },
-    ]);
-  });
-
-  it("resolves projectless sessions directly on hosts with no projects, without ID collisions", async () => {
-    const remote = "http://192.0.2.1:3011";
-    const sections = await fetchAllForTest([
-      { host: LOCAL_HOST, sessions: [{ id: "same", mode: "chat", status: "working", activity: { state: "idle" } }] },
-      { host: remote, sessions: [{ id: "same", projectId: "", mode: "tui", status: "working", activity: { state: "idle" } }] },
-    ]);
-    expect(sections.map((section) => section.workspaces[0])).toMatchObject([
-      { host: LOCAL_HOST, id: "@standalone", kind: "standalone", sessions: [{ id: "same", mode: "chat", status: "working", activity: { state: "idle" } }] },
-      { host: remote, id: "@standalone", kind: "standalone", sessions: [{ id: "same", mode: "tui" }] },
-    ]);
-    const { result } = renderHook(() => useWorkspaceSession({ host: remote, id: "same" }), { wrapper });
-    await waitFor(() => expect(result.current.data).toMatchObject({ host: remote, id: "same", mode: "tui", workspaceId: "@standalone" }));
-  });
-
-  it("reports the local host as failed while the daemon client is not ready", async () => {
-    isHostReadyMock.mockReturnValue(false);
-
-    const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(result.current.data?.[0]).toMatchObject({
-      host: LOCAL_HOST,
-      status: "failed",
-      workspaces: [],
-    });
-    expect(getMock).not.toHaveBeenCalled();
-  });
-
-  it("maps projects and their sessions, applying provider/status/title fallbacks", async () => {
-    respondWith({
-      projects: {
-        data: {
-          projects: [
-            {
-              id: "proj-1",
-              name: "my-app",
-              path: "/home/me/my-app",
-              orchestratorAgent: "codex",
-            },
-          ],
-        },
-        error: undefined,
-      },
-      sessions: {
-        data: {
-          sessions: [
-            {
-              id: "sess-1",
-              projectId: "proj-1",
-              terminalHandleId: "term-1",
-              chatProviderPreserved: true,
-              displayName: "fix-bug",
-              issueId: "github:acme/project-one#42",
-              harness: "claude-code",
-              reviewerHarness: "kimchi",
-              branch: "qa/modal-worker",
-              status: "mergeable",
-              scmStatus: "review_pending",
-              isTerminated: false,
-              autoInjectReview: false,
-              autoInjectCI: false,
-              activity: {
-                state: "idle",
-                lastActivityAt: "2026-06-10T15:30:00Z",
-              },
-              activeAgentSwitch: {
-                agentHandoffStatus: "received",
-                errorCode: "delivery_unconfirmed",
-                fromHarness: "claude-code",
-                id: "switch-1",
-                privateFutureField: "must-not-leak",
-                requestedAt: "2026-06-10T15:31:00Z",
-                semanticHandoffIncluded: true,
-                sessionId: "sess-1",
-                sourceTranscriptStatus: "available",
-                state: "delivering_context",
-                targetHarness: "codex",
-                targetStartMode: "resumed",
-                updatedAt: "2026-06-10T15:32:00Z",
-              },
-              lastUserMessageAt: "2026-06-10T16:10:00Z",
-              updatedAt: "2026-06-10T16:15:04Z",
-            },
-            {
-              // Unknown harness/status and no displayName/issueId: falls back
-              // to codex / unknown / the session id.
-              id: "sess-2",
-              projectId: "proj-1",
-              harness: "mystery-agent",
-              reviewerHarness: "mystery-reviewer",
-              status: "bogus",
-              isTerminated: false,
-              updatedAt: "2026-06-10T16:15:04Z",
-            },
-            // Belongs to another project; must not leak into proj-1.
-            {
-              id: "sess-3",
-              projectId: "proj-2",
-              isTerminated: false,
-              updatedAt: "2026-06-10T16:15:04Z",
-            },
-          ],
-        },
-        error: undefined,
-      },
-    });
-
-    const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
-
-    const workspace = result.current.data?.[0].workspaces[0];
-    expect(workspace).toBeDefined();
-    if (!workspace) throw new Error("workspace missing");
-    expect(workspace).toMatchObject({
-      id: "proj-1",
-      name: "my-app",
-      path: "/home/me/my-app",
-      orchestratorAgent: "codex",
-    });
-    expect(workspace.sessions).toHaveLength(2);
-    expect(workspace.sessions[0]).toMatchObject({
-      id: "sess-1",
-      terminalHandleId: "term-1",
-      chatProviderPreserved: true,
-      title: "fix-bug",
-      issueId: "github:acme/project-one#42",
-      provider: "claude-code",
-      reviewerHarness: "kimchi",
-      branch: "qa/modal-worker",
-      status: "mergeable",
-      scmStatus: "review_pending",
-      activity: { state: "idle", lastActivityAt: "2026-06-10T15:30:00Z" },
-      lastUserMessageAt: "2026-06-10T16:10:00Z",
-      autoInjectReview: false,
-      autoInjectCI: false,
-    });
-    expect(workspace.sessions[0].activeAgentSwitch).toEqual({
-      agentHandoffStatus: "received",
-      errorCode: "delivery_unconfirmed",
-      fromHarness: "claude-code",
-      id: "switch-1",
-      state: "delivering_context",
-      targetHarness: "codex",
-    });
-    expect(workspace.sessions[1]).toMatchObject({
-      id: "sess-2",
-      title: "sess-2",
-      provider: "codex",
-      reviewerHarness: undefined,
-      status: "unknown",
-      branch: undefined,
-      autoInjectReview: true,
-      autoInjectCI: true,
-    });
-  });
-
-  it("preserves scratch projects and leaves branchless scratch sessions branchless", async () => {
-    respondWith({
-      projects: {
-        data: {
-          projects: [
-            {
-              id: "scratch",
-              name: "Scratch",
-              kind: "scratch",
-              path: "/home/me/.ao/scratch/default",
-            },
-          ],
-        },
-        error: undefined,
-      },
-      sessions: {
-        data: {
-          sessions: [
-            {
-              id: "scratch-worker-1",
-              projectId: "scratch",
-              harness: "codex",
-              status: "working",
-              isTerminated: false,
-              updatedAt: "2026-06-10T16:15:04Z",
-            },
-          ],
-        },
-        error: undefined,
-      },
-    });
-
-    const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
-
-    expect(result.current.data?.[0].workspaces[0]).toMatchObject({
-      id: "scratch",
-      kind: "scratch",
-    });
-    expect(result.current.data?.[0].workspaces[0].sessions[0]).toMatchObject({
-      id: "scratch-worker-1",
-      branch: undefined,
-    });
-  });
-
-  it.each(["proj-1", undefined])("preserves daemon artifact URLs and provider state for project %s", async (projectId) => {
-    const artifactFiles = [{
-      path: "report.md", name: "report.md", kind: "markdown", size: 42,
-      updatedAt: "2026-10-08T00:00:00Z",
-      rawUrl: "http://ao-preview-artifact.onxxe3df.localhost:3000/report.md?raw=true",
-    }];
-    respondWith({
-      projects: { data: { projects: projectId ? [{ id: projectId, name: "App", path: "/app" }] : [] } },
-      sessions: { data: { sessions: [{
-        id: "sess-1", projectId, status: "working", isTerminated: false,
-        chatProviderPreserved: true,
-        updatedAt: "2026-10-08T00:00:00Z", artifactFiles,
-      }] } },
-    });
-    const { result } = renderWorkspaceQuery();
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(result.current.data?.[0].workspaces[0].sessions[0]).toMatchObject({
-      workspaceId: projectId ?? "@standalone", artifactFiles, chatProviderPreserved: true,
-    });
-  });
-
-  it("maps each session's prs straight from the session list", async () => {
-    respondWith({
-      projects: {
-        data: { projects: [{ id: "proj-1", name: "my-app", path: "/p" }] },
-        error: undefined,
-      },
-      sessions: {
-        data: {
-          sessions: [
-            {
-              id: "sess-1",
-              projectId: "proj-1",
-              status: "pr_open",
-              isTerminated: false,
-              updatedAt: "2026-06-10T16:15:04Z",
-              prs: [
-                {
-                  number: 278,
-                  state: "open",
-                  url: "u",
-                  ci: "passing",
-                  review: "approved",
-                  mergeability: "clean",
-                  reviewComments: false,
-                  updatedAt: "2026-06-10T16:15:04Z",
-                },
-              ],
-            },
-            {
-              id: "sess-2",
-              projectId: "proj-1",
-              status: "working",
-              isTerminated: false,
-              updatedAt: "2026-06-10T16:15:04Z",
-            },
-          ],
-        },
-        error: undefined,
-      },
-    });
-
-    const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
-
-    const sessions = result.current.data?.[0].workspaces[0].sessions ?? [];
-    expect(sessions[0].prs).toEqual([
-      {
-        number: 278,
-        state: "open",
-        url: "u",
-        ci: "passing",
-        review: "approved",
-        mergeability: "clean",
-        reviewComments: false,
-        updatedAt: "2026-06-10T16:15:04Z",
-      },
-    ]);
-    // A session with no PRs maps to an empty stack, so the empty states render.
-    expect(sessions[1].prs).toEqual([]);
-  });
-
-  it("preserves backend merged status for terminated merged sessions", async () => {
-    respondWith({
-      projects: {
-        data: { projects: [{ id: "proj-1", name: "my-app", path: "/p" }] },
-        error: undefined,
-      },
-      sessions: {
-        data: {
-          sessions: [
-            {
-              id: "sess-1",
-              projectId: "proj-1",
-              status: "merged",
-              isTerminated: true,
-              updatedAt: "2026-06-10T16:15:04Z",
-            },
-          ],
-        },
-        error: undefined,
-      },
-    });
-
-    const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
-
-    expect(result.current.data?.[0].workspaces[0].sessions[0].status).toBe(
-      "merged",
-    );
-    expect(
-      result.current.data?.[0].workspaces[0].sessions[0].isTerminated,
-    ).toBe(true);
-  });
-
-  it("falls back to terminated for terminated sessions without a known backend status", async () => {
-    respondWith({
-      projects: {
-        data: { projects: [{ id: "proj-1", name: "my-app", path: "/p" }] },
-        error: undefined,
-      },
-      sessions: {
-        data: {
-          sessions: [
-            {
-              id: "sess-1",
-              projectId: "proj-1",
-              status: "bogus",
-              isTerminated: true,
-              updatedAt: "2026-06-10T16:15:04Z",
-            },
-          ],
-        },
-        error: undefined,
-      },
-    });
-
-    const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
-
-    expect(result.current.data?.[0].workspaces[0].sessions[0].status).toBe(
-      "terminated",
-    );
-    expect(
-      result.current.data?.[0].workspaces[0].sessions[0].isTerminated,
-    ).toBe(true);
-  });
-
-  describe("active/archive split", () => {
-    // The daemon already accepts ?active=; the hook must ask for the active set
-    // on the hot path and keep the archive (terminated sessions, ~99% of a
-    // long-lived host's list) on its own query that CDC events never refetch.
-    type Init = { params?: { query?: { active?: boolean; pageSize?: number } } };
-    const at = "2026-06-10T16:15:04Z";
-    const project = { id: "proj-1", name: "my-app", path: "/p" };
-
-    function feed(state: { active: unknown[]; archived: unknown[] }) {
-      const counts = { active: 0, archived: 0, unfiltered: 0, archivedPageSize: undefined as number | undefined };
-      getMock.mockImplementation(async (_host: HostId, url: string, init?: Init) => {
-        if (url === "/api/v1/projects") return { data: { projects: [project] }, error: undefined };
-        if (url !== "/api/v1/sessions") throw new Error(`unexpected GET ${url}`);
-        const active = init?.params?.query?.active;
-        if (active === true) {
-          counts.active += 1;
-          return { data: { sessions: state.active }, error: undefined };
-        }
-        if (active === false) {
-          counts.archived += 1;
-          counts.archivedPageSize = init?.params?.query?.pageSize;
-          return { data: { sessions: state.archived }, error: undefined };
-        }
-        counts.unfiltered += 1;
-        throw new Error("sessions fetched without an active filter");
-      });
-      return counts;
-    }
-
-    function renderWithClient() {
-      const queryClient = new QueryClient({ defaultOptions: { queries: { retryDelay: 0 } } });
-      const queryWrapper = ({ children }: { children: ReactNode }) => (
-        <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
-      );
-      const { result } = renderHook(() => useWorkspaceQuery(), { wrapper: queryWrapper });
-      return { queryClient, result };
-    }
-
-    it("retains projectless archive records, with active sessions winning on restore", async () => {
-      feed({
-        active: [{ id: "restored", status: "working", mode: "chat", isTerminated: false }],
-        archived: [
-          { id: "restored", status: "terminated", isTerminated: true },
-          { id: "old", status: "terminated", isTerminated: true },
-        ],
-      });
-      const { result } = renderWithClient();
-      await waitFor(() => expect(result.current.isSuccess).toBe(true));
-      const group = result.current.data?.[0].workspaces.find((workspace) => workspace.kind === "standalone");
-      expect(group?.sessions.map(({ id, isTerminated }) => ({ id, isTerminated }))).toEqual([
-        { id: "restored", isTerminated: false }, { id: "old", isTerminated: true },
-      ]);
-    });
-
-    it("fetches only active sessions on the host key and merges the archive from its own query", async () => {
-      const counts = feed({
-        active: [{ id: "live", projectId: "proj-1", isTerminated: false, updatedAt: at }],
-        archived: [{ id: "dead", projectId: "proj-1", isTerminated: true, status: "terminated", updatedAt: at }],
-      });
-      const { result } = renderWithClient();
-      await waitFor(() => expect(result.current.isSuccess).toBe(true));
-
-      expect(result.current.data?.[0].status).toBe("ready");
-      expect(
-        result.current.data?.[0].workspaces[0].sessions.map((session) => [session.id, session.isTerminated]),
-      ).toEqual([
-        ["live", false],
-        ["dead", true],
-      ]);
-      expect(counts).toMatchObject({ active: 1, archived: 1, unfiltered: 0 });
-    });
-
-    it("refetches the active set on a host invalidation, never the archive", async () => {
-      const counts = feed({ active: [], archived: [] });
-      const { queryClient, result } = renderWithClient();
-      await waitFor(() => expect(result.current.isSuccess).toBe(true));
-      expect(counts).toMatchObject({ active: 1, archived: 1, unfiltered: 0 });
-
-      // What every CDC event does, debounced: invalidate the host key.
-      await act(async () => {
-        await queryClient.invalidateQueries({ queryKey: ["workspaces", LOCAL_HOST] });
-      });
-
-      await waitFor(() => expect(counts.active).toBe(2));
-      expect(counts.archived).toBe(1);
-    });
-
-    it("refetches the archive on the same pass when a session leaves the active set", async () => {
-      const live = { id: "sess-1", projectId: "proj-1", isTerminated: false, updatedAt: at };
-      const state = { active: [live] as unknown[], archived: [] as unknown[] };
-      const counts = feed(state);
-      const { queryClient, result } = renderWithClient();
-      await waitFor(() => expect(result.current.isSuccess).toBe(true));
-
-      // Killed between passes: gone from the active set, now in the archive. It
-      // must reach the Archived column on this pass, not at the next stale refresh.
-      state.active = [];
-      state.archived = [{ ...live, isTerminated: true, status: "terminated" }];
-      await act(async () => {
-        await queryClient.invalidateQueries({ queryKey: ["workspaces", LOCAL_HOST] });
-      });
-
-      await waitFor(() =>
-        expect(result.current.data?.[0].workspaces[0].sessions[0]?.isTerminated).toBe(true),
-      );
-      expect(counts).toMatchObject({ active: 2, archived: 2, unfiltered: 0 });
-    });
-
-    it("keeps a restored session once, as active, while the archive still lists it", async () => {
-      feed({
-        active: [{ id: "sess-1", projectId: "proj-1", isTerminated: false, status: "working", updatedAt: at }],
-        archived: [{ id: "sess-1", projectId: "proj-1", isTerminated: true, status: "terminated", updatedAt: at }],
-      });
-      const { result } = renderWithClient();
-      await waitFor(() => expect(result.current.isSuccess).toBe(true));
-
-      expect(
-        result.current.data?.[0].workspaces[0].sessions.map((session) => [session.id, session.status]),
-      ).toEqual([["sess-1", "working"]]);
-    });
-
-    it("fetches the archive as its most recent page, never the whole history", async () => {
-      // The daemon pages newest first (PR #158); the Archived column shows
-      // the most recent terminated sessions and nothing pays for the rest.
-      const counts = feed({ active: [], archived: [] });
-      const { result } = renderWithClient();
-      await waitFor(() => expect(result.current.isSuccess).toBe(true));
-
-      expect(counts.archivedPageSize).toBe(200);
-    });
-
-    it("refreshes the archive on a root invalidation, which every mutation site issues", async () => {
-      const counts = feed({ active: [], archived: [] });
-      const { queryClient, result } = renderWithClient();
-      await waitFor(() => expect(result.current.isSuccess).toBe(true));
-      expect(counts).toMatchObject({ active: 1, archived: 1, unfiltered: 0 });
-
-      // Kill, restore, cleanup, pin: they all invalidate the workspaces root,
-      // and a cleanup of terminated sessions must not leave them on the board.
-      await act(async () => {
-        await queryClient.invalidateQueries({ queryKey: ["workspaces"] });
-      });
-
-      await waitFor(() => expect(counts.archived).toBe(2));
-      expect(counts.active).toBe(2);
-    });
-  });
-
-  it("reports a projects fetch error on the local host", async () => {
-    const failure = new TypeError("Failed to fetch");
-    respondWith({ projects: { data: undefined, error: failure } });
-
-    const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(result.current.data?.[0]).toMatchObject({
-      status: "failed",
-      failure: "Failed to fetch",
-    });
-    expect(result.current.localFailure).toBe("Failed to fetch");
-  });
-
-  it("reports a sessions fetch error on the local host even when projects load", async () => {
-    const failure = new Error("sessions backend down");
-    respondWith({
-      projects: {
-        data: { projects: [{ id: "proj-1", name: "my-app", path: "/p" }] },
-        error: undefined,
-      },
-      sessions: { data: undefined, error: failure },
-    });
-
-    const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(result.current.data?.[0]).toMatchObject({
-      status: "failed",
-      failure: "sessions backend down",
-    });
-  });
-
-  it("surfaces an unauthorized host fetch", async () => {
-    getMock.mockImplementation(async (_host: HostId, url: string) =>
-      url === "/api/v1/projects"
-        ? {
-            data: undefined,
-            error: { message: "unauthorized" },
-            response: new Response(null, { status: 401 }),
-          }
-        : {
-            data: { sessions: [] },
-            error: undefined,
-            response: new Response(null, { status: 200 }),
-          },
-    );
-
-    const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(result.current.data?.[0]).toMatchObject({
-      status: "failed",
-      failure: "Could not load projects",
-    });
-  });
-});
-
-describe("useWorkspaceQuery — multi-host", () => {
-  const REMOTE = "http://192.0.2.1:3011";
-
-  it("tags every workspace and session with its host", async () => {
-    const sections = await fetchAllForTest([
-      {
-        host: LOCAL_HOST,
-        projects: [{ id: "skyvern-cloud", name: "skyvern-cloud" }],
-        sessions: [{ id: "s1", projectId: "skyvern-cloud" }],
-      },
-      {
-        host: REMOTE,
-        projects: [{ id: "skyvern-cloud", name: "skyvern-cloud" }],
-        sessions: [{ id: "s1", projectId: "skyvern-cloud" }],
-      },
-    ]);
-    const hosts = sections.flatMap((section) =>
-      section.workspaces.map((workspace) => workspace.host),
-    );
-    expect(hosts).toEqual([LOCAL_HOST, REMOTE]);
-    expect(refKey({ host: LOCAL_HOST, id: "skyvern-cloud" })).not.toBe(
-      refKey({ host: REMOTE, id: "skyvern-cloud" }),
-    );
-    expect(sections[0].workspaces[0].sessions[0].host).toBe(LOCAL_HOST);
-    expect(sections[1].label).toBe("workbox");
-  });
-
-  it("one host failing does not discard another host's data", async () => {
-    const sections = await fetchAllForTest([
-      { host: LOCAL_HOST, projects: [{ id: "p", name: "p" }], sessions: [] },
-      { host: REMOTE, fail: "connect ECONNREFUSED" },
-    ]);
-    expect(
-      sections.find((section) => section.host === LOCAL_HOST)?.status,
-    ).toBe("ready");
-    expect(
-      sections.find((section) => section.host === LOCAL_HOST)?.workspaces,
-    ).toHaveLength(1);
-    const failed = sections.find((section) => section.host === REMOTE);
-    expect(failed?.status).toBe("failed");
-    expect(failed?.workspaces).toEqual([]);
-    expect(failed?.failure).toMatch(/ECONNREFUSED/);
-  });
-
-  it("keeps the local board painted while a newly connected host is pending", async () => {
-    getMock.mockImplementation(async (host: HostId, url: string) => {
-      if (host === REMOTE) return new Promise(() => undefined);
-      if (url === "/api/v1/projects") {
-        return {
-          data: {
-            projects: [
-              { id: "local-project", name: "local-project", path: "/local" },
-            ],
-          },
-        };
-      }
-      if (url === "/api/v1/sessions") return { data: { sessions: [] } };
-      throw new Error(`unexpected GET ${url}`);
-    });
-    const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
-    await waitFor(() =>
-      expect(result.current.data?.[0]?.host).toBe(LOCAL_HOST),
-    );
-
-    connectedHostsMock.mockReturnValue([REMOTE]);
-    act(() => {
-      for (const listener of hostListeners) listener();
-    });
-
-    expect(result.current.isSuccess).toBe(true);
-    expect(result.current.isLoading).toBe(false);
-    expect(result.current.data?.map((section) => section.host)).toEqual([
-      LOCAL_HOST,
-    ]);
-  });
-
-  it("refetches only the host targeted by a host-scoped invalidation", async () => {
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retryDelay: 0 } },
-    });
-    const fetchCounts = new Map<HostId, number>();
-    connectedHostsMock.mockReturnValue([REMOTE]);
-    getMock.mockImplementation(async (host: HostId, url: string) => {
-      if (url === "/api/v1/projects") {
-        const count = (fetchCounts.get(host) ?? 0) + 1;
-        fetchCounts.set(host, count);
-        return {
-          data: {
-            projects: [
-              { id: host, name: `${host}-${count}`, path: `/${host}` },
-            ],
-          },
-        };
-      }
-      if (url === "/api/v1/sessions") return { data: { sessions: [] } };
-      throw new Error(`unexpected GET ${url}`);
-    });
-    const queryWrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
-    );
-    const { result } = renderHook(() => useWorkspaceQuery(), {
-      wrapper: queryWrapper,
-    });
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
-
-    await act(async () => {
-      await queryClient.invalidateQueries({ queryKey: ["workspaces", REMOTE] });
-    });
-
-    await waitFor(() =>
-      expect(
-        result.current.data?.find((section) => section.host === REMOTE)
-          ?.workspaces[0].name,
-      ).toBe(`${REMOTE}-2`),
-    );
-    expect(fetchCounts.get(REMOTE)).toBe(2);
-    expect(fetchCounts.get(LOCAL_HOST)).toBe(1);
-  });
-
-  it("retains last-good host data when an invalidated host refetch fails", async () => {
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retryDelay: 0 } },
-    });
-    let remoteFails = false;
-    connectedHostsMock.mockReturnValue([REMOTE]);
-    getMock.mockImplementation(async (host: HostId, url: string) => {
-      if (host === REMOTE && remoteFails)
-        throw new Error("remote daemon dropped");
-      if (url === "/api/v1/projects") {
-        return {
-          data: { projects: [{ id: host, name: host, path: `/${host}` }] },
-        };
-      }
-      if (url === "/api/v1/sessions") return { data: { sessions: [] } };
-      throw new Error(`unexpected GET ${url}`);
-    });
-    const queryWrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
-    );
-    const { result } = renderHook(() => useWorkspaceQuery(), {
-      wrapper: queryWrapper,
-    });
-    await waitFor(() => expect(result.current.data).toHaveLength(2));
-
-    remoteFails = true;
-    await act(async () => {
-      await queryClient.invalidateQueries({ queryKey: ["workspaces", REMOTE] });
-    });
-    await waitFor(() =>
-      expect(
-        result.current.data?.find((section) => section.host === REMOTE)?.status,
-      ).toBe("failed"),
-    );
-
-    const remote = result.current.data?.find(
-      (section) => section.host === REMOTE,
-    );
-    expect(remote).toMatchObject({
-      status: "failed",
-      failure: "remote daemon dropped",
-    });
-    expect(remote?.workspaces.map((workspace) => workspace.id)).toEqual([
-      REMOTE,
-    ]);
-    expect(
-      result.current.data?.find((section) => section.host === LOCAL_HOST)
-        ?.workspaces,
-    ).toHaveLength(1);
-  });
-
-  it("a host returning a malformed body fails that host, it does not throw", async () => {
-    const sections = await fetchAllForTest([
-      { host: LOCAL_HOST, projects: [], sessions: [] },
-      { host: REMOTE, body: "<!doctype html><html></html>" },
-    ]);
-    expect(sections.find((section) => section.host === REMOTE)?.status).toBe(
-      "failed",
-    );
-    expect(
-      sections.find((section) => section.host === LOCAL_HOST)?.status,
-    ).toBe("ready");
-  });
-
-  it("joins sessions to projects within a host, never across hosts", async () => {
-    const sections = await fetchAllForTest([
-      {
-        host: LOCAL_HOST,
-        projects: [{ id: "shared", name: "shared" }],
-        sessions: [],
-      },
-      {
-        host: REMOTE,
-        projects: [{ id: "shared", name: "shared" }],
-        sessions: [{ id: "r1", projectId: "shared" }],
-      },
-    ]);
-    expect(
-      sections.find((section) => section.host === LOCAL_HOST)?.workspaces[0]
-        .sessions,
-    ).toEqual([]);
-    expect(
-      sections.find((section) => section.host === REMOTE)?.workspaces[0]
-        .sessions,
-    ).toHaveLength(1);
-  });
-
-  it("appends a Ref-addressed cloud host section without flattening daemon sections", async () => {
-    cloudState.ready = true;
-    cloudState.org = { id: "org-1", displayName: "Acme Cloud" };
-    listProjectsMock.mockResolvedValue({
-      items: [
-        {
-          id: "cp-1",
-          orgId: "org-1",
-          displayName: "cloud-app",
-          repositoryUrl: "https://github.com/acme/cloud-app",
-          defaultBranch: "main",
-          config: {},
-          createdAt: "2026-08-01T00:00:00Z",
-          updatedAt: "2026-08-01T00:00:00Z",
-        },
-      ],
-      page: { hasMore: false },
-    });
-    listSessionsMock.mockResolvedValue({
-      items: [
-        {
-          id: "cloud-session-1",
-          orgId: "org-1",
-          projectId: "cp-1",
-          kind: "worker",
-          harness: "codex",
-          displayName: "Cloud worker",
-          branch: "main",
-          mode: "trusted",
-          deniedCommands: [],
-          activityState: "active",
-          status: "working",
-          runtimeConnected: true,
-          isTerminated: false,
-          createdAt: "2026-08-01T00:00:00Z",
-          updatedAt: "2026-08-01T00:00:00Z",
-        },
-      ],
-      page: { hasMore: false },
-    });
-    respondWith({
-      projects: {
-        data: { projects: [{ id: "proj-1", name: "my-app", path: "/p" }] },
-        error: undefined,
-      },
-    });
-
-    const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
-    await waitFor(() => expect(result.current.data).toHaveLength(2));
-
-    const expectedCloudHost = cloudHost("org-1");
-    expect(result.current.data?.map((section) => section.host)).toEqual([
-      LOCAL_HOST,
-      expectedCloudHost,
-    ]);
-    expect(result.current.data?.[1]).toMatchObject({
-      host: expectedCloudHost,
-      label: "Acme Cloud",
-      status: "ready",
-    });
-    expect(result.current.data?.[1]?.workspaces[0]?.sessions[0]).toMatchObject({
-      host: expectedCloudHost,
-      id: "cloud-session-1",
-      cloud: { orgId: "org-1" },
-    });
-    expect(listProjectsMock).toHaveBeenCalledWith("org-1", { limit: 100 });
-    expect(listSessionsMock).toHaveBeenCalledWith("org-1", { limit: 100 });
-  });
-
-  it("preserves the local HostSection failure contract when the cloud query fails", async () => {
-    cloudState.ready = true;
-    cloudState.org = { id: "org-1", displayName: "Acme Cloud" };
-    listProjectsMock.mockRejectedValue(new Error("control plane down"));
-    listSessionsMock.mockRejectedValue(new Error("control plane down"));
-    respondWith({
-      projects: { data: undefined, error: new Error("local daemon down") },
-    });
-
-    const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    await waitFor(() => expect(listProjectsMock).toHaveBeenCalled());
-
-    expect(result.current.data).toHaveLength(1);
-    expect(result.current.data?.[0]).toMatchObject({
-      host: LOCAL_HOST,
-      status: "failed",
-    });
-    expect(result.current.localFailure).toBe("local daemon down");
-    expect(result.current.isError).toBe(false);
-  });
-
-  it("does not call the control plane while cloud is not ready", async () => {
-    respondWith({
-      projects: {
-        data: { projects: [{ id: "proj-1", name: "my-app", path: "/p" }] },
-        error: undefined,
-      },
-    });
-
-    const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
-
-    expect(listProjectsMock).not.toHaveBeenCalled();
-    expect(listSessionsMock).not.toHaveBeenCalled();
-  });
+	it.each(["pending", "failed", "removed"])("keeps local workspace cleanup state %s", async (workspaceCleanup) => {
+		respondWith({
+			projects: { data: { projects: [{ id: "p1", name: "Project", path: "/tmp/project" }] } },
+			sessions: { data: { sessions: [{ id: "s1", projectId: "p1", harness: "codex", status: "working", statusReadiness: "ready",
+				activity: { state: "idle", lastActivityAt: "2026-01-01T00:00:00Z" }, isTerminated: true, workspaceCleanup, prs: [] }] } },
+		});
+		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
+		await waitFor(() => expect(result.current.isSuccess).toBe(true));
+		expect(result.current.data?.[0].sessions[0].workspaceCleanup).toBe(workspaceCleanup);
+	});
+
+	it.each(["checking", "unavailable"] as const)("does not expose unverified activity while %s", async (statusReadiness) => {
+		respondWith({
+			projects: { data: { projects: [{ id: "p1", name: "Project", path: "/tmp/project" }] } },
+			sessions: { data: { sessions: [{ id: "s1", projectId: "p1", harness: "codex", status: "working", statusReadiness,
+				activity: { state: "active", lastActivityAt: "2026-01-01T00:00:00Z" }, updatedAt: "2026-01-01T00:00:00Z", prs: [] }] } },
+		});
+		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
+		await waitFor(() => expect(result.current.isSuccess).toBe(true));
+		expect(result.current.data?.[0].sessions[0]).toMatchObject({ status: "unknown", statusReadiness });
+		expect(result.current.data?.[0].sessions[0].activity).toBeUndefined();
+		expect(captureRendererEventMock).not.toHaveBeenCalled();
+	});
+
+	it("keeps each artifact's inline URL, which the chat frames an HTML artifact from", async () => {
+		const inlineUrl = "http://ao-inline-artifact.x.localhost:3001/q3/report.html";
+		respondWith({
+			projects: { data: { projects: [{ id: "p1", name: "Project", path: "/tmp/project" }] } },
+			sessions: { data: { sessions: [{ id: "s1", projectId: "p1", harness: "codex", status: "working", statusReadiness: "ready",
+				activity: { state: "active", lastActivityAt: "2026-01-01T00:00:00Z" }, updatedAt: "2026-01-01T00:00:00Z", prs: [],
+				artifactFiles: [{ path: "q3/report.html", name: "report.html", kind: "html", size: 12, updatedAt: "2026-01-01T00:00:00Z", inlineUrl }] }] } },
+		});
+		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
+		await waitFor(() => expect(result.current.isSuccess).toBe(true));
+		expect(result.current.data?.[0].sessions[0].artifactFiles?.[0]).toMatchObject({ path: "q3/report.html", inlineUrl });
+	});
+
+	it("rejects workspace reads while the daemon base URL is untrusted", async () => {
+		hasTrustedApiBaseUrlMock.mockReturnValue(false);
+
+		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
+
+		await waitFor(() => expect(result.current.isError).toBe(true));
+		expect(result.current.error).toEqual(new Error("AO daemon API is not ready"));
+		expect(getMock).not.toHaveBeenCalled();
+	});
+
+	it("maps projects and their sessions, applying provider/status/title fallbacks", async () => {
+		respondWith({
+			projects: {
+				data: {
+					projects: [
+						{
+							id: "proj-1",
+							name: "my-app",
+							path: "/home/me/my-app",
+							orchestratorAgent: "codex",
+						},
+					],
+				},
+				error: undefined,
+			},
+			sessions: {
+				data: {
+					sessions: [
+						{
+							id: "sess-1",
+							projectId: "proj-1",
+							terminalHandleId: "term-1",
+							terminalGeneration: "launch-2",
+							displayName: "fix-bug",
+							issueId: "github:acme/project-one#42",
+							harness: "claude-code",
+							reviewerHarness: "agy",
+							branch: "qa/modal-worker",
+							status: "mergeable",
+							scmStatus: "review_pending",
+							kanbanColumn: "ready",
+							displayStatus: "Mergeable",
+							isTerminated: false,
+							autoInjectReview: false,
+							autoInjectCI: false,
+							activity: { state: "idle", lastActivityAt: "2026-06-10T15:30:00Z" },
+							activeAgentSwitch: {
+								agentHandoffStatus: "received",
+								errorCode: "delivery_unconfirmed",
+								fromHarness: "claude-code",
+								id: "switch-1",
+								privateFutureField: "must-not-leak",
+								requestedAt: "2026-06-10T15:31:00Z",
+								semanticHandoffIncluded: true,
+								sessionId: "sess-1",
+								sourceTranscriptStatus: "available",
+								state: "delivering_context",
+								targetHarness: "codex",
+								targetStartMode: "resumed",
+								updatedAt: "2026-06-10T15:32:00Z",
+							},
+							lastUserMessageAt: "2026-06-10T16:10:00Z",
+							updatedAt: "2026-06-10T16:15:04Z",
+						},
+						{
+							// Unknown harness/status and no displayName/issueId: falls back
+							// to codex / unknown / the session id.
+							id: "sess-2",
+							projectId: "proj-1",
+							harness: "mystery-agent",
+							reviewerHarness: "mystery-reviewer",
+							status: "bogus",
+							isTerminated: false,
+							updatedAt: "2026-06-10T16:15:04Z",
+						},
+						// Belongs to another project; must not leak into proj-1.
+						{ id: "sess-3", projectId: "proj-2", isTerminated: false, updatedAt: "2026-06-10T16:15:04Z" },
+					],
+				},
+				error: undefined,
+			},
+		});
+
+		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
+		await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+		const [workspace] = result.current.data ?? [];
+		expect(workspace).toMatchObject({
+			id: "proj-1",
+			name: "my-app",
+			path: "/home/me/my-app",
+			orchestratorAgent: "codex",
+		});
+		expect(workspace.sessions).toHaveLength(2);
+		expect(workspace.sessions[0]).toMatchObject({
+			id: "sess-1",
+			terminalHandleId: "term-1",
+			terminalGeneration: "launch-2",
+			title: "fix-bug",
+			issueId: "github:acme/project-one#42",
+			provider: "claude-code",
+			reviewerHarness: "agy",
+			branch: "qa/modal-worker",
+			status: "mergeable",
+			scmStatus: "review_pending",
+			kanbanColumn: "ready",
+			displayStatus: "Mergeable",
+			activity: { state: "idle", lastActivityAt: "2026-06-10T15:30:00Z" },
+			lastUserMessageAt: "2026-06-10T16:10:00Z",
+			autoInjectReview: false,
+			autoInjectCI: false,
+		});
+		expect(workspace.sessions[0].activeAgentSwitch).toEqual({
+			agentHandoffStatus: "received",
+			errorCode: "delivery_unconfirmed",
+			fromHarness: "claude-code",
+			id: "switch-1",
+			state: "delivering_context",
+			targetHarness: "codex",
+			updatedAt: "2026-06-10T15:32:00Z",
+		});
+		expect(workspace.sessions[1]).toMatchObject({
+			id: "sess-2",
+			title: "sess-2",
+			provider: "codex",
+			reviewerHarness: undefined,
+			status: "unknown",
+			branch: undefined,
+			autoInjectReview: true,
+			autoInjectCI: true,
+		});
+		expect(captureRendererEventMock).toHaveBeenCalledWith("ao.renderer.session_state_unknown", {
+			field: "status",
+			reason: "unrecognized",
+		});
+		expect(captureRendererEventMock).toHaveBeenCalledWith("ao.renderer.session_state_unknown", {
+			field: "activity",
+			reason: "missing",
+		});
+	});
+
+	it("preserves scratch projects and leaves branchless scratch sessions branchless", async () => {
+		respondWith({
+			projects: {
+				data: {
+					projects: [
+						{
+							id: "scratch",
+							name: "Scratch",
+							kind: "scratch",
+							path: "/home/me/.ao/scratch/default",
+						},
+					],
+				},
+				error: undefined,
+			},
+			sessions: {
+				data: {
+					sessions: [
+						{
+							id: "scratch-worker-1",
+							projectId: "scratch",
+							harness: "codex",
+							status: "working",
+							isTerminated: false,
+							updatedAt: "2026-06-10T16:15:04Z",
+						},
+					],
+				},
+				error: undefined,
+			},
+		});
+
+		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
+		await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+		expect(result.current.data?.[0]).toMatchObject({
+			id: "scratch",
+			kind: "scratch",
+		});
+		expect(result.current.data?.[0].sessions[0]).toMatchObject({
+			id: "scratch-worker-1",
+			branch: undefined,
+		});
+	});
+
+	it("falls back to the direct session read while the workspace list has not caught up", async () => {
+		getMock.mockImplementation(async (url: string, options?: { params?: { path?: { sessionId?: string } } }) => {
+			if (url === "/api/v1/projects") {
+				return {
+					data: {
+						projects: [{ id: "proj-1", name: "workspace3", path: "/tmp/workspace3", orchestratorAgent: "codex" }],
+					},
+					error: undefined,
+				};
+			}
+			if (url === "/api/v1/sessions") {
+				return { data: { sessions: [] }, error: undefined };
+			}
+			if (url === "/api/v1/sessions/{sessionId}") {
+				expect(options?.params?.path?.sessionId).toBe("sess-orch");
+				return {
+					data: {
+						session: {
+							id: "sess-orch",
+							projectId: "proj-1",
+							displayName: "orchestrate",
+							harness: "codex",
+							kind: "orchestrator",
+							mode: "tui",
+							status: "working",
+							kanbanColumn: "building",
+							displayStatus: "Working",
+							autoInjectReview: true,
+							autoInjectCI: true,
+							autoReviewEnabled: false,
+							isPinned: false,
+							isTerminated: false,
+							terminateOnPrMerge: false,
+							prs: [],
+							activity: { state: "idle", lastActivityAt: "2026-09-04T10:00:00Z" },
+							createdAt: "2026-09-04T10:00:00Z",
+							updatedAt: "2026-09-04T10:00:01Z",
+						},
+					},
+					error: undefined,
+				};
+			}
+			throw new Error(`unexpected GET ${url}`);
+		});
+
+		const queryClient = new QueryClient({ defaultOptions: { queries: { retryDelay: 0 } } });
+		const localWrapper = ({ children }: { children: ReactNode }) => (
+			<QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+		);
+
+		const { result } = renderHook(() => useWorkspaceSession("sess-orch"), { wrapper: localWrapper });
+
+		await waitFor(() => expect(result.current.data?.id).toBe("sess-orch"));
+		expect(result.current.data).toMatchObject({
+			id: "sess-orch",
+			workspaceId: "proj-1",
+			workspaceName: "workspace3",
+			title: "orchestrate",
+			provider: "codex",
+			kind: "orchestrator",
+		});
+		await waitFor(() => {
+			const cached = queryClient.getQueryData<WorkspaceSummary[]>(workspaceQueryKey);
+			expect(Array.isArray(cached)).toBe(true);
+			expect(cached?.[0]?.sessions.some((session: { id: string }) => session.id === "sess-orch")).toBe(true);
+		});
+	});
+
+	it("groups projectless sessions in Scratchpad after projects", async () => {
+		respondWith({
+			projects: { data: { projects: [{ id: "proj-1", name: "my-app", path: "/p" }] }, error: undefined },
+			sessions: {
+				data: {
+					sessions: [
+						{
+							id: "standalone-1",
+							displayName: "Research",
+							provisionState: "failed",
+							provisionError: "Agent failed to start",
+							provisionSteps: [{ id: "agent", status: "running", startedAt: "2026-06-10T16:15:00Z" }],
+							harness: "codex",
+							status: "working",
+							isTerminated: false,
+							updatedAt: "2026-06-10T16:15:04Z",
+						},
+					],
+				},
+				error: undefined,
+			},
+		});
+
+		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
+		await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+		expect(result.current.data?.map((workspace) => workspace.id)).toEqual(["proj-1", "__standalone__"]);
+		expect(result.current.data?.[1]).toMatchObject({
+			id: "__standalone__",
+			name: "Scratchpad",
+			kind: "standalone",
+		});
+		expect(result.current.data?.[1].sessions[0]).toMatchObject({
+			id: "standalone-1",
+			workspaceId: "__standalone__",
+			workspaceName: "Scratchpad",
+			title: "Research",
+			branch: undefined,
+			provisionState: "failed",
+			provisionError: "Agent failed to start",
+			provisionSteps: [{ id: "agent", status: "running", startedAt: "2026-06-10T16:15:00Z" }],
+		});
+	});
+
+	it("localizes the standalone workspace name", async () => {
+		await appI18n.changeLanguage("zh-CN");
+		respondWith({
+			sessions: {
+				data: {
+					sessions: [
+						{
+							id: "standalone-1",
+							harness: "codex",
+							status: "working",
+							isTerminated: false,
+							updatedAt: "2026-06-10T16:15:04Z",
+						},
+					],
+				},
+				error: undefined,
+			},
+		});
+
+		try {
+			const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
+			await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+			expect(result.current.data?.[0]).toMatchObject({ name: "草稿区" });
+			expect(result.current.data?.[0].sessions[0]).toMatchObject({ workspaceName: "草稿区" });
+		} finally {
+			await appI18n.changeLanguage("en");
+		}
+	});
+
+	it("maps each session's prs straight from the session list", async () => {
+		respondWith({
+			projects: { data: { projects: [{ id: "proj-1", name: "my-app", path: "/p" }] }, error: undefined },
+			sessions: {
+				data: {
+					sessions: [
+						{
+							id: "sess-1",
+							projectId: "proj-1",
+							status: "pr_open",
+							isTerminated: false,
+							updatedAt: "2026-06-10T16:15:04Z",
+							prs: [
+								{
+									number: 278,
+									state: "open",
+									url: "u",
+									ci: "passing",
+									review: "approved",
+									mergeability: "clean",
+									reviewComments: false,
+									updatedAt: "2026-06-10T16:15:04Z",
+								},
+							],
+						},
+						{
+							id: "sess-2",
+							projectId: "proj-1",
+							status: "working",
+							isTerminated: false,
+							updatedAt: "2026-06-10T16:15:04Z",
+						},
+					],
+				},
+				error: undefined,
+			},
+		});
+
+		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
+		await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+		const sessions = result.current.data?.[0].sessions ?? [];
+		expect(sessions[0].prs).toEqual([
+			{
+				number: 278,
+				state: "open",
+				url: "u",
+				ci: "passing",
+				review: "approved",
+				mergeability: "clean",
+				reviewComments: false,
+				updatedAt: "2026-06-10T16:15:04Z",
+			},
+		]);
+		// A session with no PRs maps to an empty stack, so the empty states render.
+		expect(sessions[1].prs).toEqual([]);
+	});
+
+	it("preserves backend merged status for terminated merged sessions", async () => {
+		respondWith({
+			projects: { data: { projects: [{ id: "proj-1", name: "my-app", path: "/p" }] }, error: undefined },
+			sessions: {
+				data: {
+					sessions: [
+						{
+							id: "sess-1",
+							projectId: "proj-1",
+							status: "merged",
+							isTerminated: true,
+							updatedAt: "2026-06-10T16:15:04Z",
+						},
+					],
+				},
+				error: undefined,
+			},
+		});
+
+		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
+		await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+		expect(result.current.data?.[0].sessions[0].status).toBe("merged");
+		expect(result.current.data?.[0].sessions[0].isTerminated).toBe(true);
+	});
+
+	it("falls back to terminated for terminated sessions without a known backend status", async () => {
+		respondWith({
+			projects: { data: { projects: [{ id: "proj-1", name: "my-app", path: "/p" }] }, error: undefined },
+			sessions: {
+				data: {
+					sessions: [
+						{
+							id: "sess-1",
+							projectId: "proj-1",
+							status: "bogus",
+							isTerminated: true,
+							updatedAt: "2026-06-10T16:15:04Z",
+						},
+					],
+				},
+				error: undefined,
+			},
+		});
+
+		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
+		await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+		expect(result.current.data?.[0].sessions[0].status).toBe("terminated");
+		expect(result.current.data?.[0].sessions[0].isTerminated).toBe(true);
+	});
+
+	it("surfaces a projects fetch error", async () => {
+		const failure = new TypeError("Failed to fetch");
+		respondWith({ projects: { data: undefined, error: failure } });
+
+		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
+
+		await waitFor(() => expect(result.current.isError).toBe(true), { timeout: 3_000 });
+		expect(result.current.error).toBe(failure);
+		expect(setQueryHealthyMock).toHaveBeenCalledWith("history", false, "workspaces");
+	});
+
+	it("surfaces a sessions fetch error even when projects load", async () => {
+		const failure = new Error("sessions backend down");
+		respondWith({
+			projects: { data: { projects: [{ id: "proj-1", name: "my-app", path: "/p" }] }, error: undefined },
+			sessions: { data: undefined, error: failure },
+		});
+
+		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
+
+		await waitFor(() => expect(result.current.isError).toBe(true), { timeout: 3_000 });
+		expect(result.current.error).toBe(failure);
+	});
+
+	it("merges control-plane projects after local ones with kind cloud", async () => {
+		cloudState.ready = true;
+		cloudState.org = { id: "org-1" };
+		listProjectsMock.mockResolvedValue({
+			items: [
+				{
+					id: "cp-1",
+					orgId: "org-1",
+					displayName: "cloud-app",
+					repositoryUrl: "https://github.com/acme/cloud-app",
+					defaultBranch: "main",
+					config: {},
+					createdAt: "2026-08-01T00:00:00Z",
+					updatedAt: "2026-08-01T00:00:00Z",
+				},
+			],
+			page: { hasMore: false },
+		});
+		respondWith({
+			projects: { data: { projects: [{ id: "proj-1", name: "my-app", path: "/p" }] }, error: undefined },
+			sessions: {
+				data: {
+					sessions: [
+						{
+							id: "standalone-1",
+							displayName: "Research",
+							harness: "codex",
+							status: "working",
+							isTerminated: false,
+							updatedAt: "2026-06-10T16:15:04Z",
+						},
+					],
+				},
+				error: undefined,
+			},
+		});
+
+		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
+		await waitFor(() => expect(result.current.data).toHaveLength(3));
+
+		expect(result.current.data?.[0]).toMatchObject({ id: "proj-1", name: "my-app", path: "/p" });
+		expect(result.current.data?.[1]).toEqual({
+			id: "cp-1",
+			cloudOrgId: "org-1",
+			name: "cloud-app",
+			kind: "cloud",
+			path: "",
+			sessions: [],
+		});
+		expect(result.current.data?.[2]).toMatchObject({ id: "__standalone__", name: "Scratchpad" });
+		expect(listProjectsMock).toHaveBeenCalledWith("org-1", { limit: 100 });
+	});
+
+	it("maps Cloud failing-check details into the shared PR facts", async () => {
+		cloudState.ready = true;
+		cloudState.org = { id: "org-1" };
+		listProjectsMock.mockResolvedValue({
+			items: [{ id: "cp-1", displayName: "cloud-app" }],
+			page: { hasMore: false },
+		});
+		listSessionsMock.mockResolvedValue({
+			items: [{
+				id: "cloud-session-1", projectId: "cp-1", displayName: "Fix CI",
+				harness: "codex", kind: "worker", status: "working", isTerminated: false,
+				createdAt: "2026-08-01T00:00:00Z", updatedAt: "2026-08-01T00:00:00Z",
+				prs: [{
+					url: "https://github.com/acme/cloud-app/pull/7", number: 7, state: "open",
+					ci: "failing", review: "none", mergeability: "blocked", reviewComments: false,
+					failingChecks: [{ name: "unit", status: "failed", conclusion: "failure", url: "https://ci/unit" }],
+					updatedAt: "2026-08-01T00:00:00Z",
+				}],
+			}],
+			page: { hasMore: false },
+		});
+		respondWith({ projects: { data: { projects: [] } }, sessions: { data: { sessions: [] } } });
+
+		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
+		await waitFor(() => expect(result.current.data?.[0]?.sessions).toHaveLength(1));
+
+		expect(result.current.data?.[0]?.sessions[0]?.prs[0]?.failingChecks).toEqual([
+			{ name: "unit", status: "failed", conclusion: "failure", url: "https://ci/unit" },
+		]);
+	});
+
+	it("keeps local projects when the cloud fetch fails", async () => {
+		cloudState.ready = true;
+		cloudState.org = { id: "org-1" };
+		listProjectsMock.mockRejectedValue(new Error("control plane down"));
+		respondWith({
+			projects: { data: { projects: [{ id: "proj-1", name: "my-app", path: "/p" }] }, error: undefined },
+		});
+
+		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
+		await waitFor(() => expect(result.current.isSuccess).toBe(true));
+		await waitFor(() => expect(listProjectsMock).toHaveBeenCalled());
+
+		expect(result.current.data).toHaveLength(1);
+		expect(result.current.data?.[0]).toMatchObject({ id: "proj-1" });
+		expect(result.current.isError).toBe(false);
+	});
+
+	it("does not call the control plane while cloud is not ready", async () => {
+		respondWith({
+			projects: { data: { projects: [{ id: "proj-1", name: "my-app", path: "/p" }] }, error: undefined },
+		});
+
+		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
+		await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+		expect(listProjectsMock).not.toHaveBeenCalled();
+	});
 
 	it("selects only attention-worthy worker sessions for the always-mounted tray", async () => {
 		respondWith({
@@ -1102,8 +707,98 @@ describe("useWorkspaceQuery — multi-host", () => {
 		const { result } = renderHook(() => useWorkspaceTraySessions(), { wrapper });
 		await waitFor(() => expect(result.current.isSuccess).toBe(true));
 		expect(result.current.data).toEqual([
-				{ host: LOCAL_HOST, projectId: "proj-1", projectName: "my-app", sessionId: "needs-input", title: "Needs input", zone: "action" },
-				{ host: LOCAL_HOST, projectId: "proj-1", projectName: "my-app", sessionId: "mergeable", title: "Mergeable", zone: "merge" },
+			{ projectId: "proj-1", projectName: "my-app", sessionId: "needs-input", title: "Needs input", zone: "action" },
+			{ projectId: "proj-1", projectName: "my-app", sessionId: "mergeable", title: "Mergeable", zone: "merge" },
 		]);
+	});
+});
+
+describe("useWorkspaceScope board presentation", () => {
+	it("reads a hosted session without contacting the laptop or AO Cloud", async () => {
+		cloudState.ready = true;
+		cloudState.org = { id: "org-1" };
+		remoteGetMock.mockImplementation(async (path: string) => path.endsWith("/projects")
+			? { data: { projects: [{ id: "p", name: "Hosted", path: "/host/repo" }] } }
+			: { data: { sessions: [{ id: "s", projectId: "p", kind: "worker", status: "working" }] } });
+		const { result } = renderHook(() => useWorkspaceSession("s", "box-a"), { wrapper });
+		await waitFor(() => expect(result.current.data?.id).toBe("s"));
+		expect(result.current.data?.hostId).toBe("box-a");
+		expect(getMock).not.toHaveBeenCalled();
+		expect(listProjectsMock).not.toHaveBeenCalled();
+		expect(listSessionsMock).not.toHaveBeenCalled();
+	});
+
+	it("reads a hosted project from its selected daemon without querying local or cloud", async () => {
+		cloudState.ready = true;
+		cloudState.org = { id: "org-1" };
+		remoteGetMock.mockImplementation(async (path: string) => path.endsWith("/projects")
+			? { data: { projects: [{ id: "p", name: "Hosted", path: "/host/repo" }] } }
+			: { data: { sessions: [{ id: "s", projectId: "p", kind: "worker", status: "working" }] } });
+		const { result } = renderHook(() => useWorkspaceScope("p", "s", "box-a"), { wrapper });
+		await waitFor(() => expect(result.current.data?.session?.id).toBe("s"));
+		expect(result.current.data?.project?.name).toBe("Hosted");
+		expect(remoteGetMock).toHaveBeenCalledTimes(2);
+		expect(getMock).not.toHaveBeenCalled();
+		expect(listProjectsMock).not.toHaveBeenCalled();
+		expect(listSessionsMock).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		{ kind: "orchestrator", isTerminated: false, expected: false },
+		{ kind: "orchestrator", isTerminated: true, expected: false },
+		{ kind: "worker", isTerminated: false, expected: true },
+		{ kind: "worker", isTerminated: true, expected: true },
+		{ kind: undefined, isTerminated: false, expected: true },
+	])("projects worker presence for $kind, terminated=$isTerminated", async ({ kind, isTerminated, expected }) => {
+		respondWith({
+			projects: { data: { projects: [{ id: "p", name: "project", path: "/repo" }] } },
+			sessions: { data: { sessions: [{ id: "s", projectId: "p", kind, isTerminated, status: "working" }] } },
+		});
+		const { result } = renderHook(() => useWorkspaceScope("p"), { wrapper });
+		await waitFor(() => expect(result.current.isSuccess).toBe(true));
+		expect(result.current.data?.hasWorkerSessions).toBe(expected);
+		expect(result.current.data?.project).not.toHaveProperty("sessions");
+	});
+
+	it("resolves a cloud board after the local query succeeds without a matching project", async () => {
+		cloudState.ready = true;
+		cloudState.org = { id: "org-1" };
+		respondWith({});
+		listProjectsMock.mockResolvedValue({ items: [{ id: "cloud-1", displayName: "Cloud project" }] });
+		listSessionsMock.mockResolvedValue({ items: [{ id: "cloud-worker", projectId: "cloud-1", kind: "worker", status: "working" }] });
+		const { result } = renderHook(() => useWorkspaceScope("cloud-1"), { wrapper });
+		await waitFor(() => expect(result.current.data?.hasWorkerSessions).toBe(true));
+		expect(result.current.data?.project).toMatchObject({ id: "cloud-1", kind: "cloud", name: "Cloud project" });
+	});
+});
+
+describe("useWorkspacePolling", () => {
+	it("polls once per interval however many components subscribe", async () => {
+		vi.useFakeTimers();
+		try {
+			respondWith({});
+			const queryClient = new QueryClient({ defaultOptions: { queries: { retryDelay: 0 } } });
+			const shared = ({ children }: { children: ReactNode }) => (
+				<QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+			);
+			renderHook(
+				() => {
+					useWorkspacePolling();
+					useWorkspaceQuery();
+					useWorkspaceQuery();
+					useWorkspaceTraySessions();
+				},
+				{ wrapper: shared },
+			);
+			await vi.advanceTimersByTimeAsync(0);
+			const sessionFetches = () => getMock.mock.calls.filter(([url]) => url === "/api/v1/sessions").length;
+			const afterMount = sessionFetches();
+			await vi.advanceTimersByTimeAsync(15_000);
+			expect(sessionFetches()).toBe(afterMount + 1);
+			await vi.advanceTimersByTimeAsync(15_000);
+			expect(sessionFetches()).toBe(afterMount + 2);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

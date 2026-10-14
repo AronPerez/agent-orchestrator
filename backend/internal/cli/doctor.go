@@ -267,7 +267,7 @@ func (c *commandContext) checkDaemonBuild(st daemonStatus, cliBuild daemonmeta.B
 	if err != nil || self == "" {
 		self = "this ao binary"
 	}
-	daemonPath := st.executable
+	daemonPath := st.ExecutablePath
 	if daemonPath == "" {
 		daemonPath = "the running daemon"
 	}

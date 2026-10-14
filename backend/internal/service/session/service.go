@@ -2,7 +2,6 @@ package session
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,7 +33,6 @@ type Store interface {
 	GetSessionByClientRequestID(ctx context.Context, id string) (domain.SessionRecord, bool, error)
 	ListSessions(ctx context.Context, project domain.ProjectID) ([]domain.SessionRecord, error)
 	ListAllSessions(ctx context.Context) ([]domain.SessionRecord, error)
-	ListSessionsPage(ctx context.Context, query ports.SessionPageQuery) ([]domain.SessionRecord, error)
 	GetActiveAgentSwitch(ctx context.Context, sessionID domain.SessionID) (domain.AgentSwitch, bool, error)
 	ListActiveAgentSwitches(ctx context.Context) ([]domain.AgentSwitch, error)
 	RenameSession(ctx context.Context, id domain.SessionID, displayName string, updatedAt time.Time) (bool, error)
@@ -69,24 +67,6 @@ type ListFilter struct {
 	OrchestratorOnly bool
 	Fresh            bool
 }
-
-// ListPageRequest is ListFilter plus the page: PageSize rows, resuming after
-// PageToken when set. Pagination is opt-in; List keeps the return-all contract.
-type ListPageRequest struct {
-	ListFilter
-	PageSize  int
-	PageToken string
-}
-
-// Page is one page of sessions, newest first, and the token for the
-// next page, empty on the last one.
-type Page struct {
-	Sessions      []domain.Session
-	NextPageToken string
-}
-
-// ErrInvalidPageToken reports a page token this daemon did not mint.
-var ErrInvalidPageToken = errors.New("invalid page token")
 
 // commander is the command-side surface Service delegates to: the
 // *sessionmanager.Manager in production, a fake in tests.
@@ -239,11 +219,15 @@ type Service struct {
 	// deliver activity signals at all. Only capable harnesses are eligible for
 	// the no_signal downgrade: a hook-less harness staying silent forever is
 	// normal, not a broken pipeline. nil means "unknown": never downgrade.
-	signalCapable func(domain.AgentHarness) bool
+	signalCapable         func(domain.AgentHarness) bool
+	chatProviderPreserved func(domain.SessionID) bool
 	// runtimeUnreachable reports whether AO's last liveness probe could reach a
 	// session's runtime. nil means "unknown": no session is ever flagged.
-	runtimeUnreachable     func(domain.SessionID) bool
-	chatProviderPreserved  func(domain.SessionID) bool
+	runtimeUnreachable func(domain.SessionID) bool
+	// githubIdentity optionally resolves the operator's authenticated GitHub
+	// account so the handle rides along with product telemetry. Nil disables it
+	// and the emitter degrades to anonymous.
+	githubIdentity         ports.ScopedIdentityResolver
 	titleRefinementSlots   chan struct{}
 	titleRefinementMu      sync.Mutex
 	titleRefinementCancels map[domain.SessionID]context.CancelFunc
@@ -293,10 +277,9 @@ type Deps struct {
 	// wiring passes activitydispatch.SupportsHarness. Left nil, no session is
 	// ever downgraded to no_signal.
 	SignalCapable func(domain.AgentHarness) bool
-	// RuntimeUnreachable surfaces the lifecycle reducer's last runtime
-	// reachability observation on the read model; daemon wiring passes
-	// lifecycle.Manager.RuntimeUnreachable. Left nil, no session is flagged.
-	RuntimeUnreachable func(domain.SessionID) bool
+	// GithubIdentity resolves the operator's authenticated GitHub account so the
+	// handle rides along with product telemetry.
+	GithubIdentity ports.ScopedIdentityResolver
 	// OutputTypeReconciler persists the durable OutputType column; daemon
 	// wiring passes the shared *lifecycle.Manager. Left nil, ClaimPR still
 	// succeeds but the pr OutputType only lands on the next artifact-output
@@ -305,6 +288,10 @@ type Deps struct {
 	// ArtifactDeleter deletes a session's artifacts; daemon wiring passes the
 	// shared *artifactversions.Capturer so a delete cannot race a capture.
 	ArtifactDeleter artifactDeleter
+	// RuntimeUnreachable surfaces the lifecycle reducer's last runtime
+	// reachability observation on the read model; daemon wiring passes
+	// lifecycle.Manager.RuntimeUnreachable. Left nil, no session is flagged.
+	RuntimeUnreachable func(domain.SessionID) bool
 }
 
 // NewWithDeps wires a session service with optional PR-claim dependencies.
@@ -313,7 +300,7 @@ func NewWithDeps(d Deps) *Service {
 	if backgroundContext == nil {
 		backgroundContext = context.Background()
 	}
-	s := &Service{manager: d.Manager, store: d.Store, prClaimer: d.PRClaimer, scm: d.SCM, tracker: d.Tracker, clock: d.Clock, dataDir: d.DataDir, signalCapable: d.SignalCapable, runtimeUnreachable: d.RuntimeUnreachable, telemetry: d.Telemetry, logger: d.Logger, backgroundContext: backgroundContext, agentReadiness: d.AgentReadiness, titleRefinementSlots: make(chan struct{}, delegatedTaskTitleConcurrency), titleRefinementCancels: map[domain.SessionID]context.CancelFunc{}, outputTypeReconciler: d.OutputTypeReconciler, artifactDeleter: d.ArtifactDeleter}
+	s := &Service{manager: d.Manager, store: d.Store, prClaimer: d.PRClaimer, scm: d.SCM, tracker: d.Tracker, clock: d.Clock, dataDir: d.DataDir, signalCapable: d.SignalCapable, runtimeUnreachable: d.RuntimeUnreachable, telemetry: d.Telemetry, logger: d.Logger, backgroundContext: backgroundContext, agentReadiness: d.AgentReadiness, githubIdentity: d.GithubIdentity, titleRefinementSlots: make(chan struct{}, delegatedTaskTitleConcurrency), titleRefinementCancels: map[domain.SessionID]context.CancelFunc{}, outputTypeReconciler: d.OutputTypeReconciler, artifactDeleter: d.ArtifactDeleter}
 	if s.prClaimer == nil {
 		if w, ok := d.Store.(ports.PRClaimer); ok {
 			s.prClaimer = w
@@ -491,6 +478,9 @@ func (s *Service) emitSpawned(ctx context.Context, rec domain.SessionRecord, dur
 		"harness":     string(rec.Harness),
 		"duration_ms": durationMs,
 	}
+	if actor, ok := s.githubActor(ctx); ok {
+		payload["github_actor"] = actor
+	}
 	s.telemetry.Emit(context.Background(), ports.TelemetryEvent{
 		Name:       "ao.session.spawned",
 		Source:     "session_service",
@@ -501,6 +491,22 @@ func (s *Service) emitSpawned(ctx context.Context, rec domain.SessionRecord, dur
 		RequestID:  reqid.FromContext(ctx),
 		Payload:    payload,
 	})
+}
+
+// githubActor returns the operator's GitHub login when the authenticated
+// account resolves to a human, and ("", false) for every failure mode (resolver
+// unset, no token, GET /user failure, offline, org or bot account, empty login)
+// so the event stays anonymous. Host is left empty because GitHub identity is
+// not host-scoped.
+func (s *Service) githubActor(ctx context.Context) (string, bool) {
+	if s.githubIdentity == nil {
+		return "", false
+	}
+	identity, err := s.githubIdentity.AuthenticatedIdentityForProvider(ctx, "github", "")
+	if err != nil || !identity.Human || identity.Login == "" {
+		return "", false
+	}
+	return identity.Login, true
 }
 
 func (s *Service) emitFirstSessionSpawned(ctx context.Context, rec domain.SessionRecord, project domain.ProjectRecord) {
@@ -1131,97 +1137,6 @@ func (s *Service) List(ctx context.Context, filter ListFilter) ([]domain.Session
 	if err != nil {
 		return nil, err
 	}
-	filtered := make([]domain.SessionRecord, 0, len(recs))
-	for _, rec := range recs {
-		if matchesSessionFilter(rec, filter) {
-			filtered = append(filtered, rec)
-		}
-	}
-	return s.enrichRecords(ctx, filtered, recoveryRevision)
-}
-
-// ListPage is List with the page applied in SQL: newest first by
-// (updated_at, id), PageSize rows, and a NextPageToken while more exist. The
-// store is asked for one row past the page so "is there a next page" costs
-// no second query.
-func (s *Service) ListPage(ctx context.Context, req ListPageRequest) (Page, error) {
-	if req.PageSize <= 0 {
-		return Page{}, fmt.Errorf("page size must be positive, got %d", req.PageSize)
-	}
-	query := ports.SessionPageQuery{
-		Project:          req.ProjectID,
-		OrchestratorOnly: req.OrchestratorOnly,
-		Limit:            req.PageSize + 1,
-	}
-	// Same semantics as matchesSessionFilter: Fresh means live, Active flips on
-	// IsTerminated, and asking for terminated-and-fresh is the empty set.
-	if req.Fresh {
-		live := false
-		query.Terminated = &live
-	}
-	if req.Active != nil {
-		terminated := !*req.Active
-		if query.Terminated != nil && *query.Terminated != terminated {
-			return Page{Sessions: []domain.Session{}}, nil
-		}
-		query.Terminated = &terminated
-	}
-	if req.PageToken != "" {
-		cursor, err := DecodePageToken(req.PageToken)
-		if err != nil {
-			return Page{}, err
-		}
-		query.Before = &cursor
-	}
-	recoveryRevision := s.statusRecoveryRevision()
-	recs, err := s.store.ListSessionsPage(ctx, query)
-	if err != nil {
-		return Page{}, fmt.Errorf("list sessions page: %w", err)
-	}
-	var next string
-	if len(recs) > req.PageSize {
-		recs = recs[:req.PageSize]
-		last := recs[len(recs)-1]
-		next = EncodePageToken(ports.SessionPageCursor{UpdatedAt: last.UpdatedAt, ID: last.ID})
-	}
-	sessions, err := s.enrichRecords(ctx, recs, recoveryRevision)
-	if err != nil {
-		return Page{}, err
-	}
-	return Page{Sessions: sessions, NextPageToken: next}, nil
-}
-
-// EncodePageToken makes a page token: the keyset of a page's last row,
-// base64url so it survives a query string. Tokens are opaque to clients and
-// unsigned on purpose — a forged one can only move the window, never widen
-// the filter.
-func EncodePageToken(cursor ports.SessionPageCursor) string {
-	return base64.RawURLEncoding.EncodeToString([]byte(cursor.UpdatedAt.UTC().Format(time.RFC3339Nano) + "\n" + string(cursor.ID)))
-}
-
-// DecodePageToken inverts EncodePageToken; anything else is ErrInvalidPageToken.
-func DecodePageToken(token string) (ports.SessionPageCursor, error) {
-	raw, err := base64.RawURLEncoding.DecodeString(token)
-	if err != nil {
-		return ports.SessionPageCursor{}, ErrInvalidPageToken
-	}
-	at, id, ok := strings.Cut(string(raw), "\n")
-	if !ok || id == "" {
-		return ports.SessionPageCursor{}, ErrInvalidPageToken
-	}
-	updatedAt, err := time.Parse(time.RFC3339Nano, at)
-	if err != nil {
-		return ports.SessionPageCursor{}, ErrInvalidPageToken
-	}
-	return ports.SessionPageCursor{UpdatedAt: updatedAt, ID: domain.SessionID(id)}, nil
-}
-
-// enrichRecords turns records into the display read model: active agent
-// switches, PR facts and current-head review runs, each fetched in one batched
-// read for the whole slice.
-// recoveryRevision is read before the records were listed, so a status
-// recovery that lands mid-read marks the page as still checking.
-func (s *Service) enrichRecords(ctx context.Context, recs []domain.SessionRecord, recoveryRevision uint64) ([]domain.Session, error) {
 	activeSwitches, err := s.store.ListActiveAgentSwitches(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list active agent switches: %w", err)
@@ -1230,9 +1145,13 @@ func (s *Service) enrichRecords(ctx context.Context, recs []domain.SessionRecord
 	for _, agentSwitch := range activeSwitches {
 		activeBySession[agentSwitch.SessionID] = agentSwitch
 	}
+	filtered := make([]domain.SessionRecord, 0, len(recs))
 	ids := make([]domain.SessionID, 0, len(recs))
 	for _, rec := range recs {
-		ids = append(ids, rec.ID)
+		if matchesSessionFilter(rec, filter) {
+			filtered = append(filtered, rec)
+			ids = append(ids, rec.ID)
+		}
 	}
 	prsBySession, err := s.store.ListPRFactsForSessions(ctx, ids)
 	if err != nil {
@@ -1242,8 +1161,8 @@ func (s *Service) enrichRecords(ctx context.Context, recs []domain.SessionRecord
 	if err != nil {
 		return nil, fmt.Errorf("list review runs: %w", err)
 	}
-	out := make([]domain.Session, 0, len(recs))
-	for _, rec := range recs {
+	out := make([]domain.Session, 0, len(filtered))
+	for _, rec := range filtered {
 		sess, err := s.toSessionWithFacts(ctx, rec, prsBySession[rec.ID], runsBySession[rec.ID])
 		if err != nil {
 			return nil, err

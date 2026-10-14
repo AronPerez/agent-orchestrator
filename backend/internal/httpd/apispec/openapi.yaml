@@ -3334,51 +3334,6 @@ paths:
       summary: Initialize a selected folder as a Git repository with an initial commit
       tags:
       - projects
-  /api/v1/prs/{id}/close:
-    post:
-      operationId: closePR
-      parameters:
-      - description: PR number.
-        in: path
-        name: id
-        required: true
-        schema:
-          description: PR number.
-          type: string
-      responses:
-        "200":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ClosePRResponse'
-          description: OK
-        "404":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/APIError'
-          description: Not Found
-        "409":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/APIError'
-          description: Conflict
-        "422":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/APIError'
-          description: Unprocessable Entity
-        "501":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/APIError'
-          description: Not Implemented
-      summary: Close a pull request
-      tags:
-      - prs
   /api/v1/prs/{id}/merge:
     post:
       operationId: mergePR
@@ -4159,25 +4114,6 @@ paths:
           type:
           - "null"
           - boolean
-      - description: Page size. Absent returns every matching session; present pages
-          the list newest first by update time, and the response carries nextPageToken
-          while more remain. Values above 500 are clamped to 500.
-        in: query
-        name: pageSize
-        schema:
-          description: Page size. Absent returns every matching session; present pages
-            the list newest first by update time, and the response carries nextPageToken
-            while more remain. Values above 500 are clamped to 500.
-          minimum: 1
-          type:
-          - "null"
-          - integer
-      - description: Opaque cursor from a previous page's nextPageToken.
-        in: query
-        name: pageToken
-        schema:
-          description: Opaque cursor from a previous page's nextPageToken.
-          type: string
       responses:
         "200":
           content:
@@ -9080,45 +9016,6 @@ paths:
       summary: Switch a logical AO session to another agent harness
       tags:
       - sessions
-  /api/v1/sessions/{sessionId}/workspace-location:
-    get:
-      operationId: getSessionWorkspaceLocation
-      parameters:
-      - description: Session identifier, e.g. project-1.
-        in: path
-        name: sessionId
-        required: true
-        schema:
-          description: Session identifier, e.g. project-1.
-          type: string
-      responses:
-        "200":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/DesktopWorkspaceLocationResponse'
-          description: OK
-        "404":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/APIError'
-          description: Not Found
-        "500":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/APIError'
-          description: Internal Server Error
-        "501":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/APIError'
-          description: Not Implemented
-      summary: Resolve a session workspace location over the authenticated API
-      tags:
-      - sessions
   /api/v1/sessions/{sessionId}/workspace/diffs:
     post:
       operationId: getSessionWorkspaceDiffs
@@ -11297,8 +11194,6 @@ components:
         connectedAt:
           format: date-time
           type: string
-        persistentProfile:
-          type: boolean
         sessionId:
           type: string
         transport:
@@ -11307,7 +11202,6 @@ components:
       - sessionId
       - connected
       - transport
-      - persistentProfile
       type: object
     CancelReviewResponse:
       properties:
@@ -11456,16 +11350,6 @@ components:
       required:
       - remoteUrl
       - destinationParent
-      type: object
-    ClosePRResponse:
-      properties:
-        ok:
-          type: boolean
-        prNumber:
-          type: integer
-      required:
-      - ok
-      - prNumber
       type: object
     CodewhaleLifecycleEvent:
       properties:
@@ -14308,8 +14192,6 @@ components:
       type: object
     ListSessionsResponse:
       properties:
-        nextPageToken:
-          type: string
         sessions:
           items:
             $ref: '#/components/schemas/ControllersSessionView'
@@ -14880,8 +14762,6 @@ components:
         agentRulesFile:
           type: string
         autoReview:
-          type: boolean
-        browserPersistentProfile:
           type: boolean
         canonicalRepoURL:
           type: string

@@ -240,7 +240,7 @@ async function installHarness(page: Page): Promise<void> {
 		[handleF]: "F short replay",
 		[orchestratorHandle]: "Orchestrator ready",
 	});
-	await page.goto(`/#/host/local/session/${sessionA.id}`);
+	await page.goto(`/#/projects/fake-proj/sessions/${sessionA.id}`);
 	await expect(activeTerminal(page)).toBeVisible();
 	await expect(page.getByTestId("terminal-replay-cover")).toHaveCount(0);
 	await expect(

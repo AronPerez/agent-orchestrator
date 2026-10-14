@@ -660,13 +660,13 @@ func (c *commandContext) runHook(ctx context.Context, agent, event string) error
 	}
 
 	toolName, toolUseID := activityMeta(payload)
-	agentCWD := hookAgentCWD(payload)
 	if domain.AgentHarness(agent) == domain.HarnessCursor && event == "post-tool-use-failure" {
 		if failureEvent, failureTool, ok := cursor.TerminalFailureCorrelation(payload); ok {
 			event = failureEvent
 			toolName = failureTool
 		}
 	}
+	agentCWD := hookAgentCWD(payload)
 	conversation := hookConversationSnapshot{}
 	switch domain.AgentHarness(agent) {
 	case domain.HarnessClaudeCode, domain.HarnessCodex, domain.HarnessContinue:

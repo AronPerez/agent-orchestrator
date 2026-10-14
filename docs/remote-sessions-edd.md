@@ -341,49 +341,39 @@ is warranted now.
 
 # Metrics & Monitoring
 
-**Shipped (AO-78).** This section was the weakest part of the implementation — the remote
-path had no telemetry and no logging at all, so "I expected my remote session to update and
-it didn't — why?" was unanswerable from anywhere. The instrumentation below is now in place.
+**This section is the weakest part of the current implementation and should be treated as
+required follow-up work, not as shipped.**
 
-**Instrumentation:**
+**Current state, verified:** there is **no telemetry and no logging anywhere in the remote
+path.** `main/remote-proxy.ts` emits no logs; `host-clients.ts`, `host-events.ts` and
+`active-host.ts` emit no `captureRendererEvent` calls. The app has an existing renderer
+telemetry facility (`captureRendererEvent`, used elsewhere e.g. `NotificationCenter`,
+`ShellTopbar`) and the daemon has structured `slog` logging, so the plumbing exists and is
+simply not wired up here.
 
-| Signal | Why | Where |
-| --- | --- | --- |
-| `ao.renderer.host_connect` (result: online/unauthorized/offline/not-a-daemon, duration, source: add/edit/probe) | Is adding a host succeeding, and which failure mode dominates? | `renderer/lib/host-telemetry.ts`, emitted from the add/edit dialog and the saved-host probe |
-| `ao.renderer.host_stream_state` (host, connected/disconnected, reconnect count) | Detect the silent no-live-updates case | `renderer/lib/host-events.ts`, on each state transition |
-| `ao.renderer.host_query_failed` (host, status) | Per-host data failures, previously invisible — remote clients are plain `openapi-fetch` clients and bypass `api-client`'s `ao.renderer.api_error` | `renderer/hooks/useWorkspaceQuery.ts`, in `fetchHostSection` |
-| Proxy lifecycle logs in main (start/stop, upstream error, 502) — **never the token or password** | Debuggability for "the app can't reach my host" | `main/remote-proxy.ts` |
-| `hostConnectionState` surfaced in the UI | The user is the fastest detector | Sidebar host notice: "Not receiving live updates from {host}", carried on `HostSection.streamState` |
+**Concrete consequence:** `hostConnectionState` has no consumer. If a host's event stream
+fails to connect, the user sees a board that quietly stops updating and falls back to
+polling, with nothing anywhere reporting it. "I expected my remote session to update and it
+didn't — why?" is currently **not answerable** from logs or metrics.
+
+**Proposed instrumentation (recommend as a gating follow-up):**
+
+| Signal | Why |
+| --- | --- |
+| `ao.renderer.host_connect` (result: online/unauthorized/offline/not-a-daemon, duration) | Is adding a host succeeding, and which failure mode dominates? |
+| `ao.renderer.host_stream_state` (host, connected/disconnected, reconnect count) | Detect the silent no-live-updates case |
+| `ao.renderer.host_query_failed` (host, status) | Per-host data failures, currently invisible |
+| Proxy lifecycle logs in main (start/stop, upstream error, 502) — **never the token or password** | Debuggability for "the app can't reach my host" |
+| Surface `hostConnectionState` in the UI | The user is the fastest detector; a "not receiving live updates" indicator costs little |
 
 **Alerting/pages:** **N/A** — this is a locally-installed desktop app with no on-call
 surface. Detection is user-facing and telemetry is aggregate/diagnostic, not paging.
 
-**No-secrets rules, enforced by tests:**
+**What is logged today (and must stay true):** the connection password is never logged, never
+sent to the renderer, and never crosses to the remote daemon in the URL (the proxy token is
+stripped before forwarding). Any instrumentation added must preserve all three.
 
-- The connection password is never logged, never sent to the renderer, and never crosses to
-the remote daemon in the URL (the proxy token is stripped before forwarding). All three
-were true before this work and remain true.
-- `main/remote-proxy.ts` logs the upstream address and the *post-strip* request path only.
-It must never log `req.url` — its first segment IS the proxy token — nor `entry.password`.
-- A host id IS a LAN address, so no `ao.renderer.host_*` event carries one. `host_id` is
-hashed to `host_id_hash` by `sanitizeRendererProperties`, exactly as project ids are, and
-`host_kind` (`local`/`remote`) is the only host attribute sent in the clear. Every other
-property is dropped by the allowlist.
-- `ao.renderer.host_query_failed` sends a status, never the daemon's error text, which can
-carry paths.
-
-**Volume control:** `captureRendererEvent`'s per-name rate limit is shared across hosts, so
-`host_query_failed` additionally collapses repeats of the same (host, status) inside a
-five-minute window — a host that is simply switched off refetches every 15 seconds forever
-and would otherwise spend the whole daily ceiling and hide the next host to break.
-`host_stream_state` fires on transitions only, because `EventSource` calls `onerror`
-repeatedly while it retries.
-
-**Two states, not one:** `hostConnectionState` distinguishes `idle` (no stream was ever
-opened — jsdom, preview surfaces) from `disconnected` (a stream that dropped). Only the
-second one means the board went stale, and only it is reported or shown.
-
-**Cost:** small — one existing telemetry helper and a handful of `console` calls. No new
+**Cost:** small — one existing telemetry helper and a handful of `slog` calls. No new
 infrastructure, no new vendor, no storage cost beyond existing telemetry volume.
 
 ---
@@ -460,8 +450,8 @@ they trust (home/office LAN, or a Tailscale tailnet). It is **not** designed for
 networks, shared machines, or multi-tenant use.
 
 **Security review:** the daemon's LAN listener and origin policy were reviewed when Phase 1
-shipped. The client-side additions — the loopback proxy, its token, and `remotes.json` custody —
-were reviewed under **AO-79 (2026-08-21)**; findings and accepted risks are recorded below.
+shipped. **The client-side additions here — the loopback proxy and its token — have not had a
+formal security review and should get one before this is promoted beyond internal use.**
 
 **Attack surface and mitigations:**
 
@@ -469,8 +459,8 @@ were reviewed under **AO-79 (2026-08-21)**; findings and accepted risks are reco
 | --- | --- | --- |
 | LAN listener (`:3011`) | Plaintext HTTP, 8-character connection password, binds all interfaces by default | Per-source-address **lockout** on repeated failures (`auth.go`); `"bind": "tailscale"` or a specific IP narrows exposure; documented as trusted-network-only |
 | **Loopback proxy** (new) | A local listener that forwards to a *different machine* with a stored credential — i.e. ambient authority for other local processes, the same model as AO's own loopback daemon | Every request must carry a **128-bit random token** in the URL path; without it the proxy 404s and forwards nothing. This limits reach to processes that can read renderer memory rather than any local process. Proxy is bound to `127.0.0.1` only, and is torn down when the host is disconnected. |
-| Token leakage | A path-borne credential can leak via logs or referrers | Token is **stripped before forwarding**, so the remote daemon and its logs never see it; the proxy's lifecycle logging (AO-78) never emits `req.url`, whose first segment is the token; tokens are per-activation, not persisted |
-| Stored credentials | `~/.ao/remotes.json` holds plaintext passwords | Enforced mode **0600** (except on Windows, where the CLI and the app both skip a check Node cannot make); the file is *refused* if group/other-readable; the password **never enters the renderer process** (only `{label, url}` and the loopback base cross the IPC boundary, enforced by test). No OS keychain is used — a deliberate decision, see the AO-79 review below. |
+| Token leakage | A path-borne credential can leak via logs or referrers | Token is **stripped before forwarding**, so the remote daemon and its logs never see it; the proxy emits no logs at all today; tokens are per-activation, not persisted |
+| Stored credentials | `~/.ao/remotes.json` holds plaintext passwords | Enforced mode **0600**; the file is *refused* if group/other-readable; the password **never enters the renderer process** (only `{label, url}` and the loopback base cross the IPC boundary, enforced by test). No OS keychain is used — a known limitation. |
 | Remote filesystem listing (`fs/dirs`) | Reveals directory names on the remote host | Read-only, **directory names only** (no contents, sizes, or mtimes), dotfiles skipped, capped at 500 entries, and behind the same credential that already authorizes spawning agents (i.e. shell access) — so it is not an escalation |
 | CORS / origin | `app://renderer` has no standing with a remote daemon | The proxy answers preflight locally and strips the renderer origin before forwarding; the daemon's strict origin policy is untouched |
 | Wrong-machine actions | A destructive action landing on the wrong host | Every write takes a `Ref = {host,id}` routed via that host's client; destructive prompts name the host; a colliding-id test asserts the local daemon receives **no request** when a remote action fires |
@@ -490,75 +480,6 @@ exclude the password and the token.
 
 **PII deletion:** no PII is collected or transmitted by this feature. Removing a host deletes
 its stored entry; there is no server-side copy to purge.
-
-## Security review — AO-79 (2026-08-21)
-
-**Scope:** the loopback proxy (`main/remote-proxy.ts`), the per-host token model, the
-credentialled request path (`main/remote-request.ts` + the `remotes:*` IPC surface), and
-`~/.ao/remotes.json` custody (`main/remotes-store.ts`). The daemon's LAN listener and origin
-policy were out of scope — reviewed at Phase 1.
-
-**The token model holds.** 128 bits from `crypto.randomBytes`, compared in constant time,
-per-activation and never persisted, stripped before forwarding, bound to `127.0.0.1`, and torn
-down on disconnect. Preflight is answered locally and the renderer origin never reaches the
-daemon. Nothing in the remote path logs the base URL. The renderer never receives the
-connection password. Those properties were re-checked against the code and hold.
-
-### Fixed
-
-| # | Severity | Finding |
-| --- | --- | --- |
-| 1 | High | **A renderer-supplied path could redirect the credential off-host.** `remoteRequest` concatenated `init.path` onto the saved host URL, so a path beginning with `@` turned the base into userinfo — `http://box:3011` + `@evil.example/` is a request *to evil.example*, carrying `Authorization: Bearer <connection password>`. `remotes:*` is a renderer→main trust boundary and the renderer is the process that renders agent output, so the origin is now asserted before the request is made. |
-| 2 | High | **An `https://` host was talked to in cleartext.** The proxy computed port 443 for an https upstream but forwarded with `node:http` / `net.connect` regardless, putting the connection password on the wire unencrypted. The add-host dialog accepts `https://`, so a Tailscale Serve or reverse-proxy address reached this by typing it. The proxy now uses `https.request` / `tls.connect` for an https upstream (certificates validated by default). |
-| 3 | Medium | **The proxy dropped the host's URL path prefix.** A daemon behind a reverse proxy at `http://box/ao` received every credentialled request at `/api/v1/…` instead of `/ao/api/v1/…` — delivering the Bearer credential to whatever else that vhost serves. The prefix is now restored on both the request and upgrade paths. |
-| 4 | Medium | **`remotes.json` was unreadable on Windows.** Node reports `0o666` for every writable file there, so the group/other-readable check refused every file and took saved hosts down with it. The CLI already exempts win32 for this exact reason (`cli/remote.go:154`); the TS port did not. Not caught by CI — the frontend unit job is Linux-only. |
-
-Each has a falsifying test in `frontend/src/main/*.test.ts`; all four fail on the pre-fix code.
-
-### Accepted risks
-
-- **Loopback is ambient authority.** Any local process can reach the proxy port; the token is
-what stops it. That is the same model as AO's own loopback daemon, and the token narrows reach
-from "any local process" to "a process that can read renderer memory". Accepted.
-- **The token is visible in the renderer DOM.** Attachment images are `<img src>` against the
-proxy base, so the token is readable by anything that can read the DOM. This is not a new
-class — such an attacker can already call the IPC surface — but it means the token is *not* a
-defence against a compromised renderer. Accepted; the renderer has no CSP today, which is a
-separate app-wide hardening item, not a remote-sessions one.
-- **Raw request-line assembly on the upgrade path.** The WebSocket upgrade is written to the
-socket as a hand-built HTTP request, and `entry.password` is interpolated without validation.
-Node's parser rejects CR/LF in incoming headers and request targets, so the only injection
-vector is a saved password containing control characters — which an attacker can only supply
-by getting the user to save *their* password against *their* host, where header injection buys
-nothing. Not worth code. Accepted.
-- **`cookie` and `referer` are forwarded upstream.** Deliberate: the daemon uses an `ao_conn`
-cookie for browser-served preview routes, and stripping it would break that path. No document
-is ever loaded *from* a proxy base, so no `Referer` carries the token.
-- **Plaintext HTTP on the LAN path** remains the largest limitation, unchanged by this review.
-Tailscale — now actually usable end-to-end given finding 2 — is the mitigation.
-- **`remotes.json` writes are not atomic.** A crash mid-write truncates the credential file.
-Reliability, not security; noted for whoever touches the store next.
-
-### Decision: keep the 0600 file, no OS keychain
-
-**`~/.ao/remotes.json` stays a 0600 plaintext file.** The keychain does not earn its cost here:
-
-1. **It would fork state with the CLI.** The file is deliberately shared verbatim with
-`ao --url` (`cli/remote.go`) and mirrors the mobile client's store, so "which hosts exist" has
-one source of truth. Electron `safeStorage` is unreadable from Go, so a keychain move either
-splits that store in two or demands a Go keychain implementation on three platforms.
-2. **The protection is macOS-only in practice.** On macOS, keychain items are ACL'd to the
-signed app, which is a real gain. Windows DPAPI and Linux `safeStorage` are same-user
-decryptable by construction — and on Linux without libsecret/kwallet `safeStorage` degrades to
-`basic_text`, i.e. encryption in name only.
-3. **It does not shrink the blast radius that matters.** An attacker running as the user
-already has the AO worktrees, the session store, `ao` on `PATH`, and a local daemon that can
-drive every connected remote. Encrypting one credential while the process that decrypts it is
-freely attachable is defence-in-depth, not a boundary.
-
-**Revisit if** AO targets shared or multi-user machines, or if the desktop app stops sharing
-the store with the CLI. The shape then is macOS `safeStorage` plus a Go keychain shim, decided
-together rather than one client at a time.
 
 ---
 
@@ -584,33 +505,9 @@ a multi-second host probe otherwise reads as a dead dialog to a screen-reader us
 over corrected input.
 - Unreachable hosts are **disabled** in the picker rather than selectable-then-failing.
 
-**Audited (AO-80).** A keyboard and screen-reader pass over the host tree, filter, add/edit
-dialogs and folder picker found and fixed:
-
-- **The host picker's row actions were unreachable by keyboard.** Connect, Edit and Remove
-sat inside a Radix `Select`, which calls `preventDefault()` on Tab within its listbox and
-moves focus only between options — so they were mouse-only, and a listbox whose children are
-buttons is not a listbox a screen reader can report faithfully. The picker is now a popover of
-plain buttons: every action is a Tab stop and announces as itself. An unreachable host is
-`aria-disabled` rather than `disabled`, so it stays focusable and its status can still be read.
-- **The add/edit dialog could only be submitted by pointing at its button.** Its fields are now
-a real `form`, so Enter saves, and the absolutely-positioned close button moved after the
-fields in source order so opening no longer lands on Close.
-- **The folder picker lost focus on every hop.** Stepping into a folder replaces every row, so
-the focused row stopped existing. Focus now moves into the new listing, the path is a live
-region, and a pending listing announces instead of leaving the dialog looking dead.
-- **Duplicate accessible names.** Each unreachable host section had a button called just
-"Retry"; each is now named for its host, as the picker's actions already were.
-- **The host filter's effect was silent.** Changing it redraws the tree behind it, which a
-screen reader has no reason to revisit; a live region now states which host is in view.
-
-**Deliberately deferred:** the sidebar tree's own disclosure semantics (a project row carries
-`aria-expanded` while its primary action navigates, with a second invisible toggle over the
-folder icon owning the same state, and no `aria-controls` linking either to the session list).
-That structure predates remote hosts and is shared with every local project, so it belongs to a
-sidebar-wide pass rather than this one. Per-host grouping in the tree is also deferred: each
-project's accessible name already carries its host via `hosts.qualified`, and there is no
-visual host boundary for a `role="group"` to mirror.
+**Not yet verified:** no formal accessibility audit or screen-reader pass has been run on the
+new host tree, filter, and folder picker. Recommend one before broad release, particularly
+for the tree's host-qualified labels and the filter's keyboard semantics.
 
 ---
 
@@ -674,202 +571,27 @@ terminals.
 
 | Item | Size | Priority | Parallelizable |
 | --- | --- | --- | --- |
-| ~~**Telemetry + proxy logging** (Metrics section) and surfacing `hostConnectionState` in the UI~~ — **done (AO-78)**, see Metrics & Monitoring | S–M | — | — |
-| ~~**Security review** of the loopback proxy + token model~~ | S | Done — AO-79, 2026-08-21 (four fixes; see Security & Privacy) | — |
+| **Telemetry + proxy logging** (Metrics section) and surfacing `hostConnectionState` in the UI | S–M | **High** — currently no answer to "why isn't my remote updating?" | Yes |
+| **Security review** of the loopback proxy + token model | S | **High** before promoting beyond internal use | Yes |
 | **Accessibility audit** of the host tree, filter, and folder picker | S | Medium | Yes |
 | **Setup documentation**: trust boundary, Tailscale, macOS Local Network privacy caveat | S | Medium | Yes |
-| ~~**SSH host support** — `ssh -L` tunnel into the existing proxy seam~~ — **spiked (AO-82)**: works with no proxy change; do it, docs first. See the spike section below | S then M | Medium | Yes (step 1 is documentation) |
-| **TLS + TOFU pinning** for the LAN listener — **mobile-only** after AO-82; SSH covers the desktop leg | L | Low (Tailscale covers the need) | Yes |
+| **SSH host support** — `ssh -L` tunnel into the existing proxy seam; removes plaintext LAN password entirely | M | Medium | No (after the above) |
+| **TLS + TOFU pinning** for the LAN listener | L | Low (Tailscale covers the need) | No |
 | Cross-platform verification (Windows/Linux daemon as a remote host) | M | Medium | Yes |
 
 ### Tasks
 
 *Testing time is included in each estimate. The first four items are mutually independent and
-can be parallelized across owners; SSH and TLS followed the security review — SSH is spiked (AO-82) and
-its step 1 folds into item 4.*
+can be parallelized across owners; SSH and TLS should follow the security review.*
 
-1. ~~Instrument the remote path (host connect result/duration, stream state, per-host query
+1. Instrument the remote path (host connect result/duration, stream state, per-host query
 failure); add proxy lifecycle logging in main with an explicit no-secrets rule; surface
-stream state in the UI.~~ **Done — AO-78.**
+stream state in the UI.
 2. Security review of the loopback proxy, token handling, and `remotes.json` custody;
 decide whether OS keychain storage replaces the 0600 file.
 3. Accessibility pass (screen reader + keyboard) on the host tree, filter, add/edit dialogs
 and folder picker.
 4. User-facing setup documentation, including the trusted-network boundary, the Tailscale
 bind option, and the macOS Local Network privacy failure mode.
-5. ~~SSH transport spike behind the existing proxy seam.~~ **Done — AO-82, 2026-08-22.**
+5. SSH transport spike behind the existing proxy seam.
 6. Cross-platform host verification.
-
-## SSH transport spike — AO-82 (2026-08-22)
-
-**Question:** can an `ssh -L` tunnel go behind the existing loopback-proxy seam, and does
-that remove the plaintext-HTTP risk AO-79 accepted as "the largest limitation"?
-
-**Answer: yes, and the proxy needs no change at all.** The expensive part is not the
-transport — it is who spawns and owns the `ssh` child. **Recommendation: do it, in two
-steps, documentation first.**
-
-### What was measured
-
-A throwaway test drives the **unchanged** `startRemoteProxy` against a real `ssh -L`
-forward to a stand-in daemon: `frontend/src/main/remote-proxy.ssh-spike.test.ts` on
-`ao/agent-orchestrator-84/ssh-spike`. Both a credentialled REST request and a **WebSocket
-upgrade** (the terminal/SSE path) traverse renderer → proxy → ssh → far side, with
-`Authorization: Bearer` injected in main and the renderer `Origin` still stripped. 2/2 pass.
-The test is a **proof, not a starting point** — it shells out to a live `ssh` and is not
-merge material.
-
-### 1. Tunnel lifecycle
-
-`ssh` is a child process of main, one per connected SSH host, spawned before the proxy and
-killed after it. Three measured details shape the design:
-
-- **OpenSSH will not allocate the local port.** `-L 0:…` and `-L 127.0.0.1:0:…` are both
-rejected as "Bad local forwarding specification" (OpenSSH 10.2). The caller must bind a
-socket, read the port, close it, and hand the number to `ssh` — a TOCTOU race with every
-other process on the machine. `-o ExitOnForwardFailure=yes` turns losing that race into a
-clean immediate exit rather than a tunnel that silently forwards nothing.
-- **A unix-socket forward avoids the race entirely.** `-L /path/to.sock:127.0.0.1:3011`
-works, and OpenSSH creates the socket `srw-------`, which is a tighter boundary than a
-loopback port for free. Two caveats: the path is capped by `sun_path` (~104 bytes on macOS —
-a 155-char path is rejected at parse time; `~/.ao/` fits comfortably), and it needs
-`socketPath` support at the dial site, so it is a later hardening, not the first cut.
-- **`ExitOnForwardFailure` does not catch every bad port.** It fires on a genuine conflict
-(measured: `bind [127.0.0.1]:13011: Address already in use`, exit 255), but on macOS a
-loopback-specific bind succeeds *alongside* an existing wildcard listener. Measured: with the
-local daemon on `*:3011`, `ssh -L 3011:…` binds `127.0.0.1:3011` and `[::1]:3011` with no
-error, and this machine's own loopback requests to `:3011` then reach the **remote** daemon.
-A tunnel manager must therefore let the kernel pick the port (bind `127.0.0.1:0`) rather than
-propose a default and trust `ExitOnForwardFailure` to reject a bad one.
-- **A dropped tunnel is already a handled state.** When the `ssh` child dies the forwarded
-port stops listening; the proxy gets `ECONNREFUSED` and answers its existing
-502 `{"error":"remote daemon unreachable"}`. A dead tunnel is indistinguishable from a dead
-host, so **no new UI state is needed**. Sleep/suspend is the same path once
-`ServerAliveInterval`/`ServerAliveCountMax` fire; without them a suspended peer leaves a
-listening port that hangs instead of refusing, so they are not optional.
-
-Setup cost, measured to localhost: **~200–300 ms** cold, **~75–145 ms** through an existing
-`ControlMaster` via `ssh -O forward`. Cheap enough that `remotes:probe` and `remotes:add` can
-each open a throwaway tunnel for their own duration rather than sharing a refcounted one with
-`remotes:connect`. Two independent lifetimes beat one refcounted lifetime here.
-
-### 2. Store shape, and how the Go CLI stays in agreement
-
-**`RemoteEntry` is extended in place, and the CLI needs no Go change.** Verified against the
-real binary: an entry with `"url": "ssh://box"` plus unknown `kind`/`ssh` fields sits in
-`~/.ao/remotes.json` while `ao --url http://…` resolves its siblings normally. Three existing
-properties make that safe, and all three are load-bearing:
-
-- `lookupRemoteEntry` is the **only** reader and there is **no writer** in Go, so there is no
-round-trip that could drop unknown fields.
-- It already `continue`s past an entry whose URL fails `normalizeRemoteURL` — with the comment
-"a hand-edited entry must not break every other one" — and that function rejects any scheme
-but http/https.
-- Asked for an SSH entry directly, the CLI refuses accurately rather than misbehaving:
-`invalid daemon URL "ssh://box": scheme must be http or https`.
-
-So the store stays one file with one source of truth. What the CLI *cannot* do is use an SSH
-host — and it does not need to: `ssh box ao status` is strictly better than teaching the Go
-CLI to spawn its own tunnel. If that answer is ever unacceptable, the honest fix is a
-`ao remote` subcommand, not a second store.
-
-### 3. What replaces the connection password
-
-**It does not replace it — it takes it off the wire, which is exactly what AO-79 asked for.**
-There are two possible targets on the far side and only one of them works:
-
-| Forward to | Credential | Result |
-| --- | --- | --- |
-| **LAN listener `:3011`** | connection password, still required | **Works.** Measured through a tunnel: authenticated `GET` → 200, and a renderer-shaped write carrying `Sec-Fetch-Site: cross-site` passes origin policy because `servedOverLAN` exempts it. |
-| Loopback listener `:3001` | none — "the tunnel is the auth" | **Broken, and worse than broken.** |
-
-The loopback variant fails two ways, both measured:
-
-1. **Every write and every terminal 403s.** `requiresStrictOrigin` applies on the loopback
-listener, and `strictOriginOK` rejects both `cross-site` and `same-site`. Electron's Chromium
-does attach `sec-fetch-site` to a cross-origin fetch (confirmed by echoing the renderer's own
-headers back through the Browser panel: Electron 33.4.11 / Chromium 130), and
-`STRIP_REQUEST_HEADERS` does not strip `sec-fetch-*`, so it arrives verbatim. `POST` and
-`GET /mux` through the tunnel both return `403 ORIGIN_FORBIDDEN`.
-2. **It hands out every loopback-only control route.** `lanControlBlock` exists precisely to
-keep `/shutdown`, `/internal/`, `/api/v1/mobile`, `/api/v1/dev` and `/api/v1/browser` off a
-network-reachable socket. Through a tunnel to `:3001` they are all reachable with **no
-credential** — `GET /api/v1/mobile/status` returns the daemon's connection password in
-cleartext (measured; value not recorded here). On the LAN listener the same request correctly
-returns `404 ROUTE_LOOPBACK_ONLY`.
-
-   **That list grows, which is the real argument.** The upstream sync merged as #110 added a
-sixth prefix — `/api/v1/system/install`, "host-mutating installer routes" — days after this
-spike was scoped. Every loopback-only route anyone adds from here silently widens what a
-tunnel to `:3001` would expose, and nothing in the client would notice. A design whose blast
-radius is defined by a list someone else keeps appending to is the wrong design.
-
-Neither is fatal in isolation — an SSH login is already shell access on that box — but making
-it work means weakening the loopback listener's origin boundary for *every* local caller, not
-just the tunnel. That is a daemon policy change, decided on its own merits. **Drop the
-loopback variant.**
-
-The complement is free and worth pairing with this: `bind` already accepts a literal address
-(`BindAddress` → `net.ParseIP`), so `"bind": "127.0.0.1"` in `~/.ao/data/mobile/config.json` binds
-the LAN listener to loopback only. **LAN listener on loopback + SSH tunnel = the password is
-kept, and the port is on no network at all.** No code.
-
-### 4. Host-key verification
-
-**Delegate to OpenSSH; invent nothing.** The `ao-phone-proxy` prior art named in the task does
-not apply: that proxy is **retired** (ADR 0001), and its "TOFU" was IP trust-on-first-connect,
-not host-key pinning — there is no cryptographic policy here to inherit.
-
-Spawned non-interactively with `BatchMode=yes`, all three `StrictHostKeyChecking` modes behave
-correctly and, critically, **fail fast rather than hang on an absent tty** (measured):
-`yes` and the default `ask` both exit immediately with `Host key verification failed`;
-`accept-new` silently trusts and connects. Use `BatchMode=yes` with the user's own
-`~/.ssh/known_hosts` and default strictness, and surface the failure verbatim with "run
-`ssh <host>` once in a terminal to verify its key". A first connection the user has already
-made in their own shell is a better trust event than one an Electron app makes for them.
-
-### 5. Does this subsume the TLS follow-up?
-
-**No — they are independent, and neither blocks the other.** SSH covers desktop→desktop only:
-the app can spawn `ssh`, so it never needs TLS for that leg. The mobile client cannot spawn
-`ssh`, so the phone→desktop leg keeps exactly the exposure it has today, and TLS (or the
-`tailscale` bind) remains its only answer. What SSH does change is the *priority*: TLS stops
-being the fix for the desktop path and becomes a mobile-only item, which is the lower-traffic
-one.
-
-### 6. Windows
-
-Assume nothing; two things are known and two need verification on a real Windows host:
-
-- **Known:** the unix-socket forward is macOS/Linux only, so Windows takes the TCP-port form
-and inherits the port race. And any new state file must repeat the existing win32 exemption —
-Node reports `0o666` for every writable file there (the AO-79 finding #4 in `remotes-store.ts`,
-mirroring `cli/remote.go:154`).
-- **Needs verification:** `ssh.exe` ships with Windows 10+ but as an *optional feature*, so its
-presence must be probed and its absence must be a real message rather than an `ENOENT`; and
-`child.kill()` on win32 maps to `TerminateProcess`, which should drop the forward (ssh has no
-descendants here) but has not been measured.
-
-Precedent exists either way: main already owns a long-lived child process with platform
-divergence (`daemon-owner.ts`).
-
-### Recommendation
-
-**Do it — documentation first, then the small version. Size: S then M.**
-
-1. **Ship the recipe, not the feature (S, no code).** Because the proxy needs no change and the
-CLI ignores SSH entries, *the entire transport benefit is available today*: the user runs
-`ssh -N -L 3011:127.0.0.1:3011 box` and saves `http://127.0.0.1:3011` as an ordinary host. Fold
-that into the setup documentation follow-up, together with `"bind": "127.0.0.1"`. Users get
-encrypted transport this week, and it doubles as the acceptance test for step 2.
-2. **Then let the app spawn it (M).** An optional `ssh` field on `RemoteEntry`, a tunnel manager
-in main, and one `await dialable(entry)` at the four call sites that consume an entry
-(`remotes:add`, `remotes:probe`, `remotes:request`, `remotes:connect`), plus an SSH mode in the
-add-host dialog. Nothing in `remote-proxy.ts` changes.
-3. **Drop** the loopback-listener variant, for the two measured reasons above.
-4. **Unblock** the TLS item as mobile-only rather than sequencing it after this.
-
-The one honest argument against doing step 2 at all: `"bind": "tailscale"` already delivers
-encrypted transport with zero AO code, and the EDD already names it. Step 2 buys ergonomics for
-people who have SSH and do not want Tailscale — real, but it is ergonomics, not a new security
-property. Step 1 is what actually retires the accepted risk.

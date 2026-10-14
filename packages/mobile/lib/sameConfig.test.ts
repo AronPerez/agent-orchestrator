@@ -3,12 +3,12 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("@react-native-async-storage/async-storage", () => ({
 	default: { getItem: vi.fn(), setItem: vi.fn(), removeItem: vi.fn() },
 }));
-vi.mock("./secure-store", () => ({
-	secureGetItem: vi.fn(), secureSetItem: vi.fn(), secureDeleteItem: vi.fn(),
+vi.mock("expo-secure-store", () => ({
+	getItemAsync: vi.fn(), setItemAsync: vi.fn(), deleteItemAsync: vi.fn(),
 }));
 
 import { DEFAULT_CONFIG, type ServerConfig } from "./config";
-import { sameServerConfig } from "./sameConfig";
+import { pollResultIsCurrent, sameServerConfig } from "./sameConfig";
 
 const cfg = (over: Partial<ServerConfig> = {}): ServerConfig => ({
 	...DEFAULT_CONFIG, host: "192.168.1.42", httpPort: "3011", secure: false, password: "pw", ...over,
@@ -47,5 +47,22 @@ describe("sameServerConfig", () => {
 
 	it("handles a missing previous config", () => {
 		expect(sameServerConfig(null, cfg())).toBe(false);
+	});
+});
+
+describe("pollResultIsCurrent", () => {
+	it("drops a response when the active pairing changed while it was in flight", () => {
+		const requested = cfg({ hostId: "h_laptop" });
+		const active = cfg({ hostId: "h_desktop" });
+
+		expect(pollResultIsCurrent(requested, active)).toBe(false);
+	});
+
+	it("accepts a response for an equivalent current config", () => {
+		expect(pollResultIsCurrent(cfg({ hostId: "h_laptop" }), cfg({ hostId: "h_laptop" }))).toBe(true);
+	});
+
+	it("drops a response after the app becomes unpaired", () => {
+		expect(pollResultIsCurrent(cfg({ hostId: "h_laptop" }), null)).toBe(false);
 	});
 });

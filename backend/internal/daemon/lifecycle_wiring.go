@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
@@ -223,6 +224,13 @@ type sessionLifecycle interface {
 	// SetReviewerTerminator late-binds worker lifecycle teardown to the review
 	// service, which is built alongside the controller-facing service below.
 	SetReviewerTerminator(terminator sessionmanager.ReviewerTerminator)
+	// SetHarnessUseGate prevents lifecycle operations from racing a harness
+	// executable replacement.
+	SetHarnessUseGate(gate sessionmanager.HarnessUseGate)
+	// PersistChatModel records the model the user picked in ChatUI onto the
+	// session's durable metadata before the next prompt routes. A later TUI
+	// rebuild reads it back so ChatUI model changes survive the handoff.
+	PersistChatModel(ctx context.Context, id domain.SessionID, model string) error
 	// SetStaleExitClearer late-binds lifecycle's stale-exit revival into
 	// delivery refusal, so a session a nested agent falsely marked exited heals
 	// on the user's next send (#114 effect 4).
@@ -232,13 +240,6 @@ type sessionLifecycle interface {
 	// concrete type. Not every runtime implements it; ok=false leaves
 	// hook-reported exits unprobed, exactly as before #114.
 	RuntimeExactInspector() (ports.ExactSupervisedProcessInspector, bool)
-	// SetHarnessUseGate prevents lifecycle operations from racing a harness
-	// executable replacement.
-	SetHarnessUseGate(gate sessionmanager.HarnessUseGate)
-	// PersistChatModel records the model the user picked in ChatUI onto the
-	// session's durable metadata before the next prompt routes. A later TUI
-	// rebuild reads it back so ChatUI model changes survive the handoff.
-	PersistChatModel(ctx context.Context, id domain.SessionID, model string) error
 }
 
 // sessionLifecycleMessenger adapts sessionLifecycle to ports.AgentMessenger so
@@ -254,6 +255,19 @@ func (m sessionLifecycleMessenger) Send(ctx context.Context, id domain.SessionID
 	return m.sessionLifecycle.Send(ctx, id, message, nil)
 }
 
+// telemetryEmitsSpawned reports whether the ao.session.spawned carrier event can
+// reach a sink under this config: product telemetry on and the event not on the
+// kill switch. When it cannot, session wiring leaves the GitHub identity resolver
+// nil so a spawn never makes a GitHub call whose only purpose is a dropped event.
+// This mirrors newTelemetrySink, which returns a NoopSink under the same off
+// condition, so the non-nil NoopSink never reaches an unnecessary resolve.
+func telemetryEmitsSpawned(cfg config.Config) bool {
+	if !cfg.Telemetry.Events {
+		return false
+	}
+	return !slices.Contains(cfg.Telemetry.DisabledEvents, "ao.session.spawned")
+}
+
 // startSession builds the controller-facing session service: a session manager
 // over the selected runtime, routed git/scratch workspaces, the shared store +
 // LCM, the per-session agent resolver, and the agent messenger. The tracker is
@@ -262,7 +276,7 @@ func (m sessionLifecycleMessenger) Send(ctx context.Context, id domain.SessionID
 // (issue #2685). The returned service is mounted at httpd APIDeps.Sessions.
 // It also returns the manager so the caller can wire Reconcile into the boot
 // sequence.
-func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.Runtime, store *sqlite.Store, lcm *lifecycle.Manager, artifactVersions *artifactversions.Capturer, messenger ports.AgentMessenger, telemetry ports.EventSink, notifications notificationSink, agents ports.AgentResolver, agentReadiness ports.AgentReadinessProvider, previewLifecycle sessionmanager.PreviewLifecycle, browserLifecycle sessionmanager.BrowserLifecycle, browserCapabilities sessionmanager.BrowserCapabilityIssuer, chat sessionmanager.ChatLauncher, reviewerRecoveryDone <-chan struct{}, defaults sessionmanager.SessionModeDefaults, tracker ports.Tracker, codexOperationGate ports.CodexOperationGate, log *slog.Logger) (*sessionsvc.Service, reviewsvc.Manager, sessionLifecycle, error) {
+func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.Runtime, store *sqlite.Store, lcm *lifecycle.Manager, artifactVersions *artifactversions.Capturer, messenger ports.AgentMessenger, telemetry ports.EventSink, notifications notificationSink, agents ports.AgentResolver, agentReadiness ports.AgentReadinessProvider, previewLifecycle sessionmanager.PreviewLifecycle, browserLifecycle sessionmanager.BrowserLifecycle, browserCapabilities sessionmanager.BrowserCapabilityIssuer, chat sessionmanager.ChatLauncher, reviewerRecoveryDone <-chan struct{}, defaults sessionmanager.SessionModeDefaults, reportingPolicy ports.AgentSwitchReportingPolicy, tracker ports.Tracker, codexOperationGate ports.CodexOperationGate, log *slog.Logger) (*sessionsvc.Service, reviewsvc.Manager, sessionLifecycle, error) {
 	gitWS, err := gitworktree.New(gitworktree.Options{
 		// Per-session worktrees live under the data dir, so a single AO_DATA_DIR
 		// override moves all durable per-user state together.
@@ -292,6 +306,7 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 		Agents:              agents,
 		Workspace:           ws,
 		Store:               store,
+		ReportingPolicy:     reportingPolicy,
 		DaemonRunID:         cfg.AppRunID,
 		Messenger:           messenger,
 		Chat:                chat,
@@ -309,6 +324,14 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 	})
 	mgr.SetAgentReadiness(agentReadiness)
 	scmProvider := newMultiSCMProvider(cfg.GitLab, log)
+	// Attach the operator's GitHub login to product telemetry only when its carrier
+	// event can actually be sent, and guard the typed nil from newMultiSCMProvider
+	// so the interface stays nil (degrading to anonymous) rather than wrapping a
+	// nil pointer.
+	var githubIdentity ports.ScopedIdentityResolver
+	if scmProvider != nil && telemetryEmitsSpawned(cfg) {
+		githubIdentity = scmProvider
+	}
 	sessionSvc := sessionsvc.NewWithDeps(sessionsvc.Deps{
 		Manager:           mgr,
 		Store:             store,
@@ -320,15 +343,16 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 		Logger:            log,
 		BackgroundContext: ctx,
 		AgentReadiness:    agentReadiness,
+		GithubIdentity:    githubIdentity,
 		// no_signal only makes sense for harnesses with complete lifecycle signal
 		// coverage; partial callbacks cannot prove that silence is abnormal.
-		SignalCapable: activitydispatch.FullySupportsHarness,
+		SignalCapable:        activitydispatch.FullySupportsHarness,
+		OutputTypeReconciler: lcm,
+		ArtifactDeleter:      artifactVersions,
 		// The reducer already receives every runtime probe; this is the read
 		// side, so `ao session ls` stops reporting idle for a session whose
 		// runtime AO cannot reach.
-		RuntimeUnreachable:   lcm.RuntimeUnreachable,
-		OutputTypeReconciler: lcm,
-		ArtifactDeleter:      artifactVersions,
+		RuntimeUnreachable: lcm.RuntimeUnreachable,
 	})
 	// Triggering a review spawns a reviewer over the worker's worktree, resolved
 	// from the reviewer registry (distinct from the worker agent set). The

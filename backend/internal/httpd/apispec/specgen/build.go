@@ -486,7 +486,6 @@ var schemaNames = map[string]string{ //nolint:gosec // Public OpenAPI type names
 	// httpd/controllers — PR wire envelopes
 	"ControllersMergePRRequest":          "MergePRRequest",
 	"ControllersMergePRResponse":         "MergePRResponse",
-	"ControllersClosePRResponse":         "ClosePRResponse",
 	"ControllersResolveCommentsRequest":  "ResolveCommentsRequest",
 	"ControllersResolveCommentsResponse": "ResolveCommentsResponse",
 	// httpd/controllers — review wire envelopes
@@ -2805,17 +2804,6 @@ func sessionOperations() []operation {
 			},
 		},
 		{
-			method: http.MethodGet, path: "/api/v1/sessions/{sessionId}/workspace-location", id: "getSessionWorkspaceLocation", tag: "sessions",
-			summary:    "Resolve a session workspace location over the authenticated API",
-			pathParams: []any{controllers.SessionIDParam{}},
-			resps: []respUnit{
-				{http.StatusOK, controllers.DesktopWorkspaceLocationResponse{}},
-				{http.StatusNotFound, envelope.APIError{}},
-				{http.StatusInternalServerError, envelope.APIError{}},
-				{http.StatusNotImplemented, envelope.APIError{}},
-			},
-		},
-		{
 			method: http.MethodGet, path: "/api/v1/sessions/{sessionId}/workspace/file/blob", id: "getSessionWorkspaceFileBlob", tag: "sessions",
 			summary:    "Read one side of a session workspace image file",
 			pathParams: []any{controllers.SessionIDParam{}, controllers.WorkspaceFileBlobQuery{}},
@@ -3252,18 +3240,6 @@ func prOperations() []operation {
 			resps: []respUnit{
 				{http.StatusBadRequest, envelope.APIError{}},
 				{http.StatusOK, controllers.MergePRResponse{}},
-				{http.StatusNotFound, envelope.APIError{}},
-				{http.StatusConflict, envelope.APIError{}},
-				{http.StatusUnprocessableEntity, envelope.APIError{}},
-				{http.StatusNotImplemented, envelope.APIError{}},
-			},
-		},
-		{
-			method: http.MethodPost, path: "/api/v1/prs/{id}/close", id: "closePR", tag: "prs",
-			summary:    "Close a pull request",
-			pathParams: []any{controllers.PRIDParam{}},
-			resps: []respUnit{
-				{http.StatusOK, controllers.ClosePRResponse{}},
 				{http.StatusNotFound, envelope.APIError{}},
 				{http.StatusConflict, envelope.APIError{}},
 				{http.StatusUnprocessableEntity, envelope.APIError{}},
