@@ -5,6 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MachOParseError } from "./makers/macho-archs";
 
+// Release-feed tests exercise configuration, not native compilation or ABI changes.
+const { rebuild } = vi.hoisted(() => ({
+	rebuild: vi.fn(async () => undefined),
+}));
+vi.mock("@electron/rebuild", () => ({ rebuild }));
+
 // postMake's dmg/zip branches only need to prove they call the right
 // maker-dmg functions with the right gates; the functions' own behavior
 // (sealDmg's credential matrix, verifyMacArtifact's script invocation) is
@@ -333,12 +339,18 @@ describe("desktop release feed", () => {
 		["invalid", "AronPerez", "agent-orchestrator"],
 		["custom-owner/custom-repo", "custom-owner", "custom-repo"],
 	])("uses AO_RELEASE_REPO=%s for the updater and publisher", async (repo, owner, name) => {
+		rebuild.mockClear();
 		vi.stubEnv("AO_RELEASE_REPO", repo);
 		vi.resetModules();
 		const writeFile = vi.spyOn(fs, "writeFileSync").mockImplementation(() => {});
 		const { default: releaseConfig } = await import("./forge.config");
 		const prePackage = releaseConfig.hooks!.prePackage as ForgeHookFn<"prePackage">;
-		await prePackage(releaseConfig as ResolvedForgeConfig, "darwin", "arm64");
+		await prePackage(releaseConfig as ResolvedForgeConfig, "linux", "x64");
+		expect(rebuild).toHaveBeenCalledWith(expect.objectContaining({
+			platform: "linux",
+			arch: "x64",
+			onlyModules: ["better-sqlite3"],
+		}));
 
 		expect(writeFile).toHaveBeenCalledWith("app-update.yml", [
 			"provider: github",
