@@ -445,8 +445,8 @@ The phone publishes a bounded display-only Needs-you snapshot every 30 seconds w
 AO is foregrounded, using the existing active-host poll and `agentsView` semantics
 (including pinned workers that need attention). No Watch network client or credentials.
 `updateApplicationContext` replaces prior snapshots. The Watch caches its last known
-snapshot in a Watch-only App Group shared with the widget. Only the active host is shown, labeled “Active host”, with up to eight rows; counts
-include hidden rows. Other paired hosts are not polled. Switching hosts removes the
+snapshot in a Watch-only App Group shared with the widget. Only the active host is
+shown, labeled “Active host”, with up to eight rows; counts include hidden rows. Other paired hosts are not polled. Switching hosts removes the
 previous host from the next snapshot; old in-flight polls cannot relabel its data.
 
 A successful poll's original timestamp, not bridge delivery time, establishes freshness.
