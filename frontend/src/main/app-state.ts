@@ -19,8 +19,6 @@ export interface MigrationState {
 }
 
 export interface AppStateMarker {
-	/** Newer builds acknowledge their mounted shell to the restart helper. */
-	updateRestartProtocol?: 1;
 	schemaVersion: number;
 	appPath: string;
 	version: string;
@@ -37,7 +35,6 @@ const SCHEMA_VERSION = 2;
 export const APP_STATE_FILE_NAME = "app-state.json";
 
 export interface WriteAppStateOptions {
-	updateRestartProtocol?: 1;
 	/** Directory the marker lives in (dirname of running.json, i.e. ~/.ao). */
 	stateDir: string;
 	/** Bundle path as of this launch (the macOS .app, or the platform exe). */
@@ -108,7 +105,6 @@ export async function writeAppStateMarker(opts: WriteAppStateOptions): Promise<v
 
 	const marker: AppStateMarker = {
 		schemaVersion: SCHEMA_VERSION,
-		...(opts.updateRestartProtocol ? { updateRestartProtocol: opts.updateRestartProtocol } : {}),
 		appPath: opts.appPath,
 		version: opts.version,
 		// Set once on first creation; preserve thereafter.

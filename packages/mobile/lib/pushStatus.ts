@@ -65,7 +65,7 @@ export function describePushToggle(status: PushStatus | null, server: ServerTarg
 		return {
 			value: false,
 			disabled: true,
-			footer: "Pair a machine first — notifications turn on once connected.",
+			footer: "Connect to your AO server first — notifications turn on once connected.",
 			blocked: false,
 		};
 	}
@@ -89,7 +89,7 @@ export function describePushToggle(status: PushStatus | null, server: ServerTarg
 		return {
 			value: false,
 			disabled: false,
-			footer: "This phone isn't registered with the selected machine yet.",
+			footer: "This device isn't registered with your server yet.",
 			blocked: false,
 		};
 	}
@@ -149,36 +149,36 @@ export function describeRegisterFailure(
 	switch (reason) {
 		case "server-unreachable":
 			return {
-				title: "Couldn't reach your machine",
+				title: "Couldn't reach your AO server",
 				message:
-					"Notifications are set up on this phone, but we couldn't reach your machine to register it. " +
-					"Check that AO is running and this phone is on the same network, then try again.",
+					"Your device is set up for notifications, but we couldn't reach your server to register it. " +
+					"Check that AO is running and your phone is on the same network, then try again.",
 			};
 		case "server-auth":
 			return {
-				title: "Your machine rejected the request",
+				title: "Your AO server rejected the request",
 				message:
-					"We reached your machine, but it wouldn't take the connection password. " +
-					"Re-pair under Settings → Machines, then try again.",
+					"We reached your server, but it wouldn't accept the connection password. " +
+					"Re-enter it under Settings → Connect AO, then try again.",
 			};
 		case "server-rate-limited":
 			return {
 				title: "Too many attempts",
-				message: "Your machine is refusing new attempts for now. Wait a minute, then try again.",
+				message: "Your AO server is temporarily refusing new attempts. Wait a minute, then try again.",
 			};
 		case "server-error":
 			return {
-				title: "Your machine couldn't register this phone",
+				title: "Your AO server couldn't register this device",
 				message:
-					`We reached your machine, but it returned an error${status ? ` (HTTP ${status})` : ""}. ` +
-					"Check the AO logs on that machine, then try again.",
+					`We reached your server, but it returned an error${status ? ` (HTTP ${status})` : ""}. ` +
+					"Check the AO logs on your computer, then try again.",
 			};
 		case "not-configured":
 			return {
-				title: "Pair a machine first",
+				title: "Connect to your AO server first",
 				message:
-					"This phone isn't paired yet, so there's nothing to register. " +
-					"Pair under Settings → Machines, and notifications turn on once you're connected.",
+					"This app isn't paired with a server yet, so there's nothing to register with. " +
+					"Pair with your server under Settings → Connect AO — notifications turn on once connected.",
 			};
 		case "token-failed":
 			return {

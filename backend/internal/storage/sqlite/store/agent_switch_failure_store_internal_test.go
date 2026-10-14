@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -10,7 +11,6 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
-	"github.com/aoagents/agent-orchestrator/backend/internal/observe/sentryobs"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 
 	_ "modernc.org/sqlite"
@@ -101,7 +101,7 @@ CREATE TABLE agent_switch_failure_delivery_state (
 		GateRetained: domain.AgentSwitchTriFalse, OccurredAt: now.Add(time.Second),
 	}
 	st := NewStore(db, db)
-	if err := st.ConfigureAgentSwitchFailureEventEncoder(context.Background(), sentryobs.AgentSwitchEventEncoder{}); err != nil {
+	if err := st.ConfigureAgentSwitchFailureEventEncoder(context.Background(), localFailureEventEncoder{}); err != nil {
 		t.Fatalf("configure event encoder: %v", err)
 	}
 	metadata := domain.AgentSwitchEventMetadata{
@@ -178,4 +178,11 @@ func TestAgentSwitchFailureCommitResponseLossReadbackRetryIsIdempotent(t *testin
 			t.Fatalf("%s rows after ambiguous retry = %d, err=%v", table, count, err)
 		}
 	}
+}
+
+type localFailureEventEncoder struct{}
+
+func (localFailureEventEncoder) EncodeAgentSwitchFailureEvent(input domain.AgentSwitchEventBuildInput) (ports.AgentSwitchFailureEncodedEvent, error) {
+	payload, err := json.Marshal(map[string]any{"event_id": input.EventID, "release": input.Release, "environment": input.Environment, "channel": input.Channel, "os": input.OS})
+	return ports.AgentSwitchFailureEncodedEvent{EnvelopeEncodingVersion: 1, Payload: payload}, err
 }

@@ -1,23 +1,22 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { isConcreteModelID, modelChoiceLabel } from "../lib/agent-model-choices";
 import {
 	agentModelsQueryKey,
 	agentModelsQueryOptions,
-	refreshAgentModels,
 	revalidateAgentModels,
 	type AgentModelCatalog,
 } from "../hooks/useAgentModelsQuery";
+import { cn } from "../lib/utils";
+import { refKey, type Ref } from "../lib/hosts";
 import { AgentModelCombobox } from "./settings/AgentModelCombobox";
 import { SettingsOptionMenu } from "./settings/SettingsOptionMenu";
 
 type AgentModelPickerProps = {
 	agentId: string;
 	agentLabel: string;
-	projectId: string;
-	hostId?: string;
+	project: Ref;
 	value: string;
 	mode: string;
 	disabled?: boolean;
@@ -29,8 +28,7 @@ type AgentModelPickerProps = {
 export function AgentModelPicker({
 	agentId,
 	agentLabel,
-	projectId,
-	hostId,
+	project,
 	value,
 	mode,
 	disabled = false,
@@ -40,22 +38,22 @@ export function AgentModelPicker({
 }: AgentModelPickerProps) {
 	const { t } = useTranslation();
 	const queryClient = useQueryClient();
-	const query = useQuery(agentModelsQueryOptions(agentId, projectId, hostId));
+	const projectKey = refKey(project);
+	const [customAgentId, setCustomAgentId] = useState<string | null>(null);
+	const query = useQuery(agentModelsQueryOptions(agentId, project));
 	const catalog: AgentModelCatalog | undefined = query.data;
 	const revalidationQuery = useQuery({
-		queryKey: hostId
-			? ["agent-model-revalidation", hostId, agentId, projectId, catalog?.validatedAt ?? ""]
-			: ["agent-model-revalidation", agentId, projectId, catalog?.validatedAt ?? ""],
-		queryFn: () => revalidateAgentModels(agentId, projectId, hostId),
+		queryKey: ["agent-model-revalidation", agentId, projectKey, catalog?.validatedAt ?? ""],
+		queryFn: () => revalidateAgentModels(agentId, project),
 		enabled: agentId !== "" && catalog?.refreshRecommended === true,
 		staleTime: Number.POSITIVE_INFINITY,
 		retry: false,
 	});
 	useEffect(() => {
 		if (revalidationQuery.data) {
-			queryClient.setQueryData(agentModelsQueryKey(agentId, projectId, hostId), revalidationQuery.data);
+			queryClient.setQueryData(agentModelsQueryKey(agentId, project), revalidationQuery.data);
 		}
-	}, [agentId, hostId, projectId, queryClient, revalidationQuery.data]);
+	}, [agentId, project.host, project.id, queryClient, revalidationQuery.data]);
 	const warning =
 		(revalidationQuery.isError
 			? revalidationQuery.error instanceof Error
@@ -69,11 +67,10 @@ export function AgentModelPicker({
 	}, [onWarningChange, warning]);
 	useEffect(() => () => onWarningChange(undefined), [onWarningChange]);
 
+	const noOverrideLabel = agentLabel
+		? t("newTask.letAgentChoose", { agent: agentLabel })
+		: t("settings.models.agentDefault");
 	const catalogLoading = agentId !== "" && query.isFetching && catalog === undefined;
-	const refreshCatalog = async () => {
-		const refreshed = await refreshAgentModels(agentId, projectId, hostId);
-		queryClient.setQueryData(agentModelsQueryKey(agentId, projectId, hostId), refreshed);
-	};
 
 	if (catalogLoading) {
 		return (
@@ -90,21 +87,17 @@ export function AgentModelPicker({
 	}
 
 	if (catalog?.selectionMode === "mode") {
-		const options = (catalog.models ?? []).filter((item) => isConcreteModelID(item.id)).map((item) => ({
-			value: item.id,
-			label: modelChoiceLabel(item),
-		}));
-		const explicitMode = isConcreteModelID(mode) ? mode : "";
-		const defaultMode = catalog.models?.find((item) => item.isDefault && isConcreteModelID(item.id))?.id || "";
-		const effectiveMode = explicitMode || defaultMode;
-		const visibleModeLabel = options.find((option) => option.value === effectiveMode)?.label ?? (explicitMode || t("settings.models.modeNotReported"));
+		const options = [
+			{ value: "__default__", label: noOverrideLabel },
+			...(catalog.models ?? []).map((item) => ({ value: item.id, label: item.label })),
+		];
+		const visibleModeLabel = mode ? (options.find((option) => option.value === mode)?.label ?? mode) : noOverrideLabel;
 		return (
 			<SettingsOptionMenu
 				aria-label={t("newTask.model")}
-				value={effectiveMode}
+				value={mode || "__default__"}
 				options={options}
-				action={explicitMode && !defaultMode ? { label: t("settings.models.useAgentMode"), onSelect: () => onModeChange("") } : undefined}
-				disabled={disabled || agentId === "" || (options.length === 0 && !(explicitMode && !defaultMode))}
+				disabled={disabled}
 				triggerClassName="composer-chip composer-toolbar-option w-full justify-between"
 				menuAlign="start"
 				renderTrigger={() => (
@@ -112,44 +105,84 @@ export function AgentModelPicker({
 						{visibleModeLabel}
 					</span>
 				)}
-				onChange={(value) => onModeChange(value === defaultMode ? "" : value)}
+				onChange={(nextMode) => onModeChange(nextMode === "__default__" ? "" : nextMode)}
 			/>
 		);
 	}
 
-	const customModelEntry = catalog?.customModelEntry ?? (catalog?.allowCustom ? "direct" : "none");
+	const hasCatalog = catalog?.selectionMode === "catalog" && (catalog.models?.length ?? 0) > 0;
+	const modelIsInCatalog = catalog?.models?.some((item) => item.id === value) ?? false;
 	const displayModels = (catalog?.models ?? []).map((item) =>
 		item.id === "auto" ? { ...item, label: t("settings.models.autoRouteLabel") } : item,
 	);
+	const showCustomInput = hasCatalog && (customAgentId === agentId || (value !== "" && !modelIsInCatalog));
 	const selectCatalogModel = (nextModel: string) => {
+		setCustomAgentId(null);
 		onModelChange(nextModel);
 	};
 	const selectCustomModel = (nextModel: string) => {
+		setCustomAgentId(agentId);
 		onModelChange(nextModel);
 	};
 
+	if (hasCatalog && !showCustomInput) {
+		return (
+			<AgentModelCombobox
+				key={agentId}
+				aria-label={t("newTask.model")}
+				value={value}
+				models={displayModels}
+				allowCustom={catalog.allowCustom}
+				disabled={disabled}
+				emptyLabel={noOverrideLabel}
+				onChange={selectCatalogModel}
+				onCustom={selectCustomModel}
+				compact
+				recentScope={agentId}
+				triggerClassName="composer-chip composer-toolbar-option w-full justify-between"
+				menuAlign="start"
+				renderTrigger={(label) => {
+					const visibleLabel = value ? label : noOverrideLabel;
+					return (
+						<span className="min-w-0 truncate text-control text-foreground" title={visibleLabel}>
+							{visibleLabel}
+						</span>
+					);
+				}}
+			/>
+		);
+	}
+
 	return (
-		<AgentModelCombobox
-			key={hostId ? `${hostId}:${agentId}` : agentId}
-			aria-label={t("newTask.model")}
-			value={value}
-			models={displayModels}
-			allowCustom={catalog?.allowCustom}
-			customModelEntry={customModelEntry}
-			agentLabel={agentLabel}
-			agentId={agentId}
-			onRefresh={refreshCatalog}
-			refreshing={catalog?.refreshState === "queued" || catalog?.refreshState === "refreshing"}
-			refreshError={catalog?.refreshError}
-			retryAt={catalog?.retryAt}
-			disabled={disabled || agentId === ""}
-			onChange={selectCatalogModel}
-			onCustom={selectCustomModel}
-			compact
-			recentScope={hostId ? `${hostId}:${agentId}` : agentId}
-			triggerClassName="composer-chip composer-toolbar-option w-full justify-between"
-			menuAlign="start"
-			renderTrigger={(label) => <span className="min-w-0 truncate text-control text-foreground" title={label}>{label}</span>}
-		/>
+		<span className="inline-flex w-full min-w-0 items-center gap-1.5">
+			<input
+				aria-label={t("newTask.model")}
+				className={cn(
+					"composer-chip composer-toolbar-option min-w-0 flex-1 text-control placeholder:text-passive disabled:cursor-not-allowed disabled:opacity-50",
+					!hasCatalog && "rounded-r-md!",
+				)}
+				value={value}
+				disabled={disabled || agentId === ""}
+				onChange={(event) => onModelChange(event.target.value)}
+				placeholder={query.isFetching ? t("settings.models.loading") : noOverrideLabel}
+			/>
+			{hasCatalog && (
+				<AgentModelCombobox
+					key={agentId}
+					aria-label={t("settings.models.optionsAria", { label: t("newTask.model") })}
+					value={value}
+					models={displayModels}
+					allowCustom={catalog.allowCustom}
+					disabled={disabled}
+					emptyLabel={noOverrideLabel}
+					onChange={selectCatalogModel}
+					onCustom={selectCustomModel}
+					compact
+					recentScope={agentId}
+					triggerLabel={t("settings.models.browse")}
+					triggerClassName="shrink-0"
+				/>
+			)}
+		</span>
 	);
 }

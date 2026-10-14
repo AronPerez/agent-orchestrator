@@ -45,15 +45,15 @@ async function expectBrandClearsCluster(page: Page) {
 
 test("home board route: brand clears the macOS titlebar cluster and stays readable", async ({ page }) => {
 	await page.goto("/");
-	await expect(page.getByText("Projects", { exact: true })).toBeVisible();
+	await expect(page.getByText("Projects")).toBeVisible();
 	await expectBrandClearsCluster(page);
 });
 
 test("project board route: brand clears the macOS titlebar cluster and stays readable", async ({ page }) => {
 	await page.goto("/");
-	await expect(page.getByText("Projects", { exact: true })).toBeVisible();
+	await expect(page.getByText("Projects")).toBeVisible();
 
-	// In-app nav to /projects/:id (a hard load boots the router at the board).
+	// In-app nav to the host-qualified project board.
 	await page.locator('[data-sidebar="menu-button"]').filter({ hasText: "api-gateway" }).first().click();
 	// The active project row marks itself aria-current=page once navigation lands.
 	await expect(page.locator('[aria-current="page"]')).toBeVisible();
@@ -63,7 +63,7 @@ test("project board route: brand clears the macOS titlebar cluster and stays rea
 
 test("brand stays put and readable when navigating board → session", async ({ page }) => {
 	await page.goto("/");
-	await expect(page.getByText("Projects", { exact: true })).toBeVisible();
+	await expect(page.getByText("Projects")).toBeVisible();
 
 	const boardBrandBox = await brand(page).boundingBox();
 	expect(boardBrandBox).not.toBeNull();

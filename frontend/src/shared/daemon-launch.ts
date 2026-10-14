@@ -27,20 +27,27 @@ export function resolveDaemonLaunch(
 		return {
 			command: configuredCommand,
 			args: [],
-			cwd: appPath,
+			// A packaged appPath is app.asar, a file: spawn cannot chdir into it.
+			cwd: isPackaged ? joinPath(homeDir, ".ao") : appPath,
 			shell: true,
 			source: "configured",
 		};
 	}
 
 	if (!isPackaged) {
-		// Run the daemon predev already built rather than `go run`, so the daemon's
-		// parent is Electron itself, as in the packaged app; the diagnostics view
-		// counts the daemon's parent tree as the rest of AO.
+		if (platform === "win32") {
+			return {
+				command: env.AO_DEV_DAEMON_BINARY?.trim() || joinPath(appPath, "daemon", bundledDaemonBinaryName(platform)),
+				args: ["daemon"],
+				cwd: appPath,
+				shell: false,
+				source: "dev",
+			};
+		}
 		return {
-			command: env.AO_DEV_DAEMON_BINARY?.trim() || joinPath(appPath, "daemon", bundledDaemonBinaryName(platform)),
-			args: ["daemon"],
-			cwd: appPath,
+			command: "go",
+			args: ["run", "./cmd/ao", "daemon"],
+			cwd: joinPath(appPath, "..", "backend"),
 			shell: false,
 			source: "dev",
 		};

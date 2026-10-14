@@ -1,4 +1,4 @@
-import { Feather } from "./icons";
+import { Feather } from "@expo/vector-icons";
 import { FlatList, Pressable, StyleSheet, Text } from "react-native";
 import type { ProjectInfo } from "./api";
 import type { Theme } from "./theme";
@@ -6,7 +6,6 @@ import { haptics } from "./haptics";
 import { SHEET_SCROLL_CONTENT, SheetHeader } from "./ui";
 import { useTheme, useThemedStyles } from "./ThemeProvider";
 import { ALL_PROJECTS } from "./projectFilter";
-import { iconSize, press, space, type } from "./tokens";
 
 // Picks the active project — the filter behind `useVisibleSessions()` (Agents +
 // PRs) and the default project in the spawn screen.
@@ -22,7 +21,7 @@ export function ProjectPickerSheet({
 	onSelect,
 	includeAll = true,
 	title = "Active project",
-	subtitle = "Scopes Pull Requests.",
+	subtitle = "Scopes the Agents and PRs tabs.",
 }: {
 	/** Dismisses the sheet route. */
 	onClose: () => void;
@@ -60,9 +59,6 @@ export function ProjectPickerSheet({
 			style={s.list}
 			data={rows}
 			keyExtractor={(r) => r.id}
-			// Keeps an Android drag with the list; without it the sheet's own pan
-			// takes the gesture and dismisses instead of scrolling back up.
-			nestedScrollEnabled
 			contentContainerStyle={SHEET_SCROLL_CONTENT}
 			ListHeaderComponent={<SheetHeader title={title} subtitle={subtitle} />}
 			ListEmptyComponent={<Text style={s.empty}>No projects yet. Add one from the AO dashboard on your computer.</Text>}
@@ -102,18 +98,9 @@ function Option({
 	const t = useTheme();
 	const s = useThemedStyles(makeS);
 	return (
-		<Pressable
-			accessibilityRole="button"
-			// One of these is the active project, and the row showed that with an
-			// accent colour and a check glyph — neither of which a screen reader
-			// reports. Siblings elsewhere in the app (the model picker's rows, the
-			// theme choices) already carry the state; this one did not.
-			accessibilityState={{ selected }}
-			onPress={onPress}
-			style={({ pressed }) => [s.option, pressed && s.optionPressed]}
-		>
-			<Feather name={icon} size={iconSize.sm} color={selected ? t.accent : t.textTertiary} />
-			<Text style={[s.label, selected && { color: t.accent }]} numberOfLines={1}>
+		<Pressable onPress={onPress} style={({ pressed }) => [s.option, pressed && s.optionPressed]}>
+			<Feather name={icon} size={16} color={selected ? t.blue : t.textTertiary} />
+			<Text style={[s.label, selected && { color: t.blue }]} numberOfLines={1}>
 				{label}
 			</Text>
 			{hint ? (
@@ -121,7 +108,7 @@ function Option({
 					{hint}
 				</Text>
 			) : null}
-			{selected ? <Feather name="check" size={iconSize.md} color={t.accent} /> : null}
+			{selected ? <Feather name="check" size={17} color={t.blue} /> : null}
 		</Pressable>
 	);
 }
@@ -132,22 +119,22 @@ const makeS = (t: Theme) =>
 		option: {
 			flexDirection: "row",
 			alignItems: "center",
-			gap: space.md,
-			paddingVertical: space.md,
-			paddingHorizontal: space.hair,
+			gap: 11,
+			paddingVertical: 13,
+			paddingHorizontal: 2,
 		},
-		optionPressed: { opacity: press.opacity },
-		label: { fontFamily: "Geist_500Medium", flex: 1, color: t.textPrimary, fontSize: type.subheadline.fontSize, fontWeight: "500" },
+		optionPressed: { opacity: 0.6 },
+		label: { flex: 1, color: t.textPrimary, fontSize: 15, fontWeight: "500" },
 		hint: {
 			color: t.textFaint,
-			fontSize: type.caption1.fontSize,
+			fontSize: 12,
 			fontFamily: t.fontMono,
 			flexShrink: 1,
 		},
-		empty: { fontFamily: "Geist_400Regular",
+		empty: {
 			color: t.textTertiary,
-			fontSize: type.footnote.fontSize,
-			lineHeight: type.footnote.lineHeight,
-			paddingVertical: space.md,
+			fontSize: 13,
+			lineHeight: 19,
+			paddingVertical: 14,
 		},
 	});

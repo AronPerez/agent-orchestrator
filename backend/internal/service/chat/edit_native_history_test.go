@@ -27,9 +27,11 @@ func TestEditedFirstMessageResumesNativeHistoryAfterTerminalHooks(t *testing.T) 
 	}{
 		{name: "edit_clears_previous_checkpoint"},
 		{name: "already_stuck_edit", legacyCheckpoint: true},
-		{name: "new_terminal_work_missing", legacyCheckpoint: true, terminalHook: true, wantErr: ports.ErrChatHistoryUnsettled},
+		// AO FORK DIVERGENCE (#109): untrusted legacy hook text is waived once the
+		// replay settles, so a lagging replay imports instead of failing.
+		{name: "new_terminal_work_missing", legacyCheckpoint: true, terminalHook: true},
 		{name: "new_terminal_work_replayed", legacyCheckpoint: true, terminalHook: true, terminalReplay: true},
-		{name: "unknown_checkpoint_age", legacyCheckpoint: true, unknownTime: true, wantErr: ports.ErrChatHistoryUnsettled},
+		{name: "unknown_checkpoint_age", legacyCheckpoint: true, unknownTime: true},
 		{name: "trusted_checkpoint_keeps_text_requirements", legacyCheckpoint: true, trustedCheckpoint: true, wantErr: ports.ErrChatHistoryUnsettled},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

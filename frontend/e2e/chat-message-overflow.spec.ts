@@ -107,7 +107,7 @@ test("long unbroken user messages stay inside their chat bubble @T0", async ({ p
 		});
 	});
 
-	await page.goto(`/#/projects/fake-proj/sessions/${sessionId}`);
+	await page.goto(`/#/host/local/session/${sessionId}`);
 	const humanBubble = page
 		.locator(".cursor-chat-human-message")
 		.filter({ hasText: "LABEL OCR OUTPUT" });

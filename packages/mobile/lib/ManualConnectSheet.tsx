@@ -1,14 +1,11 @@
-import { Feather } from "./icons";
-import { useState } from "react";
-import { Linking, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from "react-native";
+import { Feather } from "@expo/vector-icons";
+import { useEffect, useState } from "react";
+import { Linking, Platform, ScrollView, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import { ApiError, pingServer } from "./api";
-import { DEFAULT_CONFIG, saveConfig, type ServerConfig } from "./config";
-import { saveHost, setActiveHost, renameHost, type Host } from "./hosts";
-import { AccountManagedHostError, adoptManualConnection, DifferentMachineError, persistManualHostEdit } from "./manualConnect";
-import { configForEndpoint } from "./connect";
-import { normalizeServerHost } from "./endpoints";
-import { probeEndpoint, probeIdentity } from "./connectRuntime";
-import { IncompatibleHostVersionError } from "./race";
+import { DEFAULT_CONFIG, loadConfig, saveConfig, type ServerConfig } from "./config";
+import { saveHost, setActiveHost } from "./hosts";
+import { adoptManualConnection } from "./manualConnect";
+import { probeIdentity } from "./connectRuntime";
 import {
 	classifyConnectionFailure,
 	describeConnectionFailure,
@@ -19,51 +16,39 @@ import type { Theme } from "./theme";
 import { haptics } from "./haptics";
 import { Button, SHEET_SCROLL_CONTENT, SheetHeader, SheetScreen } from "./ui";
 import { useTheme, useThemedStyles } from "./ThemeProvider";
-import { MOBILE_EVENTS } from "./telemetry/events";
-import { mobileTelemetry } from "./telemetry/runtime";
-import { iconSize, space, touchTarget, type } from "./tokens";
 
-// The typing fallback behind the QR scanner, also reused to edit a pairing.
-// The legacy mux port is unused against the Go daemon, so it stays hidden.
-export function ManualConnectSheet({ onConnected, editingHost, editingEndpointIndex = 0 }: {
-	onConnected: () => void;
-	editingHost?: Host;
-	editingEndpointIndex?: number;
-}) {
+// The typing fallback behind the QR scanner: Tailscale users and anyone whose
+// desktop isn't in front of them. Deliberately narrower than the Settings form —
+// it omits the legacy "TERMINAL PORT" (`muxPort`), which is unused against the
+// Go daemon, and it collapses Settings' three buttons ("Scan QR", "Test
+// connection", "Save & connect") into one: during onboarding there is no reason
+// to make someone test and save as separate acts.
+export function ManualConnectSheet({ onConnected }: { onConnected: () => void }) {
 	const t = useTheme();
 	const styles = useThemedStyles(makeStyles);
-	// New pairings start blank; editing preloads only the pairing the user selected.
-	const [cfg, setCfg] = useState<ServerConfig>(() => {
-		const endpoint = editingHost?.endpoints[editingEndpointIndex];
-		return endpoint ? configForEndpoint(endpoint, editingHost.token, editingHost.id) : { ...DEFAULT_CONFIG, password: editingHost?.token ?? "" };
-	});
-	const [machineName, setMachineName] = useState(editingHost?.name ?? "");
+	const [cfg, setCfg] = useState<ServerConfig>(DEFAULT_CONFIG);
 	const [busy, setBusy] = useState(false);
 	const [failure, setFailure] = useState<ConnectionErrorCopy | null>(null);
-	const [showPassword, setShowPassword] = useState(false);
+
+	// Load whatever is already saved when the sheet opens, so a user who closes it
+	// to re-try the scanner doesn't lose what they typed. Mount is the open now
+	// that this is a route rather than an always-rendered component.
+	//
+	// The name is deliberately NOT prefilled: this same sheet also adds a *new*
+	// node, and carrying the active node's name onto a different host is how you
+	// end up with two "Studio"s. Blank means "keep the existing name, or use the
+	// host" — saveConfig decides.
+	useEffect(() => {
+		loadConfig().then((c) => setCfg({ ...c, label: "" }));
+	}, []);
 
 	const set = (k: keyof ServerConfig) => (v: string) => setCfg((prev) => ({ ...prev, [k]: v }));
 
 	async function connect() {
 		setBusy(true);
 		setFailure(null);
-		const target = { ...cfg, host: normalizeServerHost(cfg.host), httpPort: cfg.httpPort.trim() };
+		const target = { ...cfg, host: cfg.host.trim() };
 		try {
-			if (editingHost) {
-				await persistManualHostEdit(editingHost, target, machineName, editingEndpointIndex, {
-					probe: (endpoint) => probeEndpoint(endpoint, new AbortController().signal),
-					ping: pingServer,
-					saveHost,
-					renameHost,
-				});
-				haptics.success();
-				onConnected();
-				return;
-			}
-			// Identity is public; reject unsupported hosts before presenting a password.
-			let hostId = "";
-			try { hostId = await probeIdentity(target); }
-			catch (error) { if (error instanceof IncompatibleHostVersionError) throw error; }
 			// Verify BEFORE persisting. pingServer takes the config it is handed, so
 			// nothing needs to be saved to test it — and saving first would leave
 			// known-bad credentials on disk. The background poller retries every 8s,
@@ -76,53 +61,35 @@ export function ManualConnectSheet({ onConnected, editingHost, editingEndpointIn
 			// left resolution reconnecting the previously active machine on the
 			// next launch, so a manual connection silently did not stick.
 			await adoptManualConnection(target, {
-				identity: async () => hostId,
+				identity: async (c) => {
+					try {
+						return await probeIdentity(c);
+					} catch {
+						return ""; // Older daemon, or an endpoint that cannot say: still worth storing.
+					}
+				},
 				saveHost,
 				setActiveHost,
-			}, machineName);
-			mobileTelemetry()?.capture(MOBILE_EVENTS.paired, { method: "manual" });
+			});
 			haptics.success();
 			onConnected();
 		} catch (e) {
 			haptics.warning();
-			if (e instanceof DifferentMachineError || e instanceof AccountManagedHostError) {
-				setFailure({
-					title: e instanceof AccountManagedHostError ? "Managed by AO Cloud" : "Different machine",
-					message: e.message,
-					icon: "alert-circle",
-					showLocalNetworkHint: false,
-				});
-				return;
-			}
-			const status = e instanceof IncompatibleHostVersionError ? 426 : e instanceof ApiError ? e.status : undefined;
-			const copy = describeConnectionFailure(classifyConnectionFailure(status), {
-				host: target.host,
-				port: target.httpPort,
-				platform: Platform.OS,
-			});
-			setFailure(editingHost && classifyConnectionFailure(status) === "auth"
-				? { ...copy, message: "That password was rejected. Check it and try again." }
-				: copy);
+			const status = e instanceof ApiError ? e.status : undefined;
+			setFailure(
+				describeConnectionFailure(classifyConnectionFailure(status), {
+					host: target.host,
+					port: target.httpPort,
+					platform: Platform.OS,
+				}),
+			);
 		} finally {
 			setBusy(false);
 		}
 	}
 
-	const validPort = /^\d+$/.test(cfg.httpPort) && Number(cfg.httpPort) >= 1 && Number(cfg.httpPort) <= 65535;
-	const title = editingHost ? "Edit connection" : "Connect manually";
-	const subtitle = editingHost
-		? "Update this machine's name, address, port, password, or TLS setting."
-		: "Name this machine, then enter the address and password from Connect Mobile or ao remote-host enable.";
 	const form = (
 		<>
-			<Field
-				label="MACHINE NAME"
-				value={machineName}
-				onChangeText={setMachineName}
-				placeholder="AzureLinux"
-				maxLength={48}
-				returnKeyType="next"
-			/>
 			<Field
 				label="HOST"
 				value={cfg.host}
@@ -132,58 +99,48 @@ export function ManualConnectSheet({ onConnected, editingHost, editingEndpointIn
 				autoCorrect={false}
 				keyboardType="url"
 			/>
+			{/* Ten nodes of raw Tailscale IPs are unreadable in a list, so a node can
+			    carry a human name. Optional — the host is the fallback. */}
+			<Field
+				label="NAME"
+				value={cfg.label ?? ""}
+				onChangeText={set("label")}
+				placeholder={cfg.host.trim() || "Optional — defaults to the host"}
+				autoCorrect={false}
+			/>
 			<Field label="API PORT" value={cfg.httpPort} onChangeText={set("httpPort")} keyboardType="number-pad" />
-			<View style={styles.field}>
-				<Text style={styles.fieldLabel}>PASSWORD</Text>
-				<View style={styles.passwordRow}>
-					<TextInput
-						value={cfg.password}
-						onChangeText={set("password")}
-						placeholder="Connection password"
-						placeholderTextColor={t.textFaint}
-						selectionColor={t.accent}
-						autoCapitalize="none"
-						autoCorrect={false}
-						secureTextEntry={!showPassword}
-						style={[styles.input, styles.passwordInput]}
-					/>
-					<Pressable
-						accessibilityRole="button"
-						accessibilityLabel={showPassword ? "Hide password" : "Show password"}
-						onPress={() => {
-							haptics.tap();
-							setShowPassword((visible) => !visible);
-						}}
-						style={({ pressed }) => [styles.passwordToggle, pressed && styles.passwordTogglePressed]}
-					>
-						<Feather name={showPassword ? "eye-off" : "eye"} size={iconSize.lg} color={t.textSecondary} />
-					</Pressable>
-				</View>
-			</View>
+			<Field
+				label="PASSWORD"
+				value={cfg.password}
+				onChangeText={set("password")}
+				placeholder="Connection password"
+				autoCapitalize="none"
+				secureTextEntry
+			/>
 
 			<View style={styles.toggleRow}>
 				<Text style={styles.toggleLabel}>Use TLS (https / wss)</Text>
 				<Switch
 					value={!!cfg.secure}
 					onValueChange={(v) => setCfg((prev) => ({ ...prev, secure: v }))}
-					trackColor={{ true: t.green, false: t.borderStrong }}
+					trackColor={{ true: t.blue, false: t.borderStrong }}
 				/>
 			</View>
 
 			{failure ? (
 				<View style={styles.errorBox}>
-					<Feather name="alert-circle" size={iconSize.sm} color={t.red} />
+					<Feather name="alert-circle" size={15} color={t.red} />
 					<View style={{ flex: 1 }}>
 						<Text style={styles.errorText}>{failure.message}</Text>
 						{failure.showLocalNetworkHint ? (
 							<>
-								<Text style={[styles.errorText, { marginTop: space.xs }]}>{LOCAL_NETWORK_HINT}</Text>
+								<Text style={[styles.errorText, { marginTop: 6 }]}>{LOCAL_NETWORK_HINT}</Text>
 								<Button
 									title="Open settings"
 									variant="ghost"
 									icon="settings"
 									onPress={() => Linking.openSettings()}
-									style={{ marginTop: space.sm }}
+									style={{ marginTop: 10 }}
 								/>
 							</>
 						) : null}
@@ -192,12 +149,12 @@ export function ManualConnectSheet({ onConnected, editingHost, editingEndpointIn
 			) : null}
 
 			<Button
-				title={editingHost ? "Save changes" : "Connect"}
-				icon={editingHost ? "check" : "link"}
+				title="Connect"
+				icon="link"
 				loading={busy}
-				disabled={!machineName.trim() || !cfg.host.trim() || !validPort}
+				disabled={!cfg.host.trim()}
 				onPress={connect}
-				style={{ marginTop: space.lg }}
+				style={{ marginTop: 16 }}
 			/>
 		</>
 	);
@@ -214,8 +171,8 @@ export function ManualConnectSheet({ onConnected, editingHost, editingEndpointIn
 				keyboardShouldPersistTaps="handled"
 			>
 				<SheetHeader
-					title={title}
-					subtitle={subtitle}
+					title="Connect manually"
+					subtitle="Enter your computer's address from AO → Settings → Connect Mobile."
 				/>
 				{form}
 			</ScrollView>
@@ -224,7 +181,7 @@ export function ManualConnectSheet({ onConnected, editingHost, editingEndpointIn
 
 	// iOS lifts a presented form sheet over the keyboard by itself.
 	return (
-		<SheetScreen title={title} subtitle={subtitle}>
+		<SheetScreen title="Connect manually" subtitle="Enter your computer's address from AO → Settings → Connect Mobile.">
 			{form}
 		</SheetScreen>
 	);
@@ -236,7 +193,7 @@ function Field({ label, ...input }: { label: string } & React.ComponentProps<typ
 	return (
 		<View style={styles.field}>
 			<Text style={styles.fieldLabel}>{label}</Text>
-			<TextInput {...input} style={styles.input} placeholderTextColor={t.textFaint} selectionColor={t.accent} />
+			<TextInput {...input} style={styles.input} placeholderTextColor={t.textFaint} selectionColor={t.blue} />
 		</View>
 	);
 }
@@ -244,55 +201,39 @@ function Field({ label, ...input }: { label: string } & React.ComponentProps<typ
 const makeStyles = (t: Theme) =>
 	StyleSheet.create({
 		screen: { flex: 1, backgroundColor: t.bgSurface },
-		field: { marginTop: space.lg },
-		fieldLabel: { fontFamily: "Geist_600SemiBold",
+		field: { marginTop: 16 },
+		fieldLabel: {
 			color: t.textTertiary,
-			fontSize: type.caption2.fontSize,
-			fontWeight: "600",
+			fontSize: 10,
+			fontWeight: "700",
 			letterSpacing: 1.1,
-			marginBottom: space.xs,
+			marginBottom: 7,
 		},
-		input: { fontFamily: "Geist_400Regular",
+		input: {
 			backgroundColor: t.bgElevated,
 			borderWidth: 1,
 			borderColor: t.borderDefault,
-			borderRadius: 8, borderCurve: "continuous",
-			paddingHorizontal: space.md,
-			paddingVertical: space.md,
+			borderRadius: 10,
+			paddingHorizontal: 13,
+			paddingVertical: 12,
 			color: t.textPrimary,
-			fontSize: type.subheadline.fontSize,
+			fontSize: 15,
 		},
-		passwordRow: {
-			flexDirection: "row",
-			alignItems: "center",
-			backgroundColor: t.bgElevated,
-			borderWidth: 1,
-			borderColor: t.borderDefault,
-			borderRadius: 8, borderCurve: "continuous",
-		},
-		passwordInput: { flex: 1, backgroundColor: "transparent", borderWidth: 0, paddingRight: 0 },
-		passwordToggle: {
-			width: touchTarget,
-			minHeight: touchTarget,
-			alignItems: "center",
-			justifyContent: "center",
-		},
-		passwordTogglePressed: { opacity: 0.6 },
 		toggleRow: {
 			flexDirection: "row",
 			alignItems: "center",
 			justifyContent: "space-between",
-			marginTop: space.lg,
+			marginTop: 18,
 		},
-		toggleLabel: { fontFamily: "Geist_400Regular", color: t.textSecondary, fontSize: type.subheadline.fontSize, flex: 1 },
+		toggleLabel: { color: t.textSecondary, fontSize: 14, flex: 1 },
 		errorBox: {
 			flexDirection: "row",
-			gap: space.sm,
+			gap: 9,
 			alignItems: "flex-start",
 			backgroundColor: t.tintRed,
-			borderRadius: 8, borderCurve: "continuous",
-			padding: space.md,
-			marginTop: space.lg,
+			borderRadius: 10,
+			padding: 12,
+			marginTop: 16,
 		},
-		errorText: { fontFamily: "Geist_400Regular", color: t.red, fontSize: type.footnote.fontSize, lineHeight: type.footnote.lineHeight },
+		errorText: { color: t.red, fontSize: 13, lineHeight: 19 },
 	});

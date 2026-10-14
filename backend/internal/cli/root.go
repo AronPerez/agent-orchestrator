@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -17,7 +16,6 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/daemon"
 	aoprocess "github.com/aoagents/agent-orchestrator/backend/internal/process"
 	"github.com/aoagents/agent-orchestrator/backend/internal/processalive"
-	"github.com/aoagents/agent-orchestrator/backend/internal/telemetrymeta"
 )
 
 // Execute runs the ao CLI with process stdio.
@@ -29,11 +27,7 @@ func executeWithDeps(deps Deps, args []string) error {
 	deps = deps.withDefaults()
 	cmd := NewRootCommand(deps)
 	cmd.SetArgs(args)
-	err := cmd.Execute()
-	if err != nil && ExitCode(err) == 2 {
-		(&commandContext{deps: deps}).emitCLIUsageError(context.Background(), args, err)
-	}
-	return err
+	return cmd.Execute()
 }
 
 // usageError marks a command-line misuse (bad flag, wrong arg count). It lets
@@ -172,6 +166,7 @@ func (d Deps) withDefaults() Deps {
 func NewRootCommand(deps Deps) *cobra.Command {
 	deps = deps.withDefaults()
 	ctx := &commandContext{deps: deps}
+	var remoteURL string
 
 	root := &cobra.Command{
 		Use:           "ao",
@@ -180,13 +175,18 @@ func NewRootCommand(deps Deps) *cobra.Command {
 		Version:       VersionString(),
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
-			if shouldEmitCLIInvocation(cmd) {
-				ctx.emitCLIInvoked(cmd.Context(), cmd)
+		PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
+			// Every daemon call depends on which daemon this invocation targets.
+			remote, err := resolveRemoteTarget(remoteURL)
+			if err != nil {
+				return err
 			}
+			ctx.remote = remote
 			return nil
 		},
 	}
+	root.PersistentFlags().StringVar(&remoteURL, "url", "",
+		"Base URL of a remote AO daemon, e.g. http://host:3011 (env AO_URL); credential from AO_TOKEN or ~/.ao/remotes.json")
 	root.SetIn(deps.In)
 	root.SetOut(deps.Out)
 	root.SetErr(deps.Err)
@@ -197,7 +197,7 @@ func NewRootCommand(deps Deps) *cobra.Command {
 		return usageError{err}
 	})
 
-	root.AddCommand(newDaemonCommand())
+	root.AddCommand(newDaemonCommand(ctx))
 	root.AddCommand(newStartCommand(ctx))
 	root.AddCommand(newStopCommand(ctx))
 	root.AddCommand(newStatusCommand(ctx))
@@ -236,85 +236,8 @@ func NewRootCommand(deps Deps) *cobra.Command {
 
 type commandContext struct {
 	deps Deps
-}
-
-func shouldEmitCLIInvocation(cmd *cobra.Command) bool {
-	commandPath := telemetrymeta.NormalizeCommandPath(cmd.CommandPath())
-	if telemetrymeta.IsRoutineInternalCLICommand(commandPath) {
-		return false
-	}
-	switch commandPath {
-	// "ao daemon"/"ao start" are supervisor-driven bootstrapping, and
-	// "ao completion"/"ao help" are shell setup and self-documentation.
-	// "ao pty-host", "ao agent-process", and "ao mcp" are internal runtime
-	// processes. None reflect user activity.
-	case "ao daemon", "ao start", "ao completion", "ao help", "ao pty-host", "ao chat-host", "ao unreal-provider", "ao codex-login", "ao claude-login", "ao agent-process", "ao agent-process supervise", "ao mcp":
-		return false
-	default:
-		return true
-	}
-}
-
-func (c *commandContext) emitCLIInvoked(ctx context.Context, cmd *cobra.Command) {
-	reqCtx, cancel := context.WithTimeout(ctx, probeTimeout)
-	defer cancel()
-	_ = c.postLoopbackJSON(reqCtx, "/internal/telemetry/cli-invoked", map[string]string{
-		"command":     cmd.Name(),
-		"commandPath": cmd.CommandPath(),
-		"actorType":   cliInvocationActorType(cmd),
-	})
-}
-
-func cliInvocationActorType(cmd *cobra.Command) string {
-	if strings.TrimSpace(cmd.CommandPath()) == "ao hooks" {
-		return "agent"
-	}
-	if sessionIDPattern.MatchString(strings.TrimSpace(os.Getenv("AO_SESSION_ID"))) {
-		return "agent"
-	}
-	return "user"
-}
-
-func (c *commandContext) emitCLIUsageError(ctx context.Context, args []string, err error) {
-	command, commandPath := usageErrorCommand(args)
-	reqCtx, cancel := context.WithTimeout(ctx, probeTimeout)
-	defer cancel()
-	_ = c.postLoopbackJSON(reqCtx, "/internal/telemetry/cli-usage-error", map[string]string{
-		"command":     command,
-		"commandPath": commandPath,
-		"error":       err.Error(),
-	})
-}
-
-func usageErrorCommand(args []string) (string, string) {
-	// Only tokens that match registered subcommands may enter the reported
-	// path: anything past the deepest match is user data (session names,
-	// prompts, orchestrator names) and must never ride into telemetry.
-	current := NewRootCommand(Deps{})
-	tokens := []string{"ao"}
-	for _, arg := range args {
-		if strings.HasPrefix(arg, "-") {
-			break
-		}
-		var next *cobra.Command
-		for _, sub := range current.Commands() {
-			if sub.Name() == arg || sub.HasAlias(arg) {
-				next = sub
-				break
-			}
-		}
-		if next == nil {
-			break
-		}
-		tokens = append(tokens, arg)
-		current = next
-	}
-	commandPath := strings.Join(tokens, " ")
-	command := "ao"
-	if len(tokens) > 1 {
-		command = tokens[len(tokens)-1]
-	}
-	return command, commandPath
+	// remote is nil for the default local daemon; see remote.go.
+	remote *remoteTarget
 }
 
 func usageArgs(validate cobra.PositionalArgs) cobra.PositionalArgs {
@@ -340,13 +263,17 @@ func atMostOneArg(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func newDaemonCommand() *cobra.Command {
+func newDaemonCommand(ctx *commandContext) *cobra.Command {
 	return &cobra.Command{
 		Use:    "daemon",
 		Short:  "Run the AO backend daemon",
 		Hidden: true,
 		Args:   noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Flag-only, not AO_URL — see refuseDaemonURLFlag.
+			if err := ctx.refuseDaemonURLFlag(); err != nil {
+				return err
+			}
 			return daemon.Run()
 		},
 	}

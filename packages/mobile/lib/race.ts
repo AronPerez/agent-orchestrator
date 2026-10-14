@@ -5,13 +5,6 @@ export type ProbeAnswer = { hostId: string };
 
 export type ProbeFn = (endpoint: Endpoint, signal: AbortSignal) => Promise<ProbeAnswer>;
 
-export class IncompatibleHostVersionError extends Error {
-	constructor(readonly hostId: string) {
-		super("AO versions are incompatible. Update AO on this phone and the machine.");
-		this.name = "IncompatibleHostVersionError";
-	}
-}
-
 export type RaceOptions = {
 	/**
 	 * How long, after the first successful answer, to keep waiting for a
@@ -33,7 +26,7 @@ export type RaceOutcome =
 	/** hostId is what actually answered, so a machine migrated without one can
 	 * record the identity it just learned. */
 	| { ok: true; endpoint: Endpoint; hostId: string }
-	| { ok: false; reason: "no-candidates" | "none-reachable" | "incompatible" };
+	| { ok: false; reason: "no-candidates" | "none-reachable" };
 
 /**
  * Probes every candidate at once and returns the best one that answers as the
@@ -63,20 +56,10 @@ export async function raceEndpoints(
 	if (endpoints.length === 0) return { ok: false, reason: "no-candidates" };
 	const graceMs = options.graceMs ?? DEFAULT_RACE_GRACE_MS;
 
-	const isDev = typeof __DEV__ !== "undefined" && __DEV__;
-	if (isDev) {
-		console.log("[race] Racing endpoints:", {
-			count: endpoints.length,
-			expectedHostId,
-			endpoints: endpoints.map((e) => `${e.kind}://${e.host}:${e.port}`),
-		});
-	}
-
 	const controller = new AbortController();
 	let best: Endpoint | null = null;
 	let bestHostId = "";
 	let settled = 0;
-	let incompatible = false;
 	let done = false;
 	let graceTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -88,35 +71,19 @@ export async function raceEndpoints(
 			// Whatever is still in flight has lost; stop it rather than leaving
 			// sockets open on endpoints nobody is going to use.
 			controller.abort();
-			const result: RaceOutcome = best
-				? { ok: true, endpoint: best, hostId: bestHostId }
-				: { ok: false, reason: incompatible ? "incompatible" : "none-reachable" };
-			if (isDev) {
-				console.log("[race] Race finished:", result);
-			}
-			resolve(result);
+			resolve(
+				best
+					? { ok: true, endpoint: best, hostId: bestHostId }
+					: { ok: false, reason: "none-reachable" },
+			);
 		};
 
 		for (const endpoint of endpoints) {
-			if (isDev) {
-				console.log("[race] Probing endpoint:", `${endpoint.kind}://${endpoint.host}:${endpoint.port}`);
-			}
 			probe(endpoint, controller.signal)
 				.then((answer) => {
-					if (isDev) {
-						console.log("[race] Endpoint answered:", `${endpoint.kind}://${endpoint.host}:${endpoint.port}`, answer);
-					}
 					// Answering as someone else is not an error to report — it is
 					// simply not our machine, so the endpoint is discarded.
-					if (expectedHostId !== "" && answer.hostId !== expectedHostId) {
-						if (isDev) {
-							console.log("[race] Endpoint discarded: hostId mismatch", {
-								expected: expectedHostId,
-								got: answer.hostId,
-							});
-						}
-						return;
-					}
+					if (expectedHostId !== "" && answer.hostId !== expectedHostId) return;
 					if (!best || endpointRank(endpoint.kind) < endpointRank(best.kind)) {
 						best = endpoint;
 						bestHostId = answer.hostId;
@@ -127,12 +94,7 @@ export async function raceEndpoints(
 					// Nothing ranked better can still arrive, so stop early.
 					if (endpointRank(endpoint.kind) === 0) finish();
 				})
-				.catch((err) => {
-					if (err instanceof IncompatibleHostVersionError && (expectedHostId === "" || err.hostId === expectedHostId)) incompatible = true;
-					if (isDev) {
-						console.log("[race] Endpoint failed:", `${endpoint.kind}://${endpoint.host}:${endpoint.port}`, err);
-					}
-				})
+				.catch(() => {})
 				.finally(() => {
 					settled += 1;
 					if (settled === endpoints.length) finish();

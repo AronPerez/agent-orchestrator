@@ -2,10 +2,12 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { useNavigate } from "@tanstack/react-router";
 import { AlertTriangle, RotateCw, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { canBypassOrchestratorApprovals, isChatPreflightCode } from "../lib/spawn-orchestrator";
+import { isChatPreflightCode } from "../lib/spawn-orchestrator";
 import type { OrchestratorReplacementFailure } from "../stores/ui-store";
 import { findProjectOrchestrator, type WorkspaceSummary } from "../types/workspace";
 import { Button } from "./ui/button";
+import type { Ref } from "../lib/hosts";
+import { hostActionSuffix } from "../lib/host-disclosure";
 import {
 	settingsDialogContentClass,
 	settingsDialogFooterClass,
@@ -13,61 +15,48 @@ import {
 } from "./ui/dialog";
 
 type OrchestratorReplacementDialogProps = {
-	projectId: string | null;
-	pending?: boolean;
+	project: Ref | null;
 	error?: OrchestratorReplacementFailure;
 	workspaces: WorkspaceSummary[];
 	onOpenChange: (open: boolean) => void;
-	onRetry: (projectId: string) => void;
-	onRetryAsTui: (projectId: string) => void;
-	onRetryWithoutApprovals: (projectId: string) => void;
+	onRetry: (project: Ref) => void;
+	onRetryAsTui: (project: Ref) => void;
 };
 
 export function OrchestratorReplacementDialog({
-	projectId,
-	pending = false,
+	project,
 	error,
 	workspaces,
 	onOpenChange,
 	onRetry,
 	onRetryAsTui,
-	onRetryWithoutApprovals,
 }: OrchestratorReplacementDialogProps) {
 	const { t } = useTranslation();
 	const navigate = useNavigate();
-	const open = Boolean(projectId && error);
-	const orchestrator = projectId ? findProjectOrchestrator(workspaces, projectId) : undefined;
-	const canBypassApprovals = Boolean(
-		error && canBypassOrchestratorApprovals(error.code, error.details),
-	);
+	const open = Boolean(project && error);
+	const hostSuffix = project ? hostActionSuffix(t, project.host) : "";
+	const orchestrator = project ? findProjectOrchestrator(workspaces, project) : undefined;
 
 	const openCurrent = () => {
-		if (!projectId || !orchestrator) return;
+		if (!project || !orchestrator) return;
 		onOpenChange(false);
 		void navigate({
-			to: "/projects/$projectId/sessions/$sessionId",
-			params: { projectId, sessionId: orchestrator.id },
+			to: "/host/$hostId/session/$sessionId",
+			params: { hostId: orchestrator.host, sessionId: orchestrator.id },
 		});
 	};
 
 	return (
-		<Dialog.Root
-			open={open}
-			onOpenChange={(open) => {
-				if (!pending) onOpenChange(open);
-			}}
-		>
+		<Dialog.Root open={open} onOpenChange={onOpenChange}>
 			<Dialog.Portal>
 				<Dialog.Overlay className="dialog-overlay data-[state=open]:animate-overlay-in" />
 				<Dialog.Content
-					aria-busy={pending}
 					className={`${settingsDialogContentClass} fixed left-1/2 top-1/2 w-dialog-orchestrator -translate-x-1/2 -translate-y-1/2 data-[state=open]:animate-modal-in`}
 				>
 					<Dialog.Close asChild>
 						<button
 							type="button"
 							className="settings-dialog-close-button settings-close-button"
-							disabled={pending}
 							aria-label={t("orchestratorReplacement.close")}
 						>
 							<X className="size-5" aria-hidden="true" />
@@ -81,45 +70,29 @@ export function OrchestratorReplacementDialog({
 							<div className="min-w-0 flex-1">
 								<Dialog.Title className="settings-dialog-title">{t("orchestratorReplacement.title")}</Dialog.Title>
 								<Dialog.Description className="mt-1 text-control leading-5 text-settings-muted">
-									{error?.message ?? t("orchestratorReplacement.fallback")}
+									{error?.message ?? t("orchestratorReplacement.fallback")}{hostSuffix}
 								</Dialog.Description>
 							</div>
 						</div>
 					</div>
 					<div className={settingsDialogFooterClass}>
-						{canBypassApprovals ? (
-							<Button
-								type="button"
-								variant="footer-primary"
-								aria-disabled={pending}
-								onClick={() => !pending && projectId && onRetryWithoutApprovals(projectId)}
-							>
-								{t("newTask.startWithoutApprovals", { defaultValue: "Start without approvals" })}
-							</Button>
-						) : null}
 						{error && isChatPreflightCode(error.code) ? (
-							<Button
-								type="button"
-								variant="footer"
-								aria-disabled={pending}
-								onClick={() => !pending && projectId && onRetryAsTui(projectId)}
-							>
-								{t("newTask.createAsTui")}
+							<Button type="button" variant="footer" onClick={() => project && onRetryAsTui(project)}>
+								{t("newTask.createAsTui")}{hostSuffix}
 							</Button>
 						) : null}
 						{orchestrator ? (
-							<Button type="button" variant="footer" disabled={pending} onClick={openCurrent}>
+							<Button type="button" variant="footer" onClick={openCurrent}>
 								{t("orchestratorReplacement.openCurrent")}
 							</Button>
 						) : null}
 						<Button
 							type="button"
 							variant="footer-primary"
-							aria-disabled={pending}
-							onClick={() => !pending && projectId && onRetry(projectId)}
+							onClick={() => project && onRetry(project)}
 						>
 							<RotateCw className="size-3.5" aria-hidden="true" />
-							{t("orchestratorReplacement.retry")}
+							{t("orchestratorReplacement.retry")}{hostSuffix}
 						</Button>
 					</div>
 				</Dialog.Content>

@@ -11,11 +11,6 @@ export interface HumanMessageEditorProps {
 	text: string;
 	content: ConversationContentSummary[];
 	pending: boolean;
-	/** Durable unresolved delivery: lock edits, but allow explicit safe recovery. */
-	locked?: boolean;
-	recoveryLabel?: string;
-	onAbandonRecovery?: () => void;
-	sendBlocked?: boolean;
 	busy: boolean;
 	reconstructedContext?: boolean;
 	error?: string;
@@ -28,10 +23,6 @@ export function HumanMessageEditor({
 	text,
 	content,
 	pending,
-	locked = false,
-	recoveryLabel,
-	onAbandonRecovery,
-	sendBlocked = false,
 	busy,
 	reconstructedContext = false,
 	error,
@@ -43,18 +34,8 @@ export function HumanMessageEditor({
 	const [draft, setDraft] = useState(text);
 	const textarea = useRef<HTMLTextAreaElement>(null);
 	const reconstructedContextId = useId();
-	const sendDisabled =
-		pending || sendBlocked || busy || draft.trim().length === 0 || (locked && !recoveryLabel);
+	const sendDisabled = pending || busy || draft.trim().length === 0;
 	const busyMessage = busy ? t("chat.edit.stopCurrentTurn") : undefined;
-
-	useEffect(() => {
-		// React can preserve this editor while its Chat surface is hidden. If another
-		// committed surface advances the durable revision in that interval, the parent
-		// restores the newer text when this surface reconnects and it must replace the
-		// stale local seed. Ordinary typing already publishes the same text upward, so
-		// this equality-preserving update does not reset an active edit.
-		setDraft(text);
-	}, [text]);
 
 	useEffect(() => {
 		const node = textarea.current;
@@ -81,7 +62,7 @@ export function HumanMessageEditor({
 	}
 
 	return (
-		<div className="cursor-chat-composer relative flex w-full max-w-3xl flex-col gap-1.5 px-4 py-3">
+		<div className="cursor-chat-composer relative flex w-full max-w-3xl flex-col gap-1.5 border px-4 py-3">
 		<textarea
 			ref={textarea}
 			value={draft}
@@ -92,7 +73,6 @@ export function HumanMessageEditor({
 			onKeyDown={onKeyDown}
 			aria-label={t("chat.edit.label")}
 			aria-describedby={reconstructedContext ? reconstructedContextId : undefined}
-			disabled={pending || locked}
 			autoFocus
 			rows={2}
 			className="chat-composer-scrollbar max-h-56 min-h-[3.25rem] w-full resize-none overflow-y-auto overscroll-contain bg-transparent px-0 py-1 text-sm leading-relaxed text-foreground outline-none"
@@ -104,27 +84,17 @@ export function HumanMessageEditor({
 			className="mt-2"
 		/>
 		{reconstructedContext ? (
-			<p id={reconstructedContextId} className="px-1.5 text-pretty text-xs text-muted-foreground">
+			<p id={reconstructedContextId} className="px-1.5 text-pretty text-[11px] text-muted-foreground">
 				{t("chat.edit.reconstructedContext")}
 			</p>
 		) : null}
 		<div className="mt-2 flex min-h-7 items-center justify-end gap-1.5">
 			{error ? (
-				<span role="alert" className="mr-auto text-xs text-destructive">
+				<span role="alert" className="mr-auto text-[11px] text-destructive">
 					{error}
 				</span>
 			) : busyMessage ? (
-				<span className="mr-auto text-xs text-muted-foreground">{busyMessage}</span>
-			) : null}
-			{onAbandonRecovery ? (
-				<Button
-					type="button"
-					size="sm"
-					variant="outline"
-					onClick={onAbandonRecovery}
-				>
-					{t("chat.edit.abandonRecovery")}
-				</Button>
+				<span className="mr-auto text-[11px] text-muted-foreground">{busyMessage}</span>
 			) : null}
 			<Tooltip>
 				<TooltipTrigger asChild>
@@ -134,7 +104,7 @@ export function HumanMessageEditor({
 							size="icon-sm"
 							variant="ghost"
 							onClick={onCancel}
-							disabled={pending || locked}
+							disabled={pending}
 							aria-label={t("chat.edit.cancel")}
 							className="size-7"
 						>
@@ -153,7 +123,7 @@ export function HumanMessageEditor({
 							size="icon-sm"
 							onClick={submit}
 							disabled={sendDisabled}
-							aria-label={recoveryLabel ?? t("chat.edit.send")}
+							aria-label={t("chat.edit.send")}
 							className={cn(
 								"size-7 rounded-full border-transparent",
 								sendDisabled
@@ -165,7 +135,7 @@ export function HumanMessageEditor({
 						</Button>
 					</span>
 				</TooltipTrigger>
-				<TooltipContent side="bottom">{busyMessage ?? recoveryLabel ?? t("chat.edit.sendShortcut")}</TooltipContent>
+				<TooltipContent side="bottom">{busyMessage ?? t("chat.edit.sendShortcut")}</TooltipContent>
 			</Tooltip>
 		</div>
 	</div>

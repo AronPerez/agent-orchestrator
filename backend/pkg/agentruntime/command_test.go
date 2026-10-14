@@ -148,7 +148,7 @@ func TestBuildRestoreCommands(t *testing.T) {
 			},
 			want: []string{
 				"claude",
-				"--permission-mode", "bypassPermissions",
+				"--dangerously-skip-permissions",
 				"--resume", ClaudeSessionID("session-1"),
 				"--", "continue",
 			},
@@ -165,7 +165,7 @@ func TestBuildRestoreCommands(t *testing.T) {
 			},
 			want: []string{
 				"claude",
-				"--permission-mode", "bypassPermissions",
+				"--dangerously-skip-permissions",
 				"--model", "claude-opus-4-5",
 				"--effort", "high",
 				"--resume", ClaudeSessionID("session-1"),
@@ -245,7 +245,7 @@ func TestBuildRestoreCommandAppliesModel(t *testing.T) {
 				Model:      "claude-4-5",
 				Permission: PermissionBypassPermissions,
 			},
-			want: []string{"claude", "--permission-mode", "bypassPermissions", "--model", "claude-4-5", "--resume", ClaudeSessionID("session-1")},
+			want: []string{"claude", "--dangerously-skip-permissions", "--model", "claude-4-5", "--resume", ClaudeSessionID("session-1")},
 		},
 		{
 			name: "codex",

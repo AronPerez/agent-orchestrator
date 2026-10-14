@@ -1,9 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
 	buildCommands,
-	buildFileSessionCommands,
 	buildSessionActions,
-	buildWorkspaceFileCommands,
 	filterCommands,
 	groupCommands,
 	displayGroups,
@@ -15,17 +13,12 @@ import {
 	type CommandItem,
 } from "./command-palette";
 import type { PRReviewState } from "./session-reviews";
-import {
-	STANDALONE_PROJECT_KIND,
-	STANDALONE_WORKSPACE_ID,
-	type PullRequestFacts,
-	type WorkspaceSession,
-	type WorkspaceSummary,
-} from "../types/workspace";
+import type { PullRequestFacts, WorkspaceSession, WorkspaceSummary } from "../types/workspace";
 import { appI18n } from "../i18n";
 
 function session(overrides: Partial<WorkspaceSession> & { id: string }): WorkspaceSession {
 	return {
+		host: "local",
 		workspaceId: "proj-1",
 		workspaceName: "app",
 		title: overrides.id,
@@ -53,6 +46,7 @@ const pr = (number: number, url = `https://github.com/o/r/pull/${number}`): Pull
 function workspaces(): WorkspaceSummary[] {
 	return [
 		{
+			host: "local",
 			id: "proj-1",
 			name: "app",
 			path: "/repos/app",
@@ -71,54 +65,79 @@ function workspaces(): WorkspaceSummary[] {
 
 const byId = (items: CommandItem[]) => new Map(items.map((item) => [item.id, item]));
 
+// A second host running the same project: ids repeat across hosts, so every
+// fixture here has a same-id twin on "remote" to catch host-blind lookups.
+function remoteTwin(): WorkspaceSummary {
+	return {
+		host: "remote",
+		id: "proj-1",
+		name: "app",
+		path: "/repos/app",
+		type: "main",
+		sessions: [
+			session({ id: "w-pr", host: "remote", title: "remote cache", branch: "feature/remote-cache", status: "pr_open", prs: [pr(7)] }),
+			session({ id: "w-action", host: "remote", title: "remote flake", branch: "feature/remote-flake", status: "needs_input" }),
+		],
+	};
+}
+
+function bothHosts(): WorkspaceSummary[] {
+	return [...workspaces(), remoteTwin()];
+}
+
 describe("findSession", () => {
+  it("keeps standalone session navigation but never offers project or branch actions", () => {
+    const standalone = session({ id: "adhoc", workspaceId: "@standalone" });
+    const group: WorkspaceSummary = { host: "local", id: "@standalone", name: "Standalone agents", path: "", kind: "standalone", sessions: [standalone] };
+    const items = buildCommands({ workspaces: [group], currentHostId: "local", currentProjectId: group.id, currentSessionId: standalone.id });
+    expect(items.find((item) => item.id === "current-new-task")?.disabled).toBe(true);
+    expect(items.some((item) => item.group === "projects" || item.id === "current-project-settings" || item.id === "current-open-orchestrator" || item.id === "current-copy-branch")).toBe(false);
+    const actions = buildSessionActions(standalone);
+    expect(actions.some((item) => item.action?.kind === "copy-branch")).toBe(false);
+    expect(actions.find((item) => item.action?.kind === "navigate")?.action).toMatchObject({ target: { params: { hostId: "local", sessionId: "adhoc" } } });
+  });
 	it("returns the workspace and session together", () => {
-		const result = findSession(workspaces(), "w-pr");
+		const result = findSession(workspaces(), { host: "local", id: "w-pr" });
 
 		expect(result?.workspace.id).toBe("proj-1");
 		expect(result?.session.id).toBe("w-pr");
-		expect(findSession(workspaces(), "missing")).toBeUndefined();
+		expect(findSession(workspaces(), { host: "local", id: "missing" })).toBeUndefined();
+	});
+
+	// Session ids are unique per host, not across them. A bare-id lookup returns
+	// whichever host sorts first in the tree — the wrong machine's session.
+	it("resolves on the ref's host when two hosts share a session id", () => {
+		expect(findSession(bothHosts(), { host: "remote", id: "w-pr" })?.session.title).toBe("remote cache");
+		expect(findSession(bothHosts(), { host: "local", id: "w-pr" })?.session.title).toBe("add cache");
+		expect(findSession(bothHosts(), { host: "other", id: "w-pr" })).toBeUndefined();
 	});
 });
 
-describe("workspace file commands", () => {
-	it("offers file search for a current worker session and excludes orchestrators", () => {
-		const items = buildCommands({ workspaces: workspaces(), currentProjectId: "proj-1", currentSessionId: "w-working" });
-		expect(byId(items).get("current-search-files")?.action).toEqual({
-			kind: "open-file-search",
-			projectId: "proj-1",
-			target: { projectId: "proj-1", sessionId: "w-working" },
+describe("buildCommands across hosts", () => {
+	it("scopes the current session to the current host", () => {
+		const items = buildCommands({
+			workspaces: bothHosts(),
+			currentHostId: "remote",
+			currentProjectId: "proj-1",
+			currentSessionId: "w-pr",
 		});
 
-		const picker = buildFileSessionCommands(workspaces()[0]!);
-		expect(picker.some((item) => item.title === "orchestrate")).toBe(false);
+		expect(byId(items).get("current-copy-branch")?.subtitle).toBe("feature/remote-cache");
 	});
 
-	it("sorts active worktrees before terminated ones and omits unready worktrees", () => {
-		const workspace: WorkspaceSummary = {
-			...workspaces()[0]!,
-			sessions: [
-				session({ id: "done", status: "terminated" }),
-				session({ id: "starting", provisionState: "provisioning" }),
-				session({ id: "live", status: "working" }),
-			],
-		};
-		expect(buildFileSessionCommands(workspace).map((item) => item.title)).toEqual(["live", "done"]);
-	});
-
-	it("uses basenames as titles, full paths as keywords, and ranks basename matches first", () => {
-		const target = { projectId: "proj-1", sessionId: "w-working" };
-		const items = buildWorkspaceFileCommands(target, [
-			{ path: "docs/app/guide.md" },
-			{ path: "src/App.tsx" },
-		]);
-		expect(items[1]).toMatchObject({
-			id: "file:local:w-working:src/App.tsx",
-			title: "App.tsx",
-			subtitle: "src",
-			keywords: expect.arrayContaining(["src/App.tsx"]),
+	// Excluding "the current session" by bare id also hides the other host's
+	// same-id session, so a machine's session vanishes from the palette.
+	it("keeps the other host's same-id session listed", () => {
+		const items = buildCommands({
+			workspaces: bothHosts(),
+			currentHostId: "local",
+			currentProjectId: "proj-1",
+			currentSessionId: "w-pr",
 		});
-		expect(filterCommands(items, "app").map((item) => item.title)).toEqual(["App.tsx", "guide.md"]);
+		const listed = items.filter((item) => item.group === "sessions" || item.group === "attention").map((item) => item.title);
+
+		expect(listed).toContain("remote cache");
+		expect(listed).not.toContain("add cache");
 	});
 });
 
@@ -132,7 +151,7 @@ describe("buildCommands grouping", () => {
 	});
 
 	it("puts current-scoped actions in the Current group when the project is valid", () => {
-		const items = buildCommands({ workspaces: workspaces(), currentProjectId: "proj-1", currentSessionId: "w-pr" });
+		const items = buildCommands({ workspaces: workspaces(), currentProjectId: "proj-1", currentHostId: "local", currentSessionId: "w-pr" });
 		const map = byId(items);
 		expect(map.get("current-new-task")?.group).toBe("current");
 		expect(map.get("current-open-orchestrator")?.group).toBe("current");
@@ -142,7 +161,7 @@ describe("buildCommands grouping", () => {
 	});
 
 	it("disables New task with a reason when the route project is absent from workspaces", () => {
-		const items = buildCommands({ workspaces: workspaces(), currentProjectId: "missing", currentSessionId: undefined });
+		const items = buildCommands({ workspaces: workspaces(), currentProjectId: "missing", currentHostId: "local", currentSessionId: undefined });
 		const newTask = byId(items).get("current-new-task");
 		expect(newTask?.disabled).toBe(true);
 		expect(newTask?.disabledReason).toBe("No current project");
@@ -154,8 +173,9 @@ describe("buildCommands grouping", () => {
 	it("disables New task and Open orchestrator while the project orchestrator is restarting", () => {
 		const items = buildCommands({
 			workspaces: workspaces(),
+			currentHostId: "local",
 			currentProjectId: "proj-1",
-			restartingProjectIds: new Set(["proj-1"]),
+			restartingProjectIds: new Set(["local:proj-1"]),
 		});
 		const map = byId(items);
 		expect(map.get("current-new-task")?.disabled).toBe(true);
@@ -166,24 +186,17 @@ describe("buildCommands grouping", () => {
 	});
 
 	it("omits Copy branch for a synthetic (session/<id>) branch and for orchestrators", () => {
-		const synthetic = buildCommands({ workspaces: workspaces(), currentSessionId: "w-synthetic" });
+		const synthetic = buildCommands({ workspaces: workspaces(), currentHostId: "local", currentSessionId: "w-synthetic" });
 		expect(byId(synthetic).has("current-copy-branch")).toBe(false);
-		const orch = buildCommands({ workspaces: workspaces(), currentSessionId: "orch" });
+		const orch = buildCommands({ workspaces: workspaces(), currentHostId: "local", currentSessionId: "orch" });
 		expect(byId(orch).has("current-copy-branch")).toBe(false);
 	});
 
 	it("recognises an orchestrator by its id suffix, not just its kind", () => {
 		const rows = workspaces();
 		rows[0].sessions.push(session({ id: "proj-1-orchestrator", title: "legacy orch", branch: "main" }));
-		const items = buildCommands({ workspaces: rows, currentSessionId: "proj-1-orchestrator" });
+		const items = buildCommands({ workspaces: rows, currentHostId: "local", currentSessionId: "proj-1-orchestrator" });
 		expect(byId(items).has("current-copy-branch")).toBe(false);
-	});
-});
-
-describe("buildCommands global", () => {
-	it("offers a Go to home command that navigates to the root route", () => {
-		const home = buildCommands({ workspaces: [] }).find((item) => item.id === "global-home");
-		expect(home).toMatchObject({ group: "global", action: { kind: "navigate", target: { to: "/" } } });
 	});
 });
 
@@ -192,37 +205,37 @@ describe("buildCommands attention", () => {
 		const items = buildCommands({ workspaces: workspaces() });
 		const attention = items.filter((item) => item.group === "attention");
 		const ids = attention.map((item) => item.id);
-		expect(ids).toContain("attention:w-merge");
-		expect(ids).toContain("attention:w-action");
-		expect(ids).not.toContain("attention:w-working");
-		expect(ids.indexOf("attention:w-merge")).toBeLessThan(ids.indexOf("attention:w-action"));
+		expect(ids).toContain("attention:local:w-merge");
+		expect(ids).toContain("attention:local:w-action");
+		expect(ids).not.toContain("attention:local:w-working");
+		expect(ids.indexOf("attention:local:w-merge")).toBeLessThan(ids.indexOf("attention:local:w-action"));
 	});
 
 	it("omits the current session from Needs attention (already in view)", () => {
-		const items = buildCommands({ workspaces: workspaces(), currentSessionId: "w-merge" });
+		const items = buildCommands({ workspaces: workspaces(), currentHostId: "local", currentSessionId: "w-merge" });
 		const ids = new Set(items.map((item) => item.id));
-		expect(ids.has("attention:w-merge")).toBe(false);
-		expect(ids.has("attention:w-action")).toBe(true);
+		expect(ids.has("attention:local:w-merge")).toBe(false);
+		expect(ids.has("attention:local:w-action")).toBe(true);
 	});
 });
 
 describe("buildCommands sessions", () => {
 	it("does not repeat attention or current sessions in the flat Sessions list", () => {
-		const items = buildCommands({ workspaces: workspaces(), currentSessionId: "w-working" });
+		const items = buildCommands({ workspaces: workspaces(), currentHostId: "local", currentSessionId: "w-working" });
 		const ids = new Set(items.map((item) => item.id));
-		expect(ids.has("attention:w-merge")).toBe(true);
-		expect(ids.has("session:w-merge")).toBe(false);
-		expect(ids.has("attention:w-action")).toBe(true);
-		expect(ids.has("session:w-action")).toBe(false);
-		expect(ids.has("session:w-working")).toBe(false);
-		expect(ids.has("session:w-synthetic")).toBe(true);
+		expect(ids.has("attention:local:w-merge")).toBe(true);
+		expect(ids.has("session:local:w-merge")).toBe(false);
+		expect(ids.has("attention:local:w-action")).toBe(true);
+		expect(ids.has("session:local:w-action")).toBe(false);
+		expect(ids.has("session:local:w-working")).toBe(false);
+		expect(ids.has("session:local:w-synthetic")).toBe(true);
 	});
 });
 
 describe("buildCommands pull requests", () => {
 	it("creates a per-PR item searchable by number, #number, url, branch and project", () => {
 		const items = buildCommands({ workspaces: workspaces() });
-		const prItem = byId(items).get("pr:w-pr:42");
+		const prItem = byId(items).get("pr:local:w-pr:42");
 		expect(prItem?.group).toBe("prs");
 		expect(prItem?.title).toBe("#42");
 		const keywords = prItem?.keywords ?? [];
@@ -238,6 +251,7 @@ describe("buildCommands pull requests", () => {
 		const closed: PullRequestFacts = { ...pr(8), state: "closed" };
 		const ws: WorkspaceSummary[] = [
 			{
+				host: "local",
 				id: "proj-1",
 				name: "app",
 				path: "/repos/app",
@@ -246,9 +260,9 @@ describe("buildCommands pull requests", () => {
 			},
 		];
 		const ids = new Set(buildCommands({ workspaces: ws }).map((item) => item.id));
-		expect(ids.has("pr:w-mix:9")).toBe(true);
-		expect(ids.has("pr:w-mix:7")).toBe(false);
-		expect(ids.has("pr:w-mix:8")).toBe(false);
+		expect(ids.has("pr:local:w-mix:9")).toBe(true);
+		expect(ids.has("pr:local:w-mix:7")).toBe(false);
+		expect(ids.has("pr:local:w-mix:8")).toBe(false);
 	});
 });
 
@@ -288,22 +302,25 @@ describe("buildCommands PR actions", () => {
 	it("creates Open PR and Copy PR URL items per open PR", () => {
 		const items = buildCommands({ workspaces: workspaces() });
 		const map = byId(items);
-		const open = map.get("pr-open:w-pr:42");
+		const open = map.get("pr-open:local:w-pr:42");
 		expect(open?.group).toBe("prs");
 		expect(open?.title).toBe("Open PR #42");
 		expect(open?.action).toEqual({ kind: "open-pr", url: "https://github.com/o/r/pull/42" });
 		expect(open?.searchOnly).toBe(true);
-		const copy = map.get("pr-copy:w-pr:42");
+		const copy = map.get("pr-copy:local:w-pr:42");
 		expect(copy?.title).toBe("Copy PR URL #42");
 		expect(copy?.action).toEqual({ kind: "copy-pr-url", url: "https://github.com/o/r/pull/42" });
 		expect(copy?.searchOnly).toBe(true);
 	});
 
 	it("creates an enabled Run review item per open PR when review data has not loaded", () => {
-		const review = byId(buildCommands({ workspaces: workspaces() })).get("pr-review:w-pr:42");
+		const review = byId(buildCommands({ workspaces: workspaces() })).get("pr-review:local:w-pr:42");
 		expect(review?.group).toBe("prs");
 		expect(review?.title).toBe("Run review #42");
-		expect(review?.action).toEqual({ kind: "trigger-review", sessionId: "w-pr" });
+		expect(review?.action).toMatchObject({
+			kind: "trigger-review",
+			session: { host: "local", id: "w-pr" },
+		});
 		expect(review?.disabled).toBeFalsy();
 		expect(review?.disabledReason).toBeUndefined();
 		expect(review?.searchOnly).toBe(true);
@@ -316,23 +333,23 @@ describe("buildCommands PR actions", () => {
 				reviewStatesBySessionId: {},
 			}),
 		);
-		expect(map.has("pr-review:w-pr:42")).toBe(false);
-		expect(map.get("pr-open:w-pr:42")).toBeTruthy();
-		expect(map.get("pr-copy:w-pr:42")).toBeTruthy();
+		expect(map.has("pr-review:local:w-pr:42")).toBe(false);
+		expect(map.get("pr-open:local:w-pr:42")).toBeTruthy();
+		expect(map.get("pr-copy:local:w-pr:42")).toBeTruthy();
 	});
 
 	it("labels the review item Re-run review for changes requested or a completed run", () => {
 		const changesRequested = buildCommands({
 			workspaces: workspaces(),
-			reviewStatesBySessionId: { "w-pr": [reviewState(42, "changes_requested")] },
+			reviewStatesBySessionId: { "local:w-pr": [reviewState(42, "changes_requested")] },
 		});
-		expect(byId(changesRequested).get("pr-review:w-pr:42")?.title).toBe("Re-run review #42");
+		expect(byId(changesRequested).get("pr-review:local:w-pr:42")?.title).toBe("Re-run review #42");
 
 		const upToDate = buildCommands({
 			workspaces: workspaces(),
-			reviewStatesBySessionId: { "w-pr": [reviewState(42, "up_to_date", { latestRun: reviewRun(42) })] },
+			reviewStatesBySessionId: { "local:w-pr": [reviewState(42, "up_to_date", { latestRun: reviewRun(42) })] },
 		});
-		const item = byId(upToDate).get("pr-review:w-pr:42");
+		const item = byId(upToDate).get("pr-review:local:w-pr:42");
 		expect(item?.title).toBe("Re-run review #42");
 		expect(item?.disabled).toBeFalsy();
 	});
@@ -340,9 +357,9 @@ describe("buildCommands PR actions", () => {
 	it("disables the review item with Review already running when a session review is running", () => {
 		const items = buildCommands({
 			workspaces: workspaces(),
-			reviewStatesBySessionId: { "w-pr": [reviewState(42, "running")] },
+			reviewStatesBySessionId: { "local:w-pr": [reviewState(42, "running")] },
 		});
-		const review = byId(items).get("pr-review:w-pr:42");
+		const review = byId(items).get("pr-review:local:w-pr:42");
 		expect(review?.disabled).toBe(true);
 		expect(review?.disabledReason).toBe("Review already running");
 	});
@@ -350,14 +367,15 @@ describe("buildCommands PR actions", () => {
 	it("disables the review item with Not eligible for review for ineligible or draft PRs", () => {
 		const ineligible = buildCommands({
 			workspaces: workspaces(),
-			reviewStatesBySessionId: { "w-pr": [reviewState(42, "ineligible")] },
+			reviewStatesBySessionId: { "local:w-pr": [reviewState(42, "ineligible")] },
 		});
-		const ineligibleItem = byId(ineligible).get("pr-review:w-pr:42");
+		const ineligibleItem = byId(ineligible).get("pr-review:local:w-pr:42");
 		expect(ineligibleItem?.disabled).toBe(true);
 		expect(ineligibleItem?.disabledReason).toBe("Not eligible for review");
 
 		const draftWorkspaces: WorkspaceSummary[] = [
 			{
+				host: "local",
 				id: "proj-1",
 				name: "app",
 				path: "/repos/app",
@@ -367,9 +385,9 @@ describe("buildCommands PR actions", () => {
 		];
 		const draft = buildCommands({
 			workspaces: draftWorkspaces,
-			reviewStatesBySessionId: { "w-draft": [reviewState(5, "ineligible")] },
+			reviewStatesBySessionId: { "local:w-draft": [reviewState(5, "ineligible")] },
 		});
-		const draftItem = byId(draft).get("pr-review:w-draft:5");
+		const draftItem = byId(draft).get("pr-review:local:w-draft:5");
 		expect(draftItem?.disabled).toBe(true);
 		expect(draftItem?.disabledReason).toBe("Not eligible for review");
 	});
@@ -377,6 +395,7 @@ describe("buildCommands PR actions", () => {
 	it("emits per-PR action items for every open PR of a multi-PR session, all triggering the session", () => {
 		const multiWorkspaces: WorkspaceSummary[] = [
 			{
+				host: "local",
 				id: "proj-1",
 				name: "app",
 				path: "/repos/app",
@@ -385,10 +404,16 @@ describe("buildCommands PR actions", () => {
 			},
 		];
 		const map = byId(buildCommands({ workspaces: multiWorkspaces }));
-		expect(map.get("pr-open:w-multi:1")?.action).toEqual({ kind: "open-pr", url: "https://github.com/o/r/pull/1" });
-		expect(map.get("pr-open:w-multi:2")?.action).toEqual({ kind: "open-pr", url: "https://github.com/o/r/pull/2" });
-		expect(map.get("pr-review:w-multi:1")?.action).toEqual({ kind: "trigger-review", sessionId: "w-multi" });
-		expect(map.get("pr-review:w-multi:2")?.action).toEqual({ kind: "trigger-review", sessionId: "w-multi" });
+		expect(map.get("pr-open:local:w-multi:1")?.action).toEqual({ kind: "open-pr", url: "https://github.com/o/r/pull/1" });
+		expect(map.get("pr-open:local:w-multi:2")?.action).toEqual({ kind: "open-pr", url: "https://github.com/o/r/pull/2" });
+		expect(map.get("pr-review:local:w-multi:1")?.action).toMatchObject({
+			kind: "trigger-review",
+			session: { host: "local", id: "w-multi" },
+		});
+		expect(map.get("pr-review:local:w-multi:2")?.action).toMatchObject({
+			kind: "trigger-review",
+			session: { host: "local", id: "w-multi" },
+		});
 	});
 
 	it("does not create action items for merged or closed PRs", () => {
@@ -396,6 +421,7 @@ describe("buildCommands PR actions", () => {
 		const closed: PullRequestFacts = { ...pr(8), state: "closed" };
 		const ws: WorkspaceSummary[] = [
 			{
+				host: "local",
 				id: "proj-1",
 				name: "app",
 				path: "/repos/app",
@@ -404,25 +430,25 @@ describe("buildCommands PR actions", () => {
 			},
 		];
 		const ids = new Set(buildCommands({ workspaces: ws }).map((item) => item.id));
-		expect(ids.has("pr-open:w-mix:9")).toBe(true);
-		expect(ids.has("pr-copy:w-mix:9")).toBe(true);
-		expect(ids.has("pr-review:w-mix:9")).toBe(true);
-		expect(ids.has("pr-open:w-mix:7")).toBe(false);
-		expect(ids.has("pr-copy:w-mix:8")).toBe(false);
-		expect(ids.has("pr-review:w-mix:7")).toBe(false);
+		expect(ids.has("pr-open:local:w-mix:9")).toBe(true);
+		expect(ids.has("pr-copy:local:w-mix:9")).toBe(true);
+		expect(ids.has("pr-review:local:w-mix:9")).toBe(true);
+		expect(ids.has("pr-open:local:w-mix:7")).toBe(false);
+		expect(ids.has("pr-copy:local:w-mix:8")).toBe(false);
+		expect(ids.has("pr-review:local:w-mix:7")).toBe(false);
 	});
 
 	it("surfaces the action items for open pr / copy pr / review queries but hides them untyped", () => {
 		const items = buildCommands({ workspaces: workspaces() });
-		expect(filterCommands(items, "open pr").some((item) => item.id === "pr-open:w-pr:42")).toBe(true);
-		expect(filterCommands(items, "copy pr").some((item) => item.id === "pr-copy:w-pr:42")).toBe(true);
-		expect(filterCommands(items, "review").some((item) => item.id === "pr-review:w-pr:42")).toBe(true);
-		expect(filterCommands(items, "").some((item) => item.id === "pr-open:w-pr:42")).toBe(false);
-		expect(filterCommands(items, "").some((item) => item.id === "pr-review:w-pr:42")).toBe(false);
+		expect(filterCommands(items, "open pr").some((item) => item.id === "pr-open:local:w-pr:42")).toBe(true);
+		expect(filterCommands(items, "copy pr").some((item) => item.id === "pr-copy:local:w-pr:42")).toBe(true);
+		expect(filterCommands(items, "review").some((item) => item.id === "pr-review:local:w-pr:42")).toBe(true);
+		expect(filterCommands(items, "").some((item) => item.id === "pr-open:local:w-pr:42")).toBe(false);
+		expect(filterCommands(items, "").some((item) => item.id === "pr-review:local:w-pr:42")).toBe(false);
 	});
 
 	it("discovers Copy branch name via git and copy keywords", () => {
-		const items = buildCommands({ workspaces: workspaces(), currentProjectId: "proj-1", currentSessionId: "w-pr" });
+		const items = buildCommands({ workspaces: workspaces(), currentHostId: "local", currentProjectId: "proj-1", currentSessionId: "w-pr" });
 		const keywords = byId(items).get("current-copy-branch")?.keywords ?? [];
 		expect(keywords).toContain("copy");
 		expect(keywords).toContain("git");
@@ -433,6 +459,7 @@ describe("buildCommands finished sessions", () => {
 	function withFinished(): WorkspaceSummary[] {
 		return [
 			{
+				host: "local",
 				id: "proj-1",
 				name: "app",
 				path: "/repos/app",
@@ -448,22 +475,23 @@ describe("buildCommands finished sessions", () => {
 
 	it("indexes merged/terminated sessions as search-only (hidden until typed, then findable)", () => {
 		const items = buildCommands({ workspaces: withFinished() });
-		const done = byId(items).get("session:w-done");
+		const done = byId(items).get("session:local:w-done");
 		expect(done?.searchOnly).toBe(true);
-		expect(byId(items).get("session:w-live")?.searchOnly).toBeFalsy();
+		expect(byId(items).get("session:local:w-live")?.searchOnly).toBeFalsy();
 
 		const suggested = filterCommands(items, "");
-		expect(suggested.some((item) => item.id === "session:w-done")).toBe(false);
-		expect(suggested.some((item) => item.id === "session:w-live")).toBe(true);
+		expect(suggested.some((item) => item.id === "session:local:w-done")).toBe(false);
+		expect(suggested.some((item) => item.id === "session:local:w-live")).toBe(true);
 
 		const searched = filterCommands(items, "archived");
-		expect(searched.some((item) => item.id === "session:w-done")).toBe(true);
+		expect(searched.some((item) => item.id === "session:local:w-done")).toBe(true);
 	});
 });
 
 describe("result caps", () => {
 	const manyProjects = (n: number): WorkspaceSummary[] =>
 		Array.from({ length: n }, (_, i) => ({
+			host: "local",
 			id: `p${i}`,
 			name: `project-${i}`,
 			path: `/repos/p${i}`,
@@ -490,7 +518,7 @@ describe("result caps", () => {
 			session({ id: `deploy-hot-${i}`, title: `deploy hot ${i}`, status: "needs_input" }),
 		);
 		const workspaces: WorkspaceSummary[] = [
-			{ id: "deploy", name: "deploy proj", path: "/repos/deploy", type: "main", sessions: attentionSessions },
+			{ host: "local", id: "deploy", name: "deploy proj", path: "/repos/deploy", type: "main", sessions: attentionSessions },
 		];
 		const groups = displayGroups(buildCommands({ workspaces }), "deploy");
 		const total = groups.reduce((n, g) => n + g.items.length, 0);
@@ -500,6 +528,7 @@ describe("result caps", () => {
 	it("keeps search hits under category headings, best-matching category first", () => {
 		const workspaces: WorkspaceSummary[] = [
 			{
+				host: "local",
 				id: "alpha",
 				name: "alpha",
 				path: "/repos/alpha",
@@ -514,18 +543,19 @@ describe("result caps", () => {
 		// Projects outranks its default position ahead of Needs attention because
 		// "alpha" is an exact project title but only a fuzzy hit on the session.
 		expect(ids.indexOf("projects")).toBeLessThan(ids.indexOf("attention"));
-		expect(groups.find((g) => g.id === "attention")?.items.some((item) => item.id === "attention:s-attn")).toBe(
+		expect(groups.find((g) => g.id === "attention")?.items.some((item) => item.id === "attention:local:s-attn")).toBe(
 			true,
 		);
 		// Enter targets the first item in render order, so that must be the top match.
 		const rendered = groups.flatMap((g) => g.items);
-		expect(rendered[0]?.id).toBe("project:alpha");
+		expect(rendered[0]?.id).toBe("project:local:alpha");
 		expect(rendered.length).toBeLessThanOrEqual(MAX_SEARCH_RESULTS);
 	});
 
 	it("floats attention matches into their own category during search", () => {
 		const workspaces: WorkspaceSummary[] = [
 			{
+				host: "local",
 				id: "alpha",
 				name: "alpha",
 				path: "/repos/alpha",
@@ -535,7 +565,7 @@ describe("result caps", () => {
 		];
 		const groups = displayGroups(buildCommands({ workspaces }), "alpha");
 		expect(groups.map((g) => g.id)).toContain("attention");
-		expect(groups.find((g) => g.id === "attention")?.items.map((item) => item.id)).toContain("attention:s-attn");
+		expect(groups.find((g) => g.id === "attention")?.items.map((item) => item.id)).toContain("attention:local:s-attn");
 	});
 
 	it("falls back to the default category order when categories match equally well", () => {
@@ -551,6 +581,7 @@ describe("result caps", () => {
 		const manyPrs = Array.from({ length: 30 }, (_, i) => pr(i + 1));
 		const workspaces: WorkspaceSummary[] = [
 			{
+				host: "local",
 				id: "proj-deploy",
 				name: "proj-deploy",
 				path: "/repos/deploy",
@@ -563,11 +594,12 @@ describe("result caps", () => {
 		];
 		const groups = displayGroups(buildCommands({ workspaces }), "deploy");
 		const attention = groups.find((g) => g.id === "attention");
-		expect(attention?.items.map((item) => item.id)).toContain("attention:hot");
+		expect(attention?.items.map((item) => item.id)).toContain("attention:local:hot");
 	});
 
 	it("never lets a flood of attention matches crowd out an exact non-attention match", () => {
 		const floodedWorkspace: WorkspaceSummary = {
+			host: "local",
 			id: "proj-deploy",
 			name: "proj-deploy",
 			path: "/repos/deploy",
@@ -577,6 +609,7 @@ describe("result caps", () => {
 			),
 		};
 		const exactMatchWorkspace: WorkspaceSummary = {
+			host: "local",
 			id: "deploy",
 			name: "deploy",
 			path: "/repos/deploy-exact",
@@ -591,12 +624,13 @@ describe("result caps", () => {
 
 		const visible = visibleForQuery(items, "deploy");
 		expect(visible.slice(0, MAX_ATTENTION_SEARCH_RESULTS).every(isAttentionInZone)).toBe(true);
-		expect(visible).toContainEqual(expect.objectContaining({ id: "project:deploy" }));
-		expect(visible.findIndex((item) => item.id === "project:deploy")).toBeLessThan(MAX_SEARCH_RESULTS);
+		expect(visible).toContainEqual(expect.objectContaining({ id: "project:local:deploy" }));
+		expect(visible.findIndex((item) => item.id === "project:local:deploy")).toBeLessThan(MAX_SEARCH_RESULTS);
 	});
 
 	it("still surfaces the exact match when every attention title also prefix-matches (tied score)", () => {
 		const floodedWorkspace: WorkspaceSummary = {
+			host: "local",
 			id: "proj-1",
 			name: "proj-1",
 			path: "/repos/proj-1",
@@ -606,6 +640,7 @@ describe("result caps", () => {
 			),
 		};
 		const exactMatchWorkspace: WorkspaceSummary = {
+			host: "local",
 			id: "deploy",
 			name: "deploy",
 			path: "/repos/deploy-exact",
@@ -614,7 +649,7 @@ describe("result caps", () => {
 		};
 		const items = buildCommands({ workspaces: [floodedWorkspace, exactMatchWorkspace] });
 		const visible = visibleForQuery(items, "deploy");
-		expect(visible).toContainEqual(expect.objectContaining({ id: "project:deploy" }));
+		expect(visible).toContainEqual(expect.objectContaining({ id: "project:local:deploy" }));
 		expect(visible.filter((item) => !isAttentionInZone(item))).not.toHaveLength(0);
 	});
 });
@@ -627,19 +662,19 @@ describe("filterCommands / matchScore", () => {
 	it("ranks a title prefix above a keyword-only hit", () => {
 		const items = buildCommands({ workspaces: workspaces() });
 		const results = filterCommands(items, "app");
-		expect(results[0]?.id).toBe("project:proj-1");
+		expect(results[0]?.id).toBe("project:local:proj-1");
 	});
 
 	it("matches a PR by its #number", () => {
 		const items = buildCommands({ workspaces: workspaces() });
 		const results = filterCommands(items, "#42");
-		expect(results.some((item) => item.id === "pr:w-pr:42")).toBe(true);
+		expect(results.some((item) => item.id === "pr:local:w-pr:42")).toBe(true);
 	});
 });
 
 describe("groupCommands", () => {
 	it("skips empty groups and preserves group order", () => {
-		const items = buildCommands({ workspaces: workspaces(), currentProjectId: "proj-1" });
+		const items = buildCommands({ workspaces: workspaces(), currentHostId: "local", currentProjectId: "proj-1" });
 		const grouped = groupCommands(items);
 		const order = grouped.map((g) => g.id);
 		expect(order).toEqual(["current", "attention", "projects", "sessions", "prs", "global"]);
@@ -651,59 +686,41 @@ describe("session rows open the actions panel", () => {
 	it("emits open-session-actions for session rows while PR rows stay navigate", () => {
 		const items = buildCommands({ workspaces: workspaces() });
 		const map = byId(items);
-		expect(map.get("attention:w-merge")?.action).toEqual({ kind: "open-session-actions", sessionId: "w-merge" });
-		expect(map.get("pr:w-pr:42")?.action?.kind).toBe("navigate");
-		expect(map.get("project:proj-1")?.action?.kind).toBe("navigate");
+		expect(map.get("attention:local:w-merge")?.action).toEqual({
+			kind: "open-session-actions",
+			session: expect.objectContaining({ host: "local", id: "w-merge" }),
+		});
+		expect(map.get("pr:local:w-pr:42")?.action?.kind).toBe("navigate");
+		expect(map.get("project:local:proj-1")?.action?.kind).toBe("navigate");
 	});
 });
 
-const workspace: WorkspaceSummary = { id: "proj-1", name: "app", path: "/repos/app", type: "main", sessions: [] };
 const actionKinds = (items: CommandItem[]) => items.map((item) => item.action?.kind ?? "none");
 
 describe("buildSessionActions", () => {
 	it("offers Jump then Copy branch for a live worker", () => {
-		const items = buildSessionActions(workspace, session({ id: "live", status: "working" }));
+		const items = buildSessionActions(session({ id: "live", status: "working" }));
 		expect(items.map((i) => i.title)).toEqual(["Jump to session", "Copy branch name"]);
 		expect(items[0].action).toEqual({
 			kind: "navigate",
-			target: { to: "/projects/$projectId/sessions/$sessionId", params: { projectId: "proj-1", sessionId: "live" } },
-		});
-	});
-
-	it("routes a standalone session through the projectless session route", () => {
-		const standaloneWorkspace: WorkspaceSummary = {
-			id: STANDALONE_WORKSPACE_ID,
-			name: "Standalone agents",
-			kind: STANDALONE_PROJECT_KIND,
-			path: "",
-			sessions: [],
-		};
-		const items = buildSessionActions(
-			standaloneWorkspace,
-			session({ id: "standalone-1", workspaceId: "", workspaceName: "Standalone agents", branch: undefined }),
-		);
-		expect(items[0].action).toEqual({
-			kind: "navigate",
-			target: { to: "/sessions/$sessionId", params: { sessionId: "standalone-1" } },
+			target: { to: "/host/$hostId/session/$sessionId", params: { hostId: "local", sessionId: "live" } },
 		});
 	});
 
 	it("adds Resume only for a terminated worker", () => {
-		const terminated = buildSessionActions(workspace, session({ id: "gone", status: "terminated" }));
+		const terminated = buildSessionActions(session({ id: "gone", status: "terminated" }));
 		expect(terminated.find((i) => i.action?.kind === "resume-session")?.action).toEqual({
 			kind: "resume-session",
-			projectId: "proj-1",
-			sessionId: "gone",
+			session: expect.objectContaining({ host: "local", id: "gone" }),
 		});
 		for (const status of ["working", "needs_input", "no_signal", "mergeable"] as const) {
-			const items = buildSessionActions(workspace, session({ id: `s-${status}`, status }));
+			const items = buildSessionActions(session({ id: `s-${status}`, status }));
 			expect(items.some((i) => i.action?.kind === "resume-session")).toBe(false);
 		}
 	});
 
 	it("offers Resume for a durably terminated session whose derived status is not 'terminated'", () => {
 		const items = buildSessionActions(
-			workspace,
 			session({ id: "archived-merged", status: "merged", isTerminated: true }),
 		);
 		expect(items.some((i) => i.action?.kind === "resume-session")).toBe(true);
@@ -711,14 +728,13 @@ describe("buildSessionActions", () => {
 
 	it("never offers Resume or Copy branch for an orchestrator", () => {
 		const items = buildSessionActions(
-			workspace,
 			session({ id: "proj-1-orchestrator", kind: "orchestrator", status: "terminated", branch: "main" }),
 		);
 		expect(actionKinds(items)).toEqual(["navigate"]);
 	});
 
 	it("omits Copy branch for a synthetic branch", () => {
-		const items = buildSessionActions(workspace, session({ id: "syn", branch: "session/syn" }));
+		const items = buildSessionActions(session({ id: "syn", branch: "session/syn" }));
 		expect(items.some((i) => i.action?.kind === "copy-branch")).toBe(false);
 	});
 });

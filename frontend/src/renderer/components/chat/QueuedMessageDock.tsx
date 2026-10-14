@@ -2,7 +2,6 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProper
 import { flushSync } from "react-dom";
 import {
 	DndContext,
-	KeyboardSensor,
 	PointerSensor,
 	closestCenter,
 	type DragEndEvent,
@@ -11,20 +10,13 @@ import {
 	useSensor,
 	useSensors,
 } from "@dnd-kit/core";
-import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
+import { SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { ChevronDown, Circle, CornerDownLeft, GripVertical, Pencil, Trash2 } from "lucide-react";
 import { cn } from "../../lib/utils";
 import type { ConversationMessage } from "../../types/conversation";
-import { useTranslation } from "react-i18next";
-import { labelInlineImages } from "./messageAttachments";
 
-export type QueuedMessage = {
-	turnId: string;
-	message: ConversationMessage;
-	/** Sent but not yet confirmed by the daemon: shown at once, with no actions until it has a turn id. */
-	pending?: boolean;
-};
+export type QueuedMessage = { turnId: string; message: ConversationMessage };
 
 const QUEUE_DOCK_VISIBLE_ROWS = 5;
 const REORDER_ACTIVATION_DISTANCE = 4;
@@ -105,8 +97,6 @@ function QueuedMessageRowContent({
 	dragHandleRef?: (element: HTMLButtonElement | null) => void;
 	dragHandleProps?: Record<string, unknown>;
 }) {
-	const { t } = useTranslation();
-	const text = labelInlineImages(message.text, (index) => t("chat.image.numbered", { index }));
 	const showHoverSteerButton =
 		showHoverSteer ||
 		Boolean(onPromoteQueuedTurn && canSteer && !showPersistentSteer && !suppressHoverSteer);
@@ -121,9 +111,9 @@ function QueuedMessageRowContent({
 			<div className="min-w-0 flex-1 overflow-hidden">
 				<p
 					className="queue-dock-row-text truncate text-xs leading-relaxed text-foreground"
-					title={text}
+					title={message.text}
 				>
-					{text}
+					{message.text}
 				</p>
 			</div>
 			<div className="queue-dock-actions flex shrink-0 items-center gap-0.5 whitespace-nowrap">
@@ -135,7 +125,7 @@ function QueuedMessageRowContent({
 							void onRunAction(turnId, () => onPromoteQueuedTurn!(turnId));
 						}}
 						className={cn(
-							"inline-flex h-7 items-center rounded-lg px-2 text-xs leading-none text-muted-foreground transition-[background-color,color] duration-150 ease-out hover:bg-interactive-hover hover:text-foreground focus-visible:pointer-events-auto focus-visible:opacity-100 disabled:opacity-50 motion-reduce:transition-none",
+							"inline-flex h-7 items-center rounded-lg px-2 text-[11px] leading-none text-muted-foreground transition-[background-color,color] duration-150 ease-out hover:bg-interactive-hover hover:text-foreground focus-visible:pointer-events-auto focus-visible:opacity-100 disabled:opacity-50 motion-reduce:transition-none",
 							showHoverSteer
 								? "pointer-events-none opacity-100"
 								: "pointer-events-none opacity-0 group-hover/queued-row:pointer-events-auto group-hover/queued-row:opacity-100",
@@ -153,12 +143,12 @@ function QueuedMessageRowContent({
 						onClick={() => {
 							void onRunAction(turnId, () => onPromoteQueuedTurn(turnId));
 						}}
-						className="inline-flex h-7 items-center gap-1.5 rounded-lg px-2 text-xs leading-none text-muted-foreground transition-[scale,background-color,color] duration-150 ease-out hover:bg-interactive-hover hover:text-foreground active:scale-[0.96] disabled:pointer-events-none disabled:opacity-50 motion-reduce:transition-none motion-reduce:active:scale-100"
+						className="inline-flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] leading-none text-muted-foreground transition-[scale,background-color,color] duration-150 ease-out hover:bg-interactive-hover hover:text-foreground active:scale-[0.96] disabled:pointer-events-none disabled:opacity-50 motion-reduce:transition-none motion-reduce:active:scale-100"
 						aria-label="Steer this queued message into the running turn"
 						title="Steer into running turn"
 					>
 						<span className="inline-flex shrink-0 items-center gap-1 text-muted-foreground">
-							<CornerDownLeft aria-hidden="true" className="shrink-0" width={14} height={14} strokeWidth={2} />
+							<CornerDownLeft aria-hidden="true" className="shrink-0" width={12} height={12} strokeWidth={2} />
 						</span>
 						Steer
 					</button>
@@ -172,7 +162,7 @@ function QueuedMessageRowContent({
 						aria-label="Edit queued message"
 						title="Edit"
 					>
-						<Pencil aria-hidden="true" className="shrink-0" width={14} height={14} strokeWidth={2} />
+						<Pencil aria-hidden="true" className="shrink-0" width={12} height={12} strokeWidth={2} />
 					</button>
 				) : null}
 				{onCancelQueuedTurn ? (
@@ -186,7 +176,7 @@ function QueuedMessageRowContent({
 						aria-label="Delete queued message"
 						title="Delete"
 					>
-						<Trash2 aria-hidden="true" className="shrink-0" width={14} height={14} strokeWidth={2} />
+						<Trash2 aria-hidden="true" className="shrink-0" width={12} height={12} strokeWidth={2} />
 					</button>
 				) : null}
 				{reorderEnabled ? (
@@ -199,7 +189,7 @@ function QueuedMessageRowContent({
 						aria-label="Drag to reorder queued message"
 						title="Drag to reorder"
 					>
-						<GripVertical aria-hidden="true" className="shrink-0" width={14} height={14} strokeWidth={2} />
+						<GripVertical aria-hidden="true" className="shrink-0" width={12} height={12} strokeWidth={2} />
 					</button>
 				) : null}
 			</div>
@@ -291,7 +281,7 @@ function SortableQueuedMessageRow({
 				turnId={turnId}
 			/>
 			{error ? (
-				<p role="status" className="px-3 pb-2 text-xs text-warning">
+				<p role="status" className="px-3 pb-2 text-[11px] text-warning">
 					{error}
 				</p>
 			) : null}
@@ -301,7 +291,6 @@ function SortableQueuedMessageRow({
 
 export const QueuedMessageDock = memo(function QueuedMessageDock({
 	messages,
-	disabled,
 	editingTurnId,
 	canSteer,
 	canSteerNext,
@@ -314,7 +303,6 @@ export const QueuedMessageDock = memo(function QueuedMessageDock({
 	cancelPendingTurnId,
 }: {
 	messages: QueuedMessage[];
-	disabled?: boolean;
 	editingTurnId?: string;
 	canSteer?: boolean;
 	canSteerNext?: boolean;
@@ -345,7 +333,6 @@ export const QueuedMessageDock = memo(function QueuedMessageDock({
 		useSensor(PointerSensor, {
 			activationConstraint: { distance: REORDER_ACTIVATION_DISTANCE },
 		}),
-		useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
 	);
 
 	const runAction = useCallback(
@@ -377,11 +364,7 @@ export const QueuedMessageDock = memo(function QueuedMessageDock({
 		() => new Map(visibleMessages.map((message) => [message.turnId, message])),
 		[visibleMessages],
 	);
-	const pendingMessages = useMemo(() => visibleMessages.filter((entry) => entry.pending), [visibleMessages]);
-	const fifoTurnIds = useMemo(
-		() => visibleMessages.filter((entry) => !entry.pending).map(({ turnId }) => turnId),
-		[visibleMessages],
-	);
+	const fifoTurnIds = useMemo(() => visibleMessages.map(({ turnId }) => turnId), [visibleMessages]);
 	const defaultDisplayTurnIds = useMemo(() => [...fifoTurnIds].reverse(), [fifoTurnIds]);
 	const displayTurnIds = useMemo(() => {
 		if (!displayOrder) return defaultDisplayTurnIds;
@@ -391,18 +374,15 @@ export const QueuedMessageDock = memo(function QueuedMessageDock({
 		return [...ordered, ...missing];
 	}, [defaultDisplayTurnIds, displayOrder, fifoTurnIds]);
 	const displayMessages = useMemo(
-		() => [
-			// Newest first, like the rest of the dock: a pending send is the newest of all.
-			...[...pendingMessages].reverse(),
-			...displayTurnIds.flatMap((turnId) => {
+		() =>
+			displayTurnIds.flatMap((turnId) => {
 				const message = messagesByTurnId.get(turnId);
 				return message ? [message] : [];
 			}),
-		],
-		[displayTurnIds, messagesByTurnId, pendingMessages],
+		[displayTurnIds, messagesByTurnId],
 	);
 	const reorderEnabled =
-		Boolean(onReorderQueuedTurns) && fifoTurnIds.length > 1 && isOpen;
+		Boolean(onReorderQueuedTurns) && count > 1 && isOpen;
 	const nextQueuedTurnId = fifoTurnIds[0];
 
 	const suppressHoverSteer = useCallback(() => {
@@ -556,7 +536,7 @@ export const QueuedMessageDock = memo(function QueuedMessageDock({
 
 	return (
 		<div
-			className="queue-dock overflow-hidden rounded-[var(--radius-chat-composer)] border border-border bg-surface"
+			className="queue-dock overflow-hidden rounded-[var(--radius-chat-composer)] border border-border-strong bg-surface shadow-sm"
 			data-testid="queued-message-dock"
 			data-collapsible={hasMore ? "true" : "false"}
 			data-expanded={isOpen ? "true" : "false"}
@@ -626,15 +606,13 @@ export const QueuedMessageDock = memo(function QueuedMessageDock({
 									isOpen && count >= QUEUE_DOCK_VISIBLE_ROWS && "queue-dock-scroll-active",
 								)}
 							>
-								{displayMessages.map(({ turnId, message, pending }, index) => {
+								{displayMessages.map(({ turnId, message }, index) => {
 									const busy =
-										disabled || promotePendingTurnId === turnId || cancelPendingTurnId === turnId;
+										promotePendingTurnId === turnId || cancelPendingTurnId === turnId;
 									const isNextQueuedTurn = turnId === nextQueuedTurnId;
 									return (
 										<SortableQueuedMessageRow
-											// The send's own id outlives the swap from pending to confirmed, so the
-											// row stays mounted instead of replaying its entrance.
-											key={message.clientMessageId ?? turnId}
+											key={turnId}
 											turnId={turnId}
 											message={message}
 											hiddenFromView={!isOpen && index !== displayMessages.length - 1}
@@ -644,16 +622,8 @@ export const QueuedMessageDock = memo(function QueuedMessageDock({
 											error={errors[turnId]}
 											isReordering={isReordering}
 											onRowHoverChange={setHoveredTurnId}
-											reorderEnabled={reorderEnabled && !busy && !pending}
+											reorderEnabled={reorderEnabled && !busy}
 											{...rowProps}
-											{...(pending
-												? {
-														canSteer: false,
-														onPromoteQueuedTurn: undefined,
-														onBeginQueuedEdit: undefined,
-														onCancelQueuedTurn: undefined,
-													}
-												: null)}
 										/>
 									);
 								})}
@@ -661,7 +631,7 @@ export const QueuedMessageDock = memo(function QueuedMessageDock({
 						</SortableContext>
 					</DndContext>
 					{reorderError ? (
-						<p role="status" className="px-3 pb-2 text-xs text-warning">
+						<p role="status" className="px-3 pb-2 text-[11px] text-warning">
 							{reorderError}
 						</p>
 					) : null}

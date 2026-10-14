@@ -1,17 +1,19 @@
+import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
 import net from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { connectBrowserRuntime, type BrowserRuntimeLinkHandle } from "./browser-runtime-link";
+import { connectBrowserRuntime, upgradeDial, type BrowserRuntimeLinkHandle } from "./browser-runtime-link";
 
 const handles: BrowserRuntimeLinkHandle[] = [];
-const servers: net.Server[] = [];
+const servers: (net.Server | HttpServer)[] = [];
 
 afterEach(async () => {
 	handles.splice(0).forEach((handle) => handle.dispose());
 	await Promise.all(
-		servers.splice(0).map((server) =>
-			new Promise<void>((resolve) => {
-				server.close(() => resolve());
-			}),
+		servers.splice(0).map(
+			(server) =>
+				new Promise<void>((resolve) => {
+					server.close(() => resolve());
+				}),
 		),
 	);
 });
@@ -60,28 +62,6 @@ describe("browser runtime link", () => {
 				result: { text: "button Save [ref=e1]" },
 			}),
 		);
-	});
-
-	it("reports disconnects so the desktop can offer reconnect", async () => {
-		let serverSocket: net.Socket | null = null;
-		const states: boolean[] = [];
-		const server = net.createServer((socket) => {
-			serverSocket = socket;
-		});
-		servers.push(server);
-		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-		const address = server.address() as net.AddressInfo;
-		const handle = connectBrowserRuntime(
-			{ host: address.address, port: address.port },
-			{ execute: async () => ({}), onStateChange: (connected) => states.push(connected) },
-		);
-		handles.push(handle);
-		await vi.waitFor(() => expect(handle.connected).toBe(true));
-		await vi.waitFor(() => expect(states).toContain(true));
-		serverSocket!.destroy();
-		await vi.waitFor(() => expect(states).toContain(false));
-		handle.dispose();
-		expect(states).toEqual([true, false]);
 	});
 
 	it("returns structured command errors", async () => {
@@ -157,7 +137,7 @@ describe("browser runtime link", () => {
 		serverSocket!.destroy();
 	});
 
-	it("queues per session, cancels on server close, and reconnects", async () => {
+	it("queues per session and cancels work from a closed connection", async () => {
 		let serverSocket: net.Socket | null = null;
 		const messages: Array<Record<string, unknown>> = [];
 		const executed: string[] = [];
@@ -203,132 +183,61 @@ describe("browser runtime link", () => {
 		await vi.waitFor(() => expect(executed).toContain("independent"));
 		expect(executed).not.toContain("queued");
 
-		serverSocket!.end();
-		for (const requestId of ["blocked", "queued"] as const) {
-			await vi.waitFor(() =>
-				expect(messages).toContainEqual({
-					type: "result",
-					requestId,
-					ok: false,
-					error: { code: "BROWSER_COMMAND_CANCELED", message: "Browser runtime link closed" },
-				}),
-			);
-		}
-		expect(
-			messages.filter(
-				(message) =>
-					message.type === "result" &&
-					message.requestId === "blocked" &&
-					message.ok === false &&
-					(message.error as { code?: string })?.code === "BROWSER_COMMAND_CANCELED",
-			),
-		).toHaveLength(1);
+		serverSocket!.destroy();
 		await vi.waitFor(() => expect(handle.connected).toBe(false));
 		await vi.waitFor(() => expect(handle.connected).toBe(true));
 		expect(executed).not.toContain("queued");
+		expect(messages.some((message) => message.requestId === "blocked" && message.type === "result")).toBe(false);
 	});
+});
 
-	it("returns structured cancellation errors before disposing the link", async () => {
-		let serverSocket: net.Socket | null = null;
-		const messages: Array<Record<string, unknown>> = [];
-		const executed: string[] = [];
-		const server = net.createServer((socket) => {
-			serverSocket = socket;
-			let inbound = "";
-			socket.on("data", (chunk) => {
-				inbound += chunk.toString("utf8");
-				const lines = inbound.split("\n");
-				inbound = lines.pop() ?? "";
-				for (const line of lines) if (line) messages.push(JSON.parse(line));
-			});
-		});
-		servers.push(server);
-		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-		const address = server.address() as net.AddressInfo;
-		const handle = connectBrowserRuntime(
-			{ host: address.address, port: address.port },
-			{
-				execute: async (command, signal) => {
-					executed.push(command.requestId);
-					if (command.requestId === "blocked") {
-						await new Promise<void>((_, reject) => {
-							signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
-						});
-					}
-					return { requestId: command.requestId };
-				},
-			},
-		);
-		handles.push(handle);
-		await vi.waitFor(() => expect(handle.connected).toBe(true));
-
-		serverSocket!.write(
-			[
-				{ type: "command", requestId: "blocked", sessionId: "s1", action: "wait" },
-				{ type: "command", requestId: "queued", sessionId: "s1", action: "click" },
-			]
-				.map((message) => JSON.stringify(message))
-				.join("\n") + "\n",
-		);
-		await vi.waitFor(() => expect(executed).toContain("blocked"));
-
-		handle.dispose();
-		for (const requestId of ["blocked", "queued"] as const) {
-			await vi.waitFor(() =>
-				expect(messages).toContainEqual({
-					type: "result",
-					requestId,
-					ok: false,
-					error: { code: "BROWSER_COMMAND_CANCELED", message: "Browser runtime link closed" },
-				}),
+describe("upgradeDial", () => {
+	it("dials through an HTTP upgrade and hands over head bytes", async () => {
+		const server = createHttpServer();
+		const upgraded: import("node:stream").Duplex[] = [];
+		server.on("upgrade", (req, socket) => {
+			upgraded.push(socket);
+			expect(req.url).toBe("/browser-runtime");
+			expect(req.headers.upgrade).toBe("ao-browser-runtime");
+			socket.write(
+				"HTTP/1.1 101 Switching Protocols\r\nUpgrade: ao-browser-runtime\r\nConnection: Upgrade\r\n\r\n" +
+					'{"type":"command","requestId":"r1","sessionId":"s1","action":"open"}\n',
 			);
-		}
-		expect(
-			messages.filter(
-				(message) =>
-					message.type === "result" &&
-					message.requestId === "blocked" &&
-					message.ok === false &&
-					(message.error as { code?: string })?.code === "BROWSER_COMMAND_CANCELED",
-			),
-		).toHaveLength(1);
-	});
-
-	it("returns structured cancellation errors for daemon-initiated cancel frames", async () => {
-		let serverSocket: net.Socket | null = null;
-		let inbound = "";
-		const messages: unknown[] = [];
-		const execute = vi.fn(async (_command, signal) => {
-			await new Promise<void>((_, reject) => {
-				signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
-			});
-		});
-		const server = net.createServer((socket) => {
-			serverSocket = socket;
-			socket.on("data", (chunk) => {
-				inbound += chunk.toString("utf8");
-				const lines = inbound.split("\n");
-				inbound = lines.pop() ?? "";
-				for (const line of lines) if (line) messages.push(JSON.parse(line));
-			});
 		});
 		servers.push(server);
 		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-		const address = server.address() as net.AddressInfo;
-		const handle = connectBrowserRuntime({ host: address.address, port: address.port }, { execute });
-		handles.push(handle);
-		await vi.waitFor(() => expect(handle.connected).toBe(true));
+		const port = (server.address() as net.AddressInfo).port;
 
-		serverSocket!.write(`${JSON.stringify({ type: "command", requestId: "r3", sessionId: "s1", action: "wait" })}\n`);
-		await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
-		serverSocket!.write(`${JSON.stringify({ type: "cancel", requestId: "r3" })}\n`);
-		await vi.waitFor(() =>
-			expect(messages).toContainEqual({
-				type: "result",
-				requestId: "r3",
-				ok: false,
-				error: { code: "BROWSER_COMMAND_CANCELED", message: "Browser runtime link closed" },
-			}),
-		);
+		const seen: string[] = [];
+		const handle = connectBrowserRuntime(null, {
+			dial: upgradeDial(`http://127.0.0.1:${port}`),
+			execute: async (command) => {
+				seen.push(command.requestId);
+				return { ok: true };
+			},
+		});
+		handles.push(handle);
+		await vi.waitFor(() => expect(seen).toEqual(["r1"]));
+		// An upgraded socket is detached from the server, so close() alone hangs.
+		upgraded.forEach((socket) => socket.destroy());
+	});
+
+	it("rejects a non-101 response and the link retries", async () => {
+		const server = createHttpServer((_req, res) => {
+			res.writeHead(401);
+			res.end();
+		});
+		servers.push(server);
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const port = (server.address() as net.AddressInfo).port;
+		const logs: string[] = [];
+		const handle = connectBrowserRuntime(null, {
+			dial: upgradeDial(`http://127.0.0.1:${port}`),
+			execute: async () => ({}),
+			log: (message) => logs.push(message),
+		});
+		handles.push(handle);
+		await vi.waitFor(() => expect(logs.some((entry) => entry.includes("dial failed"))).toBe(true));
+		expect(handle.connected).toBe(false);
 	});
 });

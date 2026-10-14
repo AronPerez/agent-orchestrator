@@ -23,6 +23,7 @@ type recordingWorkspace struct {
 	restoreCalls       int
 	destroyCalls       int
 	forceDestroyCalls  int
+	existsCalls        int
 	stashCalls         int
 	applyCalls         int
 	addExcludeCalls    int
@@ -69,6 +70,11 @@ func (w *recordingWorkspace) ForceDestroy(_ context.Context, info ports.Workspac
 	w.forceDestroyCalls++
 	w.lastInfo = info
 	return nil
+}
+func (w *recordingWorkspace) Exists(_ context.Context, info ports.WorkspaceInfo) (bool, error) {
+	w.existsCalls++
+	w.lastInfo = info
+	return true, nil
 }
 func (w *recordingWorkspace) StashUncommitted(_ context.Context, info ports.WorkspaceInfo) (string, error) {
 	w.stashCalls++

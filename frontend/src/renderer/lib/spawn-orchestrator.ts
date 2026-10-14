@@ -1,18 +1,7 @@
-import { apiErrorCode, apiErrorDetails, apiErrorMessage, apiErrorRequestId } from "./api-client";
-import { appI18n } from "../i18n";
-import { aoBridge } from "./bridge";
-import { resumeOnce } from "../hooks/useCanResumeAgent";
-import type { OrchestratorSpawnSource } from "./orchestrator-spawn-sources";
-import { captureRendererEvent } from "./telemetry";
-import { clientForSessionHost } from "./host-clients";
+import { apiErrorCode, apiErrorMessage, apiErrorRequestId } from "./api-client";
+import { clientFor } from "./host-clients";
+import type { Ref } from "./hosts";
 import type { SessionMode } from "../types/conversation";
-
-// Every UI entry point that spawns an orchestrator: the board CTA, the topbar
-// and sidebar launchers, the restore-unavailable dialog, and the auto-spawn
-// right after a project is added. Emitting the triad from inside
-// spawnOrchestrator (keyed by source) guarantees each path reports, instead of
-// each call site remembering to instrument itself.
-export type { OrchestratorSpawnSource };
 
 const CHAT_PREFLIGHT_CODES = new Set([
 	"SESSION_MODE_UNSUPPORTED",
@@ -28,7 +17,6 @@ export class OrchestratorSpawnError extends Error {
 		readonly code?: string,
 		readonly requestId?: string,
 		readonly status?: number,
-		readonly details?: Record<string, unknown>,
 	) {
 		super(message);
 		this.name = "OrchestratorSpawnError";
@@ -39,17 +27,6 @@ export function isChatPreflightCode(code?: string): boolean {
 	return Boolean(code && CHAT_PREFLIGHT_CODES.has(code));
 }
 
-/** True when the daemon refused Chat only for the missing approvals channel
- *  and allows retrying without approvals. Mirrors the worker fallback. */
-export function canBypassOrchestratorApprovals(code?: string, details?: Record<string, unknown>): boolean {
-	if (code !== "SESSION_MODE_UNSUPPORTED" || !details) return false;
-	const has = (key: string, value: string) => {
-		const entry = details[key];
-		return entry === value || (Array.isArray(entry) && entry.includes(value));
-	};
-	return has("missingCapabilities", "approvals") && has("allowedApprovalModes", "bypass-permissions");
-}
-
 export function isChatPreflightError(error: unknown): error is OrchestratorSpawnError {
 	return error instanceof OrchestratorSpawnError && isChatPreflightCode(error.code);
 }
@@ -58,72 +35,24 @@ export function isChatPreflightError(error: unknown): error is OrchestratorSpawn
  *  true the daemon first tears down any active orchestrator for the project, then
  *  re-spawns one on the canonical branch (reattaching the existing branch). */
 export async function spawnOrchestrator(
-	projectId: string,
-	source: OrchestratorSpawnSource,
+	project: Ref,
 	clean = false,
 	mode?: SessionMode,
-	approvalMode?: "default" | "accept-edits" | "auto" | "bypass-permissions",
-	hostId?: string,
 ): Promise<string> {
-	void captureRendererEvent("ao.renderer.orchestrator_spawn_requested", { project_id: projectId, source });
-	try {
-		const { data, error, response } = await clientForSessionHost(hostId).POST("/api/v1/orchestrators", {
-			body: { projectId, clean, ...(mode ? { mode } : {}), ...(approvalMode ? { approvalMode } : {}) },
-		});
-
-		if (error || !data?.orchestrator?.id) {
-			const message = error
-				? apiErrorMessage(error, `Failed to spawn orchestrator (${response.status})`)
-				: `Failed to spawn orchestrator (${response.status})`;
-			throw new OrchestratorSpawnError(
-				message,
-				apiErrorCode(error),
-				apiErrorRequestId(error),
-				response.status,
-				apiErrorDetails(error),
-			);
-		}
-
-		void captureRendererEvent("ao.renderer.orchestrator_spawn_succeeded", { project_id: projectId, source });
-		return data.orchestrator.id;
-	} catch (err) {
-		void captureRendererEvent("ao.renderer.orchestrator_spawn_failed", { project_id: projectId, source });
-		throw err;
-	}
-}
-
-/**
- * Relaunches an orchestrator whose agent exited but whose session row is still
- * alive. Both launchers route through here so their error handling cannot
- * drift apart.
- *
- * Only ever on an explicit click, never on the exit itself: the supervisor
- * discards the agent's exit code, so a deliberate quit is indistinguishable
- * from a crash or a rate limit, and auto-relaunching the last of those loops
- * against a metered API.
- *
- * A 409 AGENT_NOT_EXITED means it is already running — the caller asked for a
- * working orchestrator and that is this one, so it resolves rather than throws.
- */
-export function resumeOrchestrator(sessionId: string, hostId?: string): Promise<void> {
-	// A local resume joins the one SessionView starts when it opens the session.
-	return hostId ? requestOrchestratorResume(sessionId, hostId) : resumeOnce(sessionId, () => requestOrchestratorResume(sessionId));
-}
-
-async function requestOrchestratorResume(sessionId: string, hostId?: string): Promise<void> {
-	const { data, error, response } = await clientForSessionHost(hostId).POST("/api/v1/sessions/{sessionId}/resume-agent", {
-		params: { path: { sessionId } },
+	const { data, error, response } = await clientFor(project.host).POST("/api/v1/orchestrators", {
+		body: { projectId: project.id, clean, ...(mode ? { mode } : {}) },
 	});
-	if (error && apiErrorCode(error) !== "AGENT_NOT_EXITED") {
-		throw new Error(apiErrorMessage(error, `Could not resume the orchestrator (${response.status})`));
+
+	if (error || !data?.orchestrator?.id) {
+		const message = error
+			? apiErrorMessage(error, `Failed to spawn orchestrator (${response.status})`)
+			: `Failed to spawn orchestrator (${response.status})`;
+		throw new OrchestratorSpawnError(
+			message,
+			apiErrorCode(error),
+			apiErrorRequestId(error),
+			response.status,
+		);
 	}
-	if (data?.resumeMode === "saved_prompt") {
-		void aoBridge.notifications
-			.show({
-				id: `resume-agent-fallback:${sessionId}:${Date.now()}`,
-				title: appI18n.t("inspector.startedFromPrompt"),
-				body: appI18n.t("inspector.resumeFallbackBody"),
-			})
-			.catch((err) => console.warn("Unable to show resume fallback notification", err));
-	}
+	return data.orchestrator.id;
 }

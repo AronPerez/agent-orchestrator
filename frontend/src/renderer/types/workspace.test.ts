@@ -6,8 +6,6 @@ import {
 	findProjectOrchestrator,
 	newestActiveOrchestrator,
 	orchestratorHealth,
-	sessionAgentExited,
-	sessionCueTargetAvailable,
 	sessionIsActive,
 	sessionNeedsAttention,
 	toAgentProvider,
@@ -16,12 +14,10 @@ import {
 	openPRs,
 	mergedPRCount,
 	primaryPR,
-	sessionArtifacts,
 	sortedPRs,
 	type AttentionZone,
 	type PRState,
 	type PullRequestFacts,
-	type SessionArtifact,
 	type SessionStatus,
 	type WorkspaceSession,
 	type WorkspaceSummary,
@@ -37,6 +33,7 @@ describe("canonicalTrackerIssueId", () => {
 
 function sessionWith(overrides: Partial<WorkspaceSession>): WorkspaceSession {
 	return {
+		host: "local",
 		id: "sess-1",
 		workspaceId: "ws-1",
 		workspaceName: "my-app",
@@ -116,42 +113,9 @@ describe("sessionIsActive", () => {
 	});
 });
 
-describe("sessionAgentExited", () => {
-	it.each([undefined, false])(
-		"rejects a terminated status when isTerminated is %s",
-		(isTerminated) => {
-			expect(
-				sessionAgentExited(
-					sessionWith({
-						status: "terminated",
-						isTerminated,
-						activity: { state: "exited", lastActivityAt: "2026-09-21T00:00:00Z" },
-					}),
-				),
-			).toBe(false);
-		},
-	);
-});
-
-describe("sessionCueTargetAvailable", () => {
-	it("accepts an active session even when activity has not been observed", () => {
-		expect(sessionCueTargetAvailable(sessionWith({}))).toBe(true);
-	});
-
-	it.each(["exited", "blocked"] as const)("rejects %s activity", (state) => {
-		expect(sessionCueTargetAvailable(sessionWith({ activity: { state, lastActivityAt: "2026-09-25T00:00:00Z" } }))).toBe(false);
-	});
-
-	it("rejects both terminated facts", () => {
-		expect(sessionCueTargetAvailable(sessionWith({ isTerminated: true }))).toBe(false);
-		expect(sessionCueTargetAvailable(sessionWith({ status: "terminated" }))).toBe(false);
-		expect(sessionCueTargetAvailable(undefined)).toBe(false);
-	});
-});
-
 describe("findProjectOrchestrator", () => {
 	function workspaceWith(sessions: WorkspaceSession[]): WorkspaceSummary {
-		return { id: "skills", name: "skills", path: "/tmp/skills", sessions };
+		return { host: "local", id: "skills", name: "skills", path: "/tmp/skills", sessions };
 	}
 
 	it("skips a terminated orchestrator that precedes the live one", () => {
@@ -161,28 +125,28 @@ describe("findProjectOrchestrator", () => {
 		const dead = sessionWith({ id: "skills-4", kind: "orchestrator", status: "terminated" });
 		const live = sessionWith({ id: "skills-5", kind: "orchestrator", status: "needs_input" });
 		const worker = sessionWith({ id: "skills-6", kind: "worker", status: "working" });
-		expect(findProjectOrchestrator([workspaceWith([dead, live, worker])], "skills")).toBe(live);
+		expect(findProjectOrchestrator([workspaceWith([dead, live, worker])], { host: "local", id: "skills" })).toBe(live);
 	});
 
 	it("prefers the newest live orchestrator when multiple replacements overlap", () => {
 		const older = sessionWith({ id: "skills-4", kind: "orchestrator", status: "idle", provider: "claude-code" });
 		const newer = sessionWith({ id: "skills-5", kind: "orchestrator", status: "working", provider: "codex" });
-		expect(findProjectOrchestrator([workspaceWith([older, newer])], "skills")).toBe(newer);
+		expect(findProjectOrchestrator([workspaceWith([older, newer])], { host: "local", id: "skills" })).toBe(newer);
 	});
 
 	it("returns undefined when every orchestrator is terminated", () => {
 		const dead = sessionWith({ id: "skills-4", kind: "orchestrator", status: "terminated" });
-		expect(findProjectOrchestrator([workspaceWith([dead])], "skills")).toBeUndefined();
+		expect(findProjectOrchestrator([workspaceWith([dead])], { host: "local", id: "skills" })).toBeUndefined();
 	});
 
 	it("ignores live workers when looking for an orchestrator", () => {
 		const worker = sessionWith({ id: "skills-6", kind: "worker", status: "working" });
-		expect(findProjectOrchestrator([workspaceWith([worker])], "skills")).toBeUndefined();
+		expect(findProjectOrchestrator([workspaceWith([worker])], { host: "local", id: "skills" })).toBeUndefined();
 	});
 
 	it("returns undefined for an unknown project", () => {
 		const live = sessionWith({ id: "skills-5", kind: "orchestrator", status: "working" });
-		expect(findProjectOrchestrator([workspaceWith([live])], "other")).toBeUndefined();
+		expect(findProjectOrchestrator([workspaceWith([live])], { host: "local", id: "other" })).toBeUndefined();
 	});
 
 	it("selects the newest active orchestrator, not the first active one", () => {
@@ -200,7 +164,7 @@ describe("findProjectOrchestrator", () => {
 			createdAt: "2026-01-02T00:00:00Z",
 			updatedAt: "2026-01-02T00:00:00Z",
 		});
-		expect(findProjectOrchestrator([workspaceWith([older, newer])], "skills")).toBe(newer);
+		expect(findProjectOrchestrator([workspaceWith([older, newer])], { host: "local", id: "skills" })).toBe(newer);
 	});
 
 	it("uses updatedAt and id as newest orchestrator tie breakers", () => {
@@ -268,8 +232,9 @@ describe("orchestratorHealth", () => {
 			updatedAt: "2026-01-02T00:00:00Z",
 		});
 
-		expect(
+			expect(
 			orchestratorHealth({
+				host: "local",
 				id: "skills",
 				name: "skills",
 				path: "/tmp/skills",
@@ -284,6 +249,7 @@ describe("orchestratorHealth", () => {
 
 		expect(
 			orchestratorHealth({
+				host: "local",
 				id: "skills",
 				name: "skills",
 				path: "/tmp/skills",
@@ -344,44 +310,6 @@ describe("PR helpers", () => {
 
 	it("primaryPR is undefined when there are no PRs", () => {
 		expect(primaryPR(sessionWith({ prs: [] }))).toBeUndefined();
-	});
-});
-
-describe("sessionArtifacts", () => {
-	const artifact = (overrides: Partial<SessionArtifact> & { path: string }): SessionArtifact => ({
-		kind: "file",
-		name: overrides.path,
-		size: 0,
-		updatedAt: "2026-01-01T00:00:00Z",
-		...overrides,
-	});
-
-	it("returns the artifact files when outputType is artifact", () => {
-		const session = sessionWith({
-			outputType: "artifact",
-			artifactFiles: [artifact({ path: "report.md", kind: "markdown" })],
-		});
-		expect(sessionArtifacts(session)).toEqual([artifact({ path: "report.md", kind: "markdown" })]);
-	});
-
-	it("is empty when outputType is pr, even if artifactFiles is populated", () => {
-		const session = sessionWith({
-			outputType: "pr",
-			artifactFiles: [artifact({ path: "report.md" })],
-		});
-		expect(sessionArtifacts(session)).toEqual([]);
-	});
-
-	it("returns the artifact files when outputType is pr_artifact (a session with both)", () => {
-		const session = sessionWith({
-			outputType: "pr_artifact",
-			artifactFiles: [artifact({ path: "report.md", kind: "markdown" })],
-		});
-		expect(sessionArtifacts(session)).toEqual([artifact({ path: "report.md", kind: "markdown" })]);
-	});
-
-	it("is empty when outputType is artifact but artifactFiles is absent", () => {
-		expect(sessionArtifacts(sessionWith({ outputType: "artifact" }))).toEqual([]);
 	});
 });
 

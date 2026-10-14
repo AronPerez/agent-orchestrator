@@ -280,6 +280,18 @@ func TestProjectsAPI_AddValidationAndConflicts(t *testing.T) {
 
 	assertErrorCode(t, body, status, http.StatusConflict, "PATH_ALREADY_REGISTERED")
 
+	// The app turns this conflict into "already registered — view it" rather
+	// than a dead-end error, which only works if the envelope names the project.
+	var conflict errorBody
+
+	mustJSON(t, body, &conflict)
+
+	if got := conflict.Details["existingProjectId"]; got != "shared" {
+
+		t.Fatalf("details.existingProjectId = %v, want %q\nbody=%s", got, "shared", body)
+
+	}
+
 	body, status, _ = doRequest(t, srv, "POST", "/api/v1/projects", `{"path":`+quote(repoB)+`,"projectId":"shared"}`)
 
 	assertErrorCode(t, body, status, http.StatusConflict, "ID_ALREADY_REGISTERED")
@@ -436,6 +448,13 @@ func TestProjectsAPI_RejectsUnknownConfigKeys(t *testing.T) {
 	// silently persisted.
 	body, status, _ = doRequest(t, srv, "PUT", "/api/v1/projects/rej", `{"displayName":"Rejects unknown","config":{"tracker":{"plugin":"github"}}}`)
 	assertErrorCode(t, body, status, http.StatusBadRequest, "INVALID_JSON")
+
+	// A known orchestratorPrompt key is accepted (regression guard now that the
+	// field exists on ProjectConfig).
+	body, status, _ = doRequest(t, srv, "PUT", "/api/v1/projects/rej/config", `{"config":{"orchestratorPrompt":"be nice"}}`)
+	if status != http.StatusOK {
+		t.Fatalf("orchestratorPrompt should be accepted, got %d; body=%s", status, body)
+	}
 
 	// POST /projects gets the same gate, so add-time config rides the same rail.
 	otherRepo := gitRepo(t, "rejects-unknown-add")

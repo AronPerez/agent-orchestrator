@@ -1,27 +1,19 @@
-import { useCallback, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, RefreshControl, SectionList, StyleSheet, View } from "react-native";
-import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
+import { useMemo, useState } from "react";
+import { ActivityIndicator, Platform, RefreshControl, ScrollView, StyleSheet, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { Theme } from "../../lib/theme";
+import { classifyConnectionFailure, describeConnectionFailure } from "../../lib/connectionError";
 import { haptics } from "../../lib/haptics";
 import { PRCard } from "../../lib/PRCard";
-import { PRFilterDock } from "../../lib/pr-filter-dock";
 import { ProjectSwitcher } from "../../lib/ProjectSwitcher";
-import { collectPRs, prLifecycle, prListSections, type PRListFilter } from "../../lib/prView";
-import { StaleBanner } from "../../lib/StaleBanner";
-import { useApp } from "../../lib/store";
-import { UnpairedState } from "../../lib/UnpairedState";
-import { PR_SUMMARY_REUSE_MS, usePRSummaries } from "../../lib/usePRSummaries";
-import { useBoardFailure } from "../../lib/useBoardFailure";
+import { comparePRs, prLifecycle } from "../../lib/prView";
+import { useApp, usePRs } from "../../lib/store";
+import { usePRSummaries } from "../../lib/usePRSummaries";
 import { useTabScrollToTop } from "../../lib/useTabScrollToTop";
-import { Button, EmptyState, HeaderIconButton, ListSectionHeader, ScreenHeader } from "../../lib/ui";
+import { Button, EmptyState, Pill, ScreenHeader } from "../../lib/ui";
 import { useTheme, useThemedStyles } from "../../lib/ThemeProvider";
-import { space } from "../../lib/tokens";
-import type { HostedSession } from "../../lib/hostedRows";
 
-export { RouteErrorBoundary as ErrorBoundary } from "../../lib/RouteErrorBoundary";
-
-type Filter = PRListFilter;
+type Filter = "open" | "merged" | "all";
 
 // Drafts are open PRs — they belong in the Open bucket even though the card
 // labels them "draft". Before, `state` had already folded draft into "open", so
@@ -36,61 +28,40 @@ export default function PRsScreen() {
 	const t = useTheme();
 	const styles = useThemedStyles(makeStyles);
 	const insets = useSafeAreaInsets();
-	const router = useRouter();
-	const { hostId: routeHostId, projectId: routeProjectId } = useLocalSearchParams<{ hostId?: string; projectId?: string }>();
-	const { hostStates, allSessions, configForHost, refreshAll, activeProjectId } = useApp();
-	const visibleHosts = useMemo(() => routeHostId ? hostStates.filter((host) => host.hostId === routeHostId) : hostStates, [hostStates, routeHostId]);
-	const projectFilter = routeHostId ? (routeProjectId ?? "all") : hostStates.length === 1 ? activeProjectId : "all";
-	const prs = useMemo(() => {
-		// Hosted rows are structurally shared across sync/notification updates.
-		// Keep those identities, and deduplicate PRs within each machine only.
-		const byHost = new Map<string, HostedSession[]>();
-		for (const session of allSessions) {
-			if (routeHostId && session.hostId !== routeHostId) continue;
-			const rows = byHost.get(session.hostId);
-			if (rows) rows.push(session);
-			else byHost.set(session.hostId, [session]);
-		}
-		return [...byHost.values()].flatMap(sessions => collectPRs(sessions).filter(({ session }) => projectFilter === "all" || session.projectId === projectFilter));
-	}, [allSessions, routeHostId, projectFilter]);
-	const configured = hostStates.length > 0;
-	const loading = visibleHosts.some((host) => host.loading);
-	const error = visibleHosts.every((host) => host.connection !== "open") ? visibleHosts.find((host) => host.error)?.error : null;
-	const notificationsUnread = hostStates.reduce((sum, host) => sum + host.notificationsUnread, 0);
+	const { configured, loading, error, errorStatus, connection, config, refresh } = useApp();
+	const prs = usePRs();
 	const [filter, setFilter] = useState<Filter>("open");
 	const [refreshing, setRefreshing] = useState(false);
 
-	const scrollRef = useTabScrollToTop<SectionList>();
+	const scrollRef = useTabScrollToTop<ScrollView>();
 
-	// Grouped around the user's next action, matching the Workers board rather
-	// than presenting a flat stream in daemon order.
-	const filtered = useMemo(() => prs.filter(({ pr }) => inBucket(filter, prLifecycle(pr))), [prs, filter]);
-	const sections = useMemo(() => prListSections(prs, filter), [prs, filter]);
+	// Sorted, which this list never was — PRs arrived in whatever order the
+	// daemon returned them, so the one you could act on could be anywhere.
+	const filtered = useMemo(
+		() => prs.filter(({ pr }) => inBucket(filter, prLifecycle(pr))).sort((a, b) => comparePRs(a.pr, b.pr)),
+		[prs, filter],
+	);
 
 	// The rich per-PR detail the cards show lives on a separate endpoint, fetched
 	// once per session and cached — see usePRSummaries. Pull-to-refresh is the
 	// only thing that re-fetches it.
-	const summaryTargets = useMemo(() => filtered.flatMap(({ session }) => {
-		const config = configForHost(session.hostId);
-		return config ? [{ config, sessionId: session.id }] : [];
-	}), [filtered, configForHost]);
-	const summaries = usePRSummaries(summaryTargets);
-	const lastSummaryRefresh = useRef(Date.now());
-	useFocusEffect(useCallback(() => {
-		// Retained tabs should not keep old detail indefinitely, nor restart N
-		// requests on every quick sidebar switch.
-		if (Date.now() - lastSummaryRefresh.current < PR_SUMMARY_REUSE_MS) return;
-		lastSummaryRefresh.current = Date.now();
-		summaries.reload();
-	}, [summaries.reload]));
-	const failure = useBoardFailure();
+	const sessionIds = useMemo(() => [...new Set(filtered.map(({ session }) => session.id))], [filtered]);
+	const summaries = usePRSummaries(sessionIds);
+	const failure = useMemo(
+		() =>
+			describeConnectionFailure(classifyConnectionFailure(errorStatus ?? undefined), {
+				host: config?.host ?? "",
+				port: config?.httpPort ?? "",
+				platform: Platform.OS,
+			}),
+		[errorStatus, config?.host, config?.httpPort],
+	);
 
 	const onRefresh = async () => {
 		haptics.tap();
 		setRefreshing(true);
-		lastSummaryRefresh.current = Date.now();
 		summaries.reload();
-		await refreshAll();
+		await refresh();
 		setRefreshing(false);
 	};
 
@@ -98,11 +69,7 @@ export default function PRsScreen() {
 		return (
 			<View style={styles.screen}>
 				<View style={{ height: insets.top }} />
-				{/* Workers and Projects both keep their header in the unpaired state; this
-				    screen dropped it, so the tab lost its title and connection lamp exactly
-				    when a user most needs to know what they are looking at. */}
-				<ScreenHeader title="Pull Requests" />
-				<UnpairedState />
+				<EmptyState icon="git-pull-request" title="No server" message="Connect to AO in Settings." />
 			</View>
 		);
 	}
@@ -116,67 +83,57 @@ export default function PRsScreen() {
 	return (
 		<View style={styles.screen}>
 			<View style={{ height: insets.top }} />
-			<ScreenHeader
-				title="Pull Requests"
-				right={
-					<HeaderIconButton
-						icon="bell"
-						label="Notifications"
-						badge={notificationsUnread}
-						onPress={() => router.navigate("/notifications")}
+			<ScreenHeader title="Pull Requests" status={connection} />
+			<ProjectSwitcher />
+
+			<View style={styles.filters}>
+				{(["open", "merged", "all"] as Filter[]).map((f) => (
+					<Pill
+						key={f}
+						label={`${f[0].toUpperCase() + f.slice(1)} ${counts[f]}`}
+						active={filter === f}
+						onPress={() => setFilter(f)}
 					/>
-				}
-			/>
-			{hostStates.length === 1 && !routeHostId ? <ProjectSwitcher /> : null}
-			{hostStates.length === 1 ? <StaleBanner error={!!error} onRetry={onRefresh} /> : null}
+				))}
+			</View>
 
 			{loading && prs.length === 0 ? (
 				<View style={styles.center}>
-					<ActivityIndicator color={t.accent} />
+					<ActivityIndicator color={t.blue} />
 				</View>
 			) : (
-				<SectionList
+				<ScrollView
 					ref={scrollRef}
-					sections={sections}
-					keyExtractor={({ pr, session }) => `${session.hostId}:${session.projectId}#${pr.number}`}
-					contentContainerStyle={{ paddingBottom: 110 }}
-					stickySectionHeadersEnabled={false}
-					refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={t.accent} />}
-					renderSectionHeader={({ section }) => <ListSectionHeader label={section.label} />}
-					renderItem={({ item: { pr, session } }) => {
-						const config = configForHost(session.hostId);
-						return <PRCard
-							pr={pr}
-							session={session}
-							hostId={session.hostId}
-							hostName={hostStates.length > 1 ? session.hostName : undefined}
-							summary={config ? summaries.summaryFor(config, session.id, pr.number) : undefined}
-						/>;
-					}}
-					ListEmptyComponent={
-						filtered.length === 0 ? (
-							error ? (
-								<EmptyState
-									icon={failure.icon}
-									title={failure.title}
-									message={failure.hint}
-									action={<Button title="Retry" icon="refresh-cw" variant="ghost" onPress={onRefresh} />}
-								/>
-							) : (
-								<EmptyState
-									icon="git-pull-request"
-									title="No pull requests"
-									message={filter === "open" ? "No open PRs right now." : "Nothing here yet."}
-								/>
-							)
-						) : null
-					}
-				/>
+					contentContainerStyle={{ paddingBottom: 110, paddingTop: 4 }}
+					refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={t.blue} />}
+				>
+					{filtered.length === 0 ? (
+						error ? (
+							<EmptyState
+								icon="wifi-off"
+								title={failure.title}
+								message={failure.message}
+								action={<Button title="Retry" icon="refresh-cw" variant="ghost" onPress={onRefresh} />}
+							/>
+						) : (
+							<EmptyState
+								icon="git-pull-request"
+								title="No pull requests"
+								message={filter === "open" ? "No open PRs right now." : "Nothing here yet."}
+							/>
+						)
+					) : (
+						filtered.map(({ pr, session }) => (
+							<PRCard
+								key={`${session.projectId}#${pr.number}`}
+								pr={pr}
+								session={session}
+								summary={summaries.summaryFor(session.id, pr.number)}
+							/>
+						))
+					)}
+				</ScrollView>
 			)}
-
-			<View style={[styles.dock, { bottom: Math.max(insets.bottom, 12) }]}>
-				<PRFilterDock filter={filter} counts={counts} onChange={setFilter} />
-			</View>
 		</View>
 	);
 }
@@ -185,14 +142,5 @@ const makeStyles = (t: Theme) =>
 	StyleSheet.create({
 		screen: { flex: 1, backgroundColor: t.bgBase },
 		center: { flex: 1, alignItems: "center", justifyContent: "center" },
-		dock: {
-			position: "absolute",
-			left: 16,
-			right: 16,
-			height: 52,
-			flexDirection: "row",
-			alignItems: "center",
-			justifyContent: "center",
-			gap: space.sm,
-		},
+		filters: { flexDirection: "row", gap: 8, paddingHorizontal: 16, paddingBottom: 12 },
 	});

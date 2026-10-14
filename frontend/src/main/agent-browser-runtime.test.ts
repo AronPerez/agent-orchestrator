@@ -47,24 +47,7 @@ describe("AO action translation", () => {
 			"--interactive",
 			"--compact",
 		]);
-		expect(nativeArgumentsForAction("snapshot", { delta: true })).toEqual(["snapshot", "--compact", "--delta"]);
-		expect(nativeArgumentsForAction("snapshot", { interactive: true, delta: true, full: true })).toEqual([
-			"snapshot",
-			"--interactive",
-			"--compact",
-			"--delta",
-			"--full",
-		]);
-		expect(nativeArgumentsForAction("snapshot", { full: true })).toEqual(["snapshot", "--compact"]);
 		expect(nativeArgumentsForAction("click", { ref: "e2" })).toEqual(["click", "@e2"]);
-		expect(nativeArgumentsForAction("click", { ref: "e2", human: true })).toEqual(["click", "@e2", "--human"]);
-		expect(nativeArgumentsForAction("dblclick", { ref: "e2", human: true })).toEqual(["dblclick", "@e2"]);
-		expect(nativeArgumentsForAction("drag", { ref: "e2", targetRef: "@e5", human: true })).toEqual([
-			"drag",
-			"@e2",
-			"@e5",
-			"--human",
-		]);
 		expect(nativeArgumentsForAction("drag", { ref: "e2", targetRef: "@e5" })).toEqual([
 			"drag",
 			"@e2",
@@ -138,6 +121,73 @@ describe("agent-browser runtime lifecycle", () => {
 		await rm(dataDir, { recursive: true, force: true });
 	}
 
+	// Regression for the reversal/prepend defect. agent-browser 0.33.1 inserts at
+	// the caret, and on a React controlled input the caret is pinned at 0 — so
+	// per-character typing arrived REVERSED ("abcdefgh" as "hgfedcba"), and a
+	// single whole-string insertion still PREPENDED onto existing content
+	// ("abcd" then "efgh" gave "efghabcd"). Both were measured against a real
+	// controlled input, both are silent, and the field that surfaced it was a
+	// masked password.
+	//
+	// These assert the native command SEQUENCE, which is what fails if someone
+	// routes `type` back to a caret-relative primitive. They cannot prove the text
+	// arrives correctly — that was verified end to end against a desktop build and
+	// is recorded in the PR. Note each assertion states the EXPECTED value rather
+	// than the absence of a known-bad one: predicting the wrong failure direction
+	// is exactly how prepend slipped past the first fix.
+	async function typeFixture(existingValue: string) {
+		const issued: string[][] = [];
+		const { dataDir, runtime } = await fixture({
+			processRunner: async (...callArgs: unknown[]) => {
+				const argv = callArgs[1] as string[];
+				issued.push(argv);
+				if (argv[0] === "get") {
+					return { stdout: JSON.stringify({ success: true, data: existingValue }), stderr: "", exitCode: 0 };
+				}
+				return { stdout: JSON.stringify({ success: true, data: {} }), stderr: "", exitCode: 0 };
+			},
+		});
+		return { dataDir, runtime, issued: () => issued.filter((argv) => argv[0] !== "stream") };
+	}
+
+	it("types by reading the field and refilling it, never inserting at the caret", async () => {
+		const { dataDir, runtime, issued } = await typeFixture("abcd");
+		try {
+			await runtime.runAction("s1", "type", { ref: "e3", text: "efgh" }, provider);
+			expect(issued()).toEqual([
+				["get", "value", "@e3", "--json"],
+				// Appended to what the field already held. Not "efgh" alone (that is
+				// replacement) and not caret-relative (that prepends: "efghabcd").
+				["fill", "@e3", "abcdefgh", "--json"],
+			]);
+		} finally {
+			await runtime.dispose();
+			await cleanup(dataDir);
+		}
+	});
+
+	it("appends to an empty field without inventing content", async () => {
+		const { dataDir, runtime, issued } = await typeFixture("");
+		try {
+			await runtime.runAction("s1", "type", { ref: "e3", text: "abcdefgh" }, provider);
+			expect(issued().at(-1)).toEqual(["fill", "@e3", "abcdefgh", "--json"]);
+		} finally {
+			await runtime.dispose();
+			await cleanup(dataDir);
+		}
+	});
+
+	it("leaves fill alone — it inserts once and never reproduced the defect", async () => {
+		const { dataDir, runtime, issued } = await typeFixture("ignored");
+		try {
+			await runtime.runAction("s1", "fill", { ref: "e3", text: "abc" }, provider);
+			expect(issued()).toEqual([["fill", "@e3", "abc", "--json"]]);
+		} finally {
+			await runtime.dispose();
+			await cleanup(dataDir);
+		}
+	});
+
 	it("serializes concurrent initialization and removes the owned run root", async () => {
 		const { dataDir, bridge, runtime } = await fixture();
 		try {
@@ -199,70 +249,6 @@ describe("agent-browser runtime lifecycle", () => {
 		}
 	});
 
-	it("passes --annotate through screenshot and returns the native annotations", async () => {
-		const png = Buffer.from(
-			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
-			"base64",
-		);
-		const annotations = [{ number: 1, ref: "e1", role: "button", name: "Save", box: { x: 1, y: 2, width: 3, height: 4 } }];
-		const commands: string[][] = [];
-		let unreadableAnnotations = false;
-		let failAnnotations = false;
-		const { dataDir, runtime } = await fixture({
-			processRunner: async (...args) => {
-				const command = args[1] as string[];
-				commands.push(command);
-				if (command[0] !== "screenshot") return { stdout: "", stderr: "", exitCode: 0 };
-				if (failAnnotations) {
-					return {
-						stdout: JSON.stringify({ success: false, error: "annotation overlay injection failed" }),
-						stderr: "",
-						exitCode: 0,
-					};
-				}
-				await writeFile(command[1], png);
-				if (unreadableAnnotations) return { stdout: "not json", stderr: "", exitCode: 0 };
-				return {
-					stdout: JSON.stringify({
-						success: true,
-						_boundary: { nonce: "n1", origin: "http://localhost:3000/" },
-						data: { path: command[1], annotations },
-					}),
-					stderr: "",
-					exitCode: 0,
-				};
-			},
-		});
-		try {
-			const plain = await runtime.screenshot("session-1", provider);
-			expect(commands.at(-1)).not.toContain("--annotate");
-			expect(plain.annotations).toBeUndefined();
-
-			const annotated = await runtime.screenshot("session-1", provider, undefined, { annotate: true });
-			expect(commands.at(-1)).toContain("--annotate");
-			expect(annotated).toMatchObject({
-				width: 1,
-				height: 1,
-				annotations,
-				_boundary: { nonce: "n1", origin: "http://localhost:3000/" },
-			});
-
-			failAnnotations = true;
-			await expect(runtime.screenshot("session-1", provider, undefined, { annotate: true })).rejects.toThrow(
-				"annotation overlay injection failed",
-			);
-			failAnnotations = false;
-
-			unreadableAnnotations = true;
-			const unreadable = await runtime.screenshot("session-1", provider, undefined, { annotate: true });
-			expect(unreadable).toMatchObject({ width: 1, height: 1, annotationsUnavailable: true });
-			expect(unreadable.annotations).toBeUndefined();
-		} finally {
-			await runtime.dispose();
-			await cleanup(dataDir);
-		}
-	});
-
 	it("re-disables streaming before every command across native daemon replacement", async () => {
 		let streamingEnabled = true;
 		const calls: string[][] = [];
@@ -291,34 +277,6 @@ describe("agent-browser runtime lifecycle", () => {
 				["stream", "disable"],
 				["get", "url"],
 			]);
-		} finally {
-			await runtime.dispose();
-			await cleanup(dataDir);
-		}
-	});
-
-	it("bounds screenshot capture below the default command timeout", async () => {
-		const timeouts: unknown[] = [];
-		const { dataDir, runtime } = await fixture({
-			processRunner: async (...args) => {
-				const command = args[1] as string[];
-				if (command[0] === "screenshot") {
-					timeouts.push(args[4]);
-					await writeFile(
-						command[1],
-						Buffer.from(
-							"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
-							"base64",
-						),
-					);
-				}
-				return { stdout: "", stderr: "", exitCode: 0 };
-			},
-		});
-		try {
-			const screenshot = await runtime.screenshot("session-1", provider);
-			expect(screenshot).toMatchObject({ width: 1, height: 1 });
-			expect(timeouts).toEqual([30_000]);
 		} finally {
 			await runtime.dispose();
 			await cleanup(dataDir);
@@ -566,16 +524,6 @@ describe("agent-browser structured output", () => {
 		expect(thrown).toMatchObject({ code: "STALE_REFERENCE", message: "Reference expired" });
 	});
 
-	it("preserves the native wait-timeout distinction for postcondition observation", () => {
-		let thrown: unknown;
-		try {
-			parseAgentBrowserJSON(JSON.stringify({ success: false, error: "Wait timed out after 2500ms" }));
-		} catch (error) {
-			thrown = error;
-		}
-		expect(thrown).toMatchObject({ code: "AGENT_BROWSER_WAIT_TIMEOUT", message: "Wait timed out after 2500ms" });
-	});
-
 	it.each([
 		"Unknown ref: e99",
 		"Could not locate element with role=button name=Sign In",
@@ -618,19 +566,6 @@ describe.skipIf(!nativeBinary)("agent-browser native compatibility", () => {
 			async sendCommand(method: string) {
 				if (method === "Runtime.evaluate") {
 					return { result: { type: "string", value: "http://localhost:5173/" } };
-				}
-				if (method === "Accessibility.getFullAXTree") {
-					return {
-						nodes: [
-							{
-								nodeId: "1",
-								ignored: false,
-								role: { type: "role", value: "button" },
-								name: { type: "computedString", value: "Save" },
-								childIds: [],
-							},
-						],
-					};
 				}
 				if (method === "Page.captureScreenshot") {
 					return {
@@ -680,17 +615,6 @@ describe.skipIf(!nativeBinary)("agent-browser native compatibility", () => {
 			expect(targets.map((target) => target.id)).toEqual(["t1"]);
 			const screenshot = await runtime.screenshot("native-fixture", provider);
 			expect(screenshot).toMatchObject({ width: 1, height: 1 });
-			const baseline = await runtime.runAction("native-fixture", "snapshot", { delta: true, full: true }, provider);
-			expect(baseline.snapshot).toMatchObject({ kind: "full", revision: expect.any(Number), tree: expect.any(String) });
-			const baselineRevision = (baseline.snapshot as { revision: number }).revision;
-			const next = (await runtime.runAction("native-fixture", "snapshot", { delta: true }, provider)).snapshot as {
-				kind: string;
-				revision: number;
-				baseRevision?: number;
-			};
-			expect(["full", "unchanged", "delta"]).toContain(next.kind);
-			expect(next.revision).toBeGreaterThan(baselineRevision);
-			if (next.kind !== "full") expect(next.baseRevision).toBe(baselineRevision);
 		} finally {
 			await runtime.dispose();
 		}

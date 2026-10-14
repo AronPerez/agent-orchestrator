@@ -1,10 +1,10 @@
 import type { BaseLayoutProps } from "fumadocs-ui/layouts/shared";
-import { COMPANY } from "./constants";
+import { COMPANY } from "../../../landing/packages/shared/src/constants";
 
 export function baseOptions(): BaseLayoutProps {
   return {
     nav: {
-      url: "/",
+      url: "/docs",
       title: (
         <span className="inline-flex items-center gap-2 text-sm font-medium text-foreground">
           <img

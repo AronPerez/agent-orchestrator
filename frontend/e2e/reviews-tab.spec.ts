@@ -1,13 +1,13 @@
 import { expect, test } from "@playwright/test";
-import { openInspector } from "./support/open-inspector";
 
 // dev:web (VITE_NO_ELECTRON=1) serves lib/mock-data.ts. Use stable session URLs
 // so fixture title changes do not prevent these tests from reaching Reviews.
 
 test("the Reviews tab renders the reviewer panel for a session that owns PRs", async ({ page }) => {
-	await page.goto("/#/projects/ao-demo/sessions/demo-ready");
+	await page.goto("/#/host/local/session/demo-ready");
 
-	const inspector = await openInspector(page);
+	const inspector = page.locator("#inspector");
+	await expect(inspector).toBeVisible();
 
 	await inspector.getByRole("tab", { name: "Reviews" }).click();
 
@@ -26,9 +26,10 @@ test("the Reviews tab renders the reviewer panel for a session that owns PRs", a
 });
 
 test("the Reviews tab stays hidden for a session with no reviewable PRs", async ({ page }) => {
-	await page.goto("/#/projects/ao-demo/sessions/demo-working");
+	await page.goto("/#/host/local/session/demo-working");
 
-	const inspector = await openInspector(page);
+	const inspector = page.locator("#inspector");
+	await expect(inspector).toBeVisible();
 	await expect(inspector.getByRole("tab", { name: "Reviews" })).toHaveCount(0);
 	await expect(inspector.getByRole("tab", { name: "Summary" })).toHaveAttribute("aria-selected", "true");
 });
@@ -38,9 +39,9 @@ test("review controls stay aligned and collapse the run action at minimum width"
 		window.localStorage.setItem("ao.inspector.widthPx", "350");
 	});
 	await page.setViewportSize({ height: 900, width: 1100 });
-	await page.goto("/#/projects/ao-demo/sessions/demo-needs-input");
+	await page.goto("/#/host/local/session/demo-needs-input");
 
-	const inspector = await openInspector(page);
+	const inspector = page.locator("#inspector");
 	await inspector.getByRole("tab", { name: "Reviews" }).click();
 	await expect(inspector.getByText("Review controls")).toBeVisible();
 

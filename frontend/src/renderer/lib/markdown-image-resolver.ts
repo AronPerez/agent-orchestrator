@@ -9,7 +9,8 @@
  * turned into a URL against that same blob route.
  */
 
-import { getApiBaseUrl } from "./api-client";
+import { baseUrlFor } from "./host-clients";
+import type { Ref } from "./hosts";
 
 const ABSOLUTE_SRC = /^[a-z][a-z0-9+.-]*:/i;
 
@@ -59,41 +60,34 @@ export function resolveMarkdownAssetPath(markdownFilePath: string, rawSrc: strin
 }
 
 /**
- * Matches `ImageDiffView.tsx`'s `workspaceImageUrl` — the same blob route,
- * `side=after` for current content.
+ * Builds the blob route used by every workspace image preview. A missing host
+ * base stays unavailable; it must not become a relative URL to the local daemon.
  *
- * `version` is not decoration. The blob route sets `no-store`, so as
- * `ImageDiffView` puts it: without a changing URL the element never refetches at
- * all. Pass the file detail's load timestamp so an image the agent rewrites
- * actually reloads instead of sitting on the copy the browser already has.
+ * When supplied, `version` is not decoration. The blob route sets `no-store`,
+ * so it makes an image the agent rewrites refetch instead of sitting on the copy
+ * the browser already has.
  */
-export function buildWorkspaceBlobUrl(sessionId: string, path: string, version: number, apiBaseUrl = getApiBaseUrl()): string {
-	const query = new URLSearchParams({ path, side: "after", v: String(version) });
-	return `${apiBaseUrl.replace(/\/+$/, "")}/api/v1/sessions/${encodeURIComponent(sessionId)}/workspace/file/blob?${query}`;
+export function buildWorkspaceBlobUrl(
+	session: Ref,
+	path: string,
+	version?: number,
+	side: "before" | "after" = "after",
+): string | undefined {
+	const baseUrl = baseUrlFor(session.host);
+	if (baseUrl === null) return undefined;
+	const query = new URLSearchParams({ path, side });
+	if (version !== undefined) query.set("v", String(version));
+	return `${baseUrl}/api/v1/sessions/${encodeURIComponent(session.id)}/workspace/file/blob?${query}`;
 }
 
 /** `undefined` for an empty src or an absolute one that should pass through untouched. */
-/**
- * Resolves a markdown image against an artifact directory served from its own
- * preview origin: the artifact origin root is the artifact-directory root, so
- * a sibling `chart.png` of `report.md` is `<origin>/chart.png`.
- */
-export function resolveArtifactImageSrc(artifactOrigin: string, markdownFilePath: string, rawSrc: string | undefined): string | undefined {
-	if (!rawSrc) return undefined;
-	if (isAbsoluteMarkdownAssetSrc(rawSrc)) return rawSrc;
-	const assetPath = resolveMarkdownAssetPath(markdownFilePath, rawSrc);
-	if (!assetPath) return undefined;
-	return `${artifactOrigin}/${assetPath.split("/").map(encodeURIComponent).join("/")}`;
-}
-
 export function resolveMarkdownImageSrc(
-	sessionId: string,
+	session: Ref,
 	markdownFilePath: string,
 	rawSrc: string | undefined,
 	version: number,
-	apiBaseUrl?: string,
 ): string | undefined {
 	if (!rawSrc) return undefined;
 	if (isAbsoluteMarkdownAssetSrc(rawSrc)) return rawSrc;
-	return buildWorkspaceBlobUrl(sessionId, resolveMarkdownAssetPath(markdownFilePath, rawSrc), version, apiBaseUrl);
+	return buildWorkspaceBlobUrl(session, resolveMarkdownAssetPath(markdownFilePath, rawSrc), version);
 }

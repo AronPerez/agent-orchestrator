@@ -5,8 +5,7 @@
 //
 // Two ways to silently disable it, both worth knowing before touching this:
 // Metro only inlines a literal `process.env.X` dot access, so destructuring or
-// bracket access reads as undefined in a build (same reason as
-// `telemetry/config.ts`); and a variable set to secret visibility is not
+// bracket access reads as undefined in a build; and a variable set to secret visibility is not
 // readable outside EAS servers, so it does not resolve during `eas update` and
 // falls through to "" here without any error.
 

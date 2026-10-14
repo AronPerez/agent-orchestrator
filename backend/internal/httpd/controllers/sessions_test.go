@@ -41,6 +41,8 @@ import (
 
 type fakeSessionService struct {
 	cleanupPending             bool
+	artifactsDeleted           []domain.SessionID
+	deleteArtifactsErr         error
 	sessions                   map[domain.SessionID]domain.Session
 	sent                       string
 	sentAttachment             *ports.SpawnAttachment
@@ -53,6 +55,7 @@ type fakeSessionService struct {
 	cleanupResult              []domain.SessionID
 	cleanupSkipped             []sessionsvc.CleanupSkipped
 	workspaceFiles             sessionsvc.WorkspaceFiles
+	workspaceListHook          func(context.Context) error
 	workspaceFile              sessionsvc.WorkspaceFileDetail
 	workspaceFileSection       sessionsvc.WorkspaceFileSection
 	workspaceFileCommitSHA     string
@@ -74,6 +77,8 @@ type fakeSessionService struct {
 	workspaceSearchQuery       string
 	workspaceSearchCursor      string
 	workspaceSearchLimit       int
+	workspaceResolvePath       string
+	workspaceResolution        sessionsvc.WorkspacePathResolution
 	workspaceTree              sessionsvc.WorkspaceTree
 	workspaceTreePath          string
 	workspacePaths             []string
@@ -484,6 +489,14 @@ func (f *fakeSessionService) Kill(_ context.Context, id domain.SessionID) (bool,
 	return true, nil
 }
 
+func (f *fakeSessionService) DeleteArtifacts(_ context.Context, id domain.SessionID) error {
+	if f.deleteArtifactsErr != nil {
+		return f.deleteArtifactsErr
+	}
+	f.artifactsDeleted = append(f.artifactsDeleted, id)
+	return nil
+}
+
 func (f *fakeSessionService) RollbackSpawn(_ context.Context, id domain.SessionID) (sessionsvc.RollbackOutcome, error) {
 	if _, ok := f.sessions[id]; ok {
 		delete(f.sessions, id)
@@ -632,7 +645,12 @@ func (f *fakeSessionService) StageAttachments(
 	return f.stagedPaths, nil
 }
 
-func (f *fakeSessionService) ListWorkspaceFiles(_ context.Context, id domain.SessionID) (sessionsvc.WorkspaceFiles, error) {
+func (f *fakeSessionService) ListWorkspaceFiles(ctx context.Context, id domain.SessionID) (sessionsvc.WorkspaceFiles, error) {
+	if f.workspaceListHook != nil {
+		if err := f.workspaceListHook(ctx); err != nil {
+			return sessionsvc.WorkspaceFiles{}, err
+		}
+	}
 	if f.workspaceErr != nil {
 		return sessionsvc.WorkspaceFiles{}, f.workspaceErr
 	}
@@ -814,6 +832,17 @@ func (f *fakeSessionService) GetPRFileRevisionAtCommit(ctx context.Context, id d
 func (f *fakeSessionService) GetWorkspaceFileRevisionAtCommit(ctx context.Context, id domain.SessionID, path string, side sessionsvc.WorkspaceFileBlobSide, workspaceVersion, expectedRevision, commitSHA string) (sessionsvc.WorkspaceFileRevision, error) {
 	f.workspaceRevisionCommitSHA = commitSHA
 	return f.GetWorkspaceFileRevision(ctx, id, path, sessionsvc.WorkspaceDiffCommitted, side, workspaceVersion, expectedRevision)
+}
+
+func (f *fakeSessionService) ResolveWorkspacePath(_ context.Context, id domain.SessionID, rawPath string) (sessionsvc.WorkspacePathResolution, error) {
+	f.workspaceResolvePath = rawPath
+	if f.workspaceErr != nil {
+		return sessionsvc.WorkspacePathResolution{}, f.workspaceErr
+	}
+	if _, ok := f.sessions[id]; !ok {
+		return sessionsvc.WorkspacePathResolution{}, apierr.NotFound("SESSION_NOT_FOUND", "Unknown session")
+	}
+	return f.workspaceResolution, nil
 }
 
 func (f *fakeSessionService) SearchWorkspaceFiles(_ context.Context, id domain.SessionID, query, cursor string, limit int) (sessionsvc.WorkspaceFileSearch, error) {
@@ -2162,6 +2191,53 @@ func TestSessionsAPI_OrchestratorRejectsUnknownApprovalMode(t *testing.T) {
 	assertErrorCode(t, body, status, http.StatusBadRequest, "INVALID_APPROVAL_MODE")
 }
 
+func TestSessionsAPI_SpawnAcceptsArtifactRequestedOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "project", body: `{"projectId":"ao","kind":"worker","harness":"codex","requestedOutput":"artifact","displayName":"New artifact"}`},
+		{name: "standalone", body: `{"kind":"worker","harness":"codex","requestedOutput":"artifact","displayName":"New artifact"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := newFakeSessionService()
+			srv := newSessionTestServer(t, svc)
+
+			body, status, _ := doRequest(t, srv, "POST", "/api/v1/sessions", tc.body)
+			if status != http.StatusCreated {
+				t.Fatalf("status = %d, want 201; body=%s", status, body)
+			}
+			if svc.lastSpawn.RequestedOutput != domain.RequestedOutputArtifact {
+				t.Fatalf("RequestedOutput = %q, want artifact", svc.lastSpawn.RequestedOutput)
+			}
+		})
+	}
+}
+
+func TestSessionsAPI_SpawnOmittedRequestedOutputStaysEmpty(t *testing.T) {
+	svc := newFakeSessionService()
+	srv := newSessionTestServer(t, svc)
+
+	body, status, _ := doRequest(t, srv, "POST", "/api/v1/sessions", `{"projectId":"ao","kind":"worker","harness":"codex"}`)
+	if status != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", status, body)
+	}
+	if svc.lastSpawn.RequestedOutput != "" {
+		t.Fatalf("RequestedOutput = %q, want empty", svc.lastSpawn.RequestedOutput)
+	}
+}
+
+func TestSessionsAPI_SpawnRejectsUnknownRequestedOutput(t *testing.T) {
+	svc := newFakeSessionService()
+	srv := newSessionTestServer(t, svc)
+
+	body, status, _ := doRequest(t, srv, "POST", "/api/v1/sessions", `{"projectId":"ao","kind":"worker","harness":"codex","requestedOutput":"slides"}`)
+	assertErrorCode(t, body, status, http.StatusBadRequest, "INVALID_REQUESTED_OUTPUT")
+	if svc.lastSpawn.RequestedOutput != "" || svc.lastSpawn.ProjectID != "" {
+		t.Fatalf("rejected request reached the service: %#v", svc.lastSpawn)
+	}
+}
+
 func TestSessionsAPI_PreviewDiscoversAndServesStaticIndex(t *testing.T) {
 	svc := newFakeSessionService()
 	workspace := t.TempDir()
@@ -3102,9 +3178,9 @@ func TestSessionsAPI_ManagedPreviewAppProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 	request.Header.Set("Authorization", "Bearer host-password")
-	request.Header.Set("Origin", "http://ao-preview-client.localhost:4321")
+	request.Header.Set("Origin", srv.URL)
 	request.Header.Set("X-AO-Preview-App-Authorization", "Basic app-token")
-	request.Header.Set("X-AO-Preview-App-Origin", "http://ao-preview-client.localhost:4321")
+	request.Header.Set("X-AO-Preview-App-Origin", srv.URL)
 	response, err = http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
@@ -3128,9 +3204,9 @@ func TestSessionsAPI_ManagedPreviewAppProxy(t *testing.T) {
 	conn, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(srv.URL, "http")+"/api/v1/sessions/ao-1/preview/app/ws", &websocket.DialOptions{
 		HTTPHeader: http.Header{
 			"Authorization":                  []string{"Bearer host-password"},
-			"Origin":                         []string{"http://ao-preview-client.localhost:4321"},
+			"Origin":                         []string{srv.URL},
 			"X-Ao-Preview-App-Authorization": []string{"Basic ws-token"},
-			"X-Ao-Preview-App-Origin":        []string{"http://ao-preview-client.localhost:4321"},
+			"X-Ao-Preview-App-Origin":        []string{srv.URL},
 		},
 	})
 	if err != nil {
@@ -3196,7 +3272,7 @@ func TestSessionsAPI_ShellPreviewCapabilityCannotAutomateBrowser(t *testing.T) {
 	srv := httptest.NewServer(httpd.NewRouterWithControl(config.Config{}, log, nil, httpd.APIDeps{
 		Sessions: svc, PreviewServer: managed, SessionCapabilities: authority,
 		ShellPreviewCapabilities: shell,
-		Browser:                  browsersvc.New(svc, nil, authority),
+		Browser:                  browsersvc.New(svc, nil, nil, authority),
 	}, httpd.ControlDeps{}))
 	t.Cleanup(srv.Close)
 	request := func(method, path, body, header, token string) (int, string) {
@@ -3687,6 +3763,26 @@ func TestSessionsAPI_SearchWorkspaceFiles(t *testing.T) {
 	}
 }
 
+func TestSessionsAPI_ResolveWorkspacePath(t *testing.T) {
+	svc := newFakeSessionService()
+	svc.workspaceResolution = sessionsvc.WorkspacePathResolution{SessionID: "ao-1", Kind: sessionsvc.WorkspacePathKindWorkspace, Path: "src/app.ts"}
+	srv := newSessionTestServer(t, svc)
+
+	body, status, headers := doRequest(t, srv, http.MethodGet, "/api/v1/sessions/ao-1/workspace/resolve?path="+url.QueryEscape("/root/src/app.ts"), "")
+	assertJSON(t, headers)
+	if status != http.StatusOK {
+		t.Fatalf("GET workspace resolve = %d body=%s", status, body)
+	}
+	if svc.workspaceResolvePath != "/root/src/app.ts" {
+		t.Fatalf("service path = %q, want /root/src/app.ts", svc.workspaceResolvePath)
+	}
+	var got controllers.WorkspacePathResolutionResponse
+	mustJSON(t, body, &got)
+	if got.SessionID != "ao-1" || got.Kind != sessionsvc.WorkspacePathKindWorkspace || got.Path != "src/app.ts" {
+		t.Fatalf("response = %#v", got)
+	}
+}
+
 func TestSessionsAPI_GetWorkspaceFileBlob(t *testing.T) {
 	svc := newFakeSessionService()
 	svc.workspaceBlob = sessionsvc.WorkspaceFileBlob{
@@ -3725,6 +3821,18 @@ func TestSessionsAPI_GetWorkspaceFileBlobRequiresPath(t *testing.T) {
 func TestSessionsAPI_StreamWorkspaceChanges(t *testing.T) {
 	workspace := t.TempDir()
 	svc := newFakeSessionService()
+	// Permit the startup reconciliation, then block refresh work to verify
+	// that the invalidation edge is sent before scanning the changed workspace.
+	scans := 0
+	svc.workspaceListHook = func(ctx context.Context) error {
+		scans++
+		if scans == 1 {
+			return nil
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
 	session := svc.sessions["ao-1"]
 	session.Metadata.WorkspacePath = workspace
 	svc.sessions["ao-1"] = session
@@ -4212,7 +4320,10 @@ func TestSessionsAPI_CleanupWithProjectFilter(t *testing.T) {
 		} `json:"skipped"`
 	}
 	mustJSON(t, body, &got)
-	if !got.OK || len(got.Cleaned) != 1 || got.Cleaned[0] != "ao-1" {
+	// ok is false here on purpose: ao-2 was skipped. This assertion used to
+	// require true, which is the bug — it encoded a response that reported
+	// success while a workspace was left behind.
+	if got.OK || len(got.Cleaned) != 1 || got.Cleaned[0] != "ao-1" {
 		t.Fatalf("cleanup response = %#v", got)
 	}
 	if len(got.Skipped) != 1 || got.Skipped[0].SessionID != "ao-2" || got.Skipped[0].Reason != "workspace has uncommitted changes" {
@@ -4221,6 +4332,66 @@ func TestSessionsAPI_CleanupWithProjectFilter(t *testing.T) {
 	if len(svc.cleanupProjects) != 1 || svc.cleanupProjects[0] != "ao" {
 		t.Fatalf("cleanupProjects = %#v, want [ao]", svc.cleanupProjects)
 	}
+}
+
+// A declined teardown must not report success. cleanup refuses a worktree with
+// uncommitted changes — the normal state of a session an agent worked in — and
+// still returns 200, so `ok` is the only field distinguishing "cleaned
+// everything" from "left a workspace, and whatever is in it, on disk".
+//
+// This reads the response state back rather than asserting a call, and covers
+// both branches: the all-clean case must stay true, or the fix would be
+// indistinguishable from hardcoding false.
+func TestSessionsAPI_CleanupOKReflectsSkipped(t *testing.T) {
+	decode := func(t *testing.T, body []byte) bool {
+		t.Helper()
+		var got struct {
+			OK      bool     `json:"ok"`
+			Cleaned []string `json:"cleaned"`
+			Skipped []struct {
+				SessionID string `json:"sessionId"`
+			} `json:"skipped"`
+		}
+		mustJSON(t, body, &got)
+		return got.OK
+	}
+
+	t.Run("every candidate cleaned", func(t *testing.T) {
+		svc := newFakeSessionService()
+		svc.cleanupResult = []domain.SessionID{"ao-1"}
+		body, status, _ := doRequest(t, newSessionTestServer(t, svc), "POST", "/api/v1/sessions/cleanup", "")
+		if status != http.StatusOK {
+			t.Fatalf("status = %d; body=%s", status, body)
+		}
+		if !decode(t, body) {
+			t.Fatalf("ok = false with nothing skipped; body=%s", body)
+		}
+	})
+
+	t.Run("a skipped session makes it false", func(t *testing.T) {
+		svc := newFakeSessionService()
+		svc.cleanupResult = []domain.SessionID{"ao-1"}
+		svc.cleanupSkipped = []sessionsvc.CleanupSkipped{{SessionID: "ao-2", Reason: "workspace has uncommitted changes"}}
+		body, status, _ := doRequest(t, newSessionTestServer(t, svc), "POST", "/api/v1/sessions/cleanup", "")
+		if status != http.StatusOK {
+			t.Fatalf("status = %d; body=%s", status, body)
+		}
+		if decode(t, body) {
+			t.Fatalf("ok = true while ao-2 was skipped; body=%s", body)
+		}
+	})
+
+	t.Run("nothing cleaned and everything skipped is still not ok", func(t *testing.T) {
+		svc := newFakeSessionService()
+		svc.cleanupSkipped = []sessionsvc.CleanupSkipped{{SessionID: "ao-2", Reason: "workspace has uncommitted changes"}}
+		body, status, _ := doRequest(t, newSessionTestServer(t, svc), "POST", "/api/v1/sessions/cleanup", "")
+		if status != http.StatusOK {
+			t.Fatalf("status = %d; body=%s", status, body)
+		}
+		if decode(t, body) {
+			t.Fatalf("ok = true with zero cleaned and one skipped; body=%s", body)
+		}
+	})
 }
 
 func TestSessionsAPI_CleanupWithoutProjectFilter(t *testing.T) {
@@ -4431,6 +4602,121 @@ func TestSessionsAPI_ClaimPRErrors(t *testing.T) {
 	}
 }
 
+// Mirrors the daemon's ListPage on the fake: newest first by (updated_at, id),
+// resumed from the real page token, one row past the page decides the token.
+func (f *fakeSessionService) ListPage(ctx context.Context, req sessionsvc.ListPageRequest) (sessionsvc.Page, error) {
+	all, _ := f.List(ctx, req.ListFilter)
+	newer := func(a, b domain.Session) bool {
+		if !a.UpdatedAt.Equal(b.UpdatedAt) {
+			return a.UpdatedAt.After(b.UpdatedAt)
+		}
+		return a.ID > b.ID
+	}
+	for i := 1; i < len(all); i++ {
+		for j := i; j > 0 && newer(all[j], all[j-1]); j-- {
+			all[j], all[j-1] = all[j-1], all[j]
+		}
+	}
+	if req.PageToken != "" {
+		cursor, err := sessionsvc.DecodePageToken(req.PageToken)
+		if err != nil {
+			return sessionsvc.Page{}, err
+		}
+		kept := all[:0]
+		for _, s := range all {
+			if s.UpdatedAt.Before(cursor.UpdatedAt) || (s.UpdatedAt.Equal(cursor.UpdatedAt) && s.ID < cursor.ID) {
+				kept = append(kept, s)
+			}
+		}
+		all = kept
+	}
+	page := sessionsvc.Page{Sessions: all}
+	if len(all) > req.PageSize {
+		page.Sessions = all[:req.PageSize]
+		last := page.Sessions[len(page.Sessions)-1]
+		page.NextPageToken = sessionsvc.EncodePageToken(ports.SessionPageCursor{UpdatedAt: last.UpdatedAt, ID: last.ID})
+	}
+	return page, nil
+}
+
+func samePageIDs(sessions []sessionBody, want []string) bool {
+	if len(sessions) != len(want) {
+		return false
+	}
+	for i := range want {
+		if sessions[i].ID != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestSessionsAPI_ListPaginatesNewestFirst(t *testing.T) {
+	svc := newFakeSessionService()
+	base := time.Unix(1700000000, 0).UTC()
+	for i, id := range []domain.SessionID{"old", "mid", "new"} {
+		at := base.Add(time.Duration(i) * time.Minute)
+		svc.sessions[id] = domain.Session{
+			SessionRecord: domain.SessionRecord{
+				ID: id, ProjectID: "ao", Kind: domain.KindWorker, IsTerminated: true,
+				Activity:  domain.Activity{State: domain.ActivityIdle, LastActivityAt: at},
+				CreatedAt: at, UpdatedAt: at,
+			},
+			Status: domain.StatusIdle,
+		}
+	}
+	srv := newSessionTestServer(t, svc)
+	type page struct {
+		Sessions      []sessionBody `json:"sessions"`
+		NextPageToken string        `json:"nextPageToken"`
+	}
+
+	body, status, _ := doRequest(t, srv, "GET", "/api/v1/sessions?active=false&pageSize=2", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET page 1 = %d, want 200; body=%s", status, body)
+	}
+	var first page
+	mustJSON(t, body, &first)
+	if !samePageIDs(first.Sessions, []string{"new", "mid"}) {
+		t.Fatalf("page 1 = %s, want newest first [new mid]", body)
+	}
+	if first.NextPageToken == "" {
+		t.Fatalf("a third row exists, so page 1 must carry nextPageToken; body=%s", body)
+	}
+
+	body, status, _ = doRequest(t, srv, "GET", "/api/v1/sessions?active=false&pageSize=2&pageToken="+first.NextPageToken, "")
+	if status != http.StatusOK {
+		t.Fatalf("GET page 2 = %d, want 200; body=%s", status, body)
+	}
+	var second page
+	mustJSON(t, body, &second)
+	if !samePageIDs(second.Sessions, []string{"old"}) || second.NextPageToken != "" {
+		t.Fatalf("page 2 = %s, want [old] and no token", body)
+	}
+
+	// Absent pageSize keeps the return-all contract, with no token on the wire.
+	body, status, _ = doRequest(t, srv, "GET", "/api/v1/sessions?active=false", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET unpaginated = %d, want 200; body=%s", status, body)
+	}
+	var raw map[string]any
+	mustJSON(t, body, &raw)
+	if _, ok := raw["nextPageToken"]; ok {
+		t.Fatalf("unpaginated list must not carry nextPageToken: %s", body)
+	}
+	if got := len(raw["sessions"].([]any)); got != 3 {
+		t.Fatalf("unpaginated list = %d sessions, want all 3", got)
+	}
+
+	if _, status, _ = doRequest(t, srv, "GET", "/api/v1/sessions?pageSize=0", ""); status != http.StatusBadRequest {
+		t.Fatalf("pageSize=0 = %d, want 400", status)
+	}
+	body, status, _ = doRequest(t, srv, "GET", "/api/v1/sessions?pageSize=1&pageToken=nope", "")
+	if status != http.StatusBadRequest || !strings.Contains(string(body), "INVALID_PAGE_TOKEN") {
+		t.Fatalf("bad token = %d %s, want 400 INVALID_PAGE_TOKEN", status, body)
+	}
+}
+
 func TestSessionsAPI_SendCarriesCooperativeSenderWithoutHumanAuthorship(t *testing.T) {
 	svc := newFakeSessionService()
 	srv := newSessionTestServer(t, svc)
@@ -4483,6 +4769,55 @@ func TestSessionsAPI_InteractionRecencyKeepsHumanTimestampSeparate(t *testing.T)
 func (f *fakeSessionService) RequestKill(ctx context.Context, id domain.SessionID) (sessionmanager.KillResult, error) {
 	freed, err := f.Kill(ctx, id)
 	return sessionmanager.KillResult{Freed: freed && !f.cleanupPending, CleanupPending: f.cleanupPending}, err
+}
+
+func TestSessionsAPI_KillKeepsArtifactsByDefault(t *testing.T) {
+	svc := newFakeSessionService()
+	srv := newSessionTestServer(t, svc)
+	body, status, _ := doRequest(t, srv, http.MethodPost, "/api/v1/sessions/ao-1/kill", "")
+	if status != http.StatusOK || strings.Contains(string(body), "artifactsDeleted") {
+		t.Fatalf("kill response = %d %s", status, body)
+	}
+	if len(svc.artifactsDeleted) != 0 {
+		t.Fatalf("artifacts deleted without the flag: %v", svc.artifactsDeleted)
+	}
+}
+
+func TestSessionsAPI_KillDeletesArtifactsWhenAsked(t *testing.T) {
+	svc := newFakeSessionService()
+	srv := newSessionTestServer(t, svc)
+	body, status, _ := doRequest(t, srv, http.MethodPost, "/api/v1/sessions/ao-1/kill", `{"deleteArtifacts":true}`)
+	var result struct {
+		ArtifactsDeleted bool `json:"artifactsDeleted"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatal(err)
+	}
+	if status != http.StatusOK || !result.ArtifactsDeleted || !svc.sessions["ao-1"].IsTerminated {
+		t.Fatalf("kill response = %d %s", status, body)
+	}
+	if len(svc.artifactsDeleted) != 1 || svc.artifactsDeleted[0] != "ao-1" {
+		t.Fatalf("artifactsDeleted = %v, want [ao-1]", svc.artifactsDeleted)
+	}
+}
+
+func TestSessionsAPI_KillSucceedsWhenArtifactDeleteFails(t *testing.T) {
+	svc := newFakeSessionService()
+	svc.deleteArtifactsErr = errors.New("disk busy")
+	srv := newSessionTestServer(t, svc)
+	body, status, _ := doRequest(t, srv, http.MethodPost, "/api/v1/sessions/ao-1/kill", `{"deleteArtifacts":true}`)
+	if status != http.StatusOK || strings.Contains(string(body), "artifactsDeleted") || !svc.sessions["ao-1"].IsTerminated {
+		t.Fatalf("kill response = %d %s", status, body)
+	}
+}
+
+func TestSessionsAPI_KillRejectsMalformedBody(t *testing.T) {
+	svc := newFakeSessionService()
+	srv := newSessionTestServer(t, svc)
+	_, status, _ := doRequest(t, srv, http.MethodPost, "/api/v1/sessions/ao-1/kill", `{"deleteArtifacts":`)
+	if status != http.StatusBadRequest || svc.sessions["ao-1"].IsTerminated {
+		t.Fatalf("status = %d terminated=%v, want 400 and a live session", status, svc.sessions["ao-1"].IsTerminated)
+	}
 }
 
 func TestSessionsAPI_KillReportsAcceptedCleanup(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -80,7 +81,7 @@ func vibeAPIKeyEnvVars(configPath string) ([]string, error) {
 			continue
 		}
 		envVar := strings.Trim(strings.TrimSpace(value), `"',`)
-		if envVar != "" && !strings.EqualFold(envVar, "null") && !containsString(vars, envVar) {
+		if envVar != "" && !strings.EqualFold(envVar, "null") && !slices.Contains(vars, envVar) {
 			vars = append(vars, envVar)
 		}
 	}
@@ -110,13 +111,4 @@ func vibeEnvFileAuthStatus(path, envVar string) (ports.AgentAuthStatus, bool, er
 		return ports.AgentAuthStatusUnknown, false, nil
 	}
 	return ports.AgentAuthStatusUnknown, false, nil
-}
-
-func containsString(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
 }

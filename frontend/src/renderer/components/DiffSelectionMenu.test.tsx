@@ -14,6 +14,17 @@ vi.mock("../lib/api-client", () => ({
 			: fallback,
 }));
 
+vi.mock("../lib/host-clients", () => ({
+	baseUrlFor: () => "http://127.0.0.1:3001",
+	connectedHosts: (() => {
+		const hosts: string[] = [];
+		return () => hosts;
+	})(),
+	subscribeConnectedHosts: () => () => undefined,
+	isHostReady: () => true,
+	clientFor: () => ({ POST: postMock }),
+}));
+
 const writeTextMock = vi.hoisted(() => vi.fn());
 
 const SAMPLE_LINES: DiffSelectionLine[] = [
@@ -24,7 +35,7 @@ const SAMPLE_LINES: DiffSelectionLine[] = [
 function renderMenu(overrides: Partial<DiffSelectionMenuProps> = {}) {
 	const onOpenChange = overrides.onOpenChange ?? vi.fn();
 	const props: DiffSelectionMenuProps = {
-		sessionId: "sess-1",
+		session: { host: "local", id: "sess-1" },
 		filePath: "src/app.ts",
 		lines: SAMPLE_LINES,
 		selectedText: "  return 42;",
@@ -87,7 +98,7 @@ describe("DiffSelectionMenu", () => {
 		expect(await screen.findByText("Sending")).toBeInTheDocument();
 		expect(postMock).toHaveBeenCalledWith("/api/v1/sessions/{sessionId}/send", {
 			params: { path: { sessionId: "sess-1" } },
-			body: { message: expect.stringContaining("Explain what these lines do and why."), userAuthored: true },
+			body: { message: expect.stringContaining("Explain what these lines do and why.") },
 		});
 		const body = postMock.mock.calls[0][1].body as { message: string };
 		expect(body.message).toContain("File: src/app.ts");
@@ -205,7 +216,7 @@ describe("DiffSelectionMenu", () => {
 		expect(await screen.findByText("Sent")).toBeInTheDocument();
 		expect(postMock).toHaveBeenCalledWith("/api/v1/sessions/{sessionId}/send", {
 			params: { path: { sessionId: "sess-1" } },
-			body: { message: expect.stringContaining("Rename this to bar"), userAuthored: true },
+			body: { message: expect.stringContaining("Rename this to bar") },
 		});
 		const body = postMock.mock.calls[0][1].body as { message: string };
 		expect(body.message).not.toContain("Explain what these lines do and why.");

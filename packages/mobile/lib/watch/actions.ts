@@ -1,5 +1,11 @@
 import type { ServerConfig } from "../config";
+import type { WatchSource } from "./snapshot";
 import type { ConversationActivity, ConversationSnapshot, DecisionOption } from "../chat/types";
+
+/** Only the currently connected, successfully polled config may receive a wrist action. */
+export function watchConfigForHost({ config, connection, error, poll }: WatchSource, hostId: string): ServerConfig | null {
+	return config?.hostId && config.hostId === hostId && connection === "open" && !error && poll?.config === config ? config : null;
+}
 
 export type ActionContext = {
 	kind: "approval" | "input" | "message";

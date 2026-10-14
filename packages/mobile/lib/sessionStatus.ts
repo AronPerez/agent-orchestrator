@@ -23,8 +23,7 @@ export function attentionOf(s: DashboardSession): AttentionLevel {
 		pr?.ciStatus === "failing" ||
 		pr?.reviewDecision === "changes_requested" ||
 		s.status === "ci_failed" ||
-		s.status === "changes_requested" ||
-		s.status === "commented"
+		s.status === "changes_requested"
 	)
 		return "review";
 	if (s.status === "pr_open" || s.status === "review_pending") return "pending";

@@ -17,6 +17,9 @@ type fakePRService struct {
 	mergeResult   prsvc.MergeResult
 	mergeErr      error
 	mergeRequest  prsvc.MergeRequest
+	closeResult   prsvc.CloseResult
+	closeErr      error
+	closePRID     string
 	resolveResult prsvc.ResolveResult
 	resolveErr    error
 }
@@ -24,6 +27,11 @@ type fakePRService struct {
 func (f *fakePRService) Merge(_ context.Context, request prsvc.MergeRequest) (prsvc.MergeResult, error) {
 	f.mergeRequest = request
 	return f.mergeResult, f.mergeErr
+}
+
+func (f *fakePRService) Close(_ context.Context, prID string) (prsvc.CloseResult, error) {
+	f.closePRID = prID
+	return f.closeResult, f.closeErr
 }
 
 func (f *fakePRService) ResolveComments(_ context.Context, _ string, _ []string) (prsvc.ResolveResult, error) {
@@ -78,6 +86,36 @@ func TestPRsRoutes_Merge_200(t *testing.T) {
 	if svc.mergeRequest.PRID != "42" || svc.mergeRequest.PRURL != "https://github.com/acme/widgets/pull/42" || svc.mergeRequest.ExpectedHeadSHA != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
 		t.Fatalf("merge request = %#v", svc.mergeRequest)
 	}
+}
+
+func TestPRsRoutes_Close_200(t *testing.T) {
+	svc := &fakePRService{closeResult: prsvc.CloseResult{PRNumber: 42}}
+	srv := newPRTestServer(t, svc)
+
+	body, status, _ := doRequest(t, srv, "POST", "/api/v1/prs/42/close", "")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", status, body)
+	}
+	var resp struct {
+		OK       bool `json:"ok"`
+		PRNumber int  `json:"prNumber"`
+	}
+	mustJSON(t, body, &resp)
+	if !resp.OK || resp.PRNumber != 42 {
+		t.Errorf("resp = %+v, want {ok:true prNumber:42}", resp)
+	}
+	if svc.closePRID != "42" {
+		t.Fatalf("close prID = %q, want 42", svc.closePRID)
+	}
+}
+
+func TestPRsRoutes_Close_404(t *testing.T) {
+	svc := &fakePRService{closeErr: prsvc.ErrPRNotFound}
+	srv := newPRTestServer(t, svc)
+
+	body, status, headers := doRequest(t, srv, "POST", "/api/v1/prs/42/close", "")
+	assertJSON(t, headers)
+	assertErrorCode(t, body, status, http.StatusNotFound, "PR_NOT_FOUND")
 }
 
 // ---- Merge: 404 ----

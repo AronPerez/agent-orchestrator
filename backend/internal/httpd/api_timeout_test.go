@@ -78,7 +78,7 @@ func TestSwitchAgentRouteUsesOrdinaryTimeoutAndReturnsAccepted(t *testing.T) {
 	)
 
 	genericResponse := httptest.NewRecorder()
-	router.ServeHTTP(genericResponse, httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil))
+	router.ServeHTTP(genericResponse, httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/v1/sessions", nil))
 	if genericResponse.Code != http.StatusOK {
 		t.Fatalf("GET sessions status = %d, want 200", genericResponse.Code)
 	}
@@ -86,7 +86,7 @@ func TestSwitchAgentRouteUsesOrdinaryTimeoutAndReturnsAccepted(t *testing.T) {
 
 	switchRequest := httptest.NewRequest(
 		http.MethodPost,
-		"/api/v1/sessions/ao-1/switch-agent",
+		"http://127.0.0.1/api/v1/sessions/ao-1/switch-agent",
 		bytes.NewBufferString(`{"targetHarness":"codex"}`),
 	)
 	switchRequest.Header.Set("Content-Type", "application/json")
@@ -116,7 +116,7 @@ func TestAttachmentUploadRouteUsesExtendedTimeout(t *testing.T) {
 		APIDeps{Sessions: svc},
 		ControlDeps{},
 	)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/ao-1/attachments", bytes.NewBufferString(`{"attachments":[{"mimeType":"text/plain","data":"YQ=="}]}`))
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/v1/sessions/ao-1/attachments", bytes.NewBufferString(`{"attachments":[{"mimeType":"text/plain","data":"YQ=="}]}`))
 	req.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, req)
@@ -148,7 +148,7 @@ func TestAttachmentCapableSendUsesExtendedTimeoutOnlyForUploads(t *testing.T) {
 		{name: "attachment", body: `{"message":"hello","attachment":{"mimeType":"text/plain","data":"YQ=="}}`, upload: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/ao-1/send", bytes.NewBufferString(tc.body))
+			req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/v1/sessions/ao-1/send", bytes.NewBufferString(tc.body))
 			req.Header.Set("Content-Type", "application/json")
 			if tc.upload {
 				req.Header.Set(attachmentUploadHeader, "1")

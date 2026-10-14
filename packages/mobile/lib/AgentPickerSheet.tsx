@@ -1,4 +1,4 @@
-import { Feather } from "./icons";
+import { Feather } from "@expo/vector-icons";
 import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text } from "react-native";
 import { AgentLogo } from "./AgentLogo";
 import type { RankedAgent } from "./agentPicker";
@@ -6,7 +6,6 @@ import { haptics } from "./haptics";
 import type { Theme } from "./theme";
 import { useTheme, useThemedStyles } from "./ThemeProvider";
 import { SHEET_SCROLL_CONTENT, SheetHeader } from "./ui";
-import { iconSize, press, space, type } from "./tokens";
 
 // Picks the agent CLI that will run a session.
 //
@@ -46,9 +45,6 @@ export function AgentPickerSheet({
 			style={s.list}
 			data={agents}
 			keyExtractor={(a) => a.id}
-			// Keeps an Android drag with the list; without it the sheet's own pan
-			// takes the gesture and dismisses instead of scrolling back up.
-			nestedScrollEnabled
 			contentContainerStyle={SHEET_SCROLL_CONTENT}
 			ListEmptyComponent={
 				<Text style={s.empty}>No agents reported. Check that AO is running on your computer, then refresh.</Text>
@@ -72,10 +68,10 @@ export function AgentPickerSheet({
 								style={({ pressed }) => [s.refresh, (pressed || refreshing) && { opacity: 0.5 }]}
 							>
 								{refreshing ? (
-									<ActivityIndicator size="small" color={t.accent} />
+									<ActivityIndicator size="small" color={t.blue} />
 								) : (
 									<>
-										<Feather name="refresh-cw" size={iconSize.xs} color={t.accent} />
+										<Feather name="refresh-cw" size={13} color={t.blue} />
 										<Text style={s.refreshText}>Refresh</Text>
 									</>
 								)}
@@ -101,9 +97,9 @@ export function AgentPickerSheet({
 						onPress={() => {
 							haptics.select();
 							// Dismiss before reporting the choice, matching the other
-							// sheets. onClose leaves the sheet, so a callback that
-							// navigated first would have that dismiss pop the
-							// destination instead of this sheet.
+							// sheets. onClose is router.back(), so a callback that
+							// navigated first would have back() pop the destination
+							// instead of this sheet.
 							onClose();
 							onSelect(a.id);
 						}}
@@ -114,7 +110,7 @@ export function AgentPickerSheet({
 						]}
 					>
 						<AgentLogo harness={a.id} size={22} />
-						<Text style={[s.label, isSelected && { color: t.accent }]} numberOfLines={1}>
+						<Text style={[s.label, isSelected && { color: t.blue }]} numberOfLines={1}>
 							{a.label}
 						</Text>
 						{a.status ? (
@@ -129,7 +125,7 @@ export function AgentPickerSheet({
 								{a.status}
 							</Text>
 						) : null}
-						{isSelected ? <Feather name="check" size={iconSize.md} color={t.accent} /> : null}
+						{isSelected ? <Feather name="check" size={17} color={t.blue} /> : null}
 					</Pressable>
 				);
 			}}
@@ -140,26 +136,26 @@ export function AgentPickerSheet({
 const makeStyles = (t: Theme) =>
 	StyleSheet.create({
 		list: { flex: 1, backgroundColor: t.bgSurface },
-		refresh: { flexDirection: "row", alignItems: "center", gap: space.xxs },
-		refreshText: { fontFamily: "Geist_600SemiBold", color: t.accent, fontSize: type.footnote.fontSize, fontWeight: "600" },
+		refresh: { flexDirection: "row", alignItems: "center", gap: 5 },
+		refreshText: { color: t.blue, fontSize: 13, fontWeight: "600" },
 		option: {
 			flexDirection: "row",
 			alignItems: "center",
-			gap: space.md,
-			paddingVertical: space.md,
-			paddingHorizontal: space.hair,
+			gap: 11,
+			paddingVertical: 11,
+			paddingHorizontal: 2,
 		},
-		optionPressed: { opacity: press.opacity },
+		optionPressed: { opacity: 0.6 },
 		// Desktop's opacity for an unpickable agent. The row still shows its mark
 		// and reason, so it reads as "not yet" rather than missing.
 		optionDisabled: { opacity: 0.45 },
-		label: { fontFamily: "Geist_500Medium", flex: 1, color: t.textPrimary, fontSize: type.subheadline.fontSize, fontWeight: "500" },
-		status: { fontFamily: "Geist_600SemiBold", color: t.textTertiary, fontSize: type.caption2.fontSize, fontWeight: "600" },
-		empty: { fontFamily: "Geist_400Regular",
+		label: { flex: 1, color: t.textPrimary, fontSize: 15, fontWeight: "500" },
+		status: { color: t.textTertiary, fontSize: 11, fontWeight: "600" },
+		empty: {
 			color: t.textTertiary,
-			fontSize: type.footnote.fontSize,
-			lineHeight: type.footnote.lineHeight,
-			paddingVertical: space.md,
+			fontSize: 13,
+			lineHeight: 19,
+			paddingVertical: 14,
 		},
-		error: { fontFamily: "Geist_400Regular", color: t.red, fontSize: type.footnote.fontSize, lineHeight: type.footnote.lineHeight, marginTop: space.sm },
+		error: { color: t.red, fontSize: 13, lineHeight: 18, marginTop: 10 },
 	});

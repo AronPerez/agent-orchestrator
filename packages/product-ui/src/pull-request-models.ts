@@ -54,7 +54,6 @@ export type PRCardPresentation = {
 export type PRSummaryMetadata = {
 	provider: string;
 	author?: string;
-	authorAvatarUrl?: string;
 	sourceBranch?: string;
 	targetBranch?: string;
 	changedFiles: number;

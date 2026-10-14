@@ -19,6 +19,8 @@ test("renderer: notification center shows the correct unread count @T0 @NTF", as
 	await page.route(/\/api\/v1\/notifications\?/, (route) =>
 		route.fulfill({
 			json: {
+				unreadCount: 2,
+				unresolvedCount: 2,
 				notifications: [
 					{
 						id: "n1",
@@ -47,7 +49,7 @@ test("renderer: notification center shows the correct unread count @T0 @NTF", as
 		}),
 	);
 
-	await page.goto("/#/projects/ao-demo");
+	await page.goto("/#/host/local/project/ao-demo");
 	// The global board on Linux renders the bell in its subhead actions.
 	const bell = page.getByRole("button", { name: "2 unread notifications" });
 	await expect(bell).toBeVisible();

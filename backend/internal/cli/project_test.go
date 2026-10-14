@@ -5,9 +5,47 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestBuildProjectConfig_OrchestratorPrompt(t *testing.T) {
+	cfg, err := buildProjectConfig(projectSetConfigOptions{}, "## role\nhi")
+	if err != nil {
+		t.Fatalf("buildProjectConfig: %v", err)
+	}
+	if cfg.OrchestratorPrompt != "## role\nhi" {
+		t.Fatalf("OrchestratorPrompt = %q", cfg.OrchestratorPrompt)
+	}
+}
+
+func TestBuildProjectConfig_PromptWithConfigJSONConflicts(t *testing.T) {
+	if _, err := buildProjectConfig(projectSetConfigOptions{configJSON: `{"defaultBranch":"x"}`}, "p"); err == nil {
+		t.Fatal("expected error combining prompt with --config-json")
+	}
+}
+
+func TestReadOrchestratorPrompt(t *testing.T) {
+	if got, err := readOrchestratorPrompt(strings.NewReader(""), ""); err != nil || got != "" {
+		t.Fatalf("empty path: got %q err %v", got, err)
+	}
+	if got, err := readOrchestratorPrompt(strings.NewReader("from stdin"), "-"); err != nil || got != "from stdin" {
+		t.Fatalf("stdin: got %q err %v", got, err)
+	}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "prompt.md")
+	if err := os.WriteFile(p, []byte("from file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := readOrchestratorPrompt(strings.NewReader(""), p); err != nil || got != "from file" {
+		t.Fatalf("file: got %q err %v", got, err)
+	}
+	if _, err := readOrchestratorPrompt(strings.NewReader(""), filepath.Join(dir, "nope.md")); err == nil {
+		t.Fatal("missing file should error")
+	}
+}
 
 type projectCapture struct {
 	method string
@@ -90,7 +128,7 @@ func TestBuildProjectConfigTrackerIntakeFlags(t *testing.T) {
 		trackerIntake:   true,
 		trackerRepo:     "acme/demo",
 		trackerAssignee: "alice",
-	})
+	}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -449,5 +487,149 @@ func TestProjectRemove_YesSkipsConfirmationAndSupportsBackendRemoveEnvelope(t *t
 	}
 	if strings.Contains(out, "Type the project id") || !strings.Contains(out, "removed project demo") {
 		t.Fatalf("--yes output should skip prompt and print removal:\n%s", out)
+	}
+}
+
+// The daemon has always returned `path` in the projects list; the CLI's own
+// summary struct dropped it on decode, so neither the table nor --json could
+// answer "where does this project actually live" — which is the whole question
+// when the answering daemon is on another machine.
+func TestProjectList_SurfacesPath(t *testing.T) {
+	cfg := setConfigEnv(t)
+	srv, _ := projectServer(t, http.StatusOK,
+		`{"projects":[{"id":"zeta","name":"Zeta","sessionPrefix":"zeta","path":"/srv/repos/zeta"}]}`)
+	writeRunFileFor(t, cfg, srv)
+
+	out, errOut, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }}, "project", "ls")
+	if err != nil {
+		t.Fatalf("unexpected error: %v\nstderr=%s", err, errOut)
+	}
+	if !strings.Contains(out, "PATH") {
+		t.Fatalf("table missing PATH column:\n%s", out)
+	}
+	if !strings.Contains(out, "/srv/repos/zeta") {
+		t.Fatalf("table missing the project path:\n%s", out)
+	}
+
+	// --json must carry it too: a remote-aware UI reads that, not the table.
+	out, errOut, err = executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }}, "project", "ls", "--json")
+	if err != nil {
+		t.Fatalf("unexpected error: %v\nstderr=%s", err, errOut)
+	}
+	if !strings.Contains(out, `"path": "/srv/repos/zeta"`) && !strings.Contains(out, `"path":"/srv/repos/zeta"`) {
+		t.Fatalf("--json dropped the path:\n%s", out)
+	}
+}
+
+// --- item 8: destructive verbs must name the daemon they act on -------------
+//
+// `project rm` is correct about WHICH daemon it removes from; the defect is
+// that neither the prompt nor the success line said so. A project id is not
+// host-qualified — the same id can exist on two daemons — so echoing it back
+// carries no information about the machine that is about to lose it.
+//
+// Local output must stay byte-identical, so the local case asserts an exact
+// literal. Path-free by design so it asserts identically on every runner OS.
+func TestProjectRemoveNamesTheDaemon(t *testing.T) {
+	removeServer := func(t *testing.T) (*httptest.Server, *[]string) {
+		t.Helper()
+		var requests []string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests = append(requests, r.Method+" "+r.URL.Path)
+			if r.Method != http.MethodDelete || r.URL.Path != "/api/v1/projects/demo" {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"ok":true,"projectId":"demo"}`)
+		}))
+		t.Cleanup(srv.Close)
+		return srv, &requests
+	}
+
+	t.Run("remote names the daemon in the prompt and the success line", func(t *testing.T) {
+		srv, _ := removeServer(t)
+		aoHome(t)
+		setConfigEnv(t)
+		t.Setenv("AO_TOKEN", "tok")
+
+		out, _, err := executeCLI(t, Deps{
+			In:           strings.NewReader("demo\n"),
+			ProcessAlive: func(int) bool { t.Error("ProcessAlive consulted for a remote target"); return false },
+		}, "project", "rm", "demo", "--url", srv.URL)
+		if err != nil {
+			t.Fatalf("project rm --url: %v", err)
+		}
+		want := `Remove project "demo" on the remote daemon at ` + srv.URL +
+			"? Type the project id to confirm: " +
+			"removed project demo on the remote daemon at " + srv.URL + "\n"
+		if out != want {
+			t.Fatalf("remote rm output = %q, want %q", out, want)
+		}
+	})
+
+	t.Run("local output is byte-identical", func(t *testing.T) {
+		cfg := setConfigEnv(t)
+		srv, _ := removeServer(t)
+		writeRunFileFor(t, cfg, srv)
+
+		out, _, err := executeCLI(t, Deps{
+			In:           strings.NewReader("demo\n"),
+			ProcessAlive: func(int) bool { return true },
+		}, "project", "rm", "demo")
+		if err != nil {
+			t.Fatalf("project rm: %v", err)
+		}
+		want := "Remove project \"demo\"? Type the project id to confirm: removed project demo\n"
+		if out != want {
+			t.Fatalf("local rm output = %q, want %q (local output must not change)", out, want)
+		}
+	})
+
+	// The prompt must still gate: a mistyped id aborts, and the DELETE is never
+	// sent. It would be an ugly irony to break a destructive-action confirmation
+	// while making it clearer.
+	t.Run("a mismatched id still aborts and sends nothing", func(t *testing.T) {
+		srv, requests := removeServer(t)
+		aoHome(t)
+		setConfigEnv(t)
+		t.Setenv("AO_TOKEN", "tok")
+
+		out, _, err := executeCLI(t, Deps{In: strings.NewReader("nope\n")},
+			"project", "rm", "demo", "--url", srv.URL)
+		if err != nil {
+			t.Fatalf("project rm --url with a mismatched id: %v", err)
+		}
+		if !strings.HasSuffix(out, "aborted\n") {
+			t.Fatalf("output = %q, want it to end with \"aborted\"", out)
+		}
+		for _, req := range *requests {
+			if strings.HasPrefix(req, http.MethodDelete+" ") {
+				t.Errorf("request %q reached the daemon after a declined confirmation", req)
+			}
+		}
+	})
+}
+
+// The CLI mirrors the daemon's config DTO by hand, so a field missing from the
+// mirror is dropped silently — the caller sees "updated config" for a setting
+// that never left the process.
+func TestProjectSetConfig_SessionInterfaceJSONReachesTheDaemon(t *testing.T) {
+	cfg := setConfigEnv(t)
+	srv, capture := projectServer(t, http.StatusOK, `{"project":{"id":"demo","path":"/repo/demo"}}`)
+	writeRunFileFor(t, cfg, srv)
+
+	_, errOut, err := executeCLI(t, Deps{
+		ProcessAlive: func(int) bool { return true },
+	}, "project", "set-config", "demo", "--config-json", `{"sessionInterface":"chat"}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v\nstderr=%s", err, errOut)
+	}
+	var got setConfigRequest
+	if err := json.Unmarshal(capture.body, &got); err != nil {
+		t.Fatalf("decode request: %v\nbody=%s", err, capture.body)
+	}
+	if got.Config.SessionInterface != "chat" {
+		t.Fatalf("sessionInterface = %q, want %q", got.Config.SessionInterface, "chat")
 	}
 }

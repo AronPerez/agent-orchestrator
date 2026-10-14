@@ -303,7 +303,7 @@ func TestDeleteDevice(t *testing.T) {
 // lan_listener_test.go covers that end-to-end.
 func TestRosterRoutesBlockedOnLANListener(t *testing.T) {
 	for _, path := range []string{"/api/v1/mobile/devices", "/api/v1/mobile/devices/i1"} {
-		if !httpd.IsLANControlBlockedPathForTest(path) {
+		if !httpd.IsLANControlBlockedPath(path) {
 			t.Fatalf("%s must be blocked on the LAN listener — a phone must not read or change the roster", path)
 		}
 	}
@@ -328,7 +328,7 @@ func TestRosterMountedRoutesAreLANBlocked(t *testing.T) {
 		}
 		checked++
 		concrete := strings.ReplaceAll(route, "{installId}", "i1")
-		if !httpd.IsLANControlBlockedPathForTest(concrete) {
+		if !httpd.IsLANControlBlockedPath(concrete) {
 			t.Errorf("%s %s is mounted but not blocked on the LAN listener", method, concrete)
 		}
 		return nil

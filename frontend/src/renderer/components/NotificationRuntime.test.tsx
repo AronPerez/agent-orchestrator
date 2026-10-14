@@ -7,6 +7,7 @@ import { NotificationRuntime } from "./NotificationCenter";
 const notifications: NotificationDTO[] = [
 	{
 		id: "ntf_1",
+		host: "local",
 		sessionId: "sess-1",
 		projectId: "proj-1",
 		prUrl: "",
@@ -19,6 +20,7 @@ const notifications: NotificationDTO[] = [
 	},
 	{
 		id: "ntf_2",
+		host: "local",
 		sessionId: "sess-2",
 		projectId: "proj-1",
 		prUrl: "",

@@ -407,15 +407,27 @@ type SessionModeDefaults interface {
 // resolveSessionMode applies the precedence for a spawn:
 //
 //  1. the mode the caller explicitly requested;
-//  2. the daemon-owned default;
-//  3. the compatibility default, TUI.
+//  2. the project's pinned interface;
+//  3. the daemon-owned default;
+//  4. the compatibility default, TUI.
 //
-// The default is read here, at spawn time, so changing the preference affects only
-// sessions created afterwards. An existing session changes only through an explicit,
-// capability-gated interface transition; it is never re-resolved from the default.
-func (m *Manager) resolveSessionMode(ctx context.Context, requested domain.SessionMode) domain.SessionMode {
+// Both configured tiers are read here, at spawn time, so changing either affects
+// only sessions created afterwards. An existing session changes only through an
+// explicit, capability-gated interface transition; it is never re-resolved.
+//
+// A project value outside this build's vocabulary is skipped rather than
+// normalized: the row may have been written by a newer daemon, and collapsing it
+// to TUI would override a daemon default of Chat with a mode nobody chose.
+func (m *Manager) resolveSessionMode(
+	ctx context.Context,
+	requested domain.SessionMode,
+	project domain.ProjectConfig,
+) domain.SessionMode {
 	if requested.Valid() {
 		return requested
+	}
+	if project.SessionInterface.Valid() {
+		return project.SessionInterface
 	}
 	if m.defaults == nil {
 		return domain.DefaultSessionMode
@@ -453,7 +465,7 @@ func (m *Manager) resumeChatController(
 
 	// Recomputed rather than persisted, matching the terminal path: a restored
 	// session keeps its standing instructions across the relaunch.
-	systemPrompt, err := m.buildSystemPrompt(ctx, rec.Kind, rec.ProjectID, rec.ID, true)
+	systemPrompt, err := m.buildSystemPrompt(ctx, rec.Kind, rec.ProjectID, rec.ID, rec.RequestedOutput, true)
 	if err != nil {
 		return RestoreResult{}, fmt.Errorf("%s %s: system prompt: %w", operation, rec.ID, err)
 	}

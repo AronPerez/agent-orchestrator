@@ -1,4 +1,3 @@
-import { AppLink } from "./AppLink";
 import type { ExternalLinkProps } from "@aoagents/product-ui";
 
 export function ProductExternalLink({
@@ -8,7 +7,7 @@ export function ProductExternalLink({
 	...props
 }: ExternalLinkProps) {
 	return (
-		<AppLink
+		<a
 			{...props}
 			aria-label={ariaLabel}
 			onClick={stopPropagation ? (event) => event.stopPropagation() : undefined}
@@ -17,6 +16,6 @@ export function ProductExternalLink({
 			target="_blank"
 		>
 			{children}
-		</AppLink>
+		</a>
 	);
 }

@@ -4,23 +4,11 @@ import type { MenuItemConstructorOptions } from "electron";
 // to a BrowserWindow. AO uses BaseWindow with WebContentsView children, so the
 // role can receive no focused window and crash the main process. Keep Electron's
 // complete standard menus through their top-level roles, but replace View so
-// DevTools routes through AO's guarded handler. Similarly, Electron's default
-// fileMenu role binds Cmd+W to "Close Window", which kills the entire application
-// window whenever a tab or terminal close races the native menu. Multi-tab
-// macOS applications (Safari, Chrome, VS Code) bind Shift+Command+W to "Close Window"
-// so Command+W remains scoped to tabs and terminals.
+// DevTools routes through AO's guarded handler.
 export function buildMacAppMenuTemplate(onToggleDevTools: () => void): MenuItemConstructorOptions[] {
 	return [
 		{ role: "appMenu" },
-		{
-			role: "fileMenu",
-			submenu: [
-				{
-					role: "close",
-					accelerator: "Shift+Command+W",
-				},
-			],
-		},
+		{ role: "fileMenu" },
 		{ role: "editMenu" },
 		{
 			label: "View",
@@ -84,8 +72,4 @@ export function buildWindowsAppMenuTemplate(onToggleDevTools?: () => void): Menu
 			submenu: [{ role: "minimize" }, { role: "close" }],
 		},
 	];
-}
-
-export function buildLinuxAppMenuTemplate(onToggleDevTools?: () => void): MenuItemConstructorOptions[] {
-	return buildWindowsAppMenuTemplate(onToggleDevTools);
 }

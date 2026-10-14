@@ -19,10 +19,6 @@ func TestAutomationListFollowsAllPages(t *testing.T) {
 				cfg := setConfigEnv(t)
 				requests := 0
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if r.URL.Path == "/internal/telemetry/cli-invoked" {
-						w.WriteHeader(http.StatusNoContent)
-						return
-					}
 					requests++
 					query := r.URL.Query()
 					if r.Method != http.MethodGet || r.URL.Path != "/api/v1/automations" || query.Get("limit") != "100" || query.Get("projectId") != "project & one" || query.Get("enabled") != enabled || query.Has("enabled") != (enabled != "") {
@@ -112,10 +108,6 @@ func TestAutomationListPaginationFailures(t *testing.T) {
 				cfg := setConfigEnv(t)
 				requests := 0
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if r.URL.Path == "/internal/telemetry/cli-invoked" {
-						w.WriteHeader(http.StatusNoContent)
-						return
-					}
 					requests++
 					if requests > len(tc.pages) {
 						t.Error("unexpected extra request")

@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AgentSwitchSummary } from "../types/workspace";
 import {
-	agentSwitchVisibilityPresentationKind,
 	deriveAgentSwitchPresentation,
 	type AgentSwitchPresentation,
 	type AgentSwitchPresentationInput,
@@ -258,14 +257,5 @@ describe("deriveAgentSwitchPresentation", () => {
 			descriptionKey: "switchAgent.checkingStatus",
 			titleKey: "switchAgent.checkingStatus",
 		});
-	});
-});
-
-describe("agent switch visibility presentation classification", () => {
-	it("classifies only required failure and recovery UI", () => {
-		expect(agentSwitchVisibilityPresentationKind({ outcome: "failure" } as AgentSwitchPresentation)).toBe("terminal_failure");
-		expect(agentSwitchVisibilityPresentationKind({ outcome: "recovery" } as AgentSwitchPresentation)).toBe("recovery_required");
-		expect(agentSwitchVisibilityPresentationKind({ outcome: "in_progress" } as AgentSwitchPresentation)).toBeUndefined();
-		expect(agentSwitchVisibilityPresentationKind({ outcome: "success" } as AgentSwitchPresentation)).toBeUndefined();
 	});
 });

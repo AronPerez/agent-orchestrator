@@ -1,5 +1,4 @@
 import { render, screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { ContextMeter } from "./ContextMeter";
 import type { ConversationRateLimits, ConversationUsage } from "../../types/conversation";
@@ -32,79 +31,68 @@ function limits(over: Partial<ConversationRateLimits> = {}): ConversationRateLim
 	};
 }
 
-/** The circular fill inside the gauge. */
-function fill(): SVGCircleElement {
-	const inner = screen.getByRole("progressbar").querySelector("circle:last-child");
+/** The fill element inside the track, whose width and colour are the encoding. */
+function fill(): HTMLElement {
+	const inner = screen.getByRole("progressbar").firstElementChild?.firstElementChild;
 	if (!inner) throw new Error("meter has no fill element");
-	return inner as SVGCircleElement;
+	return inner as HTMLElement;
 }
 
 describe("ContextMeter", () => {
-	it("reports exact accessible values with compact numbers on hover", async () => {
-		render(<ContextMeter usage={usage({ cost: 0.4594, currency: "USD" })} />);
+	it("reports fullness as a fraction of the window, not a bare token count", () => {
+		render(<ContextMeter usage={usage()} />);
+		// 18055/258400 is 7%. The old header showed "18,055 tokens", which cannot
+		// tell a user whether the conversation is nearly done.
 		expect(screen.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "7");
-		expect(screen.getByRole("progressbar")).toHaveAttribute("aria-valuetext", "18,055 / 258,400 tokens (7%)");
-		await userEvent.hover(screen.getByRole("progressbar"));
-		const tooltip = await screen.findByRole("tooltip");
-		expect(tooltip).toHaveTextContent("18.1K / 258.4K tokens (7%)");
-		expect(tooltip).not.toHaveTextContent("tokens spent in total");
-		expect(tooltip).not.toHaveTextContent("Provider-reported cost");
+		expect(screen.getByText("7%")).toBeInTheDocument();
+		expect(screen.queryByText(/18,055 tokens/)).not.toBeInTheDocument();
 	});
 
-	it("encodes fullness in the circular stroke", () => {
+	it("encodes fullness in the fill width as well as the number", () => {
 		render(<ContextMeter usage={usage({ contextUsed: 129200 })} />);
-		expect(fill()).toHaveAttribute("stroke-dasharray", "50 100");
+		expect(fill().style.width).toBe("50%");
 	});
 
-	it("keeps a nearly-empty conversation's fill visible", () => {
+	it("keeps a nearly-empty conversation's fill visible rather than zero-width", () => {
 		render(<ContextMeter usage={usage({ contextUsed: 100 })} />);
-		expect(fill()).toHaveAttribute("stroke-dasharray", "8 100");
+		// A hairline still reads as "a meter that is nearly empty"; a zero-width fill
+		// reads as a broken component.
+		expect(fill().style.width).toBe("2%");
 	});
 
 	describe("threshold colours", () => {
 		it("uses the AO logo accent below 70%", () => {
 			render(<ContextMeter usage={usage({ contextUsed: 172_000 })} />);
-			expect(screen.getByRole("progressbar")).toHaveClass("text-logo-accent");
+			expect(fill().className).toContain("bg-logo-accent");
 		});
 
 		it("shifts to the needs-you token from 70%", () => {
 			// Exactly at the boundary, which must warn rather than stay normal.
 			render(<ContextMeter usage={usage({ contextUsed: 180_880 })} />);
-			expect(screen.getByRole("progressbar")).toHaveClass("text-status-needs-you");
+			expect(fill().className).toContain("bg-status-needs-you");
+			expect(screen.getByText("70%").className).toContain("text-status-needs-you");
 		});
 
 		it("shifts to the exited token from 90%, where the next turn is at risk", () => {
 			render(<ContextMeter usage={usage({ contextUsed: 232_560 })} />);
-			expect(screen.getByRole("progressbar")).toHaveClass("text-status-exited");
+			expect(fill().className).toContain("bg-status-exited");
+			expect(screen.getByText("90%").className).toContain("text-status-exited");
 		});
 	});
 
 	it("clamps a provider that overreports past its own window", () => {
 		render(<ContextMeter usage={usage({ contextUsed: 300_000 })} />);
 		// Full, not overflowing the track and not claiming 116%.
-		expect(fill()).toHaveAttribute("stroke-dasharray", "100 100");
+		expect(fill().style.width).toBe("100%");
 		expect(screen.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "100");
 	});
 
-	it("shows known context without claiming a window the provider did not report", async () => {
-		render(<ContextMeter usage={usage({ contextWindow: 0, contextUsed: 18_055 })} />);
+	it("shows tokens without a meter when the provider states no context window", () => {
+		render(<ContextMeter usage={usage({ contextWindow: 0, contextUsed: 900 })} />);
 		// No window means no honest fullness. Drawing an empty bar would claim a
 		// conversation is roomy when it might be nearly full.
 		expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
-		const readout = screen.getByRole("img", { name: "Context 18,055 / unknown" });
-		await userEvent.hover(readout);
-		expect(await screen.findByRole("tooltip")).toHaveTextContent("Context 18.1K / unknown");
-	});
-
-	it("does not present cumulative spending as current context", () => {
-		const { container } = render(<ContextMeter usage={usage({ contextWindow: 0, contextUsed: 0, totalTokens: 900 })} />);
-		expect(container).toBeEmptyDOMElement();
-	});
-
-	it("does not claim a failed turn with zero reported used is 0% full", () => {
-		render(<ContextMeter usage={usage({ contextUsed: 0, contextWindow: 262_144 })} />);
-		expect(screen.getByRole("img", { name: "Context unknown / 262,144" })).toBeInTheDocument();
-		expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+		expect(screen.getByText("900 tokens")).toBeInTheDocument();
 	});
 
 	it("renders nothing before the provider has reported anything", () => {

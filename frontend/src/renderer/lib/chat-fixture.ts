@@ -651,7 +651,8 @@ export const chatFixtureReasoningEmpty: ConversationSnapshot = {
  * A tool server that failed to start, which the timeline cannot show.
  *
  * The agent will not mention the tools it does not have: it simply works around
- * them, so the user sees a worse answer with no cause.
+ * them, so the user sees a worse answer with no cause. The reload control is offered
+ * here because this is exactly the state it exists for.
  */
 export const chatFixtureMcpFailed: ConversationSnapshot = {
 	...chatFixture,

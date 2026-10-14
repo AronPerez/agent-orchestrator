@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ServerConfig } from "../config";
 import type { ConversationActivity, ConversationSnapshot } from "../chat/types";
-import { actionContext, createWatchActionHandler } from "./actions";
+import { actionContext, createWatchActionHandler, watchConfigForHost } from "./actions";
 
 const cfg = { hostId: "alpha", password: "SYNTHETIC_ONLY" } as ServerConfig;
 const approval = (over: Partial<ConversationActivity> = {}): ConversationActivity => ({
@@ -146,5 +146,19 @@ describe("Watch action dispatcher", () => {
 		expect(await run(inspect)).toMatchObject({ status: "open_phone" });
 		deps.configForHost.mockReturnValue({ ...cfg, hostId: "beta" });
 		expect(await run(inspect)).toMatchObject({ status: "open_phone" });
+	});
+});
+
+describe("Watch active-host binding", () => {
+	const connected = { config: cfg, connection: "open", error: null, poll: { config: cfg, sessions: [], capturedAt: 1000 } };
+	it("returns the original active config, never another paired host", () => {
+		expect(watchConfigForHost(connected, "alpha")).toBe(cfg);
+		expect(watchConfigForHost(connected, "beta")).toBeNull();
+	});
+	it("fails closed during host switches, credential rotation, disconnects and missing polls", () => {
+		for (const over of [
+			{ config: null }, { config: { ...cfg, hostId: "beta" } }, { config: { ...cfg, password: "ROTATED" } },
+			{ connection: "closed" }, { error: "unauthorized" }, { poll: null },
+		]) expect(watchConfigForHost({ ...connected, ...over }, "alpha")).toBeNull();
 	});
 });

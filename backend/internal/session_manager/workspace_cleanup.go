@@ -176,13 +176,22 @@ func (m *Manager) recordWorkspaceCleanup(ctx context.Context, rec domain.Session
 	return m.store.UpsertSessionCleanupFacts(ctx, facts)
 }
 
-func (m *Manager) recordWorkspaceCleanupResult(ctx context.Context, rec domain.SessionRecord, reason string) error {
-	disposition, code := domain.DispositionRemoved, ""
+// Completion does not count a retryable pending outcome as another attempt.
+func (m *Manager) recordWorkspaceCleanupResult(ctx context.Context, rec domain.SessionRecord, disposition domain.WorkspaceDisposition, reason string) error {
+	code := ""
 	if reason != "" {
-		disposition, code = domain.DispositionFailed, "WORKSPACE_CLEANUP_FAILED"
-		if reason == "workspace has uncommitted changes" {
-			disposition, code = domain.DispositionPreservedDirty, "WORKSPACE_DIRTY"
+		code = "WORKSPACE_CLEANUP_FAILED"
+		if disposition == domain.DispositionPreservedDirty {
+			code = "WORKSPACE_DIRTY"
 		}
 	}
-	return m.recordWorkspaceCleanup(ctx, rec, disposition, code)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), terminalIntentBudget)
+	defer cancel()
+	facts, _, err := m.store.GetSessionCleanupFacts(ctx, rec.ID)
+	if err != nil {
+		return err
+	}
+	facts.WorkspaceDisposition, facts.FailureCode = disposition, code
+	facts.NextAttemptAt = time.Time{}
+	return m.store.UpsertSessionCleanupFacts(ctx, facts)
 }

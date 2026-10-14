@@ -8,10 +8,10 @@ export type ConversationEvent = {
 };
 
 export type ConversationEventRegistry = {
-	subscribe(hostId: string, sessionId: string, listener: (event: ConversationEvent) => void): () => void;
-	publish(hostId: string, event: ConversationEvent): void;
+	subscribe(sessionId: string, listener: (event: ConversationEvent) => void): () => void;
+	publish(event: ConversationEvent): void;
 	/** Whether any session has a listener, i.e. whether payloads are worth parsing. */
-	hasListeners(hostId: string): boolean;
+	hasListeners(): boolean;
 };
 
 /**
@@ -30,32 +30,29 @@ export const LISTENER_GRACE_MS = 30_000;
 export function createConversationEventRegistry(
 	now: () => number = Date.now,
 ): ConversationEventRegistry {
-	const listeners = new Map<string, Map<string, Set<(event: ConversationEvent) => void>>>();
+	const listeners = new Map<string, Set<(event: ConversationEvent) => void>>();
 	// 0 means nothing has ever subscribed, so a cold start still skips.
-	const lastListenerAt = new Map<string, number>();
+	let lastListenerAt = 0;
 	return {
-		subscribe(hostId, sessionId, listener) {
-			const hostListeners = listeners.get(hostId) ?? new Map();
-			const sessionListeners = hostListeners.get(sessionId) ?? new Set();
+		subscribe(sessionId, listener) {
+			const sessionListeners = listeners.get(sessionId) ?? new Set();
 			sessionListeners.add(listener);
-			hostListeners.set(sessionId, sessionListeners);
-			listeners.set(hostId, hostListeners);
-			lastListenerAt.set(hostId, now());
+			listeners.set(sessionId, sessionListeners);
+			lastListenerAt = now();
 			return () => {
 				sessionListeners.delete(listener);
-				if (sessionListeners.size === 0) hostListeners.delete(sessionId);
-				if (hostListeners.size === 0) listeners.delete(hostId);
-				lastListenerAt.set(hostId, now());
+				if (sessionListeners.size === 0) listeners.delete(sessionId);
+				lastListenerAt = now();
 			};
 		},
-		hasListeners(hostId) {
-			if (listeners.has(hostId)) return true;
-			const last = lastListenerAt.get(hostId) ?? 0;
-			return last !== 0 && now() - last < LISTENER_GRACE_MS;
+		hasListeners() {
+			if (listeners.size > 0) return true;
+			if (lastListenerAt === 0) return false;
+			return now() - lastListenerAt < LISTENER_GRACE_MS;
 		},
-		publish(hostId, event) {
+		publish(event) {
 			if (!event.sessionId) return;
-			for (const listener of listeners.get(hostId)?.get(event.sessionId) ?? []) listener(event);
+			for (const listener of listeners.get(event.sessionId) ?? []) listener(event);
 		},
 	};
 }

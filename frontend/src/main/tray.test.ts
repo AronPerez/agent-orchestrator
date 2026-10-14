@@ -54,26 +54,27 @@ vi.mock("node:fs", async (importOriginal) => {
 import { createTrayController } from "./tray";
 
 function entry(overrides: Partial<TraySessionEntry> & { sessionId: string }): TraySessionEntry {
-	return { projectId: "proj-1", projectName: "note-tauri", title: overrides.sessionId, zone: "action", ...overrides };
+	return {
+		host: "local",
+		projectId: "proj-1",
+		projectName: "note-tauri",
+		title: overrides.sessionId,
+		zone: "action",
+		...overrides,
+	};
 }
 
 function setup() {
 	const openSession = vi.fn();
 	const focusWindow = vi.fn();
-	const quitCompletely = vi.fn();
-	const controller = createTrayController({ focusWindow, openSession, quitCompletely, locale: "en" });
+	const controller = createTrayController({ focusWindow, openSession, locale: "en" });
 	if (!controller) throw new Error("expected a tray controller");
 	const tray = trayInstances[trayInstances.length - 1];
-	return { controller, tray, openSession, focusWindow, quitCompletely };
+	return { controller, tray, openSession, focusWindow };
 }
 
 const sessionItems = (tray: { template: MenuItem[] }) =>
-	tray.template.filter(
-		(item) =>
-			typeof item.click === "function" &&
-			item.label !== "Show Agent Orchestrator" &&
-			item.label !== "Quit AO Completely",
-	);
+	tray.template.filter((item) => typeof item.click === "function" && item.label !== "Show Agent Orchestrator");
 
 afterEach(() => {
 	trayInstances.length = 0;
@@ -85,21 +86,7 @@ describe("createTrayController", () => {
 		const { tray } = setup();
 		expect(tray.title).toBe("");
 		expect(tray.template.some((i) => i.label === "No sessions need attention" && i.enabled === false)).toBe(true);
-		expect(tray.template.some((i) => i.label === "Quit AO Completely")).toBe(true);
-	});
-
-	it("hands the explicit quit action to the quitCompletely delegate", () => {
-		const { tray, quitCompletely } = setup();
-		const quit = tray.template.find((item) => item.label === "Quit AO Completely");
-		expect(quit?.role).toBeUndefined();
-		quit?.click?.();
-		expect(quitCompletely).toHaveBeenCalledTimes(1);
-	});
-
-	it("hands the show action to the focusWindow delegate", () => {
-		const { tray, focusWindow } = setup();
-		tray.template.find((item) => item.label === "Show Agent Orchestrator")?.click?.();
-		expect(focusWindow).toHaveBeenCalledTimes(1);
+		expect(tray.template.some((i) => i.role === "quit")).toBe(true);
 	});
 
 	it("uses grammatically correct singular for exactly one attention session", () => {
@@ -129,7 +116,7 @@ describe("createTrayController", () => {
 		const { controller, tray, openSession } = setup();
 		controller.setState({ sessions: [entry({ sessionId: "s1", title: "one" })] });
 		sessionItems(tray)[0].click?.();
-		expect(openSession).toHaveBeenCalledWith({ projectId: "proj-1", sessionId: "s1" });
+		expect(openSession).toHaveBeenCalledWith({ host: "local", sessionId: "s1" });
 	});
 
 	it("marks the icon as a macOS template so the menu bar can tint it", () => {
@@ -170,6 +157,5 @@ describe("createTrayController", () => {
 		expect(tray.tooltip).toBe("1 个会话需要关注");
 		expect(tray.template.some((i) => i.label === "需要你处理")).toBe(true);
 		expect(tray.template.some((i) => i.label === "显示 Agent Orchestrator")).toBe(true);
-		expect(tray.template.some((i) => i.label === "完全退出 AO")).toBe(true);
 	});
 });

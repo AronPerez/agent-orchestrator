@@ -2,10 +2,12 @@ package session
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +34,7 @@ type Store interface {
 	GetSessionByClientRequestID(ctx context.Context, id string) (domain.SessionRecord, bool, error)
 	ListSessions(ctx context.Context, project domain.ProjectID) ([]domain.SessionRecord, error)
 	ListAllSessions(ctx context.Context) ([]domain.SessionRecord, error)
+	ListSessionsPage(ctx context.Context, query ports.SessionPageQuery) ([]domain.SessionRecord, error)
 	GetActiveAgentSwitch(ctx context.Context, sessionID domain.SessionID) (domain.AgentSwitch, bool, error)
 	ListActiveAgentSwitches(ctx context.Context) ([]domain.AgentSwitch, error)
 	RenameSession(ctx context.Context, id domain.SessionID, displayName string, updatedAt time.Time) (bool, error)
@@ -66,6 +69,24 @@ type ListFilter struct {
 	OrchestratorOnly bool
 	Fresh            bool
 }
+
+// ListPageRequest is ListFilter plus the page: PageSize rows, resuming after
+// PageToken when set. Pagination is opt-in; List keeps the return-all contract.
+type ListPageRequest struct {
+	ListFilter
+	PageSize  int
+	PageToken string
+}
+
+// Page is one page of sessions, newest first, and the token for the
+// next page, empty on the last one.
+type Page struct {
+	Sessions      []domain.Session
+	NextPageToken string
+}
+
+// ErrInvalidPageToken reports a page token this daemon did not mint.
+var ErrInvalidPageToken = errors.New("invalid page token")
 
 // commander is the command-side surface Service delegates to: the
 // *sessionmanager.Manager in production, a fake in tests.
@@ -218,12 +239,11 @@ type Service struct {
 	// deliver activity signals at all. Only capable harnesses are eligible for
 	// the no_signal downgrade: a hook-less harness staying silent forever is
 	// normal, not a broken pipeline. nil means "unknown": never downgrade.
-	signalCapable         func(domain.AgentHarness) bool
-	chatProviderPreserved func(domain.SessionID) bool
-	// githubIdentity optionally resolves the operator's authenticated GitHub
-	// account so the handle rides along with product telemetry. Nil disables it
-	// and the emitter degrades to anonymous.
-	githubIdentity         ports.ScopedIdentityResolver
+	signalCapable func(domain.AgentHarness) bool
+	// runtimeUnreachable reports whether AO's last liveness probe could reach a
+	// session's runtime. nil means "unknown": no session is ever flagged.
+	runtimeUnreachable     func(domain.SessionID) bool
+	chatProviderPreserved  func(domain.SessionID) bool
 	titleRefinementSlots   chan struct{}
 	titleRefinementMu      sync.Mutex
 	titleRefinementCancels map[domain.SessionID]context.CancelFunc
@@ -234,6 +254,9 @@ type Service struct {
 	// service tests that construct Service directly; ClaimPR degrades to
 	// relying on the poller in that case.
 	outputTypeReconciler outputTypeReconciler
+	// artifactDeleter deletes a session's artifact files and version rows. Nil
+	// makes DeleteArtifacts fail rather than delete outside the capture lock.
+	artifactDeleter artifactDeleter
 }
 
 // SetChatProviderPreserver wires the live Chat lifetime observation after both
@@ -270,14 +293,18 @@ type Deps struct {
 	// wiring passes activitydispatch.SupportsHarness. Left nil, no session is
 	// ever downgraded to no_signal.
 	SignalCapable func(domain.AgentHarness) bool
-	// GithubIdentity resolves the operator's authenticated GitHub account so the
-	// handle rides along with product telemetry.
-	GithubIdentity ports.ScopedIdentityResolver
+	// RuntimeUnreachable surfaces the lifecycle reducer's last runtime
+	// reachability observation on the read model; daemon wiring passes
+	// lifecycle.Manager.RuntimeUnreachable. Left nil, no session is flagged.
+	RuntimeUnreachable func(domain.SessionID) bool
 	// OutputTypeReconciler persists the durable OutputType column; daemon
 	// wiring passes the shared *lifecycle.Manager. Left nil, ClaimPR still
 	// succeeds but the pr OutputType only lands on the next artifact-output
 	// poll tick.
 	OutputTypeReconciler outputTypeReconciler
+	// ArtifactDeleter deletes a session's artifacts; daemon wiring passes the
+	// shared *artifactversions.Capturer so a delete cannot race a capture.
+	ArtifactDeleter artifactDeleter
 }
 
 // NewWithDeps wires a session service with optional PR-claim dependencies.
@@ -286,7 +313,7 @@ func NewWithDeps(d Deps) *Service {
 	if backgroundContext == nil {
 		backgroundContext = context.Background()
 	}
-	s := &Service{manager: d.Manager, store: d.Store, prClaimer: d.PRClaimer, scm: d.SCM, tracker: d.Tracker, clock: d.Clock, dataDir: d.DataDir, signalCapable: d.SignalCapable, telemetry: d.Telemetry, logger: d.Logger, backgroundContext: backgroundContext, agentReadiness: d.AgentReadiness, githubIdentity: d.GithubIdentity, titleRefinementSlots: make(chan struct{}, delegatedTaskTitleConcurrency), titleRefinementCancels: map[domain.SessionID]context.CancelFunc{}, outputTypeReconciler: d.OutputTypeReconciler}
+	s := &Service{manager: d.Manager, store: d.Store, prClaimer: d.PRClaimer, scm: d.SCM, tracker: d.Tracker, clock: d.Clock, dataDir: d.DataDir, signalCapable: d.SignalCapable, runtimeUnreachable: d.RuntimeUnreachable, telemetry: d.Telemetry, logger: d.Logger, backgroundContext: backgroundContext, agentReadiness: d.AgentReadiness, titleRefinementSlots: make(chan struct{}, delegatedTaskTitleConcurrency), titleRefinementCancels: map[domain.SessionID]context.CancelFunc{}, outputTypeReconciler: d.OutputTypeReconciler, artifactDeleter: d.ArtifactDeleter}
 	if s.prClaimer == nil {
 		if w, ok := d.Store.(ports.PRClaimer); ok {
 			s.prClaimer = w
@@ -464,9 +491,6 @@ func (s *Service) emitSpawned(ctx context.Context, rec domain.SessionRecord, dur
 		"harness":     string(rec.Harness),
 		"duration_ms": durationMs,
 	}
-	if actor, ok := s.githubActor(ctx); ok {
-		payload["github_actor"] = actor
-	}
 	s.telemetry.Emit(context.Background(), ports.TelemetryEvent{
 		Name:       "ao.session.spawned",
 		Source:     "session_service",
@@ -477,22 +501,6 @@ func (s *Service) emitSpawned(ctx context.Context, rec domain.SessionRecord, dur
 		RequestID:  reqid.FromContext(ctx),
 		Payload:    payload,
 	})
-}
-
-// githubActor returns the operator's GitHub login when the authenticated
-// account resolves to a human, and ("", false) for every failure mode (resolver
-// unset, no token, GET /user failure, offline, org or bot account, empty login)
-// so the event stays anonymous. Host is left empty because GitHub identity is
-// not host-scoped.
-func (s *Service) githubActor(ctx context.Context) (string, bool) {
-	if s.githubIdentity == nil {
-		return "", false
-	}
-	identity, err := s.githubIdentity.AuthenticatedIdentityForProvider(ctx, "github", "")
-	if err != nil || !identity.Human || identity.Login == "" {
-		return "", false
-	}
-	return identity.Login, true
 }
 
 func (s *Service) emitFirstSessionSpawned(ctx context.Context, rec domain.SessionRecord, project domain.ProjectRecord) {
@@ -843,6 +851,48 @@ func (s *Service) RequestKill(ctx context.Context, id domain.SessionID) (session
 	return result, toAPIError(err)
 }
 
+// artifactDeleter deletes a session's artifact files and version rows. The
+// production implementation is *artifactversions.Capturer.
+type artifactDeleter interface {
+	DeleteSession(ctx context.Context, id domain.SessionID) error
+}
+
+// DeleteArtifacts deletes a terminated session's artifact files, version
+// history included, and its version rows, then reconciles its OutputType. The
+// directory itself is kept, so a restored session starts with an empty one.
+// Only the user's archive choice calls this; kill, cleanup and the reaper
+// never delete artifacts.
+func (s *Service) DeleteArtifacts(ctx context.Context, id domain.SessionID) error {
+	rec, ok, err := s.store.GetSession(ctx, id)
+	if err != nil {
+		return toAPIError(err)
+	}
+	if !ok {
+		return apierr.NotFound("SESSION_NOT_FOUND", "Unknown session")
+	}
+	if !rec.IsTerminated {
+		return apierr.Conflict("SESSION_NOT_TERMINATED", "Archive the session before deleting its artifacts.", nil)
+	}
+	if s.artifactDeleter == nil {
+		return fmt.Errorf("delete artifacts %s: no artifact deleter", id)
+	}
+	// The deleter only touches <dataDir>/artifacts/<id>. A row whose files live
+	// elsewhere (written under another data dir) is refused rather than
+	// reported deleted while its files stay where the UI reads them.
+	if stored := rec.Metadata.ArtifactDir; stored != "" && filepath.Clean(stored) != sessionartifacts.Dir(s.dataDir, id) {
+		return fmt.Errorf("delete artifacts %s: artifact dir %q is outside the data dir", id, stored)
+	}
+	err = s.artifactDeleter.DeleteSession(ctx, id)
+	// Reconcile even after a failure: the files may already be gone while the
+	// version rows were not dropped, and OutputType must follow what is on disk.
+	if s.outputTypeReconciler != nil {
+		if reconcileErr := s.outputTypeReconciler.ReconcileSessionOutputType(ctx, id); reconcileErr != nil && s.logger != nil {
+			s.logger.Warn("reconcile output type after deleting artifacts", "session", id, "err", reconcileErr)
+		}
+	}
+	return err
+}
+
 // RollbackSpawn deletes a seed-state session row, or falls back to a Kill if
 // the session has spawn output. Used by the CLI to undo a `spawn --claim-pr`
 // when the claim step fails, avoiding the orphan terminated row that a plain
@@ -1081,6 +1131,97 @@ func (s *Service) List(ctx context.Context, filter ListFilter) ([]domain.Session
 	if err != nil {
 		return nil, err
 	}
+	filtered := make([]domain.SessionRecord, 0, len(recs))
+	for _, rec := range recs {
+		if matchesSessionFilter(rec, filter) {
+			filtered = append(filtered, rec)
+		}
+	}
+	return s.enrichRecords(ctx, filtered, recoveryRevision)
+}
+
+// ListPage is List with the page applied in SQL: newest first by
+// (updated_at, id), PageSize rows, and a NextPageToken while more exist. The
+// store is asked for one row past the page so "is there a next page" costs
+// no second query.
+func (s *Service) ListPage(ctx context.Context, req ListPageRequest) (Page, error) {
+	if req.PageSize <= 0 {
+		return Page{}, fmt.Errorf("page size must be positive, got %d", req.PageSize)
+	}
+	query := ports.SessionPageQuery{
+		Project:          req.ProjectID,
+		OrchestratorOnly: req.OrchestratorOnly,
+		Limit:            req.PageSize + 1,
+	}
+	// Same semantics as matchesSessionFilter: Fresh means live, Active flips on
+	// IsTerminated, and asking for terminated-and-fresh is the empty set.
+	if req.Fresh {
+		live := false
+		query.Terminated = &live
+	}
+	if req.Active != nil {
+		terminated := !*req.Active
+		if query.Terminated != nil && *query.Terminated != terminated {
+			return Page{Sessions: []domain.Session{}}, nil
+		}
+		query.Terminated = &terminated
+	}
+	if req.PageToken != "" {
+		cursor, err := DecodePageToken(req.PageToken)
+		if err != nil {
+			return Page{}, err
+		}
+		query.Before = &cursor
+	}
+	recoveryRevision := s.statusRecoveryRevision()
+	recs, err := s.store.ListSessionsPage(ctx, query)
+	if err != nil {
+		return Page{}, fmt.Errorf("list sessions page: %w", err)
+	}
+	var next string
+	if len(recs) > req.PageSize {
+		recs = recs[:req.PageSize]
+		last := recs[len(recs)-1]
+		next = EncodePageToken(ports.SessionPageCursor{UpdatedAt: last.UpdatedAt, ID: last.ID})
+	}
+	sessions, err := s.enrichRecords(ctx, recs, recoveryRevision)
+	if err != nil {
+		return Page{}, err
+	}
+	return Page{Sessions: sessions, NextPageToken: next}, nil
+}
+
+// EncodePageToken makes a page token: the keyset of a page's last row,
+// base64url so it survives a query string. Tokens are opaque to clients and
+// unsigned on purpose — a forged one can only move the window, never widen
+// the filter.
+func EncodePageToken(cursor ports.SessionPageCursor) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(cursor.UpdatedAt.UTC().Format(time.RFC3339Nano) + "\n" + string(cursor.ID)))
+}
+
+// DecodePageToken inverts EncodePageToken; anything else is ErrInvalidPageToken.
+func DecodePageToken(token string) (ports.SessionPageCursor, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil {
+		return ports.SessionPageCursor{}, ErrInvalidPageToken
+	}
+	at, id, ok := strings.Cut(string(raw), "\n")
+	if !ok || id == "" {
+		return ports.SessionPageCursor{}, ErrInvalidPageToken
+	}
+	updatedAt, err := time.Parse(time.RFC3339Nano, at)
+	if err != nil {
+		return ports.SessionPageCursor{}, ErrInvalidPageToken
+	}
+	return ports.SessionPageCursor{UpdatedAt: updatedAt, ID: domain.SessionID(id)}, nil
+}
+
+// enrichRecords turns records into the display read model: active agent
+// switches, PR facts and current-head review runs, each fetched in one batched
+// read for the whole slice.
+// recoveryRevision is read before the records were listed, so a status
+// recovery that lands mid-read marks the page as still checking.
+func (s *Service) enrichRecords(ctx context.Context, recs []domain.SessionRecord, recoveryRevision uint64) ([]domain.Session, error) {
 	activeSwitches, err := s.store.ListActiveAgentSwitches(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list active agent switches: %w", err)
@@ -1089,13 +1230,9 @@ func (s *Service) List(ctx context.Context, filter ListFilter) ([]domain.Session
 	for _, agentSwitch := range activeSwitches {
 		activeBySession[agentSwitch.SessionID] = agentSwitch
 	}
-	filtered := make([]domain.SessionRecord, 0, len(recs))
 	ids := make([]domain.SessionID, 0, len(recs))
 	for _, rec := range recs {
-		if matchesSessionFilter(rec, filter) {
-			filtered = append(filtered, rec)
-			ids = append(ids, rec.ID)
-		}
+		ids = append(ids, rec.ID)
 	}
 	prsBySession, err := s.store.ListPRFactsForSessions(ctx, ids)
 	if err != nil {
@@ -1105,8 +1242,8 @@ func (s *Service) List(ctx context.Context, filter ListFilter) ([]domain.Session
 	if err != nil {
 		return nil, fmt.Errorf("list review runs: %w", err)
 	}
-	out := make([]domain.Session, 0, len(filtered))
-	for _, rec := range filtered {
+	out := make([]domain.Session, 0, len(recs))
+	for _, rec := range recs {
 		sess, err := s.toSessionWithFacts(ctx, rec, prsBySession[rec.ID], runsBySession[rec.ID])
 		if err != nil {
 			return nil, err
@@ -1272,13 +1409,16 @@ func (s *Service) toSessionWithFacts(ctx context.Context, rec domain.SessionReco
 		StatusReadiness:  readiness,
 		ChatProviderPreserved: rec.Mode == domain.SessionModeChat && !rec.IsTerminated &&
 			s.chatProviderPreserved != nil && s.chatProviderPreserved(rec.ID),
-		Status:           deriveStatus(rec, prs, now, s.harnessSignals(rec.Harness)),
-		SCMStatus:        deriveSCMStatus(prs),
-		KanbanColumn:     presentation.Column,
-		DisplayStatus:    presentation.DisplayStatus,
-		TerminalHandleID: rec.Metadata.RuntimeHandleID,
-		ArtifactFiles:    artifactFiles,
-		PRs:              prs,
+		Status:        deriveStatus(rec, prs, now, s.harnessSignals(rec.Harness)),
+		SCMStatus:     deriveSCMStatus(prs),
+		KanbanColumn:  presentation.Column,
+		DisplayStatus: presentation.DisplayStatus,
+		// Terminated sessions are no longer probed, so a leftover flag would
+		// outlive the fact; a terminated session's status is already definitive.
+		RuntimeUnreachable: !rec.IsTerminated && s.runtimeIsUnreachable(rec.ID),
+		TerminalHandleID:   rec.Metadata.RuntimeHandleID,
+		ArtifactFiles:      artifactFiles,
+		PRs:                prs,
 	}, nil
 }
 
@@ -1353,6 +1493,8 @@ func mapSessionError(err error) error {
 		return apierr.Invalid("UNKNOWN_HARNESS", err.Error(), nil)
 	case errors.Is(err, sessionmanager.ErrMissingHarness):
 		return apierr.Invalid("AGENT_REQUIRED", err.Error(), nil)
+	case errors.Is(err, sessionmanager.ErrArtifactOutputUnavailable):
+		return apierr.Invalid("ARTIFACT_OUTPUT_UNAVAILABLE", "Artifact output needs a daemon data directory to hold the session's artifacts", nil)
 	case errors.Is(err, sessionmanager.ErrHarnessInstallActive):
 		return apierr.Conflict("HARNESS_INSTALL_ACTIVE", "The selected harness is currently being installed", nil)
 	case errors.Is(err, sessionmanager.ErrUnsupportedModel):
@@ -1456,6 +1598,12 @@ func mapSessionError(err error) error {
 		return apierr.Invalid("MODEL_CAPABILITIES_UNAVAILABLE", err.Error(), nil)
 	case errors.Is(err, ports.ErrRuntimeWorkspaceCwdMismatch):
 		return apierr.Conflict("WORKSPACE_CWD_MISMATCH", err.Error(), nil)
+	// A runtime AO cannot reach is a knowable state, not an internal fault:
+	// without this the cause ("no server running on ...") existed only in the
+	// daemon log while `ao send` printed INTERNAL_ERROR. err.Error() carries the
+	// adapter's own diagnosis, exactly as WORKSPACE_CWD_MISMATCH does above.
+	case errors.Is(err, ports.ErrRuntimeUnavailable), errors.Is(err, ports.ErrRuntimeProbeInconclusive):
+		return apierr.Conflict("RUNTIME_UNREACHABLE", err.Error(), nil)
 	case errors.Is(err, ports.ErrWorkspaceLocked):
 		return apierr.Conflict("WORKSPACE_LOCKED", err.Error(), nil)
 	case errors.Is(err, sessionmanager.ErrCleanupScript):
@@ -1578,6 +1726,16 @@ func (s *Service) now() time.Time {
 		return time.Now().UTC()
 	}
 	return s.clock().UTC()
+}
+
+// runtimeIsUnreachable tolerates a zero-value Service and a nil predicate the
+// same way harnessSignals does: with no reachability source the service never
+// claims a runtime is unreachable.
+func (s *Service) runtimeIsUnreachable(id domain.SessionID) bool {
+	if s.runtimeUnreachable == nil {
+		return false
+	}
+	return s.runtimeUnreachable(id)
 }
 
 // harnessSignals tolerates a zero-value Service the same way now does. Without

@@ -5,7 +5,7 @@ Orchestrator, Settings — plus a Chat-first spawn flow, a native conversation s
 the existing live terminal, and a preview browser. Chat sessions expose durable history,
 streaming activity, approvals, provider controls, attachments, voice input, and a plain
 worktree-shell escape hatch. It is a **thin client**: it talks to the AO daemon running on your
-computer through the endpoints advertised by the desktop pairing offer. It never runs agents itself.
+computer over your local network (or Tailscale). It never runs agents itself.
 
 > **Development builds only — Expo Go is not supported.** The app depends on native modules,
 > so it must be compiled onto the device (`npx expo run:ios|run:android`). Expo Go can't load
@@ -24,8 +24,8 @@ computer through the endpoints advertised by the desktop pairing offer. It never
 
 ## How the phone reaches your machine
 
-The daemon's primary listener is loopback-only (`127.0.0.1:3001`) and unauthenticated, so a
-phone cannot reach it. To let a phone in, the desktop app opens a **second, opt-in LAN
+The daemon's primary listener is loopback-only (`127.0.0.1:3001`) and unauthenticated — a
+phone can never reach it. To let a phone in, the desktop app opens a **second, opt-in LAN
 listener** (default port **3011**) bound to `0.0.0.0`, protected by a rotating bearer
 password, serving only the app API. It exists only while **Connect Mobile** is switched on
 in the desktop app; switching it off closes the socket.
@@ -38,35 +38,16 @@ phone ──HTTP/WS── 0.0.0.0:3011   (LAN listener, bearer password, opt-in)
 desktop/CLI ───── 127.0.0.1:3001 (loopback, no auth, unchanged)
 ```
 
-LAN transport is **plaintext HTTP by design** and is for trusted home networks. A raw
-Tailscale `100.x` endpoint is plaintext unless its pairing record has `secure: true`; iOS
-blocks cleartext requests to `100.64.0.0/10`, so raw Tailscale is not an iOS path. The
-desktop source contains an automatic secure-pairing attempt, but fresh configurations
-report no secure-pairing availability while the mode is off, and current v2 endpoint data
-do not establish a verified working path. Use a managed HTTPS endpoint whose pairing
-record is marked `secure: true` for remote access. Background: [`docs/adr/0001-lan-listener-for-mobile.md`](../../docs/adr/0001-lan-listener-for-mobile.md).
-
-## Forgetting a machine
-
-Forgetting a machine removes its local pairing without waiting for network requests.
-For identified machines, the phone first persists a remote-unpair cleanup job in
-SecureStore. The daemon removes the phone's push registration when that job succeeds;
-failed jobs are retried on launch, foregrounding, and every 30 seconds while the app is
-active, even after the last machine is removed. Each retry checks the daemon's identity
-before sending the saved credential. Credentials retained solely for cleanup are erased
-after success, or when an old job is superseded by a deliberate re-pair.
-
-An unreachable daemon can still send OS notifications until the phone reaches it and
-remote cleanup succeeds. Already-sent notifications cannot be recalled. An old pairing
-without a recorded host identity can only be forgotten locally: its remote registration
-must be removed from the desktop, rather than sending credentials to an unverified address.
+Transport is **plaintext HTTP by design** — this is a trusted-home-network tool. On
+untrusted Wi-Fi, use Tailscale instead and point the app at the `100.x` address or MagicDNS
+name. Background: [`docs/adr/0001-lan-listener-for-mobile.md`](../../docs/adr/0001-lan-listener-for-mobile.md).
 
 ## Prerequisites
 
 | For             | You need                                                                              |
 | --------------- | ------------------------------------------------------------------------------------- |
 | Everything      | Node 20+, and AO running on your machine (desktop app, or the daemon from source)     |
-| Phone ↔ machine | Same Wi-Fi network for LAN, or a reachable HTTPS endpoint for remote access         |
+| Phone ↔ machine | Same Wi-Fi network, or both on the same Tailnet                                       |
 | iOS build       | macOS, Xcode 16+, an Apple ID (a free one gives a 7-day signing profile), a USB cable |
 | Android build   | Android Studio (SDK + platform-tools for `adb`), a USB cable                          |
 
@@ -77,6 +58,8 @@ This package is **not** part of an npm workspace — install from inside it:
 ```bash
 cd packages/mobile
 npm install       # .npmrc sets legacy-peer-deps; postinstall runs patch-package
+npm start          # then press i (iOS), a (Android), w (web), or scan the QR in Expo Go
+npm run web        # real terminal in a desktop browser (http://localhost:8081)
 ```
 
 Two rules worth knowing before you fight an install:
@@ -85,6 +68,24 @@ Two rules worth knowing before you fight an install:
   and the app crashes on launch. Plain `npm install` in this directory is correct.
 - `metro.config.js` pins `react` and `react-native` to this package's copies. Don't remove
   that — two React instances kill the app at startup with _"main has not been registered"_.
+
+## Web
+
+`npm run web` serves the same app to a desktop browser via react-native-web.
+The session screen renders a real xterm.js terminal (`lib/WebTerminal.web.tsx`,
+a port of the desktop renderer's terminal) against the daemon's `/mux` socket -
+keyboard, paste, copy-on-select, wheel scroll (SGR reports into the pane),
+zoom, and Restore all work.
+
+- **Browser on the same machine as the daemon:** set Host `localhost`, API
+  Port `3001` in Settings. Zero daemon config - the CORS guard allows
+  loopback origins.
+- **Browser on a different machine:** open the Connect Mobile listener directly
+  — `http://<machine>:3011` — and log in with the connection password. The daemon
+  serves its own web UI there, same-origin with the API, so no allowlist entry and
+  no bridge is involved. Only a UI you host _elsewhere_ (the Expo web build on
+  `:8081`, a Vite dev server) still needs `AO_ALLOWED_ORIGINS=http://<web-host>:8081`
+  on the daemon.
 
 ## Step 1 — Turn on Connect Mobile on the desktop
 
@@ -97,17 +98,15 @@ Nothing on the phone works until the desktop opens the LAN bridge. Do this first
 cd frontend && npm run dev      # Electron supervisor + daemon
 ```
 
-**2. Open the pairing modal:** in the desktop app, **Settings → Connect Mobile**.
+**2. Open the pairing modal:** in the desktop app, **Sidebar → Settings menu → Connect Mobile**.
 
-**3. Choose **Generate**.** The bridge binds immediately and the panel reveals the pairing
-details:
+**3. Flip the "Enable mobile" toggle on.** The bridge binds immediately and the modal reveals
+the pairing details:
 
-- a v2 **QR code** with `hostId`, name, platform, every endpoint's `kind`, `host`, `port`,
-  and `secure`, plus the bearer `token` in the link fragment. The QR or copied link is a
-  secret;
-- the current address and port, for example `192.168.1.84:3011`;
-- the 8-character **connection password** (copyable);
-- **Regenerate password**, which rotates the secret and invalidates every old token.
+- a **QR code** (encodes `{v:1, host, port, password}`),
+- the plaintext **host:port**, e.g. `192.168.1.84:3011`,
+- the 8-character **connection password** (copyable),
+- **Regenerate password**, which rotates the secret and drops any connected phone.
 
 Leave the modal open — you scan that QR in step 3. Toggling **off** tears the bridge down,
 so the phone goes offline until you turn it back on.
@@ -119,7 +118,7 @@ loopback:
 cd backend && go run .
 
 curl -X POST http://127.0.0.1:3001/api/v1/mobile/enable
-curl -s      http://127.0.0.1:3001/api/v1/mobile/status    # includes current endpoint records
+curl -s      http://127.0.0.1:3001/api/v1/mobile/status    # → {enabled, host, port, password}
 curl -X POST http://127.0.0.1:3001/api/v1/mobile/disable
 ```
 
@@ -177,14 +176,9 @@ gitignored** — the run commands prebuild them for you.
 
 Cleartext HTTP to the bridge works on Android everywhere via `usesCleartextTraffic` in
 `app.json`. On iOS, `NSAllowsLocalNetworking` in the prebuilt `Info.plist` only permits
-cleartext to link-local, `.local`, and RFC 1918 (LAN) addresses. Tailscale's
-`100.64.0.0/10` range is RFC 6598, so iOS blocks plaintext to it. The desktop source
-contains an automatic secure-pairing attempt, but fresh configurations report no
-secure-pairing availability while the mode is off, and current v2 endpoint records do not
-establish a working Tailscale TLS route. Raw Tailscale is therefore not an iOS path. The
-Android build permits cleartext bridge traffic, but this path was not tested on a physical
-device. Use `secure: true` only for a genuinely HTTPS endpoint, and do not infer a physical
-iOS or Android result from source inspection.
+cleartext to link-local, `.local`, and RFC 1918 (LAN) addresses — Tailscale's
+`100.64.0.0/10` range is RFC 6598, so iOS blocks plaintext to it. Tailscale pairing on iOS
+requires the desktop's secure-pairing mode (TLS via `tailscale serve`).
 
 > **On `expo-dev-client`:** this package doesn't depend on it today, so the debug build
 > connects straight to Metro and has no in-app launcher or URL switcher. If you want the
@@ -202,34 +196,26 @@ npx expo run:ios         # iOS Simulator    → daemon host 127.0.0.1
 npx expo run:android     # Android emulator → daemon host 10.0.2.2
 ```
 
-Port is `3011` either way. The pairing QR advertises all current endpoint records. If the
-simulator or emulator cannot use one of them, type its host by hand in step 3.
+Port is `3011` either way. The pairing QR encodes your LAN IP, which usually works here too;
+if it doesn't, type the host above by hand (step 3).
 
 ## Step 3 — Pair the phone
 
-During onboarding, tap **Pair a machine**, or tap **Scan pairing code** from an unpaired
-screen, and grant camera access when asked. The pairing screen opens the scanner and offers
-manual entry. The v2 offer carries the desktop identity, endpoint records, and bearer token.
-The phone verifies the identity, races the endpoints, stores the winning desktop, and
-reconnects without typing.
+In the app: **Settings → scan the pairing QR** (grant camera access when asked). One scan
+writes host, port, and password, then reconnects — no typing.
 
 Manual entry, if you prefer (or for simulators / Tailscale):
 
 | Field             | Value                                                                                |
 | ----------------- | ------------------------------------------------------------------------------------ |
-| **Host**          | Your machine's LAN IP (`ipconfig getifaddr en0` on macOS), or a reachable endpoint host |
-| **API Port**      | `3011`, the Connect Mobile bridge, not the loopback `3001`                              |
-| **Password**      | The 8-character connection password from the desktop panel                              |
-| **Terminal Port** | Legacy and ignored. REST and `/mux` use the API port                                    |
-| **Use TLS**       | Off for LAN. On only for a genuinely HTTPS endpoint marked `secure: true`               |
+| **Host**          | Your machine's LAN IP (`ipconfig getifaddr en0` on macOS), or Tailscale name/`100.x` |
+| **API Port**      | `3011` — the Connect Mobile bridge, **not** the loopback `3001`                      |
+| **Password**      | The 8-character password from the Connect Mobile modal                               |
+| **Terminal Port** | Legacy, ignored. The daemon serves REST and the `/mux` terminal on the API port      |
+| **Use TLS**       | Off for the LAN bridge. On only for real HTTPS, e.g. a Tailscale funnel              |
 
-Tap **Connect**. A new manual connection tries the public identity endpoint first, but
-ordinary probe errors do not stop it from sending the password to test the connection.
-An incompatible contract version does stop it. Enter only a host you trust. The app
-saves the connection after authentication succeeds. The password lives in the device
-keystore, iOS Keychain or Android Keystore, never in AsyncStorage. A phone can keep
-multiple desktops, and one desktop can authorize multiple phones. Rotating the desktop
-password invalidates every old token.
+Tap **Test connection**, then **Save**. The password lives in the device keystore (iOS
+Keychain / Android Keystore), never in AsyncStorage.
 
 ## Everyday dev loop
 
@@ -404,7 +390,7 @@ Play Store** checks on demand.
 | Symptom                                           | Fix                                                                                                                                                          |
 | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Crash at launch, _"main has not been registered"_ | Two React copies. Keep `metro.config.js` intact, reinstall with plain `npm install` (never `--force`), then `npx expo prebuild --clean`.                     |
-| **Connect** fails, everything times out            | Connect Mobile is off on the desktop, wrong port (`3011`, not `3001`), phone on a different network, or the macOS firewall is blocking incoming connections. |
+| **Test connection** fails, everything times out   | Connect Mobile is off on the desktop, wrong port (`3011`, not `3001`), phone on a different network, or the macOS firewall is blocking incoming connections. |
 | 401 / invalid password                            | The password was regenerated on the desktop. Re-scan the QR.                                                                                                 |
 | Locked out after repeated failures                | The bridge locks out a source after 5 failed attempts. Wait it out, or toggle Connect Mobile off and on.                                                     |
 | `adb devices` shows `unauthorized`                | Re-accept the USB debugging prompt on the phone.                                                                                                             |
@@ -434,7 +420,7 @@ lib/
   pairFlow.ts        applies a scanned code — race endpoints, verify, store the host
   store.tsx          app state + connection polling
   theme.ts, ui.tsx   design primitives
-scripts/             ao-phone-proxy.js — superseded by Connect Mobile, kept for reference
+scripts/             icon generation and preview helpers
 ```
 
 ## Verify
@@ -456,11 +442,12 @@ Android and old binaries without the module are unchanged. This is a new native 
 not an OTA-only feature; these source directories are explicit fingerprint inputs.
 
 The phone publishes a bounded display-only Needs-you snapshot every 30 seconds while
-AO is foregrounded, using existing multi-host polling and `agentsView` semantics
+AO is foregrounded, using the existing active-host poll and `agentsView` semantics
 (including pinned workers that need attention). No Watch network client or credentials.
 `updateApplicationContext` replaces prior snapshots. The Watch caches its last known
-snapshot in a Watch-only App Group shared with the widget. Eight hosts/eight rows per
-host are shown; counts include hidden rows, and omitted hosts are explicit.
+snapshot in a Watch-only App Group shared with the widget. Only the active host is
+shown, labeled “Active host”, with up to eight rows; counts include hidden rows. Other paired hosts are not polled. Switching hosts removes the
+previous host from the next snapshot; old in-flight polls cannot relabel its data.
 
 A successful poll's original timestamp, not bridge delivery time, establishes freshness.
 After two minutes, failures, or incomplete host coverage, the count is **N+** (known
@@ -541,6 +528,12 @@ not a compiled app. Native simulator build and physical paired-device QA are mer
 
 
 ### Wrist action boundaries (stack 2/2)
+
+Actions are restricted to the fork's active host and its current, successfully polled
+config. Switching hosts or rotating credentials invalidates the review token. Other
+paired hosts must be selected on the phone before using Watch actions. Authenticated
+requests now carry the existing daemon's expected-host header when a host ID is known;
+legacy configs without an ID retain their existing behavior.
 
 Actions use reachable `sendMessage` only. The native bridge accepts one live request
 only while phone AO and its JS listener are foreground-ready; it times out after 20s.

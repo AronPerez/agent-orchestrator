@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
 	DEFAULT_PREFERENCE,
 	isThemePreference,
-	nativeColorSchemeOverride,
 	preferenceLabel,
 	resolveScheme,
 	THEME_KEY,
@@ -32,14 +31,6 @@ describe("resolveScheme", () => {
 	it("re-resolves system against whatever the OS currently reports", () => {
 		expect(resolveScheme("system", "dark")).toBe("dark");
 		expect(resolveScheme("system", "light")).toBe("light");
-	});
-});
-
-describe("nativeColorSchemeOverride", () => {
-	it("forces native presentations to explicit app themes and defers system mode to iOS", () => {
-		expect(nativeColorSchemeOverride("light")).toBe("light");
-		expect(nativeColorSchemeOverride("dark")).toBe("dark");
-		expect(nativeColorSchemeOverride("system")).toBe("unspecified");
 	});
 });
 

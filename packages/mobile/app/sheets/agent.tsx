@@ -7,7 +7,6 @@ import { getAgents, refreshAgents } from "../../lib/api";
 import { haptics } from "../../lib/haptics";
 import { releaseSheetResult, takeSheetResult } from "../../lib/sheetResult";
 import { useApp } from "../../lib/store";
-import { backOr } from "../../lib/backNavigation";
 
 // The agent picker, as a native form sheet.
 //
@@ -68,12 +67,10 @@ export default function AgentSheetRoute() {
 			error={error}
 			refreshing={refreshing}
 			onRefresh={onRefresh}
-			onClose={() => backOr(router)}
+			onClose={() => router.back()}
 			onSelect={(id) => takeSheetResult<string>(resultKey)?.(id)}
 			title={mode === "chat" ? "Chat agent" : "Agent"}
 			subtitle={mode === "chat" ? "Installed agents with a structured Chat controller." : "The CLI that runs this terminal session."}
 		/>
 	);
 }
-
-export { SheetErrorBoundary as ErrorBoundary } from "../../lib/RouteErrorBoundary";

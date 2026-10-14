@@ -22,7 +22,6 @@ const LOGOS: Record<string, number> = {
 	cursor: require("../assets/agents/cursor.png"),
 	devin: require("../assets/agents/devin.png"),
 	droid: require("../assets/agents/droid.png"),
-	fx: require("../assets/agents/fx.png"),
 	goose: require("../assets/agents/goose.png"),
 	grok: require("../assets/agents/grok.png"),
 	kilocode: require("../assets/agents/kilocode.png"),
@@ -31,7 +30,6 @@ const LOGOS: Record<string, number> = {
 	muse: require("../assets/agents/muse.png"),
 	opencode: require("../assets/agents/opencode.png"),
 	pi: require("../assets/agents/pi.png"),
-	"prime-agent": require("../assets/agents/prime-agent.png"),
 	qwen: require("../assets/agents/qwen.png"),
 	vibe: require("../assets/agents/vibe.png"),
 };

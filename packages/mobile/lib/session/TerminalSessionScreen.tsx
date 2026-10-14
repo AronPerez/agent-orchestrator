@@ -1,19 +1,17 @@
-import { Feather } from "../icons";
+import { Feather } from "@expo/vector-icons";
 import { XtermJsWebView, type XtermWebViewHandle } from "@fressh/react-native-xtermjs-webview";
 import { useLocalSearchParams, useNavigation, useRouter } from "expo-router";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, Alert, BackHandler, Keyboard, LayoutAnimation, Platform, Pressable, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Alert, Keyboard, LayoutAnimation, Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { WebView } from "react-native-webview";
-import { ApiError, getPreview, killSession, killSessionReviewer, sendMessage } from "../api";
-import { authHeaders, isConfigured, type ServerConfig } from "../config";
-import { previewForConfig } from "../hostRoute";
+import { ApiError, getPreview, isTerminalStatus, killSession, sendMessage } from "../api";
+import { authHeaders, isConfigured, loadConfig, type ServerConfig } from "../config";
 import { terminalTheme, type Theme } from "../theme";
 import { haptics } from "../haptics";
 import { resetHeaderRightForSwap } from "../headerRightSwap";
 import { MinimalBackButton } from "../MinimalBackButton";
 import { MuxClient, type MuxStatus } from "../mux";
-import { glassHeaderControl } from "../native-header-items";
 import { Composer } from "./Composer";
 import { dockInset, rootKeyboardPad } from "./keyboardInset";
 import { KeyRow } from "./KeyRow";
@@ -26,6 +24,7 @@ import {
 	type SendTarget,
 } from "./sendRoute";
 import { useApp } from "../store";
+import { WebTerminal, type WebTerminalHandle } from "../WebTerminal";
 import { useVoiceInput } from "../voice/useVoiceInput";
 import { useTheme, useThemedStyles, useThemeState } from "../ThemeProvider";
 import { closeShellTerminal } from "../chat/api";
@@ -34,33 +33,18 @@ import {
 	type InterfaceSwitchRecheck,
 	mobileInterfaceTransitionIsActive,
 	mobileInterfaceTransitionIsCancellable,
-	mobileInterfaceTransitionRecoveryMessage,
 	useInterfaceTransition,
 } from "./useInterfaceTransition";
 import { terminalInterfaceFailureRecovery } from "./terminalInterfaceRecovery";
 import { adjustTerminalViewport } from "./terminalViewport";
-import { isRuntimeGone, type RouteSession } from "./sessionRoute";
-import { iconSize, press, space, type } from "../tokens";
-import { backOr } from "../backNavigation";
-import { userFacingError } from "../connectionError";
-import { archiveSessionMessage } from "../worker-action-model";
-import { isTerminalGoneError, TERMINAL_STATUS_LABEL, terminalErrorCopy, terminalExitedCopy } from "./terminalCopy";
 
 const FONT_SIZE = 12;
 
-/**
- * Touch padding for the two icon-only controls in the preview bar.
- *
- * The glyph sits in a box of roughly 23x19pt, well under the 44pt touch target.
- * Growing the box itself would grow the bar, so the padding goes outside it: 12pt
- * on every side except the one facing the other control, where the 8pt gap leaves
- * room for 4. Asymmetric on purpose — symmetric padding of 8 swapped this pair's
- * targets for the path text between them, and padding wide enough to reach 44 on
- * both sides would make the reload and close targets overlap, which is worse than
- * either being slightly small.
- */
-const PREVIEW_RELOAD_SLOP = { top: 12, bottom: 12, left: 12, right: 4 } as const;
-const PREVIEW_CLOSE_SLOP = { top: 12, bottom: 12, left: 4, right: 12 } as const;
+// Platform seam: on web the native WebView can't run (react-native-webview
+// resolves to a stub), so the screen swaps in the DOM terminal
+// (lib/WebTerminal.web.tsx) and an <iframe> preview. Platform.OS is constant
+// for the app's lifetime, so branching hooks/refs/JSX on it is safe.
+const isWeb = Platform.OS === "web";
 
 // Injected into the xterm WebView after load. xterm has its own touch handlers
 // that scroll by discrete lines (the janky "1 line per swipe"). We intercept in
@@ -116,16 +100,12 @@ const TERMINAL_ENHANCE_JS = `
 
   // ---- Zoom & pan -----------------------------------------------------------
   // The daemon may hold the grid wider than the phone (a co-viewing desktop
-  // drives the size). Start at 1:1 so a desktop-sized grid remains readable on
-  // the phone and is locally cropped instead of becoming a tiny overview. Pinch
-  // and the native +/- controls zoom between fit-to-width and 2x; while zoomed,
-  // one finger pans the viewport (vertical overshoot spills into scrollback) and
-  // double-tap toggles overview <-> 1:1.
-  // While zoomed we auto-pan to keep the cursor framed, so the prompt/output
-  // stays in view without chasing it by hand.
+  // drives the size). The resting view keeps the fork's readability floor instead
+  // of shrinking to a tiny overview. Pinch and the native +/- controls zoom from
+  // fit-to-width through 2x; one finger pans overflow and double-tap toggles the
+  // readable resting view with 1:1.
   function term() { return window.terminal; }
-  var Z = { s: 1, min: 1, max: 2, tx: 0, ty: 0,
-            zoomed: false, followFit: false, lastPan: 0 };
+  var Z = { s: 1, min: 1, max: 2, tx: 0, ty: 0, zoomed: false, lastPan: 0 };
   function box() {
     var root = document.querySelector('.xterm');
     var screen = document.querySelector('.xterm-screen');
@@ -145,20 +125,33 @@ const TERMINAL_ENHANCE_JS = `
     b.root.style.transformOrigin = 'top left';
     b.root.style.transform = 'translate(' + Z.tx + 'px,' + Z.ty + 'px) scale(' + Z.s + ')';
   }
-  // Fit-to-width baseline, re-run on grid/container changes. followFit records
-  // an explicit overview choice; otherwise authoritative grid resizes preserve
-  // the default/user-selected actual-size crop and only re-clamp its pan.
+  // Readability floor for the RESTING view. At pure fit-to-width the on-screen
+  // text size is contW/cols — it does not depend on the xterm font size (a bigger
+  // font just shrinks harder), so a wide daemon grid rendered whole gives ~4px
+  // text and the font buttons can't fix it. So rest no smaller than MIN_TEXT_PX
+  // and let the extra width be panned. An explicit pinch/double-tap still reaches
+  // the true fit (Z.min) when you want the whole-screen birds-eye.
+  var MIN_TEXT_PX = 9;
+  function restScale(b) {
+    var fs = 12; try { fs = term().options.fontSize || fs; } catch (_) {}
+    return Math.min(1, Math.max(Math.min(1, b.contW / b.natW), MIN_TEXT_PX / fs));
+  }
+  // Content bigger than the container at the current scale: true while zoomed in,
+  // and also at rest when the floor above holds the grid wider than the screen.
+  // Gates panning + cursor-follow, which both exist to reach off-screen content.
+  function overflows(b) { return b.natW * Z.s > b.contW + 1 || b.natH * Z.s > b.contH + 1; }
+  // Fit-to-width baseline, re-run on grid/container changes. Tracks the resting
+  // scale while at overview; preserves (re-clamps) the user's zoom otherwise.
   function applyScale() {
     try {
       var b = box(); if (!b || !b.natW || !b.contW) return;
       Z.min = Math.min(1, b.contW / b.natW);
-      if (Z.followFit) { Z.s = Z.min; Z.tx = 0; Z.ty = 0; }
+      if (!Z.zoomed) { Z.s = restScale(b); Z.tx = 0; Z.ty = 0; }
       else {
         if (Z.s < Z.min) Z.s = Z.min;
         if (Z.s > Z.max) Z.s = Z.max;
         clampT(b);
       }
-      Z.zoomed = Z.s > Z.min + 0.001;
       applyTransform(b);
     } catch (_) {}
   }
@@ -169,7 +162,6 @@ const TERMINAL_ENHANCE_JS = `
     var px = (ax - Z.tx) / Z.s, py = (ay - Z.ty) / Z.s;
     Z.s = s; Z.tx = ax - px * s; Z.ty = ay - py * s;
     Z.zoomed = s > Z.min + 0.001;
-    Z.followFit = !Z.zoomed;
     if (!Z.zoomed) { Z.s = Z.min; Z.tx = 0; Z.ty = 0; }
     clampT(b); applyTransform(b);
   }
@@ -186,8 +178,9 @@ const TERMINAL_ENHANCE_JS = `
   // the live screen — not while the user is reading scrollback.
   function followCursor() {
     try {
-      if (!Z.zoomed || Date.now() - Z.lastPan < 4000) return;
+      if (Date.now() - Z.lastPan < 4000) return;
       var T = term(); var b = box(); if (!T || !b || !T.cols || !T.rows) return;
+      if (!overflows(b)) return;
       var buf = T.buffer && T.buffer.active; if (!buf) return;
       if (buf.viewportY !== buf.baseY) return;
       var cx = (buf.cursorX + 0.5) * (b.natW / T.cols) * Z.s;
@@ -383,29 +376,30 @@ const TERMINAL_ENHANCE_JS = `
           for (var i = 0; i < Math.abs(diff); i++) wheelTick(up, t.clientX, t.clientY);
           altLines = want;
         }
-        // While zoomed, the horizontal component still pans the magnified grid.
-        if (Z.zoomed) {
-          var bz = box();
-          if (bz) { Z.tx += t.clientX - lX; clampT(bz); applyTransform(bz); Z.lastPan = Date.now(); }
-        }
+        // When the grid is wider than the screen, the horizontal component still
+        // pans it (zoomed in, or held oversized by the readability floor).
+        var bz = box();
+        if (bz && overflows(bz)) { Z.tx += t.clientX - lX; clampT(bz); applyTransform(bz); Z.lastPan = Date.now(); }
         lX = t.clientX; lY = t.clientY;
         return;
       }
-      if (Z.zoomed) {
-        // Zoomed in: one finger pans the viewport over the big grid. Vertical
-        // overshoot past the grid edge spills into scrollback scrolling (divide
-        // by scale: scrollTop is in unscaled content px, the finger in screen px).
+      var b = box();
+      if (b && overflows(b)) {
+        // Grid bigger than the screen (zoomed in, or the readability floor): one
+        // finger pans the viewport over it. Overshoot past an edge spills into
+        // scrollback scrolling (divide by scale: scrollTop is in unscaled content
+        // px, the finger in screen px) - so with only horizontal overflow the
+        // vertical drag is pure scrollback, same as the overview below.
+        // ponytail: this costs iOS momentum scrolling at rest (we preventDefault
+        // instead of letting native fling). Restore per-axis if it grates.
         if (e.cancelable) e.preventDefault();
-        var b = box();
-        if (b) {
-          Z.tx += t.clientX - lX;
-          var wantTy = Z.ty + (t.clientY - lY);
-          Z.ty = wantTy;
-          clampT(b);
-          var spill = wantTy - Z.ty;
-          if (spill !== 0 && _vp) _vp.scrollTop -= spill / Z.s;
-          applyTransform(b);
-        }
+        Z.tx += t.clientX - lX;
+        var wantTy = Z.ty + (t.clientY - lY);
+        Z.ty = wantTy;
+        clampT(b);
+        var spill = wantTy - Z.ty;
+        if (spill !== 0 && _vp) _vp.scrollTop -= spill / Z.s;
+        applyTransform(b);
         Z.lastPan = Date.now();
         lX = t.clientX; lY = t.clientY;
         return;
@@ -439,7 +433,9 @@ const TERMINAL_ENHANCE_JS = `
       var now = Date.now();
       if (now - lastTap < DBLTAP && Math.abs(sX - ltX) < 40 && Math.abs(sY - ltY) < 40) {
         lastTap = 0;
-        if (Z.zoomed) setZoom(Z.min, 0, 0);
+        // Out goes back to the RESTING view (floored, readable), not the true
+        // fit - the whole-grid birds-eye stays a deliberate pinch away.
+        if (Z.zoomed) { Z.zoomed = false; applyScale(); }
         else { setZoom(1, sX, sY); Z.lastPan = Date.now(); }
       } else { lastTap = now; ltX = sX; ltY = sY; }
     }
@@ -465,9 +461,9 @@ const TERMINAL_ENHANCE_JS = `
     s.position = 'fixed'; s.right = '12px'; s.bottom = '12px';
     s.width = '36px'; s.height = '36px'; s.lineHeight = '36px';
     s.textAlign = 'center'; s.borderRadius = '18px';
-    s.background = 'rgba(16,17,20,0.72)'; s.color = '#f4f5f7';
+    s.background = 'rgba(20,28,40,0.72)'; s.color = '#dbe4f0';
     s.fontSize = '18px'; s.fontWeight = '600';
-    s.border = '1px solid rgba(255,255,255,0.18)';
+    s.border = '1px solid rgba(120,140,170,0.35)';
     s.boxShadow = '0 2px 8px rgba(0,0,0,0.4)';
     s.webkitBackdropFilter = 'blur(6px)'; s.backdropFilter = 'blur(6px)';
     s.zIndex = '2147483647'; s.display = 'none'; s.cursor = 'pointer';
@@ -543,8 +539,14 @@ const TERMINAL_ENHANCE_JS = `
 true;
 `;
 
+const statusLabel: Record<MuxStatus, string> = {
+	connecting: "connecting...",
+	open: "live",
+	closed: "disconnected",
+	error: "error",
+};
 const statusColorFor = (t: Theme): Record<MuxStatus, string> => ({
-	connecting: t.amber,
+	connecting: t.attention,
 	open: t.green,
 	closed: t.textTertiary,
 	error: t.red,
@@ -567,21 +569,12 @@ function terminalInterfacePhaseLabel(phase?: string): string {
 	}
 }
 
-/**
- * `session` is what the route resolved when the board's lists do not hold this
- * id (see `sessionRouteView`); the lists still win whenever they have it, since
- * they are refreshed on every poll. A session from that lookup is not refreshed.
- * The shell route passes nothing.
- */
-export default function TerminalScreen({ session: resolved }: { session?: RouteSession }) {
+export default function TerminalSessionScreen() {
 	const t = useTheme();
 	const { scheme } = useThemeState();
 	const styles = useThemedStyles(makeStyles);
-	const params = useLocalSearchParams<{ id?: string; handleId?: string; projectId?: string; sessionId?: string; title?: string; kind?: string; hostId?: string }>();
+	const params = useLocalSearchParams<{ id?: string; handleId?: string; projectId?: string; sessionId?: string; title?: string }>();
 	const shellOnly = Boolean(params.handleId);
-	// A reviewer pane is attached by handle like a shell, but the daemon does not
-	// own it as a shell terminal: closing it means stopping the worker's reviewer.
-	const reviewerPane = params.kind === "reviewer" && Boolean(params.sessionId);
 	const id = String(params.handleId ?? params.id ?? "");
 	const sessionId = shellOnly ? String(params.sessionId ?? "") : id;
 	const projectId = params.projectId ? String(params.projectId) : undefined;
@@ -590,17 +583,20 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 	const [headerRightReady, setHeaderRightReady] = useState(false);
 	useLayoutEffect(
 		() => resetHeaderRightForSwap(
-			() => navigation.setOptions(glassHeaderControl("right")),
+			() => navigation.setOptions({ headerRight: undefined }),
 			() => setHeaderRightReady(true),
 		),
 		[navigation],
 	);
 	const insets = useSafeAreaInsets();
 
-	// Leaving the screen. This route is cold-started with no back stack often
-	// enough — a reload while on the terminal, or a deep link — that the rule lives
-	// in one place; see `backOr`.
-	const leave = useCallback(() => backOr(router), [router]);
+	// Leaving the screen: pop when there's history, otherwise go to the board.
+	// Guards against a missing/broken back button when this route was cold-started
+	// with no back-stack - e.g. a reload while on the terminal, or a deep link.
+	const leave = useCallback(() => {
+		if (router.canGoBack()) router.back();
+		else router.replace("/");
+	}, [router]);
 
 	const xtermRef = useRef<XtermWebViewHandle | null>(null);
 	// Theme changes still replace xterm. Retain bytes arriving between the old
@@ -617,7 +613,16 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 	// THIS grid, not the phone's own fit, so the display matches the PTY and a
 	// full-screen TUI doesn't mis-render. The WebView crops/scales it locally.
 	const authRef = useRef<{ cols: number; rows: number } | null>(null);
+	// Web target: the real xterm.js surface (native uses the WebView instead).
+	const webTermRef = useRef<WebTerminalHandle | null>(null);
+	// Trailing debounce for web grid changes: a window drag emits a burst of
+	// onResize events; the PTY should get one resize when the burst settles,
+	// then one re-assert frame (mirrors the renderer's 100ms/250ms pair in
+	// useTerminalSession - the re-assert recovers a resize the pane client
+	// lost mid-attach).
+	const webResizeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+	const [cfg, setCfg] = useState<ServerConfig | null>(null);
 	const [status, setStatus] = useState<MuxStatus>("connecting");
 	const [size, setSize] = useState<{ cols: number; rows: number } | null>(null);
 	const [banner, setBanner] = useState<string | null>(null);
@@ -626,6 +631,9 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 	const [msg, setMsg] = useState("");
 	const [sending, setSending] = useState(false);
 	const [sendTarget, setSendTarget] = useState<SendTarget>(shellOnly ? "terminal" : "agent");
+	// Web owns a DOM xterm and still changes its font/grid on zoom. Native keeps
+	// the shared PTY grid stable and zooms only its local viewport.
+	const [fontSize, setFontSize] = useState(FONT_SIZE);
 	// A terminated session has no live PTY (the mux answers "Session not found").
 	// Track that + the known status so we can offer Restore instead of a dead term.
 	const [notFound, setNotFound] = useState(false);
@@ -638,21 +646,18 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 	// green dot when the agent has produced something to view (any previewable file
 	// except the repo README); the user taps it to open.
 	const [browserOpen, setBrowserOpen] = useState(false);
-	const [loadedPreview, setLoadedPreview] = useState<{ config: ServerConfig; id: string; value: Awaited<ReturnType<typeof getPreview>> } | null>(null);
+	const [preview, setPreview] = useState<{ entry: string; url: string } | null>(null);
 	const previewWebRef = useRef<WebView>(null);
+	const webIframeRef = useRef<HTMLIFrameElement | null>(null);
 
 	const { sessions, orchestrators, restore, refresh, config: activeConfig } = useApp();
-	const preview = loadedPreview?.id === id ? previewForConfig(loadedPreview, activeConfig, params.hostId) : null;
-	const known =
-		sessions.find((s) => s.id === sessionId) ??
-		orchestrators.find((o) => o.id === sessionId) ??
-		(!shellOnly && resolved?.id === sessionId ? resolved : null);
+	const known = sessions.find((s) => s.id === sessionId) ?? orchestrators.find((o) => o.id === sessionId) ?? null;
 	// Runtime handles are opaque. Native macOS PTYs are versioned (ptyhost-v1:),
 	// so using the session id here would incorrectly route the attach to legacy
 	// tmux. Older daemons omit terminalHandleId and retain the historical
 	// session-id handle, which keeps the fallback backward-compatible.
 	const terminalHandleId = shellOnly ? id : known?.terminalHandleId || id;
-	const interfaceSwitch = useInterfaceTransition(activeConfig, shellOnly ? "" : sessionId, refresh);
+	const interfaceSwitch = useInterfaceTransition(cfg, shellOnly ? "" : sessionId, refresh);
 	// Owned by the screen rather than the hook: the background poll calls the same
 	// `refresh()`, so a hook-wide busy flag would let a poll tick disable the
 	// user's own button and swallow the very tap the recheck exists to serve.
@@ -674,7 +679,6 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 	const interfaceStatusRef = useRef(interfaceSwitch.status);
 	interfaceStatusRef.current = interfaceSwitch.status;
 	const interfaceTransitionActive = mobileInterfaceTransitionIsActive(interfaceSwitch.transition);
-	const interfaceRecoveryMessage = mobileInterfaceTransitionRecoveryMessage(interfaceSwitch.transition);
 	const interfaceTransitionNotice =
 		!interfaceTransitionActive &&
 		!interfaceSwitch.transition?.noticeAcknowledgedAt &&
@@ -704,7 +708,7 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 			known.activity === "waiting_input" ||
 			known.activity === "blocked"),
 	);
-	const dead = notFound || (!shellOnly && known ? isRuntimeGone(known) : false);
+	const dead = notFound || (!shellOnly && known ? isTerminalStatus(known.status) : false);
 	// What counts as a live preview: any file the daemon surfaces (an .html build, or
 	// a generated doc like plan.md / a report) EXCEPT a repo's README, which the
 	// detector's markdown fallback always matches on a fresh checkout. Filtering the
@@ -723,18 +727,6 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 	// that difference. This is the ONLY place the keyboard height is applied — the
 	// dock adds nothing on top of it (see dockInset), because doing both is what
 	// made the bar kick.
-	// Deliberately still on the platform listeners, unlike the spawn sheet, the
-	// Workers board and the chat screen, which all moved to keyboard-controller's
-	// useKeyboardState.
-	//
-	// That hook subscribes to keyboardWillShow and keyboardDidHide only. This
-	// screen needs keyboardDidShow as well — see the corrector below, which exists
-	// because willShow reports a height that still includes the accessory bar we
-	// hide. Migrating here would reinstate exactly the gap that corrector removes,
-	// and would lose the iOS-only didHide backup whose absence on Android is itself
-	// a fix (registering it there subscribed the same handler twice and collapsed
-	// the dock). The gain would be earlier Android events on the one screen that
-	// reserves keyboard space by hand, which is not worth reopening two fixed bugs.
 	useEffect(() => {
 		const isIOS = Platform.OS === "ios";
 		const showEvt = isIOS ? "keyboardWillShow" : "keyboardDidShow";
@@ -798,7 +790,7 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 			// Always render our own Back control so it works even when the app was
 			// cold-started directly on this route (reload/deep link) and the stack
 			// has no history for the default back button to use.
-			...glassHeaderControl("left", <MinimalBackButton onPress={leave} />),
+			headerLeft: () => <MinimalBackButton onPress={leave} />,
 		});
 	}, [navigation, id, leave, params.title, shellOnly]);
 
@@ -808,19 +800,42 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 	// Wi-Fi hands the session to Tailscale or the tunnel — and a mux still
 	// pointed at the previous address stays disconnected on a blank screen
 	// until the screen is closed and reopened.
+	const activeBaseUrl = activeConfig
+		? `${activeConfig.secure ? "https" : "http"}://${activeConfig.host}:${activeConfig.httpPort}`
+		: "";
+
 	useEffect(() => {
 		let disposed = false;
 		(async () => {
-			// A selected machine without a verified connection has no terminal.
-			// The global saved config may belong to a different machine.
-			const config = activeConfig;
+			// Prefer the endpoint the race settled on; fall back to storage on the
+			// first render, before the store has resolved one.
+			const config = activeConfig ?? (await loadConfig());
 			if (disposed) return;
-			if (!config || !isConfigured(config)) return;
+			setCfg(config);
+			if (!isConfigured(config)) return;
 
 			const mux = new MuxClient(config, {
-				onStatus: (s) => setStatus(s),
+				onStatus: (s) => {
+					setStatus(s);
+					// After a reconnect MuxClient re-opens the terminal but sends no
+					// size; re-assert the last known grid so the fresh attach and the
+					// PTY agree. Deferred one tick because onStatus fires BEFORE the
+					// open frames are replayed (mux.ts ws.onopen), and the daemon
+					// ignores a resize for a pane that isn't open yet. Clear the web
+					// terminal so the attach repaint lands on a blank grid instead of
+					// interleaving with stale cells.
+					if (s === "open" && openedRef.current) {
+						if (isWeb) webTermRef.current?.clear();
+						const d = lastDimsRef.current;
+						if (d) setTimeout(() => muxRef.current?.resize(terminalHandleId, d.cols, d.rows, projectId), 0);
+					}
+				},
 				onTerminalData: (tid, bytes) => {
 					if (tid !== terminalHandleId) return;
+					if (isWeb) {
+						webTermRef.current?.write(bytes);
+						return;
+					}
 					if (!xtermReadyRef.current || !xtermRef.current) {
 						pendingOutputRef.current.push(bytes.slice());
 						return;
@@ -829,7 +844,7 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 				},
 				onTerminalExited: (tid, code) => {
 					if (tid === terminalHandleId) {
-						setBanner(terminalExitedCopy(code));
+						setBanner(`Session exited (code ${code})`);
 						setNotFound(true);
 					}
 				},
@@ -837,8 +852,8 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 					if (tid !== terminalHandleId) return;
 					// A missing PTY means the session is terminated - offer Restore
 					// instead of surfacing it as a raw error banner.
-					if (isTerminalGoneError(msg)) setNotFound(true);
-					else setBanner(terminalErrorCopy(msg));
+					if (/not found/i.test(msg)) setNotFound(true);
+					else setBanner(msg);
 				},
 				onTerminalResize: (tid, cols, rows) => {
 					if (tid !== terminalHandleId) return;
@@ -850,18 +865,35 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 				},
 			});
 			muxRef.current = mux;
+			// The web terminal mounts synchronously and its onReady always fires
+			// before this async config load resolves (loadConfig yields at least
+			// one microtask, and WebTerminal's mount effect - a child effect -
+			// always commits before this parent effect), so onWebReady's own
+			// openTerminal attempt no-ops on a still-null muxRef. Finish the
+			// attach here instead, once the terminal side is the one already done.
+			if (isWeb && webTermRef.current && !openedRef.current) {
+				openedRef.current = true;
+				mux.openTerminal(terminalHandleId, projectId);
+				applyDims(webTermRef.current.cols, webTermRef.current.rows);
+			}
 			mux.connect();
 		})();
 		return () => {
 			disposed = true;
+			if (webResizeTimer.current) {
+				clearTimeout(webResizeTimer.current);
+				webResizeTimer.current = null;
+			}
 			muxRef.current?.disconnect();
 			muxRef.current = null;
 			xtermReadyRef.current = false;
 			pendingOutputRef.current = [];
 		};
-		// The store preserves config identity when the endpoint and credential
-		// did not change, so this also handles two hosts sharing one URL.
-	}, [terminalHandleId, activeConfig]);
+		// activeBaseUrl, not activeConfig: the object identity changes on every
+		// resolve, and rebuilding the mux on each one would tear down a healthy
+		// terminal for no reason.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [terminalHandleId, projectId, activeBaseUrl]);
 
 	useLayoutEffect(() => {
 		xtermReadyRef.current = false;
@@ -873,14 +905,14 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 	// repo README, so auto-popping would surface a blank/unbuilt page.
 	useEffect(() => {
 		if (shellOnly) return;
-		if (!activeConfig || !isConfigured(activeConfig)) return;
+		if (!cfg || !isConfigured(cfg)) return;
 		let cancelled = false;
 		let timer: ReturnType<typeof setTimeout> | null = null;
 		const tick = async () => {
 			try {
-				const p = await getPreview(activeConfig, id);
+				const p = await getPreview(cfg, id);
 				if (cancelled) return;
-				setLoadedPreview({ config: activeConfig, id, value: p });
+				setPreview(p);
 			} catch {
 				/* transient - keep polling */
 			}
@@ -891,7 +923,16 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 			cancelled = true;
 			if (timer) clearTimeout(timer);
 		};
-	}, [activeConfig, id, shellOnly]);
+	}, [cfg, id, shellOnly]);
+
+	// Switching to another node while a terminal is open: this session id belongs
+	// to the daemon we just left and does not exist on the new one, so the screen
+	// can only sit there failing to attach. Pop back to the board instead. `cfg`
+	// is the node this screen connected to; `activeConfig` is the app's active one.
+	useEffect(() => {
+		if (!cfg || !activeConfig || !isConfigured(cfg)) return;
+		if (activeConfig.host !== cfg.host || activeConfig.httpPort !== cfg.httpPort) leave();
+	}, [cfg, activeConfig, leave]);
 
 	// The WebView reports the phone's NATURAL fit (proposeDimensions, measure-only).
 	// We forward it to the daemon as this client's requested size — used only when
@@ -933,7 +974,7 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 		const pending = pendingOutputRef.current;
 		pendingOutputRef.current = [];
 		for (const bytes of pending) xtermRef.current?.write(bytes);
-		// A fresh xterm (first mount, or a remount after a font-zoom) starts at its
+		// A fresh xterm (first mount, or a remount after a theme change) starts at its
 		// default grid — restore the daemon's authoritative grid onto it so it keeps
 		// mirroring the shared PTY rather than snapping to the default.
 		if (authRef.current) xtermRef.current?.resize(authRef.current);
@@ -946,6 +987,39 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 		const d = lastDimsRef.current;
 		if (d) muxRef.current?.resize(terminalHandleId, d.cols, d.rows, projectId);
 	}, [terminalHandleId, projectId]);
+
+	// Web: the DOM terminal is mounted and ready - wire its I/O to the mux and
+	// attach. Mirrors onInitialized (native) plus the renderer's binding:
+	// input forwards to the PTY; grid changes report a debounced resize (one
+	// settled frame + one re-assert). If the socket isn't open yet, MuxClient
+	// queues the open in its openTerminals map and replays it on connect; the
+	// onStatus handler then re-asserts the size.
+	const onWebReady = useCallback(
+		(handle: WebTerminalHandle) => {
+			webTermRef.current = handle;
+			handle.onUserInput((data) => muxRef.current?.sendInput(terminalHandleId, data, projectId));
+			handle.onResize(({ cols, rows }) => {
+				if (webResizeTimer.current) clearTimeout(webResizeTimer.current);
+				webResizeTimer.current = setTimeout(() => {
+					applyDims(cols, rows);
+					webResizeTimer.current = setTimeout(() => {
+						webResizeTimer.current = null;
+						if (openedRef.current) muxRef.current?.resize(terminalHandleId, cols, rows, projectId);
+					}, 250);
+				}, 100);
+			});
+			// muxRef may still be null here (see the mux effect's fallback
+			// attach above) - in that case leave openedRef false so that
+			// fallback is the one that performs the actual attach.
+			if (openedRef.current || !muxRef.current) return;
+			openedRef.current = true;
+			muxRef.current.openTerminal(terminalHandleId, projectId);
+			// The open frame carries no size; report the real grid immediately
+			// (applyDims records it, updates the dims chip, and sends the resize).
+			applyDims(handle.cols, handle.rows);
+		},
+		[terminalHandleId, projectId, applyDims],
+	);
 
 	const onData = useCallback(
 		(data: string) => {
@@ -993,8 +1067,8 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 		}
 		setSending(true);
 		try {
-			if (!activeConfig) throw new Error("No active machine connection");
-			await sendMessage(activeConfig, id, text);
+			const config = cfg ?? (await loadConfig());
+			await sendMessage(config, id, text);
 			haptics.success();
 			setMsg("");
 		} catch (e) {
@@ -1009,12 +1083,12 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 				setBanner(REROUTED_NOTICE);
 			} else {
 				haptics.error();
-				setBanner(`Message not sent. ${userFacingError(e)}`);
+				setBanner(`Send failed: ${e instanceof Error ? e.message : String(e)}`);
 			}
 		} finally {
 			setSending(false);
 		}
-	}, [msg, sendTarget, activeConfig, id, terminalHandleId, projectId, status]);
+	}, [msg, sendTarget, cfg, id, terminalHandleId, projectId, status]);
 
 	// Push-to-talk dictation, captured on the PHONE rather than by the harness.
 	//
@@ -1057,26 +1131,21 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 			return;
 		}
 		if (!hasPreview) {
-			setBanner("No preview yet. Waiting for the agent to generate a page or document…");
+			setBanner("No preview yet - waiting for the agent to generate a page or document...");
 			return;
 		}
 		setBrowserOpen(true);
 	}, [browserOpen, hasPreview]);
 
-	// Android's back gesture closes what is on top. The preview is a full-screen
-	// overlay drawn inside this route, so without this it answered back by leaving
-	// the session — the whole terminal, not the panel the user was looking at —
-	// while the same gesture closed the drawer correctly. Registered only while the
-	// overlay is up, so it never competes with the drawer's handler for the back
-	// press on a route where only one of the two can be on screen.
-	useEffect(() => {
-		if (Platform.OS !== "android" || !browserOpen) return;
-		const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
-			setBrowserOpen(false);
-			return true;
-		});
-		return () => subscription.remove();
-	}, [browserOpen]);
+	// Reload the preview: native reloads the WebView; web re-assigns the iframe src.
+	const reloadPreview = useCallback(() => {
+		if (Platform.OS === "web") {
+			const f = webIframeRef.current;
+			if (f) f.src = f.src;
+		} else {
+			previewWebRef.current?.reload();
+		}
+	}, []);
 
 	const startInterfaceSwitch = useCallback(
 		async (policy: "drain" | "interrupt") => {
@@ -1084,7 +1153,7 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 				await interfaceSwitch.start("chat", policy);
 				setBanner(null);
 			} catch (cause) {
-				setBanner(`Couldn't switch interface. ${userFacingError(cause)}`);
+				setBanner(`Switch failed: ${cause instanceof Error ? cause.message : String(cause)}`);
 			}
 		},
 		[interfaceSwitch],
@@ -1111,7 +1180,7 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 				if (!result) recheck = { outcome: "not-attempted" };
 				// A superseded answer is not a verdict, same rule as the hook's own
 				// loop: the readiness tick can overtake a slow tap request, and acting
-				// on the tap's payload would alert "Couldn't reach AO" (or "Not ready
+				// on the tap's payload would alert "Could not reach AO" (or "Not ready
 				// yet" off an older body) while the button had just enabled itself.
 				// The newer request owns the answer; use whatever the hook adopted.
 				else if (result.stale) status = interfaceStatusRef.current;
@@ -1184,7 +1253,7 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 	// would read it before initialisation.
 	useLayoutEffect(() => {
 		if (shellOnly || !headerRightReady) {
-			navigation.setOptions(glassHeaderControl("right"));
+			navigation.setOptions({ headerRight: undefined });
 			return;
 		}
 		navigation.setOptions({
@@ -1198,7 +1267,7 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 						}}
 						disabled={rechecking || interfaceSwitch.starting || interfaceTransitionActive}
 						onPress={() => void requestInterfaceSwitch()}
-						style={({ pressed }) => [styles.headerBrowserBtn, pressed && { opacity: press.opacity }]}
+						style={({ pressed }) => [styles.headerBrowserBtn, pressed && { opacity: 0.6 }]}
 					>
 						{/* A spinner rather than a dimmed glyph: the recheck only runs while
 						    the icon is already faint, so fading it further reads as broken.
@@ -1206,12 +1275,12 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 						    to REQUEST_TIMEOUT_MS otherwise, the same dead-button shape the
 						    recheck spinner exists to remove. */}
 						{rechecking || interfaceSwitch.starting ? (
-							<ActivityIndicator size="small" color={t.accent} />
+							<ActivityIndicator size="small" color={t.blue} />
 						) : (
 							<Feather
 								name={interfaceTransitionActive ? "repeat" : "message-square"}
-								size={iconSize.md}
-								color={interfaceSwitch.status?.supported ? t.accent : t.textFaint}
+								size={18}
+								color={interfaceSwitch.status?.supported ? t.blue : t.textFaint}
 							/>
 						)}
 					</Pressable>
@@ -1219,12 +1288,12 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 						hitSlop={12}
 						accessibilityLabel={browserOpen ? "Close preview" : "Open preview"}
 						onPress={toggleBrowser}
-						style={({ pressed }) => [styles.headerBrowserBtn, pressed && { opacity: press.opacity }]}
+						style={({ pressed }) => [styles.headerBrowserBtn, pressed && { opacity: 0.6 }]}
 					>
 						<Feather
 							name="globe"
-							size={iconSize.lg}
-							color={browserOpen ? t.accent : hasPreview ? t.green : t.textSecondary}
+							size={19}
+							color={browserOpen ? t.blue : hasPreview ? t.green : t.textSecondary}
 						/>
 						{hasPreview && !browserOpen && <View style={styles.browserReadyDot} />}
 					</Pressable>
@@ -1236,35 +1305,27 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 	const confirmKill = useCallback(() => {
 		const doKill = async () => {
 			try {
-				if (!activeConfig) throw new Error("No active machine connection");
-				if (reviewerPane) await killSessionReviewer(activeConfig, String(params.sessionId));
-				else if (shellOnly) await closeShellTerminal(activeConfig, id);
-				else await killSession(activeConfig, id);
+				const config = cfg ?? (await loadConfig());
+				if (shellOnly) await closeShellTerminal(config, id);
+				else await killSession(config, id);
 				haptics.success();
 				leave();
 			} catch (e) {
 				haptics.error();
-				setBanner(`${reviewerPane ? "Couldn't stop the reviewer" : shellOnly ? "Couldn't close the shell" : "Couldn't archive the session"}. ${userFacingError(e)}`);
+				setBanner(`Kill failed: ${e instanceof Error ? e.message : String(e)}`);
 			}
 		};
 		if (Platform.OS === "web") {
 			doKill();
 			return;
 		}
-		if (reviewerPane) {
-			haptics.warning();
-			Alert.alert("Stop reviewer session?", "This closes the persistent reviewer and cancels any review it is currently running. Review history is preserved.", [
-				{ text: "Keep reviewer", style: "cancel" },
-				{ text: "Stop reviewer", style: "destructive", onPress: doKill },
-			]);
-			return;
-		}
+		// Cautionary buzz as the destructive confirmation dialog is raised.
 		haptics.warning();
-		Alert.alert(shellOnly ? "Close shell?" : "Archive session?", shellOnly ? "This stops the worktree shell." : archiveSessionMessage(id), [
+		Alert.alert(shellOnly ? "Close shell?" : "Kill session?", shellOnly ? "This stops the worktree shell." : `This stops ${id}.`, [
 			{ text: "Cancel", style: "cancel" },
-			{ text: shellOnly ? "Close" : "Archive session", style: "destructive", onPress: doKill },
+			{ text: shellOnly ? "Close" : "Kill", style: "destructive", onPress: doKill },
 		]);
-	}, [activeConfig, id, leave, params.sessionId, reviewerPane, shellOnly]);
+	}, [cfg, id, leave, shellOnly]);
 
 	// Restore a terminated session: the daemon re-attaches its worktree agent and
 	// its PTY comes back, so we re-open the terminal once restore succeeds.
@@ -1284,7 +1345,7 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 				if (d) muxRef.current?.resize(terminalHandleId, d.cols, d.rows, projectId);
 			}, 1200);
 		} catch (e) {
-			setBanner(`Couldn't restore the session. ${userFacingError(e)}`);
+			setBanner(`Restore failed: ${e instanceof Error ? e.message : String(e)}`);
 		} finally {
 			setRestoring(false);
 		}
@@ -1313,9 +1374,13 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 		[scheme],
 	);
 
-	// Adjust only the phone's CSS viewport. The xterm renderer, mux attachment,
-	// replay buffer, and daemon-owned PTY dimensions all remain untouched.
+	// Web keeps its DOM-terminal font zoom. Native changes only the local viewport,
+	// preserving the renderer, replay buffer, mux attachment, and shared PTY grid.
 	const zoom = useCallback((delta: number) => {
+		if (isWeb) {
+			setFontSize((current) => Math.min(20, Math.max(7, current + delta)));
+			return;
+		}
 		adjustTerminalViewport(xtermRef.current, delta > 0 ? 1 : -1);
 	}, []);
 
@@ -1333,15 +1398,15 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 			nestedScrollEnabled: true,
 			// Surface an Android WebView render-process crash instead of a silent black
 			// screen, so the user can tell the terminal died vs. never loaded.
-			onRenderProcessGone: () => setBanner("The terminal view stopped working. Go back and open the session again."),
+			onRenderProcessGone: () => setBanner("Terminal renderer crashed - reopen the session (Back, then tap it again)."),
 		}),
 		[],
 	);
 
-	if (activeConfig && !isConfigured(activeConfig)) {
+	if (cfg && !isConfigured(cfg)) {
 		return (
 			<View style={styles.center}>
-				<Text style={styles.bannerText}>No machine paired.</Text>
+				<Text style={styles.bannerText}>No server configured.</Text>
 			</View>
 		);
 	}
@@ -1357,13 +1422,9 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 		<View style={[styles.screen, rootPad > 0 && { paddingBottom: rootPad }]}>
 			<View style={styles.statusBar}>
 				<View style={[styles.statusDot, { backgroundColor: statusColorFor(t)[status] }]} />
-				{/* Status-bar chrome: capped so the toolbar keeps its height and the
-				    terminal grid keeps its rows at accessibility text sizes. */}
-				<Text style={styles.statusText} numberOfLines={1} maxFontSizeMultiplier={1.4}>
-					{TERMINAL_STATUS_LABEL[status]}
-				</Text>
+				<Text style={styles.statusText}>{statusLabel[status]}</Text>
 				{size && !dead && (
-					<Text style={styles.dims} numberOfLines={1} maxFontSizeMultiplier={1.4}>
+					<Text style={styles.dims}>
 						{size.cols}x{size.rows}
 					</Text>
 				)}
@@ -1374,18 +1435,18 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 							hitSlop={6}
 							accessibilityLabel="Smaller text"
 							onPress={() => { haptics.tap(); zoom(-1); }}
-							style={({ pressed }) => [styles.zoomBtn, pressed && { opacity: press.opacity }]}
+							style={({ pressed }) => [styles.zoomBtn, pressed && { opacity: 0.6 }]}
 						>
-							<Feather name="minus" size={iconSize.xs} color={t.textSecondary} />
+							<Feather name="minus" size={13} color={t.textSecondary} />
 						</Pressable>
 						<View style={styles.zoomDivider} />
 						<Pressable
 							hitSlop={6}
 							accessibilityLabel="Larger text"
 							onPress={() => { haptics.tap(); zoom(1); }}
-							style={({ pressed }) => [styles.zoomBtn, pressed && { opacity: press.opacity }]}
+							style={({ pressed }) => [styles.zoomBtn, pressed && { opacity: 0.6 }]}
 						>
-							<Feather name="plus" size={iconSize.xs} color={t.textSecondary} />
+							<Feather name="plus" size={13} color={t.textSecondary} />
 						</Pressable>
 					</View>
 				)}
@@ -1396,19 +1457,19 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 						disabled={restoring}
 						style={({ pressed }) => [styles.restoreBtn, (pressed || restoring) && { opacity: 0.7 }]}
 					>
-						<Feather name="rotate-ccw" size={iconSize.xs} color={t.accent} />
-						<Text style={styles.restoreText}>{restoring ? "Restoring…" : "Restore"}</Text>
+						<Feather name="rotate-ccw" size={12} color={t.blue} />
+						<Text style={styles.restoreText}>{restoring ? "Restoring..." : "Restore"}</Text>
 					</Pressable>
 				) : (
-					// Icon-only: the archive glyph matches the restorable action on the
-					// workers board. The accessible label carries the full operation.
+					// Icon-only: the trash glyph reads as "destroy this session" on its
+					// own, so the label would only cost width. Hence accessibilityLabel.
 					<Pressable
 						hitSlop={8}
-						accessibilityLabel={shellOnly ? "Close shell" : "Archive session"}
+						accessibilityLabel={shellOnly ? "Close shell" : "Kill session"}
 						onPress={confirmKill}
-						style={({ pressed }) => [styles.killBtn, pressed && { opacity: press.opacity }]}
+						style={({ pressed }) => [styles.killBtn, pressed && { opacity: 0.7 }]}
 					>
-						<Feather name={shellOnly ? "x" : "archive"} size={iconSize.sm} color={shellOnly ? t.red : t.textSecondary} />
+						<Feather name={shellOnly ? "x" : "trash-2"} size={14} color={t.red} />
 					</Pressable>
 				)}
 			</View>
@@ -1423,7 +1484,7 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 					<Text style={styles.bannerText}>
 						{interfaceTransitionNoticeText}
 						{interfaceSwitch.acknowledgeNoticeError
-							? ` Couldn't dismiss: ${interfaceSwitch.acknowledgeNoticeError}`
+							? ` Could not dismiss: ${interfaceSwitch.acknowledgeNoticeError}`
 							: ""}
 					</Text>
 					<View style={styles.interfaceFailureActions}>
@@ -1458,25 +1519,34 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 			) : null}
 
 			<View style={styles.termWrap}>
-				<XtermJsWebView
-					// Remount only on theme changes: xterm applies its palette at
-					// construction, so already-painted rows otherwise keep old colours.
-					key={`term-${scheme}`}
-					ref={xtermRef}
-					autoFit={false}
-					xtermOptions={xtermOptions}
-					webViewOptions={webViewOptions}
-					logger={logger}
-					onInitialized={onInitialized}
-					onData={onData}
-					style={{ flex: 1, backgroundColor: t.bgBase }}
-				/>
+				{isWeb ? (
+					<WebTerminal
+						ariaLabel={`Terminal for ${id}`}
+						fontSize={fontSize}
+						onReady={onWebReady}
+						onError={(e) => setBanner(`Terminal failed: ${e instanceof Error ? e.message : String(e)}`)}
+					/>
+				) : (
+					<XtermJsWebView
+						// Remount only on theme changes: xterm applies its palette at
+						// construction, so already-painted rows otherwise keep old colours.
+						key={`term-${scheme}`}
+						ref={xtermRef}
+						autoFit={false}
+						xtermOptions={xtermOptions}
+						webViewOptions={webViewOptions}
+						logger={logger}
+						onInitialized={onInitialized}
+						onData={onData}
+						style={{ flex: 1, backgroundColor: t.bgBase }}
+					/>
+				)}
 				{interfaceTransitionActive ? (
 					<View style={styles.interfaceOverlay}>
 						<View style={styles.interfaceCard}>
-							<Feather name={interfaceRecoveryMessage ? "alert-triangle" : "repeat"} size={iconSize.lg} color={t.accent} />
-							<Text style={styles.interfaceTitle}>{interfaceRecoveryMessage ? "Interface recovery blocked" : "Switching to Chat"}</Text>
-							<Text style={styles.interfaceCopy}>{interfaceRecoveryMessage || terminalInterfacePhaseLabel(interfaceSwitch.transition?.phase)}</Text>
+							<Feather name="repeat" size={22} color={t.blue} />
+							<Text style={styles.interfaceTitle}>Switching to Chat</Text>
+							<Text style={styles.interfaceCopy}>{terminalInterfacePhaseLabel(interfaceSwitch.transition?.phase)}</Text>
 							{mobileInterfaceTransitionIsCancellable(interfaceSwitch.transition) ? (
 								<Pressable
 									disabled={interfaceSwitch.cancelling}
@@ -1487,7 +1557,7 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 								</Pressable>
 							) : null}
 							{interfaceSwitch.error ? <Text style={styles.interfaceError}>{interfaceSwitch.error}</Text> : null}
-							{interfaceSwitch.fetchFailed || interfaceRecoveryMessage ? (
+							{interfaceSwitch.fetchFailed ? (
 								<Pressable
 									disabled={rechecking}
 									onPress={() => void retryInterfaceCheck()}
@@ -1502,7 +1572,7 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 				{dead && (
 					<View style={styles.deadOverlay}>
 						<View style={styles.deadIcon}>
-							<Feather name="power" size={iconSize.xl} color={t.textTertiary} />
+							<Feather name="power" size={24} color={t.textTertiary} />
 						</View>
 						<Text style={styles.deadTitle}>{shellOnly ? "Shell closed" : "Session terminated"}</Text>
 						<Text style={styles.deadMsg}>{shellOnly ? "This worktree shell is no longer running." : "This session has no live terminal. Restore it to bring the agent back."}</Text>
@@ -1511,8 +1581,8 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 							disabled={restoring}
 							style={({ pressed }) => [styles.restoreCta, (pressed || restoring) && { opacity: 0.8 }]}
 						>
-							<Feather name="rotate-ccw" size={iconSize.sm} color={t.onAccent} />
-							<Text style={styles.restoreCtaText}>{restoring ? "Restoring…" : "Restore session"}</Text>
+							<Feather name="rotate-ccw" size={16} color={t.onAccent} />
+							<Text style={styles.restoreCtaText}>{restoring ? "Restoring..." : "Restore session"}</Text>
 						</Pressable> : null}
 					</View>
 				)}
@@ -1522,40 +1592,37 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 				{browserOpen && preview && (
 					<View style={styles.browserOverlay}>
 						<View style={styles.browserBar}>
-							<Feather name="globe" size={iconSize.xs} color={t.textTertiary} />
+							<Feather name="globe" size={13} color={t.textTertiary} />
 							<Text style={styles.browserPath} numberOfLines={1}>
 								{preview.entry}
 							</Text>
-							<Pressable
-								accessibilityRole="button"
-								accessibilityLabel="Reload preview"
-								hitSlop={PREVIEW_RELOAD_SLOP}
-								onPress={() => { haptics.tap(); previewWebRef.current?.reload(); }}
-								style={styles.browserAction}
-							>
-								<Feather name="rotate-cw" size={iconSize.sm} color={t.accent} />
+							<Pressable hitSlop={8} onPress={() => { haptics.tap(); reloadPreview(); }} style={styles.browserAction}>
+								<Feather name="rotate-cw" size={15} color={t.blue} />
 							</Pressable>
-							<Pressable
-								accessibilityRole="button"
-								accessibilityLabel="Close preview"
-								hitSlop={PREVIEW_CLOSE_SLOP}
-								onPress={() => { haptics.tap(); setBrowserOpen(false); }}
-								style={styles.browserAction}
-							>
-								<Feather name="x" size={iconSize.md} color={t.textSecondary} />
+							<Pressable hitSlop={8} onPress={() => { haptics.tap(); setBrowserOpen(false); }} style={styles.browserAction}>
+								<Feather name="x" size={17} color={t.textSecondary} />
 							</Pressable>
 						</View>
-						<WebView
-							ref={previewWebRef}
-							// The preview route lives behind the daemon's connection-password
-							// auth (Bearer). Without this header the WebView's request 401s and
-							// renders the JSON error body instead of the page. The active
-							// machine's credential is the only one this screen may send.
-							source={{ uri: preview.url, headers: preview.authenticated && activeConfig ? authHeaders(activeConfig) : undefined }}
-							originWhitelist={["*"]}
-							style={styles.browserWeb}
-							onError={() => setBanner("Couldn't load the preview.")}
-						/>
+						{isWeb ? (
+							<iframe
+								ref={webIframeRef}
+								title="preview"
+								src={preview.url}
+								style={{ flex: 1, width: "100%", border: "none", backgroundColor: "#ffffff" }}
+							/>
+						) : (
+							<WebView
+								ref={previewWebRef}
+								// The preview route lives behind the daemon's connection-password
+								// auth (Bearer). Without this header the WebView's request 401s and
+								// renders the JSON error body instead of the page. cfg carries the
+								// password we paired with; authHeaders() turns it into the Bearer.
+								source={{ uri: preview.url, headers: cfg ? authHeaders(cfg) : undefined }}
+								originWhitelist={["*"]}
+								style={styles.browserWeb}
+								onError={() => setBanner("Preview failed to load.")}
+							/>
+						)}
 					</View>
 				)}
 			</View>
@@ -1568,18 +1635,18 @@ export default function TerminalScreen({ session: resolved }: { session?: RouteS
 				    input under the user's caret is hostile. */}
 				{(voice.state === "starting" || voice.state === "recording" || voice.state === "transcribing") && (
 					<View style={[styles.voiceStrip, voice.state === "starting" && styles.voiceStripWarmup]}>
-						<Feather name="mic" size={iconSize.xs} color={voice.state === "starting" ? t.textTertiary : t.accent} />
+						<Feather name="mic" size={13} color={voice.state === "starting" ? t.textTertiary : t.blue} />
 						<Text style={styles.voiceText} numberOfLines={2}>
 							{voice.partial ||
 								(voice.state === "starting"
 									? // The mic is not capturing yet. Saying "Listening" here would
 										// invite speech that gets dropped during warm-up.
-										"Keep holding…"
+										"Keep holding..."
 									: voice.state === "transcribing"
-										? "Transcribing…"
+										? "Transcribing..."
 										: voice.mode === "latched"
-											? "Recording hands-free — tap the mic to finish"
-											: "Speak now — release to insert")}
+											? "Recording hands-free - tap the mic to finish"
+											: "Speak now - release to insert")}
 						</Text>
 					</View>
 				)}
@@ -1615,21 +1682,21 @@ const makeStyles = (t: Theme) =>
 	statusBar: {
 		flexDirection: "row",
 		alignItems: "center",
-		paddingHorizontal: space.md,
-		paddingVertical: space.xs,
+		paddingHorizontal: 14,
+		paddingVertical: 6,
 		borderBottomWidth: 1,
 		borderBottomColor: t.borderSubtle,
 	},
-	statusDot: { width: 8, height: 8, borderRadius: 4, borderCurve: "continuous", marginRight: space.sm },
-	statusText: { fontFamily: "Geist_400Regular", color: t.textSecondary, fontSize: type.caption1.fontSize, flex: 1 },
-	dims: { color: t.textTertiary, fontSize: type.caption2.fontSize, fontFamily: t.fontMono },
+	statusDot: { width: 8, height: 8, borderRadius: 4, marginRight: 8 },
+	statusText: { color: t.textSecondary, fontSize: 12, flex: 1 },
+	dims: { color: t.textTertiary, fontSize: 11, fontFamily: t.fontMono },
 	zoomGroup: {
 		flexDirection: "row",
 		alignItems: "center",
-		marginLeft: space.sm,
+		marginLeft: 10,
 		borderWidth: 1,
 		borderColor: t.borderDefault,
-		borderRadius: 8, borderCurve: "continuous",
+		borderRadius: 7,
 		backgroundColor: t.bgElevated,
 		overflow: "hidden",
 	},
@@ -1637,21 +1704,21 @@ const makeStyles = (t: Theme) =>
 	zoomDivider: { width: 1, height: 24, backgroundColor: t.borderDefault },
 	banner: {
 		backgroundColor: t.bgElevated,
-		paddingHorizontal: space.md,
-		paddingVertical: space.sm,
+		paddingHorizontal: 14,
+		paddingVertical: 8,
 		borderBottomWidth: 1,
 		borderBottomColor: t.borderDefault,
 	},
-	bannerText: { fontFamily: "Geist_400Regular", color: t.amber, fontSize: type.caption1.fontSize },
+	bannerText: { color: t.attention, fontSize: 12 },
 	interfaceFailureActions: {
-		marginTop: space.sm,
+		marginTop: 8,
 		flexDirection: "row",
 		alignItems: "center",
 		justifyContent: "flex-end",
-		gap: space.lg,
+		gap: 16,
 	},
-	interfaceFailureActionText: { fontFamily: "Geist_600SemiBold", color: t.red, fontSize: type.caption1.fontSize, fontWeight: "600" },
-	interfaceFailureDismissText: { fontFamily: "Geist_600SemiBold", color: t.textSecondary, fontSize: type.caption1.fontSize, fontWeight: "600" },
+	interfaceFailureActionText: { color: t.red, fontSize: 12, fontWeight: "700" },
+	interfaceFailureDismissText: { color: t.textSecondary, fontSize: 12, fontWeight: "600" },
 	termWrap: { flex: 1, backgroundColor: t.bgBase },
 	dock: {
 		borderTopWidth: 1,
@@ -1663,10 +1730,10 @@ const makeStyles = (t: Theme) =>
 		alignItems: "center",
 		justifyContent: "center",
 		backgroundColor: t.tintRed,
-		borderRadius: 12, borderCurve: "continuous",
-		paddingHorizontal: space.sm,
-		paddingVertical: space.xxs,
-		marginLeft: space.md,
+		borderRadius: 12,
+		paddingHorizontal: 8,
+		paddingVertical: 5,
+		marginLeft: 12,
 	},
 	// Bare glyph in the nav bar: iOS draws its own round box behind header buttons,
 	// so a tinted pill here would fight it. Colour carries the state instead.
@@ -1683,33 +1750,33 @@ const makeStyles = (t: Theme) =>
 		...StyleSheet.absoluteFill,
 		alignItems: "center",
 		justifyContent: "center",
-		paddingHorizontal: space.xxl,
+		paddingHorizontal: 24,
 		backgroundColor: t.scrim,
 	},
 	interfaceCard: {
 		width: "100%",
 		maxWidth: 340,
 		alignItems: "center",
-		gap: space.sm,
-		paddingHorizontal: space.xl,
-		paddingVertical: space.xxl,
-		borderRadius: 16, borderCurve: "continuous",
+		gap: 10,
+		paddingHorizontal: 22,
+		paddingVertical: 24,
+		borderRadius: 16,
 		borderWidth: 1,
 		borderColor: t.borderDefault,
 		backgroundColor: t.bgSurface,
 	},
-	interfaceTitle: { fontFamily: "Geist_600SemiBold", color: t.textPrimary, fontSize: type.callout.fontSize, fontWeight: "600" },
-	interfaceCopy: { fontFamily: "Geist_400Regular", color: t.textSecondary, fontSize: type.caption1.fontSize, lineHeight: type.caption1.lineHeight, textAlign: "center" },
+	interfaceTitle: { color: t.textPrimary, fontSize: 16, fontWeight: "700" },
+	interfaceCopy: { color: t.textSecondary, fontSize: 12, lineHeight: 18, textAlign: "center" },
 	interfaceCancel: {
-		marginTop: space.xxs,
-		borderRadius: 8, borderCurve: "continuous",
+		marginTop: 4,
+		borderRadius: 9,
 		borderWidth: 1,
 		borderColor: t.borderDefault,
-		paddingHorizontal: space.md,
-		paddingVertical: space.sm,
+		paddingHorizontal: 13,
+		paddingVertical: 8,
 	},
-	interfaceCancelText: { fontFamily: "Geist_600SemiBold", color: t.textPrimary, fontSize: type.caption1.fontSize, fontWeight: "600" },
-	interfaceError: { fontFamily: "Geist_400Regular", color: t.red, fontSize: type.caption2.fontSize, lineHeight: type.caption2.lineHeight, textAlign: "center" },
+	interfaceCancelText: { color: t.textPrimary, fontSize: 12, fontWeight: "600" },
+	interfaceError: { color: t.red, fontSize: 11, lineHeight: 16, textAlign: "center" },
 	// Small green badge on the globe when a real preview is available. Offsets are
 	// from the square's centre, so it rides the glyph rather than the button frame.
 	browserReadyDot: {
@@ -1718,7 +1785,7 @@ const makeStyles = (t: Theme) =>
 		right: 3,
 		width: 8,
 		height: 8,
-		borderRadius: 4, borderCurve: "continuous",
+		borderRadius: 4,
 		backgroundColor: t.green,
 		borderWidth: 1,
 		borderColor: t.bgSurface,
@@ -1727,59 +1794,59 @@ const makeStyles = (t: Theme) =>
 	browserBar: {
 		flexDirection: "row",
 		alignItems: "center",
-		gap: space.sm,
-		paddingHorizontal: space.md,
-		paddingVertical: space.sm,
+		gap: 10,
+		paddingHorizontal: 12,
+		paddingVertical: 8,
 		backgroundColor: t.bgSurface,
 		borderBottomWidth: 1,
 		borderBottomColor: t.borderSubtle,
 	},
-	browserPath: { flex: 1, color: t.textSecondary, fontFamily: t.fontMono, fontSize: type.caption1.fontSize },
-	browserAction: { paddingHorizontal: space.xxs, paddingVertical: space.hair },
+	browserPath: { flex: 1, color: t.textSecondary, fontFamily: t.fontMono, fontSize: 12 },
+	browserAction: { paddingHorizontal: 4, paddingVertical: 2 },
 	browserWeb: { flex: 1, backgroundColor: "#ffffff" },
 	restoreBtn: {
 		flexDirection: "row",
 		alignItems: "center",
-		gap: space.xxs,
-		backgroundColor: t.accentTint,
-		borderRadius: 12, borderCurve: "continuous",
-		paddingHorizontal: space.md,
-		paddingVertical: space.xxs,
-		marginLeft: space.md,
+		gap: 4,
+		backgroundColor: t.tintBlue,
+		borderRadius: 12,
+		paddingHorizontal: 11,
+		paddingVertical: 4,
+		marginLeft: 12,
 	},
-	restoreText: { fontFamily: "Geist_600SemiBold", color: t.accent, fontWeight: "600", fontSize: type.caption1.fontSize },
+	restoreText: { color: t.blue, fontWeight: "700", fontSize: 12 },
 	deadOverlay: {
 		...StyleSheet.absoluteFill,
 		alignItems: "center",
 		justifyContent: "center",
-		padding: space.xxxl,
-		gap: space.sm,
+		padding: 32,
+		gap: 10,
 		backgroundColor: t.bgBase,
 	},
 	deadIcon: {
 		width: 64,
 		height: 64,
-		borderRadius: 16, borderCurve: "continuous",
+		borderRadius: 18,
 		backgroundColor: t.bgElevated,
 		borderWidth: 1,
 		borderColor: t.borderSubtle,
 		alignItems: "center",
 		justifyContent: "center",
-		marginBottom: space.xs,
+		marginBottom: 6,
 	},
-	deadTitle: { fontFamily: "Geist_600SemiBold", color: t.textPrimary, fontSize: type.body.fontSize, fontWeight: "600", textAlign: "center" },
-	deadMsg: { fontFamily: "Geist_400Regular", color: t.textSecondary, fontSize: type.footnote.fontSize, lineHeight: type.footnote.lineHeight, textAlign: "center", maxWidth: 300 },
+	deadTitle: { color: t.textPrimary, fontSize: 17, fontWeight: "700", textAlign: "center" },
+	deadMsg: { color: t.textSecondary, fontSize: 13, lineHeight: 20, textAlign: "center", maxWidth: 300 },
 	restoreCta: {
 		flexDirection: "row",
 		alignItems: "center",
-		gap: space.sm,
-		backgroundColor: t.accent,
-		borderRadius: 8, borderCurve: "continuous",
-		paddingVertical: space.md,
-		paddingHorizontal: space.xl,
-		marginTop: space.sm,
+		gap: 8,
+		backgroundColor: t.blue,
+		borderRadius: 10,
+		paddingVertical: 12,
+		paddingHorizontal: 20,
+		marginTop: 10,
 	},
-	restoreCtaText: { fontFamily: "Geist_600SemiBold", color: t.onAccent, fontSize: type.subheadline.fontSize, fontWeight: "600" },
+	restoreCtaText: { color: t.onAccent, fontSize: 15, fontWeight: "700" },
 	// Accent-blue like the rest of the chrome. Red is reserved for the mic button
 	// alone: one small saturated element reads as "recording", a whole red panel
 	// reads as an error. It sits at the top of the dock, so it divides itself from
@@ -1787,15 +1854,15 @@ const makeStyles = (t: Theme) =>
 	voiceStrip: {
 		flexDirection: "row",
 		alignItems: "center",
-		gap: space.sm,
-		paddingHorizontal: space.md,
-		paddingVertical: space.xs,
-		backgroundColor: t.accentTint,
+		gap: 8,
+		paddingHorizontal: 12,
+		paddingVertical: 7,
+		backgroundColor: t.tintBlue,
 		borderBottomWidth: 1,
-		borderBottomColor: t.accent,
+		borderBottomColor: t.blue,
 	},
 	// Muted while the mic warms up, so "ready to speak" is a visible state change
 	// and not just a wording difference.
 	voiceStripWarmup: { backgroundColor: t.bgElevated, borderBottomColor: t.borderDefault },
-	voiceText: { fontFamily: "Geist_400Regular", flex: 1, color: t.textPrimary, fontSize: type.footnote.fontSize },
+	voiceText: { flex: 1, color: t.textPrimary, fontSize: 13 },
 });

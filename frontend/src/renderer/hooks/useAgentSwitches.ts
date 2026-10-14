@@ -1,20 +1,17 @@
 import { useQuery } from "@tanstack/react-query";
-import { useEffect } from "react";
 import { apiErrorMessage } from "../lib/api-client";
-import { clientForSessionHost } from "../lib/host-clients";
-import { sessionUiKey } from "../lib/hosts";
+import { clientFor } from "../lib/host-clients";
+import { refKey, type Ref } from "../lib/hosts";
 import { usesPreviewWorkspaceData } from "../lib/preview-mode";
 import type { AgentSwitchSummary } from "../types/workspace";
-import { agentSwitchVisibility } from "../lib/agent-switch-visibility";
 
 export type AgentSwitch = AgentSwitchSummary;
 
 const terminalAgentSwitchStates = new Set<AgentSwitch["state"]>(["completed", "failed"]);
 
 export const agentSwitchesQueryRoot = ["session-agent-switches"] as const;
-export const agentSwitchesQueryKey = (sessionId: string, hostId?: string) => hostId
-	? (["remote-session-agent-switches", hostId, sessionId] as const)
-	: ([...agentSwitchesQueryRoot, sessionId] as const);
+export const agentSwitchesQueryKey = (session?: Ref) =>
+	session ? ([...agentSwitchesQueryRoot, refKey(session)] as const) : agentSwitchesQueryRoot;
 
 export function isTerminalAgentSwitch(agentSwitch: AgentSwitch): boolean {
 	return terminalAgentSwitchStates.has(agentSwitch.state);
@@ -76,35 +73,26 @@ export function selectDurableAgentSwitch(
 }
 
 export function agentSwitchesRefetchInterval(agentSwitches: AgentSwitch[]): 1_000 | false {
-	return findActiveAgentSwitch(agentSwitches) || agentSwitches.some(agentSwitchNeedsRecovery)
+	return findActiveAgentSwitch(agentSwitches) || agentSwitches.some(agentSwitchNeedsSourceRecovery)
 		? 1_000
 		: false;
 }
 
-async function fetchAgentSwitches(sessionId: string, hostId?: string, signal?: AbortSignal): Promise<AgentSwitch[]> {
-	const localSourceKey = `switch-history:${sessionUiKey(sessionId, hostId)}`;
-	const { data, error } = await clientForSessionHost(hostId).GET("/api/v1/sessions/{sessionId}/agent-switches", {
-		params: { path: { sessionId } },
-		signal,
+async function fetchAgentSwitches(session: Ref): Promise<AgentSwitch[]> {
+	const { data, error } = await clientFor(session.host).GET("/api/v1/sessions/{sessionId}/agent-switches", {
+		params: { path: { sessionId: session.id } },
 	});
 	if (error) {
-		agentSwitchVisibility.setQueryHealthy("active", false, localSourceKey);
-		agentSwitchVisibility.setQueryHealthy("history", false, localSourceKey);
 		throw new Error(apiErrorMessage(error, "Unable to load agent switch status"));
 	}
-	agentSwitchVisibility.setQueryHealthy("active", true, localSourceKey);
-	agentSwitchVisibility.setQueryHealthy("history", true, localSourceKey);
 	return data?.switches ?? [];
 }
 
-export function useAgentSwitches(sessionId: string, hostIdOrEnabled?: string | boolean) {
-	const hostId = typeof hostIdOrEnabled === "string" ? hostIdOrEnabled : undefined;
-	const enabled = typeof hostIdOrEnabled === "boolean" ? hostIdOrEnabled : true;
-	useEffect(() => () => agentSwitchVisibility.clearQuerySource(`switch-history:${sessionUiKey(sessionId, hostId)}`), [hostId, sessionId]);
+export function useAgentSwitches(session: Ref | undefined) {
 	return useQuery({
-		queryKey: agentSwitchesQueryKey(sessionId, hostId),
-		enabled: enabled && Boolean(sessionId),
-		queryFn: ({ signal }) => (usesPreviewWorkspaceData && !hostId ? Promise.resolve([]) : fetchAgentSwitches(sessionId, hostId, signal)),
+		queryKey: agentSwitchesQueryKey(session),
+		enabled: Boolean(session?.id),
+		queryFn: () => (usesPreviewWorkspaceData ? Promise.resolve([]) : fetchAgentSwitches(session!)),
 		// Keep active sagas fresh even if the CDC connection is temporarily
 		// unavailable. Source-recovery endpoints accept work asynchronously, so
 		// those recovery rows must also poll until their worker settles.
