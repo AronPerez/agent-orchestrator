@@ -1,4 +1,7 @@
 import { useEffect, useRef } from "react";
+import { randomUUID } from "expo-crypto";
+import { getConversationPage, resolveApproval, resolveInput, sendConversationMessage } from "../chat/api";
+import { createWatchActionHandler, watchConfigForHost } from "./actions";
 import { AppState } from "react-native";
 import { useApp } from "../store";
 import { watchBridge } from "./bridge";
@@ -24,5 +27,27 @@ export function WatchManager() {
 		const subscription = AppState.addEventListener("change", (state) => { if (state === "active") publish(); });
 		return () => { clearInterval(timer); subscription.remove(); };
 	}, [configResolved]);
+	useEffect(() => {
+		const bridge = watchBridge;
+		if (!bridge?.setReady) return;
+		const handle = createWatchActionHandler({
+			configForHost: (hostId) => watchConfigForHost({ ...current.current, poll: current.current.getSessionPoll() }, hostId),
+			read: getConversationPage, approve: resolveApproval, input: resolveInput, message: sendConversationMessage,
+			isActive: (id) => bridge.isRequestActive(id), now: Date.now, newId: randomUUID,
+		});
+		const subscription = bridge.addListener("onWatchRequest", (event) => {
+			void (async () => {
+				let payload: unknown;
+				try { payload = JSON.parse(event.payload); } catch { payload = null; }
+				const result = await handle(payload, event.id, event.deadline);
+				await bridge.completeRequest(event.id, JSON.stringify(result));
+				if (result.status === "sent" || result.status === "already_handled") void current.current.refresh();
+			})().catch(() => { /* Native deadline reports uncertainty; never replay an action. */ });
+		});
+		const ready = () => { void bridge.setReady(AppState.currentState === "active").catch(() => {}); };
+		ready();
+		const lifecycle = AppState.addEventListener("change", ready);
+		return () => { subscription.remove(); lifecycle.remove(); void bridge.setReady(false).catch(() => {}); };
+	}, []);
 	return null;
 }

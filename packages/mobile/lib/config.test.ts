@@ -19,7 +19,7 @@ vi.mock("./secure-store", () => ({
 	secureDeleteItem: async (k: string) => void secure.delete(k),
 }));
 
-const { clearConfig, listServers, loadConfig, removeServer, renameServer, saveConfig, switchServer } =
+const { authHeaders, clearConfig, listServers, loadConfig, removeServer, renameServer, saveConfig, switchServer } =
 	await import("./config");
 
 const node = (host: string, password: string, label?: string) => ({
@@ -200,5 +200,15 @@ describe("renameServer", () => {
 
 		await renameServer(id, "   ");
 		expect((await listServers()).servers[0].label).toBe("a.ts.net");
+	});
+});
+
+describe("expected-host authentication headers", () => {
+	it("pins requests to a known daemon while preserving legacy unpinned configs", () => {
+		expect(authHeaders(node("pc", "token"))).toEqual({ Authorization: "Bearer token" });
+		expect(authHeaders({ ...node("pc", "token"), hostId: "alpha" })).toEqual({
+			Authorization: "Bearer token", "X-AO-Expected-Host-ID": "alpha",
+		});
+		expect(authHeaders(node("pc", ""))).toEqual({});
 	});
 });

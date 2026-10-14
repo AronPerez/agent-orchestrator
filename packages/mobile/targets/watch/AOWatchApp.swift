@@ -68,6 +68,9 @@ struct WatchDetail: View {
                     Text(host.isCurrent(at: context.date) ? "Phone snapshot" : "Stale · refresh on iPhone").font(.caption)
                     if let captured = host.capturedAt { Text(Date(timeIntervalSince1970: captured / 1000), style: .relative).font(.caption) }
                 }
+                if item.mode == "chat" {
+                    NavigationLink("Wrist actions") { WatchActionsView(host: host, item: item) }
+                }
                 Label("Open on iPhone", systemImage: "iphone")
                 Text("Open AO and select this worker. This does not launch the phone app.").font(.caption).foregroundStyle(.secondary)
             }.frame(maxWidth: .infinity, alignment: .leading)

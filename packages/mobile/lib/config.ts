@@ -48,7 +48,10 @@ export const DEFAULT_CONFIG: ServerConfig = {
 };
 
 export function authHeaders(cfg: ServerConfig): Record<string, string> {
-	return cfg.password ? { Authorization: `Bearer ${cfg.password}` } : {};
+	return {
+		...(cfg.password ? { Authorization: `Bearer ${cfg.password}` } : {}),
+		...(cfg.hostId ? { "X-AO-Expected-Host-ID": cfg.hostId } : {}),
+	};
 }
 
 // Strip a pasted scheme (http://, ws://, …) and trailing slashes so we never
