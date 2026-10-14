@@ -7,5 +7,7 @@
 // Overridable via EXPO_PUBLIC_SENTRY_DSN. Note: this only takes effect once the
 // @sentry/react-native SDK is installed (npx expo install @sentry/react-native +
 // config plugin + prebuild); until then sentry.ts stays a no-op.
-export const DEFAULT_SENTRY_DSN =
-	"https://1d7f28aaf986243fae2218db3be2812a@o4511955966361600.ingest.us.sentry.io/4511967513935872";
+// Fork policy: this fork sends no outbound telemetry by default (develop
+// 09d842346). The upstream baked-in default is cleared, so nothing is sent
+// unless a build or user explicitly supplies one via the override below.
+export const DEFAULT_SENTRY_DSN = "";

@@ -9,5 +9,7 @@
 // process and daemon read AO_SENTRY_DSN, and both fall back to this constant.
 // Mobile has its own project and constant (see packages/mobile), because the
 // Expo bundle cannot reach frontend/src.
-export const DEFAULT_SENTRY_DSN =
-	"https://664339d231569b18bcf50d69a0ce37bf@o4511955966361600.ingest.us.sentry.io/4511955986677760";
+// Fork policy: this fork sends no outbound telemetry by default (develop
+// 09d842346). The upstream baked-in default is cleared, so nothing is sent
+// unless a build or user explicitly supplies one via the override below.
+export const DEFAULT_SENTRY_DSN = "";

@@ -69,7 +69,7 @@ export function initMobileTelemetry(): MobileTelemetry | null {
 	if (telemetry) return telemetry;
 	// Dev gate: a dev client (npm start / Expo Go) must never send to the
 	// production project. Desktop constructs no client unless packaged.
-	if (__DEV__ || MOBILE_TELEMETRY_DISABLED) return null;
+	if (__DEV__ || MOBILE_TELEMETRY_DISABLED || !MOBILE_POSTHOG_KEY) return null;
 
 	const client = new PostHog(MOBILE_POSTHOG_KEY, {
 		host: MOBILE_POSTHOG_HOST,

@@ -23,6 +23,9 @@ describe("initTelemetry recovery", () => {
 	beforeEach(() => {
 		vi.resetModules();
 		vi.clearAllMocks();
+		// This fork ships no default PostHog key, so init is exercised with an
+		// explicitly configured one.
+		vi.stubEnv("VITE_AO_POSTHOG_KEY", "phc_test");
 	});
 
 	it("retries init after a transient thrown failure instead of caching it", async () => {
