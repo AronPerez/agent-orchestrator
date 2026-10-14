@@ -686,7 +686,7 @@ describe("useTerminalSession", () => {
 			const { view, terminal, muxes } = setup();
 
 			// The daemon probes liveness and spawns the runtime client before the
-			// first byte — OPEN_TIMEOUT_MS budgets 3s for it. If the cap ran from
+			// first byte — OPEN_TIMEOUT_MS budgets 6s for it. If the cap ran from
 			// connect() it would expire here, flush nothing, and leave the gate
 			// permanently off, so the replay would land frame-by-frame.
 			act(() => void vi.advanceTimersByTime(1200));
@@ -812,7 +812,7 @@ describe("useTerminalSession", () => {
 			// Well past REPLAY_CAP_MS and REPLAY_FIRST_BYTE_MS, and still covered:
 			// both are armed from `opened`, so neither is running. This is what
 			// fails if either one is ever moved back to connect().
-			act(() => void vi.advanceTimersByTime(2_999));
+			act(() => void vi.advanceTimersByTime(5_999));
 			expect(view.result.current.replaySettled).toBe(false);
 
 			act(() => void vi.advanceTimersByTime(1)); // OPEN_TIMEOUT_MS
@@ -1052,7 +1052,8 @@ describe("useTerminalSession", () => {
 
 	it("hard-reconnects when the server never acknowledges open", () => {
 		const { view, muxes } = setup();
-		act(() => void vi.advanceTimersByTime(2_999));
+		// OPEN_TIMEOUT_MS outlasts the daemon's 3s attach-retry ladder.
+		act(() => void vi.advanceTimersByTime(5_999));
 		expect(muxes).toHaveLength(1);
 		act(() => void vi.advanceTimersByTime(1));
 		expect(view.result.current.state).toBe("reattaching");
