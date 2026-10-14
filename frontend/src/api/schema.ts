@@ -4127,6 +4127,7 @@ export interface components {
             reviewerConfig?: components["schemas"]["AgentConfig"];
             /** @enum {string} */
             reviewerHarness?: "claude-code" | "codex" | "copilot" | "cursor" | "kilocode" | "opencode" | "opencode-v2" | "kiro" | "pi" | "agy" | "devin" | "droid" | "kimi" | "kimchi" | "muse" | "amp" | "aider" | "grok" | "crush" | "auggie" | "cline" | "autohand";
+            runtimeUnreachable?: boolean;
             /** @enum {string} */
             scmStatus?: "pr_open" | "draft" | "ci_failed" | "review_pending" | "changes_requested" | "commented" | "approved" | "mergeable" | "merged";
             /** @enum {string} */
@@ -5082,6 +5083,7 @@ export interface components {
                 [key: string]: string;
             };
             orchestrator?: components["schemas"]["RoleOverride"];
+            orchestratorPrompt?: string;
             orchestratorRules?: string;
             postCreate?: string[];
             preRemove?: string[];

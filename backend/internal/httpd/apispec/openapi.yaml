@@ -14775,6 +14775,8 @@ components:
           type: object
         orchestrator:
           $ref: '#/components/schemas/RoleOverride'
+        orchestratorPrompt:
+          type: string
         orchestratorRules:
           type: string
         postCreate:
