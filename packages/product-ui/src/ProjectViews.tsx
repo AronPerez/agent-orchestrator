@@ -43,6 +43,7 @@ export type ProjectSourcePickerViewProps = {
 	dialog?: boolean;
 	disabled: boolean;
 	folderIcon?: ReactNode;
+	hostRow?: ReactNode;
 	labels: ProjectSourcePickerLabels;
 	onClose?: () => void;
 	onSelect: (source: ProjectSource) => void;
@@ -56,6 +57,7 @@ export function ProjectSourcePickerView({
 	dialog = false,
 	disabled,
 	folderIcon,
+	hostRow,
 	labels,
 	onClose,
 	onSelect,
@@ -63,19 +65,15 @@ export function ProjectSourcePickerView({
 }: ProjectSourcePickerViewProps) {
 	return (
 		<div
-			className={cn(
-				"relative isolate flex w-full flex-col items-stretch gap-6",
-				dialog
-					? "max-w-(--size-import-modal-max) rounded-lg border border-border bg-popover p-4 text-popover-foreground shadow-xl"
-					: "max-w-(--size-import-modal-max) rounded-welcome-panel border border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-modal)] p-(--size-import-modal-padding) shadow-[var(--shadow-import-modal)]",
-			)}
+			className="relative isolate flex w-full max-w-(--size-import-modal-max) flex-col items-stretch gap-6 rounded-welcome-panel border border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-modal)] p-(--size-import-modal-padding) shadow-[var(--shadow-import-modal)]"
 			role={dialog ? undefined : "group"}
 			aria-label={dialog ? undefined : labels.title}
 		>
 			<div className={cn("relative z-[1] flex flex-col items-start gap-1", onClose && "pr-10")}>
-				<h2 className={dialog ? "text-base font-semibold text-foreground" : "import-title text-balance"}>{labels.title}</h2>
-				<p className={dialog ? "text-sm text-muted-foreground" : "import-description text-pretty"}>{labels.description}</p>
+				<h2 className="import-title text-balance">{labels.title}</h2>
+				<p className="import-description text-pretty">{labels.description}</p>
 			</div>
+			{hostRow}
 			<div className="relative z-[2] grid grid-cols-1 gap-4 self-stretch sm:grid-cols-2 sm:gap-6">
 				<ProjectSourceButton
 					description={labels.cloneDescription}
@@ -83,7 +81,6 @@ export function ProjectSourcePickerView({
 					icon={cloneIcon}
 					kind="clone"
 					labels={labels}
-					dialog={dialog}
 					onClick={() => onSelect("clone")}
 				/>
 				<ProjectSourceButton
@@ -92,41 +89,28 @@ export function ProjectSourcePickerView({
 					icon={folderIcon}
 					kind="local"
 					labels={labels}
-					dialog={dialog}
 					onClick={() => onSelect("local")}
 				/>
 			</div>
 			<button
 				type="button"
 				aria-label={labels.workspace}
-				className={cn(
-					"relative z-[2] flex min-h-18 w-full items-center gap-4 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 disabled:pointer-events-none disabled:opacity-50",
-					dialog
-						? "rounded-md border border-border bg-muted/50 px-3 py-3 hover:bg-muted"
-						: "rounded-welcome-panel border border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-card)] px-5 py-4 hover:bg-[var(--color-bg-import-card-hover)]",
-				)}
+				className="relative z-[2] flex min-h-18 w-full items-center gap-4 rounded-welcome-panel border border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-card)] px-5 py-4 text-left transition-colors hover:bg-[var(--color-bg-import-card-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 disabled:pointer-events-none disabled:opacity-50"
 				disabled={disabled}
 				onClick={() => onSelect("workspace")}
 			>
-				<span
-					className={cn(
-						"grid shrink-0 place-items-center text-muted-foreground",
-						dialog
-							? "size-8 rounded-md bg-muted"
-							: "size-10 rounded-lg border border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-chip)]",
-					)}
-				>
+				<span className="grid size-10 shrink-0 place-items-center rounded-lg border border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-chip)] text-[var(--color-text-import-muted)]">
 					{workspaceIcon}
 				</span>
 				<span className="min-w-0 flex-1">
-					<span className={dialog ? "block text-sm font-medium text-foreground" : "block text-[15px] font-bold leading-5 text-[var(--color-text-import-title)]"}>
+					<span className="block text-[15px] font-bold leading-5 text-[var(--color-text-import-title)]">
 						{labels.workspace}
 					</span>
-					<span className={dialog ? "mt-0.5 block text-xs text-muted-foreground" : "mt-1 block text-pretty text-[13px] leading-5 text-[var(--color-text-import-muted)]"}>
+					<span className="mt-1 block text-pretty text-[13px] leading-5 text-[var(--color-text-import-muted)]">
 						{labels.workspaceDescription}
 					</span>
 				</span>
-				<span className="shrink-0 text-muted-foreground" aria-hidden="true">
+				<span className="shrink-0 text-[var(--color-text-import-muted)]" aria-hidden="true">
 					{arrowIcon}
 				</span>
 			</button>
@@ -150,7 +134,6 @@ function ProjectSourceButton({
 	disabled,
 	icon,
 	kind,
-	dialog,
 	labels,
 	onClick,
 }: {
@@ -159,7 +142,6 @@ function ProjectSourceButton({
 	icon?: ReactNode;
 	kind: Exclude<ProjectSource, "workspace">;
 	labels: ProjectSourcePickerLabels;
-	dialog: boolean;
 	onClick: () => void;
 }) {
 	const isClone = kind === "clone";
@@ -170,66 +152,29 @@ function ProjectSourceButton({
 		<button
 			type="button"
 			aria-label={title}
-			className={cn(
-				"flex w-full flex-col justify-start text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 disabled:pointer-events-none disabled:opacity-50",
-				dialog
-					? "min-h-36 gap-3 rounded-md border border-border bg-muted/50 p-4 hover:bg-muted"
-					: "min-h-56 gap-5 rounded-welcome-panel border border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-card)] p-6 hover:bg-[var(--color-bg-import-card-hover)]",
-			)}
+			className="flex min-h-56 w-full flex-col justify-start gap-5 rounded-welcome-panel border border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-card)] p-6 text-left transition-colors hover:bg-[var(--color-bg-import-card-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 disabled:pointer-events-none disabled:opacity-50"
 			disabled={disabled}
 			onClick={onClick}
 		>
-				<span className="flex min-h-24 w-full items-center justify-center">
-					<span
-						className={cn(
-							"flex w-full max-w-[300px] flex-col overflow-hidden rounded-lg",
-							dialog
-								? "border border-border bg-background/50"
-								: "border border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-illustration)]",
-						)}
-					>
-						<span
-							className={cn(
-								"flex min-w-0 items-center gap-2 border-b px-4 py-3",
-								dialog
-									? "border-border text-muted-foreground"
-									: "border-[var(--color-border-import-modal)] text-[var(--color-text-import-muted)]",
-							)}
-						>
+			<span className="flex min-h-24 w-full items-center justify-center">
+				<span className="flex w-full max-w-[300px] flex-col overflow-hidden rounded-lg border border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-illustration)]">
+					<span className="flex min-w-0 items-center gap-2 border-b border-[var(--color-border-import-modal)] px-4 py-3 text-[var(--color-text-import-muted)]">
 						<span className="shrink-0">{icon}</span>
 						<span className="truncate font-mono text-[12px] leading-4">{example}</span>
 					</span>
 					<span className="flex items-center gap-2 px-4 py-3">
 						<span className="size-2 shrink-0 rounded-full bg-accent-strong" aria-hidden="true" />
-							<span
-								className={
-									dialog
-										? "font-mono text-xs font-medium text-foreground"
-										: "font-mono text-[12px] font-bold leading-4 text-[var(--color-text-import-title)]"
-								}
-							>
+						<span className="font-mono text-[12px] font-bold leading-4 text-[var(--color-text-import-title)]">
 							{branch}
 						</span>
 					</span>
 				</span>
 			</span>
 			<span className="mt-auto flex w-full flex-col items-start gap-2">
-				<span
-					className={
-						dialog
-							? "text-sm font-medium text-foreground"
-							: "text-[16px] font-bold leading-6 text-[var(--color-text-import-title)]"
-					}
-				>
+				<span className="text-[16px] font-bold leading-6 text-[var(--color-text-import-title)]">
 					{title}
 				</span>
-				<span
-					className={
-						dialog
-							? "text-xs text-muted-foreground"
-							: "text-pretty text-[14px] font-normal leading-[23px] text-[var(--color-text-import-muted)]"
-					}
-				>
+				<span className="text-pretty text-[14px] font-normal leading-[23px] text-[var(--color-text-import-muted)]">
 					{description}
 				</span>
 			</span>
@@ -251,35 +196,32 @@ export function ProjectSetupHeaderView({
 	disabled,
 	leadingAction,
 	path,
-	showPath = true,
 	title,
 }: {
-	CloseButton: ComponentType<{ "aria-label": string; children: ReactNode; disabled: boolean }>;
+	CloseButton: ComponentType<{
+		"aria-label": string;
+		children: ReactNode;
+		disabled: boolean;
+	}>;
 	Description: ComponentType<ProjectSetupHeaderTextProps>;
 	Title: ComponentType<ProjectSetupHeaderTextProps>;
 	closeIcon: ReactNode;
 	closeLabel: string;
 	disabled: boolean;
 	leadingAction?: ReactNode;
-	path?: string;
-	showPath?: boolean;
+	path: string;
 	title: string;
 }) {
 	return (
-		<div
-			className={cn(
-				"flex justify-between gap-4",
-				showPath ? "items-start border-b border-border p-4" : "items-center px-4 pt-3",
-			)}
-		>
+		<div className="flex items-start justify-between gap-4 border-b border-[var(--color-border-agents-sheet)] p-(--size-import-dialog-padding)">
 			{leadingAction}
-			<div className={cn("min-w-0", !showPath && "flex-1")}>
-				<Title className={showPath ? "text-subtitle font-semibold text-foreground" : "settings-dialog-title text-left"}>
+			<div className="min-w-0">
+				<Title className="text-subtitle font-semibold text-[var(--color-text-agents-sheet-title)]">
 					{title}
 				</Title>
-				{showPath && path ? (
-					<Description className="mt-1 break-all text-xs text-muted-foreground">{path}</Description>
-				) : null}
+				<Description className="mt-1 break-all text-xs text-[var(--color-text-agents-sheet-description)]">
+					{path}
+				</Description>
 			</div>
 			<CloseButton aria-label={closeLabel} disabled={disabled}>
 				{closeIcon}
@@ -306,12 +248,11 @@ export function ProjectSetupFormView({
 	onSubmit,
 	setupNotice,
 	submitLabel,
-	submitClassName,
 	cancelLabel,
 }: {
 	agentControls: { worker: ReactNode; orchestrator: ReactNode };
 	agents: {
-		cacheMessage?: string;
+		cacheMessage: string;
 		error?: string | null;
 		loading: boolean;
 		loadingMessage: string;
@@ -327,31 +268,34 @@ export function ProjectSetupFormView({
 	onSubmit: () => void;
 	setupNotice?: { message: string; warning?: string | null } | null;
 	submitLabel: string;
-	submitClassName?: string;
-	cancelLabel?: string;
+	cancelLabel: string;
 }) {
 	const submit = (event: FormEvent<HTMLFormElement>) => {
 		event.preventDefault();
 		if (canSubmit) onSubmit();
 	};
 	return (
-		<form className="space-y-5 p-4" onSubmit={submit}>
+		<form
+			className="space-y-5 p-(--size-import-dialog-padding)"
+			onSubmit={submit}
+		>
 			<div className="grid gap-4 sm:grid-cols-2">
 				{agentControls.worker}
 				{agentControls.orchestrator}
 			</div>
 
 			{agents.loading && (
-				<p className="text-xs leading-row text-[var(--color-text-agents-sheet-description)]" role="status">
+				<p
+					className="text-xs leading-row text-[var(--color-text-agents-sheet-description)]"
+					role="status"
+				>
 					{agents.loadingMessage}
 				</p>
 			)}
 
-			{agents.cacheMessage ? (
-				<p className="text-xs leading-row text-[var(--color-text-agents-sheet-description)]">
-					{agents.cacheMessage}
-				</p>
-			) : null}
+			<p className="text-xs leading-row text-[var(--color-text-agents-sheet-description)]">
+				{agents.cacheMessage}
+			</p>
 
 			{agents.error && (
 				<div
@@ -372,12 +316,16 @@ export function ProjectSetupFormView({
 				</div>
 			)}
 
-			<div>{intakeControl}</div>
+			<div className="border-t border-[var(--color-border-agents-sheet)] pt-5">
+				{intakeControl}
+			</div>
 
 			{setupNotice && (
 				<div className="rounded-lg border border-[var(--color-border-agents-sheet)] bg-[var(--color-bg-agents-sheet-control)]/80 px-3 py-2.5 text-xs leading-body-md text-[var(--color-text-agents-sheet-description)]">
 					<p>{setupNotice.message}</p>
-					{setupNotice.warning && <p className="mt-2 text-warning">{setupNotice.warning}</p>}
+					{setupNotice.warning && (
+						<p className="mt-2 text-warning">{setupNotice.warning}</p>
+					)}
 				</div>
 			)}
 
@@ -401,27 +349,24 @@ export function ProjectSetupFormView({
 						>
 							{alert.title}
 						</p>
-						<p className="text-[var(--color-text-agents-sheet-description)]">{alert.message}</p>
+						<p className="text-[var(--color-text-agents-sheet-description)]">
+							{alert.message}
+						</p>
 					</div>
 				</div>
 			)}
 
 			<div className="flex items-center justify-end gap-3 pt-1">
-				{cancelLabel ? (
-					<button
-						className="settings-footer-button disabled:pointer-events-none disabled:opacity-50"
-						type="button"
-						disabled={isBusy}
-						onClick={onCancel}
-					>
-						{cancelLabel}
-					</button>
-				) : null}
 				<button
-					className={cn(
-						"settings-footer-button settings-footer-button-primary disabled:pointer-events-none disabled:opacity-50",
-						submitClassName,
-					)}
+					className="settings-footer-button disabled:pointer-events-none disabled:opacity-50"
+					type="button"
+					disabled={isBusy}
+					onClick={onCancel}
+				>
+					{cancelLabel}
+				</button>
+				<button
+					className="settings-footer-button settings-footer-button-primary disabled:pointer-events-none disabled:opacity-50"
 					type="submit"
 					disabled={!canSubmit}
 				>
@@ -479,9 +424,13 @@ export function ProjectSettingsRow({
 		<div className={cn("settings-row-bar", className)}>
 			<div className="flex shrink-0 items-center gap-(--size-settings-row-icon-gap)">
 				{icon}
-				<span className="whitespace-nowrap text-sm leading-5 text-settings-label">{label}</span>
+				<span className="whitespace-nowrap text-sm leading-5 text-settings-label">
+					{label}
+				</span>
 			</div>
-			<div className="flex min-w-0 flex-1 items-center justify-end">{children}</div>
+			<div className="flex min-w-0 flex-1 items-center justify-end">
+				{children}
+			</div>
 		</div>
 	);
 }
@@ -596,11 +545,15 @@ export function ProjectGeneralSettingsView({
 	labels,
 	onDisplayNameChange,
 	project,
-	showTitle = false,
 }: {
 	displayName: string;
 	externalLink?: ProjectExternalLink;
-	icons?: Partial<Record<"edit" | "name" | "id" | "kind" | "path" | "repo" | "workspaceRepo", ReactNode>>;
+	icons?: Partial<
+		Record<
+			"edit" | "name" | "id" | "kind" | "path" | "repo" | "workspaceRepo",
+			ReactNode
+		>
+	>;
 	labels: {
 		title: string;
 		name: string;
@@ -613,7 +566,6 @@ export function ProjectGeneralSettingsView({
 		editName: string;
 	};
 	onDisplayNameChange: (value: string) => void;
-	showTitle?: boolean;
 	project: {
 		id: string;
 		kindLabel: string;
@@ -626,7 +578,7 @@ export function ProjectGeneralSettingsView({
 }) {
 	return (
 		<>
-			<ProjectSettingsSection title={labels.title} titleHidden={!showTitle} grouped>
+			<ProjectSettingsSection title={labels.title} titleHidden grouped>
 				<ProjectSettingsInputRow
 					editIcon={icons?.edit}
 					editLabel={labels.editName}
@@ -636,14 +588,40 @@ export function ProjectGeneralSettingsView({
 					value={displayName}
 					onChange={onDisplayNameChange}
 				/>
-				<ProjectSettingsValueRow externalLink={externalLink} href={project.pathHref} icon={icons?.path} label={labels.path} value={project.path} />
-				<ProjectSettingsValueRow externalLink={externalLink} href={project.repoHref} icon={icons?.repo} label={labels.repo} value={project.repo || "—"} />
+				<ProjectSettingsValueRow
+					icon={icons?.id}
+					label={labels.id}
+					value={project.id}
+				/>
+				<ProjectSettingsValueRow
+					icon={icons?.kind}
+					label={labels.kind}
+					value={project.kindLabel}
+				/>
+				<ProjectSettingsValueRow
+					externalLink={externalLink}
+					href={project.pathHref}
+					icon={icons?.path}
+					label={labels.path}
+					value={project.path}
+				/>
+				<ProjectSettingsValueRow
+					externalLink={externalLink}
+					href={project.repoHref}
+					icon={icons?.repo}
+					label={labels.repo}
+					value={project.repo || "—"}
+				/>
 			</ProjectSettingsSection>
 			{project.workspaceRepos && (
 				<ProjectSettingsSection title={labels.workspaceRepos} grouped>
 					{project.workspaceRepos.length > 0 ? (
 						project.workspaceRepos.map((repo) => (
-							<ProjectSettingsRow key={repo.name} icon={icons?.workspaceRepo} label={repo.name}>
+							<ProjectSettingsRow
+								key={repo.name}
+								icon={icons?.workspaceRepo}
+								label={repo.name}
+							>
 								<span className="settings-row-value">
 									{repo.relativePath}
 									{repo.repo ? ` · ${repo.repo}` : ""}
@@ -651,7 +629,9 @@ export function ProjectGeneralSettingsView({
 							</ProjectSettingsRow>
 						))
 					) : (
-						<p className="px-1 text-xs text-settings-muted">{labels.workspaceReposEmpty}</p>
+						<p className="px-1 text-xs text-settings-muted">
+							{labels.workspaceReposEmpty}
+						</p>
 					)}
 				</ProjectSettingsSection>
 			)}
@@ -664,7 +644,7 @@ export function ProjectAgentsSettingsView({
 	orchestratorArea,
 	orchestratorModelArea,
 	permissions,
-	orchestratorPermissions,
+	sessionInterfaceArea,
 	title,
 	workerArea,
 	workerModelArea,
@@ -673,7 +653,8 @@ export function ProjectAgentsSettingsView({
 	orchestratorArea: ReactNode;
 	orchestratorModelArea: ReactNode;
 	permissions: { control: ReactNode; icon?: ReactNode; label: string };
-	orchestratorPermissions?: { control: ReactNode; icon?: ReactNode; label: string };
+	/** Omitted where the setting does not apply — see the caller's gate. */
+	sessionInterfaceArea?: ReactNode;
 	title: string;
 	workerArea: ReactNode;
 	workerModelArea: ReactNode;
@@ -687,13 +668,11 @@ export function ProjectAgentsSettingsView({
 			<ProjectSettingsRow icon={permissions.icon} label={permissions.label}>
 				{permissions.control}
 			</ProjectSettingsRow>
-			{orchestratorPermissions ? (
-				<ProjectSettingsRow icon={orchestratorPermissions.icon} label={orchestratorPermissions.label}>
-					{orchestratorPermissions.control}
-				</ProjectSettingsRow>
-			) : null}
+			{sessionInterfaceArea}
 			{missingRequiredMessage && (
-				<p className="px-1 text-xs leading-row text-error" role="alert">{missingRequiredMessage}</p>
+				<p className="px-1 text-xs leading-row text-error" role="alert">
+					{missingRequiredMessage}
+				</p>
 			)}
 		</ProjectSettingsSection>
 	);
@@ -766,7 +745,10 @@ export function ProjectWorkflowSettingsView({
 	);
 }
 
-export type ProjectSettingsFormProps = Omit<HTMLAttributes<HTMLFormElement>, "onSubmit"> & {
+export type ProjectSettingsFormProps = Omit<
+	HTMLAttributes<HTMLFormElement>,
+	"onSubmit"
+> & {
 	onSubmit: () => void;
 };
 
@@ -779,7 +761,10 @@ export function ProjectSettingsFormView({
 	return (
 		<form
 			{...props}
-			className={cn("flex w-full flex-col gap-(--size-settings-section-gap)", className)}
+			className={cn(
+				"flex w-full flex-col gap-(--size-settings-section-gap)",
+				className,
+			)}
 			onSubmit={(event) => {
 				event.preventDefault();
 				onSubmit();

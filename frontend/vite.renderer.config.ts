@@ -1,79 +1,12 @@
 // defineConfig comes from vitest/config (a superset of vite's) so the `test`
 // block typechecks; vitest itself must be pointed at this file explicitly
 // (package.json test script) because it only auto-discovers vite.config.*.
-import { execFileSync } from "node:child_process";
 import { defineConfig } from "vitest/config";
 import type { Plugin } from "vite";
 import { fileURLToPath, URL } from "node:url";
 import { TanStackRouterVite } from "@tanstack/router-plugin/vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
-import { DEFAULT_POSTHOG_HOST } from "./src/shared/posthog-config";
-
-const POSTHOG_ORIGINS = (() => {
-	const configured = process.env.VITE_AO_POSTHOG_HOST?.trim() || DEFAULT_POSTHOG_HOST;
-	if (!configured) return [];
-	let url: URL;
-	try {
-		url = new URL(configured);
-	} catch {
-		return [];
-	}
-	// posthog-js serves capture from api_host but fetches remote config from a
-	// sibling "-assets" host it derives from the same name, so a CSP built only
-	// from api_host blocks that request and logs a console error on every launch
-	// of a packaged build. Capture is unaffected (it uses api_host), and AO
-	// ignores what remote config offers, since replay, flags, and surveys are all
-	// disabled in the client. Allowing the origin only silences the error; the
-	// client settings still win over anything the server would say.
-	//
-	// The asset_host option deliberately does not cover this: per its own docs it
-	// "only applies to /static/* asset paths; dynamic assets like remote config
-	// continue to use the regular asset host derived from api_host".
-	// Scoped to PostHog Cloud, matching what posthog-js itself does: it only
-	// rewrites to an "-assets" sibling for *.posthog.com. A self-hosted instance
-	// or a loopback capture endpoint serves everything from one origin, and
-	// deriving there would emit a nonsense entry (127.0.0.1 would become
-	// "127-assets.0.0.1").
-	const origins = [url.origin];
-	if (/\.posthog\.com$/i.test(url.hostname)) {
-		const assetsHost = url.hostname.replace(/^([^.]+)\./, "$1-assets.");
-		if (assetsHost !== url.hostname) origins.push(`${url.protocol}//${assetsHost}`);
-	}
-	return origins;
-})();
-
-function gitValue(args: string[], fallback: string): string {
-	try {
-		const value = execFileSync("git", args, {
-			cwd: fileURLToPath(new URL("../", import.meta.url)),
-			encoding: "utf8",
-			stdio: ["ignore", "pipe", "ignore"],
-		}).trim();
-		return value || fallback;
-	} catch {
-		return fallback;
-	}
-}
-
-function gitIsDirty(): boolean {
-	try {
-		return execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], {
-			cwd: fileURLToPath(new URL("../", import.meta.url)),
-			encoding: "utf8",
-			stdio: ["ignore", "pipe", "ignore"],
-		}).trim().length > 0;
-	} catch {
-		return false;
-	}
-}
-
-const DEV_BUILD_INFO = {
-	branch: gitValue(["branch", "--show-current"], "main"),
-	commit: gitValue(["rev-parse", "--short", "HEAD"], "unknown"),
-	worktree: gitValue(["rev-parse", "--show-toplevel"], "unknown"),
-	isDirty: gitIsDirty(),
-};
 
 // Cloud terminals attach over a ticketed wss:// dialed directly from the
 // renderer (the WorkOS token stays in the main process; the single-use ticket
@@ -106,54 +39,51 @@ const CLOUD_CP_WS_ORIGINS = (() => {
 // needs it. Enforcing CSP in dev keeps dev/packaged parity — a connect-src
 // gap then fails on the developer's screen, not weeks later in a packaged
 // build (that skew is exactly how the cloud-terminal block in #4666 shipped).
-export function contentSecurityPolicy(mode: "build" | "serve"): string {
+function contentSecurityPolicy(mode: "build" | "serve"): string {
 	return [
 		"default-src 'self'",
 		// react-refresh injects its inline preamble in serve mode; a hash is
 		// impractical because the preamble changes with the plugin version.
 		mode === "serve" ? "script-src 'self' 'unsafe-inline'" : "script-src 'self'",
 		"style-src 'self' 'unsafe-inline'",
-		// Repository avatars can come from self-hosted SCM instances whose origins
-		// are only known at runtime. Keep the broad exception limited to images;
-		// scripts, connections, frames, and other resource classes remain scoped.
-		"img-src 'self' data: http://127.0.0.1:* http://*.localhost:* https:",
+		"img-src 'self' data: http://127.0.0.1:* http://*.localhost:*",
 		"font-src 'self' data:",
 		[
 			"connect-src",
 			"'self'",
 			"http://127.0.0.1:*",
-			"ws://127.0.0.1:*",
-			// Session artifact files are read from the daemon's artifact preview
-			// origin (ao-preview-artifact.<id>.localhost:<port>), a subdomain of
-			// localhost that 'self' and 127.0.0.1 do not cover.
+			// Daemon-isolated artifact origins (ao-preview-artifact.<session>.localhost).
 			"http://*.localhost:*",
+			"ws://127.0.0.1:*",
 			// Vite serves on localhost, which 'self' does not cover for the ws://
 			// HMR socket.
 			mode === "serve" ? "ws://localhost:*" : "",
-			...POSTHOG_ORIGINS,
 			...CLOUD_CP_WS_ORIGINS,
 		]
 			.filter(Boolean)
 			.join(" "),
 		"object-src 'none'",
 		"base-uri 'self'",
-		// Agent HTML renders (RenderFrame) are the only frames: sandboxed pages
-		// served by the loopback daemon.
-		// 'self' lets dev:web, whose API base is relative, frame a page; the page
-		// keeps its own sandbox from the daemon's CSP header either way.
-		// *.localhost is the inline-artifact origin an HTML artifact is framed from.
-		"frame-src 'self' http://127.0.0.1:* http://*.localhost:*",
+		"frame-src 'none'",
 	].join("; ");
 }
 
+// The daemon-served web build (VITE_AO_WEB=1) gets its CSP as a response header
+// from backend/internal/httpd/webui instead, because the one source that cannot
+// be known at build time — the terminal mux WebSocket origin — is whichever
+// address the user reached the daemon by, loopback or LAN.
+const isWebBuild = process.env.VITE_AO_WEB === "1";
+
 const injectCspMeta: Plugin = {
 	name: "inject-csp-meta",
-	apply: "build",
-	transformIndexHtml() {
+	transformIndexHtml(_html, ctx) {
 		return [
 			{
 				tag: "meta",
-				attrs: { "http-equiv": "Content-Security-Policy", content: contentSecurityPolicy("build") },
+				attrs: {
+					"http-equiv": "Content-Security-Policy",
+					content: contentSecurityPolicy(ctx.server ? "serve" : "build"),
+				},
 				injectTo: "head-prepend",
 			},
 		];
@@ -186,12 +116,6 @@ const productUiReactBoundary: Plugin = {
 };
 
 export default defineConfig({
-	define: {
-		"import.meta.env.VITE_AO_GIT_BRANCH": JSON.stringify(DEV_BUILD_INFO.branch),
-		"import.meta.env.VITE_AO_GIT_COMMIT": JSON.stringify(DEV_BUILD_INFO.commit),
-		"import.meta.env.VITE_AO_GIT_WORKTREE": JSON.stringify(DEV_BUILD_INFO.worktree),
-		"import.meta.env.VITE_AO_GIT_DIRTY": JSON.stringify(String(DEV_BUILD_INFO.isDirty)),
-	},
 	// "@/" → the renderer root (src/renderer), the shadcn/ui import convention.
 	resolve: {
 		alias: {
@@ -239,14 +163,16 @@ export default defineConfig({
 		productUiReactBoundary,
 		react(),
 		tailwindcss(),
-		injectCspMeta,
+		...(isWebBuild ? [] : [injectCspMeta]),
 	],
 	test: {
 		environment: "jsdom",
 		testTimeout: 20_000,
-		// Anchor node_modules at any depth: a bare "node_modules/**" replaces
-		// vitest's default "**/node_modules/**" and only matches the root.
-		exclude: ["**/node_modules/**", "dist/**", "dist-electron/**", "e2e/**"],
+		// Anchor node_modules at any depth: a bare "node_modules/**" only matches
+		// the root. src/landing and src/docs are separate Next.js deployables with
+		// their own node_modules and CI (deploy-landing.yml); their suites are not
+		// this app's and need dependencies this job does not install.
+		exclude: ["**/node_modules/**", "dist/**", "dist-electron/**", "e2e/**", "src/landing/**", "src/docs/**"],
 		globals: true,
 		setupFiles: "./src/renderer/test/setup.ts",
 	},

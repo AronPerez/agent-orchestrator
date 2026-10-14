@@ -1,11 +1,10 @@
 import { createContext } from "react";
+import type { Ref } from "../../lib/hosts";
 
 export type MarkdownFileContextValue = {
-	sessionId: string;
-	hostId?: string;
+	session: Ref;
 	filePath: string;
-	/** Origin serving an artifact directory; set only for session artifact markdown. */
-	artifactOrigin?: string;
+	artifactUrl?: string;
 	/**
 	 * The file detail's load timestamp. The blob route sets `no-store`, so this is
 	 * what makes a rewritten image reload — see `buildWorkspaceBlobUrl`.

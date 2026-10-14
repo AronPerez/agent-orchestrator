@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { aoBridge } from "./bridge";
-import { noteCloudSession } from "./cloud-telemetry";
 import type { CloudAccount } from "../../shared/cloud-account";
 
 export type { CloudAccount };
@@ -33,19 +32,7 @@ export function useCloudSession(): UseCloudSessionResult {
 
   useEffect(() => {
     let active = true;
-    // Component tests and browser preview can provide only the local bridge.
-    // Treat a missing Cloud preload surface as signed out rather than throwing
-    // from every consumer that mounts useCloudCp.
-    const cloud = aoBridge.cloud;
-    if (!cloud) {
-      setSession(null);
-      setStatus("unauthenticated");
-      return () => {
-        active = false;
-      };
-    }
-    cloud.getSession().then((s) => {
-      noteCloudSession(s, true);
+    aoBridge.cloud.getSession().then((s) => {
       if (!active) return;
       setSession(s);
       setStatus(s ? "authenticated" : "unauthenticated");
@@ -55,10 +42,7 @@ export function useCloudSession(): UseCloudSessionResult {
       setStatus("unauthenticated");
     });
 
-    const unsub = cloud.onSessionChanged((s) => {
-      // A change that brings a new signed-in user is a completed sign-in;
-      // token refreshes re-send the same user and are not counted.
-      noteCloudSession(s, false);
+    const unsub = aoBridge.cloud.onSessionChanged((s) => {
       setSession(s);
       setStatus(s ? "authenticated" : "unauthenticated");
     });
@@ -69,6 +53,7 @@ export function useCloudSession(): UseCloudSessionResult {
     };
   }, []);
 
+  // Parked while the sidebar sign-in entry point is intentionally hidden.
   const signIn = () => {
     void aoBridge.cloud.signIn();
   };

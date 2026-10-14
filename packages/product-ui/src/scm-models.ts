@@ -104,7 +104,6 @@ export type PullRequestSummary = {
 	provider: string;
 	repository: string;
 	author: string;
-	authorAvatarUrl?: string;
 	sourceBranch: string;
 	targetBranch: string;
 	headSha: string;

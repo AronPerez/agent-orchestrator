@@ -12,14 +12,10 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import {
-	archiveExtraction,
 	createWorkDirectory,
 	npmInvocation,
-	patchClaudeContextUsage,
-	patchClaudeHibernationCheck,
 	patchClaudeRetryDetails,
 	pruneNodeDistribution,
-	runtimeSourceFiles,
 } from "./build-acp-runtime-helpers.mjs";
 
 const NODE_VERSION = "22.23.2";
@@ -40,12 +36,8 @@ if (!platform || !arch) {
 const extension = process.platform === "win32" ? "zip" : "tar.gz";
 const archiveName = `node-v${NODE_VERSION}-${platform}-${arch}.${extension}`;
 const baseURL = `https://nodejs.org/dist/v${NODE_VERSION}`;
-const runtimeSources = runtimeSourceFiles();
-const signature = createHash("sha256");
-for (const source of runtimeSources) {
-	signature.update(readFileSync(join(sourceDir, source)));
-}
-const buildSignature = signature
+const buildSignature = createHash("sha256")
+	.update(readFileSync(join(sourceDir, "package-lock.json")))
 	.update(readFileSync(fileURLToPath(import.meta.url)))
 	.update(readFileSync(join(scriptsDir, "build-acp-runtime-helpers.mjs")))
 	.update(`node=${NODE_VERSION};platform=${platform};arch=${arch}`)
@@ -62,14 +54,6 @@ const expectedAdapter = join(
 	"dist",
 	"index.js",
 );
-const claudeAdapter = join(
-	outDir,
-	"node_modules",
-	"@agentclientprotocol",
-	"claude-agent-acp",
-	"dist",
-	"acp-agent.js",
-);
 if (existsSync(markerPath) && existsSync(expectedNode) && existsSync(expectedAdapter)) {
 	const marker = JSON.parse(readFileSync(markerPath, "utf8"));
 	if (marker.signature === buildSignature) process.exit(0);
@@ -77,15 +61,19 @@ if (existsSync(markerPath) && existsSync(expectedNode) && existsSync(expectedAda
 
 rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });
-for (const source of runtimeSources) {
-	cpSync(join(sourceDir, source), join(outDir, source));
-}
+cpSync(join(sourceDir, "package.json"), join(outDir, "package.json"));
+cpSync(join(sourceDir, "package-lock.json"), join(outDir, "package-lock.json"));
 
 const npm = npmInvocation(["ci", "--omit=dev", "--omit=optional", "--ignore-scripts"]);
 run(npm.command, npm.args, { cwd: outDir });
-patchClaudeRetryDetails(claudeAdapter);
-patchClaudeContextUsage(claudeAdapter);
-patchClaudeHibernationCheck(claudeAdapter);
+patchClaudeRetryDetails(join(
+	outDir,
+	"node_modules",
+	"@agentclientprotocol",
+	"claude-agent-acp",
+	"dist",
+	"acp-agent.js",
+));
 
 // The Claude Agent SDK declares platform-native Claude executables as optional
 // dependencies. --omit=optional excludes them; this removal is defense-in-depth.
@@ -120,8 +108,18 @@ try {
 
 	const archivePath = join(workDir, archiveName);
 	writeFileSync(archivePath, archive);
-	const extraction = archiveExtraction(archivePath, workDir);
-	run(extraction.command, extraction.args);
+	if (process.platform === "win32") {
+		const escapedArchive = archivePath.replaceAll("'", "''");
+		const escapedDestination = workDir.replaceAll("'", "''");
+		run("powershell.exe", [
+			"-NoProfile",
+			"-NonInteractive",
+			"-Command",
+			`Expand-Archive -LiteralPath '${escapedArchive}' -DestinationPath '${escapedDestination}' -Force`,
+		]);
+	} else {
+		run("tar", ["-xzf", archivePath, "-C", workDir]);
+	}
 	const extracted = join(workDir, basename(archiveName, `.${extension}`));
 	const nodeOut = join(outDir, "node");
 	if (!existsSync(extracted)) throw new Error(`Node archive did not contain ${extracted}`);

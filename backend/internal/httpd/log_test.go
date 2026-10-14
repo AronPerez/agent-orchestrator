@@ -87,33 +87,26 @@ func TestRequestLoggerRecords5xxCause(t *testing.T) {
 	}
 }
 
-func TestRequestLoggerSuppressesOnlySagaOwnedSentryCapture(t *testing.T) {
+func TestRequestLoggerPreservesOwnedErrorsLocally(t *testing.T) {
 	tests := []struct {
-		name         string
-		owner        ownership.Owner
-		wantCaptures int
+		name  string
+		owner ownership.Owner
 	}{
-		{name: "pre-admission HTTP owner captures", owner: ownership.OwnerHTTP, wantCaptures: 1},
-		{name: "post-admission saga owner is suppressed", owner: ownership.OwnerAgentSwitchSaga, wantCaptures: 0},
+		{name: "pre-admission HTTP owner captures", owner: ownership.OwnerHTTP},
+		{name: "post-admission saga owner is suppressed", owner: ownership.OwnerAgentSwitchSaga},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			log := slog.New(slog.NewTextHandler(&buf, nil))
 			sink := &captureSink{}
-			captures := 0
-			handler := requestLoggerWithCapture(log, sink, func(context.Context, error, map[string]string, string) {
-				captures++
-			})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handler := requestLogger(log, sink)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				envelope.WriteError(w, r, ownership.Own(errors.New("switch settlement failed"), tc.owner))
 			}))
 
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/sessions/s1/switch-agent", nil))
 
-			if captures != tc.wantCaptures {
-				t.Fatalf("Sentry captures = %d, want %d", captures, tc.wantCaptures)
-			}
 			if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), `"message":"Internal server error"`) {
 				t.Fatalf("response changed: status=%d body=%s", rec.Code, rec.Body.String())
 			}

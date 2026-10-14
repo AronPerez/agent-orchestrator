@@ -94,6 +94,10 @@ type Config struct {
 	// PromptResponseFailure lets a provider binding interpret its own structured
 	// terminal metadata after a nominally successful ACP prompt response.
 	PromptResponseFailure func(acpsdk.PromptResponse) error
+	// HistoryNotice reports a replayed user message chunk that the agent wrote
+	// into its own transcript. Replay starts no turn for it, so the agent's
+	// output after it stays in the turn before, as it did live.
+	HistoryNotice func(string) bool
 	// CanHibernate checks provider-owned work that outlives an ACP prompt.
 	CanHibernate func(context.Context, *acpsdk.ClientSideConnection, acpsdk.SessionId) (bool, error)
 	// EncodeProviderConversationID and DecodeProviderConversationID let a binding
@@ -421,6 +425,17 @@ func (d *Driver) Resume(ctx context.Context, cfg ports.ChatResumeConfig) (ports.
 		conv.setSessionPreamble(d.sessionPreamble(launchCfg))
 		return conv, nil
 	}
+	return d.resumeSession(ctx, conv, init, launchCfg, cfg, reportedProviderConversationID)
+}
+
+func (d *Driver) resumeSession(
+	ctx context.Context,
+	conv *conversation,
+	init acpsdk.InitializeResponse,
+	launchCfg LaunchConfig,
+	cfg ports.ChatResumeConfig,
+	reportedProviderConversationID string,
+) (ports.ChatConversation, error) {
 	if !supportsSessionRestore(init) {
 		conv.discard()
 		return nil, fmt.Errorf("%w: ACP agent supports neither session/load nor session/resume", ports.ErrChatResumeFailed)
@@ -492,20 +507,48 @@ func (d *Driver) Resume(ctx context.Context, cfg ports.ChatResumeConfig) (ports.
 		conv.legacyWire.modelState(), modes,
 	)
 	conv.setReportedProviderConversationID(reportedProviderConversationID)
-	// Standing context is process input, not transcript history, so a resumed
-	// conversation must receive it again even though the provider recovers the
-	// messages itself.
+	// Standing context is process input and must be restored with the native session.
 	conv.setSessionPreamble(d.sessionPreamble(launchCfg))
-	if err := conv.applyTurnSettings(ctx, ports.ChatTurnSettings{Model: cfg.Model, Effort: cfg.Effort, Approval: cfg.Permissions}); err != nil {
-		if !errors.Is(err, ErrACPSetterUnsupported) {
-			conv.discard()
-			return nil, fmt.Errorf("%w: configure ACP session: %w", ports.ErrChatResumeFailed, err)
-		}
+	if err := applyResumeSettings(ctx, conv, cfg); err != nil {
+		conv.discard()
+		return nil, fmt.Errorf("%w: configure ACP session: %w", ports.ErrChatResumeFailed, err)
 	}
 	if historyConversation != nil {
 		return historyConversation, nil
 	}
 	return conv, nil
+}
+
+// modelOptionID is the ACP config option every binding uses to carry the model
+// selection. It is the one setting AO treats as optional on resume.
+const modelOptionID = "model"
+
+// applyResumeSettings configures a resumed conversation, degrading rather than
+// failing when the agent refuses the model preference.
+//
+// A model is optional on a conversation that already exists: the provider still
+// holds the history and resumes on its own default, so a refused preference is not
+// a reason to lose the conversation. Failing the whole resume over it stranded a
+// session mid-interface-switch whenever it carried a model id belonging to another
+// agent. The preference is dropped, the settings queued behind it are applied, and
+// the user is told on the timeline. Start keeps the opposite contract: a model
+// chosen for a conversation that does not exist yet is an explicit choice, and
+// starting it on a different model would misattribute everything that follows.
+func applyResumeSettings(ctx context.Context, conv *conversation, cfg ports.ChatResumeConfig) error {
+	settings := ports.ChatTurnSettings{Model: cfg.Model, Effort: cfg.Effort, Approval: cfg.Permissions}
+	err := conv.applyTurnSettings(ctx, settings)
+	if err == nil || errors.Is(err, ErrACPSetterUnsupported) {
+		return nil
+	}
+	if cfg.Model == "" || rejectedOption(err) != modelOptionID {
+		return err
+	}
+	conv.reportUnavailableModel(cfg.Model, err)
+	settings.Model = ""
+	if retry := conv.applyTurnSettings(ctx, settings); retry != nil && !errors.Is(retry, ErrACPSetterUnsupported) {
+		return retry
+	}
+	return nil
 }
 
 // resumeFresh opens a new provider session in place of a stored one the
@@ -563,6 +606,8 @@ func (d *Driver) initialize(
 	conv.onAuthRejected = d.cfg.OnAuthRejected
 	conv.promptResponseFailure = d.cfg.PromptResponseFailure
 	conv.hibernationCheck = d.cfg.CanHibernate
+	conv.decodeConversationID = d.cfg.DecodeProviderConversationID
+	conv.historyNotice = d.cfg.HistoryNotice
 	if proc.reconnected {
 		state := proc.acpState
 		if state == nil || len(state.InitializeResult) == 0 || len(state.SessionResult) == 0 || state.SessionID == "" {
@@ -582,6 +627,7 @@ func (d *Driver) initialize(
 				return nil, acpsdk.InitializeResponse{}, nil, fmt.Errorf("%w: %w", ports.ErrChatDriverIncompatible, err)
 			}
 		}
+		conv.canDeleteFork = init.AgentCapabilities.SessionCapabilities.Delete != nil
 		return conv, init, state, nil
 	}
 
@@ -633,6 +679,7 @@ func (d *Driver) initialize(
 			return nil, acpsdk.InitializeResponse{}, nil, fmt.Errorf("%w: %w", ports.ErrChatDriverIncompatible, err)
 		}
 	}
+	conv.canDeleteFork = init.AgentCapabilities.SessionCapabilities.Delete != nil
 	return conv, init, nil, nil
 }
 
@@ -715,6 +762,9 @@ func conversationCapabilities(
 		caps[ports.ChatCapabilityResume] = false
 	}
 	caps[ports.ChatCapabilityHistory] = init.AgentCapabilities.LoadSession
+	caps[ports.ChatCapabilityFork] = false // ACP has no turn-anchored fork in the pinned SDK.
+	caps[ports.ChatCapabilityForkCurrent] = init.AgentCapabilities.SessionCapabilities.Fork != nil &&
+		supportsSessionRestore(init)
 	if extensionSupported(init.Meta, "steering") {
 		caps[ports.ChatCapabilitySteer] = true
 	}

@@ -32,7 +32,6 @@ export type TrayController = {
 export type TrayControllerOptions = {
 	focusWindow: () => void;
 	openSession: (target: TrayOpenSessionTarget) => void;
-	quitCompletely: () => void;
 	locale: AppLocale;
 };
 
@@ -61,7 +60,7 @@ export function createTrayController(options: TrayControllerOptions): TrayContro
 		const title = entry.title || t("tray.untitledSession");
 		return {
 			label: entry.projectName ? `${title}  ·  ${entry.projectName}` : title,
-			click: () => options.openSession({ projectId: entry.projectId, sessionId: entry.sessionId }),
+			click: () => options.openSession({ host: entry.host, sessionId: entry.sessionId }),
 		};
 	};
 
@@ -96,7 +95,7 @@ export function createTrayController(options: TrayControllerOptions): TrayContro
 		}
 		items.push({ type: "separator" });
 		items.push({ label: t("tray.show"), click: () => options.focusWindow() });
-		items.push({ label: t("tray.quit"), click: () => options.quitCompletely() });
+		items.push({ label: t("tray.quit"), role: "quit" });
 		tray.setContextMenu(Menu.buildFromTemplate(items));
 	};
 

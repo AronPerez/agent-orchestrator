@@ -5,16 +5,17 @@ import { watchBridge } from "./bridge";
 import { buildWatchSnapshot, type WatchSnapshot } from "./snapshot";
 
 export function WatchManager() {
-	const { hostStates, configResolved } = useApp();
-	const current = useRef({ hostStates, configResolved });
-	current.current = { hostStates, configResolved };
+	const app = useApp();
+	const { configResolved } = app;
+	const current = useRef(app);
+	current.current = app;
 	const previous = useRef<WatchSnapshot | undefined>(undefined);
 	useEffect(() => {
 		const bridge = watchBridge;
 		if (!bridge || !configResolved) return;
 		const publish = () => {
 			if (AppState.currentState !== "active" || !current.current.configResolved) return;
-			const snapshot = buildWatchSnapshot(current.current.hostStates, Date.now(), previous.current);
+			const snapshot = buildWatchSnapshot({ ...current.current, poll: current.current.getSessionPoll() }, Date.now(), previous.current);
 			previous.current = snapshot;
 			void bridge.publishSnapshot(JSON.stringify(snapshot)).catch(() => { /* Watch retains its timestamped cache. */ });
 		};

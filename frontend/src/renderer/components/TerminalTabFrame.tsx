@@ -4,8 +4,6 @@ import { cn } from "../lib/utils";
 type TerminalTabFrameProps = {
 	active: boolean;
 	action?: ReactNode;
-	/** overlay = absolute over the label (close buttons). inline = reserves width so status never covers the title. */
-	actionLayout?: "overlay" | "inline";
 	actionPosition?: "leading" | "trailing";
 	trailingAction?: ReactNode;
 	buttonRef?: Ref<HTMLButtonElement>;
@@ -23,7 +21,6 @@ type TerminalTabFrameProps = {
 export function TerminalTabFrame({
 	active,
 	action,
-	actionLayout = "overlay",
 	actionPosition = "trailing",
 	trailingAction,
 	buttonRef,
@@ -35,19 +32,11 @@ export function TerminalTabFrame({
 	"data-terminal-role": terminalRole,
 }: TerminalTabFrameProps) {
 	const { className: buttonClassName, ...restButtonProps } = buttonProps ?? {};
-	const overlayTrailing = actionLayout === "overlay" && actionPosition === "trailing" && action;
-	const inlineAction =
-		action && actionLayout === "inline" ? (
-			<div
-				className={cn(
-					"flex shrink-0 items-center self-stretch",
-					actionPosition === "leading" ? "pl-1" : "pr-1",
-				)}
-				data-terminal-tab-action
-			>
-				{action}
-			</div>
-		) : null;
+	const selectFromChrome = (event: ReactMouseEvent<HTMLElement>) => {
+		if (event.target !== event.currentTarget || restButtonProps.disabled || editingContent) return;
+		// Empty action-wrapper space belongs to the tab, not the overlaid control.
+		restButtonProps.onClick?.(event as ReactMouseEvent<HTMLButtonElement>);
+	};
 	return (
 		<span
 			className={cn(
@@ -57,44 +46,41 @@ export function TerminalTabFrame({
 			)}
 			data-terminal-role={terminalRole}
 			data-terminal-tab-frame
-			onClick={(event) => {
-				if (event.target !== event.currentTarget) return;
-				restButtonProps.onClick?.(event as unknown as ReactMouseEvent<HTMLButtonElement>);
-			}}
+			onClick={selectFromChrome}
 		>
-			<span className="relative inline-flex h-[calc(100%-2px)] w-full min-w-0 flex-1 self-stretch">
-				{actionPosition === "leading" ? inlineAction : null}
+			<span className="relative inline-flex h-[calc(100%-2px)] min-w-0 flex-1 self-stretch">
 				{editingContent ?? (
 					<button
 						ref={buttonRef}
 						className={cn(
-							"inline-flex h-full max-w-full min-w-0 flex-1 cursor-pointer items-center overflow-hidden px-2 text-left text-control leading-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent/50",
-							overlayTrailing && "pr-7",
+							"inline-flex h-full min-w-0 flex-1 cursor-pointer items-center px-2 text-left text-control leading-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent/50",
+							((actionPosition === "trailing" && action) || trailingAction) && "pr-9",
 							buttonClassName,
 						)}
 						{...restButtonProps}
 					>
-						<span className={cn("inline-flex max-w-full min-w-0 items-center gap-2 overflow-hidden", contentClassName)}>
+						<span className={cn("inline-flex min-w-0 items-center gap-2", contentClassName)}>
 							{children}
 						</span>
 					</button>
 				)}
-				{actionPosition === "trailing" ? inlineAction : null}
-				{action && actionLayout === "overlay" ? (
+				{action ? (
 					<div
 						className={cn(
 							"absolute inset-y-0 z-20 flex items-center",
 							actionPosition === "leading" ? "left-2" : "right-1",
 						)}
 						data-terminal-tab-action
+						onClick={selectFromChrome}
 					>
 						{action}
 					</div>
 				) : null}
 				{trailingAction ? (
 					<div
-						className="flex shrink-0 items-center pr-1"
+						className="absolute inset-y-0 right-1 z-10 flex items-center"
 						data-terminal-tab-action
+						onClick={selectFromChrome}
 					>
 						{trailingAction}
 					</div>

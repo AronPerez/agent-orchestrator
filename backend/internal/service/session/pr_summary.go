@@ -1,6 +1,7 @@
 package session
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"sort"
@@ -136,11 +137,11 @@ func (s *Service) ListPRListing(ctx context.Context, id domain.SessionID) (PRLis
 func summarizePR(pr domain.PullRequest, checks []domain.PullRequestCheck, reviews []domain.PullRequestReview, threads []domain.PullRequestReviewThread, comments []domain.PullRequestComment, threadsExact bool) PRSummary {
 	return PRSummary{
 		URL:              pr.URL,
-		HTMLURL:          firstNonEmpty(pr.HTMLURL, pr.URL),
+		HTMLURL:          cmp.Or(pr.HTMLURL, pr.URL),
 		Number:           pr.Number,
 		Title:            pr.Title,
 		State:            pullRequestState(pr),
-		Provider:         firstNonEmpty(pr.Provider, "github"),
+		Provider:         cmp.Or(pr.Provider, "github"),
 		Repo:             pr.Repo,
 		Author:           pr.Author,
 		AuthorAvatarURL:  pr.AuthorAvatarURL,
@@ -431,7 +432,7 @@ func summarizeMergeability(pr domain.PullRequest, _ []domain.PullRequestReviewTh
 	return PRMergeabilitySummary{
 		State:   mergeabilityOrUnknown(pr.Mergeability),
 		Reasons: mergeabilityReasons(pr),
-		PRURL:   firstNonEmpty(pr.HTMLURL, pr.URL),
+		PRURL:   cmp.Or(pr.HTMLURL, pr.URL),
 	}
 }
 

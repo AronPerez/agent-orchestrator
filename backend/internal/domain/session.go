@@ -85,6 +85,19 @@ const (
 	SessionOutputPRAndArtifact SessionOutputType = "pr_artifact"
 )
 
+// RequestedOutput is the deliverable a spawn asks for. Empty is the ordinary
+// task flow; it does not change derived status or the Kanban column.
+type RequestedOutput string
+
+// RequestedOutputArtifact asks the agent to deliver a file in the session's
+// artifact directory instead of a pull request.
+const RequestedOutputArtifact RequestedOutput = "artifact"
+
+// Valid reports whether k is empty or a known output kind.
+func (k RequestedOutput) Valid() bool {
+	return k == "" || k == RequestedOutputArtifact
+}
+
 // HasPR reports whether a session's output includes a claimed/observed PR.
 func (t SessionOutputType) HasPR() bool {
 	return t == SessionOutputPR || t == SessionOutputPRAndArtifact
@@ -113,6 +126,20 @@ type SessionArtifactFile struct {
 	Kind      SessionArtifactKind `json:"kind" enum:"html,markdown,file"`
 	Size      int64               `json:"size"`
 	UpdatedAt time.Time           `json:"updatedAt"`
+}
+
+// SessionArtifactVersion is one immutable snapshot of a session artifact file.
+// Its content is the blob named by SHA256 in the session's version store;
+// ModTime is the file's observed modification time when it was captured.
+type SessionArtifactVersion struct {
+	SessionID   SessionID
+	Path        string
+	Version     int64
+	SHA256      string
+	Size        int64
+	ContentType string
+	ModTime     time.Time
+	CreatedAt   time.Time
 }
 
 // SessionMetadata is the typed, off-status metadata for a session: operational
@@ -261,7 +288,10 @@ type SessionRecord struct {
 	AutoInjectReview   bool              `json:"autoInjectReview"`
 	AutoInjectCI       bool              `json:"autoInjectCI"`
 	OutputType         SessionOutputType `json:"outputType" enum:"none,pr,artifact,pr_artifact"`
-	Metadata           SessionMetadata   `json:"-"`
+	// RequestedOutput is the deliverable requested at spawn. It is fixed after
+	// insertion so restore and agent switching rebuild the same worker prompt.
+	RequestedOutput RequestedOutput `json:"requestedOutput,omitempty" enum:"artifact"`
+	Metadata        SessionMetadata `json:"-"`
 	// CleanupGeneration is a monotonic counter bumped each time the session is
 	// un-terminated (spawn/restore). The terminal-resource reconciler stamps its
 	// durable cleanup facts with the generation they were written for so a
@@ -443,10 +473,15 @@ type Session struct {
 	// important current fact about the session at the stage it sits in. It is
 	// derived after the column, from the facts that column reads, and ships in
 	// renderable form so clients print it without a mapping table of their own.
-	DisplayStatus     DisplayStatus         `json:"displayStatus" enum:"Working,Blocked,Exited,No signal,Awaiting PR,Fixing CI failures,Addressing comments,Needs review,Review scheduled,Reviewing,Review failed,Review pending,Draft,CI failing,Commented,Changes requested,Needs human review,Mergeable,Approved,Merged,Closed without merge,Terminated"`
-	TerminalHandleID  string                `json:"terminalHandleId,omitempty"`
-	ArtifactFiles     []SessionArtifactFile `json:"-"`
-	ActiveAgentSwitch *AgentSwitch          `json:"-"`
+	DisplayStatus DisplayStatus `json:"displayStatus" enum:"Working,Blocked,Exited,No signal,Awaiting PR,Fixing CI failures,Addressing comments,Needs review,Review scheduled,Reviewing,Review failed,Review pending,Draft,CI failing,Commented,Changes requested,Needs human review,Mergeable,Approved,Merged,Closed without merge,Terminated"`
+	// RuntimeUnreachable reports that AO's most recent liveness probe could not
+	// reach this session's runtime (for example its tmux server or pty-host is
+	// gone). It is a reachability fact about AO's view, not a claim that the
+	// session is dead, and like Status it is derived per read, never persisted.
+	RuntimeUnreachable bool                  `json:"runtimeUnreachable,omitempty"`
+	TerminalHandleID   string                `json:"terminalHandleId,omitempty"`
+	ArtifactFiles      []SessionArtifactFile `json:"-"`
+	ActiveAgentSwitch  *AgentSwitch          `json:"-"`
 	// PRs are the session's attributed pull requests (one session can own many).
 	// They feed status derivation and are surfaced on the API read model. Not
 	// serialized here: the HTTP boundary maps them to the curated wire shape.

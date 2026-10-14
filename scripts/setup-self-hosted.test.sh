@@ -413,6 +413,26 @@ PY
 			! grep -q 'Pair this host' "$tmp/out" || { cat "$tmp/out" >&2; exit 1; }
 		fi
 		;;
-	*) printf 'Usage: %s {release-channels|bootstrap-nightly|bad-tmux|no-systemd|inactive-systemd|prune|failed-restarts|failed-first-install|failed-readiness|failed-mac-bootstrap|failed-mac-readiness|failed-mac-first|relative-current|concurrent|interrupted|piped|tunnel-pairing|tunnel-unavailable}\n' "$0" >&2; exit 2 ;;
+	app)
+		# --app installs from a built .app and repoints both CLI links at it,
+		# replacing a symlinked ~/.local/bin/ao but never a user's regular file.
+		mkdir -p "$tmp/AO.app/Contents" "$tmp/home/.ao/bin" "$tmp/home/.local/bin"
+		cp -R "$tmp/pkg/resources" "$tmp/AO.app/Contents/Resources"
+		: > "$tmp/home/.ao/bin/ao"
+		ln -s /elsewhere/ao "$tmp/home/.local/bin/ao"
+		env HOME="$tmp/home" PATH="$tmp/bin" /bin/bash "$script" --app "$tmp/AO.app" --install-only > "$tmp/out" 2>&1 || { cat "$tmp/out" >&2; exit 1; }
+		target="$tmp/home/.ao/host/current/resources/daemon/ao"
+		[[ -x "$target" ]] || { printf '%s\n' 'daemon not installed from app' >&2; exit 1; }
+		[[ "$(readlink "$tmp/home/.ao/bin/ao")" == "$target" && "$(readlink "$tmp/home/.local/bin/ao")" == "$target" ]] || {
+			printf '%s\n' 'CLI links not repointed at the host daemon' >&2; exit 1;
+		}
+		rm "$tmp/home/.local/bin/ao" && : > "$tmp/home/.local/bin/ao"
+		env HOME="$tmp/home" PATH="$tmp/bin" /bin/bash "$script" --app "$tmp/AO.app" --install-only > "$tmp/out" 2>&1
+		[[ -f "$tmp/home/.local/bin/ao" && ! -L "$tmp/home/.local/bin/ao" ]] || { printf '%s\n' 'replaced a regular ~/.local/bin/ao' >&2; exit 1; }
+		if env HOME="$tmp/home" PATH="$tmp/bin" /bin/bash "$script" --app "$tmp/AO.app" --nightly > "$tmp/out" 2>&1; then
+			printf '%s\n' '--app with --nightly was accepted' >&2; exit 1
+		fi
+		;;
+	*) printf 'Usage: %s {app|release-channels|bootstrap-nightly|bad-tmux|no-systemd|inactive-systemd|prune|failed-restarts|failed-first-install|failed-readiness|failed-mac-bootstrap|failed-mac-readiness|failed-mac-first|relative-current|concurrent|interrupted|piped|tunnel-pairing|tunnel-unavailable}\n' "$0" >&2; exit 2 ;;
 esac
 printf 'PASS %s\n' "$1"

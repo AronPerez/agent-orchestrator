@@ -1,22 +1,19 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { components } from "../../api/schema";
 import { agentModelsQueryOptions, type AgentModelCatalog } from "../hooks/useAgentModelsQuery";
 import { agentLabel } from "../lib/agent-options";
-import { isConcreteModelID, modelChoiceLabel } from "../lib/agent-model-choices";
+import type { Ref } from "../lib/hosts";
 import {
 	buildRankedAgentOptions,
-	isLaunchableAgent,
-	isReadyAgent,
 	type AgentInfo,
 	type RankedAgentOption,
 	unknownAgentReadiness,
 } from "../lib/agent-select-options";
 import { KNOWN_REVIEWER_HARNESS_IDS } from "../lib/reviewer-harnesses";
 import { cn } from "../lib/utils";
-import { useAgentManagementMenu } from "../hooks/useAgentManagementMenu";
 import { AgentAvatar } from "./AgentAvatar";
 import { AgentSelectMenuItem } from "./settings/AgentSelectMenuItem";
 import {
@@ -29,12 +26,12 @@ import {
 	OptionMenuTrigger,
 } from "./ui/option-menu";
 
-const REVIEWER_AGENT_PRIORITY = ["claude-code", "codex", "cursor", "opencode", "opencode-v2", "muse", "aider"] as const;
+const REVIEWER_AGENT_PRIORITY = ["claude-code", "codex", "cursor", "opencode", "muse", "aider"] as const;
 const REVIEWER_AGENT_PRIORITY_RANK = new Map<string, number>(
 	REVIEWER_AGENT_PRIORITY.map((agent, index) => [agent, index]),
 );
 
-const HOST_TRUSTED_REVIEWERS = new Set(["agy", "devin", "droid", "kimchi", "kimi"]);
+const HOST_TRUSTED_REVIEWERS = new Set(["agy", "continue", "devin", "droid", "goose", "kimchi", "kimi", "qwen", "vibe"]);
 const USER_APPROVED_REVIEWERS = new Set(["auggie", "autohand", "cline", "crush", "grok"]);
 
 type ReviewerAgentConfig = components["schemas"]["AgentConfig"];
@@ -55,12 +52,13 @@ export function ReviewerSelect({
 	onConfigChange,
 	model = "",
 	mode = "",
-	projectId,
-	hostId,
+	project,
 	triggerClassName,
-	ariaLabel,
+	ariaLabel = "Default reviewer agent",
 	defaultHarness,
-	harnessOnly = false,
+	defaultOptionLabel,
+	defaultTriggerLabel,
+	showDefaultOption = true,
 	contentAlign = "start",
 	disabled = false,
 	agents,
@@ -71,19 +69,19 @@ export function ReviewerSelect({
 	onConfigChange?: (harness: string, config: ReviewerAgentConfig) => void;
 	model?: string;
 	mode?: string;
-	projectId?: string;
-	hostId?: string;
+	project?: Ref;
 	triggerClassName?: string;
 	ariaLabel?: string;
-	defaultHarness: string;
-	harnessOnly?: boolean;
+	defaultHarness?: string;
+	defaultOptionLabel?: string;
+	defaultTriggerLabel?: string;
+	showDefaultOption?: boolean;
 	contentAlign?: "start" | "end";
 	disabled?: boolean;
 	agents?: components["schemas"]["AgentReadinessSnapshot"][];
 	excludedHarness?: string;
 }) {
 	const { t } = useTranslation();
-	const reviewerAriaLabel = ariaLabel ?? t("settings.project.defaultReviewer");
 	const queryClient = useQueryClient();
 	const [menuOpen, setMenuOpen] = useState(false);
 	// Until the daemon's catalog arrives these entries carry the whole menu, so
@@ -99,20 +97,13 @@ export function ReviewerSelect({
 		priorityRank: REVIEWER_AGENT_PRIORITY_RANK,
 		fallbackAgents,
 	});
-	const isSelectable = hostId ? isLaunchableAgent : isReadyAgent;
 	const selectableOptions = options.filter((agent) => {
-		if (agents !== undefined && !isSelectable(agent)) return false;
 		if (agent.id === excludedHarness) return false;
-		if (agent.id === defaultHarness) return false;
+		if (showDefaultOption && defaultHarness && agent.id === defaultHarness) return false;
 		return true;
 	});
-	const catalogDefaultLabel = options.find((agent) => agent.id === defaultHarness)?.label;
-	const defaultHarnessLabel = catalogDefaultLabel && catalogDefaultLabel !== defaultHarness ? catalogDefaultLabel : agentLabel(defaultHarness);
-	const effectiveHarness = value || defaultHarness;
-	const needsSetup = agents !== undefined && Boolean(effectiveHarness && !options.some((agent) => agent.id === effectiveHarness && isSelectable(agent)));
-	const management = useAgentManagementMenu(needsSetup ? effectiveHarness : undefined, hostId);
-	const menuProjectID = projectId ?? "";
-	const triggerCatalog = useQuery(agentModelsQueryOptions(effectiveHarness, menuProjectID, hostId));
+	const effectiveHarness = value || defaultHarness || "";
+	const triggerCatalog = useQuery(agentModelsQueryOptions(effectiveHarness, project));
 
 	useEffect(() => {
 		if (!menuOpen) return;
@@ -123,51 +114,46 @@ export function ReviewerSelect({
 		}
 		for (const harness of harnesses) {
 			if (!harness) continue;
-			void queryClient.prefetchQuery(agentModelsQueryOptions(harness, menuProjectID, hostId));
+			void queryClient.prefetchQuery(agentModelsQueryOptions(harness, project));
 		}
-	}, [defaultHarness, hostId, menuOpen, menuProjectID, queryClient, selectableOptions]);
-	// An unidentified model is left off the trigger rather than labelled.
-	const selectedModelLabel = modelOrModeLabel(triggerCatalog.data, model, mode, "");
-	const triggerLabel = [value ? agentLabel(value) : defaultHarnessLabel, harnessOnly ? null : selectedModelLabel]
+	}, [defaultHarness, menuOpen, project, queryClient, selectableOptions]);
+	const selectedModelLabel = modelOrModeLabel(triggerCatalog.data, model, mode, t("settings.models.agentDefault"));
+	const triggerLabel = [value ? agentLabel(value) : (defaultTriggerLabel ?? defaultOptionLabel ?? defaultHarness), selectedModelLabel]
 		.filter(Boolean)
 		.join(" · ");
 
 	return (
 		<OptionMenu open={menuOpen} onOpenChange={setMenuOpen}>
 			<OptionMenuTrigger
-				ref={management.triggerRef}
 				className={cn(
 					"w-auto min-w-0 max-w-full justify-between gap-2 px-2 text-left",
 					contentAlign === "end" && "justify-end text-right",
 					triggerClassName,
 				)}
-				aria-label={reviewerAriaLabel}
+				aria-label={ariaLabel}
 				disabled={disabled}
 			>
 				<span className="flex min-w-0 items-center gap-2">
 					{effectiveHarness ? <AgentAvatar provider={effectiveHarness} className="size-icon-lg shrink-0" /> : null}
 					<span className={cn("min-w-0 truncate", contentAlign === "end" && "text-right")}>{triggerLabel}</span>
-					{needsSetup && <span className="text-xs text-muted-foreground">{t("agentSelector.needsSetup")}</span>}
 				</span>
 			</OptionMenuTrigger>
-			<OptionMenuContent onCloseAutoFocus={management.onCloseAutoFocus} align={contentAlign === "end" ? "end" : "start"} className="reviews-agent-menu-surface w-[18rem]">
-				<ReviewerHarnessOption
-					agent={{ id: "__default__", label: defaultHarnessLabel, disabled: false, status: "", statusTone: "success" }}
-					currentHarness={value}
-					currentModel={model}
-					currentMode={mode}
-					onSelect={(nextHarness, nextConfig) => {
-						setMenuOpen(false);
-						onChange(nextHarness);
-						onConfigChange?.(nextHarness, nextConfig);
-					}}
-					projectId={menuProjectID}
-					hostId={hostId}
-					harnessOnly={harnessOnly}
-					resolvedHarness={defaultHarness}
-					persistHarness=""
-					closeMenu={() => setMenuOpen(false)}
-				/>
+			<OptionMenuContent align={contentAlign === "end" ? "end" : "start"} className="reviews-agent-menu-surface w-[18rem]">
+				{showDefaultOption && defaultOptionLabel ? (
+					<ReviewerHarnessOption
+						agent={{ id: "__default__", label: defaultOptionLabel, disabled: false, status: "", statusTone: "success" }}
+						currentHarness={value}
+						currentModel={model}
+						currentMode={mode}
+						onSelect={(nextHarness, nextConfig) => {
+							onChange(nextHarness);
+							onConfigChange?.(nextHarness, nextConfig);
+						}}
+						project={project}
+						resolvedHarness={defaultHarness}
+						persistHarness=""
+					/>
+				) : null}
 				{selectableOptions.map((agent) => (
 					<ReviewerHarnessOption
 						key={agent.id}
@@ -176,19 +162,14 @@ export function ReviewerSelect({
 						currentModel={model}
 						currentMode={mode}
 						onSelect={(nextHarness, nextConfig) => {
-							setMenuOpen(false);
 							onChange(nextHarness);
 							onConfigChange?.(nextHarness, nextConfig);
 						}}
-						projectId={menuProjectID}
-						hostId={hostId}
-						harnessOnly={harnessOnly}
+						project={project}
 						resolvedHarness={agent.id}
 						persistHarness={agent.id}
-						closeMenu={() => setMenuOpen(false)}
 					/>
 				))}
-				<OptionMenuItem className="mt-1 border-t border-border" onSelect={management.requestManagement}>{t("agentSelector.manage")}</OptionMenuItem>
 			</OptionMenuContent>
 		</OptionMenu>
 	);
@@ -200,105 +181,131 @@ function ReviewerHarnessOption({
 	currentModel,
 	currentMode,
 	onSelect,
-	projectId,
-	hostId,
-	harnessOnly,
+	project,
 	resolvedHarness,
 	persistHarness,
-	closeMenu,
 }: {
 	agent: Pick<RankedAgentOption, "id" | "label" | "status" | "statusTone" | "disabled">;
 	currentHarness: string;
 	currentModel: string;
 	currentMode: string;
 	onSelect: (harness: string, config: ReviewerAgentConfig) => void;
-	projectId: string;
-	hostId?: string;
-	harnessOnly: boolean;
-	resolvedHarness: string;
+	project?: Ref;
+	resolvedHarness?: string;
 	persistHarness: string;
-	closeMenu: () => void;
 }) {
 	const { t } = useTranslation();
 	const [open, setOpen] = useState(false);
 	const catalogQuery = useQuery({
-		...agentModelsQueryOptions(resolvedHarness, projectId, hostId),
+		...agentModelsQueryOptions(resolvedHarness ?? "", project),
 		enabled: false,
 	});
 	const catalog = catalogQuery.data;
-	const effectiveCurrentHarness = currentHarness || (persistHarness === "" ? resolvedHarness : "");
-	const effectivePersistHarness = persistHarness || resolvedHarness;
-	const isCurrentHarness = effectiveCurrentHarness !== "" && effectiveCurrentHarness === effectivePersistHarness;
-	const isCurrentDefaultSelection = isCurrentHarness && currentModel === "" && currentMode === "";
-	const options = modelOptions(catalog);
-	const catalogKnown = catalogQuery.data !== undefined || catalogQuery.isFetched;
-	const defaultModel = catalog?.models?.find((item) => item.isDefault && isConcreteModelID(item.id))?.id;
-	const selectDefault = () => onSelect(persistHarness, {});
+	const isCurrent = currentHarness === persistHarness;
 
-	if (harnessOnly || (catalogKnown && options.length === 0)) {
+	if (!resolvedHarness) {
+		return (
+			<OptionMenuItem onSelect={() => onSelect("", {})} active={currentHarness === "" && currentModel === "" && currentMode === ""}>
+				<span className="flex min-w-0 items-center justify-between gap-3">
+					<span>{agent.label}</span>
+					{currentHarness === "" && currentModel === "" && currentMode === "" ? <Check aria-hidden="true" className="size-4" /> : null}
+				</span>
+			</OptionMenuItem>
+		);
+	}
+
+	const hasChoices = hasModelChoices(catalog);
+	const supportsCustomModel = supportsReviewerCustomModel(catalog);
+	const catalogKnown = catalogQuery.data !== undefined || catalogQuery.isFetched;
+
+	if (catalogKnown && !hasChoices) {
 		return (
 			<>
 				<OptionMenuItem
-					onSelect={selectDefault}
-					active={isCurrentDefaultSelection}
+					onSelect={() => onSelect(persistHarness, {})}
+					active={isCurrent && currentModel === "" && currentMode === ""}
 					className="reviews-agent-menu-item"
 					disabled={agent.disabled}
 				>
 					<AgentSelectMenuItem
 						agentId={resolvedHarness}
 						label={agent.label}
-						selected={isCurrentHarness}
+						selected={isCurrent}
 						status={agent.status}
 						statusTone={agent.statusTone}
 						disabled={agent.disabled}
 					/>
 				</OptionMenuItem>
+				{supportsCustomModel ? (
+					<OptionMenuSub>
+						<OptionMenuSubTrigger
+							className="pl-8 text-sm text-settings-muted"
+							aria-label={t("settings.models.customAgentModelAria", { label: agent.label })}
+							label={t("settings.models.custom")}
+						/>
+						<OptionMenuSubContent className="w-[15rem]">
+							<ReviewerCustomModelOption
+								label={agent.label}
+								currentModel={isCurrent ? currentModel : ""}
+								onSelect={(nextModel) => onSelect(persistHarness, { model: nextModel })}
+							/>
+						</OptionMenuSubContent>
+					</OptionMenuSub>
+				) : null}
 			</>
 		);
 	}
 
 	return (
 		<OptionMenuSub open={open} onOpenChange={setOpen}>
-			<OptionMenuSubTrigger
-				disabled={agent.disabled}
-				aria-label={agent.status ? `${agent.label}${agent.status}` : agent.label}
-				onClick={(event) => {
-					if (!isCurrentHarness) {
-						event.preventDefault();
-						closeMenu();
-						selectDefault();
-					}
-				}}
-			>
+			<OptionMenuSubTrigger disabled={agent.disabled} aria-label={agent.status ? `${agent.label}${agent.status}` : agent.label}>
 				<AgentSelectMenuItem
 					agentId={resolvedHarness}
 					label={agent.label}
-					selected={isCurrentHarness}
+					selected={isCurrent}
 					status={agent.status}
 					statusTone={agent.statusTone}
 					disabled={agent.disabled}
 				/>
 			</OptionMenuSubTrigger>
 			<OptionMenuSubContent className="w-[15rem]">
-				{(!isCurrentHarness || (!isCurrentDefaultSelection && !defaultModel)) && (
-					<OptionMenuItem onSelect={selectDefault}>
-						{t(catalog?.selectionMode === "mode" ? "settings.models.useAgentMode" : "settings.models.useAgentModel")}
-					</OptionMenuItem>
-				)}
+				<OptionMenuItem
+					onSelect={() => onSelect(persistHarness, {})}
+					active={isCurrent && currentModel === "" && currentMode === ""}
+				>
+					<span className="flex min-w-0 items-center justify-between gap-3">
+						<span>{t("settings.models.agentDefault")}</span>
+						{isCurrent && currentModel === "" && currentMode === "" ? <Check aria-hidden="true" className="size-4" /> : null}
+					</span>
+				</OptionMenuItem>
 				{!catalogKnown ? (
 					<OptionMenuItem disabled>{t("common.loading", { defaultValue: "Loading…" })}</OptionMenuItem>
 				) : null}
-				{options.map((option) => {
-					const config = option.value === defaultModel ? {} : option.kind === "mode" ? { mode: option.value } : { model: option.value };
+				{catalogKnown && supportsCustomModel ? (
+					<OptionMenuSub>
+						<OptionMenuSubTrigger
+							className="text-sm text-settings-muted"
+							aria-label={t("settings.models.customAgentModelAria", { label: agent.label })}
+							label={t("settings.models.custom")}
+						/>
+						<OptionMenuSubContent className="w-[15rem]">
+							<ReviewerCustomModelOption
+								label={agent.label}
+								currentModel={isCurrent ? currentModel : ""}
+								onSelect={(nextModel) => onSelect(persistHarness, { model: nextModel })}
+							/>
+						</OptionMenuSubContent>
+					</OptionMenuSub>
+				) : null}
+				{modelOptions(catalog).map((option) => {
 					const selected =
-						isCurrentHarness &&
+						isCurrent &&
 						((option.kind === "mode" && currentMode === option.value) ||
-							(option.kind === "model" && currentModel === option.value) ||
-							(isCurrentDefaultSelection && option.value === defaultModel));
+							(option.kind === "model" && currentModel === option.value));
 					return (
 						<OptionMenuItem
 							key={`${option.kind}:${option.value}`}
-							onSelect={() => onSelect(persistHarness, config)}
+							onSelect={() => onSelect(persistHarness, option.kind === "mode" ? { mode: option.value } : { model: option.value })}
 							active={selected}
 						>
 							<span className="flex min-w-0 items-center justify-between gap-3">
@@ -313,20 +320,78 @@ function ReviewerHarnessOption({
 	);
 }
 
+function ReviewerCustomModelOption({
+	label,
+	currentModel,
+	onSelect,
+}: {
+	label: string;
+	currentModel: string;
+	onSelect: (model: string) => void;
+}) {
+	const { t } = useTranslation();
+	const [customModel, setCustomModel] = useState("");
+	const customModelActionLabel = useMemo(() => {
+		const nextModel = customModel.trim();
+		return nextModel !== ""
+			? t("settings.models.useCustom", { model: nextModel })
+			: t("settings.models.custom");
+	}, [customModel, t]);
+
+	return (
+		<>
+			<div className="p-1" onKeyDown={(event) => event.stopPropagation()}>
+				<input
+					type="text"
+					aria-label={t("settings.models.customAgentModelAria", { label })}
+					value={customModel}
+					onChange={(event) => setCustomModel(event.target.value)}
+					placeholder={currentModel || t("settings.models.custom")}
+					className="settings-inline-input w-full"
+					onKeyDown={(event) => {
+						if (event.key !== "Enter") return;
+						const nextModel = customModel.trim();
+						if (nextModel === "") return;
+						event.preventDefault();
+						onSelect(nextModel);
+					}}
+				/>
+			</div>
+			<OptionMenuItem
+				onSelect={() => {
+					const nextModel = customModel.trim();
+					if (nextModel === "") return;
+					onSelect(nextModel);
+				}}
+				disabled={customModel.trim() === ""}
+			>
+				<span className="min-w-0 truncate">{customModelActionLabel}</span>
+			</OptionMenuItem>
+		</>
+	);
+}
+
+function supportsReviewerCustomModel(catalog?: AgentModelCatalog): boolean {
+	return catalog?.selectionMode === "text" && catalog.allowCustom === true;
+}
+
+function hasModelChoices(catalog?: AgentModelCatalog): boolean {
+	return modelOptions(catalog).length > 0;
+}
+
 function modelOptions(catalog?: AgentModelCatalog): Array<{ kind: "model" | "mode"; label: string; value: string }> {
 	if (!catalog) return [];
 	if (catalog.selectionMode !== "catalog" && catalog.selectionMode !== "mode" && catalog.selectionMode !== "text") return [];
-	return (catalog.models ?? []).filter((item) => isConcreteModelID(item.id)).map((item) => ({
+	return (catalog.models ?? []).map((item) => ({
 		kind: catalog.selectionMode === "mode" ? "mode" : "model",
-		label: modelChoiceLabel(item),
+		label: item.label,
 		value: item.id,
 	}));
 }
 
 function modelOrModeLabel(catalog: AgentModelCatalog | undefined, model: string, mode: string, emptyLabel: string): string {
-	const configured = mode || model;
-	const value = isConcreteModelID(configured) ? configured : "";
-	const effective = value || catalog?.models?.find((item) => item.isDefault && isConcreteModelID(item.id))?.id || "";
-	if (!effective) return emptyLabel;
-	return modelOptions(catalog).find((item) => item.value === effective)?.label || effective;
+	const value = mode || model;
+	if (!value) return emptyLabel;
+	const match = catalog?.models?.find((item) => item.id === value);
+	return match?.label || value;
 }

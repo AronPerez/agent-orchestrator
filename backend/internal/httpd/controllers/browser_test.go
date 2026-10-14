@@ -15,17 +15,19 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/browser"
 )
 
 type fakeBrowserRuntime struct {
-	status browserruntime.Status
-	action string
-	args   map[string]interface{}
-	err    error
+	status            browserruntime.Status
+	persistentProfile bool
+	action            string
+	args              map[string]interface{}
+	err               error
 }
 
-func (f *fakeBrowserRuntime) Status(_ context.Context, _ domain.SessionID, _ string) (browserruntime.Status, error) {
-	return f.status, nil
+func (f *fakeBrowserRuntime) Status(_ context.Context, _ domain.SessionID, _ string) (browser.StatusResult, error) {
+	return browser.StatusResult{Status: f.status, PersistentProfile: f.persistentProfile}, nil
 }
 
 func (f *fakeBrowserRuntime) Execute(

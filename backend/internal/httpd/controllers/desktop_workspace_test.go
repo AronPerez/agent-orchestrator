@@ -59,3 +59,29 @@ func TestDesktopWorkspaceLocationSurfacesServiceFailure(t *testing.T) {
 	body, status, _ := doRequest(t, server, http.MethodGet, "/api/v1/desktop/sessions/ao-1/workspace", "")
 	assertErrorCode(t, body, status, http.StatusInternalServerError, "INTERNAL_ERROR")
 }
+
+// The desktop app resolves a REMOTE session's workspace through this gated
+// twin: /api/v1/desktop is deliberately LAN-blocked, so the desktop route can
+// never answer over the network, while this one is served with auth.
+func TestSessionWorkspaceLocationGatedTwin(t *testing.T) {
+	server := desktopWorkspaceServer(t, fakeDesktopWorkspaceService{path: "/tmp/ao/worktrees/ao-1"})
+
+	body, status, _ := doRequest(t, server, http.MethodGet, "/api/v1/sessions/ao-1/workspace-location", "")
+	if status != http.StatusOK {
+		t.Fatalf("gated workspace-location = %d, want 200; body=%s", status, body)
+	}
+	var got struct {
+		SessionID     string `json:"sessionId"`
+		WorkspacePath string `json:"workspacePath"`
+	}
+	mustJSON(t, body, &got)
+	if got.SessionID != "ao-1" || got.WorkspacePath == "" {
+		t.Fatalf("body = %+v, want sessionId ao-1 and a workspacePath", got)
+	}
+
+	missing := desktopWorkspaceServer(t, fakeDesktopWorkspaceService{
+		err: apierr.NotFound("SESSION_NOT_FOUND", "Session was not found"),
+	})
+	body, status, _ = doRequest(t, missing, http.MethodGet, "/api/v1/sessions/does-not-exist/workspace-location", "")
+	assertErrorCode(t, body, status, http.StatusNotFound, "SESSION_NOT_FOUND")
+}

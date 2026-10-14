@@ -1,8 +1,5 @@
-import { usePathname } from "expo-router";
-import { useIsFocused, useScrollToTop } from "expo-router/react-navigation";
-import { type RefObject, useEffect, useRef } from "react";
-import { activeSidebarDestination, scrollSidebarRefToTop } from "./sidebar-navigation";
-import { useSidebarNavigation } from "./sidebar-navigation-context";
+import { useScrollToTop } from "expo-router/react-navigation";
+import { type RefObject, useRef } from "react";
 
 // The ref shape the hook accepts (ScrollView, FlatList, SectionList, ...).
 // It isn't exported, so derive it from the hook itself.
@@ -25,20 +22,7 @@ type ScrollableRef = Parameters<typeof useScrollToTop>[0];
  */
 export function useTabScrollToTop<T>(): RefObject<T | null> {
 	const ref = useRef<T>(null);
-	const pathname = usePathname();
-	const focused = useIsFocused();
-	const { scrollRequest } = useSidebarNavigation();
-	const handledSequence = useRef(0);
 	// Callers always pass a scrollable; the generic keeps the JSX ref precise.
 	useScrollToTop(ref as ScrollableRef);
-
-	useEffect(() => {
-		if (!scrollRequest || scrollRequest.sequence <= handledSequence.current) return;
-		handledSequence.current = scrollRequest.sequence;
-		if (!focused) return;
-		if (scrollRequest.destination !== activeSidebarDestination(pathname)) return;
-		scrollSidebarRefToTop(ref.current as Parameters<typeof scrollSidebarRefToTop>[0]);
-	}, [focused, pathname, scrollRequest]);
-
 	return ref;
 }

@@ -1,8 +1,6 @@
 package httpd
 
 import (
-	"context"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -11,8 +9,6 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
-	"github.com/aoagents/agent-orchestrator/backend/internal/observe/ownership"
-	"github.com/aoagents/agent-orchestrator/backend/internal/observe/sentryobs"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/telemetrymeta"
 )
@@ -32,12 +28,6 @@ import (
 // envelope.WriteError: the wire envelope hides internals ("Internal server
 // error"), so without this the cause of a 500 was lost entirely.
 func requestLogger(log *slog.Logger, sink ports.EventSink) func(http.Handler) http.Handler {
-	return requestLoggerWithCapture(log, sink, sentryobs.CaptureHTTPError)
-}
-
-type captureHTTPErrorFunc func(context.Context, error, map[string]string, string)
-
-func requestLoggerWithCapture(log *slog.Logger, sink ports.EventSink, captureHTTPError captureHTTPErrorFunc) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
@@ -65,8 +55,6 @@ func requestLoggerWithCapture(log *slog.Logger, sink ports.EventSink, captureHTT
 					if capErr != nil {
 						errorKind, errorCode = telemetrymeta.ErrorKindAndCode(capErr)
 					}
-					// Same grouping key for PostHog and Sentry so an issue lines up
-					// across both.
 					fingerprint := telemetrymeta.Fingerprint("httpd", "http_request", r.Method, path, strconv.Itoa(ww.Status()), errorKind, errorCode)
 					if sink != nil {
 						payload := map[string]any{
@@ -110,25 +98,7 @@ func requestLoggerWithCapture(log *slog.Logger, sink ports.EventSink, captureHTT
 							Payload:    payload,
 						})
 					}
-					// Capture genuine faults to Sentry with the real error/stack.
-					// 503 (transient contention) is excluded by ShouldCaptureStatus.
-					if sentryobs.ShouldCaptureStatus(ww.Status()) && captured.ReportingOwner != ownership.OwnerAgentSwitchSaga {
-						err := capErr
-						if err == nil {
-							err = fmt.Errorf("HTTP %d %s %s", ww.Status(), r.Method, path)
-						}
-						captureHTTPError(r.Context(), err, map[string]string{
-							"component":  "httpd",
-							"operation":  "http_request",
-							"method":     r.Method,
-							"path":       path,
-							"status":     strconv.Itoa(ww.Status()),
-							"category":   "http_5xx",
-							"error_kind": errorKind,
-							"error_code": errorCode,
-							"request_id": middleware.GetReqID(r.Context()),
-						}, fingerprint)
-					}
+
 				}
 			}()
 			next.ServeHTTP(ww, r)

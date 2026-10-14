@@ -26,7 +26,7 @@ func startShutdownTestLAN(t *testing.T, handler http.Handler) (*LANManager, stri
 	t.Helper()
 	m := NewMobileLAN(handler, "", 0, nil, nil)
 	m.SetPasswordHash(mobilebridge.HashPassword("secret12"))
-	port, err := m.Start(0)
+	port, err := m.Start(0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestLANManagerStopCancelsStreamAndAllowsRestart(t *testing.T) {
 	if m.Running() || m.BoundPort() != 0 {
 		t.Fatal("stopped listener still advertised")
 	}
-	port, err := m.Start(0)
+	port, err := m.Start(0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestLANManagerStartWaitsForPreviousStop(t *testing.T) {
 	}
 	startDone := make(chan error, 1)
 	go func() {
-		_, err := m.Start(0)
+		_, err := m.Start(0, "")
 		startDone <- err
 	}()
 	select {

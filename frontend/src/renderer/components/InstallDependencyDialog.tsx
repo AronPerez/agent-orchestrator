@@ -3,7 +3,7 @@ import { Check, Copy, XCircle } from "lucide-react";
 import type { TFunction } from "i18next";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { components } from "../../api/schema";
+import type { components, operations } from "../../api/schema";
 import type { MessageKey } from "../i18n";
 import { apiClient, apiErrorMessage } from "../lib/api-client";
 import { aoBridge } from "../lib/bridge";
@@ -21,12 +21,8 @@ import {
 } from "./ui/dialog";
 
 type InstallJob = components["schemas"]["InstallJob"];
-// `notice` is emitted by the daemon's OpenCode 2 install plan. Keep this
-// narrow compatibility extension while older generated clients are in use;
-// it becomes part of InstallJob when the accompanying API schema regenerates.
-type InstallJobWithNotice = InstallJob & { notice?: string };
-type InstallTarget = "tmux" | "gh" | "claude" | "codex" | "opencode" | "opencode-v2" | "copilot";
-type AgentInstallTarget = Exclude<InstallTarget, "tmux" | "gh">;
+type InstallTarget = operations["getSystemInstallStatus"]["parameters"]["path"]["target"];
+type AgentInstallTarget = Extract<InstallTarget, "claude" | "codex" | "opencode" | "copilot">;
 
 // Labels are the CLIs' own product names — not translated, same treatment as
 // "Agent Orchestrator" itself. Descriptions are ordinary UI copy and go
@@ -35,7 +31,6 @@ const AGENT_INSTALL_OPTIONS: Array<{ target: AgentInstallTarget; label: string }
 	{ target: "claude", label: "Claude Code" },
 	{ target: "codex", label: "Codex" },
 	{ target: "opencode", label: "opencode" },
-	{ target: "opencode-v2", label: "OpenCode 2" },
 	{ target: "copilot", label: "Copilot CLI" },
 ];
 
@@ -43,7 +38,6 @@ const AGENT_INSTALL_DESCRIPTION_KEYS: Record<AgentInstallTarget, MessageKey> = {
 	claude: "startup.agentDescClaude",
 	codex: "startup.agentDescCodex",
 	opencode: "startup.agentDescOpencode",
-	"opencode-v2": "startup.agentDescOpencode",
 	copilot: "startup.agentDescCopilot",
 };
 
@@ -53,23 +47,14 @@ export function isActiveInstallJob(job: InstallJob | undefined): boolean {
 	return job?.status === "running" || job?.status === "installing" || job?.status === "verifying";
 }
 
-// Startup requirements are read through a process-free GET. An explicit user
-// request to check again first forces the daemon's normal agent refresh so
-// identity-sensitive adapters can perform their bounded validation probe.
-export async function checkRequirementsAgain(onRefetchRequirements: () => Promise<unknown> | void): Promise<void> {
-	const { error } = await apiClient.POST("/api/v1/agents/refresh");
-	if (error) throw new Error(apiErrorMessage(error, "Could not refresh agent inventory."));
-	await onRefetchRequirements();
-}
-
 /** Sequential single-target install job runner: POST to start, GET on an
  *  interval while running. One target is ever in flight at a time — this
  *  gate only ever needs one, and serializing keeps the UI unambiguous about
  *  which command is running. */
 function useInstallRunner(onSucceeded: () => void) {
 	const [target, setTarget] = useState<InstallTarget | null>(null);
-	const [job, setJob] = useState<InstallJobWithNotice | undefined>(undefined);
-	const [previews, setPreviews] = useState<Partial<Record<InstallTarget, InstallJobWithNotice>>>({});
+	const [job, setJob] = useState<InstallJob | undefined>(undefined);
+	const [previews, setPreviews] = useState<Partial<Record<InstallTarget, InstallJob>>>({});
 	const [inspectedTargets, setInspectedTargets] = useState<Partial<Record<InstallTarget, boolean>>>({});
 	const [isStarting, setIsStarting] = useState(false);
 	const [startError, setStartError] = useState<string | undefined>(undefined);
@@ -94,7 +79,7 @@ function useInstallRunner(onSucceeded: () => void) {
 					params: { path: { target: polledTarget } },
 				});
 				if (error || !data) return; // transient — try again next tick
-				setJob(data as InstallJobWithNotice);
+				setJob(data);
 				if (isActiveInstallJob(data)) return;
 				stopPolling();
 				if (data.status === "succeeded") onSucceededRef.current();
@@ -113,7 +98,7 @@ function useInstallRunner(onSucceeded: () => void) {
 				params: { path: { target: nextTarget } },
 			});
 			if (error || !data) return;
-			setPreviews((current) => ({ ...current, [nextTarget]: data as InstallJobWithNotice }));
+			setPreviews((current) => ({ ...current, [nextTarget]: data }));
 		} catch {
 			// The requirements gate remains usable if plan inspection fails. The
 			// POST action will still surface its own concrete error when selected.
@@ -133,7 +118,7 @@ function useInstallRunner(onSucceeded: () => void) {
 				params: { path: { target: nextTarget } },
 			});
 			if (error || !data) throw new Error(apiErrorMessage(error, "Could not start the install."));
-			setJob(data as InstallJobWithNotice);
+			setJob(data);
 			if (isActiveInstallJob(data)) poll(nextTarget);
 			else if (data.status === "succeeded") onSucceededRef.current();
 		} catch (err) {
@@ -160,7 +145,6 @@ export function InstallDependencyDialog({
 	const [selectedAgent, setSelectedAgent] = useState<AgentInstallTarget | null>(null);
 	const [ghDismissed, setGhDismissed] = useState(false);
 	const [isCheckingAgain, setIsCheckingAgain] = useState(false);
-	const [checkAgainError, setCheckAgainError] = useState<string | undefined>();
 	const install = useInstallRunner(() => void onRefetchRequirements());
 
 	const byId = new Map(requirements.map((requirement) => [requirement.id, requirement]));
@@ -187,22 +171,14 @@ export function InstallDependencyDialog({
 
 	const checkAgain = async () => {
 		setIsCheckingAgain(true);
-		setCheckAgainError(undefined);
 		try {
-			await checkRequirementsAgain(onRefetchRequirements);
-		} catch (error) {
-			setCheckAgainError(
-				error instanceof Error && error.message ? error.message : "Could not refresh agent inventory.",
-			);
+			await onRefetchRequirements();
 		} finally {
 			setIsCheckingAgain(false);
 		}
 	};
 
 	const title = harnessBlocking ? t("startup.blockedTitleAgent") : t("startup.blockedTitleDependency");
-	const opencodeV2Notice = selectedAgent === "opencode-v2"
-		? install.jobFor("opencode-v2")?.notice ?? t("startup.installOpencodeV2ReplacementWarning")
-		: undefined;
 
 	return (
 		<Dialog open onOpenChange={() => {}}>
@@ -270,9 +246,6 @@ export function InstallDependencyDialog({
 									</RadioGroup.Item>
 								))}
 							</RadioGroup.Root>
-							{opencodeV2Notice ? (
-								<p className="mt-2 text-caption text-warning" role="status">{opencodeV2Notice}</p>
-							) : null}
 							<div className="mt-2">
 								<InstallAction
 									primaryLabel={t("startup.installSelected")}
@@ -316,11 +289,6 @@ export function InstallDependencyDialog({
 				</div>
 
 				<div className={settingsDialogFooterClass}>
-					{checkAgainError ? (
-						<p role="alert" className="basis-full text-caption leading-4 text-error">
-							{checkAgainError}
-						</p>
-					) : null}
 					<button
 						type="button"
 						className="settings-footer-button"

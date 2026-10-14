@@ -1,3 +1,4 @@
+import { RadioGroup } from "radix-ui";
 import { useTranslation } from "react-i18next";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import {
@@ -5,15 +6,10 @@ import {
 	formatReportProblemDraft,
 	reportProblemDestinationUrl,
 	type ReportProblemDiagnostics,
-	type ReportProblemEmailProvider,
 	type ReportProblemOutput,
 } from "../../lib/report-problem";
 import { aoBridge } from "../../lib/bridge";
-import { isWindowsPlatform } from "../../lib/platform";
-import { captureRendererEvent } from "../../lib/telemetry";
 import { Button } from "../ui/button";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "../ui/dropdown-menu";
-import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 
 type DestinationIconProps = {
 	className?: string;
@@ -69,6 +65,7 @@ export function ReportProblemContent({ active }: { active: boolean }) {
 	const titleId = useId();
 	const detailsId = useId();
 	const titleRef = useRef<HTMLInputElement>(null);
+	const [selectedOutput, setSelectedOutput] = useState<ReportProblemOutput>("github");
 	const [summary, setSummary] = useState("");
 	const [details, setDetails] = useState("");
 	const [copiedOutput, setCopiedOutput] = useState<ReportProblemOutput | null>(null);
@@ -81,11 +78,11 @@ export function ReportProblemContent({ active }: { active: boolean }) {
 		if (!active) {
 			setSummary("");
 			setDetails("");
+			setSelectedOutput("github");
 			setCopiedOutput(null);
 			setCopyError(null);
 			return;
 		}
-		void captureRendererEvent("ao.renderer.support_opened");
 		let cancelled = false;
 		void collectReportProblemDiagnostics().then((nextDiagnostics) => {
 			if (!cancelled) setDiagnostics(nextDiagnostics);
@@ -96,6 +93,8 @@ export function ReportProblemContent({ active }: { active: boolean }) {
 	}, [active]);
 
 	const input = { summary, details };
+	const draft = formatReportProblemDraft(input, diagnostics, selectedOutput);
+	const destination = destinations.find((option) => option.value === selectedOutput) ?? destinations[0];
 	const canSubmit = summary.trim().length > 0 && details.trim().length > 0;
 
 	const clearStatus = () => {
@@ -103,24 +102,23 @@ export function ReportProblemContent({ active }: { active: boolean }) {
 		setCopyError(null);
 	};
 
-	const copyDraft = async (output: ReportProblemOutput, emailProvider: ReportProblemEmailProvider = "system") => {
+	const copyDraft = async () => {
 		if (!canSubmit) return;
 		setCopyError(null);
-		const draft = formatReportProblemDraft(input, diagnostics, output);
+		const output = selectedOutput;
 		try {
 			await aoBridge.clipboard.writeText(draft);
-			const destinationUrl = reportProblemDestinationUrl(input, diagnostics, output, emailProvider);
+			const destinationUrl = reportProblemDestinationUrl(input, diagnostics, output);
 			if (destinationUrl) {
 				await aoBridge.app.openExternal(destinationUrl);
 			}
 			setCopiedOutput(output);
 			setSummary("");
 			setDetails("");
-			void captureRendererEvent("ao.renderer.support_submitted", { destination: output, outcome: "succeeded" });
+			setSelectedOutput("github");
 		} catch (err) {
 			setCopyError(err instanceof Error ? err.message : t("report.copyFailed"));
 			setCopiedOutput(null);
-			void captureRendererEvent("ao.renderer.support_submitted", { destination: output, outcome: "failed" });
 		}
 	};
 
@@ -130,10 +128,12 @@ export function ReportProblemContent({ active }: { active: boolean }) {
 			onKeyDown={(event) => {
 				if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
 					event.preventDefault();
-					void copyDraft("github");
+					void copyDraft();
 				}
 			}}
 		>
+			<p className="text-xs leading-4 text-settings-muted">{t("report.subtitle")}</p>
+
 			<div className="flex flex-col gap-1.5">
 				<label className="settings-field-label" htmlFor={titleId}>
 					{t("report.titleLabel")}
@@ -141,7 +141,7 @@ export function ReportProblemContent({ active }: { active: boolean }) {
 				<input
 					ref={titleRef}
 					id={titleId}
-					className="settings-field-control h-(--size-settings-action-height) rounded-md!"
+					className="settings-field-control h-(--size-settings-action-height)"
 					value={summary}
 					onChange={(event) => {
 						setSummary(event.target.value);
@@ -157,7 +157,7 @@ export function ReportProblemContent({ active }: { active: boolean }) {
 				</label>
 				<textarea
 					id={detailsId}
-					className="settings-field-control min-h-(--size-textarea-min) resize-none overflow-y-auto py-2.5 rounded-md!"
+					className="settings-field-control min-h-(--size-textarea-min) resize-y py-2.5"
 					value={details}
 					onChange={(event) => {
 						setDetails(event.target.value);
@@ -167,72 +167,45 @@ export function ReportProblemContent({ active }: { active: boolean }) {
 				/>
 			</div>
 
-			<div role="group" aria-label={t("report.destination")} className="flex flex-wrap items-center justify-end gap-3">
-				{copyError ? (
-					<p role="alert" className="text-caption leading-4 text-error">
-						{copyError}
-					</p>
-				) : null}
-				{copiedLabel && !copyError ? (
-					<p className="text-caption leading-4 text-success">{t("report.draftCopied", { label: copiedLabel })}</p>
-				) : null}
-				<div className="flex items-center gap-1.5">
-					{destinations.map((option) => {
-						if (option.value === "email" && isWindowsPlatform()) {
-							return (
-								<DropdownMenu key={option.value}>
-									<Tooltip>
-										<TooltipTrigger asChild>
-											<DropdownMenuTrigger asChild>
-												<Button
-													type="button"
-													variant="footer"
-													className="size-(--size-settings-action-height) shrink-0 rounded-md! p-0"
-													disabled={!canSubmit}
-													aria-label={option.action}
-												>
-													<option.icon className="size-icon-sm" aria-hidden="true" />
-												</Button>
-											</DropdownMenuTrigger>
-										</TooltipTrigger>
-										<TooltipContent>{option.action}</TooltipContent>
-									</Tooltip>
-									<DropdownMenuContent align="end" side="top" className="w-52">
-										<DropdownMenuItem onSelect={() => void copyDraft("email", "system")}>
-											{t("report.emailSystem")}
-										</DropdownMenuItem>
-										<DropdownMenuItem onSelect={() => void copyDraft("email", "gmail")}>
-											{t("report.emailGmail")}
-										</DropdownMenuItem>
-										<DropdownMenuItem onSelect={() => void copyDraft("email", "outlook")}>
-											{t("report.emailOutlook")}
-										</DropdownMenuItem>
-									</DropdownMenuContent>
-								</DropdownMenu>
-							);
-						}
-						return (
-							<Tooltip key={option.value}>
-								<TooltipTrigger asChild>
-									<Button
-										type="button"
-										variant="footer"
-										className="size-(--size-settings-action-height) shrink-0 rounded-md! p-0"
-										disabled={!canSubmit}
-										aria-label={option.action}
-										onClick={() => {
-											if (!canSubmit) return;
-											void copyDraft(option.value);
-										}}
-									>
-										<option.icon className="size-icon-sm" aria-hidden="true" />
-									</Button>
-								</TooltipTrigger>
-								<TooltipContent>{option.action}</TooltipContent>
-							</Tooltip>
-						);
-					})}
-				</div>
+			<RadioGroup.Root
+				value={selectedOutput}
+				onValueChange={(value) => {
+					setSelectedOutput(value as ReportProblemOutput);
+					clearStatus();
+				}}
+				aria-label={t("report.destination")}
+				className="settings-segment self-start"
+			>
+				{destinations.map((option) => (
+					<RadioGroup.Item key={option.value} value={option.value} className="settings-segment-item">
+						<option.icon className="size-icon-sm" aria-hidden="true" />
+						{option.label}
+					</RadioGroup.Item>
+				))}
+			</RadioGroup.Root>
+
+			{copyError && (
+				<p role="alert" className="text-caption leading-4 text-error">
+					{copyError}
+				</p>
+			)}
+			{copiedLabel && !copyError && (
+				<p className="text-caption leading-4 text-success">{t("report.draftCopied", { label: copiedLabel })}</p>
+			)}
+
+			<div className="flex items-center justify-end gap-3">
+				<Button
+					type="button"
+					variant="footer-primary"
+					className="rounded-md"
+					disabled={!canSubmit}
+					onClick={() => {
+						if (!canSubmit) return;
+						void copyDraft();
+					}}
+				>
+					{destination.action}
+				</Button>
 			</div>
 		</div>
 	);

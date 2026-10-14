@@ -1,5 +1,3 @@
-import { sheetInset, space } from "../tokens";
-
 export const centeredConversationMenu = {
 	position: "absolute",
 	left: 16,
@@ -7,7 +5,7 @@ export const centeredConversationMenu = {
 } as const;
 
 export const composerSheetContentStyle = {
-	paddingHorizontal: sheetInset.horizontal,
-	paddingTop: sheetInset.top,
-	paddingBottom: sheetInset.bottom,
+	paddingHorizontal: 20,
+	paddingTop: 22,
+	paddingBottom: 24,
 } as const;

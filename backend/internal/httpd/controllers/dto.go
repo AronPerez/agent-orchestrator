@@ -233,6 +233,10 @@ type ListSessionsQuery struct {
 	Active           *bool  `query:"active,omitempty" description:"When true, return non-terminated sessions; when false, return terminated sessions."`
 	OrchestratorOnly *bool  `query:"orchestratorOnly,omitempty" description:"When true, return only orchestrator sessions."`
 	Fresh            *bool  `query:"fresh,omitempty" description:"When true, return only fresh non-terminated sessions."`
+	// Pagination is opt-in so the original return-everything contract holds
+	// for callers that never send pageSize (AIP-158/180).
+	PageSize  *int64 `query:"pageSize,omitempty" minimum:"1" description:"Page size. Absent returns every matching session; present pages the list newest first by update time, and the response carries nextPageToken while more remain. Values above 500 are clamped to 500."`
+	PageToken string `query:"pageToken,omitempty" description:"Opaque cursor from a previous page's nextPageToken."`
 }
 
 // CleanupSessionsQuery is the query string accepted by POST /api/v1/sessions/cleanup.
@@ -307,6 +311,11 @@ type WorkspaceSearchQuery struct {
 	Query  string `query:"query" required:"true" description:"Case-insensitive path substring."`
 	Cursor string `query:"cursor,omitempty" description:"Opaque pagination cursor returned by the previous page."`
 	Limit  int    `query:"limit,omitempty" minimum:"1" maximum:"100" description:"Maximum results. Defaults to 50."`
+}
+
+// WorkspaceResolveQuery is the query string accepted by GET /api/v1/sessions/{sessionId}/workspace/resolve.
+type WorkspaceResolveQuery struct {
+	Path string `query:"path" required:"true" description:"Absolute or workspace-relative file path to classify."`
 }
 
 // WorkspaceTreeQuery is the query string accepted by GET /api/v1/sessions/{sessionId}/workspace/tree.
@@ -400,6 +409,9 @@ type SessionArtifactView struct {
 // ListSessionsResponse is the body of GET /api/v1/sessions.
 type ListSessionsResponse struct {
 	Sessions []SessionView `json:"sessions"`
+	// NextPageToken is set only on a paginated request that has more rows;
+	// pass it back as pageToken to continue.
+	NextPageToken string `json:"nextPageToken,omitempty"`
 }
 
 // SpawnSessionRequest is the body of POST /api/v1/sessions.
@@ -432,6 +444,11 @@ type SpawnSessionRequest struct {
 	Model string `json:"model,omitempty" maxLength:"256"`
 	// Effort is the optional reasoning level for the selected model.
 	Effort string `json:"effort,omitempty" maxLength:"32"`
+
+	// RequestedOutput asks for a specific deliverable. artifact tells the worker to
+	// write a file in its artifact directory instead of opening a PR. Omitted is
+	// the ordinary task flow.
+	RequestedOutput domain.RequestedOutput `json:"requestedOutput,omitempty" enum:"artifact"`
 
 	// DisplayName is the sidebar label for the session, capped at 100 characters.
 	// `ao spawn --name` always sets it; other clients (e.g. the desktop new-task
@@ -740,9 +757,18 @@ type WorkspaceFileSearchResponse struct {
 	Truncated  bool                                `json:"truncated"`
 }
 
-// DesktopWorkspaceLocationResponse is returned only by the LAN-blocked desktop
-// handoff route. Electron main consumes the absolute path and never exposes it
-// through the preload bridge.
+// WorkspacePathResolutionResponse is the body of GET /api/v1/sessions/{sessionId}/workspace/resolve.
+// Path is relative to the root named by Kind and empty when Kind is outside;
+// the response never carries a local absolute path.
+type WorkspacePathResolutionResponse struct {
+	SessionID domain.SessionID             `json:"sessionId"`
+	Kind      sessionsvc.WorkspacePathKind `json:"kind" enum:"workspace,artifact,outside"`
+	Path      string                       `json:"path"`
+}
+
+// DesktopWorkspaceLocationResponse is returned by the LAN-blocked desktop
+// handoff route and by its credential-gated twin under /sessions. Electron main
+// consumes the absolute path and never exposes it through the preload bridge.
 type DesktopWorkspaceLocationResponse struct {
 	SessionID     domain.SessionID `json:"sessionId"`
 	WorkspacePath string           `json:"workspacePath"`
@@ -843,6 +869,10 @@ type BrowserStatusResponse struct {
 	Connected   bool             `json:"connected"`
 	ConnectedAt time.Time        `json:"connectedAt,omitempty"`
 	Transport   string           `json:"transport"`
+	// PersistentProfile is true when this session's project opted into a shared
+	// on-disk browser profile, so logins survive session teardown and restart.
+	// False is the default: a memory-only profile, discarded with the session.
+	PersistentProfile bool `json:"persistentProfile"`
 }
 
 // BrowserCommandRequest is the stable daemon-facing command envelope. Action
@@ -990,12 +1020,20 @@ type InterfaceTransitionNoticeAckResponse struct {
 	Transition SessionInterfaceTransitionView `json:"transition"`
 }
 
+// KillSessionRequest is the optional body of POST /api/v1/sessions/{sessionId}/kill.
+// DeleteArtifacts empties the session's artifact directory once it is
+// terminated. Only the archive dialog sets it; the CLI and the reaper never do.
+type KillSessionRequest struct {
+	DeleteArtifacts bool `json:"deleteArtifacts,omitempty"`
+}
+
 // KillSessionResponse is the body of POST /api/v1/sessions/{sessionId}/kill.
 type KillSessionResponse struct {
-	OK             bool             `json:"ok"`
-	SessionID      domain.SessionID `json:"sessionId"`
-	Freed          bool             `json:"freed,omitempty"`
-	CleanupPending bool             `json:"cleanupPending,omitempty"`
+	OK               bool             `json:"ok"`
+	SessionID        domain.SessionID `json:"sessionId"`
+	Freed            bool             `json:"freed,omitempty"`
+	CleanupPending   bool             `json:"cleanupPending,omitempty"`
+	ArtifactsDeleted bool             `json:"artifactsDeleted,omitempty"`
 }
 
 // RollbackSessionResponse is the body of POST /api/v1/sessions/{sessionId}/rollback.
@@ -1018,6 +1056,8 @@ type CleanupSkippedSession struct {
 
 // CleanupSessionsResponse is the body of POST /api/v1/sessions/cleanup.
 type CleanupSessionsResponse struct {
+	// OK reports whether every candidate was cleaned. It is false when any
+	// session appears in Skipped — a declined teardown is not a completed one.
 	OK bool `json:"ok"`
 	// Cleaned lists sessions whose workspace was present and has been released.
 	Cleaned []domain.SessionID `json:"cleaned"`
@@ -1348,6 +1388,7 @@ type SetActivityRequest struct {
 	ProviderTurnID               string                              `json:"providerTurnId,omitempty" description:"Native main-turn identity reported by the hook, when supported."`
 	SubmissionID                 string                              `json:"submissionId,omitempty" maxLength:"36" description:"AO prompt-hook context correlation UUID, when supported."`
 	TranscriptPath               string                              `json:"transcriptPath,omitempty" maxLength:"4096" description:"Read-only provider-native transcript path exposed by the hook."`
+	AgentCWD                     string                              `json:"agentCwd,omitempty" maxLength:"4096" description:"Working directory of the agent process that fired the hook. Used to reject signals from nested agents that inherited AO_SESSION_ID."`
 	LaunchID                     string                              `json:"launchId,omitempty" description:"AO process generation that produced the signal."`
 	Usage                        *UsageHookMetadata                  `json:"usage,omitempty" description:"Provider transcript metadata used by the local usage pipeline."`
 }
@@ -2258,6 +2299,12 @@ type MergePRResponse struct {
 	Method   string `json:"method"`
 }
 
+// ClosePRResponse is the body of POST /api/v1/prs/{id}/close (200).
+type ClosePRResponse struct {
+	OK       bool `json:"ok"`
+	PRNumber int  `json:"prNumber"`
+}
+
 // ResolveCommentsRequest is the optional body of POST /api/v1/prs/{id}/resolve-comments.
 type ResolveCommentsRequest struct {
 	// CommentIDs accepts provider comment ids and review thread ids. Comment
@@ -2868,6 +2915,9 @@ type ConversationActivityResponse struct {
 
 // ConversationSnapshotResponse is the durable read model a client bootstraps from.
 type ConversationSnapshotResponse struct {
+	// SupportsExcerpts advertises daemon-owned source verification separately from
+	// provider capabilities. Older daemons silently ignore the excerpts input.
+	SupportsExcerpts           bool   `json:"supportsExcerpts,omitempty"`
 	ConversationID             string `json:"conversationId"`
 	ActiveBranchID             string `json:"activeBranchId,omitempty"`
 	BranchedFromEarlierMessage bool   `json:"branchedFromEarlierMessage"`

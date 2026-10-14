@@ -2,8 +2,7 @@ import { ChevronDown, Code2, FolderOpen, SquareTerminal } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { OpenTarget, OpenTargetId } from "../../shared/editor-handoff";
-import { useSessionShortcut } from "../hooks/useAppShortcut";
-import { useEditorHandoffState, useOpenSessionTarget, workspaceCheckFailed } from "../hooks/useEditorHandoff";
+import { useEditorHandoffState, useOpenSessionTarget } from "../hooks/useEditorHandoff";
 import { TopbarActionError, TopbarButton } from "./TopbarButton";
 import {
 	DropdownMenu,
@@ -16,7 +15,6 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import {
 	AndroidStudioIcon,
-	AntigravityIcon,
 	CursorIcon,
 	JetBrainsIcon,
 	SublimeIcon,
@@ -33,7 +31,6 @@ const editorIcons: Record<string, typeof VSCodeIcon> = {
 	cursor: CursorIcon,
 	windsurf: WindsurfIcon,
 	zed: ZedIcon,
-	antigravity: AntigravityIcon,
 	sublime: SublimeIcon,
 	"android-studio": AndroidStudioIcon,
 	intellij: JetBrainsIcon,
@@ -51,7 +48,6 @@ const editorColors: Record<string, string> = {
 	vscode: "#1F9CF0",
 	"vscode-insiders": "#1F9CF0",
 	vscodium: "#2F80ED",
-	antigravity: "#4285F4",
 	sublime: "#FF9800",
 	"android-studio": "#3DDC84",
 };
@@ -68,20 +64,16 @@ function TargetIcon({ target, className }: { target?: OpenTarget; className?: st
 // workspace path, launches the native target, and persists editor preference.
 // This renderer receives only safe target metadata and availability status.
 export function TopbarOpenEditorButton({
+	host,
 	sessionId,
-	projectId,
-	sessionCreatedAt,
-	sessionTerminated,
 	style,
 }: {
+	host: string;
 	sessionId: string;
-	projectId: string;
-	sessionCreatedAt?: string;
-	sessionTerminated?: boolean;
 	style?: React.CSSProperties;
 }) {
 	const { t } = useTranslation();
-	const stateQuery = useEditorHandoffState(sessionId, { sessionCreatedAt, sessionTerminated });
+	const stateQuery = useEditorHandoffState(host, sessionId);
 	const open = useOpenSessionTarget();
 	const state = stateQuery.data;
 	const [menuOpen, setMenuOpen] = useState(false);
@@ -89,6 +81,8 @@ export function TopbarOpenEditorButton({
 	const editors = targets.filter((target) => target.kind === "editor");
 	const preferred = editors.find((target) => target.id === state?.preferredEditorId);
 	const safeTargets = targets.filter((target) => target.kind !== "editor");
+	const fileManagerName = safeTargets.find((target) => target.kind === "file_manager")?.name ?? t("editor.fileManager");
+	const terminalName = safeTargets.find((target) => target.kind === "terminal")?.name ?? t("editor.terminal");
 	const workspaceAvailable = state?.workspaceAvailable === true;
 	const busy = stateQuery.isPending || open.isPending;
 	const mainDisabled = busy || !workspaceAvailable || !preferred;
@@ -96,37 +90,33 @@ export function TopbarOpenEditorButton({
 
 	const launch = (targetId?: OpenTargetId) => {
 		open.reset();
-		open.mutate({ sessionId, projectId, ...(targetId ? { targetId } : {}) });
+		open.mutate({ host, sessionId, ...(targetId ? { targetId } : {}) });
 	};
-	// ⌘O opens the workspace in the preferred editor, or in the first available
-	// target (file manager, terminal) when no editor is installed.
-	useSessionShortcut("open-in-editor", () => {
-		if (busy || !workspaceAvailable) return;
-		if (preferred) launch();
-		else if (targets[0]) launch(targets[0].id);
-	});
 	const launchError = open.error instanceof Error ? open.error.message : null;
-	const waitingLabel = stateQuery.isPending
-		? t("editor.preparingWorkspace")
-		: (workspaceCheckFailed(state) ? t("editor.checkingWorkspace") : null);
-	const workspaceError = !waitingLabel && !workspaceAvailable
-		? state?.unavailableReason ?? t("editor.workspaceUnavailable")
+	const remote = state?.remote ?? null;
+	// A remote workspace nothing can open yet is information, not an error:
+	// it gets a title, never the red TopbarActionError.
+	const remoteNotice = remote && !workspaceAvailable
+		? remote.sshConfigured
+			? null // the host itself said the workspace is gone — fall through to red guidance
+			: targets.length > 0
+				? t("editor.remoteNeedsSsh", { host: remote.hostLabel })
+				: t("editor.remoteOn", { host: remote.hostLabel })
 		: null;
-	const noEditorInstalled = !stateQuery.isPending && workspaceAvailable && editors.length === 0;
-	const mainTitle = waitingLabel
-		?? (workspaceError
-			?? (preferred
-				? t("editor.openWorkspaceInTitle", { name: preferred.name })
-				: (noEditorInstalled ? t("editor.noEditorInstalled") : t("editor.chooseEditorTitle"))));
+	const guidance = !stateQuery.isPending && !workspaceAvailable && (!remote || remote.sshConfigured)
+		? (state?.unavailableReason ?? (remote ? null : t("editor.workspaceUnavailable")))
+		: !stateQuery.isPending && !remote && editors.length === 0
+			? t("editor.noEditorGuidance", { fileManager: fileManagerName, terminal: terminalName })
+			: null;
+	const mainTitle = remoteNotice
+		?? guidance
+		?? (preferred ? t("editor.openWorkspaceInTitle", { name: preferred.name }) : t("editor.chooseEditorTitle"));
 
 	return (
 		<>
-			{/* Only a launch the user just attempted earns inline topbar space. An
-			    unavailable workspace is a standing state: the controls are disabled
-			    and the reason lives in the main button's tooltip. */}
-			{launchError ? (
-				<TopbarActionError className="max-w-content-max truncate" title={launchError}>
-					{launchError}
+			{launchError || guidance ? (
+				<TopbarActionError className="max-w-content-max truncate" title={launchError ?? guidance ?? undefined}>
+					{launchError ?? guidance}
 				</TopbarActionError>
 			) : null}
 			<div
@@ -138,11 +128,7 @@ export function TopbarOpenEditorButton({
 					<TooltipTrigger asChild>
 						<span className="inline-flex">
 							<TopbarButton
-								aria-label={waitingLabel
-									?? (workspaceError
-										?? (preferred
-											? t("editor.openInAria", { name: preferred.name })
-											: (noEditorInstalled ? t("editor.noEditorInstalled") : t("editor.chooseEditor"))))}
+								aria-label={preferred ? t("editor.openInAria", { name: preferred.name }) : t("editor.chooseEditor")}
 								className="hover:bg-transparent"
 								disabled={mainDisabled}
 								onClick={() => launch()}

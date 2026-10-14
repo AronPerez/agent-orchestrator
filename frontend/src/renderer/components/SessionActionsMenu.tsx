@@ -1,32 +1,27 @@
 import { MoreVertical } from "lucide-react";
-import { Children, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { TopbarButton } from "./TopbarButton";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
+	DropdownMenuItem,
 	DropdownMenuTrigger,
 } from "./ui/dropdown-menu";
 
 export function SessionActionsMenu({
-	children,
+	items,
 	inlineStatus,
 }: {
-	children?: ReactNode;
+	items: ReactNode[];
 	inlineStatus?: ReactNode;
 }) {
 	const { t } = useTranslation();
-	const menuItems = Children.toArray(children).filter(Boolean);
-	if (menuItems.length === 0 && !inlineStatus) return null;
-
-	// While an interface switch is running, replace the ⋮ entirely with the
-	// status spinner so handoff/cancel controls cannot interrupt a half-applied switch.
-	if (inlineStatus) {
-		return <div className="inline-flex shrink-0 items-center">{inlineStatus}</div>;
-	}
+	const menuItems = items.filter(Boolean);
 
 	return (
-		<div className="inline-flex shrink-0 items-center gap-0.5">
+		<div className="inline-flex shrink-0 items-center gap-1">
+			{inlineStatus}
 			<DropdownMenu>
 				<DropdownMenuTrigger asChild>
 					<TopbarButton
@@ -41,7 +36,11 @@ export function SessionActionsMenu({
 					</TopbarButton>
 				</DropdownMenuTrigger>
 				<DropdownMenuContent align="end" className="min-w-44">
-					{menuItems}
+					{menuItems.length > 0 ? (
+						menuItems
+					) : (
+						<DropdownMenuItem disabled>{t("session.noActions")}</DropdownMenuItem>
+					)}
 				</DropdownMenuContent>
 			</DropdownMenu>
 		</div>

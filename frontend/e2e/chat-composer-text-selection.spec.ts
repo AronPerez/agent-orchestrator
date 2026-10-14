@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 import { agentReadiness } from "../src/renderer/test/agent-readiness-fixtures";
 import { installFakeAgent } from "./support/fake-bridge";
 
@@ -18,7 +18,7 @@ const themeStyles = [
 	"solarized",
 ] as const;
 
-async function openChatWithDraft(page: Page, text = draft) {
+test("typed chat composer text is visibly selected with a pointer drag @T0", async ({ page }) => {
 	await page.emulateMedia({ reducedMotion: "reduce" });
 	await installFakeAgent(page, {
 		projectId,
@@ -100,44 +100,11 @@ async function openChatWithDraft(page: Page, text = draft) {
 		await route.fulfill({ json: { status: "ok" } });
 	});
 
-	await page.goto(`/#/projects/${projectId}/sessions/${sessionId}`);
+	await page.goto(`/#/host/local/session/${sessionId}`);
 	const composer = page.getByRole("combobox", { name: "Message the agent" });
-	await expect(composer).toBeVisible({ timeout: 15_000 });
-	await composer.fill(text);
-	await expect(composer).toHaveText(text);
-	return composer;
-}
-
-test("clicking chat whitespace and composer padding keeps the draft caret position @T0", async ({ page }) => {
-	const composer = await openChatWithDraft(page, "abcdef");
-	await composer.press("ArrowLeft");
-	await composer.press("ArrowLeft");
-	const caretOffset = () =>
-		composer.evaluate((element) => {
-			const selection = window.getSelection();
-			return selection?.anchorNode && element.contains(selection.anchorNode)
-				? selection.anchorOffset
-				: -1;
-		});
-	await expect.poll(caretOffset).toBe(4);
-
-	await page.getByRole("log", { name: "Conversation" }).click();
-	await expect(composer).toBeFocused();
-	await expect.poll(caretOffset).toBe(4);
-	await page.keyboard.type("X");
-	await expect(composer).toHaveText("abcdXef");
-
-	await composer.press("ArrowLeft");
-	await expect.poll(caretOffset).toBe(4);
-	await composer.locator("xpath=ancestor::form").click({ position: { x: 20, y: 6 } });
-	await expect(composer).toBeFocused();
-	await expect.poll(caretOffset).toBe(4);
-	await page.keyboard.type("Y");
-	await expect(composer).toHaveText("abcdYXef");
-});
-
-test("typed chat composer text is visibly selected with a pointer drag @T0", async ({ page }) => {
-	const composer = await openChatWithDraft(page);
+	await expect(composer).toBeVisible();
+	await composer.fill(draft);
+	await expect(composer).toHaveText(draft);
 
 	const textBounds = await composer.evaluate((element) => {
 		const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);

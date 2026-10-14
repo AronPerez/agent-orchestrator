@@ -139,7 +139,7 @@ Orchestrator.inc 与你现有的编程智能体和源代码管理流程配合使
     <td valign="middle" nowrap><img src="../frontend/src/renderer/assets/agents/goose.svg" alt="Goose" width="24" height="24" align="middle" /> &nbsp; <b>Goose</b></td>
   </tr>
   <tr valign="middle">
-    <td valign="middle" nowrap><img src="../frontend/src/renderer/assets/agents/qwen.png" alt="Qwen" width="24" height="24" align="middle" /> &nbsp; <b>Qwen</b></td>
+    <td valign="middle" nowrap><img src="../frontend/src/renderer/assets/agents/qwen.svg" alt="Qwen" width="24" height="24" align="middle" /> &nbsp; <b>Qwen</b></td>
     <td valign="middle" nowrap><img src="../frontend/src/renderer/assets/agents/continue.png" alt="Continue" width="24" height="24" align="middle" /> &nbsp; <b>Continue</b></td>
     <td valign="middle" nowrap><img src="../frontend/src/renderer/assets/agents/devin.png" alt="Devin" width="24" height="24" align="middle" /> &nbsp; <b>Devin</b></td>
   </tr>
@@ -225,7 +225,7 @@ cd agent-orchestrator
 
 ## 产品遥测
 
-Orchestrator.inc 收集不包含项目内容的使用和可靠性指标。但项目的 GitHub 所有者及已登录的 GitHub 用户名可能识别个人，因此这些遥测数据并非匿名。关闭遥测也会停止发送这些信息。[查看详情和设置](../docs/telemetry.md)。
+此分支不会发送使用分析数据或崩溃报告。保留本地诊断和网络功能，包括更新检查。[详细信息](../docs/telemetry.md)。
 
 ## 许可证
 

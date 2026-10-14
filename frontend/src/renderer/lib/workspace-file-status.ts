@@ -17,7 +17,6 @@ export const statusTone: Record<WorkspaceFileStatus, string> = {
 	added: "text-success",
 	deleted: "text-error",
 	modified: "text-warning",
-	// logo-accent is the blue accent; text-accent resolves to a hover-surface gray.
-	renamed: "text-logo-accent",
+	renamed: "text-accent",
 	unmodified: "text-passive",
 };

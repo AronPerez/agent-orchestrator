@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { StyledQRCode } from "./StyledQRCode";
@@ -12,8 +12,9 @@ import { scramblePairingCodes } from "./qrScramble";
  * read as a slideshow of separate codes rather than as one code churning. */
 const SCRAMBLE_LAYERS = 4;
 
-/** Keep the finished code ready to scan quickly; it only dissolves in. */
-export const QR_RESOLVE_MS = 260;
+/** How long the resolve takes. Long enough to read as settling rather than as
+ *  a cut, short enough not to delay a code the user is waiting to scan. */
+export const QR_RESOLVE_MS = 900;
 
 /** One pass through the decoy stack. Unhurried on purpose: a fast shuffle
  *  reads as a glitch, a slow one as something being worked out.
@@ -39,7 +40,7 @@ export const QR_SCRAMBLE_CYCLE_MS = 4800;
  * live inside the clipping aspect-square the panel used to impose — that is
  * what cut it in half and pushed it under the button below.
  */
-export const PairingQr = memo(function PairingQr({
+export function PairingQr({
 	value,
 	size,
 	caption,
@@ -69,20 +70,14 @@ export const PairingQr = memo(function PairingQr({
 
 	return (
 		<div className={cn("flex w-full flex-col", className)}>
-			{/* Light card. The code is drawn dark-on-light because Android's
-			    scanner will not decode an inverted one.
-
-			    The code fills the card: StyledQRCode draws its own quiet zone, so
-			    insetting it here only stacked a second margin on top of that one
-			    and shrank the modules for nothing. */}
-			<div className="relative aspect-square w-full overflow-hidden rounded-md bg-white">
+			<div className="relative aspect-square w-full overflow-hidden rounded-md">
 				{/* Drifts only while waiting: a code being scanned must hold still. */}
 				<div className={cn("absolute inset-0", !resolved && "ao-qr-drift")}>
 					{scrambling &&
 						decoys.map((code, i) => (
 							<div
 								key={code}
-								className={cn("ao-qr-decoy absolute inset-0", resolved && "ao-qr-decoy--settling")}
+								className={cn("ao-qr-decoy absolute inset-4", resolved && "ao-qr-decoy--settling")}
 								style={
 									resolved
 										? undefined
@@ -90,20 +85,19 @@ export const PairingQr = memo(function PairingQr({
 								}
 								aria-hidden="true"
 							>
-								<StyledQRCode value={code} size={size} className="ao-qr-visual block size-full [&_svg]:size-full" />
+								<StyledQRCode value={code} size={size} className="block size-full [&_svg]:size-full" />
 							</div>
 						))}
 					{value && (
 						<div
-							key={value}
-							className="ao-qr-resolved absolute inset-0"
+							className="ao-qr-resolved absolute inset-4"
 							style={{ animationDuration: `${QR_RESOLVE_MS}ms` }}
 						>
 							<StyledQRCode
 								value={value}
 								data-qr-value={value}
 								size={size}
-											className="ao-qr-visual block size-full [&_svg]:size-full"
+								className="block size-full [&_svg]:size-full"
 							/>
 						</div>
 					)}
@@ -112,7 +106,7 @@ export const PairingQr = memo(function PairingQr({
 			{/* Fixed height, not min-height: the button below must not move when
 			    the caption appears or goes. Clamped rather than grown, so a long
 			    translation wrapping to a second line still cannot shift it. */}
-			<div className="flex h-6 items-center justify-center px-2">
+			<div className="flex h-10 items-center justify-center px-2">
 				{!resolved && (
 					<p
 						className="flex items-center justify-center gap-2 text-center text-caption leading-(--leading-settings-mobile-hint) text-settings-muted"
@@ -125,4 +119,4 @@ export const PairingQr = memo(function PairingQr({
 			</div>
 		</div>
 	);
-});
+}

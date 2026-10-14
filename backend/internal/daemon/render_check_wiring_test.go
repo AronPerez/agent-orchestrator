@@ -16,7 +16,7 @@ type fakeRenderCheckBroker struct {
 	action string
 }
 
-func (f *fakeRenderCheckBroker) Execute(_ context.Context, _ domain.SessionID, action string, _ map[string]interface{}) (browserruntime.Result, error) {
+func (f *fakeRenderCheckBroker) Execute(_ context.Context, _ domain.SessionID, action string, _ map[string]interface{}, _ string) (browserruntime.Result, error) {
 	f.action = action
 	return f.result, f.err
 }

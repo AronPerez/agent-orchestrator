@@ -1,6 +1,7 @@
 package session
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -89,7 +90,7 @@ func (s *Service) ClaimPR(ctx context.Context, id domain.SessionID, ref string, 
 	if err := project.Config.ValidateCanonicalRepository(project.RepoOriginURL); err != nil {
 		return ClaimPRResult{}, apierr.Invalid("INVALID_PROJECT_CONFIG", err.Error(), nil)
 	}
-	claimOrigin := firstNonEmpty(project.Config.CanonicalRepoURL, project.RepoOriginURL)
+	claimOrigin := cmp.Or(project.Config.CanonicalRepoURL, project.RepoOriginURL)
 	prURL, number, err := normalizePRRef(ref, claimOrigin)
 	if err != nil {
 		return ClaimPRResult{}, err
@@ -260,15 +261,15 @@ func claimRowsFromSCM(sessionID domain.SessionID, obs ports.SCMObservation, revi
 		reviewPartial = obs.Review.Partial
 	}
 	pr := domain.PullRequest{
-		URL:                      firstNonEmpty(obs.PR.URL, obs.PR.HTMLURL),
+		URL:                      cmp.Or(obs.PR.URL, obs.PR.HTMLURL),
 		SessionID:                sessionID,
 		Number:                   obs.PR.Number,
 		Draft:                    obs.PR.Draft,
 		Merged:                   obs.PR.Merged,
 		Closed:                   obs.PR.Closed,
-		CI:                       domain.CIState(firstNonEmpty(obs.CI.Summary, string(domain.CIUnknown))),
-		Review:                   domain.ReviewDecision(firstNonEmpty(obs.Review.Decision, string(domain.ReviewNone))),
-		Mergeability:             domain.Mergeability(firstNonEmpty(obs.Mergeability.State, string(domain.MergeUnknown))),
+		CI:                       domain.CIState(cmp.Or(obs.CI.Summary, string(domain.CIUnknown))),
+		Review:                   domain.ReviewDecision(cmp.Or(obs.Review.Decision, string(domain.ReviewNone))),
+		Mergeability:             domain.Mergeability(cmp.Or(obs.Mergeability.State, string(domain.MergeUnknown))),
 		UpdatedAt:                now,
 		Provider:                 obs.Provider,
 		Host:                     obs.Host,
@@ -310,7 +311,7 @@ func claimRowsFromSCM(sessionID domain.SessionID, obs ports.SCMObservation, revi
 		reviews = append(reviews, domain.PullRequestReview{
 			ID:               review.ID,
 			Author:           review.Author,
-			State:            domain.ReviewDecision(firstNonEmpty(review.State, string(domain.ReviewNone))),
+			State:            domain.ReviewDecision(cmp.Or(review.State, string(domain.ReviewNone))),
 			URL:              review.URL,
 			Body:             review.Body,
 			IsBot:            review.IsBot,
@@ -505,13 +506,4 @@ func repoFromURL(raw string) (host, owner, name string, err error) {
 		return "", "", "", ErrInvalidPRRef
 	}
 	return identity.Host, identity.Namespace, identity.Name, nil
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
 }

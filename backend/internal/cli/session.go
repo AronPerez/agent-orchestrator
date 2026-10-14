@@ -55,9 +55,13 @@ type sessionDTO struct {
 	CreatedAt    time.Time       `json:"createdAt"`
 	UpdatedAt    time.Time       `json:"updatedAt"`
 	Status       string          `json:"status"`
-	Branch       string          `json:"branch,omitempty"`
-	BranchState  *branchStateDTO `json:"branchState,omitempty"`
-	PRs          []sessionPRDTO  `json:"prs"`
+	// RuntimeUnreachable means AO's last liveness probe could not reach the
+	// session's runtime, so its reported status describes a session AO can no
+	// longer see.
+	RuntimeUnreachable bool            `json:"runtimeUnreachable,omitempty"`
+	Branch             string          `json:"branch,omitempty"`
+	BranchState        *branchStateDTO `json:"branchState,omitempty"`
+	PRs                []sessionPRDTO  `json:"prs"`
 }
 
 type branchStateDTO struct {
@@ -627,12 +631,13 @@ func (c *commandContext) killSession(ctx context.Context, cmd *cobra.Command, id
 		return err
 	}
 	if res.Freed {
-		_, err := fmt.Fprintf(cmd.OutOrStdout(), "session %s killed\n", res.SessionID)
+		_, err := fmt.Fprintf(cmd.OutOrStdout(), "session %s killed%s\n", res.SessionID, c.resolvedBySuffix())
 		return err
 	}
 	// freed=false: the workspace was preserved (e.g. uncommitted changes) — the
 	// session is terminated either way, but the worktree is left for inspection.
-	_, err := fmt.Fprintf(cmd.OutOrStdout(), "session %s killed (workspace preserved)\n", res.SessionID)
+	_, err := fmt.Fprintf(cmd.OutOrStdout(), "session %s killed%s (workspace preserved)\n",
+		res.SessionID, c.resolvedBySuffix())
 	return err
 }
 
@@ -745,11 +750,11 @@ func (c *commandContext) cleanupSessions(ctx context.Context, cmd *cobra.Command
 		}
 	}
 	if opts.dryRun {
-		_, err = fmt.Fprintln(out, "\n(dry-run: no sessions were removed)")
+		_, err = fmt.Fprintf(out, "\n(dry-run: no sessions were removed%s)\n", c.resolvedBySuffix())
 		return err
 	}
 	if !opts.yes {
-		confirmed, err := confirmSessionCleanup(cmd, len(candidates), opts.project)
+		confirmed, err := c.confirmSessionCleanup(cmd, len(candidates), opts.project)
 		if err != nil {
 			return err
 		}
@@ -795,7 +800,8 @@ func (c *commandContext) cleanupSessions(ctx context.Context, cmd *cobra.Command
 			return err
 		}
 	}
-	summary := fmt.Sprintf("\nCleanup complete. %d session%s cleaned", len(cleaned), pluralS(len(cleaned)))
+	summary := fmt.Sprintf("\nCleanup complete%s. %d session%s cleaned",
+		c.resolvedBySuffix(), len(cleaned), pluralS(len(cleaned)))
 	if len(res.AlreadyGone) > 0 {
 		summary += fmt.Sprintf(", %d already gone", len(res.AlreadyGone))
 	}
@@ -860,7 +866,7 @@ func sessionListEntries(sessions []sessionDTO, summaries map[string][]sessionPRS
 			ProjectID:      sess.ProjectID,
 			Role:           sessionRole(sess),
 			DisplayName:    sess.DisplayName,
-			Status:         sess.Status,
+			Status:         sessionStatusValue(sess),
 			Activity:       sess.Activity.State,
 			IssueID:        sess.IssueID,
 			Harness:        sess.Harness,
@@ -1005,6 +1011,37 @@ func sessionAge(now, at time.Time) string {
 	return formatSessionAge(now.Sub(at)) + " ago"
 }
 
+// sessionRuntimeField names an unreachable runtime on `ao session get`, and is
+// empty otherwise so writeSessionDetails skips the row (like every other
+// optional field there).
+func sessionRuntimeField(sess sessionDTO) string {
+	if sess.RuntimeUnreachable {
+		return "unreachable (AO cannot reach this session's runtime)"
+	}
+	return ""
+}
+
+// sessionStatusLabel is the bracketed status both listings print. An
+// unreachable runtime replaces the status rather than annotating it: the
+// derived status describes a session AO can no longer see, so printing
+// "[idle]" there states more than AO knows.
+func sessionStatusLabel(sess sessionDTO) string {
+	if sess.RuntimeUnreachable {
+		return "[unreachable]"
+	}
+	if sess.Status == "" {
+		return ""
+	}
+	return "[" + sess.Status + "]"
+}
+
+func sessionStatusValue(sess sessionDTO) string {
+	if sess.RuntimeUnreachable {
+		return "unreachable"
+	}
+	return sess.Status
+}
+
 func writeSessionDetails(cmd *cobra.Command, sess sessionDTO) error {
 	out := cmd.OutOrStdout()
 	fields := [][2]string{
@@ -1013,6 +1050,7 @@ func writeSessionDetails(cmd *cobra.Command, sess sessionDTO) error {
 		{"name", sess.DisplayName},
 		{"role", sessionRole(sess)},
 		{"status", sess.Status},
+		{"runtime", sessionRuntimeField(sess)},
 		{"activity", sess.Activity.State},
 		{"harness", sess.Harness},
 		{"issue", sess.IssueID},
@@ -1109,12 +1147,17 @@ func normalizeSessionID(id string) (string, error) {
 	return trimmed, nil
 }
 
-func confirmSessionCleanup(cmd *cobra.Command, count int, project string) (bool, error) {
+// confirmSessionCleanup is a method so the prompt can name the daemon it is
+// about to clean. "across all projects" begs the question "on whose machine?",
+// and a remote target strips away every ambient cue that would otherwise answer
+// it. resolvedBySuffix is empty for a local daemon, so local output is unchanged.
+func (c *commandContext) confirmSessionCleanup(cmd *cobra.Command, count int, project string) (bool, error) {
 	scope := " across all projects"
 	if project != "" {
 		scope = fmt.Sprintf(" in project %q", project)
 	}
-	if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Clean %d terminated session%s%s? Type yes to confirm: ", count, pluralS(count), scope); err != nil {
+	if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Clean %d terminated session%s%s%s? Type yes to confirm: ",
+		count, pluralS(count), scope, c.resolvedBySuffix()); err != nil {
 		return false, err
 	}
 	reader := bufio.NewReader(cmd.InOrStdin())

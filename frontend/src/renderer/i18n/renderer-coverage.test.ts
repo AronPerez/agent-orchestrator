@@ -20,17 +20,15 @@ const approvedLiterals: Record<string, readonly string[]> = {
 		"Local: http://localhost:5173/",
 	],
 	"components/CenterPane.tsx": ["px"],
-	"components/CreateProjectFlow.tsx": [
-		"my-workspace/", "my-project", "web-app", "main", "github_pat_…", "ghp_...",
-		"https://github.com/owner/repo", "GitHub PAT",
-	],
+	"components/CreateProjectFlow.tsx": ["my-workspace/", "web-app", "main"],
 	"components/DaemonStartupLoader.tsx": ["Agent Orchestrator"],
-	// Technical branch/prefix examples moved with the common settings fields.
-	"components/ProjectSettingsEditor.tsx": ["auto", "ao"],
-	"components/RemoteDirectoryPicker.tsx": ["/home/you/code"],
+	"components/ProjectSettingsForm.tsx": [
+		"main", "ao",
+		"No workflow settings for scratch projects.",
+		"Tracker intake is not available for scratch projects.",
+	],
 	"components/SessionInspector.tsx": ["PR #"],
-	"components/Sidebar.tsx": ["Orchestrator.inc", "daemon"],
-	"components/TitlebarNav.tsx": ["Orchestrator.inc"],
+	"components/Sidebar.tsx": ["Agent Orchestrator", "daemon"],
 	"components/WindowTitlebar.tsx": [
 		"Alt+F4",
 		"Ctrl+Z",
@@ -43,7 +41,6 @@ const approvedLiterals: Record<string, readonly string[]> = {
 		"Ctrl+Shift+I",
 		"Ctrl+/",
 	],
-	"components/settings/CoderSettingsSection.tsx": ["grep -q '^Ready' ~/.bootstrap-status"],
 	"components/settings/ConnectMobileSetup.tsx": ["tailscale ip -4"],
 	"components/settings/UpdatesSection.tsx": ["PR #"],
 };
@@ -62,8 +59,7 @@ const deferredLocalizationFiles = new Set([
 	"components/chat/ComposerSuggestMenu.tsx",
 	"components/chat/ContextMeter.tsx",
 	"components/chat/CopyButton.tsx",
-	"components/chat/ElicitationDock.tsx",
-	"components/chat/MermaidBlock.tsx",
+	"components/chat/ElicitationCard.tsx",
 	"components/chat/SessionChatSurface.tsx",
 	"components/chat/TurnPlan.tsx",
 	"components/chat/TurnSettingsBar.tsx",

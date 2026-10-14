@@ -1,5 +1,5 @@
-import { type KeyboardEvent, type ReactNode, type RefObject, useEffect, useId, useRef, useState } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { type KeyboardEvent, type ReactNode, type RefObject, useEffect, useRef, useState } from "react";
+import { motion, useReducedMotion } from "motion/react";
 import type { ExternalLinkComponent } from "./external-link";
 import {
 	ArrowUpRightIcon,
@@ -18,17 +18,13 @@ import type {
 	PRCardPresentation,
 	PRSummaryMetadata,
 } from "./pull-request-models";
-import { scmUserAvatarUrl } from "./scm-avatar";
-import { NAV_ROW_HIGHLIGHT_HOST_CLASS, NavRowHighlight } from "./NavRowHighlight";
 import { cn } from "./utils";
-import { UserAvatar } from "./UserAvatar";
+import { GithubAvatar } from "./GithubAvatar";
 
-export type InspectorView = "summary" | "reviews" | "browser" | "sideChat" | "files";
+export type InspectorView = "summary" | "reviews" | "browser" | "files";
 
 export type InspectorTab = {
 	badge?: boolean;
-	/** Corner badge count, e.g. changed files; hidden at zero. */
-	count?: number;
 	displayLabel?: string;
 	icon: ReactNode;
 	id: InspectorView;
@@ -37,7 +33,7 @@ export type InspectorTab = {
 
 const inspectorShellClass = "@container/inspector flex h-full min-h-0 flex-col overflow-hidden";
 const inspectorBodyBaseClass = "min-h-0 flex-1";
-const inspectorScrollableBodyClass = "board-scrollbar overflow-x-hidden overflow-y-auto pt-0.5 pb-3";
+const inspectorScrollableBodyClass = "board-scrollbar overflow-x-hidden overflow-y-auto p-3 pb-4 @max-[300px]/inspector:px-2.5";
 export const inspectorEmptyClass = "text-xs text-settings-muted leading-normal";
 
 export function SessionInspectorShellView({
@@ -45,7 +41,6 @@ export function SessionInspectorShellView({
 	ariaLabel,
 	browserPoppedOut,
 	browserView,
-	sideChatView,
 	filesView,
 	headerActions,
 	isVisible = true,
@@ -59,7 +54,6 @@ export function SessionInspectorShellView({
 	ariaLabel: string;
 	browserPoppedOut: boolean;
 	browserView?: ReactNode;
-	sideChatView?: ReactNode;
 	filesView?: ReactNode;
 	headerActions?: ReactNode;
 	isVisible?: boolean;
@@ -112,22 +106,9 @@ export function SessionInspectorShellView({
 
 	return (
 		<aside className={inspectorShellClass} aria-label={ariaLabel}>
-			<div
-				className={cn(
-					"session-inspector__topbar flex h-inspector-tabs shrink-0 items-center border-b border-border-strong pl-1",
-					activeView === "browser" && "session-inspector__topbar--browser",
-				)}
-			>
-				{isVisible && tabs.length === 1 ? (
-					<span className="min-w-0 flex-1 px-2 text-sm text-passive">{tabs[0].label}</span>
-				) : isVisible ? (
-					<div
-						className={cn(
-							"session-inspector__tablist flex min-w-0 items-center justify-start gap-1",
-							activeView === "browser" ? "shrink-0" : "flex-1",
-						)}
-						role="tablist"
-					>
+			<div className="session-inspector__topbar flex h-inspector-tabs shrink-0 items-center border-b border-border pl-1">
+				{isVisible ? (
+					<div className="session-inspector__tablist flex min-w-0 flex-1 items-center justify-start gap-1" role="tablist">
 						{tabs.map((tab, index) => (
 							<button
 								aria-label={tab.label}
@@ -166,15 +147,6 @@ export function SessionInspectorShellView({
 										</span>
 									) : null}
 								</span>
-								{tab.count ? (
-									// Same corner count as the notification bell (NotificationCenter).
-									<span
-										aria-hidden="true"
-										className="pointer-events-none absolute right-px top-px z-[2] grid h-3 min-w-3 place-items-center rounded-full bg-accent-strong px-0.5 font-mono text-[7px] font-semibold leading-none text-accent-foreground shadow-sm ring-1 ring-background"
-									>
-										{tab.count > 99 ? "99+" : tab.count}
-									</span>
-								) : null}
 								<span className="sr-only">
 									{tab.displayLabel ?? tab.label}
 								</span>
@@ -190,8 +162,7 @@ export function SessionInspectorShellView({
 				className={cn(
 					inspectorBodyBaseClass,
 					!isVisible && "invisible pointer-events-none",
-					activeView !== "browser" && activeView !== "files" && activeView !== "sideChat" && inspectorScrollableBodyClass,
-					activeView === "sideChat" && "p-0 overflow-hidden",
+					activeView !== "browser" && activeView !== "files" && inspectorScrollableBodyClass,
 					activeView === "browser" &&
 						!browserPoppedOut &&
 						"session-inspector__body--browser p-0 overflow-hidden [&>[role=tabpanel]]:border-0 [&>[role=tabpanel]]:rounded-none",
@@ -202,7 +173,6 @@ export function SessionInspectorShellView({
 				{activeView === "summary" ? summaryView : null}
 				{activeView === "reviews" ? reviewsView : null}
 				{activeView === "browser" ? browserView : null}
-				{activeView === "sideChat" ? sideChatView : null}
 				{activeView === "files" ? filesView : null}
 			</div>
 		</aside>
@@ -210,50 +180,37 @@ export function SessionInspectorShellView({
 }
 
 export function InspectorSection({
+	action,
 	children,
+	className,
 	surface = true,
 	title,
+	titleClassName,
 }: {
+	action?: ReactNode;
 	children: ReactNode;
+	className?: string;
 	surface?: boolean;
-	title: string;
+	title?: string;
+	titleClassName?: string;
 }) {
-	const contentId = useId();
-	const [open, setOpen] = useState(true);
-	const reduceMotion = useReducedMotion();
-	// Header: 6px slot + 6px button inset puts the label 12px from the edge; collapsed headers sit 4px apart.
-	return (
-		<section className="group/inspector-section flex flex-col" data-testid="inspector-section">
-			<div className="px-1.5 py-0.5">
-				<button
-					aria-controls={contentId}
-					aria-expanded={open}
-					className={cn(NAV_ROW_HIGHLIGHT_HOST_CLASS, "relative flex w-full items-center rounded-lg p-1.5 text-left text-muted-foreground")}
-					onClick={() => setOpen((current) => !current)}
-					type="button"
-				>
-					<NavRowHighlight />
-					<span className="relative z-[1] flex w-full min-w-0 items-center justify-between gap-2 text-sm">
-						<span className="min-w-0 flex-1">{title}</span>
-						<ChevronIcon aria-hidden="true" className="size-icon-2xs shrink-0 text-passive" direction={open ? "down" : "right"} />
-					</span>
-				</button>
+	const heading =
+		title || action ? (
+			<div className={cn("mb-1 flex items-center justify-between gap-2 text-2xs font-bold uppercase tracking-settings-section text-settings-muted", titleClassName)}>
+				{title ? <span>{title}</span> : <span />}
+				{action ?? null}
 			</div>
-			<AnimatePresence initial={false}>
-				{open ? (
-					// Clips only while animating, so open sections never cut off action menus.
-					<motion.div
-						animate={{ height: "auto", opacity: 1, transitionEnd: { overflow: "visible" } }}
-						exit={{ height: 0, opacity: 0, overflow: "hidden" }}
-						initial={{ height: 0, opacity: 0, overflow: "hidden" }}
-						transition={reduceMotion ? { duration: 0 } : { duration: 0.22, ease: [0.4, 0, 0.2, 1] }}
-					>
-						<div className="min-w-0 px-3 pt-0.5 pb-3.5 group-last/inspector-section:pb-0" id={contentId}>
-							{surface ? <div className="overflow-hidden bg-settings-row py-1">{children}</div> : children}
-						</div>
-					</motion.div>
-				) : null}
-			</AnimatePresence>
+		) : null;
+	return (
+		<section className={cn("mb-4 last:mb-0", className)} data-testid="inspector-section">
+			{heading}
+			{surface ? (
+				<div className="overflow-hidden rounded-settings-row bg-settings-row px-3.5 py-1.5">
+					{children}
+				</div>
+			) : (
+				children
+			)}
 		</section>
 	);
 }
@@ -261,51 +218,25 @@ export function InspectorSection({
 export function SessionInspectorSummaryView({
 	activity,
 	activityTitle,
-	artifactCards,
-	artifactTitle,
-	branch,
 	completion,
-	context,
 	pullRequestCards,
 	pullRequestTitle,
 	reviews,
 	usage,
-	workers,
 }: {
 	activity: ReactNode;
 	activityTitle: string;
-	/** Omit alongside {@link artifactTitle} to skip the artifacts section entirely. */
-	artifactCards?: ReactNode;
-	artifactTitle?: string;
-	branch?: ReactNode;
 	completion?: ReactNode;
-	context?: ReactNode;
-	/** Omit alongside {@link pullRequestTitle} to skip the PR section entirely (e.g. no known PR output). */
-	pullRequestCards?: ReactNode;
-	pullRequestTitle?: string;
+	pullRequestCards: ReactNode;
+	pullRequestTitle: string;
 	reviews?: ReactNode;
 	usage?: ReactNode;
-	/**
-	 * The sessions this orchestrator spawned. Rendered first: for an
-	 * orchestrator, its workers are the summary's primary content.
-	 */
-	workers?: ReactNode;
 }) {
 	return (
 		<div role="tabpanel">
-			{workers}
-			{context}
-			{branch}
-			{pullRequestTitle ? (
-				<InspectorSection surface={false} title={pullRequestTitle}>
-					<div className="flex flex-col gap-1.5">{pullRequestCards}</div>
-				</InspectorSection>
-			) : null}
-			{artifactTitle ? (
-				<InspectorSection surface={false} title={artifactTitle}>
-					<div className="flex flex-col gap-1.5">{artifactCards}</div>
-				</InspectorSection>
-			) : null}
+			<InspectorSection surface={false} title={pullRequestTitle}>
+				<div className="flex flex-col gap-1.5">{pullRequestCards}</div>
+			</InspectorSection>
 			{reviews}
 			{completion}
 			<InspectorSection title={activityTitle}>{activity}</InspectorSection>
@@ -403,7 +334,7 @@ export function InspectorPullRequestCardView({
 					/>
 					{statusNotice}
 					{mergeError ? (
-						<p className="mt-2 text-xs leading-normal text-error" role="status">
+						<p className="mt-2 text-2xs leading-normal text-error" role="status">
 							{mergeError}
 						</p>
 					) : null}
@@ -432,21 +363,34 @@ const timelineNodeTone: Record<InspectorTimelineTone, string> = {
 
 export function InspectorActivityTimelineView({ events }: { events: InspectorTimelineEvent[] }) {
 	return (
-		<div className="flex flex-col">
+		<div className="relative pl-5">
 			{events.map((event, index) => (
-				<div key={index} className="flex min-h-7 items-center gap-2.5" data-testid="inspector-timeline-event">
-					<span
-						aria-hidden="true"
-						className={cn(
-							"size-1.5 shrink-0 rounded-full",
-							timelineNodeTone[event.tone],
-							event.markerBreathe && "animate-status-pulse",
-						)}
-						style={event.markerTone ? { background: event.markerTone } : undefined}
-					/>
-					<div className="min-w-0 flex-1 truncate text-sm text-foreground [&_b]:font-semibold">{event.content}</div>
+				<div key={index} className="relative pb-4 last:pb-0" data-testid="inspector-timeline-event">
+					{index < events.length - 1 ? (
+						<span
+							aria-hidden="true"
+							className={cn(
+								"absolute -bottom-[10.5px] -left-3.5 w-px bg-border",
+								event.tone === "now" ? "top-1/2" : "top-[10.5px]",
+							)}
+							data-testid="inspector-timeline-connector"
+						/>
+					) : null}
+					<div className="relative flex min-h-icon-xs items-center">
+						<span
+							aria-hidden="true"
+							className={cn(
+								"absolute -left-4.5 size-icon-xs rounded-full",
+								event.tone === "now" ? "top-1/2 -translate-y-1/2" : "top-1.5",
+								timelineNodeTone[event.tone],
+								event.markerBreathe && "animate-status-pulse",
+							)}
+							style={event.markerTone ? { background: event.markerTone } : undefined}
+						/>
+						<div className="text-xs leading-normal text-foreground [&_b]:font-semibold">{event.content}</div>
+					</div>
 					{event.timestamp ? (
-						<span className="shrink-0 font-mono text-xs tabular-nums text-passive">{event.timestamp}</span>
+						<div className="mt-1 font-mono text-2xs text-passive">{event.timestamp}</div>
 					) : null}
 				</div>
 			))}
@@ -605,14 +549,14 @@ export function InspectorReviewsView({
 }) {
 	if (isLoading && groups.length === 0) {
 		return (
-			<InspectorSection surface={false} title={labels.reviews}>
+			<InspectorSection surface title={labels.reviews}>
 				<p className={inspectorEmptyClass}>{labels.loadingReviews}</p>
 			</InspectorSection>
 		);
 	}
 	if (groups.length === 0) return null;
 	return (
-		<InspectorSection surface={false} title={labels.reviews}>
+		<InspectorSection surface={false} title={labels.reviews} titleClassName="text-foreground [&>span:first-child]:text-xs [&>span:first-child]:tracking-wide">
 			<div className="flex flex-col gap-2">
 				{groups.map((group) => (
 					<ReviewDisclosure
@@ -1029,11 +973,7 @@ function ExternalReviewCard({
 	const collapsible = bodyOverflows || hasNestedContent;
 	const headerContent = (
 		<>
-			<UserAvatar
-				className="size-6 shrink-0"
-				imageUrl={scmUserAvatarUrl("github", entry.pullRequestUrl, entry.reviewerId)}
-				name={entry.reviewerId}
-			/>
+			<GithubAvatar className="size-6 shrink-0" login={entry.reviewerId} />
 			<span className="flex min-w-0 flex-col gap-0.5">
 				<span className="flex min-w-0 items-center gap-1.5 text-xs font-semibold text-foreground">
 					<span className="min-w-0 break-words">{entry.reviewerId}</span>

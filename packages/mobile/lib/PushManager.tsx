@@ -1,29 +1,23 @@
 // Headless component mounted once under the root layout. It owns the runtime
 // side of push notifications: register after pairing (+ refresh on foreground),
-// and route notification taps
+// unregister when switching/leaving a daemon, and route notification taps
 // (warm + cold start). See docs/adr/0001-mobile-push-notifications.md (D6, D7, D9).
 import * as Device from "expo-device";
 import * as Notifications from "expo-notifications";
-import { useRootNavigationState, useRouter, type Href } from "expo-router";
-import { useOpenPage } from "./pageNavigation";
+import { useRootNavigationState, useRouter } from "expo-router";
 import { useEffect, useRef } from "react";
 import { AppState, Platform } from "react-native";
-import { markNotificationRead } from "./api";
-import { shouldPoll } from "./appStatePoll";
+import { announceDevice, markNotificationRead } from "./api";
 import { getInstallId } from "./installId";
-import { findHost } from "./hosts";
 import { notificationTarget } from "./notificationView";
-import { announcePairedDevice, configurePushHandler, ensureAndroidChannel, onManualPushRegistration, registerForPush, retryPendingUnpairs } from "./push";
+import { configurePushHandler, ensureAndroidChannel, registerForPush, unpairFromServer } from "./push";
 import { useApp } from "./store";
-import { MOBILE_EVENTS } from "./telemetry/events";
-import { mobileTelemetry } from "./telemetry/runtime";
 
 // Set the foreground presentation policy before any notification can arrive.
 configurePushHandler();
 
 type PushData = {
 	type?: string;
-	hostId?: string;
 	sessionId?: string;
 	projectId?: string;
 	prUrl?: string;
@@ -31,108 +25,102 @@ type PushData = {
 };
 
 export function PushManager(): null {
-	const { hostStates } = useApp();
+	const { config, configured, connection } = useApp();
 	const router = useRouter();
-	const openPage = useOpenPage();
 	const navState = useRootNavigationState();
 
 	const handledColdStart = useRef(false);
-	const hostsRef = useRef(hostStates);
-	hostsRef.current = hostStates;
-	const connected = shouldPoll(AppState.currentState)
-		? hostStates.flatMap(({ config, connection }) => config && connection === "open" ? [config] : [])
-		: [];
-	// Polls can refresh host snapshots without changing a connection. Only a
-	// changed endpoint, credential or open/closed transition refreshes push.
-	const connectedKey = JSON.stringify(connected.map(({ hostId, host, httpPort, secure, password }) => [hostId, host, httpPort, secure, password, hostStates.find((state) => state.hostId === hostId)?.name]));
-	const connectedRef = useRef(connected);
-	connectedRef.current = connected;
+	const wasConfigured = useRef(false);
 
 	// Create the Android channel once at startup.
 	useEffect(() => {
 		void ensureAndroidChannel();
 	}, []);
 
-	// Runs even with zero paired hosts, including onboarding after forgetting
-	// the last machine. The durable outbox also survives an app restart.
+	// When the user clears the server config, this phone has unpaired: tell that
+	// daemon to drop the row entirely, not merely clear the token, so the old
+	// desktop stops listing a phone that has moved on. Uses the persisted creds.
 	useEffect(() => {
-		const retry = (immediate: boolean) => {
-			if (shouldPoll(AppState.currentState)) void retryPendingUnpairs({ immediate }).catch(() => {});
-		};
-		retry(true);
-		const timer = setInterval(() => retry(false), 30_000);
-		const sub = AppState.addEventListener("change", (state) => { if (shouldPoll(state)) retry(true); });
-		return () => { clearInterval(timer); sub.remove(); };
-	}, []);
+		if (wasConfigured.current && !configured) {
+			void unpairFromServer();
+		}
+		wasConfigured.current = configured;
+	}, [configured]);
 
-	// Each daemon keeps its own device roster and push registration. Reconnect
-	// re-verifies identity before a foreground refresh can use a bearer.
+	// Announce this device's identity as soon as it connects, and again on every
+	// foreground while connected — with NO permission gate. This is what lets the
+	// desktop roster show a paired phone that hasn't (yet, or ever) granted
+	// notification permission or minted a push token, instead of it having no row
+	// at all. The daemon upserts by install ID, so when registerForPush later
+	// succeeds, the token attaches to this same row rather than creating a
+	// second one.
 	useEffect(() => {
-		if (connectedRef.current.length === 0) return;
-		const refresh = () => {
-			const configs = connectedRef.current;
-			void getInstallId().then((installId) => {
-				for (const config of configs) {
-					void announcePairedDevice(config, {
-						installId,
-						platform: Platform.OS,
-						deviceName: Device.deviceName ?? undefined,
-					}).catch((e) => console.warn("[push] announce failed", e));
-				}
-			}).catch((e) => console.warn("[push] announce failed", e));
-			// Automatic refresh never spends the one-shot OS permission prompt.
-			for (const config of configs) {
-				void registerForPush(config, { ask: false }).catch((e) => console.warn("[push] registration failed", e));
-			}
+		if (!config || connection !== "open") return;
+		const safeAnnounce = () => {
+			(async () => {
+				const installId = await getInstallId();
+				await announceDevice(config, {
+					installId,
+					platform: Platform.OS,
+					deviceName: Device.deviceName ?? undefined,
+				});
+			})().catch((e) => console.warn("[push] announce failed", e));
 		};
-		refresh();
-		const offManualRegistration = onManualPushRegistration(refresh);
-		return offManualRegistration;
-	}, [connectedKey]);
+		safeAnnounce();
+		const sub = AppState.addEventListener("change", (s) => {
+			if (s === "active") safeAnnounce();
+		});
+		return () => sub.remove();
+	}, [config, connection]);
+
+	// Register after a successful pairing/connection, and refresh on every
+	// foreground while connected. registerForPush persists the daemon it
+	// registered with and, when the config points at a different daemon,
+	// unregisters the old one first — so switching daemons (even across app
+	// restarts) is handled inside push.ts, not here.
+	//
+	// `ask: false`: this fires automatically, milliseconds after connect, so it
+	// must never spend the one-shot OS prompt. It re-registers users who already
+	// granted permission; asking is left to a call the user initiated.
+	useEffect(() => {
+		if (!config || connection !== "open") return;
+		const safeRegister = () => {
+			registerForPush(config, { ask: false }).catch((e) => console.warn("[push] registration failed", e));
+		};
+		safeRegister();
+		const sub = AppState.addEventListener("change", (s) => {
+			if (s === "active") safeRegister();
+		});
+		return () => sub.remove();
+	}, [config, connection]);
 
 	// Route notification taps: warm via the response listener, cold start via
 	// getLastNotificationResponseAsync (the listener alone misses the launch tap).
 	useEffect(() => {
 		if (!navState?.key) return; // wait until navigation is ready to accept routes
 
-		const handle = (resp: Notifications.NotificationResponse | null, coldStart: boolean) => {
+		const handle = (resp: Notifications.NotificationResponse | null) => {
 			if (!resp) return;
-			void route((resp.notification.request.content.data ?? {}) as PushData, coldStart);
+			route((resp.notification.request.content.data ?? {}) as PushData);
 		};
 
 		if (!handledColdStart.current) {
 			handledColdStart.current = true;
-			void Notifications.getLastNotificationResponseAsync().then((r) => handle(r, true));
+			void Notifications.getLastNotificationResponseAsync().then(handle);
 		}
-		const sub = Notifications.addNotificationResponseReceivedListener((r) => handle(r, false));
+		const sub = Notifications.addNotificationResponseReceivedListener(handle);
 		return () => sub.remove();
-		// route() reads the latest host snapshots through hostsRef.
+		// route() reads the latest config via ref-free closure; re-bind when it changes.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [navState?.key]);
+	}, [navState?.key, config]);
 
-	async function route(data: PushData, coldStart = false) {
-		// A cold-start tap can arrive before the host runtimes are hydrated. The
-		// saved pairing is the authority for whether this host may be opened.
-		const paired = data.hostId ? await findHost(data.hostId).catch(() => null) : null;
-		const hosts = hostsRef.current;
-		const destination = notificationTarget({ type: data.type ?? "", sessionId: data.sessionId, prUrl: data.prUrl, hostId: data.hostId }, paired?.id);
-		if (destination === "/") {
-			// Legacy or forgotten-machine push has no safe destination here.
-			router.navigate("/");
-			return;
-		}
-		const source = hosts.find(({ hostId }) => hostId === data.hostId);
-		const target = destination.startsWith("/review")
-			? "review"
-			: destination.startsWith("/session") ? "session" : "prs";
-		mobileTelemetry()?.capture(MOBILE_EVENTS.notificationOpened, { target, cold_start: coldStart });
+	function route(data: PushData) {
+		const destination = notificationTarget({ type: data.type ?? "", sessionId: data.sessionId });
 		// Best-effort mark-read so unread counts stay consistent with the dashboard.
-		if (source?.config && source.connection === "open" && data.notificationId) {
-			markNotificationRead(source.config, data.notificationId).catch(() => {});
+		if (config && data.notificationId) {
+			markNotificationRead(config, data.notificationId).catch(() => {});
 		}
-		// A review opens as a page even when a sheet is up when the tap arrives.
-		if (target === "review") openPage(destination as Href);
-		else router.navigate(destination);
+		router.navigate(destination);
 	}
 
 	return null;

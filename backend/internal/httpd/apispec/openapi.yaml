@@ -3334,6 +3334,51 @@ paths:
       summary: Initialize a selected folder as a Git repository with an initial commit
       tags:
       - projects
+  /api/v1/prs/{id}/close:
+    post:
+      operationId: closePR
+      parameters:
+      - description: PR number.
+        in: path
+        name: id
+        required: true
+        schema:
+          description: PR number.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClosePRResponse'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unprocessable Entity
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Close a pull request
+      tags:
+      - prs
   /api/v1/prs/{id}/merge:
     post:
       operationId: mergePR
@@ -4114,6 +4159,25 @@ paths:
           type:
           - "null"
           - boolean
+      - description: Page size. Absent returns every matching session; present pages
+          the list newest first by update time, and the response carries nextPageToken
+          while more remain. Values above 500 are clamped to 500.
+        in: query
+        name: pageSize
+        schema:
+          description: Page size. Absent returns every matching session; present pages
+            the list newest first by update time, and the response carries nextPageToken
+            while more remain. Values above 500 are clamped to 500.
+          minimum: 1
+          type:
+          - "null"
+          - integer
+      - description: Opaque cursor from a previous page's nextPageToken.
+        in: query
+        name: pageToken
+        schema:
+          description: Opaque cursor from a previous page's nextPageToken.
+          type: string
       responses:
         "200":
           content:
@@ -7021,6 +7085,11 @@ paths:
         schema:
           description: Session identifier, e.g. project-1.
           type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControllersKillSessionRequest'
       responses:
         "200":
           content:
@@ -9011,6 +9080,45 @@ paths:
       summary: Switch a logical AO session to another agent harness
       tags:
       - sessions
+  /api/v1/sessions/{sessionId}/workspace-location:
+    get:
+      operationId: getSessionWorkspaceLocation
+      parameters:
+      - description: Session identifier, e.g. project-1.
+        in: path
+        name: sessionId
+        required: true
+        schema:
+          description: Session identifier, e.g. project-1.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DesktopWorkspaceLocationResponse'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Resolve a session workspace location over the authenticated API
+      tags:
+      - sessions
   /api/v1/sessions/{sessionId}/workspace/diffs:
     post:
       operationId: getSessionWorkspaceDiffs
@@ -9521,6 +9629,58 @@ paths:
           description: Not Implemented
       summary: Get the compact changed-file manifest for the initial workspace review
         paint
+      tags:
+      - sessions
+  /api/v1/sessions/{sessionId}/workspace/resolve:
+    get:
+      operationId: resolveSessionWorkspacePath
+      parameters:
+      - description: Session identifier, e.g. project-1.
+        in: path
+        name: sessionId
+        required: true
+        schema:
+          description: Session identifier, e.g. project-1.
+          type: string
+      - description: Absolute or workspace-relative file path to classify.
+        in: query
+        name: path
+        required: true
+        schema:
+          description: Absolute or workspace-relative file path to classify.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkspacePathResolutionResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Classify a path as a workspace file, a session artifact, or neither
       tags:
       - sessions
   /api/v1/sessions/{sessionId}/workspace/search:
@@ -11137,6 +11297,8 @@ components:
         connectedAt:
           format: date-time
           type: string
+        persistentProfile:
+          type: boolean
         sessionId:
           type: string
         transport:
@@ -11145,6 +11307,7 @@ components:
       - sessionId
       - connected
       - transport
+      - persistentProfile
       type: object
     CancelReviewResponse:
       properties:
@@ -11293,6 +11456,16 @@ components:
       required:
       - remoteUrl
       - destinationParent
+      type: object
+    ClosePRResponse:
+      properties:
+        ok:
+          type: boolean
+        prNumber:
+          type: integer
+      required:
+      - ok
+      - prNumber
       type: object
     CodewhaleLifecycleEvent:
       properties:
@@ -11884,6 +12057,11 @@ components:
       - active
       - hasBattery
       type: object
+    ControllersKillSessionRequest:
+      properties:
+        deleteArtifacts:
+          type: boolean
+      type: object
     ControllersRemoteHostAccountTokenResponse:
       properties:
         hostId:
@@ -12104,6 +12282,10 @@ components:
           items:
             $ref: '#/components/schemas/SessionPRFacts'
           type: array
+        requestedOutput:
+          enum:
+          - artifact
+          type: string
         reviewerConfig:
           $ref: '#/components/schemas/AgentConfig'
         reviewerHarness:
@@ -12131,6 +12313,8 @@ components:
           - cline
           - autohand
           type: string
+        runtimeUnreachable:
+          type: boolean
         scmStatus:
           enum:
           - pr_open
@@ -12776,6 +12960,8 @@ components:
           type: string
         settings:
           $ref: '#/components/schemas/ConversationTurnSettingsPayload'
+        supportsExcerpts:
+          type: boolean
         threadState:
           $ref: '#/components/schemas/ConversationThreadStatePayload'
         title:
@@ -13856,6 +14042,8 @@ components:
       type: object
     KillSessionResponse:
       properties:
+        artifactsDeleted:
+          type: boolean
         cleanupPending:
           type: boolean
         freed:
@@ -14120,6 +14308,8 @@ components:
       type: object
     ListSessionsResponse:
       properties:
+        nextPageToken:
+          type: string
         sessions:
           items:
             $ref: '#/components/schemas/ControllersSessionView'
@@ -14691,6 +14881,8 @@ components:
           type: string
         autoReview:
           type: boolean
+        browserPersistentProfile:
+          type: boolean
         canonicalRepoURL:
           type: string
         containerReap:
@@ -14703,6 +14895,8 @@ components:
           type: object
         orchestrator:
           $ref: '#/components/schemas/RoleOverride'
+        orchestratorPrompt:
+          type: string
         orchestratorRules:
           type: string
         postCreate:
@@ -14717,6 +14911,11 @@ components:
           items:
             $ref: '#/components/schemas/DomainReviewerConfig'
           type: array
+        sessionInterface:
+          enum:
+          - chat
+          - tui
+          type: string
         sessionPrefix:
           type: string
         symlinks:
@@ -16051,6 +16250,11 @@ components:
       type: object
     SetActivityRequest:
       properties:
+        agentCwd:
+          description: Working directory of the agent process that fired the hook.
+            Used to reject signals from nested agents that inherited AO_SESSION_ID.
+          maxLength: 4096
+          type: string
         agentSessionId:
           description: Native agent session identifier used to resume its transcript.
           type: string
@@ -16934,6 +17138,10 @@ components:
           type: string
         prompt:
           maxLength: 16384
+          type: string
+        requestedOutput:
+          enum:
+          - artifact
           type: string
         trackerProvider:
           enum:
@@ -18000,6 +18208,23 @@ components:
       - stale
       - refreshing
       - degraded
+      type: object
+    WorkspacePathResolutionResponse:
+      properties:
+        kind:
+          enum:
+          - workspace
+          - artifact
+          - outside
+          type: string
+        path:
+          type: string
+        sessionId:
+          type: string
+      required:
+      - sessionId
+      - kind
+      - path
       type: object
     WorkspaceRepo:
       properties:

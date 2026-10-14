@@ -40,7 +40,9 @@
 //   - CI: derived from the latest commit's statusCheckRollup contexts
 //     (CheckRun + StatusContext). Failed if ANY context concluded in a
 //     failure class (failure / cancelled / timed_out / action_required /
-//     error). Pending if any context is still running / queued.
+//     error), except a cancelled run that a later same-named run concluded
+//     over: one sha carries several rows per name and a superseded cancel
+//     carries no verdict. Pending if any context is still running / queued.
 //     Passing if all non-skipped contexts concluded SUCCESS / NEUTRAL.
 //     Unknown otherwise. Empty rollup falls back to the rollup-level
 //     "state" field.

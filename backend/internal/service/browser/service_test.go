@@ -8,7 +8,26 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/browserruntime"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/project"
 )
+
+type fakeProjects struct {
+	result project.GetResult
+	err    error
+}
+
+func (f fakeProjects) Get(_ context.Context, _ domain.ProjectID) (project.GetResult, error) {
+	return f.result, f.err
+}
+
+// optedIn builds a project reader whose project has the persistent-profile
+// opt-in set to want.
+func optedIn(id string, want bool) fakeProjects {
+	return fakeProjects{result: project.GetResult{Project: &project.Project{
+		ID:     domain.ProjectID(id),
+		Config: &domain.ProjectConfig{BrowserPersistentProfile: want},
+	}}}
+}
 
 type fakeSessions struct {
 	session domain.Session
@@ -20,7 +39,8 @@ func (f fakeSessions) Get(_ context.Context, _ domain.SessionID) (domain.Session
 }
 
 type fakeRuntime struct {
-	action string
+	action     string
+	profileKey string
 }
 
 func (f *fakeRuntime) Status() browserruntime.Status {
@@ -32,8 +52,10 @@ func (f *fakeRuntime) Execute(
 	_ domain.SessionID,
 	action string,
 	_ map[string]interface{},
+	profileKey string,
 ) (browserruntime.Result, error) {
 	f.action = action
+	f.profileKey = profileKey
 	return browserruntime.Result{RequestID: "r1"}, nil
 }
 
@@ -47,7 +69,7 @@ func TestServiceRequiresOwningCapabilityAndLiveSession(t *testing.T) {
 	service := New(fakeSessions{session: domain.Session{SessionRecord: domain.SessionRecord{
 		ID:       "s1",
 		Metadata: domain.SessionMetadata{BrowserCapabilityVerifier: verifier},
-	}}}, runtime, authority)
+	}}}, fakeProjects{}, runtime, authority)
 
 	if _, err := service.Status(context.Background(), "s1", "wrong"); apiErrorCode(err) != "BROWSER_CAPABILITY_INVALID" {
 		t.Fatalf("wrong capability error = %v", err)
@@ -81,6 +103,7 @@ func TestServiceRequiresOwningCapabilityAndLiveSession(t *testing.T) {
 
 	terminated := New(
 		fakeSessions{session: domain.Session{SessionRecord: domain.SessionRecord{ID: "s1", IsTerminated: true}}},
+		fakeProjects{},
 		runtime,
 		authority,
 	)
@@ -122,7 +145,7 @@ func TestServiceRotationRejectsOldBearerAndDispatchesNewBearer(t *testing.T) {
 	service := New(fakeSessions{session: domain.Session{SessionRecord: domain.SessionRecord{
 		ID:       "s1",
 		Metadata: domain.SessionMetadata{BrowserCapabilityVerifier: newVerifier},
-	}}}, runtime, authority)
+	}}}, fakeProjects{}, runtime, authority)
 	if _, _, err := service.Execute(context.Background(), "s1", oldToken, "snapshot", nil); apiErrorCode(err) != "BROWSER_CAPABILITY_INVALID" {
 		t.Fatalf("old bearer error = %v, want BROWSER_CAPABILITY_INVALID", err)
 	}
@@ -155,4 +178,87 @@ func apiErrorCode(err error) string {
 		return target.Code
 	}
 	return ""
+}
+
+// The daemon is the only side that knows a session's project, so it is the only
+// side that can decide this. Every path that cannot produce a confident "yes"
+// must fall back to the isolated default: failing closed here costs a re-login,
+// while failing open shares a cookie jar nobody asked to share.
+func TestServiceResolvesProfileKeyFromProjectConfig(t *testing.T) {
+	sessionIn := func(projectID domain.ProjectID) fakeSessions {
+		return fakeSessions{session: domain.Session{SessionRecord: domain.SessionRecord{
+			ID: "s1", ProjectID: projectID,
+		}}}
+	}
+
+	for _, tc := range []struct {
+		name     string
+		sessions fakeSessions
+		projects projectReader
+		want     string
+	}{
+		{
+			name: "opted in yields the project id", sessions: sessionIn("proj-alpha"),
+			projects: optedIn("proj-alpha", true), want: "proj-alpha",
+		},
+		{
+			name:     "a different project yields ITS OWN id, never a shared one",
+			sessions: sessionIn("proj-beta"), projects: optedIn("proj-beta", true), want: "proj-beta",
+		},
+		{
+			name: "not opted in stays ephemeral", sessions: sessionIn("proj-alpha"),
+			projects: optedIn("proj-alpha", false), want: "",
+		},
+		{
+			name: "no config at all stays ephemeral", sessions: sessionIn("proj-alpha"),
+			projects: fakeProjects{result: project.GetResult{Project: &project.Project{ID: "proj-alpha"}}},
+			want:     "",
+		},
+		{
+			name: "a degraded project stays ephemeral", sessions: sessionIn("proj-alpha"),
+			projects: fakeProjects{result: project.GetResult{Degraded: &project.Degraded{ID: "proj-alpha"}}},
+			want:     "",
+		},
+		{
+			name: "an unreadable project stays ephemeral", sessions: sessionIn("proj-alpha"),
+			projects: fakeProjects{err: errors.New("boom")}, want: "",
+		},
+		{
+			name: "a session with no project stays ephemeral", sessions: sessionIn(""),
+			projects: optedIn("proj-alpha", true), want: "",
+		},
+		{
+			name: "no project reader wired stays ephemeral", sessions: sessionIn("proj-alpha"),
+			projects: nil, want: "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			authority := NewAuthority()
+			token, verifier, err := authority.Issue("s1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			sessions := tc.sessions
+			sessions.session.Metadata.BrowserCapabilityVerifier = verifier
+			runtime := &fakeRuntime{}
+			service := New(sessions, tc.projects, runtime, authority)
+
+			if _, _, err := service.Execute(context.Background(), "s1", token, "snapshot", nil); err != nil {
+				t.Fatalf("execute: %v", err)
+			}
+			if runtime.profileKey != tc.want {
+				t.Fatalf("profileKey = %q, want %q", runtime.profileKey, tc.want)
+			}
+
+			// Status must report the same answer the command path acts on, or the
+			// user is told one thing while another is true.
+			status, err := service.Status(context.Background(), "s1", token)
+			if err != nil {
+				t.Fatalf("status: %v", err)
+			}
+			if status.PersistentProfile != (tc.want != "") {
+				t.Fatalf("status.PersistentProfile = %v, want %v", status.PersistentProfile, tc.want != "")
+			}
+		})
+	}
 }

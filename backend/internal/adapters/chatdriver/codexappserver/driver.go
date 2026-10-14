@@ -739,7 +739,7 @@ func codexProcessEnv(ctx context.Context, bin string, env map[string]string) []s
 // ForkIntoHost starts an inclusive native fork in an independent provider host.
 func (d *Driver) ForkIntoHost(ctx context.Context, sourceProviderConversationID, lastProviderTurnID string, cfg ports.ChatStartConfig) (ports.ChatConversation, error) {
 	if sourceProviderConversationID == "" || lastProviderTurnID == "" {
-		return nil, errors.New("source thread and completed turn are required")
+		return nil, errors.New("source thread and exact turn anchor are required")
 	}
 	if !filepath.IsAbs(cfg.WorkspacePath) {
 		return nil, fmt.Errorf("workspace path must be absolute, got %q", cfg.WorkspacePath)
@@ -757,12 +757,12 @@ func (d *Driver) ForkIntoHost(ctx context.Context, sourceProviderConversationID,
 	conv.launchMode = cfg.Permissions
 	params := map[string]any{
 		"threadId":          sourceProviderConversationID,
-		"lastTurnId":        conv.nativeID(lastProviderTurnID),
 		"cwd":               cfg.WorkspacePath,
 		"approvalPolicy":    policy,
 		"approvalsReviewer": reviewer,
 		"sandbox":           sandbox,
 	}
+	params["lastTurnId"] = conv.nativeID(lastProviderTurnID)
 	if cfg.Model != "" {
 		params["model"] = cfg.Model
 	}
@@ -787,9 +787,15 @@ func (d *Driver) ForkIntoHost(ctx context.Context, sourceProviderConversationID,
 		_ = conv.Terminate()
 		return nil, fmt.Errorf("thread/fork in side host: %w", err)
 	}
-	if resp.Thread.ID == "" {
+	if resp.Thread.ID == "" || resp.Thread.ID == sourceProviderConversationID {
 		_ = conv.Terminate()
-		return nil, errors.New("thread/fork returned no thread id")
+		return nil, errors.New("thread/fork returned no independent thread id")
+	}
+	if cfg.RecordFork != nil {
+		if err := cfg.RecordFork(context.WithoutCancel(ctx), resp.Thread.ID); err != nil {
+			_ = conv.Terminate()
+			return nil, fmt.Errorf("record Codex fork: %w", err)
+		}
 	}
 	conv.start(resp.Thread.ID, resp.Model, resp.ReasoningEffort)
 	return conv, nil

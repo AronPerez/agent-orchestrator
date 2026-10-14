@@ -81,6 +81,7 @@ func (f *fakeActionWriter) MarkPRReviewThreadResolved(_ context.Context, _ strin
 	}
 	f.resolvedThreads = append(f.resolvedThreads, threadID)
 	return nil
+
 }
 
 type fakeSCMAction struct {

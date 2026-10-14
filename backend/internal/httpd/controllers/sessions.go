@@ -88,6 +88,7 @@ var (
 // SessionService is the controller-facing session service contract.
 type SessionService interface {
 	List(ctx context.Context, filter sessionsvc.ListFilter) ([]domain.Session, error)
+	ListPage(ctx context.Context, req sessionsvc.ListPageRequest) (sessionsvc.Page, error)
 	Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Session, int, int, error)
 	SpawnOrchestrator(ctx context.Context, projectID domain.ProjectID, clean bool, requestedMode domain.SessionMode, approval domain.PermissionMode) (domain.Session, error)
 	Get(ctx context.Context, id domain.SessionID) (domain.Session, error)
@@ -99,6 +100,7 @@ type SessionService interface {
 	ListAgentSwitches(ctx context.Context, id domain.SessionID) ([]domain.AgentSwitch, error)
 	SubmitAgentHandoff(ctx context.Context, id domain.SessionID, switchID domain.AgentSwitchID, sourceGenerationID domain.AgentGenerationID, handoff json.RawMessage) (domain.AgentSwitch, error)
 	RequestKill(ctx context.Context, id domain.SessionID) (sessionmanager.KillResult, error)
+	DeleteArtifacts(ctx context.Context, id domain.SessionID) error
 	RollbackSpawn(ctx context.Context, id domain.SessionID) (sessionsvc.RollbackOutcome, error)
 	Cleanup(ctx context.Context, project domain.ProjectID) (sessionsvc.CleanupOutcome, error)
 	Rename(ctx context.Context, id domain.SessionID, displayName string) error
@@ -134,6 +136,7 @@ type SessionService interface {
 	GetWorkspaceFileRevision(ctx context.Context, id domain.SessionID, path string, scope sessionsvc.WorkspaceDiffScope, side sessionsvc.WorkspaceFileBlobSide, workspaceVersion, expectedRevision string) (sessionsvc.WorkspaceFileRevision, error)
 	GetWorkspaceFileRevisionAtCommit(ctx context.Context, id domain.SessionID, path string, side sessionsvc.WorkspaceFileBlobSide, workspaceVersion, expectedRevision, commitSHA string) (sessionsvc.WorkspaceFileRevision, error)
 	SearchWorkspaceFiles(ctx context.Context, id domain.SessionID, query, cursor string, limit int) (sessionsvc.WorkspaceFileSearch, error)
+	ResolveWorkspacePath(ctx context.Context, id domain.SessionID, rawPath string) (sessionsvc.WorkspacePathResolution, error)
 	ListWorkspaceTree(ctx context.Context, id domain.SessionID, path string) (sessionsvc.WorkspaceTree, error)
 	InvalidateWorkspaceCache(id domain.SessionID)
 	Pin(ctx context.Context, id domain.SessionID) (domain.Session, error)
@@ -223,6 +226,7 @@ func (c *SessionsController) Register(r chi.Router) {
 	r.Post("/sessions/{sessionId}/workspace/diffs", c.getWorkspaceDiffs)
 	r.Get("/sessions/{sessionId}/workspace/file/revision", c.getWorkspaceFileRevision)
 	r.Get("/sessions/{sessionId}/workspace/search", c.searchWorkspaceFiles)
+	r.Get("/sessions/{sessionId}/workspace/resolve", c.resolveWorkspacePath)
 	r.Get("/sessions/{sessionId}/workspace/tree", c.listWorkspaceTree)
 	r.Get("/sessions/{sessionId}/pr/{prNumber}/files", c.listPRFiles)
 	r.Get("/sessions/{sessionId}/pr/{prNumber}/file", c.getPRFile)
@@ -273,17 +277,33 @@ func (c *SessionsController) list(w http.ResponseWriter, r *http.Request) {
 		apispec.NotImplemented(w, r, "GET", "/api/v1/sessions")
 		return
 	}
-	filter, err := parseSessionListFilter(r)
+	req, err := parseSessionListFilter(r)
 	if err != nil {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_QUERY", err.Error(), nil)
 		return
 	}
-	sessions, err := c.Svc.List(r.Context(), filter)
+	if req.PageSize == 0 {
+		sessions, err := c.Svc.List(r.Context(), req.ListFilter)
+		if err != nil {
+			envelope.WriteError(w, r, err)
+			return
+		}
+		envelope.WriteJSON(w, http.StatusOK, ListSessionsResponse{Sessions: sessionViews(r, sessions)})
+		return
+	}
+	page, err := c.Svc.ListPage(r.Context(), req)
 	if err != nil {
+		if errors.Is(err, sessionsvc.ErrInvalidPageToken) {
+			envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_PAGE_TOKEN", "Page token is not valid", nil)
+			return
+		}
 		envelope.WriteError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusOK, ListSessionsResponse{Sessions: sessionViews(r, sessions)})
+	envelope.WriteJSON(w, http.StatusOK, ListSessionsResponse{
+		Sessions:      sessionViews(r, page.Sessions),
+		NextPageToken: page.NextPageToken,
+	})
 }
 
 func (c *SessionsController) spawn(w http.ResponseWriter, r *http.Request) {
@@ -315,6 +335,10 @@ func (c *SessionsController) spawn(w http.ResponseWriter, r *http.Request) {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_APPROVAL_MODE", "approvalMode is invalid", nil)
 		return
 	}
+	if !in.RequestedOutput.Valid() {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "validation", "INVALID_REQUESTED_OUTPUT", "requestedOutput must be \"artifact\" or omitted", nil)
+		return
+	}
 	if len(in.Prompt) > maxPromptLen {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "PROMPT_TOO_LONG", "Prompt must be 16 KiB or fewer", nil)
 		return
@@ -343,7 +367,7 @@ func (c *SessionsController) spawn(w http.ResponseWriter, r *http.Request) {
 		keyless.Attachments = nil
 		requestHash = clientRequestFingerprint("session", keyless, attachments)
 	}
-	sess, promptBytes, systemPromptBytes, err := c.Svc.Spawn(r.Context(), ports.SpawnConfig{ProjectID: in.ProjectID, IssueID: in.IssueID, ParentSessionID: in.ParentSessionID, TrackerProvider: in.TrackerProvider, Kind: in.Kind, Harness: in.Harness, Branch: in.Branch, RequestedMode: in.Mode, Prompt: in.Prompt, DisplayName: displayName, Attachments: attachments, AgentConfig: ports.AgentConfig{Model: in.Model, Effort: in.Effort, Permissions: in.ApprovalMode}, ClientRequestID: in.ClientRequestID, ClientRequestHash: requestHash})
+	sess, promptBytes, systemPromptBytes, err := c.Svc.Spawn(r.Context(), ports.SpawnConfig{ProjectID: in.ProjectID, IssueID: in.IssueID, ParentSessionID: in.ParentSessionID, TrackerProvider: in.TrackerProvider, Kind: in.Kind, Harness: in.Harness, Branch: in.Branch, RequestedMode: in.Mode, Prompt: in.Prompt, RequestedOutput: in.RequestedOutput, DisplayName: displayName, Attachments: attachments, AgentConfig: ports.AgentConfig{Model: in.Model, Effort: in.Effort, Permissions: in.ApprovalMode}, ClientRequestID: in.ClientRequestID, ClientRequestHash: requestHash})
 	if err != nil {
 		envelope.WriteError(w, r, err)
 		return
@@ -1064,6 +1088,26 @@ func (c *SessionsController) searchWorkspaceFiles(w http.ResponseWriter, r *http
 		return
 	}
 	envelope.WriteJSON(w, http.StatusOK, workspaceFileSearchResponse(result))
+}
+
+// resolveWorkspacePath classifies a path from chat as a workspace file, a
+// session artifact, or neither, so the renderer can open it without knowing
+// where the session's worktree lives.
+func (c *SessionsController) resolveWorkspacePath(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "GET", "/api/v1/sessions/{sessionId}/workspace/resolve")
+		return
+	}
+	result, err := c.Svc.ResolveWorkspacePath(r.Context(), sessionID(r), r.URL.Query().Get("path"))
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, WorkspacePathResolutionResponse{
+		SessionID: result.SessionID,
+		Kind:      result.Kind,
+		Path:      result.Path,
+	})
 }
 
 // listWorkspaceTree returns one directory level of the session workspace's
@@ -1852,12 +1896,28 @@ func (c *SessionsController) kill(w http.ResponseWriter, r *http.Request) {
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/kill")
 		return
 	}
+	var in KillSessionRequest
+	if err := decodeJSON(r, &in); err != nil && !errors.Is(err, io.EOF) {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
+		return
+	}
 	result, err := c.Svc.RequestKill(r.Context(), sessionID(r))
 	if err != nil {
 		envelope.WriteError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusOK, KillSessionResponse{OK: true, SessionID: sessionID(r), Freed: result.Freed, CleanupPending: result.CleanupPending})
+	// The session is already archived here, so a failed delete must not fail
+	// the request: the caller would roll back an archive that happened. The
+	// response reports it instead and the files stay on disk.
+	artifactsDeleted := false
+	if in.DeleteArtifacts {
+		if err := c.Svc.DeleteArtifacts(r.Context(), sessionID(r)); err != nil {
+			slog.WarnContext(r.Context(), "delete session artifacts after archive", "session", sessionID(r), "err", err)
+		} else {
+			artifactsDeleted = true
+		}
+	}
+	envelope.WriteJSON(w, http.StatusOK, KillSessionResponse{OK: true, SessionID: sessionID(r), Freed: result.Freed, CleanupPending: result.CleanupPending, ArtifactsDeleted: artifactsDeleted})
 }
 
 // rollback undoes a partially-completed spawn: if the session row is still in
@@ -1893,8 +1953,10 @@ func (c *SessionsController) cleanup(w http.ResponseWriter, r *http.Request) {
 	for _, skip := range out.Skipped {
 		skipped = append(skipped, CleanupSkippedSession{SessionID: skip.SessionID, Reason: skip.Reason})
 	}
+	// A skipped dirty worktree remains on disk, so this successful request is
+	// not a completed cleanup from the caller's perspective.
 	envelope.WriteJSON(w, http.StatusOK, CleanupSessionsResponse{
-		OK: true, Cleaned: out.Cleaned, AlreadyGone: out.AlreadyGone, Skipped: skipped,
+		OK: len(skipped) == 0, Cleaned: out.Cleaned, AlreadyGone: out.AlreadyGone, Skipped: skipped,
 	})
 }
 
@@ -2122,6 +2184,7 @@ func (c *SessionsController) activity(w http.ResponseWriter, r *http.Request) {
 		ProviderTurnID:               capActivityMeta(domain.SanitizeControlChars(strings.TrimSpace(in.ProviderTurnID))),
 		SubmissionID:                 capActivityMeta(domain.SanitizeControlChars(strings.TrimSpace(in.SubmissionID))),
 		TranscriptPath:               capActivityText(domain.SanitizeControlChars(strings.TrimSpace(in.TranscriptPath)), 4096),
+		AgentCWD:                     capActivityText(domain.SanitizeControlChars(strings.TrimSpace(in.AgentCWD)), 4096),
 		LaunchID:                     capActivityMeta(domain.SanitizeControlChars(strings.TrimSpace(in.LaunchID))),
 	}
 	if in.RunningSubagentIDs != nil && len(*in.RunningSubagentIDs) <= 128 {
@@ -2390,31 +2453,46 @@ func orchestratorID(r *http.Request) domain.SessionID {
 	return domain.SessionID(chi.URLParam(r, "id"))
 }
 
-func parseSessionListFilter(r *http.Request) (sessionsvc.ListFilter, error) {
+// maxSessionPageSize caps a requested page; larger requests are clamped, not
+// rejected (AIP-158).
+const maxSessionPageSize = 500
+
+func parseSessionListFilter(r *http.Request) (sessionsvc.ListPageRequest, error) {
 	q := r.URL.Query()
-	filter := sessionsvc.ListFilter{ProjectID: domain.ProjectID(q.Get("project"))}
+	req := sessionsvc.ListPageRequest{ListFilter: sessionsvc.ListFilter{ProjectID: domain.ProjectID(q.Get("project"))}}
 	if raw := q.Get("active"); raw != "" {
 		active, err := strconv.ParseBool(raw)
 		if err != nil {
-			return sessionsvc.ListFilter{}, errors.New("active must be a boolean")
+			return sessionsvc.ListPageRequest{}, errors.New("active must be a boolean")
 		}
-		filter.Active = &active
+		req.Active = &active
 	}
 	if raw := q.Get("orchestratorOnly"); raw != "" {
 		orchestratorOnly, err := strconv.ParseBool(raw)
 		if err != nil {
-			return sessionsvc.ListFilter{}, errors.New("orchestratorOnly must be a boolean")
+			return sessionsvc.ListPageRequest{}, errors.New("orchestratorOnly must be a boolean")
 		}
-		filter.OrchestratorOnly = orchestratorOnly
+		req.OrchestratorOnly = orchestratorOnly
 	}
 	if raw := q.Get("fresh"); raw != "" {
 		fresh, err := strconv.ParseBool(raw)
 		if err != nil {
-			return sessionsvc.ListFilter{}, errors.New("fresh must be a boolean")
+			return sessionsvc.ListPageRequest{}, errors.New("fresh must be a boolean")
 		}
-		filter.Fresh = fresh
+		req.Fresh = fresh
 	}
-	return filter, nil
+	if raw := q.Get("pageSize"); raw != "" {
+		size, err := strconv.Atoi(raw)
+		if err != nil || size < 1 {
+			return sessionsvc.ListPageRequest{}, errors.New("pageSize must be a positive integer")
+		}
+		if size > maxSessionPageSize {
+			size = maxSessionPageSize
+		}
+		req.PageSize = size
+	}
+	req.PageToken = q.Get("pageToken")
+	return req, nil
 }
 
 func writeSessionPRError(w http.ResponseWriter, r *http.Request, err error) {

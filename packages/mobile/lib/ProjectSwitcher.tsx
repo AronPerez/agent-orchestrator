@@ -1,13 +1,12 @@
-import { Feather } from "./icons";
+import { Feather } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
-import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 import type { Theme } from "./theme";
 import { haptics } from "./haptics";
 import { activeProjectLabel } from "./projectFilter";
 import { projectSheetRoute } from "./sheetResult";
 import { useApp } from "./store";
 import { useTheme, useThemedStyles } from "./ThemeProvider";
-import { iconSize, space, type } from "./tokens";
 
 // Scopes the board to one project (or All). A header row — label, current
 // scope, overflow button — rather than the horizontal pill row it replaced: the
@@ -43,12 +42,12 @@ export function ProjectSwitcher() {
 					accessibilityRole="button"
 					accessibilityLabel="Change active project"
 				>
-					<Text style={[styles.value, active && { color: t.accent }]} numberOfLines={1}>
+					<Text style={[styles.value, active && { color: t.blue }]} numberOfLines={1}>
 						{activeProjectLabel(activeProjectId, projects, projectsKnown)}
 					</Text>
 					{/* A chevron, not an overflow "…": this changes a value rather than
 					    revealing a menu of actions. */}
-					<Feather name="chevron-down" size={iconSize.sm} color={active ? t.accent : t.textTertiary} />
+					<Feather name="chevron-down" size={16} color={active ? t.blue : t.textTertiary} />
 				</Pressable>
 			</View>
 
@@ -61,28 +60,27 @@ const makeStyles = (t: Theme) =>
 	row: {
 		flexDirection: "row",
 		alignItems: "center",
-		gap: space.md,
-		paddingHorizontal: space.lg,
-		paddingBottom: space.xxs,
+		gap: 12,
+		paddingHorizontal: 16,
+		paddingBottom: 4,
 	},
-	label: { fontFamily: "Geist_600SemiBold",
+	label: {
 		color: t.textSecondary,
-		fontSize: type.footnote.fontSize,
+		fontSize: 13,
 		letterSpacing: 0.8,
-		fontWeight: "600",
+		fontWeight: "700",
 		flex: 1,
 	},
 	trigger: {
 		flexDirection: "row",
 		alignItems: "center",
-		gap: space.xs,
-		// Keep the right-hand picker in one place as project names change.
-		...(Platform.OS === "ios" ? { width: "60%" as const, justifyContent: "flex-end" as const } : { maxWidth: "70%" as const }),
-		paddingVertical: space.xxs,
-		paddingHorizontal: space.sm,
+		gap: 7,
+		maxWidth: "70%",
+		paddingVertical: 4,
+		paddingHorizontal: 8,
 		marginRight: -8,
-		borderRadius: 8, borderCurve: "continuous",
+		borderRadius: 8,
 	},
 	triggerPressed: { backgroundColor: t.bgElevated },
-	value: { fontFamily: "Geist_600SemiBold", color: t.textTertiary, fontSize: type.footnote.fontSize, fontWeight: "600", flexShrink: 1, ...(Platform.OS === "ios" ? { textAlign: "right" as const } : {}) },
+	value: { color: t.textTertiary, fontSize: 13, fontWeight: "600", flexShrink: 1 },
 });

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { chmod, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { addRemote, readRemotes, removeRemote, RemotesFilePermissionError, updateRemote } from "./remotes-store";
+import { join } from "node:path";
+import { addRemote, applyRemoteChanges, readRemotes, removeRemote, RemotesFilePermissionError, updateRemote } from "./remotes-store";
 
 async function tempFile(contents?: string, mode = 0o600): Promise<string> {
 	const dir = await mkdtemp(join(tmpdir(), "ao-remotes-"));
@@ -49,28 +49,11 @@ describe("readRemotes", () => {
 });
 
 describe("addRemote", () => {
-	it("creates an isolated AO_DATA_DIR before saving the first host", async () => {
-		const dir = await mkdtemp(join(tmpdir(), "ao-remotes-isolated-"));
-		const path = join(dir, "data", "remotes.json");
-		await addRemote(path, { hostId: "h_workbox", label: "workbox", url: "http://192.0.2.1:3011", password: "pw" });
-		expect((await readRemotes(path))[0]?.hostId).toBe("h_workbox");
-	});
-
 	it("creates the file 0600 when absent", async () => {
 		const path = await tempFile();
 		await addRemote(path, { label: "workbox", url: "http://192.0.2.1:3011", password: "pw" });
 		expect((await stat(path)).mode & 0o777).toBe(0o600);
 		expect(JSON.parse(await readFile(path, "utf8")).remotes).toHaveLength(1);
-		expect(await readdir(dirname(path))).toEqual(["remotes.json"]);
-	});
-
-	it("keeps both hosts when adds overlap", async () => {
-		const path = await tempFile();
-		await Promise.all([
-			addRemote(path, { label: "a", url: "http://192.0.2.1:1", password: "x" }),
-			addRemote(path, { label: "b", url: "http://192.0.2.2:2", password: "y" }),
-		]);
-		expect((await readRemotes(path)).map(({ label }) => label)).toEqual(["a", "b"]);
 	});
 
 	it("appends without dropping existing entries", async () => {
@@ -85,12 +68,6 @@ describe("addRemote", () => {
 		await addRemote(path, { label: "new", url: "http://192.0.2.1:1", password: "z" });
 		const remotes = JSON.parse(await readFile(path, "utf8")).remotes;
 		expect(remotes).toEqual([{ label: "new", url: "http://192.0.2.1:1", password: "z" }]);
-	});
-
-	it("moves one host from its LAN address to its Tailscale address", async () => {
-		const path = await tempFile('{"remotes":[{"hostId":"h_workbox","label":"workbox","url":"http://192.0.2.1:1","password":"x"}]}');
-		await addRemote(path, { hostId: "h_workbox", label: "workbox", url: "https://workbox.tailnet", password: "x" });
-		expect((await readRemotes(path)).map(({ url }) => url)).toEqual(["https://workbox.tailnet"]);
 	});
 });
 
@@ -192,5 +169,81 @@ describe("removeRemote", () => {
 		const path = await tempFile(TWO_HOSTS, 0o644);
 		await expect(removeRemote(path, "http://192.0.2.1:1")).rejects.toBeInstanceOf(RemotesFilePermissionError);
 		expect(await readFile(path, "utf8")).toBe(TWO_HOSTS);
+	});
+});
+
+describe("sshDestination", () => {
+	it("round-trips an SSH destination and keeps hosts without one unchanged", async () => {
+		const file = await tempFile(JSON.stringify({
+			remotes: [
+				{ label: "Mini", url: "http://192.0.2.1:3011", password: "pw", sshDestination: "aron@mini.local" },
+				{ label: "Plain", url: "http://192.0.2.2:3011", password: "pw" },
+			],
+		}));
+		const remotes = await readRemotes(file);
+		expect(remotes[0].sshDestination).toBe("aron@mini.local");
+		expect(remotes[1].sshDestination).toBeUndefined();
+	});
+
+	it("edits, keeps, and clears the SSH destination independently of other fields", async () => {
+		const entry = { label: "Mini", url: "http://192.0.2.1:3011", password: "pw", sshDestination: "aron@mini.local" };
+		expect(applyRemoteChanges(entry, { label: "Mini2" }).sshDestination).toBe("aron@mini.local");
+		expect(applyRemoteChanges(entry, { sshDestination: "aron@10.0.0.9" }).sshDestination).toBe("aron@10.0.0.9");
+		// Empty string is the dialog's "remove it" — stored as absent, not "".
+		expect(applyRemoteChanges(entry, { sshDestination: "" }).sshDestination).toBeUndefined();
+		expect(applyRemoteChanges(entry, { sshDestination: "  aron@mini.local  " }).sshDestination).toBe("aron@mini.local");
+	});
+});
+
+// The host id a daemon reports at /api/v1/identity. Saved beside the password
+// so every later request can tell the daemon which machine it expects.
+describe("hostId", () => {
+	it("survives an edit that does not mention it", () => {
+		const entry = { label: "Mini", url: "http://192.0.2.1:3011", password: "pw", hostId: "h_1" };
+		expect(applyRemoteChanges(entry, { label: "Mini2" }).hostId).toBe("h_1");
+		expect(applyRemoteChanges(entry, { hostId: "h_2" }).hostId).toBe("h_2");
+	});
+
+	// Hosts are keyed by url everywhere in this app (Ref.host IS the address), and
+	// one daemon saved under two addresses — its LAN IP and its tailnet IP — is a
+	// supported setup. The id names the machine behind an address; it is not a
+	// second key that collapses rows.
+	it("keeps two addresses for the same daemon as two rows", async () => {
+		const path = await tempFile(
+			'{"remotes":[{"label":"lan","url":"http://192.0.2.1:1","password":"x","hostId":"h_1"}]}',
+		);
+		await addRemote(path, { label: "tailnet", url: "http://100.64.0.9:1", password: "x", hostId: "h_1" });
+		expect(await savedRemotes(path)).toHaveLength(2);
+	});
+
+	it("backfilling an id never absorbs a sibling row for the same daemon", async () => {
+		const path = await tempFile(TWO_HOSTS);
+		await updateRemote(path, "http://192.0.2.1:1", { hostId: "h_1" });
+		await updateRemote(path, "http://192.0.2.9:9", { hostId: "h_1" });
+		expect(await savedRemotes(path)).toEqual([
+			{ label: "workbox", url: "http://192.0.2.1:1", password: "old", hostId: "h_1" },
+			{ label: "mini", url: "http://192.0.2.9:9", password: "m", hostId: "h_1" },
+		]);
+	});
+});
+
+describe("writeRemotes", () => {
+	it("creates a missing parent directory and leaves only the file behind", async () => {
+		const dir = join(await mkdtemp(join(tmpdir(), "ao-remotes-")), "nested", "deeper");
+		const path = join(dir, "remotes.json");
+		await addRemote(path, { label: "workbox", url: "http://192.0.2.1:3011", password: "pw" });
+		expect(await readdir(dir)).toEqual(["remotes.json"]);
+		expect(await savedRemotes(path)).toHaveLength(1);
+	});
+
+	// Two adds racing on one file must not let the second read-modify-write
+	// overwrite the first.
+	it("serializes concurrent adds so neither entry is lost", async () => {
+		const path = await tempFile();
+		await Promise.all([
+			addRemote(path, { label: "a", url: "http://192.0.2.1:1", password: "x" }),
+			addRemote(path, { label: "b", url: "http://192.0.2.2:2", password: "y" }),
+		]);
+		expect(await savedRemotes(path)).toHaveLength(2);
 	});
 });

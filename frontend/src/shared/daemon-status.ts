@@ -1,7 +1,7 @@
 // DaemonStatus is the supervisor → renderer handshake payload, shared by the
 // Electron main process (which derives it) and the preload bridge (which types
 // the IPC surface). The renderer picks it up through the preload's AoBridge type.
-// Machine-readable failure classification for telemetry. `message` is
+// Machine-readable failure classification for diagnostics. `message` is
 // human-facing and may contain local paths; `code` is what gets reported.
 // Statuses without a code (normal ready, user-initiated stop) are not failures.
 export type DaemonFailureCode =
@@ -23,7 +23,7 @@ export type DaemonStatus = {
 	workingDirectory?: string;
 	message?: string;
 	// Recent daemon stdout/stderr retained by the Electron supervisor for local
-	// troubleshooting. It is never sent to telemetry.
+	// troubleshooting. It remains local.
 	details?: string;
 	code?: DaemonFailureCode;
 	exitCode?: number | null;

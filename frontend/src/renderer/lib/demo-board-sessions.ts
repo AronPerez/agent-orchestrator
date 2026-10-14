@@ -5,6 +5,7 @@ const demoUpdatedAt = "2026-08-26T08:00:00Z";
 /** Preview-only sessions used to exercise every board lane without a daemon. */
 export function demoBoardSessions(workspaceId: string): WorkspaceSession[] {
 	const base = {
+		host: "local",
 		activity: { state: "idle" as const, lastActivityAt: demoUpdatedAt },
 		createdAt: "2026-08-25T08:00:00Z",
 		isTerminated: false,

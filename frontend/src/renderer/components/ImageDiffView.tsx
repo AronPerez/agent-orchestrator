@@ -1,33 +1,17 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { getApiBaseUrl } from "../lib/api-client";
-import { useHostConnection } from "../hooks/useHostConnection";
+import type { Ref } from "../lib/hosts";
+import { buildWorkspaceBlobUrl } from "../lib/markdown-image-resolver";
 import { cn } from "../lib/utils";
 import type { WorkspaceFileSummary } from "../hooks/useSessionWorkspaceFiles";
 
 type WorkspaceFileStatus = WorkspaceFileSummary["status"];
 type ImageDiffSide = "before" | "after";
 
-/** Matches the image extensions supported by the daemon's blob endpoint. */
-export function isWorkspaceImagePath(path: string): boolean {
-	return /\.(apng|avif|bmp|gif|ico|jpe?g|png|webp)$/i.test(path);
-}
-
 // A light checkerboard so transparent pixels read as transparent instead of
 // borrowing the panel background.
 const CHECKERBOARD =
 	"repeating-conic-gradient(color-mix(in srgb, currentColor 8%, transparent) 0% 25%, transparent 0% 50%) 0 0 / 16px 16px";
-
-// workspaceImageUrl points an <img> straight at the daemon's blob route. The
-// route sets no-store, so `version` — the file detail's load timestamp — is what
-// makes an edited image reload: without a changing URL the element never
-// refetches at all.
-function workspaceImageUrl(sessionId: string, path: string, side: ImageDiffSide, version: number | string, hostId?: string, remoteBaseUrl?: string): string | undefined {
-	const base = hostId ? remoteBaseUrl : getApiBaseUrl();
-	if (base === undefined) return undefined;
-	const query = new URLSearchParams({ path, side, v: String(version) });
-	return `${base}/api/v1/sessions/${encodeURIComponent(sessionId)}/workspace/file/blob?${query}`;
-}
 
 /**
  * ImageDiffView renders an image file's change as the images themselves —
@@ -41,18 +25,16 @@ function workspaceImageUrl(sessionId: string, path: string, side: ImageDiffSide,
  */
 export function ImageDiffView({
 	path,
-	sessionId,
-	hostId,
+	session,
 	split,
 	status,
 	version,
 }: {
 	path: string;
-	sessionId: string;
-	hostId?: string;
+	session: Ref;
 	split: boolean;
 	status: WorkspaceFileStatus;
-	version: number | string;
+	version: number;
 }) {
 	const { t } = useTranslation();
 	// A file with no change on this side has nothing to compare against: an added
@@ -69,8 +51,7 @@ export function ImageDiffView({
 					label={t("files.imageBefore")}
 					path={path}
 					side="before"
-					sessionId={sessionId}
-					hostId={hostId}
+					session={session}
 					version={version}
 				/>
 			) : null}
@@ -80,8 +61,7 @@ export function ImageDiffView({
 					label={t("files.imageAfter")}
 					path={path}
 					side="after"
-					sessionId={sessionId}
-					hostId={hostId}
+					session={session}
 					version={version}
 				/>
 			) : null}
@@ -93,21 +73,19 @@ function ImageDiffPane({
 	label,
 	path,
 	side,
-	sessionId,
-	hostId,
+	session,
 	version,
 }: {
 	label: string;
 	path: string;
 	side: ImageDiffSide;
-	sessionId: string;
-	hostId?: string;
-	version: number | string;
+	session: Ref;
+	version: number;
 }) {
 	const { t } = useTranslation();
-	const { baseUrl: remoteBaseUrl } = useHostConnection(hostId);
 	const [size, setSize] = useState<{ width: number; height: number } | null>(null);
 	const [failed, setFailed] = useState(false);
+	const src = buildWorkspaceBlobUrl(session, path, version, side);
 	return (
 		<figure className="min-w-0 overflow-hidden rounded-md border border-border/60">
 			<figcaption className="flex items-center justify-between gap-2 border-b border-border/60 bg-background/60 px-2 py-1">
@@ -121,7 +99,9 @@ function ImageDiffPane({
 				</span>
 			</figcaption>
 			<div className="grid min-h-24 place-items-center p-3 text-passive" style={{ background: CHECKERBOARD }}>
-				{failed ? (
+				{src === undefined ? (
+					<p className="text-center text-xs text-muted-foreground">{t("hosts.contentUnavailable")}</p>
+				) : failed ? (
 					<p className="text-center text-xs text-muted-foreground">{t("files.imagePreviewFailed")}</p>
 				) : (
 					<img
@@ -131,7 +111,7 @@ function ImageDiffPane({
 						onLoad={(event) =>
 							setSize({ height: event.currentTarget.naturalHeight, width: event.currentTarget.naturalWidth })
 						}
-						src={workspaceImageUrl(sessionId, path, side, version, hostId, remoteBaseUrl)}
+						src={src}
 					/>
 				)}
 			</div>

@@ -80,10 +80,9 @@ describe("parsePairingCode", () => {
 describe("deep link scheme", () => {
 	it("matches the scheme the app registers in app.json", async () => {
 		const appConfig = (await import("../app.json")) as unknown as {
-			default: { expo: { scheme: string | string[] } };
+			default: { expo: { scheme: string } };
 		};
-		const registered = appConfig.default.expo.scheme;
-		const scheme = Array.isArray(registered) ? registered[0] : registered;
+		const scheme = appConfig.default.expo.scheme;
 
 		const got = parsePairingCode(pairingUrl(offer, `${scheme}://pair`));
 

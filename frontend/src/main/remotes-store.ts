@@ -2,14 +2,28 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
-// Saved desktop connections. Older records have no hostId and must be paired
-// again before a saved password can be sent to their address.
+// The CLI's saved-remote store, shared verbatim so the UI and `ao --url` agree
+// on which hosts exist and never hold two copies of a connection password.
+// Format and the 0600 requirement come from backend/internal/cli/remote.go:32-47.
 export type RemoteEntry = {
 	label: string;
 	url: string;
 	password: string;
+	/**
+	 * The daemon's own id from GET /api/v1/identity, learned when the host is
+	 * added. Sent back as X-AO-Expected-Host-ID so a saved address that now
+	 * answers as a different machine is refused (421) instead of obeyed. Absent
+	 * on entries saved before this field existed and for a daemon too old to
+	 * report one; those stay reachable, just unbound.
+	 */
 	hostId?: string;
-	accountUserId?: string;
+	/**
+	 * Optional `user@host` the desktop app uses to SSH-attach a local editor to
+	 * this host's workspaces. Uses the user's own ssh config/keys — no credential
+	 * is stored here. The Go CLI tolerates and ignores unknown fields in this
+	 * file (verified in the AO-82 spike; cli/remote.go has no writer to drop it).
+	 */
+	sshDestination?: string;
 };
 
 export class RemotesFilePermissionError extends Error {
@@ -45,8 +59,10 @@ export async function readRemotes(path: string): Promise<RemoteEntry[]> {
 	return parsed.remotes ?? [];
 }
 
-// Write beside the existing file so interruption never truncates the only
-// saved copy. The temporary file is 0600 before its contents are written.
+// Every write goes through here. Write beside the existing file and rename over
+// it so an interruption never truncates the only saved copy of the passwords;
+// the temporary file is 0600 before its contents are written, and readRemotes —
+// which each caller runs first — refuses anything looser on the next read.
 async function writeRemotes(path: string, remotes: RemoteEntry[]): Promise<void> {
 	await mkdir(dirname(path), { recursive: true, mode: 0o700 });
 	const temporary = `${path}.${randomUUID()}.tmp`;
@@ -69,17 +85,22 @@ let mutationQueue: Promise<void> = Promise.resolve();
 
 function serializeMutation<T>(operation: () => Promise<T>): Promise<T> {
 	const queued = mutationQueue.then(operation, operation);
-	mutationQueue = queued.then(() => undefined, () => undefined);
+	mutationQueue = queued.then(
+		() => undefined,
+		() => undefined,
+	);
 	return queued;
 }
 
 export async function addRemote(path: string, entry: RemoteEntry): Promise<void> {
 	return serializeMutation(async () => {
 		const existing = await readRemotes(path);
-		await writeRemotes(path, [
-			...existing.filter((candidate) => candidate.url !== entry.url && (!entry.hostId || candidate.hostId !== entry.hostId)),
-			entry,
-		]);
+		const normalized = { ...entry, sshDestination: entry.sshDestination?.trim() || undefined };
+		// The url is the only key. hostId names the machine behind an address and is
+		// deliberately NOT a second key: one daemon saved under two addresses (its
+		// LAN IP and its tailnet IP) is two hosts to this app, and collapsing them
+		// here would delete a row the renderer and the registry still hold.
+		await writeRemotes(path, [...existing.filter((candidate) => candidate.url !== entry.url), normalized]);
 	});
 }
 
@@ -97,8 +118,8 @@ export function applyRemoteChanges(entry: RemoteEntry, changes: RemoteChanges): 
 		label: changes.label ?? entry.label,
 		url: changes.url ?? entry.url,
 		password: changes.password ?? entry.password,
-		hostId: entry.hostId,
-		accountUserId: changes.accountUserId ?? entry.accountUserId,
+		hostId: changes.hostId ?? entry.hostId,
+		sshDestination: (changes.sshDestination ?? entry.sshDestination)?.trim() || undefined,
 	};
 }
 
@@ -110,10 +131,10 @@ export async function updateRemote(path: string, url: string, changes: RemoteCha
 		const updated = applyRemoteChanges(current, changes);
 		// Re-pointing a host MOVES its entry: the row keeps its place, and any other
 		// row already sitting on the new url is absorbed rather than left as a twin.
+		// Only the url decides that — see addRemote on why hostId must not.
 		const remotes = existing
 			.map((candidate) => (candidate === current ? updated : candidate))
-			.filter((candidate) => candidate === updated
-				|| (candidate.url !== updated.url && (!updated.hostId || candidate.hostId !== updated.hostId)));
+			.filter((candidate) => candidate === updated || candidate.url !== updated.url);
 		await writeRemotes(path, remotes);
 		return updated;
 	});

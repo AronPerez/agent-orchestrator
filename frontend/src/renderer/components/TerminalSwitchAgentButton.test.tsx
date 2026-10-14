@@ -1,14 +1,17 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { useSessionHandoffMenu } from "../hooks/useSessionHandoffMenu";
 import { AGENT_OPTIONS } from "../lib/agent-options";
 import {
 	deriveAgentSwitchPresentation,
 	type AgentSwitchPresentation,
 } from "../lib/agent-switch-presentation";
 import type { AgentSwitchSummary, WorkspaceSession } from "../types/workspace";
+import { SessionActionsMenu } from "./SessionActionsMenu";
+import { SwitchAgentDialog } from "./SwitchAgentDialog";
 import { TerminalSwitchAgentButton } from "./TerminalSwitchAgentButton";
 import { TooltipProvider } from "./ui/tooltip";
 
@@ -30,8 +33,12 @@ vi.mock("../lib/api-client", () => ({
 		return fallback;
 	},
 }));
+vi.mock("../lib/host-clients", () => ({
+	clientFor: () => ({ GET: getMock, POST: postMock }),
+}));
 
 const worker: WorkspaceSession = {
+	host: "local",
 	activity: { state: "active", lastActivityAt: "2026-06-10T00:00:00Z" },
 	branch: "ao/sess-1",
 	id: "sess-1",
@@ -95,6 +102,50 @@ function SwitchControlHarness({
 				switchError={null}
 			/>
 		</div>
+	);
+}
+
+// Mirrors SessionView: menu-item variant in the actions menu, dialog as a sibling.
+function SwitchMenuHarness({ session = worker }: { session?: WorkspaceSession }) {
+	const [container, setContainer] = useState<HTMLDivElement | null>(null);
+	const [open, setOpen] = useState(false);
+	const { agentSwitch, switchControlPresentation, switchError } = useSessionHandoffMenu(session);
+	useEffect(() => {
+		if (switchError) setOpen(true);
+	}, [switchError]);
+	return (
+		<div className="relative" data-testid="terminal-container" ref={setContainer}>
+			<SessionActionsMenu
+				items={[
+					<TerminalSwitchAgentButton
+						key="switch-agent"
+						agentSwitch={agentSwitch}
+						onOpenChange={setOpen}
+						open={open}
+						presentation={switchControlPresentation}
+						session={session}
+						switchError={switchError}
+						variant="menu-item"
+					/>,
+				]}
+			/>
+			{container ? (
+				<SwitchAgentDialog agentSwitch={agentSwitch} container={container} onOpenChange={setOpen} open={open} session={session} />
+			) : null}
+		</div>
+	);
+}
+
+function renderMenuControl(session = worker) {
+	const queryClient = new QueryClient({
+		defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+	});
+	return render(
+		<QueryClientProvider client={queryClient}>
+			<TooltipProvider>
+				<SwitchMenuHarness session={session} />
+			</TooltipProvider>
+		</QueryClientProvider>,
 	);
 }
 
@@ -171,18 +222,6 @@ describe("TerminalSwitchAgentButton", () => {
 		["orchestrator", { id: "orch-1", kind: "orchestrator" }],
 	] as const)("does not render for an %s", (_name, overrides) => {
 		renderControl({ ...worker, ...overrides } as WorkspaceSession);
-		expect(screen.queryByRole("button", { name: "Switch agent" })).not.toBeInTheDocument();
-	});
-
-	it("renders for an fx TUI worker", async () => {
-		renderControl({ ...worker, mode: "tui", provider: "fx" });
-
-		expect(await screen.findByRole("button", { name: "Switch agent" })).toBeInTheDocument();
-	});
-
-	it("does not expose switching from an fx Chat worker", () => {
-		renderControl({ ...worker, mode: "chat", provider: "fx" });
-
 		expect(screen.queryByRole("button", { name: "Switch agent" })).not.toBeInTheDocument();
 	});
 
@@ -356,5 +395,81 @@ describe("TerminalSwitchAgentButton", () => {
 		expect(retryIdempotencyKey).toEqual(expect.any(String));
 		expect(retryIdempotencyKey).not.toBe(firstIdempotencyKey);
 		expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+	});
+
+	it("switches directly from the actions submenu and marks the current agent", async () => {
+		postMock.mockResolvedValue({ data: { switch: switchRecord() }, error: undefined, response: { status: 202 } });
+		renderMenuControl();
+
+		await userEvent.click(await screen.findByRole("button", { name: "Session actions" }));
+		await userEvent.hover(await screen.findByRole("menuitem", { name: "Switch agent" }));
+		expect(await screen.findByRole("menuitem", { name: /Claude Code.*Current/ })).toHaveAttribute("data-disabled");
+		await userEvent.click(screen.getByRole("menuitem", { name: "Codex" }));
+
+		await waitFor(() => expect(postMock).toHaveBeenCalledWith("/api/v1/sessions/{sessionId}/switch-agent", {
+			params: { path: { sessionId: "sess-1" } },
+			body: { idempotencyKey: expect.any(String), targetHarness: "codex" },
+		}));
+		expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+	});
+
+	it("offers Claude Code when Codex is the current agent", async () => {
+		postMock.mockResolvedValue({ data: { switch: switchRecord({ fromHarness: "codex", targetHarness: "claude-code" }) }, error: undefined, response: { status: 202 } });
+		renderMenuControl({ ...worker, provider: "codex" });
+
+		await userEvent.click(await screen.findByRole("button", { name: "Session actions" }));
+		await userEvent.hover(await screen.findByRole("menuitem", { name: "Switch agent" }));
+		expect(await screen.findByRole("menuitem", { name: /Codex.*Current/ })).toHaveAttribute("data-disabled");
+		await userEvent.click(screen.getByRole("menuitem", { name: "Claude Code" }));
+
+		await waitFor(() => expect(postMock.mock.calls[0]?.[1]?.body?.targetHarness).toBe("claude-code"));
+	});
+
+	it("shows a rejected submenu switch in the existing error dialog", async () => {
+		postMock.mockResolvedValue({ data: undefined, error: { message: "Codex is not authorized" }, response: { status: 409 } });
+		renderMenuControl();
+
+		await userEvent.click(await screen.findByRole("button", { name: "Session actions" }));
+		await userEvent.hover(await screen.findByRole("menuitem", { name: "Switch agent" }));
+		await userEvent.click(await screen.findByRole("menuitem", { name: "Codex" }));
+
+		const dialog = await screen.findByRole("dialog", { name: "Switch agent" });
+		expect(within(dialog).getByRole("alert")).toHaveTextContent("Codex is not authorized");
+		expect(dialog).toBeInTheDocument();
+	});
+
+	it("supports keyboard selection and Escape without switching", async () => {
+		renderMenuControl();
+		await userEvent.tab();
+		expect(screen.getByRole("button", { name: "Session actions" })).toHaveFocus();
+		await userEvent.keyboard("{Enter}{ArrowRight}");
+		expect(await screen.findByRole("menuitem", { name: "Codex" })).toHaveFocus();
+		await userEvent.keyboard("{Escape}");
+		await waitFor(() => expect(screen.queryByRole("menuitem", { name: "Codex" })).not.toBeInTheDocument());
+		expect(screen.getByRole("button", { name: "Session actions" })).toHaveFocus();
+		expect(postMock).not.toHaveBeenCalled();
+	});
+
+	it("blocks another switch when the menu reopens during admission", async () => {
+		postMock.mockReturnValue(new Promise(() => {}));
+		renderMenuControl();
+		await userEvent.click(screen.getByRole("button", { name: "Session actions" }));
+		await userEvent.hover(await screen.findByRole("menuitem", { name: "Switch agent" }));
+		await userEvent.click(await screen.findByRole("menuitem", { name: "Codex" }));
+		await waitFor(() => expect(postMock).toHaveBeenCalledTimes(1));
+		await userEvent.click(screen.getByRole("button", { name: "Session actions" }));
+		expect(await screen.findByRole("menuitem", { name: "Switching to Codex" })).toHaveAttribute("data-disabled");
+		expect(screen.queryByRole("menuitem", { name: "Codex" })).not.toBeInTheDocument();
+		expect(postMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps recovery accessible through the actions menu", async () => {
+		renderMenuControl({ ...worker, activeAgentSwitch: switchRecord({ errorCode: "target_start_unconfirmed" }) });
+		await userEvent.click(screen.getByRole("button", { name: "Session actions" }));
+		await userEvent.click(await screen.findByRole("menuitem", { name: "Agent switch needs recovery" }));
+		expect(await screen.findByRole("dialog", { name: "Switch agent" })).toHaveTextContent(
+			"Target startup could not be confirmed",
+		);
+		expect(postMock).not.toHaveBeenCalled();
 	});
 });

@@ -1,7 +1,5 @@
-import { ChevronRight } from "lucide-react";
 import { DropdownMenu as DropdownMenuPrimitive } from "radix-ui";
 import { cn } from "../../lib/utils";
-import { composeMenuCloseAutoFocus, useMenuReturnTarget } from "./menu-focus";
 import {
 	actionMenuContentClass,
 	actionMenuItemClass,
@@ -13,22 +11,19 @@ export const DropdownMenu = DropdownMenuPrimitive.Root;
 export const DropdownMenuTrigger = DropdownMenuPrimitive.Trigger;
 export const DropdownMenuGroup = DropdownMenuPrimitive.Group;
 export const DropdownMenuPortal = DropdownMenuPrimitive.Portal;
+export const DropdownMenuSub = DropdownMenuPrimitive.Sub;
 
 export function DropdownMenuContent({
 	className,
-	onCloseAutoFocus,
 	portalContainer,
 	sideOffset = 6,
 	...props
 }: React.ComponentProps<typeof DropdownMenuPrimitive.Content> & {
 	portalContainer?: React.ComponentProps<typeof DropdownMenuPrimitive.Portal>["container"];
 }) {
-	const rememberReturnTarget = useMenuReturnTarget<HTMLDivElement>();
 	return (
 		<DropdownMenuPrimitive.Portal container={portalContainer}>
 			<DropdownMenuPrimitive.Content
-				ref={rememberReturnTarget}
-				onCloseAutoFocus={composeMenuCloseAutoFocus(onCloseAutoFocus)}
 				sideOffset={sideOffset}
 				className={cn(
 					actionMenuContentClass,
@@ -59,6 +54,30 @@ export function DropdownMenuItem({
 	);
 }
 
+export function DropdownMenuSubTrigger({
+	className,
+	...props
+}: React.ComponentProps<typeof DropdownMenuPrimitive.SubTrigger>) {
+	return <DropdownMenuPrimitive.SubTrigger className={cn(actionMenuItemClass, className)} {...props} />;
+}
+
+export function DropdownMenuSubContent({
+	className,
+	sideOffset = 6,
+	...props
+}: React.ComponentProps<typeof DropdownMenuPrimitive.SubContent>) {
+	return (
+		<DropdownMenuPrimitive.Portal>
+			<DropdownMenuPrimitive.SubContent
+				sideOffset={sideOffset}
+				collisionPadding={16}
+				className={cn(actionMenuContentClass, "data-[state=open]:animate-popover-in", className)}
+				{...props}
+			/>
+		</DropdownMenuPrimitive.Portal>
+	);
+}
+
 export function DropdownMenuLabel({
 	className,
 	inset,
@@ -85,50 +104,4 @@ export function DropdownMenuSeparator({
 
 export function DropdownMenuShortcut({ className, ...props }: React.ComponentProps<"span">) {
 	return <span className={cn("ml-auto text-micro tracking-wide-md text-passive", className)} {...props} />;
-}
-
-export const DropdownMenuSub = DropdownMenuPrimitive.Sub;
-
-/** A row that opens a side submenu; same row styling as DropdownMenuItem. */
-export function DropdownMenuSubTrigger({
-	className,
-	children,
-	...props
-}: React.ComponentProps<typeof DropdownMenuPrimitive.SubTrigger>) {
-	return (
-		<DropdownMenuPrimitive.SubTrigger
-			className={cn(actionMenuItemClass, "data-[state=open]:bg-interactive-hover", className)}
-			{...props}
-		>
-			{children}
-			<ChevronRight aria-hidden="true" className="ml-auto size-3.5 shrink-0 text-passive" />
-		</DropdownMenuPrimitive.SubTrigger>
-	);
-}
-
-/** The side panel a DropdownMenuSubTrigger opens; same surface as DropdownMenuContent. */
-export function DropdownMenuSubContent({
-	className,
-	// Offsets are measured from the sub-trigger row, which sits inside the parent
-	// menu's 1px border + 4px padding: 9 leaves a visible 4px gap instead of the
-	// panels touching, and -5 lines the submenu's first row up with the trigger.
-	sideOffset = 9,
-	alignOffset = -5,
-	...props
-}: React.ComponentProps<typeof DropdownMenuPrimitive.SubContent>) {
-	return (
-		<DropdownMenuPrimitive.Portal>
-			<DropdownMenuPrimitive.SubContent
-				alignOffset={alignOffset}
-				sideOffset={sideOffset}
-				className={cn(
-					actionMenuContentClass,
-					"origin-(--radix-dropdown-menu-content-transform-origin)",
-					"data-[state=open]:animate-popover-in data-[state=closed]:animate-popover-out",
-					className,
-				)}
-				{...props}
-			/>
-		</DropdownMenuPrimitive.Portal>
-	);
 }

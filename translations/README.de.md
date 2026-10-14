@@ -139,7 +139,7 @@ Coding-Agenten arbeiten in einem gemeinsamen Workflow. Die aktuellen Agenten und
     <td valign="middle" nowrap><img src="../frontend/src/renderer/assets/agents/goose.svg" alt="Goose" width="24" height="24" align="middle" /> &nbsp; <b>Goose</b></td>
   </tr>
   <tr valign="middle">
-    <td valign="middle" nowrap><img src="../frontend/src/renderer/assets/agents/qwen.png" alt="Qwen" width="24" height="24" align="middle" /> &nbsp; <b>Qwen</b></td>
+    <td valign="middle" nowrap><img src="../frontend/src/renderer/assets/agents/qwen.svg" alt="Qwen" width="24" height="24" align="middle" /> &nbsp; <b>Qwen</b></td>
     <td valign="middle" nowrap><img src="../frontend/src/renderer/assets/agents/continue.png" alt="Continue" width="24" height="24" align="middle" /> &nbsp; <b>Continue</b></td>
     <td valign="middle" nowrap><img src="../frontend/src/renderer/assets/agents/devin.png" alt="Devin" width="24" height="24" align="middle" /> &nbsp; <b>Devin</b></td>
   </tr>
@@ -225,7 +225,7 @@ Komm auf unseren [Discord](https://discord.com/invite/UZv7JjxbwG), wenn du Hilfe
 
 ## Produkttelemetrie
 
-Orchestrator.inc erfasst Nutzungs- und Zuverlässigkeitsdaten ohne Projektinhalte. Der GitHub-Projektinhaber und der angemeldete GitHub-Nutzername können jedoch Personen identifizieren; die Telemetrie ist daher nicht anonym. Beim Abschalten werden auch diese Angaben nicht mehr gesendet. [Details und Einstellungen](../docs/telemetry.md).
+Dieser Fork sendet keine Produktanalysen oder Absturzberichte. Lokale Diagnosen und funktionale Netzwerkzugriffe, einschließlich Update-Prüfungen, bleiben erhalten. [Details](../docs/telemetry.md).
 
 ## Lizenz
 

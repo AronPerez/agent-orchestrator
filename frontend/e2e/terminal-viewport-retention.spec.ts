@@ -43,6 +43,17 @@ const handleD = `${sessionD.id}/terminal_0`;
 const handleE = `${sessionE.id}/terminal_0`;
 const handleF = `${sessionF.id}/terminal_0`;
 const orchestratorHandle = "fake-proj-orchestrator/terminal_0";
+// The sidebar's orchestrator action is labelled by project name, not session
+// title (shell.openProjectOrchestrator), so it reads "Open <project>
+// orchestrator" — fake-bridge's default project is named "fake-proj".
+const orchestratorLabel = "fake-proj orchestrator";
+
+// Worker cache keys are host-qualified: the owner key is `session:${refKey}`
+// and refKey is `${host}:${id}` (see lib/hosts.refKey), so a local session A
+// parks under `session:local:viewport-a:worker|handle:…`.
+function workerCacheKeyPrefix(sessionId: string): string {
+	return `session:local:${sessionId}:worker|`;
+}
 
 const longReplay = [
 	"\x1b[?25l",
@@ -95,6 +106,25 @@ function activeBufferAtBottom(page: Page): Promise<boolean> {
 			const terminal = (element as HTMLElement & { __aoXtermForTest?: TestXterm }).__aoXtermForTest;
 			return Boolean(terminal && terminal.buffer.active.viewportY === terminal.buffer.active.baseY);
 		});
+}
+
+// Scroll the live terminal off the bottom of its scrollback.
+//
+// XtermTerminal arms a session-bounded fit backstop after mount (settleTimers at
+// 50/250/600/1200ms). Each flush re-runs the pending activation's
+// showLatestOutput(), which snaps the viewport back to the latest output — so a
+// single wheel that lands inside that window is silently undone. Re-wheel until
+// the scroll survives a fit-quiet window (FIT_QUIET_MS is 120ms) instead of
+// sleeping out a product constant this spec has no business knowing.
+async function scrollActiveTerminalUp(page: Page, delta: number): Promise<void> {
+	await activeTerminal(page).locator(".xterm-screen").hover();
+	await expect
+		.poll(async () => {
+			await page.mouse.wheel(0, -Math.abs(delta));
+			await page.waitForTimeout(200);
+			return activeBufferAtBottom(page);
+		})
+		.toBe(false);
 }
 
 async function muxStats(page: Page): Promise<FakeTerminalMuxStats> {
@@ -169,6 +199,23 @@ async function settledRevealSamples(page: Page): Promise<RevealSample[]> {
 	return revealSamples(page);
 }
 
+const handleByOpenLabel = new Map<string, string>([
+	...allSessions.map((session) => [session.title, `${session.id}/terminal_0`] as [string, string]),
+	[orchestratorLabel, orchestratorHandle],
+]);
+
+// A pane only forwards keystrokes, and only stops re-pinning to the latest
+// output, once TerminalPane has attached it to the mux — and that attach waits
+// on prepareForActivation(), which settles *after* the activation phase flips to
+// "visible". Gate on the mux open so no test drives a still-settling pane.
+async function waitForAttached(page: Page, label: string): Promise<void> {
+	const handleId = handleByOpenLabel.get(label);
+	if (!handleId) throw new Error(`no terminal handle mapped for "${label}"`);
+	await expect
+		.poll(async () => (await muxStats(page)).opens[handleId] ?? 0)
+		.toBeGreaterThanOrEqual(1);
+}
+
 async function openSession(page: Page, title: string): Promise<void> {
 	await page.getByRole("button", { name: `Open ${title}`, exact: true }).click();
 	await expect(activeTerminal(page)).toBeVisible();
@@ -177,6 +224,7 @@ async function openSession(page: Page, title: string): Promise<void> {
 			.getByTestId("session-terminal-slot")
 			.locator("[data-terminal-activation-phase='visible']"),
 	).toHaveCount(1);
+	await waitForAttached(page, title);
 }
 
 async function installHarness(page: Page): Promise<void> {
@@ -192,9 +240,15 @@ async function installHarness(page: Page): Promise<void> {
 		[handleF]: "F short replay",
 		[orchestratorHandle]: "Orchestrator ready",
 	});
-	await page.goto(`/#/projects/fake-proj/sessions/${sessionA.id}`);
+	await page.goto(`/#/host/local/session/${sessionA.id}`);
 	await expect(activeTerminal(page)).toBeVisible();
 	await expect(page.getByTestId("terminal-replay-cover")).toHaveCount(0);
+	await expect(
+		page
+			.getByTestId("session-terminal-slot")
+			.locator("[data-terminal-activation-phase='visible']"),
+	).toHaveCount(1);
+	await waitForAttached(page, sessionA.title);
 }
 
 test.describe("retained terminal viewport", () => {
@@ -266,7 +320,7 @@ test.describe("retained terminal viewport", () => {
 			await openSession(page, session.title);
 		}
 		await expect(page.locator("[data-terminal-cache-key]")).toHaveCount(6);
-		const parkedA = page.locator(`[data-terminal-cache-key^="session:${sessionA.id}:worker|"]`);
+		const parkedA = page.locator(`[data-terminal-cache-key^="${workerCacheKeyPrefix(sessionA.id)}"]`);
 		await expect(parkedA).toHaveAttribute("data-terminal-activation-phase", "parked");
 		await page.evaluate(
 			(handleId) =>
@@ -376,8 +430,7 @@ test.describe("retained terminal viewport", () => {
 			.poll(() => viewport.evaluate((element) => element.scrollHeight - element.clientHeight))
 			.toBeGreaterThan(500);
 
-		await activeTerminal(page).locator(".xterm-screen").hover();
-		await page.mouse.wheel(0, -1_400);
+		await scrollActiveTerminalUp(page, 1_400);
 		await expect
 			.poll(async () => {
 				const metrics = await viewport.evaluate((element) => ({
@@ -396,7 +449,7 @@ test.describe("retained terminal viewport", () => {
 		});
 
 		await openSession(page, sessionB.title);
-		const parkedA = page.locator(`[data-terminal-cache-key^="session:${sessionA.id}:worker|"]`);
+		const parkedA = page.locator(`[data-terminal-cache-key^="${workerCacheKeyPrefix(sessionA.id)}"]`);
 		await expect(parkedA).toHaveAttribute("aria-hidden", "true");
 		expect(await parkedA.evaluate((element) => (element as HTMLElement).inert)).toBe(true);
 
@@ -453,7 +506,7 @@ test.describe("retained terminal viewport", () => {
 		page,
 	}) => {
 		await installHarness(page);
-		await openSession(page, "Project orchestrator");
+		await openSession(page, orchestratorLabel);
 		await openSession(page, sessionA.title);
 
 		const before = await muxStats(page);
@@ -461,7 +514,7 @@ test.describe("retained terminal viewport", () => {
 		const orchestratorResizes = before.resizes[orchestratorHandle]?.length ?? 0;
 
 		for (let index = 0; index < 3; index += 1) {
-			await openSession(page, "Project orchestrator");
+			await openSession(page, orchestratorLabel);
 			await openSession(page, sessionA.title);
 		}
 
@@ -476,9 +529,7 @@ test.describe("retained terminal viewport", () => {
 		await installHarness(page);
 		const originalViewport = activeViewport(page);
 		await originalViewport.evaluate((element) => element.setAttribute("data-reconnect-instance", "a"));
-		await activeTerminal(page).locator(".xterm-screen").hover();
-		await page.mouse.wheel(0, -1_400);
-		await expect.poll(() => activeBufferAtBottom(page)).toBe(false);
+		await scrollActiveTerminalUp(page, 1_400);
 		const retainedSelection = await activeTerminal(page)
 			.locator("[aria-label='Session terminal']")
 			.evaluate((element) => {
@@ -567,12 +618,10 @@ test.describe("retained terminal viewport", () => {
 		page,
 	}) => {
 		await installHarness(page);
-		await activeTerminal(page).locator(".xterm-screen").hover();
-		await page.mouse.wheel(0, -100_000);
-		await expect.poll(() => activeBufferAtBottom(page)).toBe(false);
+		await scrollActiveTerminalUp(page, 100_000);
 
 		await openSession(page, sessionB.title);
-		const parkedA = page.locator(`[data-terminal-cache-key^="session:${sessionA.id}:worker|"]`);
+		const parkedA = page.locator(`[data-terminal-cache-key^="${workerCacheKeyPrefix(sessionA.id)}"]`);
 		await page.evaluate((handleId) => {
 			window.__aoFakeTerminalMux!.emit(
 				handleId,

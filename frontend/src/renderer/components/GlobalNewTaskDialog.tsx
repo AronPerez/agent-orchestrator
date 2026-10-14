@@ -1,10 +1,10 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
-import { workspaceQueryKeyForHost } from "../hooks/useWorkspaceQuery";
+import { workspaceQueryKey } from "../hooks/useWorkspaceQuery";
 import { useUiStore } from "../stores/ui-store";
 import { NewTaskDialog } from "./NewTaskDialog";
-import { sessionNavigateTarget } from "../lib/navigate-to-session";
+import type { Ref } from "../lib/hosts";
 
 // App-level New Task surface. Lives in the shell (always mounted, on every
 // route and platform, unlike ShellTopbar which unmounts on Linux boards) so a
@@ -17,9 +17,8 @@ export function GlobalNewTaskDialog() {
 	const queryClient = useQueryClient();
 	const newTaskRequest = useUiStore((state) => state.newTaskRequest);
 	const [open, setOpen] = useState(false);
-	const [projectId, setProjectId] = useState<string | undefined>(undefined);
-	const [hostId, setHostId] = useState<string | undefined>(undefined);
-	const lastNonce = useRef(newTaskRequest?.nonce ?? 0);
+	const [project, setProject] = useState<Ref | undefined>(undefined);
+	const lastNonce = useRef(0);
 
 	useEffect(() => {
 		if (!newTaskRequest || newTaskRequest.nonce === lastNonce.current) return;
@@ -28,23 +27,23 @@ export function GlobalNewTaskDialog() {
 		// particular, do not retarget a populated form to another project, and do
 		// not replay the ignored request when the user later closes the dialog.
 		if (open) return;
-		setProjectId(newTaskRequest.projectId);
-		setHostId(newTaskRequest.hostId);
+		setProject(newTaskRequest.project);
 		setOpen(true);
 	}, [newTaskRequest, open]);
 
 	const handleCreated = async (sessionId: string) => {
-		if (!projectId) return;
-		await queryClient.invalidateQueries({ queryKey: workspaceQueryKeyForHost(hostId) });
-		void navigate(sessionNavigateTarget(projectId, sessionId, hostId));
+		if (!project) return;
+		await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
+		void navigate({
+			to: "/host/$hostId/session/$sessionId",
+			params: { hostId: project.host, sessionId },
+		});
 	};
 
 	return (
 		<NewTaskDialog
 			open={open}
-			projectId={projectId}
-			hostId={hostId}
-			onProjectChange={setProjectId}
+			project={project}
 			onCreated={(sessionId) => void handleCreated(sessionId)}
 			onOpenChange={setOpen}
 		/>

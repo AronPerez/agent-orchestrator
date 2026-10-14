@@ -41,14 +41,6 @@ void _everyReviewerHarnessIsListed;
 
 export const KNOWN_REVIEWER_HARNESS_IDS: ReadonlySet<string> = new Set(REVIEWER_HARNESS_IDS);
 
-export const WORKER_DEFAULT_REVIEWERS: Readonly<Partial<Record<string, ReviewerHarnessId>>> = {
-	"claude-code": "claude-code",
-	codex: "codex",
-	opencode: "opencode",
-	muse: "muse",
-	kimchi: "kimchi",
-};
-
 export function toReviewerHarnessId(value?: string): ReviewerHarnessId | undefined {
 	return value && KNOWN_REVIEWER_HARNESS_IDS.has(value) ? (value as ReviewerHarnessId) : undefined;
 }
