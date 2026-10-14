@@ -41,11 +41,6 @@ func newAgentProcessSuperviseCommand(ctx *commandContext) *cobra.Command {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// The exit report names a session owned by the local daemon: AO_URL is
-			// ignored, --url is refused, and neither ever reaches the child.
-			if err := ctx.pinToLocalDaemon("ao agent-process supervise"); err != nil {
-				return err
-			}
 			sessionID = strings.TrimSpace(sessionID)
 			reviewID = strings.TrimSpace(reviewID)
 			activityReviewID = strings.TrimSpace(activityReviewID)
@@ -84,7 +79,7 @@ func newAgentProcessSuperviseCommand(ctx *commandContext) *cobra.Command {
 }
 
 func (c *commandContext) runSupervisedProcess(ctx context.Context, sessionID, reviewID, launchID string, argv []string) {
-	child := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec // argv is constructed by the selected agent adapter.
+	child := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec,forbidigo // interactive CLI child must inherit the caller's console.
 	child.Stdin = c.deps.In
 	child.Stdout = c.deps.Out
 	child.Stderr = c.deps.Err

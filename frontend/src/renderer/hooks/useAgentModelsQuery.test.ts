@@ -1,42 +1,55 @@
 import { QueryClient } from "@tanstack/react-query";
-import { describe, expect, it, vi } from "vitest";
-import {
-	agentModelsQueryOptions,
-	refreshAgentModels,
-	revalidateAgentModels,
-} from "./useAgentModelsQuery";
+import { describe, expect, it } from "vitest";
+import { invalidateAgentModelCatalogs, modelCatalogAuthIssue } from "./useAgentModelsQuery";
 
-const { get, post, clientFor } = vi.hoisted(() => {
-	const get = vi.fn().mockResolvedValue({ data: { models: [] } });
-	const post = vi.fn().mockResolvedValue({ data: { models: [] } });
-	return { get, post, clientFor: vi.fn(() => ({ GET: get, POST: post })) };
+describe("modelCatalogAuthIssue", () => {
+	it("reads the daemon's warning code", () => {
+		expect(modelCatalogAuthIssue({ warning: "x", warningCode: "auth_required" })).toBe("required");
+		expect(modelCatalogAuthIssue({ warning: "x", warningCode: "auth_expired" })).toBe("expired");
+	});
+
+	it("recognizes login wording from daemons that predate warning codes", () => {
+		expect(modelCatalogAuthIssue({ warning: "claude-code: model discovery: Anthropic rejected the credential: OAuth access token has expired. Re-authenticate to continue." })).toBe("required");
+		expect(modelCatalogAuthIssue({ warning: "Kiro is not signed in; sign in to load its models" })).toBe("required");
+	});
+
+	it("leaves other warnings alone", () => {
+		expect(modelCatalogAuthIssue({ warning: "codex model discovery returned no models" })).toBeUndefined();
+		expect(modelCatalogAuthIssue({ warning: "Models loaded, but AO could not update the model cache." })).toBeUndefined();
+		expect(modelCatalogAuthIssue(undefined)).toBeUndefined();
+	});
 });
-vi.mock("../lib/host-clients", () => ({ clientFor }));
 
-describe("standalone model catalogs", () => {
-	it("keeps the remote host and cache key without sending a synthetic project ID", async () => {
-		const project = { host: "remote", id: "@standalone" };
-		const options = agentModelsQueryOptions("codex", project);
-		expect(options.queryKey).not.toEqual(
-			agentModelsQueryOptions("codex", { ...project, host: "local" }).queryKey,
-		);
-		await new QueryClient().fetchQuery(options);
-		await refreshAgentModels("codex", project);
-		await revalidateAgentModels("codex", project);
-		expect(clientFor.mock.calls).toEqual([["remote"], ["remote"], ["remote"]]);
-		expect(get).toHaveBeenCalledWith("/api/v1/agents/{agent}/models", {
-			params: { path: { agent: "codex" }, query: { projectId: undefined } },
-		});
-		expect(post.mock.calls).toEqual(
-			[undefined, true].map((revalidate) => [
-				"/api/v1/agents/{agent}/models/refresh",
-				{
-					params: {
-						path: { agent: "codex" },
-						query: { projectId: undefined, revalidate },
-					},
-				},
-			]),
-		);
+describe("invalidateAgentModelCatalogs", () => {
+	function seeded() {
+		const client = new QueryClient();
+		const keys = {
+			local: ["agent-models", "claude-code", ""],
+			localProject: ["agent-models", "claude-code", "proj-1"],
+			otherAgent: ["agent-models", "codex", ""],
+			remote: ["agent-models", "box-a", "claude-code", ""],
+			pickerRevalidation: ["agent-model-revalidation", "claude-code", "", "t1"],
+			composerRevalidation: ["agent-model-revalidation", "", "claude-code", "", "t1"],
+			settingsRevalidation: ["agent-model-revalidation", "local", "claude-code", "", "t1"],
+			remoteRevalidation: ["agent-model-revalidation", "box-a", "claude-code", "", "t1"],
+			otherRevalidation: ["agent-model-revalidation", "", "codex", "", "t1"],
+		} as const;
+		for (const key of Object.values(keys)) client.setQueryData(key, { models: [] });
+		const invalidated = (key: readonly unknown[]) => client.getQueryState(key)?.isInvalidated === true;
+		return { client, keys, invalidated };
+	}
+
+	it("drops one agent's local catalogs and revalidations only", async () => {
+		const { client, keys, invalidated } = seeded();
+		await invalidateAgentModelCatalogs(client, "claude-code");
+		expect([keys.local, keys.localProject, keys.pickerRevalidation, keys.composerRevalidation, keys.settingsRevalidation].every(invalidated)).toBe(true);
+		expect([keys.otherAgent, keys.remote, keys.remoteRevalidation, keys.otherRevalidation].some(invalidated)).toBe(false);
+	});
+
+	it("scopes a remote host's invalidation to that host", async () => {
+		const { client, keys, invalidated } = seeded();
+		await invalidateAgentModelCatalogs(client, "claude-code", "box-a");
+		expect(invalidated(keys.remote) && invalidated(keys.remoteRevalidation)).toBe(true);
+		expect([keys.local, keys.composerRevalidation, keys.otherRevalidation].some(invalidated)).toBe(false);
 	});
 });

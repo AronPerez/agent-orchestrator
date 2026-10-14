@@ -3,7 +3,6 @@ package terminal
 import (
 	"context"
 	"encoding/base64"
-	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -34,11 +33,16 @@ type wsConn interface {
 
 const (
 	defaultHeartbeat = 15 * time.Second
-	maxMissedPongs   = 3
 	// dataWatermark caps queued PTY output per connection. Above it the producing
 	// attachment's read loop blocks, so tmux throttles at the source instead of
 	// the connection being torn down under a flood.
 	dataWatermark = 1 << 20
+	// burstFlushInterval spaces writes while output streams. A frame queued
+	// after a quiet period (a keystroke's echo) is written at once; frames
+	// queued within this interval of the previous write wait for it, so a flood
+	// leaves as a few large messages instead of thousands of tiny ones, each of
+	// which costs the renderer an event, a JSON parse and a decode.
+	burstFlushInterval = 4 * time.Millisecond
 )
 
 // Manager serves WebSocket clients, opening one attach Stream per opened pane
@@ -349,7 +353,7 @@ func (m *Manager) Serve(ctx context.Context, conn wsConn) {
 	}
 	defer c.cleanup()
 
-	go c.writeLoop(ctx)
+	go c.writeLoop(ctx, burstFlushInterval)
 	go c.heartbeatLoop(ctx, m.heartbeat)
 
 	for {
@@ -570,6 +574,12 @@ func (q *outQueue) push(msg serverMsg) {
 	}
 }
 
+func (q *outQueue) empty() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.frames) == 0
+}
+
 func (q *outQueue) full() bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -609,19 +619,49 @@ func (c *connState) enqueue(msg serverMsg) {
 	c.out.push(msg)
 }
 
-func (c *connState) writeLoop(ctx context.Context) {
+func (c *connState) writeLoop(ctx context.Context, flushInterval time.Duration) {
+	var lastWrite time.Time
+	var pace *time.Timer
+	defer func() {
+		if pace != nil {
+			pace.Stop()
+		}
+	}()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-c.out.wake:
-			for _, msg := range c.out.drain() {
-				if err := c.conn.WriteJSON(ctx, msg); err != nil {
-					c.cancel()
-					return
-				}
+		}
+		// A wake left over from frames an earlier drain already took has nothing
+		// to pace or send.
+		if c.out.empty() {
+			continue
+		}
+		if wait := flushInterval - time.Since(lastWrite); wait > 0 {
+			if pace == nil {
+				pace = time.NewTimer(wait)
+			} else {
+				pace.Reset(wait)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-pace.C:
 			}
 		}
+		msgs := c.out.drain()
+		if len(msgs) == 0 {
+			// Not a write; counting it would hold back the next isolated frame.
+			continue
+		}
+		for _, msg := range msgs {
+			if err := c.conn.WriteJSON(ctx, msg); err != nil {
+				c.cancel()
+				return
+			}
+		}
+		lastWrite = time.Now()
 	}
 }
 
@@ -631,7 +671,6 @@ func (c *connState) heartbeatLoop(ctx context.Context, interval time.Duration) {
 	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
-	missedPongs := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -640,16 +679,7 @@ func (c *connState) heartbeatLoop(ctx context.Context, interval time.Duration) {
 			pctx, cancel := context.WithTimeout(ctx, interval)
 			err := c.conn.Ping(pctx)
 			cancel()
-			if err == nil {
-				missedPongs = 0
-				continue
-			}
-			if ctx.Err() != nil || !errors.Is(err, context.DeadlineExceeded) {
-				c.cancel()
-				return
-			}
-			missedPongs++
-			if missedPongs >= maxMissedPongs {
+			if err != nil {
 				c.cancel()
 				return
 			}

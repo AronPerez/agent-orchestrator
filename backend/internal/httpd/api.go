@@ -30,6 +30,7 @@ type APIDeps struct {
 	Automations        controllers.AutomationService
 	DesktopWorkspaces  controllers.DesktopWorkspaceService
 	Activity           controllers.ActivityRecorder
+	NativeSessions     ports.AgentNativeSessionResolver
 	UsageHooks         controllers.UsageHookRecorder
 	UsageSummary       controllers.UsageSummaryService
 	SessionMemory      controllers.SessionMemoryService
@@ -69,14 +70,11 @@ type APIDeps struct {
 	Installer controllers.Installer
 	AgentAuth controllers.AgentAuthService
 	// GitHub is the local GitHub PAT + repos surface.
-	GitHub controllers.GitHubPATService
+	GitHub            controllers.GitHubPATService
+	AgentSwitchPolicy AgentSwitchPolicyControl
 	// LinkPreview unfurls external URLs for the renderer's hover cards; nil
 	// leaves the route answering 501.
 	LinkPreview controllers.LinkPreviewService
-
-	// BrowserRuntime lets a remote desktop app attach as this daemon's browser
-	// runtime over the HTTP upgrade bridge. Nil leaves the route unmounted.
-	BrowserRuntime BrowserRuntimeBridge
 
 	// Presence tracks which mobile devices are currently running the app.
 	// Nil disables presence tracking (the roster then reports every device offline).
@@ -173,6 +171,8 @@ func newAPIWithLogger(cfg config.Config, deps APIDeps, log *slog.Logger) *API {
 			Svc:                      deps.Sessions,
 			Projects:                 deps.Projects,
 			Activity:                 deps.Activity,
+			NativeSessions:           deps.NativeSessions,
+			DataDir:                  cfg.DataDir,
 			Usage:                    deps.UsageHooks,
 			Attachments:              attachmentstore.New(cfg.DataDir),
 			PreviewServer:            deps.PreviewServer,
@@ -191,7 +191,7 @@ func newAPIWithLogger(cfg config.Config, deps APIDeps, log *slog.Logger) *API {
 		fs:            &controllers.FSController{Svc: deps.Directories},
 		shellTerms:    &controllers.ShellTerminalsController{Svc: deps.ShellTerminals},
 		cues:          &controllers.CuesController{Svc: deps.Cues},
-		conversations: &controllers.ConversationsController{Svc: deps.Conversations},
+		conversations: &controllers.ConversationsController{Svc: deps.Conversations, Renders: attachmentstore.New(cfg.DataDir)},
 		settings:      &controllers.SettingsController{Svc: deps.Settings},
 		dev:           &controllers.DevController{Import: deps.DevImport},
 		browser:       &controllers.BrowserController{Svc: deps.Browser},

@@ -18,6 +18,8 @@ func TestCueCreateUsesProjectContextAndPostsOneDefinition(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
+		case r.URL.Path == "/internal/telemetry/cli-invoked":
+			w.WriteHeader(http.StatusAccepted)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/demo":
 			_, _ = io.WriteString(w, `{"project":{"id":"demo","kind":"single_repo"}}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/demo/cues":
@@ -51,6 +53,8 @@ func TestCueCreateCommandKeepsDaemonErrorEnvelope(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
+		case "/internal/telemetry/cli-invoked":
+			w.WriteHeader(http.StatusAccepted)
 		case "/api/v1/projects/demo":
 			_, _ = io.WriteString(w, `{"project":{"id":"demo","kind":"single_repo"}}`)
 		case "/api/v1/projects/demo/cues":
@@ -76,6 +80,8 @@ func TestCueCreateCommandPostsExactShellCommand(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
+		case "/internal/telemetry/cli-invoked":
+			w.WriteHeader(http.StatusAccepted)
 		case "/api/v1/projects/demo":
 			_, _ = io.WriteString(w, `{"project":{"id":"demo","kind":"single_repo"}}`)
 		case "/api/v1/projects/demo/cues":
@@ -132,6 +138,8 @@ func TestCueListReadsProjectDefinitions(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
+		case "/internal/telemetry/cli-invoked":
+			w.WriteHeader(http.StatusAccepted)
 		case "/api/v1/projects/demo":
 			_, _ = io.WriteString(w, `{"project":{"id":"demo","kind":"single_repo"}}`)
 		case "/api/v1/projects/demo/cues":

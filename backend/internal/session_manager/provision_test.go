@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -279,16 +280,17 @@ func TestEffectiveHarnessAndAgentConfig(t *testing.T) {
 	if got := effectiveAgentConfig(domain.HarnessClaudeCode, domain.KindOrchestrator, cfg); got.Model != "base" {
 		t.Fatalf("orchestrator config = %#v, want base", got)
 	}
-
-	// Provider tuning is never sent to a different pinned harness.
-	foreign := effectiveAgentConfig(domain.HarnessClaudeCode, domain.KindWorker, cfg)
-	if foreign.Model != "" || foreign.Effort != "" || foreign.Mode != "" {
-		t.Fatalf("worker config for claude-code = %#v, want provider tuning dropped", foreign)
+	// A launch harness that differs from the role's configured harness drops the
+	// role's model/mode — they were tuned for the other agent — but keeps the
+	// harness-neutral permissions.
+	if got := effectiveAgentConfig(domain.HarnessAider, domain.KindWorker, cfg); got.Model != "base" || got.Mode != "low" || got.Permissions != domain.PermissionModeAuto {
+		t.Fatalf("mismatched-harness worker config = %#v, want model=base mode=low permissions=auto", got)
 	}
-	if foreign.Permissions != domain.PermissionModeAuto {
-		t.Fatalf("worker permissions for claude-code = %q, want auto", foreign.Permissions)
-	}
-	// An unpinned role deliberately applies to any harness.
+	// A role override with no harness pinned is deliberately treated as
+	// "applies to any harness", so its model/mode are inherited whichever
+	// harness the session launches with. This is a behavior decision, not a
+	// side effect: assert it across two unrelated harnesses so it cannot
+	// silently flip back to the old drop-on-every-switch behavior.
 	unpinned := domain.ProjectConfig{
 		AgentConfig: domain.AgentConfig{Model: "base", Mode: "low"},
 		Worker:      domain.RoleOverride{AgentConfig: domain.AgentConfig{Model: "worker", Mode: "high"}},
@@ -298,7 +300,6 @@ func TestEffectiveHarnessAndAgentConfig(t *testing.T) {
 		if got.Model != "worker" || got.Mode != "high" {
 			t.Fatalf("unpinned worker config for %q = %#v, want model=worker mode=high", harness, got)
 		}
-
 	}
 }
 
@@ -320,7 +321,7 @@ func TestResolveChatAgentConfigValidatesAndResetsDependentTuning(t *testing.T) {
 		{ID: "old", Efforts: []string{"high"}},
 		{ID: "new", Efforts: []string{"low"}},
 	}}}}
-	project := domain.ProjectConfig{Worker: domain.RoleOverride{Harness: domain.HarnessCodex, AgentConfig: domain.AgentConfig{Model: "old", Effort: "high"}}}
+	project := domain.ProjectConfig{Worker: domain.RoleOverride{AgentConfig: domain.AgentConfig{Model: "old", Effort: "high"}}}
 	resolved, err := m.resolveAgentConfig(context.Background(), ports.SpawnConfig{
 		ProjectID: "p", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
 		AgentConfig: ports.AgentConfig{Model: "new"},
@@ -456,6 +457,48 @@ func TestResolveClaudeModelWithoutEffortRejectsUnknownAndStaleCatalogs(t *testin
 	}
 }
 
+func TestResolveCommandCodeTUIAgentConfigPassesEffortThrough(t *testing.T) {
+	// Command Code's catalog advertises no effort levels, so resolution must
+	// forward the raw level without consulting the catalog at all — even a
+	// discovery failure must not clear it or fail the spawn.
+	m := &Manager{modelCatalog: tuningCatalog{err: errors.New("discovery failed")}}
+
+	resolved, err := m.resolveAgentConfig(context.Background(), ports.SpawnConfig{
+		ProjectID: "p", Kind: domain.KindWorker, Harness: domain.HarnessCommandCode,
+		RequestedMode: domain.SessionModeTUI,
+		AgentConfig:   ports.AgentConfig{Model: "deepseek/deepseek-v4-flash", Effort: "high"},
+	}, domain.ProjectConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Model != "deepseek/deepseek-v4-flash" || resolved.Effort != "high" {
+		t.Fatalf("resolved = %#v, want model deepseek/deepseek-v4-flash effort high", resolved)
+	}
+
+	resolved, err = m.resolveAgentConfig(context.Background(), ports.SpawnConfig{
+		ProjectID: "p", Kind: domain.KindWorker, Harness: domain.HarnessCommandCode,
+		RequestedMode: domain.SessionModeTUI,
+	}, domain.ProjectConfig{Worker: domain.RoleOverride{AgentConfig: domain.AgentConfig{Effort: "medium"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Effort != "medium" {
+		t.Fatalf("project effort = %q, want medium", resolved.Effort)
+	}
+
+	resolved, err = m.resolveAgentConfig(context.Background(), ports.SpawnConfig{
+		ProjectID: "p", Kind: domain.KindWorker, Harness: domain.HarnessOpenCode,
+		RequestedMode: domain.SessionModeTUI,
+		AgentConfig:   ports.AgentConfig{Effort: "high"},
+	}, domain.ProjectConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Effort != "" {
+		t.Fatalf("non-effort harness effort = %q, want cleared", resolved.Effort)
+	}
+}
+
 func TestApplySymlinks(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows symlink creation requires a host privilege outside this unit test")
@@ -494,14 +537,23 @@ func TestApplySymlinksRejectsParentTraversal(t *testing.T) {
 
 func TestRunPostCreate(t *testing.T) {
 	workspace := t.TempDir()
-	if err := runPostCreate(context.Background(), workspace, []string{"echo hi > out.txt"}, nil); err != nil {
+	source := t.TempDir()
+	command := `printf '%s|%s|%s' "$PROJECT_TOKEN" "$AO_SOURCE_TREE_PATH" "$AO_WORKTREE_PATH" > out.txt`
+	if runtime.GOOS == "windows" {
+		command = `echo %PROJECT_TOKEN%^|%AO_SOURCE_TREE_PATH%^|%AO_WORKTREE_PATH%> out.txt`
+	}
+	if err := runPostCreate(context.Background(), workspace, source, []string{command}, map[string]string{"PROJECT_TOKEN": "setup-value"}); err != nil {
 		t.Fatalf("runPostCreate: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(workspace, "out.txt")); err != nil {
+	output, err := os.ReadFile(filepath.Join(workspace, "out.txt"))
+	if err != nil {
 		t.Fatalf("post-create command did not run in workspace: %v", err)
 	}
+	if !strings.Contains(string(output), "setup-value|"+source+"|"+workspace) {
+		t.Fatalf("post-create environment = %q", output)
+	}
 	// A failing command surfaces an error.
-	if err := runPostCreate(context.Background(), workspace, []string{"exit 3"}, nil); err == nil {
+	if err := runPostCreate(context.Background(), workspace, source, []string{"exit 3"}, nil); err == nil {
 		t.Fatal("expected error from failing post-create command")
 	}
 }
@@ -512,7 +564,7 @@ func TestRunPostCreateReceivesAndRedactsProjectEnv(t *testing.T) {
 		command = `echo %PROJECT_TOKEN% && exit /b 3`
 	}
 	secret := "project-secret-123"
-	err := runPostCreate(context.Background(), t.TempDir(), []string{command}, map[string]string{"PROJECT_TOKEN": secret})
+	err := runPostCreate(context.Background(), t.TempDir(), t.TempDir(), []string{command}, map[string]string{"PROJECT_TOKEN": secret})
 	if err == nil || !strings.Contains(err.Error(), "[REDACTED]") || strings.Contains(err.Error(), secret) {
 		t.Fatalf("postCreate error did not redact project value: %v", err)
 	}
@@ -531,19 +583,32 @@ func TestSpawnPermissionPrecedence(t *testing.T) {
 		} {
 			t.Run(string(kind)+"/"+tc.name, func(t *testing.T) {
 				cfg := domain.ProjectConfig{AgentConfig: domain.AgentConfig{Permissions: tc.base}, Worker: domain.RoleOverride{AgentConfig: domain.AgentConfig{Permissions: tc.role}}, Orchestrator: domain.RoleOverride{AgentConfig: domain.AgentConfig{Permissions: tc.role}}}
-
-				got := applySpawnAgentConfig(effectiveAgentConfig(effectiveHarness("", kind, cfg), kind, cfg), domain.AgentConfig{Permissions: tc.spawn})
-
+				got := applySpawnAgentConfig(effectiveAgentConfig(domain.HarnessCodex, kind, cfg), domain.AgentConfig{Permissions: tc.spawn})
 				if got.Permissions != tc.want {
 					t.Fatalf("got %q want %q", got.Permissions, tc.want)
 				}
 			})
 		}
 	}
-
-	if got := effectiveAgentConfig(effectiveHarness("", domain.KindWorker, domain.ProjectConfig{}), domain.KindWorker, domain.ProjectConfig{}); got.Permissions != "" {
-
+	if got := effectiveAgentConfig(domain.HarnessCodex, domain.KindWorker, domain.ProjectConfig{}); got.Permissions != "" {
 		t.Fatalf("non-spawn resolution changed: %q", got.Permissions)
+	}
+}
+
+func TestRunPostCreateStopsLaterStepsAfterCancellation(t *testing.T) {
+	workspace := t.TempDir()
+	command := "while :; do :; done"
+	if runtime.GOOS == "windows" {
+		command = "for /L %i in (1,0,2) do @rem waiting"
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer cancel()
+	err := runPostCreate(ctx, workspace, t.TempDir(), []string{"", command, "echo unexpected > later.txt"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "setup step 2 failed") {
+		t.Fatalf("cancellation error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "later.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("later setup step ran after cancellation: %v", err)
 	}
 }
 

@@ -142,11 +142,52 @@ func TestGetLaunchCommandBypassWithPrompt(t *testing.T) {
 
 	want := []string{
 		"claude",
-		"--dangerously-skip-permissions",
+		"--permission-mode", "bypassPermissions",
 		"--", "-add a health check",
 	}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("unexpected command\nwant: %#v\n got: %#v", want, cmd)
+	}
+}
+
+func TestGetLaunchCommandAvoidsTranscriptOfReusedAOSessionID(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	p := &Plugin{resolvedBinary: "claude"}
+	derived := claudeSessionUUID("flash-1")
+
+	sessionIDFlag := func(t *testing.T) string {
+		t.Helper()
+		cmd, err := p.GetLaunchCommand(context.Background(), ports.LaunchConfig{SessionID: "flash-1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, arg := range cmd {
+			if arg == "--session-id" && i+1 < len(cmd) {
+				return cmd[i+1]
+			}
+		}
+		t.Fatalf("no --session-id in %#v", cmd)
+		return ""
+	}
+
+	if got := sessionIDFlag(t); got != derived {
+		t.Fatalf("fresh launch session id = %q, want derived %q", got, derived)
+	}
+
+	project := filepath.Join(configDir, "projects", "-old-data-dir-flash-1")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, derived+".jsonl"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := sessionIDFlag(t)
+	if got == derived {
+		t.Fatalf("launch reused the derived id %q that already has a transcript", derived)
+	}
+	if _, err := uuid.Parse(got); err != nil {
+		t.Fatalf("fallback session id %q is not a UUID: %v", got, err)
 	}
 }
 
@@ -160,7 +201,7 @@ func TestGetLaunchCommandMapsPermissionModes(t *testing.T) {
 		{"default omits flag (defers to settings.json)", ports.PermissionModeDefault, nil, "--permission-mode"},
 		{"accept-edits", ports.PermissionModeAcceptEdits, []string{"--permission-mode", "acceptEdits"}, ""},
 		{"auto", ports.PermissionModeAuto, []string{"--permission-mode", "auto"}, ""},
-		{"bypass-permissions", ports.PermissionModeBypassPermissions, []string{"--dangerously-skip-permissions"}, ""},
+		{"bypass-permissions", ports.PermissionModeBypassPermissions, []string{"--permission-mode", "bypassPermissions"}, ""},
 		{"empty omits permission flags", "", nil, "--permission-mode"},
 	}
 
@@ -684,7 +725,7 @@ func TestGetRestoreCommandReadsAgentSessionID(t *testing.T) {
 		t.Fatalf("restore = (ok=%v, err=%v), want ok", ok, err)
 	}
 	// The hook-captured native id wins over the derived fallback.
-	want := []string{"claude", "--dangerously-skip-permissions", "--resume", "claude-native-1", "--", "continue from AO"}
+	want := []string{"claude", "--permission-mode", "bypassPermissions", "--resume", "claude-native-1", "--", "continue from AO"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("restore cmd\nwant: %#v\n got: %#v", want, cmd)
 	}
@@ -703,7 +744,7 @@ func TestGetRestoreCommandAppendsConfiguredModelAndEffort(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("restore = (ok=%v, err=%v), want ok", ok, err)
 	}
-	want := []string{"claude", "--dangerously-skip-permissions", "--model", "claude-opus-4-5", "--effort", "high", "--resume", "claude-native-1"}
+	want := []string{"claude", "--permission-mode", "bypassPermissions", "--model", "claude-opus-4-5", "--effort", "high", "--resume", "claude-native-1"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("restore cmd\nwant: %#v\n got: %#v", want, cmd)
 	}
@@ -721,7 +762,7 @@ func TestGetRestoreCommandOmitsBlankConfiguredModel(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("restore = (ok=%v, err=%v), want ok", ok, err)
 	}
-	want := []string{"claude", "--dangerously-skip-permissions", "--resume", "claude-native-1"}
+	want := []string{"claude", "--permission-mode", "bypassPermissions", "--resume", "claude-native-1"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("restore cmd\nwant: %#v\n got: %#v", want, cmd)
 	}
@@ -741,7 +782,7 @@ func TestGetRestoreCommandReappendsSystemPrompt(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("restore = (ok=%v, err=%v), want ok", ok, err)
 	}
-	want := []string{"claude", "--dangerously-skip-permissions", "--append-system-prompt", "You are an orchestrator.", "--resume", "claude-native-1"}
+	want := []string{"claude", "--permission-mode", "bypassPermissions", "--append-system-prompt", "You are an orchestrator.", "--resume", "claude-native-1"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("restore cmd\nwant: %#v\n got: %#v", want, cmd)
 	}
@@ -767,7 +808,7 @@ func TestGetRestoreCommandReappendsSystemPromptFromFile(t *testing.T) {
 		t.Fatalf("restore = (ok=%v, err=%v), want ok", ok, err)
 	}
 	want := []string{
-		"claude", "--dangerously-skip-permissions",
+		"claude", "--permission-mode", "bypassPermissions",
 		"--append-system-prompt-file", promptFile,
 		"--resume", "claude-native-1",
 		"--", "continue from AO",
@@ -799,7 +840,7 @@ func TestGetRestoreCommandFallsBackToDerivedUUID(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("restore = (ok=%v, err=%v), want ok", ok, err)
 	}
-	want := []string{"claude", "--dangerously-skip-permissions", "--resume", claudeSessionUUID("sess-r")}
+	want := []string{"claude", "--permission-mode", "bypassPermissions", "--resume", claudeSessionUUID("sess-r")}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("restore cmd\nwant: %#v\n got: %#v", want, cmd)
 	}
@@ -853,7 +894,7 @@ func TestGetLaunchCommandExplicitPermissionsOverrideConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !containsSubsequence(cmd, []string{"--dangerously-skip-permissions"}) {
+	if !containsSubsequence(cmd, []string{"--permission-mode", "bypassPermissions"}) {
 		t.Fatalf("explicit Permissions should win; got %#v", cmd)
 	}
 }

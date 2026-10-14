@@ -36,16 +36,53 @@ const (
 	// daemon validates it at startup, but worker/orchestrator spawns resolve from
 	// explicit requests or project role config instead of falling back to it.
 	DefaultAgent = "claude-code"
-	// ClientElevenX is the AO_CLIENT value entitled to the cloud offering. It is
-	// the single place the identity is spelled out; gating logic must compare
-	// against this constant, never a string literal.
-	ClientElevenX = "eleven_x"
+	// DefaultTelemetryPostHogHost is the default PostHog ingestion host when
+	// remote telemetry is enabled and AO_TELEMETRY_POSTHOG_HOST is unset.
+	DefaultTelemetryPostHogHost = "https://us.i.posthog.com"
 
 	// defaultCloudControlPlaneURL is the control plane a build talks to when no
 	// override is set. Production, now that the hosted offering is live;
 	// AO_CLOUD_CONTROL_PLANE_URL still overrides it (e.g. staging-api for dev).
 	defaultCloudControlPlaneURL = "https://api.aoagents.dev"
 )
+
+// TelemetryRemote selects the remote telemetry exporter.
+type TelemetryRemote string
+
+const (
+	// TelemetryRemoteOff disables remote telemetry export.
+	TelemetryRemoteOff TelemetryRemote = "off"
+	// TelemetryRemotePostHog exports allowlisted events to PostHog.
+	TelemetryRemotePostHog TelemetryRemote = "posthog"
+)
+
+// TelemetryConfig controls local and remote telemetry behavior.
+type TelemetryConfig struct {
+	Events bool
+	// EventsExplicit distinguishes an operator/supervisor choice from the
+	// default. A missing policy file may use a boot-scoped headless token only
+	// when AO_TELEMETRY_EVENTS was explicitly set to on.
+	EventsExplicit bool
+	Metrics        bool
+	Remote         TelemetryRemote
+	PostHogKey     string
+	PostHogHost    string
+	// DisabledEvents names event streams that must never reach the remote
+	// (billed) sink. This is the kill switch: a stream that turns out to be
+	// noisy or expensive can be silenced by configuration, without waiting for
+	// users to install a new build. Local storage still records everything.
+	DisabledEvents []string
+	// AppVersion is the desktop app version the daemon was launched by, stamped
+	// on remote events so failures can be attributed to a release. The daemon
+	// binary has no reliable version of its own (see cli.Version, which release
+	// tooling does not currently override), so the supervisor passes it in.
+	AppVersion string
+	// SentryDSN, when set (AO_SENTRY_DSN), enables daemon-side Sentry capture of
+	// genuine server faults (5xx and panics) with their Go stack. Blank keeps
+	// Sentry a no-op. Kept separate from the PostHog key: the two are different
+	// processors with different projects.
+	SentryDSN string
+}
 
 // GitLabConfig carries the self-managed GitLab host allowlist and per-host
 // token overrides. It is loaded once at daemon boot from environment variables
@@ -106,8 +143,8 @@ type Config struct {
 	// AllowedOrigins are the browser origins granted CORS read access (see
 	// DefaultAllowedOrigins). Overridden by AO_ALLOWED_ORIGINS.
 	AllowedOrigins []string
-	// LocalEvents enables opt-in diagnostic events in the local SQLite database.
-	LocalEvents bool
+	// Telemetry controls local/remote telemetry sinks.
+	Telemetry TelemetryConfig
 	// StartupWorkingDirectory is the daemon process cwd before startup
 	// normalizes it. The desktop uses this to identify dev daemons after the
 	// process cwd is moved to the stable data dir.
@@ -118,13 +155,14 @@ type Config struct {
 	// TrackerIntake gates the issue-intake observer daemon-wide
 	// (AO_TRACKER_INTAKE).
 	TrackerIntake bool
-	// Client identifies which client this deployment serves (AO_CLIENT). Empty
-	// means no client identity, which keeps client-gated offerings off.
+	// Client identifies which client this deployment serves (AO_CLIENT). It is
+	// reported to clients through the settings API and gates nothing in the
+	// daemon: the cloud offering (B2B/B2C, providers, billing) is decided per
+	// organization by the cloud control plane.
 	Client string
 	// CloudOffering reports whether the cloud offering flag is switched on
-	// (AO_CLOUD_OFFERING). The flag alone does not surface cloud in clients:
-	// the settings service also requires the entitled client (ClientElevenX)
-	// and a configured control plane.
+	// (AO_CLOUD_OFFERING). It forces the cloud gate on regardless of the user's
+	// toggle; the settings service still requires a configured control plane.
 	CloudOffering bool
 	// LocalOffering reports whether the local offering is available
 	// (AO_LOCAL_OFFERING). It defaults to true; only an explicit false/0
@@ -158,9 +196,13 @@ func (c Config) Addr() string {
 //	                     (default: a fresh id minted per daemon boot)
 //	AO_ALLOWED_ORIGINS   CORS origins, comma-separated (default DefaultAllowedOrigins)
 //	AO_TELEMETRY_EVENTS  local event capture off|on (default off)
+//	AO_TELEMETRY_METRICS local metric capture off|on (default off)
+//	AO_TELEMETRY_REMOTE  remote exporter off|posthog (default off)
+//	AO_TELEMETRY_POSTHOG_KEY   PostHog project key
+//	AO_TELEMETRY_POSTHOG_HOST  PostHog host (default DefaultTelemetryPostHogHost)
 //	AO_GITLAB_ALLOWED_HOSTS    comma-separated self-managed GitLab hosts (each may include :port)
 //	AO_GITLAB_HOST_TOKENS      host=token,host=token per-host token overrides
-//	AO_CLIENT                  client identity for offering gates (trimmed, default empty)
+//	AO_CLIENT                  client identity reported to clients (trimmed, default empty)
 //	AO_CLOUD_OFFERING          cloud offering flag off|on (default off)
 //	AO_LOCAL_OFFERING          local offering off|on (default on)
 //	AO_CLOUD_CONTROL_PLANE_URL cloud control plane base URL (trimmed, must be http(s))
@@ -174,7 +216,11 @@ func Load() (Config, error) {
 		ShutdownTimeout: DefaultShutdownTimeout,
 		Agent:           DefaultAgent,
 		AllowedOrigins:  DefaultAllowedOrigins,
-		LocalOffering:   true,
+		Telemetry: TelemetryConfig{
+			Remote:      TelemetryRemoteOff,
+			PostHogHost: DefaultTelemetryPostHogHost,
+		},
+		LocalOffering: true,
 	}
 
 	if raw := os.Getenv("AO_PORT"); raw != "" {
@@ -241,7 +287,37 @@ func Load() (Config, error) {
 		if err != nil {
 			return Config{}, err
 		}
-		cfg.LocalEvents = v
+		cfg.Telemetry.Events = v
+		cfg.Telemetry.EventsExplicit = true
+	}
+	if raw := os.Getenv("AO_TELEMETRY_METRICS"); raw != "" {
+		v, err := parseToggleEnv("AO_TELEMETRY_METRICS", raw)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.Telemetry.Metrics = v
+	}
+	if raw := os.Getenv("AO_TELEMETRY_REMOTE"); raw != "" {
+		remote, err := parseTelemetryRemote(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid AO_TELEMETRY_REMOTE %q: %w", raw, err)
+		}
+		cfg.Telemetry.Remote = remote
+	}
+	if raw := os.Getenv("AO_TELEMETRY_POSTHOG_KEY"); raw != "" {
+		cfg.Telemetry.PostHogKey = raw
+	}
+	if raw := os.Getenv("AO_TELEMETRY_POSTHOG_HOST"); raw != "" {
+		cfg.Telemetry.PostHogHost = raw
+	}
+	if raw := os.Getenv("AO_TELEMETRY_DISABLED_EVENTS"); raw != "" {
+		cfg.Telemetry.DisabledEvents = parseTelemetryDisabledEvents(raw)
+	}
+	if raw := os.Getenv("AO_TELEMETRY_APP_VERSION"); raw != "" {
+		cfg.Telemetry.AppVersion = strings.TrimSpace(raw)
+	}
+	if raw := os.Getenv("AO_SENTRY_DSN"); raw != "" {
+		cfg.Telemetry.SentryDSN = strings.TrimSpace(raw)
 	}
 
 	if raw, ok := os.LookupEnv("AO_GITLAB_ALLOWED_HOSTS"); ok && raw != "" {
@@ -331,6 +407,32 @@ func parseToggleEnv(name, raw string) (bool, error) {
 	default:
 		return false, fmt.Errorf("%s must be off|on", name)
 	}
+}
+
+func parseTelemetryRemote(raw string) (TelemetryRemote, error) {
+	switch TelemetryRemote(strings.ToLower(strings.TrimSpace(raw))) {
+	case TelemetryRemoteOff:
+		return TelemetryRemoteOff, nil
+	case TelemetryRemotePostHog:
+		return TelemetryRemotePostHog, nil
+	default:
+		return "", fmt.Errorf("must be off|posthog")
+	}
+}
+
+// parseTelemetryDisabledEvents reads the comma-separated kill-switch list.
+// Unlike the other telemetry env vars this never fails: an unparseable or
+// misspelled entry must not stop the daemon from booting, because the whole
+// point of the switch is to be usable in a hurry during an incident. An entry
+// that matches no event name is simply inert.
+func parseTelemetryDisabledEvents(raw string) []string {
+	var names []string
+	for _, part := range strings.Split(raw, ",") {
+		if name := strings.TrimSpace(part); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 // parseHostTokenMap parses a host=token,host=token map. Whitespace around
@@ -434,11 +536,6 @@ func resolveDataDir() (string, error) {
 	}
 	return filepath.Join(stateDir, "data"), nil
 }
-
-// StateDir returns the canonical AO home directory (~/.ao) that holds
-// running.json, the data dir, and the CLI's remotes file. Exported for callers
-// that need the directory itself rather than a path Load already resolves.
-func StateDir() (string, error) { return defaultStateDir() }
 
 func defaultStateDir() (string, error) {
 	homeDir, err := os.UserHomeDir()

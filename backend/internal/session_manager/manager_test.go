@@ -45,6 +45,7 @@ func TestSeedRecordPreservesAutomationRunIdentity(t *testing.T) {
 }
 
 type fakeStore struct {
+	cleanupMu                          sync.Mutex
 	cleanupFacts                       map[domain.SessionID]domain.SessionCleanupRecord
 	sessions                           map[domain.SessionID]domain.SessionRecord
 	pr                                 map[domain.SessionID]domain.PRFacts
@@ -91,23 +92,6 @@ func (f *fakeStore) GetProject(_ context.Context, id string) (domain.ProjectReco
 	r, ok := f.projects[id]
 	return r, ok, nil
 }
-
-// cleanupFacts records what the manager persisted about each session's
-// teardown, so tests can read the disposition back instead of asserting that a
-// write was attempted.
-func (f *fakeStore) UpsertSessionCleanupFacts(_ context.Context, rec domain.SessionCleanupRecord) error {
-	if f.cleanupFacts == nil {
-		f.cleanupFacts = map[domain.SessionID]domain.SessionCleanupRecord{}
-	}
-	f.cleanupFacts[rec.SessionID] = rec
-	return nil
-}
-
-func (f *fakeStore) GetSessionCleanupFacts(_ context.Context, id domain.SessionID) (domain.SessionCleanupRecord, bool, error) {
-	rec, ok := f.cleanupFacts[id]
-	return rec, ok, nil
-}
-
 func (f *fakeStore) ListWorkspaceRepos(_ context.Context, projectID string) ([]domain.WorkspaceRepoRecord, error) {
 	return f.workspaceRepo[projectID], nil
 }
@@ -894,6 +878,19 @@ type launchArgvAgent struct {
 	argv []string
 }
 
+type runtimePreparingAgent struct {
+	launchArgvAgent
+	got ports.WorkspaceHookConfig
+}
+
+func (a *runtimePreparingAgent) PrepareRuntimeLaunch(_ context.Context, cfg ports.WorkspaceHookConfig) error {
+	a.got = cfg
+	if cfg.Env != nil {
+		cfg.Env["PROVIDER_RUNTIME_PREPARED"] = "1"
+	}
+	return nil
+}
+
 func (a launchArgvAgent) GetLaunchCommand(context.Context, ports.LaunchConfig) ([]string, error) {
 	return a.argv, nil
 }
@@ -1176,10 +1173,6 @@ type fakeWorkspace struct {
 	stashErr        error
 	applyErr        error
 	forceDestroyErr error
-	// worktreeMissing makes Exists report the worktree directory as absent,
-	// simulating a worktree removed out from under a live runtime.
-	worktreeMissing bool
-	existsErr       error
 	// stashCalls counts StashUncommitted invocations.
 	stashCalls int
 	stashHook  func()
@@ -1346,9 +1339,6 @@ func (w *fakeWorkspace) Restore(ctx context.Context, cfg ports.WorkspaceConfig) 
 		return ports.WorkspaceInfo{Path: cfg.Path, Branch: cfg.Branch, BaseRef: cfg.BaseRef, SessionID: cfg.SessionID, ProjectID: cfg.ProjectID, RepoPath: cfg.RepoPath}, nil
 	}
 	return w.Create(ctx, cfg)
-}
-func (w *fakeWorkspace) Exists(_ context.Context, _ ports.WorkspaceInfo) (bool, error) {
-	return !w.worktreeMissing, w.existsErr
 }
 func (w *fakeWorkspace) ForceDestroy(_ context.Context, info ports.WorkspaceInfo) error {
 	entry := "ForceDestroy:" + string(info.SessionID)
@@ -2112,6 +2102,30 @@ func TestSpawn_WrapsSupervisedAgentAndPersistsGeneration(t *testing.T) {
 	}
 	if rec.Metadata.RuntimeLaunchID != "launch-7" {
 		t.Fatalf("stored launch id = %q, want launch-7", rec.Metadata.RuntimeLaunchID)
+	}
+}
+
+func TestSpawn_PreparesProviderRuntimeAfterAssigningGeneration(t *testing.T) {
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
+	rt := &fakeRuntime{}
+	agent := &runtimePreparingAgent{launchArgvAgent: launchArgvAgent{argv: []string{"agent"}}}
+	m := New(Deps{
+		Runtime: rt, Agents: singleAgent{agent: agent}, Workspace: &fakeWorkspace{}, Store: st,
+		Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st}, DataDir: "/ao-data", RunFilePath: "/ao-data/running.json",
+		LookPath: func(string) (string, error) { return "/bin/true", nil }, NewLaunchID: func() string { return "launch-7" },
+	})
+	if _, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessCodex}); err != nil {
+		t.Fatal(err)
+	}
+	if got := agent.got.Env[EnvRuntimeLaunchID]; got != "launch-7" {
+		t.Fatalf("preparer launch id = %q, want launch-7", got)
+	}
+	if agent.got.DataDir != "/ao-data" || agent.got.SessionID != "mer-1" {
+		t.Fatalf("preparer config = %+v", agent.got)
+	}
+	if rt.lastCfg.Env["PROVIDER_RUNTIME_PREPARED"] != "1" {
+		t.Fatalf("runtime did not receive preparer environment: %+v", rt.lastCfg.Env)
 	}
 }
 
@@ -3558,6 +3572,68 @@ func TestKill_TearsDownRuntimeAndWorkspace(t *testing.T) {
 	requireNoPromptDir(t, dataDir, "mer-1")
 }
 
+func TestKillCleanupScriptHasNoTimeLimit(t *testing.T) {
+	m, st, _, ws := newManager()
+	m.killTeardown = 2 * time.Second
+	m.dataDir = t.TempDir()
+	workspace := filepath.Join(m.dataDir, "worktrees", "mer", "mer-1")
+	if err := os.MkdirAll(workspace, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	rec := mkLive("mer-1")
+	rec.Metadata.WorkspacePath = workspace
+	st.sessions[rec.ID] = rec
+	project := st.projects["mer"]
+	command := "sleep 3 && echo finished > cleanup-marker"
+	if runtime.GOOS == "windows" {
+		command = "powershell -NoProfile -NonInteractive -Command \"Start-Sleep -Seconds 3\" && echo finished > cleanup-marker"
+	}
+	project.Config.PreRemove = []string{command}
+	st.projects["mer"] = project
+
+	freed, err := m.Kill(ctx, rec.ID)
+	if err != nil || !freed || ws.destroyCtxErr != nil || !st.sessions[rec.ID].IsTerminated {
+		t.Fatalf("long cleanup must finish before workspace removal: freed=%v err=%v workspaceCtx=%v terminated=%v", freed, err, ws.destroyCtxErr, st.sessions[rec.ID].IsTerminated)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "cleanup-marker")); err != nil {
+		t.Fatalf("cleanup command did not finish: %v", err)
+	}
+}
+
+func TestKillCleanupScriptFailurePreservesWorkspaceForRetry(t *testing.T) {
+	m, st, rt, ws := newManager()
+	m.dataDir = t.TempDir()
+	workspace := filepath.Join(m.dataDir, "worktrees", "mer", "mer-1")
+	if err := os.MkdirAll(workspace, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	rec := mkLive("mer-1")
+	rec.Metadata.WorkspacePath = workspace
+	st.sessions[rec.ID] = rec
+	project := st.projects["mer"]
+	project.Path = t.TempDir()
+	project.Config.PreRemove = []string{"echo project-secret && exit 7"}
+	project.Config.Env = map[string]string{"PROJECT_TOKEN": "project-secret"}
+	st.projects["mer"] = project
+
+	freed, err := m.Kill(ctx, rec.ID)
+	if freed || !errors.Is(err, ErrCleanupScript) || strings.Contains(err.Error(), "project-secret") {
+		t.Fatalf("kill freed=%v err=%v", freed, err)
+	}
+	if rt.destroyed != 1 || ws.destroyed != 0 || !st.sessions[rec.ID].IsTerminated {
+		t.Fatalf("failed cleanup must stop runtime, preserve workspace, and terminate session: runtime=%d workspace=%d rec=%+v", rt.destroyed, ws.destroyed, st.sessions[rec.ID])
+	}
+	project.Config.PreRemove = []string{"echo cleaned > cleanup-marker"}
+	st.projects["mer"] = project
+	result, err := m.Cleanup(ctx, "mer")
+	if err != nil || len(result.Cleaned) != 1 || ws.destroyed != 1 {
+		t.Fatalf("retry cleanup result=%+v err=%v destroyed=%d", result, err, ws.destroyed)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "cleanup-marker")); err != nil {
+		t.Fatalf("cleanup script did not run in workspace: %v", err)
+	}
+}
+
 // A caller that gives up must not take the teardown down with it. The REST
 // layer caps a request at cfg.RequestTimeout, and a session whose worktree
 // carries a large ignored tree used to run past that: the request context was
@@ -4301,6 +4377,28 @@ func TestRestore_ScratchAllowsEmptyBranch(t *testing.T) {
 	}
 }
 
+func TestRestoreRecreatedWorkspaceRunsSetupOnce(t *testing.T) {
+	m, _, _, _ := newManager()
+	managed := filepath.Join(t.TempDir(), "workspaces")
+	adapter, err := scratch.New(scratch.Options{ManagedRoot: managed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.workspace = adapter
+	workspace := filepath.Join(managed, "scratch", "workers", "scratch-1")
+	project := domain.ProjectRecord{ID: "scratch", Kind: domain.ProjectKindScratch, Path: t.TempDir(), Config: domain.ProjectConfig{PostCreate: []string{"echo setup >> setup-runs"}}}
+	rec := domain.SessionRecord{ID: "scratch-1", ProjectID: "scratch", Kind: domain.KindWorker, Metadata: domain.SessionMetadata{WorkspacePath: workspace}}
+	for i := 0; i < 2; i++ {
+		if _, err := m.restoreSessionWorkspace(context.Background(), project, rec); err != nil {
+			t.Fatalf("restore %d: %v", i+1, err)
+		}
+	}
+	output, err := os.ReadFile(filepath.Join(workspace, "setup-runs"))
+	if err != nil || strings.Count(string(output), "setup") != 1 {
+		t.Fatalf("setup runs = %q, err = %v", output, err)
+	}
+}
+
 func TestRestore_WorkspaceProjectRestoresChildrenAndRecordsInventory(t *testing.T) {
 	m, st, rt, ws := newManager()
 	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Path: "/repo/mer", Kind: domain.ProjectKindWorkspace, Config: testRoleAgents()}
@@ -4763,96 +4861,6 @@ func TestCleanup_SkipsWorkspaceReleaseWhenShellTerminalsWontClose(t *testing.T) 
 	}
 }
 
-// The durable half of the same fact. Reporting a refusal in the response body
-// only tells whoever made the call; session_cleanup_facts is what lets anything
-// else — a reaper, a later pass, an operator who was never at the terminal —
-// enumerate the workspaces still owed removal. The table has existed since
-// migration 0030 with nothing writing it.
-//
-// These read the persisted disposition back rather than asserting a write
-// happened, and cover every terminal path Cleanup can take, because a table
-// that records only some outcomes looks authoritative while being incomplete.
-func TestCleanup_RecordsWorkspaceDisposition(t *testing.T) {
-	t.Run("reclaimed workspace records removed", func(t *testing.T) {
-		m, st, _, _ := newManager()
-		seedTerminal(st, "mer-1", domain.SessionMetadata{WorkspacePath: "/ws/mer-1"})
-		if _, err := m.Cleanup(ctx, "mer"); err != nil {
-			t.Fatalf("cleanup: %v", err)
-		}
-		got, ok, _ := st.GetSessionCleanupFacts(ctx, "mer-1")
-		if !ok || got.WorkspaceDisposition != domain.DispositionRemoved {
-			t.Fatalf("disposition = %q (found=%v), want removed", got.WorkspaceDisposition, ok)
-		}
-		if got.AttemptCount != 1 || got.LastAttemptAt.IsZero() {
-			t.Fatalf("attempt bookkeeping = %d / %v, want 1 and a timestamp", got.AttemptCount, got.LastAttemptAt)
-		}
-		// Nothing schedules retries, so claiming a next attempt would be fiction.
-		if !got.NextAttemptAt.IsZero() {
-			t.Fatalf("NextAttemptAt = %v, want zero while no scheduler reads it", got.NextAttemptAt)
-		}
-	})
-
-	t.Run("dirty worktree records preserved_dirty", func(t *testing.T) {
-		m, st, _, ws := newManager()
-		seedTerminal(st, "mer-1", domain.SessionMetadata{WorkspacePath: "/ws/mer-1"})
-		ws.destroyErr = fmt.Errorf("gitworktree: refusing to remove: %w", ports.ErrWorkspaceDirty)
-		if _, err := m.Cleanup(ctx, "mer"); err != nil {
-			t.Fatalf("cleanup: %v", err)
-		}
-		got, ok, _ := st.GetSessionCleanupFacts(ctx, "mer-1")
-		if !ok || got.WorkspaceDisposition != domain.DispositionPreservedDirty {
-			t.Fatalf("disposition = %q (found=%v), want preserved_dirty", got.WorkspaceDisposition, ok)
-		}
-	})
-
-	// A non-dirty teardown failure stays pending, NOT failed. DispositionFailed
-	// means "exhausted after the retry cap, auto-retry stopped" (domain/cleanup.go)
-	// and no retry cap exists — the next pass will try again. Recording failed
-	// would have the table assert a workspace was abandoned while it is still owed.
-	t.Run("non-dirty failure stays pending, never failed", func(t *testing.T) {
-		m, st, _, ws := newManager()
-		seedTerminal(st, "mer-1", domain.SessionMetadata{WorkspacePath: "/ws/mer-1"})
-		ws.destroyErr = fmt.Errorf("disk on fire")
-		if _, err := m.Cleanup(ctx, "mer"); err != nil {
-			t.Fatalf("cleanup: %v", err)
-		}
-		got, _, _ := st.GetSessionCleanupFacts(ctx, "mer-1")
-		if got.WorkspaceDisposition == domain.DispositionFailed {
-			t.Fatal("recorded failed: that claims auto-retry stopped, but nothing caps retries")
-		}
-		if got.WorkspaceDisposition != domain.DispositionPending {
-			t.Fatalf("disposition = %q, want pending", got.WorkspaceDisposition)
-		}
-	})
-
-	t.Run("session with no workspace records not_applicable", func(t *testing.T) {
-		m, st, _, _ := newManager()
-		seedTerminal(st, "mer-1", domain.SessionMetadata{})
-		if _, err := m.Cleanup(ctx, "mer"); err != nil {
-			t.Fatalf("cleanup: %v", err)
-		}
-		got, ok, _ := st.GetSessionCleanupFacts(ctx, "mer-1")
-		if !ok || got.WorkspaceDisposition != domain.DispositionNotApplicable {
-			t.Fatalf("disposition = %q (found=%v), want not_applicable", got.WorkspaceDisposition, ok)
-		}
-	})
-
-	t.Run("repeated passes accumulate attempts", func(t *testing.T) {
-		m, st, _, ws := newManager()
-		seedTerminal(st, "mer-1", domain.SessionMetadata{WorkspacePath: "/ws/mer-1"})
-		ws.destroyErr = fmt.Errorf("gitworktree: refusing to remove: %w", ports.ErrWorkspaceDirty)
-		for i := 0; i < 3; i++ {
-			if _, err := m.Cleanup(ctx, "mer"); err != nil {
-				t.Fatalf("cleanup %d: %v", i, err)
-			}
-		}
-		got, _, _ := st.GetSessionCleanupFacts(ctx, "mer-1")
-		if got.AttemptCount != 3 {
-			t.Fatalf("AttemptCount = %d after 3 passes, want 3", got.AttemptCount)
-		}
-	})
-}
-
 // TestCleanup_ReportsSkippedWorkspaces: a refused teardown must be visible in
 // the result with a reason — a silent skip leaves users staring at
 // "Would clean N … 0 sessions cleaned" with no explanation.
@@ -5135,40 +5143,6 @@ func TestCleanup_WorkspaceProjectDirtyRowsAreSkipped(t *testing.T) {
 	}
 	if states["api"] != "" || refs["api"] != "" {
 		t.Fatalf("api state/ref = %q/%q, want unchanged dirty row", states["api"], refs["api"])
-	}
-}
-
-// TestCleanup_SkipsWorktreeSharedWithLiveSession locks the guard against the
-// orchestrator-worktree stomp: orchestrator worktrees are a per-project
-// singleton keyed on project+prefix, so a terminated orchestrator row shares its
-// WorkspacePath with the active one. Cleanup must NOT reclaim that shared path —
-// destroying it deletes the live agent's working directory out from under it.
-func TestCleanup_SkipsWorktreeSharedWithLiveSession(t *testing.T) {
-	m, st, _, ws := newManager()
-	const shared = "/ws/mer/orchestrator/mer-orchestrator"
-	// A terminated orchestrator row and the live one resolve to the SAME worktree.
-	seedTerminal(st, "mer-1", domain.SessionMetadata{WorkspacePath: shared, Branch: "ao/mer-orchestrator"})
-	st.sessions["mer-2"] = domain.SessionRecord{
-		ID: "mer-2", ProjectID: "mer", Kind: domain.KindOrchestrator,
-		Metadata: domain.SessionMetadata{WorkspacePath: shared, Branch: "ao/mer-orchestrator", RuntimeHandleID: "mer-2"},
-		Activity: domain.Activity{State: domain.ActivityActive},
-	}
-
-	res, err := m.Cleanup(ctx, "mer")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ws.destroyed != 0 {
-		t.Fatalf("Destroy calls = %d, want 0 (shared live worktree must be preserved)", ws.destroyed)
-	}
-	if len(res.Cleaned) != 0 {
-		t.Fatalf("cleaned = %v, want none (path is in use)", res.Cleaned)
-	}
-	if len(res.Skipped) != 1 || res.Skipped[0].SessionID != "mer-1" {
-		t.Fatalf("skipped = %v, want [mer-1]", res.Skipped)
-	}
-	if res.Skipped[0].Reason != "workspace in use by a live session" {
-		t.Fatalf("reason = %q", res.Skipped[0].Reason)
 	}
 }
 
@@ -5750,6 +5724,34 @@ func TestSpawnWorker_PromptFileFailureBlocksFileOnlyHarness(t *testing.T) {
 	}
 }
 
+func TestSpawnWorker_PromptFileFailureBlocksCommandCode(t *testing.T) {
+	st := newFakeStore()
+	agent := &recordingAgent{}
+	dataDir := blockedDataDir(t)
+	lookPath := func(string) (string, error) { return "/bin/true", nil }
+	m := New(Deps{
+		Runtime:   &fakeRuntime{},
+		Agents:    singleAgent{agent: agent},
+		Workspace: &fakeWorkspace{},
+		Store:     st,
+		Messenger: &fakeMessenger{},
+		Lifecycle: &fakeLCM{store: st},
+		DataDir:   dataDir,
+		LookPath:  lookPath,
+	})
+
+	_, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessCommandCode, Prompt: "do it"})
+	if err == nil {
+		t.Fatal("Spawn succeeded, want prompt-file error for Command Code")
+	}
+	if !strings.Contains(err.Error(), "system prompt file") {
+		t.Fatalf("Spawn err = %v, want system prompt file error", err)
+	}
+	if _, ok := st.sessions["mer-1"]; ok {
+		t.Fatal("seed row still exists after prompt-file failure")
+	}
+}
+
 func TestSpawnWorker_SkipsTerminatedOrchestratorContact(t *testing.T) {
 	st := newFakeStore()
 	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
@@ -5813,8 +5815,22 @@ func TestSpawnOrchestrator_UsesCoordinatorPrompt(t *testing.T) {
 			t.Fatalf("system prompt missing %q:\n%s", want, systemPrompt)
 		}
 	}
-	if words := len(strings.Fields(m.aoSkillPointer())); words > 220 {
-		t.Fatalf("always-on AO skill pointer grew to %d words; keep details in routed command guides:\n%s", words, m.aoSkillPointer())
+	// This orchestrator runs in a terminal, where the html tools and ao render
+	// do not exist, so its prompt does not send it looking for them.
+	if strings.Contains(systemPrompt, "## Showing pages in chat") {
+		t.Fatalf("terminal session prompt names the chat-only html tools:\n%s", systemPrompt)
+	}
+	chatPointer := m.aoSkillPointer(true)
+	for _, want := range []string{
+		"When a chart, table, diagram, or mockup is clearer than text, call `html_preview`, then `html_render`. If you cannot see them, search your tools for them. If you find nothing, read `",
+		"` and use `ao render`. Do not use a built-in visualize skill.",
+	} {
+		if !strings.Contains(chatPointer, want) {
+			t.Fatalf("chat pointer missing %q:\n%s", want, chatPointer)
+		}
+	}
+	if words := len(strings.Fields(chatPointer)); words > 260 {
+		t.Fatalf("always-on AO skill pointer grew to %d words; keep details in routed command guides:\n%s", words, chatPointer)
 	}
 	if strings.Contains(agent.lastLaunch.Prompt, "You are the human-facing orchestrator") {
 		t.Fatalf("coordinator role must not be in the user prompt:\n%s", agent.lastLaunch.Prompt)
@@ -5920,47 +5936,6 @@ func TestSpawnWorker_WorkspaceProjectPromptListsRepos(t *testing.T) {
 	}
 }
 
-func TestBuildSystemPrompt_OrchestratorUsesConfiguredPrompt(t *testing.T) {
-	st := newFakeStore()
-	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: domain.ProjectConfig{OrchestratorPrompt: "CUSTOM ORCHESTRATOR RULES"}}
-	lookPath := func(string) (string, error) { return "/bin/true", nil }
-	m := New(Deps{Runtime: &fakeRuntime{}, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{}, Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st}, LookPath: lookPath})
-
-	sp, err := m.buildSystemPrompt(ctx, domain.KindOrchestrator, "mer", "mer-1")
-	if err != nil {
-		t.Fatalf("buildSystemPrompt: %v", err)
-	}
-	if !strings.Contains(sp, "CUSTOM ORCHESTRATOR RULES") {
-		t.Fatalf("system prompt missing configured prompt:\n%s", sp)
-	}
-	if strings.Contains(sp, "You are the human-facing orchestrator") {
-		t.Fatalf("configured prompt must REPLACE the built-in role:\n%s", sp)
-	}
-	if !strings.Contains(sp, "Standing-instruction confidentiality") {
-		t.Fatalf("guard must still be appended:\n%s", sp)
-	}
-}
-
-func TestBuildSystemPrompt_OrchestratorFallsBackWhenUnset(t *testing.T) {
-	st := newFakeStore()
-	st.projects["mer"] = domain.ProjectRecord{ID: "mer"}
-	lookPath := func(string) (string, error) { return "/bin/true", nil }
-	m := New(Deps{Runtime: &fakeRuntime{}, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{}, Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st}, LookPath: lookPath})
-
-	sp, err := m.buildSystemPrompt(ctx, domain.KindOrchestrator, "mer", "mer-1")
-	if err != nil {
-		t.Fatalf("buildSystemPrompt: %v", err)
-	}
-	if !strings.Contains(sp, "You are the human-facing orchestrator for project mer") {
-		t.Fatalf("expected built-in orchestrator prompt:\n%s", sp)
-	}
-}
-
-// TestSystemPrompt_AppendsConfidentialityGuard: every non-empty system prompt
-// must carry the guard that tells the agent not to reveal its standing
-// instructions on request. Without it, "give me your system prompt" dumps the
-// role block verbatim. Covers orchestrator and both worker variants, since all
-// three are assembled through buildSystemPrompt.
 func TestSystemPrompt_AppendsConfidentialityGuard(t *testing.T) {
 	cases := []struct {
 		name string
@@ -5982,7 +5957,7 @@ func TestSystemPrompt_AppendsConfidentialityGuard(t *testing.T) {
 			lookPath := func(string) (string, error) { return "/bin/true", nil }
 			m := New(Deps{Runtime: &fakeRuntime{}, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{}, Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st}, LookPath: lookPath})
 
-			sp, err := m.buildSystemPrompt(ctx, tc.kind, "mer", "mer-1")
+			sp, err := m.buildSystemPrompt(ctx, tc.kind, "mer", "mer-1", "", false)
 			if err != nil {
 				t.Fatalf("buildSystemPrompt: %v", err)
 			}
@@ -6000,16 +5975,6 @@ func TestSystemPrompt_AppendsConfidentialityGuard(t *testing.T) {
 			}
 			if !strings.Contains(sp, filepath.ToSlash(filepath.Join("skills", "using-ao", "SKILL.md"))) {
 				t.Fatalf("%s: system prompt missing using-ao skill pointer:\n%s", tc.name, sp)
-			}
-			// The instruction-trust & containment guard is the behavioral fix for
-			// the multi-session provenance over-containment. It must reach every
-			// session — the injection that triggered the incident hit a worker's
-			// channel — so it is asserted here alongside the confidentiality guard.
-			if !strings.Contains(sp, "Instruction trust & containment") {
-				t.Fatalf("%s: system prompt missing instruction-trust guard:\n%s", tc.name, sp)
-			}
-			if !strings.Contains(sp, "gating on the consequence of an action, not by guessing its origin") {
-				t.Fatalf("%s: system prompt missing consequence-gating directive:\n%s", tc.name, sp)
 			}
 			if !strings.Contains(sp, "AO desktop Browser panel") || !strings.Contains(sp, "agent.browsers.get(\"iab\")") {
 				t.Fatalf("%s: system prompt missing AO browser routing guidance:\n%s", tc.name, sp)
@@ -6044,7 +6009,7 @@ func TestSystemPrompt_AppendsArtifactGuidance(t *testing.T) {
 		LookPath:  lookPath,
 	})
 
-	sp, err := m.buildSystemPrompt(ctx, domain.KindWorker, "mer", "mer-7")
+	sp, err := m.buildSystemPrompt(ctx, domain.KindWorker, "mer", "mer-7", "", false)
 	if err != nil {
 		t.Fatalf("buildSystemPrompt: %v", err)
 	}
@@ -6066,6 +6031,132 @@ func TestSystemPrompt_AppendsArtifactGuidance(t *testing.T) {
 	}
 	if strings.Contains(sp, "naturally document-shaped") {
 		t.Fatal("system prompt must not require files for ordinary summaries")
+	}
+	// Only a chat session has a thread to show a page in.
+	const inThread = "it does not belong in the workspace at all. In a chat session, a chart, table, or diagram that answers a question goes in the thread with `html_render`, not into this directory."
+	if strings.Contains(sp, "html_render") {
+		t.Fatalf("terminal session prompt names html_render:\n%s", sp)
+	}
+	chatPrompt, err := m.buildSystemPrompt(ctx, domain.KindWorker, "mer", "mer-7", "", true)
+	if err != nil {
+		t.Fatalf("buildSystemPrompt chat: %v", err)
+	}
+	if !strings.Contains(chatPrompt, inThread) {
+		t.Fatalf("chat session prompt missing %q", inThread)
+	}
+}
+
+func TestSystemPrompt_ArtifactRequestedOutput(t *testing.T) {
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Path: t.TempDir(), Config: testRoleAgents()}
+	lookPath := func(string) (string, error) { return "/bin/true", nil }
+	m := New(Deps{Runtime: &fakeRuntime{}, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{}, Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st}, DataDir: t.TempDir(), LookPath: lookPath})
+
+	cases := []struct {
+		name            string
+		kind            domain.SessionKind
+		projectID       domain.ProjectID
+		requestedOutput domain.RequestedOutput
+		want            bool
+	}{
+		{name: "ordinary worker", kind: domain.KindWorker, projectID: "mer"},
+		{name: "artifact worker", kind: domain.KindWorker, projectID: "mer", requestedOutput: domain.RequestedOutputArtifact, want: true},
+		{name: "artifact standalone worker", kind: domain.KindWorker, requestedOutput: domain.RequestedOutputArtifact, want: true},
+		{name: "orchestrator ignores artifact", kind: domain.KindOrchestrator, projectID: "mer", requestedOutput: domain.RequestedOutputArtifact},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sp, err := m.buildSystemPrompt(ctx, tc.kind, tc.projectID, "mer-7", tc.requestedOutput, true)
+			if err != nil {
+				t.Fatalf("buildSystemPrompt: %v", err)
+			}
+			if got := strings.Contains(sp, "## Artifact Output"); got != tc.want {
+				t.Fatalf("artifact output section present = %v, want %v:\n%s", got, tc.want, sp)
+			}
+			if tc.want && !strings.Contains(sp, "Do not open a pull request") {
+				t.Fatalf("artifact output section missing the no-PR rule:\n%s", sp)
+			}
+		})
+	}
+}
+
+func TestSystemPrompt_ArtifactRequestedOutputWithoutArtifactDir(t *testing.T) {
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Path: t.TempDir(), Config: testRoleAgents()}
+	lookPath := func(string) (string, error) { return "/bin/true", nil }
+	// No DataDir: artifactPrompt has no directory to name.
+	m := New(Deps{Runtime: &fakeRuntime{}, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{}, Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st}, LookPath: lookPath})
+
+	sp, err := m.buildSystemPrompt(ctx, domain.KindWorker, "mer", "mer-7", domain.RequestedOutputArtifact, false)
+	if err != nil {
+		t.Fatalf("buildSystemPrompt: %v", err)
+	}
+	if strings.Contains(sp, "## Session Artifacts") {
+		t.Fatalf("expected no artifact dir section without a data dir:\n%s", sp)
+	}
+	if !strings.Contains(sp, "## Artifact Output") {
+		t.Fatalf("artifact output section dropped without an artifact dir:\n%s", sp)
+	}
+}
+
+func TestSpawnWorker_ArtifactOutputRequiresArtifactDir(t *testing.T) {
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
+	agent := &recordingAgent{}
+	lookPath := func(string) (string, error) { return "/bin/true", nil }
+	m := New(Deps{Runtime: &fakeRuntime{}, Agents: singleAgent{agent: agent}, Workspace: &fakeWorkspace{}, Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st}, LookPath: lookPath})
+
+	_, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, RequestedOutput: domain.RequestedOutputArtifact})
+	if !errors.Is(err, ErrArtifactOutputUnavailable) {
+		t.Fatalf("Spawn err = %v, want ErrArtifactOutputUnavailable", err)
+	}
+	if len(st.sessions) != 0 {
+		t.Fatalf("rejected spawn created sessions: %v", st.sessions)
+	}
+	if agent.lastLaunch.SystemPrompt != "" {
+		t.Fatal("rejected spawn launched an agent")
+	}
+}
+
+func TestSpawnWorker_ArtifactRequestedOutputPersistsAndReachesPrompt(t *testing.T) {
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
+	agent := &recordingAgent{}
+	lookPath := func(string) (string, error) { return "/bin/true", nil }
+	m := New(Deps{Runtime: &fakeRuntime{}, Agents: singleAgent{agent: agent}, Workspace: &fakeWorkspace{}, Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st}, DataDir: t.TempDir(), LookPath: lookPath})
+
+	rec, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, RequestedOutput: domain.RequestedOutputArtifact})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.RequestedOutput != domain.RequestedOutputArtifact {
+		t.Fatalf("RequestedOutput = %q, want artifact", rec.RequestedOutput)
+	}
+	if !strings.Contains(agent.lastLaunch.SystemPrompt, "## Artifact Output") {
+		t.Fatalf("spawn system prompt missing artifact output section:\n%s", agent.lastLaunch.SystemPrompt)
+	}
+	if strings.Contains(agent.lastLaunch.Prompt, "## Artifact Output") {
+		t.Fatalf("artifact output section must not be in the task prompt:\n%s", agent.lastLaunch.Prompt)
+	}
+}
+
+func TestRestore_WorkerKeepsArtifactOutputPrompt(t *testing.T) {
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
+	st.sessions["mer-1"] = domain.SessionRecord{
+		ID: "mer-1", ProjectID: "mer", Kind: domain.KindWorker, IsTerminated: true,
+		RequestedOutput: domain.RequestedOutputArtifact,
+		Metadata:        domain.SessionMetadata{WorkspacePath: "/ws/mer-1", Branch: "b", AgentSessionID: "agent-x"},
+	}
+	agent := &recordingAgent{}
+	lookPath := func(string) (string, error) { return "/bin/true", nil }
+	m := New(Deps{Runtime: &fakeRuntime{}, Agents: singleAgent{agent: agent}, Workspace: &fakeWorkspace{}, Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st}, DataDir: t.TempDir(), LookPath: lookPath})
+
+	if _, err := m.RestoreWithMode(ctx, "mer-1"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(agent.lastRestore.SystemPrompt, "## Artifact Output") {
+		t.Fatalf("restore system prompt missing artifact output section:\n%s", agent.lastRestore.SystemPrompt)
 	}
 }
 
@@ -8172,8 +8263,8 @@ func TestRetireForReplacementCapturesAndReleasesWorkspace(t *testing.T) {
 	if stashIdx == -1 || deleteIdx == -1 || forceIdx == -1 {
 		t.Fatalf("missing expected calls in shared log: %v", sharedLog)
 	}
-	if stashIdx >= forceIdx || forceIdx >= deleteIdx {
-		t.Fatalf("replacement retire must capture, force release, then clear restore marker; log=%v", sharedLog)
+	if stashIdx >= deleteIdx || deleteIdx >= forceIdx {
+		t.Fatalf("replacement retire must capture and clear restore intent before workspace release; log=%v", sharedLog)
 	}
 	if len(browser.destroyed) != 1 || browser.destroyed[0] != "mer-orch" {
 		t.Fatalf("browser targets destroyed = %v, want mer-orch", browser.destroyed)
@@ -8443,8 +8534,8 @@ func TestRetireForReplacementStaleWorkspaceSkipsPreserveAndTerminates(t *testing
 	}
 	wantOrder := []string{
 		"StashUncommitted:mer-orch",
-		"ForceDestroy:mer-orch",
 		"DeleteSessionWorktrees:mer-orch",
+		"ForceDestroy:mer-orch",
 	}
 	next := 0
 	for _, call := range sharedLog {
@@ -8457,7 +8548,7 @@ func TestRetireForReplacementStaleWorkspaceSkipsPreserveAndTerminates(t *testing
 	}
 }
 
-func TestRetireForReplacementStaleWorkspaceCleanupFailureLeavesSessionActive(t *testing.T) {
+func TestRetireForReplacementStaleWorkspaceCleanupFailureTerminatesSession(t *testing.T) {
 	m, st, rt, ws := newLifecycleManager()
 	ws.stashErr = ports.ErrWorkspaceStale
 	ws.forceDestroyErr = errors.New("stale cleanup failed")
@@ -8480,11 +8571,11 @@ func TestRetireForReplacementStaleWorkspaceCleanupFailureLeavesSessionActive(t *
 	if err == nil || !strings.Contains(err.Error(), "force destroy") {
 		t.Fatalf("RetireForReplacement err = %v, want force destroy failure", err)
 	}
-	if st.sessions["mer-orch"].IsTerminated {
-		t.Fatal("session must remain active when stale cleanup fails")
+	if !st.sessions["mer-orch"].IsTerminated {
+		t.Fatal("stopped orchestrator must be terminated for cleanup retry")
 	}
-	if rows := st.worktrees["mer-orch"]; len(rows) != 1 {
-		t.Fatalf("restore markers after stale cleanup failure = %v, want retained", rows)
+	if rows := st.worktrees["mer-orch"]; len(rows) != 0 {
+		t.Fatalf("restore markers must be cleared before cleanup: %v", rows)
 	}
 	if rt.destroyed != 1 || rt.destroyedIDs[0] != "orch-handle" {
 		t.Fatalf("runtime destroyed = %d ids=%v, want orch-handle", rt.destroyed, rt.destroyedIDs)
@@ -8664,8 +8755,8 @@ func TestRetireForReplacementWorkspaceProjectForceDestroyFailureKeepsRepoInvento
 	if err == nil || !strings.Contains(err.Error(), "force destroy") {
 		t.Fatalf("RetireForReplacement err = %v, want force destroy failure", err)
 	}
-	if st.sessions["mer-orch"].IsTerminated {
-		t.Fatal("session must remain active when force destroy fails")
+	if !st.sessions["mer-orch"].IsTerminated {
+		t.Fatal("stopped orchestrator must be terminated for cleanup retry")
 	}
 	if rows := st.worktrees["mer-orch"]; len(rows) != 2 {
 		t.Fatalf("workspace repo inventory after force destroy failure = %v, want root and child retained", rows)
@@ -8698,15 +8789,15 @@ func TestRetireForReplacementWorkspaceProjectStaleCleanupFailureKeepsRepoInvento
 	if err == nil || !strings.Contains(err.Error(), "force destroy") {
 		t.Fatalf("RetireForReplacement err = %v, want force destroy failure", err)
 	}
-	if st.sessions["mer-orch"].IsTerminated {
-		t.Fatal("session must remain active when stale repo cleanup fails")
+	if !st.sessions["mer-orch"].IsTerminated {
+		t.Fatal("stopped orchestrator must be terminated for cleanup retry")
 	}
 	if rows := st.worktrees["mer-orch"]; len(rows) != 2 {
 		t.Fatalf("workspace repo inventory after stale cleanup failure = %v, want root and child retained", rows)
 	}
 }
 
-func TestRetireForReplacementForceDestroyFailureLeavesSessionActive(t *testing.T) {
+func TestRetireForReplacementForceDestroyFailureTerminatesSession(t *testing.T) {
 	m, st, rt, ws := newLifecycleManager()
 	ws.forceDestroyErr = errors.New("worktree still registered")
 	ws.stashRef = "refs/ao/preserved/mer-orch"
@@ -8729,8 +8820,8 @@ func TestRetireForReplacementForceDestroyFailureLeavesSessionActive(t *testing.T
 	if err == nil || !strings.Contains(err.Error(), "force destroy") {
 		t.Fatalf("RetireForReplacement err = %v, want force destroy failure", err)
 	}
-	if st.sessions["mer-orch"].IsTerminated {
-		t.Fatal("session must remain active so retry can retire it again")
+	if !st.sessions["mer-orch"].IsTerminated {
+		t.Fatal("stopped orchestrator must be terminated for cleanup retry")
 	}
 	if rt.destroyed != 1 {
 		t.Fatalf("runtime destroyed = %d, want 1 before workspace release", rt.destroyed)
@@ -9701,58 +9792,6 @@ func TestReconcileLive_AliveSessionAdoptedNoop(t *testing.T) {
 	}
 }
 
-// TestReconcileLive_AliveButMissingWorktreeRelaunches locks the guard against
-// blind-adopting a live session whose worktree was removed out from under it (a
-// sibling orchestrator session sharing the project worktree path was torn down,
-// an external `git worktree prune`, etc.). The running shell's cwd is a deleted
-// inode and cannot be healed in place, so reconcileLive must kill the orphan
-// runtime and record a shutdown-saved marker (with no preserve ref — uncommitted
-// work died with the directory) so RestoreAll re-creates the worktree from the
-// branch and relaunches the agent. It must NOT adopt.
-func TestReconcileLive_AliveButMissingWorktreeRelaunches(t *testing.T) {
-	st := newFakeStore()
-	rt := &fakeRuntime{aliveByHandle: map[string]bool{"s4": true}}
-	ws := &fakeWorkspace{worktreeMissing: true} // live runtime, but its worktree dir is gone
-	lcm := &fakeLCM{store: st}
-	lookPath := func(string) (string, error) { return "/bin/true", nil }
-	m := New(Deps{Runtime: rt, Agents: fakeAgents{}, Workspace: ws, Store: st, Messenger: &fakeMessenger{}, Lifecycle: lcm, LookPath: lookPath})
-
-	rec := domain.SessionRecord{
-		ID: "s4", ProjectID: "p1", IsTerminated: false,
-		Metadata: domain.SessionMetadata{Branch: "ao/sky-orchestrator", WorkspacePath: "/wt/s4", RuntimeHandleID: "s4"},
-	}
-
-	if err := m.reconcileLive(context.Background(), rec); err != nil {
-		t.Fatalf("reconcileLive: %v", err)
-	}
-	// The orphaned (live) runtime must be killed: its shell sits on a deleted inode.
-	if len(rt.destroyedIDs) != 1 || rt.destroyedIDs[0] != "s4" {
-		t.Fatalf("destroyedIDs = %v, want [s4] (orphan runtime killed)", rt.destroyedIDs)
-	}
-	// Marked terminated + a restore marker so RestoreAll re-provisions and relaunches.
-	if lcm.terminated["s4"] != 1 {
-		t.Fatalf("MarkTerminated(s4) = %d, want 1", lcm.terminated["s4"])
-	}
-	rows := st.worktrees["s4"]
-	if len(rows) != 1 {
-		t.Fatalf("session_worktrees marker for s4 = %+v, want one row", rows)
-	}
-	// Nothing to capture from a deleted directory.
-	if ws.stashCalls != 0 {
-		t.Fatalf("StashUncommitted calls = %d, want 0 (directory is gone)", ws.stashCalls)
-	}
-	// The stale worktree registration must be cleared so RestoreAll recreates clean.
-	foundForceDestroy := false
-	for _, c := range ws.calls {
-		if c == "ForceDestroy:s4" {
-			foundForceDestroy = true
-		}
-	}
-	if !foundForceDestroy {
-		t.Fatalf("reconcileLive must ForceDestroy to clear the stale registration; calls = %v", ws.calls)
-	}
-}
-
 // TestReconcileLive_InterruptedSpawnSeedRowIsRemoved covers a daemon that died
 // between Spawn's CreateSession and its MarkSpawned commit (e.g. the desktop
 // app was closed while "Preparing the worker terminal" was still creating the
@@ -9881,6 +9920,9 @@ func TestReconcileStartupSafetyDefersRuntimeReconciliation(t *testing.T) {
 	}
 }
 
+// TestReconcileLive_ProbeErrorIsNotDeath locks the invariant that a failed
+// IsAlive probe is NOT treated as proof that the session is dead. reconcileLive
+// must propagate the error and must NOT stash, terminate, or destroy.
 func TestReconcileLive_ProbeErrorIsNotDeath(t *testing.T) {
 	st := newFakeStore()
 	rt := &fakeRuntime{aliveErr: errors.New("probe boom")}
@@ -11300,6 +11342,73 @@ func TestSendRecordsInteractionOnlyForDirectTerminalSender(t *testing.T) {
 			}
 			if counter.calls != tc.want {
 				t.Fatalf("interaction writes=%d want=%d", counter.calls, tc.want)
+			}
+		})
+	}
+}
+
+func (f *fakeStore) UpsertSessionCleanupFacts(_ context.Context, rec domain.SessionCleanupRecord) error {
+	f.cleanupMu.Lock()
+	defer f.cleanupMu.Unlock()
+	if f.cleanupFacts == nil {
+		f.cleanupFacts = make(map[domain.SessionID]domain.SessionCleanupRecord)
+	}
+	f.cleanupFacts[rec.SessionID] = rec
+	return nil
+}
+func (f *fakeStore) GetSessionCleanupFacts(_ context.Context, id domain.SessionID) (domain.SessionCleanupRecord, bool, error) {
+	f.cleanupMu.Lock()
+	defer f.cleanupMu.Unlock()
+	rec, ok := f.cleanupFacts[id]
+	return rec, ok, nil
+}
+
+func TestOrchestratorWorkspaceBranchCollision(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		kind         domain.SessionKind
+		explicit     bool
+		wantFallback bool
+	}{
+		{name: "generated orchestrator branch", kind: domain.KindOrchestrator, wantFallback: true},
+		{name: "explicit orchestrator branch", kind: domain.KindOrchestrator, explicit: true},
+		{name: "worker branch", kind: domain.KindWorker},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, st, _, repo := newGitTaskPreparationManager(t)
+			project := st.projects["mer"]
+			branch := "ao/mer-orchestrator"
+			occupied := filepath.Join(t.TempDir(), "occupied")
+			runManagerGit(t, repo, "worktree", "add", "-b", branch, occupied, "main")
+			runManagerGit(t, repo, "branch", branch+"-2", "main")
+			dirtyPath := filepath.Join(occupied, "README.md")
+			if err := os.WriteFile(dirtyPath, []byte("existing agent work\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg := ports.SpawnConfig{ProjectID: "mer", Kind: tc.kind}
+			if tc.explicit {
+				cfg.Branch = branch
+			}
+			ws, _, err := m.createSessionWorkspace(ctx, project, cfg, "mer-1", branch, nil)
+			if tc.wantFallback {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if ws.Branch != branch+"-3" || ws.Path == occupied {
+					t.Fatalf("new workspace = %+v", ws)
+				}
+				reused, _, err := m.createSessionWorkspace(ctx, project, cfg, "mer-2", branch, nil)
+				if err != nil || reused.Path != ws.Path || reused.Branch != ws.Branch {
+					t.Fatalf("reuse workspace = %+v, err = %v", reused, err)
+				}
+			} else if !errors.Is(err, ports.ErrWorkspaceBranchCheckedOutElsewhere) {
+				t.Fatalf("error = %v, want branch conflict", err)
+			}
+			if got := strings.TrimSpace(runManagerGit(t, occupied, "branch", "--show-current")); got != branch {
+				t.Fatalf("occupied branch changed to %q", got)
+			}
+			if content, err := os.ReadFile(dirtyPath); err != nil || string(content) != "existing agent work\n" {
+				t.Fatalf("existing work changed: %q, %v", content, err)
 			}
 		})
 	}

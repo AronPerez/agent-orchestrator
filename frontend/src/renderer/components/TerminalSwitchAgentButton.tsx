@@ -1,24 +1,14 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { Check, ChevronRight, LoaderCircle, Repeat2, TriangleAlert } from "lucide-react";
+import { LoaderCircle, Repeat2, TriangleAlert } from "lucide-react";
 import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
-import {
-	clearSwitchAgentState,
-	createSwitchAgentIdempotencyKey,
-	useSwitchAgent,
-} from "../hooks/useSwitchAgent";
+import { clearSwitchAgentState } from "../hooks/useSwitchAgent";
 import type { AgentSwitchPresentation } from "../lib/agent-switch-presentation";
 import { cn } from "../lib/utils";
 import { sessionIsActive, type AgentSwitchSummary, type WorkspaceSession } from "../types/workspace";
-import { AgentAvatar } from "./AgentAvatar";
-import { canSwitchAgentHarness, SWITCH_AGENT_OPTIONS, SwitchAgentDialog } from "./SwitchAgentDialog";
+import { canSwitchAgentHarness, SwitchAgentDialog } from "./SwitchAgentDialog";
 import { TopbarButton } from "./TopbarButton";
-import {
-	DropdownMenuItem,
-	DropdownMenuSub,
-	DropdownMenuSubContent,
-	DropdownMenuSubTrigger,
-} from "./ui/dropdown-menu";
+import { DropdownMenuItem } from "./ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
 type TerminalSwitchAgentButtonProps = {
@@ -33,16 +23,6 @@ type TerminalSwitchAgentButtonProps = {
 	variant?: "icon" | "menu-item";
 };
 
-export function canSwitchAgent(session: WorkspaceSession, presentation?: AgentSwitchPresentation): boolean {
-	const controlPresentation = presentation?.outcome === "success" ? undefined : presentation;
-	return (
-		session.kind === "worker" &&
-		!session.isTerminated &&
-		canSwitchAgentHarness(session.provider) &&
-		(Boolean(controlPresentation) || sessionIsActive(session))
-	);
-}
-
 export function TerminalSwitchAgentButton({
 	agentSwitch,
 	container,
@@ -56,17 +36,21 @@ export function TerminalSwitchAgentButton({
 }: TerminalSwitchAgentButtonProps) {
 	const { t } = useTranslation();
 	const queryClient = useQueryClient();
-	const switchAgent = useSwitchAgent();
 	const controlPresentation = presentation?.outcome === "success" ? undefined : presentation;
 	const switching = controlPresentation?.outcome === "in_progress";
 	const warning = controlPresentation?.outcome === "failure" || controlPresentation?.outcome === "recovery";
-	const blocksNewSwitch = switching || disabled || switchAgent.isPending;
+	const blocksNewSwitch = switching || disabled;
 
 	useEffect(() => {
 		if (switchError) onOpenChange?.(true);
 	}, [onOpenChange, switchError]);
 
-	if (!canSwitchAgent(session, controlPresentation)) {
+	if (
+		session.kind !== "worker" ||
+		session.isTerminated ||
+		!canSwitchAgentHarness(session.provider, session.mode) ||
+		(!controlPresentation && !sessionIsActive(session))
+	) {
 		return null;
 	}
 
@@ -76,7 +60,7 @@ export function TerminalSwitchAgentButton({
 	const handleOpenChange = (nextOpen: boolean) => {
 		onOpenChange?.(nextOpen);
 		if (!nextOpen && switchError) {
-			clearSwitchAgentState(queryClient, session);
+			clearSwitchAgentState(queryClient, session.id, session.hostId);
 		}
 	};
 
@@ -90,43 +74,7 @@ export function TerminalSwitchAgentButton({
 
 	return (
 		<>
-			{variant === "menu-item" && !controlPresentation ? (
-				<DropdownMenuSub>
-					<DropdownMenuSubTrigger disabled={blocksNewSwitch}>
-						{icon}
-						{label}
-						<ChevronRight aria-hidden="true" className="ml-auto !size-icon-sm" />
-					</DropdownMenuSubTrigger>
-					<DropdownMenuSubContent>
-						{SWITCH_AGENT_OPTIONS.map((option) => {
-							const current = option.value === session.provider;
-							return (
-								<DropdownMenuItem
-									key={option.value}
-									disabled={current || blocksNewSwitch}
-									onSelect={() =>
-										switchAgent.mutate({
-											session,
-											targetHarness: option.value,
-											model: "",
-											idempotencyKey: createSwitchAgentIdempotencyKey(),
-										})
-									}
-								>
-									<AgentAvatar className="size-icon-base" decorative provider={option.value} />
-									<span className="flex-1">{option.label}</span>
-									{current ? (
-										<>
-											<Check aria-hidden="true" className="!size-icon-sm" />
-											{t("switchAgent.current")}
-										</>
-									) : null}
-								</DropdownMenuItem>
-							);
-						})}
-					</DropdownMenuSubContent>
-				</DropdownMenuSub>
-			) : variant === "menu-item" ? (
+			{variant === "menu-item" ? (
 				<DropdownMenuItem
 					className={cn(warning && "text-warning focus:text-warning [&_svg]:text-warning")}
 					disabled={blocksNewSwitch}

@@ -139,7 +139,7 @@ Orchestrator.inc는 이미 사용 중인 코딩 에이전트와 소스 제어 �
     <td valign="middle" nowrap><img src="../frontend/src/renderer/assets/agents/goose.svg" alt="Goose" width="24" height="24" align="middle" /> &nbsp; <b>Goose</b></td>
   </tr>
   <tr valign="middle">
-    <td valign="middle" nowrap><img src="../frontend/src/renderer/assets/agents/qwen.png" alt="Qwen" width="24" height="24" align="middle" /> &nbsp; <b>Qwen</b></td>
+    <td valign="middle" nowrap><img src="../frontend/src/renderer/assets/agents/qwen.svg" alt="Qwen" width="24" height="24" align="middle" /> &nbsp; <b>Qwen</b></td>
     <td valign="middle" nowrap><img src="../frontend/src/renderer/assets/agents/continue.png" alt="Continue" width="24" height="24" align="middle" /> &nbsp; <b>Continue</b></td>
     <td valign="middle" nowrap><img src="../frontend/src/renderer/assets/agents/devin.png" alt="Devin" width="24" height="24" align="middle" /> &nbsp; <b>Devin</b></td>
   </tr>
@@ -225,7 +225,7 @@ cd agent-orchestrator
 
 ## 제품 텔레메트리
 
-이 포크는 사용 분석 데이터나 충돌 보고서를 전송하지 않습니다. 로컬 진단과 업데이트 확인을 포함한 네트워크 기능은 유지됩니다. [자세히 보기](../docs/telemetry.md).
+Orchestrator.inc는 프로젝트 내용을 제외한 사용 및 안정성 지표를 수집합니다. 프로젝트의 GitHub 소유자와 로그인한 GitHub 사용자 이름은 개인을 식별할 수 있으므로 이 텔레메트리는 익명이 아닙니다. 텔레메트리를 끄면 이 정보 전송도 중단됩니다. [세부 정보와 설정](../docs/telemetry.md).
 
 ## 라이선스
 

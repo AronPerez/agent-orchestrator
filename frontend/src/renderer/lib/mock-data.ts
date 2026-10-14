@@ -1,3 +1,4 @@
+import type { CloudCpSessionChild } from "./cloud-cp";
 import type { PRState, PullRequestFacts, WorkspaceSummary } from "../types/workspace";
 import type { SessionPRSummary } from "../hooks/useSessionScmSummary";
 import type { ShellTerminal } from "../hooks/useShellTerminals";
@@ -5,6 +6,9 @@ import type { ShellTerminal } from "../hooks/useShellTerminals";
 const now = new Date().toISOString();
 const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60 * 1000).toISOString();
 const hoursAgo = (hours: number) => new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+const previewAuthorAvatarUrl = `data:image/svg+xml,${encodeURIComponent(
+	'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40"><rect width="40" height="40" rx="20" fill="#24292f"/><circle cx="20" cy="16" r="7" fill="#fff"/><path d="M8 36c1-8 6-12 12-12s11 4 12 12" fill="#fff"/></svg>',
+)}`;
 
 const demoPr = (
 	number: number,
@@ -28,7 +32,6 @@ const demoPr = (
 // enough to exercise the tab strip's layout, selection, and close control.
 export const mockShellTerminals: ShellTerminal[] = [
 	{
-		host: "local",
 		handleId: "shellterm-demo-1",
 		projectId: "ao-demo",
 		workingDir: "/Users/demo/Projects/ao-demo",
@@ -39,7 +42,6 @@ export const mockShellTerminals: ShellTerminal[] = [
 
 export const mockWorkspaces: WorkspaceSummary[] = [
 	{
-		host: "local",
 		id: "ao-demo",
 		name: "ao-demo",
 		path: "/demo/ao-demo",
@@ -48,7 +50,6 @@ export const mockWorkspaces: WorkspaceSummary[] = [
 		accentColor: "var(--color-project-accent-mint)",
 		sessions: [
 			{
-				host: "local",
 				id: "ao-demo-orchestrator",
 				terminalHandleId: "ao-demo-orchestrator/terminal_0",
 				workspaceId: "ao-demo",
@@ -66,7 +67,6 @@ export const mockWorkspaces: WorkspaceSummary[] = [
 				prs: [],
 			},
 			{
-				host: "local",
 				id: "demo-working",
 				terminalHandleId: "demo-working/terminal_0",
 				workspaceId: "ao-demo",
@@ -88,7 +88,6 @@ export const mockWorkspaces: WorkspaceSummary[] = [
 				prs: [],
 			},
 			{
-				host: "local",
 				id: "demo-needs-input",
 				terminalHandleId: "demo-needs-input/terminal_0",
 				workspaceId: "ao-demo",
@@ -110,7 +109,6 @@ export const mockWorkspaces: WorkspaceSummary[] = [
 				prs: [demoPr(318, "open", "passing", "changes_requested")],
 			},
 			{
-				host: "local",
 				id: "demo-review-stack",
 				terminalHandleId: "demo-review-stack/terminal_0",
 				workspaceId: "ao-demo",
@@ -140,7 +138,6 @@ export const mockWorkspaces: WorkspaceSummary[] = [
 				],
 			},
 			{
-				host: "local",
 				id: "demo-in-review",
 				terminalHandleId: "demo-in-review/terminal_0",
 				workspaceId: "ao-demo",
@@ -157,7 +154,6 @@ export const mockWorkspaces: WorkspaceSummary[] = [
 				prs: [demoPr(322, "open", "pending", "none", "unknown")],
 			},
 			{
-				host: "local",
 				id: "demo-ready",
 				terminalHandleId: "demo-ready/terminal_0",
 				workspaceId: "ao-demo",
@@ -178,7 +174,6 @@ export const mockWorkspaces: WorkspaceSummary[] = [
 				prs: [demoPr(323, "open", "passing", "approved")],
 			},
 			{
-				host: "local",
 				id: "demo-ci-failed",
 				terminalHandleId: "demo-ci-failed/terminal_0",
 				workspaceId: "ao-demo",
@@ -198,7 +193,6 @@ export const mockWorkspaces: WorkspaceSummary[] = [
 		],
 	},
 	{
-		host: "local",
 		id: "docs-site",
 		name: "docs-site",
 		path: "/demo/docs-site",
@@ -207,7 +201,6 @@ export const mockWorkspaces: WorkspaceSummary[] = [
 		accentColor: "var(--color-project-accent-sky)",
 		sessions: [
 			{
-				host: "local",
 				id: "docs-installation",
 				terminalHandleId: "docs-installation/terminal_0",
 				workspaceId: "docs-site",
@@ -224,7 +217,6 @@ export const mockWorkspaces: WorkspaceSummary[] = [
 				prs: [],
 			},
 			{
-				host: "local",
 				id: "docs-ready",
 				terminalHandleId: "docs-ready/terminal_0",
 				workspaceId: "docs-site",
@@ -256,7 +248,8 @@ const prSummary = (sessionId: string, number: number, overrides: Partial<Session
 		state: facts?.state ?? "open",
 		provider: "github",
 		repo: "Untrivial-ai/agent-orchestrator",
-		author: "preview-agent",
+		author: "octocat",
+		authorAvatarUrl: previewAuthorAvatarUrl,
 		sourceBranch: session?.branch ?? "",
 		targetBranch: "main",
 		headSha: `preview-${number}`,
@@ -324,6 +317,7 @@ export const mockSessionScmSummaries: Record<string, SessionPRSummary[]> = {
 	// tab's Pull request pane has something to show in the browser preview.
 	"demo-needs-input": [
 		prSummary("demo-needs-input", 318, {
+			authorAvatarUrl: undefined,
 			changedFiles: 2,
 			additions: 68,
 			deletions: 12,
@@ -486,11 +480,11 @@ export const mockSessionScmSummaries: Record<string, SessionPRSummary[]> = {
 				conflictFiles: [
 					{
 						path: "src/render/texture-cache.ts",
-						url: "https://github.com/me/webgl-preview/pull/51/conflicts#src-render-texture-cache-ts",
+						url: "https://github.com/me/webgl-preview/pull/51",
 					},
 					{
 						path: "src/render/webgl-context.ts",
-						url: "https://github.com/me/webgl-preview/pull/51/conflicts#src-render-webgl-context-ts",
+						url: "https://github.com/me/webgl-preview/pull/51",
 					},
 				],
 			},
@@ -597,5 +591,72 @@ export const mockSessionScmSummaries: Record<string, SessionPRSummary[]> = {
 				conflictFiles: [],
 			},
 		}),
+	],
+};
+
+// Children the demo orchestrator "spawned", for the inspector's Workers
+// section in browser preview mode (no control plane available there). Keyed by
+// orchestrator session id.
+const demoChild = (
+	id: string,
+	displayName: string,
+	status: string,
+	activityState: string,
+	prs: CloudCpSessionChild["prs"],
+	isTerminated = false,
+): CloudCpSessionChild => ({
+	id,
+	orgId: "demo-org",
+	projectId: "ao-demo",
+	kind: "worker",
+	harness: "claude-code",
+	displayName,
+	branch: `ao/${id.slice(0, 8)}`,
+	mode: "trusted",
+	interfaceMode: "tui",
+	deniedCommands: [],
+	activityState,
+	status,
+	runtimeConnected: !isTerminated,
+	isTerminated,
+	createdAt: hoursAgo(2),
+	updatedAt: minutesAgo(4),
+	prs,
+});
+
+export const mockOrchestratorChildren: Record<string, CloudCpSessionChild[]> = {
+	"ao-demo-orchestrator": [
+		demoChild("11111111-1111-4111-8111-111111111111", "Fix flaky CI", "ci_failed", "active", [
+			{
+				url: "https://github.com/me/ao-demo/pull/321",
+				number: 321,
+				state: "open",
+				ci: "failing",
+				review: "none",
+				mergeability: "unstable",
+				reviewComments: false,
+				updatedAt: minutesAgo(6),
+			},
+		]),
+		demoChild("22222222-2222-4222-8222-222222222222", "Dark mode toggle", "working", "active", []),
+		demoChild(
+			"33333333-3333-4333-8333-333333333333",
+			"Update onboarding copy",
+			"merged",
+			"idle",
+			[
+				{
+					url: "https://github.com/me/ao-demo/pull/318",
+					number: 318,
+					state: "merged",
+					ci: "passing",
+					review: "approved",
+					mergeability: "mergeable",
+					reviewComments: false,
+					updatedAt: hoursAgo(1),
+				},
+			],
+			true,
+		),
 	],
 };

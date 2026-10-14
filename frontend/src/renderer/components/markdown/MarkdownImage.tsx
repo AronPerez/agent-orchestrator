@@ -1,6 +1,7 @@
 import { useContext, useState } from "react";
 import { MarkdownFileContext } from "./markdown-file-context";
-import { resolveMarkdownImageSrc } from "../../lib/markdown-image-resolver";
+import { resolveArtifactImageSrc, resolveMarkdownImageSrc } from "../../lib/markdown-image-resolver";
+import { baseUrlForHost } from "../../lib/host-clients";
 
 /**
  * react-markdown's `img` override: resolves a worktree-relative `src` via the
@@ -17,17 +18,12 @@ export function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
 	// The failed URL rather than a boolean: a version bump hands us a new URL for
 	// the same reference, and that one deserves its own attempt.
 	const [failedSrc, setFailedSrc] = useState<string | null>(null);
-	let resolvedSrc = src;
-	if (context?.artifactUrl && src) {
-		try {
-			const url = new URL(src, context.artifactUrl);
-			// Artifact images stay on the isolated artifact origin, never the API.
-			url.searchParams.set("v", String(context.version));
-			resolvedSrc = url.origin === new URL(context.artifactUrl).origin ? url.href : undefined;
-		} catch { resolvedSrc = undefined; }
-	} else if (context) {
-		resolvedSrc = resolveMarkdownImageSrc(context.session, context.filePath, src, context.version);
-	}
+	const base = context?.hostId ? baseUrlForHost(context.hostId) : undefined;
+	const resolvedSrc = context?.artifactOrigin
+		? resolveArtifactImageSrc(context.artifactOrigin, context.filePath, src)
+		: context
+		? context.hostId && !base ? undefined : resolveMarkdownImageSrc(context.sessionId, context.filePath, src, context.version, base)
+		: src;
 	if (!resolvedSrc || resolvedSrc === failedSrc) return <span className="text-muted-foreground">{alt ?? ""}</span>;
 	return <img src={resolvedSrc} alt={alt ?? ""} onError={() => setFailedSrc(resolvedSrc)} />;
 }

@@ -2,7 +2,6 @@ package ports
 
 import (
 	"errors"
-	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
@@ -59,6 +58,10 @@ type SpawnConfig struct {
 	// fails the spawn rather than falling back to the other mode.
 	RequestedMode domain.SessionMode
 
+	// RequestedOutput is the deliverable the caller asks for. Empty is the ordinary
+	// task flow; artifact adds an artifact-delivery section to the worker prompt.
+	RequestedOutput domain.RequestedOutput
+
 	// DisplayName is the user-facing sidebar label. Empty falls back to the
 	// session id in the read model (e.g. orchestrator sessions).
 	DisplayName string
@@ -73,8 +76,8 @@ type SpawnConfig struct {
 	// its conversation exist, leaving the worktree and the agent controller to
 	// finish in the background. Only a caller with a UI to return to should set
 	// it: `ao spawn` and the tests rely on a returned session being fully live.
-	// Ignored for TUI mode and for orchestrators, which own a project-scoped
-	// narrative that must not be rebound before its controller exists.
+	// Ignored for TUI mode. Orchestrator callers serialize project-scoped
+	// starts and reuse the published session while its controller is starting.
 	Async bool
 	// TaskPreparation is the opaque speculative-worktree token returned while
 	// the desktop's New Task dialog is open. It is a hint: an absent or expired
@@ -90,23 +93,4 @@ type SpawnAttachment struct {
 	// inferred from the attachment's declared MIME type, or ".bin" for unknown types.
 	Ext  string
 	Data []byte
-}
-
-// SessionPageQuery selects one page of sessions, newest first by
-// (updated_at, id). Every predicate is applied in SQL so a page is a page:
-// Terminated nil lists both states, true only terminated, false only live.
-// Before resumes after the row a previous page ended on. Limit is the page
-// size; callers wanting to know whether a next page exists ask for one more.
-type SessionPageQuery struct {
-	Project          domain.ProjectID
-	Terminated       *bool
-	OrchestratorOnly bool
-	Before           *SessionPageCursor
-	Limit            int
-}
-
-// SessionPageCursor is the keyset position of the last row of a page.
-type SessionPageCursor struct {
-	UpdatedAt time.Time
-	ID        domain.SessionID
 }

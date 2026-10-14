@@ -7,12 +7,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,30 +21,17 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/runtime/ptyexec"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	aoprocess "github.com/aoagents/agent-orchestrator/backend/internal/process"
 	"github.com/aoagents/agent-orchestrator/backend/internal/tmuxbin"
 )
 
 const (
 	defaultTimeout    = 5 * time.Second
 	defaultChunkBytes = 16 * 1024
-	// defaultEnterDelay spaces the submit Enter after the literal text in
-	// SendMessage, mirroring conpty's ptyInputEnterDelay. Some TUIs treat text
-	// and an immediately-following Enter arriving in one input burst as a paste,
-	// so the Enter becomes a literal newline instead of submitting: a large
-	// multiline paste can absorb the Enter (issue #2342), and codex's paste-burst
-	// detection does the same. The pause lets that window close so the Enter
-	// registers as a discrete keypress. Tunable via Options.EnterDelay.
+	// defaultEnterDelay mirrors conpty's ptyInputEnterDelay: a pause after pasting
+	// a non-empty message, before the trailing Enter, so a large multiline paste
+	// does not absorb the Enter and leave the prompt unsubmitted (issue #2342).
 	defaultEnterDelay = 300 * time.Millisecond
-	// Destroy confirms the agent process is actually gone before returning, so a
-	// killed session cannot keep running: tmux kill-session only sends SIGHUP,
-	// which an agent can trap (the reap-then-resurrect bug). defaultKillTermGrace
-	// is how long to wait for that SIGHUP to work before escalating to an
-	// uncatchable SIGKILL; defaultKillConfirmTimeout bounds the total wait for a
-	// confirmed exit.
-	defaultKillTermGrace      = 500 * time.Millisecond
-	defaultKillConfirmTimeout = 2 * time.Second
-	// killPollInterval is how often Destroy re-checks the process group for exit.
-	killPollInterval = 25 * time.Millisecond
 	// defaultReapGrace is how long Destroy waits between SIGTERM and SIGKILL when
 	// reaping a pane's leftover background processes, giving them a chance to
 	// exit cleanly (release ports) before being forced (issue #2523). It is a
@@ -72,35 +58,25 @@ type Options struct {
 	Shell        string        // default $SHELL else /bin/sh
 	Timeout      time.Duration // default 5s
 	ChunkSize    int           // default 16*1024
-	EnterDelay   time.Duration // pause after pasting a non-empty message before the submit Enter; 0 → default defaultEnterDelay, <0 disables. Mirrors conpty's ptyInputEnterDelay so a large multiline paste does not absorb the trailing Enter (issue #2342).
-	// KillTermGrace is how long Destroy waits for kill-session's SIGHUP to reap
-	// the agent before escalating to SIGKILL; default 500ms.
-	KillTermGrace time.Duration
-	// KillConfirmTimeout bounds Destroy's total wait for the agent process group
-	// to exit; default 2s.
-	KillConfirmTimeout time.Duration
-	// ReapGrace is the grace between SIGTERM and SIGKILL when reaping a pane's
-	// leftover background processes on Destroy; default defaultReapGrace.
-	ReapGrace time.Duration
+	EnterDelay   time.Duration // pause after pasting a non-empty message before pressing Enter; default defaultEnterDelay. Conpty already does this (ptyInputEnterDelay); tmux lacked it, so a large multiline paste could absorb the trailing Enter and leave the prompt unsubmitted (issue #2342).
+	ReapGrace    time.Duration // grace between SIGTERM and SIGKILL when reaping a pane's leftover background processes on Destroy; default defaultReapGrace.
 }
 
 // Runtime runs agent sessions inside tmux sessions, driving them via the tmux
 // CLI. It implements ports.Runtime.
 type Runtime struct {
-	binary             string
-	legacyBinary       string
-	socketName         string
-	shell              string
-	timeout            time.Duration
-	chunkSize          int
-	enterDelay         time.Duration
-	killTermGrace      time.Duration
-	killConfirmTimeout time.Duration
-	reapGrace          time.Duration
-	runner             runner
-	reapSessions       func(ctx context.Context, pids []int, grace time.Duration)
-	socketMu           sync.RWMutex
-	sessionSockets     map[string]string
+	binary         string
+	legacyBinary   string
+	socketName     string
+	shell          string
+	timeout        time.Duration
+	chunkSize      int
+	enterDelay     time.Duration
+	reapGrace      time.Duration
+	runner         runner
+	reapSessions   func(ctx context.Context, pids []int, grace time.Duration)
+	socketMu       sync.RWMutex
+	sessionSockets map[string]string
 }
 
 var _ ports.Runtime = (*Runtime)(nil)
@@ -206,7 +182,7 @@ func reapPaneSessions(
 func signalSessions(ctx context.Context, pids []int, sig string) bool {
 	supported := false
 	for _, pid := range pids {
-		err := exec.CommandContext(ctx, "pkill", sig, "-s", strconv.Itoa(pid)).Run()
+		err := aoprocess.CommandContext(ctx, "pkill", sig, "-s", strconv.Itoa(pid)).Run()
 		if !isUnsupportedMatcher(err) {
 			supported = true
 		}
@@ -234,7 +210,7 @@ func isUnsupportedMatcher(err error) bool {
 // survivors so Destroy stays conservative and still attempts SIGKILL.
 func sessionsHaveProcesses(ctx context.Context, pids []int) bool {
 	for _, pid := range pids {
-		err := exec.CommandContext(ctx, "pgrep", "-s", strconv.Itoa(pid)).Run()
+		err := aoprocess.CommandContext(ctx, "pgrep", "-s", strconv.Itoa(pid)).Run()
 		if err == nil || ctx.Err() != nil {
 			return true
 		}
@@ -249,7 +225,7 @@ func sessionsHaveProcesses(ctx context.Context, pids []int) bool {
 type execRunner struct{}
 
 func (execRunner) Run(ctx context.Context, env []string, name string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := aoprocess.CommandContext(ctx, name, args...)
 	cmd.Env = append(append([]string(nil), os.Environ()...), env...)
 	// Run from a stable directory, not whatever the daemon process's cwd happens
 	// to be. The first tmux CLI call auto-starts tmux's persistent server, which
@@ -323,24 +299,9 @@ func New(opts Options) *Runtime {
 	if chunkSize <= 0 {
 		chunkSize = defaultChunkBytes
 	}
-	// 0 → default; a negative value explicitly disables the pause.
 	enterDelay := opts.EnterDelay
-	switch {
-	case enterDelay == 0:
+	if enterDelay <= 0 {
 		enterDelay = defaultEnterDelay
-	case enterDelay < 0:
-		enterDelay = 0
-	}
-	killTermGrace := opts.KillTermGrace
-	if killTermGrace <= 0 {
-		killTermGrace = defaultKillTermGrace
-	}
-	killConfirmTimeout := opts.KillConfirmTimeout
-	if killConfirmTimeout <= 0 {
-		killConfirmTimeout = defaultKillConfirmTimeout
-	}
-	if killConfirmTimeout < killTermGrace {
-		killConfirmTimeout = killTermGrace
 	}
 	reapGrace := opts.ReapGrace
 	if reapGrace <= 0 {
@@ -363,19 +324,17 @@ func New(opts Options) *Runtime {
 		}
 	}
 	return &Runtime{
-		binary:             binary,
-		legacyBinary:       legacyBinary,
-		socketName:         socketName,
-		shell:              shellPath,
-		timeout:            timeout,
-		chunkSize:          chunkSize,
-		enterDelay:         enterDelay,
-		killTermGrace:      killTermGrace,
-		killConfirmTimeout: killConfirmTimeout,
-		reapGrace:          reapGrace,
-		runner:             execRunner{},
-		reapSessions:       killSessionsByPID,
-		sessionSockets:     make(map[string]string),
+		binary:         binary,
+		legacyBinary:   legacyBinary,
+		socketName:     socketName,
+		shell:          shellPath,
+		timeout:        timeout,
+		chunkSize:      chunkSize,
+		enterDelay:     enterDelay,
+		reapGrace:      reapGrace,
+		runner:         execRunner{},
+		reapSessions:   killSessionsByPID,
+		sessionSockets: make(map[string]string),
 	}
 }
 
@@ -430,19 +389,11 @@ func (r *Runtime) Create(ctx context.Context, cfg ports.RuntimeConfig) (ports.Ru
 		return ports.RuntimeHandle{}, r.failedCreatedRuntime(handle, fmt.Errorf("tmux runtime: set window-size %s: %w", id, err))
 	}
 
-	// Pin every session option AO relies on instead of inheriting the user's
-	// global tmux configuration.
-	for _, option := range []struct {
-		name string
-		args []string
-	}{
-		{name: "destroy-unattached", args: setDestroyUnattachedOffArgs(id)},
-		{name: "history-limit", args: setHistoryLimitArgs(id)},
-		{name: "detach-on-destroy", args: setDetachOnDestroyOnArgs(id)},
-	} {
-		if _, err := r.run(ctx, option.args...); err != nil {
-			return ports.RuntimeHandle{}, r.failedCreatedRuntime(handle, fmt.Errorf("tmux runtime: set %s %s: %w", option.name, id, err))
-		}
+	// Make the attach client exit when this session is destroyed rather than
+	// hop onto one of the user's own sessions under a `detach-on-destroy off`
+	// tmux.conf (see setDetachOnDestroyOnArgs).
+	if _, err := r.run(ctx, setDetachOnDestroyOnArgs(id)...); err != nil {
+		return ports.RuntimeHandle{}, r.failedCreatedRuntime(handle, fmt.Errorf("tmux runtime: set detach-on-destroy %s: %w", id, err))
 	}
 
 	alive, err := r.IsAlive(ctx, handle)
@@ -551,26 +502,18 @@ func (r *Runtime) verifyPaneWorkingDirectory(ctx context.Context, id, want strin
 	return lastErr
 }
 
-// Destroy kills the handle's tmux session, confirms the agent process is
-// actually gone, and reaps the pane's leftover background processes. tmux
-// kill-session only sends SIGHUP, which an agent can trap and survive (the
-// reap-then-resurrect bug); Manager.Kill marks the session terminated once
-// Destroy returns, so Destroy resolves the pane's process group first and
-// escalates to an uncatchable SIGKILL, waiting bounded for exit. kill-session
-// also leaves a worker's backgrounded children (e.g. a dev server started with
-// `&`, later reparented to init) holding their ports indefinitely (issue
-// #2523), so Destroy records each pane's session id before teardown and, after
-// kill-session, signals the whole session (see killSessionsByPID). An
-// already-gone session is treated as success (idempotent).
+// Destroy kills the handle's tmux session and reaps the pane processes it
+// leaves behind. `tmux kill-session` only SIGHUPs each pane's foreground
+// process, so a worker's backgrounded children (e.g. a dev server started with
+// `&`, later reparented to init) survive it and hold their ports indefinitely
+// (issue #2523). To catch those, Destroy records each pane's session id before
+// teardown and, after kill-session, signals the whole session (see
+// killSessionsByPID). An already-gone session is treated as success (idempotent).
 func (r *Runtime) Destroy(ctx context.Context, handle ports.RuntimeHandle) error {
 	id, err := handleID(handle)
 	if err != nil {
 		return err
 	}
-	// Resolve the pane's process group before teardown, while the pane still
-	// exists to query. tmux runs each pane in its own group led by pane_pid, so
-	// one group signal reaps the agent and every child it spawned.
-	pgid, havePgid := r.resolvePaneGroup(ctx, id)
 	// Capture pane session ids while the session still exists; a missing
 	// session lists no panes and reaps nothing. Best-effort: failures here must
 	// not block the kill-session below.
@@ -598,76 +541,23 @@ func (r *Runtime) Destroy(ctx context.Context, handle ports.RuntimeHandle) error
 
 	if err != nil {
 		// Only confirmed session/server/socket absence is safe to read as
-		// "already gone". Transient failures leave teardown retryable and keep
-		// the cached socket mapping intact.
+		// "already gone" (see confirmedAbsentOutput). A transient failure here
+		// (connection refused, protocol mismatch, unexpected server exit) does
+		// not prove kill-session actually ran: treating it as success used to
+		// forget the socket mapping and return nil, so a caller could mark the
+		// session terminated and delete its worktree while the session, and
+		// its detach-on-destroy guard, might still be alive. Returning the
+		// error instead, and leaving the socket mapping intact, keeps this
+		// retryable: a caller that calls Destroy again finds the same cached
+		// socket rather than re-running discovery from scratch.
 		if confirmedAbsentOutput(err, string(out)) {
-
 			r.forgetSessionSocket(id)
 			return nil
 		}
 		return fmt.Errorf("tmux runtime: destroy session %s: %w", id, err)
 	}
 	r.forgetSessionSocket(id)
-	if !havePgid {
-		// Pane already gone or unresolvable: kill-session's SIGHUP is all we can
-		// do, and there is no group to confirm. (On Windows, where the pgid
-		// helpers are stubs, this is always the path.)
-		return nil
-	}
-	return r.confirmGroupDead(ctx, id, pgid)
-}
-
-// resolvePaneGroup returns the process-group id of the session's pane, or ok
-// false when it cannot be determined (pane already gone, unparseable output, or
-// a transient tmux failure). A false result makes Destroy fall back to a plain
-// kill-session rather than signaling a guessed group.
-func (r *Runtime) resolvePaneGroup(ctx context.Context, id string) (int, bool) {
-	out, err := r.runForSession(ctx, id, panePIDArgs(id)...)
-	if err != nil {
-		return 0, false
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(out)))
-	if err != nil || pid <= 1 {
-		return 0, false
-	}
-	return paneProcessGroup(pid)
-}
-
-// confirmGroupDead waits for the pane's process group to exit after
-// kill-session's SIGHUP, escalating to SIGKILL once the grace elapses. It
-// returns an error only if the group is still alive after SIGKILL, so
-// Manager.Kill does not mark a still-running agent terminated.
-func (r *Runtime) confirmGroupDead(ctx context.Context, id string, pgid int) error {
-	if r.waitGroupExit(ctx, pgid, r.killTermGrace) {
-		return nil
-	}
-	// SIGKILL is uncatchable, so it reaps an agent that trapped the SIGHUP.
-	_ = terminateProcessGroup(pgid)
-	if r.waitGroupExit(ctx, pgid, r.killConfirmTimeout-r.killTermGrace) {
-		return nil
-	}
-	if processGroupAlive(pgid) {
-		return fmt.Errorf("tmux runtime: destroy session %s: process group %d still alive after SIGKILL", id, pgid)
-	}
 	return nil
-}
-
-// waitGroupExit polls until the process group is gone or timeout elapses,
-// returning true once it has exited. A cancelled ctx ends the wait early,
-// returning the group's current liveness.
-func (r *Runtime) waitGroupExit(ctx context.Context, pgid int, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for {
-		if !processGroupAlive(pgid) {
-			return true
-		}
-		if !time.Now().Before(deadline) {
-			return false
-		}
-		if err := sleep(ctx, killPollInterval); err != nil {
-			return !processGroupAlive(pgid)
-		}
-	}
 }
 
 // paneSessionIDs lists the pid of every pane in the session. tmux launches each
@@ -708,12 +598,19 @@ func (r *Runtime) IsAlive(ctx context.Context, handle ports.RuntimeHandle) (bool
 	out, err := r.runForSession(ctx, id, hasSessionArgs(id)...)
 	if err != nil {
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && sessionMissingOutput(string(out)) {
-			return false, nil
+		if errors.As(err, &exitErr) {
+			if sessionMissingOutput(string(out)) {
+				return false, nil
+			}
+			if serverNotRunningOutput(string(out)) || serverSocketAbsentOutput(string(out)) {
+				return false, fmt.Errorf("tmux runtime: probe session %s: %w: %s",
+					id, ports.ErrRuntimeUnavailable, strings.TrimSpace(string(out)))
+			}
+			if transientServerFailureOutput(string(out)) {
+				return false, fmt.Errorf("tmux runtime: probe session %s: %w: %s",
+					id, ports.ErrRuntimeProbeInconclusive, strings.TrimSpace(string(out)))
+			}
 		}
-		// runForSession already tagged an unreachable/absent server with the
-		// shared runtime sentinels; anything else is a plain probe error, which
-		// is likewise never per-session death.
 		return false, fmt.Errorf("tmux runtime: probe session %s: %w", id, err)
 	}
 	return true, nil
@@ -935,15 +832,9 @@ func (r *Runtime) supervisedProcessTree(ctx context.Context, handle ports.Runtim
 	return entries, panePID, nil
 }
 
-// SendMessage sends literal text to the session (chunked via send-keys -l),
-// pauses r.enterDelay so the input settles, then presses Enter to submit. An
-// empty message presses Enter alone (the nudge contract on ports.AgentMessenger).
-//
-// The pause matters for TUIs that treat text and an immediately-following Enter
-// arriving in one burst as a paste, so the Enter becomes a literal newline and
-// nothing is submitted: a large multiline paste can absorb it (issue #2342) and
-// codex's paste-burst detection does the same. Spacing the Enter out makes it a
-// discrete keypress.
+// SendMessage sends literal text to the session (chunked via send-keys -l) then
+// presses Enter to submit. An empty message presses Enter alone (the nudge
+// contract on ports.AgentMessenger).
 //
 // ponytail: send-keys -l chunked is simpler than load-buffer/paste-buffer; the
 // ceiling is very large messages may be slower, but chunk size defaults to 16 KB
@@ -1001,22 +892,6 @@ func (r *Runtime) SendMessage(ctx context.Context, handle ports.RuntimeHandle, m
 	return nil
 }
 
-// sleep waits d, returning early with the context error if ctx is cancelled.
-// A non-positive d returns immediately.
-func sleep(ctx context.Context, d time.Duration) error {
-	if d <= 0 {
-		return nil
-	}
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
-	}
-}
-
 func sendCompletionBudget(chunkCount int, commandTimeout, enterDelay time.Duration) time.Duration {
 	return time.Duration(chunkCount)*commandTimeout + enterDelay
 }
@@ -1028,17 +903,7 @@ func (r *Runtime) Interrupt(ctx context.Context, handle ports.RuntimeHandle) err
 	if err != nil {
 		return err
 	}
-	out, err := r.runForSession(ctx, id, sendInterruptArgs(id)...)
-	if err != nil {
-		var exitErr *exec.ExitError
-		// A missing session/control endpoint leaves nothing reachable to interrupt.
-		// Other connection failures may hide a target that never received Ctrl-C.
-		if errors.Is(err, ports.ErrRuntimeUnavailable) ||
-			errors.As(err, &exitErr) && (sessionMissingOutput(string(out)) ||
-				serverNotRunningOutput(string(out)) || serverSocketAbsentOutput(string(out))) {
-			r.forgetSessionSocket(id)
-			return nil
-		}
+	if _, err := r.runForSession(ctx, id, sendInterruptArgs(id)...); err != nil {
 		return fmt.Errorf("tmux runtime: interrupt session %s: %w", id, err)
 	}
 	return nil
@@ -1208,43 +1073,7 @@ func (r *Runtime) runForSession(ctx context.Context, id string, args ...string) 
 	if err != nil {
 		return nil, err
 	}
-	out, err := r.runOnSocket(ctx, socketName, args...)
-	if err != nil {
-		return out, classifyRuntimeFailure(out, err)
-	}
-	return out, nil
-}
-
-// classifyRuntimeFailure tags a failed per-session tmux command with the shared
-// runtime sentinels. It lives on runForSession — the chokepoint every
-// per-session command goes through — rather than on IsAlive alone, because a
-// vanished tmux server is exactly as knowable when SendMessage hits it as when
-// the liveness probe does. Without it a send into a dead server returned a bare
-// `exit status 1`, which the session service could only render as an opaque 500
-// (the same class as the typed mapping added for #2775).
-//
-// Output, not exit status, is the evidence: tmux exits 1 for both "no server"
-// and ordinary command errors. An unrecognised failure is returned unchanged so
-// only knowable runtime absence is ever labelled as such.
-func classifyRuntimeFailure(out []byte, err error) error {
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) {
-		return err
-	}
-	text := strings.TrimSpace(string(out))
-	// Both the sentinel and the original error are wrapped: callers such as
-	// Destroy still match the *exec.ExitError underneath to tell an already-gone
-	// session from a real teardown failure, and commandError already carries
-	// tmux's own output, so nothing needs restating here.
-	switch {
-	// tmux >= 3.4 reports an absent server as a missing socket file; check it
-	// before the transient "error connecting" family it also matches.
-	case serverNotRunningOutput(text) || serverSocketAbsentOutput(text):
-		return fmt.Errorf("%w: %w", ports.ErrRuntimeUnavailable, err)
-	case transientServerFailureOutput(text):
-		return fmt.Errorf("%w: %w", ports.ErrRuntimeProbeInconclusive, err)
-	}
-	return err
+	return r.runOnSocket(ctx, socketName, args...)
 }
 
 func (r *Runtime) socketForSession(ctx context.Context, id string) (string, error) {
@@ -1725,6 +1554,15 @@ func validEnvKey(key string) bool {
 	return true
 }
 
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
@@ -1755,7 +1593,7 @@ func buildLaunchCommand(cfg ports.RuntimeConfig) string {
 		// opt out of color explicitly through its configured environment.
 		b.WriteString("unset NO_COLOR; ")
 	}
-	for _, key := range slices.Sorted(maps.Keys(cfg.Env)) {
+	for _, key := range sortedKeys(cfg.Env) {
 		if key == "PATH" || key == "COLORTERM" {
 			continue
 		}

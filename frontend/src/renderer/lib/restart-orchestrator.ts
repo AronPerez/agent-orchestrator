@@ -3,20 +3,21 @@ import { workspaceQueryKey } from "../hooks/useWorkspaceQuery";
 import type { SessionMode } from "../types/conversation";
 import { OrchestratorSpawnError, spawnOrchestrator } from "./spawn-orchestrator";
 import type { OrchestratorReplacementFailure } from "../stores/ui-store";
-import type { Ref } from "./hosts";
 
 type NavigateToSession = (options: {
-	to: "/host/$hostId/session/$sessionId";
-	params: { hostId: string; sessionId: string };
+	to: "/projects/$projectId/sessions/$sessionId";
+	params: { projectId: string; sessionId: string };
 }) => unknown;
 
 type RestartProjectOrchestratorOptions = {
-	project: Ref;
+	projectId: string;
 	queryClient: QueryClient;
 	navigate: NavigateToSession;
-	setProjectRestarting: (project: Ref, restarting: boolean) => void;
-	setOrchestratorReplacementError: (project: Ref, failure: OrchestratorReplacementFailure | null) => void;
+	setProjectRestarting: (projectId: string, restarting: boolean) => void;
+	setOrchestratorReplacementError: (projectId: string, failure: OrchestratorReplacementFailure | null) => void;
+	onError?: (error: unknown) => void;
 	mode?: SessionMode;
+	approvalMode?: "default" | "accept-edits" | "auto" | "bypass-permissions";
 };
 
 async function refreshWorkspaceState(queryClient: QueryClient) {
@@ -29,31 +30,42 @@ async function refreshWorkspaceState(queryClient: QueryClient) {
 }
 
 export async function restartProjectOrchestrator({
-	project,
+	projectId,
 	queryClient,
 	navigate,
 	setProjectRestarting,
 	setOrchestratorReplacementError,
+	onError,
 	mode,
+	approvalMode,
 }: RestartProjectOrchestratorOptions) {
-	setProjectRestarting(project, true);
-	setOrchestratorReplacementError(project, null);
+	// Keep the initiating control focused while the restart is pending so
+	// keyboard users retain a focus target for the duration of the operation;
+	// blur it only once navigation to the replacement session is about to
+	// happen. On failure the control stays focused and the error dialog takes
+	// focus normally.
+	const activeElement = document.activeElement;
+	setProjectRestarting(projectId, true);
+	// Keep any replacement-error dialog mounted so Retry retains focus while pending.
 	try {
-		const sessionId = await spawnOrchestrator(project, true, mode);
+		const sessionId = await spawnOrchestrator(projectId, "restart", true, mode, approvalMode);
 		await refreshWorkspaceState(queryClient);
+		setOrchestratorReplacementError(projectId, null);
+		if (activeElement instanceof HTMLElement) activeElement.blur();
 		void navigate({
-			to: "/host/$hostId/session/$sessionId",
-			params: { hostId: project.host, sessionId },
+			to: "/projects/$projectId/sessions/$sessionId",
+			params: { projectId, sessionId },
 		});
 	} catch (error) {
 		await refreshWorkspaceState(queryClient);
-		setOrchestratorReplacementError(project, {
+		setOrchestratorReplacementError(projectId, {
 			message: error instanceof Error ? error.message : "Could not replace orchestrator",
 			...(error instanceof OrchestratorSpawnError
-				? { code: error.code, requestId: error.requestId }
+				? { code: error.code, requestId: error.requestId, details: error.details }
 				: {}),
 		});
+		onError?.(error);
 	} finally {
-		setProjectRestarting(project, false);
+		setProjectRestarting(projectId, false);
 	}
 }

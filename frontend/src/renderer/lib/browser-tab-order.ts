@@ -1,7 +1,5 @@
 import { arrayMove } from "@dnd-kit/sortable";
 
-export const MAX_BROWSER_TABS = 16;
-
 export function reorderBrowserTabs(ids: string[], activeId: string, overId: string): string[] | null {
 	const oldIndex = ids.indexOf(activeId);
 	const newIndex = ids.indexOf(overId);

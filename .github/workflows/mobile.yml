@@ -17,8 +17,6 @@ permissions:
 
 jobs:
   check:
-    env:
-      EXPO_NO_TELEMETRY: "1"
     runs-on: ubuntu-latest
     defaults:
       run:

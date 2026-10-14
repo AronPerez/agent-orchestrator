@@ -1,4 +1,3 @@
-import { request as httpRequest } from "node:http";
 import net from "node:net";
 import { StringDecoder } from "node:string_decoder";
 
@@ -14,11 +13,6 @@ export type BrowserRuntimeCommand = {
 	sessionId: string;
 	action: string;
 	args?: Record<string, unknown>;
-	// Opaque partition key, set by the daemon only when this session's project
-	// opted into a persistent browser profile. Absent means the default: a
-	// throwaway, memory-only profile. The app never decides this — it does not
-	// know which project a session belongs to, and must not guess.
-	profileKey?: string;
 };
 
 type BrowserRuntimeCancel = {
@@ -31,12 +25,6 @@ export type BrowserRuntimeCommandError = {
 	message: string;
 };
 
-// Produces a socket already speaking the broker protocol. Used for remote
-// daemons, where the transport is an HTTP upgrade through the per-host proxy
-// rather than a direct unix/tcp connect. head carries any protocol bytes the
-// server sent in the same packet as the 101 response.
-export type BrowserRuntimeDial = () => Promise<{ socket: net.Socket; head?: Buffer }>;
-
 export interface BrowserRuntimeLinkHandle {
 	readonly connected: boolean;
 	dispose(): void;
@@ -46,14 +34,11 @@ type BrowserRuntimeLinkOptions = {
 	execute: (command: BrowserRuntimeCommand, signal: AbortSignal) => Promise<unknown>;
 	token?: string;
 	log?: (message: string) => void;
-	// When set, the link obtains its socket from dial() instead of connecting to
-	// address (which may then be null).
-	dial?: BrowserRuntimeDial;
-	backoffMaxMs?: number;
+	onStateChange?: (connected: boolean) => void;
 };
 
 export function connectBrowserRuntime(
-	address: string | net.TcpNetConnectOpts | null,
+	address: string | net.TcpNetConnectOpts,
 	options: BrowserRuntimeLinkOptions,
 ): BrowserRuntimeLinkHandle {
 	const log = options.log ?? (() => undefined);
@@ -67,8 +52,38 @@ export function connectBrowserRuntime(
 	let connectionEpoch = 0;
 	const commandChains = new Map<string, Promise<void>>();
 	const commandControllers = new Map<string, AbortController>();
+	const activeCommands = new Map<
+		string,
+		{ command: BrowserRuntimeCommand; target: net.Socket; epoch: number }
+	>();
+	const setConnected = (value: boolean) => {
+		if (connected === value) return;
+		connected = value;
+		options.onStateChange?.(value);
+	};
+
+	const sendCancelledResultOnTarget = (command: BrowserRuntimeCommand, target: net.Socket) => {
+		if (target.destroyed) return;
+		const frame = `${JSON.stringify({
+			type: "result",
+			requestId: command.requestId,
+			ok: false,
+			error: { code: "BROWSER_COMMAND_CANCELED", message: "Browser runtime link closed" },
+		})}\n`;
+		try {
+			target.write(frame);
+		} catch {
+			// Socket already torn down; the daemon will observe disconnect.
+		}
+	};
 
 	const cancelConnectionCommands = () => {
+		for (const { command, target } of activeCommands.values()) {
+			sendCancelledResultOnTarget(command, target);
+		}
+		// Drop tracking before aborting so in-flight respond() catch paths do not
+		// emit a second cancellation frame for the same requestId.
+		activeCommands.clear();
 		for (const controller of commandControllers.values()) controller.abort();
 		commandControllers.clear();
 		commandChains.clear();
@@ -83,10 +98,11 @@ export function connectBrowserRuntime(
 
 	const destroySocket = () => {
 		if (!socket) return;
-		connectionEpoch += 1;
+		const target = socket;
 		cancelConnectionCommands();
-		socket.removeAllListeners();
-		socket.destroy();
+		connectionEpoch += 1;
+		target.removeAllListeners();
+		target.destroy();
 		socket = null;
 	};
 
@@ -112,6 +128,27 @@ export function connectBrowserRuntime(
 		});
 	};
 
+	const sendCancelledResult = async (
+		command: BrowserRuntimeCommand,
+		target: net.Socket,
+		epoch: number,
+	) => {
+		try {
+			await send(
+				{
+					type: "result",
+					requestId: command.requestId,
+					ok: false,
+					error: { code: "BROWSER_COMMAND_CANCELED", message: "Browser runtime link closed" },
+				},
+				target,
+				epoch,
+			);
+		} catch {
+			// Socket already torn down; the daemon will observe disconnect.
+		}
+	};
+
 	const respond = async (
 		command: BrowserRuntimeCommand,
 		target: net.Socket,
@@ -124,7 +161,14 @@ export function connectBrowserRuntime(
 			controller.signal.throwIfAborted();
 			await send({ type: "result", requestId: command.requestId, ok: true, result }, target, epoch);
 		} catch (error) {
-			if (controller.signal.aborted) return;
+			if (controller.signal.aborted) {
+				// Daemon-initiated cancel frames abort one controller without clearing
+				// activeCommands; connection teardown clears the map before aborting.
+				if (activeCommands.has(command.requestId)) {
+					await sendCancelledResult(command, target, epoch);
+				}
+				return;
+			}
 			const normalized = normalizeCommandError(error);
 			try {
 				await send({ type: "result", requestId: command.requestId, ok: false, error: normalized }, target, epoch);
@@ -133,6 +177,7 @@ export function connectBrowserRuntime(
 				target.destroy();
 			}
 		} finally {
+			activeCommands.delete(command.requestId);
 			if (commandControllers.get(command.requestId) === controller) {
 				commandControllers.delete(command.requestId);
 			}
@@ -162,6 +207,7 @@ export function connectBrowserRuntime(
 		}
 		const controller = new AbortController();
 		commandControllers.set(command.requestId, controller);
+		activeCommands.set(command.requestId, { command, target, epoch });
 		const previous = commandChains.get(command.sessionId) ?? Promise.resolve();
 		const next = previous.then(() => respond(command, target, epoch, controller));
 		commandChains.set(command.sessionId, next);
@@ -197,42 +243,9 @@ export function connectBrowserRuntime(
 		if (disposed) return;
 		clearRetry();
 		const delay = backoff;
-		backoff = Math.min(backoff * 2, options.backoffMaxMs ?? BACKOFF_MAX_MS);
+		backoff = Math.min(backoff * 2, BACKOFF_MAX_MS);
 		retryTimer = setTimeout(connect, delay);
 	};
-
-	function attach(next: net.Socket, epoch: number, head: Buffer | undefined, alreadyConnected: boolean) {
-		socket = next;
-		const onReady = () => {
-			if (disposed) {
-				next.destroy();
-				return;
-			}
-			connected = true;
-			backoff = BACKOFF_INIT_MS;
-			void send({ type: "hello", version: PROTOCOL_VERSION, token: options.token }, next, epoch).catch((error) => {
-				log(`browser-runtime-link: hello failed: ${String(error)}`);
-				next.destroy();
-			});
-			log("browser-runtime-link: connected");
-		};
-		next.on("data", (chunk) => consume(chunk, next, epoch));
-		next.on("error", (error) => log(`browser-runtime-link: error: ${error.message}`));
-		next.on("close", () => {
-			if (socket !== next || connectionEpoch !== epoch) return;
-			connected = false;
-			socket = null;
-			connectionEpoch += 1;
-			cancelConnectionCommands();
-			if (!disposed) scheduleReconnect();
-		});
-		if (alreadyConnected) {
-			onReady();
-			if (head && head.length > 0) consume(head, next, epoch);
-		} else {
-			next.on("connect", onReady);
-		}
-	}
 
 	function connect() {
 		if (disposed) return;
@@ -240,25 +253,36 @@ export function connectBrowserRuntime(
 		buffer = "";
 		decoder = new StringDecoder("utf8");
 		const epoch = ++connectionEpoch;
-		if (!options.dial) {
-			if (address === null) throw new Error("connectBrowserRuntime requires an address or a dial");
-			const next = typeof address === "string" ? net.connect(address) : net.connect(address);
-			attach(next, epoch, undefined, false);
-			return;
-		}
-		void options
-			.dial()
-			.then(({ socket: dialed, head }) => {
-				if (disposed || connectionEpoch !== epoch) {
-					dialed.destroy();
-					return;
-				}
-				attach(dialed, epoch, head, true);
-			})
-			.catch((error) => {
-				log(`browser-runtime-link: dial failed: ${String(error)}`);
-				if (!disposed && connectionEpoch === epoch) scheduleReconnect();
+		const next = typeof address === "string" ? net.connect(address) : net.connect(address);
+		socket = next;
+		next.on("connect", () => {
+			if (disposed) {
+				next.destroy();
+				return;
+			}
+			setConnected(true);
+			backoff = BACKOFF_INIT_MS;
+			void send({ type: "hello", version: PROTOCOL_VERSION, token: options.token }, next, epoch).catch((error) => {
+				log(`browser-runtime-link: hello failed: ${String(error)}`);
+				next.destroy();
 			});
+			log("browser-runtime-link: connected");
+		});
+		next.on("data", (chunk) => consume(chunk, next, epoch));
+		next.on("error", (error) => log(`browser-runtime-link: error: ${error.message}`));
+		let connectionTornDown = false;
+		const tearDownConnection = () => {
+			if (connectionTornDown || socket !== next || connectionEpoch !== epoch) return;
+			connectionTornDown = true;
+			setConnected(false);
+			cancelConnectionCommands();
+			socket = null;
+			connectionEpoch += 1;
+			if (!disposed) scheduleReconnect();
+		};
+		// Cancel while the socket may still accept writes; 'close' can arrive too late.
+		next.on("end", tearDownConnection);
+		next.on("close", tearDownConnection);
 	}
 
 	connect();
@@ -268,7 +292,7 @@ export function connectBrowserRuntime(
 		},
 		dispose() {
 			disposed = true;
-			connected = false;
+			setConnected(false);
 			clearRetry();
 			destroySocket();
 		},
@@ -292,27 +316,4 @@ function isCommandError(error: unknown): error is BrowserRuntimeCommandError {
 		typeof (error as BrowserRuntimeCommandError).code === "string" &&
 		typeof (error as BrowserRuntimeCommandError).message === "string",
 	);
-}
-
-// Dials the daemon's /browser-runtime upgrade endpoint. baseUrl is the
-// per-host loopback proxy base (http://127.0.0.1:<port>/<token>) — the proxy
-// injects the remote credential on upgrade requests, so no auth is handled
-// here and the password never enters this module.
-export function upgradeDial(baseUrl: string): BrowserRuntimeDial {
-	return () =>
-		new Promise((resolve, reject) => {
-			const request = httpRequest(`${baseUrl}/browser-runtime`, {
-				headers: { connection: "Upgrade", upgrade: "ao-browser-runtime" },
-			});
-			request.on("upgrade", (_response, socket, head) => {
-				socket.on("error", () => undefined); // owner attaches real handlers next tick
-				resolve({ socket, head });
-			});
-			request.on("response", (response) => {
-				response.resume();
-				reject(new Error(`upgrade refused: HTTP ${response.statusCode}`));
-			});
-			request.on("error", reject);
-			request.end();
-		});
 }

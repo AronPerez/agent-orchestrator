@@ -85,11 +85,14 @@ func TestACPReplayCaptureDefersNormalization(t *testing.T) {
 
 func TestACPReplayDrainReconstructsTurnsInOrder(t *testing.T) {
 	conv := replayConversation()
+	conv.historyNotice = func(text string) bool { return strings.HasPrefix(text, "<note>") }
 	conv.beginHistoryReplay("session-1")
 
 	updates := []acpsdk.SessionNotification{
 		replayUserChunk("session-1", "u1", "hello"),
 		replayAgentChunk("session-1", "a1", "hi"),
+		// The agent's own note starts no turn; its answer stays in this one.
+		replayUserChunk("session-1", "n1", "<note>task finished</note>"),
 		replayAgentChunk("session-1", "a1", " there"),
 		replayUserChunk("session-1", "u2", "bye"),
 		replayAgentChunk("session-1", "a2", "later"),
@@ -264,9 +267,7 @@ func TestACPReplayLoadLargeHistoryThroughSDK(t *testing.T) {
 	conv := replayConversation()
 	clientR, clientW := io.Pipe()
 	agentR, agentW := io.Pipe()
-	// Keep the synthetic producer below the SDK's bounded notification queue;
-	// this test exercises large replay delivery, not SDK queue saturation.
-	agent := &fakeAgent{loadUpdates: updates, loadUpdateDelay: time.Millisecond}
+	agent := &fakeAgent{loadUpdates: updates}
 	agent.conn = acpsdk.NewAgentSideConnection(agent, agentW, clientR)
 	conv.conn = acpsdk.NewClientSideConnection(conv, clientW, agentR)
 	t.Cleanup(func() { _ = clientR.Close(); _ = clientW.Close(); _ = agentR.Close(); _ = agentW.Close() })
@@ -275,8 +276,8 @@ func TestACPReplayLoadLargeHistoryThroughSDK(t *testing.T) {
 	defer cancel()
 	conv.beginHistoryReplay("session-1")
 	// Hold the normalization mutex until the SDK response barrier returns.
-	// An inline handler cannot finish even its first update while this lock is
-	// held. Capturing must deliver the complete history without normalizing it.
+	// An inline handler cannot finish even its first update, fills the SDK
+	// queue, and disconnects. Capturing must deliver the complete burst anyway.
 	func() {
 		conv.mu.Lock()
 		defer conv.mu.Unlock()

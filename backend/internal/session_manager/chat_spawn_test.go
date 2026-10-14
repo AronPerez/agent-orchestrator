@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/commandcode"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	browsersvc "github.com/aoagents/agent-orchestrator/backend/internal/service/browser"
@@ -312,7 +315,6 @@ func TestChatSpawnPersistsResolvedEffortForBackgroundTasks(t *testing.T) {
 			launcher := &recordingLauncher{}
 			m, st, _ := newChatManager(launcher)
 			project := st.projects[string(chatTestProject)]
-			project.Config.Worker.Harness = domain.HarnessCodex
 			project.Config.AgentConfig.Effort = "high"
 			st.projects[string(chatTestProject)] = project
 
@@ -1433,6 +1435,53 @@ func TestChatSpawnPersistsBrowserCapabilityBeforeControllerStart(t *testing.T) {
 	}
 }
 
+func TestChatStartsPassTheAOToolServerWithOnlyDaemonCoordinates(t *testing.T) {
+	launcher := &recordingLauncher{}
+	mgr, store, _ := newChatManager(launcher)
+	mgr.executable = func() (string, error) { return "/opt/ao/bin/ao", nil }
+	mgr.runFilePath = "/ao-test/running.json"
+	mgr.browserCapabilities = &scriptedBrowserCapabilities{issues: []browserCapabilityIssue{
+		{token: "spawn-token", verifier: "spawn-verifier"}, {token: "restore-token", verifier: "restore-verifier"},
+	}}
+	project := store.projects[string(chatTestProject)]
+	project.Config.Env = map[string]string{"PROJECT_TOKEN": "secret"}
+	store.projects[string(chatTestProject)] = project
+	ctx := context.Background()
+
+	rec, _, _, err := mgr.Spawn(ctx, ports.SpawnConfig{
+		ProjectID: chatTestProject, Kind: domain.KindWorker, Harness: domain.HarnessCodex, RequestedMode: domain.SessionModeChat,
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if _, err := mgr.Kill(ctx, rec.ID); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+	if _, err := mgr.RestoreWithMode(ctx, rec.ID); err != nil {
+		t.Fatalf("RestoreWithMode: %v", err)
+	}
+
+	want := []ports.ChatMCPServerConfig{{
+		Name: "ao", Type: "stdio", Command: "/opt/ao/bin/ao", Args: []string{"mcp"},
+		Env: map[string]string{EnvSessionID: string(rec.ID), EnvRunFile: "/ao-test/running.json", EnvDataDir: mgr.dataDir},
+	}}
+	if mgr.dataDir == "" {
+		t.Fatal("test manager has no data dir")
+	}
+	if len(launcher.started) != 2 || launcher.started[1].ProviderConversationID == "" {
+		t.Fatalf("want a spawn and a resume, got %d starts", len(launcher.started))
+	}
+	for i, start := range launcher.started {
+		// The agent's own env carries the capability; the tool server never does.
+		if start.Env[EnvBrowserCapability] == "" || !reflect.DeepEqual(start.MCPServers, want) {
+			t.Fatalf("start %d: MCPServers = %+v, want %+v", i, start.MCPServers, want)
+		}
+	}
+	if got := mgr.aoMCPServers(domain.HarnessUnreal, launcher.started[0].Env); got != nil {
+		t.Fatalf("unreal agent got tool servers %+v; its driver refuses them", got)
+	}
+}
+
 func TestChatSpawnCapabilityFailurePreventsControllerStart(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -1720,111 +1769,6 @@ func TestSendRefusedForTerminatedChatSession(t *testing.T) {
 	}
 }
 
-// The reported failure: switching a claude-code chat session's interface died with
-//
-//	set ACP session option "model": Invalid value for config option model: gpt-5.6-terra
-//
-// gpt-5.6-terra is a codex model. The session's harness and the harness its project
-// role configures a model for had diverged — an explicit --agent at spawn, a completed
-// agent switch, or the role's agent edited afterwards all produce that — and every
-// launch path except the agent-switch one re-applied the role's model regardless of
-// which agent was actually going to receive it.
-func TestChatLaunchDoesNotApplyAnotherHarnessModel(t *testing.T) {
-	launcher := &recordingLauncher{}
-	mgr, store, _ := newChatManager(launcher)
-	store.projects[string(chatTestProject)] = domain.ProjectRecord{
-		ID: string(chatTestProject),
-		Config: domain.ProjectConfig{
-			Worker: domain.RoleOverride{
-				Harness:     domain.HarnessCodex,
-				AgentConfig: domain.AgentConfig{Model: "gpt-5.6-terra"},
-			},
-			Orchestrator: domain.RoleOverride{Harness: domain.HarnessClaudeCode},
-		},
-	}
-	ctx := context.Background()
-
-	rec, _, _, err := mgr.Spawn(ctx, ports.SpawnConfig{
-		ProjectID:     chatTestProject,
-		Kind:          domain.KindWorker,
-		Harness:       domain.HarnessClaudeCode,
-		RequestedMode: domain.SessionModeChat,
-	})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
-	if len(launcher.started) != 1 {
-		t.Fatalf("spawn starts = %d, want 1", len(launcher.started))
-	}
-	if got := launcher.started[0].Model; got != "" {
-		t.Errorf("spawn passed model %q to a claude-code session; it is configured for codex", got)
-	}
-
-	// The resume path is the one the interface switch and every daemon restore go
-	// through, and it rebuilds the config from the project rather than reusing what
-	// spawn resolved — so it has to make the same decision independently.
-	if _, err := mgr.Kill(ctx, rec.ID); err != nil {
-		t.Fatalf("Kill: %v", err)
-	}
-	if _, err := mgr.RestoreWithMode(ctx, rec.ID); err != nil {
-		t.Fatalf("RestoreWithMode: %v", err)
-	}
-	if len(launcher.started) != 2 {
-		t.Fatalf("restore starts = %d, want 2", len(launcher.started))
-	}
-	if got := launcher.started[1].Model; got != "" {
-		t.Errorf("resume passed model %q to a claude-code session; it is configured for codex", got)
-	}
-}
-
-// A project may pin the interface its sessions are born with. The tier sits
-// between the two that already existed, so this pins all three at once: an
-// explicit --mode still wins, and a project that pins nothing still inherits the
-// daemon-owned default.
-func TestSpawnSessionModePrecedenceExplicitThenProjectThenDaemon(t *testing.T) {
-	tests := []struct {
-		name      string
-		requested domain.SessionMode
-		project   domain.SessionMode
-		daemon    domain.SessionMode
-		want      domain.SessionMode
-	}{
-		{name: "explicit chat beats project tui", requested: domain.SessionModeChat, project: domain.SessionModeTUI, daemon: domain.SessionModeTUI, want: domain.SessionModeChat},
-		{name: "explicit tui beats project chat", requested: domain.SessionModeTUI, project: domain.SessionModeChat, daemon: domain.SessionModeChat, want: domain.SessionModeTUI},
-		{name: "project chat beats daemon tui", project: domain.SessionModeChat, daemon: domain.SessionModeTUI, want: domain.SessionModeChat},
-		{name: "project tui beats daemon chat", project: domain.SessionModeTUI, daemon: domain.SessionModeChat, want: domain.SessionModeTUI},
-		{name: "unset project inherits daemon chat", daemon: domain.SessionModeChat, want: domain.SessionModeChat},
-		{name: "unset project inherits daemon tui", daemon: domain.SessionModeTUI, want: domain.SessionModeTUI},
-		// A value this build does not know — written by a newer daemon into the
-		// same project row — is "no override", not an error and not a silent
-		// downgrade to TUI over a daemon default of Chat.
-		{name: "unknown project value is no override", project: "voice", daemon: domain.SessionModeChat, want: domain.SessionModeChat},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			mgr, store, _ := newChatManager(&recordingLauncher{})
-			mgr.defaults = fixedSessionModeDefaults(tt.daemon)
-			project := store.projects[string(chatTestProject)]
-			project.Config.SessionInterface = tt.project
-			store.projects[string(chatTestProject)] = project
-
-			rec, _, _, err := mgr.Spawn(context.Background(), ports.SpawnConfig{
-				ProjectID:     chatTestProject,
-				Kind:          domain.KindWorker,
-				Harness:       domain.HarnessCodex,
-				RequestedMode: tt.requested,
-			})
-			if err != nil {
-				t.Fatalf("Spawn: %v", err)
-			}
-			if rec.Mode != tt.want {
-				t.Fatalf("mode = %q, want %q", rec.Mode, tt.want)
-			}
-		})
-
-	}
-}
-
 type deadlineConsumingChatLauncher struct {
 	*recordingLauncher
 	cancel context.CancelFunc
@@ -1873,7 +1817,6 @@ func TestChatSpawn_RollbackGivesEachCleanupStepAFreshDeadline(t *testing.T) {
 	}
 	if !st.sessions["mer-1"].IsTerminated {
 		t.Fatal("session row was not terminated after chat shutdown exhausted its deadline")
-
 	}
 }
 
@@ -1883,4 +1826,157 @@ func (l *deadlineConsumingChatLauncher) QueueChatPrompt(_ context.Context, _ dom
 
 func (l *deadlineConsumingChatLauncher) DrainChatQueue(_ context.Context, _ domain.SessionID) error {
 	return nil
+}
+
+type hookRecordingAgent struct {
+	fakeAgent
+	hookErr   error
+	hookCalls []ports.WorkspaceHookConfig
+}
+
+func (a *hookRecordingAgent) GetAgentHooks(_ context.Context, cfg ports.WorkspaceHookConfig) error {
+	a.hookCalls = append(a.hookCalls, cfg)
+	return a.hookErr
+}
+
+// TestChatSpawnInstallsAgentHooksBeforeControllerStart is the regression test
+// for the standing-instruction delivery gap: fresh Chat sessions used to start
+// the controller without ever installing the adapter'"'"'s workspace hooks, so
+// Command Code'"'"'s SessionStart hook (which injects the prompt file) was absent
+// and the session ran with no AO role or coordination instructions.
+func TestChatSpawnInstallsAgentHooksBeforeControllerStart(t *testing.T) {
+	for _, kind := range []domain.SessionKind{domain.KindWorker, domain.KindOrchestrator} {
+		t.Run(string(kind), func(t *testing.T) {
+			dataDir := t.TempDir()
+			wsDir := t.TempDir()
+			launcher := &recordingLauncher{}
+			hooks := &hookRecordingAgent{}
+			st := newFakeStore()
+			st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
+			mgr := New(Deps{
+				Runtime:   &fakeRuntime{},
+				Agents:    switchTestAgents{domain.HarnessCommandCode: hooks},
+				Workspace: &fakeWorkspace{path: wsDir},
+				Store:     st,
+				Messenger: &fakeMessenger{},
+				Chat:      launcher,
+				Lifecycle: &fakeLCM{store: st},
+				DataDir:   dataDir,
+				LookPath:  func(string) (string, error) { return "/bin/true", nil },
+			})
+
+			hooksAtStart := -1
+			launcher.beforeStart = func(ChatStart) {
+				hooksAtStart = len(hooks.hookCalls)
+			}
+			rec, _, _, err := mgr.Spawn(context.Background(), ports.SpawnConfig{
+				ProjectID:     chatTestProject,
+				Kind:          kind,
+				Harness:       domain.HarnessCommandCode,
+				Prompt:        "say hi",
+				RequestedMode: domain.SessionModeChat,
+			})
+			if err != nil {
+				t.Fatalf("Spawn: %v", err)
+			}
+			if len(hooks.hookCalls) != 1 {
+				t.Fatalf("hook installs = %d, want 1", len(hooks.hookCalls))
+			}
+			if hooksAtStart != 1 {
+				t.Fatalf("hooks installed at controller start = %d, want 1: hooks must land before the provider starts", hooksAtStart)
+			}
+			got := hooks.hookCalls[0]
+			if got.WorkspacePath != wsDir {
+				t.Errorf("hook workspace = %q, want %q", got.WorkspacePath, wsDir)
+			}
+			if got.SystemPrompt == "" {
+				t.Error("hook install carried no system prompt; SessionStart would inject nothing")
+			}
+			if got.SystemPromptFile == "" {
+				t.Error("hook install carried no system prompt file")
+			} else if data, err := os.ReadFile(got.SystemPromptFile); err != nil || !strings.Contains(string(data), got.SystemPrompt) {
+				t.Errorf("system prompt file %q missing the installed prompt (err=%v)", got.SystemPromptFile, err)
+			}
+			if len(launcher.started) != 1 {
+				t.Fatalf("started %d controllers, want 1", len(launcher.started))
+			}
+			_ = rec
+		})
+	}
+}
+
+func TestChatSpawnFailsWhenHookInstallFails(t *testing.T) {
+	launcher := &recordingLauncher{}
+	hooks := &hookRecordingAgent{hookErr: errors.New("disk read-only")}
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
+	mgr := New(Deps{
+		Runtime:   &fakeRuntime{},
+		Agents:    switchTestAgents{domain.HarnessCommandCode: hooks},
+		Workspace: &fakeWorkspace{path: t.TempDir()},
+		Store:     st,
+		Messenger: &fakeMessenger{},
+		Chat:      launcher,
+		Lifecycle: &fakeLCM{store: st},
+		DataDir:   t.TempDir(),
+		LookPath:  func(string) (string, error) { return "/bin/true", nil },
+	})
+
+	_, _, _, err := mgr.Spawn(context.Background(), ports.SpawnConfig{
+		ProjectID:     chatTestProject,
+		Kind:          domain.KindWorker,
+		Harness:       domain.HarnessCommandCode,
+		Prompt:        "say hi",
+		RequestedMode: domain.SessionModeChat,
+	})
+	if !errors.Is(err, ErrSpawnPrepare) {
+		t.Fatalf("Spawn err = %v, want %v", err, ErrSpawnPrepare)
+	}
+	if len(launcher.started) != 0 {
+		t.Fatalf("started %d controllers after hook failure, want 0", len(launcher.started))
+	}
+}
+
+// TestChatSpawnWritesCommandCodeSessionStartHook drives a fresh Chat spawn
+// through the real Command Code adapter and asserts the workspace actually
+// receives the SessionStart hook that injects the standing instructions. A
+// prompt file without this hook is the exact gap reported against fresh Chat
+// workers and orchestrators.
+func TestChatSpawnWritesCommandCodeSessionStartHook(t *testing.T) {
+	dataDir := t.TempDir()
+	wsDir := t.TempDir()
+	launcher := &recordingLauncher{}
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
+	mgr := New(Deps{
+		Runtime:   &fakeRuntime{},
+		Agents:    switchTestAgents{domain.HarnessCommandCode: commandcode.New()},
+		Workspace: &fakeWorkspace{path: wsDir},
+		Store:     st,
+		Messenger: &fakeMessenger{},
+		Chat:      launcher,
+		Lifecycle: &fakeLCM{store: st},
+		DataDir:   dataDir,
+		LookPath:  func(string) (string, error) { return "/bin/true", nil },
+	})
+
+	if _, _, _, err := mgr.Spawn(context.Background(), ports.SpawnConfig{
+		ProjectID:     chatTestProject,
+		Kind:          domain.KindWorker,
+		Harness:       domain.HarnessCommandCode,
+		Prompt:        "say hi",
+		RequestedMode: domain.SessionModeChat,
+	}); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	settingsPath := filepath.Join(wsDir, ".commandcode", "settings.json")
+	raw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read %s: %v (hook was never installed)", settingsPath, err)
+	}
+	for _, want := range []string{"SessionStart", "ao hooks command-code session-start"} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("settings.json missing %q; standing instructions have no delivery hook:\n%s", want, raw)
+		}
+	}
 }

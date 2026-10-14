@@ -139,7 +139,7 @@ Orchestrator.inc は、すでに利用しているコーディングエージェ
     <td valign="middle" nowrap><img src="../frontend/src/renderer/assets/agents/goose.svg" alt="Goose" width="24" height="24" align="middle" /> &nbsp; <b>Goose</b></td>
   </tr>
   <tr valign="middle">
-    <td valign="middle" nowrap><img src="../frontend/src/renderer/assets/agents/qwen.png" alt="Qwen" width="24" height="24" align="middle" /> &nbsp; <b>Qwen</b></td>
+    <td valign="middle" nowrap><img src="../frontend/src/renderer/assets/agents/qwen.svg" alt="Qwen" width="24" height="24" align="middle" /> &nbsp; <b>Qwen</b></td>
     <td valign="middle" nowrap><img src="../frontend/src/renderer/assets/agents/continue.png" alt="Continue" width="24" height="24" align="middle" /> &nbsp; <b>Continue</b></td>
     <td valign="middle" nowrap><img src="../frontend/src/renderer/assets/agents/devin.png" alt="Devin" width="24" height="24" align="middle" /> &nbsp; <b>Devin</b></td>
   </tr>
@@ -225,7 +225,7 @@ cd agent-orchestrator
 
 ## 製品テレメトリ
 
-このフォークは利用状況の分析データやクラッシュレポートを送信しません。ローカル診断と、更新確認を含むネットワーク機能は維持されます。[詳細](../docs/telemetry.md)。
+Orchestrator.inc はプロジェクトの内容を除いた利用状況と信頼性の指標を収集します。ただし、GitHub 上のプロジェクト所有者やログイン中のユーザー名から個人を特定できるため、匿名ではありません。テレメトリをオフにすると、これらの情報の送信も止まります。[詳細と設定](../docs/telemetry.md)。
 
 ## ライセンス
 

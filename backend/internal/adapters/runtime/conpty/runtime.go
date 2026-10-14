@@ -519,9 +519,9 @@ func (r *Runtime) SendMessage(ctx context.Context, handle ports.RuntimeHandle, m
 		return fmt.Errorf("conpty: resolve runtime %q for message: %w", handle.ID, err)
 	}
 	if sess == nil {
-		return fmt.Errorf("conpty: session %q: %w", handle.ID, ports.ErrRuntimeUnavailable)
+		return fmt.Errorf("conpty: session %q not found", handle.ID)
 	}
-	return classifyHostFailure(handle.ID, clientSendMessage(sess.addr, message))
+	return clientSendMessage(sess.addr, message)
 }
 
 // Interrupt sends Ctrl-C to the PTY without tearing down the terminal host.
@@ -531,9 +531,9 @@ func (r *Runtime) Interrupt(ctx context.Context, handle ports.RuntimeHandle) err
 		return fmt.Errorf("conpty: resolve runtime %q for interrupt: %w", handle.ID, err)
 	}
 	if sess == nil {
-		return fmt.Errorf("conpty: session %q: %w", handle.ID, ports.ErrRuntimeUnavailable)
+		return fmt.Errorf("conpty: session %q not found", handle.ID)
 	}
-	return classifyHostFailure(handle.ID, clientSendInput(sess.addr, "\x03"))
+	return clientSendInput(sess.addr, "\x03")
 }
 
 // SendInput writes raw terminal input without appending Enter. It is intended
@@ -544,9 +544,9 @@ func (r *Runtime) SendInput(ctx context.Context, handle ports.RuntimeHandle, inp
 		return fmt.Errorf("conpty: resolve runtime %q for input: %w", handle.ID, err)
 	}
 	if sess == nil {
-		return fmt.Errorf("conpty: session %q: %w", handle.ID, ports.ErrRuntimeUnavailable)
+		return fmt.Errorf("conpty: session %q not found", handle.ID)
 	}
-	return classifyHostFailure(handle.ID, clientSendInput(sess.addr, input))
+	return clientSendInput(sess.addr, input)
 }
 
 // GetOutput returns the last lines lines from the pty-host ring buffer.
@@ -559,10 +559,9 @@ func (r *Runtime) GetOutput(ctx context.Context, handle ports.RuntimeHandle, lin
 		return "", fmt.Errorf("conpty: resolve runtime %q for output: %w", handle.ID, err)
 	}
 	if sess == nil {
-		return "", fmt.Errorf("conpty: session %q: %w", handle.ID, ports.ErrRuntimeUnavailable)
+		return "", fmt.Errorf("conpty: session %q not found", handle.ID)
 	}
-	out, err := clientGetOutput(ctx, sess.addr, lines)
-	return out, classifyHostFailure(handle.ID, err)
+	return clientGetOutput(ctx, sess.addr, lines)
 }
 
 // GetStyledOutput returns the current rendered ConPTY viewport with ANSI cell
@@ -577,7 +576,7 @@ func (r *Runtime) GetStyledOutput(ctx context.Context, handle ports.RuntimeHandl
 		return "", fmt.Errorf("conpty: resolve runtime %q for styled output: %w", handle.ID, err)
 	}
 	if sess == nil {
-		return "", fmt.Errorf("conpty: session %q: %w", handle.ID, ports.ErrRuntimeUnavailable)
+		return "", fmt.Errorf("conpty: session %q not found", handle.ID)
 	}
 	protocolVersion, err := r.resolveHostProtocol(ctx, sess)
 	if err != nil {
@@ -587,25 +586,7 @@ func (r *Runtime) GetStyledOutput(ctx context.Context, handle ports.RuntimeHandl
 		return "", fmt.Errorf("conpty: pty-host protocol version %d: %w",
 			protocolVersion, ports.ErrStyledTerminalOutputUnavailable)
 	}
-	styled, err := clientGetStyledOutput(ctx, sess.addr, lines)
-	return styled, classifyHostFailure(handle.ID, err)
-}
-
-// classifyHostFailure carries clientStatusContext's dial reading onto the
-// command paths: a refused connection means nothing is listening on the host's
-// address, which is exactly as knowable when SendMessage hits it as when the
-// liveness probe does. Without it a send into a dead pty-host returned a bare
-// "connection refused", which the session service could only render as an
-// opaque 500 with the cause left in the daemon log.
-//
-// Only the definitive reading is labelled. A timeout or a post-connect protocol
-// failure passes through unchanged rather than being relabelled as a
-// reachability fact it does not prove.
-func classifyHostFailure(id string, err error) error {
-	if err == nil || !isConnRefused(err) {
-		return err
-	}
-	return fmt.Errorf("conpty: session %q: %w: %w", id, ports.ErrRuntimeUnavailable, err)
+	return clientGetStyledOutput(ctx, sess.addr, lines)
 }
 
 // resolveHostProtocol negotiates capabilities when a daemon adopts a detached

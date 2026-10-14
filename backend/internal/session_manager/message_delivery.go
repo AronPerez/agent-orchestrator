@@ -30,15 +30,8 @@ func (m *Manager) WaitForMessageDeliveryReady(ctx context.Context, id domain.Ses
 	if rec.IsTerminated {
 		return ErrTerminated
 	}
-	// #114 effect 4: an exited reading may be a nested agent's lie. Verify
-	// liveness at most once per call; on a genuine clear fall through and let
-	// the readiness loop below re-read the healed row.
-	staleExitChecked := false
 	if rec.Activity.State == domain.ActivityExited {
-		staleExitChecked = true
-		if !m.clearedStaleExit(ctx, id) {
-			return ErrAgentExited
-		}
+		return ErrAgentExited
 	}
 
 	mode := domain.NormalizeSessionMode(rec.Mode)
@@ -82,14 +75,7 @@ func (m *Manager) WaitForMessageDeliveryReady(ctx context.Context, id domain.Ses
 			return ErrTerminated
 		}
 		if rec.Activity.State == domain.ActivityExited {
-			// One verification per call, and never a `continue`: the ticker wait
-			// lives at the bottom of this loop, so skipping it would turn a
-			// session being re-poisoned into a hot loop of ps shell-outs.
-			// Falling through costs one tick of latency and stays bounded.
-			if staleExitChecked || !m.clearedStaleExit(ctx, id) {
-				return ErrAgentExited
-			}
-			staleExitChecked = true
+			return ErrAgentExited
 		}
 
 		ready := rec.Activity.State == domain.ActivityIdle

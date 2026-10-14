@@ -173,7 +173,7 @@ func (c *MobileController) KeepAwake(w http.ResponseWriter, r *http.Request) {
 // LANController is the runtime hook set the concrete bridge needs. httpd's
 // LANManager + authState satisfy it (adapter wired in daemon.go).
 type LANController interface {
-	Start(port int, bind string) (int, error)
+	Start(port int) (int, error)
 	StartLoopback(port int) (int, error)
 	Stop(ctx context.Context) error
 	Running() bool
@@ -267,13 +267,6 @@ func (b *BridgeService) lanHosts() []string {
 	if b.PickLANHosts != nil {
 		return b.PickLANHosts()
 	}
-	// A narrowed listener must only advertise the address it actually bound.
-	// Advertising every local interface here would hand the phone endpoints
-	// that cannot reach this socket.
-	st, _ := mobilebridge.Load(b.ConfigPath)
-	if host, err := mobilebridge.BindAddress(st.Bind); err == nil && host != "0.0.0.0" {
-		return []string{host}
-	}
 	return mobilebridge.LocalPrivateIPv4s()
 }
 
@@ -304,12 +297,13 @@ func (b *BridgeService) Status() MobileStatusResponse {
 		lan, ts = nil, nil
 	}
 	res := MobileStatusResponse{
-		Enabled:       enabled,
-		LoopbackOnly:  st.LoopbackOnly,
-		Host:          first(lan),
-		TailscaleHost: first(ts),
-		Port:          b.LAN.BoundPort(),
-		Warning:       mobileUnencryptedWarning,
+		Enabled:        enabled,
+		LoopbackOnly:   st.LoopbackOnly,
+		NoPublicTunnel: st.NoPublicTunnel,
+		Host:           first(lan),
+		TailscaleHost:  first(ts),
+		Port:           b.LAN.BoundPort(),
+		Warning:        mobileUnencryptedWarning,
 		Endpoints: mobilebridge.Endpoints(mobilebridge.EndpointInputs{
 			LANHosts:       lan,
 			TailscaleHosts: ts,
@@ -574,8 +568,8 @@ func (b *BridgeService) enableWithPasswordLocked(pw string, noPublicTunnel, loop
 	// password while persisted state/UI still say the bridge is off.
 	prevHash := b.LAN.PasswordHash()
 	wasRunning := b.LAN.Running()
-	// Preserve user-set bind and pairing options across enable/regenerate.
-	st, _ := mobilebridge.Load(b.ConfigPath)
+	prevSt, _ := mobilebridge.Load(b.ConfigPath)
+
 	// A fresh listener must be armed before binding. For an already-running
 	// listener, wait until persistence succeeds before rotating the hash: a
 	// failed save must not disconnect currently authenticated clients.
@@ -583,29 +577,35 @@ func (b *BridgeService) enableWithPasswordLocked(pw string, noPublicTunnel, loop
 	if !wasRunning {
 		b.LAN.SetPasswordHash(nextHash)
 	}
-	var port int
-	var err error
+	start := b.LAN.Start
 	if loopbackOnly {
-		port, err = b.LAN.StartLoopback(b.DefaultPort)
-	} else {
-		port, err = b.LAN.Start(b.DefaultPort, st.Bind)
+		start = b.LAN.StartLoopback
 	}
+	port, err := start(b.DefaultPort)
 	if err != nil {
 		if !wasRunning {
 			b.LAN.SetPasswordHash(prevHash) // Start failed: undo the hash swap.
 		}
 		return MobileStatusResponse{}, err
 	}
-	if st.Password != "" && st.Password != pw {
+	// Preserve the persisted SecurePairing and KeepAwake flags while selecting
+	// whether this enable is allowed to start a managed public tunnel.
+	retired := prevSt.RetiredPasswordHash
+	accountTokenHash := prevSt.AccountTokenHash
+	accountToken := prevSt.AccountToken
+	accountTokenOwner := prevSt.AccountTokenOwner
+	if prevSt.Password != "" && prevSt.Password != pw {
 		// ponytail: retain only one revoked password across daemon restarts;
 		// keep more history only if multi-rotation stale clients are observed.
-		st.RetiredPasswordHash = mobilebridge.HashPassword(st.Password)
-		// Rotating the pairing password revokes a previously synced account token.
-		st.AccountTokenHash, st.AccountToken, st.AccountTokenOwner = "", "", ""
+		retired = mobilebridge.HashPassword(prevSt.Password)
+		// Password rotation is the user's credential-revocation action. A
+		// previously synced account token must not bypass it.
+		accountTokenHash = ""
+		accountToken = ""
+		accountTokenOwner = ""
 	}
-	st.Enabled, st.Password, st.LastPort = true, pw, port
-	st.NoPublicTunnel, st.LoopbackOnly = noPublicTunnel, loopbackOnly
-	if err := mobilebridge.Save(b.ConfigPath, st); err != nil {
+	nextSt := mobilebridge.State{Enabled: true, Password: pw, LastPort: port, RetiredPasswordHash: retired, AccountTokenHash: accountTokenHash, AccountToken: accountToken, AccountTokenOwner: accountTokenOwner, SecurePairing: prevSt.SecurePairing, ServeCleanupPending: prevSt.ServeCleanupPending, KeepAwake: prevSt.KeepAwake, NoPublicTunnel: noPublicTunnel, LoopbackOnly: loopbackOnly}
+	if err := mobilebridge.Save(b.ConfigPath, nextSt); err != nil {
 		// Persist failed after the listener came up. A running listener still
 		// serves the old hash; a fresh enable must tear the listener back down.
 		if !wasRunning {
@@ -619,8 +619,10 @@ func (b *BridgeService) enableWithPasswordLocked(pw string, noPublicTunnel, loop
 	if wasRunning {
 		b.LAN.SetPasswordHash(nextHash)
 	}
-	if setter, ok := b.LAN.(interface{ SetAccountTokenHash(string) }); ok {
-		setter.SetAccountTokenHash(st.AccountTokenHash)
+	if accountTokenHash != prevSt.AccountTokenHash {
+		if setter, ok := b.LAN.(interface{ SetAccountTokenHash(string) }); ok {
+			setter.SetAccountTokenHash(accountTokenHash)
+		}
 	}
 	// Re-point the proxy at the port Start actually bound. This runs on every
 	// listener start driven through this method — enable and password rotation
@@ -629,7 +631,7 @@ func (b *BridgeService) enableWithPasswordLocked(pw string, noPublicTunnel, loop
 	// method (it has no password to rotate); see RestoreOnBoot, which mirrors
 	// this same post-Start apply. A failure is recorded, never fatal: the
 	// bridge stays up in plaintext mode and Status reports serve_failed.
-	b.startConnectorsLocked(port, st)
+	b.startConnectorsLocked(port, nextSt)
 	return b.Status(), nil
 }
 
@@ -684,16 +686,14 @@ func (b *BridgeService) RestoreOnBoot(state mobilebridge.State) error {
 		b.LAN.SetPasswordHash(state.RetiredPasswordHash)
 	}
 	b.LAN.SetPasswordHash(mobilebridge.HashPassword(state.Password))
-	if hasAccountSetter {
-		accountSetter.SetAccountTokenHash(state.AccountTokenHash)
+	if setter, ok := b.LAN.(interface{ SetAccountTokenHash(string) }); ok {
+		setter.SetAccountTokenHash(state.AccountTokenHash)
 	}
-	var port int
-	var err error
+	start := b.LAN.Start
 	if state.LoopbackOnly {
-		port, err = b.LAN.StartLoopback(state.LastPort)
-	} else {
-		port, err = b.LAN.Start(state.LastPort, state.Bind)
+		start = b.LAN.StartLoopback
 	}
+	port, err := start(state.LastPort)
 	if err != nil {
 		b.LAN.SetPasswordHash(prevHash)
 		if hasAccountSetter {

@@ -39,11 +39,7 @@ type systemPromptConfig struct {
 	OrchestratorSessionID string
 	ProjectRules          string
 	OrchestratorRules     string
-	// OrchestratorOverride, when set, replaces the built-in orchestrator role
-	// prompt (project.Config.OrchestratorPrompt). OrchestratorRules and the
-	// standing guards still apply on top of it.
-	OrchestratorOverride string
-	AdditionalSections   []string
+	AdditionalSections    []string
 }
 
 type projectRulesConfig struct {
@@ -79,11 +75,7 @@ func buildSystemPromptText(cfg systemPromptConfig) string {
 	sections := make([]string, 0, 6)
 	switch cfg.Role {
 	case sessionPromptRoleOrchestrator:
-		if override := strings.TrimSpace(cfg.OrchestratorOverride); override != "" {
-			sections = append(sections, override)
-		} else {
-			sections = append(sections, orchestratorSystemPrompt(cfg.Project))
-		}
+		sections = append(sections, orchestratorSystemPrompt(cfg.Project))
 		if rules := strings.TrimSpace(cfg.OrchestratorRules); rules != "" {
 			sections = append(sections, "## Project-Specific Orchestrator Rules\n"+rules)
 		}
@@ -107,7 +99,7 @@ func buildSystemPromptText(cfg systemPromptConfig) string {
 	default:
 		return ""
 	}
-	sections = append(sections, publishingScopePrompt(), systemPromptGuard(), instructionTrustGuard)
+	sections = append(sections, publishingScopePrompt(), systemPromptGuard())
 	for _, section := range cfg.AdditionalSections {
 		if section := strings.TrimSpace(section); section != "" {
 			sections = append(sections, section)
@@ -258,8 +250,9 @@ Your job is to coordinate work, not to perform implementation. Keep the project 
 ## In-App Session Links
 
 - When referring the human to an AO session in Chat or the AO terminal, include a clickable canonical link: `+"`ao://sessions/{project-id}/{session-id}`"+`.
+- When referring the human to any file inside a session's artifact directory, whether reported or found by listing it, link it as `+"`ao://sessions/{project-id}/{session-id}/artifacts/{path}`"+`, where `+"`{session-id}`"+` owns that directory (`+"`artifacts/{session-id}/`"+` under the AO data directory) and `+"`{path}`"+` is relative to it. Use the file name as the link text. Worker reports give artifact paths, not links; build the link only in what you tell the human.
 - Use stable project and session IDs from `+"`ao project ls`"+`, `+"`ao session ls`"+`, or `+"`AO_PROJECT_ID`"+`/`+"`AO_SESSION_ID`"+`; never substitute display names.
-- Percent-encode each ID as one URL path segment when necessary. Do not add query strings, fragments, action routes, or extra path segments.
+- Percent-encode each ID and artifact path segment when necessary. Do not add query strings, fragments, action routes, or path segments beyond these two forms.
 - These links navigate only inside the running AO desktop app. Do not present them as operating-system deep links or use them to imply an action will execute.
 
 ## Review and CI Workflow

@@ -38,6 +38,7 @@ import (
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
 	sessionsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/session"
 	usagesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/usage"
+	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
 	"github.com/aoagents/agent-orchestrator/backend/internal/workspacewatch"
 )
 
@@ -87,7 +88,6 @@ var (
 // SessionService is the controller-facing session service contract.
 type SessionService interface {
 	List(ctx context.Context, filter sessionsvc.ListFilter) ([]domain.Session, error)
-	ListPage(ctx context.Context, req sessionsvc.ListPageRequest) (sessionsvc.Page, error)
 	Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Session, int, int, error)
 	SpawnOrchestrator(ctx context.Context, projectID domain.ProjectID, clean bool, requestedMode domain.SessionMode, approval domain.PermissionMode) (domain.Session, error)
 	Get(ctx context.Context, id domain.SessionID) (domain.Session, error)
@@ -98,7 +98,8 @@ type SessionService interface {
 	RecoverAgentSwitch(ctx context.Context, id domain.SessionID, switchID domain.AgentSwitchID) (domain.AgentSwitch, error)
 	ListAgentSwitches(ctx context.Context, id domain.SessionID) ([]domain.AgentSwitch, error)
 	SubmitAgentHandoff(ctx context.Context, id domain.SessionID, switchID domain.AgentSwitchID, sourceGenerationID domain.AgentGenerationID, handoff json.RawMessage) (domain.AgentSwitch, error)
-	Kill(ctx context.Context, id domain.SessionID) (bool, error)
+	RequestKill(ctx context.Context, id domain.SessionID) (sessionmanager.KillResult, error)
+	DeleteArtifacts(ctx context.Context, id domain.SessionID) error
 	RollbackSpawn(ctx context.Context, id domain.SessionID) (sessionsvc.RollbackOutcome, error)
 	Cleanup(ctx context.Context, project domain.ProjectID) (sessionsvc.CleanupOutcome, error)
 	Rename(ctx context.Context, id domain.SessionID, displayName string) error
@@ -134,6 +135,7 @@ type SessionService interface {
 	GetWorkspaceFileRevision(ctx context.Context, id domain.SessionID, path string, scope sessionsvc.WorkspaceDiffScope, side sessionsvc.WorkspaceFileBlobSide, workspaceVersion, expectedRevision string) (sessionsvc.WorkspaceFileRevision, error)
 	GetWorkspaceFileRevisionAtCommit(ctx context.Context, id domain.SessionID, path string, side sessionsvc.WorkspaceFileBlobSide, workspaceVersion, expectedRevision, commitSHA string) (sessionsvc.WorkspaceFileRevision, error)
 	SearchWorkspaceFiles(ctx context.Context, id domain.SessionID, query, cursor string, limit int) (sessionsvc.WorkspaceFileSearch, error)
+	ResolveWorkspacePath(ctx context.Context, id domain.SessionID, rawPath string) (sessionsvc.WorkspacePathResolution, error)
 	ListWorkspaceTree(ctx context.Context, id domain.SessionID, path string) (sessionsvc.WorkspaceTree, error)
 	InvalidateWorkspaceCache(id domain.SessionID)
 	Pin(ctx context.Context, id domain.SessionID) (domain.Session, error)
@@ -187,6 +189,8 @@ type SessionsController struct {
 		Get(context.Context, domain.ProjectID) (projectsvc.GetResult, error)
 	}
 	Activity                 ActivityRecorder
+	NativeSessions           ports.AgentNativeSessionResolver
+	DataDir                  string
 	Usage                    UsageHookRecorder
 	Attachments              *attachmentstore.Store
 	PreviewServer            ManagedPreviewServer
@@ -207,6 +211,7 @@ func (c *SessionsController) Register(r chi.Router) {
 	r.Post("/sessions/{sessionId}/preview/server", c.startPreviewServer)
 	r.Delete("/sessions/{sessionId}/preview/server", c.stopPreviewServer)
 	r.Get("/sessions/{sessionId}/preview/files/*", c.previewFile)
+	r.Get("/sessions/{sessionId}/artifact-files/*", c.artifactFile)
 	for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
 		r.Method(method, "/sessions/{sessionId}/preview/app/*", http.HandlerFunc(c.previewApp))
 	}
@@ -220,6 +225,7 @@ func (c *SessionsController) Register(r chi.Router) {
 	r.Post("/sessions/{sessionId}/workspace/diffs", c.getWorkspaceDiffs)
 	r.Get("/sessions/{sessionId}/workspace/file/revision", c.getWorkspaceFileRevision)
 	r.Get("/sessions/{sessionId}/workspace/search", c.searchWorkspaceFiles)
+	r.Get("/sessions/{sessionId}/workspace/resolve", c.resolveWorkspacePath)
 	r.Get("/sessions/{sessionId}/workspace/tree", c.listWorkspaceTree)
 	r.Get("/sessions/{sessionId}/pr/{prNumber}/files", c.listPRFiles)
 	r.Get("/sessions/{sessionId}/pr/{prNumber}/file", c.getPRFile)
@@ -247,6 +253,7 @@ func (c *SessionsController) Register(r chi.Router) {
 	r.Post("/sessions/{sessionId}/rollback", c.rollback)
 	r.Post("/sessions/{sessionId}/send", c.send)
 	r.Post("/sessions/{sessionId}/activity", c.activity)
+	r.Post("/sessions/{sessionId}/activity/codewhale", c.codewhaleActivity)
 	r.Post("/sessions/{sessionId}/pin", c.pin)
 	r.Delete("/sessions/{sessionId}/pin", c.unpin)
 	r.Get("/orchestrators", c.listOrchestrators)
@@ -269,33 +276,17 @@ func (c *SessionsController) list(w http.ResponseWriter, r *http.Request) {
 		apispec.NotImplemented(w, r, "GET", "/api/v1/sessions")
 		return
 	}
-	req, err := parseSessionListFilter(r)
+	filter, err := parseSessionListFilter(r)
 	if err != nil {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_QUERY", err.Error(), nil)
 		return
 	}
-	if req.PageSize == 0 {
-		sessions, err := c.Svc.List(r.Context(), req.ListFilter)
-		if err != nil {
-			envelope.WriteError(w, r, err)
-			return
-		}
-		envelope.WriteJSON(w, http.StatusOK, ListSessionsResponse{Sessions: sessionViews(r, sessions)})
-		return
-	}
-	page, err := c.Svc.ListPage(r.Context(), req)
+	sessions, err := c.Svc.List(r.Context(), filter)
 	if err != nil {
-		if errors.Is(err, sessionsvc.ErrInvalidPageToken) {
-			envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_PAGE_TOKEN", "Page token is not valid", nil)
-			return
-		}
 		envelope.WriteError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusOK, ListSessionsResponse{
-		Sessions:      sessionViews(r, page.Sessions),
-		NextPageToken: page.NextPageToken,
-	})
+	envelope.WriteJSON(w, http.StatusOK, ListSessionsResponse{Sessions: sessionViews(r, sessions)})
 }
 
 func (c *SessionsController) spawn(w http.ResponseWriter, r *http.Request) {
@@ -327,6 +318,10 @@ func (c *SessionsController) spawn(w http.ResponseWriter, r *http.Request) {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_APPROVAL_MODE", "approvalMode is invalid", nil)
 		return
 	}
+	if !in.RequestedOutput.Valid() {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "validation", "INVALID_REQUESTED_OUTPUT", "requestedOutput must be \"artifact\" or omitted", nil)
+		return
+	}
 	if len(in.Prompt) > maxPromptLen {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "PROMPT_TOO_LONG", "Prompt must be 16 KiB or fewer", nil)
 		return
@@ -355,7 +350,7 @@ func (c *SessionsController) spawn(w http.ResponseWriter, r *http.Request) {
 		keyless.Attachments = nil
 		requestHash = clientRequestFingerprint("session", keyless, attachments)
 	}
-	sess, promptBytes, systemPromptBytes, err := c.Svc.Spawn(r.Context(), ports.SpawnConfig{ProjectID: in.ProjectID, IssueID: in.IssueID, ParentSessionID: in.ParentSessionID, TrackerProvider: in.TrackerProvider, Kind: in.Kind, Harness: in.Harness, Branch: in.Branch, RequestedMode: in.Mode, Prompt: in.Prompt, DisplayName: displayName, Attachments: attachments, AgentConfig: ports.AgentConfig{Model: in.Model, Effort: in.Effort, Permissions: in.ApprovalMode}, ClientRequestID: in.ClientRequestID, ClientRequestHash: requestHash})
+	sess, promptBytes, systemPromptBytes, err := c.Svc.Spawn(r.Context(), ports.SpawnConfig{ProjectID: in.ProjectID, IssueID: in.IssueID, ParentSessionID: in.ParentSessionID, TrackerProvider: in.TrackerProvider, Kind: in.Kind, Harness: in.Harness, Branch: in.Branch, RequestedMode: in.Mode, Prompt: in.Prompt, RequestedOutput: in.RequestedOutput, DisplayName: displayName, Attachments: attachments, AgentConfig: ports.AgentConfig{Model: in.Model, Effort: in.Effort, Permissions: in.ApprovalMode}, ClientRequestID: in.ClientRequestID, ClientRequestHash: requestHash})
 	if err != nil {
 		envelope.WriteError(w, r, err)
 		return
@@ -613,6 +608,31 @@ func (c *SessionsController) previewApp(w http.ResponseWriter, r *http.Request) 
 	proxy.ServeHTTP(w, r)
 }
 
+// inlineArtifactOrigin serves the session's artifact directory on its inline
+// origin, the one the chat thread frames an HTML artifact from: the request
+// path is the artifact path, files only, read-only, in the inline sandbox.
+func (c *SessionsController) inlineArtifactOrigin(w http.ResponseWriter, r *http.Request, id domain.SessionID) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		envelope.WriteAPIError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "METHOD_NOT_ALLOWED",
+			r.Method+" not allowed on an artifact origin", nil)
+		return
+	}
+	if c.Svc == nil {
+		writeArtifactFileNotFound(w, r)
+		return
+	}
+	// The session read fills in the default artifact directory for a row
+	// stored without one.
+	sess, err := c.Svc.Get(r.Context(), id)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	asset := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
+	serveArtifactFile(w, r, inlineArtifactContentSecurityPolicy, sess.Metadata.ArtifactDir, asset)
+}
+
 func isPreviewLoopback(host string) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true
@@ -630,6 +650,10 @@ func isPreviewLoopback(host string) bool {
 // /assets/app.css maps to dist/assets/app.css. This mirrors a production static
 // server and fixes root-relative URLs without rewriting user-generated files.
 func (c *SessionsController) PreviewOrigin(w http.ResponseWriter, r *http.Request) bool {
+	if id, ok := previewutil.SessionIDFromInlineArtifactHost(r.Host); ok {
+		c.inlineArtifactOrigin(w, r, id)
+		return true
+	}
 	id, artifactOrigin := previewutil.SessionIDFromArtifactHost(r.Host)
 	if !artifactOrigin {
 		var ok bool
@@ -1047,6 +1071,26 @@ func (c *SessionsController) searchWorkspaceFiles(w http.ResponseWriter, r *http
 		return
 	}
 	envelope.WriteJSON(w, http.StatusOK, workspaceFileSearchResponse(result))
+}
+
+// resolveWorkspacePath classifies a path from chat as a workspace file, a
+// session artifact, or neither, so the renderer can open it without knowing
+// where the session's worktree lives.
+func (c *SessionsController) resolveWorkspacePath(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "GET", "/api/v1/sessions/{sessionId}/workspace/resolve")
+		return
+	}
+	result, err := c.Svc.ResolveWorkspacePath(r.Context(), sessionID(r), r.URL.Query().Get("path"))
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, WorkspacePathResolutionResponse{
+		SessionID: result.SessionID,
+		Kind:      result.Kind,
+		Path:      result.Path,
+	})
 }
 
 // listWorkspaceTree returns one directory level of the session workspace's
@@ -1835,12 +1879,28 @@ func (c *SessionsController) kill(w http.ResponseWriter, r *http.Request) {
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/kill")
 		return
 	}
-	freed, err := c.Svc.Kill(r.Context(), sessionID(r))
+	var in KillSessionRequest
+	if err := decodeJSON(r, &in); err != nil && !errors.Is(err, io.EOF) {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
+		return
+	}
+	result, err := c.Svc.RequestKill(r.Context(), sessionID(r))
 	if err != nil {
 		envelope.WriteError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusOK, KillSessionResponse{OK: true, SessionID: sessionID(r), Freed: freed})
+	// The session is already archived here, so a failed delete must not fail
+	// the request: the caller would roll back an archive that happened. The
+	// response reports it instead and the files stay on disk.
+	artifactsDeleted := false
+	if in.DeleteArtifacts {
+		if err := c.Svc.DeleteArtifacts(r.Context(), sessionID(r)); err != nil {
+			slog.WarnContext(r.Context(), "delete session artifacts after archive", "session", sessionID(r), "err", err)
+		} else {
+			artifactsDeleted = true
+		}
+	}
+	envelope.WriteJSON(w, http.StatusOK, KillSessionResponse{OK: true, SessionID: sessionID(r), Freed: result.Freed, CleanupPending: result.CleanupPending, ArtifactsDeleted: artifactsDeleted})
 }
 
 // rollback undoes a partially-completed spawn: if the session row is still in
@@ -1876,10 +1936,8 @@ func (c *SessionsController) cleanup(w http.ResponseWriter, r *http.Request) {
 	for _, skip := range out.Skipped {
 		skipped = append(skipped, CleanupSkippedSession{SessionID: skip.SessionID, Reason: skip.Reason})
 	}
-	// A skipped dirty worktree remains on disk, so this successful request is
-	// not a completed cleanup from the caller's perspective.
 	envelope.WriteJSON(w, http.StatusOK, CleanupSessionsResponse{
-		OK: len(skipped) == 0, Cleaned: out.Cleaned, AlreadyGone: out.AlreadyGone, Skipped: skipped,
+		OK: true, Cleaned: out.Cleaned, AlreadyGone: out.AlreadyGone, Skipped: skipped,
 	})
 }
 
@@ -2107,7 +2165,6 @@ func (c *SessionsController) activity(w http.ResponseWriter, r *http.Request) {
 		ProviderTurnID:               capActivityMeta(domain.SanitizeControlChars(strings.TrimSpace(in.ProviderTurnID))),
 		SubmissionID:                 capActivityMeta(domain.SanitizeControlChars(strings.TrimSpace(in.SubmissionID))),
 		TranscriptPath:               capActivityText(domain.SanitizeControlChars(strings.TrimSpace(in.TranscriptPath)), 4096),
-		AgentCWD:                     capActivityText(domain.SanitizeControlChars(strings.TrimSpace(in.AgentCWD)), 4096),
 		LaunchID:                     capActivityMeta(domain.SanitizeControlChars(strings.TrimSpace(in.LaunchID))),
 	}
 	if in.RunningSubagentIDs != nil && len(*in.RunningSubagentIDs) <= 128 {
@@ -2171,6 +2228,101 @@ func (c *SessionsController) activity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	envelope.WriteJSON(w, http.StatusOK, SetActivityResponse{OK: true, SessionID: sessionID(r), State: in.State})
+}
+
+// codewhaleActivity translates Codewhale's v0.10 lifecycle outbox webhook into
+// AO's provider-neutral activity signal. The launch id lives in the callback
+// URL because Codewhale's event envelope has no supervisor-generation field.
+func (c *SessionsController) codewhaleActivity(w http.ResponseWriter, r *http.Request) {
+	if c.Activity == nil {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/activity/codewhale")
+		return
+	}
+	launchID := capActivityMeta(domain.SanitizeControlChars(strings.TrimSpace(r.URL.Query().Get("launchId"))))
+	if launchID == "" {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "LAUNCH_ID_REQUIRED", "Codewhale lifecycle callbacks require a launchId", nil)
+		return
+	}
+	var in CodewhaleLifecycleWebhookRequest
+	if err := decodeJSON(r, &in); err != nil {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
+		return
+	}
+	if in.Event.SchemaVersion != 1 {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "UNSUPPORTED_CODEWHALE_LIFECYCLE_SCHEMA", "Unsupported Codewhale lifecycle schema", nil)
+		return
+	}
+
+	hookThreadID := capActivityMeta(domain.SanitizeControlChars(strings.TrimSpace(in.Event.ThreadID)))
+	if hookThreadID == "" {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "CODEWHALE_THREAD_ID_REQUIRED", "Codewhale lifecycle callbacks require a thread_id", nil)
+		return
+	}
+	signal := ports.ActivitySignal{
+		Timestamp:      in.Event.Timestamp,
+		Event:          capActivityMeta(domain.SanitizeControlChars(strings.TrimSpace(in.Event.Event))),
+		ProviderTurnID: capActivityMeta(domain.SanitizeControlChars(strings.TrimSpace(in.Event.TurnID))),
+		LaunchID:       launchID,
+	}
+	if signal.Timestamp.IsZero() {
+		signal.Timestamp = in.At
+	}
+	switch strings.TrimSpace(in.Event.Kind) {
+	case "session.started":
+		signal.Event = "session-start"
+	case "turn.started":
+		signal.Valid = true
+		signal.State = domain.ActivityActive
+		signal.Event = "user-prompt-submit"
+	case "turn.completed", "turn.failed", "turn.interrupted", "turn.stalled":
+		signal.Valid = true
+		signal.State = domain.ActivityWaitingInput
+		signal.Event = "stop"
+	case "session.ended":
+		signal.Valid = true
+		signal.State = domain.ActivityExited
+		signal.Event = "session-end"
+	case "subagent.spawned", "subagent.completed":
+		// Provider-internal subagents remain opaque activity inside this AO
+		// session until AO has a provider-neutral nested-session model.
+		envelope.WriteJSON(w, http.StatusOK, SetActivityResponse{OK: true, SessionID: sessionID(r)})
+		return
+	default:
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "UNKNOWN_CODEWHALE_LIFECYCLE_EVENT", "Unknown Codewhale lifecycle event", nil)
+		return
+	}
+	// Codewhale's thread_id is a per-process HookExecutor id (sess_*), not the
+	// durable UUID accepted by --resume. Terminal turn/session events run after
+	// Codewhale saves the conversation, so resolve that UUID from the launch's
+	// isolated Runtime store before lifecycle persists a native resume handle.
+	if c.NativeSessions != nil && (signal.Event == "stop" || signal.Event == "session-end") {
+		nativeID, ok, err := c.NativeSessions.ResolveNativeSessionID(r.Context(), ports.NativeSessionResolveConfig{
+			DataDir:   c.DataDir,
+			SessionID: sessionID(r),
+			LaunchID:  launchID,
+		})
+		if err != nil {
+			envelope.WriteError(w, r, err)
+			return
+		}
+		if ok {
+			signal.AgentSessionID = capActivityMeta(domain.SanitizeControlChars(strings.TrimSpace(nativeID)))
+		}
+	}
+	if err := c.Activity.ApplyActivitySignal(r.Context(), sessionID(r), signal); err != nil {
+		if errors.Is(err, ports.ErrActivityProjectionContention) {
+			w.Header().Set("Retry-After", "1")
+			envelope.WriteAPIError(w, r, http.StatusServiceUnavailable, "unavailable", "ACTIVITY_PROJECTION_BUSY", "Concurrent session updates prevented this activity signal from committing", nil)
+			return
+		}
+		if errors.Is(err, ports.ErrSessionNotFound) {
+			envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "SESSION_NOT_FOUND", "Unknown session", nil)
+			return
+		}
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, SetActivityResponse{OK: true, SessionID: sessionID(r), State: string(signal.State)})
 }
 
 // capActivityMeta bounds an optional activity correlation string; overlong
@@ -2281,46 +2433,31 @@ func orchestratorID(r *http.Request) domain.SessionID {
 	return domain.SessionID(chi.URLParam(r, "id"))
 }
 
-// maxSessionPageSize caps a requested page; larger requests are clamped, not
-// rejected (AIP-158).
-const maxSessionPageSize = 500
-
-func parseSessionListFilter(r *http.Request) (sessionsvc.ListPageRequest, error) {
+func parseSessionListFilter(r *http.Request) (sessionsvc.ListFilter, error) {
 	q := r.URL.Query()
-	req := sessionsvc.ListPageRequest{ListFilter: sessionsvc.ListFilter{ProjectID: domain.ProjectID(q.Get("project"))}}
+	filter := sessionsvc.ListFilter{ProjectID: domain.ProjectID(q.Get("project"))}
 	if raw := q.Get("active"); raw != "" {
 		active, err := strconv.ParseBool(raw)
 		if err != nil {
-			return sessionsvc.ListPageRequest{}, errors.New("active must be a boolean")
+			return sessionsvc.ListFilter{}, errors.New("active must be a boolean")
 		}
-		req.Active = &active
+		filter.Active = &active
 	}
 	if raw := q.Get("orchestratorOnly"); raw != "" {
 		orchestratorOnly, err := strconv.ParseBool(raw)
 		if err != nil {
-			return sessionsvc.ListPageRequest{}, errors.New("orchestratorOnly must be a boolean")
+			return sessionsvc.ListFilter{}, errors.New("orchestratorOnly must be a boolean")
 		}
-		req.OrchestratorOnly = orchestratorOnly
+		filter.OrchestratorOnly = orchestratorOnly
 	}
 	if raw := q.Get("fresh"); raw != "" {
 		fresh, err := strconv.ParseBool(raw)
 		if err != nil {
-			return sessionsvc.ListPageRequest{}, errors.New("fresh must be a boolean")
+			return sessionsvc.ListFilter{}, errors.New("fresh must be a boolean")
 		}
-		req.Fresh = fresh
+		filter.Fresh = fresh
 	}
-	if raw := q.Get("pageSize"); raw != "" {
-		size, err := strconv.Atoi(raw)
-		if err != nil || size < 1 {
-			return sessionsvc.ListPageRequest{}, errors.New("pageSize must be a positive integer")
-		}
-		if size > maxSessionPageSize {
-			size = maxSessionPageSize
-		}
-		req.PageSize = size
-	}
-	req.PageToken = q.Get("pageToken")
-	return req, nil
+	return filter, nil
 }
 
 func writeSessionPRError(w http.ResponseWriter, r *http.Request, err error) {
@@ -2603,6 +2740,7 @@ func sessionArtifactFiles(r *http.Request, s domain.Session) []SessionArtifactVi
 		}
 		if artifact.Kind == domain.SessionArtifactHTML {
 			view.PreviewURL, _ = previewutil.ArtifactFileURL("http://"+r.Host, s.ID, artifact.Path)
+			view.InlineURL, _ = previewutil.InlineArtifactFileURL("http://"+r.Host, s.ID, artifact.Path)
 		}
 		out = append(out, view)
 	}

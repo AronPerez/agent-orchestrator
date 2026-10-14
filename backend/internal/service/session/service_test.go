@@ -61,6 +61,7 @@ func (f *fakeAgentReadiness) RecheckAgent(agentID string) {
 }
 
 type fakeStore struct {
+	cleanupFacts        map[domain.SessionID]domain.SessionCleanupRecord
 	sessions            map[domain.SessionID]domain.SessionRecord
 	getSessionErr       error
 	activeSwitches      map[domain.SessionID]domain.AgentSwitch
@@ -564,6 +565,22 @@ func TestSessionRenameUpdatesDisplayName(t *testing.T) {
 	}
 	if got := st.sessions["mer-1"].DisplayName; got != "Fix issue #90" {
 		t.Fatalf("display name = %q, want trimmed rename", got)
+	}
+}
+
+func TestSessionRenameRejectsOrchestrator(t *testing.T) {
+	for _, terminated := range []bool{false, true} {
+		st := newFakeStore()
+		st.sessions["mer-1"] = domain.SessionRecord{ID: "mer-1", ProjectID: "mer", Kind: domain.KindOrchestrator, IsTerminated: terminated}
+
+		err := (&Service{store: st}).Rename(context.Background(), "mer-1", "My orchestrator")
+		var e *apierr.Error
+		if !errors.As(err, &e) || e.Kind != apierr.KindInvalid || e.Code != "ORCHESTRATOR_RENAME_UNSUPPORTED" {
+			t.Fatalf("terminated=%v: err = %v, want apierr Invalid ORCHESTRATOR_RENAME_UNSUPPORTED", terminated, err)
+		}
+		if got := st.sessions["mer-1"].DisplayName; got != "" {
+			t.Fatalf("terminated=%v: display name = %q, want unchanged", terminated, got)
+		}
 	}
 }
 
@@ -2541,6 +2558,7 @@ type fakeCommander struct {
 	cleanupProjects  []domain.ProjectID
 	killErr          error
 	retireErr        error
+	retireFunc       func(context.Context, domain.SessionID) error
 	sendErr          error
 	sendFunc         func(domain.SessionID, string) error
 	cleanupErr       error
@@ -2550,6 +2568,7 @@ type fakeCommander struct {
 	spawnCalls       int
 	spawned          bool
 	spawnedCfg       ports.SpawnConfig
+	spawnCtx         context.Context
 	killsAtSpawn     int
 	restoreErr       error
 	restoreResult    sessionmanager.RestoreResult
@@ -2569,7 +2588,8 @@ type backgroundTaskCall struct {
 	prompt       string
 }
 
-func (f *fakeCommander) Spawn(_ context.Context, cfg ports.SpawnConfig) (domain.SessionRecord, int, int, error) {
+func (f *fakeCommander) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.SessionRecord, int, int, error) {
+	f.spawnCtx = ctx
 	if f.spawnErr != nil {
 		return domain.SessionRecord{}, 0, 0, f.spawnErr
 	}
@@ -2638,7 +2658,10 @@ func (f *fakeCommander) Kill(_ context.Context, id domain.SessionID) (bool, erro
 	}
 	return true, nil
 }
-func (f *fakeCommander) RetireForReplacement(_ context.Context, id domain.SessionID) error {
+func (f *fakeCommander) RetireForReplacement(ctx context.Context, id domain.SessionID) error {
+	if f.retireFunc != nil {
+		return f.retireFunc(ctx, id)
+	}
 	if f.retireErr != nil {
 		return f.retireErr
 	}
@@ -2860,6 +2883,28 @@ func TestSpawnOrchestratorCleanContinuesWhenRetireNoticeFails(t *testing.T) {
 	}
 }
 
+func TestSpawnOrchestratorCleanPreservesCancellationForReplacement(t *testing.T) {
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer"}
+	st.sessions["mer-1"] = domain.SessionRecord{ID: "mer-1", ProjectID: "mer", Kind: domain.KindOrchestrator}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fc := &fakeCommander{retireFunc: func(retireCtx context.Context, _ domain.SessionID) error {
+		cancel()
+		if err := retireCtx.Err(); err != nil {
+			t.Fatalf("retirement must finish after request cancellation: %v", err)
+		}
+		return nil
+	}}
+	svc := &Service{manager: fc, store: st}
+	if _, err := svc.SpawnOrchestrator(ctx, "mer", true, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if fc.spawnCtx == nil || !errors.Is(fc.spawnCtx.Err(), context.Canceled) {
+		t.Fatal("replacement spawn must receive the cancelled request context")
+	}
+}
+
 func TestSpawnOrchestratorCleanPreservesPersistedMode(t *testing.T) {
 	st := newFakeStore()
 	st.projects["mer"] = domain.ProjectRecord{ID: "mer"}
@@ -2904,6 +2949,9 @@ func TestSpawnOrchestratorUsesExplicitModeForNewProjectOrchestrator(t *testing.T
 
 	if _, err := svc.SpawnOrchestrator(context.Background(), "mer", false, domain.SessionModeChat, ""); err != nil {
 		t.Fatalf("SpawnOrchestrator: %v", err)
+	}
+	if !fc.spawnedCfg.Async {
+		t.Fatal("orchestrator startup must publish a session before Chat launches")
 	}
 	if fc.spawnedCfg.RequestedMode != domain.SessionModeChat {
 		t.Fatalf("requested mode = %q, want chat", fc.spawnedCfg.RequestedMode)
@@ -3456,9 +3504,10 @@ func TestSpawnEmitsTelemetryOnSuccess(t *testing.T) {
 	if ev.ProjectID == nil || *ev.ProjectID != "mer" || ev.SessionID == nil || *ev.SessionID != "mer-9" {
 		t.Fatalf("event ids = %+v", ev)
 	}
-	// Local operational events do not resolve or include the operator identity.
+	// With no GitHub identity resolver wired, the handle degrades to anonymous and
+	// the carrier event omits github_actor entirely.
 	if _, ok := ev.Payload["github_actor"]; ok {
-		t.Fatalf("payload should omit github_actor: %#v", ev.Payload)
+		t.Fatalf("payload should omit github_actor without a resolver: %#v", ev.Payload)
 	}
 }
 
@@ -3570,10 +3619,10 @@ func TestToAPIErrorMapsWorkspaceBranchSentinels(t *testing.T) {
 		{"Windows command line too long", fmt.Errorf("spawn: %w: escaped command line is 32769 UTF-16 code units", ports.ErrRuntimeCommandLineTooLong), apierr.KindInvalid, "WINDOWS_COMMAND_LINE_TOO_LONG"},
 		{"runtime workspace cwd mismatch", fmt.Errorf("spawn mer-1: runtime: %w: session mer-1 started in \"/deleted/shipit\", want \"/tmp/ws\"", ports.ErrRuntimeWorkspaceCwdMismatch), apierr.KindConflict, "WORKSPACE_CWD_MISMATCH"},
 		{"workspace locked", fmt.Errorf("restore mer-1: %w: \"/tmp/ws\" (branch \"ao/mer-1\") is registered but its directory is missing", ports.ErrWorkspaceLocked), apierr.KindConflict, "WORKSPACE_LOCKED"},
-		{"runtime unavailable", fmt.Errorf("send mer-1: guard mer-1: send: tmux runtime: session mer-1: %w: no server running on /private/tmp/tmux-501/ao", ports.ErrRuntimeUnavailable), apierr.KindConflict, "RUNTIME_UNREACHABLE"},
-		{"runtime probe inconclusive", fmt.Errorf("send mer-1: guard mer-1: send: tmux runtime: session mer-1: %w: error connecting to /private/tmp/tmux-501/default", ports.ErrRuntimeProbeInconclusive), apierr.KindConflict, "RUNTIME_UNREACHABLE"},
+		{"cleanup script failed", fmt.Errorf("kill mer-1: %w: secret output", sessionmanager.ErrCleanupScript), apierr.KindConflict, "WORKSPACE_CLEANUP_FAILED"},
 		{"unknown harness", fmt.Errorf("spawn: %w: %q", sessionmanager.ErrUnknownHarness, "bogus"), apierr.KindInvalid, "UNKNOWN_HARNESS"},
 		{"missing harness", fmt.Errorf("spawn: %w: configure project worker.agent or pass --harness", sessionmanager.ErrMissingHarness), apierr.KindInvalid, "AGENT_REQUIRED"},
+		{"artifact output unavailable", fmt.Errorf("spawn: %w", sessionmanager.ErrArtifactOutputUnavailable), apierr.KindInvalid, "ARTIFACT_OUTPUT_UNAVAILABLE"},
 		{"harness install active", fmt.Errorf("spawn: %w", sessionmanager.ErrHarnessInstallActive), apierr.KindConflict, "HARNESS_INSTALL_ACTIVE"},
 		{"awaiting decision", fmt.Errorf("send mer-1: %w", sessionmanager.ErrAwaitingDecision), apierr.KindConflict, "SESSION_AWAITING_DECISION"},
 		{"startup pending", fmt.Errorf("send mer-1: %w", sessionmanager.ErrStartupPending), apierr.KindConflict, "SESSION_STARTUP_PENDING"},
@@ -3595,6 +3644,9 @@ func TestToAPIErrorMapsWorkspaceBranchSentinels(t *testing.T) {
 		{"switch in progress", fmt.Errorf("switch agent mer-1: %w", domain.ErrAgentSwitchInProgress), apierr.KindConflict, "AGENT_SWITCH_IN_PROGRESS"},
 		{"switch idempotency conflict", fmt.Errorf("switch agent mer-1: %w", domain.ErrAgentSwitchIdempotencyConflict), apierr.KindConflict, "AGENT_SWITCH_IDEMPOTENCY_CONFLICT"},
 		{"chat mode unsupported", fmt.Errorf("spawn: %w", ports.ErrChatUnsupported), apierr.KindConflict, "SESSION_MODE_UNSUPPORTED"},
+		{"chat recovery inconclusive with deadline", fmt.Errorf("resume agent mer-1: resume chat: %w: persistent ACP host: %w",
+			ports.ErrChatRecoveryInconclusive, fmt.Errorf("chat host ownership is inconclusive: %w", context.DeadlineExceeded)),
+			apierr.KindConflict, "CHAT_RECOVERY_INCONCLUSIVE"},
 		{"chat driver unavailable", fmt.Errorf("spawn: %w", ports.ErrChatDriverUnavailable), apierr.KindConflict, "CHAT_DRIVER_UNAVAILABLE"},
 		{"chat driver incompatible", fmt.Errorf("spawn: %w", ports.ErrChatDriverIncompatible), apierr.KindConflict, "CHAT_DRIVER_INCOMPATIBLE"},
 		{"chat auth required", fmt.Errorf("spawn: %w", ports.ErrChatAuthRequired), apierr.KindConflict, "CHAT_AUTH_REQUIRED"},
@@ -3613,21 +3665,10 @@ func TestToAPIErrorMapsWorkspaceBranchSentinels(t *testing.T) {
 			if !errors.As(mapped, &e) || e.Kind != tc.wantKind || e.Code != tc.wantCode {
 				t.Fatalf("mapped = %v, want %s %s", mapped, tc.wantCode, e)
 			}
+			if strings.Contains(e.Message, "secret output") {
+				t.Fatalf("mapped message leaked script output: %q", e.Message)
+			}
 		})
-	}
-}
-
-// The whole point of the mapping is that the operator no longer has to read the
-// daemon log: the adapter's own diagnosis has to reach the client message.
-func TestUnreachableRuntimeErrorCarriesTheCause(t *testing.T) {
-	err := fmt.Errorf("send mer-1: guard mer-1: send: tmux runtime: session mer-1: %w: exit status 1: no server running on /private/tmp/tmux-501/ao",
-		ports.ErrRuntimeUnavailable)
-	var e *apierr.Error
-	if !errors.As(toAPIError(err), &e) {
-		t.Fatalf("toAPIError did not produce a typed error: %v", err)
-	}
-	if !strings.Contains(e.Message, "no server running on /private/tmp/tmux-501/ao") {
-		t.Fatalf("message lost the cause: %q", e.Message)
 	}
 }
 
@@ -3685,6 +3726,12 @@ func TestToSpawnAPIErrorMapsSpawnStageSentinels(t *testing.T) {
 			fmt.Errorf("spawn mer-1: %w: %w", sessionmanager.ErrWorkspaceCreate, ports.ErrWorkspaceBranchNotFetched),
 			apierr.KindInvalid,
 			"BRANCH_NOT_FETCHED",
+		},
+		{
+			"artifact output without a data dir",
+			fmt.Errorf("spawn: %w", sessionmanager.ErrArtifactOutputUnavailable),
+			apierr.KindInvalid,
+			"ARTIFACT_OUTPUT_UNAVAILABLE",
 		},
 		{
 			"unclassified fallback",
@@ -5717,113 +5764,6 @@ func TestSpawnTelemetryCarriesRequestID(t *testing.T) {
 	}
 }
 
-// Mirrors the SQL: every predicate applied, newest first by (updated_at, id),
-// resumable from the keyset, capped at Limit.
-func (f *fakeStore) ListSessionsPage(_ context.Context, q ports.SessionPageQuery) ([]domain.SessionRecord, error) {
-	var recs []domain.SessionRecord
-	for _, rec := range f.sessions {
-		if q.Project != "" && rec.ProjectID != q.Project {
-			continue
-		}
-		if q.Terminated != nil && rec.IsTerminated != *q.Terminated {
-			continue
-		}
-		if q.OrchestratorOnly && rec.Kind != domain.KindOrchestrator {
-			continue
-		}
-		if q.Before != nil && !pageNewer(domain.SessionRecord{UpdatedAt: q.Before.UpdatedAt, ID: q.Before.ID}, rec) {
-			continue
-		}
-		recs = append(recs, rec)
-	}
-	for i := 1; i < len(recs); i++ {
-		for j := i; j > 0 && pageNewer(recs[j], recs[j-1]); j-- {
-			recs[j], recs[j-1] = recs[j-1], recs[j]
-		}
-	}
-	if q.Limit > 0 && len(recs) > q.Limit {
-		recs = recs[:q.Limit]
-	}
-	return recs, nil
-}
-
-func pageNewer(a, b domain.SessionRecord) bool {
-	if !a.UpdatedAt.Equal(b.UpdatedAt) {
-		return a.UpdatedAt.After(b.UpdatedAt)
-	}
-	return a.ID > b.ID
-}
-
-func pageIDs(sessions []domain.Session) []domain.SessionID {
-	out := make([]domain.SessionID, 0, len(sessions))
-	for _, s := range sessions {
-		out = append(out, s.ID)
-	}
-	return out
-}
-
-func sameIDs(a, b []domain.SessionID) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func TestListPagePaginatesNewestFirstWithAResumableToken(t *testing.T) {
-	st := newFakeStore()
-	base := time.Unix(1700000000, 0).UTC()
-	for i, id := range []domain.SessionID{"mer-1", "mer-2", "mer-3"} {
-		st.sessions[id] = domain.SessionRecord{ID: id, ProjectID: "mer", IsTerminated: true, UpdatedAt: base.Add(time.Duration(i) * time.Minute)}
-	}
-	svc := &Service{store: st}
-	active := false
-
-	first, err := svc.ListPage(context.Background(), ListPageRequest{ListFilter: ListFilter{Active: &active}, PageSize: 2})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := pageIDs(first.Sessions), []domain.SessionID{"mer-3", "mer-2"}; !sameIDs(got, want) {
-		t.Fatalf("first page = %v, want newest first %v", got, want)
-	}
-	if first.NextPageToken == "" {
-		t.Fatal("a third row exists, so the first page must carry a next-page token")
-	}
-	if st.listPRFactsCalls != 1 {
-		t.Fatalf("ListPRFacts calls = %d, want 1 batched call for the page", st.listPRFactsCalls)
-	}
-
-	rest, err := svc.ListPage(context.Background(), ListPageRequest{ListFilter: ListFilter{Active: &active}, PageSize: 2, PageToken: first.NextPageToken})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := pageIDs(rest.Sessions), []domain.SessionID{"mer-1"}; !sameIDs(got, want) {
-		t.Fatalf("second page = %v, want %v", got, want)
-	}
-	if rest.NextPageToken != "" {
-		t.Fatalf("last page must not carry a token, got %q", rest.NextPageToken)
-	}
-}
-
-func TestListPageRejectsAMalformedToken(t *testing.T) {
-	_, err := (&Service{store: newFakeStore()}).ListPage(context.Background(), ListPageRequest{PageSize: 1, PageToken: "not-a-token"})
-	if !errors.Is(err, ErrInvalidPageToken) {
-		t.Fatalf("err = %v, want ErrInvalidPageToken", err)
-	}
-}
-
-func TestPageTokenRoundTrips(t *testing.T) {
-	want := ports.SessionPageCursor{UpdatedAt: time.Unix(1700000000, 123456789).UTC(), ID: "mer-7"}
-	got, err := DecodePageToken(EncodePageToken(want))
-	if err != nil || !got.UpdatedAt.Equal(want.UpdatedAt) || got.ID != want.ID {
-		t.Fatalf("round trip = %+v, %v; want %+v", got, err, want)
-	}
-}
-
 func TestGetReconcilesWhenPersistedArtifactOutputHasNoFilesLeft(t *testing.T) {
 	dataDir := t.TempDir()
 	artifactDir := filepath.Join(dataDir, "artifacts", "mer-1")
@@ -5848,5 +5788,139 @@ func TestGetReconcilesWhenPersistedArtifactOutputHasNoFilesLeft(t *testing.T) {
 	}
 	if len(reconciler.reconciled) != 1 {
 		t.Fatalf("reconciled = %v, want the removal persisted", reconciler.reconciled)
+	}
+}
+
+func (f *fakeStore) GetSessionCleanupFacts(_ context.Context, id domain.SessionID) (domain.SessionCleanupRecord, bool, error) {
+	rec, ok := f.cleanupFacts[id]
+	return rec, ok, nil
+}
+func (f *fakeCommander) RequestKill(ctx context.Context, id domain.SessionID) (sessionmanager.KillResult, error) {
+	freed, err := f.Kill(ctx, id)
+	return sessionmanager.KillResult{Freed: freed}, err
+}
+
+func TestSessionReadsExposeOnlyCurrentTerminatedCleanupFacts(t *testing.T) {
+	st := newFakeStore()
+	st.sessions["mer-1"] = domain.SessionRecord{ID: "mer-1", ProjectID: "mer", IsTerminated: true, CleanupGeneration: 2}
+	st.cleanupFacts = map[domain.SessionID]domain.SessionCleanupRecord{
+		"mer-1": {SessionID: "mer-1", SessionGeneration: 2, WorkspaceDisposition: domain.DispositionFailed},
+	}
+	svc := &Service{store: st}
+	for _, tc := range []struct {
+		terminated bool
+		generation int64
+		want       domain.WorkspaceDisposition
+	}{
+		{true, 2, domain.DispositionFailed}, {false, 2, ""}, {true, 3, ""},
+	} {
+		rec := st.sessions["mer-1"]
+		rec.IsTerminated, rec.CleanupGeneration = tc.terminated, tc.generation
+		st.sessions[rec.ID] = rec
+		got, err := svc.Get(context.Background(), rec.ID)
+		if err != nil || got.WorkspaceCleanup != tc.want {
+			t.Fatalf("cleanup=%q want=%q err=%v", got.WorkspaceCleanup, tc.want, err)
+		}
+		list, err := svc.List(context.Background(), ListFilter{})
+		if err != nil || len(list) != 1 || list[0].WorkspaceCleanup != tc.want {
+			t.Fatalf("list=%+v err=%v", list, err)
+		}
+	}
+}
+
+type fakeArtifactDeleter struct {
+	deleted []domain.SessionID
+	err     error
+}
+
+func (f *fakeArtifactDeleter) DeleteSession(_ context.Context, id domain.SessionID) error {
+	f.deleted = append(f.deleted, id)
+	return f.err
+}
+
+func TestDeleteArtifactsDeletesThroughTheDeleterAndReconciles(t *testing.T) {
+	st := newFakeStore()
+	st.sessions["mer-1"] = domain.SessionRecord{
+		ID: "mer-1", ProjectID: "mer", Kind: domain.KindWorker, IsTerminated: true,
+		OutputType: domain.SessionOutputArtifact,
+	}
+	deleter := &fakeArtifactDeleter{}
+	reconciler := &fakeOutputTypeReconciler{}
+	svc := NewWithDeps(Deps{Store: st, DataDir: t.TempDir(), OutputTypeReconciler: reconciler, ArtifactDeleter: deleter})
+
+	if err := svc.DeleteArtifacts(context.Background(), "mer-1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(deleter.deleted) != 1 || deleter.deleted[0] != "mer-1" {
+		t.Fatalf("deleted = %v, want [mer-1]", deleter.deleted)
+	}
+	if len(reconciler.reconciled) != 1 || reconciler.reconciled[0] != "mer-1" {
+		t.Fatalf("reconciled = %v, want [mer-1]", reconciler.reconciled)
+	}
+}
+
+func TestDeleteArtifactsReconcilesAndReportsAFailedDelete(t *testing.T) {
+	st := newFakeStore()
+	st.sessions["mer-1"] = domain.SessionRecord{ID: "mer-1", ProjectID: "mer", Kind: domain.KindWorker, IsTerminated: true}
+	deleter := &fakeArtifactDeleter{err: errors.New("file in use")}
+	reconciler := &fakeOutputTypeReconciler{}
+	svc := NewWithDeps(Deps{Store: st, DataDir: t.TempDir(), OutputTypeReconciler: reconciler, ArtifactDeleter: deleter})
+
+	if err := svc.DeleteArtifacts(context.Background(), "mer-1"); err == nil {
+		t.Fatal("DeleteArtifacts succeeded, want the deleter's error")
+	}
+	if len(reconciler.reconciled) != 1 {
+		t.Fatalf("reconciled = %v, want a reconcile after the failure too", reconciler.reconciled)
+	}
+}
+
+func TestDeleteArtifactsRefusesLiveSession(t *testing.T) {
+	st := newFakeStore()
+	st.sessions["mer-1"] = domain.SessionRecord{ID: "mer-1", ProjectID: "mer", Kind: domain.KindWorker}
+	deleter := &fakeArtifactDeleter{}
+	svc := NewWithDeps(Deps{Store: st, DataDir: t.TempDir(), ArtifactDeleter: deleter})
+
+	err := svc.DeleteArtifacts(context.Background(), "mer-1")
+	var apiErr *apierr.Error
+	if !errors.As(err, &apiErr) || apiErr.Code != "SESSION_NOT_TERMINATED" {
+		t.Fatalf("err = %v, want SESSION_NOT_TERMINATED", err)
+	}
+	if len(deleter.deleted) != 0 {
+		t.Fatalf("deleted = %v for a live session, want none", deleter.deleted)
+	}
+}
+
+func TestDeleteArtifactsRefusesAnArtifactDirOutsideTheDataDir(t *testing.T) {
+	st := newFakeStore()
+	st.sessions["mer-1"] = domain.SessionRecord{
+		ID: "mer-1", ProjectID: "mer", Kind: domain.KindWorker, IsTerminated: true,
+		Metadata: domain.SessionMetadata{ArtifactDir: filepath.Join(t.TempDir(), "old-data", "artifacts", "mer-1")},
+	}
+	deleter := &fakeArtifactDeleter{}
+	svc := NewWithDeps(Deps{Store: st, DataDir: t.TempDir(), ArtifactDeleter: deleter})
+
+	if err := svc.DeleteArtifacts(context.Background(), "mer-1"); err == nil {
+		t.Fatal("DeleteArtifacts succeeded, want a refusal")
+	}
+	if len(deleter.deleted) != 0 {
+		t.Fatalf("deleted = %v, want none", deleter.deleted)
+	}
+}
+
+func TestDeleteArtifactsAcceptsTheCanonicalArtifactDir(t *testing.T) {
+	dataDir := t.TempDir()
+	st := newFakeStore()
+	st.sessions["mer-1"] = domain.SessionRecord{
+		ID: "mer-1", ProjectID: "mer", Kind: domain.KindWorker, IsTerminated: true,
+		Metadata: domain.SessionMetadata{ArtifactDir: filepath.Join(dataDir, "artifacts", "mer-1")},
+	}
+	deleter := &fakeArtifactDeleter{}
+	svc := NewWithDeps(Deps{Store: st, DataDir: dataDir, ArtifactDeleter: deleter})
+
+	if err := svc.DeleteArtifacts(context.Background(), "mer-1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(deleter.deleted) != 1 {
+		t.Fatalf("deleted = %v, want [mer-1]", deleter.deleted)
 	}
 }

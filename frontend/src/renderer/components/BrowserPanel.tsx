@@ -1,70 +1,95 @@
 import {
-  memo,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  type FocusEvent,
-  type FormEvent,
+	memo,
+	useCallback,
+	useEffect,
+	useId,
+	useLayoutEffect,
+	useRef,
+	useState,
+	type FocusEvent,
+	type FormEvent,
+	type KeyboardEvent,
+	type ReactElement,
 } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
-  DndContext,
-  KeyboardSensor,
-  PointerSensor,
-  closestCenter,
-  useSensor,
-  useSensors,
-  type DragEndEvent,
+	DndContext,
+	DragOverlay,
+	KeyboardSensor,
+	PointerSensor,
+	closestCenter,
+	useSensor,
+	useSensors,
+	type DragEndEvent,
+	type Modifier,
 } from "@dnd-kit/core";
 import {
-  SortableContext,
-  horizontalListSortingStrategy,
-  sortableKeyboardCoordinates,
-  useSortable,
+	SortableContext,
+	horizontalListSortingStrategy,
+	sortableKeyboardCoordinates,
+	useSortable,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import {
-  ArrowLeft,
-  ArrowRight,
-  Bug,
-  Check,
-  Globe2,
-  Layers3,
-  Maximize2,
-  Minimize2,
-  Monitor,
-  MousePointer2,
-  Plus,
-  RefreshCw,
-  Smartphone,
-  Tablet,
-  X,
+	ArrowLeft,
+	ArrowRight,
+	Bug,
+	Camera,
+	Check,
+	ChevronDown,
+	ChevronRight,
+	ChevronUp,
+	Copy,
+	Download,
+	Eye,
+	ExternalLink,
+	Globe2,
+	Maximize2,
+	Minimize2,
+	RotateCcw,
+	Search,
+	Monitor,
+	MoreVertical,
+	MousePointer2,
+	Plus,
+	RefreshCw,
+	Settings2,
+	Smartphone,
+	Tablet,
+	Trash2,
+	UserRound,
+	X,
 } from "lucide-react";
 import { apiErrorMessage } from "../lib/api-client";
-import { clientFor } from "../lib/host-clients";
-import { refKey, type Ref } from "../lib/hosts";
+import { clientForSessionHost } from "../lib/host-clients";
 import { useBrowserView, type BrowserViewModel } from "../hooks/useBrowserView";
-import {
-  formatBrowserAnnotationMessage,
-  type BrowserAnnotationSubmitPayload,
-} from "../../shared/browser-annotations";
+import { useTabScrollEdges } from "../hooks/useTabScrollEdges";
+import { formatBrowserAnnotationMessage, type BrowserAnnotationSubmitPayload } from "../../shared/browser-annotations";
+import type { BrowserProfile } from "../../shared/browser-profiles";
 import type { WorkspaceSession } from "../types/workspace";
 import { Button } from "./ui/button";
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
+	DropdownMenu,
+	DropdownMenuContent,
+	DropdownMenuItem,
+	DropdownMenuTrigger,
 } from "./ui/dropdown-menu";
+import { SETTINGS_MENU_ROW, SETTINGS_MENU_SURFACE } from "./settings/SettingsMenuTrigger";
 import { Input } from "./ui/input";
+import { Popover, PopoverAnchor, PopoverContent } from "./ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
-import { BrowserTabsRail, type BrowserTabsRailHandle } from "./BrowserTabsRail";
 import { cn } from "../lib/utils";
+import { useUiStore } from "../stores/ui-store";
 import { appI18n, type MessageKey } from "../i18n";
 import { browserTabLabel } from "../lib/browser-tab-label";
 import { reorderBrowserTabs } from "../lib/browser-tab-order";
 import { handleTabListKeyDown } from "../lib/terminal-tabs";
+import { useBrowserDownloads } from "../hooks/useBrowserDownloads";
+import { BrowserDownloadsList } from "./BrowserDownloadsList";
+import { isWebLink, openLinkInSystemBrowser } from "../lib/external-link-policy";
+import { aoBridge } from "../lib/bridge";
 
 // One-click viewport width presets for responsive testing — height is shown
 // for reference but not enforced (only width drives CSS breakpoints, and
@@ -80,512 +105,473 @@ import { handleTabListKeyDown } from "../lib/terminal-tabs";
 // their one orientation is used directly. iPad Air and Nest Hub have since
 // been dropped from Chrome's own current list but are kept here since
 // they're still common, well-known breakpoints worth testing against.
-const DEVICE_PRESETS: {
-  id: string;
-  label: string;
-  width: number;
-  height: number;
-  category: "phone" | "tablet";
-}[] = [
-  {
-    id: "iphone-se",
-    label: "iPhone SE",
-    width: 375,
-    height: 667,
-    category: "phone",
-  },
-  {
-    id: "iphone-xr",
-    label: "iPhone XR",
-    width: 414,
-    height: 896,
-    category: "phone",
-  },
-  {
-    id: "iphone-12-pro",
-    label: "iPhone 12 Pro",
-    width: 390,
-    height: 844,
-    category: "phone",
-  },
-  {
-    id: "iphone-14-pro-max",
-    label: "iPhone 14 Pro Max",
-    width: 430,
-    height: 932,
-    category: "phone",
-  },
-  {
-    id: "iphone-15-pro-max",
-    label: "iPhone 15 Pro Max",
-    width: 430,
-    height: 932,
-    category: "phone",
-  },
-  {
-    id: "iphone-16-pro-max",
-    label: "iPhone 16 Pro Max",
-    width: 440,
-    height: 956,
-    category: "phone",
-  },
-  {
-    id: "pixel-7",
-    label: "Pixel 7",
-    width: 412,
-    height: 915,
-    category: "phone",
-  },
-  {
-    id: "pixel-8",
-    label: "Pixel 8",
-    width: 412,
-    height: 915,
-    category: "phone",
-  },
-  {
-    id: "pixel-9",
-    label: "Pixel 9",
-    width: 412,
-    height: 924,
-    category: "phone",
-  },
-  {
-    id: "pixel-10",
-    label: "Pixel 10",
-    width: 412,
-    height: 924,
-    category: "phone",
-  },
-  {
-    id: "galaxy-s8-plus",
-    label: "Samsung Galaxy S8+",
-    width: 360,
-    height: 740,
-    category: "phone",
-  },
-  {
-    id: "galaxy-s20-ultra",
-    label: "Samsung Galaxy S20 Ultra",
-    width: 412,
-    height: 915,
-    category: "phone",
-  },
-  {
-    id: "galaxy-a51-71",
-    label: "Samsung Galaxy A51/71",
-    width: 412,
-    height: 914,
-    category: "phone",
-  },
-  {
-    id: "ipad-mini",
-    label: "iPad Mini",
-    width: 768,
-    height: 1024,
-    category: "tablet",
-  },
-  {
-    id: "ipad-air",
-    label: "iPad Air",
-    width: 820,
-    height: 1180,
-    category: "tablet",
-  },
-  {
-    id: "ipad-pro",
-    label: "iPad Pro",
-    width: 1032,
-    height: 1376,
-    category: "tablet",
-  },
-  {
-    id: "surface-pro-7",
-    label: "Surface Pro 7",
-    width: 912,
-    height: 1368,
-    category: "tablet",
-  },
-  {
-    id: "surface-duo",
-    label: "Surface Duo",
-    width: 540,
-    height: 720,
-    category: "phone",
-  },
-  {
-    id: "galaxy-z-fold-5",
-    label: "Galaxy Z Fold 5",
-    width: 344,
-    height: 882,
-    category: "phone",
-  },
-  {
-    id: "zenbook-fold",
-    label: "Asus Zenbook Fold",
-    width: 853,
-    height: 1280,
-    category: "tablet",
-  },
-  {
-    id: "nest-hub",
-    label: "Nest Hub",
-    width: 1024,
-    height: 600,
-    category: "tablet",
-  },
-  {
-    id: "nest-hub-max",
-    label: "Nest Hub Max",
-    width: 1280,
-    height: 800,
-    category: "tablet",
-  },
+const DEVICE_PRESETS: { id: string; label: string; width: number; height: number; category: "phone" | "tablet" }[] = [
+	{ id: "iphone-se", label: "iPhone SE", width: 375, height: 667, category: "phone" },
+	{ id: "iphone-xr", label: "iPhone XR", width: 414, height: 896, category: "phone" },
+	{ id: "iphone-12-pro", label: "iPhone 12 Pro", width: 390, height: 844, category: "phone" },
+	{ id: "iphone-14-pro-max", label: "iPhone 14 Pro Max", width: 430, height: 932, category: "phone" },
+	{ id: "iphone-15-pro-max", label: "iPhone 15 Pro Max", width: 430, height: 932, category: "phone" },
+	{ id: "iphone-16-pro-max", label: "iPhone 16 Pro Max", width: 440, height: 956, category: "phone" },
+	{ id: "pixel-7", label: "Pixel 7", width: 412, height: 915, category: "phone" },
+	{ id: "pixel-8", label: "Pixel 8", width: 412, height: 915, category: "phone" },
+	{ id: "pixel-9", label: "Pixel 9", width: 412, height: 924, category: "phone" },
+	{ id: "pixel-10", label: "Pixel 10", width: 412, height: 924, category: "phone" },
+	{ id: "galaxy-s8-plus", label: "Samsung Galaxy S8+", width: 360, height: 740, category: "phone" },
+	{ id: "galaxy-s20-ultra", label: "Samsung Galaxy S20 Ultra", width: 412, height: 915, category: "phone" },
+	{ id: "galaxy-a51-71", label: "Samsung Galaxy A51/71", width: 412, height: 914, category: "phone" },
+	{ id: "ipad-mini", label: "iPad Mini", width: 768, height: 1024, category: "tablet" },
+	{ id: "ipad-air", label: "iPad Air", width: 820, height: 1180, category: "tablet" },
+	{ id: "ipad-pro", label: "iPad Pro", width: 1032, height: 1376, category: "tablet" },
+	{ id: "surface-pro-7", label: "Surface Pro 7", width: 912, height: 1368, category: "tablet" },
+	{ id: "surface-duo", label: "Surface Duo", width: 540, height: 720, category: "phone" },
+	{ id: "galaxy-z-fold-5", label: "Galaxy Z Fold 5", width: 344, height: 882, category: "phone" },
+	{ id: "zenbook-fold", label: "Asus Zenbook Fold", width: 853, height: 1280, category: "tablet" },
+	{ id: "nest-hub", label: "Nest Hub", width: 1024, height: 600, category: "tablet" },
+	{ id: "nest-hub-max", label: "Nest Hub Max", width: 1280, height: 800, category: "tablet" },
 ];
 const CUSTOM_DEVICE_PRESET_ID = "custom";
+const MAX_HISTORY_SUGGESTIONS = 4;
 const MIN_DEVICE_FRAME_WIDTH = 240;
 const MAX_DEVICE_FRAME_WIDTH = 2560;
 
+export const restrictBrowserTopTabDragToTabStrip: Modifier = ({
+	activeNodeRect,
+	containerNodeRect,
+	transform,
+}) => {
+	if (!activeNodeRect || !containerNodeRect) return { ...transform, y: 0 };
+	const minX = containerNodeRect.left - activeNodeRect.left;
+	const maxX = containerNodeRect.right - activeNodeRect.right;
+	return {
+		...transform,
+		x: Math.min(maxX, Math.max(minX, transform.x)),
+		y: 0,
+	};
+};
+const browserTopTabDragModifiers = [restrictBrowserTopTabDragToTabStrip];
+
 function clampDeviceFrameWidth(width: number): number | undefined {
-  if (!Number.isFinite(width)) return undefined;
-  return Math.min(
-    MAX_DEVICE_FRAME_WIDTH,
-    Math.max(MIN_DEVICE_FRAME_WIDTH, Math.round(width)),
-  );
+	if (!Number.isFinite(width)) return undefined;
+	return Math.min(MAX_DEVICE_FRAME_WIDTH, Math.max(MIN_DEVICE_FRAME_WIDTH, Math.round(width)));
 }
 
 type BrowserPanelProps = {
-  session: WorkspaceSession;
-  active: boolean;
-  poppedOut: boolean;
-  onTogglePopOut: (next: boolean, sourceRect?: DOMRectReadOnly) => void;
+	session: WorkspaceSession;
+	active: boolean;
+	poppedOut: boolean;
+	onTogglePopOut: (next: boolean) => void;
+	topbarHost?: HTMLElement | null;
 };
 
-type AnnotationStatus =
-  | "idle"
-  | "picking"
-  | "queued"
-  | "sending"
-  | "sent"
-  | "error";
-
-// Docked rail visibility: collapsed (0px, tab access via the toolbar trigger) is
-// the default; pinning restores an always-visible icon rail. Persisted so it's a
-// one-time choice, not a state.
-const RAIL_PINNED_STORAGE_KEY = "ao.browserTabs.railPinned";
+type AnnotationStatus = "idle" | "picking" | "queued" | "sending" | "sent" | "error";
 
 export type BrowserAnnotationQueueModel = {
-  status: AnnotationStatus;
-  error: string;
-  queuedCount: number;
-  beginPicking: () => void;
-  cancelPicking: () => void;
-  enqueue: (payload: BrowserAnnotationSubmitPayload) => void;
-  failPicking: (message: string) => void;
-  retryQueued: () => void;
+	status: AnnotationStatus;
+	error: string;
+	queuedCount: number;
+	beginPicking: () => void;
+	cancelPicking: () => void;
+	enqueue: (payload: BrowserAnnotationSubmitPayload) => void;
+	failPicking: (message: string) => void;
+	retryQueued: () => void;
 };
 
 export function useBrowserAnnotationQueue({
-  session,
-  navUrl,
+	sessionId,
+	hostId,
+	sourcePreviewUrl,
+	navUrl,
 }: {
-  session?: Ref;
-  navUrl?: string;
+	sessionId?: string;
+	hostId?: string;
+	sourcePreviewUrl?: string;
+	navUrl?: string;
 }): BrowserAnnotationQueueModel {
-  const [state, setState] = useState<{
-    status: AnnotationStatus;
-    error: string;
-    queuedCount: number;
-  }>({
-    status: "idle",
-    error: "",
-    queuedCount: 0,
-  });
-  const annotationQueueRef = useRef<BrowserAnnotationSubmitPayload[]>([]);
-  const annotationSendingRef = useRef(false);
-  const sessionRef = useRef<Ref | null>(session ?? null);
-  const sessionHost = session?.host;
-  const sessionId = session?.id;
-  const generationRef = useRef(0);
-  const sentTimerRef = useRef<number | null>(null);
+	const [state, setState] = useState<{ status: AnnotationStatus; error: string; queuedCount: number }>({
+		status: "idle",
+		error: "",
+		queuedCount: 0,
+	});
+	const annotationQueueRef = useRef<BrowserAnnotationSubmitPayload[]>([]);
+	const stagedScreenshotPathsRef = useRef(new Map<BrowserAnnotationSubmitPayload, string[]>());
+	const annotationSendingRef = useRef(false);
+	const sessionIdRef = useRef(sessionId ?? "");
+	const hostIdRef = useRef(hostId);
+	const sourcePreviewUrlRef = useRef(sourcePreviewUrl);
+	const generationRef = useRef(0);
+	const sentTimerRef = useRef<number | null>(null);
 
-  const resetQueue = useCallback(() => {
-    generationRef.current += 1;
-    if (sentTimerRef.current !== null)
-      window.clearTimeout(sentTimerRef.current);
-    sentTimerRef.current = null;
-    annotationQueueRef.current = [];
-    annotationSendingRef.current = false;
-    setState({ status: "idle", error: "", queuedCount: 0 });
-  }, []);
+	const resetQueue = useCallback(() => {
+		generationRef.current += 1;
+		if (sentTimerRef.current !== null) window.clearTimeout(sentTimerRef.current);
+		sentTimerRef.current = null;
+		annotationQueueRef.current = [];
+		stagedScreenshotPathsRef.current.clear();
+		annotationSendingRef.current = false;
+		setState({ status: "idle", error: "", queuedCount: 0 });
+	}, []);
 
-  const drainAnnotationQueue = useCallback(() => {
-    if (annotationSendingRef.current || !sessionRef.current) {
-      return;
-    }
+	const drainAnnotationQueue = useCallback(() => {
+		if (annotationSendingRef.current || !sessionIdRef.current) {
+			return;
+		}
 
-    const payload = annotationQueueRef.current.shift();
-    setState((current) => ({
-      ...current,
-      queuedCount: annotationQueueRef.current.length,
-    }));
-    if (!payload) return;
+		const payload = annotationQueueRef.current.shift();
+		setState((current) => ({ ...current, queuedCount: annotationQueueRef.current.length }));
+		if (!payload) return;
 
-    annotationSendingRef.current = true;
-    const sendGeneration = generationRef.current;
-    const sendSession = sessionRef.current;
-    setState({
-      status: "sending",
-      error: "",
-      queuedCount: annotationQueueRef.current.length,
-    });
+		annotationSendingRef.current = true;
+		const sendGeneration = generationRef.current;
+		const sendSessionId = sessionIdRef.current;
+		const client = clientForSessionHost(hostIdRef.current);
+		setState({ status: "sending", error: "", queuedCount: annotationQueueRef.current.length });
 
-    void (async () => {
-      let sent = false;
-      let failureMessage = appI18n.t("browser.unableSendAnnotation");
-      try {
-        const message = formatBrowserAnnotationMessage(payload);
-        const { error } = await clientFor(sendSession.host).POST(
-          "/api/v1/sessions/{sessionId}/send",
-          {
-            params: { path: { sessionId: sendSession.id } },
-            body: { message, attachment: payload.snapshot },
-          },
-        );
-        if (error) {
-          failureMessage = apiErrorMessage(
-            error,
-            appI18n.t("browser.unableSendAnnotation"),
-          );
-          return;
-        }
-        sent = true;
-      } catch (error) {
-        failureMessage = apiErrorMessage(
-          error,
-          appI18n.t("browser.unableSendAnnotation"),
-        );
-      } finally {
-        if (
-          sendGeneration !== generationRef.current ||
-          !sessionRef.current ||
-          refKey(sendSession) !== refKey(sessionRef.current)
-        )
-          return;
-        annotationSendingRef.current = false;
-        if (!sent) {
-          annotationQueueRef.current.unshift(payload);
-          setState({
-            status: "error",
-            error: failureMessage,
-            queuedCount: annotationQueueRef.current.length,
-          });
-          return;
-        }
+		void (async () => {
+			let sent = false;
+			let failureMessage = appI18n.t("browser.unableSendAnnotation");
+			try {
+				let screenshotPaths = stagedScreenshotPathsRef.current.get(payload);
+				if (!screenshotPaths) {
+					const attachments = [
+						...payload.session.screenshots.map(({ mimeType, data }) => ({ mimeType, data })),
+						...(payload.snapshot ? [payload.snapshot] : []),
+					];
+					if (attachments.length > 0) {
+						const staged = await client.POST("/api/v1/sessions/{sessionId}/attachments", {
+							params: { path: { sessionId: sendSessionId } },
+							body: { attachments },
+						});
+						if (staged.error || !staged.data) {
+							failureMessage = apiErrorMessage(staged.error, appI18n.t("browser.unableSendAnnotation"));
+							return;
+						}
+						screenshotPaths = staged.data.paths;
+						stagedScreenshotPathsRef.current.set(payload, screenshotPaths);
+					} else {
+						screenshotPaths = [];
+					}
+				}
+				let sendPayload = payload;
+				if (hostIdRef.current && sourcePreviewUrlRef.current) {
+					let pageUrl = "";
+					try {
+						pageUrl = await aoBridge.remotes.resolvePreviewUrl(hostIdRef.current, sendSessionId, payload.session.page.url);
+					} catch { /* A disconnected host cannot resolve a preview capability. */ }
+					sendPayload = { ...payload, session: { ...payload.session, page: { ...payload.session.page, url: pageUrl } } };
+				}
+				const message = formatBrowserAnnotationMessage(sendPayload, { screenshotPaths });
+				const { error } = await client.POST("/api/v1/sessions/{sessionId}/send", {
+					params: { path: { sessionId: sendSessionId } },
+					body: { message, userAuthored: true },
+				});
+				if (error) {
+					failureMessage = apiErrorMessage(error, appI18n.t("browser.unableSendAnnotation"));
+					return;
+				}
+				sent = true;
+				stagedScreenshotPathsRef.current.delete(payload);
+				await window.ao?.browser.completeAnnotation?.({
+					viewId: payload.viewId,
+					tabId: payload.tabId,
+					pageKey: payload.pageKey,
+					sessionToken: payload.sessionToken,
+					success: true,
+				});
+			} catch (error) {
+				failureMessage = apiErrorMessage(error, appI18n.t("browser.unableSendAnnotation"));
+			} finally {
+				if (sendGeneration !== generationRef.current || sendSessionId !== sessionIdRef.current) return;
+				annotationSendingRef.current = false;
+				if (!sent) {
+					annotationQueueRef.current.unshift(payload);
+					setState({
+						status: "error",
+						error: failureMessage,
+						queuedCount: annotationQueueRef.current.length,
+					});
+					return;
+				}
 
-        const queuedCount = annotationQueueRef.current.length;
-        setState({
-          status: queuedCount > 0 ? "queued" : "sent",
-          error: "",
-          queuedCount,
-        });
-        if (queuedCount > 0) {
-          drainAnnotationQueue();
-        } else {
-          if (sentTimerRef.current !== null)
-            window.clearTimeout(sentTimerRef.current);
-          sentTimerRef.current = window.setTimeout(() => {
-            sentTimerRef.current = null;
-            setState((current) =>
-              current.status === "sent"
-                ? { status: "idle", error: "", queuedCount: 0 }
-                : current,
-            );
-          }, 2_000);
-        }
-      }
-    })();
-  }, []);
+				const queuedCount = annotationQueueRef.current.length;
+				setState({ status: queuedCount > 0 ? "queued" : "sent", error: "", queuedCount });
+				if (queuedCount > 0) {
+					drainAnnotationQueue();
+				} else {
+					if (sentTimerRef.current !== null) window.clearTimeout(sentTimerRef.current);
+					sentTimerRef.current = window.setTimeout(() => {
+						sentTimerRef.current = null;
+						setState((current) =>
+							current.status === "sent" ? { status: "idle", error: "", queuedCount: 0 } : current,
+						);
+					}, 2_000);
+				}
+			}
+		})();
+	}, []);
 
-  useEffect(() => {
-    sessionRef.current =
-      sessionHost && sessionId ? { host: sessionHost, id: sessionId } : null;
-    resetQueue();
-  }, [resetQueue, sessionHost, sessionId]);
+	useEffect(() => {
+		sessionIdRef.current = sessionId ?? "";
+		hostIdRef.current = hostId;
+		sourcePreviewUrlRef.current = sourcePreviewUrl;
+		resetQueue();
+	}, [hostId, resetQueue, sessionId, sourcePreviewUrl]);
 
-  useEffect(() => {
-    if (navUrl) return;
-    resetQueue();
-  }, [navUrl, resetQueue]);
+	useEffect(() => {
+		if (navUrl) return;
+		resetQueue();
+	}, [navUrl, resetQueue]);
 
-  useEffect(
-    () => () => {
-      if (sentTimerRef.current !== null)
-        window.clearTimeout(sentTimerRef.current);
-    },
-    [],
-  );
+	useEffect(
+		() => () => {
+			if (sentTimerRef.current !== null) window.clearTimeout(sentTimerRef.current);
+		},
+		[],
+	);
 
-  const beginPicking = useCallback(() => {
-    setState((current) => ({ ...current, status: "picking", error: "" }));
-  }, []);
+	const beginPicking = useCallback(() => {
+		setState((current) => ({ ...current, status: "picking", error: "" }));
+	}, []);
 
-  const cancelPicking = useCallback(() => {
-    setState((current) => ({
-      status:
-        annotationQueueRef.current.length > 0
-          ? "queued"
-          : current.status === "sending"
-            ? "sending"
-            : "idle",
-      error: "",
-      queuedCount: annotationQueueRef.current.length,
-    }));
-  }, []);
+	const cancelPicking = useCallback(() => {
+		setState((current) => ({
+			status: annotationQueueRef.current.length > 0 ? "queued" : current.status === "sending" ? "sending" : "idle",
+			error: "",
+			queuedCount: annotationQueueRef.current.length,
+		}));
+	}, []);
 
-  const failPicking = useCallback((message: string) => {
-    setState({
-      status: "error",
-      error: message,
-      queuedCount: annotationQueueRef.current.length,
-    });
-  }, []);
+	const failPicking = useCallback((message: string) => {
+		setState({ status: "error", error: message, queuedCount: annotationQueueRef.current.length });
+	}, []);
 
-  const enqueue = useCallback(
-    (payload: BrowserAnnotationSubmitPayload) => {
-      annotationQueueRef.current.push(payload);
-      setState({
-        status: "queued",
-        error: "",
-        queuedCount: annotationQueueRef.current.length,
-      });
-      drainAnnotationQueue();
-    },
-    [drainAnnotationQueue],
-  );
+	const enqueue = useCallback(
+		(payload: BrowserAnnotationSubmitPayload) => {
+			annotationQueueRef.current.push(payload);
+			setState({ status: "queued", error: "", queuedCount: annotationQueueRef.current.length });
+			drainAnnotationQueue();
+		},
+		[drainAnnotationQueue],
+	);
 
-  const retryQueued = useCallback(() => {
-    if (annotationQueueRef.current.length === 0) return;
-    setState({
-      status: "queued",
-      error: "",
-      queuedCount: annotationQueueRef.current.length,
-    });
-    drainAnnotationQueue();
-  }, [drainAnnotationQueue]);
+	const retryQueued = useCallback(() => {
+		if (annotationQueueRef.current.length === 0) return;
+		setState({ status: "queued", error: "", queuedCount: annotationQueueRef.current.length });
+		drainAnnotationQueue();
+	}, [drainAnnotationQueue]);
 
-  return {
-    status: state.status,
-    error: state.error,
-    queuedCount: state.queuedCount,
-    beginPicking,
-    cancelPicking,
-    enqueue,
-    failPicking,
-    retryQueued,
-  };
+	return {
+		status: state.status,
+		error: state.error,
+		queuedCount: state.queuedCount,
+		beginPicking,
+		cancelPicking,
+		enqueue,
+		failPicking,
+		retryQueued,
+	};
 }
 
 export function BrowserPanel({
-  session,
-  active,
-  poppedOut,
-  onTogglePopOut,
+	session,
+	active,
+	poppedOut,
+	onTogglePopOut,
+	topbarHost,
 }: BrowserPanelProps) {
-  const browserView = useBrowserView({
-    session,
-    active,
-    poppedOut,
-    previewUrl: session.previewUrl,
-    previewRevision: session.previewRevision,
-  });
-  const annotationQueue = useBrowserAnnotationQueue({
-    session,
-    navUrl: browserView.navState.url,
-  });
-  return (
-    <BrowserPanelView
-      active={active}
-      annotationQueue={annotationQueue}
-      browserView={browserView}
-      onTogglePopOut={onTogglePopOut}
-      poppedOut={poppedOut}
-      session={session}
-    />
-  );
+	const browserView = useBrowserView({
+		sessionId: session.id,
+		active,
+		poppedOut,
+		previewUrl: session.previewUrl,
+		previewRevision: session.previewRevision,
+	});
+	const annotationQueue = useBrowserAnnotationQueue({
+		sessionId: session.id,
+		navUrl: browserView.navState.url,
+	});
+	return (
+		<BrowserPanelView
+			active={active}
+			annotationQueue={annotationQueue}
+			browserView={browserView}
+			onTogglePopOut={onTogglePopOut}
+			poppedOut={poppedOut}
+			session={session}
+			topbarHost={topbarHost}
+		/>
+	);
 }
 
 export function BrowserPanelView({
 	active,
-  poppedOut,
-  onTogglePopOut,
-  browserView,
-  annotationQueue,
-}: BrowserPanelProps & {
-  annotationQueue: BrowserAnnotationQueueModel;
-  browserView: BrowserViewModel;
-}) {
-  const { t } = useTranslation();
-  const {
-    viewId,
-    navState,
-    slotRef,
-    navigate,
-    goBack,
-    goForward,
-    reload,
-    stop,
-    tabs,
-    activeTabId,
-    tabNotice,
-    selectTab,
-    closeTab,
-    openTab,
-    reorderTabs,
-    closedTabs,
-    reopenClosedTab,
-    agentBrowserActive,
-    agentBrowserActivity,
-    devtoolsState = { viewId: "", open: false, activeTabId: "" },
-    openDevTools = async () => undefined,
-    closeDevTools = async () => undefined,
-    annotationMode,
-    setAnnotationMode,
-    mode,
-    iframeSrc,
-    iframeKey,
-  } = browserView;
-  const [urlInput, setUrlInput] = useState(navState.url);
-  const [urlEditing, setUrlEditing] = useState(false);
-  const urlTakeover = urlEditing && !poppedOut;
-  const {
-    beginPicking,
-    cancelPicking,
-    enqueue,
-    error,
-    failPicking,
-    queuedCount,
-    retryQueued,
-    status,
-  } = annotationQueue;
-  const hasNativeBrowser = Boolean(window.ao?.browser);
-  const showStaticPreview = !hasNativeBrowser && navState.url !== "";
-  const canAnnotate = Boolean(window.ao?.browser && viewId && navState.url);
-  const canRetryAnnotation = status === "error" && queuedCount > 0;
-  const [devicePreset, setDevicePreset] = useState<string | null>(null);
-  const [customDeviceWidth, setCustomDeviceWidth] = useState("390");
-  const deviceFrameWidth =
-    devicePreset === CUSTOM_DEVICE_PRESET_ID
-      ? clampDeviceFrameWidth(Number(customDeviceWidth))
-      : DEVICE_PRESETS.find((preset) => preset.id === devicePreset)?.width;
-  const railRef = useRef<BrowserTabsRailHandle>(null);
-  const panelRef = useRef<HTMLDivElement>(null);
-  const urlInputRef = useRef<HTMLInputElement>(null);
-  const [pinned, setPinned] = useState(
-    () => window.localStorage.getItem(RAIL_PINNED_STORAGE_KEY) === "1",
-  );
-  const showTabsTrigger = !poppedOut && !pinned && tabs.length >= 2;
-  const [topTabDragActive, setTopTabDragActive] = useState(false);
+	poppedOut,
+	onTogglePopOut,
+	browserView,
+	annotationQueue,
+	topbarHost,
+}: BrowserPanelProps & { annotationQueue: BrowserAnnotationQueueModel; browserView: BrowserViewModel }) {
+	const { t } = useTranslation();
+	const prefersReducedMotion = useReducedMotion();
+	const {
+		viewId,
+		navState,
+		slotRef,
+		navigate,
+		goBack,
+		goForward,
+		reload,
+		stop,
+		findState = { viewId: "", tabId: "", query: "", activeMatchOrdinal: 0, matches: 0, finalUpdate: true },
+		findOpenRequest = 0,
+		findInPage = async () => undefined,
+		stopFindInPage = async () => undefined,
+		tabs,
+		activeTabId,
+		tabNotice,
+		selectTab,
+		closeTab,
+		openTab,
+		reorderTabs,
+		closedTabs,
+		reopenClosedTab,
+		agentBrowserActive,
+		agentBrowserActivity,
+		browserRuntimeConnected,
+		reconnectBrowserRuntime = async () => undefined,
+		devtoolsState = { viewId: "", open: false, activeTabId: "" },
+		profileState = { viewId: "", profileId: null, temporary: true },
+		openDevTools = async () => undefined,
+		closeDevTools = async () => undefined,
+		annotationMode,
+		annotationState = { count: 0, screenshotCount: 0, hasDraft: false },
+		setAnnotationMode,
+		annotationAction = async () => undefined,
+	} = browserView;
+	const [urlInput, setUrlInput] = useState(navState.url);
+	const [urlCopied, setUrlCopied] = useState(false);
+	const [historySuggestions, setHistorySuggestions] = useState<Array<{ url: string; title?: string }>>([]);
+	const historyMenuId = useId();
+	const [activeHistorySuggestion, setActiveHistorySuggestion] = useState(-1);
+	const [urlEditing, setUrlEditing] = useState(false);
+	const { beginPicking, cancelPicking, enqueue, error, failPicking, queuedCount, retryQueued, status } =
+		annotationQueue;
+	const hasNativeBrowser = Boolean(window.ao?.browser);
+	const showStaticPreview = !hasNativeBrowser && navState.url !== "";
+	const canAnnotate = Boolean(window.ao?.browser && viewId && navState.url);
+	const canRetryAnnotation = status === "error" && queuedCount > 0;
+	const [devicePreset, setDevicePreset] = useState<string | null>(null);
+	const [customDeviceWidth, setCustomDeviceWidth] = useState("390");
+	const customWidthInputRef = useRef<HTMLInputElement>(null);
+	const [controlsView, setControlsView] = useState<"root" | "devices" | "profiles">("root");
+	const [controlsOpen, setControlsOpen] = useState(false);
+	const [runtimeReconnectPending, setRuntimeReconnectPending] = useState(false);
+	const [browserProfiles, setBrowserProfiles] = useState<BrowserProfile[]>([]);
+	const [profilesLoading, setProfilesLoading] = useState(false);
+	const openGlobalSettings = useUiStore((state) => state.openGlobalSettings);
+	const deviceFrameWidth =
+		devicePreset === CUSTOM_DEVICE_PRESET_ID
+			? clampDeviceFrameWidth(Number(customDeviceWidth))
+			: DEVICE_PRESETS.find((preset) => preset.id === devicePreset)?.width;
+	const urlInputRef = useRef<HTMLInputElement>(null);
+	const findInputRef = useRef<HTMLInputElement>(null);
+	const findComposingRef = useRef(false);
+	const findStateRef = useRef(findState);
+	findStateRef.current = findState;
+	const [findOpen, setFindOpen] = useState(false);
+	const findOpenRef = useRef(findOpen);
+	findOpenRef.current = findOpen;
+	const [findQuery, setFindQuery] = useState("");
+	const historyMenuRef = useRef<HTMLDivElement>(null);
+	const historyRequestGenerationRef = useRef(0);
+	const copyFeedbackTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+	const [draggedTopTabId, setDraggedTopTabId] = useState<string | null>(null);
+	const draggedTopTab = tabs.find((tab) => tab.id === draggedTopTabId);
+	const {
+		scrollRef: tabScrollRef,
+		scrollToEnd: scrollTabsToEnd,
+		showLeftFade: showTabsLeftFade,
+		showRightFade: showTabsRightFade,
+	} = useTabScrollEdges([tabs.length]);
+	const previousTabCountRef = useRef(tabs.length);
+	// Vertical wheel scrolls the horizontal tab strip when it overflows — same
+	// affordance as the session terminal tabs (CenterPane.tsx).
+	useEffect(() => {
+		const element = tabScrollRef.current;
+		if (!element) return;
+		const handleWheel = (event: WheelEvent) => {
+			if (event.ctrlKey || event.metaKey || Math.abs(event.deltaX) >= Math.abs(event.deltaY)) return;
+			if (event.deltaY === 0 || element.scrollWidth <= element.clientWidth) return;
+			event.preventDefault();
+			element.scrollBy({ left: event.deltaY });
+		};
+		element.addEventListener("wheel", handleWheel, { passive: false });
+		return () => element.removeEventListener("wheel", handleWheel);
+	}, [tabScrollRef]);
+
+	// Opening a tab (or a popup adding one) appends it, so reveal the newest.
+	useEffect(() => {
+		if (tabs.length > previousTabCountRef.current) scrollTabsToEnd();
+		previousTabCountRef.current = tabs.length;
+	}, [tabs.length, scrollTabsToEnd]);
+
+	// Keep the active tab visible when selection changes (click, keyboard, or a
+	// close that shifts activation), unless a drag is positioning it.
+	useEffect(() => {
+		if (draggedTopTabId) return;
+		const region = tabScrollRef.current;
+		if (!region) return;
+		const activeTab = Array.from(region.querySelectorAll<HTMLElement>("[data-browser-tab-id]")).find(
+			(element) => element.dataset.browserTabId === activeTabId,
+		);
+		if (!activeTab) return;
+		const regionRect = region.getBoundingClientRect();
+		const tabRect = activeTab.getBoundingClientRect();
+		let nextScrollLeft = region.scrollLeft;
+		if (tabRect.left < regionRect.left) nextScrollLeft -= regionRect.left - tabRect.left;
+		if (tabRect.right > regionRect.right) nextScrollLeft += tabRect.right - regionRect.right;
+		if (nextScrollLeft === region.scrollLeft) return;
+		region.scrollTo({ behavior: "smooth", left: Math.max(0, nextScrollLeft) });
+	}, [activeTabId, tabs.length, draggedTopTabId, tabScrollRef]);
+
+	useEffect(() => {
+		if (controlsView !== "profiles" || !window.ao?.browserProfiles) return;
+		let canceled = false;
+		setProfilesLoading(true);
+		void window.ao.browserProfiles
+			.list()
+			.then((state) => {
+				if (!canceled) setBrowserProfiles(state.profiles);
+			})
+			.catch(() => {
+				if (!canceled) setBrowserProfiles([]);
+			})
+			.finally(() => {
+				if (!canceled) setProfilesLoading(false);
+			});
+		return () => {
+			canceled = true;
+		};
+	}, [controlsView]);
+
+	const selectBrowserProfile = useCallback(
+		(profileId: string | null) => {
+			if (!viewId || !window.ao?.browser) return;
+			void window.ao.browser.selectProfile({
+				viewId,
+				profileId,
+				labels: {
+					temporary: t("browser.profile.temporary"),
+					manage: t("browser.profile.manage"),
+					switchTitle: t("browser.profile.switchTitle"),
+					switchMessage: t("browser.profile.switchMessage"),
+					switchDetail: t("browser.profile.switchDetail"),
+					cancel: t("common.no"),
+					confirm: t("common.yes"),
+				},
+			});
+		},
+		[t, viewId],
+	);
 
 	useEffect(() => {
 		if (!viewId) return;
@@ -598,20 +584,63 @@ export function BrowserPanelView({
 		() =>
 			window.ao?.browser.onFocusLocation((targetViewId) => {
 				if (targetViewId !== viewId) return;
+				// ⌘T/Ctrl+T focuses the omnibox after opening a tab. When the bar is
+				// portaled into the inspector header it sits outside the panel focus
+				// boundary, so restore the browser shortcut target before the input
+				// takes focus — otherwise the next ⌘T/⌘W falls through to terminal
+				// shortcuts and yank focus to the main pane.
+				window.ao?.browser.notifyPanelUsed(viewId);
+				if (document.activeElement === urlInputRef.current) {
+					return;
+				}
 				urlInputRef.current?.focus();
 				urlInputRef.current?.select();
 			}),
 		[viewId],
 	);
 	useEffect(() => {
-		const onPageFocus = window.ao?.browser.onPageFocus;
-		if (!onPageFocus) return;
-		return onPageFocus((focusedViewId) => {
-			if (focusedViewId !== viewId) return;
-			urlInputRef.current?.blur();
-			setUrlEditing(false);
+		if (findOpenRequest <= 0) return;
+		if (findOpenRef.current) {
+			setFindOpen(false);
+			setFindQuery("");
+			void stopFindInPage(true);
+			return;
+		}
+		setFindOpen(true);
+		setFindQuery(findStateRef.current.query);
+		requestAnimationFrame(() => {
+			findInputRef.current?.focus();
+			findInputRef.current?.select();
 		});
-	}, [viewId]);
+	}, [findOpenRequest, stopFindInPage]);
+	useEffect(() => {
+		if (!findOpen || findState.tabId !== activeTabId) return;
+		setFindQuery(findState.query);
+	}, [activeTabId, findOpen, findState.query, findState.tabId]);
+	const closeFind = useCallback(() => {
+		setFindOpen(false);
+		setFindQuery("");
+		void stopFindInPage(true);
+	}, [stopFindInPage]);
+	const runFind = useCallback(
+		(query: string, forward = true, newSession = true) => {
+			void findInPage(query, forward, newSession);
+		},
+		[findInPage],
+	);
+	const handleFindKeyDown = useCallback(
+		(event: KeyboardEvent<HTMLInputElement>) => {
+			if (event.key === "Escape") {
+				event.preventDefault();
+				closeFind();
+				return;
+			}
+			if (event.key !== "Enter" || findComposingRef.current || !findQuery) return;
+			event.preventDefault();
+			runFind(findQuery, !event.shiftKey, false);
+		},
+		[closeFind, findQuery, runFind],
+	);
 	useEffect(
 		() =>
 			window.ao?.browser.onReopenClosedTab((targetViewId) => {
@@ -621,156 +650,267 @@ export function BrowserPanelView({
 		[reopenClosedTab, viewId],
 	);
 
-  const tabSensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
-    useSensor(KeyboardSensor, {
-      coordinateGetter: sortableKeyboardCoordinates,
-    }),
-  );
-  const handleTopTabDragEnd = useCallback(
-    (event: DragEndEvent) => {
-      setTopTabDragActive(false);
-      if (!event.over) return;
-      const orderedIds = reorderBrowserTabs(
-        tabs.map((tab) => tab.id),
-        String(event.active.id),
-        String(event.over.id),
-      );
-      if (orderedIds) reorderTabs(orderedIds);
-    },
-    [reorderTabs, tabs],
-  );
+	const tabSensors = useSensors(
+		useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+		useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+	);
+	const handleTopTabDragEnd = useCallback(
+		(event: DragEndEvent) => {
+			setDraggedTopTabId(null);
+			if (!event.over) return;
+			const orderedIds = reorderBrowserTabs(
+				tabs.map((tab) => tab.id),
+				String(event.active.id),
+				String(event.over.id),
+			);
+			if (orderedIds) reorderTabs(orderedIds);
+		},
+		[reorderTabs, tabs],
+	);
 
-  const handlePinnedChange = useCallback((next: boolean) => {
-    setPinned(next);
-    window.localStorage.setItem(RAIL_PINNED_STORAGE_KEY, next ? "1" : "0");
-  }, []);
+	// Docked DevTools belongs to the native page view, which is intentionally
+	// hidden while the active target is blank. Keep close available for any
+	// in-flight state update, but do not offer an open action with no page.
+	const canUseDevTools = hasNativeBrowser && Boolean(viewId) && Boolean(navState.url || devtoolsState.open);
+	const canTakeScreenshot = hasNativeBrowser && Boolean(viewId) && Boolean(navState.url);
+	const showGlobalToast = useUiStore((state) => state.showGlobalToast);
+	const browserDownloads = useBrowserDownloads();
+	const [downloadsOpen, setDownloadsOpen] = useState(false);
+	const knownDownloadIds = useRef<Set<string> | null>(null);
+	const observedInitialDownloads = useRef(false);
+	const hasActiveDownload = browserDownloads.downloads.some(
+		(download) => download.status === "progressing" || download.status === "paused" || download.status === "blocked",
+	);
+	useEffect(() => {
+		if (!browserDownloads.initialized) return;
+		const nextIds = new Set(browserDownloads.downloads.map((download) => download.id));
+		if (!observedInitialDownloads.current) {
+			observedInitialDownloads.current = true;
+			knownDownloadIds.current = nextIds;
+			return;
+		}
+		const previousIds = knownDownloadIds.current;
+		const hasNewDownload = previousIds
+			? browserDownloads.downloads.some((download) => !previousIds.has(download.id))
+			: false;
+		if (active && hasNewDownload) setDownloadsOpen(true);
+		knownDownloadIds.current = nextIds;
+	}, [active, browserDownloads.downloads, browserDownloads.initialized]);
 
-  // Docked DevTools belongs to the native page view, which is intentionally
-  // hidden while the active target is blank. Keep close available for any
-  // in-flight state update, but do not offer an open action with no page.
-  const canUseDevTools =
-    hasNativeBrowser &&
-    Boolean(viewId) &&
-    Boolean(navState.url || devtoolsState.open);
+	const takeScreenshot = useCallback(async () => {
+		if (!viewId || !window.ao?.browser) return;
+		try {
+			await window.ao.browser.captureScreenshot(viewId);
+			showGlobalToast(t("browser.screenshotCopied"), undefined, "top-center");
+		} catch {
+			showGlobalToast(t("browser.screenshotFailed"), undefined, "top-center");
+		}
+	}, [showGlobalToast, t, viewId]);
 
-  useEffect(() => {
-    setUrlInput(navState.url);
-    // A prior submit (typed, or pasted, then Enter) leaves the caret at the
-    // end of the old value; the browser keeps that same horizontal scroll
-    // position for the new value, scrolling the scheme/host off the left
-    // edge (e.g. showing "://example.com" instead of "https://example.com").
-    // Reset it once the DOM has the new value committed, so the address is
-    // readable from the start like a real address bar after navigating.
-    const frame = window.requestAnimationFrame(() => {
-      if (urlInputRef.current) urlInputRef.current.scrollLeft = 0;
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [navState.url]);
+	useEffect(() => {
+		setUrlInput(navState.url);
+		setUrlCopied(false);
+		clearTimeout(copyFeedbackTimeoutRef.current);
+		setHistorySuggestions([]);
+		setActiveHistorySuggestion(-1);
+		// A prior submit (typed, or pasted, then Enter) leaves the caret at the
+		// end of the old value; the browser keeps that same horizontal scroll
+		// position for the new value, scrolling the scheme/host off the left
+		// edge (e.g. showing "://example.com" instead of "https://example.com").
+		// Reset it once the DOM has the new value committed, so the address is
+		// readable from the start like a real address bar after navigating.
+		const frame = window.requestAnimationFrame(() => {
+			if (urlInputRef.current) urlInputRef.current.scrollLeft = 0;
+		});
+		return () => {
+			window.cancelAnimationFrame(frame);
+			clearTimeout(copyFeedbackTimeoutRef.current);
+		};
+	}, [navState.url]);
 
-  useEffect(() => {
-    if (!urlEditing || poppedOut) return;
-    const frame = window.requestAnimationFrame(() =>
-      urlInputRef.current?.select(),
-    );
-    return () => window.cancelAnimationFrame(frame);
-  }, [poppedOut, urlEditing]);
+	useEffect(() => {
+		const generation = ++historyRequestGenerationRef.current;
+		const query = urlInput.trim();
+		if (
+			!urlEditing ||
+			!window.ao?.browser ||
+			!viewId ||
+			!profileState.profileId ||
+			query === navState.url ||
+			query.length < 1
+		) {
+			setHistorySuggestions([]);
+			return;
+		}
+		let current = true;
+		const timer = window.setTimeout(() => {
+			void window.ao!.browser.historySuggestions({ viewId, query }).then(
+				(suggestions) => {
+					if (!current || historyRequestGenerationRef.current !== generation) return;
+					setHistorySuggestions(suggestions.slice(0, MAX_HISTORY_SUGGESTIONS));
+					setActiveHistorySuggestion(-1);
+				},
+				() => {
+					if (!current || historyRequestGenerationRef.current !== generation) return;
+					setHistorySuggestions([]);
+					setActiveHistorySuggestion(-1);
+				},
+			);
+		}, 120);
+		return () => {
+			current = false;
+			window.clearTimeout(timer);
+		};
+	}, [navState.url, profileState.profileId, urlEditing, urlInput, viewId]);
 
-  useEffect(() => {
-    const offSubmit = window.ao?.browser.onAnnotationSubmit((payload) => {
-      if (payload.viewId !== viewId) return;
-      enqueue(payload);
-    });
-    const offCancel = window.ao?.browser.onAnnotationCancel((payload) => {
-      if (payload.viewId !== viewId) return;
-      cancelPicking();
-    });
-    return () => {
-      offSubmit?.();
-      offCancel?.();
-    };
-  }, [cancelPicking, enqueue, viewId]);
+	useLayoutEffect(() => {
+		if (!urlEditing) return;
+		urlInputRef.current?.select();
+	}, [urlEditing]);
 
-  const submit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const nextURL = urlInput.trim();
-    if (nextURL) void navigate(nextURL);
-  };
+	useEffect(() => {
+		const onPageFocus = window.ao?.browser.onPageFocus;
+		if (!onPageFocus) return;
+		return onPageFocus((focusedViewId) => {
+			if (focusedViewId !== viewId) return;
+			historyRequestGenerationRef.current += 1;
+			urlInputRef.current?.blur();
+			setUrlEditing(false);
+			setUrlInput(navState.url);
+			setHistorySuggestions([]);
+			setActiveHistorySuggestion(-1);
+		});
+	}, [navState.url, viewId]);
 
-  const beginUrlEditing = () => {
-    const input = urlInputRef.current;
-    const wrapper = input?.parentElement;
-    const toolbar = input?.closest<HTMLElement>(".browser-panel__toolbar");
-    if (!poppedOut && wrapper && toolbar) {
-      const wrapperRect = wrapper.getBoundingClientRect();
-      const toolbarRect = toolbar.getBoundingClientRect();
-      const navigationButtons = toolbar.querySelectorAll<HTMLElement>(
-        ".browser-panel__navigation-btn",
-      );
-      const lastNavigationButton = navigationButtons.item(
-        navigationButtons.length - 1,
-      );
-      const targetLeft =
-        lastNavigationButton?.getBoundingClientRect().right ??
-        toolbarRect.left + 4;
-      wrapper.style.setProperty(
-        "--browser-url-expand-left",
-        `${targetLeft + 2 - wrapperRect.left}px`,
-      );
-      wrapper.style.setProperty(
-        "--browser-url-expand-right",
-        `${wrapperRect.right - toolbarRect.right + 4}px`,
-      );
-    }
-    setUrlInput(navState.url);
-    setUrlEditing(true);
-  };
+	useEffect(() => {
+		const offSubmit = window.ao?.browser.onAnnotationSubmit((payload) => {
+			if (payload.viewId !== viewId) return;
+			enqueue(payload);
+		});
+		const offCancel = window.ao?.browser.onAnnotationCancel((payload) => {
+			if (payload.viewId !== viewId) return;
+			cancelPicking();
+		});
+		return () => {
+			offSubmit?.();
+			offCancel?.();
+		};
+	}, [cancelPicking, enqueue, viewId]);
 
-  const toggleAnnotationMode = async () => {
-    if (!canAnnotate || status === "sending") return;
-    if (canRetryAnnotation) {
-      retryQueued();
-      return;
-    }
-    const next = !(annotationMode || status === "picking");
-    try {
-      await setAnnotationMode(next);
-      if (next) {
-        beginPicking();
-      } else {
-        cancelPicking();
-      }
-    } catch (error) {
-      failPicking(
-        error instanceof Error
-          ? error.message
-          : appI18n.t("browser.unableStartAnnotation"),
-      );
-    }
-  };
+	const navigateFromAddressBar = (url: string) => {
+		historyRequestGenerationRef.current += 1;
+		urlInputRef.current?.blur();
+		setUrlEditing(false);
+		setUrlInput(url);
+		setHistorySuggestions([]);
+		setActiveHistorySuggestion(-1);
+		void navigate(url);
+	};
 
-  // The button lives in the toolbar, not inside the rail, so a fast
-  // hover-rail-then-click-here still needs to force the flyout closed first —
-  // same reason rows inside the rail do it (see BrowserTabsRail.tsx). A blank
-  // new tab has nowhere to go on its own, so send focus straight to the URL
-  // bar afterward instead of leaving the user to click into it themselves.
-  const handleOpenTab = useCallback(async () => {
-    railRef.current?.closeFlyout(true);
-    await openTab();
-    urlInputRef.current?.focus();
-    urlInputRef.current?.select();
-  }, [openTab]);
+	const submit = (event: FormEvent<HTMLFormElement>) => {
+		event.preventDefault();
+		const nextURL = urlInput.trim();
+		if (nextURL) navigateFromAddressBar(nextURL);
+	};
 
-  const handleSelectTab = useCallback(
-    async (tabId: string) => {
-      try {
-        await selectTab(tabId);
-      } catch {
-        // The existing tab remains active.
-      }
-    },
-    [selectTab],
-  );
+	const handleURLChange = (value: string) => {
+		historyRequestGenerationRef.current += 1;
+		setUrlInput(value);
+		setActiveHistorySuggestion(-1);
+	};
+
+	const handleURLKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+		if (event.key === "Escape") {
+			event.preventDefault();
+			historyRequestGenerationRef.current += 1;
+			setHistorySuggestions([]);
+			setActiveHistorySuggestion(-1);
+			return;
+		}
+		if (historySuggestions.length === 0) return;
+		if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+			event.preventDefault();
+			const direction = event.key === "ArrowDown" ? 1 : -1;
+			setActiveHistorySuggestion((current) => {
+				if (current < 0) return direction > 0 ? 0 : historySuggestions.length - 1;
+				return (current + direction + historySuggestions.length) % historySuggestions.length;
+			});
+			return;
+		}
+		if (event.key === "Enter" && activeHistorySuggestion >= 0) {
+			event.preventDefault();
+			navigateFromAddressBar(historySuggestions[activeHistorySuggestion]!.url);
+			return;
+		}
+	};
+
+	const endUrlEditing = (event: FocusEvent<HTMLInputElement>) => {
+		if (event.relatedTarget instanceof Node && historyMenuRef.current?.contains(event.relatedTarget)) return;
+		historyRequestGenerationRef.current += 1;
+		setUrlEditing(false);
+		setUrlInput(navState.url);
+		setHistorySuggestions([]);
+		setActiveHistorySuggestion(-1);
+	};
+
+	const beginUrlEditing = () => {
+		setUrlEditing(true);
+	};
+
+	const openCurrentPageExternally = () => {
+		if (!isWebLink(navState.url)) return;
+		void openLinkInSystemBrowser(navState.url);
+	};
+
+	const copyCurrentURL = async () => {
+		if (!navState.url) return;
+		try {
+			await aoBridge.clipboard.writeText(navState.url);
+			setUrlCopied(true);
+			clearTimeout(copyFeedbackTimeoutRef.current);
+			copyFeedbackTimeoutRef.current = setTimeout(() => setUrlCopied(false), 1_200);
+		} catch {
+			showGlobalToast(t("browser.urlCopyFailed"), undefined, "top-center");
+		}
+	};
+
+	const toggleAnnotationMode = async () => {
+		if (!canAnnotate || status === "sending") return;
+		if (canRetryAnnotation) {
+			retryQueued();
+			return;
+		}
+		const next = !(annotationMode || status === "picking");
+		try {
+			await setAnnotationMode(next);
+			if (next) {
+				beginPicking();
+			} else {
+				cancelPicking();
+			}
+		} catch (error) {
+			failPicking(error instanceof Error ? error.message : appI18n.t("browser.unableStartAnnotation"));
+		}
+	};
+
+	// A blank new tab has nowhere to go on its own, so send focus straight to
+	// the URL bar afterward instead of leaving the user to click into it.
+	const handleOpenTab = useCallback(async () => {
+		await openTab();
+		urlInputRef.current?.focus();
+		urlInputRef.current?.select();
+	}, [openTab]);
+
+	const handleSelectTab = useCallback(
+		async (tabId: string) => {
+			try {
+				await selectTab(tabId);
+			} catch {
+				// The existing tab remains active.
+			}
+		},
+		[selectTab],
+	);
 	const handleCloseTab = useCallback(
 		(tabId: string) => {
 			void closeTab(tabId);
@@ -778,38 +918,356 @@ export function BrowserPanelView({
 		[closeTab],
 	);
 
-  const annotationStatusLabel =
-    status === "picking"
-      ? t("browser.pickElement")
-      : status === "queued"
-        ? queuedCount > 1
-          ? t("browser.queuedCount", { count: queuedCount })
-          : t("browser.queued")
-        : status === "sending"
-          ? t("browser.sending")
-          : status === "sent"
-            ? t("browser.sent")
-            : status === "error"
-              ? error
-              : "";
-  const agentStatusLabel = agentActivityLabel(
-    agentBrowserActivity,
-    agentBrowserActive,
-  );
-  return (
-    <div
-      className={cn(
-        "browser-panel flex h-full min-h-browser-min flex-col overflow-hidden rounded-lg border border-border bg-background",
-        poppedOut && "browser-panel--popped-out",
-        agentStatusLabel && "browser-panel--agent-active",
-      )}
-      data-browser-dock-target={poppedOut ? undefined : ""}
-      data-browser-native-page={navState.url ? "live" : "empty"}
-      data-testid="browser-panel"
+	const annotationStatusLabel =
+		status === "picking"
+			? t("browser.pickElement")
+			: status === "queued"
+				? queuedCount > 1
+					? t("browser.queuedCount", { count: queuedCount })
+					: t("browser.queued")
+				: status === "sending"
+					? t("browser.sending")
+					: status === "sent"
+						? t("browser.sent")
+						: status === "error"
+							? error
+							: "";
+	const agentStatusLabel = agentActivityLabel(agentBrowserActivity, agentBrowserActive);
+	const runtimeDisconnected = hasNativeBrowser && browserRuntimeConnected === false;
+	const reconnectRuntime = useCallback(async () => {
+		setRuntimeReconnectPending(true);
+		try {
+			await reconnectBrowserRuntime();
+		} finally {
+			setRuntimeReconnectPending(false);
+		}
+	}, [reconnectBrowserRuntime]);
+	const suggestionsOpen = urlEditing && historySuggestions.length > 0;
+	const currentURLIsWeb = isWebLink(navState.url);
+	const copyURLLabel = t(urlCopied ? "browser.urlCopied" : "browser.copyUrl");
+	const browserAddressBar = (
+		<form
+			className={cn(
+				"browser-panel__address-bar min-w-0 flex-1",
+				urlEditing && "browser-panel__address-bar--editing",
+			)}
+			data-testid="browser-address-bar"
+			onFocusCapture={() => {
+				// When docked, this form is portaled into the inspector header and is
+				// therefore outside the browser-panel focus boundary below. Restore the
+				// browser shortcut target when its address input receives focus.
+				if (viewId) window.ao?.browser.notifyPanelUsed(viewId);
+			}}
+			onSubmit={submit}
+		>
+			<Popover
+				onOpenChange={(open) => {
+					if (!open && suggestionsOpen) {
+						historyRequestGenerationRef.current += 1;
+						setHistorySuggestions([]);
+						setActiveHistorySuggestion(-1);
+					}
+				}}
+				open={suggestionsOpen}
+			>
+				<PopoverAnchor asChild>
+					<div className="browser-panel__url-wrap relative min-w-0 flex-1">
+						<Input
+							aria-activedescendant={activeHistorySuggestion >= 0 ? `${historyMenuId}-${activeHistorySuggestion}` : undefined}
+							aria-controls={suggestionsOpen ? historyMenuId : undefined}
+							aria-expanded={suggestionsOpen}
+							aria-haspopup="listbox"
+							aria-label={t("browser.url")}
+							className="browser-panel__url-input h-browser-url text-xs"
+							onBlur={endUrlEditing}
+							onChange={(event) => handleURLChange(event.target.value)}
+							onClick={() => urlInputRef.current?.select()}
+							onFocus={beginUrlEditing}
+							onKeyDown={handleURLKeyDown}
+							placeholder={t("browser.urlPlaceholder")}
+							ref={urlInputRef}
+							value={urlEditing || poppedOut ? urlInput : getDisplayUrl(navState.url)}
+						/>
+						{navState.url ? (
+							<BrowserControlTooltip label={copyURLLabel}>
+								<Button
+									aria-label={copyURLLabel}
+									className={cn(
+										"browser-panel__url-copy",
+										!currentURLIsWeb && "browser-panel__url-copy--only",
+									)}
+									onClick={() => void copyCurrentURL()}
+									size="icon-sm"
+									type="button"
+									variant="ghost"
+								>
+									<span className="relative size-icon-base">
+										<Copy
+											aria-hidden="true"
+											className={cn(
+												"absolute inset-0 size-icon-base transition-[opacity,transform] duration-150 motion-reduce:transition-none",
+												urlCopied ? "scale-75 opacity-0" : "scale-100 opacity-100",
+											)}
+										/>
+										<Check
+											aria-hidden="true"
+											className={cn(
+												"absolute inset-0 size-icon-base text-success transition-[opacity,transform] duration-150 motion-reduce:transition-none",
+												urlCopied ? "scale-100 opacity-100" : "scale-75 opacity-0",
+											)}
+										/>
+									</span>
+								</Button>
+							</BrowserControlTooltip>
+						) : null}
+						{currentURLIsWeb ? (
+							<BrowserControlTooltip label={t("inspector.openInSystemBrowser")}>
+									<Button
+										aria-label={t("inspector.openInSystemBrowser")}
+										className="browser-panel__url-external"
+										onClick={openCurrentPageExternally}
+										size="icon-sm"
+										type="button"
+										variant="ghost"
+									>
+										<ExternalLink aria-hidden="true" className="size-icon-base" />
+									</Button>
+							</BrowserControlTooltip>
+						) : null}
+					</div>
+				</PopoverAnchor>
+				<PopoverContent
+					align="start"
+					aria-label={t("browser.urlSuggestions")}
+					className={cn(
+						SETTINGS_MENU_SURFACE,
+						"browser-panel__history-suggestions",
+					)}
+					data-browser-native-overlay="true"
+					id={historyMenuId}
+					onOpenAutoFocus={(event) => event.preventDefault()}
+					ref={historyMenuRef}
+					role="listbox"
+					sideOffset={4}
+				>
+					{historySuggestions.map((suggestion, index) => (
+						<button
+							aria-selected={index === activeHistorySuggestion}
+							className={cn(
+								SETTINGS_MENU_ROW,
+								"flex w-full items-center gap-2.5 px-2.5 py-2 text-left",
+								index === activeHistorySuggestion && "bg-settings-menu-selected text-settings-title",
+							)}
+							id={`${historyMenuId}-${index}`}
+							key={suggestion.url}
+							onClick={() => navigateFromAddressBar(suggestion.url)}
+							onMouseDown={(event) => event.preventDefault()}
+							onPointerMove={() => setActiveHistorySuggestion(index)}
+							role="option"
+							type="button"
+						>
+							<BrowserSuggestionIcon
+								cachedFavicon={faviconForOpenTab(suggestion.url, tabs)}
+								url={suggestion.url}
+								viewId={viewId}
+							/>
+							<span className="min-w-0 flex-1">
+								{suggestion.title ? (
+									<span className="block truncate text-control text-settings-title">{suggestion.title}</span>
+								) : null}
+								<span className="block truncate text-caption text-settings-muted">{suggestion.url}</span>
+							</span>
+						</button>
+					))}
+				</PopoverContent>
+			</Popover>
+		</form>
+	);
+	const browserTabBar = (
+		<div className="browser-panel__tab-bar" data-testid="browser-tab-bar">
+			<DndContext
+				collisionDetection={closestCenter}
+				modifiers={browserTopTabDragModifiers}
+				onDragCancel={() => setDraggedTopTabId(null)}
+				onDragEnd={handleTopTabDragEnd}
+				onDragStart={({ active }) => setDraggedTopTabId(String(active.id))}
+				sensors={tabSensors}
+			>
+				<SortableContext items={tabs.map((tab) => tab.id)} strategy={horizontalListSortingStrategy}>
+					<div className="browser-panel__tab-region">
+						<div
+							aria-label={t("browser.tabs")}
+							className="browser-panel__tab-strip"
+							onKeyDown={draggedTopTabId ? undefined : handleTabListKeyDown}
+							ref={tabScrollRef}
+							role="tablist"
+						>
+							{tabs.map((tab) => (
+								<SortableBrowserTopTab
+									key={tab.id}
+									onClose={handleCloseTab}
+									onSelect={handleSelectTab}
+									selected={tab.id === activeTabId}
+									tab={tab}
+								/>
+							))}
+						</div>
+						{showTabsLeftFade ? (
+							<div aria-hidden="true" className="browser-panel__tab-fade browser-panel__tab-fade--left" />
+						) : null}
+						{showTabsRightFade ? <div aria-hidden="true" className="browser-panel__tab-fade" /> : null}
+					</div>
+				</SortableContext>
+				<DragOverlay adjustScale={false} dropAnimation={null} modifiers={browserTopTabDragModifiers}>
+					{draggedTopTab ? <BrowserTopTabDragOverlay tab={draggedTopTab} /> : null}
+				</DragOverlay>
+			</DndContext>
+				<BrowserControlTooltip label={t("browser.openNewTab")}>
+					<button
+						aria-label={t("browser.openNewTab")}
+						className={cn("browser-panel__tab-new", draggedTopTabId && "browser-panel__tab-new--dragging")}
+						onClick={() => void handleOpenTab()}
+						type="button"
+					>
+						<Plus aria-hidden="true" className="size-icon-base" />
+					</button>
+				</BrowserControlTooltip>
+		</div>
+	);
+	const annotationIdle = annotationState.count === 0 && !annotationState.hasDraft;
+	const annotationToolbar = (
+		<div className="browser-panel__toolbar browser-panel__toolbar--annotation">
+			<div className="browser-panel__annotation-actions browser-panel__annotation-actions--leading">
+				<Tooltip>
+					<TooltipTrigger asChild>
+						<Button
+							aria-label={t("browser.annotationDiscardAllComments")}
+							className="browser-panel__annotation-discard"
+							disabled={annotationIdle && annotationState.screenshotCount === 0}
+							onClick={() => void annotationAction("discard-all")}
+							size="icon-sm"
+							type="button"
+							variant="ghost"
+						>
+							<Trash2 aria-hidden="true" className="size-icon-base" />
+						</Button>
+					</TooltipTrigger>
+					<TooltipContent data-browser-native-overlay="true" side="bottom">
+						{t("browser.annotationDiscardAll")}
+					</TooltipContent>
+				</Tooltip>
+			</div>
+			<div className="browser-panel__annotation-context">
+				{annotationIdle ? (
+					<span className="browser-panel__annotation-hint">{t("browser.annotationEmptyHint")}</span>
+				) : (
+					<>
+						{annotationState.count > 0 ? (
+							<span aria-hidden="true" className="browser-panel__annotation-status-dot" />
+						) : null}
+						<span className="browser-panel__annotation-count">
+							{t("browser.annotationCount", { count: annotationState.count })}
+						</span>
+					</>
+				)}
+			</div>
+			<div className="browser-panel__annotation-actions browser-panel__annotation-actions--trailing">
+				<Tooltip>
+					<TooltipTrigger asChild>
+						<Button
+							aria-label={t("browser.takeScreenshot")}
+							onClick={() => void annotationAction("capture")}
+							size="icon-sm"
+							type="button"
+							variant="ghost"
+						>
+							<Camera aria-hidden="true" className="size-icon-base" />
+							{annotationState.screenshotCount > 0 ? (
+								<span className="browser-panel__annotation-icon-count">{annotationState.screenshotCount}</span>
+							) : null}
+						</Button>
+					</TooltipTrigger>
+					<TooltipContent data-browser-native-overlay="true" side="bottom">
+						{t("browser.takeScreenshot")}
+					</TooltipContent>
+				</Tooltip>
+				<Tooltip>
+					<TooltipTrigger asChild>
+						<Button
+							aria-label={t("browser.annotationOriginalPage")}
+							disabled={annotationIdle}
+							onBlur={() => void annotationAction("restore-preview")}
+							onKeyDown={(event) => {
+								if ((event.key !== "Enter" && event.key !== " ") || event.repeat) return;
+								event.preventDefault();
+								void annotationAction("preview-original");
+							}}
+							onKeyUp={(event) => {
+								if (event.key !== "Enter" && event.key !== " ") return;
+								void annotationAction("restore-preview");
+							}}
+							onPointerCancel={() => void annotationAction("restore-preview")}
+							onPointerDown={() => void annotationAction("preview-original")}
+							onPointerLeave={() => void annotationAction("restore-preview")}
+							onPointerUp={() => void annotationAction("restore-preview")}
+							size="icon-sm"
+							type="button"
+							variant="ghost"
+						>
+							<Eye aria-hidden="true" className="size-icon-base" />
+						</Button>
+					</TooltipTrigger>
+					<TooltipContent data-browser-native-overlay="true" side="bottom">
+						{t("browser.annotationOriginal")}
+					</TooltipContent>
+				</Tooltip>
+				<span aria-hidden="true" className="browser-panel__annotation-separator" />
+				<Button
+					aria-label={t("browser.annotationSendAll")}
+					className="browser-panel__annotation-send"
+					disabled={annotationIdle}
+					onClick={() => void annotationAction("submit")}
+					size="sm"
+					type="button"
+					variant={annotationIdle ? "ghost" : "primary"}
+				>
+					{t("browser.annotationSend")}
+					{annotationState.count > 0 ? (
+						<span className="browser-panel__annotation-send-count">{annotationState.count}</span>
+					) : null}
+				</Button>
+			</div>
+		</div>
+	);
+	return (
+		<div
+			className={cn(
+				"browser-panel flex h-full min-h-browser-min flex-col overflow-hidden border border-border bg-background",
+				poppedOut && "browser-panel--popped-out",
+				agentStatusLabel && "browser-panel--agent-active",
+			)}
+			data-browser-dock-target={poppedOut ? undefined : ""}
+			data-browser-native-page={navState.url ? "live" : "empty"}
+			data-testid="browser-panel"
 			onBlurCapture={(event: FocusEvent<HTMLDivElement>) => {
-				if (viewId && !event.currentTarget.contains(event.relatedTarget)) {
-					window.ao?.browser.notifyPanelBlur(viewId);
+				if (!viewId || event.currentTarget.contains(event.relatedTarget)) return;
+				// Focus moving into the portaled omnibox is still browser chrome — do
+				// not drop the shortcut target or ⌘T/⌘W will create/close terminals.
+				if (topbarHost && event.relatedTarget instanceof Node && topbarHost.contains(event.relatedTarget)) {
+					return;
 				}
+				// relatedTarget is null or body/documentElement when focus leaves the
+				// document entirely (e.g. into the native page after a shortcut-driven
+				// tab close) or when an unmounting element drops focus to document.body.
+				// That is still browser context, so keep the shortcut target.
+				if (
+					!event.relatedTarget ||
+					event.relatedTarget === document.body ||
+					event.relatedTarget === document.documentElement
+				) {
+					return;
+				}
+				window.ao?.browser.notifyPanelBlur(viewId);
 			}}
 			onFocusCapture={() => {
 				if (viewId) window.ao?.browser.notifyPanelUsed(viewId);
@@ -817,60 +1275,32 @@ export function BrowserPanelView({
 			onPointerDownCapture={() => {
 				if (viewId) window.ao?.browser.notifyPanelUsed(viewId);
 			}}
-			ref={panelRef}
 			role="tabpanel"
 		>
-			{poppedOut ? (
-				<div className="browser-panel__tab-bar" data-testid="browser-tab-bar">
-					<DndContext
-						collisionDetection={closestCenter}
-						onDragCancel={() => setTopTabDragActive(false)}
-						onDragEnd={handleTopTabDragEnd}
-						onDragStart={() => setTopTabDragActive(true)}
-						sensors={tabSensors}
-					>
-						<SortableContext items={tabs.map((tab) => tab.id)} strategy={horizontalListSortingStrategy}>
-							<div
-								aria-label={t("browser.tabs")}
-								className="browser-panel__tab-strip"
-								onKeyDown={topTabDragActive ? undefined : handleTabListKeyDown}
-								role="tablist"
-							>
-								{tabs.map((tab) => (
-									<SortableBrowserTopTab
-										key={tab.id}
-										onClose={handleCloseTab}
-										onSelect={handleSelectTab}
-										onlyTab={tabs.length === 1}
-										selected={tab.id === activeTabId}
-										tab={tab}
-									/>
-								))}
-							</div>
-						</SortableContext>
-					</DndContext>
-					<button
-						aria-label={t("browser.openNewTab")}
-						className="browser-panel__tab-new"
-						onClick={() => void handleOpenTab()}
-						title={t("browser.openNewTab")}
-						type="button"
-					>
-						<Plus aria-hidden="true" className="size-icon-base" />
-					</button>
-				</div>
-			) : null}
-			<form
-				className={cn(
-					"browser-panel__toolbar flex shrink-0 min-w-0 items-center gap-1 border-b border-border bg-surface",
-					urlTakeover && "browser-panel__toolbar--url-takeover",
-				)}
-				data-testid="browser-toolbar"
-				onSubmit={submit}
+			{topbarHost ? createPortal(browserAddressBar, topbarHost) : browserAddressBar}
+			<div
+				className="browser-panel__tab-row"
+				data-testid="browser-tab-row"
 			>
-				<Tooltip>
-					<TooltipTrigger asChild>
-						<span className="inline-flex">
+				{browserTabBar}
+				<div className="browser-panel__toolbar" data-testid="browser-toolbar">
+							{runtimeDisconnected ? (
+								<div className="flex min-w-0 items-center gap-1.5 text-2xs text-destructive" data-testid="browser-runtime-alert" role="alert">
+									<span className="truncate">{t("browser.runtimeDisconnected")}</span>
+									<Button
+										className="shrink-0"
+										disabled={runtimeReconnectPending}
+										onClick={() => void reconnectRuntime()}
+										size="sm"
+										type="button"
+										variant="outline"
+									>
+										{t("browser.reconnectRuntime")}
+									</Button>
+								</div>
+							) : null}
+							<BrowserControlTooltip label={t("browser.back")}>
+								<span className="browser-panel__navigation-control inline-flex">
 							<Button
 								aria-label={t("browser.back")}
 								className="browser-panel__navigation-btn"
@@ -882,13 +1312,10 @@ export function BrowserPanelView({
 							>
 								<ArrowLeft aria-hidden="true" className="size-icon-base" />
 							</Button>
-						</span>
-					</TooltipTrigger>
-					<TooltipContent data-browser-native-overlay="true" side="bottom">{t("browser.back")}</TooltipContent>
-				</Tooltip>
-				<Tooltip>
-					<TooltipTrigger asChild>
-						<span className="inline-flex">
+					</span>
+				</BrowserControlTooltip>
+				<BrowserControlTooltip label={t("browser.forward")}>
+					<span className="browser-panel__navigation-control inline-flex">
 							<Button
 								aria-label={t("browser.forward")}
 								className="browser-panel__navigation-btn"
@@ -900,13 +1327,10 @@ export function BrowserPanelView({
 							>
 								<ArrowRight aria-hidden="true" className="size-icon-base" />
 							</Button>
-						</span>
-					</TooltipTrigger>
-					<TooltipContent data-browser-native-overlay="true" side="bottom">{t("browser.forward")}</TooltipContent>
-				</Tooltip>
-				<Tooltip>
-					<TooltipTrigger asChild>
-						<Button
+					</span>
+				</BrowserControlTooltip>
+				<BrowserControlTooltip label={navState.isLoading ? t("browser.stop") : t("browser.reload")}>
+					<Button
 							aria-label={navState.isLoading ? t("browser.stop") : t("browser.reload")}
 							className="browser-panel__navigation-btn"
 							onClick={() => void (navState.isLoading ? stop() : reload())}
@@ -919,13 +1343,26 @@ export function BrowserPanelView({
 							) : (
 								<RefreshCw aria-hidden="true" className="size-icon-base" />
 							)}
-						</Button>
-					</TooltipTrigger>
-					<TooltipContent data-browser-native-overlay="true" side="bottom">{navState.isLoading ? t("browser.stop") : t("browser.reload")}</TooltipContent>
-				</Tooltip>
-				<Tooltip>
-					<TooltipTrigger asChild>
-						<span className="inline-flex">
+					</Button>
+				</BrowserControlTooltip>
+				{annotationStatusLabel ? (
+					<span className="sr-only" role="status">
+						{annotationStatusLabel}
+					</span>
+				) : agentStatusLabel ? (
+					<span aria-live="polite" className="sr-only" role="status">
+						{agentStatusLabel}
+					</span>
+				) : null}
+				{tabNotice ? (
+					<span className="max-w-24 truncate text-caption text-accent" role="status">
+						{tabNotice}
+					</span>
+				) : null}
+				<BrowserControlTooltip
+					label={annotationStatusLabel || agentStatusLabel || (canRetryAnnotation ? t("browser.retryAnnotation") : t("browser.annotate"))}
+				>
+					<span className="inline-flex">
 							<Button
 								aria-label={
 									canRetryAnnotation
@@ -942,7 +1379,7 @@ export function BrowserPanelView({
 								type="button"
 								variant="ghost"
 							>
-								<MousePointer2 aria-hidden="true" className="h-4 w-4" />
+								<MousePointer2 aria-hidden="true" className="size-icon-base" />
 								{annotationStatusLabel ? (
 									<span
 										aria-hidden="true"
@@ -955,71 +1392,98 @@ export function BrowserPanelView({
 									<span aria-hidden="true" className="pointer-events-none absolute -right-0.5 -top-0.5 size-1.5 rounded-full bg-accent" />
 								) : null}
 							</Button>
-						</span>
-					</TooltipTrigger>
-					<TooltipContent data-browser-native-overlay="true" side="bottom">
-						{annotationStatusLabel || agentStatusLabel || (canRetryAnnotation ? t("browser.retryAnnotation") : t("browser.annotate"))}
-					</TooltipContent>
-				</Tooltip>
-				{annotationStatusLabel ? (
-					<span className="sr-only" role="status">
-						{annotationStatusLabel}
 					</span>
-				) : agentStatusLabel ? (
-					<span aria-live="polite" className="sr-only" role="status">
-						{agentStatusLabel}
-					</span>
-				) : null}
-					<div className="browser-panel__url-wrap relative min-w-0 flex-1">
-					<Input
-						aria-label={t("browser.url")}
-						className="browser-panel__url-input h-browser-url font-mono text-xs"
-						onBlur={() => setUrlEditing(false)}
-						onChange={(event) => setUrlInput(event.target.value)}
-						onFocus={beginUrlEditing}
-						placeholder={t("browser.urlPlaceholder")}
-						ref={urlInputRef}
-						value={urlEditing || poppedOut ? urlInput : compactBrowserAddress(navState.url)}
-					/>
-				</div>
-				{tabNotice ? (
-					<span className="max-w-24 truncate text-caption text-accent" role="status">
-						{tabNotice}
-					</span>
-				) : null}
-				<DropdownMenu>
-					<Tooltip>
-						<TooltipTrigger asChild>
+				</BrowserControlTooltip>
+				{browserDownloads.downloads.length > 0 ? (
+					<DropdownMenu
+						onOpenChange={(open) => {
+							setDownloadsOpen(open);
+						}}
+						open={downloadsOpen}
+					>
+						<BrowserControlTooltip disabled={downloadsOpen} label={t("browser.downloads.title")}>
 							<DropdownMenuTrigger asChild>
+									<Button
+									aria-label={t("browser.downloads.title")}
+									className={cn("relative", hasActiveDownload && "text-accent")}
+										size="icon-sm"
+										type="button"
+										variant="ghost"
+									>
+										<Download aria-hidden="true" className="size-icon-base" />
+										{hasActiveDownload ? <span aria-hidden="true" className="absolute right-0.5 top-0.5 size-1.5 rounded-full bg-accent" /> : null}
+									</Button>
+							</DropdownMenuTrigger>
+						</BrowserControlTooltip>
+						<DropdownMenuContent
+							align="end"
+							className="w-96 p-0"
+							data-browser-native-overlay="true"
+						>
+							<div className="flex items-center justify-between border-b border-border px-3 py-2">
+								<p className="text-xs font-semibold">{t("browser.downloads.title")}</p>
+								<Button onClick={() => openGlobalSettings("browserProfiles")} size="sm" type="button" variant="ghost">
+									{t("browser.downloads.showAll")}
+								</Button>
+							</div>
+							<BrowserDownloadsList
+								compact
+								downloads={browserDownloads.downloads.slice(0, 5)}
+								error={browserDownloads.error}
+								onAction={(id, action) => void browserDownloads.action(id, action)}
+							/>
+						</DropdownMenuContent>
+					</DropdownMenu>
+				) : null}
+				{poppedOut ? (
+					<BrowserControlTooltip label={t("browser.returnToPanel")}>
+						<Button
+							aria-label={t("browser.returnToPanel")}
+							onClick={() => onTogglePopOut(false)}
+							size="icon-sm"
+							type="button"
+							variant="ghost"
+						>
+							<Minimize2 aria-hidden="true" className="size-icon-base" />
+						</Button>
+					</BrowserControlTooltip>
+				) : null}
+				<DropdownMenu
+					onOpenChange={(open) => {
+						setControlsOpen(open);
+						if (!open) setControlsView("root");
+					}}
+				>
+					<BrowserControlTooltip disabled={controlsOpen} label={t("browser.controls")}>
+						<DropdownMenuTrigger asChild>
 								<Button
-									aria-label={t("browser.devicePreset")}
-									aria-pressed={devicePreset !== null}
-									className={cn(
-										devicePreset !== null &&
-											"bg-accent-strong text-accent-foreground hover:bg-accent-strong dark:hover:bg-accent-strong",
-									)}
+									aria-label={t("browser.controls")}
 									size="icon-sm"
 									type="button"
 									variant="ghost"
 								>
-									{(() => {
-										const active = DEVICE_PRESETS.find((preset) => preset.id === devicePreset);
-										const ActiveIcon = active ? (active.category === "tablet" ? Tablet : Smartphone) : Monitor;
-										return <ActiveIcon aria-hidden="true" className="size-icon-base" />;
-									})()}
+									<MoreVertical aria-hidden="true" className="size-icon-base" />
 								</Button>
-							</DropdownMenuTrigger>
-						</TooltipTrigger>
-						<TooltipContent data-browser-native-overlay="true" side="bottom">{t("browser.devicePreset")}</TooltipContent>
-					</Tooltip>
-					{/* Opens directly over the live page (the toolbar sits right above the
-					    native browser view), so without this it renders behind the native
-					    view — Electron always paints native view pixels above the
-					    renderer. Marked as a browser overlay so useBrowserView.ts's
-					    MutationObserver raises the transparent shell above the native view
-					    for as long as this stays mounted+open. See the matching comment on
-					    BrowserTabsRail's flyout for the full mechanism. */}
-					<DropdownMenuContent align="end" className="w-64" data-browser-native-overlay="true">
+						</DropdownMenuTrigger>
+					</BrowserControlTooltip>
+					<DropdownMenuContent
+						align="end"
+						className={controlsView === "root" ? "w-56" : "w-64"}
+						data-browser-native-overlay="true"
+					>
+						{controlsView === "devices" ? (
+							<>
+								<DropdownMenuItem
+									className="gap-1.5"
+									onSelect={(event) => {
+										event.preventDefault();
+										setControlsView("root");
+									}}
+								>
+									<ChevronRight aria-hidden="true" className="size-3.5 rotate-180 text-passive" />
+									{t("browser.devicePreset")}
+								</DropdownMenuItem>
+								<div className="my-1 h-px bg-border" role="separator" />
 						<DropdownMenuItem className="gap-1.5" onSelect={() => setDevicePreset(null)}>
 							<span className="flex size-4 shrink-0 items-center justify-center">
 								{devicePreset === null ? <Check aria-hidden="true" className="text-accent" /> : null}
@@ -1027,7 +1491,7 @@ export function BrowserPanelView({
 							{t("browser.deviceFit")}
 						</DropdownMenuItem>
 						<div className="my-1 h-px bg-border" role="separator" />
-						<div className="flex max-h-72 flex-col gap-px overflow-y-auto">
+						<div className="board-scrollbar flex max-h-72 flex-col gap-px overflow-y-auto pr-0.5">
 							{DEVICE_PRESETS.map((preset) => {
 								const PresetIcon = preset.category === "tablet" ? Tablet : Smartphone;
 								return (
@@ -1049,12 +1513,24 @@ export function BrowserPanelView({
 							})}
 						</div>
 						<div className="my-1 h-px bg-border" role="separator" />
-						<label className="flex items-center gap-1.5 px-2 py-1.5 text-body">
+						<DropdownMenuItem
+							className="gap-1.5"
+							// Radix re-focuses an item on pointer move/leave, which would pull focus
+							// out of the width field while the mouse drifts over the row.
+							onPointerMove={(event) => event.preventDefault()}
+							onPointerLeave={(event) => event.preventDefault()}
+							onSelect={(event) => {
+								event.preventDefault();
+								customWidthInputRef.current?.focus();
+							}}
+						>
 							<span className="flex size-4 shrink-0 items-center justify-center">
 								{devicePreset === CUSTOM_DEVICE_PRESET_ID ? <Check aria-hidden="true" className="text-accent" /> : null}
 							</span>
 							<span className="flex-1">{t("browser.deviceCustomWidth")}</span>
 							<Input
+								aria-label={t("browser.deviceCustomWidth")}
+								ref={customWidthInputRef}
 								className="h-6 w-16 shrink-0 px-1.5 text-right font-mono text-caption"
 								inputMode="numeric"
 								max={MAX_DEVICE_FRAME_WIDTH}
@@ -1064,123 +1540,224 @@ export function BrowserPanelView({
 									setDevicePreset(CUSTOM_DEVICE_PRESET_ID);
 								}}
 								onClick={(event) => event.stopPropagation()}
+								onKeyDown={(event) => {
+									// Escape still closes the menu; everything else is typing.
+									if (event.key !== "Escape") event.stopPropagation();
+								}}
 								type="number"
 								value={customDeviceWidth}
 							/>
-						</label>
+						</DropdownMenuItem>
+							</>
+						) : controlsView === "profiles" ? (
+							<>
+								<DropdownMenuItem
+									className="gap-1.5"
+									onSelect={(event) => {
+										event.preventDefault();
+										setControlsView("root");
+									}}
+								>
+									<ChevronRight aria-hidden="true" className="size-3.5 rotate-180 text-passive" />
+									{t("browser.profile.label")}
+								</DropdownMenuItem>
+								<div className="my-1 h-px bg-border" role="separator" />
+								<DropdownMenuItem className="gap-2" disabled={agentBrowserActive} onSelect={() => selectBrowserProfile(null)}>
+									<span className="flex size-4 shrink-0 items-center justify-center">
+										{profileState.profileId === null ? <Check aria-hidden="true" className="text-accent" /> : null}
+									</span>
+									<span className="flex-1 truncate">{t("browser.profile.temporary")}</span>
+								</DropdownMenuItem>
+								{profilesLoading ? (
+									<div className="px-8 py-1.5 text-caption text-passive">{t("settings.browserProfiles.loading")}</div>
+								) : (
+									browserProfiles.map((profile) => (
+										<DropdownMenuItem
+											className="gap-2"
+											disabled={agentBrowserActive}
+											key={profile.id}
+											onSelect={() => selectBrowserProfile(profile.id)}
+										>
+											<span className="flex size-4 shrink-0 items-center justify-center">
+												{profileState.profileId === profile.id ? <Check aria-hidden="true" className="text-accent" /> : null}
+											</span>
+											<span className="flex-1 truncate">{profile.name}</span>
+										</DropdownMenuItem>
+									))
+								)}
+								<div className="my-1 h-px bg-border" role="separator" />
+								<DropdownMenuItem onSelect={() => openGlobalSettings("browserProfiles")}>
+									<Settings2 aria-hidden="true" className="size-icon-base" />
+									{t("browser.profile.manage")}
+								</DropdownMenuItem>
+							</>
+						) : (
+							<>
+								{!poppedOut ? (
+									<>
+										<DropdownMenuItem
+											className="gap-2"
+											onSelect={() => onTogglePopOut(true)}
+										>
+										<Maximize2 aria-hidden="true" className="size-icon-base shrink-0" />
+											<span className="flex-1">{t("browser.popOut")}</span>
+										</DropdownMenuItem>
+										<div className="my-1 h-px bg-border" role="separator" />
+									</>
+								) : null}
+								<DropdownMenuItem
+									className="gap-2"
+									onSelect={(event) => {
+										event.preventDefault();
+										setControlsView("devices");
+									}}
+								>
+									<Monitor aria-hidden="true" className="size-icon-base shrink-0" />
+									<span className="flex-1">{t("browser.devicePreset")}</span>
+									{devicePreset !== null ? <span className="size-1.5 rounded-full bg-accent" /> : null}
+									<ChevronRight aria-hidden="true" className="size-3.5 shrink-0 text-passive" />
+								</DropdownMenuItem>
+								<DropdownMenuItem
+									className="gap-2"
+									onSelect={(event) => {
+										event.preventDefault();
+										setControlsView("profiles");
+									}}
+								>
+									<UserRound aria-hidden="true" className="size-icon-base shrink-0" />
+									<span className="flex-1">{t("browser.profile.label")}</span>
+									<span className="max-w-20 truncate text-caption text-passive">
+										{profileState.profileName ?? t("browser.profile.temporary")}
+									</span>
+									<ChevronRight aria-hidden="true" className="size-3.5 shrink-0 text-passive" />
+								</DropdownMenuItem>
+								<DropdownMenuItem
+									className="gap-2"
+									disabled={!canUseDevTools}
+									onSelect={() => void (devtoolsState.open ? closeDevTools() : openDevTools())}
+								>
+									<Bug aria-hidden="true" className="size-icon-base shrink-0" />
+									<span className="flex-1">{t(devtoolsState.open ? "browser.closeDevTools" : "browser.openDevTools")}</span>
+									{devtoolsState.open ? <Check aria-hidden="true" className="text-accent" /> : null}
+								</DropdownMenuItem>
+								<DropdownMenuItem className="gap-2" disabled={!canTakeScreenshot} onSelect={() => void takeScreenshot()}>
+									<Camera aria-hidden="true" className="size-icon-base shrink-0" />
+									<span className="flex-1">{t("browser.takeScreenshot")}</span>
+								</DropdownMenuItem>
+								<DropdownMenuItem className="gap-2" onSelect={() => openGlobalSettings("browserProfiles")}>
+									<Download aria-hidden="true" className="size-icon-base shrink-0" />
+									<span className="flex-1">{t("browser.downloads.title")}</span>
+								</DropdownMenuItem>
+								{closedTabs.length > 0 ? (
+									<DropdownMenuItem className="gap-2" onSelect={() => void reopenClosedTab()}>
+										<RotateCcw aria-hidden="true" className="size-icon-base shrink-0" />
+										<span className="flex-1">{t("browser.reopenClosedTab")}</span>
+									</DropdownMenuItem>
+								) : null}
+							</>
+						)}
 					</DropdownMenuContent>
 				</DropdownMenu>
-				<Tooltip>
-					<TooltipTrigger asChild>
-						<span className="inline-flex">
-							<Button
-								aria-label={t(devtoolsState.open ? "browser.closeDevTools" : "browser.openDevTools")}
-								aria-pressed={devtoolsState.open}
-								className={cn(
-									devtoolsState.open &&
-										"bg-accent-strong text-accent-foreground hover:bg-accent-strong dark:hover:bg-accent-strong",
-								)}
-								disabled={!canUseDevTools}
-								onClick={() => void (devtoolsState.open ? closeDevTools() : openDevTools())}
-								size="icon-sm"
-								type="button"
-								variant="ghost"
-							>
-								<Bug aria-hidden="true" className="size-icon-base" />
-							</Button>
-						</span>
-					</TooltipTrigger>
-					<TooltipContent data-browser-native-overlay="true" side="bottom">
-						{t(devtoolsState.open ? "browser.closeDevTools" : "browser.openDevTools")}
-					</TooltipContent>
-				</Tooltip>
-				<Tooltip>
-					<TooltipTrigger asChild>
-						<Button
-							aria-label={poppedOut ? t("browser.returnToPanel") : t("browser.popOut")}
-							onClick={() => onTogglePopOut(!poppedOut, panelRef.current?.getBoundingClientRect())}
-							size="icon-sm"
-							type="button"
-							variant="ghost"
-						>
-							{poppedOut ? (
-								<Minimize2 aria-hidden="true" className="size-icon-base" />
-							) : (
-								<Maximize2 aria-hidden="true" className="size-icon-base" />
-							)}
-						</Button>
-					</TooltipTrigger>
-					<TooltipContent data-browser-native-overlay="true" side="bottom">{poppedOut ? t("browser.returnToPanel") : t("browser.popOut")}</TooltipContent>
-				</Tooltip>
-				{/* Docked mode has no reserved rail column by default (see
-				    BrowserTabsRail.tsx) — this trigger is the only way to reach the tab
-				    list until the user pins the rail. Hidden at a single tab, same as
-				    the rail's own hover trigger was before this existed. Hover/focus
-				    drive the rail's flyout imperatively since the two live in separate
-				    DOM subtrees (toolbar row vs. body row) — see BrowserTabsRail.tsx's
-				    BrowserTabsRailHandle for why the close side stays debounced here. */}
-        {showTabsTrigger ? (
-          <div className="browser-panel__toolbar-tabs-trigger flex w-8 shrink-0 items-center justify-center self-stretch border-l border-border">
-            <Button
-              aria-label={t("browser.tabsTitle", { count: tabs.length })}
-              className="relative"
-              onBlur={() => railRef.current?.closeFlyout()}
-              onFocus={() => railRef.current?.openFlyout(true)}
-              onPointerEnter={() => railRef.current?.openFlyout()}
-              onPointerLeave={() => railRef.current?.closeFlyout()}
-              size="icon-sm"
-              title={t("browser.tabsTitle", { count: tabs.length })}
-              type="button"
-              variant="ghost"
-            >
-              <Layers3 aria-hidden="true" className="size-icon-base" />
-              <span
-                aria-hidden="true"
-                className="pointer-events-none absolute -right-0.5 -top-0.5 grid min-w-4 place-items-center rounded-full bg-foreground px-1 font-mono text-[9px] font-semibold leading-4 text-background shadow-sm"
-              >
-                {tabs.length}
-              </span>
-            </Button>
-          </div>
-        ) : null}
-        {/* Fixed at the rail's own width (w-8) and flush against the panel's
-				    right edge (the form has no right padding) so this column lines up
-				    with the docked rail directly below it. Popped-out has no icon rail
-				    to align with, and gets its own "+" row inside BrowserTabsRail. */}
-				{!poppedOut ? (
-					<div className="browser-panel__toolbar-new-tab flex w-8 shrink-0 items-center justify-center self-stretch border-l border-border">
-						<Tooltip>
-							<TooltipTrigger asChild>
-								<Button
-									aria-label={t("browser.openNewTab")}
-									onClick={() => void handleOpenTab()}
-									size="icon-sm"
-									type="button"
-									variant="ghost"
-								>
-									<Plus aria-hidden="true" className="size-icon-base" />
-								</Button>
-							</TooltipTrigger>
-							<TooltipContent data-browser-native-overlay="true" side="bottom">{t("browser.openNewTab")}</TooltipContent>
-						</Tooltip>
-					</div>
+				</div>
+			</div>
+			<AnimatePresence initial={false}>
+				{annotationMode ? (
+					<motion.div
+						key="annotation-toolbar"
+						className="browser-panel__annotation-row"
+						data-testid="browser-annotation-toolbar"
+						initial={prefersReducedMotion ? false : { height: 0, opacity: 0 }}
+						animate={{ height: "auto", opacity: 1 }}
+						exit={prefersReducedMotion ? undefined : { height: 0, opacity: 0 }}
+						transition={
+							prefersReducedMotion
+								? { duration: 0 }
+								: { duration: 0.18, ease: [0.22, 1, 0.36, 1] }
+						}
+					>
+						{annotationToolbar}
+					</motion.div>
 				) : null}
-			</form>
+			</AnimatePresence>
+			{findOpen ? (
+				<div className="browser-panel__find-row" role="search" data-testid="browser-find-row">
+					<Search aria-hidden="true" className="size-3.5 shrink-0 text-passive" />
+					<input
+						ref={findInputRef}
+						className="browser-panel__find-input"
+						value={findQuery}
+						placeholder={t("browser.find.placeholder")}
+						aria-label={t("browser.find.placeholder")}
+						onChange={(event) => {
+							const query = event.currentTarget.value;
+							setFindQuery(query);
+							if (!findComposingRef.current) runFind(query);
+						}}
+						onCompositionStart={() => {
+							findComposingRef.current = true;
+						}}
+						onCompositionEnd={(event) => {
+							findComposingRef.current = false;
+							const query = event.currentTarget.value;
+							setFindQuery(query);
+							runFind(query);
+						}}
+						onKeyDown={handleFindKeyDown}
+					/>
+					<span className="browser-panel__find-status" aria-live="polite" aria-atomic="true">
+						{findQuery
+							? findState.matches > 0
+								? t("browser.find.matchCount", {
+									active: findState.activeMatchOrdinal,
+									total: findState.matches,
+								})
+								: findState.finalUpdate
+									? t("browser.find.noResults")
+									: ""
+							: ""}
+					</span>
+					<button
+						type="button"
+						className="browser-panel__find-button"
+						disabled={!findQuery}
+						aria-label={t("browser.find.previous")}
+						onClick={() => runFind(findQuery, false, false)}
+					>
+						<ChevronUp aria-hidden="true" />
+					</button>
+					<button
+						type="button"
+						className="browser-panel__find-button"
+						disabled={!findQuery}
+						aria-label={t("browser.find.next")}
+						onClick={() => runFind(findQuery, true, false)}
+					>
+						<ChevronDown aria-hidden="true" />
+					</button>
+					<button
+						type="button"
+						className="browser-panel__find-button"
+						aria-label={t("browser.find.close")}
+						onClick={closeFind}
+					>
+						<X aria-hidden="true" />
+					</button>
+				</div>
+			) : null}
 			<div className="browser-panel__body flex min-h-0 flex-1 overflow-hidden">
 				<div
 					className="browser-panel__viewport relative min-h-0 flex-1 overflow-hidden"
 					// The live page paints as a separate native WebContentsView, not inside
-					// this div. Opening any overlay (e.g. the tabs-rail flyout,
-					// BrowserTabsRail.tsx's data-browser-native-overlay) briefly raises the
-					// transparent shell above that native view so the overlay can paint on
-					// top — if this div painted an opaque background here, it would blank
-					// the live page for the duration. `.browser-panel__viewport` in
-					// styles.css carries its own plain-CSS background (a decorative
-					// gradient for the empty/no-bridge placeholder states) that is NOT a
-					// Tailwind utility and so can't be toggled via className — Tailwind
-					// utilities live in a lower-priority cascade layer and can never
-					// override plain author CSS. Gate that CSS rule with this data
-					// attribute instead, so there's exactly one place deciding opacity.
+					// this div. Opening any browser overlay (e.g. the controls menu) briefly
+					// raises the transparent shell above that native view so the overlay can
+					// paint on top — if this div painted an opaque background here, it would
+					// blank the live page for the duration. `.browser-panel__viewport` in
+					// styles.css carries its own plain-CSS background for the empty/no-bridge
+					// placeholder states that is NOT a Tailwind utility and so can't be
+					// toggled via className — Tailwind utilities live in a lower-priority
+					// cascade layer and can never override plain author CSS. Gate that CSS
+					// rule with this data attribute instead, so there's exactly one place
+					// deciding opacity.
 					data-placeholder={!hasNativeBrowser || navState.url === "" ? "true" : undefined}
 					data-testid="browser-viewport"
 				>
@@ -1188,270 +1765,300 @@ export function BrowserPanelView({
 					    preset — the empty/error placeholders below stay full-width
 					    overlays. maxWidth caps it to whatever room the panel actually
 					    has instead of overflowing a narrow docked panel. */}
-          <div
-            className={cn(
-              "relative mx-auto h-full",
-              deviceFrameWidth &&
-                "border-x border-border shadow-(--shadow-popover)",
-            )}
-            style={
-              deviceFrameWidth
-                ? { maxWidth: "100%", width: deviceFrameWidth }
-                : undefined
-            }
-          >
-            {/* The web app has no native WebContentsView to paint into this
-						    slot, so it falls back to an iframe rendered inside it. */}
-            <div
-              className="browser-panel__slot absolute inset-0 min-h-px min-w-px"
-              data-testid="browser-device-frame"
-              ref={slotRef}
-            >
-              {mode === "web" && iframeSrc ? (
-                <iframe
-                  key={iframeKey}
-                  title={t("browser.previewTitle")}
-                  src={iframeSrc}
-                  className="absolute inset-0 h-full w-full border-0"
-                />
-              ) : null}
-            </div>
-          </div>
-          {showStaticPreview && !(mode === "web" && iframeSrc) ? (
-            <StaticPreview url={navState.url} />
-          ) : null}
-          {navState.url === "" ? (
-            <div className="pointer-events-none absolute inset-0 grid place-items-center p-5 text-center font-mono text-xs text-passive">
-              {/* Say which browser this is. People log into a site here, find
-									their system browser unchanged, and assume it failed. */}
-              <div className="max-w-sm space-y-1.5">
-                <p>{t("browser.emptyUrl")}</p>
-                <p className="text-passive/70">
-                  {t("browser.emptyProfileNote")}
-                </p>
-              </div>
-            </div>
-          ) : null}
-          {navState.error ? (
-            <p
-              className={cn(
-                "absolute inset-x-2.5 bottom-2.5 m-0 border border-error/35 bg-error/8 px-2.5 py-2",
-                "rounded-md text-xs text-destructive",
-              )}
-              data-testid="browser-preview-error"
-            >
-              {navState.error}
-            </p>
-          ) : null}
-        </div>
-        {/* Both docked and popped-out keep the rail on the right of the
-				    viewport (out of the way of the toolbar/address bar). */}
-        <BrowserTabsRail
-          activeTabId={activeTabId}
-          closedTabs={closedTabs}
-          onCloseTab={closeTab}
-          onOpenTab={handleOpenTab}
-          onPinnedChange={handlePinnedChange}
-          onReopenClosedTab={reopenClosedTab}
-          onReorderTabs={reorderTabs}
-          onSelectTab={handleSelectTab}
-          pinned={pinned}
-          poppedOut={poppedOut}
-          ref={railRef}
-          tabs={tabs}
-        />
-      </div>
-    </div>
-  );
+					<div
+						className={cn("relative mx-auto h-full", deviceFrameWidth && "border-x border-border shadow-(--shadow-popover)")}
+						style={deviceFrameWidth ? { maxWidth: "100%", width: deviceFrameWidth } : undefined}
+					>
+						<div
+							className="browser-panel__slot absolute inset-0 min-h-px min-w-px"
+							data-testid="browser-device-frame"
+							ref={slotRef}
+						/>
+					</div>
+					{showStaticPreview ? <StaticPreview url={navState.url} /> : null}
+					{navState.url === "" ? (
+						<div className="pointer-events-none absolute inset-0 grid place-items-center p-5 text-center text-xs text-muted-foreground">
+							<p>{t("browser.emptyUrl")}</p>
+						</div>
+					) : null}
+					{navState.error ? (
+						<p
+							className={cn(
+								"absolute inset-x-2.5 bottom-2.5 m-0 border border-error/35 bg-error/8 px-2.5 py-2",
+								"rounded-md text-xs text-destructive",
+							)}
+							data-testid="browser-preview-error"
+						>
+							{navState.error}
+						</p>
+					) : null}
+				</div>
+			</div>
+		</div>
+	);
+}
+
+function BrowserControlTooltip({
+	children,
+	disabled = false,
+	label,
+}: {
+	children: ReactElement;
+	disabled?: boolean;
+	label: string;
+}) {
+	const [open, setOpen] = useState(false);
+	useEffect(() => {
+		if (disabled) setOpen(false);
+	}, [disabled]);
+	return (
+		<Tooltip open={open} onOpenChange={(nextOpen) => setOpen(disabled ? false : nextOpen)}>
+			<TooltipTrigger asChild>{children}</TooltipTrigger>
+			<TooltipContent data-browser-native-overlay="true" side="bottom" sideOffset={4}>
+				{label}
+			</TooltipContent>
+		</Tooltip>
+	);
 }
 
 const SortableBrowserTopTab = memo(function SortableBrowserTopTab({
-  tab,
-  selected,
-  onlyTab,
-  onSelect,
-  onClose,
+	tab,
+	selected,
+	onSelect,
+	onClose,
 }: {
-  tab: BrowserViewModel["tabs"][number];
-  selected: boolean;
-  onlyTab: boolean;
+	tab: BrowserViewModel["tabs"][number];
+	selected: boolean;
 	onSelect: (tabId: string) => void;
 	onClose: (tabId: string) => void;
 }) {
-  const { t } = useTranslation();
-  const {
-    attributes,
-    listeners,
-    setNodeRef,
-    transform,
-    transition,
-    isDragging,
-  } = useSortable({ id: tab.id });
-  const label = browserTabLabel(tab.title, tab.url);
-  const closeLabel = t("browser.closeTab", { title: label.title });
-  return (
-    <div
-      className={cn(
-        "browser-panel__tab",
-        selected && "browser-panel__tab--active",
-        isDragging && "browser-panel__tab--dragging z-chrome opacity-80",
-      )}
-      ref={setNodeRef}
-      style={{ transform: CSS.Transform.toString(transform), transition }}
-    >
-      <button
-        {...attributes}
-        {...listeners}
-        aria-selected={selected}
-        className="browser-panel__tab-select"
-				onClick={() => void onSelect(tab.id)}
-        role="tab"
-        tabIndex={selected ? 0 : -1}
-        title={label.title}
-        type="button"
-      >
-        {tab.favicon ? (
-          <img
-            alt=""
-            className="browser-panel__tab-icon object-cover"
-            src={tab.favicon}
-          />
-        ) : (
-          <Globe2 aria-hidden="true" className="browser-panel__tab-icon" />
-        )}
-        <span className="browser-panel__tab-title">{label.title}</span>
-      </button>
-      <button
-        aria-label={closeLabel}
-        className="browser-panel__tab-close"
-        disabled={onlyTab}
-				onClick={() => onClose(tab.id)}
-        title={onlyTab ? t("browser.onlyTab") : closeLabel}
-        type="button"
-      >
-        <X aria-hidden="true" className="size-icon-sm" />
-      </button>
-    </div>
-  );
+	const { t } = useTranslation();
+	const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: tab.id });
+	const label = browserTabLabel(tab.title, tab.url);
+	const closeLabel = t("browser.closeTab", { title: label.title });
+	return (
+		<div
+			className={cn(
+				"browser-panel__tab",
+				selected && "browser-panel__tab--active",
+				isDragging && "browser-panel__tab--drag-placeholder",
+			)}
+			data-browser-tab-id={tab.id}
+			ref={setNodeRef}
+			style={{ transform: CSS.Transform.toString(transform), transition }}
+		>
+			<BrowserControlTooltip label={label.title}>
+				<button
+					{...attributes}
+					{...listeners}
+					aria-selected={selected}
+					className="browser-panel__tab-select"
+					onClick={() => void onSelect(tab.id)}
+					role="tab"
+					tabIndex={selected ? 0 : -1}
+					type="button"
+				>
+					{tab.favicon ? (
+						<img alt="" className="browser-panel__tab-icon object-cover" src={tab.favicon} />
+					) : (
+						<Globe2 aria-hidden="true" className="browser-panel__tab-icon" />
+					)}
+					<span className="browser-panel__tab-title">{label.title}</span>
+				</button>
+			</BrowserControlTooltip>
+			{tab.url && tab.url !== "about:blank" ? (
+				<BrowserControlTooltip label={closeLabel}>
+					<button
+						aria-label={closeLabel}
+						className="browser-panel__tab-close"
+						onClick={() => onClose(tab.id)}
+						type="button"
+					>
+						<X aria-hidden="true" className="size-icon-base" />
+					</button>
+				</BrowserControlTooltip>
+			) : null}
+		</div>
+	);
 });
 
-function compactBrowserAddress(url: string): string {
-  if (!url) return "";
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
-      return parsed.host.replace(/^www\./i, "");
-    }
-    if (parsed.protocol === "file:") {
-      const name = parsed.pathname.split("/").filter(Boolean).at(-1);
-      return name ? decodeURIComponent(name) : url;
-    }
-    return parsed.host || url;
-  } catch {
-    return url;
-  }
-}
+export const BrowserTopTabDragOverlay = memo(function BrowserTopTabDragOverlay({
+	tab,
+}: {
+	tab: BrowserViewModel["tabs"][number];
+}) {
+	const label = browserTabLabel(tab.title, tab.url);
+	return (
+		<div
+			aria-hidden="true"
+			className="browser-panel__tab browser-panel__tab--drag-overlay"
+			data-testid="browser-tab-drag-overlay"
+		>
+			<div className="browser-panel__tab-select">
+				{tab.favicon ? (
+					<img alt="" className="browser-panel__tab-icon object-cover" src={tab.favicon} />
+				) : (
+					<Globe2 aria-hidden="true" className="browser-panel__tab-icon" />
+				)}
+				<span className="browser-panel__tab-title">{label.title}</span>
+			</div>
+			{tab.url && tab.url !== "about:blank" ? (
+				<span className="browser-panel__tab-close">
+					<X aria-hidden="true" className="size-icon-base" />
+				</span>
+			) : null}
+		</div>
+	);
+});
 
-function agentActivityLabel(
-  activity: BrowserViewModel["agentBrowserActivity"],
-  active: boolean,
-): string {
-  if (!active && !activity?.active) return "";
-  const action = activity?.active ? activity.action : "";
-  if (!action) return appI18n.t("browser.agentUsing");
-  return appI18n.t("browser.agentAction", { verb: browserActionVerb(action) });
+function agentActivityLabel(activity: BrowserViewModel["agentBrowserActivity"], active: boolean): string {
+	if (!active && !activity?.active) return "";
+	const action = activity?.active ? activity.action : "";
+	if (!action) return appI18n.t("browser.agentUsing");
+	return appI18n.t("browser.agentAction", { verb: browserActionVerb(action) });
 }
 
 function browserActionVerb(action: string): string {
-  const key = ((): MessageKey => {
-    switch (action) {
-      case "click":
-        return "browser.verb.click";
-      case "fill":
-      case "type":
-        return "browser.verb.type";
-      case "press":
-        return "browser.verb.press";
-      case "hover":
-        return "browser.verb.hover";
-      case "scroll":
-        return "browser.verb.scroll";
-      case "open":
-        return "browser.verb.open";
-      case "wait":
-        return "browser.verb.wait";
-      case "snapshot":
-        return "browser.verb.read";
-      case "highlight":
-        return "browser.verb.highlight";
-      case "unhighlight":
-        return "browser.verb.clearHighlight";
-      case "tab-new":
-        return "browser.verb.openTab";
-      case "tab-select":
-        return "browser.verb.switchTab";
-      case "tab-close":
-        return "browser.verb.closeTab";
-      case "tabs":
-        return "browser.verb.checkTabs";
-      default:
-        return "browser.verb.using";
-    }
-  })();
-  return appI18n.t(key);
+	const key = ((): MessageKey => {
+		switch (action) {
+			case "click":
+				return "browser.verb.click";
+			case "fill":
+			case "type":
+				return "browser.verb.type";
+			case "press":
+				return "browser.verb.press";
+			case "hover":
+				return "browser.verb.hover";
+			case "scroll":
+				return "browser.verb.scroll";
+			case "open":
+				return "browser.verb.open";
+			case "wait":
+				return "browser.verb.wait";
+			case "snapshot":
+				return "browser.verb.read";
+			case "highlight":
+				return "browser.verb.highlight";
+			case "unhighlight":
+				return "browser.verb.clearHighlight";
+			case "tab-new":
+				return "browser.verb.openTab";
+			case "tab-select":
+				return "browser.verb.switchTab";
+			case "tab-close":
+				return "browser.verb.closeTab";
+			case "tabs":
+				return "browser.verb.checkTabs";
+			default:
+				return "browser.verb.using";
+		}
+	})();
+	return appI18n.t(key);
+}
+
+function getDisplayUrl(url: string): string {
+	if (!url) return url;
+	try {
+		const parsed = new URL(url);
+		if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+			return parsed.hostname.replace(/^www\./, "");
+		}
+		return url;
+	} catch {
+		return url;
+	}
+}
+
+function webOrigin(url: string): string | undefined {
+	try {
+		const parsed = new URL(url);
+		return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.origin : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function faviconForOpenTab(url: string, tabs: BrowserViewModel["tabs"]): string | undefined {
+	const origin = webOrigin(url);
+	if (!origin) return undefined;
+	return tabs.find((tab) => tab.favicon && webOrigin(tab.url) === origin)?.favicon;
+}
+
+function BrowserSuggestionIcon({ cachedFavicon, url, viewId }: { cachedFavicon?: string; url: string; viewId: string }) {
+	const origin = webOrigin(url);
+	const nativeCompositionEnabled = window.ao?.browser.nativeCompositionEnabled === true;
+	const directFavicon = !nativeCompositionEnabled && origin ? `${origin}/favicon.ico` : undefined;
+	const [favicon, setFavicon] = useState(cachedFavicon ?? directFavicon);
+	useEffect(() => {
+		setFavicon(cachedFavicon ?? directFavicon);
+		const historyFavicon = window.ao?.browser.historyFavicon;
+		if (cachedFavicon || !nativeCompositionEnabled || !viewId || typeof historyFavicon !== "function") return;
+		let current = true;
+		void historyFavicon({ viewId, url }).then(
+			(nextFavicon) => {
+				if (current && nextFavicon) setFavicon(nextFavicon);
+			},
+			() => undefined,
+		);
+		return () => {
+			current = false;
+		};
+	}, [cachedFavicon, directFavicon, nativeCompositionEnabled, url, viewId]);
+	if (!favicon) {
+		return <Globe2 aria-hidden="true" className="size-icon-base shrink-0 text-settings-muted" />;
+	}
+	return (
+		<img
+			alt=""
+			className="size-icon-base shrink-0 rounded-sm object-contain"
+			onError={() => setFavicon(undefined)}
+			src={favicon}
+		/>
+	);
 }
 
 function StaticPreview({ url }: { url: string }) {
-  return (
-    <div className="absolute inset-0 overflow-auto bg-background text-foreground">
-      <div className="border-b border-border bg-surface px-4 py-3">
-        <div className="text-caption font-semibold uppercase tracking-wide-md text-muted-foreground">
-          AO Preview
-        </div>
-        <div className="mt-1 truncate font-mono text-xs text-accent">{url}</div>
-      </div>
-      <div className="mx-auto max-w-preview-max px-5 py-6">
-        <div className="rounded-lg border border-border bg-card p-5 shadow-sm">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <h1 className="text-heading-lg font-semibold leading-tight tracking-normal text-foreground">
-                Demo app preview
-              </h1>
-              <p className="mt-1 text-control leading-row text-muted-foreground">
-                The worker exposed a local Vite app with{" "}
-                <span className="font-mono">ao preview</span>.
-              </p>
-            </div>
-            <span className="rounded-md bg-success/15 px-2.5 py-1 text-caption font-semibold text-success">
-              Loaded
-            </span>
-          </div>
-          <div className="mt-5 grid grid-cols-3 gap-3">
-            {[
-              ["Routes", "12 passing"],
-              ["Build", "ready"],
-              ["Latency", "42 ms"],
-            ].map(([label, value]) => (
-              <div
-                key={label}
-                className="rounded-md border border-border bg-raised p-3"
-              >
-                <div className="text-caption font-medium uppercase tracking-wide text-muted-foreground">
-                  {label}
-                </div>
-                <div className="mt-1 text-subtitle font-semibold text-foreground">
-                  {value}
-                </div>
-              </div>
-            ))}
-          </div>
-          <div className="mt-5 rounded-md border border-border bg-terminal p-3 font-mono text-xs leading-row text-terminal-dim">
-            <div>$ npm run dev -- --host 127.0.0.1</div>
-            <div className="text-success-bright">ready in 418 ms</div>
-            <div>Local: http://localhost:5173/</div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
+	return (
+		<div className="absolute inset-0 overflow-auto bg-background text-foreground">
+			<div className="border-b border-border bg-surface px-4 py-3">
+				<div className="text-caption font-semibold uppercase tracking-wide-md text-muted-foreground">AO Preview</div>
+				<div className="mt-1 truncate font-mono text-xs text-accent">{url}</div>
+			</div>
+			<div className="mx-auto max-w-preview-max px-5 py-6">
+				<div className="rounded-lg border border-border bg-card p-5 shadow-sm">
+					<div className="flex items-center justify-between gap-3">
+						<div>
+							<h1 className="text-heading-lg font-semibold leading-tight tracking-normal text-foreground">
+								Demo app preview
+							</h1>
+							<p className="mt-1 text-control leading-row text-muted-foreground">
+								The worker exposed a local Vite app with <span className="font-mono">ao preview</span>.
+							</p>
+						</div>
+						<span className="rounded-md bg-success/15 px-2.5 py-1 text-caption font-semibold text-success">
+							Loaded
+						</span>
+					</div>
+					<div className="mt-5 grid grid-cols-3 gap-3">
+						{[
+							["Routes", "12 passing"],
+							["Build", "ready"],
+							["Latency", "42 ms"],
+						].map(([label, value]) => (
+							<div key={label} className="rounded-md border border-border bg-raised p-3">
+								<div className="text-caption font-medium uppercase tracking-wide text-muted-foreground">{label}</div>
+								<div className="mt-1 text-subtitle font-semibold text-foreground">{value}</div>
+							</div>
+						))}
+					</div>
+					<div className="mt-5 rounded-md border border-border bg-terminal p-3 font-mono text-xs leading-row text-terminal-dim">
+						<div>$ npm run dev -- --host 127.0.0.1</div>
+						<div className="text-success-bright">ready in 418 ms</div>
+						<div>Local: http://localhost:5173/</div>
+					</div>
+				</div>
+			</div>
+		</div>
+	);
 }

@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -433,13 +432,13 @@ func parseCodexResponseItem(raw json.RawMessage, state *codexParserStateV1, resu
 			return
 		}
 		if !validCodexCallID(payload.CallID) ||
-			(!slices.Contains(state.PendingSpawnCallIDs, payload.CallID) && len(state.PendingSpawnCallIDs) >= maxCodexAttributionIDs) {
+			(!containsString(state.PendingSpawnCallIDs, payload.CallID) && len(state.PendingSpawnCallIDs) >= maxCodexAttributionIDs) {
 			recordMalformed(result)
 			return
 		}
 		state.PendingSpawnCallIDs = appendUniqueString(state.PendingSpawnCallIDs, payload.CallID)
 	case "function_call_output":
-		if !slices.Contains(state.PendingSpawnCallIDs, payload.CallID) {
+		if !containsString(state.PendingSpawnCallIDs, payload.CallID) {
 			return
 		}
 		var output struct {
@@ -449,7 +448,7 @@ func parseCodexResponseItem(raw json.RawMessage, state *codexParserStateV1, resu
 			recordMalformed(result)
 			return
 		}
-		alreadyDiscovered := slices.Contains(state.DiscoveredChildIDs, output.AgentID)
+		alreadyDiscovered := containsString(state.DiscoveredChildIDs, output.AgentID)
 		if !alreadyDiscovered && len(state.DiscoveredChildIDs) >= maxCodexAttributionIDs {
 			recordMalformed(result)
 			return
@@ -572,8 +571,17 @@ func validCodexAgentID(value string) bool {
 	return err == nil && parsed.String() == value
 }
 
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
 func appendUniqueString(values []string, value string) []string {
-	if slices.Contains(values, value) {
+	if containsString(values, value) {
 		return values
 	}
 	return append(values, value)

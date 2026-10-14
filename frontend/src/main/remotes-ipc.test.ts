@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { RemoteRegistry } from "./remote-registry";
 import { findRemote, removeSavedRemote, toHostViews, updateSavedRemote } from "./remotes-ipc";
 import type { RemoteEntry } from "./remotes-store";
 
@@ -17,42 +16,26 @@ async function tempFile(contents = TWO_HOSTS, mode = 0o600): Promise<string> {
 	return path;
 }
 
-// A real RemoteRegistry over a fake proxy: the close() call is the assertion, and
-// only the real class knows when it fires.
-function connectedOn(url: string, label = "workbox") {
-	const close = vi.fn().mockResolvedValue(undefined);
-	const registry = new RemoteRegistry(async () => ({
-		base: "http://127.0.0.1:9999/tok",
-		url,
-		close,
-	}));
-	const connected = {
-		view: async () => registry.views().find((view) => view.url === url) ?? null,
-		deactivate: async (target: string) => registry.disconnect(target),
-	};
-	return {
-		connected,
-		close,
-		connection: registry.connect({ label, url, password: "old" }),
-	};
-}
-
-// No proxy has been started, so nothing is connected.
-const idleProxy = () => async () => undefined;
-
 const online = async () => "online" as const;
+const dropped = () => vi.fn<(url: string) => Promise<void>>().mockResolvedValue(undefined);
 
 describe("toHostViews", () => {
 	it("strips the password before anything crosses to the renderer", () => {
-		const views = toHostViews([
-			{
-				label: "workbox",
-				url: "http://192.0.2.1:3011",
-				password: "supersecret",
-			},
-		]);
-		expect(views).toEqual([{ label: "workbox", url: "http://192.0.2.1:3011" }]);
+		const views = toHostViews([{ hostId: "h_workbox", label: "workbox", url: "http://192.0.2.1:3011", password: "supersecret" }]);
+		expect(views).toEqual([{ hostId: "h_workbox", label: "workbox", url: "http://192.0.2.1:3011" }]);
 		expect(JSON.stringify(views)).not.toContain("supersecret");
+	});
+});
+
+describe("findRemote", () => {
+	it("returns the saved entry for a url", async () => {
+		const path = await tempFile();
+		await expect(findRemote(path, "http://192.0.2.9:9")).resolves.toEqual({ label: "mini", url: "http://192.0.2.9:9", password: "m" });
+	});
+
+	it("refuses a url it has never saved", async () => {
+		const path = await tempFile();
+		await expect(findRemote(path, "http://192.0.2.5:5")).rejects.toThrow(/no saved host/);
 	});
 });
 
@@ -60,94 +43,48 @@ describe("updateSavedRemote", () => {
 	it("probes the merged entry before it writes anything", async () => {
 		const path = await tempFile();
 		const probed: RemoteEntry[] = [];
-		const health = await updateSavedRemote(
-			path,
-			"http://192.0.2.1:1",
-			{ password: "rotated" },
-			idleProxy(),
-			async (entry) => {
-				probed.push(entry);
-				return "online";
-			},
-		);
+		const health = await updateSavedRemote(path, "http://192.0.2.1:1", { password: "rotated" }, dropped(), async (entry) => {
+			probed.push(entry);
+			return "online";
+		});
 		expect(health).toBe("online");
 		// Probed with the new password against the saved address, not with either half.
 		expect(probed).toEqual([{ label: "workbox", url: "http://192.0.2.1:1", password: "rotated" }]);
 	});
 
-	it("saves nothing when the edited host does not answer", async () => {
+	it("saves nothing and drops nothing when the edited host does not answer", async () => {
 		const path = await tempFile();
-		const health = await updateSavedRemote(
-			path,
-			"http://192.0.2.1:1",
-			{ password: "wrong" },
-			idleProxy(),
-			async () => "unauthorized",
-		);
+		const disconnect = dropped();
+		const health = await updateSavedRemote(path, "http://192.0.2.1:1", { password: "wrong" }, disconnect, async () => "unauthorized");
 		expect(health).toBe("unauthorized");
 		expect(await readFile(path, "utf8")).toBe(TWO_HOSTS);
+		expect(disconnect).not.toHaveBeenCalled();
 	});
 
-	// The live proxy holds the address and password that were saved when it
+	// A live proxy holds the address and password that were saved when it
 	// started; after an edit both may be stale, so it does not get to keep serving.
-	it("tears down the proxy when the edited host is connected", async () => {
+	it("drops the edited host's proxy by its old url", async () => {
 		const path = await tempFile();
-		const { connected, close, connection } = connectedOn("http://192.0.2.1:1");
-		await connection;
-		await updateSavedRemote(path, "http://192.0.2.1:1", { url: "http://192.0.2.5:5" }, connected.deactivate, online);
-		expect(close).toHaveBeenCalled();
-		await expect(connected.view()).resolves.toBeNull();
-	});
-
-	it("leaves another host's proxy alone", async () => {
-		const path = await tempFile();
-		const { connected, close, connection } = connectedOn("http://192.0.2.9:9", "mini");
-		await connection;
-		await updateSavedRemote(path, "http://192.0.2.1:1", { password: "rotated" }, connected.deactivate, online);
-		expect(close).not.toHaveBeenCalled();
-		await expect(connected.view()).resolves.not.toBeNull();
+		const disconnect = dropped();
+		await updateSavedRemote(path, "http://192.0.2.1:1", { url: "http://192.0.2.5:5" }, disconnect, online);
+		expect(disconnect).toHaveBeenCalledTimes(1);
+		expect(disconnect).toHaveBeenCalledWith("http://192.0.2.1:1");
 	});
 });
 
 describe("removeSavedRemote", () => {
-	it("forgets the host", async () => {
+	it("forgets the host and drops its proxy", async () => {
 		const path = await tempFile();
-		await removeSavedRemote(path, "http://192.0.2.1:1", idleProxy());
-		expect(JSON.parse(await readFile(path, "utf8")).remotes).toEqual([
-			{ label: "mini", url: "http://192.0.2.9:9", password: "m" },
-		]);
-	});
-
-	it("tears down the proxy when the removed host is connected", async () => {
-		const path = await tempFile();
-		const { connected, close, connection } = connectedOn("http://192.0.2.1:1");
-		await connection;
-		await removeSavedRemote(path, "http://192.0.2.1:1", connected.deactivate);
-		expect(close).toHaveBeenCalled();
-		// Nothing left pointing at a host that no longer exists.
-		await expect(connected.view()).resolves.toBeNull();
-	});
-
-	it("leaves another host's proxy alone", async () => {
-		const path = await tempFile();
-		const { connected, close, connection } = connectedOn("http://192.0.2.9:9", "mini");
-		await connection;
-		await removeSavedRemote(path, "http://192.0.2.1:1", connected.deactivate);
-		expect(close).not.toHaveBeenCalled();
+		const disconnect = dropped();
+		await removeSavedRemote(path, "http://192.0.2.1:1", disconnect);
+		expect(JSON.parse(await readFile(path, "utf8")).remotes).toEqual([{ label: "mini", url: "http://192.0.2.9:9", password: "m" }]);
+		expect(disconnect).toHaveBeenCalledWith("http://192.0.2.1:1");
 	});
 
 	it("refuses to touch a file others can read", async () => {
 		const path = await tempFile(TWO_HOSTS, 0o644);
-		await expect(removeSavedRemote(path, "http://192.0.2.1:1", idleProxy())).rejects.toThrow(/chmod 600/);
+		const disconnect = dropped();
+		await expect(removeSavedRemote(path, "http://192.0.2.1:1", disconnect)).rejects.toThrow(/chmod 600/);
+		expect(disconnect).not.toHaveBeenCalled();
 	});
-});
-
-describe("findRemote", () => {
-  it("finds saved hosts and refuses unknown URLs", async () => {
-    const path = await tempFile();
-    await expect(findRemote(path, "http://192.0.2.9:9")).resolves.toEqual({
-      label: "mini", url: "http://192.0.2.9:9", password: "m",
-    });
-    await expect(findRemote(path, "http://192.0.2.5:5")).rejects.toThrow(/no saved host/);
-  });
 });

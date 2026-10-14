@@ -111,8 +111,8 @@ func orchestratorLineParts(sess sessionDTO) []string {
 	if !sess.Activity.LastActivityAt.IsZero() {
 		parts = append(parts, "("+formatSessionAge(time.Since(sess.Activity.LastActivityAt))+")")
 	}
-	if label := sessionStatusLabel(sess); label != "" {
-		parts = append(parts, label)
+	if sess.Status != "" {
+		parts = append(parts, "["+sess.Status+"]")
 	}
 	if sess.IsTerminated {
 		parts = append(parts, "terminated")

@@ -28,7 +28,10 @@ import (
 // sessionIDPattern bounds the AO_SESSION_ID we will place in a request path to
 // the id alphabet the daemon issues. Validating the externally-set env value
 // before it reaches the loopback URL keeps it from steering the request.
-var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+// Project ids may contain single dots (e.g. "acme.dev"), and session ids
+// inherit them ("acme.dev-2"); dot runs and leading dots stay rejected so the
+// id can never be "." or ".." in a request or file path.
+var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$`)
 
 const (
 	// hooksLogName is the file under AO_DATA_DIR where hook delivery failures
@@ -63,7 +66,6 @@ type setActivityAPIRequest struct {
 	ProviderTurnID               string                              `json:"providerTurnId,omitempty"`
 	SubmissionID                 string                              `json:"submissionId,omitempty"`
 	TranscriptPath               string                              `json:"transcriptPath,omitempty"`
-	AgentCWD                     string                              `json:"agentCwd,omitempty"`
 	LaunchID                     string                              `json:"launchId,omitempty"`
 	Usage                        *usageHookMetadata                  `json:"usage,omitempty"`
 }
@@ -250,26 +252,6 @@ func hookAgentSessionID(payload []byte) string {
 		return ""
 	}
 	return id
-}
-
-// hookAgentCWD extracts the working directory of the agent process that fired
-// the hook. Every Claude Code hook event carries it, and it is the session's cwd
-// at launch rather than the shell's — a `cd` inside a tool call does not move it.
-// That is what makes it usable as the identity of the reporting agent.
-func hookAgentCWD(payload []byte) string {
-	var p struct {
-		CWD      string `json:"cwd"`
-		CWDCamel string `json:"currentWorkingDirectory"`
-	}
-	_ = json.Unmarshal(payload, &p)
-	cwd := strings.TrimSpace(p.CWD)
-	if cwd == "" {
-		cwd = strings.TrimSpace(p.CWDCamel)
-	}
-	if len(cwd) > maxHookTranscriptPath {
-		return ""
-	}
-	return cwd
 }
 
 // hookLaunchID extracts the runtime launch id a plugin embeds in its payload.
@@ -583,11 +565,6 @@ func newHooksCommand(ctx *commandContext) *cobra.Command {
 }
 
 func (c *commandContext) runHook(ctx context.Context, agent, event string) error {
-	// Before anything else, including reading stdin: a hook reports on a session
-	// owned by the local daemon, so AO_URL is ignored and --url is refused.
-	if err := c.pinToLocalDaemon("ao hooks"); err != nil {
-		return err
-	}
 	observedAt := c.deps.Now()
 	if isAgyModernHookEvent(agent, event) {
 		// AGY requires every modern hook handler to return a JSON object, even
@@ -657,7 +634,6 @@ func (c *commandContext) runHook(ctx context.Context, agent, event string) error
 	}
 
 	toolName, toolUseID := activityMeta(payload)
-	agentCWD := hookAgentCWD(payload)
 	if domain.AgentHarness(agent) == domain.HarnessCursor && event == "post-tool-use-failure" {
 		if failureEvent, failureTool, ok := cursor.TerminalFailureCorrelation(payload); ok {
 			event = failureEvent
@@ -688,7 +664,6 @@ func (c *commandContext) runHook(ctx context.Context, agent, event string) error
 		CoordinationID:               conversation.CoordinationID,
 		ProviderTurnID:               conversation.ProviderTurnID,
 		TranscriptPath:               conversation.TranscriptPath,
-		AgentCWD:                     agentCWD,
 		LaunchID:                     launchID,
 		Usage:                        usage,
 	}
@@ -870,15 +845,26 @@ func validLaunchID(value string) string {
 	return value
 }
 
+// openHandsContextHookOutput is OpenHands' hook result shape: it reads
+// additionalContext from the top level and ignores hookSpecificOutput.
+type openHandsContextHookOutput struct {
+	AdditionalContext string `json:"additionalContext"`
+}
+
 func shouldEmitSessionStartContext(agent, event string) bool {
 	if agent == "gemini" {
+		return event == "user-prompt-submit"
+	}
+	if agent == string(domain.HarnessOpenHands) {
+		// OpenHands ignores SessionStart hook output and has no system-prompt
+		// flag; UserPromptSubmit context is appended to each user message.
 		return event == "user-prompt-submit"
 	}
 	if event != "session-start" {
 		return false
 	}
 	switch agent {
-	case "agy", "devin":
+	case "agy", "command-code", "devin":
 		return true
 	default:
 		return false
@@ -900,12 +886,18 @@ func (c *commandContext) emitSessionStartContext(agent, event, sessionID string)
 	if prompt == "" {
 		return
 	}
-	var out sessionStartHookOutput
-	out.HookSpecificOutput.HookEventName = "SessionStart"
-	if agent == "gemini" {
-		out.HookSpecificOutput.HookEventName = "BeforeAgent"
+	var out any
+	if agent == string(domain.HarnessOpenHands) {
+		out = openHandsContextHookOutput{AdditionalContext: prompt}
+	} else {
+		var start sessionStartHookOutput
+		start.HookSpecificOutput.HookEventName = "SessionStart"
+		if agent == "gemini" {
+			start.HookSpecificOutput.HookEventName = "BeforeAgent"
+		}
+		start.HookSpecificOutput.AdditionalContext = prompt
+		out = start
 	}
-	out.HookSpecificOutput.AdditionalContext = prompt
 	if err := json.NewEncoder(c.deps.Out).Encode(out); err != nil {
 		c.reportHookFailure(agent, event, sessionID, fmt.Errorf("write session-start context: %w", err))
 	}
@@ -925,21 +917,6 @@ func (c *commandContext) reportHookFailure(agent, event, sessionID string, cause
 	}
 	line := fmt.Sprintf("%s session=%s %s\n", time.Now().UTC().Format(time.RFC3339), sessionID, msg)
 	appendHooksLog(dataDir, line)
-}
-
-// noteIgnoredRemoteTarget records an AO_URL that pinToLocalDaemon ignored, so
-// an operator debugging a dead activity feed has one place that says so.
-//
-// hooks.log only, deliberately not stderr: an agent's hook runner swallows
-// stderr, and `ao agent-process supervise` shares the user's terminal, where a
-// line on every agent launch would be noise.
-func noteIgnoredRemoteTarget(command, target string) {
-	dataDir := strings.TrimSpace(os.Getenv("AO_DATA_DIR"))
-	if dataDir == "" {
-		return
-	}
-	appendHooksLog(dataDir, fmt.Sprintf("%s %s: AO_URL=%s ignored — daemon-local callback, reported to the local daemon\n",
-		time.Now().UTC().Format(time.RFC3339), command, target))
 }
 
 // appendHooksLog appends one line to the hooks log, truncating first when the

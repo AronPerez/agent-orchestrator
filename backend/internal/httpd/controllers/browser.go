@@ -13,7 +13,6 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apispec"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
-	"github.com/aoagents/agent-orchestrator/backend/internal/service/browser"
 )
 
 const browserCapabilityHeader = "X-AO-Browser-Capability"
@@ -28,7 +27,7 @@ var browserTelemetryActions = map[string]struct{}{
 
 // BrowserService authorizes and executes session-scoped browser operations.
 type BrowserService interface {
-	Status(ctx context.Context, sessionID domain.SessionID, capability string) (browser.StatusResult, error)
+	Status(ctx context.Context, sessionID domain.SessionID, capability string) (browserruntime.Status, error)
 	Execute(ctx context.Context, sessionID domain.SessionID, capability, action string, args map[string]interface{}) (browserruntime.Result, string, error)
 }
 
@@ -59,11 +58,10 @@ func (c *BrowserController) status(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	envelope.WriteJSON(w, http.StatusOK, BrowserStatusResponse{
-		SessionID:         sessionID,
-		Connected:         status.Connected,
-		ConnectedAt:       status.ConnectedAt,
-		Transport:         "electron-webcontents-debugger",
-		PersistentProfile: status.PersistentProfile,
+		SessionID:   sessionID,
+		Connected:   status.Connected,
+		ConnectedAt: status.ConnectedAt,
+		Transport:   "electron-webcontents-debugger",
 	})
 }
 

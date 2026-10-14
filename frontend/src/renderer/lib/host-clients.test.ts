@@ -1,157 +1,48 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { setApiBaseUrl } from "./api-client";
-import { aoBridge } from "./bridge";
-import { LOCAL_HOST } from "./hosts";
-import {
-	baseUrlFor,
-	clientFor,
-	connectedHosts,
-	connectHost,
-	disconnectHost,
-	forgetHost,
-	hostLabelFor,
-	isHostReady,
-	registerHostBase,
-	subscribeConnectedHosts,
-	syncConnectedHosts,
-} from "./host-clients";
+import { afterEach, expect, it, vi } from "vitest";
 
-const REMOTE = "http://192.0.2.1:3011";
-const OTHER_REMOTE = "http://192.0.2.9:3011";
+const remotes = vi.hoisted(() => ({ connect: vi.fn(), disconnect: vi.fn(async () => undefined) }));
+vi.mock("./bridge", () => ({ aoBridge: { remotes } }));
 
-beforeEach(() => {
-	forgetHost(REMOTE);
-	forgetHost(OTHER_REMOTE);
-	setApiBaseUrl("http://127.0.0.1:3001");
-	vi.restoreAllMocks();
+import { clientForHost, connectHost, connectedHosts, disconnectHost, isQuickTunnelHost, subscribeConnectedHosts } from "./host-clients";
+
+afterEach(async () => {
+	for (const hostId of connectedHosts()) await disconnectHost(hostId);
+	remotes.connect.mockReset();
 });
 
-describe("host-clients", () => {
-	it("resolves the local host to the daemon base", () => {
-		expect(baseUrlFor(LOCAL_HOST)).toBe("http://127.0.0.1:3001");
-		expect(isHostReady(LOCAL_HOST)).toBe(true);
-	});
+it("never treats the local sentinel as a remote host", () => {
+	expect(() => clientForHost("local")).toThrow(/not a remote host/);
+});
 
-	it("reports an unregistered remote as not ready rather than throwing", () => {
-		expect(baseUrlFor(REMOTE)).toBeNull();
-		expect(isHostReady(REMOTE)).toBe(false);
-	});
+it("re-pairing an address removes its old host identity from the active map", async () => {
+	const url = "http://box:3001";
+	remotes.connect
+		.mockResolvedValueOnce({ hostId: "h_old", label: "Box", url, base: "http://127.0.0.1:4000/old" })
+		.mockResolvedValueOnce({ hostId: "h_new", label: "Box", url, base: "http://127.0.0.1:4001/new" });
+	await connectHost(url);
+	await connectHost(url);
+	expect(connectedHosts()).toEqual(["h_new"]);
+});
 
-	it("routes a remote request through that host's proxy base", async () => {
-		registerHostBase(REMOTE, "http://127.0.0.1:9999/tok");
-		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-			new Response('{"projects":[]}', {
-				status: 200,
-				headers: { "content-type": "application/json" },
-			}),
-		);
-		await clientFor(REMOTE).GET("/api/v1/projects");
-		expect((fetchSpy.mock.calls[0][0] as Request).url).toBe(
-			"http://127.0.0.1:9999/tok/api/v1/projects",
-		);
-	});
+it("recognizes only a connected Cloudflare quick-tunnel hostname", async () => {
+	remotes.connect.mockResolvedValue({ hostId: "h_tunnel", label: "Tunnel", url: "https://box.trycloudflare.com", base: "http://127.0.0.1:4000" });
+	await connectHost("https://box.trycloudflare.com");
+	expect(isQuickTunnelHost("h_tunnel")).toBe(true);
+	expect(isQuickTunnelHost("missing")).toBe(false);
+	remotes.connect.mockResolvedValue({ hostId: "h_direct", label: "Direct", url: "https://box.trycloudflare.com.evil.example", base: "http://127.0.0.1:4001" });
+	await connectHost("https://box.trycloudflare.com.evil.example");
+	expect(isQuickTunnelHost("h_direct")).toBe(false);
+});
 
-	it("routes a local request to the local daemon, not a proxy", async () => {
-		registerHostBase(REMOTE, "http://127.0.0.1:9999/tok");
-		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-			new Response('{"projects":[]}', {
-				status: 200,
-				headers: { "content-type": "application/json" },
-			}),
-		);
-		await clientFor(LOCAL_HOST).GET("/api/v1/projects");
-		expect((fetchSpy.mock.calls[0][0] as Request).url).toBe(
-			"http://127.0.0.1:3001/api/v1/projects",
-		);
-	});
-
-	it("follows the local base when the daemon moves port", async () => {
-		clientFor(LOCAL_HOST);
-		setApiBaseUrl("http://127.0.0.1:3037");
-		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-			new Response('{"projects":[]}', {
-				status: 200,
-				headers: { "content-type": "application/json" },
-			}),
-		);
-
-		await clientFor(LOCAL_HOST).GET("/api/v1/projects");
-
-		expect((fetchSpy.mock.calls[0][0] as Request).url).toBe(
-			"http://127.0.0.1:3037/api/v1/projects",
-		);
-	});
-
-	it("forgetting a host makes it not ready again", () => {
-		registerHostBase(REMOTE, "http://127.0.0.1:9999/tok");
-		expect(isHostReady(REMOTE)).toBe(true);
-		forgetHost(REMOTE);
-		expect(isHostReady(REMOTE)).toBe(false);
-	});
-
-	it("binds a connected host to the proxy base returned by main", async () => {
-		vi.spyOn(aoBridge.remotes, "connect").mockResolvedValue({
-			label: "workbox",
-			url: REMOTE,
-			base: "http://127.0.0.1:9999/tok",
-		});
-
-		await connectHost(REMOTE);
-
-		expect(baseUrlFor(REMOTE)).toBe("http://127.0.0.1:9999/tok");
-		expect(hostLabelFor(REMOTE)).toBe("workbox");
-	});
-
-	it("publishes connected-host changes for a mounted workspace query", () => {
-		const changed = vi.fn();
-		const unsubscribe = subscribeConnectedHosts(changed);
-
-		registerHostBase(REMOTE, "http://127.0.0.1:9999/tok", "workbox");
-		expect(changed).toHaveBeenCalledOnce();
-		expect(connectedHosts()).toEqual([REMOTE]);
-
-		forgetHost(REMOTE);
-		expect(changed).toHaveBeenCalledTimes(2);
-		unsubscribe();
-	});
-
-	it("forgets a host before waiting for its proxy to close", async () => {
-		registerHostBase(REMOTE, "http://127.0.0.1:9999/tok");
-		let finishDisconnect!: () => void;
-		const disconnect = vi
-			.spyOn(aoBridge.remotes, "disconnect")
-			.mockReturnValue(
-				new Promise<void>((resolve) => {
-					finishDisconnect = resolve;
-				}),
-			);
-
-		const pending = disconnectHost(REMOTE);
-
-		expect(isHostReady(REMOTE)).toBe(false);
-		expect(disconnect).toHaveBeenCalledWith(REMOTE);
-		finishDisconnect();
-		await pending;
-	});
-
-	it("re-binds every proxy main already has connected", async () => {
-		vi.spyOn(aoBridge.remotes, "connected").mockResolvedValue([
-			{
-				label: "workbox",
-				url: REMOTE,
-				base: "http://127.0.0.1:9999/one",
-			},
-			{
-				label: "mini",
-				url: OTHER_REMOTE,
-				base: "http://127.0.0.1:9999/two",
-			},
-		]);
-
-		await syncConnectedHosts();
-
-		expect(connectedHosts()).toEqual([REMOTE, OTHER_REMOTE]);
-		expect(baseUrlFor(REMOTE)).toBe("http://127.0.0.1:9999/one");
-		expect(baseUrlFor(OTHER_REMOTE)).toBe("http://127.0.0.1:9999/two");
-	});
+it("publishes an endpoint change even when its loopback proxy keeps the same base", async () => {
+	const changed = vi.fn();
+	const stop = subscribeConnectedHosts(changed);
+	remotes.connect.mockResolvedValue({ hostId: "h_box", label: "Box", url: "http://box:3001", base: "http://127.0.0.1:4000" });
+	await connectHost("http://box:3001");
+	changed.mockClear();
+	remotes.connect.mockResolvedValue({ hostId: "h_box", label: "Box", url: "https://box.trycloudflare.com", base: "http://127.0.0.1:4000" });
+	await connectHost("https://box.trycloudflare.com");
+	expect(changed).toHaveBeenCalledOnce();
+	expect(isQuickTunnelHost("h_box")).toBe(true);
+	stop();
 });

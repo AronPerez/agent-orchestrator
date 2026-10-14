@@ -20,6 +20,7 @@ INSERT INTO sessions (
     preview_url, preview_revision, terminate_on_pr_merge, cleanup_generation, browser_capability_verifier,
     artifact_dir, session_output_type,
     session_mode, provider_conversation_id, controller_generation, model, effort, session_permissions,
+    requested_output,
     created_at, updated_at, is_pinned, pinned_at, auto_inject_review, auto_inject_ci,
     provision_state, provision_error, is_task_preparation, automation_run_id, automation_launch_completed,
     client_request_id, client_request_hash
@@ -30,7 +31,7 @@ INSERT INTO sessions (
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-    ?, ?
+    ?, ?, ?
 );
 
 -- name: GetClientRequestSession :one
@@ -224,6 +225,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     conversation_checkpoint_state, conversation_checkpoint_generation, conversation_checkpoint_native_id,
     conversation_checkpoint_unsettled, conversation_checkpoint_turn_id, native_checkpoint_evidence,
     native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions,
+    requested_output,
     provision_state, provision_error, provision_steps, branch_state, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
     hibernated_at
@@ -243,6 +245,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     conversation_checkpoint_state, conversation_checkpoint_generation, conversation_checkpoint_native_id,
     conversation_checkpoint_unsettled, conversation_checkpoint_turn_id, native_checkpoint_evidence,
     native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions,
+    requested_output,
     provision_state, provision_error, provision_steps, branch_state, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
     hibernated_at
@@ -262,6 +265,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     conversation_checkpoint_state, conversation_checkpoint_generation, conversation_checkpoint_native_id,
     conversation_checkpoint_unsettled, conversation_checkpoint_turn_id, native_checkpoint_evidence,
     native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions,
+    requested_output,
     provision_state, provision_error, provision_steps, branch_state, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
     hibernated_at
@@ -281,45 +285,11 @@ SELECT id, project_id, num, issue_id, kind, harness,
     conversation_checkpoint_state, conversation_checkpoint_generation, conversation_checkpoint_native_id,
     conversation_checkpoint_unsettled, conversation_checkpoint_turn_id, native_checkpoint_evidence,
     native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions,
+    requested_output,
     provision_state, provision_error, provision_steps, branch_state, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
     hibernated_at
 FROM sessions ORDER BY project_id, num;
-
--- name: ListSessionsPage :many
--- One page of sessions, newest first, with every filter applied in SQL so a
--- page is a page. terminated: -1 any, 0 live only, 1 terminated only.
--- has_cursor 0 lists from the top; otherwise the keyset (before_updated_at,
--- before_id) is the last row of the previous page.
--- Standalone sessions have a NULL project_id, so only the unfiltered list has them.
--- Hidden task-preparation rows are never listed (matchesSessionFilter agrees).
-SELECT id, project_id, num, issue_id, kind, harness,
-    activity_state, activity_last_at, is_terminated, branch, workspace_path,
-    runtime_handle_id, agent_session_id, agent_session_id_launch_id, native_identity_observed_at, prompt,
-    created_at, updated_at, revision, display_name, first_signal_at, preview_url,
-    preview_revision, cleanup_generation, runtime_launch_id,
-    workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
-    reviewer_harness, reviewer_agent_config, is_pinned, pinned_at,
-    session_mode, provider_conversation_id, controller_generation, browser_capability_verifier,
-    artifact_dir, session_output_type,
-    latest_user_prompt, latest_user_prompt_at, latest_interaction_at, latest_assistant_update, latest_assistant_update_at,
-    conversation_checkpoint_state, conversation_checkpoint_generation, conversation_checkpoint_native_id,
-    conversation_checkpoint_unsettled, conversation_checkpoint_turn_id, native_checkpoint_evidence,
-    native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions,
-    provision_state, provision_error, provision_steps, branch_state, is_task_preparation, automation_run_id, automation_launch_completed,
-    claude_activity_facts, codex_activity_facts,
-    hibernated_at
-FROM sessions
-WHERE (CAST(sqlc.arg(project) AS TEXT) = '' OR project_id = CAST(sqlc.arg(project) AS TEXT))
-  AND is_task_preparation = 0
-  AND (CAST(sqlc.arg(terminated) AS INTEGER) = -1
-       OR is_terminated = (CAST(sqlc.arg(terminated) AS INTEGER) = 1))
-  AND (CAST(sqlc.arg(orchestrator_only) AS INTEGER) = 0 OR kind = 'orchestrator')
-  AND (CAST(sqlc.arg(has_cursor) AS INTEGER) = 0
-       OR updated_at < sqlc.arg(before_updated_at)
-       OR (updated_at = sqlc.arg(before_updated_at) AND id < sqlc.arg(before_id)))
-ORDER BY updated_at DESC, id DESC
-LIMIT sqlc.arg(page_limit);
 
 -- name: ListChatHibernationCandidates :many
 SELECT id FROM sessions
@@ -346,6 +316,7 @@ UPDATE sessions SET
     model = sqlc.arg(model),
     effort = sqlc.arg(effort),
     session_permissions = sqlc.arg(session_permissions),
+    requested_output = sqlc.arg(requested_output),
     created_at = sqlc.arg(created_at),
     updated_at = sqlc.arg(updated_at),
     auto_inject_review = sqlc.arg(auto_inject_review),
