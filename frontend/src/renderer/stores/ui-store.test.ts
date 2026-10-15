@@ -101,8 +101,8 @@ describe("remoteHosts flag", () => {
 		useUiStore.setState({ remoteHosts: false });
 	});
 
-	it("is on by default behind developer mode", async () => {
-		expect((await bootStore()).getState().remoteHosts).toBe(true);
+	it("is off by default until remote connections are explicitly enabled", async () => {
+		expect((await bootStore()).getState().remoteHosts).toBe(false);
 	});
 
 	it("persists the switch so the choice survives a restart", () => {

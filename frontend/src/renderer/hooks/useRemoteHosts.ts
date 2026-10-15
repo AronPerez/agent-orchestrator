@@ -28,12 +28,11 @@ export type RemoteHost = {
 };
 
 export function useRemoteHosts(): { hosts: RemoteHost[]; refresh: () => Promise<void> } {
-	const remoteHostsEnabled = useUiStore((state) => state.developerMode && state.remoteHosts);
+	const enabled = useUiStore((state) => state.remoteHosts);
 	const { status, session } = useCloudSession();
-	const accountId = session?.user.id ?? "";
+	const accountId = status === "authenticated" ? session?.user.id ?? "" : "";
 	const { settings } = useSettings();
 	const cloudBaseUrl = settings?.cloudControlPlaneUrl ?? "";
-	const enabled = remoteHostsEnabled && status === "authenticated" && Boolean(accountId);
 	const enabledRef = useRef(enabled);
 	enabledRef.current = enabled;
 	const accountRef = useRef(accountId);
@@ -51,7 +50,7 @@ export function useRemoteHosts(): { hosts: RemoteHost[]; refresh: () => Promise<
 		const generation = ++refreshGeneration.current;
 		const current = () => enabledRef.current && accountRef.current === accountId && refreshGeneration.current === generation;
 		let saved = await aoBridge.remotes.list();
-		if (cloudBaseUrl) {
+		if (accountId && cloudBaseUrl) {
 			try {
 				const accountHosts = await listAccountRemoteHosts(cloudBaseUrl);
 				if (!current()) return;
@@ -100,7 +99,6 @@ export function useRemoteHosts(): { hosts: RemoteHost[]; refresh: () => Promise<
 			previousAccount.current = accountId;
 			refreshGeneration.current++;
 			setHosts([]);
-			for (const hostId of connectedHosts()) void disconnectHost(hostId);
 		}
 		if (enabled) {
 			void refresh();
@@ -145,10 +143,10 @@ export function useRemoteHosts(): { hosts: RemoteHost[]; refresh: () => Promise<
 		return () => window.removeEventListener(HOSTS_CHANGED_EVENT, onChanged);
 	}, [enabled, refresh]);
 	useEffect(() => {
-		if (!enabled || !cloudBaseUrl) return;
+		if (!enabled || !accountId || !cloudBaseUrl) return;
 		const timer = setInterval(() => { if (!document.hidden) void refresh(); }, ACCOUNT_SYNC_MS);
 		return () => clearInterval(timer);
-	}, [enabled, cloudBaseUrl, refresh]);
+	}, [enabled, accountId, cloudBaseUrl, refresh]);
 
 	return { hosts: enabled ? hosts : NO_HOSTS, refresh };
 }

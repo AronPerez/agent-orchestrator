@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { appI18n } from "../i18n";
@@ -12,6 +12,7 @@ import { useTelemetryPolicyStore } from "../stores/telemetry-policy-store";
 import { TooltipProvider } from "./ui/tooltip";
 
 const { harnessSettingsSectionMock } = vi.hoisted(() => ({ harnessSettingsSectionMock: vi.fn() }));
+const account = vi.hoisted(() => ({ status: "authenticated" as "authenticated" | "unauthenticated" }));
 
 vi.mock("./settings/HarnessSettingsSection", () => ({
 	HarnessSettingsSection: (props: { focusAgentId?: string; hostId?: string; titleHidden?: boolean }) => {
@@ -121,7 +122,7 @@ vi.mock("../lib/bridge", () => ({
 }));
 
 vi.mock("../lib/cloud-session", () => ({
-	useCloudSession: () => ({ status: "authenticated", session: { user: { id: "test-user" } } }),
+	useCloudSession: () => ({ status: account.status, session: account.status === "authenticated" ? { user: { id: "test-user" } } : null }),
 }));
 
 function renderForm(section: GlobalSettingsSection = "all", focusAgentId?: string, hostId?: string) {
@@ -137,6 +138,7 @@ function renderForm(section: GlobalSettingsSection = "all", focusAgentId?: strin
 }
 
 beforeEach(async () => {
+	account.status = "authenticated";
 	harnessSettingsSectionMock.mockReset();
 	for (const m of [
 		getUpdate,
@@ -289,9 +291,40 @@ describe("GlobalSettingsForm", () => {
 		expect(useUiStore.getState().diagnostics).toBe(true);
 	});
 
-	it("keeps Remote hosts in its own page and persists the enable switch", async () => {
+	it("offers remote connections in General > Advanced while signed out with Developer mode off", async () => {
+		account.status = "unauthenticated";
 		const user = userEvent.setup();
-		useUiStore.getState().setDeveloperMode(true);
+		renderForm("general");
+		const advanced = within((await screen.findByRole("heading", { name: "Advanced" })).closest("section")!);
+		const developerMode = advanced.getByRole("switch", { name: "Developer mode" });
+		const toggle = advanced.getByRole("switch", { name: "Connect to remote hosts" });
+		expect(developerMode).toHaveAttribute("aria-checked", "false");
+		expect(toggle).toBeEnabled();
+		expect(toggle).toHaveAttribute("aria-checked", "false");
+		expect(advanced.getAllByRole("switch").indexOf(toggle)).toBe(advanced.getAllByRole("switch").indexOf(developerMode) + 1);
+		await user.click(toggle);
+		expect(window.localStorage.getItem("ao.remoteHosts")).toBe("true");
+		expect(useUiStore.getState().remoteHosts).toBe(true);
+		await user.click(toggle);
+		expect(window.localStorage.getItem("ao.remoteHosts")).toBe("false");
+		expect(developerMode).toHaveAttribute("aria-checked", "false");
+	});
+
+	it("keeps both remote connection switches in sync while signed out", async () => {
+		account.status = "unauthenticated";
+		const user = userEvent.setup();
+		renderForm();
+		const toggles = await screen.findAllByRole("switch", { name: "Connect to remote hosts" });
+		expect(toggles).toHaveLength(2);
+		await user.click(toggles[0]);
+		for (const toggle of toggles) expect(toggle).toHaveAttribute("aria-checked", "true");
+		await user.click(toggles[1]);
+		for (const toggle of toggles) expect(toggle).toHaveAttribute("aria-checked", "false");
+	});
+
+	it("keeps the Remote hosts page and its enable switch usable while signed out", async () => {
+		account.status = "unauthenticated";
+		const user = userEvent.setup();
 		renderForm("remoteHosts");
 		const remoteHosts = await screen.findByRole("switch", { name: "Connect to remote hosts" });
 		expect(remoteHosts).toHaveAttribute("aria-checked", "false");

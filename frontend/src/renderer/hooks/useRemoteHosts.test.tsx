@@ -7,12 +7,16 @@ const remotes = vi.hoisted(() => ({
 	connect: vi.fn(),
 	disconnect: vi.fn(),
 	connected: vi.fn(),
+	importAccountHost: vi.fn(),
+	pruneAccountHosts: vi.fn(),
 }));
 const account = vi.hoisted(() => ({ status: "authenticated" as "authenticated" | "unauthenticated" }));
+const cloud = vi.hoisted(() => ({ baseUrl: "", listAccountRemoteHosts: vi.fn(async () => []) }));
 
 vi.mock("../lib/bridge", () => ({ aoBridge: { remotes } }));
 vi.mock("../lib/cloud-session", () => ({ useCloudSession: () => ({ status: account.status, session: account.status === "authenticated" ? { user: { id: "user-a" } } : null }) }));
-vi.mock("./useSettings", () => ({ useSettings: () => ({ settings: { cloudControlPlaneUrl: "" } }) }));
+vi.mock("./useSettings", () => ({ useSettings: () => ({ settings: { cloudControlPlaneUrl: cloud.baseUrl } }) }));
+vi.mock("../lib/account-remote-hosts", () => ({ listAccountRemoteHosts: cloud.listAccountRemoteHosts }));
 
 import { baseUrlForHost, connectedHosts } from "../lib/host-clients";
 import { useConnectedHosts } from "./useHostConnection";
@@ -20,6 +24,10 @@ import { requestRemoteHostsRefresh, useRemoteHosts } from "./useRemoteHosts";
 
 beforeEach(() => {
 	account.status = "authenticated";
+	cloud.baseUrl = "";
+	cloud.listAccountRemoteHosts.mockClear();
+	remotes.importAccountHost.mockClear();
+	remotes.pruneAccountHosts.mockClear();
 	remotes.list.mockReset().mockResolvedValue([
 		{ hostId: "box-a", label: "Box A", url: "http://box-a:3001" },
 		{ hostId: "box-b", label: "Box B", url: "http://box-b:3001" },
@@ -46,35 +54,36 @@ it("does not connect to saved boxes until Remote hosts is enabled", async () => 
 	expect(remotes.connect).not.toHaveBeenCalled();
 });
 
-it("requires AO sign-in and disconnects remote hosts on sign-out", async () => {
-	useUiStore.setState({ remoteHosts: true });
-	account.status = "unauthenticated";
-	const { result, rerender } = renderHook(() => useRemoteHosts());
-	expect(result.current.hosts).toEqual([]);
-	expect(remotes.list).not.toHaveBeenCalled();
-	account.status = "authenticated";
-	rerender();
-	await waitFor(() => expect(result.current.hosts).toHaveLength(2));
-	account.status = "unauthenticated";
-	rerender();
-	await waitFor(() => expect(result.current.hosts).toEqual([]));
-	expect(connectedHosts()).toEqual([]);
-});
-
-it("keeps remote hosts disconnected until Developer mode is enabled", async () => {
+it("connects local hosts while signed out with Developer mode off without Cloud sync", async () => {
 	useUiStore.setState({ developerMode: false, remoteHosts: true });
+	account.status = "unauthenticated";
+	cloud.baseUrl = "https://cloud.example";
 	const { result } = renderHook(() => useRemoteHosts());
 	const connections = renderHook(() => useConnectedHosts());
-	expect(result.current.hosts).toEqual([]);
-	expect(connections.result.current).toEqual([]);
-	expect(remotes.list).not.toHaveBeenCalled();
-	act(() => useUiStore.setState({ developerMode: true }));
 	await waitFor(() => expect(result.current.hosts).toHaveLength(2));
-	expect(connections.result.current).toEqual(["box-a", "box-b"]);
-	act(() => useUiStore.setState({ developerMode: false }));
-	await waitFor(() => expect(result.current.hosts).toEqual([]));
-	expect(connections.result.current).toEqual([]);
-	expect(connectedHosts()).toEqual([]);
+	await waitFor(() => expect(connections.result.current).toEqual(["box-a", "box-b"]));
+	expect(cloud.listAccountRemoteHosts).not.toHaveBeenCalled();
+	expect(remotes.importAccountHost).not.toHaveBeenCalled();
+	expect(remotes.pruneAccountHosts).not.toHaveBeenCalled();
+});
+
+it("keeps local connections on sign-out but disconnects account-only hosts", async () => {
+	useUiStore.setState({ developerMode: false, remoteHosts: true });
+	cloud.baseUrl = "https://cloud.example";
+	const { result, rerender } = renderHook(() => useRemoteHosts());
+	await waitFor(() => expect(connectedHosts()).toEqual(["box-a", "box-b"]));
+	expect(cloud.listAccountRemoteHosts).toHaveBeenCalledOnce();
+	expect(remotes.pruneAccountHosts).toHaveBeenCalledWith("user-a", []);
+	remotes.list.mockResolvedValue([{ hostId: "box-a", label: "Box A", url: "http://box-a:3001" }]);
+	account.status = "unauthenticated";
+	rerender();
+	await waitFor(() => expect(result.current.hosts).toEqual([
+		{ hostId: "box-a", label: "Box A", url: "http://box-a:3001", status: "connected" },
+	]));
+	expect(connectedHosts()).toEqual(["box-a"]);
+	expect(remotes.disconnect).toHaveBeenCalledWith("http://box-b:3001");
+	expect(remotes.disconnect).not.toHaveBeenCalledWith("http://box-a:3001");
+	expect(cloud.listAccountRemoteHosts).toHaveBeenCalledOnce();
 });
 
 it("connects both saved boxes and exposes their stable IDs", async () => {

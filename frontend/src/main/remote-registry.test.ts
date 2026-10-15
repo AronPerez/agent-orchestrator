@@ -9,7 +9,7 @@ describe("connected remote hosts", () => {
 		expect(registry.connected({ label: workbox.label, url: workbox.url, password: workbox.password })).toBeUndefined();
 	});
 
-	it("closes proxies on account sign-out but permits a later sign-in", async () => {
+	it("closes all proxies without disabling later connections", async () => {
 		let closed = 0;
 		const registry = new RemoteRegistry(async () => ({
 			base: "http://127.0.0.1:7654/token",
@@ -23,6 +23,27 @@ describe("connected remote hosts", () => {
 		await expect(registry.connect(workbox)).resolves.toMatchObject({ hostId: workbox.hostId });
 		await registry.closeAll();
 		expect(closed).toBe(2);
+	});
+
+	it.each(["", "user-b"])("retires other accounts' proxies but keeps local pairings (account %s)", async (account) => {
+		const closed: string[] = [];
+		const registry = new RemoteRegistry(async (entry) => ({
+			base: `http://127.0.0.1:7654/${entry.hostId}`,
+			previewUrl: (_sessionId, sourceUrl) => sourceUrl,
+			resolvePreviewUrl: (_sessionId, viewedUrl) => viewedUrl,
+			close: async () => { closed.push(entry.hostId!); },
+		}));
+		const imported = { hostId: "h_imported", label: "Imported", url: "https://imported.example", password: "a".repeat(64), accountUserId: "user-a" };
+		await registry.connect(workbox);
+		await registry.connect(imported);
+		await registry.disconnectOtherAccounts("user-a");
+		expect(closed).toEqual([]);
+		await registry.disconnectOtherAccounts(account);
+		expect(closed).toEqual(["h_imported"]);
+		expect(registry.connected(workbox)).toBeDefined();
+		expect(registry.connected(imported)).toBeUndefined();
+		await registry.closeAll();
+		expect(closed).toEqual(["h_imported", "h_workbox"]);
 	});
 
 	it("keeps two different machines connected at once", async () => {

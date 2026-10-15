@@ -21,6 +21,7 @@ const shellMocks = vi.hoisted(() => {
 		routeParams: {} as { hostId?: string; projectId?: string; sessionId?: string },
 		routeSearch: {} as Record<string, unknown>,
 		matchRouteTarget: null as string | null,
+		accountStatus: "authenticated" as "authenticated" | "unauthenticated",
 		workspaces: [] as WorkspaceSummary[],
 		remoteWorkspaces: [] as WorkspaceSummary[],
 		remoteFailedHostIds: [] as string[],
@@ -102,6 +103,7 @@ const shellMocks = vi.hoisted(() => {
 		setKeybindings: vi.fn(async (overrides: KeybindingOverrides) => overrides),
 		setKeybindingRecording: vi.fn(async () => undefined),
 		queryClient: {
+			getMutationCache: () => ({ getAll: () => [] }),
 			ensureQueryData: vi.fn(),
 			fetchQuery: vi.fn(),
 			getQueryData: vi.fn(),
@@ -187,7 +189,7 @@ vi.mock("../lib/host-clients", () => ({
 }));
 
 vi.mock("../lib/cloud-session", () => ({
-	useCloudSession: () => ({ status: "authenticated", session: { user: { id: "test-user" } } }),
+	useCloudSession: () => ({ status: shellMocks.state.accountStatus, session: shellMocks.state.accountStatus === "authenticated" ? { user: { id: "test-user" } } : null }),
 }));
 vi.mock("../hooks/useSettings", () => ({ useSettings: () => ({ settings: { cloudControlPlaneUrl: "" } }) }));
 
@@ -417,6 +419,7 @@ beforeEach(() => {
 	shellMocks.state.routeParams = {};
 	shellMocks.state.routeSearch = {};
 	shellMocks.state.matchRouteTarget = null;
+	shellMocks.state.accountStatus = "authenticated";
 	shellMocks.state.workspaces = workspaces;
 	shellMocks.state.remoteWorkspaces = [];
 	shellMocks.state.remoteFailedHostIds = [];
@@ -457,6 +460,22 @@ describe("shell workspace startup", () => {
 	// that needs it resolves within findBy's default timeout.
 	beforeAll(async () => {
 		await import("../components/chat/OrchestratorStartingChat");
+	});
+	it.each(["authenticated", "unauthenticated"] as const)("keeps a remote route usable when %s with Developer mode off, including sign-out", async (status) => {
+		shellMocks.state.accountStatus = status;
+		shellMocks.state.routeParams = { hostId: "box-a", projectId: "remote-project", sessionId: "remote-session" };
+		useUiStore.setState({ developerMode: false, remoteHosts: true });
+		const view = await renderShell();
+		await waitFor(() => expect(shellMocks.listRemoteHosts).toHaveBeenCalledOnce());
+		expect(shellMocks.navigate).not.toHaveBeenCalled();
+		if (status === "authenticated") {
+			shellMocks.state.accountStatus = "unauthenticated";
+			view.rerender(<Suspense fallback={null}><ShellRoute /></Suspense>);
+			await waitFor(() => expect(shellMocks.listRemoteHosts).toHaveBeenCalledTimes(2));
+			expect(shellMocks.navigate).not.toHaveBeenCalled();
+		}
+		act(() => useUiStore.setState({ remoteHosts: false }));
+		await waitFor(() => expect(shellMocks.navigate).toHaveBeenCalledWith({ to: "/", replace: true }));
 	});
 	it("rechecks a connected host when its session queries fail", async () => {
 		useUiStore.setState({ developerMode: true, remoteHosts: true });

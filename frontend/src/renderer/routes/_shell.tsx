@@ -339,16 +339,16 @@ function ShellLayout() {
 	const routeParams = useParams({ strict: false }) as { hostId?: string; projectId?: string; sessionId?: string };
 	const routeParamsRef = useRef(routeParams);
 	routeParamsRef.current = routeParams;
-	const remoteHostsEnabled = useUiStore((state) => state.developerMode && state.remoteHosts);
+	const remoteHostsEnabled = useUiStore((state) => state.remoteHosts);
 	const { status: accountStatus, session: cloudAccount } = useCloudSession();
 	useEffect(() => {
-		if ((!remoteHostsEnabled || accountStatus === "unauthenticated") && routeParams.hostId) void navigate({ to: "/", replace: true });
-	}, [accountStatus, navigate, remoteHostsEnabled, routeParams.hostId]);
+		if (!remoteHostsEnabled && routeParams.hostId) void navigate({ to: "/", replace: true });
+	}, [navigate, remoteHostsEnabled, routeParams.hostId]);
 	useCloudAccountSwitchReset({
 		userId: cloudAccount?.user.id ?? null,
 		ready: accountStatus !== "loading",
 		queryClient,
-		onLocalPage: !routeParams.projectId ||
+		onLocalPage: Boolean(routeParams.hostId) || !routeParams.projectId ||
 			workspaces.some((workspace) => workspace.id === routeParams.projectId && workspace.kind !== CLOUD_PROJECT_KIND),
 		leavePage: () => void navigate({ to: "/", replace: true }),
 	});
