@@ -186,7 +186,7 @@ vi.mock("../lib/host-clients", () => ({
 	clientForHost: () => ({ DELETE: shellMocks.remoteDelete }),
 	connectHost: vi.fn(),
 	connectedHosts: () => [],
-	disconnectHost: vi.fn(),
+	disconnectHost: vi.fn(async () => undefined),
 	subscribeConnectedHosts: () => () => undefined,
 }));
 

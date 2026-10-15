@@ -1,4 +1,5 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useUiStore } from "../stores/ui-store";
 
@@ -10,20 +11,22 @@ const remotes = vi.hoisted(() => ({
 	importAccountHost: vi.fn(),
 	pruneAccountHosts: vi.fn(),
 }));
-const account = vi.hoisted(() => ({ status: "authenticated" as "authenticated" | "unauthenticated" }));
+const account = vi.hoisted(() => ({ status: "authenticated" as "authenticated" | "unauthenticated", userId: "user-a" }));
 const cloud = vi.hoisted(() => ({ baseUrl: "", listAccountRemoteHosts: vi.fn(async () => []) }));
 
 vi.mock("../lib/bridge", () => ({ aoBridge: { remotes } }));
-vi.mock("../lib/cloud-session", () => ({ useCloudSession: () => ({ status: account.status, session: account.status === "authenticated" ? { user: { id: "user-a" } } : null }) }));
+vi.mock("../lib/cloud-session", () => ({ useCloudSession: () => ({ status: account.status, session: account.status === "authenticated" ? { user: { id: account.userId } } : null }) }));
 vi.mock("./useSettings", () => ({ useSettings: () => ({ settings: { cloudControlPlaneUrl: cloud.baseUrl } }) }));
 vi.mock("../lib/account-remote-hosts", () => ({ listAccountRemoteHosts: cloud.listAccountRemoteHosts }));
 
 import { baseUrlForHost, connectedHosts } from "../lib/host-clients";
 import { useConnectedHosts } from "./useHostConnection";
 import { requestRemoteHostsRefresh, useRemoteHosts } from "./useRemoteHosts";
+import { remoteWorkspaceQueryKey, useRemoteWorkspaces } from "./useWorkspaceQuery";
 
 beforeEach(() => {
 	account.status = "authenticated";
+	account.userId = "user-a";
 	cloud.baseUrl = "";
 	cloud.listAccountRemoteHosts.mockClear();
 	remotes.importAccountHost.mockClear();
@@ -84,6 +87,33 @@ it("keeps local connections on sign-out but disconnects account-only hosts", asy
 	expect(remotes.disconnect).toHaveBeenCalledWith("http://box-b:3001");
 	expect(remotes.disconnect).not.toHaveBeenCalledWith("http://box-a:3001");
 	expect(cloud.listAccountRemoteHosts).toHaveBeenCalledOnce();
+});
+
+it.each(["pending", "rejected"])("retires prior-account cached pinned sessions before a %s registry refresh", async (refresh) => {
+	useUiStore.setState({ developerMode: false, remoteHosts: true });
+	remotes.list.mockResolvedValue([
+		{ hostId: "box-a", label: "Local pairing", url: "http://box-a:3001" },
+		{ hostId: "box-b", label: "Account host", url: "http://box-b:3001", accountUserId: "user-a" },
+	]);
+	const queryClient = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, retry: false } } });
+	for (const hostId of ["box-a", "box-b"]) {
+		queryClient.setQueryData([...remoteWorkspaceQueryKey(hostId), "projects"], [{ id: "project", name: "Project", path: "/project" }]);
+		queryClient.setQueryData([...remoteWorkspaceQueryKey(hostId), "sessions"], [{ id: `pinned-${hostId}`, projectId: "project", harness: "codex", status: "working", isPinned: true, prs: [] }]);
+	}
+	const { result, rerender } = renderHook(() => ({ hosts: useRemoteHosts(), workspaces: useRemoteWorkspaces() }), {
+		wrapper: ({ children }) => <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>,
+	});
+	const pinned = () => result.current.workspaces.data.flatMap((project) => project.sessions).filter((session) => session.isPinned).map((session) => session.id);
+	await waitFor(() => expect(pinned()).toEqual(["pinned-box-a", "pinned-box-b"]));
+	if (refresh === "pending") remotes.list.mockImplementation(() => new Promise(() => {}));
+	else remotes.list.mockRejectedValue(new Error("registry unavailable"));
+	account.userId = "user-b";
+	rerender();
+	expect(connectedHosts()).toEqual(["box-a"]);
+	await waitFor(() => expect(pinned()).toEqual(["pinned-box-a"]));
+	expect(remotes.disconnect).toHaveBeenCalledWith("http://box-b:3001");
+	expect(remotes.disconnect).not.toHaveBeenCalledWith("http://box-a:3001");
+	expect(queryClient.getQueryData([...remoteWorkspaceQueryKey("box-b"), "sessions"])).toBeDefined();
 });
 
 it("connects both saved boxes and exposes their stable IDs", async () => {
