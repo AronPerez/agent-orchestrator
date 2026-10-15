@@ -52,6 +52,7 @@ const {
 			coverInitialReplay?: boolean;
 			createMux?: () => unknown;
 			exitNotice?: string;
+			runtimeUnavailable?: boolean;
 			waitForInitialOutput?: boolean;
 			shellTerminalHandleId?: string;
 		}>,
@@ -148,7 +149,7 @@ vi.mock("./XtermTerminal", () => ({
 vi.mock("../hooks/useTerminalSession", () => ({
 	useTerminalSession: (
 		_session: WorkspaceSession | undefined,
-		options: { coverInitialReplay?: boolean; createMux?: () => unknown; exitNotice?: string; waitForInitialOutput?: boolean; shellTerminalHandleId?: string },
+		options: { coverInitialReplay?: boolean; createMux?: () => unknown; exitNotice?: string; runtimeUnavailable?: boolean; waitForInitialOutput?: boolean; shellTerminalHandleId?: string },
 	) => {
 		terminalSessionOptions.push(options);
 		return {
@@ -1163,6 +1164,61 @@ describe("terminal restore", () => {
 				}),
 			);
 			expect(invalidate).toHaveBeenCalledWith({ queryKey: ["workspaces"] });
+		} finally {
+			view.restore();
+		}
+	});
+
+	it.each([worker, orchestrator])("offers explicit recovery for unavailable $kind sessions", async (session) => {
+		terminalState.value = "exited";
+		const view = renderPane({
+			...session,
+			terminalHandleId: "legacy-tmux",
+			isTerminated: false,
+			status: "unknown",
+			statusReadiness: "unavailable",
+		});
+		try {
+			expect(screen.getByText("Unable to verify")).toBeInTheDocument();
+			expect(terminalSessionOptions.at(-1)?.runtimeUnavailable).toBe(true);
+			expect(terminalSessionOptions.at(-1)?.exitNotice).toContain("Unable to verify");
+			expect(screen.queryByText("Terminal ended")).not.toBeInTheDocument();
+			expect(screen.queryByRole("button", { name: "Restore session" })).not.toBeInTheDocument();
+			expect(postMock).not.toHaveBeenCalled();
+			await userEvent.click(await screen.findByRole("button", { name: "Resume agent" }));
+			await waitFor(() => expect(postMock).toHaveBeenCalledWith("/api/v1/sessions/{sessionId}/resume-agent", {
+				params: { path: { sessionId: session.id } },
+			}));
+		} finally {
+			view.restore();
+		}
+	});
+
+	it("keeps unavailable-session recovery visible before attachment exits and after a failed retry", async () => {
+		terminalState.value = "attached";
+		postMock.mockResolvedValueOnce({ error: {}, response: { status: 409 } });
+		const view = renderPane({ ...worker, terminalHandleId: "legacy-tmux", statusReadiness: "unavailable" });
+		try {
+			expect(screen.getByText("Unable to verify")).toBeInTheDocument();
+			await userEvent.click(await screen.findByRole("button", { name: "Resume agent" }));
+			expect(await screen.findByText("Failed to resume agent (409)")).toBeInTheDocument();
+			expect(screen.getByRole("button", { name: "Resume agent" })).toBeEnabled();
+			expect(postMock).toHaveBeenCalledTimes(1);
+		} finally {
+			view.restore();
+		}
+	});
+
+	it.each([
+		{ kind: "shell", handleId: "shell-1", generation: "1", sessionId: worker.id, title: "Shell" },
+		{ kind: "reviewer", handleId: "reviewer-1", harness: "codex", sessionId: worker.id },
+	] satisfies TerminalTarget[])("does not apply agent recovery to a $kind pane", (target) => {
+		terminalState.value = "attached";
+		const view = renderPane({ ...worker, statusReadiness: "unavailable" }, undefined, undefined, target);
+		try {
+			expect(screen.queryByText("Unable to verify")).not.toBeInTheDocument();
+			expect(terminalSessionOptions.at(-1)?.runtimeUnavailable).toBe(false);
+			expect(screen.queryByRole("button", { name: "Resume agent" })).not.toBeInTheDocument();
 		} finally {
 			view.restore();
 		}

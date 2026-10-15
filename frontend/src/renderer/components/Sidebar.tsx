@@ -2366,6 +2366,8 @@ function SessionRow({
 	// A stopped agent takes seconds to come back. Start it while the pointer rests
 	// on the row so the chat is ready when it opens; opening joins this request.
 	const warmUpAgent = () => {
+		// An inconclusive runtime probe needs explicit recovery, not a hover.
+		if (session.statusReadiness && session.statusReadiness !== "ready") return;
 		if (!canPrefetch || !hasTrustedApiBaseUrl() || !canResumeAgent(session)) return;
 		void resumeAgentOnOpen(session.id)
 			.catch(() => {})

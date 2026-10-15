@@ -2055,6 +2055,7 @@
 	"terminal.restoreToContinue": "Restore the session to attach a live terminal and continue writing.",
 	"terminal.reviewerEnded": "This reviewer terminal has ended. Re-run review from the summary panel, or switch back to the agent terminal.",
 	"terminal.sessionEndedNotTerminated": "This terminal process ended, but the session is not marked terminated yet.",
+	"terminal.runtimeUnavailable": "AO could not verify this session’s runtime. Use Resume agent to retry.",
 	"terminal.sessionAria": "Session terminal",
 	"terminal.shellExited": "This shell exited. Close the tab, or open a new terminal.",
 	"terminal.shellAria": "Shell terminal",

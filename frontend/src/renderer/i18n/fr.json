@@ -1858,6 +1858,7 @@
 	"terminal.restoreToContinue": "Restaurez la session pour attacher un terminal actif et continuer à écrire.",
 	"terminal.reviewerEnded": "Ce terminal de relecteur est terminé. Relancez la revue depuis le panneau de résumé, ou revenez au terminal de l'agent.",
 	"terminal.sessionEndedNotTerminated": "Ce processus de terminal s'est terminé, mais la session n'est pas encore marquée comme terminée.",
+	"terminal.runtimeUnavailable": "AO n’a pas pu vérifier l’environnement d’exécution de cette session. Utilisez « Reprendre l’agent » pour réessayer.",
 	"terminal.sessionAria": "Terminal de session",
 	"terminal.shellExited": "Ce shell s'est terminé. Fermez l'onglet ou ouvrez un nouveau terminal.",
 	"terminal.shellAria": "Terminal shell",

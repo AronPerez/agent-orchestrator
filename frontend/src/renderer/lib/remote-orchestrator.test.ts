@@ -27,12 +27,16 @@ it("deduplicates concurrent spawns for one host and project", async () => {
 	await expect(first).resolves.toBe("orch-b");
 });
 
-it("resumes an exited orchestrator on its owning host", async () => {
+it.each(["exited", "unavailable"] as const)("resumes an %s orchestrator on its owning host", async (state) => {
 	const orchestrator: WorkspaceSession = {
 		hostId: "box-a", id: "orch-a", workspaceId: "shared", workspaceName: "Todo App",
 		title: "Orchestrator", provider: "opencode", kind: "orchestrator", status: "working",
 		updatedAt: "2026-09-28T00:00:00Z", prs: [], activity: { state: "exited", lastActivityAt: "2026-09-28T00:00:00Z" },
 	};
+	if (state === "unavailable") {
+		orchestrator.statusReadiness = "unavailable";
+		orchestrator.activity = undefined;
+	}
 	mocks.post.mockResolvedValue({ data: { resumeMode: "native" } });
 	await expect(openRemoteOrchestrator("box-a", "shared", orchestrator)).resolves.toBe("orch-a");
 	expect(mocks.selectedHosts).toEqual(["box-a"]);

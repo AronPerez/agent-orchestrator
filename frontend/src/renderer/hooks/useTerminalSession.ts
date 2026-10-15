@@ -96,6 +96,8 @@ export type UseTerminalSessionOptions = {
 	createMux?: () => TerminalMux;
 	/** Contextual terminal-close text for an intentionally short-lived pane. */
 	exitNotice?: string;
+	/** The session's own runtime could not be verified; reconnect once it recovers. */
+	runtimeUnavailable?: boolean;
 	/**
 	 * Attach to a standalone shell terminal (POST /api/v1/shell-terminals)
 	 * instead of a session's pane. When set it wins over `session`, which
@@ -216,6 +218,7 @@ export function useTerminalSession(session: WorkspaceSession | undefined, option
 	sessionRef.current = session;
 	const previousSessionActiveRef = useRef(session ? sessionIsActive(session) : false);
 	const previousActivityStateRef = useRef(session?.activity?.state);
+	const runtimeRecoveryPendingRef = useRef(false);
 	const optionsRef = useRef(options);
 	optionsRef.current = options;
 	const stateRef = useRef<TerminalSessionState>(state);
@@ -1025,6 +1028,7 @@ export function useTerminalSession(session: WorkspaceSession | undefined, option
 		runtime.current.needsVisibleSizeSync = true;
 	}, [isVisible]);
 
+	const runtimeUnavailable = options.runtimeUnavailable;
 	useEffect(() => {
 		const r = runtime.current;
 		const handle = session?.terminalHandleId ?? null;
@@ -1035,7 +1039,11 @@ export function useTerminalSession(session: WorkspaceSession | undefined, option
 		previousActivityStateRef.current = session?.activity?.state;
 		const restoredSession = !wasActive && isActive;
 		const resumedAgent = previousActivityState === "exited" && session?.activity?.state !== "exited";
-		if (!handle || (!restoredSession && !resumedAgent) || r.detached || !r.terminal) {
+		if (runtimeUnavailable) runtimeRecoveryPendingRef.current = true;
+		// Recovery can adopt a surviving runtime without changing its handle or generation.
+		const recoveredRuntime = runtimeRecoveryPendingRef.current && isActive && session?.statusReadiness === "ready";
+		if (!isActive || recoveredRuntime) runtimeRecoveryPendingRef.current = false;
+		if (!handle || (!restoredSession && !resumedAgent && !recoveredRuntime) || r.detached || !r.terminal) {
 			return;
 		}
 		if (r.handle !== handle) return;
@@ -1048,9 +1056,11 @@ export function useTerminalSession(session: WorkspaceSession | undefined, option
 		}
 	}, [
 		connect,
+		runtimeUnavailable,
 		session?.activity?.state,
 		session?.isTerminated,
 		session?.status,
+		session?.statusReadiness,
 		session?.terminalHandleId,
 		transition,
 	]);

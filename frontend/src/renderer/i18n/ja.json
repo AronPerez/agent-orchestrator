@@ -1827,6 +1827,7 @@
 	"terminal.restoreToContinue": "セッションを復元してライブターミナルを接続し、入力を続けてください。",
 	"terminal.reviewerEnded": "このレビュアーターミナルは終了しました。サマリーパネルからレビューを再実行するか、エージェントターミナルに戻ってください。",
 	"terminal.sessionEndedNotTerminated": "このターミナルプロセスは終了しましたが、セッションはまだ終了済みとマークされていません。",
+	"terminal.runtimeUnavailable": "AO はこのセッションのランタイムを確認できませんでした。「エージェントを再開」で再試行してください。",
 	"terminal.sessionAria": "セッションターミナル",
 	"terminal.shellExited": "このシェルは終了しました。タブを閉じるか、新しいターミナルを開いてください。",
 	"terminal.shellAria": "シェルターミナル",

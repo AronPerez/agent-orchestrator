@@ -1858,6 +1858,7 @@
 	"terminal.restoreToContinue": "Restaure a sessão para anexar um terminal ao vivo e continuar escrevendo.",
 	"terminal.reviewerEnded": "Este terminal de revisor foi encerrado. Execute a revisão novamente no painel de resumo ou volte ao terminal do agente.",
 	"terminal.sessionEndedNotTerminated": "Este processo do terminal encerrou, mas a sessão ainda não está marcada como encerrada.",
+	"terminal.runtimeUnavailable": "O AO não conseguiu verificar o ambiente de execução desta sessão. Use Retomar agente para tentar novamente.",
 	"terminal.sessionAria": "Terminal da sessão",
 	"terminal.shellExited": "Este shell foi encerrado. Feche a aba ou abra um novo terminal.",
 	"terminal.shellAria": "Terminal do shell",
