@@ -20,9 +20,9 @@ const online = async () => "online" as const;
 const dropped = () => vi.fn<(url: string) => Promise<void>>().mockResolvedValue(undefined);
 
 describe("toHostViews", () => {
-	it("strips the password before anything crosses to the renderer", () => {
-		const views = toHostViews([{ hostId: "h_workbox", label: "workbox", url: "http://192.0.2.1:3011", password: "supersecret" }]);
-		expect(views).toEqual([{ hostId: "h_workbox", label: "workbox", url: "http://192.0.2.1:3011" }]);
+	it.each([undefined, "user-a"])("strips passwords but preserves account ownership for renderer access checks (%s)", (accountUserId) => {
+		const views = toHostViews([{ hostId: "h_workbox", label: "workbox", url: "http://192.0.2.1:3011", password: "supersecret", accountUserId }]);
+		expect(views).toEqual([{ hostId: "h_workbox", label: "workbox", url: "http://192.0.2.1:3011", ...(accountUserId ? { accountUserId } : {}) }]);
 		expect(JSON.stringify(views)).not.toContain("supersecret");
 	});
 });

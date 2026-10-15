@@ -401,7 +401,7 @@ describe("registerRemotesIpc", () => {
 	it("lists hosts without their passwords", async () => {
 		const ipc = fakeIpc();
 		registerRemotes(ipc.ipcMain, { file: await tempFile(), registry: new RemoteRegistry(async () => { throw new Error("unused"); }), requireAccount: signedIn });
-		await expect(ipc.invoke("remotes:list")).resolves.toEqual([{ hostId: "h_workbox", label: "workbox", url: "http://192.0.2.1:1" }]);
+		await expect(ipc.invoke("remotes:list")).resolves.toEqual([{ hostId: "h_workbox", label: "workbox", url: "http://192.0.2.1:1", accountUserId: TEST_ACCOUNT }]);
 	});
 
 	it("saves a new host only after it answers as a daemon", async () => {
@@ -449,17 +449,17 @@ describe("registerRemotesIpc", () => {
 		});
 		await ipc.invoke("remotes:importAccountHost", "user-a", { hostId: "h_cloud", label: "Cloud", url: "https://cloud.example", password: "a".repeat(64) });
 		await expect(ipc.invoke("remotes:list")).resolves.toEqual([
-			{ hostId: "h_manual", label: "Manual", url: "https://manual.example" },
-			{ hostId: "h_cloud", label: "Cloud", url: "https://cloud.example" },
+			{ hostId: "h_manual", label: "Manual", url: "https://manual.example", accountUserId: "user-a" },
+			{ hostId: "h_cloud", label: "Cloud", url: "https://cloud.example", accountUserId: "user-a" },
 		]);
 		await ipc.invoke("remotes:pruneAccountHosts", "user-a", []);
 		await expect(ipc.invoke("remotes:list")).resolves.toEqual([
-			{ hostId: "h_manual", label: "Manual", url: "https://manual.example" },
+			{ hostId: "h_manual", label: "Manual", url: "https://manual.example", accountUserId: "user-a" },
 		]);
 		account = "user-b";
 		await expect(ipc.invoke("remotes:importAccountHost", "user-a", { hostId: "h_leak", label: "Leak", url: "https://leak.example", password: "a".repeat(64) })).rejects.toThrow(/Invalid account/);
 		await expect(ipc.invoke("remotes:list")).resolves.toEqual([
-			{ hostId: "h_other", label: "Other", url: "https://other.example" },
+			{ hostId: "h_other", label: "Other", url: "https://other.example", accountUserId: "user-b" },
 		]);
 	});
 

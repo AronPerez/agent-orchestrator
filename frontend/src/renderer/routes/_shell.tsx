@@ -341,6 +341,13 @@ function ShellLayout() {
 	routeParamsRef.current = routeParams;
 	const remoteHostsEnabled = useUiStore((state) => state.remoteHosts);
 	const { status: accountStatus, session: cloudAccount } = useCloudSession();
+	// Keep local drafts mounted while a disconnect's navigation is awaiting confirmation.
+	const lastRouteHost = useRef<(typeof remoteHosts)[number] | undefined>(undefined);
+	const routeHost = remoteHosts.find((host) => host.hostId === routeParams.hostId) ??
+		(lastRouteHost.current?.hostId === routeParams.hostId ? lastRouteHost.current : undefined);
+	lastRouteHost.current = routeHost;
+	const remoteRouteAccessible = !routeParams.hostId || Boolean(routeHost &&
+		(!routeHost.accountUserId || (accountStatus === "authenticated" && routeHost.accountUserId === cloudAccount?.user.id)));
 	useEffect(() => {
 		if (!remoteHostsEnabled && routeParams.hostId) void navigate({ to: "/", replace: true });
 	}, [navigate, remoteHostsEnabled, routeParams.hostId]);
@@ -348,7 +355,7 @@ function ShellLayout() {
 		userId: cloudAccount?.user.id ?? null,
 		ready: accountStatus !== "loading",
 		queryClient,
-		onLocalPage: Boolean(routeParams.hostId) || !routeParams.projectId ||
+		onLocalPage: routeParams.hostId ? Boolean(routeHost && !routeHost.accountUserId) : !routeParams.projectId ||
 			workspaces.some((workspace) => workspace.id === routeParams.projectId && workspace.kind !== CLOUD_PROJECT_KIND),
 		leavePage: () => void navigate({ to: "/", replace: true }),
 	});
@@ -1384,7 +1391,8 @@ function ShellLayout() {
 					<main className={cn("flex min-w-0 flex-1 flex-col overflow-x-hidden", !sidebarHasLayout && "sidebar-hidden")}>
 						<div className="relative min-h-0 flex-1 overflow-x-hidden">
 							{/* Board/session routes render inside the same inset box the welcome board and settings paint for themselves, so every screen sits within the app's outer boundary. */}
-							<ShellCenter
+							{/* A closed account proxy must not leave its cached board/session on screen. */}
+							{remoteRouteAccessible ? <ShellCenter
 								hideShellTopbar={hideShellTopbar}
 								isSessionRoute={Boolean(routeParams.sessionId)}
 								selfFramedCenterPanel={selfFramedCenterPanel}
@@ -1392,7 +1400,7 @@ function ShellLayout() {
 								startingCloudOrchestrator={!routeParams.hostId && startingWorkspace?.kind === CLOUD_PROJECT_KIND}
 								startingSteps={startingSteps}
 								startingCoderWorkspaceUrl={startingOrchestratorSession?.cloud?.coderWorkspaceUrl}
-							/>
+							/> : <p role="alert" className="px-4 py-3 text-sm text-destructive">{t("remote.hostOffline")}</p>}
 						</div>
 						</main>
 					</div>

@@ -23,6 +23,7 @@ export type RemoteHost = {
 	hostId: string;
 	label: string;
 	url: string;
+	accountUserId?: string;
 	status: "connecting" | "connected" | "offline";
 	failureReason?: "unauthorized" | "incompatible";
 };
@@ -98,7 +99,7 @@ export function useRemoteHosts(): { hosts: RemoteHost[]; refresh: () => Promise<
 		if (previousAccount.current !== accountId) {
 			previousAccount.current = accountId;
 			refreshGeneration.current++;
-			setHosts([]);
+			setHosts((previous) => previous.filter((host) => !host.accountUserId || host.accountUserId === accountId));
 		}
 		if (enabled) {
 			void refresh();
