@@ -613,6 +613,8 @@ type fakeRuntime struct {
 	outputs            []string
 	outputCalls        int
 	outputErr          error
+	styledOutputs      []string
+	styledOutputCalls  int
 	interruptErr       error
 	interrupts         []string
 	onInterrupt        func(ports.RuntimeHandle)
@@ -826,10 +828,18 @@ func (r *fakeRuntime) GetOutput(_ context.Context, _ ports.RuntimeHandle, _ int)
 	return out, nil
 }
 func (r *fakeRuntime) GetStyledOutput(ctx context.Context, handle ports.RuntimeHandle, lines int) (string, error) {
+	r.styledOutputCalls++
 	if r.outputErr != nil {
 		return "", r.outputErr
 	}
-	return "", nil
+	if len(r.styledOutputs) == 0 {
+		return "", nil
+	}
+	out := r.styledOutputs[0]
+	if len(r.styledOutputs) > 1 {
+		r.styledOutputs = r.styledOutputs[1:]
+	}
+	return out, nil
 }
 
 type fakeAgent struct{}
@@ -10444,6 +10454,153 @@ func TestSend_SkipsConfirmForHooklessHarness(t *testing.T) {
 	// Hookless path returns within milliseconds (no 2s+ confirmation wait).
 	if dt := time.Since(start); dt > 250*time.Millisecond {
 		t.Fatalf("Send took %s for a hookless harness; confirmActive should have been skipped", dt)
+	}
+}
+
+func TestSend_CodexSessionDeliveryRetriesEnterForItsVisibleDraft(t *testing.T) {
+	st := newFakeStore()
+	st.sessions["s1"] = pastStartupGate(domain.SessionRecord{
+		ID: "s1", Harness: domain.HarnessCodex, Mode: domain.SessionModeTUI,
+		Activity: domain.Activity{State: domain.ActivityIdle},
+		Metadata: domain.SessionMetadata{RuntimeLaunchID: "launch-1", RuntimeHandleID: "handle-1"},
+	})
+	messenger := &fakeMessenger{}
+	m := newSendTestManager(t, codex.New(), messenger, st)
+	runtime := m.runtime.(*fakeRuntime)
+	messenger.onSend = func(_ domain.SessionID, message string) {
+		if message == "" {
+			return
+		}
+		deliveryID, ok := domain.SessionDeliveryID(message)
+		if !ok {
+			t.Fatalf("message is not a session delivery: %q", message)
+		}
+		runtime.styledOutputs = []string{fmt.Sprintf("› <ao-session-delivery id=%q>continue the task\n\nGPT-6-Sol medium · ~/project\n", deliveryID)}
+	}
+
+	if err := m.Send(context.Background(), "s1", "continue the task", nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if len(messenger.msgs) != 3 || messenger.msgs[0] == "" || messenger.msgs[1] != "" || messenger.msgs[2] != "" {
+		t.Fatalf("pane messages = %#v, want the delivery followed by two Enter-only retries", messenger.msgs)
+	}
+	if runtime.styledOutputCalls != 2 {
+		t.Fatalf("styled surface reads = %d, want one before each retry", runtime.styledOutputCalls)
+	}
+}
+
+func TestSend_CodexSessionDeliveryCanRetryDraftWhileSteeringActiveTurn(t *testing.T) {
+	st := newFakeStore()
+	st.sessions["s1"] = pastStartupGate(domain.SessionRecord{
+		ID: "s1", Harness: domain.HarnessCodex, Mode: domain.SessionModeTUI,
+		Activity: domain.Activity{State: domain.ActivityActive},
+		Metadata: domain.SessionMetadata{RuntimeLaunchID: "launch-1", RuntimeHandleID: "handle-1"},
+	})
+	messenger := &fakeMessenger{}
+	m := newSendTestManager(t, codex.New(), messenger, st)
+	m.sendConfirm.maxAttempts = 2
+	runtime := m.runtime.(*fakeRuntime)
+	messenger.onSend = func(_ domain.SessionID, message string) {
+		if message == "" {
+			return
+		}
+		deliveryID, ok := domain.SessionDeliveryID(message)
+		if !ok {
+			t.Fatalf("message is not a session delivery: %q", message)
+		}
+		runtime.styledOutputs = []string{fmt.Sprintf("• Working (4s • esc to interrupt)\n› <ao-session-delivery id=%q>continue the task\n\nGPT-6-Sol medium · ~/project\n", deliveryID)}
+	}
+
+	if err := m.Send(context.Background(), "s1", "continue the task", nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if len(messenger.msgs) != 2 || messenger.msgs[0] == "" || messenger.msgs[1] != "" {
+		t.Fatalf("pane messages = %#v, want delivery followed by one Enter-only retry", messenger.msgs)
+	}
+}
+
+func TestSend_CodexSessionDeliverySkipsEnterUnlessItsDraftIsProven(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		state  domain.ActivityState
+		screen func(string) string
+	}{
+		{
+			name:  "permission picker",
+			state: domain.ActivityIdle,
+			screen: func(id string) string {
+				return fmt.Sprintf("› <ao-session-delivery id=%q>continue\nRun this command?\n› 1. Approve once\n  2. Deny\nPress enter to confirm or esc to go back\n", id)
+			},
+		},
+		{
+			name:   "different draft",
+			state:  domain.ActivityIdle,
+			screen: func(string) string { return "› a human-authored draft\n\nGPT-6-Sol medium · ~/project\n" },
+		},
+		{
+			name:  "waiting input activity",
+			state: domain.ActivityWaitingInput,
+			screen: func(id string) string {
+				return fmt.Sprintf("› <ao-session-delivery id=%q>continue\n\nGPT-6-Sol medium · ~/project\n", id)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newFakeStore()
+			st.sessions["s1"] = pastStartupGate(domain.SessionRecord{
+				ID: "s1", Harness: domain.HarnessCodex, Mode: domain.SessionModeTUI,
+				Activity: domain.Activity{State: tc.state},
+				Metadata: domain.SessionMetadata{RuntimeLaunchID: "launch-1", RuntimeHandleID: "handle-1"},
+			})
+			messenger := &fakeMessenger{}
+			m := newSendTestManager(t, codex.New(), messenger, st)
+			runtime := m.runtime.(*fakeRuntime)
+			messenger.onSend = func(_ domain.SessionID, message string) {
+				if message == "" {
+					return
+				}
+				deliveryID, ok := domain.SessionDeliveryID(message)
+				if !ok {
+					t.Fatalf("message is not a session delivery: %q", message)
+				}
+				runtime.styledOutputs = []string{tc.screen(deliveryID)}
+			}
+
+			if err := m.Send(context.Background(), "s1", "continue", nil); err != nil {
+				t.Fatalf("Send: %v", err)
+			}
+			if len(messenger.msgs) != 1 {
+				t.Fatalf("pane messages = %#v, want only the original delivery", messenger.msgs)
+			}
+		})
+	}
+}
+
+func TestSend_CodexSessionDeliveryStopsAfterSemanticAcceptance(t *testing.T) {
+	st := newFakeStore()
+	st.sessions["s1"] = pastStartupGate(domain.SessionRecord{
+		ID: "s1", Harness: domain.HarnessCodex, Mode: domain.SessionModeTUI,
+		Activity: domain.Activity{State: domain.ActivityIdle},
+		Metadata: domain.SessionMetadata{RuntimeLaunchID: "launch-1", RuntimeHandleID: "handle-1"},
+	})
+	messenger := &fakeMessenger{onSend: func(id domain.SessionID, message string) {
+		deliveryID, ok := domain.SessionDeliveryID(message)
+		if !ok {
+			t.Fatalf("message is not a session delivery: %q", message)
+		}
+		rec := st.sessions[id]
+		rec.Activity.State = domain.ActivityActive
+		rec.Metadata.ConversationCheckpointState = domain.ConversationCheckpointCoordination
+		rec.Metadata.ConversationCheckpointGeneration = rec.Metadata.RuntimeLaunchID
+		rec.Metadata.ConversationCheckpointTurnID = deliveryID
+		st.sessions[id] = rec
+	}}
+	m := newSendTestManager(t, codex.New(), messenger, st)
+	if err := m.Send(context.Background(), "s1", "continue", nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if len(messenger.msgs) != 1 {
+		t.Fatalf("pane messages = %#v, want no retry after semantic acceptance", messenger.msgs)
 	}
 }
 

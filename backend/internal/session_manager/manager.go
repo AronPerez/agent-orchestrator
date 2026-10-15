@@ -4741,7 +4741,9 @@ func (m *Manager) send(ctx context.Context, id domain.SessionID, message, client
 	if !ok {
 		return nil
 	}
-	if m.harnessNudgeSafe(rec.Harness) {
+	if deliveryID, sessionDelivery := domain.SessionDeliveryID(message); sessionDelivery && rec.Harness == domain.HarnessCodex {
+		m.confirmCodexSessionDelivery(ctx, id, deliveryID, rec)
+	} else if m.harnessNudgeSafe(rec.Harness) {
 		m.confirmActive(ctx, m.messenger, id)
 	}
 	return nil
@@ -4800,6 +4802,102 @@ func (m *Manager) harnessNudgeSafe(harness domain.AgentHarness) bool {
 	}
 	blk, ok := agent.(ports.BlockedActivitySignaler)
 	return ok && blk.EmitsBlockedActivity()
+}
+
+// confirmCodexSessionDelivery retries the trailing Enter only when Codex has
+// not semantically accepted this exact session delivery and its live screen
+// still shows that delivery as an idle composer draft. Codex maps permission
+// requests to waiting_input, so the general activity-only retry is unsafe.
+func (m *Manager) confirmCodexSessionDelivery(ctx context.Context, id domain.SessionID, deliveryID string, sent domain.SessionRecord) {
+	if sent.Metadata.RuntimeLaunchID == "" || sent.Metadata.RuntimeHandleID == "" || domain.NormalizeSessionMode(sent.Mode) != domain.SessionModeTUI {
+		return
+	}
+	if m.agents == nil {
+		return
+	}
+	agent, ok := m.agents.Agent(domain.HarnessCodex)
+	if !ok {
+		return
+	}
+	acceptance, ok := agent.(ports.SemanticMessageAcceptanceSignaler)
+	if !ok || !acceptance.EmitsSemanticMessageAcceptance() {
+		return
+	}
+	inspector, ok := agent.(ports.TerminalSurfaceInspector)
+	if !ok {
+		return
+	}
+	steerer, ok := agent.(ports.ActiveTurnSteerer)
+	if !ok || !steerer.SteersActiveTurn() {
+		return
+	}
+	styledOutput, ok := m.runtime.(ports.StyledTerminalOutputReader)
+	if !ok {
+		return
+	}
+
+	for attempt := 1; attempt <= m.sendConfirm.maxAttempts; attempt++ {
+		accepted, canRetry := m.waitForCodexSessionDelivery(ctx, id, deliveryID, sent)
+		if accepted || !canRetry || attempt == m.sendConfirm.maxAttempts {
+			return
+		}
+		outcome, err := m.messenger.NudgeDraftChecked(ctx, id, func(harness domain.AgentHarness) bool {
+			return harness == domain.HarnessCodex && steerer.SteersActiveTurn()
+		}, func(checkCtx context.Context, current domain.SessionRecord) bool {
+			if current.Harness != domain.HarnessCodex || domain.NormalizeSessionMode(current.Mode) != domain.SessionModeTUI ||
+				current.Metadata.RuntimeLaunchID != sent.Metadata.RuntimeLaunchID || current.Metadata.RuntimeHandleID != sent.Metadata.RuntimeHandleID ||
+				semanticMessageAccepted(current, deliveryID) {
+				return false
+			}
+			output, err := styledOutput.GetStyledOutput(checkCtx, runtimeHandle(current.Metadata), messageDeliveryReadyLines)
+			if err != nil || !strings.Contains(output, deliveryID) {
+				return false
+			}
+			surface := inspector.InspectTerminalSurface(output)
+			workMatchesActivity := surface.Work == ports.TerminalSurfaceWorkIdle && current.Activity.State == domain.ActivityIdle ||
+				surface.Work == ports.TerminalSurfaceWorkActive && current.Activity.State == domain.ActivityActive
+			return workMatchesActivity && surface.Composer == ports.TerminalComposerDraft
+		})
+		if err != nil {
+			m.logger.Warn("send: Codex delivery Enter retry failed", "sessionID", id, "attempt", attempt, "error", err)
+			return
+		}
+		if outcome != sessionguard.Sent {
+			m.logger.Info("send: Codex delivery Enter retry suppressed", "sessionID", id, "attempt", attempt, "outcome", outcome.String())
+			return
+		}
+	}
+}
+
+func (m *Manager) waitForCodexSessionDelivery(ctx context.Context, id domain.SessionID, deliveryID string, sent domain.SessionRecord) (accepted, canRetry bool) {
+	deadline := time.NewTimer(m.sendConfirm.attemptDeadline)
+	defer deadline.Stop()
+	ticker := time.NewTicker(m.sendConfirm.pollInterval)
+	defer ticker.Stop()
+	for {
+		current, ok, err := m.store.GetSession(ctx, id)
+		if err != nil {
+			m.logger.Warn("send: Codex delivery confirmation read failed", "sessionID", id, "error", err)
+			return false, false
+		}
+		if !ok || current.IsTerminated || current.Harness != domain.HarnessCodex ||
+			current.Metadata.RuntimeLaunchID != sent.Metadata.RuntimeLaunchID || current.Metadata.RuntimeHandleID != sent.Metadata.RuntimeHandleID {
+			return false, false
+		}
+		if semanticMessageAccepted(current, deliveryID) {
+			return true, false
+		}
+		if current.Activity.State != domain.ActivityIdle && current.Activity.State != domain.ActivityActive {
+			return false, false
+		}
+		select {
+		case <-ctx.Done():
+			return false, false
+		case <-deadline.C:
+			return false, true
+		case <-ticker.C:
+		}
+	}
 }
 
 func (m *Manager) harnessStartupSignalGatesInput(harness domain.AgentHarness) bool {
