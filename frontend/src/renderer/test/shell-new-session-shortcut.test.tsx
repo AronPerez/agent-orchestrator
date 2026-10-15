@@ -21,6 +21,9 @@ const shellMocks = vi.hoisted(() => {
 		routeParams: {} as { hostId?: string; projectId?: string; sessionId?: string },
 		routeSearch: {} as Record<string, unknown>,
 		matchRouteTarget: null as string | null,
+		accountStatus: "authenticated" as "authenticated" | "unauthenticated",
+		accountUserId: "test-user",
+		cachedSessionTitle: "",
 		workspaces: [] as WorkspaceSummary[],
 		remoteWorkspaces: [] as WorkspaceSummary[],
 		remoteFailedHostIds: [] as string[],
@@ -102,6 +105,7 @@ const shellMocks = vi.hoisted(() => {
 		setKeybindings: vi.fn(async (overrides: KeybindingOverrides) => overrides),
 		setKeybindingRecording: vi.fn(async () => undefined),
 		queryClient: {
+			getMutationCache: () => ({ getAll: () => [] }),
 			ensureQueryData: vi.fn(),
 			fetchQuery: vi.fn(),
 			getQueryData: vi.fn(),
@@ -112,7 +116,7 @@ const shellMocks = vi.hoisted(() => {
 			setQueryData: vi.fn(),
 		},
 		remoteDelete: vi.fn(),
-		listRemoteHosts: vi.fn(async () => []),
+		listRemoteHosts: vi.fn<() => Promise<Array<{ hostId: string; label: string; url: string; accountUserId?: string }>>>(async () => []),
 		state,
 	};
 });
@@ -128,7 +132,7 @@ vi.mock("@tanstack/react-query", async (importOriginal) => ({
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
 	...(await importOriginal<typeof import("@tanstack/react-router")>()),
 	createFileRoute: () => (options: unknown) => ({ options }),
-	Outlet: () => null,
+	Outlet: () => shellMocks.state.cachedSessionTitle ? <div data-testid="cached-session-card">{shellMocks.state.cachedSessionTitle}</div> : null,
 	useMatchRoute: () => (options: { to: string }) => shellMocks.state.matchRouteTarget === options.to,
 	useNavigate: () => shellMocks.navigate,
 	useRouter: () => shellMocks.router,
@@ -182,12 +186,12 @@ vi.mock("../lib/host-clients", () => ({
 	clientForHost: () => ({ DELETE: shellMocks.remoteDelete }),
 	connectHost: vi.fn(),
 	connectedHosts: () => [],
-	disconnectHost: vi.fn(),
+	disconnectHost: vi.fn(async () => undefined),
 	subscribeConnectedHosts: () => () => undefined,
 }));
 
 vi.mock("../lib/cloud-session", () => ({
-	useCloudSession: () => ({ status: "authenticated", session: { user: { id: "test-user" } } }),
+	useCloudSession: () => ({ status: shellMocks.state.accountStatus, session: shellMocks.state.accountStatus === "authenticated" ? { user: { id: shellMocks.state.accountUserId } } : null }),
 }));
 vi.mock("../hooks/useSettings", () => ({ useSettings: () => ({ settings: { cloudControlPlaneUrl: "" } }) }));
 
@@ -417,10 +421,13 @@ beforeEach(() => {
 	shellMocks.state.routeParams = {};
 	shellMocks.state.routeSearch = {};
 	shellMocks.state.matchRouteTarget = null;
+	shellMocks.state.accountStatus = "authenticated";
+	shellMocks.state.accountUserId = "test-user";
+	shellMocks.state.cachedSessionTitle = "";
 	shellMocks.state.workspaces = workspaces;
 	shellMocks.state.remoteWorkspaces = [];
 	shellMocks.state.remoteFailedHostIds = [];
-	shellMocks.listRemoteHosts.mockClear();
+	shellMocks.listRemoteHosts.mockReset().mockResolvedValue([]);
 	shellMocks.state.removeRemoteProject = undefined;
 	shellMocks.state.configureRemoteProject = undefined;
 	shellMocks.remoteDelete.mockReset().mockResolvedValue({});
@@ -457,6 +464,43 @@ describe("shell workspace startup", () => {
 	// that needs it resolves within findBy's default timeout.
 	beforeAll(async () => {
 		await import("../components/chat/OrchestratorStartingChat");
+	});
+	it.each(["unauthenticated", "sign-out", "account switch"] as const)("keeps a local-paired remote route usable on %s with Developer mode off", async (change) => {
+		shellMocks.state.accountStatus = change === "unauthenticated" ? "unauthenticated" : "authenticated";
+		shellMocks.state.routeParams = { hostId: "box-a", projectId: "remote-project", sessionId: "remote-session" };
+		shellMocks.state.cachedSessionTitle = "Local paired session";
+		shellMocks.listRemoteHosts.mockResolvedValue([{ hostId: "box-a", label: "Local pairing", url: "https://box-a.example" }]);
+		useUiStore.setState({ developerMode: false, remoteHosts: true });
+		const view = await renderShell();
+		expect(await screen.findByTestId("cached-session-card")).toHaveTextContent("Local paired session");
+		expect(shellMocks.navigate).not.toHaveBeenCalled();
+		if (change !== "unauthenticated") {
+			if (change === "sign-out") shellMocks.state.accountStatus = "unauthenticated";
+			else shellMocks.state.accountUserId = "other-user";
+			view.rerender(<Suspense fallback={null}><ShellRoute /></Suspense>);
+			await waitFor(() => expect(shellMocks.listRemoteHosts).toHaveBeenCalledTimes(2));
+			expect(shellMocks.navigate).not.toHaveBeenCalled();
+			expect(screen.getByTestId("cached-session-card")).toHaveTextContent("Local paired session");
+		}
+		act(() => useUiStore.setState({ remoteHosts: false }));
+		await waitFor(() => expect(shellMocks.navigate).toHaveBeenCalledWith({ to: "/", replace: true }));
+		expect(screen.getByTestId("cached-session-card")).toHaveTextContent("Local paired session");
+	});
+	it.each(["sign-out", "account switch"])("hides a cached account-imported project board on %s even before navigation completes", async (change) => {
+		shellMocks.state.routeParams = { hostId: "account-box", projectId: "private-project" };
+		shellMocks.state.cachedSessionTitle = "Account A private session";
+		shellMocks.listRemoteHosts.mockResolvedValue([{ hostId: "account-box", label: "Imported", url: "https://account-box.example", accountUserId: "test-user" }]);
+		useUiStore.setState({ developerMode: false, remoteHosts: true });
+		const view = await renderShell();
+		expect(await screen.findByTestId("cached-session-card")).toHaveTextContent("Account A private session");
+		// The old board cache and route remain populated until navigation finishes.
+		shellMocks.listRemoteHosts.mockResolvedValue([]);
+		if (change === "sign-out") shellMocks.state.accountStatus = "unauthenticated";
+		else shellMocks.state.accountUserId = "other-user";
+		view.rerender(<Suspense fallback={null}><ShellRoute /></Suspense>);
+		await waitFor(() => expect(shellMocks.navigate).toHaveBeenCalledWith({ to: "/", replace: true }));
+		expect(screen.queryByTestId("cached-session-card")).not.toBeInTheDocument();
+		expect(screen.queryByText("Account A private session")).not.toBeInTheDocument();
 	});
 	it("rechecks a connected host when its session queries fail", async () => {
 		useUiStore.setState({ developerMode: true, remoteHosts: true });

@@ -193,6 +193,30 @@ test("renderer: route nav home to board to session detail and back @T0 @BRD", as
 
 // ── SET: settings ────────────────────────────────────────────────────────────
 
+test("renderer: local remote-host settings work signed out with Developer mode off @T0 @SET", async ({ page }) => {
+	await installFakeBridge(page); // The fake Cloud session is signed out.
+	await page.goto("/#/settings");
+	const settings = page.getByTestId("settings-page");
+	const navigation = page.getByRole("navigation", { name: "Settings sections" });
+	const advanced = settings.locator("section").filter({ has: page.getByRole("heading", { name: "Advanced", exact: true }) });
+	const developerMode = advanced.getByRole("switch", { name: "Developer mode" });
+	const toggle = advanced.getByRole("switch", { name: "Connect to remote hosts" });
+	await expect(developerMode).not.toBeChecked();
+	await expect(toggle).toBeVisible();
+	await expect(toggle).not.toBeChecked();
+	await toggle.click();
+	await expect(toggle).toBeChecked();
+	await navigation.getByRole("button", { name: "Remote hosts", exact: true }).click();
+	const pageToggle = settings.getByRole("switch", { name: "Connect to remote hosts" });
+	await expect(pageToggle).toBeChecked();
+	await expect(settings.getByLabel("Connection password")).toBeVisible();
+	await pageToggle.click();
+	await navigation.getByRole("button", { name: "General", exact: true }).click();
+	await expect(toggle).not.toBeChecked();
+	await expect(developerMode).not.toBeChecked();
+	await expect.poll(() => page.evaluate(() => localStorage.getItem("ao.remoteHosts"))).toBe("false");
+});
+
 // #2483 SET-001.
 test("renderer: global settings page renders all sections @T0 @SET", async ({ page }) => {
 	// The settings revamp (#2797) reduced the page to General + Updates + Help;

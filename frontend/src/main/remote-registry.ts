@@ -12,7 +12,7 @@ type StartProxy = (entry: RemoteEntry) => Promise<ActiveProxy>;
 
 /** One loopback proxy per connected host. */
 export class RemoteRegistry {
-	private readonly live = new Map<string, { view: ConnectedHostView; proxy: ActiveProxy; password: string }>();
+	private readonly live = new Map<string, { view: ConnectedHostView; proxy: ActiveProxy; password: string; accountUserId?: string }>();
 	// ponytail: one queue serializes five-host startup; split by host if connect latency becomes measurable.
 	private tail: Promise<void> = Promise.resolve();
 	private closing = false;
@@ -21,7 +21,7 @@ export class RemoteRegistry {
 
 	connected(entry: RemoteEntry): ConnectedHostView | undefined {
 		const existing = this.live.get(entry.url);
-		return existing && existing.view.hostId === entry.hostId && existing.password === entry.password ? existing.view : undefined;
+		return existing && existing.view.hostId === entry.hostId && existing.password === entry.password && existing.accountUserId === entry.accountUserId ? existing.view : undefined;
 	}
 
 	private enqueue<T>(action: () => Promise<T>): Promise<T> {
@@ -43,7 +43,7 @@ export class RemoteRegistry {
 			}
 			const proxy = await this.start(entry);
 			const view = { hostId: entry.hostId, label: entry.label, url: entry.url, base: proxy.base };
-			this.live.set(entry.url, { view, proxy, password: entry.password });
+			this.live.set(entry.url, { view, proxy, password: entry.password, accountUserId: entry.accountUserId });
 			return view;
 		});
 	}
@@ -69,7 +69,17 @@ export class RemoteRegistry {
 		});
 	}
 
-	/** Retire all proxies on account sign-out without disabling later sign-in. */
+	/** Account changes retire imported credentials, never local password pairings. */
+	disconnectOtherAccounts(accountId: string): Promise<void> {
+		return this.enqueue(async () => {
+			for (const [url, entry] of this.live) {
+				if (!entry.accountUserId || entry.accountUserId === accountId) continue;
+				this.live.delete(url);
+				await entry.proxy.close();
+			}
+		});
+	}
+
 	disconnectAll(): Promise<void> {
 		return this.enqueue(async () => {
 			const entries = [...this.live.values()];

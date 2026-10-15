@@ -23,17 +23,17 @@ export type RemoteHost = {
 	hostId: string;
 	label: string;
 	url: string;
+	accountUserId?: string;
 	status: "connecting" | "connected" | "offline";
 	failureReason?: "unauthorized" | "incompatible";
 };
 
 export function useRemoteHosts(): { hosts: RemoteHost[]; refresh: () => Promise<void> } {
-	const remoteHostsEnabled = useUiStore((state) => state.developerMode && state.remoteHosts);
+	const enabled = useUiStore((state) => state.remoteHosts);
 	const { status, session } = useCloudSession();
-	const accountId = session?.user.id ?? "";
+	const accountId = status === "authenticated" ? session?.user.id ?? "" : "";
 	const { settings } = useSettings();
 	const cloudBaseUrl = settings?.cloudControlPlaneUrl ?? "";
-	const enabled = remoteHostsEnabled && status === "authenticated" && Boolean(accountId);
 	const enabledRef = useRef(enabled);
 	enabledRef.current = enabled;
 	const accountRef = useRef(accountId);
@@ -50,8 +50,10 @@ export function useRemoteHosts(): { hosts: RemoteHost[]; refresh: () => Promise<
 		if (!enabledRef.current) return;
 		const generation = ++refreshGeneration.current;
 		const current = () => enabledRef.current && accountRef.current === accountId && refreshGeneration.current === generation;
-		let saved = await aoBridge.remotes.list();
-		if (cloudBaseUrl) {
+		let saved: Awaited<ReturnType<typeof aoBridge.remotes.list>>;
+		try { saved = await aoBridge.remotes.list(); }
+		catch { return; } // Settings reports registry errors; keep known local pairings usable.
+		if (accountId && cloudBaseUrl) {
 			try {
 				const accountHosts = await listAccountRemoteHosts(cloudBaseUrl);
 				if (!current()) return;
@@ -99,8 +101,13 @@ export function useRemoteHosts(): { hosts: RemoteHost[]; refresh: () => Promise<
 		if (previousAccount.current !== accountId) {
 			previousAccount.current = accountId;
 			refreshGeneration.current++;
-			setHosts([]);
-			for (const hostId of connectedHosts()) void disconnectHost(hostId);
+			// Retire renderer access before registry or Cloud requests can delay the refresh.
+			for (const host of hostsRef.current) {
+				if (host.accountUserId && host.accountUserId !== accountId) {
+					void disconnectHost(host.hostId).catch(() => { /* Renderer access is already retired. */ });
+				}
+			}
+			setHosts((previous) => previous.filter((host) => !host.accountUserId || host.accountUserId === accountId));
 		}
 		if (enabled) {
 			void refresh();
@@ -145,10 +152,10 @@ export function useRemoteHosts(): { hosts: RemoteHost[]; refresh: () => Promise<
 		return () => window.removeEventListener(HOSTS_CHANGED_EVENT, onChanged);
 	}, [enabled, refresh]);
 	useEffect(() => {
-		if (!enabled || !cloudBaseUrl) return;
+		if (!enabled || !accountId || !cloudBaseUrl) return;
 		const timer = setInterval(() => { if (!document.hidden) void refresh(); }, ACCOUNT_SYNC_MS);
 		return () => clearInterval(timer);
-	}, [enabled, cloudBaseUrl, refresh]);
+	}, [enabled, accountId, cloudBaseUrl, refresh]);
 
 	return { hosts: enabled ? hosts : NO_HOSTS, refresh };
 }

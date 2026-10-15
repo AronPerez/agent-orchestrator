@@ -32,7 +32,9 @@ ao remote-host enable --tunnel-only
 ao remote-host status
 ```
 
-The tunnel starts asynchronously; run `status` again until an HTTPS address appears. On the other desktop, sign in to Orchestrator and open **Settings → Remote hosts → Add host**, then enter that address and connection password. Treat these details as credentials. Cloudflare terminates TLS and can read tunneled traffic; quick-tunnel addresses can change on restart.
+The tunnel starts asynchronously; run `status` again until an HTTPS address appears. On the other desktop, open **Settings → Remote hosts → Add host**, then enter that address and connection password. Local pairing and remote session management do not require AO Cloud sign-in or Developer mode; synchronizing hosts through an AO Cloud account still requires sign-in. Treat these details as credentials. Cloudflare terminates TLS and can read tunneled traffic; quick-tunnel addresses can change on restart.
+
+**Connect to remote hosts** is available in **Settings → General → Advanced** and on the **Remote hosts** page. Both switches control the same preference. Connections are off until enabled or a host is paired; existing saved choices are preserved.
 
 If the host already has LAN access enabled, its displayed HTTP address works only on a trusted reachable network. Use `ao remote-host enable --tunnel` to add HTTPS access while retaining that LAN listener; switching to tunnel-only mode requires disabling it first and invalidates the old password.
 

@@ -254,7 +254,7 @@ describe("SettingsDialog", () => {
 		));
 	});
 
-	it("shows Remote hosts in standard Settings while the connection switch is off", async () => {
+	it("shows Remote hosts while signed out with Developer mode and the connection switch off", async () => {
 		useUiStore.setState({ developerMode: false, remoteHosts: false });
 		useUiStore.getState().openGlobalSettings("remoteHosts");
 		renderSettingsDialog();

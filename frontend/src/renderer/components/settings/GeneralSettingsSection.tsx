@@ -146,6 +146,8 @@ export function GeneralSettingsSection({
 	const soundNotificationsSaveError = useSoundNotificationsStore((state) => state.saveError);
 	const developerMode = useUiStore((state) => state.developerMode);
 	const setDeveloperMode = useUiStore((state) => state.setDeveloperMode);
+	const remoteHosts = useUiStore((state) => state.remoteHosts);
+	const setRemoteHosts = useUiStore((state) => state.setRemoteHosts);
 	const terminalCopyOnSelect = useUiStore((state) => state.terminalCopyOnSelect);
 	const setTerminalCopyOnSelect = useUiStore((state) => state.setTerminalCopyOnSelect);
 
@@ -257,6 +259,9 @@ export function GeneralSettingsSection({
 						checked={developerMode}
 						onCheckedChange={setDeveloperMode}
 					/>
+				</SettingsRow>
+				<SettingsRow label={t("remote.enable")} description={t("remote.enableDescription")}>
+					<Switch aria-label={t("remote.enable")} checked={remoteHosts} onCheckedChange={setRemoteHosts} />
 				</SettingsRow>
 				{developerMode && <CloudOfferingRow />}
 				{developerMode && <DiagnosticsRow />}
