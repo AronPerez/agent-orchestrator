@@ -931,6 +931,7 @@ describe("SessionView", () => {
 			delete session.previewRevision;
 			delete session.isTerminated;
 			delete session.runtimeConnected;
+			delete session.statusReadiness;
 			delete session.cloud;
 			session.status = "working";
 			session.provider = "claude-code";
@@ -1104,6 +1105,18 @@ describe("SessionView", () => {
 		view.rerender(<SessionView sessionId="sess-1" />);
 		await act(async () => {});
 		expect(resumeAgentPostMock).not.toHaveBeenCalled();
+	});
+
+	it.each([undefined, "exited"] as const)("does not automatically resume or show a resume shimmer for an unavailable session with activity %s", async (activity) => {
+		const session = workerSession("sess-1");
+		session.mode = "chat";
+		session.status = "unknown";
+		session.statusReadiness = "unavailable";
+		session.activity = activity ? { state: activity, lastActivityAt: "exited" } : undefined;
+		render(<SessionView sessionId="sess-1" />);
+		await act(async () => {});
+		expect(resumeAgentPostMock).not.toHaveBeenCalled();
+		expect(screen.getByTestId("chat-surface")).toHaveAttribute("data-transitioning", "false");
 	});
 
 	it("keeps terminated sessions stopped when opened", async () => {

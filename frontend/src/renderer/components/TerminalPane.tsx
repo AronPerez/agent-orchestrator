@@ -1082,6 +1082,10 @@ function AttachedTerminal({
 	// A shell pane has no session, so it hands the hook its handle directly
 	// instead of reading one off `attachSession`.
 	const shellTerminalHandleId = terminalTarget?.kind === "shell" ? terminalTarget.handleId : undefined;
+	const runtimeUnavailable = Boolean(
+		session && !session.cloud && sessionIsActive(session) && session.statusReadiness === "unavailable" &&
+		(!terminalTarget || terminalTarget.kind === "worker"),
+	);
 	const { attach, state, error, replaySettled, hasAttached, syncVisibleSize } = useTerminalSession(attachSession, {
 		coverInitialReplay: terminalTarget?.kind !== "reviewer",
 		// Cloud workers can acknowledge a terminal before the coding agent emits
@@ -1089,9 +1093,12 @@ function AttachedTerminal({
 		waitForInitialOutput: Boolean(attachSession?.cloud),
 		createMux,
 		daemonReady,
+		runtimeUnavailable,
 		exitNotice:
 			terminalTarget?.kind === "reviewer"
 				? "\r\n\x1b[2m[reviewer terminal finished]\x1b[0m"
+				: runtimeUnavailable
+				? `\r\n\x1b[2m[${t("session.statusUnavailable")}]\x1b[0m`
 				: undefined,
 		inputDisabled,
 		isVisible,
@@ -1326,7 +1333,7 @@ function AttachedTerminal({
 	// never reports "exited" there, so without this the strip — and the resume
 	// action on it — stays hidden in exactly the state that needs it (#3875).
 	const showEndedStatePreview =
-		state === "exited" || canRestoreSession || (terminalTarget?.kind === "worker" && sessionAgentExited(session));
+		runtimeUnavailable || state === "exited" || canRestoreSession || (terminalTarget?.kind === "worker" && sessionAgentExited(session));
 	const isCloudConnecting =
 		Boolean(attachSession?.cloud) &&
 		!isCloudConnectError &&
@@ -1340,6 +1347,7 @@ function AttachedTerminal({
 			{showEndedState && (
 				<TerminalEndedStrip
 					canRestore={canRestoreSession}
+					runtimeUnavailable={runtimeUnavailable}
 					error={restoreError}
 					isRestoring={isRestoring}
 					onRestore={restoreSession}
@@ -1463,6 +1471,7 @@ function ReplayCover({ message }: { message?: string }) {
 
 type TerminalEndedStripProps = {
 	canRestore: boolean;
+	runtimeUnavailable: boolean;
 	error?: string;
 	isRestoring: boolean;
 	onRestore: () => void;
@@ -1471,10 +1480,12 @@ type TerminalEndedStripProps = {
 	variant: "reviewer" | "session" | "shell";
 };
 
-function TerminalEndedStrip({ canRestore, error, isRestoring, onRestore, reviewStatus, session, variant }: TerminalEndedStripProps) {
+function TerminalEndedStrip({ canRestore, runtimeUnavailable, error, isRestoring, onRestore, reviewStatus, session, variant }: TerminalEndedStripProps) {
 	const { t } = useTranslation();
 	const reviewDelivered = variant === "reviewer" && reviewStatus === "delivered";
-	const message = reviewDelivered
+	const message = runtimeUnavailable
+		? t("terminal.runtimeUnavailable")
+		: reviewDelivered
 		? t("terminal.reviewerCompleted")
 		: canRestore
 		? t("terminal.restoreToContinue")
@@ -1489,12 +1500,12 @@ function TerminalEndedStrip({ canRestore, error, isRestoring, onRestore, reviewS
 			<div className="flex min-h-control-board items-center gap-3">
 				<div className="min-w-0 flex-1">
 					<div className="font-mono text-caption font-medium uppercase tracking-wide-md text-muted-foreground">
-						{reviewDelivered ? t("terminal.reviewCompleted") : t("terminal.ended")}
+						{runtimeUnavailable ? t("session.statusUnavailable") : reviewDelivered ? t("terminal.reviewCompleted") : t("terminal.ended")}
 					</div>
 					<div className="mt-0.5 truncate text-xs text-muted-foreground">{message}</div>
 				</div>
 				{error && <div className="max-w-content-max truncate text-xs text-destructive">{error}</div>}
-				{variant === "session" && session ? <ResumeAgentControl session={session} /> : null}
+				{variant === "session" && session ? <ResumeAgentControl session={session} hostId={session.hostId} /> : null}
 				{canRestore && (
 					<Tooltip>
 						<TooltipTrigger asChild>

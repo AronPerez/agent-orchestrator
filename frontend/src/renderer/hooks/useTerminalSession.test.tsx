@@ -983,6 +983,50 @@ describe("useTerminalSession", () => {
 		expect(muxes[1].opens).toEqual([["handle-1", 80, 24]]);
 	});
 
+	it.each(["exited", "error", "attached", "resumed", "terminated"] as const)("handles recovery of an unavailable %s pane without changing its handle or generation", (state) => {
+		const muxes: FakeMux[] = [];
+		const createMux = () => {
+			const fake = createFakeMux();
+			muxes.push(fake);
+			return fake.mux;
+		};
+		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		const wrapper = ({ children }: { children: ReactNode }) => (
+			<QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+		);
+		const unavailable: WorkspaceSession = {
+			...session, statusReadiness: "unavailable", terminalGeneration: "launch-1",
+			activity: state === "resumed" ? { state: "exited", lastActivityAt: "exited" } : undefined,
+		};
+		const view = renderHook(
+			({ attachedSession }) => useTerminalSession(attachedSession, {
+				daemonReady: true, createMux, runtimeUnavailable: attachedSession.statusReadiness === "unavailable",
+			}),
+			{ initialProps: { attachedSession: unavailable }, wrapper },
+		);
+		act(() => { view.result.current.attach(createFakeTerminal()); });
+		act(() => muxes[0].emitOpened("handle-1"));
+		if (state === "error") act(() => muxes[0].emitError("handle-1", "runtime unavailable"));
+		else if (state !== "attached") act(() => muxes[0].emitExit("handle-1"));
+
+		view.rerender({ attachedSession: { ...unavailable, statusReadiness: "checking" } });
+		expect(muxes).toHaveLength(1);
+		const recovered: WorkspaceSession = {
+			...unavailable, statusReadiness: "ready", activity: undefined, isTerminated: state === "terminated",
+		};
+		view.rerender({ attachedSession: recovered });
+		const shouldReconnect = state !== "attached" && state !== "terminated";
+		expect(muxes).toHaveLength(shouldReconnect ? 2 : 1);
+		if (shouldReconnect) {
+			expect(muxes[0].disposed).toBe(true);
+			expect(muxes[1].opens).toEqual([["handle-1", 80, 24]]);
+			act(() => muxes[1].emitOpened("handle-1"));
+		}
+		expect(view.result.current.state).toBe(state === "terminated" ? "exited" : "attached");
+		view.rerender({ attachedSession: { ...recovered, updatedAt: "later" } });
+		expect(muxes).toHaveLength(shouldReconnect ? 2 : 1);
+	});
+
 	it("does not reconnect a broken live pane on ordinary session updates", () => {
 		const muxes: FakeMux[] = [];
 		const createMux = () => {

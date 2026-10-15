@@ -1882,6 +1882,7 @@
 	"terminal.restoreToContinue": "恢复会话以连接实时终端并继续输入。",
 	"terminal.reviewerEnded": "此评审终端已结束。请在摘要面板重新运行评审，或切换回代理终端。",
 	"terminal.sessionEndedNotTerminated": "终端进程已结束，但会话尚未标记为已终止。",
+	"terminal.runtimeUnavailable": "AO 无法验证此会话的运行时。请使用“恢复代理”重试。",
 	"terminal.sessionAria": "会话终端",
 	"terminal.shellExited": "此 shell 已退出。可关闭标签页，或打开新终端。",
 	"terminal.shellAria": "Shell 终端",

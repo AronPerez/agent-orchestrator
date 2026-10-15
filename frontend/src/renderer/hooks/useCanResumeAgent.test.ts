@@ -18,6 +18,32 @@ const exitedSession: WorkspaceSession = {
 };
 
 describe("canResumeAgent", () => {
+	const unavailableSession: WorkspaceSession = {
+		...exitedSession,
+		status: "unknown",
+		statusReadiness: "unavailable",
+		activity: undefined,
+	};
+
+	it("allows explicit recovery when runtime verification failed without an exit fact", () => {
+		expect(canResumeAgent(unavailableSession)).toBe(true);
+	});
+
+	it.each([
+		{ isTerminated: true },
+		{ status: "terminated" as const },
+		{ statusReadiness: "checking" as const },
+		{ statusReadiness: "ready" as const },
+		{ cloud: { orgId: "org-1" } },
+		{ activeAgentSwitch: { id: "switch-1" } as WorkspaceSession["activeAgentSwitch"] },
+	])("does not recover an unavailable session with %j", (override) => {
+		expect(canResumeAgent({ ...unavailableSession, ...override })).toBe(false);
+	});
+
+	it("blocks unavailable-session recovery during an interface transition", () => {
+		expect(canResumeAgent(unavailableSession, sessionInterfaceTransition(unavailableSession.id))).toBe(false);
+	});
+
 	it("blocks resume while an interface transition is active", () => {
 		expect(canResumeAgent(exitedSession, sessionInterfaceTransition(exitedSession.id))).toBe(false);
 	});

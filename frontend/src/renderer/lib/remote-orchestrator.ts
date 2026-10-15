@@ -17,7 +17,9 @@ export function openRemoteOrchestrator(
 	const key = `${refKey({ host: hostId, id: projectId })}:${clean ? "clean" : "ensure"}`;
 	const current = inFlight.get(key);
 	if (current) return current;
-	if (!clean && orchestrator && !sessionAgentExited(orchestrator)) return Promise.resolve(orchestrator.id);
+	if (!clean && orchestrator && !sessionAgentExited(orchestrator) && orchestrator.statusReadiness !== "unavailable") {
+		return Promise.resolve(orchestrator.id);
+	}
 	const request = (async () => {
 		if (!clean && orchestrator) {
 			await resumeOrchestrator(orchestrator.id, hostId);

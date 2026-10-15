@@ -60,6 +60,7 @@ const {
 	renameSessionMock,
 	spawnMock,
 	resumeOrchestratorMock,
+	trustedApiMock,
 	updateStatusMock,
 	commandPaletteEnabled,
 } = vi.hoisted(
@@ -83,6 +84,7 @@ const {
 		renameSessionMock: vi.fn().mockResolvedValue(undefined),
 		spawnMock: vi.fn(),
 		resumeOrchestratorMock: vi.fn(),
+		trustedApiMock: vi.fn(() => false),
 		updateStatusMock: vi.fn(),
 		downloadUpdateMock: vi.fn(),
 		checkUpdateMock: vi.fn(),
@@ -173,7 +175,7 @@ vi.mock("../hooks/useSettings", () => ({
 
 vi.mock("../lib/api-client", () => ({
 	apiClient: { GET: getMock, POST: postMock },
-	hasTrustedApiBaseUrl: () => false,
+	hasTrustedApiBaseUrl: trustedApiMock,
 	apiErrorMessage: (error: unknown) => {
 		if (error instanceof Error) return error.message;
 		if (typeof error === "object" && error !== null && "message" in error && typeof error.message === "string") {
@@ -473,6 +475,7 @@ function fireDrag(
 }
 
 beforeEach(() => {
+	trustedApiMock.mockReset().mockReturnValue(false);
 	window.localStorage.clear();
 	dragEnds.clear();
 	dragOvers.clear();
@@ -779,14 +782,32 @@ describe("Sidebar", () => {
 	// The sidebar owns its own openOrchestrator, separate from
 	// useProjectOrchestratorAction. Clicking Orchestrator on an orchestrator whose
 	// agent exited must resume it, not navigate to the dead terminal.
-	it("resumes an exited orchestrator instead of opening its dead terminal", async () => {
+	it.each(["exited", "unavailable"] as const)("resumes an %s orchestrator instead of opening its dead terminal", async (state) => {
 		const user = userEvent.setup();
-		renderSidebar({ workspaces: [{ ...workspace, sessions: [exitedOrchestrator] }] });
+		const orchestrator = state === "unavailable"
+			? { ...exitedOrchestrator, activity: undefined, statusReadiness: "unavailable" as const }
+			: exitedOrchestrator;
+		renderSidebar({ workspaces: [{ ...workspace, sessions: [orchestrator] }] });
 
 		await user.click(screen.getByRole("button", { name: "Open Project One orchestrator" }));
 
 		await waitFor(() => expect(resumeOrchestratorMock).toHaveBeenCalledWith("proj-1-orch"));
 		expect(spawnMock).not.toHaveBeenCalled();
+	});
+
+	it("does not recover an unavailable session merely on hover", async () => {
+		vi.useFakeTimers();
+		try {
+			renderSidebar({ workspaces: [{ ...workspace, sessions: [{
+				...session, mode: "chat", statusReadiness: "unavailable",
+			}] }] });
+			trustedApiMock.mockReturnValue(true);
+			fireEvent.mouseEnter(screen.getByRole("button", { name: "Open fix login" }));
+			await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+			expect(postMock).not.toHaveBeenCalledWith("/api/v1/sessions/{sessionId}/resume-agent", expect.anything());
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("opens an exited orchestrator at once and reports a failed resume", async () => {
