@@ -8,7 +8,10 @@ import (
 	"unicode/utf8"
 )
 
-const reportDeliveryPrefix = `<ao-report-delivery id="`
+const (
+	reportDeliveryPrefix  = `<ao-report-delivery id="`
+	sessionDeliveryPrefix = `<ao-session-delivery id="`
+)
 
 // WrapReportDelivery marks an AO-authored report batch so provider prompt
 // hooks can correlate semantic acceptance with its durable delivery identity.
@@ -210,10 +213,15 @@ func WrapSessionDelivery(id, message string) string {
 	return fmt.Sprintf("<ao-session-delivery id=%q>\n%s\n</ao-session-delivery>", id, message)
 }
 
+// SessionDeliveryID returns the identity from an AO session-delivery envelope.
+func SessionDeliveryID(message string) (string, bool) {
+	return deliveryID(message, sessionDeliveryPrefix)
+}
+
 // CoordinationDeliveryID recognizes both durable reports and session sends.
 func CoordinationDeliveryID(message string) (string, bool) {
 	if id, ok := ReportDeliveryID(message); ok {
 		return id, true
 	}
-	return deliveryID(message, `<ao-session-delivery id="`)
+	return SessionDeliveryID(message)
 }

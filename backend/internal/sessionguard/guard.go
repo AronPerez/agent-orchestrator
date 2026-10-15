@@ -11,6 +11,7 @@ package sessionguard
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -72,6 +73,9 @@ const (
 	// server approval) leave the row idle with FirstSignalAt unset; writing
 	// there consumes input on the dialog instead of the agent composer.
 	SuppressedStartupPending
+	// SuppressedUnsafeSurface means a caller's just-in-time terminal check did
+	// not prove the composer was safe for an Enter-only retry.
+	SuppressedUnsafeSurface
 )
 
 // String names the outcome for logs.
@@ -93,6 +97,8 @@ func (o Outcome) String() string {
 		return "suppressed_input_gated"
 	case SuppressedStartupPending:
 		return "suppressed_startup_pending"
+	case SuppressedUnsafeSurface:
+		return "suppressed_unsafe_surface"
 	default:
 		return "suppressed_unknown"
 	}
@@ -294,6 +300,40 @@ func (g *Guard) Nudge(ctx context.Context, id domain.SessionID, msg string) (Out
 	return g.send(ctx, id, msg, g.refuseNudge)
 }
 
+// NudgeDraftChecked sends Enter only when the caller's current-screen check
+// proves the composer still contains a draft. Active turns require an explicit
+// harness capability because Enter there steers the running turn. The check
+// runs under the same input lease, immediately before the write.
+func (g *Guard) NudgeDraftChecked(ctx context.Context, id domain.SessionID, steersActiveTurn func(domain.AgentHarness) bool, check func(context.Context, domain.SessionRecord) bool) (Outcome, error) {
+	if check == nil {
+		return SuppressedUnsafeSurface, nil
+	}
+	outcome, err := g.sendThenChecked(ctx, id, "", func(rec domain.SessionRecord) (Outcome, bool) {
+		if g.tuiAwaitingStartupInput(rec) {
+			return SuppressedStartupPending, true
+		}
+		switch rec.Activity.State {
+		case domain.ActivityIdle:
+			return SuppressedUnknown, false
+		case domain.ActivityWaitingInput, domain.ActivityBlocked:
+			return SuppressedAwaitingUser, true
+		case domain.ActivityActive:
+			return SuppressedBusy, steersActiveTurn == nil || !steersActiveTurn(rec.Harness)
+		default:
+			return SuppressedUnknown, true
+		}
+	}, func(checkCtx context.Context, rec domain.SessionRecord) error {
+		if !check(checkCtx, rec) {
+			return errUnsafeNudgeSurface
+		}
+		return nil
+	}, nil)
+	if errors.Is(err, errUnsafeNudgeSurface) {
+		return SuppressedUnsafeSurface, nil
+	}
+	return outcome, err
+}
+
 // NudgeUrgent writes an AO-initiated message that must reach the agent even
 // while the session sits idle at a needs-input prompt (waiting_input) —
 // reserved for alerts where a human parked at that prompt may be exactly who
@@ -362,6 +402,12 @@ func (g *Guard) send(ctx context.Context, id domain.SessionID, msg string, refus
 }
 
 func (g *Guard) sendThen(ctx context.Context, id domain.SessionID, msg string, refuse func(domain.SessionRecord) (Outcome, bool), after func(context.Context) error) (Outcome, error) {
+	return g.sendThenChecked(ctx, id, msg, refuse, nil, after)
+}
+
+var errUnsafeNudgeSurface = errors.New("sessionguard: terminal surface is not a safe draft")
+
+func (g *Guard) sendThenChecked(ctx context.Context, id domain.SessionID, msg string, refuse func(domain.SessionRecord) (Outcome, bool), preWrite func(context.Context, domain.SessionRecord) error, after func(context.Context) error) (Outcome, error) {
 	g.leaseMu.RLock()
 	lease := g.lease
 	g.leaseMu.RUnlock()
@@ -373,7 +419,7 @@ func (g *Guard) sendThen(ctx context.Context, id domain.SessionID, msg string, r
 		}
 		defer release()
 	}
-	outcome, err := g.sendAdmitted(ctx, id, msg, refuse)
+	outcome, err := g.sendAdmittedChecked(ctx, id, msg, refuse, preWrite)
 	if err == nil && outcome == Sent && after != nil {
 		if afterErr := after(ctx); afterErr != nil {
 			return outcome, afterErr
