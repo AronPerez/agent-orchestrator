@@ -1,1 +1,0 @@
-import{o as e,t}from"./react-BqBvWGiZ.js";import{a as n}from"./ui-store-Ct6sw7rm.js";import{t as r}from"./useNavigate-DxOr1oeF.js";var i=e(t());function a(){let e=r(),t=n(e=>e.openGlobalSettings);return(0,i.useEffect)(()=>{t(),e({to:`/`,replace:!0})},[e,t]),null}export{a as component};
