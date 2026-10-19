@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -461,6 +462,79 @@ func TestACPRelayStallWatchdogWaitsOnTheClient(t *testing.T) {
 	}
 	if frame := failStalled(t, relay, 1, time.Now().Add(2*promptStallTimeout)).client; frame == nil {
 		t.Fatal("watchdog ignored adapter silence after the user answered")
+	}
+}
+
+func TestACPRelayStallWatchdogWaitsOnTools(t *testing.T) {
+	for _, status := range []string{"pending", "in_progress", ""} {
+		t.Run(status, func(t *testing.T) {
+			relay, _ := startStallTestPrompt(t)
+			statusField := ""
+			if status != "" {
+				statusField = `,"status":"` + status + `"`
+			}
+			relayProviderFrame(t, relay, []byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-live","update":{"sessionUpdate":"tool_call","toolCallId":"t1","title":"Build"`+statusField+`}}}`+"\n"), 1, true)
+			// Content-only updates must not forget an unfinished tool, even across reattachment.
+			relayProviderFrame(t, relay, []byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-live","update":{"sessionUpdate":"tool_call_update","toolCallId":"t1","content":[]}}}`+"\n"), 2, true)
+			if frames := failStalled(t, relay, 2, time.Now().Add(2*promptStallTimeout)); len(frames.client)+len(frames.provider) != 0 {
+				t.Fatalf("watchdog cancelled an unfinished tool: provider=%s client=%s", frames.provider, frames.client)
+			}
+		})
+	}
+}
+
+func TestACPRelayStallWatchdogResumesAfterAllToolsFinish(t *testing.T) {
+	relay, _ := startStallTestPrompt(t)
+	for _, id := range []string{"t1", "t2"} {
+		relayProviderFrame(t, relay, fmt.Appendf(nil, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-live","update":{"sessionUpdate":"tool_call","toolCallId":%q,"title":"Build","status":"in_progress"}}}`+"\n", id), 1, true)
+	}
+	relayProviderFrame(t, relay, []byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-live","update":{"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"completed"}}}`+"\n"), 1, true)
+	if frames := failStalled(t, relay, 1, time.Now().Add(2*promptStallTimeout)); len(frames.client)+len(frames.provider) != 0 {
+		t.Fatalf("watchdog ignored the second running tool: provider=%s client=%s", frames.provider, frames.client)
+	}
+	relayProviderFrame(t, relay, []byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-live","update":{"sessionUpdate":"tool_call_update","toolCallId":"t2","status":"failed"}}}`+"\n"), 1, true)
+	if frames := failStalled(t, relay, 1, time.Now()); len(frames.client)+len(frames.provider) != 0 {
+		t.Fatalf("watchdog counted tool execution as adapter silence: provider=%s client=%s", frames.provider, frames.client)
+	}
+	if frames := failStalled(t, relay, 1, time.Now().Add(2*promptStallTimeout)); len(frames.client) == 0 || len(frames.provider) == 0 {
+		t.Fatalf("watchdog ignored adapter silence after all tools finished: provider=%s client=%s", frames.provider, frames.client)
+	}
+}
+
+func TestACPRelayStallWatchdogForgetsToolsAfterPromptResult(t *testing.T) {
+	relay, promptID := startStallTestPrompt(t)
+	relayProviderFrame(t, relay, []byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-live","update":{"sessionUpdate":"tool_call","toolCallId":"t1","title":"Build","status":"in_progress"}}}`+"\n"), 1, true)
+	if frames := failStalled(t, relay, 1, time.Now().Add(2*promptStallTimeout)); len(frames.client)+len(frames.provider) != 0 {
+		t.Fatalf("watchdog cancelled a quiet tool: provider=%s client=%s", frames.provider, frames.client)
+	}
+	result, _ := relayProviderFrame(t, relay, []byte(`{"jsonrpc":"2.0","id":`+promptID+`,"result":{"stopReason":"end_turn"}}`+"\n"), 1, true)
+	if !strings.Contains(string(result), `"stopReason":"end_turn"`) {
+		t.Fatalf("valid completion lost after a quiet tool: %s", result)
+	}
+	ack, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "method": ACPPromptAckMethod,
+		"params": map[string]string{"eventId": relay.snapshot().PendingResultEventID},
+	})
+	relayClientFrame(t, relay, append(ack, '\n'), 1)
+	relayClientFrame(t, relay, []byte(`{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":"session-live","prompt":[]}}`+"\n"), 1)
+	if frames := failStalled(t, relay, 1, time.Now().Add(2*promptStallTimeout)); len(frames.client) == 0 {
+		t.Fatal("previous prompt's tools disabled the next prompt's watchdog")
+	}
+}
+
+func TestACPRelayStallWatchdogIgnoresUnrelatedToolUpdates(t *testing.T) {
+	for _, params := range []string{
+		`{"sessionId":"another-session","update":{"sessionUpdate":"tool_call","toolCallId":"t1","title":"Build","status":"in_progress"}}`,
+		`{"sessionId":"session-live","update":{"sessionUpdate":"tool_call","title":"Build","status":"in_progress"}}`,
+		`{"sessionId":"session-live","update":{"sessionUpdate":"other","toolCallId":"t1","status":"in_progress"}}`,
+	} {
+		t.Run(params, func(t *testing.T) {
+			relay, _ := startStallTestPrompt(t)
+			relayProviderFrame(t, relay, []byte(`{"jsonrpc":"2.0","method":"session/update","params":`+params+`}`+"\n"), 1, true)
+			if frames := failStalled(t, relay, 1, time.Now().Add(2*promptStallTimeout)); len(frames.client) == 0 {
+				t.Fatal("unrelated tool update disabled the watchdog")
+			}
+		})
 	}
 }
 

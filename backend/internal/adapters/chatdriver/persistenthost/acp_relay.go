@@ -17,11 +17,8 @@ const (
 	ACPEventIDMetaKey = "ao.persistentEventId"
 
 	// promptStallTimeout is how long an in-flight session/prompt may hear
-	// nothing from the adapter, while the adapter is not waiting on the client,
-	// before the relay settles it synthetically. A live turn streams tool
-	// calls, message chunks, or state changes continuously, so a silent gap
-	// this long means the adapter's turn state machine lost the completion
-	// (upstream claude-agent-acp#1145 class) and no response will ever arrive.
+	// nothing from the adapter, while neither tools nor client interactions are
+	// pending, before the relay settles it synthetically.
 	promptStallTimeout = 15 * time.Minute
 
 	// promptStallCheckInterval is how often the host re-checks for a stalled
@@ -68,7 +65,7 @@ type acpClientFrames struct {
 	client   []byte
 }
 
-// acpRelay is deliberately only a JSON-RPC correlation layer. The pinned ACP
+// acpRelay is deliberately only an ACP protocol bookkeeping layer. The pinned ACP
 // SDK and all provider semantics remain in the adapter; the host owns only the
 // connection state that cannot be reconstructed after a daemon dies.
 type acpRelay struct {
@@ -86,6 +83,7 @@ type acpRelay struct {
 	promptJournal     *acpPromptJournal
 	promptResult      []byte
 	cancelRequested   bool
+	activeToolCalls   map[string]struct{}
 	// lastActivityAt stamps the last adapter output, prompt registration, or
 	// client answer to an adapter request, so the stall watchdog can tell a
 	// live turn from a lost one.
@@ -254,6 +252,7 @@ func (r *acpRelay) clientFrame(ctx context.Context, frame []byte, generation uin
 		r.state.ActiveCompaction = isCompactionPrompt(envelope["params"])
 		r.state.PendingResultEventID = ""
 		r.cancelRequested = false
+		r.activeToolCalls = make(map[string]struct{})
 		r.lastActivityAt = time.Now()
 		if err := r.promptJournal.reset(ctx); err != nil {
 			return acpClientFrames{}, err
@@ -357,6 +356,31 @@ func (r *acpRelay) providerFrame(
 			return rewritten, true, nil
 		}
 		if r.state.ActivePrompt {
+			if method == "session/update" {
+				var params struct {
+					SessionID string `json:"sessionId"`
+					Update    struct {
+						Kind   string `json:"sessionUpdate"`
+						ID     string `json:"toolCallId"`
+						Status string `json:"status"`
+					} `json:"update"`
+				}
+				if json.Unmarshal(envelope["params"], &params) == nil && params.SessionID == r.state.SessionID && params.Update.ID != "" {
+					update := params.Update
+					if update.Kind == "tool_call" || update.Kind == "tool_call_update" {
+						switch update.Status {
+						case "pending", "in_progress":
+							r.activeToolCalls[update.ID] = struct{}{}
+						case "completed", "failed":
+							delete(r.activeToolCalls, update.ID)
+						case "":
+							if update.Kind == "tool_call" {
+								r.activeToolCalls[update.ID] = struct{}{}
+							}
+						}
+					}
+				}
+			}
 			eventID := r.newEventID()
 			injectMeta(envelope, ACPEventIDMetaKey, eventID)
 			rewritten := marshalFrame(envelope, frame)
@@ -391,6 +415,7 @@ func (r *acpRelay) providerFrame(
 		r.state.ActivePrompt = false
 		r.state.ActiveCompaction = false
 		r.cancelRequested = false
+		r.activeToolCalls = nil
 		eventID := r.newEventID()
 		injectResultMeta(envelope, ACPEventIDMetaKey, eventID)
 		rewritten := rewriteResponseID(envelope, request.clientID, frame)
@@ -414,7 +439,7 @@ func (r *acpRelay) providerFrame(
 // from the adapter for promptStallTimeout. It gives the turn a terminal state
 // instead of leaving the session's Working indicator hanging until the next
 // controller restart. A turn waiting on the client (a permission prompt or an
-// elicitation) is not silent; the daemon owns that wait. The prompt may
+// elicitation) or an unfinished tool is not stalled. The prompt may
 // belong to an earlier controller generation: providerFrame then turns the
 // failure into the private prompt result, which the reattached controller
 // finishes against the turn it adopted.
@@ -429,7 +454,7 @@ func (r *acpRelay) failStalledPrompt(
 	attached bool,
 	now time.Time,
 ) (acpClientFrames, error) {
-	if !r.state.ActivePrompt || len(r.serverRequests) > 0 || now.Sub(r.lastActivityAt) < promptStallTimeout {
+	if !r.state.ActivePrompt || len(r.serverRequests) > 0 || len(r.activeToolCalls) > 0 || now.Sub(r.lastActivityAt) < promptStallTimeout {
 		return acpClientFrames{}, nil
 	}
 	for providerID, request := range r.pending {
