@@ -564,9 +564,7 @@ func (d *Driver) connectSession(
 		stop:          transport.Stdin.Close,
 		terminate: func() error {
 			_ = transport.Stdin.Close()
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			return persistenthost.Shutdown(shutdownCtx, dataDir, string(sessionID))
+			return persistenthost.Shutdown(context.Background(), dataDir, string(sessionID))
 		},
 	}
 	conv := newConversation(proc, d.log, providerScopeID)

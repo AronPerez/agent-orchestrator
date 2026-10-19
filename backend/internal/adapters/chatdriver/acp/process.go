@@ -120,9 +120,7 @@ func persistentTerminate(
 		once.Do(func() {
 			gate.Open()
 			_ = stdin.Close()
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			result = shutdown(ctx)
+			result = shutdown(context.Background())
 		})
 		return result
 	}

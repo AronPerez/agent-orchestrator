@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/google/uuid"
 
@@ -260,7 +259,5 @@ func (c *conversation) Close() error {
 
 func (c *conversation) Terminate() error {
 	_ = c.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	return c.shutdownHost(ctx, c.cfg.DataDir, c.cfg.AOSessionID)
+	return c.shutdownHost(context.Background(), c.cfg.DataDir, c.cfg.AOSessionID)
 }
