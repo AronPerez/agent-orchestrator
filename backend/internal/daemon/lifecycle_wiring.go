@@ -201,6 +201,7 @@ func (l *lifecycleStack) Stop() {
 type sessionLifecycle interface {
 	Reconcile(ctx context.Context) error
 	ReconcileStartupSafety(ctx context.Context) error
+	ReconnectAwakeAgent(ctx context.Context, target domain.AwakeAgentTarget) error
 	ReconcileBackground(ctx context.Context) error
 	HibernateIdleChats(ctx context.Context) error
 	RestoreAll(ctx context.Context) error
@@ -364,10 +365,12 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 	}
 	reviewerChat, _ := chat.(reviewcore.ReviewerChatController)
 	reviewEngine := reviewcore.New(reviewcore.Deps{
-		Store:    store,
-		Sessions: store,
-		PRs:      store,
-		Projects: store,
+		// The manager's installer gate is bound after the installer is built.
+		HarnessUse: mgr,
+		Store:      store,
+		Sessions:   store,
+		PRs:        store,
+		Projects:   store,
 		Launcher: reviewcore.NewLauncher(reviewers, runtime, cfg.DataDir,
 			reviewcore.WithRunFilePath(cfg.RunFilePath),
 			reviewcore.WithAgentAuth(reviewerAgentAuth{readiness: agentReadiness}),
@@ -603,6 +606,7 @@ var _ interface {
 var _ sessionmanager.ChatLauncher = chatLauncher{}
 var _ interface {
 	RunBackgroundTask(context.Context, domain.AgentHarness, ports.ChatStartConfig, string) (string, error)
+	RunPromptSuggestionTask(context.Context, domain.SessionID, string, domain.AgentHarness, ports.ChatStartConfig, string) (string, error)
 	ArmChatHandoff(context.Context, domain.SessionID, domain.SessionInterfaceTransitionPolicy) error
 	PrepareChatHandoff(context.Context, domain.SessionID, domain.SessionInterfaceTransitionPolicy) error
 	AbortChatHandoff(domain.SessionID)
@@ -687,6 +691,10 @@ func (c chatLauncher) RunBackgroundTask(ctx context.Context, harness domain.Agen
 	return c.svc.RunBackgroundTask(ctx, harness, cfg, prompt)
 }
 
+func (c chatLauncher) RunPromptSuggestionTask(ctx context.Context, id domain.SessionID, turnID string, harness domain.AgentHarness, cfg ports.ChatStartConfig, prompt string) (string, error) {
+	return c.svc.RunPromptSuggestionTask(ctx, id, turnID, harness, cfg, prompt)
+}
+
 func (c chatLauncher) StartChatTurn(ctx context.Context, id domain.SessionID, text string) (string, error) {
 	return c.svc.StartChatTurn(ctx, id, text)
 }
@@ -730,6 +738,12 @@ func (c chatLauncher) ArmChatHandoff(
 	policy domain.SessionInterfaceTransitionPolicy,
 ) error {
 	return c.svc.ArmChatHandoff(ctx, id, policy)
+}
+
+// MarkAccountSwitch marks the turn an account move stopped, so the chat shows
+// the switch instead of a failure.
+func (c chatLauncher) MarkAccountSwitch(ctx context.Context, id domain.SessionID, accountID string) error {
+	return c.svc.MarkAccountSwitch(ctx, id, accountID)
 }
 
 func (c chatLauncher) PrepareChatHandoff(
