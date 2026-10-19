@@ -43,6 +43,32 @@ function fakeTarget() {
 }
 
 describe("attachAppShortcuts", () => {
+	it.each([true, false])("leaves find to the focused renderer, Browser, or terminal (macOS: %s)", (isMac) => {
+		const source = fakeSource();
+		const target = fakeTarget();
+		attachAppShortcuts(source, isMac, target, true);
+
+		const event = source.emit({ key: "f", meta: isMac, control: !isMac });
+
+		expect(event.preventDefault).not.toHaveBeenCalled();
+		expect(target.send).not.toHaveBeenCalled();
+		expect(target.focus).not.toHaveBeenCalled();
+	});
+
+	it("keeps a rebound Board find shortcut renderer-local too", () => {
+		const source = fakeSource();
+		const target = fakeTarget();
+		attachAppShortcuts(source, false, target, true, () => ({
+			find: [{ key: "f", ctrl: true, shift: true, alt: false, meta: false }],
+		}));
+
+		const event = source.emit({ key: "F", control: true, shift: true });
+
+		expect(event.preventDefault).not.toHaveBeenCalled();
+		expect(target.send).not.toHaveBeenCalled();
+		expect(target.focus).not.toHaveBeenCalled();
+	});
+
 	it("routes Ctrl+Shift+I to shell DevTools when no Browser view is available", async () => {
 		const source = fakeSource();
 		const target = { ...fakeTarget(), toggleDevTools: vi.fn() };

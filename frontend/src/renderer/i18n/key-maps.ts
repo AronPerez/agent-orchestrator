@@ -10,6 +10,7 @@ export const shortcutLabelKeys: Record<AppShortcutId, MessageKey> = {
 	"reopen-closed-tab": "shortcut.reopen-closed-tab",
 	"keyboard-shortcuts": "shortcut.keyboard-shortcuts",
 	"command-palette": "shortcut.command-palette",
+	find: "shortcut.find",
 	"quick-open-file": "shortcut.quick-open-file",
 	"open-settings": "shortcut.open-settings",
 	"toggle-sidebar": "shortcut.toggle-sidebar",
