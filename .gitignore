@@ -113,3 +113,5 @@ scripts/running.json
 
 # web UI bundle built by scripts/daemon-build.sh
 backend/internal/httpd/webui/bundle/
+
+/frontend/wake-helper/
