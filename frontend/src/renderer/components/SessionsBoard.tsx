@@ -24,12 +24,18 @@ import {
 import {
 	boardKanbanColumnOrder,
 	getKanbanColumnView,
+	getSessionStatusView,
 	type KanbanColumnView,
 } from "../lib/session-presentation";
+import { matchScore } from "../lib/command-palette";
+import { isDialogOrMenuOpen } from "../lib/dom-selectors";
+import { matchesAppShortcut } from "../../shared/shortcuts";
+import { useKeybindingsStore } from "../stores/keybindings-store";
 import { useRestoreSession } from "../hooks/useRestoreSession";
 import { useTerminateSession } from "../hooks/useTerminateSession";
 import { useRemoteProjectQuery, useWorkspaceQuery, workspaceQueryKeyForHost } from "../hooks/useWorkspaceQuery";
 import { NotificationCenter } from "./NotificationCenter";
+import { BoardFindBar } from "./BoardFindBar";
 import { BoardWelcome, ProjectBoardEmpty } from "./BoardEmptyStates";
 import { TopbarButton, topbarProjectLabelClass } from "./TopbarButton";
 import { restartProjectOrchestrator } from "../lib/restart-orchestrator";
@@ -88,6 +94,20 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 	const shell = useShellMaybe();
 	const connected = useConnectedHosts().includes(hostId ?? "");
 	const scopeKey = refKey({ host: hostId ?? LOCAL_HOST, id: projectId ?? "all" });
+	const [isFindOpen, setIsFindOpen] = useState(false);
+	const [findQuery, setFindQuery] = useState("");
+	const findInputRef = useRef<HTMLInputElement>(null);
+	const boardRef = useRef<HTMLDivElement>(null);
+	const findOriginRef = useRef<HTMLElement | null>(null);
+	const closeFind = useCallback(() => {
+		setIsFindOpen(false);
+		setFindQuery("");
+		(findOriginRef.current?.isConnected ? findOriginRef.current : boardRef.current)?.focus();
+	}, []);
+	useEffect(() => {
+		setIsFindOpen(false);
+		setFindQuery("");
+	}, [scopeKey]);
 	// Lanes follow the daemon's delivery order: building -> validating ->
 	// in review -> ready. The middle two are one review-feedback loop, split by
 	// whose turn it is.
@@ -123,10 +143,21 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 	const setOrchestratorReplacementError = useUiStore((state) => state.setOrchestratorReplacementError);
 	const setOrchestratorStartupError = useUiStore((state) => state.setOrchestratorStartupError);
 	const health = workspace ? orchestratorHealth(workspace, isProjectRestarting) : { state: "ok" as const };
-	const archived = sessions
+	const filteredSessions = findQuery.trim()
+		? sessions.filter((session) => matchScore(findQuery, {
+			title: session.title,
+			subtitle: session.branch,
+			keywords: [
+				session.workspaceName,
+				getSessionStatusView(session.status, t).label,
+				...session.prs.flatMap((pr) => [`#${pr.number}`, String(pr.number)]),
+			],
+		}) > 0)
+		: sessions;
+	const archived = filteredSessions
 		.filter(isArchivedSession)
 		.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
-	const activeSessions = sessions.filter((candidate) => !isArchivedSession(candidate));
+	const activeSessions = filteredSessions.filter((candidate) => !isArchivedSession(candidate));
 	const boardSessions = activeSessions.map((session) =>
 		session.status === "no_signal" || session.displayStatus === "No signal"
 			? { ...session, kanbanColumn: "building" as const }
@@ -145,6 +176,35 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 	const showProjectEmpty = hostId
 		? connected && remoteProjectQuery.isSuccess && Boolean(workspace) && liveSessions.length === 0
 		: presentation.showProjectEmpty;
+	const boardLoadFailed = !hostId && (presentation.workspaceStartupState === "error" || localWorkspaceQuery.isError);
+	const canFind = !showStartup && !showWelcome && !showProjectEmpty && !boardLoadFailed
+		&& (!hostId || Boolean(workspace)) && !(projectId && (isProvisioning || projectActions.isSpawning));
+	useEffect(() => {
+		if (!canFind) return;
+		const handleKeyDown = (event: KeyboardEvent) => {
+			if (event.defaultPrevented || event.isComposing || event.repeat || isDialogOrMenuOpen()
+				|| useUiStore.getState().settingsModal?.scope === "global") return;
+			const target = event.target instanceof Element ? event.target : null;
+			if (target?.closest(".browser-panel, .xterm, .terminal-surface, [data-testid='session-terminal']")) return;
+			if (target !== findInputRef.current && target?.closest("input, textarea, [contenteditable]:not([contenteditable='false'])")) return;
+			if (isFindOpen && event.key === "Escape") {
+				event.preventDefault();
+				closeFind();
+				return;
+			}
+			if (!matchesAppShortcut("find", {
+				key: event.key, code: event.code, ctrl: event.ctrlKey, meta: event.metaKey, shift: event.shiftKey, alt: event.altKey,
+			}, isMacPlatform(), useKeybindingsStore.getState().overrides)) return;
+			event.preventDefault();
+			if (!isFindOpen) findOriginRef.current = document.activeElement instanceof HTMLElement && document.activeElement !== document.body
+				? document.activeElement : boardRef.current;
+			setIsFindOpen(true);
+			findInputRef.current?.focus();
+			findInputRef.current?.select();
+		};
+		window.addEventListener("keydown", handleKeyDown);
+		return () => window.removeEventListener("keydown", handleKeyDown);
+	}, [canFind, closeFind, isFindOpen]);
 	// Memory and CPU monitoring is a developer tool: the light, the card chips
 	// and the window behind them only exist with Diagnostics on in Developer mode.
 	// They read this machine, so another machine's board shows none of them.
@@ -166,7 +226,7 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 			chipTone(pressure ?? "fine", facts.find((f) => f.id === session.id) ?? toSessionFacts(session, memoryBySession?.get(session.id), now), largest);
 	}, [sessions, memoryBySession, pressure]);
 	// The bar hosts the memory indicator too, so it stays up with an empty archive.
-	const hasArchive = archived.length > 0 || hasMemory;
+	const hasArchive = sessions.some(isArchivedSession) || hasMemory;
 	const terminateSession = useTerminateSession();
 	const activeScopeRef = useRef(scopeKey);
 	activeScopeRef.current = scopeKey;
@@ -228,7 +288,7 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 	}
 
 	return (
-		<div className="relative flex h-full min-h-0 flex-col bg-background text-foreground" data-testid="board" data-host-id={hostId} data-project-id={projectId}>
+		<div className="relative flex h-full min-h-0 flex-col bg-background text-foreground" data-testid="board" data-host-id={hostId} data-project-id={projectId} ref={boardRef} tabIndex={-1}>
 			{/* macOS: shell topbar is hidden on board routes, so the project/"Board"
 			    crumb + New task / Orchestrator / bell live in this in-panel row.
 			    Win/Linux keep the crumb and actions in the framed ShellTopbar.
@@ -269,7 +329,17 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 
 			{/* Reserve only the collapsed archive bar. Expanded archive overlays the
 			    board so lane height (and Needs You scrollbars) stay stable. */}
-			<div className={cn("min-h-0 flex-1 overflow-hidden", hasArchive && archiveToggleOffsetClassName)}>
+			<div className={cn("relative min-h-0 flex-1 overflow-hidden", hasArchive && archiveToggleOffsetClassName)}>
+				{canFind && isFindOpen ? (
+					<BoardFindBar
+						inputRef={findInputRef}
+						matches={filteredSessions.length}
+						onClose={closeFind}
+						onQueryChange={setFindQuery}
+						query={findQuery}
+						total={sessions.length}
+					/>
+				) : null}
 				{projectId && health.state !== "ok" && (!hostId || connected && (health.state !== "missing" || hasConfiguredOrchestratorAgent(workspace))) ? (
 					<div className="mx-3 my-3 flex items-center gap-3 rounded-md border border-border bg-surface px-3 py-2 text-xs text-muted-foreground">
 						<AlertTriangle className="size-icon-base shrink-0 text-warning" aria-hidden="true" />
@@ -302,12 +372,14 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 					</span>
 				</div>
 			) : null}
-				{!hostId && (presentation.workspaceStartupState === "error" || localWorkspaceQuery.isError) ? (
+				{boardLoadFailed ? (
 					<p className="py-10 text-center text-xs text-passive">{t("shell.couldNotLoadSessions")}</p>
 				) : hostId && !workspace ? null : showWelcome ? (
 				<BoardWelcome />
 				) : showProjectEmpty ? (
 					<ProjectBoardEmpty actions={<ProjectBoardActions actions={projectActions} placement="empty" />} />
+				) : findQuery.trim() && filteredSessions.length === 0 ? (
+					<p className="py-10 text-center text-xs text-muted-foreground">{t("board.find.noResults")}</p>
 				) : (
 					<SessionsBoardGridView
 						columns={columns}

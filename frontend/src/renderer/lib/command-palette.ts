@@ -548,7 +548,9 @@ function isSubsequence(query: string, haystack: string): boolean {
 	return i === query.length;
 }
 
-export function matchScore(query: string, item: CommandItem): number {
+export type MatchTarget = Pick<CommandItem, "title" | "subtitle" | "keywords"> & Partial<Pick<CommandItem, "group">>;
+
+export function matchScore(query: string, item: MatchTarget): number {
 	const q = query.trim().toLowerCase();
 	if (!q) return 1;
 	const title = item.title.toLowerCase();

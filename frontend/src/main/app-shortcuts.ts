@@ -71,6 +71,8 @@ const appShortcutMatch = (
 	overrides: KeybindingOverrides,
 ): { id: AppShortcutId; channel: string; payload: unknown[] } | null => {
 	for (const { id } of APP_SHORTCUTS) {
+		// Board find is renderer-local; Browser and terminal find keep their chords.
+		if (id === "find") continue;
 		if (mainHandledShortcuts.has(id) || !matchesAppShortcut(id, chord, isMac, overrides)) continue;
 		const legacy = legacyShortcutChannels[id];
 		if (legacy) return { id, channel: legacy, payload: [] };

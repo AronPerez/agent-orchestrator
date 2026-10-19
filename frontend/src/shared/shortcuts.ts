@@ -36,6 +36,7 @@ export type AppShortcutId =
 	| "reopen-closed-tab"
 	| "keyboard-shortcuts"
 	| "command-palette"
+	| "find"
 	| "quick-open-file"
 	| "open-settings"
 	| "toggle-sidebar"
@@ -85,6 +86,7 @@ export const SHORTCUT_CATEGORIES: readonly ShortcutCategory[] = ["General", "Nav
 export const APP_SHORTCUTS: readonly ShortcutDefinition[] = [
 	{ id: "new-session", label: "New session", category: "General" },
 	{ id: "command-palette", label: "Open command palette", category: "General" },
+	{ id: "find", label: "Find", category: "General" },
 	{ id: "quick-open-file", label: "Quick open file", category: "General" },
 	{ id: "open-settings", label: "Open settings", category: "General" },
 	{ id: "keyboard-shortcuts", label: "Show keyboard shortcuts", category: "General" },
@@ -145,6 +147,8 @@ export function defaultShortcutBindings(id: AppShortcutId, isMac: boolean): read
 			return [binding("/", primary)];
 		case "command-palette":
 			return [binding("k", primary), binding("p", { ...primary, shift: true })];
+		case "find":
+			return [binding("f", primary)];
 		case "quick-open-file":
 			return [binding("p", primary)];
 		case "open-settings":

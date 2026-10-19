@@ -321,6 +321,8 @@ describe("shortcut binding matching and validation", () => {
 		for (const key of readline) {
 			if (yielding.has(key)) continue;
 			for (const { id } of APP_SHORTCUTS) {
+				// Board find is renderer-local, never a main-process terminal intercept.
+				if (id === "find") continue;
 				expect(matchesAppShortcut(id, chord({ key, ctrl: true }), false), `${id} steals Ctrl+${key}`).toBe(false);
 			}
 		}
@@ -364,5 +366,22 @@ describe("shortcut binding matching and validation", () => {
 		expect(shortcutBindingValidationError(chord({ key: "q", meta: true }), true)).not.toBeNull();
 		expect(shortcutBindingValidationError(chord({ key: "F4", alt: true }), false)).not.toBeNull();
 		expect(shortcutBindingValidationError(chord({ key: "j", meta: true }), true)).toBeNull();
+	});
+});
+
+describe("find shortcut", () => {
+	it("defaults to Command+F on macOS and Ctrl+F on Windows/Linux", () => {
+		expect(matchesAppShortcut("find", chord({ key: "f", meta: true }), true)).toBe(true);
+		expect(matchesAppShortcut("find", chord({ key: "F", ctrl: true }), false)).toBe(true);
+		expect(matchesAppShortcut("find", chord({ key: "f", ctrl: true }), true)).toBe(false);
+		expect(matchesAppShortcut("find", chord({ key: "f", meta: true }), false)).toBe(false);
+		expect(matchesAppShortcut("find", chord({ key: "f", ctrl: true, shift: true }), false)).toBe(false);
+	});
+
+	it("uses a user override instead of the default chord", () => {
+		const overrides = { find: [chord({ key: "e", ctrl: true, shift: true })] };
+
+		expect(matchesAppShortcut("find", chord({ key: "e", ctrl: true, shift: true }), false, overrides)).toBe(true);
+		expect(matchesAppShortcut("find", chord({ key: "f", ctrl: true }), false, overrides)).toBe(false);
 	});
 });
