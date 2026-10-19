@@ -244,6 +244,20 @@ export type SessionCardViewProps = {
 	usage?: BoardUsagePresentation;
 };
 
+export function getBoardSessionStatusLabel(
+	session: BoardSessionPresentation,
+	translate: ProductUITranslator = defaultProductUITranslator,
+): string {
+	return session.statusReadiness === "checking"
+		? translate("session.statusChecking")
+		: session.statusReadiness === "unavailable"
+			? translate("session.statusUnavailable")
+			: (session.statusPresentation?.label ??
+				(session.displayStatus
+					? getDisplayStatusLabel(session.displayStatus, translate)
+					: getSessionStatusView(session.status, translate).label));
+}
+
 export function SessionCardView({
 	action,
 	artifacts,
@@ -264,7 +278,6 @@ export function SessionCardView({
 	translate,
 	usage,
 }: SessionCardViewProps) {
-	const translateStatus = translate ?? defaultProductUITranslator;
 	const badge = getSessionStatusView(session.status, translate);
 	const statusPresentation = session.statusPresentation;
 	const needsAttention = boardSessionNeedsAttention(session);
@@ -278,13 +291,7 @@ export function SessionCardView({
 				: (session.statusPresentation?.className ?? column.titleClassName);
 	const branch = session.branch ?? "";
 	const showBranch = branch !== "" && !sameLabel(branch, session.title) && !sameLabel(branch, session.id);
-	const renderedStatusLabel =
-		session.statusReadiness === "checking"
-			? translateStatus("session.statusChecking")
-			: session.statusReadiness === "unavailable"
-				? translateStatus("session.statusUnavailable")
-				: (statusPresentation?.label ??
-					(session.displayStatus ? getDisplayStatusLabel(session.displayStatus, translate) : badge.label));
+	const renderedStatusLabel = getBoardSessionStatusLabel(session, translate);
 	// Additive summary footer, not a replacement for renderedStatusLabel: it
 	// only appears once the daemon confirms the session is actually finished
 	// ("terminated", or "merged" with isTerminated true -- a live session can

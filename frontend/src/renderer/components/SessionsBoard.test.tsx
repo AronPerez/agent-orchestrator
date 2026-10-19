@@ -1822,6 +1822,44 @@ describe("SessionsBoard find bar", () => {
 		expect(within(findBar).getByText(count)).toBeInTheDocument();
 	});
 
+	it.each<[string, Partial<WorkspaceSession>, string]>([
+		["en", {}, "Idle"],
+		["en", { displayStatus: "Awaiting PR" }, "Awaiting PR"],
+		["en", { displayStatus: "Mergeable" }, "Mergeable"],
+		["en", { displayStatus: "Fixing CI failures" }, "Fixing CI failures"],
+		["de", { displayStatus: "Awaiting PR" }, "Wartet auf PR"],
+		["en", { displayStatus: "Awaiting PR", provisionState: "failed" }, "Start failed"],
+		["en", { provisionState: "provisioning" }, "Starting Claude Code…"],
+		["en", { activeAgentSwitch: activeAgentSwitch("s-status") }, "Switching to Codex"],
+		["en", { displayStatus: "Working", provisionState: "failed", statusReadiness: "checking" }, "Checking…"],
+		["en", { displayStatus: "Working", statusReadiness: "unavailable" }, "Unable to verify"],
+	])("matches the rendered status and legacy fallback in %s: %j", async (language, overrides, label) => {
+		await appI18n.changeLanguage(language);
+		workspaceQueryMock.mockReturnValue({
+			data: [workspaceWithSessions([
+				boardSession({ id: "s-status", title: "matching worker", status: "idle", ...overrides }),
+				boardSession({ id: "s-other", title: "unrelated worker", status: "working" }),
+			])],
+			isError: false,
+			isSuccess: true,
+		});
+		try {
+			renderBoard("p1");
+			const findBar = await openFindBar();
+			const input = within(findBar).getByRole("textbox");
+			for (const query of [label, appI18n.t("status.idle")]) {
+				await userEvent.clear(input);
+				await userEvent.type(input, query);
+				expect(within(findBar).getByText("1/2")).toBeInTheDocument();
+				expect(screen.getByTestId("session-status")).toHaveTextContent(label);
+				expect(screen.getByText("matching worker")).toBeInTheDocument();
+				expect(screen.queryByText("unrelated worker")).not.toBeInTheDocument();
+			}
+		} finally {
+			await appI18n.changeLanguage("en");
+		}
+	});
+
 	it("clears on close, returns focus to the board, and reopens without a stale query", async () => {
 		renderBoard("p1");
 		const findBar = await openFindBar();

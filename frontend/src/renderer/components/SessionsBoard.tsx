@@ -8,6 +8,7 @@ import {
 	SessionsBoardGridView,
 	archiveToggleOffsetClassName,
 	chipTone,
+	getBoardSessionStatusLabel,
 	largestSession,
 	type ChipTone,
 } from "@aoagents/product-ui";
@@ -28,6 +29,7 @@ import {
 	type KanbanColumnView,
 } from "../lib/session-presentation";
 import { matchScore } from "../lib/command-palette";
+import type { MessageKey } from "../i18n";
 import { isDialogOrMenuOpen } from "../lib/dom-selectors";
 import { matchesAppShortcut } from "../../shared/shortcuts";
 import { useKeybindingsStore } from "../stores/keybindings-store";
@@ -63,6 +65,7 @@ import {
 	ArchivedSessionCardAdapter,
 	BoardSessionCardAdapter,
 	sessionsBoardLabels,
+	toBoardSessionPresentation,
 } from "./SessionsBoardAdapters";
 
 type SessionsBoardProps = {
@@ -149,6 +152,7 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 			subtitle: session.branch,
 			keywords: [
 				session.workspaceName,
+				getBoardSessionStatusLabel(toBoardSessionPresentation(session, t), (key, values) => t(key as MessageKey, values)),
 				getSessionStatusView(session.status, t).label,
 				...session.prs.flatMap((pr) => [`#${pr.number}`, String(pr.number)]),
 			],
