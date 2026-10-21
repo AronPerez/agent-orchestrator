@@ -177,3 +177,43 @@ func TestSwitchTargetThatMissesItsPromptLeavesTheSessionToTheRollback(t *testing
 }
 
 func ptr(s string) *string { return &s }
+
+type scopedSwitchAuthAgent struct{ *launchAuthAgent }
+
+func (scopedSwitchAuthAgent) AuthStatus(context.Context) (ports.AgentAuthStatus, error) {
+	return ports.AgentAuthStatusUnauthorized, nil
+}
+
+func TestSwitchTUIProviderUsesProjectScopedAuthBeforeStoppingSource(t *testing.T) {
+	for _, status := range []ports.AgentAuthStatus{ports.AgentAuthStatusAuthorized, ports.AgentAuthStatusUnauthorized} {
+		t.Run(string(status), func(t *testing.T) {
+			st := newFakeStore()
+			config := testRoleAgents()
+			config.Env = map[string]string{"ANTHROPIC_API_KEY": "project-test-key"}
+			st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: config}
+			rec := mkLive("mer-1")
+			rec.Harness, rec.Mode, rec.Kind = domain.HarnessCodex, domain.SessionModeTUI, domain.KindWorker
+			rec.Activity.State = domain.ActivityExited
+			rec.Metadata.Branch, rec.Metadata.Prompt = "branch", "original task"
+			st.sessions[rec.ID] = rec
+			agent := scopedSwitchAuthAgent{&launchAuthAgent{recordingAgent: &recordingAgent{}, status: status}}
+			runtime := &fakeRuntime{}
+			m := New(Deps{Runtime: runtime, Agents: singleAgent{agent: agent}, Store: &launchOptionsFakeStore{fakeStore: st},
+				Workspace: &fakeWorkspace{}, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+				LookPath: func(string) (string, error) { return "/bin/true", nil }})
+			err := m.SwitchTUIProvider(context.Background(), rec.ID, domain.ProviderSwitchRequest{
+				TargetHarness: domain.HarnessClaudeCode, HandoffNote: "handoff",
+			})
+			if agent.workingDir != rec.Metadata.WorkspacePath || agent.env["ANTHROPIC_API_KEY"] != "project-test-key" {
+				t.Fatalf("auth ignored launch context: cwd=%q env=%v", agent.workingDir, agent.env)
+			}
+			if status == ports.AgentAuthStatusUnauthorized {
+				if !errors.Is(err, ports.ErrAgentAuthRequired) || runtime.created != 0 || runtime.destroyed != 0 || st.sessions[rec.ID].Harness != rec.Harness {
+					t.Fatalf("unauthorized preflight touched source: err=%v created=%d destroyed=%d", err, runtime.created, runtime.destroyed)
+				}
+			} else if err != nil || runtime.created != 1 || st.sessions[rec.ID].Harness != domain.HarnessClaudeCode {
+				t.Fatalf("project-authorized target did not start: err=%v created=%d", err, runtime.created)
+			}
+		})
+	}
+}

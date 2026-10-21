@@ -1,6 +1,12 @@
 -- Fork compatibility only: receipts for the frozen UI over provider switching.
 -- No old saga worker, native-session registry, or failure uploader is restored.
 
+-- name: ReserveForkSwitchLaunch :execrows
+UPDATE sessions SET runtime_launch_id = sqlc.arg(launch_id), updated_at = sqlc.arg(updated_at)
+WHERE id = sqlc.arg(id) AND revision = sqlc.arg(expected_revision)
+    AND harness = sqlc.arg(expected_harness) AND session_mode = 'tui'
+    AND is_terminated = sqlc.arg(expected_terminated) AND runtime_handle_id = '';
+
 -- name: ListForkAgentSwitches :many
 SELECT * FROM agent_switches WHERE session_id = ? ORDER BY requested_at DESC, id DESC;
 

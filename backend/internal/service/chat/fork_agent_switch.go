@@ -11,6 +11,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
 type forkSwitchStore interface {
@@ -91,6 +92,17 @@ func (s *Service) ForkSwitchAgent(ctx context.Context, id domain.SessionID, req 
 	// as a source-authored handoff fence or used to probe/stop a process.
 	if sw.SourceGenerationID == "" {
 		sw.SourceGenerationID = sw.ID
+	}
+	// Resolve only after fingerprinting the wire request; retries keep its meaning
+	// even when the project's inherited model changes after the first launch.
+	if resolver, ok := s.terminalSwitcher.(interface {
+		ResolveForkSwitchConfig(context.Context, domain.SessionRecord, domain.AgentHarness, string) (ports.AgentConfig, error)
+	}); ok {
+		config, err := resolver.ResolveForkSwitchConfig(ctx, rec, req.TargetHarness, req.Model)
+		if err != nil {
+			return domain.AgentSwitch{}, err
+		}
+		req.Model, req.Effort = config.Model, config.Effort
 	}
 	if err := st.InsertForkAgentSwitch(ctx, sw); err != nil {
 		return domain.AgentSwitch{}, err

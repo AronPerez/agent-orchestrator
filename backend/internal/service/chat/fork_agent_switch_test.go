@@ -15,7 +15,9 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	chatsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/chat"
+	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/store"
 )
 
@@ -115,6 +117,67 @@ func TestForkAgentSwitchLegacyHTTPValidation(t *testing.T) {
 	rows, err := h.st.ListForkAgentSwitches(context.Background(), testSession)
 	if err != nil || len(rows) != 0 {
 		t.Fatalf("invalid requests admitted switches: %+v %v", rows, err)
+	}
+}
+
+type forkConfiguredSwitcher struct {
+	forkRecoverySwitcher
+	manager *sessionmanager.Manager
+}
+
+func (f *forkConfiguredSwitcher) ResolveForkSwitchConfig(ctx context.Context, rec domain.SessionRecord, target domain.AgentHarness, model string) (ports.AgentConfig, error) {
+	return f.manager.ResolveForkSwitchConfig(ctx, rec, target, model)
+}
+
+type forkModelCatalog struct{}
+
+func (forkModelCatalog) Models(context.Context, string, string, bool) (ports.AgentModelCatalog, error) {
+	return ports.AgentModelCatalog{Models: []ports.AgentModelInfo{{ID: "opus"}, {ID: "sonnet"}}}, nil
+}
+
+func TestForkAgentSwitchLegacyHTTPInheritsTargetModel(t *testing.T) {
+	for _, tc := range []struct{ name, model, want string }{
+		{"inherited", "", "opus"}, {"explicit", "sonnet", "sonnet"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _, driver := newEditHarness(t, false)
+			ctx := context.Background()
+			config := domain.ProjectConfig{
+				AgentConfig:  domain.AgentConfig{Model: "sonnet"},
+				Orchestrator: domain.RoleOverride{Harness: domain.HarnessClaudeCode, AgentConfig: domain.AgentConfig{Model: "opus"}},
+			}
+			if _, err := h.st.UpdateProjectSettings(ctx, string(testProject), "test", config); err != nil {
+				t.Fatal(err)
+			}
+			r := forkSwitchRouter(h)
+			manager := sessionmanager.New(sessionmanager.Deps{Store: h.st})
+			manager.SetModelCatalog(forkModelCatalog{})
+			h.svc.SetTerminalProviderSwitcher(&forkConfiguredSwitcher{manager: manager})
+			body := `{"targetHarness":"claude-code","idempotencyKey":"inherited-model"}`
+			if tc.model != "" {
+				body = fmt.Sprintf(`{"targetHarness":"claude-code","idempotencyKey":"inherited-model","model":%q}`, tc.model)
+			}
+			if w := forkSwitchCall(r, http.MethodPost, "/switch-agent", body); w.Code != http.StatusAccepted {
+				t.Fatalf("switch: %d %s", w.Code, w.Body.String())
+			}
+			conversation, err := h.st.ConversationForSession(ctx, testSession)
+			if err != nil || conversation.Settings.Model != tc.want || lastStart(driver).Model != tc.want {
+				t.Fatalf("model: launch=%q settings=%q want=%q err=%v", lastStart(driver).Model, conversation.Settings.Model, tc.want, err)
+			}
+			config.Orchestrator.AgentConfig.Model = "changed-after-switch"
+			if _, err := h.st.UpdateProjectSettings(ctx, string(testProject), "test", config); err != nil {
+				t.Fatal(err)
+			}
+			if w := forkSwitchCall(r, http.MethodPost, "/switch-agent", body); w.Code != http.StatusAccepted || !strings.Contains(w.Body.String(), `"state":"completed"`) {
+				t.Fatalf("retry should match the original request, not new defaults: %d %s", w.Code, w.Body.String())
+			}
+			driver.mu.Lock()
+			starts := driver.startCalls
+			driver.mu.Unlock()
+			if starts != 2 {
+				t.Fatalf("retry started another provider: %d launches", starts)
+			}
+		})
 	}
 }
 
