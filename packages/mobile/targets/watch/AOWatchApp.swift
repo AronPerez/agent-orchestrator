@@ -3,7 +3,10 @@ import SwiftUI
 @main
 struct AOWatchApp: App {
     @StateObject private var store = InboxStore()
-    var body: some Scene { WindowGroup { InboxView().environmentObject(store) } }
+    var body: some Scene {
+        WindowGroup { InboxView().environmentObject(store) }
+            .backgroundTask(.watchConnectivity) { await store.receiveBackgroundUpdates() }
+    }
 }
 
 struct InboxView: View {

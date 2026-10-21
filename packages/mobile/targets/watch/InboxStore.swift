@@ -47,21 +47,41 @@ final class InboxStore: NSObject, ObservableObject, WCSessionDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 25) { finish(uncertain) }
     }
 
+    @MainActor
+    func receiveBackgroundUpdates() async {
+        guard WCSession.isSupported() else { return }
+        let session = WCSession.default
+        // Buffer state changes that arrive before the main actor can resume.
+        let (updates, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let observation = session.publisher(for: \.activationState)
+            .combineLatest(session.publisher(for: \.hasContentPending))
+            .sink { _ in continuation.yield(()) }
+        defer { observation.cancel(); continuation.finish() }
+        for await _ in updates {
+            if Task.isCancelled { return }
+            guard session.activationState == .activated, !session.hasContentPending else { continue }
+            // Flush the latest context here even if its delegate write is still queued.
+            receive(session.receivedApplicationContext)
+            return
+        }
+    }
+
+    @MainActor
     private func receive(_ context: [String: Any]) {
         guard let json = context["snapshot"] as? String, json.utf8.count < 48_000,
               let data = json.data(using: .utf8),
               let incoming = try? JSONDecoder().decode(WatchSnapshot.self, from: data), incoming.version == 1 else { return }
-        DispatchQueue.main.async {
-            guard incoming.generatedAt >= (self.snapshot?.generatedAt ?? 0) else { return }
-            let merged = incoming.retainingCache(from: self.snapshot)
-            self.snapshot = merged
-            WatchCache.save(merged)
-            WidgetCenter.shared.reloadTimelines(ofKind: "AOAttention")
-        }
+        guard incoming.generatedAt >= (snapshot?.generatedAt ?? 0) else { return }
+        let merged = incoming.retainingCache(from: snapshot)
+        snapshot = merged
+        WatchCache.save(merged)
+        WidgetCenter.shared.reloadTimelines(ofKind: "AOAttention")
     }
-    func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) { receive(applicationContext) }
+    func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) {
+        DispatchQueue.main.async { self.receive(applicationContext) }
+    }
     func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
-        receive(session.receivedApplicationContext)
+        DispatchQueue.main.async { self.receive(session.receivedApplicationContext) }
         sessionReachabilityDidChange(session)
     }
     func sessionReachabilityDidChange(_ session: WCSession) {

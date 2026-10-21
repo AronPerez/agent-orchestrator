@@ -480,6 +480,7 @@ npm ci
 npm run typecheck
 npm test
 ./scripts/test-watch-model.sh   # Foundation assertion tests; no simulator needed
+./scripts/test-watch-background.sh # macOS: actual InboxStore with transport/cache doubles
 npx expo prebuild --clean --platform ios
 # Pair an iOS and watchOS simulator in Xcode > Devices and Simulators first.
 xcrun simctl list pairs
@@ -522,7 +523,10 @@ not a compiled app. Native simulator build and physical paired-device QA are mer
    host offline while one remains connected; verify partial counts and host labels.
 6. Add each complication family and a Smart Stack widget. Inspect after two minutes,
    after a day, and after reconnecting; compare last-known count/age with the inbox.
-   Check wrist-down privacy, widget refresh delays, battery use and VoiceOver.
+   Keep phone AO foregrounded, background the Watch app, then change attention on a
+   host. Confirm the complication cache updates without opening the Watch app again
+   (allow OS-budgeted widget refresh). Check wrist-down privacy, widget refresh delays,
+   battery use and VoiceOver.
 7. In a Chat worker, open **Wrist actions**, choose an offered one-time decision and
    inspect the entire command, cwd, reason, host and worker before **Confirm and send**.
    Cancel once (no request), confirm once, then answer the same request on the phone
