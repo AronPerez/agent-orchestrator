@@ -1,8 +1,8 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { workspaceQueryKey } from "./useWorkspaceQuery";
-import { apiErrorMessage } from "../lib/api-client";
-import { clientFor } from "../lib/host-clients";
-import type { Ref } from "../lib/hosts";
+import type { WorkspaceSession } from "../types/workspace";
+import { workspaceQueryKeyForHost } from "./useWorkspaceQuery";
+import { apiClient, apiErrorMessage } from "../lib/api-client";
+import { clientForSessionHost } from "../lib/host-clients";
 
 export const pinSessionMutationKey = ["pin-session"] as const;
 export const unpinSessionMutationKey = ["unpin-session"] as const;
@@ -11,8 +11,8 @@ export function usePinSession() {
 	const queryClient = useQueryClient();
 	return useMutation({
 		mutationKey: pinSessionMutationKey,
-		mutationFn: async (session: Ref) => {
-			const { error, response } = await clientFor(session.host).POST("/api/v1/sessions/{sessionId}/pin", {
+		mutationFn: async (session: WorkspaceSession) => {
+			const { error, response } = await (session.hostId ? clientForSessionHost(session.hostId) : apiClient).POST("/api/v1/sessions/{sessionId}/pin", {
 				params: { path: { sessionId: session.id } },
 			});
 			if (error) {
@@ -20,8 +20,8 @@ export function usePinSession() {
 				throw new Error(apiErrorMessage(error, fallback));
 			}
 		},
-		onSuccess: async () => {
-			await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
+		onSuccess: async (_data, session) => {
+			await queryClient.invalidateQueries({ queryKey: workspaceQueryKeyForHost(session.hostId) });
 		},
 		onError: (error) => {
 			console.error("Failed to pin session:", error);
@@ -33,8 +33,8 @@ export function useUnpinSession() {
 	const queryClient = useQueryClient();
 	return useMutation({
 		mutationKey: unpinSessionMutationKey,
-		mutationFn: async (session: Ref) => {
-			const { error, response } = await clientFor(session.host).DELETE("/api/v1/sessions/{sessionId}/pin", {
+		mutationFn: async (session: WorkspaceSession) => {
+			const { error, response } = await (session.hostId ? clientForSessionHost(session.hostId) : apiClient).DELETE("/api/v1/sessions/{sessionId}/pin", {
 				params: { path: { sessionId: session.id } },
 			});
 			if (error) {
@@ -42,8 +42,8 @@ export function useUnpinSession() {
 				throw new Error(apiErrorMessage(error, fallback));
 			}
 		},
-		onSuccess: async () => {
-			await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
+		onSuccess: async (_data, session) => {
+			await queryClient.invalidateQueries({ queryKey: workspaceQueryKeyForHost(session.hostId) });
 		},
 		onError: (error) => {
 			console.error("Failed to unpin session:", error);

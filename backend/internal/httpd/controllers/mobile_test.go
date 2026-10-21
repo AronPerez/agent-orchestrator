@@ -41,6 +41,9 @@ func (f *fakeBridge) SetKeepAwake(on bool) (MobileStatusResponse, error) {
 	r.KeepAwake.Enabled = on
 	return r, nil
 }
+func (f *fakeBridge) SetKeepAwakeLid(bool, bool) (MobileStatusResponse, error) {
+	return MobileStatusResponse{}, errors.New("closed-lid wakefulness unavailable")
+}
 func (f *fakeBridge) SetSecurePairing(on bool) (MobileStatusResponse, error) {
 	r := f.Status()
 	r.SecurePairing.Enabled = on
@@ -53,17 +56,12 @@ type fakeLAN struct {
 	hash        string
 	accountHash string
 	stopCalls   int
-	bind        string
 	bindHost    string
 }
 
-func (f *fakeLAN) Start(port int, bind string) (int, error) {
+func (f *fakeLAN) Start(port int) (int, error) {
 	f.running = true
-	f.bind = bind
-	f.bindHost = bind
-	if bind == "" || bind == "all" {
-		f.bindHost = "0.0.0.0"
-	}
+	f.bindHost = "0.0.0.0"
 	return port, nil
 }
 func (f *fakeLAN) StartLoopback(port int) (int, error) {
@@ -212,34 +210,6 @@ func TestMobileEnableReturnsPassword(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&got)
 	if !got.Enabled || got.Password != "abcd1234" || got.Warning == "" {
 		t.Fatalf("bad response: %+v", got)
-	}
-}
-
-// The bind mode is user-set config, not something enable/regenerate owns: it
-// must reach the listener and survive the write-back that stamps the new
-// password and port.
-func TestEnablePassesAndPreservesBind(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "mobile", "config.json")
-	if err := mobilebridge.Save(path, mobilebridge.State{Bind: "tailscale"}); err != nil {
-		t.Fatalf("seed config: %v", err)
-	}
-	lan := &fakeLAN{}
-	b := &BridgeService{LAN: lan, ConfigPath: path, DefaultPort: 3011}
-	if _, err := b.Enable(); err != nil {
-		t.Fatalf("enable: %v", err)
-	}
-	if lan.bind != "tailscale" {
-		t.Errorf("LAN.Start bind = %q, want tailscale", lan.bind)
-	}
-	st, err := mobilebridge.Load(path)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if st.Bind != "tailscale" {
-		t.Errorf("persisted bind = %q, want it preserved across enable", st.Bind)
-	}
-	if !st.Enabled || st.Password == "" {
-		t.Errorf("enable did not persist enabled state: %+v", st)
 	}
 }
 
@@ -458,8 +428,8 @@ type portOverrideLAN struct {
 	boundPortStale int
 }
 
-func (f *portOverrideLAN) BoundPort() int                 { return f.boundPortStale }
-func (f *portOverrideLAN) Start(int, string) (int, error) { f.running = true; return f.startPort, nil }
+func (f *portOverrideLAN) BoundPort() int         { return f.boundPortStale }
+func (f *portOverrideLAN) Start(int) (int, error) { f.running = true; return f.startPort, nil }
 
 func newSecureBridge(t *testing.T, info mobilebridge.TailscaleInfo, target func() int) *BridgeService {
 	t.Helper()
@@ -1091,7 +1061,7 @@ type startErrorLAN struct {
 	err error
 }
 
-func (f *startErrorLAN) Start(int, string) (int, error) { return 0, f.err }
+func (f *startErrorLAN) Start(int) (int, error) { return 0, f.err }
 
 func TestMobileRestoreOnBootRollsBackHashWhenStartFails(t *testing.T) {
 	startErr := errors.New("bind failed")

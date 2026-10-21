@@ -66,10 +66,10 @@ type daemonStatus struct {
 	Ready  string `json:"ready,omitempty"`
 	Error  string `json:"error,omitempty"`
 	owned  bool
-	// build and executable are what /healthz reported about the daemon itself.
-	// Unexported: only `ao doctor` compares them against this CLI's own build.
-	build      daemonmeta.Build
-	executable string
+	// build is what /healthz reported about the daemon itself.
+	// Unexported: only `ao doctor` compares them against this CLI's own build,
+	// and `ao status --json` is a stable contract that does not need them.
+	build daemonmeta.Build
 }
 
 type probeResult struct {
@@ -144,9 +144,8 @@ func (c *commandContext) inspectDaemon(ctx context.Context) (daemonStatus, error
 		return st, nil
 	}
 	st.owned = true
-	st.build = health.Build
-	st.executable = health.ExecutablePath
 	st.ExecutablePath = health.ExecutablePath
+	st.build = health.Build
 	st.Health = health.Status
 	if health.Status != "ok" {
 		st.State = stateUnhealthy
@@ -194,9 +193,6 @@ func (c *commandContext) inspectRemoteDaemon(ctx context.Context) daemonStatus {
 		return st
 	}
 	st.PID = health.PID
-	st.ExecutablePath = health.ExecutablePath
-	st.executable = health.ExecutablePath
-	st.build = health.Build
 	st.Health = health.Status
 	if health.Status != "ok" {
 		st.State = stateUnhealthy

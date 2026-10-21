@@ -4,9 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node --require ../../../scripts/disable-tool-telemetry.cjs ./node_modules/next/dist/bin/next dev",
-    "build": "node --require ../../../scripts/disable-tool-telemetry.cjs ./node_modules/next/dist/bin/next build",
-    "start": "node --require ../../../scripts/disable-tool-telemetry.cjs ./node_modules/next/dist/bin/next start"
+    "dev": "next dev",
+    "build": "next build --webpack",
+    "start": "next start"
   },
   "dependencies": {
     "@fumadocs/satteri": "^0.3.1",

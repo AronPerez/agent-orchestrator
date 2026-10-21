@@ -3,6 +3,7 @@ package httpd
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -21,6 +22,26 @@ type timeoutProbeSessionService struct {
 	switchBudget  chan time.Duration
 	uploadBudget  chan time.Duration
 	sendBudget    chan time.Duration
+	previewBudget chan time.Duration
+}
+
+func (s *timeoutProbeSessionService) GetRecord(ctx context.Context, _ domain.SessionID) (domain.SessionRecord, error) {
+	s.previewBudget <- remainingRequestBudget(ctx)
+	return domain.SessionRecord{}, errors.New("probe only")
+}
+
+// recordBudget is the deadline GetRecord saw. The route has run by the time it
+// is read, so a route that never reached GetRecord fails here instead of
+// blocking the test.
+func (s *timeoutProbeSessionService) recordBudget(t *testing.T) time.Duration {
+	t.Helper()
+	select {
+	case budget := <-s.previewBudget:
+		return budget
+	case <-time.After(time.Second):
+		t.Fatal("the route never read the session record")
+		return 0
+	}
 }
 
 func (s *timeoutProbeSessionService) List(ctx context.Context, _ sessionsvc.ListFilter) ([]domain.Session, error) {
@@ -78,7 +99,7 @@ func TestSwitchAgentRouteUsesOrdinaryTimeoutAndReturnsAccepted(t *testing.T) {
 	)
 
 	genericResponse := httptest.NewRecorder()
-	router.ServeHTTP(genericResponse, httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/v1/sessions", nil))
+	router.ServeHTTP(genericResponse, httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil))
 	if genericResponse.Code != http.StatusOK {
 		t.Fatalf("GET sessions status = %d, want 200", genericResponse.Code)
 	}
@@ -86,7 +107,7 @@ func TestSwitchAgentRouteUsesOrdinaryTimeoutAndReturnsAccepted(t *testing.T) {
 
 	switchRequest := httptest.NewRequest(
 		http.MethodPost,
-		"http://127.0.0.1/api/v1/sessions/ao-1/switch-agent",
+		"/api/v1/sessions/ao-1/switch-agent",
 		bytes.NewBufferString(`{"targetHarness":"codex"}`),
 	)
 	switchRequest.Header.Set("Content-Type", "application/json")
@@ -116,7 +137,7 @@ func TestAttachmentUploadRouteUsesExtendedTimeout(t *testing.T) {
 		APIDeps{Sessions: svc},
 		ControlDeps{},
 	)
-	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/v1/sessions/ao-1/attachments", bytes.NewBufferString(`{"attachments":[{"mimeType":"text/plain","data":"YQ=="}]}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/ao-1/attachments", bytes.NewBufferString(`{"attachments":[{"mimeType":"text/plain","data":"YQ=="}]}`))
 	req.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, req)
@@ -126,6 +147,41 @@ func TestAttachmentUploadRouteUsesExtendedTimeout(t *testing.T) {
 	budget := <-svc.uploadBudget
 	if budget < 9*time.Minute || budget > 10*time.Minute {
 		t.Fatalf("attachment upload budget = %s, want about 10 minutes", budget)
+	}
+}
+
+// A managed preview carries the dev server's HMR socket and event streams; the
+// REST budget cut them at a minute (504) and reloaded the page.
+func TestManagedPreviewAppProxyHasNoRequestTimeout(t *testing.T) {
+	svc := &timeoutProbeSessionService{previewBudget: make(chan time.Duration, 1)}
+	router := NewRouterWithControl(
+		config.Config{RequestTimeout: 250 * time.Millisecond},
+		discardLogger(),
+		nil,
+		APIDeps{Sessions: svc, PreviewServer: struct {
+			controllers.ManagedPreviewServer
+		}{}},
+		ControlDeps{},
+	)
+	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/v1/sessions/ao-1/preview/app/_next/webpack-hmr", nil))
+	if budget := svc.recordBudget(t); budget != 0 {
+		t.Fatalf("managed preview budget = %s, want no deadline", budget)
+	}
+}
+
+// The agent browser's stream socket stays open as long as its tab does.
+func TestAgentBrowserProxyHasNoRequestTimeout(t *testing.T) {
+	svc := &timeoutProbeSessionService{previewBudget: make(chan time.Duration, 1)}
+	router := NewRouterWithControl(
+		config.Config{RequestTimeout: 250 * time.Millisecond, AgentBrowserURL: "http://127.0.0.1:9"},
+		discardLogger(),
+		nil,
+		APIDeps{Sessions: svc},
+		ControlDeps{},
+	)
+	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/v1/sessions/ao-1/agent-browser/ws/cdp", nil))
+	if budget := svc.recordBudget(t); budget != 0 {
+		t.Fatalf("agent browser budget = %s, want no deadline", budget)
 	}
 }
 
@@ -148,7 +204,7 @@ func TestAttachmentCapableSendUsesExtendedTimeoutOnlyForUploads(t *testing.T) {
 		{name: "attachment", body: `{"message":"hello","attachment":{"mimeType":"text/plain","data":"YQ=="}}`, upload: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/v1/sessions/ao-1/send", bytes.NewBufferString(tc.body))
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/ao-1/send", bytes.NewBufferString(tc.body))
 			req.Header.Set("Content-Type", "application/json")
 			if tc.upload {
 				req.Header.Set(attachmentUploadHeader, "1")

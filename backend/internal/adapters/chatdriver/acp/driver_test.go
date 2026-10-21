@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -774,26 +775,31 @@ func TestPersistentACPReconnectAcknowledgesAlreadyCommittedPrompt(t *testing.T) 
 type fakeAgent struct {
 	conn *acpsdk.AgentSideConnection
 
-	mu                  sync.Mutex
-	initParams          acpsdk.InitializeRequest
-	capabilities        *acpsdk.AgentCapabilities
-	initErr             error
-	newParams           acpsdk.NewSessionRequest
-	loadParams          acpsdk.LoadSessionRequest
-	resumeParams        acpsdk.ResumeSessionRequest
-	forkParams          acpsdk.UnstableForkSessionRequest
-	forkID              string
-	forkErr             error
-	forkCalls           int
-	onFork              func(context.Context) error
-	deletedForks        []string
-	loadUpdates         []acpsdk.SessionUpdate
-	loadUpdateBatches   [][]acpsdk.SessionUpdate
-	loadUpdateDelay     time.Duration
-	blockLoadCall       int
-	loadStarted         chan struct{}
-	failLoadFrom        int   // LoadSession calls >= this number return failLoadErr
-	failLoadErr         error // the SDK coerces a plain error into -32603
+	mu                sync.Mutex
+	initParams        acpsdk.InitializeRequest
+	authMethods       []string
+	capabilities      *acpsdk.AgentCapabilities
+	initErr           error
+	newParams         acpsdk.NewSessionRequest
+	loadParams        acpsdk.LoadSessionRequest
+	resumeParams      acpsdk.ResumeSessionRequest
+	forkParams        acpsdk.UnstableForkSessionRequest
+	forkID            string
+	forkErr           error
+	forkCalls         int
+	onFork            func(context.Context) error
+	deletedForks      []string
+	loadUpdates       []acpsdk.SessionUpdate
+	loadUpdateBatches [][]acpsdk.SessionUpdate
+	blockLoadCall     int
+	loadStarted       chan struct{}
+	failLoadFrom      int   // LoadSession calls >= this number return failLoadErr
+	failLoadErr       error // the SDK coerces a plain error into -32603
+	// rejectReload answers a session/load of an already loaded, unclosed
+	// session with Copilot's "already loaded" error.
+	rejectReload        bool
+	sessionOpen         bool
+	closeCalls          int
 	loadCalls           int
 	resumeCalls         int
 	promptParams        acpsdk.PromptRequest
@@ -958,7 +964,10 @@ func serveLegacyKimi(agent *legacyKimiAgent, in io.Reader, out io.Writer) {
 
 var _ acpsdk.Agent = (*fakeAgent)(nil)
 
-func (a *fakeAgent) Authenticate(context.Context, acpsdk.AuthenticateRequest) (acpsdk.AuthenticateResponse, error) {
+func (a *fakeAgent) Authenticate(_ context.Context, params acpsdk.AuthenticateRequest) (acpsdk.AuthenticateResponse, error) {
+	a.mu.Lock()
+	a.authMethods = append(a.authMethods, params.MethodId)
+	a.mu.Unlock()
 	return acpsdk.AuthenticateResponse{}, nil
 }
 func (a *fakeAgent) Initialize(_ context.Context, params acpsdk.InitializeRequest) (acpsdk.InitializeResponse, error) {
@@ -1034,6 +1043,10 @@ func (a *fakeAgent) Cancel(context.Context, acpsdk.CancelNotification) error {
 	return err
 }
 func (a *fakeAgent) CloseSession(context.Context, acpsdk.CloseSessionRequest) (acpsdk.CloseSessionResponse, error) {
+	a.mu.Lock()
+	a.closeCalls++
+	a.sessionOpen = false
+	a.mu.Unlock()
 	return acpsdk.CloseSessionResponse{}, nil
 }
 func (a *fakeAgent) ListSessions(context.Context, acpsdk.ListSessionsRequest) (acpsdk.ListSessionsResponse, error) {
@@ -1082,7 +1095,6 @@ func (a *fakeAgent) LoadSession(ctx context.Context, params acpsdk.LoadSessionRe
 	a.loadCalls++
 	loadCall := a.loadCalls
 	updates := append([]acpsdk.SessionUpdate(nil), a.loadUpdates...)
-	updateDelay := a.loadUpdateDelay
 	if batch := a.loadCalls - 1; batch < len(a.loadUpdateBatches) {
 		updates = append([]acpsdk.SessionUpdate(nil), a.loadUpdateBatches[batch]...)
 	}
@@ -1090,6 +1102,11 @@ func (a *fakeAgent) LoadSession(ctx context.Context, params acpsdk.LoadSessionRe
 	started := a.loadStarted
 	failLoad := a.failLoadFrom > 0 && loadCall >= a.failLoadFrom
 	failLoadErr := a.failLoadErr
+	if a.rejectReload && a.sessionOpen {
+		a.mu.Unlock()
+		return acpsdk.LoadSessionResponse{}, acpsdk.NewInvalidParams("Session " + string(params.SessionId) + " is already loaded")
+	}
+	a.sessionOpen = true
 	a.mu.Unlock()
 	if failLoad {
 		return acpsdk.LoadSessionResponse{}, failLoadErr
@@ -1104,9 +1121,6 @@ func (a *fakeAgent) LoadSession(ctx context.Context, params acpsdk.LoadSessionRe
 	for _, update := range updates {
 		if err := a.conn.SessionUpdate(ctx, acpsdk.SessionNotification{SessionId: params.SessionId, Update: update}); err != nil {
 			return acpsdk.LoadSessionResponse{}, err
-		}
-		if updateDelay > 0 {
-			time.Sleep(updateDelay)
 		}
 	}
 	return acpsdk.LoadSessionResponse{}, nil
@@ -1370,6 +1384,70 @@ func TestACPDriverValidatesHandshakeIdentityBeforeOpeningSession(t *testing.T) {
 	agent.mu.Unlock()
 	if opened {
 		t.Fatal("session/new ran before the handshake identity was admitted")
+	}
+}
+
+func TestACPDriverRunsAfterInitializeBeforeOpeningSession(t *testing.T) {
+	agent := &fakeAgent{}
+	driver := New(Config{
+		Harness:      domain.HarnessAgy,
+		Capabilities: ports.ChatCapabilities{ports.ChatCapabilityStreaming: true},
+		Probe:        func(context.Context) error { return nil },
+		Launch:       func(context.Context, LaunchConfig) (Launch, error) { return Launch{Command: "fake"}, nil },
+		AfterInitialize: func(ctx context.Context, conn *acpsdk.ClientSideConnection, _ acpsdk.InitializeResponse, launchCfg LaunchConfig) error {
+			if launchCfg.Env["GEMINI_HOME"] != "/session/gemini" {
+				t.Errorf("AfterInitialize environment = %v", launchCfg.Env)
+			}
+			agent.mu.Lock()
+			opened := agent.newParams.Cwd != ""
+			agent.mu.Unlock()
+			if opened {
+				t.Error("session/new ran before AfterInitialize")
+			}
+			_, err := conn.Authenticate(ctx, acpsdk.AuthenticateRequest{MethodId: "oauth-personal"})
+			return err
+		},
+	}, nil)
+	driver.useTestProcess(fakeSpawn(agent))
+
+	conversation, err := driver.Start(context.Background(), ports.ChatStartConfig{
+		WorkspacePath: t.TempDir(), Env: map[string]string{"GEMINI_HOME": "/session/gemini"},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = conversation.Close() }()
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+	if len(agent.authMethods) != 1 || agent.authMethods[0] != "oauth-personal" {
+		t.Fatalf("authenticate calls = %v, want [oauth-personal]", agent.authMethods)
+	}
+	if agent.newParams.Cwd == "" {
+		t.Fatal("session/new did not run after AfterInitialize succeeded")
+	}
+}
+
+func TestACPDriverAfterInitializeFailureStopsStart(t *testing.T) {
+	agent := &fakeAgent{}
+	driver := New(Config{
+		Harness:      domain.HarnessAgy,
+		Capabilities: ports.ChatCapabilities{ports.ChatCapabilityStreaming: true},
+		Probe:        func(context.Context) error { return nil },
+		Launch:       func(context.Context, LaunchConfig) (Launch, error) { return Launch{Command: "fake"}, nil },
+		AfterInitialize: func(context.Context, *acpsdk.ClientSideConnection, acpsdk.InitializeResponse, LaunchConfig) error {
+			return &acpsdk.RequestError{Code: -32000, Message: "Authentication required"}
+		},
+	}, nil)
+	driver.useTestProcess(fakeSpawn(agent))
+
+	_, err := driver.Start(context.Background(), ports.ChatStartConfig{WorkspacePath: t.TempDir()})
+	if !errors.Is(err, ports.ErrChatAuthRequired) {
+		t.Fatalf("Start error = %v, want ErrChatAuthRequired", err)
+	}
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+	if agent.newParams.Cwd != "" {
+		t.Fatal("session/new ran after AfterInitialize failed")
 	}
 }
 
@@ -3004,6 +3082,60 @@ func TestRawCommandFromInput(t *testing.T) {
 	}
 }
 
+func TestToolEventPreservesCommandExitCode(t *testing.T) {
+	intPtr := func(value int) *int { return &value }
+	for _, tt := range []struct {
+		name         string
+		raw          string
+		kind         acpsdk.ToolKind
+		status       acpsdk.ToolCallStatus
+		terminalExit *int
+		wantExit     *int
+		wantStatus   domain.ActivityStatus
+	}{
+		{"nonzero shell exit", `{"output":"command output\n","metadata":{"exit":7}}`, acpsdk.ToolKindExecute, acpsdk.ToolCallStatusCompleted, nil, intPtr(7), domain.ActivityStatusFailed},
+		{"successful shell exit", `{"output":"command output\n","metadata":{"exit":0}}`, acpsdk.ToolKindExecute, acpsdk.ToolCallStatusCompleted, nil, intPtr(0), domain.ActivityStatusCompleted},
+		{"missing exit", `{"output":"command output\n","metadata":{}}`, acpsdk.ToolKindExecute, acpsdk.ToolCallStatusCompleted, nil, nil, domain.ActivityStatusCompleted},
+		{"null exit", `{"output":"command output\n","metadata":{"exit":null}}`, acpsdk.ToolKindExecute, acpsdk.ToolCallStatusCompleted, nil, nil, domain.ActivityStatusCompleted},
+		{"string exit", `{"output":"command output\n","metadata":{"exit":"7"}}`, acpsdk.ToolKindExecute, acpsdk.ToolCallStatusCompleted, nil, nil, domain.ActivityStatusCompleted},
+		{"fractional exit", `{"output":"command output\n","metadata":{"exit":1.5}}`, acpsdk.ToolKindExecute, acpsdk.ToolCallStatusCompleted, nil, nil, domain.ActivityStatusCompleted},
+		{"non-command metadata", `{"output":"command output\n","metadata":{"exit":7}}`, acpsdk.ToolKindRead, acpsdk.ToolCallStatusCompleted, nil, nil, domain.ActivityStatusCompleted},
+		{"provider failure stays failed", `{"output":"command output\n","metadata":{"exit":0}}`, acpsdk.ToolKindExecute, acpsdk.ToolCallStatusFailed, nil, intPtr(0), domain.ActivityStatusFailed},
+		{"terminal exit takes precedence", `{"output":"command output\n","metadata":{"exit":7}}`, acpsdk.ToolKindExecute, acpsdk.ToolCallStatusCompleted, intPtr(0), intPtr(0), domain.ActivityStatusCompleted},
+		{"terminal nonzero exit", `{"output":"command output\n"}`, acpsdk.ToolKindExecute, acpsdk.ToolCallStatusCompleted, intPtr(7), intPtr(7), domain.ActivityStatusFailed},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var raw any
+			if err := json.Unmarshal([]byte(tt.raw), &raw); err != nil {
+				t.Fatal(err)
+			}
+			tool := &toolState{id: "command-1", kind: tt.kind, status: tt.status, rawOutput: raw, rawInput: map[string]any{"command": "printf test; exit 7"}}
+			if tt.terminalExit != nil {
+				tool.meta = map[string]any{"terminal_exit": map[string]any{"exit_code": *tt.terminalExit}}
+			}
+			conv := &conversation{}
+			event := conv.toolEvent("turn-1", tool, true)
+			if event.Kind != ports.ChatEventActivityCompleted || event.ActivityStatus != tt.wantStatus {
+				t.Fatalf("event kind/status = %s/%s, want completed/%s", event.Kind, event.ActivityStatus, tt.wantStatus)
+			}
+			var detail map[string]any
+			if err := json.Unmarshal(event.Detail, &detail); err != nil {
+				t.Fatal(err)
+			}
+			if tt.wantExit == nil {
+				if _, exists := detail["exitCode"]; exists {
+					t.Fatalf("unexpected exitCode: %#v", detail["exitCode"])
+				}
+			} else if detail["exitCode"] != float64(*tt.wantExit) {
+				t.Fatalf("exitCode = %#v, want %d", detail["exitCode"], *tt.wantExit)
+			}
+			if detail["output"] != "command output\n" {
+				t.Fatalf("output changed: %#v", detail["output"])
+			}
+		})
+	}
+}
+
 func TestToolOutputTextNormalizesProviderDefinedRawOutput(t *testing.T) {
 	tests := []struct {
 		name string
@@ -4630,281 +4762,6 @@ func TestACPCompactionRestoredOnLiveReconnect(t *testing.T) {
 	}
 }
 
-func requestedConfigID(params acpsdk.SetSessionConfigOptionRequest) string {
-	if params.ValueId != nil {
-		return string(params.ValueId.ConfigId)
-	}
-	if params.Boolean != nil {
-		return string(params.Boolean.ConfigId)
-	}
-	return ""
-}
-
-func rejectsModelOption(t *testing.T) (*Driver, *fakeAgent) {
-	t.Helper()
-	agent := &fakeAgent{
-		capabilities: &acpsdk.AgentCapabilities{LoadSession: true},
-		configErr: acpsdk.NewInternalError(map[string]any{
-			"details": "Invalid value for config option model: gpt-5.6-terra",
-		}),
-		configErrOption: "model",
-	}
-	driver := New(Config{
-		Harness:      domain.HarnessClaudeCode,
-		Capabilities: ports.ChatCapabilities{ports.ChatCapabilityStreaming: true},
-		Probe:        func(context.Context) error { return nil },
-		Launch:       func(context.Context, LaunchConfig) (Launch, error) { return Launch{Command: "fake"}, nil },
-		SessionOptions: func(settings ports.ChatTurnSettings) []SessionOption {
-			options := make([]SessionOption, 0, 2)
-			if settings.Model != "" {
-				options = append(options, SessionOption{ID: "model", Value: settings.Model})
-			}
-			return append(options, SessionOption{ID: "effort", Value: "high"})
-		},
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	driver.useTestProcess(fakeSpawn(agent))
-	return driver, agent
-}
-
-func TestACPResumeDegradesWhenAgentRejectsTheModelOption(t *testing.T) {
-	driver, agent := rejectsModelOption(t)
-
-	conv, err := driver.Resume(context.Background(), ports.ChatResumeConfig{
-		ProviderConversationID: "provider-session-1",
-		WorkspacePath:          t.TempDir(),
-		Model:                  "gpt-5.6-terra",
-	})
-	if err != nil {
-		t.Fatalf("Resume failed the whole session over an optional model preference: %v", err)
-	}
-	defer conv.Close()
-
-	// Everything queued behind the model still applies: the options loop stops at
-	// the first refusal, so dropping the model has to re-run the rest.
-	agent.mu.Lock()
-	effort := agent.options["effort"]
-	agent.mu.Unlock()
-	if effort != "high" {
-		t.Errorf("effort option = %q, want high: settings after the rejected model were never applied", effort)
-	}
-
-	// And the user is told, on the timeline, that their choice was not honored —
-	// otherwise the session silently runs on a model nobody picked.
-	warning := ""
-	for range 4 {
-		event := nextEvent(t, conv.Events())
-		if event.Kind == ports.ChatEventActivityCompleted && event.ActivityKind == domain.ActivityKindSystem {
-			warning = event.Summary
-			break
-		}
-	}
-	if !strings.Contains(warning, "gpt-5.6-terra") {
-		t.Errorf("warning summary = %q, want a system activity naming the model that was dropped", warning)
-	}
-}
-
-func TestACPStartFailsWhenAgentRejectsTheModelOption(t *testing.T) {
-	driver, _ := rejectsModelOption(t)
-
-	conv, err := driver.Start(context.Background(), ports.ChatStartConfig{
-		WorkspacePath: t.TempDir(),
-		Model:         "gpt-5.6-terra",
-	})
-	if err == nil {
-		_ = conv.Close()
-		t.Fatal("Start accepted a model the agent refused; an explicit spawn-time choice must fail fast")
-	}
-	if !strings.Contains(err.Error(), "configure ACP session") {
-		t.Errorf("Start error = %v, want the configure-session failure", err)
-	}
-}
-
-func TestACPDriverClosesReplayTurnsAsRecoveredWithoutBlockingResume(t *testing.T) {
-	userOneID := "11111111-1111-4111-8111-111111111111"
-	answerOneID := "22222222-2222-4222-8222-222222222222"
-	userTwoID := "33333333-3333-4333-8333-333333333333"
-	answerTwoID := "44444444-4444-4444-8444-444444444444"
-	userOne := acpsdk.UpdateUserMessageText("Inspect the repository")
-	userOne.UserMessageChunk.MessageId = &userOneID
-	replayBlock := acpsdk.ResourceBlock(acpsdk.EmbeddedResourceResource{
-		TextResourceContents: &acpsdk.TextResourceContents{
-			Uri: ports.ChatInternalReplayResourceURI, Text: `{"kind":"approximate_conversation_context"}`,
-			Meta: map[string]any{aoInternalReplayMetaKey: true},
-		},
-	})
-	replaySeed := acpsdk.UpdateUserMessage(replayBlock)
-	replaySeed.UserMessageChunk.MessageId = &userOneID
-	answerOneA := acpsdk.UpdateAgentMessageText("The repository ")
-	answerOneA.AgentMessageChunk.MessageId = &answerOneID
-	answerOneB := acpsdk.UpdateAgentMessageText("is ready.")
-	answerOneB.AgentMessageChunk.MessageId = &answerOneID
-	userTwo := acpsdk.UpdateUserMessageText("Run the tests")
-	userTwo.UserMessageChunk.MessageId = &userTwoID
-	answerTwo := acpsdk.UpdateAgentMessageText("All tests pass.")
-	answerTwo.AgentMessageChunk.MessageId = &answerTwoID
-	pendingTool := acpsdk.SessionUpdate{ToolCall: &acpsdk.SessionUpdateToolCall{
-		SessionUpdate: "tool_call", ToolCallId: "history-tool", Title: "Run tests",
-		Kind: acpsdk.ToolKindExecute, Status: acpsdk.ToolCallStatusInProgress,
-	}}
-
-	agent := &fakeAgent{
-		capabilities: &acpsdk.AgentCapabilities{
-			LoadSession: true,
-		},
-		loadUpdates: []acpsdk.SessionUpdate{
-			userOne, replaySeed, answerOneA, answerOneB, userTwo, answerTwo, pendingTool,
-		},
-	}
-	driver := New(Config{
-		Harness:      domain.HarnessClaudeCode,
-		Capabilities: ports.ChatCapabilities{ports.ChatCapabilityStreaming: true},
-		Probe:        func(context.Context) error { return nil },
-		Launch:       func(context.Context, LaunchConfig) (Launch, error) { return Launch{Command: "fake"}, nil },
-		SessionMeta: func(cfg LaunchConfig) map[string]any {
-			return map[string]any{"systemPrompt": map[string]any{"append": cfg.SystemPrompt}}
-		},
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	driver.useTestProcess(fakeSpawn(agent))
-
-	conv, err := driver.Resume(context.Background(), ports.ChatResumeConfig{
-		ProviderConversationID: "provider-session-1",
-		WorkspacePath:          t.TempDir(),
-		SystemPrompt:           "AO load instructions",
-		ProviderScopeID:        "history-scope",
-	})
-	if err != nil {
-		t.Fatalf("Resume: %v", err)
-	}
-	defer conv.Close()
-	if _, ok := conv.(ports.ChatHistoryRefresher); !ok {
-		t.Fatal("ACP session/load replay must expose refreshable history")
-	}
-
-	agent.mu.Lock()
-	loadCalls, resumeCalls := agent.loadCalls, agent.resumeCalls
-	loadedSession := string(agent.loadParams.SessionId)
-	loadMeta := agent.loadParams.Meta
-	agent.mu.Unlock()
-	if loadCalls != 1 || resumeCalls != 0 || loadedSession != "provider-session-1" {
-		t.Fatalf("load calls = %d, resume calls = %d, session = %q", loadCalls, resumeCalls, loadedSession)
-	}
-	prompt, ok := loadMeta["systemPrompt"].(map[string]any)
-	if !ok || prompt["append"] != "AO load instructions" {
-		t.Fatalf("session/load metadata = %#v, want recomputed system prompt", loadMeta)
-	}
-
-	history, err := conv.(ports.ChatHistoryReader).ReadHistory(context.Background())
-	if err != nil {
-		t.Fatalf("ReadHistory: %v", err)
-	}
-	var states []domain.TurnState
-	var recoveredActivity bool
-	for _, event := range history {
-		if event.Kind == ports.ChatEventTurnCompleted {
-			states = append(states, event.TurnState)
-		}
-		if event.ProviderItemID == (&conversation{providerScopeID: "history-scope"}).providerItemID("history-tool") &&
-			event.Kind == ports.ChatEventActivityCompleted {
-			recoveredActivity = event.ActivityStatus == domain.ActivityStatusRecovered
-		}
-	}
-	if len(states) != 2 || states[0] != domain.TurnStateRecovered ||
-		states[1] != domain.TurnStateRecovered {
-		t.Fatalf("replayed turn states = %v, want [recovered recovered]", states)
-	}
-	if !recoveredActivity {
-		t.Fatalf("history = %#v, want pending replay tool settled as recovered", history)
-	}
-	if history[0].ProviderTurnID != historyTurnID("history-scope", userOneID) ||
-		history[1].ProviderItemID != (&conversation{providerScopeID: "history-scope"}).providerItemID(userOneID) ||
-		history[1].ClientMessageID != (&conversation{providerScopeID: "history-scope"}).providerItemID(userOneID) ||
-		history[2].ProviderItemID != (&conversation{providerScopeID: "history-scope"}).providerItemID(answerOneID) {
-		t.Fatalf("history ids do not use the durable provider scope: %#v", history[:3])
-	}
-	if len(history[1].ProviderItemAliases) != 1 || history[1].ProviderItemAliases[0] != userOneID ||
-		len(history[2].ProviderItemAliases) != 1 || history[2].ProviderItemAliases[0] != answerOneID {
-		t.Fatalf("history does not preserve legacy raw item aliases: %#v", history[:3])
-	}
-	if !conv.Capabilities().Has(ports.ChatCapabilityHistory) {
-		t.Fatal("session/load conversation did not advertise replayable history")
-	}
-
-	ready := nextEvent(t, conv.Events())
-	if ready.Kind != ports.ChatEventControllerState || ready.ControllerState != ports.ChatControllerReady {
-		t.Fatalf("first live event = %#v, want controller ready", ready)
-	}
-	select {
-	case event := <-conv.Events():
-		t.Fatalf("history leaked onto the live event stream: %#v", event)
-	case <-time.After(30 * time.Millisecond):
-	}
-}
-
-func TestACPInterruptCancelsTheLocalPromptAfterNotifyingTheAgent(t *testing.T) {
-	agent := &fakeAgent{promptBlock: true, promptStarted: make(chan struct{}, 1)}
-	driver := New(Config{
-		Harness: domain.HarnessOpenCode,
-		Capabilities: ports.ChatCapabilities{
-			ports.ChatCapabilityStreaming: true,
-			ports.ChatCapabilityInterrupt: true,
-		},
-		Probe: func(context.Context) error { return nil },
-		Launch: func(context.Context, LaunchConfig) (Launch, error) {
-			return Launch{Command: "fake"}, nil
-		},
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	driver.useTestProcess(fakeSpawn(agent))
-
-	conversation, err := driver.Start(context.Background(), ports.ChatStartConfig{
-		WorkspacePath: t.TempDir(),
-	})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer conversation.Close()
-	_ = nextEvent(t, conversation.Events()) // controller.ready
-	ref, err := conversation.SendTurn(context.Background(), ports.ChatUserMessage{Text: "wait"})
-	if err != nil {
-		t.Fatalf("SendTurn: %v", err)
-	}
-	if err := conversation.(ports.ChatDeferredTurnStarter).StartDeferredTurn(ref.ProviderTurnID); err != nil {
-		t.Fatalf("StartDeferredTurn: %v", err)
-	}
-	select {
-	case <-agent.promptStarted:
-	case <-time.After(time.Second):
-		t.Fatal("Prompt did not start")
-	}
-	if err := conversation.Interrupt(context.Background(), ref.ProviderTurnID); err != nil {
-		t.Fatalf("Interrupt: %v", err)
-	}
-
-	for {
-		event := nextEvent(t, conversation.Events())
-		if event.Kind == ports.ChatEventTurnCompleted {
-			if event.TurnState != domain.TurnStateInterrupted {
-				t.Fatalf("turn state = %q, want interrupted", event.TurnState)
-			}
-			break
-		}
-	}
-	// The SDK may emit a second idempotent session/cancel while unwinding the
-	// locally cancelled Prompt request. What matters is that the explicit
-	// notification was sent and the local request settled. Notification handling
-	// is asynchronous, so observe it rather than assuming it ran before the turn
-	// completion event.
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		agent.mu.Lock()
-		cancelCalls := agent.cancelCalls
-		agent.mu.Unlock()
-		if cancelCalls >= 1 {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatal("ACP cancel notification was not handled")
-}
 func TestReconnectMissingHostNeverLaunchesProvider(t *testing.T) {
 	driver := New(Config{Harness: domain.HarnessClaudeCode, Launch: func(context.Context, LaunchConfig) (Launch, error) {
 		t.Fatal("health check tried to launch ACP provider")
@@ -4977,5 +4834,417 @@ func TestACPDriverResumeStartsFreshOnlyForMissingSessionWhenAllowed(t *testing.T
 				t.Fatalf("provider conversation = %q, want the fresh session", got)
 			}
 		})
+	}
+}
+
+func requestedConfigID(params acpsdk.SetSessionConfigOptionRequest) string {
+	if params.ValueId != nil {
+		return string(params.ValueId.ConfigId)
+	}
+	if params.Boolean != nil {
+		return string(params.Boolean.ConfigId)
+	}
+	return ""
+}
+
+// rejectsModelOption builds a driver whose agent refuses exactly the model option
+// the way claude-agent-acp does when handed an id from another agent's catalog:
+// -32603 "Invalid value for config option model: gpt-5.6-terra".
+func rejectsModelOption(t *testing.T) (*Driver, *fakeAgent) {
+	t.Helper()
+	agent := &fakeAgent{
+		capabilities: &acpsdk.AgentCapabilities{LoadSession: true},
+		configErr: acpsdk.NewInternalError(map[string]any{
+			"details": "Invalid value for config option model: gpt-5.6-terra",
+		}),
+		configErrOption: "model",
+	}
+	driver := New(Config{
+		Harness:      domain.HarnessClaudeCode,
+		Capabilities: ports.ChatCapabilities{ports.ChatCapabilityStreaming: true},
+		Probe:        func(context.Context) error { return nil },
+		Launch:       func(context.Context, LaunchConfig) (Launch, error) { return Launch{Command: "fake"}, nil },
+		SessionOptions: func(settings ports.ChatTurnSettings) []SessionOption {
+			options := make([]SessionOption, 0, 2)
+			if settings.Model != "" {
+				options = append(options, SessionOption{ID: "model", Value: settings.Model})
+			}
+			return append(options, SessionOption{ID: "effort", Value: "high"})
+		},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	driver.useTestProcess(fakeSpawn(agent))
+	return driver, agent
+}
+
+// The failure this fixes: an interface switch died whole because the agent refused
+// a model preference — "switch interface …: resume chat: chat conversation resume
+// failed: configure ACP session: set ACP session option "model": Invalid value for
+// config option model: gpt-5.6-terra".
+//
+// A model is an optional preference on a conversation that already exists. The
+// provider still holds the history and resumes perfectly on its own default, so
+// refusing the preference must not destroy the resume and strand the session
+// between two interfaces. The preference is dropped and reported instead.
+func TestACPResumeDegradesWhenAgentRejectsTheModelOption(t *testing.T) {
+	driver, agent := rejectsModelOption(t)
+	driver.cfg.LaunchSessionOptions = func(cfg LaunchConfig) []SessionOption {
+		return []SessionOption{{ID: "agent", Value: "ao-" + string(cfg.SessionID)}}
+	}
+
+	conv, err := driver.Resume(context.Background(), ports.ChatResumeConfig{
+		SessionID:              "worker-1",
+		ProviderConversationID: "provider-session-1",
+		WorkspacePath:          t.TempDir(),
+		Model:                  "gpt-5.6-terra",
+	})
+	if err != nil {
+		t.Fatalf("Resume failed the whole session over an optional model preference: %v", err)
+	}
+	defer conv.Close()
+
+	// Everything queued behind the model still applies: the options loop stops at
+	// the first refusal, so dropping the model has to re-run the rest.
+	agent.mu.Lock()
+	effort, profile := agent.options["effort"], agent.options["agent"]
+	agent.mu.Unlock()
+	if profile != "ao-worker-1" {
+		t.Errorf("agent option = %q, want ao-worker-1", profile)
+	}
+	if effort != "high" {
+		t.Errorf("effort option = %q, want high: settings after the rejected model were never applied", effort)
+	}
+
+	// And the user is told, on the timeline, that their choice was not honored —
+	// otherwise the session silently runs on a model nobody picked.
+	warning := ""
+	for range 4 {
+		event := nextEvent(t, conv.Events())
+		if event.Kind == ports.ChatEventActivityCompleted && event.ActivityKind == domain.ActivityKindSystem {
+			warning = event.Summary
+			break
+		}
+	}
+	if !strings.Contains(warning, "gpt-5.6-terra") {
+		t.Errorf("warning summary = %q, want a system activity naming the model that was dropped", warning)
+	}
+}
+
+// Spawn is the other half of the contract. A model chosen for a conversation that
+// does not exist yet is an explicit choice, not a stale preference, and quietly
+// starting it on a different model would misattribute everything that follows.
+func TestACPStartFailsWhenAgentRejectsTheModelOption(t *testing.T) {
+	driver, _ := rejectsModelOption(t)
+
+	conv, err := driver.Start(context.Background(), ports.ChatStartConfig{
+		SessionID:     "worker-1",
+		WorkspacePath: t.TempDir(),
+		Model:         "gpt-5.6-terra",
+	})
+	if err == nil {
+		_ = conv.Close()
+		t.Fatal("Start accepted a model the agent refused; an explicit spawn-time choice must fail fast")
+	}
+	if !strings.Contains(err.Error(), "configure ACP session") {
+		t.Errorf("Start error = %v, want the configure-session failure", err)
+	}
+}
+
+// Launch-scoped options are set once the session exists, before the launch's
+// turn settings, and again after session/load.
+func TestACPDriverAppliesLaunchSessionOptionsOnStartAndResume(t *testing.T) {
+	catalog := []acpsdk.SessionConfigOption{
+		selectConfigOption("agent", "Agent", "", "", "", "ao-sess1"),
+	}
+	agent := &fakeAgent{newConfig: catalog, setConfig: catalog}
+	driver := New(Config{
+		Harness:      domain.HarnessCopilot,
+		Capabilities: ports.ChatCapabilities{ports.ChatCapabilityStreaming: true, ports.ChatCapabilityResume: true},
+		Probe:        func(context.Context) error { return nil },
+		Launch:       func(context.Context, LaunchConfig) (Launch, error) { return Launch{Command: "fake"}, nil },
+		LaunchSessionOptions: func(cfg LaunchConfig) []SessionOption {
+			return []SessionOption{{ID: "agent", Value: "ao-" + string(cfg.SessionID)}}
+		},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	driver.useTestProcess(fakeSpawn(agent))
+
+	conv, err := driver.Start(context.Background(), ports.ChatStartConfig{
+		SessionID: domain.SessionID("sess1"), WorkspacePath: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	conv.Close()
+	agent.mu.Lock()
+	got, calls := agent.options["agent"], agent.setCalls
+	agent.options = nil
+	agent.mu.Unlock()
+	if got != "ao-sess1" || calls != 1 {
+		t.Fatalf("after Start: agent option = %q in %d set calls, want ao-sess1 in 1", got, calls)
+	}
+
+	resumed, err := driver.Resume(context.Background(), ports.ChatResumeConfig{
+		SessionID: domain.SessionID("sess1"), WorkspacePath: t.TempDir(),
+		ProviderConversationID: "claude-session-1",
+	})
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	defer resumed.Close()
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+	if agent.options["agent"] != "ao-sess1" {
+		t.Errorf("after Resume: agent option = %q, want ao-sess1", agent.options["agent"])
+	}
+}
+
+// A setter may accept a launch option without returning the catalog. Keep the
+// remaining advertised choices available for subsequent launch settings.
+func TestACPDriverPreservesCatalogAcrossLaunchOptionsWithoutReturnedCatalog(t *testing.T) {
+	catalog := []acpsdk.SessionConfigOption{
+		selectConfigOption("agent", "Agent", "", "default", "default", "copilot"),
+		selectConfigOption("allow_all", "Allow all", "", "off", "on", "off"),
+	}
+	agent := &fakeAgent{newConfig: catalog}
+	driver := New(Config{
+		Harness:      domain.HarnessCopilot,
+		Capabilities: ports.ChatCapabilities{ports.ChatCapabilityStreaming: true},
+		Probe:        func(context.Context) error { return nil },
+		Launch:       func(context.Context, LaunchConfig) (Launch, error) { return Launch{Command: "fake"}, nil },
+		LaunchSessionOptions: func(LaunchConfig) []SessionOption {
+			return []SessionOption{{ID: "agent", Value: "copilot"}}
+		},
+		SessionOptions: func(settings ports.ChatTurnSettings) []SessionOption {
+			if settings.Approval == ports.PermissionModeBypassPermissions {
+				return []SessionOption{{ID: "allow_all", Value: "on"}}
+			}
+			return nil
+		},
+		RequireAdvertisedOptions: true,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	driver.useTestProcess(fakeSpawn(agent))
+
+	conv, err := driver.Start(context.Background(), ports.ChatStartConfig{
+		SessionID: domain.SessionID("sess1"), WorkspacePath: t.TempDir(),
+		Permissions: ports.PermissionModeBypassPermissions,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer conv.Close()
+
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+	if got := agent.options["agent"]; got != "copilot" {
+		t.Errorf("agent option = %q, want copilot", got)
+	}
+	if got := agent.options["allow_all"]; got != "on" {
+		t.Errorf("allow_all option = %q, want on", got)
+	}
+	if agent.setCalls != 2 {
+		t.Errorf("set config calls = %d, want 2", agent.setCalls)
+	}
+}
+
+// A setter may accept a change without returning the rebuilt catalog.
+// SetConfigOption returns nil so callers requiring an authoritative confirmation
+// can fail closed, while the in-memory catalog preserves the accepted option.
+func TestACPDriverSetConfigOptionReturnsNilWhenAgentOmitsCatalog(t *testing.T) {
+	catalog := []acpsdk.SessionConfigOption{
+		selectConfigOption("model", "Model", "", "sonnet", "sonnet", "opus"),
+	}
+	agent := &fakeAgent{newConfig: catalog}
+	driver := New(Config{
+		Harness:      domain.HarnessCopilot,
+		Capabilities: ports.ChatCapabilities{ports.ChatCapabilityStreaming: true},
+		Probe:        func(context.Context) error { return nil },
+		Launch:       func(context.Context, LaunchConfig) (Launch, error) { return Launch{Command: "fake"}, nil },
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	driver.useTestProcess(fakeSpawn(agent))
+
+	conv, err := driver.Start(context.Background(), ports.ChatStartConfig{
+		SessionID: domain.SessionID("sess1"), WorkspacePath: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer conv.Close()
+
+	controller, ok := conv.(ports.ChatConfigOptionController)
+	if !ok {
+		t.Fatal("conversation does not implement ChatConfigOptionController")
+	}
+
+	// fakeAgent has setConfig == nil by default, so SetSessionConfigOption returns empty ConfigOptions.
+	updated, err := controller.SetConfigOption(context.Background(), "model", ports.ChatConfigOptionValue{Select: "opus"})
+	if err != nil {
+		t.Fatalf("SetConfigOption: %v", err)
+	}
+	if updated != nil {
+		t.Fatalf("SetConfigOption returned %v, want nil when provider omits catalog", updated)
+	}
+
+	options, err := controller.ListConfigOptions(context.Background())
+	if err != nil {
+		t.Fatalf("ListConfigOptions: %v", err)
+	}
+	if len(options) != 1 || options[0].Current.Select != "opus" {
+		t.Fatalf("preserved options = %v, want model=opus", options)
+	}
+}
+
+// RequireAdvertisedOptions makes an option the session never offered fail
+// instead of reaching an agent that would acknowledge and drop it.
+func TestACPDriverRequireAdvertisedOptionsRejectsUnadvertised(t *testing.T) {
+	catalog := []acpsdk.SessionConfigOption{
+		selectConfigOption("allow_all", "Allow all", "", "off", "on", "off"),
+	}
+	newDriver := func(agent *fakeAgent) *Driver {
+		driver := New(Config{
+			Harness:      domain.HarnessCopilot,
+			Capabilities: ports.ChatCapabilities{ports.ChatCapabilityStreaming: true},
+			Probe:        func(context.Context) error { return nil },
+			Launch:       func(context.Context, LaunchConfig) (Launch, error) { return Launch{Command: "fake"}, nil },
+			SessionOptions: func(settings ports.ChatTurnSettings) []SessionOption {
+				var out []SessionOption
+				if settings.Model != "" {
+					out = append(out, SessionOption{ID: "model", Value: settings.Model})
+				}
+				if settings.Approval != "" {
+					out = append(out, SessionOption{ID: "allow_all", Value: "on"})
+				}
+				return out
+			},
+			RequireAdvertisedOptions: true,
+		}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		driver.useTestProcess(fakeSpawn(agent))
+		return driver
+	}
+
+	agent := &fakeAgent{newConfig: catalog, setConfig: catalog}
+	_, err := newDriver(agent).Start(context.Background(), ports.ChatStartConfig{
+		SessionID: domain.SessionID("sess1"), WorkspacePath: t.TempDir(), Model: "gpt-x",
+	})
+	if !errors.Is(err, ports.ErrChatConfigOptionInvalid) {
+		t.Fatalf("Start with unadvertised model: err = %v, want ErrChatConfigOptionInvalid", err)
+	}
+	agent.mu.Lock()
+	if _, sent := agent.options["model"]; sent {
+		t.Error("unadvertised model option reached the agent")
+	}
+	agent.mu.Unlock()
+
+	agent = &fakeAgent{newConfig: catalog, setConfig: catalog}
+	conv, err := newDriver(agent).Start(context.Background(), ports.ChatStartConfig{
+		SessionID: domain.SessionID("sess1"), WorkspacePath: t.TempDir(),
+		Permissions: ports.PermissionModeBypassPermissions,
+	})
+	if err != nil {
+		t.Fatalf("Start with advertised option: %v", err)
+	}
+	defer conv.Close()
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+	if agent.options["allow_all"] != "on" {
+		t.Errorf("allow_all = %q, want on", agent.options["allow_all"])
+	}
+}
+
+// An agent that refuses to reload a session its connection holds (Copilot)
+// still refreshes history when the binding closes the session first.
+func TestACPRefreshHistoryClosesSessionBeforeReload(t *testing.T) {
+	for _, closeFirst := range []bool{false, true} {
+		agent := &fakeAgent{
+			rejectReload: true,
+			capabilities: &acpsdk.AgentCapabilities{
+				LoadSession:         true,
+				SessionCapabilities: acpsdk.SessionCapabilities{Close: &acpsdk.SessionCloseCapabilities{}},
+			},
+		}
+		driver := New(Config{
+			Harness:                  domain.HarnessCopilot,
+			Capabilities:             ports.ChatCapabilities{ports.ChatCapabilityStreaming: true, ports.ChatCapabilityResume: true},
+			Probe:                    func(context.Context) error { return nil },
+			Launch:                   func(context.Context, LaunchConfig) (Launch, error) { return Launch{Command: "fake"}, nil },
+			CloseSessionBeforeReload: closeFirst,
+		}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		driver.useTestProcess(fakeSpawn(agent))
+		conv, err := driver.Resume(context.Background(), ports.ChatResumeConfig{
+			SessionID: "sess1", WorkspacePath: t.TempDir(), ProviderConversationID: "provider-session-1",
+		})
+		if err != nil {
+			t.Fatalf("closeFirst=%v Resume: %v", closeFirst, err)
+		}
+		_, err = conv.(ports.ChatHistoryRefresher).RefreshHistory(context.Background())
+		conv.Close()
+		agent.mu.Lock()
+		closes, loads := agent.closeCalls, agent.loadCalls
+		agent.mu.Unlock()
+		if !closeFirst {
+			if err == nil {
+				t.Fatal("without CloseSessionBeforeReload the reload should hit the agent's already-loaded error")
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("RefreshHistory: %v", err)
+		}
+		if loads != 2 || closes < 1 {
+			t.Fatalf("loads = %d, closes = %d; want 2 loads with a close between", loads, closes)
+		}
+	}
+}
+
+// Copilot replays user prompts without message ids. Each prompt after an
+// answer must start its own turn, or every later turn merges into the first
+// and no checkpoint can match.
+func TestACPHistoryReplaySplitsIDLessPromptsAfterAnswers(t *testing.T) {
+	agent := &fakeAgent{
+		capabilities: &acpsdk.AgentCapabilities{LoadSession: true},
+		loadUpdates: []acpsdk.SessionUpdate{
+			acpsdk.UpdateUserMessageText("Hi how are "),
+			acpsdk.UpdateUserMessageText("you"),
+			acpsdk.UpdateAgentMessageText("Doing well."),
+			acpsdk.UpdateUserMessageText("What did I ask?"),
+			acpsdk.UpdateAgentMessageText("You asked how I am."),
+		},
+	}
+	driver := New(Config{
+		Harness:      domain.HarnessCopilot,
+		Capabilities: ports.ChatCapabilities{ports.ChatCapabilityStreaming: true, ports.ChatCapabilityResume: true},
+		Probe:        func(context.Context) error { return nil },
+		Launch:       func(context.Context, LaunchConfig) (Launch, error) { return Launch{Command: "fake"}, nil },
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	driver.useTestProcess(fakeSpawn(agent))
+	conv, err := driver.Resume(context.Background(), ports.ChatResumeConfig{
+		SessionID: "sess1", WorkspacePath: t.TempDir(), ProviderConversationID: "provider-session-1",
+	})
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	defer conv.Close()
+	events, err := conv.(ports.ChatHistoryReader).ReadHistory(context.Background())
+	if err != nil {
+		t.Fatalf("ReadHistory: %v", err)
+	}
+	type turn struct{ user, assistant string }
+	var turns []turn
+	byID := map[string]int{}
+	for _, event := range events {
+		index, ok := byID[event.ProviderTurnID]
+		if !ok {
+			index = len(turns)
+			byID[event.ProviderTurnID] = index
+			turns = append(turns, turn{})
+		}
+		switch event.Kind {
+		case ports.ChatEventUserMessageCompleted:
+			turns[index].user += event.Text
+		case ports.ChatEventMessageCompleted:
+			turns[index].assistant += event.Text
+		}
+	}
+	want := []turn{{"Hi how are you", "Doing well."}, {"What did I ask?", "You asked how I am."}}
+	if !reflect.DeepEqual(turns, want) {
+		t.Fatalf("replayed turns = %+v, want %+v", turns, want)
 	}
 }

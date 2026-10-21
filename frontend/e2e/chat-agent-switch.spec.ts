@@ -1,12 +1,12 @@
 import { expect, test } from "@playwright/test";
 import { agentReadiness } from "../src/renderer/test/agent-readiness-fixtures";
 import { installFakeAgent } from "./support/fake-bridge";
-import { openSwitchAgentMenu } from "./support/open-switch-agent-menu";
+import { openSwitchAgentDialog } from "./support/open-switch-agent-menu";
 
 const projectId = "chat-agent-switch";
 const sessionId = "chat-switch-worker";
 
-test("chat session without an agent terminal switches from the submenu @T0", async ({ page }) => {
+test("chat session without an agent terminal exposes the switch-agent dialog @T0", async ({ page }) => {
 	await page.emulateMedia({ reducedMotion: "reduce" });
 	await installFakeAgent(page, {
 		projectId,
@@ -15,17 +15,6 @@ test("chat session without an agent terminal switches from the submenu @T0", asy
 	});
 	await page.route("http://127.0.0.1:8080/api/v1/**", async (route) => {
 		const pathname = new URL(route.request().url()).pathname;
-		if (pathname === `/api/v1/sessions/${sessionId}/switch-agent`) {
-			expect(route.request().postDataJSON()).toEqual({
-				targetHarness: "claude-code",
-				idempotencyKey: expect.any(String),
-			});
-			await route.fulfill({
-				status: 202,
-				json: { switch: { id: "switch-1", fromHarness: "codex", targetHarness: "claude-code", state: "preparing_handoff" } },
-			});
-			return;
-		}
 		if (pathname === "/api/v1/agents/readiness" || pathname === "/api/v1/agents/readiness/ensure") {
 			await route.fulfill({
 				json: {
@@ -99,13 +88,7 @@ test("chat session without an agent terminal switches from the submenu @T0", asy
 		await route.fulfill({ json: { status: "ok" } });
 	});
 
-	await page.goto(`/#/host/local/session/${sessionId}`);
+	await page.goto(`/#/projects/${projectId}/sessions/${sessionId}`);
 	await expect(page.getByRole("region", { name: "Chat" })).toBeVisible();
-	const menu = await openSwitchAgentMenu(page);
-	await expect(menu.getByRole("menuitem", { name: "Codex Current" })).toBeDisabled();
-	const accepted = page.waitForResponse((response) => response.url().endsWith(`/${sessionId}/switch-agent`) && response.status() === 202);
-	await menu.getByRole("menuitem", { name: "Claude Code", exact: true }).click();
-	await accepted;
-	await expect(menu).not.toBeVisible();
-	await expect(page.getByRole("dialog", { name: "Switch agent" })).not.toBeVisible();
+	await openSwitchAgentDialog(page);
 });

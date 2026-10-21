@@ -29,11 +29,6 @@ type State struct {
 	Enabled  bool   `json:"enabled"`
 	Password string `json:"password"`
 	LastPort int    `json:"lastPort"`
-	// Bind narrows which interface the LAN listener binds: "" / "all"
-	// (every interface, the default), "tailscale", or a literal IP. See
-	// BindAddress. There is no API for it yet — edit config.json and
-	// re-enable the bridge.
-	Bind string `json:"bind,omitempty"`
 	// The last rotated credential stays recognizable as stale after restart.
 	RetiredPasswordHash string `json:"retiredPasswordHash,omitempty"`
 	// AccountTokenHash permits a separate, machine-scoped credential to be
@@ -65,7 +60,8 @@ type State struct {
 	// KeepAwake is the user's choice to keep this Mac from idle-sleeping while
 	// the bridge is on. Kept separate from Enabled so turning the bridge off and
 	// on again does not forget it.
-	KeepAwake bool `json:"keepAwake"`
+	KeepAwake    bool `json:"keepAwake"`
+	KeepAwakeLid bool `json:"keepAwakeLid,omitempty"`
 }
 
 // Path returns the Connect Mobile config file location under the data dir

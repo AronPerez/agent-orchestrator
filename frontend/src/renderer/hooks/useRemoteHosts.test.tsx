@@ -1,61 +1,315 @@
-import { renderHook, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { LOCAL_HOST_ID, useRemoteHosts } from "./useRemoteHosts";
+import { act, renderHook, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useUiStore } from "../stores/ui-store";
 
-const { listMock, probeMock } = vi.hoisted(() => ({
-	listMock: vi.fn(),
-	probeMock: vi.fn(),
+const remotes = vi.hoisted(() => ({
+	list: vi.fn(),
+	connect: vi.fn(),
+	disconnect: vi.fn(),
+	connected: vi.fn(),
+	importAccountHost: vi.fn(),
+	pruneAccountHosts: vi.fn(),
 }));
+const account = vi.hoisted(() => ({ status: "authenticated" as "authenticated" | "unauthenticated", userId: "user-a" }));
+const cloud = vi.hoisted(() => ({ baseUrl: "", listAccountRemoteHosts: vi.fn(async () => []) }));
 
-// The bridge's `remotes` surface lands with the IPC task; mock the module
-// rather than spying on a stub that does not exist yet.
-vi.mock("../lib/bridge", () => ({
-	aoBridge: { remotes: { list: listMock, probe: probeMock } },
-}));
+vi.mock("../lib/bridge", () => ({ aoBridge: { remotes } }));
+vi.mock("../lib/cloud-session", () => ({ useCloudSession: () => ({ status: account.status, session: account.status === "authenticated" ? { user: { id: account.userId } } : null }) }));
+vi.mock("./useSettings", () => ({ useSettings: () => ({ settings: { cloudControlPlaneUrl: cloud.baseUrl } }) }));
+vi.mock("../lib/account-remote-hosts", () => ({ listAccountRemoteHosts: cloud.listAccountRemoteHosts }));
+
+import { baseUrlForHost, connectedHosts } from "../lib/host-clients";
+import { useConnectedHosts } from "./useHostConnection";
+import { requestRemoteHostsRefresh, useRemoteHosts } from "./useRemoteHosts";
+import { remoteWorkspaceQueryKey, useRemoteWorkspaces } from "./useWorkspaceQuery";
 
 beforeEach(() => {
-	listMock.mockClear();
-	probeMock.mockClear();
-	listMock.mockResolvedValue([{ label: "workbox", url: "http://192.0.2.1:3011" }]);
-	probeMock.mockResolvedValue("online");
+	account.status = "authenticated";
+	account.userId = "user-a";
+	cloud.baseUrl = "";
+	cloud.listAccountRemoteHosts.mockClear();
+	remotes.importAccountHost.mockClear();
+	remotes.pruneAccountHosts.mockClear();
+	remotes.list.mockReset().mockResolvedValue([
+		{ hostId: "box-a", label: "Box A", url: "http://box-a:3001" },
+		{ hostId: "box-b", label: "Box B", url: "http://box-b:3001" },
+	]);
+	remotes.connect.mockReset().mockImplementation(async (url: string) => ({
+		hostId: url.includes("box-a") ? "box-a" : "box-b",
+		label: url.includes("box-a") ? "Box A" : "Box B",
+		url,
+		base: "http://127.0.0.1:4000",
+	}));
+	remotes.disconnect.mockReset().mockResolvedValue(undefined);
+	useUiStore.setState({ developerMode: true, remoteHosts: false });
+});
+
+afterEach(() => {
+	vi.useRealTimers();
+	useUiStore.setState({ developerMode: false, remoteHosts: false });
+});
+
+it("does not connect to saved boxes until Remote hosts is enabled", async () => {
+	const { result } = renderHook(() => useRemoteHosts());
+	await waitFor(() => expect(result.current.hosts).toHaveLength(0));
+	expect(remotes.list).not.toHaveBeenCalled();
+	expect(remotes.connect).not.toHaveBeenCalled();
+});
+
+it("connects local hosts while signed out with Developer mode off without Cloud sync", async () => {
+	useUiStore.setState({ developerMode: false, remoteHosts: true });
+	account.status = "unauthenticated";
+	cloud.baseUrl = "https://cloud.example";
+	const { result } = renderHook(() => useRemoteHosts());
+	const connections = renderHook(() => useConnectedHosts());
+	await waitFor(() => expect(result.current.hosts).toHaveLength(2));
+	await waitFor(() => expect(connections.result.current).toEqual(["box-a", "box-b"]));
+	expect(cloud.listAccountRemoteHosts).not.toHaveBeenCalled();
+	expect(remotes.importAccountHost).not.toHaveBeenCalled();
+	expect(remotes.pruneAccountHosts).not.toHaveBeenCalled();
+});
+
+it("keeps local connections on sign-out but disconnects account-only hosts", async () => {
+	useUiStore.setState({ developerMode: false, remoteHosts: true });
+	cloud.baseUrl = "https://cloud.example";
+	const { result, rerender } = renderHook(() => useRemoteHosts());
+	await waitFor(() => expect(connectedHosts()).toEqual(["box-a", "box-b"]));
+	expect(cloud.listAccountRemoteHosts).toHaveBeenCalledOnce();
+	expect(remotes.pruneAccountHosts).toHaveBeenCalledWith("user-a", []);
+	remotes.list.mockResolvedValue([{ hostId: "box-a", label: "Box A", url: "http://box-a:3001" }]);
+	account.status = "unauthenticated";
+	rerender();
+	await waitFor(() => expect(result.current.hosts).toEqual([
+		{ hostId: "box-a", label: "Box A", url: "http://box-a:3001", status: "connected" },
+	]));
+	expect(connectedHosts()).toEqual(["box-a"]);
+	expect(remotes.disconnect).toHaveBeenCalledWith("http://box-b:3001");
+	expect(remotes.disconnect).not.toHaveBeenCalledWith("http://box-a:3001");
+	expect(cloud.listAccountRemoteHosts).toHaveBeenCalledOnce();
+});
+
+it.each(["pending", "rejected"])("retires prior-account cached pinned sessions before a %s registry refresh", async (refresh) => {
+	useUiStore.setState({ developerMode: false, remoteHosts: true });
+	remotes.list.mockResolvedValue([
+		{ hostId: "box-a", label: "Local pairing", url: "http://box-a:3001" },
+		{ hostId: "box-b", label: "Account host", url: "http://box-b:3001", accountUserId: "user-a" },
+	]);
+	const queryClient = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, retry: false } } });
+	for (const hostId of ["box-a", "box-b"]) {
+		queryClient.setQueryData([...remoteWorkspaceQueryKey(hostId), "projects"], [{ id: "project", name: "Project", path: "/project" }]);
+		queryClient.setQueryData([...remoteWorkspaceQueryKey(hostId), "sessions"], [{ id: `pinned-${hostId}`, projectId: "project", harness: "codex", status: "working", isPinned: true, prs: [] }]);
+	}
+	const { result, rerender } = renderHook(() => ({ hosts: useRemoteHosts(), workspaces: useRemoteWorkspaces() }), {
+		wrapper: ({ children }) => <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>,
+	});
+	const pinned = () => result.current.workspaces.data.flatMap((project) => project.sessions).filter((session) => session.isPinned).map((session) => session.id);
+	await waitFor(() => expect(pinned()).toEqual(["pinned-box-a", "pinned-box-b"]));
+	if (refresh === "pending") remotes.list.mockImplementation(() => new Promise(() => {}));
+	else remotes.list.mockRejectedValue(new Error("registry unavailable"));
+	account.userId = "user-b";
+	rerender();
+	expect(connectedHosts()).toEqual(["box-a"]);
+	await waitFor(() => expect(pinned()).toEqual(["pinned-box-a"]));
+	expect(remotes.disconnect).toHaveBeenCalledWith("http://box-b:3001");
+	expect(remotes.disconnect).not.toHaveBeenCalledWith("http://box-a:3001");
+	expect(queryClient.getQueryData([...remoteWorkspaceQueryKey("box-b"), "sessions"])).toBeDefined();
+});
+
+it("connects both saved boxes and exposes their stable IDs", async () => {
 	useUiStore.setState({ remoteHosts: true });
+	const { result } = renderHook(() => useRemoteHosts());
+	await waitFor(() => expect(result.current.hosts).toEqual([
+		{ hostId: "box-a", label: "Box A", url: "http://box-a:3001", status: "connected" },
+		{ hostId: "box-b", label: "Box B", url: "http://box-b:3001", status: "connected" },
+	]));
 });
 
-describe("useRemoteHosts with the Remote hosts flag off", () => {
-	it("lists only the local host and contacts no saved host", async () => {
-		useUiStore.setState({ remoteHosts: false });
-		const { result } = renderHook(() => useRemoteHosts());
-
-		await result.current.refresh();
-
-		expect(result.current.hosts.map((host) => host.id)).toEqual([LOCAL_HOST_ID]);
-		expect(listMock).not.toHaveBeenCalled();
-		expect(probeMock).not.toHaveBeenCalled();
-	});
+it("disconnects the prior proxy when a connected host becomes unreachable", async () => {
+	remotes.list.mockResolvedValue([{ hostId: "box-a", label: "Box A", url: "http://box-a:3001" }]);
+	useUiStore.setState({ remoteHosts: true });
+	const { result } = renderHook(() => useRemoteHosts());
+	await waitFor(() => expect(result.current.hosts[0]?.status).toBe("connected"));
+	remotes.connect.mockRejectedValueOnce(new Error("host offline"));
+	await act(async () => result.current.refresh());
+	expect(result.current.hosts[0]?.status).toBe("offline");
+	expect(remotes.disconnect).toHaveBeenCalledWith("http://box-a:3001");
+	expect(connectedHosts()).not.toContain("box-a");
 });
 
-describe("useRemoteHosts", () => {
-	it("always lists the local host first, before any remote resolves", () => {
-		const { result } = renderHook(() => useRemoteHosts());
-		expect(result.current.hosts[0]).toMatchObject({ id: LOCAL_HOST_ID, url: null, status: "local" });
-	});
+it("shows password rejected when a connected host rejects its saved credential", async () => {
+	remotes.list.mockResolvedValue([{ hostId: "box-a", label: "Box A", url: "http://box-a:3001" }]);
+	useUiStore.setState({ remoteHosts: true });
+	const { result } = renderHook(() => useRemoteHosts());
+	await waitFor(() => expect(result.current.hosts[0]?.status).toBe("connected"));
+	remotes.connect.mockRejectedValueOnce(new Error("host http://box-a:3001 is unauthorized"));
+	await act(async () => result.current.refresh());
+	expect(result.current.hosts[0]).toMatchObject({ status: "offline", failureReason: "unauthorized" });
+	expect(connectedHosts()).not.toContain("box-a");
+});
 
-	it("appends saved hosts and probes each one", async () => {
-		const { result } = renderHook(() => useRemoteHosts());
-		await waitFor(() => expect(result.current.hosts).toHaveLength(2));
-		await waitFor(() => expect(result.current.hosts[1]).toMatchObject({ label: "workbox", status: "online" }));
-	});
+it("turns a connected host offline when a remote request asks for a connection recheck", async () => {
+	remotes.list.mockResolvedValue([{ hostId: "box-a", label: "Box A", url: "http://box-a:3001" }]);
+	useUiStore.setState({ remoteHosts: true });
+	const { result } = renderHook(() => useRemoteHosts());
+	await waitFor(() => expect(result.current.hosts[0]?.status).toBe("connected"));
+	remotes.connect.mockRejectedValueOnce(new Error("host http://box-a:3001 is unauthorized"));
+	act(() => requestRemoteHostsRefresh());
+	await waitFor(() => expect(result.current.hosts[0]).toMatchObject({ status: "offline", failureReason: "unauthorized" }));
+	expect(connectedHosts()).not.toContain("box-a");
+});
 
-	it("surfaces an unreachable host as offline rather than hiding it", async () => {
-		probeMock.mockResolvedValue("offline");
-		const { result } = renderHook(() => useRemoteHosts());
-		await waitFor(() => expect(result.current.hosts[1]?.status).toBe("offline"));
-	});
+it("shows an incompatible API version after reconnect without retaining the old proxy", async () => {
+	remotes.list.mockResolvedValue([{ hostId: "box-a", label: "Box A", url: "http://box-a:3001" }]);
+	useUiStore.setState({ remoteHosts: true });
+	const { result } = renderHook(() => useRemoteHosts());
+	await waitFor(() => expect(result.current.hosts[0]?.status).toBe("connected"));
+	remotes.connect.mockRejectedValueOnce(new Error("host http://box-a:3001 is incompatible"));
+	await act(async () => result.current.refresh());
+	expect(result.current.hosts[0]).toMatchObject({ status: "offline", failureReason: "incompatible" });
+	expect(connectedHosts()).not.toContain("box-a");
+});
 
-	it("keeps the local host when the bridge has no remotes at all", async () => {
-		listMock.mockResolvedValue([]);
-		const { result } = renderHook(() => useRemoteHosts());
-		await waitFor(() => expect(result.current.hosts).toEqual([expect.objectContaining({ id: LOCAL_HOST_ID })]));
+it("keeps healthy hosts visible while rechecking a failed one", async () => {
+	useUiStore.setState({ remoteHosts: true });
+	const { result } = renderHook(() => useRemoteHosts());
+	await waitFor(() => expect(result.current.hosts.every((host) => host.status === "connected")).toBe(true));
+	let failA!: (reason: Error) => void;
+	let finishB!: (host: { hostId: string; label: string; url: string; base: string }) => void;
+	remotes.connect.mockImplementationOnce(() => new Promise((_, reject) => { failA = reject; }));
+	remotes.connect.mockImplementationOnce(() => new Promise((resolve) => { finishB = resolve; }));
+	let refresh!: Promise<void>;
+	await act(async () => { refresh = result.current.refresh(); await Promise.resolve(); });
+	expect(result.current.hosts.find((host) => host.hostId === "box-b")?.status).toBe("connected");
+	await act(async () => {
+		finishB({ hostId: "box-b", label: "Box B", url: "http://box-b:3001", base: "http://127.0.0.1:4000" });
+		failA(new Error("host http://box-a:3001 is offline"));
+		await refresh;
 	});
+	expect(result.current.hosts.map((host) => [host.hostId, host.status])).toEqual([["box-a", "offline"], ["box-b", "connected"]]);
+});
+
+it("keeps B connected when A's corrupted saved address points at B", async () => {
+	const sharedUrl = "http://box-b:3001";
+	remotes.list.mockResolvedValue([
+		{ hostId: "box-a", label: "Box A", url: sharedUrl },
+		{ hostId: "box-b", label: "Box B", url: sharedUrl },
+	]);
+	remotes.connect.mockImplementation(async (url: string, hostId?: string) => {
+		if (hostId === "box-a") throw new Error("remote host identity changed");
+		return { hostId: "box-b", label: "Box B", url, base: "http://127.0.0.1:4000" };
+	});
+	useUiStore.setState({ remoteHosts: true });
+	const { result } = renderHook(() => useRemoteHosts());
+	await waitFor(() => expect(result.current.hosts.map((host) => [host.hostId, host.status])).toEqual([
+		["box-a", "offline"], ["box-b", "connected"],
+	]));
+	expect(connectedHosts()).toContain("box-b");
+	expect(remotes.disconnect).not.toHaveBeenCalledWith(sharedUrl);
+});
+
+it("does not disconnect a newer successful connection after an older refresh fails", async () => {
+	remotes.list.mockResolvedValue([{ hostId: "box-a", label: "Box A", url: "http://box-a:3001" }]);
+	useUiStore.setState({ remoteHosts: true });
+	const { result } = renderHook(() => useRemoteHosts());
+	await waitFor(() => expect(result.current.hosts[0]?.status).toBe("connected"));
+	let failOld!: (reason: Error) => void;
+	remotes.connect.mockImplementationOnce(() => new Promise((_, reject) => { failOld = reject; }));
+	const oldRefresh = result.current.refresh();
+	await waitFor(() => expect(remotes.connect).toHaveBeenCalledTimes(2));
+	const newRefresh = result.current.refresh();
+	await act(async () => { await newRefresh; failOld(new Error("stale failure")); await oldRefresh; });
+	expect(result.current.hosts[0]?.status).toBe("connected");
+	expect(connectedHosts()).toContain("box-a");
+	expect(remotes.disconnect).not.toHaveBeenCalledWith("http://box-a:3001");
+});
+
+it("does not replace a newer proxy when an older refresh succeeds late", async () => {
+	const oldUrl = "http://box-a:3001";
+	const newUrl = "http://box-a-new:3001";
+	remotes.list.mockReset().mockResolvedValueOnce([{ hostId: "box-a", label: "Box A", url: oldUrl }])
+		.mockResolvedValueOnce([{ hostId: "box-a", label: "Box A", url: oldUrl }])
+		.mockResolvedValue([{ hostId: "box-a", label: "Box A", url: newUrl }]);
+	useUiStore.setState({ remoteHosts: true });
+	const { result } = renderHook(() => useRemoteHosts());
+	await waitFor(() => expect(result.current.hosts[0]?.status).toBe("connected"));
+	let finishOld!: (host: { hostId: string; label: string; url: string; base: string }) => void;
+	remotes.connect.mockImplementationOnce(() => new Promise((resolve) => { finishOld = resolve; }))
+		.mockResolvedValueOnce({ hostId: "box-a", label: "Box A", url: newUrl, base: "http://127.0.0.1:4001" });
+	let oldRefresh!: Promise<void>;
+	await act(async () => { oldRefresh = result.current.refresh(); await Promise.resolve(); });
+	await waitFor(() => expect(remotes.connect).toHaveBeenCalledTimes(2));
+	await act(async () => { await result.current.refresh(); });
+	expect(baseUrlForHost("box-a")).toBe("http://127.0.0.1:4001");
+	await act(async () => { finishOld({ hostId: "box-a", label: "Box A", url: oldUrl, base: "http://127.0.0.1:4000" }); await oldRefresh; });
+	expect(baseUrlForHost("box-a")).toBe("http://127.0.0.1:4001");
+	expect(remotes.disconnect).not.toHaveBeenCalledWith(newUrl);
+});
+
+it("closes a connection that finishes after the feature is disabled", async () => {
+	let finishConnect!: (value: { hostId: string; label: string; url: string; base: string }) => void;
+	remotes.list.mockResolvedValue([{ hostId: "box-a", label: "Box A", url: "http://box-a:3001" }]);
+	remotes.connect.mockImplementation(() => new Promise((resolve) => { finishConnect = resolve; }));
+	useUiStore.setState({ remoteHosts: true });
+	const { result } = renderHook(() => useRemoteHosts());
+	await waitFor(() => expect(remotes.connect).toHaveBeenCalledOnce());
+	act(() => useUiStore.setState({ remoteHosts: false }));
+	await act(async () => finishConnect({ hostId: "box-a", label: "Box A", url: "http://box-a:3001", base: "http://127.0.0.1:4000" }));
+	await waitFor(() => expect(remotes.disconnect).toHaveBeenCalledWith("http://box-a:3001"));
+	expect(result.current.hosts).toEqual([]);
+});
+
+it("reconnects a saved host that was offline at startup without retrying healthy hosts", async () => {
+	vi.useFakeTimers();
+	let boxAOnline = false;
+	const connect = remotes.connect.getMockImplementation()!;
+	remotes.connect.mockImplementation((url: string, hostId: string) =>
+		url.includes("box-a") && !boxAOnline
+			? Promise.reject(new Error(`host ${url} is offline`))
+			: connect(url, hostId),
+	);
+	useUiStore.setState({ remoteHosts: true });
+	const { result } = renderHook(() => useRemoteHosts());
+	await act(async () => { await Promise.resolve(); });
+	expect(result.current.hosts.map(({ status }) => status)).toEqual(["offline", "connected"]);
+	boxAOnline = true;
+	await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+	expect(result.current.hosts.map(({ status }) => status)).toEqual(["connected", "connected"]);
+	expect(remotes.connect.mock.calls.filter(([url]) => url.includes("box-b"))).toHaveLength(1);
+});
+
+it("does not automatically retry a saved host with an invalid password", async () => {
+	vi.useFakeTimers();
+	remotes.list.mockResolvedValue([{ hostId: "box-a", label: "Box A", url: "http://box-a:3001" }]);
+	remotes.connect.mockRejectedValue(new Error("host http://box-a:3001 is unauthorized"));
+	useUiStore.setState({ remoteHosts: true });
+	const { result } = renderHook(() => useRemoteHosts());
+	await act(async () => { await Promise.resolve(); });
+	expect(result.current.hosts[0]?.status).toBe("offline");
+	expect(result.current.hosts[0]?.failureReason).toBe("unauthorized");
+	await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+	expect(remotes.connect).toHaveBeenCalledTimes(1);
+});
+
+it("does not replace a newer proxy when an old offline retry finishes late", async () => {
+	vi.useFakeTimers();
+	const oldUrl = "http://box-a:3001";
+	const newUrl = "http://box-a-new:3001";
+	remotes.list.mockResolvedValueOnce([{ hostId: "box-a", label: "Box A", url: oldUrl }]);
+	let finishRetry!: (host: { hostId: string; label: string; url: string; base: string }) => void;
+	remotes.connect.mockRejectedValueOnce(new Error(`host ${oldUrl} is offline`))
+		.mockImplementationOnce(() => new Promise((resolve) => { finishRetry = resolve; }))
+		.mockResolvedValueOnce({ hostId: "box-a", label: "Box A", url: newUrl, base: "http://127.0.0.1:4001" });
+	useUiStore.setState({ remoteHosts: true });
+	const { result } = renderHook(() => useRemoteHosts());
+	await act(async () => { await Promise.resolve(); });
+	expect(result.current.hosts[0]?.status).toBe("offline");
+	await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+	remotes.list.mockResolvedValue([{ hostId: "box-a", label: "Box A", url: newUrl }]);
+	await act(async () => { await result.current.refresh(); });
+	expect(baseUrlForHost("box-a")).toBe("http://127.0.0.1:4001");
+	await act(async () => finishRetry({ hostId: "box-a", label: "Box A", url: oldUrl, base: "http://127.0.0.1:4000" }));
+	expect(baseUrlForHost("box-a")).toBe("http://127.0.0.1:4001");
+	expect(remotes.disconnect).toHaveBeenCalledWith(oldUrl);
+	expect(remotes.disconnect).not.toHaveBeenCalledWith(newUrl);
 });

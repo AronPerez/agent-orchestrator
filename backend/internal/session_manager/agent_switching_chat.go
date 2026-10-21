@@ -171,7 +171,7 @@ func (m *Manager) executeChatAgentSwitch(
 	if !ok {
 		return result, fmt.Errorf("switch Chat agent %s: %w", id, ErrInterfaceHandoffUnsupported)
 	}
-	// resolveAgentConfig drops role tuning configured for another agent.
+	baseAgentConfig := effectiveAgentConfig(cfg.TargetHarness, rec.Kind, project.Config)
 	agentConfig, err := m.resolveAgentConfig(ctx, ports.SpawnConfig{
 		ProjectID: rec.ProjectID,
 		Kind:      rec.Kind,
@@ -179,7 +179,7 @@ func (m *Manager) executeChatAgentSwitch(
 		AgentConfig: ports.AgentConfig{
 			Model: strings.TrimSpace(cfg.Model),
 		},
-	}, project.Config)
+	}, domain.ProjectConfig{AgentConfig: baseAgentConfig})
 	if err != nil {
 		return result, fmt.Errorf("switch Chat agent %s: target config: %w", id, err)
 	}
@@ -634,6 +634,12 @@ func (m *Manager) rollbackStoppedChatAgentSwitchSource(
 		systemPrompt, systemPromptFile, agentConfig, env,
 	); err != nil {
 		return err
+	}
+	// A target that failed to start can leave its provider host behind. The
+	// session has one host, so the source cannot reopen while the target's
+	// host still owns it under another protocol. Stop it first.
+	if err := m.stopSourceControllerConclusive(current); err != nil {
+		return fmt.Errorf("stop failed target controller: %w", err)
 	}
 	_, err = m.resumeChatController(
 		ctx, "restore failed agent switch", current, project,

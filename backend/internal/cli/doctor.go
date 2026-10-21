@@ -93,6 +93,7 @@ var harnessProbeSpecs = map[string]harnessProbeSpec{
 	"continue":    {BinaryName: "cn"},
 	// Command Code's binary is `cmd` on Unix and `cmdc` on Windows, where `cmd`
 	// is the built-in shell; the full name resolves on every platform.
+	"memcode":      {BinaryName: "memcode", VersionArg: "--version"},
 	"command-code": {BinaryName: "command-code", VersionArg: "--version"},
 }
 
@@ -267,7 +268,7 @@ func (c *commandContext) checkDaemonBuild(st daemonStatus, cliBuild daemonmeta.B
 	if err != nil || self == "" {
 		self = "this ao binary"
 	}
-	daemonPath := st.executable
+	daemonPath := st.ExecutablePath
 	if daemonPath == "" {
 		daemonPath = "the running daemon"
 	}

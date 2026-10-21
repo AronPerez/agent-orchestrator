@@ -153,6 +153,28 @@ func TestTaskPreparationsStayOutOfSessionReads(t *testing.T) {
 	}
 }
 
+func TestGetRecordReadsOnlyTheStoredRow(t *testing.T) {
+	st := newFakeStore()
+	st.sessions["mer-1"] = domain.SessionRecord{ID: "mer-1", ProjectID: "mer", Metadata: domain.SessionMetadata{PreviewURL: "http://localhost:5173/"}}
+	st.sessions["mer-2"] = domain.SessionRecord{ID: "mer-2", ProjectID: "mer", IsTaskPreparation: true}
+	svc := &Service{store: st}
+
+	rec, err := svc.GetRecord(context.Background(), "mer-1")
+	if err != nil || rec.Metadata.PreviewURL != "http://localhost:5173/" {
+		t.Fatalf("GetRecord = %+v, %v", rec, err)
+	}
+	if st.listPRFactsCalls != 0 || st.listReviewRunsCalls != 0 {
+		t.Fatalf("GetRecord read PR facts %d times and review runs %d times, want none", st.listPRFactsCalls, st.listReviewRunsCalls)
+	}
+	for _, id := range []domain.SessionID{"mer-2", "missing"} {
+		_, err = svc.GetRecord(context.Background(), id)
+		var apiError *apierr.Error
+		if !errors.As(err, &apiError) || apiError.Code != "SESSION_NOT_FOUND" {
+			t.Fatalf("GetRecord(%s) error = %v, want SESSION_NOT_FOUND", id, err)
+		}
+	}
+}
+
 func (f *fakeStore) GetActiveAgentSwitch(_ context.Context, id domain.SessionID) (domain.AgentSwitch, bool, error) {
 	if f.activeSwitchGetErr != nil {
 		return domain.AgentSwitch{}, false, f.activeSwitchGetErr
@@ -3121,6 +3143,34 @@ func TestSpawnStillRejectsFreshUnauthorizedCodexAccount(t *testing.T) {
 	}
 }
 
+// The readiness gate reads the computer's own Codex login. A task that will run
+// on a saved account does not use that login, so its state is not a reason to
+// refuse; the launch checks the account it runs on.
+func TestSpawnOnASavedCodexAccountIgnoresTheComputersLogin(t *testing.T) {
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer"}
+	fc := &fakeCommander{}
+	readiness := &fakeAgentReadiness{snapshot: domain.AgentReadinessSnapshot{
+		ID: "codex", Installation: domain.AgentInstallationObservation{State: domain.AgentInstallationInstalled},
+		Authentication: domain.AgentAuthenticationObservation{
+			State: domain.AgentAuthenticationUnauthorized, Freshness: domain.AgentReadinessFresh,
+		},
+	}}
+	svc := NewWithDeps(Deps{Manager: fc, Store: st, AgentReadiness: readiness})
+	var asked []string
+	svc.SetComputerLoginCheck(func(_ context.Context, harness domain.AgentHarness, accountID string) bool {
+		asked = append(asked, string(harness)+":"+accountID)
+		return false
+	})
+
+	if _, _, _, err := svc.Spawn(context.Background(), ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessCodex}); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if fc.spawnCalls != 1 || len(asked) != 1 || asked[0] != "codex:" {
+		t.Fatalf("spawn calls = %d, asked %v; want the saved default to launch", fc.spawnCalls, asked)
+	}
+}
+
 func TestSpawnInvalidatesReadinessAfterTypedLaunchFailure(t *testing.T) {
 	tests := []struct {
 		name             string
@@ -3504,9 +3554,10 @@ func TestSpawnEmitsTelemetryOnSuccess(t *testing.T) {
 	if ev.ProjectID == nil || *ev.ProjectID != "mer" || ev.SessionID == nil || *ev.SessionID != "mer-9" {
 		t.Fatalf("event ids = %+v", ev)
 	}
-	// Local operational events do not resolve or include the operator identity.
+	// With no GitHub identity resolver wired, the handle degrades to anonymous and
+	// the carrier event omits github_actor entirely.
 	if _, ok := ev.Payload["github_actor"]; ok {
-		t.Fatalf("payload should omit github_actor: %#v", ev.Payload)
+		t.Fatalf("payload should omit github_actor without a resolver: %#v", ev.Payload)
 	}
 }
 
@@ -3618,9 +3669,9 @@ func TestToAPIErrorMapsWorkspaceBranchSentinels(t *testing.T) {
 		{"Windows command line too long", fmt.Errorf("spawn: %w: escaped command line is 32769 UTF-16 code units", ports.ErrRuntimeCommandLineTooLong), apierr.KindInvalid, "WINDOWS_COMMAND_LINE_TOO_LONG"},
 		{"runtime workspace cwd mismatch", fmt.Errorf("spawn mer-1: runtime: %w: session mer-1 started in \"/deleted/shipit\", want \"/tmp/ws\"", ports.ErrRuntimeWorkspaceCwdMismatch), apierr.KindConflict, "WORKSPACE_CWD_MISMATCH"},
 		{"workspace locked", fmt.Errorf("restore mer-1: %w: \"/tmp/ws\" (branch \"ao/mer-1\") is registered but its directory is missing", ports.ErrWorkspaceLocked), apierr.KindConflict, "WORKSPACE_LOCKED"},
+		{"cleanup script failed", fmt.Errorf("kill mer-1: %w: secret output", sessionmanager.ErrCleanupScript), apierr.KindConflict, "WORKSPACE_CLEANUP_FAILED"},
 		{"runtime unavailable", fmt.Errorf("send mer-1: guard mer-1: send: tmux runtime: session mer-1: %w: no server running on /private/tmp/tmux-501/ao", ports.ErrRuntimeUnavailable), apierr.KindConflict, "RUNTIME_UNREACHABLE"},
 		{"runtime probe inconclusive", fmt.Errorf("send mer-1: guard mer-1: send: tmux runtime: session mer-1: %w: error connecting to /private/tmp/tmux-501/default", ports.ErrRuntimeProbeInconclusive), apierr.KindConflict, "RUNTIME_UNREACHABLE"},
-		{"cleanup script failed", fmt.Errorf("kill mer-1: %w: secret output", sessionmanager.ErrCleanupScript), apierr.KindConflict, "WORKSPACE_CLEANUP_FAILED"},
 		{"unknown harness", fmt.Errorf("spawn: %w: %q", sessionmanager.ErrUnknownHarness, "bogus"), apierr.KindInvalid, "UNKNOWN_HARNESS"},
 		{"missing harness", fmt.Errorf("spawn: %w: configure project worker.agent or pass --harness", sessionmanager.ErrMissingHarness), apierr.KindInvalid, "AGENT_REQUIRED"},
 		{"artifact output unavailable", fmt.Errorf("spawn: %w", sessionmanager.ErrArtifactOutputUnavailable), apierr.KindInvalid, "ARTIFACT_OUTPUT_UNAVAILABLE"},
@@ -5776,113 +5827,6 @@ func TestSpawnTelemetryCarriesRequestID(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// Mirrors the SQL: every predicate applied, newest first by (updated_at, id),
-// resumable from the keyset, capped at Limit.
-func (f *fakeStore) ListSessionsPage(_ context.Context, q ports.SessionPageQuery) ([]domain.SessionRecord, error) {
-	var recs []domain.SessionRecord
-	for _, rec := range f.sessions {
-		if q.Project != "" && rec.ProjectID != q.Project {
-			continue
-		}
-		if q.Terminated != nil && rec.IsTerminated != *q.Terminated {
-			continue
-		}
-		if q.OrchestratorOnly && rec.Kind != domain.KindOrchestrator {
-			continue
-		}
-		if q.Before != nil && !pageNewer(domain.SessionRecord{UpdatedAt: q.Before.UpdatedAt, ID: q.Before.ID}, rec) {
-			continue
-		}
-		recs = append(recs, rec)
-	}
-	for i := 1; i < len(recs); i++ {
-		for j := i; j > 0 && pageNewer(recs[j], recs[j-1]); j-- {
-			recs[j], recs[j-1] = recs[j-1], recs[j]
-		}
-	}
-	if q.Limit > 0 && len(recs) > q.Limit {
-		recs = recs[:q.Limit]
-	}
-	return recs, nil
-}
-
-func pageNewer(a, b domain.SessionRecord) bool {
-	if !a.UpdatedAt.Equal(b.UpdatedAt) {
-		return a.UpdatedAt.After(b.UpdatedAt)
-	}
-	return a.ID > b.ID
-}
-
-func pageIDs(sessions []domain.Session) []domain.SessionID {
-	out := make([]domain.SessionID, 0, len(sessions))
-	for _, s := range sessions {
-		out = append(out, s.ID)
-	}
-	return out
-}
-
-func sameIDs(a, b []domain.SessionID) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func TestListPagePaginatesNewestFirstWithAResumableToken(t *testing.T) {
-	st := newFakeStore()
-	base := time.Unix(1700000000, 0).UTC()
-	for i, id := range []domain.SessionID{"mer-1", "mer-2", "mer-3"} {
-		st.sessions[id] = domain.SessionRecord{ID: id, ProjectID: "mer", IsTerminated: true, UpdatedAt: base.Add(time.Duration(i) * time.Minute)}
-	}
-	svc := &Service{store: st}
-	active := false
-
-	first, err := svc.ListPage(context.Background(), ListPageRequest{ListFilter: ListFilter{Active: &active}, PageSize: 2})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := pageIDs(first.Sessions), []domain.SessionID{"mer-3", "mer-2"}; !sameIDs(got, want) {
-		t.Fatalf("first page = %v, want newest first %v", got, want)
-	}
-	if first.NextPageToken == "" {
-		t.Fatal("a third row exists, so the first page must carry a next-page token")
-	}
-	if st.listPRFactsCalls != 1 {
-		t.Fatalf("ListPRFacts calls = %d, want 1 batched call for the page", st.listPRFactsCalls)
-	}
-
-	rest, err := svc.ListPage(context.Background(), ListPageRequest{ListFilter: ListFilter{Active: &active}, PageSize: 2, PageToken: first.NextPageToken})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := pageIDs(rest.Sessions), []domain.SessionID{"mer-1"}; !sameIDs(got, want) {
-		t.Fatalf("second page = %v, want %v", got, want)
-	}
-	if rest.NextPageToken != "" {
-		t.Fatalf("last page must not carry a token, got %q", rest.NextPageToken)
-	}
-}
-
-func TestListPageRejectsAMalformedToken(t *testing.T) {
-	_, err := (&Service{store: newFakeStore()}).ListPage(context.Background(), ListPageRequest{PageSize: 1, PageToken: "not-a-token"})
-	if !errors.Is(err, ErrInvalidPageToken) {
-		t.Fatalf("err = %v, want ErrInvalidPageToken", err)
-	}
-}
-
-func TestPageTokenRoundTrips(t *testing.T) {
-	want := ports.SessionPageCursor{UpdatedAt: time.Unix(1700000000, 123456789).UTC(), ID: "mer-7"}
-	got, err := DecodePageToken(EncodePageToken(want))
-	if err != nil || !got.UpdatedAt.Equal(want.UpdatedAt) || got.ID != want.ID {
-		t.Fatalf("round trip = %+v, %v; want %+v", got, err, want)
 	}
 }
 

@@ -261,7 +261,7 @@ func TestRunBackgroundTaskUsesResolvedWorkerHarnessAndConfig(t *testing.T) {
 		Metadata: domain.SessionMetadata{
 			WorkspacePath: "/ws/mer-1",
 			Model:         "selected-model",
-			Effort:        "low",
+			Effort:        "xhigh",
 			Permissions:   ports.PermissionModeAcceptEdits,
 		},
 	}
@@ -276,7 +276,7 @@ func TestRunBackgroundTaskUsesResolvedWorkerHarnessAndConfig(t *testing.T) {
 	}
 	task := launcher.background[0]
 	if launcher.backgroundHarnesses[0] != rec.Harness || task.WorkspacePath == rec.Metadata.WorkspacePath ||
-		task.Model != rec.Metadata.Model || task.Effort != rec.Metadata.Effort || task.Permissions != ports.PermissionModeAcceptEdits {
+		task.Model != rec.Metadata.Model || task.Effort != "" || task.Permissions != ports.PermissionModeAcceptEdits {
 		t.Fatalf("background task = %#v", task)
 	}
 	if _, err := os.Stat(task.WorkspacePath); !errors.Is(err, os.ErrNotExist) {
@@ -291,6 +291,9 @@ func TestRunBackgroundTaskUsesResolvedWorkerHarnessAndConfig(t *testing.T) {
 	if _, ok := task.Env[EnvSessionID]; ok {
 		t.Fatalf("background task inherited %s: %#v", EnvSessionID, task.Env)
 	}
+	if worker := st.sessions[rec.ID]; worker.Metadata.Model != rec.Metadata.Model || worker.Metadata.Effort != rec.Metadata.Effort {
+		t.Fatalf("background task changed worker model/effort: %#v", worker.Metadata)
+	}
 }
 
 func TestBackgroundTaskPermissionsKeepKimiCompatible(t *testing.T) {
@@ -302,7 +305,7 @@ func TestBackgroundTaskPermissionsKeepKimiCompatible(t *testing.T) {
 	}
 }
 
-func TestChatSpawnPersistsResolvedEffortForBackgroundTasks(t *testing.T) {
+func TestChatSpawnPersistsResolvedEffort(t *testing.T) {
 	for _, tt := range []struct {
 		name     string
 		override bool
@@ -315,7 +318,6 @@ func TestChatSpawnPersistsResolvedEffortForBackgroundTasks(t *testing.T) {
 			launcher := &recordingLauncher{}
 			m, st, _ := newChatManager(launcher)
 			project := st.projects[string(chatTestProject)]
-			project.Config.Worker.Harness = domain.HarnessCodex
 			project.Config.AgentConfig.Effort = "high"
 			st.projects[string(chatTestProject)] = project
 
@@ -1770,119 +1772,6 @@ func TestSendRefusedForTerminatedChatSession(t *testing.T) {
 	}
 }
 
-// The reported failure: switching a claude-code chat session's interface died with
-//
-//	set ACP session option "model": Invalid value for config option model: gpt-5.6-terra
-//
-// gpt-5.6-terra is a codex model. The session's harness and the harness its project
-// role configures a model for had diverged — an explicit --agent at spawn, a completed
-// agent switch, or the role's agent edited afterwards all produce that — and every
-// launch path except the agent-switch one re-applied the role's model regardless of
-// which agent was actually going to receive it.
-func TestChatLaunchDoesNotApplyAnotherHarnessModel(t *testing.T) {
-	launcher := &recordingLauncher{}
-	mgr, store, _ := newChatManager(launcher)
-	store.projects[string(chatTestProject)] = domain.ProjectRecord{
-		ID: string(chatTestProject),
-		Config: domain.ProjectConfig{
-			Worker: domain.RoleOverride{
-				Harness:     domain.HarnessCodex,
-				AgentConfig: domain.AgentConfig{Model: "gpt-5.6-terra"},
-			},
-			Orchestrator: domain.RoleOverride{Harness: domain.HarnessClaudeCode},
-		},
-	}
-	ctx := context.Background()
-
-	rec, _, _, err := mgr.Spawn(ctx, ports.SpawnConfig{
-		ProjectID:     chatTestProject,
-		Kind:          domain.KindWorker,
-		Harness:       domain.HarnessClaudeCode,
-		RequestedMode: domain.SessionModeChat,
-	})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
-	if len(launcher.started) != 1 {
-		t.Fatalf("spawn starts = %d, want 1", len(launcher.started))
-	}
-	if got := launcher.started[0].Model; got != "" {
-		t.Errorf("spawn passed model %q to a claude-code session; it is configured for codex", got)
-	}
-
-	// The resume path is the one the interface switch and every daemon restore go
-	// through, and it rebuilds the config from the project rather than reusing what
-	// spawn resolved — so it has to make the same decision independently.
-	if _, err := mgr.Kill(ctx, rec.ID); err != nil {
-		t.Fatalf("Kill: %v", err)
-	}
-	if _, err := mgr.RestoreWithMode(ctx, rec.ID); err != nil {
-		t.Fatalf("RestoreWithMode: %v", err)
-	}
-	if len(launcher.started) != 2 {
-		t.Fatalf("restore starts = %d, want 2", len(launcher.started))
-	}
-	if got := launcher.started[1].Model; got != "" {
-		t.Errorf("resume passed model %q to a claude-code session; it is configured for codex", got)
-	}
-}
-
-// A project may pin the interface its sessions are born with. The tier sits
-// between the two that already existed, so this pins all three at once: an
-// explicit --mode still wins, and a project that pins nothing still inherits the
-// daemon-owned default.
-func TestSpawnSessionModePrecedenceExplicitThenProjectThenDaemon(t *testing.T) {
-	tests := []struct {
-		name      string
-		kind      domain.SessionKind
-		requested domain.SessionMode
-		project   domain.SessionMode
-		daemon    domain.SessionMode
-		want      domain.SessionMode
-	}{
-		{name: "explicit chat beats project tui", requested: domain.SessionModeChat, project: domain.SessionModeTUI, daemon: domain.SessionModeTUI, want: domain.SessionModeChat},
-		{name: "explicit tui beats project chat", requested: domain.SessionModeTUI, project: domain.SessionModeChat, daemon: domain.SessionModeChat, want: domain.SessionModeTUI},
-		{name: "project chat beats daemon tui", project: domain.SessionModeChat, daemon: domain.SessionModeTUI, want: domain.SessionModeChat},
-		{name: "project tui beats daemon chat", project: domain.SessionModeTUI, daemon: domain.SessionModeChat, want: domain.SessionModeTUI},
-		{name: "unset project inherits daemon chat", daemon: domain.SessionModeChat, want: domain.SessionModeChat},
-		{name: "unset project inherits daemon tui", daemon: domain.SessionModeTUI, want: domain.SessionModeTUI},
-		// A value this build does not know — written by a newer daemon into the
-		// same project row — is "no override", not an error and not a silent
-		// downgrade to TUI over a daemon default of Chat.
-		{name: "unknown project value is no override", project: "voice", daemon: domain.SessionModeChat, want: domain.SessionModeChat},
-		{name: "orchestrator defaults to chat", kind: domain.KindOrchestrator, daemon: domain.SessionModeTUI, want: domain.SessionModeChat},
-		{name: "orchestrator preserves project tui", kind: domain.KindOrchestrator, project: domain.SessionModeTUI, daemon: domain.SessionModeChat, want: domain.SessionModeTUI},
-		{name: "orchestrator explicit tui beats project chat", kind: domain.KindOrchestrator, requested: domain.SessionModeTUI, project: domain.SessionModeChat, want: domain.SessionModeTUI},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			mgr, store, _ := newChatManager(&recordingLauncher{})
-			mgr.defaults = fixedSessionModeDefaults(tt.daemon)
-			project := store.projects[string(chatTestProject)]
-			project.Config.SessionInterface = tt.project
-			store.projects[string(chatTestProject)] = project
-
-			kind := tt.kind
-			if kind == "" {
-				kind = domain.KindWorker
-			}
-			rec, _, _, err := mgr.Spawn(context.Background(), ports.SpawnConfig{
-				ProjectID:     chatTestProject,
-				Kind:          kind,
-				Harness:       domain.HarnessCodex,
-				RequestedMode: tt.requested,
-			})
-			if err != nil {
-				t.Fatalf("Spawn: %v", err)
-			}
-			if rec.Mode != tt.want {
-				t.Fatalf("mode = %q, want %q", rec.Mode, tt.want)
-			}
-		})
-
-	}
-}
-
 type deadlineConsumingChatLauncher struct {
 	*recordingLauncher
 	cancel context.CancelFunc
@@ -1931,7 +1820,6 @@ func TestChatSpawn_RollbackGivesEachCleanupStepAFreshDeadline(t *testing.T) {
 	}
 	if !st.sessions["mer-1"].IsTerminated {
 		t.Fatal("session row was not terminated after chat shutdown exhausted its deadline")
-
 	}
 }
 
@@ -2054,9 +1942,11 @@ func TestChatSpawnFailsWhenHookInstallFails(t *testing.T) {
 
 // TestChatSpawnWritesCommandCodeSessionStartHook drives a fresh Chat spawn
 // through the real Command Code adapter and asserts the workspace actually
-// receives the SessionStart hook that injects the standing instructions. A
-// prompt file without this hook is the exact gap reported against fresh Chat
-// workers and orchestrators.
+// receives the managed hooks (SessionStart for the TUI lifecycle plus
+// PreToolUse/PostToolUse/Stop for activity). The SessionStart hook itself
+// never fires under `cmd acp` (issue #6784); Chat standing instructions ride
+// the first prompt preamble instead, so this asserts hook installation — not
+// Chat delivery.
 func TestChatSpawnWritesCommandCodeSessionStartHook(t *testing.T) {
 	dataDir := t.TempDir()
 	wsDir := t.TempDir()
@@ -2093,5 +1983,84 @@ func TestChatSpawnWritesCommandCodeSessionStartHook(t *testing.T) {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("settings.json missing %q; standing instructions have no delivery hook:\n%s", want, raw)
 		}
+	}
+}
+
+// A project may pin the interface its sessions are born with. The tier sits
+// between the two that already existed, so this pins all three at once: an
+// explicit --mode still wins, and a project that pins nothing still inherits the
+// daemon-owned default.
+func TestSpawnSessionModePrecedenceExplicitThenProjectThenDaemon(t *testing.T) {
+	tests := []struct {
+		name      string
+		requested domain.SessionMode
+		project   domain.SessionMode
+		daemon    domain.SessionMode
+		want      domain.SessionMode
+	}{
+		{name: "explicit chat beats project tui", requested: domain.SessionModeChat, project: domain.SessionModeTUI, daemon: domain.SessionModeTUI, want: domain.SessionModeChat},
+		{name: "explicit tui beats project chat", requested: domain.SessionModeTUI, project: domain.SessionModeChat, daemon: domain.SessionModeChat, want: domain.SessionModeTUI},
+		{name: "project chat beats daemon tui", project: domain.SessionModeChat, daemon: domain.SessionModeTUI, want: domain.SessionModeChat},
+		{name: "project tui beats daemon chat", project: domain.SessionModeTUI, daemon: domain.SessionModeChat, want: domain.SessionModeTUI},
+		{name: "unset project inherits daemon chat", daemon: domain.SessionModeChat, want: domain.SessionModeChat},
+		{name: "unset project inherits daemon tui", daemon: domain.SessionModeTUI, want: domain.SessionModeTUI},
+		// A value this build does not know — written by a newer daemon into the
+		// same project row — is "no override", not an error and not a silent
+		// downgrade to TUI over a daemon default of Chat.
+		{name: "unknown project value is no override", project: "voice", daemon: domain.SessionModeChat, want: domain.SessionModeChat},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mgr, store, _ := newChatManager(&recordingLauncher{})
+			mgr.defaults = fixedSessionModeDefaults(tt.daemon)
+			project := store.projects[string(chatTestProject)]
+			project.Config.SessionInterface = tt.project
+			store.projects[string(chatTestProject)] = project
+
+			rec, _, _, err := mgr.Spawn(context.Background(), ports.SpawnConfig{
+				ProjectID:     chatTestProject,
+				Kind:          domain.KindWorker,
+				Harness:       domain.HarnessCodex,
+				RequestedMode: tt.requested,
+			})
+			if err != nil {
+				t.Fatalf("Spawn: %v", err)
+			}
+			if rec.Mode != tt.want {
+				t.Fatalf("mode = %q, want %q", rec.Mode, tt.want)
+			}
+		})
+	}
+}
+
+type suggestionRecordingLauncher struct {
+	*recordingLauncher
+	source domain.SessionID
+	turn   string
+}
+
+func (l *suggestionRecordingLauncher) RunPromptSuggestionTask(ctx context.Context, id domain.SessionID, turn string, harness domain.AgentHarness, cfg ports.ChatStartConfig, prompt string) (string, error) {
+	l.source, l.turn = id, turn
+	return l.RunBackgroundTask(ctx, harness, cfg, prompt)
+}
+func TestRunPromptSuggestionTaskPassesForkSourceWithScratchPolicy(t *testing.T) {
+	launcher := &suggestionRecordingLauncher{recordingLauncher: &recordingLauncher{}}
+	m, st, _ := newChatManager(launcher)
+	m.dataDir = t.TempDir()
+	rec := domain.SessionRecord{ID: "mer-1", ProjectID: chatTestProject, Kind: domain.KindWorker, Harness: domain.HarnessClaudeCode, Metadata: domain.SessionMetadata{WorkspacePath: "/foreground", Model: "selected-model", Permissions: ports.PermissionModeAuto}}
+	st.sessions[rec.ID] = rec
+	got, err := m.RunPromptSuggestionTask(t.Context(), rec.ID, "completed-turn", "suggestion only", "Suggest next message")
+	if err != nil || got != "Generated title" || launcher.source != rec.ID || launcher.turn != "completed-turn" || len(launcher.background) != 1 {
+		t.Fatalf("source=%q turn=%q result=%q err=%v", launcher.source, launcher.turn, got, err)
+	}
+	cfg := launcher.background[0]
+	if launcher.backgroundHarnesses[0] != rec.Harness || cfg.WorkspacePath == rec.Metadata.WorkspacePath || cfg.Model != rec.Metadata.Model || cfg.Permissions != ports.PermissionModeAcceptEdits || cfg.SystemPrompt != "suggestion only" {
+		t.Fatalf("suggestion config=%+v", cfg)
+	}
+	if _, ok := cfg.Env[EnvSessionID]; ok {
+		t.Fatal("suggestion inherited foreground hook identity")
+	}
+	if _, err := os.Stat(cfg.WorkspacePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("scratch workspace survived suggestion")
 	}
 }

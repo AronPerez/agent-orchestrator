@@ -115,6 +115,49 @@ func TestGuard_OutcomeByState(t *testing.T) {
 	}
 }
 
+func TestGuard_NudgeDraftCheckedRequiresSafeActivityAndSurface(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		state         domain.ActivityState
+		safeSurface   bool
+		steersActive  bool
+		want          Outcome
+		wantCheck     bool
+		wantMessenger bool
+	}{
+		{name: "idle draft", state: domain.ActivityIdle, safeSurface: true, want: Sent, wantCheck: true, wantMessenger: true},
+		{name: "unproven surface", state: domain.ActivityIdle, want: SuppressedUnsafeSurface, wantCheck: true},
+		{name: "waiting input", state: domain.ActivityWaitingInput, safeSurface: true, want: SuppressedAwaitingUser},
+		{name: "blocked", state: domain.ActivityBlocked, safeSurface: true, want: SuppressedAwaitingUser},
+		{name: "active", state: domain.ActivityActive, safeSurface: true, want: SuppressedBusy},
+		{name: "active steerable draft", state: domain.ActivityActive, safeSurface: true, steersActive: true, want: Sent, wantCheck: true, wantMessenger: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			messenger := &fakeMessenger{}
+			g := New(&fakeStore{rec: record(tc.state, false), ok: true}, messenger, nil)
+			checks := 0
+			got, err := g.NudgeDraftChecked(context.Background(), "s1", func(domain.AgentHarness) bool {
+				return tc.steersActive
+			}, func(context.Context, domain.SessionRecord) bool {
+				checks++
+				return tc.safeSurface
+			})
+			if err != nil || got != tc.want {
+				t.Fatalf("NudgeDraftChecked = (%v, %v), want (%v, nil)", got, err, tc.want)
+			}
+			if (checks == 1) != tc.wantCheck {
+				t.Fatalf("surface check calls = %d, want called=%v", checks, tc.wantCheck)
+			}
+			if (len(messenger.sent) == 1) != tc.wantMessenger {
+				t.Fatalf("messenger sends = %v, want sent=%v", messenger.sent, tc.wantMessenger)
+			}
+			if tc.wantMessenger && messenger.sent[0] != "" {
+				t.Fatalf("message = %q, want Enter-only empty message", messenger.sent[0])
+			}
+		})
+	}
+}
+
 // TestGuard_NudgeUrgentReachesNeedsInputButNotBlocked pins NudgeUrgent's
 // outcome table directly: it is the only nudge method that may write into a
 // session idle at a needs-input prompt, and it must still refuse blocked (where

@@ -2,7 +2,6 @@ package ports
 
 import (
 	"errors"
-	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
@@ -51,6 +50,9 @@ type SpawnConfig struct {
 	// AgentConfigResolved means AgentConfig already contains the fully merged
 	// project/role/task settings and may intentionally clear inherited values.
 	AgentConfigResolved bool
+	// AgentAccountID is the provider account the agent runs under. Empty uses
+	// the provider's default account.
+	AgentAccountID string
 
 	// RequestedMode is the caller's explicit session mode, or empty to let the
 	// daemon resolve its default. It is validated and persisted before any
@@ -66,6 +68,10 @@ type SpawnConfig struct {
 	// DisplayName is the user-facing sidebar label. Empty falls back to the
 	// session id in the read model (e.g. orchestrator sessions).
 	DisplayName string
+	// NameFromPrompt generates task and workspace names before launch.
+	NameFromPrompt bool
+	// KeepDisplayName preserves an explicit CLI/API title while naming its workspace.
+	KeepDisplayName bool
 	// Attachments are files pasted or dropped into the task brief. They are
 	// written into the session worktree and referenced by path in the prompt so
 	// the agent can read them (CLI agents receive the prompt as text and cannot
@@ -94,23 +100,4 @@ type SpawnAttachment struct {
 	// inferred from the attachment's declared MIME type, or ".bin" for unknown types.
 	Ext  string
 	Data []byte
-}
-
-// SessionPageQuery selects one page of sessions, newest first by
-// (updated_at, id). Every predicate is applied in SQL so a page is a page:
-// Terminated nil lists both states, true only terminated, false only live.
-// Before resumes after the row a previous page ended on. Limit is the page
-// size; callers wanting to know whether a next page exists ask for one more.
-type SessionPageQuery struct {
-	Project          domain.ProjectID
-	Terminated       *bool
-	OrchestratorOnly bool
-	Before           *SessionPageCursor
-	Limit            int
-}
-
-// SessionPageCursor is the keyset position of the last row of a page.
-type SessionPageCursor struct {
-	UpdatedAt time.Time
-	ID        domain.SessionID
 }

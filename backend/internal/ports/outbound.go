@@ -81,12 +81,6 @@ type AgentMessenger interface {
 // liveness probing for reapers and terminal attachment.
 type Runtime interface {
 	Create(ctx context.Context, cfg RuntimeConfig) (RuntimeHandle, error)
-	// Destroy tears down the session and must not return nil until the agent
-	// process is confirmed gone. Manager.Kill marks a session terminated only
-	// after Destroy succeeds, so a Destroy that returned while the agent was
-	// still alive would let a "terminated" session keep running and complete
-	// outbound side effects (the reap-then-resurrect bug). An already-gone
-	// session is a nil (idempotent) success.
 	Destroy(ctx context.Context, handle RuntimeHandle) error
 	GetOutput(ctx context.Context, handle RuntimeHandle, lines int) (string, error)
 	IsAlive(ctx context.Context, handle RuntimeHandle) (bool, error)
@@ -533,6 +527,20 @@ var (
 	// fmt.Errorf so callers can match it with errors.Is.
 	ErrRuntimeProbeInconclusive = errors.New("runtime: liveness probe inconclusive")
 )
+
+// WorkspaceTaskNamer finalizes an unlaunched task's branch and directory names.
+// Even on error, the returned info describes the current paths and branches.
+type WorkspaceTaskNamer interface {
+	NameTaskWorkspace(ctx context.Context, info WorkspaceProjectInfo, branch, name string) (WorkspaceProjectInfo, error)
+	RepairTaskWorkspace(ctx context.Context, info WorkspaceProjectInfo) (WorkspaceProjectInfo, error)
+}
+
+// WorkspaceTaskNamingRecovery keeps an interrupted rename recoverable until
+// the caller acknowledges that the resulting paths are durably stored.
+type WorkspaceTaskNamingRecovery interface {
+	RecoverTaskWorkspace(ctx context.Context, projectID domain.ProjectID, id domain.SessionID) (WorkspaceProjectInfo, bool, error)
+	CompleteTaskWorkspaceNaming(ctx context.Context, info WorkspaceProjectInfo) error
+}
 
 // WorkspaceConfig is the spec for creating or restoring a session's workspace.
 type WorkspaceConfig struct {

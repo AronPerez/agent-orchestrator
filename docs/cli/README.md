@@ -54,7 +54,7 @@ Notes:
 - `ao stop` only ever stops the local daemon it found through `running.json`. A
   `--url` / `AO_URL` target is refused — including one that names loopback, so
   the single destructive verb never changes behavior based on how the URL looks.
-- CLI invocations and usage errors do not send analytics requests.
+- CLI telemetry (`/internal/*`) is never sent to a remote daemon.
 - Repeated bad passwords lock your source address out of the LAN listener for a
   minute. `ao status` reports that as `locked_out` rather than `unhealthy` — the
   daemon is fine; wait and retry. This state cannot occur against a local daemon.
@@ -268,18 +268,9 @@ command reports `STALE_REFERENCE`.
 Browser waits cover load completion, text or selector appearance and
 disappearance, URL matching, fixed delays, and a configurable DOM-stability
 window for HMR-driven verification.
-Browser tabs in the same worker share a memory-only Electron profile. Different
-workers receive distinct partitions, so cookies, authentication, local storage,
-and session storage do not leak between their browser runtimes.
-A project can opt out of that isolation with
-`ao project set-config <id> --browser-persistent-profile`, which gives every
-session on that project ONE shared on-disk profile instead
-(`~/.ao/electron/Partitions/ao-browser-<projectId>`), so a login survives session
-teardown and app restart. It is off by default, and the trade-off is the reason:
-that one cookie jar is shared by every worker session on the project, so a
-prompt-injected agent in any of them can use every login in it. Other projects
-stay isolated, and permissions remain denied either way. `ao browser status`
-always states which of the two modes a session is running on.
+Temporary browser profiles are isolated per worker. Named profiles persist and
+can be reused across sessions, intentionally sharing cookies and storage.
+Profile selection does not broaden the session authorization on browser commands.
 Network capture is disabled by default and must be started explicitly. It is
 scoped to the active tab at start time, expires after 60 seconds by default
 (maximum 300), retains at most 200 in-memory entries, and is cleared with the

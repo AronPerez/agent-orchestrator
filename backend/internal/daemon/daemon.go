@@ -12,6 +12,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -22,12 +24,14 @@ import (
 	codexagent "github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/codex"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/modelcatalog"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/opencode"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agentaccount"
 	chatdriveracp "github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/acp"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/codexappserver"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/persistenthost"
 	chatdriverregistry "github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/registry"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/runtime/runtimeselect"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/systemexec"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/telemetry/policyauthority"
 	"github.com/aoagents/agent-orchestrator/backend/internal/attachmentstore"
 	"github.com/aoagents/agent-orchestrator/backend/internal/autoreview"
 	"github.com/aoagents/agent-orchestrator/backend/internal/browserruntime"
@@ -39,6 +43,8 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
 	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
 	"github.com/aoagents/agent-orchestrator/backend/internal/notify"
+	agentswitchobs "github.com/aoagents/agent-orchestrator/backend/internal/observe/agentswitch"
+	"github.com/aoagents/agent-orchestrator/backend/internal/observe/sentryobs"
 	usagepipeline "github.com/aoagents/agent-orchestrator/backend/internal/observe/usage"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/presence"
@@ -47,7 +53,9 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/push"
 	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
 	agentsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/agent"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/agentaccounts"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/agentauth"
+	awakesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/awake"
 	browsersvc "github.com/aoagents/agent-orchestrator/backend/internal/service/browser"
 	chatsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/chat"
 	cuesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/cue"
@@ -76,6 +84,101 @@ import (
 const usageReconcileTick = 3 * time.Minute
 
 const chatHibernateSweepTick = 30 * time.Second
+
+// sentryEnvironment maps the daemon's app version to a Sentry environment so a
+// nightly/edge build's issues do not mix with stable release health.
+func sentryEnvironment(version string) string {
+	v := strings.ToLower(strings.TrimSpace(version))
+	switch {
+	case v == "":
+		return "unknown"
+	case strings.Contains(v, "nightly"):
+		return "nightly"
+	case strings.Contains(v, "edge") || strings.Contains(v, "pr"):
+		return "development"
+	default:
+		return "stable"
+	}
+}
+
+func agentSwitchEventMetadata(cfg config.Config) domain.AgentSwitchEventMetadata {
+	environment := domain.AgentSwitchEnvironmentStable
+	channel := domain.AgentSwitchChannelStable
+	version := strings.ToLower(strings.TrimSpace(cfg.Telemetry.AppVersion))
+	switch {
+	case strings.Contains(version, "nightly"):
+		environment, channel = domain.AgentSwitchEnvironmentNightly, domain.AgentSwitchChannelNightly
+	case strings.Contains(version, "edge"), strings.Contains(version, "-pr"):
+		environment, channel = domain.AgentSwitchEnvironmentDevelopment, domain.AgentSwitchChannelPreview
+	}
+	osName := domain.AgentSwitchOS(runtime.GOOS)
+	return domain.AgentSwitchEventMetadata{
+		Release: cfg.Telemetry.AppVersion, Environment: environment, Channel: channel,
+		Platform: domain.AgentSwitchPlatformDaemon, OS: osName,
+		ElapsedTimeBucket: domain.AgentSwitchElapsedNotApplicable,
+	}
+}
+
+func agentSwitchFailureStreamDisabled(disabled []string) bool {
+	for _, name := range disabled {
+		if name == "ao.agent_switch.failure" || name == "ao.agent_switch.*" || name == "*" {
+			return true
+		}
+	}
+	return false
+}
+
+type agentSwitchDaemonFaultEnqueuer interface {
+	EnqueueAgentSwitchDaemonFault(context.Context, ports.AgentSwitchDaemonFault) (ports.AgentSwitchMutationResult, error)
+}
+
+func agentSwitchWorkerWaitTimedOut(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded)
+}
+
+func enqueueAgentSwitchWorkerShutdownTimeout(
+	ctx context.Context,
+	store agentSwitchDaemonFaultEnqueuer,
+	policy ports.AgentSwitchReportingPolicy,
+	daemonRunID string,
+	at time.Time,
+) error {
+	if store == nil || policy == nil || strings.TrimSpace(daemonRunID) == "" {
+		return nil
+	}
+	fault := domain.AgentSwitchFault{
+		ReportKind:           domain.AgentSwitchReportDaemonLifecycleFailure,
+		FailurePoint:         domain.AgentSwitchFailureShutdownWorkerTimeout,
+		ClassifierCallsite:   domain.AgentSwitchClassifierDaemonShutdown,
+		Phase:                domain.AgentSwitchStateNotApplicable,
+		ErrorCode:            domain.AgentSwitchErrorNotApplicable,
+		FaultCode:            domain.AgentSwitchFaultShutdownWorkersTimedOut,
+		Execution:            domain.AgentSwitchExecutionDaemonShutdown,
+		Mode:                 domain.SessionModeNotApplicable,
+		FromHarness:          domain.HarnessNotApplicable,
+		TargetHarness:        domain.HarnessNotApplicable,
+		TargetStartMode:      domain.AgentSwitchTargetStartNotApplicable,
+		RuntimeBackend:       domain.AgentSwitchRuntimeNotApplicable,
+		CallOutcome:          domain.AgentSwitchCallTimedOut,
+		Ownership:            domain.AgentSwitchOwnershipNotApplicable,
+		Compensation:         domain.AgentSwitchCompensationNotApplicable,
+		UserImpact:           domain.AgentSwitchUserImpactNotApplicable,
+		SourceStopConfirmed:  domain.AgentSwitchTriNotApplicable,
+		TargetOwnerCommitted: domain.AgentSwitchTriNotApplicable,
+		GateRetained:         domain.AgentSwitchTriNotApplicable,
+		OccurredAt:           at,
+		Frames: []domain.AgentSwitchStackFrame{{
+			Package: "daemon", Function: "Run",
+			Filename: "backend/internal/daemon/daemon.go", Line: 1,
+		}},
+	}
+	_, err := store.EnqueueAgentSwitchDaemonFault(ctx, ports.AgentSwitchDaemonFault{
+		DaemonRunID:   daemonRunID,
+		Fault:         fault,
+		Authorization: policy.Authorization(),
+	})
+	return err
+}
 
 // Run starts the daemon and blocks until it exits. SIGINT/SIGTERM drive
 // graceful shutdown through the HTTP server and background workers.
@@ -134,6 +237,34 @@ func Run() error {
 	if _, err := store.RequeueClaimedReports(context.Background()); err != nil {
 		return fmt.Errorf("recover report delivery claims: %w", err)
 	}
+	if err := store.ConfigureAgentSwitchFailureEventEncoder(context.Background(), sentryobs.AgentSwitchEventEncoder{}); err != nil {
+		return fmt.Errorf("configure agent switch failure event encoder: %w", err)
+	}
+
+	// Consent and event metadata are established before any reporting surface or
+	// recovery enrollment exists. SQLite is forced off first on every boot so a
+	// stale enabled mirror can never authorize work after a restart.
+	destination, destinationErr := sentryobs.ParseAgentSwitchDSN(cfg.Telemetry.SentryDSN, true)
+	if destinationErr != nil && cfg.Telemetry.SentryDSN != "" {
+		log.Warn("agent switch failure sender disabled", "error", destinationErr)
+	}
+	policyCoordinator := agentswitchobs.NewPolicyCoordinator(store, agentswitchobs.PolicyOptions{
+		AuthorityReader:         policyauthority.New(filepath.Join(cfg.DataDir, agentswitchobs.PolicyFileName)),
+		TelemetryEvents:         cfg.Telemetry.Events,
+		TelemetryEventsExplicit: cfg.Telemetry.EventsExplicit,
+		DestinationFingerprint:  destination.Fingerprint,
+		StreamKillSwitched:      agentSwitchFailureStreamDisabled(cfg.Telemetry.DisabledEvents),
+		Metadata:                agentSwitchEventMetadata(cfg),
+		OnEventsChanged:         sentryobs.SetPolicyEnabled,
+		ProviderDrain:           sentryobs.Drain,
+	})
+	if err := policyCoordinator.ForceDisabled(context.Background()); err != nil {
+		return fmt.Errorf("force agent switch reporting disabled: %w", err)
+	}
+	if err := policyCoordinator.Synchronize(context.Background()); err != nil && !errors.Is(err, agentswitchobs.ErrPolicyUnavailable) {
+		return fmt.Errorf("synchronize agent switch reporting policy: %w", err)
+	}
+
 	// Refresh the embedded using-ao skill into the data dir so worker sessions
 	// in any project can read the ao CLI catalog from a stable absolute path.
 	// Non-fatal: the skill is an enhancement over `ao --help`, not required.
@@ -141,8 +272,22 @@ func Run() error {
 		log.Warn("install using-ao skill", "err", err)
 	}
 
-	telemetrySink := newTelemetrySink(cfg, store, log)
+	telemetryCfg := cfg
+	telemetryCfg.Telemetry.Events = policyCoordinator.EventsEnabled()
+	telemetrySink := newTelemetrySink(telemetryCfg, store, log)
 	defer func() { _ = telemetrySink.Close(context.Background()) }()
+	// Daemon Sentry: captures genuine 5xx/panics with their Go stack. Gated on
+	// Initialize the transport once so a later policy opt-in works without a
+	// daemon restart. The policy gate remains fail-closed and is checked before
+	// every capture; a blank DSN still leaves this as a no-op.
+	if err := sentryobs.Init(sentryobs.Config{
+		DSN:         cfg.Telemetry.SentryDSN,
+		Release:     cfg.Telemetry.AppVersion,
+		Environment: sentryEnvironment(cfg.Telemetry.AppVersion),
+	}); err != nil {
+		log.Warn("daemon sentry disabled", "err", err)
+	}
+	defer sentryobs.Flush(2 * time.Second)
 	telemetrySink.Emit(context.Background(), ports.TelemetryEvent{
 		Name:       "ao.daemon.started",
 		Source:     "daemon",
@@ -158,6 +303,30 @@ func Run() error {
 	// graceful shutdown inside Server.Run and stops the background goroutines.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	policyCoordinator.StartWatcher(ctx)
+	defer func() { _ = policyCoordinator.CloseAndDrain(context.Background()) }()
+	// Constructing the synchronous sender performs no I/O. The hard production
+	// gate keeps this dormant until the separate privacy and destination release
+	// gates are approved; each call remains guarded by durable consent below.
+	var agentSwitchObserver ports.AgentSwitchFailureObserver
+	if domain.AgentSwitchFailureProductionEnabled && destinationErr == nil {
+		agentSwitchObserver = sentryobs.NewAgentSwitchFailureSender(destination, nil)
+	}
+	agentSwitchDispatcher, err := newAgentSwitchFailureDispatcher(store, policyCoordinator, agentSwitchObserver, log)
+	if err != nil {
+		return fmt.Errorf("wire agent switch failure dispatcher: %w", err)
+	}
+	if agentSwitchDispatcher != nil {
+		agentSwitchDispatcher.Start(ctx)
+		defer func() {
+			stopContext, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+			defer cancel()
+			if stopErr := agentSwitchDispatcher.Stop(stopContext); stopErr != nil {
+				log.Error("agent switch failure dispatcher shutdown", "error", stopErr)
+			}
+		}()
+	}
+
 	cdcPipe, err := startCDC(ctx, store, log)
 	if err != nil {
 		return err
@@ -361,8 +530,8 @@ func Run() error {
 		},
 		// Claude's model IDs are provider-specific — first-party aliases,
 		// Bedrock ARNs-in-miniature, Vertex @-versions — so the list has to come
-		// from whichever provider is configured. An error here is expected and
-		// harmless: discovery falls back to the static aliases.
+		// from whichever provider is configured. On failure, the service retains
+		// the matching persisted catalog instead of inventing model aliases.
 		ClaudeModels: func(listCtx context.Context, request ports.AgentModelDiscoveryRequest) ([]ports.AgentModelInfo, error) {
 			return claudecodeagent.ProviderModels(listCtx, request.Binary, request.WorkingDir, request.Env)
 		},
@@ -408,7 +577,7 @@ func Run() error {
 
 	persistentHostsReconciled := make(chan struct{})
 	reviewerChatsRecovered := make(chan struct{})
-	sessionSvc, reviewSvc, wiredSessMgr, err := startSession(ctx, cfg, runtimeAdapter, store, lcStack.LCM, lcStack.ArtifactVersions, messenger, telemetrySink, notificationWriter, agents, agentSvc, managedPreview, browserBroker, browserAuthority, chatLauncher{svc: chatSvc, persistentHostReconcileDone: persistentHostsReconciled}, reviewerChatsRecovered, settingsSvc, tracker, codexOperationGate, log)
+	sessionSvc, reviewSvc, wiredSessMgr, err := startSession(ctx, cfg, runtimeAdapter, store, lcStack.LCM, lcStack.ArtifactVersions, messenger, telemetrySink, notificationWriter, agents, agentSvc, managedPreview, browserBroker, browserAuthority, chatLauncher{svc: chatSvc, persistentHostReconcileDone: persistentHostsReconciled}, reviewerChatsRecovered, settingsSvc, policyCoordinator, tracker, codexOperationGate, log)
 	if err != nil {
 		stop()
 		lcStack.Stop()
@@ -441,6 +610,41 @@ func Run() error {
 		},
 	})
 	sessMgr = wiredSessMgr
+	agentAccountSvc := newAgentAccounts(cfg, store, codexHome, agentDeps.CodexAccounts, log)
+	if wired, ok := sessMgr.(interface {
+		SetAgentAccounts(ports.AgentAccountLaunchEnv)
+	}); ok {
+		wired.SetAgentAccounts(agentAccountSvc)
+	}
+	if stopper, ok := sessMgr.(interface {
+		ExitAgentsOnAccount(context.Context, string) error
+	}); ok {
+		agentAccountSvc.SetAgentStopper(stopper.ExitAgentsOnAccount)
+	}
+	sessionSvc.SetComputerLoginCheck(agentAccountSvc.RunsOnComputerLogin)
+	if agentSvc != nil {
+		agentSvc.SetSavedDefaultSignIn(agentAccountSvc.DefaultSignIn)
+		agentAccountSvc.SetDefaultChanged(func(p domain.AgentAccountProvider) {
+			harness := map[domain.AgentAccountProvider]domain.AgentHarness{
+				domain.AgentAccountProviderClaude: domain.HarnessClaudeCode,
+				domain.AgentAccountProviderCodex:  domain.HarnessCodex,
+			}[p]
+			if harness != "" {
+				agentSvc.InvalidateAgentAuthentication(string(harness))
+			}
+		})
+	}
+	if runner, ok := sessMgr.(interface {
+		RunPromptSuggestionTask(context.Context, domain.SessionID, string, string, string) (string, error)
+	}); ok {
+		chatSvc.SetPromptSuggestionRunner(func(requestCtx context.Context, id domain.SessionID, turnID, systemPrompt, prompt string) (string, error) {
+			taskCtx, cancel := context.WithCancel(requestCtx)
+			stopOnShutdown := context.AfterFunc(ctx, cancel)
+			defer stopOnShutdown()
+			defer cancel()
+			return runner.RunPromptSuggestionTask(taskCtx, id, turnID, systemPrompt, prompt)
+		})
+	}
 	if fenced, ok := sessMgr.(interface{ SetPersistentHostReconcileDone(<-chan struct{}) }); ok {
 		fenced.SetPersistentHostReconcileDone(persistentHostsReconciled)
 	}
@@ -508,10 +712,12 @@ func Run() error {
 		privateNPMPrefixes[systeminstall.TargetOpencodeV2] = prefix
 	}
 	systemInstall := systeminstall.NewWithDeps(hostCommands, hostCommands, systeminstall.Deps{
-		JobStore:           store,
-		Verifier:           systeminstall.NewVerifier(agents, hostCommands),
-		Sessions:           store,
-		PrivateNPMPrefixes: privateNPMPrefixes,
+		JobStore:            store,
+		Verifier:            systeminstall.NewVerifier(agents, hostCommands),
+		Sessions:            store,
+		Reviewers:           store,
+		DisableUpdateChecks: !cfg.HarnessUpdateChecks,
+		PrivateNPMPrefixes:  privateNPMPrefixes,
 	})
 	if err := systemInstall.Recover(ctx); err != nil {
 		stop()
@@ -543,7 +749,7 @@ func Run() error {
 	}
 	// HostID is assigned below, once the identity file has been read.
 	mc := &controllers.MobileController{Bridge: bs}
-	browserService := browsersvc.New(sessionSvc, projectSvc, browserBroker, browserAuthority)
+	browserService := browsersvc.New(sessionSvc, browserBroker, browserAuthority)
 
 	// Standalone shell terminals: user-opened shells with no agent session
 	// behind them. They reuse the same runtime adapter (and therefore the same
@@ -553,6 +759,7 @@ func Run() error {
 	systemChecks.SetGitHubAuthTerminalOpener(shellTermSvc)
 	agentAuthSvc := agentauth.NewWithAgentResolver(hostCommands, agentSvc, shellTermSvc, cfg.DataDir)
 	agentSvc.SetCodexAccountLoginTerminalOpener(shellTermSvc)
+	agentAccountSvc.SetTerminals(shellTermSvc)
 	// Late-bound so Kill/Cleanup close a session's scoped shells before its
 	// worktree is torn down (shellTermSvc cannot exist before sessMgr does; see
 	// SetShellTerminalCloser).
@@ -645,11 +852,7 @@ func Run() error {
 			ThreadWriter: store,
 		})
 	} else {
-		var prCloser ports.SCMCloser
-		if githubProvider, err := newGitHubSCMProvider(log); err == nil {
-			prCloser = githubProvider
-		}
-		prActions = prsvc.NewActionService(prsvc.ActionDeps{Store: store, Merger: prMerger, Closer: prCloser, Reader: prReader})
+		log.Warn("pr action service disabled: no usable SCM provider")
 	}
 
 	// Codex switch recovery is best effort and never blocks unrelated daemon
@@ -727,17 +930,24 @@ func Run() error {
 			Binary: res.Path, PIDPath: tunnelPID, Log: log,
 		})
 	}
-	if res := mobilebridge.ResolveCloudflared(mobilebridge.LocalCloudflaredLookup(cfg.DataDir)); !res.NeedsInstall {
+	// A system cloudflared is version-checked by running it (30-120ms, up to a
+	// 5s timeout), so resolve off the boot path. Status reads and anything that
+	// needs a connector, such as restoring an enabled bridge, wait for this
+	// lookup rather than racing it.
+	bs.ResolveTunnelInBackground(func() controllers.TunnelController {
+		res := mobilebridge.ResolveCloudflared(mobilebridge.LocalCloudflaredLookup(cfg.DataDir))
+		if res.NeedsInstall {
+			// Not fatal: the LAN and Tailscale endpoints still work, and Connect
+			// Mobile behaves exactly as it did before remote access existed.
+			log.Info("mobile remote access unavailable; cloudflared not installed",
+				"rejectedSystemPath", res.SystemPath)
+			return nil
+		}
 		log.Info("mobile remote access available", "cloudflared", res.Path, "source", res.Source)
-		bs.Tunnel = mobilebridge.NewManagedTunnel(mobilebridge.ManagedTunnelDeps{
+		return mobilebridge.NewManagedTunnel(mobilebridge.ManagedTunnelDeps{
 			Binary: res.Path, PIDPath: tunnelPID, Log: log,
 		})
-	} else {
-		// Not fatal: the LAN and Tailscale endpoints still work, and Connect
-		// Mobile behaves exactly as it did before remote access existed.
-		log.Info("mobile remote access unavailable; cloudflared not installed",
-			"rejectedSystemPath", res.SystemPath)
-	}
+	})
 
 	// Stable, machine-bound host identity, served by the unauthenticated
 	// GET /api/v1/identity probe. A failure here is not fatal: the probe then
@@ -756,19 +966,36 @@ func Run() error {
 		go dispatcher.Run(ctx)
 	}
 	if mobilebridge.KeepAwakeSupported() {
-		bs.KeepAwake = mobilebridge.NewKeepAwake(os.Getpid())
+		ka := mobilebridge.NewKeepAwake(os.Getpid())
+		ka.SetLidController(mobilebridge.NewLidAwake(os.Getpid(), os.Getenv("AO_WAKE_HELPER"), cfg.DataDir))
+		bs.KeepAwake = ka
 	}
+	awakeHost := awakesvc.NewHost(os.Getpid(), os.Getenv("AO_WAKE_HELPER"), cfg.DataDir)
+	awakeSvc, stopAwake := startAwake(ctx, store, awakeHost, awakesvc.BindingFuncs{
+		Session: func(ctx context.Context, id string) (bool, error) {
+			row, found, err := store.GetSession(ctx, domain.SessionID(id))
+			return found && !row.IsTerminated, err
+		},
+		Agent:       store.HasAwakeAgentActivity,
+		Interrupted: chatSvc.InterruptedAwakeAgents,
+		Reconnect:   sessMgr.ReconnectAwakeAgent,
+		App:         awakeHost.AppAlive,
+	}, log)
+	defer stopAwake()
 	var nativeSessions ports.AgentNativeSessionResolver
 	if codewhaleAgent, ok := agents.Agent(domain.HarnessCodewhale); ok {
 		nativeSessions, _ = codewhaleAgent.(ports.AgentNativeSessionResolver)
 	}
 
 	srv, err := httpd.NewWithDeps(cfg, log, termMgr, httpd.APIDeps{
+		Awake:              awakeSvc,
 		Projects:           projectSvc,
+		ArtifactVersions:   lcStack.ArtifactVersions,
 		HostID:             hostIdentity.HostID,
 		Endpoints:          bs,
 		Agents:             agentSvc,
 		CodexAccounts:      agentSvc,
+		AgentAccounts:      agentAccountSvc,
 		SystemChecks:       systemChecks,
 		Installer:          systemInstall,
 		Sessions:           sessionSvc,
@@ -788,7 +1015,7 @@ func Run() error {
 		ShellTerminals:     shellTermSvc,
 		Cues:               cuesvc.New(cuesvc.Deps{Store: store, Sessions: sessionSvc, Terminals: shellTermSvc}),
 		AgentAuth:          agentAuthSvc,
-		GitHub:             githubpat.New(cfg.DataDir),
+		GitHub:             newGitHubStatusService(githubpat.New(cfg.DataDir), prReader),
 		Conversations:      chatSvc,
 		Settings:           settingsSvc,
 		CDC:                store,
@@ -809,11 +1036,11 @@ func Run() error {
 			},
 		}),
 		Browser:                  browserService,
-		BrowserRuntime:           browserBroker,
 		LinkPreview:              linkpreviewsvc.New(nil),
 		PreviewServer:            managedPreview,
 		SessionCapabilities:      browserAuthority,
 		ShellPreviewCapabilities: shellTermSvc,
+		AgentSwitchPolicy:        policyCoordinator,
 	})
 	if err != nil {
 		stop()
@@ -884,7 +1111,12 @@ func Run() error {
 		// lazily Ensure on demand. Kick it here, after the listener is live, so its
 		// bounded subprocess probes no longer contend with the synchronous
 		// migration and fencing reconcile that gate the port bind.
-		agentSvc.WarmReadiness()
+		readinessDone := agentSvc.WarmReadiness()
+		if cfg.HarnessUpdateChecks {
+			go watchInstalledHarnessUpdates(ctx, readinessDone, cfg.HarnessUpdateInterval, agentSvc.EnsureInstallationReadiness, func(ctx context.Context, target systeminstall.Target, refresh bool) (systeminstall.UpdateAdvisory, error) {
+				return systemInstall.UpdateAdvisory(ctx, target, refresh)
+			}, log)
+		}
 		done := make(chan struct{})
 		startupReconcileDone = done
 		go func() {
@@ -939,6 +1171,13 @@ func Run() error {
 	// via defer) avoids the LIFO trap where a Stop() that blocks on ctx-cancel
 	// runs before the cancel: a non-signal exit path would hang otherwise.
 	stop()
+	if agentSwitchDispatcher != nil {
+		dispatcherStopContext, dispatcherStopCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		if err := agentSwitchDispatcher.Stop(dispatcherStopContext); err != nil {
+			log.Error("agent switch failure dispatcher shutdown", "error", err)
+		}
+		dispatcherStopCancel()
+	}
 	installStopCtx, installStopCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	if err := systemInstall.Close(installStopCtx); err != nil {
 		log.Error("harness installer shutdown", "err", err)
@@ -954,6 +1193,13 @@ func Run() error {
 	backgroundStopCancel()
 	switchStopCtx, switchCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	if err := sessMgr.WaitAgentSwitchWorkers(switchStopCtx); err != nil {
+		if agentSwitchWorkerWaitTimedOut(err) {
+			enqueueCtx, enqueueCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if enqueueErr := enqueueAgentSwitchWorkerShutdownTimeout(enqueueCtx, store, policyCoordinator, cfg.AppRunID, time.Now().UTC()); enqueueErr != nil {
+				log.Error("agent switch worker shutdown observability enqueue", "error", enqueueErr)
+			}
+			enqueueCancel()
+		}
 		log.Error("agent switch worker shutdown", "err", err)
 	}
 	switchCancel()
@@ -1097,4 +1343,21 @@ func stabilizeWorkingDirectory(dataDir string) error {
 		return fmt.Errorf("daemon working directory: chdir %s: %w", dataDir, err)
 	}
 	return nil
+}
+
+// newAgentAccounts builds the Claude Code and Codex account catalog. Each
+// account is a config folder under the state dir; "This computer" is the CLI's
+// own folder, which AO never changes the login of.
+func newAgentAccounts(cfg config.Config, store *sqlite.Store, codexHome string, codexAccounts ports.CodexAccountClientFactory, log *slog.Logger) *agentaccounts.Service {
+	claudeHome, claudeConfig := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")), ""
+	if claudeHome != "" {
+		claudeConfig = filepath.Join(claudeHome, ".claude.json")
+	} else if home, err := os.UserHomeDir(); err == nil {
+		claudeHome, claudeConfig = filepath.Join(home, ".claude"), filepath.Join(home, ".claude.json")
+	}
+	providers := []ports.AgentAccountProviderCLI{
+		&agentaccount.Claude{Binary: claudecodeagent.New().ResolveBinary, DeviceHome: claudeHome, DeviceConfig: claudeConfig},
+		&agentaccount.Codex{Binary: codexagent.New().ResolveBinary, Accounts: codexAccounts, DeviceHome: codexHome},
+	}
+	return agentaccounts.New(store, providers, filepath.Join(cfg.StateDir, "agent-accounts"), nil, log)
 }

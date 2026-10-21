@@ -3,7 +3,7 @@ import { AppState as RNAppState } from "react-native";
 import type { ServerConfig } from "../config";
 import { ApiError } from "../api";
 import { shouldPoll } from "../appStatePoll";
-import { shouldKeepPolling } from "../connectionError";
+import { shouldKeepPolling, userFacingError, NOT_PAIRED_ACTION_COPY } from "../connectionError";
 import {
 	acknowledgeSessionInterfaceTransitionNotice,
 	cancelSessionInterfaceTransition,
@@ -15,11 +15,14 @@ import {
 	interfaceTransitionNextPoll,
 	mobileInterfaceTransitionIsActive,
 } from "./interfaceTransition";
+import { trackFeature } from "../telemetry/runtime";
 
 export {
 	interfaceSwitchAlert,
 	mobileInterfaceTransitionIsActive,
+	mobileInterfaceTransitionIsBusy,
 	mobileInterfaceTransitionIsCancellable,
+	mobileInterfaceTransitionRecoveryMessage,
 } from "./interfaceTransition";
 export type { InterfaceSwitchRecheck } from "./interfaceTransition";
 
@@ -98,7 +101,7 @@ export function useInterfaceTransition(
 			}
 			return { ok: true, status: next };
 		} catch (cause) {
-			const message = cause instanceof Error ? cause.message : String(cause);
+			const message = userFacingError(cause);
 			const httpStatus = cause instanceof ApiError ? cause.status : undefined;
 			const stale = !current();
 			if (!stale) {
@@ -226,17 +229,25 @@ export function useInterfaceTransition(
 		pollable,
 		refresh,
 		sessionId,
+		status?.transition?.id,
+		status?.transition?.errorCode,
 		status?.transition?.phase,
 		status?.reasonCode,
 	]);
 
 	const start = useCallback(
 		async (targetMode: "chat" | "tui", policy: "drain" | "interrupt") => {
-			if (!cfg) throw new Error("No AO server configured");
+			if (!cfg) throw new Error(NOT_PAIRED_ACTION_COPY);
 			setStarting(true);
 			setError(undefined);
 			try {
-				const transition = await startSessionInterfaceTransition(cfg, sessionId, targetMode, policy);
+				// A live chat<->tui handoff. `mode` is the target the user switched to;
+				// in a two-mode world it also names the direction (to tui = from chat).
+				const transition = await trackFeature(
+					"handoff",
+					() => startSessionInterfaceTransition(cfg, sessionId, targetMode, policy),
+					{ mode: targetMode },
+				);
 				noteRequestLanded();
 				setStatus((current) => ({
 					supported: current?.supported ?? true,
@@ -244,7 +255,7 @@ export function useInterfaceTransition(
 					transition,
 				}));
 			} catch (cause) {
-				const message = cause instanceof Error ? cause.message : String(cause);
+				const message = userFacingError(cause);
 				setError(message);
 				throw cause;
 			} finally {
@@ -255,14 +266,14 @@ export function useInterfaceTransition(
 	);
 
 	const cancel = useCallback(async () => {
-		if (!cfg) throw new Error("No AO server configured");
+		if (!cfg) throw new Error(NOT_PAIRED_ACTION_COPY);
 		setCancelling(true);
 		setError(undefined);
 		try {
 			await cancelSessionInterfaceTransition(cfg, sessionId);
 			await refresh();
 		} catch (cause) {
-			const message = cause instanceof Error ? cause.message : String(cause);
+			const message = userFacingError(cause);
 			setError(message);
 			throw cause;
 		} finally {
@@ -272,7 +283,7 @@ export function useInterfaceTransition(
 
 	const acknowledgeNotice = useCallback(
 		async (transitionId: string) => {
-			if (!cfg) throw new Error("No AO server configured");
+			if (!cfg) throw new Error(NOT_PAIRED_ACTION_COPY);
 			setAcknowledgingNotice(true);
 			setAcknowledgeNoticeError(undefined);
 			try {
@@ -286,7 +297,7 @@ export function useInterfaceTransition(
 					current?.transition?.id === transition.id ? { ...current, transition } : current,
 				);
 			} catch (cause) {
-				const message = cause instanceof Error ? cause.message : String(cause);
+				const message = userFacingError(cause);
 				setAcknowledgeNoticeError(message);
 				throw cause;
 			} finally {

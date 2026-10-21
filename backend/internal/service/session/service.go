@@ -2,7 +2,6 @@ package session
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,7 +33,6 @@ type Store interface {
 	GetSessionByClientRequestID(ctx context.Context, id string) (domain.SessionRecord, bool, error)
 	ListSessions(ctx context.Context, project domain.ProjectID) ([]domain.SessionRecord, error)
 	ListAllSessions(ctx context.Context) ([]domain.SessionRecord, error)
-	ListSessionsPage(ctx context.Context, query ports.SessionPageQuery) ([]domain.SessionRecord, error)
 	GetActiveAgentSwitch(ctx context.Context, sessionID domain.SessionID) (domain.AgentSwitch, bool, error)
 	ListActiveAgentSwitches(ctx context.Context) ([]domain.AgentSwitch, error)
 	RenameSession(ctx context.Context, id domain.SessionID, displayName string, updatedAt time.Time) (bool, error)
@@ -69,24 +67,6 @@ type ListFilter struct {
 	OrchestratorOnly bool
 	Fresh            bool
 }
-
-// ListPageRequest is ListFilter plus the page: PageSize rows, resuming after
-// PageToken when set. Pagination is opt-in; List keeps the return-all contract.
-type ListPageRequest struct {
-	ListFilter
-	PageSize  int
-	PageToken string
-}
-
-// Page is one page of sessions, newest first, and the token for the
-// next page, empty on the last one.
-type Page struct {
-	Sessions      []domain.Session
-	NextPageToken string
-}
-
-// ErrInvalidPageToken reports a page token this daemon did not mint.
-var ErrInvalidPageToken = errors.New("invalid page token")
 
 // commander is the command-side surface Service delegates to: the
 // *sessionmanager.Manager in production, a fake in tests.
@@ -126,6 +106,11 @@ type interfaceTransitionCommander interface {
 // service fakes while production delegates to Session Manager.
 type exitAgentCommander interface {
 	ExitAgent(context.Context, domain.SessionID) (domain.SessionRecord, error)
+}
+
+// agentAccountCommander keeps account moves optional for focused service fakes.
+type agentAccountCommander interface {
+	StartAccountTransition(context.Context, domain.SessionID, string, domain.SessionInterfaceTransitionPolicy) (domain.SessionInterfaceTransition, error)
 }
 
 // RollbackOutcome reports what happened in a rollback: either the seed row was
@@ -239,11 +224,15 @@ type Service struct {
 	// deliver activity signals at all. Only capable harnesses are eligible for
 	// the no_signal downgrade: a hook-less harness staying silent forever is
 	// normal, not a broken pipeline. nil means "unknown": never downgrade.
-	signalCapable func(domain.AgentHarness) bool
+	signalCapable         func(domain.AgentHarness) bool
+	chatProviderPreserved func(domain.SessionID) bool
 	// runtimeUnreachable reports whether AO's last liveness probe could reach a
 	// session's runtime. nil means "unknown": no session is ever flagged.
-	runtimeUnreachable     func(domain.SessionID) bool
-	chatProviderPreserved  func(domain.SessionID) bool
+	runtimeUnreachable func(domain.SessionID) bool
+	// githubIdentity optionally resolves the operator's authenticated GitHub
+	// account so the handle rides along with product telemetry. Nil disables it
+	// and the emitter degrades to anonymous.
+	githubIdentity         ports.ScopedIdentityResolver
 	titleRefinementSlots   chan struct{}
 	titleRefinementMu      sync.Mutex
 	titleRefinementCancels map[domain.SessionID]context.CancelFunc
@@ -257,6 +246,15 @@ type Service struct {
 	// artifactDeleter deletes a session's artifact files and version rows. Nil
 	// makes DeleteArtifacts fail rather than delete outside the capture lock.
 	artifactDeleter artifactDeleter
+	// runsOnComputerLogin reports whether a new session would launch on the
+	// computer's own CLI login rather than a saved account. Nil means always.
+	runsOnComputerLogin func(context.Context, domain.AgentHarness, string) bool
+}
+
+// SetComputerLoginCheck late-binds the account check the launch gate needs: the
+// computer's login state matters only to a session that will run on it.
+func (s *Service) SetComputerLoginCheck(check func(ctx context.Context, harness domain.AgentHarness, accountID string) bool) {
+	s.runsOnComputerLogin = check
 }
 
 // SetChatProviderPreserver wires the live Chat lifetime observation after both
@@ -293,10 +291,9 @@ type Deps struct {
 	// wiring passes activitydispatch.SupportsHarness. Left nil, no session is
 	// ever downgraded to no_signal.
 	SignalCapable func(domain.AgentHarness) bool
-	// RuntimeUnreachable surfaces the lifecycle reducer's last runtime
-	// reachability observation on the read model; daemon wiring passes
-	// lifecycle.Manager.RuntimeUnreachable. Left nil, no session is flagged.
-	RuntimeUnreachable func(domain.SessionID) bool
+	// GithubIdentity resolves the operator's authenticated GitHub account so the
+	// handle rides along with product telemetry.
+	GithubIdentity ports.ScopedIdentityResolver
 	// OutputTypeReconciler persists the durable OutputType column; daemon
 	// wiring passes the shared *lifecycle.Manager. Left nil, ClaimPR still
 	// succeeds but the pr OutputType only lands on the next artifact-output
@@ -305,6 +302,10 @@ type Deps struct {
 	// ArtifactDeleter deletes a session's artifacts; daemon wiring passes the
 	// shared *artifactversions.Capturer so a delete cannot race a capture.
 	ArtifactDeleter artifactDeleter
+	// RuntimeUnreachable surfaces the lifecycle reducer's last runtime
+	// reachability observation on the read model; daemon wiring passes
+	// lifecycle.Manager.RuntimeUnreachable. Left nil, no session is flagged.
+	RuntimeUnreachable func(domain.SessionID) bool
 }
 
 // NewWithDeps wires a session service with optional PR-claim dependencies.
@@ -313,7 +314,7 @@ func NewWithDeps(d Deps) *Service {
 	if backgroundContext == nil {
 		backgroundContext = context.Background()
 	}
-	s := &Service{manager: d.Manager, store: d.Store, prClaimer: d.PRClaimer, scm: d.SCM, tracker: d.Tracker, clock: d.Clock, dataDir: d.DataDir, signalCapable: d.SignalCapable, runtimeUnreachable: d.RuntimeUnreachable, telemetry: d.Telemetry, logger: d.Logger, backgroundContext: backgroundContext, agentReadiness: d.AgentReadiness, titleRefinementSlots: make(chan struct{}, delegatedTaskTitleConcurrency), titleRefinementCancels: map[domain.SessionID]context.CancelFunc{}, outputTypeReconciler: d.OutputTypeReconciler, artifactDeleter: d.ArtifactDeleter}
+	s := &Service{manager: d.Manager, store: d.Store, prClaimer: d.PRClaimer, scm: d.SCM, tracker: d.Tracker, clock: d.Clock, dataDir: d.DataDir, signalCapable: d.SignalCapable, runtimeUnreachable: d.RuntimeUnreachable, telemetry: d.Telemetry, logger: d.Logger, backgroundContext: backgroundContext, agentReadiness: d.AgentReadiness, githubIdentity: d.GithubIdentity, titleRefinementSlots: make(chan struct{}, delegatedTaskTitleConcurrency), titleRefinementCancels: map[domain.SessionID]context.CancelFunc{}, outputTypeReconciler: d.OutputTypeReconciler, artifactDeleter: d.ArtifactDeleter}
 	if s.prClaimer == nil {
 		if w, ok := d.Store.(ports.PRClaimer); ok {
 			s.prClaimer = w
@@ -397,32 +398,49 @@ func (s *Service) spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 		}
 		if cfg.Harness == domain.HarnessCodex &&
 			readiness.Authentication.State == domain.AgentAuthenticationUnauthorized &&
-			readiness.Authentication.Freshness == domain.AgentReadinessFresh {
+			readiness.Authentication.Freshness == domain.AgentReadinessFresh &&
+			(s.runsOnComputerLogin == nil || s.runsOnComputerLogin(ctx, cfg.Harness, cfg.AgentAccountID)) {
 			return domain.Session{}, 0, 0, apierr.Conflict("CODEX_ACCOUNT_AUTH_UNVERIFIED", "Add or sign in to a Codex account in Settings before starting a Codex session", nil)
 		}
 	}
-	start := s.now()
-	firstSession, err := s.isFirstSession(ctx)
-	if err != nil {
-		return domain.Session{}, 0, 0, fmt.Errorf("count sessions: %w", err)
-	}
 	cfg = s.withIssueContext(ctx, cfg, project)
-	rec, promptBytes, systemPromptBytes, err := s.manager.Spawn(ctx, cfg)
+	rec, promptBytes, systemPromptBytes, err := s.spawnWithTelemetry(ctx, cfg, project)
 	if err != nil {
 		s.invalidateAgentReadinessAfterLaunchFailure(cfg.Harness, err)
-		apiErr := toSpawnAPIError(err)
-		s.emitSpawnFailed(ctx, cfg, apiErr, s.now().Sub(start).Milliseconds())
-		return domain.Session{}, 0, 0, apiErr
-	}
-	s.emitSpawned(ctx, rec, s.now().Sub(start).Milliseconds())
-	if firstSession {
-		s.emitFirstSessionSpawned(ctx, rec, project)
+		return domain.Session{}, 0, 0, toSpawnAPIError(err)
 	}
 	sess, err := s.toSession(ctx, rec)
 	if err != nil {
 		return domain.Session{}, 0, 0, err
 	}
 	return sess, promptBytes, systemPromptBytes, nil
+}
+
+// spawnWithTelemetry is the only path from the service into manager.Spawn, so
+// every created session emits ao.session.spawned or ao.session.spawn_failed
+// exactly once. Client-request replays return before reaching it.
+func (s *Service) spawnWithTelemetry(ctx context.Context, cfg ports.SpawnConfig, project domain.ProjectRecord) (domain.SessionRecord, int, int, error) {
+	// CLI and orchestrator workers use this same naming policy as desktop tasks.
+	if !cfg.NameFromPrompt && cfg.Kind == domain.KindWorker && project.ID != "" &&
+		project.Kind.WithDefault() != domain.ProjectKindScratch && strings.TrimSpace(cfg.Branch) == "" && strings.TrimSpace(cfg.Prompt) != "" {
+		cfg.NameFromPrompt = true
+		cfg.KeepDisplayName = cfg.DisplayName != ""
+	}
+	start := s.now()
+	firstSession, err := s.isFirstSession(ctx)
+	if err != nil {
+		return domain.SessionRecord{}, 0, 0, fmt.Errorf("count sessions: %w", err)
+	}
+	rec, promptBytes, systemPromptBytes, err := s.manager.Spawn(ctx, cfg)
+	if err != nil {
+		s.emitSpawnFailed(ctx, cfg, err, s.now().Sub(start).Milliseconds())
+		return domain.SessionRecord{}, 0, 0, err
+	}
+	s.emitSpawned(ctx, rec, s.now().Sub(start).Milliseconds())
+	if firstSession {
+		s.emitFirstSessionSpawned(ctx, rec, project)
+	}
+	return rec, promptBytes, systemPromptBytes, nil
 }
 
 func (s *Service) invalidateAgentReadinessAfterLaunchFailure(harness domain.AgentHarness, err error) {
@@ -491,6 +509,9 @@ func (s *Service) emitSpawned(ctx context.Context, rec domain.SessionRecord, dur
 		"harness":     string(rec.Harness),
 		"duration_ms": durationMs,
 	}
+	if actor, ok := s.githubActor(ctx); ok {
+		payload["github_actor"] = actor
+	}
 	s.telemetry.Emit(context.Background(), ports.TelemetryEvent{
 		Name:       "ao.session.spawned",
 		Source:     "session_service",
@@ -501,6 +522,22 @@ func (s *Service) emitSpawned(ctx context.Context, rec domain.SessionRecord, dur
 		RequestID:  reqid.FromContext(ctx),
 		Payload:    payload,
 	})
+}
+
+// githubActor returns the operator's GitHub login when the authenticated
+// account resolves to a human, and ("", false) for every failure mode (resolver
+// unset, no token, GET /user failure, offline, org or bot account, empty login)
+// so the event stays anonymous. Host is left empty because GitHub identity is
+// not host-scoped.
+func (s *Service) githubActor(ctx context.Context) (string, bool) {
+	if s.githubIdentity == nil {
+		return "", false
+	}
+	identity, err := s.githubIdentity.AuthenticatedIdentityForProvider(ctx, "github", "")
+	if err != nil || !identity.Human || identity.Login == "" {
+		return "", false
+	}
+	return identity.Login, true
 }
 
 func (s *Service) emitFirstSessionSpawned(ctx context.Context, rec domain.SessionRecord, project domain.ProjectRecord) {
@@ -747,6 +784,23 @@ func (s *Service) ResumeAgent(ctx context.Context, id domain.SessionID) (ResumeA
 		return ResumeAgentOutcome{}, err
 	}
 	return ResumeAgentOutcome{Session: session, Mode: restoreModeView(res.Mode)}, nil
+}
+
+// StartAccountTransition moves the session's agent to another provider account
+// through the durable controller handoff. stopTurn cancels a turn in progress;
+// otherwise the move waits for it to finish.
+func (s *Service) StartAccountTransition(ctx context.Context, id domain.SessionID, accountID string, stopTurn bool) (domain.SessionInterfaceTransition, error) {
+	manager, ok := s.manager.(agentAccountCommander)
+	if !ok {
+		return domain.SessionInterfaceTransition{}, apierr.Conflict(
+			"AGENT_ACCOUNT_UNSUPPORTED", "This build cannot move a session to another account", nil)
+	}
+	policy := domain.SessionInterfaceTransitionDrain
+	if stopTurn {
+		policy = domain.SessionInterfaceTransitionInterrupt
+	}
+	transition, err := manager.StartAccountTransition(ctx, id, accountID, policy)
+	return transition, toAPIError(err)
 }
 
 // InterfaceTransitionStatus returns capability and progress without launching
@@ -1131,97 +1185,6 @@ func (s *Service) List(ctx context.Context, filter ListFilter) ([]domain.Session
 	if err != nil {
 		return nil, err
 	}
-	filtered := make([]domain.SessionRecord, 0, len(recs))
-	for _, rec := range recs {
-		if matchesSessionFilter(rec, filter) {
-			filtered = append(filtered, rec)
-		}
-	}
-	return s.enrichRecords(ctx, filtered, recoveryRevision)
-}
-
-// ListPage is List with the page applied in SQL: newest first by
-// (updated_at, id), PageSize rows, and a NextPageToken while more exist. The
-// store is asked for one row past the page so "is there a next page" costs
-// no second query.
-func (s *Service) ListPage(ctx context.Context, req ListPageRequest) (Page, error) {
-	if req.PageSize <= 0 {
-		return Page{}, fmt.Errorf("page size must be positive, got %d", req.PageSize)
-	}
-	query := ports.SessionPageQuery{
-		Project:          req.ProjectID,
-		OrchestratorOnly: req.OrchestratorOnly,
-		Limit:            req.PageSize + 1,
-	}
-	// Same semantics as matchesSessionFilter: Fresh means live, Active flips on
-	// IsTerminated, and asking for terminated-and-fresh is the empty set.
-	if req.Fresh {
-		live := false
-		query.Terminated = &live
-	}
-	if req.Active != nil {
-		terminated := !*req.Active
-		if query.Terminated != nil && *query.Terminated != terminated {
-			return Page{Sessions: []domain.Session{}}, nil
-		}
-		query.Terminated = &terminated
-	}
-	if req.PageToken != "" {
-		cursor, err := DecodePageToken(req.PageToken)
-		if err != nil {
-			return Page{}, err
-		}
-		query.Before = &cursor
-	}
-	recoveryRevision := s.statusRecoveryRevision()
-	recs, err := s.store.ListSessionsPage(ctx, query)
-	if err != nil {
-		return Page{}, fmt.Errorf("list sessions page: %w", err)
-	}
-	var next string
-	if len(recs) > req.PageSize {
-		recs = recs[:req.PageSize]
-		last := recs[len(recs)-1]
-		next = EncodePageToken(ports.SessionPageCursor{UpdatedAt: last.UpdatedAt, ID: last.ID})
-	}
-	sessions, err := s.enrichRecords(ctx, recs, recoveryRevision)
-	if err != nil {
-		return Page{}, err
-	}
-	return Page{Sessions: sessions, NextPageToken: next}, nil
-}
-
-// EncodePageToken makes a page token: the keyset of a page's last row,
-// base64url so it survives a query string. Tokens are opaque to clients and
-// unsigned on purpose — a forged one can only move the window, never widen
-// the filter.
-func EncodePageToken(cursor ports.SessionPageCursor) string {
-	return base64.RawURLEncoding.EncodeToString([]byte(cursor.UpdatedAt.UTC().Format(time.RFC3339Nano) + "\n" + string(cursor.ID)))
-}
-
-// DecodePageToken inverts EncodePageToken; anything else is ErrInvalidPageToken.
-func DecodePageToken(token string) (ports.SessionPageCursor, error) {
-	raw, err := base64.RawURLEncoding.DecodeString(token)
-	if err != nil {
-		return ports.SessionPageCursor{}, ErrInvalidPageToken
-	}
-	at, id, ok := strings.Cut(string(raw), "\n")
-	if !ok || id == "" {
-		return ports.SessionPageCursor{}, ErrInvalidPageToken
-	}
-	updatedAt, err := time.Parse(time.RFC3339Nano, at)
-	if err != nil {
-		return ports.SessionPageCursor{}, ErrInvalidPageToken
-	}
-	return ports.SessionPageCursor{UpdatedAt: updatedAt, ID: domain.SessionID(id)}, nil
-}
-
-// enrichRecords turns records into the display read model: active agent
-// switches, PR facts and current-head review runs, each fetched in one batched
-// read for the whole slice.
-// recoveryRevision is read before the records were listed, so a status
-// recovery that lands mid-read marks the page as still checking.
-func (s *Service) enrichRecords(ctx context.Context, recs []domain.SessionRecord, recoveryRevision uint64) ([]domain.Session, error) {
 	activeSwitches, err := s.store.ListActiveAgentSwitches(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list active agent switches: %w", err)
@@ -1230,9 +1193,13 @@ func (s *Service) enrichRecords(ctx context.Context, recs []domain.SessionRecord
 	for _, agentSwitch := range activeSwitches {
 		activeBySession[agentSwitch.SessionID] = agentSwitch
 	}
+	filtered := make([]domain.SessionRecord, 0, len(recs))
 	ids := make([]domain.SessionID, 0, len(recs))
 	for _, rec := range recs {
-		ids = append(ids, rec.ID)
+		if matchesSessionFilter(rec, filter) {
+			filtered = append(filtered, rec)
+			ids = append(ids, rec.ID)
+		}
 	}
 	prsBySession, err := s.store.ListPRFactsForSessions(ctx, ids)
 	if err != nil {
@@ -1242,8 +1209,8 @@ func (s *Service) enrichRecords(ctx context.Context, recs []domain.SessionRecord
 	if err != nil {
 		return nil, fmt.Errorf("list review runs: %w", err)
 	}
-	out := make([]domain.Session, 0, len(recs))
-	for _, rec := range recs {
+	out := make([]domain.Session, 0, len(filtered))
+	for _, rec := range filtered {
 		sess, err := s.toSessionWithFacts(ctx, rec, prsBySession[rec.ID], runsBySession[rec.ID])
 		if err != nil {
 			return nil, err
@@ -1297,6 +1264,21 @@ func matchesSessionFilter(rec domain.SessionRecord, filter ListFilter) bool {
 		return false
 	}
 	return true
+}
+
+// GetRecord reads a session's stored row without the read model Get builds on
+// top (PR facts, review runs, artifact listing, agent switch). It serves hot
+// paths that need only stored fields, such as the preview proxy, which runs
+// once for every module a dev server serves.
+func (s *Service) GetRecord(ctx context.Context, id domain.SessionID) (domain.SessionRecord, error) {
+	rec, ok, err := s.store.GetSession(ctx, id)
+	if err != nil {
+		return domain.SessionRecord{}, fmt.Errorf("get %s: %w", id, err)
+	}
+	if !ok || rec.IsTaskPreparation {
+		return domain.SessionRecord{}, apierr.NotFound("SESSION_NOT_FOUND", "Unknown session")
+	}
+	return rec, nil
 }
 
 // Get returns one session as an enriched display model, or an apierr.NotFound
@@ -1435,6 +1417,19 @@ func mapSessionError(err error) error {
 		return nil
 	case errors.Is(err, sessionmanager.ErrNotFound):
 		return apierr.NotFound("SESSION_NOT_FOUND", "Unknown session")
+	case errors.Is(err, ports.ErrAgentAccountUnknown):
+		return apierr.NotFound("AGENT_ACCOUNT_NOT_FOUND", "Unknown agent account")
+	case errors.Is(err, ports.ErrAgentAccountProviderMismatch):
+		return apierr.Invalid("AGENT_ACCOUNT_PROVIDER_MISMATCH", "The account is for a different agent", nil)
+	case errors.Is(err, ports.ErrAgentAccountDefaultUnusable):
+		return apierr.Conflict("AGENT_ACCOUNT_DEFAULT_UNUSABLE", "The default account is signed out or now holds another login. Sign it in again, or make another account the default.", nil)
+	case errors.Is(err, ports.ErrAgentAccountSignedOut):
+		return apierr.Conflict("AGENT_ACCOUNT_SIGNED_OUT", "The account is signed out; sign it in again first", nil)
+	case errors.Is(err, ports.ErrAgentAccountUnchanged):
+		return apierr.Conflict("AGENT_ACCOUNT_UNCHANGED", "The session already uses this account", nil)
+	case errors.Is(err, ports.ErrAgentAccountUnshared):
+		return apierr.Conflict("AGENT_ACCOUNT_UNSHARED",
+			"AO cannot link this account's folder to this computer's history. On Windows, turn on Developer Mode.", nil)
 	case errors.Is(err, sessionmanager.ErrNotRestorable):
 		return apierr.Conflict("SESSION_NOT_RESTORABLE", "Session is not restorable", nil)
 	case errors.Is(err, sessionmanager.ErrTerminated):
@@ -1462,6 +1457,9 @@ func mapSessionError(err error) error {
 	case errors.Is(err, sessionmanager.ErrNativeConversationUnverified):
 		return apierr.Conflict("NATIVE_SESSION_UNVERIFIED",
 			"The current terminal launch has not confirmed that it owns the stored native conversation yet", nil)
+	case errors.Is(err, sessionmanager.ErrInterfaceWorkspaceUnavailable):
+		return apierr.Conflict("WORKSPACE_UNAVAILABLE",
+			"The session's workspace was never set up; retry its start before switching interfaces", nil)
 	case errors.Is(err, sessionmanager.ErrInterfaceTransitionNotCancellable):
 		return apierr.Conflict("INTERFACE_TRANSITION_NOT_CANCELLABLE",
 			"The source controller has already stopped; AO must finish or recover the switch", nil)

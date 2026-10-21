@@ -815,7 +815,7 @@ func TestDoctorDaemonBuildCheck(t *testing.T) {
 	}
 	unknown := daemonmeta.Build{Source: daemonmeta.BuildSourceUnknown}
 	healthy := func(b daemonmeta.Build) daemonStatus {
-		return daemonStatus{State: stateReady, owned: true, build: b, executable: "/app/daemon/ao"}
+		return daemonStatus{State: stateReady, owned: true, build: b, ExecutablePath: "/app/daemon/ao"}
 	}
 
 	for _, tc := range []struct {

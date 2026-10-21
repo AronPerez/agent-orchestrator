@@ -33,6 +33,7 @@ const (
 	// Electron never has to duplicate the backend's platform-specific naming.
 	RuntimeAddressEnv     = "AO_BROWSER_RUNTIME_ADDRESS"
 	helloTimeout          = 5 * time.Second
+	helloReplyTimeout     = time.Second
 	runtimeReconnectGrace = 2 * time.Second
 	maxRuntimeFrameBytes  = 8 << 20
 )
@@ -76,9 +77,6 @@ type Command struct {
 	SessionID domain.SessionID       `json:"sessionId"`
 	Action    string                 `json:"action"`
 	Args      map[string]interface{} `json:"args,omitempty"`
-	// ProfileKey is set only when the session's project opted into a persistent
-	// browser profile. See wireMessage.ProfileKey.
-	ProfileKey string `json:"profileKey,omitempty"`
 }
 
 // CommandError is a stable browser failure returned by the Electron runtime.
@@ -108,33 +106,15 @@ type wireMessage struct {
 	SessionID domain.SessionID       `json:"sessionId,omitempty"`
 	Action    string                 `json:"action,omitempty"`
 	Args      map[string]interface{} `json:"args,omitempty"`
-	// ProfileKey is an OPAQUE partition key for the Electron runtime. Empty is
-	// the default and means "give this session a throwaway memory-only profile";
-	// non-empty means "this project opted into a shared on-disk profile, use
-	// this key for it". The daemon is the only side that knows the session's
-	// project and that project's config, so it decides; the app never looks a
-	// project up. Empty on every command that does not create a session.
-	ProfileKey string          `json:"profileKey,omitempty"`
-	OK         bool            `json:"ok,omitempty"`
-	Result     json.RawMessage `json:"result,omitempty"`
-	Error      *CommandError   `json:"error,omitempty"`
+	OK        bool                   `json:"ok,omitempty"`
+	Result    json.RawMessage        `json:"result,omitempty"`
+	Error     *CommandError          `json:"error,omitempty"`
 }
 
 type pendingResult struct {
 	value interface{}
 	err   error
 }
-
-// connClass distinguishes how a runtime reached the broker. Local is the
-// desktop app on this machine (unix socket, per-launch token); remote is a
-// desktop app on another machine (HTTP upgrade, authenticated by the LAN
-// credential before the broker ever sees the connection).
-type connClass int
-
-const (
-	classLocal connClass = iota
-	classRemote
-)
 
 // Broker owns the single active Electron runtime connection. Commands are
 // correlated by request id, so independent AO sessions may use the bridge
@@ -144,7 +124,6 @@ type Broker struct {
 
 	mu                sync.Mutex
 	conn              net.Conn
-	connClass         connClass
 	connectedAt       time.Time
 	pending           map[string]chan pendingResult
 	writeGate         chan struct{}
@@ -184,13 +163,7 @@ func (b *Broker) Status() Status {
 }
 
 // Execute sends one browser command to the connected Electron runtime.
-func (b *Broker) Execute(
-	ctx context.Context,
-	sessionID domain.SessionID,
-	action string,
-	args map[string]interface{},
-	profileKey string,
-) (Result, error) {
+func (b *Broker) Execute(ctx context.Context, sessionID domain.SessionID, action string, args map[string]interface{}) (Result, error) {
 	requestID := uuid.NewString()
 	resultCh := make(chan pendingResult, 1)
 
@@ -211,12 +184,11 @@ func (b *Broker) Execute(
 	}
 
 	msg := wireMessage{
-		Type:       "command",
-		RequestID:  requestID,
-		SessionID:  sessionID,
-		Action:     action,
-		Args:       args,
-		ProfileKey: profileKey,
+		Type:      "command",
+		RequestID: requestID,
+		SessionID: sessionID,
+		Action:    action,
+		Args:      args,
 	}
 	if err := b.write(ctx, conn, msg); err != nil {
 		b.removePending(requestID)
@@ -246,7 +218,7 @@ func (b *Broker) Execute(
 // public browser action allowlist but still uses the authenticated runtime
 // transport, so session teardown does not depend on a mounted renderer panel.
 func (b *Broker) DestroySession(ctx context.Context, sessionID domain.SessionID) error {
-	_, err := b.Execute(ctx, sessionID, "__destroy-session", nil, "")
+	_, err := b.Execute(ctx, sessionID, "__destroy-session", nil)
 	if errors.Is(err, ErrUnavailable) {
 		return nil
 	}
@@ -269,45 +241,37 @@ func (b *Broker) Serve(ctx context.Context, ln net.Listener) error {
 			}
 			return fmt.Errorf("accept browser runtime: %w", err)
 		}
-		go b.serveConn(ctx, conn, classLocal)
+		go b.serveConn(ctx, conn)
 	}
 }
 
-// ServeRemoteConn adopts one already-authenticated connection from the HTTP
-// upgrade endpoint and blocks until it closes. The HTTP layer (LAN credential,
-// or loopback ambient authority) is the authenticator, so the hello token is
-// not checked. A remote runtime never displaces a connected local one: the
-// machine that owns the daemon keeps its browser panel, and the remote app's
-// reconnect loop takes over only after the local app disconnects.
-func (b *Broker) ServeRemoteConn(ctx context.Context, conn net.Conn) {
-	b.serveConn(ctx, conn, classRemote)
-}
-
-func (b *Broker) serveConn(ctx context.Context, conn net.Conn, class connClass) {
+func (b *Broker) serveConn(ctx context.Context, conn net.Conn) {
 	_ = conn.SetReadDeadline(time.Now().Add(helloTimeout))
 	scanner := bufio.NewScanner(conn)
 	scanner.Buffer(make([]byte, 64*1024), maxRuntimeFrameBytes)
-	var hello wireMessage
-	if !scanner.Scan() ||
-		json.Unmarshal(scanner.Bytes(), &hello) != nil ||
-		hello.Type != "hello" ||
-		hello.Version != ProtocolVersion ||
-		(class == classLocal && !validRuntimeToken(b.token, hello.Token)) {
+	if !scanner.Scan() {
+		_ = conn.Close()
+		return
+	}
+	// Answer every hello explicitly, so the runtime knows whether it was accepted
+	// instead of guessing from how long the socket stays open (#6466). Older
+	// runtimes ignore both frames.
+	if rejection := helloRejection(scanner.Bytes(), b.token); rejection != nil {
+		_ = writeHelloReply(conn, wireMessage{Type: "hello-rejected", Error: rejection})
 		_ = conn.Close()
 		return
 	}
 	_ = conn.SetReadDeadline(time.Time{})
-
-	b.mu.Lock()
-	if class == classRemote && b.conn != nil && b.connClass == classLocal {
-		b.mu.Unlock()
+	// Nothing else can write to conn until it is published below, so hello-ok is
+	// always the first frame the runtime reads.
+	if err := writeHelloReply(conn, wireMessage{Type: "hello-ok"}); err != nil {
 		_ = conn.Close()
-		b.log.Info("browser runtime: remote runtime rejected; local runtime is connected")
 		return
 	}
+
+	b.mu.Lock()
 	old := b.conn
 	b.conn = conn
-	b.connClass = class
 	b.connectedAt = time.Now().UTC()
 	b.signalConnectionChangedLocked()
 	pending := b.takePendingLocked()
@@ -399,6 +363,40 @@ func (b *Broker) write(ctx context.Context, conn net.Conn, msg wireMessage) erro
 	return err
 }
 
+// helloRejection reports why a runtime's first frame is not an acceptable hello,
+// or nil if it is.
+func helloRejection(frame []byte, token string) *CommandError {
+	var hello wireMessage
+	switch {
+	case json.Unmarshal(frame, &hello) != nil || hello.Type != "hello":
+		return &CommandError{Code: "BROWSER_RUNTIME_BAD_HELLO", Message: "first frame was not a hello"}
+	case hello.Version != ProtocolVersion:
+		return &CommandError{
+			Code:    "BROWSER_RUNTIME_PROTOCOL_MISMATCH",
+			Message: fmt.Sprintf("daemon speaks browser runtime protocol %d, runtime sent %d", ProtocolVersion, hello.Version),
+		}
+	case !validRuntimeToken(token, hello.Token):
+		return &CommandError{
+			Code:    "BROWSER_RUNTIME_TOKEN_REJECTED",
+			Message: "browser runtime token does not match the one this daemon was started with",
+		}
+	}
+	return nil
+}
+
+func writeHelloReply(conn net.Conn, msg wireMessage) error {
+	frame, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	if err := conn.SetWriteDeadline(time.Now().Add(helloReplyTimeout)); err != nil {
+		return err
+	}
+	defer func() { _ = conn.SetWriteDeadline(time.Time{}) }()
+	_, err = conn.Write(append(frame, '\n'))
+	return err
+}
+
 func validRuntimeToken(expected, actual string) bool {
 	if expected == "" {
 		return actual == ""
@@ -438,7 +436,6 @@ func (b *Broker) disconnect(conn net.Conn, cause error) {
 		return
 	}
 	b.conn = nil
-	b.connClass = classLocal
 	b.connectedAt = time.Time{}
 	b.signalConnectionChangedLocked()
 	pending := b.takePendingLocked()

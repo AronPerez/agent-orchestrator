@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ServerConfig } from "../config";
+import type { HostSnapshot } from "../otherHosts";
 import type { ConversationActivity, ConversationSnapshot } from "../chat/types";
 import { actionContext, createWatchActionHandler, watchConfigForHost } from "./actions";
 
@@ -147,18 +148,36 @@ describe("Watch action dispatcher", () => {
 		deps.configForHost.mockReturnValue({ ...cfg, hostId: "beta" });
 		expect(await run(inspect)).toMatchObject({ status: "open_phone" });
 	});
+	it("does not spend another host's token for an overlapping worker ID", async () => {
+		const { run, deps } = setup();
+		const beta = { ...cfg, hostId: "beta" };
+		deps.configForHost.mockImplementation((id) => id === "alpha" ? cfg : id === "beta" ? beta : null);
+		await run(inspect);
+		const decision = { ...inspect, kind: "decide", token: "token", decisionId: "accept" };
+		expect(await run({ ...decision, hostId: "beta" })).toMatchObject({ status: "open_phone" });
+		expect(deps.approve).not.toHaveBeenCalled();
+		expect(await run(decision)).toMatchObject({ status: "sent" });
+		expect(deps.approve).toHaveBeenCalledWith(cfg, "worker", "request-1", "accept");
+	});
 });
 
-describe("Watch active-host binding", () => {
-	const connected = { config: cfg, connection: "open", error: null, poll: { config: cfg, sessions: [], capturedAt: 1000 } };
-	it("returns the original active config, never another paired host", () => {
-		expect(watchConfigForHost(connected, "alpha")).toBe(cfg);
-		expect(watchConfigForHost(connected, "beta")).toBeNull();
+describe("Watch paired-host binding", () => {
+	const connected = { hostId: "alpha", config: cfg, connection: "open", error: null, lastSyncAt: 1000 } as HostSnapshot;
+	it("returns each host's original live config, never another paired host's", () => {
+		const beta = { ...cfg, hostId: "beta" };
+		const hosts = [connected, { ...connected, hostId: "beta", config: beta }];
+		expect(watchConfigForHost(hosts, cfg, "alpha")).toBe(cfg);
+		expect(watchConfigForHost(hosts, beta, "beta")).toBe(beta);
+		expect(watchConfigForHost(hosts, cfg, "beta")).toBeNull();
 	});
-	it("fails closed during host switches, credential rotation, disconnects and missing polls", () => {
+	it("fails closed during credential rotation, disconnects, missing polls and removal", () => {
+		for (const config of [null, { ...cfg }, { ...cfg, password: "ROTATED" }]) {
+			expect(watchConfigForHost([connected], config, "alpha")).toBeNull();
+		}
 		for (const over of [
 			{ config: null }, { config: { ...cfg, hostId: "beta" } }, { config: { ...cfg, password: "ROTATED" } },
-			{ connection: "closed" }, { error: "unauthorized" }, { poll: null },
-		]) expect(watchConfigForHost({ ...connected, ...over }, "alpha")).toBeNull();
+			{ connection: "closed" as const }, { error: "unauthorized" }, { lastSyncAt: 0 },
+		]) expect(watchConfigForHost([{ ...connected, ...over }], cfg, "alpha")).toBeNull();
+		expect(watchConfigForHost([], cfg, "alpha")).toBeNull();
 	});
 });

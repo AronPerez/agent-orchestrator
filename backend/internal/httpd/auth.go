@@ -1,8 +1,6 @@
 package httpd
 
 import (
-	"encoding/json"
-	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -110,10 +108,7 @@ func (l *lockout) blocked(src string) bool {
 	return false
 }
 
-// fail records a failed password guess and reports whether THIS call tripped
-// the lockout (exactly at the limit), so the caller can log the trip once
-// rather than on every subsequent failure.
-func (l *lockout) fail(src string) bool {
+func (l *lockout) fail(src string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.now()
@@ -132,7 +127,6 @@ func (l *lockout) fail(src string) bool {
 	a.fails++
 	a.expires = now.Add(time.Minute)
 	l.attempts[src] = a
-	return a.fails == 5
 }
 
 func (l *lockout) reset(src string) {
@@ -154,6 +148,22 @@ func sourceKey(r *http.Request) string {
 	return r.RemoteAddr
 }
 
+// clientSource is the address of a request's client, which lockouts count
+// failures against. Cloudflared connects from loopback, so its visitor IP
+// stands in for it. A LAN client must not be able to spoof its source with this
+// header.
+func clientSource(r *http.Request) string {
+	src := sourceKey(r)
+	if ip := net.ParseIP(src); ip != nil && ip.IsLoopback() {
+		if forwarded := r.Header.Values("CF-Connecting-IP"); len(forwarded) == 1 {
+			if visitor := net.ParseIP(forwarded[0]); visitor != nil {
+				return visitor.String()
+			}
+		}
+	}
+	return src
+}
+
 func bearerToken(r *http.Request) string {
 	h := r.Header.Get("Authorization")
 	if strings.HasPrefix(h, "Bearer ") {
@@ -162,41 +172,19 @@ func bearerToken(r *http.Request) string {
 	return ""
 }
 
-// wsProtocolPrefix marks the Sec-WebSocket-Protocol entry carrying the
-// connection token. Browsers cannot set headers on new WebSocket(), so the web
-// client requests ["ao.auth", "ao.bearer.<pw>"] and the daemon echoes the
-// "ao.auth" marker (see muxAuthSubprotocol in terminal_mux.go). Safe as an
-// auth channel: the Fetch spec forbids Sec-* headers on fetch/XHR, so only a
-// real WebSocket handshake can carry it, and the value is still verified
-// against the password hash exactly like a Bearer token.
-const wsProtocolPrefix = "ao.bearer."
-
-func wsProtocolToken(r *http.Request) string {
-	for _, v := range r.Header.Values("Sec-WebSocket-Protocol") {
-		for _, p := range strings.Split(v, ",") {
-			if p = strings.TrimSpace(p); strings.HasPrefix(p, wsProtocolPrefix) {
-				return strings.TrimPrefix(p, wsProtocolPrefix)
-			}
-		}
-	}
-	return ""
-}
-
-// authCookieName carries the connection token on requests a browser cannot put
-// a header on. It is minted two ways: by handleLogin at Path=/ (a session
-// credential for a daemon-served page), and by maybeSetPreviewAuthCookie scoped
-// to one session's preview files. See credential for how both are honored.
+// authCookieName carries the connection token for a preview page's in-page
+// subresource requests. See connectionToken / maybeSetPreviewAuthCookie.
 const authCookieName = "ao_conn"
 
 // previewFilesMarker is the path segment that identifies a preview-file request
-// (GET /api/v1/sessions/{id}/preview/files/*).
+// (GET /api/v1/sessions/{id}/preview/files/*). The auth cookie is both scoped to
+// and honored only on this path, so it can never authenticate any other endpoint.
 const previewFilesMarker = "/preview/files/"
 
 // previewFilesCookiePath returns the cookie Path to scope the auth cookie to the
 // requesting session's preview files (".../preview/files/"), or "" if the request
-// is not a preview-file request. Preview output is workspace-authored content, so
-// the cookie IT gets stays pinned to its own path — it never widens into the
-// Path=/ session cookie handleLogin issues to a page the daemon served itself.
+// is not a preview-file request. Scoping this tightly is what keeps the cookie
+// from ever reaching /kill, /send, another session, or any non-preview route.
 func previewFilesCookiePath(urlPath string) string {
 	i := strings.Index(urlPath, previewFilesMarker)
 	if i < 0 {
@@ -205,49 +193,22 @@ func previewFilesCookiePath(urlPath string) string {
 	return urlPath[:i+len(previewFilesMarker)]
 }
 
-// authLoginPath exchanges the connection password for a session cookie. It
-// exists on the authenticated (LAN) listener only, where there is a password to
-// exchange; on the no-auth loopback listener it is simply not a route.
-const authLoginPath = "/api/v1/auth/login"
-
-// credential returns the token authenticating r against either hash, whether it
-// arrived in a cookie, and whether it is valid.
-//
-// It comes from the Authorization: Bearer header (the mobile API client and a
-// preview page's top-level navigation), the ao.bearer.* Sec-WebSocket-Protocol
-// entry (a browser's /mux handshake, which cannot set Authorization), or the
-// ao_conn cookie — the only channel available to a browser API that lets it set
-// neither, notably EventSource/SSE, <img>, and top-level navigation.
-//
-// Every ao_conn cookie is tried, not just the first: the login route mints one
-// at Path=/ while a preview page may separately hold one scoped to its own
-// preview-files path (see maybeSetPreviewAuthCookie), and the browser sends
-// both. Picking the first would fail auth roughly half the time.
-//
-// A cookie authenticating on its own is deliberately narrower than it looks —
-// authMiddleware additionally requires a strict origin whenever the cookie is
-// what authenticated, because cookies ride cross-site and a Bearer never does.
-func credential(currentHash, accountHash string, r *http.Request) (tok string, viaCookie, ok bool) {
-	matches := func(token string) bool {
-		return mobilebridge.PasswordMatches(currentHash, token) || mobilebridge.PasswordMatches(accountHash, token)
-	}
+// connectionToken returns the caller's connection token. It comes from the
+// Authorization: Bearer header (the mobile API client and a preview page's
+// top-level navigation) or, ONLY on the preview-files route, the auth cookie (a
+// preview page's subresource requests — images/CSS/JS — which the WebView issues
+// without our header). Restricting the cookie to the preview-files path means it
+// can never authenticate any other mobile endpoint even if a client sends it.
+func connectionToken(r *http.Request) string {
 	if t := bearerToken(r); t != "" {
-		return t, false, matches(t)
+		return t
 	}
-	if t := wsProtocolToken(r); t != "" {
-		return t, false, matches(t)
-	}
-	var seen string
-	for _, c := range r.Cookies() {
-		if c.Name != authCookieName {
-			continue
+	if previewFilesCookiePath(r.URL.Path) != "" {
+		if c, err := r.Cookie(authCookieName); err == nil {
+			return c.Value
 		}
-		if matches(c.Value) {
-			return c.Value, true, true
-		}
-		seen = c.Value
 	}
-	return seen, seen != "", false
+	return ""
 }
 
 // maybeSetPreviewAuthCookie drops the auth cookie when a preview FILE is fetched
@@ -282,82 +243,11 @@ func maybeSetPreviewAuthCookie(w http.ResponseWriter, r *http.Request, tok strin
 	})
 }
 
-// handleLogin serves POST /api/v1/auth/login: it exchanges the connection
-// password for the ao_conn session cookie.
-//
-//	POST /api/v1/auth/login {"password":"<connection password>"}
-//	  204 No Content + Set-Cookie: ao_conn=<token>; HttpOnly; SameSite=Strict; Path=/
-//	  401 on a wrong password, counted by the same per-source lockout
-//
-// It exists because a browser cannot put an Authorization header on everything:
-// EventSource (SSE) in particular sends cookies and nothing else. The cookie
-// value is the password itself, so it validates through exactly the same hash
-// comparison as a Bearer — there is no second credential system to keep in sync
-// or to revoke separately: rotating the password invalidates every cookie.
-//
-// Minting the cookie is gated on a strict origin. A cookie is the one
-// credential a browser will attach to requests a hostile page initiates, so
-// handing one out to a cross-origin caller would be handing out CSRF. That is
-// checked here, and again on every request the cookie authenticates.
-func handleLogin(w http.ResponseWriter, r *http.Request, state *authState, lock *lockout, log *slog.Logger, connected *mobileConnectReporter, src, remoteSrc string) {
-	if r.Method != http.MethodPost {
-		methodNotAllowedJSON(w, r)
-		return
-	}
-	if !strictOriginOK(nil, r) {
-		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "ORIGIN_FORBIDDEN",
-			"login is accepted only from this daemon's own pages", nil)
-		return
-	}
-	var body struct {
-		Password string `json:"password"`
-	}
-	// 4 KiB is orders of magnitude more than an 8-char password needs; the cap
-	// is only there so an unauthenticated route cannot be used to buffer a
-	// large body.
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil {
-		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON",
-			"request body must be JSON of the form {\"password\":\"...\"}", nil)
-		return
-	}
-	if body.Password == "" || !mobilebridge.PasswordMatches(state.currentHash(), body.Password) {
-		if body.Password != "" && !state.retiredPasswordMatches(body.Password) && lock.fail(src) {
-			log.Warn("LAN auth lockout tripped", "src", src)
-		}
-		envelope.WriteAPIError(w, r, http.StatusUnauthorized, "unauthorized", "BAD_PASSWORD",
-			"missing or invalid connection password", nil)
-		return
-	}
-	lock.reset(src)
-	connected.report(remoteSrc)
-	//nolint:gosec // Secure is intentionally omitted, exactly as for the preview
-	// cookie: the LAN bridge is plaintext http by design (ADR 0001), and a Secure
-	// cookie would never be sent over it. The password already travels the same
-	// plain link as a Bearer.
-	http.SetCookie(w, &http.Cookie{
-		Name:     authCookieName,
-		Value:    body.Password,
-		Path:     "/",
-		HttpOnly: true,
-		// Strict, not Lax: nothing about this daemon is meant to be reached by
-		// following a link from another site, so there is no navigation case Lax
-		// would buy — and Strict keeps the cookie off cross-site top-level
-		// requests entirely.
-		SameSite: http.SameSiteStrictMode,
-	})
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// isCORSPreflight reports whether r is a CORS preflight: an OPTIONS request
-// bearing both an Origin and the Access-Control-Request-Method header. This is
-// the same shape corsMiddleware answers itself (see cors.go), so anything
-// matching here terminates there and never reaches a route handler.
-func isCORSPreflight(r *http.Request) bool {
-	return r.Method == http.MethodOptions &&
-		r.Header.Get("Origin") != "" &&
-		r.Header.Get("Access-Control-Request-Method") != ""
-}
-
+// authMiddleware authenticates LAN requests against the current connection
+// password. connected, which may be nil, is notified of the source address of
+// every request that authenticates; it exists so telemetry can observe that a
+// phone actually reached this desktop, and it must not block the request, since
+// it runs inline on every authenticated call.
 // identityProbePath is the one route the LAN listener serves without the
 // connection password. The phone races several endpoints, and a private
 // address is not an identity: 192.168.1.42 exists on most networks. Verifying
@@ -377,104 +267,43 @@ func isIdentityProbe(r *http.Request) bool {
 	return r.Method == http.MethodGet && r.URL.Path == identityProbePath
 }
 
-// authMiddleware authenticates LAN requests against the current connection
-// password. connected, which may be nil, is notified of the source address of
-// every request that authenticates; it exists so telemetry can observe that a
-// phone actually reached this desktop, and it must not block the request, since
-// it runs inline on every authenticated call.
-func authMiddleware(state *authState, lock *lockout, log *slog.Logger, connected *mobileConnectReporter) func(http.Handler) http.Handler {
+func authMiddleware(state *authState, lock *lockout, connected *mobileConnectReporter) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if isIdentityProbe(r) {
 				next.ServeHTTP(w, r)
 				return
 			}
-			// A CORS preflight can never be authenticated: browsers strip
-			// credentials from it, so it arrives with no Authorization header by
-			// design. Rejecting it 401s the preflight, the browser reports an
-			// opaque "CORS error", and the real request is never sent — so every
-			// cross-origin browser client (the Expo web build reaching the LAN
-			// listener from another machine) is locked out regardless of password.
-			// Worse, counting it as a failed attempt means repeated preflights trip
-			// the per-source lockout for a client holding the CORRECT password.
-			//
-			// Pass it through to corsMiddleware, which answers it with 204 and no
-			// body, or 403 when the Origin is not allowlisted. Requiring BOTH
-			// preflight headers is what keeps this from becoming an auth bypass:
-			// corsMiddleware handles every request matching this shape itself and
-			// never calls a route handler, so no side effect can run unauthenticated.
-			if isCORSPreflight(r) {
-				next.ServeHTTP(w, r)
-				return
-			}
 			remoteSrc := sourceKey(r)
-			src := remoteSrc
-			// Cloudflared connects from loopback, so use its visitor IP for lockout
-			// only. A LAN client must not be able to spoof its source with this header.
-			if ip := net.ParseIP(remoteSrc); ip != nil && ip.IsLoopback() {
-				if forwarded := r.Header.Values("CF-Connecting-IP"); len(forwarded) == 1 {
-					if visitor := net.ParseIP(forwarded[0]); visitor != nil {
-						src = visitor.String()
-					}
-				}
-			}
+			src := clientSource(r) // for the lockout only
 			if lock.blocked(src) {
 				envelope.WriteAPIError(w, r, http.StatusTooManyRequests, "too_many_requests", "LOCKED_OUT",
 					"too many failed attempts; try again shortly", nil)
 				return
 			}
-			if r.URL.Path == authLoginPath {
-				handleLogin(w, r, state, lock, log, connected, src, remoteSrc)
-				return
-			}
+			tok := connectionToken(r)
 			conn, _ := r.Context().Value(lanConnContextKey{}).(*lanConn)
 			if conn != nil {
 				conn.owner.mu.Lock()
 			}
-			hashes := state.hashes.Load()
-			var tok string
-			var viaCookie, ok bool
-			if hashes != nil {
-				tok, viaCookie, ok = credential(hashes.current, hashes.account, r)
-			}
-			if ok {
-				// A cookie rides along on cross-site requests; a Bearer or the
-				// ao.bearer.* subprotocol can only be attached by code that was
-				// handed the password. So when the cookie is what authenticated,
-				// origin checking is not optional — without it any page on the
-				// network could drive this daemon through the user's browser
-				// (classic CSRF, and CSWSH on the /mux upgrade).
-				if viaCookie && !strictOriginOK(nil, r) {
-					if conn != nil {
-						conn.owner.mu.Unlock()
-					}
-					envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "ORIGIN_FORBIDDEN",
-						"cookie credentials are accepted only from this daemon's own pages", nil)
-					return
-				}
-				if conn != nil {
-					// Record auth atomically with rotation's connection close.
+			// Record auth atomically with rotation's connection close.
+			authenticated := mobilebridge.PasswordMatches(state.currentHash(), tok) ||
+				mobilebridge.PasswordMatches(state.accountHash(), tok)
+			if conn != nil {
+				if authenticated {
 					conn.tokenHash = mobilebridge.HashPassword(tok)
 				}
-			}
-			if conn != nil {
 				conn.owner.mu.Unlock()
 			}
-			if ok {
+			if authenticated {
 				lock.reset(src)
 				connected.report(remoteSrc)
 				maybeSetPreviewAuthCookie(w, r, tok)
 				next.ServeHTTP(w, r)
 				return
 			}
-			// A tokenless request guesses nothing: 401 it, but don't let it consume
-			// lockout budget — the lockout throttles password guessing, and counting
-			// headerless traffic (an old web build's /mux retry loop, a stray probe)
-			// would 429 every request from that IP, including authenticated REST.
-			// The trip Warn is the only trace a lockout leaves: auth runs outside
-			// requestLogger, so these 401/429s never reach the access log.
-			if tok != "" && !state.retiredPasswordMatches(tok) && lock.fail(src) {
-				log.Warn("LAN auth lockout tripped", "src", src)
+			if !state.retiredPasswordMatches(tok) {
+				lock.fail(src)
 			}
 			envelope.WriteAPIError(w, r, http.StatusUnauthorized, "unauthorized", "BAD_PASSWORD",
 				"missing or invalid connection password", nil)

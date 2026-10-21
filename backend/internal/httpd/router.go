@@ -3,6 +3,9 @@
 package httpd
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -16,14 +19,24 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
-	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/webui"
+	agentswitchobs "github.com/aoagents/agent-orchestrator/backend/internal/observe/agentswitch"
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	"github.com/aoagents/agent-orchestrator/backend/internal/telemetrymeta"
 	"github.com/aoagents/agent-orchestrator/backend/internal/terminal"
 )
 
 // ControlDeps carries the daemon-control hooks the router exposes, such as the
 // callback that requests a graceful shutdown.
 type ControlDeps struct {
-	RequestShutdown func()
+	RequestShutdown   func()
+	AgentSwitchPolicy AgentSwitchPolicyControl
+}
+
+// AgentSwitchPolicyControl coordinates the daemon side of desktop telemetry
+// policy changes without exposing the concrete policy coordinator to HTTP.
+type AgentSwitchPolicyControl interface {
+	PrepareDisable(context.Context) (ports.AgentSwitchFailurePolicyAcknowledgement, error)
+	ApplyPolicy(context.Context, string, bool) (ports.AgentSwitchFailurePolicyAcknowledgement, error)
 }
 
 // NewRouterWithControl builds the root router with the standard middleware
@@ -36,7 +49,6 @@ type ControlDeps struct {
 //	RequestID     → attach a request id for correlation
 //	requestLogger → slog-backed access log + 5xx telemetry, carries the request id
 //	recoverer     → turn a handler panic into 500 instead of crashing the daemon
-//	hostGuard     → reject Hosts this daemon does not answer to (DNS rebinding)
 //	accountOrigin → exact renderer-origin boundary for Codex account management
 //	cors          → CORS allowlist for the Electron renderer / dev origins
 //
@@ -51,7 +63,6 @@ func NewRouterWithControl(cfg config.Config, log *slog.Logger, termMgr *terminal
 	r.Use(middleware.RequestID)
 	r.Use(requestLogger(log, deps.Telemetry))
 	r.Use(recoverTelemetry(log, deps.Telemetry))
-	r.Use(hostGuard(cfg.AllowedOrigins))
 	// Account-management routes do not inherit the general localhost preview
 	// exception. This guard must wrap corsMiddleware so hostile preflights are
 	// rejected before the general CORS layer can answer them.
@@ -59,22 +70,81 @@ func NewRouterWithControl(cfg config.Config, log *slog.Logger, termMgr *terminal
 	r.Use(corsMiddleware(cfg.AllowedOrigins))
 	r.Use(previewOriginMiddleware(api.sessions))
 
-	// Last-resort route: the embedded browser UI, falling through to the JSON
-	// 404 for anything the daemon owns. chi's defaults are text/plain, which
-	// would break consumers that parse every response as the locked APIError
-	// shape, so webui.Handler delegates every non-UI path to notFoundJSON.
-	r.NotFound(webui.Handler(http.HandlerFunc(notFoundJSON)).ServeHTTP)
+	// JSON envelopes for unmatched routes / methods — chi's defaults are
+	// text/plain, which would break consumers that parse every response as
+	// the locked APIError shape.
+	r.NotFound(notFoundJSON)
 	r.MethodNotAllowed(methodNotAllowedJSON)
 
 	mountHealth(r, cfg)
 	mountTerminalMux(r, termMgr, log)
-	mountBrowserRuntimeBridge(r, deps.BrowserRuntime, log)
 	mountControl(r, control)
+	mountAgentSwitchPolicyControl(r, control.AgentSwitchPolicy)
+	mountTelemetry(r, cfg, deps.Telemetry)
 	mountMobile(r, deps.Mobile)
+	mountAwake(r, &controllers.AwakeController{Svc: deps.Awake})
 	mountMobileDevices(r, &controllers.MobileDevicesController{Registry: deps.DeviceRoster, Presence: deps.DeviceLive})
 	api.Register(r)
 
 	return r
+}
+
+type applyAgentSwitchPolicyRequest struct {
+	ConsentGeneration string `json:"consentGeneration"`
+	EventsEnabled     bool   `json:"eventsEnabled"`
+}
+
+func mountAgentSwitchPolicyControl(r chi.Router, policy AgentSwitchPolicyControl) {
+	if policy == nil {
+		return
+	}
+	writeAck := func(w http.ResponseWriter, acknowledgement ports.AgentSwitchFailurePolicyAcknowledgement) {
+		envelope.WriteJSON(w, http.StatusOK, map[string]any{
+			"status": "applied", "consentGeneration": acknowledgement.Authorization.ConsentGeneration,
+			"eventsEnabled": acknowledgement.Authorization.Enabled, "gateDrained": acknowledgement.GateDrained,
+			"purgeConfirmed": acknowledgement.PurgeConfirmed,
+		})
+	}
+	r.Post("/internal/agent-switch-observability/prepare-disable", func(w http.ResponseWriter, req *http.Request) {
+		if !localControlRequest(req) {
+			envelope.WriteJSON(w, http.StatusForbidden, map[string]any{"status": "forbidden"})
+			return
+		}
+		acknowledgement, err := policy.PrepareDisable(req.Context())
+		if err != nil {
+			envelope.WriteJSON(w, http.StatusInternalServerError, map[string]any{"status": "failed"})
+			return
+		}
+		writeAck(w, acknowledgement)
+	})
+	r.Post("/internal/agent-switch-observability/apply-policy", func(w http.ResponseWriter, req *http.Request) {
+		if !localControlRequest(req) {
+			envelope.WriteJSON(w, http.StatusForbidden, map[string]any{"status": "forbidden"})
+			return
+		}
+		decoder := json.NewDecoder(http.MaxBytesReader(w, req.Body, 4096))
+		decoder.DisallowUnknownFields()
+		var body applyAgentSwitchPolicyRequest
+		if err := decoder.Decode(&body); err != nil || body.ConsentGeneration == "" {
+			envelope.WriteJSON(w, http.StatusBadRequest, map[string]any{"status": "invalid_request"})
+			return
+		}
+		acknowledgement, err := policy.ApplyPolicy(req.Context(), body.ConsentGeneration, body.EventsEnabled)
+		if err != nil {
+			status := http.StatusInternalServerError
+			result := "failed"
+			if errors.Is(err, agentswitchobs.ErrPolicyHintMismatch) {
+				status = http.StatusConflict
+				result = "authority_mismatch"
+			} else if errors.Is(err, agentswitchobs.ErrPolicyCleanupPending) {
+				status = http.StatusConflict
+				result = "cleanup_pending"
+			}
+			envelope.WriteJSON(w, status, map[string]any{"status": result})
+			return
+		}
+		writeAck(w, acknowledgement)
+	})
 }
 
 func previewOriginMiddleware(sessions *controllers.SessionsController) func(http.Handler) http.Handler {
@@ -178,6 +248,135 @@ func mountMobileDevices(r chi.Router, c *controllers.MobileDevicesController) {
 	r.Delete("/api/v1/mobile/devices/{installId}", c.Remove)
 }
 
+type cliInvokedRequest struct {
+	Command     string `json:"command"`
+	CommandPath string `json:"commandPath"`
+	ActorType   string `json:"actorType"`
+}
+
+type cliUsageErrorRequest struct {
+	Command     string `json:"command"`
+	CommandPath string `json:"commandPath"`
+	Error       string `json:"error"`
+}
+
+func mountTelemetry(r chi.Router, cfg config.Config, sink ports.EventSink) {
+	if sink == nil {
+		return
+	}
+	// CLI telemetry is capped to bounded uniques: ao.app.active once per UTC day
+	// for user-context CLI activity (matching the renderer
+	// heartbeat) and ao.cli.invoked once per actor type + command path per UTC
+	// day. Scripts and agent sessions invoke read-only commands (status, ls,
+	// get) in polling loops, so raw invocation counts measure automation, not
+	// usage; bounded uniques keep the "which commands, how many users" signal
+	// without the firehose. The reservation state is persisted under DataDir so
+	// daemon restarts cannot turn polling loops back into raw event volume.
+	cliTelemetry := newCLITelemetryReservoir(cfg.DataDir)
+	r.Post("/internal/telemetry/cli-invoked", func(w http.ResponseWriter, req *http.Request) {
+		if !localControlRequest(req) {
+			envelope.WriteJSON(w, http.StatusForbidden, map[string]any{
+				"status":  "forbidden",
+				"service": daemonmeta.ServiceName,
+			})
+			return
+		}
+
+		var body cliInvokedRequest
+		dec := json.NewDecoder(req.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&body); err != nil {
+			envelope.WriteAPIError(w, req, http.StatusBadRequest, "bad_request", "INVALID_JSON", "request body must be valid JSON", nil)
+			return
+		}
+		if body.CommandPath == "" {
+			envelope.WriteAPIError(w, req, http.StatusBadRequest, "bad_request", "COMMAND_PATH_REQUIRED", "commandPath is required", nil)
+			return
+		}
+		commandPath := telemetrymeta.NormalizeCommandPath(body.CommandPath)
+		actorType := telemetrymeta.CLIActorType(body.ActorType, commandPath)
+		if actorType == "system" {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		if telemetrymeta.IsRoutineInternalCLICommand(commandPath) {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+
+		if now := time.Now(); cliTelemetry.reserveInvoked(now, actorType, commandPath) {
+			sink.Emit(req.Context(), ports.TelemetryEvent{
+				Name:       "ao.cli.invoked",
+				Source:     "cli",
+				OccurredAt: now.UTC(),
+				Level:      ports.TelemetryLevelInfo,
+				RequestID:  middleware.GetReqID(req.Context()),
+				Payload: map[string]any{
+					"command":      body.Command,
+					"command_path": commandPath,
+					"actor_type":   actorType,
+				},
+			})
+		}
+		if actorType == "user" {
+			if now := time.Now(); cliTelemetry.reserveActive(now) {
+				sink.Emit(req.Context(), ports.TelemetryEvent{
+					Name:       "ao.app.active",
+					Source:     "cli",
+					OccurredAt: now.UTC(),
+					Level:      ports.TelemetryLevelInfo,
+					RequestID:  middleware.GetReqID(req.Context()),
+					Payload: map[string]any{
+						"channel":      "cli",
+						"command":      body.Command,
+						"command_path": commandPath,
+						"actor_type":   actorType,
+					},
+				})
+			}
+		}
+		w.WriteHeader(http.StatusAccepted)
+	})
+	r.Post("/internal/telemetry/cli-usage-error", func(w http.ResponseWriter, req *http.Request) {
+		if !localControlRequest(req) {
+			envelope.WriteJSON(w, http.StatusForbidden, map[string]any{
+				"status":  "forbidden",
+				"service": daemonmeta.ServiceName,
+			})
+			return
+		}
+
+		var body cliUsageErrorRequest
+		dec := json.NewDecoder(req.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&body); err != nil {
+			envelope.WriteAPIError(w, req, http.StatusBadRequest, "bad_request", "INVALID_JSON", "request body must be valid JSON", nil)
+			return
+		}
+		if body.CommandPath == "" {
+			envelope.WriteAPIError(w, req, http.StatusBadRequest, "bad_request", "COMMAND_PATH_REQUIRED", "commandPath is required", nil)
+			return
+		}
+
+		sink.Emit(req.Context(), ports.TelemetryEvent{
+			Name:       "ao.cli.usage_errors",
+			Source:     "cli",
+			OccurredAt: time.Now().UTC(),
+			Level:      ports.TelemetryLevelWarn,
+			RequestID:  middleware.GetReqID(req.Context()),
+			Payload: map[string]any{
+				"component":    "cli",
+				"operation":    "command_parse",
+				"command":      body.Command,
+				"command_path": body.CommandPath,
+				"error_kind":   "usage",
+				"fingerprint":  telemetrymeta.Fingerprint("cli", "command_parse", body.CommandPath, "usage"),
+			},
+		})
+		w.WriteHeader(http.StatusAccepted)
+	})
+}
+
 // localControlRequest reports whether a control request is a trusted local
 // caller. The Go CLI client addresses the daemon by its loopback host and
 // never sets an Origin header; a cross-site browser fetch always carries an
@@ -220,16 +419,9 @@ func daemonProbePayload(status string, cfg config.Config) map[string]any {
 	// Two shapes, deliberately. `buildIdentity` is the original flat field and is
 	// omitted when unknown, which existing clients already guard for
 	// (frontend/src/main.ts compares only when both sides are non-empty). `build`
-	// is the form a *remote* client needs: it carries `source`, so "this daemon
-	// does not know its build" is distinguishable from a real answer. Comparing
-	// two daemons that both report source "unknown" tells you nothing, and
-	// without that field it reads as a match.
-	//
-	// This is the only version signal on the wire. It is reachable on the LAN
-	// listener only WITH the connection password (/healthz and /readyz are in
-	// webui.daemonPrefixes, so they are never served as UI) — deliberately, since
-	// an unauthenticated data-returning route on that socket would break the
-	// hostGuard LAN exemption (see AGENTS.md hard rules).
+	// carries `source`, so "this daemon does not know its build" is
+	// distinguishable from a real answer: two daemons that both report source
+	// "unknown" must not read as a match.
 	build := daemonmeta.CurrentBuild()
 	payload["build"] = build
 	if build.Identity != "" {
@@ -249,4 +441,22 @@ func daemonProbePayload(status string, cfg config.Config) map[string]any {
 		payload["appImagePath"] = appImage
 	}
 	return payload
+}
+
+// Wake policy can alter host power and remains desktop/loopback-only.
+func mountAwake(r chi.Router, c *controllers.AwakeController) {
+	r.Get("/api/v1/awake", c.Status)
+	r.Get("/api/v1/awake/observations", c.Observe)
+	r.Post("/api/v1/awake/sessions", c.Start)
+	r.Post("/api/v1/awake/sessions/{awakeId}/end", c.End)
+	r.Post("/api/v1/awake/sessions/{awakeId}/extend", c.Extend)
+	r.Put("/api/v1/awake/settings", c.Settings)
+	r.Put("/api/v1/awake/rules", c.Rules)
+	r.Post("/api/v1/awake/low-power/authorize", c.AuthorizeLowPower)
+	r.Post("/api/v1/awake/low-power/revoke", c.RevokeLowPower)
+	r.Post("/api/v1/awake/stop", c.Stop)
+	r.Post("/api/v1/awake/resume", c.Resume)
+	r.Post("/api/v1/awake/recover", c.Recover)
+	r.Delete("/api/v1/awake/history", c.ClearHistory)
+	r.Post("/api/v1/awake/downloads", c.Downloads)
 }

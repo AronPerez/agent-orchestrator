@@ -115,6 +115,22 @@ describe("useDaemonStatus", () => {
 		expect(setApiBaseUrlMock).toHaveBeenCalledWith("http://127.0.0.1:4555");
 	});
 
+	it("keeps the same status object when a refresh reports no change", async () => {
+		getStatusMock.mockResolvedValue({ state: "ready", port: 4555, pid: 101 });
+		const queryClient = fakeQueryClient();
+		const { result } = renderHook(() => useDaemonStatus(queryClient));
+		await waitFor(() => expect(result.current).toEqual({ state: "ready", port: 4555, pid: 101 }));
+		const first = result.current;
+		const pushStatus = onStatusMock.mock.calls[0][0] as (status: DaemonStatus) => void;
+
+		act(() => pushStatus({ state: "ready", port: 4555, pid: 101 }));
+		expect(result.current).toBe(first);
+
+		act(() => pushStatus({ state: "ready", port: 4555, pid: 101, message: "changed" }));
+		expect(result.current).not.toBe(first);
+		expect(result.current.message).toBe("changed");
+	});
+
 	it("clears readiness when the daemon identity changes or becomes unavailable", async () => {
 		getStatusMock.mockResolvedValue({ state: "ready", port: 4555, pid: 101 });
 		const queryClient = fakeQueryClient();
@@ -129,7 +145,14 @@ describe("useDaemonStatus", () => {
 			queryKey: ["agent-readiness"],
 			exact: true,
 		});
-		expect(queryClient.removeQueries).toHaveBeenCalledTimes(3);
+		expect(queryClient.removeQueries).toHaveBeenCalledWith({
+			queryKey: ["codex-accounts"],
+			exact: true,
+		});
+		expect(queryClient.removeQueries).toHaveBeenCalledWith({
+			queryKey: ["system-requirements"],
+		});
+		expect(queryClient.removeQueries).toHaveBeenCalledTimes(9);
 	});
 
 	it("ensures display readiness when the window regains focus", async () => {

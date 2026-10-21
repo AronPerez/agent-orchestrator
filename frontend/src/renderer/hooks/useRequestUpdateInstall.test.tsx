@@ -1,125 +1,152 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { RestartToUpdateDialog } from "../components/RestartToUpdateDialog";
-import {
-	cancelUpdateInstall, confirmUpdateInstall, requestUpdateInstall, useUpdateInstallStore,
-} from "./useRequestUpdateInstall";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act, render } from "@testing-library/react";
+import type { ReactNode } from "react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { useRequestUpdateInstall } from "./useRequestUpdateInstall";
+import { workspaceQueryOptions } from "./useWorkspaceQuery";
 
-const { get, install, clientFor, baseUrlFor } = vi.hoisted(() => ({
-	get: vi.fn(), install: vi.fn(), clientFor: vi.fn(), baseUrlFor: vi.fn(),
-}));
-vi.mock("../lib/host-clients", () => ({ clientFor, baseUrlFor }));
+const { install, openPrompt, fetchWorkspaces } = vi.hoisted(() => ({ install: vi.fn(), openPrompt: vi.fn(), fetchWorkspaces: vi.fn() }));
+
 vi.mock("../lib/bridge", () => ({ aoBridge: { updates: { install } } }));
+vi.mock("../stores/ui-store", () => ({
+	useUiStore: (select: (state: { openUpdateInstallPrompt: () => void }) => unknown) =>
+		select({ openUpdateInstallPrompt: openPrompt }),
+}));
 
-const active = { id: "same-id", mode: "chat", chatProviderPreserved: false, isTerminated: false, activity: { state: "active" } };
-const response = (sessions: unknown[] = []) => ({ data: { sessions } });
-const phase = () => useUpdateInstallStore.getState().phase;
+vi.mock("./useWorkspaceQuery", () => ({ workspaceQueryOptions: { queryKey: ["workspaces"], queryFn: fetchWorkspaces, staleTime: 10_000 } }));
+
+// Which sessions count as at-risk is update-install-risk.test.ts's job (6 cases
+// there). These only need one of each shape to drive the branch below: a chat
+// session mid-turn on a daemon-owned driver is at risk, a TUI session is not.
+const session = (mode: "chat" | "tui") => ({
+	id: mode,
+	title: "Session",
+	workspaceName: "repo",
+	provider: "claude-code",
+	mode,
+	status: "working",
+});
+
+function renderTrigger(seed?: unknown, configure?: (client: QueryClient) => void) {
+	const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+	if (seed !== undefined) { client.setQueryData(workspaceQueryOptions.queryKey, seed); fetchWorkspaces.mockResolvedValue(seed); }
+	configure?.(client);
+	let trigger: () => void = () => undefined;
+	function Probe() {
+		trigger = useRequestUpdateInstall();
+		return null;
+	}
+	const wrapper = ({ children }: { children: ReactNode }) => (
+		<QueryClientProvider client={client}>{children}</QueryClientProvider>
+	);
+	render(<Probe />, { wrapper });
+	return async () => { await act(async () => { trigger(); await Promise.resolve(); }); };
+}
 
 beforeEach(() => {
-	vi.resetAllMocks();
-	clientFor.mockReturnValue({ GET: get });
-	baseUrlFor.mockReturnValue("http://localhost:3001");
-	get.mockResolvedValue(response([active]));
-	install.mockResolvedValue(undefined);
-	useUpdateInstallStore.setState({ phase: "idle", promptOpen: false, risk: { count: 0, unknown: true }, failed: false });
+	install.mockReset();
+	openPrompt.mockReset();
+	fetchWorkspaces.mockReset().mockRejectedValue(new Error("daemon unavailable"));
 });
-afterEach(() => { cleanup(); vi.useRealTimers(); });
 
-describe("shared restart-to-update guard", () => {
-	it("warns for active local Chat; Cancel and Escape never call install", async () => {
-		render(<RestartToUpdateDialog />);
-		act(requestUpdateInstall);
-		expect(await screen.findByText("1 local Chat session may lose its current turn")).toBeInTheDocument();
-		expect(screen.getByText(/Remote sessions are not affected/)).toBeInTheDocument();
-		fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-		expect(phase()).toBe("idle");
-		act(requestUpdateInstall);
-		await screen.findByRole("dialog");
-		fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
-		expect(phase()).toBe("idle");
-		expect(install).not.toHaveBeenCalled();
-	});
-
-	it.each([[], [{ ...active, chatProviderPreserved: true }], [{ ...active, mode: "tui" }]].map((sessions) => ({ sessions })))("installs a safe snapshot without prompting: %j", async ({ sessions }) => {
-		get.mockResolvedValue(response(sessions));
-		requestUpdateInstall();
-		await waitFor(() => expect(install).toHaveBeenCalledTimes(1));
-		expect(useUpdateInstallStore.getState().promptOpen).toBe(false);
-	});
-
-	it("fetches a new local-only snapshot on every request and on confirmation, never reuses cached safe data", async () => {
-		get.mockResolvedValueOnce(response());
-		requestUpdateInstall();
-		await waitFor(() => expect(phase()).toBe("idle"));
-		requestUpdateInstall();
-		await waitFor(() => expect(phase()).toBe("confirm"));
+describe("useRequestUpdateInstall", () => {
+	it("installs directly when nothing would lose a turn", async () => {
+		// The confirmation existed to warn about lost work. With nothing to warn
+		// about it is a modal on top of the Settings modal saying nothing, and the
+		// build installs on the next quit anyway.
+		await renderTrigger([{ sessions: [session("tui")] }])();
 		expect(install).toHaveBeenCalledTimes(1);
-		confirmUpdateInstall();
-		await waitFor(() => expect(install).toHaveBeenCalledTimes(2));
-		expect(get).toHaveBeenCalledTimes(3);
-		for (const [host] of clientFor.mock.calls) expect(host).toBe("local");
-		expect(get).toHaveBeenCalledWith("/api/v1/sessions", expect.objectContaining({
-			params: { query: { active: true } }, cache: "no-store", signal: expect.any(AbortSignal),
-		}));
+		expect(openPrompt).not.toHaveBeenCalled();
 	});
 
-	it("coalesces clicks across entry points while checking, prompting, and installing", async () => {
-		let finish!: () => void;
-		install.mockReturnValue(new Promise<void>((resolve) => { finish = resolve; }));
-		requestUpdateInstall(); requestUpdateInstall();
-		await waitFor(() => expect(phase()).toBe("confirm"));
-		requestUpdateInstall();
-		expect(get).toHaveBeenCalledTimes(1);
-		confirmUpdateInstall(); confirmUpdateInstall(); requestUpdateInstall();
-		await waitFor(() => expect(install).toHaveBeenCalledTimes(1));
-		confirmUpdateInstall(); requestUpdateInstall(); cancelUpdateInstall();
-		expect(phase()).toBe("installing");
-		finish();
-		await waitFor(() => expect(phase()).toBe("idle"));
-	});
-
-	it.each(["network", "api", "malformed", "disconnect"])("requires confirmation after %s failure", async (failure) => {
-		if (failure === "network") get.mockRejectedValue(new Error("offline"));
-		if (failure === "api") get.mockResolvedValue({ error: { message: "failed" } });
-		if (failure === "malformed") get.mockResolvedValue({ data: {} });
-		if (failure === "disconnect") clientFor.mockImplementation(() => { throw new Error("disconnected"); });
-		requestUpdateInstall();
-		await waitFor(() => expect(phase()).toBe("confirm"));
-		expect(useUpdateInstallStore.getState().risk.unknown).toBe(true);
+	it("confirms when a session would lose an in-flight turn", async () => {
+		await renderTrigger([{ sessions: [session("tui"), session("chat")] }])();
+		expect(openPrompt).toHaveBeenCalledTimes(1);
 		expect(install).not.toHaveBeenCalled();
 	});
 
-	it("rejects an old daemon response after its base changes", async () => {
-		baseUrlFor.mockReturnValueOnce("http://localhost:3001").mockReturnValue("http://localhost:3002");
-		get.mockResolvedValue(response());
-		requestUpdateInstall();
-		await waitFor(() => expect(phase()).toBe("confirm"));
+	it("confirms when the workspace list has not resolved", async () => {
+		// Unknown is not the same as safe: AO cannot rule out a live turn, so it
+		// asks rather than quitting out from under one.
+		await renderTrigger()();
+		expect(openPrompt).toHaveBeenCalledTimes(1);
 		expect(install).not.toHaveBeenCalled();
 	});
+});
 
-	it("bounds a hanging snapshot, aborts it, and ignores its late safe response", async () => {
-		vi.useFakeTimers();
-		let finish!: (value: ReturnType<typeof response>) => void;
-		get.mockReturnValue(new Promise((resolve) => { finish = resolve; }));
-		requestUpdateInstall();
-		await vi.advanceTimersByTimeAsync(5_000);
-		expect(phase()).toBe("confirm");
-		expect(get.mock.calls[0][1].signal.aborted).toBe(true);
-		cancelUpdateInstall();
-		finish(response());
-		await vi.advanceTimersByTimeAsync(0);
-		expect(phase()).toBe("idle");
+describe("restart safety with uncertain workspace data", () => {
+	it("confirms for a chat turn waiting for approval", async () => {
+		await renderTrigger([{ sessions: [{ ...session("chat"), status: "needs_input" }] }])();
+		expect(openPrompt).toHaveBeenCalledTimes(1);
 		expect(install).not.toHaveBeenCalled();
 	});
-
-	it("surfaces install rejection, permits cancellation and a later retry", async () => {
-		get.mockResolvedValue(response());
-		install.mockRejectedValueOnce(new Error("IPC failed"));
-		render(<RestartToUpdateDialog />);
-		act(requestUpdateInstall);
-		expect(await screen.findByRole("alert")).toHaveTextContent("AO could not prepare the update");
-		fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-		act(requestUpdateInstall);
-		await waitFor(() => expect(install).toHaveBeenCalledTimes(2));
+	it("refreshes a stale safe snapshot before installing", async () => {
+		await renderTrigger([], (client) => {
+			client.setQueryData(workspaceQueryOptions.queryKey, [], { updatedAt: Date.now() - 60_000 });
+		})();
+		expect(openPrompt).not.toHaveBeenCalled();
+		expect(install).toHaveBeenCalledTimes(1);
+		expect(fetchWorkspaces).toHaveBeenCalledTimes(1);
 	});
+	it("refreshes invalidated safe data before installing", async () => {
+		await renderTrigger([], (client) => {
+			void client.invalidateQueries({ queryKey: workspaceQueryOptions.queryKey, refetchType: "none" });
+		})();
+		expect(openPrompt).not.toHaveBeenCalled();
+		expect(install).toHaveBeenCalledTimes(1);
+		expect(fetchWorkspaces).toHaveBeenCalledTimes(1);
+	});
+	it("waits for a pending fresh snapshot", async () => {
+		let resolve!: (value: never[]) => void;
+		let pending!: Promise<never[]>;
+		const trigger = renderTrigger([], (client) => {
+			pending = client.fetchQuery({
+				queryKey: workspaceQueryOptions.queryKey,
+				queryFn: () => new Promise<never[]>((done) => { resolve = done; }),
+				staleTime: 0,
+			});
+		});
+		const clicked = trigger();
+		expect(install).not.toHaveBeenCalled();
+		resolve([]);
+		await pending;
+		await clicked;
+		expect(openPrompt).not.toHaveBeenCalled();
+		expect(install).toHaveBeenCalledTimes(1);
+	});
+	it("confirms when a refresh failed but previous data remains", async () => {
+		let client!: QueryClient;
+		const trigger = renderTrigger([], (current) => { client = current; });
+		await client.fetchQuery({
+			queryKey: workspaceQueryOptions.queryKey,
+			queryFn: async () => { throw new Error("daemon unavailable"); },
+			staleTime: 0,
+		}).catch(() => undefined);
+		fetchWorkspaces.mockRejectedValue(new Error("still unavailable"));
+		await trigger();
+		expect(openPrompt).toHaveBeenCalledTimes(1);
+		expect(install).not.toHaveBeenCalled();
+	});
+	it("installs directly with a fresh empty snapshot", async () => {
+		await renderTrigger([])();
+		expect(install).toHaveBeenCalledTimes(1);
+		expect(openPrompt).not.toHaveBeenCalled();
+	});
+});
+
+it("refreshes even a fresh safe cache and warns about newly working chat", async () => {
+	const trigger = renderTrigger([]);
+	fetchWorkspaces.mockResolvedValue([{ sessions: [session("chat")] }]);
+	await trigger();
+	expect(fetchWorkspaces).toHaveBeenCalledTimes(1);
+	expect(openPrompt).toHaveBeenCalledTimes(1);
+	expect(install).not.toHaveBeenCalled();
+});
+
+it("installs when a previously risky worker has finished", async () => {
+	const trigger = renderTrigger([{ sessions: [session("chat")] }]);
+	fetchWorkspaces.mockResolvedValue([]);
+	await trigger();
+	expect(install).toHaveBeenCalledTimes(1);
+	expect(openPrompt).not.toHaveBeenCalled();
 });

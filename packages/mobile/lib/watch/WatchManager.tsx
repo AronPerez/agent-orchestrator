@@ -18,7 +18,11 @@ export function WatchManager() {
 		if (!bridge || !configResolved) return;
 		const publish = () => {
 			if (AppState.currentState !== "active" || !current.current.configResolved) return;
-			const snapshot = buildWatchSnapshot({ ...current.current, poll: current.current.getSessionPoll() }, Date.now(), previous.current);
+			const app = current.current;
+			// The primary host's memoized rows need not change on a successful poll.
+			const hosts = app.hostStates.map((host) => host.hostId === app.currentHostId
+				? { ...host, lastSyncAt: app.getLastSyncAt() } : host);
+			const snapshot = buildWatchSnapshot(hosts, Date.now(), previous.current);
 			previous.current = snapshot;
 			void bridge.publishSnapshot(JSON.stringify(snapshot)).catch(() => { /* Watch retains its timestamped cache. */ });
 		};
@@ -31,7 +35,7 @@ export function WatchManager() {
 		const bridge = watchBridge;
 		if (!bridge?.setReady) return;
 		const handle = createWatchActionHandler({
-			configForHost: (hostId) => watchConfigForHost({ ...current.current, poll: current.current.getSessionPoll() }, hostId),
+			configForHost: (hostId) => watchConfigForHost(current.current.hostStates, current.current.configForHost(hostId), hostId),
 			read: getConversationPage, approve: resolveApproval, input: resolveInput, message: sendConversationMessage,
 			isActive: (id) => bridge.isRequestActive(id), now: Date.now, newId: randomUUID,
 		});
@@ -41,7 +45,7 @@ export function WatchManager() {
 				try { payload = JSON.parse(event.payload); } catch { payload = null; }
 				const result = await handle(payload, event.id, event.deadline);
 				await bridge.completeRequest(event.id, JSON.stringify(result));
-				if (result.status === "sent" || result.status === "already_handled") void current.current.refresh();
+				if (result.status === "sent" || result.status === "already_handled") void current.current.refreshAll();
 			})().catch(() => { /* Native deadline reports uncertainty; never replay an action. */ });
 		});
 		const ready = () => { void bridge.setReady(AppState.currentState === "active").catch(() => {}); };

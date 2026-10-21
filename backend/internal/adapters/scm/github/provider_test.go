@@ -1061,62 +1061,6 @@ func TestObserve_TokenInjectedAsBearer(t *testing.T) {
 	}
 }
 
-func TestClosePullRequest_UsesGitHubRESTPatchEndpoint(t *testing.T) {
-	f := newFakeGH(t)
-	f.on(http.MethodPatch, "/repos/octocat/hello/pulls/42", func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("Authorization"); got != "Bearer tkn-test" {
-			t.Fatalf("Authorization = %q, want Bearer token", got)
-		}
-		var body struct {
-			State string `json:"state"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatalf("decode body: %v", err)
-		}
-		if body.State != "closed" {
-			t.Fatalf("state = %q, want closed", body.State)
-		}
-		w.WriteHeader(http.StatusOK)
-	})
-	p := newProviderForTest(t, f)
-
-	ref := ports.SCMPRRef{Repo: ports.SCMRepo{Owner: "octocat", Name: "hello"}, Number: 42}
-	if err := p.ClosePullRequest(ctx(), ref); err != nil {
-		t.Fatalf("ClosePullRequest: %v", err)
-	}
-	if got := f.callsTo(http.MethodPatch, "/repos/octocat/hello/pulls/42"); got != 1 {
-		t.Fatalf("close endpoint calls = %d, want 1", got)
-	}
-}
-
-func TestClosePullRequest_StatusErrorsMapToSCMSentinels(t *testing.T) {
-	tests := []struct {
-		name   string
-		status int
-		want   error
-	}{
-		{name: "not found", status: http.StatusNotFound, want: ports.ErrSCMNotFound},
-		{name: "method not allowed", status: http.StatusMethodNotAllowed, want: ports.ErrSCMNotMergeable},
-		{name: "preconditions", status: http.StatusUnprocessableEntity, want: ports.ErrSCMNotMergeable},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			f := newFakeGH(t)
-			f.on(http.MethodPatch, "/repos/octocat/hello/pulls/42", func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(tt.status)
-				_, _ = w.Write([]byte(`{"message":"nope"}`))
-			})
-			p := newProviderForTest(t, f)
-
-			ref := ports.SCMPRRef{Repo: ports.SCMRepo{Owner: "octocat", Name: "hello"}, Number: 42}
-			err := p.ClosePullRequest(ctx(), ref)
-			if !errors.Is(err, tt.want) {
-				t.Fatalf("err = %v, want %v", err, tt.want)
-			}
-		})
-	}
-}
-
 func TestStaticTokenSourceRejectsBlank(t *testing.T) {
 	if _, err := StaticTokenSource("").Token(context.Background()); !errors.Is(err, ErrNoToken) {
 		t.Fatalf("err = %v, want ErrNoToken", err)

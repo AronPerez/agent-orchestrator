@@ -1,45 +1,33 @@
 import { QueryClient } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { NotificationDTO, NotificationsCache } from "./notifications";
+import { computeSseRetryDelayMs } from "./sse-backoff";
+import type { NotificationDTO, NotificationsCache, NotificationsPage } from "./notifications";
 
 const {
+	apiDeleteMock,
 	apiGetMock,
-	apiPostMock,
-	baseUrlForMock,
-	clientForMock,
-	connectedHostsMock,
+	getApiBaseUrlMock,
 	onStatusMock,
 	removeStatusMock,
 	showNotificationMock,
 	subscribeApiBaseUrlMock,
-	subscribeConnectedHostsMock,
 	unsubscribeBaseUrlMock,
-	unsubscribeConnectedHostsMock,
 } = vi.hoisted(() => ({
+	apiDeleteMock: vi.fn(),
 	apiGetMock: vi.fn(),
-	apiPostMock: vi.fn(),
-	baseUrlForMock: vi.fn(),
-	clientForMock: vi.fn(),
-	connectedHostsMock: vi.fn(),
+	getApiBaseUrlMock: vi.fn(() => "http://127.0.0.1:3001"),
 	onStatusMock: vi.fn(),
 	removeStatusMock: vi.fn(),
 	showNotificationMock: vi.fn(),
 	subscribeApiBaseUrlMock: vi.fn(),
-	subscribeConnectedHostsMock: vi.fn(),
 	unsubscribeBaseUrlMock: vi.fn(),
-	unsubscribeConnectedHostsMock: vi.fn(),
 }));
 
 vi.mock("./api-client", () => ({
+	apiClient: { DELETE: apiDeleteMock, GET: apiGetMock },
 	apiErrorMessage: () => "Request failed",
+	getApiBaseUrl: getApiBaseUrlMock,
 	subscribeApiBaseUrl: subscribeApiBaseUrlMock,
-}));
-
-vi.mock("./host-clients", () => ({
-	baseUrlFor: baseUrlForMock,
-	clientFor: clientForMock,
-	connectedHosts: connectedHostsMock,
-	subscribeConnectedHosts: subscribeConnectedHostsMock,
 }));
 
 vi.mock("./bridge", () => ({
@@ -50,22 +38,26 @@ vi.mock("./bridge", () => ({
 }));
 
 import {
+	applyNotificationsCleared,
+	applyNotificationDeleted,
+	applyOptimisticNotificationDelete,
 	applyResolvedNotification,
+	clearAllNotifications,
 	createNotificationsTransport,
+	deleteNotification,
 	fetchNotificationsPage,
 	getCachedNotifications,
 	getCachedUnreadCount,
+	isNotificationsCacheFromClear,
 	keepLatestNotificationsPage,
 	markAllCachedNotificationsRead,
-	markAllNotificationsRead,
 	mergeUnreadNotification,
 	NOTIFICATION_PAGE_SIZE,
 	recentNotificationsQueryKey,
+	reconcileNotifications,
+	rollbackOptimisticNotificationDelete,
 	unreadNotificationsQueryKey,
 } from "./notifications";
-import { LOCAL_HOST, refKey, type HostId } from "./hosts";
-
-const REMOTE = "http://192.0.2.1:3011";
 
 class EventSourceStub {
 	static instances: EventSourceStub[] = [];
@@ -98,7 +90,6 @@ class EventSourceStub {
 function notification(overrides: Partial<NotificationDTO> = {}): NotificationDTO {
 	return {
 		id: "ntf_1",
-		host: LOCAL_HOST,
 		sessionId: "mer-1",
 		projectId: "mer",
 		prUrl: "",
@@ -124,27 +115,17 @@ function setWindowState({ focused, visible }: { focused: boolean; visible: boole
 }
 
 beforeEach(() => {
+	apiDeleteMock.mockReset();
 	apiGetMock.mockReset();
-	apiPostMock.mockReset();
 	EventSourceStub.instances = [];
-	baseUrlForMock.mockReset().mockImplementation((host: HostId) =>
-		host === LOCAL_HOST ? "http://127.0.0.1:3001" : "http://127.0.0.1:9999/tok",
-	);
-	clientForMock.mockReset().mockImplementation(() => ({ GET: apiGetMock, POST: apiPostMock }));
-	connectedHostsMock.mockReset().mockReturnValue([]);
+	getApiBaseUrlMock.mockReset().mockReturnValue("http://127.0.0.1:3001");
 	onStatusMock.mockReset().mockReturnValue(removeStatusMock);
 	removeStatusMock.mockReset();
 	showNotificationMock.mockReset().mockResolvedValue(undefined);
 	subscribeApiBaseUrlMock.mockReset().mockReturnValue(unsubscribeBaseUrlMock);
-	subscribeConnectedHostsMock.mockReset().mockReturnValue(unsubscribeConnectedHostsMock);
 	unsubscribeBaseUrlMock.mockReset();
-	unsubscribeConnectedHostsMock.mockReset();
 	(globalThis as unknown as { EventSource: unknown }).EventSource = EventSourceStub;
 });
-
-function key(id: string, host = LOCAL_HOST): string {
-	return refKey({ host, id });
-}
 
 afterEach(() => {
 	delete (globalThis as unknown as { EventSource?: unknown }).EventSource;
@@ -152,31 +133,59 @@ afterEach(() => {
 });
 
 describe("notification cache helpers", () => {
+	it("calls the clear-all endpoint", async () => {
+		apiDeleteMock.mockResolvedValue({
+			data: { clearId: "clear-1", clearEpoch: "epoch-1", clearSequence: 1, clearedCount: 2 },
+		});
+
+		await expect(clearAllNotifications()).resolves.toEqual({
+			clearId: "clear-1",
+			clearEpoch: "epoch-1",
+			clearSequence: 1,
+			clearedCount: 2,
+		});
+		expect(apiDeleteMock).toHaveBeenCalledWith("/api/v1/notifications");
+	});
+
+	it("calls the single-notification delete endpoint", async () => {
+		apiDeleteMock.mockResolvedValue({ data: { notification: notification() }, response: { status: 200 } });
+
+		await expect(deleteNotification(notification())).resolves.toEqual(notification());
+		expect(apiDeleteMock).toHaveBeenCalledWith("/api/v1/notifications/{id}", {
+			params: { path: { id: "ntf_1" } },
+		});
+	});
+
+	it("treats an already-cleared notification as a successful delete", async () => {
+		apiDeleteMock.mockResolvedValue({
+			error: { code: "NOTIFICATION_NOT_FOUND", message: "Unknown notification" },
+			response: { status: 404 },
+		});
+
+		await expect(deleteNotification(notification())).resolves.toEqual(notification());
+	});
+
 	it.each([
-		{
-			cursor: JSON.stringify([[LOCAL_HOST, "previous"]]),
-			hostCursor: "previous",
-			nextCursor: "older",
-			status: "all" as const,
-			unreadCount: 4,
-		},
-		{ cursor: "", hostCursor: "", nextCursor: undefined, status: "unread" as const, unreadCount: 1 },
-	])("requests a bounded $status page", async ({ cursor, hostCursor, nextCursor, status, unreadCount }) => {
+		{ cursor: "previous", nextCursor: "older", status: "all" as const, unreadCount: 4 },
+		{ cursor: "", nextCursor: undefined, status: "unread" as const, unreadCount: 1 },
+	])("requests a bounded $status page", async ({ cursor, nextCursor, status, unreadCount }) => {
 		apiGetMock.mockResolvedValue({
 			data: { notifications: [notification()], nextCursor, unreadCount, unresolvedCount: 3 },
 		});
 
-		await expect(fetchNotificationsPage(status, cursor)).resolves.toEqual({
+		const controller = new AbortController();
+		await expect(fetchNotificationsPage(status, cursor, controller.signal)).resolves.toEqual({
 			notifications: [notification()],
-			nextCursor: nextCursor ? JSON.stringify([[LOCAL_HOST, nextCursor]]) : undefined,
+			nextCursor,
 			unreadCount,
 			unresolvedCount: 3,
 		});
 
 		expect(apiGetMock).toHaveBeenCalledWith("/api/v1/notifications", {
+			signal: controller.signal,
 			params: {
 				query: {
-					cursor: hostCursor || undefined,
+					cursor: cursor || undefined,
 					limit: NOTIFICATION_PAGE_SIZE,
 					status,
 				},
@@ -184,95 +193,14 @@ describe("notification cache helpers", () => {
 		});
 	});
 
-	it("fans notification history across hosts and merges counts and cursors", async () => {
-		connectedHostsMock.mockReturnValue([REMOTE]);
-		const localGet = vi.fn().mockResolvedValue({
-			data: {
-				notifications: [notification({ id: "same", createdAt: "2026-06-16T10:00:00Z" })],
-				nextCursor: "local-older",
-				unreadCount: 2,
-				unresolvedCount: 1,
-			},
-		});
-		const remoteGet = vi.fn().mockResolvedValue({
-			data: {
-				notifications: [notification({ id: "same", createdAt: "2026-06-16T11:00:00Z" })],
-				nextCursor: "remote-older",
-				unreadCount: 3,
-				unresolvedCount: 2,
-			},
-		});
-		clientForMock.mockImplementation((host: HostId) => ({
-			GET: host === LOCAL_HOST ? localGet : remoteGet,
-			POST: apiPostMock,
-		}));
-
-		const page = await fetchNotificationsPage("all");
-
-		expect(page.notifications.map(({ host, id }) => ({ host, id }))).toEqual([
-			{ host: REMOTE, id: "same" },
-			{ host: LOCAL_HOST, id: "same" },
-		]);
-		expect(page.unreadCount).toBe(5);
-		expect(page.unresolvedCount).toBe(3);
-		expect(JSON.parse(page.nextCursor ?? "")).toEqual([
-			[LOCAL_HOST, "local-older"],
-			[REMOTE, "remote-older"],
-		]);
-	});
-
-	it("keeps reachable hosts' notification history when another host is down", async () => {
-		connectedHostsMock.mockReturnValue([REMOTE]);
-		clientForMock.mockImplementation((host: HostId) => ({
-			GET:
-				host === LOCAL_HOST
-					? vi.fn().mockResolvedValue({
-							data: { notifications: [notification()], unreadCount: 1, unresolvedCount: 1 },
-						})
-					: vi.fn().mockRejectedValue(new Error("host unavailable")),
-			POST: apiPostMock,
-		}));
-
-		await expect(fetchNotificationsPage("unread")).resolves.toEqual({
-			notifications: [notification()],
-			nextCursor: undefined,
-			unreadCount: 1,
-			unresolvedCount: 1,
-		});
-	});
-
-	it("fans read acknowledgements to the notification's originating host", async () => {
-		connectedHostsMock.mockReturnValue([REMOTE]);
-		const localPost = vi.fn().mockResolvedValue({ data: { updatedCount: 1 } });
-		const remotePost = vi.fn().mockResolvedValue({ data: { updatedCount: 2 } });
-		clientForMock.mockImplementation((host: HostId) => ({
-			GET: apiGetMock,
-			POST: host === LOCAL_HOST ? localPost : remotePost,
-		}));
-
-		await expect(
-			markAllNotificationsRead([key("local-1"), key("remote-1", REMOTE), key("remote-2", REMOTE)]),
-		).resolves.toBe(3);
-		expect(localPost).toHaveBeenCalledWith("/api/v1/notifications/read-all", { body: { ids: ["local-1"] } });
-		expect(remotePost).toHaveBeenCalledWith("/api/v1/notifications/read-all", {
-			body: { ids: ["remote-1", "remote-2"] },
-		});
-	});
-
-	it("merges unread notifications by host-qualified id", () => {
+	it("merges unread notifications by id", () => {
 		const qc = queryClient();
 
 		expect(mergeUnreadNotification(qc, notification())).toBe(true);
 		expect(mergeUnreadNotification(qc, notification())).toBe(false);
-		expect(mergeUnreadNotification(qc, notification({ host: REMOTE }))).toBe(true);
 
-		expect(getCachedNotifications(qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey))).toHaveLength(2);
-		expect(getCachedUnreadCount(qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey))).toBe(2);
-
-		markAllCachedNotificationsRead(qc, [key("ntf_1", REMOTE)]);
-		const cached = getCachedNotifications(qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey));
-		expect(cached.find((item) => item.host === REMOTE)?.status).toBe("read");
-		expect(cached.find((item) => item.host === LOCAL_HOST)?.status).toBe("unread");
+		expect(getCachedNotifications(qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey))).toHaveLength(1);
+		expect(getCachedUnreadCount(qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey))).toBe(1);
 	});
 
 	// Opening the panel acknowledges what it rendered; history keeps the rows.
@@ -284,12 +212,40 @@ describe("notification cache helpers", () => {
 			pages: [{ notifications: [notification()], unreadCount: 1, unresolvedCount: 1 }],
 		});
 
-		markAllCachedNotificationsRead(qc, [key("ntf_1")]);
+		markAllCachedNotificationsRead(qc, ["ntf_1"]);
 
 		expect(getCachedUnreadCount(qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey))).toBe(0);
 		expect(getCachedNotifications(qc.getQueryData<NotificationsCache>(recentNotificationsQueryKey))).toEqual([
 			expect.objectContaining({ id: "ntf_1", status: "read" }),
 		]);
+	});
+
+	it("clears every unread row when acknowledging with no ids", () => {
+		const qc = queryClient();
+		mergeUnreadNotification(qc, notification({ id: "ntf_1" }));
+		mergeUnreadNotification(qc, notification({ id: "ntf_2" }));
+		qc.setQueryData<NotificationsCache>(recentNotificationsQueryKey, {
+			pageParams: [""],
+			pages: [
+				{
+					notifications: [notification({ id: "ntf_1" }), notification({ id: "ntf_2" })],
+					unreadCount: 2,
+					unresolvedCount: 2,
+				},
+			],
+		});
+
+		markAllCachedNotificationsRead(qc, []);
+
+		expect(getCachedNotifications(qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey))).toEqual([]);
+		expect(getCachedUnreadCount(qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey))).toBe(0);
+		expect(getCachedNotifications(qc.getQueryData<NotificationsCache>(recentNotificationsQueryKey))).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ id: "ntf_1", status: "read" }),
+				expect.objectContaining({ id: "ntf_2", status: "read" }),
+			]),
+		);
+		expect(getCachedNotifications(qc.getQueryData<NotificationsCache>(recentNotificationsQueryKey))).toHaveLength(2);
 	});
 
 	// Acknowledging must never discard the cursor to rows the panel has not
@@ -314,7 +270,7 @@ describe("notification cache helpers", () => {
 
 		markAllCachedNotificationsRead(
 			qc,
-			loaded.map((item) => refKey(item)),
+			loaded.map((item) => item.id),
 		);
 
 		const cache = qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey);
@@ -368,7 +324,7 @@ describe("notification cache helpers", () => {
 			],
 		});
 
-		markAllCachedNotificationsRead(qc, [key("ntf_101")], 1);
+		markAllCachedNotificationsRead(qc, ["ntf_101"], 1);
 
 		const unread = qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey);
 		expect(unread?.pages[0]?.nextCursor).toBe("older-unread");
@@ -433,7 +389,7 @@ describe("notification cache helpers", () => {
 			pages: [{ notifications: [notification()], unreadCount: 1, unresolvedCount: 1 }],
 		});
 
-		applyResolvedNotification(qc, notification({ resolvedAt: "2026-06-16T11:00:00Z" }));
+		expect(applyResolvedNotification(qc, notification({ resolvedAt: "2026-06-16T11:00:00Z" }))).toBe(true);
 
 		const unread = qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey);
 		expect(getCachedNotifications(unread)).toEqual([
@@ -447,6 +403,133 @@ describe("notification cache helpers", () => {
 			expect.objectContaining({ id: "ntf_1", status: "unread", resolvedAt: "2026-06-16T11:00:00Z" }),
 		]);
 		expect(recent?.pages[0]?.unresolvedCount).toBe(0);
+	});
+
+	it("applies a resolution only once", () => {
+		const qc = queryClient();
+		qc.setQueryData<NotificationsCache>(recentNotificationsQueryKey, {
+			pageParams: [""],
+			pages: [{ notifications: [notification(), notification({ id: "ntf_2" })], unreadCount: 2, unresolvedCount: 2 }],
+		});
+		const resolved = notification({ resolvedAt: "2026-06-16T11:00:00Z" });
+
+		applyResolvedNotification(qc, resolved);
+		applyResolvedNotification(qc, resolved);
+
+		expect(qc.getQueryData<NotificationsCache>(recentNotificationsQueryKey)?.pages[0]?.unresolvedCount).toBe(1);
+	});
+
+	it("deletes one notification once and updates global counts even when the row is not loaded", () => {
+		const qc = queryClient();
+		const other = notification({ id: "ntf_2", status: "read", type: "pr_merged" });
+		for (const queryKey of [unreadNotificationsQueryKey, recentNotificationsQueryKey] as const) {
+			qc.setQueryData<NotificationsCache>(queryKey, {
+				pageParams: [""],
+				pages: [{ notifications: [other], unreadCount: 1, unresolvedCount: 1 }],
+			});
+		}
+
+		expect(applyNotificationDeleted(qc, notification())).toBe(true);
+		expect(applyNotificationDeleted(qc, notification())).toBe(false);
+
+		for (const queryKey of [unreadNotificationsQueryKey, recentNotificationsQueryKey] as const) {
+			const cache = qc.getQueryData<NotificationsCache>(queryKey);
+			expect(getCachedNotifications(cache)).toEqual([other]);
+			expect(cache?.pages[0]?.unreadCount).toBe(0);
+			expect(cache?.pages[0]?.unresolvedCount).toBe(0);
+		}
+	});
+
+	it("rolls an optimistic delete back unless a live event confirmed it", () => {
+		const qc = queryClient();
+		for (const queryKey of [unreadNotificationsQueryKey, recentNotificationsQueryKey] as const) {
+			qc.setQueryData<NotificationsCache>(queryKey, {
+				pageParams: [""],
+				pages: [{ notifications: [notification()], unreadCount: 1, unresolvedCount: 1 }],
+			});
+		}
+
+		applyOptimisticNotificationDelete(qc, notification());
+		expect(getCachedNotifications(qc.getQueryData<NotificationsCache>(recentNotificationsQueryKey))).toEqual([]);
+		expect(rollbackOptimisticNotificationDelete(qc, "ntf_1")).toBe(true);
+		expect(getCachedNotifications(qc.getQueryData<NotificationsCache>(recentNotificationsQueryKey))).toEqual([
+			notification(),
+		]);
+		expect(qc.getQueryData<NotificationsCache>(recentNotificationsQueryKey)?.pages[0]?.unreadCount).toBe(1);
+
+		applyOptimisticNotificationDelete(qc, notification());
+		expect(applyNotificationDeleted(qc, notification())).toBe(false);
+		expect(rollbackOptimisticNotificationDelete(qc, "ntf_1")).toBe(false);
+		expect(getCachedNotifications(qc.getQueryData<NotificationsCache>(recentNotificationsQueryKey))).toEqual([]);
+	});
+
+	it("does not restore counts when the row was absent or its page was replaced", () => {
+		const qc = queryClient();
+		const deleted = notification({ status: "read" });
+		qc.setQueryData<NotificationsCache>(unreadNotificationsQueryKey, {
+			pageParams: [""],
+			pages: [{ notifications: [notification({ id: "other" })], unreadCount: 1, unresolvedCount: 2 }],
+		});
+		qc.setQueryData<NotificationsCache>(recentNotificationsQueryKey, {
+			pageParams: ["", "older"],
+			pages: [
+				{ notifications: [notification({ id: "other" })], unreadCount: 1, unresolvedCount: 2 },
+				{ notifications: [deleted], unreadCount: 1, unresolvedCount: 2 },
+			],
+		});
+
+		applyOptimisticNotificationDelete(qc, deleted);
+		expect(qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey)?.pages[0]?.unresolvedCount).toBe(2);
+		qc.setQueryData<NotificationsCache>(recentNotificationsQueryKey, {
+			pageParams: [""],
+			pages: [{ notifications: [notification({ id: "replacement" })], unreadCount: 0, unresolvedCount: 1 }],
+		});
+
+		expect(rollbackOptimisticNotificationDelete(qc, deleted.id)).toBe(true);
+		expect(qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey)?.pages[0]?.unresolvedCount).toBe(2);
+		expect(qc.getQueryData<NotificationsCache>(recentNotificationsQueryKey)?.pages[0]?.unresolvedCount).toBe(1);
+		expect(getCachedNotifications(qc.getQueryData<NotificationsCache>(recentNotificationsQueryKey))).toEqual([
+			expect.objectContaining({ id: "replacement" }),
+		]);
+	});
+
+	it("bounds remembered delete confirmations without dropping active optimistic deletes", () => {
+		const qc = queryClient();
+		applyOptimisticNotificationDelete(qc, notification({ id: "pending" }));
+
+		for (let index = 0; index < 300; index++) {
+			applyNotificationDeleted(qc, notification({ id: `confirmed-${index}` }));
+		}
+
+		expect(rollbackOptimisticNotificationDelete(qc, "pending")).toBe(true);
+		expect(applyNotificationDeleted(qc, notification({ id: "confirmed-299" }))).toBe(false);
+		expect(applyNotificationDeleted(qc, notification({ id: "confirmed-0" }))).toBe(true);
+	});
+
+	it("does not let an older clear generation erase a newer notification", () => {
+		const qc = queryClient();
+		expect(
+			applyNotificationsCleared(qc, { clearId: "clear-2", clearEpoch: "epoch-1", clearSequence: 2 }),
+		).toBe(true);
+		mergeUnreadNotification(qc, notification({ id: "after-clear" }));
+
+		expect(
+			applyNotificationsCleared(qc, { clearId: "clear-1", clearEpoch: "epoch-1", clearSequence: 1 }),
+		).toBe(false);
+		expect(getCachedNotifications(qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey))).toEqual([
+			expect.objectContaining({ id: "after-clear" }),
+		]);
+	});
+
+	it("accepts a clear from a new daemon epoch", () => {
+		const qc = queryClient();
+		applyNotificationsCleared(qc, { clearId: "clear-old", clearEpoch: "epoch-1", clearSequence: 9 });
+		mergeUnreadNotification(qc, notification({ id: "before-restart-clear" }));
+
+		expect(
+			applyNotificationsCleared(qc, { clearId: "clear-new", clearEpoch: "epoch-2", clearSequence: 1 }),
+		).toBe(true);
+		expect(getCachedNotifications(qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey))).toEqual([]);
 	});
 
 	it("drops older pages after the panel closes while keeping the latest page", () => {
@@ -469,7 +552,6 @@ describe("notification cache helpers", () => {
 
 describe("createNotificationsTransport", () => {
 	it("opens the notification stream and invalidates unread notifications on open", () => {
-		baseUrlForMock.mockReturnValue("http://127.0.0.1:62220/proxy-token/");
 		const qc = queryClient();
 		const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
 
@@ -477,25 +559,9 @@ describe("createNotificationsTransport", () => {
 		EventSourceStub.instances[0].onopen?.();
 
 		expect(EventSourceStub.instances).toHaveLength(1);
-		expect(EventSourceStub.instances[0].url).toBe(
-			"http://127.0.0.1:62220/proxy-token/api/v1/notifications/stream",
-		);
+		expect(EventSourceStub.instances[0].url).toBe("http://127.0.0.1:3001/api/v1/notifications/stream");
 		expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: unreadNotificationsQueryKey });
 		expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: recentNotificationsQueryKey });
-	});
-
-	it("opens one notification stream at each connected host's base", () => {
-		connectedHostsMock.mockReturnValue([REMOTE]);
-		baseUrlForMock.mockImplementation((host: HostId) =>
-			host === LOCAL_HOST ? "http://127.0.0.1:3001" : "http://127.0.0.1:9999/tok",
-		);
-
-		createNotificationsTransport(queryClient()).connect();
-
-		expect(EventSourceStub.instances.map((source) => source.url)).toEqual([
-			"http://127.0.0.1:3001/api/v1/notifications/stream",
-			"http://127.0.0.1:9999/tok/api/v1/notifications/stream",
-		]);
 	});
 
 	it("merges live notifications and shows one toast for a new id", () => {
@@ -510,10 +576,11 @@ describe("createNotificationsTransport", () => {
 		expect(getCachedNotifications(qc.getQueryData<NotificationsCache>(recentNotificationsQueryKey))).toHaveLength(1);
 		expect(showNotificationMock).toHaveBeenCalledTimes(1);
 		expect(showNotificationMock).toHaveBeenCalledWith({
-			id: key("ntf_1"),
+			id: "ntf_1",
 			title: "checkout-flow needs input",
 			body: "The agent is waiting for your response.",
 			type: "needs_input",
+			watched: false,
 		});
 	});
 
@@ -535,109 +602,317 @@ describe("createNotificationsTransport", () => {
 		expect(qc.getQueryData<NotificationsCache>(recentNotificationsQueryKey)?.pages[0]?.unresolvedCount).toBe(0);
 	});
 
-	it("suppresses the needs_input toast for the session the user is already watching", () => {
+	it("reconciles counts when a resolved notification is outside the loaded pages", async () => {
+		const qc = queryClient();
+		const other = notification({ id: "other" });
+		for (const queryKey of [unreadNotificationsQueryKey, recentNotificationsQueryKey] as const) {
+			qc.setQueryData<NotificationsCache>(queryKey, {
+				pageParams: [""],
+				pages: [{ notifications: [other], unreadCount: 2, unresolvedCount: 2 }],
+			});
+		}
+		const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
+		createNotificationsTransport(qc).connect();
+
+		EventSourceStub.instances[0].dispatch(
+			"notification_resolved",
+			notification({ id: "not-loaded", resolvedAt: "2026-06-16T11:00:00Z" }),
+		);
+
+		await vi.waitFor(() => expect(invalidateSpy).toHaveBeenCalledTimes(2));
+	});
+
+	it("removes a deleted notification from every live cache", async () => {
+		const qc = queryClient();
+		const cancelSpy = vi.spyOn(qc, "cancelQueries");
+		createNotificationsTransport(qc).connect();
+		const source = EventSourceStub.instances[0];
+		source.dispatch("notification_created", notification());
+
+		source.dispatch("notification_deleted", notification());
+
+		await vi.waitFor(() =>
+			expect(getCachedNotifications(qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey))).toEqual([]),
+		);
+		expect(getCachedNotifications(qc.getQueryData<NotificationsCache>(recentNotificationsQueryKey))).toEqual([]);
+			expect(cancelSpy).toHaveBeenCalledWith(
+			{ queryKey: ["notifications", "history"] },
+			{ revert: false },
+		);
+	});
+
+	it("replays clear and create events then reconciles once after a reconnect snapshot", async () => {
+		const qc = queryClient();
+		mergeUnreadNotification(qc, notification({ id: "before-clear" }));
+		const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
+		let finishRefresh: (() => void) | undefined;
+		const refresh = new Promise<void>((resolve) => {
+			finishRefresh = resolve;
+		});
+		invalidateSpy.mockReturnValue(refresh);
+		createNotificationsTransport(qc).connect();
+		const source = EventSourceStub.instances[0];
+
+		source.onopen?.();
+		source.dispatch("notification_cleared", { clearId: "clear-1", clearEpoch: "epoch-1", clearSequence: 1 });
+		source.dispatch("notification_created", notification({ id: "after-clear" }));
+		expect(getCachedNotifications(qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey))).toEqual([
+			expect.objectContaining({ id: "before-clear" }),
+		]);
+
+		finishRefresh?.();
+		await vi.waitFor(() =>
+			expect(getCachedNotifications(qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey))).toEqual([
+				expect.objectContaining({ id: "after-clear" }),
+			]),
+		);
+		await vi.waitFor(() => expect(invalidateSpy).toHaveBeenCalledTimes(4));
+	});
+
+	it("buffers live creates while an explicit reconciliation refreshes snapshots", async () => {
+		const qc = queryClient();
+		const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
+		let finishRefresh: (() => void) | undefined;
+		const refresh = new Promise<void>((resolve) => {
+			finishRefresh = resolve;
+		});
+		invalidateSpy.mockReturnValue(refresh);
+		createNotificationsTransport(qc).connect();
+		const source = EventSourceStub.instances[0];
+
+		const reconciliation = reconcileNotifications(qc);
+		source.dispatch("notification_created", notification({ id: "during-refresh" }));
+		for (const queryKey of [unreadNotificationsQueryKey, recentNotificationsQueryKey] as const) {
+			qc.setQueryData<NotificationsCache>(queryKey, {
+				pageParams: [""],
+				pages: [{ notifications: [], unreadCount: 0, unresolvedCount: 0 }],
+			});
+		}
+		expect(getCachedNotifications(qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey))).toEqual([]);
+
+		finishRefresh?.();
+		await reconciliation;
+
+		expect(getCachedNotifications(qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey))).toEqual([
+			expect.objectContaining({ id: "during-refresh" }),
+		]);
+		expect(getCachedNotifications(qc.getQueryData<NotificationsCache>(recentNotificationsQueryKey))).toEqual([
+			expect.objectContaining({ id: "during-refresh" }),
+		]);
+	});
+
+	it.each([
+		{ focusedAtReplay: false, sessionAtReplay: undefined, watchedAtReceipt: true },
+		{ focusedAtReplay: true, sessionAtReplay: "mer-1", watchedAtReceipt: false },
+	])(
+		"keeps watched=$watchedAtReceipt from receipt time while replaying a buffered create",
+		async ({ focusedAtReplay, sessionAtReplay, watchedAtReceipt }) => {
+			let focused = watchedAtReceipt;
+			let visibleSessionId = watchedAtReceipt ? "mer-1" : undefined;
+			vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+			vi.spyOn(document, "hasFocus").mockImplementation(() => focused);
+			const qc = queryClient();
+			const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
+			let finishRefresh: (() => void) | undefined;
+			const refresh = new Promise<void>((resolve) => {
+				finishRefresh = resolve;
+			});
+			invalidateSpy.mockReturnValue(refresh);
+			createNotificationsTransport(qc, () => visibleSessionId).connect();
+
+			const reconciliation = reconcileNotifications(qc);
+			EventSourceStub.instances[0].dispatch("notification_created", notification({ id: "buffered" }));
+			focused = focusedAtReplay;
+			visibleSessionId = sessionAtReplay;
+			finishRefresh?.();
+			await reconciliation;
+
+			expect(showNotificationMock).toHaveBeenCalledWith(expect.objectContaining({ id: "buffered", watched: watchedAtReceipt }));
+		},
+	);
+
+	it("buffers live creates while a per-item delete reconciles snapshots", async () => {
+		const qc = queryClient();
+		const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
+		let finishRefresh: (() => void) | undefined;
+		const refresh = new Promise<void>((resolve) => {
+			finishRefresh = resolve;
+		});
+		invalidateSpy.mockReturnValue(refresh);
+		createNotificationsTransport(qc).connect();
+		const source = EventSourceStub.instances[0];
+		const deleted = notification({ id: "deleted" });
+		source.dispatch("notification_created", deleted);
+		applyOptimisticNotificationDelete(qc, deleted);
+		applyNotificationDeleted(qc, deleted);
+
+		const reconciliation = reconcileNotifications(qc);
+		source.dispatch("notification_created", notification({ id: "during-delete-refresh" }));
+		for (const queryKey of [unreadNotificationsQueryKey, recentNotificationsQueryKey] as const) {
+			qc.setQueryData<NotificationsCache>(queryKey, {
+				pageParams: [""],
+				pages: [{ notifications: [], unreadCount: 0, unresolvedCount: 0 }],
+			});
+		}
+
+		finishRefresh?.();
+		await reconciliation;
+
+		for (const queryKey of [unreadNotificationsQueryKey, recentNotificationsQueryKey] as const) {
+			expect(getCachedNotifications(qc.getQueryData<NotificationsCache>(queryKey))).toEqual([
+				expect.objectContaining({ id: "during-delete-refresh" }),
+			]);
+		}
+	});
+
+	it("identifies only the cache snapshot installed by clear-all", () => {
+		const qc = queryClient();
+		qc.setQueryData<NotificationsCache>(recentNotificationsQueryKey, {
+			pageParams: [""],
+			pages: [{ notifications: [], unreadCount: 0, unresolvedCount: 0 }],
+		});
+		expect(isNotificationsCacheFromClear(qc)).toBe(false);
+
+		applyNotificationsCleared(qc, { clearId: "clear-1", clearEpoch: "epoch-1", clearSequence: 1 });
+		expect(isNotificationsCacheFromClear(qc)).toBe(true);
+
+		qc.setQueryData<NotificationsCache>(recentNotificationsQueryKey, (current) =>
+			current ? { ...current, pageParams: ["fresh"] } : current,
+		);
+		expect(isNotificationsCacheFromClear(qc)).toBe(false);
+	});
+
+	it("cancels an in-flight history fetch before applying a clear and later create", async () => {
+		const qc = queryClient();
+		let requestStarted: (() => void) | undefined;
+		const started = new Promise<void>((resolve) => {
+			requestStarted = resolve;
+		});
+		apiGetMock.mockImplementation(
+			(_path: string, options: { signal?: AbortSignal }) =>
+				new Promise((resolve) => {
+					requestStarted?.();
+					options.signal?.addEventListener("abort", () => {
+						resolve({
+							data: {
+								notifications: [notification({ id: "stale-fetch" })],
+								unreadCount: 1,
+								unresolvedCount: 1,
+							},
+						});
+					});
+				}),
+		);
+		const staleFetch = qc.fetchInfiniteQuery({
+			queryKey: unreadNotificationsQueryKey,
+			queryFn: ({ pageParam, signal }) => fetchNotificationsPage("unread", pageParam, signal),
+			initialPageParam: "",
+			getNextPageParam: (page: NotificationsPage) => page.nextCursor,
+		});
+		await started;
+
+		createNotificationsTransport(qc).connect();
+		const source = EventSourceStub.instances[0];
+		source.dispatch("notification_cleared", {
+			clearId: "clear-1",
+			clearEpoch: "epoch-1",
+			clearSequence: 1,
+		});
+		source.dispatch("notification_created", notification({ id: "after-clear" }));
+
+		await staleFetch.catch(() => undefined);
+		await vi.waitFor(() => {
+			expect(apiGetMock.mock.calls[0]?.[1].signal.aborted).toBe(true);
+			expect(getCachedNotifications(qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey))).toEqual([
+				expect.objectContaining({ id: "after-clear" }),
+			]);
+		});
+	});
+
+	it("marks the needs_input notification watched for the session the user is already looking at", () => {
 		setWindowState({ focused: true, visible: true });
 		const qc = queryClient();
-		createNotificationsTransport(qc, () => ({ host: LOCAL_HOST, id: "mer-1" })).connect();
+		createNotificationsTransport(qc, () => "mer-1").connect();
 
 		EventSourceStub.instances[0].dispatch("notification_created", notification());
 
 		expect(getCachedNotifications(qc.getQueryData<NotificationsCache>(unreadNotificationsQueryKey))).toHaveLength(1);
-		expect(showNotificationMock).not.toHaveBeenCalled();
-	});
-
-	it("does not suppress a remote toast when a local session has the same id", () => {
-		setWindowState({ focused: true, visible: true });
-		connectedHostsMock.mockReturnValue([REMOTE]);
-		createNotificationsTransport(queryClient(), () => ({ host: LOCAL_HOST, id: "mer-1" })).connect();
-
-		EventSourceStub.instances[1].dispatch("notification_created", notification());
-
-		expect(showNotificationMock).toHaveBeenCalledWith(expect.objectContaining({ id: key("ntf_1", REMOTE) }));
+		expect(showNotificationMock).toHaveBeenCalledTimes(1);
+		expect(showNotificationMock).toHaveBeenCalledWith(expect.objectContaining({ watched: true }));
 	});
 
 	it.each([
 		{
-			activeSession: { host: LOCAL_HOST, id: "other-session" },
+			activeSessionId: "other-session",
 			focused: true,
 			reason: "the notification is for a different session",
 			visible: true,
 		},
-		{ activeSession: { host: LOCAL_HOST, id: "mer-1" }, focused: true, reason: "the window is hidden", visible: false },
-		{
-			activeSession: { host: LOCAL_HOST, id: "mer-1" },
-			focused: false,
-			reason: "the window is visible but unfocused",
-			visible: true,
-		},
-		{ activeSession: undefined, focused: true, reason: "no session is open", visible: true },
-	])("still shows the needs_input toast when $reason", ({ activeSession, focused, visible }) => {
+		{ activeSessionId: "mer-1", focused: true, reason: "the window is hidden", visible: false },
+		{ activeSessionId: "mer-1", focused: false, reason: "the window is visible but unfocused", visible: true },
+		{ activeSessionId: undefined, focused: true, reason: "no session is open", visible: true },
+	])("leaves the needs_input notification unwatched when $reason", ({ activeSessionId, focused, visible }) => {
 		setWindowState({ focused, visible });
-		createNotificationsTransport(queryClient(), () => activeSession).connect();
+		createNotificationsTransport(queryClient(), () => activeSessionId).connect();
 
 		EventSourceStub.instances[0].dispatch("notification_created", notification());
 
 		expect(showNotificationMock).toHaveBeenCalledTimes(1);
+		expect(showNotificationMock).toHaveBeenCalledWith(expect.objectContaining({ watched: false }));
 	});
 
 	it.each(["ready_to_merge", "pr_merged", "pr_closed_unmerged"] as const)(
-		"still shows the %s toast for the focused active session",
+		"leaves the %s notification unwatched for the focused active session",
 		(type) => {
 			setWindowState({ focused: true, visible: true });
-			createNotificationsTransport(queryClient(), () => ({ host: LOCAL_HOST, id: "mer-1" })).connect();
+			createNotificationsTransport(queryClient(), () => "mer-1").connect();
 
 			EventSourceStub.instances[0].dispatch("notification_created", notification({ type }));
 
 			expect(showNotificationMock).toHaveBeenCalledTimes(1);
+			expect(showNotificationMock).toHaveBeenCalledWith(expect.objectContaining({ watched: false }));
 		},
 	);
+
+	it("does not make a new daemon port serve the dead port's backoff delay", () => {
+		vi.useFakeTimers();
+		vi.spyOn(Math, "random").mockReturnValue(0.5);
+		createNotificationsTransport(queryClient()).connect();
+		const onBaseUrlChange = subscribeApiBaseUrlMock.mock.calls[0][0] as () => void;
+
+		// Grow the delay on the old port.
+		for (let failure = 1; failure <= 4; failure += 1) {
+			const source = EventSourceStub.instances.at(-1)!;
+			source.readyState = 2;
+			source.onerror?.();
+			vi.advanceTimersByTime(computeSseRetryDelayMs(failure, () => 0.5));
+		}
+
+		getApiBaseUrlMock.mockReturnValue("http://127.0.0.1:4555");
+		onBaseUrlChange();
+
+		// The fresh port starts over at the initial delay.
+		const moved = EventSourceStub.instances.at(-1)!;
+		moved.readyState = 2;
+		moved.onerror?.();
+		const beforeRetry = EventSourceStub.instances.length;
+		vi.advanceTimersByTime(computeSseRetryDelayMs(1, () => 0.5) - 1);
+		expect(EventSourceStub.instances).toHaveLength(beforeRetry);
+		vi.advanceTimersByTime(1);
+		expect(EventSourceStub.instances).toHaveLength(beforeRetry + 1);
+		vi.useRealTimers();
+	});
 
 	it("reconnects when the API base URL changes", () => {
 		createNotificationsTransport(queryClient()).connect();
 		const onBaseUrlChange = subscribeApiBaseUrlMock.mock.calls[0][0] as () => void;
 		const first = EventSourceStub.instances[0];
 
-		baseUrlForMock.mockReturnValue("http://127.0.0.1:4555");
+		getApiBaseUrlMock.mockReturnValue("http://127.0.0.1:4555");
 		onBaseUrlChange();
 
 		expect(first.closed).toBe(true);
 		expect(EventSourceStub.instances).toHaveLength(2);
 		expect(EventSourceStub.instances[1].url).toBe("http://127.0.0.1:4555/api/v1/notifications/stream");
-	});
-
-	it("opens and closes a remote stream as the connected hosts change", () => {
-		createNotificationsTransport(queryClient()).connect();
-		const onHostsChanged = subscribeConnectedHostsMock.mock.calls[0][0] as () => void;
-		const local = EventSourceStub.instances[0];
-
-		connectedHostsMock.mockReturnValue([REMOTE]);
-		onHostsChanged();
-		const remote = EventSourceStub.instances[1];
-		expect(remote.url).toBe("http://127.0.0.1:9999/tok/api/v1/notifications/stream");
-
-		connectedHostsMock.mockReturnValue([]);
-		onHostsChanged();
-		expect(remote.closed).toBe(true);
-		expect(local.closed).toBe(false);
-	});
-
-	it("retries only the host whose EventSource closes", () => {
-		vi.useFakeTimers();
-		try {
-			connectedHostsMock.mockReturnValue([REMOTE]);
-			createNotificationsTransport(queryClient()).connect();
-			const local = EventSourceStub.instances[0];
-			const remote = EventSourceStub.instances[1];
-
-			remote.readyState = 2;
-			remote.onerror?.();
-			vi.advanceTimersByTime(5_000);
-
-			expect(EventSourceStub.instances).toHaveLength(3);
-			expect(EventSourceStub.instances[2].url).toBe(remote.url);
-			expect(local.closed).toBe(false);
-		} finally {
-			vi.useRealTimers();
-		}
 	});
 });

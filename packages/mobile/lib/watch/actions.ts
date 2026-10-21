@@ -1,10 +1,11 @@
 import type { ServerConfig } from "../config";
-import type { WatchSource } from "./snapshot";
+import type { HostSnapshot } from "../otherHosts";
 import type { ConversationActivity, ConversationSnapshot, DecisionOption } from "../chat/types";
 
-/** Only the currently connected, successfully polled config may receive a wrist action. */
-export function watchConfigForHost({ config, connection, error, poll }: WatchSource, hostId: string): ServerConfig | null {
-	return config?.hostId && config.hostId === hostId && connection === "open" && !error && poll?.config === config ? config : null;
+/** The live connection must still own the requested host's successful poll. */
+export function watchConfigForHost(hosts: HostSnapshot[], config: ServerConfig | null, hostId: string): ServerConfig | null {
+	const host = hosts.find((entry) => entry.hostId === hostId);
+	return config?.hostId === hostId && host?.connection === "open" && !host.error && host.lastSyncAt > 0 && host.config === config ? config : null;
 }
 
 export type ActionContext = {

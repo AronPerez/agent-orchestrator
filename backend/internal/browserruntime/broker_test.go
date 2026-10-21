@@ -57,15 +57,13 @@ func TestBrokerExecuteRoundTrip(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 	enc := json.NewEncoder(conn)
 	dec := json.NewDecoder(conn)
-	if err := enc.Encode(wireMessage{Type: "hello", Version: ProtocolVersion}); err != nil {
-		t.Fatal(err)
-	}
+	handshake(t, enc, dec, "")
 	waitConnected(t, broker)
 
 	resultCh := make(chan Result, 1)
 	errCh := make(chan error, 1)
 	go func() {
-		result, err := broker.Execute(context.Background(), "session-1", "snapshot", map[string]interface{}{"interactive": true}, "proj-alpha")
+		result, err := broker.Execute(context.Background(), "session-1", "snapshot", map[string]interface{}{"interactive": true})
 		if err != nil {
 			errCh <- err
 			return
@@ -76,12 +74,6 @@ func TestBrokerExecuteRoundTrip(t *testing.T) {
 	var command wireMessage
 	if err := dec.Decode(&command); err != nil {
 		t.Fatal(err)
-	}
-	// The profile key must actually reach the app: it is the only thing that
-	// tells the runtime to use a shared on-disk profile, and a silently dropped
-	// field would look exactly like "this project did not opt in".
-	if command.ProfileKey != "proj-alpha" {
-		t.Fatalf("profileKey = %q, want proj-alpha", command.ProfileKey)
 	}
 	if command.Type != "command" || command.SessionID != "session-1" || command.Action != "snapshot" {
 		t.Fatalf("command = %#v", command)
@@ -121,7 +113,7 @@ func TestBrokerExecuteWaitsForRuntimeReconnect(t *testing.T) {
 	resultCh := make(chan Result, 1)
 	errCh := make(chan error, 1)
 	go func() {
-		result, err := broker.Execute(context.Background(), "session-1", "snapshot", nil, "")
+		result, err := broker.Execute(context.Background(), "session-1", "snapshot", nil)
 		if err != nil {
 			errCh <- err
 			return
@@ -136,9 +128,7 @@ func TestBrokerExecuteWaitsForRuntimeReconnect(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 	enc := json.NewEncoder(conn)
 	dec := json.NewDecoder(conn)
-	if err := enc.Encode(wireMessage{Type: "hello", Version: ProtocolVersion}); err != nil {
-		t.Fatal(err)
-	}
+	handshake(t, enc, dec, "")
 	var command wireMessage
 	if err := dec.Decode(&command); err != nil {
 		t.Fatal(err)
@@ -166,7 +156,7 @@ func TestBrokerExecuteHonorsContextWhileWaitingForRuntime(t *testing.T) {
 	broker := New(nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	_, err := broker.Execute(ctx, "session-1", "snapshot", nil, "")
+	_, err := broker.Execute(ctx, "session-1", "snapshot", nil)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("error = %v, want context deadline", err)
 	}
@@ -188,12 +178,12 @@ func TestBrokerMapsRuntimeError(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 	enc := json.NewEncoder(conn)
 	dec := json.NewDecoder(conn)
-	_ = enc.Encode(wireMessage{Type: "hello", Version: ProtocolVersion})
+	handshake(t, enc, dec, "")
 	waitConnected(t, broker)
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := broker.Execute(context.Background(), "session-1", "click", map[string]interface{}{"ref": "e1"}, "")
+		_, err := broker.Execute(context.Background(), "session-1", "click", map[string]interface{}{"ref": "e1"})
 		errCh <- err
 	}()
 	var command wireMessage
@@ -221,7 +211,7 @@ func TestBrokerUnavailableWithoutElectron(t *testing.T) {
 	broker := New(nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	if _, err := broker.Execute(ctx, "session-1", "snapshot", nil, ""); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := broker.Execute(ctx, "session-1", "snapshot", nil); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("error = %v, want context deadline", err)
 	}
 }
@@ -236,24 +226,44 @@ func TestBrokerRejectsInvalidRuntimeToken(t *testing.T) {
 	}
 	go func() { _ = broker.Serve(ctx, ln) }()
 
-	invalid, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := json.NewEncoder(invalid).Encode(wireMessage{
-		Type:    "hello",
-		Version: ProtocolVersion,
-		Token:   "wrong-token",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	_ = invalid.SetReadDeadline(time.Now().Add(time.Second))
-	if _, err := invalid.Read(make([]byte, 1)); err == nil {
-		t.Fatal("invalid runtime connection remained open")
-	}
-	_ = invalid.Close()
-	if broker.Status().Connected {
-		t.Fatal("broker accepted an invalid runtime token")
+	for _, tc := range []struct {
+		name  string
+		hello string
+		code  string
+	}{
+		{"wrong token", `{"type":"hello","version":2,"token":"wrong-token"}`, "BROWSER_RUNTIME_TOKEN_REJECTED"},
+		{"missing token", `{"type":"hello","version":2}`, "BROWSER_RUNTIME_TOKEN_REJECTED"},
+		{"other protocol", `{"type":"hello","version":3,"token":"expected-token"}`, "BROWSER_RUNTIME_PROTOCOL_MISMATCH"},
+		{"not a hello", `{"type":"result","requestId":"r1"}`, "BROWSER_RUNTIME_BAD_HELLO"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			invalid, err := net.Dial("tcp", ln.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = invalid.Close() }()
+			if _, err := io.WriteString(invalid, tc.hello+"\n"); err != nil {
+				t.Fatal(err)
+			}
+			// The runtime learns it was refused, and why, before the daemon closes.
+			_ = invalid.SetReadDeadline(time.Now().Add(browserRuntimeTestTimeout()))
+			dec := json.NewDecoder(invalid)
+			var reply wireMessage
+			if err := dec.Decode(&reply); err != nil {
+				t.Fatal(err)
+			}
+			if reply.Type != "hello-rejected" || reply.Error == nil || reply.Error.Code != tc.code {
+				t.Fatalf("reply = %#v, want hello-rejected with %s", reply, tc.code)
+			}
+			// Only EOF proves the daemon closed the connection; a deadline timeout
+			// would mean it stayed open.
+			if err := dec.Decode(&reply); !errors.Is(err, io.EOF) {
+				t.Fatalf("read after hello-rejected: err = %v, reply = %#v; want io.EOF from the daemon closing", err, reply)
+			}
+			if broker.Status().Connected {
+				t.Fatal("broker accepted an invalid hello")
+			}
+		})
 	}
 
 	valid, err := net.Dial("tcp", ln.Addr().String())
@@ -261,13 +271,7 @@ func TestBrokerRejectsInvalidRuntimeToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = valid.Close() }()
-	if err := json.NewEncoder(valid).Encode(wireMessage{
-		Type:    "hello",
-		Version: ProtocolVersion,
-		Token:   "expected-token",
-	}); err != nil {
-		t.Fatal(err)
-	}
+	handshake(t, json.NewEncoder(valid), json.NewDecoder(valid), "expected-token")
 	waitConnected(t, broker)
 }
 
@@ -290,7 +294,7 @@ func TestBrokerCancellationSendsCancelFrame(t *testing.T) {
 	defer cancel()
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := broker.Execute(requestCtx, "session-1", "wait", nil, "")
+		_, err := broker.Execute(requestCtx, "session-1", "wait", nil)
 		errCh <- err
 	}()
 	var command wireMessage
@@ -369,6 +373,21 @@ func TestBrokerWriteObservesContext(t *testing.T) {
 	}
 }
 
+// handshake sends a hello and requires hello-ok as the daemon's first frame.
+func handshake(t *testing.T, enc *json.Encoder, dec *json.Decoder, token string) {
+	t.Helper()
+	if err := enc.Encode(wireMessage{Type: "hello", Version: ProtocolVersion, Token: token}); err != nil {
+		t.Fatal(err)
+	}
+	var reply wireMessage
+	if err := dec.Decode(&reply); err != nil {
+		t.Fatal(err)
+	}
+	if reply.Type != "hello-ok" {
+		t.Fatalf("first daemon frame = %#v, want hello-ok", reply)
+	}
+}
+
 func waitConnected(t *testing.T, broker *Broker) {
 	t.Helper()
 	deadline := time.Now().Add(browserRuntimeTestTimeout())
@@ -402,154 +421,4 @@ func browserRuntimeTestTimeout() time.Duration {
 		return time.Second
 	}
 	return 5 * time.Second
-}
-
-// A remote conn authenticates at the HTTP layer, so hello carries no token
-// even when the broker holds one. It must still connect and execute.
-func TestServeRemoteConnAcceptsTokenlessHelloAndExecutes(t *testing.T) {
-	broker := New(nil, "launch-secret")
-	client, server := net.Pipe()
-	defer func() { _ = client.Close() }()
-	done := make(chan struct{})
-	go func() { broker.ServeRemoteConn(context.Background(), server); close(done) }()
-
-	writeFrame(t, client, `{"type":"hello","version":2}`)
-	waitConnected(t, broker)
-
-	go func() {
-		dec := json.NewDecoder(client)
-		var command wireMessage
-		if err := dec.Decode(&command); err != nil {
-			return
-		}
-		// net.Pipe is unbuffered and Go 1.27's Decoder stops before the
-		// encoder's trailing newline, so keep reading or the broker's write
-		// never completes.
-		go func() { _, _ = io.Copy(io.Discard, client) }()
-		_ = json.NewEncoder(client).Encode(wireMessage{
-			Type:      "result",
-			RequestID: command.RequestID,
-			OK:        true,
-			Result:    json.RawMessage(`{"url":"http://x"}`),
-		})
-	}()
-
-	result, err := broker.Execute(context.Background(), "s1", "open", map[string]interface{}{"url": "http://x"}, "")
-	if err != nil {
-		t.Fatalf("execute over remote conn: %v", err)
-	}
-	value, ok := result.Value.(map[string]interface{})
-	if !ok || value["url"] != "http://x" {
-		t.Fatalf("unexpected result: %#v", result.Value)
-	}
-	_ = client.Close()
-	<-done
-}
-
-// Wrong protocol version is still rejected on the remote path.
-func TestServeRemoteConnRejectsWrongVersion(t *testing.T) {
-	broker := New(nil)
-	client, server := net.Pipe()
-	defer func() { _ = client.Close() }()
-	go broker.ServeRemoteConn(context.Background(), server)
-
-	writeFrame(t, client, `{"type":"hello","version":1}`)
-	expectClosed(t, client)
-	if broker.Status().Connected {
-		t.Fatal("wrong-version remote conn must not connect")
-	}
-}
-
-// Local wins: while a local (token-checked) runtime is connected, a remote conn
-// is closed without replacing it; when local disconnects, a remote retry
-// connects.
-func TestRemoteConnNeverDisplacesLocal(t *testing.T) {
-	broker := New(nil, "tok")
-	local := connectLocal(t, broker, "tok")
-	waitConnected(t, broker)
-
-	remoteClient, remoteServer := net.Pipe()
-	defer func() { _ = remoteClient.Close() }()
-	go broker.ServeRemoteConn(context.Background(), remoteServer)
-	writeFrame(t, remoteClient, `{"type":"hello","version":2}`)
-	expectClosed(t, remoteClient)
-	if !broker.Status().Connected {
-		t.Fatal("local conn must survive a remote attempt")
-	}
-
-	_ = local.Close()
-	waitDisconnected(t, broker)
-
-	retryClient, retryServer := net.Pipe()
-	defer func() { _ = retryClient.Close() }()
-	go broker.ServeRemoteConn(context.Background(), retryServer)
-	writeFrame(t, retryClient, `{"type":"hello","version":2}`)
-	waitConnected(t, broker)
-}
-
-// Local displaces remote (the machine that owns the daemon gets its panel back).
-func TestLocalConnDisplacesRemote(t *testing.T) {
-	broker := New(nil, "tok")
-	remoteClient, remoteServer := net.Pipe()
-	defer func() { _ = remoteClient.Close() }()
-	go broker.ServeRemoteConn(context.Background(), remoteServer)
-	writeFrame(t, remoteClient, `{"type":"hello","version":2}`)
-	waitConnected(t, broker)
-
-	_ = connectLocal(t, broker, "tok")
-	expectClosed(t, remoteClient)
-	waitConnected(t, broker)
-}
-
-func writeFrame(t *testing.T, conn net.Conn, frame string) {
-	t.Helper()
-	if _, err := io.WriteString(conn, frame+"\n"); err != nil {
-		t.Fatalf("write frame: %v", err)
-	}
-}
-
-// connectLocal attaches a runtime the way the desktop app on the daemon's own
-// machine does: a real listener plus the per-launch runtime token.
-func connectLocal(t *testing.T, broker *Broker, token string) net.Conn {
-	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	go func() { _ = broker.Serve(ctx, ln) }()
-	conn, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-	if err := json.NewEncoder(conn).Encode(wireMessage{
-		Type:    "hello",
-		Version: ProtocolVersion,
-		Token:   token,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	return conn
-}
-
-func expectClosed(t *testing.T, conn net.Conn) {
-	t.Helper()
-	_ = conn.SetReadDeadline(time.Now().Add(browserRuntimeTestTimeout()))
-	if _, err := conn.Read(make([]byte, 1)); err == nil {
-		t.Fatal("connection remained open")
-	}
-	_ = conn.SetReadDeadline(time.Time{})
-}
-
-func waitDisconnected(t *testing.T, broker *Broker) {
-	t.Helper()
-	deadline := time.Now().Add(browserRuntimeTestTimeout())
-	for broker.Status().Connected {
-		if time.Now().After(deadline) {
-			t.Fatal("browser runtime did not disconnect")
-		}
-		time.Sleep(time.Millisecond)
-	}
 }

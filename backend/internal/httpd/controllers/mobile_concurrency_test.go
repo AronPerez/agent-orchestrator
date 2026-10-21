@@ -28,7 +28,7 @@ type concurrencyLAN struct {
 	stopOnce     sync.Once
 }
 
-func (f *concurrencyLAN) Start(port int, _ string) (int, error) {
+func (f *concurrencyLAN) Start(port int) (int, error) {
 	if f.startEntered != nil {
 		f.startOnce.Do(func() { close(f.startEntered) })
 	}
@@ -42,7 +42,7 @@ func (f *concurrencyLAN) Start(port int, _ string) (int, error) {
 	return port, nil
 }
 
-func (f *concurrencyLAN) StartLoopback(port int) (int, error) { return f.Start(port, "127.0.0.1") }
+func (f *concurrencyLAN) StartLoopback(port int) (int, error) { return f.Start(port) }
 
 func (f *concurrencyLAN) Stop(context.Context) error {
 	if f.stopEntered != nil {

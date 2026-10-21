@@ -56,14 +56,20 @@ func TestInterfaceHandoffRecoversLegacyCheckpointFromUnsettledChatTurn(t *testin
 				WorkspacePath: t.TempDir(), ProviderConversationID: "thread-1", HistoryMode: ports.ChatHistoryRequired,
 				HistoryPolicy: domain.SessionInterfaceTransitionHistoryStrict,
 			}
-			// Upstream requires explicit provider-history consent for a hidden
-			// cancelled prompt. AO FORK DIVERGENCE (#109): once the replay has
-			// settled, untrusted hook text is waived even under the strict policy,
-			// so every attempt imports without duplicating history.
+			// Latest main can retire legacy text when its unsettled AO message
+			// remains in the snapshot. Cancelled queue messages are filtered out,
+			// so those still need explicit provider-history recovery consent.
 			policies := []domain.SessionInterfaceTransitionHistoryPolicy{
 				domain.SessionInterfaceTransitionHistoryStrict,
 				domain.SessionInterfaceTransitionHistoryProvider,
 				domain.SessionInterfaceTransitionHistoryProvider,
+			}
+			if state == domain.TurnStateCancelled {
+				if _, err := svc.Start(ctx, cfg); !errors.Is(err, ports.ErrChatHistoryUnsettled) ||
+					!ports.ChatHistoryMismatchOnlyUntrustedText(err) {
+					t.Fatalf("hidden cancelled prompt must require recovery consent: %v", err)
+				}
+				policies = policies[1:]
 			}
 			for attempt, policy := range policies {
 				cfg.HistoryPolicy = policy

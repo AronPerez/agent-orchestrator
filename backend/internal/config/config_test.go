@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -11,7 +12,7 @@ import (
 func TestLoadDefaults(t *testing.T) {
 	// Clear every recognised var so we observe pure defaults regardless of the
 	// surrounding environment.
-	for _, k := range []string{"AO_PORT", "AO_REQUEST_TIMEOUT", "AO_SHUTDOWN_TIMEOUT", "AO_RUN_FILE", "AO_DATA_DIR", "AO_AGENT", "AO_ALLOWED_ORIGINS", "AO_TELEMETRY_EVENTS"} {
+	for _, k := range []string{"AO_PORT", "AO_REQUEST_TIMEOUT", "AO_SHUTDOWN_TIMEOUT", "AO_RUN_FILE", "AO_DATA_DIR", "AO_AGENT", "AO_ALLOWED_ORIGINS", "AO_TELEMETRY_EVENTS", "AO_TELEMETRY_METRICS", "AO_TELEMETRY_REMOTE", "AO_TELEMETRY_POSTHOG_KEY", "AO_TELEMETRY_POSTHOG_HOST", "AO_TELEMETRY_DISABLED_EVENTS", "AO_TELEMETRY_APP_VERSION", "AO_HARNESS_UPDATE_CHECKS", "AO_HARNESS_UPDATE_INTERVAL"} {
 		t.Setenv(k, "")
 	}
 
@@ -49,11 +50,14 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.DataDir != wantDataDir {
 		t.Errorf("DataDir = %q, want %q", cfg.DataDir, wantDataDir)
 	}
-	if cfg.LocalEvents {
-		t.Fatal("local diagnostics must be off by default")
-	}
 	if wantStateDir := filepath.Join(homeDir, ".ao"); cfg.StateDir != wantStateDir {
 		t.Errorf("StateDir = %q, want %q", cfg.StateDir, wantStateDir)
+	}
+	if cfg.Telemetry.Remote != TelemetryRemoteOff || cfg.Telemetry.PostHogHost != DefaultTelemetryPostHogHost {
+		t.Fatalf("Telemetry defaults = %+v", cfg.Telemetry)
+	}
+	if cfg.Telemetry.EventsExplicit {
+		t.Fatal("Telemetry.EventsExplicit = true for an absent setting")
 	}
 }
 
@@ -100,6 +104,10 @@ func TestLoadOverrides(t *testing.T) {
 	t.Setenv("AO_RUN_FILE", runFilePath)
 	t.Setenv("AO_DATA_DIR", dataDir)
 	t.Setenv("AO_TELEMETRY_EVENTS", "on")
+	t.Setenv("AO_TELEMETRY_METRICS", "off")
+	t.Setenv("AO_TELEMETRY_REMOTE", "posthog")
+	t.Setenv("AO_TELEMETRY_POSTHOG_KEY", "phc_test")
+	t.Setenv("AO_TELEMETRY_POSTHOG_HOST", "https://eu.i.posthog.com")
 
 	cfg, err := Load()
 	if err != nil {
@@ -123,8 +131,14 @@ func TestLoadOverrides(t *testing.T) {
 	if cfg.StateDir != dataDir {
 		t.Errorf("StateDir = %q, want explicit DataDir %q", cfg.StateDir, dataDir)
 	}
-	if !cfg.LocalEvents {
-		t.Fatal("local diagnostic events not enabled")
+	if !cfg.Telemetry.Events || cfg.Telemetry.Metrics {
+		t.Fatalf("Telemetry toggles = %+v", cfg.Telemetry)
+	}
+	if !cfg.Telemetry.EventsExplicit {
+		t.Fatal("Telemetry.EventsExplicit = false for AO_TELEMETRY_EVENTS=on")
+	}
+	if cfg.Telemetry.Remote != TelemetryRemotePostHog || cfg.Telemetry.PostHogKey != "phc_test" || cfg.Telemetry.PostHogHost != "https://eu.i.posthog.com" {
+		t.Fatalf("Telemetry remote = %+v", cfg.Telemetry)
 	}
 }
 
@@ -144,6 +158,8 @@ func TestLoadInvalid(t *testing.T) {
 		{"null origin", map[string]string{"AO_ALLOWED_ORIGINS": "app://renderer,null"}},
 		{"wildcard origin", map[string]string{"AO_ALLOWED_ORIGINS": "*"}},
 		{"bad telemetry events", map[string]string{"AO_TELEMETRY_EVENTS": "maybe"}},
+		{"bad telemetry metrics", map[string]string{"AO_TELEMETRY_METRICS": "maybe"}},
+		{"bad telemetry remote", map[string]string{"AO_TELEMETRY_REMOTE": "otlp"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -191,6 +207,49 @@ func TestLoadAllowedOrigins(t *testing.T) {
 			}
 		}
 	})
+}
+
+// The kill switch and the supervisor-supplied version are user-visible
+// boundaries: the daemon reads them from the environment the desktop app hands
+// it, so a parsing regression here silently disables the switch.
+func TestLoadTelemetryDisabledEventsAndAppVersion(t *testing.T) {
+	t.Setenv("AO_TELEMETRY_DISABLED_EVENTS", " ao.v2.app.active , ao.renderer.* ,, ")
+	t.Setenv("AO_TELEMETRY_APP_VERSION", "  0.11.2  ")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []string{"ao.v2.app.active", "ao.renderer.*"}
+	if len(cfg.Telemetry.DisabledEvents) != len(want) {
+		t.Fatalf("DisabledEvents = %#v, want %#v", cfg.Telemetry.DisabledEvents, want)
+	}
+	for i, name := range want {
+		if cfg.Telemetry.DisabledEvents[i] != name {
+			t.Fatalf("DisabledEvents[%d] = %q, want %q", i, cfg.Telemetry.DisabledEvents[i], name)
+		}
+	}
+	if cfg.Telemetry.AppVersion != "0.11.2" {
+		t.Fatalf("AppVersion = %q, want trimmed 0.11.2", cfg.Telemetry.AppVersion)
+	}
+}
+
+// An unparseable or blank list must never stop the daemon booting: the switch
+// has to be usable in a hurry, so a bad entry is inert rather than fatal.
+func TestLoadTelemetryDisabledEventsBlankIsInert(t *testing.T) {
+	t.Setenv("AO_TELEMETRY_DISABLED_EVENTS", " , , ")
+	t.Setenv("AO_TELEMETRY_APP_VERSION", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Telemetry.DisabledEvents) != 0 {
+		t.Fatalf("DisabledEvents = %#v, want empty", cfg.Telemetry.DisabledEvents)
+	}
+	if cfg.Telemetry.AppVersion != "" {
+		t.Fatalf("AppVersion = %q, want empty", cfg.Telemetry.AppVersion)
+	}
 }
 
 func TestLoadOfferingDefaults(t *testing.T) {
@@ -466,5 +525,89 @@ func TestLoadTrackerIntakeRejectsGarbage(t *testing.T) {
 	t.Setenv("AO_TRACKER_INTAKE", "maybe")
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() = nil error, want error for malformed AO_TRACKER_INTAKE")
+	}
+}
+
+// The daemon proxies desktop requests to the agent browser, so it may only
+// ever point at this host.
+func TestLoadAgentBrowserURL(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want string
+	}{
+		{"http://127.0.0.1:8080", "http://127.0.0.1:8080"},
+		{" http://localhost:8080/ ", "http://localhost:8080"},
+		{"http://10.0.0.5:8080", ""},
+		{"http://example.com:8080", ""},
+		{"https://127.0.0.1:8080", ""},
+		{"http://user:pw@127.0.0.1:8080", ""},
+		{"http://127.0.0.1:8080/?token=x", ""},
+	} {
+		t.Setenv("AO_AGENT_BROWSER_URL", tc.raw)
+		t.Setenv("AO_AGENT_BROWSER_TOKEN", "rb-secret")
+		cfg, err := Load()
+		if tc.want == "" {
+			if err == nil {
+				t.Errorf("%q: loaded, want an error", tc.raw)
+			}
+			continue
+		}
+		if err != nil || cfg.AgentBrowserURL != tc.want || cfg.AgentBrowserToken != "rb-secret" {
+			t.Errorf("%q: got %q, %q, %v; want %q", tc.raw, cfg.AgentBrowserURL, cfg.AgentBrowserToken, err, tc.want)
+		}
+	}
+}
+
+// The agent browser refuses every request without its exact token: a padded
+// one would never match, and a missing one must stop the daemon with a reason
+// rather than leave the agent tab silently empty.
+func TestLoadAgentBrowserToken(t *testing.T) {
+	t.Setenv("AO_AGENT_BROWSER_URL", "http://127.0.0.1:8080")
+	t.Setenv("AO_AGENT_BROWSER_TOKEN", " rb-secret\n")
+	if cfg, err := Load(); err != nil || cfg.AgentBrowserToken != "rb-secret" {
+		t.Errorf("padded token: got %q, %v; want rb-secret", cfg.AgentBrowserToken, err)
+	}
+	for _, token := range []string{"", " \t"} {
+		t.Setenv("AO_AGENT_BROWSER_TOKEN", token)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "AO_AGENT_BROWSER_TOKEN") {
+			t.Errorf("token %q: got %v, want an error naming AO_AGENT_BROWSER_TOKEN", token, err)
+		}
+	}
+}
+
+func TestLoadHarnessUpdateChecksToggle(t *testing.T) {
+	t.Setenv("AO_HARNESS_UPDATE_CHECKS", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.HarnessUpdateChecks {
+		t.Fatal("harness update checks are off by default")
+	}
+	t.Setenv("AO_HARNESS_UPDATE_CHECKS", "off")
+	if cfg, err = Load(); err != nil || cfg.HarnessUpdateChecks {
+		t.Fatalf("AO_HARNESS_UPDATE_CHECKS=off: checks=%t err=%v", cfg.HarnessUpdateChecks, err)
+	}
+	t.Setenv("AO_HARNESS_UPDATE_CHECKS", "sometimes")
+	if _, err := Load(); err == nil {
+		t.Fatal("invalid AO_HARNESS_UPDATE_CHECKS value was accepted")
+	}
+}
+
+func TestLoadHarnessUpdateInterval(t *testing.T) {
+	t.Setenv("AO_HARNESS_UPDATE_INTERVAL", "")
+	cfg, err := Load()
+	if err != nil || cfg.HarnessUpdateInterval != DefaultHarnessUpdateInterval {
+		t.Fatalf("default interval = %s, err=%v; want %s", cfg.HarnessUpdateInterval, err, DefaultHarnessUpdateInterval)
+	}
+	t.Setenv("AO_HARNESS_UPDATE_INTERVAL", "12h")
+	if cfg, err = Load(); err != nil || cfg.HarnessUpdateInterval != 12*time.Hour {
+		t.Fatalf("12h interval = %s, err=%v", cfg.HarnessUpdateInterval, err)
+	}
+	for _, raw := range []string{"30m", "0s", "-1h", "soon"} {
+		t.Setenv("AO_HARNESS_UPDATE_INTERVAL", raw)
+		if _, err := Load(); err == nil {
+			t.Fatalf("AO_HARNESS_UPDATE_INTERVAL=%q was accepted", raw)
+		}
 	}
 }

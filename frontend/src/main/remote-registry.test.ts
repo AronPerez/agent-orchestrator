@@ -1,103 +1,126 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { RemoteRegistry } from "./remote-registry";
 
-const a = { label: "workbox", url: "http://192.0.2.1:3011", password: "pw" };
-const b = { label: "mini", url: "http://192.0.2.9:3011", password: "pw2" };
+const workbox = { label: "workbox", url: "http://192.0.2.1:3011", password: "secret", hostId: "h_workbox" };
 
-function rig() {
-	const closes: string[] = [];
-	const start = vi.fn(async (e: typeof a) => ({
-		base: `http://127.0.0.1:9/${e.label}`,
-		url: e.url,
-		close: async () => {
-			closes.push(e.url);
-		},
-	}));
-	return { start, closes };
-}
-
-describe("RemoteRegistry", () => {
-	it("keeps several hosts connected at once", async () => {
-		const { start } = rig();
-		const registry = new RemoteRegistry(start);
-		await registry.connect(a);
-		await registry.connect(b);
-		expect(registry.views().map((v) => v.label).sort()).toEqual(["mini", "workbox"]);
-		expect(start).toHaveBeenCalledTimes(2);
+describe("connected remote hosts", () => {
+	it("returns no live connection for an unpaired legacy host", () => {
+		const registry = new RemoteRegistry(async () => { throw new Error("must not start a proxy"); });
+		expect(registry.connected({ label: workbox.label, url: workbox.url, password: workbox.password })).toBeUndefined();
 	});
 
-	it("connecting the same url twice reuses the live proxy", async () => {
-		const { start } = rig();
-		const registry = new RemoteRegistry(start);
-		const first = await registry.connect(a);
-		const second = await registry.connect(a);
-		expect(second.base).toBe(first.base);
-		expect(start).toHaveBeenCalledTimes(1);
-		expect(registry.views()).toHaveLength(1);
-	});
-
-	it("disconnect closes only that host's proxy", async () => {
-		const { start, closes } = rig();
-		const registry = new RemoteRegistry(start);
-		await registry.connect(a);
-		await registry.connect(b);
-		await registry.disconnect(a.url);
-		expect(closes).toEqual([a.url]);
-		expect(registry.views().map((v) => v.label)).toEqual(["mini"]);
-	});
-
-	it("never exposes the password", async () => {
-		const { start } = rig();
-		const registry = new RemoteRegistry(start);
-		await registry.connect(a);
-		expect(JSON.stringify(registry.views())).not.toContain("pw");
-	});
-
-	it("a host that fails to start does not join the registry", async () => {
-		const start = vi.fn(async () => {
-			throw new Error("not a daemon");
-		});
-		const registry = new RemoteRegistry(start);
-		await expect(registry.connect(a)).rejects.toThrow(/not a daemon/);
-		expect(registry.views()).toEqual([]);
-	});
-
-	it("starts one runtime link per connected host and disposes it on disconnect", async () => {
-		const { start } = rig();
-		const disposed: string[] = [];
-		const started: string[] = [];
-		const registry = new RemoteRegistry(start, (entry, proxy) => {
-			started.push(`${entry.url}|${proxy.base}`);
-			return { connected: true, dispose: () => disposed.push(entry.url) };
-		});
-		await registry.connect(a);
-		await registry.connect(a); // reuse — no second link
-		expect(started).toEqual([`${a.url}|http://127.0.0.1:9/workbox`]);
-
-		await registry.disconnect(a.url);
-		expect(disposed).toEqual([a.url]);
-	});
-
-	it("disposes every runtime link on closeAll", async () => {
-		const { start } = rig();
-		const disposed: string[] = [];
-		const registry = new RemoteRegistry(start, (entry) => ({
-			connected: true,
-			dispose: () => disposed.push(entry.url),
+	it("closes all proxies without disabling later connections", async () => {
+		let closed = 0;
+		const registry = new RemoteRegistry(async () => ({
+			base: "http://127.0.0.1:7654/token",
+			previewUrl: (_sessionId, sourceUrl) => sourceUrl,
+			resolvePreviewUrl: (_sessionId, viewedUrl) => viewedUrl,
+			close: async () => { closed++; },
 		}));
-		await registry.connect(a);
-		await registry.connect(b);
+		await registry.connect(workbox);
+		await registry.disconnectAll();
+		expect(closed).toBe(1);
+		await expect(registry.connect(workbox)).resolves.toMatchObject({ hostId: workbox.hostId });
 		await registry.closeAll();
-		expect(disposed.sort()).toEqual([a.url, b.url].sort());
+		expect(closed).toBe(2);
 	});
 
-	it("closeAll tears every proxy down", async () => {
-		const { start, closes } = rig();
-		const registry = new RemoteRegistry(start);
-		await registry.connect(a);
-		await registry.connect(b);
+	it.each(["", "user-b"])("retires other accounts' proxies but keeps local pairings (account %s)", async (account) => {
+		const closed: string[] = [];
+		const registry = new RemoteRegistry(async (entry) => ({
+			base: `http://127.0.0.1:7654/${entry.hostId}`,
+			previewUrl: (_sessionId, sourceUrl) => sourceUrl,
+			resolvePreviewUrl: (_sessionId, viewedUrl) => viewedUrl,
+			close: async () => { closed.push(entry.hostId!); },
+		}));
+		const imported = { hostId: "h_imported", label: "Imported", url: "https://imported.example", password: "a".repeat(64), accountUserId: "user-a" };
+		await registry.connect(workbox);
+		await registry.connect(imported);
+		await registry.disconnectOtherAccounts("user-a");
+		expect(closed).toEqual([]);
+		await registry.disconnectOtherAccounts(account);
+		expect(closed).toEqual(["h_imported"]);
+		expect(registry.connected(workbox)).toBeDefined();
+		expect(registry.connected(imported)).toBeUndefined();
 		await registry.closeAll();
-		expect(closes.sort()).toEqual([a.url, b.url].sort());
-		expect(registry.views()).toEqual([]);
+		expect(closed).toEqual(["h_imported", "h_workbox"]);
+	});
+
+	it("keeps two different machines connected at once", async () => {
+		const closed: string[] = [];
+		const registry = new RemoteRegistry(async (entry) => ({
+			base: `http://127.0.0.1:7654/${entry.hostId}`,
+			previewUrl: (_sessionId, sourceUrl) => sourceUrl,
+			resolvePreviewUrl: (_sessionId, viewedUrl) => viewedUrl,
+			close: async () => { closed.push(entry.url); },
+		}));
+		await registry.connect(workbox);
+		await registry.connect({ hostId: "h_mini", label: "mini", url: "http://192.0.2.9:3011", password: "other" });
+		expect(closed).toEqual([]);
+		await registry.closeAll();
+		expect(closed).toEqual([workbox.url, "http://192.0.2.9:3011"]);
+	});
+
+	it("closes an in-flight connection before app shutdown finishes", async () => {
+		let finishStart!: (value: { base: string; previewUrl: (_sessionId: string, sourceUrl: string) => string; resolvePreviewUrl: (_sessionId: string, viewedUrl: string) => string; close: () => Promise<void> }) => void;
+		let closeCount = 0;
+		const registry = new RemoteRegistry(async () => new Promise((resolve) => { finishStart = resolve; }));
+		const connecting = registry.connect(workbox);
+		const shutdown = registry.closeAll();
+		await Promise.resolve();
+		finishStart({
+			base: "http://127.0.0.1:7654/token",
+			previewUrl: (_sessionId, sourceUrl) => sourceUrl,
+			resolvePreviewUrl: (_sessionId, viewedUrl) => viewedUrl,
+			close: async () => { closeCount++; },
+		});
+		await Promise.all([connecting, shutdown]);
+		expect(closeCount).toBe(1);
+		await expect(registry.connect(workbox)).rejects.toThrow(/closing/);
+	});
+
+	it("replaces a LAN proxy when the same host connects by Tailscale", async () => {
+		const closed: string[] = [];
+		const registry = new RemoteRegistry(async (entry) => ({
+			base: `http://127.0.0.1:7654/${entry.url.includes("https") ? "tailscale" : "lan"}`,
+			previewUrl: (_sessionId, sourceUrl) => sourceUrl,
+			resolvePreviewUrl: (_sessionId, viewedUrl) => viewedUrl,
+			close: async () => { closed.push(entry.url); },
+		}));
+		await registry.connect(workbox);
+		const updated = await registry.connect({ ...workbox, url: "https://workbox.tailnet" });
+		expect(updated).toEqual({
+			hostId: "h_workbox",
+			label: "workbox",
+			url: "https://workbox.tailnet",
+			base: "http://127.0.0.1:7654/tailscale",
+		});
+		expect(closed).toEqual([workbox.url]);
+		await registry.closeAll();
+		expect(closed).toEqual([workbox.url, "https://workbox.tailnet"]);
+	});
+	it("does not leave a proxy serving after a connect and disconnect overlap", async () => {
+		let finishStart!: (value: { base: string; previewUrl: (_sessionId: string, sourceUrl: string) => string; resolvePreviewUrl: (_sessionId: string, viewedUrl: string) => string; close: () => Promise<void> }) => void;
+		let startCount = 0;
+		let closeCount = 0;
+		const registry = new RemoteRegistry(async () => {
+			startCount++;
+			return new Promise((resolve) => {
+				finishStart = resolve;
+			});
+		});
+		const first = registry.connect(workbox);
+		const second = registry.connect(workbox);
+		const disconnect = registry.disconnect(workbox.url);
+		await Promise.resolve();
+		finishStart({
+			base: "http://127.0.0.1:7654/token",
+			previewUrl: (_sessionId, sourceUrl) => sourceUrl,
+			resolvePreviewUrl: (_sessionId, viewedUrl) => viewedUrl,
+			close: async () => { closeCount++; },
+		});
+		await Promise.all([first, second, disconnect]);
+		expect(startCount).toBe(1);
+		expect(closeCount).toBe(1);
 	});
 });

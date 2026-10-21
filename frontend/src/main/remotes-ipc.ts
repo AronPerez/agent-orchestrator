@@ -10,18 +10,18 @@ import {
 
 // What the renderer is allowed to see. The password stays in the main process.
 export type RemoteHostView = {
+	hostId: string;
 	label: string;
 	url: string;
-	/** Present when the user configured SSH-attach for this host. Not a secret. */
-	sshDestination?: string;
+	accountUserId?: string;
 };
 
 export function toHostViews(entries: RemoteEntry[]): RemoteHostView[] {
-	return entries.map(({ label, url, sshDestination }) => ({ label, url, ...(sshDestination ? { sshDestination } : {}) }));
+	return entries.map(({ hostId, label, url, accountUserId }) => ({ hostId: hostId ?? "", label, url, ...(accountUserId ? { accountUserId } : {}) }));
 }
 
-export async function findRemote(path: string, url: string): Promise<RemoteEntry> {
-	const entry = (await readRemotes(path)).find((candidate) => candidate.url === url);
+export async function findRemote(path: string, url: string, hostId?: string): Promise<RemoteEntry> {
+	const entry = (await readRemotes(path)).find((candidate) => candidate.url === url && (!hostId || candidate.hostId === hostId));
 	if (!entry) throw new Error(`no saved host for ${url}`);
 	return entry;
 }

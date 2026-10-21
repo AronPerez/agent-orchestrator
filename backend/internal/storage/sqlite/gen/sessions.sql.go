@@ -178,7 +178,8 @@ SELECT id, project_id, num, issue_id, kind, harness,
     requested_output,
     provision_state, provision_error, provision_steps, branch_state, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
-    hibernated_at
+    hibernated_at, client_request_id, client_request_hash, client_request_committed,
+    runtime_released_launch_id
 FROM sessions WHERE id = ?
 `
 
@@ -251,6 +252,10 @@ type GetSessionRow struct {
 	ClaudeActivityFacts              string
 	CodexActivityFacts               string
 	HibernatedAt                     sql.NullTime
+	ClientRequestID                  string
+	ClientRequestHash                string
+	ClientRequestCommitted           bool
+	RuntimeReleasedLaunchID          string
 }
 
 func (q *Queries) GetSession(ctx context.Context, id domain.SessionID) (GetSessionRow, error) {
@@ -325,6 +330,10 @@ func (q *Queries) GetSession(ctx context.Context, id domain.SessionID) (GetSessi
 		&i.ClaudeActivityFacts,
 		&i.CodexActivityFacts,
 		&i.HibernatedAt,
+		&i.ClientRequestID,
+		&i.ClientRequestHash,
+		&i.ClientRequestCommitted,
+		&i.RuntimeReleasedLaunchID,
 	)
 	return i, err
 }
@@ -346,7 +355,8 @@ SELECT id, project_id, num, issue_id, kind, harness,
     requested_output,
     provision_state, provision_error, provision_steps, branch_state, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
-    hibernated_at
+    hibernated_at, client_request_id, client_request_hash, client_request_committed,
+    runtime_released_launch_id
 FROM sessions WHERE automation_run_id = ?
 `
 
@@ -419,6 +429,10 @@ type GetSessionByAutomationRunIDRow struct {
 	ClaudeActivityFacts              string
 	CodexActivityFacts               string
 	HibernatedAt                     sql.NullTime
+	ClientRequestID                  string
+	ClientRequestHash                string
+	ClientRequestCommitted           bool
+	RuntimeReleasedLaunchID          string
 }
 
 func (q *Queries) GetSessionByAutomationRunID(ctx context.Context, automationRunID *domain.AutomationRunID) (GetSessionByAutomationRunIDRow, error) {
@@ -493,6 +507,10 @@ func (q *Queries) GetSessionByAutomationRunID(ctx context.Context, automationRun
 		&i.ClaudeActivityFacts,
 		&i.CodexActivityFacts,
 		&i.HibernatedAt,
+		&i.ClientRequestID,
+		&i.ClientRequestHash,
+		&i.ClientRequestCommitted,
+		&i.RuntimeReleasedLaunchID,
 	)
 	return i, err
 }
@@ -677,7 +695,8 @@ SELECT id, project_id, num, issue_id, kind, harness,
     requested_output,
     provision_state, provision_error, provision_steps, branch_state, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
-    hibernated_at
+    hibernated_at, client_request_id, client_request_hash, client_request_committed,
+    runtime_released_launch_id
 FROM sessions ORDER BY project_id, num
 `
 
@@ -750,6 +769,10 @@ type ListAllSessionsRow struct {
 	ClaudeActivityFacts              string
 	CodexActivityFacts               string
 	HibernatedAt                     sql.NullTime
+	ClientRequestID                  string
+	ClientRequestHash                string
+	ClientRequestCommitted           bool
+	RuntimeReleasedLaunchID          string
 }
 
 func (q *Queries) ListAllSessions(ctx context.Context) ([]ListAllSessionsRow, error) {
@@ -830,6 +853,10 @@ func (q *Queries) ListAllSessions(ctx context.Context) ([]ListAllSessionsRow, er
 			&i.ClaudeActivityFacts,
 			&i.CodexActivityFacts,
 			&i.HibernatedAt,
+			&i.ClientRequestID,
+			&i.ClientRequestHash,
+			&i.ClientRequestCommitted,
+			&i.RuntimeReleasedLaunchID,
 		); err != nil {
 			return nil, err
 		}
@@ -894,7 +921,8 @@ SELECT id, project_id, num, issue_id, kind, harness,
     requested_output,
     provision_state, provision_error, provision_steps, branch_state, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
-    hibernated_at
+    hibernated_at, client_request_id, client_request_hash, client_request_committed,
+    runtime_released_launch_id
 FROM sessions WHERE project_id IS ? ORDER BY num
 `
 
@@ -967,6 +995,10 @@ type ListSessionsByProjectRow struct {
 	ClaudeActivityFacts              string
 	CodexActivityFacts               string
 	HibernatedAt                     sql.NullTime
+	ClientRequestID                  string
+	ClientRequestHash                string
+	ClientRequestCommitted           bool
+	RuntimeReleasedLaunchID          string
 }
 
 func (q *Queries) ListSessionsByProject(ctx context.Context, projectID *domain.ProjectID) ([]ListSessionsByProjectRow, error) {
@@ -1047,224 +1079,10 @@ func (q *Queries) ListSessionsByProject(ctx context.Context, projectID *domain.P
 			&i.ClaudeActivityFacts,
 			&i.CodexActivityFacts,
 			&i.HibernatedAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listSessionsPage = `-- name: ListSessionsPage :many
-SELECT id, project_id, num, issue_id, kind, harness,
-    activity_state, activity_last_at, is_terminated, branch, workspace_path,
-    runtime_handle_id, agent_session_id, agent_session_id_launch_id, native_identity_observed_at, prompt,
-    created_at, updated_at, revision, display_name, first_signal_at, preview_url,
-    preview_revision, cleanup_generation, runtime_launch_id,
-    workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
-    reviewer_harness, reviewer_agent_config, is_pinned, pinned_at,
-    session_mode, provider_conversation_id, controller_generation, browser_capability_verifier,
-    artifact_dir, session_output_type,
-    latest_user_prompt, latest_user_prompt_at, latest_interaction_at, latest_assistant_update, latest_assistant_update_at,
-    conversation_checkpoint_state, conversation_checkpoint_generation, conversation_checkpoint_native_id,
-    conversation_checkpoint_unsettled, conversation_checkpoint_turn_id, native_checkpoint_evidence,
-    native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions,
-    requested_output,
-    provision_state, provision_error, provision_steps, branch_state, is_task_preparation, automation_run_id, automation_launch_completed,
-    claude_activity_facts, codex_activity_facts,
-    hibernated_at
-FROM sessions
-WHERE (CAST(?1 AS TEXT) = '' OR project_id = CAST(?1 AS TEXT))
-  AND is_task_preparation = 0
-  AND (CAST(?2 AS INTEGER) = -1
-       OR is_terminated = (CAST(?2 AS INTEGER) = 1))
-  AND (CAST(?3 AS INTEGER) = 0 OR kind = 'orchestrator')
-  AND (CAST(?4 AS INTEGER) = 0
-       OR updated_at < ?5
-       OR (updated_at = ?5 AND id < ?6))
-ORDER BY updated_at DESC, id DESC
-LIMIT ?7
-`
-
-type ListSessionsPageParams struct {
-	Project          string
-	Terminated       int64
-	OrchestratorOnly int64
-	HasCursor        int64
-	BeforeUpdatedAt  time.Time
-	BeforeID         domain.SessionID
-	PageLimit        int64
-}
-
-type ListSessionsPageRow struct {
-	ID                               domain.SessionID
-	ProjectID                        *domain.ProjectID
-	Num                              int64
-	IssueID                          domain.IssueID
-	Kind                             domain.SessionKind
-	Harness                          domain.AgentHarness
-	ActivityState                    domain.ActivityState
-	ActivityLastAt                   time.Time
-	IsTerminated                     bool
-	Branch                           string
-	WorkspacePath                    string
-	RuntimeHandleID                  string
-	AgentSessionID                   string
-	AgentSessionIDLaunchID           string
-	NativeIdentityObservedAt         sql.NullTime
-	Prompt                           string
-	CreatedAt                        time.Time
-	UpdatedAt                        time.Time
-	Revision                         int64
-	DisplayName                      string
-	FirstSignalAt                    sql.NullTime
-	PreviewURL                       string
-	PreviewRevision                  int64
-	CleanupGeneration                int64
-	RuntimeLaunchID                  string
-	WorkspaceRepoPath                string
-	TerminateOnPRMerge               bool
-	DiffBaseSha                      string
-	DiffBaseRef                      string
-	ReviewerHarness                  domain.ReviewerHarness
-	ReviewerAgentConfig              string
-	IsPinned                         bool
-	PinnedAt                         sql.NullTime
-	SessionMode                      domain.SessionMode
-	ProviderConversationID           string
-	ControllerGeneration             string
-	BrowserCapabilityVerifier        string
-	ArtifactDir                      string
-	SessionOutputType                string
-	LatestUserPrompt                 string
-	LatestUserPromptAt               sql.NullTime
-	LatestInteractionAt              sql.NullTime
-	LatestAssistantUpdate            string
-	LatestAssistantUpdateAt          sql.NullTime
-	ConversationCheckpointState      domain.ConversationCheckpointState
-	ConversationCheckpointGeneration string
-	ConversationCheckpointNativeID   string
-	ConversationCheckpointUnsettled  bool
-	ConversationCheckpointTurnID     string
-	NativeCheckpointEvidence         string
-	NativeTranscriptPath             string
-	AutoInjectReview                 bool
-	AutoInjectCI                     bool
-	AutoReviewEnabled                bool
-	Model                            string
-	Effort                           string
-	SessionPermissions               string
-	RequestedOutput                  string
-	ProvisionState                   domain.SessionProvisionState
-	ProvisionError                   string
-	ProvisionSteps                   string
-	BranchState                      string
-	IsTaskPreparation                bool
-	AutomationRunID                  *domain.AutomationRunID
-	AutomationLaunchCompleted        bool
-	ClaudeActivityFacts              string
-	CodexActivityFacts               string
-	HibernatedAt                     sql.NullTime
-}
-
-// One page of sessions, newest first, with every filter applied in SQL so a
-// page is a page. terminated: -1 any, 0 live only, 1 terminated only.
-// has_cursor 0 lists from the top; otherwise the keyset (before_updated_at,
-// before_id) is the last row of the previous page.
-// Standalone sessions have a NULL project_id, so only the unfiltered list has them.
-// Hidden task-preparation rows are never listed (matchesSessionFilter agrees).
-func (q *Queries) ListSessionsPage(ctx context.Context, arg ListSessionsPageParams) ([]ListSessionsPageRow, error) {
-	rows, err := q.db.QueryContext(ctx, listSessionsPage,
-		arg.Project,
-		arg.Terminated,
-		arg.OrchestratorOnly,
-		arg.HasCursor,
-		arg.BeforeUpdatedAt,
-		arg.BeforeID,
-		arg.PageLimit,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []ListSessionsPageRow{}
-	for rows.Next() {
-		var i ListSessionsPageRow
-		if err := rows.Scan(
-			&i.ID,
-			&i.ProjectID,
-			&i.Num,
-			&i.IssueID,
-			&i.Kind,
-			&i.Harness,
-			&i.ActivityState,
-			&i.ActivityLastAt,
-			&i.IsTerminated,
-			&i.Branch,
-			&i.WorkspacePath,
-			&i.RuntimeHandleID,
-			&i.AgentSessionID,
-			&i.AgentSessionIDLaunchID,
-			&i.NativeIdentityObservedAt,
-			&i.Prompt,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-			&i.Revision,
-			&i.DisplayName,
-			&i.FirstSignalAt,
-			&i.PreviewURL,
-			&i.PreviewRevision,
-			&i.CleanupGeneration,
-			&i.RuntimeLaunchID,
-			&i.WorkspaceRepoPath,
-			&i.TerminateOnPRMerge,
-			&i.DiffBaseSha,
-			&i.DiffBaseRef,
-			&i.ReviewerHarness,
-			&i.ReviewerAgentConfig,
-			&i.IsPinned,
-			&i.PinnedAt,
-			&i.SessionMode,
-			&i.ProviderConversationID,
-			&i.ControllerGeneration,
-			&i.BrowserCapabilityVerifier,
-			&i.ArtifactDir,
-			&i.SessionOutputType,
-			&i.LatestUserPrompt,
-			&i.LatestUserPromptAt,
-			&i.LatestInteractionAt,
-			&i.LatestAssistantUpdate,
-			&i.LatestAssistantUpdateAt,
-			&i.ConversationCheckpointState,
-			&i.ConversationCheckpointGeneration,
-			&i.ConversationCheckpointNativeID,
-			&i.ConversationCheckpointUnsettled,
-			&i.ConversationCheckpointTurnID,
-			&i.NativeCheckpointEvidence,
-			&i.NativeTranscriptPath,
-			&i.AutoInjectReview,
-			&i.AutoInjectCI,
-			&i.AutoReviewEnabled,
-			&i.Model,
-			&i.Effort,
-			&i.SessionPermissions,
-			&i.RequestedOutput,
-			&i.ProvisionState,
-			&i.ProvisionError,
-			&i.ProvisionSteps,
-			&i.BranchState,
-			&i.IsTaskPreparation,
-			&i.AutomationRunID,
-			&i.AutomationLaunchCompleted,
-			&i.ClaudeActivityFacts,
-			&i.CodexActivityFacts,
-			&i.HibernatedAt,
+			&i.ClientRequestID,
+			&i.ClientRequestHash,
+			&i.ClientRequestCommitted,
+			&i.RuntimeReleasedLaunchID,
 		); err != nil {
 			return nil, err
 		}
@@ -1694,6 +1512,43 @@ func (q *Queries) SetSessionHibernated(ctx context.Context, arg SetSessionHibern
 	return result.RowsAffected()
 }
 
+const setSessionNamedWorkspace = `-- name: SetSessionNamedWorkspace :execrows
+UPDATE sessions SET
+    branch = ?1,
+    workspace_path = ?2,
+    workspace_repo_path = ?3,
+    updated_at = ?4
+WHERE id = ?5 AND runtime_handle_id = '' AND provider_conversation_id = ''
+  AND is_terminated = 0 AND is_task_preparation = 0
+  AND (workspace_path = '' OR workspace_path = ?6 OR workspace_path = ?2)
+`
+
+type SetSessionNamedWorkspaceParams struct {
+	Branch            string
+	WorkspacePath     string
+	WorkspaceRepoPath string
+	UpdatedAt         time.Time
+	ID                domain.SessionID
+	ExpectedPath      string
+}
+
+// Naming and recovery may update an unlaunched Chat or TUI checkout, but cannot
+// replace another path adopted since the caller read the session.
+func (q *Queries) SetSessionNamedWorkspace(ctx context.Context, arg SetSessionNamedWorkspaceParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, setSessionNamedWorkspace,
+		arg.Branch,
+		arg.WorkspacePath,
+		arg.WorkspaceRepoPath,
+		arg.UpdatedAt,
+		arg.ID,
+		arg.ExpectedPath,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const setSessionPinned = `-- name: SetSessionPinned :execrows
 UPDATE sessions SET is_pinned = ?, pinned_at = ?, updated_at = ? WHERE id = ?
 `
@@ -1853,6 +1708,27 @@ func (q *Queries) SetSessionReviewerConfig(ctx context.Context, arg SetSessionRe
 		arg.UpdatedAt,
 		arg.ID,
 	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const setSessionRuntimeReleased = `-- name: SetSessionRuntimeReleased :execrows
+UPDATE sessions
+SET runtime_released_launch_id = ?1
+WHERE id = ?2 AND runtime_launch_id = ?1
+`
+
+type SetSessionRuntimeReleasedParams struct {
+	LaunchID string
+	ID       domain.SessionID
+}
+
+// Narrow write for an agent exit that keeps its session: names only the
+// released launch, and only while that launch is still the session's own.
+func (q *Queries) SetSessionRuntimeReleased(ctx context.Context, arg SetSessionRuntimeReleasedParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, setSessionRuntimeReleased, arg.LaunchID, arg.ID)
 	if err != nil {
 		return 0, err
 	}

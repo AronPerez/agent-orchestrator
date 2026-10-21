@@ -16,7 +16,6 @@ package chat
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -30,13 +29,10 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
-// nativeHistorySettleLimit is a var only so tests can exercise the deadline arm
-// of readNativeHistory without waiting it out. Production never reassigns it.
-var nativeHistorySettleLimit = 45 * time.Second
-
 const (
 	nativeHistorySettlePoll    = 100 * time.Millisecond
 	nativeHistorySettlePollMax = 2 * time.Second
+	nativeHistorySettleLimit   = 45 * time.Second
 	branchHandoffReportLimit   = 5 * time.Second
 	retryClientMessagePrefix   = "retry-attempt/"
 )
@@ -56,6 +52,7 @@ type Store interface {
 	CreateReviewConversation(ctx context.Context, id, reviewID string, project domain.ProjectID, session domain.SessionID, now time.Time) (domain.ConversationRecord, error)
 	OpenNativeConversation(ctx context.Context, id string, scope domain.ConversationScope, project domain.ProjectID, session domain.SessionID, now time.Time) (domain.ConversationRecord, error)
 	CreateProjectConversationWithContextReset(ctx context.Context, id string, project domain.ProjectID, session domain.SessionID, reset domain.ConversationActivity, now time.Time) (domain.ConversationRecord, error)
+	CreateProjectConversationAdoptingQueue(ctx context.Context, id string, project domain.ProjectID, session domain.SessionID, reset domain.ConversationActivity, now time.Time) (domain.ConversationRecord, error)
 	ConversationForSession(ctx context.Context, session domain.SessionID) (domain.ConversationRecord, error)
 	ClaimChatControllerGeneration(ctx context.Context, session domain.SessionID, generation string) error
 	ClaimReviewChatController(ctx context.Context, reviewID, providerID, generation string, now time.Time) (bool, error)
@@ -206,6 +203,7 @@ type Controller struct {
 
 	conv                   ports.ChatConversation
 	store                  Store
+	continuationReader     SnapshotReader
 	activity               ActivityRecorder
 	log                    *slog.Logger
 	newID                  IDFactory
@@ -274,12 +272,17 @@ type Controller struct {
 	// Interface drain keeps dispatching accepted rows; interface interrupt and an
 	// idle branch mutation stop dispatch entirely. The target controller is not
 	// started until this controller reports quiescent and is closed.
-	handoff           controllerHandoff
-	branchHandoffDone chan struct{}
+	handoff controllerHandoff
+	// handoffInterrupted is the provider turn an interrupt-policy handoff
+	// stopped, so the move can say on that exact turn why it ended.
+	handoffInterrupted string
+	branchHandoffDone  chan struct{}
 	// preserveProviderOnStop is set before deliberate daemon detach. It prevents
 	// the closing controller from projecting a false provider exit or failing work
 	// that the detached host continues to run.
 	preserveProviderOnStop bool
+	transportInterrupted   bool
+	explicitClose          bool
 
 	// account, threadState and mcpServers are merged here before being written,
 	// because the provider reports each of them in pieces: account/updated carries
@@ -369,6 +372,7 @@ func newController(
 	now Clock,
 	onAccountChanged func(domain.SessionID, string, domain.AgentHarness),
 	onCodexCapacityChanged func(domain.SessionID, string, ports.CodexCapacityObservation),
+	reader SnapshotReader,
 ) *Controller {
 	c := &Controller{
 		sessionID:              sessionID,
@@ -378,6 +382,7 @@ func newController(
 		harness:                harness,
 		conv:                   conv,
 		store:                  store,
+		continuationReader:     reader,
 		activity:               activity,
 		log:                    log,
 		newID:                  newID,
@@ -562,7 +567,7 @@ func (p *nativeHistoryCheckpoint) captureAOHighWater(
 		}
 		if !message.Streaming && kind != "" && message.Sequence > turnEvidence[message.TurnID].sequence {
 			turnEvidence[message.TurnID] = nativeHistoryHighWater{
-				sequence: message.Sequence, providerItemID: message.ProviderItemID, kind: kind, text: message.Text,
+				sequence: message.Sequence, providerItemID: message.ProviderItemID, kind: kind, text: nativeHistoryMessageText(message),
 			}
 		}
 		if message.Role == domain.MessageRoleUser && message.Sequence > 0 &&
@@ -854,44 +859,6 @@ func nativeHistoryTextMatches(checkpoint, replayed string) bool {
 	return domain.NativeCheckpointTextMatches(checkpoint, replayed)
 }
 
-// staleHookFactsOnly reports whether the only thing standing between this replay
-// and an import is the provider-hook half of the checkpoint.
-//
-// AO FORK DIVERGENCE from upstream (#4120 / #4186 / #4466). Upstream treats every
-// mismatch as blocking and offers an explicit provider-history retry for
-// untrusted hook text. This fork keeps its own renderer, which has no such retry,
-// so we waive the untrusted hook-text dimensions only, and only where no further
-// provider observation is possible.
-//
-// WHY: latestUserPrompt/latestAssistantUpdate are a write-if-non-empty cache that
-// nothing reconciles. Any hook that failed to reach the daemon — every hook fired
-// while the daemon is restarting is dropped, and `ao hooks` exits 0 so the agent
-// is never disrupted — leaves a value the provider cannot reproduce, and no later
-// event repairs it. Measured on a live install: 96 of 120 TUI claude-code sessions
-// held a value appearing nowhere in their own transcript, so their TUI -> Chat
-// switch could never succeed. On ACP the replay is a frozen snapshot captured
-// during Resume, so that failure is permanent rather than merely slow.
-//
-// What we accept in exchange is a replay that may lag the newest terminal-side
-// turn: degraded but usable, and strictly better than a session that can never
-// enter Chat again.
-//
-// REVERT THIS once the renderer carries upstream's provider-history recovery
-// (TARGET_HISTORY_UNTRUSTED_TEXT_MISMATCH -> historyPolicy provider_history).
-// Fork issue #109.
-//
-// It requires that the provider itself reported a clean read — a genuinely
-// unsettled provider is not this case — and that every mismatch is untrusted hook
-// text, so AO's own high-water mark and trusted facts stay hard gates and history
-// AO already showed the user is never silently dropped.
-//
-// An empty replay is excluded: a provider that replays nothing at all has not
-// given us a stale thread, it has given us no thread, and importing that would
-// erase a conversation rather than lag it.
-func staleHookFactsOnly(required, providerClean bool, events []ports.ChatEvent, err error) bool {
-	return required && providerClean && len(events) > 0 && ports.ChatHistoryMismatchOnlyUntrustedText(err)
-}
-
 // readNativeHistory loads and validates the settled provider thread without
 // mutating AO's timeline. A pending provider boundary uses this split phase so
 // the caller can project the events inside the same transaction that publishes
@@ -924,9 +891,7 @@ func (c *Controller) readNativeHistory(
 	refresher, refreshable := reader.(ports.ChatHistoryRefresher)
 	sawUnsettled := false
 	var lastUnsettled error
-settle:
 	for refresh := 0; ; refresh++ {
-		providerClean := err == nil
 		if err == nil && required {
 			if mismatches := checkpoint.mismatches(
 				events, existingTurns, existingMessages, existingActivities,
@@ -957,13 +922,6 @@ settle:
 		sawUnsettled = true
 		lastUnsettled = err
 		if !refreshable {
-			// No further provider observation is possible, so this is the last
-			// resort described above.
-			if staleHookFactsOnly(required, providerClean, events, err) {
-				c.log.Warn("importing native history despite unreachable provider hook facts",
-					"session", c.sessionID, "reason", "immutable replay settled; hook checkpoint cannot be reproduced")
-				break
-			}
 			return nil, fmt.Errorf("native conversation history snapshot is incomplete and cannot be refreshed: %w", err)
 		}
 
@@ -971,13 +929,6 @@ settle:
 		select {
 		case <-historyCtx.Done():
 			timer.Stop()
-			// The settle window is gone; nothing more will arrive. Labelled so the
-			// break leaves the loop rather than just this select.
-			if staleHookFactsOnly(required, providerClean, events, err) {
-				c.log.Warn("importing native history despite unreachable provider hook facts",
-					"session", c.sessionID, "reason", "settle window expired; hook checkpoint cannot be reproduced")
-				break settle
-			}
 			return nil, fmt.Errorf("wait for settled native conversation history: %w: %w",
 				lastUnsettled, historyCtx.Err())
 		case <-timer.C:
@@ -1100,6 +1051,26 @@ type nativeHistoryTurnIndex struct {
 	ordered          []*nativeHistoryTurn
 }
 
+// nativeHistoryMessageText restores AO-owned text context for native transcript
+// matching. Public message text stays short; opaque provider IDs can change on
+// load, so reconciliation must compare the exact prompt that was dispatched.
+func nativeHistoryMessageText(message domain.ConversationMessage) string {
+	if message.Role != domain.MessageRoleUser || !message.Continuation || message.DeliveryContentJSON == "" {
+		return message.Text
+	}
+	var content []ports.ChatContent
+	if json.Unmarshal([]byte(message.DeliveryContentJSON), &content) != nil {
+		return message.Text
+	}
+	internal := make([]ports.ChatContent, 0, len(content))
+	for _, block := range content {
+		if block.Internal && block.Type == "text" {
+			internal = append(internal, block)
+		}
+	}
+	return excerptDeliveryMessage(ports.ChatUserMessage{Text: message.Text, Content: internal}).Text
+}
+
 func indexNativeHistoryTurns(
 	existingTurns []domain.ConversationTurn,
 	existingMessages []domain.ConversationMessage,
@@ -1150,10 +1121,10 @@ func indexNativeHistoryTurns(
 		if candidate == nil {
 			continue
 		}
-		candidate.messages[nativeHistoryMessageFingerprint(message.Role, message.Text)]++
+		candidate.messages[nativeHistoryMessageFingerprint(message.Role, nativeHistoryMessageText(message))]++
 		rememberProviderItem(message.ProviderItemID, candidate)
 		if message.Role == domain.MessageRoleUser && candidate.text == "" {
-			candidate.text = message.Text
+			candidate.text = nativeHistoryMessageText(message)
 			candidate.clientMessage = message.ClientMessageID
 			candidate.providerItem = message.ProviderItemID
 		}
@@ -1485,6 +1456,13 @@ func (c *Controller) sendLocked(
 		return domain.ConversationTurn{}, ErrControllerHandoff
 	}
 
+	// Bind retries to the client request before adding durable continuation context.
+	var err error
+	msg, err = c.prepareContinuation(ctx, msg)
+	if err != nil {
+		return domain.ConversationTurn{}, err
+	}
+
 	now := c.now()
 	turnID := c.newID()
 	markedSending := false
@@ -1520,13 +1498,11 @@ func (c *Controller) sendLocked(
 		SenderProjectID:     msg.SenderProjectID,
 		SenderDisplayName:   msg.SenderDisplayName,
 		AuthoredByUser:      msg.AuthoredByUser,
+		Continuation:        msg.Continuation,
 		InteractionAt:       msg.InteractionAt,
 	}
 
-	var (
-		created bool
-		err     error
-	)
+	var created bool
 	if c.reviewID == "" {
 		created, err = c.store.AppendUserMessage(ctx, c.conversation.ID, c.sessionID, c.generation, record, turnID, now)
 	} else {
@@ -1646,6 +1622,7 @@ func (c *Controller) RetryTurn(ctx context.Context, turnID string) (domain.Conve
 		Origin:              prompt.Origin,
 		ClientMessageID:     key,
 		DeliveryContentJSON: prompt.DeliveryContentJSON,
+		Continuation:        prompt.Continuation,
 	}
 	var created bool
 	if c.reviewID == "" {
@@ -1669,6 +1646,7 @@ func (c *Controller) RetryTurn(ctx context.Context, turnID string) (domain.Conve
 
 	return c.dispatch(ctx, newTurnID, ports.ChatUserMessage{
 		Text:            prompt.Text,
+		Continuation:    prompt.Continuation,
 		Content:         content,
 		Origin:          prompt.Origin,
 		ClientMessageID: key,
@@ -1691,6 +1669,10 @@ func retryPromptContent(raw string, capabilities ports.ChatCapabilities) ([]port
 	}
 	for _, item := range content {
 		switch item.Type {
+		case "text":
+			if !item.Internal || strings.TrimSpace(item.Text) == "" {
+				return nil, fmt.Errorf("%w: text context must be AO-owned and nonempty", ErrRetryContentInvalid)
+			}
 		case "image":
 			if item.Data == "" || !strings.HasPrefix(strings.ToLower(item.MIMEType), "image/") {
 				return nil, fmt.Errorf("%w: image attachments require data and an image MIME type", ErrRetryContentInvalid)
@@ -1929,6 +1911,10 @@ func excerptDeliveryMessage(msg ports.ChatUserMessage) ports.ChatUserMessage {
 	content := make([]ports.ChatContent, 0, len(msg.Content))
 	var fallback strings.Builder
 	for _, item := range msg.Content {
+		if item.Internal && item.Type == "text" {
+			fallback.WriteString("\n\n" + item.Text)
+			continue
+		}
 		if item.Type != "excerpt" || item.Excerpt == nil {
 			content = append(content, item)
 			continue
@@ -2390,7 +2376,18 @@ func (c *Controller) interruptForHandoff(ctx context.Context) error {
 		}
 		return fmt.Errorf("interrupt turn %s for handoff: %w", turn, err)
 	}
+	c.mu.Lock()
+	c.handoffInterrupted = turn
+	c.mu.Unlock()
 	return nil
+}
+
+// HandoffInterruptedTurn is the provider turn the handoff's interrupt stopped,
+// or "" when it stopped none.
+func (c *Controller) HandoffInterruptedTurn() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.handoffInterrupted
 }
 
 // Interrupt cancels the in-flight turn, and with it anything queued behind it.
@@ -2671,6 +2668,9 @@ func (c *Controller) Rollback(ctx context.Context, turnID string) (int, error) {
 // their historical process-close behavior. The persistent host replays detached
 // output and unresolved provider requests to the replacement controller.
 func (c *Controller) Close(ctx context.Context) error {
+	c.mu.Lock()
+	c.explicitClose = true
+	c.mu.Unlock()
 	c.once.Do(func() {
 		if preserver, ok := c.conv.(ports.ChatProviderPreserver); ok && preserver.PreservesProviderOnClose() {
 			c.mu.Lock()
@@ -2695,6 +2695,7 @@ func (c *Controller) Close(ctx context.Context) error {
 // and controller replacement use Terminate.
 func (c *Controller) Terminate(ctx context.Context) error {
 	c.mu.Lock()
+	c.explicitClose = true
 	if c.forkCancel != nil {
 		c.forkCancel()
 	}
@@ -2767,6 +2768,8 @@ func (c *Controller) project() {
 			// A lost attachment is not proof the persistent provider stopped. Keep
 			// its turn/request correlation and queued intake for a replacement.
 			c.mu.Lock()
+			preserver, persistentProvider := c.conv.(ports.ChatProviderPreserver)
+			c.transportInterrupted = !c.explicitClose && persistentProvider && preserver.PreservesProviderOnClose()
 			c.preserveProviderOnStop = true
 			c.state = ports.ChatControllerStopped
 			suppressStoppedActivity := c.suppressStoppedActivity
@@ -3221,7 +3224,7 @@ func (c *Controller) apply(ctx context.Context, event ports.ChatEvent) error {
 				Kind:   domain.ActivityKindSystem,
 				Status: domain.ActivityStatusCompleted,
 				Summary: fmt.Sprintf("Provider answered with %s instead of %s",
-					event.Reroute.ToModel, cmp.Or(event.Reroute.FromModel, "the selected model")),
+					event.Reroute.ToModel, firstNonEmpty(event.Reroute.FromModel, "the selected model")),
 				Detail:         rerouteDetail(*event.Reroute),
 				ProviderItemID: rerouteItemID(event.ProviderTurnID),
 			}, now)
@@ -3267,7 +3270,7 @@ func (c *Controller) apply(ctx context.Context, event ports.ChatEvent) error {
 				Status: domain.ActivityStatusCompleted,
 				// Falls back to a plain label rather than an empty row: a driver that
 				// reports a compaction without a summary still happened.
-				Summary: cmp.Or(event.Summary, "Compacted the conversation history"),
+				Summary: firstNonEmpty(event.Summary, "Compacted the conversation history"),
 				Detail:  compactionDetail(event),
 				// The provider's own item id, so a compaction replayed across a
 				// reconnect updates the existing row instead of adding a second.
@@ -3318,7 +3321,7 @@ func (c *Controller) apply(ctx context.Context, event ports.ChatEvent) error {
 				ID:             c.newID(),
 				Kind:           domain.ActivityKindUserInput,
 				Status:         domain.ActivityStatusPending,
-				Summary:        cmp.Or(event.Input.Message, "The agent needs more information"),
+				Summary:        firstNonEmpty(event.Input.Message, "The agent needs more information"),
 				Detail:         detail,
 				RequestID:      event.RequestID,
 				ProviderItemID: event.ProviderItemID,
@@ -3586,7 +3589,7 @@ func (c *Controller) applyAccount(
 			Detail:  detail,
 			// Keyed on the reason so a provider retrying its demand updates one row
 			// instead of filling the timeline with the same notice.
-			ProviderItemID: "ao-reauth-" + cmp.Or(update.ReauthReason, "unknown"),
+			ProviderItemID: "ao-reauth-" + firstNonEmpty(update.ReauthReason, "unknown"),
 		}, now)
 }
 
@@ -3942,6 +3945,15 @@ func compactionDetail(event ports.ChatEvent) []byte {
 		return event.Detail
 	}
 	return encoded
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func nonEmptyJSON(raw []byte) []byte {

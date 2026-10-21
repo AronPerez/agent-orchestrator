@@ -34,7 +34,9 @@ type wsConn interface {
 
 const (
 	defaultHeartbeat = 15 * time.Second
-	maxMissedPongs   = 3
+	// maxMissedPongs tolerates transient ping timeouts before tearing the
+	// connection down.
+	maxMissedPongs = 3
 	// dataWatermark caps queued PTY output per connection. Above it the producing
 	// attachment's read loop blocks, so tmux throttles at the source instead of
 	// the connection being torn down under a flood.

@@ -1,0 +1,5 @@
+{
+	"title": "Configuration",
+	"defaultOpen": false,
+	"pages": ["projects", "lifecycle-automation", "remote-access"]
+}

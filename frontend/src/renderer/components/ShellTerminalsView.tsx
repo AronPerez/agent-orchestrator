@@ -1,16 +1,15 @@
 import { ChevronLeft, ChevronRight, Plus } from "lucide-react";
+import { isSettingsPageOpen } from "../hooks/useAppShortcut";
 import { useCallback, useEffect } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import { defaultShortcutBindings, shortcutBindingLabel } from "../../shared/shortcuts";
 import { useOverflowScroll } from "../hooks/useOverflowScroll";
-import { useCloseShellTerminal, useConnectedShellTerminals, useRenameShellTerminal } from "../hooks/useShellTerminals";
+import { adoptedShellHandle, useCloseShellTerminal, useRenameShellTerminal, useShellTerminals } from "../hooks/useShellTerminals";
 import { useShell } from "../lib/shell-context";
 import { aoBridge } from "../lib/bridge";
 import { isMacPlatform } from "../lib/platform";
-import { hasBrowserDaemon } from "../lib/preview-mode";
 import { cn } from "../lib/utils";
 import { handleTerminalTabListKeyDown } from "../lib/terminal-tabs";
-import { refKey } from "../lib/hosts";
 import { useResolvedTheme, useUiStore } from "../stores/ui-store";
 import { ShellTerminalTab } from "./ShellTerminalTab";
 import { TerminalPane } from "./TerminalPane";
@@ -32,7 +31,7 @@ export function ShellTerminalsView() {
 	const theme = useResolvedTheme();
 	// The standalone screen shows only session-less shells; a session's own
 	// shells belong to that session's tab strip, not this global list.
-	const shellTerminals = useConnectedShellTerminals().filter((shell) => !shell.sessionId);
+	const shellTerminals = (useShellTerminals().data ?? []).filter((s) => !s.sessionId);
 	const closeShellTerminal = useCloseShellTerminal();
 	const renameShellTerminal = useRenameShellTerminal();
 	const requestNewShellTerminal = useUiStore((state) => state.requestNewShellTerminal);
@@ -42,9 +41,9 @@ export function ShellTerminalsView() {
 	// Keep the selection pointed at a shell that still exists: closing the active
 	// tab (or a daemon-side exit pruning it) would otherwise leave the pane bound
 	// to a dead handle.
-	const active = shellTerminals.find(
-		(shell) => refKey({ host: shell.host, id: shell.handleId }) === activeHandleId,
-	);
+	// A tab selected while it was pending follows it to the shell it became.
+	const selectedHandleId = activeHandleId ? (adoptedShellHandle(activeHandleId) ?? activeHandleId) : null;
+	const active = shellTerminals.find((s) => s.handleId === selectedHandleId);
 	const tabsOverflow = useOverflowScroll<HTMLDivElement>(shellTerminals.map((t) => t.handleId).join("|"));
 	const selectAdjacentTab = useCallback(
 		(direction: -1 | 1) => {
@@ -52,7 +51,7 @@ export function ShellTerminalsView() {
 			const activeIndex = active ? shellTerminals.indexOf(active) : 0;
 			const nextIndex = (activeIndex + direction + shellTerminals.length) % shellTerminals.length;
 			const next = shellTerminals[nextIndex];
-			if (next) setActiveShellTerminal({ host: next.host, id: next.handleId });
+			if (next) setActiveShellTerminal(next.handleId);
 		},
 		[active, setActiveShellTerminal, shellTerminals],
 	);
@@ -61,23 +60,21 @@ export function ShellTerminalsView() {
 			if (activeHandleId !== null) setActiveShellTerminal(null);
 			return;
 		}
-		if (!active) {
-			const first = shellTerminals[0];
-			if (first) setActiveShellTerminal({ host: first.host, id: first.handleId });
-		}
+		if (!active) setActiveShellTerminal(shellTerminals[0].handleId);
+		else if (active.handleId !== activeHandleId) setActiveShellTerminal(active.handleId);
 	}, [shellTerminals, active, activeHandleId, setActiveShellTerminal]);
 
 	useEffect(
 		() =>
 			aoBridge.app.onCloseShellTerminalShortcut(() => {
-				if (active) closeShellTerminal.mutate({ host: active.host, id: active.handleId });
+				if (active) closeShellTerminal.mutate(active.handleId);
 			}),
 		[active, closeShellTerminal],
 	);
 
 	useEffect(() => {
-		const disposePrevious = aoBridge.app.onPreviousTabShortcut(() => selectAdjacentTab(-1));
-		const disposeNext = aoBridge.app.onNextTabShortcut(() => selectAdjacentTab(1));
+		const disposePrevious = aoBridge.app.onPreviousTabShortcut(() => !isSettingsPageOpen() && selectAdjacentTab(-1));
+		const disposeNext = aoBridge.app.onNextTabShortcut(() => !isSettingsPageOpen() && selectAdjacentTab(1));
 		return () => {
 			disposePrevious();
 			disposeNext();
@@ -127,11 +124,11 @@ export function ShellTerminalsView() {
 						const isActive = shell.handleId === active?.handleId;
 						return (
 							<ShellTerminalTab
-								key={refKey({ host: shell.host, id: shell.handleId })}
+								key={shell.handleId}
 								isActive={isActive}
-								onClose={() => closeShellTerminal.mutate({ host: shell.host, id: shell.handleId })}
-								onRename={(title) => renameShellTerminal.mutate({ terminal: { host: shell.host, id: shell.handleId }, title })}
-								onSelect={() => setActiveShellTerminal({ host: shell.host, id: shell.handleId })}
+								onClose={() => closeShellTerminal.mutate(shell.handleId)}
+								onRename={(title) => renameShellTerminal.mutate({ handleId: shell.handleId, title })}
+								onSelect={() => setActiveShellTerminal(shell.handleId)}
 								shell={shell}
 							/>
 						);
@@ -173,14 +170,13 @@ export function ShellTerminalsView() {
 			<div className="min-h-0 flex-1">
 				{active ? (
 					<TerminalPane
-						daemonReady={daemonStatus.state === "ready" || hasBrowserDaemon}
+						daemonReady={daemonStatus.state === "ready"}
 						fontSize={12}
 						terminalTarget={{
 							generation: active.createdAt,
 							kind: "shell",
-							host: active.host,
 							handleId: active.handleId,
-							session: active.sessionId ? { host: active.host, id: active.sessionId } : undefined,
+							sessionId: active.sessionId,
 							title: active.title,
 						}}
 						theme={theme}

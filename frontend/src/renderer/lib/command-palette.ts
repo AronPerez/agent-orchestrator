@@ -3,7 +3,6 @@ import {
 	attentionZone,
 	attentionZoneOrder,
 	isOrchestratorSession,
-	isStandaloneSession,
 	openPRs,
 	sessionIsActive,
 	sessionNeedsAttention,
@@ -12,6 +11,7 @@ import {
 	type PullRequestFacts,
 	type WorkspaceSession,
 	type WorkspaceSummary,
+	STANDALONE_WORKSPACE_ID,
 } from "../types/workspace";
 import {
 	openReviewStatesFor,
@@ -20,28 +20,45 @@ import {
 	type PRReviewState,
 } from "./session-reviews";
 import { appI18n, type MessageKey } from "../i18n";
-import { refKey, type Ref } from "./hosts";
 
-export type CommandGroupId = "current" | "attention" | "projects" | "sessions" | "prs" | "global";
+export type CommandGroupId = "current" | "attention" | "files" | "projects" | "sessions" | "prs" | "global";
 
 export type NavigateTarget =
+	| { to: "/" }
 	| { to: "/settings" }
-	| { to: "/host/$hostId/project/$projectId"; params: { hostId: string; projectId: string } }
-	| { to: "/host/$hostId/project/$projectId/settings"; params: { hostId: string; projectId: string } }
+	| { to: "/projects/$projectId"; params: { projectId: string } }
+	| { to: "/projects/$projectId/settings"; params: { projectId: string } }
+	| { to: "/projects/$projectId/sessions/$sessionId"; params: { projectId: string; sessionId: string } }
+	| { to: "/sessions/$sessionId"; params: { sessionId: string } }
+	| { to: "/host/$hostId/project/$projectId/session/$sessionId"; params: { hostId: string; projectId: string; sessionId: string } }
 	| { to: "/host/$hostId/session/$sessionId"; params: { hostId: string; sessionId: string } };
+
+export type WorkspaceFileSearchTarget = {
+	projectId: string;
+	sessionId: string;
+	hostId?: string;
+	cloudOrgId?: string;
+};
+
+export type WorkspaceFileSearchItem = {
+	path: string;
+	status?: string;
+	binary?: boolean;
+};
 
 export type CommandAction =
 	| { kind: "navigate"; target: NavigateTarget }
-	| { kind: "open-new-task"; project: Ref }
+	| { kind: "open-new-task"; projectId: string }
 	| { kind: "open-new-project" }
-	| { kind: "open-orchestrator"; project: Ref }
-	| { kind: "open-project-settings"; project: Ref }
-	| { kind: "open-session-actions"; session: Ref }
-	| { kind: "resume-session"; session: Ref }
+	| { kind: "open-orchestrator"; projectId: string }
+	| { kind: "open-session-actions"; sessionId: string }
+	| { kind: "open-file-search"; projectId: string; target?: WorkspaceFileSearchTarget }
+	| { kind: "open-workspace-file"; target: WorkspaceFileSearchTarget; path: string }
+	| { kind: "resume-session"; projectId: string; sessionId: string }
 	| { kind: "copy-branch"; branch: string }
 	| { kind: "open-pr"; url: string }
 	| { kind: "copy-pr-url"; url: string }
-	| { kind: "trigger-review"; session: Ref }
+	| { kind: "trigger-review"; sessionId: string }
 	| { kind: "toggle-theme" };
 
 export type CommandItem = {
@@ -60,8 +77,8 @@ export type CommandItem = {
 export type CommandPaletteContext = {
 	workspaces: WorkspaceSummary[];
 	currentProjectId?: string;
-	currentHostId?: string;
 	currentSessionId?: string;
+	currentHostId?: string;
 	restartingProjectIds?: ReadonlySet<string>;
 	/**
 	 * Live review states per session, injected by the palette's queries. Omitting the
@@ -73,11 +90,12 @@ export type CommandPaletteContext = {
 	reviewStatesBySessionId?: Readonly<Record<string, PRReviewState[]>>;
 };
 
-export const commandGroupOrder: CommandGroupId[] = ["current", "attention", "projects", "sessions", "prs", "global"];
+export const commandGroupOrder: CommandGroupId[] = ["current", "attention", "files", "projects", "sessions", "prs", "global"];
 
 const commandGroupLabelKeys: Record<CommandGroupId, MessageKey> = {
 	current: "command.group.current",
 	attention: "command.group.attention",
+	files: "command.group.files",
 	projects: "command.group.projects",
 	sessions: "command.group.sessions",
 	prs: "command.group.prs",
@@ -91,6 +109,9 @@ export const commandGroupLabel: Record<CommandGroupId, string> = {
 	},
 	get attention() {
 		return appI18n.t(commandGroupLabelKeys.attention);
+	},
+	get files() {
+		return appI18n.t(commandGroupLabelKeys.files);
 	},
 	get projects() {
 		return appI18n.t(commandGroupLabelKeys.projects);
@@ -107,7 +128,7 @@ export const commandGroupLabel: Record<CommandGroupId, string> = {
 };
 
 function isSyntheticBranch(session: WorkspaceSession): boolean {
-	return isStandaloneSession(session) || session.branch === `session/${session.id}`;
+	return session.branch === `session/${session.id}`;
 }
 
 type SessionCommandGroup = Extract<CommandGroupId, "attention" | "sessions">;
@@ -119,11 +140,90 @@ export type WorkspaceSessionContext = {
 	session: WorkspaceSession;
 };
 
-function jumpTarget(session: WorkspaceSession): NavigateTarget {
+function jumpTarget(workspace: WorkspaceSummary, session: WorkspaceSession): NavigateTarget {
+	if (workspace.hostId) {
+		if (workspace.id === STANDALONE_WORKSPACE_ID) {
+			return { to: "/host/$hostId/session/$sessionId", params: { hostId: workspace.hostId, sessionId: session.id } };
+		}
+		return {
+			to: "/host/$hostId/project/$projectId/session/$sessionId",
+			params: { hostId: workspace.hostId, projectId: workspace.id, sessionId: session.id },
+		};
+	}
+	if (workspace.id === STANDALONE_WORKSPACE_ID) {
+		return { to: "/sessions/$sessionId", params: { sessionId: session.id } };
+	}
 	return {
-		to: "/host/$hostId/session/$sessionId",
-		params: { hostId: session.host, sessionId: session.id },
+		to: "/projects/$projectId/sessions/$sessionId",
+		params: { projectId: workspace.id, sessionId: session.id },
 	};
+}
+
+export function workspaceFileSearchTarget(
+	workspace: WorkspaceSummary,
+	session: WorkspaceSession,
+): WorkspaceFileSearchTarget {
+	return {
+		projectId: workspace.id,
+		sessionId: session.id,
+		...(workspace.hostId ? { hostId: workspace.hostId } : {}),
+		...(session.cloud?.orgId ? { cloudOrgId: session.cloud.orgId } : {}),
+	};
+}
+
+export function sessionSupportsFileSearch(session: WorkspaceSession): boolean {
+	return !isOrchestratorSession(session)
+		&& session.provisionState !== "provisioning"
+		&& session.provisionState !== "failed";
+}
+
+export function fileSearchSessions(workspace: WorkspaceSummary): WorkspaceSession[] {
+	return workspace.sessions
+		.filter(sessionSupportsFileSearch)
+		.map((session, index) => ({ session, index }))
+		.sort((a, b) => Number(!sessionIsActive(a.session)) - Number(!sessionIsActive(b.session)) || a.index - b.index)
+		.map(({ session }) => session);
+}
+
+export function buildFileSessionCommands(
+	workspace: WorkspaceSummary,
+): CommandItem[] {
+	return fileSearchSessions(workspace).map((session) => ({
+		id: `file-session:${workspace.hostId ?? "local"}:${session.id}`,
+		group: "sessions",
+		title: session.title,
+		subtitle: `${session.branch || workspace.name} · ${session.displayStatus || session.status}`,
+		keywords: [session.branch ?? "", workspace.name, session.displayStatus ?? "", session.status],
+		action: {
+			kind: "open-file-search",
+			projectId: workspace.id,
+			target: workspaceFileSearchTarget(workspace, session),
+		},
+	}));
+}
+
+function workspacePathParts(path: string): { basename: string; directory?: string } {
+	const segments = path.split("/");
+	const basename = segments.pop() || path;
+	const directory = segments.join("/");
+	return { basename, ...(directory ? { directory } : {}) };
+}
+
+export function buildWorkspaceFileCommands(
+	target: WorkspaceFileSearchTarget,
+	files: readonly WorkspaceFileSearchItem[],
+): CommandItem[] {
+	return files.map((file) => {
+		const { basename, directory } = workspacePathParts(file.path);
+		return {
+			id: `file:${target.hostId ?? "local"}:${target.sessionId}:${file.path}`,
+			group: "files",
+			title: basename,
+			subtitle: directory,
+			keywords: [file.path, directory ?? "", file.status ?? ""],
+			action: { kind: "open-workspace-file", target, path: file.path },
+		};
+	});
 }
 
 function sessionCommand(
@@ -132,44 +232,45 @@ function sessionCommand(
 	group: SessionCommandGroup,
 ): CommandItem {
 	return {
-		id: `${SESSION_ID_PREFIX[group]}:${refKey(session)}`,
+		id: `${SESSION_ID_PREFIX[group]}:${session.id}`,
 		group,
 		title: session.title,
 		subtitle: workspace.name,
 		zone: attentionZone(session),
 		keywords: [workspace.name, session.branch ?? "", session.issueId ?? ""],
-		action: { kind: "open-session-actions", session },
+		action: { kind: "open-session-actions", sessionId: session.id },
 	};
 }
 
 export function buildSessionActions(
+	workspace: WorkspaceSummary,
 	session: WorkspaceSession,
 	t: TFunction = appI18n.t,
 ): CommandItem[] {
 	const items: CommandItem[] = [];
 
 	items.push({
-		id: `session-action:jump:${refKey(session)}`,
+		id: `session-action:jump:${session.id}`,
 		group: "current",
 		title: t("command.jumpToSession"),
 		keywords: ["open", "go", "view", session.title],
-		action: { kind: "navigate", target: jumpTarget(session) },
+		action: { kind: "navigate", target: jumpTarget(workspace, session) },
 	});
 
 	if (!sessionIsActive(session) && !isOrchestratorSession(session)) {
 		items.push({
-			id: `session-action:resume:${refKey(session)}`,
+			id: `session-action:resume:${session.id}`,
 			group: "current",
 			title: t("command.resumeAgent"),
 			subtitle: t("command.resumeAgentSubtitle"),
 			keywords: ["restore", "restart", "retry", "resume", session.title],
-			action: { kind: "resume-session", session },
+			action: { kind: "resume-session", projectId: workspace.id, sessionId: session.id },
 		});
 	}
 
 	if (session.branch && !isOrchestratorSession(session) && !isSyntheticBranch(session)) {
 		items.push({
-			id: `session-action:copy-branch:${refKey(session)}`,
+			id: `session-action:copy-branch:${session.id}`,
 			group: "current",
 			title: t("command.copyBranch"),
 			subtitle: session.branch,
@@ -181,25 +282,27 @@ export function buildSessionActions(
 	return items;
 }
 
-export function findSession(workspaces: WorkspaceSummary[], ref: Ref): WorkspaceSessionContext | undefined {
+export function findSession(workspaces: WorkspaceSummary[], sessionId: string): WorkspaceSessionContext | undefined {
 	for (const workspace of workspaces) {
-		const match = workspace.sessions.find((session) => session.host === ref.host && session.id === ref.id);
+		const match = workspace.sessions.find((session) => session.id === sessionId);
 		if (match) return { workspace, session: match };
 	}
 	return undefined;
 }
 
 export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n.t): CommandItem[] {
-	const { workspaces, currentHostId, currentProjectId, currentSessionId, restartingProjectIds, reviewStatesBySessionId } = ctx;
+	const { workspaces, currentProjectId, currentSessionId, currentHostId, restartingProjectIds, reviewStatesBySessionId } = ctx;
 	const items: CommandItem[] = [];
 
-	const currentProject = currentProjectId && currentHostId
-		? workspaces.find((workspace) => workspace.kind !== "standalone" && workspace.id === currentProjectId && workspace.host === currentHostId)
+	const currentProject = currentProjectId
+		? workspaces.find((workspace) => workspace.id === currentProjectId
+			&& (workspace.hostId ?? "") === (currentHostId ?? ""))
 		: undefined;
-	const currentSession = currentHostId && currentSessionId
-		? findSession(workspaces, { host: currentHostId, id: currentSessionId })?.session
+	const currentSession = currentSessionId
+		? currentProject?.sessions.find((session) => session.id === currentSessionId)
+			?? findSession(workspaces, currentSessionId)?.session
 		: undefined;
-	const isProjectRestarting = Boolean(currentProject && restartingProjectIds?.has(refKey(currentProject)));
+	const isProjectRestarting = Boolean(currentProject && restartingProjectIds?.has(currentProject.id));
 
 	items.push({
 		id: "current-new-task",
@@ -213,27 +316,53 @@ export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n
 			: isProjectRestarting
 				? t("command.orchestratorRestarting")
 				: undefined,
-		...(currentProject ? { action: { kind: "open-new-task" as const, project: currentProject } } : {}),
+		...(currentProject ? { action: { kind: "open-new-task" as const, projectId: currentProject.id } } : {}),
 	});
 
 	if (currentProject) {
+		if (currentProject.id !== STANDALONE_WORKSPACE_ID) {
+			items.push({
+				id: "current-open-orchestrator",
+				group: "current",
+				title: t("command.openOrchestrator"),
+				subtitle: currentProject.name,
+				keywords: ["orchestrator", "spawn", currentProject.name],
+				disabled: isProjectRestarting,
+				disabledReason: isProjectRestarting ? t("command.orchestratorRestarting") : undefined,
+				action: { kind: "open-orchestrator", projectId: currentProject.id },
+			});
+			items.push({
+				id: "current-project-settings",
+				group: "current",
+				title: t("command.projectSettings"),
+				subtitle: currentProject.name,
+				keywords: ["settings", "config", currentProject.name],
+				action: {
+					kind: "navigate",
+					target: { to: "/projects/$projectId/settings", params: { projectId: currentProject.id } },
+				},
+			});
+		}
+	}
+
+	const searchableCurrentSession = currentSession && sessionSupportsFileSearch(currentSession)
+		? currentSession
+		: undefined;
+	const searchableProjectSessions = currentProject ? fileSearchSessions(currentProject) : [];
+	if (currentProject && (searchableCurrentSession || searchableProjectSessions.length > 0)) {
 		items.push({
-			id: "current-open-orchestrator",
+			id: "current-search-files",
 			group: "current",
-			title: t("command.openOrchestrator"),
-			subtitle: currentProject.name,
-			keywords: ["orchestrator", "spawn", currentProject.name],
-			disabled: isProjectRestarting,
-			disabledReason: isProjectRestarting ? t("command.orchestratorRestarting") : undefined,
-			action: { kind: "open-orchestrator", project: currentProject },
-		});
-		items.push({
-			id: "current-project-settings",
-			group: "current",
-			title: t("command.projectSettings"),
-			subtitle: currentProject.name,
-			keywords: ["settings", "config", currentProject.name],
-			action: { kind: "open-project-settings", project: currentProject },
+			title: t("command.searchFiles"),
+			subtitle: searchableCurrentSession?.title ?? currentProject.name,
+			keywords: ["file", "files", "path", "workspace", "worktree", "code"],
+			action: {
+				kind: "open-file-search",
+				projectId: currentProject.id,
+				...(searchableCurrentSession
+					? { target: workspaceFileSearchTarget(currentProject, searchableCurrentSession) }
+					: {}),
+			},
 		});
 	}
 
@@ -253,39 +382,32 @@ export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n
 		.flatMap((workspace) => workerSessions(workspace.sessions).map((session) => ({ workspace, session })))
 		.filter(
 			({ session }) =>
-				(!currentSession || refKey(session) !== refKey(currentSession)) &&
-				(attentionZone(session) === "merge" || sessionNeedsAttention(session)),
+				session.id !== currentSessionId && (attentionZone(session) === "merge" || sessionNeedsAttention(session)),
 		)
 		.sort(
 			(a, b) =>
 				attentionZoneOrder.indexOf(attentionZone(a.session)) - attentionZoneOrder.indexOf(attentionZone(b.session)),
 		);
 
-	const attentionIds = new Set(attentionSessions.map(({ session }) => refKey(session)));
+	const attentionIds = new Set(attentionSessions.map(({ session }) => session.id));
 
 	for (const { workspace, session } of attentionSessions) {
 		items.push(sessionCommand(workspace, session, "attention"));
 	}
 
-	for (const workspace of workspaces.filter((workspace) => workspace.kind !== "standalone")) {
+	for (const workspace of workspaces.filter((candidate) => candidate.id !== STANDALONE_WORKSPACE_ID)) {
 		items.push({
-			id: `project:${refKey(workspace)}`,
+			id: `project:${workspace.id}`,
 			group: "projects",
 			title: workspace.name,
 			keywords: [workspace.path],
-			action: {
-				kind: "navigate",
-				target: {
-					to: "/host/$hostId/project/$projectId",
-					params: { hostId: workspace.host, projectId: workspace.id },
-				},
-			},
+			action: { kind: "navigate", target: { to: "/projects/$projectId", params: { projectId: workspace.id } } },
 		});
 	}
 
 	for (const workspace of workspaces) {
 		for (const session of workerSessions(workspace.sessions).filter(
-			(session) => !attentionIds.has(refKey(session)) && (!currentSession || refKey(session) !== refKey(currentSession)),
+			(session) => !attentionIds.has(session.id) && session.id !== currentSessionId,
 		)) {
 			items.push({ ...sessionCommand(workspace, session, "sessions"), searchOnly: !sessionIsActive(session) });
 		}
@@ -293,7 +415,7 @@ export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n
 
 	for (const workspace of workspaces) {
 		for (const session of workerSessions(workspace.sessions)) {
-			const sessionReviewStates = reviewStatesBySessionId?.[refKey(session)];
+			const sessionReviewStates = reviewStatesBySessionId?.[session.id];
 			// Whole prop omitted (e.g. a test that doesn't care about review state) means
 			// "assume eligible"; a defined map with this session's key absent means the
 			// live app hasn't loaded this session's review state yet — don't expose a
@@ -312,22 +434,16 @@ export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n
 					workspace.name,
 					pr.state,
 				];
-				items.push({
-					id: `pr:${refKey(session)}:${pr.number}`,
+			items.push({
+					id: `pr:${session.id}:${pr.number}`,
 					group: "prs",
 					title: `#${pr.number}`,
 					subtitle,
 					keywords: prKeywords,
-					action: {
-						kind: "navigate",
-						target: {
-							to: "/host/$hostId/session/$sessionId",
-							params: { hostId: session.host, sessionId: session.id },
-						},
-					},
+					action: { kind: "navigate", target: jumpTarget(workspace, session) },
 				});
 				items.push({
-					id: `pr-open:${refKey(session)}:${pr.number}`,
+					id: `pr-open:${session.id}:${pr.number}`,
 					group: "prs",
 					title: t("command.openPr", { number: pr.number }),
 					subtitle,
@@ -336,7 +452,7 @@ export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n
 					action: { kind: "open-pr", url: pr.url },
 				});
 				items.push({
-					id: `pr-copy:${refKey(session)}:${pr.number}`,
+					id: `pr-copy:${session.id}:${pr.number}`,
 					group: "prs",
 					title: t("command.copyPrUrl", { number: pr.number }),
 					subtitle,
@@ -351,6 +467,13 @@ export function buildCommands(ctx: CommandPaletteContext, t: TFunction = appI18n
 		}
 	}
 
+	items.push({
+		id: "global-home",
+		group: "global",
+		title: t("shell.goHome"),
+		keywords: ["home", "start", "get started", "clone", "import", "standalone"],
+		action: { kind: "navigate", target: { to: "/" } },
+	});
 	items.push({
 		id: "global-new-project",
 		group: "global",
@@ -401,10 +524,11 @@ function prReviewCommand(
 		: ineligible
 			? t("command.notEligibleForReview")
 			: undefined;
-	const states = prReviewState ? [prReviewState] : [];
-	const runLabel = prReviewState ? reviewSessionRunAction(states, false) : t("inspector.review.run");
+	const runLabel = prReviewState
+		? reviewSessionRunAction([prReviewState], false)
+		: t("inspector.review.run");
 	return {
-		id: `pr-review:${refKey(session)}:${pr.number}`,
+		id: `pr-review:${session.id}:${pr.number}`,
 		group: "prs",
 		title: t("command.reviewPr", { action: runLabel, number: pr.number }),
 		subtitle,
@@ -412,10 +536,7 @@ function prReviewCommand(
 		searchOnly: true,
 		disabled,
 		disabledReason,
-		action: {
-			kind: "trigger-review",
-			session: { host: session.host, id: session.id },
-		},
+		action: { kind: "trigger-review", sessionId: session.id },
 	};
 }
 
@@ -427,8 +548,7 @@ function isSubsequence(query: string, haystack: string): boolean {
 	return i === query.length;
 }
 
-/** The minimum shape scoring needs; `CommandItem` satisfies it structurally. */
-export type MatchTarget = Pick<CommandItem, "title" | "subtitle" | "keywords">;
+export type MatchTarget = Pick<CommandItem, "title" | "subtitle" | "keywords"> & Partial<Pick<CommandItem, "group">>;
 
 export function matchScore(query: string, item: MatchTarget): number {
 	const q = query.trim().toLowerCase();
@@ -437,6 +557,11 @@ export function matchScore(query: string, item: MatchTarget): number {
 	const extras = [item.subtitle ?? "", ...(item.keywords ?? [])].join(" ").toLowerCase();
 
 	const titleIdx = title.indexOf(q);
+	if (item.group === "files") {
+		if (title === q) return 1200;
+		if (titleIdx === 0) return 1100;
+		if (titleIdx > 0) return 900 - titleIdx;
+	}
 	if (titleIdx === 0) return 1000;
 	if (titleIdx > 0) return 800 - titleIdx;
 	if (extras.includes(q)) return 500;

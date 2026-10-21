@@ -1,9 +1,11 @@
+import type { Ref } from "react";
 import { useTranslation } from "react-i18next";
 import { X } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 
-export type BoardFindBarProps = {
+type BoardFindBarProps = {
+	inputRef: Ref<HTMLInputElement>;
 	matches: number;
 	onClose: () => void;
 	onQueryChange: (query: string) => void;
@@ -11,30 +13,28 @@ export type BoardFindBarProps = {
 	total: number;
 };
 
-/**
- * Floating filter strip over the board content. Presentational only — the board
- * owns the query, the shortcut, and the filtering.
- */
-export function BoardFindBar({ matches, onClose, onQueryChange, query, total }: BoardFindBarProps) {
+export function BoardFindBar({ inputRef, matches, onClose, onQueryChange, query, total }: BoardFindBarProps) {
 	const { t } = useTranslation();
 	return (
 		<div
-			className="absolute right-3 top-3 z-20 flex items-center gap-2 rounded-lg border border-border-strong bg-popover py-2 pl-3 pr-2 text-popover-foreground shadow-lg"
+			aria-label={t("board.find.placeholder")}
+			className="absolute right-3 top-3 z-20 flex max-w-[calc(100%-1.5rem)] items-center gap-2 rounded-md border border-border bg-popover p-1.5 text-popover-foreground shadow-sm"
 			data-testid="board-find-bar"
 			role="search"
 		>
 			<Input
 				aria-label={t("board.find.placeholder")}
 				autoFocus
-				className="h-control-md w-56"
+				className="h-control-md w-56 flex-1 focus-visible:border-ring"
 				onChange={(event) => onQueryChange(event.target.value)}
 				placeholder={t("board.find.placeholder")}
+				ref={inputRef}
 				value={query}
 			/>
-			<span className="shrink-0 font-mono text-xs tabular-nums text-muted-foreground">
+			<span aria-live="polite" className="shrink-0 text-xs tabular-nums text-muted-foreground">
 				{t("board.find.count", { matches, total })}
 			</span>
-			<Button aria-label={t("board.find.close")} onClick={onClose} size="icon-sm" type="button" variant="ghost">
+			<Button aria-label={t("board.find.close")} className="focus-visible:bg-muted" onClick={onClose} size="icon-sm" type="button" variant="ghost">
 				<X aria-hidden="true" className="size-icon-md" />
 			</Button>
 		</div>

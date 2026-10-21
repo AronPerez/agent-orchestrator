@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"slices"
 	"sort"
 	"strings"
 
@@ -220,7 +219,7 @@ func (r *Resolver) selectRemote(ctx context.Context, repo string) (string, []str
 	if out, err := r.run(ctx, r.binary, "-C", repo, "config", "--get", "checkout.defaultRemote"); err == nil {
 		configured := strings.TrimSpace(string(out))
 		if configured != "" {
-			if slices.Contains(remotes, configured) {
+			if contains(remotes, configured) {
 				return configured, remotes, nil
 			}
 			return "", remotes, unresolvedf(
@@ -229,7 +228,7 @@ func (r *Resolver) selectRemote(ctx context.Context, repo string) (string, []str
 			)
 		}
 	}
-	if slices.Contains(remotes, "origin") {
+	if contains(remotes, "origin") {
 		return "origin", remotes, nil
 	}
 	if len(remotes) == 1 {
@@ -385,6 +384,15 @@ func nonEmptyLines(value string) []string {
 		}
 	}
 	return out
+}
+
+func contains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func unresolvedf(format string, args ...any) error {

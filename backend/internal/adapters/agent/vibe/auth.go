@@ -4,9 +4,10 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/authprobe"
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
@@ -55,13 +56,31 @@ func vibeLocalAuthStatus(ctx context.Context) (ports.AgentAuthStatus, bool, erro
 	if err != nil {
 		return ports.AgentAuthStatusUnknown, false, err
 	}
+	// Vibe's own ~/.vibe/.env decides first; the same variables in the
+	// process environment are the fallback.
+	envFile := filepath.Join(vibeHome, ".env")
+	fileStatus, fileOK := ports.AgentAuthStatusUnknown, false
+	var fileErr error
 	for _, envVar := range envVars {
-		if strings.TrimSpace(os.Getenv(envVar)) != "" {
-			return ports.AgentAuthStatusAuthorized, true, nil
+		status, ok, err := vibeEnvFileAuthStatus(envFile, envVar)
+		if err != nil {
+			fileErr = err
+			break
 		}
-		if status, ok, err := vibeEnvFileAuthStatus(filepath.Join(vibeHome, ".env"), envVar); err != nil || ok {
-			return status, ok, err
+		if ok {
+			if status == ports.AgentAuthStatusAuthorized {
+				ports.RecordAuthEvidence(ctx, authprobe.FileSource(envFile).WithMethod(domain.AgentAccountMethodAPIKey))
+				return status, true, nil
+			}
+			fileStatus, fileOK = status, true
+			break
 		}
+	}
+	if authprobe.CredentialEnvironment(ctx, domain.AgentAccountMethodAPIKey, envVars...) != "" {
+		return ports.AgentAuthStatusAuthorized, true, nil
+	}
+	if fileErr != nil || fileOK {
+		return fileStatus, fileOK, fileErr
 	}
 	return ports.AgentAuthStatusUnknown, false, nil
 }
@@ -81,7 +100,7 @@ func vibeAPIKeyEnvVars(configPath string) ([]string, error) {
 			continue
 		}
 		envVar := strings.Trim(strings.TrimSpace(value), `"',`)
-		if envVar != "" && !strings.EqualFold(envVar, "null") && !slices.Contains(vars, envVar) {
+		if envVar != "" && !strings.EqualFold(envVar, "null") && !containsString(vars, envVar) {
 			vars = append(vars, envVar)
 		}
 	}
@@ -111,4 +130,13 @@ func vibeEnvFileAuthStatus(path, envVar string) (ports.AgentAuthStatus, bool, er
 		return ports.AgentAuthStatusUnknown, false, nil
 	}
 	return ports.AgentAuthStatusUnknown, false, nil
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }

@@ -1,72 +1,186 @@
+import { useCallback, useEffect, useId, useRef } from "react";
 import { useTranslation } from "react-i18next";
-import type { Ref } from "../lib/hosts";
-import { buildWorkspaceBlobUrl } from "../lib/markdown-image-resolver";
-import type { WorkspaceFileDetail } from "../hooks/useSessionWorkspaceFiles";
-import { canonicalLanguage } from "../lib/code-highlight";
-import { HighlightedCode } from "./chat/HighlightedCode";
-import { PanelMessage } from "./WorkspaceDiffView";
+import { type FileContents, type LineAnnotation } from "@pierre/diffs";
+import { File } from "@pierre/diffs/react";
+import { getApiBaseUrl } from "../lib/api-client";
+import { useAskInChat } from "../lib/chat-context-bus";
+import { useHostConnection } from "../hooks/useHostConnection";
+import { sessionUiKey } from "../lib/hosts";
+import type { WorkspaceDiffScope, WorkspaceFileDetail } from "../hooks/useSessionWorkspaceFiles";
+import { useUiStore } from "../stores/ui-store";
+import { FileAnnotationComposer, LineFeedbackButtonControl, PanelMessage, type FileAnnotationModel } from "./WorkspaceDiffView";
+import { AO_PIERRE_SURFACE_CSS } from "./diffs/pierreTheme";
+import { SelectionAskButton } from "./diffs/SelectionAskButton";
+import { codeReference, useCodeSelection } from "./diffs/useCodeSelection";
+import { usePersistentGutterUtility } from "./diffs/usePersistentGutterUtility";
 
 function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+	if (bytes < 1024) return `${bytes} B`;
+	if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+	return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function workspaceRawImageUrl(sessionId: string, path: string, side: "before" | "after", hostId?: string, remoteBaseUrl?: string): string | undefined {
+	const base = hostId ? remoteBaseUrl : getApiBaseUrl();
+	if (base === undefined) return undefined;
+	const query = new URLSearchParams({ path, side });
+	return `${base}/api/v1/sessions/${encodeURIComponent(sessionId)}/workspace/file/blob?${query}`;
 }
 
 // Renders an untouched (unmodified) workspace file: an agent didn't write
 // this one, so there's no diff to show, just its current content. Binary and
 // oversized files short-circuit before any tokenization is attempted.
 export function ReadOnlyFileView({
-  detail,
-  session,
+	annotation,
+	detail,
+	editing = false,
+	onContentReady,
+	onEditChange,
+	onRevealLineConsumed,
+	revealLine,
+	scope = "combined",
+	sessionId,
+	hostId,
+	side = "after",
 }: {
-  detail: WorkspaceFileDetail;
-  session: Ref;
+	annotation: FileAnnotationModel;
+	detail: WorkspaceFileDetail;
+	editing?: boolean;
+	onContentReady?: () => void;
+	onEditChange?: (content: string) => void;
+	onRevealLineConsumed?: (requestKey: number) => void;
+	revealLine?: { line: number; requestKey: number };
+	scope?: WorkspaceDiffScope;
+	sessionId: string;
+	hostId?: string;
+	side?: "before" | "after";
 }) {
-  const { t } = useTranslation();
-  if (detail.binary) {
-    if (detail.imageMediaType) {
-      const src = buildWorkspaceBlobUrl(session, detail.path);
-      if (src === undefined) return <PanelMessage>{t("hosts.contentUnavailable")}</PanelMessage>;
-      return (
-        <div className="grid place-items-center p-3">
-          <img
-            alt={detail.path}
-            className="max-h-[70vh] max-w-full object-contain"
-            src={src}
-          />
-        </div>
-      );
-    }
-    return <PanelMessage>{t("files.binaryUnavailable")}</PanelMessage>;
-  }
-  if (detail.contentTruncated) {
-    return (
-      <PanelMessage>
-        {t("files.explorer.tooLarge", { size: formatBytes(detail.size) })}
-      </PanelMessage>
-    );
-  }
-  return <HighlightedContent content={detail.content} path={detail.path} />;
-}
-
-// Reuse AO's CSP-compatible highlight.js pipeline so file previews and code
-// shown elsewhere in the renderer share grammars, colors, and caching.
-export function HighlightedContent({
-  content,
-  path,
-}: {
-  content: string;
-  path: string;
-}) {
-  const extension = path.split("/").pop()?.split(".").pop();
-  const language = canonicalLanguage(extension);
-  return (
-    <div className="chat-code min-h-0 flex-1 overflow-auto p-3">
-      <pre className="whitespace-pre font-mono text-xs leading-5 text-foreground">
-        <code>
-          <HighlightedCode code={content} language={language} />
-        </code>
-      </pre>
-    </div>
-  );
+	const { t } = useTranslation();
+	const { baseUrl: remoteBaseUrl } = useHostConnection(hostId);
+	const resolvedTheme = useUiStore((state) => state.resolvedTheme);
+	const containerRef = useRef<HTMLDivElement>(null);
+	const pendingRevealRef = useRef(revealLine);
+	const consumedRevealRequestKeysRef = useRef(new Set<number>());
+	const editorInstanceId = useId();
+	const gutterHover = usePersistentGutterUtility(containerRef);
+	const revealRequestedLine = useCallback(() => {
+		const target = pendingRevealRef.current;
+		if (!target) return;
+		if (consumedRevealRequestKeysRef.current.has(target.requestKey)) {
+			pendingRevealRef.current = undefined;
+			return;
+		}
+		const diffsContainer = containerRef.current?.querySelector("diffs-container");
+		const line = diffsContainer?.shadowRoot?.querySelector<HTMLElement>(`[data-line="${target.line}"]`);
+		if (!line) return;
+		line.scrollIntoView({ block: "center" });
+		consumedRevealRequestKeysRef.current.add(target.requestKey);
+		pendingRevealRef.current = undefined;
+		onRevealLineConsumed?.(target.requestKey);
+	}, [onRevealLineConsumed]);
+	useEffect(() => {
+		if (!revealLine || consumedRevealRequestKeysRef.current.has(revealLine.requestKey)) {
+			pendingRevealRef.current = undefined;
+			return;
+		}
+		pendingRevealRef.current = revealLine;
+		const frame = requestAnimationFrame(revealRequestedLine);
+		return () => cancelAnimationFrame(frame);
+	}, [revealLine?.line, revealLine?.requestKey, revealRequestedLine]);
+	// Highlighted code gets an "Ask in chat" button (or Cmd/Ctrl+L) while the
+	// session has a Chat composer; in edit mode a selection belongs to the editor.
+	const askInChat = useAskInChat(sessionId, hostId);
+	const codeSelection = useCodeSelection(containerRef, (selection) => askInChat?.(codeReference(detail.path, selection, false)), askInChat !== undefined && !editing);
+	if (detail.binary) {
+		if (detail.imageMediaType) {
+			return (
+				<div className="grid place-items-center p-3">
+					<img
+						alt={detail.path}
+						className="max-h-[70vh] max-w-full object-contain"
+						src={workspaceRawImageUrl(sessionId, detail.path, side, hostId, remoteBaseUrl)}
+					/>
+				</div>
+			);
+		}
+		return <PanelMessage>{t("files.binaryUnavailable")}</PanelMessage>;
+	}
+	if (detail.contentTruncated) {
+		return <PanelMessage>{t("files.explorer.tooLarge", { size: formatBytes(detail.size) })}</PanelMessage>;
+	}
+	const activeTargets = annotation.targets.filter((target) => target.surface !== "review" && target.path === detail.path && target.side === "file" && target.line != null);
+	const lineAnnotations: LineAnnotation<"feedback">[] | undefined = activeTargets.length > 0
+		? activeTargets.map((target) => ({ lineNumber: target.line as number, metadata: "feedback" }))
+		: undefined;
+	const file: FileContents = {
+		name: detail.path,
+		contents: detail.content,
+		cacheKey: detail.fileFingerprint ?? detail.workspaceVersion ?? `${detail.path}:${detail.size}`,
+	};
+	const beginLineAnnotation = (line: number) => {
+		annotation.begin({
+			path: detail.path,
+			previousPath: detail.previousPath,
+			side: "file",
+			line,
+			newLine: side === "after" ? line : undefined,
+			oldLine: side === "before" ? line : undefined,
+			lineKind: "context",
+			lineText: detail.content.replace(/\n$/, "").split("\n")[line - 1] ?? "",
+			scope,
+			surface: "focused",
+			workspaceVersion: detail.workspaceVersion,
+			fileFingerprint: detail.fileFingerprint,
+		});
+	};
+	return (
+		<div
+			className="ao-pierre-surface min-w-0 select-text"
+			data-editing={editing || undefined}
+			onPointerLeave={gutterHover.onPointerLeave}
+			onPointerMove={gutterHover.onPointerMove}
+			ref={containerRef}
+		>
+			<File<"feedback">
+				disableWorkerPool={typeof Worker === "undefined"}
+				edit={editing}
+				editStateKey={`${sessionUiKey(sessionId, hostId)}:${detail.path}:file:${editorInstanceId}`}
+				editorOptions={{
+					onAttach: (editor) => requestAnimationFrame(() => editor.focus({ lineNumber: "first-visible" })),
+					ownsVerticalViewport: true,
+				}}
+				file={file}
+				lineAnnotations={lineAnnotations}
+				options={{
+					disableFileHeader: true,
+					enableGutterUtility: true,
+					lineHoverHighlight: "line",
+					onPostRender: () => {
+						gutterHover.restoreAfterRender();
+						onContentReady?.();
+						revealRequestedLine();
+					},
+					overflow: "wrap",
+					theme: { dark: "github-dark", light: "github-light" },
+					themeType: resolvedTheme,
+					tokenizeMaxLength: 200_000,
+					tokenizeMaxLineLength: 2_000,
+					unsafeCSS: AO_PIERRE_SURFACE_CSS,
+				}}
+				renderAnnotation={(line) => {
+					const target = activeTargets.find((open) => open.line === line.lineNumber);
+					return target ? <FileAnnotationComposer annotation={annotation} target={target} /> : null;
+				}}
+				onEditChange={(event) => onEditChange?.(event.file.contents)}
+				onEditComplete={() => "reject"}
+				renderGutterUtility={(getHoveredLine) => (
+					<LineFeedbackButtonControl gutter label={t("files.addFeedback")} onClick={() => {
+						const line = getHoveredLine();
+						if (line) beginLineAnnotation(line.lineNumber);
+					}} />
+				)}
+			/>
+			<SelectionAskButton onAsk={codeSelection.ask} source={codeSelection.source} />
+		</div>
+	);
 }

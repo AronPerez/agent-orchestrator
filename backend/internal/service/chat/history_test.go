@@ -724,10 +724,11 @@ func newEditHarnessWithOptions(
 	})
 	svc := chatsvc.New(chatsvc.Options{
 		Store: wrapStore(st), Sessions: st,
-		Reader:   wrapReader(reader),
-		Drivers:  fakeRegistry{driver: driver},
-		Log:      slog.New(slog.DiscardHandler),
-		Activity: activity,
+		Reader:     wrapReader(reader),
+		PageReader: boundedSnapshotReader(st),
+		Drivers:    fakeRegistry{driver: driver},
+		Log:        slog.New(slog.DiscardHandler),
+		Activity:   activity,
 		NewID: func() string {
 			idMu.Lock()
 			defer idMu.Unlock()
@@ -2434,7 +2435,6 @@ func TestMissingEditTurnReplaysOriginalHTTPStatusAfterRestart(t *testing.T) {
 		request := httptest.NewRequest(http.MethodPost,
 			"/api/v1/sessions/"+string(testSession)+"/conversation/turns/missing/edit",
 			strings.NewReader(`{"text":"replacement","clientMessageId":"missing-turn-replay"}`))
-		request.Host = "localhost"
 		request.Header.Set("Content-Type", "application/json")
 		response := httptest.NewRecorder()
 		router.ServeHTTP(response, request)

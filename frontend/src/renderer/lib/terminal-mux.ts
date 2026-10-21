@@ -10,12 +10,8 @@
 //     server → opened{id} | data{id,data} | exited{id} | error{id?,error}
 //   ch "system"   — ping/pong liveness
 //
-// The renderer connects to the daemon (same host/port as the REST API, path
-// `/mux`). Remote hosts use the Electron main-process loopback proxy, whose
-// token path prefix must survive this conversion.
-
-import { baseUrlFor } from "./host-clients";
-import { LOCAL_HOST, type HostId } from "./hosts";
+// The renderer connects directly to the loopback daemon (same host/port as the
+// REST API, path `/mux`); it is not proxied through the Electron main process.
 
 type ServerFrame = {
 	ch: string;
@@ -87,17 +83,17 @@ export function muxUrlFromApiBase(apiBaseUrl: string): string {
 	return `${ws.replace(/\/+$/, "")}/mux`;
 }
 
-export function muxUrlForHost(host: HostId): string | null {
-	const base = baseUrlFor(host);
-	return base === null ? null : muxUrlFromApiBase(base);
-}
-
 type DataListener = (bytes: Uint8Array) => void;
 type ExitListener = () => void;
 type OpenedListener = () => void;
 type ErrorListener = (message: string) => void;
 
-export type MuxConnectionState = "open" | "closed";
+// "waiting" is a cloud-only state: the control plane answered the terminal
+// ticket mint with 409 WORKER_UNAVAILABLE because the sandbox worker has not
+// checked in yet (normal during a cold start). It reconnects like "closed" but
+// must NOT count against the connect-failure circuit breaker, because nothing
+// actually failed to connect. The local daemon mux never emits it.
+export type MuxConnectionState = "open" | "closed" | "waiting";
 type ConnectionListener = (state: MuxConnectionState) => void;
 
 export type TerminalMux = {
@@ -127,10 +123,10 @@ export type TerminalMux = {
 export type TerminalMuxPool = {
 	/**
 	 * Acquire an independently disposable attachment lease over the shared
-	 * browser-to-daemon mux socket for one host.
+	 * browser-to-daemon mux socket.
 	 */
-	acquire: (host?: HostId) => TerminalMux | null;
-	/** Release every shared socket and listener (the pool stays reusable). */
+	acquire: () => TerminalMux;
+	/** Release the current shared socket and every listener (the pool stays reusable). */
 	dispose: () => void;
 };
 
@@ -271,44 +267,41 @@ export function createTerminalMux(url: string, WebSocketImpl: typeof WebSocket =
 }
 
 /**
- * Share each host's mux transport without sharing attachment ownership.
+ * Share the mux transport without sharing attachment ownership.
  *
  * The daemon protocol already multiplexes frames by terminal id. A lease keeps
  * listener and cleanup ownership local to one useTerminalSession instance while
- * avoiding one WebSocket and ping timer per retained xterm. A host's last lease
- * closes its underlying client. A socket-level failure retires that client so
- * reconnecting leases for that host converge on one replacement socket.
+ * avoiding one WebSocket and ping timer per retained xterm. The last lease
+ * closes the underlying client. A socket-level failure retires that client so
+ * reconnecting leases converge on one replacement socket.
  */
-export function createTerminalMuxPool(createMux: (host: HostId) => TerminalMux | null): TerminalMuxPool {
+export function createTerminalMuxPool(createMux: () => TerminalMux): TerminalMuxPool {
 	type Connection = {
 		closed: boolean;
 		disposed: boolean;
-		host: HostId;
 		mux: TerminalMux;
 		refs: number;
 		unsubscribeState: () => void;
 	};
 
 	const connections = new Set<Connection>();
-	const current = new Map<HostId, Connection>();
+	let current: Connection | null = null;
 
 	const disposeConnection = (connection: Connection) => {
 		if (connection.disposed) return;
 		connection.disposed = true;
 		connection.closed = true;
-		if (current.get(connection.host) === connection) current.delete(connection.host);
+		if (current === connection) current = null;
 		connections.delete(connection);
 		connection.unsubscribeState();
 		connection.mux.dispose();
 	};
 
-	const newConnection = (host: HostId): Connection | null => {
-		const mux = createMux(host);
-		if (mux === null) return null;
+	const newConnection = (): Connection => {
+		const mux = createMux();
 		const connection: Connection = {
 			closed: false,
 			disposed: false,
-			host,
 			mux,
 			refs: 0,
 			unsubscribeState: () => undefined,
@@ -316,18 +309,16 @@ export function createTerminalMuxPool(createMux: (host: HostId) => TerminalMux |
 		connection.unsubscribeState = mux.onConnectionChange((state) => {
 			if (state !== "closed") return;
 			connection.closed = true;
-			if (current.get(host) === connection) current.delete(host);
+			if (current === connection) current = null;
 			if (connection.refs === 0) disposeConnection(connection);
 		});
 		connections.add(connection);
-		current.set(host, connection);
+		current = connection;
 		return connection;
 	};
 
-	const acquire = (host: HostId = LOCAL_HOST): TerminalMux | null => {
-		const existing = current.get(host);
-		const connection = existing && !existing.closed && !existing.disposed ? existing : newConnection(host);
-		if (connection === null) return null;
+	const acquire = (): TerminalMux => {
+		const connection = current && !current.closed && !current.disposed ? current : newConnection();
 		connection.refs += 1;
 		let released = false;
 		const subscriptions = new Set<() => void>();
@@ -381,7 +372,7 @@ export function createTerminalMuxPool(createMux: (host: HostId) => TerminalMux |
 	return {
 		acquire,
 		dispose: () => {
-			current.clear();
+			current = null;
 			for (const connection of [...connections]) disposeConnection(connection);
 		},
 	};

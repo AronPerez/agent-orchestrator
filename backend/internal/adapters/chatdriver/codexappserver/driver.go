@@ -305,6 +305,7 @@ func (d *Driver) Start(ctx context.Context, cfg ports.ChatStartConfig) (ports.Ch
 
 	policy, sandbox, reviewer := launchApprovalSettings(cfg.Permissions, cfg.ReadOnly)
 	conv.readOnly = cfg.ReadOnly
+	conv.disableNetwork = cfg.DisableNetwork
 	conv.launchMode = cfg.Permissions
 	params := map[string]any{
 		"cwd":               cfg.WorkspacePath,
@@ -563,9 +564,7 @@ func (d *Driver) connectSession(
 		stop:          transport.Stdin.Close,
 		terminate: func() error {
 			_ = transport.Stdin.Close()
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			return persistenthost.Shutdown(shutdownCtx, dataDir, string(sessionID))
+			return persistenthost.Shutdown(context.Background(), dataDir, string(sessionID))
 		},
 	}
 	conv := newConversation(proc, d.log, providerScopeID)
@@ -631,6 +630,9 @@ func approvalReviewer(mode ports.PermissionMode) string {
 // no network (AO never grants it), while full access and the read-only
 // reviewer sandbox do.
 func (c *conversation) SandboxAllowsNetwork(turnMode ports.PermissionMode) bool {
+	if c.disableNetwork {
+		return false
+	}
 	if c.readOnly {
 		return true
 	}
@@ -754,6 +756,7 @@ func (d *Driver) ForkIntoHost(ctx context.Context, sourceProviderConversationID,
 	}
 	policy, sandbox, reviewer := launchApprovalSettings(cfg.Permissions, cfg.ReadOnly)
 	conv.readOnly = cfg.ReadOnly
+	conv.disableNetwork = cfg.DisableNetwork
 	conv.launchMode = cfg.Permissions
 	params := map[string]any{
 		"threadId":          sourceProviderConversationID,
@@ -763,6 +766,8 @@ func (d *Driver) ForkIntoHost(ctx context.Context, sourceProviderConversationID,
 		"sandbox":           sandbox,
 	}
 	params["lastTurnId"] = conv.nativeID(lastProviderTurnID)
+	// The child retains native context; copied turns are not needed in this response.
+	params["excludeTurns"] = true
 	if cfg.Model != "" {
 		params["model"] = cfg.Model
 	}

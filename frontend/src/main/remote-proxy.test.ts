@@ -1,13 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createServer, type IncomingMessage, type Server } from "node:http";
+import { createServer, request as httpRequest, type IncomingMessage, type Server } from "node:http";
 import { connect as netConnect, type AddressInfo } from "node:net";
 import { startRemoteProxy, type ActiveProxy } from "./remote-proxy";
 
 type Seen = {
 	url: string;
 	auth: string | undefined;
-	origin: string | undefined;
 	expectedHost: string | undefined;
+	origin: string | undefined;
+	appAuth: string | undefined;
+	appOrigin: string | undefined;
 	body: string;
 };
 
@@ -33,13 +35,14 @@ beforeEach(() => {
 afterEach(async () => {
 	vi.restoreAllMocks();
 	await proxy?.close();
+	upstream?.closeAllConnections();
 	await new Promise<void>((resolve) => (upstream ? upstream.close(() => resolve()) : resolve()));
 	upstream = undefined;
 	proxy = undefined;
 });
 
 async function startUpstream(
-	handler: (req: IncomingMessage, seen: Seen[]) => { status: number; body: string },
+	handler: (req: IncomingMessage, seen: Seen[]) => { status: number; body: string; headers?: Record<string, string> },
 ): Promise<{ port: number; seen: Seen[] }> {
 	const seen: Seen[] = [];
 	upstream = createServer((req, res) => {
@@ -49,12 +52,14 @@ async function startUpstream(
 			seen.push({
 				url: req.url ?? "",
 				auth: req.headers.authorization,
-				origin: req.headers.origin,
 				expectedHost: req.headers["x-ao-expected-host-id"] as string | undefined,
+				origin: req.headers.origin,
+				appAuth: req.headers["x-ao-preview-app-authorization"] as string | undefined,
+				appOrigin: req.headers["x-ao-preview-app-origin"] as string | undefined,
 				body,
 			});
 			const out = handler(req, seen);
-			res.writeHead(out.status, { "content-type": "application/json" });
+			res.writeHead(out.status, { "content-type": "application/json", ...out.headers });
 			res.end(out.body);
 		});
 	});
@@ -63,6 +68,301 @@ async function startUpstream(
 }
 
 describe("startRemoteProxy", () => {
+	it("serves authenticated artifact files and sibling assets without replacing an app preview", async () => {
+		const { port, seen } = await startUpstream(() => ({ status: 200, body: "artifact", headers: { "set-cookie": "secret=1" } }));
+		proxy = await startRemoteProxy({ label: "box", url: `http://127.0.0.1:${port}/ao`, password: "pw" });
+		const app = proxy.previewUrl("ao-1", "http://localhost:5173/");
+		const source = `http://ao-preview-artifact.mfxs2mi.localhost:${port}/docs/report.md?raw=true`;
+		const raw = proxy.previewUrl("ao-1", source);
+		const html = proxy.previewUrl("ao-1", source.replace("report.md?raw=true", "index.html"));
+		expect(new URL(html).host).toBe(new URL(raw).host);
+		expect(proxy.previewUrl("ao-1", source)).toBe(raw);
+		expect(proxy.resolvePreviewUrl("ao-1", raw)).toBe(source);
+		expect(proxy.resolvePreviewUrl("ao-2", raw)).toBe("");
+		const request = async (url: string, method = "GET") => {
+			const target = new URL(url);
+			return new Promise<number>((resolve, reject) => {
+				const req = httpRequest({ hostname: "127.0.0.1", port: Number(new URL(proxy!.base).port), path: target.pathname + target.search, method, headers: { Host: target.host } }, (res) => {
+					expect(res.headers["set-cookie"]).toBeUndefined();
+					res.resume();
+					res.on("end", () => resolve(res.statusCode ?? 0));
+				});
+				req.on("error", reject);
+				req.end();
+			});
+		};
+		expect(await request(raw)).toBe(200);
+		expect(await request(html)).toBe(200);
+		expect(await request(new URL("chart.png", raw).href)).toBe(200);
+		expect(await request(new URL("/assets/chart.png", raw).href)).toBe(200);
+		expect(await request(raw, "POST")).toBe(404);
+		expect(seen.map((entry) => entry.url)).toEqual([
+			"/ao/api/v1/sessions/ao-1/preview/files/docs/report.md?raw=true&source=artifact",
+			"/ao/api/v1/sessions/ao-1/preview/files/docs/index.html?source=artifact",
+			"/ao/api/v1/sessions/ao-1/preview/files/docs/chart.png?source=artifact",
+			"/ao/api/v1/sessions/ao-1/preview/files/assets/chart.png?source=artifact",
+		]);
+		expect(seen.every((entry) => entry.auth === "Bearer pw" && !entry.appAuth)).toBe(true);
+		// Clearing Browser's app preview does not invalidate raw artifact reads.
+		expect(proxy.previewUrl("ao-1", "http://localhost:5173/")).toBe(app);
+		proxy.previewUrl("ao-1", "");
+		expect(await request(raw)).toBe(200);
+	});
+
+	it("scopes a stable static preview origin to one session and serves root assets", async () => {
+		const { port, seen } = await startUpstream((request) => ({
+			status: request.url === "/api/v1/projects" ? 200 : 200,
+			body: request.url === "/api/v1/projects" ? "SECRET API" : "preview file",
+		}));
+		proxy = await startRemoteProxy({ label: "workbox", url: `http://127.0.0.1:${port}`, password: "pw" });
+		const source = `http://ao-preview.mfxs2mi.localhost:${port}/dist/index.html`;
+		const preview = proxy.previewUrl("ao-1", source);
+		expect(proxy.resolvePreviewUrl("ao-1", new URL("/design?x=1#note", preview).href)).toBe(`http://ao-preview.mfxs2mi.localhost:${port}/design?x=1#note`);
+		expect(proxy.resolvePreviewUrl("ao-2", preview)).toBe("");
+		expect(proxy.resolvePreviewUrl("ao-1", "https://example.com/design")).toBe("https://example.com/design");
+		const shorthand = proxy.previewUrl("ao-3", "localhost:5173/");
+		expect(proxy.resolvePreviewUrl("ao-3", new URL("/details", shorthand).href)).toBe("http://localhost:5173/details");
+		expect(proxy.previewUrl("ao-1", source)).toBe(preview);
+		expect(new URL(preview).hostname).not.toBe(new URL(proxy.base).hostname);
+		expect(preview).not.toContain(new URL(proxy.base).pathname.slice(1));
+		const request = async (url: string): Promise<{ status: number; body: string }> => {
+			const target = new URL(url);
+			return new Promise((resolve, reject) => {
+				const req = httpRequest({ hostname: "127.0.0.1", port: Number(new URL(proxy!.base).port), path: target.pathname + target.search, headers: { Host: target.host } }, (res) => {
+					let body = "";
+					res.on("data", (chunk) => { body += chunk.toString(); });
+					res.on("end", () => resolve({ status: res.statusCode ?? 0, body }));
+				});
+				req.on("error", reject);
+				req.end();
+			});
+		};
+		const asset = await request(new URL("/assets/app.css", preview).href);
+		expect(asset.body).toBe("preview file");
+		expect(seen.at(-1)?.url).toBe("/api/v1/sessions/ao-1/preview/files/dist/assets/app.css");
+		const attemptedAPI = await request(new URL("/api/v1/projects", preview).href);
+		expect(attemptedAPI.body).toBe("preview file");
+		expect(seen.at(-1)?.url).toBe("/api/v1/sessions/ao-1/preview/files/dist/api/v1/projects");
+		expect(() => proxy!.previewUrl("ao-2", source)).toThrow(/unsupported|preview/i);
+		expect(new URL(proxy.previewUrl("ao-2", "http://127.0.0.2:5173/")).hostname).toMatch(/^ao-preview-[0-9a-f]{32}\.localhost$/);
+		expect(new URL(proxy.previewUrl("ao-2", "http://[::ffff:127.0.0.1]:5173/")).hostname).toMatch(/^ao-preview-[0-9a-f]{32}\.localhost$/);
+		expect(new URL(proxy.previewUrl("ao-2", "http://localhost.:5173/")).hostname).toMatch(/^ao-preview-[0-9a-f]{32}\.localhost$/);
+		const changed = proxy.previewUrl("ao-1", `http://localhost:5173/`);
+		expect(changed).not.toBe(preview);
+		expect(proxy.resolvePreviewUrl("ao-1", preview)).toBe("");
+		expect((await request(preview)).status).toBe(404);
+		expect(proxy.previewUrl("ao-1", "https://example.com/")).toBe("https://example.com/");
+		expect((await request(changed)).status).toBe(404);
+		const clearing = proxy.previewUrl("ao-1", "http://localhost:5173/");
+		expect(proxy.previewUrl("ao-1", "")).toBe("");
+		expect((await request(clearing)).status).toBe(404);
+	});
+
+	it("relays app Authorization and same-origin intent only on preview requests", async () => {
+		const { port, seen } = await startUpstream(() => ({ status: 200, body: "ok" }));
+		proxy = await startRemoteProxy({ label: "workbox", url: `http://127.0.0.1:${port}`, password: "host-password" });
+		const preview = new URL(proxy.previewUrl("ao-1", "http://localhost:5173/"));
+		const post = (origin?: string, authorization?: string) => new Promise<number>((resolve, reject) => {
+			const req = httpRequest({
+				hostname: "127.0.0.1", port: Number(preview.port), path: "/submit", method: "POST",
+				headers: {
+					Host: preview.host, ...(origin ? { Origin: origin } : {}), ...(authorization ? { Authorization: authorization } : {}),
+					"X-AO-Preview-App-Authorization": "forged", "X-AO-Preview-App-Origin": "forged",
+				},
+			}, (res) => { res.resume(); res.on("end", () => resolve(res.statusCode ?? 0)); });
+			req.on("error", reject);
+			req.end("data");
+		});
+		expect(await post(preview.origin, "Basic app-token")).toBe(200);
+		expect(seen.at(-1)).toMatchObject({
+			url: "/api/v1/sessions/ao-1/preview/app/submit", auth: "Bearer host-password", origin: undefined,
+			appAuth: "Basic app-token", appOrigin: preview.origin, body: "data",
+		});
+		expect(await post()).toBe(200);
+		expect(seen.at(-1)).toMatchObject({ appAuth: undefined, appOrigin: undefined });
+		expect(await post("http://evil.example")).toBe(403);
+		expect(seen).toHaveLength(2);
+	});
+
+	it("does not log preview paths or query secrets on connection failure", async () => {
+		const { port } = await startUpstream(() => ({ status: 200, body: '{"hostId":"wrong","apiVersion":1}' }));
+		proxy = await startRemoteProxy({ hostId: "expected", label: "workbox", url: `http://127.0.0.1:${port}`, password: "pw" });
+		const preview = new URL(proxy.previewUrl("ao-1", "http://localhost:5173/reset/path-secret?code=query-secret"));
+		const status = await new Promise<number>((resolve, reject) => {
+			const req = httpRequest({ hostname: "127.0.0.1", port: Number(preview.port), path: preview.pathname + preview.search, headers: { Host: preview.host } }, (res) => {
+				res.resume();
+				res.on("end", () => resolve(res.statusCode ?? 0));
+			});
+			req.on("error", reject);
+			req.end();
+		});
+		expect(status).toBe(502);
+		expect(warned.join("\n")).toContain("preview/app");
+		expect(warned.join("\n")).not.toMatch(/path-secret|query-secret/);
+	});
+
+	it("shows managed-server guidance only for AO's own preview conflict", async () => {
+		let managed = false;
+		const { port } = await startUpstream(() => ({
+			status: 409, body: managed ? '{"code":"PREVIEW_MANAGED_REQUIRED"}' : "app conflict",
+			headers: managed ? { "x-ao-preview-managed-required": "1" } : undefined,
+		}));
+		proxy = await startRemoteProxy({ label: "workbox", url: `http://127.0.0.1:${port}`, password: "pw" });
+		const preview = new URL(proxy.previewUrl("ao-1", "http://localhost:5173/"));
+		const request = () => new Promise<string>((resolve, reject) => {
+			const req = httpRequest({ hostname: "127.0.0.1", port: Number(preview.port), path: "/", headers: { Host: preview.host } }, (res) => {
+				let body = "";
+				res.on("data", (chunk) => { body += chunk.toString(); });
+				res.on("end", () => resolve(body));
+			});
+			req.on("error", reject);
+			req.end();
+		});
+		expect(await request()).toBe("app conflict");
+		managed = true;
+		expect(await request()).toContain("ao preview start");
+	});
+
+	it("forwards a managed preview websocket on its preview-only origin", async () => {
+		upstream = createServer((_request, response) => response.end("ok"));
+		let upgradePath = "";
+		let upgradeAuth = "";
+		let upgradeAppAuth = "";
+		let upgradeAppOrigin = "";
+		upstream.on("upgrade", (request, socket) => {
+			upgradePath = request.url ?? "";
+			upgradeAuth = String(request.headers.authorization ?? "");
+			upgradeAppAuth = String(request.headers["x-ao-preview-app-authorization"] ?? "");
+			upgradeAppOrigin = String(request.headers["x-ao-preview-app-origin"] ?? "");
+			socket.write("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n");
+			socket.end();
+		});
+		await new Promise<void>((resolve) => upstream?.listen(0, "127.0.0.1", resolve));
+		const port = (upstream.address() as AddressInfo).port;
+		proxy = await startRemoteProxy({ label: "workbox", url: `http://127.0.0.1:${port}`, password: "pw" });
+		const preview = new URL(proxy.previewUrl("ao-1", "http://localhost:5173/"));
+		const socket = netConnect(Number(preview.port), "127.0.0.1");
+		const reply = await new Promise<string>((resolve, reject) => {
+			let data = "";
+			socket.on("error", reject);
+			socket.on("data", (chunk) => {
+				data += chunk.toString();
+				if (data.includes("\r\n\r\n")) resolve(data);
+			});
+			socket.on("connect", () => socket.write(`GET /socket HTTP/1.1\r\nHost: ${preview.host}\r\nOrigin: ${preview.origin}\r\nAuthorization: Basic app-token\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGVzdA==\r\nSec-WebSocket-Version: 13\r\n\r\n`));
+		});
+		socket.destroy();
+		expect(reply).toContain("101 Switching Protocols");
+		expect(upgradePath).toBe("/api/v1/sessions/ao-1/preview/app/socket");
+		expect(upgradeAuth).toBe("Bearer pw");
+		expect(upgradeAppAuth).toBe("Basic app-token");
+		expect(upgradeAppOrigin).toBe(preview.origin);
+	});
+	it("proxies an IPv6 host instead of dialing its URL brackets", async (context) => {
+		upstream = createServer((_request, response) => response.end("ok"));
+		try {
+			await new Promise<void>((resolve, reject) => {
+				upstream?.once("error", reject);
+				upstream?.listen(0, "::1", resolve);
+			});
+		} catch (error) {
+			if (["EADDRNOTAVAIL", "EAFNOSUPPORT"].includes((error as NodeJS.ErrnoException).code ?? "")) {
+				upstream = undefined;
+				context.skip();
+			}
+			throw error;
+		}
+		const port = (upstream.address() as AddressInfo).port;
+		proxy = await startRemoteProxy({ label: "IPv6 box", url: `http://[::1]:${port}`, password: "pw" });
+		const response = await fetch(`${proxy.base}/api/v1/projects`);
+		expect(response.status).toBe(200);
+		expect(await response.text()).toBe("ok");
+	});
+
+	it("allows only the Forge dev renderer origin when configured", async () => {
+		const { port } = await startUpstream(() => ({ status: 200, body: "{}" }));
+		proxy = await startRemoteProxy(
+			{ label: "workbox", url: `http://127.0.0.1:${port}`, password: "pw" },
+			"http://localhost:5173",
+		);
+		const response = await fetch(`${proxy.base}/api/v1/projects`, {
+			method: "OPTIONS",
+			headers: { Origin: "http://localhost:5173" },
+		});
+		expect(response.headers.get("access-control-allow-origin")).toBe("http://localhost:5173");
+		const foreign = await fetch(`${proxy.base}/api/v1/projects`, {
+			method: "OPTIONS",
+			headers: { Origin: "http://evil.example" },
+		});
+		expect(foreign.headers.get("access-control-allow-origin")).toBe("http://localhost:5173");
+	});
+
+	it("serves a verified host with the token stripped", async () => {
+		const { port, seen } = await startUpstream((request) => ({
+			status: 200,
+			body: request.url === "/api/v1/identity"
+				? '{"hostId":"h_workbox","apiVersion":1}'
+				: '{"ok":true}',
+		}));
+		proxy = await startRemoteProxy({ hostId: "h_workbox", label: "workbox", url: `http://127.0.0.1:${port}`, password: "secret" });
+		const response = await fetch(`${proxy.base}/api/v1/projects`, {
+			headers: { "X-AO-Expected-Host-ID": "h_spoofed" },
+		});
+		expect(response.status).toBe(200);
+		expect(seen.map(({ url, auth, expectedHost }) => ({ url, auth, expectedHost }))).toEqual([
+			{ url: "/api/v1/identity", auth: undefined, expectedHost: undefined },
+			{ url: "/api/v1/projects", auth: "Bearer secret", expectedHost: "h_workbox" },
+		]);
+	});
+
+	it("rechecks host identity before a later request can send its credential", async () => {
+		const { port, seen } = await startUpstream((request) => ({
+			status: 200,
+			body: request.url === "/api/v1/identity"
+				? '{"hostId":"h_replacement","apiVersion":1}'
+				: "{}",
+		}));
+		proxy = await startRemoteProxy({
+			hostId: "h_expected",
+			label: "workbox",
+			url: `http://127.0.0.1:${port}`,
+			password: "secret",
+		});
+		const response = await fetch(`${proxy.base}/api/v1/projects?code=secret-code`);
+		expect(response.status).toBe(502);
+		expect(await response.json()).toEqual({
+			error: "remote host identity not verified",
+			code: "HOST_IDENTITY_UNVERIFIED",
+			message: "remote host identity not verified",
+		});
+		expect(seen.map((request) => request.url)).toEqual(["/api/v1/identity"]);
+		expect(seen[0].auth).toBeUndefined();
+		expect(warned.join("\n")).not.toContain("secret-code");
+	});
+
+	it("stops forwarding after a host upgrades to an incompatible API", async () => {
+		const { port, seen } = await startUpstream((request) => ({
+			status: 200,
+			body: request.url === "/api/v1/identity"
+				? '{"hostId":"h_workbox","apiVersion":2}'
+				: "{}",
+		}));
+		proxy = await startRemoteProxy({ hostId: "h_workbox", label: "workbox", url: `http://127.0.0.1:${port}`, password: "secret" });
+		const response = await fetch(`${proxy.base}/api/v1/projects`);
+		expect(response.status).toBe(426);
+		expect(await response.json()).toMatchObject({ code: "HOST_API_INCOMPATIBLE", message: expect.stringContaining("Update AO") });
+		expect(seen.map((request) => request.url)).toEqual(["/api/v1/identity"]);
+		expect(seen[0].auth).toBeUndefined();
+	});
+
+	it("connects a saved address without an explicit scheme", async () => {
+		const { port, seen } = await startUpstream(() => ({ status: 200, body: "{}" }));
+		proxy = await startRemoteProxy({ label: "workbox", url: `127.0.0.1:${port}`, password: "pw" });
+		const response = await fetch(`${proxy.base}/healthz`);
+		expect(response.status).toBe(200);
+		expect(seen[0].auth).toBe("Bearer pw");
+	});
+
 	it("forwards with the token stripped and the credential injected", async () => {
 		const { port, seen } = await startUpstream(() => ({
 			status: 200,
@@ -89,23 +389,6 @@ describe("startRemoteProxy", () => {
 		expect(seen[0].body).toBe('{"path":"/srv/repo"}');
 	});
 
-	// The proxy is how the renderer's requests reach the daemon, so the saved
-	// host id has to ride along here too — or the daemon's 421 guard never sees a
-	// request it could refuse.
-	it("names the saved host id on forwarded requests", async () => {
-		const { port, seen } = await startUpstream(() => ({ status: 200, body: "{}" }));
-		proxy = await startRemoteProxy({ label: "workbox", url: `http://127.0.0.1:${port}`, password: "pw", hostId: "h_1" });
-		await fetch(`${proxy.base}/healthz`, { headers: { origin: "app://renderer" } });
-		expect(seen[0].expectedHost).toBe("h_1");
-	});
-
-	it("sends no host id header for an unbound host", async () => {
-		const { port, seen } = await startUpstream(() => ({ status: 200, body: "{}" }));
-		proxy = await startRemoteProxy({ label: "workbox", url: `http://127.0.0.1:${port}`, password: "pw" });
-		await fetch(`${proxy.base}/healthz`, { headers: { origin: "app://renderer" } });
-		expect(seen[0].expectedHost).toBeUndefined();
-	});
-
 	// The add-host dialog accepts https://, so this is what a Tailscale Serve or
 	// reverse-proxy address does today: the upstream is a TLS endpoint and the
 	// proxy must not put the connection password on the wire in the clear.
@@ -121,6 +404,11 @@ describe("startRemoteProxy", () => {
 		// outcome is a failed request — never a plaintext one that succeeds.
 		const res = await fetch(`${proxy.base}/api/v1/projects`);
 		expect(res.status).toBe(502);
+		expect(await res.json()).toEqual({
+			error: "remote daemon unreachable",
+			code: "UPSTREAM_UNAVAILABLE",
+			message: "remote daemon unreachable",
+		});
 		expect(seen).toHaveLength(0);
 	});
 
@@ -192,11 +480,13 @@ describe("startRemoteProxy", () => {
 				origin: "app://renderer",
 				"access-control-request-method": "POST",
 				"access-control-request-headers": "content-type",
+				"access-control-request-private-network": "true",
 			},
 		});
 		expect(res.status).toBe(204);
 		expect(res.headers.get("access-control-allow-origin")).toBe("app://renderer");
 		expect(res.headers.get("access-control-allow-headers")).toMatch(/content-type/i);
+		expect(res.headers.get("access-control-allow-private-network")).toBe("true");
 		expect(seen).toHaveLength(0); // preflight never leaves the machine
 	});
 
@@ -216,16 +506,6 @@ describe("startRemoteProxy", () => {
 		});
 		expect(res.status).toBe(400); // errors pass through untouched…
 		expect(res.headers.get("access-control-allow-origin")).toBe("app://renderer"); // …but stay readable
-	});
-
-	it("returns 502 when the upstream is unreachable", async () => {
-		proxy = await startRemoteProxy({
-			label: "dead",
-			url: "http://127.0.0.1:1",
-			password: "pw",
-		});
-		const res = await fetch(`${proxy.base}/api/v1/projects`);
-		expect(res.status).toBe(502);
 	});
 
 	// "The app can't reach my host" had no answer anywhere before this, and the
@@ -262,68 +542,84 @@ describe("startRemoteProxy", () => {
 		expect(warning).not.toContain(token);
 	});
 
-	it("listens on loopback only", async () => {
+	it("binds only to 127.0.0.1, not every interface", async () => {
 		const { port } = await startUpstream(() => ({ status: 200, body: "{}" }));
 		proxy = await startRemoteProxy({
 			label: "workbox",
 			url: `http://127.0.0.1:${port}`,
 			password: "pw",
 		});
-		expect(new URL(proxy.base).hostname).toBe("127.0.0.1");
+		expect((await fetch(`${proxy.base}/healthz`)).status).toBe(200);
+		expect(proxy.listeningAddress).toBe("127.0.0.1");
 	});
 });
 
 describe("startRemoteProxy streams", () => {
-	it.each([
-		{ flushHeaders: false, closeProxy: false },
-		{ flushHeaders: true, closeProxy: false },
-		{ flushHeaders: false, closeProxy: true },
-		{ flushHeaders: true, closeProxy: true },
-	])("cancels abandoned upstream SSE requests (%j)", async ({ flushHeaders, closeProxy }) => {
-		let upstreamClosed = false;
-		const received = new Promise<void>((resolve) => {
-			upstream = createServer((_req, res) => {
-				res.on("close", () => { upstreamClosed = true; });
-				if (flushHeaders) {
-					res.writeHead(200, { "content-type": "text/event-stream" });
-					res.flushHeaders();
-				}
-				resolve();
-			});
+	it("closes a stream when the remote daemon drops it after headers", async () => {
+		upstream = createServer((_req, res) => {
+			res.writeHead(200, { "content-type": "text/event-stream" });
+			res.write("data: first\n\n");
+			setTimeout(() => res.destroy(), 20);
 		});
 		await new Promise<void>((resolve) => upstream?.listen(0, "127.0.0.1", resolve));
-		const port = (upstream!.address() as AddressInfo).port;
+		const port = (upstream.address() as AddressInfo).port;
 		proxy = await startRemoteProxy({ label: "workbox", url: `http://127.0.0.1:${port}`, password: "pw" });
-		const proxyUrl = new URL(proxy.base);
-		const socket = netConnect(Number(proxyUrl.port), "127.0.0.1", () => {
-			socket.write(`GET ${proxyUrl.pathname}/api/v1/sessions/s1/workspace/events HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n`);
+
+		const response = await fetch(`${proxy.base}/api/v1/events`);
+		expect(response.status).toBe(200);
+		await expect(response.text()).rejects.toThrow();
+		expect(warned.some((line) => line.includes("stream ended"))).toBe(true);
+	});
+
+	it("refuses a WebSocket when the host identity changed", async () => {
+		let sawUpgrade = false;
+		upstream = createServer((request, response) => {
+			response.setHeader("content-type", "application/json");
+			response.end(request.url === "/api/v1/identity" ? '{"hostId":"h_other","apiVersion":1}' : "{}");
 		});
-		socket.on("error", () => undefined);
-		const headersReceived = new Promise<void>((resolve) => {
-			let headers = "";
-			socket.on("data", (chunk: Buffer) => {
-				headers += chunk.toString();
-				if (headers.includes("\r\n\r\n")) resolve();
-			});
-		});
-		try {
-			await received;
-			if (flushHeaders) await headersReceived;
-			if (closeProxy) {
-				await proxy.close();
-				proxy = undefined;
-			} else {
-				socket.destroy();
-			}
-			// A real daemon releases its workspace watcher only when this
-			// upstream connection closes, even after the renderer is gone.
-			await vi.waitFor(() => expect(upstreamClosed).toBe(true));
-			expect(warned).toEqual([]);
-		} finally {
+		upstream.on("upgrade", (_request, socket) => {
+			sawUpgrade = true;
 			socket.destroy();
-			// Keep a failing regression from hanging the suite's server teardown.
-			upstream!.closeAllConnections();
-		}
+		});
+		await new Promise<void>((resolve) => upstream?.listen(0, "127.0.0.1", resolve));
+		const port = (upstream.address() as AddressInfo).port;
+		proxy = await startRemoteProxy({ hostId: "h_expected", label: "workbox", url: `http://127.0.0.1:${port}`, password: "secret" });
+		const proxyUrl = new URL(proxy.base);
+		const socket = netConnect(Number(proxyUrl.port), "127.0.0.1");
+		await new Promise<void>((resolve) => socket.once("connect", resolve));
+		const closed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
+		socket.write(`GET ${proxyUrl.pathname}/mux HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGVzdA==\r\nSec-WebSocket-Version: 13\r\n\r\n`);
+		await closed;
+		expect(sawUpgrade).toBe(false);
+	});
+
+	it("closes while a WebSocket is waiting for the identity probe", async () => {
+		let started!: () => void;
+		const identityStarted = new Promise<void>((resolve) => { started = resolve; });
+		upstream = createServer((request, response) => {
+			if (request.url !== "/api/v1/identity") return;
+			started();
+			setTimeout(() => {
+				response.setHeader("content-type", "application/json");
+				response.end('{"hostId":"h_workbox","apiVersion":1}');
+			}, 500);
+		});
+		await new Promise<void>((resolve) => upstream?.listen(0, "127.0.0.1", resolve));
+		const port = (upstream.address() as AddressInfo).port;
+		proxy = await startRemoteProxy({ hostId: "h_workbox", label: "workbox", url: `http://127.0.0.1:${port}`, password: "pw" });
+		const proxyUrl = new URL(proxy.base);
+		const socket = netConnect(Number(proxyUrl.port), "127.0.0.1");
+		await new Promise<void>((resolve) => socket.once("connect", resolve));
+		socket.write(`GET ${proxyUrl.pathname}/mux HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGVzdA==\r\nSec-WebSocket-Version: 13\r\n\r\n`);
+		await identityStarted;
+		const closing = proxy.close();
+		const outcome = await Promise.race([
+			closing.then(() => "closed"),
+			new Promise<string>((resolve) => setTimeout(() => resolve("pending"), 200)),
+		]);
+		socket.destroy();
+		await closing;
+		expect(outcome).toBe("closed");
 	});
 
 	it("closes while an upgraded socket is still open", async () => {
@@ -372,7 +668,9 @@ describe("startRemoteProxy streams", () => {
 	// right away; otherwise it reports CONNECTING forever, which is exactly what
 	// "not receiving live updates" looked like before this was found.
 	it("flushes response headers before the first SSE byte arrives", async () => {
+		let upstreamClosed = false;
 		upstream = createServer((_req, res) => {
+			res.once("close", () => { upstreamClosed = true; });
 			res.writeHead(200, { "content-type": "text/event-stream" });
 			// The real daemon flushes its own headers immediately (confirmed by a
 			// direct curl against it) — this upstream must too, or the test would
@@ -417,6 +715,7 @@ describe("startRemoteProxy streams", () => {
 		// block well before that proves the proxy flushes headers on their own
 		// rather than only when they can piggyback on the first body write.
 		expect(headersArrivedAfterMs).toBeLessThan(300);
+		await vi.waitFor(() => expect(upstreamClosed).toBe(true), { timeout: 1_000 });
 	});
 
 	it("delivers SSE chunks as they are written, not on close", async () => {

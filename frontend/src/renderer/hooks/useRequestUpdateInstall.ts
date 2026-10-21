@@ -1,91 +1,40 @@
-import { create } from "zustand";
+import { useQueryClient } from "@tanstack/react-query";
+import { useCallback, useRef } from "react";
 import { aoBridge } from "../lib/bridge";
-import { baseUrlFor, clientFor } from "../lib/host-clients";
-import { LOCAL_HOST } from "../lib/hosts";
-import { updateInstallRisk, type UpdateInstallRisk } from "../lib/update-install-risk";
+import { sessionsAtRiskFromInstall } from "../lib/update-install-risk";
+import { useUiStore } from "../stores/ui-store";
+import { workspaceQueryOptions } from "./useWorkspaceQuery";
+import type { WorkspaceSummary } from "../types/workspace";
 
-const UNKNOWN_RISK: UpdateInstallRisk = { count: 0, unknown: true };
-const SNAPSHOT_TIMEOUT_MS = 5_000;
+export function useRequestUpdateInstall(): () => void {
+	const openPrompt = useUiStore((state) => state.openUpdateInstallPrompt);
+	const queryClient = useQueryClient();
+	const pending = useRef(false);
 
-type InstallState = {
-	phase: "idle" | "checking" | "confirm" | "installing";
-	promptOpen: boolean;
-	returnFocusTo?: HTMLElement;
-	risk: UpdateInstallRisk;
-	failed: boolean;
-};
-
-// Shared across sidebar, settings and automatic feature-build progression.
-export const useUpdateInstallStore = create<InstallState>(() => ({
-	phase: "idle", promptOpen: false, risk: UNKNOWN_RISK, failed: false,
-}));
-
-async function freshLocalRisk(): Promise<UpdateInstallRisk> {
-	const controller = new AbortController();
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	try {
-		const base = baseUrlFor(LOCAL_HOST);
-		// Bypass the workspace cache and project grouping (which hides standalone
-		// sessions). No pageSize means the daemon returns the complete active set.
-		const result = await Promise.race([
-			clientFor(LOCAL_HOST).GET("/api/v1/sessions", {
-				params: { query: { active: true } },
-				cache: "no-store",
-				signal: controller.signal,
-			}),
-			new Promise<never>((_, reject) => {
-				timer = setTimeout(() => {
-					controller.abort();
-					reject(new Error("Session refresh timed out"));
-				}, SNAPSHOT_TIMEOUT_MS);
-			}),
-		]);
-		if (result.error || base !== baseUrlFor(LOCAL_HOST)) return UNKNOWN_RISK;
-		return updateInstallRisk(result.data);
-	} catch {
-		return UNKNOWN_RISK;
-	} finally {
-		clearTimeout(timer);
-	}
-}
-
-async function checkAndInstall(confirmed: boolean): Promise<void> {
-	useUpdateInstallStore.setState({ phase: "checking", promptOpen: confirmed, failed: false });
-	const risk = await freshLocalRisk();
-	if (!confirmed && (risk.count > 0 || risk.unknown)) {
-		useUpdateInstallStore.setState({ phase: "confirm", promptOpen: true, risk });
-		return;
-	}
-	useUpdateInstallStore.setState({ phase: "installing", risk });
-	try {
-		await aoBridge.updates.install();
-		useUpdateInstallStore.setState({ phase: "idle", promptOpen: false });
-	} catch {
-		useUpdateInstallStore.setState({ phase: "confirm", promptOpen: true, risk, failed: true });
-	}
-}
-
-export function requestUpdateInstall(): void {
-	if (useUpdateInstallStore.getState().phase !== "idle") return;
-	useUpdateInstallStore.setState({
-		returnFocusTo: document.activeElement instanceof HTMLElement ? document.activeElement : undefined,
-	});
-	void checkAndInstall(false);
-}
-
-export function confirmUpdateInstall(): void {
-	if (useUpdateInstallStore.getState().phase !== "confirm") return;
-	// Confirmation acknowledges local-turn risk, including unknown state. Still
-	// refresh at this click: the original prompt may have been open a long time.
-	void checkAndInstall(true);
-}
-
-export function cancelUpdateInstall(): void {
-	if (useUpdateInstallStore.getState().phase !== "confirm") return;
-	useUpdateInstallStore.setState({ phase: "idle", promptOpen: false, failed: false });
-}
-
-export function useRequestUpdateInstall() {
-	const busy = useUpdateInstallStore((state) => state.phase !== "idle");
-	return { requestInstall: requestUpdateInstall, busy };
+	return useCallback(() => {
+		if (pending.current) return;
+		pending.current = true;
+		void (async () => {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			try {
+				// Force a current local snapshot, even when the cache appears fresh.
+				const projects = await Promise.race([
+					queryClient.fetchQuery({ ...workspaceQueryOptions, staleTime: 0, retry: false }),
+					new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error("Worker refresh timed out")), 10_000); }),
+				]);
+				const snapshot = queryClient.getQueryState<WorkspaceSummary[]>(workspaceQueryOptions.queryKey);
+				if (snapshot?.isInvalidated || sessionsAtRiskFromInstall(projects.flatMap((project) => project.sessions)).length > 0) {
+					openPrompt();
+					return;
+				}
+				await aoBridge.updates.install();
+			} catch {
+				// Unknown worker state still requires explicit confirmation.
+				openPrompt();
+			} finally {
+				clearTimeout(timer);
+				pending.current = false;
+			}
+		})();
+	}, [openPrompt, queryClient]);
 }

@@ -32,7 +32,8 @@ in [gemini-cli.md](gemini-cli.md).
 | [harnesses/command-code.md](harnesses/command-code.md)   | Command Code TUI setup, activity hooks, Chat over `cmd acp`, exact restore, and current limits.                 |
 | [STATUS.md](STATUS.md)                                 | What is shipped on `main` today and what is still in flight.                                                          |
 | [stack.md](stack.md)                                   | Accepted library/runtime choices, pending stack decisions, and dependencies explicitly avoided for V1.                |
-| [telemetry.md](telemetry.md)                           | Fork privacy policy, local diagnostics, and retained functional networking.                                    |
+| [telemetry.md](telemetry.md)                           | User-facing overview of product telemetry, privacy safeguards, and opt-out controls.                                    |
+| [posthog-cost-controls.md](posthog-cost-controls.md)   | PostHog event-name migration, ingestion drop rules, and dashboard queries for reducing telemetry spend.              |
 | [remote-sessions-edd.md](remote-sessions-edd.md)       | EDD for shipped multi-host federation: one app driving N daemons, the loopback proxy, and LAN credential containment. |
 
 See [startup-cues.md](startup-cues.md) for command cues that gate a new worktree’s opening turn.

@@ -1,40 +1,51 @@
 import { describe, expect, it } from "vitest";
-import { updateInstallRisk } from "./update-install-risk";
+import { sessionsAtRiskFromInstall, type UpdateRiskSession } from "./update-install-risk";
 
-const session = {
-	id: "same-id",
-	mode: "chat",
-	isTerminated: false,
-	chatProviderPreserved: false,
-	activity: { state: "active" },
-};
-const risk = (...sessions: unknown[]) => updateInstallRisk({ sessions });
+function session(overrides: Partial<UpdateRiskSession> = {}): UpdateRiskSession {
+	return {
+		id: "s1",
+		title: "Session",
+		workspaceName: "repo",
+		provider: "claude-code",
+		mode: "chat",
+		status: "working",
+		...overrides,
+	};
+}
 
-describe("update install risk", () => {
-	it.each(["active", "waiting_input", "blocked"])("warns for %s Chat regardless of derived board status or harness", (state) => {
-		expect(risk({ ...session, harness: "codex", status: "mergeable", activity: { state } })).toEqual({ count: 1, unknown: false });
+describe("sessionsAtRiskFromInstall", () => {
+	it("flags a working chat session on a daemon-owned driver", () => {
+		expect(sessionsAtRiskFromInstall([session()])).toHaveLength(1);
 	});
-	it.each([
-		{ chatProviderPreserved: true },
-		{ mode: "tui" },
-		{ isTerminated: true },
-		{ activity: { state: "idle" } },
-		{ activity: { state: "exited" } },
-	])("does not warn for known safe state %j", (safe) => {
-		expect(risk({ ...session, ...safe })).toEqual({ count: 0, unknown: false });
+
+	it("treats no_signal as possibly mid-turn", () => {
+		expect(sessionsAtRiskFromInstall([session({ status: "no_signal" })])).toHaveLength(1);
 	});
-	it.each([
-		{ activity: undefined }, { activity: { state: "unknown" } },
-		{ activity: { state: "future-state" } }, { mode: undefined },
-		{ chatProviderPreserved: undefined },
-	])("fails conservatively for missing or unknown facts %j", (unknown) => {
-		expect(risk({ ...session, ...unknown }).unknown).toBe(true);
+
+	it("flags a chat turn paused for approval or input", () => {
+		expect(sessionsAtRiskFromInstall([session({ status: "needs_input" })])).toHaveLength(1);
 	});
-	it.each([undefined, {}, { sessions: null }, { sessions: [null] }, { sessions: ["bad"] }, { sessions: [], nextPageToken: "more" }])("does not treat malformed/incomplete snapshots as empty: %j", (body) => {
-		expect(updateInstallRisk(body).unknown).toBe(true);
+
+	it("spares TUI sessions, whose runtime is detached and re-adopted", () => {
+		expect(sessionsAtRiskFromInstall([session({ mode: "tui" })])).toEqual([]);
 	});
-	it("includes standalone and orchestrator sessions, and accepts an empty complete snapshot", () => {
-		expect(risk(session, { ...session, kind: "orchestrator" }).count).toBe(2);
-		expect(risk()).toEqual({ count: 0, unknown: false });
+
+	it.each(["codex", "claude-code", "cursor", "opencode", "droid", "kimi", "kimchi", "pi", "omp"] as const)(
+		"spares %s only when the daemon confirms persistent ownership",
+		(provider) => {
+			expect(sessionsAtRiskFromInstall([session({ provider, chatProviderPreserved: true })])).toEqual([]);
+			expect(sessionsAtRiskFromInstall([session({ provider })])).toHaveLength(1);
+			expect(sessionsAtRiskFromInstall([session({ provider, chatProviderPreserved: false })])).toHaveLength(1);
+		},
+	);
+
+	it("spares sessions with no turn in flight", () => {
+		for (const status of ["idle", "exited", "merged", "pr_open"]) {
+			expect(sessionsAtRiskFromInstall([session({ status })])).toEqual([]);
+		}
+	});
+
+	it("spares terminated sessions", () => {
+		expect(sessionsAtRiskFromInstall([session({ isTerminated: true })])).toEqual([]);
 	});
 });

@@ -1,24 +1,8 @@
 # Upstream remote-hosts stack — status and hand-off
 
-> **Status 2026-10-06.** All 21 PRs (#4358–#4378) were opened upstream as drafts on
-> 2026-08-24. **Merged:** #4359 (fs/dirs), #4365 (host identity primitives), #4366 (Remote
-> hosts flag), #4367 (saved-host store). **Closed unmerged** between 2026-09-23 and 10-02:
-> #4358, #4360–#4364, #4369–#4375, #4377, #4378. **Still open:** #4368 (token-gated loopback
-> proxy — its code shipped inside upstream #5921, uncredited) and #4376 (per-host terminal
-> mux — supersession unverified). Upstream then shipped its own multi-host client plus
-> headless host tooling as #5921 (`5976aaa98`). The fork's sync PR #177 (2026-10-05) took
-> #5921's backend, scripts and docs and kept this fork's client; the follow-up PR that adds
-> host identity to the desktop client (`hostId` in `remotes.json`, `X-AO-Expected-Host-ID`,
-> restored `build:host`) closes the pairing-protocol gap that split left behind.
-> Everything below is the 2026-08-24 hand-off, kept for history.
+Built by Plan 1 (`docs/superpowers/plans/2026-08-23-upstream-remote-hosts-foundation.md`, branches A1–A5), Plan 2 (`docs/superpowers/plans/2026-08-24-upstream-host-ui-fs.md`, branches A6–A7b) and Plan 3 (`docs/superpowers/plans/2026-08-24-upstream-hosts-wave3.md`, branches A8a–A11) against `upstream/main @ 6cba6344c` (2026-08-24). Branches live on `origin` (our fork); **no PR has been opened upstream**. The RFC text is `docs/upstreaming-rfc-remote-hosts.md`.
 
-Two independent stacks: **Track A** (desktop multi-host, TypeScript) below, and **Track C**
-(the CLI's `--url` / `AO_URL` remote target, Go) at the end of this document. They share no
-code — only reviewers — and can be opened in parallel.
-
-Built by Plan 1 (`docs/superpowers/plans/2026-08-23-upstream-remote-hosts-foundation.md`, branches A1–A5), Plan 2 (`docs/superpowers/plans/2026-08-24-upstream-host-ui-fs.md`, branches A6–A7b) and Plan 3 (`docs/superpowers/plans/2026-08-24-upstream-hosts-wave3.md`, branches A8a–A11) against `upstream/main @ 6cba6344c` (2026-08-24). Branches live on `origin` (our fork); every branch was opened upstream as a draft PR on 2026-08-24 — see the status block above for their outcome. The RFC text is `docs/upstreaming-rfc-remote-hosts.md`.
-
-There are **sixteen** branches in Track A. The public names are the clean refs below (`up-a1-flag` … `up-a11-docs`). The
+There are **sixteen** branches. The public names are the clean refs below (`up-a1-flag` … `up-a11-docs`). The
 `ao/agent-orchestrator-96/up-a*` twins on origin point at the same commits and are AO
 session bookkeeping only — never open an upstream PR from a namespaced ref.
 
@@ -109,103 +93,49 @@ Wave 3 forks into two lines that rejoin once. A8a builds on A5 — **not on A2**
    `cd backend && go generate ./internal/httpd/apispec/... && cd ../frontend && npm run api:ts` —
    or `api-drift` fails on a spec built from an older tree.
 
-## Upstream drift — rebased and closed out (2026-08-24)
+## Upstream has moved since the stack was cut
 
-The stack was originally cut against `upstream/main @ 6cba6344c`. By the time the campaign
-began executing this runbook, upstream had moved to **`c9a0adb21`** — 9 commits ahead, not
-the 4 recorded above when this note was first written (upstream kept moving between
-hand-offs):
+Every branch here is built on `upstream/main @ 6cba6344c`. As of **2026-08-24**, upstream is at
+`346b53336` — four commits ahead:
 
-    c9a0adb21 fix(desktop): bundle tmux on macOS and Linux (#4293)
-    1880498c8 fix(session): escape inconclusive agent switch recovery (#4269)
-    75dfa21e8 feat(observability): Sentry-ready error capture + triage classification (mobile) (#4181)
-    9df8862dc feat(observability): daemon Sentry — capture 5xx and panics with Go stacks (#4346)
-    48045a10f fix(desktop): make startup layout render together (#4330)
     346b53336 fix(usage): accept switch-sized Codex metadata (#4345)
     2fa9672c7 feat: add native Kimi ACP chat driver (#4193)
     f20411d14 feat: add OMP ACP chat driver (#4196)
     0fed9c46a fix: align sidebar status dots with board lanes (#4026)
 
-**All 21 branches have been rebased onto `c9a0adb21`, re-verified, and pushed.** The SHAs in
-the tables below are current as of that rebase. Full detail — every conflict and its
-resolution, the re-verification methodology (including two load-flake false failures caught
-by A/B and fully-isolated re-runs before trusting a "clean" result), and the scrub pass that
-removed `Claude-Session:` trailers from every commit message — is in the campaign ledger:
-`/Users/amongstar/.ao/data/briefs/agentic-devops/upstream-campaign-ledger.md`, Entries 3–4.
-Three integration tags were rebuilt: `up-a5-base` → `71a515d85`, `up-a7b-base` → `43b217500`,
-`up-a10-base` → `6e0a0c175`.
+Most of it is backend and does not touch this stack. **Three renderer files collide**, and one
+of them is the file the one-tree PR rewrites most:
 
-The predicted `Sidebar.tsx` conflict on A10 did not occur — A8a and A9a absorbed that file
-first via their own conflicts, and by the time A10's rebase ran, `0fed9c46a`'s change and the
-host-section rewrite no longer touched the same lines. The one substantive resolution worth
-knowing about: A9c's rebase dropped a one-line edit inside `routes/_shell.tsx`'s
-`agentCatalogPortRef` effect, because upstream's `48045a10f` deleted that effect entirely —
-A9c's edit is obsolete by construction, not lost.
+| File | Upstream change | Stack branch that also touches it |
+| --- | --- | --- |
+| `components/Sidebar.tsx` | status-dot alignment (`0fed9c46a`), ~17 lines | A10 (host sections, switcher, per-project host label) |
+| `components/Sidebar.test.tsx` | the same change's tests, ~49 lines | A10 |
+| `lib/session-presentation.test.ts` | new cases for the shared presentation helper | A8a (fixture `host` field only) |
 
-## Open PRs (draft, `AronPerez` → `Untrivial-ai/agent-orchestrator`, stacked-drafts mode)
-
-All 21 are open as drafts, in dependency order, using cumulative diffs for chained branches
-(each stacked PR's body names "Stacked on #N" for its parent(s) rather than waiting for the
-parent to merge, per the human's explicit stacked-drafts choice). Frontend-surface PRs open
-before their QA-evidence screenshot is captured and are held from ready/review-request until
-it is embedded — see the ledger for the evidence-capture plan and status per PR.
-
-**QA-evidence images live on the orphan branch `campaign-assets`** (this fork, no shared
-history with `main` — `git checkout --orphan`), under `qa-evidence/<pr-slug>.png`, linked
-into each PR's Artifacts section via `raw.githubusercontent.com/AronPerez/agent-orchestrator/
-campaign-assets/qa-evidence/<file>.png`. **`campaign-assets` must never be deleted while any
-of #4358–#4378 are open** — every embedded screenshot resolves through it, and deleting the
-branch breaks every image in every open PR's body simultaneously.
-
-| Branch | PR |
-| --- | --- |
-| `up-a1-flag` | [#4366](https://github.com/Untrivial-ai/agent-orchestrator/pull/4366) |
-| `up-a2-hosts` | [#4365](https://github.com/Untrivial-ai/agent-orchestrator/pull/4365) |
-| `up-a3-store` | [#4367](https://github.com/Untrivial-ai/agent-orchestrator/pull/4367) |
-| `up-a4-proxy` | [#4368](https://github.com/Untrivial-ai/agent-orchestrator/pull/4368) |
-| `up-a5-clients` | [#4369](https://github.com/Untrivial-ai/agent-orchestrator/pull/4369) |
-| `up-a6-host-ui` | [#4370](https://github.com/Untrivial-ai/agent-orchestrator/pull/4370) |
-| `up-a7a-fs-dirs` | [#4359](https://github.com/Untrivial-ai/agent-orchestrator/pull/4359) |
-| `up-a7b-folder-picker` | [#4371](https://github.com/Untrivial-ai/agent-orchestrator/pull/4371) |
-| `up-a8a-refs` | [#4372](https://github.com/Untrivial-ai/agent-orchestrator/pull/4372) |
-| `up-a8b-fanout` | [#4374](https://github.com/Untrivial-ai/agent-orchestrator/pull/4374) |
-| `up-a8c-terminals` | [#4376](https://github.com/Untrivial-ai/agent-orchestrator/pull/4376) |
-| `up-a9a-writes-sessions` | [#4373](https://github.com/Untrivial-ai/agent-orchestrator/pull/4373) |
-| `up-a9b-writes-projects` | [#4375](https://github.com/Untrivial-ai/agent-orchestrator/pull/4375) |
-| `up-a9c-writes-reviews` | [#4377](https://github.com/Untrivial-ai/agent-orchestrator/pull/4377) |
-| `up-a10-one-tree` | [#4378](https://github.com/Untrivial-ai/agent-orchestrator/pull/4378) |
-| `up-a11-docs` | [#4360](https://github.com/Untrivial-ai/agent-orchestrator/pull/4360) |
-| `up-c1-url` | [#4358](https://github.com/Untrivial-ai/agent-orchestrator/pull/4358) |
-| `up-c2a-refuse-local` | [#4361](https://github.com/Untrivial-ai/agent-orchestrator/pull/4361) |
-| `up-c2b-remote-path` | [#4362](https://github.com/Untrivial-ai/agent-orchestrator/pull/4362) |
-| `up-c2c-name-daemon` | [#4363](https://github.com/Untrivial-ai/agent-orchestrator/pull/4363) |
-| `up-c3-route-loopback` | [#4364](https://github.com/Untrivial-ai/agent-orchestrator/pull/4364) |
-
-PR bodies now follow the skyvern-cloud template (Ticket / Problem / Solution / How Has This
-Been Tested / Artifacts) instead of the What/Why/How/Testing/Checklist shape below — the
-files in `docs/upstreaming-pr-bodies/` are the current, validated versions; treat the
-descriptions in this document as historical design record, not the literal PR text.
+Rebase A10 before opening it, and expect a real conflict in `Sidebar.tsx` — resolve it by
+keeping both changes, never by taking a side. Nothing else in the stack is affected, and no
+branch needs rebasing until it is opened.
 
 ## The branches
 
 | # | Branch (on `origin`) | SHA | Base | Upstream title | Non-test files | Tests it carries |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | `up-a1-flag` | `4a2970469` | `upstream/main` | feat(settings): add an experimental Remote hosts flag | 10 | ui-store ×3, settings switch ×1 |
-| 2 | `up-a2-hosts` | `881a65c78` | `upstream/main` | feat(hosts): host identity primitives | 1 | hosts ×5 |
-| 3 | `up-a3-store` | `0d94b9e92` | `upstream/main` | feat(remotes): saved-host store, authenticated requests, password-free IPC | 9 | store + request ×30, ipc ×8, remotes-main ×4 |
-| 4 | `up-a4-proxy` | `11e54ccce` | `up-a3-store` | feat(remotes): token-gated loopback proxy for remote daemons | 9 | proxy ×15, registry ×7, remotes-main ×6 |
-| 5 | `up-a5-clients` | `7874bea65` | merge(A1, A2, A4), tag `up-a5-base` | feat(hosts): per-host API clients and flag-gated host boot | 3 | host-clients ×9, active-host ×6 |
-| 6 | `up-a6-host-ui` | `11f79b300` | `up-a5-clients` | feat(hosts): add, edit and remove remote hosts | 14 | useRemoteHosts ×5, HostSelect ×12, AddRemoteHostDialog ×20, CreateProjectFlowHosts ×6, fake-daemon ×5 |
-| 7 | `up-a7a-fs-dirs` | `eb9f8dd8c` | `upstream/main` | feat(daemon): read-only directory listing at GET /api/v1/fs/dirs | 6 | fs ×4 (Go), LAN policy assertion |
-| 8 | `up-a7b-folder-picker` | `e5ca2d51f` | merge(A6, A7a), tag `up-a7b-base` | feat(projects): browse a remote host's folders when adding a project | 11 | RemoteFolderPicker ×9, CreateProjectFlow.remote ×8 |
-| 9 | `up-a8a-refs` | `0a1c6b5f2` | `up-a5-clients` | refactor(hosts): thread Ref through reads and host-qualified routes | 50 | `src/renderer` 140 files / 2025 tests (base 139 / 2019) |
-| 10 | `up-a8b-fanout` | `8dd10d053` | `up-a8a-refs` | feat(hosts): fan out workspace queries and event streams per host | 21 | 142 / 2048; adds host-events ×8, fake-daemon ×7, rewritten useWorkspaceQuery |
-| 11 | `up-a8c-terminals` | `dc8e54c94` | `up-a8b-fanout` | feat(hosts): one terminal mux per host | 9 | 142 / 2051; adds mux-across-hosts ×3 |
-| 12 | `up-a9a-writes-sessions` | `fb3dec718` | `up-a8a-refs` | refactor(hosts): route session and terminal writes by Ref | 22 | 141 / 2030; adds session-writes-by-ref ×5 |
-| 13 | `up-a9b-writes-projects` | `52976f778` | `up-a9a-writes-sessions` | refactor(hosts): route project and orchestrator writes by Ref | 11 | 141 / 2030 |
-| 14 | `up-a9c-writes-reviews` | `407096036` | `up-a9b-writes-projects` | refactor(hosts): route pull request and review writes by Ref | 12 | 141 / 2030 |
-| 15 | `up-a10-one-tree` | `10503094a` | merge(A6, A8c, A9c), tag `up-a10-base` | feat(hosts): one tree across every connected host | 17 | 147 / 2113; adds Sidebar-across-hosts ×5, host_connect telemetry ×1 |
-| 16 | `up-a11-docs` | `79ba70131` | `upstream/main` | docs(remote-hosts): setup, trust boundary, ADR | 5 | none — documentation only |
+| 1 | `up-a1-flag` | `616dd08af` | `upstream/main` | feat(settings): add an experimental Remote hosts flag | 10 | ui-store ×3, settings switch ×1 |
+| 2 | `up-a2-hosts` | `9c0010aad` | `upstream/main` | feat(hosts): host identity primitives | 1 | hosts ×5 |
+| 3 | `up-a3-store` | `4c4e7e9d1` | `upstream/main` | feat(remotes): saved-host store, authenticated requests, password-free IPC | 9 | store + request ×30, ipc ×8, remotes-main ×4 |
+| 4 | `up-a4-proxy` | `825dfde92` | `up-a3-store` | feat(remotes): token-gated loopback proxy for remote daemons | 9 | proxy ×15, registry ×7, remotes-main ×6 |
+| 5 | `up-a5-clients` | `39fa64f23` | merge(A1, A2, A4), tag `up-a5-base` | feat(hosts): per-host API clients and flag-gated host boot | 3 | host-clients ×9, active-host ×6 |
+| 6 | `up-a6-host-ui` | `d00d3cd2b` | `up-a5-clients` | feat(hosts): add, edit and remove remote hosts | 14 | useRemoteHosts ×5, HostSelect ×12, AddRemoteHostDialog ×20, CreateProjectFlowHosts ×6, fake-daemon ×5 |
+| 7 | `up-a7a-fs-dirs` | `98604953b` | `upstream/main` | feat(daemon): read-only directory listing at GET /api/v1/fs/dirs | 6 | fs ×4 (Go), LAN policy assertion |
+| 8 | `up-a7b-folder-picker` | `26d0c5db2` | merge(A6, A7a), tag `up-a7b-base` | feat(projects): browse a remote host's folders when adding a project | 11 | RemoteFolderPicker ×9, CreateProjectFlow.remote ×8 |
+| 9 | `up-a8a-refs` | `2d58b559a` | `up-a5-clients` | refactor(hosts): thread Ref through reads and host-qualified routes | 50 | `src/renderer` 140 files / 2025 tests (base 139 / 2019) |
+| 10 | `up-a8b-fanout` | `17e2e98f0` | `up-a8a-refs` | feat(hosts): fan out workspace queries and event streams per host | 21 | 142 / 2048; adds host-events ×8, fake-daemon ×7, rewritten useWorkspaceQuery |
+| 11 | `up-a8c-terminals` | `330bcffc4` | `up-a8b-fanout` | feat(hosts): one terminal mux per host | 9 | 142 / 2051; adds mux-across-hosts ×3 |
+| 12 | `up-a9a-writes-sessions` | `a2b10f97f` | `up-a8a-refs` | refactor(hosts): route session and terminal writes by Ref | 22 | 141 / 2030; adds session-writes-by-ref ×5 |
+| 13 | `up-a9b-writes-projects` | `e93a11444` | `up-a9a-writes-sessions` | refactor(hosts): route project and orchestrator writes by Ref | 11 | 141 / 2030 |
+| 14 | `up-a9c-writes-reviews` | `f5cdb2554` | `up-a9b-writes-projects` | refactor(hosts): route pull request and review writes by Ref | 12 | 141 / 2030 |
+| 15 | `up-a10-one-tree` | `e16a55e49` | merge(A6, A8c, A9c), tag `up-a10-base` | feat(hosts): one tree across every connected host | 17 | 147 / 2113; adds Sidebar-across-hosts ×5, host_connect telemetry ×1 |
+| 16 | `up-a11-docs` | `0dd65c265` | `upstream/main` | docs(remote-hosts): setup, trust boundary, ADR | 5 | none — documentation only |
 
 Verified on the upstream base at build time: every listed suite green, `tsc --noEmit` and
 `tsc -p tsconfig.e2e.json` clean on each branch; A5's full run was 72 files / 871 passed.
@@ -267,70 +197,3 @@ list does not read as outstanding work:
 One item, recorded the same way:
 
 - `components/chat/ChatWorkspace.tsx` still reads `inspectorSessions[snapshot.sessionId]` — a bare session id — because a conversation snapshot carries no host. It is a layout read (whether the inspector is open), so two hosts' same-id sessions share only that. Everything else in that store is keyed by `refKey` as of A9c. The fork has the same gap.
-
----
-
-# Track C — CLI remote target (`--url` / `AO_URL`)
-
-Built by Plan C (`docs/superpowers/plans/2026-08-24-upstream-cli-url.md`) against the same `upstream/main @ 6cba6344c` (2026-08-24). Go only: `backend/internal/cli/**` plus one function in `backend/internal/httpd/lan_listener.go`. It shares no code with Track A and can be opened in parallel with it — same reviewers, different files. Branches live on `origin`; **no PR has been opened upstream**.
-
-The branch names below are the only refs — there are no AO session-namespaced twins for Track C, because `plan/2026-08-24-cli` exists as a branch and git refuses a nested ref under it (`directory file conflict`).
-
-## Branch topology
-
-`up-c1-url` is the root. `up-c2a-refuse-local`, `up-c2b-remote-path`, `up-c2c-name-daemon` and `up-c3-route-loopback` are cut from it as **independent siblings** — no branch calls another's helpers, and each is separately reviewable as "no `--url` ⇒ no change". C3 sits on C1 rather than on `upstream/main` because its end-to-end test drives the real LAN listener through the real CLI with `--url`; the daemon hunk itself is independent.
-
-## Order of operations (human)
-
-1. Open C1 with (or just after) the RFC. It is the only Track C PR that adds a surface; the other four are bug fixes in behaviour it creates, and reviewing them before C1 exists reads as noise.
-2. Once C1 is squash-merged, rebase all four siblings onto `upstream/main` and open them — any order, all four at once is fine.
-3. Rebase recipe (upstream squash-merges, so always `--onto` across a merged parent, never a merge):
-
-       git fetch upstream
-       git rebase --onto upstream/main up-c1-url up-c2a-refuse-local
-       git push --force-with-lease origin up-c2a-refuse-local
-       # (same two lines for up-c2b-remote-path, up-c2c-name-daemon, up-c3-route-loopback)
-
-4. **Expected conflicts between the siblings, and how to resolve them.** C2a, C2b and C2c each append helpers to `remote.go` immediately above `// authorize presents the remote connection password.`, and each appends tests to the end of `remote_test.go`. Once one merges, the next one's rebase conflicts there. Every such conflict is **additive — keep both sides**; no two siblings modify the same lines. The one exception worth reading carefully: C2b and C2c both touch `project.go`'s `project add` success line. C2c owns it (it appends `ctx.resolvedBySuffix()`); C2b deliberately leaves it at upstream's form. If C2c merges first, C2b's rebase must keep C2c's version.
-
-## The branches
-
-| # | Branch (on `origin`) | SHA | Base | Upstream title | Non-test files | Tests it carries |
-| --- | --- | --- | --- | --- | --- | --- |
-| C1 | `up-c1-url` | `6edda5648` | `upstream/main` | feat(cli): target a remote daemon with --url / AO_URL | 6 + `docs/cli/README.md` | remote ×15 |
-| C2a | `up-c2a-refuse-local` | `75accf4a7` | `up-c1-url` | fix(cli): refuse --url on commands that only ever act on this machine | 9 | remote ×3, callbacks ×4, dev ×1 |
-| C2b | `up-c2b-remote-path` | `ee42b9114` | `up-c1-url` | fix(cli): judge a remote --path and a remote project by the remote host's rules | 4 | remote ×3, project ×1, pr_ref ×4 |
-| C2c | `up-c2c-name-daemon` | `ac5982054` | `up-c1-url` | fix(cli): name the daemon in destructive prompts and success lines | 3 | remote ×1, project ×1, session ×2 |
-| C3 | `up-c3-route-loopback` | `399525e27` | `up-c1-url` | fix(daemon): distinguish a LAN policy block from a missing route | 1 | lan_listener ×3, cli end-to-end ×1 |
-
-Verified on the upstream base at build time, on every branch: `go build ./...`, `go vet ./...`, `go test ./...` and `go test -race` over the touched packages all green, `gofmt -l` empty, and the branch's own named tests confirmed RED before the implementation went in.
-
-**One upstream flake to expect, not ours.** `TestSessionSwitchAgentCancellationAndOverallTimeout/overall_timeout_includes_recovery_command` (`internal/cli/session_switch_test.go`) sets a 20 ms overall wait; under machine load the first HTTP round trip can exceed it and the raw `context deadline exceeded` surfaces instead of the expected message. Measured at ~2 failures per 300 runs **on clean `upstream/main`** as well as on these branches, so it is not a Track C regression. Nothing in this stack touches `session_switch.go`.
-
-## Running the Go suite on a machine with an AO session
-
-`internal/cli` reads ambient `AO_*` environment. On a box with a live AO session (`AO_SESSION_ID`, `AO_PROJECT_ID`, `AO_DATA_DIR`, `AO_RUN_FILE`, `AO_RUNTIME_LAUNCH_ID`, `AO_BROWSER_CAPABILITY`, …) that produces ~15 failures that are pure harness leakage — CI is unaffected. Clear all of it, and note that **zsh does not word-split an unquoted parameter**, so `env $UNSET go test` silently clears nothing and the array form is required:
-
-    args=(); for v in $(env | grep -o '^AO_[A-Z_0-9]*'); do args+=(-u "$v"); done
-    env "${args[@]}" env | grep -c '^AO_'      # must print 0
-    env "${args[@]}" go test ./...
-
-## Opening a PR (C1 first; the other four in any order after it merges)
-
-    gh pr create --repo Untrivial-ai/agent-orchestrator --base main --draft \
-      --head AronPerez:up-c1-url \
-      --title "feat(cli): target a remote daemon with --url / AO_URL" \
-      --body-file docs/upstreaming-pr-bodies/c1-url.md
-
-`--draft` per the 2026-08-24 directive: this is a stack, and nothing signals mergeable until
-the order is settled. Mark ready with `gh pr ready <n>` when a PR is genuinely up for review.
-
-Bodies follow upstream's template (What / Why / How / Testing / Checklist) and are in `docs/upstreaming-pr-bodies/`. Each body's "Why" links the RFC issue number once it exists — fill `#RFC` in before opening.
-
-## What a reviewer can verify with no `--url` and no `AO_URL`
-
-- `resolveRemoteTarget("")` returns `nil` and every daemon call goes through the run-file path it always did (`TestResolveRemoteTargetDefaultsToLocal`, `TestDaemonBaseLocalUsesRunFile`, C1).
-- Every guard added by C2a/C2b/C2c returns `nil` on its first line (`TestLocalOnlyCommandsUnchangedWithoutRemoteTarget`, `TestDaemonLocalCallbacksUnchangedWithoutRemoteTarget`, `TestResolvedBySuffix`, and the local halves of `TestCheckRemoteProjectPathRefusesHostRelative` / `TestCheckRemoteImplicitProjectRefusesLocalSignals`).
-- Local output is asserted as exact literals, not substrings, wherever a suffix could have crept in (C2c).
-- `ao status` against a local daemon still reports `unhealthy` for the same HTTP status a remote target reports `locked_out` for (`TestStatusLocalUnchangedForSameHTTPStatus`, C1).
-- The loopback listener is untouched by C3 (`TestLoopbackStillServesBlockedRoute`).

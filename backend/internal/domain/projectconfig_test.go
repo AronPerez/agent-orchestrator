@@ -93,10 +93,10 @@ func TestProjectConfigValidate(t *testing.T) {
 		{"tracker intake unknown provider", ProjectConfig{TrackerIntake: TrackerIntakeConfig{Enabled: true, Provider: "linear", Assignee: "alice"}}, true},
 		{"tracker intake repo with whitespace", ProjectConfig{TrackerIntake: TrackerIntakeConfig{Enabled: true, Repo: " acme/demo", Assignee: "alice"}}, true},
 		{"tracker intake assignee with whitespace", ProjectConfig{TrackerIntake: TrackerIntakeConfig{Enabled: true, Assignee: " alice"}}, true},
-		{"orchestrator prompt ok", ProjectConfig{OrchestratorPrompt: strings.Repeat("a", 1024)}, false},
-		{"orchestrator prompt too long", ProjectConfig{OrchestratorPrompt: strings.Repeat("a", 64*1024+1)}, true},
 		{"auto review enabled", ProjectConfig{AutoReview: true}, false},
 		{"auto review disabled", ProjectConfig{AutoReview: false}, false},
+		{"orchestrator prompt ok", ProjectConfig{OrchestratorPrompt: strings.Repeat("a", 1024)}, false},
+		{"orchestrator prompt too long", ProjectConfig{OrchestratorPrompt: strings.Repeat("a", 64*1024+1)}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

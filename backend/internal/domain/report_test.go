@@ -22,6 +22,16 @@ func TestReportDeliveryEnvelopeRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSessionDeliveryID(t *testing.T) {
+	message := WrapSessionDelivery("session-send:abc123", "orchestrator direction")
+	if got, ok := SessionDeliveryID(message); !ok || got != "session-send:abc123" {
+		t.Fatalf("SessionDeliveryID() = %q, %v", got, ok)
+	}
+	if _, ok := SessionDeliveryID(WrapReportDelivery("report-batch:abc123", "report")); ok {
+		t.Fatal("SessionDeliveryID() recognized a report delivery")
+	}
+}
+
 func TestValidateReportContent(t *testing.T) {
 	pr := "https://github.com/owner/repo/pull/42"
 	tests := []struct {

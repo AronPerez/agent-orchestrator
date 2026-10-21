@@ -107,7 +107,6 @@ func TestEditQueuedTurnRouteRefusals(t *testing.T) {
 				Sessions: newFakeSessionService(), Conversations: svc,
 			}, httpd.ControlDeps{})
 			request := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/p1-1/conversation/turns/turn-queued/queue/edit", bytes.NewBufferString(`{"text":"update"}`))
-			request.Host = "localhost"
 			response := httptest.NewRecorder()
 			router.ServeHTTP(response, request)
 			assertErrorCode(t, response.Body.Bytes(), response.Code, tc.status, tc.code)

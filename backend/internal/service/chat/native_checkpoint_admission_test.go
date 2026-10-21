@@ -37,9 +37,7 @@ func TestStartNativeCheckpointAdmission(t *testing.T) {
 		{name: "unsettled before driver launch", verifyErr: ports.ErrChatHistoryUnsettled},
 		{name: "replayed wrong UUID", wrongUUID: true},
 		{name: "AO high-water still enforced", highWater: true},
-		// AO FORK DIVERGENCE (#109): the fork waives untrusted legacy hook text
-		// once the replay settles, with or without consent.
-		{name: "legacy gate waived after settled replay", legacy: true, wantPass: true},
+		{name: "legacy gate still enforced", legacy: true},
 		{name: "legacy gate waived only by consent", legacy: true, consent: true, wantPass: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
