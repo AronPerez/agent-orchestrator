@@ -3201,11 +3201,11 @@ func (m *Manager) ResumeAgentWithMode(ctx context.Context, id domain.SessionID) 
 // resumeAgentWithMode preserves strict native-history intent for automatic
 // retries, including update stops that have no stale-binary failure marker.
 func (m *Manager) resumeAgentWithMode(ctx context.Context, id domain.SessionID, requireNativeHistory bool) (result RestoreResult, err error) {
-	return m.resumeAgentWithExpectedOwner(ctx, id, requireNativeHistory, "")
+	return m.resumeAgentWithExpectedOwner(ctx, id, false, requireNativeHistory, "")
 }
 
 // Fork compatibility: the optional owner fence is checked under the resume gate.
-func (m *Manager) resumeAgentWithExpectedOwner(ctx context.Context, id domain.SessionID, requireNativeHistory bool, expected domain.AgentHarness) (result RestoreResult, err error) {
+func (m *Manager) resumeAgentWithExpectedOwner(ctx context.Context, id domain.SessionID, forceFresh, requireNativeHistory bool, expected domain.AgentHarness) (result RestoreResult, err error) {
 	if err := m.beginAgentResume(ctx, id); err != nil {
 		return RestoreResult{}, fmt.Errorf("resume agent %s: %w", id, err)
 	}
@@ -3229,6 +3229,13 @@ func (m *Manager) resumeAgentWithExpectedOwner(ctx context.Context, id domain.Se
 	}
 	if expected != "" && rec.Harness != expected {
 		return RestoreResult{}, fmt.Errorf("resume agent %s: owner changed during recovery: %w", id, ErrResumeInProgress)
+	}
+	// A never-started switch target must not resume an older native conversation.
+	// Recheck the pre-launch facts after reacquiring the operation gate.
+	if forceFresh && (domain.NormalizeSessionMode(rec.Mode) != domain.SessionModeTUI ||
+		rec.Metadata.RuntimeHandleID != "" || rec.Metadata.RuntimeLaunchID != "" || rec.Metadata.AgentSessionID != "" ||
+		m.sessionLaunchOptions(ctx, id).HandoffNote == "") {
+		return RestoreResult{}, fmt.Errorf("resume agent %s: target launch changed during recovery: %w", id, ErrResumeInProgress)
 	}
 	if rec.HibernatedAt != nil && m.persistentHostReconcileDone != nil {
 		select {
@@ -3341,8 +3348,8 @@ func (m *Manager) resumeAgentWithExpectedOwner(ctx context.Context, id domain.Se
 			return RestoreResult{}, fmt.Errorf("resume agent %s: hibernation state changed: %w", id, ErrResumeInProgress)
 		}
 	}
-	result, err = m.resumeAgentRecordWithPolicy(ctx, "resume agent", rec,
-		requireNativeHistory || (rec.StaleBinary != nil && rec.StaleBinary.SwitchFailedAt != nil))
+	result, err = m.resumeAgentRecordWithReservedGeneration(ctx, "resume agent", rec, forceFresh,
+		requireNativeHistory || (rec.StaleBinary != nil && rec.StaleBinary.SwitchFailedAt != nil), "")
 	if err == nil && m.chat != nil && domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat &&
 		rec.StaleBinary != nil && rec.StaleBinary.SwitchFailedAt != nil {
 		// A failed move to a new release kept the user's queued messages for
@@ -3649,6 +3656,12 @@ func (m *Manager) relaunchSessionWithPolicyAndGeneration(ctx context.Context, op
 		Env:           env,
 	}
 	var handle ports.RuntimeHandle
+	if (switching || savedNote) && rec.Metadata.RuntimeHandleID == "" {
+		if err := m.reserveForkSwitchLaunch(ctx, rec.ID, rec.Harness, launchID); err != nil {
+			m.cleanupSystemPromptDir(rec.ID)
+			return RestoreResult{}, fmt.Errorf("%s %s: reserve switch launch: %w", operation, rec.ID, err)
+		}
+	}
 	if restartHandle == nil {
 		handle, err = m.runtime.Create(ctx, runtimeCfg)
 	} else {

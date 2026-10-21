@@ -8,6 +8,8 @@ package gen
 import (
 	"context"
 	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
 const disableForkAgentSwitchReporting = `-- name: DisableForkAgentSwitchReporting :exec
@@ -133,12 +135,9 @@ func (q *Queries) ListActiveForkAgentSwitches(ctx context.Context) ([]AgentSwitc
 }
 
 const listForkAgentSwitches = `-- name: ListForkAgentSwitches :many
-
 SELECT id, session_id, idempotency_key, request_fingerprint, from_harness, target_harness, target_native_session_ref, target_start_mode, state, agent_handoff_status, source_transcript_status, semantic_handoff_included, agent_handoff_path, agent_handoff_hash, source_generation_id, target_generation_id, target_runtime_handle_id, target_acknowledged_at, error_code, requested_at, updated_at, final_handoff_path, final_handoff_hash, failure_point FROM agent_switches WHERE session_id = ? ORDER BY requested_at DESC, id DESC
 `
 
-// Fork compatibility only: receipts for the frozen UI over provider switching.
-// No old saga worker, native-session registry, or failure uploader is restored.
 func (q *Queries) ListForkAgentSwitches(ctx context.Context, sessionID string) ([]AgentSwitch, error) {
 	rows, err := q.db.QueryContext(ctx, listForkAgentSwitches, sessionID)
 	if err != nil {
@@ -212,4 +211,38 @@ DELETE FROM agent_switch_failure_receipts
 func (q *Queries) PurgeForkAgentSwitchReceipts(ctx context.Context) error {
 	_, err := q.db.ExecContext(ctx, purgeForkAgentSwitchReceipts)
 	return err
+}
+
+const reserveForkSwitchLaunch = `-- name: ReserveForkSwitchLaunch :execrows
+
+UPDATE sessions SET runtime_launch_id = ?1, updated_at = ?2
+WHERE id = ?3 AND revision = ?4
+    AND harness = ?5 AND session_mode = 'tui'
+    AND is_terminated = ?6 AND runtime_handle_id = ''
+`
+
+type ReserveForkSwitchLaunchParams struct {
+	LaunchID           string
+	UpdatedAt          time.Time
+	ID                 domain.SessionID
+	ExpectedRevision   int64
+	ExpectedHarness    domain.AgentHarness
+	ExpectedTerminated bool
+}
+
+// Fork compatibility only: receipts for the frozen UI over provider switching.
+// No old saga worker, native-session registry, or failure uploader is restored.
+func (q *Queries) ReserveForkSwitchLaunch(ctx context.Context, arg ReserveForkSwitchLaunchParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, reserveForkSwitchLaunch,
+		arg.LaunchID,
+		arg.UpdatedAt,
+		arg.ID,
+		arg.ExpectedRevision,
+		arg.ExpectedHarness,
+		arg.ExpectedTerminated,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
