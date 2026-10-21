@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
@@ -24,6 +25,7 @@ type Installer interface {
 	AgentJobs(ctx context.Context) ([]systeminstall.Job, error)
 	Verify(ctx context.Context, target systeminstall.Target) (systeminstall.Job, error)
 	UpdateAdvisory(ctx context.Context, target systeminstall.Target, refresh bool) (systeminstall.UpdateAdvisory, error)
+	CancelAgentOperation(ctx context.Context, target systeminstall.Target) (systeminstall.Job, error)
 }
 
 // SystemInstallController owns the system prerequisite and agent harness install routes.
@@ -39,6 +41,7 @@ func (c *SystemInstallController) Register(r chi.Router) {
 	r.Get("/agents/install-jobs", c.agentJobs)
 	r.Get("/agents/{agent}/update-advisory", c.updateAdvisory)
 	r.Post("/agents/{agent}/install", c.startAgent)
+	r.Post("/agents/{agent}/install/cancel", c.cancelAgent)
 	r.Get("/agents/{agent}/install", c.agentStatus)
 	r.Post("/agents/{agent}/verify", c.verifyAgent)
 }
@@ -112,7 +115,28 @@ func (c *SystemInstallController) startAgent(w http.ResponseWriter, r *http.Requ
 		envelope.WriteError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusAccepted, job)
+	envelope.WriteJSON(w, http.StatusAccepted, forkInstallJobView(job))
+}
+
+func (c *SystemInstallController) cancelAgent(w http.ResponseWriter, r *http.Request) {
+	if c.Installer == nil {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/agents/{agent}/install/cancel")
+		return
+	}
+	target, ok := parseAgentInstallTarget(w, r)
+	if !ok {
+		return
+	}
+	job, err := c.Installer.CancelAgentOperation(r.Context(), target)
+	if errors.Is(err, systeminstall.ErrNotWaiting) {
+		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict", "INSTALL_NOT_WAITING", "no update is waiting for idle sessions for this harness", nil)
+		return
+	}
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, forkInstallJobView(job))
 }
 
 func (c *SystemInstallController) agentJobs(w http.ResponseWriter, r *http.Request) {
@@ -124,6 +148,10 @@ func (c *SystemInstallController) agentJobs(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		envelope.WriteError(w, r, err)
 		return
+	}
+	jobs = slices.Clone(jobs)
+	for i := range jobs {
+		jobs[i] = forkInstallJobView(jobs[i])
 	}
 	envelope.WriteJSON(w, http.StatusOK, AgentInstallJobsResponse{Jobs: jobs})
 }
@@ -145,10 +173,20 @@ func (c *SystemInstallController) verifyAgent(w http.ResponseWriter, r *http.Req
 		envelope.WriteError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusAccepted, job)
+	envelope.WriteJSON(w, http.StatusAccepted, forkInstallJobView(job))
 }
 
 func writeAgentInstallError(w http.ResponseWriter, r *http.Request, err error) bool {
+	var active *systeminstall.HarnessActiveError
+	if errors.As(err, &active) {
+		details := harnessActiveDetails(active)
+		message := "end active sessions for this harness before changing its installation"
+		if active.Starting {
+			message = "a session for this harness is starting; try again when it has started"
+		}
+		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict", "HARNESS_ACTIVE", message, details)
+		return true
+	}
 	switch {
 	case errors.Is(err, systeminstall.ErrUpdateVersion):
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_UPDATE_VERSION", "expectedVersion is only accepted for updates and must be a version newer than the installed one", nil)
@@ -184,7 +222,7 @@ func (c *SystemInstallController) agentStatus(w http.ResponseWriter, r *http.Req
 		envelope.WriteError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusOK, job)
+	envelope.WriteJSON(w, http.StatusOK, forkInstallJobView(job))
 }
 
 func (c *SystemInstallController) start(w http.ResponseWriter, r *http.Request) {
@@ -204,7 +242,7 @@ func (c *SystemInstallController) start(w http.ResponseWriter, r *http.Request) 
 		envelope.WriteError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusAccepted, job)
+	envelope.WriteJSON(w, http.StatusAccepted, forkInstallJobView(job))
 }
 
 func (c *SystemInstallController) status(w http.ResponseWriter, r *http.Request) {
@@ -221,7 +259,7 @@ func (c *SystemInstallController) status(w http.ResponseWriter, r *http.Request)
 		envelope.WriteError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusOK, job)
+	envelope.WriteJSON(w, http.StatusOK, forkInstallJobView(job))
 }
 
 // parseInstallTarget reads and validates the {target} path param against the
@@ -246,4 +284,22 @@ func parseAgentInstallTarget(w http.ResponseWriter, r *http.Request) (systeminst
 		return "", false
 	}
 	return target, true
+}
+
+func harnessActiveDetails(active *systeminstall.HarnessActiveError) map[string]any {
+	sessionIDs := make([]string, 0, len(active.SessionIDs))
+	for _, id := range active.SessionIDs {
+		sessionIDs = append(sessionIDs, string(id))
+	}
+	reviewerIDs := make([]string, 0, len(active.ReviewerIDs))
+	for _, id := range active.ReviewerIDs {
+		reviewerIDs = append(reviewerIDs, string(id))
+	}
+	return map[string]any{
+		"count":              active.Count(),
+		"sessionIds":         sessionIDs,
+		"reviewerSessionIds": reviewerIDs,
+		"level":              string(active.Level),
+		"starting":           active.Starting,
+	}
 }

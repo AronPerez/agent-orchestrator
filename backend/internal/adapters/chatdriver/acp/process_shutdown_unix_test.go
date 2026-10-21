@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,10 +23,13 @@ func TestPersistentTerminateWaitsForProviderGrace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	shutdown := func(ctx context.Context) error {
+	shutdown := func(ctx context.Context, quick bool) error {
+		if quick {
+			return persistenthost.ShutdownQuick(ctx, dataDir, sessionID)
+		}
 		return persistenthost.Shutdown(ctx, dataDir, sessionID)
 	}
-	t.Cleanup(func() { _ = shutdown(context.Background()) })
+	t.Cleanup(func() { _ = shutdown(context.Background(), false) })
 	// Wait until the provider ignores SIGTERM, so termination needs both grace periods.
 	ready := make(chan string, 1)
 	go func() {
@@ -41,7 +45,7 @@ func TestPersistentTerminateWaitsForProviderGrace(t *testing.T) {
 		t.Fatal("provider did not become ready")
 	}
 
-	terminate := persistentTerminate(newGatedReader(transport.Stdout, false), transport.Stdin, shutdown)
+	terminate := persistentTerminate(newGatedReader(transport.Stdout, false), transport.Stdin, &atomic.Bool{}, shutdown)
 	started := time.Now()
 	if err := terminate(); err != nil {
 		t.Fatal(err)

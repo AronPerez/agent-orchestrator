@@ -38,6 +38,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/agents/{agent}/chat/prewarm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Run an agent's Chat readiness check in the background so a later switch to it skips it */
+        post: operations["prewarmChatAgent"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/agents/{agent}/install": {
         parameters: {
             query?: never;
@@ -50,6 +67,23 @@ export interface paths {
         put?: never;
         /** Start an asynchronous install, reinstall, or update for one fixed agent harness */
         post: operations["startAgentInstall"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/agents/{agent}/install/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel an update that is waiting for the harness's sessions to be idle */
+        post: operations["cancelAgentInstall"];
         delete?: never;
         options?: never;
         head?: never;
@@ -338,6 +372,40 @@ export interface paths {
         };
         /** Return display-safe native authentication plans for supported agents */
         get: operations["listAgentAuthPlans"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/agents/chat/permission-modes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List the permission modes each agent can run a chat in, strictest first */
+        get: operations["listChatPermissionModes"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/agents/chat/unavailable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List which agents cannot run a chat because an adapter they need is not installed */
+        get: operations["listUnavailableChatAgents"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1231,6 +1299,23 @@ export interface paths {
         get: operations["getLinkPreview"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mobile/browser-control": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Allow or deny paired-device access to the desktop browser */
+        post: operations["setMobileBrowserRemoteAccess"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2852,6 +2937,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{sessionId}/conversation/turns/{turnId}/auto-resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Schedule or cancel a usage-limited turn retry */
+        patch: operations["setSessionConversationTurnAutoResume"];
+        trace?: never;
+    };
     "/api/v1/sessions/{sessionId}/conversation/turns/{turnId}/cancel": {
         parameters: {
             query?: never;
@@ -2965,6 +3067,23 @@ export interface paths {
         put?: never;
         /** Exit the agent while preserving its AO session */
         post: operations["exitAgent"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/{sessionId}/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read a session's turns, newest first, across Chat and Terminal */
+        get: operations["getSessionHistory"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -3185,6 +3304,23 @@ export interface paths {
         patch: operations["patchSessionPreviewApp"];
         trace?: never;
     };
+    "/api/v1/sessions/{sessionId}/preview/artifacts/*": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Serve a selected static browser preview file from the session artifact directory */
+        get: operations["getSessionPreviewArtifact"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{sessionId}/preview/files/*": {
         parameters: {
             query?: never;
@@ -3216,6 +3352,23 @@ export interface paths {
         post: operations["startSessionPreviewServer"];
         /** Stop the managed preview server for a session */
         delete: operations["stopSessionPreviewServer"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/{sessionId}/provider-switch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Switch an idle Chat session to another provider */
+        post: operations["switchSessionProvider"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -3544,6 +3697,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{sessionId}/workspace/branches": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List the local branches and pull requests a workspace review can read, checked-out branch first */
+        get: operations["listSessionWorkspaceBranches"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{sessionId}/workspace/diffs": {
         parameters: {
             query?: never;
@@ -3658,6 +3828,23 @@ export interface paths {
         get: operations["getSessionWorkspaceHistory"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/{sessionId}/workspace/history/selection": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Resolve ticked commits, or a view's whole range, to their combined changed files */
+        post: operations["getSessionWorkspaceCommitSelection"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3834,6 +4021,23 @@ export interface paths {
         patch: operations["updateSessionInterface"];
         trace?: never;
     };
+    "/api/v1/settings/version-refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Choose whether idle open sessions move to newly installed harness releases */
+        patch: operations["updateVersionRefresh"];
+        trace?: never;
+    };
     "/api/v1/shell-terminals": {
         parameters: {
             query?: never;
@@ -3999,6 +4203,23 @@ export interface paths {
         post?: never;
         /** Cancel an unclaimed speculative task worktree */
         delete: operations["cancelTaskPreparation"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/telemetry/identity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Report the desktop telemetry identity and opt-out so a paired phone can adopt it */
+        get: operations["getTelemetryIdentity"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -4312,6 +4533,7 @@ export interface components {
             /** Format: date-time */
             lastUsedAt?: null | string;
             provider?: string;
+            supportsFast?: boolean;
         };
         AgentModelsResponse: {
             agentId: string;
@@ -4336,6 +4558,7 @@ export interface components {
             refreshState?: "idle" | "queued" | "refreshing" | "error";
             /** Format: date-time */
             retryAt?: null | string;
+            runnableModels?: string[];
             /** @enum {string} */
             selectionMode: "catalog" | "text" | "mode";
             source: string;
@@ -4390,6 +4613,7 @@ export interface components {
             /** Format: date-time */
             checkedAt: string;
             currentVersion?: string;
+            inUse?: components["schemas"]["AgentUpdateInUse"];
             latestVersion?: string;
             maintenanceMethod?: string;
             /** @enum {string} */
@@ -4397,6 +4621,17 @@ export interface components {
             source?: string;
             /** @enum {string} */
             status: "unknown" | "current" | "behind_latest" | "ahead_of_latest";
+        };
+        AgentUpdateInUse: {
+            /**
+             * @description Whether an update can run while they do: safe keeps the running release, warn may disturb it, blocked requires them to end, idle waits until they are idle and restarts them around the update.
+             * @enum {string}
+             */
+            level: "safe" | "warn" | "blocked" | "idle";
+            /** @description Sessions running this harness, directly or through their reviewer. */
+            liveSessions: number;
+            /** @description Sessions that run this harness or own a reviewer that does. */
+            sessionIds?: string[];
         };
         AppMemoryResponse: {
             /** @description False when there was no earlier sample to measure against: cpuPercent is unknown, not zero. */
@@ -4666,6 +4901,13 @@ export interface components {
         CancelSessionInterfaceTransitionResponse: {
             ok: boolean;
             sessionId: string;
+        };
+        ChatAgentPermissionModes: {
+            agent: string;
+            modes: string[];
+        };
+        ChatPermissionModesResponse: {
+            agents: components["schemas"]["ChatAgentPermissionModes"][];
         };
         ClaimPRRequest: {
             allowTakeover?: null | boolean;
@@ -4993,7 +5235,7 @@ export interface components {
             createdAt: string;
             displayName?: string;
             /** @enum {string} */
-            displayStatus: "Working" | "Blocked" | "Exited" | "No signal" | "Awaiting PR" | "Fixing CI failures" | "Addressing comments" | "Needs review" | "Review scheduled" | "Reviewing" | "Review failed" | "Review pending" | "Draft" | "CI failing" | "Commented" | "Changes requested" | "Needs human review" | "Mergeable" | "Approved" | "Merged" | "Closed without merge" | "Terminated";
+            displayStatus: "Working" | "Blocked" | "Exited" | "No signal" | "Interrupted" | "Awaiting PR" | "Fixing CI failures" | "Addressing comments" | "Needs review" | "Review scheduled" | "Reviewing" | "Review failed" | "Review pending" | "Draft" | "CI failing" | "Commented" | "Changes requested" | "Needs human review" | "Mergeable" | "Approved" | "Merged" | "Closed without merge" | "Terminated";
             harness?: string;
             /** Format: date-time */
             hibernatedAt?: null | string;
@@ -5034,6 +5276,7 @@ export interface components {
             runtimeUnreachable?: boolean;
             /** @enum {string} */
             scmStatus?: "pr_open" | "draft" | "ci_failed" | "review_pending" | "changes_requested" | "commented" | "approved" | "mergeable" | "merged";
+            staleBinary?: components["schemas"]["SessionStaleBinary"];
             /** @enum {string} */
             status: "working" | "pr_open" | "draft" | "ci_failed" | "review_pending" | "changes_requested" | "commented" | "approved" | "mergeable" | "merged" | "needs_input" | "exited" | "idle" | "terminated" | "no_signal";
             /** @enum {string} */
@@ -5202,6 +5445,7 @@ export interface components {
             displayName: string;
             efforts?: string[];
             id: string;
+            supportsFast?: boolean;
         };
         ConversationModelsResponse: {
             models: components["schemas"]["ConversationModelResponse"][];
@@ -5301,6 +5545,7 @@ export interface components {
             completedAt?: null | string;
             diff?: components["schemas"]["ConversationTurnDiffResponse"];
             errorMessage?: string;
+            hasHumanPrompt?: boolean;
             hasRetryAttempt?: boolean;
             id: string;
             plan?: components["schemas"]["ConversationPlanResponse"];
@@ -5311,12 +5556,22 @@ export interface components {
             startedAt?: null | string;
             /** @enum {string} */
             state: "queued" | "running" | "completed" | "recovered" | "interrupted" | "failed" | "cancelled";
+            usageLimit?: components["schemas"]["ConversationUsageLimitResponse"];
         };
         ConversationTurnSettingsPayload: {
             /** @enum {string} */
             approvalMode?: "default" | "accept-edits" | "auto" | "bypass-permissions";
+            /** @enum {string} */
+            autoCompactWindow?: "200k" | "1m";
+            fastMode?: boolean;
             model?: string;
+            planMode?: boolean;
             reasoningEffort?: string;
+        };
+        ConversationUsageLimitResponse: {
+            autoResume: boolean;
+            resetsAt?: null | string;
+            resumeError?: string;
         };
         ConversationUsagePayload: {
             /** Format: int64 */
@@ -5653,10 +5908,10 @@ export interface components {
             /** Format: date-time */
             startedAt?: null | string;
             /**
-             * @description Current lifecycle state of the job.
+             * @description Current lifecycle state of the job. waiting_for_idle: the update runs once every session using the harness is idle (Windows).
              * @enum {string}
              */
-            status: "idle" | "running" | "installing" | "verifying" | "succeeded" | "failed" | "unsupported" | "interrupted";
+            status: "idle" | "running" | "waiting_for_idle" | "installing" | "verifying" | "succeeded" | "failed" | "unsupported" | "interrupted";
             /**
              * @description Fixed install target this job ran (or is running) for.
              * @enum {string}
@@ -5664,6 +5919,8 @@ export interface components {
             target: "tmux" | "gh" | "claude" | "claude-code" | "codex" | "cursor" | "opencode" | "opencode-v2" | "aider" | "copilot" | "grok" | "kimi" | "pi" | "amp" | "auggie" | "droid" | "crush" | "cline" | "goose" | "qwen" | "gemini" | "continue" | "devin" | "kiro" | "kilocode" | "vibe" | "muse" | "agy" | "autohand" | "kimchi" | "prime-agent" | "omp" | "fx" | "unreal-agent" | "codewhale" | "mimo-code" | "deepseek-harness" | "openhands" | "command-code" | "memcode" | "cloudflared";
             /** Format: date-time */
             updatedAt?: null | string;
+            /** @description While waiting_for_idle, the sessions the update still waits for and why. */
+            waitingOn?: components["schemas"]["SessionWait"][];
         };
         InvokeCueRequest: {
             /** @description Optional exact session target. Agent cues message it; command cues use its worktree. Omit it to spawn an agent worker or run a command in the project root. A supplied id must be non-blank and compatible, and never falls back to a replacement worker. Invocation body limit: 4 KiB. */
@@ -5815,6 +6072,8 @@ export interface components {
             entries: components["schemas"]["WorkspaceTreeEntry"][];
             path: string;
             sessionId: string;
+            /** @description True only when the tree was read from the requested immutable snapshot. */
+            snapshot?: boolean;
             truncated: boolean;
         };
         MarkAllNotificationsReadRequest: {
@@ -5851,6 +6110,10 @@ export interface components {
             method: string;
             ok: boolean;
             prNumber: number;
+            /** @enum {string} */
+            state: "merged";
+            /** Format: date-time */
+            stateChangedAt: string;
         };
         MobileDeviceResponse: {
             /** Format: date-time */
@@ -5878,6 +6141,7 @@ export interface components {
             secure: boolean;
         };
         MobileStatusResponse: {
+            browserRemoteAccess: boolean;
             enabled: boolean;
             endpoints: components["schemas"]["MobileEndpoint"][];
             host: string;
@@ -5982,6 +6246,10 @@ export interface components {
             targetKind?: "app" | "api";
             url?: string;
         };
+        PrewarmChatAgentResponse: {
+            /** @description Agent adapter identifier whose Chat check was started. */
+            agent: string;
+        };
         ProbeAgentResponse: {
             agent: components["schemas"]["AgentInfo"];
             installed: boolean;
@@ -6053,6 +6321,23 @@ export interface components {
             activityId: string;
             providerTurnId: string;
             sourceTurnId: string;
+        };
+        ProviderSwitchRequest: {
+            /** @enum {string} */
+            autoCompactWindow?: "200k" | "1m";
+            effort?: string;
+            fastMode?: boolean;
+            idempotencyKey?: string;
+            message?: components["schemas"]["SendConversationMessageRequest"];
+            model?: string;
+            /** @enum {string} */
+            permissionMode?: "default" | "accept-edits" | "auto" | "bypass-permissions";
+            targetHarness: string;
+            ultracode?: boolean;
+        };
+        ProviderSwitchResponse: {
+            message?: components["schemas"]["SendConversationMessageResponse"];
+            status: string;
         };
         PublishRenderRequest: {
             /** @description Also keep the page as a session artifact, a deliverable the user keeps. */
@@ -6348,6 +6633,18 @@ export interface components {
             remoteBranch?: string;
             unpushed: number;
         };
+        SessionHistoryResponse: {
+            offset: number;
+            total: number;
+            turns: components["schemas"]["SessionHistoryTurn"][];
+        };
+        SessionHistoryTurn: {
+            agentResponse: string;
+            /** Format: date-time */
+            at: string;
+            harness?: string;
+            userRequest: string;
+        };
         SessionInterfaceTransition: {
             /** Format: date-time */
             completedAt?: null | string;
@@ -6528,6 +6825,11 @@ export interface components {
             entry?: string;
             previewUrl?: string;
             sessionId: string;
+            /**
+             * @description Root containing the selected static entry; omitted for external app URLs.
+             * @enum {string}
+             */
+            source?: "workspace" | "artifact";
         };
         SessionProvisionStep: {
             /** Format: date-time */
@@ -6541,6 +6843,14 @@ export interface components {
         };
         SessionResponse: {
             session: components["schemas"]["ControllersSessionView"];
+        };
+        SessionStaleBinary: {
+            /** Format: date-time */
+            since: string;
+            /** Format: date-time */
+            switchFailedAt?: null | string;
+            /** @description Harness release now installed; the session moves to it on its next launch. */
+            version: string;
         };
         SessionStepResponse: {
             /**
@@ -6559,6 +6869,11 @@ export interface components {
             sessionId: string;
             totals: components["schemas"]["UsageTotalsResponse"];
         };
+        SessionWait: {
+            /** @enum {string} */
+            reason: "working" | "command" | "approval" | "starting" | "reviewer" | "resume";
+            sessionId: string;
+        };
         SetActivityRequest: {
             /** @description Working directory of the agent process that fired the hook. Used to reject signals from nested agents that inherited AO_SESSION_ID. */
             agentCwd?: string;
@@ -6575,6 +6890,10 @@ export interface components {
             entrypoint?: string;
             /** @description AO hook sub-command that produced this state (e.g. post-tool-use). */
             event?: string;
+            /** @description The agent's final message of the turn, kept for terminal turn history only. */
+            finalAssistantMessage?: string;
+            /** @description The agent whose hook sent this signal. A signal from an agent the session no longer runs is ignored. */
+            harness?: string;
             /** @description Latest assistant update exposed by the provider hook. */
             latestAssistantUpdate?: string;
             /** @description Latest real user prompt exposed by the provider hook. */
@@ -6586,6 +6905,8 @@ export interface components {
              * @description Time the local hook process observed the event, before delivery to the daemon.
              */
             observedAt?: string;
+            /** @description Process id of the provider process that fired the hook (Claude's CLAUDE_PID). */
+            processId?: number;
             /** @description Native main-turn identity reported by the hook, when supported. */
             providerTurnId?: string;
             /** @description Running Claude subagent ids observed in a parent Stop hook; empty means none, absent means no snapshot. */
@@ -6605,6 +6926,8 @@ export interface components {
             toolUseId?: string;
             /** @description Read-only provider-native transcript path exposed by the hook. */
             transcriptPath?: string;
+            /** @description The user's request for the turn, kept for terminal turn history only. */
+            turnUserRequest?: string;
             /** @description Provider transcript metadata used by the local usage pipeline. */
             usage?: components["schemas"]["UsageHookMetadata"];
         };
@@ -6612,6 +6935,9 @@ export interface components {
             ok: boolean;
             sessionId: string;
             state: string;
+        };
+        SetBrowserRemoteAccessRequest: {
+            enabled: boolean;
         };
         SetChatViewRequest: {
             active: boolean;
@@ -6690,6 +7016,9 @@ export interface components {
             /** @enum {string} */
             harness?: "claude-code" | "codex" | "copilot" | "cursor" | "kilocode" | "opencode" | "opencode-v2" | "kiro" | "pi" | "agy" | "devin" | "droid" | "kimi" | "kimchi" | "muse" | "amp" | "aider" | "grok" | "crush" | "auggie" | "cline" | "autohand";
         };
+        SetTurnAutoResumeRequest: {
+            enabled: null | boolean;
+        };
         SettingsResponse: {
             chatHarnesses: string[];
             chatHibernationEnabled: boolean;
@@ -6704,6 +7033,8 @@ export interface components {
             };
             localEnabled: boolean;
             trackerIntakeEnabled: boolean;
+            /** @description After a harness update, idle open sessions restart on the new release instead of running the old one until they happen to restart. */
+            versionRefresh: boolean;
         };
         ShellTerminalEnvelope: {
             shellTerminal: components["schemas"]["ShellTerminalResponse"];
@@ -7108,6 +7439,12 @@ export interface components {
             /** @description Individual checks in stable order for the selected probe. */
             requirements: components["schemas"]["SystemRequirement"][];
         };
+        TelemetryIdentityResponse: {
+            cloudUserId?: string;
+            distinctId: string;
+            githubLogin?: string;
+            optedOut: boolean;
+        };
         TrackerIntakeConfig: {
             assignee?: string;
             enabled?: boolean;
@@ -7144,6 +7481,13 @@ export interface components {
             reviewerSurface?: components["schemas"]["DomainReviewerSurface"];
             reviews: components["schemas"]["PRReviewState"][];
             runs: components["schemas"]["ReviewRun"][];
+        };
+        UnavailableChatAgent: {
+            agent: string;
+            reason: string;
+        };
+        UnavailableChatAgentsResponse: {
+            agents: components["schemas"]["UnavailableChatAgent"][];
         };
         UnregisterPushDeviceResponse: {
             deleted: boolean;
@@ -7185,6 +7529,9 @@ export interface components {
         UpdateShellTerminalRequest: {
             /** @description New tab title for the shell terminal. Trimmed; must be non-empty. */
             title: string;
+        };
+        UpdateVersionRefreshRequest: {
+            enabled: null | boolean;
         };
         UpdateWorkspaceFileRequest: {
             content: string;
@@ -7230,6 +7577,73 @@ export interface components {
             /** @enum {string} */
             status: "waiting" | "complete" | "duplicate" | "mismatch";
         };
+        WorkspaceBranchResponse: {
+            checkedOut: boolean;
+            detached?: boolean;
+            isDefault: boolean;
+            /**
+             * @description local reads as a branch view (or the checked-out worktree); pull_request reads as a pull request view.
+             * @enum {string}
+             */
+            kind: "local" | "remote" | "pull_request";
+            /** @description Branch name, the pull request's source branch, or empty for a detached HEAD. */
+            name: string;
+            prNumber?: number;
+            prTitle?: string;
+            /** @description Pass as sourceUrl with prNumber to read a pull_request row. */
+            prUrl?: string;
+            tipSha?: string;
+            /**
+             * Format: date-time
+             * @description The tip's committer time, or the pull request's last update.
+             */
+            updatedAt?: null | string;
+        };
+        WorkspaceBranchesResponse: {
+            /** @description The checked-out row first, then the rest newest first; at most 200 rows. */
+            branches: components["schemas"]["WorkspaceBranchResponse"][];
+            defaultBranch?: string;
+            sessionId: string;
+            /** @description False for scratch sessions, which have no Git history. */
+            supported: boolean;
+            truncated: boolean;
+        };
+        WorkspaceCommitConflictResponse: {
+            /** @description The ticked commit whose changes did not apply. */
+            commitSha: string;
+            /** @description Up to 20 paths that did not apply. */
+            paths: string[];
+            /** @enum {string} */
+            reason: "conflict" | "unsupported_history";
+        };
+        WorkspaceCommitSelectionRequest: {
+            /** @description Local branch to read instead of the checked-out worktree. */
+            branch?: string;
+            /** @description Full SHAs. Empty = the whole range (All commits). */
+            commitShas: string[];
+            /** @description The view's baseSha from its history. A moved base fails with WORKSPACE_REF_MOVED. */
+            expectedBaseSha?: string;
+            /** @description The view's tipSha from its history. A moved tip fails with WORKSPACE_REF_MOVED. */
+            expectedTipSha?: string;
+            /** @description Associated pull request to read instead of the checked-out worktree. */
+            prNumber?: number;
+            /** @description Stable URL of the pull request, for PRs that share a number. Requires prNumber. */
+            sourceUrl?: string;
+            /** @description Fence for checked-out selections. */
+            workspaceVersion?: string;
+        };
+        WorkspaceCommitSelectionResponse: {
+            baseSha?: string;
+            combinable: boolean;
+            conflict?: components["schemas"]["WorkspaceCommitConflictResponse"];
+            /** @description True when the commits form one unbroken range. */
+            contiguous: boolean;
+            files: components["schemas"]["WorkspaceFileSummary"][];
+            sessionId: string;
+            summary: components["schemas"]["WorkspaceSummary"];
+            tipSha: string;
+            truncated: boolean;
+        };
         WorkspaceCommitSummary: {
             author: string;
             files: components["schemas"]["WorkspaceFileSummary"][];
@@ -7256,13 +7670,25 @@ export interface components {
             truncated: boolean;
         };
         WorkspaceDiffRequest: {
-            /** @description Exact commit SHA for a committed-scope comparison. */
+            /** @description Local branch to read instead of the checked-out worktree. Requires the committed scope. */
+            branch?: string;
+            /** @description Exact commit SHA for a committed-scope comparison. Cannot be combined with commitShas. */
             commitSha?: string;
+            /** @description Full SHAs whose combined changes are compared. Requires the committed scope. */
+            commitShas?: string[];
             contextLines: number;
+            /** @description The view's baseSha from its history. A moved base fails with WORKSPACE_REF_MOVED. */
+            expectedBaseSha?: string;
+            /** @description The view's tipSha from its history. A moved tip fails with WORKSPACE_REF_MOVED. */
+            expectedTipSha?: string;
             ignoreWhitespace: boolean;
             paths: string[];
+            /** @description Associated pull request to read instead of the checked-out worktree. Requires the committed scope. */
+            prNumber?: number;
             /** @enum {string} */
             scope: "combined" | "committed" | "staged" | "unstaged" | "untracked";
+            /** @description Stable URL of the pull request, for PRs that share a number. Requires prNumber. */
+            sourceUrl?: string;
             workspaceVersion?: string;
         };
         WorkspaceDiffsResponse: {
@@ -7285,6 +7711,8 @@ export interface components {
             diffTruncated: boolean;
             editable: boolean;
             fileFingerprint: string;
+            /** @description True only for a read-only revision, never a live worktree file. */
+            historical?: boolean;
             imageMediaType?: string;
             path: string;
             previousPath?: string;
@@ -7330,6 +7758,8 @@ export interface components {
         WorkspaceFileSections: {
             committed: components["schemas"]["WorkspaceFileSummary"][];
             staged: components["schemas"]["WorkspaceFileSummary"][];
+            /** @description Worktree vs HEAD, untracked files included. Always present; a response without it comes from an older daemon. */
+            uncommitted: components["schemas"]["WorkspaceFileSummary"][];
             unstaged: components["schemas"]["WorkspaceFileSummary"][];
             untracked: components["schemas"]["WorkspaceFileSummary"][];
         };
@@ -7347,11 +7777,16 @@ export interface components {
             status: "unmodified" | "modified" | "added" | "deleted" | "renamed";
         };
         WorkspaceHistoryResponse: {
+            /** @description Checked-out view only. */
             ahead?: null | number;
+            /** @description Checked-out view only. */
             behind?: null | number;
             commits: components["schemas"]["WorkspaceCommitSummary"][];
             commitsTruncated?: boolean;
+            /** @description Totals for All commits. Views only. */
+            rangeSummary?: components["schemas"]["WorkspaceSummary"];
             sessionId: string;
+            view: components["schemas"]["WorkspaceViewResponse"];
         };
         WorkspaceManifestResponse: {
             compareBaseRef?: string;
@@ -7397,6 +7832,22 @@ export interface components {
             status?: "unmodified" | "modified" | "added" | "deleted" | "renamed";
             /** @enum {string} */
             type: "file" | "dir";
+        };
+        WorkspaceViewResponse: {
+            baseRef?: string;
+            /** @description Set only in since_base mode. Fence a later view read with it as expectedBaseSha. */
+            baseSha?: string;
+            /** @enum {string} */
+            kind: "checked_out" | "branch" | "pull_request";
+            /** @description Branch name, or the pull request's source branch. */
+            name?: string;
+            /**
+             * @description since_base lists the commits since baseSha; recent lists the newest 50 first-parent commits of a default branch, or of a branch with no default branch to measure from.
+             * @enum {string}
+             */
+            rangeMode: "since_base" | "recent";
+            /** @description Fence a later view read with it as expectedTipSha. */
+            tipSha?: string;
         };
     };
     responses: never;
@@ -7495,6 +7946,38 @@ export interface operations {
             };
         };
     };
+    prewarmChatAgent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Agent adapter identifier. */
+                agent: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PrewarmChatAgentResponse"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
     getAgentInstallStatus: {
         parameters: {
             query?: never;
@@ -7554,6 +8037,65 @@ export interface operations {
         responses: {
             /** @description Accepted */
             202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InstallJob"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    cancelAgentInstall: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Agent adapter identifier. */
+                agent: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -8442,6 +8984,70 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listChatPermissionModes: {
+        parameters: {
+            query?: {
+                /** @description Comma-separated agent adapter identifiers. */
+                agents?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChatPermissionModesResponse"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listUnavailableChatAgents: {
+        parameters: {
+            query?: {
+                /** @description Comma-separated agent adapter identifiers. */
+                agents?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UnavailableChatAgentsResponse"];
                 };
             };
             /** @description Not Implemented */
@@ -11428,6 +12034,57 @@ export interface operations {
             };
             /** @description Bad Gateway */
             502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    setMobileBrowserRemoteAccess: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetBrowserRemoteAccessRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MobileStatusResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -14593,7 +15250,6 @@ export interface operations {
             path: {
                 /** @description Session identifier, e.g. project-1. */
                 sessionId: string;
-                /** @description Durable agent-switch identifier. */
                 switchId: string;
             };
             cookie?: never;
@@ -14667,7 +15323,6 @@ export interface operations {
             path: {
                 /** @description Session identifier, e.g. project-1. */
                 sessionId: string;
-                /** @description Durable agent-switch identifier. */
                 switchId: string;
             };
             cookie?: never;
@@ -17356,6 +18011,78 @@ export interface operations {
             };
         };
     };
+    setSessionConversationTurnAutoResume: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Session identifier, e.g. project-1. */
+                sessionId: string;
+                /** @description AO conversation turn identifier, from the snapshot's turns array. */
+                turnId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetTurnAutoResumeRequest"];
+            };
+        };
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
     cancelQueuedSessionConversationTurn: {
         parameters: {
             query?: never;
@@ -17794,6 +18521,70 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getSessionHistory: {
+        parameters: {
+            query?: {
+                /** @description Number of newest turns to skip. */
+                offset?: number;
+                /** @description Maximum turns to return. Defaults to 10. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Session identifier, e.g. project-1. */
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionHistoryResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -19000,6 +19791,56 @@ export interface operations {
             };
         };
     };
+    getSessionPreviewArtifact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Session identifier, e.g. project-1. */
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
     getSessionPreviewFile: {
         parameters: {
             query?: {
@@ -19305,6 +20146,78 @@ export interface operations {
             };
             /** @description Not Implemented */
             501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    switchSessionProvider: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Session identifier, e.g. project-1. */
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProviderSwitchRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProviderSwitchResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -20468,6 +21381,56 @@ export interface operations {
             };
         };
     };
+    listSessionWorkspaceBranches: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Session identifier, e.g. project-1. */
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceBranchesResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
     getSessionWorkspaceDiffs: {
         parameters: {
             query?: never;
@@ -20593,10 +21556,24 @@ export interface operations {
     getSessionWorkspaceFile: {
         parameters: {
             query?: {
+                /** @description Read the immutable review snapshot instead of the live worktree. */
+                snapshot?: boolean;
+                /** @description Local or remote-tracking branch to read without checkout. */
+                branch?: string;
+                /** @description Associated pull request number. */
+                prNumber?: number;
+                /** @description Associated pull request URL. */
+                sourceUrl?: string;
+                /** @description Pinned source tip for snapshot reads. Must remain reachable from the selected source. */
+                expectedTipSha?: string;
+                /** @description Pinned comparison base for snapshot reads. */
+                expectedBaseSha?: string;
+                /** @description Comma-separated selected commit SHAs. */
+                commitShas?: string;
                 /** @description Session-worktree-relative file path. */
                 path?: string;
-                /** @description Git-state section the file was opened from (see WorkspaceFileSections). staged diffs the index against HEAD; unstaged diffs the worktree against the index; omitted/committed/untracked diff the worktree against the compare base. */
-                section?: "committed" | "staged" | "unstaged" | "untracked";
+                /** @description Git-state section the file was opened from (see WorkspaceFileSections). uncommitted diffs the worktree against HEAD; staged diffs the index against HEAD; unstaged diffs the worktree against the index; omitted/committed/untracked diff the worktree against the compare base. */
+                section?: "uncommitted" | "committed" | "staged" | "unstaged" | "untracked";
                 /** @description Exact commit SHA to read as an immutable committed-scope snapshot. */
                 commitSha?: string;
             };
@@ -20629,6 +21606,15 @@ export interface operations {
             };
             /** @description Not Found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -20731,6 +21717,22 @@ export interface operations {
     getSessionWorkspaceFileBlob: {
         parameters: {
             query: {
+                /** @description Read the immutable review snapshot instead of the live worktree. */
+                snapshot?: boolean;
+                /** @description Local or remote-tracking branch to read without checkout. */
+                branch?: string;
+                /** @description Associated pull request number. */
+                prNumber?: number;
+                /** @description Associated pull request URL. */
+                sourceUrl?: string;
+                /** @description Pinned source tip for snapshot reads. Must remain reachable from the selected source. */
+                expectedTipSha?: string;
+                /** @description Pinned comparison base for snapshot reads. */
+                expectedBaseSha?: string;
+                /** @description Comma-separated selected commit SHAs. */
+                commitShas?: string;
+                /** @description Selected commit SHA. */
+                commitSha?: string;
                 /** @description Session-worktree-relative file path. */
                 path: string;
                 /** @description Which revision to read: the compare base (before) or the session worktree (after). Defaults to after. */
@@ -20774,6 +21776,15 @@ export interface operations {
                     "application/json": components["schemas"]["APIError"];
                 };
             };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
             /** @description Internal Server Error */
             500: {
                 headers: {
@@ -20797,18 +21808,32 @@ export interface operations {
     getSessionWorkspaceFileRevision: {
         parameters: {
             query: {
+                /** @description Read the selected immutable comparison, including an empty commit range. */
+                snapshot?: boolean;
                 /** @description Session-worktree-relative file path. */
                 path: string;
                 /** @description Comparison scope. Defaults to combined. */
-                scope?: "combined" | "committed" | "staged" | "unstaged" | "untracked";
+                scope?: "combined" | "uncommitted" | "committed" | "staged" | "unstaged" | "untracked";
                 /** @description Comparison side. Defaults to after. */
                 side?: "before" | "after";
                 /** @description Opaque workspace snapshot token used for consistency checks. */
                 workspaceVersion?: string;
                 /** @description Opaque revision token used for optimistic consistency checks. */
                 expectedRevision?: string;
-                /** @description Exact commit SHA for a committed-scope comparison. */
+                /** @description Exact commit SHA for a committed-scope comparison. Cannot be combined with commitShas. */
                 commitSha?: string;
+                /** @description Comma-separated full SHAs (max 250) whose combined changes are compared. Requires the committed scope. */
+                commitShas?: string;
+                /** @description Local branch to read instead of the checked-out worktree. Requires the committed scope. */
+                branch?: string;
+                /** @description Associated pull request to read instead of the checked-out worktree. Requires the committed scope. */
+                prNumber?: number;
+                /** @description Stable URL of the pull request, for PRs that share a number. Requires prNumber. */
+                sourceUrl?: string;
+                /** @description The branch or pull request view's tipSha from its history. A moved tip fails with WORKSPACE_REF_MOVED. */
+                expectedTipSha?: string;
+                /** @description The branch or pull request view's baseSha from its history. A moved base fails with WORKSPACE_REF_MOVED. */
+                expectedBaseSha?: string;
             };
             header?: never;
             path: {
@@ -20927,7 +21952,14 @@ export interface operations {
     };
     getSessionWorkspaceHistory: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Local branch to read instead of the checked-out worktree. Read from revisions only; nothing is checked out. */
+                branch?: string;
+                /** @description Associated pull request to read instead of the checked-out worktree. */
+                prNumber?: number;
+                /** @description Stable URL of the pull request, for PRs that share a number. Requires prNumber. */
+                sourceUrl?: string;
+            };
             header?: never;
             path: {
                 /** @description Session identifier, e.g. project-1. */
@@ -20946,8 +21978,89 @@ export interface operations {
                     "application/json": components["schemas"]["WorkspaceHistoryResponse"];
                 };
             };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
             /** @description Not Found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getSessionWorkspaceCommitSelection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Session identifier, e.g. project-1. */
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WorkspaceCommitSelectionRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceCommitSelectionResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -21156,6 +22269,24 @@ export interface operations {
     listSessionWorkspaceTree: {
         parameters: {
             query?: {
+                /** @description Case-insensitive path search across the selected snapshot. */
+                filter?: string;
+                /** @description Selected commit SHA. */
+                commitSha?: string;
+                /** @description Read the immutable review snapshot instead of the live worktree. */
+                snapshot?: boolean;
+                /** @description Local or remote-tracking branch to read without checkout. */
+                branch?: string;
+                /** @description Associated pull request number. */
+                prNumber?: number;
+                /** @description Associated pull request URL. */
+                sourceUrl?: string;
+                /** @description Pinned source tip for snapshot reads. Must remain reachable from the selected source. */
+                expectedTipSha?: string;
+                /** @description Pinned comparison base for snapshot reads. */
+                expectedBaseSha?: string;
+                /** @description Comma-separated selected commit SHAs. */
+                commitShas?: string;
                 /** @description Directory path relative to the session workspace root. Empty or omitted lists the root. */
                 path?: string;
             };
@@ -21188,6 +22319,15 @@ export interface operations {
             };
             /** @description Not Found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -21469,6 +22609,57 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["UpdateSessionInterfaceRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SettingsResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    updateVersionRefresh: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateVersionRefreshRequest"];
             };
         };
         responses: {
@@ -22099,6 +23290,35 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getTelemetryIdentity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TelemetryIdentityResponse"];
                 };
             };
             /** @description Not Implemented */

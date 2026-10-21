@@ -77,11 +77,12 @@ func SetTelemetryField(r *http.Request, key string, value any) {
 
 // APIError is the locked wire shape for every non-2xx response.
 type APIError struct {
-	Error          string          `json:"error"`
-	Code           string          `json:"code"`
-	Message        string          `json:"message"`
-	RequestID      string          `json:"requestId,omitempty"`
-	Details        map[string]any  `json:"details,omitempty"`
+	Error     string         `json:"error"`
+	Code      string         `json:"code"`
+	Message   string         `json:"message"`
+	RequestID string         `json:"requestId,omitempty"`
+	Details   map[string]any `json:"details,omitempty"`
+	// Fork compatibility: frozen clients still classify historical saga-owned errors.
 	ReportingOwner ownership.Owner `json:"reporting_owner,omitempty" enum:"http,agent_switch_saga"`
 }
 
