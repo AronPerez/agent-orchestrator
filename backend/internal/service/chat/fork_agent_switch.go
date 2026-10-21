@@ -167,7 +167,12 @@ func (s *Service) ForkRecoverAgentSwitch(ctx context.Context, id domain.SessionI
 	if err != nil {
 		return domain.AgentSwitch{}, err
 	}
-	defer unlock()
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			unlock()
+		}
+	}()
 	rows, err := s.ForkListAgentSwitches(ctx, id)
 	if err != nil {
 		return domain.AgentSwitch{}, err
@@ -196,31 +201,42 @@ func (s *Service) ForkRecoverAgentSwitch(ctx context.Context, id domain.SessionI
 		}
 		recoverer, ok := s.terminalSwitcher.(interface {
 			RecoverForkSwitchOwner(context.Context, domain.SessionID, domain.AgentHarness) error
+			RunForkSwitch(func(context.Context)) error
 		})
 		if !ok {
 			return domain.AgentSwitch{}, apierr.Unavailable("AGENT_SWITCH_UNAVAILABLE", "Agent recovery is unavailable")
 		}
-		if err := recoverer.RecoverForkSwitchOwner(ctx, id, rec.Harness); err != nil {
-			return domain.AgentSwitch{}, err
-		}
-		sw.State, sw.ErrorCode = "failed", "switch_failed"
-		if rec.Harness == sw.TargetHarness {
-			sw.State, sw.ErrorCode = "completed", ""
-			if sw.TargetStartMode == "" {
-				sw.TargetStartMode = "fresh"
-			}
-		}
-		if sw.AgentHandoffStatus == "requested" {
-			sw.AgentHandoffStatus = "unavailable"
-		}
-		sw.UpdatedAt = s.now()
 		st, ok := s.store.(forkSwitchStore)
 		if !ok {
 			return domain.AgentSwitch{}, apierr.Unavailable("AGENT_SWITCH_UNAVAILABLE", "Switch history is unavailable")
 		}
-		if err := st.FinishForkAgentSwitch(ctx, sw); err != nil {
+		if err := recoverer.RunForkSwitch(func(workCtx context.Context) {
+			defer unlock()
+			if err := recoverer.RecoverForkSwitchOwner(workCtx, id, rec.Harness); err != nil {
+				s.log.Warn("legacy switch recovery remains unconfirmed", "session", id, "error", err)
+				return
+			}
+			out := sw
+			out.State, out.ErrorCode = "failed", "switch_failed"
+			if rec.Harness == sw.TargetHarness {
+				out.State, out.ErrorCode = "completed", ""
+				if out.TargetStartMode == "" {
+					out.TargetStartMode = "fresh"
+				}
+			}
+			if out.AgentHandoffStatus == "requested" {
+				out.AgentHandoffStatus = "unavailable"
+			}
+			out.UpdatedAt = s.now()
+			saveCtx, cancel := context.WithTimeout(context.WithoutCancel(workCtx), 5*time.Second)
+			defer cancel()
+			if err := st.FinishForkAgentSwitch(saveCtx, out); err != nil {
+				s.log.Error("persist legacy switch recovery", "session", id, "error", err)
+			}
+		}); err != nil {
 			return domain.AgentSwitch{}, err
 		}
+		handedOff = true
 		return sw, nil
 	}
 	return domain.AgentSwitch{}, apierr.NotFound("AGENT_SWITCH_NOT_FOUND", "Unknown agent switch")

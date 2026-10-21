@@ -151,7 +151,7 @@ func TestForkAgentSwitchRestartRecoveryDoesNotReplaySwitch(t *testing.T) {
 	if err != nil || active[testSession] == nil || active[testSession].ErrorCode != "source_stop_unconfirmed" {
 		t.Fatalf("restart snapshot: %+v %v", active, err)
 	}
-	recovery := &forkRecoverySwitcher{}
+	recovery := &queuedForkSwitcher{}
 	h.svc.SetTerminalProviderSwitcher(recovery)
 	r := forkSwitchRouter(h)
 	h.svc.SetTerminalProviderSwitcher(recovery)
@@ -160,8 +160,16 @@ func TestForkAgentSwitchRestartRecoveryDoesNotReplaySwitch(t *testing.T) {
 		t.Fatalf("pending switch bypassed: %d %s", blocked.Code, blocked.Body.String())
 	}
 	got := forkSwitchCall(r, http.MethodPost, "/agent-switches/"+sw.ID+"/recover", "")
-	if got.Code != http.StatusAccepted || !strings.Contains(got.Body.String(), `"state":"failed"`) || recovery.calls != 1 || recovery.expected != rec.Harness {
+	if got.Code != http.StatusAccepted || recovery.calls != 0 || recovery.work == nil {
 		t.Fatalf("recovery: %d %s, %+v", got.Code, got.Body.String(), recovery)
+	}
+	recovery.work(ctx)
+	if recovery.calls != 1 || recovery.expected != rec.Harness {
+		t.Fatalf("recovered wrong owner: %+v", recovery)
+	}
+	rows, err := h.st.ListForkAgentSwitches(ctx, testSession)
+	if err != nil || len(rows) != 1 || rows[0].State != "failed" {
+		t.Fatalf("recovery outcome: %+v %v", rows, err)
 	}
 	active, err = h.svc.ForkActiveAgentSwitches(ctx)
 	if err != nil || len(active) != 0 {
