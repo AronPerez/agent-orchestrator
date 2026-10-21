@@ -4,8 +4,9 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apispec/specgen"
 	"gopkg.in/yaml.v3"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apispec/specgen"
 )
 
 func TestBuildForkFrozenClientContracts(t *testing.T) {

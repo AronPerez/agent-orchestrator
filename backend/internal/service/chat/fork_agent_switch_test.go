@@ -2,7 +2,9 @@ package chat_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
+	chatsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/chat"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/store"
 )
 
@@ -224,5 +227,51 @@ func TestForkAgentSwitchReturnsBeforeProviderStarts(t *testing.T) {
 	after, _, _ := h.st.GetSession(context.Background(), testSession)
 	if after.Harness != domain.HarnessClaudeCode {
 		t.Fatal("worker did not use new provider switch")
+	}
+}
+
+func TestForkAgentSwitchReplaysPreUpgradeReceiptsWithoutStarting(t *testing.T) {
+	for _, modelField := range []string{"", `,"model":""`} {
+		t.Run(modelField, func(t *testing.T) {
+			h, _, driver := newEditHarness(t, false)
+			ctx := context.Background()
+			payload := `{"sessionId":"` + string(testSession) + `","targetHarness":"claude-code","note":""` + modelField + `}`
+			at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			sw := domain.AgentSwitch{ID: "legacy-switch", SessionID: testSession, FromHarness: domain.HarnessCodex, TargetHarness: domain.HarnessClaudeCode, IdempotencyKey: "old-retry", RequestFingerprint: fmt.Sprintf("v1:%x", sha256.Sum256([]byte(payload))), SourceGenerationID: "old-source", RequestedAt: at, UpdatedAt: at}
+			if err := h.st.InsertForkAgentSwitch(ctx, sw); err != nil {
+				t.Fatal(err)
+			}
+			sw.State = "completed"
+			if err := h.st.FinishForkAgentSwitch(ctx, sw); err != nil {
+				t.Fatal(err)
+			}
+			w := forkSwitchCall(forkSwitchRouter(h), http.MethodPost, "/switch-agent", `{"targetHarness":"claude-code","idempotencyKey":"old-retry"}`)
+			if w.Code != http.StatusAccepted || !strings.Contains(w.Body.String(), sw.ID) {
+				t.Fatalf("legacy retry: %d %s", w.Code, w.Body.String())
+			}
+			driver.mu.Lock()
+			starts := driver.startCalls
+			driver.mu.Unlock()
+			if starts != 1 {
+				t.Fatalf("legacy retry started target: %d starts", starts)
+			}
+		})
+	}
+}
+
+type forkLegacyPendingStore struct{ *store.Store }
+
+func (s forkLegacyPendingStore) ListForkAgentSwitches(context.Context, domain.SessionID) ([]domain.AgentSwitch, error) {
+	return []domain.AgentSwitch{{ID: "old-unconfirmed-target", SessionID: testSession, FromHarness: domain.HarnessCodex, TargetHarness: domain.HarnessClaudeCode, State: "starting_target", SourceGenerationID: "source", TargetGenerationID: "out-of-band-target"}}, nil
+}
+
+func TestForkAgentSwitchDoesNotResumeOverUnconfirmedLegacyTarget(t *testing.T) {
+	h, _, _ := newEditHarnessWithStore(t, false, func(st *store.Store) chatsvc.Store { return forkLegacyPendingStore{st} })
+	r := forkSwitchRouter(h)
+	recovery := &forkRecoverySwitcher{}
+	h.svc.SetTerminalProviderSwitcher(recovery)
+	w := forkSwitchCall(r, http.MethodPost, "/agent-switches/old-unconfirmed-target/recover", "")
+	if w.Code != http.StatusConflict || recovery.calls != 0 {
+		t.Fatalf("unsafe legacy recovery: %d %s, calls=%d", w.Code, w.Body.String(), recovery.calls)
 	}
 }
