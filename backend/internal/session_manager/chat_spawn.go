@@ -350,7 +350,7 @@ func (m *Manager) launchChatController(ctx context.Context, in chatSpawn) (domai
 // AO_BROWSER_CAPABILITY.
 func (m *Manager) aoMCPServers(harness domain.AgentHarness, env map[string]string) []ports.ChatMCPServerConfig {
 	if harness == domain.HarnessUnreal {
-		// Its driver refuses AO-supplied tool servers; the agent uses `ao render`.
+		// Its harness takes no tool servers; the agent uses `ao render`.
 		return nil
 	}
 	executable, err := m.executable()
@@ -427,35 +427,38 @@ type SessionModeDefaults interface {
 	DefaultSessionMode(ctx context.Context) domain.SessionMode
 }
 
-// resolveSessionMode applies the precedence for a spawn:
+// resolveSessionMode reads the project and daemon defaults at spawn time only.
+// A valid project pin acts as the requested mode unless the caller chose one.
+func (m *Manager) resolveSessionMode(ctx context.Context, kind domain.SessionKind, requested domain.SessionMode, project domain.ProjectConfig) domain.SessionMode {
+	if !requested.Valid() && project.SessionInterface.Valid() {
+		requested = project.SessionInterface
+	}
+	var defaultMode domain.SessionMode
+	if m.defaults != nil {
+		defaultMode = m.defaults.DefaultSessionMode(ctx)
+	}
+	return startSessionMode(kind, requested, defaultMode)
+}
+
+// startSessionMode is the precedence for a spawn's controller mode:
 //
-//  1. the mode the caller explicitly requested;
-//  2. the project's pinned interface;
+//  1. the mode the caller explicitly requested (or the project's pin);
+//  2. Chat for an orchestrator;
 //  3. the daemon-owned default;
 //  4. the compatibility default, TUI.
 //
-// Both configured tiers are read here, at spawn time, so changing either affects
-// only sessions created afterwards. An existing session changes only through an
-// explicit, capability-gated interface transition; it is never re-resolved.
-//
-// A project value outside this build's vocabulary is skipped rather than
-// normalized: the row may have been written by a newer daemon, and collapsing it
-// to TUI would override a daemon default of Chat with a mode nobody chose.
-func (m *Manager) resolveSessionMode(
-	ctx context.Context,
-	requested domain.SessionMode,
-	project domain.ProjectConfig,
-) domain.SessionMode {
+// Whether the harness can run the result is checked afterwards. The cloud
+// control plane resolves a cloud session's interface with the same precedence
+// (cloud/internal/domain.StartInterface); both are tested against
+// contracts/session-start-interface.json so they cannot drift.
+func startSessionMode(kind domain.SessionKind, requested, defaultMode domain.SessionMode) domain.SessionMode {
 	if requested.Valid() {
 		return requested
 	}
-	if project.SessionInterface.Valid() {
-		return project.SessionInterface
+	if kind == domain.KindOrchestrator {
+		return domain.SessionModeChat
 	}
-	if m.defaults == nil {
-		return domain.DefaultSessionMode
-	}
-	return domain.NormalizeSessionMode(m.defaults.DefaultSessionMode(ctx))
+	return domain.NormalizeSessionMode(defaultMode)
 }
 
 // resumeChatController reattaches a chat session to its provider conversation
@@ -493,11 +496,6 @@ func (m *Manager) resumeChatController(
 	if err != nil {
 		return RestoreResult{}, fmt.Errorf("%s %s: system prompt: %w", operation, rec.ID, err)
 	}
-	systemPrompt, err = m.systemPromptForNativeRestore(ctx, rec, systemPrompt)
-	if err != nil {
-		return RestoreResult{}, fmt.Errorf("%s %s: switched continuation: %w", operation, rec.ID, err)
-	}
-
 	agentConfig := restoredAgentConfig(rec, project.Config)
 	if rec.Metadata.Permissions != "" {
 		agentConfig.Permissions = rec.Metadata.Permissions

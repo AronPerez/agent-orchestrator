@@ -64,7 +64,7 @@ func TestAgentProvablyAliveFailsOpen(t *testing.T) {
 		}(), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			m := New(newFakeAgentSwitchLifecycleStore(), &fakeMessenger{})
+			m := New(newFakeStore(), &fakeMessenger{})
 			if tc.inspector != nil {
 				m.SetExitInspector(tc.inspector)
 			}
@@ -82,7 +82,7 @@ func exitSignal(event string) ports.ActivitySignal {
 	}
 }
 
-func sessionState(t *testing.T, store *fakeAgentSwitchLifecycleStore, id domain.SessionID) domain.ActivityState {
+func sessionState(t *testing.T, store *fakeStore, id domain.SessionID) domain.ActivityState {
 	t.Helper()
 	rec, ok, err := store.GetSession(ctx, id)
 	if err != nil || !ok {
@@ -95,9 +95,9 @@ func sessionState(t *testing.T, store *fakeAgentSwitchLifecycleStore, id domain.
 // nested-agent poisoning measured in #114 (session marked exited while its
 // real agent sat idle; ao send then refused with AGENT_EXITED).
 func TestHookExitDroppedWhenAgentProvablyAlive(t *testing.T) {
-	store := newFakeAgentSwitchLifecycleStore()
+	store := newFakeStore()
 	rec := supervisedRec("s1")
-	store.setSession(rec)
+	store.sessions[rec.ID] = rec
 	insp := &fakeExitInspector{alive: true}
 	m := New(store, &fakeMessenger{})
 	m.SetExitInspector(insp)
@@ -125,9 +125,9 @@ func TestHookExitAppliedUnlessProvablyAlive(t *testing.T) {
 		{"no inspector wired - fail open", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			store := newFakeAgentSwitchLifecycleStore()
+			store := newFakeStore()
 			rec := supervisedRec("s1")
-			store.setSession(rec)
+			store.sessions[rec.ID] = rec
 			m := New(store, &fakeMessenger{})
 			if tc.inspector != nil {
 				m.SetExitInspector(tc.inspector)
@@ -150,9 +150,9 @@ func TestHookExitAppliedUnlessProvablyAlive(t *testing.T) {
 func TestAuthoritativeExitNeverProbed(t *testing.T) {
 	for _, event := range []string{"process-exited", "chat.controller.stopped"} {
 		t.Run(event, func(t *testing.T) {
-			store := newFakeAgentSwitchLifecycleStore()
+			store := newFakeStore()
 			rec := supervisedRec("s1")
-			store.setSession(rec)
+			store.sessions[rec.ID] = rec
 			insp := &fakeExitInspector{alive: true} // even a live-looking probe must not matter
 			m := New(store, &fakeMessenger{})
 			m.SetExitInspector(insp)
@@ -197,8 +197,8 @@ func TestClearStaleExit(t *testing.T) {
 		}(), &fakeExitInspector{alive: true}, false, domain.ActivityExited},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			store := newFakeAgentSwitchLifecycleStore()
-			store.setSession(tc.rec)
+			store := newFakeStore()
+			store.sessions[tc.rec.ID] = tc.rec
 			m := New(store, &fakeMessenger{})
 			if tc.inspector != nil {
 				m.SetExitInspector(tc.inspector)
