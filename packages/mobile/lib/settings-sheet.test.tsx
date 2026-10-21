@@ -22,6 +22,7 @@ vi.mock("./ThemeProvider", () => ({ ThemeProvider: "ThemeProvider", useTheme: ()
 vi.mock("./store", () => ({ AppProvider: "AppProvider" }));
 vi.mock("./OnboardingGate", () => ({ OnboardingGate: () => null }));
 vi.mock("./TelemetryManager", () => ({ TelemetryManager: () => null }));
+vi.mock("./watch/WatchManager", () => ({ WatchManager: () => null }));
 vi.mock("./PushManager", () => ({ PushManager: () => null }));
 vi.mock("./UpdatesManager", () => ({ UpdatesManager: () => null }));
 vi.mock("./StoreUpdateManager", () => ({ StoreUpdateManager: () => null }));

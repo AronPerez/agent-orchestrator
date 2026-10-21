@@ -13,6 +13,7 @@ import { Platform, View } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { SafeAreaProvider } from "react-native-safe-area-context";
+import { WatchManager } from "../lib/watch/WatchManager";
 import { OnboardingGate } from "../lib/OnboardingGate";
 import { TelemetryManager } from "../lib/TelemetryManager";
 import { PushManager } from "../lib/PushManager";
@@ -138,7 +139,9 @@ function Shell() {
 			{/* Light content on a dark app, dark content on a light one. */}
 			<StatusBar style={scheme === "dark" ? "light" : "dark"} />
 			<TelemetryManager />
-			<PushManager />
+			{/* expo-notifications response APIs are not implemented on web. */}
+			{Platform.OS !== "web" ? <PushManager /> : null}
+			<WatchManager />
 			<UpdatesManager />
 			<StoreUpdateManager />
 			<OnboardingGate />
