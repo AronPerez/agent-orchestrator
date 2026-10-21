@@ -363,7 +363,7 @@ func newDaemonCommand(ctx *commandContext) *cobra.Command {
 			if err := ctx.refuseDaemonURLFlag(); err != nil {
 				return err
 			}
-			return daemon.Run()
+			return daemon.Run(Version)
 		},
 	}
 }

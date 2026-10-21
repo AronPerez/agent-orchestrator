@@ -95,82 +95,38 @@ func TestSignalCWDBelongsToSessionAcceptsSymlinkedWorkspaceForm(t *testing.T) {
 	}
 }
 
-// The cwd guard in ApplyActivitySignal runs after stagePendingAgentSwitchNativeMetadata,
-// which writes the very resume handle the guard exists to protect. A nested agent
-// spawned by an agent-switch target inherits its launch id, so it clears the launch
-// fence; without a cwd check on this path its throwaway conversation becomes the
-// target's resume handle.
-func TestNestedAgentCannotStageAgentSwitchResumeHandle(t *testing.T) {
-	store := newFakeAgentSwitchLifecycleStore()
-	ref := domain.AgentNativeSessionID("native-target")
-	store.native[ref] = domain.AgentNativeSession{
-		ID: ref, AOSessionID: "mer-1", Harness: domain.HarnessCodex,
-		LastGenerationID: "target-generation",
-	}
-	rec := working("mer-1")
-	rec.Metadata.RuntimeLaunchID = "target-generation"
-	rec.Metadata.WorkspacePath = "/data/worktrees/proj/mer-1"
-	store.setSession(rec)
-	store.setActiveSwitch(domain.AgentSwitch{
-		ID: "switch-1", SessionID: rec.ID, FromHarness: domain.HarnessClaudeCode,
-		TargetHarness: domain.HarnessCodex, State: domain.AgentSwitchStartingTarget,
-		SourceGenerationID: "source-generation", TargetGenerationID: "target-generation",
-		TargetNativeSessionRef: &ref,
-	})
-	m := New(store, &fakeMessenger{})
-
-	if err := m.ApplyActivitySignal(ctx, rec.ID, ports.ActivitySignal{
-		Valid: true, State: domain.ActivityActive, Event: "user-prompt-submit",
-		LaunchID:       "target-generation",
-		AgentSessionID: "nested-throwaway",
-		TranscriptPath: "/tmp/scratch/nested-throwaway.jsonl",
-		AgentCWD:       "/tmp/scratch/probe",
-	}); err != nil {
-		t.Fatalf("ApplyActivitySignal: %v", err)
-	}
-
-	store.mu.Lock()
-	got := store.native[ref]
-	store.mu.Unlock()
-	if got.NativeSessionID != "" || got.TranscriptPath != "" {
-		t.Fatalf("out-of-workspace signal staged the target resume handle: %+v", got)
-	}
-}
-
-// The session's own agent must still be able to stage it.
-func TestSessionAgentStillStagesAgentSwitchResumeHandle(t *testing.T) {
-	store := newFakeAgentSwitchLifecycleStore()
-	ref := domain.AgentNativeSessionID("native-target")
-	store.native[ref] = domain.AgentNativeSession{
-		ID: ref, AOSessionID: "mer-1", Harness: domain.HarnessCodex,
-		LastGenerationID: "target-generation",
-	}
-	rec := working("mer-1")
-	rec.Metadata.RuntimeLaunchID = "target-generation"
-	rec.Metadata.WorkspacePath = "/data/worktrees/proj/mer-1"
-	store.setSession(rec)
-	store.setActiveSwitch(domain.AgentSwitch{
-		ID: "switch-1", SessionID: rec.ID, FromHarness: domain.HarnessClaudeCode,
-		TargetHarness: domain.HarnessCodex, State: domain.AgentSwitchStartingTarget,
-		SourceGenerationID: "source-generation", TargetGenerationID: "target-generation",
-		TargetNativeSessionRef: &ref,
-	})
-	m := New(store, &fakeMessenger{})
-
-	if err := m.ApplyActivitySignal(ctx, rec.ID, ports.ActivitySignal{
-		Valid: true, State: domain.ActivityActive, Event: "user-prompt-submit",
-		LaunchID:       "target-generation",
-		AgentSessionID: "codex-native",
-		TranscriptPath: "/provider/codex-native.jsonl",
-		AgentCWD:       "/data/worktrees/proj/mer-1",
-	}); err != nil {
-		t.Fatalf("ApplyActivitySignal: %v", err)
-	}
-
-	store.mu.Lock()
-	got := store.native[ref]
-	store.mu.Unlock()
-	if got.NativeSessionID != "codex-native" || got.TranscriptPath != "/provider/codex-native.jsonl" {
-		t.Fatalf("the session's own agent failed to stage its resume handle: %+v", got)
+// Fork regression: native identity now lives on the session, not the retired
+// switching saga. A nested agent must still not overwrite its owner's identity.
+func TestActivitySignalProtectsNativeIdentityByCWD(t *testing.T) {
+	for _, tc := range []struct {
+		name, cwd string
+		accepted  bool
+	}{
+		{"nested agent", "/tmp/scratch/probe", false},
+		{"session agent", "/data/worktrees/proj/mer-1", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newFakeStore()
+			rec := working("mer-1")
+			rec.Metadata.RuntimeLaunchID = "target-generation"
+			rec.Metadata.WorkspacePath = "/data/worktrees/proj/mer-1"
+			store.sessions[rec.ID] = rec
+			m := New(store, &fakeMessenger{})
+			if err := m.ApplyActivitySignal(ctx, rec.ID, ports.ActivitySignal{
+				Valid: true, State: domain.ActivityActive, Event: "user-prompt-submit",
+				LaunchID: "target-generation", AgentSessionID: "codex-native",
+				TranscriptPath: "/provider/codex-native.jsonl", AgentCWD: tc.cwd,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			got := store.sessions[rec.ID].Metadata
+			if tc.accepted {
+				if got.AgentSessionID != "codex-native" || got.NativeTranscriptPath != "/provider/codex-native.jsonl" {
+					t.Fatalf("own native identity was not recorded: %+v", got)
+				}
+			} else if got.AgentSessionID != "" || got.NativeTranscriptPath != "" {
+				t.Fatalf("nested agent replaced native identity: %+v", got)
+			}
+		})
 	}
 }
