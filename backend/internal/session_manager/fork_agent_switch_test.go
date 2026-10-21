@@ -3,10 +3,15 @@ package sessionmanager
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/claudecode"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/lifecycle"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -90,6 +95,41 @@ func TestForkRecoverSwitchOwnerUsesNativeResumeForProvenDeadSource(t *testing.T)
 	}
 }
 
+func TestForkFreshRecoveryRechecksPreLaunchState(t *testing.T) {
+	for _, changed := range []string{"owner", "mode", "runtime handle", "launch intent", "native identity", "handoff"} {
+		t.Run(changed, func(t *testing.T) {
+			st := newFakeStore()
+			rec := mkLive("mer-1")
+			rec.Harness, rec.Mode, rec.Activity.State = domain.HarnessClaudeCode, domain.SessionModeTUI, domain.ActivityExited
+			rec.Metadata.RuntimeHandleID, rec.Metadata.RuntimeLaunchID, rec.Metadata.AgentSessionID = "", "", ""
+			store := &launchOptionsFakeStore{fakeStore: st, options: domain.AgentLaunchOptions{HandoffNote: "handoff"}}
+			switch changed {
+			case "owner":
+				rec.Harness = domain.HarnessCodex
+			case "mode":
+				rec.Mode = domain.SessionModeChat
+			case "runtime handle":
+				rec.Metadata.RuntimeHandleID = "new-runtime"
+			case "launch intent":
+				rec.Metadata.RuntimeLaunchID = "new-launch"
+			case "native identity":
+				rec.Metadata.AgentSessionID = "new-native"
+			case "handoff":
+				store.options.HandoffNote = ""
+			}
+			st.sessions[rec.ID] = rec
+			runtime := &fakeRuntime{}
+			m := New(Deps{Store: store, Runtime: runtime})
+			if _, err := m.resumeAgentWithExpectedOwner(context.Background(), rec.ID, true, false, domain.HarnessClaudeCode); !errors.Is(err, ErrResumeInProgress) {
+				t.Fatalf("changed pre-launch state was not fenced: %v", err)
+			}
+			if runtime.created != 0 || runtime.destroyed != 0 {
+				t.Fatal("recovery touched a changed target")
+			}
+		})
+	}
+}
+
 type forkOwnerCommitCrashStore struct {
 	*sqlite.Store
 	crash bool
@@ -124,17 +164,37 @@ func (r *forkCrashRuntime) Create(ctx context.Context, cfg ports.RuntimeConfig) 
 	return r.fakeRuntime.Create(ctx, cfg)
 }
 
+type forkRecoveryClaude struct{ *claudecode.Plugin }
+
+// Keep Claude's real restore/launch behavior without probing external credentials.
+func (forkRecoveryClaude) ValidateLaunchAuth(context.Context, string, map[string]string) (ports.AgentAuthStatus, error) {
+	return ports.AgentAuthStatusAuthorized, nil
+}
+
 func TestForkRecoverSwitchAfterTargetOwnerCommit(t *testing.T) {
-	for _, afterLaunchIntent := range []bool{false, true} {
-		t.Run(map[bool]string{false: "before runtime creation", true: "uncommitted launch"}[afterLaunchIntent], func(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		target            domain.AgentHarness
+		afterLaunchIntent bool
+	}{
+		{"before runtime creation", domain.HarnessCodex, false},
+		{"uncommitted launch", domain.HarnessCodex, true},
+		{"return to Claude with an earlier transcript", domain.HarnessClaudeCode, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			afterLaunchIntent := tc.afterLaunchIntent
 			ctx := context.Background()
 			st := sqlitetest.MustOpen(t)
 			at := time.Now().UTC()
 			if err := st.UpsertProject(ctx, domain.ProjectRecord{ID: "mer", Path: t.TempDir(), RegisteredAt: at, Config: testRoleAgents()}); err != nil {
 				t.Fatal(err)
 			}
+			source := domain.HarnessClaudeCode
+			if tc.target == domain.HarnessClaudeCode {
+				source = domain.HarnessCodex
+			}
 			rec, err := st.CreateSession(ctx, domain.SessionRecord{
-				ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessClaudeCode, Mode: domain.SessionModeTUI,
+				ProjectID: "mer", Kind: domain.KindWorker, Harness: source, Mode: domain.SessionModeTUI,
 				CreatedAt: at, UpdatedAt: at, Activity: domain.Activity{State: domain.ActivityExited, LastActivityAt: at},
 				Metadata: domain.SessionMetadata{WorkspacePath: t.TempDir(), Branch: "branch", RuntimeHandleID: "source",
 					RuntimeLaunchID: "source-launch", AgentSessionID: "source-native", Prompt: "ORIGINAL TASK"},
@@ -143,14 +203,41 @@ func TestForkRecoverSwitchAfterTargetOwnerCommit(t *testing.T) {
 				t.Fatal(err)
 			}
 			sw := domain.AgentSwitch{ID: "fork-switch-crash", SessionID: rec.ID, FromHarness: rec.Harness,
-				TargetHarness: domain.HarnessCodex, IdempotencyKey: "crash-retry", RequestFingerprint: "v1:" + strings.Repeat("a", 64),
+				TargetHarness: tc.target, IdempotencyKey: "crash-retry", RequestFingerprint: "v1:" + strings.Repeat("a", 64),
 				SourceGenerationID: "source-launch", RequestedAt: at, UpdatedAt: at}
 			if err := st.InsertForkAgentSwitch(ctx, sw); err != nil {
 				t.Fatal(err)
 			}
-			runtime := &forkCrashRuntime{fakeRuntime: &fakeRuntime{}}
 			agent := &recordingAgent{}
-			deps := Deps{Runtime: runtime, Agents: singleAgent{agent: agent}, Workspace: &fakeWorkspace{},
+			var targetAgent ports.Agent = agent
+			var earlierClaudeID string
+			if tc.target == domain.HarnessClaudeCode {
+				configDir, binDir := t.TempDir(), t.TempDir()
+				t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+				t.Setenv("PATH", binDir)
+				binary := "claude"
+				if runtime.GOOS == "windows" {
+					binary += ".exe"
+				}
+				if err := os.WriteFile(filepath.Join(binDir, binary), []byte("not executed by the fake runtime"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				claude := forkRecoveryClaude{claudecode.New()}
+				targetAgent = claude
+				earlierClaudeID, _, err = claude.NativeConversationID(ctx, ports.SessionRef{ID: string(rec.ID)}, domain.SessionModeTUI, "")
+				if err != nil || earlierClaudeID == "" {
+					t.Fatalf("Claude fallback identity = %q, %v", earlierClaudeID, err)
+				}
+				transcripts := filepath.Join(configDir, "projects", "earlier-claude")
+				if err := os.MkdirAll(transcripts, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(transcripts, earlierClaudeID+".jsonl"), []byte("{\"type\":\"user\",\"message\":\"before Codex\"}\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			runtime := &forkCrashRuntime{fakeRuntime: &fakeRuntime{}}
+			deps := Deps{Runtime: runtime, Agents: singleAgent{agent: targetAgent}, Workspace: &fakeWorkspace{}, DataDir: t.TempDir(),
 				Store:     &forkOwnerCommitCrashStore{Store: st, crash: !afterLaunchIntent},
 				Messenger: &fakeMessenger{}, Lifecycle: lifecycle.New(st, &fakeMessenger{}),
 				LookPath: func(string) (string, error) { return "/bin/true", nil }}
@@ -179,6 +266,13 @@ func TestForkRecoverSwitchAfterTargetOwnerCommit(t *testing.T) {
 			committed, _, err := st.GetSession(ctx, rec.ID)
 			if err != nil || committed.Metadata.RuntimeHandleID != "" || (committed.Metadata.RuntimeLaunchID != "") != afterLaunchIntent {
 				t.Fatalf("unexpected crash boundary: %+v, %v", committed.Metadata, err)
+			}
+			if earlierClaudeID != "" {
+				argv, _, mode, err := restoreArgv(ctx, targetAgent, rec.ID, rec.Metadata.WorkspacePath, committed.Metadata,
+					"", "", ports.AgentConfig{}, rec.Kind, tc.target, deps.DataDir, nil)
+				if err != nil || mode != RestoreModeNative || !slices.Contains(argv, earlierClaudeID) {
+					t.Fatalf("fixture must reproduce Claude's old-transcript fallback: argv=%v mode=%s err=%v", argv, mode, err)
+				}
 			}
 			stale := committed
 			stale.Revision--
@@ -211,8 +305,22 @@ func TestForkRecoverSwitchAfterTargetOwnerCommit(t *testing.T) {
 				return
 			}
 			got, _, err := st.GetSession(ctx, rec.ID)
-			if err != nil || rows[0].State != "completed" || got.Harness != sw.TargetHarness || runtime.created != 1 || agent.lastLaunch.Prompt != "HANDOFF NOTE" || got.Metadata.Prompt != "ORIGINAL TASK" {
+			if err != nil || rows[0].State != "completed" || got.Harness != sw.TargetHarness || runtime.created != 1 || got.Metadata.Prompt != "ORIGINAL TASK" {
 				t.Fatalf("recovery did not settle committed target: %+v receipt=%+v launches=%d prompt=%q err=%v", got, rows[0], runtime.created, agent.lastLaunch.Prompt, err)
+			}
+			if earlierClaudeID != "" {
+				argv := runtime.lastCfg.Argv
+				freshID := ""
+				for i, arg := range argv {
+					if arg == "--session-id" && i+1 < len(argv) {
+						freshID = argv[i+1]
+					}
+				}
+				if freshID == "" || freshID == earlierClaudeID || slices.Contains(argv, "--resume") || !slices.Contains(argv, "HANDOFF NOTE") || slices.Contains(argv, "ORIGINAL TASK") {
+					t.Fatalf("recovery must start a new Claude conversation with the handoff, not %s: %v", earlierClaudeID, argv)
+				}
+			} else if agent.lastLaunch.Prompt != "HANDOFF NOTE" {
+				t.Fatalf("recovered prompt = %q, want handoff", agent.lastLaunch.Prompt)
 			}
 		})
 	}

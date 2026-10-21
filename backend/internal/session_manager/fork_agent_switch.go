@@ -42,6 +42,7 @@ func (m *Manager) RecoverForkSwitchOwner(ctx context.Context, id domain.SessionI
 	if rec.IsTerminated || rec.Harness != expected {
 		return apierr.Conflict("AGENT_SWITCH_RECOVERY_REQUIRED", "Session owner changed or was terminated", nil)
 	}
+	preLaunch := false
 	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
 		if m.chat != nil && m.chat.HasLiveChatController(id) {
 			return nil
@@ -56,6 +57,7 @@ func (m *Manager) RecoverForkSwitchOwner(ctx context.Context, id domain.SessionI
 			if rec.Metadata.RuntimeLaunchID != "" || rec.Metadata.AgentSessionID != "" || m.sessionLaunchOptions(ctx, id).HandoffNote == "" {
 				return apierr.Conflict("AGENT_SWITCH_RECOVERY_REQUIRED", "Target launch ownership is unconfirmed", nil)
 			}
+			preLaunch = true
 		} else {
 			// A terminal pane may be a shell or an unconfirmed target, not this owner.
 			alive, err := m.runtime.IsAlive(ctx, runtimeHandle(rec.Metadata))
@@ -75,7 +77,7 @@ func (m *Manager) RecoverForkSwitchOwner(ctx context.Context, id domain.SessionI
 	// gap between releasing this probe reservation and acquiring resume's.
 	m.endAgentOperation(id, agentOperationProviderSwitch)
 	reserved = false
-	_, err = m.resumeAgentWithExpectedOwner(ctx, id, false, expected)
+	_, err = m.resumeAgentWithExpectedOwner(ctx, id, preLaunch, false, expected)
 	return err
 }
 
