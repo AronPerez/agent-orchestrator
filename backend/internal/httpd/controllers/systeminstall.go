@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
@@ -114,7 +115,7 @@ func (c *SystemInstallController) startAgent(w http.ResponseWriter, r *http.Requ
 		envelope.WriteError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusAccepted, job)
+	envelope.WriteJSON(w, http.StatusAccepted, forkInstallJobView(job))
 }
 
 func (c *SystemInstallController) cancelAgent(w http.ResponseWriter, r *http.Request) {
@@ -135,7 +136,7 @@ func (c *SystemInstallController) cancelAgent(w http.ResponseWriter, r *http.Req
 		envelope.WriteError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusOK, job)
+	envelope.WriteJSON(w, http.StatusOK, forkInstallJobView(job))
 }
 
 func (c *SystemInstallController) agentJobs(w http.ResponseWriter, r *http.Request) {
@@ -147,6 +148,10 @@ func (c *SystemInstallController) agentJobs(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		envelope.WriteError(w, r, err)
 		return
+	}
+	jobs = slices.Clone(jobs)
+	for i := range jobs {
+		jobs[i] = forkInstallJobView(jobs[i])
 	}
 	envelope.WriteJSON(w, http.StatusOK, AgentInstallJobsResponse{Jobs: jobs})
 }
@@ -168,7 +173,7 @@ func (c *SystemInstallController) verifyAgent(w http.ResponseWriter, r *http.Req
 		envelope.WriteError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusAccepted, job)
+	envelope.WriteJSON(w, http.StatusAccepted, forkInstallJobView(job))
 }
 
 func writeAgentInstallError(w http.ResponseWriter, r *http.Request, err error) bool {
@@ -217,7 +222,7 @@ func (c *SystemInstallController) agentStatus(w http.ResponseWriter, r *http.Req
 		envelope.WriteError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusOK, job)
+	envelope.WriteJSON(w, http.StatusOK, forkInstallJobView(job))
 }
 
 func (c *SystemInstallController) start(w http.ResponseWriter, r *http.Request) {
@@ -237,7 +242,7 @@ func (c *SystemInstallController) start(w http.ResponseWriter, r *http.Request) 
 		envelope.WriteError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusAccepted, job)
+	envelope.WriteJSON(w, http.StatusAccepted, forkInstallJobView(job))
 }
 
 func (c *SystemInstallController) status(w http.ResponseWriter, r *http.Request) {
@@ -254,7 +259,7 @@ func (c *SystemInstallController) status(w http.ResponseWriter, r *http.Request)
 		envelope.WriteError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusOK, job)
+	envelope.WriteJSON(w, http.StatusOK, forkInstallJobView(job))
 }
 
 // parseInstallTarget reads and validates the {target} path param against the

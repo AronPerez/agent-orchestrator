@@ -3649,6 +3649,12 @@ func (m *Manager) relaunchSessionWithPolicyAndGeneration(ctx context.Context, op
 		Env:           env,
 	}
 	var handle ports.RuntimeHandle
+	if (switching || savedNote) && rec.Metadata.RuntimeHandleID == "" {
+		if err := m.reserveForkSwitchLaunch(ctx, rec.ID, rec.Harness, launchID); err != nil {
+			m.cleanupSystemPromptDir(rec.ID)
+			return RestoreResult{}, fmt.Errorf("%s %s: reserve switch launch: %w", operation, rec.ID, err)
+		}
+	}
 	if restartHandle == nil {
 		handle, err = m.runtime.Create(ctx, runtimeCfg)
 	} else {

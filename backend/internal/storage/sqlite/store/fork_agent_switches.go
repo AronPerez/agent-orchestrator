@@ -8,6 +8,17 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/gen"
 )
 
+// ReserveForkSwitchLaunch saves launch intent before any external runtime effect.
+func (s *Store) ReserveForkSwitchLaunch(ctx context.Context, rec domain.SessionRecord, launchID string) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	n, err := s.qw.ReserveForkSwitchLaunch(ctx, gen.ReserveForkSwitchLaunchParams{
+		ID: rec.ID, ExpectedRevision: rec.Revision, ExpectedHarness: rec.Harness,
+		ExpectedTerminated: rec.IsTerminated, LaunchID: launchID, UpdatedAt: rec.UpdatedAt,
+	})
+	return n == 1, err
+}
+
 // ListForkAgentSwitches reads the retained table without restoring the old saga.
 func (s *Store) ListForkAgentSwitches(ctx context.Context, id domain.SessionID) ([]domain.AgentSwitch, error) {
 	rows, err := s.qr.ListForkAgentSwitches(ctx, string(id))

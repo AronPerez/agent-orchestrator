@@ -63,7 +63,7 @@ func (m *Manager) SwitchTUIProvider(ctx context.Context, id domain.SessionID, re
 		return err
 	}
 	ws := workspaceInfo(rec)
-	if err := preflightTUISwitchTarget(ctx, target, targetAgent); err != nil {
+	if err := m.preflightTUISwitchTarget(ctx, rec, project, target, targetAgent); err != nil {
 		return err
 	}
 
@@ -281,13 +281,25 @@ func (m *Manager) confirmTUISwitchTargetAlive(ctx context.Context, rec domain.Se
 // preflightTUISwitchTarget refuses a target with no binary or sign-in while the
 // source still runs, so the user's agent is not stopped for nothing. A probe
 // that cannot answer does not block: the launch itself still validates.
-func preflightTUISwitchTarget(ctx context.Context, harness domain.AgentHarness, target ports.Agent) error {
+func (m *Manager) preflightTUISwitchTarget(ctx context.Context, rec domain.SessionRecord, project domain.ProjectRecord, harness domain.AgentHarness, target ports.Agent) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	if resolver, ok := target.(ports.AgentBinaryResolver); ok {
 		if _, err := resolver.ResolveBinary(ctx); errors.Is(err, ports.ErrAgentBinaryNotFound) {
 			return &domain.ProviderSwitchError{Kind: domain.ProviderSwitchRefusalUnavailable, Detail: fmt.Sprintf("%s is not installed", harness), Cause: err}
 		}
+	}
+	// Fork compatibility: project credentials take precedence over global login.
+	if _, ok := target.(ports.AgentLaunchAuthValidator); ok {
+		rec.Harness = harness
+		config := effectiveAgentConfig(harness, rec.Kind, project.Config)
+		env := m.runtimeEnv(rec.ID, rec.ProjectID, rec.IssueID, project.Config.Env)
+		pinRuntimePermissionEnv(env, config.Permissions)
+		m.augmentAgentRuntimeEnv(target, env)
+		if err := m.preflightLaunchAuth(ctx, target, rec, env); err != nil {
+			return &domain.ProviderSwitchError{Kind: domain.ProviderSwitchRefusalUnavailable, Detail: fmt.Sprintf("%s is not signed in", harness), Cause: err}
+		}
+		return nil
 	}
 	if checker, ok := target.(ports.AgentAuthChecker); ok {
 		if status, err := checker.AuthStatus(ctx); err == nil && status == ports.AgentAuthStatusUnauthorized {
