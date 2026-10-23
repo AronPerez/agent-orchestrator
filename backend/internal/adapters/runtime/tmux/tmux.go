@@ -1520,7 +1520,10 @@ func handleID(handle ports.RuntimeHandle) (string, error) {
 // board (issue #3475).
 func sessionMissingOutput(out string) bool {
 	s := strings.ToLower(out)
+	// Option-target commands (set-option -t =id:) word a missing session
+	// "no such session: =id:" rather than "can't find session" (tmux 3.6a).
 	return strings.Contains(s, "can't find session") ||
+		strings.Contains(s, "no such session") ||
 		strings.Contains(s, "session not found")
 }
 
