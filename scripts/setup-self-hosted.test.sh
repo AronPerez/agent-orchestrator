@@ -41,6 +41,9 @@ printf '%s\n' '#!/bin/sh' 'case "$1" in' \
 	'      esac' \
 	'    fi ;;' \
 	'  daemon) printf "%s\n" "$PATH" > "$TEST_SERVICE_PATH_CAPTURE" ;;' \
+	'  stop)' \
+	'    if [ -n "${TEST_LAUNCHCTL_LOG:-}" ]; then echo stop >> "$TEST_LAUNCHCTL_LOG"; fi' \
+	'    [ -z "${TEST_AO_STOP_FAIL:-}" ] ;;' \
 	'  version) exit 0 ;;' 'esac' > "$tmp/pkg/resources/daemon/ao"
 printf '%s\n' '#!/bin/sh' 'echo v22.0.0' > "$tmp/pkg/resources/acp-runtime/node/bin/node"
 printf '%s\n' '#!/bin/sh' 'echo tmux' > "$tmp/pkg/resources/tmux/bin/tmux"
@@ -298,6 +301,29 @@ PY
 		[[ ! -e "$tmp/home/Library/LaunchAgents/dev.aoagents.self-hosted.plist" ]] || { printf '%s\n' 'failed first Mac install left a login agent' >&2; exit 1; }
 		[[ "$(grep -c '^bootout$' "$tmp/launch.log")" == 2 ]] || { printf '%s\n' 'failed first Mac install did not unload the failed agent' >&2; exit 1; }
 		;;
+	mac-stop)
+		# Upgrades stop any daemon the LaunchAgent did not start before the new one
+		# boots, and launchd restarts only crashes so `ao stop` sticks.
+		rm "$tmp/bin/uname"
+		printf '%s\n' '#!/bin/sh' 'case "$1" in -s) echo Darwin ;; -m) echo arm64 ;; esac' > "$tmp/bin/uname"
+		printf '%s\n' '#!/bin/sh' 'echo "$1" >> "$TEST_LAUNCHCTL_LOG"' > "$tmp/bin/launchctl"
+		chmod +x "$tmp/bin/uname" "$tmp/bin/launchctl"
+		COPYFILE_DISABLE=1 tar -czf "$bundle" -C "$tmp/pkg" resources
+		env HOME="$tmp/home" PATH="$tmp/bin" AO_HOST_INSTALL_DIR="$tmp/host" TEST_AO_HOST_ROOT="$tmp/host" \
+			TEST_AO_READY_AFTER_INSTALL=1 TEST_LAUNCHCTL_LOG="$tmp/launch.log" \
+			/bin/bash "$script" --bundle "$bundle" > "$tmp/out" 2>&1 || { cat "$tmp/out" >&2; exit 1; }
+		[[ "$(tr '\n' ' ' < "$tmp/launch.log")" == 'bootout stop bootstrap ' ]] || { printf '%s\n' 'daemon not stopped between bootout and bootstrap' >&2; cat "$tmp/launch.log" >&2; exit 1; }
+		python3 -c 'import plistlib,sys; assert plistlib.load(open(sys.argv[1],"rb"))["KeepAlive"] == {"SuccessfulExit": False}' \
+			"$tmp/home/Library/LaunchAgents/dev.aoagents.self-hosted.plist" || { printf '%s\n' 'KeepAlive restarts clean exits' >&2; exit 1; }
+		good="$(readlink "$tmp/host/current")"
+		result=0
+		env HOME="$tmp/home" PATH="$tmp/bin" AO_HOST_INSTALL_DIR="$tmp/host" TEST_AO_HOST_ROOT="$tmp/host" \
+			TEST_AO_READY_AFTER_INSTALL=1 TEST_LAUNCHCTL_LOG="$tmp/fail.log" TEST_AO_STOP_FAIL=1 \
+			/bin/bash "$script" --bundle "$bundle" > "$tmp/out" 2>&1 || result=$?
+		[[ "$result" != 0 ]] || { printf '%s\n' 'upgrade succeeded although the old daemon kept running' >&2; exit 1; }
+		[[ "$(readlink "$tmp/host/current")" == "$good" ]] || { printf '%s\n' 'failed stop left the new release active' >&2; exit 1; }
+		grep -q 'Could not stop the running AO daemon' "$tmp/out" || { cat "$tmp/out" >&2; exit 1; }
+		;;
 	relative-current)
 		COPYFILE_DISABLE=1 tar -czf "$bundle" -C "$tmp/pkg" resources
 		for attempt in 1 2; do
@@ -433,6 +459,6 @@ PY
 			printf '%s\n' '--app with --nightly was accepted' >&2; exit 1
 		fi
 		;;
-	*) printf 'Usage: %s {app|release-channels|bootstrap-nightly|bad-tmux|no-systemd|inactive-systemd|prune|failed-restarts|failed-first-install|failed-readiness|failed-mac-bootstrap|failed-mac-readiness|failed-mac-first|relative-current|concurrent|interrupted|piped|tunnel-pairing|tunnel-unavailable}\n' "$0" >&2; exit 2 ;;
+	*) printf 'Usage: %s {app|release-channels|bootstrap-nightly|bad-tmux|no-systemd|inactive-systemd|prune|failed-restarts|failed-first-install|failed-readiness|failed-mac-bootstrap|failed-mac-readiness|failed-mac-first|mac-stop|relative-current|concurrent|interrupted|piped|tunnel-pairing|tunnel-unavailable}\n' "$0" >&2; exit 2 ;;
 esac
 printf 'PASS %s\n' "$1"
