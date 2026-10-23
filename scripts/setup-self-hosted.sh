@@ -268,6 +268,15 @@ done
 printf 'exec %q daemon\n' "$host_root/current/resources/daemon/ao" >> "$runner"
 chmod 700 "$runner"
 
+# The service manager only stops the daemon it started; one from `ao start` or the
+# desktop app would keep running the old binary and satisfy the readiness check.
+stop_running_daemon() {
+	if ! "$release/resources/daemon/ao" stop; then
+		printf '%s\n' 'Could not stop the running AO daemon; stop it and retry.' >&2
+		return 1
+	fi
+}
+
 if [[ "$platform" == Linux ]]; then
 	unit_dir="$HOME/.config/systemd/user"
 	mkdir -p "$unit_dir"
@@ -284,7 +293,7 @@ if [[ "$platform" == Linux ]]; then
 			if ! systemctl --user disable --now ao-self-hosted.service; then
 				printf '%s\n' 'Could not stop and disable the failed AO service.' >&2
 			fi
-			rm -- "$host_root/current"
+			rm -f -- "$host_root/current"
 			return
 		fi
 		ln -sfn "$previous_target" "$host_root/current"
@@ -292,6 +301,11 @@ if [[ "$platform" == Linux ]]; then
 			printf 'Previous AO release restored at %s/current, but its service did not restart.\n' "$host_root" >&2
 		fi
 	}
+	systemctl --user stop ao-self-hosted.service || true
+	if ! stop_running_daemon; then
+		restore_previous_service
+		exit 1
+	fi
 	ln -sfn "$release" "$host_root/current"
 	if ! systemctl --user restart ao-self-hosted.service; then
 		restore_previous_service
@@ -307,6 +321,7 @@ else
 	# With --app the desktop app replaces any daemon it did not start (per-launch
 	# browser token), so KeepAlive would respawn into "already running" forever.
 	# Start at login only, and have the app spawn this same binary.
+	# Otherwise restart only after a crash, so `ao stop` (clean exit) sticks.
 	keep_alive=true
 	if [[ -n "$app" ]]; then
 		keep_alive=false
@@ -318,7 +333,7 @@ data = {
     'Label': 'dev.aoagents.self-hosted',
     'ProgramArguments': [os.environ['AO_HOST_RUNNER']],
     'RunAtLoad': True,
-    'KeepAlive': os.environ['AO_HOST_KEEP_ALIVE'] == 'true',
+    'KeepAlive': {'SuccessfulExit': False} if os.environ['AO_HOST_KEEP_ALIVE'] == 'true' else False,
     'StandardOutPath': os.path.join(os.environ['AO_HOST_LOG_DIR'], 'daemon.log'),
     'StandardErrorPath': os.path.join(os.environ['AO_HOST_LOG_DIR'], 'daemon.err'),
 }
@@ -328,7 +343,7 @@ PY
 	restore_previous_launch_agent() {
 		launchctl bootout "gui/$(id -u)" "$plist" >/dev/null 2>&1 || true
 		if [[ -z "$previous_target" ]]; then
-			rm -- "$host_root/current" "$plist"
+			rm -f -- "$host_root/current" "$plist"
 			return
 		fi
 		ln -sfn "$previous_target" "$host_root/current"
@@ -336,8 +351,12 @@ PY
 			printf 'Previous AO release restored at %s/current, but its LaunchAgent did not start.\n' "$host_root" >&2
 		fi
 	}
-	ln -sfn "$release" "$host_root/current"
 	launchctl bootout "gui/$(id -u)" "$plist" >/dev/null 2>&1 || true
+	if ! stop_running_daemon; then
+		restore_previous_launch_agent
+		exit 1
+	fi
+	ln -sfn "$release" "$host_root/current"
 	if ! launchctl bootstrap "gui/$(id -u)" "$plist"; then
 		restore_previous_launch_agent
 		printf '%s\n' 'AO LaunchAgent start failed; inspect its logs.' >&2
