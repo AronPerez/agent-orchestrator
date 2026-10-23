@@ -3,6 +3,7 @@ package domain
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -10,20 +11,49 @@ import (
 
 const (
 	reportDeliveryPrefix  = `<ao-report-delivery id="`
+	reportDeliveryFooter  = `<ao-report-delivery-end id="`
 	sessionDeliveryPrefix = `<ao-session-delivery id="`
 )
 
+// pastedContentMarkup matches the wrapper Claude Code inserts when it collapses
+// bursts of typed PTY input into paste blocks. Wrappers land at arbitrary byte
+// offsets (mid-word, mid-id), so they are removed before ids are matched.
+var pastedContentMarkup = regexp.MustCompile(`\n*</?pasted_content(?: id="[^"\n]*")?>\n*`)
+
 // WrapReportDelivery marks an AO-authored report batch so provider prompt
 // hooks can correlate semantic acceptance with its durable delivery identity.
+// The footer repeats the id because a TUI can drop or paste-wrap the head of a
+// large typed message; without it such a batch is never acknowledged and is
+// redelivered forever.
 func WrapReportDelivery(id, message string) string {
-	return fmt.Sprintf("%s%s\">\n%s\n</ao-report-delivery>", reportDeliveryPrefix, id, message)
+	return fmt.Sprintf("%s%s\">\n%s\n</ao-report-delivery>\n%s%s\"/>", reportDeliveryPrefix, id, message, reportDeliveryFooter, id)
 }
 
-// ReportDeliveryID returns the durable identity from an AO report envelope.
+// ReportDeliveryID returns the durable identity from an AO report envelope,
+// read from its opening tag or, when the head was lost, its trailing footer.
 // Delivery ids are generated internally and deliberately restricted so a
 // malformed prompt cannot manufacture markup or an unbounded correlation key.
 func ReportDeliveryID(message string) (string, bool) {
-	return deliveryID(message, reportDeliveryPrefix)
+	message = strings.TrimSpace(unwrapPastedContent(message))
+	if id, ok := deliveryID(message, reportDeliveryPrefix); ok {
+		return id, true
+	}
+	i := strings.LastIndex(message, reportDeliveryFooter)
+	if i < 0 {
+		return "", false
+	}
+	id, ok := strings.CutSuffix(message[i+len(reportDeliveryFooter):], `"/>`)
+	if !ok {
+		return "", false
+	}
+	return validDeliveryID(id)
+}
+
+func unwrapPastedContent(message string) string {
+	if !strings.Contains(message, "pasted_content") {
+		return message
+	}
+	return pastedContentMarkup.ReplaceAllString(message, "")
 }
 
 func deliveryID(message, prefix string) (string, bool) {
@@ -33,10 +63,16 @@ func deliveryID(message, prefix string) (string, bool) {
 	}
 	rest := strings.TrimPrefix(message, prefix)
 	end := strings.Index(rest, `">`)
-	if end <= 0 || end > 128 {
+	if end < 0 {
 		return "", false
 	}
-	id := rest[:end]
+	return validDeliveryID(rest[:end])
+}
+
+func validDeliveryID(id string) (string, bool) {
+	if id == "" || len(id) > 128 {
+		return "", false
+	}
 	for _, r := range id {
 		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') &&
 			(r < '0' || r > '9') && r != ':' && r != '-' && r != '_' {
@@ -215,7 +251,7 @@ func WrapSessionDelivery(id, message string) string {
 
 // SessionDeliveryID returns the identity from an AO session-delivery envelope.
 func SessionDeliveryID(message string) (string, bool) {
-	return deliveryID(message, sessionDeliveryPrefix)
+	return deliveryID(unwrapPastedContent(message), sessionDeliveryPrefix)
 }
 
 // CoordinationDeliveryID recognizes both durable reports and session sends.

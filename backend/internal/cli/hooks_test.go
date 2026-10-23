@@ -939,12 +939,22 @@ func TestHooks_UserPromptSubmitReportsOnlyMainUserCheckpoint(t *testing.T) {
 }
 
 func TestHookConversationFactsCorrelatesAcceptedReportDelivery(t *testing.T) {
-	prompt := domain.WrapReportDelivery("report-batch:abc123", "Reports since your previous turn:")
-	payload := []byte(`{"prompt":` + mustJSONString(t, prompt) + `,"prompt_id":"native-turn"}`)
-	got := hookConversationFacts(domain.HarnessClaudeCode, "user-prompt-submit", payload)
-	if got.CheckpointOrigin != domain.ConversationCheckpointOriginCoordination ||
-		got.CoordinationID != "report-batch:abc123" || got.LatestUserPrompt != "" {
-		t.Fatalf("conversation facts = %+v", got)
+	prompt := domain.WrapReportDelivery("report-batch:abc123", "Reports since your previous turn:\n"+strings.Repeat("worker detail ", 200))
+	for name, observed := range map[string]string{
+		"intact": prompt,
+		// Claude Code dropped the head of a large typed delivery (rpt_92472097).
+		"head truncated": prompt[1081:],
+		// Claude Code paste-wrapped the head, splitting the opening id.
+		"paste wrapped": `<pasted_content id="fb71">` + "\n" + prompt[:40] + "\n</pasted_content id=\"fb71\">\n\n\n" + prompt[40:],
+	} {
+		t.Run(name, func(t *testing.T) {
+			payload := []byte(`{"prompt":` + mustJSONString(t, observed) + `,"prompt_id":"native-turn"}`)
+			got := hookConversationFacts(domain.HarnessClaudeCode, "user-prompt-submit", payload)
+			if got.CheckpointOrigin != domain.ConversationCheckpointOriginCoordination ||
+				got.CoordinationID != "report-batch:abc123" || got.LatestUserPrompt != "" {
+				t.Fatalf("conversation facts = %+v", got)
+			}
+		})
 	}
 }
 
