@@ -942,8 +942,6 @@ func TestHookConversationFactsCorrelatesAcceptedReportDelivery(t *testing.T) {
 	prompt := domain.WrapReportDelivery("report-batch:abc123", "Reports since your previous turn:\n"+strings.Repeat("worker detail ", 200))
 	for name, observed := range map[string]string{
 		"intact": prompt,
-		// Claude Code dropped the head of a large typed delivery (rpt_92472097).
-		"head truncated": prompt[1081:],
 		// Claude Code paste-wrapped the head, splitting the opening id.
 		"paste wrapped": `<pasted_content id="fb71">` + "\n" + prompt[:40] + "\n</pasted_content id=\"fb71\">\n\n\n" + prompt[40:],
 	} {
@@ -952,6 +950,26 @@ func TestHookConversationFactsCorrelatesAcceptedReportDelivery(t *testing.T) {
 			got := hookConversationFacts(domain.HarnessClaudeCode, "user-prompt-submit", payload)
 			if got.CheckpointOrigin != domain.ConversationCheckpointOriginCoordination ||
 				got.CoordinationID != "report-batch:abc123" || got.LatestUserPrompt != "" {
+				t.Fatalf("conversation facts = %+v", got)
+			}
+		})
+	}
+}
+
+// Neither a head-less delivery nor a human prompt that quotes one carries the
+// opening id, so the hook must not certify either as accepted coordination.
+// The daemon correlates a head-less tail with the one delivery it awaits.
+func TestHookConversationFactsKeepsFooterOnlyPromptsHuman(t *testing.T) {
+	prompt := domain.WrapReportDelivery("report-batch:abc123", "Reports since your previous turn:\n"+strings.Repeat("worker detail ", 200))
+	for name, observed := range map[string]string{
+		"head truncated": prompt[1081:],
+		"human quote":    "Please explain this failure:\n" + domain.WrapReportDelivery("report-batch:abc123", "worker failed"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			payload := []byte(`{"prompt":` + mustJSONString(t, observed) + `,"prompt_id":"native-turn"}`)
+			got := hookConversationFacts(domain.HarnessClaudeCode, "user-prompt-submit", payload)
+			if got.CheckpointOrigin != domain.ConversationCheckpointOriginHuman || got.CoordinationID != "" ||
+				got.LatestUserPrompt != observed || got.TurnUserRequest != observed {
 				t.Fatalf("conversation facts = %+v", got)
 			}
 		})

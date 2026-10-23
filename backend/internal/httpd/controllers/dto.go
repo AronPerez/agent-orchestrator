@@ -65,6 +65,8 @@ type ReportResponse struct {
 	Outputs     []ReportOutputResponse `json:"outputs,omitempty"`
 	CreatedAt   time.Time              `json:"createdAt"`
 	RepeatCount int64                  `json:"repeatCount"`
+	// DeliveryBatchID names the orchestrator delivery that carried this report.
+	DeliveryBatchID string `json:"deliveryBatchId,omitempty"`
 }
 
 // ListReportsResponse contains a project's ordered persisted reports.

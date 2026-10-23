@@ -23,8 +23,9 @@ func TestReportDeliveryEnvelopeRoundTrip(t *testing.T) {
 }
 
 // Claude Code can drop the head of a large typed delivery or wrap arbitrary
-// slices of it in <pasted_content> blocks. Either shape must still yield the id,
-// or the batch is never acknowledged and is redelivered forever.
+// slices of it in <pasted_content> blocks. A paste-wrapped envelope is still
+// complete and is acknowledged; a head-less one must not be, because the
+// reports in the lost head never reached the orchestrator.
 func TestReportDeliveryIDSurvivesTUIInputMangling(t *testing.T) {
 	const id = "report-batch:rpt_92472097-ef55-4e90-81dd-92b5b443f178"
 	message := WrapReportDelivery(id, "Reports since your previous turn:\n"+strings.Repeat("[checkpoint] worker detail\n", 200))
@@ -33,27 +34,44 @@ func TestReportDeliveryIDSurvivesTUIInputMangling(t *testing.T) {
 	}
 	footer := strings.LastIndex(message, "<ao-report-delivery-end")
 	for name, observed := range map[string]string{
-		"head truncated":              message[1081:],
-		"head truncated, tail pasted": message[1081:2000] + "\n\n" + wrap(message[2000:]),
-		"head paste wrapped":          wrap(message[:1536]) + message[1536:],
-		"opening id split by paste":   message[:30] + "\n\n" + wrap(message[30:]),
-		"footer id split by paste":    message[1081:footer+40] + "\n\n" + wrap(message[footer+40:]),
-		"whole message pasted":        wrap(message),
+		"head paste wrapped":        wrap(message[:1536]) + message[1536:],
+		"opening id split by paste": message[:30] + "\n\n" + wrap(message[30:]),
+		"whole message pasted":      wrap(message),
 	} {
 		if got, ok := ReportDeliveryID(observed); !ok || got != id {
 			t.Errorf("%s: ReportDeliveryID() = %q, %v", name, got, ok)
 		}
-	}
-	for _, invalid := range []string{
-		message[1081 : len(message)-3],
-		`<ao-report-delivery-end id="/>`,
-		`<ao-report-delivery-end id=""/>`,
-		`tail <ao-report-delivery-end id="bad value"/>`,
-		`<ao-report-delivery-end id="` + id + `"/> trailing human text`,
-	} {
-		if got, ok := ReportDeliveryID(invalid); ok {
-			t.Errorf("ReportDeliveryID(%q) = %q, true", invalid, got)
+		if ReportDeliveryTruncated(observed, id) {
+			t.Errorf("%s: complete delivery reported truncated", name)
 		}
+	}
+	for name, observed := range map[string]string{
+		"head truncated":              message[1081:],
+		"head truncated, tail pasted": message[1081:2000] + "\n\n" + wrap(message[2000:]),
+		"footer id split by paste":    message[1081:footer+40] + "\n\n" + wrap(message[footer+40:]),
+	} {
+		if got, ok := ReportDeliveryID(observed); ok {
+			t.Errorf("%s: head-less delivery acknowledged as %q", name, got)
+		}
+		if !ReportDeliveryTruncated(observed, id) {
+			t.Errorf("%s: truncation not detected", name)
+		}
+		if ReportDeliveryTruncated(observed, "report-batch:other") {
+			t.Errorf("%s: truncation matched an id that is not awaited", name)
+		}
+	}
+	// A human quoting a delivery for diagnosis keeps their instruction.
+	quoted := "Please explain this failure:\n" + WrapReportDelivery("report-batch:abc123", "worker failed")
+	if got, ok := CoordinationDeliveryID(quoted); ok {
+		t.Errorf("human-prefixed quote classified as coordination %q", got)
+	}
+	for _, invalid := range []string{message[1081 : len(message)-3], message[1081:] + "\nthanks", ""} {
+		if ReportDeliveryTruncated(invalid, id) {
+			t.Errorf("ReportDeliveryTruncated(%q) = true", invalid)
+		}
+	}
+	if ReportDeliveryTruncated(message[1081:], "") {
+		t.Error("empty awaited id matched")
 	}
 }
 
