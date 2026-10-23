@@ -22,31 +22,32 @@ var pastedContentMarkup = regexp.MustCompile(`\n*</?pasted_content(?: id="[^"\n]
 
 // WrapReportDelivery marks an AO-authored report batch so provider prompt
 // hooks can correlate semantic acceptance with its durable delivery identity.
-// The footer repeats the id because a TUI can drop or paste-wrap the head of a
-// large typed message; without it such a batch is never acknowledged and is
-// redelivered forever.
+// The footer repeats the id so the sender can tell a delivery whose head a TUI
+// dropped (see ReportDeliveryTruncated) from one that never arrived.
 func WrapReportDelivery(id, message string) string {
 	return fmt.Sprintf("%s%s\">\n%s\n</ao-report-delivery>\n%s%s\"/>", reportDeliveryPrefix, id, message, reportDeliveryFooter, id)
 }
 
-// ReportDeliveryID returns the durable identity from an AO report envelope,
-// read from its opening tag or, when the head was lost, its trailing footer.
+// ReportDeliveryID returns the durable identity from an AO report envelope.
+// Only a complete envelope (its opening tag) counts: a tail alone is not proof
+// the whole batch arrived, and is indistinguishable from quoted text.
 // Delivery ids are generated internally and deliberately restricted so a
 // malformed prompt cannot manufacture markup or an unbounded correlation key.
 func ReportDeliveryID(message string) (string, bool) {
+	return deliveryID(unwrapPastedContent(message), reportDeliveryPrefix)
+}
+
+// ErrReportDeliveryTruncated reports that an awaited report envelope arrived
+// without its head, so the target saw only part of the batch.
+var ErrReportDeliveryTruncated = errors.New("report delivery arrived truncated")
+
+// ReportDeliveryTruncated reports whether message is the tail of the envelope
+// for id with its head missing. Callers must pass the id they are awaiting, so
+// a quoted footer cannot affect anything but that one delivery.
+func ReportDeliveryTruncated(message, id string) bool {
 	message = strings.TrimSpace(unwrapPastedContent(message))
-	if id, ok := deliveryID(message, reportDeliveryPrefix); ok {
-		return id, true
-	}
-	i := strings.LastIndex(message, reportDeliveryFooter)
-	if i < 0 {
-		return "", false
-	}
-	id, ok := strings.CutSuffix(message[i+len(reportDeliveryFooter):], `"/>`)
-	if !ok {
-		return "", false
-	}
-	return validDeliveryID(id)
+	return id != "" && !strings.HasPrefix(message, reportDeliveryPrefix) &&
+		strings.HasSuffix(message, reportDeliveryFooter+id+`"/>`)
 }
 
 func unwrapPastedContent(message string) string {
@@ -63,16 +64,10 @@ func deliveryID(message, prefix string) (string, bool) {
 	}
 	rest := strings.TrimPrefix(message, prefix)
 	end := strings.Index(rest, `">`)
-	if end < 0 {
+	if end <= 0 || end > 128 {
 		return "", false
 	}
-	return validDeliveryID(rest[:end])
-}
-
-func validDeliveryID(id string) (string, bool) {
-	if id == "" || len(id) > 128 {
-		return "", false
-	}
+	id := rest[:end]
 	for _, r := range id {
 		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') &&
 			(r < '0' || r > '9') && r != ':' && r != '-' && r != '_' {

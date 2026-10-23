@@ -4936,6 +4936,11 @@ func (m *Manager) SendSemantic(ctx context.Context, id domain.SessionID, message
 	if semanticMessageAccepted(rec, clientMessageID) {
 		return nil
 	}
+	// A prior attempt already arrived head-less; resending the same text would
+	// be mangled the same way.
+	if semanticMessageTruncated(rec, clientMessageID) {
+		return domain.ErrReportDeliveryTruncated
+	}
 	wrapped := domain.WrapReportDelivery(clientMessageID, message)
 	if err := m.send(ctx, id, wrapped, clientMessageID, ports.MessageDeliveryOptions{}); err != nil {
 		return err
@@ -4954,6 +4959,9 @@ func (m *Manager) SendSemantic(ctx context.Context, id domain.SessionID, message
 		}
 		if semanticMessageAccepted(current, clientMessageID) {
 			return nil
+		}
+		if semanticMessageTruncated(current, clientMessageID) {
+			return domain.ErrReportDeliveryTruncated
 		}
 		select {
 		case <-ctx.Done():
@@ -4982,6 +4990,13 @@ func semanticMessageAccepted(rec domain.SessionRecord, clientMessageID string) b
 		rec.Metadata.ConversationCheckpointState == domain.ConversationCheckpointCoordination &&
 		rec.Metadata.ConversationCheckpointGeneration == rec.Metadata.RuntimeLaunchID &&
 		rec.Metadata.ConversationCheckpointTurnID == clientMessageID
+}
+
+// semanticMessageTruncated detects a TUI that dropped the head of this exact
+// delivery: the hook then sees no envelope id and records the tail as an
+// ordinary prompt, which still ends with the id footer.
+func semanticMessageTruncated(rec domain.SessionRecord, clientMessageID string) bool {
+	return domain.ReportDeliveryTruncated(rec.Metadata.LatestUserPrompt, clientMessageID)
 }
 
 // InterruptTUI requests cancellation through the session's owned runtime.

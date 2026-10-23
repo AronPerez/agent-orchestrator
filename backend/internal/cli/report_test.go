@@ -99,3 +99,40 @@ func TestReportPreservesAPIEnvelopeAsRuntimeError(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+func TestReportShowPrintsOnlyTheRequestedBatch(t *testing.T) {
+	cfg := setConfigEnv(t)
+	t.Setenv("AO_PROJECT_ID", "demo")
+	t.Setenv("AO_SESSION_ID", "")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/projects/demo":
+			_, _ = io.WriteString(w, `{"project":{"id":"demo","kind":"single_repo"}}`)
+		case "/api/v1/reports":
+			if r.URL.Query().Get("projectId") != "demo" {
+				t.Errorf("projectId = %q", r.URL.Query().Get("projectId"))
+			}
+			_, _ = io.WriteString(w, `{"reports":[
+				{"id":"rpt_a","sessionId":"w-1","state":"needs_input","note":"pick a schema","repeatCount":1,"deliveryBatchId":"report-batch:rpt_a"},
+				{"id":"rpt_b","sessionId":"w-2","message":"tests green","outputs":[{"kind":"pr_created","reference":"https://github.com/o/r/pull/1"}],"repeatCount":2,"deliveryBatchId":"report-batch:rpt_a"},
+				{"id":"rpt_c","sessionId":"w-3","state":"done","note":"other batch","repeatCount":1,"deliveryBatchId":"report-batch:rpt_c"}]}`)
+		default:
+			w.WriteHeader(http.StatusAccepted)
+		}
+	}))
+	defer srv.Close()
+	writeRunFileFor(t, cfg, srv)
+
+	out, _, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }}, "report", "show", "report-batch:rpt_a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "Reports in report-batch:rpt_a:\n\n[needs_input] w-1\npick a schema\n\n[information] w-2 (repeated 2 times)\ntests green\npr_created: https://github.com/o/r/pull/1\n"
+	if out != want {
+		t.Fatalf("output = %q, want %q", out, want)
+	}
+	if _, _, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }}, "report", "show", "report-batch:missing"); err == nil || !strings.Contains(err.Error(), "no reports in batch") {
+		t.Fatalf("missing batch err = %v", err)
+	}
+}

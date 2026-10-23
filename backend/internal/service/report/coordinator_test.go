@@ -2,6 +2,7 @@ package report
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -144,6 +145,45 @@ func TestCoordinatorAcceptanceAndPiggybackFencing(t *testing.T) {
 	}
 }
 
+// A batch whose head was dropped reached the orchestrator only partly: report
+// "first" was lost with the head. It must stay pending until the orchestrator
+// accepts a notice pointing at the full stored batch.
+func TestCoordinatorTruncatedBatchIsNotAcknowledgedUntilRecovered(t *testing.T) {
+	now := time.Date(2026, 9, 14, 14, 0, 0, 0, time.UTC)
+	store := newCoordinatorStore(now)
+	store.sessions = []domain.SessionRecord{{ID: "orch", ProjectID: "p", Kind: domain.KindOrchestrator, Mode: domain.SessionModeTUI}}
+	store.add(reportAt("first", "worker-a", now, now, "lost with the head"))
+	store.add(reportAt("second", "worker-b", now, now, "arrived in the tail"))
+	delivery := &coordinatorDelivery{results: []error{domain.ErrReportDeliveryTruncated, errors.New("notice not observed")}}
+	c := NewCoordinator(CoordinatorDeps{Store: store, Delivery: delivery, Now: func() time.Time { return now }, NewToken: func() string { return "claim" }, RetryDelay: time.Second})
+
+	if _, err := c.RunDue(context.Background()); err == nil {
+		t.Fatal("RunDue() succeeded although the recovery notice was not accepted")
+	}
+	if store.acked != 0 {
+		t.Fatalf("acknowledged = %d, want 0 after a truncated delivery", store.acked)
+	}
+	for _, report := range store.reports {
+		if report.DeliveryState != domain.ReportPending {
+			t.Fatalf("report %s state = %s, want pending", report.ID, report.DeliveryState)
+		}
+	}
+
+	delivery.results = []error{domain.ErrReportDeliveryTruncated}
+	if _, err := c.RunDue(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if store.acked != 2 {
+		t.Fatalf("acknowledged = %d, want 2 once the notice is accepted", store.acked)
+	}
+	notice := delivery.submissions[len(delivery.submissions)-1]
+	if notice.key != "report-batch:first:recovery" ||
+		!strings.Contains(notice.message, "ao report show report-batch:first") ||
+		!strings.Contains(notice.message, "(2 reports)") || strings.Contains(notice.message, "lost with the head") {
+		t.Fatalf("recovery notice = %#v", notice)
+	}
+}
+
 type coordinatorStore struct {
 	mu         sync.Mutex
 	now        time.Time
@@ -283,6 +323,8 @@ type coordinatorDelivery struct {
 	submissions []coordinatorSubmission
 	interrupts  []domain.SessionID
 	submitErr   error
+	// results are returned by successive accepted submissions, then nil.
+	results []error
 }
 
 func (d *coordinatorDelivery) Submit(_ context.Context, target domain.SessionID, message, key string) error {
@@ -290,7 +332,12 @@ func (d *coordinatorDelivery) Submit(_ context.Context, target domain.SessionID,
 		return d.submitErr
 	}
 	d.submissions = append(d.submissions, coordinatorSubmission{target, message, key})
-	return nil
+	if len(d.results) == 0 {
+		return nil
+	}
+	err := d.results[0]
+	d.results = d.results[1:]
+	return err
 }
 func (d *coordinatorDelivery) Interrupt(_ context.Context, target domain.SessionID) error {
 	d.interrupts = append(d.interrupts, target)

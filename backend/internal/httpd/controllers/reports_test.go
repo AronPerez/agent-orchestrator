@@ -71,14 +71,14 @@ func TestReportsAPI_ListIsReadOnlyProjection(t *testing.T) {
 	created := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
 	svc := &fakeReportService{reports: []domain.ReportRecord{{
 		ID: "rpt_1", SessionID: "worker", ProjectID: "ao", State: domain.ReportDone,
-		Note: "finished", CreatedAt: created, RepeatCount: 2,
+		Note: "finished", CreatedAt: created, RepeatCount: 2, DeliveryBatchID: "report-batch:rpt_1",
 		Outputs: []domain.ReportOutput{{Kind: domain.ReportOutputArtifact, Reference: "opaque"}},
 	}}}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	srv := httptest.NewServer(httpd.NewRouterWithControl(config.Config{}, log, nil, httpd.APIDeps{Reports: svc}, httpd.ControlDeps{}))
 	defer srv.Close()
 	body, status, _ := doRequest(t, srv, "GET", "/api/v1/reports?projectId=ao", "")
-	if status != http.StatusOK || !reportContainsAll(string(body), `"id":"rpt_1"`, `"sessionId":"worker"`, `"reference":"opaque"`, `"repeatCount":2`) {
+	if status != http.StatusOK || !reportContainsAll(string(body), `"id":"rpt_1"`, `"sessionId":"worker"`, `"reference":"opaque"`, `"repeatCount":2`, `"deliveryBatchId":"report-batch:rpt_1"`) {
 		t.Fatalf("status=%d body=%s", status, body)
 	}
 	_, status, _ = doRequest(t, srv, "GET", "/api/v1/reports", "")
