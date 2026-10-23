@@ -22,6 +22,41 @@ func TestReportDeliveryEnvelopeRoundTrip(t *testing.T) {
 	}
 }
 
+// Claude Code can drop the head of a large typed delivery or wrap arbitrary
+// slices of it in <pasted_content> blocks. Either shape must still yield the id,
+// or the batch is never acknowledged and is redelivered forever.
+func TestReportDeliveryIDSurvivesTUIInputMangling(t *testing.T) {
+	const id = "report-batch:rpt_92472097-ef55-4e90-81dd-92b5b443f178"
+	message := WrapReportDelivery(id, "Reports since your previous turn:\n"+strings.Repeat("[checkpoint] worker detail\n", 200))
+	wrap := func(s string) string {
+		return "<pasted_content id=\"8437\">\n" + s + "\n</pasted_content id=\"8437\">\n\n\n"
+	}
+	footer := strings.LastIndex(message, "<ao-report-delivery-end")
+	for name, observed := range map[string]string{
+		"head truncated":              message[1081:],
+		"head truncated, tail pasted": message[1081:2000] + "\n\n" + wrap(message[2000:]),
+		"head paste wrapped":          wrap(message[:1536]) + message[1536:],
+		"opening id split by paste":   message[:30] + "\n\n" + wrap(message[30:]),
+		"footer id split by paste":    message[1081:footer+40] + "\n\n" + wrap(message[footer+40:]),
+		"whole message pasted":        wrap(message),
+	} {
+		if got, ok := ReportDeliveryID(observed); !ok || got != id {
+			t.Errorf("%s: ReportDeliveryID() = %q, %v", name, got, ok)
+		}
+	}
+	for _, invalid := range []string{
+		message[1081 : len(message)-3],
+		`<ao-report-delivery-end id="/>`,
+		`<ao-report-delivery-end id=""/>`,
+		`tail <ao-report-delivery-end id="bad value"/>`,
+		`<ao-report-delivery-end id="` + id + `"/> trailing human text`,
+	} {
+		if got, ok := ReportDeliveryID(invalid); ok {
+			t.Errorf("ReportDeliveryID(%q) = %q, true", invalid, got)
+		}
+	}
+}
+
 func TestSessionDeliveryID(t *testing.T) {
 	message := WrapSessionDelivery("session-send:abc123", "orchestrator direction")
 	if got, ok := SessionDeliveryID(message); !ok || got != "session-send:abc123" {
