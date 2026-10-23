@@ -669,3 +669,42 @@ func TestRuntimeIntegrationSurvivalOptionsTakeEffect(t *testing.T) {
 		t.Fatalf("pane history_limit = %q, want %q", got, want)
 	}
 }
+
+// A reviewer relaunch Destroys its stable handle first. When that session was
+// already killed while the server stayed up, real tmux answers Destroy's
+// set-option with "no such session: =id:"; Destroy must still read that as
+// already gone instead of failing the launch.
+func TestRuntimeIntegrationDestroyAfterSessionKilledExternally(t *testing.T) {
+	systemTmux, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("tmux unavailable")
+	}
+	tmuxTmpDir, err := os.MkdirTemp("/tmp", "ao-tmux-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tmuxTmpDir) })
+	t.Setenv("TMUX_TMPDIR", tmuxTmpDir)
+	t.Setenv("TMUX", "")
+	t.Cleanup(func() { _ = exec.Command(systemTmux, "-L", "ao", "kill-server").Run() })
+
+	base := strings.ReplaceAll(t.Name(), "/", "_")
+	keepID, goneID := base+"_keep", base+"_gone"
+	for _, id := range []string{keepID, goneID} {
+		if out, startErr := exec.Command(systemTmux, "-L", "ao", "new-session", "-d", "-s", id, "sleep 30").CombinedOutput(); startErr != nil {
+			t.Fatalf("start %s: %v: %s", id, startErr, out)
+		}
+	}
+	r := New(Options{Binary: systemTmux, LegacyBinary: systemTmux, SocketName: "ao", Timeout: 5 * time.Second})
+	handle := ports.RuntimeHandle{ID: goneID}
+	if alive, aliveErr := r.IsAlive(context.Background(), handle); aliveErr != nil || !alive {
+		t.Fatalf("IsAlive before kill = (%v, %v), want (true, nil)", alive, aliveErr)
+	}
+	if out, killErr := exec.Command(systemTmux, "-L", "ao", "kill-session", "-t", "="+goneID).CombinedOutput(); killErr != nil {
+		t.Fatalf("external kill: %v: %s", killErr, out)
+	}
+
+	if err := r.Destroy(context.Background(), handle); err != nil {
+		t.Fatalf("Destroy of externally killed session: %v", err)
+	}
+}

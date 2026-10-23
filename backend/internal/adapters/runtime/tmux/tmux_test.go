@@ -1009,6 +1009,23 @@ func TestDestroyIsIdempotentWhenSessionMissing(t *testing.T) {
 	}
 }
 
+// Real tmux words the two misses differently: set-option on an option target
+// says "no such session: =id:" while kill-session says "can't find session".
+// Treating the former as fatal blocked every reviewer relaunch whose previous
+// pane was already gone ("reviewer replace stale pane").
+func TestDestroyIsIdempotentWhenSetOptionReportsNoSuchSession(t *testing.T) {
+	r, fr := newTestRuntime(0)
+	fr.outputs = [][]byte{nil, []byte("no such session: =sess-1:"), []byte("can't find session: sess-1")}
+	fr.err = &exec.ExitError{}
+
+	if err := r.Destroy(context.Background(), ports.RuntimeHandle{ID: "sess-1"}); err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	if len(fr.calls) != 3 || fr.calls[2].args[0] != "kill-session" {
+		t.Fatalf("calls = %#v, want kill-session to run after set-option miss", fr.calls)
+	}
+}
+
 func TestDestroyIsIdempotentWhenNoServer(t *testing.T) {
 	r, fr := newTestRuntime(0)
 	fr.outputs = [][]byte{nil, []byte("no server running on /tmp/tmux-1000/default"), []byte("no server running on /tmp/tmux-1000/default")}
