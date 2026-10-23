@@ -41,8 +41,8 @@ func TestReportDeliveryIDSurvivesTUIInputMangling(t *testing.T) {
 		if got, ok := ReportDeliveryID(observed); !ok || got != id {
 			t.Errorf("%s: ReportDeliveryID() = %q, %v", name, got, ok)
 		}
-		if ReportDeliveryTruncated(observed, id) {
-			t.Errorf("%s: complete delivery reported truncated", name)
+		if got, ok := CoordinationDeliveryID(observed); !ok || got != id {
+			t.Errorf("%s: CoordinationDeliveryID() = %q, %v", name, got, ok)
 		}
 	}
 	for name, observed := range map[string]string{
@@ -53,25 +53,23 @@ func TestReportDeliveryIDSurvivesTUIInputMangling(t *testing.T) {
 		if got, ok := ReportDeliveryID(observed); ok {
 			t.Errorf("%s: head-less delivery acknowledged as %q", name, got)
 		}
-		if !ReportDeliveryTruncated(observed, id) {
-			t.Errorf("%s: truncation not detected", name)
-		}
-		if ReportDeliveryTruncated(observed, "report-batch:other") {
-			t.Errorf("%s: truncation matched an id that is not awaited", name)
+		// Still AO coordination, under a turn id that never acknowledges the batch.
+		if got, ok := CoordinationDeliveryID(observed); !ok || got != TruncatedReportDeliveryTurnID(id) || got == id {
+			t.Errorf("%s: CoordinationDeliveryID() = %q, %v", name, got, ok)
 		}
 	}
-	// A human quoting a delivery for diagnosis keeps their instruction.
-	quoted := "Please explain this failure:\n" + WrapReportDelivery("report-batch:abc123", "worker failed")
-	if got, ok := CoordinationDeliveryID(quoted); ok {
-		t.Errorf("human-prefixed quote classified as coordination %q", got)
-	}
-	for _, invalid := range []string{message[1081 : len(message)-3], message[1081:] + "\nthanks", ""} {
-		if ReportDeliveryTruncated(invalid, id) {
-			t.Errorf("ReportDeliveryTruncated(%q) = true", invalid)
+	for name, observed := range map[string]string{
+		// A human quoting a delivery for diagnosis keeps their instruction.
+		"human quote":           "Please explain this failure:\n" + WrapReportDelivery("report-batch:abc123", "worker failed"),
+		"footer not at end":     message[1081:] + "\nthanks",
+		"footer cut":            message[1081 : len(message)-3],
+		"markup in footer id":   `tail <ao-report-delivery-end id="abc">junk"/>`,
+		"empty footer id":       `tail <ao-report-delivery-end id=""/>`,
+		"footer prefix overlap": `<ao-report-delivery-end id="/>`,
+	} {
+		if got, ok := CoordinationDeliveryID(observed); ok {
+			t.Errorf("%s: classified as coordination %q", name, got)
 		}
-	}
-	if ReportDeliveryTruncated(message[1081:], "") {
-		t.Error("empty awaited id matched")
 	}
 }
 

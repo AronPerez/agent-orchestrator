@@ -4993,10 +4993,11 @@ func semanticMessageAccepted(rec domain.SessionRecord, clientMessageID string) b
 }
 
 // semanticMessageTruncated detects a TUI that dropped the head of this exact
-// delivery: the hook then sees no envelope id and records the tail as an
-// ordinary prompt, which still ends with the id footer.
+// delivery: the hook records its tail as coordination under a turn id derived
+// from, but never equal to, the delivery id.
 func semanticMessageTruncated(rec domain.SessionRecord, clientMessageID string) bool {
-	return domain.ReportDeliveryTruncated(rec.Metadata.LatestUserPrompt, clientMessageID)
+	return clientMessageID != "" &&
+		semanticMessageAccepted(rec, domain.TruncatedReportDeliveryTurnID(clientMessageID))
 }
 
 // InterruptTUI requests cancellation through the session's owned runtime.

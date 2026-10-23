@@ -1383,6 +1383,68 @@ func TestActivity_CoordinationPromptFollowedByPromptlessStopDoesNotAdvanceCheckp
 	}
 }
 
+// A report batch whose head the TUI dropped, followed by AO's recovery notice,
+// is AO coordination end to end. Neither turn may replace the last real human
+// facts, and the truncated turn must not carry the batch's acceptance id.
+func TestActivity_TruncatedReportAndRecoveryPreserveHumanCheckpoint(t *testing.T) {
+	const batchID = "report-batch:rpt_1"
+	m, store, _ := newManager()
+	humanAt := time.Unix(122, 0).UTC()
+	rec := working("mer-1")
+	rec.Metadata.RuntimeLaunchID = "terminal-generation"
+	rec.Metadata.AgentSessionID = "native-1"
+	rec.Metadata.AgentSessionIDLaunchID = "terminal-generation"
+	rec.Metadata.LatestUserPrompt = "last real user direction"
+	rec.Metadata.LatestUserPromptAt = humanAt
+	rec.Metadata.LatestAssistantUpdate = "last real assistant update"
+	rec.Metadata.ConversationCheckpointState = domain.ConversationCheckpointComplete
+	rec.Metadata.ConversationCheckpointGeneration = "terminal-generation"
+	rec.Metadata.ConversationCheckpointNativeID = "native-1"
+	store.sessions[rec.ID] = rec
+
+	// The hook reports a recognised delivery as coordination with this id and
+	// no prompt text.
+	submit := func(prompt string, at time.Time) string {
+		t.Helper()
+		turnID, ok := domain.CoordinationDeliveryID(prompt)
+		if !ok {
+			t.Fatalf("prompt not recognised as AO coordination: %q", prompt)
+		}
+		if err := m.ApplyActivitySignal(ctx, rec.ID, ports.ActivitySignal{
+			Valid: true, State: domain.ActivityActive, Event: "user-prompt-submit",
+			LaunchID: "terminal-generation", AgentSessionID: "native-1", Timestamp: at,
+			ConversationCheckpointOrigin: domain.ConversationCheckpointOriginCoordination,
+			CoordinationID:               turnID,
+		}); err != nil {
+			t.Fatalf("apply prompt: %v", err)
+		}
+		return turnID
+	}
+	assertHuman := func(stage string) {
+		t.Helper()
+		got := store.sessions[rec.ID].Metadata
+		if got.LatestUserPrompt != rec.Metadata.LatestUserPrompt || !got.LatestUserPromptAt.Equal(humanAt) ||
+			got.LatestAssistantUpdate != rec.Metadata.LatestAssistantUpdate {
+			t.Fatalf("%s replaced human facts: %+v", stage, got)
+		}
+	}
+
+	batch := domain.WrapReportDelivery(batchID, "Reports since your previous turn:\n"+strings.Repeat("worker detail ", 200))
+	if turnID := submit(batch[1081:], humanAt.Add(time.Minute)); turnID == batchID {
+		t.Fatal("head-less delivery acknowledged the batch")
+	}
+	assertHuman("truncated delivery")
+	if got := store.sessions[rec.ID].Metadata.ConversationCheckpointTurnID; got != domain.TruncatedReportDeliveryTurnID(batchID) {
+		t.Fatalf("truncated turn id = %q", got)
+	}
+
+	submit(domain.WrapReportDelivery(batchID+":recovery", "Report batch cut off; run ao report show "+batchID), humanAt.Add(2*time.Minute))
+	assertHuman("recovery notice")
+	if got := store.sessions[rec.ID].Metadata.ConversationCheckpointTurnID; got != batchID+":recovery" {
+		t.Fatalf("recovery turn id = %q", got)
+	}
+}
+
 func TestActivity_StopWithoutCurrentPromptNeverPairsWithPriorTurn(t *testing.T) {
 	m, store, _ := newManager()
 	rec := working("mer-1")
