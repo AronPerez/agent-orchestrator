@@ -51,6 +51,16 @@ requests immediate delivery plus a rate-limited interrupt. Informational work
 batches for up to one hour, while the first done report opens a fixed five
 minute settlement window.
 
+## Reading a delivered batch
+
+```text
+ao report show <batch-id> [--project <id>]
+```
+
+Prints every report in an orchestrator delivery batch. When a batch reaches
+the orchestrator with its beginning cut off, AO sends a short notice naming the
+batch; run this command to read the reports that were lost.
+
 **Examples:**
 
 ```bash

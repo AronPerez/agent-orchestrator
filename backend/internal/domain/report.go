@@ -22,31 +22,53 @@ var pastedContentMarkup = regexp.MustCompile(`\n*</?pasted_content(?: id="[^"\n]
 
 // WrapReportDelivery marks an AO-authored report batch so provider prompt
 // hooks can correlate semantic acceptance with its durable delivery identity.
-// The footer repeats the id because a TUI can drop or paste-wrap the head of a
-// large typed message; without it such a batch is never acknowledged and is
-// redelivered forever.
+// The footer repeats the id so a delivery whose head a TUI dropped is still
+// recognised as AO coordination (see CoordinationDeliveryID) and the sender can
+// tell it from one that never arrived.
 func WrapReportDelivery(id, message string) string {
 	return fmt.Sprintf("%s%s\">\n%s\n</ao-report-delivery>\n%s%s\"/>", reportDeliveryPrefix, id, message, reportDeliveryFooter, id)
 }
 
-// ReportDeliveryID returns the durable identity from an AO report envelope,
-// read from its opening tag or, when the head was lost, its trailing footer.
+// ReportDeliveryID returns the durable identity from an AO report envelope.
+// Only a complete envelope (its opening tag) counts: a tail alone is not proof
+// the whole batch arrived, and is indistinguishable from quoted text.
 // Delivery ids are generated internally and deliberately restricted so a
 // malformed prompt cannot manufacture markup or an unbounded correlation key.
 func ReportDeliveryID(message string) (string, bool) {
+	return deliveryID(unwrapPastedContent(message), reportDeliveryPrefix)
+}
+
+// ErrReportDeliveryTruncated reports that an awaited report envelope arrived
+// without its head, so the target saw only part of the batch.
+var ErrReportDeliveryTruncated = errors.New("report delivery arrived truncated")
+
+// truncatedDeliverySuffix marks the coordination turn of a head-less delivery.
+// It never equals the delivery id, so the batch is not acknowledged, but the
+// sender awaiting that id can recognise it with TruncatedReportDeliveryTurnID.
+const truncatedDeliverySuffix = ":truncated"
+
+// TruncatedReportDeliveryTurnID is the coordination turn id recorded when the
+// envelope for id arrives with its head dropped.
+func TruncatedReportDeliveryTurnID(id string) string {
+	return id + truncatedDeliverySuffix
+}
+
+// truncatedReportDeliveryID recognises an AO envelope whose head a TUI dropped:
+// it ends with the id footer, and no opening tag for that id appears anywhere.
+// A human quoting a whole delivery after their own text keeps the opening tag,
+// so their prompt stays human.
+func truncatedReportDeliveryID(message string) (string, bool) {
 	message = strings.TrimSpace(unwrapPastedContent(message))
-	if id, ok := deliveryID(message, reportDeliveryPrefix); ok {
-		return id, true
-	}
-	i := strings.LastIndex(message, reportDeliveryFooter)
-	if i < 0 {
+	rest, ok := strings.CutSuffix(message, `"/>`)
+	i := strings.LastIndex(rest, reportDeliveryFooter)
+	if !ok || i < 0 {
 		return "", false
 	}
-	id, ok := strings.CutSuffix(message[i+len(reportDeliveryFooter):], `"/>`)
-	if !ok {
+	id := rest[i+len(reportDeliveryFooter):]
+	if !validDeliveryID(id) || strings.Contains(message, reportDeliveryPrefix+id+`">`) {
 		return "", false
 	}
-	return validDeliveryID(id)
+	return id, true
 }
 
 func unwrapPastedContent(message string) string {
@@ -63,23 +85,23 @@ func deliveryID(message, prefix string) (string, bool) {
 	}
 	rest := strings.TrimPrefix(message, prefix)
 	end := strings.Index(rest, `">`)
-	if end < 0 {
+	if end < 0 || !validDeliveryID(rest[:end]) {
 		return "", false
 	}
-	return validDeliveryID(rest[:end])
+	return rest[:end], true
 }
 
-func validDeliveryID(id string) (string, bool) {
+func validDeliveryID(id string) bool {
 	if id == "" || len(id) > 128 {
-		return "", false
+		return false
 	}
 	for _, r := range id {
 		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') &&
 			(r < '0' || r > '9') && r != ':' && r != '-' && r != '_' {
-			return "", false
+			return false
 		}
 	}
-	return id, true
+	return true
 }
 
 const (
@@ -255,9 +277,14 @@ func SessionDeliveryID(message string) (string, bool) {
 }
 
 // CoordinationDeliveryID recognizes both durable reports and session sends.
+// A head-less report yields TruncatedReportDeliveryTurnID, never the delivery
+// id itself, so it is coordination without acknowledging the batch.
 func CoordinationDeliveryID(message string) (string, bool) {
 	if id, ok := ReportDeliveryID(message); ok {
 		return id, true
+	}
+	if id, ok := truncatedReportDeliveryID(message); ok {
+		return TruncatedReportDeliveryTurnID(id), true
 	}
 	return SessionDeliveryID(message)
 }

@@ -61,6 +61,7 @@ func (c *ReportsController) list(w http.ResponseWriter, r *http.Request) {
 			ID: record.ID, SessionID: string(record.SessionID), ProjectID: string(record.ProjectID),
 			State: string(record.State), Note: record.Note, Message: record.Message,
 			Outputs: outputs, CreatedAt: record.CreatedAt, RepeatCount: record.RepeatCount,
+			DeliveryBatchID: record.DeliveryBatchID,
 		}
 	}
 	envelope.WriteJSON(w, http.StatusOK, response)

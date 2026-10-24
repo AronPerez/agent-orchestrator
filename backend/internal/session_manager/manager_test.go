@@ -11214,6 +11214,54 @@ func TestSendSemanticTUIRequiresCorrelatedPromptAcceptance(t *testing.T) {
 	}
 }
 
+// A TUI that drops the head of a typed delivery records only its tail, as a
+// coordination turn under a derived id. That is not acceptance of the batch:
+// the sender reports the truncation instead of timing out, and does not retype
+// the same mangled text.
+func TestSendSemanticTUIReportsHeadTruncatedDelivery(t *testing.T) {
+	const deliveryID = "report-batch:abc123"
+	st := newFakeStore()
+	st.sessions["s1"] = pastStartupGate(domain.SessionRecord{
+		ID: "s1", Harness: domain.HarnessClaudeCode, Mode: domain.SessionModeTUI,
+		Activity: domain.Activity{State: domain.ActivityIdle},
+		Metadata: domain.SessionMetadata{RuntimeLaunchID: "launch-1"},
+	})
+	msg := &fakeMessenger{onSend: func(id domain.SessionID, message string) {
+		if message == "" {
+			return
+		}
+		turnID, ok := domain.CoordinationDeliveryID(message[len(message)/2:])
+		if !ok {
+			t.Fatalf("head-less tail not recognised as coordination")
+		}
+		rec := st.sessions[id]
+		rec.Activity.State = domain.ActivityActive
+		rec.Metadata.ConversationCheckpointState = domain.ConversationCheckpointCoordination
+		rec.Metadata.ConversationCheckpointGeneration = "launch-1"
+		rec.Metadata.ConversationCheckpointTurnID = turnID
+		st.sessions[id] = rec
+	}}
+	m := newSendTestManager(t, semanticSignalingAgent{}, msg, st)
+	report := "Reports since your previous turn:\n" + strings.Repeat("worker detail ", 100)
+
+	if err := m.SendSemantic(context.Background(), "s1", report, deliveryID); !errors.Is(err, domain.ErrReportDeliveryTruncated) {
+		t.Fatalf("SendSemantic error = %v, want truncated", err)
+	}
+	if err := m.SendSemantic(context.Background(), "s1", report, deliveryID); !errors.Is(err, domain.ErrReportDeliveryTruncated) {
+		t.Fatalf("retry SendSemantic error = %v, want truncated", err)
+	}
+	if len(msg.msgs) != 1 {
+		t.Fatalf("pane writes = %d, want 1", len(msg.msgs))
+	}
+	// A different delivery is unaffected by the earlier truncated tail.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+	msg.onSend = nil
+	if err := m.SendSemantic(ctx, "s1", "notice", deliveryID+":recovery"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("recovery SendSemantic error = %v, want context deadline", err)
+	}
+}
+
 func TestSendSemanticTUIDoesNotAcceptPaneWrite(t *testing.T) {
 	st := newFakeStore()
 	st.sessions["s1"] = pastStartupGate(domain.SessionRecord{

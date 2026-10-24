@@ -178,7 +178,14 @@ func (c *Coordinator) deliverProject(ctx context.Context, projectID domain.Proje
 			return deferErr
 		}
 	}
-	if err := c.delivery.Submit(ctx, target.ID, batch.Render(), batch.IdempotencyKey()); err != nil {
+	err = c.delivery.Submit(ctx, target.ID, batch.Render(), batch.IdempotencyKey())
+	if errors.Is(err, domain.ErrReportDeliveryTruncated) {
+		// The orchestrator saw only the tail. Resending the same text is mangled
+		// the same way, so point it at the stored batch with a notice short
+		// enough to arrive intact, and acknowledge only once that is accepted.
+		err = c.delivery.Submit(ctx, target.ID, batch.RecoveryNotice(), batch.IdempotencyKey()+":recovery")
+	}
+	if err != nil {
 		return c.release(ctx, batch, err)
 	}
 	_, err = c.store.AcknowledgeReportBatch(ctx, batch.ProjectID, batch.Token, c.now().UTC())
@@ -322,6 +329,13 @@ func (b PreparedBatch) Render() string {
 		}
 	}
 	return out.String()
+}
+
+// RecoveryNotice tells an orchestrator that received a head-truncated batch
+// where to read it in full.
+func (b PreparedBatch) RecoveryNotice() string {
+	key := b.IdempotencyKey()
+	return fmt.Sprintf("Report batch %s (%d reports) reached you cut off, so part of it is missing. Read it in full: ao report show %s", key, len(b.Reports), key)
 }
 
 func reportDisplayNameOrID(r domain.ReportRecord) string {

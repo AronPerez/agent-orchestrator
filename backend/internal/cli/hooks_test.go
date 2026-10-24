@@ -942,8 +942,6 @@ func TestHookConversationFactsCorrelatesAcceptedReportDelivery(t *testing.T) {
 	prompt := domain.WrapReportDelivery("report-batch:abc123", "Reports since your previous turn:\n"+strings.Repeat("worker detail ", 200))
 	for name, observed := range map[string]string{
 		"intact": prompt,
-		// Claude Code dropped the head of a large typed delivery (rpt_92472097).
-		"head truncated": prompt[1081:],
 		// Claude Code paste-wrapped the head, splitting the opening id.
 		"paste wrapped": `<pasted_content id="fb71">` + "\n" + prompt[:40] + "\n</pasted_content id=\"fb71\">\n\n\n" + prompt[40:],
 	} {
@@ -955,6 +953,30 @@ func TestHookConversationFactsCorrelatesAcceptedReportDelivery(t *testing.T) {
 				t.Fatalf("conversation facts = %+v", got)
 			}
 		})
+	}
+}
+
+// A head-less delivery is AO coordination, so it must not displace the human
+// checkpoint, but its turn id must not acknowledge the batch either. A human
+// quoting a whole delivery after their own words stays a human prompt.
+func TestHookConversationFactsClassifiesFooterOnlyPrompts(t *testing.T) {
+	prompt := domain.WrapReportDelivery("report-batch:abc123", "Reports since your previous turn:\n"+strings.Repeat("worker detail ", 200))
+	payload := func(observed string) []byte {
+		return []byte(`{"prompt":` + mustJSONString(t, observed) + `,"prompt_id":"native-turn"}`)
+	}
+
+	got := hookConversationFacts(domain.HarnessClaudeCode, "user-prompt-submit", payload(prompt[1081:]))
+	if got.CheckpointOrigin != domain.ConversationCheckpointOriginCoordination ||
+		got.CoordinationID != domain.TruncatedReportDeliveryTurnID("report-batch:abc123") ||
+		got.LatestUserPrompt != "" || got.TurnUserRequest != "" {
+		t.Fatalf("head-truncated facts = %+v", got)
+	}
+
+	quote := "Please explain this failure:\n" + domain.WrapReportDelivery("report-batch:abc123", "worker failed")
+	got = hookConversationFacts(domain.HarnessClaudeCode, "user-prompt-submit", payload(quote))
+	if got.CheckpointOrigin != domain.ConversationCheckpointOriginHuman || got.CoordinationID != "" ||
+		got.LatestUserPrompt != quote || got.TurnUserRequest != quote {
+		t.Fatalf("human quote facts = %+v", got)
 	}
 }
 

@@ -3,6 +3,9 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"net/url"
 	"os"
 	"strings"
 	"unicode/utf8"
@@ -51,7 +54,76 @@ func newReportCommand(ctx *commandContext) *cobra.Command {
 	f.BoolVar(&o.needsInput, "needs-input", false, "Report that input is needed")
 	f.BoolVar(&o.stuck, "stuck", false, "Report that work is stuck")
 	f.BoolVar(&o.done, "done", false, "Report that work is done")
+	cmd.AddCommand(newReportShowCommand(ctx))
 	return cmd
+}
+
+type reportListAPIResponse struct {
+	Reports []struct {
+		SessionID       string            `json:"sessionId"`
+		State           string            `json:"state"`
+		Note            string            `json:"note"`
+		Message         string            `json:"message"`
+		Outputs         []reportAPIOutput `json:"outputs"`
+		RepeatCount     int64             `json:"repeatCount"`
+		DeliveryBatchID string            `json:"deliveryBatchId"`
+	} `json:"reports"`
+}
+
+// newReportShowCommand reads back a delivered batch, the recovery path AO
+// points an orchestrator to when a batch reached it with its head cut off.
+func newReportShowCommand(ctx *commandContext) *cobra.Command {
+	var project string
+	cmd := &cobra.Command{
+		Use:   "show <batch-id>",
+		Short: "Print every report in an orchestrator delivery batch",
+		Args:  usageArgs(cobra.ExactArgs(1)),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resolved, err := ctx.resolveSpawnProject(cmd.Context(), project)
+			if err != nil {
+				return err
+			}
+			var response reportListAPIResponse
+			if err := ctx.getJSON(cmd.Context(), "reports?projectId="+url.QueryEscape(resolved.ID), &response); err != nil {
+				return err
+			}
+			return writeReportBatch(cmd.OutOrStdout(), response, args[0])
+		},
+	}
+	cmd.Flags().StringVar(&project, "project", "", "Project id (default: AO_PROJECT_ID, current session, or current registered repo)")
+	return cmd
+}
+
+func writeReportBatch(w io.Writer, response reportListAPIResponse, batchID string) error {
+	found := 0
+	for _, report := range response.Reports {
+		if report.DeliveryBatchID != batchID {
+			continue
+		}
+		if found == 0 {
+			_, _ = fmt.Fprintf(w, "Reports in %s:", batchID)
+		}
+		found++
+		state := report.State
+		if state == "" {
+			state = "information"
+		}
+		_, _ = fmt.Fprintf(w, "\n\n[%s] %s", state, report.SessionID)
+		if report.RepeatCount > 1 {
+			_, _ = fmt.Fprintf(w, " (repeated %d times)", report.RepeatCount)
+		}
+		if text := report.Note + report.Message; text != "" {
+			_, _ = fmt.Fprintf(w, "\n%s", text)
+		}
+		for _, output := range report.Outputs {
+			_, _ = fmt.Fprintf(w, "\n%s: %s", output.Kind, output.Reference)
+		}
+	}
+	if found == 0 {
+		return fmt.Errorf("no reports in batch %s", batchID)
+	}
+	_, err := fmt.Fprintln(w)
+	return err
 }
 
 func (c *commandContext) report(ctx context.Context, args []string, o reportOptions) error {

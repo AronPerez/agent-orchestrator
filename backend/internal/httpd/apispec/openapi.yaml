@@ -18530,6 +18530,8 @@ components:
         createdAt:
           format: date-time
           type: string
+        deliveryBatchId:
+          type: string
         id:
           type: string
         message:

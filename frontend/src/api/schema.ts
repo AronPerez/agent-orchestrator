@@ -6468,6 +6468,7 @@ export interface components {
         ReportResponse: {
             /** Format: date-time */
             createdAt: string;
+            deliveryBatchId?: string;
             id: string;
             message?: string;
             note?: string;
