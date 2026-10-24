@@ -12,6 +12,7 @@ const { postMock, postMockA, postMockB } = vi.hoisted(() => ({
 
 vi.mock("../lib/api-client", () => ({
 	apiClient: { POST: postMock },
+	apiErrorCode: (error: { code?: string }) => error.code,
 	apiErrorMessage: () => "request failed",
 }));
 
@@ -23,7 +24,12 @@ vi.mock("../lib/host-clients", async (importOriginal) => ({
 }));
 
 import { agentSwitchesQueryKey } from "./useAgentSwitches";
-import { conversationQueryKey } from "./useConversation";
+import {
+	conversationConfigOptionsQueryKey,
+	conversationModelsQueryKey,
+	conversationQueryKey,
+	conversationSkillsQueryKey,
+} from "./useConversation";
 import { sessionUiKey } from "../lib/hosts";
 import { clearSwitchAgentState, useRecoverAgentSwitch, useSwitchAgent, useSwitchAgentState } from "./useSwitchAgent";
 
@@ -113,6 +119,75 @@ describe("useSwitchAgent", () => {
 				queryKey: ["conversation-config-options", "sess-1"],
 			});
 			expect(removeQueries).toHaveBeenCalledWith({ queryKey: ["conversation-skills", "sess-1"] });
+		});
+	});
+
+	it("retries the renamed provider route when a remote daemon lacks the legacy handler", async () => {
+		postMockA
+			.mockResolvedValueOnce({
+				data: undefined,
+				error: { code: "ROUTE_NOT_FOUND", message: "POST /api/v1/sessions/sess-1/switch-agent has no handler" },
+				response: { status: 404 },
+			})
+			.mockResolvedValueOnce({
+				data: { status: "ok" },
+				error: undefined,
+				response: { status: 200 },
+			});
+		const queryClient = new QueryClient({
+			defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+		});
+		const { result } = renderHook(() => useSwitchAgent(), { wrapper: wrapper(queryClient) });
+		const remoteSession = { ...session, hostId: "host-a", provider: "claude-code" } satisfies WorkspaceSession;
+		const body = { targetHarness: "codex" as const, model: "gpt-5.6-codex", idempotencyKey: "remote-switch" };
+
+		await expect(result.current.mutateAsync({ session: remoteSession, ...body })).resolves.toBeUndefined();
+
+		expect(postMockA).toHaveBeenNthCalledWith(1,
+			"/api/v1/sessions/{sessionId}/switch-agent",
+			{ params: { path: { sessionId: session.id } }, body },
+		);
+		expect(postMockA).toHaveBeenNthCalledWith(2,
+			"/api/v1/sessions/{sessionId}/provider-switch",
+			{ params: { path: { sessionId: session.id } }, body },
+		);
+		expect(queryClient.getQueryData(agentSwitchesQueryKey(session.id, "host-a"))).toBeUndefined();
+	});
+
+	it("refreshes remote state when the provider-switch fallback loses its response", async () => {
+		postMockA
+			.mockResolvedValueOnce({
+				data: undefined,
+				error: { code: "ROUTE_NOT_FOUND" },
+				response: { status: 404 },
+			})
+			.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+		const queryClient = new QueryClient({
+			defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+		});
+		const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+		const removeQueries = vi.spyOn(queryClient, "removeQueries");
+		const { result } = renderHook(() => useSwitchAgent(), { wrapper: wrapper(queryClient) });
+		const remoteSession = { ...session, hostId: "host-a", provider: "claude-code" } satisfies WorkspaceSession;
+
+		await expect(result.current.mutateAsync({
+			session: remoteSession,
+			targetHarness: "codex",
+			model: "",
+			idempotencyKey: "unknown-switch",
+		})).rejects.toThrow("Failed to fetch");
+
+		await waitFor(() => {
+			expect(invalidate).toHaveBeenCalledWith({ queryKey: ["remote-workspaces", "host-a"] });
+			expect(invalidate).toHaveBeenCalledWith({ queryKey: conversationQueryKey(session.id, "host-a") });
+			for (const queryKey of [
+				conversationModelsQueryKey(session.id, "host-a"),
+				conversationConfigOptionsQueryKey(session.id, "host-a"),
+				conversationSkillsQueryKey(session.id, "host-a"),
+			]) {
+				expect(removeQueries).toHaveBeenCalledWith({ queryKey });
+				expect(invalidate).toHaveBeenCalledWith({ queryKey });
+			}
 		});
 	});
 
