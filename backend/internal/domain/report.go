@@ -1,6 +1,8 @@
 package domain
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"regexp"
@@ -24,18 +26,61 @@ var pastedContentMarkup = regexp.MustCompile(`\n*</?pasted_content(?: id="[^"\n]
 // hooks can correlate semantic acceptance with its durable delivery identity.
 // The footer repeats the id so a delivery whose head a TUI dropped is still
 // recognised as AO coordination (see CoordinationDeliveryID) and the sender can
-// tell it from one that never arrived.
+// tell it from one that never arrived. It also carries a checksum of the body,
+// because a TUI can cut the middle or tail out while leaving the head intact.
 func WrapReportDelivery(id, message string) string {
-	return fmt.Sprintf("%s%s\">\n%s\n</ao-report-delivery>\n%s%s\"/>", reportDeliveryPrefix, id, message, reportDeliveryFooter, id)
+	return fmt.Sprintf("%s%s\">\n%s\n</ao-report-delivery>\n%s%s\" sum=%q/>", reportDeliveryPrefix, id, message, reportDeliveryFooter, id, reportDeliverySum(message))
+}
+
+// reportDeliverySum ignores whitespace and paste wrappers: TUIs reflow both
+// without losing content, while any dropped text changes the sum.
+func reportDeliverySum(body string) string {
+	sum := sha256.Sum256([]byte(strings.Join(strings.Fields(unwrapPastedContent(body)), "")))
+	return hex.EncodeToString(sum[:8])
 }
 
 // ReportDeliveryID returns the durable identity from an AO report envelope.
-// Only a complete envelope (its opening tag) counts: a tail alone is not proof
-// the whole batch arrived, and is indistinguishable from quoted text.
+// Only an intact envelope counts: its opening tag, its footer, and a body
+// matching the footer checksum. A tail alone is not proof the whole batch
+// arrived, and is indistinguishable from quoted text; a head with a cut body
+// lost every report in the cut.
 // Delivery ids are generated internally and deliberately restricted so a
 // malformed prompt cannot manufacture markup or an unbounded correlation key.
 func ReportDeliveryID(message string) (string, bool) {
-	return deliveryID(unwrapPastedContent(message), reportDeliveryPrefix)
+	message = unwrapPastedContent(message)
+	id, ok := deliveryID(message, reportDeliveryPrefix)
+	if !ok || !reportDeliveryIntact(message, id) {
+		return "", false
+	}
+	return id, true
+}
+
+// reportDeliveryIntact checks that a delivery opening with id ends with its
+// footer and that the body between them matches the footer checksum.
+func reportDeliveryIntact(message, id string) bool {
+	message = strings.TrimSpace(message)
+	i, footerID, sum := reportDeliveryFooterOf(message)
+	start := len(reportDeliveryPrefix) + len(id) + len(`">`)
+	if footerID != id || i < start {
+		return false
+	}
+	body, ok := strings.CutSuffix(strings.TrimSpace(message[start:i]), "</ao-report-delivery>")
+	return ok && sum == reportDeliverySum(body)
+}
+
+// reportDeliveryFooterOf parses the footer that ends message, returning its
+// offset (-1 when absent), id, and body checksum.
+func reportDeliveryFooterOf(message string) (int, string, string) {
+	rest, ok := strings.CutSuffix(message, `"/>`)
+	i := strings.LastIndex(rest, reportDeliveryFooter)
+	if !ok || i < 0 {
+		return -1, "", ""
+	}
+	id, sum, _ := strings.Cut(rest[i+len(reportDeliveryFooter):], `" sum="`)
+	if !validDeliveryID(id) {
+		return -1, "", ""
+	}
+	return i, id, sum
 }
 
 // ErrReportDeliveryTruncated reports that an awaited report envelope arrived
@@ -59,13 +104,8 @@ func TruncatedReportDeliveryTurnID(id string) string {
 // so their prompt stays human.
 func truncatedReportDeliveryID(message string) (string, bool) {
 	message = strings.TrimSpace(unwrapPastedContent(message))
-	rest, ok := strings.CutSuffix(message, `"/>`)
-	i := strings.LastIndex(rest, reportDeliveryFooter)
-	if !ok || i < 0 {
-		return "", false
-	}
-	id := rest[i+len(reportDeliveryFooter):]
-	if !validDeliveryID(id) || strings.Contains(message, reportDeliveryPrefix+id+`">`) {
+	i, id, _ := reportDeliveryFooterOf(message)
+	if i < 0 || strings.Contains(message, reportDeliveryPrefix+id+`">`) {
 		return "", false
 	}
 	return id, true
@@ -277,10 +317,15 @@ func SessionDeliveryID(message string) (string, bool) {
 }
 
 // CoordinationDeliveryID recognizes both durable reports and session sends.
-// A head-less report yields TruncatedReportDeliveryTurnID, never the delivery
-// id itself, so it is coordination without acknowledging the batch.
+// A report missing its head, body, or tail yields TruncatedReportDeliveryTurnID,
+// never the delivery id itself, so it is coordination without acknowledging
+// the batch.
 func CoordinationDeliveryID(message string) (string, bool) {
-	if id, ok := ReportDeliveryID(message); ok {
+	unwrapped := unwrapPastedContent(message)
+	if id, ok := deliveryID(unwrapped, reportDeliveryPrefix); ok {
+		if !reportDeliveryIntact(unwrapped, id) {
+			return TruncatedReportDeliveryTurnID(id), true
+		}
 		return id, true
 	}
 	if id, ok := truncatedReportDeliveryID(message); ok {

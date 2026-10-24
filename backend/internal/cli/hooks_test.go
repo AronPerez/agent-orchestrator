@@ -972,6 +972,14 @@ func TestHookConversationFactsClassifiesFooterOnlyPrompts(t *testing.T) {
 		t.Fatalf("head-truncated facts = %+v", got)
 	}
 
+	middleCut := prompt[:200] + prompt[len(prompt)-300:]
+	got = hookConversationFacts(domain.HarnessClaudeCode, "user-prompt-submit", payload(middleCut))
+	if got.CheckpointOrigin != domain.ConversationCheckpointOriginCoordination ||
+		got.CoordinationID != domain.TruncatedReportDeliveryTurnID("report-batch:abc123") ||
+		got.LatestUserPrompt != "" || got.TurnUserRequest != "" {
+		t.Fatalf("middle-cut facts = %+v", got)
+	}
+
 	quote := "Please explain this failure:\n" + domain.WrapReportDelivery("report-batch:abc123", "worker failed")
 	got = hookConversationFacts(domain.HarnessClaudeCode, "user-prompt-submit", payload(quote))
 	if got.CheckpointOrigin != domain.ConversationCheckpointOriginHuman || got.CoordinationID != "" ||

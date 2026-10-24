@@ -58,7 +58,7 @@ ao report show <batch-id> [--project <id>]
 ```
 
 Prints every report in an orchestrator delivery batch. When a batch reaches
-the orchestrator with its beginning cut off, AO sends a short notice naming the
+the orchestrator with any part cut off, AO sends a short notice naming the
 batch; run this command to read the reports that were lost.
 
 **Examples:**
