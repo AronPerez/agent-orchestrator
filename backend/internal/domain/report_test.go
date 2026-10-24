@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -70,6 +71,60 @@ func TestReportDeliveryIDSurvivesTUIInputMangling(t *testing.T) {
 		if got, ok := CoordinationDeliveryID(observed); ok {
 			t.Errorf("%s: classified as coordination %q", name, got)
 		}
+	}
+}
+
+// A TUI can also cut the middle or tail out of a delivery and keep its head
+// (report-batch:rpt_7cf9cdf4: report 1, the start of report 2 and the tail of
+// report 9 arrived, and all 9 were acknowledged). The opening tag alone must
+// not acknowledge the batch; the footer checksum proves the body arrived.
+func TestReportDeliveryIDRejectsHeadIntactCuts(t *testing.T) {
+	const id = "report-batch:rpt_7cf9cdf4-2cc4-4798-a780-57156207836b"
+	var body strings.Builder
+	body.WriteString("Reports since your previous turn:")
+	for i := 1; i <= 9; i++ {
+		fmt.Fprintf(&body, "\n\n[done] [worker-%d](ao://sessions/p/w%d)\n%s", i, i, strings.Repeat(fmt.Sprintf("report %d detail ", i), 20))
+	}
+	message := WrapReportDelivery(id, body.String())
+	wrap := func(s string) string {
+		return "<pasted_content id=\"8437\">\n" + s + "\n</pasted_content id=\"8437\">\n\n\n"
+	}
+	report2 := strings.Index(message, "[worker-2]")
+	report9 := strings.Index(message, "[worker-9]")
+	footer := strings.LastIndex(message, "<ao-report-delivery-end")
+
+	// Whitespace reflow and paste wrappers lose nothing, so the batch is intact.
+	for name, observed := range map[string]string{
+		"intact":             message,
+		"whitespace reflow":  strings.ReplaceAll(strings.ReplaceAll(message, "\n\n", "\n"), " detail", "\tdetail"),
+		"body paste wrapped": message[:report2] + wrap(message[report2:report9]) + message[report9:],
+	} {
+		if got, ok := CoordinationDeliveryID(observed); !ok || got != id {
+			t.Errorf("%s: CoordinationDeliveryID() = %q, %v", name, got, ok)
+		}
+	}
+
+	for name, observed := range map[string]string{
+		"middle cut":            message[:report2+40] + message[report9+300:],
+		"tail cut":              message[:report9+100],
+		"tail cut in footer":    message[:footer+40],
+		"one character cut":     message[:report2] + message[report2+1:],
+		"middle cut, pasted":    wrap(message[:report2+40]) + message[report9+300:],
+		"middle and footer cut": message[:report2+40] + message[report9+300:footer+40],
+		"footer from other id":  message[:footer] + `<ao-report-delivery-end id="report-batch:other" sum="00"/>`,
+	} {
+		if got, ok := ReportDeliveryID(observed); ok {
+			t.Errorf("%s: cut delivery acknowledged as %q", name, got)
+		}
+		// Still AO coordination, under the turn id that triggers recovery.
+		if got, ok := CoordinationDeliveryID(observed); !ok || got != TruncatedReportDeliveryTurnID(id) {
+			t.Errorf("%s: CoordinationDeliveryID() = %q, %v", name, got, ok)
+		}
+	}
+
+	// Head and middle both cut: the head-less path still recovers it.
+	if got, ok := CoordinationDeliveryID(message[report2:report2+200] + message[report9:]); !ok || got != TruncatedReportDeliveryTurnID(id) {
+		t.Errorf("head and middle cut: CoordinationDeliveryID() = %q, %v", got, ok)
 	}
 }
 
