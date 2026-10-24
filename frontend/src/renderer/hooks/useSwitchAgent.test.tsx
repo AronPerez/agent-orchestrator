@@ -12,6 +12,7 @@ const { postMock, postMockA, postMockB } = vi.hoisted(() => ({
 
 vi.mock("../lib/api-client", () => ({
 	apiClient: { POST: postMock },
+	apiErrorCode: (error: { code?: string }) => error.code,
 	apiErrorMessage: () => "request failed",
 }));
 
@@ -114,6 +115,38 @@ describe("useSwitchAgent", () => {
 			});
 			expect(removeQueries).toHaveBeenCalledWith({ queryKey: ["conversation-skills", "sess-1"] });
 		});
+	});
+
+	it("retries the renamed provider route when a remote daemon lacks the legacy handler", async () => {
+		postMockA
+			.mockResolvedValueOnce({
+				data: undefined,
+				error: { code: "ROUTE_NOT_FOUND", message: "POST /api/v1/sessions/sess-1/switch-agent has no handler" },
+				response: { status: 404 },
+			})
+			.mockResolvedValueOnce({
+				data: { status: "ok" },
+				error: undefined,
+				response: { status: 200 },
+			});
+		const queryClient = new QueryClient({
+			defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+		});
+		const { result } = renderHook(() => useSwitchAgent(), { wrapper: wrapper(queryClient) });
+		const remoteSession = { ...session, hostId: "host-a", provider: "claude-code" } satisfies WorkspaceSession;
+		const body = { targetHarness: "codex" as const, model: "gpt-5.6-codex", idempotencyKey: "remote-switch" };
+
+		await expect(result.current.mutateAsync({ session: remoteSession, ...body })).resolves.toBeUndefined();
+
+		expect(postMockA).toHaveBeenNthCalledWith(1,
+			"/api/v1/sessions/{sessionId}/switch-agent",
+			{ params: { path: { sessionId: session.id } }, body },
+		);
+		expect(postMockA).toHaveBeenNthCalledWith(2,
+			"/api/v1/sessions/{sessionId}/provider-switch",
+			{ params: { path: { sessionId: session.id } }, body },
+		);
+		expect(queryClient.getQueryData(agentSwitchesQueryKey(session.id, "host-a"))).toBeUndefined();
 	});
 
 	it("routes equal session IDs to their owning hosts and isolates cache updates", async () => {
