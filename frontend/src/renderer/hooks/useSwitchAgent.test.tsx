@@ -24,7 +24,12 @@ vi.mock("../lib/host-clients", async (importOriginal) => ({
 }));
 
 import { agentSwitchesQueryKey } from "./useAgentSwitches";
-import { conversationQueryKey } from "./useConversation";
+import {
+	conversationConfigOptionsQueryKey,
+	conversationModelsQueryKey,
+	conversationQueryKey,
+	conversationSkillsQueryKey,
+} from "./useConversation";
 import { sessionUiKey } from "../lib/hosts";
 import { clearSwitchAgentState, useRecoverAgentSwitch, useSwitchAgent, useSwitchAgentState } from "./useSwitchAgent";
 
@@ -147,6 +152,43 @@ describe("useSwitchAgent", () => {
 			{ params: { path: { sessionId: session.id } }, body },
 		);
 		expect(queryClient.getQueryData(agentSwitchesQueryKey(session.id, "host-a"))).toBeUndefined();
+	});
+
+	it("refreshes remote state when the provider-switch fallback loses its response", async () => {
+		postMockA
+			.mockResolvedValueOnce({
+				data: undefined,
+				error: { code: "ROUTE_NOT_FOUND" },
+				response: { status: 404 },
+			})
+			.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+		const queryClient = new QueryClient({
+			defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+		});
+		const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+		const removeQueries = vi.spyOn(queryClient, "removeQueries");
+		const { result } = renderHook(() => useSwitchAgent(), { wrapper: wrapper(queryClient) });
+		const remoteSession = { ...session, hostId: "host-a", provider: "claude-code" } satisfies WorkspaceSession;
+
+		await expect(result.current.mutateAsync({
+			session: remoteSession,
+			targetHarness: "codex",
+			model: "",
+			idempotencyKey: "unknown-switch",
+		})).rejects.toThrow("Failed to fetch");
+
+		await waitFor(() => {
+			expect(invalidate).toHaveBeenCalledWith({ queryKey: ["remote-workspaces", "host-a"] });
+			expect(invalidate).toHaveBeenCalledWith({ queryKey: conversationQueryKey(session.id, "host-a") });
+			for (const queryKey of [
+				conversationModelsQueryKey(session.id, "host-a"),
+				conversationConfigOptionsQueryKey(session.id, "host-a"),
+				conversationSkillsQueryKey(session.id, "host-a"),
+			]) {
+				expect(removeQueries).toHaveBeenCalledWith({ queryKey });
+				expect(invalidate).toHaveBeenCalledWith({ queryKey });
+			}
+		});
 	});
 
 	it("routes equal session IDs to their owning hosts and isolates cache updates", async () => {

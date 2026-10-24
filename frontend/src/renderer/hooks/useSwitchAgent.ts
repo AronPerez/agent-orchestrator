@@ -8,6 +8,7 @@ import { agentSwitchesQueryKey, type AgentSwitch } from "./useAgentSwitches";
 import {
 	clearConversationProviderCatalogs,
 	conversationQueryKey,
+	invalidateConversationProviderCatalogs,
 } from "./useConversation";
 import { workspaceQueryKeyForHost } from "./useWorkspaceQuery";
 import { recordDirectWorkerInteraction } from "../lib/session-management-telemetry";
@@ -86,6 +87,17 @@ export function createSwitchAgentIdempotencyKey(): string {
 	return crypto.randomUUID();
 }
 
+function refreshAfterProviderSwitch(queryClient: QueryClient, sessionId: string, hostId: string) {
+	clearConversationProviderCatalogs(queryClient, sessionId, hostId);
+	void queryClient.invalidateQueries({ queryKey: workspaceQueryKeyForHost(hostId) });
+	void queryClient.invalidateQueries({ queryKey: conversationQueryKey(sessionId, hostId) });
+	invalidateConversationProviderCatalogs(queryClient, sessionId, hostId);
+}
+
+const providerSwitchOutcomeUnknown = (status: number, error: unknown) =>
+	// A remote gateway can time out while the detached daemon switch still finishes.
+	[502, 503, 504].includes(status) && !String(apiErrorCode(error) ?? "").startsWith("PROVIDER_SWITCH_");
+
 export function useSwitchAgent() {
 	const queryClient = useQueryClient();
 	return useMutation({
@@ -108,11 +120,20 @@ export function useSwitchAgent() {
 				},
 			);
 			if (session.hostId && response.status === 404 && apiErrorCode(error) === "ROUTE_NOT_FOUND") {
-				const fallback = await client.POST("/api/v1/sessions/{sessionId}/provider-switch", {
-					params: { path: { sessionId: session.id } },
-					body,
+				const hostId = session.hostId;
+				const refresh = () => refreshAfterProviderSwitch(queryClient, session.id, hostId);
+				const fallback = await client.POST(
+					"/api/v1/sessions/{sessionId}/provider-switch",
+					{ params: { path: { sessionId: session.id } }, body },
+				).catch((failure: unknown) => {
+					refresh();
+					throw failure;
 				});
-				if (!fallback.error && fallback.response.status === 200 && fallback.data?.status === "ok") return;
+				if (!fallback.error && fallback.response.status === 200 && fallback.data?.status === "ok") {
+					refresh();
+					return;
+				}
+				if (providerSwitchOutcomeUnknown(fallback.response.status, fallback.error)) refresh();
 				throw new Error(apiErrorMessage(fallback.error, `Failed to switch agent (${fallback.response.status})`));
 			}
 			if (error || response.status !== 202 || !data?.switch) {
@@ -124,12 +145,11 @@ export function useSwitchAgent() {
 			return data.switch;
 		},
 		onSuccess: (agentSwitch, variables) => {
-			if (agentSwitch) {
-				queryClient.setQueryData<AgentSwitch[]>(
-					agentSwitchesQueryKey(variables.session.id, variables.session.hostId),
-					(current = []) => [agentSwitch, ...current.filter((entry) => entry.id !== agentSwitch.id)],
-				);
-			}
+			if (!agentSwitch) return;
+			queryClient.setQueryData<AgentSwitch[]>(
+				agentSwitchesQueryKey(variables.session.id, variables.session.hostId),
+				(current = []) => [agentSwitch, ...current.filter((entry) => entry.id !== agentSwitch.id)],
+			);
 			clearConversationProviderCatalogs(queryClient, variables.session.id, variables.session.hostId);
 			void queryClient.invalidateQueries({ queryKey: conversationQueryKey(variables.session.id, variables.session.hostId) });
 		},
