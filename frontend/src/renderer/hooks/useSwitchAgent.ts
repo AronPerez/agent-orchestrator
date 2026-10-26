@@ -1,6 +1,6 @@
 import { type QueryClient, useMutation, useMutationState, useQueryClient } from "@tanstack/react-query";
 import type { components } from "../../api/schema";
-import { apiErrorMessage } from "../lib/api-client";
+import { apiErrorCode, apiErrorMessage } from "../lib/api-client";
 import { clientForSessionHost } from "../lib/host-clients";
 import { sessionUiKey } from "../lib/hosts";
 import type { WorkspaceSession } from "../types/workspace";
@@ -8,6 +8,7 @@ import { agentSwitchesQueryKey, type AgentSwitch } from "./useAgentSwitches";
 import {
 	clearConversationProviderCatalogs,
 	conversationQueryKey,
+	invalidateConversationProviderCatalogs,
 } from "./useConversation";
 import { workspaceQueryKeyForHost } from "./useWorkspaceQuery";
 import { recordDirectWorkerInteraction } from "../lib/session-management-telemetry";
@@ -86,12 +87,24 @@ export function createSwitchAgentIdempotencyKey(): string {
 	return crypto.randomUUID();
 }
 
+function refreshAfterProviderSwitch(queryClient: QueryClient, sessionId: string, hostId: string) {
+	clearConversationProviderCatalogs(queryClient, sessionId, hostId);
+	void queryClient.invalidateQueries({ queryKey: workspaceQueryKeyForHost(hostId) });
+	void queryClient.invalidateQueries({ queryKey: conversationQueryKey(sessionId, hostId) });
+	invalidateConversationProviderCatalogs(queryClient, sessionId, hostId);
+}
+
+const providerSwitchOutcomeUnknown = (status: number, error: unknown) =>
+	// A remote gateway can time out while the detached daemon switch still finishes.
+	[502, 503, 504].includes(status) && !String(apiErrorCode(error) ?? "").startsWith("PROVIDER_SWITCH_");
+
 export function useSwitchAgent() {
 	const queryClient = useQueryClient();
 	return useMutation({
 		mutationKey: switchAgentMutationKey,
 		mutationFn: async ({ session, targetHarness, model, idempotencyKey }: SwitchAgentInput) => {
 			recordDirectWorkerInteraction(session.id, "lifecycle", session.kind, session.hostId);
+			const client = clientForSessionHost(session.hostId);
 			const body: {
 				targetHarness: SwitchAgentHarness;
 				model?: string;
@@ -99,13 +112,30 @@ export function useSwitchAgent() {
 			} = { targetHarness, idempotencyKey };
 			const normalizedModel = model.trim();
 			if (normalizedModel) body.model = normalizedModel;
-			const { data, error, response } = await clientForSessionHost(session.hostId).POST(
+			const { data, error, response } = await client.POST(
 				"/api/v1/sessions/{sessionId}/switch-agent",
 				{
 					params: { path: { sessionId: session.id } },
 					body,
 				},
 			);
+			if (session.hostId && response.status === 404 && apiErrorCode(error) === "ROUTE_NOT_FOUND") {
+				const hostId = session.hostId;
+				const refresh = () => refreshAfterProviderSwitch(queryClient, session.id, hostId);
+				const fallback = await client.POST(
+					"/api/v1/sessions/{sessionId}/provider-switch",
+					{ params: { path: { sessionId: session.id } }, body },
+				).catch((failure: unknown) => {
+					refresh();
+					throw failure;
+				});
+				if (!fallback.error && fallback.response.status === 200 && fallback.data?.status === "ok") {
+					refresh();
+					return;
+				}
+				if (providerSwitchOutcomeUnknown(fallback.response.status, fallback.error)) refresh();
+				throw new Error(apiErrorMessage(fallback.error, `Failed to switch agent (${fallback.response.status})`));
+			}
 			if (error || response.status !== 202 || !data?.switch) {
 				const fallback = response
 					? `Failed to switch agent (${response.status})`
