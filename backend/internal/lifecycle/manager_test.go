@@ -2327,6 +2327,9 @@ func TestPRObservation_ReviewCommentsNudgeAgent(t *testing.T) {
 		"fix this",
 		"https://github.com/o/r/pull/1#discussion_r1",
 		"Thread ID: T1",
+		"Reply on every thread you address",
+		"Resolve only threads opened by bots",
+		"Never resolve a human-opened thread",
 		"re-fetch review data unless you need additional context",
 	} {
 		if !strings.Contains(msg.msgs[0], want) {
@@ -2335,6 +2338,27 @@ func TestPRObservation_ReviewCommentsNudgeAgent(t *testing.T) {
 	}
 	if strings.Contains(msg.msgs[0], "already handled") {
 		t.Fatalf("review nudge included resolved comment:\n%s", msg.msgs[0])
+	}
+}
+
+func TestFormatReviewCommentsMessage_ResolutionUsesThreadOpener(t *testing.T) {
+	got := formatReviewCommentsMessage([]ports.PRCommentObservation{
+		{Author: "alice", ThreadID: "human-thread", Body: "please fix"},
+		{Author: "chatgpt-codex-connector", ThreadID: "bot-thread", Body: "please fix"},
+	})
+	for _, want := range []string{
+		"Reply on every thread you address",
+		"Resolve only threads opened by bots",
+		"@chatgpt-codex-connector or an author GitHub identifies as Bot",
+		"Never resolve a human-opened thread; leave resolution to its author",
+		"Check the thread opener, not just the latest commenter",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("review nudge missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "resolve each thread directly") {
+		t.Fatalf("review nudge retained blanket resolution instruction:\n%s", got)
 	}
 }
 

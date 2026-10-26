@@ -855,8 +855,9 @@ func formatReviewChangesRequestedMessage(review domain.PullRequestReview) string
 }
 
 func formatReviewCommentsMessage(comments []ports.PRCommentObservation) string {
+	const threadGuidance = "Reply on every thread you address and push fixes. Resolve only threads opened by bots (for example, @chatgpt-codex-connector or an author GitHub identifies as Bot). Never resolve a human-opened thread; leave resolution to its author. Check the thread opener, not just the latest commenter."
 	if len(comments) == 0 {
-		return "A reviewer left feedback on your PR. Address it and push. Fetch the review details only if you need additional context beyond what AO has provided here."
+		return "A reviewer left feedback on your PR. Address it. " + threadGuidance + " Fetch the review details only if you need additional context beyond what AO has provided here."
 	}
 	var msg strings.Builder
 	fmt.Fprintf(&msg, "The following %d unresolved review comment(s) are on your PR as of just now. You should not need to re-fetch this data unless you need additional context.\n", len(comments))
@@ -885,7 +886,7 @@ func formatReviewCommentsMessage(comments []ports.PRCommentObservation) string {
 		}
 		msg.WriteString("\n")
 	}
-	msg.WriteString("\nAddress each comment and push fixes. Use the thread ID to resolve each thread directly after pushing when available. You should not need to re-fetch review data unless you need additional context beyond what is provided here.")
+	msg.WriteString("\nAddress each comment. " + threadGuidance + " You should not need to re-fetch review data unless you need additional context beyond what is provided here.")
 	return msg.String()
 }
 
