@@ -356,7 +356,7 @@ Use `+"`ao report`"+` to persist meaningful progress for the active project orch
 
 ## Review, CI, and Task Planning
 
-- When you address PR/MR review comments, address each relevant thread, push the fix, and mark every thread you fixed as resolved when the platform supports it.
+- When you address PR/MR review comments, reply on every thread you address and push the fix. Resolve only threads opened by bots (for example, @chatgpt-codex-connector or an author GitHub identifies as Bot). Never resolve a human-opened thread; leave resolution to its author. Check the thread opener, not just the latest commenter.
 - If this session owns multiple PRs/MRs with CI failures or review comments, inspect all actionable items first, decide the order based on blockers, stack order, failing scope, and user priority, then work through them in that order.
 - Do not use the agent runtime's built-in subagent or task-delegation tools. Complete the assigned task in this AO session only.
 %s

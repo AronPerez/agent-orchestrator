@@ -6099,7 +6099,10 @@ func TestSpawnWorker_IncludesReviewCIAndPlanningInstructions(t *testing.T) {
 	systemPrompt := agent.lastLaunch.SystemPrompt
 	for _, want := range []string{
 		"## Review, CI, and Task Planning",
-		"mark every thread you fixed as resolved",
+		"reply on every thread you address",
+		"Resolve only threads opened by bots",
+		"Never resolve a human-opened thread",
+		"Check the thread opener, not just the latest commenter",
 		"multiple PRs/MRs with CI failures or review comments",
 		"decide the order based on blockers, stack order, failing scope, and user priority",
 		"Do not use the agent runtime's built-in subagent or task-delegation tools",
@@ -6108,6 +6111,9 @@ func TestSpawnWorker_IncludesReviewCIAndPlanningInstructions(t *testing.T) {
 		if !strings.Contains(systemPrompt, want) {
 			t.Fatalf("worker system prompt missing %q:\n%s", want, systemPrompt)
 		}
+	}
+	if strings.Contains(systemPrompt, "mark every thread you fixed as resolved") {
+		t.Fatalf("worker system prompt retained blanket resolution instruction:\n%s", systemPrompt)
 	}
 }
 
