@@ -174,6 +174,7 @@ describe("ReadOnlyFileView", () => {
 			/>,
 		);
 		const img = screen.getByRole("img");
+		expect(img).toHaveAttribute("crossorigin", "anonymous");
 		expect(img).toHaveAttribute("src", expect.stringContaining("/api/v1/sessions/sess-1/workspace/file/blob"));
 		expect(img).toHaveAttribute("src", expect.stringContaining("side=after"));
 	});

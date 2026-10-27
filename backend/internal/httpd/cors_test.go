@@ -278,3 +278,42 @@ func TestRenderDocumentNavigationBoundary(t *testing.T) {
 		}
 	}
 }
+
+func TestRendererReadOriginBoundary(t *testing.T) {
+	for _, path := range []string{
+		"/api/v1/projects",
+		"/api/v1/sessions",
+		"/api/v1/sessions/s1/workspace/file/blob?path=logo.png",
+	} {
+		for _, tc := range []struct {
+			name, origin, site, mode string
+			want                     int
+		}{
+			{"packaged CORS read", "app://renderer", "cross-site", "cors", http.StatusNoContent},
+			{"trusted proxy read", "http://localhost:5173", "same-origin", "cors", http.StatusNoContent},
+			{"hostile CORS read", "http://evil.example", "cross-site", "cors", http.StatusForbidden},
+			{"opaque origin", "null", "cross-site", "cors", http.StatusForbidden},
+			{"originless same-origin read", "", "same-origin", "cors", http.StatusForbidden},
+			{"originless image", "", "cross-site", "no-cors", http.StatusForbidden},
+		} {
+			t.Run(path+"/"+tc.name, func(t *testing.T) {
+				r := httptest.NewRequest(http.MethodGet, path, nil)
+				r.Header.Set("Sec-Fetch-Site", tc.site)
+				r.Header.Set("Sec-Fetch-Mode", tc.mode)
+				if strings.Contains(path, "/workspace/file/blob") {
+					r.Header.Set("Sec-Fetch-Dest", "image")
+				}
+				if tc.origin != "" {
+					r.Header.Set("Origin", tc.origin)
+				}
+				w := httptest.NewRecorder()
+				corsMiddleware([]string{"app://renderer", "http://localhost:5173"})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusNoContent)
+				})).ServeHTTP(w, r)
+				if w.Code != tc.want {
+					t.Fatalf("status = %d, want %d", w.Code, tc.want)
+				}
+			})
+		}
+	}
+}

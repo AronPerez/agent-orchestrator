@@ -25,5 +25,6 @@ export function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
 		? context.hostId && !base ? undefined : resolveMarkdownImageSrc(context.sessionId, context.filePath, src, context.version, base)
 		: src;
 	if (!resolvedSrc || resolvedSrc === failedSrc) return <span className="text-muted-foreground">{alt ?? ""}</span>;
-	return <img src={resolvedSrc} alt={alt ?? ""} onError={() => setFailedSrc(resolvedSrc)} />;
+	// Only workspace blobs need CORS; external images may not support it.
+	return <img src={resolvedSrc} alt={alt ?? ""} crossOrigin={resolvedSrc !== src && !context?.artifactOrigin ? "anonymous" : undefined} onError={() => setFailedSrc(resolvedSrc)} />;
 }
