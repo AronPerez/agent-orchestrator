@@ -18,10 +18,10 @@ import (
 	"github.com/aoagents/agent-orchestrator/cloud/internal/domain"
 )
 
-// liveTestStore serves no events and a live state the test controls, and
+// liveTestStore serves event history and live state the test controls, and
 // records presence calls.
 type liveTestStore struct {
-	Store
+	*growingEventStore
 	mu        sync.Mutex
 	viewers   []domain.SessionViewer
 	joined    []string
@@ -31,11 +31,7 @@ type liveTestStore struct {
 }
 
 func newLiveTestStore() *liveTestStore {
-	return &liveTestStore{leftCh: make(chan string, 4)}
-}
-
-func (s *liveTestStore) ListClientEvents(context.Context, domain.Principal, string, string, int64, int, []string) ([]domain.ClientEvent, bool, error) {
-	return nil, false, nil
+	return &liveTestStore{growingEventStore: &growingEventStore{}, leftCh: make(chan string, 4)}
 }
 
 func (s *liveTestStore) JoinSessionViewers(_ context.Context, _ domain.Principal, _, _ string, connectionID string) error {
@@ -252,6 +248,38 @@ func TestLiveEventStreamTracksViewers(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("closing the stream did not leave the viewer list")
+	}
+}
+
+func TestLiveNotificationDoesNotReplayConsumedEvents(t *testing.T) {
+	t.Parallel()
+	store := newLiveTestStore()
+	store.append(1)
+	store.append(2)
+	server, httpServer := liveTestServer(t, store)
+	frames, _ := openLiveStream(t, httpServer, "?live=1")
+
+	decodeLiveFrame(t, nextFrame(t, frames, 2*time.Second))
+	for _, id := range []string{"1", "2"} {
+		frame := nextFrame(t, frames, 2*time.Second)
+		if frame.event != "chat.assistant_delta" || frame.id != id {
+			t.Fatalf("history frame = %+v, want assistant delta %s", frame, id)
+		}
+	}
+
+	store.setViewers(domain.SessionViewer{UserID: "user-2", Name: "Bob", Role: "editor"})
+	server.HandleSessionLiveNotify(sessionEventsTestSession)
+	live := decodeLiveFrame(t, nextFrame(t, frames, 2*time.Second))
+	if len(live.Viewers) != 1 || live.Viewers[0].Name != "Bob" {
+		t.Fatalf("live viewers = %+v", live.Viewers)
+	}
+	expectNoFrame(t, frames, 300*time.Millisecond)
+
+	store.append(3)
+	server.HandleSessionEventNotify(sessionEventsTestSession)
+	frame := nextFrame(t, frames, 2*time.Second)
+	if frame.event != "chat.assistant_delta" || frame.id != "3" {
+		t.Fatalf("new event = %+v, want assistant delta 3", frame)
 	}
 }
 

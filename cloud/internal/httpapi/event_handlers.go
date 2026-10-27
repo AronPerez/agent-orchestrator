@@ -296,6 +296,7 @@ func (s *Server) streamClientEvents(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		events = nil
 		if hasMore {
 			events, hasMore, err = s.store.ListClientEvents(
 				r.Context(),
