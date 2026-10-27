@@ -33,28 +33,26 @@ func TestCORS(t *testing.T) {
 			wantACAO:   "app://renderer",
 		},
 		{
-			// Not in the allowlist — trusted because loopback-served content
-			// can already reach the daemon directly (dev/preview servers on
-			// arbitrary ports).
-			name:       "loopback origin allowed without an allowlist entry",
+			// A local web server is not an authenticated AO renderer.
+			name:       "loopback origin rejected without an allowlist entry",
 			method:     http.MethodGet,
 			headers:    map[string]string{"Origin": "http://localhost:5181"},
-			wantStatus: http.StatusOK,
-			wantACAO:   "http://localhost:5181",
+			wantStatus: http.StatusForbidden,
+			wantACAO:   "",
 		},
 		{
-			name:       "loopback IP origin allowed",
+			name:       "loopback IP origin rejected",
 			method:     http.MethodGet,
 			headers:    map[string]string{"Origin": "http://127.0.0.1:8080"},
-			wantStatus: http.StatusOK,
-			wantACAO:   "http://127.0.0.1:8080",
+			wantStatus: http.StatusForbidden,
+			wantACAO:   "",
 		},
 		{
-			name:       "isolated localhost preview origin allowed",
+			name:       "isolated localhost preview origin rejected",
 			method:     http.MethodGet,
 			headers:    map[string]string{"Origin": "http://ao-preview.mfxs2mi.localhost:5181"},
-			wantStatus: http.StatusOK,
-			wantACAO:   "http://ao-preview.mfxs2mi.localhost:5181",
+			wantStatus: http.StatusForbidden,
+			wantACAO:   "",
 		},
 		{
 			// localhost in the host position of a non-loopback origin must not
@@ -248,6 +246,74 @@ func TestCORSPreflightHeaders(t *testing.T) {
 	} {
 		if got := resp.Header.Get(header); got != want {
 			t.Errorf("%s = %q, want %q", header, got, want)
+		}
+	}
+}
+
+func TestRenderDocumentNavigationBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		method, path, origin string
+		want                 int
+	}{
+		{"GET", "/api/v1/sessions/s1/renders/r1", "", 204},
+		{"HEAD", "/api/v1/sessions/s1/renders/r1?source=1", "", 204},
+		{"POST", "/api/v1/sessions/s1/renders/r1", "", 403},
+		{"GET", "/api/v1/sessions/s1/renders/check", "", 403},
+		{"GET", "/api/v1/sessions/s1/renders/r1/artifact", "", 403},
+		{"GET", "/api/v1/sessions/s1/workspace/file/blob", "", 403},
+		{"GET", "/api/v1/sessions/s1/renders/r1", "null", 403},
+		{"GET", "/api/v1/sessions/s1/renders/r1", "http://evil.localhost", 403},
+	} {
+		for _, site := range []string{"cross-site", "none"} {
+			r := httptest.NewRequest(tc.method, tc.path, nil)
+			r.Header.Set("Sec-Fetch-Site", site)
+			if tc.origin != "" {
+				r.Header.Set("Origin", tc.origin)
+			}
+			w := httptest.NewRecorder()
+			corsMiddleware([]string{"app://renderer"})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })).ServeHTTP(w, r)
+			if w.Code != tc.want {
+				t.Errorf("%s %s origin=%q site=%s: got %d want %d", tc.method, tc.path, tc.origin, site, w.Code, tc.want)
+			}
+		}
+	}
+}
+
+func TestRendererReadOriginBoundary(t *testing.T) {
+	for _, path := range []string{
+		"/api/v1/projects",
+		"/api/v1/sessions",
+		"/api/v1/sessions/s1/workspace/file/blob?path=logo.png",
+	} {
+		for _, tc := range []struct {
+			name, origin, site, mode string
+			want                     int
+		}{
+			{"packaged CORS read", "app://renderer", "cross-site", "cors", http.StatusNoContent},
+			{"trusted proxy read", "http://localhost:5173", "same-origin", "cors", http.StatusNoContent},
+			{"hostile CORS read", "http://evil.example", "cross-site", "cors", http.StatusForbidden},
+			{"opaque origin", "null", "cross-site", "cors", http.StatusForbidden},
+			{"originless same-origin read", "", "same-origin", "cors", http.StatusForbidden},
+			{"originless image", "", "cross-site", "no-cors", http.StatusForbidden},
+		} {
+			t.Run(path+"/"+tc.name, func(t *testing.T) {
+				r := httptest.NewRequest(http.MethodGet, path, nil)
+				r.Header.Set("Sec-Fetch-Site", tc.site)
+				r.Header.Set("Sec-Fetch-Mode", tc.mode)
+				if strings.Contains(path, "/workspace/file/blob") {
+					r.Header.Set("Sec-Fetch-Dest", "image")
+				}
+				if tc.origin != "" {
+					r.Header.Set("Origin", tc.origin)
+				}
+				w := httptest.NewRecorder()
+				corsMiddleware([]string{"app://renderer", "http://localhost:5173"})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusNoContent)
+				})).ServeHTTP(w, r)
+				if w.Code != tc.want {
+					t.Fatalf("status = %d, want %d", w.Code, tc.want)
+				}
+			})
 		}
 	}
 }

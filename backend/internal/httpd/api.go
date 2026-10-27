@@ -55,6 +55,8 @@ type APIDeps struct {
 	// Conversations is nil until a Chat driver is wired; the controller then
 	// answers 501 rather than panicking, matching the other optional surfaces.
 	Conversations controllers.ConversationService
+	// ConversationSearch is the chat full-text index; nil answers 501.
+	ConversationSearch controllers.ConversationSearch
 	// Settings is the daemon-owned preference surface.
 	Settings  controllers.SettingsService
 	DevImport controllers.DevImportService
@@ -67,6 +69,7 @@ type APIDeps struct {
 	Mobile                   *controllers.MobileController
 	BrowserLive              *BrowserLiveHub
 	Browser                  controllers.BrowserService
+	BrowserChrome            controllers.BrowserChromeService
 	PreviewServer            controllers.ManagedPreviewServer
 	SessionCapabilities      controllers.SessionCapabilityValidator
 	ShellPreviewCapabilities controllers.ShellPreviewCapabilityValidator
@@ -207,10 +210,10 @@ func newAPIWithLogger(cfg config.Config, deps APIDeps, log *slog.Logger) *API {
 		fs:            &controllers.FSController{Svc: deps.Directories},
 		shellTerms:    &controllers.ShellTerminalsController{Svc: deps.ShellTerminals},
 		cues:          &controllers.CuesController{Svc: deps.Cues},
-		conversations: &controllers.ConversationsController{Svc: deps.Conversations, Renders: attachmentstore.New(cfg.DataDir)},
+		conversations: &controllers.ConversationsController{Svc: deps.Conversations, Renders: attachmentstore.New(cfg.DataDir), Search: deps.ConversationSearch},
 		settings:      &controllers.SettingsController{Svc: deps.Settings},
 		dev:           &controllers.DevController{Import: deps.DevImport},
-		browser:       &controllers.BrowserController{Svc: deps.Browser},
+		browser:       &controllers.BrowserController{Svc: deps.Browser, Chrome: deps.BrowserChrome},
 		system:        &controllers.SystemController{Checks: deps.SystemChecks},
 		identity:      &controllers.IdentityController{HostID: deps.HostID},
 		endpoints:     &controllers.EndpointsController{Source: deps.Endpoints},
@@ -267,7 +270,15 @@ func (a *API) Register(root chi.Router) {
 			r.Use(func(next http.Handler) http.Handler {
 				ordinary := middleware.Timeout(timeout)(next)
 				upload := middleware.Timeout(max(timeout, 10*time.Minute))(next)
+				clone := middleware.Timeout(max(timeout, 30*time.Minute))(next)
 				return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+					// A clone downloads the whole repository inside the request,
+					// which takes minutes for a large repository.
+					if pattern := chi.RouteContext(req.Context()).RoutePattern(); pattern == "/api/v1/projects/clone" ||
+						pattern == "/api/v1/projects/clone/prepare" {
+						clone.ServeHTTP(w, req)
+						return
+					}
 					// A spawn, an orchestrator start or a restore runs the project's
 					// Setup inside the request, and a Setup step may take far longer
 					// than one REST request: the operation extends this budget by its

@@ -286,12 +286,15 @@ paths:
           description: Return catalog facts without reading session history for model
             recency. Cached catalogs are served while discovery refreshes in the background.
           type: boolean
-      - description: Optional project identifier used as the model-catalog cache scope.
+      - description: 'Optional cloud credential scope. Any other value, including
+          a project identifier, is ignored: model catalogs are cached per device,
+          not per project.'
         in: query
         name: projectId
         schema:
-          description: Optional project identifier used as the model-catalog cache
-            scope.
+          description: 'Optional cloud credential scope. Any other value, including
+            a project identifier, is ignored: model catalogs are cached per device,
+            not per project.'
           type: string
       responses:
         "200":
@@ -347,12 +350,15 @@ paths:
           description: Refresh the Harness Settings browsing catalog without session-history
             enrichment; FX includes all connections in a separate cache.
           type: boolean
-      - description: Optional project identifier used as the model-catalog cache scope.
+      - description: 'Optional cloud credential scope. Any other value, including
+          a project identifier, is ignored: model catalogs are cached per device,
+          not per project.'
         in: query
         name: projectId
         schema:
-          description: Optional project identifier used as the model-catalog cache
-            scope.
+          description: 'Optional cloud credential scope. Any other value, including
+            a project identifier, is ignored: model catalogs are cached per device,
+            not per project.'
           type: string
       - description: When true, compare executable and config metadata before running
           discovery.
@@ -2346,6 +2352,76 @@ paths:
       summary: Manage desktop Stay Awake
       tags:
       - settings
+  /api/v1/browser/chrome:
+    delete:
+      operationId: removeBrowserChrome
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersBrowserChromeStatusResponse'
+          description: OK
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Disable Chrome mode: unregister AO''s native host and remove the installed
+        extension bundle'
+      tags:
+      - browser
+    get:
+      operationId: getBrowserChrome
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersBrowserChromeStatusResponse'
+          description: OK
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Report Chrome mode: native host registration, extension bundle, and
+        connection'
+      tags:
+      - browser
+    post:
+      operationId: setupBrowserChrome
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersBrowserChromeStatusResponse'
+          description: OK
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Enable Chrome mode: install the AO extension bundle and register AO''s
+        native host with Chrome'
+      tags:
+      - browser
   /api/v1/browser/commands:
     post:
       operationId: executeBrowserCommand
@@ -2476,6 +2552,45 @@ paths:
       summary: Check whether the desktop browser runtime is connected for a session
       tags:
       - browser
+  /api/v1/conversations/search:
+    get:
+      operationId: searchConversations
+      parameters:
+      - description: Words to find in chat messages, matched by word form.
+        in: query
+        name: query
+        required: true
+        schema:
+          description: Words to find in chat messages, matched by word form.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConversationSearchResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Search visible chat messages across conversations
+      tags:
+      - conversations
   /api/v1/cues/{cueId}:
     delete:
       operationId: deleteCue
@@ -4183,6 +4298,44 @@ paths:
       tags:
       - projects
   /api/v1/projects/{id}/permissions:
+    delete:
+      operationId: forgetProjectPermissions
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+      summary: Forget remembered project permissions
+      tags:
+      - projects
     patch:
       operationId: setProjectPermissions
       parameters:
@@ -4401,7 +4554,45 @@ paths:
               schema:
                 $ref: '#/components/schemas/APIError'
           description: Internal Server Error
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Service Unavailable
       summary: Clone and register a project from a git repository URL
+      tags:
+      - projects
+  /api/v1/projects/clone/check:
+    post:
+      operationId: checkCloneDestination
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CloneProjectInput'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CloneDestination'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+      summary: Check a clone destination and normalize its repository URL without
+        network access
       tags:
       - projects
   /api/v1/projects/clone/cleanup:
@@ -4465,6 +4656,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/APIError'
           description: Internal Server Error
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Service Unavailable
       summary: Clone a project without registering it so Git setup can be completed
       tags:
       - projects
@@ -4822,13 +5019,13 @@ paths:
           type:
           - "null"
           - integer
-      - description: Maximum combined messages and activities to return. Defaults
-          to 200.
+      - description: Maximum messages to return; tool activity between them comes
+          along without counting. Defaults to 200.
         in: query
         name: limit
         schema:
-          description: Maximum combined messages and activities to return. Defaults
-            to 200.
+          description: Maximum messages to return; tool activity between them comes
+            along without counting. Defaults to 200.
           maximum: 500
           minimum: 1
           type:
@@ -5285,6 +5482,35 @@ paths:
           type:
           - "null"
           - boolean
+      - description: Session kind filter. worker keeps every session that is not an
+          orchestrator.
+        in: query
+        name: kind
+        schema:
+          description: Session kind filter. worker keeps every session that is not
+            an orchestrator.
+          enum:
+          - worker
+          - orchestrator
+          type: string
+      - description: Page size. When set, sessions are ordered pinned first, then
+          most recently updated, and nextCursor resumes the list. When omitted, every
+          match is returned.
+        in: query
+        name: limit
+        schema:
+          description: Page size. When set, sessions are ordered pinned first, then
+            most recently updated, and nextCursor resumes the list. When omitted,
+            every match is returned.
+          maximum: 200
+          minimum: 1
+          type: integer
+      - description: Opaque cursor returned by the previous page. Requires limit.
+        in: query
+        name: cursor
+        schema:
+          description: Opaque cursor returned by the previous page. Requires limit.
+          type: string
       responses:
         "200":
           content:
@@ -6416,13 +6642,13 @@ paths:
           type:
           - "null"
           - integer
-      - description: Maximum combined messages and activities to return. Defaults
-          to 200.
+      - description: Maximum messages to return; tool activity between them comes
+          along without counting. Defaults to 200.
         in: query
         name: limit
         schema:
-          description: Maximum combined messages and activities to return. Defaults
-            to 200.
+          description: Maximum messages to return; tool activity between them comes
+            along without counting. Defaults to 200.
           maximum: 500
           minimum: 1
           type:
@@ -11795,6 +12021,59 @@ paths:
       summary: Search visible workspace file paths
       tags:
       - sessions
+  /api/v1/sessions/{sessionId}/workspace/search/content:
+    get:
+      operationId: searchSessionWorkspaceContent
+      parameters:
+      - description: Session identifier, e.g. project-1.
+        in: path
+        name: sessionId
+        required: true
+        schema:
+          description: Session identifier, e.g. project-1.
+          type: string
+      - description: Words to find in file contents, case-insensitive and in any order.
+        in: query
+        name: query
+        required: true
+        schema:
+          description: Words to find in file contents, case-insensitive and in any
+            order.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkspaceContentSearchResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Search the contents of visible workspace files
+      tags:
+      - sessions
   /api/v1/sessions/{sessionId}/workspace/tree:
     get:
       operationId: listSessionWorkspaceTree
@@ -13808,6 +14087,8 @@ components:
           type: string
         displayName:
           type: string
+        effort:
+          type: string
         enabled:
           type: boolean
         harness:
@@ -13826,6 +14107,10 @@ components:
           - string
         latestRun:
           $ref: '#/components/schemas/AutomationRunSummaryResponse'
+        mode:
+          type: string
+        model:
+          type: string
         nextRunAt:
           format: date-time
           type: string
@@ -14318,6 +14603,10 @@ components:
       type: object
     BrowserStatusResponse:
       properties:
+        client:
+          type: string
+        clientVersion:
+          type: string
         connected:
           type: boolean
         connectedAt:
@@ -14325,12 +14614,21 @@ components:
           type: string
         sessionId:
           type: string
+        target:
+          enum:
+          - panel
+          - chrome
+          type: string
         transport:
+          enum:
+          - electron-webcontents-debugger
+          - chrome-extension
           type: string
       required:
       - sessionId
       - connected
       - transport
+      - target
       type: object
     CancelReviewResponse:
       properties:
@@ -14465,6 +14763,22 @@ components:
       - clearId
       - clearEpoch
       - clearSequence
+      type: object
+    CloneDestination:
+      properties:
+        canUseExisting:
+          type: boolean
+        exists:
+          type: boolean
+        path:
+          type: string
+        remoteUrl:
+          type: string
+      required:
+      - remoteUrl
+      - path
+      - exists
+      - canUseExisting
       type: object
     ClonePreparationResult:
       properties:
@@ -15095,6 +15409,53 @@ components:
         disabled:
           type: boolean
       type: object
+    ControllersBrowserChromeChannel:
+      properties:
+        available:
+          type: boolean
+        manifestPath:
+          type: string
+        name:
+          type: string
+        registered:
+          type: boolean
+      required:
+      - name
+      - available
+      - registered
+      - manifestPath
+      type: object
+    ControllersBrowserChromeStatusResponse:
+      properties:
+        channels:
+          items:
+            $ref: '#/components/schemas/ControllersBrowserChromeChannel'
+          type: array
+        clientVersion:
+          type: string
+        connected:
+          type: boolean
+        enabled:
+          type: boolean
+        extensionBundled:
+          type: boolean
+        extensionId:
+          type: string
+        extensionPath:
+          type: string
+        extensionVersion:
+          type: string
+        hostPath:
+          type: string
+      required:
+      - enabled
+      - connected
+      - extensionId
+      - extensionPath
+      - extensionBundled
+      - hostPath
+      - channels
+      type: object
     ControllersKeepAwakeStatus:
       properties:
         active:
@@ -15230,6 +15591,8 @@ components:
           type: boolean
         branch:
           type: string
+        branchNaming:
+          type: boolean
         branchState:
           $ref: '#/components/schemas/SessionBranchState'
         chatProviderPreserved:
@@ -15535,6 +15898,7 @@ components:
           - mcp_tool
           - auto_review
           - user_input
+          - ao_action
           type: string
         createdAt:
           type: string
@@ -15878,6 +16242,8 @@ components:
       properties:
         explanation:
           type: string
+        spansTurns:
+          type: boolean
         steps:
           items:
             $ref: '#/components/schemas/ConversationPlanStepResponse'
@@ -15953,6 +16319,38 @@ components:
       required:
       - uri
       - name
+      type: object
+    ConversationSearchHitResponse:
+      properties:
+        messageId:
+          type: string
+        projectId:
+          type: string
+        reviewId:
+          type: string
+        sessionId:
+          type: string
+        text:
+          description: A passage of the message, with each match wrapped in U+0002
+            and U+0003.
+          type: string
+        title:
+          type: string
+      required:
+      - messageId
+      - sessionId
+      - projectId
+      - title
+      - text
+      type: object
+    ConversationSearchResponse:
+      properties:
+        results:
+          items:
+            $ref: '#/components/schemas/ConversationSearchHitResponse'
+          type: array
+      required:
+      - results
       type: object
     ConversationSkillResponse:
       properties:
@@ -16236,6 +16634,8 @@ components:
           type: string
         displayName:
           type: string
+        effort:
+          type: string
         enabled:
           type:
           - "null"
@@ -16246,6 +16646,10 @@ components:
           enum:
           - worker
           - orchestrator
+          type: string
+        mode:
+          type: string
+        model:
           type: string
         projectId:
           type: string
@@ -16438,6 +16842,7 @@ components:
           - openhands
           - command-code
           - memcode
+          - hermes
           - fake
           type: string
         approvalMode:
@@ -17138,6 +17543,7 @@ components:
           - openhands
           - command-code
           - memcode
+          - hermes
           - cloudflared
           type: string
         updatedAt:
@@ -17485,6 +17891,10 @@ components:
       type: object
     ListSessionsResponse:
       properties:
+        archived:
+          $ref: '#/components/schemas/SessionArchiveSummary'
+        nextCursor:
+          type: string
         sessions:
           items:
             $ref: '#/components/schemas/ControllersSessionView'
@@ -18060,6 +18470,8 @@ components:
       type: object
     ProjectClonePreparationCleanupInput:
       properties:
+        keepCheckout:
+          type: boolean
         path:
           minLength: 1
           type: string
@@ -18908,6 +19320,20 @@ components:
           type: string
         codex:
           type: string
+      type: object
+    SessionArchiveSummary:
+      properties:
+        byProject:
+          additionalProperties:
+            type: integer
+          type:
+          - object
+          - "null"
+        total:
+          type: integer
+      required:
+      - total
+      - byProject
       type: object
     SessionArtifact:
       properties:
@@ -20507,6 +20933,7 @@ components:
           - openhands
           - command-code
           - memcode
+          - hermes
           type: string
         issueId:
           type: string
@@ -20987,6 +21414,8 @@ components:
           type: string
         githubLogin:
           type: string
+        installId:
+          type: string
         optedOut:
           type: boolean
       required:
@@ -21153,6 +21582,10 @@ components:
           type:
           - "null"
           - string
+        effort:
+          type:
+          - "null"
+          - string
         enabled:
           type:
           - "null"
@@ -21165,6 +21598,14 @@ components:
           enum:
           - worker
           - orchestrator
+          type:
+          - "null"
+          - string
+        mode:
+          type:
+          - "null"
+          - string
+        model:
           type:
           - "null"
           - string
@@ -21542,6 +21983,29 @@ components:
       - author
       - timestamp
       - files
+      type: object
+    WorkspaceContentSearchHitResponse:
+      properties:
+        line:
+          type: integer
+        path:
+          type: string
+        text:
+          description: The line, with each match wrapped in U+0002 and U+0003.
+          type: string
+      required:
+      - path
+      - line
+      - text
+      type: object
+    WorkspaceContentSearchResponse:
+      properties:
+        results:
+          items:
+            $ref: '#/components/schemas/WorkspaceContentSearchHitResponse'
+          type: array
+      required:
+      - results
       type: object
     WorkspaceDiffDeferredResponse:
       properties:

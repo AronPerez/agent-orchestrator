@@ -96,6 +96,7 @@ export function ReadOnlyFileView({
 			return (
 				<div className="grid place-items-center p-3">
 					<img
+						crossOrigin="anonymous"
 						alt={detail.path}
 						className="max-h-[70vh] max-w-full object-contain"
 						src={workspaceRawImageUrl(sessionId, detail.path, side, hostId, remoteBaseUrl)}

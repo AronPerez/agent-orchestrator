@@ -187,6 +187,9 @@ type Automation struct {
 	LastRunAt   sql.NullTime
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+	Model       string
+	Mode        string
+	Effort      string
 }
 
 type AutomationRun struct {
@@ -355,6 +358,10 @@ type ConversationMessage struct {
 	Continuation        int64
 }
 
+type ConversationMessagesFt struct {
+	Text string
+}
+
 type ConversationProviderEvent struct {
 	ID              int64
 	ConversationID  string
@@ -409,6 +416,8 @@ type ConversationTurn struct {
 	UsageLimitResetsAt    sql.NullTime
 	UsageLimitAutoResume  int64
 	UsageLimitResumeError string
+	BatchedInput          int64
+	ProviderInputText     string
 }
 
 type Cue struct {
@@ -729,6 +738,8 @@ type Session struct {
 	StaleBinaryLaunch                string
 	StaleBinarySwitchFailedAt        sql.NullTime
 	LaunchOptions                    string
+	BranchNaming                     bool
+	TemporaryBranch                  string
 }
 
 type SessionAgentAccount struct {

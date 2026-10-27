@@ -12,6 +12,10 @@ describe("ImageDiffView", () => {
 			<ImageDiffView path="docs/logo.png" sessionId="sess-1" split status="modified" version={1} />,
 		);
 
+		for (const image of screen.getAllByRole("img")) {
+			expect(image).toHaveAttribute("crossorigin", "anonymous");
+		}
+
 		fireEvent.error(await screen.findByAltText("Before version of docs/logo.png"));
 		expect(await screen.findByText("Image preview could not be loaded.")).toBeInTheDocument();
 

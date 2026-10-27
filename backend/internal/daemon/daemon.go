@@ -40,6 +40,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/codexops"
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/daemon/supervisor"
+	"github.com/aoagents/agent-orchestrator/backend/internal/datadirlock"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
@@ -103,6 +104,15 @@ func sentryEnvironment(version string) string {
 	}
 }
 
+// Session Manager asserts the terminal input gate's optional capabilities at
+// runtime: a signature drift compiles but silently turns the send guard's
+// keystroke fence off (#5711).
+var _ interface {
+	sessionmanager.TerminalInputGate
+	sessionmanager.TerminalInputObserver
+	sessionmanager.TerminalInputFencer
+} = (*terminal.Manager)(nil)
+
 // Run starts the daemon and blocks until it exits. SIGINT/SIGTERM drive
 // graceful shutdown through the HTTP server and background workers.
 func Run(buildVersion string) error {
@@ -137,6 +147,11 @@ func Run(buildVersion string) error {
 	}
 	browserAuthority := browsersvc.NewAuthority()
 	browserBroker := browserruntime.New(log, browserRuntimeToken)
+	chrome := newChromeMode(cfg, log)
+	var browserLifecycle sessionmanager.BrowserLifecycle = browserBroker
+	if chrome != nil {
+		browserLifecycle = chrome.lifecycle(browserBroker)
+	}
 	browserStreamBroker := browserstream.New(log, browserRuntimeToken)
 
 	// Fail fast only if a daemon is genuinely still serving the recorded port.
@@ -152,6 +167,34 @@ func Run(buildVersion string) error {
 	} else if live != nil && runFileOwnerServing(&http.Client{Timeout: staleProbeTimeout}, config.LoopbackHost, live) {
 		return fmt.Errorf("daemon already running (pid %d, port %d); refusing to start", live.PID, live.Port)
 	}
+
+	// Take the data-directory lock before touching SQLite. The run-file check
+	// above only proves nobody else owns this port/run file; it says nothing
+	// about the data dir, so a second daemon with a different AO_PORT/AO_RUN_FILE
+	// but the same AO_DATA_DIR would otherwise open and hot-migrate the database
+	// underneath the first daemon, invalidating its prepared statements against
+	// the new schema (issue #3716). The lock is scoped to the data dir alone and
+	// is held until Run returns; a crashed holder's lock is dropped by the OS, so
+	// a successor reclaims it with no stale-lock bookkeeping.
+	//
+	// A desktop takeover spawns this daemon as soon as the old one's /healthz
+	// goes dark, which happens when its shutdown starts. With T = ShutdownTimeout,
+	// the old daemon's capped shutdown (end of Run) then takes at most 8T+18s:
+	//   - the HTTP drain and seven stages capped at T each: failure dispatcher,
+	//     harness installer, background workers, agent-switch workers, Codex
+	//     account-switch workers, chat StopAll, LAN listener;
+	//   - fixed caps: 5s agent-switch fault enqueue, 3s `tailscale serve off`,
+	//     5s closed-lid lease release plus 3s caffeinate exit (keep-awake), and
+	//     a 2s Sentry flush.
+	// Wait 9T+18s (108s by default), one stage of margin. Run's uncapped waits
+	// (startup reconcile, preview servers, chat side stops, usage, pricing,
+	// lifecycle stack) are not covered: a predecessor stuck in one past the
+	// wait still makes this daemon exit 75.
+	dataDirLock, err := lockDataDir(context.Background(), cfg.DataDir, 9*cfg.ShutdownTimeout+18*time.Second, log)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dataDirLock.Release() }()
 
 	// Open the durable store and bring up the CDC substrate: DB triggers capture
 	// changes into change_log, the poller tails it, and the broadcaster fans
@@ -179,12 +222,16 @@ func Run(buildVersion string) error {
 	sentryobs.SetPolicyEnabled(eventsAllowed)
 	telemetrySink, telemetryIdentity := newTelemetrySink(cfg, store, log)
 	defer func() { _ = telemetrySink.Close(context.Background()) }()
-	// Daemon Sentry: captures genuine 5xx/panics with their Go stack. Gated on
-	// Initialize the transport once so a later policy opt-in works without a
-	// daemon restart. The policy gate remains fail-closed and is checked before
-	// every capture; a blank DSN still leaves this as a no-op.
+	installID := ""
+	if telemetryIdentity != nil {
+		installID = telemetryIdentity.Snapshot().InstallID
+	}
+	// Initialize daemon Sentry once so a later policy opt-in works without a
+	// restart. The policy gate is checked before every capture. An unavailable
+	// install ID omits the tag without disabling error reporting.
 	if err := sentryobs.Init(sentryobs.Config{
 		DSN:         cfg.Telemetry.SentryDSN,
+		InstallID:   installID,
 		Release:     cfg.Telemetry.AppVersion,
 		Environment: sentryEnvironment(cfg.Telemetry.AppVersion),
 	}); err != nil {
@@ -239,7 +286,6 @@ func Run(buildVersion string) error {
 	// runtime pane. Keep this path small until durable inbox semantics are needed.
 	// Built before the Lifecycle Manager so the LCM can use it for SCM-driven
 	// agent nudges (CI failure, review feedback, merge conflict).
-	messenger := newSessionMessenger(store, runtimeAdapter, log)
 	lifecycleMessenger := newModeAwareMessenger()
 	notificationHub := notify.NewHub()
 	notificationBarrier := &sync.Mutex{}
@@ -272,6 +318,7 @@ func Run(buildVersion string) error {
 		}
 		return fmt.Errorf("wire agent resolver: %w", err)
 	}
+	messenger := newSessionMessenger(store, runtimeAdapter, log, agents)
 
 	lcStack := startLifecycle(ctx, cfg.DataDir, store, runtimeAdapter, lifecycleMessenger, notificationWriter, telemetrySink, agents, log)
 
@@ -280,6 +327,7 @@ func Run(buildVersion string) error {
 	// resolver (AO_AGENT validated here for compatibility), and the agent
 	// messenger, then mount it on the API.
 	var agentSvc *agentsvc.Service
+	var agentAccountSvc *agentaccounts.Service
 	chatDrivers := chatdriverregistry.Build(log, func() {
 		if agentSvc == nil {
 			return
@@ -361,6 +409,11 @@ func Run(buildVersion string) error {
 		Log:      log,
 		NewID:    uuid.NewString,
 		OnAccountChanged: func(sessionID domain.SessionID, generation string, harness domain.AgentHarness) {
+			// The session's own account (a saved one, or this computer's login) is
+			// read again off the chat path; the CLI probe can take seconds.
+			if accounts := agentAccountSvc; accounts != nil {
+				go accounts.RecheckSessionAccount(ctx, sessionID, harness)
+			}
 			if harness != domain.HarnessCodex || agentSvc == nil || agentSvc.CodexAccountSwitchInProgress() {
 				return
 			}
@@ -458,7 +511,7 @@ func Run(buildVersion string) error {
 	codexOperationGate := codexops.NewGate()
 	codexAccountRoot, codexPendingRoot, codexSwitchStagingRoot := codexAccountRoots(cfg.StateDir)
 	agentDeps := agentsvc.Deps{
-		Cache: store, Discoverer: modelDiscoverer, Projects: store, Sessions: store, Context: ctx, Logger: log,
+		Cache: store, Discoverer: modelDiscoverer, Sessions: store, Context: ctx, Logger: log,
 		ModelDiscoveryDir:      filepath.Join(cfg.DataDir, "model-discovery"),
 		CodexAccountRoot:       codexAccountRoot,
 		CodexPendingRoot:       codexPendingRoot,
@@ -484,7 +537,10 @@ func Run(buildVersion string) error {
 		}
 		return fmt.Errorf("reviewer resolver: %w", err)
 	}
-	sessionSvc, reviewSvc, wiredSessMgr, err := startSession(ctx, cfg, runtimeAdapter, store, lcStack.LCM, lcStack.ArtifactVersions, messenger, telemetrySink, notificationWriter, agents, agentSvc, managedPreview, browserBroker, browserAuthority, chatLauncher{svc: chatSvc, persistentHostReconcileDone: persistentHostsReconciled}, reviewerChatsRecovered, settingsSvc, tracker, codexOperationGate, reviewers, log)
+	// The review service starts before the SCM observer it asks for review
+	// refreshes, so it holds a late-bound handle.
+	reviewRefresher := &scmReviewRefresher{}
+	sessionSvc, reviewSvc, wiredSessMgr, err := startSession(ctx, cfg, runtimeAdapter, store, lcStack.LCM, lcStack.ArtifactVersions, messenger, telemetrySink, notificationWriter, agents, agentSvc, managedPreview, browserLifecycle, browserAuthority, chatLauncher{svc: chatSvc, persistentHostReconcileDone: persistentHostsReconciled}, reviewerChatsRecovered, settingsSvc, tracker, codexOperationGate, reviewers, reviewRefresher, log)
 	if err != nil {
 		stop()
 		lcStack.Stop()
@@ -521,7 +577,7 @@ func Run(buildVersion string) error {
 	if switcher, ok := wiredSessMgr.(chatsvc.TerminalProviderSwitcher); ok {
 		chatSvc.SetTerminalProviderSwitcher(switcher)
 	}
-	agentAccountSvc := newAgentAccounts(cfg, store, codexHome, agentDeps.CodexAccounts, log)
+	agentAccountSvc = newAgentAccounts(cfg, store, codexHome, agentDeps.CodexAccounts, log)
 	chatSvc.SetUsageLimitAccounts(agentAccountSvc)
 	if wired, ok := sessMgr.(interface {
 		SetAgentAccounts(ports.AgentAccountLaunchEnv)
@@ -591,10 +647,13 @@ func Run(buildVersion string) error {
 	if insp, ok := sessMgr.RuntimeExactInspector(); ok {
 		lcStack.LCM.SetExitInspector(insp)
 	}
-	lcStack.LCM.SetSessionInputLease(sessMgr)
+	// Lifecycle reactions deliberately do not hold Session Manager's input
+	// lease: they reach the agent through sessMgr.Send, which leases its own
+	// pane writes. Holding it here deadlocked every reaction to a hibernated
+	// Chat session, because waking it waits for admitted input to drain.
 	lcStack.LCM.SetSessionOperationGate(sessMgr)
 	termMgr.SetSessionInputLease(sessMgr)
-	projectSvc := projectsvc.NewWithDeps(projectsvc.Deps{Store: store, Sessions: sessionSvc, DefaultHarness: domain.AgentHarness(cfg.Agent), Telemetry: telemetrySink, Logger: log, OnModelScopeChanged: agentSvc.InvalidateProjectModelCatalogs})
+	projectSvc := projectsvc.NewWithDeps(projectsvc.Deps{Store: store, Sessions: sessionSvc, DefaultHarness: domain.AgentHarness(cfg.Agent), Telemetry: telemetrySink, Logger: log})
 	reportSessions, ok := sessMgr.(reportSemanticSession)
 	if !ok {
 		return errors.New("wire report delivery: session manager lacks semantic send support")
@@ -687,6 +746,11 @@ func Run(buildVersion string) error {
 	// HostID is assigned below, once the identity file has been read.
 	mc := &controllers.MobileController{Bridge: bs}
 	browserService := browsersvc.New(sessionSvc, browserBroker, browserAuthority)
+	var browserChrome controllers.BrowserChromeService
+	if chrome != nil {
+		browserService.UseChrome(chrome.broker, chrome.targets, log)
+		browserChrome = chrome
+	}
 	browserLive := httpd.NewBrowserLiveHub(browserStreamBroker, sessionSvc, func() bool {
 		state, err := mobilebridge.Load(bs.ConfigPath)
 		return err == nil && state.Enabled && state.BrowserRemoteAccess
@@ -780,7 +844,7 @@ func Run(buildVersion string) error {
 		}()
 		lcStack.LCM.SetUsageFinalizer(usageCollector)
 	}
-	lcStack.scmDone = startSCMObserver(ctx, store, lcStack.LCM, sessionSvc, cfg.GitLab, log)
+	lcStack.scmDone = startSCMObserver(ctx, store, lcStack.LCM, sessionSvc, cfg.GitLab, reviewRefresher, log)
 	var prActions prsvc.ActionManager
 	prReader := newMultiSCMProvider(cfg.GitLab, log)
 	prMerger := newMultiSCMMerger(cfg.GitLab, log)
@@ -966,6 +1030,7 @@ func Run(buildVersion string) error {
 		AgentAuth:                   agentAuthSvc,
 		GitHub:                      newGitHubStatusService(githubpat.New(cfg.DataDir), prReader),
 		Conversations:               chatSvc,
+		ConversationSearch:          store,
 		Settings:                    settingsSvc,
 		CDC:                         store,
 		Events:                      cdcPipe.Broadcaster,
@@ -987,6 +1052,7 @@ func Run(buildVersion string) error {
 			},
 		}),
 		Browser:                  browserService,
+		BrowserChrome:            browserChrome,
 		LinkPreview:              linkpreviewsvc.New(nil),
 		PreviewServer:            managedPreview,
 		SessionCapabilities:      browserAuthority,
@@ -1016,6 +1082,11 @@ func Run(buildVersion string) error {
 				log.Warn("browser runtime: serve stopped with error", "err", err)
 			}
 		}()
+	}
+	if chrome != nil {
+		if err := chrome.serve(ctx, cfg.RunFilePath); err != nil {
+			log.Warn("browser chrome: listener unavailable; Chrome mode disabled", "err", err)
+		}
 	}
 	_ = os.Unsetenv(browserstream.RuntimeAddressEnv)
 	if ln, addr, err := browserstream.Listen(cfg.RunFilePath); err != nil {
@@ -1266,7 +1337,11 @@ func (d reportSemanticDelivery) Submit(ctx context.Context, id domain.SessionID,
 	if d.sessions == nil {
 		return reportsvc.ErrReportDeliveryModeUnsupported
 	}
-	return d.sessions.SendSemantic(ctx, id, message, idempotencyKey)
+	err := d.sessions.SendSemantic(ctx, id, message, idempotencyKey)
+	if errors.Is(err, sessionmanager.ErrComposerBusy) {
+		return fmt.Errorf("%w: %w", reportsvc.ErrOrchestratorBusy, err)
+	}
+	return err
 }
 
 func (d reportSemanticDelivery) Interrupt(ctx context.Context, id domain.SessionID) error {
@@ -1371,6 +1446,34 @@ func usagePipelineWatchRoots(roots usagesvc.SourceRoots) []string {
 // can capture it separately from any structured stdout protocol added later.
 func newLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
+
+// lockDataDir takes the data-dir lock. When another AO process holds it, as a
+// predecessor still shutting down during a takeover does, it logs and waits up
+// to wait for that process to exit, then refuses to start. On a file system
+// that cannot lock it returns a nil lock (Release is a no-op) and no error.
+func lockDataDir(ctx context.Context, dataDir string, wait time.Duration, log *slog.Logger) (*datadirlock.Lock, error) {
+	lock, err := datadirlock.Acquire(ctx, dataDir, 0)
+	if errors.Is(err, datadirlock.ErrUnsupported) {
+		// Some NFS, SMB and FUSE mounts cannot lock files. Start unguarded, as AO
+		// did before the lock, rather than refuse to run on them.
+		log.Warn("data dir file system cannot lock files; starting without the single-daemon guard", "err", err)
+		return nil, nil
+	}
+	if !errors.Is(err, datadirlock.ErrLocked) {
+		return lock, err
+	}
+	log.Warn("waiting for another AO process to release the data dir", "err", err, "wait", wait)
+	start := time.Now()
+	lock, err = datadirlock.Acquire(ctx, dataDir, wait)
+	if errors.Is(err, datadirlock.ErrLocked) {
+		return nil, fmt.Errorf("%w; waited %s for it to exit, refusing to start", err, wait)
+	}
+	if err != nil {
+		return nil, err
+	}
+	log.Info("data dir lock acquired", "waited", time.Since(start).Round(time.Millisecond))
+	return lock, nil
 }
 
 func stabilizeWorkingDirectory(dataDir string) error {

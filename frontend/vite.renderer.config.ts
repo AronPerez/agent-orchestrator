@@ -221,6 +221,16 @@ export default defineConfig({
 			"/api": {
 				target: process.env.AO_DEV_API_TARGET ?? "http://127.0.0.1:3001",
 				changeOrigin: false,
+				configure(proxy) {
+					proxy.on("proxyReq", (proxyReq, request) => {
+						// Same-origin reads omit Origin; name their actual host, never a fixed renderer grant.
+						if (request.headers.origin === undefined && request.headers["sec-fetch-site"] === "same-origin" &&
+							(request.method === "GET" || request.method === "HEAD") && request.headers.host) {
+							const scheme = "encrypted" in request.socket && request.socket.encrypted ? "https" : "http";
+							proxyReq.setHeader("Origin", `${scheme}://${request.headers.host}`);
+						}
+					});
+				},
 			},
 			"/mux": {
 				target: process.env.AO_DEV_API_TARGET ?? "http://127.0.0.1:3001",
