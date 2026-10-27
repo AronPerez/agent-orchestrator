@@ -410,7 +410,11 @@ func TestACPReplayLoadLargeHistoryThroughSDK(t *testing.T) {
 	agentR, agentW := io.Pipe()
 	agent := &fakeAgent{loadUpdates: updates}
 	agent.conn = acpsdk.NewAgentSideConnection(agent, agentW, clientR)
-	conv.conn = acpsdk.NewClientSideConnection(conv, clientW, agentR)
+	// Match production's wire-ordered notification path, not the SDK's bounded queue.
+	wire, sdkWriter, sdkReader := newLegacyACPTransport(clientW)
+	conv.legacyWire = wire
+	conv.conn = acpsdk.NewClientSideConnection(conv, sdkWriter, sdkReader)
+	go wire.forward(agentR, conv.handleNotification)
 	t.Cleanup(func() { _ = clientR.Close(); _ = clientW.Close(); _ = agentR.Close(); _ = agentW.Close() })
 	loader := newRefreshableConversation(conv, acpsdk.LoadSessionRequest{SessionId: "session-1", Cwd: t.TempDir(), McpServers: []acpsdk.McpServer{}})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
