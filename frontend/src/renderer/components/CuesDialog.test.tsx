@@ -106,7 +106,7 @@ test("validates bytes and required command, preserves content and recovers from 
 	expect(screen.getByLabelText("Command")).toHaveValue("  npm test\n");
 	fireEvent.click(screen.getByRole("button", { name: "Create" }));
 	await waitFor(() => expect(cues.createCue).toHaveBeenCalledTimes(2));
-	expect(cues.createCue).toHaveBeenLastCalledWith("project", expect.objectContaining({ command: "  npm test\n" }));
+	expect(cues.createCue).toHaveBeenLastCalledWith("project", expect.objectContaining({ command: "  npm test\n" }), undefined);
 });
 
 test("save blocks duplicate submissions and dismissal; completion from another project is ignored", async () => {
@@ -357,7 +357,7 @@ test("agent editing validates required content and keeps a failed update editabl
 	expect(screen.getByLabelText("Agent instruction")).toHaveValue("  explain\n");
 	fireEvent.click(screen.getByRole("button", { name: "Save" }));
 	await waitFor(() => expect(cues.updateCue).toHaveBeenCalledTimes(2));
-	expect(cues.updateCue).toHaveBeenLastCalledWith("cue-1", expect.objectContaining({ prompt: "  explain\n", type: "agent" }));
+	expect(cues.updateCue).toHaveBeenLastCalledWith("cue-1", expect.objectContaining({ prompt: "  explain\n", type: "agent" }), undefined);
 });
 
 test.each(["", "deleted-cue"])("clicking without a valid remembered cue (%s) opens the list", async (id) => {
@@ -415,7 +415,7 @@ test("session creation saves and closes without running, changing history, or na
 	fireEvent.change(screen.getByLabelText("Command"), { target: { value: "  npm test\n" } });
 	fireEvent.click(screen.getByRole("button", { name: "Create" }));
 	await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-	expect(cues.createCue).toHaveBeenCalledExactlyOnceWith("project", { name: "Tests", type: "command", command: "  npm test\n" });
+	expect(cues.createCue).toHaveBeenCalledExactlyOnceWith("project", { name: "Tests", type: "command", command: "  npm test\n" }, undefined);
 	expect(cues.invokeCue).not.toHaveBeenCalled();
 	expect(readLastRunCue("project")).toBe("");
 	expect(openProjectSettings).not.toHaveBeenCalled();
@@ -454,7 +454,7 @@ test("the creation modal supports agent cues and returns focus to the session bu
 	fireEvent.change(screen.getByLabelText("Agent instruction"), { target: { value: "  Review changes\n" } });
 	fireEvent.click(screen.getByRole("button", { name: "Create" }));
 	await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-	expect(cues.createCue).toHaveBeenCalledExactlyOnceWith("project", { name: "Review", type: "agent", prompt: "  Review changes\n" });
+	expect(cues.createCue).toHaveBeenCalledExactlyOnceWith("project", { name: "Review", type: "agent", prompt: "  Review changes\n" }, undefined);
 	await waitFor(() => expect(screen.getByRole("button", { name: "Run a cue" })).toHaveFocus());
 	expect(cues.invokeCue).not.toHaveBeenCalled();
 });

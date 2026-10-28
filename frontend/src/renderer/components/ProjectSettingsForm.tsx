@@ -5,7 +5,7 @@ import type { components } from "../../api/schema";
 import { useAgentReadinessQuery, useEnsureAgentReadiness } from "../hooks/useAgentReadinessQuery";
 import { useRemoteProjectQuery, workspaceQueryKeyForHost, workspaceQueryOptions } from "../hooks/useWorkspaceQuery";
 import { useSettings } from "../hooks/useSettings";
-import { useConnectedHosts } from "../hooks/useHostConnection";
+import { projectQueryKey, useProjectSettingsQuery } from "../hooks/useProjectSettingsQuery";
 import { apiClient, apiErrorMessage } from "../lib/api-client";
 import { clientForHost } from "../lib/host-clients";
 import { LOCAL_HOST, refKey } from "../lib/hosts";
@@ -28,8 +28,6 @@ type ProjectConfig = components["schemas"]["ProjectConfig"];
 type TrackerIntakeConfig = components["schemas"]["TrackerIntakeConfig"];
 
 const DEFAULT_BRANCH_AUTO = "auto";
-
-const projectQueryKey = (id: string, hostId?: string) => hostId ? ["project", hostId, id] as const : ["project", id] as const;
 
 type SettingsSaveResult = {
 	savedKey: string;
@@ -74,24 +72,10 @@ function LocalProjectSettingsAdapter({
 }: ProjectSettingsFormProps) {
 	const { t } = useTranslation();
 	const queryClient = useQueryClient();
-	const connected = useConnectedHosts();
-	const hostConnected = !hostId || connected.includes(hostId);
+	const { query, hostConnected } = useProjectSettingsQuery(projectId, hostId);
 	useEffect(() => {
 		if (!hostConnected) onSaveState?.({ phase: "idle" });
 	}, [hostConnected, onSaveState]);
-
-	const query = useQuery({
-		queryKey: projectQueryKey(projectId, hostId),
-		enabled: hostConnected,
-		queryFn: async () => {
-			const { data, error } = await (hostId ? clientForHost(hostId) : apiClient).GET("/api/v1/projects/{id}", {
-				params: { path: { id: projectId } },
-			});
-			if (error) throw new Error(apiErrorMessage(error));
-			if (data?.status !== "ok") throw new Error(t("settings.project.degraded"));
-			return data.project as Project;
-		},
-	});
 
 	return (
 		<>

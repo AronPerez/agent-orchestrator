@@ -1,11 +1,14 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { components } from "../../api/schema";
-import { workspaceQueryKey } from "../hooks/useWorkspaceQuery";
+import { workspaceQueryKeyForHost } from "../hooks/useWorkspaceQuery";
 import { clearTerminateSessionState } from "../hooks/useTerminateSession";
 import { apiClient, apiErrorMessage } from "../lib/api-client";
+import { projectQueryKey, useProjectSettingsQuery } from "../hooks/useProjectSettingsQuery";
+import { clientForHost } from "../lib/host-clients";
+import { LOCAL_HOST, refKey } from "../lib/hosts";
 import type { ProjectSettingsSaveState } from "./ProjectSettingsForm";
 import { Button } from "./ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
@@ -13,27 +16,37 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 type Project = components["schemas"]["Project"];
 type ScriptKind = "setup" | "cleanup";
 
-export function ProjectScriptsSettings({ projectId, onSaveState }: { projectId: string; onSaveState?: (state: ProjectSettingsSaveState) => void }) {
+export function ProjectScriptsSettings({ projectId, hostId, onSaveState }: { projectId: string; hostId?: string; onSaveState?: (state: ProjectSettingsSaveState) => void }) {
 	const { t } = useTranslation();
 	const client = useQueryClient();
-	const query = useQuery({
-		queryKey: ["project", projectId],
-		queryFn: async () => {
-			const { data, error } = await apiClient.GET("/api/v1/projects/{id}", { params: { path: { id: projectId } } });
-			if (error) throw new Error(apiErrorMessage(error));
-			if (data?.status !== "ok") throw new Error(t("settings.project.degraded"));
-			return data.project as Project;
-		},
-	});
+	const { query, hostConnected } = useProjectSettingsQuery(projectId, hostId);
+	useEffect(() => {
+		if (!hostConnected) onSaveState?.({ phase: "idle" });
+		else if (query.isError) onSaveState?.({ phase: "failed", error: apiErrorMessage(query.error) });
+	}, [hostConnected, onSaveState, query.isError, query.error]);
+	const offline = <p role="alert" className="text-pretty text-sm text-error">{t("remote.hostOffline")}</p>;
+	if (!hostConnected && !query.data) return offline;
 	if (query.isLoading) return <p className="text-sm text-settings-muted">{t("settings.project.loading")}</p>;
-	if (query.isError || !query.data) return <p role="alert" className="text-sm text-error">{query.error instanceof Error ? query.error.message : t("settings.project.loadFailed")}</p>;
-	return <ScriptsEditor key={projectId} project={query.data} onSaveState={onSaveState} onSaved={() => {
-		void client.invalidateQueries({ queryKey: ["project", projectId] });
-		void client.invalidateQueries({ queryKey: workspaceQueryKey });
-	}} />;
+	if (!query.data) return <p role="alert" className="text-sm text-error">{query.error instanceof Error ? query.error.message : t("settings.project.loadFailed")}</p>;
+	return <>
+		{!hostConnected ? offline : query.isError ? <p role="alert" className="text-sm text-error">{query.error instanceof Error ? query.error.message : t("settings.project.loadFailed")}</p> : null}
+		<fieldset className="min-h-full min-w-0" hidden={!hostConnected} disabled={!hostConnected || query.isError}>
+			<ScriptsEditor
+				key={refKey({ host: hostId ?? LOCAL_HOST, id: projectId })}
+				hostId={hostId}
+				hostConnected={hostConnected && !query.isError}
+				project={query.data}
+				onSaveState={onSaveState}
+				onSaved={() => {
+					void client.invalidateQueries({ queryKey: projectQueryKey(projectId, hostId) });
+					void client.invalidateQueries({ queryKey: workspaceQueryKeyForHost(hostId) });
+				}}
+			/>
+		</fieldset>
+	</>;
 }
 
-function ScriptsEditor({ project, onSaveState, onSaved }: { project: Project; onSaveState?: (state: ProjectSettingsSaveState) => void; onSaved: () => void }) {
+function ScriptsEditor({ project, hostId, hostConnected, onSaveState, onSaved }: { project: Project; hostId?: string; hostConnected: boolean; onSaveState?: (state: ProjectSettingsSaveState) => void; onSaved: () => void }) {
 	const { t } = useTranslation();
 	const client = useQueryClient();
 	const scratch = project.kind === "scratch";
@@ -51,11 +64,12 @@ function ScriptsEditor({ project, onSaveState, onSaved }: { project: Project; on
 	const dirty = JSON.stringify(commands) !== saved;
 	const mutation = useMutation({
 		mutationFn: async (scripts: typeof commands) => {
-			const current = await apiClient.GET("/api/v1/projects/{id}", { params: { path: { id: project.id } } });
+			if (!hostConnected) throw new Error(t("remote.hostOffline"));
+			const current = await (hostId ? clientForHost(hostId) : apiClient).GET("/api/v1/projects/{id}", { params: { path: { id: project.id } } });
 			if (current.error) throw new Error(apiErrorMessage(current.error));
 			if (current.data?.status !== "ok" || !current.data.project) throw new Error(t("settings.project.degraded"));
 			const latest = current.data.project as Project;
-			const { error } = await apiClient.PUT("/api/v1/projects/{id}", {
+			const { error } = await (hostId ? clientForHost(hostId) : apiClient).PUT("/api/v1/projects/{id}", {
 				params: { path: { id: project.id } },
 				body: { displayName: latest.name, config: { ...latest.config, ...scripts } },
 			});
@@ -66,23 +80,25 @@ function ScriptsEditor({ project, onSaveState, onSaved }: { project: Project; on
 	});
 	const retry = useMutation({
 		mutationFn: async () => {
-			const { data, error } = await apiClient.POST("/api/v1/sessions/cleanup", { params: { query: { project: project.id } } });
+			if (!hostConnected) throw new Error(t("remote.hostOffline"));
+			const { data, error } = await (hostId ? clientForHost(hostId) : apiClient).POST("/api/v1/sessions/cleanup", { params: { query: { project: project.id } } });
 			if (error) throw new Error(apiErrorMessage(error));
 			return data;
 		},
 		onSuccess: (result) => {
-			for (const sessionId of [...result.cleaned, ...result.alreadyGone]) clearTerminateSessionState(client, sessionId);
+			for (const sessionId of [...result.cleaned, ...result.alreadyGone]) clearTerminateSessionState(client, sessionId, hostId);
 			onSaved();
 		},
 	});
 	useEffect(() => {
+		if (!hostConnected) return;
 		onSaveState?.({
 			phase: mutation.isError ? "failed" : mutation.isPending ? "saving" : dirty ? "pending" : savedAt ? "saved" : "idle",
 			dirty,
 			requestPending: mutation.isPending,
 			error: mutation.error instanceof Error ? mutation.error.message : undefined,
 		});
-	}, [dirty, mutation.error, mutation.isError, mutation.isPending, onSaveState, savedAt]);
+	}, [hostConnected, dirty, mutation.error, mutation.isError, mutation.isPending, onSaveState, savedAt]);
 	const updateSteps = (kind: ScriptKind, steps: string[]) => {
 		setDrafts((current) => ({ ...current, [kind]: steps }));
 		setSavedAt(false);

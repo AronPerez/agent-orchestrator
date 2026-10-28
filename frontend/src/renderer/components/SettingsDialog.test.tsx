@@ -89,13 +89,17 @@ vi.mock("../hooks/useWorkspaceQuery", () => ({
 }));
 
 vi.mock("./CuesDialog", () => ({
-	CuesSettings: ({ projectId, onBusyChange }: { projectId: string; onBusyChange?: (busy: boolean) => void }) => (
-		<div data-testid="project-cues-settings">{projectId}<button onClick={() => onBusyChange?.(true)} type="button">Make cues busy</button></div>
+	CuesSettings: ({ projectId, hostId, onBusyChange }: { projectId: string; hostId?: string; onBusyChange?: (busy: boolean) => void }) => (
+		<div data-testid="project-cues-settings" data-host-id={hostId}>{projectId}<button onClick={() => onBusyChange?.(true)} type="button">Make cues busy</button></div>
 	),
 }));
 
 vi.mock("./ProjectScriptsSettings", () => ({
-	ProjectScriptsSettings: ({ projectId }: { projectId: string }) => <div data-testid="project-scripts-settings">{projectId}</div>,
+	ProjectScriptsSettings: ({ projectId, hostId }: { projectId: string; hostId?: string }) => <div data-testid="project-scripts-settings" data-host-id={hostId}>{projectId}</div>,
+}));
+
+vi.mock("./ProjectEnvironmentSettings", () => ({
+	ProjectEnvironmentSettings: ({ projectId, hostId }: { projectId: string; hostId?: string }) => <div data-testid="project-environment-settings" data-host-id={hostId}>{projectId}</div>,
 }));
 
 // The dialog reads the cloud gate to decide whether the Cloud nav page exists;
@@ -233,13 +237,16 @@ describe("SettingsDialog", () => {
 		expect(await screen.findByRole("button", { name: "Start pending save" })).toBeInTheDocument();
 	});
 
-	it("does not offer local environment or workspace scripts for a remote project", async () => {
+	it("offers Scripts, Environment, and Cues on the remote project host", async () => {
 		useUiStore.getState().openProjectSettings("proj-1", "box-a");
 		renderSettingsDialog();
 
 		expect(await screen.findByRole("button", { name: "Agents" })).toBeInTheDocument();
-		expect(screen.queryByRole("button", { name: "Scripts" })).not.toBeInTheDocument();
-		expect(screen.queryByRole("button", { name: "Environment" })).not.toBeInTheDocument();
+		for (const section of ["Scripts", "Environment", "Cues"]) {
+			await userEvent.click(screen.getByRole("button", { name: section }));
+			expect(screen.getByTestId(`project-${section.toLowerCase()}-settings`)).toHaveTextContent("proj-1");
+			expect(screen.getByTestId(`project-${section.toLowerCase()}-settings`)).toHaveAttribute("data-host-id", "box-a");
+		}
 	});
 
 	it("opens the requested global settings page", async () => {
