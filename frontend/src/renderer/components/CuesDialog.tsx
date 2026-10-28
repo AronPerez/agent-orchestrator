@@ -9,6 +9,8 @@ import {
 	useProjectCuesQuery,
 	useUpdateCueMutation,
 } from "../hooks/useCuesQuery";
+import { useConnectedHosts } from "../hooks/useHostConnection";
+import { LOCAL_HOST, refKey } from "../lib/hosts";
 import { CUE_LIMITS } from "../lib/cues";
 import type { CueDTO, CueInput } from "../lib/cues";
 import { Button } from "./ui/button";
@@ -26,6 +28,7 @@ import { SettingsOptionMenu } from "./settings/SettingsOptionMenu";
 
 type CuesSettingsProps = {
 	projectId: string;
+	hostId?: string;
 	onBusyChange?: (busy: boolean) => void;
 	createOnly?: boolean;
 	onCreated?: () => void;
@@ -67,21 +70,23 @@ function CueTypeIcon({ type, className }: { type: CueType; className?: string })
 }
 
 export function CuesSettings(props: CuesSettingsProps) {
-	return <ProjectCuesSettings key={props.projectId} {...props} />;
+	return <ProjectCuesSettings key={refKey({ host: props.hostId ?? LOCAL_HOST, id: props.projectId })} {...props} />;
 }
 
-function ProjectCuesSettings({ projectId, onBusyChange, createOnly = false, onCreated, onCancel, hideCueActions = false }: CuesSettingsProps) {
+function ProjectCuesSettings({ projectId, hostId, onBusyChange, createOnly = false, onCreated, onCancel, hideCueActions = false }: CuesSettingsProps) {
 	const { t } = useTranslation();
 	const showGlobalToast = useUiStore((state) => state.showGlobalToast);
-	const cuesQuery = useProjectCuesQuery(projectId, !createOnly);
+	const connected = useConnectedHosts();
+	const hostConnected = !hostId || connected.includes(hostId);
+	const cuesQuery = useProjectCuesQuery(projectId, !createOnly && hostConnected, hostId);
 	useEffect(() => {
-		if (!createOnly && cuesQuery.isError && !cuesQuery.isFetching) {
-			showGlobalToast(t("cues.loadFailed"), apiErrorMessage(cuesQuery.error, t("cues.loadFailed")), { tone: "error", dedupeKey: `cues.load.${projectId}` });
+		if (hostConnected && !createOnly && cuesQuery.isError && !cuesQuery.isFetching) {
+			showGlobalToast(t("cues.loadFailed"), apiErrorMessage(cuesQuery.error, t("cues.loadFailed")), { tone: "error", dedupeKey: `cues.load.${refKey({ host: hostId ?? LOCAL_HOST, id: projectId })}` });
 		}
-	}, [projectId, createOnly, cuesQuery.isError, cuesQuery.isFetching, cuesQuery.error, showGlobalToast, t]);
-	const createMutation = useCreateCueMutation(projectId);
-	const updateMutation = useUpdateCueMutation(projectId);
-	const deleteMutation = useDeleteCueMutation(projectId);
+	}, [hostId, hostConnected, projectId, createOnly, cuesQuery.isError, cuesQuery.isFetching, cuesQuery.error, showGlobalToast, t]);
+	const createMutation = useCreateCueMutation(projectId, hostId);
+	const updateMutation = useUpdateCueMutation(projectId, hostId);
+	const deleteMutation = useDeleteCueMutation(projectId, hostId);
 
 	const [formOpen, setFormOpen] = useState<"new" | CueDTO | null>(createOnly ? "new" : null);
 	const [deletingCue, setDeletingCue] = useState<CueDTO | null>(null);
@@ -116,7 +121,7 @@ function ProjectCuesSettings({ projectId, onBusyChange, createOnly = false, onCr
 	};
 
 	const handleSave = async () => {
-		if (formOpen === null || pending.current) return;
+		if (!hostConnected || formOpen === null || pending.current) return;
 		const trimmedName = draft.name.trim();
 		if (!trimmedName) {
 			setFormError(t("cues.nameRequired"));
@@ -166,7 +171,7 @@ function ProjectCuesSettings({ projectId, onBusyChange, createOnly = false, onCr
 	};
 
 	const handleDelete = async () => {
-		if (!deletingCue || pending.current) return;
+		if (!hostConnected || !deletingCue || pending.current) return;
 		pending.current = true;
 		setDeleting(true);
 		try {
@@ -329,6 +334,8 @@ function ProjectCuesSettings({ projectId, onBusyChange, createOnly = false, onCr
 			) : null}
 		</div>;
 	};
+
+	if (!hostConnected) return <p role="alert" className="text-pretty text-sm text-error">{t("remote.hostOffline")}</p>;
 
 	// The footer action only exists once a list is showing; an empty list carries its own button.
 	const empty = !formOpen && !cuesQuery.isError && (!cuesQuery.isFetchedAfterMount || (cuesQuery.data ?? []).length === 0);

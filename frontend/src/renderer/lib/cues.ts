@@ -1,5 +1,6 @@
 import type { components } from "../../api/schema";
 import { apiClient, apiErrorMessage } from "./api-client";
+import { clientForHost } from "./host-clients";
 
 export type CueDTO = components["schemas"]["CueResponse"];
 export type CueInput = components["schemas"]["CueDefinitionRequest"];
@@ -11,18 +12,18 @@ export const CUE_LIMITS = {
 	prompt: 16384,
 } as const;
 
-export const projectCuesQueryKey = (projectId: string) => ["cues", projectId] as const;
+export const projectCuesQueryKey = (projectId: string, hostId?: string) => hostId ? ["cues", hostId, projectId] as const : ["cues", projectId] as const;
 
-export async function fetchProjectCues(projectId: string): Promise<CueDTO[]> {
-	const { data, error } = await apiClient.GET("/api/v1/projects/{projectId}/cues", {
+export async function fetchProjectCues(projectId: string, hostId?: string): Promise<CueDTO[]> {
+	const { data, error } = await (hostId ? clientForHost(hostId) : apiClient).GET("/api/v1/projects/{projectId}/cues", {
 		params: { path: { projectId } },
 	});
 	if (error) throw new Error(apiErrorMessage(error, "Could not load cues"));
 	return data?.cues ?? [];
 }
 
-export async function createCue(projectId: string, input: CueInput): Promise<CueDTO> {
-	const { data, error } = await apiClient.POST("/api/v1/projects/{projectId}/cues", {
+export async function createCue(projectId: string, input: CueInput, hostId?: string): Promise<CueDTO> {
+	const { data, error } = await (hostId ? clientForHost(hostId) : apiClient).POST("/api/v1/projects/{projectId}/cues", {
 		params: { path: { projectId } },
 		body: input,
 	});
@@ -30,8 +31,8 @@ export async function createCue(projectId: string, input: CueInput): Promise<Cue
 	return data.cue;
 }
 
-export async function updateCue(cueId: string, input: CueInput): Promise<CueDTO> {
-	const { data, error } = await apiClient.PATCH("/api/v1/cues/{cueId}", {
+export async function updateCue(cueId: string, input: CueInput, hostId?: string): Promise<CueDTO> {
+	const { data, error } = await (hostId ? clientForHost(hostId) : apiClient).PATCH("/api/v1/cues/{cueId}", {
 		params: { path: { cueId } },
 		body: input,
 	});
@@ -39,8 +40,8 @@ export async function updateCue(cueId: string, input: CueInput): Promise<CueDTO>
 	return data.cue;
 }
 
-export async function deleteCue(cueId: string): Promise<void> {
-	const { error } = await apiClient.DELETE("/api/v1/cues/{cueId}", {
+export async function deleteCue(cueId: string, hostId?: string): Promise<void> {
+	const { error } = await (hostId ? clientForHost(hostId) : apiClient).DELETE("/api/v1/cues/{cueId}", {
 		params: { path: { cueId } },
 	});
 	if (error) throw new Error(apiErrorMessage(error, "Could not delete cue"));

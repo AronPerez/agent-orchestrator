@@ -67,6 +67,27 @@ async function startUpstream(
 	return { port: (upstream.address() as AddressInfo).port, seen };
 }
 
+it.each([
+	["GET", "/api/v1/projects/shared", undefined],
+	["PUT", "/api/v1/projects/shared", { displayName: "Remote", config: { env: { TOKEN: "value" }, postCreate: ["npm ci"], preRemove: ["echo cleanup"] } }],
+	["POST", "/api/v1/sessions/cleanup?project=shared", undefined],
+	["GET", "/api/v1/projects/shared/cues", undefined],
+	["POST", "/api/v1/projects/shared/cues", { name: "Tests", type: "command", command: "npm test" }],
+	["PATCH", "/api/v1/cues/cue-shared", { name: "Review", type: "agent", prompt: "Review changes" }],
+	["DELETE", "/api/v1/cues/cue-shared", undefined],
+])("forwards remote settings %s %s with authentication and the original body", async (method, route, body) => {
+	const { port, seen } = await startUpstream((request) => {
+		expect(request.method).toBe(method);
+		return { status: 200, body: '{"ok":true}' };
+	});
+	proxy = await startRemoteProxy({ label: "workbox", url: `http://127.0.0.1:${port}`, password: "pw" });
+	const response = await fetch(`${proxy.base}${route}`, {
+		method, headers: { "Content-Type": "application/json", Origin: "app://renderer" }, body: JSON.stringify(body),
+	});
+	expect(await response.json()).toEqual({ ok: true });
+	expect(seen).toEqual([expect.objectContaining({ url: route, auth: "Bearer pw", origin: undefined, body: body ? JSON.stringify(body) : "" })]);
+});
+
 describe("startRemoteProxy", () => {
 	it("serves authenticated artifact files and sibling assets without replacing an app preview", async () => {
 		const { port, seen } = await startUpstream(() => ({ status: 200, body: "artifact", headers: { "set-cookie": "secret=1" } }));
