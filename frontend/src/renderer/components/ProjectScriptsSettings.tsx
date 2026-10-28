@@ -20,10 +20,10 @@ export function ProjectScriptsSettings({ projectId, hostId, onSaveState }: { pro
 	const { t } = useTranslation();
 	const client = useQueryClient();
 	const { query, hostConnected } = useProjectSettingsQuery(projectId, hostId);
+	const saveBlockedReason = !hostConnected ? t("remote.hostOffline") : query.isError ? apiErrorMessage(query.error) : undefined;
 	useEffect(() => {
-		if (!hostConnected) onSaveState?.({ phase: "idle" });
-		else if (query.isError) onSaveState?.({ phase: "failed", error: apiErrorMessage(query.error) });
-	}, [hostConnected, onSaveState, query.isError, query.error]);
+		if (!query.data) onSaveState?.({ phase: saveBlockedReason ? "failed" : "idle", error: saveBlockedReason });
+	}, [onSaveState, query.data, saveBlockedReason]);
 	const offline = <p role="alert" className="text-pretty text-sm text-error">{t("remote.hostOffline")}</p>;
 	if (!hostConnected && !query.data) return offline;
 	if (query.isLoading) return <p className="text-sm text-settings-muted">{t("settings.project.loading")}</p>;
@@ -34,7 +34,7 @@ export function ProjectScriptsSettings({ projectId, hostId, onSaveState }: { pro
 			<ScriptsEditor
 				key={refKey({ host: hostId ?? LOCAL_HOST, id: projectId })}
 				hostId={hostId}
-				hostConnected={hostConnected && !query.isError}
+				saveBlockedReason={saveBlockedReason}
 				project={query.data}
 				onSaveState={onSaveState}
 				onSaved={() => {
@@ -46,7 +46,7 @@ export function ProjectScriptsSettings({ projectId, hostId, onSaveState }: { pro
 	</>;
 }
 
-function ScriptsEditor({ project, hostId, hostConnected, onSaveState, onSaved }: { project: Project; hostId?: string; hostConnected: boolean; onSaveState?: (state: ProjectSettingsSaveState) => void; onSaved: () => void }) {
+function ScriptsEditor({ project, hostId, saveBlockedReason, onSaveState, onSaved }: { project: Project; hostId?: string; saveBlockedReason?: string; onSaveState?: (state: ProjectSettingsSaveState) => void; onSaved: () => void }) {
 	const { t } = useTranslation();
 	const client = useQueryClient();
 	const scratch = project.kind === "scratch";
@@ -64,7 +64,7 @@ function ScriptsEditor({ project, hostId, hostConnected, onSaveState, onSaved }:
 	const dirty = JSON.stringify(commands) !== saved;
 	const mutation = useMutation({
 		mutationFn: async (scripts: typeof commands) => {
-			if (!hostConnected) throw new Error(t("remote.hostOffline"));
+			if (saveBlockedReason) throw new Error(saveBlockedReason);
 			const current = await (hostId ? clientForHost(hostId) : apiClient).GET("/api/v1/projects/{id}", { params: { path: { id: project.id } } });
 			if (current.error) throw new Error(apiErrorMessage(current.error));
 			if (current.data?.status !== "ok" || !current.data.project) throw new Error(t("settings.project.degraded"));
@@ -80,7 +80,7 @@ function ScriptsEditor({ project, hostId, hostConnected, onSaveState, onSaved }:
 	});
 	const retry = useMutation({
 		mutationFn: async () => {
-			if (!hostConnected) throw new Error(t("remote.hostOffline"));
+			if (saveBlockedReason) throw new Error(saveBlockedReason);
 			const { data, error } = await (hostId ? clientForHost(hostId) : apiClient).POST("/api/v1/sessions/cleanup", { params: { query: { project: project.id } } });
 			if (error) throw new Error(apiErrorMessage(error));
 			return data;
@@ -91,14 +91,13 @@ function ScriptsEditor({ project, hostId, hostConnected, onSaveState, onSaved }:
 		},
 	});
 	useEffect(() => {
-		if (!hostConnected) return;
 		onSaveState?.({
-			phase: mutation.isError ? "failed" : mutation.isPending ? "saving" : dirty ? "pending" : savedAt ? "saved" : "idle",
+			phase: mutation.isPending ? "saving" : saveBlockedReason || mutation.isError ? "failed" : dirty ? "pending" : savedAt ? "saved" : "idle",
 			dirty,
 			requestPending: mutation.isPending,
-			error: mutation.error instanceof Error ? mutation.error.message : undefined,
+			error: saveBlockedReason ?? (mutation.error instanceof Error ? mutation.error.message : undefined),
 		});
-	}, [hostConnected, dirty, mutation.error, mutation.isError, mutation.isPending, onSaveState, savedAt]);
+	}, [saveBlockedReason, dirty, mutation.error, mutation.isError, mutation.isPending, onSaveState, savedAt]);
 	const updateSteps = (kind: ScriptKind, steps: string[]) => {
 		setDrafts((current) => ({ ...current, [kind]: steps }));
 		setSavedAt(false);

@@ -49,8 +49,8 @@ type CueDraft = {
 	prompt: string;
 };
 
-function emptyDraft(): CueDraft {
-	return { name: "", type: "command", command: "", prompt: "" };
+function emptyDraft(type: CueType = "command"): CueDraft {
+	return { name: "", type, command: "", prompt: "" };
 }
 
 function draftFromDTO(cue: CueDTO): CueDraft {
@@ -90,7 +90,7 @@ function ProjectCuesSettings({ projectId, hostId, onBusyChange, createOnly = fal
 
 	const [formOpen, setFormOpen] = useState<"new" | CueDTO | null>(createOnly ? "new" : null);
 	const [deletingCue, setDeletingCue] = useState<CueDTO | null>(null);
-	const [draft, setDraft] = useState<CueDraft>(emptyDraft);
+	const [draft, setDraft] = useState<CueDraft>(() => emptyDraft(hostId ? "agent" : "command"));
 	const [formError, setFormError] = useState<string | null>(null);
 	const [saving, setSaving] = useState(false);
 	const [deleting, setDeleting] = useState(false);
@@ -108,13 +108,13 @@ function ProjectCuesSettings({ projectId, hostId, onBusyChange, createOnly = fal
 
 	const openNew = () => {
 		if (pending.current) return;
-		setDraft(emptyDraft());
+		setDraft(emptyDraft(hostId ? "agent" : "command"));
 		setFormError(null);
 		setFormOpen("new");
 	};
 
 	const openEdit = (cue: CueDTO) => {
-		if (pending.current) return;
+		if (pending.current || (hostId && cueType(cue) === "command")) return;
 		setDraft(draftFromDTO(cue));
 		setFormError(null);
 		setFormOpen(cue);
@@ -122,6 +122,10 @@ function ProjectCuesSettings({ projectId, hostId, onBusyChange, createOnly = fal
 
 	const handleSave = async () => {
 		if (!hostConnected || formOpen === null || pending.current) return;
+		if (hostId && (draft.type === "command" || (formOpen !== "new" && cueType(formOpen) === "command"))) {
+			setFormError(t("cues.remoteCommandReadOnly"));
+			return;
+		}
 		const trimmedName = draft.name.trim();
 		if (!trimmedName) {
 			setFormError(t("cues.nameRequired"));
@@ -246,7 +250,7 @@ function ProjectCuesSettings({ projectId, hostId, onBusyChange, createOnly = fal
 											type="button"
 											variant="ghost"
 											size="icon-sm"
-											disabled={busy}
+											disabled={busy || Boolean(hostId && cueKind === "command")}
 											onClick={() => openEdit(cue)}
 											aria-label={t("cues.edit")}
 											title={t("cues.edit")}
@@ -300,7 +304,7 @@ function ProjectCuesSettings({ projectId, hostId, onBusyChange, createOnly = fal
 					aria-label={t("cues.typeLabel")}
 					value={draft.type}
 					options={[
-						{ value: "command", label: t("cues.typeName.command"), icon: <CueTypeIcon type="command" className="size-3! shrink-0 text-settings-muted" /> },
+						{ value: "command", label: t("cues.typeName.command"), disabled: Boolean(hostId), icon: <CueTypeIcon type="command" className="size-3! shrink-0 text-settings-muted" /> },
 						{ value: "agent", label: t("cues.typeName.agent"), icon: <CueTypeIcon type="agent" className="size-3! shrink-0 text-settings-muted" /> },
 					]}
 					onChange={(type) => setDraft((current) => ({ ...current, type }))}
@@ -342,6 +346,7 @@ function ProjectCuesSettings({ projectId, hostId, onBusyChange, createOnly = fal
 	return (
 		<div className="flex flex-col gap-(--size-settings-section-inner-gap)">
 			<p className="text-sm leading-5 text-settings-muted">{t("cues.settingsDescription")}</p>
+			{hostId && <p className="text-sm leading-5 text-settings-muted">{t("cues.remoteCommandReadOnly")}</p>}
 			<fieldset className="min-w-0" disabled={busy}>{formOpen ? renderForm() : renderList()}</fieldset>
 			{empty ? null : (
 			<div className="flex items-center justify-end gap-2">

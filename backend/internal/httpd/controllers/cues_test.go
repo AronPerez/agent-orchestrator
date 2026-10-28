@@ -2,6 +2,7 @@ package controllers_test
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/requestscope"
+	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
 	cuesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/cue"
 	shelltermsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/shellterm"
 )
@@ -577,5 +579,65 @@ func TestCuesAPI_BoundedSingleJSONBody(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestCuesAPI_AuthenticatedLANAuthoringPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name, method, path, body string
+		authenticated            bool
+		storedType               domain.CueType
+		wantStatus               int
+	}{
+		{"unauthenticated agent create", "POST", "/api/v1/projects/portfolio/cues", `{"name":"Tests","type":"agent","prompt":"Run tests"}`, false, "", http.StatusUnauthorized},
+		{"agent create", "POST", "/api/v1/projects/portfolio/cues", `{"name":"Tests","type":"agent","prompt":"Run tests"}`, true, "", http.StatusCreated},
+		{"agent update", "PATCH", "/api/v1/cues/cue-def456", `{"name":"Tests","type":"agent","prompt":"Run tests"}`, true, domain.CueTypeAgent, http.StatusOK},
+		{"command create", "POST", "/api/v1/projects/portfolio/cues", `{"name":"Tests","type":"command","command":"npm test"}`, true, "", http.StatusForbidden},
+		{"command update", "PATCH", "/api/v1/cues/cue-def456", `{"name":"Tests","type":"command","command":"npm test"}`, true, domain.CueTypeCommand, http.StatusForbidden},
+		{"command conversion", "PATCH", "/api/v1/cues/cue-def456", `{"name":"Tests","type":"agent","prompt":"Run tests"}`, true, domain.CueTypeCommand, http.StatusForbidden},
+		{"agent conversion", "PATCH", "/api/v1/cues/cue-def456", `{"name":"Tests","type":"command","command":"npm test"}`, true, domain.CueTypeAgent, http.StatusForbidden},
+		{"command invocation", "POST", "/api/v1/cues/cue-def456/invoke", `{}`, true, domain.CueTypeCommand, http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &fakeCueService{created: sampleCue(), updated: sampleCue(), got: domain.Cue{Type: tc.storedType}, enforceLoopback: true}
+			log := slog.New(slog.NewTextHandler(io.Discard, nil))
+			router := httpd.NewRouterWithControl(config.Config{}, log, nil, httpd.APIDeps{Cues: svc}, httpd.ControlDeps{})
+			lan := httpd.NewMobileLAN(router, "test-host", 0, log, nil)
+			lan.SetPasswordHash(mobilebridge.HashPassword("test-password"))
+			port, err := lan.StartLoopback(0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = lan.Stop(context.Background()) })
+			req, err := http.NewRequest(tc.method, fmt.Sprintf("http://127.0.0.1:%d%s", port, tc.path), strings.NewReader(tc.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			if tc.authenticated {
+				req.Header.Set("Authorization", "Bearer test-password")
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != tc.wantStatus {
+				t.Fatalf("status=%d want=%d body=%s", resp.StatusCode, tc.wantStatus, body)
+			}
+			if tc.wantStatus == http.StatusForbidden && !strings.Contains(string(body), "CUE_COMMAND_LOOPBACK_REQUIRED") {
+				t.Fatalf("unexpected policy error: %s", body)
+			}
+			if tc.wantStatus >= 400 && svc.createCalls+svc.updateCalls != 0 {
+				t.Fatal("denied request reached the write service")
+			}
+			if svc.gotInvoke.AllowDirectCommand {
+				t.Fatal("LAN invocation was granted loopback authority")
+			}
+		})
 	}
 }

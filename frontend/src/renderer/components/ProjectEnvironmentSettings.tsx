@@ -49,10 +49,10 @@ export function ProjectEnvironmentSettings({ projectId, hostId, onSaveState }: {
 	const { t } = useTranslation();
 	const queryClient = useQueryClient();
 	const { query, hostConnected } = useProjectSettingsQuery(projectId, hostId);
+	const saveBlockedReason = !hostConnected ? t("remote.hostOffline") : query.isError ? apiErrorMessage(query.error) : undefined;
 	useEffect(() => {
-		if (!hostConnected) onSaveState?.({ phase: "idle" });
-		else if (query.isError) onSaveState?.({ phase: "failed", error: apiErrorMessage(query.error) });
-	}, [hostConnected, onSaveState, query.isError, query.error]);
+		if (!query.data) onSaveState?.({ phase: saveBlockedReason ? "failed" : "idle", error: saveBlockedReason });
+	}, [onSaveState, query.data, saveBlockedReason]);
 	const offline = <p role="alert" className="text-pretty text-sm text-error">{t("remote.hostOffline")}</p>;
 	if (!hostConnected && !query.data) return offline;
 	if (query.isLoading) return <div className="project-settings-form" aria-busy="true" aria-label={t("settings.project.loading")}><section><div className="settings-grouped-rows flex w-full flex-col"><div className="settings-row-bar" /></div></section></div>;
@@ -63,7 +63,7 @@ export function ProjectEnvironmentSettings({ projectId, hostId, onSaveState }: {
 			<VariablesEditor
 				key={refKey({ host: hostId ?? LOCAL_HOST, id: projectId })}
 				hostId={hostId}
-				hostConnected={hostConnected && !query.isError}
+				saveBlockedReason={saveBlockedReason}
 				projectId={projectId}
 				initial={query.data.config?.env}
 				onSaveState={onSaveState}
@@ -76,10 +76,10 @@ export function ProjectEnvironmentSettings({ projectId, hostId, onSaveState }: {
 	</>;
 }
 
-function VariablesEditor({ projectId, hostId, hostConnected, initial, onSaveState, onSaved }: {
+function VariablesEditor({ projectId, hostId, saveBlockedReason, initial, onSaveState, onSaved }: {
 	projectId: string;
 	hostId?: string;
-	hostConnected: boolean;
+	saveBlockedReason?: string;
 	initial?: Record<string, string>;
 	onSaveState?: (state: ProjectSettingsSaveState) => void;
 	onSaved: () => void;
@@ -110,7 +110,7 @@ function VariablesEditor({ projectId, hostId, hostConnected, initial, onSaveStat
 	const unsaveable = dirty && envDraft === null;
 	const mutation = useMutation({
 		mutationFn: async (env: Record<string, string>) => {
-			if (!hostConnected) throw new Error(t("remote.hostOffline"));
+			if (saveBlockedReason) throw new Error(saveBlockedReason);
 			// Refresh before the whole-config PUT so this page cannot erase changes made elsewhere.
 			const current = await (hostId ? clientForHost(hostId) : apiClient).GET("/api/v1/projects/{id}", { params: { path: { id: projectId } } });
 			if (current.error) throw new Error(apiErrorMessage(current.error));
@@ -130,15 +130,14 @@ function VariablesEditor({ projectId, hostId, hostConnected, initial, onSaveStat
 		},
 	});
 	useEffect(() => {
-		if (!hostConnected) return;
 		onSaveState?.({
-			phase: mutation.isError ? "failed" : mutation.isPending ? "saving" : dirty ? "pending" : savedAt ? "saved" : "idle",
+			phase: mutation.isPending ? "saving" : saveBlockedReason || mutation.isError ? "failed" : dirty ? "pending" : savedAt ? "saved" : "idle",
 			dirty,
-			unsaveable,
+			unsaveable: unsaveable && !saveBlockedReason,
 			requestPending: mutation.isPending,
-			error: mutation.error instanceof Error ? mutation.error.message : undefined,
+			error: saveBlockedReason ?? (mutation.error instanceof Error ? mutation.error.message : undefined),
 		});
-	}, [hostConnected, dirty, mutation.error, mutation.isError, mutation.isPending, onSaveState, savedAt, unsaveable]);
+	}, [saveBlockedReason, dirty, mutation.error, mutation.isError, mutation.isPending, onSaveState, savedAt, unsaveable]);
 	const showEmpty = rows.length === 0 && activeTab === "variables";
 	const update = (next: Row[]) => { attempted.current = null; setRows(next); setError(null); setSavedAt(false); setImportedCount(null); };
 	const importPasted = () => {
@@ -185,12 +184,12 @@ function VariablesEditor({ projectId, hostId, hostConnected, initial, onSaveStat
 	};
 	// Autosave: a draft with valid, unique names saves shortly after the last edit.
 	useEffect(() => {
-		if (!hostConnected || !dirty || mutation.isPending || activeTab !== "variables" || envDraft === null) return;
+		if (saveBlockedReason || !dirty || mutation.isPending || activeTab !== "variables" || envDraft === null) return;
 		const key = JSON.stringify(envDraft);
 		if (attempted.current === key) return;
 		const timer = window.setTimeout(() => { attempted.current = key; mutation.mutate(envDraft); }, 700);
 		return () => window.clearTimeout(timer);
-	}, [hostConnected, activeTab, dirty, mutation, rows]); // eslint-disable-line react-hooks/exhaustive-deps
+	}, [saveBlockedReason, activeTab, dirty, mutation, rows]); // eslint-disable-line react-hooks/exhaustive-deps
 	return <form id="project-settings-form" className="project-settings-form flex min-h-full flex-col gap-(--size-settings-section-inner-gap)" onSubmit={(event) => { event.preventDefault(); save(); }}>
 		<p className="text-sm leading-5 text-settings-muted">{t("settings.project.environmentDescription")}</p>
 		{showEmpty ? <ProjectSettingsSection title={t("settings.project.environmentVariables")} titleHidden grouped>

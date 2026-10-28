@@ -554,6 +554,7 @@
 	"cues.commandRequired": "Se requiere un comando.",
 	"cues.promptRequired": "Se requiere una instrucción.",
 	"cues.fieldTooLong": "{{field}} debe tener como máximo {{limit}} bytes UTF-8.",
+	"cues.remoteCommandReadOnly": "Crea y edita las cues de comando en el escritorio al que pertenecen. Aquí puedes gestionar las cues de agente.",
 	"cues.settingsDescription": "Guarda comandos e instrucciones para agentes como atajos reutilizables para este proyecto.",
 	"cues.title": "Cues",
 	"cues.typeLabel": "Type",

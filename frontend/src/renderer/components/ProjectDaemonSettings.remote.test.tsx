@@ -38,7 +38,7 @@ type Section = keyof typeof sections;
 const project = (host: string) => ({ id: "shared", name: host, kind: "single_repo", config: {
 	postCreate: [`echo ${host}`], preRemove: ["echo cleanup"], env: { TOKEN: host }, autoReview: true,
 } });
-const cue = { id: "cue-shared", projectId: "shared", name: "Tests", type: "command", command: "npm test" };
+const cue = { id: "cue-shared", projectId: "shared", name: "Tests", type: "agent", prompt: "Run tests" };
 function connect(...hosts: string[]) {
 	act(() => { mocks.connected = hosts; for (const listener of mocks.listeners) listener(); });
 }
@@ -123,22 +123,22 @@ it("retries remote cleanup without clearing a same-ID local session's error", as
 	expect(mocks.localPost).not.toHaveBeenCalled();
 });
 
-it("creates, edits, and deletes remote cues with host-scoped invalidation", async () => {
+it("creates, edits, and deletes remote agent cues with host-scoped invalidation", async () => {
 	connect("box-a");
 	const { client } = setup("Cues");
 	const invalidate = vi.spyOn(client, "invalidateQueries");
 	await userEvent.click(await screen.findByRole("button", { name: "New cue" }));
 	fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Remote tests" } });
-	fireEvent.change(screen.getByLabelText("Command"), { target: { value: "npm test" } });
+	fireEvent.change(screen.getByLabelText("Agent instruction"), { target: { value: "Run tests" } });
 	await userEvent.click(screen.getByRole("button", { name: "Create" }));
 	await waitFor(() => expect(mocks.post).toHaveBeenCalledWith("box-a", "/api/v1/projects/{projectId}/cues", {
-		params: { path: { projectId: "shared" } }, body: { name: "Remote tests", type: "command", command: "npm test" },
+		params: { path: { projectId: "shared" } }, body: { name: "Remote tests", type: "agent", prompt: "Run tests" },
 	}));
 	await userEvent.click(await screen.findByRole("button", { name: "Edit" }));
-	fireEvent.change(screen.getByLabelText("Command"), { target: { value: "npm run lint" } });
+	fireEvent.change(screen.getByLabelText("Agent instruction"), { target: { value: "Run lint" } });
 	await userEvent.click(screen.getByRole("button", { name: "Save" }));
 	await waitFor(() => expect(mocks.patch).toHaveBeenCalledWith("box-a", "/api/v1/cues/{cueId}", {
-		params: { path: { cueId: "cue-shared" } }, body: { name: "box-a", type: "command", command: "npm run lint" },
+		params: { path: { cueId: "cue-shared" } }, body: { name: "box-a", type: "agent", prompt: "Run lint" },
 	}));
 	await userEvent.click(await screen.findByRole("button", { name: "Delete" }));
 	await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Delete" }));
@@ -186,4 +186,19 @@ it.each(["Scripts", "Environment"] as const)("%s keeps a draft when a reconnect 
 	await act(async () => { await client.invalidateQueries({ queryKey: ["project", "box-a", "shared"] }); });
 	await waitFor(() => expect(screen.getByLabelText(label)).toBeEnabled());
 	expect(screen.getByLabelText(label)).toHaveValue("keep this draft");
+});
+
+it("explains the remote command policy and blocks command creation, editing, and conversion", async () => {
+	connect("box-a");
+	mocks.get.mockResolvedValue({ data: { cues: [{ ...cue, type: "command", command: "npm test", prompt: undefined }] } });
+	setup("Cues");
+	expect(await screen.findByText("Tests")).toBeVisible();
+	expect(screen.getByText("Create and edit command cues on the owning desktop. You can manage agent cues here.")).toBeVisible();
+	expect(screen.getByRole("button", { name: "Edit" })).toBeDisabled();
+	await userEvent.click(screen.getByRole("button", { name: "New cue" }));
+	expect(screen.getByLabelText("Agent instruction")).toBeVisible();
+	fireEvent.keyDown(screen.getByRole("button", { name: "Type" }), { key: "ArrowDown" });
+	expect(await screen.findByRole("menuitem", { name: "Command" })).toHaveAttribute("aria-disabled", "true");
+	expect(mocks.post).not.toHaveBeenCalled();
+	expect(mocks.patch).not.toHaveBeenCalled();
 });
