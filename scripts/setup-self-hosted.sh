@@ -352,6 +352,8 @@ PY
 		fi
 	}
 	launchctl bootout "gui/$(id -u)" "$plist" >/dev/null 2>&1 || true
+	# A disabled label (e.g. toggled off in Login Items) makes bootstrap fail with EIO.
+	launchctl enable "gui/$(id -u)/dev.aoagents.self-hosted"
 	if ! stop_running_daemon; then
 		restore_previous_launch_agent
 		exit 1

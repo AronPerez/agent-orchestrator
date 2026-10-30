@@ -312,7 +312,7 @@ PY
 		env HOME="$tmp/home" PATH="$tmp/bin" AO_HOST_INSTALL_DIR="$tmp/host" TEST_AO_HOST_ROOT="$tmp/host" \
 			TEST_AO_READY_AFTER_INSTALL=1 TEST_LAUNCHCTL_LOG="$tmp/launch.log" \
 			/bin/bash "$script" --bundle "$bundle" > "$tmp/out" 2>&1 || { cat "$tmp/out" >&2; exit 1; }
-		[[ "$(tr '\n' ' ' < "$tmp/launch.log")" == 'bootout stop bootstrap ' ]] || { printf '%s\n' 'daemon not stopped between bootout and bootstrap' >&2; cat "$tmp/launch.log" >&2; exit 1; }
+		[[ "$(tr '\n' ' ' < "$tmp/launch.log")" == 'bootout enable stop bootstrap ' ]] || { printf '%s\n' 'daemon not stopped between bootout and bootstrap' >&2; cat "$tmp/launch.log" >&2; exit 1; }
 		python3 -c 'import plistlib,sys; assert plistlib.load(open(sys.argv[1],"rb"))["KeepAlive"] == {"SuccessfulExit": False}' \
 			"$tmp/home/Library/LaunchAgents/dev.aoagents.self-hosted.plist" || { printf '%s\n' 'KeepAlive restarts clean exits' >&2; exit 1; }
 		good="$(readlink "$tmp/host/current")"
