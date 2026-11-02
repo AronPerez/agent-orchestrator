@@ -28,6 +28,12 @@ printf '%s\n' '#!/bin/sh' 'case "$1" in' \
 	'    if [ -n "${TEST_AO_READY_FOR_TARGET:-}" ] && [ "$(readlink "$TEST_AO_HOST_ROOT/current")" = "$TEST_AO_READY_FOR_TARGET" ]; then' \
 	'      TEST_AO_STATE=ready TEST_AO_EXE="$TEST_AO_HOST_ROOT/current/resources/daemon/ao"' \
 	'    fi' \
+	'    if [ -n "${TEST_AO_READY_AFTER_POLLS:-}" ] && [ -L "$TEST_AO_HOST_ROOT/current" ]; then' \
+	'      echo poll >> "$TEST_AO_POLL_LOG"' \
+	'      if [ "$(/usr/bin/wc -l < "$TEST_AO_POLL_LOG")" -ge "$TEST_AO_READY_AFTER_POLLS" ]; then' \
+	'        TEST_AO_STATE=ready TEST_AO_EXE="$TEST_AO_HOST_ROOT/current/resources/daemon/ao"' \
+	'      fi' \
+	'    fi' \
 	'    printf '\''{"state":"%s","executablePath":"%s"}\n'\'' "${TEST_AO_STATE:-stopped}" "${TEST_AO_EXE:-}" ;;' \
 	'  remote-host)' \
 	'    if [ -n "${TEST_AO_TUNNEL_PAIRING:-}" ]; then' \
@@ -242,8 +248,23 @@ PY
 		[[ ! -e "$tmp/unit-enabled" ]] || { printf '%s\n' 'failed first install left the unit enabled' >&2; exit 1; }
 		grep -Fqx -- '--user disable --now ao-self-hosted.service' "$tmp/systemctl.log" || { printf '%s\n' 'failed first install did not stop and disable the unit' >&2; exit 1; }
 		;;
-	failed-readiness)
+	slow-readiness)
+		# A daemon still running startup migrations is alive but not yet ready;
+		# the installer must wait for it instead of rolling back after 20s.
 		printf '%s\n' '#!/bin/sh' 'if [ "$2" = restart ]; then echo restart >> "$TEST_SYSTEMCTL_LOG"; fi' > "$tmp/bin/systemctl"
+		chmod +x "$tmp/bin/systemctl"
+		rm "$tmp/bin/sleep"
+		printf '%s\n' '#!/bin/sh' 'exit 0' > "$tmp/bin/sleep"
+		chmod +x "$tmp/bin/sleep"
+		COPYFILE_DISABLE=1 tar -czf "$bundle" -C "$tmp/pkg" resources
+		env HOME="$tmp/home" PATH="$tmp/bin" AO_HOST_INSTALL_DIR="$tmp/host" TEST_AO_HOST_ROOT="$tmp/host" \
+			TEST_AO_READY_AFTER_POLLS=40 TEST_AO_POLL_LOG="$tmp/polls.log" TEST_SYSTEMCTL_LOG="$tmp/restarts.log" \
+			/bin/bash "$script" --bundle "$bundle" > "$tmp/out" 2>&1 || { printf '%s\n' 'slow but alive daemon was rolled back' >&2; cat "$tmp/out" >&2; exit 1; }
+		[[ "$(grep -c '^restart$' "$tmp/restarts.log")" == 1 ]] || { printf '%s\n' 'slow daemon was restarted' >&2; exit 1; }
+		;;
+	failed-readiness)
+		# The unit reports inactive: the daemon exited, so waiting longer cannot help.
+		printf '%s\n' '#!/bin/sh' 'if [ "$2" = restart ]; then echo restart >> "$TEST_SYSTEMCTL_LOG"; fi' 'if [ "$2" = is-active ]; then exit 3; fi' > "$tmp/bin/systemctl"
 		chmod +x "$tmp/bin/systemctl"
 		rm "$tmp/bin/sleep"
 		printf '%s\n' '#!/bin/sh' 'exit 0' > "$tmp/bin/sleep"
@@ -289,6 +310,20 @@ PY
 		[[ "$(readlink "$tmp/host/current")" == "$good" ]] || { printf '%s\n' 'failed Mac upgrade left the new release active' >&2; exit 1; }
 		[[ "$(grep -c '^bootstrap$' "$tmp/upgrade-launch.log")" == 2 ]] || { printf '%s\n' 'failed Mac upgrade did not restart the previous agent' >&2; exit 1; }
 		[[ "$(grep -c '^bootout$' "$tmp/upgrade-launch.log")" == 2 ]] || { printf '%s\n' 'failed Mac upgrade did not unload the failed agent' >&2; exit 1; }
+		;;
+	slow-mac-readiness)
+		rm "$tmp/bin/uname" "$tmp/bin/sleep"
+		printf '%s\n' '#!/bin/sh' 'case "$1" in -s) echo Darwin ;; -m) echo arm64 ;; esac' > "$tmp/bin/uname"
+		printf '%s\n' '#!/bin/sh' 'echo "$1" >> "$TEST_LAUNCHCTL_LOG"' \
+			'if [ "$1" = print ]; then printf "\tstate = running\n\tpid = 42\n"; fi' > "$tmp/bin/launchctl"
+		printf '%s\n' '#!/bin/sh' 'exit 0' > "$tmp/bin/sleep"
+		chmod +x "$tmp/bin/uname" "$tmp/bin/launchctl" "$tmp/bin/sleep"
+		COPYFILE_DISABLE=1 tar -czf "$bundle" -C "$tmp/pkg" resources
+		env HOME="$tmp/home" PATH="$tmp/bin" AO_HOST_INSTALL_DIR="$tmp/host" TEST_AO_HOST_ROOT="$tmp/host" \
+			TEST_AO_READY_AFTER_POLLS=40 TEST_AO_POLL_LOG="$tmp/polls.log" TEST_LAUNCHCTL_LOG="$tmp/launch.log" \
+			/bin/bash "$script" --bundle "$bundle" > "$tmp/out" 2>&1 || { printf '%s\n' 'slow but alive Mac daemon was rolled back' >&2; cat "$tmp/out" >&2; exit 1; }
+		[[ "$(grep -c '^bootstrap$' "$tmp/launch.log")" == 1 ]] || { printf '%s\n' 'slow Mac daemon was restarted' >&2; exit 1; }
+		[[ -L "$tmp/host/current" ]] || { printf '%s\n' 'slow Mac install left no current release' >&2; exit 1; }
 		;;
 	failed-mac-first)
 		rm "$tmp/bin/uname"
@@ -468,6 +503,6 @@ PY
 			printf '%s\n' '--app with --nightly was accepted' >&2; exit 1
 		fi
 		;;
-	*) printf 'Usage: %s {app|release-channels|bootstrap-nightly|bad-tmux|no-systemd|inactive-systemd|prune|failed-restarts|failed-first-install|failed-readiness|failed-mac-bootstrap|failed-mac-readiness|failed-mac-first|mac-stop|relative-current|concurrent|interrupted|piped|tunnel-pairing|tunnel-unavailable|tunnel-linked}\n' "$0" >&2; exit 2 ;;
+	*) printf 'Usage: %s {app|release-channels|bootstrap-nightly|bad-tmux|no-systemd|inactive-systemd|prune|failed-restarts|failed-first-install|failed-readiness|slow-readiness|failed-mac-bootstrap|failed-mac-readiness|slow-mac-readiness|failed-mac-first|mac-stop|relative-current|concurrent|interrupted|piped|tunnel-pairing|tunnel-unavailable|tunnel-linked}\n' "$0" >&2; exit 2 ;;
 esac
 printf 'PASS %s\n' "$1"

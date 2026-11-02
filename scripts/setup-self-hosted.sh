@@ -366,10 +366,27 @@ PY
 	fi
 fi
 
-for attempt in {1..20}; do
+# Startup migrations on a large database (a VACUUM can take minutes) keep the
+# daemon alive but unready, so wait while the service process is still running
+# and roll back early only once it has exited.
+service_running() {
+	if [[ "$platform" == Linux ]]; then
+		systemctl --user is-active --quiet ao-self-hosted.service
+	else
+		[[ "$(launchctl print "gui/$(id -u)/dev.aoagents.self-hosted" 2>/dev/null)" == *"state = running"* ]]
+	fi
+}
+for ((attempt = 1; attempt <= 900; attempt++)); do
 	status="$("$host_root/current/resources/daemon/ao" status --json)"
 	state="$(printf '%s' "$status" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("state", ""))')"
 	[[ "$state" == ready ]] && break
+	# Give the service manager a few seconds to spawn the process before trusting "not running".
+	if ((attempt > 5)) && ! service_running; then
+		break
+	fi
+	if ((attempt == 20)); then
+		printf '%s\n' 'AO is still starting (database migrations can take several minutes); waiting.' >&2
+	fi
 	sleep 1
 done
 [[ "$state" == ready ]] || {
