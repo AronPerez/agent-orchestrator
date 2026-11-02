@@ -281,6 +281,7 @@ func (m *Manager) confirmTUISwitchTargetAlive(ctx context.Context, rec domain.Se
 // preflightTUISwitchTarget refuses a target with no binary or sign-in while the
 // source still runs, so the user's agent is not stopped for nothing. A probe
 // that cannot answer does not block: the launch itself still validates.
+// The sign-in check uses the credentials the relaunch will get.
 func (m *Manager) preflightTUISwitchTarget(ctx context.Context, rec domain.SessionRecord, project domain.ProjectRecord, harness domain.AgentHarness, target ports.Agent) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -301,10 +302,15 @@ func (m *Manager) preflightTUISwitchTarget(ctx context.Context, rec domain.Sessi
 		}
 		return nil
 	}
-	if checker, ok := target.(ports.AgentAuthChecker); ok {
-		if status, err := checker.AuthStatus(ctx); err == nil && status == ports.AgentAuthStatusUnauthorized {
-			return &domain.ProviderSwitchError{Kind: domain.ProviderSwitchRefusalUnavailable, Detail: fmt.Sprintf("%s is not signed in", harness), Cause: ports.ErrAgentAuthRequired}
-		}
+	status := ports.AgentAuthStatusUnknown
+	var err error
+	if runtimeChecker, ok := target.(ports.AgentRuntimeAuthChecker); ok && m.dataDir != "" {
+		status, _, _, err = runtimeChecker.AuthStatusForRuntime(ctx, m.dataDir)
+	} else if checker, ok := target.(ports.AgentAuthChecker); ok {
+		status, err = checker.AuthStatus(ctx)
+	}
+	if err == nil && status == ports.AgentAuthStatusUnauthorized {
+		return &domain.ProviderSwitchError{Kind: domain.ProviderSwitchRefusalUnavailable, Detail: fmt.Sprintf("%s is not signed in", harness), Cause: ports.ErrAgentAuthRequired}
 	}
 	return nil
 }

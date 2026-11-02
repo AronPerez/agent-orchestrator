@@ -115,23 +115,24 @@ type containerReapConfig struct {
 // client. The CLI sets common fields via flags and the whole object via
 // --config-json.
 type projectConfig struct {
-	ContainerReap      *containerReapConfig `json:"containerReap,omitempty"`
-	CanonicalRepoURL   string               `json:"canonicalRepoURL,omitempty"`
-	DefaultBranch      string               `json:"defaultBranch,omitempty"`
-	SessionPrefix      string               `json:"sessionPrefix,omitempty"`
-	Env                map[string]string    `json:"env,omitempty"`
-	Symlinks           []string             `json:"symlinks,omitempty"`
-	PostCreate         []string             `json:"postCreate,omitempty"`
-	AgentRules         string               `json:"agentRules,omitempty"`
-	AgentRulesFile     string               `json:"agentRulesFile,omitempty"`
-	OrchestratorRules  string               `json:"orchestratorRules,omitempty"`
-	OrchestratorPrompt string               `json:"orchestratorPrompt,omitempty"`
-	AgentConfig        agentConfig          `json:"agentConfig,omitempty"`
-	Worker             roleOverride         `json:"worker,omitempty"`
-	Orchestrator       roleOverride         `json:"orchestrator,omitempty"`
-	TrackerIntake      trackerIntakeConfig  `json:"trackerIntake,omitempty"`
-	SessionInterface   string               `json:"sessionInterface,omitempty"`
-	AutoReview         bool                 `json:"autoReview,omitempty"`
+	ContainerReap         *containerReapConfig `json:"containerReap,omitempty"`
+	CanonicalRepoURL      string               `json:"canonicalRepoURL,omitempty"`
+	DefaultBranch         string               `json:"defaultBranch,omitempty"`
+	SessionPrefix         string               `json:"sessionPrefix,omitempty"`
+	Env                   map[string]string    `json:"env,omitempty"`
+	Symlinks              []string             `json:"symlinks,omitempty"`
+	PostCreate            []string             `json:"postCreate,omitempty"`
+	AgentRules            string               `json:"agentRules,omitempty"`
+	AgentRulesFile        string               `json:"agentRulesFile,omitempty"`
+	OrchestratorRules     string               `json:"orchestratorRules,omitempty"`
+	OrchestratorRulesFile string               `json:"orchestratorRulesFile,omitempty"`
+	OrchestratorPrompt    string               `json:"orchestratorPrompt,omitempty"`
+	AgentConfig           agentConfig          `json:"agentConfig,omitempty"`
+	Worker                roleOverride         `json:"worker,omitempty"`
+	Orchestrator          roleOverride         `json:"orchestrator,omitempty"`
+	TrackerIntake         trackerIntakeConfig  `json:"trackerIntake,omitempty"`
+	SessionInterface      string               `json:"sessionInterface,omitempty"`
+	AutoReview            bool                 `json:"autoReview,omitempty"`
 	// WorkersRequestReview must round-trip through set-config so a CLI edit
 	// of another field never silently turns it off.
 	WorkersRequestReview bool             `json:"workersRequestReview,omitempty"`
@@ -155,6 +156,7 @@ type projectSetConfigOptions struct {
 	agentRules             string
 	agentRulesFile         string
 	orchestratorRules      string
+	orchestratorRulesFile  string
 	orchestratorPromptFile string
 	env                    []string
 	symlink                []string
@@ -358,6 +360,7 @@ func newProjectSetConfigCommand(ctx *commandContext) *cobra.Command {
 	f.StringVar(&opts.agentRulesFile, "agent-rules-file", "", "Repo-relative file containing worker standing instructions")
 	f.StringVar(&opts.orchestratorRules, "orchestrator-rules", "", "Project-specific standing instructions for orchestrator sessions")
 	f.StringVar(&opts.orchestratorPromptFile, "orchestrator-prompt-file", "", "Path to a file with the orchestrator system prompt, or - for stdin")
+	f.StringVar(&opts.orchestratorRulesFile, "orchestrator-rules-file", "", "Repo-relative file containing orchestrator standing instructions")
 	f.StringArrayVar(&opts.env, "env", nil, "Env var KEY=VALUE forwarded into sessions (repeatable)")
 	f.StringArrayVar(&opts.symlink, "symlink", nil, "Repo-relative path to symlink into workspaces (repeatable)")
 	f.StringArrayVar(&opts.postCreate, "post-create", nil, "Command to run after workspace creation (repeatable)")
@@ -400,19 +403,20 @@ func buildProjectConfig(opts projectSetConfigOptions, orchestratorPrompt string)
 		return projectConfig{}, err
 	}
 	cfg := projectConfig{
-		CanonicalRepoURL:   opts.canonicalRepoURL,
-		DefaultBranch:      opts.defaultBranch,
-		SessionPrefix:      opts.sessionPrefix,
-		Env:                env,
-		Symlinks:           opts.symlink,
-		PostCreate:         opts.postCreate,
-		AgentRules:         opts.agentRules,
-		AgentRulesFile:     opts.agentRulesFile,
-		OrchestratorRules:  opts.orchestratorRules,
-		OrchestratorPrompt: orchestratorPrompt,
-		AgentConfig:        agentConfig{Model: opts.model, Permissions: opts.permission},
-		Worker:             roleOverride{Agent: opts.workerAgent},
-		Orchestrator:       roleOverride{Agent: opts.orchestratorAgent},
+		CanonicalRepoURL:      opts.canonicalRepoURL,
+		DefaultBranch:         opts.defaultBranch,
+		SessionPrefix:         opts.sessionPrefix,
+		Env:                   env,
+		Symlinks:              opts.symlink,
+		PostCreate:            opts.postCreate,
+		AgentRules:            opts.agentRules,
+		AgentRulesFile:        opts.agentRulesFile,
+		OrchestratorRules:     opts.orchestratorRules,
+		OrchestratorRulesFile: opts.orchestratorRulesFile,
+		OrchestratorPrompt:    orchestratorPrompt,
+		AgentConfig:           agentConfig{Model: opts.model, Permissions: opts.permission},
+		Worker:                roleOverride{Agent: opts.workerAgent},
+		Orchestrator:          roleOverride{Agent: opts.orchestratorAgent},
 		TrackerIntake: trackerIntakeConfig{
 			Enabled:  opts.trackerIntake,
 			Repo:     opts.trackerRepo,

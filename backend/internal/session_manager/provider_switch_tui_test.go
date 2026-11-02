@@ -217,3 +217,33 @@ func TestSwitchTUIProviderUsesProjectScopedAuthBeforeStoppingSource(t *testing.T
 		})
 	}
 }
+
+// runtimeAuthSwitchTarget is signed in only through a login AO saved itself,
+// like Claude Code with a setup-token login and no native login.
+type runtimeAuthSwitchTarget struct {
+	fakeAgent
+	dataDir string
+}
+
+func (runtimeAuthSwitchTarget) AuthStatus(context.Context) (ports.AgentAuthStatus, error) {
+	return ports.AgentAuthStatusUnauthorized, nil
+}
+
+func (a runtimeAuthSwitchTarget) AuthStatusForRuntime(_ context.Context, dataDir string) (ports.AgentAuthStatus, domain.AgentAccountIdentity, []domain.AgentAuthDiagnostic, error) {
+	if dataDir != a.dataDir {
+		return ports.AgentAuthStatusUnauthorized, domain.AgentAccountIdentity{}, nil, nil
+	}
+	return ports.AgentAuthStatusAuthorized, domain.AgentAccountIdentity{}, nil, nil
+}
+
+func TestPreflightTUISwitchTargetAcceptsAOSavedLogin(t *testing.T) {
+	target := runtimeAuthSwitchTarget{dataDir: "/daemon/data"}
+	m := New(Deps{DataDir: "/daemon/data"})
+	if err := m.preflightTUISwitchTarget(context.Background(), domain.SessionRecord{}, domain.ProjectRecord{}, domain.HarnessClaudeCode, target); err != nil {
+		t.Fatalf("preflight refused a target signed in through an AO-saved login: %v", err)
+	}
+	m = New(Deps{})
+	if err := m.preflightTUISwitchTarget(context.Background(), domain.SessionRecord{}, domain.ProjectRecord{}, domain.HarnessClaudeCode, target); !errors.Is(err, ports.ErrAgentAuthRequired) {
+		t.Fatalf("preflight without a data directory = %v, want the native sign-in refusal", err)
+	}
+}
