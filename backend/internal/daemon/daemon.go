@@ -1091,8 +1091,9 @@ func Run(buildVersion string) error {
 				usage.flush(ctx, false)
 			}
 		},
-		Mobile:      mc,
-		BrowserLive: browserLive,
+		Mobile:         mc,
+		BrowserLive:    browserLive,
+		BrowserRuntime: browserBroker,
 		DevImport: devimportsvc.New(devimportsvc.Deps{
 			Store:         store,
 			TargetDataDir: cfg.DataDir,

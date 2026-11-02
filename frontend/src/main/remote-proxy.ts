@@ -6,6 +6,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { IncompatibleRemoteVersionError, readRemoteIdentity } from "./remote-request";
 import type { RemoteEntry } from "./remotes-store";
+import type { BrowserRuntimeLinkHandle } from "./browser-runtime-link";
 
 // Loopback proxy fronting one remote AO daemon. It exists because the renderer
 // cannot authenticate to a remote daemon itself: EventSource and WebSocket
@@ -19,6 +20,7 @@ import type { RemoteEntry } from "./remotes-store";
 // stripped before forwarding: the remote daemon and its logs never see it.
 export type ActiveProxy = {
 	base: string;
+	browserRuntime?: BrowserRuntimeLinkHandle;
 	listeningAddress?: string;
 	previewUrl: (sessionId: string, sourceUrl: string) => string;
 	resolvePreviewUrl: (sessionId: string, viewedUrl: string) => string;
@@ -41,6 +43,13 @@ function previewHostForSession(id: string, label = "ao-preview"): string {
 	}
 	if (bits) encoded += alphabet[(value << (5 - bits)) & 31];
 	return `${label}.${encoded.match(/.{1,50}/g)?.join(".")}.localhost`;
+}
+
+export function isRemoteLoopbackURL(url: URL): boolean {
+	const host = url.hostname.replace(/^\[|\]$/g, "").replace(/\.+$/, "");
+	return host === "localhost" || host === "0.0.0.0" || host === "::1" ||
+		(isIP(host) === 4 && host.startsWith("127.")) ||
+		(isIP(host) === 6 && /^::ffff:7f[0-9a-f]{2}:/i.test(host));
 }
 
 function previewAssetPath(entry: string, requested: string): string {
@@ -290,6 +299,15 @@ export async function startRemoteProxy(entry: RemoteEntry, rendererOrigin = REND
 			socket.destroy();
 			return;
 		}
+		// Browser pages must not register as the desktop runtime, even though
+		// the proxy normally strips Origin before forwarding authenticated APIs.
+		let route: string;
+		try { route = decodeURIComponent(path.slice(prefix.length).split("?", 1)[0]); }
+		catch { socket.destroy(); return; }
+		if (route.replace(/\/+$/, "") === "/browser-runtime" && (req.headers.origin || req.headers["sec-fetch-site"])) {
+			socket.destroy();
+			return;
+		}
 		if (!validPreviewOrigin(req.headers.host, req.headers.origin, preview?.kind)) {
 			socket.destroy();
 			return;
@@ -370,15 +388,18 @@ export async function startRemoteProxy(entry: RemoteEntry, rendererOrigin = REND
 			}
 			const previous = previewSessions.get(sessionId);
 			if (previous?.sourceUrl === sourceUrl) return previous.url;
+			// Agent navigation within the selected app must not revoke the origin
+			// used by the renderer or another tab of the same session.
+			if (previous && previewHosts.get(previous.host)?.kind === "app" && new URL(previous.sourceHref).origin === parsed.origin) {
+				return `http://${previous.host}${parsed.pathname}${parsed.search}${parsed.hash}`;
+			}
 			if (previous) {
 				previewHosts.delete(previous.host);
 				previewSessions.delete(sessionId);
 			}
 			let kind: PreviewTarget["kind"];
 			const previewHost = parsed.hostname.replace(/^\[|\]$/g, "").replace(/\.+$/, "");
-			const loopback = previewHost === "localhost" || previewHost === "0.0.0.0" || previewHost === "::1" ||
-				(isIP(previewHost) === 4 && previewHost.startsWith("127.")) ||
-				(isIP(previewHost) === 6 && /^::ffff:7f[0-9a-f]{2}:/i.test(previewHost));
+			const loopback = isRemoteLoopbackURL(parsed);
 			if (previewHost === previewHostForSession(sessionId)) kind = "static";
 			else if (parsed.protocol === "http:" && loopback) kind = "app";
 			else if (loopback) throw new Error("unsupported local preview protocol");

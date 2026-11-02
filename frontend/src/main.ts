@@ -185,6 +185,7 @@ import { registerRemotesIpc, remotesFilePath } from "./main/remotes-main";
 import { createLocalHostIdentity } from "./main/remote-request";
 import { RemoteRegistry } from "./main/remote-registry";
 import { startRemoteProxy } from "./main/remote-proxy";
+import { attachRemoteBrowserRuntime } from "./main/remote-browser-runtime";
 import { AGENT_SWITCH_VISIBILITY_IPC_CHANNEL } from "./shared/agent-switch-observability";
 
 // Globals injected at compile time by @electron-forge/plugin-vite.
@@ -1504,8 +1505,8 @@ function disposeBrowserRuntimeLink(): void {
 	browserRuntimeLinkIdentity = null;
 }
 
-function publishBrowserRuntimeState(connected: boolean): void {
-	getShellWebContents()?.send("browser:runtimeState", { connected } satisfies BrowserRuntimeState);
+function publishBrowserRuntimeState(connected: boolean, hostId?: string): void {
+	getShellWebContents()?.send("browser:runtimeState", { connected, hostId } satisfies BrowserRuntimeState);
 }
 
 function reconnectBrowserRuntimeLink(): void {
@@ -2334,14 +2335,15 @@ ipcMain.handle("theme:persist-terminal",(_event, scheme: unknown) => {
 // Renderer calls this when focus lands on real shell UI (not the titlebar menu), so menu:action's panel fallback below doesn't go stale.
 ipcMain.on("shell:focus", () => browserViewHost?.forgetLastFocusedPanel());
 
-ipcMain.handle("browser:runtime:reconnect", (event) => {
+ipcMain.handle("browser:runtime:reconnect", (event, hostId?: string) => {
 		if (event.sender !== getShellWebContents()) throw new Error("Untrusted browser runtime request.");
-		reconnectBrowserRuntimeLink();
+		if (hostId) remoteRegistry.browserRuntime(hostId)?.reconnect();
+		else reconnectBrowserRuntimeLink();
 });
 
-ipcMain.handle("browser:runtime:state", (event): BrowserRuntimeState => {
+ipcMain.handle("browser:runtime:state", (event, hostId?: string): BrowserRuntimeState => {
 	if (event.sender !== getShellWebContents()) throw new Error("Untrusted browser runtime request.");
-	return { connected: browserRuntimeLink?.connected ?? false };
+	return { hostId, connected: (hostId ? remoteRegistry.browserRuntime(hostId) : browserRuntimeLink)?.connected ?? false };
 });
 
 ipcMain.on("browser:overlay", (event, open: unknown) => {
@@ -2505,11 +2507,18 @@ async function chooseDirectory(title: string, defaultPath?: string): Promise<str
 	return result.filePaths[0] ?? null;
 }
 
-const remoteRegistry = new RemoteRegistry((entry) => {
+const remoteRegistry = new RemoteRegistry(async (entry) => {
 	// Node reports "null" for the custom app:// origin; only Vite's HTTP URL
 	// needs parsing. Never reflect an arbitrary request Origin here.
 	const devUrl = typeof MAIN_WINDOW_VITE_DEV_SERVER_URL === "undefined" ? undefined : MAIN_WINDOW_VITE_DEV_SERVER_URL;
-	return startRemoteProxy(entry, devUrl ? new URL(devUrl).origin : RENDERER_ORIGIN);
+	const proxy = await startRemoteProxy(entry, devUrl ? new URL(devUrl).origin : RENDERER_ORIGIN);
+	return attachRemoteBrowserRuntime(entry.hostId!, proxy, async (command, signal) => {
+		const host = browserViewHost;
+		// App shutdown may already have disposed every view before proxies close.
+		if (!host && command.action === "__destroy-session") return { destroyed: false };
+		if (!host) throw new Error("Browser target owner is unavailable");
+		return host.execute(command.sessionId, command.action, command.args, signal);
+	}, (connected) => publishBrowserRuntimeState(connected, entry.hostId));
 });
 registerRemotesIpc(ipcMain, {
 	file: remotesFilePath(),

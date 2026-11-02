@@ -1,3 +1,4 @@
+import type { BrowserRuntimeState } from "../../main/browser-view-host";
 import {
 	resetClosedTabsForTest,
 	resetConsumedPreviewTriggersForTest,
@@ -37,6 +38,7 @@ function createSlot(rect: Partial<DOMRect> = {}) {
 
 function setupBridge() {
 	const listeners = new Set<Listener>();
+	const runtimeListeners = new Set<(state: BrowserRuntimeState) => void>();
 	const tabsListeners = new Set<TabsListener>();
 	const devtoolsListeners = new Set<DevToolsListener>();
 	const activityListeners = new Set<ActivityListener>();
@@ -148,7 +150,7 @@ function setupBridge() {
 		showProfileMenu: vi.fn(),
 		selectProfile: vi.fn(),
 		reconnectRuntime: vi.fn(async () => undefined),
-		getRuntimeState: vi.fn(async () => ({ connected: false })),
+		getRuntimeState: vi.fn(async (): Promise<BrowserRuntimeState> => ({ connected: false })),
 		historySuggestions: vi.fn(async () => []),
 		historyFavicon: vi.fn(async () => undefined),
 		captureScreenshot: vi.fn(async () => undefined),
@@ -181,7 +183,10 @@ function setupBridge() {
 			activityListeners.add(listener);
 			return () => activityListeners.delete(listener);
 		}),
-		onRuntimeState: vi.fn(() => () => undefined),
+		onRuntimeState: vi.fn((listener: (state: BrowserRuntimeState) => void) => {
+			runtimeListeners.add(listener);
+			return () => runtimeListeners.delete(listener);
+		}),
 		onProfileState: vi.fn((listener: ProfileListener) => {
 			profileListeners.add(listener);
 			return () => profileListeners.delete(listener);
@@ -195,6 +200,9 @@ function setupBridge() {
 		}),
 		emit(state: BrowserNavState) {
 			listeners.forEach((listener) => listener(state));
+		},
+		emitRuntime(state: BrowserRuntimeState) {
+			runtimeListeners.forEach((listener) => listener(state));
 		},
 		emitTabs(state: Parameters<TabsListener>[0]) {
 			tabsListeners.forEach((listener) => listener(state));
@@ -280,6 +288,25 @@ describe("useBrowserView", () => {
 		await waitFor(() => expect(bridge.getRuntimeState).toHaveBeenCalled());
 		await waitFor(() => expect(result.current.browserRuntimeConnected).toBe(false));
 		expect(slot).toBeInTheDocument();
+	});
+
+	it("uses the remote host's runtime state and reconnect target", async () => {
+		const bridge = setupBridge();
+		bridge.getRuntimeState.mockResolvedValueOnce({ hostId: "remote-a", connected: true });
+		const { result } = renderHook(() => useBrowserView({
+			sessionId: "remote:remote-a:sess-1", active: true, poppedOut: false,
+			origin: { hostId: "remote-a", sessionId: "sess-1", proxyBase: "http://127.0.0.1:3000/token" },
+		}));
+		await waitFor(() => expect(bridge.getRuntimeState).toHaveBeenCalledWith("remote-a"));
+		await waitFor(() => expect(result.current.browserRuntimeConnected).toBe(true));
+		act(() => bridge.emitRuntime({ connected: false }));
+		expect(result.current.browserRuntimeConnected).toBe(true);
+		act(() => bridge.emitRuntime({ hostId: "remote-b", connected: false }));
+		expect(result.current.browserRuntimeConnected).toBe(true);
+		act(() => bridge.emitRuntime({ hostId: "remote-a", connected: false }));
+		expect(result.current.browserRuntimeConnected).toBe(false);
+		await act(async () => result.current.reconnectBrowserRuntime());
+		expect(bridge.reconnectRuntime).toHaveBeenCalledWith("remote-a");
 	});
 
 	it("keeps bounds revisions increasing when the same native view remounts", async () => {

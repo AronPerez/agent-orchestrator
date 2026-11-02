@@ -48,6 +48,10 @@ export class RemoteRegistry {
 		});
 	}
 
+	browserRuntime(hostId: string) {
+		return [...this.live.values()].find(({ view }) => view.hostId === hostId)?.proxy.browserRuntime;
+	}
+
 	previewUrl(hostId: string, sessionId: string, sourceUrl: string): string {
 		const connected = [...this.live.values()].find(({ view }) => view.hostId === hostId);
 		if (!connected) throw new Error(`Host ${hostId} is not connected`);

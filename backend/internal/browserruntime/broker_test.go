@@ -537,3 +537,43 @@ func TestBrokerExclusiveKeepsFirstRuntime(t *testing.T) {
 		t.Fatalf("connected runtime = %q, want first", got)
 	}
 }
+
+func TestRemoteRuntimePriority(t *testing.T) {
+	broker := New(nil, "local-secret")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	remote, remoteServer := net.Pipe()
+	defer remote.Close()
+	go broker.ServeRemoteConn(ctx, remoteServer)
+	handshake(t, json.NewEncoder(remote), json.NewDecoder(remote), "")
+	waitConnected(t, broker)
+
+	assertRejected := func() {
+		t.Helper()
+		client, server := net.Pipe()
+		defer client.Close()
+		_ = client.SetDeadline(time.Now().Add(3 * time.Second))
+		go broker.ServeRemoteConn(ctx, server)
+		if err := json.NewEncoder(client).Encode(wireMessage{Type: "hello", Version: ProtocolVersion}); err != nil {
+			t.Fatal(err)
+		}
+		var reply wireMessage
+		if err := json.NewDecoder(client).Decode(&reply); err != nil {
+			t.Fatal(err)
+		}
+		if reply.Type != "hello-rejected" || reply.Error.Code != "BROWSER_RUNTIME_BUSY" {
+			t.Fatalf("second remote accepted: %#v", reply)
+		}
+	}
+	assertRejected()
+
+	local, localServer := net.Pipe()
+	defer local.Close()
+	go broker.serveConn(ctx, localServer)
+	handshake(t, json.NewEncoder(local), json.NewDecoder(local), "local-secret")
+	_ = remote.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, err := remote.Read(make([]byte, 1)); err == nil {
+		t.Fatal("local runtime did not replace remote")
+	}
+	assertRejected()
+}
