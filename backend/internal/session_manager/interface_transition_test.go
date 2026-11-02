@@ -2893,6 +2893,40 @@ func TestTransitionMessageRetryUsesStableChatIdempotencyKey(t *testing.T) {
 	}
 }
 
+// A terminated target cannot accept delivery until it is restored. That is not
+// a transient failure: reporting it kept the dispatcher on its 2s error retry
+// and logged an error every cycle for as long as the session stayed dead.
+func TestTransitionMessagesForTerminatedSessionWaitWithoutFailing(t *testing.T) {
+	manager, store, _, chat, _ := newTransitionManager(t, domain.SessionModeChat)
+	rec := store.sessions["session-1"]
+	rec.IsTerminated = true
+	store.sessions["session-1"] = rec
+	now := time.Now()
+	transition := domain.SessionInterfaceTransition{
+		ID: "transition-terminated", SessionID: "session-1",
+		SourceMode: domain.SessionModeTUI, TargetMode: domain.SessionModeChat,
+		Policy:    domain.SessionInterfaceTransitionDrain,
+		Phase:     domain.SessionInterfaceTransitionCompleted,
+		CreatedAt: now, UpdatedAt: now, CompletedAt: now,
+	}
+	store.transitions[transition.ID] = transition
+	if err := store.EnqueueSessionInterfaceTransitionMessage(
+		context.Background(), transition.ID, "handoff-message-1", "review is ready", now, ports.MessageDeliveryOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.deliverAllTransitionMessages(context.Background()); err != nil {
+		t.Fatalf("terminated target reported as a delivery failure: %v", err)
+	}
+	if len(chat.relayIDs) != 0 {
+		t.Fatalf("delivered to a terminated session: %v", chat.relayIDs)
+	}
+	pending, err := store.ListPendingSessionInterfaceTransitionMessages(context.Background(), transition.ID)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("pending = %+v err=%v, want the message kept for a restored session", pending, err)
+	}
+}
+
 func TestTransitionDeliveryWaitsForFirstTUISignal(t *testing.T) {
 	manager, store, _, _, _ := newTransitionManager(t, domain.SessionModeTUI)
 	rec := store.sessions["session-1"]

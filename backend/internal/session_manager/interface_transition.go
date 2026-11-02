@@ -1611,9 +1611,13 @@ func (m *Manager) deliverAllTransitionMessages(ctx context.Context) error {
 	}
 	var failures []error
 	for _, transition := range transitions {
-		if err := m.deliverTransitionMessages(ctx, transition); err != nil {
-			failures = append(failures, err)
+		err := m.deliverTransitionMessages(ctx, transition)
+		// A terminated or deleted target is not a retryable failure. Its messages
+		// stay pending so a restored session still receives them on the idle scan.
+		if err == nil || errors.Is(err, ErrTerminated) || errors.Is(err, ErrNotFound) {
+			continue
 		}
+		failures = append(failures, err)
 	}
 	return errors.Join(failures...)
 }
