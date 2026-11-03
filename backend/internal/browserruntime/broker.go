@@ -18,16 +18,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
 const (
 	// ProtocolVersion identifies the daemon-to-Electron browser bridge contract.
-	// v3 adds broker-issued ping frames answered by pong; v2 peers (desktop
-	// builds older than the heartbeat) are still accepted and simply not probed.
-	ProtocolVersion = 3
+	// v4 adds session ownership; v3 adds heartbeat. Legacy local peers remain supported.
+	ProtocolVersion = 4
 	// minSupportedProtocolVersion is the oldest hello the broker accepts, so a
 	// freshly built daemon keeps working against a not-yet-upgraded desktop app.
 	minSupportedProtocolVersion = 2
@@ -127,9 +124,14 @@ type Result struct {
 }
 
 type wireMessage struct {
-	Type    string `json:"type"`
-	Version int    `json:"version,omitempty"`
-	Token   string `json:"token,omitempty"`
+	Type      string             `json:"type"`
+	RuntimeID string             `json:"runtimeId,omitempty"`
+	Sessions  []domain.SessionID `json:"sessions,omitempty"`
+	Takeover  bool               `json:"takeover,omitempty"`
+	Owned     bool               `json:"owned"`
+	Revision  uint64             `json:"revision,omitempty"`
+	Version   int                `json:"version,omitempty"`
+	Token     string             `json:"token,omitempty"`
 	// Client and ClientVersion are optional hello metadata.
 	Client        string                 `json:"client,omitempty"`
 	ClientVersion string                 `json:"clientVersion,omitempty"`
@@ -147,27 +149,46 @@ type pendingResult struct {
 	err   error
 }
 
-// Broker owns the single active Electron runtime connection. Commands are
-// correlated by request id, so independent AO sessions may use the bridge
-// concurrently without sharing browser targets or results.
+// Broker routes session commands to independent desktop connections. Chrome
+// retains its exclusive single-runtime policy.
 type Broker struct {
-	log *slog.Logger
-
+	log               *slog.Logger
 	mu                sync.Mutex
-	conn              net.Conn
-	connectedAt       time.Time
-	pending           map[string]chan pendingResult
-	writeGate         chan struct{}
+	peers             map[string]*runtimePeer
+	local             *runtimePeer
+	owners            map[domain.SessionID]string
+	revision          uint64
 	connectionChanged chan struct{}
 	token             string
 	transport         string
-	client            string
-	clientVersion     string
 	verifyPeer        func(net.Conn) error
 	exclusive         bool
-	pongAt            time.Time
+	liveness          livenessConfig
+}
 
-	liveness livenessConfig
+type runtimePeer struct {
+	conn                  net.Conn
+	id                    string
+	remote                bool
+	version               int
+	connectedAt           time.Time
+	client, clientVersion string
+	pongAt                time.Time
+	writeGate             chan struct{}
+	pending               map[string]pendingRequest
+	sessions              map[domain.SessionID]struct{}
+}
+type pendingRequest struct {
+	sessionID domain.SessionID
+	result    chan pendingResult
+}
+
+func newRuntimePeer(conn net.Conn, id string, remote bool, hello wireMessage) *runtimePeer {
+	gate := make(chan struct{}, 1)
+	gate <- struct{}{}
+	return &runtimePeer{conn: conn, id: id, remote: remote, version: hello.Version, connectedAt: time.Now().UTC(),
+		client: hello.Client, clientVersion: hello.ClientVersion, pongAt: time.Now(), writeGate: gate,
+		pending: make(map[string]pendingRequest), sessions: make(map[domain.SessionID]struct{})}
 }
 
 // New creates an empty browser command broker.
@@ -175,13 +196,12 @@ func New(log *slog.Logger, token ...string) *Broker {
 	if log == nil {
 		log = slog.Default()
 	}
-	gate := make(chan struct{}, 1)
-	gate <- struct{}{}
 	runtimeToken := ""
 	if len(token) > 0 {
 		runtimeToken = token[0]
 	}
-	return &Broker{log: log, pending: make(map[string]chan pendingResult), writeGate: gate, connectionChanged: make(chan struct{}), token: runtimeToken, transport: TransportElectron, liveness: defaultLiveness}
+	return &Broker{log: log, peers: make(map[string]*runtimePeer), owners: make(map[domain.SessionID]string),
+		connectionChanged: make(chan struct{}), token: runtimeToken, transport: TransportElectron, liveness: defaultLiveness}
 }
 
 // TransportElectron is the desktop app's WebContentsView runtime.
@@ -223,82 +243,6 @@ func NewToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(raw), nil
 }
 
-// Status returns the current Electron runtime connection state.
-func (b *Broker) Status() Status {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return Status{
-		Connected:     b.conn != nil,
-		ConnectedAt:   b.connectedAt,
-		Transport:     b.transport,
-		Client:        b.client,
-		ClientVersion: b.clientVersion,
-	}
-}
-
-// Execute sends one browser command to the connected Electron runtime.
-func (b *Broker) Execute(ctx context.Context, sessionID domain.SessionID, action string, args map[string]interface{}) (Result, error) {
-	requestID := uuid.NewString()
-	resultCh := make(chan pendingResult, 1)
-
-	var conn net.Conn
-	for {
-		var err error
-		conn, err = b.waitForConnection(ctx)
-		if err != nil {
-			return Result{}, err
-		}
-		b.mu.Lock()
-		if b.conn == conn {
-			b.pending[requestID] = resultCh
-			b.mu.Unlock()
-			break
-		}
-		b.mu.Unlock()
-	}
-
-	msg := wireMessage{
-		Type:      "command",
-		RequestID: requestID,
-		SessionID: sessionID,
-		Action:    action,
-		Args:      args,
-	}
-	if err := b.write(ctx, conn, msg); err != nil {
-		b.removePending(requestID)
-		if ctx.Err() != nil {
-			return Result{}, ctx.Err()
-		}
-		b.disconnect(conn, fmt.Errorf("write browser command: %w", err))
-		return Result{}, ErrUnavailable
-	}
-
-	select {
-	case <-ctx.Done():
-		b.removePending(requestID)
-		cancelCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-		_ = b.write(cancelCtx, conn, wireMessage{Type: "cancel", RequestID: requestID})
-		cancel()
-		return Result{}, ctx.Err()
-	case result := <-resultCh:
-		if result.err != nil {
-			return Result{}, result.err
-		}
-		return Result{RequestID: requestID, Value: result.value}, nil
-	}
-}
-
-// DestroySession implements sessionmanager.BrowserLifecycle. It bypasses the
-// public browser action allowlist but still uses the authenticated runtime
-// transport, so session teardown does not depend on a mounted renderer panel.
-func (b *Broker) DestroySession(ctx context.Context, sessionID domain.SessionID) error {
-	_, err := b.Execute(ctx, sessionID, "__destroy-session", nil)
-	if errors.Is(err, ErrUnavailable) {
-		return nil
-	}
-	return err
-}
-
 // Serve accepts Electron runtime connections until ctx is cancelled. A new
 // valid runtime replaces an older connection and fails its in-flight commands;
 // this makes renderer reload/restart recovery deterministic.
@@ -320,8 +264,8 @@ func (b *Broker) Serve(ctx context.Context, ln net.Listener) error {
 }
 
 // ServeRemoteConn accepts a connection authenticated by the LAN HTTP listener.
-// The first remote desktop keeps control until it disconnects; local Electron
-// always takes priority. Never expose this entry point without bearer auth.
+// Session ownership, not connection order, chooses the command destination.
+// Never expose this entry point without bearer auth.
 func (b *Broker) ServeRemoteConn(ctx context.Context, conn net.Conn) {
 	b.serveRuntimeConn(ctx, conn, true)
 }
@@ -339,8 +283,7 @@ func (b *Broker) serveRuntimeConn(ctx context.Context, conn net.Conn, remote boo
 	b.mu.Unlock()
 	if verify != nil && !remote {
 		if err := verify(conn); err != nil {
-			b.log.Warn("browser runtime peer rejected", "transport", b.transport, "err", err)
-			_ = conn.Close()
+			b.log.Warn("browser runtime peer rejected", "err", err)
 			return
 		}
 	}
@@ -348,100 +291,108 @@ func (b *Broker) serveRuntimeConn(ctx context.Context, conn net.Conn, remote boo
 	scanner := bufio.NewScanner(conn)
 	scanner.Buffer(make([]byte, 64*1024), maxRuntimeFrameBytes)
 	if !scanner.Scan() {
-		_ = conn.Close()
 		return
 	}
-	// Answer every hello explicitly, so the runtime knows whether it was accepted
-	// instead of guessing from how long the socket stays open (#6466). Older
-	// runtimes ignore both frames.
-	helloFrame := scanner.Bytes()
 	token := b.token
 	if remote {
-		token = "" // The LAN bearer check replaces the local launch-token handoff.
+		token = ""
 	}
-	if rejection := helloRejection(helloFrame, token); rejection != nil {
+	if rejection := helloRejection(scanner.Bytes(), token); rejection != nil {
 		_ = writeHelloReply(conn, wireMessage{Type: "hello-rejected", Error: rejection})
-		_ = conn.Close()
 		return
 	}
 	var hello wireMessage
-	_ = json.Unmarshal(helloFrame, &hello) // validated by helloRejection
-	if b.busy(remote) {
+	_ = json.Unmarshal(scanner.Bytes(), &hello)
+	if remote && hello.Version < 4 {
+		_ = writeHelloReply(conn, wireMessage{Type: "hello-rejected", Error: &CommandError{Code: "BROWSER_RUNTIME_PROTOCOL_MISMATCH", Message: "Update the remote desktop to use session-scoped browsers"}})
+		return
+	}
+	id := hello.RuntimeID
+	if id == "" && (!remote && (hello.Version < 4 || b.exclusive)) {
+		id = "local"
+	}
+	if id == "" || len(id) > 128 || (remote && id == "local") {
+		_ = writeHelloReply(conn, wireMessage{Type: "hello-rejected", Error: &CommandError{Code: "BROWSER_RUNTIME_BAD_HELLO", Message: "A bounded runtime ID is required"}})
+		return
+	}
+	p := newRuntimePeer(conn, id, remote, hello)
+	b.mu.Lock()
+	busy := b.exclusive && len(b.peers) > 0
+	collision := b.peers[id] != nil && b.peers[id].remote != remote
+	b.mu.Unlock()
+	if busy || collision {
 		_ = writeHelloReply(conn, wireMessage{Type: "hello-rejected", Error: errRuntimeBusy})
-		_ = conn.Close()
 		return
 	}
 	_ = conn.SetReadDeadline(time.Time{})
-	// Nothing else can write to conn until it is published below, so hello-ok is
-	// always the first frame the runtime reads.
 	if err := writeHelloReply(conn, wireMessage{Type: "hello-ok"}); err != nil {
-		_ = conn.Close()
 		return
 	}
-
 	b.mu.Lock()
-	if (b.exclusive || remote) && b.conn != nil {
-		// Another runtime connected while this one was being accepted.
+	if (b.exclusive && len(b.peers) > 0) || (b.peers[id] != nil && b.peers[id].remote != remote) {
 		b.mu.Unlock()
-		frame, _ := json.Marshal(wireMessage{Type: "rejected", Error: errRuntimeBusy})
-		_ = conn.SetWriteDeadline(time.Now().Add(time.Second))
-		_, _ = conn.Write(append(frame, '\n'))
-		_ = conn.Close()
+		_ = writeHelloReply(conn, wireMessage{Type: "rejected", Error: errRuntimeBusy})
 		return
 	}
-	old := b.conn
-	b.conn = conn
-	b.connectedAt = time.Now().UTC()
-	b.client = hello.Client
-	b.clientVersion = hello.ClientVersion
+	old := b.peers[id]
+	if !remote && b.local != nil {
+		old = b.local
+		delete(b.peers, old.id)
+	}
+	b.peers[id] = p
+	if !remote {
+		b.local = p
+	}
+	var notices []sessionNotice
+	for _, sessionID := range hello.Sessions {
+		notices = append(notices, b.claimLocked(p, sessionID, false, "")...)
+	}
 	b.signalConnectionChangedLocked()
-	pending := b.takePendingLocked()
-	// A v3 runtime is probed; v2 peers keep their connection but are never pinged.
-	if hello.Version >= ProtocolVersion {
-		b.pongAt = time.Now()
-	}
 	b.mu.Unlock()
-	if old != nil && old != conn {
-		_ = old.Close()
+	if old != nil {
+		b.disconnect(old, nil)
 	}
-	failPending(pending, ErrUnavailable)
-	b.log.Info("browser runtime connected", "transport", b.transport, "client", hello.Client, "clientVersion", hello.ClientVersion)
-
-	if hello.Version >= ProtocolVersion {
-		go b.runLiveness(ctx, conn)
+	defer b.disconnect(p, nil)
+	b.sendNotices(ctx, notices)
+	b.log.Info("browser runtime connected", "transport", b.transport, "remote", remote, "client", hello.Client)
+	if hello.Version >= 3 {
+		go b.runLiveness(ctx, p)
 	}
-
-	go func() {
-		<-ctx.Done()
-		_ = conn.Close()
-	}()
-
+	go func() { <-ctx.Done(); _ = conn.Close() }()
 	for scanner.Scan() {
 		var msg wireMessage
-		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
+		if json.Unmarshal(scanner.Bytes(), &msg) != nil {
 			continue
 		}
-		if msg.Type == "pong" {
+		b.mu.Lock()
+		current := b.peers[id] == p
+		b.mu.Unlock()
+		if !current {
+			return
+		}
+		switch msg.Type {
+		case "pong":
 			b.mu.Lock()
-			if b.conn == conn {
-				b.pongAt = time.Now()
-			}
+			p.pongAt = time.Now()
 			b.mu.Unlock()
-			continue
+		case "attach-session":
+			if hello.Version < 4 || b.exclusive {
+				continue
+			}
+			b.mu.Lock()
+			notices := b.claimLocked(p, msg.SessionID, msg.Takeover, msg.RequestID)
+			b.mu.Unlock()
+			b.sendNotices(ctx, notices)
+		case "result":
+			if msg.RequestID != "" {
+				b.resolve(p, msg)
+			}
 		}
-		if msg.Type != "result" || msg.RequestID == "" {
-			continue
-		}
-		b.resolve(msg)
 	}
-	b.disconnect(conn, scanner.Err())
+	b.disconnect(p, scanner.Err())
 }
 
-// runLiveness probes a protocol v3 runtime until the connection goes away. An
-// unanswered ping does not immediately fail the peer — the stall check is what
-// declares it unresponsive — because a healthy runtime answers pings from its
-// socket read loop regardless of how busy its command pipeline is.
-func (b *Broker) runLiveness(ctx context.Context, conn net.Conn) {
+func (b *Broker) runLiveness(ctx context.Context, p *runtimePeer) {
 	ticker := time.NewTicker(b.liveness.interval)
 	defer ticker.Stop()
 	for {
@@ -451,18 +402,18 @@ func (b *Broker) runLiveness(ctx context.Context, conn net.Conn) {
 		case <-ticker.C:
 		}
 		b.mu.Lock()
-		replaced := b.conn != conn
-		stalled := time.Since(b.pongAt) > b.liveness.stallLimit
+		current := b.peers[p.id] == p
+		stalled := time.Since(p.pongAt) > b.liveness.stallLimit
 		b.mu.Unlock()
-		if replaced {
+		if !current {
 			return
 		}
 		if stalled {
-			b.disconnect(conn, ErrUnresponsive)
+			b.disconnect(p, ErrUnresponsive)
 			return
 		}
 		pingCtx, cancel := context.WithTimeout(ctx, time.Second)
-		err := b.write(pingCtx, conn, wireMessage{Type: "ping"})
+		err := p.write(pingCtx, wireMessage{Type: "ping"})
 		cancel()
 		if err != nil {
 			b.log.Debug("browser runtime ping failed", "err", err)
@@ -470,14 +421,19 @@ func (b *Broker) runLiveness(ctx context.Context, conn net.Conn) {
 	}
 }
 
-func (b *Broker) write(ctx context.Context, conn net.Conn, msg wireMessage) error {
+func (p *runtimePeer) write(ctx context.Context, msg wireMessage) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-b.writeGate:
+	case <-p.writeGate:
 	}
-	defer func() { b.writeGate <- struct{}{} }()
+	defer func() { p.writeGate <- struct{}{} }()
+	return p.writeFrame(ctx, msg)
+}
 
+// The caller holds writeGate, including when registering a command for cancellation.
+func (p *runtimePeer) writeFrame(ctx context.Context, msg wireMessage) error {
+	conn := p.conn
 	deadline := time.Now().Add(30 * time.Second)
 	if requested, ok := ctx.Deadline(); ok && requested.Before(deadline) {
 		deadline = requested
@@ -535,13 +491,6 @@ func (b *Broker) write(ctx context.Context, conn net.Conn, msg wireMessage) erro
 
 var errRuntimeBusy = &CommandError{Code: "BROWSER_RUNTIME_BUSY", Message: "Another browser runtime is already connected"}
 
-// busy reports whether an exclusive broker already has a runtime.
-func (b *Broker) busy(remote bool) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return (b.exclusive || remote) && b.conn != nil
-}
-
 // helloRejection reports why a runtime's first frame is not an acceptable hello,
 // or nil if it is.
 func helloRejection(frame []byte, token string) *CommandError {
@@ -583,10 +532,11 @@ func validRuntimeToken(expected, actual string) bool {
 	return hmac.Equal([]byte(expected), []byte(actual))
 }
 
-func (b *Broker) resolve(msg wireMessage) {
+func (b *Broker) resolve(p *runtimePeer, msg wireMessage) {
 	b.mu.Lock()
-	ch := b.pending[msg.RequestID]
-	delete(b.pending, msg.RequestID)
+	request := p.pending[msg.RequestID]
+	delete(p.pending, msg.RequestID)
+	ch := request.result
 	b.mu.Unlock()
 	if ch == nil {
 		return
@@ -608,69 +558,32 @@ func (b *Broker) resolve(msg wireMessage) {
 	ch <- pendingResult{value: value}
 }
 
-func (b *Broker) disconnect(conn net.Conn, cause error) {
+func (b *Broker) disconnect(p *runtimePeer, cause error) {
 	b.mu.Lock()
-	if b.conn != conn {
-		b.mu.Unlock()
-		return
+	current := b.peers[p.id] == p
+	if current {
+		delete(b.peers, p.id)
+		if b.local == p {
+			b.local = nil
+		}
+		b.signalConnectionChangedLocked()
 	}
-	b.conn = nil
-	b.connectedAt = time.Time{}
-	b.client = ""
-	b.clientVersion = ""
-	b.signalConnectionChangedLocked()
-	pending := b.takePendingLocked()
+	pending := p.pending
+	p.pending = make(map[string]pendingRequest)
 	b.mu.Unlock()
-	_ = conn.Close()
-	failPending(pending, ErrUnavailable)
-	if cause != nil && !errors.Is(cause, io.EOF) && !errors.Is(cause, net.ErrClosed) {
-		b.log.Warn("browser runtime disconnected", "err", cause)
-	} else {
-		b.log.Info("browser runtime disconnected")
+	_ = p.conn.Close()
+	for _, r := range pending {
+		r.result <- pendingResult{err: ErrUnavailable}
 	}
-}
-
-func (b *Broker) waitForConnection(ctx context.Context) (net.Conn, error) {
-	waitCtx, cancel := context.WithTimeout(ctx, runtimeReconnectGrace)
-	defer cancel()
-	for {
-		b.mu.Lock()
-		conn := b.conn
-		changed := b.connectionChanged
-		b.mu.Unlock()
-		if conn != nil {
-			return conn, nil
-		}
-		select {
-		case <-waitCtx.Done():
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			return nil, fmt.Errorf("%w: %w", ErrReconnecting, ErrUnavailable)
-		case <-changed:
+	if current {
+		if cause != nil && !errors.Is(cause, io.EOF) && !errors.Is(cause, net.ErrClosed) {
+			b.log.Warn("browser runtime disconnected", "err", cause)
+		} else {
+			b.log.Info("browser runtime disconnected")
 		}
 	}
 }
-
 func (b *Broker) signalConnectionChangedLocked() {
 	close(b.connectionChanged)
 	b.connectionChanged = make(chan struct{})
-}
-
-func (b *Broker) removePending(requestID string) {
-	b.mu.Lock()
-	delete(b.pending, requestID)
-	b.mu.Unlock()
-}
-
-func (b *Broker) takePendingLocked() map[string]chan pendingResult {
-	pending := b.pending
-	b.pending = make(map[string]chan pendingResult)
-	return pending
-}
-
-func failPending(pending map[string]chan pendingResult, err error) {
-	for _, ch := range pending {
-		ch <- pendingResult{err: err}
-	}
 }

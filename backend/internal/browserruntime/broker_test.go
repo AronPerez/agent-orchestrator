@@ -233,7 +233,7 @@ func TestBrokerRejectsInvalidRuntimeToken(t *testing.T) {
 	}{
 		{"wrong token", `{"type":"hello","version":2,"token":"wrong-token"}`, "BROWSER_RUNTIME_TOKEN_REJECTED"},
 		{"missing token", `{"type":"hello","version":2}`, "BROWSER_RUNTIME_TOKEN_REJECTED"},
-		{"other protocol", `{"type":"hello","version":4,"token":"expected-token"}`, "BROWSER_RUNTIME_PROTOCOL_MISMATCH"},
+		{"other protocol", `{"type":"hello","version":999,"token":"expected-token"}`, "BROWSER_RUNTIME_PROTOCOL_MISMATCH"},
 		{"not a hello", `{"type":"result","requestId":"r1"}`, "BROWSER_RUNTIME_BAD_HELLO"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -285,8 +285,9 @@ func TestBrokerCancellationSendsCancelFrame(t *testing.T) {
 		_ = runtimeConn.Close()
 	})
 	broker.mu.Lock()
-	broker.conn = pausedConn
-	broker.connectedAt = time.Now().UTC()
+	peer := newRuntimePeer(pausedConn, "local", false, wireMessage{Version: 3})
+	broker.peers[peer.id] = peer
+	broker.local = peer
 	broker.mu.Unlock()
 	dec := json.NewDecoder(runtimeConn)
 
@@ -355,7 +356,6 @@ func (c *pauseAfterFirstWriteConn) release() {
 }
 
 func TestBrokerWriteObservesContext(t *testing.T) {
-	broker := New(nil)
 	server, client := net.Pipe()
 	defer func() {
 		_ = server.Close()
@@ -364,7 +364,7 @@ func TestBrokerWriteObservesContext(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	started := time.Now()
-	err := broker.write(ctx, client, wireMessage{Type: "command", RequestID: "blocked"})
+	err := newRuntimePeer(client, "test", false, wireMessage{}).write(ctx, wireMessage{Type: "command", RequestID: "blocked"})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("write error = %v", err)
 	}
@@ -376,7 +376,7 @@ func TestBrokerWriteObservesContext(t *testing.T) {
 // handshake sends a hello and requires hello-ok as the daemon's first frame.
 func handshake(t *testing.T, enc *json.Encoder, dec *json.Decoder, token string) {
 	t.Helper()
-	if err := enc.Encode(wireMessage{Type: "hello", Version: ProtocolVersion, Token: token}); err != nil {
+	if err := enc.Encode(wireMessage{Type: "hello", Version: 3, Token: token}); err != nil {
 		t.Fatal(err)
 	}
 	var reply wireMessage
@@ -404,7 +404,12 @@ func waitPendingRequest(t *testing.T, broker *Broker, requestID string) {
 	deadline := time.Now().Add(browserRuntimeTestTimeout())
 	for {
 		broker.mu.Lock()
-		_, ok := broker.pending[requestID]
+		ok := false
+		for _, p := range broker.peers {
+			if _, found := p.pending[requestID]; found {
+				ok = true
+			}
+		}
 		broker.mu.Unlock()
 		if ok {
 			return
@@ -449,7 +454,7 @@ func TestBrokerPeerVerifierRejectsBeforeHello(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = json.NewEncoder(rejected).Encode(wireMessage{Type: "hello", Version: ProtocolVersion})
+	_ = json.NewEncoder(rejected).Encode(wireMessage{Type: "hello", Version: 3})
 	_ = rejected.SetReadDeadline(time.Now().Add(time.Second))
 	if _, err := rejected.Read(make([]byte, 1)); err == nil {
 		t.Fatal("rejected peer remained connected")
@@ -466,7 +471,7 @@ func TestBrokerPeerVerifierRejectsBeforeHello(t *testing.T) {
 	defer func() { _ = accepted.Close() }()
 	if err := json.NewEncoder(accepted).Encode(wireMessage{
 		Type:          "hello",
-		Version:       ProtocolVersion,
+		Version:       3,
 		Client:        "ao-chrome-extension",
 		ClientVersion: "1.2.3",
 	}); err != nil {
@@ -512,7 +517,7 @@ func TestBrokerExclusiveKeepsFirstRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = first.Close() }()
-	if err := json.NewEncoder(first).Encode(wireMessage{Type: "hello", Version: ProtocolVersion, ClientVersion: "first"}); err != nil {
+	if err := json.NewEncoder(first).Encode(wireMessage{Type: "hello", Version: 3, ClientVersion: "first"}); err != nil {
 		t.Fatal(err)
 	}
 	waitConnected(t, broker)
@@ -522,7 +527,7 @@ func TestBrokerExclusiveKeepsFirstRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = second.Close() }()
-	if err := json.NewEncoder(second).Encode(wireMessage{Type: "hello", Version: ProtocolVersion, ClientVersion: "second"}); err != nil {
+	if err := json.NewEncoder(second).Encode(wireMessage{Type: "hello", Version: 3, ClientVersion: "second"}); err != nil {
 		t.Fatal(err)
 	}
 	_ = second.SetReadDeadline(time.Now().Add(time.Second))
@@ -536,44 +541,4 @@ func TestBrokerExclusiveKeepsFirstRuntime(t *testing.T) {
 	if got := broker.Status().ClientVersion; got != "first" {
 		t.Fatalf("connected runtime = %q, want first", got)
 	}
-}
-
-func TestRemoteRuntimePriority(t *testing.T) {
-	broker := New(nil, "local-secret")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	remote, remoteServer := net.Pipe()
-	defer remote.Close()
-	go broker.ServeRemoteConn(ctx, remoteServer)
-	handshake(t, json.NewEncoder(remote), json.NewDecoder(remote), "")
-	waitConnected(t, broker)
-
-	assertRejected := func() {
-		t.Helper()
-		client, server := net.Pipe()
-		defer client.Close()
-		_ = client.SetDeadline(time.Now().Add(3 * time.Second))
-		go broker.ServeRemoteConn(ctx, server)
-		if err := json.NewEncoder(client).Encode(wireMessage{Type: "hello", Version: ProtocolVersion}); err != nil {
-			t.Fatal(err)
-		}
-		var reply wireMessage
-		if err := json.NewDecoder(client).Decode(&reply); err != nil {
-			t.Fatal(err)
-		}
-		if reply.Type != "hello-rejected" || reply.Error.Code != "BROWSER_RUNTIME_BUSY" {
-			t.Fatalf("second remote accepted: %#v", reply)
-		}
-	}
-	assertRejected()
-
-	local, localServer := net.Pipe()
-	defer local.Close()
-	go broker.serveConn(ctx, localServer)
-	handshake(t, json.NewEncoder(local), json.NewDecoder(local), "local-secret")
-	_ = remote.SetReadDeadline(time.Now().Add(3 * time.Second))
-	if _, err := remote.Read(make([]byte, 1)); err == nil {
-		t.Fatal("local runtime did not replace remote")
-	}
-	assertRejected()
 }

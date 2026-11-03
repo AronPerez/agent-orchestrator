@@ -3,6 +3,7 @@ package httpd
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/browserruntime"
+	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
 )
 
@@ -52,14 +54,34 @@ func TestBrowserRuntimeRequiresLANBearer(t *testing.T) {
 
 func TestBrowserRuntimeRemoteRoundTrip(t *testing.T) {
 	broker := browserruntime.New(nil, "private-launch-token")
-	router := chi.NewRouter()
-	mountBrowserRuntime(router, broker)
+	router := NewRouterWithControl(config.Config{}, discardLogger(), nil, APIDeps{BrowserRuntime: broker}, ControlDeps{})
 	auth := &authState{}
 	auth.setHash(mobilebridge.HashPassword("paired-password"))
 	server := httptest.NewServer(lanControlBlock(authMiddleware(auth, newLockout(time.Now), nil)(router)))
 	defer server.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() { _ = broker.Serve(ctx, listener) }()
+	local, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer local.Close()
+	if err := json.NewEncoder(local).Encode(map[string]any{"type": "hello", "version": 3, "token": "private-launch-token"}); err != nil {
+		t.Fatal(err)
+	}
+	var localHello map[string]any
+	if err := json.NewDecoder(local).Decode(&localHello); err != nil {
+		t.Fatal(err)
+	}
+	if localHello["type"] != "hello-ok" {
+		t.Fatal(localHello)
+	}
 	ws, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http")+"/browser-runtime", &websocket.DialOptions{
 		HTTPHeader: http.Header{"Authorization": {"Bearer paired-password"}},
 	})
@@ -69,7 +91,7 @@ func TestBrowserRuntimeRemoteRoundTrip(t *testing.T) {
 	defer ws.CloseNow()
 	conn := websocket.NetConn(ctx, ws, websocket.MessageText)
 	enc, dec := json.NewEncoder(conn), json.NewDecoder(conn)
-	if err := enc.Encode(map[string]any{"type": "hello", "version": 2}); err != nil {
+	if err := enc.Encode(map[string]any{"type": "hello", "version": 4, "runtimeId": "remote-test", "sessions": []string{"remote-session"}}); err != nil {
 		t.Fatal(err)
 	}
 	var hello map[string]any
@@ -78,6 +100,13 @@ func TestBrowserRuntimeRemoteRoundTrip(t *testing.T) {
 	}
 	if hello["type"] != "hello-ok" {
 		t.Fatalf("hello: %v", hello)
+	}
+	var state map[string]any
+	if err := dec.Decode(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state["owned"] != true {
+		t.Fatalf("remote session not owned: %v", state)
 	}
 	result := make(chan error, 1)
 	go func() {

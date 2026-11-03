@@ -50,7 +50,7 @@ func newTunedWedgeHarness(t *testing.T, tune func(*Broker)) *wedgeHarness {
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 	enc := json.NewEncoder(conn)
-	if err := enc.Encode(wireMessage{Type: "hello", Version: ProtocolVersion}); err != nil {
+	if err := enc.Encode(wireMessage{Type: "hello", Version: 3}); err != nil {
 		t.Fatal(err)
 	}
 	dec := json.NewDecoder(conn)
@@ -130,7 +130,10 @@ func expectWedgeTimeout(t *testing.T, h *wedgeHarness, outcomes <-chan executeOu
 func assertPendingEmpty(t *testing.T, broker *Broker) {
 	t.Helper()
 	broker.mu.Lock()
-	pending := len(broker.pending)
+	pending := 0
+	for _, p := range broker.peers {
+		pending += len(p.pending)
+	}
 	broker.mu.Unlock()
 	if pending != 0 {
 		t.Fatalf("pending registry holds %d entries, want 0", pending)
@@ -241,7 +244,7 @@ func TestBrokerNewConnectionFailsStalePending(t *testing.T) {
 	}
 	defer func() { _ = replacement.Close() }()
 	replacementEnc := json.NewEncoder(replacement)
-	if err := replacementEnc.Encode(wireMessage{Type: "hello", Version: ProtocolVersion}); err != nil {
+	if err := replacementEnc.Encode(wireMessage{Type: "hello", Version: 3}); err != nil {
 		t.Fatal(err)
 	}
 	replacementDec := json.NewDecoder(replacement)

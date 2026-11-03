@@ -16,7 +16,7 @@ type namedRuntime struct {
 	actions   []string
 }
 
-func (r *namedRuntime) Status() browserruntime.Status {
+func (r *namedRuntime) StatusForSession(_ domain.SessionID) browserruntime.Status {
 	return browserruntime.Status{Connected: true, Transport: r.transport}
 }
 
