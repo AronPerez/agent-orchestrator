@@ -129,7 +129,7 @@ type wireMessage struct {
 	Sessions  []domain.SessionID `json:"sessions,omitempty"`
 	Takeover  bool               `json:"takeover,omitempty"`
 	Owned     bool               `json:"owned"`
-	Revision  uint64             `json:"revision,omitempty"`
+	Revision  uint64             `json:"revision"`
 	Version   int                `json:"version,omitempty"`
 	Token     string             `json:"token,omitempty"`
 	// Client and ClientVersion are optional hello metadata.

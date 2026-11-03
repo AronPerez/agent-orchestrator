@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"testing"
@@ -22,6 +23,11 @@ type routingPeer struct {
 }
 
 func newRoutingPeer(t *testing.T, b *Broker, remote bool, id string, sessions ...string) *routingPeer {
+	t.Helper()
+	return newRoutingPeerVersion(t, b, remote, id, 4, sessions...)
+}
+
+func newRoutingPeerVersion(t *testing.T, b *Broker, remote bool, id string, version int, sessions ...string) *routingPeer {
 	t.Helper()
 	client, server := net.Pipe()
 	p := &routingPeer{conn: client, enc: json.NewEncoder(client), messages: make(chan wireMessage, 32)}
@@ -53,7 +59,7 @@ func newRoutingPeer(t *testing.T, b *Broker, remote bool, id string, sessions ..
 	if !remote {
 		token = "local-secret"
 	}
-	p.send(t, map[string]any{"type": "hello", "version": 4, "runtimeId": id, "sessions": sessions, "token": token})
+	p.send(t, map[string]any{"type": "hello", "version": version, "runtimeId": id, "sessions": sessions, "token": token})
 	if m := p.next(t, "hello-ok"); m.Type != "hello-ok" {
 		t.Fatal(m)
 	}
@@ -181,6 +187,71 @@ func TestSessionRoutingUnclaimed(t *testing.T) {
 	}
 	if m := remote.claim(t, "first", false); m.Error == nil || m.Error.Code != "BROWSER_SESSION_BUSY" {
 		t.Fatal("first command did not pin its runtime")
+	}
+}
+
+func TestSessionRoutingImplicitClaimSerializesZeroRevision(t *testing.T) {
+	for _, version := range []int{2, 3, 4} {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			b := New(nil, "local-secret")
+			local := newRoutingPeerVersion(t, b, false, "local", version)
+			finishRouting(t, local, executeRouting(t, b, "first"))
+			client, server := net.Pipe()
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(func() { cancel(); _ = client.Close() })
+			go b.serveRuntimeConn(ctx, server, true)
+			_ = client.SetDeadline(time.Now().Add(3 * time.Second))
+			enc, dec := json.NewEncoder(client), json.NewDecoder(client)
+			if err := enc.Encode(map[string]any{"type": "hello", "version": 4, "runtimeId": uuid.NewString()}); err != nil {
+				t.Fatal(err)
+			}
+			expectHelloOK(t, dec)
+			if err := enc.Encode(map[string]any{"type": "attach-session", "sessionId": "first", "requestId": "claim"}); err != nil {
+				t.Fatal(err)
+			}
+			// Decode the actual frame, not wireMessage: a missing revision would
+			// otherwise become zero and conceal the desktop's validation failure.
+			var reply map[string]any
+			if err := dec.Decode(&reply); err != nil {
+				t.Fatal(err)
+			}
+			commandErr, _ := reply["error"].(map[string]any)
+			if reply["type"] != "session-state" || reply["requestId"] != "claim" || reply["owned"] != false || commandErr["code"] != "BROWSER_SESSION_BUSY" {
+				t.Fatalf("conflict reply = %#v", reply)
+			}
+			if revision, ok := reply["revision"].(float64); !ok || revision != 0 {
+				t.Fatalf("revision = %#v, want numeric zero", reply["revision"])
+			}
+		})
+	}
+}
+
+func TestSessionRoutingDestroyLegacyViewWithoutClaim(t *testing.T) {
+	for _, version := range []int{2, 3, 4} {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			b := New(nil, "local-secret")
+			local := newRoutingPeerVersion(t, b, false, "local", version)
+			waitConnected(t, b)
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- b.DestroySession(ctx, "unadvertised") }()
+			if version < 4 {
+				m := local.next(t, "command")
+				if m.Action != "__destroy-session" || m.SessionID != "unadvertised" {
+					t.Fatalf("teardown = %#v", m)
+				}
+				local.send(t, map[string]any{"type": "result", "requestId": m.RequestID, "ok": true})
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case m := <-local.messages:
+				t.Fatalf("unexpected teardown frame: %#v", m)
+			default:
+			}
+		})
 	}
 }
 func TestSessionRoutingLocalRestart(t *testing.T) {

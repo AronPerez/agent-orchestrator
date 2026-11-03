@@ -219,7 +219,8 @@ func (b *Broker) DestroySession(ctx context.Context, id domain.SessionID) error 
 	b.mu.Lock()
 	var peers []*runtimePeer
 	for _, p := range b.peers {
-		if _, ok := p.sessions[id]; ok {
+		// Legacy desktops can open native views without advertising a claim.
+		if _, ok := p.sessions[id]; ok || p.version < 4 {
 			peers = append(peers, p)
 		}
 	}
