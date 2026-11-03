@@ -273,7 +273,7 @@ export function connectBrowserRuntime(
 		decoder = new StringDecoder("utf8");
 		const epoch = ++connectionEpoch;
 		const ws = address instanceof URL ? new WebSocket(address, { handshakeTimeout: 8_000, maxPayload: MAX_COMMAND_BYTES }) : null;
-		const next = ws ? createWebSocketStream(ws) : typeof address === "string" ? net.connect(address) : net.connect(address as net.TcpNetConnectOpts);
+		const next = ws ? createWebSocketStream(ws, { decodeStrings: false }) : typeof address === "string" ? net.connect(address) : net.connect(address as net.TcpNetConnectOpts);
 		socket = next;
 		const ready = () => {
 			if (disposed) {

@@ -35,7 +35,9 @@ async function remote(hostId = "host-a") {
 	let peer: WebSocket;
 	ws.on("connection", (client) => {
 		peer = client;
-		client.on("message", (data) => {
+		client.on("message", (data, isBinary) => {
+			// Match the Go endpoint's text-only websocket.NetConn contract.
+			if (isBinary) { client.close(1003, "expected text frame"); return; }
 			for (const line of data.toString().split("\n").filter(Boolean)) {
 				const message = JSON.parse(line);
 				messages.push(message);
