@@ -68,6 +68,7 @@ export const mockWorkspaces: WorkspaceSummary[] = [
 			},
 			{
 				id: "demo-working",
+				parentSessionId: "ao-demo-orchestrator",
 				terminalHandleId: "demo-working/terminal_0",
 				workspaceId: "ao-demo",
 				workspaceName: "ao-demo",
@@ -89,6 +90,7 @@ export const mockWorkspaces: WorkspaceSummary[] = [
 			},
 			{
 				id: "demo-needs-input",
+				parentSessionId: "demo-working",
 				terminalHandleId: "demo-needs-input/terminal_0",
 				workspaceId: "ao-demo",
 				workspaceName: "ao-demo",
@@ -139,6 +141,7 @@ export const mockWorkspaces: WorkspaceSummary[] = [
 			},
 			{
 				id: "demo-in-review",
+				parentSessionId: "demo-working",
 				terminalHandleId: "demo-in-review/terminal_0",
 				workspaceId: "ao-demo",
 				workspaceName: "ao-demo",
@@ -155,6 +158,7 @@ export const mockWorkspaces: WorkspaceSummary[] = [
 			},
 			{
 				id: "demo-ready",
+				parentSessionId: "ao-demo-orchestrator",
 				terminalHandleId: "demo-ready/terminal_0",
 				workspaceId: "ao-demo",
 				workspaceName: "ao-demo",
@@ -660,3 +664,24 @@ export const mockOrchestratorChildren: Record<string, CloudCpSessionChild[]> = {
 		),
 	],
 };
+
+/** Synthetic coordination evidence for the browser-only product preview. */
+export const mockCoordinationEvents = [
+	{
+		id: "preview-report", kind: "report" as const, sourceSessionId: "demo-working",
+		summary: "Worker PRs are in review. One session needs reviewer feedback; CI is pending on another.",
+		state: "pending", reportState: "checkpoint", createdAt: minutesAgo(2),
+	},
+	{
+		id: "preview-message-in", kind: "message" as const,
+		sourceSessionId: "demo-needs-input", targetSessionId: "demo-working",
+		summary: "Review feedback is recorded. Waiting for a decision before changing the approved scope.",
+		state: "recorded", createdAt: minutesAgo(5),
+	},
+	{
+		id: "preview-message-out", kind: "message" as const,
+		sourceSessionId: "demo-working", targetSessionId: "demo-in-review",
+		summary: "Please report the current PR head and CI result. Keep this pass read-only.",
+		state: "recorded", createdAt: minutesAgo(10),
+	},
+];

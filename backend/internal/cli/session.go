@@ -67,6 +67,8 @@ type sessionDTO struct {
 	// longer see.
 	RuntimeUnreachable bool   `json:"runtimeUnreachable,omitempty"`
 	Mode               string `json:"mode,omitempty"`
+
+	ParentSessionID string `json:"parentSessionId,omitempty"`
 }
 
 type branchStateDTO struct {

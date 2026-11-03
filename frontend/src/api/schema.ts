@@ -3229,6 +3229,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{sessionId}/coordination": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read the latest 50 recorded coordination events */
+        get: operations["getSessionCoordination"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{sessionId}/exit-agent": {
         parameters: {
             query?: never;
@@ -5586,6 +5603,7 @@ export interface components {
             model?: string;
             /** @enum {string} */
             outputType: "none" | "pr" | "artifact" | "pr_artifact";
+            parentSessionId?: string;
             /** Format: date-time */
             pinnedAt?: null | string;
             /** Format: int64 */
@@ -5961,6 +5979,18 @@ export interface components {
             outputTokens: number;
             /** Format: int64 */
             totalTokens: number;
+        };
+        CoordinationEvent: {
+            /** Format: date-time */
+            createdAt: string;
+            id: string;
+            /** @enum {string} */
+            kind: "message" | "report";
+            reportState?: string;
+            sourceSessionId: string;
+            state: string;
+            summary: string;
+            targetSessionId?: string;
         };
         CreateAutomationRequest: {
             cron?: string;
@@ -7047,6 +7077,10 @@ export interface components {
             commits: number;
             remoteBranch?: string;
             unpushed: number;
+        };
+        SessionCoordinationResponse: {
+            events: components["schemas"]["CoordinationEvent"][];
+            hasMore: boolean;
         };
         SessionHistoryResponse: {
             offset: number;
@@ -19560,6 +19594,56 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getSessionCoordination: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Session identifier, e.g. project-1. */
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionCoordinationResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

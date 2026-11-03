@@ -548,6 +548,8 @@ var schemaNames = map[string]string{ //nolint:gosec // Public OpenAPI type names
 	"ControllersReportOutputRequest":              "ReportOutputRequest",
 	"ControllersCreateReportResponse":             "CreateReportResponse",
 	"ControllersReportOutputResponse":             "ReportOutputResponse",
+	"ControllersSessionCoordinationResponse":      "SessionCoordinationResponse",
+	"DomainCoordinationEvent":                     "CoordinationEvent",
 	"ControllersReportResponse":                   "ReportResponse",
 	"ControllersListReportsResponse":              "ListReportsResponse",
 	"ControllersClearNotificationsResponse":       "ClearNotificationsResponse",
@@ -2897,6 +2899,12 @@ func projectOperations() []operation {
 
 func sessionOperations() []operation {
 	return []operation{
+		{
+			method: http.MethodGet, path: "/api/v1/sessions/{sessionId}/coordination", id: "getSessionCoordination", tag: "sessions",
+			summary:    "Read the latest 50 recorded coordination events",
+			pathParams: []any{controllers.SessionIDParam{}},
+			resps:      []respUnit{{http.StatusOK, controllers.SessionCoordinationResponse{}}, {http.StatusNotFound, envelope.APIError{}}, {http.StatusInternalServerError, envelope.APIError{}}, {http.StatusNotImplemented, envelope.APIError{}}},
+		},
 		{
 			method: http.MethodGet, path: "/api/v1/sessions", id: "listSessions", tag: "sessions",
 			summary:    "List sessions",

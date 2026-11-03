@@ -1021,6 +1021,16 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 	if projectKind == domain.ProjectKindScratch && strings.TrimSpace(cfg.Branch) != "" {
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w", ErrScratchBranchUnsupported)
 	}
+	if cfg.ParentSessionID != "" {
+		parent, found, err := m.store.GetSession(ctx, cfg.ParentSessionID)
+		if err != nil {
+			return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: load parent: %w", err)
+		}
+		// Preserve stale/cross-project caller behavior without recording false lineage.
+		if !found || parent.ProjectID != cfg.ProjectID {
+			cfg.ParentSessionID = ""
+		}
+	}
 	if cfg.ParentSessionID != "" && cfg.AgentConfig.Permissions == "" {
 		permissions, err := m.inheritedSpawnPermissions(ctx, cfg.ProjectID, cfg.ParentSessionID)
 		if err != nil {
@@ -5868,6 +5878,7 @@ func normalizeWorkspacePath(p string) string {
 
 func seedRecord(cfg ports.SpawnConfig, projectConfig domain.ProjectConfig, now time.Time) domain.SessionRecord {
 	return domain.SessionRecord{
+		ParentSessionID:   cfg.ParentSessionID,
 		ProjectID:         cfg.ProjectID,
 		IssueID:           cfg.IssueID,
 		AutomationRunID:   cfg.AutomationRunID,

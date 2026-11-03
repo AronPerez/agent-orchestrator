@@ -3972,3 +3972,9 @@ type SwitchSessionAgentAccountRequest struct {
 	// account's limit. Otherwise the move waits for the turn to finish.
 	StopTurn bool `json:"stopTurn,omitempty"`
 }
+
+// SessionCoordinationResponse contains the latest 50 recorded events.
+type SessionCoordinationResponse struct {
+	Events  []domain.CoordinationEvent `json:"events"`
+	HasMore bool                       `json:"hasMore"`
+}
