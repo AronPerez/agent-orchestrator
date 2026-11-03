@@ -99,6 +99,7 @@ export function toWorkspaceSession(
 	}
 	return {
 		id: session.id,
+		parentSessionId: session.parentSessionId,
 		terminalHandleId: session.terminalHandleId,
 		terminalGeneration: session.terminalGeneration,
 		workspaceId: project.id,
@@ -202,6 +203,7 @@ function toLocalWorkspaceSession(
 	if (!activity || activity.state === "unknown") reportUnknownSessionField("activity", session.activity?.state);
 	return {
 		id: session.id,
+		parentSessionId: session.parentSessionId,
 		terminalHandleId: session.terminalHandleId,
 		terminalGeneration: session.terminalGeneration,
 		workspaceId,

@@ -8969,6 +8969,45 @@ paths:
       summary: Promote a queued message into the in-flight turn
       tags:
       - conversations
+  /api/v1/sessions/{sessionId}/coordination:
+    get:
+      operationId: getSessionCoordination
+      parameters:
+      - description: Session identifier, e.g. project-1.
+        in: path
+        name: sessionId
+        required: true
+        schema:
+          description: Session identifier, e.g. project-1.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionCoordinationResponse'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Read the latest 50 recorded coordination events
+      tags:
+      - sessions
   /api/v1/sessions/{sessionId}/exit-agent:
     post:
       operationId: exitAgent
@@ -16201,6 +16240,8 @@ components:
           - artifact
           - pr_artifact
           type: string
+        parentSessionId:
+          type: string
         pinnedAt:
           format: date-time
           type:
@@ -17222,6 +17263,36 @@ components:
       - outputTokens
       - cachedTokens
       - totalTokens
+      type: object
+    CoordinationEvent:
+      properties:
+        createdAt:
+          format: date-time
+          type: string
+        id:
+          type: string
+        kind:
+          enum:
+          - message
+          - report
+          type: string
+        reportState:
+          type: string
+        sourceSessionId:
+          type: string
+        state:
+          type: string
+        summary:
+          type: string
+        targetSessionId:
+          type: string
+      required:
+      - id
+      - kind
+      - sourceSessionId
+      - summary
+      - state
+      - createdAt
       type: object
     CreateAutomationRequest:
       properties:
@@ -20039,6 +20110,18 @@ components:
       required:
       - commits
       - unpushed
+      type: object
+    SessionCoordinationResponse:
+      properties:
+        events:
+          items:
+            $ref: '#/components/schemas/CoordinationEvent'
+          type: array
+        hasMore:
+          type: boolean
+      required:
+      - events
+      - hasMore
       type: object
     SessionHistoryResponse:
       properties:

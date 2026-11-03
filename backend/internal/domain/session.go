@@ -265,8 +265,10 @@ type SessionMetadata struct {
 // facts: identity, agent harness, activity_state, is_terminated, and operational
 // metadata. The user-facing Status is derived from these facts plus PR facts.
 type SessionRecord struct {
-	ID        SessionID `json:"id"`
-	ProjectID ProjectID `json:"projectId,omitempty"`
+	// ParentSessionID is immutable spawn lineage, not an authority or reporting relationship.
+	ParentSessionID SessionID `json:"parentSessionId,omitempty"`
+	ID              SessionID `json:"id"`
+	ProjectID       ProjectID `json:"projectId,omitempty"`
 	// AutomationRunID is the optional durable origin for an unattended spawn.
 	// It is internal lifecycle data, not part of the session API read model.
 	AutomationRunID *AutomationRunID `json:"-"`

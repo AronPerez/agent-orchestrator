@@ -1,3 +1,5 @@
+import { SessionFleet } from "./SessionFleet";
+import { Button } from "./ui/button";
 import { OrchestratorStartingChat } from "./chat/OrchestratorStartingChat";
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { useTranslation } from "react-i18next";
@@ -98,6 +100,7 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 	const connected = useConnectedHosts().includes(hostId ?? "");
 	const scopeKey = refKey({ host: hostId ?? LOCAL_HOST, id: projectId ?? "all" });
 	const [isFindOpen, setIsFindOpen] = useState(false);
+	const [view, setView] = useState<"board" | "fleet">("board");
 	const [findQuery, setFindQuery] = useState("");
 	const findInputRef = useRef<HTMLInputElement>(null);
 	const boardRef = useRef<HTMLDivElement>(null);
@@ -110,6 +113,7 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 	useEffect(() => {
 		setIsFindOpen(false);
 		setFindQuery("");
+		setView("board");
 	}, [scopeKey]);
 	// Lanes follow the daemon's delivery order: building -> validating ->
 	// in review -> ready. The middle two are one review-feedback loop, split by
@@ -181,7 +185,7 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 		? connected && remoteProjectQuery.isSuccess && Boolean(workspace) && liveSessions.length === 0
 		: presentation.showProjectEmpty;
 	const boardLoadFailed = !hostId && (presentation.workspaceStartupState === "error" || localWorkspaceQuery.isError);
-	const canFind = !showStartup && !showWelcome && !showProjectEmpty && !boardLoadFailed
+	const canFind = view === "board" && !showStartup && !showWelcome && !showProjectEmpty && !boardLoadFailed
 		&& (!hostId || Boolean(workspace)) && !(projectId && (isProvisioning || projectActions.isSpawning));
 	useEffect(() => {
 		if (!canFind) return;
@@ -333,6 +337,16 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 
 			{/* Reserve only the collapsed archive bar. Expanded archive overlays the
 			    board so lane height (and Needs You scrollbars) stay stable. */}
+			{projectId && !hostId && workspace?.kind !== CLOUD_PROJECT_KIND ? (
+				<div className="flex gap-1 border-b border-border px-3 py-2" role="group" aria-label="Project view">
+					<Button variant={view === "board" ? "secondary" : "ghost"} size="sm" aria-pressed={view === "board"} onClick={() => setView("board")}>Board</Button>
+					<Button variant={view === "fleet" ? "secondary" : "ghost"} size="sm" aria-pressed={view === "fleet"} onClick={() => { closeFind(); setView("fleet"); }}>Fleet</Button>
+				</div>
+			) : null}
+			{view === "fleet" && workspace ? <>
+				{boardLoadFailed ? <p role="alert" className="px-4 py-2 text-xs text-destructive">Could not refresh sessions. Showing the last snapshot.</p> : null}
+				<SessionFleet key={scopeKey} sessions={workspace.sessions} onOpen={openSession} />
+			</> : <>
 			<div className={cn("relative min-h-0 flex-1 overflow-hidden", hasArchive && archiveToggleOffsetClassName)}>
 				{canFind && isFindOpen ? (
 					<BoardFindBar
@@ -413,6 +427,7 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 					sessions={archived}
 				/>
 			) : null}
+			</>}
 			{showStartup ? <DaemonStartupLoader /> : null}
 		</div>
 	);
