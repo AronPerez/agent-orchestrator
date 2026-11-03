@@ -1229,6 +1229,32 @@ response bodies; it allowlists safe headers and redacts URL credentials,
 fragments, and query values. Closing the tab, ending the session, or shutting
 down Electron disables and discards the capture.
 
+### Connected remote desktops
+
+For paired remote hosts, the desktop opens `/browser-runtime` through the same
+per-host loopback proxy used by the remote API and terminal WebSockets. That
+proxy verifies the host identity and supplies its bearer credential; the remote
+daemon accepts the runtime only on the authenticated LAN/tunnel path, never on
+the unauthenticated primary listener or from a browser origin. The existing
+newline-JSON broker protocol runs over the WebSocket, including cancellation
+and liveness. Worker CLI capability checks are unchanged.
+
+Remote commands use the renderer's host-scoped session key, so matching session
+IDs on separate machines never share a view or temporary profile. A local
+Electron runtime takes priority; otherwise the first connected remote desktop
+keeps the broker until it disconnects. Host disconnection retires the link,
+cancels outstanding commands and destroys the views it used.
+
+`ao preview` still publishes a session preview selection through CDC. Both the
+renderer and remote browser commands use the existing isolated preview origins:
+static files remain confined to the session's selected workspace/artifact root,
+and live apps require `ao preview start` with a session-owned managed server.
+The proxy does not expose arbitrary remote loopback ports. Public sites load
+normally on the desktop. LAN HTTP, managed HTTPS tunnels and HTTPS reverse
+proxies share this path; no new listener, credential store or dependency is
+introduced. `AO_AGENT_BROWSER_URL` remains the separate headless-browser mode;
+cloud worker browsers and mobile screen streaming are unchanged.
+
 ---
 
 ## Load-Bearing Rules

@@ -69,6 +69,7 @@ type APIDeps struct {
 	TelemetryIdentity        ports.TelemetryIdentityStore
 	Mobile                   *controllers.MobileController
 	BrowserLive              *BrowserLiveHub
+	BrowserRuntime           browserRuntimeBroker
 	Browser                  controllers.BrowserService
 	BrowserChrome            controllers.BrowserChromeService
 	PreviewServer            controllers.ManagedPreviewServer

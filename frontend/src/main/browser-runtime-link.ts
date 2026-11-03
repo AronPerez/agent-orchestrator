@@ -1,4 +1,6 @@
 import net from "node:net";
+import type { Duplex } from "node:stream";
+import WebSocket, { createWebSocketStream } from "ws";
 import { StringDecoder } from "node:string_decoder";
 
 const PROTOCOL_VERSION = 2;
@@ -27,6 +29,7 @@ export type BrowserRuntimeCommandError = {
 
 export interface BrowserRuntimeLinkHandle {
 	readonly connected: boolean;
+	reconnect(): void;
 	dispose(): void;
 }
 
@@ -38,13 +41,13 @@ type BrowserRuntimeLinkOptions = {
 };
 
 export function connectBrowserRuntime(
-	address: string | net.TcpNetConnectOpts,
+	address: string | net.TcpNetConnectOpts | URL,
 	options: BrowserRuntimeLinkOptions,
 ): BrowserRuntimeLinkHandle {
 	const log = options.log ?? (() => undefined);
 	let disposed = false;
 	let connected = false;
-	let socket: net.Socket | null = null;
+	let socket: Duplex | null = null;
 	let retryTimer: ReturnType<typeof setTimeout> | null = null;
 	let backoff = BACKOFF_INIT_MS;
 	let buffer = "";
@@ -54,7 +57,7 @@ export function connectBrowserRuntime(
 	const commandControllers = new Map<string, AbortController>();
 	const activeCommands = new Map<
 		string,
-		{ command: BrowserRuntimeCommand; target: net.Socket; epoch: number }
+		{ command: BrowserRuntimeCommand; target: Duplex; epoch: number }
 	>();
 	const setConnected = (value: boolean) => {
 		if (connected === value) return;
@@ -62,7 +65,7 @@ export function connectBrowserRuntime(
 		options.onStateChange?.(value);
 	};
 
-	const sendCancelledResultOnTarget = (command: BrowserRuntimeCommand, target: net.Socket) => {
+	const sendCancelledResultOnTarget = (command: BrowserRuntimeCommand, target: Duplex) => {
 		if (target.destroyed) return;
 		const frame = `${JSON.stringify({
 			type: "result",
@@ -102,11 +105,13 @@ export function connectBrowserRuntime(
 		cancelConnectionCommands();
 		connectionEpoch += 1;
 		target.removeAllListeners();
+		// A WebSocket stream can fail asynchronously when closed during its handshake.
+		target.on("error", () => undefined);
 		target.destroy();
 		socket = null;
 	};
 
-	const send = async (message: unknown, target: net.Socket, epoch: number): Promise<void> => {
+	const send = async (message: unknown, target: Duplex, epoch: number): Promise<void> => {
 		if (socket !== target || connectionEpoch !== epoch || target.destroyed) return;
 		const frame = `${JSON.stringify(message)}\n`;
 		if (Buffer.byteLength(frame, "utf8") > MAX_RESULT_BYTES) {
@@ -130,7 +135,7 @@ export function connectBrowserRuntime(
 
 	const sendCancelledResult = async (
 		command: BrowserRuntimeCommand,
-		target: net.Socket,
+		target: Duplex,
 		epoch: number,
 	) => {
 		try {
@@ -151,7 +156,7 @@ export function connectBrowserRuntime(
 
 	const respond = async (
 		command: BrowserRuntimeCommand,
-		target: net.Socket,
+		target: Duplex,
 		epoch: number,
 		controller: AbortController,
 	) => {
@@ -184,12 +189,26 @@ export function connectBrowserRuntime(
 		}
 	};
 
-	const consumeLine = (line: string, target: net.Socket, epoch: number) => {
+	const consumeLine = (line: string, target: Duplex, epoch: number) => {
 		if (!line.trim()) return;
-		let message: BrowserRuntimeCommand | BrowserRuntimeCancel;
+		let message: BrowserRuntimeCommand | BrowserRuntimeCancel | { type: "hello-ok" | "hello-rejected" | "rejected" | "ping" };
 		try {
-			message = JSON.parse(line) as BrowserRuntimeCommand | BrowserRuntimeCancel;
+			message = JSON.parse(line);
 		} catch {
+			return;
+		}
+		if (!message || typeof message !== "object") return;
+		if (message.type === "hello-ok") {
+			setConnected(true);
+			backoff = BACKOFF_INIT_MS;
+			return;
+		}
+		if (message.type === "hello-rejected" || message.type === "rejected") {
+			target.destroy();
+			return;
+		}
+		if (message.type === "ping") {
+			void send({ type: "pong" }, target, epoch).catch(() => target.destroy());
 			return;
 		}
 		if (message.type === "cancel" && typeof message.requestId === "string") {
@@ -216,7 +235,7 @@ export function connectBrowserRuntime(
 		});
 	};
 
-	const consume = (chunk: Buffer, target: net.Socket, epoch: number) => {
+	const consume = (chunk: Buffer, target: Duplex, epoch: number) => {
 		if (socket !== target || connectionEpoch !== epoch) return;
 		buffer += decoder.write(chunk);
 		for (;;) {
@@ -253,21 +272,24 @@ export function connectBrowserRuntime(
 		buffer = "";
 		decoder = new StringDecoder("utf8");
 		const epoch = ++connectionEpoch;
-		const next = typeof address === "string" ? net.connect(address) : net.connect(address);
+		const ws = address instanceof URL ? new WebSocket(address, { handshakeTimeout: 8_000, maxPayload: MAX_COMMAND_BYTES }) : null;
+		const next = ws ? createWebSocketStream(ws, { decodeStrings: false }) : typeof address === "string" ? net.connect(address) : net.connect(address as net.TcpNetConnectOpts);
 		socket = next;
-		next.on("connect", () => {
+		const ready = () => {
 			if (disposed) {
 				next.destroy();
 				return;
 			}
-			setConnected(true);
-			backoff = BACKOFF_INIT_MS;
-			void send({ type: "hello", version: PROTOCOL_VERSION, token: options.token }, next, epoch).catch((error) => {
+			// Remote brokers can reject a competing desktop; wait for their hello-ok.
+			if (!ws) { setConnected(true); backoff = BACKOFF_INIT_MS; }
+			void send({ type: "hello", version: ws ? 3 : PROTOCOL_VERSION, token: options.token }, next, epoch).catch((error) => {
 				log(`browser-runtime-link: hello failed: ${String(error)}`);
 				next.destroy();
 			});
 			log("browser-runtime-link: connected");
-		});
+		};
+		if (ws) ws.on("open", ready);
+		else next.on("connect", ready);
 		next.on("data", (chunk) => consume(chunk, next, epoch));
 		next.on("error", (error) => log(`browser-runtime-link: error: ${error.message}`));
 		let connectionTornDown = false;
@@ -289,6 +311,12 @@ export function connectBrowserRuntime(
 	return {
 		get connected() {
 			return connected;
+		},
+		reconnect() {
+			if (disposed) return;
+			setConnected(false);
+			clearRetry();
+			connect();
 		},
 		dispose() {
 			disposed = true;

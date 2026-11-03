@@ -170,6 +170,7 @@ export type BrowserAgentActivityState = {
 };
 
 export type BrowserRuntimeState = {
+	hostId?: string;
 	connected: boolean;
 };
 
