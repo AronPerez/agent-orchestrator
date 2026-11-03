@@ -9,8 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/google/uuid"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
 type routingPeer struct {
@@ -269,5 +270,26 @@ func TestSessionRoutingTransferDoesNotCancelOffscreen(t *testing.T) {
 	local.send(t, map[string]any{"type": "result", "requestId": command.RequestID, "ok": true})
 	if err := <-done; err != nil {
 		t.Fatalf("handoff canceled offscreen work: %v", err)
+	}
+}
+
+func TestSessionRoutingDestroyDispatchesToEveryPeerBeforeWaiting(t *testing.T) {
+	b := New(nil, "local-secret")
+	a := newRoutingPeer(t, b, false, uuid.NewString(), "a")
+	remote := newRoutingPeer(t, b, true, uuid.NewString())
+	remote.claim(t, "a", true)
+	a.next(t, "session-state")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- b.DestroySession(ctx, "a") }()
+	// Neither desktop answers until both have received teardown. One slow
+	// runtime must not consume the other runtime's cleanup deadline.
+	commands := []wireMessage{a.next(t, "command"), remote.next(t, "command")}
+	for i, p := range []*routingPeer{a, remote} {
+		p.send(t, map[string]any{"type": "result", "requestId": commands[i].RequestID, "ok": true})
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }

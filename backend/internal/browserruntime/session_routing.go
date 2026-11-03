@@ -6,8 +6,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/google/uuid"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
 var errSessionBusy = &CommandError{Code: "BROWSER_SESSION_BUSY", Message: "Browser is controlled by another desktop."}
@@ -223,9 +224,16 @@ func (b *Broker) DestroySession(ctx context.Context, id domain.SessionID) error 
 		}
 	}
 	b.mu.Unlock()
-	var errs []error
+	results := make(chan error, len(peers))
 	for _, p := range peers {
-		if _, err := b.executeOnPeer(ctx, p, id, "__destroy-session", nil, false); err != nil && !errors.Is(err, ErrUnavailable) && !errors.Is(err, errPeerChanged) {
+		go func() {
+			_, err := b.executeOnPeer(ctx, p, id, "__destroy-session", nil, false)
+			results <- err
+		}()
+	}
+	var errs []error
+	for range peers {
+		if err := <-results; err != nil && !errors.Is(err, ErrUnavailable) && !errors.Is(err, errPeerChanged) {
 			errs = append(errs, err)
 		}
 	}
