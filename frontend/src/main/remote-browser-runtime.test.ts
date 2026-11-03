@@ -101,6 +101,23 @@ describe("remote desktop browser routing", () => {
 		expect(link.sessionState("project-1").owned).toBe(false);
 	});
 
+	it("does not let a timed-out claim overwrite a newer ownership update", async () => {
+		const host = await remote();
+		const link = attach("host-a", host.proxy, vi.fn(async () => ({}))).browserRuntime!;
+		await vi.waitFor(() => expect(link.connected).toBe(true));
+		const timers = vi.spyOn(globalThis, "setTimeout");
+		try {
+			const claim = link.attachSession("project-1", false);
+			const timeout = timers.mock.calls.find(([, delay]) => delay === 8_000)![0] as () => void;
+			host.send({ type: "session-state", sessionId: "project-1", owned: true, revision: 3 });
+			await vi.waitFor(() => expect(link.sessionState("project-1").owned).toBe(true));
+			timeout();
+			expect(await claim).toMatchObject({ owned: true, error: undefined });
+		} finally {
+			timers.mockRestore();
+		}
+	});
+
 	it("exposes a rejected hello and never claims that a transport is ready", async () => {
 		const host = await remote();
 		const attached = attach("host-a", host.proxy, vi.fn(async () => ({})));

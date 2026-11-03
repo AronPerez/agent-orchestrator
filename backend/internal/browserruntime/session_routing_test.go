@@ -251,3 +251,23 @@ func TestSessionRoutingOffscreenStaysLocal(t *testing.T) {
 	}()
 	finishRouting(t, a, done)
 }
+
+func TestSessionRoutingTransferDoesNotCancelOffscreen(t *testing.T) {
+	b := New(nil, "local-secret")
+	local := newRoutingPeer(t, b, false, uuid.NewString(), "a")
+	remote := newRoutingPeer(t, b, true, uuid.NewString())
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_, err := b.Execute(ctx, "a", "__render-check", nil)
+		done <- err
+	}()
+	command := local.next(t, "command")
+	remote.claim(t, "a", true)
+	local.next(t, "session-state")
+	local.send(t, map[string]any{"type": "result", "requestId": command.RequestID, "ok": true})
+	if err := <-done; err != nil {
+		t.Fatalf("handoff canceled offscreen work: %v", err)
+	}
+}

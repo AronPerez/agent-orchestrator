@@ -179,8 +179,9 @@ type runtimePeer struct {
 	sessions              map[domain.SessionID]struct{}
 }
 type pendingRequest struct {
-	sessionID domain.SessionID
-	result    chan pendingResult
+	sessionID   domain.SessionID
+	ownerScoped bool
+	result      chan pendingResult
 }
 
 func newRuntimePeer(conn net.Conn, id string, remote bool, hello wireMessage) *runtimePeer {

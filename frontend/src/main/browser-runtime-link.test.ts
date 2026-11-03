@@ -23,7 +23,7 @@ describe("browser runtime link", () => {
 		let inbound = "";
 		const messages: unknown[] = [];
 		const server = net.createServer((socket) => {
- socket.once("data", () => socket.write('{"type":"hello-ok"}\n'));
+			socket.once("data", () => socket.write('{"type":"hello-ok"}\n'));
 			serverSocket = socket;
 			socket.on("data", (chunk) => {
 				inbound += chunk.toString("utf8");
@@ -67,7 +67,7 @@ describe("browser runtime link", () => {
 		let serverSocket: net.Socket | null = null;
 		const states: boolean[] = [];
 		const server = net.createServer((socket) => {
- socket.once("data", () => socket.write('{"type":"hello-ok"}\n'));
+			socket.once("data", () => socket.write('{"type":"hello-ok"}\n'));
 			serverSocket = socket;
 		});
 		servers.push(server);
@@ -91,7 +91,7 @@ describe("browser runtime link", () => {
 		let inbound = "";
 		const messages: unknown[] = [];
 		const server = net.createServer((socket) => {
- socket.once("data", () => socket.write('{"type":"hello-ok"}\n'));
+			socket.once("data", () => socket.write('{"type":"hello-ok"}\n'));
 			serverSocket = socket;
 			socket.on("data", (chunk) => {
 				inbound += chunk.toString("utf8");
@@ -128,7 +128,7 @@ describe("browser runtime link", () => {
 		let serverSocket: net.Socket | null = null;
 		const execute = vi.fn(async () => ({}));
 		const server = net.createServer((socket) => {
- socket.once("data", () => socket.write('{"type":"hello-ok"}\n'));
+			socket.once("data", () => socket.write('{"type":"hello-ok"}\n'));
 			serverSocket = socket;
 		});
 		servers.push(server);
@@ -166,7 +166,7 @@ describe("browser runtime link", () => {
 		const messages: Array<Record<string, unknown>> = [];
 		const executed: string[] = [];
 		const server = net.createServer((socket) => {
- socket.once("data", () => socket.write('{"type":"hello-ok"}\n'));
+			socket.once("data", () => socket.write('{"type":"hello-ok"}\n'));
 			serverSocket = socket;
 			let inbound = "";
 			socket.on("data", (chunk) => {
@@ -238,7 +238,7 @@ describe("browser runtime link", () => {
 		const messages: Array<Record<string, unknown>> = [];
 		const executed: string[] = [];
 		const server = net.createServer((socket) => {
- socket.once("data", () => socket.write('{"type":"hello-ok"}\n'));
+			socket.once("data", () => socket.write('{"type":"hello-ok"}\n'));
 			serverSocket = socket;
 			let inbound = "";
 			socket.on("data", (chunk) => {
@@ -310,7 +310,7 @@ describe("browser runtime link", () => {
 			});
 		});
 		const server = net.createServer((socket) => {
- socket.once("data", () => socket.write('{"type":"hello-ok"}\n'));
+			socket.once("data", () => socket.write('{"type":"hello-ok"}\n'));
 			serverSocket = socket;
 			socket.on("data", (chunk) => {
 				inbound += chunk.toString("utf8");

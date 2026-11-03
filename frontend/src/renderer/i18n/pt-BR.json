@@ -250,6 +250,8 @@
 	"browser.reload": "Recarregar",
 	"browser.retryAnnotation": "Tentar anotação novamente",
 	"browser.runtimeDisconnected": "O runtime do navegador foi desconectado.",
+	"browser.runtimeOwnedElsewhere": "O navegador está sendo controlado por outro computador.",
+	"browser.useBrowserHere": "Usar o navegador aqui",
 	"browser.reconnectRuntime": "Reconectar",
 	"browser.returnToPanel": "Voltar ao painel",
 	"browser.sending": "Enviando",

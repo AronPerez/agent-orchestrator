@@ -39,7 +39,7 @@ func (b *Broker) claimLocked(p *runtimePeer, id domain.SessionID, takeover bool,
 	var notices []sessionNotice
 	if old := b.peers[owner]; old != nil && old != p {
 		for requestID, r := range old.pending {
-			if r.sessionID == id {
+			if r.sessionID == id && r.ownerScoped {
 				delete(old.pending, requestID)
 				r.result <- pendingResult{err: errSessionTransferred}
 				notices = append(notices, sessionNotice{old, wireMessage{Type: "cancel", RequestID: requestID}})
@@ -175,11 +175,12 @@ func (b *Broker) executeOnPeer(ctx context.Context, p *runtimePeer, id domain.Se
 		p.writeGate <- struct{}{}
 		return Result{}, errPeerChanged
 	}
-	if checkOwner && action != "__render-check" && action != "__render-measure" {
+	ownerScoped := checkOwner && action != "__render-check" && action != "__render-measure"
+	if ownerScoped {
 		b.owners[id] = p.id
 		p.sessions[id] = struct{}{}
 	}
-	p.pending[requestID] = pendingRequest{sessionID: id, result: ch}
+	p.pending[requestID] = pendingRequest{sessionID: id, ownerScoped: ownerScoped, result: ch}
 	b.mu.Unlock()
 	err := p.writeFrame(ctx, wireMessage{Type: "command", RequestID: requestID, SessionID: id, Action: action, Args: args})
 	p.writeGate <- struct{}{}

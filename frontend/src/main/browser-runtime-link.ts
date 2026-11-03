@@ -87,7 +87,8 @@ export function connectBrowserRuntime(
 	const settleClaim = (requestId: string) => {
 		const pending = claims.get(requestId);
 		if (!pending) return;
-		clearTimeout(pending.timer); claims.delete(requestId);
+		clearTimeout(pending.timer);
+		claims.delete(requestId);
 		pending.resolve(sessionState(pending.sessionId));
 	};
 	let socket: Duplex | null = null;
@@ -251,7 +252,7 @@ export function connectBrowserRuntime(
 		}
 		if (!message || typeof message !== "object") return;
 		if (message.type === "hello-ok") {
-	runtimeError = undefined;
+			runtimeError = undefined;
 			setConnected(true);
 			for (const sessionId of sessions) {
 				if (!helloSessions.has(sessionId) && ![...claims.values()].some((claim) => claim.sessionId === sessionId)) void attachSession(sessionId, false);
@@ -345,7 +346,7 @@ export function connectBrowserRuntime(
 	function connect() {
 		if (disposed) return;
 		destroySocket();
-	sessionStates.clear();
+		sessionStates.clear();
 		buffer = "";
 		decoder = new StringDecoder("utf8");
 		const epoch = ++connectionEpoch;
@@ -385,20 +386,23 @@ export function connectBrowserRuntime(
 	}
 
 	function attachSession(sessionId: string, takeover: boolean): Promise<BrowserRuntimeSessionState> {
-			if (disposed) return Promise.resolve(sessionState(sessionId));
-			sessions.add(sessionId);
-			if (!connected || !socket) return Promise.resolve(sessionState(sessionId));
-			const target = socket, epoch = connectionEpoch, requestId = randomUUID();
-			return new Promise((resolve) => {
-				const timer = setTimeout(() => {
-					sessionStates.set(sessionId, { type: "session-state", sessionId, owned: false, revision: sessionStates.get(sessionId)?.revision ?? 0, error: { code: "BROWSER_RUNTIME_TIMEOUT", message: "Browser ownership request timed out" } });
+		if (disposed) return Promise.resolve(sessionState(sessionId));
+		sessions.add(sessionId);
+		if (!connected || !socket) return Promise.resolve(sessionState(sessionId));
+		const target = socket, epoch = connectionEpoch, requestId = randomUUID();
+		const previous = sessionStates.get(sessionId);
+		return new Promise((resolve) => {
+			const timer = setTimeout(() => {
+				if (sessionStates.get(sessionId) === previous) {
+					sessionStates.set(sessionId, { type: "session-state", sessionId, owned: false, revision: previous?.revision ?? 0, error: { code: "BROWSER_RUNTIME_TIMEOUT", message: "Browser ownership request timed out" } });
 					options.onSessionState?.(sessionState(sessionId));
-					settleClaim(requestId);
-				}, 8_000);
-				claims.set(requestId, { sessionId, resolve, timer });
-				void send({ type: "attach-session", requestId, sessionId, takeover }, target, epoch).catch(() => target.destroy());
-			});
-		}
+				}
+				settleClaim(requestId);
+			}, 8_000);
+			claims.set(requestId, { sessionId, resolve, timer });
+			void send({ type: "attach-session", requestId, sessionId, takeover }, target, epoch).catch(() => target.destroy());
+		});
+	}
 
 	connect();
 	return {
