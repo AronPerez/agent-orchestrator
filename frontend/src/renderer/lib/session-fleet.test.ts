@@ -7,6 +7,8 @@ const session = (id: string, parentSessionId?: string, extra: Partial<WorkspaceS
 	parentSessionId,
 	title: id,
 	workspaceId: "p",
+	updatedAt: "2026-11-03T00:00:00Z",
+	prs: [],
 	workspaceName: "Project",
 	provider: "codex",
 	status: "idle",

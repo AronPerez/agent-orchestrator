@@ -1,9 +1,10 @@
 package sessionmanager
 
 import (
+	"testing"
+
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
-	"testing"
 )
 
 func TestSpawnParentLineageWithExplicitPermissions(t *testing.T) {

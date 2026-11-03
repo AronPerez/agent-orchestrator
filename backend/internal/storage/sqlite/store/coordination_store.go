@@ -23,7 +23,7 @@ func (s *Store) ListSessionCoordination(ctx context.Context, id domain.SessionID
 		events = append(events, domain.CoordinationEvent{ID: "message:" + m.ID, Kind: "message", SourceSessionID: m.SenderSessionID, TargetSessionID: string(*m.TargetSessionID), Summary: m.Summary, State: "recorded", CreatedAt: m.CreatedAt})
 	}
 	for _, r := range reports {
-		events = append(events, domain.CoordinationEvent{ID: "report:" + r.ID, Kind: "report", SourceSessionID: string(r.SessionID), Summary: r.Summary, State: r.DeliveryState, ReportState: r.State, CreatedAt: r.CreatedAt})
+		events = append(events, domain.CoordinationEvent{ID: "report:" + r.ID, Kind: "report", SourceSessionID: r.SessionID, Summary: r.Summary, State: r.DeliveryState, ReportState: r.State, CreatedAt: r.CreatedAt})
 	}
 	sort.Slice(events, func(i, j int) bool {
 		if events[i].CreatedAt.Equal(events[j].CreatedAt) {
