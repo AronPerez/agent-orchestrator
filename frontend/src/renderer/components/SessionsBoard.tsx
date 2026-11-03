@@ -338,13 +338,13 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 			{/* Reserve only the collapsed archive bar. Expanded archive overlays the
 			    board so lane height (and Needs You scrollbars) stay stable. */}
 			{projectId && !hostId && workspace?.kind !== CLOUD_PROJECT_KIND ? (
-				<div className="flex gap-1 border-b border-border px-3 py-2" role="group" aria-label="Project view">
-					<Button variant={view === "board" ? "secondary" : "ghost"} size="sm" aria-pressed={view === "board"} onClick={() => setView("board")}>Board</Button>
-					<Button variant={view === "fleet" ? "secondary" : "ghost"} size="sm" aria-pressed={view === "fleet"} onClick={() => { closeFind(); setView("fleet"); }}>Fleet</Button>
+				<div className="flex gap-1 border-b border-border px-3 py-2" role="group" aria-label={t("fleet.view")}>
+					<Button variant={view === "board" ? "secondary" : "ghost"} size="sm" aria-pressed={view === "board"} onClick={() => setView("board")}>{t("shell.board")}</Button>
+					<Button variant={view === "fleet" ? "secondary" : "ghost"} size="sm" aria-pressed={view === "fleet"} onClick={() => { closeFind(); setView("fleet"); }}>{t("fleet.tab")}</Button>
 				</div>
 			) : null}
 			{view === "fleet" && workspace ? <>
-				{boardLoadFailed ? <p role="alert" className="px-4 py-2 text-xs text-destructive">Could not refresh sessions. Showing the last snapshot.</p> : null}
+				{boardLoadFailed ? <p role="alert" className="px-4 py-2 text-xs text-destructive">{t("fleet.stale")}</p> : null}
 				<SessionFleet key={scopeKey} sessions={workspace.sessions} onOpen={openSession} />
 			</> : <>
 			<div className={cn("relative min-h-0 flex-1 overflow-hidden", hasArchive && archiveToggleOffsetClassName)}>

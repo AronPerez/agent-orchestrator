@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { appI18n } from "../i18n";
 import { SessionFleet } from "./SessionFleet";
 import type { WorkspaceSession } from "../types/workspace";
 
@@ -62,6 +63,16 @@ beforeEach(() => {
 });
 
 describe("SessionFleet", () => {
+	it("localizes fleet chrome and accessibility labels", async () => {
+		await appI18n.changeLanguage("es");
+		try {
+			show([]);
+			expect(screen.getByRole("region", { name: "Flota de sesiones" })).toBeInTheDocument();
+			expect(screen.getByText("No hay sesiones para mostrar.")).toBeInTheDocument();
+		} finally {
+			await appI18n.changeLanguage("en");
+		}
+	});
 	it("selects a worker and opens the existing session", async () => {
 		const open = show();
 		fireEvent.click(screen.getByRole("button", { name: /Implement login.*Worker/ }));

@@ -4,7 +4,7 @@ export type FleetRow = {
 	session: WorkspaceSession;
 	depth: number;
 	childCount: number;
-	role: string;
+	role: "Orchestrator" | "Manager" | "Worker";
 	parentUnavailable: boolean;
 };
 
