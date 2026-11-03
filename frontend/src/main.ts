@@ -1510,8 +1510,8 @@ function publishBrowserRuntimeState(connected: boolean, hostId?: string): void {
 }
 
 function reconnectBrowserRuntimeLink(): void {
-	disposeBrowserRuntimeLink();
-	establishBrowserRuntimeLink();
+	if (browserRuntimeLink) browserRuntimeLink.reconnect();
+	else establishBrowserRuntimeLink();
 }
 
 function establishBrowserRuntimeLink(): void {
@@ -1542,8 +1542,11 @@ function establishBrowserRuntimeLink(): void {
 	if (browserRuntimeLink && browserRuntimeLinkIdentity && sameBrowserRuntimeIdentity(browserRuntimeLinkIdentity, identity)) {
 		return;
 	}
+	const previousRuntime = browserRuntimeLink ? { runtimeId: browserRuntimeLink.runtimeId, sessions: browserRuntimeLink.sessions } : {};
 	if (browserRuntimeLink) disposeBrowserRuntimeLink();
 	browserRuntimeLink = connectBrowserRuntime(address, {
+		...previousRuntime,
+		onSessionState: (state) => getShellWebContents()?.send("browser:runtimeState", state),
 		token,
 		execute: (command, signal) => {
 			// A render check or measure uses its own hidden offscreen window,
@@ -2341,9 +2344,18 @@ ipcMain.handle("browser:runtime:reconnect", (event, hostId?: string) => {
 		else reconnectBrowserRuntimeLink();
 });
 
-ipcMain.handle("browser:runtime:state", (event, hostId?: string): BrowserRuntimeState => {
+ipcMain.handle("browser:runtime:state", (event, sessionId: string, hostId?: string): BrowserRuntimeState => {
 	if (event.sender !== getShellWebContents()) throw new Error("Untrusted browser runtime request.");
-	return { hostId, connected: (hostId ? remoteRegistry.browserRuntime(hostId) : browserRuntimeLink)?.connected ?? false };
+	if (typeof sessionId !== "string" || !sessionId) throw new Error("Session ID is required.");
+	const link = hostId ? remoteRegistry.browserRuntime(hostId) : browserRuntimeLink;
+	return { hostId, ...(link?.sessionState(sessionId) ?? { sessionId, connected: false, owned: false }) };
+});
+
+ipcMain.handle("browser:runtime:attach", async (event, sessionId: string, hostId?: string, takeover = false): Promise<BrowserRuntimeState> => {
+	if (event.sender !== getShellWebContents()) throw new Error("Untrusted browser runtime request.");
+	if (typeof sessionId !== "string" || !sessionId || typeof takeover !== "boolean") throw new Error("Invalid browser session claim.");
+	const link = hostId ? remoteRegistry.browserRuntime(hostId) : browserRuntimeLink;
+	return { hostId, ...(await link?.attachSession(sessionId, takeover) ?? { sessionId, connected: false, owned: false }) };
 });
 
 ipcMain.on("browser:overlay", (event, open: unknown) => {
@@ -2518,7 +2530,7 @@ const remoteRegistry = new RemoteRegistry(async (entry) => {
 		if (!host && command.action === "__destroy-session") return { destroyed: false };
 		if (!host) throw new Error("Browser target owner is unavailable");
 		return host.execute(command.sessionId, command.action, command.args, signal);
-	}, (connected) => publishBrowserRuntimeState(connected, entry.hostId));
+	}, (connected) => publishBrowserRuntimeState(connected, entry.hostId), (state) => getShellWebContents()?.send("browser:runtimeState", { ...state, hostId: entry.hostId }));
 });
 registerRemotesIpc(ipcMain, {
 	file: remotesFilePath(),

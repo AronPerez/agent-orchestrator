@@ -103,7 +103,8 @@ export const aoBridge: AoBridge =
 		browser: {
 			nativeCompositionEnabled: false,
 			reconnectRuntime: async () => undefined,
-			getRuntimeState: async () => ({ connected: false }),
+			getRuntimeState: async (sessionId, hostId) => ({ sessionId, hostId, connected: false, owned: false }),
+			attachRuntime: async (sessionId, hostId) => ({ sessionId, hostId, connected: false, owned: false }),
 			ensure: async (sessionId: string) => ({
 				viewId: `preview:${sessionId}`,
 				url: "",

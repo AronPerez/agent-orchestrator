@@ -409,7 +409,8 @@ const api = {
 	},
 	browser: {
 		reconnectRuntime: (hostId?: string) => ipcRenderer.invoke("browser:runtime:reconnect", hostId) as Promise<void>,
-		getRuntimeState: (hostId?: string) => ipcRenderer.invoke("browser:runtime:state", hostId) as Promise<BrowserRuntimeState>,
+		getRuntimeState: (sessionId: string, hostId?: string) => ipcRenderer.invoke("browser:runtime:state", sessionId, hostId) as Promise<BrowserRuntimeState>,
+		attachRuntime: (sessionId: string, hostId?: string, takeover = false) => ipcRenderer.invoke("browser:runtime:attach", sessionId, hostId, takeover) as Promise<BrowserRuntimeState>,
 		nativeCompositionEnabled: true,
 		ensure: (sessionId: string) => ipcRenderer.invoke("browser:ensure", sessionId) as Promise<BrowserNavState>,
 		setBounds: (input: BrowserBoundsInput) => ipcRenderer.send("browser:setBounds", input),

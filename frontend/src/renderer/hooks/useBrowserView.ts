@@ -110,6 +110,8 @@ export type BrowserViewModel = {
 	agentBrowserActive: boolean;
 	agentBrowserActivity: BrowserAgentActivityState | null;
 	browserRuntimeConnected: boolean | null;
+	browserRuntimeError: BrowserRuntimeState["error"];
+	takeBrowserControl: () => Promise<void>;
 	reconnectBrowserRuntime: () => Promise<void>;
 	destroy: () => void;
 	annotationMode: boolean;
@@ -295,6 +297,11 @@ export function useBrowserView({
 	const [agentBrowserActive, setAgentBrowserActive] = useState(false);
 	const [agentBrowserActivity, setAgentBrowserActivity] = useState<BrowserAgentActivityState | null>(null);
 	const [browserRuntimeConnected, setBrowserRuntimeConnected] = useState<boolean | null>(null);
+	const [browserRuntimeError, setBrowserRuntimeError] = useState<BrowserRuntimeState["error"]>();
+	const runtimeSessionId = origin?.sessionId ?? sessionId;
+	const runtimeUpdates = useRef(0);
+	const runtimeSessionRef = useRef(sessionId);
+	runtimeSessionRef.current = sessionId;
 	const [stateSessionId, setStateSessionId] = useState(sessionId);
 	const slotNodeRef = useRef<HTMLDivElement | null>(null);
 	const viewIdRef = useRef("");
@@ -638,20 +645,50 @@ export function useBrowserView({
 
 	useEffect(() => {
 		let disposed = false;
+		runtimeUpdates.current++;
+		setBrowserRuntimeConnected(null);
+		setBrowserRuntimeError(undefined);
 		const applyState = (state: BrowserRuntimeState) => {
-			if (!disposed && state.hostId === origin?.hostId) setBrowserRuntimeConnected(state.connected);
+			if (disposed || state.hostId !== origin?.hostId || (state.sessionId !== undefined && state.sessionId !== runtimeSessionId)) return;
+			setBrowserRuntimeConnected(state.connected);
+			setBrowserRuntimeError(state.error);
 		};
-		const unsubscribe = window.ao?.browser.onRuntimeState(applyState);
-		void window.ao?.browser.getRuntimeState(origin?.hostId).then(applyState);
-		return () => {
-			disposed = true;
-			unsubscribe?.();
+		const attach = () => {
+			if (terminated) return;
+			const before = runtimeUpdates.current;
+			void window.ao?.browser.attachRuntime(runtimeSessionId, origin?.hostId, false).then((state) => {
+				if (runtimeUpdates.current === before) applyState(state);
+			}).catch((error: unknown) => {
+				if (runtimeUpdates.current === before) applyState({ hostId: origin?.hostId, sessionId: runtimeSessionId, connected: false, error: { code: "BROWSER_RUNTIME_UNAVAILABLE", message: error instanceof Error ? error.message : "Browser runtime unavailable" } });
+			});
 		};
-	}, [origin?.hostId]);
+		const unsubscribe = window.ao?.browser.onRuntimeState((state) => {
+			if (state.hostId !== origin?.hostId || (state.sessionId !== undefined && state.sessionId !== runtimeSessionId)) return;
+			runtimeUpdates.current++;
+			if (state.sessionId === undefined && state.connected) attach();
+			else applyState(state);
+		});
+		attach();
+		return () => { disposed = true; runtimeUpdates.current++; unsubscribe?.(); };
+	}, [runtimeSessionId, origin?.hostId, terminated]);
 
 	const reconnectBrowserRuntime = useCallback(async () => {
 		await window.ao?.browser.reconnectRuntime(origin?.hostId);
 	}, [origin?.hostId]);
+
+	const takeBrowserControl = useCallback(async () => {
+		if (terminated) return;
+		const before = runtimeUpdates.current;
+		try {
+			const state = await window.ao?.browser.attachRuntime(runtimeSessionId, origin?.hostId, true);
+			if (state && runtimeSessionRef.current === sessionId && runtimeUpdates.current === before) {
+				setBrowserRuntimeConnected(state.connected);
+				setBrowserRuntimeError(state.error);
+			}
+		} catch (error) {
+			if (runtimeSessionRef.current === sessionId && runtimeUpdates.current === before) setBrowserRuntimeError({ code: "BROWSER_RUNTIME_UNAVAILABLE", message: error instanceof Error ? error.message : "Browser runtime unavailable" });
+		}
+	}, [sessionId, runtimeSessionId, origin?.hostId, terminated]);
 
 	useEffect(
 		() => () => {
@@ -1156,6 +1193,8 @@ export function useBrowserView({
 		agentBrowserActive: stateBelongsToSession && agentBrowserActive,
 		agentBrowserActivity: stateBelongsToSession ? agentBrowserActivity : null,
 		browserRuntimeConnected,
+		browserRuntimeError,
+		takeBrowserControl,
 		reconnectBrowserRuntime,
 		destroy,
 		annotationMode,

@@ -171,7 +171,11 @@ export type BrowserAgentActivityState = {
 
 export type BrowserRuntimeState = {
 	hostId?: string;
+	// Transport broadcasts omit sessionId; ownership updates always include it.
+	sessionId?: string;
 	connected: boolean;
+	owned?: boolean;
+	error?: { code: string; message: string };
 };
 
 export type BrowserDevToolsState = {
