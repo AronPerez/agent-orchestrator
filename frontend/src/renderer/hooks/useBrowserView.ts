@@ -639,19 +639,19 @@ export function useBrowserView({
 	useEffect(() => {
 		let disposed = false;
 		const applyState = (state: BrowserRuntimeState) => {
-			if (!disposed) setBrowserRuntimeConnected(state.connected);
+			if (!disposed && state.hostId === origin?.hostId) setBrowserRuntimeConnected(state.connected);
 		};
 		const unsubscribe = window.ao?.browser.onRuntimeState(applyState);
-		void window.ao?.browser.getRuntimeState().then(applyState);
+		void window.ao?.browser.getRuntimeState(origin?.hostId).then(applyState);
 		return () => {
 			disposed = true;
 			unsubscribe?.();
 		};
-	}, []);
+	}, [origin?.hostId]);
 
 	const reconnectBrowserRuntime = useCallback(async () => {
-		await window.ao?.browser.reconnectRuntime();
-	}, []);
+		await window.ao?.browser.reconnectRuntime(origin?.hostId);
+	}, [origin?.hostId]);
 
 	useEffect(
 		() => () => {

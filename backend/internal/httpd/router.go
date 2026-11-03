@@ -81,6 +81,7 @@ func NewRouterWithControl(cfg config.Config, log *slog.Logger, termMgr *terminal
 	mountForkAgentSwitchPolicy(r, cfg.DataDir, deps.ForkPurgeAgentSwitchReports)
 	mountMobile(r, deps.Mobile)
 	mountBrowserLive(r, deps.BrowserLive)
+	mountBrowserRuntime(r, deps.BrowserRuntime)
 	mountAwake(r, &controllers.AwakeController{Svc: deps.Awake})
 	mountMobileDevices(r, &controllers.MobileDevicesController{Registry: deps.DeviceRoster, Presence: deps.DeviceLive})
 	api.Register(r)

@@ -319,11 +319,25 @@ func (b *Broker) Serve(ctx context.Context, ln net.Listener) error {
 	}
 }
 
+// ServeRemoteConn accepts a connection authenticated by the LAN HTTP listener.
+// The first remote desktop keeps control until it disconnects; local Electron
+// always takes priority. Never expose this entry point without bearer auth.
+func (b *Broker) ServeRemoteConn(ctx context.Context, conn net.Conn) {
+	b.serveRuntimeConn(ctx, conn, true)
+}
+
 func (b *Broker) serveConn(ctx context.Context, conn net.Conn) {
+	b.serveRuntimeConn(ctx, conn, false)
+}
+
+func (b *Broker) serveRuntimeConn(ctx context.Context, conn net.Conn, remote bool) {
+	defer func() { _ = conn.Close() }()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	b.mu.Lock()
 	verify := b.verifyPeer
 	b.mu.Unlock()
-	if verify != nil {
+	if verify != nil && !remote {
 		if err := verify(conn); err != nil {
 			b.log.Warn("browser runtime peer rejected", "transport", b.transport, "err", err)
 			_ = conn.Close()
@@ -341,14 +355,18 @@ func (b *Broker) serveConn(ctx context.Context, conn net.Conn) {
 	// instead of guessing from how long the socket stays open (#6466). Older
 	// runtimes ignore both frames.
 	helloFrame := scanner.Bytes()
-	if rejection := helloRejection(helloFrame, b.token); rejection != nil {
+	token := b.token
+	if remote {
+		token = "" // The LAN bearer check replaces the local launch-token handoff.
+	}
+	if rejection := helloRejection(helloFrame, token); rejection != nil {
 		_ = writeHelloReply(conn, wireMessage{Type: "hello-rejected", Error: rejection})
 		_ = conn.Close()
 		return
 	}
 	var hello wireMessage
 	_ = json.Unmarshal(helloFrame, &hello) // validated by helloRejection
-	if b.busy() {
+	if b.busy(remote) {
 		_ = writeHelloReply(conn, wireMessage{Type: "hello-rejected", Error: errRuntimeBusy})
 		_ = conn.Close()
 		return
@@ -362,7 +380,7 @@ func (b *Broker) serveConn(ctx context.Context, conn net.Conn) {
 	}
 
 	b.mu.Lock()
-	if b.exclusive && b.conn != nil {
+	if (b.exclusive || remote) && b.conn != nil {
 		// Another runtime connected while this one was being accepted.
 		b.mu.Unlock()
 		frame, _ := json.Marshal(wireMessage{Type: "rejected", Error: errRuntimeBusy})
@@ -518,10 +536,10 @@ func (b *Broker) write(ctx context.Context, conn net.Conn, msg wireMessage) erro
 var errRuntimeBusy = &CommandError{Code: "BROWSER_RUNTIME_BUSY", Message: "Another browser runtime is already connected"}
 
 // busy reports whether an exclusive broker already has a runtime.
-func (b *Broker) busy() bool {
+func (b *Broker) busy(remote bool) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.exclusive && b.conn != nil
+	return (b.exclusive || remote) && b.conn != nil
 }
 
 // helloRejection reports why a runtime's first frame is not an acceptable hello,
