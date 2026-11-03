@@ -149,7 +149,7 @@ import { RemoteHostsSection } from "./RemoteHostsSection";
 // sidebar toggle + history arrows above this surface. Windows hangs the sidebar
 // under its custom titlebar.
 const isMac = isMacPlatform();
-const brandInTitlebar = isMac || isLinuxPlatform();
+const hideSidebarBrand = isMac || isLinuxPlatform();
 const noDragStyle = isMac ? ({ WebkitAppRegion: "no-drag" } as React.CSSProperties) : undefined;
 
 // One row-action layout shared by project rows, session rows, and the section
@@ -321,25 +321,13 @@ export const SIDEBAR_DEFAULT_WIDTH = 240;
 export const SIDEBAR_MIN_WIDTH = 200;
 export const SIDEBAR_MAX_WIDTH = 420;
 const SIDEBAR_BRAND_TRAILING_GAP = 12;
-/** Narrowest the sidebar may get: just wide enough to show the whole brand
- *  label. Measured, because the label's left edge moves with window zoom (the
- *  traffic-light reserve is divided by the zoom factor). Falls back to
- *  SIDEBAR_MIN_WIDTH when no brand is rendered (collapsed rail, tests). */
+/** Fit the Windows sidebar brand; macOS/Linux use the standard resize floor. */
 function sidebarMinWidth(): number {
 	const brand = Array.from(document.querySelectorAll<HTMLElement>("[data-sidebar-brand]")).find(
 		(el) => el.getBoundingClientRect().width > 0,
 	);
 	if (!brand) return SIDEBAR_MIN_WIDTH;
-	// Measure the label's natural width (its scrollWidth), not its painted width:
-	// the titlebar clips the label to the sidebar, so the painted width would
-	// shrink the floor to whatever the sidebar already is. Without a separate
-	// label (the Windows header), the whole brand element is the label.
-	const label = brand.querySelector<HTMLElement>("[data-brand-label]");
-	// +1px of slack: scrollWidth is rounded, and a fractional label width would
-	// otherwise clip the last letter at exactly the floor.
-	const fit = label
-		? Math.ceil(label.getBoundingClientRect().left + label.scrollWidth + SIDEBAR_BRAND_TRAILING_GAP + 1)
-		: Math.ceil(brand.getBoundingClientRect().left + brand.scrollWidth + SIDEBAR_BRAND_TRAILING_GAP);
+	const fit = Math.ceil(brand.getBoundingClientRect().left + brand.scrollWidth + SIDEBAR_BRAND_TRAILING_GAP);
 	return Math.min(SIDEBAR_MAX_WIDTH, fit);
 }
 /** Initial item count shown in expanded sections; Show more/less toggles the remainder.
@@ -967,8 +955,8 @@ export function Sidebar({
 					aria-label={t("shell.goHome")}
 					className={cn(
 						"group/brand flex w-full shrink-0 items-center gap-1.5 rounded-md px-0.5 text-left",
-						// macOS/Linux show the brand in TitlebarNav instead.
-						brandInTitlebar && "hidden",
+						// macOS/Linux reserve the header for navigation controls.
+						hideSidebarBrand && "hidden",
 						"group-data-[collapsible=icon]:flex-col group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:gap-1 group-data-[collapsible=icon]:px-0 group-data-[collapsible=icon]:pb-2",
 						commandPaletteEnabled ? "pb-2" : "pb-3",
 					)}

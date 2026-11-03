@@ -30,7 +30,6 @@ const approvedLiterals: Record<string, readonly string[]> = {
 	"components/RemoteDirectoryPicker.tsx": ["/home/you/code"],
 	"components/SessionInspector.tsx": ["PR #"],
 	"components/Sidebar.tsx": ["Orchestrator.inc", "daemon"],
-	"components/TitlebarNav.tsx": ["Orchestrator.inc"],
 	"components/WindowTitlebar.tsx": [
 		"Alt+F4",
 		"Ctrl+Z",
