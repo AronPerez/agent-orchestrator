@@ -249,6 +249,8 @@
 	"browser.reload": "Neu laden",
 	"browser.retryAnnotation": "Annotation erneut versuchen",
 	"browser.runtimeDisconnected": "Browser-Laufzeit getrennt.",
+	"browser.runtimeOwnedElsewhere": "Der Browser wird von einem anderen Desktop gesteuert.",
+	"browser.useBrowserHere": "Browser hier verwenden",
 	"browser.reconnectRuntime": "Neu verbinden",
 	"browser.returnToPanel": "Zurück zum Panel",
 	"browser.sending": "Wird gesendet",

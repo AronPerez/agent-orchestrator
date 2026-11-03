@@ -150,7 +150,8 @@ function setupBridge() {
 		showProfileMenu: vi.fn(),
 		selectProfile: vi.fn(),
 		reconnectRuntime: vi.fn(async () => undefined),
-		getRuntimeState: vi.fn(async (): Promise<BrowserRuntimeState> => ({ connected: false })),
+		getRuntimeState: vi.fn(async (sessionId: string, hostId?: string): Promise<BrowserRuntimeState> => ({ sessionId, hostId, connected: false })),
+		attachRuntime: vi.fn(async (sessionId: string, hostId?: string, _takeover = false): Promise<BrowserRuntimeState> => ({ sessionId, hostId, connected: true, owned: true })),
 		historySuggestions: vi.fn(async () => []),
 		historyFavicon: vi.fn(async () => undefined),
 		captureScreenshot: vi.fn(async () => undefined),
@@ -281,23 +282,23 @@ describe("useBrowserView", () => {
 
 	it("hydrates the runtime connection state for a late-mounted panel", async () => {
 		const bridge = setupBridge();
-		bridge.getRuntimeState.mockResolvedValueOnce({ connected: false });
+		bridge.attachRuntime.mockResolvedValueOnce({ sessionId: "sess-1", connected: false });
 		const slot = createSlot();
 		const { result } = renderHook(() => useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }));
 
-		await waitFor(() => expect(bridge.getRuntimeState).toHaveBeenCalled());
+		await waitFor(() => expect(bridge.attachRuntime).toHaveBeenCalled());
 		await waitFor(() => expect(result.current.browserRuntimeConnected).toBe(false));
 		expect(slot).toBeInTheDocument();
 	});
 
 	it("uses the remote host's runtime state and reconnect target", async () => {
 		const bridge = setupBridge();
-		bridge.getRuntimeState.mockResolvedValueOnce({ hostId: "remote-a", connected: true });
+		bridge.attachRuntime.mockResolvedValueOnce({ sessionId: "sess-1", hostId: "remote-a", connected: true });
 		const { result } = renderHook(() => useBrowserView({
 			sessionId: "remote:remote-a:sess-1", active: true, poppedOut: false,
 			origin: { hostId: "remote-a", sessionId: "sess-1", proxyBase: "http://127.0.0.1:3000/token" },
 		}));
-		await waitFor(() => expect(bridge.getRuntimeState).toHaveBeenCalledWith("remote-a"));
+		await waitFor(() => expect(bridge.attachRuntime).toHaveBeenCalledWith("sess-1", "remote-a", false));
 		await waitFor(() => expect(result.current.browserRuntimeConnected).toBe(true));
 		act(() => bridge.emitRuntime({ connected: false }));
 		expect(result.current.browserRuntimeConnected).toBe(true);
@@ -307,6 +308,34 @@ describe("useBrowserView", () => {
 		expect(result.current.browserRuntimeConnected).toBe(false);
 		await act(async () => result.current.reconnectBrowserRuntime());
 		expect(bridge.reconnectRuntime).toHaveBeenCalledWith("remote-a");
+	});
+
+	it("claims a session once, isolates ownership updates and explicitly takes control", async () => {
+		const bridge = setupBridge();
+		const origin = { hostId: "remote-a", sessionId: "sess-1", proxyBase: "http://127.0.0.1:3000/token" };
+		const { result, rerender } = renderHook(({ active }) => useBrowserView({ sessionId: "remote:remote-a:sess-1", origin, active, poppedOut: false }), { initialProps: { active: true } });
+		await waitFor(() => expect(bridge.attachRuntime).toHaveBeenCalledWith("sess-1", "remote-a", false));
+		rerender({ active: false });
+		expect(bridge.attachRuntime).toHaveBeenCalledTimes(1);
+		act(() => bridge.emitRuntime({ hostId: "remote-a", sessionId: "other", connected: false }));
+		expect(result.current.browserRuntimeConnected).toBe(true);
+		act(() => bridge.emitRuntime({ hostId: "remote-a", sessionId: "sess-1", connected: true, owned: false, error: { code: "BROWSER_SESSION_BUSY", message: "Browser is controlled by another desktop." } }));
+		expect(result.current.browserRuntimeError?.code).toBe("BROWSER_SESSION_BUSY");
+		await act(async () => result.current.takeBrowserControl());
+		expect(bridge.attachRuntime).toHaveBeenLastCalledWith("sess-1", "remote-a", true);
+	});
+
+	it("does not replace a newer ownership event with a delayed handoff snapshot", async () => {
+		const bridge = setupBridge();
+		const { result } = renderHook(() => useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }));
+		await waitFor(() => expect(result.current.browserRuntimeConnected).toBe(true));
+		let resolve!: (state: BrowserRuntimeState) => void;
+		bridge.attachRuntime.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+		let handoff!: Promise<void>;
+		act(() => { handoff = result.current.takeBrowserControl(); });
+		act(() => bridge.emitRuntime({ sessionId: "sess-1", connected: true, owned: false, error: { code: "BROWSER_SESSION_BUSY", message: "Browser is controlled by another desktop." } }));
+		await act(async () => { resolve({ sessionId: "sess-1", connected: true, owned: true }); await handoff; });
+		expect(result.current.browserRuntimeError?.code).toBe("BROWSER_SESSION_BUSY");
 	});
 
 	it("keeps bounds revisions increasing when the same native view remounts", async () => {

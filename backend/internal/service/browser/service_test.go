@@ -23,7 +23,7 @@ type fakeRuntime struct {
 	action string
 }
 
-func (f *fakeRuntime) Status() browserruntime.Status {
+func (f *fakeRuntime) StatusForSession(_ domain.SessionID) browserruntime.Status {
 	return browserruntime.Status{Connected: true}
 }
 

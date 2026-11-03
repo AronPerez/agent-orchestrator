@@ -62,6 +62,8 @@ const hookState = vi.hoisted(() => ({
 	annotationMode: false,
 	annotationState: { count: 0, screenshotCount: 0, hasDraft: false },
 	browserRuntimeConnected: true as boolean | null,
+	browserRuntimeError: undefined as { code: string; message: string } | undefined,
+	takeBrowserControl: vi.fn(async () => undefined),
 	tabs: [{ id: "t1", url: "", title: "", active: true }],
 	activeTabId: "t1",
 	tabNotice: "",
@@ -111,6 +113,8 @@ vi.mock("../hooks/useBrowserView", () => ({
 			openDevTools: hookState.openDevTools,
 			closeDevTools: hookState.closeDevTools,
 			browserRuntimeConnected: hookState.browserRuntimeConnected,
+			browserRuntimeError: hookState.browserRuntimeError,
+			takeBrowserControl: hookState.takeBrowserControl,
 			reconnectBrowserRuntime: hookState.reconnectBrowserRuntime,
 			annotationMode: hookState.annotationMode,
 			annotationState: hookState.annotationState,
@@ -284,6 +288,8 @@ describe("BrowserPanel", () => {
 		hookState.annotationMode = false;
 		hookState.annotationState = { count: 0, screenshotCount: 0, hasDraft: false };
 		hookState.browserRuntimeConnected = true;
+		hookState.browserRuntimeError = undefined;
+		hookState.takeBrowserControl.mockReset();
 		postMock.mockReset();
 		postMock.mockResolvedValue({ data: {} });
 		annotationSubmitListeners.clear();
@@ -1436,6 +1442,19 @@ describe("BrowserPanel", () => {
 		await userEvent.click(screen.getByRole("button", { name: "Reconnect" }));
 
 		expect(hookState.reconnectBrowserRuntime).toHaveBeenCalledOnce();
+	});
+
+	it("offers an explicit session handoff without reconnecting a healthy runtime", async () => {
+		hookState.browserRuntimeConnected = true;
+		Object.assign(hookState, {
+			browserRuntimeError: { code: "BROWSER_SESSION_BUSY", message: "Browser is controlled by another desktop." },
+			takeBrowserControl: vi.fn(async () => undefined),
+		});
+		render(<BrowserPanel active onTogglePopOut={() => undefined} poppedOut={false} session={session} />);
+		expect(screen.getByTestId("browser-runtime-alert")).toHaveTextContent("Browser is controlled by another desktop.");
+		await userEvent.click(screen.getByRole("button", { name: "Use browser here" }));
+		expect((hookState as typeof hookState & { takeBrowserControl: ReturnType<typeof vi.fn> }).takeBrowserControl).toHaveBeenCalledOnce();
+		expect(hookState.reconnectBrowserRuntime).not.toHaveBeenCalled();
 	});
 
 	it("does not render a globe icon in the URL input", () => {

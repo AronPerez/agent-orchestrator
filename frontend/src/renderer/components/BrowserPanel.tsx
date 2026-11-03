@@ -437,6 +437,8 @@ export function BrowserPanelView({
 		agentBrowserActive,
 		agentBrowserActivity,
 		browserRuntimeConnected,
+		browserRuntimeError,
+		takeBrowserControl = async () => undefined,
 		reconnectBrowserRuntime = async () => undefined,
 		devtoolsState = { viewId: "", open: false, activeTabId: "" },
 		profileState = { viewId: "", profileId: null, temporary: true },
@@ -934,14 +936,16 @@ export function BrowserPanelView({
 							: "";
 	const agentStatusLabel = agentActivityLabel(agentBrowserActivity, agentBrowserActive);
 	const runtimeDisconnected = hasNativeBrowser && browserRuntimeConnected === false;
+	const runtimeConflict = hasNativeBrowser && browserRuntimeConnected === true && browserRuntimeError?.code === "BROWSER_SESSION_BUSY";
 	const reconnectRuntime = useCallback(async () => {
 		setRuntimeReconnectPending(true);
 		try {
-			await reconnectBrowserRuntime();
+			if (runtimeConflict) await takeBrowserControl();
+			else await reconnectBrowserRuntime();
 		} finally {
 			setRuntimeReconnectPending(false);
 		}
-	}, [reconnectBrowserRuntime]);
+	}, [reconnectBrowserRuntime, runtimeConflict, takeBrowserControl]);
 	const suggestionsOpen = urlEditing && historySuggestions.length > 0;
 	const currentURLIsWeb = isWebLink(navState.url);
 	const copyURLLabel = t(urlCopied ? "browser.urlCopied" : "browser.copyUrl");
@@ -1284,9 +1288,9 @@ export function BrowserPanelView({
 			>
 				{browserTabBar}
 				<div className="browser-panel__toolbar" data-testid="browser-toolbar">
-							{runtimeDisconnected ? (
+							{runtimeDisconnected || (hasNativeBrowser && browserRuntimeError) ? (
 								<div className="flex min-w-0 items-center gap-1.5 text-2xs text-destructive" data-testid="browser-runtime-alert" role="alert">
-									<span className="truncate">{t("browser.runtimeDisconnected")}</span>
+									<span className="truncate">{runtimeConflict ? t("browser.runtimeOwnedElsewhere") : browserRuntimeError?.message || t("browser.runtimeDisconnected")}</span>
 									<Button
 										className="shrink-0"
 										disabled={runtimeReconnectPending}
@@ -1295,7 +1299,7 @@ export function BrowserPanelView({
 										type="button"
 										variant="outline"
 									>
-										{t("browser.reconnectRuntime")}
+										{t(runtimeConflict ? "browser.useBrowserHere" : "browser.reconnectRuntime")}
 									</Button>
 								</div>
 							) : null}

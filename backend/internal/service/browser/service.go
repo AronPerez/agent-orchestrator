@@ -28,7 +28,7 @@ type sessionReader interface {
 }
 
 type runtime interface {
-	Status() browserruntime.Status
+	StatusForSession(_ domain.SessionID) browserruntime.Status
 	Execute(ctx context.Context, sessionID domain.SessionID, action string, args map[string]interface{}) (browserruntime.Result, error)
 }
 
@@ -67,7 +67,7 @@ func (s *Service) Status(ctx context.Context, sessionID domain.SessionID, capabi
 		return browserruntime.Status{}, err
 	}
 	target := s.targetFor(sessionID)
-	status := s.runtimeFor(target).Status()
+	status := s.runtimeFor(target).StatusForSession(sessionID)
 	status.Target = target
 	return status, nil
 }
@@ -137,7 +137,7 @@ func (s *Service) target(sessionID domain.SessionID, args map[string]interface{}
 		}
 	}
 	target := s.targetFor(sessionID)
-	status := s.runtimeFor(target).Status()
+	status := s.runtimeFor(target).StatusForSession(sessionID)
 	return browserruntime.Result{Value: map[string]interface{}{
 		"target":        target,
 		"transport":     status.Transport,

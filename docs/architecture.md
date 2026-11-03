@@ -1240,10 +1240,24 @@ newline-JSON broker protocol runs over the WebSocket, including cancellation
 and liveness. Worker CLI capability checks are unchanged.
 
 Remote commands use the renderer's host-scoped session key, so matching session
-IDs on separate machines never share a view or temporary profile. A local
-Electron runtime takes priority; otherwise the first connected remote desktop
-keeps the broker until it disconnects. Host disconnection retires the link,
-cancels outstanding commands and destroys the views it used.
+IDs on separate machines never share a view or temporary profile. Protocol v4 connects multiple desktops without choosing a daemon-wide winner.
+Opening a session claims its browser; a connected owner can only be replaced
+by the explicit “Use browser here” action. A transfer cancels that session's
+in-flight commands without replaying them and does not move tabs or cookies.
+Pending results, write ordering and heartbeat are isolated per connection.
+
+A disconnected session owner stays reserved while its link reconnects; its
+commands never fall back to a different desktop. An unclaimed session selects
+and pins the sole connected runtime, or fails with `BROWSER_SESSION_UNCLAIMED`
+if more than one desktop is available. Claims are in-memory, replayed in the
+hello after reconnect, and forgotten when the session is destroyed. After a
+daemon restart, sessions whose claims have not yet replayed follow the same
+unclaimed-session rule; ownership is not persisted across daemon restarts.
+
+Local v2/v3 and exclusive Chrome runtimes remain supported (heartbeat starts
+at v3). Remote runtimes require v4, so update both desktop and daemon. Host
+disconnection retires its link and views. Offscreen render-check/measure
+commands still use local Electron, never a remote desktop.
 
 `ao preview` still publishes a session preview selection through CDC. Both the
 renderer and remote browser commands use the existing isolated preview origins:
