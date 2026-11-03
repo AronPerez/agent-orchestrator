@@ -1,16 +1,17 @@
 import { sessionUiKey } from "../renderer/lib/hosts";
-import { connectBrowserRuntime, type BrowserRuntimeCommand } from "./browser-runtime-link";
+import { connectBrowserRuntime, type BrowserRuntimeCommand, type BrowserRuntimeSessionState } from "./browser-runtime-link";
 import { isRemoteLoopbackURL, type ActiveProxy } from "./remote-proxy";
 
 type Execute = (command: BrowserRuntimeCommand, signal: AbortSignal) => Promise<unknown>;
 
 /** Attach the desktop's native Browser panel to a paired daemon's broker. */
-export function attachRemoteBrowserRuntime(hostId: string, proxy: ActiveProxy, execute: Execute, onStateChange?: (connected: boolean) => void): ActiveProxy {
+export function attachRemoteBrowserRuntime(hostId: string, proxy: ActiveProxy, execute: Execute, onStateChange?: (connected: boolean) => void, onSessionState?: (state: BrowserRuntimeSessionState) => void): ActiveProxy {
 	const endpoint = new URL(`${proxy.base}/browser-runtime`);
 	endpoint.protocol = "ws:"; // The existing loopback proxy owns upstream TLS and credentials.
 	const sessions = new Set<string>();
 	const link = connectBrowserRuntime(endpoint, {
 		onStateChange,
+	onSessionState,
 		execute: async (command, signal) => {
 			if (command.action.startsWith("__") && command.action !== "__destroy-session") {
 				throw new Error("Remote browser does not support offscreen rendering");

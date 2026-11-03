@@ -17,7 +17,7 @@ afterEach(async () => {
 	await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => { server.closeAllConnections(); server.close(() => resolve()); })));
 });
 
-async function remote(hostId = "host-a") {
+async function remote(hostId = "host-a", acceptHello = true) {
 	const requests: { url?: string; auth?: string; host?: string }[] = [];
 	const server = createServer((req, res) => {
 		if (req.url === "/ao/api/v1/identity") res.end(JSON.stringify({ hostId, apiVersion: 1 }));
@@ -41,7 +41,7 @@ async function remote(hostId = "host-a") {
 			for (const line of data.toString().split("\n").filter(Boolean)) {
 				const message = JSON.parse(line);
 				messages.push(message);
-				if (message.type === "hello") client.send('{"type":"hello-ok"}\n');
+				if (message.type === "hello" && acceptHello) client.send('{"type":"hello-ok"}\n');
 			}
 		});
 	});
@@ -61,11 +61,59 @@ function attach(hostId: string, proxy: ActiveProxy, execute: (command: BrowserRu
 const command = { type: "command", sessionId: "project-1", requestId: "r1", action: "open", args: { url: "http://localhost:5173/page" } };
 
 describe("remote desktop browser routing", () => {
+	it("registers sessions opened while the hello acknowledgement is pending", async () => {
+		const host = await remote("host-a", false);
+		const link = attach("host-a", host.proxy, vi.fn(async () => ({}))).browserRuntime!;
+		await vi.waitFor(() => expect(host.messages).toHaveLength(1));
+		await link.attachSession("late-session", false);
+		host.send({ type: "hello-ok" });
+		await vi.waitFor(() => expect(host.messages.at(-1)).toMatchObject({ type: "attach-session", sessionId: "late-session", takeover: false }));
+		host.send({ type: "session-state", requestId: host.messages.at(-1)!.requestId, sessionId: "late-session", owned: true, revision: 1 });
+		await vi.waitFor(() => expect(link.sessionState("late-session").owned).toBe(true));
+	});
+
+	it("keeps a denied session claim separate from the connected transport and replays it on reconnect", async () => {
+		const host = await remote();
+		const attached = attach("host-a", host.proxy, vi.fn(async () => ({})));
+		const link = attached.browserRuntime!;
+		await vi.waitFor(() => expect(link.connected).toBe(true));
+		const claim = link.attachSession("project-1", false);
+		await vi.waitFor(() => expect(host.messages.at(-1)).toMatchObject({ type: "attach-session", sessionId: "project-1", takeover: false }));
+		const requestId = host.messages.at(-1)!.requestId;
+		host.send({ type: "session-state", requestId, sessionId: "project-1", owned: false, revision: 2, error: { code: "BROWSER_SESSION_BUSY", message: "Browser is controlled by another desktop." } });
+		expect(await claim).toMatchObject({ connected: true, owned: false, error: { code: "BROWSER_SESSION_BUSY" } });
+		expect(link.connected).toBe(true);
+		const takeover = link.attachSession("project-1", true);
+		await vi.waitFor(() => expect(host.messages.at(-1)).toMatchObject({ takeover: true }));
+		host.send({ type: "session-state", requestId: host.messages.at(-1)!.requestId, sessionId: "project-1", owned: true, revision: 4 });
+		expect(await takeover).toMatchObject({ owned: true });
+		// A delayed notification must not undo the newer claim.
+		host.send({ type: "session-state", sessionId: "project-1", owned: false, revision: 3 });
+		host.send({ type: "ping" });
+		await vi.waitFor(() => expect(host.messages.at(-1)).toEqual({ type: "pong" }));
+		expect(link.sessionState("project-1").owned).toBe(true);
+		const pending = link.attachSession("project-2", false);
+		host.drop();
+		await expect(pending).resolves.toMatchObject({ connected: false, owned: false });
+		await vi.waitFor(() => expect(host.messages.filter((m) => m.type === "hello")).toHaveLength(2));
+		const hellos = host.messages.filter((m) => m.type === "hello");
+		expect(hellos[1]).toMatchObject({ version: 4, runtimeId: hellos[0].runtimeId, sessions: ["project-1", "project-2"] });
+		expect(link.sessionState("project-1").owned).toBe(false);
+	});
+
+	it("exposes a rejected hello and never claims that a transport is ready", async () => {
+		const host = await remote();
+		const attached = attach("host-a", host.proxy, vi.fn(async () => ({})));
+		await vi.waitFor(() => expect(attached.browserRuntime!.connected).toBe(true));
+		host.send({ type: "hello-rejected", error: { code: "BROWSER_RUNTIME_PROTOCOL_MISMATCH", message: "Update AO" } });
+		await vi.waitFor(() => expect(attached.browserRuntime!.sessionState("project-1")).toMatchObject({ connected: false, error: { code: "BROWSER_RUNTIME_PROTOCOL_MISMATCH" } }));
+	});
+
 	it("authenticates the bridge, scopes the panel and tunnels loopback previews", async () => {
 		const host = await remote();
 		const execute = vi.fn(async (cmd: BrowserRuntimeCommand) => ({ url: cmd.args?.url, target: { url: cmd.args?.url }, text: "page text" }));
 		attach("host-a", host.proxy, execute);
-		await vi.waitFor(() => expect(host.messages[0]).toEqual({ type: "hello", version: 3 }));
+		await vi.waitFor(() => expect(host.messages[0]).toMatchObject({ type: "hello", version: 4, runtimeId: expect.any(String), sessions: [] }));
 		expect(host.requests[0]).toEqual({ url: "/ao/browser-runtime", auth: "Bearer paired-secret", host: "host-a" });
 		host.send(command);
 		await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());

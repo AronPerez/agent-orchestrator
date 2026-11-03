@@ -1,9 +1,10 @@
 import net from "node:net";
+import { randomUUID } from "node:crypto";
 import type { Duplex } from "node:stream";
 import WebSocket, { createWebSocketStream } from "ws";
 import { StringDecoder } from "node:string_decoder";
 
-const PROTOCOL_VERSION = 2;
+const PROTOCOL_VERSION = 4;
 const BACKOFF_INIT_MS = 200;
 const BACKOFF_MAX_MS = 2_000;
 const MAX_COMMAND_BYTES = 1 << 20;
@@ -27,13 +28,36 @@ export type BrowserRuntimeCommandError = {
 	message: string;
 };
 
+export type BrowserRuntimeSessionState = {
+	sessionId: string;
+	connected: boolean;
+	owned: boolean;
+	error?: BrowserRuntimeCommandError;
+};
+
+type SessionStateMessage = {
+	type: "session-state";
+	sessionId: string;
+	owned: boolean;
+	revision: number;
+	requestId?: string;
+	error?: BrowserRuntimeCommandError;
+};
+
 export interface BrowserRuntimeLinkHandle {
+	readonly runtimeId: string;
+	readonly sessions: readonly string[];
+	attachSession(sessionId: string, takeover: boolean): Promise<BrowserRuntimeSessionState>;
+	sessionState(sessionId: string): BrowserRuntimeSessionState;
 	readonly connected: boolean;
 	reconnect(): void;
 	dispose(): void;
 }
 
 type BrowserRuntimeLinkOptions = {
+	runtimeId?: string;
+	sessions?: readonly string[];
+	onSessionState?: (state: BrowserRuntimeSessionState) => void;
 	execute: (command: BrowserRuntimeCommand, signal: AbortSignal) => Promise<unknown>;
 	token?: string;
 	log?: (message: string) => void;
@@ -47,6 +71,25 @@ export function connectBrowserRuntime(
 	const log = options.log ?? (() => undefined);
 	let disposed = false;
 	let connected = false;
+	const runtimeId = options.runtimeId ?? randomUUID();
+	const sessions = new Set(options.sessions);
+	let helloSessions = new Set<string>();
+	const sessionStates = new Map<string, SessionStateMessage>();
+	let runtimeError: BrowserRuntimeCommandError | undefined;
+	const claims = new Map<string, { sessionId: string; resolve: (state: BrowserRuntimeSessionState) => void; timer: ReturnType<typeof setTimeout> }>();
+	const sessionState = (sessionId: string): BrowserRuntimeSessionState => {
+		const state = sessionStates.get(sessionId);
+		return { sessionId, connected, owned: connected && state?.owned === true, error: runtimeError ?? state?.error };
+	};
+	const publishSessions = () => {
+		for (const sessionId of sessions) options.onSessionState?.(sessionState(sessionId));
+	};
+	const settleClaim = (requestId: string) => {
+		const pending = claims.get(requestId);
+		if (!pending) return;
+		clearTimeout(pending.timer); claims.delete(requestId);
+		pending.resolve(sessionState(pending.sessionId));
+	};
 	let socket: Duplex | null = null;
 	let retryTimer: ReturnType<typeof setTimeout> | null = null;
 	let backoff = BACKOFF_INIT_MS;
@@ -63,6 +106,10 @@ export function connectBrowserRuntime(
 		if (connected === value) return;
 		connected = value;
 		options.onStateChange?.(value);
+		if (!value) {
+			for (const requestId of claims.keys()) settleClaim(requestId);
+		}
+		publishSessions();
 	};
 
 	const sendCancelledResultOnTarget = (command: BrowserRuntimeCommand, target: Duplex) => {
@@ -163,6 +210,11 @@ export function connectBrowserRuntime(
 		try {
 			controller.signal.throwIfAborted();
 			const result = await options.execute(command, controller.signal);
+			if (command.action === "__destroy-session") {
+				sessions.delete(command.sessionId);
+				sessionStates.delete(command.sessionId);
+				for (const [requestId, claim] of claims) if (claim.sessionId === command.sessionId) settleClaim(requestId);
+			}
 			controller.signal.throwIfAborted();
 			await send({ type: "result", requestId: command.requestId, ok: true, result }, target, epoch);
 		} catch (error) {
@@ -191,7 +243,7 @@ export function connectBrowserRuntime(
 
 	const consumeLine = (line: string, target: Duplex, epoch: number) => {
 		if (!line.trim()) return;
-		let message: BrowserRuntimeCommand | BrowserRuntimeCancel | { type: "hello-ok" | "hello-rejected" | "rejected" | "ping" };
+		let message: BrowserRuntimeCommand | BrowserRuntimeCancel | SessionStateMessage | { type: "hello-ok" | "hello-rejected" | "rejected" | "ping"; error?: BrowserRuntimeCommandError };
 		try {
 			message = JSON.parse(line);
 		} catch {
@@ -199,12 +251,29 @@ export function connectBrowserRuntime(
 		}
 		if (!message || typeof message !== "object") return;
 		if (message.type === "hello-ok") {
+	runtimeError = undefined;
 			setConnected(true);
+			for (const sessionId of sessions) {
+				if (!helloSessions.has(sessionId) && ![...claims.values()].some((claim) => claim.sessionId === sessionId)) void attachSession(sessionId, false);
+			}
 			backoff = BACKOFF_INIT_MS;
 			return;
 		}
 		if (message.type === "hello-rejected" || message.type === "rejected") {
+			runtimeError = isCommandError(message.error) ? message.error : { code: "BROWSER_RUNTIME_REJECTED", message: "Browser runtime registration was rejected" };
+			setConnected(false);
+			publishSessions();
 			target.destroy();
+			return;
+		}
+		if (message.type === "session-state") {
+			if (typeof message.sessionId !== "string" || typeof message.owned !== "boolean" || !Number.isSafeInteger(message.revision) || !sessions.has(message.sessionId)) return;
+			const previous = sessionStates.get(message.sessionId);
+			if (!previous || message.revision >= previous.revision) {
+				sessionStates.set(message.sessionId, { ...message, error: isCommandError(message.error) ? message.error : undefined });
+				options.onSessionState?.(sessionState(message.sessionId));
+			}
+			if (message.requestId && claims.get(message.requestId)?.sessionId === message.sessionId) settleClaim(message.requestId);
 			return;
 		}
 		if (message.type === "ping") {
@@ -223,6 +292,13 @@ export function connectBrowserRuntime(
 			typeof command.action !== "string"
 		) {
 			return;
+		}
+		if (!command.action.startsWith("__")) {
+			sessions.add(command.sessionId);
+			if (!sessionStates.has(command.sessionId)) {
+				sessionStates.set(command.sessionId, { type: "session-state", sessionId: command.sessionId, owned: true, revision: 0 });
+				options.onSessionState?.(sessionState(command.sessionId));
+			}
 		}
 		const controller = new AbortController();
 		commandControllers.set(command.requestId, controller);
@@ -269,6 +345,7 @@ export function connectBrowserRuntime(
 	function connect() {
 		if (disposed) return;
 		destroySocket();
+	sessionStates.clear();
 		buffer = "";
 		decoder = new StringDecoder("utf8");
 		const epoch = ++connectionEpoch;
@@ -280,9 +357,9 @@ export function connectBrowserRuntime(
 				next.destroy();
 				return;
 			}
-			// Remote brokers can reject a competing desktop; wait for their hello-ok.
-			if (!ws) { setConnected(true); backoff = BACKOFF_INIT_MS; }
-			void send({ type: "hello", version: ws ? 3 : PROTOCOL_VERSION, token: options.token }, next, epoch).catch((error) => {
+			// Both transports must acknowledge the v4 registration before accepting claims.
+			helloSessions = new Set(sessions);
+			void send({ type: "hello", version: PROTOCOL_VERSION, runtimeId, sessions: [...helloSessions], token: options.token }, next, epoch).catch((error) => {
 				log(`browser-runtime-link: hello failed: ${String(error)}`);
 				next.destroy();
 			});
@@ -307,8 +384,29 @@ export function connectBrowserRuntime(
 		next.on("close", tearDownConnection);
 	}
 
+	function attachSession(sessionId: string, takeover: boolean): Promise<BrowserRuntimeSessionState> {
+			if (disposed) return Promise.resolve(sessionState(sessionId));
+			sessions.add(sessionId);
+			if (!connected || !socket) return Promise.resolve(sessionState(sessionId));
+			const target = socket, epoch = connectionEpoch, requestId = randomUUID();
+			return new Promise((resolve) => {
+				const timer = setTimeout(() => {
+					sessionStates.set(sessionId, { type: "session-state", sessionId, owned: false, revision: sessionStates.get(sessionId)?.revision ?? 0, error: { code: "BROWSER_RUNTIME_TIMEOUT", message: "Browser ownership request timed out" } });
+					options.onSessionState?.(sessionState(sessionId));
+					settleClaim(requestId);
+				}, 8_000);
+				claims.set(requestId, { sessionId, resolve, timer });
+				void send({ type: "attach-session", requestId, sessionId, takeover }, target, epoch).catch(() => target.destroy());
+			});
+		}
+
 	connect();
 	return {
+		runtimeId,
+		get sessions() { return [...sessions]; },
+		sessionState,
+		attachSession,
+
 		get connected() {
 			return connected;
 		},
