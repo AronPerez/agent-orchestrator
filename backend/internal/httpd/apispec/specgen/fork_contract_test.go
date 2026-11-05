@@ -15,6 +15,7 @@ func TestBuildForkFrozenClientContracts(t *testing.T) {
 		t.Fatal(err)
 	}
 	var doc struct {
+		Paths      map[string]any `yaml:"paths"`
 		Components struct {
 			Schemas map[string]openAPISchemaNode `yaml:"schemas"`
 		} `yaml:"components"`
@@ -32,5 +33,11 @@ func TestBuildForkFrozenClientContracts(t *testing.T) {
 	}
 	if _, ok := doc.Components.Schemas["AgentSwitch"]; !ok {
 		t.Fatal("legacy switch receipt schema missing")
+	}
+	if _, ok := doc.Paths["/api/v1/settings/cloud-offering"]; !ok {
+		t.Fatal("frozen UI cloud toggle route missing")
+	}
+	if _, ok := doc.Components.Schemas["SettingsResponse"].Properties["cloudOffering"]; !ok {
+		t.Fatal("frozen UI cloud toggle field missing")
 	}
 }

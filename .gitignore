@@ -118,3 +118,4 @@ scripts/running.json
 backend/internal/httpd/webui/bundle/
 
 /frontend/wake-helper/
+/frontend/dictation-helper/
