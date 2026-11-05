@@ -1228,6 +1228,39 @@ describe("browser:closeTab automation-runtime fallback", () => {
 		expect(result.tabs.map((tab) => tab.id)).toEqual(["t1"]);
 	});
 
+	it.each(["renderer", "agent", "cancelled-agent"])("closes an unregistered AO popup from %s without disturbing the synchronized active tab", async (source) => {
+		const { host, invoke, runtime, views, activeTargets } = setupTabHost();
+		await host.execute("sess-1", "snapshot");
+		const { viewId } = (await invoke("browser:ensure", "sess-1")) as { viewId: string };
+		const controller = new AbortController();
+		const original = vi.mocked(runtime.runAction).getMockImplementation()!;
+		vi.mocked(runtime.runAction).mockImplementation(async (sessionId, action, args, provider, signal) => {
+			if (args.tabId === "t2" && (action === "tab-select" || action === "tab-close")) {
+				if (action === "tab-close" && source === "cancelled-agent") controller.abort();
+				throw Object.assign(new Error("AO popup is absent from the native registry"), { code: "BROWSER_TARGET_MISMATCH" });
+			}
+			return original(sessionId, action, args, provider, signal);
+		});
+		views[0].webContents.openWindow("https://popup.example.test/");
+		await vi.waitFor(async () => {
+			expect(await host.execute("sess-1", "tabs")).toMatchObject({ tabs: [expect.anything(), expect.anything()] });
+		});
+		await host.execute("sess-1", "tab-select", { tabId: "t1" });
+		expect(activeTargets.get("sess-1")).toBe("t1");
+		const closing = source === "renderer"
+			? invoke("browser:closeTab", { viewId, tabId: "t2" })
+			: host.execute("sess-1", "tab-close", { tabId: "t2" }, controller.signal);
+		if (source === "cancelled-agent") {
+			await expect(closing).rejects.toMatchObject({ code: "BROWSER_COMMAND_CANCELED" });
+			await expect(host.execute("sess-1", "tabs")).resolves.toMatchObject({ activeTabId: "t1", tabs: [{ id: "t1" }, { id: "t2" }] });
+			expect(views[1].webContents.close).not.toHaveBeenCalled();
+		} else {
+			await expect(closing).resolves.toMatchObject({ activeTabId: "t1", tabs: [{ id: "t1" }] });
+			expect(views[1].webContents.close).toHaveBeenCalledOnce();
+		}
+		expect(views[0].webContents.close).not.toHaveBeenCalled();
+	});
+
 	// Regression, reported live: the runtime's Target.closeTarget handling
 	// (invoked from inside runAction) can call AO's own internal closeTab
 	// before the runtime still reports the overall tab-close command as

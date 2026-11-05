@@ -1664,7 +1664,10 @@ export function createBrowserViewHost(
             );
           }
         } catch (error) {
-          if (!isAgentBrowserCommandFailure(error)) throw error;
+          if (
+            !isAgentBrowserCommandFailure(error) &&
+            !isBrowserTargetMismatch(error)
+          ) throw error;
           // Closing the AO-owned WebContentsView by its exact logical ID is safe
           // even when agent-browser forgot that ID. It cannot fall through to a
           // different target, unlike a read or page mutation.
