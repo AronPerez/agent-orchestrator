@@ -87,6 +87,11 @@ function canonicalKey(url: string, number: number): string {
 	return canonicalURL(url) || `number:${number}`;
 }
 
+/** The key that tells two observations of one pull request apart from others. */
+export function prDisplayKey(pr: { url: string; number: number }): string {
+	return canonicalKey(pr.url, pr.number);
+}
+
 function canonicalURL(rawUrl: string): string | undefined {
 	return prURL({ url: rawUrl, htmlUrl: rawUrl, mergeability: { prUrl: rawUrl } } as SessionPRSummary);
 }
@@ -308,14 +313,16 @@ function reviewStatusDetail(pr: SessionPRSummary): string {
 		case "approved": return appI18n.t("pr.review.requirementSatisfied");
 		case "changes_requested": return appI18n.t("pr.review.changesActive");
 		case "review_required": return appI18n.t("pr.review.requiredNotSubmitted");
-		case "none": return appI18n.t("pr.review.notRequired");
+		// Unresolved comments hold a PR back (the row is a warning) even with no review required.
+		case "none": return appI18n.t(pr.review.hasUnresolvedHumanComments ? "pr.review.unresolvedComments" : "pr.review.notRequired");
 	}
 }
 
 function mergeReadinessDetail(pr: SessionPRSummary): string {
 	if (pr.mergeability.state === "conflicting") return appI18n.t("pr.merge.reasonConflict");
-	if (pr.ci.state === "failing") return appI18n.t("pr.merge.reasonChecksFailing");
+	// Review first: the checks-failing text states the review requirement is satisfied.
 	if (!reviewAllowsMerge(pr.review.decision)) return appI18n.t("pr.merge.reasonReview");
+	if (pr.ci.state === "failing") return appI18n.t("pr.merge.reasonChecksFailing");
 	if (pr.review.hasUnresolvedHumanComments) return appI18n.t("pr.merge.reasonComments");
 	if (pr.mergeability.state !== "mergeable") return providerBlockedDetail(pr);
 	return appI18n.t("pr.merge.reasonReady");
@@ -769,4 +776,28 @@ function overflowLabel(total: number, shown: number, noun: PRNoun): string | und
 
 function pluralize(noun: PRNoun, count: number): string {
 	return appI18n.t(prNounKeys[noun], { count });
+}
+
+/**
+ * owner/name of the repository a pull request URL points at (GitHub
+ * /owner/name/pull/N or GitLab /owner/name/-/merge_requests/N), or undefined.
+ */
+export function prRepositoryFromUrl(raw: string | undefined): string | undefined {
+	if (!raw) return undefined;
+	try {
+		const match = new URL(raw).pathname.match(/^\/([^/]+\/[^/]+)\/(?:pull|issues|-\/merge_requests)\/\d+/);
+		return match?.[1];
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Whether a session's pull requests span more than one repository (a
+ * multi-repository cloud session can open one per repository), in which case
+ * each one is labelled with its repository.
+ */
+export function prsSpanRepositories(prs: ReadonlyArray<{ url?: string; htmlUrl?: string; repo?: string }>): boolean {
+	const repositories = new Set(prs.map((pr) => (pr.repo || prRepositoryFromUrl(pr.htmlUrl || pr.url) || "").toLowerCase()).filter(Boolean));
+	return repositories.size > 1;
 }

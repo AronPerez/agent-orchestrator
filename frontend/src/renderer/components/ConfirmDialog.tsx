@@ -1,9 +1,9 @@
 import { useRef } from "react";
-import { X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
 import { useRestoreFocusOnClose } from "../hooks/useRestoreFocusOnClose";
 import { Button } from "./ui/button";
+import { CloseButton } from "./ui/close-button";
 import {
 	Dialog,
 	DialogClose,
@@ -30,6 +30,7 @@ type ConfirmDialogProps = {
 	/** Options shown between the description and the buttons. */
 	children?: React.ReactNode;
 	busy?: boolean;
+	confirmDisabled?: boolean;
 	error?: string | null;
 	onConfirm: () => void;
 	onOpenChange: (open: boolean) => void;
@@ -49,6 +50,7 @@ export function ConfirmDialog({
 	destructive,
 	children,
 	busy,
+	confirmDisabled,
 	error,
 	onConfirm,
 	onOpenChange,
@@ -72,8 +74,10 @@ export function ConfirmDialog({
 				// DOM tree, so a confirm rendered from inside a clickable row or card
 				// would otherwise also trigger that ancestor's onClick (opening the very
 				// session being confirmed). The modal — dimmed backdrop included — owns
-				// its own clicks. Radix still dismisses on the native pointerdown.
+				// its own clicks, right-clicks included. Radix still dismisses on the
+				// native pointerdown.
 				onClick={(event) => event.stopPropagation()}
+				onContextMenu={(event) => event.stopPropagation()}
 				onOpenAutoFocus={(event) => {
 					// Destructive confirms start on the safe choice, not the close X.
 					const target = destructive ? cancelRef.current : confirmRef.current;
@@ -82,19 +86,16 @@ export function ConfirmDialog({
 					target.focus();
 				}}
 				onCloseAutoFocus={restoreFocusOnClose}
-				overlay={<DialogOverlay onClick={(event) => event.stopPropagation()} />}
+				overlay={<DialogOverlay onClick={(event) => event.stopPropagation()} onContextMenu={(event) => event.stopPropagation()} />}
 			>
 				<DialogClose asChild>
-					<button
-						type="button"
+					<CloseButton
+						floating
 						disabled={busy}
 						tabIndex={-1}
-						className="settings-dialog-close-button settings-close-button"
 						aria-label={t("confirm.close")}
 						title={t("confirm.closeEsc")}
-					>
-						<X className="size-4" aria-hidden="true" />
-					</button>
+					/>
 				</DialogClose>
 
 				<div className={cn(settingsDialogHeaderClass, "border-b-0 p-5 pr-12")}>
@@ -124,9 +125,9 @@ export function ConfirmDialog({
 						ref={confirmRef}
 						aria-label={confirmAriaLabel}
 						type="button"
-						variant="footer-primary"
-						className={cn(compactButtonClass, destructive && "bg-danger-strong hover:bg-danger-strong")}
-						disabled={busy}
+						variant={destructive ? "footer-destructive" : "footer-primary"}
+						className={compactButtonClass}
+						disabled={busy || confirmDisabled}
 						onClick={onConfirm}
 					>
 						{confirmLabel}

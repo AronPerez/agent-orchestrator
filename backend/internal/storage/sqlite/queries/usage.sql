@@ -200,8 +200,9 @@ WHERE (s.is_terminated = 0 OR ub.state = 'finalizing')
 	      WHERE binding_id = ub.id
 	  )
   )
-ORDER BY ub.updated_at, ub.id
-LIMIT ?;
+  AND ub.id > sqlc.arg(after_id)
+ORDER BY ub.id
+LIMIT sqlc.arg(row_limit);
 
 -- name: ListUsageBindingsForCodexParent :many
 SELECT DISTINCT ub.*
@@ -277,6 +278,9 @@ UPDATE usage_sources SET
 WHERE id = sqlc.arg(id);
 
 -- name: UpdateUsageBinding :execrows
+-- Every binding row update emits a session_updated change event, and
+-- reconciliation re-asserts the same state on every pass, so a write that would
+-- change neither the state nor the error code is skipped.
 UPDATE usage_bindings SET
     state = CASE
         WHEN sqlc.arg(state) = '' THEN usage_bindings.state
@@ -288,7 +292,12 @@ UPDATE usage_bindings SET
         ELSE sqlc.arg(last_error_code)
     END,
     updated_at = sqlc.arg(updated_at)
-WHERE id = sqlc.arg(id);
+WHERE id = sqlc.arg(id)
+  AND (
+      (sqlc.arg(state) <> '' AND usage_bindings.state <> sqlc.arg(state))
+      OR (usage_bindings.last_error_code <> 'codex_source_budget_exceeded'
+          AND usage_bindings.last_error_code <> sqlc.arg(last_error_code))
+  );
 
 -- name: CompleteUsageBindingIfSettled :execrows
 UPDATE usage_bindings
@@ -485,14 +494,17 @@ WHERE id = sqlc.arg(id)
 RETURNING binding_id;
 
 -- name: ListLegacyUsageSourceIDs :many
-SELECT DISTINCT us.id
-FROM usage_sources us
-JOIN model_usage_events mue ON mue.usage_source_id = us.id
 -- Open attribution: never attributed, or attributed only by inference and so
--- still replaceable by an observation.
+-- still replaceable by an observation. This is exactly what the partial index
+-- idx_model_usage_events_open_attribution holds, so the sources are read from
+-- that index alone. Every event's usage_source_id references usage_sources, so
+-- no join is needed; with the join the planner left the partial index for the
+-- full usage_source index once sqlite_stat1 existed.
+SELECT DISTINCT mue.usage_source_id
+FROM model_usage_events mue
 WHERE mue.billing_provider_id IS NULL
    OR mue.billing_provider_source = 'inferred'
-ORDER BY us.id;
+ORDER BY mue.usage_source_id;
 
 -- name: ListLegacyUsageEvents :many
 SELECT

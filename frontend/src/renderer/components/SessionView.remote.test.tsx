@@ -27,7 +27,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 vi.mock("../hooks/useCloudCp", () => ({ useCloudCp: () => ({ ready: false, baseUrl: "", client: {} }) }));
 vi.mock("../hooks/useCloudOrg", () => ({ useCloudOrg: () => ({ org: undefined, ready: false }) }));
 vi.mock("../lib/shell-context", () => ({ useShell: () => ({ daemonStatus: { state: "ready" } }) }));
-vi.mock("./ShellTopbar", () => ({ ShellTopbar: () => <div data-testid="shared-shell-topbar" /> }));
+vi.mock("./SessionTopbarActions", () => ({ SessionTopbarActions: () => <div data-testid="shared-shell-topbar" /> }));
 vi.mock("./NotificationCenter", () => ({ NotificationCenter: () => <button aria-label="Notifications" type="button" /> }));
 vi.mock("./TerminalPane", () => ({ TerminalPane: ({ session, terminalTarget, inputDisabled, createMux }: { session?: { hostId?: string; terminalHandleId?: string }; terminalTarget?: { kind: string; handleId?: string }; inputDisabled?: boolean; createMux?: () => unknown }) => <div data-testid="remote-terminal-base" data-host-id={session?.hostId ?? ""} data-terminal-handle={terminalTarget?.handleId ?? session?.terminalHandleId ?? ""} data-input-disabled={inputDisabled ? "true" : "false"} data-remote-mux={createMux ? "true" : "false"}>{session?.hostId ? baseUrlForHost(session.hostId) : "local"}</div> }));
 
@@ -39,11 +39,12 @@ import { shellTerminalsQueryKey, shellTerminalsQueryKeyForHost } from "../hooks/
 import { agentReadiness } from "../test/agent-readiness-fixtures";
 import { SessionView } from "./SessionView";
 import { SessionTopbarProvider } from "./SessionTopbarPortal";
+import { PageTopbarSurface } from "./PageTopbar";
 import { TooltipProvider } from "./ui/tooltip";
 
 function renderRemoteSession(queryClient: QueryClient, hostId = "box-a") {
 	return render(<QueryClientProvider client={queryClient}>
-		<TooltipProvider><SessionTopbarProvider><SessionView hostId={hostId} sessionId="session-1" /></SessionTopbarProvider></TooltipProvider>
+		<TooltipProvider><SessionTopbarProvider><PageTopbarSurface notifications><SessionView hostId={hostId} sessionId="session-1" /></PageTopbarSurface></SessionTopbarProvider></TooltipProvider>
 	</QueryClientProvider>);
 }
 
@@ -276,9 +277,9 @@ it("shows a normal inspector and reads its changed files from the remote host on
 	await userEvent.click(await screen.findByRole("button", { name: "Open full file" }));
 	expect(screen.getByRole("tab", { name: "page.tsx" })).toBeInTheDocument();
 	expect(screen.getByTestId("session-file-workspace")).toBeInTheDocument();
-	await userEvent.click(screen.getByRole("button", { name: "Maximize files" }));
+	await userEvent.click(screen.getByRole("button", { name: "Maximize" }));
 	expect(screen.getByTestId("files-popout-topbar")).toBeInTheDocument();
-	await userEvent.click(screen.getByRole("button", { name: "Minimize files" }));
+	await userEvent.click(screen.getByRole("button", { name: "Return to panel" }));
 	expect(requests).toContain("http://127.0.0.1:4000/api/v1/sessions/session-1/workspace/manifest");
 	expect(requests).toContain("http://127.0.0.1:4000/api/v1/sessions/session-1/workspace/diffs");
 	await waitFor(() => expect(requests.some((url) => url.startsWith("http://127.0.0.1:4000/api/v1/sessions/session-1/workspace/file?path="))).toBe(true));
@@ -389,7 +390,7 @@ it("baselines previews separately when the same session ID is viewed on another 
 	await screen.findByRole("combobox", { name: "Message the agent" });
 	expect(useUiStore.getState().inspectorSessions[sessionUiKey("session-1", "box-a")]?.view).toBe("summary");
 	view.rerender(<QueryClientProvider client={client}>
-		<TooltipProvider><SessionTopbarProvider><SessionView hostId="box-b" sessionId="session-1" /></SessionTopbarProvider></TooltipProvider>
+		<TooltipProvider><SessionTopbarProvider><PageTopbarSurface notifications><SessionView hostId="box-b" sessionId="session-1" /></PageTopbarSurface></SessionTopbarProvider></TooltipProvider>
 	</QueryClientProvider>);
 	await waitFor(() => expect(client.getQueryData(remoteWorkspaceQueryKey("box-b"))).toBeDefined());
 	expect(useUiStore.getState().inspectorSessions[sessionUiKey("session-1", "box-b")]?.view).toBe("summary");
@@ -432,7 +433,7 @@ it("automatically reveals a remote preview after session data finishes loading",
 	await connectHost("http://box-a:3001");
 	const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 	renderRemoteSession(queryClient);
-	await waitFor(() => expect(ensure).toHaveBeenCalledWith("remote:box-a:session-1"));
+	await waitFor(() => expect(ensure).toHaveBeenCalledWith("remote:box-a:session-1", false));
 	await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 	releaseInitialSessions();
 	await screen.findByRole("combobox", { name: "Message the agent" });
@@ -446,8 +447,7 @@ it("automatically reveals a remote preview after session data finishes loading",
 	await waitFor(() => expect(resolvePreview).toHaveBeenCalledWith("box-a", "session-1", "http://127.0.0.1:4600/"));
 	await waitFor(() => expect(screen.getByRole("textbox", { name: "Browser URL" })).toHaveValue("ao-preview.localhost"));
 	await waitFor(() => expect(within(screen.getByRole("tablist", { name: "Browser tabs" })).getByRole("tab", { name: "QA preview" })).toBeVisible());
-	await userEvent.click(screen.getByRole("button", { name: "Browser controls" }));
-	await userEvent.click(screen.getByRole("menuitem", { name: "Pop out" }));
+	await userEvent.click(screen.getByRole("button", { name: "Maximize" }));
 	expect(screen.getByTestId("browser-popout-topbar")).toBeInTheDocument();
 	await userEvent.click(within(document.querySelector(".browser-popout-overlay") as HTMLElement).getByRole("button", { name: "Return to panel" }));
 	expect(screen.queryByTestId("browser-popout-topbar")).not.toBeInTheDocument();
@@ -487,7 +487,7 @@ it("opens a TUI host file in a shared center tab and renames on that host", asyn
 	expect(screen.getByRole("tab", { name: "page.tsx" })).toHaveAttribute("aria-selected", "true");
 	expect(screen.getByTestId("session-file-workspace")).toBeInTheDocument();
 	await userEvent.click(screen.getByRole("tab", { name: /Worker · Codex/ }));
-	expect(screen.queryByTestId("session-file-workspace")).not.toBeInTheDocument();
+	expect(screen.getByTestId("session-file-workspace").closest("[inert]")).not.toBeNull();
 	expect(screen.getByTestId("remote-terminal-base")).toBeVisible();
 	await userEvent.dblClick(screen.getByRole("tab", { name: /Worker · Codex/ }));
 	const rename = screen.getByRole("textbox", { name: /Rename/ });
@@ -619,12 +619,13 @@ it("reuses a Chat delivery ID when a lost response is retried", async () => {
 	const message = await screen.findByRole("combobox", { name: "Message the agent" });
 	await typeInLexicalEditor(message, "Continue the task");
 	await userEvent.click(screen.getByRole("button", { name: "Send message" }));
-	await screen.findByText(/delivery wasn’t confirmed/);
+	// The lost send waits beside the box with its delivery ID.
+	await screen.findByTestId("unsent-message-strip");
 	await act(async () => { await disconnectHost("box-a"); });
 	expect(screen.getByRole("alert")).toHaveTextContent("Host is offline");
 	await act(async () => { await connectHost("http://box-a:3001"); });
-	await screen.findByRole("button", { name: "Retry message safely" });
-	await userEvent.click(screen.getByRole("button", { name: "Retry message safely" }));
+	await waitFor(() => expect(screen.getByRole("button", { name: "Retry" })).toBeEnabled());
+	await userEvent.click(screen.getByRole("button", { name: "Retry" }));
 	await waitFor(() => expect(deliveryIds).toHaveLength(2));
 	expect(deliveryIds[1]).toBe(deliveryIds[0]);
 	expect(posts).toEqual([
@@ -713,12 +714,13 @@ it("retries reviewer Chat on Box B with the same delivery ID", async () => {
 	expect(await screen.findByText("Review on port 4001")).toBeInTheDocument();
 	await typeInLexicalEditor(screen.getByRole("combobox", { name: "Message the agent" }), "Review this change");
 	await userEvent.click(screen.getByRole("button", { name: "Send message" }));
-	await screen.findByText(/delivery wasn’t confirmed/);
+	// The lost send waits beside the box with its delivery ID.
+	await screen.findByTestId("unsent-message-strip");
 	await act(async () => { await disconnectHost("box-b"); });
 	expect(screen.getByRole("alert")).toHaveTextContent("Host is offline");
 	await act(async () => { await connectHost("http://box-b:3001"); });
-	await screen.findByRole("button", { name: "Retry message safely" });
-	await userEvent.click(screen.getByRole("button", { name: "Retry message safely" }));
+	await waitFor(() => expect(screen.getByRole("button", { name: "Retry" })).toBeEnabled());
+	await userEvent.click(screen.getByRole("button", { name: "Retry" }));
 	await waitFor(() => expect(deliveryIds).toHaveLength(2));
 	expect(deliveryIds[1]).toBe(deliveryIds[0]);
 	expect(posts).toEqual([
@@ -908,5 +910,5 @@ it("hides Chat switching for a remote harness outside that host's Chat list", as
 	renderRemoteSession(queryClient);
 	await screen.findByTestId("remote-terminal-base");
 	await waitFor(() => expect(queryClient.getQueryData(["settings", "box-a"])).toMatchObject({ chatHarnesses: ["claude-code", "codex"] }));
-	expect(screen.queryByRole("button", { name: "Session actions" })).not.toBeInTheDocument();
+	expect(screen.queryByRole("button", { name: "Switch to chat UI" })).not.toBeInTheDocument();
 });

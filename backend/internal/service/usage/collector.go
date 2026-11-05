@@ -80,11 +80,17 @@ func DefaultSourceRoots(ctx context.Context, dataDir string) (SourceRoots, error
 	if codexHome == "" {
 		codexHome = filepath.Join(home, ".codex")
 	}
+	// Like the CLI and the accounts' shared history, a custom config folder
+	// moves Claude's transcripts.
+	claudeHome := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR"))
+	if claudeHome == "" {
+		claudeHome = filepath.Join(home, ".claude")
+	}
 	if strings.TrimSpace(dataDir) == "" {
 		dataDir = filepath.Join(home, ".ao", "data")
 	}
 	return SourceRoots{
-		ClaudeProjects: filepath.Join(home, ".claude", "projects"),
+		ClaudeProjects: filepath.Join(claudeHome, "projects"),
 		CodexSessions:  filepath.Join(codexHome, "sessions"),
 		CodexArchived:  filepath.Join(codexHome, "archived_sessions"),
 		KimiHome:       filepath.Join(dataDir, "kimi"),
@@ -98,7 +104,7 @@ type collectorStore interface {
 	GetUsageBinding(context.Context, domain.SessionID, domain.AgentHarness, string) (domain.UsageBindingRecord, bool, error)
 	ListUsageBindingsForSession(context.Context, domain.SessionID) ([]domain.UsageBindingRecord, error)
 	FinalizeUsageBindingsForSessionLaunch(context.Context, domain.SessionID, string, int64, time.Time) ([]domain.UsageBindingRecord, error)
-	ListUsageDiscoveryBindings(context.Context, int64) ([]domain.UsageBindingRecord, error)
+	ListUsageDiscoveryBindings(context.Context, int64, int64) ([]domain.UsageBindingRecord, error)
 	ListUsageBindingsForCodexParent(context.Context, string) ([]domain.UsageBindingRecord, error)
 	ListLatestRetiredCodexReplacementClaimsByPath(context.Context, string) ([]domain.UsageSourceRecord, error)
 	UpdateUsageBindingState(context.Context, int64, domain.UsageBindingState, string, time.Time) (bool, error)
@@ -122,6 +128,10 @@ type Collector struct {
 	now                     func() time.Time
 	logger                  *slog.Logger
 	mu                      sync.Mutex
+	// discoveryAfterID is where the next bounded reconcile pass resumes,
+	// guarded by mu. Unchanged bindings are not rewritten, so their updated_at
+	// cannot rotate the pass through more bindings than one limit holds.
+	discoveryAfterID int64
 	// Guarded separately from mu, which RecordHook holds across the whole hook.
 	routeMu sync.RWMutex
 }
@@ -669,9 +679,29 @@ func (c *Collector) ReconcileSources(ctx context.Context, limit int64) error {
 	if limit == 0 {
 		limit = defaultDiscoveryLimit
 	}
-	bindings, err := c.store.ListUsageDiscoveryBindings(ctx, limit)
+	afterID := c.discoveryAfterID
+	if limit < 0 {
+		afterID = 0
+	}
+	bindings, err := c.store.ListUsageDiscoveryBindings(ctx, afterID, limit)
 	if err != nil {
 		return err
+	}
+	if remaining := limit - int64(len(bindings)); limit > 0 && remaining > 0 && c.discoveryAfterID > 0 {
+		wrapped, err := c.store.ListUsageDiscoveryBindings(ctx, 0, remaining)
+		if err != nil {
+			return err
+		}
+		for _, binding := range wrapped {
+			if binding.ID > c.discoveryAfterID {
+				break
+			}
+			bindings = append(bindings, binding)
+		}
+	}
+	c.discoveryAfterID = 0
+	if limit > 0 && int64(len(bindings)) == limit {
+		c.discoveryAfterID = bindings[len(bindings)-1].ID
 	}
 	now := c.now().UTC()
 	var errs []error
@@ -1471,7 +1501,7 @@ func (c *Collector) discoverClaudeContinuations(
 			// would strand a zero-source binding and fail every reconcile pass.
 			continue
 		}
-		newBinding, err := c.upsertContinuationBinding(ctx, session, nativeID, now)
+		newBinding, err := c.upsertContinuationBinding(ctx, session, binding.Harness, nativeID, now)
 		if err != nil {
 			errs = append(errs, err)
 			continue
@@ -1507,10 +1537,11 @@ func (c *Collector) discoverClaudeContinuations(
 func (c *Collector) upsertContinuationBinding(
 	ctx context.Context,
 	session domain.SessionRecord,
+	harness domain.AgentHarness,
 	nativeID string,
 	now time.Time,
 ) (domain.UsageBindingRecord, error) {
-	existing, exists, err := c.store.GetUsageBinding(ctx, session.ID, session.Harness, nativeID)
+	existing, exists, err := c.store.GetUsageBinding(ctx, session.ID, harness, nativeID)
 	if err != nil {
 		return domain.UsageBindingRecord{}, err
 	}
@@ -1525,7 +1556,7 @@ func (c *Collector) upsertContinuationBinding(
 	}
 	return c.store.UpsertUsageBinding(ctx, domain.UsageBindingRecord{
 		SessionID:    session.ID,
-		Harness:      session.Harness,
+		Harness:      harness,
 		NativeRootID: nativeID,
 		State:        state,
 		UpdatedAt:    now,

@@ -4,11 +4,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { aoBridge } from "../../lib/bridge";
 import { setApiBaseUrl } from "../../lib/api-client";
 import { renderMermaidDiagram } from "../../lib/mermaid-diagram";
-import { ActivityTitle, ChatLinkProvider, ChatMarkdown } from "./ChatMarkdown";
+import { useUiStore } from "../../stores/ui-store";
+import { ActivityTitle, ArtifactPathCode, ChatLinkProvider, ChatMarkdown, ChatOpeningRef } from "./ChatMarkdown";
+import { WorkerUpdateRows } from "./WorkerUpdates";
 import { ChatImageSourceProvider } from "./chat-image-source";
 
 const sessionPreview = vi.hoisted(() => vi.fn());
 vi.mock("../SessionLinkPreviewCard", () => ({
+	ArtifactLinkPreviewCard: () => <div data-testid="artifact-link-preview" />,
 	SessionLinkPreviewCard: (props: unknown) => {
 		sessionPreview(props);
 		return <div data-testid="session-link-preview" />;
@@ -270,9 +273,10 @@ describe("ChatMarkdown", () => {
 
 	it("scopes a session preview to the chat source", async () => {
 		sessionPreview.mockClear();
+		const onSessionLinkOpen = vi.fn();
 		render(
 			<ChatLinkProvider
-				onSessionLinkOpen={vi.fn()}
+				onSessionLinkOpen={onSessionLinkOpen}
 				sessionLinkHostId="box-a"
 			>
 				<ChatMarkdown text="[Worker](ao://sessions/project/session)" />
@@ -285,7 +289,12 @@ describe("ChatMarkdown", () => {
 			href: "ao://sessions/project/session",
 			sourceHostId: "box-a",
 			sourceKind: undefined,
+			onOpen: expect.any(Function),
 		});
+
+		// The card opens the session through the same handler as the link click.
+		(sessionPreview.mock.calls.at(-1)![0] as { onOpen: () => void }).onOpen();
+		expect(onSessionLinkOpen).toHaveBeenCalledExactlyOnceWith("ao://sessions/project/session");
 	});
 
 	it("renders remote workspace paths as text while keeping external links working", async () => {
@@ -301,6 +310,8 @@ describe("ChatMarkdown", () => {
 		fireEvent.click(report);
 		fireEvent.click(report, { metaKey: true });
 		fireEvent.contextMenu(report);
+		expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Copy path"]);
+		await userEvent.click(screen.getByRole("menuitem", { name: "Copy path" }));
 		await userEvent.click(screen.getByRole("link", { name: "issue" }));
 		expect(onLinkOpen).toHaveBeenCalledExactlyOnceWith("https://example.com/i/1");
 		expect(openExternal).not.toHaveBeenCalled();
@@ -384,7 +395,7 @@ describe("ChatMarkdown", () => {
 		const link = screen.getByRole("link", { name: "final report" });
 
 		fireEvent.contextMenu(link);
-		await user.click(await screen.findByRole("menuitem", { name: "Open in Files" }));
+		await user.click(await screen.findByRole("menuitem", { name: "Open in AO" }));
 
 		expect(onFileOpen).toHaveBeenCalledWith("reports/final.html");
 		expect(onLinkOpen).not.toHaveBeenCalled();
@@ -424,10 +435,61 @@ describe("ChatMarkdown", () => {
 		expect(onSessionLinkOpen).toHaveBeenCalledWith(href);
 	});
 
+	it("offers path actions on an absolute artifact reference while preserving its artifact link", async () => {
+		linkSource.workspaces = [{ id: "project", sessions: [{ id: "worker-1", artifactFiles: [{ path: "plan.md" }] }] }];
+		const copy = vi.spyOn(aoBridge.clipboard, "writeText").mockResolvedValue(undefined);
+		const open = vi.fn();
+		renderWithSessionLinkHandler("`/tmp/ao/artifacts/worker-1/plan.md`", open);
+		const link = screen.getByRole("link");
+		await userEvent.click(link);
+		expect(open).toHaveBeenCalledExactlyOnceWith("ao://sessions/project/worker-1/artifacts/plan.md");
+		fireEvent.contextMenu(link);
+		await userEvent.click(screen.getByRole("menuitem", { name: "Copy path" }));
+		expect(copy).toHaveBeenCalledExactlyOnceWith("/tmp/ao/artifacts/worker-1/plan.md");
+		copy.mockRestore();
+	});
+
 	it("leaves inline code naming an unlisted artifact as plain code", () => {
 		linkSource.workspaces = [{ id: "project", sessions: [{ id: "worker-1", artifactFiles: [{ path: "plan.md" }] }] }];
 		renderWithSessionLinkHandler("`worker-1/other.md` and `/tmp/ao/artifacts/worker-2/plan.md`", vi.fn());
 		expect(screen.queryByRole("link")).not.toBeInTheDocument();
+	});
+
+	it.each(["text", "element"])("keeps an unlisted artifact's %s children renderable and copyable", async (kind) => {
+		linkSource.workspaces = [];
+		const copy = vi.spyOn(aoBridge.clipboard, "writeText").mockResolvedValue(undefined);
+		try {
+			render(<ArtifactPathCode text="/tmp/ao/artifacts/worker-1/plan.md">
+				{kind === "text" ? "plan.md" : <code>plan.md</code>}
+			</ArtifactPathCode>);
+			fireEvent.contextMenu(screen.getByText("plan.md"));
+			await userEvent.click(screen.getByRole("menuitem", { name: "Copy path" }));
+			expect(copy).toHaveBeenCalledExactlyOnceWith("/tmp/ao/artifacts/worker-1/plan.md");
+		} finally {
+			copy.mockRestore();
+		}
+	});
+
+	it("keeps a worker report renderable when its artifact is removed from the catalog", async () => {
+		linkSource.workspaces = [{ id: "project", sessions: [{ id: "worker-1", artifactFiles: [{ path: "plan.md" }] }] }];
+		const copy = vi.spyOn(aoBridge.clipboard, "writeText").mockResolvedValue(undefined);
+		const report = () => <ChatLinkProvider onSessionLinkOpen={vi.fn()}><WorkerUpdateRows updates={[{
+			key: "report-1", state: "done", name: "Worker", sessionId: "worker-1", projectId: "project",
+			body: "Finished planning\nartifact: plan.md", createdAt: "2026-10-28T12:00:00Z",
+		}]} /></ChatLinkProvider>;
+		try {
+			const view = render(report());
+			expect(screen.getByRole("link", { name: "plan.md" })).toHaveAttribute("href", "ao://sessions/project/worker-1/artifacts/plan.md");
+			linkSource.workspaces = [];
+			view.rerender(report());
+			expect(screen.getByTestId("worker-update")).toHaveTextContent("Finished planning");
+			expect(screen.queryByRole("link", { name: "plan.md" })).not.toBeInTheDocument();
+			fireEvent.contextMenu(screen.getByText("plan.md"));
+			await userEvent.click(screen.getByRole("menuitem", { name: "Copy path" }));
+			expect(copy).toHaveBeenCalledExactlyOnceWith("worker-1/plan.md");
+		} finally {
+			copy.mockRestore();
+		}
 	});
 
 	it("leaves malformed session-like text inert", () => {
@@ -790,6 +852,66 @@ describe("ChatMarkdown code highlighting", () => {
 });
 
 
+describe("ChatMarkdown block streaming", () => {
+	it.each([
+		["```text\nprint( ", "print( "],
+		["~~~text\n**literal ", "**literal "],
+		["    **literal", "**literal"],
+		["- item\n\n      **literal", "**literal"],
+		[">     **literal", "**literal"],
+		["[ref]: https://example.com\n\n    **literal", "**literal"],
+	])("preserves streamed code source: %s", (text, code) => {
+		const { container } = render(<ChatMarkdown text={text} streaming />);
+		expect(container.querySelector("pre")?.textContent).toBe(code);
+	});
+
+	it("repairs incomplete inline formatting for display only and keeps partial links inert", () => {
+		const { container, rerender } = render(<ChatMarkdown text="Some **unfinished" streaming />);
+		expect(container.querySelector("strong")).toHaveTextContent("unfinished");
+		rerender(<ChatMarkdown text="Some **unfinished" />);
+		expect(container.querySelector("strong")).toBeNull();
+		expect(container.textContent).toBe("Some **unfinished");
+		rerender(<ChatMarkdown text="See [docs](https://exam" streaming />);
+		expect(container.querySelector("a")).toBeNull();
+		expect(container.textContent).toBe("See docs");
+	});
+
+	it("leaves open fences literal and highlights a completed fence before the reply ends", async () => {
+		const code = 'const literal = "**unfinished";';
+		const fence = "```js\n" + code;
+		const { container, rerender } = render(<ChatMarkdown text={fence} streaming />);
+		expect(container.querySelector("pre")?.textContent).toBe(code);
+		rerender(<ChatMarkdown text={fence + "\n```\n\nMore prose"} streaming />);
+		await waitFor(() => expect(container.querySelector("pre .hljs-keyword")).toBeInTheDocument());
+		expect(container.querySelector("pre")?.textContent).toBe(code);
+	});
+
+	it("resolves late reference definitions and keeps footnote IDs document-wide", () => {
+		const text = "First [docs][ref]\n\nSecond\n\nThird";
+		const { container, rerender } = render(<ChatMarkdown text={text} streaming />);
+		rerender(<ChatMarkdown text={text + "\n\n[ref]: https://example.com/docs"} streaming />);
+		expect(screen.getByRole("link", { name: "docs" })).toHaveAttribute("href", "https://example.com/docs");
+		rerender(<ChatMarkdown text={"First[^a]\n\nSecond[^b]\n\n[^a]: Alpha\n\n[^b]: Beta"} />);
+		const ids = [...container.querySelectorAll("[id]")].map((node) => node.id);
+		expect(new Set(ids).size).toBe(ids.length);
+		expect(container.textContent).toContain("Alpha");
+		expect(container.textContent).toContain("Beta");
+	});
+
+	it("keeps source-relative fade offsets when a chat opens across several blocks", () => {
+		const text = "First\n\nSecond\n\nAlready visible";
+		const view = (source: string) => <ChatOpeningRef.Provider value={{ current: true }}><ChatMarkdown text={source} streaming /></ChatOpeningRef.Provider>;
+		const { container, rerender } = render(view(text));
+		expect(container.querySelectorAll(".stream-char")).toHaveLength(0);
+		rerender(view(text + " new"));
+		expect(container.querySelectorAll(".stream-char")).toHaveLength(4);
+		const first = container.querySelector("p");
+		rerender(view(text + " new\n\nTail"));
+		expect(container.querySelector("p")).toBe(first);
+	});
+});
+
+
 describe("ActivityTitle", () => {
 	it("keeps code delimiters inside multi-backtick code spans", () => {
 		const { container } = render(<ActivityTitle text={"Edit ``file`name.ts``"} />);
@@ -816,6 +938,23 @@ describe("ChatMarkdown streaming fade", () => {
 	it("never wraps a reply that mounts settled", () => {
 		const { container } = render(<ChatMarkdown text="from history" />);
 		expect(fading(container)).toBe(0);
+	});
+
+	it("does not fade text already on screen when a chat opens mid-stream", () => {
+		const opening = { current: true };
+		const reply = (text: string) => (
+			<ChatOpeningRef.Provider value={opening}>
+				<ChatMarkdown text={text} streaming />
+			</ChatOpeningRef.Provider>
+		);
+		const { container, rerender } = render(reply("already shown"));
+		opening.current = false;
+		expect(fading(container)).toBe(0);
+		expect(container.textContent).toBe("already shown");
+
+		rerender(reply("already shown and more"));
+		expect(fading(container)).toBe(" and more".length);
+		expect(container.textContent).toBe("already shown and more");
 	});
 
 	it("fades while streaming and sheds the spans shortly after it settles", () => {
@@ -871,5 +1010,47 @@ describe("ChatMarkdown streaming fade", () => {
 			</ChatLinkProvider>,
 		);
 		expect(screen.getByRole("link")).toHaveTextContent("docs");
+	});
+});
+
+describe("ChatMarkdown math", () => {
+	afterEach(() => useUiStore.setState({ renderMath: false }));
+
+	it("stops repairing a paused stream's prose once math turns it into a formula", async () => {
+		// With math off, `$a~b$` is prose, and streaming repair escapes its `~`.
+		const { container } = render(<ChatMarkdown text="Paused at $a~b$" streaming />);
+		act(() => useUiStore.setState({ renderMath: true }));
+		await waitFor(() => expect(container.querySelector('[data-math="inline"] .katex')).not.toBeNull());
+		expect(container.querySelector("[data-tex]")).toHaveAttribute("data-tex", "a~b");
+	});
+
+	it("leaves dollar signs as text while the setting is off", () => {
+		const { container } = render(<ChatMarkdown text="Costs $5 and $10, or $x^2$." />);
+		expect(container).toHaveTextContent("Costs $5 and $10, or $x^2$.");
+		expect(container.querySelector("[data-math]")).toBeNull();
+	});
+
+	it("typesets inline and display formulas in every delimiter when on", async () => {
+		useUiStore.setState({ renderMath: true });
+		const { container } = render(
+			<ChatMarkdown text={"Euler $e^{i\\pi}+1=0$ and \\(x^2\\).\n\n\\[\n\\int_0^1 x\\,dx\n\\]\n\n$$\nE=mc^2\n$$"} />,
+		);
+		await waitFor(() => expect(container.querySelectorAll('[data-math="inline"] .katex')).toHaveLength(2));
+		expect(container.querySelectorAll('[data-math="display"] .katex-display')).toHaveLength(2);
+		expect(container).not.toHaveTextContent("\\(");
+	});
+
+	it("typesets a ```math fence without the setting", async () => {
+		const { container } = render(<ChatMarkdown text={"```math\na^2+b^2=c^2\n```"} />);
+		await waitFor(() => expect(container.querySelector('[data-math="display"] .katex-display')).not.toBeNull());
+		expect(container.querySelector("pre")).toBeNull();
+	});
+
+	it("shows the TeX source when KaTeX cannot parse it", async () => {
+		useUiStore.setState({ renderMath: true });
+		const { container } = render(<ChatMarkdown text={"Try $\\notacommand{x}$ and $y$."} />);
+		await waitFor(() => expect(container.querySelector('[data-math="inline"] .katex')).not.toBeNull());
+		expect(container.querySelectorAll('[data-math="inline"] .katex')).toHaveLength(1);
+		expect(container).toHaveTextContent("$\\notacommand{x}$");
 	});
 });
