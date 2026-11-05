@@ -575,23 +575,34 @@ describe("createEventTransport", () => {
 		}
 	});
 
-	it("refetches cached unavailable state after the post-spawn session update", async () => {
+	it.each([
+		{
+			queryRoot: "editor-handoff",
+			unavailable: { workspaceAvailable: false },
+			available: { workspaceAvailable: true },
+		},
+		{
+			queryRoot: "session-interface-transition",
+			unavailable: { supported: false, reasonCode: "WORKSPACE_UNAVAILABLE" },
+			available: { supported: true },
+		},
+	])("refetches cached $queryRoot readiness when provisioning finishes", async ({ queryRoot, unavailable, available }) => {
 		vi.useFakeTimers();
 		let disconnect: (() => void) | undefined;
 		let unsubscribe: (() => void) | undefined;
 		try {
 			const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-			const queryKey = ["editor-handoff", "agent-orchestrator-260"] as const;
+			const queryKey = [queryRoot, "agent-orchestrator-260"] as const;
 			const queryFn = vi
 				.fn()
-				.mockResolvedValueOnce({ workspaceAvailable: false })
-				.mockResolvedValue({ workspaceAvailable: true });
+				.mockResolvedValueOnce(unavailable)
+				.mockResolvedValue(available);
 			await queryClient.fetchQuery({ queryKey, queryFn, staleTime: 10_000 });
 			const observer = new QueryObserver(queryClient, { queryKey, queryFn, staleTime: 10_000 });
 			unsubscribe = observer.subscribe(() => {});
 			disconnect = createEventTransport(queryClient).connect();
 
-			expect(queryClient.getQueryData(queryKey)).toEqual({ workspaceAvailable: false });
+			expect(observer.getCurrentResult().data).toEqual(unavailable);
 			cdcSources()[0].emit(
 				"session_updated",
 				JSON.stringify({
@@ -599,14 +610,14 @@ describe("createEventTransport", () => {
 					projectId: "agent-orchestrator",
 					sessionId: "agent-orchestrator-260",
 					type: "session_updated",
-					payload: { id: "agent-orchestrator-260" },
+					payload: { id: "agent-orchestrator-260", provisionState: "ready" },
 					createdAt: "2026-08-29T07:55:18.913484Z",
 				}),
 			);
 
 			await vi.advanceTimersByTimeAsync(200);
 			expect(queryFn).toHaveBeenCalledTimes(2);
-			expect(queryClient.getQueryData(queryKey)).toEqual({ workspaceAvailable: true });
+			expect(observer.getCurrentResult().data).toEqual(available);
 		} finally {
 			unsubscribe?.();
 			disconnect?.();
