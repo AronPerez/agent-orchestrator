@@ -2017,6 +2017,45 @@ describe("ensureNativeActiveTab automation-runtime resync", () => {
 		expect(runAction.mock.calls.some(([, action]) => action === "tab-close")).toBe(false);
 	});
 
+	it("commits native tab selection when Page.bringToFront does not activate the AO view", async () => {
+		const { host, runtime, activeTargets } = setupTabHost();
+		await host.execute("sess-1", "tab-new");
+		const original = vi.mocked(runtime.runAction).getMockImplementation()!;
+		vi.mocked(runtime.runAction).mockImplementation(async (sessionId, action, args, provider, signal) => {
+			if (action === "tab-select") {
+				// agent-browser switches internally and sends Page.bringToFront, not Target.activateTarget.
+				activeTargets.set(sessionId, String(args.tabId));
+				return {};
+			}
+			return original(sessionId, action, args, provider, signal);
+		});
+		await expect(host.execute("sess-1", "tab-select", { tabId: "t1" })).resolves.toMatchObject({ id: "t1" });
+		await expect(host.execute("sess-1", "tabs")).resolves.toMatchObject({ activeTabId: "t1" });
+		expect(activeTargets.get("sess-1")).toBe("t1");
+	});
+
+	it.each(["tab-select", "tab-new"])("recovers with %s when the active native target is untargetable", async (action) => {
+		const { host, invoke, runtime, activeTargets } = setupTabHost();
+		await host.execute("sess-1", "tabs");
+		const { viewId } = (await invoke("browser:ensure", "sess-1")) as { viewId: string };
+		await invoke("browser:openTab", { viewId });
+		const original = vi.mocked(runtime.runAction).getMockImplementation()!;
+		vi.mocked(runtime.runAction).mockImplementation(async (sessionId, nativeAction, args, provider, signal) => {
+			if (nativeAction === "tab-select" && args.tabId === "t1") {
+				throw Object.assign(new Error("native target is unavailable"), { code: "AGENT_BROWSER_COMMAND_FAILED" });
+			}
+			return original(sessionId, nativeAction, args, provider, signal);
+		});
+		await expect(invoke("browser:selectTab", { viewId, tabId: "t1" })).rejects.toMatchObject({
+			code: "BROWSER_TARGET_MISMATCH",
+		});
+		await expect(host.execute("sess-1", "snapshot")).rejects.toMatchObject({ code: "BROWSER_TARGET_MISMATCH" });
+		const recoveredId = action === "tab-select" ? "t2" : "t3";
+		await expect(host.execute("sess-1", action, { tabId: "t2" })).resolves.toMatchObject({ id: recoveredId });
+		await expect(host.execute("sess-1", "snapshot")).resolves.toMatchObject({ text: expect.any(String) });
+		expect(activeTargets.get("sess-1")).toBe(recoveredId);
+	});
+
 	it("synchronizes screenshots and fails before capture when the popup target cannot be selected", async () => {
 		const { host, runtime, views } = setupTabHost();
 		const runAction = runtime.runAction as unknown as ReturnType<typeof vi.fn>;
