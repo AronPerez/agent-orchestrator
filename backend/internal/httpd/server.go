@@ -233,15 +233,11 @@ func (s *Server) requestShutdown() {
 // Run return so the daemon exits without tearing down sessions. Idempotent.
 func (s *Server) RequestShutdown() { s.requestShutdown() }
 
-// RequestShutdownAfterDesktopExit handles loss of the desktop supervisor,
-// including Force Quit. A shutdown already requested for replacement wins.
+// RequestShutdownAfterDesktopExit preserves agents: the retained updater
+// disconnects without announcing replacement. Stopping agents requires an
+// explicit, current-owner shutdown request.
 func (s *Server) RequestShutdownAfterDesktopExit() {
-	s.shutdownOnce.Do(func() {
-		if os.Getenv("AO_OWNER") == "app" && s.cfg.AppRunID != "" {
-			s.stopAgents.Store(true)
-		}
-		close(s.shutdownRequested)
-	})
+	s.requestShutdown()
 }
 
 func (s *Server) requestAgentShutdown(appRunID string) bool {
@@ -252,5 +248,5 @@ func (s *Server) requestAgentShutdown(appRunID string) bool {
 	return true
 }
 
-// StopAgentsRequested distinguishes desktop exit from daemon replacement.
+// StopAgentsRequested records an explicit current-owner request to stop agents.
 func (s *Server) StopAgentsRequested() bool { return s.stopAgents.Load() }

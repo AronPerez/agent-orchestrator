@@ -2,6 +2,7 @@ package httpd
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
+	"github.com/aoagents/agent-orchestrator/backend/internal/daemon/supervisor"
 )
 
 func TestDesktopExitShutdownPolicy(t *testing.T) {
@@ -21,7 +23,7 @@ func TestDesktopExitShutdownPolicy(t *testing.T) {
 		replacement bool
 		wantStop    bool
 	}{
-		{name: "desktop death stops agents", owner: "app", wantStop: true},
+		{name: "legacy desktop disconnect preserves agents", owner: "app"},
 		{name: "planned replacement preserves agents", owner: "app", replacement: true},
 		{name: "headless daemon preserves agents"},
 		{name: "keep alive daemon preserves agents", owner: "persistent"},
@@ -151,5 +153,45 @@ func TestDesktopShutdownEndpoint(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The retained updater disconnects without first announcing a replacement.
+func TestLegacyUpdateAfterSupervisorGracePreservesAgents(t *testing.T) {
+	t.Setenv("AO_OWNER", "app")
+	srv := &Server{cfg: config.Config{AppRunID: "run-1"}, shutdownRequested: make(chan struct{})}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	sup := supervisor.New(time.Millisecond, srv.RequestShutdownAfterDesktopExit, discardLogger())
+	go func() { done <- sup.Serve(ctx, ln) }()
+	t.Cleanup(func() {
+		cancel()
+		_ = ln.Close()
+		if err := <-done; err != nil {
+			t.Errorf("supervisor: %v", err)
+		}
+	})
+	conn, err := net.DialTimeout("tcp", ln.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.Close()
+	select {
+	case <-srv.shutdownRequested:
+	case <-time.After(5 * time.Second):
+		t.Fatal("disconnect did not expire the supervisor grace")
+	}
+	// Only now does the replacement app arrive, too late to cancel the grace.
+	replacement, err := net.DialTimeout("tcp", ln.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = replacement.Close() }()
+	if srv.StopAgentsRequested() {
+		t.Fatal("an update slower than the supervisor grace requested agent termination")
 	}
 }

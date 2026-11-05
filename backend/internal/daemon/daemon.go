@@ -1394,8 +1394,8 @@ func Run(buildVersion string) error {
 	})
 
 	// Both graceful shutdown paths (SIGTERM and POST /shutdown) funnel through
-	// srv.Run returning. Desktop exit, including loss of its supervisor, requests
-	// agent shutdown; daemon replacement preserves processes for the next boot.
+	// srv.Run returning. Explicit desktop quit requests agent shutdown; bare
+	// supervisor loss and daemon replacement preserve processes for the next boot.
 
 	// Shut the background goroutines down in order: cancel the context FIRST so
 	// their loops exit, then wait for them to drain. Doing this explicitly (not
@@ -1437,7 +1437,7 @@ func Run(buildVersion string) error {
 	codexSwitchCancel()
 	managedPreview.Close()
 	<-previewDone
-	// Daemon replacement detaches providers. Desktop exit stops processes
+	// Daemon replacement detaches providers. Explicit desktop quit stops processes
 	// while keeping the sessions and worktrees available for resume.
 	chatStopTimeout := cfg.ShutdownTimeout
 	if srv.StopAgentsRequested() {
