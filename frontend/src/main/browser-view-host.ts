@@ -1664,7 +1664,10 @@ export function createBrowserViewHost(
             );
           }
         } catch (error) {
-          if (!isAgentBrowserCommandFailure(error)) throw error;
+          if (
+            !isAgentBrowserCommandFailure(error) &&
+            !isBrowserTargetMismatch(error)
+          ) throw error;
           // Closing the AO-owned WebContentsView by its exact logical ID is safe
           // even when agent-browser forgot that ID. It cannot fall through to a
           // different target, unlike a read or page mutation.
@@ -3267,7 +3270,9 @@ export function createBrowserViewHost(
           return queueNativeOperation(
             session,
             async () => {
-              await ensureNativeActiveTab(session, nativeSignal);
+              // Recovery commands address a new or explicit tab, not the broken active target.
+              if (nativeAction !== "tab-new" && nativeAction !== "tab-select")
+                await ensureNativeActiveTab(session, nativeSignal);
               const targetEntry = activeEntry(session);
               const targetTabId = targetEntry.tabId;
               await targetEntry.ready;
@@ -3301,6 +3306,8 @@ export function createBrowserViewHost(
                 nativeAction === "tab-select" &&
                 typeof nativeArgs.tabId === "string"
               ) {
+                if (session.activeTabId !== nativeArgs.tabId)
+                  activateTab(session, nativeArgs.tabId);
                 session.nativeActiveTabId = nativeArgs.tabId;
               }
               if (nativeAction === "tab-new" || nativeAction === "tab-close") {

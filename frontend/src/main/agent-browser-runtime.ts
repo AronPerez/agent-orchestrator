@@ -223,6 +223,18 @@ export class AgentBrowserRuntime {
 		signal?: AbortSignal,
 	): Promise<AgentBrowserJSONResult> {
 		if (action === "type") return this.typeByAppend(sessionId, args, provider, signal);
+		if (action === "tab-select" || (action === "tab-close" && args.tabId !== undefined)) {
+			const tabId = stringValue(args.tabId, "tabId is required");
+			const mismatch = () => runtimeError("BROWSER_TARGET_MISMATCH", `Browser automation could not target AO tab ${tabId}`);
+			if (!provider.listTargets().some((target) => target.id === tabId)) throw mismatch();
+			// Native tN IDs are allocated independently, and reset when its daemon restarts.
+			const listed = await this.runAction(sessionId, "tabs", {}, provider, signal);
+			const tab = Array.isArray(listed.tabs)
+				? listed.tabs.find((candidate) => isRecord(candidate) && candidate.targetId === tabId)
+				: undefined;
+			if (!isRecord(tab) || typeof tab.tabId !== "string" || !/^t[1-9]\d*$/.test(tab.tabId)) throw mismatch();
+			args = { ...args, tabId: tab.tabId };
+		}
 		const result = await this.run(sessionId, [...nativeArgumentsForAction(action, args), "--json"], provider, signal);
 		return parseAgentBrowserJSON(result.stdout);
 	}

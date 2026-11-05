@@ -669,7 +669,7 @@ describe("agent-browser structured output", () => {
 
 const nativeBinary = process.env.AO_AGENT_BROWSER_TEST_BINARY;
 describe.skipIf(!nativeBinary)("agent-browser native compatibility", () => {
-	it("connects the pinned native daemon and keeps native tab lifecycle commands aligned", async () => {
+	it.each([1, 2, 7])("targets AO tabs across native registry numbering (first AO tab t%s)", async (firstTab) => {
 		class DebuggerFixture extends EventEmitter {
 			attached = false;
 			attach() {
@@ -709,7 +709,7 @@ describe.skipIf(!nativeBinary)("agent-browser native compatibility", () => {
 		}
 		const targets = [
 			{
-				id: "t1",
+				id: `t${firstTab}`,
 				url: "http://localhost:5173/",
 				title: "Fixture",
 				debugger: new DebuggerFixture(),
@@ -719,7 +719,7 @@ describe.skipIf(!nativeBinary)("agent-browser native compatibility", () => {
 			listTargets: () => targets,
 			createTarget: async (url: string) => {
 				const target = {
-					id: `t${targets.length + 1}`,
+					id: `t${firstTab + targets.length}`,
 					url,
 					title: "New tab",
 					debugger: new DebuggerFixture(),
@@ -742,9 +742,19 @@ describe.skipIf(!nativeBinary)("agent-browser native compatibility", () => {
 			expect(result.url).toBe("http://localhost:5173/");
 			const created = await runtime.runAction("native-fixture", "tab-new", {}, provider);
 			expect(created.tabId).toBe("t2");
-			expect(targets.map((target) => target.id)).toEqual(["t1", "t2"]);
-			await runtime.runAction("native-fixture", "tab-close", { tabId: "t2" }, provider);
-			expect(targets.map((target) => target.id)).toEqual(["t1"]);
+			expect(targets.map((target) => target.id)).toEqual([`t${firstTab}`, `t${firstTab + 1}`]);
+			await expect(runtime.runAction("native-fixture", "tab-close", { tabId: "outside-worker" }, provider)).rejects.toMatchObject({
+				code: "BROWSER_TARGET_MISMATCH",
+			});
+			const initial = await runtime.runAction("native-fixture", "tab-select", { tabId: `t${firstTab}` }, provider);
+			expect(initial.targetId).toBe(`t${firstTab}`);
+			const selected = await runtime.runAction("native-fixture", "tab-select", { tabId: `t${firstTab + 1}` }, provider);
+			expect(selected.targetId).toBe(`t${firstTab + 1}`);
+			await runtime.runAction("native-fixture", "get", { property: "url" }, provider);
+			await runtime.runAction("native-fixture", "snapshot", {}, provider);
+			await runtime.runAction("native-fixture", "errors", {}, provider);
+			await runtime.runAction("native-fixture", "tab-close", { tabId: `t${firstTab + 1}` }, provider);
+			expect(targets.map((target) => target.id)).toEqual([`t${firstTab}`]);
 			const screenshot = await runtime.screenshot("native-fixture", provider);
 			expect(screenshot).toMatchObject({ width: 1, height: 1 });
 			const baseline = await runtime.runAction("native-fixture", "snapshot", { delta: true, full: true }, provider);
