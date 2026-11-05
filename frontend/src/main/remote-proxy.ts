@@ -257,6 +257,15 @@ export async function startRemoteProxy(entry: RemoteEntry, rendererOrigin = REND
 					...upstreamRes.headers,
 					...corsHeaders,
 				};
+				if (preview?.kind === "app" && headers["x-ao-preview-api-sandbox"] === "1") {
+					// This confined origin replaces the API sandbox; retaining it makes module/HMR origins opaque.
+					const policies = String(headers["content-security-policy"] ?? "").split(",").map((policy) => policy.trim());
+					const sandbox = policies.lastIndexOf("sandbox allow-scripts allow-forms");
+					if (sandbox !== -1) policies.splice(sandbox, 1);
+					if (policies.length) headers["content-security-policy"] = policies.join(", ");
+					else delete headers["content-security-policy"];
+					delete headers["x-ao-preview-api-sandbox"];
+				}
 				delete headers.connection;
 				delete headers["keep-alive"];
 				if (preview && preview.kind !== "app") delete headers["set-cookie"];
