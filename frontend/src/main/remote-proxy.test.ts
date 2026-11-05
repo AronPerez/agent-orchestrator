@@ -42,7 +42,7 @@ afterEach(async () => {
 });
 
 async function startUpstream(
-	handler: (req: IncomingMessage, seen: Seen[]) => { status: number; body: string; headers?: Record<string, string> },
+	handler: (req: IncomingMessage, seen: Seen[]) => { status: number; body: string; headers?: Record<string, string | string[]> },
 ): Promise<{ port: number; seen: Seen[] }> {
 	const seen: Seen[] = [];
 	upstream = createServer((req, res) => {
@@ -89,6 +89,57 @@ it.each([
 });
 
 describe("startRemoteProxy", () => {
+	it.each([
+		{ isolated: true, marker: "1", policies: ["default-src 'self'", "sandbox allow-scripts allow-forms"], expected: "default-src 'self'" },
+		{ isolated: true, marker: "1", policies: ["default-src 'self', sandbox allow-scripts allow-forms"], expected: "default-src 'self'" },
+		{ isolated: true, marker: "1", policies: ["sandbox allow-scripts allow-forms"], expected: undefined },
+		{ isolated: true, marker: "1", policies: ["sandbox allow-scripts allow-forms", "sandbox allow-scripts allow-forms"], expected: "sandbox allow-scripts allow-forms" },
+		{ isolated: true, marker: undefined, policies: ["sandbox allow-scripts allow-forms"], expected: "sandbox allow-scripts allow-forms" },
+		{ isolated: false, marker: "1", policies: ["default-src 'self'", "sandbox allow-scripts allow-forms"], expected: "default-src 'self', sandbox allow-scripts allow-forms" },
+	])("removes only the marked API sandbox on an isolated app preview: $isolated / $marker / $policies", async ({ isolated, marker, policies, expected }) => {
+		const { port } = await startUpstream(() => ({
+			status: 200, body: '<script type="module" src="/cloud/index.tsx"></script>',
+			headers: { "content-security-policy": policies, ...(marker ? { "x-ao-preview-api-sandbox": marker } : {}) },
+		}));
+		proxy = await startRemoteProxy({ label: "box", url: `http://127.0.0.1:${port}`, password: "pw" });
+		const target = new URL(isolated ? proxy.previewUrl("ao-1", "http://localhost:5173/") : `${proxy.base}/api/v1/sessions/ao-1/preview/app/`);
+		const headers = await new Promise<IncomingMessage["headers"]>((resolve, reject) => {
+			const req = httpRequest({ hostname: "127.0.0.1", port: Number(target.port), path: target.pathname, headers: { Host: target.host } }, (res) => {
+				res.resume();
+				res.on("end", () => resolve(res.headers));
+			});
+			req.on("error", reject);
+			req.end();
+		});
+		expect(headers["content-security-policy"]).toBe(expected);
+		expect(headers["x-ao-preview-api-sandbox"]).toBe(isolated ? undefined : marker);
+	});
+
+	it("forwards same-preview Vite modules but rejects opaque and foreign preview origins", async () => {
+		const { port, seen } = await startUpstream(() => ({ status: 200, body: "export default true" }));
+		proxy = await startRemoteProxy({ label: "box", url: `http://127.0.0.1:${port}`, password: "pw" });
+		const preview = new URL(proxy.previewUrl("ao-1", "http://localhost:5173/"));
+		const foreign = new URL(proxy.previewUrl("ao-2", "http://localhost:5173/"));
+		const request = (path: string, origin: string) => new Promise<number>((resolve, reject) => {
+			const req = httpRequest({ hostname: "127.0.0.1", port: Number(preview.port), path, headers: { Host: preview.host, Origin: origin } }, (res) => {
+				res.resume();
+				res.on("end", () => resolve(res.statusCode ?? 0));
+			});
+			req.on("error", reject);
+			req.end();
+		});
+		for (const path of ["/cloud/index.tsx", "/@vite/client", "/@react-refresh"]) {
+			expect(await request(path, preview.origin)).toBe(200);
+			expect(await request(path, "null")).toBe(403);
+			expect(await request(path, foreign.origin)).toBe(403);
+		}
+		expect(seen.map(({ url, appOrigin }) => ({ url, appOrigin }))).toEqual([
+			{ url: "/api/v1/sessions/ao-1/preview/app/cloud/index.tsx", appOrigin: preview.origin },
+			{ url: "/api/v1/sessions/ao-1/preview/app/@vite/client", appOrigin: preview.origin },
+			{ url: "/api/v1/sessions/ao-1/preview/app/@react-refresh", appOrigin: preview.origin },
+		]);
+	});
+
 	it("serves authenticated artifact files and sibling assets without replacing an app preview", async () => {
 		const { port, seen } = await startUpstream(() => ({ status: 200, body: "artifact", headers: { "set-cookie": "secret=1" } }));
 		proxy = await startRemoteProxy({ label: "box", url: `http://127.0.0.1:${port}/ao`, password: "pw" });
@@ -248,17 +299,19 @@ describe("startRemoteProxy", () => {
 		expect(await request()).toContain("ao preview start");
 	});
 
-	it("forwards a managed preview websocket on its preview-only origin", async () => {
+	it.each(["same-preview", "null", "cross-preview", "http://evil.example"])("checks the managed HMR websocket origin: %s", async (originKind) => {
 		upstream = createServer((_request, response) => response.end("ok"));
 		let upgradePath = "";
 		let upgradeAuth = "";
 		let upgradeAppAuth = "";
 		let upgradeAppOrigin = "";
+		let upgradeProtocol = "";
 		upstream.on("upgrade", (request, socket) => {
 			upgradePath = request.url ?? "";
 			upgradeAuth = String(request.headers.authorization ?? "");
 			upgradeAppAuth = String(request.headers["x-ao-preview-app-authorization"] ?? "");
 			upgradeAppOrigin = String(request.headers["x-ao-preview-app-origin"] ?? "");
+			upgradeProtocol = String(request.headers["sec-websocket-protocol"] ?? "");
 			socket.write("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n");
 			socket.end();
 		});
@@ -266,6 +319,8 @@ describe("startRemoteProxy", () => {
 		const port = (upstream.address() as AddressInfo).port;
 		proxy = await startRemoteProxy({ label: "workbox", url: `http://127.0.0.1:${port}`, password: "pw" });
 		const preview = new URL(proxy.previewUrl("ao-1", "http://localhost:5173/"));
+		const foreign = new URL(proxy.previewUrl("ao-2", "http://localhost:5173/"));
+		const origin = originKind === "same-preview" ? preview.origin : originKind === "cross-preview" ? foreign.origin : originKind;
 		const socket = netConnect(Number(preview.port), "127.0.0.1");
 		const reply = await new Promise<string>((resolve, reject) => {
 			let data = "";
@@ -274,14 +329,21 @@ describe("startRemoteProxy", () => {
 				data += chunk.toString();
 				if (data.includes("\r\n\r\n")) resolve(data);
 			});
-			socket.on("connect", () => socket.write(`GET /socket HTTP/1.1\r\nHost: ${preview.host}\r\nOrigin: ${preview.origin}\r\nAuthorization: Basic app-token\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGVzdA==\r\nSec-WebSocket-Version: 13\r\n\r\n`));
+			socket.on("close", () => resolve(data));
+			socket.on("connect", () => socket.write(`GET /?token=hmr-token HTTP/1.1\r\nHost: ${preview.host}\r\nOrigin: ${origin}\r\nAuthorization: Basic app-token\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Protocol: vite-hmr\r\nSec-WebSocket-Key: dGVzdA==\r\nSec-WebSocket-Version: 13\r\n\r\n`));
 		});
 		socket.destroy();
+		if (originKind !== "same-preview") {
+			expect(reply).toBe("");
+			expect(upgradePath).toBe("");
+			return;
+		}
 		expect(reply).toContain("101 Switching Protocols");
-		expect(upgradePath).toBe("/api/v1/sessions/ao-1/preview/app/socket");
+		expect(upgradePath).toBe("/api/v1/sessions/ao-1/preview/app/?token=hmr-token");
 		expect(upgradeAuth).toBe("Bearer pw");
 		expect(upgradeAppAuth).toBe("Basic app-token");
 		expect(upgradeAppOrigin).toBe(preview.origin);
+		expect(upgradeProtocol).toBe("vite-hmr");
 	});
 	it("proxies an IPv6 host instead of dialing its URL brackets", async (context) => {
 		upstream = createServer((_request, response) => response.end("ok"));
