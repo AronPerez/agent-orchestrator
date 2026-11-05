@@ -3,9 +3,11 @@ package sessionmanager
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -147,29 +149,41 @@ func TestInterfaceTransitionRollbackStartsNeverStartedChatFresh(t *testing.T) {
 	}
 }
 
-// A start that failed before the workspace existed leaves nothing for either
-// controller to run in. The switch is refused up front, with the reason shown
-// on the control, instead of stopping the source and failing into recovery.
-func TestInterfaceTransitionRefusesSessionWithoutWorkspace(t *testing.T) {
+type workspaceCheckingTransitionChat struct{ *transitionChat }
+
+func (c workspaceCheckingTransitionChat) StartChat(ctx context.Context, cfg ChatStart) (ChatStarted, error) {
+	if !filepath.IsAbs(cfg.WorkspacePath) {
+		return ChatStarted{}, fmt.Errorf("workspace path must be absolute, got %q", cfg.WorkspacePath)
+	}
+	return c.transitionChat.StartChat(ctx, cfg)
+}
+
+// A failed or in-progress start must not hand off an unpublished workspace,
+// nor race its original controller launch after the workspace is published.
+func TestInterfaceTransitionRefusesSessionUntilWorkspaceReady(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		provision domain.SessionProvisionState
-		refused   bool
+		name               string
+		provision          domain.SessionProvisionState
+		workspacePublished bool
 	}{
-		{"start failed", domain.SessionProvisionFailed, true},
-		{"no provisioning record", "", true},
+		{"start failed", domain.SessionProvisionFailed, false},
+		{"no provisioning record", "", false},
 		{"still provisioning", domain.SessionProvisionProvisioning, false},
+		{"workspace published but still provisioning", domain.SessionProvisionProvisioning, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			manager, store, _, log, id := neverStartedChatOrchestrator(t, func(store *sqlite.Store) lifecycleRecorder {
+			manager, store, chat, log, id := neverStartedChatOrchestrator(t, func(store *sqlite.Store) lifecycleRecorder {
 				return &sqliteTransitionLifecycle{store: store}
 			})
+			manager.chat = workspaceCheckingTransitionChat{chat}
 			ctx := context.Background()
 			rec, _, err := store.GetSession(ctx, id)
 			if err != nil {
 				t.Fatal(err)
 			}
-			rec.Metadata.WorkspacePath = ""
+			if !tc.workspacePublished {
+				rec.Metadata.WorkspacePath = ""
+			}
 			if err := store.UpdateSession(ctx, rec); err != nil {
 				t.Fatal(err)
 			}
@@ -182,20 +196,62 @@ func TestInterfaceTransitionRefusesSessionWithoutWorkspace(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := status.ReasonCode == "WORKSPACE_UNAVAILABLE"; got != tc.refused || (tc.refused && status.Supported) {
-				t.Fatalf("status = %+v, want refused=%v", status, tc.refused)
-			}
-			if !tc.refused {
-				return
-			}
-			_, err = manager.StartInterfaceTransition(ctx, id, domain.SessionModeTUI,
+			transition, err := manager.StartInterfaceTransition(ctx, id, domain.SessionModeTUI,
 				domain.SessionInterfaceTransitionDrain, domain.SessionInterfaceTransitionHistoryStrict)
+			if err == nil {
+				settled := settleSQLiteTransition(t, store, transition.ID)
+				t.Fatalf("switch admitted before workspace ready: %s (%s): %s", settled.Phase, settled.ErrorCode, settled.ErrorDetail)
+			}
 			if !errors.Is(err, ErrInterfaceWorkspaceUnavailable) {
 				t.Fatalf("StartInterfaceTransition = %v, want ErrInterfaceWorkspaceUnavailable", err)
+			}
+			if status.ReasonCode != "WORKSPACE_UNAVAILABLE" || status.Supported {
+				t.Fatalf("status = %+v, want WORKSPACE_UNAVAILABLE", status)
 			}
 			if _, found, err := store.GetLatestSessionInterfaceTransition(ctx, id); err != nil || found || len(*log) != 0 {
 				t.Fatalf("refusal touched the session: transition=%v err=%v log=%v", found, err, *log)
 			}
+			if tc.workspacePublished {
+				if _, err := store.SetSessionProvisionState(ctx, id, domain.SessionProvisionReady, "", time.Now()); err != nil {
+					t.Fatal(err)
+				}
+				status, err = manager.InterfaceTransitionStatus(ctx, id)
+				if err != nil || !status.Supported {
+					t.Fatalf("switch stayed unavailable after startup: status=%+v err=%v", status, err)
+				}
+			}
 		})
+	}
+}
+
+func TestInterfaceTransitionTargetFailureRestoresChatWorkspace(t *testing.T) {
+	manager, store, chat, _, id := neverStartedChatOrchestrator(t, func(store *sqlite.Store) lifecycleRecorder {
+		return &sqliteTransitionLifecycle{store: store}
+	})
+	manager.chat = workspaceCheckingTransitionChat{chat}
+	manager.runtime.(*transitionRuntime).createErr = errors.New("terminal launch failed")
+	ctx := context.Background()
+	before, _, err := store.GetSession(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transition, err := manager.StartInterfaceTransition(ctx, id, domain.SessionModeTUI,
+		domain.SessionInterfaceTransitionDrain, domain.SessionInterfaceTransitionHistoryStrict)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settled := settleSQLiteTransition(t, store, transition.ID)
+	if settled.Phase != domain.SessionInterfaceTransitionFailed || settled.ErrorCode != "TARGET_RESUME_FAILED" ||
+		!strings.Contains(settled.ErrorDetail, "terminal launch failed") {
+		t.Fatalf("rollback = %s (%s): %s", settled.Phase, settled.ErrorCode, settled.ErrorDetail)
+	}
+	current, _, err := store.GetSession(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Mode != domain.SessionModeChat || current.Metadata.WorkspacePath != before.Metadata.WorkspacePath ||
+		chat.start.WorkspacePath != before.Metadata.WorkspacePath {
+		t.Fatalf("rollback lost the source workspace: mode=%s stored=%q launch=%q want=%q",
+			current.Mode, current.Metadata.WorkspacePath, chat.start.WorkspacePath, before.Metadata.WorkspacePath)
 	}
 }

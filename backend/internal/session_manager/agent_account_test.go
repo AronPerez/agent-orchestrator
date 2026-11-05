@@ -109,6 +109,29 @@ func newAccountTransitionManager(t *testing.T, mode domain.SessionMode) (*Manage
 	return manager, store, runtime, chat, accounts, log
 }
 
+func TestAccountTransitionRefusesProvisioningWorkspace(t *testing.T) {
+	for _, workspace := range []string{"", "/ws/session-1"} {
+		t.Run(workspace, func(t *testing.T) {
+			manager, store, _, _, accounts, log := newAccountTransitionManager(t, domain.SessionModeChat)
+			rec := store.sessions["session-1"]
+			rec.ProvisionState = domain.SessionProvisionProvisioning
+			rec.Metadata.WorkspacePath = workspace
+			store.sessions[rec.ID] = rec
+			transition, err := manager.StartAccountTransition(context.Background(), rec.ID, "acct-b", domain.SessionInterfaceTransitionDrain)
+			if err == nil {
+				settled := awaitTransition(t, store, transition.ID)
+				t.Fatalf("account switch admitted during provisioning: %+v", settled)
+			}
+			if !errors.Is(err, ErrInterfaceWorkspaceUnavailable) {
+				t.Fatalf("StartAccountTransition = %v, want ErrInterfaceWorkspaceUnavailable", err)
+			}
+			if len(store.transitions) != 0 || len(*log) != 0 || accounts.boundTo(rec.ID) != "device-claude" {
+				t.Fatalf("refusal changed the session: transitions=%v log=%v account=%s", store.transitions, *log, accounts.boundTo(rec.ID))
+			}
+		})
+	}
+}
+
 // The move is a transaction: the agent restarts on the new account first, and
 // the session's binding changes only once that agent is live.
 func TestAccountTransitionMovesATerminalSessionAndCommitsAfterTheTargetStarts(t *testing.T) {
