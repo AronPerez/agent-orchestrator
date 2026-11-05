@@ -2296,41 +2296,28 @@ func TestDesktopRelaunchPreservesUserShells(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// A daemon restart within the same launch keeps every shell. A new
-			// launch reaps the session-less one: clients show shells only in a
-			// session's tab strip, so nothing could show or close it.
-			newLaunch := tc.nextRun != testAppRunID
-			want, wantReaped, wantNext := []ShellTerminal{side, standalone}, int64(0), "Terminal 3"
-			if newLaunch {
-				want, wantReaped, wantNext = []ShellTerminal{side}, 1, "Terminal 1"
-			}
+			want := []ShellTerminal{side, standalone}
 
 			// Recreate the service just as boot does. The runtime and durable rows
 			// belong to the shells, not to this service or desktop launch.
 			svc = NewService(rt, st, projects, sessions, "/data/dir", tc.nextRun, testLogger())
 			rt.aliveErr = tc.probeErr // The fake returns false alongside probe errors.
-			if n, err := svc.ReapShellTerminalsFromPreviousAppRuns(ctx); err != nil || n != wantReaped {
-				t.Fatalf("reap = %d, %v; want %d", n, err, wantReaped)
+			if n, err := svc.ReapShellTerminalsFromPreviousAppRuns(ctx); err != nil || n != 0 {
+				t.Fatalf("reap = %d, %v", n, err)
 			}
 			got, err := svc.ListShellTerminalsForCurrentAppRun(ctx)
 			if err != nil || !reflect.DeepEqual(got, want) {
 				t.Fatalf("restored = %+v, %v; want %+v", got, err, want)
 			}
-			if newLaunch {
-				if !reflect.DeepEqual(rt.destroyed, []string{standalone.HandleID}) {
-					t.Fatalf("destroyed = %v, want only the session-less shell %s", rt.destroyed, standalone.HandleID)
-				}
-			} else if len(rt.destroyed) != 0 {
+			if len(rt.destroyed) != 0 {
 				t.Fatalf("destroyed user shells: %v", rt.destroyed)
 			}
 			next, err := svc.OpenShellTerminal(ctx, OpenShellTerminalInput{SessionID: "session-1"})
-			if err != nil || next.Title != wantNext {
-				t.Fatalf("next terminal = %+v, %v; want %s", next, err, wantNext)
+			if err != nil || next.Title != "Terminal 3" {
+				t.Fatalf("next terminal = %+v, %v; want Terminal 3", next, err)
 			}
-			if !newLaunch {
-				if err := svc.CloseShellTerminal(ctx, standalone.HandleID); err != nil {
-					t.Fatal(err)
-				}
+			if err := svc.CloseShellTerminal(ctx, standalone.HandleID); err != nil {
+				t.Fatal(err)
 			}
 			release, err := svc.BeginSessionTeardown(ctx, "session-1")
 			if err != nil {
