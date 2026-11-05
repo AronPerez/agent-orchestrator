@@ -364,9 +364,10 @@ export function createEventTransport(queryClient: QueryClient): EventTransport {
 						) {
 							// Async chat startup changes the session's provisionState, but
 							// does not emit a conversationId. Refresh the open conversation
-							// so its controller state can leave "connecting".
+							// and controls gated on workspace readiness.
 							pendingConversationSessions.add(decoded.sessionId);
 							pendingEditorHandoffSessions.add(decoded.sessionId);
+							pendingInterfaceTransitionSessions.add(decoded.sessionId);
 						}
 					} catch {
 						// A malformed CDC payload still invalidates workspaces; it simply

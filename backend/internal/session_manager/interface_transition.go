@@ -105,7 +105,7 @@ func (m *Manager) InterfaceTransitionStatus(
 		status.Reason = "Terminated sessions must be restored before switching interfaces."
 	} else if interfaceWorkspaceUnavailable(rec) {
 		status.ReasonCode = "WORKSPACE_UNAVAILABLE"
-		status.Reason = "This session's workspace was never set up. Retry start before switching interfaces."
+		status.Reason = "This session's workspace is not ready. Wait for startup to finish, or retry a failed start, before switching interfaces."
 	} else if target == domain.SessionModeChat && (m.chat == nil || !m.chat.SupportsChat(rec.Harness)) {
 		status.ReasonCode = "CHAT_UNSUPPORTED"
 		status.Reason = fmt.Sprintf("%s does not support Chat UI.", rec.Harness)
@@ -144,12 +144,10 @@ func (m *Manager) InterfaceTransitionStatus(
 	return status, nil
 }
 
-// interfaceWorkspaceUnavailable reports a session whose start failed before
-// its workspace existed. Neither controller can launch without one, so a switch
-// would only fail and leave both stopped. A session still provisioning is not
-// refused: its workspace is on the way.
+// Neither target startup nor rollback can launch without a workspace. Even
+// after publishing it, an asynchronous spawn still owns the controller launch.
 func interfaceWorkspaceUnavailable(rec domain.SessionRecord) bool {
-	return strings.TrimSpace(rec.Metadata.WorkspacePath) == "" && !rec.ProvisionState.IsProvisioning()
+	return strings.TrimSpace(rec.Metadata.WorkspacePath) == "" || rec.ProvisionState.IsProvisioning()
 }
 
 // StartInterfaceTransition durably claims the session and starts the handoff in
