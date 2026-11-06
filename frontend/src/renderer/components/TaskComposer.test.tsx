@@ -214,6 +214,57 @@ describe("TaskComposer", () => {
 		expect(h.post.mock.calls.some(([path]) => path === "/api/v1/orchestrators/delegate")).toBe(false);
 	});
 
+	it.each([false, true])("uses remote project defaults over remembered choices (explicit harness: %s)", async (explicitHarness) => {
+		window.localStorage.setItem("ao.taskComposer.preferences.v1", JSON.stringify({
+			"box-a:project-a": {
+				lastAgent: "claude-code",
+				agents: {
+					"claude-code": { model: "opus", mode: "", effort: "max" },
+					codex: { model: "gpt-old", mode: "", effort: "low" },
+				},
+			},
+		}));
+		h.agentCatalog = { agents: [agentReadiness("codex", "Codex"), agentReadiness("claude-code", "Claude Code")] };
+		h.remoteGet.mockImplementation(async (path: string, options?: { params?: { path?: { agent?: string } } }) => {
+			if (path.includes("/models")) return { data: {
+				agent: options?.params?.path?.agent,
+				selectionMode: "text", allowCustom: true,
+				models: [
+					{ id: "gpt-6.1-terra", label: "GPT-6.1 Terra", isDefault: true, efforts: ["low", "high"], defaultEffort: "low" },
+					{ id: "gpt-old", label: "Old model", efforts: ["low", "high"], defaultEffort: "low" },
+					{ id: "opus", label: "Opus", efforts: ["high", "max"], defaultEffort: "high" },
+				],
+			} };
+			if (path === "/api/v1/settings") return { data: { defaultSessionMode: "tui", chatHarnesses: ["codex", "claude-code"] } };
+			return { data: { status: "ok", project: {
+				id: "project-a", agent: "claude-code",
+				config: { worker: { agent: "codex", agentConfig: { model: "gpt-6.1-terra", effort: "high" } } },
+			} } };
+		});
+		h.remotePost.mockImplementation(async (path: string) => path === "/api/v1/orchestrators/delegate"
+			? { data: { workerId: "remote-defaults" } }
+			: { data: {} });
+		const onCreated = vi.fn();
+		render(<Wrap><TaskComposer hostId="box-a" projectId="project-a" onCreated={onCreated} /></Wrap>);
+		await waitFor(() => expect(screen.getByLabelText("Agent")).toHaveAttribute("data-value", "codex"));
+		expect(await screen.findByRole("button", { name: "Model" })).toHaveTextContent("GPT-6.1 Terra");
+		await waitFor(() => expect(screen.getByRole("button", { name: "Effort" })).toHaveTextContent("High"));
+		if (explicitHarness) fireEvent.click(screen.getByLabelText("Agent"));
+		await waitForTaskReady();
+		fireEvent.change(task(), { target: { value: "Respect remote project defaults" } });
+		fireEvent.click(startTask());
+		await waitFor(() => expect(onCreated).toHaveBeenCalledWith("remote-defaults"));
+		expect(h.remotePost).toHaveBeenCalledWith("/api/v1/orchestrators/delegate", expect.objectContaining({
+			body: expect.objectContaining({ projectId: "project-a", agent: explicitHarness ? "claude-code" : "codex" }),
+		}));
+		if (!explicitHarness) {
+			const request = h.remotePost.mock.calls.find(([path]) => path === "/api/v1/orchestrators/delegate")?.[1].body;
+			expect(request.model).toBeUndefined();
+			expect(request.effort).toBeUndefined();
+		}
+		expect(h.post).not.toHaveBeenCalled();
+	});
+
 	it("reuses a task request id after an uncertain response and changes it with the draft", async () => {
 		h.agentCatalog = { agents: [agentReadiness("opencode", "OpenCode")] };
 		h.remoteGet.mockImplementation(async (path: string) => {

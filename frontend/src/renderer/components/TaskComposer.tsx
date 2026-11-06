@@ -379,7 +379,8 @@ export function TaskComposer({
 	const rememberedAgentIsAvailable = Boolean(
 		availableAgents?.some((candidate) => candidate.id === rememberedAgent && (hostId ? isLaunchableAgent(candidate) : isReadyAgent(candidate))),
 	);
-	const defaultWorkerAgent = rememberedAgentIsAvailable ? rememberedAgent : configuredDefaultAgent;
+	// Saved choices must not override a project's current role defaults.
+	const defaultWorkerAgent = projectWorkerAgent || (rememberedAgentIsAvailable ? rememberedAgent : configuredDefaultAgent);
 	const selectedAgent = agent || defaultWorkerAgent;
 	// A cloud project is unknown to the local daemon, so its model catalog is
 	// queried agent-level (no project scope); otherwise the request 404s and the
@@ -486,14 +487,14 @@ export function TaskComposer({
 	const rememberedModeIsValid =
 		isConcreteModelID(rememberedMode) && catalogModels.some((item) => item.id === rememberedMode);
 	const defaultModelForSelectedAgent =
-		(rememberedModelIsValid ? rememberedModel : "") ||
 		(isConcreteModelID(projectModelForSelectedAgent) ? projectModelForSelectedAgent : "") ||
+		(rememberedModelIsValid ? rememberedModel : "") ||
 		(!catalogUsesModes && isConcreteModelID(lastUsedOption) ? lastUsedOption : "") ||
 		(catalogUsesModes ? "" : catalogDefaultOption) ||
 		claudeFallbackOption;
 	const defaultModeForSelectedAgent =
-		(rememberedModeIsValid ? rememberedMode : "") ||
 		(isConcreteModelID(projectModeForSelectedAgent) ? projectModeForSelectedAgent : "") ||
+		(rememberedModeIsValid ? rememberedMode : "") ||
 		(catalogUsesModes && isConcreteModelID(lastUsedOption) ? lastUsedOption : "") ||
 		(catalogUsesModes ? catalogDefaultOption : "");
 	const selectedModel = model || (modelTouched ? (catalogUsesModes ? "" : catalogDefaultOption) : defaultModelForSelectedAgent);
@@ -507,11 +508,8 @@ export function TaskComposer({
 		rememberedConfigForSelectedAgent &&
 			Object.prototype.hasOwnProperty.call(rememberedConfigForSelectedAgent, "effort"),
 	);
-	const defaultEffortForSelectedAgent = rememberedEffortIsExplicit
-		? (rememberedConfigForSelectedAgent?.effort ?? "")
-		: selectedAgent === configuredProjectAgent
-			? defaultWorkerEffort
-			: "";
+	const defaultEffortForSelectedAgent = (selectedAgent === configuredProjectAgent ? defaultWorkerEffort : "") ||
+		(rememberedEffortIsExplicit ? rememberedConfigForSelectedAgent?.effort ?? "" : "");
 	const { selected: effortModel } = useModelTuning({
 		models: catalogModels,
 		model: selectedModel,
