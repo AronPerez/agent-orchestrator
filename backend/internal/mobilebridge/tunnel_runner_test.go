@@ -342,7 +342,7 @@ func TestTunnelRunnerKeepsTheQuickTunnelUntilAReplacementIsMade(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("asked AO Cloud %d times", cloud.requests())
+			t.Fatalf("quick tunnel did not start after %d AO Cloud requests", cloud.requests())
 		}
 	}
 	cancel()

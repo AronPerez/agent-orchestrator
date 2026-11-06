@@ -42,7 +42,29 @@ func TestHarnessDefaultsPersistIndependentlyAndReset(t *testing.T) {
 	if err != nil || len(reset.HarnessDefaults) != 1 || reset.HarnessDefaults["claude-code"].IsZero() {
 		t.Fatalf("reset changed another harness: %+v, %v", reset, err)
 	}
-	if reset.DefaultSessionMode != initial.DefaultSessionMode || reset.CloudOffering != initial.CloudOffering {
+	if reset.DefaultSessionMode != initial.DefaultSessionMode || reset.CloudOffering != initial.CloudOffering || reset.VersionRefresh != initial.VersionRefresh {
 		t.Fatal("harness defaults changed unrelated settings")
+	}
+}
+
+func TestCloudOfferingAndRetentionPersistIndependently(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	if err := s.SetCloudOffering(ctx, true, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSessionRetentionDays(ctx, 7, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := s.GetAppSettings(ctx)
+	if err != nil || !saved.CloudOffering || saved.SessionRetentionDays != 7 {
+		t.Fatalf("retention changed the cloud toggle: %+v, %v", saved, err)
+	}
+	if err := s.SetCloudOffering(ctx, false, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	saved, err = s.GetAppSettings(ctx)
+	if err != nil || saved.CloudOffering || saved.SessionRetentionDays != 7 {
+		t.Fatalf("cloud toggle changed retention: %+v, %v", saved, err)
 	}
 }

@@ -200,10 +200,10 @@ func validatePathComponent(name, value string) error {
 
 func (w *Workspace) validateManagedPath(path string) (string, error) {
 	if strings.TrimSpace(path) == "" {
-		return "", errors.New("scratch workspace: empty path")
+		return "", fmt.Errorf("scratch workspace: empty path: %w", ports.ErrWorkspaceUnsafePath)
 	}
 	if !filepath.IsAbs(path) {
-		return "", fmt.Errorf("scratch workspace: %q is not absolute", path)
+		return "", fmt.Errorf("scratch workspace: %q is not absolute: %w", path, ports.ErrWorkspaceUnsafePath)
 	}
 	clean := filepath.Clean(path)
 	physical, err := physicalAbs(clean)
@@ -215,7 +215,7 @@ func (w *Workspace) validateManagedPath(path string) (string, error) {
 		return "", err
 	}
 	if !inside || samePath(physical, w.managedRoot) {
-		return "", fmt.Errorf("scratch workspace: path %q is outside managed root %q", physical, w.managedRoot)
+		return "", fmt.Errorf("scratch workspace: path %q is outside managed root %q: %w", physical, w.managedRoot, ports.ErrWorkspaceUnsafePath)
 	}
 	return physical, nil
 }

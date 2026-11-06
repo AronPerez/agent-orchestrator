@@ -1,4 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, expectTypeOf, it, vi } from "vitest";
+
+import type { components, operations, paths } from "../src/schema.js";
 
 import {
   CloudApiError,
@@ -11,6 +13,26 @@ import {
 } from "../src/index.js";
 
 describe("CloudClient", () => {
+  it("omits private Cloud APIs that the retained server cannot serve", () => {
+    type Unsupported = "getProjectEnvironment" | "putProjectEnvironment" | "getProjectIntakeStatus"
+      | "listProjectCues" | "createProjectCue" | "updateProjectCue" | "deleteProjectCue" | "invokeProjectCue"
+      | "saveArtifact" | "saveSessionArtifact" | "listArtifactVersions" | "listSessionArtifactVersions"
+      | "getArtifactVersion" | "getSessionArtifactVersion" | "restoreArtifactVersion" | "restoreSessionArtifactVersion"
+      | "restartSessionAgent" | "searchChats" | "updateSession" | "setSessionPinned" | "pinSession" | "unpinSession"
+      | "listReviewChatEvents" | "sendReviewChatMessage" | "interruptReviewChat" | "suggestChatPrompt";
+    expectTypeOf<Extract<keyof ReturnType<typeof createCloudClient> | keyof operations, Unsupported>>().toBeNever();
+    expectTypeOf<operations["deleteSessionArtifact"]>().toBeObject();
+    expectTypeOf<components["schemas"]["CreateSessionInput"]["reasoningEffort"]>().toMatchTypeOf<string | undefined>();
+    expectTypeOf<components["schemas"]["CreateSessionInput"]["provider"]>().toMatchTypeOf<string | undefined>();
+    expectTypeOf<components["schemas"]["AOReviewRun"]["reviewerTerminalId"]>().toMatchTypeOf<string | undefined>();
+  });
+
+  it("keeps artifact publishing aligned with fork cloud", () => {
+    expectTypeOf<paths["/api/cloud/v1/me/artifact-shares"]["post"]>().toEqualTypeOf<operations["createArtifactShare"]>();
+    expectTypeOf<paths["/api/cloud/v1/me/artifact-shares/{shareId}"]["put"]>().toEqualTypeOf<operations["updateArtifactShare"]>();
+    expectTypeOf<Extract<keyof paths, "/api/cloud/v1/me/artifact-shares/uploads">>().toBeNever();
+  });
+
   it("loads normalized project settings and preserves PATCH omissions", async () => {
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => jsonResponse({ project: { id: "project" } }));
     const client = createCloudClient({ baseUrl: "https://cloud.test", getAccessToken: () => "token", fetch: fetchMock });

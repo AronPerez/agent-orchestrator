@@ -876,6 +876,25 @@ paths:
                 $ref: "#/components/schemas/SessionArtifactList"
         default:
           $ref: "#/components/responses/Error"
+    delete:
+      operationId: deleteSessionArtifact
+      tags: [Artifacts]
+      description: >-
+        Deletes one committed artifact's metadata and requests deletion of its
+        stored object version. An invalid path answers 400 invalid_path.
+        Present only when offering.artifacts is enabled; otherwise 404.
+      parameters:
+        - name: path
+          in: query
+          required: true
+          schema:
+            type: string
+            maxLength: 1024
+      responses:
+        "204":
+          description: The file was deleted.
+        default:
+          $ref: "#/components/responses/Error"
   /api/cloud/v1/orgs/{orgId}/sessions/{sessionId}/artifacts/access:
     parameters:
       - $ref: "#/components/parameters/OrgId"
@@ -6445,6 +6464,19 @@ components:
             from the default stored when the orchestrator was created, unlike
             local spawns, which read the user's default at spawn time; a
             changed default reaches them once a new orchestrator is created.
+        reasoningEffort:
+          type: string
+          enum: [default, none, minimal, low, medium, high, xhigh, max, ultra]
+          description: >-
+            Reasoning effort the opening prompt runs with. Optional; empty uses
+            the model's default.
+        provider:
+          type: string
+          description: >-
+            Sandbox provider the session runs on, one the deployment offers
+            (see /me). Optional; empty uses the organization's default. A
+            project set up for a provider, or a worker linked to the project's
+            orchestrator, runs there instead.
     UpdateSessionPreferencesInput:
       type: object
       additionalProperties: false
@@ -6855,6 +6887,9 @@ components:
           format: date-time
         autoInjectReview:
           type: boolean
+        reviewerTerminalId:
+          type: string
+          description: The reviewer terminal of a review that runs in a terminal.
     AOPullRequestReviewState:
       type: object
       additionalProperties: false

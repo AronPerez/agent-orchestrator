@@ -531,7 +531,8 @@ export interface paths {
         get: operations["listSessionArtifacts"];
         put?: never;
         post?: never;
-        delete?: never;
+        /** @description Deletes one committed artifact's metadata and requests deletion of its stored object version. An invalid path answers 400 invalid_path. Present only when offering.artifacts is enabled; otherwise 404. */
+        delete: operations["deleteSessionArtifact"];
         options?: never;
         head?: never;
         patch?: never;
@@ -3468,6 +3469,13 @@ export interface components {
             interfaceMode?: components["schemas"]["SessionInterfaceMode"];
             /** @description The user's default session interface, for a create without interfaceMode. The control plane resolves the session's interface from it as the local daemon resolves a spawn: an orchestrator starts in chat, a worker in this default, and chat only for a harness listed in chatHarnesses (any other starts in tui without an error). A create with neither field (from a desktop that predates them) starts in tui, an orchestrator too. An orchestrator keeps it for the workers it spawns, which resolve from the default stored when the orchestrator was created, unlike local spawns, which read the user's default at spawn time; a changed default reaches them once a new orchestrator is created. */
             defaultInterfaceMode?: components["schemas"]["SessionInterfaceMode"];
+            /**
+             * @description Reasoning effort the opening prompt runs with. Optional; empty uses the model's default.
+             * @enum {string}
+             */
+            reasoningEffort?: "default" | "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+            /** @description Sandbox provider the session runs on, one the deployment offers (see /me). Optional; empty uses the organization's default. A project set up for a provider, or a worker linked to the project's orchestrator, runs there instead. */
+            provider?: string;
         };
         UpdateSessionPreferencesInput: {
             reviewerHarness?: components["schemas"]["CloudReviewerHarness"] | string;
@@ -3641,6 +3649,8 @@ export interface components {
             /** Format: date-time */
             deliveredAt?: string;
             autoInjectReview: boolean;
+            /** @description The reviewer terminal of a review that runs in a terminal. */
+            reviewerTerminalId?: string;
         };
         AOPullRequestReviewState: {
             pullRequestUrl: string;
@@ -5233,6 +5243,30 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["SessionArtifactList"];
                 };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    deleteSessionArtifact: {
+        parameters: {
+            query: {
+                path: string;
+            };
+            header?: never;
+            path: {
+                orgId: components["parameters"]["OrgId"];
+                sessionId: components["parameters"]["SessionId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The file was deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             default: components["responses"]["Error"];
         };

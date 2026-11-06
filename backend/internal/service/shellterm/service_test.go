@@ -1089,6 +1089,34 @@ func TestOpenShellTerminalDefersStartWhenTheClientWillSizeIt(t *testing.T) {
 	}
 }
 
+func TestOpenShellTerminalStartsAtTheClientGridWhenGiven(t *testing.T) {
+	rt := newFakeShellRuntime()
+	projects := &fakeProjectRootLocator{roots: map[domain.ProjectID]string{"portfolio": "/repos/portfolio"}}
+	svc := newTestService(rt, &fakeShellTerminalStore{}, projects)
+
+	in := OpenShellTerminalInput{ProjectID: "portfolio", StartOnAttach: true, Cols: 146, Rows: 37}
+	if _, err := svc.OpenShellTerminal(context.Background(), in); err != nil {
+		t.Fatalf("OpenShellTerminal: %v", err)
+	}
+	if len(rt.created) != 1 || rt.created[0].InitialCols != 146 || rt.created[0].InitialRows != 37 {
+		t.Fatalf("runtime creates = %+v, want the client's 146x37 grid", rt.created)
+	}
+}
+
+func TestOpenShellTerminalIgnoresAnOutOfRangeGrid(t *testing.T) {
+	rt := newFakeShellRuntime()
+	projects := &fakeProjectRootLocator{roots: map[domain.ProjectID]string{"portfolio": "/repos/portfolio"}}
+	svc := newTestService(rt, &fakeShellTerminalStore{}, projects)
+
+	in := OpenShellTerminalInput{ProjectID: "portfolio", StartOnAttach: true, Cols: 1, Rows: 5000}
+	if _, err := svc.OpenShellTerminal(context.Background(), in); err != nil {
+		t.Fatalf("OpenShellTerminal: %v", err)
+	}
+	if len(rt.created) != 1 || rt.created[0].InitialCols != 0 || rt.created[0].InitialRows != 0 || !rt.created[0].StartOnAttach {
+		t.Fatalf("runtime creates = %+v, want no grid and start-on-attach kept", rt.created)
+	}
+}
+
 func TestOpenShellTerminalRejectsUnavailableWindowsShell(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows shell selection only applies on Windows")
@@ -1133,12 +1161,21 @@ func TestOpenShellTerminalPinsPATHToDaemonBinary(t *testing.T) {
 			rt := newFakeShellRuntime()
 			svc := newTestService(rt, &fakeShellTerminalStore{}, &fakeProjectRootLocator{})
 			svc.executable = tc.executable
+			svc.dataDir = t.TempDir()
 
 			if _, err := svc.OpenShellTerminal(context.Background(), OpenShellTerminalInput{}); err != nil {
 				t.Fatalf("OpenShellTerminal: %v", err)
 			}
 			if got := rt.created[0].Env["PATH"]; got != tc.want {
 				t.Fatalf("PATH = %q, want %q", got, tc.want)
+			}
+			// A terminal is a login shell: its startup files run after the pin,
+			// so it re-pins afterwards, and only when there is a pin.
+			pinned := tc.want != "" && runtime.GOOS != "windows"
+			if env := rt.created[0].Env; (env["AO_PATH_PIN"] == filepath.Dir(daemonExe) &&
+				env["ZDOTDIR"] == filepath.Join(svc.dataDir, "runtime", "login-shell") &&
+				strings.Contains(env["PROMPT_COMMAND"], "_AO_PATH_REPINNED")) != pinned {
+				t.Fatalf("terminal env = %v, want the login-shell re-pin %v", env, pinned)
 			}
 		})
 	}
@@ -2387,7 +2424,7 @@ func TestShellReconciliationPreservesUncertainChildOrHost(t *testing.T) {
 			rt.destroyErr, rt.aliveErr = tc.destroyErr, tc.hostProbeErr
 			handleID := "ptyhost-v1:shell-exited"
 			rt.aliveByHandle[handleID] = true
-			st := &fakeShellTerminalStore{records: []ShellTerminalRecord{{HandleID: handleID, AppRunID: "previous"}}}
+			st := &fakeShellTerminalStore{records: []ShellTerminalRecord{{HandleID: handleID, SessionID: "session-1", AppRunID: "previous"}}}
 			svc := newTestService(rt, st, &fakeProjectRootLocator{})
 			if count, err := svc.ReapShellTerminalsFromPreviousAppRuns(context.Background()); err != nil || count != 0 {
 				t.Fatalf("reap = %d, %v; want preserved runtime", count, err)
@@ -2458,5 +2495,23 @@ func TestOpenCommandTerminalRenderedSkipStateOverridesStaleRawMarker(t *testing.
 	case got := <-rt.sentCh:
 		t.Fatalf("initial input sent while rendered authentication picker is open: %#v", got)
 	case <-time.After(2 * initialInputPollInterval):
+	}
+}
+
+// A restarted daemon in the same app launch must still see the trusted command
+// terminals its predecessor opened, so agent auth can keep excluding logins.
+func TestListCommandTerminalsForCurrentAppRunReturnsOnlyThisLaunchesTrustedTerminals(t *testing.T) {
+	st := &fakeShellTerminalStore{records: []ShellTerminalRecord{
+		{HandleID: "user-shell", AppRunID: testAppRunID, Title: "Shell 1"},
+		{HandleID: "auth-current", AppRunID: testAppRunID, Title: "Log in to Codex", Transient: true},
+		{HandleID: "auth-previous", AppRunID: "previous", Title: "Log in to Codex", Transient: true},
+	}}
+	svc := newTestService(newFakeShellRuntime(), st, nil)
+	got, err := svc.ListCommandTerminalsForCurrentAppRun(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].HandleID != "auth-current" || got[0].Title != "Log in to Codex" {
+		t.Fatalf("command terminals = %+v, want only this launch's trusted terminal", got)
 	}
 }
