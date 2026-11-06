@@ -174,9 +174,7 @@ export function TaskComposer({
 		() => readTaskComposerPreferences(preferenceContext),
 		[preferenceContext],
 	);
-	const agentDrafts = useRef<Record<string, TaskComposerAgentPreference>>({
-		...persistedPreferences?.agents,
-	}).current;
+	const agentDrafts = useRef<Record<string, TaskComposerAgentPreference>>({}).current;
 	const createCloudTask = useCallback(
 		async (input: CreateTaskInput): Promise<string> => {
 			if (input.attachments?.length) throw new Error(t("newTask.cloudAttachmentsUnsupported", { defaultValue: "File attachments are not supported for cloud tasks yet." }));
@@ -475,7 +473,8 @@ export function TaskComposer({
 		selectedAgent === "claude-code" && !catalogUsesModes
 			? (splitClaudeModels(catalogModels).current.find((item) => /opus/i.test(modelChoiceLabel(item)))?.id ?? "")
 			: "";
-	const rememberedConfigForSelectedAgent = agentDrafts[selectedAgent];
+	const draftConfigForSelectedAgent = agentDrafts[selectedAgent];
+	const rememberedConfigForSelectedAgent = draftConfigForSelectedAgent ?? persistedPreferences?.agents[selectedAgent];
 	const rememberedModel = rememberedConfigForSelectedAgent?.model ?? "";
 	const rememberedMode = rememberedConfigForSelectedAgent?.mode ?? "";
 	const rememberedModelIsValid =
@@ -487,12 +486,14 @@ export function TaskComposer({
 	const rememberedModeIsValid =
 		isConcreteModelID(rememberedMode) && catalogModels.some((item) => item.id === rememberedMode);
 	const defaultModelForSelectedAgent =
+		(draftConfigForSelectedAgent && rememberedModelIsValid ? rememberedModel : "") ||
 		(isConcreteModelID(projectModelForSelectedAgent) ? projectModelForSelectedAgent : "") ||
 		(rememberedModelIsValid ? rememberedModel : "") ||
 		(!catalogUsesModes && isConcreteModelID(lastUsedOption) ? lastUsedOption : "") ||
 		(catalogUsesModes ? "" : catalogDefaultOption) ||
 		claudeFallbackOption;
 	const defaultModeForSelectedAgent =
+		(draftConfigForSelectedAgent && rememberedModeIsValid ? rememberedMode : "") ||
 		(isConcreteModelID(projectModeForSelectedAgent) ? projectModeForSelectedAgent : "") ||
 		(rememberedModeIsValid ? rememberedMode : "") ||
 		(catalogUsesModes && isConcreteModelID(lastUsedOption) ? lastUsedOption : "") ||
@@ -508,7 +509,8 @@ export function TaskComposer({
 		rememberedConfigForSelectedAgent &&
 			Object.prototype.hasOwnProperty.call(rememberedConfigForSelectedAgent, "effort"),
 	);
-	const defaultEffortForSelectedAgent = (selectedAgent === configuredProjectAgent ? defaultWorkerEffort : "") ||
+	const defaultEffortForSelectedAgent = draftConfigForSelectedAgent?.effort ||
+		(selectedAgent === configuredProjectAgent ? defaultWorkerEffort : "") ||
 		(rememberedEffortIsExplicit ? rememberedConfigForSelectedAgent?.effort ?? "" : "");
 	const { selected: effortModel } = useModelTuning({
 		models: catalogModels,

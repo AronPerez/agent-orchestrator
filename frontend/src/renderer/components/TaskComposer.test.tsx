@@ -265,6 +265,48 @@ describe("TaskComposer", () => {
 		expect(h.post).not.toHaveBeenCalled();
 	});
 
+	it.each(["catalog", "mode"])("preserves current-form %s tuning when switching agents with project defaults", async (selectionMode) => {
+		h.agentCatalog = { agents: [agentReadiness("codex", "Codex"), agentReadiness("claude-code", "Claude Code")] };
+		h.remoteGet.mockImplementation(async (path: string, options?: { params?: { path?: { agent?: string } } }) => {
+			if (path.includes("/models")) return { data: options?.params?.path?.agent === "claude-code"
+				? { agent: "claude-code", selectionMode: "catalog", models: [{ id: "opus", label: "Opus", isDefault: true }], allowCustom: true }
+				: { agent: "codex", selectionMode, models: [
+					{ id: "option-a", label: "Option A", isDefault: true, efforts: ["low", "high"], defaultEffort: "high" },
+					{ id: "option-b", label: "Option B", efforts: ["low", "high"], defaultEffort: "high" },
+				], allowCustom: false } };
+			if (path === "/api/v1/settings") return { data: { defaultSessionMode: "tui", chatHarnesses: ["codex", "claude-code"] } };
+			return { data: { status: "ok", project: { id: "project-a", config: { worker: {
+				agent: "codex", agentConfig: selectionMode === "mode"
+					? { mode: "option-a" }
+					: { model: "option-a", effort: "high" },
+			} } } } };
+		});
+		h.remotePost.mockResolvedValue({ data: { workerId: "remote-draft" } });
+		const onCreated = vi.fn();
+		render(<Wrap><TaskComposer hostId="box-a" projectId="project-a" onCreated={onCreated} /></Wrap>);
+		const picker = await screen.findByRole("button", { name: "Model" });
+		await waitFor(() => expect(picker).toHaveTextContent("Option A"));
+		await userEvent.click(picker);
+		await userEvent.click(await screen.findByRole("menuitem", { name: "Option B" }));
+		if (selectionMode === "catalog") {
+			await userEvent.click(await screen.findByRole("button", { name: "Effort" }));
+			await userEvent.click(await screen.findByRole("menuitemradio", { name: "Low" }));
+		}
+		fireEvent.click(screen.getByLabelText("Agent"));
+		await waitFor(() => expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent("Opus"));
+		fireEvent.click(screen.getByLabelText("Agent"));
+		await waitFor(() => expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent("Option B"));
+		if (selectionMode === "catalog") expect(screen.getByRole("button", { name: "Effort" })).toHaveTextContent("Low");
+		await waitForTaskReady();
+		fireEvent.change(task(), { target: { value: "Keep my current-form tuning" } });
+		fireEvent.click(startTask());
+		await waitFor(() => expect(onCreated).toHaveBeenCalledWith("remote-draft"));
+		const request = h.remotePost.mock.calls.find(([path]) => path === "/api/v1/orchestrators/delegate")?.[1].body;
+		expect(request).toEqual(expect.objectContaining({ agent: "codex", model: "option-b" }));
+		if (selectionMode === "catalog") expect(request.effort).toBe("low");
+		expect(h.post).not.toHaveBeenCalled();
+	});
+
 	it("reuses a task request id after an uncertain response and changes it with the draft", async () => {
 		h.agentCatalog = { agents: [agentReadiness("opencode", "OpenCode")] };
 		h.remoteGet.mockImplementation(async (path: string) => {
