@@ -497,15 +497,21 @@ export function ProjectTerminationFeedback({ projectId, hostId }: { projectId: s
 	if (states.length === 0) return null;
 
 	return (
-		<div aria-label={t("shell.sessionTerminationStatus")} className="flex max-w-content-max items-center gap-2">
+		<div
+			aria-label={t("shell.sessionTerminationStatus")}
+			className="scrollbar-none flex min-w-0 max-w-content-max items-center gap-2 overflow-x-auto focus-visible:outline-2 focus-visible:outline-ring"
+			role="region"
+			style={noDragStyle}
+			tabIndex={0}
+		>
 			{states.map((state) =>
 				state.error ? (
-					<TopbarActionError className="max-w-48 truncate" key={state.session.id} title={`${state.session.title}: ${state.error}`}>
+					<TopbarActionError className="max-w-48 shrink-0 truncate" key={state.session.id} title={`${state.session.title}: ${state.error}`}>
 						{state.error}
 					</TopbarActionError>
 				) : (
 					<span
-						className="max-w-40 truncate text-caption text-muted-foreground"
+						className="max-w-40 shrink-0 truncate text-caption text-muted-foreground"
 						key={state.session.id}
 						role="status"
 						title={t(state.cleanupPending ? "shell.workspaceCleanupPending" : "shell.archivingNamed", { title: state.session.title })}

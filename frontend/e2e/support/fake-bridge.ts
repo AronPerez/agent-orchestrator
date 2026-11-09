@@ -3,6 +3,7 @@ import type { Page } from "@playwright/test";
 import type { UpdateSettings, UpdateStatus } from "../../src/main/update-settings";
 import type { AoBridge } from "../../src/preload";
 import type { DaemonStatus } from "../../src/shared/daemon-status";
+import type { WorkspaceSession } from "../../src/renderer/types/workspace";
 import { coerceUiSettings, DEFAULT_UI_SETTINGS } from "../../src/shared/ui-locale";
 
 // The e2e suite runs the renderer under `dev:web` (VITE_NO_ELECTRON=1) with no
@@ -408,6 +409,8 @@ export type FakeWorker = {
 	activity?: "active" | "idle" | "waiting_input" | "exited";
 	previewUrl?: string;
 	previewRevision?: number;
+	isTerminated?: boolean;
+	workspaceCleanup?: WorkspaceSession["workspaceCleanup"];
 };
 
 export type FakeAgentOptions = {
@@ -515,6 +518,8 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 				activity: { state: w.activity ?? "active", lastActivityAt: new Date().toISOString() },
 				previewUrl: w.previewUrl,
 				previewRevision: w.previewRevision,
+				isTerminated: w.isTerminated,
+				workspaceCleanup: w.workspaceCleanup,
 				prs: [],
 			});
 
