@@ -92,7 +92,7 @@ func TestKeychainPrefersClaudeCodeAccountOverOlderItem(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cred, found := ResolveLocal(context.Background(), ProviderFirstParty, ResolveOptions{
-				Env: envFrom(map[string]string{"USER": "someone"}), GOOS: "darwin", AllowKeychain: true,
+				Env: envFrom(map[string]string{"USER": "someone", "HOME": t.TempDir()}), GOOS: "darwin", AllowKeychain: true,
 				Runner: fakeKeychain([3]string{service, "unknown", tc.stale}, current),
 			})
 			if !found || cred.Secret != "current-token" {
@@ -104,7 +104,7 @@ func TestKeychainPrefersClaudeCodeAccountOverOlderItem(t *testing.T) {
 
 func TestKeychainStillReadsItemFiledUnderAnotherAccount(t *testing.T) {
 	cred, found := ResolveLocal(context.Background(), ProviderFirstParty, ResolveOptions{
-		Env: envFrom(map[string]string{"USER": "someone"}), GOOS: "darwin", AllowKeychain: true,
+		Env: envFrom(map[string]string{"USER": "someone", "HOME": t.TempDir()}), GOOS: "darwin", AllowKeychain: true,
 		Runner: fakeKeychain([3]string{"Claude Code-credentials", "unknown", `{"claudeAiOauth":{"accessToken":"only-token"}}`}),
 	})
 	if !found || cred.Secret != "only-token" {
@@ -116,7 +116,7 @@ func TestKeychainStillReadsItemFiledUnderAnotherAccount(t *testing.T) {
 // must not stand in for it.
 func TestKeychainDoesNotReplaceAccountItemWithAnotherAccounts(t *testing.T) {
 	_, found := ResolveLocal(context.Background(), ProviderFirstParty, ResolveOptions{
-		Env: envFrom(map[string]string{"USER": "someone"}), GOOS: "darwin", AllowKeychain: true,
+		Env: envFrom(map[string]string{"USER": "someone", "HOME": t.TempDir()}), GOOS: "darwin", AllowKeychain: true,
 		Runner: fakeKeychain(
 			[3]string{"Claude Code-credentials", "unknown", `{"claudeAiOauth":{"accessToken":"stale-token"}}`},
 			[3]string{"Claude Code-credentials", "someone", `{"mcpOAuth":{}}`},
@@ -153,7 +153,7 @@ func TestKeychainDoesNotWidenLookupAfterAccountReadFails(t *testing.T) {
 			stale := fakeKeychain([3]string{"Claude Code-credentials", "unknown", `{"claudeAiOauth":{"accessToken":"stale-token"}}`})
 			var unscoped []string
 			_, found := ResolveLocal(context.Background(), ProviderFirstParty, ResolveOptions{
-				Env: envFrom(map[string]string{"USER": "someone"}), GOOS: "darwin", AllowKeychain: true,
+				Env: envFrom(map[string]string{"USER": "someone", "HOME": t.TempDir()}), GOOS: "darwin", AllowKeychain: true,
 				Runner: func(ctx context.Context, name string, args ...string) ([]byte, error) {
 					if slices.Contains(args, "-a") {
 						return nil, tc.err
