@@ -110,12 +110,21 @@ export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}
 					onPreviousTabShortcut: unsubscribe,
 					onNextTabShortcut: unsubscribe,
 					onShortcut: unsubscribe,
+					setMenuAvailability: () => undefined,
+					onMenuAction: unsubscribe,
 					onScrollPhase: unsubscribe,
+					showPrivacyGuide: async () => undefined,
+					updatePrivacyGuide: async () => false,
+					closePrivacyGuide: async () => undefined,
 				},
 				terminal: {
 					saveDroppedFile: async () => "",
 					setFocused: () => undefined,
 					onFontSizeShortcut: () => () => undefined,
+				},
+				artifactZoom: {
+					setEngaged: () => undefined,
+					onShortcut: () => () => undefined,
 				},
 				window: {
 					getZoomFactor: async () => 1,
@@ -140,6 +149,11 @@ export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}
 				chatImage: {
 					fetch: async () => ({ bytes: new Uint8Array(), mimeType: "image/png" }),
 					save: async () => true,
+				},
+				sessionShareUrls: {
+					remember: async () => undefined,
+					recall: async () => ({}),
+					forget: async () => undefined,
 				},
 				cloudShare: {
 					available: async () => true,
@@ -186,6 +200,7 @@ export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}
 					setPreferredEditor: async (editorId) => editorId,
 					open: async () => ({ id: "cursor" as const, name: "Cursor", kind: "editor" as const }),
 					openArtifacts: async () => ({ id: "file-manager" as const, name: "File Manager", kind: "file_manager" as const }),
+					openArtifactInBrowser: async () => undefined,
 				},
 				telemetry: {
 					getBootstrap: async () => null,
@@ -194,6 +209,8 @@ export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}
 					onAnalyticsOptOut: () => () => undefined,
 					setCloudUser: async () => false,
 					getGithubLogin: async () => null,
+					getLifetimeSessions: async () => null,
+					claimFirstOpen: async () => "ineligible" as const,
 					getPolicy: async () => ({ eventsEnabled: false, consentGeneration: "e2e", updatedAt: new Date(0).toISOString(), acknowledged: false, consentRenewalRequired: false, state: "applied", environmentVeto: true, durabilitySupported: false, reason: "environment_veto" }),
 					setEventsEnabled: async () => ({ eventsEnabled: false, consentGeneration: "e2e", updatedAt: new Date(0).toISOString(), acknowledged: false, consentRenewalRequired: false, state: "applied", environmentVeto: true, durabilitySupported: false, reason: "environment_veto" }),
 					onPolicy: () => () => false,
@@ -342,6 +359,11 @@ export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}
 					link: async () => ({ ok: false as const, code: "unsupported" as const, message: "unavailable" }),
 					unlink: async () => ({ ok: false as const, code: "unsupported" as const, message: "unavailable" }),
 				},
+				cliShadow: {
+					inspect: async () => ({ kind: "unknown" as const }),
+					replace: async () => ({ ok: false as const, code: "io" as const, message: "Not available in this environment." }),
+					reveal: async () => undefined,
+				},
 				updateSettings: {
 					get: async () => currentUpdateSettings,
 					set: async (next: UpdateSettings) => {
@@ -409,6 +431,7 @@ export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}
 					localAuthAvailable: async () => false,
 					onOpenShareLink: () => () => undefined,
 					takePendingShareLink: async () => null,
+					takePendingSignIn: async () => null,
 					localRegister: async () => {
 						throw new Error("local auth is unavailable in e2e");
 					},
@@ -1042,12 +1065,21 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 					onPreviousTabShortcut: unsubscribe,
 					onNextTabShortcut: unsubscribe,
 					onShortcut: unsubscribe,
+					setMenuAvailability: () => undefined,
+					onMenuAction: unsubscribe,
 					onScrollPhase: unsubscribe,
+					showPrivacyGuide: async () => undefined,
+					updatePrivacyGuide: async () => false,
+					closePrivacyGuide: async () => undefined,
 				},
 				terminal: {
 					saveDroppedFile: async () => "",
 					setFocused: () => undefined,
 					onFontSizeShortcut: () => () => undefined,
+				},
+				artifactZoom: {
+					setEngaged: () => undefined,
+					onShortcut: () => () => undefined,
 				},
 				window: {
 					getZoomFactor: async () => 1,
@@ -1068,6 +1100,11 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 				chatImage: {
 					fetch: async () => ({ bytes: new Uint8Array(), mimeType: "image/png" }),
 					save: async () => true,
+				},
+				sessionShareUrls: {
+					remember: async () => undefined,
+					recall: async () => ({}),
+					forget: async () => undefined,
 				},
 				cloudShare: {
 					available: async () => true,
@@ -1114,6 +1151,7 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 					setPreferredEditor: async (editorId) => editorId,
 					open: async () => ({ id: "cursor" as const, name: "Cursor", kind: "editor" as const }),
 					openArtifacts: async () => ({ id: "file-manager" as const, name: "File Manager", kind: "file_manager" as const }),
+					openArtifactInBrowser: async () => undefined,
 				},
 				telemetry: {
 					getBootstrap: async () => null,
@@ -1122,6 +1160,8 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 					onAnalyticsOptOut: () => () => undefined,
 					setCloudUser: async () => false,
 					getGithubLogin: async () => null,
+					getLifetimeSessions: async () => null,
+					claimFirstOpen: async () => "ineligible" as const,
 					getPolicy: async () => ({ eventsEnabled: false, consentGeneration: "e2e", updatedAt: new Date(0).toISOString(), acknowledged: false, consentRenewalRequired: false, state: "applied", environmentVeto: true, durabilitySupported: false, reason: "environment_veto" }),
 					setEventsEnabled: async () => ({ eventsEnabled: false, consentGeneration: "e2e", updatedAt: new Date(0).toISOString(), acknowledged: false, consentRenewalRequired: false, state: "applied", environmentVeto: true, durabilitySupported: false, reason: "environment_veto" }),
 					onPolicy: () => () => false,
@@ -1261,6 +1301,11 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 					link: async () => ({ ok: false as const, code: "unsupported" as const, message: "unavailable" }),
 					unlink: async () => ({ ok: false as const, code: "unsupported" as const, message: "unavailable" }),
 				},
+				cliShadow: {
+					inspect: async () => ({ kind: "unknown" as const }),
+					replace: async () => ({ ok: false as const, code: "io" as const, message: "Not available in this environment." }),
+					reveal: async () => undefined,
+				},
 				updateSettings: {
 					get: async () => ({
 						enabled: false,
@@ -1325,6 +1370,7 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 					localAuthAvailable: async () => false,
 					onOpenShareLink: () => () => undefined,
 					takePendingShareLink: async () => null,
+					takePendingSignIn: async () => null,
 					localRegister: async () => {
 						throw new Error("local auth is unavailable in e2e");
 					},

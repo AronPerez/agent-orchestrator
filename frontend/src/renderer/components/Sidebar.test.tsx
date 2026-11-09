@@ -1187,7 +1187,7 @@ describe("Sidebar", () => {
 		expect(screen.getByRole("button", { name: "Show 3 more agents" })).toBeInTheDocument();
 	});
 
-	it("shows scroll-edge fades on project and Scratchpad sections as they scroll", () => {
+	it("fades the scroll edges of project and Scratchpad sections as they scroll", () => {
 		renderSidebar({
 			workspaces: [
 				...Array.from({ length: 2 }, (_, index) => ({
@@ -1214,18 +1214,18 @@ describe("Sidebar", () => {
 			});
 
 			fireEvent.scroll(scroller);
-			expect(scroller.parentElement?.querySelector(".sidebar-section-scroll-fade--bottom")).toBeInTheDocument();
-			expect(scroller.parentElement?.querySelector(".sidebar-section-scroll-fade--top")).not.toBeInTheDocument();
+			expect(scroller).toHaveAttribute("data-fade-end");
+			expect(scroller).not.toHaveAttribute("data-fade-start");
 
 			scroller.scrollTop = 50;
 			fireEvent.scroll(scroller);
-			expect(scroller.parentElement?.querySelector(".sidebar-section-scroll-fade--top")).toBeInTheDocument();
-			expect(scroller.parentElement?.querySelector(".sidebar-section-scroll-fade--bottom")).toBeInTheDocument();
+			expect(scroller).toHaveAttribute("data-fade-start");
+			expect(scroller).toHaveAttribute("data-fade-end");
 
 			scroller.scrollTop = 100;
 			fireEvent.scroll(scroller);
-			expect(scroller.parentElement?.querySelector(".sidebar-section-scroll-fade--top")).toBeInTheDocument();
-			expect(scroller.parentElement?.querySelector(".sidebar-section-scroll-fade--bottom")).not.toBeInTheDocument();
+			expect(scroller).toHaveAttribute("data-fade-start");
+			expect(scroller).not.toHaveAttribute("data-fade-end");
 		}
 	});
 
@@ -1787,7 +1787,7 @@ describe("Sidebar", () => {
 			path: "/repo/parent/universe",
 			repos: [],
 			setupWarning:
-				"Selected folder is inside an existing Git repository at /repo/parent. AO will initialize this folder as a separate repository.",
+				"Selected folder is inside an existing Git repository at /repo/parent. Orchestrator will initialize this folder as a separate repository.",
 		});
 		renderSidebar({ onCreateProject, onInitializeProject });
 
@@ -1933,7 +1933,7 @@ describe("Sidebar", () => {
 					remote: "",
 					hasRemote: false,
 					status: "error",
-					reason: "Repository name is reserved by AO.",
+					reason: "Repository name is reserved by Orchestrator.",
 				},
 				{
 					name: "api",
@@ -2031,7 +2031,7 @@ describe("Sidebar", () => {
 
 		expect(screen.getByText("unborn")).toBeInTheDocument();
 		expect(screen.queryByText("Set an origin remote for the child repositories marked below before importing this workspace.")).not.toBeInTheDocument();
-		expect(screen.getByText("The 2 repositories marked below have no commit or origin remote yet. AO will import this workspace without them, and agents will not work in them.")).toBeInTheDocument();
+		expect(screen.getByText("The 2 repositories marked below have no commit or origin remote yet. Orchestrator will import this workspace without them, and agents will not work in them.")).toBeInTheDocument();
 		expect(screen.getByText("Git setup needed · Not included")).toBeInTheDocument();
 		expect(screen.getByText("No remote · Not included")).toBeInTheDocument();
 		expect(screen.queryByRole("dialog", { name: "Prepare project" })).not.toBeInTheDocument();
@@ -2104,7 +2104,7 @@ describe("Sidebar", () => {
 
 	it("does not rescan folders for non-validation create failures", async () => {
 		const user = userEvent.setup();
-		const onCreateProject = vi.fn().mockRejectedValue(new Error("AO daemon is not ready.")) as CreateProjectHandler;
+		const onCreateProject = vi.fn().mockRejectedValue(new Error("Orchestrator daemon is not ready.")) as CreateProjectHandler;
 		window.ao!.app.chooseDirectory = vi.fn().mockResolvedValue("/repo/workspace");
 		window.ao!.app.checkAncestorRepo = vi.fn().mockResolvedValue(undefined);
 		renderSidebar({ onCreateProject });
@@ -2118,7 +2118,7 @@ describe("Sidebar", () => {
 
 		await waitFor(() => expect(useUiStore.getState().globalToast).toMatchObject({
 			title: "Project setup failed",
-			body: "AO daemon is not ready.",
+			body: "Orchestrator daemon is not ready.",
 		}));
 		expect(screen.getByRole("dialog", { name: "New project" })).toBeInTheDocument();
 		// The initial folder validation is required by the import step. The
@@ -2138,7 +2138,7 @@ describe("Sidebar", () => {
 		window.ao!.app.checkAncestorRepo = vi
 			.fn()
 			.mockResolvedValue(
-				"Selected folder is inside an existing Git repository at /repo. AO will initialize this folder as a separate repository.",
+				"Selected folder is inside an existing Git repository at /repo. Orchestrator will initialize this folder as a separate repository.",
 			);
 		renderSidebar({ onCreateProject, onInitializeProject });
 
@@ -2148,12 +2148,12 @@ describe("Sidebar", () => {
 		await user.click(screen.getByRole("button", { name: "Continue" }));
 		expect(
 			screen.getByText(
-				"Selected folder is inside an existing Git repository at /repo. AO will initialize this folder as a separate repository.",
+				"Selected folder is inside an existing Git repository at /repo. Orchestrator will initialize this folder as a separate repository.",
 			),
 		).toBeInTheDocument();
 		expect(
 			screen.getByText(
-				"If this folder needs Git setup, AO will initialize it and create the first commit before starting.",
+				"If this folder needs Git setup, Orchestrator will initialize it and create the first commit before starting.",
 			),
 		).toBeInTheDocument();
 		await chooseOption(screen.getByRole("combobox", { name: "Orchestrator agent" }), "Claude Code");
@@ -2336,7 +2336,7 @@ describe("Sidebar", () => {
 		await user.click(await screen.findByRole("menuitem", { name: "Remove project" }));
 
 		expect(await screen.findByRole("dialog", { name: "Remove project" })).toHaveTextContent(
-			"2 open pull requests belong to this project. Removing it will hide those pull requests from AO, but will not close them.",
+			"2 open pull requests belong to this project. Removing it will hide those pull requests from Orchestrator, but will not close them.",
 		);
 	});
 
@@ -2874,7 +2874,7 @@ describe("Sidebar", () => {
 		// A working agent spins even when its PR has a state to flag.
 		expect(sessionDot("ci failed task")).toHaveAttribute("data-session-spinner");
 		expect(sessionDot("review task")).toHaveAttribute("data-session-marker", "review");
-		expect(sessionDot("review task")).toHaveClass("lucide-circle-alert", "text-status-in-review");
+		expect(sessionDot("review task")).toHaveClass("icon-circle-alert", "text-status-in-review");
 		expect(sessionDot("ready task")).toHaveAttribute("data-session-marker", "ready");
 		expect(sessionDot("merged task")).toHaveAttribute("data-session-marker", "merged");
 		expect(sessionDot("merged task")).not.toHaveClass("animate-spin");
@@ -2951,11 +2951,11 @@ describe("Sidebar", () => {
 			}],
 		});
 		expect(screen.getByLabelText("Open fix login").querySelector("[data-session-marker]")).not.toBeInTheDocument();
-		expect(document.querySelector("[data-project-folder-icon] .lucide-folder-open")).toBeInTheDocument();
+		expect(document.querySelector("[data-project-folder-icon] .icon-folder-open")).toBeInTheDocument();
 		await user.click(screen.getByLabelText("Toggle Project One sessions"));
 		expect(screen.queryByLabelText("Open fix login")).not.toBeInTheDocument();
 		expect(document.querySelector("[data-project-folder-icon] [data-project-marker]")).not.toBeInTheDocument();
-		expect(document.querySelector("[data-project-folder-icon] .lucide-folder")).toBeInTheDocument();
+		expect(document.querySelector("[data-project-folder-icon] .icon-folder")).toBeInTheDocument();
 	});
 
 	it("replaces the folder with a warning when a collapsed project needs attention", () => {
@@ -2964,8 +2964,8 @@ describe("Sidebar", () => {
 			expandedProjectIds: [],
 			workspaces: [{ ...workspace, sessions: [{ ...session, status: "needs_input" }] }],
 		});
-		expect(document.querySelector('[data-project-folder-icon] [data-project-marker="attention"]')).toHaveClass("lucide-circle-alert", "text-destructive");
-		expect(document.querySelector("[data-project-folder-icon] .lucide-folder")).not.toBeInTheDocument();
+		expect(document.querySelector('[data-project-folder-icon] [data-project-marker="attention"]')).toHaveClass("icon-circle-alert", "text-destructive");
+		expect(document.querySelector("[data-project-folder-icon] .icon-folder")).not.toBeInTheDocument();
 	});
 
 	it.each(["ci_failed", "exited"] as const)("keeps the folder for a collapsed project with a %s session", (status) => {
@@ -2975,7 +2975,7 @@ describe("Sidebar", () => {
 			workspaces: [{ ...workspace, sessions: [{ ...session, status }] }],
 		});
 		expect(document.querySelector("[data-project-folder-icon] [data-project-marker]")).not.toBeInTheDocument();
-		expect(document.querySelector("[data-project-folder-icon] .lucide-folder")).toBeInTheDocument();
+		expect(document.querySelector("[data-project-folder-icon] .icon-folder")).toBeInTheDocument();
 	});
 
 	it("shows a first-letter tile for a project without a repository avatar", () => {
@@ -2983,7 +2983,7 @@ describe("Sidebar", () => {
 		renderSidebar({ expandedProjectIds: [], workspaces: [{ ...workspace, sessions: [] }] });
 		const icon = document.querySelector("[data-project-folder-icon]");
 		expect(icon).toHaveTextContent("P");
-		expect(icon?.querySelector(".lucide-folder")).not.toBeInTheDocument();
+		expect(icon?.querySelector(".icon-folder")).not.toBeInTheDocument();
 	});
 
 	it("previews the board card to the right of a hovered session row", async () => {
@@ -3138,6 +3138,87 @@ describe("Sidebar", () => {
 		expect(screen.queryByTestId("board-session-card")).not.toBeInTheDocument();
 		const card = await screen.findByTestId("board-session-card");
 		expect(card.closest('[data-slot="hover-card-content"]')?.className).not.toMatch(/animate-in/);
+	});
+
+	it("closes the preview when the row's archive confirm opens", async () => {
+		const user = userEvent.setup();
+		renderSidebar({ workspaces: [{ ...workspace, sessions: [session] }] });
+
+		resetSessionPreviewWarmth();
+		const row = screen.getByLabelText("Open fix login").closest<HTMLElement>("[data-session-row]")!;
+		await user.hover(screen.getByLabelText("Open fix login"));
+		await screen.findByTestId("board-session-card");
+
+		await user.click(within(row).getByLabelText("Archive session"));
+		const dialog = await screen.findByRole("dialog", { name: "Are you sure you want to archive this session?" });
+		await waitFor(() => expect(screen.queryByTestId("board-session-card")).not.toBeInTheDocument());
+
+		await user.click(within(dialog).getByRole("button", { name: "No" }));
+		await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+		await waitFor(() => expect(within(row).getByLabelText("Archive session")).toHaveFocus());
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		expect(screen.queryByTestId("board-session-card")).not.toBeInTheDocument();
+	});
+
+	it("closes the row's archive confirm on the first Escape", async () => {
+		const user = userEvent.setup();
+		renderSidebar({ workspaces: [{ ...workspace, sessions: [session] }] });
+
+		const row = screen.getByLabelText("Open fix login").closest<HTMLElement>("[data-session-row]")!;
+		await user.click(within(row).getByLabelText("Archive session"));
+		await screen.findByRole("dialog");
+
+		await user.keyboard("{Escape}");
+		await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+	});
+
+	it("keeps the preview closed through the archive confirm opened from the context menu", async () => {
+		const user = userEvent.setup();
+		renderSidebar({ workspaces: [{ ...workspace, sessions: [session] }] });
+
+		resetSessionPreviewWarmth();
+		const row = screen.getByLabelText("Open fix login");
+		await user.hover(row);
+		await screen.findByTestId("board-session-card");
+
+		fireEvent.contextMenu(row);
+		await user.click(await screen.findByRole("menuitem", { name: "Archive session" }));
+		const dialog = await screen.findByRole("dialog", { name: "Are you sure you want to archive this session?" });
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		expect(screen.queryByTestId("board-session-card")).not.toBeInTheDocument();
+
+		await user.click(within(dialog).getByRole("button", { name: "No" }));
+		await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		expect(screen.queryByTestId("board-session-card")).not.toBeInTheDocument();
+	});
+
+	it("previews a row again after renaming it from the context menu", async () => {
+		const user = userEvent.setup();
+		renderSidebar({ workspaces: [{ ...workspace, sessions: [session] }] });
+
+		resetSessionPreviewWarmth();
+		fireEvent.contextMenu(screen.getByLabelText("Open fix login"));
+		await user.click(await screen.findByRole("menuitem", { name: "Rename fix login" }));
+		const input = screen.getByRole("textbox", { name: "Rename fix login" });
+		await user.clear(input);
+		await user.type(input, "polish login{Enter}");
+		await waitFor(() => expect(renameSessionMock).toHaveBeenCalledWith("proj-1-1", "polish login"));
+
+		await user.hover(screen.getByLabelText("Open fix login"));
+		expect(await screen.findByTestId("board-session-card")).toHaveTextContent("fix login");
+	});
+
+	it("previews a row when focus moves to it from another control", async () => {
+		renderSidebar({ workspaces: [{ ...workspace, sessions: [session] }] });
+
+		resetSessionPreviewWarmth();
+		act(() => {
+			screen.getByRole("button", { name: "Search" }).focus();
+			screen.getByLabelText("Open fix login").focus();
+		});
+
+		await screen.findByTestId("board-session-card");
 	});
 
 	it("lists sessions that need input above the rest", () => {
@@ -3352,7 +3433,7 @@ describe("Sidebar", () => {
 
 		const row = screen.getByLabelText("Open fix login").closest<HTMLElement>("[data-session-row]")!;
 		const archiveButton = within(row).getByLabelText("Archive session");
-		expect(archiveButton.querySelector("svg")).toHaveClass("lucide-archive");
+		expect(archiveButton.querySelector("svg")).toHaveClass("icon-archive");
 
 		fireEvent.click(archiveButton);
 		expect(postMock).not.toHaveBeenCalled();
