@@ -859,7 +859,7 @@ func formatReviewChangesRequestedMessage(review domain.PullRequestReview) string
 	if review.ID != "" {
 		fmt.Fprintf(&msg, "\nReview ID: %s", domain.SanitizeControlChars(review.ID))
 	}
-	msg.WriteString("\n\nAddress the requested changes and push. You should not need to re-fetch the review unless you need additional context beyond what AO has provided here.")
+	msg.WriteString("\n\nAddress the requested changes and push. You should not need to re-fetch the review unless you need additional context beyond what Orchestrator has provided here.")
 	return msg.String()
 }
 

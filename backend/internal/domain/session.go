@@ -126,6 +126,7 @@ type SessionArtifactFile struct {
 	Kind      SessionArtifactKind `json:"kind" enum:"html,markdown,file"`
 	Size      int64               `json:"size"`
 	UpdatedAt time.Time           `json:"updatedAt"`
+	ShareURL  string              `json:"shareUrl,omitempty"`
 }
 
 // SessionArtifactVersion is one immutable snapshot of a session artifact file.
@@ -291,6 +292,9 @@ type SessionRecord struct {
 	ReviewerConfig    AgentConfig     `json:"reviewerConfig,omitempty"`
 	AutoReviewEnabled bool            `json:"autoReviewEnabled"`
 	DisplayName       string          `json:"displayName,omitempty"`
+	// DisplayNameExplicit marks a name a person or caller chose, which outranks
+	// a terminal program's title. Generated and prompt-derived names do not.
+	DisplayNameExplicit bool `json:"-"`
 	// Mode is the session's currently committed conversation controller. Every
 	// send, restore, kill, and reaper decision dispatches from it. Only the
 	// durable interface-transition coordinator may change it; the daemon default
@@ -413,6 +417,7 @@ type SessionBranchState struct {
 	// RemoteBranch is the remote-tracking branch, such as "origin/feat/x".
 	// Empty means the branch has never been pushed.
 	RemoteBranch string `json:"remoteBranch,omitempty"`
+	RemoteHead   string `json:"remoteHead,omitempty"`
 	// Unpushed is how many branch commits are not on RemoteBranch. It equals
 	// Commits while RemoteBranch is empty.
 	Unpushed int `json:"unpushed"`
@@ -543,6 +548,10 @@ type Session struct {
 	// WorkspaceCleanupReportOnly marks a cleanup a sweep started rather than an
 	// archive: clients list its failure but raise no error for it.
 	WorkspaceCleanupReportOnly bool `json:"workspaceCleanupReportOnly,omitempty"`
+	// WorkspacePublished says the session has a recorded workspace, so its
+	// workspace reads can succeed. An asynchronous start publishes it partway
+	// through, and a failed start can keep one. The path itself stays private.
+	WorkspacePublished bool `json:"workspacePublished" description:"Whether the session has a recorded workspace that workspace reads can use."`
 	// StatusReadiness describes startup verification, never a persisted status.
 	// Clients must withhold activity labels until ready; unavailable permits retry.
 	StatusReadiness string `json:"statusReadiness" enum:"checking,ready,unavailable"`
@@ -569,6 +578,8 @@ type Session struct {
 	TerminalHandleID   string                `json:"terminalHandleId,omitempty"`
 	ArtifactFiles      []SessionArtifactFile `json:"-"`
 	ActiveAgentSwitch  *AgentSwitch          `json:"-"`
+	// TerminalTitle labels a terminal session only when no explicit name outranks it.
+	TerminalTitle string `json:"terminalTitle,omitempty"`
 	// PRs are the session's attributed pull requests (one session can own many).
 	// They feed status derivation and are surfaced on the API read model. Not
 	// serialized here: the HTTP boundary maps them to the curated wire shape.

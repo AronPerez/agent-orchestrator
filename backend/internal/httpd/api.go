@@ -53,6 +53,7 @@ type APIDeps struct {
 	ShellTerminals              controllers.ShellTerminalService
 	Cues                        controllers.CueService
 	UsageFlush                  func(context.Context)
+	PRRefresh                   controllers.PRRefresher
 	// Conversations is nil until a Chat driver is wired; the controller then
 	// answers 501 rather than panicking, matching the other optional surfaces.
 	Conversations controllers.ConversationService
@@ -193,6 +194,7 @@ func newAPIWithLogger(cfg config.Config, deps APIDeps, log *slog.Logger) *API {
 			Svc:                      deps.Sessions,
 			Projects:                 deps.Projects,
 			Activity:                 deps.Activity,
+			PRRefresh:                deps.PRRefresh,
 			NativeSessions:           deps.NativeSessions,
 			DataDir:                  cfg.DataDir,
 			Usage:                    deps.UsageHooks,
@@ -283,7 +285,7 @@ func (a *API) Register(root chi.Router) {
 					// A clone downloads the whole repository inside the request,
 					// which takes minutes for a large repository.
 					if pattern := chi.RouteContext(req.Context()).RoutePattern(); pattern == "/api/v1/projects/clone" ||
-						pattern == "/api/v1/projects/clone/prepare" {
+						pattern == "/api/v1/projects/clone/prepare" || pattern == "/api/v1/projects/clone/prepare/stream" {
 						clone.ServeHTTP(w, req)
 						return
 					}

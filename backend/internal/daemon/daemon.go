@@ -4,6 +4,7 @@
 package daemon
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -75,8 +76,10 @@ import (
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
 	reportsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/report"
 	settingssvc "github.com/aoagents/agent-orchestrator/backend/internal/service/settings"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/shellagent"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/systemcheck"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/systeminstall"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/terminaltitle"
 	usagesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/usage"
 	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillassets"
@@ -206,7 +209,7 @@ func Run(buildVersion string) error {
 	// (startup reconcile, preview servers, chat side stops, usage, pricing,
 	// lifecycle stack) are not covered: a predecessor stuck in one past the
 	// wait still makes this daemon exit 75.
-	installerShutdownTimeout := max(cfg.ShutdownTimeout, systeminstall.DefaultShutdownTimeout())
+	installerShutdownTimeout := max(cfg.ShutdownTimeout, cmp.Or(cfg.InstallerShutdownTimeout, systeminstall.DefaultShutdownTimeout()))
 	dataDirLock, err := lockDataDir(context.Background(), cfg.DataDir, dataDirTakeoverWait(cfg.ShutdownTimeout, installerShutdownTimeout), log)
 	if err != nil {
 		return err
@@ -273,7 +276,7 @@ func Run(buildVersion string) error {
 			"agent": cfg.Agent,
 		},
 	})
-	emitInstallLifecycleEvents(cfg, telemetryIdentity, telemetrySink, log)
+	emitInstallLifecycleEvents(cfg, telemetryIdentity, telemetrySink, storeHasPriorState(store), log)
 
 	// signal.NotifyContext cancels ctx on SIGINT/SIGTERM, which drives the
 	// graceful shutdown inside Server.Run and stops the background goroutines.
@@ -390,7 +393,11 @@ func Run(buildVersion string) error {
 			}()
 		}
 	}
+	// The review and chat services and the hook route start before the SCM
+	// observer they ask for early refreshes, so they hold a late-bound handle.
+	reviewRefresher := &scmReviewRefresher{}
 	chatSvc := chatsvc.New(chatsvc.Options{
+		PRChanged:           reviewRefresher.RequestSessionRefresh,
 		Store:               store,
 		Sessions:            store,
 		Renders:             attachmentstore.New(cfg.DataDir),
@@ -423,8 +430,8 @@ func Run(buildVersion string) error {
 				BranchedFromEarlierMessage:       rows.BranchedFromEarlierMessage,
 			}, nil
 		}),
-		PageReader: chatsvc.SnapshotPageReaderFunc(func(ctx context.Context, conversationID string, beforeSequence, limit int64) (chatsvc.ConversationRows, error) {
-			rows, err := store.LoadConversationSnapshotPage(ctx, conversationID, beforeSequence, limit)
+		PageReader: chatsvc.SnapshotPageReaderFunc(func(ctx context.Context, conversationID string, beforeSequence, afterSequence, limit int64) (chatsvc.ConversationRows, error) {
+			rows, err := store.LoadConversationSnapshotRange(ctx, conversationID, beforeSequence, afterSequence, limit)
 			if err != nil {
 				return chatsvc.ConversationRows{}, err
 			}
@@ -440,6 +447,7 @@ func Run(buildVersion string) error {
 				BranchedFromEarlierMessage:       rows.BranchedFromEarlierMessage,
 				OldestSequence:                   rows.OldestSequence,
 				HasMoreBefore:                    rows.HasMoreBefore,
+				AfterSequence:                    rows.AfterSequence,
 			}, nil
 		}),
 		Drivers: chatDrivers,
@@ -586,9 +594,6 @@ func Run(buildVersion string) error {
 		}
 		return fmt.Errorf("reviewer resolver: %w", err)
 	}
-	// The review service starts before the SCM observer it asks for review
-	// refreshes, so it holds a late-bound handle.
-	reviewRefresher := &scmReviewRefresher{}
 	sessionSvc, reviewSvc, wiredSessMgr, err := startSession(ctx, cfg, runtimeAdapter, store, lcStack.LCM, lcStack.ArtifactVersions, messenger, telemetrySink, notificationWriter, agents, agentSvc, managedPreview, browserLifecycle, browserAuthority, chatLauncher{svc: chatSvc, persistentHostReconcileDone: persistentHostsReconciled}, reviewerChatsRecovered, settingsSvc, tracker, codexOperationGate, reviewers, reviewRefresher, log)
 	if err != nil {
 		stop()
@@ -728,7 +733,12 @@ func Run(buildVersion string) error {
 	// Chat session, because waking it waits for admitted input to drain.
 	lcStack.LCM.SetSessionOperationGate(sessMgr)
 	termMgr.SetSessionInputLease(sessMgr)
-	projectSvc := projectsvc.NewWithDeps(projectsvc.Deps{Store: store, Sessions: sessionSvc, DefaultHarness: domain.AgentHarness(cfg.Agent), Telemetry: telemetrySink, Milestones: installMilestones(cfg), Logger: log})
+	githubRepos := newGitHubRepoResolver(log)
+	if githubRepos != nil {
+		sessionSvc.SetGitHubRepositoryResolver(githubRepos)
+	}
+	projectSvc := projectsvc.NewWithDeps(projectsvc.Deps{Store: store, Sessions: sessionSvc, DefaultHarness: domain.AgentHarness(cfg.Agent), Telemetry: telemetrySink, Milestones: installMilestones(cfg), Logger: log, GitHubRepos: githubRepos})
+	go projectSvc.WarmCanonicalRepos(ctx)
 	reportSessions, ok := sessMgr.(reportSemanticSession)
 	if !ok {
 		return errors.New("wire report delivery: session manager lacks semantic send support")
@@ -853,6 +863,16 @@ func Run(buildVersion string) error {
 	// terminal mux) as session panes, but keep their own ids, storage, and
 	// lifetime — see internal/service/shellterm.
 	shellTermSvc := startShellTerminals(ctx, cfg, runtimeAdapter, store, projectSvc, sessionSvc, log)
+	// Agents started by hand in a shell give its tab their logo and status.
+	if rt, ok := runtimeAdapter.(shellagent.Runtime); ok {
+		shellAgents := shellagent.NewManager(ctx, rt, agents, log)
+		shellTermSvc.SetAgentTracker(ctx, shellAgents)
+		termMgr.SetShellAgents(shellAgents)
+	}
+	// Titles are followed whether or not any terminal UI is open.
+	if rt, ok := runtimeAdapter.(ports.TerminalTitleWatcher); ok {
+		go terminaltitle.NewManager(rt, store, cfg.AppRunID, log).Run(ctx)
+	}
 	systemChecks.SetGitHubAuthTerminalOpener(shellTermSvc)
 	agentAuthSvc := agentauth.NewWithAgentResolver(hostCommands, agentSvc, shellTermSvc, cfg.DataDir)
 	defer agentAuthSvc.Close()
@@ -1152,6 +1172,7 @@ func Run(buildVersion string) error {
 		Telemetry:                   telemetrySink,
 		TelemetryIdentity:           telemetryIdentity,
 		LifetimeSessions:            store.LifetimeSessions,
+		PRRefresh:                   reviewRefresher,
 		UsageFlush: func(ctx context.Context) {
 			if usage != nil {
 				usage.flush(ctx, false)
@@ -1289,6 +1310,7 @@ func Run(buildVersion string) error {
 			defer lcStack.StartReaperLoop()
 			if reconcileErr := reconcilePersistentChatHosts(ctx, cfg.DataDir, store, cfg.AppRunID); reconcileErr != nil {
 				log.Error("persistent chat host reconciliation on boot failed", "err", reconcileErr)
+				sentryobs.CaptureBackground(ctx, reconcileErr, "chat", "reconcile", map[string]string{"reason": "chat_host"})
 			}
 			close(persistentHostsReconciled)
 			// Reviewer-owned Chat controllers wait for persistent host reconciliation.
@@ -1303,6 +1325,7 @@ func Run(buildVersion string) error {
 			}
 			if reconcileErr := lcStack.ReconcileRuntime(ctx); reconcileErr != nil {
 				log.Error("background agent-process reconciliation on boot failed", "err", reconcileErr)
+				sentryobs.CaptureBackground(ctx, reconcileErr, "lifecycle", "reconcile", map[string]string{"reason": "runtime"})
 			}
 		}()
 		go func() {

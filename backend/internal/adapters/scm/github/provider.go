@@ -321,11 +321,13 @@ func (p *Provider) fetchJobLogTail(ctx context.Context, owner, repo string, jobI
 // ---------------------------------------------------------------------------
 
 // ciSummaryFromGraphQL maps the per-PR status rollup onto domain.CIState.
-// If ANY visible context concluded failure-class we return CIFailing,
-// except for a CANCELLED run a later same-named run concluded over — that
-// cancel carries no verdict and its successor is already in the list.
-// Otherwise any pending context wins over passing. An empty rollup is
-// CIUnknown. When the rollup is paginated (pageInfo.hasNextPage=true)
+// If ANY visible context concluded failure-class we return CIFailing.
+// Otherwise any pending context wins over passing. A cancelled check is
+// not a failure: it usually means a replacement run is on its way, which
+// the pending case reports. With nothing running, a cancelled check (say,
+// one stopped by hand) settles as CIUnknown even beside passing checks:
+// it proved nothing, so AO must not report the PR as passing. An empty
+// rollup is CIUnknown. When the rollup is paginated (pageInfo.hasNextPage=true)
 // the verdict is conservative: a known failure is still safe — failures
 // don't get un-failed by more pages — but passing/pending/unknown
 // verdicts could hide a failing context on the next page, so we degrade
@@ -343,7 +345,7 @@ func ciSummaryFromGraphQL(pr map[string]any) domain.CIState {
 		// rather than returning CIUnknown for an otherwise-decided PR.
 		return mapRollupState(str(roll["state"]))
 	}
-	pending, passing := false, false
+	pending, passing, cancelled := false, false, false
 	concluded := latestConcludedCheckRun(rawNodes)
 	for _, n := range rawNodes {
 		st := checkStatusFromGraphQL(n)
@@ -351,8 +353,10 @@ func ciSummaryFromGraphQL(pr map[string]any) domain.CIState {
 			continue
 		}
 		switch st {
-		case domain.PRCheckFailed, domain.PRCheckCancelled:
+		case domain.PRCheckFailed:
 			return domain.CIFailing
+		case domain.PRCheckCancelled:
+			cancelled = true
 		case domain.PRCheckQueued, domain.PRCheckInProgress:
 			pending = true
 		case domain.PRCheckPassed:
@@ -365,6 +369,8 @@ func ciSummaryFromGraphQL(pr map[string]any) domain.CIState {
 	switch {
 	case pending:
 		return domain.CIPending
+	case cancelled:
+		return domain.CIUnknown
 	case passing:
 		return domain.CIPassing
 	default:
@@ -726,7 +732,7 @@ func checkRunStartedAt(n map[string]any) (time.Time, bool) {
 }
 
 func isFailingCheckStatus(s domain.PRCheckStatus) bool {
-	return s == domain.PRCheckFailed || s == domain.PRCheckCancelled
+	return s == domain.PRCheckFailed
 }
 
 // ---------------------------------------------------------------------------

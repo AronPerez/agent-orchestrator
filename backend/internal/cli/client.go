@@ -39,11 +39,11 @@ type apiResponseError struct {
 	ErrorBody  apiError
 }
 
-var errDaemonUnavailable = errors.New("AO daemon unavailable")
+var errDaemonUnavailable = errors.New("the Orchestrator daemon is unavailable")
 
 // errDaemonNotRunning distinguishes a missing/stale run file from transport
 // failures so hooks can keep expected restart noise out of the agent's stderr.
-var errDaemonNotRunning = errors.New("AO daemon is not running")
+var errDaemonNotRunning = errors.New("the Orchestrator daemon is not running")
 
 // daemonUnavailableError keeps the established user-facing diagnostics while
 // giving the few idempotent CLI operations that can safely retry a typed signal.
