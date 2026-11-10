@@ -1,9 +1,10 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { ArrowUpRight, ChevronDown, Copy, Download, Ellipsis, FolderOpen, Pencil, Pin, PinOff, SquareTerminal, Trash2 } from "lucide-react";
+import { ArrowUpRight, ChevronDown, Copy, Download, Ellipsis, ExternalLink, FolderOpen, MoreVertical, Pencil, Pin, PinOff, Share, SquareTerminal, Trash2 } from "@/components/app-icons";
 import type { OpenArtifactsTargetId } from "../../shared/editor-handoff";
-import { useOpenSessionArtifacts } from "../hooks/useEditorHandoff";
+import { isBrowserArtifactPath } from "../../shared/editor-handoff";
+import { useOpenArtifactInBrowser, useOpenSessionArtifacts } from "../hooks/useEditorHandoff";
 import { deleteSessionArtifactFile, sessionArtifactFileQueryOptions } from "../hooks/useSessionWorkspaceFiles";
 import { cloudSessionsQueryKey, workspaceQueryKeyForHost } from "../hooks/useWorkspaceQuery";
 import { useCloudCp } from "../hooks/useCloudCp";
@@ -19,16 +20,18 @@ import { useArtifactsViewStore } from "../stores/artifacts-view-store";
 import type { SessionArtifact, WorkspaceSession } from "../types/workspace";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { Button } from "./ui/button";
+import { ShareArtifactMenuPopover, VIDEO_FILE, useShareAvailable } from "./ShareArtifactPopover";
+import type { CloudShareFile } from "../../shared/cloud-share";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "./ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
 const ERROR_CLEAR_MS = 5_000;
 
-function fileManagerName(): string {
+export function fileManagerName(): string {
 	return isMacPlatform() ? "Finder" : isWindowsPlatform() ? "File Explorer" : "File Manager";
 }
 
-function terminalName(): string {
+export function terminalName(): string {
 	return isWindowsPlatform() ? "Command Prompt" : "Terminal";
 }
 
@@ -36,7 +39,9 @@ function terminalName(): string {
  * Copies a cloud session's artifact files to its folder under ~/.ao and opens
  * it in the file manager, or, given `reveal`, copies only that artifact and
  * shows it there: a cloud session's artifacts live in the control plane, so
- * this is the folder a local session's "Show in" opens.
+ * this is the folder a local session's "Show in" opens. With `browser`, it
+ * copies them all, so a page's own files load, and opens `reveal` in the
+ * default browser.
  */
 export async function openCloudArtifactsFolder(
 	client: CloudCpClient,
@@ -44,9 +49,10 @@ export async function openCloudArtifactsFolder(
 	orgId: string,
 	sessionId: string,
 	reveal?: Pick<SessionArtifact, "path" | "updatedAt">,
+	browser = false,
 ): Promise<void> {
 	const [files, access] = await Promise.all([
-		reveal ? [reveal] : client.listSessionArtifacts(orgId, sessionId).then(({ artifacts }) => artifacts),
+		reveal && !browser ? [reveal] : client.listSessionArtifacts(orgId, sessionId).then(({ artifacts }) => artifacts),
 		client.createSessionArtifactAccess(orgId, sessionId),
 	]);
 	const root = `${baseUrl.replace(/\/+$/, "")}${access.filesPrefix}`;
@@ -54,6 +60,7 @@ export async function openCloudArtifactsFolder(
 		sessionId,
 		files: files.map((file) => ({ path: file.path, url: cloudArtifactFileUrl(root, file.path, file.updatedAt) })),
 		reveal: reveal?.path,
+		...(browser ? { open: "browser" as const } : {}),
 	});
 }
 
@@ -69,6 +76,8 @@ export function ArtifactActionsMenu({
 	hostId,
 	session,
 	iconOnly = false,
+	verticalDots = false,
+	share,
 	variant = "default",
 	onEdit,
 	pinInMenu = false,
@@ -85,6 +94,10 @@ export function ArtifactActionsMenu({
 	hostId?: string;
 	session: Pick<WorkspaceSession, "id" | "cloud">;
 	iconOnly?: boolean;
+	/** Draws the icon-only trigger as a vertical ellipsis. */
+	verticalDots?: boolean;
+	/** Adds a Share item to an icon-only menu; it opens the share panel under the trigger. */
+	share?: Omit<CloudShareFile, "baseUrl" | "shareId">;
 	variant?: "default" | "sidebar";
 	onEdit?: () => void;
 	pinInMenu?: boolean;
@@ -99,10 +112,15 @@ export function ArtifactActionsMenu({
 	const { t } = useTranslation();
 	const queryClient = useQueryClient();
 	const open = useOpenSessionArtifacts();
+	const browser = useOpenArtifactInBrowser();
 	const [copyError, setCopyError] = useState("");
 	const [confirmingDelete, setConfirmingDelete] = useState(false);
 	const [menuOpen, setMenuOpen] = useState(false);
-	const actionClassName = cn(className, menuOpen && "opacity-100 [@media(hover:hover)]:opacity-100");
+	const [shareOpen, setShareOpen] = useState(false);
+	const sharing = useRef(false);
+	const shareAvailable = useShareAvailable();
+	const canShare = Boolean(share) && iconOnly && shareAvailable && !VIDEO_FILE.test(artifact.path);
+	const actionClassName = cn(className, (menuOpen || shareOpen) && "opacity-100 [@media(hover:hover)]:opacity-100");
 	// The artifact directory is on this machine only for a local session.
 	const local = !hostId && !session.cloud;
 	const sidebar = variant === "sidebar";
@@ -130,9 +148,32 @@ export function ArtifactActionsMenu({
 		setConfirmingDelete(true);
 	};
 	const reveal = (targetId: OpenArtifactsTargetId) => {
+		browser.reset();
 		setCopyError("");
 		open.mutate({ sessionId: session.id, targetId, path: artifact.path });
 	};
+	// The main process resolves the path inside the session's artifact
+	// directory; a cloud session's file opens from its copy under ~/.ao.
+	// A cloud open copies the session's files first; one at a time.
+	const [cloudBrowserOpening, setCloudBrowserOpening] = useState(false);
+	const openInBrowser = async () => {
+		open.reset();
+		setCopyError("");
+		if (!session.cloud) {
+			browser.mutate({ sessionId: session.id, path: artifact.path });
+			return;
+		}
+		setCloudBrowserOpening(true);
+		try {
+			await openCloudArtifactsFolder(cloudClient, cloudBaseUrl, session.cloud.orgId, session.id, artifact, true);
+		} catch (error) {
+			setCopyError(error instanceof Error ? error.message : String(error));
+		} finally {
+			setCloudBrowserOpening(false);
+		}
+	};
+	const browserOpening = browser.isPending || cloudBrowserOpening;
+	const browserReadable = isBrowserArtifactPath(artifact.path);
 	const revealCloud = async () => {
 		open.reset();
 		setCopyError("");
@@ -168,16 +209,18 @@ export function ArtifactActionsMenu({
 	};
 	const copyable = owner && !fileMediaKind(artifact.path);
 
-	const error = open.error?.message || copyError;
+	const error = open.error?.message || browser.error?.message || copyError;
 	const resetOpen = open.reset;
+	const resetBrowser = browser.reset;
 	useEffect(() => {
 		if (!error) return;
 		const timer = setTimeout(() => {
 			resetOpen();
+			resetBrowser();
 			setCopyError("");
 		}, ERROR_CLEAR_MS);
 		return () => clearTimeout(timer);
-	}, [error, resetOpen]);
+	}, [error, resetBrowser, resetOpen]);
 	const menuTrigger = (
 		<DropdownMenuTrigger asChild>
 			<Button
@@ -188,7 +231,7 @@ export function ArtifactActionsMenu({
 				type="button"
 				variant={iconOnly ? "quiet" : "ghost"}
 			>
-				{iconOnly ? <Ellipsis aria-hidden="true" className="size-icon-sm" /> : (
+				{iconOnly ? (verticalDots ? <MoreVertical aria-hidden="true" className="size-icon-sm" /> : <Ellipsis aria-hidden="true" className="size-icon-sm" />) : (
 					<>
 						<span className="truncate">{artifact.name}</span>
 						<ChevronDown aria-hidden="true" className="size-icon-xs shrink-0 text-muted-foreground" />
@@ -250,14 +293,33 @@ export function ArtifactActionsMenu({
 			) : null}
 			{!sidebar || local || session.cloud ? <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
 				{iconOnly ? (
-					<span className="inline-flex">{menuTrigger}</span>
-				
+					canShare && share ? (
+						<ShareArtifactMenuPopover file={share} name={artifact.name} onOpenChange={setShareOpen} open={shareOpen}>
+							<span className="inline-flex">{menuTrigger}</span>
+						</ShareArtifactMenuPopover>
+					) : <span className="inline-flex">{menuTrigger}</span>
 				) : menuTrigger}
-				<DropdownMenuContent align={iconOnly ? "end" : "start"} className="min-w-44" data-browser-native-overlay="true">
+				<DropdownMenuContent
+					align={iconOnly ? "end" : "start"}
+					className="min-w-44"
+					data-browser-native-overlay="true"
+					// Focus goes to the share panel, not back to the trigger, which would close it.
+					onCloseAutoFocus={(event) => {
+						if (!sharing.current) return;
+						sharing.current = false;
+						event.preventDefault();
+					}}
+				>
+					{/* The caller's rows come first and end with their own separator, if any render. */}
 					{children}
-					{children ? <DropdownMenuSeparator /> : null}
-					{onTogglePin || onOpenInSession ? (
+					{onTogglePin || onOpenInSession || canShare ? (
 						<>
+							{canShare ? (
+								<DropdownMenuItem onSelect={() => { sharing.current = true; setShareOpen(true); }}>
+									<Share aria-hidden="true" />
+									{t("artifacts.share.menu")}
+								</DropdownMenuItem>
+							) : null}
 							{onTogglePin ? (
 								<DropdownMenuItem onSelect={onTogglePin}>
 									{pinned ? <PinOff aria-hidden="true" /> : <Pin aria-hidden="true" />}
@@ -285,6 +347,12 @@ export function ArtifactActionsMenu({
 										<SquareTerminal aria-hidden="true" />
 										{t("artifacts.showIn", { name: terminalName() })}
 									</DropdownMenuItem>
+									{browserReadable ? (
+										<DropdownMenuItem disabled={browserOpening} onSelect={() => void openInBrowser()}>
+											<ExternalLink aria-hidden="true" />
+											{t("artifacts.openInBrowser")}
+										</DropdownMenuItem>
+									) : null}
 									{copyable || session.cloud ? <DropdownMenuSeparator /> : null}
 								</>
 							) : null}
@@ -296,6 +364,12 @@ export function ArtifactActionsMenu({
 								<FolderOpen aria-hidden="true" />
 								{t("artifacts.showIn", { name: fileManagerName() })}
 							</DropdownMenuItem>
+							{!sidebar && browserReadable ? (
+								<DropdownMenuItem disabled={browserOpening} onSelect={() => void openInBrowser()}>
+									<ExternalLink aria-hidden="true" />
+									{t("artifacts.openInBrowser")}
+								</DropdownMenuItem>
+							) : null}
 							{!sidebar ? <DropdownMenuSeparator /> : null}
 						</>
 					) : null}

@@ -178,6 +178,16 @@ func (f *fakeStore) CommitSessionControllerEpoch(
 	return f.changeSessionControllerEpoch(id, source, target, nativeConversationID, now, false)
 }
 
+func (f *fakeStore) CommitSessionControllerEpochArchivedChat(
+	_ context.Context,
+	id domain.SessionID,
+	source, target domain.SessionMode,
+	nativeConversationID string,
+	now time.Time,
+) (bool, error) {
+	return f.changeSessionControllerEpoch(id, source, target, nativeConversationID, now, false)
+}
+
 func (f *fakeStore) RestoreSessionControllerEpoch(
 	_ context.Context,
 	id domain.SessionID,
@@ -1496,6 +1506,46 @@ func TestActivity_NewNativeConversationClearsPriorConversationCheckpoint(t *test
 	}
 }
 
+// TestActivity_OpenCodeParentOnlyTrafficPreservesNativeIdentity pins the
+// plugin-side child filter from the lifecycle side: the OpenCode plugins forward
+// only parent-session events, so folded subagent activity must never move the
+// persisted native id (the restore handle) or reset the parent conversation
+// checkpoint. A child id arriving here would be a plugin regression.
+func TestActivity_OpenCodeParentOnlyTrafficPreservesNativeIdentity(t *testing.T) {
+	for _, harness := range []domain.AgentHarness{domain.HarnessOpenCode, domain.HarnessOpenCodeV2} {
+		t.Run(string(harness), func(t *testing.T) {
+			m, store, _ := newManager()
+			rec := working("mer-1")
+			rec.Harness = harness
+			rec.Metadata.RuntimeLaunchID = "launch-current"
+			rec.Metadata.AgentSessionID = "native-parent"
+			rec.Metadata.AgentSessionIDLaunchID = "launch-current"
+			rec.Metadata.LatestUserPrompt = "parent prompt"
+			rec.Metadata.ConversationCheckpointState = domain.ConversationCheckpointPrompt
+			store.sessions[rec.ID] = rec
+
+			for _, s := range []ports.ActivitySignal{
+				{Valid: true, State: domain.ActivityActive, Event: "active", LaunchID: "launch-current", AgentSessionID: "native-parent"},
+				{Valid: true, State: domain.ActivityBlocked, Event: "permission-blocked", LaunchID: "launch-current", AgentSessionID: "native-parent"},
+				{Valid: true, State: domain.ActivityActive, Event: "permission-resolved", LaunchID: "launch-current", AgentSessionID: "native-parent"},
+				{Valid: true, State: domain.ActivityActive, Event: "active", LaunchID: "launch-current", AgentSessionID: "native-parent", ToolName: "read", ToolUseID: "folded-child-tool"},
+			} {
+				if err := m.ApplyActivitySignal(ctx, rec.ID, s); err != nil {
+					t.Fatalf("%s: %v", s.Event, err)
+				}
+				got := store.sessions[rec.ID].Metadata
+				if got.AgentSessionID != "native-parent" {
+					t.Fatalf("after %s: AgentSessionID = %q, want native-parent", s.Event, got.AgentSessionID)
+				}
+				if got.ConversationCheckpointState != domain.ConversationCheckpointPrompt || got.LatestUserPrompt != "parent prompt" {
+					t.Fatalf("after %s: checkpoint = %q prompt = %q, want the parent turn intact",
+						s.Event, got.ConversationCheckpointState, got.LatestUserPrompt)
+				}
+			}
+		})
+	}
+}
+
 func TestActivity_NewRuntimeLaunchClearsPriorConversationCheckpoint(t *testing.T) {
 	m, store, _ := newManager()
 	rec := working("mer-1")
@@ -2132,7 +2182,7 @@ func TestActivity_WaitingInputEntryAndExitEmitTelemetry(t *testing.T) {
 	if len(sink.events) != 2 {
 		t.Fatalf("events = %#v, want waiting_input entered/exited", sink.events)
 	}
-	if sink.events[0].Name != "ao.session.waiting_input_entered" || sink.events[1].Name != "ao.session.waiting_input_exited" {
+	if sink.events[0].Name != "ao.sessions.input_wait_started" || sink.events[1].Name != "ao.sessions.input_wait_ended" {
 		t.Fatalf("event names = %#v", []string{sink.events[0].Name, sink.events[1].Name})
 	}
 	if got := sink.events[1].Payload["dwell_ms"]; got != int64(3000) {
@@ -3876,7 +3926,7 @@ func TestActivity_BlockedEntryAndExitEmitTelemetry(t *testing.T) {
 	if len(sink.events) != 2 {
 		t.Fatalf("events = %#v, want entered/exited", sink.events)
 	}
-	if sink.events[0].Name != "ao.session.waiting_input_entered" || sink.events[1].Name != "ao.session.waiting_input_exited" {
+	if sink.events[0].Name != "ao.sessions.input_wait_started" || sink.events[1].Name != "ao.sessions.input_wait_ended" {
 		t.Fatalf("event names = %#v (family events keep the waiting_input_* names)", []string{sink.events[0].Name, sink.events[1].Name})
 	}
 	if got := sink.events[0].Payload["state"]; got != "blocked" {

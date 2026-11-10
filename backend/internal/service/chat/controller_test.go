@@ -77,8 +77,8 @@ func fullSnapshotReader(st *sqlite.Store) chatsvc.SnapshotReader {
 }
 
 func boundedSnapshotReader(st *sqlite.Store) chatsvc.SnapshotPageReader {
-	return chatsvc.SnapshotPageReaderFunc(func(ctx context.Context, id string, before, limit int64) (chatsvc.ConversationRows, error) {
-		rows, err := st.LoadConversationSnapshotPage(ctx, id, before, limit)
+	return chatsvc.SnapshotPageReaderFunc(func(ctx context.Context, id string, before, after, limit int64) (chatsvc.ConversationRows, error) {
+		rows, err := st.LoadConversationSnapshotRange(ctx, id, before, after, limit)
 		return chatsvc.ConversationRows{Conversation: rows.Conversation, ActiveBranch: rows.ActiveBranch,
 			Turns: rows.Turns, Messages: rows.Messages, Activities: rows.Activities}, err
 	})
@@ -6719,6 +6719,12 @@ func TestCodexRateLimitsUpdateActiveAccountCapacityWithoutConversationPersistenc
 	events, err := st.ProviderEventsSince(context.Background(), ctrl.ConversationID(), 0, 10)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// The capacity callback fires before the event reaches the archive.
+	for deadline := time.Now().Add(5 * time.Second); len(events) == 0 && time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if events, err = st.ProviderEventsSince(context.Background(), ctrl.ConversationID(), 0, 10); err != nil {
+			t.Fatal(err)
+		}
 	}
 	var archived map[string]any
 	if len(events) != 1 || json.Unmarshal([]byte(events[0].PayloadJson), &archived) != nil || archived["rateLimits"] != nil || strings.Contains(events[0].PayloadJson, "usedPercent") {

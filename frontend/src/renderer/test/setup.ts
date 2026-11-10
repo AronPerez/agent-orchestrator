@@ -83,6 +83,14 @@ if (typeof window !== "undefined") {
 		});
 	}
 
+	// jsdom does not implement Element.scrollTo. Chat find repaints from a
+	// timer, so a test that finishes first would otherwise see an unhandled
+	// "scrollTo is not a function" after it has passed.
+	// On Element, where tests that need a spy install it, so theirs replaces this one.
+	if (typeof Element.prototype.scrollTo !== "function") {
+		Object.defineProperty(Element.prototype, "scrollTo", { configurable: true, writable: true, value: () => {} });
+	}
+
 	Object.defineProperty(window, "matchMedia", {
 		configurable: true,
 		writable: true,
@@ -144,6 +152,9 @@ if (typeof window !== "undefined") {
 			chooseDirectory: async () => null,
 			checkGitRepository: async () => true,
 			openExternal: async () => undefined,
+			showPrivacyGuide: async () => undefined,
+			updatePrivacyGuide: async () => false,
+			closePrivacyGuide: async () => undefined,
 			openChromeExtensions: async () => undefined,
 			scanImportFolder: async ({ path }: { path: string }) => ({ path, repos: [] }),
 			checkAncestorRepo: async () => undefined,
@@ -169,12 +180,18 @@ if (typeof window !== "undefined") {
 			onPreviousTabShortcut: () => () => undefined,
 			onNextTabShortcut: () => () => undefined,
 			onShortcut: (listener: Parameters<typeof appShortcutBus.subscribe>[0]) => appShortcutBus.subscribe(listener),
+			setMenuAvailability: () => undefined,
+			onMenuAction: () => () => undefined,
 			onScrollPhase: () => () => undefined,
 		},
 		terminal: {
 			saveDroppedFile: async () => "",
 			setFocused: () => undefined,
 			onFontSizeShortcut: () => () => undefined,
+		},
+		artifactZoom: {
+			setEngaged: () => undefined,
+			onShortcut: () => () => undefined,
 		},
 		window: {
 			getZoomFactor: async () => 1,
@@ -202,6 +219,11 @@ if (typeof window !== "undefined") {
 		chatImage: {
 			fetch: async () => ({ bytes: new Uint8Array(), mimeType: "image/png" }),
 			save: async () => true,
+		},
+		sessionShareUrls: {
+			remember: async () => undefined,
+			recall: async () => ({}),
+			forget: async () => undefined,
 		},
 		cloudShare: {
 			available: async () => true,
@@ -247,6 +269,7 @@ if (typeof window !== "undefined") {
 			openArtifacts: async ({ targetId }) => targetId === "terminal"
 				? { id: "terminal", name: "Terminal", kind: "terminal" }
 				: { id: "file-manager", name: "Finder", kind: "file_manager" },
+			openArtifactInBrowser: async () => undefined,
 			copyWorkspacePath: async () => undefined,
 		},
 		telemetry: {
@@ -256,6 +279,8 @@ if (typeof window !== "undefined") {
 			onAnalyticsOptOut: () => () => undefined,
 			setCloudUser: async () => false,
 			getGithubLogin: async () => null,
+			getLifetimeSessions: async () => null,
+			claimFirstOpen: async () => "ineligible" as const,
 			getPolicy: async () => ({ eventsEnabled: false, consentGeneration: "test", updatedAt: new Date(0).toISOString(), acknowledged: false, state: "applied", environmentVeto: true, durabilitySupported: false }),
 			setEventsEnabled: async () => ({ eventsEnabled: false, consentGeneration: "test", updatedAt: new Date(0).toISOString(), acknowledged: false, state: "applied", environmentVeto: true, durabilitySupported: false }),
 			onPolicy: () => () => false,
@@ -423,6 +448,11 @@ if (typeof window !== "undefined") {
 			link: async () => ({ ok: false as const, code: "unsupported" as const, message: "unavailable" }),
 			unlink: async () => ({ ok: false as const, code: "unsupported" as const, message: "unavailable" }),
 		},
+		cliShadow: {
+			inspect: async () => ({ kind: "unknown" as const }),
+			replace: async () => ({ ok: false as const, code: "io" as const, message: "Not available in this environment." }),
+			reveal: async () => undefined,
+		},
 		updateSettings: {
 			get: async () => ({ enabled: false, channel: "latest", nightlyAck: false, feature: null, macDifferentialUpdates: false }),
 			set: async () => undefined,
@@ -484,6 +514,7 @@ if (typeof window !== "undefined") {
 			onSessionChanged: () => () => undefined,
 			onOpenShareLink: () => () => undefined,
 			takePendingShareLink: async () => null,
+			takePendingSignIn: async () => null,
 		},
 		cloudCp: {
 			request: async () => ({ status: 401, headers: {}, body: "" }),
