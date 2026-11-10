@@ -77,14 +77,13 @@ Also follow **PR hygiene** in [AGENTS.md](AGENTS.md): branch from `main`, one is
 Ready PRs targeting `main` run the Linux suites. Ask a maintainer to add
 `ci:macos` for macOS helpers, updater or packaging changes, or `ci:full` for
 Windows paths, process handling, or other cross-platform changes. `ci:full`
-also enables the frontend macOS jobs.
+also enables the frontend macOS jobs. Changes to the macOS helpers under
+`frontend/native/`, their build scripts, or the DMG assets start the macOS jobs
+without a label.
 
-Apply labels before the next push. Label changes alone do not restart CI;
-the next push evaluates the current labels. Rerunning an old run can retain its
-original event payload, so do not rely on a rerun to pick up a new label.
-Draft and stacked PRs still skip heavy suites. Main pushes retain full native
-coverage. CLI macOS and Windows check names remain present on ready PRs even
-without `ci:full`, but their test steps are intentionally skipped.
+Label changes alone do not restart CI. CI reads the labels when it runs, so
+push again or re-run the latest CI run after changing them. Main pushes retain
+full native coverage.
 
 ### Weekly contributor call
 

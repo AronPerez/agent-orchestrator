@@ -1202,6 +1202,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/conversations/{conversationId}/find": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Find literal occurrences in the active conversation branch */
+        get: operations["findConversation"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/conversations/{conversationId}/find-window": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Load a read-only transcript page around a find result */
+        get: operations["findConversationWindow"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/conversations/search": {
         parameters: {
             query?: never;
@@ -1991,6 +2025,23 @@ export interface paths {
         put?: never;
         /** Clone a project without registering it so Git setup can be completed */
         post: operations["prepareCloneProject"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/clone/prepare/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Clone a project without registering it, streaming each git step as a server-sent event */
+        post: operations["prepareCloneProjectStream"];
         delete?: never;
         options?: never;
         head?: never;
@@ -4536,6 +4587,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/terminal-shells": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List the shells installed on this machine for new terminals */
+        get: operations["listTerminalShells"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/terminal-shells/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Check that a custom shell path is an executable */
+        get: operations["checkTerminalShell"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/usage/memory/pressure": {
         parameters: {
             query?: never;
@@ -4685,6 +4770,7 @@ export interface components {
             email?: string;
             id: string;
             limits?: components["schemas"]["AgentAccountLimits"];
+            loggedIn: boolean;
             plan?: string;
             problem?: string;
             /** @enum {string} */
@@ -5318,6 +5404,17 @@ export interface components {
             preparationId: string;
             remoteUrl: string;
         };
+        ClonePrepareStreamEvent: {
+            error?: components["schemas"]["APIError"];
+            progress?: components["schemas"]["CloneProgress"];
+            result?: components["schemas"]["ClonePreparationResult"];
+        };
+        CloneProgress: {
+            attempt: number;
+            percent?: null | number;
+            /** @enum {string} */
+            phase: "enumerating_objects" | "counting_objects" | "compressing_objects" | "receiving_objects" | "resolving_deltas" | "updating_files" | "filtering_content" | "retrying";
+        };
         CloneProjectInput: {
             config?: components["schemas"]["ProjectConfig"];
             destinationParent: string;
@@ -5639,6 +5736,7 @@ export interface components {
             supported: boolean;
         };
         ControllersKillSessionRequest: {
+            callerSessionId?: string;
             deleteArtifacts?: boolean;
         };
         ControllersRemoteHostAccountTokenResponse: {
@@ -5743,12 +5841,15 @@ export interface components {
             statusReadiness: "checking" | "ready" | "unavailable";
             terminalGeneration?: string;
             terminalHandleId?: string;
+            terminalTitle?: string;
             terminateOnPrMerge: boolean;
             /** Format: date-time */
             updatedAt: string;
             /** @enum {string} */
             workspaceCleanup?: "pending" | "removed" | "preserved_dirty" | "failed" | "not_applicable";
             workspaceCleanupReportOnly?: boolean;
+            /** @description Whether the session has a recorded workspace that workspace reads can use. */
+            workspacePublished: boolean;
         };
         ControllersSetKeepAwakeRequest: {
             enabled: boolean;
@@ -5887,6 +5988,27 @@ export interface components {
             truncated: boolean;
             workspaceVersion?: string;
         };
+        ConversationFindOccurrence: {
+            block: number;
+            end: number;
+            messageId: string;
+            /** Format: int64 */
+            revision: number;
+            /** Format: int64 */
+            sequence: number;
+            start: number;
+        };
+        ConversationFindResponse: {
+            conversationId: string;
+            initialIndex: number;
+            lastCursor?: string;
+            nextCursor?: string;
+            occurrences: components["schemas"]["ConversationFindOccurrence"][];
+            offset: number;
+            previousCursor?: string;
+            total: number;
+            transcriptRevision: string;
+        };
         ConversationImageContentRequest: {
             data: string;
             mimeType: string;
@@ -6004,6 +6126,8 @@ export interface components {
             account?: components["schemas"]["ConversationAccountPayload"];
             activeBranchId?: string;
             activities: components["schemas"]["ConversationActivityResponse"][];
+            /** Format: int64 */
+            afterSequence?: number;
             branchMaterialization?: components["schemas"]["ConversationBranchMaterializationResponse"];
             branchPoints?: components["schemas"]["ConversationBranchPointResponse"][];
             branchedFromEarlierMessage: boolean;
@@ -6520,6 +6644,8 @@ export interface components {
             supported: components["schemas"]["AgentInfo"][];
         };
         ListArtifactVersionsResponse: {
+            /** @description This daemon serves a version's bytes on the preview route and restores any file type. Absent from an older daemon. */
+            mediaVersions?: boolean;
             path: string;
             versions: components["schemas"]["ArtifactVersionSummary"][];
         };
@@ -6688,6 +6814,7 @@ export interface components {
             secure: boolean;
         };
         MobileStatusResponse: {
+            accountLinkRefused: boolean;
             accountLinked: boolean;
             browserRemoteAccess: boolean;
             enabled: boolean;
@@ -6760,7 +6887,7 @@ export interface components {
             rows?: number;
             /** @description Agent session the shell is scoped to, so it appears only in that session's tab strip. Omitted makes it a standalone shell. */
             sessionId?: string;
-            /** @description Windows shell selector: auto, git-bash, pwsh, powershell, cmd, or a custom executable path. Ignored on macOS and Linux. */
+            /** @description Shell to launch: auto (the user's default shell), an executable path, or on Windows a selector (git-bash, pwsh, powershell, cmd, wsl). */
             shell?: string;
             /** @description Start the shell when the requesting client attaches with its terminal grid instead of immediately, so the shell starts at the size that client shows. Only for clients that attach as a sized viewer; omitted starts the shell immediately at the default grid. */
             startOnAttach?: boolean;
@@ -6811,6 +6938,8 @@ export interface components {
         };
         Project: {
             agent?: string;
+            canonicalOwnerAvatarUrl?: string;
+            canonicalRepo?: string;
             config?: components["schemas"]["ProjectConfig"];
             defaultBranch: string;
             folderMissing: boolean;
@@ -7198,6 +7327,7 @@ export interface components {
             path: string;
             previewUrl?: string;
             rawUrl?: string;
+            shareUrl?: string;
             /** Format: int64 */
             size: number;
             /** Format: date-time */
@@ -7206,6 +7336,7 @@ export interface components {
         SessionBranchState: {
             commits: number;
             remoteBranch?: string;
+            remoteHead?: string;
             unpushed: number;
         };
         SessionCoordinationResponse: {
@@ -7484,6 +7615,8 @@ export interface components {
              * @description Time the local hook process observed the event, before delivery to the daemon.
              */
             observedAt?: string;
+            /** @description The finished tool call probably changed the session's pull request (gh pr merge, git push), so AO re-reads it early. */
+            prMayHaveChanged?: boolean;
             /** @description Process id of the provider process that fired the hook (Claude's CLAUDE_PID). */
             processId?: number;
             /** @description Native main-turn identity reported by the hook, when supported. */
@@ -7628,6 +7761,7 @@ export interface components {
             handleId: string;
             projectId?: string;
             sessionId?: string;
+            terminalTitle?: string;
             title: string;
             workingDir: string;
         };
@@ -7817,10 +7951,12 @@ export interface components {
         SpawnSessionRequest: {
             /** @enum {string} */
             approvalMode?: "default" | "accept-edits" | "auto" | "bypass-permissions";
+            async?: boolean;
             attachments?: components["schemas"]["AttachmentInput"][];
             branch?: string;
             clientRequestId?: string;
             displayName?: string;
+            displayNameExplicit?: boolean;
             effort?: string;
             /** @enum {string} */
             harness?: "claude-code" | "codex" | "aider" | "opencode" | "opencode-v2" | "grok" | "droid" | "amp" | "agy" | "crush" | "cursor" | "qwen" | "gemini" | "copilot" | "goose" | "auggie" | "continue" | "devin" | "cline" | "kimi" | "muse" | "kiro" | "kilocode" | "vibe" | "pi" | "kimchi" | "omp" | "fx" | "prime-agent" | "autohand" | "unreal-agent" | "codewhale" | "mimo-code" | "deepseek-harness" | "openhands" | "command-code" | "memcode" | "hermes";
@@ -8037,6 +8173,27 @@ export interface components {
             isSignedIn?: null | boolean;
             lifetimeSessions?: null | number;
             optedOut: boolean;
+        };
+        TerminalShellCheckResponse: {
+            executable: boolean;
+            /** @description Why the path cannot launch. */
+            message?: string;
+            /** @description Resolved executable path when executable. */
+            path?: string;
+        };
+        TerminalShellResponse: {
+            /** @description Value to send as a terminal's shell: auto, a Windows selector, or the executable path. */
+            id: string;
+            /** @description Display name, such as zsh or PowerShell. */
+            name: string;
+            /** @description Executable path. Empty when the default shell cannot be resolved. */
+            path?: string;
+        };
+        TerminalShellsResponse: {
+            /** @description The shell auto resolves to. */
+            default: components["schemas"]["TerminalShellResponse"];
+            /** @description Installed shells, one per real binary. */
+            shells: components["schemas"]["TerminalShellResponse"][];
         };
         TrackerIntakeConfig: {
             assignee?: string;
@@ -12381,6 +12538,137 @@ export interface operations {
             };
         };
     };
+    findConversation: {
+        parameters: {
+            query?: {
+                /** @description Case-insensitive literal substring in displayed message text (maximum 512 characters). */
+                query?: string;
+                /** @description Opaque continuation bound to query and transcript revision. */
+                cursor?: string;
+                /** @description Start at or after this visible message when cursor is absent. */
+                anchorMessageId?: string;
+                anchorBlock?: number;
+                anchorOffset?: number;
+                /** @description Fallback position when the anchor message was removed. */
+                anchorSequence?: number;
+                /** @description Choose the preceding match if a removed anchor has no following match. */
+                fallbackToPrevious?: boolean;
+            };
+            header?: never;
+            path: {
+                conversationId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConversationFindResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    findConversationWindow: {
+        parameters: {
+            query: {
+                sequence: number;
+            };
+            header?: never;
+            path: {
+                conversationId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConversationSnapshotResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
     searchConversations: {
         parameters: {
             query: {
@@ -15222,6 +15510,48 @@ export interface operations {
             };
         };
     };
+    prepareCloneProjectStream: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CloneProjectInput"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": components["schemas"]["ClonePrepareStreamEvent"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
     initializeProjectRepository: {
         parameters: {
             query?: never;
@@ -17710,6 +18040,10 @@ export interface operations {
                 beforeSequence?: null | number;
                 /** @description Maximum messages to return; tool activity between them comes along without counting. Defaults to 200. */
                 limit?: null | number;
+                /** @description Read only items newer than this conversation sequence. The response echoes afterSequence when it applied the floor. Omit for a whole page. */
+                afterSequence?: null | number;
+                /** @description Keep at most this many bytes of each command output: its head and tail. A cut output carries outputBytes, the full size. Omit for whole outputs. */
+                outputLimit?: null | number;
             };
             header?: never;
             path: {
@@ -21536,6 +21870,8 @@ export interface operations {
                 source?: "workspace" | "artifact";
                 /** @description When true, serve Markdown files as raw source instead of rendering them to HTML for Browser preview. */
                 raw?: boolean;
+                /** @description With source=artifact, serve this saved version of the file instead of its current content. */
+                artifactVersion?: number;
             };
             header?: never;
             path: {
@@ -25189,6 +25525,49 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listTerminalShells: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TerminalShellsResponse"];
+                };
+            };
+        };
+    };
+    checkTerminalShell: {
+        parameters: {
+            query?: {
+                /** @description Custom shell: an absolute path, a ~/ path, or a command on PATH. */
+                path?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TerminalShellCheckResponse"];
                 };
             };
         };

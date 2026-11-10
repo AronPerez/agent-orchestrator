@@ -305,7 +305,7 @@ func TestStatusRemoteWithoutLocalRunFile(t *testing.T) {
 	if want := []string{"Bearer s3cret12", "Bearer s3cret12"}; len(gotAuth) != 2 || gotAuth[0] != want[0] || gotAuth[1] != want[1] {
 		t.Fatalf("Authorization headers = %q, want %q", gotAuth, want)
 	}
-	for _, want := range []string{"AO daemon: ready", "url: " + srv.URL, "pid: 777"} {
+	for _, want := range []string{"Orchestrator daemon: ready", "url: " + srv.URL, "pid: 777"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("status output missing %q:\n%s", want, out.String())
 		}
