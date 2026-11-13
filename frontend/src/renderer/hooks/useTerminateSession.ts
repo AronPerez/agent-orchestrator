@@ -318,6 +318,7 @@ export function useTerminateSessionState(sessionId: string, hostId?: string, ena
 }
 
 export function useProjectTerminateSessionStates(workspaceId: string | undefined, hostId?: string) {
+	const { t } = useTranslation();
 	const data = useCachedWorkspaces(hostId);
 	const sessions = data?.find((workspace) => workspace.id === workspaceId)?.sessions ?? [];
 	const states = summarizeBySession(useTerminateSessionMutations())
@@ -328,9 +329,11 @@ export function useProjectTerminateSessionStates(workspaceId: string | undefined
 			isPending, session, cleanupPending: false,
 		}));
 	for (const session of sessions) {
-		if (archiveCleanup(session) !== "pending") continue;
+		const cleanupPending = archiveCleanup(session) === "pending";
+		const cleanupError = workspaceCleanupErrorKey(session);
+		if (!cleanupPending && !cleanupError) continue;
 		const previous = states.findIndex((state) => state.session.id === session.id);
-		const state = { error: null, isPending: true, session, cleanupPending: true };
+		const state = { error: cleanupError ? t(cleanupError) : null, isPending: cleanupPending, session, cleanupPending };
 		if (previous < 0) states.push(state);
 		else states[previous] = state;
 	}

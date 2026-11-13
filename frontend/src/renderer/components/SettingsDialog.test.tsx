@@ -115,10 +115,12 @@ vi.mock("./ProjectScriptsSettings", () => ({
 	CloudProjectScriptsSettings: ({ projectId, cloudOrgId }: { hostId?: string; projectId: string; cloudOrgId: string }) => <div data-testid="cloud-project-scripts-settings">{cloudOrgId}/{projectId}</div>,
 }));
 
-vi.mock("./ProjectEnvironmentSettings", () => ({
- ProjectEnvironmentSettings: ({ projectId, hostId }: { projectId: string; hostId?: string }) => <div data-testid="project-environment-settings" data-host-id={hostId}>{projectId}</div>,
- CloudProjectEnvironmentSettings: () => <div data-testid="cloud-project-environment-settings" />,
-}));
+vi.mock("./ProjectEnvironmentSettings", async (importOriginal) => {
+ const actual = await importOriginal<typeof import("./ProjectEnvironmentSettings")>();
+ return { ...actual, ProjectEnvironmentSettings: (props: Parameters<typeof actual.ProjectEnvironmentSettings>[0]) => props.hostId
+ ? <div data-testid="project-environment-settings" data-host-id={props.hostId}>{props.projectId}</div>
+ : <actual.ProjectEnvironmentSettings {...props} /> };
+});
 
 // The dialog reads the cloud gate to decide whether the Cloud nav page exists;
 // mocked so these tests need no QueryClientProvider (same pattern as Sidebar).

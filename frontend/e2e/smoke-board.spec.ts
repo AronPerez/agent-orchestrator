@@ -13,7 +13,7 @@ const columnCard = (column: string, id: string) =>
 	`[data-testid="board-column"][data-column="${column}"] [data-session-id="${id}"]`;
 
 for (const colorScheme of ["dark", "light"] as const) {
-	test(`renderer: Board find filters lanes and archive and clears on close (${colorScheme}) @T0 @BRD`, async ({ page }) => {
+	test(`renderer: Board find filters active lanes and archive opens separately, clearing on close (${colorScheme}) @T0 @BRD`, async ({ page }) => {
 		await page.emulateMedia({ colorScheme, reducedMotion: "reduce" });
 		await page.setViewportSize({ width: 800, height: 700 });
 		await installFakeAgent(page, { workers: [
@@ -28,10 +28,13 @@ for (const colorScheme of ["dark", "light"] as const) {
 		const input = bar.getByRole("textbox");
 		await expect(input).toBeFocused();
 		await input.fill("alpha");
-		await expect(bar).toContainText("2/3");
+		await expect(bar).toContainText("1/2");
 		await expect(page.getByRole("button", { name: "Beta worker", exact: true })).toHaveCount(0);
 		await page.getByRole("button", { name: /^Archive, 1 session$/ }).click();
-		await expect(page.getByRole("list", { name: "Archived sessions" })).toContainText("Alpha archived");
+		const archive = page.getByRole("dialog", { name: "Archived sessions" });
+		await expect(archive).toContainText("Alpha archived");
+		await page.keyboard.press("Escape");
+		await expect(archive).toBeHidden();
 		const boardBox = await page.getByTestId("board").boundingBox();
 		const barBox = await bar.boundingBox();
 		expect(barBox!.x).toBeGreaterThanOrEqual(boardBox!.x);

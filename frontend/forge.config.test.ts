@@ -1,3 +1,4 @@
+vi.mock("./scripts/build-mac-dmg.mjs", () => ({ checkMacDmgLayout: vi.fn(async () => undefined) }));
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs, { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import type { ForgeHookFn, ResolvedForgeConfig } from "@electron-forge/shared-types";
@@ -349,7 +350,7 @@ describe("packaged authentication callback registration", () => {
 	it("declares ao-app in the macOS bundle and Linux package metadata", () => {
 		expect(config.packagerConfig?.protocols).toEqual([
 			{
-				name: "Agent Orchestrator authentication callback",
+				name: "Orchestrator authentication callback",
 				schemes: ["ao-app"],
 			},
 		]);

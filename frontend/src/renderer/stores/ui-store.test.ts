@@ -67,7 +67,7 @@ describe("global settings deep links", () => {
 		});
 
 		useUiStore.getState().openGlobalSettings("harness");
-		expect(useUiStore.getState().settingsModal).toEqual({ scope: "global", section: "agents" });
+		expect(useUiStore.getState().settingsModal).toEqual({ scope: "global", section: "harness" });
 	});
 
 	it("preserves project settings only for explicit recovery navigation", () => {

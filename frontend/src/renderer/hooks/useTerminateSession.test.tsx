@@ -315,7 +315,7 @@ describe("durable workspace cleanup feedback", () => {
 		useUiStore.getState().clearGlobalToast();
 	});
 
-	it("tracks pending cleanup and leaves settled outcomes out of the page state", async () => {
+	it("tracks pending cleanup and preserves durable dirty or failed page feedback", async () => {
 		const queryClient = new QueryClient();
 		const queryFn = vi.fn().mockResolvedValue(workspaces);
 		queryClient.setQueryDefaults(workspaceQueryKey, { queryFn });
@@ -331,7 +331,7 @@ describe("durable workspace cleanup feedback", () => {
 		for (const settled of ["failed", "preserved_dirty"] as const) {
 			await act(async () => { setCleanup(queryClient, settled); });
 			await waitFor(() => expect(result.current.session).toEqual({ error: null, isPending: false }));
-			expect(result.current.project).toEqual([]);
+			expect(result.current.project).toMatchObject([{ cleanupPending: false, isPending: false, error: expect.any(String) }]);
 		}
 		expect(toasts()).toEqual([]);
 	});

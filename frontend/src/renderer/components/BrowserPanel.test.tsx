@@ -297,7 +297,9 @@ describe("BrowserPanel", () => {
 		hookState.annotationAction.mockResolvedValue(undefined);
 		hookState.annotationMode = false;
 		hookState.annotationState = { count: 0, screenshotCount: 0, hasDraft: false };
-		hookState.runtimeState = { connected: true, connecting: false, rejected: false };
+		hookState.browserRuntimeConnected = null as unknown as boolean;
+	hookState.browserRuntimeError = undefined;
+	hookState.runtimeState = { connected: true, connecting: false, rejected: false };
 		postMock.mockReset();
 		postMock.mockResolvedValue({ data: {} });
 		annotationSubmitListeners.clear();

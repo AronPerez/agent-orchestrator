@@ -83,7 +83,7 @@ describe("MobileDevicesSection", () => {
 			vi.advanceTimersByTime(REMOVE_UNDO_MS);
 		});
 		await waitFor(() => expect(del).toHaveBeenCalledTimes(1));
-		expect(del.mock.calls[0][1]).toMatchObject({ params: { path: { id: "i1" } } });
+		expect(del.mock.calls[0][1]).toMatchObject({ params: { path: { installId: "i1" } } });
 		await waitFor(() => expect(screen.queryByText("iPhone removed")).not.toBeInTheDocument());
 		expect(screen.queryByText("iPhone")).not.toBeInTheDocument();
 		expect(screen.getByText("M31s")).toBeInTheDocument();
@@ -305,7 +305,7 @@ describe("MobileDevicesSection", () => {
 			vi.advanceTimersByTime(REMOVE_UNDO_MS);
 		});
 		await waitFor(() => expect(del).toHaveBeenCalledTimes(1));
-		expect(del.mock.calls[0][1]).toMatchObject({ params: { path: { id: "account" } } });
+		expect(del.mock.calls[0][1]).toMatchObject({ params: { path: { installId: "account" } } });
 	});
 
 });

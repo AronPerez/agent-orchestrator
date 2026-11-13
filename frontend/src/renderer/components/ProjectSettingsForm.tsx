@@ -1,3 +1,4 @@
+import { apiErrorException } from "../lib/api-error-exception";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { useEffect, useRef } from "react";
@@ -7,7 +8,7 @@ import { useAgentReadinessQuery, useEnsureAgentReadiness } from "../hooks/useAge
 import { useRemoteProjectQuery, workspaceQueryKeyForHost, workspaceQueryOptions } from "../hooks/useWorkspaceQuery";
 import { useSettings } from "../hooks/useSettings";
 import { projectQueryKey, useProjectSettingsQuery } from "../hooks/useProjectSettingsQuery";
-import { apiClient, apiErrorMessage } from "../lib/api-client";
+import { apiClient } from "../lib/api-client";
 import { clientForHost } from "../lib/host-clients";
 import { LOCAL_HOST, refKey } from "../lib/hosts";
 import { isLaunchableAgent } from "../lib/agent-select-options";
@@ -249,7 +250,7 @@ function SettingsBody({ project, projectId, hostId, hostConnected, onSaved, sect
 			params: { path: { id: projectId } },
 			body: { displayName, config: next },
 		});
-		if (error) throw new Error(apiErrorMessage(error));
+		if (error) throw apiErrorException(error);
 		const replaceOrchestrator = replacementFailedRef.current || values.orchestratorAgent !== lastOrchestratorRef.current ||
 			(Boolean(activeOrchestrator && activeOrchestrator.provider !== values.orchestratorAgent) && !replacementAttemptedRef.current);
 		lastOrchestratorRef.current = values.orchestratorAgent;

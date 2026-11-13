@@ -4254,6 +4254,11 @@ html[data-window-translucent="true"] :is(.queue-dock, .queue-dock-toggle, .queue
    field on its own row. The inspector tabs and actions keep the first row, so
    none of the controls can overlap. */
 @container inspector (max-width: 440px) {
+	/* Center the second row across the full toolbar, including the floating rail. */
+	.center-panel-shell--floating-topbar [data-slot="inspector-container"] .session-inspector__topbar--browser {
+		padding-left: 0;
+	}
+
 	.session-inspector__topbar--browser {
 		height: calc(var(--size-inspector-tabs) + var(--size-inspector-tabs));
 		grid-template-columns: minmax(0, 1fr) auto;

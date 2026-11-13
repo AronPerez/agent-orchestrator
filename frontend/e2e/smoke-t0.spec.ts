@@ -209,7 +209,7 @@ test("renderer: local remote-host settings work signed out with Developer mode o
 	await navigation.getByRole("button", { name: "Remote hosts", exact: true }).click();
 	const pageToggle = settings.getByRole("switch", { name: "Connect to remote hosts" });
 	await expect(pageToggle).toBeChecked();
-	await expect(settings.getByLabel("Connection password")).toBeVisible();
+	await expect(settings.getByLabel("Pairing code or password")).toBeVisible();
 	await pageToggle.click();
 	await navigation.getByRole("button", { name: "General", exact: true }).click();
 	await expect(toggle).not.toBeChecked();

@@ -74,6 +74,9 @@ export function toBoardSessionPresentation(
 					tone: "var(--color-status-exited)",
 				}
 			: undefined;
+	const legacySwitchStatus = session.activeAgentSwitch
+		? { className: "text-status-working", indicatorClassName: "bg-status-working animate-status-pulse", label: appI18n.t("switchAgent.compact.switching", { target: agentLabel(session.activeAgentSwitch.targetHarness) }), tone: "var(--color-status-working)" }
+		: undefined;
 	const importStatus = session.needsResume && !session.isTerminated
 		? {
 				className: "text-status-idle",
@@ -92,7 +95,7 @@ export function toBoardSessionPresentation(
 		provider: session.provider,
 		status: session.status,
 		statusReadiness: session.statusReadiness,
-		statusPresentation: provisioningStatus ?? failedStartStatus ?? importStatus,
+		statusPresentation: provisioningStatus ?? failedStartStatus ?? legacySwitchStatus ?? importStatus,
 		title: session.title,
 		trackerIssueId: canonicalTrackerIssueId(session.issueId),
 		updatedAt: session.updatedAt,

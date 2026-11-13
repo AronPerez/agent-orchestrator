@@ -1,6 +1,7 @@
+import { apiErrorException } from "../lib/api-error-exception";
 import { type QueryClient, useMutation, useMutationState, useQueryClient } from "@tanstack/react-query";
 import type { components } from "../../api/schema";
-import { apiErrorCode, apiErrorMessage } from "../lib/api-client";
+import { apiErrorCode } from "../lib/api-client";
 import { clientForSessionHost } from "../lib/host-clients";
 import { sessionUiKey } from "../lib/hosts";
 import type { WorkspaceSession } from "../types/workspace";
@@ -134,13 +135,13 @@ export function useSwitchAgent() {
 					return;
 				}
 				if (providerSwitchOutcomeUnknown(fallback.response.status, fallback.error)) refresh();
-				throw new Error(apiErrorMessage(fallback.error, `Failed to switch agent (${fallback.response.status})`));
+				throw apiErrorException(fallback.error, `Failed to switch agent (${fallback.response.status})`);
 			}
 			if (error || response.status !== 202 || !data?.switch) {
 				const fallback = response
 					? `Failed to switch agent (${response.status})`
 					: "Failed to switch agent";
-				throw new Error(apiErrorMessage(error, fallback));
+				throw apiErrorException(error, fallback);
 			}
 			return data.switch;
 		},
@@ -173,7 +174,7 @@ export function useRecoverAgentSwitch() {
 				const fallback = response
 					? `Failed to recover agent switch (${response.status})`
 					: "Failed to recover agent switch";
-				throw new Error(apiErrorMessage(error, fallback));
+				throw apiErrorException(error, fallback);
 			}
 			return data.switch;
 		},

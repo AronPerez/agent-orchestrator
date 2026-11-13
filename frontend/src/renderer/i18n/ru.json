@@ -5048,5 +5048,19 @@
 	"fleet.recipientUnknown": "Project orchestrator (recipient not recorded)",
 	"fleet.report": "Report",
 	"fleet.noSummary": "No summary",
-	"fleet.stale": "Could not refresh sessions. Showing the last snapshot."
+	"fleet.stale": "Could not refresh sessions. Showing the last snapshot.",
+	"settings.codexAccounts.dayUsageLimit_few": "{{count}}-day usage limit",
+	"settings.codexAccounts.dayUsageLimit_many": "{{count}}-day usage limit",
+	"settings.codexAccounts.hourUsageLimit_few": "{{count}}-hour usage limit",
+	"settings.codexAccounts.hourUsageLimit_many": "{{count}}-hour usage limit",
+	"settings.codexAccounts.minuteUsageLimit_few": "{{count}}-minute usage limit",
+	"settings.codexAccounts.minuteUsageLimit_many": "{{count}}-minute usage limit",
+	"settings.codexAccounts.dayCount_few": "{{count}} days",
+	"settings.codexAccounts.dayCount_many": "{{count}} days",
+	"settings.codexAccounts.count_few": "{{count}} accounts",
+	"settings.codexAccounts.count_many": "{{count}} accounts",
+	"settings.billing.featureRunning_few": "{{count}} sessions at once",
+	"settings.billing.featureRunning_many": "{{count}} sessions at once",
+	"settings.billing.featureTotal_few": "{{count}} sessions in total",
+	"settings.billing.featureTotal_many": "{{count}} sessions in total"
 }

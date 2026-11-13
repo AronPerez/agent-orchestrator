@@ -1,3 +1,4 @@
+import { getSessionStatusView } from "../lib/session-presentation";
 import { useKeybindingsStore } from "../stores/keybindings-store";
 import { toKanbanColumn } from "@aoagents/product-ui";
 import { appI18n } from "../i18n";
@@ -181,7 +182,7 @@ async function expandArchive() {
 
 beforeEach(() => {
 	// The memory light and card chips are Developer mode tools behind the Diagnostics toggle.
-	useUiStore.setState({ developerMode: true, diagnostics: true, archiveModal: null });
+	useUiStore.setState({ developerMode: true, diagnostics: true, archiveModal: null, settingsModal: null });
 	navigateMock.mockReset();
 	notificationShowMock.mockReset().mockResolvedValue(undefined);
 	postMock.mockReset().mockResolvedValue({ data: {} });
@@ -2305,6 +2306,7 @@ function terminatedSession(overrides: Partial<WorkspaceSession> = {}): Workspace
 
 describe("SessionsBoard find bar", () => {
 	beforeEach(() => {
+		useKeybindingsStore.setState({ overrides: {} });
 		workspaceQueryMock.mockReturnValue({
 			data: [
 				workspaceWithSessions([
@@ -2355,7 +2357,7 @@ describe("SessionsBoard find bar", () => {
 		["en", { displayStatus: "Awaiting PR" }, "Awaiting PR"],
 		["en", { displayStatus: "Mergeable" }, "Mergeable"],
 		["en", { displayStatus: "Fixing CI failures" }, "Fixing CI failures"],
-		["de", { displayStatus: "Awaiting PR" }, "Wartet auf PR"],
+		["de", { displayStatus: "Awaiting review" }, "Wartet auf Review"],
 		["en", { displayStatus: "Awaiting PR", provisionState: "failed" }, "Start failed"],
 		["en", { provisionState: "provisioning" }, "Starting Claude Code…"],
 		["en", { activeAgentSwitch: activeAgentSwitch("s-status") }, "Switching to Codex"],
@@ -2375,10 +2377,10 @@ describe("SessionsBoard find bar", () => {
 			renderBoard("p1");
 			const findBar = await openFindBar();
 			const input = within(findBar).getByRole("textbox");
-			for (const query of [label, appI18n.t("status.idle")]) {
+			for (const query of [label, getSessionStatusView("idle", appI18n.t).label]) {
 				await userEvent.clear(input);
 				await userEvent.type(input, query);
-				expect(within(findBar).getByText("1/2")).toBeInTheDocument();
+				expect(findBar).toHaveTextContent("1/2");
 				expect(screen.getByTestId("session-status")).toHaveTextContent(label);
 				expect(screen.getByText("matching worker")).toBeInTheDocument();
 				expect(screen.queryByText("unrelated worker")).not.toBeInTheDocument();
@@ -2475,7 +2477,7 @@ describe("SessionsBoard find bar", () => {
 
 		expect(screen.getByText("alpha worker")).toBeInTheDocument();
 		expect(screen.queryByText("beta worker")).not.toBeInTheDocument();
-		expect(within(findBar).getByText("1/2")).toBeInTheDocument();
+		expect(findBar).toHaveTextContent("1/2");
 	});
 
 

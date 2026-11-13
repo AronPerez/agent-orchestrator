@@ -40,7 +40,7 @@ describe("packaged renderer CSP", () => {
 		const frameSrc = contentSecurityPolicy("build")
 			.split("; ")
 			.filter((directive) => directive.startsWith("frame-src"));
-		expect(frameSrc).toEqual(["frame-src 'self' http://127.0.0.1:* http://*.localhost:*"]);
+		expect(frameSrc).toEqual(["frame-src 'self' http://127.0.0.1:* http://*.localhost:* https://staging-api.aoagents.dev https://api.aoagents.dev"]);
 	});
 });
 

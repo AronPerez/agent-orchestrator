@@ -111,7 +111,7 @@ it("explains an incompatible host without adding it", async () => {
 	fireEvent.change(screen.getByRole("textbox", { name: "Address" }), { target: { value: "http://box-a:3001" } });
 	fireEvent.change(screen.getByLabelText("Pairing code or password"), { target: { value: "secret123" } });
 	fireEvent.click(screen.getByRole("button", { name: "Add host" }));
-	await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Update AO"));
+	await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Update Orchestrator"));
 	expect(saved.entries).toEqual([]);
 });
 

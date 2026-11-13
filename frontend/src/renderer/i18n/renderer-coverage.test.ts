@@ -10,7 +10,7 @@ const displayAttributes = new Set(["alt", "aria-label", "placeholder", "title"])
 // English UI copy. Keeping this allowlist exact makes newly introduced chrome fail.
 const approvedLiterals: Record<string, readonly string[]> = {
 	"components/BrowserPanel.tsx": [
-		"AO Preview",
+		"AO Preview", "Orchestrator Preview",
 		"Demo app preview",
 		"The worker exposed a local Vite app with",
 		"ao preview",
@@ -29,7 +29,9 @@ const approvedLiterals: Record<string, readonly string[]> = {
 	"components/ProjectSettingsEditor.tsx": ["auto", "ao"],
 	"components/RemoteDirectoryPicker.tsx": ["/home/you/code"],
 	"components/SessionInspector.tsx": ["PR #"],
-	"components/Sidebar.tsx": ["Orchestrator.inc", "daemon"],
+	"components/Sidebar.tsx": ["Orchestrator.inc", "Orchestrator", "daemon"],
+	"components/TitlebarNav.tsx": ["Orchestrator"],
+	"components/QuitConfirmDialog.tsx": ["Esc"],
 	"components/WindowTitlebar.tsx": [
 		"Alt+F4",
 		"Ctrl+Z",

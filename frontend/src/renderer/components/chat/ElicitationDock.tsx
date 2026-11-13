@@ -695,7 +695,7 @@ function FormField({
 		<input
 			id={id}
 			type={numeric ? "number" : "text"}
-			placeholder={rows ? `${label}…` : undefined}			aria-required={required || undefined}
+			aria-required={required || undefined}
 			min={typeof property.minimum === "number" ? property.minimum : undefined}
 			max={typeof property.maximum === "number" ? property.maximum : undefined}
 			step={property.type === "integer" ? 1 : undefined}

@@ -393,11 +393,6 @@ export function GeneralSettingsSection({
 
 	return (
 		<>
-			<SettingsSection title={t("remote.enable")} grouped>
-				<SettingsRow label={t("remote.enable")} description={t("remote.enableDescription")}>
-					<Switch aria-label={t("remote.enable")} checked={remoteHosts} onCheckedChange={setRemoteHosts} />
-				</SettingsRow>
-			</SettingsSection>
 			{/* Appearance */}
 			<SettingsSection title={t("settings.appearance")} titleHidden={titleHidden} grouped>
 				<SettingsRow label={t("settings.theme")}>
@@ -516,6 +511,9 @@ export function GeneralSettingsSection({
 						checked={developerMode}
 						onCheckedChange={setDeveloperMode}
 					/>
+				</SettingsRow>
+				<SettingsRow label={t("remote.enable")} description={t("remote.enableDescription")}>
+					<Switch aria-label={t("remote.enable")} checked={remoteHosts} onCheckedChange={setRemoteHosts} />
 				</SettingsRow>
 				{developerMode && <DiagnosticsRow />}
 				<CliLinkSettings enabled={developerMode} />
