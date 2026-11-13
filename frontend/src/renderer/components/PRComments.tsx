@@ -9,7 +9,6 @@ import { useSendToSessionWorker } from "../hooks/useSendToSessionWorker";
 import { workspaceQueryKeyForHost } from "../hooks/useWorkspaceQuery";
 import { useAddTextToChat } from "../lib/chat-context-bus";
 import { formatTimeCompact } from "../lib/format-time";
-import { getGitHubStatus } from "../lib/github-daemon";
 import { clientForSessionHost } from "../lib/host-clients";
 import { prCheckedOut, prThreadDiffUrl } from "../lib/pr-display";
 import { usesPreviewWorkspaceData as usePreviewData } from "../lib/preview-mode";
@@ -364,7 +363,16 @@ export function PRComments({ detailsFailed, hostId, onViewInDiff, pr, session }:
 	const canWrite = !session.cloud && !usePreviewData && pr.provider === "github" && Boolean(pr.url);
 	// Who AO posts as. Reply is for other people's comments, as on GitHub; until
 	// the login is known, every comment offers it.
-	const login = useQuery({ queryKey: ["github-status"], queryFn: getGitHubStatus, staleTime: 5 * 60_000, enabled: canWrite }).data?.login;
+	const login = useQuery({
+		queryKey: ["github-status", hostId ?? ""],
+		queryFn: async () => {
+			const { data, error } = await clientForSessionHost(hostId).GET("/api/v1/github/status");
+			if (error || !data) throw apiErrorException(error);
+			return data;
+		},
+		staleTime: 5 * 60_000,
+		enabled: canWrite,
+	}).data?.login;
 	const viewer = login?.toLowerCase();
 	const mine = (author: string) => viewer !== undefined && author.replace(/^@/, "").toLowerCase() === viewer;
 	const refresh = () => Promise.all([

@@ -15,7 +15,7 @@ import { resetPRFocus, SessionInspector } from "./SessionInspector";
 import { subscribeChatComposerText } from "../lib/chat-context-bus";
 import { sessionUiKey } from "../lib/hosts";
 import { resetPRMergeMethods } from "./PRActions";
-import { ADDED_TO_CHAT_MS } from "./PRComments";
+import { ADDED_TO_CHAT_MS, PRComments } from "./PRComments";
 import { PRTabPane } from "./PRTabPane";
 import { resetPRTabs, usePRTabs } from "../lib/pr-tabs";
 import { TooltipProvider } from "./ui/tooltip";
@@ -40,7 +40,7 @@ import type {
 import { STANDALONE_WORKSPACE_ID } from "../types/workspace";
 import { noPRDetails } from "../lib/pr-display";
 
-const { cloudCpMock, getMock, navigateMock, patchMock, putMock, postMock } = vi.hoisted(
+const { cloudCpMock, getMock, navigateMock, patchMock, putMock, postMock, sessionHostClientMock } = vi.hoisted(
   () => ({
     cloudCpMock: {
       cancelSessionReviews: vi.fn(),
@@ -62,6 +62,7 @@ const { cloudCpMock, getMock, navigateMock, patchMock, putMock, postMock } = vi.
     patchMock: vi.fn(),
     putMock: vi.fn(),
     postMock: vi.fn(),
+    sessionHostClientMock: vi.fn(),
   }),
 );
 
@@ -93,6 +94,7 @@ vi.mock("../lib/api-client", () => ({
     PUT: putMock,
   },
   getApiBaseUrl: () => "http://127.0.0.1:3001",
+  reportingFetch: async (request: Request) => Response.json((await getMock(new URL(request.url).pathname)).data),
   hasTrustedApiBaseUrl: () => false,
   subscribeApiBaseUrl: () => () => {},
   apiErrorMessage: (error: unknown, fallback = "Request failed") => {
@@ -120,7 +122,7 @@ vi.mock("../hooks/useCloudCp", async (importOriginal) => {
 
 vi.mock("../lib/host-clients", async (importOriginal) => ({
   ...await importOriginal<typeof import("../lib/host-clients")>(),
-  clientForSessionHost: () => ({ GET: getMock, POST: postMock, PATCH: patchMock, PUT: putMock }),
+  clientForSessionHost: sessionHostClientMock,
   clientForHost: () => ({ GET: getMock, POST: postMock, PATCH: patchMock, PUT: putMock }),
 }));
 
@@ -367,6 +369,7 @@ beforeEach(() => {
     event: { id: "event-1" },
   });
   getMock.mockReset();
+  sessionHostClientMock.mockReset().mockImplementation(() => ({ GET: getMock, POST: postMock, PATCH: patchMock, PUT: putMock }));
   navigateMock.mockReset();
   patchMock.mockReset();
   postMock.mockReset();
@@ -1630,7 +1633,7 @@ describe("SessionInspector PR section", () => {
     renderWithQuery(<PRTabPane session={session([pr(7, "open", { url: summary.url })])} url={summary.url} />, undefined, (client) => {
       seedPRSummaries(client, [summary]);
       // AO posts as grace here.
-      client.setQueryData(["github-status"], { connected: true, login: "grace" });
+      client.setQueryData(["github-status", ""], { connected: true, login: "grace" });
     });
 
     const own = await screen.findByRole("article", { name: "grace" });
@@ -1638,6 +1641,53 @@ describe("SessionInspector PR section", () => {
     expect(within(screen.getByRole("article", { name: "src/own.ts:1" })).queryByRole("button", { name: "Reply" })).not.toBeInTheDocument();
     // linus and ada are in this thread, so it takes a reply.
     expect(within(screen.getByRole("article", { name: "src/search.ts:12" })).getByRole("button", { name: "Reply" })).toBeInTheDocument();
+  });
+
+  it("uses each session host's GitHub identity for Reply and the composer across host switches", async () => {
+    const summary = prSummary(7, "open", {
+      conversation: ["alice", "bob", "carol"].map((author) => ({
+        id: author, author, isBot: false, body: `${author}'s comment`, createdAt: "2026-06-15T11:00:00Z",
+      })),
+    });
+    const respond = commonGetsResponder();
+    const statusClient = (login: string) => vi.fn(async (path: string) =>
+      path === "/api/v1/github/status" ? { data: { connected: true, login } } : respond(path));
+    const localGet = statusClient("alice");
+    const hostAGet = statusClient("bob");
+    const hostBGet = statusClient("carol");
+    getMock.mockImplementation(localGet);
+    sessionHostClientMock.mockImplementation((hostId?: string) => ({
+      GET: hostId === "box-a" ? hostAGet : hostId === "box-b" ? hostBGet : getMock,
+      POST: postMock, PATCH: patchMock, PUT: putMock,
+    }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const viewFor = (hostId?: string) => (
+      <QueryClientProvider client={client}>
+        <TooltipProvider><PRComments pr={summary} session={session([])} hostId={hostId} /></TooltipProvider>
+      </QueryClientProvider>
+    );
+    const view = render(viewFor());
+    const expectIdentity = async (login: string) => {
+      await waitFor(() => expect(screen.getByTestId("pr-comment-composer").querySelector("img"))
+        .toHaveAttribute("src", `https://github.com/${login}.png?size=40`));
+      for (const author of ["alice", "bob", "carol"]) {
+        const reply = within(screen.getByRole("article", { name: author })).queryByRole("button", { name: "Reply" });
+        if (author === login) expect(reply).not.toBeInTheDocument();
+        else expect(reply).toBeInTheDocument();
+      }
+    };
+    await expectIdentity("alice");
+    view.rerender(viewFor("box-a"));
+    await expectIdentity("bob");
+    view.rerender(viewFor("box-b"));
+    await expectIdentity("carol");
+    view.rerender(viewFor("box-a"));
+    await expectIdentity("bob");
+    view.rerender(viewFor());
+    await expectIdentity("alice");
+    for (const get of [localGet, hostAGet, hostBGet]) {
+      expect(get.mock.calls.filter(([path]) => path === "/api/v1/github/status")).toHaveLength(1);
+    }
   });
 
   it("keeps a plain comment box open at the end of the tab, with media and no formatting toolbar", async () => {
