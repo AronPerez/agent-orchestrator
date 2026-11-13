@@ -5,6 +5,7 @@ import { useUiStore } from "../stores/ui-store";
 
 const remotes = vi.hoisted(() => ({
 	list: vi.fn(),
+	syncAccountHosts: vi.fn(async () => undefined),
 	connect: vi.fn(),
 	disconnect: vi.fn(),
 	connected: vi.fn(),
@@ -31,6 +32,7 @@ beforeEach(() => {
 	cloud.listAccountRemoteHosts.mockClear();
 	remotes.importAccountHost.mockClear();
 	remotes.pruneAccountHosts.mockClear();
+	remotes.syncAccountHosts.mockClear();
 	remotes.list.mockReset().mockResolvedValue([
 		{ hostId: "box-a", label: "Box A", url: "http://box-a:3001" },
 		{ hostId: "box-b", label: "Box B", url: "http://box-b:3001" },
@@ -75,8 +77,8 @@ it("keeps local connections on sign-out but disconnects account-only hosts", asy
 	cloud.baseUrl = "https://cloud.example";
 	const { result, rerender } = renderHook(() => useRemoteHosts());
 	await waitFor(() => expect(connectedHosts()).toEqual(["box-a", "box-b"]));
-	expect(cloud.listAccountRemoteHosts).toHaveBeenCalledOnce();
-	expect(remotes.pruneAccountHosts).toHaveBeenCalledWith("user-a", []);
+	expect(remotes.syncAccountHosts).toHaveBeenCalledOnce();
+	expect(remotes.syncAccountHosts).toHaveBeenCalledWith("user-a");
 	remotes.list.mockResolvedValue([{ hostId: "box-a", label: "Box A", url: "http://box-a:3001" }]);
 	account.status = "unauthenticated";
 	rerender();
@@ -86,7 +88,7 @@ it("keeps local connections on sign-out but disconnects account-only hosts", asy
 	expect(connectedHosts()).toEqual(["box-a"]);
 	expect(remotes.disconnect).toHaveBeenCalledWith("http://box-b:3001");
 	expect(remotes.disconnect).not.toHaveBeenCalledWith("http://box-a:3001");
-	expect(cloud.listAccountRemoteHosts).toHaveBeenCalledOnce();
+	expect(remotes.syncAccountHosts).toHaveBeenCalledOnce();
 });
 
 it.each(["pending", "rejected"])("retires prior-account cached pinned sessions before a %s registry refresh", async (refresh) => {

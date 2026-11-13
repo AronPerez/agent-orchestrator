@@ -92,7 +92,7 @@ describe("mobile Chat API boundaries", () => {
 
 	it("preserves daemon pin facts used by the Agents ordering", async () => {
 		vi.mocked(fetch)
-			.mockResolvedValueOnce(response({ sessions: [{ id: "w-1", projectId: "p-1", mode: "chat", activity: { state: "idle", lastActivityAt: "2026-08-08T10:00:00Z" }, updatedAt: "2026-08-09T10:00:00Z", isPinned: true, pinnedAt: "2026-08-09T10:00:00Z" }] }))
+			.mockResolvedValueOnce(response({ sessions: [{ id: "w-1", projectId: "p-1", mode: "chat", activity: { state: "idle", lastActivityAt: "2026-08-08T10:00:00Z" }, updatedAt: "2026-08-09T10:00:00Z", isPinned: true, pinnedAt: "2026-08-09T10:00:00Z" }], archived: { total: 0, byProject: {} } }))
 			.mockResolvedValueOnce(response({ sessions: [] }))
 			.mockResolvedValueOnce(response({ projects: [] }));
 		const result = await getSessions(cfg);
@@ -104,7 +104,7 @@ describe("mobile Chat API boundaries", () => {
 			.mockResolvedValueOnce(response({ sessions: [{
 				id: "w-1", projectId: "p-1", mode: "chat",
 				autoReviewEnabled: true, autoInjectReview: false, autoInjectCI: false,
-			}] }))
+			}], archived: { total: 0, byProject: {} } }))
 			.mockResolvedValueOnce(response({ sessions: [] }))
 			.mockResolvedValueOnce(response({ projects: [] }));
 
@@ -539,5 +539,8 @@ function replayFrames(count: number): string {
 }
 
 function response(body: unknown, status = 200): Response {
-	return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+	// These fixtures represent the current daemon, which advertises its archive summary.
+	const payload = body && typeof body === "object" && "sessions" in body
+		? { archived: { total: 0, byProject: {} }, ...body } : body;
+	return new Response(JSON.stringify(payload), { status, headers: { "content-type": "application/json" } });
 }

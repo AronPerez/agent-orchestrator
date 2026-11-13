@@ -39,30 +39,26 @@ describe("TitlebarNav", () => {
 		useUiStore.setState({ isSidebarOpen: true });
 	});
 
-	it.each([false, true])("keeps the same header row with sidebar open=%s", (open) => {
+	it.each([false, true])("keeps chrome available with sidebar open=%s", (open) => {
 		useUiStore.setState({ isSidebarOpen: open });
 		const { container, rerender } = render(<TitlebarNav />);
-		const nav = container.querySelector('[data-slot="titlebar-nav"]');
-		expect(nav).toHaveClass("top-px", "h-traffic-light-clearance", "left-titlebar-cluster-left");
+		expect(container.querySelector('[data-slot="titlebar-nav"]')).toBeVisible();
+		if (open) expect(screen.getByText("Orchestrator")).toBeVisible();
+		else expect(screen.getByRole("button", { name: "Go back" })).toBeDisabled();
 		rerender(<TooltipProvider><TitlebarNav isFullScreen /></TooltipProvider>);
-		expect(nav).toHaveClass("top-px", "h-traffic-light-clearance", "left-titlebar-cluster-left-fullscreen");
-		expect(screen.getByRole("button", { name: "Go back" })).toBeDisabled();
+		expect(container.querySelector('[data-slot="titlebar-nav"]')).toBeVisible();
 	});
 
-	it("keeps history arrows visible after the sidebar settles open", async () => {
+	it("shows the brand when the sidebar settles open", async () => {
 		render(<><div data-slot="sidebar-container" /><TitlebarNav /></>);
 		await act(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
-
-		expect(screen.queryByText("Orchestrator.inc")).not.toBeInTheDocument();
-		for (const name of ["Go back", "Go forward"]) {
-			const button = screen.getByRole("button", { name });
-			expect(button).toBeVisible();
-			expect(button).toBeDisabled();
-			expect(button.style).toHaveProperty("WebkitAppRegion", "no-drag");
-		}
+		expect(screen.getByText("Orchestrator")).toBeVisible();
+		expect(screen.queryByRole("button", { name: "Go back" })).not.toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "Go forward" })).not.toBeInTheDocument();
 	});
 
-	it("navigates history with the sidebar open and respects the history lock", () => {
+	it("navigates history when arrows are shown and respects the history lock", () => {
+		useUiStore.setState({ isSidebarOpen: false });
 		canGoBack.mockReturnValue(true);
 		const { rerender } = render(<TitlebarNav />);
 		const listener = history.subscribe.mock.calls.at(-1)![0];

@@ -81,7 +81,7 @@ it("does not connect a newly paired host after Remote hosts is turned off", asyn
 	renderSettings();
 	fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "Box A" } });
 	fireEvent.change(screen.getByRole("textbox", { name: "Address" }), { target: { value: "http://box-a:3001" } });
-	fireEvent.change(screen.getByLabelText("Connection password"), { target: { value: "secret123" } });
+	fireEvent.change(screen.getByLabelText("Pairing code or password"), { target: { value: "secret123" } });
 	const submit = screen.getByRole("button", { name: "Add host" });
 	fireEvent.click(submit);
 	expect(submit).toBeDisabled();
@@ -96,27 +96,12 @@ it("pairs a host and shows it in the saved-host list", async () => {
 	expect(screen.getByRole("switch", { name: "Connect to remote hosts" })).toHaveAttribute("aria-checked", "false");
 	fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "Box A" } });
 	fireEvent.change(screen.getByRole("textbox", { name: "Address" }), { target: { value: "http://box-a:3001" } });
-	fireEvent.change(screen.getByLabelText("Connection password"), { target: { value: "secret123" } });
+	fireEvent.change(screen.getByLabelText("Pairing code or password"), { target: { value: "secret123" } });
 	fireEvent.click(screen.getByRole("button", { name: "Add host" }));
 	await waitFor(() => expect(screen.getByText("Box A")).toBeVisible());
 	expect(screen.getByRole("switch", { name: "Connect to remote hosts" })).toHaveAttribute("aria-checked", "true");
 	expect(remotes.add).toHaveBeenCalledWith({ label: "Box A", url: "http://box-a:3001", password: "secret123" });
-	expect(screen.getByLabelText("Connection password")).toHaveAttribute("type", "password");
-	expect(remotes.issueAccountToken).not.toHaveBeenCalled();
-	expect(cloud.saveAccountRemoteHost).not.toHaveBeenCalled();
-});
-
-it("syncs a paired host only when signed in to AO Cloud", async () => {
-	account.status = "authenticated";
-	renderSettings();
-	fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "Box A" } });
-	fireEvent.change(screen.getByRole("textbox", { name: "Address" }), { target: { value: "http://box-a:3001" } });
-	fireEvent.change(screen.getByLabelText("Connection password"), { target: { value: "secret123" } });
-	fireEvent.click(screen.getByRole("button", { name: "Add host" }));
-	await waitFor(() => expect(cloud.saveAccountRemoteHost).toHaveBeenCalledWith("https://cloud.example", {
-		hostId: "box-a", label: "Box A", url: "http://box-a:3001", token: "account-token",
-	}));
-	expect(remotes.issueAccountToken).toHaveBeenCalledWith("http://box-a:3001");
+	expect(screen.getByLabelText("Pairing code or password")).toHaveAttribute("type", "password");
 });
 
 it("explains an incompatible host without adding it", async () => {
@@ -124,9 +109,9 @@ it("explains an incompatible host without adding it", async () => {
 	renderSettings();
 	fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "Box A" } });
 	fireEvent.change(screen.getByRole("textbox", { name: "Address" }), { target: { value: "http://box-a:3001" } });
-	fireEvent.change(screen.getByLabelText("Connection password"), { target: { value: "secret123" } });
+	fireEvent.change(screen.getByLabelText("Pairing code or password"), { target: { value: "secret123" } });
 	fireEvent.click(screen.getByRole("button", { name: "Add host" }));
-	await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Update AO"));
+	await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Update Orchestrator"));
 	expect(saved.entries).toEqual([]);
 });
 
@@ -136,8 +121,8 @@ it("explains how to re-pair a saved host without an identity", async () => {
 	await screen.findByText(/Old Box/);
 	expect(screen.getByText(/edit this host and enter its connection password/i)).toBeVisible();
 	fireEvent.click(screen.getByRole("button", { name: "Edit Old Box" }));
-	expect(screen.getByLabelText("Connection password")).toBeRequired();
-	fireEvent.change(screen.getByLabelText("Connection password"), { target: { value: "new-secret" } });
+	expect(screen.getByLabelText("Pairing code or password")).toBeRequired();
+	fireEvent.change(screen.getByLabelText("Pairing code or password"), { target: { value: "new-secret" } });
 	fireEvent.click(screen.getByRole("button", { name: "Save host" }));
 	await waitFor(() => expect(remotes.add).toHaveBeenCalledWith({
 		label: "Old Box",
@@ -152,8 +137,8 @@ it("edits a saved host without reading or replacing its password", async () => {
 	renderSettings();
 	await screen.findByRole("button", { name: "Edit Box A" });
 	fireEvent.click(screen.getByRole("button", { name: "Edit Box A" }));
-	expect(screen.getByLabelText("Connection password")).toHaveValue("");
-	expect(screen.getByLabelText("Connection password")).not.toBeRequired();
+	expect(screen.getByLabelText("Pairing code or password")).toHaveValue("");
+	expect(screen.getByLabelText("Pairing code or password")).not.toBeRequired();
 	fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "Office" } });
 	fireEvent.change(screen.getByRole("textbox", { name: "Address" }), { target: { value: "http://office:3011" } });
 	fireEvent.click(screen.getByRole("button", { name: "Save host" }));

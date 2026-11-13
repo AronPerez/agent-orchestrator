@@ -7,11 +7,11 @@ import { CueRunMenu } from "./chat/CueRunMenu";
 import { TooltipProvider } from "./ui/tooltip";
 import { readLastRunCue, rememberLastRunCue } from "../lib/last-run-cue";
 import * as cues from "../lib/cues";
+import { CloudCpError } from "../lib/cloud-cp/errors";
 
-const { toast, navigate, navigateTerminals, openProjectSettings, setActiveShellTerminal, loadShellPreference } = vi.hoisted(() => ({
+const { toast, navigate, openProjectSettings, setActiveShellTerminal, loadShellPreference } = vi.hoisted(() => ({
 	toast: vi.fn(),
 	navigate: vi.fn(),
-	navigateTerminals: vi.fn(),
 	openProjectSettings: vi.fn(),
 	setActiveShellTerminal: vi.fn(),
 	loadShellPreference: vi.fn().mockResolvedValue(undefined),
@@ -19,7 +19,7 @@ const { toast, navigate, navigateTerminals, openProjectSettings, setActiveShellT
 vi.mock("../stores/ui-store", () => ({
 	useUiStore: (select: (s: unknown) => unknown) => select({ showGlobalToast: toast, openProjectSettings, setActiveShellTerminal }),
 }));
-vi.mock("../lib/navigate-to-session", () => ({ useNavigateToSession: () => navigate, useNavigateToTerminals: () => navigateTerminals }));
+vi.mock("../lib/navigate-to-session", () => ({ useNavigateToSession: () => navigate }));
 vi.mock("../stores/terminal-shell-store", () => ({
 	terminalShellRequestValue: () => "auto",
 	useTerminalShellStore: { getState: () => ({ load: loadShellPreference, preference: { kind: "auto" } }) },
@@ -106,7 +106,31 @@ test("validates bytes and required command, preserves content and recovers from 
 	expect(screen.getByLabelText("Command")).toHaveValue("  npm test\n");
 	fireEvent.click(screen.getByRole("button", { name: "Create" }));
 	await waitFor(() => expect(cues.createCue).toHaveBeenCalledTimes(2));
-	expect(cues.createCue).toHaveBeenLastCalledWith("project", expect.objectContaining({ command: "  npm test\n" }), undefined);
+	expect(cues.createCue).toHaveBeenLastCalledWith("project", expect.objectContaining({ command: "  npm test\n" }));
+});
+
+test("shows the control plane's reason in the editor when it refuses a Cloud cue", async () => {
+	setup(<CuesSettings projectId="project" cloudOrgId="org" />);
+	fireEvent.click(await screen.findByRole("button", { name: "New cue" }));
+	fireEvent.change(screen.getByLabelText("Name"), { target: { value: "tests" } });
+	fireEvent.change(screen.getByLabelText("Command"), { target: { value: "npm test" } });
+	vi.mocked(cues.createCue).mockRejectedValueOnce(new CloudCpError("A cue named \"Tests\" already exists in this project.", { status: 409, code: "conflict" }));
+	fireEvent.click(screen.getByRole("button", { name: "Create" }));
+	expect(await screen.findByRole("alert")).toHaveTextContent("A cue named \"Tests\" already exists in this project.");
+	expect(toast).not.toHaveBeenCalled();
+	// The draft stays, so the name can be changed and saved.
+	expect(screen.getByLabelText("Name")).toHaveValue("tests");
+
+	vi.mocked(cues.createCue).mockRejectedValueOnce(new CloudCpError("A command cue cannot have a prompt.", { status: 422, code: "validation_error" }));
+	fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Unit tests" } });
+	fireEvent.click(screen.getByRole("button", { name: "Create" }));
+	await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("A command cue cannot have a prompt."));
+	expect(toast).not.toHaveBeenCalled();
+
+	// Any other failure is still a toast.
+	vi.mocked(cues.createCue).mockRejectedValueOnce(new CloudCpError("The control plane is unavailable.", { status: 503 }));
+	fireEvent.click(screen.getByRole("button", { name: "Create" }));
+	await waitFor(() => expect(toast).toHaveBeenCalledWith("Could not save the cue.", "The control plane is unavailable.", "error"));
 });
 
 test("save blocks duplicate submissions and dismissal; completion from another project is ignored", async () => {
@@ -357,7 +381,7 @@ test("agent editing validates required content and keeps a failed update editabl
 	expect(screen.getByLabelText("Agent instruction")).toHaveValue("  explain\n");
 	fireEvent.click(screen.getByRole("button", { name: "Save" }));
 	await waitFor(() => expect(cues.updateCue).toHaveBeenCalledTimes(2));
-	expect(cues.updateCue).toHaveBeenLastCalledWith("cue-1", expect.objectContaining({ prompt: "  explain\n", type: "agent" }), undefined);
+	expect(cues.updateCue).toHaveBeenLastCalledWith("cue-1", expect.objectContaining({ prompt: "  explain\n", type: "agent" }));
 });
 
 test.each(["", "deleted-cue"])("clicking without a valid remembered cue (%s) opens the list", async (id) => {
@@ -415,7 +439,7 @@ test("session creation saves and closes without running, changing history, or na
 	fireEvent.change(screen.getByLabelText("Command"), { target: { value: "  npm test\n" } });
 	fireEvent.click(screen.getByRole("button", { name: "Create" }));
 	await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-	expect(cues.createCue).toHaveBeenCalledExactlyOnceWith("project", { name: "Tests", type: "command", command: "  npm test\n" }, undefined);
+	expect(cues.createCue).toHaveBeenCalledExactlyOnceWith("project", { name: "Tests", type: "command", command: "  npm test\n" });
 	expect(cues.invokeCue).not.toHaveBeenCalled();
 	expect(readLastRunCue("project")).toBe("");
 	expect(openProjectSettings).not.toHaveBeenCalled();
@@ -454,7 +478,7 @@ test("the creation modal supports agent cues and returns focus to the session bu
 	fireEvent.change(screen.getByLabelText("Agent instruction"), { target: { value: "  Review changes\n" } });
 	fireEvent.click(screen.getByRole("button", { name: "Create" }));
 	await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-	expect(cues.createCue).toHaveBeenCalledExactlyOnceWith("project", { name: "Review", type: "agent", prompt: "  Review changes\n" }, undefined);
+	expect(cues.createCue).toHaveBeenCalledExactlyOnceWith("project", { name: "Review", type: "agent", prompt: "  Review changes\n" });
 	await waitFor(() => expect(screen.getByRole("button", { name: "Run a cue" })).toHaveFocus());
 	expect(cues.invokeCue).not.toHaveBeenCalled();
 });

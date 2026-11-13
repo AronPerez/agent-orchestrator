@@ -213,7 +213,15 @@ test("typed chat composer text is visibly selected with a pointer drag @T0", asy
 				const surfaceBackground = getComputedStyle(surface).backgroundColor;
 				const selectionColor = rgba(selectionBackground);
 				const textColor = rgba(selectionForeground);
-				const surfaceColor = rgba(surfaceBackground);
+				// A translucent composer paints over its ancestors, not over opaque RGB.
+				const paintedBackground = (node: Element | null): number[] => {
+					if (!node) return [1, 1, 1];
+					const color = rgba(getComputedStyle(node).backgroundColor);
+					if (color[3] === 1) return color.slice(0, 3);
+					const behind = paintedBackground(node.parentElement);
+					return color.slice(0, 3).map((channel, index) => channel * color[3] + behind[index]! * (1 - color[3]));
+				};
+				const surfaceColor = paintedBackground(surface);
 				const compositedBackground = selectionColor.slice(0, 3).map(
 					(channel, index) => channel * selectionColor[3] + surfaceColor[index]! * (1 - selectionColor[3]),
 				);

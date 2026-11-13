@@ -1,3 +1,7 @@
+vi.mock("expo-router/react-navigation", () => ({ getFocusedRouteNameFromRoute: () => undefined }));
+vi.mock("./appFonts", () => ({ appFonts: {} }));
+vi.mock("./symbolFonts", () => ({ symbolFonts: {} }));
+vi.mock("./themeStore", () => ({ loadThemeSettings: async () => ({ preference: "dark", style: "default" }) }));
 import { act, create } from "react-test-renderer";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -20,6 +24,7 @@ vi.mock("react-native-keyboard-controller", () => ({ KeyboardProvider: "Keyboard
 vi.mock("react-native-safe-area-context", () => ({ SafeAreaProvider: "SafeAreaProvider" }));
 vi.mock("./ThemeProvider", () => ({ ThemeProvider: "ThemeProvider", useTheme: () => fixtures.theme, useThemeState: () => ({ scheme: "dark" }) }));
 vi.mock("./store", () => ({ AppProvider: "AppProvider" }));
+vi.mock("./cloud/CloudProvider", () => ({ CloudProvider: "CloudProvider" }));
 vi.mock("./OnboardingGate", () => ({ OnboardingGate: () => null }));
 vi.mock("./TelemetryManager", () => ({ TelemetryManager: () => null }));
 vi.mock("./watch/WatchManager", () => ({ WatchManager: () => null }));
@@ -34,8 +39,8 @@ import RootLayout from "../app/_layout";
 
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
-describe("Settings sheet visible viewport", () => {
-	it.each(["android", "ios"])("keeps the fixed editor footer inside every allowed %s sheet height", (platform) => {
+describe("Settings viewport", () => {
+	it.each(["android", "ios"])("uses a full settings page and a platform-appropriate %s naming sheet", async (platform) => {
 		fixtures.platform.OS = platform;
 		vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
 		const error = console.error;
@@ -44,7 +49,7 @@ describe("Settings sheet visible viewport", () => {
 			error(...args);
 		});
 		let renderer!: ReturnType<typeof create>;
-		act(() => { renderer = create(<RootLayout />); });
+		await act(async () => { renderer = create(<RootLayout />); });
 		try {
 			const settings = renderer.root.findByProps({ name: "settings" }).props.options;
 			const naming = renderer.root.findByProps({ name: "sheets/machine-name" }).props.options;
@@ -54,14 +59,14 @@ describe("Settings sheet visible viewport", () => {
 				expect(naming.contentStyle.backgroundColor).toBe("transparent");
 			} else {
 				expect(naming.presentation).toBe("formSheet");
-				expect(naming.sheetAllowedDetents).toBe("fitToContents");
+				expect(naming.sheetAllowedDetents).toEqual([0.5]);
 			}
-			// A footer placed at the tallest detent must also be visible at opening.
-			// Android translates the full-height content instead of resizing the
-			// nested Settings navigator when moving to a smaller detent.
-			expect(settings.sheetAllowedDetents).toEqual([0.92]);
-			expect(settings.sheetInitialDetentIndex).toBe(0);
-			expect(settings.gestureEnabled).toBe(false);
+			// Settings uses a full page, so its editor footer follows the viewport
+			// instead of a sheet's maximum detent height.
+			expect(settings.headerShown).toBe(false);
+			expect(settings.presentation).toBeUndefined();
+			expect(settings.sheetAllowedDetents).toBeUndefined();
+			expect(settings.sheetInitialDetentIndex).toBeUndefined();
 		} finally {
 			act(() => renderer.unmount());
 		}

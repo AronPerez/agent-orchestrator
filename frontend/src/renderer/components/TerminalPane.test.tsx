@@ -605,7 +605,7 @@ describe("TerminalPane empty states", () => {
 	it("shows a no-selection message when no session is selected", () => {
 		const view = renderPane();
 		try {
-			expect(screen.getByText("Agent Orchestrator")).toBeInTheDocument();
+			expect(screen.getByText("Orchestrator")).toBeInTheDocument();
 			expect(screen.getByText("No session selected. Pick a worker to attach its terminal.")).toBeInTheDocument();
 		} finally {
 			view.restore();
@@ -1283,7 +1283,7 @@ describe("terminal restore", () => {
 
 		// Cloud sessions recover through the control plane; the local daemon has
 		// never heard of them, so this button must not appear for one.
-		it("does not offer resume for a cloud session", () => {
+		it("offers the control-plane resume control for a cloud session", () => {
 			terminalState.value = "exited";
 			const view = renderPane({
 				...worker,
@@ -1291,7 +1291,7 @@ describe("terminal restore", () => {
 				cloud: { orgId: "org-1" },
 			});
 			try {
-				expect(screen.queryByRole("button", { name: "Resume agent" })).not.toBeInTheDocument();
+				expect(screen.getByRole("button", { name: "Resume agent" })).toBeInTheDocument();
 			} finally {
 				view.restore();
 			}
@@ -1341,7 +1341,7 @@ describe("terminal restore", () => {
 		try {
 			expect(await screen.findByRole("button", { name: "Restore session" })).toBeInTheDocument();
 			expect(screen.getByTestId("xterm")).toBeInTheDocument();
-			expect(screen.getByText("Terminal ended")).toBeInTheDocument();
+			expect(screen.getByText("Session terminated")).toBeInTheDocument();
 			expect(screen.queryByText("Terminal error: terminal handle missing")).not.toBeInTheDocument();
 		} finally {
 			view.restore();

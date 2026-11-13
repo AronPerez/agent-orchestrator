@@ -48,6 +48,10 @@ type Provider struct {
 	identityMu       sync.Mutex
 	identity         ports.SCMIdentity
 	identityResolved bool
+	// now and randomSuffix name comment attachments; tests pin them, and nil
+	// means the wall clock and crypto/rand.
+	now          func() time.Time
+	randomSuffix func() string
 }
 
 // NewProvider returns a Provider. If opts.Client is supplied it is used

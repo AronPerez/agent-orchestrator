@@ -188,19 +188,21 @@ func TestCueCommandPreservesNativeEvalEOFAndOptionBehavior(t *testing.T) {
 					}
 					want := tc.want
 					if tc.name == "EOF backslash" {
-						// Bash 3 (including macOS sh) drops this backslash; newer Bash preserves it.
-						if shell == "bash" || shell == "sh" {
-							native, err := exec.Command(path, "-c", `eval 'printf "%s" foo\'`).Output()
+						switch shell {
+						case "zsh":
+							want = "foo"
+						case "fish":
+							want = "not executed"
+						default:
+							// bash before 4 drops a trailing backslash at EOF, so ask the shell.
+							// No startup file may print into the answer.
+							probe := exec.Command(path, "-c", `f() { printf '%s' "$1"; }; eval 'f foo\'`)
+							probe.Env = append(os.Environ(), "BASH_ENV=", "ENV=")
+							native, err := probe.Output()
 							if err != nil {
-								t.Fatal(err)
+								t.Fatalf("native %s eval: %v", shell, err)
 							}
 							want = string(native)
-						}
-						if shell == "zsh" {
-							want = "foo"
-						}
-						if shell == "fish" {
-							want = "not executed"
 						}
 					}
 					rt := &cuePTYRuntime{fakeShellRuntime: newFakeShellRuntime(), t: t}

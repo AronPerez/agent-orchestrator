@@ -37,6 +37,7 @@ export type DaemonProbe = {
 	/** VCS build stamp (git revision, "-dirty" suffix when the tree was modified).
 	 * Absent on unstamped builds (`go run`) — callers then fall back to path. */
 	buildIdentity?: string;
+	ipv6Loopback?: boolean;
 };
 
 /** A /healthz|/readyz probe of a loopback port; resolves null when nothing valid answers. */
@@ -73,6 +74,7 @@ export function parseDaemonProbe(endpoint: "healthz" | "readyz", body: unknown):
 			typeof candidate.startupWorkingDirectory === "string" ? candidate.startupWorkingDirectory : undefined,
 		appImagePath: typeof candidate.appImagePath === "string" ? candidate.appImagePath : undefined,
 		buildIdentity: typeof candidate.buildIdentity === "string" ? candidate.buildIdentity : undefined,
+		...(candidate.ipv6Loopback === true ? { ipv6Loopback: true } : {}),
 	};
 }
 
@@ -169,6 +171,7 @@ async function readinessStatus(
 			pid,
 			executablePath: ready.executablePath,
 			workingDirectory: ready.workingDirectory,
+		...(ready.ipv6Loopback === true ? { ipv6Loopback: true } : {}),
 			message,
 			code: "identity_mismatch",
 		};
@@ -180,5 +183,6 @@ async function readinessStatus(
 		pid,
 		executablePath: ready.executablePath,
 		workingDirectory: ready.workingDirectory,
+		...(ready.ipv6Loopback === true ? { ipv6Loopback: true } : {}),
 	};
 }

@@ -1,4 +1,4 @@
-import { KeyRound } from "lucide-react";
+import { KeyRound } from "@/components/app-icons";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
@@ -21,7 +21,8 @@ type GitHubTokenFieldProps = {
 	onSubmit?: () => void;
 	submitLabel: string;
 	submitDisabled?: boolean;
-	submitVariant?: "outline" | "primary";
+	/** "ghost" is the muted settings-row action (Save beside a settings field). */
+	submitVariant?: "secondary" | "primary" | "ghost";
 	showSubmitButton?: boolean;
 	tone?: "default" | "warning";
 	/** Omit the inset card shell (settings rows already provide framing). */
@@ -87,6 +88,7 @@ export function GitHubTokenField({
 					<Button
 						type="button"
 						variant={submitVariant}
+						{...(submitVariant === "ghost" ? { size: "sm" as const, className: "shrink-0 text-settings-muted hover:text-settings-label" } : {})}
 						disabled={submitDisabled || disabled || value.trim() === ""}
 						onClick={onSubmit}
 					>

@@ -1,3 +1,4 @@
+vi.mock("./scripts/build-mac-dmg.mjs", () => ({ checkMacDmgLayout: vi.fn(async () => undefined) }));
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs, { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import type { ForgeHookFn, ResolvedForgeConfig } from "@electron-forge/shared-types";
@@ -105,6 +106,66 @@ describe("native runtime resources", () => {
 		expect(extraResourcesForPlatform("darwin")).toContain("update-helper");
 		expect(extraResourcesForPlatform("linux")).not.toContain("update-helper");
 		expect(extraResourcesForPlatform("win32")).not.toContain("update-helper");
+	});
+
+	it("bundles both menu bar wake icon resolutions", () => {
+		expect(extraResourcesForPlatform("darwin")).toEqual(expect.arrayContaining([
+			"assets/trayAwakeIconTemplate.png",
+			"assets/trayAwakeIconTemplate@2x.png",
+		]));
+	});
+
+	it("ships the Liquid Glass icon catalog only on macOS and names it in Info.plist", () => {
+		expect(extraResourcesForPlatform("darwin")).toContain("assets/Assets.car");
+		expect(extraResourcesForPlatform("linux")).not.toContain("assets/Assets.car");
+		expect(extraResourcesForPlatform("win32")).not.toContain("assets/Assets.car");
+		expect(config.packagerConfig?.extendInfo).toMatchObject({ CFBundleIconName: "AppIcon" });
+		// The .icns stays as CFBundleIconFile for macOS before 26.
+		expect(config.packagerConfig?.icon).toBe("assets/icon");
+	});
+
+	it("bundles the wake coordinator only on macOS", () => {
+		expect(extraResourcesForPlatform("darwin")).toContain("wake-helper");
+		expect(extraResourcesForPlatform("linux")).not.toContain("wake-helper");
+		expect(extraResourcesForPlatform("win32")).not.toContain("wake-helper");
+	});
+
+	it("bundles the dictation helper only on macOS", () => {
+		expect(extraResourcesForPlatform("darwin")).toContain("dictation-helper");
+		expect(extraResourcesForPlatform("linux")).not.toContain("dictation-helper");
+		expect(extraResourcesForPlatform("win32")).not.toContain("dictation-helper");
+	});
+
+	it("bundles cloudflared only on macOS", () => {
+		expect(extraResourcesForPlatform("darwin")).toContain("cloudflared");
+		expect(extraResourcesForPlatform("linux")).not.toContain("cloudflared");
+		expect(extraResourcesForPlatform("win32")).not.toContain("cloudflared");
+	});
+
+	it("fails packaging when the Liquid Glass icon catalog was not copied into Resources", async () => {
+		const resources = join(fixtureDir, "AO.app", "Contents", "Resources");
+		mkdirSync(join(resources, "update-helper"), { recursive: true });
+		mkdirSync(join(resources, "wake-helper"), { recursive: true });
+		writeFileSync(join(resources, "update-helper", "ao-update-progress"), "");
+		writeFileSync(join(resources, "wake-helper", "ao-wake"), "");
+		const hook = config.hooks?.postPackage;
+		if (typeof hook !== "function") throw new Error("postPackage hook missing");
+		await expect(hook(config, { platform: "darwin", arch: "arm64", outputPaths: [fixtureDir] })).rejects.toThrow("packaged macOS app icon catalog missing");
+	});
+
+	it("fails packaging when cloudflared was not copied into Resources", async () => {
+		const resources = join(fixtureDir, "AO.app", "Contents", "Resources");
+		mkdirSync(join(resources, "update-helper"), { recursive: true });
+		mkdirSync(join(resources, "wake-helper"), { recursive: true });
+		writeFileSync(join(resources, "update-helper", "ao-update-progress"), "");
+		writeFileSync(join(resources, "wake-helper", "ao-wake"), "");
+		writeFileSync(join(resources, "Assets.car"), "");
+		const dictationHelper = join(resources, "dictation-helper", "Orchestrator.app", "Contents", "MacOS");
+		mkdirSync(dictationHelper, { recursive: true });
+		writeFileSync(join(dictationHelper, "Orchestrator"), "");
+		const hook = config.hooks?.postPackage;
+		if (typeof hook !== "function") throw new Error("postPackage hook missing");
+		await expect(hook(config, { platform: "darwin", arch: "arm64", outputPaths: [fixtureDir] })).rejects.toThrow("packaged cloudflared missing");
 	});
 
 	it.each(["darwin", "linux"] as const)("bundles tmux on %s", (platform) => {
@@ -289,7 +350,7 @@ describe("packaged authentication callback registration", () => {
 	it("declares ao-app in the macOS bundle and Linux package metadata", () => {
 		expect(config.packagerConfig?.protocols).toEqual([
 			{
-				name: "Agent Orchestrator authentication callback",
+				name: "Orchestrator authentication callback",
 				schemes: ["ao-app"],
 			},
 		]);
@@ -317,6 +378,10 @@ describe("packaged native dependencies", () => {
 		if (typeof ignore !== "function") return;
 
 		expect(ignore("/.vite/build/main.js")).toBe(false);
+		// Release source maps go to Sentry, never into the app.
+		expect(ignore("/.vite/build/main.js.map")).toBe(true);
+		expect(ignore("/.vite/renderer/main_window/assets/index-RzpjvxTk.js.map")).toBe(true);
+		expect(ignore("/.vite/renderer/main_window/assets/index-RzpjvxTk.js")).toBe(false);
 		expect(ignore("/node_modules")).toBe(false);
 		expect(ignore("/node_modules/better-sqlite3/build/Release/better_sqlite3.node")).toBe(false);
 		expect(ignore("/node_modules/bindings/bindings.js")).toBe(false);

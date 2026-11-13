@@ -1,5 +1,6 @@
 // @vitest-environment node
-import { createServer, request as httpRequest, type Server } from "node:http";
+import { request as httpsRequest } from "node:https";
+import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import WebSocket, { WebSocketServer } from "ws";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -141,7 +142,7 @@ describe("remote desktop browser routing", () => {
 		expect(preview.href).not.toContain(new URL(host.proxy.base).pathname);
 		// Node does not resolve *.localhost; send the same Host header Chromium uses.
 		const body = await new Promise<string>((resolve, reject) => {
-			const req = httpRequest(`http://127.0.0.1:${preview.port}${preview.pathname}`, { headers: { Host: preview.host } }, (res) => {
+			const req = httpsRequest(`https://127.0.0.1:${preview.port}${preview.pathname}`, { rejectUnauthorized: false, headers: { Host: preview.host } }, (res) => {
 				let body = ""; res.on("data", (chunk) => { body += chunk; }); res.on("end", () => resolve(body));
 			});
 			req.on("error", reject); req.end();
@@ -211,10 +212,14 @@ describe("remote desktop browser routing", () => {
 		expect(execute).toHaveBeenCalledWith(expect.objectContaining({ sessionId: sessionUiKey("project-1", "host-b"), action: "__destroy-session" }), expect.any(AbortSignal));
 	});
 
-	it.each(["/browser-runtime", "/browser-runtime?ignored=1", "/%62rowser-runtime"])("rejects page-origin runtime registration at %s before forwarding credentials", async (path) => {
+	it.each(["/browser-runtime", "/browser-runtime?ignored=1", "/%62rowser-runtime"].flatMap((path) => [
+		{ path, options: { origin: "https://untrusted.example" } },
+		{ path, options: { origin: "app://renderer" } },
+		{ path, options: { headers: { "sec-fetch-site": "same-origin" } } },
+	]))("rejects page-origin runtime registration before forwarding credentials: %j", async ({ path, options }) => {
 		const host = await remote();
 		const url = new URL(`${host.proxy.base}${path}`); url.protocol = "ws:";
-		const ws = new WebSocket(url, { origin: "https://untrusted.example" });
+		const ws = new WebSocket(url, options);
 		await new Promise<void>((resolve) => { ws.on("error", () => resolve()); });
 		expect(host.requests).toEqual([]);
 	});

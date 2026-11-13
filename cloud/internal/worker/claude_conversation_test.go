@@ -17,27 +17,31 @@ func TestRecordClaudeConversation(t *testing.T) {
 	defer func() { claudeProcessRunning = previous }()
 	dataDir := t.TempDir()
 	start := time.Unix(1_800_000_000, 0)
-	if err := RecordClaudeConversation(dataDir, "100", "a", start); err != nil {
+	// Use this process so /proc cannot identify an unrelated process at a
+	// hard-coded pid. Linux records its start time; other platforms leave it empty.
+	pid := strconv.Itoa(os.Getpid())
+	procStart := processStart(pid)
+	if err := RecordClaudeConversation(dataDir, pid, "a", start); err != nil {
 		t.Fatal(err)
 	}
 	// Later hooks in the same conversation keep when it began.
-	if err := RecordClaudeConversation(dataDir, "100", "a", start.Add(time.Minute)); err != nil {
+	if err := RecordClaudeConversation(dataDir, pid, "a", start.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	want := ClaudeConversation{First: "a", Current: "a", Since: start.UnixNano(), Started: start.UnixNano()}
-	if got := ReadClaudeConversations(dataDir)["100"]; got != want {
+	want := ClaudeConversation{First: "a", Current: "a", Since: start.UnixNano(), Started: start.UnixNano(), ProcStart: procStart}
+	if got := ReadClaudeConversations(dataDir)[pid]; got != want {
 		t.Fatalf("record = %+v, want %+v", got, want)
 	}
 	// /clear: a new conversation in the same process.
 	cleared := start.Add(2 * time.Minute)
-	if err := RecordClaudeConversation(dataDir, "100", "b", cleared); err != nil {
+	if err := RecordClaudeConversation(dataDir, pid, "b", cleared); err != nil {
 		t.Fatal(err)
 	}
-	want = ClaudeConversation{First: "a", Current: "b", Since: cleared.UnixNano(), Started: start.UnixNano()}
-	if got := ReadClaudeConversations(dataDir)["100"]; got != want {
+	want = ClaudeConversation{First: "a", Current: "b", Since: cleared.UnixNano(), Started: start.UnixNano(), ProcStart: procStart}
+	if got := ReadClaudeConversations(dataDir)[pid]; got != want {
 		t.Fatalf("record = %+v, want %+v", got, want)
 	}
-	if err := RecordClaudeConversation(dataDir, "200", "c", cleared); err != nil {
+	if err := RecordClaudeConversation(dataDir, strconv.Itoa(os.Getpid()+1), "c", cleared); err != nil {
 		t.Fatal(err)
 	}
 	if got := len(ReadClaudeConversations(dataDir)); got != 2 {

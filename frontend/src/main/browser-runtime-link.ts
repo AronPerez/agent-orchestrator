@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 import type { Duplex } from "node:stream";
 import WebSocket, { createWebSocketStream } from "ws";
 import { StringDecoder } from "node:string_decoder";
+import { HANDSHAKE_CLOSED_BEFORE_ACCEPT } from "../shared/daemon-takeover";
+import type { BrowserRuntimeState } from "./browser-view-host";
 
 const PROTOCOL_VERSION = 4;
 const BACKOFF_INIT_MS = 200;
@@ -22,6 +24,16 @@ type BrowserRuntimeCancel = {
 	type: "cancel";
 	requestId: string;
 };
+
+type Handshake = {
+	accept: () => void;
+	refuse: (error: BrowserRuntimeCommandError | undefined) => void;
+};
+
+const CONNECTING: BrowserRuntimeState = { connected: false, connecting: true, rejected: false };
+const CONNECTED: BrowserRuntimeState = { connected: true, connecting: false, rejected: false };
+const REJECTED: BrowserRuntimeState = { connected: false, connecting: false, rejected: true };
+export const BROWSER_RUNTIME_DISCONNECTED: BrowserRuntimeState = { connected: false, connecting: false, rejected: false };
 
 export type BrowserRuntimeCommandError = {
 	code: string;
@@ -45,6 +57,7 @@ type SessionStateMessage = {
 };
 
 export interface BrowserRuntimeLinkHandle {
+	readonly state: BrowserRuntimeState;
 	readonly runtimeId: string;
 	readonly sessions: readonly string[];
 	attachSession(sessionId: string, takeover: boolean): Promise<BrowserRuntimeSessionState>;
@@ -61,8 +74,14 @@ type BrowserRuntimeLinkOptions = {
 	execute: (command: BrowserRuntimeCommand, signal: AbortSignal) => Promise<unknown>;
 	token?: string;
 	log?: (message: string) => void;
-	onStateChange?: (connected: boolean) => void;
+	onStateChange?: (state: BrowserRuntimeState) => void;
+	onHandshakeRejected?: (reason: string) => void;
 };
+
+function handshakeRejectionReason(error: BrowserRuntimeCommandError | undefined): string {
+	if (error?.code === "BROWSER_RUNTIME_TOKEN_REJECTED") return "invalid-token";
+	return error?.code ?? "handshake-rejected";
+}
 
 export function connectBrowserRuntime(
 	address: string | net.TcpNetConnectOpts | URL,
@@ -71,6 +90,8 @@ export function connectBrowserRuntime(
 	const log = options.log ?? (() => undefined);
 	let disposed = false;
 	let connected = false;
+	let state = CONNECTING;
+	let unansweredStreak = 0;
 	const runtimeId = options.runtimeId ?? randomUUID();
 	const sessions = new Set(options.sessions);
 	let helloSessions = new Set<string>();
@@ -103,10 +124,14 @@ export function connectBrowserRuntime(
 		string,
 		{ command: BrowserRuntimeCommand; target: Duplex; epoch: number }
 	>();
+	const setState = (next: BrowserRuntimeState) => {
+		if (disposed || state === next) return;
+		state = next;
+		options.onStateChange?.(state);
+	};
 	const setConnected = (value: boolean) => {
 		if (connected === value) return;
 		connected = value;
-		options.onStateChange?.(value);
 		if (!value) {
 			for (const requestId of claims.keys()) settleClaim(requestId);
 		}
@@ -242,7 +267,7 @@ export function connectBrowserRuntime(
 		}
 	};
 
-	const consumeLine = (line: string, target: Duplex, epoch: number) => {
+	const consumeLine = (line: string, target: Duplex, epoch: number, handshake: Handshake) => {
 		if (!line.trim()) return;
 		let message: BrowserRuntimeCommand | BrowserRuntimeCancel | SessionStateMessage | { type: "hello-ok" | "hello-rejected" | "rejected" | "ping"; error?: BrowserRuntimeCommandError };
 		try {
@@ -253,7 +278,8 @@ export function connectBrowserRuntime(
 		if (!message || typeof message !== "object") return;
 		if (message.type === "hello-ok") {
 			runtimeError = undefined;
-			setConnected(true);
+			handshake.accept();
+			if (!connected) return;
 			for (const sessionId of sessions) {
 				if (!helloSessions.has(sessionId) && ![...claims.values()].some((claim) => claim.sessionId === sessionId)) void attachSession(sessionId, false);
 			}
@@ -264,6 +290,7 @@ export function connectBrowserRuntime(
 			runtimeError = isCommandError(message.error) ? message.error : { code: "BROWSER_RUNTIME_REJECTED", message: "Browser runtime registration was rejected" };
 			setConnected(false);
 			publishSessions();
+			handshake.refuse(runtimeError);
 			target.destroy();
 			return;
 		}
@@ -312,7 +339,7 @@ export function connectBrowserRuntime(
 		});
 	};
 
-	const consume = (chunk: Buffer, target: Duplex, epoch: number) => {
+	const consume = (chunk: Buffer, target: Duplex, epoch: number, handshake: Handshake) => {
 		if (socket !== target || connectionEpoch !== epoch) return;
 		buffer += decoder.write(chunk);
 		for (;;) {
@@ -331,7 +358,7 @@ export function connectBrowserRuntime(
 				target.destroy();
 				return;
 			}
-			consumeLine(line, target, epoch);
+			consumeLine(line, target, epoch, handshake);
 		}
 	};
 
@@ -353,22 +380,54 @@ export function connectBrowserRuntime(
 		const ws = address instanceof URL ? new WebSocket(address, { handshakeTimeout: 8_000, maxPayload: MAX_COMMAND_BYTES }) : null;
 		const next = ws ? createWebSocketStream(ws, { decodeStrings: false }) : typeof address === "string" ? net.connect(address) : net.connect(address as net.TcpNetConnectOpts);
 		socket = next;
+		let opened = false;
+		let accepted = false;
+		let refused = false;
+		// A TCP connect is not an accepted link: only the daemon's answer to the
+		// hello settles the handshake. Treating connect as success flipped the state
+		// and reset the backoff on every refused attempt (#6466).
+		const handshake: Handshake = {
+			accept: () => {
+				if (accepted || refused || socket !== next || connectionEpoch !== epoch) return;
+				accepted = true;
+				unansweredStreak = 0;
+				backoff = BACKOFF_INIT_MS;
+				setConnected(true);
+				setState(CONNECTED);
+				log("browser-runtime-link: connected");
+			},
+			refuse: (error) => {
+				if (accepted || refused || socket !== next || connectionEpoch !== epoch) return;
+				refused = true;
+				// Keep the daemon's reason: a stale token, a protocol mismatch and a
+				// malformed hello are all refusals, with different causes.
+				const reason = error ? `${error.code}: ${error.message}` : "no reason given";
+				log(
+					`browser-runtime-link: the Orchestrator daemon refused this app's browser runtime (${reason}); ` +
+						"run `ao stop`, then reopen Orchestrator.",
+				);
+				setState({ ...REJECTED, rejectionCode: error?.code });
+				// A refused token cannot be retried into acceptance, so the caller may
+				// have to retire the daemon it adopted instead of waiting for a redial.
+				options.onHandshakeRejected?.(handshakeRejectionReason(error));
+			},
+		};
 		const ready = () => {
 			if (disposed) {
 				next.destroy();
 				return;
 			}
+			opened = true;
 			// Both transports must acknowledge the v4 registration before accepting claims.
 			helloSessions = new Set(sessions);
 			void send({ type: "hello", version: PROTOCOL_VERSION, runtimeId, sessions: [...helloSessions], token: options.token }, next, epoch).catch((error) => {
 				log(`browser-runtime-link: hello failed: ${String(error)}`);
 				next.destroy();
 			});
-			log("browser-runtime-link: connected");
 		};
 		if (ws) ws.on("open", ready);
 		else next.on("connect", ready);
-		next.on("data", (chunk) => consume(chunk, next, epoch));
+		next.on("data", (chunk) => consume(chunk, next, epoch, handshake));
 		next.on("error", (error) => log(`browser-runtime-link: error: ${error.message}`));
 		let connectionTornDown = false;
 		const tearDownConnection = () => {
@@ -378,6 +437,26 @@ export function connectBrowserRuntime(
 			cancelConnectionCommands();
 			socket = null;
 			connectionEpoch += 1;
+			// The same token would be refused again. Stay down until the user asks to
+			// reconnect or the daemon changes, both of which build a new link.
+			if (refused) return;
+			if (accepted) {
+				// A daemon restart or replaced link. Redial at once, and report a
+				// disconnect only if that attempt fails too.
+				setState(CONNECTING);
+			} else {
+				// An unreachable daemon, a transport error, or an older daemon closing on
+				// a hello it refused. None of these proves a refusal, so keep retrying
+				// without resetting the backoff.
+				unansweredStreak += 1;
+				if (unansweredStreak === 1) log("browser-runtime-link: link closed before the daemon answered the hello; retrying");
+				// A daemon predating hello-rejected refuses a stale token by simply
+				// hanging up, so this is the only signal the recovery path gets for it.
+				// An accepted link that drops is an ordinary disconnect, reported above
+				// instead, and must never retire a healthy daemon.
+				if (opened) options.onHandshakeRejected?.(HANDSHAKE_CLOSED_BEFORE_ACCEPT);
+				setState(BROWSER_RUNTIME_DISCONNECTED);
+			}
 			if (!disposed) scheduleReconnect();
 		};
 		// Cancel while the socket may still accept writes; 'close' can arrive too late.
@@ -404,8 +483,10 @@ export function connectBrowserRuntime(
 		});
 	}
 
+	options.onStateChange?.(state);
 	connect();
 	return {
+		get state() { return state; },
 		runtimeId,
 		get sessions() { return [...sessions]; },
 		sessionState,
@@ -417,6 +498,7 @@ export function connectBrowserRuntime(
 		reconnect() {
 			if (disposed) return;
 			setConnected(false);
+			setState(CONNECTING);
 			clearRetry();
 			connect();
 		},

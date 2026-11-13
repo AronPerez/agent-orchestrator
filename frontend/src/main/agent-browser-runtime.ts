@@ -115,7 +115,10 @@ export type AgentBrowserRuntimeOptions = {
 
 export type AgentBrowserJSONResult = Record<string, unknown>;
 
-export type AgentBrowserBridge = Pick<AgentBrowserCDPBridge, "start" | "close">;
+export type AgentBrowserBridge = Pick<
+	AgentBrowserCDPBridge,
+	"start" | "close" | "reconcileTargets" | "beginCommand" | "endCommand"
+>;
 
 export type NativeProcessRunner = (
 	binaryPath: string,
@@ -188,6 +191,23 @@ export class AgentBrowserRuntime {
 		const runtime = await this.ensureSession(sessionId, provider);
 		await this.touchRuntimeRoot();
 		const environment = this.environment(runtime);
+		runtime.bridge.reconcileTargets();
+		await runtime.bridge.beginCommand();
+		try {
+			return await this.runCommand(args, environment, signal, timeoutMs);
+		} finally {
+			await runtime.bridge.endCommand().catch((error: unknown) => {
+				this.log(`agent-browser bridge quiet failed: ${String(error)}`);
+			});
+		}
+	}
+
+	private async runCommand(
+		args: string[],
+		environment: NodeJS.ProcessEnv,
+		signal: AbortSignal | undefined,
+		timeoutMs: number,
+	): Promise<AgentBrowserRunResult> {
 		// The native daemon can expire and be recreated independently while this
 		// AO session runtime remains alive. Its replacement starts streaming by
 		// default, so reassert the input-surface policy immediately before every
@@ -223,44 +243,50 @@ export class AgentBrowserRuntime {
 		signal?: AbortSignal,
 	): Promise<AgentBrowserJSONResult> {
 		if (action === "type") return this.typeByAppend(sessionId, args, provider, signal);
-		if (action === "tab-select" || (action === "tab-close" && args.tabId !== undefined)) {
-			const tabId = stringValue(args.tabId, "tabId is required");
-			const mismatch = () => runtimeError("BROWSER_TARGET_MISMATCH", `Browser automation could not target AO tab ${tabId}`);
-			if (!provider.listTargets().some((target) => target.id === tabId)) throw mismatch();
-			// Native tN IDs are allocated independently, and reset when its daemon restarts.
-			const listed = await this.runAction(sessionId, "tabs", {}, provider, signal);
-			const tab = Array.isArray(listed.tabs)
-				? listed.tabs.find((candidate) => isRecord(candidate) && candidate.targetId === tabId)
-				: undefined;
-			if (!isRecord(tab) || typeof tab.tabId !== "string" || !/^t[1-9]\d*$/.test(tab.tabId)) throw mismatch();
-			args = { ...args, tabId: tab.tabId };
+		const nativeArgs = nativeArgumentsForAction(action, args);
+		const requestedTabId = action === "tab-select" || action === "tab-close"
+			? optionalStringValue(args.tabId)
+			: undefined;
+		if (action === "tab-close" && requestedTabId) {
+			if (this.disposed) throw runtimeError("AGENT_BROWSER_RUNTIME_CLOSED", "Browser automation runtime is closed");
+			if (signal?.aborted) throw runtimeError("AGENT_BROWSER_CANCELLED", "agent-browser command was cancelled");
+			if (!provider.listTargets().some((target) => target.id === requestedTabId)) {
+				throw runtimeError("AGENT_BROWSER_COMMAND_FAILED", `Unable to resolve Orchestrator browser tab ${requestedTabId}`);
+			}
+			// A native daemon restart can renumber tabs between list and close.
+			// Close the exact AO-owned target, then notify an existing daemon.
+			await provider.closeTarget(requestedTabId);
+			this.sessions.get(sessionId)?.bridge.reconcileTargets();
+			return { tabId: requestedTabId, targetId: requestedTabId, closed: true, untrustedExternalContent: true };
 		}
-		const result = await this.run(sessionId, [...nativeArgumentsForAction(action, args), "--json"], provider, signal);
-		return parseAgentBrowserJSON(result.stdout);
+		if (requestedTabId) {
+			// AO target IDs and the native daemon's sequential tab IDs have
+			// independent lifetimes. Resolve by CDP identity for every selection.
+			const listed = await this.run(sessionId, ["tab", "list", "--json"], provider, signal);
+			const tabs = parseAgentBrowserJSON(listed.stdout).tabs;
+			const matches = Array.isArray(tabs)
+				? tabs.filter((tab) => isRecord(tab) && tab.targetId === requestedTabId)
+				: [];
+			const tab = matches.length === 1 ? matches[0] : undefined;
+			if (!isRecord(tab) || typeof tab.tabId !== "string" || !/^t[1-9]\d*$/.test(tab.tabId)) {
+				throw runtimeError("AGENT_BROWSER_COMMAND_FAILED", `Unable to resolve Orchestrator browser tab ${requestedTabId}`);
+			}
+			nativeArgs[nativeArgs.length - 1] = tab.tabId;
+		}
+		const result = await this.run(sessionId, [...nativeArgs, "--json"], provider, signal);
+		const parsed = parseAgentBrowserJSON(result.stdout);
+		if (requestedTabId && parsed.targetId !== requestedTabId) {
+			throw runtimeError("AGENT_BROWSER_COMMAND_FAILED", `Browser automation did not target Orchestrator tab ${requestedTabId}`);
+		}
+		if (action === "tab-new" || action === "tab-select" || action === "tab-close") {
+			if (typeof parsed.targetId !== "string" || !parsed.targetId) {
+				throw runtimeError("AGENT_BROWSER_COMMAND_FAILED", "Browser automation returned no tab target identity");
+			}
+			parsed.tabId = parsed.targetId;
+		}
+		return parsed;
 	}
 
-	/**
-	 * `type` appends by rewriting the whole field, because on a React controlled
-	 * input the caret is pinned at 0 and cannot be moved.
-	 *
-	 * agent-browser 0.33.1 inserts at the caret. On a controlled input the caret
-	 * never advances after an insertion — measured: it is already 0 at the `input`
-	 * event, which fires synchronously during the insertion and before React's own
-	 * listener runs. So every insertion lands at position 0. Typing character by
-	 * character therefore produced REVERSED text, and a single whole-string
-	 * insertion (the previous fix) still PREPENDED onto whatever was already there:
-	 * `type "abcd"` then `type "efgh"` gave "efghabcd".
-	 *
-	 * Reading the field and filling it with `existing + text` sidesteps the caret
-	 * entirely, which is the only thing that works when the caret cannot be
-	 * positioned. Plain inputs are unaffected either way — their caret advances
-	 * normally — so this is chosen for correctness on controlled inputs, not
-	 * because the old path failed everywhere.
-	 *
-	 * This is the SECOND workaround over the same upstream defect. The bug is in
-	 * agent-browser (pinned 0.33.1), not in AO, and still deserves an upstream
-	 * report — that is the fix that would let this be deleted.
-	 */
 	private async typeByAppend(
 		sessionId: string,
 		args: Record<string, unknown>,
@@ -323,7 +349,7 @@ export class AgentBrowserRuntime {
 			const annotated = options.annotate === true ? this.nativeAnnotations(result.stdout) : undefined;
 			const image = await readFile(target);
 			if (image.length > MAX_SCREENSHOT_BYTES) {
-				throw runtimeError("AGENT_BROWSER_OUTPUT_TOO_LARGE", "Browser screenshot exceeded AO's size limit");
+				throw runtimeError("AGENT_BROWSER_OUTPUT_TOO_LARGE", "Browser screenshot exceeded Orchestrator's size limit");
 			}
 			const { width, height } = pngDimensions(image);
 			return {
@@ -563,7 +589,7 @@ export class AgentBrowserRuntime {
 		} catch {
 			throw runtimeError(
 				"AGENT_BROWSER_NOT_INSTALLED",
-				`AO's browser automation component was not found at ${this.options.binaryPath}. Reinstall or rebuild the desktop app.`,
+				`Orchestrator's browser automation component was not found at ${this.options.binaryPath}. Reinstall or rebuild the desktop app.`,
 			);
 		}
 	}
@@ -925,22 +951,22 @@ export function validateAgentBrowserArguments(args: string[]): void {
 	}
 	const command = args[0].toLowerCase();
 	if (!ALLOWED_COMMANDS.has(command)) {
-		throw runtimeError("AGENT_BROWSER_COMMAND_BLOCKED", `agent-browser command is not enabled in AO: ${command}`);
+		throw runtimeError("AGENT_BROWSER_COMMAND_BLOCKED", `agent-browser command is not enabled in Orchestrator: ${command}`);
 	}
 	for (const arg of args) {
 		const lower = arg.toLowerCase();
 		if (FORBIDDEN_FLAGS.some((flag) => lower === flag || lower.startsWith(`${flag}=`))) {
-			throw runtimeError("AGENT_BROWSER_COMMAND_BLOCKED", `agent-browser flag is managed by AO: ${arg}`);
+			throw runtimeError("AGENT_BROWSER_COMMAND_BLOCKED", `agent-browser flag is managed by Orchestrator: ${arg}`);
 		}
 	}
 	if (command === "open" && args[1] && !args[1].startsWith("-")) {
 		assertHTTPURL(args[1]);
 	}
 	if (command === "diff" && args[1]?.toLowerCase() !== "snapshot") {
-		throw runtimeError("AGENT_BROWSER_COMMAND_BLOCKED", "Only snapshot diff is enabled in AO");
+		throw runtimeError("AGENT_BROWSER_COMMAND_BLOCKED", "Only snapshot diff is enabled in Orchestrator");
 	}
 	if (command === "get" && args[1]?.toLowerCase() === "cdp-url") {
-		throw runtimeError("AGENT_BROWSER_COMMAND_BLOCKED", "The private AO CDP endpoint cannot be displayed");
+		throw runtimeError("AGENT_BROWSER_COMMAND_BLOCKED", "The private Orchestrator CDP endpoint cannot be displayed");
 	}
 }
 
@@ -979,7 +1005,7 @@ async function runNativeProcess(
 		): Buffer<ArrayBufferLike> => {
 			if (current.length + chunk.length > MAX_OUTPUT_BYTES) {
 				child.kill();
-				finish(runtimeError("AGENT_BROWSER_OUTPUT_TOO_LARGE", "agent-browser output exceeded AO's limit"));
+				finish(runtimeError("AGENT_BROWSER_OUTPUT_TOO_LARGE", "agent-browser output exceeded Orchestrator's limit"));
 				return current;
 			}
 			return Buffer.concat([current, chunk]);
@@ -1038,7 +1064,7 @@ function assertAgentBrowserSocketPath(socketDir: string, namespace: string, plat
 	if (byteLength > AGENT_BROWSER_UNIX_SOCKET_PATH_MAX_BYTES) {
 		throw runtimeError(
 			"AGENT_BROWSER_START_FAILED",
-			`Agent Browser socket path is ${byteLength} bytes; Unix supports at most ${AGENT_BROWSER_UNIX_SOCKET_PATH_MAX_BYTES}. AO needs a shorter socket directory.`,
+			`Agent Browser socket path is ${byteLength} bytes; Unix supports at most ${AGENT_BROWSER_UNIX_SOCKET_PATH_MAX_BYTES}. Orchestrator needs a shorter socket directory.`,
 		);
 	}
 }

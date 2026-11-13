@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check } from "lucide-react";
+import { Check } from "@/components/app-icons";
 import { useTranslation } from "react-i18next";
 import type { components } from "../../api/schema";
 import { agentModelsQueryOptions, type AgentModelCatalog } from "../hooks/useAgentModelsQuery";
+import { useOfferedModels } from "../hooks/useOfferedModels";
 import { agentLabel } from "../lib/agent-options";
 import { isConcreteModelID, modelChoiceLabel } from "../lib/agent-model-choices";
 import {
@@ -44,7 +45,7 @@ export function reviewerTrustWarning(harness: string): string | null {
 		return "Experimental host-trusted reviewer: this agent is not OS-isolated and may retain shell, plugin, editor, and network access.";
 	}
 	if (USER_APPROVED_REVIEWERS.has(harness)) {
-		return "Experimental user-approved reviewer: AO keeps the agent's native permission prompts enabled; review execution may pause for your approval.";
+		return "Experimental user-approved reviewer: Orchestrator keeps the agent's native permission prompts enabled; review execution may pause for your approval.";
 	}
 	return null;
 }
@@ -230,7 +231,11 @@ function ReviewerHarnessOption({
 	const effectivePersistHarness = persistHarness || resolvedHarness;
 	const isCurrentHarness = effectiveCurrentHarness !== "" && effectiveCurrentHarness === effectivePersistHarness;
 	const isCurrentDefaultSelection = isCurrentHarness && currentModel === "" && currentMode === "";
-	const options = modelOptions(catalog);
+	const { models: offeredModels } = useOfferedModels(resolvedHarness, catalog?.models, {
+		hostId,
+		keep: isCurrentHarness ? [currentModel, currentMode] : [],
+	});
+	const options = modelOptions(catalog, offeredModels);
 	const catalogKnown = catalogQuery.data !== undefined || catalogQuery.isFetched;
 	const defaultModel = catalog?.models?.find((item) => item.isDefault && isConcreteModelID(item.id))?.id;
 	const selectDefault = () => onSelect(persistHarness, {});
@@ -313,10 +318,10 @@ function ReviewerHarnessOption({
 	);
 }
 
-function modelOptions(catalog?: AgentModelCatalog): Array<{ kind: "model" | "mode"; label: string; value: string }> {
+function modelOptions(catalog?: AgentModelCatalog, models = catalog?.models ?? []): Array<{ kind: "model" | "mode"; label: string; value: string }> {
 	if (!catalog) return [];
 	if (catalog.selectionMode !== "catalog" && catalog.selectionMode !== "mode" && catalog.selectionMode !== "text") return [];
-	return (catalog.models ?? []).filter((item) => isConcreteModelID(item.id)).map((item) => ({
+	return models.filter((item) => isConcreteModelID(item.id)).map((item) => ({
 		kind: catalog.selectionMode === "mode" ? "mode" : "model",
 		label: modelChoiceLabel(item),
 		value: item.id,

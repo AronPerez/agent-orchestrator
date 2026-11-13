@@ -36,13 +36,13 @@ function textIn(tree: Root): string {
 describe("canonicalLanguage", () => {
 	it("resolves the aliases agents actually write", () => {
 		expect(canonicalLanguage("ts")).toBe("typescript");
-		expect(canonicalLanguage("tsx")).toBe("typescript");
+		expect(canonicalLanguage("tsx")).toBe("tsx");
 		expect(canonicalLanguage("sh")).toBe("bash");
 		expect(canonicalLanguage("zsh")).toBe("bash");
 		expect(canonicalLanguage("console")).toBe("bash");
 		expect(canonicalLanguage("golang")).toBe("go");
 		expect(canonicalLanguage("yml")).toBe("yaml");
-		expect(canonicalLanguage("html")).toBe("xml");
+		expect(canonicalLanguage("html")).toBe("html");
 		expect(canonicalLanguage("patch")).toBe("diff");
 	});
 

@@ -23,7 +23,6 @@ import { NAV_ROW_HIGHLIGHT_HOST_CLASS, NavRowHighlight } from "./NavRowHighlight
 import { cn } from "./utils";
 import { UserAvatar } from "./UserAvatar";
 
-/** "artifacts" has no tab: the host opens it from a menu it renders in `headerActions`. */
 export type InspectorView = "summary" | "reviews" | "browser" | "sideChat" | "files" | "artifacts";
 
 export type InspectorTab = {
@@ -72,10 +71,6 @@ export function SessionInspectorShellView({
 	summaryView?: ReactNode;
 	tabs: InspectorTab[];
 }) {
-	const prefersReducedMotion = useReducedMotion();
-	const tabIndicatorTransition = prefersReducedMotion
-		? { duration: 0 }
-		: { type: "spring" as const, duration: 0.3, bounce: 0 };
 
 	if (loadingText) {
 		return (
@@ -140,22 +135,13 @@ export function SessionInspectorShellView({
 								aria-selected={activeView === tab.id}
 								tabIndex={activeView === tab.id ? 0 : -1}
 								className={cn(
-									"session-inspector__tab-button relative inline-flex size-control-md shrink-0 items-center justify-center rounded-md p-0 font-semibold text-passive transition-[color] duration-fast hover:bg-interactive-hover hover:text-foreground",
+									"session-inspector__tab-button relative inline-flex size-control-md shrink-0 items-center justify-center rounded-md border border-transparent p-0 font-medium text-passive outline-none hover:bg-interactive-hover hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2",
 									activeView === tab.id && "text-foreground",
 								)}
 								onClick={() => onViewChange(tab.id)}
 								onKeyDown={(event) => selectAdjacentTab(event, index)}
 								title={tab.label}
 							>
-								{activeView === tab.id ? (
-									<motion.span
-										aria-hidden="true"
-										className="absolute inset-0 rounded-md bg-interactive-active"
-										initial={false}
-										layoutId="session-inspector-tab-indicator"
-										transition={tabIndicatorTransition}
-									/>
-								) : null}
 								<span className="relative z-[1] inline-flex shrink-0 [&_svg]:size-icon-md">
 									{tab.icon}
 									{tab.badge ? (
@@ -194,6 +180,8 @@ export function SessionInspectorShellView({
 					inspectorBodyBaseClass,
 					!isVisible && "invisible pointer-events-none",
 					activeView !== "browser" && activeView !== "files" && activeView !== "sideChat" && activeView !== "artifacts" && inspectorScrollableBodyClass,
+					// Read-only details opt out of the app-wide `user-select: none` so they can be copied.
+					(activeView === "summary" || activeView === "reviews") && "select-text",
 					(activeView === "sideChat" || activeView === "artifacts") && "p-0 overflow-hidden",
 					activeView === "browser" &&
 						!browserPoppedOut &&
@@ -215,15 +203,18 @@ export function SessionInspectorShellView({
 
 export function InspectorSection({
 	children,
+	defaultOpen = true,
 	surface = true,
 	title,
 }: {
 	children: ReactNode;
+	/** Off for reference detail the reader opens on demand (a Setup log). */
+	defaultOpen?: boolean;
 	surface?: boolean;
 	title: string;
 }) {
 	const contentId = useId();
-	const [open, setOpen] = useState(true);
+	const [open, setOpen] = useState(defaultOpen);
 	const reduceMotion = useReducedMotion();
 	// Header: 6px slot + 6px button inset puts the label 12px from the edge; collapsed headers sit 4px apart.
 	return (
@@ -273,6 +264,7 @@ export function SessionInspectorSummaryView({
 	pullRequestCards,
 	pullRequestTitle,
 	reviews,
+	scripts,
 	usage,
 	workers,
 }: {
@@ -288,6 +280,8 @@ export function SessionInspectorSummaryView({
 	pullRequestCards?: ReactNode;
 	pullRequestTitle?: string;
 	reviews?: ReactNode;
+	/** The project's Setup and Cleanup runs (Cloud sessions), just before the activity. */
+	scripts?: ReactNode;
 	usage?: ReactNode;
 	/**
 	 * The sessions this orchestrator spawned. Rendered first: for an
@@ -312,6 +306,7 @@ export function SessionInspectorSummaryView({
 			) : null}
 			{reviews}
 			{completion}
+			{scripts}
 			<InspectorSection title={activityTitle}>{activity}</InspectorSection>
 			{usage}
 		</div>
@@ -327,6 +322,8 @@ export type InspectorPullRequest = PRSummaryMetadata & {
 	state: InspectorPullRequestState;
 	stateLabel: string;
 	title?: string;
+	/** owner/name, shown before the number when a session's PRs span several repositories. */
+	repositoryLabel?: string;
 	reviewDetailsAction?: ReactNode;
 };
 
@@ -338,29 +335,57 @@ const prStateTone: Record<InspectorPullRequestState, string> = {
 };
 
 export function InspectorPullRequestCardView({
+	compact = false,
 	countNounLabel,
+	description,
+	details,
 	externalIcon,
 	externalLink: ExternalLink,
+	headerless = false,
 	mergeAction,
 	mergeError,
 	openLabel,
+	openedViaLabel,
 	pr,
 	pullRequestIcon,
+	readinessDetails,
 	statusNotice,
 }: {
+	/**
+	 * The PR view's denser card: the author and diff stats on one line, and one
+	 * dropdown for the facts that decide the merge instead of every status row.
+	 */
+	compact?: boolean;
 	countNounLabel: CountNounLabel;
+	/** The PR body, shown under the number and state, before the branches. */
+	description?: ReactNode;
+	/** Shown under the author and diff stats, such as labels and requested reviewers. */
+	details?: ReactNode;
 	externalIcon?: ReactNode;
 	externalLink: ExternalLinkComponent;
+	/**
+	 * Drop the card frame, title and number: the host shows them in its own
+	 * header row, as the inspector's PR card does with its own state row.
+	 */
+	headerless?: boolean;
 	mergeAction?: ReactNode;
 	mergeError?: string | null;
 	openLabel: string;
+	openedViaLabel?: string;
 	pr: InspectorPullRequest;
 	pullRequestIcon?: ReactNode;
+	/** More under a merge-readiness row, keyed by the row. */
+	readinessDetails?: Partial<Record<string, ReactNode>>;
 	statusNotice?: ReactNode;
 }) {
+	const Frame = headerless ? "div" : "article";
 	return (
-		<article className="min-w-0 w-full rounded-lg border border-(--color-border-settings-input) bg-(--color-bg-settings-input) px-3 py-2.5">
-			{pr.title ? (
+		<Frame
+			className={headerless
+				? "min-w-0 w-full pb-2"
+				: "min-w-0 w-full rounded-lg border border-(--color-border-settings-input) bg-(--color-bg-settings-input) px-3 py-2.5"}
+		>
+			{!headerless && pr.title ? (
 				<ExternalLink
 					className="inline text-sm font-semibold leading-snug tracking-tight text-settings-label underline-offset-2 hover:underline focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
 					href={pr.href}
@@ -368,14 +393,14 @@ export function InspectorPullRequestCardView({
 					{pr.title}
 				</ExternalLink>
 			) : null}
-			<div className={cn("flex min-w-0 items-center gap-2", pr.title && "mt-1.5")}>
+			{headerless ? null : <div className={cn("flex min-w-0 items-center gap-2", pr.title && "mt-1.5")}>
 				<ExternalLink
 					ariaLabel={openLabel}
 					className="inline-flex min-w-0 items-center gap-1 font-mono text-xs font-medium text-settings-label decoration-muted-foreground underline-offset-2 hover:text-settings-label hover:underline focus-visible:rounded-sm focus-visible:text-settings-label focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
 					href={pr.href}
 				>
 					{pullRequestIcon ?? <GitPullRequestIcon className="size-icon-sm shrink-0" />}
-					<span>PR #{pr.number}</span>
+					<span className="truncate">{pr.repositoryLabel ? `${pr.repositoryLabel} ` : ""}PR #{pr.number}</span>
 					{externalIcon ?? <ArrowUpRightIcon className="size-icon-2xs shrink-0" />}
 				</ExternalLink>
 				<span
@@ -389,20 +414,26 @@ export function InspectorPullRequestCardView({
 				>
 					{pr.stateLabel}
 				</span>
-			</div>
+			</div>}
+			{description}
 			<PRSummaryMeta
 				className="mt-1.5"
 				countNounLabel={countNounLabel}
 				externalLink={ExternalLink}
+				inline={compact}
+				openedViaLabel={openedViaLabel}
 				pr={pr}
 			/>
+			{details}
 			{pr.state !== "merged" ? (
 				<>
 					<PRCardStatusSummary
 						action={mergeAction}
 						className="mt-2"
+						compactReadiness={compact}
 						externalLink={ExternalLink}
 						presentation={pr.card}
+						readinessDetails={readinessDetails}
 						reviewDetailsAction={pr.reviewDetailsAction}
 					/>
 					{statusNotice}
@@ -413,7 +444,7 @@ export function InspectorPullRequestCardView({
 					) : null}
 				</>
 			) : null}
-		</article>
+		</Frame>
 	);
 }
 
@@ -539,6 +570,8 @@ export type InspectorReviewGroup = {
 	};
 	meta: string;
 	number: number;
+	/** Unique per PR; a multi-repository session can repeat a number across repositories. Defaults to the number. */
+	key?: string;
 	title: string;
 	verdict?: InspectorVerdict;
 };
@@ -621,7 +654,7 @@ export function InspectorReviewsView({
 				{groups.map((group) => (
 					<ReviewDisclosure
 						defaultOpen={false}
-						key={group.number}
+						key={group.key ?? group.number}
 						meta={group.meta}
 						title={group.title}
 						verdict={group.verdict}
