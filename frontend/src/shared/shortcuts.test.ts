@@ -13,9 +13,12 @@ import {
 	matchesPreviousTabShortcut,
 	defaultShortcutBindings,
 	matchesShortcutBinding,
+	shortcutBindingAccelerator,
 	shortcutBindingKeys,
 	shortcutBindingLabel,
 	shortcutBindingValidationError,
+	type AppShortcutId,
+	type ShortcutBinding,
 	type ShortcutChord,
 } from "./shortcuts";
 
@@ -126,6 +129,8 @@ describe("default shortcuts", () => {
 	// [id, chord] pairs a user can press on macOS. ⌘⇧[ reports key "{" with
 	// code BracketLeft, so those chords carry the physical code like Electron does.
 	it.each([
+		["find", chord({ key: "f", meta: true })],
+		["find-in-chat", chord({ key: "f", meta: true })],
 		["new-session", chord({ key: "n", meta: true })],
 		["new-shell-terminal", chord({ key: "t", meta: true })],
 		["close-shell-terminal", chord({ key: "w", meta: true })],
@@ -138,7 +143,7 @@ describe("default shortcuts", () => {
 		["toggle-sidebar", chord({ key: "b", meta: true })],
 		["toggle-inspector", chord({ key: "b", code: "KeyB", meta: true, alt: true })],
 		["toggle-terminal", chord({ key: "`", code: "Backquote", ctrl: true })],
-		["toggle-diff", chord({ key: "D", meta: true, shift: true })],
+		["toggle-diff", chord({ key: "Î", code: "KeyD", alt: true, shift: true })],
 		["toggle-inspector", chord({ key: "B", meta: true, shift: true })],
 		["jump-to-session", chord({ key: "1", meta: true })],
 		["jump-to-session", chord({ key: "9", meta: true })],
@@ -158,8 +163,20 @@ describe("default shortcuts", () => {
 		["open-in-editor", chord({ key: "o", meta: true })],
 		["copy-session-path", chord({ key: "C", meta: true, shift: true })],
 		["model-picker", chord({ key: "M", meta: true, shift: true })],
+		["split-shell-terminal", chord({ key: "d", meta: true })],
+		["split-shell-terminal-down", chord({ key: "D", meta: true, shift: true })],
+		["dictate", chord({ key: "∂", code: "KeyD", alt: true })],
+		["open-orchestrator", chord({ key: "O", meta: true, shift: true })],
 	] as const)("macOS binds %s to its chord", (id, pressed) => {
 		expect(matchesAppShortcut(id, pressed, true)).toBe(true);
+	});
+
+	it.each([
+		["split-shell-terminal", "D"],
+		["split-shell-terminal-down", "_"],
+	] as const)("Windows/Linux binds %s without taking Alt+Shift layout switching", (id, key) => {
+		expect(matchesAppShortcut(id, chord({ key, ctrl: true, alt: true, shift: true }), false)).toBe(true);
+		expect(matchesAppShortcut(id, chord({ key, alt: true, shift: true }), false)).toBe(false);
 	});
 
 	it("tells ⌘[ (history) apart from ⌘⇧[ (previous session)", () => {
@@ -185,7 +202,7 @@ describe("default shortcuts", () => {
 		expect(matchesAppShortcut("jump-to-session", chord({ key: "a", meta: true }), true)).toBe(false);
 	});
 
-	it.each([true, false])("never gives two commands the same chord (macOS: %s)", (isMac) => {
+	it.each([true, false])("keeps default chords unique except contextual Find aliases (macOS: %s)", (isMac) => {
 		const seen = new Map<string, string>();
 		for (const { id } of APP_SHORTCUTS) {
 			for (const binding of defaultShortcutBindings(id, isMac)) {
@@ -196,7 +213,9 @@ describe("default shortcuts", () => {
 					binding.shift,
 					binding.alt,
 				].join("|");
-				expect(seen.get(signature), `${id} collides with ${seen.get(signature)}`).toBeUndefined();
+				const previous = seen.get(signature);
+				if (id === "find-in-chat" && previous === "find") continue;
+				expect(previous, `${id} collides with ${previous}`).toBeUndefined();
 				seen.set(signature, id);
 			}
 		}
@@ -287,7 +306,8 @@ describe("shortcut binding matching and validation", () => {
 			for (const { id } of APP_SHORTCUTS) {
 				for (const bound of defaultShortcutBindings(id, isMac)) {
 					if (/^[a-z0-9]$/i.test(bound.key)) {
-						expect(bound.code === undefined || bound.code === "KeyB", `${id} carries code ${bound.code}`).toBe(true);
+						// Option+letter types a character on macOS, so those chords match the physical key.
+						expect(bound.code === undefined || (bound.alt && ["KeyB", "KeyD"].includes(bound.code)), `${id} carries code ${bound.code}`).toBe(true);
 					}
 				}
 			}
@@ -317,12 +337,10 @@ describe("shortcut binding matching and validation", () => {
 
 	it("keeps Windows/Linux defaults off bare terminal-owned chords other than the yielding ones", () => {
 		const readline = ["a", "e", "k", "u", "w", "r", "p", "n", "b", "f", "l", "y", "t", "d", "c", "z"];
-		const yielding = new Set(["k", "p", "w", "t", "b"]);
+		const yielding = new Set(["k", "p", "w", "t", "b", "f"]);
 		for (const key of readline) {
 			if (yielding.has(key)) continue;
 			for (const { id } of APP_SHORTCUTS) {
-				// Board find is renderer-local, never a main-process terminal intercept.
-				if (id === "find") continue;
 				expect(matchesAppShortcut(id, chord({ key, ctrl: true }), false), `${id} steals Ctrl+${key}`).toBe(false);
 			}
 		}
@@ -369,19 +387,30 @@ describe("shortcut binding matching and validation", () => {
 	});
 });
 
-describe("find shortcut", () => {
-	it("defaults to Command+F on macOS and Ctrl+F on Windows/Linux", () => {
-		expect(matchesAppShortcut("find", chord({ key: "f", meta: true }), true)).toBe(true);
-		expect(matchesAppShortcut("find", chord({ key: "F", ctrl: true }), false)).toBe(true);
-		expect(matchesAppShortcut("find", chord({ key: "f", ctrl: true }), true)).toBe(false);
-		expect(matchesAppShortcut("find", chord({ key: "f", meta: true }), false)).toBe(false);
-		expect(matchesAppShortcut("find", chord({ key: "f", ctrl: true, shift: true }), false)).toBe(false);
+describe("shortcutBindingAccelerator", () => {
+	const bound = (key: string, modifiers: Partial<ShortcutBinding> = {}): ShortcutBinding => ({
+		key, ctrl: false, meta: false, shift: false, alt: false, ...modifiers,
 	});
 
-	it("uses a user override instead of the default chord", () => {
-		const overrides = { find: [chord({ key: "e", ctrl: true, shift: true })] };
+	it("uses the macOS default bindings of the menu commands", () => {
+		const accelerator = (id: AppShortcutId) => shortcutBindingAccelerator(defaultShortcutBindings(id, true)[0]);
+		expect(accelerator("toggle-sidebar")).toBe("Command+B");
+		expect(accelerator("toggle-inspector")).toBe("Shift+Command+B");
+		expect(accelerator("open-orchestrator")).toBe("Shift+Command+O");
+		expect(accelerator("history-back")).toBe("Command+[");
+	});
 
-		expect(matchesAppShortcut("find", chord({ key: "e", ctrl: true, shift: true }), false, overrides)).toBe(true);
-		expect(matchesAppShortcut("find", chord({ key: "f", ctrl: true }), false, overrides)).toBe(false);
+	it("names special keys the way Electron spells them", () => {
+		expect(shortcutBindingAccelerator(bound("ArrowUp", { meta: true, alt: true }))).toBe("Alt+Command+Up");
+		expect(shortcutBindingAccelerator(bound("+", { meta: true }))).toBe("Command+Plus");
+	});
+
+	it("falls back to the physical key for a character Option typed", () => {
+		expect(shortcutBindingAccelerator(bound("∫", { alt: true, code: "KeyB" }))).toBe("Alt+B");
+	});
+
+	it("has no accelerator for the 1-9 family or an unnameable key", () => {
+		expect(shortcutBindingAccelerator(bound("1-9", { meta: true }))).toBeUndefined();
+		expect(shortcutBindingAccelerator(bound("∫", { alt: true }))).toBeUndefined();
 	});
 });

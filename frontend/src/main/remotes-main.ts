@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -11,6 +12,26 @@ import { ExpectedIpcError } from "./main-error-capture";
 // Without an override, keep the existing ~/.ao location.
 export function remotesFilePath(): string {
 	return path.join(process.env.AO_DATA_DIR?.trim() || path.join(os.homedir(), ".ao"), "remotes.json");
+}
+
+type RunFile = (file: string, args: string[], options: { timeout: number }) => Promise<{ stdout: string }>;
+
+/** The name other devices list this machine under: macOS's Computer Name
+ * ("Dhruv’s Mac mini"), else the host name without its mDNS suffix. */
+export async function computerName(
+	run: RunFile = promisify(execFile),
+	platform: NodeJS.Platform = process.platform,
+	hostname: () => string = os.hostname,
+): Promise<string> {
+	if (platform === "darwin") {
+		try {
+			const name = (await run("/usr/sbin/scutil", ["--get", "ComputerName"], { timeout: 2_000 })).stdout.trim();
+			if (name) return name;
+		} catch {
+			// No Computer Name set; the host name still identifies the machine.
+		}
+	}
+	return hostname().replace(/\.local$/i, "");
 }
 
 // The slice of Electron's ipcMain these handlers need, so tests need no Electron.
@@ -272,7 +293,7 @@ export function registerRemotesIpc(
 		// Keep the original password on the machine that performed pairing; a
 		// Cloud refresh must not replace it with the narrower account token. A
 		// password this launch cannot decrypt is kept the same way.
-		if (local && (local.sealedPassword || (local.password && !holdsAccountToken(local)))) {
+		if (local && (!local.accountUserId || local.sealedPassword || (local.password && !holdsAccountToken(local)))) {
 			if (local.label !== host.label || local.url !== host.url) await updateRemote(file, local.url, { label: host.label, url: host.url });
 			return;
 		}
@@ -296,7 +317,7 @@ export function registerRemotesIpc(
 			for (const entry of await owned()) {
 				// Only account-imported credentials are directory-managed. A machine
 				// paired here with its original password remains a local pairing.
-				if (entry.hostId && !current.has(entry.hostId) && holdsAccountToken(entry)) {
+				if (entry.hostId && entry.accountUserId === account && !current.has(entry.hostId) && holdsAccountToken(entry)) {
 					await removeSavedRemote(file, entry.url, disconnect);
 				}
 			}
@@ -336,6 +357,7 @@ export function registerRemotesIpc(
 		await accountHosts("PUT", `/${encodeURIComponent(issued.hostId)}`, { body: issued.registration });
 	});
 	ipcMain.handle("remotes:disconnect", async (_event, url: string) => ordered(() => disconnect(url)));
+	ipcMain.handle("remotes:computerName", () => computerName());
 	ipcMain.handle("remotes:previewUrl", async (_event, hostId: string, sessionId: string, sourceUrl: string) => {
 		const account = await getAccountId();
 		if (!(await owned()).some((entry) => entry.hostId === hostId)) throw new Error("Host does not belong to this account.");
@@ -349,5 +371,16 @@ export function registerRemotesIpc(
 		refuseSelf(hostId, await localIdentity());
 		if (await getAccountId() !== account) throw new Error("Account changed during remote connection.");
 		return registry.resolvePreviewUrl(hostId, sessionId, viewedUrl);
+	});
+	ipcMain.handle("remotes:agentBrowserUrl", async (_event, hostId: string, sessionId: string) => {
+		if (!(await owned()).some((entry) => entry.hostId === hostId)) throw new ExpectedIpcError("Host does not belong to this account.");
+		return registry.agentBrowserUrl(hostId, sessionId);
+	});
+	ipcMain.handle("remotes:externalUrl", async (_event, hostId: string, url: string) => {
+		const account = await getAccountId();
+		refuseSelf(hostId, await localIdentity());
+		if (!(await owned()).some((entry) => entry.hostId === hostId)) throw new ExpectedIpcError("Host does not belong to this account.");
+		if (await getAccountId() !== account) throw new ExpectedIpcError("Account changed during remote connection.");
+		return registry.externalUrl(hostId, url);
 	});
 }

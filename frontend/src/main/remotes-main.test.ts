@@ -7,7 +7,7 @@ import { registerRemotesIpc, remotesFilePath, type RemotesIpcDeps } from "./remo
 import { RemoteRegistry } from "./remote-registry";
 import { setPasswordCipher } from "./remotes-store";
 import { createLocalHostIdentity, type RemoteHealth } from "./remote-request";
-import { ExpectedIpcError, installIpcErrorCapture, resetMainErrorCaptureForTests, setMainErrorSink } from "./main-error-capture";
+import { ExpectedIpcError } from "./main-error-capture";
 
 type Handler = (event: unknown, ...args: unknown[]) => Promise<unknown>;
 
@@ -94,7 +94,7 @@ describe("registerRemotesIpc", () => {
 		registerRemotes(ipc.ipcMain, { file, registry: new RemoteRegistry(start), requireAccount: signedIn, localIdentity: async () => "h_workbox", identity: async () => "h_workbox", probe });
 		const args = channel === "remotes:add" ? [{ label: "self", url: "https://self.example", password: "new" }]
 			: channel === "remotes:update" ? ["http://192.0.2.1:1", { password: "new" }]
-			: channel.includes("Preview") || channel === "remotes:previewUrl" ? ["h_workbox", "s_1", "http://localhost:3000"]
+			: channel.includes("Preview") || channel === "remotes:previewUrl" || channel === "remotes:externalUrl" ? ["h_workbox", "s_1", "http://localhost:3000"]
 			: ["http://192.0.2.1:1"];
 		await expect(ipc.invoke(channel, ...args)).rejects.toThrow(/itself/);
 		expect(probe).not.toHaveBeenCalled();
@@ -282,15 +282,12 @@ describe("registerRemotesIpc", () => {
 		expect(await readFile(file, "utf8")).toBe(original);
 	});
 
-	it.each(["remotes:importAccountHost", "remotes:pruneAccountHosts", "remotes:issueAccountToken"])("still requires sign-in for %s", async (channel) => {
+	it("requires sign-in for account host synchronization", async () => {
 		const file = await tempFile();
 		const original = await readFile(file, "utf8");
 		const ipc = fakeIpc();
 		registerRemotes(ipc.ipcMain, { file, registry: new RemoteRegistry(async () => { throw new Error("unused"); }), requireAccount: signedIn, getAccountId: async () => "" });
-		const args = channel === "remotes:issueAccountToken" ? ["http://192.0.2.1:1"]
-			: channel === "remotes:pruneAccountHosts" ? ["", []]
-			: ["", { hostId: "h_cloud", label: "Cloud", url: "https://cloud.example", password: "a".repeat(64) }];
-		await expect(ipc.invoke(channel, ...args)).rejects.toThrow(/Sign in to AO Cloud/);
+		await expect(ipc.invoke("remotes:syncAccountHosts", "")).rejects.toThrow(/Sign in/);
 		expect(await readFile(file, "utf8")).toBe(original);
 	});
 
@@ -589,7 +586,7 @@ describe("registerRemotesIpc", () => {
 		await newer;
 		answers[0](listing("Older"));
 		await older;
-		await expect(ipc.invoke("remotes:list")).resolves.toContainEqual({ hostId: "h_cloud", label: "Newer", url: "https://cloud.example" });
+		await expect(ipc.invoke("remotes:list")).resolves.toContainEqual({ hostId: "h_cloud", label: "Newer", url: "https://cloud.example", accountUserId: "test-account" });
 	});
 
 	it.each([
@@ -642,7 +639,7 @@ describe("registerRemotesIpc", () => {
 			expect(pair).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ url: "https://new.example", hostId: "h_new" }), "typed-secret", { name: "Test Mac", platform: process.platform });
 			expect(probe).toHaveBeenCalledWith(expect.objectContaining({ password: token }));
 			expect((await saved(file)).find((entry) => entry.hostId === "h_new")).toEqual({
-				hostId: "h_new", label: "New", url: "https://new.example", password: token, accountUserId: TEST_ACCOUNT, ...(fallbackPassword ? { fallbackPassword } : {}),
+				hostId: "h_new", label: "New", url: "https://new.example", password: token, ...(fallbackPassword ? { fallbackPassword } : {}),
 			});
 		});
 

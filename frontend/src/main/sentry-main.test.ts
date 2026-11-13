@@ -35,6 +35,8 @@ let dataDir = "";
 beforeEach(() => {
 	vi.spyOn(Math, "random").mockReturnValue(0);
 	vi.stubEnv("AO_PUBLISHED_BUILD", "1");
+	// Consent-enabled transport tests opt into a synthetic DSN; fork defaults stay empty.
+	vi.stubEnv("AO_ELECTRON_SENTRY_DSN", "https://electron.example/2");
 	dataDir = mkdtempSync(path.join(os.tmpdir(), "ao-sentry-main-"));
 });
 afterEach(() => {
@@ -57,13 +59,12 @@ describe("Electron main Sentry configuration", () => {
 	});
 
 	it("creates an offline client with consent-owned crash integrations and an install user", async () => {
-		vi.stubEnv("AO_ELECTRON_SENTRY_DSN", undefined);
 		const transport = await initMainSentry("1.0.0", dataDir, "/tmp/ao-electron-test");
 		expect(transport).toBeTruthy();
 		expect(sdk.init).toHaveBeenCalledOnce();
 		const options = sdk.init.mock.calls[0]?.[0];
 		expect(options).toMatchObject({
-			dsn: DEFAULT_ELECTRON_SENTRY_DSN,
+			dsn: "https://electron.example/2",
 			transport: sdkTransport,
 			transportOptions: { queuePath: "/tmp/ao-electron-test/sentry/queue", shouldSend: expect.any(Function), shouldStore: expect.any(Function) },
 			ipcMode: 0,
@@ -132,7 +133,6 @@ describe("Electron main Sentry configuration", () => {
 
 	it("matches daemon Sentry environments for stable, nightly, and development versions", async () => {
 		vi.stubEnv("AO_TELEMETRY_APP_VERSION", undefined);
-		vi.stubEnv("AO_ELECTRON_SENTRY_DSN", undefined);
 		for (const [version, environment] of [["1.0.0", "stable"], ["1.0.1-nightly.202610291200", "nightly"]]) {
 			await initMainSentry(version, dataDir, "/tmp/ao-electron-test");
 			expect(sdk.init.mock.calls.at(-1)?.[0].environment).toBe(environment);
@@ -436,6 +436,14 @@ describe("Electron main Sentry configuration", () => {
 		expect(mainError("get project private-repo")?.fingerprint).toEqual(mainError("resume agent ai-sports-coach-113")?.fingerprint);
 		expect(beforeSend({ type: undefined, message: "'renderer' process exited with 'crashed'" })?.fingerprint).toEqual(["electron", "process_exit", "crashed", "Error", "unknown", "electron-main"]);
 		expect(beforeSend({ type: undefined, level: "fatal", exception: { values: [{ type: "TypeError", value: "private", mechanism: { type: "generic" } }] } })?.fingerprint).toEqual(["electron", "uncaught_exception", "unknown", "TypeError", "unknown", "electron-main"]);
+	});
+
+	it("does not start a published client without an explicit fork DSN", async () => {
+		vi.stubEnv("AO_ELECTRON_SENTRY_DSN", undefined);
+		const transport = await initMainSentry("1.0.0", dataDir, "/tmp/ao-electron-test");
+		transport.capture({ consentGeneration: "generation-1", kind: "message", message: "error" });
+		expect(sdk.init).not.toHaveBeenCalled();
+		expect(sdk.captureEvent).not.toHaveBeenCalled();
 	});
 
 	it("does not start a client when the environment explicitly sets a blank DSN", async () => {
