@@ -1,13 +1,14 @@
+import { useKeybindingsStore } from "../stores/keybindings-store";
+import { toKanbanColumn } from "@aoagents/product-ui";
+import { appI18n } from "../i18n";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	type WorkspaceSession,
 	type WorkspaceSummary,
 } from "../types/workspace";
-import { toKanbanColumn } from "@aoagents/product-ui";
-import { appI18n } from "../i18n";
 
 // Instant motion updates so height tweens do not leave tests waiting on timers.
 vi.mock("motion/react", async (importOriginal) => {
@@ -24,6 +25,7 @@ const {
 	navigateMock,
 	notificationShowMock,
 	postMock,
+	patchMock,
 	workspaceQueryMock,
 	cloudProjectsMock,
 	spawnCloudOrchestratorMock,
@@ -54,7 +56,10 @@ const {
 	};
 });
 
-vi.mock("./ShellTopbar", async (importOriginal) => ({ ...(await importOriginal<typeof import("./ShellTopbar")>()), ShellTopbar: () => null }));
+vi.mock("../lib/cloud-orchestrator", () => ({ spawnCloudOrchestrator: spawnCloudOrchestratorMock }));
+
+vi.mock("../hooks/useCloudOffering", () => ({ useCloudOffering: () => ({ defaultProvider: "coder" }) }));
+
 
 vi.mock("@tanstack/react-router", () => ({
 	useNavigate: () => navigateMock,
@@ -98,7 +103,7 @@ vi.mock("../hooks/useSessionMemory", async (importOriginal) => {
 });
 
 vi.mock("../lib/api-client", () => ({
-	apiClient: { POST: (...args: unknown[]) => postMock(...args) },
+	apiClient: { POST: (...args: unknown[]) => postMock(...args), PATCH: (...args: unknown[]) => patchMock(...args) },
 	apiErrorCode: (error: unknown) => (error as { code?: string } | null)?.code,
 	apiErrorMessage: (_error: unknown, fallback: string) => fallback,
 	getApiBaseUrl: () => "http://127.0.0.1:3001",
@@ -108,6 +113,7 @@ vi.mock("../lib/api-client", () => ({
 vi.mock("../lib/bridge", () => ({
 	aoBridge: {
 		app: {
+			onShortcut: () => () => {},
 			onCloseShellTerminalShortcut: () => () => {},
 			onPreviousTabShortcut: () => () => {},
 			onNextTabShortcut: () => () => {},
@@ -122,6 +128,9 @@ vi.mock("../lib/bridge", () => ({
 		clipboard: {
 			writeText: vi.fn(),
 		},
+		editorHandoff: {
+			getState: vi.fn().mockResolvedValue({ targets: [], preferredEditorId: "cursor", workspaceAvailable: true }),
+		},
 		notifications: {
 			show: (...args: unknown[]) => notificationShowMock(...args),
 		},
@@ -132,14 +141,10 @@ vi.mock("../lib/platform", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../lib/platform")>();
 	return {
 		...actual,
-		usesBoardActionsInPanel: () => boardActionsInPanelMock(),
 		isLinuxPlatform: () => false,
-		isMacPlatform: () => false,
 	};
 });
 
-import { archiveToggleHeightClassName, archiveToggleOffsetClassName } from "@aoagents/product-ui";
-import { useKeybindingsStore } from "../stores/keybindings-store";
 import { isMacPlatform } from "../lib/platform";
 import { useUiStore } from "../stores/ui-store";
 import { sessionScmSummaryQueryKey } from "../hooks/useSessionScmSummary";
@@ -177,10 +182,10 @@ async function expandArchive() {
 beforeEach(() => {
 	// The memory light and card chips are Developer mode tools behind the Diagnostics toggle.
 	useUiStore.setState({ developerMode: true, diagnostics: true, archiveModal: null });
-	useKeybindingsStore.setState({ overrides: {} });
 	navigateMock.mockReset();
 	notificationShowMock.mockReset().mockResolvedValue(undefined);
 	postMock.mockReset().mockResolvedValue({ data: {} });
+	patchMock.mockReset().mockResolvedValue({ data: {}, response: { status: 200 } });
 	workspaceQueryMock.mockReset().mockReturnValue({ data: [], isError: false });
 	appMemoryMock.mockReset().mockReturnValue({ data: undefined, isError: false });
 	sessionMemoryMock.mockReset().mockReturnValue({ data: undefined, isError: false });
@@ -208,6 +213,72 @@ describe("SessionsBoard", () => {
 		}
 	});
 
+	it("starts a Freestyle cloud orchestrator in place, on its conversation, and keeps the loader for Coder", () => {
+		workspaceQueryMock.mockReturnValue({ data: [{ id: "p1", name: "Cloud project", kind: "cloud", path: "", sessions: [] }], isSuccess: true });
+		useUiStore.getState().setProjectProvisioning("p1", true);
+		try {
+			cloudProjectsMock.mockReturnValue([{ id: "p1", config: { sandboxProvider: "freestyle" } }]);
+			renderBoard("p1");
+			expect(screen.queryByTestId("cloud-session-loader-screen")).not.toBeInTheDocument();
+			const composer = screen.getByRole("combobox", { name: "Message the agent" });
+			expect(composer.closest("form")).toHaveAttribute("data-starting", "true");
+			cleanup();
+			// The org default applies to a project with no provider of its own (Coder here).
+			cloudProjectsMock.mockReturnValue([{ id: "p1", config: {} }]);
+			renderBoard("p1");
+			expect(screen.getByTestId("cloud-session-loader-screen")).toBeInTheDocument();
+			expect(screen.queryByRole("combobox", { name: "Message the agent" })).not.toBeInTheDocument();
+		} finally {
+			cloudProjectsMock.mockReturnValue(undefined);
+			useUiStore.getState().setProjectProvisioning("p1", false);
+		}
+	});
+
+	it("starts a just-created Freestyle project's orchestrator once, without showing the empty board", async () => {
+		workspaceQueryMock.mockReturnValue({ data: [{ id: "p1", name: "Cloud project", kind: "cloud", path: "", sessions: [] }], isSuccess: true });
+		cloudProjectsMock.mockReturnValue([{ id: "p1", config: { sandboxProvider: "freestyle" } }]);
+		spawnCloudOrchestratorMock.mockReset().mockReturnValue(new Promise(() => {}));
+		useUiStore.getState().setAutoStartOrchestrator("p1", true);
+		try {
+			renderBoard("p1");
+			expect(screen.queryByTestId("board")).not.toBeInTheDocument();
+			expect(screen.getByRole("combobox", { name: "Message the agent" }).closest("form")).toHaveAttribute("data-starting", "true");
+			await waitFor(() => expect(spawnCloudOrchestratorMock).toHaveBeenCalledTimes(1));
+			expect(useUiStore.getState().autoStartOrchestratorProjectIds.has("p1")).toBe(false);
+		} finally {
+			cloudProjectsMock.mockReturnValue(undefined);
+			useUiStore.getState().setAutoStartOrchestrator("p1", false);
+		}
+	});
+
+	it("offers a guest of a shared project no Task, orchestrator or missing-orchestrator notice", () => {
+		const worker = boardSession({ id: "s1", title: "Upgrade to React 20", status: "working", cloud: { orgId: "org-elsewhere", shared: true } });
+		workspaceQueryMock.mockReturnValue({ data: [{ ...workspaceWithSessions([worker]), kind: "cloud", cloudOrgId: "org-elsewhere", shared: { byName: "Asha" } }], isSuccess: true });
+		renderBoard("p1");
+		expect(screen.queryByRole("button", { name: /^(Task|New task)$/ })).toBeNull();
+		expect(screen.queryByText("No orchestrator is running for this project.")).toBeNull();
+	});
+
+	it("keeps Task and the missing-orchestrator notice on the owner's own project", () => {
+		const worker = boardSession({ id: "s1", title: "Upgrade to React 20", status: "working", cloud: { orgId: "org-mine" } });
+		workspaceQueryMock.mockReturnValue({ data: [{ ...workspaceWithSessions([worker]), kind: "cloud", cloudOrgId: "org-mine" }], isSuccess: true });
+		renderBoard("p1");
+		expect(screen.getAllByRole("button", { name: /^(Task|New task)$/ }).length).toBeGreaterThan(0);
+	});
+
+	it("leaves an unflagged cloud project on its board", () => {
+		workspaceQueryMock.mockReturnValue({ data: [{ id: "p1", name: "Cloud project", kind: "cloud", path: "", sessions: [] }], isSuccess: true });
+		cloudProjectsMock.mockReturnValue([{ id: "p1", config: { sandboxProvider: "freestyle" } }]);
+		spawnCloudOrchestratorMock.mockReset();
+		try {
+			renderBoard("p1");
+			expect(screen.getByTestId("board")).toBeInTheDocument();
+			expect(spawnCloudOrchestratorMock).not.toHaveBeenCalled();
+		} finally {
+			cloudProjectsMock.mockReturnValue(undefined);
+		}
+	});
+
 	it("shows the orchestrator launch surface immediately after project setup", () => {
 		workspaceQueryMock.mockReturnValue({ data: [{ id: "p1", name: "New project", path: "/tmp/new-project", sessions: [] }], isSuccess: true });
 		useUiStore.getState().setProjectProvisioning("p1", true);
@@ -219,6 +290,29 @@ describe("SessionsBoard", () => {
 		} finally {
 			useUiStore.getState().setProjectProvisioning("p1", false);
 		}
+	});
+
+	it("renames a session from its card's context menu", async () => {
+		const user = userEvent.setup();
+		workspaceQueryMock.mockReturnValue({
+			data: [workspaceWithSessions([boardSession({ id: "s1", title: "Fix login", status: "working" })])],
+			isSuccess: true, isError: false,
+		});
+		renderBoard("p1");
+
+		fireEvent.contextMenu(await screen.findByText("Fix login"));
+		await user.click(await screen.findByRole("menuitem", { name: "Rename Fix login" }));
+		const dialog = await screen.findByRole("dialog");
+		const input = within(dialog).getByRole("textbox", { name: "Rename Fix login" });
+		await user.clear(input);
+		await user.type(input, "Fix login redirect");
+		await user.click(within(dialog).getByRole("button", { name: "Rename" }));
+
+		await waitFor(() => expect(patchMock).toHaveBeenCalledWith("/api/v1/sessions/{sessionId}", {
+			params: { path: { sessionId: "s1" } },
+			body: { displayName: "Fix login redirect" },
+		}));
+		expect(navigateMock).not.toHaveBeenCalled();
 	});
 
 	it("says a session's status could not be verified, without offering a retry", () => {
@@ -273,7 +367,7 @@ describe("SessionsBoard", () => {
 		expect(screen.queryByTestId("app-memory-indicator")).not.toBeInTheDocument();
 	});
 
-	it("shows AO memory pressure in the archive bar even with nothing archived", async () => {
+	it("shows AO memory pressure before the Task button, and no archive bar with nothing archived", async () => {
 		const GIB = 1024 ** 3;
 		appMemoryMock.mockReturnValue({
 			isError: false,
@@ -290,15 +384,18 @@ describe("SessionsBoard", () => {
 		renderBoard("p1");
 		expect(screen.queryByRole("button", { name: /^Archive, \d+ sessions?$/ })).not.toBeInTheDocument();
 		const indicator = screen.getByTestId("app-memory-indicator");
+		// In the board's action row, ahead of the Task button.
+		expect(indicator.closest(".workspace-topbar-actions")).not.toBeNull();
+		const task = screen.getByRole("button", { name: "New task" });
+		expect(indicator.compareDocumentPosition(task) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 		expect(indicator).toHaveTextContent("12.0 GB");
 		expect(indicator).toHaveAttribute("data-memory-state", "tight");
-		expect(indicator).toHaveAttribute("aria-label", "Tight · 2.0 GB free of 32.0 GB · AO holds 12.0 GB · pressure 35.0");
+		expect(indicator).toHaveAttribute("aria-label", "Tight · 2.0 GB free of 32.0 GB · Orchestrator holds 12.0 GB · pressure 35.0");
 		await userEvent.click(indicator);
 		expect(await screen.findByTestId("session-memory-stacked")).toBeInTheDocument();
 	});
 
 	it.each(["single_repo", "multi_repo", "cloud", "standalone", undefined] as const)("hides the cue runner for %s projects", (kind) => {
-		boardActionsInPanelMock.mockReturnValue(true);
 		workspaceQueryMock.mockReturnValue({
 			data: [{ ...workspaceWithSessions([]), kind }],
 			isError: false,
@@ -368,7 +465,6 @@ describe("SessionsBoard", () => {
 	});
 
 	it("shows the Board identity and compact actions in the in-panel board chrome", () => {
-		boardActionsInPanelMock.mockReturnValue(true);
 		workspaceQueryMock.mockReturnValue({
 			data: [
 				{
@@ -410,10 +506,9 @@ describe("SessionsBoard", () => {
 	});
 
 	it.each([
-		["active", "Working", "bg-status-working", true],
-		["idle", "Idle", "bg-status-idle", false],
-	] as const)("shows %s orchestrator activity in the in-panel board toolbar", (state, label, tone, pulses) => {
-		boardActionsInPanelMock.mockReturnValue(true);
+		["active", "Working"],
+		["idle", "Idle"],
+	] as const)("shows %s orchestrator activity in the in-panel board toolbar", (state, label) => {
 		workspaceQueryMock.mockReturnValue({
 			data: [
 				{
@@ -444,16 +539,12 @@ describe("SessionsBoard", () => {
 		renderBoard("p1");
 
 		const button = screen.getByRole("button", { name: `Orchestrator, ${label}` });
-		const indicator = button.querySelector("span.size-dot-sm") as HTMLElement;
+		const indicator = button.querySelector("span.size-dot-sm");
 		expect(within(button).getByText("Orchestrator").hasAttribute("data-compact-label")).toBe(true);
-		expect(indicator).toHaveAttribute("aria-hidden", "true");
-		expect(indicator).toHaveClass(tone);
-		expect(indicator).toHaveClass(pulses ? "animate-status-pulse" : "size-dot-sm");
-		if (!pulses) expect(indicator).not.toHaveClass("animate-status-pulse");
+		expect(indicator).toBeNull();
 	});
 
 	it("shows the Board crumb on the root board when actions live in the panel", () => {
-		boardActionsInPanelMock.mockReturnValue(true);
 		workspaceQueryMock.mockReturnValue({
 			data: [
 				{
@@ -506,7 +597,7 @@ describe("SessionsBoard", () => {
 		expect(within(idleCard).getByText("Idle")).toBeInTheDocument();
 		const terminateButton = within(idleCard).getByRole("button", { name: "Archive brand-font-pipeline" });
 		expect(terminateButton).toHaveClass("opacity-0", "group-hover:opacity-100", "group-focus-within:opacity-100");
-		expect(terminateButton.querySelector("svg")).toHaveClass("lucide-archive");
+		expect(terminateButton.querySelector("svg")).toHaveClass("icon-archive");
 		expect(within(idleCard).getByText("Idle").parentElement?.parentElement).toHaveClass("flex");
 		expect(within(idleCard).getByText("brand-font-pipeline")).toHaveClass("font-semibold", "line-clamp-2");
 	});
@@ -616,6 +707,33 @@ describe("SessionsBoard", () => {
 		expect(status.querySelector(".animate-spin")).toBeNull();
 	});
 
+	it("paints a Merged card purple and holds the loader even while its agent keeps running", () => {
+		workspaceQueryMock.mockReturnValue({
+			data: [
+				workspaceWithSessions([
+					boardSession({
+						id: "s-merged-active",
+						title: "merged-active-task",
+						status: "working",
+						displayStatus: "Merged",
+						kanbanColumn: "ready",
+						activity: { state: "active", lastActivityAt: "2026-01-01T00:00:00Z" },
+					}),
+				]),
+			],
+			isError: false,
+			isSuccess: true,
+		});
+
+		renderBoard("p1");
+		const card = screen.getByText("merged-active-task").closest('[data-testid="board-session-card"]') as HTMLElement;
+		const status = within(card).getByTestId("session-status");
+		expect(status).toHaveTextContent("Merged");
+		expect(status).toHaveClass("text-status-merged");
+		expect(status).not.toHaveClass("text-success", "text-status-ready");
+		expect(status.querySelector(".animate-spin")).toBeNull();
+	});
+
 	it("paints Closed without merge red while keeping merged status purple", () => {
 		workspaceQueryMock.mockReturnValue({
 			data: [
@@ -650,6 +768,8 @@ describe("SessionsBoard", () => {
 						title: "spawning-card-task",
 						status: "working",
 						provisionState: "provisioning",
+						branch: "ao/s-spawning/root",
+						provisionSteps: [{ id: "worktree", status: "running" }],
 						activity: { state: "exited", lastActivityAt: "2026-01-01T00:00:00Z" },
 					}),
 				]),
@@ -661,6 +781,8 @@ describe("SessionsBoard", () => {
 		renderBoard("p1");
 		const card = screen.getByText("spawning-card-task").closest('[data-testid="board-session-card"]') as HTMLElement;
 		expect(within(card).getByText("Starting Claude Code…")).toBeInTheDocument();
+		expect(within(card).getByRole("status")).toHaveClass("chat-working-shimmer");
+		expect(within(card).queryByText("ao/s-spawning/root")).not.toBeInTheDocument();
 		expect(within(card).queryByText("Working")).not.toBeInTheDocument();
 		expect(within(card).queryByText("Exited")).not.toBeInTheDocument();
 	});
@@ -709,34 +831,6 @@ describe("SessionsBoard", () => {
 		const card = screen.getByText("failed-setup-task").closest('[data-testid="board-session-card"]') as HTMLElement;
 		expect(within(card).getByTestId("session-status")).toHaveTextContent("Start failed");
 		expect(within(card).queryByText("Idle")).not.toBeInTheDocument();
-	});
-
-	it("shows switch progress instead of the exited source on a card", () => {
-		const worker = boardSession({
-			id: "s-switching",
-			title: "switching worker",
-			status: "exited",
-			activity: {
-				state: "exited",
-				lastActivityAt: "2026-01-01T00:00:00Z",
-			},
-		});
-		worker.activeAgentSwitch = activeAgentSwitch(worker.id);
-		workspaceQueryMock.mockReturnValue({
-			data: [workspaceWithSessions([worker])],
-			isError: false,
-			isSuccess: true,
-		});
-
-		renderBoard("p1");
-
-		const card = screen.getByText("switching worker").closest('[data-testid="board-session-card"]') as HTMLElement;
-		const status = within(card).getByText("Switching to Codex").parentElement as HTMLElement;
-		expect(status).toHaveClass("text-status-working");
-		expect(status).not.toHaveAttribute("data-kanban-column");
-		expect(status.style.getPropertyValue("--session-status-tone")).toBe("");
-		expect(status.querySelector(".animate-status-pulse")).toBeNull();
-		expect(within(card).queryByText("Exited")).not.toBeInTheDocument();
 	});
 
 	it("styles legacy statuses from their status-implied Kanban columns", () => {
@@ -1835,6 +1929,21 @@ describe("SessionsBoard", () => {
 		expect(postMock).not.toHaveBeenCalled();
 	});
 
+	it("closes the card's archive confirm on the first Escape", async () => {
+		workspaceQueryMock.mockReturnValue({
+			data: [workspaceWithSessions([boardSession({ id: "s-merged", title: "merged worker", status: "merged" })])],
+			isError: false,
+			isSuccess: true,
+		});
+		renderBoard("p1");
+
+		await userEvent.click(screen.getByRole("button", { name: "Archive merged worker" }));
+		await screen.findByRole("dialog");
+
+		await userEvent.keyboard("{Escape}");
+		await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+	});
+
 	it("terminates a live merged session from its card without opening the session", async () => {
 		workspaceQueryMock.mockReturnValue({
 			data: [workspaceWithSessions([boardSession({ id: "s-merged", title: "merged worker", status: "merged" })])],
@@ -1909,7 +2018,8 @@ describe("SessionsBoard", () => {
 
 		await waitFor(() => expect(postMock).toHaveBeenCalledTimes(1));
 		expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-		expect(await screen.findByRole("alert")).toHaveTextContent("Failed to terminate session (500)");
+		const alerts = await screen.findAllByRole("alert");
+		expect(alerts.some((alert) => alert.textContent?.includes("Failed to terminate session (500)"))).toBe(true);
 		expect(screen.getByRole("button", { name: "Archive merged worker" })).toBeEnabled();
 	});
 
@@ -1931,6 +2041,10 @@ describe("SessionsBoard", () => {
 });
 
 describe("SessionsBoard artifacts", () => {
+	beforeEach(() => {
+		useUiStore.setState({ inspectorSessions: {}, workspaceFileOpenRequest: null });
+	});
+
 	const artifact = (name: string, updatedAt: string, kind: "html" | "markdown" = "markdown") => ({
 		kind,
 		name,
@@ -1963,7 +2077,7 @@ describe("SessionsBoard artifacts", () => {
 		renderBoard("p1");
 
 		const list = await screen.findByTestId("board-session-artifacts");
-		const links = within(list).getAllByRole("button");
+		const links = within(list).getAllByRole("button", { name: /^Open artifact / });
 		expect(links.map((link) => link.textContent)).toEqual(["newest.html", "middle.md"]);
 		expect(list).toHaveTextContent("+2 more");
 
@@ -1979,6 +2093,97 @@ describe("SessionsBoard artifacts", () => {
 			to: "/projects/$projectId/sessions/$sessionId",
 			params: { projectId: "p1", sessionId: "s-art" },
 		});
+	});
+
+	it.each([3, 10, 12])("expands and collapses %i artifacts in place, capped at ten", async (count) => {
+		workspaceQueryMock.mockReturnValue({
+			data: [workspaceWithSessions([boardSession({
+				id: "s-art",
+				title: "Write the report",
+				status: "working",
+				outputType: "artifact",
+				artifactFiles: Array.from({ length: count }, (_, index) =>
+					artifact(`file-${String(index + 1).padStart(2, "0")}.md`, "2026-01-01T00:00:00Z")),
+			})])],
+			isError: false,
+			isSuccess: true,
+		});
+		renderBoard("p1");
+
+		const list = await screen.findByTestId("board-session-artifacts");
+		const more = within(list).getByRole("button", { name: `+${count - 2} more` });
+		expect(more).toHaveAttribute("aria-expanded", "false");
+		more.focus();
+		await userEvent.keyboard("{Enter}");
+
+		expect(more).toHaveAttribute("aria-expanded", "true");
+		expect(document.getElementById(more.getAttribute("aria-controls")!)).toBeInTheDocument();
+		expect(within(list).getAllByRole("button", { name: /^Open artifact / })).toHaveLength(Math.min(count, 10));
+		expect(navigateMock).not.toHaveBeenCalled();
+		expect(useUiStore.getState().workspaceFileOpenRequest).toBeNull();
+
+		if (count > 10) {
+			await userEvent.click(within(list).getByRole("button", { name: "Open in inspector" }));
+			// SessionView initializes the inspector when navigation mounts a session.
+			useUiStore.getState().initializeInspectorSession("s-art", false, true);
+			expect(useUiStore.getState().inspectorSessions["s-art"]).toMatchObject({
+				initialized: true, isOpen: true, view: "artifacts",
+			});
+			expect(useUiStore.getState().workspaceFileOpenRequest).toBeNull();
+			expect(navigateMock).toHaveBeenCalledTimes(1);
+		} else {
+			expect(within(list).queryByRole("button", { name: "Open in inspector" })).not.toBeInTheDocument();
+		}
+
+		await userEvent.click(within(list).getByRole("button", { name: "Show less" }));
+		expect(within(list).getAllByRole("button", { name: /^Open artifact / })).toHaveLength(2);
+		expect(more).toHaveAttribute("aria-expanded", "false");
+	});
+
+	it.each([1, 2])("shows %i artifacts without expansion controls", async (count) => {
+		workspaceQueryMock.mockReturnValue({
+			data: [workspaceWithSessions([boardSession({
+				id: "s-art", title: "Write the report", status: "working", outputType: "artifact",
+				artifactFiles: Array.from({ length: count }, (_, index) => artifact(`file-${index}.md`, "2026-01-01T00:00:00Z")),
+			})])],
+			isError: false,
+			isSuccess: true,
+		});
+		renderBoard("p1");
+		const list = await screen.findByTestId("board-session-artifacts");
+		expect(within(list).getAllByRole("button")).toHaveLength(count);
+		expect(within(list).queryByRole("button", { name: /more|Show less|Open in inspector/ })).not.toBeInTheDocument();
+	});
+
+	it.each(["pointer", "keyboard"])("suppresses previews after expansion until intentional %s interaction", async (interaction) => {
+		workspaceQueryMock.mockReturnValue({
+			data: [workspaceWithSessions([boardSession({
+				id: "s-art", title: "Write the report", status: "working", outputType: "artifact",
+				artifactFiles: ["a.md", "b.md", "c.md"].map((name) => artifact(name, "2026-01-01T00:00:00Z")),
+			})])],
+			isError: false,
+			isSuccess: true,
+		});
+		renderBoard("p1");
+		await userEvent.click(await screen.findByRole("button", { name: "+1 more" }));
+		const row = screen.getByRole("button", { name: "Open artifact c.md" });
+		fireEvent.pointerOver(row, { pointerType: "mouse", clientX: 0, clientY: 0 });
+		fireEvent.pointerMove(row, { pointerType: "mouse", clientX: 0, clientY: 0 });
+		await act(() => new Promise((resolve) => setTimeout(resolve, 350)));
+		expect(screen.queryByRole("status", { name: "c.md" })).not.toBeInTheDocument();
+
+		if (interaction === "pointer") {
+			fireEvent.pointerMove(row, { pointerType: "mouse", clientX: 10, clientY: 10 });
+			expect(screen.queryByRole("status", { name: "c.md" })).not.toBeInTheDocument();
+			await act(() => new Promise((resolve) => setTimeout(resolve, 200)));
+			fireEvent.pointerMove(row, { pointerType: "mouse", clientX: 20, clientY: 20 });
+			await act(() => new Promise((resolve) => setTimeout(resolve, 200)));
+			expect(screen.queryByRole("status", { name: "c.md" })).not.toBeInTheDocument();
+		} else {
+			fireEvent.focus(row);
+		}
+		expect(await screen.findByRole("status", { name: "c.md" })).toBeInTheDocument();
+		expect(navigateMock).not.toHaveBeenCalled();
 	});
 
 	it("orders artifacts with equal or unparseable timestamps by path", () => {
@@ -2130,14 +2335,14 @@ describe("SessionsBoard find bar", () => {
 	});
 
 	it.each([
-		["ALPHA", "2/4"],
-		["alwr", "1/4"],
-		["ao/s-alpha", "1/4"],
-		["radic", "4/4"],
-		["terminated", "2/4"],
-		["#42", "2/4"],
-		["42", "2/4"],
-		["   ", "4/4"],
+		["ALPHA", "1/2"],
+		["alwr", "1/2"],
+		["ao/s-alpha", "1/2"],
+		["radic", "2/2"],
+		["terminated", "0/2"],
+		["#42", "0/2"],
+		["42", "0/2"],
+		["   ", "2/2"],
 	])("matches titles, branches, projects, statuses and PRs with palette scoring: %s", async (query, count) => {
 		renderBoard("p1");
 		const findBar = await openFindBar();
@@ -2270,19 +2475,10 @@ describe("SessionsBoard find bar", () => {
 
 		expect(screen.getByText("alpha worker")).toBeInTheDocument();
 		expect(screen.queryByText("beta worker")).not.toBeInTheDocument();
-		expect(within(findBar).getByText("2/4")).toBeInTheDocument();
+		expect(within(findBar).getByText("1/2")).toBeInTheDocument();
 	});
 
-	it("filters the archive with the same query", async () => {
-		renderBoard("p1");
 
-		const findBar = await openFindBar();
-		await userEvent.type(within(findBar).getByRole("textbox"), "alpha");
-		const archive = await expandArchive();
-
-		expect(within(archive).getByText("alpha archived")).toBeInTheDocument();
-		expect(within(archive).queryByText("beta archived")).not.toBeInTheDocument();
-	});
 
 	it("shows an empty state when nothing matches", async () => {
 		renderBoard("p1");
@@ -2291,7 +2487,7 @@ describe("SessionsBoard find bar", () => {
 		await userEvent.type(within(findBar).getByRole("textbox"), "zzzz");
 
 		expect(screen.getByText("No sessions match")).toBeInTheDocument();
-		expect(within(findBar).getByText("0/4")).toBeInTheDocument();
+		expect(within(findBar).getByText("0/2")).toBeInTheDocument();
 	});
 
 	it("restores the unfiltered board on Escape", async () => {

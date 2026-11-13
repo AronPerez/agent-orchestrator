@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Loader2, MessageSquare, Pencil, Plus, TerminalSquare, Trash2, X } from "lucide-react";
+import { Loader2, MessageSquare, Pencil, Plus, TerminalSquare, Trash2 } from "@/components/app-icons";
 import { apiErrorMessage } from "../lib/api-client";
+import { CloudCpError } from "../lib/cloud-cp/errors";
+import { useConnectedHosts } from "../hooks/useHostConnection";
+import { LOCAL_HOST, refKey } from "../lib/hosts";
 import { useUiStore } from "../stores/ui-store";
 import {
 	useCreateCueMutation,
@@ -9,11 +12,10 @@ import {
 	useProjectCuesQuery,
 	useUpdateCueMutation,
 } from "../hooks/useCuesQuery";
-import { useConnectedHosts } from "../hooks/useHostConnection";
-import { LOCAL_HOST, refKey } from "../lib/hosts";
 import { CUE_LIMITS } from "../lib/cues";
 import type { CueDTO, CueInput } from "../lib/cues";
 import { Button } from "./ui/button";
+import { CloseButton } from "./ui/close-button";
 import { ConfirmDialog } from "./ConfirmDialog";
 import {
 	Dialog,
@@ -26,8 +28,15 @@ import {
 } from "./ui/dialog";
 import { SettingsOptionMenu } from "./settings/SettingsOptionMenu";
 
+/** A Cloud cue the control plane refused as invalid (400, 422) or as clashing with another (409). */
+function isCueRefusal(error: unknown): boolean {
+	return error instanceof CloudCpError && (error.status === 400 || error.status === 409 || error.status === 422) && error.message !== "";
+}
+
 type CuesSettingsProps = {
 	projectId: string;
+	/** A Cloud project's organization: its cues live on the control plane. */
+	cloudOrgId?: string;
 	hostId?: string;
 	onBusyChange?: (busy: boolean) => void;
 	createOnly?: boolean;
@@ -70,23 +79,23 @@ function CueTypeIcon({ type, className }: { type: CueType; className?: string })
 }
 
 export function CuesSettings(props: CuesSettingsProps) {
-	return <ProjectCuesSettings key={refKey({ host: props.hostId ?? LOCAL_HOST, id: props.projectId })} {...props} />;
+	return <ProjectCuesSettings key={`${props.cloudOrgId ?? ""}:${refKey({ host: props.hostId ?? LOCAL_HOST, id: props.projectId })}`} {...props} />;
 }
 
-function ProjectCuesSettings({ projectId, hostId, onBusyChange, createOnly = false, onCreated, onCancel, hideCueActions = false }: CuesSettingsProps) {
+function ProjectCuesSettings({ projectId, cloudOrgId, hostId, onBusyChange, createOnly = false, onCreated, onCancel, hideCueActions = false }: CuesSettingsProps) {
 	const { t } = useTranslation();
 	const showGlobalToast = useUiStore((state) => state.showGlobalToast);
 	const connected = useConnectedHosts();
 	const hostConnected = !hostId || connected.includes(hostId);
-	const cuesQuery = useProjectCuesQuery(projectId, !createOnly && hostConnected, hostId);
+	const cuesQuery = useProjectCuesQuery(projectId, !createOnly && hostConnected, hostId, cloudOrgId);
 	useEffect(() => {
 		if (hostConnected && !createOnly && cuesQuery.isError && !cuesQuery.isFetching) {
-			showGlobalToast(t("cues.loadFailed"), apiErrorMessage(cuesQuery.error, t("cues.loadFailed")), { tone: "error", dedupeKey: `cues.load.${refKey({ host: hostId ?? LOCAL_HOST, id: projectId })}` });
+			showGlobalToast(t("cues.loadFailed"), apiErrorMessage(cuesQuery.error, t("cues.loadFailed")), { tone: "error", dedupeKey: `cues.load.${cloudOrgId ?? ""}:${refKey({ host: hostId ?? LOCAL_HOST, id: projectId })}` });
 		}
-	}, [hostId, hostConnected, projectId, createOnly, cuesQuery.isError, cuesQuery.isFetching, cuesQuery.error, showGlobalToast, t]);
-	const createMutation = useCreateCueMutation(projectId, hostId);
-	const updateMutation = useUpdateCueMutation(projectId, hostId);
-	const deleteMutation = useDeleteCueMutation(projectId, hostId);
+	}, [hostId, hostConnected, cloudOrgId, projectId, createOnly, cuesQuery.isError, cuesQuery.isFetching, cuesQuery.error, showGlobalToast, t]);
+	const createMutation = useCreateCueMutation(projectId, hostId, cloudOrgId);
+	const updateMutation = useUpdateCueMutation(projectId, hostId, cloudOrgId);
+	const deleteMutation = useDeleteCueMutation(projectId, hostId, cloudOrgId);
 
 	const [formOpen, setFormOpen] = useState<"new" | CueDTO | null>(createOnly ? "new" : null);
 	const [deletingCue, setDeletingCue] = useState<CueDTO | null>(null);
@@ -163,7 +172,11 @@ function ProjectCuesSettings({ projectId, hostId, onBusyChange, createOnly = fal
 			else setFormOpen(null);
 		} catch (error) {
 			if (!mounted.current) return;
-			showGlobalToast(t("cues.saveFailed"), apiErrorMessage(error, t("cues.saveFailed")), "error");
+			// The control plane refuses a cue its project's rules do not allow (a
+			// name another cue has, ignoring case; a command cue with a prompt, or
+			// an agent cue with a command) and says why: the form shows it.
+			if (isCueRefusal(error)) setFormError(apiErrorMessage(error, t("cues.saveFailed")));
+			else showGlobalToast(t("cues.saveFailed"), apiErrorMessage(error, t("cues.saveFailed")), "error");
 		} finally {
 			pending.current = false;
 			if (mounted.current) setSaving(false);
@@ -198,13 +211,15 @@ function ProjectCuesSettings({ projectId, hostId, onBusyChange, createOnly = fal
 		}
 		if (cuesQuery.isError) {
 			return (
-				<div className="flex flex-col items-center gap-3 py-8 text-center">
-					<p role="alert" className="text-sm text-error">
-						{apiErrorMessage(cuesQuery.error, t("cues.loadFailed"))}
-					</p>
-					<Button type="button" variant="outline" size="sm" onClick={() => void cuesQuery.refetch()}>
-						{t("cues.retry")}
-					</Button>
+				<div className="settings-grouped-rows flex w-full flex-col">
+					<div className="settings-row-bar">
+						<p role="alert" className="min-w-0 text-sm text-error">
+							{apiErrorMessage(cuesQuery.error, t("cues.loadFailed"))}
+						</p>
+						<Button type="button" variant="quiet" size="sm" onClick={() => void cuesQuery.refetch()}>
+							{t("cues.retry")}
+						</Button>
+					</div>
 				</div>
 			);
 		}
@@ -216,7 +231,7 @@ function ProjectCuesSettings({ projectId, hostId, onBusyChange, createOnly = fal
 						<div className="settings-grouped-rows flex w-full flex-col">
 							<div className="settings-row-bar">
 								<span className="text-sm leading-5 text-settings-label">{t("cues.empty")}</span>
-								<Button type="button" variant="ghost" disabled={busy} onClick={openNew}>
+								<Button type="button" variant="quiet" size="sm" disabled={busy} onClick={openNew}>
 									<Plus aria-hidden="true" />
 									{t("cues.newCue")}
 								</Button>
@@ -244,25 +259,25 @@ function ProjectCuesSettings({ projectId, hostId, onBusyChange, createOnly = fal
 									{hideCueActions ? null : <div className="flex shrink-0 items-center gap-0.5">
 										<Button
 											type="button"
-											variant="ghost"
+											variant="quiet"
 											size="icon-sm"
 											disabled={busy}
 											onClick={() => openEdit(cue)}
 											aria-label={t("cues.edit")}
 											title={t("cues.edit")}
-											className="size-7 shrink-0 p-0 text-settings-muted hover:text-foreground"
+											className="shrink-0"
 										>
 											<Pencil className="size-3.5" aria-hidden="true" />
 										</Button>
 										<Button
 											type="button"
-											variant="ghost"
+											variant="destructive-ghost"
 											size="icon-sm"
 											disabled={busy}
 											onClick={() => { if (!pending.current) { deleteMutation.reset(); setDeletingCue(cue); } }}
 											aria-label={t("cues.delete")}
 											title={t("cues.delete")}
-											className="size-7 shrink-0 p-0 text-settings-muted hover:text-destructive"
+											className="shrink-0"
 										>
 											<Trash2 className="size-3.5" aria-hidden="true" />
 										</Button>
@@ -306,7 +321,6 @@ function ProjectCuesSettings({ projectId, hostId, onBusyChange, createOnly = fal
 					onChange={(type) => setDraft((current) => ({ ...current, type }))}
 					triggerClassName="w-fit self-start"
 					menuAlign="start"
-					menuClassName="border-0! shadow-md!"
 				/>
 			</div>
 
@@ -335,28 +349,28 @@ function ProjectCuesSettings({ projectId, hostId, onBusyChange, createOnly = fal
 		</div>;
 	};
 
-	if (!hostConnected) return <p role="alert" className="text-pretty text-sm text-error">{t("remote.hostOffline")}</p>;
-
 	// The footer action only exists once a list is showing; an empty list carries its own button.
 	const empty = !formOpen && !cuesQuery.isError && (!cuesQuery.isFetchedAfterMount || (cuesQuery.data ?? []).length === 0);
+	if (!hostConnected) return <p role="alert" className="text-pretty text-sm text-error">{t("remote.hostOffline")}</p>;
+
 	return (
 		<div className="flex flex-col gap-(--size-settings-section-inner-gap)">
-			<p className="text-sm leading-5 text-settings-muted">{t("cues.settingsDescription")}</p>
-			<fieldset className="min-w-0" disabled={busy}>{formOpen ? renderForm() : renderList()}</fieldset>
+			<p className="px-(--settings-row-inset) text-sm leading-5 text-settings-muted">{t("cues.settingsDescription")}</p>
+			<fieldset className="min-w-0" disabled={busy}>{formOpen ? createOnly ? renderForm() : <div className="settings-grouped-rows flex w-full flex-col"><div className="settings-content-row">{renderForm()}</div></div> : renderList()}</fieldset>
 			{empty ? null : (
 			<div className="flex items-center justify-end gap-2">
 				{formOpen ? (
 					<>
-						<Button type="button" variant="outline" disabled={saving} onClick={() => createOnly ? onCancel?.() : setFormOpen(null)}>
+						<Button type="button" variant="quiet" size="sm" disabled={saving} onClick={() => createOnly ? onCancel?.() : setFormOpen(null)}>
 							{t("cues.cancel")}
 						</Button>
-						<Button type="button" disabled={saving} onClick={() => void handleSave()}>
+						<Button type="button" size="sm" disabled={saving} onClick={() => void handleSave()}>
 							{saving ? <Loader2 className="animate-spin" aria-hidden="true" /> : null}
 							{formOpen === "new" ? t("cues.create") : t("cues.save")}
 						</Button>
 					</>
 				) : (
-					<Button type="button" disabled={busy} onClick={openNew}>
+					<Button type="button" size="sm" disabled={busy} onClick={openNew}>
 						<Plus aria-hidden="true" />
 						{t("cues.newCue")}
 					</Button>
@@ -382,8 +396,10 @@ function ProjectCuesSettings({ projectId, hostId, onBusyChange, createOnly = fal
 }
 
 /** Session-local creation surface; shares the settings editor and validation. */
-export function CreateCueDialog({ projectId, open, onOpenChange, onClosed }: {
+export function CreateCueDialog({ projectId, cloudOrgId, open, onOpenChange, onClosed }: {
 	projectId: string;
+	cloudOrgId?: string;
+	hostId?: string;
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
 	onClosed?: () => void;
@@ -400,10 +416,10 @@ export function CreateCueDialog({ projectId, open, onOpenChange, onClosed }: {
 				}}>
 				<DialogHeader className={`${settingsDialogHeaderClass} flex flex-row items-center justify-between`}>
 					<DialogTitle className="text-2xl font-bold text-foreground">{t("cues.newCue")}</DialogTitle>
-					<button type="button" aria-label={t("settings.close")} className="settings-close-button" disabled={busy} onClick={() => onOpenChange(false)}><X aria-hidden="true" className="size-4" /></button>
+					<CloseButton aria-label={t("settings.close")} disabled={busy} onClick={() => onOpenChange(false)} />
 				</DialogHeader>
 				{open ? <div className={settingsDialogBodyClass}>
-					<CuesSettings projectId={projectId} createOnly hideCueActions onBusyChange={setBusy}
+					<CuesSettings projectId={projectId} cloudOrgId={cloudOrgId} createOnly hideCueActions onBusyChange={setBusy}
 						onCreated={() => onOpenChange(false)} onCancel={() => onOpenChange(false)} />
 				</div> : null}
 			</DialogContent>

@@ -1,6 +1,7 @@
 import type { SessionBrowserRuntimeState } from "../../main/browser-view-host";
 import {
 	resetClosedTabsForTest,
+	resetNativeViewCacheForTest,
 	resetConsumedPreviewTriggersForTest,
 	useBrowserView,
 	type BrowserNavState,
@@ -36,14 +37,16 @@ function createSlot(rect: Partial<DOMRect> = {}) {
 	return slot;
 }
 
+
+const sessionRuntimeListeners = new Set<(state: SessionBrowserRuntimeState) => void>();
 function setupBridge() {
 	const listeners = new Set<Listener>();
-	const runtimeListeners = new Set<(state: SessionBrowserRuntimeState) => void>();
 	const tabsListeners = new Set<TabsListener>();
 	const devtoolsListeners = new Set<DevToolsListener>();
 	const activityListeners = new Set<ActivityListener>();
 	const profileListeners = new Set<ProfileListener>();
 	const annotationStateListeners = new Set<AnnotationStateListener>();
+	sessionRuntimeListeners.clear();
 	const bridge = {
 		nativeCompositionEnabled: false,
 		stateFor(viewId: string): BrowserNavState {
@@ -149,9 +152,12 @@ function setupBridge() {
 		})),
 		showProfileMenu: vi.fn(),
 		selectProfile: vi.fn(),
-		reconnectRuntime: vi.fn(async () => undefined),
-		getSessionRuntimeState: vi.fn(async (sessionId: string, hostId?: string): Promise<SessionBrowserRuntimeState> => ({ sessionId, hostId, connected: false })),
-		attachRuntime: vi.fn(async (sessionId: string, hostId?: string, _takeover = false): Promise<SessionBrowserRuntimeState> => ({ sessionId, hostId, connected: true, owned: true })),
+		getSessionRuntimeState: vi.fn(async (sessionId: string, hostId?: string): Promise<SessionBrowserRuntimeState> => ({ sessionId, hostId, connected: true, owned: true })),
+  attachRuntime: vi.fn(async (sessionId: string, hostId?: string, _takeover = false): Promise<SessionBrowserRuntimeState> => ({ sessionId, hostId, connected: true, owned: true })),
+  onSessionRuntimeStateChanged: vi.fn((listener: (state: SessionBrowserRuntimeState) => void) => { sessionRuntimeListeners.add(listener); return () => { sessionRuntimeListeners.delete(listener); }; }),
+  emitRuntime(state: SessionBrowserRuntimeState) { sessionRuntimeListeners.forEach((listener) => listener(state)); },
+  reconnectRuntime: vi.fn(async () => undefined),
+		getRuntimeState: vi.fn(async () => ({ connected: false, connecting: false, rejected: false })),
 		historySuggestions: vi.fn(async () => []),
 		historyFavicon: vi.fn(async () => undefined),
 		captureScreenshot: vi.fn(async () => undefined),
@@ -184,10 +190,7 @@ function setupBridge() {
 			activityListeners.add(listener);
 			return () => activityListeners.delete(listener);
 		}),
-		onSessionRuntimeStateChanged: vi.fn((listener: (state: SessionBrowserRuntimeState) => void) => {
-			runtimeListeners.add(listener);
-			return () => runtimeListeners.delete(listener);
-		}),
+		onRuntimeState: vi.fn(() => () => undefined),
 		onProfileState: vi.fn((listener: ProfileListener) => {
 			profileListeners.add(listener);
 			return () => profileListeners.delete(listener);
@@ -201,9 +204,6 @@ function setupBridge() {
 		}),
 		emit(state: BrowserNavState) {
 			listeners.forEach((listener) => listener(state));
-		},
-		emitRuntime(state: SessionBrowserRuntimeState) {
-			runtimeListeners.forEach((listener) => listener(state));
 		},
 		emitTabs(state: Parameters<TabsListener>[0]) {
 			tabsListeners.forEach((listener) => listener(state));
@@ -242,6 +242,7 @@ describe("useBrowserView", () => {
 		document.body.replaceChildren();
 		resetConsumedPreviewTriggersForTest();
 		resetClosedTabsForTest();
+		resetNativeViewCacheForTest();
 	});
 
 	it("ensures a scoped browser view and reports the measured slot bounds", async () => {
@@ -249,7 +250,7 @@ describe("useBrowserView", () => {
 		const slot = createSlot();
 		const { result } = renderHook(() => useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }));
 
-		await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-1"));
+		await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-1", false));
 		// Simulate the real IPC flow: after ensure, a navigate call sends a nav
 		// state with a URL so the positioning effect considers the view visible.
 		act(() =>
@@ -328,60 +329,142 @@ describe("useBrowserView", () => {
 
 	it("swaps straight to a session's cached native view when switching back", async () => {
 		const bridge = setupBridge();
-		bridge.attachRuntime.mockResolvedValueOnce({ sessionId: "sess-1", connected: false });
 		const slot = createSlot();
+		const live = (viewId: string) => ({ viewId, url: "http://localhost:3000/", title: "", canGoBack: false, canGoForward: false, isLoading: false });
+		const { result, rerender } = renderHook(
+			({ sessionId }) => useBrowserView({ sessionId, active: true, poppedOut: false }),
+			{ initialProps: { sessionId: "sess-1" } },
+		);
+		act(() => result.current.slotRef(slot));
+		await waitFor(() => expect(result.current.viewId).toBe("42:sess-1"));
+		act(() => bridge.emit(live("42:sess-1")));
+		rerender({ sessionId: "sess-2" });
+		await waitFor(() => expect(result.current.viewId).toBe("42:sess-2"));
+		act(() => bridge.emit(live("42:sess-2")));
+
+		// Hold the lookup so only the cached view can be on screen.
+		bridge.ensure.mockImplementationOnce(() => new Promise<BrowserNavState>(() => undefined));
+		bridge.setBounds.mockClear();
+		rerender({ sessionId: "sess-1" });
+
+		// The panel keeps showing the live page, and the first frame's native swap
+		// shows the destination before hiding the departing view.
+		expect(result.current.viewId).toBe("42:sess-1");
+		expect(result.current.navState.url).toBe("http://localhost:3000/");
+		await waitFor(() =>
+			expect(bridge.setBounds).toHaveBeenCalledWith(expect.objectContaining({ viewId: "42:sess-1", visible: true })),
+		);
+		const calls = bridge.setBounds.mock.calls.map(([input]) => [input.viewId, input.visible]);
+		const shown = calls.findIndex(([viewId, visible]) => viewId === "42:sess-1" && visible);
+		const hidden = calls.findIndex(([viewId, visible]) => viewId === "42:sess-2" && !visible);
+		expect(shown).toBeGreaterThanOrEqual(0);
+		expect(hidden).toBeGreaterThan(shown);
+		expect(calls.some(([viewId, visible]) => viewId === "42:sess-1" && !visible)).toBe(false);
+	});
+
+	it("moves the native page on every frame of the inspector slide", async () => {
+		const bridge = setupBridge();
+		const slot = createSlot();
+		const gap = document.createElement("div");
+		gap.setAttribute("data-slot", "inspector-gap");
+		document.body.appendChild(gap);
 		const { result } = renderHook(() => useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }));
+		act(() => result.current.slotRef(slot));
+		await waitFor(() => expect(result.current.viewId).toBe("42:sess-1"));
+		act(() => bridge.emit({ viewId: "42:sess-1", url: "http://localhost:3000/", title: "", canGoBack: false, canGoForward: false, isLoading: false }));
+		const slide = (type: string) => {
+			const event = new Event(type, { bubbles: true });
+			Object.defineProperty(event, "propertyName", { value: "width" });
+			gap.dispatchEvent(event);
+		};
+		await new Promise((resolve) => setTimeout(resolve, 350));
+		bridge.setBounds.mockClear();
 
-		await waitFor(() => expect(bridge.attachRuntime).toHaveBeenCalled());
-		await waitFor(() => expect(result.current.browserRuntimeConnected).toBe(false));
-		expect(slot).toBeInTheDocument();
+		act(() => slide("transitionrun"));
+		await waitFor(() => expect(bridge.setBounds.mock.calls.length).toBeGreaterThanOrEqual(3));
+		act(() => slide("transitionend"));
+		const settled = bridge.setBounds.mock.calls.length;
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		expect(bridge.setBounds.mock.calls.length).toBe(settled);
+		expect(bridge.setBounds).toHaveBeenLastCalledWith(expect.objectContaining({ viewId: "42:sess-1", visible: true }));
 	});
 
-	it("uses the remote host's runtime state and reconnect target", async () => {
+	it("leaves a hidden page alone while another inspector tab slides", async () => {
 		const bridge = setupBridge();
-		bridge.attachRuntime.mockResolvedValueOnce({ sessionId: "sess-1", hostId: "remote-a", connected: true });
-		const { result } = renderHook(() => useBrowserView({
-			sessionId: "remote:remote-a:sess-1", active: true, poppedOut: false,
-			origin: { hostId: "remote-a", sessionId: "sess-1", proxyBase: "http://127.0.0.1:3000/token" },
-		}));
-		await waitFor(() => expect(bridge.attachRuntime).toHaveBeenCalledWith("sess-1", "remote-a", false));
-		await waitFor(() => expect(result.current.browserRuntimeConnected).toBe(true));
-		act(() => bridge.emitRuntime({ connected: false }));
-		expect(result.current.browserRuntimeConnected).toBe(true);
-		act(() => bridge.emitRuntime({ hostId: "remote-b", connected: false }));
-		expect(result.current.browserRuntimeConnected).toBe(true);
-		act(() => bridge.emitRuntime({ hostId: "remote-a", connected: false }));
-		expect(result.current.browserRuntimeConnected).toBe(false);
-		await act(async () => result.current.reconnectBrowserRuntime());
-		expect(bridge.reconnectRuntime).toHaveBeenCalledWith("remote-a");
+		const slot = createSlot();
+		const gap = document.createElement("div");
+		gap.setAttribute("data-slot", "inspector-gap");
+		document.body.appendChild(gap);
+		const { result } = renderHook(() => useBrowserView({ sessionId: "sess-1", active: false, poppedOut: false }));
+		act(() => result.current.slotRef(slot));
+		await waitFor(() => expect(result.current.viewId).toBe("42:sess-1"));
+		await new Promise((resolve) => setTimeout(resolve, 350));
+		bridge.setBounds.mockClear();
+
+		const event = new Event("transitionrun", { bubbles: true });
+		Object.defineProperty(event, "propertyName", { value: "width" });
+		act(() => { gap.dispatchEvent(event); });
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		expect(bridge.setBounds).not.toHaveBeenCalled();
 	});
 
-	it("claims a session once, isolates ownership updates and explicitly takes control", async () => {
+	it("shows a cached session's latest page when switching back", async () => {
 		const bridge = setupBridge();
-		const origin = { hostId: "remote-a", sessionId: "sess-1", proxyBase: "http://127.0.0.1:3000/token" };
-		const { result, rerender } = renderHook(({ active }) => useBrowserView({ sessionId: "remote:remote-a:sess-1", origin, active, poppedOut: false }), { initialProps: { active: true } });
-		await waitFor(() => expect(bridge.attachRuntime).toHaveBeenCalledWith("sess-1", "remote-a", false));
-		rerender({ active: false });
-		expect(bridge.attachRuntime).toHaveBeenCalledTimes(1);
-		act(() => bridge.emitRuntime({ hostId: "remote-a", sessionId: "other", connected: false }));
-		expect(result.current.browserRuntimeConnected).toBe(true);
-		act(() => bridge.emitRuntime({ hostId: "remote-a", sessionId: "sess-1", connected: true, owned: false, error: { code: "BROWSER_SESSION_BUSY", message: "Browser is controlled by another desktop." } }));
-		expect(result.current.browserRuntimeError?.code).toBe("BROWSER_SESSION_BUSY");
-		await act(async () => result.current.takeBrowserControl());
-		expect(bridge.attachRuntime).toHaveBeenLastCalledWith("sess-1", "remote-a", true);
+		const slot = createSlot();
+		const live = (viewId: string, url: string) => ({ viewId, url, title: "", canGoBack: false, canGoForward: false, isLoading: false });
+		const { result, rerender } = renderHook(
+			({ sessionId }) => useBrowserView({ sessionId, active: true, poppedOut: false }),
+			{ initialProps: { sessionId: "sess-1" } },
+		);
+		act(() => result.current.slotRef(slot));
+		await waitFor(() => expect(result.current.viewId).toBe("42:sess-1"));
+		act(() => bridge.emit(live("42:sess-1", "http://localhost:3000/")));
+		rerender({ sessionId: "sess-2" });
+		await waitFor(() => expect(result.current.viewId).toBe("42:sess-2"));
+
+		// An agent navigates sess-1's page while the user is on sess-2.
+		act(() => bridge.emit(live("42:sess-1", "http://localhost:3000/next")));
+		bridge.ensure.mockImplementationOnce(() => new Promise<BrowserNavState>(() => undefined));
+		rerender({ sessionId: "sess-1" });
+
+		expect(result.current.navState.url).toBe("http://localhost:3000/next");
 	});
 
-	it("does not replace a newer ownership event with a delayed handoff snapshot", async () => {
+	it("hides the departing view even when ensure answers with a new view first", async () => {
 		const bridge = setupBridge();
-		const { result } = renderHook(() => useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }));
-		await waitFor(() => expect(result.current.browserRuntimeConnected).toBe(true));
-		let resolve!: (state: SessionBrowserRuntimeState) => void;
-		bridge.attachRuntime.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
-		let handoff!: Promise<void>;
-		act(() => { handoff = result.current.takeBrowserControl(); });
-		act(() => bridge.emitRuntime({ sessionId: "sess-1", connected: true, owned: false, error: { code: "BROWSER_SESSION_BUSY", message: "Browser is controlled by another desktop." } }));
-		await act(async () => { resolve({ sessionId: "sess-1", connected: true, owned: true }); await handoff; });
-		expect(result.current.browserRuntimeError?.code).toBe("BROWSER_SESSION_BUSY");
+		const slot = createSlot();
+		const live = (viewId: string) => ({ viewId, url: "http://localhost:3000/", title: "", canGoBack: false, canGoForward: false, isLoading: false });
+		const { result, rerender } = renderHook(
+			({ sessionId }) => useBrowserView({ sessionId, active: true, poppedOut: false }),
+			{ initialProps: { sessionId: "sess-1" } },
+		);
+		act(() => result.current.slotRef(slot));
+		await waitFor(() => expect(result.current.viewId).toBe("42:sess-1"));
+		act(() => bridge.emit(live("42:sess-1")));
+		rerender({ sessionId: "sess-2" });
+		await waitFor(() => expect(result.current.viewId).toBe("42:sess-2"));
+		act(() => bridge.emit(live("42:sess-2")));
+
+		// sess-1's view was recreated while the user was away.
+		bridge.ensure.mockImplementationOnce(async () => live("43:sess-1"));
+		bridge.setBounds.mockClear();
+		rerender({ sessionId: "sess-1" });
+
+		await waitFor(() => expect(result.current.viewId).toBe("43:sess-1"));
+		await waitFor(() =>
+			expect(bridge.setBounds).toHaveBeenCalledWith(expect.objectContaining({ viewId: "42:sess-2", visible: false })),
+		);
+	});
+
+	it("leaves the runtime link state to the Browser panel (#6466)", async () => {
+		const bridge = setupBridge();
+		createSlot();
+		renderHook(() => useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }));
+		await act(async () => undefined);
+
+		// SessionView owns this hook; a flapping link must not re-render it.
+		expect(bridge.onRuntimeState).not.toHaveBeenCalled();
+		expect(bridge.getRuntimeState).not.toHaveBeenCalled();
 	});
 
 	it("keeps bounds revisions increasing when the same native view remounts", async () => {
@@ -1146,7 +1229,7 @@ describe("useBrowserView", () => {
 		document.body.appendChild(column);
 
 		const { result } = renderHook(() => useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }));
-		await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-1"));
+		await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-1", false));
 		act(() =>
 			bridge.emit({
 				viewId: "42:sess-1",
@@ -1169,6 +1252,41 @@ describe("useBrowserView", () => {
 				visible: true,
 			})),
 		);
+	});
+
+	it("keeps the inspector viewport width while sliding out of and back into the workspace", async () => {
+		const bridge = setupBridge();
+		const split = document.createElement("div");
+		split.className = "session-split";
+		const column = document.createElement("div");
+		column.setAttribute("data-panel", "");
+		column.dataset.slot = "inspector-container";
+		const slot = createSlot();
+		const rect = slot.getBoundingClientRect();
+		let offset = 0;
+		split.getBoundingClientRect = () => ({ ...rect, x: 0, left: 0, right: 800, width: 800 });
+		column.getBoundingClientRect = () => ({
+			...rect, x: 500 + offset, left: 500 + offset, right: 800 + offset, width: 300,
+		});
+		slot.getBoundingClientRect = () => ({
+			...rect, x: 506 + offset, left: 506 + offset, right: 800 + offset, width: 294,
+		});
+		column.appendChild(slot);
+		split.appendChild(column);
+		document.body.appendChild(split);
+
+		const { result } = renderHook(() => useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }));
+		await waitFor(() => expect(result.current.viewId).toBe("42:sess-1"));
+		act(() => result.current.slotRef(slot));
+
+		for (const position of [0, 150, 300, 150, 0]) {
+			offset = position;
+			act(() => window.dispatchEvent(new Event("resize")));
+			await waitFor(() => expect(bridge.setBounds).toHaveBeenLastCalledWith(expect.objectContaining({
+				rect: { x: 506 + position, y: 34, width: 294, height: 240 },
+				visible: true,
+			})));
+		}
 	});
 
 	it("re-measures after a layout transition settles, catching a position-only shift", async () => {
@@ -1271,7 +1389,7 @@ describe("useBrowserView", () => {
 		const slot = createSlot();
 		const { result } = renderHook(() => useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }));
 
-		await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-1"));
+		await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-1", false));
 		act(() =>
 			bridge.emit({
 				viewId: "42:sess-1",
@@ -1313,7 +1431,7 @@ describe("useBrowserView", () => {
 		const slot = createSlot();
 		const { result } = renderHook(() => useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }));
 
-		await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-1"));
+		await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-1", false));
 		act(() =>
 			bridge.emit({
 				viewId: "42:sess-1",
@@ -1349,7 +1467,7 @@ describe("useBrowserView", () => {
 		const bridge = setupBridge();
 		const slot = createSlot();
 		const { result } = renderHook(() => useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }));
-		await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-1"));
+		await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-1", false));
 		act(() =>
 			bridge.emit({
 				viewId: "42:sess-1",
@@ -1379,7 +1497,7 @@ describe("useBrowserView", () => {
 		const slot = createSlot();
 		const { result } = renderHook(() => useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }));
 
-		await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-1"));
+		await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-1", false));
 		act(() =>
 			bridge.emit({
 				viewId: "42:sess-1",
@@ -1423,7 +1541,7 @@ describe("useBrowserView", () => {
 		const slot = createSlot();
 		const { result } = renderHook(() => useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }));
 
-		await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-1"));
+		await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-1", false));
 		act(() =>
 			bridge.emit({
 				viewId: "42:sess-1",
@@ -1462,7 +1580,7 @@ describe("useBrowserView", () => {
 	it("does not raise the browser overlay during sidebar resize", async () => {
 		const bridge = setupBridge();
 		renderHook(() => useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }));
-		await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-1"));
+		await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-1", false));
 		bridge.setOverlayOpen.mockClear();
 
 		await act(async () => {
@@ -1481,7 +1599,7 @@ describe("useBrowserView", () => {
 	it("does not scan the document for unrelated data-state mutations", async () => {
 		const bridge = setupBridge();
 		renderHook(() => useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }));
-		await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-1"));
+		await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-1", false));
 		const querySelector = vi.spyOn(document, "querySelector");
 
 		const unrelated = document.createElement("button");
@@ -1554,7 +1672,7 @@ describe("useBrowserView", () => {
 		const { rerender } = renderHook(({ sessionId }) => useProbe(sessionId), {
 			initialProps: { sessionId: "sess-1" },
 		});
-		await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-1"));
+		await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-1", false));
 		act(() =>
 			bridge.emit({
 				viewId: "42:sess-1",
@@ -1568,7 +1686,7 @@ describe("useBrowserView", () => {
 
 		observedUrls.length = 0;
 		rerender({ sessionId: "sess-2" });
-		await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-2"));
+		await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-2", false));
 
 		expect(observedUrls).not.toContain("http://localhost:3000/");
 	});
@@ -1663,6 +1781,165 @@ describe("useBrowserView", () => {
 		rerender({ previewUrl: "http://localhost:5173/", previewRevision: 3, terminated: true });
 		await waitFor(() => expect(resolve).toHaveBeenLastCalledWith("box-a", "ao-1", ""));
 		expect(browser.navigate).not.toHaveBeenCalledWith(expect.objectContaining({ url: "http://localhost:5173/" }));
+	});
+
+	describe("agent browser tab", () => {
+		const viewId = "42:remote:box-a:ao-1";
+		const agentUrl = "https://ao-preview-11112222333344445555666677778888.localhost:47663/v/cdp?embed=1&sq=70&ss=1";
+		const appPreview = "https://ao-preview-0123456789abcdef0123456789abcdef.localhost:47663/";
+		const remote = { sessionId: "remote:box-a:ao-1", origin: { hostId: "box-a", sessionId: "ao-1", proxyBase: "http://127.0.0.1:4000/token" }, active: true, poppedOut: false };
+
+		it("asks main to show a remote session's agent browser", async () => {
+			const browser = setupBridge();
+			vi.spyOn(aoBridge.remotes, "agentBrowserUrl").mockResolvedValue(agentUrl);
+			renderHook(() => useBrowserView(remote));
+			await waitFor(() => expect(browser.openTab).toHaveBeenCalledWith({ viewId, url: agentUrl }));
+			expect(browser.navigate).not.toHaveBeenCalled();
+		});
+
+		it("asks main to show a cloud session's agent browser, backing off until it is up", async () => {
+			vi.useFakeTimers();
+			try {
+				const browser = setupBridge();
+				const remoteLookup = vi.spyOn(aoBridge.remotes, "agentBrowserUrl");
+				const lookup = vi.spyOn(aoBridge.cloudCp, "agentBrowserUrl").mockResolvedValueOnce("").mockResolvedValue(agentUrl);
+				renderHook(() => useBrowserView({ sessionId: "ses-1", cloudAgentBrowser: { baseUrl: "https://cp.example", orgId: "org-1", sessionId: "ses-1" }, active: true, poppedOut: false }));
+				await act(() => vi.advanceTimersByTimeAsync(0));
+				expect(lookup).toHaveBeenCalledWith("https://cp.example", "org-1", "ses-1");
+				await act(() => vi.advanceTimersByTimeAsync(2_000));
+				expect(lookup).toHaveBeenCalledTimes(2);
+				expect(browser.openTab).toHaveBeenCalledWith({ viewId: "42:ses-1", url: agentUrl });
+				expect(remoteLookup).not.toHaveBeenCalled();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it("opens a preview beside the agent tab, never over it", async () => {
+			const browser = setupBridge();
+			vi.spyOn(aoBridge.remotes, "agentBrowserUrl").mockResolvedValue("");
+			vi.spyOn(aoBridge.remotes, "previewUrl").mockResolvedValue(appPreview);
+			// Before its viewer reports, an agent tab is still empty.
+			const agentTab = { id: "t1", url: "", title: "", active: true, remote: { tabId: "" } };
+			browser.getTabs.mockResolvedValue({ viewId, activeTabId: "t1", tabs: [agentTab] });
+			renderHook(() => useBrowserView({ ...remote, previewUrl: "http://localhost:5173/", previewRevision: 1 }));
+			await waitFor(() => expect(browser.openTab).toHaveBeenCalledWith({ viewId, url: appPreview }));
+			expect(browser.navigate).not.toHaveBeenCalled();
+		});
+
+		it("updates the preview tab rather than the agent tab the person is on", async () => {
+			const browser = setupBridge();
+			vi.spyOn(aoBridge.remotes, "agentBrowserUrl").mockResolvedValue("");
+			vi.spyOn(aoBridge.remotes, "previewUrl").mockResolvedValue(appPreview);
+			const agentTab = { id: "a1", url: "https://en.wikipedia.org/wiki/Starfish", title: "Starfish", active: true, remote: { tabId: "R1" } };
+			const previewTab = { id: "t1", url: "https://ao-preview-ffffffffffffffffffffffffffffffff.localhost:47663/", title: "Daybook", active: false };
+			browser.getTabs.mockResolvedValue({ viewId, activeTabId: "a1", tabs: [previewTab, agentTab] });
+			renderHook(() => useBrowserView({ ...remote, previewUrl: "http://localhost:5173/", previewRevision: 1 }));
+			await waitFor(() => expect(browser.navigate).toHaveBeenCalledWith({ viewId, url: appPreview }));
+			expect(browser.selectTab).toHaveBeenCalledWith({ viewId, tabId: "t1" });
+			expect(browser.openTab).not.toHaveBeenCalled();
+		});
+
+		it("leaves the panel alone when the host has no agent browser", async () => {
+			const browser = setupBridge();
+			const lookup = vi.spyOn(aoBridge.remotes, "agentBrowserUrl").mockResolvedValue("");
+			renderHook(() => useBrowserView(remote));
+			await waitFor(() => expect(lookup).toHaveBeenCalledWith("box-a", "ao-1"));
+			expect(browser.navigate).not.toHaveBeenCalled();
+			expect(browser.openTab).not.toHaveBeenCalled();
+		});
+
+		it("asks again, backing off, for an agent browser that is not up yet", async () => {
+			vi.useFakeTimers();
+			try {
+				const browser = setupBridge();
+				// Redeploying, then up.
+				const lookup = vi.spyOn(aoBridge.remotes, "agentBrowserUrl").mockResolvedValueOnce("").mockResolvedValueOnce("").mockResolvedValue(agentUrl);
+				renderHook(() => useBrowserView(remote));
+				await act(() => vi.advanceTimersByTimeAsync(0));
+				expect(lookup).toHaveBeenCalledTimes(1);
+				await act(() => vi.advanceTimersByTimeAsync(2_000));
+				expect(lookup).toHaveBeenCalledTimes(2);
+				await act(() => vi.advanceTimersByTimeAsync(3_999));
+				expect(lookup).toHaveBeenCalledTimes(2);
+				await act(() => vi.advanceTimersByTimeAsync(1));
+				expect(lookup).toHaveBeenCalledTimes(3);
+				expect(browser.openTab).toHaveBeenCalledWith({ viewId, url: agentUrl });
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it("keeps asking for the agent browser while the view stays, every 15 s at most, and stops as soon as it goes", async () => {
+			vi.useFakeTimers();
+			try {
+				setupBridge();
+				const lookup = vi.spyOn(aoBridge.remotes, "agentBrowserUrl").mockResolvedValue("");
+				const view = renderHook(() => useBrowserView(remote));
+				await act(() => vi.advanceTimersByTimeAsync(0));
+				await act(() => vi.advanceTimersByTimeAsync(10 * 60_000));
+				// At 0, 2, 6 and 14 s, then every 15 s: an agent may first use its
+				// browser long after the view opened.
+				expect(lookup).toHaveBeenCalledTimes(43);
+				view.unmount();
+				lookup.mockClear();
+				await act(() => vi.advanceTimersByTimeAsync(60 * 60_000));
+				expect(lookup).not.toHaveBeenCalled();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it("asks again after a failed lookup", async () => {
+			vi.useFakeTimers();
+			vi.spyOn(console, "warn").mockImplementation(() => undefined);
+			try {
+				const browser = setupBridge();
+				const lookup = vi.spyOn(aoBridge.remotes, "agentBrowserUrl").mockRejectedValueOnce(new Error("proxy failed")).mockResolvedValue(agentUrl);
+				renderHook(() => useBrowserView(remote));
+				await act(() => vi.advanceTimersByTimeAsync(0));
+				expect(lookup).toHaveBeenCalledTimes(1);
+				await act(() => vi.advanceTimersByTimeAsync(2_000));
+				expect(lookup).toHaveBeenCalledTimes(2);
+				expect(browser.openTab).toHaveBeenCalledWith(expect.objectContaining({ url: agentUrl }));
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it("opens a link in the person's own tab, never in an agent tab", async () => {
+			const browser = setupBridge();
+			vi.spyOn(aoBridge.remotes, "agentBrowserUrl").mockResolvedValue("");
+			// An agent tab on about:blank reports no URL, and another is already on the link.
+			const blankAgent = { id: "a1", url: "", title: "", active: true, remote: { tabId: "R1" } };
+			const sameAgent = { id: "a2", url: "https://example.com/", title: "Example", active: false, remote: { tabId: "R2" } };
+			browser.getTabs.mockResolvedValue({ viewId, activeTabId: "a1", tabs: [blankAgent, sameAgent] });
+			const { result } = renderHook(() => useBrowserView(remote));
+			await waitFor(() => expect(browser.getTabs).toHaveBeenCalled());
+			await act(() => result.current.openLink("https://example.com/"));
+			expect(browser.openTab).toHaveBeenCalledWith({ viewId, url: "https://example.com/" });
+			expect(browser.navigate).not.toHaveBeenCalled();
+			expect(browser.selectTab).not.toHaveBeenCalled();
+		});
+
+		it("keeps a closed agent tab out of Recently Closed", async () => {
+			const browser = setupBridge();
+			vi.spyOn(aoBridge.remotes, "agentBrowserUrl").mockResolvedValue("");
+			const { result } = renderHook(() => useBrowserView(remote));
+			await waitFor(() => expect(result.current.tabs.length).toBeGreaterThan(0));
+			act(() => browser.emitTabs({
+				viewId,
+				activeTabId: "a1",
+				tabs: [
+					{ id: "t1", url: "https://example.org/", title: "Mine", active: false },
+					{ id: "a1", url: "http://localhost:5173/", title: "Agent's app", active: true, remote: { tabId: "R1" } },
+				],
+				change: { kind: "popup", tabId: "a1" },
+			}));
+			browser.closeTab.mockResolvedValue({ viewId, activeTabId: "t1", tabs: [{ id: "t1", url: "https://example.org/", title: "Mine", active: true }] });
+			await act(() => result.current.closeTab("a1"));
+			expect(result.current.closedTabs).toEqual([]);
+		});
 	});
 
 	it("keeps the user's manual navigation on session switch-back and only re-navigates on a new preview", async () => {
@@ -1854,7 +2131,7 @@ describe("useBrowserView", () => {
 		);
 
 		rerender({ sessionId: "sess-2", previewUrl: "http://127.0.0.1:5173/" });
-		await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-2"));
+		await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-2", false));
 		await waitFor(() =>
 			expect(bridge.navigate).toHaveBeenCalledWith({
 				viewId: "42:sess-2",
@@ -1937,6 +2214,61 @@ describe("useBrowserView", () => {
 		expect(bridge.clear).not.toHaveBeenCalled();
 	});
 
+	it("reopens an available artifact after daemon termination destroys its native target", async () => {
+		const bridge = setupBridge();
+		const { rerender } = renderHook(
+			({ sessionEnded }) => useBrowserView({
+				sessionId: "sess-1", active: true, poppedOut: false, terminated: false, sessionEnded,
+				previewUrl: "http://ao-preview-artifact.onwxg.localhost:3300/report.html", previewRevision: 1,
+			}),
+			{ initialProps: { sessionEnded: false } },
+		);
+		await waitFor(() => expect(bridge.navigate).toHaveBeenCalledTimes(1));
+		rerender({ sessionEnded: true });
+		await waitFor(() => expect(bridge.navigate).toHaveBeenCalledTimes(2));
+		expect(bridge.ensure).toHaveBeenCalledTimes(2);
+		expect(bridge.destroy).not.toHaveBeenCalled();
+	});
+
+	it("preserves manual navigation when revisiting an already-ended artifact session", async () => {
+		const bridge = setupBridge();
+		const options = {
+			sessionId: "sess-1", active: true, poppedOut: false, terminated: false, sessionEnded: true,
+			previewUrl: "http://ao-preview-artifact.onwxg.localhost:3300/report.html", previewRevision: 1,
+		};
+		const first = renderHook(() => useBrowserView(options));
+		await waitFor(() => expect(bridge.navigate).toHaveBeenCalledTimes(1));
+		await act(() => first.result.current.navigate("https://example.com/manual"));
+		first.unmount();
+		const second = renderHook(() => useBrowserView(options));
+		await waitFor(() => expect(second.result.current.viewId).toBe("42:sess-1"));
+		expect(bridge.navigate).toHaveBeenCalledTimes(2);
+	});
+
+	it("does not create a browser for an already terminated session", () => {
+		const bridge = setupBridge();
+		const { result } = renderHook(() => useBrowserView({
+			sessionId: "sess-1", active: true, poppedOut: false, terminated: true,
+		}));
+		expect(bridge.ensure).not.toHaveBeenCalled();
+		expect(result.current.viewId).toBe("");
+	});
+
+	it("destroys a browser that finishes creating after termination", async () => {
+		const bridge = setupBridge();
+		let finish!: (state: BrowserNavState) => void;
+		bridge.ensure.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+		const { result, rerender } = renderHook(
+			({ terminated }) => useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false, terminated }),
+			{ initialProps: { terminated: false } },
+		);
+		rerender({ terminated: true });
+		await act(async () => finish(bridge.stateFor("42:sess-1")));
+		expect(bridge.destroy).toHaveBeenCalledWith("42:sess-1");
+		expect(result.current.viewId).toBe("");
+		expect(bridge.navigate).not.toHaveBeenCalled();
+	});
+
 	it("destroys the complete browser target when the session is terminated", async () => {
 		const bridge = setupBridge();
 		const { rerender, result } = renderHook(
@@ -1960,6 +2292,12 @@ describe("useBrowserView", () => {
 		expect(bridge.clear).not.toHaveBeenCalled();
 		expect(bridge.navigate).toHaveBeenCalledTimes(1);
 		expect(result.current.viewId).toBe("");
+
+		// Restoring re-creates the target without a route change or remount.
+		rerender({ terminated: false });
+		await waitFor(() => expect(result.current.viewId).toBe("42:sess-1"));
+		expect(bridge.ensure).toHaveBeenCalledTimes(2);
+		await waitFor(() => expect(bridge.navigate).toHaveBeenCalledTimes(2));
 	});
 
 	it("hides the native view while an element outside the slot is fullscreen, and restores it on exit", async () => {
@@ -2042,7 +2380,7 @@ describe("useBrowserView", () => {
 		host.appendChild(slot);
 
 		const { result } = renderHook(() => useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }));
-		await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-1"));
+		await waitFor(() => expect(bridge.ensure).toHaveBeenCalledWith("sess-1", false));
 		act(() =>
 			bridge.emit({
 				viewId: "42:sess-1",
@@ -2066,5 +2404,52 @@ describe("useBrowserView", () => {
 				}),
 			),
 		);
+	});
+it("uses the remote host's runtime state and reconnect target", async () => {
+		const bridge = setupBridge();
+		bridge.attachRuntime.mockResolvedValueOnce({ sessionId: "sess-1", hostId: "remote-a", connected: true, owned: true });
+		const { result } = renderHook(() => useBrowserView({
+			sessionId: "remote:remote-a:sess-1", active: true, poppedOut: false,
+			origin: { hostId: "remote-a", sessionId: "sess-1", proxyBase: "http://127.0.0.1:3000/token" },
+		}));
+		await waitFor(() => expect(bridge.attachRuntime).toHaveBeenCalledWith("sess-1", "remote-a", false));
+		await waitFor(() => expect(result.current.browserRuntimeConnected).toBe(true));
+		act(() => bridge.emitRuntime({ sessionId: "sess-1", connected: false, owned: false }));
+		expect(result.current.browserRuntimeConnected).toBe(true);
+		act(() => bridge.emitRuntime({ sessionId: "sess-1", hostId: "remote-b", connected: false, owned: false }));
+		expect(result.current.browserRuntimeConnected).toBe(true);
+		act(() => bridge.emitRuntime({ sessionId: "sess-1", hostId: "remote-a", connected: false, owned: false }));
+		expect(result.current.browserRuntimeConnected).toBe(false);
+		await act(async () => result.current.reconnectBrowserRuntime());
+		expect(bridge.reconnectRuntime).not.toHaveBeenCalled();
+		expect(bridge.attachRuntime).toHaveBeenLastCalledWith("sess-1", "remote-a", false);
+	});
+
+it("claims a session once, isolates ownership updates and explicitly takes control", async () => {
+		const bridge = setupBridge();
+		const origin = { hostId: "remote-a", sessionId: "sess-1", proxyBase: "http://127.0.0.1:3000/token" };
+		const { result, rerender } = renderHook(({ active }) => useBrowserView({ sessionId: "remote:remote-a:sess-1", origin, active, poppedOut: false }), { initialProps: { active: true } });
+		await waitFor(() => expect(bridge.attachRuntime).toHaveBeenCalledWith("sess-1", "remote-a", false));
+		rerender({ active: false });
+		expect(bridge.attachRuntime).toHaveBeenCalledTimes(1);
+		act(() => bridge.emitRuntime({ hostId: "remote-a", sessionId: "other", connected: false, owned: false }));
+		expect(result.current.browserRuntimeConnected).toBe(true);
+		act(() => bridge.emitRuntime({ hostId: "remote-a", sessionId: "sess-1", connected: true, owned: false, error: { code: "BROWSER_SESSION_BUSY", message: "Browser is controlled by another desktop." } }));
+		expect(result.current.browserRuntimeError?.code).toBe("BROWSER_SESSION_BUSY");
+		await act(async () => result.current.takeBrowserControl());
+		expect(bridge.attachRuntime).toHaveBeenLastCalledWith("sess-1", "remote-a", true);
+	});
+
+it("does not replace a newer ownership event with a delayed handoff snapshot", async () => {
+		const bridge = setupBridge();
+		const { result } = renderHook(() => useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }));
+		await waitFor(() => expect(result.current.browserRuntimeConnected).toBe(true));
+		let resolve!: (state: SessionBrowserRuntimeState) => void;
+		bridge.attachRuntime.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+		let handoff!: Promise<void>;
+		act(() => { handoff = result.current.takeBrowserControl(); });
+		act(() => bridge.emitRuntime({ sessionId: "sess-1", connected: true, owned: false, error: { code: "BROWSER_SESSION_BUSY", message: "Browser is controlled by another desktop." } }));
+		await act(async () => { resolve({ sessionId: "sess-1", connected: true, owned: true }); await handoff; });
+		expect(result.current.browserRuntimeError?.code).toBe("BROWSER_SESSION_BUSY");
 	});
 });

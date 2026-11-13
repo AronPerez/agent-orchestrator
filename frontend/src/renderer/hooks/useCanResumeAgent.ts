@@ -60,7 +60,8 @@ export function canResumeAgent(
 ): boolean {
 	return Boolean(
 		session &&
-			(session.needsResume && sessionIsActive(session) || sessionAgentExited(session)) &&
+			sessionIsActive(session) &&
+			(session.needsResume || sessionAgentExited(session) || session.statusReadiness === "unavailable") &&
 			!session.activeAgentSwitch &&
 			!session.cloud &&
 			!interfaceTransitionIsActive(transition),

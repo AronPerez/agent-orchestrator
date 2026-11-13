@@ -196,7 +196,7 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 			subtitle: session.branch,
 			keywords: [
 				session.workspaceName,
-				getBoardSessionStatusLabel(toBoardSessionPresentation(session, t), (key, values) => t(key as MessageKey, values)),
+				getBoardSessionStatusLabel(toBoardSessionPresentation(session), (key, values) => t(key as MessageKey, values)),
 				getSessionStatusView(session.status, t).label,
 				...session.prs.flatMap((pr) => [`#${pr.number}`, String(pr.number)]),
 			],

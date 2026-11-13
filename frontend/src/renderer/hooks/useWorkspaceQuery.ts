@@ -102,6 +102,7 @@ export function toWorkspaceSession(
 	return {
 		id: session.id,
 		parentSessionId: session.parentSessionId,
+		activeAgentSwitch: session.activeAgentSwitch,
 		terminalHandleId: session.terminalHandleId,
 		terminalGeneration: session.terminalGeneration,
 		workspaceId: project.id,
@@ -211,6 +212,7 @@ function toLocalWorkspaceSession(
 	return {
 		id: session.id,
 		parentSessionId: session.parentSessionId,
+		activeAgentSwitch: session.activeAgentSwitch,
 		terminalHandleId: session.terminalHandleId,
 		terminalGeneration: session.terminalGeneration,
 		workspaceId,
@@ -487,7 +489,6 @@ export function toCloudWorkspaceSession(
 ): WorkspaceSession {
 	return {
 		id: session.id,
-		parentSessionId: session.parentSessionId,
 		// The terminal pane only mounts for a session that has a terminal handle.
 		// A cloud session's PTY is addressed by the session id over its ticketed
 		// CP WebSocket, so the session id is its handle.

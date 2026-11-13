@@ -539,5 +539,8 @@ function replayFrames(count: number): string {
 }
 
 function response(body: unknown, status = 200): Response {
-	return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+	// These fixtures represent the current daemon, which advertises its archive summary.
+	const payload = body && typeof body === "object" && "sessions" in body
+		? { archived: { total: 0, byProject: {} }, ...body } : body;
+	return new Response(JSON.stringify(payload), { status, headers: { "content-type": "application/json" } });
 }

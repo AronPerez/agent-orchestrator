@@ -4,6 +4,7 @@ import type { DaemonStatus } from "../../shared/daemon-status";
 import { daemonFailureMessage } from "./daemon-failure";
 import { captureRendererEvent } from "./telemetry";
 import { captureApiErrorToSentry } from "./sentry";
+import { markApiError, withApiErrorOwnership } from "./reported-errors";
 
 function devApiBaseUrl(): string {
 	return typeof window === "undefined" ? "http://127.0.0.1:3001" : window.location.origin;
@@ -19,6 +20,33 @@ const baseUrlListeners = new Set<() => void>();
 
 export function getApiBaseUrl(): string {
 	return runtimeApiBaseUrl ?? "";
+}
+
+// Chromium allows six HTTP/1.1 connections per host, and every EventSource
+// holds one for its whole life. The renderer keeps three to five streams open
+// on the daemon, which left two or three connections for every other request,
+// so one slow request queued the rest (Settings among them). A *.localhost name
+// resolves to loopback in Chromium but is a separate host, so streams opened on
+// it get their own connections. Only the loopback daemon address is remapped.
+//
+// Chromium resolves a *.localhost name to ::1 first, and the daemon's main
+// listener is 127.0.0.1, so another process on [::1] at the daemon's port (or
+// on a dual-stack ::) would receive these streams. The name is used only while
+// the daemon reports that it serves [::1] at its port too (ipv6Loopback in its
+// status); otherwise streams stay on 127.0.0.1.
+const eventStreamHostname = "ao-events.localhost";
+let daemonServesIPv6Loopback = false;
+
+/** The base URL a daemon EventSource connects to; see eventStreamHostname. */
+export function eventStreamBaseUrl(baseUrl: string, ipv6Loopback = daemonServesIPv6Loopback): string {
+	try {
+		const url = new URL(baseUrl);
+		if (!ipv6Loopback || url.hostname !== "127.0.0.1") return baseUrl.replace(/\/+$/, "");
+		url.hostname = eventStreamHostname;
+		return url.href.replace(/\/+$/, "");
+	} catch {
+		return baseUrl.replace(/\/+$/, "");
+	}
 }
 
 export function hasTrustedApiBaseUrl(): boolean {
@@ -49,6 +77,7 @@ export function setApiBaseUrl(nextBaseUrl: string | null): void {
 // availability message.
 export function setApiDaemonStatus(nextStatus: DaemonStatus): void {
 	daemonStatus = nextStatus;
+	daemonServesIPv6Loopback = nextStatus.state === "ready" && nextStatus.ipv6Loopback === true;
 }
 
 // Route templates from the generated OpenAPI schema (frontend/src/api/schema.ts).
@@ -75,6 +104,11 @@ const ROUTE_TEMPLATES = [
 	"/api/v1/agents/readiness",
 	"/api/v1/agents/readiness/ensure",
 	"/api/v1/agents/{agent}/auth",
+	"/api/v1/agents/{agent}/auth/operations",
+	"/api/v1/agents/{agent}/auth/operations/{operationId}",
+	"/api/v1/agents/{agent}/auth/operations/{operationId}/code",
+	"/api/v1/agents/{agent}/logout",
+	"/api/v1/settings/harness-defaults/{agent}",
 	"/api/v1/agents/{agent}/install",
 	"/api/v1/agents/codex/accounts",
 	"/api/v1/agents/codex/accounts/{accountId}",
@@ -88,6 +122,15 @@ const ROUTE_TEMPLATES = [
 	"/api/v1/agents/codex/accounts/login-operations/{operationId}/cancel",
 	"/api/v1/agents/codex/account-switches",
 	"/api/v1/agents/codex/account-switches/{switchId}",
+	"/api/v1/agents/accounts",
+	"/api/v1/agents/accounts/usage",
+	"/api/v1/agents/accounts/login",
+	"/api/v1/agents/accounts/login/{operationId}/verify",
+	"/api/v1/agents/accounts/login/{operationId}/cancel",
+	"/api/v1/agents/accounts/sessions/{sessionId}",
+	"/api/v1/agents/accounts/{accountId}",
+	"/api/v1/agents/accounts/{accountId}/default",
+	"/api/v1/agents/accounts/{accountId}/reset-credit",
 	"/api/v1/agents/{agent}/models",
 	"/api/v1/agents/{agent}/models/refresh",
 	"/api/v1/agents/{agent}/probe",
@@ -106,6 +149,8 @@ const ROUTE_TEMPLATES = [
 	"/api/v1/projects",
 "/api/v1/projects/clone",
 	"/api/v1/projects/clone/prepare",
+	"/api/v1/projects/clone/prepare/stream",
+	"/api/v1/projects/clone/check",
 	"/api/v1/projects/clone/cleanup",
 	"/api/v1/projects/initialize",
 	"/api/v1/projects/{id}",
@@ -115,9 +160,6 @@ const ROUTE_TEMPLATES = [
 	"/api/v1/sessions",
 	"/api/v1/sessions/{sessionId}",
 	"/api/v1/sessions/{sessionId}/activity",
-	"/api/v1/sessions/{sessionId}/agent-switches",
-	"/api/v1/sessions/{sessionId}/agent-switches/{switchId}/handoff",
-	"/api/v1/sessions/{sessionId}/agent-switches/{switchId}/recover",
 	"/api/v1/sessions/{sessionId}/exit-agent",
 	"/api/v1/sessions/{sessionId}/interface-transition",
 	"/api/v1/sessions/{sessionId}/kill",
@@ -126,10 +168,10 @@ const ROUTE_TEMPLATES = [
 	"/api/v1/sessions/{sessionId}/preview",
 	"/api/v1/sessions/{sessionId}/preview/files/*",
 	"/api/v1/sessions/{sessionId}/preview/server",
+	"/api/v1/sessions/{sessionId}/provider-switch",
 	"/api/v1/sessions/{sessionId}/renders/{renderId}/artifact",
 	"/api/v1/sessions/{sessionId}/resume-agent",
 	"/api/v1/sessions/{sessionId}/restore",
-	"/api/v1/sessions/{sessionId}/switch-agent",
 	"/api/v1/sessions/{sessionId}/reviews",
 	"/api/v1/sessions/{sessionId}/reviews/cancel",
 	"/api/v1/sessions/{sessionId}/reviews/comments/resolve",
@@ -195,7 +237,9 @@ function fallbackNormalize(pathname: string): string {
 			i += 1;
 		}
 	}
-	return segments.join("/");
+	// Route words never contain a digit, apart from the API version; any other
+	// segment with one is an identifier (a side-chat UUID, a shell terminal ID).
+	return segments.map((segment) => (/\d/.test(segment) && !/^v\d+$/.test(segment) ? ":id" : segment)).join("/");
 }
 
 export function normalizeApiOperation(method: string, pathname: string): string {
@@ -208,12 +252,34 @@ export function normalizeApiOperation(method: string, pathname: string): string 
 }
 
 type ApiErrorCategory = "daemon_unavailable" | "network_error" | "http_4xx" | "http_5xx";
-type ReportingOwner = NonNullable<components["schemas"]["APIError"]["reporting_owner"]>;
 
 // One event per (operation, category, status) per window: a daemon outage
 // makes every polling query fail at once and on every retry — the failure
 // signal matters, the storm does not.
 const API_ERROR_DEDUPE_MS = 30_000;
+// These codes are the successful or expected outcome of a probe: Codex is not
+// wired in this process, or a shell the user already closed. Other 401 and
+// 404 responses still report, including an expired GitHub token.
+const EXPECTED_API_ERROR_CODES = new Set([
+	"UPSTREAM_UNAVAILABLE",
+	"HOST_IDENTITY_UNVERIFIED",
+	"CODEX_ACCOUNT_MANAGEMENT_UNAVAILABLE",
+	"SHELL_TERMINAL_NOT_FOUND",
+]);
+
+// Conversation probes that 409 while the chat controller is not ready.
+// Exact normalized operations only, so a later 409 on another skills or
+// models route still reports.
+const EXPECTED_PROBE_CONFLICTS = new Set([
+	"POST /api/v1/sessions/:id/workspace/diffs",
+	"GET /api/v1/sessions/:id/conversation/config-options",
+	"GET /api/v1/sessions/:id/conversation/models",
+	"GET /api/v1/sessions/:id/conversation/skills",
+]);
+
+function expectedProbeConflict(operation: string, status?: number): boolean {
+	return status === 409 && EXPECTED_PROBE_CONFLICTS.has(operation);
+}
 const lastApiErrorAt = new Map<string, number>();
 
 function reportApiError(
@@ -222,27 +288,19 @@ function reportApiError(
 	status?: number,
 	code?: string,
 	requestId?: string,
-	reportingOwner?: ReportingOwner,
 ): void {
-	// Treat an omitted owner as HTTP-owned for dedupe purposes. Saga-owned
-	// responses need their own bucket so suppressing one cannot hide a later
-	// generic HTTP failure from Sentry.
-	const ownerBucket = reportingOwner === "agent_switch_saga" ? "agent_switch_saga" : "http";
-	const key = `${operation}|${category}|${status ?? ""}|${ownerBucket}`;
+	const key = `${operation}|${category}|${status ?? ""}`;
 	const now = Date.now();
 	const last = lastApiErrorAt.get(key);
 	if (last !== undefined && now - last < API_ERROR_DEDUPE_MS) return;
 	lastApiErrorAt.set(key, now);
-	void captureRendererEvent("ao.renderer.api_error", {
+	void captureRendererEvent("ao.requests.failed", {
 		operation,
 		error_category: category,
 		status,
+		error_code: code,
 	});
-	// Mirror into Sentry (no-op unless a DSN is configured). The daemon `code`
-	// is what drives the fine-grained severity/owner classification; `requestId`
-	// (when present) is tagged so a client event pivots to the daemon's own
-	// capture of the same request, which carries the matching request_id.
-	if (reportingOwner !== "agent_switch_saga") {
+	if (category !== "daemon_unavailable" && !(status !== undefined && status >= 400 && status < 500 && EXPECTED_PROBE_CONFLICTS.has(operation))) {
 		captureApiErrorToSentry(operation, category, status, code, requestId);
 	}
 }
@@ -310,10 +368,9 @@ export async function reportingFetch(input: Request): Promise<Response> {
 async function runtimeFetch(input: Request): Promise<Response> {
 	tagClientTimeZone(input);
 	const operation = normalizeApiOperation(input.method, new URL(input.url).pathname);
-	const visibilityOwned = operation === "GET /api/v1/projects" || operation === "GET /api/v1/sessions" || operation === "GET /api/v1/sessions/:id/agent-switches";
 	const baseUrl = runtimeApiBaseUrl;
 	if (baseUrl === null) {
-		if (!visibilityOwned) reportApiError(operation, "daemon_unavailable", 503);
+		if (daemonStatus.state !== "starting") reportApiError(operation, "daemon_unavailable", 503);
 		return new Response(JSON.stringify({ message: daemonFailureMessage(daemonStatus), code: daemonStatus.code }), {
 			status: 503,
 			headers: { "Content-Type": "application/json" },
@@ -356,44 +413,21 @@ async function runtimeFetch(input: Request): Promise<Response> {
 	try {
 		response = await send();
 	} catch (error) {
+		markApiError(error);
 		// Caller-initiated aborts (unmounted components cancelling queries) are not failures.
 		if (!(error instanceof DOMException && error.name === "AbortError")) {
-			if (!visibilityOwned) reportApiError(operation, "network_error");
+			reportApiError(operation, "network_error");
 		}
 		throw error;
 	}
-	if (!response.ok) {
-		// Best-effort read the daemon error envelope's `code` (via a clone so the
-		// caller still gets an unconsumed body) to drive classification.
-		let code: string | undefined;
-		let requestId: string | undefined;
-		let reportingOwner: ReportingOwner | undefined;
-		try {
-			const body = (await response.clone().json()) as Partial<components["schemas"]["APIError"]>;
-			if (typeof body?.code === "string" && body.code !== "") code = body.code;
-			if (typeof body?.requestId === "string" && body.requestId !== "") requestId = body.requestId;
-			if (body?.reporting_owner === "http" || body?.reporting_owner === "agent_switch_saga") {
-				reportingOwner = body.reporting_owner;
-			}
-		} catch {
-			// Non-JSON or empty body: fall back to status-only classification.
-		}
-		if (!visibilityOwned) reportApiError(
-			operation,
-			response.status >= 500 ? "http_5xx" : "http_4xx",
-			response.status,
-			code,
-			requestId,
-			reportingOwner,
-		);
-	}
+	if (!response.ok) await reportResponseError(operation, response);
 	return response;
 }
 
-export const apiClient = createClient<paths>({
+export const apiClient = withApiErrorOwnership(createClient<paths>({
 	baseUrl: initialApiBaseUrl,
 	fetch: runtimeFetch,
-});
+}));
 
 // Build each request against the daemon's current address, so runtimeFetch
 // passes it straight to fetch. Rebasing a request built against the

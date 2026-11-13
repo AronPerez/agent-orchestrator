@@ -66,7 +66,7 @@ describe("global settings deep links", () => {
 			focusAgentId: "codex",
 		});
 
-		useUiStore.getState().openGlobalSettings("agents");
+		useUiStore.getState().openGlobalSettings("harness");
 		expect(useUiStore.getState().settingsModal).toEqual({ scope: "global", section: "agents" });
 	});
 

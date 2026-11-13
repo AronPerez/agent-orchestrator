@@ -8898,7 +8898,7 @@ export interface components {
             /** @description Associated pull request to read instead of the checked-out worktree. Requires the committed scope. */
             prNumber?: number;
             /** @enum {string} */
-            scope: "combined" | "committed" | "staged" | "unstaged" | "untracked";
+            scope: "combined" | "uncommitted" | "committed" | "staged" | "unstaged" | "untracked";
             /** @description Stable URL of the pull request, for PRs that share a number. Requires prNumber. */
             sourceUrl?: string;
             workspaceVersion?: string;

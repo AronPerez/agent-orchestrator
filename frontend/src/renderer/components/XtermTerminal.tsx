@@ -64,8 +64,10 @@ import { leaseWebglRenderer, type WebglLease } from "../lib/terminal-webgl-pool"
 import { useUiStore, type Theme, type ThemeStyle } from "../stores/ui-store";
 import { TerminalSearch } from "./TerminalSearch";
 import { useLinkPreview } from "../hooks/useLinkPreview";
-import { LinkPreviewCard, LinkPreviewCardLoading } from "./LinkPreviewCard";
-import { HoverCard, HoverCardContent, HoverCardTrigger } from "./ui/hover-card";
+import { LinkPreviewHoverCard } from "./LinkPreviewCard";
+import { CloseButton } from "./ui/close-button";
+import { HoverCard, HoverCardTrigger } from "./ui/hover-card";
+import { Pressable } from "./ui/pressable";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
@@ -74,8 +76,25 @@ import {
 	DropdownMenuTrigger,
 } from "./ui/dropdown-menu";
 
+/** A dropped file that was not placed: its reason, or the limit it was over. */
+type DropFailure = { name: string; reason?: string; maxMegabytes?: number };
+type DropNotice = { kind: "placing"; names: string[] } | { kind: "failed"; failures: DropFailure[] };
+/** A local save shows its progress only once it takes longer than this. */
+const LOCAL_DROP_NOTICE_DELAY_MS = 400;
+/** How long a drop failure stays unless dismissed first. */
+const DROP_FAILURE_NOTICE_MS = 10_000;
+
 export type XtermTerminalProps = {
 	ariaLabel?: string;
+	/**
+	 * Puts a file dropped on the terminal where the terminal's program can open
+	 * it and answers with that path, a POSIX sandbox path, which is typed at the
+	 * prompt quoted for its shell. Absent, the file is saved on this machine (a
+	 * local terminal). Null, the terminal takes no dropped files.
+	 */
+	saveDroppedFile?: ((file: { name: string; bytes: Uint8Array }) => Promise<string | null | undefined>) | null;
+	/** The largest file saveDroppedFile takes; a larger one is refused before it is read. */
+	droppedFileMaxBytes?: number;
 	className?: string;
 	fontSize?: number;
 	isFullscreen?: boolean;
@@ -101,6 +120,8 @@ export type XtermTerminalProps = {
 	onSessionLinkOpen?: (uri: string) => void;
 	/** Publish the positive grid after a retained terminal becomes visible. */
 	onVisibleSize?: (cols: number, rows: number) => void;
+	/** Every grid a visible terminal commits, including later resizes. */
+	onGridChange?: (cols: number, rows: number) => void;
 	/** Hidden retained terminals keep parsing output but expose no UI overlays. */
 	isVisible?: boolean;
 	/** Cursor Agent understands AO's terminal color protocol; generic terminals do not. */
@@ -225,16 +246,18 @@ function terminalFontSizeDelta(event: KeyboardEvent): -1 | 0 | 1 {
 function normalizedTerminalShortcut(event: KeyboardEvent): string | null {
 	if (event.shiftKey) return null;
 
-	// macOS Command+Left/Right → readline beginning/end of line. Do not treat
-	// the Windows key (metaKey on Win/Linux) as Command, and do not rewrite
-	// Windows Home/End: those must fall through to xterm's native sequences
-	// because Ctrl+A is SelectAll in default PSReadLine (#3093).
+	// macOS Command chords → readline (iTerm2 Natural Text Editing). Do not
+	// treat the Windows key (metaKey on Win/Linux) as Command, and do not
+	// rewrite Windows Home/End: those must fall through to xterm's native
+	// sequences because Ctrl+A is SelectAll in default PSReadLine (#3093).
 	if (event.metaKey && !event.ctrlKey && !event.altKey && isMacPlatform()) {
 		switch (event.key) {
 			case "ArrowLeft":
 				return "\x01";
 			case "ArrowRight":
 				return "\x05";
+			case "Backspace":
+				return "\x15";
 			default:
 				return null;
 		}
@@ -528,9 +551,15 @@ export function sessionLinkProvider(
 export function XtermTerminal(props: XtermTerminalProps) {
 	const { t } = useTranslation();
 	const themeStyle = useUiStore((state) => state.themeStyle);
+	const windowTranslucency = useUiStore((state) => state.windowTranslucency);
 	const macPlatform = isMacPlatform();
+	const translucent = macPlatform && windowTranslucency;
 	const shellRef = useRef<HTMLDivElement | null>(null);
 	const hostRef = useRef<HTMLDivElement | null>(null);
+	const saveDroppedFileRef = useRef(props.saveDroppedFile);
+	saveDroppedFileRef.current = props.saveDroppedFile;
+	const droppedFileMaxBytesRef = useRef(props.droppedFileMaxBytes);
+	droppedFileMaxBytesRef.current = props.droppedFileMaxBytes;
 	const scrollbarTrackRef = useRef<HTMLDivElement | null>(null);
 	const scrollbarThumbRef = useRef<HTMLDivElement | null>(null);
 	const termRef = useRef<Terminal | null>(null);
@@ -728,6 +757,7 @@ export function XtermTerminal(props: XtermTerminalProps) {
 
 	useEffect(
 		() => () => {
+			if (dropNoticeTimerRef.current !== undefined) window.clearTimeout(dropNoticeTimerRef.current);
 			if (copiedToastTimerRef.current !== undefined) window.clearTimeout(copiedToastTimerRef.current);
 			if (linkPreviewTimerRef.current !== undefined) window.clearTimeout(linkPreviewTimerRef.current);
 			if (selectHintTimerRef.current !== undefined) window.clearTimeout(selectHintTimerRef.current);
@@ -744,10 +774,11 @@ export function XtermTerminal(props: XtermTerminalProps) {
 		applyDocumentThemeStyle(themeStyle);
 		const term = termRef.current;
 		if (!term) return;
-		const { dark, light } = buildTerminalThemes();
+		const { dark, light } = buildTerminalThemes(translucent);
 		term.options.theme = props.theme === "dark" ? dark : light;
+		webglLeaseRef.current?.setEnabled(!translucent);
 		colorSchemeReporterRef.current?.(props.theme, themeStyle);
-	}, [props.theme, themeStyle]);
+	}, [props.theme, themeStyle, translucent]);
 
 	useEffect(() => {
 		if (!termRef.current || !props.supportsCursorColorScheme) return;
@@ -792,9 +823,10 @@ export function XtermTerminal(props: XtermTerminalProps) {
 			callbacksRef.current.onChangeFontSize?.(delta);
 		});
 		const activateLink = (event: MouseEvent, uri: string) => {
+			// Open on a plain click even while the pane tracks the mouse, like web
+			// links: tmux (mouse on) and fullscreen TUIs keep tracking on, so a
+			// modifier gate here made plain clicks do nothing.
 			if (uri.startsWith("ao:")) {
-				const modifierPressed = isMacPlatform() ? event.metaKey : event.ctrlKey;
-				if (term.modes.mouseTrackingMode !== "none" && !modifierPressed) return;
 				callbacksRef.current.onSessionLinkOpen?.(uri);
 				return;
 			}
@@ -831,8 +863,11 @@ export function XtermTerminal(props: XtermTerminalProps) {
 
 		let term: Terminal;
 		try {
-			const { dark, light } = buildTerminalThemes();
+			const { dark, light } = buildTerminalThemes(translucent);
 			term = new Terminal({
+				// xterm requires this before open; keep macOS terminals ready for
+				// live transparency toggles without recreating their buffers.
+				allowTransparency: macPlatform,
 				// Required for the Unicode 11 width addon below.
 				allowProposedApi: true,
 				cursorBlink: true,
@@ -926,7 +961,10 @@ export function XtermTerminal(props: XtermTerminalProps) {
 		if (import.meta.env.DEV) {
 			(host as DevXtermHost).__aoXtermForTest = term;
 		}
-		const webglLease = leaseWebglRenderer(term, () => callbacksRef.current.isVisible !== false);
+		// WebGL forces alpha to 1 for default-background cells carrying flags
+		// such as dim, leaving opaque rectangles on a transparent canvas. The
+		// DOM renderer respects their alpha and preserves the same buffer.
+		const webglLease = leaseWebglRenderer(term, () => callbacksRef.current.isVisible !== false, !translucent);
 		webglLeaseRef.current = webglLease;
 		webglLease.activate();
 		term.options.macOptionClickForcesSelection = true;
@@ -1239,8 +1277,8 @@ export function XtermTerminal(props: XtermTerminalProps) {
 			// shells, where ESC+CR is not a "newline" affordance. The correct fix is to
 			// scope it by pane kind — TerminalPane already branches on
 			// `terminalTarget?.kind === "shell"` at the XtermTerminal call site — once
-			// this branch is rebased onto main, which brings that discriminator (and
-			// ShellTerminalsView) that does not yet exist here. Until then the behavior
+			// this branch is rebased onto main, which brings that discriminator that does
+			// not yet exist here. Until then the behavior
 			// is left unchanged and the emitted bytes are identical for all panes.
 			if (event.key === "Enter" && event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
 				consumeTerminalShortcut(event);
@@ -1522,6 +1560,7 @@ export function XtermTerminal(props: XtermTerminalProps) {
 			if (firstMeasurement && callbacksRef.current.isVisible !== false) {
 				callbacksRef.current.onVisibleSize?.(term.cols, term.rows);
 			}
+			if (callbacksRef.current.isVisible !== false) callbacksRef.current.onGridChange?.(term.cols, term.rows);
 		};
 		const synchronizedFrames = term.parser.registerCsiHandler({ prefix: "?", final: "h" }, (params) => {
 			if (params.includes(2026)) usesSynchronizedOutput = true;
@@ -1556,8 +1595,43 @@ export function XtermTerminal(props: XtermTerminalProps) {
 			wasDragging = dragging;
 		});
 		dragStateObserver.observe(document.body, { attributes: true, attributeFilter: ["class"] });
+		// The host's content box as the ResizeObserver last delivered it. Grids
+		// derived from it plus xterm's cell metrics need no layout read.
+		let observedBox: { width: number; height: number } | null = null;
+		const gridFromObservedBox = () => {
+			const cell = term.dimensions?.css.cell;
+			if (!observedBox || observedBox.width <= 0 || observedBox.height <= 0) return undefined;
+			if (!cell || !Number.isFinite(cell.width) || !Number.isFinite(cell.height)
+				|| cell.width <= 0 || cell.height <= 0) {
+				return undefined;
+			}
+			const gutter = term.options.scrollback === 0 || term.options.scrollbar?.showScrollbar === false
+				? 0 : (term.options.scrollbar?.width ?? MAC_TERMINAL_SCROLLBAR_WIDTH);
+			return {
+				cols: Math.max(2, Math.floor((Math.floor(observedBox.width) - paddingX - gutter) / cell.width)),
+				rows: Math.max(1, Math.floor((Math.floor(observedBox.height) - paddingY) / cell.height)),
+			};
+		};
+		// The inspector slides open or closed by animating its gap's width, so the
+		// terminal box changes on every frame of that slide. Refitting each frame
+		// reflowed the whole buffer and resized the PTY ~36 times per toggle (each
+		// a SIGWINCH redraw from the agent). Hold the grid while the slide runs and
+		// fit once when it lands; the stable-fit timer is the fallback.
+		const inspectorSliding = () =>
+			host.closest(".session-split")?.querySelector('[data-slot="inspector-gap"][data-motion="animated"]') != null;
+		const settleAfterSlide = (event: TransitionEvent) => {
+			if (event.propertyName !== "width" || fitQuietTimer === null) return;
+			if (!(event.target instanceof Element) || event.target.getAttribute("data-slot") !== "inspector-gap") return;
+			if (!event.target.closest(".session-split")?.contains(host)) return;
+			flushScheduledFit();
+		};
+		document.addEventListener("transitionend", settleAfterSlide);
 		const observer = new ResizeObserver((entries) => {
 			if (disposed) return;
+			// Track the box even while parked, so the stabilizer never proposes
+			// from a box that changed while this terminal was hidden.
+			const observed = entries.find((entry) => entry.target === host)?.contentRect;
+			if (observed) observedBox = { width: observed.width, height: observed.height };
 			if (callbacksRef.current.isVisible === false) {
 				waitingForResizeOutput = false;
 				hasResizeFrame = false;
@@ -1567,21 +1641,21 @@ export function XtermTerminal(props: XtermTerminalProps) {
 				scheduleVisibleFit();
 				return;
 			}
-			const box = entries.find((entry) => entry.target === host)?.contentRect;
-			const cell = term.dimensions?.css.cell;
-			if (!box || !cell || !Number.isFinite(cell.width) || !Number.isFinite(cell.height)
-				|| cell.width <= 0 || cell.height <= 0) {
+			if (!observed) {
 				scheduleLiveFit();
 				return;
 			}
-			if (box.width <= 0 || box.height <= 0) {
+			if (observed.width <= 0 || observed.height <= 0) return;
+			if (inspectorSliding()) {
+				scheduleStableFit();
 				return;
 			}
-			const gutter = term.options.scrollback === 0 || term.options.scrollbar?.showScrollbar === false
-				? 0 : (term.options.scrollbar?.width ?? MAC_TERMINAL_SCROLLBAR_WIDTH);
-			const cols = Math.max(2, Math.floor((Math.floor(box.width) - paddingX - gutter) / cell.width));
-			const rows = Math.max(1, Math.floor((Math.floor(box.height) - paddingY) / cell.height));
-			resizeGrid(cols, rows);
+			const grid = gridFromObservedBox();
+			if (!grid) {
+				scheduleLiveFit();
+				return;
+			}
+			resizeGrid(grid.cols, grid.rows);
 		});
 		observer.observe(host);
 
@@ -1614,8 +1688,12 @@ export function XtermTerminal(props: XtermTerminalProps) {
 		let stableFrames = 0;
 		let refits = 0;
 		let pending: { cols: number; rows: number } | null = null;
+		// onRender runs right after xterm writes the frame, so FitAddon's
+		// computed-style read here forced a full page layout on every repaint —
+		// the main cost of opening several terminals at once. Propose from the
+		// observed box instead; only before the first observation fall back.
 		const stabilizer = term.onRender(() => {
-			const proposed = proposeGrid();
+			const proposed = gridFromObservedBox() ?? proposeGrid();
 			if (!proposed || !proposed.cols || !proposed.rows) return;
 			if (proposed.cols !== term.cols || proposed.rows !== term.rows) {
 				stableFrames = 0;
@@ -1627,7 +1705,7 @@ export function XtermTerminal(props: XtermTerminalProps) {
 						stabilizer.dispose();
 						return;
 					}
-					fitTerminal();
+					resizeGrid(proposed.cols, proposed.rows);
 					return;
 				}
 				pending = { cols: proposed.cols, rows: proposed.rows };
@@ -1678,7 +1756,9 @@ export function XtermTerminal(props: XtermTerminalProps) {
 			emitUserInput(data, isMouseHoverReport(data) ? "hover" : "mouse");
 		};
 		const protocolInput = term.onData((data) => {
-			oscColorForwarder.push(data);
+			// xterm answers old colour queries in a replayed scrollback, and the agent, no longer
+			// waiting, takes the answer as typed text ("11;rgb:…" in Droid's prompt).
+			if (pendingReplayWrites === 0) oscColorForwarder.push(data);
 			cursorPositionForwarder.push(data);
 			forwardMouseReport(data);
 		});
@@ -1787,7 +1867,7 @@ export function XtermTerminal(props: XtermTerminalProps) {
 		// a temp file by the main process and that path is inserted instead.
 		const isFileDrag = (event: DragEvent) => Array.from(event.dataTransfer?.types ?? []).includes("Files");
 		const dragOverInput = (event: DragEvent) => {
-			if (!isFileDrag(event)) return;
+			if (!isFileDrag(event) || saveDroppedFileRef.current === null) return;
 			event.preventDefault();
 			if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
 		};
@@ -1798,7 +1878,7 @@ export function XtermTerminal(props: XtermTerminalProps) {
 		const isDirectoryDrag = (event: DragEvent) =>
 			event.dataTransfer?.items?.[0]?.webkitGetAsEntry?.()?.isDirectory ?? false;
 		const dropInput = (event: DragEvent) => {
-			if (isDirectoryDrag(event)) return;
+			if (isDirectoryDrag(event) || saveDroppedFileRef.current === null) return;
 			const files = Array.from(event.dataTransfer?.files ?? []);
 			if (files.length === 0) return;
 			event.preventDefault();
@@ -1809,29 +1889,39 @@ export function XtermTerminal(props: XtermTerminalProps) {
 			// never shows the overlay.
 			void (async () => {
 				const paths: string[] = [];
-				for (const file of files) {
-					try {
-						const bytes = new Uint8Array(await file.arrayBuffer());
-						const saved = await aoBridge.terminal.saveDroppedFile({ name: file.name, bytes });
-						if (saved) paths.push(saved);
-					} catch (error) {
-						console.warn("Unable to attach dropped file", error);
+				const failures: DropFailure[] = [];
+				const sandbox = saveDroppedFileRef.current;
+				const save = sandbox ?? ((dropped: { name: string; bytes: Uint8Array }) => aoBridge.terminal.saveDroppedFile(dropped));
+				const maxBytes = sandbox ? droppedFileMaxBytesRef.current : undefined;
+				// Uploading and placing a file in a sandbox takes a while: say so. A
+				// local save is quick, so it says so only if it is not.
+				const drop = dropNoticeRef.current.begin(files.map((file) => file.name), sandbox ? 0 : LOCAL_DROP_NOTICE_DELAY_MS);
+				try {
+					for (const file of files) {
+						if (maxBytes !== undefined && file.size > maxBytes) {
+							failures.push({ name: file.name, maxMegabytes: Math.floor(maxBytes / (1024 * 1024)) });
+							continue;
+						}
+						try {
+							const bytes = new Uint8Array(await file.arrayBuffer());
+							const saved = await save({ name: file.name, bytes });
+							if (saved) paths.push(saved);
+						} catch (error) {
+							console.warn("Unable to attach dropped file", error);
+							const reason = error instanceof Error ? error.message.trim() : "";
+							failures.push({ name: file.name, ...(reason ? { reason } : {}) });
+						}
 					}
+				} finally {
+					dropNoticeRef.current.end(drop, failures);
 				}
 				if (paths.length === 0) return;
-				pasteText(`${paths.map((p) => (/\s/.test(p) ? `'${p}'` : p)).join(" ")} `);
+				pasteText(droppedPathsText(paths, Boolean(sandbox)));
 			})();
 		};
 		shell.addEventListener("dragover", dragOverInput);
 		shell.addEventListener("drop", dropInput);
 
-		// Every reveal in the terminal routes through here and performs the reveal
-		// on the *next* statement: the settled-fit listener below resolves
-		// prepareForActivation only after this returns, and useTerminalSession's
-		// three replay-settle sites call setReplaySettled(true) right after it. A
-		// throw would therefore strand the pane for good — behind a container the
-		// cache holds at visibility:hidden until activation resolves, or behind a
-		// replay cover that never lifts. Scrolling is cosmetic; the reveal is not.
 		const showLatestOutput = () => {
 			try {
 				term.scrollToBottom();
@@ -1843,8 +1933,7 @@ export function XtermTerminal(props: XtermTerminalProps) {
 				viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
 				scheduleScrollbarUpdate();
 			} catch {
-				// A stale scroll position is a cosmetic flaw; a stranded reveal is a
-				// terminal that never loads its text.
+				// Viewport scrolling must not strand terminal activation behind its reveal cover.
 			}
 		};
 
@@ -1999,6 +2088,7 @@ export function XtermTerminal(props: XtermTerminalProps) {
 			if (fitCapTimer !== null) clearTimeout(fitCapTimer);
 			fitSettledListeners.clear();
 			observer.disconnect();
+			document.removeEventListener("transitionend", settleAfterSlide);
 			dragStateObserver.disconnect();
 			synchronizedFrames.dispose();
 			synchronizedCapability.dispose();
@@ -2258,7 +2348,7 @@ export function XtermTerminal(props: XtermTerminalProps) {
 				{copiedToast && props.isVisible !== false ? (
 					<div
 						aria-live="polite"
-						className="pointer-events-none absolute bottom-3 left-1/2 z-10 -translate-x-1/2 rounded-md border border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-modal)] px-3 py-1.5 text-xs text-[var(--color-text-import-title)] shadow-[var(--shadow-import-modal)]"
+						className="pointer-events-none absolute bottom-3 left-1/2 z-10 -translate-x-1/2 rounded-md border border-(--color-border-overlay) bg-[var(--color-bg-import-modal)] px-3 py-1.5 text-xs text-[var(--color-text-import-title)] shadow-[var(--shadow-import-modal)]"
 						role="status"
 					>
 						{t("terminal.copiedToClipboard")}
@@ -2267,8 +2357,7 @@ export function XtermTerminal(props: XtermTerminalProps) {
 			</div>
 			<DropdownMenu modal={false} open={contextMenu.open} onOpenChange={setContextMenuOpen}>
 				<DropdownMenuTrigger asChild>
-					<button
-						type="button"
+					<Pressable
 						aria-hidden="true"
 						tabIndex={-1}
 						style={{
@@ -2357,8 +2446,7 @@ export function XtermTerminal(props: XtermTerminalProps) {
 				}}
 			>
 				<HoverCardTrigger asChild>
-					<button
-						type="button"
+					<Pressable
 						aria-hidden="true"
 						tabIndex={-1}
 						style={{
@@ -2374,19 +2462,15 @@ export function XtermTerminal(props: XtermTerminalProps) {
 						}}
 					/>
 				</HoverCardTrigger>
-				{linkPreview && !linkPreviewQuery.isError ? (
-					<HoverCardContent
-						collisionPadding={8}
+				{linkPreview ? (
+					<LinkPreviewHoverCard
+						url={linkPreview.url}
+						query={linkPreviewQuery}
+						onBrowserOpen={props.onLinkOpen}
 						portalContainer={contextMenuPortalContainer}
 						onPointerEnter={() => linkPreviewControlsRef.current.cancelHide()}
 						onPointerLeave={() => linkPreviewControlsRef.current.hide()}
-					>
-						{linkPreviewQuery.data ? (
-							<LinkPreviewCard url={linkPreview.url} preview={linkPreviewQuery.data} />
-						) : (
-							<LinkPreviewCardLoading />
-						)}
-					</HoverCardContent>
+					/>
 				) : null}
 			</HoverCard>
 		</>

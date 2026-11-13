@@ -9,7 +9,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apispec/specgen"
 )
 
-func TestBuildForkFrozenClientContracts(t *testing.T) {
+func TestBuildForkCompatibleClientContracts(t *testing.T) {
 	raw, err := specgen.Build()
 	if err != nil {
 		t.Fatal(err)
@@ -24,8 +24,8 @@ func TestBuildForkFrozenClientContracts(t *testing.T) {
 		t.Fatal(err)
 	}
 	scopes := doc.Components.Schemas["WorkspaceDiffRequest"].Properties["scope"].Enum
-	if !slices.Equal(scopes, []string{"combined", "committed", "staged", "unstaged", "untracked"}) {
-		t.Fatalf("frozen review scope changed: %v", scopes)
+	if !slices.Equal(scopes, []string{"combined", "uncommitted", "committed", "staged", "unstaged", "untracked"}) {
+		t.Fatalf("supported review scopes changed: %v", scopes)
 	}
 	owners := doc.Components.Schemas["APIError"].Properties["reporting_owner"].Enum
 	if !slices.Contains(owners, "agent_switch_saga") {

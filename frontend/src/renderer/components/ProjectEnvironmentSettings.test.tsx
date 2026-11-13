@@ -3,7 +3,8 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import { CloudCpError } from "../lib/cloud-cp/errors";
-import { CloudProjectEnvironmentSettings, ProjectEnvironmentSettings } from "./ProjectEnvironmentSettings";
+import { ProjectEnvironmentSettings } from "./ProjectEnvironmentSettings";
+import { CloudProjectEnvironmentSettings } from "./ProjectEnvironmentSettings";
 
 const { getMock, putMock, cloudGet, cloudPut } = vi.hoisted(() => ({ getMock: vi.fn(), putMock: vi.fn(), cloudGet: vi.fn(), cloudPut: vi.fn() }));
 vi.mock("../lib/api-client", () => ({ apiClient: { GET: getMock, PUT: putMock }, apiErrorMessage: () => "request failed" }));

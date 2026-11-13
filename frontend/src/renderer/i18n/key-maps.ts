@@ -11,6 +11,12 @@ export const shortcutLabelKeys: Record<AppShortcutId, MessageKey> = {
 	"keyboard-shortcuts": "shortcut.keyboard-shortcuts",
 	"command-palette": "shortcut.command-palette",
 	find: "shortcut.find",
+	"dictate": "shortcut.dictate",
+	"find-in-chat": "shortcut.find-in-chat",
+	"open-orchestrator": "shortcut.open-orchestrator",
+	"split-shell-terminal": "shortcut.split-shell-terminal",
+	"split-shell-terminal-down": "shortcut.split-shell-terminal-down",
+
 	"quick-open-file": "shortcut.quick-open-file",
 	"open-settings": "shortcut.open-settings",
 	"toggle-sidebar": "shortcut.toggle-sidebar",

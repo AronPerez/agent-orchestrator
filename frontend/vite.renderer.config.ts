@@ -90,8 +90,9 @@ const DEV_BUILD_INFO = {
 // setting the build cannot read; list the baked defaults and fold in a
 // developer's AO_CLOUD_CONTROL_PLANE_URL override so a custom control plane
 // keeps a working terminal in packaged builds too.
-const CLOUD_CP_WS_ORIGINS = (() => {
-	const origins = ["wss://staging-api.aoagents.dev", "wss://api.aoagents.dev"];
+// The hosted cloud control planes, plus AO_CLOUD_CONTROL_PLANE_URL when set.
+const CLOUD_CP_ORIGINS = (() => {
+	const origins = ["https://staging-api.aoagents.dev", "https://api.aoagents.dev"];
 	const override = process.env.AO_CLOUD_CONTROL_PLANE_URL?.trim();
 	if (!override) return origins;
 	let url: URL;
@@ -100,10 +101,12 @@ const CLOUD_CP_WS_ORIGINS = (() => {
 	} catch {
 		return origins;
 	}
-	const origin = `${url.protocol === "http:" ? "ws:" : "wss:"}//${url.host}`;
+	const origin = `${url.protocol === "http:" ? "http:" : "https:"}//${url.host}`;
 	if (!origins.includes(origin)) origins.push(origin);
 	return origins;
 })();
+
+const CLOUD_CP_WS_ORIGINS = CLOUD_CP_ORIGINS.map((origin) => origin.replace(/^http/, "ws"));
 
 // CSP for the renderer. The daemon is loopback-only, so network access is
 // pinned to 127.0.0.1 (REST + SSE over http, terminal mux over ws), plus the
@@ -117,9 +120,11 @@ const CLOUD_CP_WS_ORIGINS = (() => {
 export function contentSecurityPolicy(mode: "build" | "serve"): string {
 	return [
 		"default-src 'self'",
-		// react-refresh injects its inline preamble in serve mode; a hash is
-		// impractical because the preamble changes with the plugin version.
-		mode === "serve" ? "script-src 'self' 'unsafe-inline'" : "script-src 'self'",
+		// 'wasm-unsafe-eval' lets @pierre/highlights compile its WebAssembly module;
+		// it does not permit JS eval. react-refresh injects its inline preamble in
+		// serve mode; a hash is impractical because the preamble changes with the
+		// plugin version.
+		mode === "serve" ? "script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'" : "script-src 'self' 'wasm-unsafe-eval'",
 		"style-src 'self' 'unsafe-inline'",
 		// Repository avatars can come from self-hosted SCM instances whose origins
 		// are only known at runtime. Keep the broad exception limited to images;
@@ -165,7 +170,9 @@ export function contentSecurityPolicy(mode: "build" | "serve"): string {
 		// 'self' lets dev:web, whose API base is relative, frame a page; the page
 		// keeps its own sandbox from the daemon's CSP header either way.
 		// *.localhost is the inline-artifact origin an HTML artifact is framed from.
-		"frame-src 'self' http://127.0.0.1:* http://*.localhost:*",
+		// A cloud session's HTML artifact is framed from its control plane, whose
+		// response CSP sandboxes it.
+		["frame-src 'self' http://127.0.0.1:* http://*.localhost:*", ...CLOUD_CP_ORIGINS].join(" "),
 	].join("; ");
 }
 
@@ -216,6 +223,7 @@ export default defineConfig({
 		"import.meta.env.VITE_AO_GIT_COMMIT": JSON.stringify(DEV_BUILD_INFO.commit),
 		"import.meta.env.VITE_AO_GIT_WORKTREE": JSON.stringify(DEV_BUILD_INFO.worktree),
 		"import.meta.env.VITE_AO_GIT_DIRTY": JSON.stringify(String(DEV_BUILD_INFO.isDirty)),
+		"import.meta.env.VITE_AO_TEAMS": JSON.stringify(TEAMS_FLAG),
 	},
 	// "@/" → the renderer root (src/renderer), the shadcn/ui import convention.
 	resolve: {
@@ -254,8 +262,6 @@ export default defineConfig({
 	server: {
 		proxy: {
 			"/api": {
-				target: process.env.AO_DEV_API_TARGET ?? "http://127.0.0.1:3001",
-				changeOrigin: false,
 				configure(proxy) {
 					proxy.on("proxyReq", (proxyReq, request) => {
 						// Same-origin reads omit Origin; name their actual host, never a fixed renderer grant.
@@ -266,6 +272,8 @@ export default defineConfig({
 						}
 					});
 				},
+				target: process.env.AO_DEV_API_TARGET ?? "http://127.0.0.1:3001",
+				changeOrigin: false,
 			},
 			"/mux": {
 				target: process.env.AO_DEV_API_TARGET ?? "http://127.0.0.1:3001",
@@ -289,10 +297,13 @@ export default defineConfig({
 	],
 	test: {
 		environment: "jsdom",
+		silent: "passed-only",
 		testTimeout: 20_000,
 		// Anchor node_modules at any depth: a bare "node_modules/**" replaces
 		// vitest's default "**/node_modules/**" and only matches the root.
-		exclude: ["**/node_modules/**", "dist/**", "dist-electron/**", "e2e/**"],
+		// The docs site is its own package with its own Vitest config and
+		// dependencies; the docs CI step runs its tests.
+		exclude: ["**/node_modules/**", "dist/**", "dist-electron/**", "e2e/**", "src/docs/**"],
 		globals: true,
 		setupFiles: "./src/renderer/test/setup.ts",
 	},

@@ -884,9 +884,7 @@ type WorkspaceFileResponse struct {
 
 // WorkspaceDiffRequest requests renderer-independent unified patches.
 type WorkspaceDiffRequest struct {
-	// Fork compatibility: keep the frozen desktop/cloud selector vocabulary.
-	// The backend still accepts upstream uncommitted comparisons, but this client cannot select them.
-	Scope            string   `json:"scope" enum:"combined,committed,staged,unstaged,untracked"`
+	Scope            string   `json:"scope" enum:"combined,uncommitted,committed,staged,unstaged,untracked"`
 	Paths            []string `json:"paths" minItems:"1" maxItems:"100"`
 	ContextLines     int      `json:"contextLines" minimum:"0" maximum:"20"`
 	IgnoreWhitespace bool     `json:"ignoreWhitespace"`

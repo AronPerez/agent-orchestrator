@@ -314,7 +314,7 @@ function CueMenuItems({
 	onCloseAutoFocus: (event: Event) => void;
 }) {
 	const { t } = useTranslation();
-	const query = useProjectCuesQuery(projectId, true, cloudOrgId);
+	const query = useProjectCuesQuery(projectId, true, undefined, cloudOrgId);
 	const showGlobalToast = useUiStore((state) => state.showGlobalToast);
 	useEffect(() => {
 		if (query.isError && !query.isFetching) {

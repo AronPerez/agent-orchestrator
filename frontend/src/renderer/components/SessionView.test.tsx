@@ -1062,7 +1062,7 @@ describe("SessionView", () => {
 
 		fireEvent.click(screen.getByRole("button", { name: "open files" }));
 
-		expect(useUiStore.getState().inspectorSessions["sess-1"]?.filesSource).toEqual({ kind: "workspace" });
+		expect(useUiStore.getState().inspectorSessions["sess-1"]?.filesSelection?.branch).toEqual({ kind: "checked_out" });
 		expect(useUiStore.getState().inspectorSessions["sess-1"]?.view).toBe("files");
 		expect(screen.queryByText("artifacts view")).not.toBeInTheDocument();
 	});

@@ -24892,6 +24892,7 @@ components:
         scope:
           enum:
           - combined
+          - uncommitted
           - committed
           - staged
           - unstaged

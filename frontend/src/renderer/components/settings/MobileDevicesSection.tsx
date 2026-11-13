@@ -94,8 +94,8 @@ export function MobileDevicesSection() {
 				previewDevices = previewDevices.filter((d) => d.id !== id);
 				return;
 			}
-			const { error } = await apiClient.DELETE("/api/v1/mobile/devices/{id}", {
-				params: { path: { id } },
+			const { error } = await apiClient.DELETE("/api/v1/mobile/devices/{installId}", {
+				params: { path: { installId: id } },
 			});
 			if (error) throw apiErrorException(error);
 		},
