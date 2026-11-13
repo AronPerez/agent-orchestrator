@@ -41,8 +41,9 @@ RUN apt-get update && \
     apt-get install --yes --no-install-recommends \
         build-essential debhelper docbook-to-man fakeroot && \
     rm -rf /var/lib/apt/lists/*
+# Pin the control file's archive identity as well as its SHA-256.
 ADD --checksum=sha256:b5ad165baca0f2f2ac2a02b6b4b66d68ee890f582df398da9f86399679ca9c29 \
-    https://deb.debian.org/debian/pool/main/e/expat/expat_2.9.0-1.dsc ./
+    https://snapshot.debian.org/file/eefe91ce34a88026a1a7c8bfe08d990fa156890d/expat_2.9.0-1.dsc ./
 ADD --checksum=sha256:6e8ce7b52ebbaa423c59becc7cf1e6875c42e49228c062ac8123c10e700cec27 \
     https://deb.debian.org/debian/pool/main/e/expat/expat_2.9.0.orig.tar.gz ./
 ADD --checksum=sha256:d23e632b05f10e269ee5426ff1ea962b4aec17fcd179c4dec14390a6793da764 \
