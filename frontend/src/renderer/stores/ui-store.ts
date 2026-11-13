@@ -394,8 +394,7 @@ function initialDeveloperMode() {
 }
 
 function initialRemoteHosts() {
-	// On by default: signed-in devices discover account hosts without an extra
-	// per-device setup switch.
+	// Local connections remain opt-in without requiring Developer Mode.
 	return getLocalStorage()?.getItem(remoteHostsStorageKey) === "true";
 }
 

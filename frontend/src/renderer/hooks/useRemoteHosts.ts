@@ -19,26 +19,29 @@ export function requestRemoteHostsRefresh(): void {
 }
 
 export type RemoteHost = {
+	accountUserId?: string;
 	hostId: string;
 	label: string;
 	url: string;
-	accountUserId?: string;
 	status: "connecting" | "connected" | "offline";
 	failureReason?: "unauthorized" | "incompatible";
 };
 
-export function useRemoteHosts(): { hosts: RemoteHost[]; refresh: () => Promise<void> } {
-	const enabled = useUiStore((state) => state.remoteHosts);
+/** listed: hosts holds the saved list, not the empty one before the first read. */
+export function useRemoteHosts(): { hosts: RemoteHost[]; listed: boolean; refresh: () => Promise<void> } {
+	const remoteHostsEnabled = useUiStore((state) => state.remoteHosts);
 	const { status, session } = useCloudSession();
 	const accountId = status === "authenticated" ? session?.user.id ?? "" : "";
 	const { settings } = useSettings();
 	const cloudBaseUrl = settings?.cloudControlPlaneUrl ?? "";
+	const enabled = remoteHostsEnabled;
 	const enabledRef = useRef(enabled);
 	enabledRef.current = enabled;
 	const accountRef = useRef(accountId);
 	accountRef.current = accountId;
 	const previousAccount = useRef(accountId);
 	const [hosts, setHosts] = useState<RemoteHost[]>([]);
+	const [listed, setListed] = useState(false);
 	const hostsRef = useRef(hosts);
 	hostsRef.current = hosts;
 	const retryableHosts = useRef(new Set<string>());
@@ -50,8 +53,7 @@ export function useRemoteHosts(): { hosts: RemoteHost[]; refresh: () => Promise<
 		const generation = ++refreshGeneration.current;
 		const current = () => enabledRef.current && accountRef.current === accountId && refreshGeneration.current === generation;
 		let saved: Awaited<ReturnType<typeof aoBridge.remotes.list>>;
-		try { saved = await aoBridge.remotes.list(); }
-		catch { return; } // Settings reports registry errors; keep known local pairings usable.
+		try { saved = await aoBridge.remotes.list(); } catch { return; }
 		if (accountId && cloudBaseUrl) {
 			try {
 				await aoBridge.remotes.syncAccountHosts(accountId);
@@ -62,6 +64,7 @@ export function useRemoteHosts(): { hosts: RemoteHost[]; refresh: () => Promise<
 		await Promise.all(connectedHosts().filter((hostId) => !saved.some((host) => host.hostId === hostId)).map(disconnectHost));
 		if (!current()) return;
 		savedHostUrls.current = new Map(saved.map((host) => [host.hostId, host.url]));
+		setListed(true);
 		setHosts((previous) => saved.map((host) => ({
 			...host,
 			status: previous.some((entry) => entry.hostId === host.hostId && entry.url === host.url && entry.status === "connected") ? "connected" : "connecting",
@@ -97,13 +100,11 @@ export function useRemoteHosts(): { hosts: RemoteHost[]; refresh: () => Promise<
 		if (previousAccount.current !== accountId) {
 			previousAccount.current = accountId;
 			refreshGeneration.current++;
-			// Retire renderer access before registry or Cloud requests can delay the refresh.
-			for (const host of hostsRef.current) {
-				if (host.accountUserId && host.accountUserId !== accountId) {
-					void disconnectHost(host.hostId).catch(() => { /* Renderer access is already retired. */ });
-				}
-			}
 			setHosts((previous) => previous.filter((host) => !host.accountUserId || host.accountUserId === accountId));
+			setListed(false);
+			for (const host of hostsRef.current) {
+				if (host.accountUserId && host.accountUserId !== accountId) void disconnectHost(host.hostId).catch(() => undefined);
+			}
 		}
 		if (enabled) {
 			void refresh();
@@ -111,6 +112,7 @@ export function useRemoteHosts(): { hosts: RemoteHost[]; refresh: () => Promise<
 		}
 		refreshGeneration.current++;
 		setHosts([]);
+		setListed(false);
 		retryableHosts.current.clear();
 		savedHostUrls.current.clear();
 		for (const hostId of connectedHosts()) void disconnectHost(hostId);
@@ -153,5 +155,5 @@ export function useRemoteHosts(): { hosts: RemoteHost[]; refresh: () => Promise<
 		return () => clearInterval(timer);
 	}, [enabled, accountId, cloudBaseUrl, refresh]);
 
-	return { hosts: enabled ? hosts : NO_HOSTS, refresh };
+	return { hosts: enabled ? hosts : NO_HOSTS, listed: enabled && listed, refresh };
 }

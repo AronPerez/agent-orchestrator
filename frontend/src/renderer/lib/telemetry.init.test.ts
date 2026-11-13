@@ -7,9 +7,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const posthogStub = {
 	init: vi.fn(),
 	register: vi.fn(),
-	capture: vi.fn(() => ({})),
+	capture: vi.fn((_event?: string, _properties?: Record<string, unknown>): object | undefined => ({})),
 	captureException: vi.fn(),
 	addExceptionStep: vi.fn(),
+	identify: vi.fn(),
+	alias: vi.fn((_alias?: string, _original?: string): object | number | undefined => ({})),
+	reset: vi.fn(),
+	setPersonProperties: vi.fn(),
+	opt_in_capturing: vi.fn(),
+	opt_out_capturing: vi.fn(),
+	set_config: vi.fn(),
+	reloadFeatureFlags: vi.fn(),
 };
 
 function mockPosthog() {
@@ -23,9 +31,51 @@ describe("initTelemetry recovery", () => {
 	beforeEach(() => {
 		vi.resetModules();
 		vi.clearAllMocks();
-		// This fork ships no default PostHog key, so init is exercised with an
-		// explicitly configured one.
 		vi.stubEnv("VITE_AO_POSTHOG_KEY", "phc_test");
+	});
+
+	async function initializedUpdateCapture() {
+		localStorage.clear();
+		mockPosthog();
+		vi.doMock("./bridge", () => ({
+			aoBridge: {
+				telemetry: { getBootstrap: vi.fn(async () => ({
+					appVersion: "1.2.3", platform: "darwin", distinctId: "ins_test",
+					disabledEvents: [], eventsEnabled: true, consentGeneration: "generation-1",
+				})) },
+				updateSettings: { get: vi.fn(async () => ({})) },
+			},
+		}));
+		const { captureRendererEvent, initTelemetry } = await import("./telemetry");
+		expect(await initTelemetry()).toBe(true);
+		posthogStub.capture.mockClear();
+		return captureRendererEvent;
+	}
+
+	it("captures every renamed event under its new name and never an old one", async () => {
+		const captureRendererEvent = await initializedUpdateCapture();
+		const { LEGACY_EVENT_NAMES } = await import("./telemetry");
+		for (const name of Object.keys(LEGACY_EVENT_NAMES)) {
+			posthogStub.capture.mockClear();
+			expect(await captureRendererEvent(name, { phase: "download", error_category: "network", to_version: "9.9.9", surface: "home" }), name).toBe(true);
+			expect(posthogStub.capture.mock.calls.map(([event]) => event), name).toContain(name);
+		}
+		const legacy = new Set(Object.values(LEGACY_EVENT_NAMES).flat());
+		expect(posthogStub.capture.mock.calls.some(([event]) => legacy.has(String(event)))).toBe(false);
+	});
+
+	it("writes log-only events to the console instead of PostHog", async () => {
+		const captureRendererEvent = await initializedUpdateCapture();
+		const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+		try {
+			for (const name of ["ao.renderer.agents_available", "ao.renderer.cloud_offering_resolved"]) {
+				expect(await captureRendererEvent(name, { installed_count: 2, org_kind: "b2c" })).toBe(true);
+				expect(info).toHaveBeenCalledWith(`[telemetry] ${name}`, expect.any(Object));
+			}
+			expect(posthogStub.capture).not.toHaveBeenCalled();
+		} finally {
+			info.mockRestore();
+		}
 	});
 
 	it("retries init after a transient thrown failure instead of caching it", async () => {

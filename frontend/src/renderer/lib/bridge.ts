@@ -221,6 +221,7 @@ export const aoBridge: AoBridge =
 		},
 		browser: {
 			getSessionRuntimeState: async (sessionId, hostId) => ({ sessionId, hostId, connected: false, owned: false }),
+			onSessionRuntimeStateChanged: () => () => {},
 			attachRuntime: async (sessionId, hostId) => ({ sessionId, hostId, connected: false, owned: false }),
 			nativeCompositionEnabled: false,
 			reconnectRuntime: async () => undefined,

@@ -6,7 +6,7 @@ import type {
 	BrowserFindState,
 	BrowserNavState,
 	BrowserRect,
-	BrowserRuntimeState,
+	SessionBrowserRuntimeState,
 	BrowserTabState,
 	BrowserTabsState,
 } from "../../main/browser-view-host";
@@ -110,7 +110,7 @@ export type BrowserViewModel = {
 	agentBrowserActive: boolean;
 	agentBrowserActivity: BrowserAgentActivityState | null;
 	browserRuntimeConnected: boolean | null;
-	browserRuntimeError: BrowserRuntimeState["error"];
+	browserRuntimeError: SessionBrowserRuntimeState["error"];
 	takeBrowserControl: () => Promise<void>;
 	reconnectBrowserRuntime: () => Promise<void>;
 	destroy: () => void;
@@ -300,7 +300,7 @@ export function useBrowserView({
 	const [agentBrowserActive, setAgentBrowserActive] = useState(false);
 	const [agentBrowserActivity, setAgentBrowserActivity] = useState<BrowserAgentActivityState | null>(null);
 	const [browserRuntimeConnected, setBrowserRuntimeConnected] = useState<boolean | null>(null);
-	const [browserRuntimeError, setBrowserRuntimeError] = useState<BrowserRuntimeState["error"]>();
+	const [browserRuntimeError, setBrowserRuntimeError] = useState<SessionBrowserRuntimeState["error"]>();
 	const runtimeSessionId = origin?.sessionId ?? sessionId;
 	const runtimeUpdates = useRef(0);
 	const runtimeSessionRef = useRef(sessionId);
@@ -651,7 +651,7 @@ export function useBrowserView({
 		runtimeUpdates.current++;
 		setBrowserRuntimeConnected(null);
 		setBrowserRuntimeError(undefined);
-		const applyState = (state: BrowserRuntimeState) => {
+		const applyState = (state: SessionBrowserRuntimeState) => {
 			if (disposed || state.hostId !== origin?.hostId || (state.sessionId !== undefined && state.sessionId !== runtimeSessionId)) return;
 			setBrowserRuntimeConnected(state.connected);
 			setBrowserRuntimeError(state.error);
@@ -665,7 +665,7 @@ export function useBrowserView({
 				if (runtimeUpdates.current === before) applyState({ hostId: origin?.hostId, sessionId: runtimeSessionId, connected: false, error: { code: "BROWSER_RUNTIME_UNAVAILABLE", message: error instanceof Error ? error.message : "Browser runtime unavailable" } });
 			});
 		};
-		const unsubscribe = window.ao?.browser.onRuntimeState((state) => {
+		const unsubscribe = window.ao?.browser.onSessionRuntimeStateChanged((state) => {
 			if (state.hostId !== origin?.hostId || (state.sessionId !== undefined && state.sessionId !== runtimeSessionId)) return;
 			runtimeUpdates.current++;
 			if (state.sessionId === undefined && state.connected) attach();

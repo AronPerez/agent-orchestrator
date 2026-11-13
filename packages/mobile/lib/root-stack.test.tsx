@@ -1,3 +1,4 @@
+vi.mock("./watch/WatchManager", () => ({ WatchManager: () => null }));
 import { act, create } from "react-test-renderer";
 import { afterEach, describe, expect, it, vi } from "vitest";
 

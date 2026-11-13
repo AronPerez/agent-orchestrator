@@ -298,6 +298,7 @@ if (typeof window !== "undefined") {
 		},
 		browser: {
 			getSessionRuntimeState: async (sessionId, hostId) => ({ sessionId, hostId, connected: false, owned: false }),
+			onSessionRuntimeStateChanged: () => () => {},
 			attachRuntime: async (sessionId, hostId) => ({ sessionId, hostId, connected: false, owned: false }),
 			nativeCompositionEnabled: true,
 			reconnectRuntime: async () => undefined,

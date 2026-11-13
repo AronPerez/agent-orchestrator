@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { DEFAULT_SENTRY_DSN } from "./sentry-config";
+const TEST_SENTRY_DSN = "https://public@example.test/1";
 
 const sdk = vi.hoisted(() => ({
 	init: vi.fn(),
@@ -29,18 +29,18 @@ beforeEach(() => {
 	vi.clearAllMocks();
 	sdk.importGate = null;
 	vi.stubEnv("EXPO_PUBLIC_AO_TELEMETRY_DISABLED", undefined);
-	vi.stubEnv("EXPO_PUBLIC_SENTRY_DSN", undefined);
+	vi.stubEnv("EXPO_PUBLIC_SENTRY_DSN", TEST_SENTRY_DSN);
 });
 
 describe("mobile Sentry consent and payload", () => {
-	it("waits for consent and uses the existing mobile project DSN", async () => {
+	it("waits for consent and uses the explicitly configured DSN", async () => {
 		const sentry = await import("./sentry");
 		sentry.setMobileSentryContext({ release: "2.2.0@42", channel: "production" });
 		expect(sdk.init).not.toHaveBeenCalled();
 		sentry.setMobileSentryConsent(true);
 		await sentry.initMobileSentry();
 		expect(sdk.init).toHaveBeenCalledWith(expect.objectContaining({
-			dsn: DEFAULT_SENTRY_DSN,
+			dsn: TEST_SENTRY_DSN,
 			release: "2.2.0@42",
 			environment: "stable",
 			enableNative: false,

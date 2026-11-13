@@ -92,7 +92,7 @@ describe("mobile Chat API boundaries", () => {
 
 	it("preserves daemon pin facts used by the Agents ordering", async () => {
 		vi.mocked(fetch)
-			.mockResolvedValueOnce(response({ sessions: [{ id: "w-1", projectId: "p-1", mode: "chat", activity: { state: "idle", lastActivityAt: "2026-08-08T10:00:00Z" }, updatedAt: "2026-08-09T10:00:00Z", isPinned: true, pinnedAt: "2026-08-09T10:00:00Z" }] }))
+			.mockResolvedValueOnce(response({ sessions: [{ id: "w-1", projectId: "p-1", mode: "chat", activity: { state: "idle", lastActivityAt: "2026-08-08T10:00:00Z" }, updatedAt: "2026-08-09T10:00:00Z", isPinned: true, pinnedAt: "2026-08-09T10:00:00Z" }], archived: { total: 0, byProject: {} } }))
 			.mockResolvedValueOnce(response({ sessions: [] }))
 			.mockResolvedValueOnce(response({ projects: [] }));
 		const result = await getSessions(cfg);
@@ -104,7 +104,7 @@ describe("mobile Chat API boundaries", () => {
 			.mockResolvedValueOnce(response({ sessions: [{
 				id: "w-1", projectId: "p-1", mode: "chat",
 				autoReviewEnabled: true, autoInjectReview: false, autoInjectCI: false,
-			}] }))
+			}], archived: { total: 0, byProject: {} } }))
 			.mockResolvedValueOnce(response({ sessions: [] }))
 			.mockResolvedValueOnce(response({ projects: [] }));
 

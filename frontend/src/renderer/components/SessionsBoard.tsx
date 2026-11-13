@@ -1,15 +1,21 @@
 import { SessionFleet } from "./SessionFleet";
-import { Button } from "./ui/button";
+import { BoardFindBar } from "./BoardFindBar";
+import { matchScore } from "../lib/command-palette";
+import type { MessageKey } from "../i18n";
+import { isDialogOrMenuOpen } from "../lib/dom-selectors";
+import { matchesAppShortcut } from "../../shared/shortcuts";
+import { useKeybindingsStore } from "../stores/keybindings-store";
+import { isMacPlatform } from "../lib/platform";
 import { OrchestratorStartingChat } from "./chat/OrchestratorStartingChat";
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import {
 	SessionsBoardGridView,
 	chipTone,
-	getBoardSessionStatusLabel,
 	largestSession,
+	getBoardSessionStatusLabel,
 	type ChipTone,
 } from "@aoagents/product-ui";
 import { AlertTriangle, Archive, RotateCw, WifiOff } from "@/components/app-icons";
@@ -31,18 +37,14 @@ import {
 	getSessionStatusView,
 	type KanbanColumnView,
 } from "../lib/session-presentation";
-import { matchScore } from "../lib/command-palette";
-import type { MessageKey } from "../i18n";
-import { isDialogOrMenuOpen } from "../lib/dom-selectors";
-import { matchesAppShortcut } from "../../shared/shortcuts";
-import { useKeybindingsStore } from "../stores/keybindings-store";
-import { useRestoreSession } from "../hooks/useRestoreSession";
 import { useSessionMenuAvailable } from "../hooks/useAppMenuCommand";
 import { useSessionShortcut } from "../hooks/useAppShortcut";
 import { useTerminateSession } from "../hooks/useTerminateSession";
-import { useRemoteProjectQuery, useWorkspaceQuery, workspaceQueryKeyForHost } from "../hooks/useWorkspaceQuery";
-import { NotificationCenter } from "./NotificationCenter";
-import { BoardFindBar } from "./BoardFindBar";
+import { useCloudCp } from "../hooks/useCloudCp";
+import { useSessionParticipants } from "../hooks/useSessionParticipants";
+import { useCloudProjectsQuery, useRemoteProjectQuery, useWorkspaceQuery, workspaceQueryKeyForHost } from "../hooks/useWorkspaceQuery";
+import { useCloudOffering } from "../hooks/useCloudOffering";
+import { FREESTYLE_PROVIDER, projectSandboxProvider } from "../lib/cloud-offering";
 import { BoardWelcome, ProjectBoardEmpty } from "./BoardEmptyStates";
 import { ProjectImportOffer } from "./ProjectImportOffer";
 import { noDragStyle, PageTopbar, PageTopbarTitle } from "./PageTopbar";
@@ -60,13 +62,14 @@ import { labelForHost } from "../lib/host-clients";
 import type { RemoteHost } from "../hooks/useRemoteHosts";
 import { cn } from "../lib/utils";
 import { useConnectedHosts } from "../hooks/useHostConnection";
-import { LOCAL_HOST, refKey } from "../lib/hosts";
+import { LOCAL_HOST, refKey, sessionUiKey } from "../lib/hosts";
 import { useShellMaybe } from "../lib/shell-context";
 import { sessionNavigateTarget } from "../lib/navigate-to-session";
-import { ProjectTerminationFeedback } from "./ShellTopbar";
+import { ProjectTerminationFeedback } from "./SessionTopbarActions";
 import { ProjectBoardActions } from "./ProjectBoardActions";
 import { useDiagnosticsEnabled, usePressureState, useSessionMemory } from "../hooks/useSessionMemory";
-import { AppMemoryIndicator, toSessionFacts, useHasAppMemory } from "./SessionMemoryPanel";
+import { AppMemoryIndicator, toSessionFacts } from "./SessionMemoryPanel";
+import { Button } from "./ui/button";
 import { recordManualWorkerOpen } from "../lib/session-management-telemetry";
 import {
 	BoardSessionCardAdapter,
@@ -112,15 +115,22 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 	const columns: KanbanColumnView[] = boardKanbanColumnOrder.map((column) => getKanbanColumnView(column, t));
 	const localWorkspaceQuery = useWorkspaceQuery();
 	const remoteProjectQuery = useRemoteProjectQuery(hostId ?? "", projectId ?? "");
-	// Evaluated at render so platform mocks in tests can flip the in-panel chrome.
-	const boardActionsInPanel = usesBoardActionsInPanel();
-	/** Bell lives in the board action row when the shell topbar does not host it. */
-	const boardOwnsNotificationCenter = isLinuxPlatform() || boardActionsInPanel;
 	const all = localWorkspaceQuery.data ?? [];
 	const workspaces = hostId
 		? remoteProjectQuery.data ? [remoteProjectQuery.data] : []
 		: projectId ? all.filter((candidate) => candidate.id === projectId) : all;
 	const workspace = projectId ? workspaces[0] : undefined;
+	// A Freestyle cloud project's orchestrator starts in place (see
+	// OrchestratorStartingChat); its session does not exist yet, so the
+	// project's provider decides, as the control plane's does.
+	// Only this machine's cloud projects start in place: a remote host's board
+	// never reads this machine's cloud settings (as useCloudCp below).
+	const localCloudBoard = !hostId && workspace?.kind === CLOUD_PROJECT_KIND;
+	const cloudProjects = useCloudProjectsQuery({ enabled: localCloudBoard });
+	const offering = useCloudOffering(localCloudBoard);
+	const cloudProject = cloudProjects.data?.find((candidate) => candidate.id === projectId);
+	const startsInPlace = localCloudBoard && cloudProject !== undefined &&
+		projectSandboxProvider(cloudProject.config, offering) === FREESTYLE_PROVIDER;
 	// Board chrome stays route-oriented; project context remains in the sidebar.
 	const boardLabel = t("shell.board");
 	const liveSessions = workspaces.flatMap((workspace) => workerSessions(workspace.sessions)).filter((session) => !session.needsResume || isArchivedSession(session));
@@ -173,8 +183,15 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 	const setOrchestratorReplacementError = useUiStore((state) => state.setOrchestratorReplacementError);
 	const setOrchestratorStartupError = useUiStore((state) => state.setOrchestratorStartupError);
 	const health = workspace ? orchestratorHealth(workspace, isProjectRestarting) : { state: "ok" as const };
+	// Someone this project was shared with works through what was shared and
+	// the owner's orchestrator: they can't start tasks or an orchestrator
+	// here, so the board offers neither and doesn't ask them to.
+	const guest = Boolean(workspace?.shared);
+	// The archive itself is the shell's modal; the board only shows its count.
+	const archivedCount = sessions.filter(isArchivedSession).length;
+	const searchableSessions = sessions.filter((candidate) => !isArchivedSession(candidate));
 	const filteredSessions = findQuery.trim()
-		? sessions.filter((session) => matchScore(findQuery, {
+		? searchableSessions.filter((session) => matchScore(findQuery, {
 			title: session.title,
 			subtitle: session.branch,
 			keywords: [
@@ -184,14 +201,8 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 				...session.prs.flatMap((pr) => [`#${pr.number}`, String(pr.number)]),
 			],
 		}) > 0)
-		: sessions;
-	// Someone this project was shared with works through what was shared and
-	// the owner's orchestrator: they can't start tasks or an orchestrator
-	// here, so the board offers neither and doesn't ask them to.
-	const guest = Boolean(workspace?.shared);
-	// The archive itself is the shell's modal; the board only shows its count.
-	const archivedCount = sessions.filter(isArchivedSession).length;
-	const activeSessions = filteredSessions.filter((candidate) => !isArchivedSession(candidate));
+		: searchableSessions;
+	const activeSessions = filteredSessions;
 	// Who is in each shared cloud session, read without joining any of them.
 	const participantsBySession = useSessionParticipants(activeSessions, !hostId);
 	const { userId: cloudUserId } = useCloudCp(!hostId && activeSessions.some((session) => Boolean(session.cloud)));
@@ -214,13 +225,13 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 		? connected && remoteProjectQuery.isSuccess && Boolean(workspace) && liveSessions.length === 0
 		: presentation.showProjectEmpty;
 	const boardLoadFailed = !hostId && (presentation.workspaceStartupState === "error" || localWorkspaceQuery.isError);
-	const canFind = view === "board" && !showStartup && !showWelcome && !showProjectEmpty && !boardLoadFailed
+	const canFind = view === "board" && !presentation.showStartup && !showWelcome && !showProjectEmpty && !boardLoadFailed
 		&& (!hostId || Boolean(workspace)) && !(projectId && (isProvisioning || projectActions.isSpawning));
 	useEffect(() => {
 		if (!canFind) return;
 		const handleKeyDown = (event: KeyboardEvent) => {
 			if (event.defaultPrevented || event.isComposing || event.repeat || isDialogOrMenuOpen()
-				|| useUiStore.getState().settingsModal?.scope === "global") return;
+				|| useUiStore.getState().settingsModal) return;
 			const target = event.target instanceof Element ? event.target : null;
 			if (target?.closest(".browser-panel, .xterm, .terminal-surface, [data-testid='session-terminal']")) return;
 			if (target !== findInputRef.current && target?.closest("input, textarea, [contenteditable]:not([contenteditable='false'])")) return;
@@ -242,11 +253,13 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 		window.addEventListener("keydown", handleKeyDown);
 		return () => window.removeEventListener("keydown", handleKeyDown);
 	}, [canFind, closeFind, isFindOpen]);
+	const canShowFleet = Boolean(projectId && !hostId && workspace && workspace.kind !== CLOUD_PROJECT_KIND);
 	// Memory and CPU monitoring is a developer tool: the light, the card chips
 	// and the window behind them only exist with Diagnostics on in Developer mode.
 	// They read this machine, so another machine's board shows none of them.
 	const diagnostics = useDiagnosticsEnabled();
-	const hasMemory = useHasAppMemory(!hostId) && diagnostics && !hostId;
+	// The light leads the board's actions, before the Task button, not in the archive bar.
+	const memoryLight = diagnostics && !hostId ? <AppMemoryIndicator /> : null;
 	// Per-session readings feed each card's resource chip. Chips are grey
 	// unless the machine is tight and the card is part of the fix (idle, or
 	// the single largest).
@@ -272,6 +285,13 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 	}, [navigate, hostId]);
 	const openSessionArtifact = useCallback((session: WorkspaceSession, path: string) => {
 		useUiStore.getState().requestWorkspaceFileOpen(session.id, path, hostId, "artifact");
+		openSession(session);
+	}, [openSession, hostId]);
+	const openSessionArtifacts = useCallback((session: WorkspaceSession) => {
+		const uiKey = sessionUiKey(session.id, hostId);
+		useUiStore.getState().initializeInspectorSession(uiKey, Boolean(session.previewUrl), true);
+		useUiStore.getState().setInspectorView(uiKey, "artifacts");
+		useUiStore.getState().setInspectorOpen(uiKey, true);
 		openSession(session);
 	}, [openSession, hostId]);
 
@@ -304,21 +324,19 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 	const actions = projectId && (!hostId || connected) ? (
 		<>
 			<ProjectTerminationFeedback projectId={projectId} hostId={hostId} />
-			<ProjectBoardActions actions={projectActions} placement="header" quiet={showProjectEmpty} cloud={workspace?.kind === CLOUD_PROJECT_KIND} />
-			{boardOwnsNotificationCenter ? (
-				<>
-					<NotificationCenter />
-				</>
-			) : null}
+			{memoryLight}
+			{guest ? null : <ProjectBoardActions actions={projectActions} placement="header" quiet={showProjectEmpty} cloud={workspace?.kind === CLOUD_PROJECT_KIND} />}
 		</>
 	) : hostOffline ? (
 		<HostOfflineStatus host={savedHost} label={hostLabel ?? ""} updatedAt={workspace ? remoteProjectQuery.dataUpdatedAt : undefined} />
 	) : memoryLight ?? undefined;
 
-	if (projectId && (isProvisioning || projectActions.isSpawning)) {
+	if (projectId && (isProvisioning || projectActions.isSpawning || autoStartPending)) {
 		return <OrchestratorStartingChat
-			cloud={workspace?.kind === CLOUD_PROJECT_KIND}
+			cloud={workspace?.kind === CLOUD_PROJECT_KIND || autoStartPending}
+			freestyle={startsInPlace || autoStartPending}
 			coderWorkspaceUrl={workspace?.sessions.find((session) => session.kind === "orchestrator")?.cloud?.coderWorkspaceUrl}
+			harness={workspace?.orchestratorAgent ?? workspace?.sessions.find((session) => session.kind === "orchestrator")?.provider}
 		/>;
 	}
 
@@ -340,33 +358,31 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 			{hostId && projectId && connected && workspace && !orchestrator && !hasConfiguredOrchestratorAgent(workspace) ? (
 				<div className="mx-3 my-3 flex items-center gap-3 rounded-md border border-border bg-surface px-3 py-2 text-xs text-muted-foreground">
 					<span className="min-w-0 flex-1">{t("remote.configureOrchestratorFirst", { label: labelForHost(hostId) ?? hostId, defaultValue: "Choose an orchestrator agent on {{label}} to start one." })}</span>
-					<button type="button" className="shrink-0 rounded-md px-2 py-1 font-medium text-foreground hover:bg-interactive-hover focus-visible:outline-2 focus-visible:outline-ring" onClick={() => shell?.openRemoteProjectSettings(hostId, projectId)}>{t("restoreUnavailable.configureOrchestrator")}</button>
+					<Button type="button" variant="ghost" size="xs" className="font-medium" onClick={() => shell?.openRemoteProjectSettings(hostId, projectId)}>{t("restoreUnavailable.configureOrchestrator")}</Button>
 				</div>
 			) : null}
 
-			{/* Reserve only the collapsed archive bar. Expanded archive overlays the
-			    board so lane height (and Needs You scrollbars) stay stable. */}
-			{projectId && !hostId && workspace?.kind !== CLOUD_PROJECT_KIND ? (
+			{canShowFleet ? (
 				<div className="flex gap-1 border-b border-border px-3 py-2" role="group" aria-label={t("fleet.view")}>
 					<Button variant={view === "board" ? "secondary" : "ghost"} size="sm" aria-pressed={view === "board"} onClick={() => setView("board")}>{t("shell.board")}</Button>
 					<Button variant={view === "fleet" ? "secondary" : "ghost"} size="sm" aria-pressed={view === "fleet"} onClick={() => { closeFind(); setView("fleet"); }}>{t("fleet.tab")}</Button>
 				</div>
 			) : null}
-			{view === "fleet" && workspace ? <>
+			{canShowFleet && view === "fleet" && workspace ? <>
 				{boardLoadFailed ? <p role="alert" className="px-4 py-2 text-xs text-destructive">{t("fleet.stale")}</p> : null}
 				<SessionFleet key={scopeKey} sessions={workspace.sessions} onOpen={openSession} />
 			</> : <>
-			<div className={cn("min-h-0 flex-1 overflow-hidden", hostOffline && workspace && "opacity-75")} data-host-offline={hostOffline && workspace ? "" : undefined}>
-				{canFind && isFindOpen ? <BoardFindBar inputRef={findInputRef} matches={filteredSessions.length} onClose={closeFind} onQueryChange={setFindQuery} query={findQuery} total={sessions.length} /> : null}
+			<div className={cn("relative min-h-0 flex-1 overflow-hidden", hostOffline && workspace && "opacity-75")} data-host-offline={hostOffline && workspace ? "" : undefined}>
+				{canFind && isFindOpen ? <BoardFindBar inputRef={findInputRef} matches={filteredSessions.length} onClose={closeFind} onQueryChange={setFindQuery} query={findQuery} total={searchableSessions.length} /> : null}
 				{projectId && !guest && health.state !== "ok" && (!hostId || connected && (health.state !== "missing" || hasConfiguredOrchestratorAgent(workspace))) ? (
 					<div className="mx-3 my-3 flex items-center gap-3 rounded-md border border-border bg-surface px-3 py-2 text-xs text-muted-foreground">
 						<AlertTriangle className="size-icon-base shrink-0 text-warning" aria-hidden="true" />
 						<span className="min-w-0 flex-1">{health.message}</span>
 						{health.state === "restart_needed" || health.state === "duplicates" ? (
-							<TopbarButton disabled={isProjectRestarting} onClick={() => void restartOrchestrator()} variant="primary">
+							<Button type="button" size="sm" disabled={isProjectRestarting} onClick={() => void restartOrchestrator()} variant="primary">
 								<RotateCw className="size-3.5" aria-hidden="true" />
 								{t("shell.restart")}
-							</TopbarButton>
+							</Button>
 						) : null}
 					</div>
 				) : null}
@@ -390,7 +406,7 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 					</span>
 				</div>
 			) : null}
-				{boardLoadFailed ? (
+				{!hostId && (presentation.workspaceStartupState === "error" || localWorkspaceQuery.isError) ? (
 					<p className="py-10 text-center text-xs text-passive">{t("shell.couldNotLoadSessions")}</p>
 				) : hostOffline && !workspace ? (
 					<div className="flex h-full min-h-0 items-center justify-center overflow-y-auto" data-testid="board-host-offline-empty">
@@ -415,10 +431,13 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 						labels={boardLabels}
 						renderSessionCard={(session) => (
 							<BoardSessionCardAdapter
+								participants={participantsBySession.get(session.id)}
+								me={cloudUserId}
 								memory={memoryBySession?.get(session.id)}
 								memoryTone={chipToneOf(session)}
 								onOpen={() => openSession(session)}
 								onOpenArtifact={(path) => openSessionArtifact(session, path)}
+								onOpenArtifacts={() => openSessionArtifacts(session)}
 								onTerminate={!hostId || connected ? ({ deleteArtifacts }) => terminateSession.mutate({ ...session, deleteArtifacts }) : undefined}
 								session={session}
 							/>
@@ -450,8 +469,8 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 					</Button>
 				</div>
 			) : null}
-			</>}
 			{showStartup ? <DaemonStartupLoader /> : null}
+			</>}
 		</div>
 	);
 }

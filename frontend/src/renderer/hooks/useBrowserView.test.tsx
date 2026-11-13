@@ -1,4 +1,4 @@
-import type { BrowserRuntimeState } from "../../main/browser-view-host";
+import type { SessionBrowserRuntimeState } from "../../main/browser-view-host";
 import {
 	resetClosedTabsForTest,
 	resetConsumedPreviewTriggersForTest,
@@ -38,7 +38,7 @@ function createSlot(rect: Partial<DOMRect> = {}) {
 
 function setupBridge() {
 	const listeners = new Set<Listener>();
-	const runtimeListeners = new Set<(state: BrowserRuntimeState) => void>();
+	const runtimeListeners = new Set<(state: SessionBrowserRuntimeState) => void>();
 	const tabsListeners = new Set<TabsListener>();
 	const devtoolsListeners = new Set<DevToolsListener>();
 	const activityListeners = new Set<ActivityListener>();
@@ -150,8 +150,8 @@ function setupBridge() {
 		showProfileMenu: vi.fn(),
 		selectProfile: vi.fn(),
 		reconnectRuntime: vi.fn(async () => undefined),
-		getRuntimeState: vi.fn(async (sessionId: string, hostId?: string): Promise<BrowserRuntimeState> => ({ sessionId, hostId, connected: false })),
-		attachRuntime: vi.fn(async (sessionId: string, hostId?: string, _takeover = false): Promise<BrowserRuntimeState> => ({ sessionId, hostId, connected: true, owned: true })),
+		getSessionRuntimeState: vi.fn(async (sessionId: string, hostId?: string): Promise<SessionBrowserRuntimeState> => ({ sessionId, hostId, connected: false })),
+		attachRuntime: vi.fn(async (sessionId: string, hostId?: string, _takeover = false): Promise<SessionBrowserRuntimeState> => ({ sessionId, hostId, connected: true, owned: true })),
 		historySuggestions: vi.fn(async () => []),
 		historyFavicon: vi.fn(async () => undefined),
 		captureScreenshot: vi.fn(async () => undefined),
@@ -184,7 +184,7 @@ function setupBridge() {
 			activityListeners.add(listener);
 			return () => activityListeners.delete(listener);
 		}),
-		onRuntimeState: vi.fn((listener: (state: BrowserRuntimeState) => void) => {
+		onSessionRuntimeStateChanged: vi.fn((listener: (state: SessionBrowserRuntimeState) => void) => {
 			runtimeListeners.add(listener);
 			return () => runtimeListeners.delete(listener);
 		}),
@@ -202,7 +202,7 @@ function setupBridge() {
 		emit(state: BrowserNavState) {
 			listeners.forEach((listener) => listener(state));
 		},
-		emitRuntime(state: BrowserRuntimeState) {
+		emitRuntime(state: SessionBrowserRuntimeState) {
 			runtimeListeners.forEach((listener) => listener(state));
 		},
 		emitTabs(state: Parameters<TabsListener>[0]) {
@@ -375,7 +375,7 @@ describe("useBrowserView", () => {
 		const bridge = setupBridge();
 		const { result } = renderHook(() => useBrowserView({ sessionId: "sess-1", active: true, poppedOut: false }));
 		await waitFor(() => expect(result.current.browserRuntimeConnected).toBe(true));
-		let resolve!: (state: BrowserRuntimeState) => void;
+		let resolve!: (state: SessionBrowserRuntimeState) => void;
 		bridge.attachRuntime.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
 		let handoff!: Promise<void>;
 		act(() => { handoff = result.current.takeBrowserControl(); });
