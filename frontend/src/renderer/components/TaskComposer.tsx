@@ -14,6 +14,7 @@ import type { components } from "../../api/schema";
 import { apiClient, apiErrorCode, apiErrorMessage } from "../lib/api-client";
 import { clientForHost } from "../lib/host-clients";
 import { useConnectedHosts } from "../hooks/useHostConnection";
+import { useResetStaleProjectTuning } from "../hooks/useResetStaleProjectTuning";
 import { captureRendererEvent } from "../lib/telemetry";
 import {
 	cacheAgentReadiness,
@@ -25,8 +26,13 @@ import { useSettings } from "../hooks/useSettings";
 import { useCloudCp } from "../hooks/useCloudCp";
 import { useCloudOrg } from "../hooks/useCloudOrg";
 import { useProviderConnections } from "../hooks/useProviderConnections";
-import { cloudAgentInfos, connectedCredentialType, credentialModelScope, isCloudHarnessConnected } from "../lib/cloud-agents";
-import { agentModelDisplayLabel, isConcreteModelID, modelChoiceLabel, splitClaudeModels } from "../lib/agent-model-choices";
+import { CLOUD_AGENT_PROVIDERS, cloudAgentInfos, connectedCredentialType, credentialModelScope } from "../lib/cloud-agents";
+import { createCloudSession } from "../lib/cloud-session-create";
+import { reportCloudSessionCreateRequested } from "../lib/cloud-telemetry";
+import { rememberStandaloneAgent } from "../lib/cloud-standalone-agents";
+import { cloudDefaultModel, cloudModelLabel, isConcreteModelID, isModelSelectable, modelChoiceLabel, splitClaudeModels, withoutLocalAvailability } from "../lib/agent-model-choices";
+import { collapseModelVariants, findModelVariant, listsModelVariants, pickModelVariant } from "../lib/model-variants";
+import { ToggleRow } from "./chat/AgentSwitchPicker";
 import { fallbackEffort } from "../lib/effort";
 import {
 	buildRankedAgentOptions,
@@ -34,7 +40,7 @@ import {
 	isLaunchableAgent,
 	isReadyAgent,
 } from "../lib/agent-select-options";
-import { cloudSessionsQueryKey, useCloudProjectsQuery } from "../hooks/useWorkspaceQuery";
+import { cloudSessionsQueryKey, seedCreatedFreestyleSession, seedCreatedStandaloneAgent, useCloudProjectsQuery } from "../hooks/useWorkspaceQuery";
 import {
 	agentModelsQueryKey,
 	agentModelsQueryOptions,
@@ -45,9 +51,10 @@ import {
 import { useModelCatalogAuthRecovery } from "../hooks/useModelCatalogAuthRecovery";
 import { useUiStore } from "../stores/ui-store";
 import { ModelCatalogNotice } from "./ModelCatalogNotice";
-import { STANDALONE_WORKSPACE_ID } from "../types/workspace";
-import { AgentModelCombobox } from "./settings/AgentModelCombobox";
-import { EffortPicker, type EffortAvailability } from "./settings/EffortPicker";
+import { CLOUD_STANDALONE_WORKSPACE_ID, STANDALONE_WORKSPACE_ID, toAgentProvider } from "../types/workspace";
+import { CODER_PROVIDER, projectSandboxProvider } from "../lib/cloud-offering";
+import { type EffortAvailability } from "./settings/EffortPicker";
+import { COMPOSER_MENU_WIDTH, TaskEffortPicker, TaskModelPicker } from "./TaskModelControls";
 import { useModelTuning } from "./settings/ModelTuningControls";
 import { SettingsOptionMenu } from "./settings/SettingsOptionMenu";
 import {
@@ -167,7 +174,12 @@ export function TaskComposer({
 	const { org: cloudOrg } = useCloudOrg();
 	const cloudProjects = useCloudProjectsQuery();
 	const cloudProject = (cloudProjects.data ?? []).find((project) => project.id === projectId);
-	const isCloudProject = !hostId && Boolean(cloudProject);
+	// A Cloud standalone agent starts as a Cloud task with no project's
+	// settings: the control plane gives it a project of its own.
+	const isCloudStandalone = !hostId && projectId === CLOUD_STANDALONE_WORKSPACE_ID;
+	const isCloudProject = !hostId && (Boolean(cloudProject) || isCloudStandalone);
+	// Coder projects keep their own New Task dialog and start-up untouched.
+	const isCoderCloudProject = isCloudProject && !isCloudStandalone && projectSandboxProvider(cloudProject?.config, cloudOffering) === CODER_PROVIDER;
 	const isStandalone = projectId === STANDALONE_WORKSPACE_ID;
 	const preferenceContext = hostId ? `${hostId}:${projectId ?? ""}` : projectId ?? "";
 	const persistedPreferences = useMemo(
@@ -183,14 +195,43 @@ export function TaskComposer({
 			try {
 				// No provider: the control plane runs the session on the project's
 				// stored provider (config.sandboxProvider), else the org's default.
-				const { session } = await cloudClient.createSession(cloudOrg.id, {
-					projectId: input.projectId,
-					kind: "worker",
-					harness: input.agent ?? "claude-code",
-					displayName: input.brief.trim().slice(0, 100) || (input.agent ?? "claude-code"),
+				// The task starts in the interface the composer resolved (its choice,
+				// else the default session interface); an older control plane that
+				// predates the field starts it in the terminal (createCloudSession).
+				const body = {
+					harness: input.agent,
+					displayName: input.brief.trim().slice(0, 100) || input.agent,
 					prompt: input.brief,
 					...(input.model ? { model: input.model } : {}),
 					...(input.effort ? { reasoningEffort: input.effort } : {}),
+					...(input.mode ? { interfaceMode: input.mode } : {}),
+					// Only a permission the user picked, as for a local task; without
+					// one the worker derives it from the session's mode.
+					...(input.approvalMode ? { approvalMode: input.approvalMode } : {}),
+				};
+				const createOptions = input.clientRequestId ? { idempotencyKey: input.clientRequestId } : undefined;
+				let session;
+				if (isCloudStandalone) {
+					// The agent and its project come back together; its project joins
+					// the list now so the Scratchpad shows the agent at once.
+					reportCloudSessionCreateRequested({ kind: "worker", projectId: "" });
+					const created = await cloudClient.createStandaloneAgent(cloudOrg.id, body, createOptions);
+					seedCreatedStandaloneAgent(queryClient, cloudBaseUrl, cloudOrg.id, created.project);
+					rememberStandaloneAgent(created.session.id, created.project.id);
+					session = created.session;
+				} else {
+					({ session } = await createCloudSession(cloudClient, cloudOrg.id, { projectId: input.projectId, kind: "worker", ...body }, createOptions));
+				}
+				// The session's Chat composer shows, and its turns keep, what the task
+				// was started with, as a local task's chat does.
+				rememberCloudChatSettings(cloudOrg.id, session.id, session.harness, input);
+				// The session view shows the brief from its first frame, with its start
+				// under it, while the sandbox comes up.
+				seedCloudOpening(queryClient, cloudOrg.id, session.id, {
+					clientMessageId: input.clientRequestId ?? session.id,
+					text: input.brief,
+					createdAt: sentAt,
+					...(session.interfaceMode ? { interfaceMode: session.interfaceMode } : {}),
 				});
 				// The control plane provisions the sandbox asynchronously; surface the
 				// new session on the board immediately.
@@ -202,7 +243,7 @@ export function TaskComposer({
 				throw err instanceof Error ? err : new Error(t("newTask.unableToStart"));
 			}
 		},
-		[cloudClient, cloudOrg, queryClient, t],
+		[cloudBaseUrl, cloudClient, cloudOrg, cloudUserId, isCloudStandalone, queryClient, t],
 	);
 
 	const createDaemonTask = useCallback(
@@ -405,6 +446,40 @@ export function TaskComposer({
 	const projectModeForSelectedAgent = selectedAgent === configuredProjectAgent
 		? defaultWorkerMode
 		: "";
+	const rememberedConfigForSelectedAgent = agentDrafts[selectedAgent];
+	const rememberedModel = rememberedConfigForSelectedAgent?.model ?? "";
+	const rememberedMode = rememberedConfigForSelectedAgent?.mode ?? "";
+	// A cloud task runs the control plane's catalog for its agent: the models a
+	// Cloud worker on the same CLI version and credential reported, or the ones
+	// its pinned CLI release supports. Neither depends on this computer's login.
+	const cloudCatalogAgent = isCloudProject && (CLOUD_AGENT_PROVIDERS as readonly string[]).includes(selectedAgent);
+	const cloudCatalogState = useCloudModelCatalog({ orgId: cloudOrg?.id, agent: selectedAgent, enabled: cloudCatalogAgent });
+	const cloudModelCatalogQuery = cloudCatalogState.query;
+	const cloudCatalog = cloudCatalogState.catalog;
+	// Until the catalog arrives no listed model vouches for the effort, so a task
+	// does not start yet with a level its model refuses.
+	const cloudCatalogLoading = cloudCatalogState.loading;
+	const cloudCatalogGap = cloudCatalogState.gap;
+	// A model the account's own Cloud list verifiably lacks fails every turn, so
+	// nothing picks it for a cloud task on its own: not a remembered pick, not the
+	// project's model, not a suggestion carried in from elsewhere.
+	const cloudModelUnavailable = (id: string) => isCloudProject && cloudModelVerdict(cloudCatalog, id) === "unavailable";
+	// A task started beside a Cloud project's running orchestrator, with the
+	// orchestrator's agent and no worker model of the project's, starts on the
+	// model the orchestrator runs now, as long as the account can run it.
+	const cloudOrchestrator = useCloudOrchestratorModel({
+		baseUrl: cloudBaseUrl,
+		orgId: cloudOrg?.id,
+		projectId,
+		// A standalone agent has no orchestrator to start beside.
+		enabled: isCloudProject && !isCloudStandalone,
+	});
+	const orchestratorModelForSelectedAgent = isCloudProject && cloudOrchestrator && cloudOrchestrator.harness === selectedAgent &&
+		isConcreteModelID(cloudOrchestrator.model) && !cloudModelUnavailable(cloudOrchestrator.model)
+		? cloudOrchestrator.model
+		: "";
+	const localCatalogForCloud = listsLocalModelsForCloud(cloudCatalogGap, selectedAgent, modelScope);
+	const localCatalogInUse = !isCloudProject || localCatalogForCloud;
 	// Shares the picker's query key, so this is the same fetch, not a second one.
 	const modelCatalogQuery = useQuery(agentModelsQueryOptions(selectedAgent, modelsProjectId, hostId));
 	const revalidationQuery = useQuery({
@@ -523,7 +598,19 @@ export function TaskComposer({
 	const cloudDefaultEffort = isCloudProject && effortOptions.includes("medium") ? "medium" : "";
 	const inheritedEffort = selectedAgent === configuredProjectAgent ? defaultWorkerEffort : "";
 	const implicitEffort = inheritedEffort || effortModel?.defaultEffort || "";
-	const selectedAgentLabel = agentCatalog?.agents.find((item) => item.id === selectedAgent)?.label || selectedAgent;
+	const selectedAgentLabel = availableAgents?.find((item) => item.id === selectedAgent)?.label || selectedAgent;
+	useResetStaleProjectTuning({
+		projectId: isCloudProject || isStandalone ? undefined : projectQuery.data?.id,
+		hostId,
+		agent: selectedAgent,
+		agentLabel: selectedAgentLabel,
+		projectAgent: configuredProjectAgent,
+		config: isCloudProject ? undefined : projectQuery.data?.config,
+		catalog: localCatalog,
+	});
+	// A cloud project's Chat-capable harnesses come from the control plane, as a
+	// local project's come from the daemon.
+	const chatHarnesses = isCloudProject ? cloudOffering.chatHarnesses : settings?.chatHarnesses;
 	const requiresTuiFallback =
 		selectedAgent !== "" &&
 		settings?.defaultSessionMode === "chat" &&
@@ -688,6 +775,300 @@ export function TaskComposer({
 			setIsSubmitting(false);
 		}
 	};
+	// The interface a plain submit asks for; a TUI-only agent cannot open Chat.
+	const submitMode: TaskLaunchOptions["interfaceMode"] = selectedAgent === "unreal-agent" ? "chat" : requiresTuiFallback ? "tui" : undefined;
+	const launchFallback = (brief: string, clientRequestId?: string, files?: FileAttachmentPayload[]) =>
+		fallbackAction === "bypass-permissions"
+			? launch(brief, { interfaceMode: selectedAgent === "unreal-agent" ? "chat" : undefined, approvalMode: "bypass-permissions", clientRequestId, attachments: files })
+			: launch(brief, { interfaceMode: "tui", clientRequestId, attachments: files });
+
+	const changeAgent = (value: string) => {
+		setError(undefined);
+		setStatus(undefined);
+		setErrorAction(undefined);
+		setBranchOverride("");
+		if (selectedAgent) agentDrafts[selectedAgent] = rememberedPreference("agent-switch");
+		setAgent(value);
+		setAgentTouched(true);
+		setModel("");
+		setMode("");
+		setEffort("");
+		setModelTouched(false);
+		setEffortTouched(false);
+	};
+
+	// The agents the new chat page's picker offers, ranked as in New Task. Locally only
+	// installed agents whose sign-in is known to be usable: an "Auth unknown" agent may
+	// not start, so it stays in Harness settings. A remote host's readiness can be
+	// unknown without anything being wrong, so there definite failures alone are left out.
+	const agentChoices = useMemo(() => {
+		const agents = isCloudProject ? cloudAgents : agentCatalog?.agents;
+		const ranked = buildRankedAgentOptions({
+			agents,
+			priorityRank: DEFAULT_AGENT_PRIORITY_RANK,
+			fallbackAgents: AGENT_OPTIONS.map((agent) => unknownAgentReadiness(agent, agentLabel(agent))),
+		});
+		return (agents ? ranked.filter(hostId ? isLaunchableAgent : startsLocally) : ranked).map(({ id, label }) => ({ id, label }));
+	}, [agentCatalog?.agents, cloudAgents, hostId, isCloudProject]);
+	const catalogProjectId = isCloudProject || isStandalone ? "" : projectId ?? "";
+	// A pick from the picker's other agents: that agent, with the model and effort chosen
+	// alongside it, if any. Its catalog is cached, since the picker lists its models.
+	const switchAgent = (harness: string, pick: { model?: string; effort?: string } = {}) => {
+		if (harness !== selectedAgent) changeAgent(harness);
+		if (pick.model) {
+			// Cloud's lists name models only; this computer's may name launch modes.
+			const catalog = isCloudProject ? undefined : queryClient.getQueryData(agentModelsQueryOptions(harness, catalogProjectId, hostId).queryKey);
+			if (catalog?.selectionMode === "mode") {
+				setMode(pick.model);
+				setModel("");
+			} else {
+				setModel(pick.model);
+				setMode("");
+			}
+			setModelTouched(true);
+		}
+		if (pick.effort) {
+			setEffort(pick.effort);
+			setEffortTouched(true);
+		}
+	};
+
+	// A cloud task shows the effort it sends.
+	const shownEffort = isCloudProject ? effectiveEffort : effort;
+	const showEffort = cursorChoice ? cursorChoice.family.efforts.length > 1 : !requiresTuiFallback && (effortOptions.length > 0 || Boolean(shownEffort && shownEffort !== "default"));
+	// The same choices in the chat composer's shape, so the new chat page can use its settings bar.
+	// The orchestrator's model says so in the model menus.
+	const orchestratorModelHint = orchestratorModelIsValid
+		? { id: orchestratorModelForSelectedAgent, label: t("newTask.sameAsOrchestrator") }
+		: undefined;
+	const chatModels = useMemo<ChatModel[]>(() => catalogModels.map((item) => ({
+		id: item.id,
+		displayName: item.id === "auto" ? t("settings.models.autoRouteLabel") : catalogUsesModes ? modelChoiceLabel(item) : item.label,
+		default: Boolean(item.isDefault),
+		efforts: item.efforts,
+		defaultEffort: item.defaultEffort,
+		...(orchestratorModelHint?.id === item.id ? { hint: orchestratorModelHint.label } : {}),
+	})), [catalogModels, catalogUsesModes, orchestratorModelHint?.id, orchestratorModelHint?.label, t]);
+	const turnSettings: TurnSettings = {
+		model: (selectedModel || selectedMode) || undefined,
+		reasoningEffort: showEffort ? effectiveEffort || undefined : undefined,
+		// Display the inherited policy even when the daemon applies it at launch.
+		approvalMode: effectiveApproval,
+	};
+	const chooseTurnSettings = (next: TurnSettings) => {
+		if ((next.model ?? "") !== (turnSettings.model ?? "")) {
+			if (catalogUsesModes) {
+				setMode(next.model ?? "");
+				setModel("");
+				setEffort("");
+			} else {
+				setModel(next.model ?? "");
+				setMode("");
+			}
+			setModelTouched(true);
+		}
+		if ((next.reasoningEffort ?? "") !== (turnSettings.reasoningEffort ?? "")) {
+			setEffort(next.reasoningEffort ?? "");
+			setEffortTouched(true);
+		}
+		if (next.approvalMode && next.approvalMode !== turnSettings.approvalMode) setApprovalMode(next.approvalMode);
+	};
+
+	return {
+		launch,
+		launchFallback,
+		// What a plain send would request right now, to save alongside a send.
+		launchSnapshot: (): LaunchReplay => ({
+			agent: selectedAgent || undefined,
+			model: requestedModel,
+			effort: requestedEffort,
+			approvalMode: launchApproval,
+			mode: submitMode,
+		}),
+		// The interface a plain send starts in, including the Settings default.
+		effectiveInterface: (submitMode ?? settings?.defaultSessionMode ?? "tui") as "chat" | "tui",
+		refreshModels: refreshSelectedModels,
+		preparedSessionId,
+		submitMode,
+		isCloudProject,
+		isCoderCloudProject,
+		canSubmit,
+		isSubmitting,
+		isDirty: modelTouched || effortTouched || attachments.length > 0,
+		error,
+		status,
+		errorAction: errorAction === "install-agent" ? {
+			label: t("newTask.openHarnessSettings", { defaultValue: "Open Agent Harnesses" }),
+			onClick: () => openGlobalSettings("harness", { focusAgentId: selectedAgent, ...(hostId ? { hostId } : {}), harnessView: "local", preserveProject: true }),
+		} : errorAction === "choose-branch" ? {
+			label: t("newTask.chooseNewBranch", { defaultValue: "Choose new branch" }),
+			input: {
+				label: t("newTask.newBranchPrompt", { defaultValue: "New branch name" }),
+				value: branchDraft,
+				onChange: setBranchDraft,
+			},
+			onClick: () => {
+				if (!branchDraft.trim()) return;
+				setBranchOverride(branchDraft.trim());
+				setErrorAction(undefined);
+				setError(undefined);
+				setStatus(t("newTask.newBranchReady", { branch: branchDraft.trim(), defaultValue: "Branch {{branch}} selected for your next task." }));
+			},
+		} : undefined,
+		remoteLoadError,
+		modelWarning,
+		modelWarningRetries,
+		fallbackAction,
+		fallbackLabel: fallbackAction === "bypass-permissions"
+			? t("newTask.startWithoutApprovals", { defaultValue: "Start without approvals" })
+			: t("newTask.createAsTui"),
+		agent: {
+			label: t("newTask.agent"),
+			placeholder: t("newTask.selectAgent"),
+			value: selectedAgent,
+			agents: isCloudProject ? cloudAgents : agentCatalog?.agents,
+			disabled:
+				isSubmitting || (!isCloudProject && agentsQuery.isFetching && agentCatalog === undefined),
+			onChange: changeAgent,
+		},
+		model: {
+			agentId: selectedAgent,
+			agentLabel: selectedAgentLabel,
+			projectId: isStandalone || isCloudStandalone ? "" : (projectId ?? ""),
+			disabled: isSubmitting,
+			value: selectedModel,
+			mode: selectedMode,
+			catalog: modelCatalog,
+			fetching: localCatalogInUse ? localModelCatalogQuery.isFetching : cloudModelCatalogQuery.isFetching,
+			loading:
+				selectedAgent !== "" &&
+				(localCatalogInUse
+					? localModelCatalogQuery.isFetching && localModelCatalogQuery.data === undefined
+					: cloudModelCatalogQuery.isFetching && cloudCatalog === undefined),
+			onModelChange: (value: string) => {
+				setModel(value);
+				setMode("");
+				setModelTouched(true);
+				// Effort levels are per-model, so a level the newly chosen model
+				// does not advertise has to be dropped rather than carried over. A
+				// cloud model Cloud's catalog does not list may still take it. The
+				// cloud default shows no effort, so it starts from the project's.
+				if (isCloudProject && value === "") {
+					setEffort(inheritedEffort);
+					return;
+				}
+				const listed = cloudCatalog?.models.find((item) => item.id === value);
+				const nextEfforts = listed
+					? listed.efforts
+					: modelCatalog?.models?.find((item) => item.id === value)?.efforts;
+				const keepUnknown = isCloudProject && !listed && nextEfforts === undefined;
+				setEffort((current) => (current !== "" && !keepUnknown && !nextEfforts?.includes(current) ? "" : current));
+			},
+			onModeChange: (value: string) => {
+				setMode(value);
+				setModel("");
+				setModelTouched(true);
+				// A mode replaces the model entirely, so no model vouches for a
+				// previously chosen level any more.
+				setEffort("");
+			},
+		},
+		effort: cursorChoice ? {
+			disabled: isSubmitting,
+			options: cursorChoice.family.efforts,
+			value: cursorChoice.variant.effort ?? "",
+			onChange: (value: string) => pickCursorVariant({ effort: value }),
+		} : {
+			disabled: isSubmitting,
+			options: effortOptions,
+			value: effectiveEffort,
+			onChange: (value: string) => {
+				setEffort(value);
+				setEffortTouched(true);
+			},
+		},
+		attachments: {
+			items: attachments.map(({ id, name, dataUrl }) => ({ id, name, previewUrl: dataUrl })),
+			error: attachmentError,
+			onAddFiles: (files: File[]) => void addFiles(files),
+			onRemove: removeAttachment,
+		},
+		showEffort,
+		chatModels,
+		approvalModes: usesChatPermissions ? chatPermissionModes ?? [] : undefined,
+		turnSettings,
+		chooseTurnSettings,
+		agentChoices,
+		catalogProjectId,
+		// A Cloud task's organization: the agent switch lists Cloud's models for the account.
+		catalogCloudOrgId: isCloudProject ? cloudOrg?.id : undefined,
+		switchAgent,
+		renderAgentControl: (control: TaskComposerAgentControl) => <DesktopAgentControl {...control} hostId={hostId} manageView={isCloudProject ? "cloud" : "local"} />,
+		renderEffortControl: (control: TaskComposerEffortControl) => <TaskEffortPicker {...control} value={control.value || cloudDefaultEffort} defaultEffort={cursorChoice ? undefined : inheritedEffort || effortModel?.defaultEffort} availability={cursorChoice ? "supported" : effortAvailability}
+			footer={cursorChoice?.family.hasThinkingChoice ? <ToggleRow label={t("agentSwitch.thinking")} checked={cursorChoice.variant.thinking} onChange={(thinking) => pickCursorVariant({ thinking })} /> : undefined} />,
+		renderModelControl: (control: TaskComposerModelControl) => <TaskModelPicker {...control}
+			hostId={hostId}
+			onRefresh={isCloudProject && !cloudCatalogAgent ? undefined : refreshSelectedModels}
+			allowNativeSelection={isCloudProject}
+			footer={cloudModelSource}
+			modelHint={orchestratorModelHint}
+			showFollowAgentAction={Boolean(catalogDefaultOption || !isConcreteModelID(projectModelOrMode))} />,
+	};
+}
+
+export type TaskLaunch = ReturnType<typeof useTaskLaunch>;
+
+/** Installed, with a sign-in that works, is not needed, or has credentials not yet verified. */
+function startsLocally(agent: AgentInfo): boolean {
+	return agent.installation.state === "installed" && (isReadyAgent(agent) || agent.authentication.state === "configured");
+}
+
+/** The picks a composer had for one project, parked while it shows a project of the other kind (local or Cloud). */
+type ParkedComposerPicks = {
+	/** The agent the picks were made with; they never come back for another. */
+	agent: string;
+	model: string;
+	mode: string;
+	effort: string;
+	modelTouched: boolean;
+	effortTouched: boolean;
+};
+
+// The launch form as a standalone composer. The app starts tasks from the new
+// chat page; this view keeps the launch logic exercised in isolation.
+export function TaskComposer({
+	projectId,
+	hostId,
+	onCreated,
+	onDirtyChange,
+	onSubmittingChange,
+	autoFocusTitle,
+	createLabel,
+}: TaskComposerProps) {
+	const { t } = useTranslation();
+	const taskPlaceholder = useMemo(() => {
+		const placeholders = t("newTask.taskPlaceholders" as never, { returnObjects: true }) as string[];
+		return Array.isArray(placeholders)
+			? (placeholders[Math.floor(Math.random() * placeholders.length)] ?? "")
+			: "";
+	}, [t]);
+	const task = useTaskLaunch({ projectId, hostId });
+	const [isPromptDirty, setIsPromptDirty] = useState(false);
+	const isDirty = isPromptDirty || task.isDirty;
+	const handlePromptChange = useCallback((value: string) => {
+		const nextDirty = value.trim() !== "";
+		setIsPromptDirty((wasDirty) => (wasDirty === nextDirty ? wasDirty : nextDirty));
+	}, []);
+	useEffect(() => {
+		onDirtyChange?.(isDirty);
+	}, [isDirty, onDirtyChange]);
+	useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
+	useEffect(() => {
+		onSubmittingChange?.(task.isSubmitting);
+	}, [task.isSubmitting, onSubmittingChange]);
+	useEffect(() => () => onSubmittingChange?.(false), [onSubmittingChange]);
+	// The hook records a failure for display, so a rejected create just stays put.
+	const settle = (created: Promise<string>) => void created.then(onCreated, () => undefined);
 
 	return (
 		<TaskComposerView

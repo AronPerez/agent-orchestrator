@@ -5,7 +5,7 @@ import { THEMES, getThemeDefinition } from "../../lib/theme-palettes";
 import type { AppLocale } from "../../i18n";
 import { useLocaleStore } from "../../stores/locale-store";
 import { useSoundNotificationsStore } from "../../stores/sound-notifications-store";
-import { useUiStore } from "../../stores/ui-store";
+import { useUiStore, type ChatSendKeyMode } from "../../stores/ui-store";
 import { useTelemetryPolicyStore } from "../../stores/telemetry-policy-store";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { useTerminalShellStore } from "../../stores/terminal-shell-store";
@@ -19,6 +19,7 @@ import { useSettings, useUpdateCloudOffering, useUpdateSessionInterface } from "
 import type { SessionMode } from "../../types/workspace";
 import type { TerminalShellKind } from "../../../shared/ui-locale";
 import { isMacPlatform, isWindowsPlatform } from "../../lib/platform";
+import type { TerminalClickMode } from "../../lib/terminal-mouse";
 
 /**
  * Default interface for new sessions. Daemon-owned so `ao spawn` and mobile
@@ -150,6 +151,20 @@ export function GeneralSettingsSection({
 	const setRemoteHosts = useUiStore((state) => state.setRemoteHosts);
 	const terminalCopyOnSelect = useUiStore((state) => state.terminalCopyOnSelect);
 	const setTerminalCopyOnSelect = useUiStore((state) => state.setTerminalCopyOnSelect);
+	const terminalClickMode = useUiStore((state) => state.terminalClickMode);
+	const setTerminalClickMode = useUiStore((state) => state.setTerminalClickMode);
+	const terminalClickOptions = [
+		{ value: "app", label: t("settings.terminalClicks.app") },
+		{ value: "select", label: t("settings.terminalClicks.select") },
+	] satisfies SettingsOption<TerminalClickMode>[];
+	const projectAvatars = useUiStore((state) => state.projectAvatars);
+	const setProjectAvatars = useUiStore((state) => state.setProjectAvatars);
+	const chatSendKeyMode = useUiStore((state) => state.chatSendKeyMode);
+	const setChatSendKeyMode = useUiStore((state) => state.setChatSendKeyMode);
+	const chatSendKeyOptions = [
+		{ value: "enter", label: t("settings.chatSendKey.enter") },
+		{ value: "mod-enter", label: t("settings.chatSendKey.modEnter") },
+	] satisfies SettingsOption<ChatSendKeyMode>[];
 
 	// Trigger and menu rows share one layout: name, then the palette on the right.
 	const renderColorTheme = (option: SettingsOption<ThemeStyle> | undefined, compact = false) =>
@@ -201,7 +216,14 @@ export function GeneralSettingsSection({
 						/>
 					</div>
 				</SettingsRow>
-				<SettingsRow label={t("settings.language")}>
+				{isMacPlatform() && <WindowTranslucencyRow />}
+				<SettingsRow label={t("settings.projectAvatars")} description={t("settings.projectAvatars.description")}>
+					<Switch aria-label={t("settings.projectAvatars")} checked={projectAvatars} onCheckedChange={setProjectAvatars} />
+				</SettingsRow>
+				<SettingsRow
+					label={t("settings.language")}
+					description={localeSaveError ? <span role="alert" className="text-error">{t("settings.language.saveFailed")}</span> : undefined}
+				>
 					<SettingsOptionMenu
 						aria-label={t("settings.language")}
 						disabled={localeSaving}
@@ -230,7 +252,21 @@ export function GeneralSettingsSection({
 						onCheckedChange={setTerminalCopyOnSelect}
 					/>
 				</SettingsRow>
-				<SettingsRow label={t("settings.soundNotifications")}>
+				<SettingsRow
+					label={t("settings.terminalClicks")}
+					description={isMacPlatform() ? t("settings.terminalClicks.description.mac") : t("settings.terminalClicks.description.other")}
+				>
+					<SettingsOptionMenu
+						aria-label={t("settings.terminalClicks")}
+						value={terminalClickMode}
+						options={terminalClickOptions}
+						onChange={setTerminalClickMode}
+					/>
+				</SettingsRow>
+				<SettingsRow
+					label={t("settings.soundNotifications")}
+					description={soundNotificationsSaveError ? <span role="alert" className="text-error">{t("settings.soundNotifications.saveFailed")}</span> : undefined}
+				>
 					<Switch
 						aria-label={t("settings.soundNotifications")}
 						checked={soundNotificationsEnabled}
@@ -266,7 +302,8 @@ export function GeneralSettingsSection({
 				{developerMode && <CloudOfferingRow />}
 				{developerMode && <DiagnosticsRow />}
 				{developerMode && <SideChatsRow />}
-				{developerMode && isMacPlatform() && <WindowTranslucencyRow />}
+				{developerMode && <SplitPanesRow />}
+				{developerMode && <ChromeAgentsRow />}
 			</SettingsSection>
 		</>
 	);
@@ -326,12 +363,21 @@ function SideChatsRow() {
 	const sideChats = useUiStore((state) => state.sideChats);
 	const setSideChats = useUiStore((state) => state.setSideChats);
 	return (
-		<div className="flex w-full flex-col">
-			<SettingsRow label={t("settings.sideChats")}>
-				<Switch aria-label={t("settings.sideChats")} checked={sideChats} onCheckedChange={setSideChats} />
-			</SettingsRow>
-			<p className="px-3 pb-2 text-xs leading-relaxed text-muted-foreground">{t("settings.sideChatsHint")}</p>
-		</div>
+		<SettingsRow label={t("settings.sideChats")} description={t("settings.sideChatsHint")}>
+			<Switch aria-label={t("settings.sideChats")} checked={sideChats} onCheckedChange={setSideChats} />
+		</SettingsRow>
+	);
+}
+
+/** Developer Mode-only switch for dragging center tabs into split panes. Off by default. */
+function SplitPanesRow() {
+	const { t } = useTranslation();
+	const splitPanes = useUiStore((state) => state.splitPanes);
+	const setSplitPanes = useUiStore((state) => state.setSplitPanes);
+	return (
+		<SettingsRow label={t("settings.splitPanes")} description={t("settings.splitPanesHint")}>
+			<Switch aria-label={t("settings.splitPanes")} checked={splitPanes} onCheckedChange={setSplitPanes} />
+		</SettingsRow>
 	);
 }
 

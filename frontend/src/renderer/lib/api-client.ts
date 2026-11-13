@@ -61,6 +61,12 @@ export function setApiDaemonStatus(nextStatus: DaemonStatus): void {
 // would miss (orchestrators/{id}). Keep in sync with schema.ts.
 const ROUTE_TEMPLATES = [
 	"/api/v1/sessions/{sessionId}/coordination",
+    "/api/v1/awake/observations", "/api/v1/awake", "/api/v1/awake/sessions", "/api/v1/awake/settings",
+    "/api/v1/awake/rules", "/api/v1/awake/stop", "/api/v1/awake/resume",
+    "/api/v1/awake/recover", "/api/v1/awake/history", "/api/v1/awake/downloads",
+    "/api/v1/awake/low-power/authorize", "/api/v1/awake/low-power/revoke", "/api/v1/awake/sessions/{awakeId}/end",
+    "/api/v1/awake/sessions/{awakeId}/extend",
+    "/api/v1/session-import",
 	"/api/v1/agents",
 	"/api/v1/agents/install-jobs",
 	"/api/v1/agents/auth-plans",
@@ -241,7 +247,68 @@ function reportApiError(
 	}
 }
 
+// Reads the daemon error envelope's `code` (via a clone so the caller still
+// gets an unconsumed body) and reports the failure unless it is expected.
+async function reportResponseError(operation: string, response: Response): Promise<void> {
+	let code: string | undefined;
+	let requestId: string | undefined;
+	try {
+		const body = (await response.clone().json()) as Partial<components["schemas"]["APIError"]>;
+		if (typeof body?.code === "string" && body.code !== "") code = body.code;
+		if (typeof body?.requestId === "string" && body.requestId !== "") requestId = body.requestId;
+	} catch {
+		// Non-JSON or empty body: fall back to status-only classification.
+	}
+	if (!(code && EXPECTED_API_ERROR_CODES.has(code)) && !expectedProbeConflict(operation, response.status)) reportApiError(
+		operation,
+		response.status >= 500 ? "http_5xx" : "http_4xx",
+		response.status,
+		code,
+		requestId,
+	);
+}
+
+// Agent prompts name the user's time zone. The daemon may run on a remote host
+// in another zone, so the app reports its own. Only writes carry it: spawns are
+// POSTs, and a custom header on GETs would add a CORS preflight per polled URL.
+export const CLIENT_TIME_ZONE_HEADER = "X-AO-Client-Time-Zone";
+let clientTimeZone: { value: string; at: number } | undefined;
+function currentTimeZone(): string {
+	const now = Date.now();
+	if (!clientTimeZone || now - clientTimeZone.at > 60_000) {
+		let value = "";
+		try { value = Intl.DateTimeFormat().resolvedOptions().timeZone ?? ""; } catch { /* unsupported */ }
+		clientTimeZone = { value, at: now };
+	}
+	return clientTimeZone.value;
+}
+export function tagClientTimeZone(input: Request): void {
+	if (input.method === "GET" || input.method === "HEAD" || input.method === "OPTIONS") return;
+	const zone = currentTimeZone();
+	if (!zone || input.headers.has(CLIENT_TIME_ZONE_HEADER)) return;
+	try { input.headers.set(CLIENT_TIME_ZONE_HEADER, zone); } catch { /* immutable headers: send without it */ }
+}
+
+// A fetch for clients that talk to a daemon directly (a connected remote host)
+// rather than through runtimeFetch's rebasing. Failures are reported the same
+// way the local client reports them; they used to be invisible.
+export async function reportingFetch(input: Request): Promise<Response> {
+	tagClientTimeZone(input);
+	const operation = normalizeApiOperation(input.method, new URL(input.url).pathname);
+	let response: Response;
+	try {
+		response = await fetch(input);
+	} catch (error) {
+		markApiError(error);
+		if (!(error instanceof DOMException && error.name === "AbortError")) reportApiError(operation, "network_error");
+		throw error;
+	}
+	if (!response.ok) await reportResponseError(operation, response);
+	return response;
+}
+
 async function runtimeFetch(input: Request): Promise<Response> {
+	tagClientTimeZone(input);
 	const operation = normalizeApiOperation(input.method, new URL(input.url).pathname);
 	const visibilityOwned = operation === "GET /api/v1/projects" || operation === "GET /api/v1/sessions" || operation === "GET /api/v1/sessions/:id/agent-switches";
 	const baseUrl = runtimeApiBaseUrl;

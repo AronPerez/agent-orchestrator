@@ -1,4 +1,5 @@
 import { useWindowZoomFactor } from "../hooks/useWindowZoomFactor";
+import { useAutoSpawnPauseNotice } from "../hooks/useAutoSpawnPauseNotice";
 import { AppBrowserLinkContext } from "../components/AppLink";
 import { useSessionBrowserLink } from "../hooks/useSessionBrowserLink";
 import { createFileRoute, Outlet, useMatchRoute, useNavigate, useParams, useRouter } from "@tanstack/react-router";
@@ -7,12 +8,15 @@ import { lazy, memo, Suspense, type CSSProperties, type ReactNode, useCallback, 
 import { FolderPlus } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { CommandPalette } from "../components/CommandPalette";
+import { useLatestCallback } from "../hooks/useStable";
 import { CenterPanelShell } from "../components/CenterPanelShell";
 import { DaemonFailureBanner } from "../components/DaemonFailureBanner";
 import { DaemonStartupLoader } from "../components/DaemonStartupLoader";
 import { NotificationRuntime } from "../components/NotificationCenter";
 import { TrayRuntime } from "../components/TrayRuntime";
-import { GlobalNewTaskDialog } from "../components/GlobalNewTaskDialog";
+import { SharedWithYouNotifier } from "../components/teams/SharedWithYouNotifier";
+import { NewTaskNavigator } from "../components/NewTaskNavigator";
+import { ArchiveModalHost } from "../components/ArchiveModalHost";
 import { GlobalToast } from "../components/GlobalToast";
 import { SettingsPane, SettingsProvider } from "../components/SettingsDialog";
 import { KeyboardShortcutsDialog } from "../components/KeyboardShortcutsDialog";
@@ -21,7 +25,7 @@ import { ShellTopbar } from "../components/ShellTopbar";
 import { SessionTopbarProvider } from "../components/SessionTopbarPortal";
 import { OrchestratorReplacementDialog } from "../components/OrchestratorReplacementDialog";
 import { RestartToUpdateDialog } from "../components/RestartToUpdateDialog";
-import { TelemetryConsentRenewalDialog } from "../components/TelemetryConsentRenewalDialog";
+import { SessionImportDialog } from "../components/SessionImportDialog";
 import { Sidebar } from "../components/Sidebar";
 import type { CreateProjectInput } from "../components/CreateProjectFlow";
 import { useRemoteHosts } from "../hooks/useRemoteHosts";
@@ -60,7 +64,7 @@ import {
 	hidesShellTopbar,
 } from "../lib/platform";
 import { sidebarIsVisible, sidebarOccupiesLayout, useUiStore } from "../stores/ui-store";
-import { CLOUD_PROJECT_KIND, hasConfiguredOrchestratorAgent, newestActiveOrchestrator, sessionIsActive, STANDALONE_WORKSPACE_ID, toProjectKind, type WorkspaceSession, type WorkspaceSummary } from "../types/workspace";
+import { CLOUD_PROJECT_KIND, hasConfiguredOrchestratorAgent, newestActiveOrchestrator, isScratchpadWorkspace, sessionIsActive, STANDALONE_WORKSPACE_ID, toProjectKind, type WorkspaceSession, type WorkspaceSummary } from "../types/workspace";
 import type { components } from "../../api/schema";
 import { useAgentInventoryTelemetry } from "../hooks/useAgentInventoryTelemetry";
 import { remoteWorkspaceQueryKey } from "../hooks/useWorkspaceQuery";
@@ -70,6 +74,10 @@ import { useCloudAccountSwitchReset } from "../hooks/useCloudAccountSwitchReset"
 import { openRemoteOrchestrator } from "../lib/remote-orchestrator";
 import { projectNavigateTarget, sessionNavigateTarget } from "../lib/navigate-to-session";
 import { sessionUiKey } from "../lib/hosts";
+import { pageHasTopbar } from "../lib/shell-topbar";
+import { forgetRemoteHost, syncRemoteCache } from "../lib/remote-chat-cache";
+import { watchRemoteUnpins } from "../lib/remote-session-unpins";
+import { useRemoteUnpinStore } from "../stores/remote-unpin-store";
 import { buildSidebarSessionOrder, sessionWantsAttention, stepSessionNav, type SidebarNavSession } from "../lib/sidebar-order";
 import { useSidebarOrderStore } from "../stores/sidebar-order-store";
 import { useAppShortcut } from "../hooks/useAppShortcut";
@@ -83,8 +91,34 @@ const loadOrchestratorStartingChat = () => import("../components/chat/Orchestrat
 const OrchestratorStartingChat = lazy(() =>
 	loadOrchestratorStartingChat().then((module) => ({ default: module.OrchestratorStartingChat })),
 );
+
+const EMPTY_PAUSE_PROJECTS: never[] = [];
 function preloadOrchestratorStartingChat(): void {
 	void loadOrchestratorStartingChat().catch(() => undefined);
+}
+const LazySessionView = lazy(() => loadSessionView().then((module) => ({ default: module.SessionView })));
+// React.lazy suspends on its first render even when the code has already loaded,
+// which drew a blank pane on the first session open (the hand-off from the new
+// chat page flickered once). Once loaded, the component renders directly.
+function SessionView(props: ComponentProps<typeof LoadedSessionView>) {
+	const [Loaded] = useState(() => loadedSessionView()?.SessionView);
+	return Loaded ? <Loaded {...props} /> : <LazySessionView {...props} />;
+}
+function preloadSessionView(): void {
+	void loadSessionView().catch(() => undefined);
+}
+
+const LAST_PROJECT_KEY = "ao.newTask.lastProject";
+
+/** The last project the user was in, while it still exists. */
+function lastProjectId(workspaces: WorkspaceSummary[]): string | undefined {
+	let id: string | null = null;
+	try {
+		id = localStorage.getItem(LAST_PROJECT_KEY);
+	} catch {
+		return undefined;
+	}
+	return workspaces.some((workspace) => workspace.id === id && !isScratchpadWorkspace(workspace)) ? id ?? undefined : undefined;
 }
 
 export const Route = createFileRoute("/_shell")({
@@ -145,6 +179,7 @@ function findRegisteredWorkspaceByPath(workspaces: WorkspaceSummary[], path: str
 type CreateProjectConfigInput = {
 	workerAgent: string;
 	orchestratorAgent: string;
+	reviewerAgent?: string;
 	trackerIntake?: components["schemas"]["TrackerIntakeConfig"];
 	defaultBranch?: string;
 };
@@ -154,6 +189,7 @@ export function createProjectConfig(input: CreateProjectConfigInput): components
 		...(input.defaultBranch ? { defaultBranch: input.defaultBranch } : {}),
 		worker: { agent: input.workerAgent as components["schemas"]["RoleOverride"]["agent"] },
 		orchestrator: { agent: input.orchestratorAgent as components["schemas"]["RoleOverride"]["agent"] },
+		...(input.reviewerAgent ? { reviewers: [{ harness: input.reviewerAgent }] } : {}),
 		...(input.trackerIntake ? { trackerIntake: input.trackerIntake } : {}),
 	};
 }
@@ -243,8 +279,25 @@ function ShellLayout() {
 	useWorkspacePolling();
 	const workspaceQuery = useWorkspaceQuery();
 	const workspaces = workspaceQuery.data ?? [];
-	const { hosts: remoteHosts, refresh: refreshRemoteHosts } = useRemoteHosts();
-	const { data: remoteWorkspaces, failedHostIds: remoteFailedHostIds } = useRemoteWorkspaces();
+	const { hosts: remoteHosts, listed: remoteHostsListed, refresh: refreshRemoteHosts } = useRemoteHosts();
+	const remoteHostIdsKey = remoteHosts.map((host) => host.hostId).join("\0");
+	const remoteHostIds = useMemo(() => remoteHostIdsKey ? remoteHostIdsKey.split("\0") : [], [remoteHostIdsKey]);
+	// What each host showed last stays only for the hosts still saved, and shows
+	// while they connect or are offline.
+	useEffect(() => {
+		if (!remoteHostsListed) return;
+		void syncRemoteCache(queryClient, remoteHostIds);
+		// Pins removed here for a host that is no longer saved have no row left to hide.
+		useRemoteUnpinStore.getState().keepHosts(remoteHostIds);
+	}, [queryClient, remoteHostIds, remoteHostsListed]);
+	// Pins removed here while a host was unreachable reach it once its list loads.
+	useEffect(() => watchRemoteUnpins(queryClient), [queryClient]);
+	const refusedRemoteHostKey = remoteHosts.filter((host) => host.failureReason === "unauthorized").map((host) => host.hostId).join("\0");
+	useEffect(() => {
+		for (const hostId of refusedRemoteHostKey ? refusedRemoteHostKey.split("\0") : []) void forgetRemoteHost(queryClient, hostId);
+	}, [queryClient, refusedRemoteHostKey]);
+	const { data: remoteWorkspaces, failedHostIds: remoteFailedHostIds } = useRemoteWorkspaces({ cachedHostIds: remoteHostIds });
+	useAutoSpawnPauseNotice([...(workspaceQuery.data ?? EMPTY_PAUSE_PROJECTS), ...(remoteWorkspaces ?? EMPTY_PAUSE_PROJECTS)]);
 	const failedRemoteHostKey = remoteFailedHostIds.join("\0");
 	useEffect(() => {
 		if (failedRemoteHostKey) void refreshRemoteHosts();
@@ -359,7 +412,9 @@ function ShellLayout() {
 			workspaces.some((workspace) => workspace.id === routeParams.projectId && workspace.kind !== CLOUD_PROJECT_KIND),
 		leavePage: () => void navigate({ to: "/", replace: true }),
 	});
-	const linkSession = routeParams.hostId ? undefined : workspaces.flatMap((workspace) => workspace.sessions).find((session) => session.id === routeParams.sessionId);
+	const linkSession = (routeParams.hostId ? remoteWorkspaces ?? [] : workspaces)
+		.flatMap((workspace) => workspace.sessions)
+		.find((session) => session.id === routeParams.sessionId && session.hostId === routeParams.hostId);
 	const openBrowserLink = useSessionBrowserLink(linkSession);
 	const canOpenBrowserLink = linkSession?.kind === "worker" && sessionIsActive(linkSession);
 	useEffect(() => {
@@ -430,6 +485,19 @@ function ShellLayout() {
 		: routeParams.sessionId
 			? workspaces.find((workspace) => workspace.sessions.some((session) => session.id === routeParams.sessionId))?.id
 			: undefined;
+	// The last project the user was in, so a new session started from outside any
+	// project opens there rather than in the scratchpad.
+	const scopedIsProject = Boolean(scopedProjectId) && workspaces.some(
+		(workspace) => workspace.id === scopedProjectId && !isScratchpadWorkspace(workspace),
+	);
+	useEffect(() => {
+		if (!scopedIsProject || !scopedProjectId || scopedProjectId === STANDALONE_WORKSPACE_ID) return;
+		try {
+			localStorage.setItem(LAST_PROJECT_KEY, scopedProjectId);
+		} catch {
+			// Without it a new session outside a project starts in the scratchpad.
+		}
+	}, [scopedIsProject, scopedProjectId]);
 	const scopedSession = routeParams.sessionId
 		? (routeParams.hostId ? remoteWorkspaces : workspaces)
 			.flatMap((workspace) => workspace.sessions)
@@ -588,6 +656,9 @@ function ShellLayout() {
 					projectId: workspace.id,
 					kind: "orchestrator",
 					harness: input.orchestratorAgent as components["schemas"]["SpawnSessionRequest"]["harness"],
+					// The daemon already starts orchestrators in the background; say so
+					// explicitly, as the CLI does, so the request never holds a Setup.
+					async: true,
 				},
 			});
 			if (spawnError || !spawnData?.session?.id) {
@@ -608,19 +679,22 @@ function ShellLayout() {
 					? { ...item, sessions: [toWorkspaceSession(spawnData.session, { id: workspace.id, name: workspace.name }), ...item.sessions.filter((session) => session.id !== sessionId)] }
 					: item),
 			);
+			// Follow the new orchestrator only if the user is still waiting on
+			// this project's board; do not pull them back from another page.
+			// The provisioning gate stays up until the session route has landed,
+			// otherwise the board shows through for a beat between the two.
+			const current = routeParamsRef.current;
+			if (current.projectId === workspace.id && !current.sessionId && !current.hostId) {
+				// A failed navigation is not a failed start: the session exists.
+				await navigate({
+					to: "/projects/$projectId/sessions/$sessionId",
+					params: { projectId: workspace.id, sessionId },
+				}).catch(() => undefined);
+			}
 			// The session now exists, so the sidebar button can open it even if
 			// the user left while it spawned.
 			window.clearTimeout(provisioningGuard);
 			setProjectProvisioning(workspace.id, false);
-			// Follow the new orchestrator only if the user is still waiting on
-			// this project's board; do not pull them back from another page.
-			const current = routeParamsRef.current;
-			if (current.projectId === workspace.id && !current.sessionId && !current.hostId) {
-				void navigate({
-					to: "/projects/$projectId/sessions/$sessionId",
-					params: { projectId: workspace.id, sessionId },
-				});
-			}
 		} catch (spawnError) {
 			window.clearTimeout(provisioningGuard);
 			setProjectProvisioning(workspace.id, false);
@@ -669,6 +743,7 @@ function ShellLayout() {
 			path: string;
 			workerAgent: string;
 			orchestratorAgent: string;
+			reviewerAgent?: string;
 			trackerIntake?: components["schemas"]["TrackerIntakeConfig"];
 			asWorkspace?: boolean;
 			clonePreparationId?: string;
@@ -747,6 +822,7 @@ function ShellLayout() {
 			destinationParent: string;
 			workerAgent: string;
 			orchestratorAgent: string;
+			reviewerAgent?: string;
 			trackerIntake?: components["schemas"]["TrackerIntakeConfig"];
 			signal?: AbortSignal;
 		}) => {
@@ -962,6 +1038,28 @@ function ShellLayout() {
 			showGlobalToast(t("shell.couldNotSpawn"), message, "error");
 		}
 	}, [navigate, openProjectSettings, queryClient, remoteWorkspaces, setOrchestratorStartupError, showGlobalToast, t]);
+	// The sidebar is memoized, and the shell re-renders several times per route
+	// change. Handlers that keep their identity let those renders skip it.
+	const openRemoteProjectFromSidebar = useCallback((hostId: string, projectId: string) => {
+		void navigate(projectNavigateTarget(projectId, hostId));
+	}, [navigate]);
+	const openRemoteOrchestratorFromSidebar = useLatestCallback((hostId: string, projectId: string) => {
+		void openRemoteProjectOrchestrator(hostId, projectId);
+	});
+	const configureRemoteProjectFromSidebar = useCallback(
+		(hostId: string, projectId: string) => openProjectSettings(projectId, hostId),
+		[openProjectSettings],
+	);
+	const removeRemoteProjectFromSidebar = useLatestCallback(removeRemoteProject);
+	const retryRemoteHosts = useCallback(() => {
+		void refreshRemoteHosts();
+		void queryClient.invalidateQueries({ queryKey: ["remote-workspaces"] });
+	}, [queryClient, refreshRemoteHosts]);
+	// A new handler on every shell render would rebuild the sidebar context and
+	// re-render every row button that reads it.
+	const handleSidebarOpenChange = useCallback((open: boolean) => {
+		if (open !== isSidebarOpen) toggleSidebar();
+	}, [isSidebarOpen, toggleSidebar]);
 
 	const restartOrchestrator = useCallback(
 		async (projectId: string, mode?: "chat" | "tui", approvalMode?: "bypass-permissions") => {
@@ -1003,6 +1101,10 @@ function ShellLayout() {
 					body: { enabled: developerMode },
 				});
 				if (error) throw error;
+				const { error: limitHistoryError } = await apiClient.PUT("/api/v1/usage/limit-history", {
+					body: { enabled: developerMode },
+				});
+				if (limitHistoryError) throw limitHistoryError;
 			}).catch(() => {
 				if (!cancelled) retry = setTimeout(sync, 5_000);
 			});
@@ -1252,6 +1354,8 @@ function ShellLayout() {
 			initializeProjectRepository,
 			openRemoteProjectSettings: (hostId: string, projectId: string) => openProjectSettings(projectId, hostId),
 			openProject,
+			remoteHosts,
+			retryRemoteHosts,
 			validateImport,
 		}),
 		[
@@ -1261,6 +1365,8 @@ function ShellLayout() {
 			initializeProjectRepository,
 			openProjectSettings,
 			openProject,
+			remoteHosts,
+			retryRemoteHosts,
 			validateImport,
 			workspaceStartupState,
 		],
@@ -1296,10 +1402,12 @@ function ShellLayout() {
 						</div>
 					</div>
 				) : null}
-				<GlobalNewTaskDialog />
+				<NewTaskNavigator />
+				<ArchiveModalHost />
 				<GlobalToast />
 				<RestartToUpdateDialog />
-				<TelemetryConsentRenewalDialog />
+				<SessionImportDialog />
+				{quitConfirmDialog}
 				<KeyboardShortcutsDialog
 					open={isKeyboardShortcutsOpen}
 					onOpenChange={setIsKeyboardShortcutsOpen}
@@ -1345,9 +1453,7 @@ function ShellLayout() {
 				<SidebarProvider
 					className="min-h-0 flex-1 flex-col overflow-x-hidden"
 					keyboardShortcut={false}
-					onOpenChange={(open) => {
-						if (open !== isSidebarOpen) toggleSidebar();
-					}}
+					onOpenChange={handleSidebarOpenChange}
 					open={!isStartupLoading && isSidebarOpen}
 					style={
 						{
@@ -1377,14 +1483,11 @@ function ShellLayout() {
 						remoteHosts={remoteHosts}
 						onCreateRemoteProject={createRemoteProject}
 						onInitializeRemoteProject={initializeRemoteProject}
-						onOpenRemoteProject={(hostId, projectId) => { void navigate(projectNavigateTarget(projectId, hostId)); }}
-						onOpenRemoteOrchestrator={(hostId, projectId) => { void openRemoteProjectOrchestrator(hostId, projectId); }}
-						onConfigureRemoteProject={(hostId, projectId) => openProjectSettings(projectId, hostId)}
-						onRemoveRemoteProject={removeRemoteProject}
-						onRetryRemoteHosts={() => {
-							void refreshRemoteHosts();
-							void queryClient.invalidateQueries({ queryKey: ["remote-workspaces"] });
-						}}
+						onOpenRemoteProject={openRemoteProjectFromSidebar}
+						onOpenRemoteOrchestrator={openRemoteOrchestratorFromSidebar}
+						onConfigureRemoteProject={configureRemoteProjectFromSidebar}
+						onRemoveRemoteProject={removeRemoteProjectFromSidebar}
+						onRetryRemoteHosts={retryRemoteHosts}
 						remoteWorkspaces={remoteWorkspaces}
 						remoteFailedHostIds={remoteFailedHostIds}
 					/>

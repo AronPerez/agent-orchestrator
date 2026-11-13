@@ -1,12 +1,13 @@
-import { Code2, Download, ExternalLink, FilePlus, FileText, Globe2, Loader2, Maximize2 } from "lucide-react";
+import { apiErrorException } from "../../lib/api-error-exception";
+import { Code2, Download, ExternalLink, FilePlus, FileText, Loader2, Maximize2, WrapText } from "@/components/app-icons";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
-import { useOpenArtifactPreview } from "../../hooks/useOpenArtifactPreview";
-import { apiClient, apiErrorMessage, getApiBaseUrl, subscribeApiBaseUrl } from "../../lib/api-client";
+import { apiClient, getApiBaseUrl, subscribeApiBaseUrl } from "../../lib/api-client";
 import {
 	clampRenderHeight,
 	measuredRenderHeight,
 	readRenderContentHeight,
+	readRenderImageRequest,
 	readRenderLinkRequest,
 	readRenderTheme,
 	renderFileName,
@@ -19,10 +20,15 @@ import {
 import { cn } from "../../lib/utils";
 import { useUiStore } from "../../stores/ui-store";
 import type { ArtifactRef, RenderRef } from "../../types/conversation";
+import { BrowserIcon } from "../icons";
 import { Button, type ButtonProps } from "../ui/button";
 import { Dialog, DialogContent, DialogTitle } from "../ui/dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
+import { ChatImageDialog } from "./ChatImage";
 import { useChatArtifactLinks, useChatRemoteHost } from "./chat-image-source";
+import { useChatBrowserOpen } from "./ChatMarkdown";
+
+type RenderImage = { src: string; alt: string };
 
 /** What a frame shows: a page the agent rendered, or an HTML artifact it reported. */
 interface FramePage {
@@ -84,23 +90,31 @@ function useRenderTheme(): RenderTheme {
 function RenderDocument({
 	page,
 	displayMode,
+	wrapContent,
+	onOpenImage,
 	className,
 }: {
 	page: FramePage;
 	displayMode: RenderDisplayMode;
+	wrapContent: boolean;
+	onOpenImage: (image: RenderImage) => void;
 	className?: string;
 }) {
 	const theme = useRenderTheme();
 	const frameRef = useRef<HTMLIFrameElement>(null);
 	const themeRef = useRef(theme);
 	themeRef.current = theme;
+	const wrapContentRef = useRef(wrapContent);
+	wrapContentRef.current = wrapContent;
+	const onOpenImageRef = useRef(onOpenImage);
+	onOpenImageRef.current = onOpenImage;
 	// The daemon can come back on another port, so the src follows the API base
-	// (a frame not yet loaded would otherwise point at a dead port). The theme
-	// rides in the fragment only for the first paint; later flips are posted, so
-	// they never reload the page.
+	// (a frame not yet loaded would otherwise point at a dead port). Theme and
+	// wrapping ride in the fragment only for the first paint; later changes are
+	// posted, so they never reload the page.
 	const baseUrl = useSyncExternalStore(subscribeApiBaseUrl, getApiBaseUrl, getApiBaseUrl);
 	const src = useMemo(
-		() => `${page.frameUrl ?? `${baseUrl}${page.path}`}${renderThemeFragment(themeRef.current, displayMode, page.scrollable)}`,
+		() => `${page.frameUrl ?? `${baseUrl}${page.path}`}${renderThemeFragment(themeRef.current, displayMode, page.scrollable, wrapContentRef.current)}`,
 		[baseUrl, page.path, page.frameUrl, displayMode, page.scrollable],
 	);
 	const [contentHeight, setContentHeight] = useState<number>();
@@ -119,10 +133,10 @@ function RenderDocument({
 		return () => observer.disconnect();
 	}, [heights]);
 	const postTheme = () =>
-		frameRef.current?.contentWindow?.postMessage(renderThemeMessage(themeRef.current, displayMode, page.scrollable), "*");
+		frameRef.current?.contentWindow?.postMessage(renderThemeMessage(themeRef.current, displayMode, page.scrollable, wrapContent), "*");
 	useEffect(() => {
 		postTheme();
-	}, [theme]);
+	}, [theme, wrapContent]);
 	// Layout effect: a fast page can post its height before a passive effect runs.
 	useLayoutEffect(() => {
 		const onMessage = (event: MessageEvent) => {
@@ -134,10 +148,11 @@ function RenderDocument({
 				return;
 			}
 			// Only while the reader is using this frame: a page can post on load.
+			if (document.activeElement !== frame || navigator.userActivation?.isActive === false) return;
 			const url = readRenderLinkRequest(event.data);
-			if (url && document.activeElement === frame && navigator.userActivation?.isActive !== false) {
-				window.open(url, "_blank", "noopener,noreferrer");
-			}
+			if (url) window.open(url, "_blank", "noopener,noreferrer");
+			const image = readRenderImageRequest(event.data);
+			if (image) onOpenImageRef.current(image);
 		};
 		window.addEventListener("message", onMessage);
 		return () => window.removeEventListener("message", onMessage);
@@ -200,7 +215,7 @@ async function saveRenderAsArtifact(render: RenderRef): Promise<string> {
 		params: { path: { sessionId, renderId: render.id } },
 		body: { title: render.title },
 	});
-	if (!data) throw new Error(apiErrorMessage(error, "save render as artifact failed"));
+	if (!data) throw apiErrorException(error, "save render as artifact failed");
 	return data.name;
 }
 
@@ -237,19 +252,19 @@ function RenderSource({ path }: { path: string }) {
 	);
 }
 
-/** Opens an artifact in the session's Browser panel, on its own preview origin. */
-function OpenInPanelAction({ sessionId, previewUrl, onOpen }: { sessionId: string; previewUrl: string; onOpen: () => void }) {
+/** Opens the artifact in the session's contextual Artifacts tab. */
+function OpenInPanelAction({ sessionId, path, onOpen }: { sessionId: string; path: string; onOpen: () => void }) {
 	const { t } = useTranslation();
-	const openArtifactPreview = useOpenArtifactPreview(sessionId);
+	const requestWorkspaceFileOpen = useUiStore((state) => state.requestWorkspaceFileOpen);
 	return (
 		<RenderAction
 			label={t("chat.artifact.openInPanel")}
 			onClick={() => {
 				onOpen();
-				openArtifactPreview(previewUrl);
+				requestWorkspaceFileOpen(sessionId, path, undefined, "artifact");
 			}}
 		>
-			<Globe2 className="size-3.5" />
+			<FileText className="size-3.5" />
 		</RenderAction>
 	);
 }
@@ -272,9 +287,17 @@ export function RenderFrame(props: { render: RenderRef } | { artifact: ArtifactR
 					frameUrl: links?.inlineUrl,
 				};
 	const [expanded, setExpanded] = useState(false);
+	const [wrapContent, setWrapContent] = useState(false);
 	const [showSource, setShowSource] = useState(false);
 	const [saving, setSaving] = useState(false);
 	const [savingArtifact, setSavingArtifact] = useState(false);
+	const [image, setImage] = useState<RenderImage>();
+	const [imageOpen, setImageOpen] = useState(false);
+	const openImage = (next: RenderImage) => {
+		setImage(next);
+		setImageOpen(true);
+	};
+	const openInBrowserPanel = useChatBrowserOpen();
 	// The local daemon has no copy of a remote host's render, and the remote
 	// proxy URL must not reach the page: its path carries the proxy's capability
 	// token, which the page could read from its own location.
@@ -304,6 +327,43 @@ export function RenderFrame(props: { render: RenderRef } | { artifact: ArtifactR
 			})
 			.finally(() => setSavingArtifact(false));
 	};
+	const wrapAction = (
+		<RenderAction
+			label={t("chat.render.wrapContent")}
+			aria-pressed={wrapContent}
+			className="aria-pressed:bg-muted"
+			onClick={() => setWrapContent((current) => !current)}
+		>
+			<WrapText aria-hidden="true" className="size-3.5" />
+		</RenderAction>
+	);
+	// The page on its own, as a tab opens it. A render opens from its render
+	// route, whose sandbox CSP keeps it off the daemon wherever it is opened.
+	// An HTML artifact opens from its preview origin, the same URL the
+	// Artifacts tab and `ao preview` open: the daemon serves the artifact-files
+	// route the chat frames only to the app's own frames, and refuses a
+	// browser tab there (ORIGIN_FORBIDDEN). With no preview URL listed for it,
+	// the artifact does not open outside the chat.
+	const artifactPreviewUrl = "artifact" in props && links?.previewUrl && /^https?:\/\//.test(links.previewUrl) ? links.previewUrl : undefined;
+	const standaloneUrl = (): string | undefined => "artifact" in props
+		? artifactPreviewUrl
+		: `${getApiBaseUrl()}${page.path}${renderThemeFragment(readRenderTheme(), "fullscreen", false, wrapContent)}`;
+	const opensStandalone = !("artifact" in props) || artifactPreviewUrl !== undefined;
+	const openStandalone = (open: (url: string) => void) => {
+		const url = standaloneUrl();
+		if (url) open(url);
+	};
+	const browserPanelAction = openInBrowserPanel && opensStandalone ? (
+		<RenderAction
+			label={t("inspector.openInAOBrowser")}
+			onClick={() => {
+				setExpanded(false);
+				openStandalone(openInBrowserPanel);
+			}}
+		>
+			<BrowserIcon aria-hidden="true" className="size-3.5" />
+		</RenderAction>
+	) : null;
 	return (
 		<div className="group/render relative min-w-0">
 			{"artifact" in props ? (
@@ -311,25 +371,30 @@ export function RenderFrame(props: { render: RenderRef } | { artifact: ArtifactR
 					<FileText aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
 					<span className="shrink-0 font-medium text-foreground">{t("chat.artifact.label")}</span>
 					<span className="min-w-0 flex-1 truncate text-muted-foreground">{page.title}</span>
-					{links?.previewUrl ? (
-						<OpenInPanelAction sessionId={links.sessionId} previewUrl={links.previewUrl} onOpen={() => undefined} />
+					{links && "artifact" in props ? (
+						<OpenInPanelAction sessionId={links.sessionId} path={props.artifact.path} onOpen={() => undefined} />
 					) : null}
 				</div>
 			) : null}
-			<RenderDocument page={page} displayMode="inline" />
-			<RenderAction
-				label={t("chat.render.expand")}
+			<RenderDocument page={page} displayMode="inline" wrapContent={wrapContent} onOpenImage={openImage} />
+			<div
 				className={cn(
-					"absolute end-1 opacity-0 transition-opacity group-hover/render:opacity-100 focus-visible:opacity-100",
+					"absolute end-1 flex gap-1 opacity-0 transition-opacity group-hover/render:opacity-100 focus-within:opacity-100",
 					"artifact" in props ? "top-9" : "top-1",
 				)}
-				onClick={() => {
-					setShowSource(false);
-					setExpanded(true);
-				}}
 			>
-				<Maximize2 className="size-3.5" />
-			</RenderAction>
+				{wrapAction}
+				{browserPanelAction}
+				<RenderAction
+					label={t("chat.render.expand")}
+					onClick={() => {
+						setShowSource(false);
+						setExpanded(true);
+					}}
+				>
+					<Maximize2 className="size-3.5" />
+				</RenderAction>
+			</div>
 			<Dialog open={expanded} onOpenChange={setExpanded}>
 				<DialogContent
 					aria-describedby={undefined}
@@ -345,6 +410,7 @@ export function RenderFrame(props: { render: RenderRef } | { artifact: ArtifactR
 					{/* pe-9 keeps the actions clear of the dialog's own close button. */}
 					<div className="flex h-8 shrink-0 items-center gap-1 ps-2 pe-9">
 						<DialogTitle className="min-w-0 flex-1 truncate text-subtitle">{page.title}</DialogTitle>
+						{wrapAction}
 						<RenderAction
 							label={t("chat.render.viewSource")}
 							aria-pressed={showSource}
@@ -365,29 +431,27 @@ export function RenderFrame(props: { render: RenderRef } | { artifact: ArtifactR
 								<FilePlus className="size-3.5" />
 							</RenderAction>
 						) : null}
-						{links?.previewUrl ? (
-							<OpenInPanelAction sessionId={links.sessionId} previewUrl={links.previewUrl} onOpen={() => setExpanded(false)} />
+						{links && "artifact" in props ? (
+							<OpenInPanelAction sessionId={links.sessionId} path={props.artifact.path} onOpen={() => setExpanded(false)} />
 						) : null}
-						<RenderAction
-							label={t("chat.render.openInBrowser")}
-							onClick={() =>
-								window.open(
-									`${getApiBaseUrl()}${page.path}${renderThemeFragment(readRenderTheme(), "fullscreen")}`,
-									"_blank",
-									"noopener,noreferrer",
-								)
-							}
-						>
-							<ExternalLink className="size-3.5" />
-						</RenderAction>
+						{browserPanelAction}
+						{opensStandalone ? (
+							<RenderAction
+								label={t("chat.render.openInBrowser")}
+								onClick={() => openStandalone((url) => window.open(url, "_blank", "noopener,noreferrer"))}
+							>
+								<ExternalLink className="size-3.5" />
+							</RenderAction>
+						) : null}
 					</div>
 					{!expanded ? null : showSource ? (
 						<RenderSource path={page.path} />
 					) : (
-						<RenderDocument page={page} displayMode="fullscreen" className="max-h-[calc(100svh-8rem)]" />
+						<RenderDocument page={page} displayMode="fullscreen" wrapContent={wrapContent} onOpenImage={openImage} className="max-h-[calc(100svh-8rem)]" />
 					)}
 				</DialogContent>
 			</Dialog>
+			{image ? <ChatImageDialog open={imageOpen} onOpenChange={setImageOpen} url={image.src} label={image.alt} /> : null}
 		</div>
 	);
 }

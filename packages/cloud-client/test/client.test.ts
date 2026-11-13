@@ -13,14 +13,10 @@ import {
 } from "../src/index.js";
 
 describe("CloudClient", () => {
-  it("omits private Cloud APIs that the retained server cannot serve", () => {
-    type Unsupported = "getProjectEnvironment" | "putProjectEnvironment" | "getProjectIntakeStatus"
-      | "listProjectCues" | "createProjectCue" | "updateProjectCue" | "deleteProjectCue" | "invokeProjectCue"
-      | "saveArtifact" | "saveSessionArtifact" | "listArtifactVersions" | "listSessionArtifactVersions"
-      | "getArtifactVersion" | "getSessionArtifactVersion" | "restoreArtifactVersion" | "restoreSessionArtifactVersion"
-      | "restartSessionAgent" | "searchChats" | "updateSession" | "setSessionPinned" | "pinSession" | "unpinSession"
-      | "listReviewChatEvents" | "sendReviewChatMessage" | "interruptReviewChat" | "suggestChatPrompt";
-    expectTypeOf<Extract<keyof ReturnType<typeof createCloudClient> | keyof operations, Unsupported>>().toBeNever();
+  it("includes upstream operations alongside the compatible session contracts", () => {
+    type UpstreamOperations = "getProjectEnvironment" | "putProjectEnvironment" | "getProjectIntakeStatus"
+      | "listProjectCues" | "createProjectCue" | "updateProjectCue" | "deleteProjectCue" | "invokeProjectCue";
+    expectTypeOf<Exclude<UpstreamOperations, keyof operations>>().toBeNever();
     expectTypeOf<operations["deleteSessionArtifact"]>().toBeObject();
     expectTypeOf<components["schemas"]["CreateSessionInput"]["reasoningEffort"]>().toMatchTypeOf<string | undefined>();
     expectTypeOf<components["schemas"]["CreateSessionInput"]["provider"]>().toMatchTypeOf<string | undefined>();
@@ -30,7 +26,7 @@ describe("CloudClient", () => {
   it("keeps artifact publishing aligned with fork cloud", () => {
     expectTypeOf<paths["/api/cloud/v1/me/artifact-shares"]["post"]>().toEqualTypeOf<operations["createArtifactShare"]>();
     expectTypeOf<paths["/api/cloud/v1/me/artifact-shares/{shareId}"]["put"]>().toEqualTypeOf<operations["updateArtifactShare"]>();
-    expectTypeOf<Extract<keyof paths, "/api/cloud/v1/me/artifact-shares/uploads">>().toBeNever();
+    expectTypeOf<paths["/api/cloud/v1/me/artifact-shares/uploads"]>().toBeObject();
   });
 
   it("loads normalized project settings and preserves PATCH omissions", async () => {

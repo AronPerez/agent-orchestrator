@@ -19,6 +19,20 @@ const h = vi.hoisted(() => ({
 	agentCatalog: undefined as { agents: ReturnType<typeof import("../test/agent-readiness-fixtures").agentReadiness>[] } | undefined,
 	cloudProjects: [] as Array<{ id: string; displayName: string; repositoryUrl: string; defaultBranch: string; config: Record<string, unknown> }>,
 	cloudCreateSession: vi.fn(),
+	cloudCreateStandaloneAgent: vi.fn(),
+	seedCreatedStandaloneAgent: vi.fn(),
+	cloudDeleteSession: vi.fn(),
+	cloudRenameSession: vi.fn(),
+	cloudSendSessionMessage: vi.fn(),
+	cloudGetSession: vi.fn(),
+	cloudOfferingLoaded: false,
+	cloudDefaultProvider: "",
+	cloudListUserAgentModels: vi.fn(),
+	cloudListProviderConnections: vi.fn(),
+	cloudChatHarnesses: ["claude-code", "codex", "cursor"],
+	cloudOrgId: "org-1",
+	cloudBaseUrl: "https://cloud-a.example.test",
+	cloudUserId: "user-1",
 }));
 
 vi.mock("../hooks/useAgentReadinessQuery", async (importOriginal) => {
@@ -84,6 +98,8 @@ vi.mock("../hooks/useWorkspaceQuery", () => ({
 	cloudProjectsQueryKey: ["cloud-projects"] as const,
 	useCloudSessionsQuery: () => ({ data: [] }),
 	cloudSessionsQueryKey: ["cloud-sessions"] as const,
+	seedCreatedFreestyleSession: vi.fn(),
+	seedCreatedStandaloneAgent: h.seedCreatedStandaloneAgent,
 }));
 
 vi.mock("../hooks/useCloudOrg", () => ({
@@ -91,7 +107,15 @@ vi.mock("../hooks/useCloudOrg", () => ({
 }));
 
 vi.mock("../hooks/useCloudCp", () => ({
-	useCloudCp: () => ({ client: { createSession: h.cloudCreateSession } }),
+	useCloudCp: () => ({
+		baseUrl: h.cloudBaseUrl,
+		userId: h.cloudUserId,
+		client: {
+			createSession: h.cloudCreateSession, createStandaloneAgent: h.cloudCreateStandaloneAgent,
+			listUserAgentModels: h.cloudListUserAgentModels, listUserProviderConnections: h.cloudListProviderConnections,
+			deleteSession: h.cloudDeleteSession, renameSession: h.cloudRenameSession, sendSessionMessage: h.cloudSendSessionMessage, getSession: h.cloudGetSession,
+		},
+	}),
 }));
 
 import { TaskComposer } from "./TaskComposer";
@@ -99,6 +123,10 @@ import { agentReadiness } from "../test/agent-readiness-fixtures";
 import { agentReadinessQueryKey } from "../hooks/useAgentReadinessQuery";
 import { providerConnectionsQueryKey } from "../hooks/useProviderConnections";
 import { useUiStore } from "../stores/ui-store";
+import { subscribeCloudSessionEvents } from "../lib/cloud-cp/session-events-hub";
+import { standaloneAgentProjectId } from "../lib/cloud-standalone-agents";
+import { CLOUD_STANDALONE_WORKSPACE_ID } from "../types/workspace";
+import type { CloudCpStreamEvent } from "../../main/cloud-cp-proxy";
 
 function Wrap({ children, queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } }) }: {
 	children: ReactNode;
@@ -147,6 +175,21 @@ afterEach(() => {
 	h.agentCatalog = undefined;
 	h.cloudProjects.length = 0;
 	h.cloudCreateSession.mockReset();
+	h.cloudCreateStandaloneAgent.mockReset();
+	h.seedCreatedStandaloneAgent.mockReset();
+	h.cloudDeleteSession.mockReset().mockResolvedValue(undefined);
+	h.cloudRenameSession.mockReset();
+	h.cloudSendSessionMessage.mockReset();
+	h.cloudGetSession.mockReset();
+	h.cloudOfferingLoaded = false;
+	h.cloudDefaultProvider = "";
+	window.localStorage.removeItem("ao.cloudPreparedSessions.v1");
+	h.cloudListUserAgentModels.mockReset();
+	h.cloudListProviderConnections.mockReset();
+	h.cloudChatHarnesses = ["claude-code", "codex", "cursor"];
+	h.cloudOrgId = "org-1";
+	h.cloudBaseUrl = "https://cloud-a.example.test";
+	h.cloudUserId = "user-1";
 	vi.unstubAllGlobals();
 	h.agentValues.length = 0;
 	window.localStorage.removeItem("ao.taskComposer.preferences.v1");
@@ -1154,6 +1197,95 @@ describe("TaskComposer", () => {
 		expect(await screen.findByRole("alert")).toHaveTextContent("File attachments are not supported for cloud tasks yet.");
 		expect(onCreated).not.toHaveBeenCalled();
 		expect(h.post).not.toHaveBeenCalled();
+		expect(h.capture).toHaveBeenCalledWith("ao.tasks.create_failed", { project_id: "cloud-1" });
+	});
+
+	it("starts a cloud task in the default session mode, as a local task does", async () => {
+		h.cloudProjects.push({ id: "cloud-1", displayName: "Cloud", repositoryUrl: "https://example.com/repo", defaultBranch: "main", config: { worker: { agent: "claude-code" } } });
+		h.get.mockImplementation(async (path: string) => path === "/api/v1/settings"
+			? { data: { defaultSessionMode: "chat", chatHarnesses: ["claude-code"] } }
+			: { data: { agent: "claude-code", selectionMode: "catalog", models: [{ id: "claude-sonnet-test", label: "Sonnet", isDefault: true }], allowCustom: true } });
+		h.cloudCreateSession.mockResolvedValue({ session: { id: "session-1" } });
+		render(<Wrap><TaskComposer projectId="cloud-1" onCreated={vi.fn()} /></Wrap>);
+		await waitForTaskReady();
+		fireEvent.change(task(), { target: { value: "Do the work" } });
+		fireEvent.click(startTask());
+		await waitFor(() => expect(h.cloudCreateSession).toHaveBeenCalledWith("org-1", expect.objectContaining({ interfaceMode: "chat" }), { idempotencyKey: expect.any(String) }));
+	});
+
+	it("starts a Cloud standalone agent as the one session of a project of its own", async () => {
+		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		queryClient.setQueryData(providerConnectionsQueryKey, [
+			{ id: "claude-connection", provider: "claude-code", label: "default", validationState: "valid", updatedAt: "2026-10-24T00:00:00Z", config: {} },
+		]);
+		h.get.mockImplementation(async (path: string) => path === "/api/v1/settings"
+			? { data: { defaultSessionMode: "chat", chatHarnesses: ["claude-code"] } }
+			: { data: { agent: "claude-code", selectionMode: "catalog", models: [{ id: "claude-sonnet-test", label: "Sonnet", isDefault: true }], allowCustom: true } });
+		const project = { id: "agent-1", displayName: "Do the work", standaloneAgent: true };
+		h.cloudCreateStandaloneAgent.mockResolvedValue({ project, session: { id: "session-1" } });
+		const onCreated = vi.fn();
+		render(<Wrap queryClient={queryClient}><TaskComposer projectId={CLOUD_STANDALONE_WORKSPACE_ID} onCreated={onCreated} /></Wrap>);
+		await waitForTaskReady();
+		fireEvent.change(task(), { target: { value: "Do the work" } });
+		fireEvent.click(startTask());
+
+		await waitFor(() => expect(h.cloudCreateStandaloneAgent).toHaveBeenCalledWith(
+			"org-1",
+			expect.objectContaining({ harness: "claude-code", prompt: "Do the work", displayName: "Do the work", interfaceMode: "chat" }),
+			{ idempotencyKey: expect.any(String) },
+		));
+		const body = h.cloudCreateStandaloneAgent.mock.calls[0][1];
+		expect(body).not.toHaveProperty("projectId");
+		expect(body).not.toHaveProperty("kind");
+		expect(h.cloudCreateSession).not.toHaveBeenCalled();
+		expect(h.post).not.toHaveBeenCalled();
+		expect(h.seedCreatedStandaloneAgent).toHaveBeenCalledWith(expect.anything(), h.cloudBaseUrl, "org-1", project);
+		expect(standaloneAgentProjectId("session-1")).toBe("agent-1");
+		await waitFor(() => expect(onCreated).toHaveBeenCalledWith("session-1"));
+	});
+
+	it("starts a cloud task in the terminal when the control plane has no Chat for its agent, as local does", async () => {
+		h.cloudChatHarnesses = [];
+		h.cloudProjects.push({ id: "cloud-1", displayName: "Cloud", repositoryUrl: "https://example.com/repo", defaultBranch: "main", config: { worker: { agent: "claude-code" } } });
+		h.get.mockImplementation(async (path: string) => path === "/api/v1/settings"
+			? { data: { defaultSessionMode: "chat", chatHarnesses: ["claude-code"] } }
+			: { data: { agent: "claude-code", selectionMode: "catalog", models: [{ id: "claude-sonnet-test", label: "Sonnet", isDefault: true }], allowCustom: true } });
+		h.cloudCreateSession.mockResolvedValue({ session: { id: "session-1" } });
+		render(<Wrap><TaskComposer projectId="cloud-1" onCreated={vi.fn()} /></Wrap>);
+		await waitForTaskReady();
+		fireEvent.change(task(), { target: { value: "Do the work" } });
+		fireEvent.click(startTask());
+		await waitFor(() => expect(h.cloudCreateSession).toHaveBeenCalledWith("org-1", expect.objectContaining({ interfaceMode: "tui" }), { idempotencyKey: expect.any(String) }));
+	});
+
+	it("offers to create a refused cloud Chat task in the terminal, as local does", async () => {
+		h.cloudProjects.push({ id: "cloud-1", displayName: "Cloud", repositoryUrl: "https://example.com/repo", defaultBranch: "main", config: { worker: { agent: "claude-code" } } });
+		h.get.mockImplementation(async (path: string) => path === "/api/v1/settings"
+			? { data: { defaultSessionMode: "chat", chatHarnesses: ["claude-code"] } }
+			: { data: { agent: "claude-code", selectionMode: "catalog", models: [{ id: "claude-sonnet-test", label: "Sonnet", isDefault: true }], allowCustom: true } });
+		h.cloudCreateSession.mockRejectedValueOnce(new CloudCpError("claude-code can't run in Chat in AO Cloud. Start it in the terminal.", { status: 409, code: "SESSION_MODE_UNSUPPORTED" }));
+		h.cloudCreateSession.mockResolvedValueOnce({ session: { id: "session-1" } });
+		render(<Wrap><TaskComposer projectId="cloud-1" onCreated={vi.fn()} /></Wrap>);
+		await waitForTaskReady();
+		fireEvent.change(task(), { target: { value: "Do the work" } });
+		fireEvent.click(startTask());
+		fireEvent.click(await screen.findByRole("button", { name: "Create as Terminal UI" }));
+		await waitFor(() => expect(h.cloudCreateSession).toHaveBeenLastCalledWith("org-1", expect.objectContaining({ interfaceMode: "tui" }), { idempotencyKey: expect.any(String) }));
+	});
+
+	// An older control plane lists this device's models, whose first one the cloud VM may not run.
+	it("leaves an unreported cloud default model to the cloud VM", async () => {
+		const queryClient = cloudFixture("codex");
+		h.get.mockImplementation(async () => ({ data: { agent: "codex", selectionMode: "catalog", models: [
+			{ id: "gpt-local-only", label: "Local only" },
+			{ id: "gpt-other", label: "Other" },
+		], allowCustom: true } }));
+		render(<Wrap queryClient={queryClient}><TaskComposer projectId="cloud-1" onCreated={vi.fn()} /></Wrap>);
+		await screen.findByText(/This Cloud server can't list its models/);
+		fireEvent.change(task(), { target: { value: "Do the work" } });
+		fireEvent.click(startTask());
+		await waitFor(() => expect(h.cloudCreateSession).toHaveBeenCalledOnce());
+		expect(h.cloudCreateSession.mock.calls[0][1]).not.toHaveProperty("model");
 	});
 
 	it("defaults cloud effort to medium and sends explicit effort choices", async () => {

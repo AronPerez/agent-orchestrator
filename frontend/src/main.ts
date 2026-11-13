@@ -129,12 +129,15 @@ import { bundledTmuxBinaryPath, stableBundledTmuxBinaryPath } from "./shared/bun
 import {
 	handleCloudDeepLink,
 	getCloudSession,
+	getCloudSessionCached,
 	installCloudIPC,
 	registerCloudProtocol,
 	showCloudSignInFailure,
 } from "./main/cloud-auth";
 import { installCloudLocalAuthIPC } from "./main/cloud-auth-local";
 import { installCloudCpProxy } from "./main/cloud-cp-proxy";
+import { clearFolderImports, isChosenFolder, registerCloudFolderPushIpc, rememberChosenFolder } from "./main/cloud-folder-push";
+import { createControlPlaneUrlResolver } from "./main/cloud-control-plane-url";
 import { DEFAULT_POSTHOG_HOST, DEFAULT_POSTHOG_PROJECT_KEY } from "./shared/posthog-config";
 import { DEFAULT_SENTRY_DSN } from "./shared/sentry-config";
 import { buildTelemetryBootstrap, rendererTelemetryEnabled } from "./shared/telemetry";
@@ -155,6 +158,12 @@ import {
 import { createBrowserProfileStore } from "./main/browser-profile-store";
 import { BrowserHistoryStore } from "./main/browser-history-store";
 import { createBrowserDownloadManager } from "./main/browser-download-manager";
+import { registerAgentLoginIpc } from "./main/agent-login-ipc";
+import { registerChatImageIpc } from "./main/chat-image-ipc";
+import { createArtifactSnapshotStore, registerArtifactSnapshotIpc, registerArtifactSnapshotProtocol } from "./main/artifact-snapshots";
+import { ARTIFACT_SNAPSHOT_SCHEME } from "./shared/artifact-snapshot";
+import { createArtifactSnapshotRenderer } from "./main/artifact-snapshot-window";
+import { pruneCloudArtifactFolders, registerCloudArtifactIpc } from "./main/cloud-artifact-ipc";
 import { BrowserProfileImportService } from "./main/browser-profile-import";
 import {
 	registerBrowserProfileIpc,
@@ -182,6 +191,7 @@ import { buildLinuxAppMenuTemplate, buildMacAppMenuTemplate, buildWindowsAppMenu
 import { ancestorRepositorySetupWarning, resolveCheckedOutBranch, scanImportFolder } from "./main/import-folder-scan";
 import { parseOpenFolderPathArg } from "./main/open-folder-arg";
 import { registerRemotesIpc, remotesFilePath } from "./main/remotes-main";
+import { sealSavedPasswords, setPasswordCipher } from "./main/remotes-store";
 import { createLocalHostIdentity } from "./main/remote-request";
 import { RemoteRegistry } from "./main/remote-registry";
 import { startRemoteProxy } from "./main/remote-proxy";
@@ -476,6 +486,9 @@ protocol.registerSchemesAsPrivileged([
 		scheme: RENDERER_SCHEME,
 		privileges: { standard: true, secure: true, supportFetchAPI: true, codeCache: true },
 	},
+	// Cached artifact previews, loaded by the cards' <img>s (main/artifact-snapshots.ts). Secure, so
+	// the app:// renderer may show them.
+	{ scheme: ARTIFACT_SNAPSHOT_SCHEME, privileges: { standard: true, secure: true } },
 ]);
 
 // Register ao-app:// as the deep-link protocol for WorkOS auth callbacks.
@@ -523,11 +536,14 @@ function annotatePreloadPath(): string {
 	return path.join(__dirname, "annotate-preload.js");
 }
 
-// Runtime window/taskbar icon for Linux and Windows. macOS ignores this and
-// uses the .app bundle's .icns instead. Packaged: shipped via extraResource to
-// resources/icon.png.
-// Unpackaged runs return undefined so the dev window keeps Electron's default
-// icon and never impersonates the installed app's taskbar/dock icon (#3642).
+function privacyGuidePreloadPath(): string {
+	return path.join(__dirname, "privacy-guide-preload.js");
+}
+
+// Runtime window/taskbar icon for Linux and Windows, and the unpackaged macOS
+// dock icon. Packaged: shipped via extraResource to resources/icon.png. Unpackaged runs use
+// the orange "DEV" variant so they are recognisable and never impersonate the
+// installed app's taskbar/dock icon (#3642).
 function windowIconPath(): string | undefined {
 	if (!app.isPackaged) return undefined;
 	const iconFile = process.platform === "win32" ? "icon.ico" : "icon.png";
@@ -537,11 +553,19 @@ function windowIconPath(): string | undefined {
 	return existsSync(fallback) ? fallback : undefined;
 }
 
+// Electron 44 removed clipboard.writeImage in favour of the W3C-style
+// ClipboardItem API; the browser host and chat images share this adapter.
+function writeClipboardImage(image: Electron.NativeImage): Promise<void> {
+	return clipboard.write([
+		new ClipboardItem({ "image/png": new Blob([new Uint8Array(image.toPNG())], { type: "image/png" }) }),
+	]);
+}
+
+// Unpackaged runs only: the Dock shows the DEV icon. A packaged app keeps its
+// bundle icon, which macOS 26+ renders as Liquid Glass from Assets.car and
+// adapts to light, dark, tinted and clear; a runtime PNG would flatten it.
 function applyRuntimeAppIcon(): void {
-	if (process.platform !== "darwin") return;
-	// Unpackaged runs keep Electron's default dock icon so the dev window is
-	// visually distinct from the installed app (#3642).
-	if (!app.isPackaged) return;
+	if (process.platform !== "darwin" || app.isPackaged) return;
 	const iconPath = windowIconPath();
 	if (!iconPath) return;
 	const icon = nativeImage.createFromPath(iconPath);
@@ -1066,6 +1090,10 @@ async function createWindowInternal(): Promise<void> {
 	shellWebContents.on("render-process-gone", () => trayLifecycle.clear());
 
 	mainWindow.on("closed", () => {
+		// The snapshot window is a BaseWindow too: left open it would count as the app's last window,
+		// and the requests still queued must not open another one.
+		artifactSnapshotStore.cancel();
+		artifactSnapshotRenderer.close();
 		chatDraftRisks = [];
 		chatDraftDialog = undefined;
 		chatDraftQuitConfirmed = false;
@@ -1226,10 +1254,10 @@ function telemetryOverrides(): Record<string, string> {
 		AO_TELEMETRY_POSTHOG_KEY: process.env.AO_TELEMETRY_POSTHOG_KEY ?? DEFAULT_POSTHOG_PROJECT_KEY,
 		AO_TELEMETRY_POSTHOG_HOST: process.env.AO_TELEMETRY_POSTHOG_HOST ?? DEFAULT_POSTHOG_HOST,
 		// Daemon-side Sentry (5xx + panics with Go stacks). Stamped on the daemon
-		// env so the spawned daemon inherits the DSN; off in dev to match the
-		// PostHog remote gate, and an explicit env always wins. A blank value
-		// leaves the daemon's Sentry a no-op.
-		AO_SENTRY_DSN: process.env.AO_SENTRY_DSN ?? (isDev ? "" : DEFAULT_SENTRY_DSN),
+		// env so the spawned daemon inherits the DSN; off in dev and in any copy
+		// that is not a published stable or nightly build, and an explicit env
+		// always wins. A blank value leaves the daemon's Sentry a no-op.
+		AO_SENTRY_DSN: daemonSentryDsn(process.env.AO_SENTRY_DSN, process.env.AO_TELEMETRY_APP_VERSION ?? app.getVersion(), isDev),
 		// The daemon binary has no version of its own that release tooling sets,
 		// so without this every daemon event lands unattributable to a release.
 		AO_TELEMETRY_APP_VERSION: process.env.AO_TELEMETRY_APP_VERSION ?? app.getVersion(),
@@ -2516,7 +2544,10 @@ async function chooseDirectory(title: string, defaultPath?: string): Promise<str
 	const result = await dialog.showOpenDialog(options);
 
 	if (result.canceled) return null;
-	return result.filePaths[0] ?? null;
+	const chosen = result.filePaths[0] ?? null;
+	// A cloud workspace may upload only a folder picked here.
+	if (chosen) rememberChosenFolder(chosen);
+	return chosen;
 }
 
 const remoteRegistry = new RemoteRegistry(async (entry) => {
@@ -2532,6 +2563,13 @@ const remoteRegistry = new RemoteRegistry(async (entry) => {
 		return host.execute(command.sessionId, command.action, command.args, signal);
 	}, (connected) => publishBrowserRuntimeState(connected, entry.hostId), (state) => getShellWebContents()?.send("browser:runtimeState", { ...state, hostId: entry.hostId }));
 });
+setPasswordCipher(() => protectedStorageAvailable() ? {
+	encrypt: (text) => safeStorage.encryptString(text).toString("base64"),
+	decrypt: (sealed) => safeStorage.decryptString(Buffer.from(sealed, "base64")),
+} : null);
+void app.whenReady().then(() => sealSavedPasswords(remotesFilePath())).catch((error: unknown) => {
+	console.warn("[remotes] could not encrypt saved host passwords", error);
+});
 registerRemotesIpc(ipcMain, {
 	file: remotesFilePath(),
 	registry: remoteRegistry,
@@ -2539,6 +2577,14 @@ registerRemotesIpc(ipcMain, {
 		if (!await getCloudSession(cloudDataDir())) throw new Error("Sign in to AO Cloud to sync account hosts.");
 	},
 	getAccountId: async () => (await getCloudSession(cloudDataDir()))?.user.id ?? "",
+	cloudRequest: async (method, path, { body, signal } = {}) => {
+		const baseUrl = await cloudControlPlaneUrl();
+		if (!baseUrl) throw new ExpectedIpcError("No Orchestrator Cloud control plane is configured.");
+		return cloudCpProxy.request({
+			baseUrl, path, method,
+			...(body === undefined ? {} : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
+		}, { hostTokens: true, signal });
+	},
 	localIdentity: createLocalHostIdentity(() => daemonStatus.state === "ready" && daemonStatus.port
 		? { port: daemonStatus.port, pid: daemonStatus.pid, generation: daemonAttachmentGeneration }
 		: null),
@@ -2668,6 +2714,68 @@ ipcMain.handle("clipboard:writeText", (_event, text: string) => {
 	}
 });
 ipcMain.handle("clipboard:readText", () => clipboard.readText());
+registerChatImageIpc({
+	ipcMain,
+	clipboard: { writeImage: writeClipboardImage },
+	createImage: (bytes) => nativeImage.createFromBuffer(bytes),
+	dialog,
+	downloadsDirectory: () => app.getPath("downloads"),
+	appName: app.getName(),
+});
+const artifactSnapshotRenderer = createArtifactSnapshotRenderer({
+	BrowserWindow,
+	preload: preloadPath(),
+	pageUrl: () => new URL("artifact-snapshot.html", rendererUrl()).href,
+	// Never open the hidden window without the shell: the app stays alive on macOS after the shell closes.
+	shellOpen: () => {
+		const contents = getShellWebContents();
+		return contents !== null && !contents.isDestroyed();
+	},
+});
+const artifactSnapshotStore = createArtifactSnapshotStore({
+	directory: path.join(desktopDataDir, "artifact-previews"),
+	render: artifactSnapshotRenderer.render,
+});
+registerArtifactSnapshotIpc({ ipcMain, store: artifactSnapshotStore });
+registerCloudArtifactIpc({
+	ipcMain,
+	openInBrowser: (target) => openFileInDefaultBrowser(target),
+	openInFileManager: async (target, isFile) => {
+		if (isFile) shell.showItemInFolder(target);
+		else {
+			const error = await shell.openPath(target);
+			if (error) throw new Error(error);
+		}
+	},
+});
+// Copies made for "Show in" pile up under ~/.ao/cloud-artifacts; drop stale ones.
+void pruneCloudArtifactFolders().catch((error) => console.warn("AO: unable to prune old cloud artifact copies", error));
+
+// Share links: publishing reads the file and holds the token here, in the main
+// process; the renderer asks for it when the person presses Publish.
+const shareSnapshotDir = path.join(desktopDataDir, "tmp", "share-uploads");
+void clearShareSnapshots(shareSnapshotDir).catch(() => undefined);
+registerCloudShareIpc({
+	ipcMain,
+	daemonDataDir: resolvedDaemonDataDir,
+	snapshotDir: () => shareSnapshotDir,
+	getToken: () => getCloudAccessToken(cloudDataDir()),
+	fetch: (url, init) => net.fetch(url, init),
+	records: new ShareLinkRecords(path.join(desktopDataDir, "share-links.json")),
+});
+// Session and project share links this device made, so Copy link works again
+// later; only the signed-in account's, which the file names.
+const sessionShareUrls = new SessionShareUrls(path.join(desktopDataDir, "session-share-links.bin"), {
+	available: protectedStorageAvailable,
+	encrypt: (text) => safeStorage.encryptString(text),
+	decrypt: (value) => safeStorage.decryptString(value),
+}, async () => (await readAuthStore(cloudDataDir())).session?.user.id);
+registerSessionShareUrlsIpc(ipcMain, sessionShareUrls);
+registerAgentLoginIpc({
+	ipcMain,
+	daemonPort: () => (daemonStatus.state === "ready" ? daemonStatus.port : undefined),
+	trustedSender: (sender) => sender === getShellWebContents(),
+});
 
 // A file dropped onto the terminal is delivered as raw bytes (its original path
 // is unavailable to the sandboxed renderer on macOS — see webUtils.getPathForFile
@@ -2958,14 +3066,71 @@ function cloudDataDir(): string {
 		: path.join(os.homedir(), ".ao");
 }
 
-function notifyRenderersOfCloudSession(account: import("./shared/cloud-account").CloudAccount | null): void {
+// The control plane the daemon is configured for, the only server the AO
+// Cloud token is sent to (the renderer reads the same value from the daemon).
+const cloudControlPlaneUrl = createControlPlaneUrlResolver(() =>
+	daemonStatus.state === "ready" && daemonStatus.port
+		? { baseUrl: `http://127.0.0.1:${daemonStatus.port}`, key: `${daemonStatus.port}:${daemonStatus.pid ?? ""}` }
+		: null);
+
+// Cloud sessions' agent browsers, served to the Browser panel's agent tabs.
+const cloudAgentProxy = createCloudAgentProxy(cloudDataDir, cloudControlPlaneUrl);
+
+// A sign-in completed through the website's return page also hands over that
+// visit's id (see CloudSignInContext). It waits here until the renderer takes
+// it, once: on the notification below, or when it mounts. A sign-in link that
+// starts the app arrives before any window listens (macOS sends open-url
+// before ready, and elsewhere the window may still be loading), and a context
+// sent then would be lost. A sign-out drops it.
+const pendingCloudSignIn = createPendingCloudSignIn();
+
+ipcMain.handle("cloud:takePendingSignIn", () => pendingCloudSignIn.take());
+
+// The account this run last told the renderer about, to notice another one signing in.
+let notifiedCloudUserId: string | undefined;
+
+function bindArtifactSnapshotsToCloudAccount(userId: string | null): void {
+	artifactSnapshotStore.bindCloudAccount(userId).catch((error) => {
+		// The old files stay on record as another account's, so the next sign-in, or the next launch, tries again.
+		console.warn("AO: could not delete the cached Cloud artifact previews", error);
+	});
+}
+
+function notifyRenderersOfCloudSession(
+	account: import("./shared/cloud-account").CloudAccount | null,
+	signIn?: import("./shared/cloud-account").CloudSignInContext,
+): void {
 	void remoteRegistry.disconnectOtherAccounts(account?.user.id ?? "");
+	pendingCloudSignIn.note(account, signIn);
+	// Share URLs belong to the account that made them: they go when it signs
+	// out or someone else signs in. The first notice of a run has no account
+	// to compare with; the store itself never shows another account's (its
+	// file names the owner), so one who signed in since the last run never sees them.
+	if (!account || (notifiedCloudUserId !== undefined && account.user.id !== notifiedCloudUserId)) {
+		void sessionShareUrls.clear().catch(() => undefined);
+	}
+	notifiedCloudUserId = account?.user.id;
+	// The Cloud artifact previews on disk belong to one account: another one signing in, or this one
+	// being lost (a sign-out, or a refresh that failed for good), clears them.
+	bindArtifactSnapshotsToCloudAccount(account?.user.id ?? null);
+	if (!account) {
+		void cloudAgentProxy.close();
+	}
 	const contents = getShellWebContents();
 	if (!contents || contents.isDestroyed()) return;
 	contents.send("cloud:sessionChanged", account);
 }
 
-installCloudIPC(cloudDataDir, notifyRenderersOfCloudSession);
+// Telemetry's Cloud binding is retired as part of sign-out itself, not only when
+// the renderer later hands the sign-out to the daemon: the app can quit first,
+// and a CLI-started daemon would then restore the departed account.
+installCloudIPC(cloudDataDir, notifyRenderersOfCloudSession, async () => {
+	// Cloud artifact previews cached on disk go with the account, before the app can quit.
+	await artifactSnapshotStore.clearCloud().catch((error) => {
+		console.warn("AO: could not delete the cached Cloud artifact previews", error);
+	});
+	await telemetryIdentity.signOut();
+});
 
 // Dev-only local (email/password) sign-in against a loopback Docker control
 // plane running AO_CLOUD_LOCAL_AUTH. Gated to unpackaged/dev builds + loopback
@@ -2974,7 +3139,30 @@ installCloudLocalAuthIPC(cloudDataDir, notifyRenderersOfCloudSession);
 
 // Cloud control-plane proxy IPC — cloudCp:request/openStream/closeStream.
 // CP calls go through main so the WorkOS bearer token never reaches a renderer.
-installCloudCpProxy(cloudDataDir);
+const cloudCpProxy = installCloudCpProxy(cloudDataDir, cloudControlPlaneUrl);
+
+// A local folder added to a cloud workspace is uploaded from here, into the
+// empty repository the control plane made for it, so the token stays in main.
+const folderImportDir = path.join(desktopDataDir, "tmp", "folder-imports");
+void clearFolderImports(folderImportDir).catch(() => undefined);
+registerCloudFolderPushIpc(ipcMain, {
+	controlPlaneUrl: cloudControlPlaneUrl,
+	getToken: () => getCloudAccessToken(cloudDataDir()),
+	tmpRoot: () => folderImportDir,
+	env: () => daemonEnv(),
+	homeDir: os.homedir(),
+	// The data directory this app resolved (AO_DATA_DIR) and its Electron
+	// profile: no folder inside or holding either is uploaded.
+	appStateDirs: () => [desktopDataDir, app.getPath("userData")],
+	ready: ensureShellEnv,
+	trustedSender: (sender) => {
+		const contents = sender as WebContents;
+		return trustedShellWebContents.get(contents?.id) === contents;
+	},
+	chosenFolder: isChosenFolder,
+});
+ipcMain.handle("cloudCp:agentBrowserUrl", (_event, baseUrl: unknown, orgId: unknown, sessionId: unknown) =>
+	cloudAgentProxy.agentBrowserUrl(baseUrl, orgId, sessionId));
 
 function focusCloudWindow(): void {
 	const window = BaseWindow.getAllWindows()[0];
@@ -3118,12 +3306,9 @@ async function writeAppStateOnLaunch(): Promise<void> {
 }
 
 app.whenReady().then(async () => {
-	if (app.isPackaged) {
-		const { checkDesktopVersionFloor } = await import("./main/desktop-version-floor");
-		await checkDesktopVersionFloor().catch((err) =>
-			console.warn("desktop version floor check failed:", err),
-		);
-	}
+	applyUserAgentFallback(app);
+	powerMonitor.on("suspend", () => recordUpdateDiagnostic("power-suspend"));
+	powerMonitor.on("resume", () => recordUpdateDiagnostic("power-resume"));
 	void refreshGitHubOwners();
 	const visibilityKillSwitched = (process.env.AO_TELEMETRY_DISABLED_EVENTS ?? "").split(",").some((name) => name.trim() === "ao.agent_switch.visibility_failure");
 	// The approved release gate is intentionally closed. Tests inject the
@@ -3248,6 +3433,13 @@ app.whenReady().then(async () => {
 	}
 
 	registerRendererProtocol();
+	registerArtifactSnapshotProtocol({ protocol, store: artifactSnapshotStore });
+	// Which account owns the cached Cloud previews from the last run, so a different or lost one clears them
+	// even if the app quit before it could.
+	void getCloudSessionCached(cloudDataDir()).then(
+		(account) => bindArtifactSnapshotsToCloudAccount(account?.user.id ?? null),
+		() => bindArtifactSnapshotsToCloudAccount(null),
+	);
 	applyRuntimeAppIcon();
 	const initialUiSettings = keybindingRunFile
 		? await readUiSettings(path.dirname(keybindingRunFile))
@@ -3268,7 +3460,20 @@ app.whenReady().then(async () => {
 	}
 	await createWindow();
 	if (browserQuitRequested) return;
-	void startDaemon();
+	// Not awaited: launch must not wait on this network fetch (up to 10 s). It
+	// runs once the window exists so its dialogs attach to it.
+	if (app.isPackaged) {
+		void import("./main/desktop-version-floor")
+			.then(({ checkDesktopVersionFloor }) => checkDesktopVersionFloor({
+					parent: () => mainWindow,
+					quit: () => {
+						preserveAgentsOnQuit = true;
+						desktopQuit.quitCompletely();
+					},
+				}))
+			.catch((err) => console.warn("desktop version floor check failed:", err));
+	}
+	if (!daemonStartsWithWindow) void startDaemon();
 	initAutoUpdates();
 
 	// Windows/Linux: on first launch, the deep-link URL may arrive as a

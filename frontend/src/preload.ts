@@ -44,8 +44,21 @@ import {
 } from "./shared/telemetry-policy";
 import type { MigrationState } from "./main/app-state";
 import type { UpdateSettings, UpdateStatus, UpdateInstallResult } from "./main/update-settings";
-import type { CloudAccount } from "./shared/cloud-account";
+import type { CloudAccount, CloudPendingSignIn } from "./shared/cloud-account";
+import {
+	CLOUD_SHARE_PROGRESS_CHANNEL,
+	type CloudShareAccess,
+	type CloudShareFile,
+	type CloudShareGrant,
+	type CloudShareInspection,
+	type CloudShareLink,
+	type CloudShareLinks,
+	type CloudShareProgress,
+	type CloudSharePublishResult,
+} from "./shared/cloud-share";
 import type { LocalLoginInput, LocalRegisterInput } from "./main/cloud-auth-local";
+import type { PushFolderInput, PushFolderPreview, PushFolderResult } from "./main/cloud-folder-push";
+export type { PushFolderInput, PushFolderPreview, PushFolderResult };
 import type {
 	CloudCpProxyRequestInit,
 	CloudCpProxyResponse,
@@ -357,6 +370,67 @@ const api = {
 	clipboard: {
 		writeText: (text: string) => ipcRenderer.invoke("clipboard:writeText", text) as Promise<void>,
 		readText: () => ipcRenderer.invoke("clipboard:readText") as Promise<string>,
+		writeImage: (bytes: Uint8Array) => ipcRenderer.invoke("clipboard:writeImage", bytes) as Promise<void>,
+	},
+	chatImage: {
+		fetch: (url: string) => ipcRenderer.invoke("chatImage:fetch", url) as Promise<{ bytes: Uint8Array; mimeType: string }>,
+		save: (input: { name: string; bytes: Uint8Array }) => ipcRenderer.invoke("chatImage:save", input) as Promise<boolean>,
+	},
+	// Cached artifact preview images, rendered once in a hidden window (main/artifact-snapshots.ts).
+	// Cards load them from the snapshot scheme; this only asks for a missing one.
+	artifactSnapshot: {
+		/** Renders a missing preview; true once it is cached. */
+		request: (job: unknown) => ipcRenderer.invoke("artifactSnapshot:request", job) as Promise<boolean>,
+	},
+	// Session and project share links this device made (main/session-share-urls.ts).
+	sessionShareUrls: {
+		remember: (baseUrl: string, linkId: string, url: string) =>
+			ipcRenderer.invoke("sessionShareUrls:remember", { baseUrl, linkId, url }) as Promise<void>,
+		recall: (baseUrl: string, linkIds: readonly string[]) =>
+			ipcRenderer.invoke("sessionShareUrls:recall", { baseUrl, linkIds }) as Promise<Record<string, string>>,
+		forget: (baseUrl: string, linkIds: readonly string[]) =>
+			ipcRenderer.invoke("sessionShareUrls:forget", { baseUrl, linkIds }) as Promise<void>,
+	},
+	// Share links, published from the share popover's Publish button.
+	// The main process reads and uploads the file; the renderer never sees
+	// the file or the token. See shared/cloud-share.ts.
+	cloudShare: {
+		inspect: (file: CloudShareFile) => ipcRenderer.invoke("cloudShare:inspect", file) as Promise<CloudShareInspection>,
+		available: (baseUrl: string) => ipcRenderer.invoke("cloudShare:available", { baseUrl }) as Promise<boolean | null>,
+		list: (baseUrl: string) => ipcRenderer.invoke("cloudShare:list", { baseUrl }) as Promise<CloudShareLinks>,
+		publish: (file: CloudShareFile) => ipcRenderer.invoke("cloudShare:publish", file) as Promise<CloudSharePublishResult>,
+		cancel: () => ipcRenderer.invoke("cloudShare:cancel") as Promise<void>,
+		unpublish: (baseUrl: string, shareId: string) => ipcRenderer.invoke("cloudShare:unpublish", { baseUrl, shareId }) as Promise<void>,
+		setAccess: (baseUrl: string, shareId: string, access: CloudShareAccess) =>
+			ipcRenderer.invoke("cloudShare:setAccess", { baseUrl, shareId, access }) as Promise<CloudShareLink>,
+		grants: (baseUrl: string, shareId: string) => ipcRenderer.invoke("cloudShare:grants", { baseUrl, shareId }) as Promise<CloudShareGrant[]>,
+		invite: (baseUrl: string, shareId: string, emails: string[]) =>
+			ipcRenderer.invoke("cloudShare:invite", { baseUrl, shareId, emails }) as Promise<CloudShareGrant[]>,
+		removeGrant: (baseUrl: string, shareId: string, grantId: string) =>
+			ipcRenderer.invoke("cloudShare:removeGrant", { baseUrl, shareId, grantId }) as Promise<void>,
+		onProgress: (listener: (progress: CloudShareProgress) => void) => {
+			const wrapped = (_event: Electron.IpcRendererEvent, progress: CloudShareProgress) => listener(progress);
+			ipcRenderer.on(CLOUD_SHARE_PROGRESS_CHANNEL, wrapped);
+			return () => {
+				ipcRenderer.off(CLOUD_SHARE_PROGRESS_CHANNEL, wrapped);
+			};
+		},
+	},
+	cloudArtifact: {
+		fetch: (url: string) => ipcRenderer.invoke("cloudArtifact:fetch", url) as Promise<Uint8Array>,
+		/**
+		 * Copies the given artifacts of a cloud session to its folder under ~/.ao, replacing an earlier copy, and opens it,
+		 * or shows `reveal` in it; with `open: "browser"`, opens the copied `reveal` file in the default browser instead.
+		 */
+		openFolder: (input: { sessionId: string; files: Array<{ path: string; url: string }>; reveal?: string; open?: "browser" }) =>
+			ipcRenderer.invoke("cloudArtifact:openFolder", input) as Promise<void>,
+		onFrameNavigated: (listener: (navigation: { url: string; status: number }) => void) => {
+			const wrapped = (_event: Electron.IpcRendererEvent, navigation: { url: string; status: number }) => listener(navigation);
+			ipcRenderer.on("cloudArtifact:frameNavigated", wrapped);
+			return () => {
+				ipcRenderer.off("cloudArtifact:frameNavigated", wrapped);
+			};
+		},
 	},
 	daemon: {
 		getStatus: () => ipcRenderer.invoke("daemon:getStatus") as Promise<DaemonStatus>,
@@ -699,15 +773,15 @@ const api = {
 		list: () => ipcRenderer.invoke("featureBuilds:list") as Promise<FeatureBuild[]>,
 		getActive: () => ipcRenderer.invoke("featureBuilds:getActive") as Promise<{ pr: number } | null>,
 	},
-	// Saved AO daemons, shared with the CLI's ~/.ao/remotes.json. Everything the
-	// renderer receives back is password-free (see main/remotes-ipc.ts); the
-	// plaintext password only travels renderer -> main on add or credential edit.
+	// Saved AO daemons in ~/.ao/remotes.json. Everything the renderer receives
+	// back is password-free (see main/remotes-ipc.ts); a password only travels
+	// renderer -> main on add or credential edit. Account host tokens stay in main.
 	remotes: {
 		list: () => ipcRenderer.invoke("remotes:list") as Promise<RemoteHostView[]>,
-		importAccountHost: (accountId: string, input: { hostId: string; label: string; url: string; password: string }) =>
-			ipcRenderer.invoke("remotes:importAccountHost", accountId, input) as Promise<void>,
-		pruneAccountHosts: (accountId: string, hostIds: string[]) => ipcRenderer.invoke("remotes:pruneAccountHosts", accountId, hostIds) as Promise<void>,
-		issueAccountToken: (url: string) => ipcRenderer.invoke("remotes:issueAccountToken", url) as Promise<string>,
+		// Saves the account's machines from AO Cloud and forgets the ones it no longer lists.
+		syncAccountHosts: (accountId: string) => ipcRenderer.invoke("remotes:syncAccountHosts", accountId) as Promise<void>,
+		// Lists a paired host under the signed-in account.
+		linkAccountHost: (url: string) => ipcRenderer.invoke("remotes:linkAccountHost", url) as Promise<void>,
 		add: (input: { label: string; url: string; password: string }) =>
 			ipcRenderer.invoke("remotes:add", input) as Promise<RemoteHealth>,
 		// An edit carries only what changed: an omitted password keeps the saved
@@ -750,6 +824,27 @@ const api = {
 				ipcRenderer.off("cloud:sessionChanged", wrapped);
 			};
 		},
+		// A shared session's link opened while the app runs (ao-app://share/...).
+		onOpenShareLink: (listener: (url: string) => void) => {
+			const wrapped = (_event: Electron.IpcRendererEvent, url: string) => listener(url);
+			ipcRenderer.on("cloud:openShareLink", wrapped);
+			return () => {
+				ipcRenderer.off("cloud:openShareLink", wrapped);
+			};
+		},
+		// One that arrived before the window was ready, taken once.
+		takePendingShareLink: () => ipcRenderer.invoke("cloud:takePendingShareLink") as Promise<string | null>,
+		// Uploads a local folder into the empty repository AO Cloud made for it
+		// (main/cloud-folder-push.ts); the token stays in main.
+		pushFolderToRepository: (input: PushFolderInput) =>
+			ipcRenderer.invoke("cloud:pushFolderToRepository", input) as Promise<PushFolderResult>,
+		// What uploading a picked folder would do, before anything is uploaded:
+		// the secret-looking files it leaves out, or why it cannot go.
+		previewFolderUpload: (input: { folder: string }) =>
+			ipcRenderer.invoke("cloud:previewFolderUpload", input) as Promise<PushFolderPreview>,
+		// The context a sign-in that just completed added (CloudSignInContext),
+		// with its account, taken once; null when there is none.
+		takePendingSignIn: () => ipcRenderer.invoke("cloud:takePendingSignIn") as Promise<CloudPendingSignIn | null>,
 	},
 	// Cloud control-plane transport. The CP has no CORS and the WorkOS bearer
 	// token lives only in the main process, so every CP call is proxied through

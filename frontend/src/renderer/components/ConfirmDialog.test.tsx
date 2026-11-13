@@ -2,6 +2,17 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { expect, test, vi } from "vitest";
 import { ConfirmDialog } from "./ConfirmDialog";
 
+test("can disable confirmation without preventing cancellation", () => {
+	const onConfirm = vi.fn();
+	const onOpenChange = vi.fn();
+	render(<ConfirmDialog open title="Choose a method" description="Select the original method." confirmLabel="Update" confirmDisabled onConfirm={onConfirm} onOpenChange={onOpenChange} />);
+	expect(screen.getByRole("button", { name: "Update" })).toBeDisabled();
+	fireEvent.click(screen.getByRole("button", { name: "Update" }));
+	expect(onConfirm).not.toHaveBeenCalled();
+	fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+	expect(onOpenChange).toHaveBeenCalledWith(false);
+});
+
 test("starts on Cancel for destructive confirms and restores focus on close", async () => {
 	const opener = document.createElement("button");
 	document.body.appendChild(opener);
@@ -13,6 +24,15 @@ test("starts on Cancel for destructive confirms and restores focus on close", as
 
 	rerender(<ConfirmDialog {...props} open={false} destructive />);
 	await waitFor(() => expect(opener).toHaveFocus());
+	opener.remove();
+});
+
+test("starts on Cancel while it can't be confirmed yet, so focus never stays behind it", async () => {
+	const opener = document.createElement("button");
+	document.body.appendChild(opener);
+	opener.focus();
+	render(<ConfirmDialog open confirmDisabled title="Make a new link?" description="Sure?" confirmLabel="Make new link" onConfirm={vi.fn()} onOpenChange={vi.fn()} />);
+	await waitFor(() => expect(screen.getByRole("button", { name: "Cancel" })).toHaveFocus());
 	opener.remove();
 });
 
@@ -39,6 +59,6 @@ test("uses the same centered settings-dialog layout as nearby app dialogs", () =
 
 	const dialog = screen.getByRole("dialog", { name: "Kill session?" });
 
-	expect(dialog).toHaveClass("left-[50%]", "top-[50%]", "z-overlay", "bg-popover", "p-0");
+	expect(dialog).toHaveClass("left-[50%]", "top-[50%]", "z-overlay", "bg-overlay", "p-0");
 	expect(screen.getByRole("button", { name: "Confirm kill" }).querySelector("svg")).toBeNull();
 });

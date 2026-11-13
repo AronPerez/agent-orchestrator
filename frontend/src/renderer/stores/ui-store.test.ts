@@ -87,6 +87,17 @@ describe("global settings deep links", () => {
 		useUiStore.getState().closeSettings();
 		expect(useUiStore.getState().settingsModal).toEqual({ scope: "project", projectId: "project-1" });
 	});
+
+	it("drops a pending account sign-in when settings close or project settings open", () => {
+		useUiStore.getState().openGlobalSettings("harness", { focusAgentId: "claude-code", loginAccountId: "acct-b" });
+		expect(useUiStore.getState().accountLogin).toBe("acct-b");
+		useUiStore.getState().closeSettings();
+		expect(useUiStore.getState().accountLogin).toBeNull();
+
+		useUiStore.getState().openGlobalSettings("harness", { focusAgentId: "claude-code", loginAccountId: "acct-b" });
+		useUiStore.getState().openProjectSettings("project-1");
+		expect(useUiStore.getState().accountLogin).toBeNull();
+	});
 });
 
 // A fresh module sees exactly what a booting renderer sees: only storage.
@@ -242,5 +253,41 @@ describe("workspace file open requests", () => {
 
 		useUiStore.getState().clearWorkspaceFileOpenRequest(oldNonce + 1);
 		expect(useUiStore.getState().workspaceFileOpenRequest).toBeNull();
+	});
+});
+
+describe("palette search requests", () => {
+	it("carries a line with a file open request", () => {
+		useUiStore.getState().requestWorkspaceFileOpen("session-1", "src/App.tsx", undefined, undefined, 42);
+		expect(useUiStore.getState().workspaceFileOpenRequest).toMatchObject({ sessionId: "session-1", path: "src/App.tsx", line: 42 });
+	});
+
+	it("records and clears a chat message focus request by nonce", () => {
+		useUiStore.getState().requestChatMessageFocus("session-1", "m1", "the passage");
+		const request = useUiStore.getState().chatMessageFocusRequest;
+		expect(request).toMatchObject({ sessionId: "session-1", messageId: "m1", text: "the passage" });
+		useUiStore.getState().clearChatMessageFocusRequest((request?.nonce ?? 0) + 1);
+		expect(useUiStore.getState().chatMessageFocusRequest).not.toBeNull();
+		useUiStore.getState().clearChatMessageFocusRequest(request!.nonce);
+		expect(useUiStore.getState().chatMessageFocusRequest).toBeNull();
+	});
+});
+
+describe("retired new sidebar design switch", () => {
+	beforeEach(() => {
+		window.localStorage.clear();
+		vi.resetModules();
+	});
+
+	it("boots into the one sidebar design for someone who had switched it off", async () => {
+		window.localStorage.setItem("ao.developerMode", "true");
+		window.localStorage.setItem("ao.newSidebarDesign", "false");
+
+		const state = (await bootStore()).getState();
+
+		expect(state).not.toHaveProperty("newSidebarDesign");
+		expect(state).not.toHaveProperty("setNewSidebarDesign");
+		expect(window.localStorage.getItem("ao.newSidebarDesign")).toBeNull();
+		expect(document.documentElement.hasAttribute("data-legacy-status-colors")).toBe(false);
 	});
 });

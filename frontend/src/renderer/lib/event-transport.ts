@@ -307,6 +307,8 @@ export function createEventTransport(queryClient: QueryClient): EventTransport {
 										conversationId?: unknown;
 										reviewId?: unknown;
 										interfaceTransitionId?: unknown;
+										activity?: unknown;
+										shellTerminalHandleId?: unknown;
 										kind?: unknown;
 										agentId?: unknown;
 										projectId?: unknown;
@@ -363,9 +365,21 @@ export function createEventTransport(queryClient: QueryClient): EventTransport {
 							typeof payload?.interfaceTransitionId !== "string"
 						) {
 							// Async chat startup changes the session's provisionState, but
-							// does not emit a conversationId. Refresh the open conversation
-							// and controls gated on workspace readiness.
-							pendingConversationSessions.add(decoded.sessionId);
+							// does not emit a conversationId, and the controller turning
+							// ready writes nothing of its own: whichever session update
+							// follows is what lets an open chat leave "connecting". Once the
+							// chat is ready or working, an id-only update (usage bookkeeping,
+							// cleanup facts, agent-switch rows) changes nothing in it, and
+							// refetching for each one reloaded its whole page every few seconds.
+							if (!idOnlySessionUpdate || !conversationSettled(queryClient, decoded.sessionId)) {
+								pendingConversationSessions.add(decoded.sessionId);
+							}
+							// Native identity and provisioning changes carry the session-row
+							// activity field. Recheck switch readiness even after its poll
+							// budget expires, without reacting to id-only usage updates.
+							if (typeof payload?.activity === "string") {
+								pendingInterfaceTransitionSessions.add(decoded.sessionId);
+							}
 							pendingEditorHandoffSessions.add(decoded.sessionId);
 							pendingInterfaceTransitionSessions.add(decoded.sessionId);
 						}

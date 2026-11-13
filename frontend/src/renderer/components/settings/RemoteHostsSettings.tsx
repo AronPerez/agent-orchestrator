@@ -5,7 +5,7 @@ import { aoBridge } from "../../lib/bridge";
 import { disconnectHost } from "../../lib/host-clients";
 import { requestRemoteHostsRefresh } from "../../hooks/useRemoteHosts";
 import { useCloudSession } from "../../lib/cloud-session";
-import { deleteAccountRemoteHost, saveAccountRemoteHost } from "../../lib/account-remote-hosts";
+import { deleteAccountRemoteHost } from "../../lib/account-remote-hosts";
 import { useSettings } from "../../hooks/useSettings";
 import { useUiStore } from "../../stores/ui-store";
 import { ConfirmDialog } from "../ConfirmDialog";
@@ -92,10 +92,7 @@ export function RemoteHostsSettings({ titleHidden }: { titleHidden?: boolean }) 
 			if (editing?.hostId) await disconnectHost(editing.hostId);
 			if (editing && !editing.hostId && editing.url !== nextUrl) await aoBridge.remotes.remove(editing.url);
 			const current = (await aoBridge.remotes.list()).find((item) => item.url === nextUrl);
-			if (status === "authenticated" && current?.hostId && cloudBaseUrl) {
-				const token = await aoBridge.remotes.issueAccountToken(current.url);
-				await saveAccountRemoteHost(cloudBaseUrl, { hostId: current.hostId, label: current.label, url: current.url, token });
-			}
+			if (status === "authenticated" && current?.hostId && cloudBaseUrl) await aoBridge.remotes.linkAccountHost(current.url);
 			await load();
 			resetForm();
 			if (!enabled) setEnabled(true);

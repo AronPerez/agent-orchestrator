@@ -1,4 +1,5 @@
-import { Bot, KeyRound, Loader2, MonitorCog, Play, TriangleAlert, Wrench, X, type LucideIcon } from "lucide-react";
+import type { AppIcon } from "./icons";
+import { Bot, FolderGit2, KeyRound, Loader2, MonitorCog, Play, ScrollText, Share2, TriangleAlert, Wrench } from "@/components/app-icons";
 import * as Dialog from "@radix-ui/react-dialog";
 import { createPortal } from "react-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -12,8 +13,13 @@ import { ensureCodexAccounts } from "../hooks/useCodexAccountsQuery";
 import { writeCodexAccounts } from "../hooks/codex-accounts-state";
 import { GlobalSettingsForm } from "./GlobalSettingsForm";
 import { ProjectSettingsForm, type ProjectSettingsSaveState, type ProjectSettingsSection as ProjectFormSection } from "./ProjectSettingsForm";
-import { ProjectScriptsSettings } from "./ProjectScriptsSettings";
-import { ProjectEnvironmentSettings } from "./ProjectEnvironmentSettings";
+import { CloudProjectScriptsSettings, ProjectScriptsSettings } from "./ProjectScriptsSettings";
+import { CloudProjectInstructionsSettings, CloudProjectRepositoriesSettings } from "./CloudProjectLayoutSettings";
+import { CloudProjectSharingSettings } from "./CloudProjectSharingSettings";
+import { cloudProjectSettingsQueryKey } from "./CloudProjectSettingsForm";
+import { useCloudCp } from "../hooks/useCloudCp";
+import { isCloudWorkspaceProject } from "../lib/cloud-project-repos";
+import { CloudProjectEnvironmentSettings, ProjectEnvironmentSettings } from "./ProjectEnvironmentSettings";
 import { useCloudProjectsQuery, workspaceQueryOptions } from "../hooks/useWorkspaceQuery";
 import { CuesSettings } from "./CuesDialog";
 import { motion } from "motion/react";
@@ -26,7 +32,12 @@ import { DialogHeader, settingsDialogBodyClass, settingsDialogHeaderClass, setti
 import { NAV_ROW_HIGHLIGHT_HOST_CLASS, NavRowHighlight } from "./NavRowHighlight";
 import { labelForHost } from "../lib/host-clients";
 import { LOCAL_HOST, refKey } from "../lib/hosts";
-import { globalSettingsItem, visibleGlobalSettings } from "./settings/settingsCatalog";
+import { globalSettingsItem, teamsPageFor, type TeamsPage, visibleGlobalSettings } from "./settings/settingsCatalog";
+import { fetchMobileStatus, mobileStatusQueryKey } from "./settings/ConnectMobileContent";
+import { fetchDevices, mobileDevicesQueryKey } from "./settings/MobileDevicesSection";
+import { fetchPairingCode, mobilePairingCodeQueryKey, PAIRING_CODE_REFRESH_MS } from "../lib/mobile-pairing-code";
+import { findSettingsTarget, highlightSettingsTarget, SETTINGS_FOCUS_HIGHLIGHT_MS } from "../lib/settings-focus";
+import { useEdgeFade } from "../hooks/useEdgeFade";
 
 function initialProjectSaveState(): ProjectSettingsSaveState {
 	return { phase: "idle" };
@@ -73,6 +84,9 @@ function useSettingsLayer(settingsModal: SettingsModal | null) {
 	// record of it. Resolve it here so its settings load from the control plane.
 	const explicitCloudOrgId = displaySettings?.scope === "project" ? displaySettings.cloudOrgId : undefined;
 	const localProjectScope = displaySettings?.scope === "project" && !remoteHostId && explicitCloudOrgId === undefined;
+	// Only a project the local daemon may hold needs the org's list to tell
+	// whether it is a Cloud project; one opened as a Cloud project is read on
+	// its own below.
 	const cloudProjects = useCloudProjectsQuery({ enabled: localProjectScope });
 	const cloudProject = localProjectScope
 		? cloudProjects.data?.find((project) => project.id === displaySettings.projectId)
@@ -91,6 +105,16 @@ function useSettingsLayer(settingsModal: SettingsModal | null) {
 
 	const cloudOrgId = explicitCloudOrgId ?? cloudProject?.orgId;
 	const isCloudProjectSettings = displaySettings?.scope === "project" && cloudOrgId !== undefined;
+	// The Cloud project itself, by the query its settings pages load it with,
+	// so they share one read: whichever org it is in, wherever it sits in the
+	// org's list.
+	const cloudCp = useCloudCp(isCloudProjectSettings);
+	const cloudProjectRecord = useQuery({
+		queryKey: cloudProjectSettingsQueryKey(cloudCp.baseUrl, cloudOrgId ?? "", projectId),
+		enabled: isCloudProjectSettings && cloudCp.ready,
+		retry: false,
+		queryFn: ({ signal }) => cloudCp.client.getProject(cloudOrgId ?? "", projectId, { signal }).then((response) => response.project),
+	});
 	const projectSections: Array<{
 		id: ProjectSettingsSection;
 		label: string;
@@ -99,12 +123,26 @@ function useSettingsLayer(settingsModal: SettingsModal | null) {
 		{ id: "general", label: t("settings.project.general"), icon: MonitorCog },
 		{ id: "agents", label: t("settings.project.agents"), icon: Bot },
 	];
-	// Scripts, environment, and cues are daemon features, unavailable for Cloud projects.
-	if (!isCloudProjectSettings) {
-		projectSections.push({ id: "scripts", label: t("settings.project.scripts"), icon: Wrench });
+	// Scripts, environment and cues are project settings on local and Cloud
+	// projects alike (a Cloud session's worker runs and gets them); remote hosts
+	// expose none of these.
+	// A Cloud project's repositories, where its agent starts, and the
+	// instructions added to its agents' prompts live on the control plane.
+	if (isCloudProjectSettings) {
+		// A workspace's repositories are all its own, side by side in its folder.
+		const workspace = isCloudWorkspaceProject(cloudProjectRecord.data ?? cloudProject);
+		projectSections.push({ id: "repositories", label: workspace ? t("settings.cloudProject.workspaceRepositories", { defaultValue: "Workspace repositories" }) : t("settings.project.repositories", { defaultValue: "Repositories" }), icon: FolderGit2 });
+		projectSections.push({ id: "instructions", label: t("settings.project.instructions", { defaultValue: "Instructions" }), icon: ScrollText });
+	}
+	projectSections.push({ id: "scripts", label: t("settings.project.scripts"), icon: Wrench });
+	{
 		projectSections.push({ id: "environment", label: t("settings.project.environment"), icon: KeyRound });
 		projectSections.push({ id: "cues", label: t("cues.title"), icon: Play });
 	}
+	// Sharing the whole project, as a session's Share does: only the project's
+	// own organization shares it, and only once WorkOS enables sharing for it.
+	const canShareProject = isCloudProjectSettings && cloudOrgId === offering.org?.id && offering.features?.includes(SHARE_FEATURE) === true;
+	if (canShareProject) projectSections.push({ id: "sharing", label: t("settings.project.sharing"), icon: Share2 });
 
 	const isProjectSettings = displaySettings?.scope === "project";
 	const [activeSection, setActiveSection] = useState<GlobalSettingsSection>("general");
@@ -202,16 +240,13 @@ function useSettingsLayer(settingsModal: SettingsModal | null) {
 		}
 		if (globalSettingsWasOpen.current) return;
 		globalSettingsWasOpen.current = true;
-		// Warm account management as soon as global Settings opens, regardless of
-		// which page is selected. By the time the user visits Accounts, external
-		// login/logout changes and saved-account observations are already current.
-		void ensureCodexAccounts([], {
-			includeUsage: true,
-			forceAuthentication: true,
-			forceDeviceReconciliation: true,
-		})
-			.then((next) => writeCodexAccounts(queryClient, next, "replace"))
-			.catch(() => undefined);
+		// Warm Mobile as soon as global Settings opens: its pairing state and Keep
+		// awake are known before the page is first drawn, so nothing pops in or
+		// flips after it opens.
+		void queryClient.prefetchQuery({ queryKey: mobileStatusQueryKey, queryFn: fetchMobileStatus });
+		void queryClient.prefetchQuery({ queryKey: mobileDevicesQueryKey, queryFn: fetchDevices });
+		// Fails quietly while Connect Mobile is off; the page fetches it once on.
+		void queryClient.prefetchQuery({ queryKey: mobilePairingCodeQueryKey, queryFn: fetchPairingCode, staleTime: PAIRING_CODE_REFRESH_MS });
 	}, [queryClient, settingsModal?.scope]);
 
 	const selectProjectSection = (id: ProjectSettingsSection) => {
@@ -229,7 +264,24 @@ function useSettingsLayer(settingsModal: SettingsModal | null) {
 	const navItems: SettingsNavEntry[] = isProjectSettings
 		? projectSections.map(({ id, label, icon }) => ({ id, label, icon, active: activeProjectSection === id, disabled: cueBusy, onSelect: () => selectProjectSection(id) }))
 		: globalSections.map(({ id, label, icon }) => ({ id, label: label(t), icon, active: activeSection === id, onSelect: () => selectGlobalSection(id) }));
-	const showSaveStatus = isProjectSettings && activeProjectSection !== "cues" &&
+	const navigationBlocked = isProjectSettings && (cueBusy || projectSaveState.requestPending === true || (projectSaveState.phase === "pending" && !projectSaveState.unsaveable) || projectSaveState.phase === "saving");
+	const history = isProjectSettings ? projectHistory : globalHistory;
+	const navigation: SwipeNavigationActions = {
+		canGoBack: !navigationBlocked,
+		canGoForward: !navigationBlocked && history.next !== undefined,
+		back: () => {
+			if (navigationBlocked) return;
+			if (isProjectSettings && projectHistory.previous !== undefined) selectProjectSection(projectHistory.previous, projectHistory.back);
+			else if (!isProjectSettings && globalHistory.previous !== undefined) { globalHistory.back(); setFocusAgentId(undefined); }
+			else closeSettingsDialog();
+		},
+		forward: () => {
+			if (navigationBlocked) return;
+			if (isProjectSettings && projectHistory.next !== undefined) selectProjectSection(projectHistory.next, projectHistory.forward);
+			else if (!isProjectSettings) { globalHistory.forward(); setFocusAgentId(undefined); }
+		},
+	};
+	const showSaveStatus = isProjectSettings && activeProjectSection !== "cues" && activeProjectSection !== "sharing" &&
 		(projectSaveState.phase === "failed" ||
 			(projectSaveState.phase === "pending" && !projectSaveState.unsaveable) ||
 			projectSaveState.phase === "saving" ||
@@ -265,8 +317,21 @@ function useSettingsLayer(settingsModal: SettingsModal | null) {
 			if (displaySettings?.scope === "project" && !isCloudProjectSettings && activeProjectSection === "scripts") {
 				return <ProjectScriptsSettings projectId={displaySettings.projectId} hostId={remoteHostId} onSaveState={setProjectSaveState} />;
 			}
-			if (displaySettings?.scope === "project" && !isCloudProjectSettings && activeProjectSection === "environment") {
-				return <ProjectEnvironmentSettings projectId={displaySettings.projectId} hostId={remoteHostId} onSaveState={setProjectSaveState} />;
+			if (displaySettings?.scope === "project" && canShareProject && cloudOrgId !== undefined && activeProjectSection === "sharing") {
+				return <CloudProjectSharingSettings projectId={displaySettings.projectId} cloudOrgId={cloudOrgId} />;
+			}
+			if (displaySettings?.scope === "project" && isCloudProjectSettings && cloudOrgId !== undefined && activeProjectSection === "instructions") {
+				return <CloudProjectInstructionsSettings projectId={displaySettings.projectId} cloudOrgId={cloudOrgId} onSaveState={setProjectSaveState} />;
+			}
+			if (displaySettings?.scope === "project" && !remoteHostId && activeProjectSection === "scripts") {
+				return isCloudProjectSettings && cloudOrgId !== undefined
+					? <CloudProjectScriptsSettings projectId={displaySettings.projectId} cloudOrgId={cloudOrgId} onSaveState={setProjectSaveState} />
+					: <ProjectScriptsSettings projectId={displaySettings.projectId} onSaveState={setProjectSaveState} />;
+			}
+			if (displaySettings?.scope === "project" && activeProjectSection === "environment") {
+				return isCloudProjectSettings && cloudOrgId !== undefined
+					? <CloudProjectEnvironmentSettings projectId={displaySettings.projectId} cloudOrgId={cloudOrgId} onSaveState={setProjectSaveState} />
+					: <ProjectEnvironmentSettings projectId={displaySettings.projectId} hostId={remoteHostId} onSaveState={setProjectSaveState} />;
 			}
 			if (displaySettings?.scope === "project") {
 				return <ProjectSettingsForm projectId={displaySettings.projectId} hostId={remoteHostId} cloudOrgId={cloudOrgId} section={activeProjectSection as ProjectFormSection} onSaveState={setProjectSaveState} />;
