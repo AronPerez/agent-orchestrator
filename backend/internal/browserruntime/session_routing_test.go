@@ -63,6 +63,25 @@ func newRoutingPeerVersion(t *testing.T, b *Broker, remote bool, id string, vers
 	if m := p.next(t, "hello-ok"); m.Type != "hello-ok" {
 		t.Fatal(m)
 	}
+	// hello-ok is written before publication. Wait for this exact connection,
+	// including when replacing an existing peer, before asserting routing state.
+	readyCtx, readyCancel := context.WithTimeout(ctx, 3*time.Second)
+	defer readyCancel()
+	for {
+		b.mu.Lock()
+		peer := b.peers[id]
+		ready := peer != nil && peer.conn == server
+		changed := b.connectionChanged
+		b.mu.Unlock()
+		if ready {
+			break
+		}
+		select {
+		case <-changed:
+		case <-readyCtx.Done():
+			t.Fatalf("runtime %q was not published: %v", id, readyCtx.Err())
+		}
+	}
 	for range sessions {
 		p.next(t, "session-state")
 	}
