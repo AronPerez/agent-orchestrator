@@ -1,3 +1,4 @@
+vi.mock("../hooks/useAgentInventoryTelemetry", () => ({ useAgentInventoryTelemetry: () => {}, useSetupCheckedTelemetry: () => {} }));
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { CancelledError } from "@tanstack/react-query";
 import { Suspense, type ComponentType, type PropsWithChildren } from "react";
@@ -255,6 +256,7 @@ vi.mock("../components/TitlebarNav", async () => {
 		typeof import("../stores/ui-store")
 	>("../stores/ui-store");
 	return {
+		useCanGoForward: () => false,
 		TitlebarNav: () => {
 			const isSidebarOpen = useStore(sidebarIsVisible);
 			const toggleSidebar = useStore((state) => state.toggleSidebar);
