@@ -1,6 +1,7 @@
 import type { CloudCpSessionChild } from "./cloud-cp";
 import type { PRState, PullRequestFacts, WorkspaceSummary } from "../types/workspace";
 import type { SessionPRSummary } from "../hooks/useSessionScmSummary";
+import { noPRDetails } from "./pr-display";
 import type { ShellTerminal } from "../hooks/useShellTerminals";
 
 const now = new Date().toISOString();
@@ -245,6 +246,7 @@ const prSummary = (sessionId: string, number: number, overrides: Partial<Session
 	const facts = session?.prs.find((item) => item.number === number);
 	const url = facts?.url ?? `https://github.com/Untrivial-ai/agent-orchestrator/pull/${number}`;
 	return {
+		...noPRDetails(),
 		url,
 		htmlUrl: url,
 		number,
@@ -262,6 +264,7 @@ const prSummary = (sessionId: string, number: number, overrides: Partial<Session
 		changedFiles: 3,
 		ci: {
 			autoInjectCI: true,
+			checks: [],
 			state: facts?.ci === "failing" ? "failing" : facts?.ci === "pending" ? "pending" : "passing",
 			failingChecks: [],
 		},
@@ -305,6 +308,7 @@ export const mockSessionScmSummaries: Record<string, SessionPRSummary[]> = {
 		prSummary("demo-ci-failed", 324, {
 			ci: {
 				autoInjectCI: false,
+				checks: [],
 				state: "failing",
 				failingChecks: [
 					{
@@ -424,6 +428,7 @@ export const mockSessionScmSummaries: Record<string, SessionPRSummary[]> = {
 			deletions: 17,
 			ci: {
 				autoInjectCI: true,
+				checks: [],
 				state: "failing",
 				failingChecks: [
 					{
@@ -461,6 +466,7 @@ export const mockSessionScmSummaries: Record<string, SessionPRSummary[]> = {
 			deletions: 22,
 			ci: {
 				autoInjectCI: true,
+				checks: [],
 				state: "failing",
 				failingChecks: [
 					{
