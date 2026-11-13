@@ -604,7 +604,9 @@ const api = {
 		onSessionRuntimeStateChanged: (listener: (state: SessionBrowserRuntimeState) => void) => {
 			const wrapped = (_event: Electron.IpcRendererEvent, state: SessionBrowserRuntimeState) => listener(state);
 			ipcRenderer.on("browser:sessionRuntimeStateChanged", wrapped);
-			return () => ipcRenderer.off("browser:sessionRuntimeStateChanged", wrapped);
+			return () => {
+				ipcRenderer.off("browser:sessionRuntimeStateChanged", wrapped);
+			};
 		},
 		nativeCompositionEnabled: true,
 		ensure: (sessionId: string, createInitialTab = true) => ipcRenderer.invoke("browser:ensure", sessionId, createInitialTab) as Promise<BrowserNavState>,

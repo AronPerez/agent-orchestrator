@@ -26,6 +26,8 @@ describe("preload browser runtime contract", () => {
 
 	it("keeps event payloads and listener cleanup on separate channels", async () => {
 		const api = await load();
+		// Electron's off() is fluent; unsubscribe must still return void.
+		ipc.off.mockReturnValue(ipc);
 		const global = vi.fn(), session = vi.fn();
 		const stopGlobal = api.browser.onRuntimeState(global);
 		const stopSession = api.browser.onSessionRuntimeStateChanged(session);
@@ -38,7 +40,8 @@ describe("preload browser runtime contract", () => {
 		expect(session).not.toHaveBeenCalled();
 		sessionListener({}, ownership);
 		expect(session).toHaveBeenCalledExactlyOnceWith(ownership);
-		stopGlobal(); stopSession();
+		expect(stopGlobal()).toBeUndefined();
+		expect(stopSession()).toBeUndefined();
 		expect(ipc.off).toHaveBeenCalledWith("browser:runtimeState", globalListener);
 		expect(ipc.off).toHaveBeenCalledWith("browser:sessionRuntimeStateChanged", sessionListener);
 	});
