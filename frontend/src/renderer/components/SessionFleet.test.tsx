@@ -234,6 +234,28 @@ describe("SessionFleet", () => {
 		expect(screen.queryByText("No recorded communication in this history.")).toBeNull();
 		expect(get).not.toHaveBeenCalled();
 	});
+	it.each([404, 501])("recovers from HTTP %s using Retry without reconnecting the host", async (status) => {
+		let finish!: (value: ReturnType<typeof history>) => void;
+		remoteGet.mockResolvedValueOnce({ error: { code: status === 404 ? "NOT_FOUND" : "NOT_IMPLEMENTED" }, response: { status } });
+		remoteGet.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+		const client = new QueryClient({ defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } } });
+		const hosts = [...connected.hosts];
+		renderFleet("box-a", sessions, client);
+		const alert = await screen.findByRole("alert");
+		expect(alert).toHaveTextContent(status === 404 ? "Communication history was not found on this host." : "Communication history is not supported by this host.");
+		const retry = within(alert).getByRole("button", { name: "Retry" });
+		fireEvent.click(retry);
+		expect(await screen.findByRole("status")).toHaveTextContent("Loading communication");
+		expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+		await act(async () => finish(history("History available after host upgrade")));
+		expect(await screen.findByText("History available after host upgrade")).toBeVisible();
+		expect(screen.queryByRole("alert")).toBeNull();
+		expect(client.getQueryData(["session-coordination", "box-a", "orch"])).toEqual(history("History available after host upgrade").data);
+		expect(connected.hosts).toEqual(hosts);
+		expect(resolveHost.mock.calls).toEqual([["box-a"], ["box-a"]]);
+		expect(remoteGet).toHaveBeenCalledTimes(2);
+		expect(get).not.toHaveBeenCalled();
+	});
 	it("keeps old apiVersion=1 host sessions without parent fields usable when coordination is missing", async () => {
 		remoteGet.mockResolvedValue({ error: { code: "NOT_FOUND" }, response: { status: 404 } });
 		const { open } = renderFleet("box-a", [{ ...sessions[2], parentSessionId: undefined }]);

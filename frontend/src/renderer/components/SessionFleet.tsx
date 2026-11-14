@@ -222,14 +222,10 @@ export function SessionFleet({
 									<p role="status" className="text-xs text-muted-foreground">
 										{t("remote.offline")}{coordination.data ? ` · ${t("remote.offlineCopy")}` : ""}
 									</p>
-								) : historyError?.status === 404 ? (
-									<p role="alert" className="text-xs text-muted-foreground">{t("fleet.historyNotFound")}</p>
-								) : historyError?.status === 501 ? (
-									<p role="alert" className="text-xs text-muted-foreground">{t("fleet.historyUnsupported")}</p>
 								) : coordination.isError ? (
-									<div role="alert" className="text-xs text-destructive">
-										{t("fleet.loadError")}{" "}
-										<Button variant="ghost" size="sm" onClick={() => void coordination.refetch()}>
+									<div role="alert" className={cn("text-xs", historyError?.status === 404 || historyError?.status === 501 ? "text-muted-foreground" : "text-destructive")}>
+										{t(historyError?.status === 404 ? "fleet.historyNotFound" : historyError?.status === 501 ? "fleet.historyUnsupported" : "fleet.loadError")}{" "}
+										<Button variant="ghost" size="sm" disabled={coordination.isFetching} onClick={() => void coordination.refetch()}>
 											{t("notify.retry")}
 										</Button>
 									</div>
