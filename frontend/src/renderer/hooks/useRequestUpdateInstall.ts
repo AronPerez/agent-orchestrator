@@ -17,6 +17,10 @@ export function useRequestUpdateInstall(): () => void {
 		void (async () => {
 			let timer: ReturnType<typeof setTimeout> | undefined;
 			try {
+				if ((await aoBridge.updates.getStatus()).installed) {
+					openPrompt();
+					return;
+				}
 				// Force a current local snapshot, even when the cache appears fresh.
 				const projects = await Promise.race([
 					queryClient.fetchQuery({ ...workspaceQueryOptions, staleTime: 0, retry: false }),

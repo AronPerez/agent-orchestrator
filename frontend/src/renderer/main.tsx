@@ -24,6 +24,10 @@ import { useLocaleStore } from "./stores/locale-store";
 import { useSoundNotificationsStore } from "./stores/sound-notifications-store";
 import { useTelemetryPolicyStore } from "./stores/telemetry-policy-store";
 import { useAnalyticsOptOutStore } from "./stores/analytics-opt-out-store";
+import { verifyDesktopBuild } from "./lib/verify-desktop-build";
+import { InstalledBuildMismatch } from "./components/InstalledBuildMismatch";
+
+declare const __AO_DESKTOP_BUILD_ID__: string;
 
 // Bind before the first render: errors during route setup and the first
 // render used to fire before TelemetryBoundary's effect bound these. Captures
@@ -116,6 +120,7 @@ declare module "@tanstack/react-router" {
 }
 
 async function renderApp(): Promise<void> {
+	const buildMatches = await verifyDesktopBuild((identity) => aoBridge.updates.verifyBuild(identity), __AO_DESKTOP_BUILD_ID__);
 	void useTelemetryPolicyStore.getState().load();
 	// The persisted locale is cosmetic; do not leave a newly opened native
 	// window blank while its IPC read completes. The router's pending screen
@@ -131,10 +136,12 @@ async function renderApp(): Promise<void> {
 		<I18nextProvider i18n={appI18n}>
 			<TelemetryBoundary>
 				<QueryClientProvider client={queryClient}>
-					<CloudNotificationRuntime />
-					<TelemetryIdentityRuntime />
-					<RouterProvider router={router} />
-					<CloudOnboardingGate />
+					{buildMatches ? <>
+						<CloudNotificationRuntime />
+						<TelemetryIdentityRuntime />
+						<RouterProvider router={router} />
+						<CloudOnboardingGate />
+					</> : <InstalledBuildMismatch />}
 				</QueryClientProvider>
 			</TelemetryBoundary>
 		</I18nextProvider>,

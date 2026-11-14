@@ -12,6 +12,7 @@ import { Button } from "./ui/button";
 import { DesktopReleaseNotes } from "./DesktopReleaseNotes";
 import { displayableUpdateError } from "../../shared/update-error-message";
 import { localizedUpdateError } from "../lib/update-error-copy";
+import type { InstalledBuildRestart } from "../../main/installed-build";
 import {
 	Dialog,
 	DialogContent,
@@ -47,6 +48,7 @@ function RestartToUpdateDialogBody() {
 	const { t, i18n } = useTranslation();
 	const close = useUiStore((state) => state.closeUpdateInstallPrompt);
 	const status = useUpdateStatus(undefined, true);
+	const installed = status.installed;
 	const workspace = useWorkspaceQuery();
 
 	const [pending, setPending] = useState(false);
@@ -126,15 +128,20 @@ function RestartToUpdateDialogBody() {
 		}
 	};
 
-	const confirm = async () => {
+	const confirm = async (mode: InstalledBuildRestart = "now") => {
 		// A ref guards same-turn clicks before React commits the disabled state.
-		if (installing.current || !version) return;
+		if (installing.current || (!installed && !version)) return;
 		installing.current = true;
 		installStartedStatus.current = status;
 		setConfirmedBuild({ version, releaseNotes });
 		setPending(true);
 		setFailureDetail(null);
 		try {
+			if (installed) {
+				await aoBridge.updates.restartInstalled(mode);
+				if (mounted.current) close();
+				return;
+			}
 			const result = await aoBridge.updates.install(version);
 			if (result?.state === "confirmation-required") {
 				if (mounted.current) {
@@ -175,12 +182,14 @@ function RestartToUpdateDialogBody() {
 			>
 				<div className={cn(settingsDialogHeaderClass, "py-4")}>
 					<DialogTitle>{t("update.restart.title")}</DialogTitle>
-					{buildLabel && <DialogDescription>{buildLabel}</DialogDescription>}
+					{installed ? <DialogDescription>{t("update.restart.installed")}</DialogDescription> : buildLabel && <DialogDescription>{buildLabel}</DialogDescription>}
 				</div>
 
 				<div className={cn(settingsDialogBodyClass, "gap-3 pt-4")}>
-					{(workspace.isError || !workspace.data) && <p role="status">{t("update.restart.unknownWorkers", { defaultValue: "Current worker state could not be confirmed. Installing restarts Orchestrator and may interrupt current tasks." })}</p>}
-					{atRisk.length > 0 && (
+					{installed && !installed.idle && <p role="status" className="text-sm text-settings-label">{t("update.restart.waitForIdle")}</p>}
+					{installed?.restartWhenIdle && <p role="status" className="text-sm text-settings-label">{t("update.restart.scheduled")}</p>}
+					{!installed && (workspace.isError || !workspace.data) && <p role="status">{t("update.restart.unknownWorkers", { defaultValue: "Current worker state could not be confirmed. Installing restarts Orchestrator and may interrupt current tasks." })}</p>}
+					{!installed && atRisk.length > 0 && (
 						<div
 							className="rounded-md border border-warning/30 bg-warning/8 px-3 py-2.5"
 							data-testid="restart-sessions-warning"
@@ -206,7 +215,7 @@ function RestartToUpdateDialogBody() {
 
 					{/* The notes are the only region that shrinks, so they grow with their
 					    content up to the dialog's max height and scroll only past that. */}
-					<section className="flex min-h-0 flex-col gap-1.5">
+					{!installed && <section className="flex min-h-0 flex-col gap-1.5">
 						<p className="text-caption font-medium uppercase tracking-wide text-settings-muted">
 							{t("update.restart.whatsNew")}
 						</p>
@@ -218,7 +227,7 @@ function RestartToUpdateDialogBody() {
 						) : (
 							<p className="text-sm leading-5 text-settings-muted">{t("update.restart.noNotes")}</p>
 						)}
-					</section>
+					</section>}
 
 					{targetChanged && (
 						<p role="status" className="text-sm text-settings-label">
@@ -227,13 +236,13 @@ function RestartToUpdateDialogBody() {
 					)}
 					{failureDetail !== null && (
 						<div role="alert" className="space-y-1 text-sm text-destructive">
-							<p>{t("update.restart.prepareFailed")}</p>
+							<p>{t(installed ? "update.restart.restartFailed" : "update.restart.prepareFailed")}</p>
 							{failureDetail && <p className="whitespace-pre-line break-words">{failureText}</p>}
 						</div>
 					)}
 					{/* On failure the main process turns off install-on-quit, so hide
 					    this line rather than contradict the error above. */}
-					{failureDetail === null && (
+					{!installed && failureDetail === null && (
 						<p className="text-xs leading-4 text-settings-muted">{t("update.restart.installsOnQuit")}</p>
 					)}
 				</div>
@@ -242,18 +251,23 @@ function RestartToUpdateDialogBody() {
 					<Button type="button" variant="secondary" size="sm" onClick={close} disabled={pending}>
 						{t("confirm.cancel")}
 					</Button>
+					{installed && <Button type="button" variant="secondary" size="sm" onClick={() => void confirm(installed.restartWhenIdle ? "cancel" : "when-idle")} disabled={pending}>
+						{t(installed.restartWhenIdle ? "update.restart.cancelScheduled" : "update.restart.whenIdle")}
+					</Button>}
 					<Button
 						type="button"
 						variant="primary"
 						size="sm"
-						onClick={hasFailed ? retry : confirm}
-						disabled={pending || (!hasFailed && !version)}
+						onClick={hasFailed && !installed ? retry : () => void confirm()}
+						disabled={pending || (installed ? !installed.idle : !hasFailed && !version)}
 					>
 						{pending
 							? t("update.restart.preparing")
-							: hasFailed
-								? t("update.restart.retry")
-								: t("update.restart.confirm")}
+							: installed
+								? t("update.restart.now")
+								: hasFailed
+									? t("update.restart.retry")
+									: t("update.restart.confirm")}
 					</Button>
 				</div>
 			</DialogContent>

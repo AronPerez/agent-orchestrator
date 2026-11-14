@@ -31,6 +31,7 @@ import {
 } from "electron";
 import {
 	setRendererSink,
+	setInstalledBuildStatus,
 	startAutoUpdates,
 	ensureUpdatePrefs,
 	checkForUpdatesNow,
@@ -47,6 +48,7 @@ import {
 	type UpdateCheckOptions,
 } from "./main/auto-updater";
 import { listFeatureBuilds, getActiveFeatureBuild } from "./main/feature-builds";
+import { createArchiveIdentityReader, InstalledBuildGuard, sessionsAreIdle, watchInstalledBuild } from "./main/installed-build";
 import { clearMainSentryCache, initMainSentry, sanitizeRendererCapture } from "./main/sentry-main";
 import { TelemetryPolicyAuthority, resolveDesktopDataDir } from "./main/telemetry-policy-file";
 import { DesktopTelemetryController } from "./main/desktop-telemetry-controller";
@@ -278,7 +280,35 @@ installIpcErrorCapture(ipcMain);
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string | undefined;
 declare const MAIN_WINDOW_VITE_NAME: string;
 declare const __AO_BUILD_IDENTITY__: string | undefined;
+declare const __AO_DESKTOP_BUILD_ID__: string;
 const APP_BUILD_IDENTITY = typeof __AO_BUILD_IDENTITY__ === "string" ? __AO_BUILD_IDENTITY__ : "";
+const DESKTOP_BUILD_ID = __AO_DESKTOP_BUILD_ID__;
+// Capture while this main starts, before waiting on the daemon or creating a window.
+// AppImage's outer file is stable across mounts; the mounted ASAR is not replaced.
+const installedArchive = process.platform === "linux" && process.env.APPIMAGE ? process.env.APPIMAGE : app.getAppPath();
+const installedBuildDisk = app.isPackaged ? require("original-fs") as typeof import("node:fs") : undefined;
+const installedBuildGuard = installedBuildDisk ? new InstalledBuildGuard({
+	readIdentity: createArchiveIdentityReader(installedArchive, installedBuildDisk),
+	isIdle: async () => {
+		const port = daemonStatus.port;
+		if (chatDraftRisks.length > 0 || !port || !await readDaemonProbe(port, "readyz")) return false;
+		// A newer host may be refused for attachment, but can still report whether
+		// its tasks are idle so a replaced desktop can safely relaunch into it.
+		const response = await fetch(`http://127.0.0.1:${port}/api/v1/sessions`, { signal: AbortSignal.timeout(5_000) });
+		return response.ok && sessionsAreIdle(await response.json());
+	},
+	onChange: (status) => {
+		console.info("AO: installed desktop build changed", { running: DESKTOP_BUILD_ID, installed: status?.identity, idle: status?.idle });
+		setInstalledBuildStatus(status);
+	},
+	relaunch: () => {
+		if (chatDraftRisks.length > 0) throw new Error("Save current chat drafts before restarting Orchestrator.");
+		preserveAgentsOnQuit = true;
+		app.relaunch(process.platform === "linux" && process.env.APPIMAGE ? { execPath: process.env.APPIMAGE } : {});
+		desktopQuit.quitCompletely();
+	},
+}) : undefined;
+let installedBuildWatching: ReturnType<typeof watchInstalledBuild> | undefined;
 
 const execFileAsync = promisify(execFile);
 
@@ -663,7 +693,17 @@ function registerRendererProtocol(): void {
 		}
 		const target = path.extname(resolved) === "" ? path.join(distRoot, "index.html") : resolved;
 		try {
-			return await net.fetch(pathToFileURL(target).toString());
+			const replaced = () => new Response("<!doctype html><title>Restart Orchestrator</title><p>A new build is installed. Quit and reopen Orchestrator to continue.</p>", { status: 503, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
+			if (installedBuildGuard && !await installedBuildGuard.canLoadRenderer()) {
+				installedBuildWatching?.check();
+				return replaced();
+			}
+			const response = await net.fetch(pathToFileURL(target).toString());
+			if (!installedBuildGuard) return response;
+			// Finish reading before the second identity check, including lazy chunks.
+			const body = await response.arrayBuffer();
+			if (!await installedBuildGuard.canLoadRenderer()) return replaced();
+			return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
 		} catch {
 			return new Response("Not found", { status: 404 });
 		}
@@ -1312,6 +1352,7 @@ async function createWindowInternal(): Promise<void> {
 		// Leaving the app (switching apps, hiding, minimizing) finishes dictation.
 		dictation.stop();
 	});
+	mainWindow.on("focus", () => installedBuildWatching?.check());
 	shellWebContents.on("render-process-gone", () => {
 		keybindingRecordingActive = false;
 		terminalFocused = false;
@@ -3786,6 +3827,16 @@ ipcMain.handle("featureBuilds:list", () => listFeatureBuilds());
 ipcMain.handle("featureBuilds:getActive", () => getActiveFeatureBuild());
 
 ipcMain.handle("updates:getStatus", (): UpdateStatus => getUpdateStatus());
+ipcMain.handle("updates:restartInstalled", (event, mode: unknown) => {
+	if (event.sender !== getShellWebContents() || !installedBuildGuard || typeof mode !== "string" || !["now", "when-idle", "cancel"].includes(mode)) throw new Error("Invalid installed build restart request.");
+	return installedBuildGuard.requestRestart(mode as "now" | "when-idle" | "cancel");
+});
+ipcMain.handle("updates:verifyBuild", async (event, identity: unknown) => {
+	if (event.sender !== getShellWebContents() || typeof identity !== "string") return false;
+	if (!installedBuildGuard || identity === DESKTOP_BUILD_ID) return true;
+	await installedBuildGuard.rendererMismatch();
+	return false;
+});
 ipcMain.handle("updates:check", async (_event, options?: UpdateCheckOptions) => {
 	const runFile = runFilePath();
 	if (!runFile) return;
@@ -4210,6 +4261,14 @@ app.on("second-instance", (_event, argv) => {
 // frontend/docs/desktop-release.md.
 function initAutoUpdates(): void {
 	if (!app.isPackaged) return;
+	if (installedBuildGuard && installedBuildDisk) {
+		installedBuildWatching = watchInstalledBuild(installedBuildGuard, installedBuildDisk, [
+			path.dirname(installedArchive),
+			...(process.platform === "darwin" ? [path.dirname(resolveBundlePath())] : []),
+		]);
+		powerMonitor.on("resume", installedBuildWatching.check);
+		app.on("will-quit", () => installedBuildWatching?.dispose());
+	}
 	const runFile = runFilePath();
 	if (!runFile) return;
 	const stateDir = path.dirname(runFile);
@@ -4500,6 +4559,7 @@ app.on("before-quit", (event) => {
 			app.quit();
 		} else {
 			preserveAgentsOnQuit = false;
+			installedBuildGuard?.cancelRestart();
 			clearUpdateRestartRequest();
 			desktopQuit.cancelQuit();
 		}
@@ -4563,12 +4623,12 @@ app.on("before-quit", (event) => {
 			};
 			browserQuitCleanupPromise = cleanup.then(() => undefined).finally(finishQuit);
 		}
-		if (isUpdateRestartRequested() && !updateQuitDeadlineArmed) {
+		if ((isUpdateRestartRequested() || installedBuildGuard?.restartRequested) && !updateQuitDeadlineArmed) {
 			updateQuitDeadlineArmed = true;
 			// Also cover a normal quit already waiting on the same cleanup.
 			void finishUpdateQuit(browserQuitCleanupPromise, {
 				quit: () => undefined, // The existing cleanup continuation owns normal quit.
-				exit: () => { if (isUpdateRestartRequested()) app.exit(0); },
+				exit: () => { if (isUpdateRestartRequested() || installedBuildGuard?.restartRequested) app.exit(0); },
 				log: (error) => console.error("update shutdown:", error),
 			});
 		}

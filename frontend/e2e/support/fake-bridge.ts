@@ -396,6 +396,8 @@ export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}
 					setRecording: async () => undefined,
 				},
 				updates: {
+					restartInstalled: async () => undefined,
+					verifyBuild: async () => true,
 					getStatus: async () => currentUpdateStatus,
 					check: async () => undefined,
 					returnHome: async () => undefined,
@@ -1357,6 +1359,8 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 					setRecording: async () => undefined,
 				},
 				updates: {
+					restartInstalled: async () => undefined,
+					verifyBuild: async () => true,
 					getStatus: async () => ({ state: "idle" }),
 					check: async () => undefined,
 					returnHome: async () => undefined,

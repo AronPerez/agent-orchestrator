@@ -100,6 +100,7 @@ import { useCloudLocalAuth } from "../hooks/useCloudLocalAuth";
 import { useLocalSignInDialogStore } from "../stores/local-signin-dialog-store";
 import { useShellMaybe } from "../lib/shell-context";
 import { useUpdateStatus } from "../hooks/useUpdateStatus";
+import { useInstalledBuildPrompt } from "../hooks/useInstalledBuildPrompt";
 import { MAX_SESSION_DISPLAY_NAME_LEN, useSessionRename } from "../hooks/useSessionRename";
 import { useSessionPreviewHover } from "../hooks/useSessionPreviewHover";
 import { effectiveShortcutBindings, shortcutBindingKeys } from "../../shared/shortcuts";
@@ -725,6 +726,7 @@ export const Sidebar = memo(function Sidebar({
 	const [expandedChromeVisible, setExpandedChromeVisible] = useState(!isCollapsed);
 	// One IPC subscription for both footer variants of the restart-to-update prompt.
 	const updateStatus = useUpdateStatus();
+	useInstalledBuildPrompt(updateStatus);
 	const openUpdateInstallPrompt = useUiStore((state) => state.openUpdateInstallPrompt);
 	// Daemon status for the smoke suite's sr-only mirror in the footer. Null when
 	// rendered outside the shell (unit tests) — the mirror simply doesn't render.

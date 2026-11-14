@@ -564,7 +564,7 @@ function UpdateActions({
 						// running a daemon-owned driver.
 						<Button ref={restartButtonRef} type="button" variant="primary" size="sm" onClick={requestUpdateInstall}>
 							<RefreshCw className="size-icon-sm" aria-hidden="true" />
-							{t("settings.updates.restartInstall")}
+							{t(status.installed ? "update.restart.options" : "settings.updates.restartInstall")}
 						</Button>
 					)}
 					{/* Always rendered. Hiding it whenever something was available or
@@ -675,7 +675,9 @@ function UpdateStatusLine({
 		case "downloaded":
 			className = "text-success";
 			icon = <CheckCircle2 className="size-icon-sm shrink-0" aria-hidden="true" />;
-			label = t("settings.updates.downloaded");
+			label = status.installed
+				? t(status.installed.restartWhenIdle ? "update.restart.scheduled" : "update.restart.installed")
+				: t("settings.updates.downloaded");
 			detail = status.version ? t("settings.updates.targetVersion", { version: status.version }) : null;
 			break;
 		case "not-available":
