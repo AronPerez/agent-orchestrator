@@ -55,7 +55,8 @@ let loaded = false;
 export async function syncRemoteCache(queryClient: QueryClient, hostIds: string[]): Promise<void> {
 	const hosts = new Set(hostIds);
 	for (const query of queryClient.getQueryCache().findAll()) {
-		const host = cachedHost(query.queryKey);
+		// Coordination is memory-only, but shares the saved host's access lifetime.
+		const host = cachedHost(query.queryKey) ?? (query.queryKey[0] === "session-coordination" && typeof query.queryKey[1] === "string" ? query.queryKey[1] : undefined);
 		if (host && !hosts.has(host)) queryClient.removeQueries({ queryKey: query.queryKey, exact: true });
 	}
 	if (typeof indexedDB === "undefined") return;
@@ -89,6 +90,7 @@ export async function syncRemoteCache(queryClient: QueryClient, hostIds: string[
 export async function forgetRemoteHost(queryClient: QueryClient, hostId: string): Promise<void> {
 	queryClient.removeQueries({ queryKey: ["remote-conversation", hostId] });
 	queryClient.removeQueries({ queryKey: ["remote-workspaces", hostId] });
+	queryClient.removeQueries({ queryKey: ["session-coordination", hostId] });
 	if (typeof indexedDB === "undefined") return;
 	try {
 		const store = (await openDatabase()).transaction(STORE, "readwrite").objectStore(STORE);

@@ -5149,5 +5149,7 @@
 	"fleet.recipientUnknown": "Orquestrador do projeto (destinatário não registrado)",
 	"fleet.report": "Relatório",
 	"fleet.noSummary": "Sem resumo",
-	"fleet.stale": "Não foi possível atualizar as sessões. Exibindo o último estado salvo."
+	"fleet.stale": "Não foi possível atualizar as sessões. Exibindo o último estado salvo.",
+	"fleet.historyNotFound": "O histórico de comunicação não foi encontrado neste host.",
+	"fleet.historyUnsupported": "Este host não oferece suporte ao histórico de comunicação."
 }

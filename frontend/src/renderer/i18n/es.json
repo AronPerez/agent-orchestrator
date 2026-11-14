@@ -5149,5 +5149,7 @@
 	"fleet.recipientUnknown": "Orquestador del proyecto (destinatario no registrado)",
 	"fleet.report": "Informe",
 	"fleet.noSummary": "Sin resumen",
-	"fleet.stale": "No se pudieron actualizar las sesiones. Se muestra la última instantánea."
+	"fleet.stale": "No se pudieron actualizar las sesiones. Se muestra la última instantánea.",
+	"fleet.historyNotFound": "No se encontró el historial de comunicación en este equipo.",
+	"fleet.historyUnsupported": "Este equipo no admite el historial de comunicación."
 }

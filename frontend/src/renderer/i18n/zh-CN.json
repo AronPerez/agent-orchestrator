@@ -5008,5 +5008,7 @@
 	"fleet.recipientUnknown": "项目编排器（未记录接收者）",
 	"fleet.report": "报告",
 	"fleet.noSummary": "无摘要",
-	"fleet.stale": "无法刷新会话。正在显示上次快照。"
+	"fleet.stale": "无法刷新会话。正在显示上次快照。",
+	"fleet.historyNotFound": "在此主机上未找到通信记录。",
+	"fleet.historyUnsupported": "此主机不支持通信记录。"
 }

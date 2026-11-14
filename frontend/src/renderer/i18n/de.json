@@ -5026,5 +5026,7 @@
 	"fleet.recipientUnknown": "Projekt-Orchestrator (Empfänger nicht erfasst)",
 	"fleet.report": "Bericht",
 	"fleet.noSummary": "Keine Zusammenfassung",
-	"fleet.stale": "Sitzungen konnten nicht aktualisiert werden. Der letzte Stand wird angezeigt."
+	"fleet.stale": "Sitzungen konnten nicht aktualisiert werden. Der letzte Stand wird angezeigt.",
+	"fleet.historyNotFound": "Auf diesem Host wurde kein Kommunikationsverlauf gefunden.",
+	"fleet.historyUnsupported": "Dieser Host unterstützt keinen Kommunikationsverlauf."
 }
