@@ -967,12 +967,15 @@ export function useRemoteWorkspaces(options: WorkspaceSubscriptionOptions & {
  * session query's key, so session mutations refresh both detail surfaces. */
 export function useRemoteProjectQuery(hostId: string, projectId: string) {
 	const queryClient = useQueryClient();
+	// Cache-only observers react when IndexedDB restores the lists after mount.
+	const savedProjects = useQuery({ queryKey: remoteProjectsQueryKey(hostId), queryFn: () => fetchRemoteProjects(hostId), enabled: false });
+	const savedSessions = useQuery({ queryKey: remoteSessionsQueryKey(hostId), queryFn: () => fetchRemoteSessions(hostId), enabled: false });
 	const unpins = useRemoteUnpinStore((state) => state.unpins);
 	const select = useCallback((workspaces: WorkspaceSummary[]) => {
 		const workspace = workspaces.find((candidate) => candidate.id === projectId);
 		return workspace && withRemoteUnpins(workspace, unpins);
 	}, [projectId, unpins]);
-	return useQuery({
+	const remote = useQuery({
 		queryKey: remoteWorkspaceQueryKey(hostId),
 		queryFn: () => fetchRemoteWorkspaces(hostId),
 		select,
@@ -981,12 +984,18 @@ export function useRemoteProjectQuery(hostId: string, projectId: string) {
 		// Restore the board from the sidebar's persisted lists after a restart or
 		// combined-query eviction, also while the owning host is disconnected.
 		initialData: () => {
-			const projects = queryClient.getQueryData<Awaited<ReturnType<typeof fetchRemoteProjects>>>(remoteProjectsQueryKey(hostId));
-			const sessions = queryClient.getQueryData<Awaited<ReturnType<typeof fetchRemoteSessions>>>(remoteSessionsQueryKey(hostId));
-			return hostId && projects && sessions ? toRemoteWorkspaces(hostId, projects, sessions) : undefined;
+			return hostId && savedProjects.data && savedSessions.data ? toRemoteWorkspaces(hostId, savedProjects.data, savedSessions.data) : undefined;
 		},
-		initialDataUpdatedAt: () => queryClient.getQueryState(remoteSessionsQueryKey(hostId))?.dataUpdatedAt,
+		initialDataUpdatedAt: () => savedSessions.dataUpdatedAt,
 	});
+	useEffect(() => {
+		if (!hostId || !savedProjects.data || !savedSessions.data) return;
+		const key = remoteWorkspaceQueryKey(hostId);
+		// A combined response is authoritative, including an empty project list.
+		if (queryClient.getQueryData(key) !== undefined) return;
+		queryClient.setQueryData(key, toRemoteWorkspaces(hostId, savedProjects.data, savedSessions.data), { updatedAt: savedSessions.dataUpdatedAt });
+	}, [queryClient, hostId, savedProjects.data, savedSessions.data, savedSessions.dataUpdatedAt]);
+	return remote;
 }
 
 /** Every project on one remote host, from the same cache as the board's
