@@ -5006,5 +5006,7 @@
 	"fleet.recipientUnknown": "Project orchestrator (recipient not recorded)",
 	"fleet.report": "Report",
 	"fleet.noSummary": "No summary",
-	"fleet.stale": "Could not refresh sessions. Showing the last snapshot."
+	"fleet.stale": "Could not refresh sessions. Showing the last snapshot.",
+	"fleet.historyNotFound": "Communication history was not found on this host.",
+	"fleet.historyUnsupported": "Communication history is not supported by this host."
 }

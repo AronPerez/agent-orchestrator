@@ -5026,5 +5026,7 @@
 	"fleet.recipientUnknown": "プロジェクトのオーケストレーター（受信者の記録なし）",
 	"fleet.report": "レポート",
 	"fleet.noSummary": "要約なし",
-	"fleet.stale": "セッションを更新できませんでした。前回のスナップショットを表示しています。"
+	"fleet.stale": "セッションを更新できませんでした。前回のスナップショットを表示しています。",
+	"fleet.historyNotFound": "このホストに通信履歴が見つかりませんでした。",
+	"fleet.historyUnsupported": "このホストは通信履歴に対応していません。"
 }

@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
 	retryRemoteHosts: vi.fn(),
 	remoteHosts: [] as Array<{ hostId: string; label: string; url: string; status: string; failureReason?: string }>,
 	connected: ["box-a", "box-b"],
+	projectFailed: false,
 	workspaces: {} as Record<string, {
 		hostId: string; id: string; name: string; path: string; orchestratorAgent: string;
 		sessions: Array<Record<string, unknown>>;
@@ -38,7 +39,7 @@ vi.mock("../hooks/useWorkspaceQuery", () => ({
 		isError: false, isSuccess: false,
 	}),
 	useRemoteProjectQuery: (hostId: string) => ({
-		data: mocks.workspaces[hostId], isError: false, isSuccess: Boolean(mocks.workspaces[hostId]),
+		data: mocks.workspaces[hostId], isError: mocks.projectFailed, isSuccess: Boolean(mocks.workspaces[hostId]) && !mocks.projectFailed,
 		dataUpdatedAt: mocks.workspaces[hostId] ? Date.now() - 12 * 60_000 : 0,
 	}),
 	useRemoteHostWorkspacesQuery: (hostId: string) => ({
@@ -60,6 +61,7 @@ vi.mock("../lib/api-client", () => ({
 	apiErrorMessage: (error: { message?: string }, fallback: string) => error?.message ?? fallback,
 }));
 vi.mock("../lib/host-clients", () => ({
+	clientForSessionHost: (hostId?: string) => ({ GET: (...args: unknown[]) => hostId ? mocks.remoteGet(hostId, ...args) : mocks.localGet(...args) }),
 	clientForHost: (hostId: string) => ({
 		GET: (...args: unknown[]) => mocks.remoteGet(hostId, ...args),
 		POST: (...args: unknown[]) => mocks.remotePost(hostId, ...args),
@@ -129,13 +131,14 @@ beforeEach(() => {
 	for (const mock of [mocks.navigate, mocks.localGet, mocks.localPost, mocks.remoteGet, mocks.remotePost,
 		mocks.requestNewTask, mocks.openRemoteProjectSettings, mocks.retryRemoteHosts]) mock.mockReset();
 	mocks.connected = ["box-a", "box-b"];
+	mocks.projectFailed = false;
 	mocks.remoteHosts = [];
-	useUiStore.setState({ archiveModal: null });
+	useUiStore.setState({ archiveModal: null, developerMode: true });
 	mocks.workspaces = {
 		"box-a": { hostId: "box-a", id: "shared", name: "Todo App", path: "/todo", orchestratorAgent: "opencode", sessions: [worker("box-a")] },
 		"box-b": { hostId: "box-b", id: "shared", name: "Todo App", path: "/todo", orchestratorAgent: "opencode", sessions: [worker("box-b", "Fix billing")] },
 	};
-	mocks.remoteGet.mockResolvedValue({ data: { prs: [] } });
+	mocks.remoteGet.mockImplementation((_host, path) => Promise.resolve({ data: path.endsWith("/coordination") ? { events: [], hasMore: false } : { prs: [] } }));
 	mocks.remotePost.mockResolvedValue({ data: {}, error: undefined });
 });
 
@@ -167,6 +170,64 @@ it("renders the shared board with host-scoped data, PRs, actions, and navigation
 	expect(screen.queryByText("Fix login")).toBeNull();
 	await waitFor(() => expect(mocks.remoteGet).toHaveBeenCalledWith("box-b", "/api/v1/sessions/{sessionId}/pr", expect.anything()));
 	expect(mocks.localGet).not.toHaveBeenCalled();
+});
+
+it("opens Fleet on A and B with equal project/session IDs and keeps GET/Open on the selected host", async () => {
+	const { showHost } = renderBoard("box-a");
+	fireEvent.click(screen.getByRole("button", { name: "Fleet" }));
+	expect(screen.getByRole("region", { name: "Session fleet" })).toBeVisible();
+	await waitFor(() => expect(mocks.remoteGet).toHaveBeenCalledWith("box-a", "/api/v1/sessions/{sessionId}/coordination", expect.objectContaining({ params: { path: { sessionId: "worker-1" } } })));
+	fireEvent.click(screen.getByRole("button", { name: "Open session" }));
+	expect(mocks.navigate).toHaveBeenLastCalledWith({ to: "/host/$hostId/project/$projectId/session/$sessionId", params: { hostId: "box-a", projectId: "shared", sessionId: "worker-1" } });
+	showHost("box-b");
+	expect(screen.queryByRole("region", { name: "Session fleet" })).toBeNull();
+	fireEvent.click(screen.getByRole("button", { name: "Fleet" }));
+	await waitFor(() => expect(mocks.remoteGet).toHaveBeenCalledWith("box-b", "/api/v1/sessions/{sessionId}/coordination", expect.objectContaining({ params: { path: { sessionId: "worker-1" } } })));
+	fireEvent.click(screen.getByRole("button", { name: "Open session" }));
+	expect(mocks.navigate).toHaveBeenLastCalledWith({ to: "/host/$hostId/project/$projectId/session/$sessionId", params: { hostId: "box-b", projectId: "shared", sessionId: "worker-1" } });
+	expect(mocks.localGet).not.toHaveBeenCalled();
+});
+
+it("passes full remote lineage to Fleet, including an archived orchestrator ancestor", async () => {
+	mocks.workspaces["box-a"].sessions = [
+		{ ...worker("box-a", "Archived orchestrator", "terminated"), id: "orch", kind: "orchestrator", isTerminated: true },
+		{ ...worker("box-a", "Manager"), id: "manager", parentSessionId: "orch" },
+		{ ...worker("box-a", "Child"), parentSessionId: "manager" },
+	];
+	renderBoard("box-a");
+	fireEvent.click(screen.getByRole("button", { name: "Fleet" }));
+	expect(screen.getByRole("button", { name: /Archived orchestrator.*Orchestrator.*Archived/ })).toBeVisible();
+	expect(screen.getByRole("button", { name: /Manager.*Manager/ })).toBeVisible();
+	fireEvent.click(screen.getByRole("button", { name: "Collapse Manager" }));
+	expect(screen.queryByRole("button", { name: /Child.*Worker/ })).toBeNull();
+	await screen.findByText("No recorded communication in this history.");
+});
+
+it("keeps cached Fleet accessible offline and does not query the local daemon", () => {
+	mocks.connected = [];
+	renderBoard("box-a");
+	fireEvent.click(screen.getByRole("button", { name: "Fleet" }));
+	expect(screen.getByRole("region", { name: "Session fleet" })).toHaveAttribute("data-host-offline");
+	expect(screen.getByRole("button", { name: /Fix login.*Worker/ })).toBeVisible();
+	expect(mocks.remoteGet.mock.calls.filter(([, path]) => path.endsWith("/coordination"))).toHaveLength(0);
+	expect(mocks.localGet).not.toHaveBeenCalled();
+});
+
+it("labels a remote Fleet snapshot stale when its project refresh fails", async () => {
+	mocks.projectFailed = true;
+	renderBoard("box-a");
+	fireEvent.click(screen.getByRole("button", { name: "Fleet" }));
+	expect(screen.getByText("Could not refresh sessions. Showing the last snapshot.")).toHaveAttribute("role", "alert");
+	expect(screen.getByRole("button", { name: /Fix login.*Worker/ })).toBeVisible();
+	await screen.findByText("No recorded communication in this history.");
+});
+
+it("does not require Developer mode to open a locally paired host's Fleet", async () => {
+	useUiStore.setState({ developerMode: false });
+	renderBoard("box-a");
+	fireEvent.click(screen.getByRole("button", { name: "Fleet" }));
+	expect(screen.getByRole("region", { name: "Session fleet" })).toBeVisible();
+	await screen.findByText("No recorded communication in this history.");
 });
 
 it("archives and restores through the selected host with host-scoped navigation", async () => {

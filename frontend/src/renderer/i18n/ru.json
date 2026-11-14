@@ -5255,5 +5255,7 @@
 	"settings.billing.featureRunning_few": "{{count}} sessions at once",
 	"settings.billing.featureRunning_many": "{{count}} sessions at once",
 	"settings.billing.featureTotal_few": "{{count}} sessions in total",
-	"settings.billing.featureTotal_many": "{{count}} sessions in total"
+	"settings.billing.featureTotal_many": "{{count}} sessions in total",
+	"fleet.historyNotFound": "История общения на этом хосте не найдена.",
+	"fleet.historyUnsupported": "Этот хост не поддерживает историю общения."
 }

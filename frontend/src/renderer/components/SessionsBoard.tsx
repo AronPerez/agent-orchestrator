@@ -253,7 +253,7 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 		window.addEventListener("keydown", handleKeyDown);
 		return () => window.removeEventListener("keydown", handleKeyDown);
 	}, [canFind, closeFind, isFindOpen]);
-	const canShowFleet = Boolean(projectId && !hostId && workspace && workspace.kind !== CLOUD_PROJECT_KIND);
+	const canShowFleet = Boolean(projectId && workspace && workspace.kind !== CLOUD_PROJECT_KIND);
 	// Memory and CPU monitoring is a developer tool: the light, the card chips
 	// and the window behind them only exist with Diagnostics on in Developer mode.
 	// They read this machine, so another machine's board shows none of them.
@@ -369,8 +369,8 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 				</div>
 			) : null}
 			{canShowFleet && view === "fleet" && workspace ? <>
-				{boardLoadFailed ? <p role="alert" className="px-4 py-2 text-xs text-destructive">{t("fleet.stale")}</p> : null}
-				<SessionFleet key={scopeKey} sessions={workspace.sessions} onOpen={openSession} />
+				{boardLoadFailed || (hostId && remoteProjectQuery.isError) ? <p role="alert" className="px-4 py-2 text-xs text-destructive">{t("fleet.stale")}</p> : null}
+				<SessionFleet key={scopeKey} sessions={workspace.sessions} onOpen={openSession} hostId={hostId} />
 			</> : <>
 			<div className={cn("relative min-h-0 flex-1 overflow-hidden", hostOffline && workspace && "opacity-75")} data-host-offline={hostOffline && workspace ? "" : undefined}>
 				{canFind && isFindOpen ? <BoardFindBar inputRef={findInputRef} matches={filteredSessions.length} onClose={closeFind} onQueryChange={setFindQuery} query={findQuery} total={searchableSessions.length} /> : null}

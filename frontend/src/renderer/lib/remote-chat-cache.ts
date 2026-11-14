@@ -43,6 +43,14 @@ function cachedHost(key: QueryKey): string | undefined {
 
 const isChat = (key: QueryKey) => key[0] === "remote-conversation";
 
+function removeCoordinationQueries(queryClient: QueryClient, queryKey: QueryKey, exact = false): void {
+	const filters = { queryKey, exact };
+	// Reset before eviction so mounted observers release history too. Calling
+	// resetQueries instead would also refetch active observers during cleanup.
+	for (const query of queryClient.getQueryCache().findAll(filters)) query.reset();
+	queryClient.removeQueries(filters);
+}
+
 // Data read from disk or already written is not written again.
 const saved = new WeakSet<object>();
 
@@ -55,8 +63,12 @@ let loaded = false;
 export async function syncRemoteCache(queryClient: QueryClient, hostIds: string[]): Promise<void> {
 	const hosts = new Set(hostIds);
 	for (const query of queryClient.getQueryCache().findAll()) {
-		const host = cachedHost(query.queryKey);
-		if (host && !hosts.has(host)) queryClient.removeQueries({ queryKey: query.queryKey, exact: true });
+		// Coordination is memory-only, but shares the saved host's access lifetime.
+		const host = cachedHost(query.queryKey) ?? (query.queryKey[0] === "session-coordination" && typeof query.queryKey[1] === "string" ? query.queryKey[1] : undefined);
+		if (host && !hosts.has(host)) {
+			if (query.queryKey[0] === "session-coordination") removeCoordinationQueries(queryClient, query.queryKey, true);
+			else queryClient.removeQueries({ queryKey: query.queryKey, exact: true });
+		}
 	}
 	if (typeof indexedDB === "undefined") return;
 	try {
@@ -89,6 +101,7 @@ export async function syncRemoteCache(queryClient: QueryClient, hostIds: string[
 export async function forgetRemoteHost(queryClient: QueryClient, hostId: string): Promise<void> {
 	queryClient.removeQueries({ queryKey: ["remote-conversation", hostId] });
 	queryClient.removeQueries({ queryKey: ["remote-workspaces", hostId] });
+	removeCoordinationQueries(queryClient, ["session-coordination", hostId]);
 	if (typeof indexedDB === "undefined") return;
 	try {
 		const store = (await openDatabase()).transaction(STORE, "readwrite").objectStore(STORE);

@@ -1,13 +1,29 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { appI18n } from "../i18n";
 import { SessionFleet } from "./SessionFleet";
 import type { WorkspaceSession } from "../types/workspace";
+import { forgetRemoteHost, syncRemoteCache } from "../lib/remote-chat-cache";
 
-const { get } = vi.hoisted(() => ({ get: vi.fn() }));
-vi.mock("../lib/api-client", () => ({ apiClient: { GET: get } }));
-vi.mock("../lib/preview-mode", () => ({ usesPreviewWorkspaceData: false }));
+const { get, remoteGet, connected, resolveHost, preview } = vi.hoisted(() => ({
+	get: vi.fn(), remoteGet: vi.fn(), connected: { hosts: ["box-a", "box-b"] }, resolveHost: vi.fn(), preview: { enabled: false },
+}));
+vi.mock("../lib/api-client", () => ({
+	apiClient: { GET: get },
+	apiErrorCode: (error: { code?: string }) => error?.code,
+	apiErrorMessage: (error: { message?: string }, fallback = "Request failed") => error?.message ?? fallback,
+}));
+vi.mock("../hooks/useHostConnection", () => ({ useConnectedHosts: () => connected.hosts }));
+vi.mock("../lib/host-clients", () => ({
+	clientForSessionHost: (hostId?: string) => {
+		resolveHost(hostId);
+		if (!hostId) return { GET: get };
+		if (!connected.hosts.includes(hostId)) throw new Error("Host not connected");
+		return { GET: (...args: unknown[]) => remoteGet(hostId, ...args) };
+	},
+}));
+vi.mock("../lib/preview-mode", () => ({ get usesPreviewWorkspaceData() { return preview.enabled; } }));
 
 const sessions: WorkspaceSession[] = [
 	{
@@ -47,19 +63,33 @@ const sessions: WorkspaceSession[] = [
 		issueId: "TASK-1",
 	},
 ];
-function show(items = sessions) {
+const clients: QueryClient[] = [];
+function renderFleet(hostId?: string, items = sessions, client = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
 	const open = vi.fn();
-	const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-	render(
-		<QueryClientProvider client={queryClient}>
-			<SessionFleet sessions={items} onOpen={open} />
-		</QueryClientProvider>,
-	);
-	return open;
+	clients.push(client);
+	const view = (host?: string) => <QueryClientProvider client={client}>
+		<SessionFleet key={host ?? "local"} sessions={items.map((session) => ({ ...session, hostId: host }))} hostId={host} onOpen={open} />
+	</QueryClientProvider>;
+	const rendered = render(view(hostId));
+	return { ...rendered, open, client, showHost: (host?: string) => rendered.rerender(view(host)) };
+}
+const show = (items = sessions) => renderFleet(undefined, items).open;
+function history(summary: string) {
+	return { data: { events: [{ id: "event-1", kind: "message", sourceSessionId: "orch", targetSessionId: "worker", summary, state: "recorded", createdAt: "2026-11-03T00:00:00Z" }], hasMore: false } };
 }
 beforeEach(() => {
 	get.mockReset();
 	get.mockResolvedValue({ data: { events: [], hasMore: false } });
+	remoteGet.mockReset();
+	remoteGet.mockResolvedValue({ data: { events: [], hasMore: false } });
+	resolveHost.mockClear();
+	connected.hosts = ["box-a", "box-b"];
+	preview.enabled = false;
+});
+afterEach(async () => {
+	cleanup();
+	for (const client of clients.splice(0)) client.clear();
+	await new Promise((resolve) => setTimeout(resolve, 0));
 });
 
 describe("SessionFleet", () => {
@@ -81,7 +111,7 @@ describe("SessionFleet", () => {
 		expect(open).toHaveBeenCalledWith(sessions[2]);
 		await waitFor(() =>
 			expect(get).toHaveBeenCalledWith("/api/v1/sessions/{sessionId}/coordination", {
-				params: { path: { sessionId: "worker" } },
+				params: { path: { sessionId: "worker" } }, signal: expect.any(AbortSignal),
 			}),
 		);
 		fireEvent.click(screen.getByRole("button", { name: "Collapse Release coordination" }));
@@ -127,5 +157,166 @@ describe("SessionFleet", () => {
 		expect(screen.getByText("No sessions to display.")).toBeInTheDocument();
 		expect(within(screen.getByRole("region")).queryByRole("complementary")).toBeNull();
 		expect(get).not.toHaveBeenCalled();
+	});
+	it("isolates identical project/session/event IDs on local, A and B", async () => {
+		get.mockResolvedValue(history("Local communication"));
+		remoteGet.mockImplementation((hostId) => Promise.resolve(history(`${hostId} communication`)));
+		const { showHost, client } = renderFleet();
+		expect(await screen.findByText("Local communication")).toBeVisible();
+		showHost("box-a");
+		expect(screen.queryByText("Local communication")).toBeNull();
+		expect(await screen.findByText("box-a communication")).toBeVisible();
+		showHost("box-b");
+		expect(screen.queryByText("box-a communication")).toBeNull();
+		expect(await screen.findByText("box-b communication")).toBeVisible();
+		for (const [host, summary] of [["", "Local communication"], ["box-a", "box-a communication"], ["box-b", "box-b communication"]]) {
+			expect(client.getQueryData(["session-coordination", host, "orch"])).toEqual(history(summary).data);
+		}
+		expect(get).toHaveBeenCalledTimes(1);
+		expect(remoteGet).toHaveBeenCalledWith("box-b", "/api/v1/sessions/{sessionId}/coordination", {
+			params: { path: { sessionId: "orch" } }, signal: expect.any(AbortSignal),
+		});
+	});
+	it("aborts an old host request and ignores its late response after switching hosts", async () => {
+		let finish!: (value: ReturnType<typeof history>) => void;
+		let signal!: AbortSignal;
+		remoteGet.mockImplementation((host, _path, options) => host === "box-a" ? new Promise((resolve) => {
+			finish = resolve; signal = options.signal;
+		}) : Promise.resolve(history("B history")));
+		const { showHost } = renderFleet("box-a");
+		await waitFor(() => expect(remoteGet).toHaveBeenCalledTimes(1));
+		showHost("box-b");
+		expect(signal.aborted).toBe(true);
+		expect(await screen.findByText("B history")).toBeVisible();
+		await act(async () => finish(history("Late A history")));
+		expect(screen.queryByText("Late A history")).toBeNull();
+		expect(get).not.toHaveBeenCalled();
+	});
+	it("cancels on disconnect, keeps cached history marked offline, and resolves the client again on reconnect", async () => {
+		const { client, showHost } = renderFleet("box-a");
+		await screen.findByText("No recorded communication in this history.");
+		let finish!: (value: ReturnType<typeof history>) => void;
+		let signal!: AbortSignal;
+		remoteGet.mockImplementationOnce((_host, _path, options) => new Promise((resolve) => {
+			finish = resolve; signal = options.signal;
+		}));
+		void client.invalidateQueries({ queryKey: ["session-coordination", "box-a", "orch"] });
+		await waitFor(() => expect(remoteGet).toHaveBeenCalledTimes(2));
+		connected.hosts = [];
+		showHost("box-a");
+		expect(await screen.findByRole("status")).toHaveTextContent("Offline");
+		await waitFor(() => expect(signal.aborted).toBe(true));
+		await act(async () => finish(history("Late disconnected history")));
+		expect(screen.queryByText("Late disconnected history")).toBeNull();
+		connected.hosts = ["box-a"];
+		showHost("box-a");
+		await waitFor(() => expect(remoteGet).toHaveBeenCalledTimes(3));
+		expect(resolveHost.mock.calls.filter(([host]) => host === "box-a")).toHaveLength(3);
+		expect(get).not.toHaveBeenCalled();
+	});
+	it("does not fetch or invent empty communication for an offline host", () => {
+		connected.hosts = [];
+		renderFleet("box-a");
+		expect(screen.getByRole("status")).toHaveTextContent("Offline");
+		expect(screen.queryByText("No recorded communication in this history.")).toBeNull();
+		expect(remoteGet).not.toHaveBeenCalled();
+		expect(get).not.toHaveBeenCalled();
+	});
+	it.each(["revoked pairing", "removed account host"])("clears a mounted offline Fleet's history after %s cleanup", async (reason) => {
+		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		client.setQueryData(["session-coordination", "box-b", "orch"], history("Other host history").data);
+		client.setQueryData(["session-coordination", "", "orch"], history("Local history").data);
+		remoteGet.mockResolvedValue(history("Paired-host private communication"));
+		const { showHost } = renderFleet("box-a", sessions, client);
+		expect(await screen.findByText("Paired-host private communication")).toBeVisible();
+		connected.hosts = ["box-b"];
+		showHost("box-a"); // Same mounted observer; ordinary disconnect keeps its saved copy.
+		expect(screen.getByRole("status")).toHaveTextContent("Offline");
+		expect(screen.getByText("Paired-host private communication")).toBeVisible();
+		expect(client.getQueryState(["session-coordination", "box-a", "orch"])?.fetchStatus).toBe("idle");
+		await act(async () => {
+			if (reason === "revoked pairing") await forgetRemoteHost(client, "box-a");
+			else await syncRemoteCache(client, ["box-b"]);
+		});
+		expect(client.getQueryData(["session-coordination", "box-a", "orch"])).toBeUndefined();
+		// No additional render, navigation or reconnect may be needed to scrub the live view.
+		await waitFor(() => expect(screen.queryByText("Paired-host private communication")).toBeNull());
+		expect(screen.getByRole("status")).not.toHaveTextContent("Showing the last saved copy");
+		expect(screen.queryByText("No recorded communication in this history.")).toBeNull();
+		expect(client.getQueryData(["session-coordination", "box-b", "orch"])).toEqual(history("Other host history").data);
+		expect(client.getQueryData(["session-coordination", "", "orch"])).toEqual(history("Local history").data);
+		expect(remoteGet).toHaveBeenCalledTimes(1);
+		expect(get).not.toHaveBeenCalled();
+	});
+	it.each([
+		[404, "NOT_FOUND", "Communication history was not found on this host."],
+		[501, "NOT_IMPLEMENTED", "Communication history is not supported by this host."],
+		[501, "COORDINATION_UNAVAILABLE", "Communication history is not supported by this host."],
+		[401, "DEVICE_REVOKED", "Could not load communication."],
+		[502, "UPSTREAM_UNAVAILABLE", "Offline"],
+	])("shows host response %s/%s without local fallback", async (status, code, message) => {
+		remoteGet.mockResolvedValue({ error: { code }, response: { status } });
+		renderFleet("box-a");
+		expect(await screen.findByText(message)).toBeVisible();
+		expect(screen.queryByText("No recorded communication in this history.")).toBeNull();
+		expect(get).not.toHaveBeenCalled();
+	});
+	it.each([404, 501])("recovers from HTTP %s using Retry without reconnecting the host", async (status) => {
+		let finish!: (value: ReturnType<typeof history>) => void;
+		remoteGet.mockResolvedValueOnce({ error: { code: status === 404 ? "NOT_FOUND" : "NOT_IMPLEMENTED" }, response: { status } });
+		remoteGet.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+		const client = new QueryClient({ defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } } });
+		const hosts = [...connected.hosts];
+		renderFleet("box-a", sessions, client);
+		const alert = await screen.findByRole("alert");
+		expect(alert).toHaveTextContent(status === 404 ? "Communication history was not found on this host." : "Communication history is not supported by this host.");
+		const retry = within(alert).getByRole("button", { name: "Retry" });
+		fireEvent.click(retry);
+		expect(await screen.findByRole("status")).toHaveTextContent("Loading communication");
+		expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+		await act(async () => finish(history("History available after host upgrade")));
+		expect(await screen.findByText("History available after host upgrade")).toBeVisible();
+		expect(screen.queryByRole("alert")).toBeNull();
+		expect(client.getQueryData(["session-coordination", "box-a", "orch"])).toEqual(history("History available after host upgrade").data);
+		expect(connected.hosts).toEqual(hosts);
+		expect(resolveHost.mock.calls).toEqual([["box-a"], ["box-a"]]);
+		expect(remoteGet).toHaveBeenCalledTimes(2);
+		expect(get).not.toHaveBeenCalled();
+	});
+	it("keeps old apiVersion=1 host sessions without parent fields usable when coordination is missing", async () => {
+		remoteGet.mockResolvedValue({ error: { code: "NOT_FOUND" }, response: { status: 404 } });
+		const { open } = renderFleet("box-a", [{ ...sessions[2], parentSessionId: undefined }]);
+		expect(await screen.findByText("Communication history was not found on this host.")).toBeVisible();
+		expect(screen.getByText(/Older sessions may predate lineage tracking/)).toBeVisible();
+		fireEvent.click(screen.getByRole("button", { name: "Open session" }));
+		expect(open).toHaveBeenCalledWith(expect.objectContaining({ id: "worker", hostId: "box-a" }));
+	});
+	it("does not replace a remote failure with local preview communication", async () => {
+		preview.enabled = true;
+		remoteGet.mockResolvedValue({ error: { code: "NOT_IMPLEMENTED" }, response: { status: 501 } });
+		renderFleet("box-a");
+		expect(await screen.findByText("Communication history is not supported by this host.")).toBeVisible();
+		expect(screen.queryByText(appI18n.t("fleet.preview"))).toBeNull();
+		expect(get).not.toHaveBeenCalled();
+	});
+	it.each([undefined, "box-a", "box-b"])("preserves archive, collapse, status, PR and artifact details on host %s", async (host) => {
+		const items: WorkspaceSession[] = [
+			{ ...sessions[0], status: "terminated", isTerminated: true },
+			sessions[1],
+			{ ...sessions[2], displayStatus: "Waiting for review", prs: [{ url: "https://example.test/pr/44", number: 44, state: "open", ci: "passing", review: "approved", mergeability: "clean", reviewComments: false, updatedAt: sessions[2].updatedAt }], artifactFiles: [{ kind: "file", name: "evidence.txt", path: "evidence.txt", size: 12, updatedAt: sessions[2].updatedAt }] },
+			{ ...sessions[2], id: "old", title: "Unrelated archive", parentSessionId: undefined, status: "terminated", isTerminated: true },
+		];
+		renderFleet(host, items);
+		expect(screen.getByRole("button", { name: /Orchestrator.*Archived/ })).toBeVisible();
+		expect(screen.queryByRole("button", { name: /Unrelated archive/ })).toBeNull();
+		fireEvent.click(screen.getByRole("button", { name: /Implement login.*Waiting for review/ }));
+		expect(screen.getByRole("link", { name: "PR #44" })).toHaveAttribute("href", "https://example.test/pr/44");
+		expect(screen.getByText("CI: passing · Review: approved")).toBeVisible();
+		expect(screen.getByText("Artifacts: 1 · Open session to inspect")).toBeVisible();
+		fireEvent.click(screen.getByRole("button", { name: "Collapse Release coordination" }));
+		expect(screen.queryByRole("button", { name: /Implement login.*Waiting for review/ })).toBeNull();
+		fireEvent.click(screen.getByRole("button", { name: "Show archived" }));
+		expect(screen.getByRole("button", { name: /Unrelated archive.*Archived/ })).toBeVisible();
+		await screen.findByText("No recorded communication in this history.");
 	});
 });

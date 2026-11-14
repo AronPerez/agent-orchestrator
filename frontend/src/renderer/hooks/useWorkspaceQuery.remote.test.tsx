@@ -16,7 +16,7 @@ import { appI18n } from "../i18n";
 import { sessionUiKey } from "../lib/hosts";
 import { useRemoteUnpinStore } from "../stores/remote-unpin-store";
 import { clearOptimisticSessionKill, trackOptimisticSessionKill } from "./optimistic-session-kills";
-import { remoteWorkspaceQueryKey, useRemoteWorkspaces, useWorkspaceQuery, useWorkspaceSession } from "./useWorkspaceQuery";
+import { remoteWorkspaceQueryKey, useRemoteProjectQuery, useRemoteWorkspaces, useWorkspaceQuery, useWorkspaceSession } from "./useWorkspaceQuery";
 
 function wrapper({ children }: { children: ReactNode }) {
 	return <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>{children}</QueryClientProvider>;
@@ -187,6 +187,64 @@ it("shows a saved host's last lists without reading it, and its session while it
 	expect(result.current.connectedOnly.data).toEqual([]);
 	expect(result.current.session.data?.id).toBe("session-1");
 	expect(fetchMock).not.toHaveBeenCalled();
+});
+
+it("replaces a saved project snapshot with the owning host's fresh lists after reconnecting", async () => {
+	await prepareTwoHosts();
+	localGet.mockClear();
+	const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+	const updatedAt = Date.now() - 12 * 60_000;
+	client.setQueryData(["remote-workspaces", "box-a", "projects"], [{ id: "project-1", name: "Saved project", path: "/saved" }], { updatedAt });
+	client.setQueryData(["remote-workspaces", "box-a", "sessions"], [{ id: "session-1", projectId: "project-1", displayName: "Saved worker", harness: "codex", status: "idle", prs: [] }], { updatedAt });
+	const { result, unmount } = renderHook(() => useRemoteProjectQuery("box-a", "project-1"), {
+		wrapper: ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>,
+	});
+	try {
+		expect(result.current.data?.name).toBe("Saved project");
+		expect(result.current.data?.sessions[0]?.title).toBe("Saved worker");
+		expect(client.getQueryState(remoteWorkspaceQueryKey("box-a"))?.dataUpdatedAt).toBe(updatedAt);
+		await waitFor(() => expect(result.current.data?.name).toBe("Remote"));
+		expect(result.current.data?.sessions[0]).toMatchObject({ hostId: "box-a", id: "session-1", status: "working" });
+		const freshUpdatedAt = client.getQueryState(remoteWorkspaceQueryKey("box-a"))?.dataUpdatedAt;
+		await act(async () => {
+			client.setQueryData(["remote-workspaces", "box-a", "projects"], [{ id: "project-1", name: "Older late project", path: "/old" }], { updatedAt });
+			client.setQueryData(["remote-workspaces", "box-a", "sessions"], [{ id: "session-1", projectId: "project-1", displayName: "Older late worker", harness: "codex", status: "idle", prs: [] }], { updatedAt });
+			await new Promise((resolve) => setTimeout(resolve, 0));
+		});
+		expect(result.current.data?.name).toBe("Remote");
+		expect(result.current.data?.sessions[0]?.status).toBe("working");
+		expect(client.getQueryState(remoteWorkspaceQueryKey("box-a"))?.dataUpdatedAt).toBe(freshUpdatedAt);
+		expect(localGet).not.toHaveBeenCalled();
+	} finally {
+		unmount(); client.clear();
+	}
+});
+
+it("does not resurrect a deleted project when old lists arrive after a fresh empty host response", async () => {
+	await prepareTwoHosts();
+	localGet.mockClear();
+	vi.stubGlobal("fetch", vi.fn(async () => Response.json({ projects: [], sessions: [] })));
+	const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+	const key = remoteWorkspaceQueryKey("box-a");
+	const { result, unmount } = renderHook(() => useRemoteProjectQuery("box-a", "project-1"), {
+		wrapper: ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>,
+	});
+	try {
+		await waitFor(() => expect(result.current.isSuccess).toBe(true));
+		const freshUpdatedAt = client.getQueryState(key)?.dataUpdatedAt;
+		const updatedAt = Date.now() - 12 * 60_000;
+		await act(async () => {
+			client.setQueryData(["remote-workspaces", "box-a", "projects"], [{ id: "project-1", name: "Deleted project", path: "/old" }], { updatedAt });
+			client.setQueryData(["remote-workspaces", "box-a", "sessions"], [{ id: "session-1", projectId: "project-1", harness: "codex", status: "idle", prs: [], updatedAt: new Date(updatedAt).toISOString() }], { updatedAt });
+			await new Promise((resolve) => setTimeout(resolve, 0));
+		});
+		expect(result.current.data).toBeUndefined();
+		expect(client.getQueryData(key)).toEqual([]);
+		expect(client.getQueryState(key)?.dataUpdatedAt).toBe(freshUpdatedAt);
+		expect(localGet).not.toHaveBeenCalled();
+	} finally {
+		unmount(); client.clear();
+	}
 });
 
 it("keeps the same lists across re-renders until a host's data changes", async () => {

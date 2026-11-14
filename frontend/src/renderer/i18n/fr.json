@@ -5149,5 +5149,7 @@
 	"fleet.recipientUnknown": "Orchestrateur du projet (destinataire non enregistré)",
 	"fleet.report": "Rapport",
 	"fleet.noSummary": "Aucun résumé",
-	"fleet.stale": "Impossible d’actualiser les sessions. Affichage du dernier instantané."
+	"fleet.stale": "Impossible d’actualiser les sessions. Affichage du dernier instantané.",
+	"fleet.historyNotFound": "L’historique des communications est introuvable sur cet hôte.",
+	"fleet.historyUnsupported": "Cet hôte ne prend pas en charge l’historique des communications."
 }

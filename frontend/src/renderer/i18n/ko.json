@@ -5026,5 +5026,7 @@
 	"fleet.recipientUnknown": "프로젝트 오케스트레이터(수신자 기록 없음)",
 	"fleet.report": "보고서",
 	"fleet.noSummary": "요약 없음",
-	"fleet.stale": "세션을 새로 고치지 못했습니다. 마지막 스냅샷을 표시합니다."
+	"fleet.stale": "세션을 새로 고치지 못했습니다. 마지막 스냅샷을 표시합니다.",
+	"fleet.historyNotFound": "이 호스트에서 통신 기록을 찾을 수 없습니다.",
+	"fleet.historyUnsupported": "이 호스트는 통신 기록을 지원하지 않습니다."
 }

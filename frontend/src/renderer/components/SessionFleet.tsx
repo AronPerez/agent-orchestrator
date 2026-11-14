@@ -1,10 +1,14 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight, ExternalLink, GitBranch, MessageSquare } from "lucide-react";
 import type { components } from "../../api/schema";
 import type { WorkspaceSession } from "../types/workspace";
-import { apiClient } from "../lib/api-client";
+import { apiErrorCode } from "../lib/api-client";
+import { apiErrorException } from "../lib/api-error-exception";
+import { clientForSessionHost } from "../lib/host-clients";
+import { HOST_UNREACHABLE_CODES, LOCAL_HOST } from "../lib/hosts";
+import { useConnectedHosts } from "../hooks/useHostConnection";
 import { getSessionStatusView } from "../lib/session-presentation";
 import { fleetRows } from "../lib/session-fleet";
 import { usesPreviewWorkspaceData } from "../lib/preview-mode";
@@ -14,15 +18,21 @@ import { AppLink } from "./AppLink";
 import { Button } from "./ui/button";
 
 type Coordination = components["schemas"]["SessionCoordinationResponse"];
+type CoordinationRequestError = Error & { status?: number; code?: string };
 
 export function SessionFleet({
 	sessions,
 	onOpen,
+	hostId,
 }: {
 	sessions: WorkspaceSession[];
 	onOpen: (session: WorkspaceSession) => void;
+	hostId?: string;
 }) {
 	const { t, i18n } = useTranslation();
+	const queryClient = useQueryClient();
+	const remote = Boolean(hostId && hostId !== LOCAL_HOST);
+	const connected = useConnectedHosts().includes(hostId ?? "");
 	const roleLabels = {
 		Orchestrator: t("shell.orchestrator"),
 		Manager: t("fleet.manager"),
@@ -34,12 +44,16 @@ export function SessionFleet({
 	const rows = useMemo(() => fleetRows(sessions, collapsed, showArchived), [sessions, collapsed, showArchived]);
 	const selected = rows.find((row) => row.session.id === selectedId) ?? rows[0];
 	const session = selected?.session;
-	const coordination = useQuery({
-		queryKey: ["session-coordination", session?.id],
-		enabled: !!session,
-		refetchInterval: 15_000,
-		queryFn: async (): Promise<Coordination> => {
-			if (usesPreviewWorkspaceData)
+	useEffect(() => {
+		if (remote && !connected) void queryClient.cancelQueries({ queryKey: ["session-coordination", hostId, session?.id], exact: true });
+	}, [queryClient, remote, connected, hostId, session?.id]);
+	const coordination = useQuery<Coordination>({
+		queryKey: ["session-coordination", hostId ?? "", session?.id],
+		enabled: !!session && (!remote || connected),
+		retry: false,
+		refetchInterval: (query) => [404, 501].includes((query.state.error as CoordinationRequestError | null)?.status ?? 0) ? false : 15_000,
+		queryFn: async ({ signal }): Promise<Coordination> => {
+			if (usesPreviewWorkspaceData && !remote)
 				return {
 					events: mockCoordinationEvents.filter(
 						(event) =>
@@ -48,13 +62,16 @@ export function SessionFleet({
 					),
 					hasMore: false,
 				};
-			const { data, error } = await apiClient.GET("/api/v1/sessions/{sessionId}/coordination", {
+			const { data, error, response } = await clientForSessionHost(hostId).GET("/api/v1/sessions/{sessionId}/coordination", {
 				params: { path: { sessionId: session!.id } },
+				signal,
 			});
-			if (error || !data) throw new Error("Could not load communication");
+			if (error || !data) throw Object.assign(apiErrorException(error), { status: response?.status, code: apiErrorCode(error) });
 			return data;
 		},
 	});
+	const historyError = coordination.error as CoordinationRequestError | null;
+	const offline = remote && (!connected || HOST_UNREACHABLE_CODES.has(historyError?.code));
 	const names = new Map(sessions.map((item) => [item.id, item.title]));
 	const toggle = (id: string) =>
 		setCollapsed((current) => {
@@ -64,7 +81,7 @@ export function SessionFleet({
 			return next;
 		});
 	return (
-		<section className="flex min-h-0 flex-1 flex-col" aria-label={t("fleet.title")}>
+		<section className="flex min-h-0 flex-1 flex-col" aria-label={t("fleet.title")} data-host-offline={offline ? "" : undefined}>
 			<div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-2">
 				<p className="text-xs text-muted-foreground">
 					{t("fleet.explanation")}
@@ -73,7 +90,7 @@ export function SessionFleet({
 					{t("fleet.showArchived")}
 				</Button>
 			</div>
-			{usesPreviewWorkspaceData ? (
+			{usesPreviewWorkspaceData && !remote ? (
 				<p className="px-4 py-2 text-xs text-muted-foreground">
 					{t("fleet.preview")}
 				</p>
@@ -201,10 +218,14 @@ export function SessionFleet({
 								<p className="text-xs text-muted-foreground">
 									{t("fleet.coverage")}
 								</p>
-								{coordination.isError ? (
-									<div role="alert" className="text-xs text-destructive">
-										{t("fleet.loadError")}{" "}
-										<Button variant="ghost" size="sm" onClick={() => void coordination.refetch()}>
+								{offline ? (
+									<p role="status" className="text-xs text-muted-foreground">
+										{t("remote.offline")}{coordination.data ? ` · ${t("remote.offlineCopy")}` : ""}
+									</p>
+								) : coordination.isError ? (
+									<div role="alert" className={cn("text-xs", historyError?.status === 404 || historyError?.status === 501 ? "text-muted-foreground" : "text-destructive")}>
+										{t(historyError?.status === 404 ? "fleet.historyNotFound" : historyError?.status === 501 ? "fleet.historyUnsupported" : "fleet.loadError")}{" "}
+										<Button variant="ghost" size="sm" disabled={coordination.isFetching} onClick={() => void coordination.refetch()}>
 											{t("notify.retry")}
 										</Button>
 									</div>
@@ -212,7 +233,8 @@ export function SessionFleet({
 									<p role="status" className="text-xs text-muted-foreground">
 										{t("fleet.loading")}
 									</p>
-								) : (
+								) : null}
+								{coordination.data && (!coordination.isError || offline) ? (
 									<>
 										{coordination.data?.hasMore ? (
 											<p className="text-xs text-muted-foreground">{t("fleet.limit")}</p>
@@ -242,7 +264,7 @@ export function SessionFleet({
 											</ol>
 										)}
 									</>
-								)}
+								) : null}
 							</div>
 						</aside>
 					) : null}
