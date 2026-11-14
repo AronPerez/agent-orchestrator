@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { appI18n } from "../i18n";
 import { SessionFleet } from "./SessionFleet";
 import type { WorkspaceSession } from "../types/workspace";
+import { forgetRemoteHost, syncRemoteCache } from "../lib/remote-chat-cache";
 
 const { get, remoteGet, connected, resolveHost, preview } = vi.hoisted(() => ({
 	get: vi.fn(), remoteGet: vi.fn(), connected: { hosts: ["box-a", "box-b"] }, resolveHost: vi.fn(), preview: { enabled: false },
@@ -219,6 +220,32 @@ describe("SessionFleet", () => {
 		expect(screen.getByRole("status")).toHaveTextContent("Offline");
 		expect(screen.queryByText("No recorded communication in this history.")).toBeNull();
 		expect(remoteGet).not.toHaveBeenCalled();
+		expect(get).not.toHaveBeenCalled();
+	});
+	it.each(["revoked pairing", "removed account host"])("clears a mounted offline Fleet's history after %s cleanup", async (reason) => {
+		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		client.setQueryData(["session-coordination", "box-b", "orch"], history("Other host history").data);
+		client.setQueryData(["session-coordination", "", "orch"], history("Local history").data);
+		remoteGet.mockResolvedValue(history("Paired-host private communication"));
+		const { showHost } = renderFleet("box-a", sessions, client);
+		expect(await screen.findByText("Paired-host private communication")).toBeVisible();
+		connected.hosts = ["box-b"];
+		showHost("box-a"); // Same mounted observer; ordinary disconnect keeps its saved copy.
+		expect(screen.getByRole("status")).toHaveTextContent("Offline");
+		expect(screen.getByText("Paired-host private communication")).toBeVisible();
+		expect(client.getQueryState(["session-coordination", "box-a", "orch"])?.fetchStatus).toBe("idle");
+		await act(async () => {
+			if (reason === "revoked pairing") await forgetRemoteHost(client, "box-a");
+			else await syncRemoteCache(client, ["box-b"]);
+		});
+		expect(client.getQueryData(["session-coordination", "box-a", "orch"])).toBeUndefined();
+		// No additional render, navigation or reconnect may be needed to scrub the live view.
+		await waitFor(() => expect(screen.queryByText("Paired-host private communication")).toBeNull());
+		expect(screen.getByRole("status")).not.toHaveTextContent("Showing the last saved copy");
+		expect(screen.queryByText("No recorded communication in this history.")).toBeNull();
+		expect(client.getQueryData(["session-coordination", "box-b", "orch"])).toEqual(history("Other host history").data);
+		expect(client.getQueryData(["session-coordination", "", "orch"])).toEqual(history("Local history").data);
+		expect(remoteGet).toHaveBeenCalledTimes(1);
 		expect(get).not.toHaveBeenCalled();
 	});
 	it.each([
