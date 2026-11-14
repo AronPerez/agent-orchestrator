@@ -966,6 +966,7 @@ export function useRemoteWorkspaces(options: WorkspaceSubscriptionOptions & {
 /** A host-qualified project detail query for the board. It shares the remote
  * session query's key, so session mutations refresh both detail surfaces. */
 export function useRemoteProjectQuery(hostId: string, projectId: string) {
+	const queryClient = useQueryClient();
 	const unpins = useRemoteUnpinStore((state) => state.unpins);
 	const select = useCallback((workspaces: WorkspaceSummary[]) => {
 		const workspace = workspaces.find((candidate) => candidate.id === projectId);
@@ -977,6 +978,14 @@ export function useRemoteProjectQuery(hostId: string, projectId: string) {
 		select,
 		enabled: Boolean(hostId && projectId),
 		retry: 1,
+		// Restore the board from the sidebar's persisted lists after a restart or
+		// combined-query eviction, also while the owning host is disconnected.
+		initialData: () => {
+			const projects = queryClient.getQueryData<Awaited<ReturnType<typeof fetchRemoteProjects>>>(remoteProjectsQueryKey(hostId));
+			const sessions = queryClient.getQueryData<Awaited<ReturnType<typeof fetchRemoteSessions>>>(remoteSessionsQueryKey(hostId));
+			return hostId && projects && sessions ? toRemoteWorkspaces(hostId, projects, sessions) : undefined;
+		},
+		initialDataUpdatedAt: () => queryClient.getQueryState(remoteSessionsQueryKey(hostId))?.dataUpdatedAt,
 	});
 }
 
