@@ -4,6 +4,7 @@ import { eventStreamBaseUrl, getApiBaseUrl, hasTrustedApiBaseUrl, subscribeApiBa
 import { setEventsConnectionState } from "./events-connection";
 import { computeSseRetryDelayMs } from "./sse-backoff";
 import { workspaceQueryKey } from "../hooks/useWorkspaceQuery";
+import { keptArtifactsQueryKey } from "../hooks/useKeptArtifacts";
 import { sessionScmSummaryQueryKey } from "../hooks/useSessionScmSummary";
 import { conversationQueryKey, conversationQueryRoot, conversationSettled, refreshRemoteConversationOnce } from "../hooks/useConversation";
 import {
@@ -283,6 +284,8 @@ export function createEventTransport(queryClient: QueryClient): EventTransport {
 				}
 				if (workspaceInvalidationPending) {
 					invalidate(workspaceQueryKey);
+					// A deleted session or removed project changes what is kept.
+					invalidate(keptArtifactsQueryKey);
 					invalidate(sessionScmSummaryQueryKey());
 					invalidate(sessionUsageQueryRoot);
 					workspaceInvalidationPending = false;
@@ -401,6 +404,7 @@ export function createEventTransport(queryClient: QueryClient): EventTransport {
 										conversationId?: unknown;
 										reviewId?: unknown;
 										interfaceTransitionId?: unknown;
+										activity?: unknown;
 										shellTerminalHandleId?: unknown;
 										kind?: unknown;
 										agentId?: unknown;
@@ -474,6 +478,12 @@ export function createEventTransport(queryClient: QueryClient): EventTransport {
 							// refetching for each one reloaded its whole page every few seconds.
 							if (!idOnlySessionUpdate || !conversationSettled(queryClient, decoded.sessionId)) {
 								pendingConversationSessions.add(decoded.sessionId);
+							}
+							// Native identity and provisioning changes carry the session-row
+							// activity field. Recheck switch readiness even after its poll
+							// budget expires, without reacting to id-only usage updates.
+							if (typeof payload?.activity === "string") {
+								pendingInterfaceTransitionSessions.add(decoded.sessionId);
 							}
 							pendingEditorHandoffSessions.add(decoded.sessionId);
 						}

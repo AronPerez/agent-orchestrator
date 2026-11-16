@@ -253,8 +253,7 @@ beforeEach(() => {
 	postMock.mockResolvedValue({ data: { ok: true, sessionId: "sess-1" }, error: undefined });
 	useWorkspaceQueryMock.mockReset();
 	useWorkspaceQueryMock.mockReturnValue({ data: [], isError: false, isLoading: false, isSuccess: true });
-	// The simplified top bar is a Developer Mode preview; this suite covers it.
-	useUiStore.setState({ developerMode: true, inspectorSessions: {}, settingsModal: null, newTaskRequest: null });
+	useUiStore.setState({ inspectorSessions: {}, settingsModal: null, newTaskRequest: null });
 });
 
 describe("optimistic orchestrator topbar", () => {
@@ -268,6 +267,20 @@ describe("optimistic orchestrator topbar", () => {
 		expect(screen.getByRole("button", { name: "New task" })).toBeDisabled();
 		expect(screen.getByRole("button", { name: "Board" })).toBeDisabled();
 		expect(screen.queryByRole("button", { name: "Notifications" })).not.toBeInTheDocument();
+		// The editor and cue controls hold their place so nothing slides in when the session lands.
+		expect(screen.getByRole("button", { name: "Choose editor", hidden: true })).toBeDisabled();
+		expect(screen.getByRole("button", { name: "Run a cue" })).toBeDisabled();
+	});
+
+	it("reserves no editor or cue slot on a remote host, where the session has neither", () => {
+		useWorkspaceQueryMock.mockReturnValue({ data: [], isError: false, isLoading: false, isSuccess: true });
+		render(
+			<QueryClientProvider client={new QueryClient()}>
+				<TooltipProvider><SessionTopbarActions startingOrchestrator route={{ hostId: "host-1", projectId: "proj-1" }} /></TooltipProvider>
+			</QueryClientProvider>,
+		);
+		expect(screen.queryByRole("button", { name: "Choose editor", hidden: true })).not.toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "Run a cue" })).not.toBeInTheDocument();
 	});
 });
 
@@ -293,6 +306,52 @@ describe("SessionTopbarActions embedded actions", () => {
 
 		const plain = renderTopbar(sessionWith());
 		expect(plain.container.querySelector("[data-session-owner-tag]")).toBeNull();
+	});
+
+	it("offers no orchestrator in a Cloud standalone agent, which has none", () => {
+		const agent = sessionWith({ workspaceId: "agent-1", workspaceName: "Fix the flake", cloud: { orgId: "org" } });
+		const data: WorkspaceSummary[] = [
+			{ id: "agent-1", name: "Fix the flake", path: "", kind: "cloud", cloudOrgId: "org", standaloneAgent: true, sessions: [agent] },
+		];
+		useWorkspaceQueryMock.mockReturnValue({ data, isError: false, isLoading: false, isSuccess: true });
+		paramsMock.projectId = "agent-1";
+		paramsMock.sessionId = agent.id;
+		render(
+			<QueryClientProvider client={new QueryClient()}>
+				<TooltipProvider>
+					<SessionTopbarActions />
+				</TooltipProvider>
+			</QueryClientProvider>,
+		);
+		expect(screen.queryByRole("button", { name: "Open orchestrator" })).toBeNull();
+	});
+
+	it("opens the archive confirmation from ⌘⇧A in a Cloud standalone agent, and returns home once confirmed", async () => {
+		const agent = sessionWith({ workspaceId: "agent-1", workspaceName: "Fix the flake", cloud: { orgId: "org" } });
+		const data: WorkspaceSummary[] = [
+			{ id: "agent-1", name: "Fix the flake", path: "", kind: "cloud", cloudOrgId: "org", standaloneAgent: true, sessions: [agent] },
+		];
+		useWorkspaceQueryMock.mockReturnValue({ data, isError: false, isLoading: false, isSuccess: true });
+		paramsMock.projectId = "agent-1";
+		paramsMock.sessionId = agent.id;
+		render(
+			<QueryClientProvider client={new QueryClient()}>
+				<TooltipProvider>
+					<SessionTopbarActions />
+				</TooltipProvider>
+			</QueryClientProvider>,
+		);
+		openArchiveConfirm();
+		await clickKillDialogConfirm();
+		// The Cloud archive goes to the control plane, not the local daemon.
+		expect(postMock).not.toHaveBeenCalled();
+		expect(navigateMock).toHaveBeenCalledWith({ to: "/" });
+	});
+
+	it("leaves ⌘⇧A inert on a Cloud session shared from another organization", () => {
+		renderTopbar(sessionWith({ cloud: { orgId: "org", shared: true } }));
+		openArchiveConfirm();
+		expect(screen.queryByRole("dialog")).toBeNull();
 	});
 
 	it("renders only session actions when embedded in the terminal bar", () => {
@@ -374,39 +433,6 @@ describe("SessionTopbarActions route", () => {
 	it("falls back to the URL without a route", () => {
 		renderRouted(orchestrator.id);
 		expect(screen.getByRole("button", { name: "New task" })).toBeInTheDocument();
-	});
-});
-
-describe("SessionTopbarActions without Developer Mode", () => {
-	beforeEach(() => useUiStore.setState({ developerMode: false }));
-
-	it("keeps the previous orchestrator row: New task and a labeled Open Kanban", () => {
-		renderTopbar(orchestrator);
-
-		const buttons = within(screen.getByTestId("workspace-topbar-actions")).getAllByRole("button");
-		const newTask = screen.getByRole("button", { name: "New task" });
-		const kanban = screen.getByRole("button", { name: "Open Kanban" });
-		expect(kanban).toHaveTextContent("Open Kanban");
-		expect(screen.queryByRole("button", { name: "Board" })).not.toBeInTheDocument();
-		expect(buttons.indexOf(newTask)).toBeLessThan(buttons.indexOf(kanban));
-		expect(screen.queryByTestId("session-actions-divider")).not.toBeInTheDocument();
-	});
-
-	it("keeps the Archive button on a worker", () => {
-		renderTopbarSessions([worker, orchestrator], worker.id);
-
-		expect(screen.getByRole("button", { name: "Archive session" })).toBeInTheDocument();
-	});
-
-	it("closes the archive confirm on the first Escape", async () => {
-		const user = userEvent.setup();
-		renderTopbarSessions([worker, orchestrator], worker.id);
-
-		await user.click(screen.getByRole("button", { name: "Archive session" }));
-		await screen.findByRole("dialog");
-
-		await user.keyboard("{Escape}");
-		await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
 	});
 });
 

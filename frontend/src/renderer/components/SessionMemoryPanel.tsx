@@ -583,7 +583,7 @@ export function SessionMemoryPanel({
 function GroupRow({ label }: { label: string }) {
 	return (
 		<tr className="memory-group">
-			<td className={cn("pb-1 pt-4 text-xs font-medium leading-4 text-settings-muted in-[tr:first-child]:pt-3", cell.name)} colSpan={columnCount}>{label}</td>
+			<td className={cn("pb-1 pt-4 text-xs font-medium leading-4 text-settings-muted [tr:first-child>&]:pt-3", cell.name)} colSpan={columnCount}>{label}</td>
 		</tr>
 	);
 }
@@ -763,7 +763,7 @@ export function sessionReport(
 	const working = session.activity?.state === "active";
 	const identity = [session.workspaceName, session.kind ?? "worker", session.provider, session.mode].filter(Boolean).join(" · ");
 	const lines = [session.title, identity];
-	// The daemon's lane ("Needs review") and what the agent is doing right now
+	// The daemon's lane ("Awaiting review") and what the agent is doing right now
 	// ("Bash · 38s") are different facts, but on an idle session they collapse
 	// to the same word; print it once.
 	const lane = session.displayStatus ?? session.status;

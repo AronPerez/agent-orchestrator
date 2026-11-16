@@ -70,22 +70,22 @@ func newRenderCommand(ctx *commandContext) *cobra.Command {
 		Use:   "render <file.html>",
 		Short: "Show a self-contained HTML page inline in this chat session's thread",
 		Long: "Show a chart, table, diagram, or mockup inline in the current chat session's\n" +
-			"thread, above your final reply. Call it before that reply, and do not announce\n" +
-			"or restate the page in it.\n\n" +
-			"The file must be one self-contained HTML document (inline <style> and <script>,\n" +
-			"at most 1 MiB). Remote https:// resources such as a CDN chart library load\n" +
-			"as-is; relative URLs do not resolve. A local image given by absolute path\n" +
-			"(src=\"/abs/shot.png\", CSS url(/abs/bg.webp), or a JS string) is put into\n" +
-			"the page, up to 10 MiB each. Orchestrator stores its own copy, so write the\n" +
-			"file outside the repository.\n\n" +
-			"Style with the theme variables Orchestrator injects on :root, which follow\n" +
-			"light/dark live: --background --foreground --muted --muted-foreground --card\n" +
+			"thread, above your final reply. Run it before writing that reply, and let the\n" +
+			"reply add to the page rather than introduce or repeat it.\n\n" +
+			"The file is a single HTML page of at most 1 MiB with its CSS and JavaScript\n" +
+			"inline. It may load https:// resources such as a charting library from a CDN;\n" +
+			"relative URLs do not resolve. A picture from this computer, named by absolute\n" +
+			"path in an img src, a CSS url(), or a JavaScript string (/tmp/plot.png), is\n" +
+			"embedded in the page, up to 10 MiB each. Orchestrator keeps its own copy, so\n" +
+			"write the file outside the repository.\n\n" +
+			"Color the page with the theme variables on :root, which switch with light and\n" +
+			"dark mode: --background --foreground --muted --muted-foreground --card\n" +
 			"--card-foreground --popover --border --border-strong --primary\n" +
 			"--primary-foreground --accent --accent-foreground --success --warning\n" +
 			"--destructive --code --link --chart-1..--chart-6 --radius --font-sans --font-mono.\n" +
-			"Use a fluid width with no outer padding, card, or border; give charts fixed\n" +
-			"pixel heights; never size html/body with 100vh. Chat sessions only: in a\n" +
-			"terminal session use `ao preview` instead.\n\n" +
+			"Let the page fill the width without outer padding, a card, or a border; give\n" +
+			"charts a fixed pixel height; do not size html or body with 100vh. Chat sessions\n" +
+			"only: in a terminal session use `ao preview` instead.\n\n" +
 			"Run `ao render --check <file>` first: the Orchestrator desktop app returns a\n" +
 			"screenshot, the page's content height, and its console messages.",
 		Example: `  ao render --check "$TMPDIR/turns-by-day.html" --width 390
@@ -182,15 +182,24 @@ func renderShownText(renderID string) string {
 }
 
 // renderArtifactLine reports where a publish kept the page as an artifact, or
-// why it did not; it is empty when no artifact was asked for.
+// why it did not; it is empty when no artifact was asked for. A kept page is not
+// registered, and in a session that registered anything else it is not listed,
+// so the line gives the agent the command while it is still acting on the render.
 func renderArtifactLine(resp renderAPIResponse) string {
 	switch {
 	case resp.ArtifactPath != "":
-		return "saved as artifact: " + resp.ArtifactPath
+		return "saved as artifact: " + resp.ArtifactPath + "\nto list it as an artifact, run: ao artifact add " + quoteShellArg(resp.ArtifactPath)
 	case resp.ArtifactError != "":
 		return "warning: not saved as artifact: " + resp.ArtifactError
 	}
 	return ""
+}
+
+// quoteShellArg single-quotes value for a POSIX shell. The path it quotes holds
+// the page title, which can repeat text from a document, and the agent runs what
+// it is given, so double quotes would leave "$(...)" and backticks live.
+func quoteShellArg(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
 
 // postRenderCheck inlines a page's local images and has the desktop app

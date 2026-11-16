@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -36,8 +37,9 @@ var (
 )
 
 const (
-	maxExcerptReferences = 8
-	maxExcerptTextBytes  = 24 * 1024
+	maxExcerptReferences   = 8
+	maxExcerptTextBytes    = 24 * 1024
+	maxExcerptCommentRunes = 4 * 1024
 	// Each excerpt carries its source turn so a short selection keeps its
 	// meaning. Long turns are truncated so eight excerpts cannot flood the
 	// provider prompt or the durable delivery row.
@@ -104,9 +106,15 @@ type Service struct {
 	autoResumeInFlight    map[string]bool
 	autoResumeScanning    bool
 	usageLimitAccounts    usageLimitAccountReader
+	handoffMu             sync.Mutex
+	handoff               accountHandoffDeps
+	handoffSince          time.Time
+	handoffScanning       bool
+	handoffs              map[string]*accountHandoff
 	// updateStops are sessions stopped so an update could replace their
 	// executable; the update starts them again, so their queue is kept.
 	updateStops map[domain.SessionID]bool
+	otherWriter func(context.Context, domain.SessionRecord, time.Time) (bool, bool)
 
 	runPromptSuggestion   func(context.Context, domain.SessionID, string, string, string) (string, error)
 	promptSuggestionSlots chan struct{}
@@ -418,6 +426,7 @@ func (s *Service) Start(ctx context.Context, cfg StartConfig) (*Controller, erro
 // startLocked is the launch implementation shared by ordinary starts and the
 // provider-switch saga. Callers must hold the typed controller gate.
 func (s *Service) startLocked(ctx context.Context, cfg StartConfig) (*Controller, error) {
+	startedAt := s.now()
 	owner := conversationOwner(cfg)
 	if owner.Kind == domain.ConversationOwnerReview {
 		cfg.ReadOnly = true
@@ -449,6 +458,7 @@ func (s *Service) startLocked(ctx context.Context, cfg StartConfig) (*Controller
 
 	replayCheckpoint := nativeHistoryCheckpoint{harness: cfg.Harness}
 	nativeEvidence := ""
+	importingHistory := false
 	if cfg.HistoryMode == ports.ChatHistoryRequired {
 		if s.sessions == nil {
 			return nil, errors.New("native history replay requires a session reader")
@@ -460,6 +470,7 @@ func (s *Service) startLocked(ctx context.Context, cfg StartConfig) (*Controller
 		if !found {
 			return nil, ports.ErrSessionNotFound
 		}
+		importingHistory = rec.NeedsImportResume()
 		nativeEvidence = rec.Metadata.NativeCheckpointEvidence
 		replayCheckpoint.latestUserPromptAt = rec.Metadata.LatestUserPromptAt
 		replayCheckpoint.latestAssistantUpdateAt = rec.Metadata.LatestAssistantUpdateAt
@@ -705,6 +716,16 @@ func (s *Service) startLocked(ctx context.Context, cfg StartConfig) (*Controller
 	if err != nil {
 		return nil, fmt.Errorf("load active conversation branch: %w", err)
 	}
+	if note := strings.TrimSpace(cfg.ForkHandoffNote); note != "" && cfg.ProviderSwitch == nil && activeBranch.HandoffNote == "" {
+		keeper, ok := s.store.(forkHandoffNoteKeeper)
+		if !ok {
+			return nil, errors.New("chat start: store can't keep a fork's copied conversation")
+		}
+		if err := keeper.SetConversationBranchHandoffNote(ctx, conversation.ID, activeBranch.ID, note); err != nil {
+			return nil, fmt.Errorf("keep fork's copied conversation: %w", err)
+		}
+		activeBranch.HandoffNote = note
+	}
 	providerScopeID := activeBranch.ProviderScopeID
 	providerHandleOwnedByActiveBranch := true
 	if cfg.ProviderScopeID != "" {
@@ -781,6 +802,17 @@ func (s *Service) startLocked(ctx context.Context, cfg StartConfig) (*Controller
 	if tokens := domain.AutoCompactTokens[conversation.Settings.AutoCompactWindow]; cfg.Harness == domain.HarnessClaudeCode && tokens > 0 {
 		cfg.Env = cloneStartConfig(cfg).Env
 		cfg.Env[claudeAutoCompactWindowEnv] = fmt.Sprint(tokens)
+	}
+	// A fork's first start resumes the provider conversation copied for it,
+	// into a conversation with no settings saved yet: it starts with the
+	// session's, as a new conversation does, not with empty ones.
+	if cfg.ProviderConversationID != "" && cfg.ForkFirstStart && cfg.ProviderSwitch == nil {
+		conversation.Settings.Model = cfg.Model
+		conversation.Settings.ReasoningEffort = cfg.Effort
+		conversation.Settings.ApprovalMode = cfg.Permissions
+		if err := s.store.SetConversationSettings(ctx, conversation.ID, conversation.Settings, s.now()); err != nil {
+			return nil, fmt.Errorf("record initial conversation settings: %w", err)
+		}
 	}
 	// Conversation settings are durable user choices. Restore the selected
 	// model when rebuilding a controller after a daemon restart; the caller's
@@ -1053,7 +1085,10 @@ func (s *Service) startLocked(ctx context.Context, cfg StartConfig) (*Controller
 	// A fresh generation per launch, so events from the controller this one
 	// replaced can be told apart from the current one's.
 	controller := newController(
-		cfg.SessionID, owner, conversation, generation, cfg.Harness, conv, s.store, s.activity, s.log, s.newID, s.now, s.onAccountChanged, s.recheckAccount, s.prChanged, s.onCodexCapacityChanged, s.reader)
+		cfg.SessionID, owner, conversation, generation, cfg.Harness, cfg.WorkspacePath, conv, s.store, s.activity, s.log, s.newID, s.now, s.onAccountChanged, s.recheckAccount, s.prChanged, s.onCodexCapacityChanged, s.reader)
+	if owner.Kind != domain.ConversationOwnerReview {
+		controller.artifactDir = s.sessionArtifactDir(ctx, cfg.SessionID)
+	}
 	var commitProviderHistory func(context.Context) error
 	if liveReconnect {
 		if err := s.store.FailReservedQueuedBatch(ctx, conversation.ID, s.now()); err != nil {
@@ -1120,6 +1155,12 @@ func (s *Service) startLocked(ctx context.Context, cfg StartConfig) (*Controller
 			ctx, existing.Turns, existing.Messages, existing.Activities,
 			(cfg.HistoryMode == ports.ChatHistoryRequired), replayCheckpoint,
 		)
+		if historyErr == nil && importingHistory && !slices.ContainsFunc(events, func(event ports.ChatEvent) bool {
+			return (event.Kind == ports.ChatEventUserMessageCompleted || event.Kind == ports.ChatEventMessageCompleted) &&
+				strings.TrimSpace(event.Text) != ""
+		}) {
+			historyErr = fmt.Errorf("%w: the provider returned no readable messages for the imported conversation", ports.ErrChatHistoryUnavailable)
+		}
 		if historyErr != nil {
 			if cleanupErr := cleanupUnpublishedConversation(conv, false); cleanupErr != nil && (cfg.HistoryMode == ports.ChatHistoryRequired) {
 				return nil, fmt.Errorf("%w: failed history target shutdown: %w",
@@ -1226,6 +1267,9 @@ func (s *Service) startLocked(ctx context.Context, cfg StartConfig) (*Controller
 		cfg.ExpectedControllerOwner.ControllerGeneration = controller.Generation()
 	}
 	s.mu.Lock()
+	if !liveReconnect {
+		controller.started = startedAt
+	}
 	s.ownerControllers[owner] = controller
 	if owner.Kind == domain.ConversationOwnerSession {
 		s.controllers[cfg.SessionID] = controller
@@ -1364,9 +1408,38 @@ func (s *Service) Send(
 	if err := validateFileReferenceContent(msg, string(id)); err != nil {
 		return domain.ConversationTurn{}, err
 	}
-	if s.switchBeforeSend(ctx, record) {
-		// The provider stopped on its old release. The hibernated path below
-		// queues this message and wakes the session on the installed one.
+	restarting, writerErr := s.checkOtherWriter(ctx, record)
+	if writerErr != nil {
+		if found, err := s.sentMessageRetry(ctx, id, msg); found || err != nil {
+			return domain.ConversationTurn{}, err
+		}
+		return domain.ConversationTurn{}, writerErr
+	}
+	sharedClaudeImport := record.Harness == domain.HarnessClaudeCode && record.Metadata.ImportSource != nil &&
+		record.Metadata.ProviderConversationID == cmp.Or(record.Metadata.ImportSource.ResumeNativeID, record.Metadata.ImportSource.NativeID)
+	if restarting && !sharedClaudeImport {
+		defer s.startBackgroundWake(id)
+	}
+	if restarting || s.switchBeforeSend(ctx, record) {
+		// The provider stopped. Refresh the durable hibernation state before
+		// reloading imported history or queuing this message for a wake.
+		if record, err = s.requireChatSession(ctx, id); err != nil {
+			return domain.ConversationTurn{}, err
+		}
+	}
+	if sharedClaudeImport && record.HibernatedAt != nil {
+		if found, err := s.sentMessageRetry(ctx, id, msg); found || err != nil {
+			return domain.ConversationTurn{}, err
+		}
+		// Native history must be projected before this prompt gets a sequence.
+		// Queuing it before the reload puts older terminal turns below it.
+		if err := s.wakeHibernated(ctx, id); err != nil {
+			s.versionSwitchFailed(ctx, id, err)
+			return domain.ConversationTurn{}, fmt.Errorf("%w: reload imported conversation: %w", ports.ErrChatResumeFailed, err)
+		}
+		if version, switched := s.takeVersionSwitch(id); switched {
+			s.observeVersionSwitch(id, version, "succeeded")
+		}
 		if record, err = s.requireChatSession(ctx, id); err != nil {
 			return domain.ConversationTurn{}, err
 		}
@@ -1380,6 +1453,9 @@ func (s *Service) Send(
 			} else if found {
 				if !fileReferenceContentsMatch(existing.DeliveryContentJSON, msg.Content) {
 					return domain.ConversationTurn{}, domain.ErrClientMessageConflict
+				}
+				if err := validateSnapshotRetry(msg, existing); err != nil {
+					return domain.ConversationTurn{}, err
 				}
 				msg.ClientPayloadHash = existing.ClientPayloadHash
 				return controller.Send(ctx, msg)
@@ -1480,9 +1556,19 @@ func (s *Service) SendForOwner(ctx context.Context, owner domain.ConversationOwn
 			if !fileReferenceContentsMatch(existing.DeliveryContentJSON, msg.Content) {
 				return domain.ConversationTurn{}, domain.ErrClientMessageConflict
 			}
+			if err := validateSnapshotRetry(msg, existing); err != nil {
+				return domain.ConversationTurn{}, err
+			}
 			msg.ClientPayloadHash = existing.ClientPayloadHash
 			return controller.Send(ctx, msg)
 		}
+	}
+	if hasExcerptSnapshots(msg.Excerpts) {
+		hash, err := clientPayloadHash(msg)
+		if err != nil {
+			return domain.ConversationTurn{}, err
+		}
+		msg.ClientPayloadHash = hash
 	}
 	if err := hydrateExcerptReferences(ctx, controller, &msg); err != nil {
 		return domain.ConversationTurn{}, err
@@ -1496,6 +1582,20 @@ func hydrateExcerptReferences(ctx context.Context, controller *Controller, msg *
 	}
 	if err := validateExcerptReferences(msg.Excerpts, controller.conversation.ID); err != nil {
 		return err
+	}
+	if hasExcerptSnapshots(msg.Excerpts) {
+		var legacy []ports.ChatExcerptReference
+		for _, ref := range msg.Excerpts {
+			if ref.Snapshot != nil {
+				msg.Content = append(msg.Content, snapshotExcerptContent(ref))
+			} else {
+				legacy = append(legacy, ref)
+			}
+		}
+		msg.Excerpts = legacy
+		if len(legacy) == 0 {
+			return nil
+		}
 	}
 	messages, err := controller.store.ConversationMessages(ctx, controller.conversation.ID)
 	if err != nil {
@@ -1567,13 +1667,25 @@ func validateExcerptReferences(excerpts []ports.ChatExcerptReference, conversati
 	if len(excerpts) > maxExcerptReferences {
 		return fmt.Errorf("%w: at most %d excerpts may be attached", ErrExcerptInvalid, maxExcerptReferences)
 	}
-	total := 0
+	total, rawTotal := 0, 0
 	for _, excerpt := range excerpts {
 		text := strings.TrimSpace(excerpt.Text)
-		if excerpt.ConversationID != conversationID || excerpt.MessageID == "" || text == "" || excerpt.Revision < 0 {
+		if excerpt.ConversationID != conversationID || excerpt.MessageID == "" || (text == "" && !isFlowchartOnlySnapshot(excerpt.Snapshot)) || excerpt.Revision < 0 {
 			return fmt.Errorf("%w: source conversation, message, revision, and text are required", ErrExcerptInvalid)
 		}
-		total += len(text)
+		if utf8.RuneCountInString(excerpt.Comment) > maxExcerptCommentRunes {
+			return fmt.Errorf("%w: annotation comment exceeds %d characters", ErrExcerptInvalid, maxExcerptCommentRunes)
+		}
+		if excerpt.Snapshot != nil {
+			if err := validateExcerptSnapshot(excerpt.Snapshot); err != nil {
+				return err
+			}
+			rawTotal += len(excerpt.Snapshot.RawText)
+			if rawTotal > maxExcerptTextBytes {
+				return fmt.Errorf("%w: raw excerpts exceed %d bytes", ErrExcerptInvalid, maxExcerptTextBytes)
+			}
+		}
+		total += len(excerpt.Text)
 		if total > maxExcerptTextBytes {
 			return fmt.Errorf("%w: attached excerpts exceed %d bytes", ErrExcerptInvalid, maxExcerptTextBytes)
 		}
@@ -1950,6 +2062,8 @@ type Snapshot struct {
 	HasMoreBefore                    bool
 	// AfterSequence is the floor of a tail read, or zero for a whole page.
 	AfterSequence int64
+	// BatchedDeliveries links queued turns AO batched into another turn's input.
+	BatchedDeliveries []domain.ConversationBatchedDelivery
 	// Usage and RateLimits are current state carried on the snapshot the client
 	// already polls, rather than timeline entries or a second request. Both are nil
 	// until the provider has reported, so a client can tell "not known yet" from a
@@ -1996,6 +2110,8 @@ type ConversationRows struct {
 	OldestSequence                   int64
 	HasMoreBefore                    bool
 	AfterSequence                    int64
+	// BatchedDeliveries links queued turns AO batched into another turn's input.
+	BatchedDeliveries []domain.ConversationBatchedDelivery
 }
 
 // idleControllerState is what a session with no live controller reports. A
@@ -2042,9 +2158,13 @@ func withDispatchingTurnRunning(turns []domain.ConversationTurn, dispatching ...
 // controller state is reported separately so the client can distinguish "no
 // history" from "agent not running".
 func (s *Service) Snapshot(ctx context.Context, id domain.SessionID) (Snapshot, error) {
-	record, err := s.requireChatSession(ctx, id)
+	record, err := s.requireReadableConversation(ctx, id)
 	if err != nil {
 		return Snapshot{}, err
+	}
+
+	if record.NeedsImportResume() {
+		return s.importedSnapshot(ctx, record, 0, 100)
 	}
 
 	conversation, err := s.store.ConversationForSession(ctx, id)
@@ -2100,6 +2220,7 @@ func (s *Service) Snapshot(ctx context.Context, id domain.SessionID) (Snapshot, 
 		Activities:                       rows.Activities,
 		BranchPoints:                     rows.BranchPoints,
 		BranchedFromEarlierMessage:       rows.BranchedFromEarlierMessage,
+		BatchedDeliveries:                rows.BatchedDeliveries,
 		Capabilities:                     caps,
 		Usage:                            rows.Conversation.Usage,
 		RateLimits:                       rows.Conversation.RateLimits,
@@ -2145,7 +2266,7 @@ func (s *Service) snapshotForReviewRows(review domain.Review, rows ConversationR
 		state, caps = controller.State(), controller.Capabilities()
 		dispatching = controller.DispatchingTurnIDs()
 	}
-	return Snapshot{Conversation: rows.Conversation, ActiveBranch: rows.ActiveBranch, EditFloorSequence: rows.EditFloorSequence, NativeForkAvailableAfterSequence: rows.NativeForkAvailableAfterSequence, SessionID: review.SessionID, Harness: domain.AgentHarness(review.Harness), Mode: domain.SessionModeChat, Controller: state, Turns: withDispatchingTurnRunning(rows.Turns, dispatching...), Messages: rows.Messages, Activities: rows.Activities, BranchPoints: rows.BranchPoints, BranchedFromEarlierMessage: rows.BranchedFromEarlierMessage, OldestSequence: rows.OldestSequence, HasMoreBefore: rows.HasMoreBefore, Capabilities: caps, Usage: rows.Conversation.Usage, RateLimits: rows.Conversation.RateLimits}
+	return Snapshot{Conversation: rows.Conversation, ActiveBranch: rows.ActiveBranch, EditFloorSequence: rows.EditFloorSequence, NativeForkAvailableAfterSequence: rows.NativeForkAvailableAfterSequence, SessionID: review.SessionID, Harness: domain.AgentHarness(review.Harness), Mode: domain.SessionModeChat, Controller: state, Turns: withDispatchingTurnRunning(rows.Turns, dispatching...), Messages: rows.Messages, Activities: rows.Activities, BranchPoints: rows.BranchPoints, BranchedFromEarlierMessage: rows.BranchedFromEarlierMessage, OldestSequence: rows.OldestSequence, HasMoreBefore: rows.HasMoreBefore, BatchedDeliveries: rows.BatchedDeliveries, Capabilities: caps, Usage: rows.Conversation.Usage, RateLimits: rows.Conversation.RateLimits}
 }
 
 // SnapshotPage reads one bounded timeline page. The live conversation metadata
@@ -2154,10 +2275,14 @@ func (s *Service) snapshotForReviewRows(review domain.Review, rows ConversationR
 // A positive afterSequence reads only the tail after it; AfterSequence echoes it
 // when the reader applied it.
 func (s *Service) SnapshotPage(ctx context.Context, id domain.SessionID, beforeSequence, afterSequence, limit int64) (Snapshot, error) {
-	record, err := s.requireChatSession(ctx, id)
+	record, err := s.requireReadableConversation(ctx, id)
 	if err != nil {
 		return Snapshot{}, err
 	}
+	if record.NeedsImportResume() {
+		return s.importedSnapshot(ctx, record, beforeSequence, limit)
+	}
+
 	conversation, err := s.store.ConversationForSession(ctx, id)
 	if errors.Is(err, domain.ErrNoConversation) {
 		return Snapshot{
@@ -2178,6 +2303,11 @@ func (s *Service) SnapshotPage(ctx context.Context, id domain.SessionID, beforeS
 	rows, err := s.pageReader.LoadConversationSnapshotPage(ctx, conversation.ID, beforeSequence, afterSequence, limit)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("load conversation page %s: %w", conversation.ID, err)
+	}
+	if source := record.Metadata.ImportSource; source != nil && source.HistoryThrough > 0 && !rows.HasMoreBefore && rows.AfterSequence == 0 {
+		if rows, err = s.withImportedHistory(ctx, id, source.HistoryThrough, rows, beforeSequence, limit); err != nil {
+			return Snapshot{}, err
+		}
 	}
 	waking := s.isWaking(id)
 	state := idleControllerState(record)
@@ -2213,6 +2343,7 @@ func (s *Service) SnapshotPage(ctx context.Context, id domain.SessionID, beforeS
 		OldestSequence:                   rows.OldestSequence,
 		HasMoreBefore:                    rows.HasMoreBefore,
 		AfterSequence:                    rows.AfterSequence,
+		BatchedDeliveries:                rows.BatchedDeliveries,
 		Capabilities:                     caps,
 		Usage:                            rows.Conversation.Usage,
 		RateLimits:                       rows.Conversation.RateLimits,
@@ -2344,6 +2475,29 @@ func chatAdmissionError(driver ports.ChatDriver, harness domain.AgentHarness, ca
 	return nil
 }
 
+// PreflightChatWithEnv checks the task's native prerequisites separately from
+// cached global capabilities, before the session manager allocates durable state.
+func (s *Service) PreflightChatWithEnv(
+	ctx context.Context,
+	harness domain.AgentHarness,
+	permissions ports.PermissionMode,
+	env map[string]string,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	driver, err := s.drivers.Driver(harness)
+	if err != nil {
+		return fmt.Errorf("%w: %s has no chat driver", ports.ErrChatUnsupported, harness)
+	}
+	if validator, ok := driver.(ports.ChatEnvironmentValidator); ok {
+		if err := validator.ValidateEnvironment(ctx, env); err != nil {
+			return err
+		}
+	}
+	return s.PreflightChat(ctx, harness, permissions)
+}
+
 func capabilityAdmissionError(
 	harness domain.AgentHarness,
 	caps ports.ChatCapabilities,
@@ -2415,6 +2569,12 @@ func (s *Service) rebindBranchOnReady(
 
 // withHandoffNote adds a switch's handoff note to the agent's system prompt. A
 // branch keeps its note for life, so every launch on it passes the note again.
+// forkHandoffNoteKeeper stores the note a text-handoff fork's agent starts
+// with on the branch it runs on.
+type forkHandoffNoteKeeper interface {
+	SetConversationBranchHandoffNote(ctx context.Context, conversationID, branchID, note string) error
+}
+
 func withHandoffNote(systemPrompt, note string) string {
 	if note == "" {
 		return systemPrompt
@@ -2890,6 +3050,12 @@ func (s *Service) relayChatTurn(
 	// through the provider start, and a caller holding the session's input
 	// lease (a lifecycle nudge) deadlocks with the resume, which waits for that
 	// lease to drain.
+	stoppedForOtherWriter := false
+	defer func() {
+		if stoppedForOtherWriter {
+			s.startBackgroundWake(id)
+		}
+	}()
 	for {
 		if err := ctx.Err(); err != nil {
 			return "", err
@@ -2897,6 +3063,17 @@ func (s *Service) relayChatTurn(
 		record, err := s.requireChatSession(ctx, id)
 		if err != nil {
 			return "", err
+		}
+		restarting, writerErr := s.checkOtherWriter(ctx, record)
+		if writerErr != nil {
+			if found, err := s.sentMessageRetry(ctx, id, msg); found || err != nil {
+				return "", err
+			}
+			return "", writerErr
+		}
+		if restarting {
+			stoppedForOtherWriter = true
+			continue
 		}
 		if record.HibernatedAt != nil {
 			turn, err := s.queueWithoutController(ctx, record, msg, false)
