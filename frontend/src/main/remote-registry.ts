@@ -52,6 +52,11 @@ export class RemoteRegistry {
 		return [...this.live.values()].find(({ view }) => view.hostId === hostId)?.proxy.browserRuntime;
 	}
 
+	/** The connected host's API base on its loopback proxy, or undefined while it is not connected. */
+	apiBase(hostId: string): string | undefined {
+		return [...this.live.values()].find(({ view }) => view.hostId === hostId)?.view.base;
+	}
+
 	previewUrl(hostId: string, sessionId: string, sourceUrl: string): string {
 		const connected = [...this.live.values()].find(({ view }) => view.hostId === hostId);
 		if (!connected) throw new Error(`Host ${hostId} is not connected`);
@@ -60,6 +65,10 @@ export class RemoteRegistry {
 
 	isAgentBrowserUrl(url: string): boolean {
 		return [...this.live.values()].some(({ proxy }) => proxy.isAgentBrowserUrl?.(url) ?? false);
+	}
+
+	isRenderUrl(url: string): boolean {
+		return [...this.live.values()].some(({ proxy }) => proxy.isRenderUrl?.(url) ?? false);
 	}
 
 	agentBrowserUrl(hostId: string, sessionId: string): Promise<string> {
