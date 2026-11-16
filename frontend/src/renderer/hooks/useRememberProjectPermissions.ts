@@ -6,6 +6,7 @@ import { clientForSessionHost } from "../lib/host-clients";
 import type { ApprovalMode } from "../types/conversation";
 import { STANDALONE_WORKSPACE_ID, type SessionKind } from "../types/workspace";
 import { remoteWorkspaceQueryKey, workspaceQueryKey } from "./useWorkspaceQuery";
+import { projectQueryKey } from "./useProjectSettingsQuery";
 
 type ProjectPermissionsConfig = {
 	config?: {
@@ -23,7 +24,7 @@ type ProjectPermissionsConfig = {
 export function useRememberProjectPermissions(projectId: string, sourceHarness?: string, hostId?: string, kind?: SessionKind) {
 	const queryClient = useQueryClient();
 	const hasProject = Boolean(projectId) && projectId !== STANDALONE_WORKSPACE_ID;
-	const projectKey = hostId ? ["project", projectId, hostId] : ["project", projectId];
+	const projectKey = projectQueryKey(projectId, hostId);
 	const project = useQuery({
 		queryKey: projectKey,
 		enabled: hasProject,
@@ -49,7 +50,7 @@ export function useRememberProjectPermissions(projectId: string, sourceHarness?:
 		},
 		onSuccess: (_data, { targetProjectId }) => {
 			void Promise.all([
-				queryClient.invalidateQueries({ queryKey: hostId ? ["project", targetProjectId, hostId] : ["project", targetProjectId] }),
+				queryClient.invalidateQueries({ queryKey: projectQueryKey(targetProjectId, hostId) }),
 				queryClient.invalidateQueries({ queryKey: hostId ? remoteWorkspaceQueryKey(hostId) : workspaceQueryKey }),
 			]).catch(() => {});
 		},
