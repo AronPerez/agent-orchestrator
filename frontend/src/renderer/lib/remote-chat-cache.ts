@@ -43,12 +43,19 @@ function cachedHost(key: QueryKey): string | undefined {
 
 const isChat = (key: QueryKey) => key[0] === "remote-conversation";
 
-function removeCoordinationQueries(queryClient: QueryClient, queryKey: QueryKey, exact = false): void {
+function removeObservedQueries(queryClient: QueryClient, queryKey: QueryKey, exact = false): void {
 	const filters = { queryKey, exact };
 	// Reset before eviction so mounted observers release history too. Calling
 	// resetQueries instead would also refetch active observers during cleanup.
 	for (const query of queryClient.getQueryCache().findAll(filters)) query.reset();
 	queryClient.removeQueries(filters);
+}
+
+// These queries share the host's access lifetime but are never written to disk.
+function memoryHost(key: QueryKey): string | undefined {
+	if (typeof key[1] !== "string") return undefined;
+	if (key[0] === "session-coordination" || (key[0] === "project" && key.length === 3) || key[0] === "project-avatar") return key[1];
+	return undefined;
 }
 
 // Data read from disk or already written is not written again.
@@ -63,10 +70,9 @@ let loaded = false;
 export async function syncRemoteCache(queryClient: QueryClient, hostIds: string[]): Promise<void> {
 	const hosts = new Set(hostIds);
 	for (const query of queryClient.getQueryCache().findAll()) {
-		// Coordination is memory-only, but shares the saved host's access lifetime.
-		const host = cachedHost(query.queryKey) ?? (query.queryKey[0] === "session-coordination" && typeof query.queryKey[1] === "string" ? query.queryKey[1] : undefined);
+		const host = cachedHost(query.queryKey) ?? memoryHost(query.queryKey);
 		if (host && !hosts.has(host)) {
-			if (query.queryKey[0] === "session-coordination") removeCoordinationQueries(queryClient, query.queryKey, true);
+			if (memoryHost(query.queryKey)) removeObservedQueries(queryClient, query.queryKey, true);
 			else queryClient.removeQueries({ queryKey: query.queryKey, exact: true });
 		}
 	}
@@ -101,7 +107,9 @@ export async function syncRemoteCache(queryClient: QueryClient, hostIds: string[
 export async function forgetRemoteHost(queryClient: QueryClient, hostId: string): Promise<void> {
 	queryClient.removeQueries({ queryKey: ["remote-conversation", hostId] });
 	queryClient.removeQueries({ queryKey: ["remote-workspaces", hostId] });
-	removeCoordinationQueries(queryClient, ["session-coordination", hostId]);
+	for (const query of queryClient.getQueryCache().findAll()) {
+		if (memoryHost(query.queryKey) === hostId) removeObservedQueries(queryClient, query.queryKey, true);
+	}
 	if (typeof indexedDB === "undefined") return;
 	try {
 		const store = (await openDatabase()).transaction(STORE, "readwrite").objectStore(STORE);

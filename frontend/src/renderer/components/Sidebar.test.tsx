@@ -42,6 +42,7 @@ import { useRemoteWorkspaces } from "../hooks/useWorkspaceQuery";
 import { clearOptimisticSessionKill, trackOptimisticSessionKill } from "../hooks/optimistic-session-kills";
 import { useRemoteUnpinStore } from "../stores/remote-unpin-store";
 import { sessionUiKey } from "../lib/hosts";
+import { connectHost, disconnectHost } from "../lib/host-clients";
 
 type DragOverTestEvent = {
 	active: {
@@ -3413,6 +3414,33 @@ describe("Sidebar", () => {
 		const icon = document.querySelector("[data-project-folder-icon]");
 		expect(icon).toHaveTextContent("P");
 		expect(icon?.querySelector(".icon-folder")).not.toBeInTheDocument();
+	});
+
+	it("renders the owning host's avatar beside a remote project with the same ID as a local project", async () => {
+		useUiStore.setState({ projectAvatars: true, remoteHosts: true });
+		const url = "http://box-avatar:3001";
+		const connection = vi.spyOn(aoBridge.remotes, "connect").mockResolvedValue({ hostId: "box-avatar", label: "Box", url, base: "http://127.0.0.1:4000" });
+		await connectHost(url);
+		const remoteUrl = "https://avatars.githubusercontent.com/remote?s=64";
+		const remoteData = "data:image/png;base64,cmVtb3Rl";
+		try {
+			renderSidebar({
+				workspaces: [{ ...workspace, sessions: [] }],
+				remoteHosts: [{ hostId: "box-avatar", label: "Box", url, status: "connected" }],
+				remoteWorkspaces: [{ ...workspace, hostId: "box-avatar", sessions: [] }],
+				seed: (client) => {
+					client.setQueryData(["project", workspace.id], { repo: "https://github.com/local/repo" });
+					client.setQueryData(["project", "box-avatar", workspace.id], { repo: "https://github.com/remote/repo" });
+					client.setQueryData(["project-avatar", "box-avatar", workspace.id, remoteUrl], remoteData);
+				},
+			});
+			await waitFor(() => expect(document.querySelector("[data-remote-project-row] img")).toHaveAttribute("src", remoteData));
+			expect(document.querySelector('[data-project-id]:not([data-remote-project-row]) img')).toHaveAttribute("src", "https://avatars.githubusercontent.com/local?s=64");
+		} finally {
+			cleanup();
+			await disconnectHost("box-avatar");
+			connection.mockRestore();
+		}
 	});
 
 	it("previews the board card to the right of a hovered session row", async () => {

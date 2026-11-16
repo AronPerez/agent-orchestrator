@@ -927,7 +927,8 @@ export const Sidebar = memo(function Sidebar({
 			sessions: scratchpads.flatMap((workspace) => workspace.sessions),
 		};
 	}, [t, workspaces]);
-	const projectAvatars = useProjectAvatars(projectWorkspaces);
+	const avatarWorkspaces = useMemo(() => [...projectWorkspaces, ...remoteWorkspaces], [projectWorkspaces, remoteWorkspaces]);
+	const projectAvatars = useProjectAvatars(avatarWorkspaces);
 	const {
 		listed: visibleWorkspaces,
 		hiddenCount: hiddenProjectCount,
@@ -1294,6 +1295,7 @@ export const Sidebar = memo(function Sidebar({
 													key={projectKey}
 													workspace={workspace}
 													hostLabel={host.label}
+													avatarUrl={projectAvatars.get(projectKey)}
 													expanded={!collapsedRemoteProjects.has(projectKey)}
 													selection={scopedSelection}
 													isDragged={false}

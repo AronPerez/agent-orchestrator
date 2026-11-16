@@ -1,10 +1,13 @@
 import { useQueries } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
-import { apiClient } from "../lib/api-client";
 import { apiErrorException } from "../lib/api-error-exception";
+import { clientForSessionHost } from "../lib/host-clients";
+import { sessionUiKey } from "../lib/hosts";
 import { repositoryOwnerAvatar } from "../lib/repository-avatar";
 import { useUiStore } from "../stores/ui-store";
 import { CLOUD_PROJECT_KIND, STANDALONE_PROJECT_KIND, type WorkspaceSummary } from "../types/workspace";
+import { useConnectedHosts } from "./useHostConnection";
+import { projectQueryKey } from "./useProjectSettingsQuery";
 
 // Avatar URL -> the image as a data URL, so a launch paints known avatars with
 // no network request.
@@ -40,9 +43,18 @@ function readCache(): AvatarCache {
 // Draws the avatar through a CORS image and a canvas. Loading it as an image
 // keeps it under the renderer's img-src policy (fetch would need connect-src),
 // and a redirect to a sign-in page fails to decode instead of being cached.
-function loadAsDataUrl(url: string): Promise<string | null> {
+function loadAsDataUrl(url: string, signal?: AbortSignal): Promise<string | null> {
 	return new Promise((resolve) => {
+		if (signal?.aborted) return resolve(null);
 		const image = new Image();
+		const finish = (src: string | null) => {
+			image.onload = null;
+			image.onerror = null;
+			signal?.removeEventListener("abort", abort);
+			resolve(src);
+		};
+		const abort = () => { finish(null); image.src = ""; };
+		signal?.addEventListener("abort", abort, { once: true });
 		image.crossOrigin = "anonymous";
 		image.onload = () => {
 			try {
@@ -50,14 +62,14 @@ function loadAsDataUrl(url: string): Promise<string | null> {
 				canvas.width = 64;
 				canvas.height = 64;
 				const context = canvas.getContext("2d");
-				if (!context) return resolve(null);
+				if (!context) return finish(null);
 				context.drawImage(image, 0, 0, 64, 64);
-				resolve(canvas.toDataURL("image/png"));
+				finish(canvas.toDataURL("image/png"));
 			} catch {
-				resolve(null);
+				finish(null);
 			}
 		};
-		image.onerror = () => resolve(null);
+		image.onerror = () => finish(null);
 		image.src = url;
 	});
 }
@@ -65,27 +77,29 @@ function loadAsDataUrl(url: string): Promise<string | null> {
 // Refreshed once per launch, so an owner's new avatar replaces the cached one.
 const refreshedUrls = new Set<string>();
 
-// The image source for each local project's repository owner avatar, keyed by
-// project id. Cached images come from localStorage on first render, so the
+// Image sources keyed by sessionUiKey(projectId, hostId). Local cached images
+// come from localStorage on first render, so the
 // sidebar paints them instantly; project details then confirm the owner and
 // refresh the cache in the background. A failed refresh keeps the cached
 // image. Empty when the setting is off.
 export function useProjectAvatars(workspaces: readonly WorkspaceSummary[]): Map<string, string> {
 	const enabled = useUiStore((state) => state.projectAvatars);
+	const connected = useConnectedHosts();
 	const [cache, setCache] = useState(readCache);
 	const [knownUrls] = useState(() => readStrings(urlsKey));
 	const projects = useMemo(
-		() => workspaces.filter((workspace) => !workspace.hostId && workspace.kind !== CLOUD_PROJECT_KIND && workspace.kind !== STANDALONE_PROJECT_KIND),
+		() => workspaces.filter((workspace) => workspace.kind !== CLOUD_PROJECT_KIND && workspace.kind !== STANDALONE_PROJECT_KIND),
 		[workspaces],
 	);
 	const details = useQueries({
 		queries: projects.map((project) => ({
-			queryKey: ["project", project.id],
-			enabled,
+			queryKey: projectQueryKey(project.id, project.hostId),
+			enabled: enabled && (!project.hostId || connected.includes(project.hostId)),
 			staleTime: 30_000,
-			queryFn: async () => {
-				const { data, error } = await apiClient.GET("/api/v1/projects/{id}", {
+			queryFn: async ({ signal }) => {
+				const { data, error } = await clientForSessionHost(project.hostId).GET("/api/v1/projects/{id}", {
 					params: { path: { id: project.id } },
+					signal,
 				});
 				if (error) throw apiErrorException(error);
 				if (data?.status !== "ok") return undefined;
@@ -96,10 +110,12 @@ export function useProjectAvatars(workspaces: readonly WorkspaceSummary[]): Map<
 	const urls = useMemo(() => {
 		const map = new Map<string, string>();
 		projects.forEach((project, index) => {
+			if (project.hostId && !connected.includes(project.hostId)) return;
+			const key = sessionUiKey(project.id, project.hostId);
 			const query = details[index];
 			if (!query?.isSuccess) {
-				const known = knownUrls[project.id];
-				if (known) map.set(project.id, known);
+				const known = !project.hostId && knownUrls[project.id];
+				if (known) map.set(key, known);
 				return;
 			}
 			const detail = query.data;
@@ -111,13 +127,32 @@ export function useProjectAvatars(workspaces: readonly WorkspaceSummary[]): Map<
 				? { repo: detail.canonicalRepo, ownerAvatarUrl: detail.canonicalOwnerAvatarUrl }
 				: undefined;
 			const avatar = repo ? repositoryOwnerAvatar(repo, canonical) : null;
-			if (avatar) map.set(project.id, avatar.url);
+			if (avatar) map.set(key, avatar.url);
 		});
 		return map;
-	}, [details, knownUrls, projects]);
-	const urlKey = [...new Set(urls.values())].sort().join("\n");
-	const settled = details.every((query) => !query.isPending);
-	const urlsJson = JSON.stringify(Object.fromEntries(urls));
+	}, [connected, details, knownUrls, projects]);
+	const remoteImages = projects.flatMap((project) => {
+		const key = sessionUiKey(project.id, project.hostId);
+		const url = urls.get(key);
+		return project.hostId && url ? [{ key, hostId: project.hostId, id: project.id, url }] : [];
+	});
+	// Public SCM images use the same CORS/canvas path as local avatars. Only
+	// their metadata needs host authentication; remote pixels stay memory-only.
+	const remoteSources = useQueries({
+		queries: remoteImages.map((image) => ({
+			queryKey: ["project-avatar", image.hostId, image.id, image.url],
+			enabled,
+			staleTime: Infinity,
+			queryFn: ({ signal }) => loadAsDataUrl(image.url, signal),
+		})),
+	});
+	const localUrls = new Map(projects.filter((project) => !project.hostId).flatMap((project) => {
+		const url = urls.get(project.id);
+		return url ? [[project.id, url] as const] : [];
+	}));
+	const urlKey = [...new Set(localUrls.values())].sort().join("\n");
+	const settled = projects.every((project, index) => project.hostId || !details[index]?.isPending);
+	const urlsJson = JSON.stringify(Object.fromEntries(localUrls));
 	useEffect(() => {
 		if (!enabled || !settled) return;
 		try {
@@ -150,7 +185,11 @@ export function useProjectAvatars(workspaces: readonly WorkspaceSummary[]): Map<
 	return useMemo(() => {
 		const map = new Map<string, string>();
 		if (!enabled) return map;
-		for (const [projectId, url] of urls) map.set(projectId, cache[url] ?? url);
+		for (const [projectId, url] of localUrls) map.set(projectId, cache[url] ?? url);
+		remoteImages.forEach((image, index) => {
+			const src = remoteSources[index]?.data;
+			if (src) map.set(image.key, src);
+		});
 		return map;
-	}, [cache, enabled, urls]);
+	}, [cache, enabled, localUrls, remoteImages, remoteSources]);
 }

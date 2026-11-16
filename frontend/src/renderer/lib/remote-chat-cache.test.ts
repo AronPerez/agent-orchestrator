@@ -9,7 +9,10 @@ function seeded() {
 		client.setQueryData(["remote-workspaces", hostId, "sessions"], []);
 		client.setQueryData(["remote-workspaces", hostId, "projects"], []);
 		client.setQueryData(["session-coordination", hostId, "session-1"], { events: [], hasMore: false });
+		client.setQueryData(["project", hostId, "same"], { repo: `https://github.com/${hostId}/repo` });
+		client.setQueryData(["project-avatar", hostId, "same", "https://avatars.githubusercontent.com/u/42"], "data:image/png;base64,cGl4ZWxz");
 	}
+	client.setQueryData(["project", "same"], { repo: "https://github.com/local/repo" });
 	client.setQueryData(["session-coordination", "", "session-1"], { events: [], hasMore: false });
 	client.setQueryData(["remote-conversation-refresh-error", "box-b", "session-1"], true);
 	return client;
@@ -26,6 +29,10 @@ it("prunes a removed account host while keeping locally paired and local history
 	expect(client.getQueryData(["session-coordination", "box-b", "session-1"])).toBeUndefined();
 	expect(client.getQueryData(["session-coordination", "box-a", "session-1"])).toBeDefined();
 	expect(client.getQueryData(["session-coordination", "", "session-1"])).toBeDefined();
+	expect(client.getQueryData(["project", "box-b", "same"])).toBeUndefined();
+	expect(client.getQueryData(["project-avatar", "box-b", "same", "https://avatars.githubusercontent.com/u/42"])).toBeUndefined();
+	expect(client.getQueryData(["project-avatar", "box-a", "same", "https://avatars.githubusercontent.com/u/42"])).toBeDefined();
+	expect(client.getQueryData(["project", "same"])).toBeDefined();
 	// Only kept queries are the cache's to prune.
 	expect(client.getQueryData(["remote-conversation-refresh-error", "box-b", "session-1"])).toBe(true);
 });
@@ -38,6 +45,16 @@ it("drops everything kept for a host that refused this device", async () => {
 	expect(client.getQueryData(["session-coordination", "box-b", "session-1"])).toBeUndefined();
 	expect(client.getQueryData(["session-coordination", "box-a", "session-1"])).toBeDefined();
 	expect(client.getQueryData(["remote-conversation", "box-a", "session-1"])).toBeDefined();
+	expect(client.getQueryData(["project", "box-b", "same"])).toBeUndefined();
+	expect(client.getQueryData(["project-avatar", "box-b", "same", "https://avatars.githubusercontent.com/u/42"])).toBeUndefined();
+});
+
+it("does not confuse a local project ID with a forgotten host ID", async () => {
+	const client = seeded();
+	client.setQueryData(["project", "box-b"], { repo: "https://github.com/local/repo" });
+	await forgetRemoteHost(client, "box-b");
+	expect(client.getQueryData(["project", "box-b"])).toBeDefined();
+	client.clear();
 });
 
 it("cancels forgotten-host coordination so a late response cannot repopulate it", async () => {
