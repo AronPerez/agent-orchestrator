@@ -3198,6 +3198,28 @@ describe("Sidebar", () => {
 		expect(window.localStorage.getItem("ao-sidebar-w")).toBe(String(SIDEBAR_MIN_WIDTH + 5));
 	});
 
+	it("keeps the fixed navigation clear of the center panel when window zoom moves it right", async () => {
+		const nav = document.createElement("div");
+		nav.setAttribute("data-slot", "titlebar-nav");
+		let right = 176;
+		nav.getBoundingClientRect = () => ({ width: 92, right }) as DOMRect;
+		document.body.append(nav);
+		try {
+			renderSidebar();
+			const gap = document.querySelector<HTMLElement>('[data-slot="sidebar-gap"]')!;
+			fireEvent.pointerDown(screen.getByTestId("resize-handle"), { clientX: SIDEBAR_DEFAULT_WIDTH });
+			fireEvent.pointerMove(window, { clientX: 0 });
+			fireEvent.pointerUp(window);
+			expect(gap.style.getPropertyValue("--ao-sidebar-w")).toBe(`${SIDEBAR_MIN_WIDTH}px`);
+
+			right = 260;
+			window.dispatchEvent(new Event("resize"));
+			await waitFor(() => expect(gap.style.getPropertyValue("--ao-sidebar-w")).toBe("272px"));
+		} finally {
+			nav.remove();
+		}
+	});
+
 	it("never drops the floor below SIDEBAR_MIN_WIDTH and grows when the brand moves right", async () => {
 		// Titlebar brand as in native fullscreen: no traffic-light reserve, so the
 		// label alone would fit a sidebar narrower than the footer needs.

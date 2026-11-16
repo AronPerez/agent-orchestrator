@@ -9,9 +9,8 @@ function render(ui: ReactElement) {
 	return rtlRender(<TooltipProvider>{ui}</TooltipProvider>);
 }
 
-const { history, canGoBack } = vi.hoisted(() => ({
-	canGoBack: vi.fn(() => false),
-	history: {
+const { history, router, canGoBack } = vi.hoisted(() => {
+	const history = {
 		back: vi.fn(),
 		forward: vi.fn(),
 		location: { state: { __TSR_index: 0 } },
@@ -19,12 +18,13 @@ const { history, canGoBack } = vi.hoisted(() => ({
 			location: { state: { __TSR_index: number } };
 			action: { type: string };
 		}) => void) => () => undefined),
-	},
-}));
+	};
+	return { history, router: { history }, canGoBack: vi.fn(() => false) };
+});
 
 vi.mock("@tanstack/react-router", () => ({
 	useCanGoBack: canGoBack,
-	useRouter: () => ({ history }),
+	useRouter: () => router,
 }));
 
 vi.mock("../lib/platform", () => ({
@@ -35,32 +35,54 @@ vi.mock("../lib/platform", () => ({
 describe("TitlebarNav", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
+		history.location.state.__TSR_index = 0;
 		canGoBack.mockReturnValue(false);
 		useUiStore.setState({ isSidebarOpen: true });
 	});
 
-	it.each([false, true])("keeps chrome available with sidebar open=%s", (open) => {
+	it.each([
+		{ open: true, fullscreen: false },
+		{ open: false, fullscreen: false },
+		{ open: true, fullscreen: true },
+		{ open: false, fullscreen: true },
+	])("keeps both arrows visible with sidebar open=$open, fullscreen=$fullscreen", ({ open, fullscreen }) => {
 		useUiStore.setState({ isSidebarOpen: open });
-		const { container, rerender } = render(<TitlebarNav />);
-		expect(container.querySelector('[data-slot="titlebar-nav"]')).toBeVisible();
-		if (open) expect(screen.getByText("Orchestrator")).toBeVisible();
-		else expect(screen.getByRole("button", { name: "Go back" })).toBeDisabled();
-		rerender(<TooltipProvider><TitlebarNav isFullScreen /></TooltipProvider>);
-		expect(container.querySelector('[data-slot="titlebar-nav"]')).toBeVisible();
+		const { container } = render(<TitlebarNav isFullScreen={fullscreen} />);
+		const nav = container.querySelector('[data-slot="titlebar-nav"]');
+		expect(nav).toBeVisible();
+		expect(nav).toHaveClass("top-0", fullscreen ? "left-titlebar-cluster-left-fullscreen" : "left-titlebar-cluster-left");
+		expect(nav).toHaveClass(fullscreen ? "h-toolbar" : "h-traffic-light-clearance");
+		expect(nav?.querySelector('[data-slot="titlebar-brand"], [data-sidebar-brand], img')).toBeNull();
+		for (const name of ["Go back", "Go forward"]) {
+			const button = screen.getByRole("button", { name });
+			expect(button).toBeVisible();
+			expect(button).toBeDisabled();
+			expect(button).toHaveAttribute("aria-disabled", "true");
+			expect(button.closest('[inert], [aria-hidden="true"]')).toBeNull();
+			fireEvent.click(button);
+		}
+		expect(history.back).not.toHaveBeenCalled();
+		expect(history.forward).not.toHaveBeenCalled();
 	});
 
-	it("shows the brand when the sidebar settles open", async () => {
-		render(<><div data-slot="sidebar-container" /><TitlebarNav /></>);
-		await act(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
-		expect(screen.getByText("Orchestrator")).toBeVisible();
-		expect(screen.queryByRole("button", { name: "Go back" })).not.toBeInTheDocument();
-		expect(screen.queryByRole("button", { name: "Go forward" })).not.toBeInTheDocument();
+	it("keeps the same history controls mounted while toggling the sidebar", () => {
+		render(<TitlebarNav />);
+		const back = screen.getByRole("button", { name: "Go back" });
+		const forward = screen.getByRole("button", { name: "Go forward" });
+		fireEvent.click(screen.getByRole("button", { name: "Collapse sidebar" }));
+		expect(useUiStore.getState().isSidebarOpen).toBe(false);
+		expect(screen.getByRole("button", { name: "Go back" })).toBe(back);
+		expect(screen.getByRole("button", { name: "Go forward" })).toBe(forward);
+		fireEvent.click(screen.getByRole("button", { name: "Expand sidebar" }));
+		expect(useUiStore.getState().isSidebarOpen).toBe(true);
+		expect(back).toBeVisible();
+		expect(forward).toBeVisible();
 	});
 
-	it("navigates history when arrows are shown and respects the history lock", () => {
-		useUiStore.setState({ isSidebarOpen: false });
+	it.each([false, true])("navigates available history with sidebar open=%s", (open) => {
+		useUiStore.setState({ isSidebarOpen: open });
 		canGoBack.mockReturnValue(true);
-		const { rerender } = render(<TitlebarNav />);
+		render(<TitlebarNav />);
 		const listener = history.subscribe.mock.calls.at(-1)![0];
 		act(() => {
 			listener({ location: { state: { __TSR_index: 2 } }, action: { type: "PUSH" } });
@@ -74,9 +96,35 @@ describe("TitlebarNav", () => {
 		fireEvent.click(forward);
 		expect(history.back).toHaveBeenCalledOnce();
 		expect(history.forward).toHaveBeenCalledOnce();
+	});
 
-		rerender(<TooltipProvider><TitlebarNav historyLocked /></TooltipProvider>);
-		expect(back).toBeDisabled();
+	it("disables forward at the history tip and after a push discards forward entries", () => {
+		render(<TitlebarNav />);
+		const forward = screen.getByRole("button", { name: "Go forward" });
+		const listener = history.subscribe.mock.calls.at(-1)![0];
+		const navigate = (index: number, type: string) => act(() => {
+			history.location.state.__TSR_index = index;
+			listener({ location: history.location, action: { type } });
+		});
+		navigate(2, "PUSH");
 		expect(forward).toBeDisabled();
+		navigate(0, "BACK");
+		expect(forward).toBeEnabled();
+		navigate(2, "FORWARD");
+		expect(forward).toBeDisabled();
+		navigate(0, "BACK");
+		expect(forward).toBeEnabled();
+		navigate(1, "PUSH");
+		expect(forward).toBeDisabled();
+	});
+
+	it("keeps the settings back action available without router history", () => {
+		const onBack = vi.fn();
+		render(<TitlebarNav onBack={onBack} />);
+		const back = screen.getByRole("button", { name: "Go back" });
+		expect(back).toBeEnabled();
+		fireEvent.click(back);
+		expect(onBack).toHaveBeenCalledOnce();
+		expect(history.back).not.toHaveBeenCalled();
 	});
 });
