@@ -18,7 +18,6 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/reqid"
-	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessionguard"
 )
 
@@ -375,7 +374,7 @@ func coordinationNudgeSent(outcome sessionguard.Outcome, err error) bool {
 	// DeliveryUnconfirmed is the one messenger error that follows a pane
 	// write. Other errors are definite refusals or pre-write failures and must
 	// remain retryable by the contract coordinator.
-	return err == nil || errors.Is(err, sessionmanager.ErrDeliveryUnconfirmed)
+	return err == nil || errors.Is(err, ports.ErrAgentDeliveryUnconfirmed)
 }
 
 // SetCompletionTerminator wires merge completion to the same teardown path as

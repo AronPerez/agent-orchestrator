@@ -16,7 +16,6 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
-	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 )
 
@@ -368,16 +367,17 @@ func TestNudgeSessionReportsDefiniteMessengerRefusalAsUnsent(t *testing.T) {
 	rec := working("mer-1")
 	rec.Harness = domain.HarnessCodex
 	st.sessions[rec.ID] = rec
-	messenger.err = sessionmanager.ErrComposerBusy
+	definiteRefusal := errors.New("composer busy before write")
+	messenger.err = definiteRefusal
 
 	sent, err := m.NudgeSession(context.Background(), rec.ID, "wrap up and report")
-	if !errors.Is(err, sessionmanager.ErrComposerBusy) || sent {
+	if !errors.Is(err, definiteRefusal) || sent {
 		t.Fatalf("sent=%v err=%v, want definite refusal", sent, err)
 	}
 
-	messenger.err = sessionmanager.ErrDeliveryUnconfirmed
+	messenger.err = ports.ErrAgentDeliveryUnconfirmed
 	sent, err = m.NudgeSession(context.Background(), rec.ID, "wrap up and report")
-	if !errors.Is(err, sessionmanager.ErrDeliveryUnconfirmed) || !sent {
+	if !errors.Is(err, ports.ErrAgentDeliveryUnconfirmed) || !sent {
 		t.Fatalf("sent=%v err=%v, want ambiguous post-write delivery", sent, err)
 	}
 }
