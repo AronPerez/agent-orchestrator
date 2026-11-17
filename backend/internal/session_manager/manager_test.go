@@ -77,6 +77,7 @@ func TestValidateSpawnContractRejectsIncompleteOrNonWorkerContracts(t *testing.T
 		{name: "orchestrator", cfg: ports.SpawnConfig{Kind: domain.KindOrchestrator, Goal: "Ship it", Timebox: time.Hour}},
 		{name: "standalone", cfg: ports.SpawnConfig{Kind: domain.KindWorker, Goal: "Ship it", Timebox: time.Hour}},
 		{name: "overlong goal", cfg: ports.SpawnConfig{Kind: domain.KindWorker, Goal: strings.Repeat("x", 1001), Timebox: time.Hour}},
+		{name: "async tracker intake", cfg: ports.SpawnConfig{Kind: domain.KindWorker, Async: true, TrackerIntakeLimits: &domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := validateSpawnContract(tc.cfg); err == nil {
@@ -113,6 +114,7 @@ type fakeStore struct {
 
 	createClientRequestErr error
 	promoteTaskErr         error
+	trackerIntakePending   map[string]domain.SessionID
 	trackerIntakeHandled   map[string]domain.SessionID
 	trackerIntakeLimits    []domain.AutomatedSessionLimits
 	// worktrees maps session ID to its saved worktree rows (shutdown-saved marker).
@@ -136,6 +138,7 @@ func newFakeStore() *fakeStore {
 		conversations:        map[domain.SessionID]domain.ConversationRecord{},
 		workspaceRepo:        map[string][]domain.WorkspaceRepoRecord{},
 		worktrees:            map[domain.SessionID][]domain.SessionWorktreeRecord{},
+		trackerIntakePending: map[string]domain.SessionID{},
 		trackerIntakeHandled: map[string]domain.SessionID{},
 	}
 }
@@ -161,11 +164,47 @@ func (f *fakeStore) CreateSession(_ context.Context, rec domain.SessionRecord) (
 }
 func (f *fakeStore) CreateTrackerIntakeSession(ctx context.Context, rec domain.SessionRecord, limits domain.AutomatedSessionLimits) (domain.SessionRecord, error) {
 	f.trackerIntakeLimits = append(f.trackerIntakeLimits, limits)
+	key := string(rec.ProjectID) + "\x00" + string(rec.IssueID)
+	if f.trackerIntakePending[key] != "" {
+		return domain.SessionRecord{}, ports.ErrTrackerIntakeActive
+	}
+	if f.trackerIntakeHandled[key] != "" {
+		return domain.SessionRecord{}, ports.ErrTrackerIntakeHandled
+	}
 	created, err := f.CreateSession(ctx, rec)
 	if err == nil {
-		f.trackerIntakeHandled[string(rec.ProjectID)+"\x00"+string(rec.IssueID)] = created.ID
+		f.trackerIntakePending[key] = created.ID
 	}
 	return created, err
+}
+func (f *fakeStore) CommitTrackerIntakeSession(_ context.Context, id domain.SessionID, _ time.Time) error {
+	for key, pendingID := range f.trackerIntakePending {
+		if pendingID == id {
+			delete(f.trackerIntakePending, key)
+			f.trackerIntakeHandled[key] = id
+			return nil
+		}
+	}
+	return fmt.Errorf("tracker intake session %s is missing", id)
+}
+func (f *fakeStore) ReconcileTrackerIntakeSession(_ context.Context, id domain.SessionID, _ time.Time) error {
+	rec, exists := f.sessions[id]
+	for key, pendingID := range f.trackerIntakePending {
+		if pendingID != id {
+			continue
+		}
+		if !exists || rec.IsTerminated {
+			delete(f.trackerIntakePending, key)
+			return nil
+		}
+		if rec.Metadata.RuntimeHandleID != "" || rec.Metadata.AgentSessionID != "" || rec.Metadata.ProviderConversationID != "" ||
+			rec.Metadata.ControllerGeneration != "" || rec.Metadata.NativeTranscriptPath != "" {
+			delete(f.trackerIntakePending, key)
+			f.trackerIntakeHandled[key] = id
+		}
+		return nil
+	}
+	return nil
 }
 func (f *fakeStore) CreateAutomationSession(ctx context.Context, rec domain.SessionRecord) (domain.SessionRecord, bool, error) {
 	for _, existing := range f.sessions {
@@ -2793,29 +2832,42 @@ func TestSpawnAutomationAdoptsOnlyCompletedLaunch(t *testing.T) {
 	}
 }
 
-func TestSpawnTrackerIntakeKeepsAdmissionProofAfterLaunchRollback(t *testing.T) {
+func TestSpawnTrackerIntakeFailedLaunchCanRetryAndSuccessfulLaunchCommits(t *testing.T) {
 	m, st, rt, _ := newManager()
 	rt.createErr = errors.New("runtime unavailable")
 	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
-	_, _, _, err := m.Spawn(ctx, ports.SpawnConfig{
+	cfg := ports.SpawnConfig{
 		ProjectID:           "mer",
 		IssueID:             "github:acme/mer#12",
 		Kind:                domain.KindWorker,
 		Harness:             domain.HarnessClaudeCode,
 		Prompt:              "do it",
 		TrackerIntakeLimits: &limits,
-	})
+	}
+	_, _, _, err := m.Spawn(ctx, cfg)
 	if err == nil {
 		t.Fatal("Spawn() error = nil, want runtime failure")
 	}
 	if _, ok := st.sessions["mer-1"]; ok {
 		t.Fatal("failed launch left its seed session behind")
 	}
-	if got := st.trackerIntakeHandled["mer\x00github:acme/mer#12"]; got != "mer-1" {
-		t.Fatalf("intake proof = %q, want rolled-back seed mer-1", got)
+	if got := st.trackerIntakePending["mer\x00github:acme/mer#12"]; got != "" {
+		t.Fatalf("pending intake claim = %q after confirmed rollback, want released", got)
+	}
+	if got := st.trackerIntakeHandled["mer\x00github:acme/mer#12"]; got != "" {
+		t.Fatalf("intake proof = %q after failed launch, want none", got)
 	}
 	if len(st.trackerIntakeLimits) != 1 || st.trackerIntakeLimits[0] != limits {
 		t.Fatalf("atomic-admission limits = %+v, want %+v", st.trackerIntakeLimits, limits)
+	}
+
+	rt.createErr = nil
+	created, _, _, err := m.Spawn(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Spawn(retry): %v", err)
+	}
+	if got := st.trackerIntakeHandled["mer\x00github:acme/mer#12"]; got != created.ID {
+		t.Fatalf("intake proof = %q, want successful retry %q", got, created.ID)
 	}
 }
 

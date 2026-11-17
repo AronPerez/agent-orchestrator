@@ -4081,6 +4081,7 @@ func TestToSpawnAPIErrorPreservesTrackerAdmissionOutcomes(t *testing.T) {
 		wantCode string
 	}{
 		{name: "already handled", cause: ports.ErrTrackerIntakeHandled, wantKind: apierr.KindConflict, wantCode: "TRACKER_INTAKE_ALREADY_HANDLED"},
+		{name: "same issue active", cause: ports.ErrTrackerIntakeActive, wantKind: apierr.KindConflict, wantCode: "TRACKER_INTAKE_ACTIVE_SESSION"},
 		{name: "capacity", cause: ports.ErrAutomatedSessionCapacity, wantKind: apierr.KindTooManyRequests, wantCode: "AUTOMATED_SESSION_CAPACITY"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -2190,6 +2190,10 @@ func toSpawnAPIError(err error) error {
 		mapped := apierr.Conflict("TRACKER_INTAKE_ALREADY_HANDLED", "This tracker item was already delivered to a session", nil)
 		mapped.Cause = err
 		return mapped
+	case errors.Is(err, ports.ErrTrackerIntakeActive):
+		mapped := apierr.Conflict("TRACKER_INTAKE_ACTIVE_SESSION", "This tracker item already has a live session", nil)
+		mapped.Cause = err
+		return mapped
 	case errors.Is(err, ports.ErrAutomatedSessionCapacity):
 		mapped := apierr.TooManyRequests("AUTOMATED_SESSION_CAPACITY", "The project is at its automated-session capacity")
 		mapped.Cause = err

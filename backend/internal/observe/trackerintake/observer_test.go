@@ -351,6 +351,27 @@ func TestPollStopsProjectWhenHandledLedgerReadFails(t *testing.T) {
 	}
 }
 
+func TestPollStopsProjectWhenPendingClaimReconciliationFails(t *testing.T) {
+	store := &fakeStore{
+		projects: []domain.ProjectRecord{{
+			ID:            "demo",
+			RepoOriginURL: "https://github.com/acme/demo.git",
+			Config:        domain.ProjectConfig{TrackerIntake: domain.TrackerIntakeConfig{Enabled: true, Assignee: "alice"}},
+		}},
+		reconcileErr: errors.New("ledger unavailable"),
+	}
+	tracker := &fakeTracker{}
+	if err := New(singleResolver(tracker), store, &fakeSpawner{}, Config{Logger: discardLogger()}).Poll(context.Background()); err != nil {
+		t.Fatalf("Poll() error = %v", err)
+	}
+	if len(store.reconciled) != 1 || store.reconciled[0] != "demo" {
+		t.Fatalf("reconciled projects = %v, want [demo]", store.reconciled)
+	}
+	if len(tracker.repos) != 0 {
+		t.Fatalf("tracker calls = %d, want 0 after reconciliation failure", len(tracker.repos))
+	}
+}
+
 func TestPollSkipsSessionScanWhenIntakeDisabled(t *testing.T) {
 	store := &fakeStore{
 		projects:    []domain.ProjectRecord{{ID: "demo"}},
@@ -500,6 +521,17 @@ func TestPollHandlesAtomicAdmissionOutcomes(t *testing.T) {
 	t.Run("already handled continues", func(t *testing.T) {
 		store, tracker := newFixture()
 		spawner := &fakeSpawner{failIssue: "github:acme/demo#1", failErr: ports.ErrTrackerIntakeHandled}
+		if err := New(singleResolver(tracker), store, spawner, Config{Logger: discardLogger()}).Poll(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if len(spawner.calls) != 2 || spawner.calls[1].IssueID != "github:acme/demo#2" {
+			t.Fatalf("spawn calls = %+v, want admission to continue to issue #2", spawner.calls)
+		}
+	})
+
+	t.Run("same issue active continues", func(t *testing.T) {
+		store, tracker := newFixture()
+		spawner := &fakeSpawner{failIssue: "github:acme/demo#1", failErr: ports.ErrTrackerIntakeActive}
 		if err := New(singleResolver(tracker), store, spawner, Config{Logger: discardLogger()}).Poll(context.Background()); err != nil {
 			t.Fatal(err)
 		}
@@ -685,11 +717,13 @@ func singleResolver(tracker ports.Tracker) TrackerResolver {
 }
 
 type fakeStore struct {
-	projects    []domain.ProjectRecord
-	sessions    []domain.SessionRecord
-	sessionsErr error
-	handled     map[domain.ProjectID][]domain.TrackerIntakeHandledRecord
-	handledErr  error
+	projects     []domain.ProjectRecord
+	sessions     []domain.SessionRecord
+	sessionsErr  error
+	reconciled   []domain.ProjectID
+	reconcileErr error
+	handled      map[domain.ProjectID][]domain.TrackerIntakeHandledRecord
+	handledErr   error
 }
 
 func (f *fakeStore) ListProjects(context.Context) ([]domain.ProjectRecord, error) {
@@ -698,6 +732,11 @@ func (f *fakeStore) ListProjects(context.Context) ([]domain.ProjectRecord, error
 
 func (f *fakeStore) ListAllSessions(context.Context) ([]domain.SessionRecord, error) {
 	return append([]domain.SessionRecord(nil), f.sessions...), f.sessionsErr
+}
+
+func (f *fakeStore) ReconcileTrackerIntakeClaims(_ context.Context, projectID domain.ProjectID, _ time.Time) error {
+	f.reconciled = append(f.reconciled, projectID)
+	return f.reconcileErr
 }
 
 func (f *fakeStore) ListTrackerIntakeHandled(_ context.Context, projectID domain.ProjectID) ([]domain.TrackerIntakeHandledRecord, error) {

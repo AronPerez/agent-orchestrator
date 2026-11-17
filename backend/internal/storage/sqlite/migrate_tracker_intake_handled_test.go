@@ -32,23 +32,23 @@ func TestTrackerIntakeHandledMigrationBackfillsLiveIssueSessions(t *testing.T) {
 	if err := migrate(db); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	rows, err := db.Query(`SELECT issue_id, session_id FROM tracker_intake_handled ORDER BY issue_id`)
+	rows, err := db.Query(`SELECT issue_id, session_id, state FROM tracker_intake_handled ORDER BY issue_id`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer rows.Close()
-	var got [][2]string
+	var got [][3]string
 	for rows.Next() {
-		var issueID, sessionID string
-		if err := rows.Scan(&issueID, &sessionID); err != nil {
+		var issueID, sessionID, state string
+		if err := rows.Scan(&issueID, &sessionID, &state); err != nil {
 			t.Fatal(err)
 		}
-		got = append(got, [2]string{issueID, sessionID})
+		got = append(got, [3]string{issueID, sessionID, state})
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0] != [2]string{"github:acme/demo#1", "demo-1"} {
+	if len(got) != 1 || got[0] != [3]string{"github:acme/demo#1", "demo-1", "handled"} {
 		t.Fatalf("backfilled rows = %+v, want only the live issue-linked session", got)
 	}
 }

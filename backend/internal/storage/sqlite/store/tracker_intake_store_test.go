@@ -10,7 +10,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
-func TestCreateTrackerIntakeSessionAtomicallyAdmitsAndRecords(t *testing.T) {
+func TestCreateTrackerIntakeSessionAtomicallyAdmitsThenPromotes(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 	seedProject(t, store, "demo")
@@ -26,14 +26,26 @@ func TestCreateTrackerIntakeSessionAtomicallyAdmitsAndRecords(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(handled) != 1 || handled[0].IssueID != first.IssueID || handled[0].SessionID != created.ID {
-		t.Fatalf("handled records = %+v, want atomic proof for %s", handled, created.ID)
+	if len(handled) != 0 {
+		t.Fatalf("handled records before launch commit = %+v, want pending claim hidden", handled)
 	}
 
 	duplicate := sampleRecord("demo")
 	duplicate.IssueID = first.IssueID
-	if _, err := store.CreateTrackerIntakeSession(ctx, duplicate, limits); !errors.Is(err, ports.ErrTrackerIntakeHandled) {
-		t.Fatalf("CreateTrackerIntakeSession(duplicate) error = %v, want ErrTrackerIntakeHandled", err)
+	if _, err := store.CreateTrackerIntakeSession(ctx, duplicate, limits); !errors.Is(err, ports.ErrTrackerIntakeActive) {
+		t.Fatalf("CreateTrackerIntakeSession(pending duplicate) error = %v, want ErrTrackerIntakeActive", err)
+	}
+
+	when := time.Date(2026, 11, 17, 16, 0, 0, 0, time.UTC)
+	if err := store.CommitTrackerIntakeSession(ctx, created.ID, when); err != nil {
+		t.Fatalf("CommitTrackerIntakeSession(): %v", err)
+	}
+	handled, err = store.ListTrackerIntakeHandled(ctx, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(handled) != 1 || handled[0].IssueID != first.IssueID || handled[0].SessionID != created.ID || !handled[0].HandledAt.Equal(when) {
+		t.Fatalf("handled records = %+v, want committed delivery for %s", handled, created.ID)
 	}
 
 	second := sampleRecord("demo")
@@ -43,7 +55,7 @@ func TestCreateTrackerIntakeSessionAtomicallyAdmitsAndRecords(t *testing.T) {
 	}
 }
 
-func TestTrackerIntakeAdmissionProofSurvivesFailedLaunchRollback(t *testing.T) {
+func TestTrackerIntakeFailedLaunchRollbackReleasesPendingClaim(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 	seedProject(t, store, "demo")
@@ -60,13 +72,99 @@ func TestTrackerIntakeAdmissionProofSurvivesFailedLaunchRollback(t *testing.T) {
 	if err != nil || !deleted {
 		t.Fatalf("DeleteSession(seed) = %t, %v", deleted, err)
 	}
+	if err := store.ReconcileTrackerIntakeSession(ctx, created.ID, time.Now()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeSession(): %v", err)
+	}
 
 	handled, err := store.ListTrackerIntakeHandled(ctx, "demo")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(handled) != 1 || handled[0].IssueID != record.IssueID || handled[0].SessionID != created.ID {
-		t.Fatalf("handled after launch rollback = %+v, want delivery proof retained", handled)
+	if len(handled) != 0 {
+		t.Fatalf("handled after launch rollback = %+v, want no delivery proof", handled)
+	}
+	retry := sampleRecord("demo")
+	retry.IssueID = record.IssueID
+	if _, err := store.CreateTrackerIntakeSession(ctx, retry, domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}); err != nil {
+		t.Fatalf("CreateTrackerIntakeSession(retry): %v", err)
+	}
+}
+
+func TestCreateTrackerIntakeSessionRejectsLiveSessionForSameIssue(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, store, "demo")
+
+	manual := sampleRecord("demo")
+	manual.IssueID = "github:acme/demo#18"
+	if _, err := store.CreateSession(ctx, manual); err != nil {
+		t.Fatal(err)
+	}
+	intake := sampleRecord("demo")
+	intake.IssueID = manual.IssueID
+	_, err := store.CreateTrackerIntakeSession(ctx, intake, domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2})
+	if !errors.Is(err, ports.ErrTrackerIntakeActive) {
+		t.Fatalf("CreateTrackerIntakeSession(same live issue) error = %v, want ErrTrackerIntakeActive", err)
+	}
+}
+
+func TestReconcileTrackerIntakeClaimsPromotesLaunchedSessionAndKeepsPrelaunchClaimsPending(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, store, "demo")
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
+
+	seed := sampleRecord("demo")
+	seed.IssueID = "github:acme/demo#20"
+	seed.Metadata.WorkspacePath = ""
+	seed.Metadata.RuntimeHandleID = ""
+	seed.Metadata.AgentSessionID = ""
+	seed.Metadata.Prompt = ""
+	seed.Metadata.LatestUserPrompt = ""
+	seed.Metadata.LatestUserPromptAt = time.Time{}
+	seed.Metadata.LatestAssistantUpdate = ""
+	seed.Metadata.NativeTranscriptPath = ""
+	seedClaim, err := store.CreateTrackerIntakeSession(ctx, seed, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceOnly := seed
+	workspaceOnly.IssueID = "github:acme/demo#21"
+	workspaceOnly.Metadata.WorkspacePath = "/tmp/demo-21"
+	workspaceClaim, err := store.CreateTrackerIntakeSession(ctx, workspaceOnly, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	progressed := seed
+	progressed.IssueID = "github:acme/demo#22"
+	progressedClaim, err := store.CreateTrackerIntakeSession(ctx, progressed, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	progressedClaim.Metadata.RuntimeHandleID = "runtime-21"
+	if err := store.UpdateSession(ctx, progressedClaim); err != nil {
+		t.Fatal(err)
+	}
+
+	when := time.Date(2026, 11, 17, 16, 5, 0, 0, time.UTC)
+	if err := store.ReconcileTrackerIntakeClaims(ctx, "demo", when); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	handled, err := store.ListTrackerIntakeHandled(ctx, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(handled) != 1 || handled[0].SessionID != progressedClaim.ID || !handled[0].HandledAt.Equal(when) {
+		t.Fatalf("handled after reconcile = %+v, want only launched claim", handled)
+	}
+	if _, err := store.CreateTrackerIntakeSession(ctx, seed, limits); !errors.Is(err, ports.ErrTrackerIntakeActive) {
+		t.Fatalf("still-live seed claim became retryable: %v", err)
+	}
+	if _, err := store.CreateTrackerIntakeSession(ctx, workspaceOnly, limits); !errors.Is(err, ports.ErrTrackerIntakeActive) {
+		t.Fatalf("workspace-only claim became handled or retryable: %v", err)
+	}
+	if seedClaim.ID == workspaceClaim.ID || seedClaim.ID == progressedClaim.ID || workspaceClaim.ID == progressedClaim.ID {
+		t.Fatal("test setup reused a session id")
 	}
 }
 

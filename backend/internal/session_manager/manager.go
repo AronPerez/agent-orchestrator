@@ -369,6 +369,8 @@ type Store interface {
 	ListWorkspaceRepos(ctx context.Context, projectID string) ([]domain.WorkspaceRepoRecord, error)
 	CreateSession(ctx context.Context, rec domain.SessionRecord) (domain.SessionRecord, error)
 	CreateTrackerIntakeSession(ctx context.Context, rec domain.SessionRecord, limits domain.AutomatedSessionLimits) (domain.SessionRecord, error)
+	CommitTrackerIntakeSession(ctx context.Context, id domain.SessionID, handledAt time.Time) error
+	ReconcileTrackerIntakeSession(ctx context.Context, id domain.SessionID, handledAt time.Time) error
 	CreateAutomationSession(ctx context.Context, rec domain.SessionRecord) (domain.SessionRecord, bool, error)
 	CreateClientRequestSession(ctx context.Context, rec domain.SessionRecord) (domain.SessionRecord, bool, error)
 	GetSessionByClientRequestID(ctx context.Context, id string) (domain.SessionRecord, bool, error)
@@ -1345,6 +1347,18 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 		}
 	}
 	id := rec.ID
+	if cfg.TrackerIntakeLimits != nil {
+		defer func() {
+			if resultErr == nil {
+				return
+			}
+			cleanupCtx, cancel := spawnRollbackContext(ctx)
+			defer cancel()
+			if reconcileErr := m.store.ReconcileTrackerIntakeSession(cleanupCtx, id, m.clock()); reconcileErr != nil {
+				m.logger.Warn("spawn: tracker intake claim reconciliation failed", "sessionID", id, "error", reconcileErr)
+			}
+		}()
+	}
 	if m.agentAccounts != nil || cfg.AgentAccountID != "" {
 		err := ports.ErrAgentAccountUnknown
 		if m.agentAccounts != nil {
@@ -1628,6 +1642,11 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 				return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnCommit, err)
 			}
 		}
+		if cfg.TrackerIntakeLimits != nil {
+			if err := m.store.CommitTrackerIntakeSession(ctx, id, m.clock()); err != nil {
+				return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnCommit, err)
+			}
+		}
 		namingHandedOff = true
 		m.nameTaskBranchLater(ctx, rec, ws, workspaceProject, taskName, cancelNaming)
 		return rec, promptBytes, systemPromptBytes, nil
@@ -1832,6 +1851,11 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 	}
 	if cfg.ClientRequestID != "" {
 		if err := m.store.CommitClientRequestSession(ctx, id); err != nil {
+			return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnCommit, err)
+		}
+	}
+	if cfg.TrackerIntakeLimits != nil {
+		if err := m.store.CommitTrackerIntakeSession(ctx, id, m.clock()); err != nil {
 			return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnCommit, err)
 		}
 	}
@@ -6567,6 +6591,9 @@ func seedRecord(cfg ports.SpawnConfig, projectConfig domain.ProjectConfig, now t
 
 func validateSpawnContract(cfg ports.SpawnConfig) error {
 	const maxGoalRunes = 1000
+	if cfg.TrackerIntakeLimits != nil && cfg.Async {
+		return fmt.Errorf("tracker intake does not support asynchronous spawn")
+	}
 	goal := strings.TrimSpace(cfg.Goal)
 	if goal == "" && cfg.Timebox == 0 {
 		return nil

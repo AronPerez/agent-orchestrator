@@ -1035,10 +1035,11 @@ type TimestampRepairProgress struct {
 }
 
 type TrackerIntakeHandled struct {
-	ProjectID string
-	IssueID   string
-	SessionID string
-	HandledAt time.Time
+	ProjectID  string
+	IssueID    string
+	SessionID  string
+	State      string
+	RecordedAt time.Time
 }
 
 type UsageBinding struct {

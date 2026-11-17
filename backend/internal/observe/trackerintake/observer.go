@@ -41,6 +41,7 @@ const (
 type Store interface {
 	ListProjects(ctx context.Context) ([]domain.ProjectRecord, error)
 	ListAllSessions(ctx context.Context) ([]domain.SessionRecord, error)
+	ReconcileTrackerIntakeClaims(ctx context.Context, projectID domain.ProjectID, handledAt time.Time) error
 	ListTrackerIntakeHandled(ctx context.Context, projectID domain.ProjectID) ([]domain.TrackerIntakeHandledRecord, error)
 }
 
@@ -179,6 +180,10 @@ func (o *Observer) pollProject(ctx context.Context, project domain.ProjectRecord
 	}
 	projectID := domain.ProjectID(project.ID)
 	seen, active := intakeSessionState(sessions, projectID)
+	if err := o.store.ReconcileTrackerIntakeClaims(ctx, projectID, now); err != nil {
+		o.logger.Error("tracker intake: reconcile pending claims failed", "project", project.ID, "err", err)
+		return true
+	}
 	handled, err := o.store.ListTrackerIntakeHandled(ctx, projectID)
 	if err != nil {
 		o.logger.Error("tracker intake: list handled items failed", "project", project.ID, "err", err)
@@ -252,7 +257,7 @@ func (o *Observer) pollProject(ctx context.Context, project domain.ProjectRecord
 			// stricter or looser policy override inside the observer.
 		})
 		if err != nil {
-			if errors.Is(err, ports.ErrTrackerIntakeHandled) {
+			if errors.Is(err, ports.ErrTrackerIntakeHandled) || errors.Is(err, ports.ErrTrackerIntakeActive) {
 				continue
 			}
 			if errors.Is(err, ports.ErrAutomatedSessionCapacity) {

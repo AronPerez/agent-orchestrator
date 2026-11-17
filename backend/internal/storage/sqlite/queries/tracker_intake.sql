@@ -1,18 +1,33 @@
 -- name: RecordTrackerIntakeHandled :exec
-INSERT INTO tracker_intake_handled (project_id, issue_id, session_id, handled_at)
-VALUES (?, ?, ?, ?)
-ON CONFLICT (project_id, issue_id) DO NOTHING;
+INSERT INTO tracker_intake_handled (project_id, issue_id, session_id, state, recorded_at)
+VALUES (?, ?, ?, 'handled', ?)
+ON CONFLICT (project_id, issue_id) DO UPDATE SET
+    state = 'handled',
+    recorded_at = excluded.recorded_at
+WHERE tracker_intake_handled.state = 'pending'
+  AND tracker_intake_handled.session_id = excluded.session_id;
 
 -- name: ListTrackerIntakeHandled :many
-SELECT project_id, issue_id, session_id, handled_at
+SELECT project_id, issue_id, session_id, recorded_at
 FROM tracker_intake_handled
-WHERE project_id = ?
-ORDER BY handled_at, issue_id;
+WHERE project_id = ? AND state = 'handled'
+ORDER BY recorded_at, issue_id;
 
--- name: GetTrackerIntakeHandled :one
-SELECT project_id, issue_id, session_id, handled_at
+-- name: GetTrackerIntakeClaim :one
+SELECT project_id, issue_id, session_id, state, recorded_at
 FROM tracker_intake_handled
 WHERE project_id = ? AND issue_id = ?;
+
+-- name: GetTrackerIntakeClaimBySession :one
+SELECT project_id, issue_id, session_id, state, recorded_at
+FROM tracker_intake_handled
+WHERE session_id = ?;
+
+-- name: ListPendingTrackerIntakeClaims :many
+SELECT project_id, issue_id, session_id, state, recorded_at
+FROM tracker_intake_handled
+WHERE project_id = ? AND state = 'pending'
+ORDER BY recorded_at, issue_id;
 
 -- name: CountLiveIssueLinkedSessions :one
 SELECT COUNT(*)
@@ -22,6 +37,24 @@ WHERE project_id = ?
   AND trim(issue_id) <> ''
   AND is_terminated = FALSE;
 
--- name: InsertTrackerIntakeHandled :exec
-INSERT INTO tracker_intake_handled (project_id, issue_id, session_id, handled_at)
-VALUES (?, ?, ?, ?);
+-- name: HasLiveSessionForTrackerIssue :one
+SELECT EXISTS(
+    SELECT 1
+    FROM sessions
+    WHERE project_id = ?
+      AND issue_id = ?
+      AND is_terminated = FALSE
+) AS active;
+
+-- name: InsertTrackerIntakeClaim :exec
+INSERT INTO tracker_intake_handled (project_id, issue_id, session_id, state, recorded_at)
+VALUES (?, ?, ?, 'pending', ?);
+
+-- name: CommitTrackerIntakeSession :execrows
+UPDATE tracker_intake_handled
+SET state = 'handled', recorded_at = ?
+WHERE session_id = ? AND state = 'pending';
+
+-- name: DeletePendingTrackerIntakeClaim :execrows
+DELETE FROM tracker_intake_handled
+WHERE session_id = ? AND state = 'pending';
