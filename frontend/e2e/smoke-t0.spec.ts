@@ -151,8 +151,7 @@ test("renderer: board state rehydrates after a renderer relaunch @T0 @DMN", asyn
 
 	await page.reload();
 	await expect(page.getByTestId("daemon-status")).toHaveAttribute("data-state", "ready");
-	await expect(page.getByTestId("board-session-card").first()).toBeVisible();
-	expect(await page.getByTestId("board-session-card").first().textContent()).toBe(before);
+	await expect(page.getByTestId("board-session-card").first()).toHaveText(before ?? "");
 });
 
 // ── BRD: board ──────────────────────────────────────────────────────────────
