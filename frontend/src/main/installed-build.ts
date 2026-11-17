@@ -67,12 +67,28 @@ export function sessionsAreIdle(body: unknown): boolean {
 	if (!body || typeof body !== "object" || !("sessions" in body) || !Array.isArray(body.sessions)) return false;
 	return body.sessions.every((session: unknown) => {
 		if (!session || typeof session !== "object") return false;
-		const s = session as { isTerminated?: boolean; statusReadiness?: string; provisionState?: string; activity?: { state?: string }; displayStatus?: string };
+		const s = session as { isTerminated?: boolean; status?: string; statusReadiness?: string; provisionState?: string; runtimeUnreachable?: boolean; activity?: { state?: string } };
 		if (s.isTerminated === true) return true;
-		return s.statusReadiness === "ready" && s.provisionState !== "provisioning" &&
+		return s.isTerminated === false && s.statusReadiness === "ready" && s.runtimeUnreachable !== true && s.provisionState !== "provisioning" &&
 			(s.activity?.state === "idle" || s.activity?.state === "exited") &&
-			!["Reviewing", "Review scheduled", "Retrying review"].includes(s.displayStatus ?? "");
+			["idle", "exited", "pr_open", "draft", "ci_failed", "review_pending", "changes_requested", "commented", "approved", "mergeable", "merged"].includes(s.status ?? "");
 	});
+}
+
+/** Display labels can hide another PR's running reviewer. Read all live sessions. */
+export async function sessionsAndReviewsAreIdle(body: unknown, readReviews: (sessionId: string) => Promise<unknown>): Promise<boolean> {
+	if (!sessionsAreIdle(body)) return false;
+	try {
+		for (const session of (body as { sessions: { id?: unknown; isTerminated?: boolean }[] }).sessions) {
+			if (session.isTerminated === true) continue;
+			if (typeof session.id !== "string" || !session.id) return false;
+			const result = await readReviews(session.id) as { runs?: unknown } | null;
+			if (!result || !Array.isArray(result.runs) || !result.runs.every((run: unknown) =>
+				run && typeof run === "object" && "status" in run &&
+				["complete", "delivered", "failed", "cancelled"].includes(String(run.status)))) return false;
+		}
+		return true;
+	} catch { return false; }
 }
 
 /** One launch owns one immutable baseline; no restart/dismissal state is persisted. */
@@ -96,6 +112,7 @@ export class InstalledBuildGuard {
 		readIdentity(): Promise<string | null>;
 		isIdle(): Promise<boolean>;
 		onChange(status: InstalledBuildStatus | undefined): void;
+		onReplacement(replaced: boolean): void;
 		assertRestartSafe(): void;
 		relaunch(): void;
 	}) {
@@ -113,9 +130,11 @@ export class InstalledBuildGuard {
 		catch (error) { this.cancelRestart(); throw error; }
 	}
 
-	async canLoadRenderer(): Promise<boolean> {
+	async isRunningBuildInstalled(): Promise<boolean> {
 		const running = await this.running;
-		return running !== null && await this.deps.readIdentity() === running;
+		const current = running !== null && await this.deps.readIdentity() === running;
+		this.deps.onReplacement(!current);
+		return current;
 	}
 
 	async rendererMismatch(): Promise<void> {
@@ -130,6 +149,8 @@ export class InstalledBuildGuard {
 	private async checkInstalledBuild(): Promise<void> {
 		const running = await this.running;
 		const installed = await this.deps.readIdentity();
+		// Suspend installers before target settling or any asynchronous idle read.
+		this.deps.onReplacement(!running || !installed || running !== installed || this.rendererIsMismatched);
 		if (!running || !installed) {
 			this.candidate = null;
 			if (this.status) this.publish({ ...this.status, idle: false });

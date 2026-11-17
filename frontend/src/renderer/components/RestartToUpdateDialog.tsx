@@ -186,7 +186,7 @@ function RestartToUpdateDialogBody() {
 				</div>
 
 				<div className={cn(settingsDialogBodyClass, "gap-3 pt-4")}>
-					{installed?.restartBlocked && <p role="alert" className="text-sm text-settings-label">{t("update.restart.nativeUpdatePending")}</p>}
+					{installed?.restartBlocked && <p role="alert" className="text-sm text-settings-label">{t(installed.restartBlocked === "appimage-unverified" ? "update.restart.appImageUnverified" : "update.restart.nativeUpdatePending")}</p>}
 					{installed && !installed.restartBlocked && !installed.idle && <p role="status" className="text-sm text-settings-label">{t("update.restart.waitForIdle")}</p>}
 					{installed?.restartWhenIdle && !installed.restartBlocked && <p role="status" className="text-sm text-settings-label">{t("update.restart.scheduled")}</p>}
 					{!installed && (workspace.isError || !workspace.data) && <p role="status">{t("update.restart.unknownWorkers", { defaultValue: "Current worker state could not be confirmed. Installing restarts Orchestrator and may interrupt current tasks." })}</p>}

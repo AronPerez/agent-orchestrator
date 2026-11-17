@@ -678,7 +678,7 @@ function UpdateStatusLine({
 				? <AlertTriangle className="size-icon-sm shrink-0" aria-hidden="true" />
 				: <CheckCircle2 className="size-icon-sm shrink-0" aria-hidden="true" />;
 			label = status.installed
-				? t(status.installed.restartBlocked ? "update.restart.nativeUpdatePending" : status.installed.restartWhenIdle ? "update.restart.scheduled" : "update.restart.installed")
+				? t(status.installed.restartBlocked === "appimage-unverified" ? "update.restart.appImageUnverified" : status.installed.restartBlocked ? "update.restart.nativeUpdatePending" : status.installed.restartWhenIdle ? "update.restart.scheduled" : "update.restart.installed")
 				: t("settings.updates.downloaded");
 			detail = status.version ? t("settings.updates.targetVersion", { version: status.version }) : null;
 			break;

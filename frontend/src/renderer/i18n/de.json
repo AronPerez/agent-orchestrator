@@ -1853,6 +1853,7 @@
 	"update.restart.cancelScheduled": "Geplanten Neustart abbrechen",
 	"update.restart.restartFailed": "Orchestrator konnte nicht neu gestartet werden. Versuche es erneut.",
 	"update.restart.nativeUpdatePending": "Ein früheres macOS-Update könnte beim Beenden von Orchestrator noch installiert werden. Beende Orchestrator, warte auf ausstehende Updates und installiere diesen Build erneut, bevor du die App wieder öffnest.",
+	"update.restart.appImageUnverified": "Orchestrator kann nicht prüfen, ob die neue AppImage-Datei vollständig ist. Lassen Sie diese App laufen, bis Sie einen geprüften Download haben. Beenden Sie sie dann und öffnen Sie die neue AppImage-Datei.",
 	"update.restart.blockedShort": "Neustart erfordert Aufmerksamkeit",
 	"update.restart.whatsNew": "Neu in dieser Version",
 	"update.restart.noNotes": "Für diesen Build wurden keine Versionshinweise veröffentlicht.",

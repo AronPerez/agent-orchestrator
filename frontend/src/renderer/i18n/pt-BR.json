@@ -1883,6 +1883,7 @@
 	"update.restart.cancelScheduled": "Cancelar reinicialização agendada",
 	"update.restart.restartFailed": "O Orchestrator não pôde reiniciar. Tente novamente.",
 	"update.restart.nativeUpdatePending": "Uma atualização anterior do macOS ainda pode ser instalada ao fechar o Orchestrator. Feche o Orchestrator, aguarde o término de qualquer atualização pendente e reinstale esta compilação antes de reabri-lo.",
+	"update.restart.appImageUnverified": "O Orchestrator não consegue verificar se o AppImage substituto está completo. Mantenha este aplicativo aberto até ter um download verificado; depois, encerre-o e abra o novo AppImage.",
 	"update.restart.blockedShort": "A reinicialização requer atenção",
 	"update.restart.whatsNew": "O que mudou",
 	"update.restart.noNotes": "Nenhuma nota de versão foi publicada para esta compilação.",

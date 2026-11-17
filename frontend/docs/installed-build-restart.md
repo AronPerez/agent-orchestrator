@@ -26,7 +26,10 @@ records its version, revision and a per-Forge-invocation token baked into both
 main and renderer. The token distinguishes rebuilds at the same dirty commit.
 Electron's `original-fs` reads the physical archive, avoiding its cached ASAR
 index. File metadata caches unchanged hashes. A bounded ASAR header/length
-check rejects truncated copies; two matching observations confirm a replacement.
+check rejects truncated copies; two matching observations confirm a restart
+target. The first different or unreadable observation immediately suspends
+updater handoffs, before settling or reading worker state. Explicit updater
+installs recheck the physical identity again immediately before handoff.
 
 Main watches the resources directory and, on macOS, the enclosing bundle's
 parent. A 30-second timer reattaches watches and checks again; focus and resume
@@ -49,17 +52,32 @@ The sidebar opens the existing restart dialog; an idle board receives one
 automatic prompt per identity.
 Only an explicit Restart now or Restart when idle request can relaunch.
 
+For AppImage replacements, stable size/hash observations do not prove that the
+copy is complete. Both restart choices remain blocked, including queued idle
+restarts. The dialog asks the user to obtain a verified complete download before
+quitting and opening it manually; this guard does not execute an unverified
+replacement or attempt to infer completeness from a paused copy.
+
 Main refreshes local session facts before relaunching. Active, approval,
 provisioning, reviewing, unavailable and unknown states keep it waiting, as do
-unsafe unsaved chat drafts. The user can cancel the in-memory queue. The normal
-quit path preserves agents; no harness stop/update/resume operation is added.
-No new file, preference or dismissal marker is persisted. A fresh process pins
-the newly installed archive and has no inherited mismatch or prompt.
+unsafe unsaved chat drafts. Stored idle activity is insufficient when status is
+`no_signal` or the runtime is unreachable. Each live session's review API must
+answer and all recorded review runs must be terminal; a display label for one
+PR cannot hide another running review. The user can cancel the in-memory queue.
+The normal quit path preserves agents; no harness stop/update/resume operation
+is added. No restart intent, preference or dismissal marker is persisted. A fresh
+process pins the newly installed archive and has no inherited mismatch or prompt.
 
-The packaged renderer protocol checks the archive before and after reading
-each resource. It refuses swapped resources, including reloads and lazy chunks,
-instead of mixing new renderer code with old main code. A baked renderer/main
-identity handshake also fences a cached renderer from another main build.
+Before opening a packaged window, main copies the built renderer and preloads
+to its private `~/.ao/electron/running-renderer` cache, checking the physical
+archive identity before and after capture. The protocol serves that snapshot,
+so unloaded session/Settings chunks and reloads remain usable while work becomes
+idle, without mixing in replacement resources. Clean quit removes the cache;
+the next launch replaces any cache left by a crash. A capture that cannot prove
+its source identity fails closed. AppImage uses its existing immutable mount
+without comparing each resource request against the replaced outer file.
+A baked renderer/main identity handshake also fences a cached renderer from
+another main build.
 
 ## Host-only updates
 

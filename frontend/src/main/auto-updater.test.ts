@@ -123,6 +123,56 @@ it("does not overwrite an external install arriving during a pending restart", a
   expect(autoUpdater.quitAndInstall).not.toHaveBeenCalled();
 });
 
+it("disables staged install-on-quit at the first mismatch before the restart notice exists", async () => {
+  const { module, autoUpdater, updaterEvents } = await importAutoUpdater();
+  await module.startAutoUpdates(stateDir);
+  updaterEvents.get("update-downloaded")?.({ version: "2.1.0" });
+  let identity = "A";
+  const guard = new InstalledBuildGuard({ readIdentity: async () => identity, isIdle: async () => true,
+    onChange: module.setInstalledBuildStatus, onReplacement: module.setInstalledBuildReplacementDetected,
+    assertRestartSafe: module.assertInstalledBuildRestartSafe, relaunch: vi.fn() });
+  identity = "B";
+  await guard.check();
+  expect(guard.status).toBeUndefined();
+  expect(autoUpdater.autoInstallOnAppQuit).toBe(false);
+  await expect(module.quitAndInstallUpdate()).rejects.toThrow(/installed/);
+  expect(autoUpdater.quitAndInstall).not.toHaveBeenCalled();
+});
+
+it.each(["linux", "darwin"] as const)("rechecks physical identity at the %s install handoff without waiting for the watcher", async (platform) => {
+  const restore = stubProcess(platform, "/usr/bin/node");
+  try {
+    const { module, autoUpdater, updaterEvents } = await importAutoUpdater();
+    await module.startAutoUpdates(stateDir);
+    updaterEvents.get("update-downloaded")?.({ version: "2.1.0" });
+    const current = vi.fn().mockResolvedValueOnce(true).mockResolvedValue(false);
+    module.setUpdateInstallGuard(current);
+    await expect(module.quitAndInstallUpdate("2.1.0")).rejects.toThrow(/installed/);
+    expect(current).toHaveBeenCalledTimes(2);
+    expect(autoUpdater.autoInstallOnAppQuit).toBe(false);
+    expect(autoUpdater.quitAndInstall).not.toHaveBeenCalled();
+  } finally { restore(); }
+});
+
+it("keeps a stable but partial replacement AppImage from becoming a queued restart target", async () => {
+  const original = process.env.APPIMAGE;
+  const image = nodePath.join(stateDir, "desktop.AppImage");
+  process.env.APPIMAGE = image;
+  try {
+    const { module } = await importAutoUpdater();
+    writeFileSync(image, "running image");
+    const guard = new InstalledBuildGuard({ readIdentity: async () => readFileSync(image, "utf8"), isIdle: async () => true,
+      onChange: module.setInstalledBuildStatus, onReplacement: module.setInstalledBuildReplacementDetected,
+      assertRestartSafe: module.assertInstalledBuildRestartSafe, relaunch: vi.fn() });
+    writeFileSync(image, "paused partial copy");
+    await guard.check();
+    await guard.check();
+    expect(module.getUpdateStatus().installed?.restartBlocked).toBe("appimage-unverified");
+    await expect(guard.requestRestart("when-idle")).rejects.toThrow(/AppImage.*complete/i);
+    expect(guard.restartRequested).toBe(false);
+  } finally { if (original === undefined) delete process.env.APPIMAGE; else process.env.APPIMAGE = original; }
+});
+
 it("keeps build B intact when native-staged A would install on any process exit", async () => {
   const restore = stubProcess("darwin", "/usr/bin/node");
   try {
@@ -137,7 +187,7 @@ it("keeps build B intact when native-staged A would install on any process exit"
     const quit = () => { exits += 1; if (nativeStaged) writeFileSync(bundle, nativeStaged); };
     const guard = new InstalledBuildGuard({
       readIdentity: async () => readFileSync(bundle, "utf8"), isIdle: async () => true,
-      onChange: module.setInstalledBuildStatus, assertRestartSafe: module.assertInstalledBuildRestartSafe, relaunch: quit,
+      onChange: module.setInstalledBuildStatus, onReplacement: module.setInstalledBuildReplacementDetected, assertRestartSafe: module.assertInstalledBuildRestartSafe, relaunch: quit,
     });
     updaterEvents.get("update-downloaded")?.({ version: "2.1.0" });
     nativeAutoUpdater.emit("update-downloaded", undefined, undefined, "2.1.0");
@@ -167,6 +217,18 @@ it("keeps the native restart gate closed through in-flight checks and later erro
     nativeAutoUpdater.emit("checking-for-update");
     expect(() => module.assertInstalledBuildRestartSafe()).toThrow(/macOS.*update/i);
     nativeAutoUpdater.emit("error", new Error("native preparation failed after handoff"));
+    expect(() => module.assertInstalledBuildRestartSafe()).toThrow(/macOS.*update/i);
+  } finally { restore(); }
+});
+
+it("blocks native-conflicted retry relaunch before the replacement notice settles", async () => {
+  const restore = stubProcess("darwin", "/usr/bin/node");
+  try {
+    const { module, updaterEvents } = await importAutoUpdater();
+    await module.startAutoUpdates(stateDir);
+    updaterEvents.get("update-downloaded")?.({ version: "2.1.0" });
+    module.setInstalledBuildReplacementDetected(true);
+    expect(module.getUpdateStatus().installed).toBeUndefined();
     expect(() => module.assertInstalledBuildRestartSafe()).toThrow(/macOS.*update/i);
   } finally { restore(); }
 });

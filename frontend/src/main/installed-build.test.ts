@@ -4,7 +4,8 @@ import * as fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createPackage } from "@electron/asar";
-import { createArchiveIdentityReader, InstalledBuildGuard, sessionsAreIdle, watchInstalledBuild } from "./installed-build";
+import type { components } from "../api/schema";
+import { createArchiveIdentityReader, InstalledBuildGuard, sessionsAreIdle, sessionsAndReviewsAreIdle, watchInstalledBuild } from "./installed-build";
 
 function guardHarness() {
 	let identity: string | null = "running-asar";
@@ -13,11 +14,39 @@ function guardHarness() {
 	const relaunch = vi.fn();
 	const isIdle = vi.fn(async () => idle);
 	const assertRestartSafe = vi.fn<() => void>();
-	const guard = new InstalledBuildGuard({ readIdentity: async () => identity, isIdle, onChange, assertRestartSafe, relaunch });
-	return { guard, onChange, relaunch, isIdle, assertRestartSafe, replace: (next: string | null) => { identity = next; }, busy: () => { idle = false; }, idle: () => { idle = true; } };
+	const onReplacement = vi.fn();
+	const guard = new InstalledBuildGuard({ readIdentity: async () => identity, isIdle, onChange, onReplacement, assertRestartSafe, relaunch });
+	return { guard, onChange, onReplacement, relaunch, isIdle, assertRestartSafe, replace: (next: string | null) => { identity = next; }, busy: () => { idle = false; }, idle: () => { idle = true; } };
 }
 
 describe("installed desktop build", () => {
+	it("suspends the updater at the first mismatch before settling or probing workers", async () => {
+		const h = guardHarness();
+		h.replace("B");
+		await h.guard.check();
+		expect(h.onReplacement).toHaveBeenLastCalledWith(true);
+		expect(h.guard.status).toBeUndefined();
+		expect(h.isIdle).not.toHaveBeenCalled();
+		let finish!: (idle: boolean) => void;
+		h.isIdle.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+		const checking = h.guard.check();
+		await vi.waitFor(() => expect(finish).toBeDefined());
+		expect(h.onReplacement).toHaveBeenLastCalledWith(true);
+		expect(h.guard.status).toBeUndefined();
+		finish(true);
+		await checking;
+	});
+
+	it("keeps updater handoffs suspended during an unreadable copy and restores them after a reversion", async () => {
+		const h = guardHarness();
+		h.replace(null);
+		await h.guard.check();
+		expect(h.onReplacement).toHaveBeenLastCalledWith(true);
+		h.replace("running-asar");
+		await h.guard.check();
+		expect(h.onReplacement).toHaveBeenLastCalledWith(false);
+	});
+
 	it("does not prompt when identities match", async () => {
 		const h = guardHarness();
 		await h.guard.check();
@@ -140,13 +169,13 @@ describe("installed desktop build", () => {
 		expect(h.relaunch).not.toHaveBeenCalled();
 	});
 
-	it("blocks renderer loads immediately on replacement, before the prompt settles", async () => {
+	it("checks physical identity immediately on replacement, before the prompt settles", async () => {
 		const h = guardHarness();
-		expect(await h.guard.canLoadRenderer()).toBe(true);
+		expect(await h.guard.isRunningBuildInstalled()).toBe(true);
 		h.replace("new-asar");
-		expect(await h.guard.canLoadRenderer()).toBe(false);
+		expect(await h.guard.isRunningBuildInstalled()).toBe(false);
 		h.replace(null);
-		expect(await h.guard.canLoadRenderer()).toBe(false);
+		expect(await h.guard.isRunningBuildInstalled()).toBe(false);
 	});
 
 	it("detects a renderer built against a different main and does not loop after relaunch", async () => {
@@ -169,7 +198,7 @@ describe("installed desktop build", () => {
 		await h.guard.check();
 		await h.guard.requestRestart("now");
 		const onChange = vi.fn();
-		const restarted = new InstalledBuildGuard({ readIdentity: async () => "new-asar", isIdle: async () => true, onChange, assertRestartSafe: () => undefined, relaunch: vi.fn() });
+		const restarted = new InstalledBuildGuard({ readIdentity: async () => "new-asar", isIdle: async () => true, onChange, onReplacement: () => undefined, assertRestartSafe: () => undefined, relaunch: vi.fn() });
 		await restarted.check();
 		await restarted.check();
 		expect(restarted.status).toBeUndefined();
@@ -178,12 +207,34 @@ describe("installed desktop build", () => {
 });
 
 describe("idle evidence", () => {
+	const idleSession = {
+		id: "worker-1", isTerminated: false, status: "idle", statusReadiness: "ready",
+		activity: { state: "idle", lastActivityAt: "2026-11-16T20:00:00Z" },
+	} satisfies Pick<components["schemas"]["ControllersSessionView"], "id" | "isTerminated" | "status" | "statusReadiness" | "activity">;
+	it.each([{ status: "no_signal" }, { runtimeUnreachable: true }])("rejects stored idle activity with unavailable live facts: %j", (facts) => {
+		expect(sessionsAreIdle({ sessions: [{ ...idleSession, ...facts }] })).toBe(false);
+	});
+	it.each(["Approved", "Mergeable"])("checks all running review passes even when the display says %s", async (displayStatus) => {
+		const readReviews = vi.fn(async (_sessionId: string) => ({ runs: [{ status: "complete", prUrl: "pr-1" }, { status: "running", prUrl: "pr-2" }] }));
+		expect(await sessionsAndReviewsAreIdle({ sessions: [{ ...idleSession, displayStatus, status: displayStatus === "Approved" ? "approved" : "mergeable" }] }, readReviews)).toBe(false);
+		expect(readReviews).toHaveBeenCalledWith("worker-1");
+	});
+	it("requires available review facts for every live session and ignores terminated sessions", async () => {
+		const body = { sessions: [idleSession, { ...idleSession, id: "worker-2" }, { isTerminated: true }] };
+		const readReviews = vi.fn(async (_sessionId: string) => ({ runs: [] }));
+		expect(await sessionsAndReviewsAreIdle(body, readReviews)).toBe(true);
+		expect(readReviews.mock.calls.map(([id]) => id)).toEqual(["worker-1", "worker-2"]);
+		readReviews.mockRejectedValueOnce(new Error("unavailable"));
+		expect(await sessionsAndReviewsAreIdle(body, readReviews)).toBe(false);
+		readReviews.mockResolvedValueOnce({} as { runs: never[] });
+		expect(await sessionsAndReviewsAreIdle(body, readReviews)).toBe(false);
+	});
 	it.each(["active", "waiting_input", "blocked", "unknown"])("waits for %s sessions", (state) => {
 		expect(sessionsAreIdle({ sessions: [{ activity: { state }, statusReadiness: "ready" }] })).toBe(false);
 	});
 	it("accepts idle, exited and terminated sessions, including an empty board", () => {
 		expect(sessionsAreIdle({ sessions: [] })).toBe(true);
-		expect(sessionsAreIdle({ sessions: [{ activity: { state: "idle" }, statusReadiness: "ready" }, { activity: { state: "exited" }, statusReadiness: "ready" }, { isTerminated: true }] })).toBe(true);
+		expect(sessionsAreIdle({ sessions: [idleSession, { ...idleSession, activity: { ...idleSession.activity, state: "exited" }, status: "exited" }, { isTerminated: true }] })).toBe(true);
 	});
 	it.each([null, {}, { sessions: null }, { sessions: [{}] }, { sessions: [{ activity: { state: "idle" }, statusReadiness: "checking" }] }, { sessions: [{ activity: { state: "idle" }, statusReadiness: "ready", provisionState: "provisioning" }] }])("fails closed for missing or unsettled evidence: %j", (body) => {
 		expect(sessionsAreIdle(body)).toBe(false);
@@ -220,7 +271,8 @@ it("does not identify a truncated ASAR as an installed build even when its size 
 	const archive = path.join(dir, "app.asar");
 	await createPackage(source, archive);
 	const read = createArchiveIdentityReader(archive, fs);
-	expect(await read()).not.toBeNull();
+	// This packager can resolve before its output stream has finished flushing.
+	await vi.waitFor(async () => expect(await read()).not.toBeNull());
 	fs.truncateSync(archive, fs.statSync(archive).size - 1);
 	expect(await read()).toBeNull();
 	expect(await read()).toBeNull();
