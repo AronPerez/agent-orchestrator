@@ -213,6 +213,31 @@ beforeEach(() => {
 });
 
 describe("ProjectSettingsForm", () => {
+	it("saves the per-project worker stall threshold", async () => {
+		mockProject({
+			id: "proj-1",
+			name: "Project One",
+			kind: "single_repo",
+			path: "/repo/project-one",
+			repo: "",
+			defaultBranch: "main",
+			config: {
+				worker: { agent: "codex" },
+				orchestrator: { agent: "claude-code" },
+				workerContracts: { stallMinutes: 17 },
+			},
+		});
+
+		renderSettings();
+		const stallMinutes = await beginEdit("Stall threshold (minutes)");
+		expect(stallMinutes).toHaveValue("17");
+		await userEvent.clear(stallMinutes);
+		await userEvent.type(stallMinutes, "30{Enter}");
+
+		await waitFor(() => expect(putMock).toHaveBeenCalledTimes(1));
+		expect(putMock.mock.calls[0]?.[1]?.body.config.workerContracts).toEqual({ stallMinutes: 30 });
+	});
+
 	it("saves a changed project setting without a submit action", async () => {
 		mockProject({
 			id: "proj-1",

@@ -73,6 +73,9 @@ export type BoardSessionPresentation = {
 	trackerIssueId?: string;
 	updatedAt: string;
 	lastUserMessageAt?: string;
+	goal?: string;
+	timeboxDeadlineAt?: string;
+	contractStalled?: boolean;
 };
 
 export type BoardSessionStatusPresentation = {
@@ -240,6 +243,7 @@ export type SessionCardViewProps = {
 		formatTime: (timestamp: string) => string;
 		intakeIssue: (id: string) => string;
 		pr: BoardPullRequestLabels;
+		timeLeft?: (deadline: string) => string;
 		updatedAt: (timestamp: string) => string;
 	};
 	onOpen?: () => void;
@@ -265,7 +269,9 @@ export function getBoardSessionStatusLabel(
 	session: BoardSessionPresentation,
 	translate: ProductUITranslator = defaultProductUITranslator,
 ): string {
-	return session.statusReadiness === "checking"
+	return session.contractStalled
+		? translate("session.contractStalled")
+		: session.statusReadiness === "checking"
 		? translate("session.statusChecking")
 		: session.statusReadiness === "unavailable"
 			? translate("session.statusUnavailable")
@@ -321,6 +327,10 @@ export function SessionCardView({
 	const topic = branchTopic(branch);
 	const showBranch = Boolean(branchLabel) || (branch !== "" && !sameLabel(topic, session.title) && !sameLabel(topic, session.id));
 	const renderedStatusLabel = getBoardSessionStatusLabel(session, translate);
+	const contractGoal = session.goal?.trim();
+	const contractTimeLeft = session.timeboxDeadlineAt
+		? labels.timeLeft?.(session.timeboxDeadlineAt)
+		: undefined;
 	const statusDetail =
 		session.statusReadiness !== "checking" && session.statusReadiness !== "unavailable" && !statusPresentation
 			? session.prMix?.detail
@@ -485,6 +495,19 @@ export function SessionCardView({
 						{branchRow}
 					</div>
 				) : null}
+				{!compact && (contractGoal || contractTimeLeft) ? (
+					<div
+						className="mt-1.5 flex min-w-0 items-center gap-2 text-2xs text-muted-foreground"
+						data-testid="session-contract"
+					>
+						{contractGoal ? (
+							<span className="min-w-0 flex-1 truncate" title={contractGoal}>{contractGoal}</span>
+						) : null}
+						{contractTimeLeft ? (
+							<span className="shrink-0 tabular-nums">{contractTimeLeft}</span>
+						) : null}
+					</div>
+				) : null}
 				{compact && pullRequestProgressLabel ? (
 					<div
 						className="mt-1 min-w-0 truncate text-2xs text-muted-foreground"
@@ -538,6 +561,7 @@ export function SessionCardView({
 }
 
 function boardSessionNeedsAttention(session: BoardSessionPresentation): boolean {
+	if (session.contractStalled) return true;
 	if (session.statusReadiness && session.statusReadiness !== "ready") return false;
 	if (session.statusPresentation) return false;
 	switch (session.displayStatus) {

@@ -26,7 +26,7 @@ import { useSettings } from "../hooks/useSettings";
 import { prepareUnpublish, sessionDeleteTargets, sessionPublishedCheck, warnLinksStillLive } from "../lib/unpublish-artifacts";
 import { sessionBranchPresentation } from "../lib/session-branch";
 import { BranchNamingLabel } from "./BranchNamingLabel";
-import { formatTimeCompact } from "../lib/format-time";
+import { formatContractTimeLeft, formatTimeCompact } from "../lib/format-time";
 import { prBrowserUrl, sessionPRDisplaySummaries } from "../lib/pr-display";
 import { sessionPRMix } from "../lib/session-pr-mix";
 import { agentLabel } from "../lib/agent-options";
@@ -107,6 +107,11 @@ export function toBoardSessionPresentation(
 		trackerIssueId: canonicalTrackerIssueId(session.issueId),
 		updatedAt: session.updatedAt,
 		lastUserMessageAt: session.lastUserMessageAt,
+		goal: session.goal,
+		timeboxDeadlineAt: session.timeboxDeadlineAt,
+		contractStalled: Boolean(
+			session.contractStallEscalatedAt && !session.contractOutcome && !session.isTerminated,
+		),
 	};
 }
 
@@ -397,6 +402,7 @@ function DesktopSessionCard({
 				formatTime: formatTimeCompact,
 				intakeIssue: (id) => t("shell.intakeIssue", { id }),
 				pr: hidePullRequestProgress ? { ...pullRequestLabels(t), progress: undefined } : pullRequestLabels(t),
+				timeLeft: formatContractTimeLeft,
 				updatedAt: (timestamp: string) =>
 					t("shell.lastMessageAt", { time: formatTimeCompact(timestamp) }),
 			}}

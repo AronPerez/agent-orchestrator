@@ -222,6 +222,35 @@ describe("SessionsBoardView", () => {
 		},
 	);
 
+	it("shows a worker goal and time left while using the existing attention treatment for a stalled contract", () => {
+		render(
+			<SessionCardView
+				externalLink={ExternalLink}
+				labels={{
+					formatTime: () => "5m ago",
+					intakeIssue: (id) => `Issue ${id}`,
+					pr: progressLabels,
+					timeLeft: () => "45m left",
+					updatedAt: (timestamp) => `Updated ${timestamp}`,
+				}}
+				renderAvatar={() => null}
+				session={{
+					...baseSession,
+					contractStalled: true,
+					goal: "Ship the worker contract UI",
+					timeboxDeadlineAt: "2026-08-09T10:45:00Z",
+				}}
+			/>,
+		);
+
+		const card = screen.getByTestId("board-session-card");
+		expect(within(card).getByTestId("session-contract")).toHaveTextContent(
+			"Ship the worker contract UI45m left",
+		);
+		expect(within(card).getByTestId("session-status")).toHaveTextContent("Stalled");
+		expect(card).toHaveClass("animate-attention-card-pulse", "border-status-needs-you");
+	});
+
 	it("gives a compact card branch and time on one line, PRs below, and no status strip", () => {
 		const onOpen = vi.fn();
 		render(

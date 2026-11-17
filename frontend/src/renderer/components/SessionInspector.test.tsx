@@ -11,7 +11,7 @@ import {
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps, ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { PRSummaryCard, resetPRFocus, SessionInspector } from "./SessionInspector";
+import { PRSummaryCard, resetPRFocus, SessionContractSummary, SessionInspector } from "./SessionInspector";
 import { subscribeChatComposerText } from "../lib/chat-context-bus";
 import { sessionUiKey } from "../lib/hosts";
 import { resetPRMergeMethods } from "./PRActions";
@@ -413,6 +413,21 @@ afterEach(() => {
 });
 
 describe("SessionInspector tabs", () => {
+	it("shows a worker contract goal and time left in Summary", () => {
+		render(
+			<SessionContractSummary
+				session={{
+					goal: "Ship the worker contract UI",
+					timeboxDeadlineAt: new Date(Date.now() + 45 * 60_000).toISOString(),
+				}}
+			/>,
+		);
+
+		expect(screen.getByRole("button", { name: "Goal" })).toHaveAttribute("aria-expanded", "true");
+		expect(screen.getByText("Ship the worker contract UI")).toBeInTheDocument();
+		expect(screen.getByText("45m left")).toBeInTheDocument();
+	});
+
   it("gives an orchestrator Summary and Browser, with its account but no branch", () => {
     renderWithQuery(<SessionInspector orchestrator session={session([], { kind: "orchestrator" })} />);
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["Summary", "Browser"]);

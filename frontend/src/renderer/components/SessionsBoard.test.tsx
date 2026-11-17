@@ -483,6 +483,25 @@ describe("SessionsBoard", () => {
 		expect(presentation.lastUserMessageAt).toBe("2026-01-01T09:00:00Z");
 	});
 
+	it("marks only an active unresolved contract stalled", () => {
+		const contract = boardSession({
+			id: "contract-worker",
+			status: "idle",
+			title: "Contract worker",
+			goal: "Ship the worker contract UI",
+			timeboxDeadlineAt: "2026-01-01T11:00:00Z",
+			contractStallEscalatedAt: "2026-01-01T10:00:00Z",
+		});
+
+		expect(toBoardSessionPresentation(contract)).toMatchObject({
+			goal: "Ship the worker contract UI",
+			timeboxDeadlineAt: "2026-01-01T11:00:00Z",
+			contractStalled: true,
+		});
+		expect(toBoardSessionPresentation({ ...contract, contractOutcome: "met" }).contractStalled).toBe(false);
+		expect(toBoardSessionPresentation({ ...contract, isTerminated: true }).contractStalled).toBe(false);
+	});
+
 	it("localizes dynamic card actions and pull request lifecycle labels", async () => {
 		await appI18n.changeLanguage("zh-CN");
 		workspaceQueryMock.mockReturnValue({
