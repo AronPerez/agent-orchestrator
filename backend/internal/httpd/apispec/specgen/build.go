@@ -80,6 +80,8 @@ func Build() ([]byte, error) {
 			"Durable dashboard notifications"),
 		*(&openapi31.Tag{Name: "reports"}).WithDescription(
 			"Durable worker reports"),
+		*(&openapi31.Tag{Name: "decisions"}).WithDescription(
+			"Durable decision calls and their immutable history"),
 		*(&openapi31.Tag{Name: "usage"}).WithDescription(
 			"Token usage telemetry for AO sessions"),
 		*(&openapi31.Tag{Name: "push"}).WithDescription(
@@ -354,6 +356,7 @@ var schemaNames = map[string]string{ //nolint:gosec // Public OpenAPI type names
 	"DomainSessionContractOutcome":    "SessionContractOutcome",
 	"DomainSessionWait":               "SessionWait",
 	"DomainProjectConfig":             "ProjectConfig",
+	"DomainCollisionRadarConfig":      "CollisionRadarConfig",
 	"DomainTrackerIntakeConfig":       "TrackerIntakeConfig",
 	"ControllersTriggerReviewRequest": "TriggerReviewRequest",
 	"DomainContainerReapConfig":       "ContainerReapConfig",
@@ -435,6 +438,8 @@ var schemaNames = map[string]string{ //nolint:gosec // Public OpenAPI type names
 	"ControllersAttachmentInput":                          "AttachmentInput",
 	"ControllersListWorkspaceFilesResponse":               "ListWorkspaceFilesResponse",
 	"ControllersWorkspaceManifestResponse":                "WorkspaceManifestResponse",
+	"ControllersProjectOverlapResponse":                   "ProjectOverlapResponse",
+	"ControllersProjectOverlapsResponse":                  "ProjectOverlapsResponse",
 	"ControllersWorkspaceHistoryResponse":                 "WorkspaceHistoryResponse",
 	"ControllersWorkspaceHistoryQuery":                    "WorkspaceHistoryQuery",
 	"ControllersWorkspaceViewResponse":                    "WorkspaceViewResponse",
@@ -604,6 +609,15 @@ var schemaNames = map[string]string{ //nolint:gosec // Public OpenAPI type names
 	"DomainCoordinationEvent":                     "CoordinationEvent",
 	"ControllersReportResponse":                   "ReportResponse",
 	"ControllersListReportsResponse":              "ListReportsResponse",
+	"ControllersDecisionOptionPayload":            "DecisionOptionPayload",
+	"ControllersDecisionLinkPayload":              "DecisionLinkPayload",
+	"ControllersRaiseDecisionRequest":             "RaiseDecisionRequest",
+	"ControllersDecisionCallResponse":             "DecisionCallResponse",
+	"ControllersListDecisionsQuery":               "ListDecisionsQuery",
+	"ControllersListDecisionsResponse":            "ListDecisionsResponse",
+	"ControllersDecisionIDParam":                  "DecisionIDParam",
+	"ControllersDecisionEntryResponse":            "DecisionEntryResponse",
+	"ControllersDecisionDetailResponse":           "DecisionDetailResponse",
 	"ControllersClearNotificationsResponse":       "ClearNotificationsResponse",
 	"ControllersUsageHookMetadata":                "UsageHookMetadata",
 	"ControllersListUsageSessionsQuery":           "ListUsageSessionsQuery",
@@ -877,6 +891,7 @@ func operations() []operation {
 	ops = append(ops, reviewOperations()...)
 	ops = append(ops, notificationOperations()...)
 	ops = append(ops, reportOperations()...)
+	ops = append(ops, decisionOperations()...)
 	ops = append(ops, usageOperations()...)
 	ops = append(ops, pushOperations()...)
 	ops = append(ops, importOperations()...)
@@ -1044,6 +1059,32 @@ func reportOperations() []operation {
 			{http.StatusNotImplemented, envelope.APIError{}},
 		},
 	}}
+}
+
+func decisionOperations() []operation {
+	commonErrors := []respUnit{
+		{http.StatusBadRequest, envelope.APIError{}},
+		{http.StatusNotFound, envelope.APIError{}},
+		{http.StatusInternalServerError, envelope.APIError{}},
+		{http.StatusNotImplemented, envelope.APIError{}},
+	}
+	return []operation{
+		{
+			method: http.MethodPost, path: "/api/v1/decisions", id: "raiseDecision", tag: "decisions",
+			summary: "Raise a decision call from a session", reqBody: controllers.RaiseDecisionRequest{},
+			resps: append([]respUnit{{http.StatusCreated, controllers.DecisionCallResponse{}}}, commonErrors...),
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/decisions", id: "listDecisions", tag: "decisions",
+			summary: "List or search decision calls", pathParams: []any{controllers.ListDecisionsQuery{}},
+			resps: append([]respUnit{{http.StatusOK, controllers.ListDecisionsResponse{}}}, commonErrors...),
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/decisions/{id}", id: "getDecision", tag: "decisions",
+			summary: "Get one decision call and its history", pathParams: []any{controllers.DecisionIDParam{}},
+			resps: append([]respUnit{{http.StatusOK, controllers.DecisionDetailResponse{}}}, commonErrors...),
+		},
+	}
 }
 
 // systemOperations declares the startup requirements gate the desktop loading
@@ -3359,6 +3400,17 @@ func projectOperations() []operation {
 				{http.StatusBadRequest, envelope.APIError{}},
 				{http.StatusNotFound, envelope.APIError{}},
 				{http.StatusInternalServerError, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/overlaps", id: "getProjectOverlaps", tag: "projects",
+			summary:    "Find active project sessions changing the same base-relative paths",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProjectOverlapsResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
 			},
 		},
 		{
