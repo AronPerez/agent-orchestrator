@@ -239,7 +239,13 @@ describe("coordination credentials", () => {
 		expect(new Headers(init?.headers).get("x-ao-expected-host-id")).toBe("h_workbox");
 	});
 
-	it.each([[404, "retired"], [401, "unauthorized"], [403, "unauthorized"], [405, "unsupported"], [501, "unsupported"], [500, "offline"]])(
+	it("treats only the coordination device's not-found envelope as already retired", async () => {
+		await expect(revokeCoordinationToken(host, "dev_coord", fakeFetch(404, { code: "COORDINATION_TOKEN_NOT_FOUND" }))).resolves.toBe("retired");
+		await expect(revokeCoordinationToken(host, "dev_coord", fakeFetch(404, { code: "NOT_FOUND" }))).resolves.toBe("unsupported");
+		await expect(revokeCoordinationToken(host, "dev_coord", fakeTextFetch(404, "missing route"))).resolves.toBe("unsupported");
+	});
+
+	it.each([[401, "unauthorized"], [403, "unauthorized"], [405, "unsupported"], [501, "unsupported"], [500, "offline"]])(
 		"maps revoke status %i to %s", async (status, result) => {
 			await expect(revokeCoordinationToken(host, "dev_coord", fakeFetch(status))).resolves.toBe(result);
 		},

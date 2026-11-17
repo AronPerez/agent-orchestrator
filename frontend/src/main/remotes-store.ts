@@ -175,9 +175,20 @@ function serializeMutation<T>(operation: () => Promise<T>): Promise<T> {
 export async function addRemote(path: string, entry: RemoteEntry): Promise<void> {
 	return serializeMutation(async () => {
 		const existing = await readRemotes(path);
+		const replaced = existing.filter((candidate) => candidate.url === entry.url || (entry.hostId && candidate.hostId === entry.hostId));
+		const pendingCoordinationDeviceIds = [...new Set([
+			...(entry.pendingCoordinationDeviceIds ?? []),
+			...replaced.flatMap((candidate) => [
+				...(candidate.pendingCoordinationDeviceIds ?? []),
+				...(candidate.coordinationDeviceId ? [candidate.coordinationDeviceId] : []),
+			]),
+		])].filter((deviceId) => deviceId !== entry.coordinationDeviceId);
+		const replacement = pendingCoordinationDeviceIds.length > 0
+			? { ...entry, pendingCoordinationDeviceIds }
+			: entry;
 		await writeRemotes(path, [
 			...existing.filter((candidate) => candidate.url !== entry.url && (!entry.hostId || candidate.hostId !== entry.hostId)),
-			entry,
+			replacement,
 		]);
 	});
 }

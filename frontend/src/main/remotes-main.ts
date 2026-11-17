@@ -169,7 +169,7 @@ export function registerRemotesIpc(
 	type UnsavedCoordination = { token: string; deviceId: string; parentHash: string };
 	const unsavedCoordination = new Map<string, UnsavedCoordination>();
 	const credentialFingerprint = (credential: string) => createHash("sha256").update(credential).digest("hex");
-	const coordinationKey = (account: string, entry: RemoteEntry, parentHash: string) => `${account}\n${entry.hostId ?? entry.url}\n${parentHash}`;
+	const coordinationKey = (entry: RemoteEntry) => entry.hostId ?? entry.url;
 	const coordinationChanges = (candidate: UnsavedCoordination, pendingCoordinationDeviceIds: string[] = []): RemoteChanges => ({
 		coordinationToken: candidate.token,
 		coordinationDeviceId: candidate.deviceId,
@@ -178,13 +178,20 @@ export function registerRemotesIpc(
 	});
 	const ensureCoordinationCredential = async (entry: RemoteEntry, localHostId: string, account: string): Promise<RemoteEntry> => {
 		const parentHash = credentialFingerprint(entry.password);
-		const key = coordinationKey(account, entry, parentHash);
+		const key = coordinationKey(entry);
 		const unsavedCandidate = unsavedCoordination.get(key);
 		if (unsavedCandidate) {
+			if (unsavedCandidate.parentHash !== parentHash) {
+				let retired: CoordinationTokenRevokeResult;
+				try { retired = await revokeCoordination(entry, unsavedCandidate.deviceId); }
+				catch { return entry; }
+				if (retired !== "retired") return entry;
+				unsavedCoordination.delete(key);
+			} else {
 			let health: CoordinationTokenHealth;
 			try { health = await probeCoordination({ ...entry, coordinationToken: unsavedCandidate.token }); }
 			catch { return entry; }
-			if (health === "valid") {
+			if (health === "valid" || health === "revoked") {
 				try {
 					const saved = await updateRemote(file, entry.url, coordinationChanges(unsavedCandidate));
 					unsavedCoordination.delete(key);
@@ -194,7 +201,12 @@ export function registerRemotesIpc(
 				}
 			}
 			if (health === "offline") return entry;
+			let retired: CoordinationTokenRevokeResult;
+			try { retired = await revokeCoordination(entry, unsavedCandidate.deviceId); }
+			catch { return entry; }
+			if (retired !== "retired") return entry;
 			unsavedCoordination.delete(key);
+			}
 		}
 
 		let current = entry;
@@ -277,6 +289,31 @@ export function registerRemotesIpc(
 			await retireOrRemember();
 			return current;
 		}
+	};
+	const retireCoordinationChildren = async (entry: RemoteEntry): Promise<boolean> => {
+		if (entry.coordinationToken && !entry.coordinationDeviceId) return false;
+		let current = entry;
+		const deviceIDs = [...new Set([
+			...(current.pendingCoordinationDeviceIds ?? []),
+			...(current.coordinationDeviceId ? [current.coordinationDeviceId] : []),
+		])];
+		for (const deviceID of deviceIDs) {
+			let retired: CoordinationTokenRevokeResult;
+			try { retired = await revokeCoordination(current, deviceID); }
+			catch { return false; }
+			if (retired !== "retired") return false;
+			const pending = (current.pendingCoordinationDeviceIds ?? []).filter((candidate) => candidate !== deviceID);
+			const active = current.coordinationDeviceId === deviceID;
+			try {
+				current = await updateRemote(file, current.url, {
+					...(active ? { coordinationToken: "", coordinationDeviceId: "", coordinationParentHash: "" } : {}),
+					pendingCoordinationDeviceIds: pending,
+				});
+			} catch {
+				return false;
+			}
+		}
+		return true;
 	};
 	// Keep edits and connects ordered so an update cannot leave a stale proxy.
 	// ponytail: one queue includes network probes; split by host if five-host setup is too slow.
@@ -362,7 +399,12 @@ export function registerRemotesIpc(
 		return updateSavedRemote(file, url, editable, disconnect, (entry) => checkedProbe(entry, account));
 	}));
 	ipcMain.handle("remotes:remove", async (_event, url: string) => ordered(async () => {
-		if (!(await owned()).some((entry) => entry.url === url)) throw new Error("Host does not belong to this account.");
+		const entry = (await owned()).find((candidate) => candidate.url === url);
+		if (!entry) throw new Error("Host does not belong to this account.");
+		await disconnect(url);
+		if (!await retireCoordinationChildren(entry)) {
+			throw new ExpectedIpcError("The host is saved until its agent coordination credential can be retired.");
+		}
 		return removeSavedRemote(file, url, disconnect);
 	}));
 	ipcMain.handle("remotes:connect", async (_event, url: string, hostId?: string) => ordered(async () => {
@@ -439,6 +481,10 @@ export function registerRemotesIpc(
 		}
 		if (local?.accountUserId === account) {
 			if (local.sealedPassword && local.accountToken) {
+				if (!local.coordinationToken || local.coordinationParentHash === credentialFingerprint(host.token)) {
+					if (local.label !== host.label || local.url !== host.url) await updateRemote(file, local.url, { label: host.label, url: host.url });
+					return;
+				}
 				const pending = [...new Set([...(local.pendingCoordinationDeviceIds ?? []), ...(local.coordinationDeviceId ? [local.coordinationDeviceId] : [])])];
 				await updateRemote(file, local.url, {
 					label: host.label, url: host.url,
@@ -475,7 +521,8 @@ export function registerRemotesIpc(
 				// Only account-imported credentials are directory-managed. A machine
 				// paired here with its original password remains a local pairing.
 				if (entry.hostId && entry.accountUserId === account && !current.has(entry.hostId) && holdsAccountToken(entry)) {
-					await removeSavedRemote(file, entry.url, disconnect);
+					await disconnect(entry.url);
+					if (await retireCoordinationChildren(entry)) await removeSavedRemote(file, entry.url, disconnect);
 				}
 			}
 		});
