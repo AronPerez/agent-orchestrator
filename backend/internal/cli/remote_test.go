@@ -54,6 +54,27 @@ func writeRemotes(t *testing.T, home string, perm os.FileMode, entries ...remote
 	}
 }
 
+func writeActiveCloudAccount(t *testing.T, home, userID string) {
+	t.Helper()
+	path := filepath.Join(home, ".ao", "cloud_active_user")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if userID == "" {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		return
+	}
+	raw, err := json.Marshal(activeCloudAccountMarker{UserID: userID, DesktopPID: os.Getpid()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(raw, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestNormalizeRemoteURL(t *testing.T) {
 	ok := map[string]string{
 		"http://host:3011":         "http://host:3011",
@@ -299,31 +320,21 @@ func TestSavedRemoteResolutionRespectsActiveAccount(t *testing.T) {
 
 func TestSelectSavedHostUsesLocalActiveAccount(t *testing.T) {
 	home := aoHome(t)
-	dataDir := filepath.Join(home, ".ao", "data")
-	t.Setenv("AO_DATA_DIR", dataDir)
-	t.Setenv("AO_REMOTES_FILE", filepath.Join(home, ".ao", remotesFileName))
-	runPath := filepath.Join(dataDir, "running.json")
-	t.Setenv("AO_RUN_FILE", runPath)
-	if err := runfile.Write(runPath, runfile.Info{PID: os.Getpid(), Port: 3001, StartedAt: time.Now().UTC()}); err != nil {
-		t.Fatal(err)
-	}
 	writeRemotes(t, home, 0o600,
 		remoteEntry{Label: "desk", URL: "https://a.example", HostID: "h_a", CoordinationToken: "aoc_a", AccountUserID: "user-a"},
 		remoteEntry{Label: "desk", URL: "https://b.example", HostID: "h_b", CoordinationToken: "aoc_b", AccountUserID: "user-b"},
 	)
-	activeAccount := "user-a"
+	writeActiveCloudAccount(t, home, "user-a")
 	switchAccountDuringProbe := false
 	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		switch req.URL.Path {
-		case "/internal/telemetry/identity":
-			return jsonResponse(http.StatusOK, fmt.Sprintf(`{"cloudUserId":%q,"known":true}`, activeAccount)), nil
 		case "/api/v1/identity":
 			hostID := "h_a"
 			if req.URL.Host == "b.example" {
 				hostID = "h_b"
 			}
 			if switchAccountDuringProbe {
-				activeAccount = "user-b"
+				writeActiveCloudAccount(t, home, "user-b")
 			}
 			return jsonResponse(http.StatusOK, fmt.Sprintf(`{"hostId":%q,"apiVersion":1}`, hostID)), nil
 		default:
@@ -335,19 +346,58 @@ func TestSelectSavedHostUsesLocalActiveAccount(t *testing.T) {
 		t.Fatalf("user-a selection = %+v, %v", c.remote, err)
 	}
 	c.remote = nil
-	activeAccount = "user-b"
+	writeActiveCloudAccount(t, home, "user-b")
 	if err := c.selectSavedHost(context.Background(), "desk"); err != nil || c.remote.hostID != "h_b" {
 		t.Fatalf("user-b selection = %+v, %v", c.remote, err)
 	}
 	c.remote = nil
-	activeAccount = ""
+	writeActiveCloudAccount(t, home, "")
 	if err := c.selectSavedHost(context.Background(), "desk"); err == nil || c.remote != nil {
 		t.Fatalf("signed-out selection = %+v, %v", c.remote, err)
 	}
-	activeAccount = "user-a"
+	writeActiveCloudAccount(t, home, "user-a")
 	switchAccountDuringProbe = true
 	if err := c.selectSavedHost(context.Background(), "desk"); err == nil || c.remote != nil {
 		t.Fatalf("account-switch-during-probe selection = %+v, %v", c.remote, err)
+	}
+}
+
+func TestSessionListUsesSavedHostThroughRootCommand(t *testing.T) {
+	home := aoHome(t)
+	var requests []string
+	var sessionAuth, sessionExpectedHost string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		switch r.URL.Path {
+		case "/api/v1/identity":
+			if auth := r.Header.Get("Authorization"); auth != "" {
+				t.Fatalf("identity probe Authorization = %q, want empty", auth)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"hostId": "h_desk", "apiVersion": 1})
+		case "/api/v1/sessions":
+			sessionAuth = r.Header.Get("Authorization")
+			sessionExpectedHost = r.Header.Get("X-AO-Expected-Host-ID")
+			_ = json.NewEncoder(w).Encode(map[string]any{"sessions": []any{}})
+		default:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer srv.Close()
+	writeRemotes(t, home, 0o600, remoteEntry{
+		Label: "desk", URL: srv.URL, HostID: "h_desk", CoordinationToken: "aoc_coordination",
+	})
+
+	var out bytes.Buffer
+	err := executeWithDeps(Deps{Out: &out, Err: &out, HTTPClient: srv.Client()},
+		[]string{"session", "ls", "--host", "desk"})
+	if err != nil {
+		t.Fatalf("ao session ls --host: %v\n%s", err, out.String())
+	}
+	if sessionAuth != "Bearer aoc_coordination" || sessionExpectedHost != "h_desk" {
+		t.Fatalf("session request auth=%q expected-host=%q", sessionAuth, sessionExpectedHost)
+	}
+	if len(requests) < 2 || requests[0] != "GET /api/v1/identity" {
+		t.Fatalf("requests = %v, want identity probe before authenticated reads", requests)
 	}
 }
 

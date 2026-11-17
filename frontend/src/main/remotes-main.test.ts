@@ -614,7 +614,8 @@ describe("registerRemotesIpc", () => {
 			const file = await tempFile();
 			await writeFile(file, JSON.stringify({ remotes: [
 				{ hostId: "h_paired", label: "Paired", url: "https://paired.example", sealedPassword: "sealed-pairing", accountUserId: TEST_ACCOUNT },
-				{ hostId: "h_token", label: "Token", url: "https://token.example", sealedPassword: "sealed-token", accountToken: true, accountUserId: TEST_ACCOUNT },
+				{ hostId: "h_token", label: "Token", url: "https://token.example", sealedPassword: "sealed-token", accountToken: true, accountUserId: TEST_ACCOUNT,
+					coordinationToken: "aoc_saved", coordinationDeviceId: "dev_saved", coordinationParentHash: createHash("sha256").update("a".repeat(64)).digest("hex") },
 				{ hostId: "h_gone", label: "Gone", url: "https://gone.example", sealedPassword: "sealed-gone", accountToken: true, accountUserId: TEST_ACCOUNT },
 			] }));
 			const ipc = fakeIpc();
@@ -629,7 +630,8 @@ describe("registerRemotesIpc", () => {
 			// Neither password is replaced by the account token, and the host the account dropped goes.
 			expect(JSON.parse(await readFile(file, "utf8")).remotes).toEqual([
 				{ hostId: "h_paired", label: "Renamed", url: "https://moved.example", sealedPassword: "sealed-pairing", accountUserId: TEST_ACCOUNT },
-				{ hostId: "h_token", label: "Token", url: "https://token.example", sealedPassword: "sealed-token", accountToken: true, accountUserId: TEST_ACCOUNT },
+				{ hostId: "h_token", label: "Token", url: "https://token.example", sealedPassword: "sealed-token", accountToken: true, accountUserId: TEST_ACCOUNT,
+					coordinationToken: "aoc_saved", coordinationDeviceId: "dev_saved", coordinationParentHash: createHash("sha256").update("a".repeat(64)).digest("hex") },
 			]);
 		} finally {
 			setPasswordCipher(() => null);
@@ -832,6 +834,101 @@ describe("registerRemotesIpc", () => {
 			} finally {
 				await chmod(dirname(file), 0o700);
 			}
+		});
+
+		it("persists an explicitly revoked unsaved child instead of minting another", async () => {
+			const file = await tempFile();
+			const issueCoordination = vi.fn<NonNullable<RemotesIpcDeps["issueCoordination"]>>(async () => ({
+				kind: "issued", token: coordinationToken, deviceId: coordinationDeviceId,
+			}));
+			const revokeCoordination = vi.fn<NonNullable<RemotesIpcDeps["revokeCoordination"]>>(async () => "offline");
+			const registry = new RemoteRegistry(proxy());
+			const ipc = fakeIpc();
+			registerRemotes(ipc.ipcMain, {
+				file, registry, requireAccount: signedIn, identity: async () => "h_workbox", probe: async () => "online",
+				issueCoordination, revokeCoordination, probeCoordination: async () => "revoked",
+			});
+			await chmod(dirname(file), 0o500);
+			await ipc.invoke("remotes:connect", "http://192.0.2.1:1");
+			await registry.disconnect("http://192.0.2.1:1");
+			await chmod(dirname(file), 0o700);
+
+			await ipc.invoke("remotes:connect", "http://192.0.2.1:1");
+			expect(issueCoordination).toHaveBeenCalledOnce();
+			expect((await saved(file))[0]).toMatchObject({ coordinationToken, coordinationDeviceId });
+		});
+
+		it("retires an unsaved child before issuing under a changed parent", async () => {
+			const file = await tempFile();
+			let generation = 0;
+			const calls: string[] = [];
+			const issueCoordination = vi.fn<NonNullable<RemotesIpcDeps["issueCoordination"]>>(async () => {
+				generation++;
+				calls.push(`issue-${generation}`);
+				return { kind: "issued", token: `aoc_${String(generation).repeat(64)}`, deviceId: `dev_${generation}` };
+			});
+			const revokeCoordination = vi.fn<NonNullable<RemotesIpcDeps["revokeCoordination"]>>(async (_entry, id) => {
+				calls.push(`revoke-${id}`);
+				return calls.filter((call) => call.startsWith("revoke-")).length === 1 ? "offline" : "retired";
+			});
+			const registry = new RemoteRegistry(proxy());
+			const ipc = fakeIpc();
+			registerRemotes(ipc.ipcMain, {
+				file, registry, requireAccount: signedIn, identity: async () => "h_workbox", probe: async () => "online",
+				issueCoordination, revokeCoordination,
+			});
+			await chmod(dirname(file), 0o500);
+			await ipc.invoke("remotes:connect", "http://192.0.2.1:1");
+			await registry.disconnect("http://192.0.2.1:1");
+			await chmod(dirname(file), 0o700);
+			await ipc.invoke("remotes:update", "http://192.0.2.1:1", { password: "new-parent" });
+
+			await ipc.invoke("remotes:connect", "http://192.0.2.1:1");
+			expect(calls).toEqual(["issue-1", "revoke-dev_1", "revoke-dev_1", "issue-2"]);
+			expect((await saved(file))[0]).toMatchObject({
+				coordinationDeviceId: "dev_2", coordinationParentHash: parentHash("new-parent"),
+			});
+		});
+
+		it("retires coordination children before removing a host", async () => {
+			const file = await tempFile();
+			await writeFile(file, JSON.stringify({ remotes: [{
+				hostId: "h_workbox", label: "workbox", url: "http://192.0.2.1:1", password: "old", accountUserId: TEST_ACCOUNT,
+				coordinationToken: "aoc_old", coordinationDeviceId: "dev_active", pendingCoordinationDeviceIds: ["dev_pending"],
+			}] }));
+			let available = false;
+			const revokeCoordination = vi.fn<NonNullable<RemotesIpcDeps["revokeCoordination"]>>(async () => available ? "retired" : "offline");
+			const ipc = fakeIpc();
+			registerRemotes(ipc.ipcMain, {
+				file, registry: new RemoteRegistry(proxy()), requireAccount: signedIn, revokeCoordination,
+			});
+
+			await expect(ipc.invoke("remotes:remove", "http://192.0.2.1:1")).rejects.toBeInstanceOf(ExpectedIpcError);
+			expect(await saved(file)).toHaveLength(1);
+			available = true;
+			await ipc.invoke("remotes:remove", "http://192.0.2.1:1");
+			expect(await saved(file)).toHaveLength(0);
+		});
+
+		it("retains an account-pruned host until its children can be retired", async () => {
+			const file = await tempFile();
+			const accountToken = "a".repeat(64);
+			await writeFile(file, JSON.stringify({ remotes: [{
+				hostId: "h_workbox", label: "workbox", url: "http://192.0.2.1:1", password: accountToken, accountUserId: TEST_ACCOUNT,
+				coordinationToken: "aoc_old", coordinationDeviceId: "dev_active",
+			}] }));
+			let available = false;
+			const ipc = fakeIpc();
+			registerRemotes(ipc.ipcMain, {
+				file, registry: new RemoteRegistry(proxy()), requireAccount: signedIn,
+				cloudRequest: cloudListing(), revokeCoordination: async () => available ? "retired" : "offline",
+			});
+
+			await ipc.invoke("remotes:syncAccountHosts", TEST_ACCOUNT);
+			expect(await saved(file)).toHaveLength(1);
+			available = true;
+			await ipc.invoke("remotes:syncAccountHosts", TEST_ACCOUNT);
+			expect(await saved(file)).toHaveLength(0);
 		});
 
 		it("keeps desktop connections working when the remote release has no issuer", async () => {
