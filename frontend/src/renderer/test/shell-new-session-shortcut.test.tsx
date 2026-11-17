@@ -1905,6 +1905,25 @@ describe("shell session deep links", () => {
 		});
 	});
 
+	it("bounds a stalled Cloud wait for an available local session link", async () => {
+		shellMocks.state.cloudLoadSettled = false;
+		const view = await renderShellWithReadyDaemon();
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+		try {
+			emitSessionDeepLink("ao-app://sessions/proj-1/sess-1");
+			expect(shellMocks.navigate).not.toHaveBeenCalled();
+			expect(useUiStore.getState().globalToast).toBeNull();
+			await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+			expect(useUiStore.getState().globalToast?.title).toContain("Could not open the link");
+			// A later Cloud result must not resurrect an expired navigation.
+			shellMocks.state.cloudLoadSettled = true;
+			await act(async () => { view.rerender(<Suspense fallback={null}><ShellRoute /></Suspense>); });
+			expect(shellMocks.navigate).not.toHaveBeenCalled();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("holds a remote-targeted link until the host's workspace data settles", async () => {
 		useUiStore.setState({ remoteHosts: true });
 		shellMocks.state.remoteHostsState = { hosts: [{ hostId: "box-a", status: "connecting" }], listed: true, settled: true, refresh: async () => undefined };

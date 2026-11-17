@@ -101,6 +101,7 @@ import { onDedicatedShortcut, useAppShortcut } from "../hooks/useAppShortcut";
 import { recordManualWorkerOpen, recordSessionSurface } from "../lib/session-management-telemetry";
 
 const SHELL_LOADER_STALE_MS = 2_000;
+const SESSION_DEEP_LINK_LOAD_TIMEOUT_MS = 15_000;
 
 // Only shown while an orchestrator is starting, but it pulls in the whole chat
 // stack (ChatWorkspace, lexical, markdown). Lazy keeps that off every route.
@@ -1448,7 +1449,7 @@ const replacementErrorCount = Object.keys(orchestratorReplacementErrors).length;
 			|| remoteFailedHostIds.includes(hostId)));
 	const sessionDeepLinksReady = workspaceQuery.isSuccess && workspaceStartupState === "ready"
 		&& workspaceQuery.cloudLoadSettled && remoteWorkspaceLoadSettled;
-	const pendingSessionDeepLinkRef = useRef<string | null>(null);
+	const [pendingSessionDeepLink, setPendingSessionDeepLink] = useState<{ url: string; deadline: number } | null>(null);
 	const handleSessionDeepLink = useCallback(
 		(rawUrl: string) => {
 			const link = `ao://${rawUrl.slice("ao-app://".length)}`;
@@ -1494,19 +1495,32 @@ const replacementErrorCount = Object.keys(orchestratorReplacementErrors).length;
 	useEffect(() => {
 		return aoBridge.app.onOpenSessionDeepLink((rawUrl) => {
 			if (!sessionDeepLinksReady) {
-				pendingSessionDeepLinkRef.current = rawUrl;
+				setPendingSessionDeepLink({ url: rawUrl, deadline: Date.now() + SESSION_DEEP_LINK_LOAD_TIMEOUT_MS });
 				return;
 			}
 			handleSessionDeepLink(rawUrl);
 		});
 	}, [handleSessionDeepLink, sessionDeepLinksReady]);
 	useEffect(() => {
-		if (!sessionDeepLinksReady) return;
-		const pending = pendingSessionDeepLinkRef.current;
-		if (!pending) return;
-		pendingSessionDeepLinkRef.current = null;
-		handleSessionDeepLink(pending);
-	}, [handleSessionDeepLink, sessionDeepLinksReady]);
+		if (!pendingSessionDeepLink) return;
+		const remaining = pendingSessionDeepLink.deadline - Date.now();
+		const expire = () => {
+			setPendingSessionDeepLink(null);
+			useUiStore.getState().showGlobalToast(t("report.linkFailed"));
+		};
+		if (remaining <= 0) {
+			expire();
+			return;
+		}
+		if (sessionDeepLinksReady) {
+			setPendingSessionDeepLink(null);
+			handleSessionDeepLink(pendingSessionDeepLink.url);
+			return;
+		}
+		// Keep the arrival deadline across partial loads and background updates.
+		const timer = setTimeout(expire, remaining);
+		return () => clearTimeout(timer);
+	}, [handleSessionDeepLink, pendingSessionDeepLink, sessionDeepLinksReady, t]);
 
 	useEffect(() => {
 		const disposePrevious = onDedicatedShortcut("previous-session", (handler) => aoBridge.app.onPreviousSessionShortcut(handler), () => navigateSession(-1));

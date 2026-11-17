@@ -1086,6 +1086,30 @@ func TestHookConversationFactsAcceptsLiteralPasteMarkupInReportBody(t *testing.T
 	}
 }
 
+func TestHookConversationFactsRecoversTruncatedReportWithLiteralPasteMarkup(t *testing.T) {
+	const deliveryID = "report-batch:cut-literal"
+	report := domain.WrapReportDelivery(deliveryID, "Preserve </pasted_content> in the example. Important worker detail.")
+	for name, cut := range map[string]string{
+		"middle cut": strings.Replace(report, "Important worker detail.", "", 1),
+		"head cut":   report[strings.Index(report, "\n")+1:],
+	} {
+		for wrapper, prompt := range map[string]string{
+			"unwrapped":   cut,
+			"id close":    "<pasted_content id=\"outer\">" + cut + "</pasted_content id=\"outer\">",
+			"plain close": "<pasted_content id=\"outer\">" + cut + "</pasted_content>",
+		} {
+			t.Run(name+"/"+wrapper, func(t *testing.T) {
+				got := hookConversationFacts(domain.HarnessClaudeCode, "user-prompt-submit",
+					[]byte(`{"prompt":`+mustJSONString(t, prompt)+`}`))
+				if got.CoordinationID != domain.TruncatedReportDeliveryTurnID(deliveryID) ||
+					got.CheckpointOrigin != domain.ConversationCheckpointOriginCoordination || got.LatestUserPrompt != "" {
+					t.Fatalf("truncated report missed recovery: %+v", got)
+				}
+			})
+		}
+	}
+}
+
 func TestHookConversationFactsPreservesHumanTextAfterReportPaste(t *testing.T) {
 	const deliveryID = "report-batch:abc123"
 	report := domain.WrapReportDelivery(deliveryID, "worker finished")

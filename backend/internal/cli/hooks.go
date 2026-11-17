@@ -565,13 +565,13 @@ func hookConversationFacts(agent domain.AgentHarness, event string, payload []by
 var claudePastedContentTag = regexp.MustCompile(`\n*(?:<pasted_content id="([A-Za-z0-9_-]+)">|</pasted_content(?: id="([A-Za-z0-9_-]+)")?>|(<pasted_content>))\n*`)
 
 // Paste blocks can split an envelope anywhere, including its id. Remove paired
-// Claude wrappers, allowing literal unmatched tags only inside a verified report.
+// Claude wrappers, allowing literal unmatched tags only inside a recognized report.
 func normalizeClaudePastedPrompt(prompt string) string {
 	tags := claudePastedContentTag.FindAllStringSubmatchIndex(prompt, -1)
 	if len(tags) == 0 {
 		return prompt
 	}
-	// Locate a checksummed body without deciding which tags are transport.
+	// Locate a report frame without deciding which tags are transport.
 	// Prefer its transport boundaries, so literal body markup cannot consume
 	// an outer opener or closer. Remaining body tags are paired afterwards.
 	var preview strings.Builder
@@ -585,11 +585,14 @@ func normalizeClaudePastedPrompt(prompt string) string {
 	preview.WriteString(prompt[start:])
 	stripped := preview.String()
 	value := strings.TrimSpace(stripped)
-	_, end := intactReportPrefix(value)
+	_, end := reportPrefixFacts(value)
 	inBody := make([]bool, len(tags))
 	if end != 0 {
-		bodyStart := strings.Index(value, `">`) + len(`">`)
-		bodyEnd := strings.LastIndex(value[:end], "</ao-report-delivery>")
+		bodyStart := 0
+		if strings.HasPrefix(value, `<ao-report-delivery id="`) {
+			bodyStart = strings.Index(value, `">`) + len(`">`)
+		}
+		bodyEnd := strings.LastIndex(value[:end], `<ao-report-delivery-end id="`)
 		leading := strings.Index(stripped, value)
 		for i, offset := range offsets {
 			inBody[i] = offset-leading >= bodyStart && offset-leading <= bodyEnd
@@ -670,7 +673,7 @@ func normalizeClaudePastedPrompt(prompt string) string {
 	normalized.WriteString(prompt[start:])
 	value = strings.TrimSpace(normalized.String())
 	if unmatched {
-		_, end := intactReportPrefix(value)
+		_, end := reportPrefixFacts(value)
 		if end == 0 || strings.Contains(value[end:], "<pasted_content") || strings.Contains(value[end:], "</pasted_content") {
 			return prompt
 		}
@@ -689,9 +692,9 @@ func firstHookValue(values ...string) string {
 
 func aoCoordinationFacts(value string) (string, bool) {
 	value = strings.TrimSpace(value)
-	// An intact checksummed report followed by human text can acknowledge the
-	// delivery, but must preserve the human instruction as the turn's request.
-	if id, end := intactReportPrefix(value); end != 0 {
+	// Intact reports can acknowledge delivery. Truncated ones carry only the
+	// recovery turn id. A trailing human instruction remains the turn's request.
+	if id, end := reportPrefixFacts(value); end != 0 {
 		return id, strings.TrimSpace(value[end:]) == ""
 	}
 	// Only Claude's validated wrappers were removed above. Other harnesses and
@@ -704,11 +707,11 @@ func aoCoordinationFacts(value string) (string, bool) {
 		strings.HasPrefix(value, "AO transferred the previous agent's context in hidden system instructions.")
 }
 
-func intactReportPrefix(value string) (string, int) {
+// reportPrefixFacts prefers a verified checksum, but also recognizes a cut
+// envelope ending in its matching footer. That yields only the truncated turn
+// id, never the delivery id that would acknowledge an incomplete batch.
+func reportPrefixFacts(value string) (string, int) {
 	const reportPrefix = `<ao-report-delivery id="`
-	if !strings.HasPrefix(value, reportPrefix) {
-		return "", 0
-	}
 	const footerPrefix = `<ao-report-delivery-end id="`
 	for searchFrom := 0; searchFrom < len(value); {
 		footer := strings.Index(value[searchFrom:], footerPrefix)
@@ -726,6 +729,16 @@ func intactReportPrefix(value string) (string, int) {
 			// an unvalidated outer wrapper or a split id from another harness.
 			if id, ok := domain.ReportDeliveryID(envelope); ok && strings.HasPrefix(envelope, reportPrefix+id+`">`) {
 				return id, end
+			}
+			// Only an ending footer proves the truncated frame boundary.
+			// Human-prefixed or unvalidated split headers remain human input.
+			if end == len(value) {
+				footerID, _, hasSum := strings.Cut(value[footer+len(footerPrefix):], `" sum="`)
+				id, coordination := domain.CoordinationDeliveryID(envelope)
+				if hasSum && coordination && id == domain.TruncatedReportDeliveryTurnID(footerID) &&
+					(!strings.Contains(envelope, reportPrefix) || strings.HasPrefix(envelope, reportPrefix+footerID+`">`)) {
+					return id, end
+				}
 			}
 		}
 	}
