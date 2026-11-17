@@ -1934,7 +1934,7 @@ function daemonEnv(forceKeep = keepDaemonAlive(process.env)): NodeJS.ProcessEnv 
 	const ownerTag = {
 		AO_OWNER,
 		AO_DATA_DIR: desktopDataDir,
-		...remotesDaemonEnvironment(),
+		...remotesDaemonEnvironment(process.env, os.homedir(), desktopLaunchWorkingDirectory, cloudDataDir()),
 		AO_APP_RUN_ID: appRunId,
         ...(process.platform === "darwin" ? { AO_WAKE_HELPER: app.isPackaged
             ? path.join(process.resourcesPath, "wake-helper", "ao-wake")

@@ -18,9 +18,9 @@ import {
 	type PairDeviceResult,
 	type RemoteHealth,
 } from "./remote-request";
-import { findRemote, removeSavedRemote, toHostViews, updateSavedRemote } from "./remotes-ipc";
+import { findRemote, toHostViews, updateSavedRemote } from "./remotes-ipc";
 import type { RemoteRegistry } from "./remote-registry";
-import { ACCOUNT_TOKEN, DEVICE_TOKEN_PREFIX, addRemote, holdsAccountToken, holdsPairingPassword, readRemotes, updateRemote, type RemoteChanges, type RemoteEntry } from "./remotes-store";
+import { ACCOUNT_TOKEN, DEVICE_TOKEN_PREFIX, addRemote, holdsAccountToken, holdsPairingPassword, queueRemoteCleanup, readRemotes, removeCleanupRemote, updateRemote, type RemoteChanges, type RemoteEntry } from "./remotes-store";
 import { ExpectedIpcError } from "./main-error-capture";
 
 // An isolated desktop run must not read or write the real user's credentials.
@@ -29,9 +29,19 @@ export function remotesFilePath(env: NodeJS.ProcessEnv = process.env, homeDir = 
 	return path.resolve(cwd, env.AO_DATA_DIR?.trim() || path.join(homeDir, ".ao"), "remotes.json");
 }
 
-/** Carry the desktop-owned host store through the daemon to spawned agents. */
-export function remotesDaemonEnvironment(env: NodeJS.ProcessEnv = process.env, homeDir = os.homedir(), cwd = process.cwd()): { AO_REMOTES_FILE: string } {
-	return { AO_REMOTES_FILE: remotesFilePath(env, homeDir, cwd) };
+/** Carry the desktop-owned host store and its exact Cloud authority through the daemon to spawned agents. */
+export function remotesDaemonEnvironment(
+	env: NodeJS.ProcessEnv = process.env,
+	homeDir = os.homedir(),
+	cwd = process.cwd(),
+	cloudAuthDir?: string,
+): { AO_REMOTES_FILE: string; AO_CLOUD_ACCOUNT_FILE: string } {
+	const remotesFile = remotesFilePath(env, homeDir, cwd);
+	const authDir = cloudAuthDir ? path.resolve(cwd, cloudAuthDir) : path.dirname(remotesFile);
+	return {
+		AO_REMOTES_FILE: remotesFile,
+		AO_CLOUD_ACCOUNT_FILE: path.join(authDir, "cloud_active_user"),
+	};
 }
 
 type RunFile = (file: string, args: string[], options: { timeout: number }) => Promise<{ stdout: string }>;
@@ -290,30 +300,41 @@ export function registerRemotesIpc(
 			return current;
 		}
 	};
-	const retireCoordinationChildren = async (entry: RemoteEntry): Promise<boolean> => {
+	const retireCoordinationChildren = async (entry: RemoteEntry, account: string): Promise<boolean> => {
 		if (entry.coordinationToken && !entry.coordinationDeviceId) return false;
-		let current = entry;
 		const deviceIDs = [...new Set([
-			...(current.pendingCoordinationDeviceIds ?? []),
-			...(current.coordinationDeviceId ? [current.coordinationDeviceId] : []),
+			...(entry.pendingCoordinationDeviceIds ?? []),
+			...(entry.coordinationDeviceId ? [entry.coordinationDeviceId] : []),
 		])];
+		if (deviceIDs.length === 0) return true;
+		if (!entry.hostId || (entry.accountUserId && entry.accountUserId !== account)) return false;
+		let localHostId: string;
+		try {
+			localHostId = await requireLocalIdentity();
+		} catch {
+			return false;
+		}
 		for (const deviceID of deviceIDs) {
 			let retired: CoordinationTokenRevokeResult;
-			try { retired = await revokeCoordination(current, deviceID); }
+			try {
+				const actual = await identity(entry);
+				refuseSelf(actual, localHostId);
+				if (actual !== entry.hostId) return false;
+				await checkConnectionContext(localHostId, account);
+				retired = await revokeCoordination(entry, deviceID);
+				await checkConnectionContext(localHostId, account);
+			}
 			catch { return false; }
 			if (retired !== "retired") return false;
-			const pending = (current.pendingCoordinationDeviceIds ?? []).filter((candidate) => candidate !== deviceID);
-			const active = current.coordinationDeviceId === deviceID;
-			try {
-				current = await updateRemote(file, current.url, {
-					...(active ? { coordinationToken: "", coordinationDeviceId: "", coordinationParentHash: "" } : {}),
-					pendingCoordinationDeviceIds: pending,
-				});
-			} catch {
-				return false;
-			}
 		}
 		return true;
+	};
+	const hideAndRetire = async (entry: RemoteEntry, account: string, extraDeviceIDs: string[] = []): Promise<void> => {
+		const cleanup = await queueRemoteCleanup(file, entry.url, entry.hostId, extraDeviceIDs);
+		if (!cleanup) return;
+		if (await retireCoordinationChildren(cleanup, account)) {
+			await removeCleanupRemote(file, cleanup.url, cleanup.hostId);
+		}
 	};
 	// Keep edits and connects ordered so an update cannot leave a stale proxy.
 	// ponytail: one queue includes network probes; split by host if five-host setup is too slow.
@@ -333,7 +354,7 @@ export function registerRemotesIpc(
 		const account = await getAccountId();
 		const entries = await readRemotes(file);
 		// Local pairings have no account owner; account-scoped credentials stay isolated.
-		return entries.filter((item) => !item.accountUserId || item.accountUserId === account);
+		return entries.filter((item) => !item.cleanupOnly && (!item.accountUserId || item.accountUserId === account));
 	};
 
 	ipcMain.handle("remotes:list", () => ordered(async () => {
@@ -374,7 +395,7 @@ export function registerRemotesIpc(
 		const account = await getAccountId();
 		if (!(await owned()).some((entry) => entry.url === url)) throw new ExpectedIpcError("Host does not belong to this account.");
 		const editable: RemoteChanges = { label: changes.label, url: changes.url, password: changes.password };
-		const current = (await readRemotes(file)).find((entry) => entry.url === url);
+		const current = (await readRemotes(file)).find((entry) => !entry.cleanupOnly && entry.url === url);
 		if (editable.password !== undefined && current) {
 			const typed: RemoteEntry = { ...current, url: editable.url ?? url, password: editable.password, fallbackPassword: undefined, sealedFallbackPassword: undefined };
 			const localHostId = await requireLocalIdentity();
@@ -399,13 +420,17 @@ export function registerRemotesIpc(
 		return updateSavedRemote(file, url, editable, disconnect, (entry) => checkedProbe(entry, account));
 	}));
 	ipcMain.handle("remotes:remove", async (_event, url: string) => ordered(async () => {
-		const entry = (await owned()).find((candidate) => candidate.url === url);
+		const account = await getAccountId();
+		const entries = (await readRemotes(file)).filter((candidate) => candidate.url === url
+			&& (!candidate.accountUserId || candidate.accountUserId === account));
+		const entry = entries.find((candidate) => !candidate.cleanupOnly)
+			?? entries.find((candidate) => candidate.cleanupOnly);
 		if (!entry) throw new Error("Host does not belong to this account.");
 		await disconnect(url);
-		if (!await retireCoordinationChildren(entry)) {
-			throw new ExpectedIpcError("The host is saved until its agent coordination credential can be retired.");
-		}
-		return removeSavedRemote(file, url, disconnect);
+		const key = coordinationKey(entry);
+		const unsavedCandidate = unsavedCoordination.get(key);
+		await hideAndRetire(entry, account, unsavedCandidate ? [unsavedCandidate.deviceId] : []);
+		if (unsavedCandidate) unsavedCoordination.delete(key);
 	}));
 	ipcMain.handle("remotes:connect", async (_event, url: string, hostId?: string) => ordered(async () => {
 		const account = await getAccountId();
@@ -471,7 +496,7 @@ export function registerRemotesIpc(
 	};
 	const importAccountHost = async (account: string, host: AccountHost) => {
 		if (!host.hostId || !ACCOUNT_TOKEN.test(host.token ?? "")) throw new ExpectedIpcError("Invalid account host credential.");
-		const local = (await readRemotes(file)).find((entry) => entry.hostId === host.hostId);
+		const local = (await readRemotes(file)).find((entry) => !entry.cleanupOnly && entry.hostId === host.hostId);
 		// Keep the original password on the machine that performed pairing; a
 		// Cloud refresh must not replace it with the narrower account token. A
 		// password this launch cannot decrypt is kept the same way.
@@ -515,6 +540,12 @@ export function registerRemotesIpc(
 			const account = await accountID();
 			if (account !== expectedAccountId) throw new ExpectedIpcError("Account changed during host sync.");
 			appliedSync = sync;
+			for (const cleanup of (await readRemotes(file)).filter((entry) => entry.cleanupOnly
+				&& (!entry.accountUserId || entry.accountUserId === account))) {
+				if (await retireCoordinationChildren(cleanup, account)) {
+					await removeCleanupRemote(file, cleanup.url, cleanup.hostId);
+				}
+			}
 			for (const host of hosts) await importAccountHost(account, host);
 			const current = new Set(hosts.map((host) => host.hostId));
 			for (const entry of await owned()) {
@@ -522,7 +553,7 @@ export function registerRemotesIpc(
 				// paired here with its original password remains a local pairing.
 				if (entry.hostId && entry.accountUserId === account && !current.has(entry.hostId) && holdsAccountToken(entry)) {
 					await disconnect(entry.url);
-					if (await retireCoordinationChildren(entry)) await removeSavedRemote(file, entry.url, disconnect);
+					await hideAndRetire(entry, account);
 				}
 			}
 		});
@@ -533,7 +564,7 @@ export function registerRemotesIpc(
 		const { hostKeys } = await accountHosts<{ hostKeys?: boolean }>("GET", "", { timeoutMs: accountDirectoryTimeoutMs });
 		const issued = await ordered(async () => {
 			const account = await accountID();
-			const entry = (await readRemotes(file)).find((saved) => saved.url === url && (!saved.accountUserId || saved.accountUserId === account));
+			const entry = (await readRemotes(file)).find((saved) => !saved.cleanupOnly && saved.url === url && (!saved.accountUserId || saved.accountUserId === account));
 			if (!entry?.hostId) throw new ExpectedIpcError("Pair this host before linking it to your account.");
 			const localHostId = await requireLocalIdentity();
 			refuseSelf(entry.hostId, localHostId);
