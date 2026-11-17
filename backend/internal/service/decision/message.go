@@ -11,7 +11,7 @@ import (
 // answer or dismissal. fallback is true when it goes to the project's
 // orchestrator because the owning session has ended.
 func DeliveryMessage(call domain.DecisionCall, fallback bool) string {
-	if call.State == domain.DecisionStateDismissed {
+	if call.StandingKind == domain.DecisionKindDismissed {
 		return dismissalMessage(call, fallback)
 	}
 	return answerMessage(call, fallback)

@@ -2,6 +2,7 @@ package decision
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -191,6 +192,109 @@ func TestDelivererSendsAgainWhenRecordingFailed(t *testing.T) {
 	}
 	if delivered != 1 {
 		t.Fatalf("delivered entries=%d, want 1", delivered)
+	}
+}
+
+func TestDelivererTracksAChangedAnswerAfterTheEarlierDeliveryRecordFailed(t *testing.T) {
+	fixture := newDecisionService(t)
+	first := answeredCall(t, fixture, fixture.w1)
+	messenger := newFakeDecisionMessenger()
+	store := &failingAppendStore{DeliveryStore: fixture.store, fail: true}
+	deliverer := newTestDeliverer(store, messenger, "h_a")
+
+	pending, err := deliverer.RunDue(context.Background())
+	if err != nil || pending != 1 || len(messenger.messages) != 1 {
+		t.Fatalf("first RunDue() pending=%d messages=%+v err=%v", pending, messenger.messages, err)
+	}
+	second, err := fixture.service.Answer(context.Background(), Actor{Surface: domain.RequestSurfaceCLI}, first.ID, AnswerInput{
+		Choice: domain.DecisionChoiceOption, Option: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err = deliverer.RunDue(context.Background())
+	if err != nil || pending != 0 || len(messenger.messages) != 3 {
+		t.Fatalf("changed RunDue() pending=%d messages=%+v err=%v", pending, messenger.messages, err)
+	}
+	second.Redelivery = true
+	if messenger.messages[1].text != DeliveryMessage(first, false) || messenger.messages[2].text != DeliveryMessage(second, false) ||
+		!strings.HasPrefix(messenger.messages[2].text, "Changed decision on your call") {
+		t.Fatalf("messages = %+v", messenger.messages)
+	}
+	entries, err := fixture.store.ListDecisionEntries(context.Background(), first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivered := make(map[string]bool)
+	for _, entry := range entries {
+		if entry.Kind != domain.DecisionKindDelivered {
+			continue
+		}
+		var payload domain.DecisionDeliveredPayload
+		if json.Unmarshal(entry.Payload, &payload) == nil {
+			delivered[payload.ForEntry] = true
+		}
+	}
+	if !delivered[first.StandingEntryID] || !delivered[second.StandingEntryID] || len(delivered) != 2 {
+		t.Fatalf("delivered entries = %+v", delivered)
+	}
+}
+
+func TestDelivererUsesDismissalEntryAfterTheCallClosed(t *testing.T) {
+	fixture := newDecisionService(t)
+	call := raiseDecision(t, fixture, fixture.w1)
+	at := time.UnixMilli(4_000_000).UTC()
+	for i, fact := range []struct {
+		id      string
+		kind    domain.DecisionEntryKind
+		payload any
+		author  domain.DecisionAuthorKind
+	}{
+		{id: "withdrawn", kind: domain.DecisionKindWithdrawn, payload: struct{}{}, author: domain.DecisionAuthorSession},
+		{id: "dismissed", kind: domain.DecisionKindDismissed, payload: domain.DecisionDismissedPayload{Note: "No longer needed."}, author: domain.DecisionAuthorPerson},
+	} {
+		raw, err := json.Marshal(fact.payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _, err = fixture.store.AppendDecisionEntry(context.Background(), domain.DecisionEntry{
+			ID: fact.id, Origin: "h_a", CallID: call.ID, Kind: fact.kind, Payload: raw,
+			WrittenAt: at.Add(time.Duration(i) * time.Second), AuthorKind: fact.author,
+		}, at.Add(time.Duration(i)*time.Second))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	messenger := newFakeDecisionMessenger()
+	pending, err := newTestDeliverer(fixture.store, messenger, "h_a").RunDue(context.Background())
+	if err != nil || pending != 0 || len(messenger.messages) != 1 || !strings.HasPrefix(messenger.messages[0].text, "I dismissed your call") {
+		t.Fatalf("pending=%d messages=%+v err=%v", pending, messenger.messages, err)
+	}
+}
+
+func TestDelivererFallsBackOnlyAfterTheOwnerIsConfirmedExited(t *testing.T) {
+	fixture := newDecisionService(t)
+	call := answeredCall(t, fixture, fixture.w1)
+	messenger := newFakeDecisionMessenger()
+	messenger.errs[fixture.w1] = errors.New("no live chat controller")
+	deliverer := newTestDeliverer(fixture.store, messenger, "h_a")
+
+	pending, err := deliverer.RunDue(context.Background())
+	if err != nil || pending != 1 || len(messenger.messages) != 0 {
+		t.Fatalf("temporary failure pending=%d messages=%+v err=%v", pending, messenger.messages, err)
+	}
+	owner, ok, err := fixture.store.GetSession(context.Background(), fixture.w1)
+	if err != nil || !ok {
+		t.Fatalf("GetSession() = %+v, %v, %v", owner, ok, err)
+	}
+	owner.Activity.State = domain.ActivityExited
+	if err := fixture.store.UpdateSession(context.Background(), owner); err != nil {
+		t.Fatal(err)
+	}
+	pending, err = deliverer.RunDue(context.Background())
+	if err != nil || pending != 0 || len(messenger.messages) != 1 || messenger.messages[0].session != fixture.orch ||
+		!strings.HasPrefix(messenger.messages[0].text, "Decision on a call raised by") {
+		t.Fatalf("confirmed exit pending=%d messages=%+v err=%v call=%+v", pending, messenger.messages, err, call)
 	}
 }
 

@@ -126,13 +126,34 @@ func (s *Store) ListDecisionCallsByState(ctx context.Context, state domain.Decis
 	return decisionCallsFromGen(rows)
 }
 
-// ListDecisionCallsAwaitingDelivery returns pending calls raised on origin.
+// ListDecisionCallsAwaitingDelivery returns one ledger snapshot for every
+// undelivered answer or dismissal raised on origin.
 func (s *Store) ListDecisionCallsAwaitingDelivery(ctx context.Context, origin string) ([]domain.DecisionCall, error) {
-	rows, err := s.qr.ListDecisionCallsAwaitingDelivery(ctx, origin)
+	rows, err := s.qr.ListDecisionEntriesAwaitingDelivery(ctx, origin)
 	if err != nil {
 		return nil, fmt.Errorf("list decisions awaiting delivery: %w", err)
 	}
-	return decisionCallsFromGen(rows)
+	calls := make([]domain.DecisionCall, 0, len(rows))
+	for _, row := range rows {
+		pending := decisionEntryFromGen(row)
+		entryRows, err := s.qr.ListDecisionEntries(ctx, pending.CallID)
+		if err != nil {
+			return nil, fmt.Errorf("list decision entries for pending delivery %s: %w", pending.ID, err)
+		}
+		entries := make([]domain.DecisionEntry, 0, len(entryRows))
+		for _, entryRow := range entryRows {
+			entry := decisionEntryFromGen(entryRow)
+			if entry.Kind == domain.DecisionKindDelivered || domain.CompareDecisionEntries(entry, pending) <= 0 {
+				entries = append(entries, entry)
+			}
+		}
+		call, ok := domain.ReduceDecisionCall(entries)
+		if !ok || call.StandingEntryID != pending.ID {
+			return nil, fmt.Errorf("reduce pending decision delivery %s", pending.ID)
+		}
+		calls = append(calls, call)
+	}
+	return calls, nil
 }
 
 // ListDecisionStreams returns the newest recorded name for every stream.
