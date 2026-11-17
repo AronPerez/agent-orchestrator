@@ -152,6 +152,10 @@ type SessionService interface {
 	Unpin(ctx context.Context, id domain.SessionID) (domain.Session, error)
 }
 
+type projectOverlapNoticeScheduler interface {
+	ScheduleProjectOverlapNotices(sessionsvc.ProjectOverlapResult)
+}
+
 type sessionMessageOptionsSender interface {
 	SendWithOptions(ctx context.Context, id domain.SessionID, message string, attachment *ports.SpawnAttachment, options ports.MessageDeliveryOptions) error
 }
@@ -1171,6 +1175,7 @@ func (c *SessionsController) projectOverlaps(w http.ResponseWriter, r *http.Requ
 		envelope.WriteError(w, r, err)
 		return
 	}
+	c.scheduleProjectOverlapNotices(overlaps)
 	envelope.WriteJSON(w, http.StatusOK, projectOverlapsResponse(overlaps))
 }
 
@@ -1639,10 +1644,12 @@ func (c *SessionsController) streamProjectOverlapChanges(w http.ResponseWriter, 
 	}
 	// Install the watcher before the authoritative read so edits in the setup
 	// gap still produce a later invalidation edge.
-	if _, err := c.Svc.ProjectOverlaps(r.Context(), projectID); err != nil {
+	overlaps, err := c.Svc.ProjectOverlaps(r.Context(), projectID)
+	if err != nil {
 		envelope.WriteError(w, r, err)
 		return
 	}
+	c.scheduleProjectOverlapNotices(overlaps)
 
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream; charset=utf-8")
@@ -1665,9 +1672,11 @@ func (c *SessionsController) streamProjectOverlapChanges(w http.ResponseWriter, 
 			if !ok {
 				return
 			}
-			if _, err := c.Svc.ProjectOverlaps(r.Context(), projectID); err != nil {
+			overlaps, err := c.Svc.ProjectOverlaps(r.Context(), projectID)
+			if err != nil {
 				return
 			}
+			c.scheduleProjectOverlapNotices(overlaps)
 			if _, err := fmt.Fprint(w, "event: overlaps_changed\ndata: {}\n\n"); err != nil {
 				return
 			}
@@ -1678,6 +1687,12 @@ func (c *SessionsController) streamProjectOverlapChanges(w http.ResponseWriter, 
 			}
 			flusher.Flush()
 		}
+	}
+}
+
+func (c *SessionsController) scheduleProjectOverlapNotices(result sessionsvc.ProjectOverlapResult) {
+	if scheduler, ok := c.Svc.(projectOverlapNoticeScheduler); ok {
+		scheduler.ScheduleProjectOverlapNotices(result)
 	}
 }
 

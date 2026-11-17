@@ -121,6 +121,7 @@ type fakeSessionService struct {
 	projectOverlapsErr         error
 	overlapProjectID           domain.ProjectID
 	projectOverlapReads        int
+	projectOverlapNoticeReads  int
 	overlapWatchProjectID      domain.ProjectID
 	spawnErr                   error
 	lastSpawn                  ports.SpawnConfig
@@ -970,6 +971,10 @@ func (f *fakeSessionService) ProjectOverlaps(_ context.Context, projectID domain
 		return sessionsvc.ProjectOverlapResult{}, f.projectOverlapsErr
 	}
 	return f.projectOverlaps, nil
+}
+
+func (f *fakeSessionService) ScheduleProjectOverlapNotices(_ sessionsvc.ProjectOverlapResult) {
+	f.projectOverlapNoticeReads++
 }
 
 func newSessionTestServer(t *testing.T, svc *fakeSessionService) *httptest.Server {
@@ -4085,6 +4090,9 @@ func TestSessionsAPI_ProjectOverlaps(t *testing.T) {
 	if svc.overlapProjectID != "demo" {
 		t.Fatalf("project id = %q, want demo", svc.overlapProjectID)
 	}
+	if svc.projectOverlapNoticeReads != 1 {
+		t.Fatalf("notice reconciles = %d, want 1", svc.projectOverlapNoticeReads)
+	}
 	var got controllers.ProjectOverlapsResponse
 	mustJSON(t, body, &got)
 	if got.ProjectID != "demo" || len(got.Overlaps) != 1 {
@@ -4741,8 +4749,8 @@ func TestSessionsAPI_StreamProjectOverlapChanges(t *testing.T) {
 	if contentType := resp.Header.Get("Content-Type"); !strings.HasPrefix(contentType, "text/event-stream") {
 		t.Fatalf("Content-Type = %q, want text/event-stream", contentType)
 	}
-	if svc.overlapWatchProjectID != "demo" || svc.projectOverlapReads != 1 {
-		t.Fatalf("startup reads watch=%q overlaps=%d, want demo/1", svc.overlapWatchProjectID, svc.projectOverlapReads)
+	if svc.overlapWatchProjectID != "demo" || svc.projectOverlapReads != 1 || svc.projectOverlapNoticeReads != 1 {
+		t.Fatalf("startup reads watch=%q overlaps=%d notices=%d, want demo/1/1", svc.overlapWatchProjectID, svc.projectOverlapReads, svc.projectOverlapNoticeReads)
 	}
 
 	event := make(chan string, 1)
@@ -4768,6 +4776,9 @@ func TestSessionsAPI_StreamProjectOverlapChanges(t *testing.T) {
 	}
 	if svc.projectOverlapReads != 2 {
 		t.Fatalf("overlap reads after change = %d, want 2", svc.projectOverlapReads)
+	}
+	if svc.projectOverlapNoticeReads != 2 {
+		t.Fatalf("notice reconciles after change = %d, want 2", svc.projectOverlapNoticeReads)
 	}
 }
 

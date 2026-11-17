@@ -5,10 +5,13 @@ import (
 	"errors"
 	"os"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
+	"github.com/aoagents/agent-orchestrator/backend/internal/sessionguard"
 )
 
 func TestProjectOverlapsReturnsSortedActivePairsAndHonorsIgnores(t *testing.T) {
@@ -296,6 +299,185 @@ func TestProjectOverlapWatchPathsSkipsScratchAndUnavailableSessions(t *testing.T
 	if got == nil || len(got) != 0 {
 		t.Fatalf("scratch watch paths = %#v, want non-nil empty list", got)
 	}
+}
+
+func TestReconcileProjectOverlapNoticesSendsEachSideOnceAndRearmsAfterClear(t *testing.T) {
+	store := newMemoryOverlapNoticeStore()
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+	store.sessions["demo-a"] = domain.SessionRecord{ID: "demo-a", ProjectID: "demo", DisplayName: "Alpha"}
+	store.sessions["demo-b"] = domain.SessionRecord{ID: "demo-b", ProjectID: "demo", DisplayName: "Beta"}
+	nudger := &recordingOverlapNudger{}
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	svc := NewWithDeps(Deps{Store: store, OverlapNudger: nudger, Clock: func() time.Time { return now }})
+
+	overlap := ProjectOverlapResult{
+		ProjectID: "demo",
+		Overlaps:  []ProjectOverlap{{SessionA: "demo-a", SessionB: "demo-b", Paths: []string{"README.md", "frontend/App.tsx"}}},
+	}
+	if err := svc.ReconcileProjectOverlapNotices(context.Background(), overlap); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+	if len(nudger.calls) != 2 {
+		t.Fatalf("nudge calls = %+v, want one per session", nudger.calls)
+	}
+	if nudger.calls[0].sessionID != "demo-a" || !strings.Contains(nudger.calls[0].message, "session Beta (demo-b) also changed these files") ||
+		!strings.Contains(nudger.calls[0].message, "- README.md") || !strings.Contains(nudger.calls[0].message, "- frontend/App.tsx") {
+		t.Fatalf("first nudge = %+v", nudger.calls[0])
+	}
+	if nudger.calls[1].sessionID != "demo-b" || !strings.Contains(nudger.calls[1].message, "session Alpha (demo-a) also changed these files") {
+		t.Fatalf("second nudge = %+v", nudger.calls[1])
+	}
+	if len(store.notices) != 2 {
+		t.Fatalf("persisted notices = %+v, want two directed rows", store.notices)
+	}
+
+	// A changed path set is still the same active pair, so it must not create
+	// edit-by-edit noise while the collision remains present.
+	overlap.Overlaps[0].Paths = []string{"backend/main.go"}
+	if err := svc.ReconcileProjectOverlapNotices(context.Background(), overlap); err != nil {
+		t.Fatalf("repeat reconcile: %v", err)
+	}
+	if len(nudger.calls) != 2 {
+		t.Fatalf("repeat nudge calls = %d, want 2", len(nudger.calls))
+	}
+
+	if err := svc.ReconcileProjectOverlapNotices(context.Background(), ProjectOverlapResult{ProjectID: "demo"}); err != nil {
+		t.Fatalf("clear reconcile: %v", err)
+	}
+	if len(store.notices) != 0 {
+		t.Fatalf("notices after clear = %+v, want none", store.notices)
+	}
+	if err := svc.ReconcileProjectOverlapNotices(context.Background(), overlap); err != nil {
+		t.Fatalf("rearmed reconcile: %v", err)
+	}
+	if len(nudger.calls) != 4 {
+		t.Fatalf("rearmed nudge calls = %d, want 4", len(nudger.calls))
+	}
+}
+
+func TestReconcileProjectOverlapNoticesRetriesOnlySuppressedRecipient(t *testing.T) {
+	store := newMemoryOverlapNoticeStore()
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+	store.sessions["demo-a"] = domain.SessionRecord{ID: "demo-a", ProjectID: "demo"}
+	store.sessions["demo-b"] = domain.SessionRecord{ID: "demo-b", ProjectID: "demo"}
+	nudger := &recordingOverlapNudger{outcomes: map[domain.SessionID][]sessionguard.Outcome{
+		"demo-a": {sessionguard.SuppressedBusy, sessionguard.Sent},
+		"demo-b": {sessionguard.Sent},
+	}}
+	svc := NewWithDeps(Deps{Store: store, OverlapNudger: nudger})
+	result := ProjectOverlapResult{ProjectID: "demo", Overlaps: []ProjectOverlap{{SessionA: "demo-a", SessionB: "demo-b", Paths: []string{"shared.go"}}}}
+
+	if err := svc.ReconcileProjectOverlapNotices(context.Background(), result); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+	if len(store.notices) != 1 || !store.hasNotice("demo-b", "demo-a") {
+		t.Fatalf("notices = %+v, want only delivered demo-b -> demo-a", store.notices)
+	}
+	if err := svc.ReconcileProjectOverlapNotices(context.Background(), result); err != nil {
+		t.Fatalf("retry reconcile: %v", err)
+	}
+	if len(nudger.calls) != 3 || nudger.calls[2].sessionID != "demo-a" {
+		t.Fatalf("nudge calls = %+v, want only demo-a retried", nudger.calls)
+	}
+	if len(store.notices) != 2 {
+		t.Fatalf("notices after retry = %+v, want both directions", store.notices)
+	}
+}
+
+func TestReconcileProjectOverlapNoticesContinuesAfterOneRecipientErrors(t *testing.T) {
+	store := newMemoryOverlapNoticeStore()
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+	store.sessions["demo-a"] = domain.SessionRecord{ID: "demo-a", ProjectID: "demo"}
+	store.sessions["demo-b"] = domain.SessionRecord{ID: "demo-b", ProjectID: "demo"}
+	nudger := &recordingOverlapNudger{
+		outcomes: map[domain.SessionID][]sessionguard.Outcome{"demo-a": {sessionguard.SuppressedUnknown}, "demo-b": {sessionguard.Sent}},
+		errors:   map[domain.SessionID][]error{"demo-a": {errors.New("guard read failed")}},
+	}
+	svc := NewWithDeps(Deps{Store: store, OverlapNudger: nudger})
+	result := ProjectOverlapResult{ProjectID: "demo", Overlaps: []ProjectOverlap{{SessionA: "demo-a", SessionB: "demo-b", Paths: []string{"shared.go"}}}}
+
+	if err := svc.ReconcileProjectOverlapNotices(context.Background(), result); err == nil || !strings.Contains(err.Error(), "guard read failed") {
+		t.Fatalf("reconcile error = %v, want guard failure", err)
+	}
+	if len(nudger.calls) != 2 || !store.hasNotice("demo-b", "demo-a") {
+		t.Fatalf("calls=%+v notices=%+v, want independent demo-b delivery", nudger.calls, store.notices)
+	}
+}
+
+func TestFormatProjectOverlapNoticeBoundsPaths(t *testing.T) {
+	paths := make([]string, 23)
+	for i := range paths {
+		paths[i] = "path-" + string(rune('a'+i)) + ".go"
+	}
+	message := formatProjectOverlapNotice("Peer", "demo-b", paths)
+	if !strings.Contains(message, "- path-a.go") || !strings.Contains(message, "- path-t.go") ||
+		strings.Contains(message, "path-u.go") || !strings.Contains(message, "+ 3 more files") {
+		t.Fatalf("bounded message:\n%s", message)
+	}
+}
+
+type overlapNoticeKey struct {
+	sessionID     domain.SessionID
+	peerSessionID domain.SessionID
+}
+
+type memoryOverlapNoticeStore struct {
+	*fakeStore
+	notices map[overlapNoticeKey]domain.SessionOverlapNotice
+}
+
+func newMemoryOverlapNoticeStore() *memoryOverlapNoticeStore {
+	return &memoryOverlapNoticeStore{fakeStore: newFakeStore(), notices: map[overlapNoticeKey]domain.SessionOverlapNotice{}}
+}
+
+func (s *memoryOverlapNoticeStore) ListProjectSessionOverlapNotices(_ context.Context, projectID domain.ProjectID) ([]domain.SessionOverlapNotice, error) {
+	result := make([]domain.SessionOverlapNotice, 0, len(s.notices))
+	for _, notice := range s.notices {
+		if session, ok := s.sessions[notice.SessionID]; ok && session.ProjectID == projectID {
+			result = append(result, notice)
+		}
+	}
+	return result, nil
+}
+
+func (s *memoryOverlapNoticeStore) UpsertSessionOverlapNotice(_ context.Context, notice domain.SessionOverlapNotice) error {
+	s.notices[overlapNoticeKey{sessionID: notice.SessionID, peerSessionID: notice.PeerSessionID}] = notice
+	return nil
+}
+
+func (s *memoryOverlapNoticeStore) DeleteSessionOverlapNotice(_ context.Context, sessionID, peerSessionID domain.SessionID) error {
+	delete(s.notices, overlapNoticeKey{sessionID: sessionID, peerSessionID: peerSessionID})
+	return nil
+}
+
+func (s *memoryOverlapNoticeStore) hasNotice(sessionID, peerSessionID domain.SessionID) bool {
+	_, ok := s.notices[overlapNoticeKey{sessionID: sessionID, peerSessionID: peerSessionID}]
+	return ok
+}
+
+type overlapNudgeCall struct {
+	sessionID domain.SessionID
+	message   string
+}
+
+type recordingOverlapNudger struct {
+	calls    []overlapNudgeCall
+	outcomes map[domain.SessionID][]sessionguard.Outcome
+	errors   map[domain.SessionID][]error
+}
+
+func (n *recordingOverlapNudger) NudgeCoordination(_ context.Context, sessionID domain.SessionID, message string) (sessionguard.Outcome, error) {
+	n.calls = append(n.calls, overlapNudgeCall{sessionID: sessionID, message: message})
+	var err error
+	if errs := n.errors[sessionID]; len(errs) > 0 {
+		n.errors[sessionID] = errs[1:]
+		err = errs[0]
+	}
+	if outcomes := n.outcomes[sessionID]; len(outcomes) > 0 {
+		n.outcomes[sessionID] = outcomes[1:]
+		return outcomes[0], err
+	}
+	return sessionguard.Sent, err
 }
 
 func overlapSession(id domain.SessionID, workspace string) domain.SessionRecord {

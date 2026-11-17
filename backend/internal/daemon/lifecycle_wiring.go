@@ -430,6 +430,7 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 		// runtime AO cannot reach.
 		RuntimeUnreachable: lcm.RuntimeUnreachable,
 		ShareLinks:         sessionartifacts.NewShareLinks(cfg.DataDir, cfg.CloudControlPlaneURL),
+		OverlapNudger:      lcm,
 	}
 	// Guard the typed nil some tests pass, so reads list files by path instead.
 	if artifactVersions != nil {
