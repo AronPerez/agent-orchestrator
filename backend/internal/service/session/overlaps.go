@@ -150,7 +150,7 @@ func (s *Service) activeProjectOverlapSessions(ctx context.Context, projectID do
 	}
 	active := records[:0]
 	for _, record := range records {
-		if record.IsTerminated || record.IsTaskPreparation || strings.TrimSpace(record.Metadata.WorkspacePath) == "" {
+		if record.IsTerminated || record.IsTaskPreparation || record.NeedsImportResume() || strings.TrimSpace(record.Metadata.WorkspacePath) == "" {
 			continue
 		}
 		active = append(active, record)
