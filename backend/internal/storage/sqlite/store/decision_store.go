@@ -79,6 +79,7 @@ func (s *Store) AppendDecisionEntry(ctx context.Context, entry domain.DecisionEn
 	return stored, call, nil
 }
 
+// GetDecisionCall returns a call's materialized read model when it exists.
 func (s *Store) GetDecisionCall(ctx context.Context, callID string) (domain.DecisionCall, bool, error) {
 	row, err := s.qr.GetDecisionCall(ctx, callID)
 	if errors.Is(err, sql.ErrNoRows) {

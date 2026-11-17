@@ -16,6 +16,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
 )
 
+// Store is the persistence boundary used by the decision service.
 type Store interface {
 	GetSession(context.Context, domain.SessionID) (domain.SessionRecord, bool, error)
 	ListSessions(context.Context, domain.ProjectID) ([]domain.SessionRecord, error)
@@ -29,6 +30,7 @@ type Store interface {
 	SearchDecisionCalls(context.Context, string, int) ([]domain.DecisionCall, error)
 }
 
+// Deps supplies the decision service's persistence, identity, clock and hooks.
 type Deps struct {
 	Store        Store
 	HostID       string
@@ -38,6 +40,7 @@ type Deps struct {
 	OnAppended   func(domain.DecisionEntry)
 }
 
+// Service applies actor, validation and work-stream rules to ledger operations.
 type Service struct {
 	store        Store
 	hostID       string
@@ -47,6 +50,7 @@ type Service struct {
 	onAppended   func(domain.DecisionEntry)
 }
 
+// New constructs a decision service from its daemon-owned dependencies.
 func New(d Deps) *Service {
 	if d.Now == nil {
 		d.Now = time.Now
@@ -75,6 +79,7 @@ type Actor struct {
 	Surface domain.RequestSurface
 }
 
+// RaiseInput contains the session-authored parts of a new decision call.
 type RaiseInput struct {
 	Title     string
 	Context   string
@@ -83,18 +88,22 @@ type RaiseInput struct {
 	Reference string
 }
 
+// Scope selects a decision list view.
 type Scope string
 
+// ScopeMine and ScopeNeedsYou are the supported decision list views.
 const (
 	ScopeMine     Scope = "mine"
 	ScopeNeedsYou Scope = "needs_you"
 )
 
+// Detail combines a call read model with its immutable history.
 type Detail struct {
 	Call    domain.DecisionCall
 	Entries []domain.DecisionEntry
 }
 
+// Raise validates and appends a new call owned by the acting session.
 func (s *Service) Raise(ctx context.Context, actor Actor, input RaiseInput) (domain.DecisionCall, error) {
 	if actor.Session == "" {
 		return domain.DecisionCall{}, apierr.Invalid("DECISION_SESSION_REQUIRED", "This needs a session. Run it from inside a session.", nil)
@@ -157,6 +166,7 @@ func (s *Service) Raise(ctx context.Context, actor Actor, input RaiseInput) (dom
 	return call, nil
 }
 
+// Get returns one call and its ordered ledger history.
 func (s *Service) Get(ctx context.Context, callID string) (Detail, error) {
 	call, ok, err := s.store.GetDecisionCall(ctx, callID)
 	if err != nil {
@@ -176,6 +186,7 @@ func (s *Service) Get(ctx context.Context, callID string) (Detail, error) {
 	return Detail{Call: calls[0], Entries: entries}, nil
 }
 
+// List returns calls in the requested actor-relative scope.
 func (s *Service) List(ctx context.Context, actor Actor, scope Scope) ([]domain.DecisionCall, error) {
 	var calls []domain.DecisionCall
 	var err error
@@ -196,6 +207,7 @@ func (s *Service) List(ctx context.Context, actor Actor, scope Scope) ([]domain.
 	return s.withStreams(ctx, calls)
 }
 
+// Search returns text matches with the actor's project ranked first.
 func (s *Service) Search(ctx context.Context, actor Actor, query string) ([]domain.DecisionCall, error) {
 	if strings.TrimSpace(query) == "" {
 		return nil, apierr.Invalid("DECISION_QUERY_REQUIRED", "Say what to search for.", nil)

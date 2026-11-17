@@ -25,10 +25,7 @@ func DeriveDecisionStream(raiser SessionID, sessions []SessionRecord) (SessionRe
 	visited := make(map[SessionID]bool)
 	var stream SessionRecord
 	var found bool
-	for {
-		if visited[current.ID] || current.Kind == KindOrchestrator {
-			break
-		}
+	for !visited[current.ID] && current.Kind != KindOrchestrator {
 		visited[current.ID] = true
 		if hasChild[current.ID] {
 			stream, found = current, true

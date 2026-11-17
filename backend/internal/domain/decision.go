@@ -13,6 +13,7 @@ import (
 // ErrDecisionEntryInvalid reports a ledger entry missing required identity.
 var ErrDecisionEntryInvalid = errors.New("invalid decision entry")
 
+// MaxDecisionTitle and the other limits bound user-authored ledger payloads.
 const (
 	MaxDecisionTitle       = 120
 	MaxDecisionContext     = 1000
@@ -29,6 +30,7 @@ const (
 // DecisionEntryKind identifies one fact appended to the decision ledger.
 type DecisionEntryKind string
 
+// DecisionKindRaised and its peers name facts that can be appended to a call.
 const (
 	DecisionKindRaised    DecisionEntryKind = "raised"
 	DecisionKindAnswered  DecisionEntryKind = "answered"
@@ -42,6 +44,7 @@ const (
 // DecisionAuthorKind identifies who wrote a ledger entry.
 type DecisionAuthorKind string
 
+// DecisionAuthorPerson and its peers name the writer of a ledger fact.
 const (
 	DecisionAuthorPerson  DecisionAuthorKind = "person"
 	DecisionAuthorSession DecisionAuthorKind = "session"
@@ -107,22 +110,26 @@ func CompareDecisionEntries(a, b DecisionEntry) int {
 	return 0
 }
 
+// DecisionOption is one choice offered by a call and its consequence.
 type DecisionOption struct {
 	Label       string `json:"label"`
 	Consequence string `json:"consequence"`
 	Recommended bool   `json:"recommended,omitempty"`
 }
 
+// DecisionLink points to supporting material for a call.
 type DecisionLink struct {
 	Label string `json:"label"`
 	URL   string `json:"url"`
 }
 
+// DecisionPageRef identifies an immutable page snapshot by content fingerprint.
 type DecisionPageRef struct {
 	Fingerprint string `json:"fingerprint"`
 	Size        int64  `json:"size"`
 }
 
+// DecisionRaisedPayload is the complete question recorded by a raised entry.
 type DecisionRaisedPayload struct {
 	Title            string           `json:"title"`
 	Context          string           `json:"context"`
@@ -139,26 +146,31 @@ type DecisionRaisedPayload struct {
 	OwnerSessionName string           `json:"ownerSessionName"`
 }
 
+// DecisionChoiceOption and DecisionChoiceOther distinguish answer forms.
 const (
 	DecisionChoiceOption = "option"
 	DecisionChoiceOther  = "other"
 )
 
+// DecisionAnsweredPayload records the person's current answer to a call.
 type DecisionAnsweredPayload struct {
 	Choice string `json:"choice"`
 	Option int    `json:"option,omitempty"`
 	Note   string `json:"note,omitempty"`
 }
 
+// DecisionDismissedPayload records why a person dismissed a call.
 type DecisionDismissedPayload struct {
 	Note string `json:"note,omitempty"`
 }
 
+// DecisionDeliveredSent and DecisionDeliveredNoSession describe delivery attempts.
 const (
 	DecisionDeliveredSent      = "sent"
 	DecisionDeliveredNoSession = "no_session"
 )
 
+// DecisionDeliveredPayload records delivery of an answer to a session.
 type DecisionDeliveredPayload struct {
 	ForEntry    string    `json:"forEntry"`
 	Status      string    `json:"status"`
@@ -167,11 +179,13 @@ type DecisionDeliveredPayload struct {
 	Fallback    bool      `json:"fallback,omitempty"`
 }
 
+// DecisionOutcomePayload records what happened after a decision was carried out.
 type DecisionOutcomePayload struct {
 	Text string `json:"text"`
 	Link string `json:"link,omitempty"`
 }
 
+// DecisionRetiredPayload changes whether a call is hidden from active views.
 type DecisionRetiredPayload struct {
 	Retired bool `json:"retired"`
 }
@@ -184,6 +198,7 @@ type DecisionRuleError struct {
 
 func (e *DecisionRuleError) Error() string { return e.Message }
 
+// ValidateDecisionRaise applies the user-facing rules for a new call.
 func ValidateDecisionRaise(p DecisionRaisedPayload) error {
 	title := strings.TrimSpace(p.Title)
 	if title == "" {
@@ -245,6 +260,7 @@ func ValidateDecisionRaise(p DecisionRaisedPayload) error {
 	return nil
 }
 
+// ValidateDecisionAnswer checks an answer against the call's option count.
 func ValidateDecisionAnswer(optionCount int, p DecisionAnsweredPayload) error {
 	if p.Choice != DecisionChoiceOption && p.Choice != DecisionChoiceOther {
 		return decisionRule("choice_invalid", "Choose one of the call's options, or \"something else\".")
@@ -258,6 +274,7 @@ func ValidateDecisionAnswer(optionCount int, p DecisionAnsweredPayload) error {
 	return ValidateDecisionNote(p.Note)
 }
 
+// ValidateDecisionNote checks an optional answer or dismissal note.
 func ValidateDecisionNote(note string) error {
 	if n := utf8.RuneCountInString(strings.TrimSpace(note)); n > MaxDecisionNote {
 		return decisionRule("note_too_long", fmt.Sprintf("The note is %d characters; the limit is 1000.", n))
@@ -265,6 +282,7 @@ func ValidateDecisionNote(note string) error {
 	return nil
 }
 
+// ValidateDecisionOutcome checks the final result recorded for a call.
 func ValidateDecisionOutcome(p DecisionOutcomePayload) error {
 	text := strings.TrimSpace(p.Text)
 	if text == "" {

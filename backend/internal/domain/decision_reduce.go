@@ -7,8 +7,10 @@ import (
 	"time"
 )
 
+// DecisionCallState is the derived lifecycle state of a decision call.
 type DecisionCallState string
 
+// DecisionStateNeedsYou and its peers are the possible derived call states.
 const (
 	DecisionStateNeedsYou   DecisionCallState = "needs_you"
 	DecisionStateInProgress DecisionCallState = "in_progress"
@@ -35,8 +37,10 @@ func (s DecisionCallState) Label() string {
 	}
 }
 
+// DecisionDeliveryState is the derived delivery status of the standing answer.
 type DecisionDeliveryState string
 
+// DecisionDeliveryNone and its peers are the possible answer delivery states.
 const (
 	DecisionDeliveryNone      DecisionDeliveryState = ""
 	DecisionDeliveryPending   DecisionDeliveryState = "pending"
@@ -44,6 +48,7 @@ const (
 	DecisionDeliveryNoSession DecisionDeliveryState = "no_session"
 )
 
+// DecisionCall is the read model reduced from a call's immutable entries.
 type DecisionCall struct {
 	ID                string                `json:"id"`
 	Origin            string                `json:"origin"`
