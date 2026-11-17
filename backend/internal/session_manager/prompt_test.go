@@ -327,6 +327,65 @@ func TestBuildSystemPromptAsksEveryRoleToNarrateToolCalls(t *testing.T) {
 	}
 }
 
+func TestBuildSystemPromptTellsEveryRoleHowToAskTheHumanToDecide(t *testing.T) {
+	for name, cfg := range map[string]systemPromptConfig{
+		"worker": {
+			Role:                  sessionPromptRoleWorker,
+			OrchestratorSessionID: "shop-1",
+		},
+		"standalone worker": {
+			Role:       sessionPromptRoleWorker,
+			Standalone: true,
+		},
+		"orchestrator": {
+			Role: sessionPromptRoleOrchestrator,
+		},
+		"orchestrator override": {
+			Role:                 sessionPromptRoleOrchestrator,
+			OrchestratorOverride: "You coordinate.",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := buildSystemPromptText(cfg)
+			for _, want := range []string{
+				"ao decision search <words>",
+				"ao decision raise --title <the question>",
+				`--option "<label> :: <what it leads to>"`,
+				"Never ask the human for a ruling by id.",
+				`begins "Decision on your call" or "Changed decision on your call"`,
+				`begins "I dismissed your call"`,
+				`begins "Decision on a call raised by"`,
+				"ao decision outcome <id> --text <what happened>",
+				"run `ao decision ls`",
+				"Only the human answers, dismisses or retires a call.",
+				"Never put secrets, credentials or personal data in a call.",
+			} {
+				if !strings.Contains(got, want) {
+					t.Errorf("prompt missing decision instruction %q", want)
+				}
+			}
+			if count := strings.Count(got, "## Decisions for the Human"); count != 1 {
+				t.Errorf("decision section heading appears %d times, want 1", count)
+			}
+		})
+	}
+}
+
+func TestBuildSystemPrompt_WorkerSendsChoicesToCallsNotReports(t *testing.T) {
+	got := buildSystemPromptText(systemPromptConfig{Role: sessionPromptRoleWorker})
+	for _, want := range []string{
+		"raise a call for it (see Decisions for the Human) instead of guessing",
+		"When missing input that is not a choice between options blocks progress, such as missing access, run `ao report --needs-input --note <text>`. For a choice, raise a call (see Decisions for the Human).",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("worker prompt missing decision instruction %q", want)
+		}
+	}
+	if strings.Contains(got, "When a decision or missing input blocks progress") {
+		t.Error("worker prompt still routes decisions to needs-input reports")
+	}
+}
+
 func TestBuildTaskPromptPreservesExplicitPublishingScope(t *testing.T) {
 	for _, prompt := range []string{"Fix the issue, push the branch, and open a PR.", "Fix the issue locally. Do not push or open a PR."} {
 		got := buildTaskPrompt(taskPromptConfig{Role: sessionPromptRoleWorker, Prompt: prompt, IssueID: "42"})
