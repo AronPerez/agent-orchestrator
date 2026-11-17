@@ -348,22 +348,22 @@ func New(store sessionStore, messenger ports.AgentMessenger, opts ...Option) *Ma
 // NudgeSession sends one unsolicited supervision message through the ordinary
 // just-in-time lifecycle guard. It may steer an active turn (needed for a
 // deadline wrap-up), but still refuses input and permission waits.
-func (m *Manager) NudgeSession(ctx context.Context, id domain.SessionID, message string) (bool, error) {
+func (m *Manager) NudgeSession(ctx context.Context, id domain.SessionID, key, message string) (bool, error) {
 	if m == nil || m.guard == nil {
 		return false, nil
 	}
-	outcome, err := m.guard.NudgeCoordination(ctx, id, message, m.steerActive)
+	outcome, err := m.guard.NudgeCoordination(ctx, id, domain.WrapSessionDelivery(key, message), m.steerActive)
 	return coordinationNudgeSent(outcome, err), err
 }
 
 // NudgeIdleSession is NudgeSession with active-turn steering disabled. Stall
 // supervision uses it so a worker that resumed after the coordinator's earlier
 // idle read cannot receive a stale "continue" message mid-turn.
-func (m *Manager) NudgeIdleSession(ctx context.Context, id domain.SessionID, message string) (bool, error) {
+func (m *Manager) NudgeIdleSession(ctx context.Context, id domain.SessionID, key, message string) (bool, error) {
 	if m == nil || m.guard == nil {
 		return false, nil
 	}
-	outcome, err := m.guard.NudgeCoordination(ctx, id, message, nil)
+	outcome, err := m.guard.NudgeCoordination(ctx, id, domain.WrapSessionDelivery(key, message), nil)
 	return coordinationNudgeSent(outcome, err), err
 }
 

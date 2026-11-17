@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -14,25 +15,21 @@ type contractNudgeStore interface {
 
 type contractChatNudger interface {
 	SteerOrSend(context.Context, domain.SessionID, ports.ChatUserMessage, bool) (chatsvc.SteerOrSendResult, error)
-}
-
-type contractSemanticNudger interface {
-	SendSemantic(context.Context, domain.SessionID, string, string) error
+	SendIfIdle(context.Context, domain.SessionID, ports.ChatUserMessage) (bool, error)
 }
 
 type contractTUINudger interface {
-	NudgeSession(context.Context, domain.SessionID, string) (bool, error)
-	NudgeIdleSession(context.Context, domain.SessionID, string) (bool, error)
+	NudgeSession(context.Context, domain.SessionID, string, string) (bool, error)
+	NudgeIdleSession(context.Context, domain.SessionID, string, string) (bool, error)
 }
 
 // contractNudger selects the delivery primitive from a fresh session read.
 // Chat deadlines use its atomic steer-or-send path, while TUI writes remain
 // behind lifecycle's capability-aware input guard.
 type contractNudger struct {
-	store    contractNudgeStore
-	chat     contractChatNudger
-	semantic contractSemanticNudger
-	tui      contractTUINudger
+	store contractNudgeStore
+	chat  contractChatNudger
+	tui   contractTUINudger
 }
 
 func (n contractNudger) NudgeSession(ctx context.Context, id domain.SessionID, key, message string) (bool, error) {
@@ -44,15 +41,23 @@ func (n contractNudger) NudgeSession(ctx context.Context, id domain.SessionID, k
 		if n.chat == nil {
 			return false, nil
 		}
-		_, err := n.chat.SteerOrSend(ctx, id, ports.ChatUserMessage{
+		msg := ports.ChatUserMessage{
 			Text: message, ClientMessageID: key, Origin: domain.MessageOriginAutomation,
-		}, false)
-		return err == nil, err
+		}
+		_, err := n.chat.SteerOrSend(ctx, id, msg, false)
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, chatsvc.ErrSteerUnsupported) {
+			return false, err
+		}
+		msg.ClientMessageID = key + ":idle"
+		return n.chat.SendIfIdle(ctx, id, msg)
 	}
 	if n.tui == nil {
 		return false, nil
 	}
-	return n.tui.NudgeSession(ctx, id, message)
+	return n.tui.NudgeSession(ctx, id, key, message)
 }
 
 func (n contractNudger) NudgeIdleSession(ctx context.Context, id domain.SessionID, key, message string) (bool, error) {
@@ -64,16 +69,17 @@ func (n contractNudger) NudgeIdleSession(ctx context.Context, id domain.SessionI
 		return false, nil
 	}
 	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
-		if n.semantic == nil {
+		if n.chat == nil {
 			return false, nil
 		}
-		err := n.semantic.SendSemantic(ctx, id, message, key)
-		return err == nil, err
+		return n.chat.SendIfIdle(ctx, id, ports.ChatUserMessage{
+			Text: message, ClientMessageID: key, Origin: domain.MessageOriginAutomation,
+		})
 	}
 	if n.tui == nil {
 		return false, nil
 	}
-	return n.tui.NudgeIdleSession(ctx, id, message)
+	return n.tui.NudgeIdleSession(ctx, id, key, message)
 }
 
 func (n contractNudger) session(ctx context.Context, id domain.SessionID) (domain.SessionRecord, bool, error) {

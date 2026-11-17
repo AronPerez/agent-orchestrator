@@ -323,7 +323,7 @@ func TestNudgeIdleSessionUsesInputSafetyGuard(t *testing.T) {
 			rec.Activity.State = tc.state
 			st.sessions[rec.ID] = rec
 
-			sent, err := m.NudgeIdleSession(context.Background(), rec.ID, "continue or report")
+			sent, err := m.NudgeIdleSession(context.Background(), rec.ID, "stall-key", "continue or report")
 			if err != nil || sent != tc.sent {
 				t.Fatalf("sent=%v err=%v, want sent=%v", sent, err, tc.sent)
 			}
@@ -344,9 +344,12 @@ func TestNudgeSessionCanSteerActiveDeadline(t *testing.T) {
 	rec.Harness = domain.HarnessCodex
 	st.sessions[rec.ID] = rec
 
-	sent, err := m.NudgeSession(context.Background(), rec.ID, "wrap up and report")
+	sent, err := m.NudgeSession(context.Background(), rec.ID, "deadline-key", "wrap up and report")
 	if err != nil || !sent || len(messenger.msgs) != 1 {
 		t.Fatalf("sent=%v messages=%v err=%v", sent, messenger.msgs, err)
+	}
+	if got, ok := domain.SessionDeliveryID(messenger.msgs[0]); !ok || got != "deadline-key" {
+		t.Fatalf("delivery key=%q ok=%v message=%q", got, ok, messenger.msgs[0])
 	}
 }
 
@@ -356,7 +359,7 @@ func TestNudgeSessionSuppressesActiveHarnessWithoutSteering(t *testing.T) {
 	rec.Harness = domain.HarnessClaudeCode
 	st.sessions[rec.ID] = rec
 
-	sent, err := m.NudgeSession(context.Background(), rec.ID, "wrap up and report")
+	sent, err := m.NudgeSession(context.Background(), rec.ID, "deadline-key", "wrap up and report")
 	if err != nil || sent || len(messenger.msgs) != 0 {
 		t.Fatalf("sent=%v messages=%v err=%v", sent, messenger.msgs, err)
 	}
@@ -370,13 +373,13 @@ func TestNudgeSessionReportsDefiniteMessengerRefusalAsUnsent(t *testing.T) {
 	definiteRefusal := errors.New("composer busy before write")
 	messenger.err = definiteRefusal
 
-	sent, err := m.NudgeSession(context.Background(), rec.ID, "wrap up and report")
+	sent, err := m.NudgeSession(context.Background(), rec.ID, "deadline-key", "wrap up and report")
 	if !errors.Is(err, definiteRefusal) || sent {
 		t.Fatalf("sent=%v err=%v, want definite refusal", sent, err)
 	}
 
 	messenger.err = ports.ErrAgentDeliveryUnconfirmed
-	sent, err = m.NudgeSession(context.Background(), rec.ID, "wrap up and report")
+	sent, err = m.NudgeSession(context.Background(), rec.ID, "deadline-key", "wrap up and report")
 	if !errors.Is(err, ports.ErrAgentDeliveryUnconfirmed) || !sent {
 		t.Fatalf("sent=%v err=%v, want ambiguous post-write delivery", sent, err)
 	}
