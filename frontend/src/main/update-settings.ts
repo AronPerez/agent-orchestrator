@@ -32,8 +32,16 @@ export interface UpdateSettings {
 export type UpdateState =
 	"idle" | "checking" | "available" | "not-available" | "downloading" | "preparing" | "downloaded" | "error" | "unsupported";
 
+export interface InstalledBuildStatus {
+	identity: string;
+	idle: boolean;
+	restartWhenIdle: boolean;
+}
+
 export interface UpdateStatus {
 	state: UpdateState;
+	/** Already installed by another process; restart without running an installer. */
+	installed?: InstalledBuildStatus;
 	version?: string;
 	/** Absent while a requested download is waiting for its first progress event. */
 	percent?: number;

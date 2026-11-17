@@ -25,6 +25,7 @@ import {
   type UpdateSettings,
   type UpdateStatus,
   type UpdateInstallResult,
+  type InstalledBuildStatus,
 } from "./update-settings";
 import { reconcileFeaturePin } from "./feature-builds";
 import { captureMainError, type MainErrorReason } from "./main-error-capture";
@@ -204,6 +205,18 @@ export function configureFeed(
 }
 
 let lastStatus: UpdateStatus = { state: "idle" };
+let installedBuildStatus: InstalledBuildStatus | undefined;
+
+function withInstalledBuild(status: UpdateStatus): UpdateStatus {
+  return installedBuildStatus ? { state: "downloaded", installed: installedBuildStatus } : status;
+}
+
+export function setInstalledBuildStatus(status: InstalledBuildStatus | undefined): void {
+  installedBuildStatus = status;
+  applyInstallOnQuitPolicy();
+  if (status) activeDownloadCancellation?.cancel();
+  sendToRenderer("updates:status", getUpdateStatus());
+}
 let independentStatusRevision = 0;
 let eventsWired = false;
 let lastCheckError: UpdateFailure | undefined;
@@ -832,7 +845,7 @@ function broadcast(
     }
   }
   lastStatus = stamped;
-  sendToRenderer("updates:status", stamped);
+  sendToRenderer("updates:status", withInstalledBuild(stamped));
 }
 
 function withActiveRequest(status: UpdateStatus): UpdateStatus {
@@ -2422,7 +2435,7 @@ export function getUpdateStatus(): UpdateStatus {
   // any broadcast (no checking-for-update → restore no-ops), and Settings
   // seeds from this getter (#3526).
   const { releaseNotes: _ignored, ...statusWithoutNotes } = lastStatus;
-  return {
+  return withInstalledBuild({
     ...statusWithoutNotes,
     ...stagedStamp(),
     ...releaseNotesFor(lastStatus),
@@ -2433,7 +2446,7 @@ export function getUpdateStatus(): UpdateStatus {
     ...(consecutiveAutomaticCheckFailures >= FAILING_CHECK_THRESHOLD
       ? { checksFailing: true }
       : {}),
-  };
+  });
 }
 
 // The cadence is one number for every channel today, so this ignores its
@@ -3019,7 +3032,7 @@ export function getMacInstallBlocker(): string | undefined {
 // the staged build wait for a location it can actually install from.
 function applyInstallOnQuitPolicy(): void {
   const blocker = getMacInstallBlocker();
-  autoUpdater.autoInstallOnAppQuit = blocker === undefined && !awaitingStagedReplacement && !nativePreparationBlocked && !stagingDiskShortfall;
+  autoUpdater.autoInstallOnAppQuit = !installedBuildStatus && blocker === undefined && !awaitingStagedReplacement && !nativePreparationBlocked && !stagingDiskShortfall;
   if (awaitingStagedReplacement) {
     console.info(
       "install-on-quit disabled until the replacement build is staged; the cached one belongs to a channel the user left",
@@ -3045,7 +3058,12 @@ export function clearUpdateRestartRequest(): void {
   macRestartPreparation = undefined;
 }
 
+function assertNoInstalledBuild(): void {
+  if (installedBuildStatus) throw new Error("A different build is already installed. Restart to use the installed build.");
+}
+
 export async function quitAndInstallUpdate(confirmedVersion?: string): Promise<UpdateInstallResult> {
+  assertNoInstalledBuild();
   recordUpdateDiagnostic("install-requested", { confirmedVersion });
   if (confirmedVersion !== undefined && (typeof confirmedVersion !== "string" || !confirmedVersion.trim())) {
     throw new Error("A valid confirmed update version is required.");
@@ -3093,6 +3111,7 @@ export async function quitAndInstallUpdate(confirmedVersion?: string): Promise<U
     recordUpdateDiagnostic("quit-and-install", { version: stagedVersion });
     updateRestartRequested = true;
     try {
+      assertNoInstalledBuild();
       autoUpdater.quitAndInstall(false, true);
     } catch (error) {
       clearUpdateRestartRequest();
@@ -3113,6 +3132,7 @@ export async function quitAndInstallUpdate(confirmedVersion?: string): Promise<U
   const preparation = runSerializedUpdaterOperation("manual-install", async () => {
     const previousPreparationError = nativePreparationError;
     const assertInstallActive = () => {
+      assertNoInstalledBuild();
       if (installAbandoned) throw new Error("Update preparation cancelled. Confirm installation again.");
       if (nativePreparationError && nativePreparationError !== previousPreparationError) throw nativePreparationError;
     };

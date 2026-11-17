@@ -81,6 +81,16 @@ describe("updateFailurePhase", () => {
 });
 
 describe("SidebarUpdateRow", () => {
+	it("keeps an external installation actionable while workers are busy or a restart is queued", async () => {
+		const onRequestInstall = vi.fn();
+		const installed = { identity: "external", idle: false, restartWhenIdle: false };
+		const view = renderRow({ state: "downloaded", installed }, onRequestInstall);
+		expect(screen.getByText("Build installed · Restart")).toBeVisible();
+		await userEvent.click(screen.getByRole("button", { name: "Restart options" }));
+		expect(onRequestInstall).toHaveBeenCalledTimes(1);
+		view.rerender({ state: "downloaded", installed: { ...installed, restartWhenIdle: true } });
+		expect(screen.getByText("Restart when idle")).toBeVisible();
+	});
 	it("turns an unlabelled error into a failed row only after a download it saw", () => {
 		const view = renderRow({ state: "downloading", percent: 30 });
 		expect(screen.getByTestId("sidebar-update-downloading")).toBeVisible();

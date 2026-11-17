@@ -47,6 +47,7 @@ export type SidebarUpdateAction =
 	| null;
 
 export function sidebarUpdateAction(status: UpdateStatus, failedPhase: FailedPhase | null = null): SidebarUpdateAction {
+	if (status.installed) return { kind: "install" };
 	if (status.state === "downloading") {
 		// Absent until the first progress event of a requested download.
 		const percent = status.percent === undefined ? undefined : Math.min(100, Math.max(0, status.percent));
@@ -245,10 +246,10 @@ export function SidebarUpdateRow({
 		);
 	} else if (action.kind === "install") {
 		const version = displayVersion(action.version);
-		title = t("shell.updateReadyToInstall");
+		title = status.installed ? t(status.installed.restartWhenIdle ? "update.restart.scheduledShort" : "update.restart.installedShort") : t("shell.updateReadyToInstall");
 		glyph = <UpdateGlyph icon={<RotateCw aria-hidden="true" />} solid="ready" />;
 		press = {
-			label: version ? t("shell.restartInstallUpdateVersion", { version }) : t("shell.restartInstallUpdate"),
+			label: status.installed ? t("update.restart.options") : version ? t("shell.restartInstallUpdateVersion", { version }) : t("shell.restartInstallUpdate"),
 			onClick: onRequestInstall,
 		};
 	} else {
@@ -353,8 +354,8 @@ export function SidebarUpdateRail({
 		onClick = () => void requestUpdateDownload();
 	} else if (action.kind === "install") {
 		const version = displayVersion(action.version);
-		label = version ? t("shell.restartInstallUpdateVersion", { version }) : t("shell.restartInstallUpdate");
-		tooltip = t("shell.updateReadyToInstall");
+		label = status.installed ? t("update.restart.options") : version ? t("shell.restartInstallUpdateVersion", { version }) : t("shell.restartInstallUpdate");
+		tooltip = status.installed ? t(status.installed.restartWhenIdle ? "update.restart.scheduledShort" : "update.restart.installedShort") : t("shell.updateReadyToInstall");
 		onClick = onRequestInstall;
 	} else {
 		failed = true;
