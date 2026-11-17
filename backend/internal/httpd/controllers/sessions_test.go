@@ -111,6 +111,8 @@ type fakeSessionService struct {
 	workspaceTree              sessionsvc.WorkspaceTree
 	workspaceTreePath          string
 	workspacePaths             []string
+	projectOverlapPaths        []string
+	projectOverlapPathsErr     error
 	workspaceReconciles        int
 	workspaceHistoryView       sessionsvc.WorkspaceView
 	workspaceViewHistory       *sessionsvc.WorkspaceHistory
@@ -118,6 +120,8 @@ type fakeSessionService struct {
 	projectOverlaps            sessionsvc.ProjectOverlapResult
 	projectOverlapsErr         error
 	overlapProjectID           domain.ProjectID
+	projectOverlapReads        int
+	overlapWatchProjectID      domain.ProjectID
 	spawnErr                   error
 	lastSpawn                  ports.SpawnConfig
 	orchestratorMode           domain.SessionMode
@@ -743,6 +747,14 @@ func (f *fakeSessionService) WorkspaceWatchPaths(_ context.Context, id domain.Se
 	return []string{session.Metadata.WorkspacePath}, nil
 }
 
+func (f *fakeSessionService) ProjectOverlapWatchPaths(_ context.Context, projectID domain.ProjectID) ([]string, error) {
+	f.overlapWatchProjectID = projectID
+	if f.projectOverlapPathsErr != nil {
+		return nil, f.projectOverlapPathsErr
+	}
+	return append([]string(nil), f.projectOverlapPaths...), nil
+}
+
 func (f *fakeSessionService) GetWorkspaceFile(_ context.Context, id domain.SessionID, path string, section sessionsvc.WorkspaceFileSection) (sessionsvc.WorkspaceFileDetail, error) {
 	f.workspaceFileSection = section
 	if f.workspaceErr != nil {
@@ -953,6 +965,7 @@ func (f *fakeSessionService) InvalidateWorkspaceCache(_ domain.SessionID) {}
 
 func (f *fakeSessionService) ProjectOverlaps(_ context.Context, projectID domain.ProjectID) (sessionsvc.ProjectOverlapResult, error) {
 	f.overlapProjectID = projectID
+	f.projectOverlapReads++
 	if f.projectOverlapsErr != nil {
 		return sessionsvc.ProjectOverlapResult{}, f.projectOverlapsErr
 	}
@@ -4700,6 +4713,61 @@ func TestSessionsAPI_StreamWorkspaceChanges(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for workspace change event")
+	}
+}
+
+func TestSessionsAPI_StreamProjectOverlapChanges(t *testing.T) {
+	workspace := t.TempDir()
+	svc := newFakeSessionService()
+	svc.projectOverlapPaths = []string{workspace}
+	svc.projectOverlaps = sessionsvc.ProjectOverlapResult{ProjectID: "demo"}
+	srv := newSessionTestServer(t, svc)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/api/v1/projects/demo/overlaps/events", nil)
+	if err != nil {
+		t.Fatalf("new overlap stream request: %v", err)
+	}
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("GET overlap stream: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("GET overlap stream = %d body=%s", resp.StatusCode, body)
+	}
+	if contentType := resp.Header.Get("Content-Type"); !strings.HasPrefix(contentType, "text/event-stream") {
+		t.Fatalf("Content-Type = %q, want text/event-stream", contentType)
+	}
+	if svc.overlapWatchProjectID != "demo" || svc.projectOverlapReads != 1 {
+		t.Fatalf("startup reads watch=%q overlaps=%d, want demo/1", svc.overlapWatchProjectID, svc.projectOverlapReads)
+	}
+
+	event := make(chan string, 1)
+	go func() {
+		scanner := bufio.NewScanner(resp.Body)
+		for scanner.Scan() {
+			if scanner.Text() == "event: overlaps_changed" {
+				event <- scanner.Text()
+				return
+			}
+		}
+	}()
+	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("changed\n"), 0o644); err != nil {
+		t.Fatalf("write workspace file: %v", err)
+	}
+	select {
+	case got := <-event:
+		if got != "event: overlaps_changed" {
+			t.Fatalf("event = %q, want overlaps_changed", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for overlap change event")
+	}
+	if svc.projectOverlapReads != 2 {
+		t.Fatalf("overlap reads after change = %d, want 2", svc.projectOverlapReads)
 	}
 }
 

@@ -5559,5 +5559,12 @@
 	"shell.deleteCloudProjectTitle": "Eliminar proyecto",
 	"shell.deleteCloudProjectLead": "Esto eliminará {{name}} definitivamente",
 	"shell.deleteCloudProjectConfirm": "Eliminar definitivamente",
-	"shell.cloudProjectDeleted": "Se eliminó {{name}} definitivamente"
+	"shell.cloudProjectDeleted": "Se eliminó {{name}} definitivamente",
+	"collisionRadar.badge": "Solapamiento",
+	"collisionRadar.cardAria_one": "1 archivo modificado se solapa con {{sessions}}",
+	"collisionRadar.cardAria_other": "{{count}} archivos modificados se solapan con {{sessions}}",
+	"collisionRadar.title": "Posible colisión",
+	"collisionRadar.incompleteTitle": "Análisis de colisiones incompleto",
+	"collisionRadar.summary": "{{sessions}} también modificó archivos en este espacio de trabajo.",
+	"collisionRadar.incomplete": "No se pudieron comparar algunos cambios del espacio de trabajo. Esta lista puede estar incompleta."
 }

@@ -5385,5 +5385,12 @@
 	"shell.deleteCloudProjectTitle": "Delete project",
 	"shell.deleteCloudProjectLead": "This will permanently delete {{name}}",
 	"shell.deleteCloudProjectConfirm": "Delete permanently",
-	"shell.cloudProjectDeleted": "Deleted {{name}}"
+	"shell.cloudProjectDeleted": "Deleted {{name}}",
+	"collisionRadar.badge": "Overlap",
+	"collisionRadar.cardAria_one": "1 changed file overlaps with {{sessions}}",
+	"collisionRadar.cardAria_other": "{{count}} changed files overlap with {{sessions}}",
+	"collisionRadar.title": "Possible collision",
+	"collisionRadar.incompleteTitle": "Collision scan incomplete",
+	"collisionRadar.summary": "{{sessions}} also changed files in this workspace.",
+	"collisionRadar.incomplete": "Some workspace changes could not be compared. This list may be incomplete."
 }

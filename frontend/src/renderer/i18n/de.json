@@ -5406,5 +5406,12 @@
 	"shell.deleteCloudProjectTitle": "Projekt löschen",
 	"shell.deleteCloudProjectLead": "Dadurch wird {{name}} endgültig gelöscht",
 	"shell.deleteCloudProjectConfirm": "Endgültig löschen",
-	"shell.cloudProjectDeleted": "{{name}} gelöscht"
+	"shell.cloudProjectDeleted": "{{name}} gelöscht",
+	"collisionRadar.badge": "Überschneidung",
+	"collisionRadar.cardAria_one": "1 geänderte Datei überschneidet sich mit {{sessions}}",
+	"collisionRadar.cardAria_other": "{{count}} geänderte Dateien überschneiden sich mit {{sessions}}",
+	"collisionRadar.title": "Mögliche Kollision",
+	"collisionRadar.incompleteTitle": "Kollisionsprüfung unvollständig",
+	"collisionRadar.summary": "{{sessions}} hat ebenfalls Dateien in diesem Arbeitsbereich geändert.",
+	"collisionRadar.incomplete": "Einige Änderungen im Arbeitsbereich konnten nicht verglichen werden. Diese Liste ist möglicherweise unvollständig."
 }

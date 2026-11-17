@@ -92,4 +92,10 @@ describe("sharing from a board card", () => {
 		expect(circles.tagName).toBe("SPAN");
 		expect(onOpen).not.toHaveBeenCalled();
 	});
+
+	it("marks a card whose changed files overlap another session", () => {
+		renderCard({ collision: { pathCount: 2, peerNames: ["API cleanup"] } });
+		expect(screen.getByText("Overlap")).toBeInTheDocument();
+		expect(screen.getByLabelText("2 changed files overlap with API cleanup")).toBeInTheDocument();
+	});
 });

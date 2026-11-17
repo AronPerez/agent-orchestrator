@@ -5440,6 +5440,45 @@ paths:
       summary: Find active project sessions changing the same base-relative paths
       tags:
       - projects
+  /api/v1/projects/{id}/overlaps/events:
+    get:
+      operationId: streamProjectOverlapChanges
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      responses:
+        "200":
+          content:
+            text/event-stream:
+              schema:
+                type: string
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Stream project collision radar invalidations
+      tags:
+      - sessions
   /api/v1/projects/{id}/permissions:
     delete:
       operationId: forgetProjectPermissions

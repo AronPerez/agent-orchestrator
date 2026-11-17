@@ -5406,5 +5406,12 @@
 	"shell.deleteCloudProjectTitle": "プロジェクトを完全に削除",
 	"shell.deleteCloudProjectLead": "{{name}} を完全に削除します",
 	"shell.deleteCloudProjectConfirm": "完全に削除",
-	"shell.cloudProjectDeleted": "{{name}} を完全に削除しました"
+	"shell.cloudProjectDeleted": "{{name}} を完全に削除しました",
+	"collisionRadar.badge": "重複",
+	"collisionRadar.cardAria_one": "変更された1件のファイルが {{sessions}} と重複しています",
+	"collisionRadar.cardAria_other": "変更された{{count}}件のファイルが {{sessions}} と重複しています",
+	"collisionRadar.title": "競合の可能性",
+	"collisionRadar.incompleteTitle": "競合スキャンが未完了です",
+	"collisionRadar.summary": "{{sessions}} もこのワークスペース内のファイルを変更しました。",
+	"collisionRadar.incomplete": "一部のワークスペース変更を比較できませんでした。この一覧は不完全な可能性があります。"
 }

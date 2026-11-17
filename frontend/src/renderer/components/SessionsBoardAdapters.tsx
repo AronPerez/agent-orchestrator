@@ -13,7 +13,7 @@ import {
 	type BoardUsagePresentation,
 	type ProductUITranslator,
 } from "@aoagents/product-ui";
-import { Archive, Check, Copy, File, GitBranch, LoaderCircle, RotateCcw, Share2, Trash2 } from "@/components/app-icons";
+import { AlertTriangle, Archive, Check, Copy, File, GitBranch, LoaderCircle, RotateCcw, Share2, Trash2 } from "@/components/app-icons";
 import type { MessageKey } from "../i18n";
 import { apiClient, apiErrorMessage } from "../lib/api-client";
 import { aoBridge } from "../lib/bridge";
@@ -58,6 +58,9 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import { someoneElseWorking, type SessionPerson } from "../lib/session-people";
 import { SessionPeopleStack } from "./SessionPeople";
 import { SessionOwnerTag } from "./SessionOwnerTag";
+import { Badge } from "./ui/badge";
+
+export type BoardCollision = { pathCount: number; peerNames: string[] };
 
 export function toBoardSessionPresentation(
 	session: WorkspaceSession,
@@ -117,6 +120,7 @@ export function sessionsBoardLabels(t: TFunction): BoardColumnLabels {
 }
 
 export function BoardSessionCardAdapter({
+	collision,
 	me,
 	participants,
 	memory,
@@ -128,6 +132,7 @@ export function BoardSessionCardAdapter({
 	onTerminate,
 	session,
 }: {
+	collision?: BoardCollision;
 	/** Live reading of the session's process tree, for the card's resource chip. */
 	memory?: SessionMemoryReading;
 	/** Colour for the chip; neutral unless this card is part of the fix. */
@@ -147,6 +152,7 @@ export function BoardSessionCardAdapter({
 }) {
 	return (
 		<DesktopSessionCard
+			collision={collision}
 			me={me}
 			participants={participants}
 			memory={memory}
@@ -238,6 +244,7 @@ export function ArchivedSessionCardAdapter({
 }
 
 function DesktopSessionCard({
+	collision,
 	me,
 	participants,
 	action,
@@ -261,6 +268,7 @@ function DesktopSessionCard({
 }: {
 	action?: ReactNode;
 	branchAction?: ReactNode;
+	collision?: BoardCollision;
 	compact?: boolean;
 	footer?: ReactNode;
 	hidePullRequestProgress?: boolean;
@@ -372,6 +380,21 @@ function DesktopSessionCard({
 		</Tooltip>
 	) : null;
 	const people = participants && participants.length > 0 ? participants : undefined;
+	const collisionBadge = collision ? (
+		<Tooltip>
+			<TooltipTrigger asChild>
+				<Badge
+					aria-label={t("collisionRadar.cardAria", { count: collision.pathCount, sessions: collision.peerNames.join(", ") })}
+					variant="warning"
+				>
+					<AlertTriangle aria-hidden="true" />
+					{t("collisionRadar.badge")}
+				</Badge>
+			</TooltipTrigger>
+			<TooltipContent>{t("collisionRadar.cardAria", { count: collision.pathCount, sessions: collision.peerNames.join(", ") })}</TooltipContent>
+		</Tooltip>
+	) : null;
+	const ownerTag = session.cloud?.requestedBy ? <SessionOwnerTag session={session} /> : null;
 
 	const card = (
 		<SessionCardView
@@ -425,7 +448,7 @@ function DesktopSessionCard({
 				url: prBrowserUrl(pr),
 			}))}
 			renderAvatar={(provider) => <AgentAvatar provider={provider} />}
-			tag={session.cloud?.requestedBy ? <SessionOwnerTag session={session} /> : undefined}
+			tag={collisionBadge || ownerTag ? <span className="inline-flex min-w-0 items-center gap-1">{collisionBadge}{ownerTag}</span> : undefined}
 			session={
 				hideTerminatedStatus
 					? hideTerminatedCardStatus(toBoardSessionPresentation(session))

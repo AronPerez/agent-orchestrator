@@ -413,6 +413,27 @@ afterEach(() => {
 });
 
 describe("SessionInspector tabs", () => {
+	it("lists exact overlapping paths and the other sessions in Summary", async () => {
+		const respond = commonGetsResponder();
+		getMock.mockImplementation(async (path: string) => path === "/api/v1/projects/{id}/overlaps"
+			? {
+				data: {
+					projectId: "ws-1",
+					overlaps: [{ sessionA: "sess-1", sessionB: "sess-2", paths: ["frontend/src/App.tsx", "README.md"] }],
+					truncatedSessionIds: [], unresolvedBaseSessionIds: [], unavailableSessionIds: [],
+				},
+			}
+			: respond(path));
+		const current = session([]);
+		const peer = session([], { id: "sess-2", title: "API cleanup", branch: "feat/api" });
+		renderWithQuery(<SessionInspector session={current} />, [{ id: "ws-1", name: "my-app", path: "/repo", sessions: [current, peer] }]);
+
+		expect(await screen.findByText("Possible collision")).toBeInTheDocument();
+		expect(screen.getByText("API cleanup")).toBeInTheDocument();
+		expect(screen.getByText("frontend/src/App.tsx")).toBeInTheDocument();
+		expect(screen.getByText("README.md")).toBeInTheDocument();
+	});
+
   it("gives an orchestrator Summary and Browser, with its account but no branch", () => {
     renderWithQuery(<SessionInspector orchestrator session={session([], { kind: "orchestrator" })} />);
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["Summary", "Browser"]);

@@ -5694,5 +5694,12 @@
 	"shell.deleteCloudProjectTitle": "Удалить проект навсегда",
 	"shell.deleteCloudProjectLead": "Проект {{name}} будет удалён навсегда",
 	"shell.deleteCloudProjectConfirm": "Удалить навсегда",
-	"shell.cloudProjectDeleted": "Проект {{name}} удалён навсегда"
+	"shell.cloudProjectDeleted": "Проект {{name}} удалён навсегда",
+	"collisionRadar.badge": "Пересечение",
+	"collisionRadar.cardAria_one": "1 изменённый файл пересекается с работой {{sessions}}",
+	"collisionRadar.cardAria_other": "{{count}} изменённых файлов пересекаются с работой {{sessions}}",
+	"collisionRadar.title": "Возможный конфликт",
+	"collisionRadar.incompleteTitle": "Проверка конфликтов не завершена",
+	"collisionRadar.summary": "{{sessions}} также изменил(а) файлы в этом рабочем пространстве.",
+	"collisionRadar.incomplete": "Не удалось сравнить некоторые изменения рабочего пространства. Список может быть неполным."
 }
