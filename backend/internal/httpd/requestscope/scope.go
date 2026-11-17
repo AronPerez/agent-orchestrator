@@ -3,7 +3,10 @@
 // the shared API router.
 package requestscope
 
-import "context"
+import (
+	"context"
+	"slices"
+)
 
 type lanKey struct{}
 
@@ -30,11 +33,17 @@ const (
 	CredentialPairingCode CredentialKind = "pairing-code"
 )
 
-// Credential is what the LAN listener accepted. DeviceID is set for CredentialDevice.
+// Credential is what the LAN listener accepted. DeviceID is set for
+// CredentialDevice. An empty Scopes list is the existing full app credential;
+// a non-empty list is a capability credential enforced by the LAN listener.
 type Credential struct {
 	Kind     CredentialKind
 	DeviceID string
+	Scopes   []string
 }
+
+// HasScope reports whether the accepted credential carries scope.
+func (c Credential) HasScope(scope string) bool { return slices.Contains(c.Scopes, scope) }
 
 type credentialKey struct{}
 

@@ -8,9 +8,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/go-chi/chi/v5"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/requestscope"
 	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
 )
 
@@ -56,6 +61,90 @@ func (f *fakeBridge) SetBrowserRemoteAccess(on bool) (MobileStatusResponse, erro
 	return r, nil
 }
 
+type interruptedCoordinationBridge struct{ fakeBridge }
+
+func (*interruptedCoordinationBridge) IssueCoordinationToken(context.Context, string, string, string, requestscope.Credential, string) (CoordinationTokenResponse, error) {
+	return CoordinationTokenResponse{}, context.Canceled
+}
+
+func (*interruptedCoordinationBridge) RevokeCoordinationToken(context.Context, string, requestscope.Credential, string) (bool, error) {
+	return false, context.Canceled
+}
+
+type recordingCoordinationBridge struct {
+	fakeBridge
+	clientID string
+}
+
+func (b *recordingCoordinationBridge) IssueCoordinationToken(_ context.Context, _, _, clientID string, _ requestscope.Credential, _ string) (CoordinationTokenResponse, error) {
+	b.clientID = clientID
+	return CoordinationTokenResponse{HostID: "h_test", DeviceID: "dev_test", Token: mobilebridge.CoordinationTokenPrefix + strings.Repeat("a", 64), Scope: mobilebridge.DeviceScopeAgentCoordination}, nil
+}
+
+func TestCoordinationHandlerCarriesValidatedClientID(t *testing.T) {
+	bridge := &recordingCoordinationBridge{}
+	controller := &MobileController{Bridge: bridge}
+	credential := requestscope.Credential{Kind: requestscope.CredentialPassword}
+	request := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/remote-host/coordination-token", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer secret12")
+		req = req.WithContext(requestscope.WithCredential(req.Context(), credential))
+		recorder := httptest.NewRecorder()
+		controller.IssueCoordinationToken(recorder, req)
+		return recorder
+	}
+
+	if recorder := request(`{"name":"Origin","platform":"darwin","clientId":"h_origin"}`); recorder.Code != http.StatusOK {
+		t.Fatalf("valid status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	if bridge.clientID != "h_origin" {
+		t.Fatalf("client id = %q", bridge.clientID)
+	}
+	bridge.clientID = ""
+	if recorder := request(`{"clientId":"not valid"}`); recorder.Code != http.StatusBadRequest {
+		t.Fatalf("invalid status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	if bridge.clientID != "" {
+		t.Fatal("invalid client id reached the bridge")
+	}
+}
+
+func TestCoordinationHandlersReturnNonSuccessWhenInterrupted(t *testing.T) {
+	controller := &MobileController{Bridge: &interruptedCoordinationBridge{}}
+	credential := requestscope.Credential{Kind: requestscope.CredentialDevice, DeviceID: "device-full"}
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+		handle http.HandlerFunc
+	}{
+		{name: "issue", method: http.MethodPost, path: "/api/v1/remote-host/coordination-token", handle: controller.IssueCoordinationToken},
+		{name: "revoke", method: http.MethodDelete, path: "/api/v1/remote-host/coordination-token/device-child", handle: controller.RevokeCoordinationToken},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			router := chi.NewRouter()
+			router.Method(tc.method, tc.path, tc.handle)
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			req.Header.Set("Authorization", "Bearer parent-token")
+			req = req.WithContext(requestscope.WithCredential(req.Context(), credential))
+			recorder := httptest.NewRecorder()
+
+			router.ServeHTTP(recorder, req)
+
+			if recorder.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want 503; body=%s", recorder.Code, recorder.Body.String())
+			}
+			var body map[string]any
+			if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if body["code"] != "COORDINATION_TOKEN_INTERRUPTED" {
+				t.Fatalf("body = %v", body)
+			}
+		})
+	}
+}
+
 func TestMobileBrowserRemoteAccess(t *testing.T) {
 	c := &MobileController{Bridge: &fakeBridge{}}
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/mobile/browser-control", strings.NewReader(`{"enabled":true}`))
@@ -75,11 +164,12 @@ func TestMobileBrowserRemoteAccess(t *testing.T) {
 
 // fakeLAN is a minimal LANController for exercising BridgeService directly.
 type fakeLAN struct {
-	running     bool
-	hash        string
-	accountHash string
-	stopCalls   int
-	bindHost    string
+	running      bool
+	hash         string
+	accountHash  string
+	stopCalls    int
+	bindHost     string
+	disconnected []string
 }
 
 func (f *fakeLAN) Start(port int) (int, error) {
@@ -109,6 +199,9 @@ func (f *fakeLAN) SetPasswordHash(h string)     { f.hash = h }
 func (f *fakeLAN) PasswordHash() string         { return f.hash }
 func (f *fakeLAN) SetAccountTokenHash(h string) { f.accountHash = h }
 func (f *fakeLAN) AccountTokenHash() string     { return f.accountHash }
+func (f *fakeLAN) DisconnectCredential(hash string) {
+	f.disconnected = append(f.disconnected, hash)
+}
 
 func TestIssueAccountTokenRequiresPairingPasswordAndPersistsHash(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "mobile", "config.json")
@@ -196,6 +289,308 @@ func TestIssueAccountTokenReusesCredentialForSameAccount(t *testing.T) {
 	}
 	if got, err := bridge.IssueAccountToken(third.Token, "user-b"); err != nil || got.Token != third.Token {
 		t.Fatalf("current token retry = %+v, %v; want current credential", got, err)
+	}
+}
+
+func TestAccountRotationAndUnlinkRevokeDerivedCoordinationTokens(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mobile", "config.json")
+	if err := mobilebridge.Save(path, mobilebridge.State{Enabled: true, Password: "secret12"}); err != nil {
+		t.Fatal(err)
+	}
+	devices, err := mobilebridge.LoadAccessDevices(mobilebridge.AccessDevicesPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lan := &fakeLAN{running: true}
+	bridge := &BridgeService{LAN: lan, ConfigPath: path, HostID: "h_test", Devices: devices}
+	account, err := bridge.IssueAccountToken("secret12", "user-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := bridge.IssueCoordinationToken(context.Background(), "Account agent", "cli", "", requestscope.Credential{
+		Kind: requestscope.CredentialAccount,
+	}, account.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	password, err := bridge.IssueCoordinationToken(context.Background(), "Password agent", "cli", "", requestscope.Credential{
+		Kind: requestscope.CredentialPassword,
+	}, "secret12")
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err = bridge.IssueAccountToken("secret12", "user-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := devices.Match(first.Token); ok {
+		t.Fatal("account rotation left its derived coordination token valid")
+	}
+	if _, ok := devices.Match(password.Token); !ok {
+		t.Fatal("account rotation revoked a password-derived token")
+	}
+
+	second, err := bridge.IssueCoordinationToken(context.Background(), "Second account agent", "cli", "", requestscope.Credential{
+		Kind: requestscope.CredentialAccount,
+	}, account.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bridge.UnlinkAccount(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := devices.Match(second.Token); ok {
+		t.Fatal("account unlink left its derived coordination token valid")
+	}
+	for _, token := range []string{first.Token, second.Token} {
+		want := mobilebridge.HashPassword(token)
+		if !slices.Contains(lan.disconnected, want) {
+			t.Fatalf("live derived credential %s was not disconnected: %v", want, lan.disconnected)
+		}
+	}
+}
+
+func TestCoordinationClientRetryReplacesLostResponseToken(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mobile", "config.json")
+	if err := mobilebridge.Save(path, mobilebridge.State{Enabled: true, Password: "secret12"}); err != nil {
+		t.Fatal(err)
+	}
+	devices, err := mobilebridge.LoadAccessDevices(mobilebridge.AccessDevicesPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lan := &fakeLAN{running: true}
+	bridge := &BridgeService{LAN: lan, ConfigPath: path, HostID: "h_test", Devices: devices}
+	first, err := bridge.IssueCoordinationToken(context.Background(), "Origin", "darwin", "h_origin", requestscope.Credential{
+		Kind: requestscope.CredentialPassword,
+	}, "secret12")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := bridge.IssueCoordinationToken(context.Background(), "Origin", "darwin", "h_origin", requestscope.Credential{
+		Kind: requestscope.CredentialPassword,
+	}, "secret12")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := devices.Match(first.Token); ok {
+		t.Fatal("token from the lost first response survived the retry")
+	}
+	if matched, ok := devices.Match(second.Token); !ok || matched.ClientID != "h_origin" {
+		t.Fatalf("retry token = %+v, %v", matched, ok)
+	}
+	if !slices.Contains(lan.disconnected, mobilebridge.HashPassword(first.Token)) {
+		t.Fatalf("first live credential was not disconnected: %v", lan.disconnected)
+	}
+	if got := devices.List(); len(got) != 1 || got[0].ID != second.DeviceID {
+		t.Fatalf("devices after retry = %+v", got)
+	}
+}
+
+func TestCoordinationIssuanceSerializesWithDeviceRevocation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mobile", "config.json")
+	if err := mobilebridge.Save(path, mobilebridge.State{Enabled: true, Password: "secret12"}); err != nil {
+		t.Fatal(err)
+	}
+	devices, err := mobilebridge.LoadAccessDevices(mobilebridge.AccessDevicesPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, parentToken, err := devices.Issue("Laptop", "darwin", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge := &BridgeService{LAN: &fakeLAN{running: true}, ConfigPath: path, HostID: "h_test", Devices: devices}
+	issueLocked := make(chan struct{})
+	releaseIssue := make(chan struct{})
+	bridge.afterCoordinationIssueLock = func() {
+		bridge.afterCoordinationIssueLock = nil
+		close(issueLocked)
+		<-releaseIssue
+	}
+	type issueResult struct {
+		result CoordinationTokenResponse
+		err    error
+	}
+	issued := make(chan issueResult, 1)
+	go func() {
+		result, err := bridge.IssueCoordinationToken(context.Background(), "Child", "cli", "", requestscope.Credential{
+			Kind: requestscope.CredentialDevice, DeviceID: parent.ID,
+		}, parentToken)
+		issued <- issueResult{result: result, err: err}
+	}()
+	<-issueLocked
+	revoked := make(chan error, 1)
+	go func() {
+		_, found, err := bridge.RevokeDevice(parent.ID)
+		if err == nil && !found {
+			err = errors.New("parent device was not found")
+		}
+		revoked <- err
+	}()
+	close(releaseIssue)
+	got := <-issued
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if err := <-revoked; err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := devices.Match(got.result.Token); ok {
+		t.Fatal("coordination token survived overlapping parent revocation")
+	}
+	if _, err := bridge.IssueCoordinationToken(context.Background(), "Late child", "cli", "", requestscope.Credential{
+		Kind: requestscope.CredentialDevice, DeviceID: parent.ID,
+	}, parentToken); !errors.Is(err, errCoordinationIssuerRevoked) {
+		t.Fatalf("issuance after revocation = %v, want errCoordinationIssuerRevoked", err)
+	}
+}
+
+func TestCoordinationIssuanceSerializesWithAccountUnlink(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mobile", "config.json")
+	if err := mobilebridge.Save(path, mobilebridge.State{Enabled: true, Password: "secret12"}); err != nil {
+		t.Fatal(err)
+	}
+	devices, err := mobilebridge.LoadAccessDevices(mobilebridge.AccessDevicesPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge := &BridgeService{LAN: &fakeLAN{running: true}, ConfigPath: path, HostID: "h_test", Devices: devices}
+	account, err := bridge.IssueAccountToken("secret12", "user-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	issueLocked := make(chan struct{})
+	releaseIssue := make(chan struct{})
+	bridge.afterCoordinationIssueLock = func() {
+		bridge.afterCoordinationIssueLock = nil
+		close(issueLocked)
+		<-releaseIssue
+	}
+	type issueResult struct {
+		result CoordinationTokenResponse
+		err    error
+	}
+	issued := make(chan issueResult, 1)
+	go func() {
+		result, err := bridge.IssueCoordinationToken(context.Background(), "Child", "cli", "", requestscope.Credential{
+			Kind: requestscope.CredentialAccount,
+		}, account.Token)
+		issued <- issueResult{result: result, err: err}
+	}()
+	<-issueLocked
+	unlinked := make(chan error, 1)
+	go func() { unlinked <- bridge.UnlinkAccount() }()
+	close(releaseIssue)
+	got := <-issued
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if err := <-unlinked; err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := devices.Match(got.result.Token); ok {
+		t.Fatal("coordination token survived overlapping account unlink")
+	}
+	if _, err := bridge.IssueCoordinationToken(context.Background(), "Late child", "cli", "", requestscope.Credential{
+		Kind: requestscope.CredentialAccount,
+	}, account.Token); !errors.Is(err, errCoordinationIssuerRevoked) {
+		t.Fatalf("issuance after account unlink = %v, want errCoordinationIssuerRevoked", err)
+	}
+}
+
+func TestCoordinationIssuanceStopsWaitingWhenContextIsCanceled(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mobile", "config.json")
+	if err := mobilebridge.Save(path, mobilebridge.State{Enabled: true, Password: "secret12"}); err != nil {
+		t.Fatal(err)
+	}
+	devices, err := mobilebridge.LoadAccessDevices(mobilebridge.AccessDevicesPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge := &BridgeService{LAN: &fakeLAN{running: true}, ConfigPath: path, Devices: devices}
+	bridge.transitionMu.Lock()
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := bridge.IssueCoordinationToken(ctx, "Child", "cli", "", requestscope.Credential{Kind: requestscope.CredentialPassword}, "secret12")
+		result <- err
+	}()
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("issuance wait error = %v, want context canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("issuance remained blocked after its request was canceled")
+	}
+	bridge.transitionMu.Unlock()
+}
+
+func TestCoordinationIssuanceRechecksThatRemoteAccessIsEnabled(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mobile", "config.json")
+	if err := mobilebridge.Save(path, mobilebridge.State{Enabled: false, Password: "secret12"}); err != nil {
+		t.Fatal(err)
+	}
+	devices, err := mobilebridge.LoadAccessDevices(mobilebridge.AccessDevicesPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, token, err := devices.Issue("Laptop", "darwin", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge := &BridgeService{LAN: &fakeLAN{}, ConfigPath: path, Devices: devices}
+	if _, err := bridge.IssueCoordinationToken(context.Background(), "Child", "cli", "", requestscope.Credential{
+		Kind: requestscope.CredentialDevice, DeviceID: parent.ID,
+	}, token); !errors.Is(err, errCoordinationIssuerRevoked) {
+		t.Fatalf("disabled issuance = %v, want errCoordinationIssuerRevoked", err)
+	}
+}
+
+func TestCoordinationRevocationRevalidatesCallerAfterWaiting(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mobile", "config.json")
+	if err := mobilebridge.Save(path, mobilebridge.State{Enabled: true, Password: "secret12"}); err != nil {
+		t.Fatal(err)
+	}
+	devices, err := mobilebridge.LoadAccessDevices(mobilebridge.AccessDevicesPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	caller, callerToken, err := devices.Issue("Caller", "darwin", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, targetToken, err := devices.IssueScopedBy("Target", "cli", []string{mobilebridge.DeviceScopeAgentCoordination}, mobilebridge.SharedPassword, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge := &BridgeService{LAN: &fakeLAN{running: true}, ConfigPath: path, Devices: devices}
+	bridge.transitionMu.Lock()
+	result := make(chan error, 1)
+	go func() {
+		_, err := bridge.RevokeCoordinationToken(context.Background(), target.ID, requestscope.Credential{
+			Kind: requestscope.CredentialDevice, DeviceID: caller.ID,
+		}, callerToken)
+		result <- err
+	}()
+	if _, found, err := devices.Revoke(caller.ID); err != nil || !found {
+		t.Fatalf("revoke caller: found=%v err=%v", found, err)
+	}
+	bridge.transitionMu.Unlock()
+	if err := <-result; !errors.Is(err, errCoordinationIssuerRevoked) {
+		t.Fatalf("revocation after caller removal = %v, want errCoordinationIssuerRevoked", err)
+	}
+	if _, ok := devices.Match(targetToken); !ok {
+		t.Fatal("target was revoked by a caller that no longer authenticated")
 	}
 }
 

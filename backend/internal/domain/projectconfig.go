@@ -39,6 +39,11 @@ type ProjectConfig struct {
 	// PreRemove are shell commands run before an AO-managed Git worktree is
 	// permanently removed, each within its own time limit when it sets one.
 	PreRemove []string `json:"preRemove,omitempty"`
+	// Verify are opt-in shell commands run in a worker's workspace after the
+	// worker reports done. Each command uses the same per-step time-limit syntax
+	// as PostCreate. Verification results are durable facts; they do not mutate
+	// the worker's lifecycle state.
+	Verify []string `json:"verify,omitempty"`
 
 	// AgentRules are project-specific standing instructions for worker sessions.
 	AgentRules string `json:"agentRules,omitempty"`
@@ -313,6 +318,9 @@ func (c ProjectConfig) Validate() error {
 		return err
 	}
 	if err := validateScriptSteps("preRemove", c.PreRemove); err != nil {
+		return err
+	}
+	if err := validateScriptSteps("verify", c.Verify); err != nil {
 		return err
 	}
 	if err := validateRepoRelative(c.AgentRulesFile); err != nil {

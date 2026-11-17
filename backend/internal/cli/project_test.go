@@ -177,6 +177,30 @@ func TestProjectSetConfig_PreRemoveConfigJSON(t *testing.T) {
 	}
 }
 
+func TestProjectSetConfig_VerifyFlags(t *testing.T) {
+	cfg := setConfigEnv(t)
+	srv, capture := projectServer(t, http.StatusOK, `{"project":{"id":"demo","path":"/repo/demo"}}`)
+	writeRunFileFor(t, cfg, srv)
+
+	_, errOut, err := executeCLI(t, Deps{
+		ProcessAlive: func(int) bool { return true },
+	}, "project", "set-config", "demo", "--verify", "go test ./...", "--verify", "npm run typecheck")
+	if err != nil {
+		t.Fatalf("unexpected error: %v\nstderr=%s", err, errOut)
+	}
+	if capture.method != http.MethodPut || capture.path != "/api/v1/projects/demo/config" {
+		t.Fatalf("request = %s %s, want PUT /api/v1/projects/demo/config", capture.method, capture.path)
+	}
+	var got setConfigRequest
+	if err := json.Unmarshal(capture.body, &got); err != nil {
+		t.Fatalf("decode request: %v\nbody=%s", err, capture.body)
+	}
+	want := []string{"go test ./...", "npm run typecheck"}
+	if !reflect.DeepEqual(got.Config.Verify, want) {
+		t.Fatalf("verify request = %#v, want %q", got.Config.Verify, want)
+	}
+}
+
 func TestBuildProjectConfigTrackerIntakeFlags(t *testing.T) {
 	changed := func(name string) bool {
 		return name == "tracker-intake" || name == "tracker-repo" || name == "tracker-assignee"
@@ -259,9 +283,9 @@ func TestProjectConfigFlagsListsEveryFieldFlag(t *testing.T) {
 	}
 }
 
-// storedProjectConfig carries fields set in the desktop app that no
-// set-config flag manages (effort, preRemove, workersRequestReview).
-const storedProjectConfig = `{"sessionPrefix":"old","env":{"KEEP":"1"},"preRemove":["make clean"],` +
+// storedProjectConfig carries a mix of CLI-managed and desktop-only fields so
+// partial updates prove they preserve every config field they do not change.
+const storedProjectConfig = `{"sessionPrefix":"old","env":{"KEEP":"1"},"preRemove":["make clean"],"verify":["go test ./..."],` +
 	`"agentConfig":{"model":"m1","effort":"high"},"worker":{"agent":"codex","agentConfig":{"effort":"medium"}},` +
 	`"reviewers":[{"harness":"claude-code","agentConfig":{"effort":"max"}}],"workersRequestReview":true,` +
 	`"workerContracts":{"stallMinutes":17}}`

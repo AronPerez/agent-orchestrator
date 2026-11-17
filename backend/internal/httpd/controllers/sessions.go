@@ -414,10 +414,24 @@ func (c *SessionsController) spawn(w http.ResponseWriter, r *http.Request) {
 	async := in.Async && in.ProjectID != ""
 	sess, promptBytes, systemPromptBytes, err := c.Svc.Spawn(r.Context(), ports.SpawnConfig{ProjectID: in.ProjectID, IssueID: in.IssueID, ParentSessionID: in.ParentSessionID, TrackerProvider: in.TrackerProvider, Kind: in.Kind, Harness: in.Harness, Branch: in.Branch, BaseBranch: strings.TrimSpace(in.BaseBranch), RequestedMode: in.Mode, Prompt: in.Prompt, Goal: goal, Timebox: timebox, RequestedOutput: in.RequestedOutput, DisplayName: displayName, DisplayNameExplicit: in.DisplayNameExplicit && displayName != "", Attachments: attachments, AgentConfig: ports.AgentConfig{Model: in.Model, Effort: in.Effort, Permissions: in.ApprovalMode}, EffortOverride: strings.TrimSpace(in.Effort) != "", AgentAccountID: strings.TrimSpace(in.AccountID), ClientRequestID: in.ClientRequestID, ClientRequestHash: requestHash, Async: async})
 	if err != nil {
-		envelope.WriteError(w, r, err)
+		writeSpawnError(w, r, err)
 		return
 	}
 	envelope.WriteJSON(w, http.StatusCreated, SpawnSessionResponse{Session: sessionView(r, sess), PromptBytes: promptBytes, SystemPromptBytes: systemPromptBytes})
+}
+
+const coordinationSpawnFailureMessage = "Remote session could not be started. Check the destination host for details."
+
+func writeSpawnError(w http.ResponseWriter, r *http.Request, err error) {
+	var apiError *apierr.Error
+	if isAgentCoordinationRequest(r.Context()) && errors.As(err, &apiError) {
+		// Service errors may carry local paths or setup output. Keep the original in
+		// request diagnostics while returning its stable kind/code across the
+		// coordination credential boundary.
+		envelope.WriteRedactedError(w, r, err, apierr.New(apiError.Kind, apiError.Code, coordinationSpawnFailureMessage, nil))
+		return
+	}
+	envelope.WriteError(w, r, err)
 }
 
 // attachmentError carries a client-facing API error code + message for a
@@ -3174,6 +3188,9 @@ func sessionView(r *http.Request, s domain.Session) SessionView {
 	if s.ActiveAgentSwitch != nil {
 		sw := agentSwitchView(*s.ActiveAgentSwitch)
 		view.ActiveAgentSwitch = &sw
+	}
+	if isAgentCoordinationRequest(r.Context()) {
+		view.ProvisionError = ""
 	}
 	return view
 }
