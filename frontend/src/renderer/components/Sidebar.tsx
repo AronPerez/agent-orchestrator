@@ -27,6 +27,7 @@ import {
 	LayoutGrid,
 	Package,
 	Gauge,
+	FolderTree,
 	LogIn,
 	LogOut,
 	MoreVertical,
@@ -547,6 +548,7 @@ function useSelection() {
 	const goHome = useCallback(() => void navigate({ to: "/" }), [navigate]);
 	const goAutomations = useCallback(() => void navigate({ to: "/automations" }), [navigate]);
 	const goArtifacts = useCallback(() => void navigate({ to: "/artifacts" }), [navigate]);
+	const goFleet = useCallback(() => void navigate({ to: "/fleet" }), [navigate]);
 	const goUsage = useCallback(() => void navigate({ to: "/usage" }), [navigate]);
 	const goStandaloneBoard = useCallback(() => void navigate({ to: "/sessions" }), [navigate]);
 	const goGlobalSettings = useCallback(() => openGlobalSettings(), [openGlobalSettings]);
@@ -574,6 +576,7 @@ function useSelection() {
 		isHome: pathname === "/",
 		isAutomations: pathname === "/automations",
 		isArtifacts: pathname === "/artifacts",
+		isFleet: pathname === "/fleet",
 		isUsage: pathname === "/usage",
 		activeRemoteHostId: params.hostId,
 		activeRemoteProjectId: params.hostId ? params.projectId : undefined,
@@ -583,6 +586,7 @@ function useSelection() {
 		goHome,
 		goAutomations,
 		goArtifacts,
+		goFleet,
 		goUsage,
 		goStandaloneBoard,
 		// Settings is a modal — open it in place so the current page (session
@@ -592,7 +596,7 @@ function useSelection() {
 		goSettings,
 		goProject,
 		goSession,
-	}), [goArtifacts, goAutomations, goUsage, goConnectMobile, goGlobalSettings, goHome, goProject, goSession, goSettings, goStandaloneBoard, params.hostId, params.projectId, params.sessionId, pathname]);
+	}), [goArtifacts, goAutomations, goFleet, goUsage, goConnectMobile, goGlobalSettings, goHome, goProject, goSession, goSettings, goStandaloneBoard, params.hostId, params.projectId, params.sessionId, pathname]);
 }
 
 // Rows showing the red alert sit above the rest, but only in the default
@@ -1176,6 +1180,15 @@ export const Sidebar = memo(function Sidebar({
 							onClick={selection.goArtifacts}
 							tooltip={isCollapsed ? t("artifacts.title") : undefined}
 							trailing={artifactTotal > 0 ? String(artifactTotal) : undefined}
+						/>
+					</SidebarMenuItem>
+					<SidebarMenuItem>
+						<SidebarTopNavRow
+							active={selection.isFleet}
+							icon={<FolderTree aria-hidden="true" />}
+							label={t("fleet.tab")}
+							onClick={selection.goFleet}
+							tooltip={isCollapsed ? t("fleet.tab") : undefined}
 						/>
 					</SidebarMenuItem>
 					{developerMode ? (

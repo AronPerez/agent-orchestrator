@@ -819,6 +819,25 @@ describe("Sidebar", () => {
 		expect(artifacts.textContent).toBe("Artifacts");
 	});
 
+	it("opens the fleet page from the top navigation and marks it active", async () => {
+		const user = userEvent.setup();
+		renderSidebar();
+
+		const artifacts = screen.getByRole("button", { name: "Artifacts" });
+		const fleet = screen.getByRole("button", { name: "Fleet" });
+		expect(artifacts.compareDocumentPosition(fleet) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+		expect(fleet).not.toHaveAttribute("aria-current");
+
+		await user.click(fleet);
+		expect(navigateMock).toHaveBeenCalledWith({ to: "/fleet" });
+
+		act(() => {
+			mockLocation.pathname = "/fleet";
+			notifyRouteChange();
+		});
+		expect(screen.getByRole("button", { name: "Fleet" })).toHaveAttribute("aria-current", "page");
+	});
+
 	it("navigates home from the brand row", async () => {
 		const user = userEvent.setup();
 		mockParams.projectId = "proj-1";
