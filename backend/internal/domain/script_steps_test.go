@@ -31,6 +31,7 @@ func TestProjectConfigValidatesScriptStepTimeouts(t *testing.T) {
 	for _, cfg := range []ProjectConfig{
 		{PostCreate: []string{"npm ci", "# ao-timeout: 1m\nmake"}},
 		{PreRemove: []string{"# ao-timeout: 120m\nmake down"}},
+		{Verify: []string{"go test ./...", "# ao-timeout: 45m\nnpm run typecheck"}},
 	} {
 		if err := cfg.Validate(); err != nil {
 			t.Errorf("%+v: %v", cfg, err)
@@ -41,6 +42,9 @@ func TestProjectConfigValidatesScriptStepTimeouts(t *testing.T) {
 		{PostCreate: []string{"ok", "# ao-timeout: 121m\nnpm ci"}},
 		{PreRemove: []string{"# ao-timeout: 500m\nmake down"}},
 		{PreRemove: []string{"# ao-timeout: 5m\n  "}},
+		{Verify: []string{"# ao-timeout: 0m\ngo test ./..."}},
+		{Verify: []string{"# ao-timeout: 121m\ngo test ./..."}},
+		{Verify: []string{"# ao-timeout: 5m\n  "}},
 	} {
 		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "step") {
 			t.Errorf("%+v: err = %v, want the step refused", cfg, err)
