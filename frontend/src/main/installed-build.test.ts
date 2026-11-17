@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { runInNewContext } from "node:vm";
 import { createPackage } from "@electron/asar";
 import type { components } from "../api/schema";
 import { createArchiveIdentityReader, InstalledBuildGuard, sessionsAreIdle, sessionsAndReviewsAreIdle, watchInstalledBuild } from "./installed-build";
@@ -15,7 +16,7 @@ function guardHarness() {
 	const isIdle = vi.fn(async () => idle);
 	const assertRestartSafe = vi.fn<() => void>();
 	const onReplacement = vi.fn();
-	const guard = new InstalledBuildGuard({ readIdentity: async () => identity, isIdle, onChange, onReplacement, assertRestartSafe, relaunch });
+	const guard = new InstalledBuildGuard({ readIdentity: () => identity, isIdle, onChange, onReplacement, assertRestartSafe, relaunch });
 	return { guard, onChange, onReplacement, relaunch, isIdle, assertRestartSafe, replace: (next: string | null) => { identity = next; }, busy: () => { idle = false; }, idle: () => { idle = true; } };
 }
 
@@ -198,7 +199,7 @@ describe("installed desktop build", () => {
 		await h.guard.check();
 		await h.guard.requestRestart("now");
 		const onChange = vi.fn();
-		const restarted = new InstalledBuildGuard({ readIdentity: async () => "new-asar", isIdle: async () => true, onChange, onReplacement: () => undefined, assertRestartSafe: () => undefined, relaunch: vi.fn() });
+		const restarted = new InstalledBuildGuard({ readIdentity: () => "new-asar", isIdle: async () => true, onChange, onReplacement: () => undefined, assertRestartSafe: () => undefined, relaunch: vi.fn() });
 		await restarted.check();
 		await restarted.check();
 		expect(restarted.status).toBeUndefined();
@@ -207,27 +208,87 @@ describe("installed desktop build", () => {
 });
 
 describe("idle evidence", () => {
+	const noSideWork = async () => ({ sides: [] });
 	const idleSession = {
-		id: "worker-1", isTerminated: false, status: "idle", statusReadiness: "ready",
+		id: "worker-1", mode: "chat", isTerminated: false, status: "idle", statusReadiness: "ready",
 		activity: { state: "idle", lastActivityAt: "2026-11-16T20:00:00Z" },
-	} satisfies Pick<components["schemas"]["ControllersSessionView"], "id" | "isTerminated" | "status" | "statusReadiness" | "activity">;
+	} satisfies Pick<components["schemas"]["ControllersSessionView"], "id" | "mode" | "isTerminated" | "status" | "statusReadiness" | "activity">;
 	it.each([{ status: "no_signal" }, { runtimeUnreachable: true }])("rejects stored idle activity with unavailable live facts: %j", (facts) => {
 		expect(sessionsAreIdle({ sessions: [{ ...idleSession, ...facts }] })).toBe(false);
 	});
 	it.each(["Approved", "Mergeable"])("checks all running review passes even when the display says %s", async (displayStatus) => {
 		const readReviews = vi.fn(async (_sessionId: string) => ({ runs: [{ status: "complete", prUrl: "pr-1" }, { status: "running", prUrl: "pr-2" }] }));
-		expect(await sessionsAndReviewsAreIdle({ sessions: [{ ...idleSession, displayStatus, status: displayStatus === "Approved" ? "approved" : "mergeable" }] }, readReviews)).toBe(false);
+		expect(await sessionsAndReviewsAreIdle({ sessions: [{ ...idleSession, displayStatus, status: displayStatus === "Approved" ? "approved" : "mergeable" }] }, readReviews, noSideWork)).toBe(false);
 		expect(readReviews).toHaveBeenCalledWith("worker-1");
+	});
+	it.each([
+		{ status: "pr_open", displayStatus: "Review scheduled", runs: [] },
+		{ status: "review_pending", displayStatus: "Retrying review", runs: [{ status: "failed" }] },
+	])("keeps pending reviews busy with terminal or absent runs: $displayStatus", async ({ status, displayStatus, runs }) => {
+		expect(await sessionsAndReviewsAreIdle({ sessions: [{ ...idleSession, status, displayStatus }] }, async () => ({ runs, activeReviewers: [] }), noSideWork)).toBe(false);
+	});
+	it.each(["active", "waiting_input", "blocked", "unknown", undefined])("keeps terminal passes busy with reviewer activity %s", async (reviewerActivityState) => {
+		expect(await sessionsAndReviewsAreIdle({ sessions: [idleSession] }, async () => ({
+			runs: [{ status: "delivered" }], reviewerHandleId: "reviewer-1", reviewerActivityState, activeReviewers: [],
+		}), noSideWork)).toBe(false);
+	});
+	it("does not infer another live reviewer's activity from the selected idle reviewer", async () => {
+		expect(await sessionsAndReviewsAreIdle({ sessions: [idleSession] }, async () => ({
+			runs: [{ status: "complete" }], reviewerHandleId: "pane-1", reviewerActivityState: "idle",
+			reviewerSurface: { reviewId: "reviewer-1", handleId: "pane-1" },
+			activeReviewers: [{ reviewId: "reviewer-1", handleId: "pane-1" }, { reviewId: "reviewer-2", handleId: "pane-2" }],
+		}), noSideWork)).toBe(false);
+	});
+	it.each(["idle", "exited"])("accepts terminal passes with confirmed %s reviewer activity", async (reviewerActivityState) => {
+		expect(await sessionsAndReviewsAreIdle({ sessions: [idleSession] }, async () => ({
+			runs: [{ status: "complete" }, { status: "delivered" }], reviewerHandleId: "pane-1", reviewerActivityState,
+			reviewerSurface: { reviewId: "reviewer-1", handleId: "pane-1" },
+			activeReviewers: [{ reviewId: "reviewer-1", handleId: "pane-1" }],
+		}), noSideWork)).toBe(true);
+	});
+	it.each([
+		{ sides: [{ state: "ready", hasWork: true }] }, // Queued or running turns.
+		{ sides: [{ state: "failed", hasWork: true }] }, // Failed provider with a queued turn.
+		{ sides: [{ state: "opening", hasWork: false }] },
+		{ sides: [{ state: "recovering", hasWork: false }] },
+		{ sides: [{}] }, {}, null,
+	])("checks independent side-chat work in the main idle probe: %j", async (sides) => {
+		const main = fs.readFileSync(path.join(import.meta.dirname, "../main.ts"), "utf8");
+		const start = main.indexOf("\tisIdle: async () => {");
+		const fetch = vi.fn(async (url: string) => ({ ok: true, json: async () =>
+			url.endsWith("/sessions") ? { sessions: [idleSession] } : url.endsWith("/reviews") ? { runs: [], activeReviewers: [] } : sides }));
+		const { isIdle } = runInNewContext(`({${main.slice(start, main.indexOf("\n\tonChange:", start))}})`, {
+			daemonStatus: { port: 3001 }, chatDraftRisks: [], readDaemonProbe: async () => true,
+			fetch, AbortSignal, sessionsAndReviewsAreIdle,
+		});
+		expect(await isIdle()).toBe(false);
+		expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/conversation/side-chats"), expect.anything());
 	});
 	it("requires available review facts for every live session and ignores terminated sessions", async () => {
 		const body = { sessions: [idleSession, { ...idleSession, id: "worker-2" }, { isTerminated: true }] };
-		const readReviews = vi.fn(async (_sessionId: string) => ({ runs: [] }));
-		expect(await sessionsAndReviewsAreIdle(body, readReviews)).toBe(true);
+		const readReviews = vi.fn<(_sessionId: string) => Promise<unknown>>(async () => ({ runs: [], activeReviewers: [] }));
+		const readSides = vi.fn(async (_sessionId: string) => ({ sides: [] }));
+		expect(await sessionsAndReviewsAreIdle(body, readReviews, readSides)).toBe(true);
 		expect(readReviews.mock.calls.map(([id]) => id)).toEqual(["worker-1", "worker-2"]);
+		expect(readSides.mock.calls.map(([id]) => id)).toEqual(["worker-1", "worker-2"]);
 		readReviews.mockRejectedValueOnce(new Error("unavailable"));
-		expect(await sessionsAndReviewsAreIdle(body, readReviews)).toBe(false);
-		readReviews.mockResolvedValueOnce({} as { runs: never[] });
-		expect(await sessionsAndReviewsAreIdle(body, readReviews)).toBe(false);
+		expect(await sessionsAndReviewsAreIdle(body, readReviews, readSides)).toBe(false);
+		readReviews.mockResolvedValueOnce({});
+		expect(await sessionsAndReviewsAreIdle(body, readReviews, readSides)).toBe(false);
+		readReviews.mockResolvedValueOnce({ runs: [] });
+		expect(await sessionsAndReviewsAreIdle(body, readReviews, readSides)).toBe(false);
+		readSides.mockRejectedValueOnce(new Error("side chats unavailable"));
+		expect(await sessionsAndReviewsAreIdle(body, readReviews, readSides)).toBe(false);
+	});
+	it("accepts side chats only with confirmed absence of queued or running work", async () => {
+		expect(await sessionsAndReviewsAreIdle({ sessions: [idleSession] }, async () => ({ runs: [], activeReviewers: [] }), async () => ({
+			sides: [{ state: "ready", hasWork: false }, { state: "failed", hasWork: false }],
+		}))).toBe(true);
+	});
+	it("does not query the chat-only side endpoint for confirmed TUI sessions", async () => {
+		const readSides = vi.fn(async () => { throw new Error("not a chat session"); });
+		expect(await sessionsAndReviewsAreIdle({ sessions: [{ ...idleSession, mode: "tui" } satisfies Pick<components["schemas"]["ControllersSessionView"], "mode">] }, async () => ({ runs: [], activeReviewers: [] }), readSides)).toBe(true);
+		expect(readSides).not.toHaveBeenCalled();
 	});
 	it.each(["active", "waiting_input", "blocked", "unknown"])("waits for %s sessions", (state) => {
 		expect(sessionsAreIdle({ sessions: [{ activity: { state }, statusReadiness: "ready" }] })).toBe(false);
@@ -259,6 +320,20 @@ it("hashes archive bytes rather than version, path, size, or modification time",
 	expect(await read()).toBeNull();
 	fs.writeFileSync(archive, "new-build");
 	expect(await read()).not.toBeNull();
+});
+
+it("reads physical identity synchronously for the native handoff boundary", () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-installed-sync-"));
+	temporary.push(dir);
+	const archive = path.join(dir, "desktop.AppImage");
+	fs.writeFileSync(archive, "A");
+	const read = createArchiveIdentityReader(archive, fs);
+	const running = read();
+	expect(typeof running).toBe("string");
+	fs.writeFileSync(archive, "B");
+	expect(read()).not.toBe(running);
+	fs.unlinkSync(archive);
+	expect(read()).toBeNull();
 });
 
 it("does not identify a truncated ASAR as an installed build even when its size stops changing", async () => {

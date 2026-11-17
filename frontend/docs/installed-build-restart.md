@@ -28,8 +28,10 @@ Electron's `original-fs` reads the physical archive, avoiding its cached ASAR
 index. File metadata caches unchanged hashes. A bounded ASAR header/length
 check rejects truncated copies; two matching observations confirm a restart
 target. The first different or unreadable observation immediately suspends
-updater handoffs, before settling or reading worker state. Explicit updater
-installs recheck the physical identity again immediately before handoff.
+updater handoffs, before settling or reading worker state. Identity reads are
+synchronous at automatic native handoff, explicit install, and retry relaunch,
+so those paths cannot race ahead of the watcher notification. Unchanged files
+use the metadata hash cache; changed files are hashed in bounded chunks.
 
 Main watches the resources directory and, on macOS, the enclosing bundle's
 parent. A 30-second timer reattaches watches and checks again; focus and resume
@@ -63,7 +65,12 @@ provisioning, reviewing, unavailable and unknown states keep it waiting, as do
 unsafe unsaved chat drafts. Stored idle activity is insufficient when status is
 `no_signal` or the runtime is unreachable. Each live session's review API must
 answer and all recorded review runs must be terminal; a display label for one
-PR cannot hide another running review. The user can cancel the in-memory queue.
+PR cannot hide another running review. Scheduled and retrying reviews remain
+busy even without a running pass. Live reviewer activity must also be idle or
+exited. The API only exposes the selected reviewer's activity, so another live
+reviewer keeps the gate closed until its activity can be confirmed. Independent
+side chats must report no queued or running work; unavailable side-chat facts
+also keep the gate closed. The user can cancel the in-memory queue.
 The normal quit path preserves agents; no harness stop/update/resume operation
 is added. No restart intent, preference or dismissal marker is persisted. A fresh
 process pins the newly installed archive and has no inherited mismatch or prompt.

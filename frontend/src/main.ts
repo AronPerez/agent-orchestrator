@@ -305,6 +305,10 @@ const installedBuildGuard = installedBuildDisk ? new InstalledBuildGuard({
 			const reviews = await fetch(`http://127.0.0.1:${port}/api/v1/sessions/${encodeURIComponent(sessionId)}/reviews`, { signal: AbortSignal.timeout(5_000) });
 			if (!reviews.ok) throw new Error("Review state unavailable");
 			return reviews.json();
+		}, async (sessionId) => {
+			const sides = await fetch(`http://127.0.0.1:${port}/api/v1/sessions/${encodeURIComponent(sessionId)}/conversation/side-chats`, { signal: AbortSignal.timeout(5_000) });
+			if (!sides.ok) throw new Error("Side chat state unavailable");
+			return sides.json();
 		});
 	},
 	onChange: (status) => {
@@ -692,7 +696,7 @@ if (!app.requestSingleInstanceLock()) {
 } else {
 	registerCloudProtocol();
 	if (pinPackagedRenderer && installedBuildGuard) {
-		rendererResourcesReady = pinRendererResources(sourceViteRoot, runtimeViteRoot, () => installedBuildGuard.isRunningBuildInstalled()).then(
+		rendererResourcesReady = pinRendererResources(sourceViteRoot, runtimeViteRoot, async () => installedBuildGuard.isRunningBuildInstalled()).then(
 			(cache) => { rendererCache = cache; return true; },
 			(error) => { console.error("AO: could not pin the running renderer:", error); return false; },
 		);
@@ -3872,6 +3876,7 @@ ipcMain.handle("updates:install", (_event, confirmedVersion?: string) => quitAnd
 // in-process, so restart AO like a manual quit-and-reopen. An external build
 // still needs the native staging gate: disabling install-on-quit cannot disarm ShipIt.
 ipcMain.handle("updates:relaunch", () => {
+	installedBuildGuard?.isRunningBuildInstalled();
 	assertInstalledBuildRestartSafe();
 	recordUpdateDiagnostic("retry-relaunch-requested");
 	preserveAgentsOnQuit = true;

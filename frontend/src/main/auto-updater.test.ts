@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import { EventEmitter } from "node:events";
+import { runInNewContext } from "node:vm";
 import semver from "semver";
 import { CancellationToken } from "builder-util-runtime";
 import nodePath from "node:path";
@@ -128,7 +129,7 @@ it("disables staged install-on-quit at the first mismatch before the restart not
   await module.startAutoUpdates(stateDir);
   updaterEvents.get("update-downloaded")?.({ version: "2.1.0" });
   let identity = "A";
-  const guard = new InstalledBuildGuard({ readIdentity: async () => identity, isIdle: async () => true,
+  const guard = new InstalledBuildGuard({ readIdentity: () => identity, isIdle: async () => true,
     onChange: module.setInstalledBuildStatus, onReplacement: module.setInstalledBuildReplacementDetected,
     assertRestartSafe: module.assertInstalledBuildRestartSafe, relaunch: vi.fn() });
   identity = "B";
@@ -139,13 +140,64 @@ it("disables staged install-on-quit at the first mismatch before the restart not
   expect(autoUpdater.quitAndInstall).not.toHaveBeenCalled();
 });
 
+it.each(["B", null])("checks the physical build before automatic native handoff without a watcher: %s", async (replacement) => {
+  const restore = stubProcess("darwin", "/usr/bin/node");
+  try {
+    const { module, autoUpdater, updaterEvents } = await importAutoUpdater(undefined, { nativeReadyManually: true });
+    await module.startAutoUpdates(stateDir);
+    let identity: string | null = "A";
+    const guard = new InstalledBuildGuard({ readIdentity: () => identity, isIdle: async () => true,
+      onChange: module.setInstalledBuildStatus, onReplacement: module.setInstalledBuildReplacementDetected,
+      assertRestartSafe: module.assertInstalledBuildRestartSafe, relaunch: vi.fn() });
+    const current = vi.fn(() => guard.isRunningBuildInstalled());
+    module.setUpdateInstallGuard(current);
+    identity = replacement;
+    const nativeHandoff = vi.fn();
+    updaterEvents.get("update-downloaded")?.({ version: "2.1.0" });
+    // MacUpdater reads this synchronously after dispatching the download event.
+    if (autoUpdater.autoInstallOnAppQuit) nativeHandoff();
+    expect(nativeHandoff).not.toHaveBeenCalled();
+    expect(current).toHaveBeenCalledOnce();
+    expect(module.getUpdateStatus().installed).toBeUndefined();
+  } finally { restore(); }
+});
+
+it("rechecks physical identity in the retry IPC before a watcher notification", async () => {
+  const restore = stubProcess("darwin", "/usr/bin/node");
+  try {
+    const { module, nativeAutoUpdater } = await importAutoUpdater(undefined, { nativeReadyManually: true });
+    await module.startAutoUpdates(stateDir);
+    nativeAutoUpdater.emit("checking-for-update");
+    nativeAutoUpdater.emit("error", new Error("native preparation timed out"));
+    let identity = "A";
+    const guard = new InstalledBuildGuard({ readIdentity: () => identity, isIdle: async () => true,
+      onChange: module.setInstalledBuildStatus, onReplacement: module.setInstalledBuildReplacementDetected,
+      assertRestartSafe: module.assertInstalledBuildRestartSafe, relaunch: vi.fn() });
+    identity = "B";
+    const main = readFileSync(nodePath.join(import.meta.dirname, "../main.ts"), "utf8");
+    const start = main.indexOf('ipcMain.handle("updates:relaunch",');
+    let retry!: () => Promise<void> | void;
+    const relaunch = vi.fn();
+    const quitCompletely = vi.fn();
+    // Execute the registered IPC itself, without booting Electron or a daemon.
+    runInNewContext(main.slice(start, main.indexOf("\n});", start) + 4), {
+      ipcMain: { handle: (_channel: string, handler: typeof retry) => { retry = handler; } },
+      installedBuildGuard: guard, assertInstalledBuildRestartSafe: module.assertInstalledBuildRestartSafe,
+      recordUpdateDiagnostic: vi.fn(), app: { relaunch }, desktopQuit: { quitCompletely },
+    });
+    await expect(Promise.resolve().then(() => retry())).rejects.toThrow(/macOS.*update/i);
+    expect(relaunch).not.toHaveBeenCalled();
+    expect(quitCompletely).not.toHaveBeenCalled();
+  } finally { restore(); }
+});
+
 it.each(["linux", "darwin"] as const)("rechecks physical identity at the %s install handoff without waiting for the watcher", async (platform) => {
   const restore = stubProcess(platform, "/usr/bin/node");
   try {
     const { module, autoUpdater, updaterEvents } = await importAutoUpdater();
     await module.startAutoUpdates(stateDir);
     updaterEvents.get("update-downloaded")?.({ version: "2.1.0" });
-    const current = vi.fn().mockResolvedValueOnce(true).mockResolvedValue(false);
+    const current = vi.fn().mockReturnValueOnce(true).mockReturnValue(false);
     module.setUpdateInstallGuard(current);
     await expect(module.quitAndInstallUpdate("2.1.0")).rejects.toThrow(/installed/);
     expect(current).toHaveBeenCalledTimes(2);
@@ -161,7 +213,7 @@ it("keeps a stable but partial replacement AppImage from becoming a queued resta
   try {
     const { module } = await importAutoUpdater();
     writeFileSync(image, "running image");
-    const guard = new InstalledBuildGuard({ readIdentity: async () => readFileSync(image, "utf8"), isIdle: async () => true,
+    const guard = new InstalledBuildGuard({ readIdentity: () => readFileSync(image, "utf8"), isIdle: async () => true,
       onChange: module.setInstalledBuildStatus, onReplacement: module.setInstalledBuildReplacementDetected,
       assertRestartSafe: module.assertInstalledBuildRestartSafe, relaunch: vi.fn() });
     writeFileSync(image, "paused partial copy");
@@ -186,7 +238,7 @@ it("keeps build B intact when native-staged A would install on any process exit"
     // ShipIt's exit action is independent of the JS updater flag and method.
     const quit = () => { exits += 1; if (nativeStaged) writeFileSync(bundle, nativeStaged); };
     const guard = new InstalledBuildGuard({
-      readIdentity: async () => readFileSync(bundle, "utf8"), isIdle: async () => true,
+      readIdentity: () => readFileSync(bundle, "utf8"), isIdle: async () => true,
       onChange: module.setInstalledBuildStatus, onReplacement: module.setInstalledBuildReplacementDetected, assertRestartSafe: module.assertInstalledBuildRestartSafe, relaunch: quit,
     });
     updaterEvents.get("update-downloaded")?.({ version: "2.1.0" });

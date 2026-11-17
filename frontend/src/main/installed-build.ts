@@ -37,21 +37,26 @@ function asarIsComplete(file: string, disk: typeof fs): boolean {
 }
 
 /** Uses original-fs in Electron: its patched fs can cache a replaced ASAR. */
-export function createArchiveIdentityReader(file: string, disk: typeof fs): () => Promise<string | null> {
+export function createArchiveIdentityReader(file: string, disk: typeof fs): () => string | null {
 	let cached: { stamp: string; identity: string } | undefined;
-	let pending: Promise<string | null> | undefined;
 	const stamp = () => {
 		const st = disk.statSync(file);
 		return st.isFile() && st.size > 0 ? `${st.dev}:${st.ino}:${st.size}:${st.mtimeMs}:${st.ctimeMs}` : null;
 	};
-	const read = async () => {
+	return () => {
 		try {
 			const before = stamp();
 			if (!before) return null;
 			if (cached?.stamp === before) return cached.identity;
 			if (file.endsWith(".asar") && !asarIsComplete(file, disk)) return null;
 			const hash = createHash("sha256");
-			for await (const chunk of disk.createReadStream(file)) hash.update(chunk);
+			// MacUpdater's automatic handoff cannot await an event listener.
+			const fd = disk.openSync(file, "r");
+			try {
+				const chunk = Buffer.alloc(1024 * 1024);
+				let size: number;
+				while ((size = disk.readSync(fd, chunk, 0, chunk.length, null)) > 0) hash.update(chunk.subarray(0, size));
+			} finally { disk.closeSync(fd); }
 			if (stamp() !== before) return null;
 			cached = { stamp: before, identity: hash.digest("hex") };
 			return cached.identity;
@@ -59,7 +64,6 @@ export function createArchiveIdentityReader(file: string, disk: typeof fs): () =
 			return null; // Missing/in-progress installations are not a new identity.
 		}
 	};
-	return () => pending ??= read().finally(() => { pending = undefined; });
 }
 
 /** Unknown, provisioning and approval states must never count as idle. */
@@ -67,25 +71,36 @@ export function sessionsAreIdle(body: unknown): boolean {
 	if (!body || typeof body !== "object" || !("sessions" in body) || !Array.isArray(body.sessions)) return false;
 	return body.sessions.every((session: unknown) => {
 		if (!session || typeof session !== "object") return false;
-		const s = session as { isTerminated?: boolean; status?: string; statusReadiness?: string; provisionState?: string; runtimeUnreachable?: boolean; activity?: { state?: string } };
+		const s = session as { isTerminated?: boolean; status?: string; displayStatus?: string; statusReadiness?: string; provisionState?: string; runtimeUnreachable?: boolean; activity?: { state?: string } };
 		if (s.isTerminated === true) return true;
 		return s.isTerminated === false && s.statusReadiness === "ready" && s.runtimeUnreachable !== true && s.provisionState !== "provisioning" &&
 			(s.activity?.state === "idle" || s.activity?.state === "exited") &&
+			!["Reviewing", "Review scheduled", "Retrying review"].includes(s.displayStatus ?? "") &&
 			["idle", "exited", "pr_open", "draft", "ci_failed", "review_pending", "changes_requested", "commented", "approved", "mergeable", "merged"].includes(s.status ?? "");
 	});
 }
 
 /** Display labels can hide another PR's running reviewer. Read all live sessions. */
-export async function sessionsAndReviewsAreIdle(body: unknown, readReviews: (sessionId: string) => Promise<unknown>): Promise<boolean> {
+export async function sessionsAndReviewsAreIdle(body: unknown, readReviews: (sessionId: string) => Promise<unknown>, readSideChats: (sessionId: string) => Promise<unknown>): Promise<boolean> {
 	if (!sessionsAreIdle(body)) return false;
 	try {
-		for (const session of (body as { sessions: { id?: unknown; isTerminated?: boolean }[] }).sessions) {
+		for (const session of (body as { sessions: { id?: unknown; isTerminated?: boolean; mode?: string }[] }).sessions) {
 			if (session.isTerminated === true) continue;
 			if (typeof session.id !== "string" || !session.id) return false;
-			const result = await readReviews(session.id) as { runs?: unknown } | null;
+			const result = await readReviews(session.id) as { runs?: unknown; reviewerActivityState?: string; reviewerHandleId?: string; reviewerSurface?: { reviewId?: string }; activeReviewers?: unknown } | null;
 			if (!result || !Array.isArray(result.runs) || !result.runs.every((run: unknown) =>
 				run && typeof run === "object" && "status" in run &&
 				["complete", "delivered", "failed", "cancelled"].includes(String(run.status)))) return false;
+			if (!Array.isArray(result.activeReviewers)) return false;
+			if ((result.reviewerActivityState !== undefined || result.reviewerHandleId || result.reviewerSurface || result.activeReviewers.length > 0) &&
+				!["idle", "exited"].includes(result.reviewerActivityState ?? "")) return false;
+			// The API only supplies the selected reviewer's activity; other live panes are unknown.
+			if (!result.activeReviewers.every((reviewer: unknown) => reviewer && typeof reviewer === "object" &&
+				"reviewId" in reviewer && typeof reviewer.reviewId === "string" && reviewer.reviewId === result.reviewerSurface?.reviewId)) return false;
+			if (session.mode === "tui") continue; // TUI sessions cannot own independent side chats.
+			const sides = await readSideChats(session.id) as { sides?: unknown } | null;
+			if (!sides || !Array.isArray(sides.sides) || !sides.sides.every((side: unknown) => side && typeof side === "object" &&
+				"hasWork" in side && side.hasWork === false && "state" in side && ["ready", "failed", "closed"].includes(String(side.state)))) return false;
 		}
 		return true;
 	} catch { return false; }
@@ -93,7 +108,7 @@ export async function sessionsAndReviewsAreIdle(body: unknown, readReviews: (ses
 
 /** One launch owns one immutable baseline; no restart/dismissal state is persisted. */
 export class InstalledBuildGuard {
-	private readonly running: Promise<string | null>;
+	private readonly running: string | null;
 	private candidate: string | null = null;
 	private rendererIsMismatched = false;
 	private checking: Promise<void> | undefined;
@@ -109,7 +124,7 @@ export class InstalledBuildGuard {
 	}
 
 	constructor(private readonly deps: {
-		readIdentity(): Promise<string | null>;
+		readIdentity(): string | null;
 		isIdle(): Promise<boolean>;
 		onChange(status: InstalledBuildStatus | undefined): void;
 		onReplacement(replaced: boolean): void;
@@ -130,9 +145,8 @@ export class InstalledBuildGuard {
 		catch (error) { this.cancelRestart(); throw error; }
 	}
 
-	async isRunningBuildInstalled(): Promise<boolean> {
-		const running = await this.running;
-		const current = running !== null && await this.deps.readIdentity() === running;
+	isRunningBuildInstalled(): boolean {
+		const current = this.running !== null && this.deps.readIdentity() === this.running;
 		this.deps.onReplacement(!current);
 		return current;
 	}
@@ -147,8 +161,8 @@ export class InstalledBuildGuard {
 	}
 
 	private async checkInstalledBuild(): Promise<void> {
-		const running = await this.running;
-		const installed = await this.deps.readIdentity();
+		const running = this.running;
+		const installed = this.deps.readIdentity();
 		// Suspend installers before target settling or any asynchronous idle read.
 		this.deps.onReplacement(!running || !installed || running !== installed || this.rendererIsMismatched);
 		if (!running || !installed) {
@@ -178,7 +192,7 @@ export class InstalledBuildGuard {
 			return;
 		}
 		const target = this.status;
-		if (!target || await this.deps.readIdentity() !== target.identity) {
+		if (!target || this.deps.readIdentity() !== target.identity) {
 			throw new Error("The installed build is still changing. Wait for installation to finish and try again.");
 		}
 		const idle = await this.deps.isIdle().catch(() => false);
@@ -192,7 +206,7 @@ export class InstalledBuildGuard {
 		}
 		if (!idle || this.restarting) return;
 		// Recheck the target after the asynchronous worker probe as well.
-		if (await this.deps.readIdentity() !== target.identity || revision !== this.restartRevision) return;
+		if (this.deps.readIdentity() !== target.identity || revision !== this.restartRevision) return;
 		this.assertRestartSafe();
 		this.restarting = true;
 		try { this.deps.relaunch(); } catch (error) { this.restarting = false; throw error; }
