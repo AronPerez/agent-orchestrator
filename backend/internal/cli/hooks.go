@@ -604,7 +604,15 @@ func aoCoordinationFacts(value string) (string, bool) {
 	value = strings.TrimSpace(value)
 	// An intact checksummed report followed by human text can acknowledge the
 	// delivery, but must preserve the human instruction as the turn's request.
-	if footer := strings.Index(value, `<ao-report-delivery-end id="`); footer >= 0 {
+	const footerPrefix = `<ao-report-delivery-end id="`
+	for searchFrom := 0; searchFrom < len(value); {
+		footer := strings.Index(value[searchFrom:], footerPrefix)
+		if footer < 0 {
+			break
+		}
+		footer += searchFrom
+		// A report may quote footer markup; only its verified checksum counts.
+		searchFrom = footer + len(footerPrefix)
 		if end := strings.Index(value[footer:], `"/>`); end >= 0 {
 			end += footer + len(`"/>`)
 			envelope := value[:end]

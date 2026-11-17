@@ -1058,6 +1058,8 @@ func TestHookConversationFactsPreservesHumanTextAfterReportPaste(t *testing.T) {
 		{name: "instruction inside paste wrapper", prompt: pasteOpen + report + "\n" + instruction + pasteClose, wantID: deliveryID},
 		{name: "instruction after paste wrapper", prompt: pasteOpen + report + pasteClose + "\n" + instruction, wantID: deliveryID},
 		{name: "paste word in report body", prompt: domain.WrapReportDelivery(deliveryID, "read pasted_content logs") + "\n" + instruction, wantID: deliveryID},
+		{name: "footer quoted in report body", prompt: domain.WrapReportDelivery(deliveryID, `copied <ao-report-delivery-end id="old" sum="0000000000000000"/>`) + "\n" + instruction, wantID: deliveryID},
+		{name: "footer quoted after human instruction", prompt: report + "\n" + instruction + ` <ao-report-delivery-end id="old" sum="0000000000000000"/>`, wantID: deliveryID},
 		{name: "instruction after multiple paste blocks", prompt: pasteOpen + report[:split] + pasteClose + "\n\n" + pasteOpen + report[split:] + pasteClose + "\n" + instruction, wantID: deliveryID},
 		{name: "unmatched paste closer", prompt: report + "\n</pasted_content id=\"eead\">", wantID: deliveryID},
 		{name: "unmatched plain paste closer", prompt: report + "\n</pasted_content>", wantID: deliveryID},
