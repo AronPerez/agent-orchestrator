@@ -205,7 +205,13 @@ export function FleetTreeList({
 		const hasDescendantRollup = rollupOrder.some((zone) => item.node.rollup[zone] > 0);
 		return (
 			<Pressable
-				accessibilityLabel={`Open ${item.node.session.title}, ${role}, ${visual.label}`}
+				accessibilityLabel={[
+					`Open ${item.node.session.title}`,
+					role,
+					visual.label,
+					item.node.parentUnavailable ? "Parent unavailable" : undefined,
+					hasDescendantRollup ? descendants : undefined,
+				].filter(Boolean).join(", ")}
 				accessibilityRole="button"
 				onPress={() => router.push({
 					pathname: "/session/[id]",

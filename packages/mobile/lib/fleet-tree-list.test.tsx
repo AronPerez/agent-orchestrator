@@ -116,4 +116,15 @@ describe("FleetTreeList", () => {
 			params: { id: "Child", projectId: "project", hostId: "box" },
 		});
 	});
+
+	it("announces descendant attention and missing-parent state", () => {
+		const view = render([
+			worker("Manager"),
+			worker("Child", { parentSessionId: "Manager", status: "needs_input" }),
+			worker("Orphan", { parentSessionId: "missing" }),
+		]);
+
+		expect(view.root.findByProps({ accessibilityLabel: "Open Manager, Manager, Working, 1 needs you" })).toBeTruthy();
+		expect(view.root.findByProps({ accessibilityLabel: "Open Orphan, Worker, Working, Parent unavailable" })).toBeTruthy();
+	});
 });
