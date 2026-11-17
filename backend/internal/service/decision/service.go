@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"sort"
 	"strings"
@@ -86,6 +87,19 @@ type RaiseInput struct {
 	Options   []domain.DecisionOption
 	Links     []domain.DecisionLink
 	Reference string
+}
+
+// AnswerInput identifies an offered option or a person-authored alternative.
+type AnswerInput struct {
+	Choice string
+	Option int
+	Note   string
+}
+
+// OutcomeInput records the result of carrying out a decision.
+type OutcomeInput struct {
+	Text string
+	Link string
 }
 
 // Scope selects a decision list view.
@@ -187,6 +201,92 @@ func (s *Service) Get(ctx context.Context, callID string) (Detail, error) {
 	return Detail{Call: calls[0], Entries: entries}, nil
 }
 
+// Answer records the person's standing answer to an open call.
+func (s *Service) Answer(ctx context.Context, actor Actor, callID string, input AnswerInput) (domain.DecisionCall, error) {
+	call, err := s.call(ctx, callID)
+	if err != nil {
+		return domain.DecisionCall{}, err
+	}
+	if actor.Session != "" {
+		return domain.DecisionCall{}, personOnly()
+	}
+	if call.State != domain.DecisionStateNeedsYou && call.State != domain.DecisionStateInProgress && call.State != domain.DecisionStateDismissed {
+		return domain.DecisionCall{}, wrongState(call, `This call is closed. Its state is "%s".`)
+	}
+	payload := domain.DecisionAnsweredPayload{Choice: input.Choice, Option: input.Option, Note: input.Note}
+	if err := domain.ValidateDecisionAnswer(len(call.Raised.Options), payload); err != nil {
+		return domain.DecisionCall{}, invalidDecision(err)
+	}
+	return s.append(ctx, actor, call.ID, domain.DecisionKindAnswered, payload)
+}
+
+// Dismiss records that the person declined to choose from a pending call.
+func (s *Service) Dismiss(ctx context.Context, actor Actor, callID, note string) (domain.DecisionCall, error) {
+	call, err := s.call(ctx, callID)
+	if err != nil {
+		return domain.DecisionCall{}, err
+	}
+	if actor.Session != "" {
+		return domain.DecisionCall{}, personOnly()
+	}
+	if call.State != domain.DecisionStateNeedsYou {
+		return domain.DecisionCall{}, wrongState(call, `Only a call in "Needs you" can be dismissed. This one is "%s".`)
+	}
+	if err := domain.ValidateDecisionNote(note); err != nil {
+		return domain.DecisionCall{}, invalidDecision(err)
+	}
+	return s.append(ctx, actor, call.ID, domain.DecisionKindDismissed, domain.DecisionDismissedPayload{Note: note})
+}
+
+// RecordOutcome closes an in-progress call with the result of carrying it out.
+func (s *Service) RecordOutcome(ctx context.Context, actor Actor, callID string, input OutcomeInput) (domain.DecisionCall, error) {
+	call, err := s.call(ctx, callID)
+	if err != nil {
+		return domain.DecisionCall{}, err
+	}
+	if actor.Session != "" && !s.mayClose(call, actor.Session) {
+		return domain.DecisionCall{}, notOwner()
+	}
+	if call.State != domain.DecisionStateInProgress {
+		return domain.DecisionCall{}, wrongState(call, `An outcome can be recorded once a call is "In progress". This one is "%s".`)
+	}
+	payload := domain.DecisionOutcomePayload{Text: input.Text, Link: input.Link}
+	if err := domain.ValidateDecisionOutcome(payload); err != nil {
+		return domain.DecisionCall{}, invalidDecision(err)
+	}
+	return s.append(ctx, actor, call.ID, domain.DecisionKindOutcome, payload)
+}
+
+// Withdraw closes a pending call at the owning session's request.
+func (s *Service) Withdraw(ctx context.Context, actor Actor, callID string) (domain.DecisionCall, error) {
+	call, err := s.call(ctx, callID)
+	if err != nil {
+		return domain.DecisionCall{}, err
+	}
+	if !s.owns(call, actor.Session) {
+		return domain.DecisionCall{}, notOwner()
+	}
+	if call.State != domain.DecisionStateNeedsYou {
+		return domain.DecisionCall{}, wrongState(call, `Only a call in "Needs you" can be withdrawn. This one is "%s".`)
+	}
+	return s.append(ctx, actor, call.ID, domain.DecisionKindWithdrawn, struct{}{})
+}
+
+// Retire changes whether a completed call still applies.
+func (s *Service) Retire(ctx context.Context, actor Actor, callID string, retired bool) (domain.DecisionCall, error) {
+	call, err := s.call(ctx, callID)
+	if err != nil {
+		return domain.DecisionCall{}, err
+	}
+	if actor.Session != "" {
+		return domain.DecisionCall{}, personOnly()
+	}
+	if call.State != domain.DecisionStateDone {
+		return domain.DecisionCall{}, wrongState(call, `Only a finished call can be marked "no longer applies". This one is "%s".`)
+	}
+	return s.append(ctx, actor, call.ID, domain.DecisionKindRetired, domain.DecisionRetiredPayload{Retired: retired})
+}
+
 // List returns calls in the requested actor-relative scope.
 func (s *Service) List(ctx context.Context, actor Actor, scope Scope) ([]domain.DecisionCall, error) {
 	var calls []domain.DecisionCall
@@ -259,6 +359,64 @@ func (s *Service) actorProject(ctx context.Context, actor Actor) (domain.Project
 		return "", false, apierr.NotFound("SESSION_NOT_FOUND", "Unknown session")
 	}
 	return session.ProjectID, true, nil
+}
+
+func (s *Service) call(ctx context.Context, callID string) (domain.DecisionCall, error) {
+	call, ok, err := s.store.GetDecisionCall(ctx, callID)
+	if err != nil {
+		return domain.DecisionCall{}, err
+	}
+	if !ok {
+		return domain.DecisionCall{}, apierr.NotFound("DECISION_NOT_FOUND", "Unknown call")
+	}
+	return call, nil
+}
+
+func (s *Service) append(ctx context.Context, actor Actor, callID string, kind domain.DecisionEntryKind, payload any) (domain.DecisionCall, error) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return domain.DecisionCall{}, err
+	}
+	now := s.now().UTC()
+	entry := domain.DecisionEntry{
+		ID: s.newID("dent_"), Origin: s.hostID, CallID: callID,
+		Kind: kind, Payload: raw, WrittenAt: now,
+	}
+	if actor.Session != "" {
+		entry.AuthorKind = domain.DecisionAuthorSession
+		entry.AuthorSession = actor.Session
+	} else {
+		entry.AuthorKind = domain.DecisionAuthorPerson
+		entry.AuthorSurface = actor.Surface
+	}
+	stored, call, err := s.store.AppendDecisionEntry(ctx, entry, now)
+	if err != nil {
+		return domain.DecisionCall{}, err
+	}
+	if s.onAppended != nil {
+		s.onAppended(stored)
+	}
+	return call, nil
+}
+
+func (s *Service) owns(call domain.DecisionCall, session domain.SessionID) bool {
+	return session != "" && call.Origin == s.hostID && call.Raised.OwnerSessionID == session
+}
+
+func (s *Service) mayClose(call domain.DecisionCall, session domain.SessionID) bool {
+	return call.Origin == s.hostID && (call.Raised.OwnerSessionID == session || call.DeliveredTo == session)
+}
+
+func personOnly() error {
+	return apierr.Forbidden("DECISION_PERSON_ONLY", "Only the person can answer, dismiss or retire a call. A session cannot.")
+}
+
+func notOwner() error {
+	return apierr.Forbidden("DECISION_NOT_OWNER", "Only the session that raised this call can do that.")
+}
+
+func wrongState(call domain.DecisionCall, message string) error {
+	return apierr.Conflict("DECISION_WRONG_STATE", fmt.Sprintf(message, call.State.Label()), map[string]any{"state": call.State})
 }
 
 func sessionName(session domain.SessionRecord) string {
