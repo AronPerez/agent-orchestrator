@@ -110,6 +110,13 @@ coordination. Its opening tells you what happened:
 - `"I dismissed your call"` means no answer is coming.
 - `"Decision on a call raised by"` sends an ended session's answer to the project orchestrator.
 
+When an answer or dismissal arrives and you have a project orchestrator, first
+report the resolved call so it can resume any other session that reused it:
+
+```text
+ao report --checkpoint --note "Decision call resolved: <call-link>; resume sessions blocked by it"
+```
+
 Act on the human's message, including its note and any replacement warning.
 
 ## Recording the outcome

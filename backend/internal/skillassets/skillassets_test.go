@@ -282,6 +282,7 @@ func TestEmbeddedDecisionGuidanceCoversSearchingRaisingAndClosing(t *testing.T) 
 		"resume the blocked session after it is answered",
 		"explicitly tell the human in your current response",
 		"ao decision show <call-link>",
+		`ao report --checkpoint --note "Decision call resolved: <call-link>; resume sessions blocked by it"`,
 	} {
 		if !strings.Contains(guidance, want) {
 			t.Fatalf("decision guidance missing %q", want)

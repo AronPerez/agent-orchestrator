@@ -412,6 +412,25 @@ func TestBuildSystemPrompt_UnparentedRolesExposeBlockingCallsToHuman(t *testing.
 	}
 }
 
+func TestBuildSystemPrompt_SharedCallOwnerAlertsOrchestratorForDependentWorker(t *testing.T) {
+	cfg := systemPromptConfig{Role: sessionPromptRoleWorker, OrchestratorSessionID: "shop-1"}
+	ownerPrompt := buildSystemPromptText(cfg)
+	dependentPrompt := buildSystemPromptText(cfg)
+
+	if !strings.Contains(dependentPrompt, `ao report --needs-input --note "Blocked by <call-link>; resume this session when it is answered"`) {
+		t.Fatal("dependent worker prompt is missing its shared-call handoff")
+	}
+	for _, want := range []string{
+		"When an answer or dismissal arrives and you have a project orchestrator",
+		`ao report --checkpoint --note "Decision call resolved: <call-link>; resume sessions blocked by it"`,
+		"so it can resume any other session that reused your call",
+	} {
+		if !strings.Contains(ownerPrompt, want) {
+			t.Errorf("call owner prompt missing dependent-session alert %q", want)
+		}
+	}
+}
+
 func TestBuildTaskPromptPreservesExplicitPublishingScope(t *testing.T) {
 	for _, prompt := range []string{"Fix the issue, push the branch, and open a PR.", "Fix the issue locally. Do not push or open a PR."} {
 		got := buildTaskPrompt(taskPromptConfig{Role: sessionPromptRoleWorker, Prompt: prompt, IssueID: "42"})
