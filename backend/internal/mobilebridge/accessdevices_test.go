@@ -214,6 +214,47 @@ func TestAccessDevicesScopedIssuerPersistsAndCanBeRevoked(t *testing.T) {
 	}
 }
 
+func TestAccessDevicesScopedClientReissueReplacesPriorToken(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mobile", "access-devices.json")
+	now := time.Date(2026, 11, 17, 14, 0, 0, 0, time.UTC)
+	devices, err := LoadAccessDevices(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, firstToken, replaced, err := devices.IssueScopedByClient(
+		"Origin laptop", "darwin", []string{DeviceScopeAgentCoordination}, SharedAccount, "h_origin", now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replaced) != 0 {
+		t.Fatalf("first issuance replaced = %+v, want none", replaced)
+	}
+	second, secondToken, replaced, err := devices.IssueScopedByClient(
+		"Origin laptop", "darwin", []string{DeviceScopeAgentCoordination}, SharedAccount, "h_origin", now.Add(time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replaced) != 1 || replaced[0].ID != first.ID {
+		t.Fatalf("second issuance replaced = %+v, want first device %s", replaced, first.ID)
+	}
+	if _, ok := devices.Match(firstToken); ok {
+		t.Fatal("first token survived idempotent reissue")
+	}
+	if matched, ok := devices.Match(secondToken); !ok || matched.ID != second.ID || matched.ClientID != "h_origin" {
+		t.Fatalf("second token = %+v, %v", matched, ok)
+	}
+
+	reloaded, err := LoadAccessDevices(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if listed := reloaded.List(); len(listed) != 1 || listed[0].ID != second.ID || listed[0].ClientID != "h_origin" {
+		t.Fatalf("reloaded devices = %+v", listed)
+	}
+}
+
 func TestAccessDevicesTouchAndLink(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "access-devices.json")
 	now := time.Date(2026, 11, 10, 9, 0, 0, 0, time.UTC)

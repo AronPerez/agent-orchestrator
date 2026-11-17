@@ -3317,6 +3317,7 @@ type PairDeviceResponse struct {
 type IssueCoordinationTokenRequest struct {
 	Name     string `json:"name,omitempty" description:"Name shown in the host's device list."`
 	Platform string `json:"platform,omitempty" description:"The requesting machine's platform."`
+	ClientID string `json:"clientId,omitempty" description:"Stable opaque ID of the requesting AO installation; retries replace an unseen prior token for this client."`
 }
 
 // CoordinationDeviceIDParam identifies a previously issued coordination token.
