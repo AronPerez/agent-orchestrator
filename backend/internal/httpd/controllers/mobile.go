@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/requestscope"
 	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
@@ -87,10 +89,7 @@ func (c *MobileController) IssueAccountToken(w http.ResponseWriter, r *http.Requ
 // agents with OS authority, clients must protect it as full host authority.
 func (c *MobileController) IssueCoordinationToken(w http.ResponseWriter, r *http.Request) {
 	credential := requestscope.CredentialFrom(r.Context())
-	fullCredential := credential.Kind == requestscope.CredentialPassword ||
-		credential.Kind == requestscope.CredentialAccount ||
-		(credential.Kind == requestscope.CredentialDevice && len(credential.Scopes) == 0)
-	if !fullCredential {
+	if !isFullRemoteCredential(credential) {
 		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "COORDINATION_TOKEN_ISSUER",
 			"A full remote-host credential is required.", nil)
 		return
@@ -130,6 +129,42 @@ func (c *MobileController) IssueCoordinationToken(w http.ResponseWriter, r *http
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	envelope.WriteJSON(w, http.StatusOK, result)
+}
+
+// RevokeCoordinationToken retires one route-filtered token without exposing the
+// desktop-only mobile-device control surface on the LAN listener.
+func (c *MobileController) RevokeCoordinationToken(w http.ResponseWriter, r *http.Request) {
+	if !isFullRemoteCredential(requestscope.CredentialFrom(r.Context())) {
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "COORDINATION_TOKEN_ISSUER",
+			"A full remote-host credential is required.", nil)
+		return
+	}
+	revoker, ok := c.Bridge.(interface {
+		RevokeCoordinationToken(string) (bool, error)
+	})
+	if !ok {
+		envelope.WriteAPIError(w, r, http.StatusNotImplemented, "not_implemented", "COORDINATION_TOKEN",
+			"agent coordination credentials are unavailable", nil)
+		return
+	}
+	found, err := revoker.RevokeCoordinationToken(chi.URLParam(r, "deviceId"))
+	if err != nil {
+		envelope.WriteAPIError(w, r, http.StatusInternalServerError, "internal", "COORDINATION_TOKEN",
+			"could not revoke the agent coordination credential", nil)
+		return
+	}
+	if !found {
+		envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "COORDINATION_TOKEN_NOT_FOUND",
+			"Unknown agent coordination credential.", nil)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func isFullRemoteCredential(credential requestscope.Credential) bool {
+	return credential.Kind == requestscope.CredentialPassword ||
+		credential.Kind == requestscope.CredentialAccount ||
+		(credential.Kind == requestscope.CredentialDevice && len(credential.Scopes) == 0)
 }
 
 // NewPairingCode handles POST /api/v1/mobile/pairing-code. The route is
@@ -1364,6 +1399,35 @@ func (b *BridgeService) RevokeDevice(id string) (installID string, found bool, e
 		lan.DisconnectCredential(device.TokenHash)
 	}
 	return device.InstallID, true, nil
+}
+
+// RevokeCoordinationToken removes only a route-filtered coordination device.
+// It shares transitionMu with issuance and parent revocation so a token cannot
+// appear between a lifecycle check and the matching removal.
+func (b *BridgeService) RevokeCoordinationToken(id string) (bool, error) {
+	b.transitionMu.Lock()
+	defer b.transitionMu.Unlock()
+	if b.Devices == nil {
+		return false, nil
+	}
+	coordination := false
+	for _, device := range b.Devices.List() {
+		if device.ID == id && len(device.Scopes) == 1 && device.Scopes[0] == mobilebridge.DeviceScopeAgentCoordination {
+			coordination = true
+			break
+		}
+	}
+	if !coordination {
+		return false, nil
+	}
+	device, found, err := b.Devices.Revoke(id)
+	if err != nil || !found {
+		return found, err
+	}
+	if lan, ok := b.LAN.(interface{ DisconnectCredential(string) }); ok {
+		lan.DisconnectCredential(device.TokenHash)
+	}
+	return true, nil
 }
 
 // UnlinkAccount revokes the account token, cutting off every account device.

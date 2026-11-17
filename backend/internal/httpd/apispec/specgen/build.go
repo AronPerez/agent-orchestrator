@@ -2704,6 +2704,17 @@ func mobileOperations() []operation {
 			},
 		},
 		{
+			method: http.MethodDelete, path: "/api/v1/remote-host/coordination-token/{deviceId}", id: "revokeRemoteHostCoordinationToken", tag: "mobile",
+			summary:    "Revoke one route-limited cross-machine agent coordination credential",
+			pathParams: []any{controllers.CoordinationDeviceIDParam{}},
+			resps: []respUnit{
+				{http.StatusNoContent, nil},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+			},
+		},
+		{
 			method: http.MethodPost, path: "/api/v1/remote-host/account-token", id: "issueRemoteHostAccountToken", tag: "mobile",
 			summary: "Issue a host-scoped account credential using the pairing password or a device token",
 			resps: []respUnit{

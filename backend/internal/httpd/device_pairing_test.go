@@ -483,6 +483,42 @@ func TestOnlyFullCredentialsIssueCoordinationTokens(t *testing.T) {
 	}
 }
 
+func TestOnlyFullCredentialsRevokeCoordinationTokens(t *testing.T) {
+	h := newPairingHost(t)
+	fullID, full := h.pair("secret12", "Laptop")
+	status, body := h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", full, nil)
+	coordinationID, _ := body["deviceId"].(string)
+	coordination, _ := body["token"].(string)
+	if status != http.StatusOK || coordinationID == "" || coordination == "" {
+		t.Fatalf("issue coordination token: status=%d body=%v", status, body)
+	}
+
+	path := "/api/v1/remote-host/coordination-token/" + coordinationID
+	if status, body = h.remote(http.MethodDelete, path, coordination, nil); status != http.StatusForbidden || body["code"] != "CREDENTIAL_SCOPE_DENIED" {
+		t.Fatalf("coordination token revoked itself: status=%d body=%v", status, body)
+	}
+	if h.sessions(coordination) != http.StatusOK {
+		t.Fatal("denied revoke invalidated the coordination token")
+	}
+
+	if status, body = h.remote(http.MethodDelete, "/api/v1/remote-host/coordination-token/"+fullID, full, nil); status != http.StatusNotFound || body["code"] != "COORDINATION_TOKEN_NOT_FOUND" {
+		t.Fatalf("full device was accepted as a coordination token: status=%d body=%v", status, body)
+	}
+	if h.sessions(full) != http.StatusOK {
+		t.Fatal("coordination revoke invalidated a full device credential")
+	}
+
+	if status, body = h.remote(http.MethodDelete, path, full, nil); status != http.StatusNoContent {
+		t.Fatalf("revoke coordination token: status=%d body=%v", status, body)
+	}
+	if h.sessions(coordination) != http.StatusUnauthorized {
+		t.Fatal("revoked coordination token still authenticates")
+	}
+	if status, body = h.remote(http.MethodDelete, path, full, nil); status != http.StatusNotFound || body["code"] != "COORDINATION_TOKEN_NOT_FOUND" {
+		t.Fatalf("second revoke: status=%d body=%v", status, body)
+	}
+}
+
 func TestRequireDeviceCredentialsRefusesThePassword(t *testing.T) {
 	h := newPairingHost(t)
 	_, token := h.pair(h.code(), "Phone")
