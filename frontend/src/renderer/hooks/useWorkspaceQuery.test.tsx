@@ -8,7 +8,7 @@ import type { WorkspaceSummary } from "../types/workspace";
 const { captureRendererEventMock, cloudState, getMock, getSessionMock, hasTrustedApiBaseUrlMock, listProjectsMock, listStandaloneAgentsMock, listSessionArtifactsMock, listSessionsMock, listSharedProjectSessionsMock, listSharedProjectsMock, remoteGetMock } = vi.hoisted(
 	() => ({
 		captureRendererEventMock: vi.fn().mockResolvedValue(undefined),
-		cloudState: { ready: false, org: undefined as { id: string } | undefined },
+		cloudState: { ready: false, loading: false, orgLoading: false, org: undefined as { id: string } | undefined },
 		getMock: vi.fn(),
 		getSessionMock: vi.fn(),
 		hasTrustedApiBaseUrlMock: vi.fn(() => true),
@@ -43,13 +43,14 @@ vi.mock("./useCloudCp", () => ({
 			listSharedProjects: listSharedProjectsMock,
 		},
 		ready: cloudState.ready,
+		loading: cloudState.loading,
 		baseUrl: "https://cp.example.com",
 		userId: "guest-user",
 	}),
 }));
 
 vi.mock("./useCloudOrg", () => ({
-	useCloudOrg: () => ({ org: cloudState.org, isLoading: false, error: undefined, ready: cloudState.ready }),
+	useCloudOrg: () => ({ org: cloudState.org, isLoading: cloudState.orgLoading, error: undefined, ready: cloudState.ready }),
 }));
 
 import { CloudCpError } from "../lib/cloud-cp";
@@ -83,6 +84,8 @@ beforeEach(() => {
 	getMock.mockReset();
 	hasTrustedApiBaseUrlMock.mockReset().mockReturnValue(true);
 	cloudState.ready = false;
+	cloudState.loading = false;
+	cloudState.orgLoading = false;
 	cloudState.org = undefined;
 	listProjectsMock.mockReset();
 	listStandaloneAgentsMock.mockReset().mockResolvedValue({ items: [], page: { hasMore: false } });
@@ -879,6 +882,63 @@ describe("useWorkspaceQuery", () => {
 		await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
 		expect(listProjectsMock).not.toHaveBeenCalled();
+		expect(result.current.cloudLoadSettled).toBe(true);
+	});
+
+	it.each(["configuration", "organization", "projects", "sessions", "shared"])("holds deep-link readiness while Cloud %s loads", async (source) => {
+		let release!: () => void;
+		const held = new Promise<void>((resolve) => { release = resolve; });
+		cloudState.loading = source === "configuration";
+		cloudState.ready = source !== "configuration";
+		cloudState.orgLoading = source === "organization";
+		cloudState.org = source === "configuration" || source === "organization" ? undefined : { id: "org-1" };
+		listProjectsMock.mockImplementation(async () => {
+			if (source === "projects") await held;
+			return { items: [] };
+		});
+		listSessionsMock.mockImplementation(async () => {
+			if (source === "sessions") await held;
+			return { items: [] };
+		});
+		listSharedProjectsMock.mockImplementation(async () => {
+			if (source === "shared") await held;
+			return { shared: [] };
+		});
+		respondWith({});
+		const { result, rerender } = renderHook(() => useWorkspaceQuery(), { wrapper });
+		await waitFor(() => expect(result.current.isSuccess).toBe(true));
+		expect(result.current.cloudLoadSettled).toBe(false);
+		await act(async () => {
+			cloudState.loading = false;
+			cloudState.ready = true;
+			cloudState.orgLoading = false;
+			cloudState.org = { id: "org-1" };
+			release();
+			rerender();
+		});
+		await waitFor(() => expect(result.current.cloudLoadSettled).toBe(true));
+	});
+
+	it.each(["projects", "sessions", "shared"])("settles deep-link readiness after a failed Cloud %s request", async (source) => {
+		cloudState.ready = true;
+		cloudState.org = { id: "org-1" };
+		listProjectsMock.mockResolvedValue({ items: [] });
+		const failed = { projects: listProjectsMock, sessions: listSessionsMock, shared: listSharedProjectsMock }[source]!;
+		failed.mockRejectedValue(new Error("Cloud unavailable"));
+		respondWith({});
+		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
+		await waitFor(() => expect(result.current.cloudLoadSettled).toBe(true));
+		expect(result.current.isSuccess).toBe(true);
+		expect(result.current.isError).toBe(false);
+	});
+
+	it("does not wait for Cloud when that source is excluded", async () => {
+		cloudState.ready = true;
+		cloudState.loading = true;
+		respondWith({});
+		const { result } = renderHook(() => useWorkspaceQuery({ includeCloud: false }), { wrapper });
+		await waitFor(() => expect(result.current.isSuccess).toBe(true));
+		expect(result.current.cloudLoadSettled).toBe(true);
 	});
 
 	it("redraws a component only for the fields it reads, not for every refetch", async () => {

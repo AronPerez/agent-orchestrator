@@ -1090,14 +1090,14 @@ export function useWorkspaceQuery(options: WorkspaceSubscriptionOptions = {}) {
 	const cloud = useCloudProjectsQuery(cloudOptions);
 	const cloudSessions = useCloudSessionsQuery(cloudOptions);
 	const sharedWorkspaces = useSharedCloudWorkspacesQuery(cloudOptions);
-	const { org, ready } = useCloudOrg();
+	const { org, ready, isLoading: orgLoading } = useCloudOrg();
 	const orgId = org?.id;
 	const localData = local.data;
 	const cloudData = cloud.data;
 	const cloudSessionData = cloudSessions.data;
 	const sharedData = sharedWorkspaces.data;
 	const queryClient = useQueryClient();
-	const { baseUrl: cloudBaseUrl } = useCloudCp();
+	const { baseUrl: cloudBaseUrl, loading: cloudLoading } = useCloudCp();
 	// The merged list drops pending removals too (a shared project is not in the
 	// own-project list); the version rebuilds it when one starts or ends.
 	const removalVersion = useSyncExternalStore(subscribeOptimisticProjectRemovals, optimisticProjectRemovalsVersion);
@@ -1125,7 +1125,13 @@ export function useWorkspaceQuery(options: WorkspaceSubscriptionOptions = {}) {
 		// removalVersion is read outside React by applyOptimisticProjectRemovals.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [localData, cloudData, cloudSessionData, sharedData, includeCloud, orgId, ready, removalVersion]);
-	return withQueryFields(local, { data });
+	// Local status remains authoritative for rendering. Hostless deep links
+	// also need every enabled Cloud source's initial result before a miss is
+	// trustworthy; background refreshes with existing data do not hold them.
+	const cloudLoadSettled = !includeCloud || options.enabled === false || (!cloudLoading && (!ready ||
+		(!orgLoading && (orgId === undefined || ((cloud.isSuccess || cloud.isError) && (cloudSessions.isSuccess || cloudSessions.isError))) &&
+			(sharedWorkspaces.isSuccess || sharedWorkspaces.isError))));
+	return withQueryFields(local, { data, cloudLoadSettled });
 }
 
 /**

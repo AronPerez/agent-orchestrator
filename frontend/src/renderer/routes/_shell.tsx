@@ -1446,7 +1446,8 @@ const replacementErrorCount = Object.keys(orchestratorReplacementErrors).length;
 		&& (!remoteHostsListed || remoteHostIds.every((hostId) => remoteHosts.some((host) => host.hostId === hostId && host.status === "offline")
 			|| (remoteLoadedProjectHostIds.includes(hostId) && remoteLoadedSessionHostIds.includes(hostId))
 			|| remoteFailedHostIds.includes(hostId)));
-	const sessionDeepLinksReady = workspaceQuery.isSuccess && workspaceStartupState === "ready" && remoteWorkspaceLoadSettled;
+	const sessionDeepLinksReady = workspaceQuery.isSuccess && workspaceStartupState === "ready"
+		&& workspaceQuery.cloudLoadSettled && remoteWorkspaceLoadSettled;
 	const pendingSessionDeepLinkRef = useRef<string | null>(null);
 	const handleSessionDeepLink = useCallback(
 		(rawUrl: string) => {
@@ -1458,9 +1459,9 @@ const replacementErrorCount = Object.keys(orchestratorReplacementErrors).length;
 			// Resolve the session and its owning workspace from the same list:
 			// a local and a remote project can share an id, and the workspace
 			// supplies the hostId for the route and artifact requests.
-			const resolvedLocal = target ? resolveSessionLink(link, workspaces) : undefined;
-			const resolvedRemote = target ? resolveSessionLink(link, remoteWorkspaces) : undefined;
-			if (resolvedLocal && resolvedRemote) {
+			const matches = target ? [...workspaces, ...remoteWorkspaces].filter((entry) =>
+				entry.id === target.projectId && entry.sessions.some((session) => session.id === target.sessionId)) : [];
+			if (new Set(matches.map((entry) => entry.hostId)).size > 1) {
 				// Session ids are <project>-<n> per daemon, so a paired machine
 				// running the same repo can host a session with the same id. The
 				// URL carries no host, so honoring either side is a guess that
@@ -1468,14 +1469,8 @@ const replacementErrorCount = Object.keys(orchestratorReplacementErrors).length;
 				useUiStore.getState().showGlobalToast(t("deepLink.sessionAmbiguous"));
 				return;
 			}
-			const resolved = resolvedLocal ?? resolvedRemote;
-			const workspace = resolvedLocal
-				? workspaces.find((entry) => entry.id === resolvedLocal.projectId)
-				: resolvedRemote
-					// Hosts merge into one list and can share an id (standalone), so
-					// the workspace must be the one holding the resolved session.
-					? remoteWorkspaces.find((entry) => entry.id === resolvedRemote.projectId && entry.sessions.some((session) => session.id === resolvedRemote.sessionId))
-					: undefined;
+			const workspace = matches[0];
+			const resolved = workspace ? resolveSessionLink(link, [workspace]) : undefined;
 			if (!resolved || !workspace) {
 				// A failed host query settles the gate with that host's projects
 				// holding empty session lists, so a miss on such a project is

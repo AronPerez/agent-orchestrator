@@ -568,43 +568,108 @@ var claudePastedContentTag = regexp.MustCompile(`\n*(?:<pasted_content id="([A-Z
 // Claude wrappers, allowing literal unmatched tags only inside a verified report.
 func normalizeClaudePastedPrompt(prompt string) string {
 	tags := claudePastedContentTag.FindAllStringSubmatchIndex(prompt, -1)
+	if len(tags) == 0 {
+		return prompt
+	}
+	// Locate a checksummed body without deciding which tags are transport.
+	// Prefer its transport boundaries, so literal body markup cannot consume
+	// an outer opener or closer. Remaining body tags are paired afterwards.
+	var preview strings.Builder
+	offsets := make([]int, len(tags))
+	start := 0
+	for i, tag := range tags {
+		preview.WriteString(prompt[start:tag[0]])
+		offsets[i] = preview.Len()
+		start = tag[1]
+	}
+	preview.WriteString(prompt[start:])
+	stripped := preview.String()
+	value := strings.TrimSpace(stripped)
+	_, end := intactReportPrefix(value)
+	inBody := make([]bool, len(tags))
+	if end != 0 {
+		bodyStart := strings.Index(value, `">`) + len(`">`)
+		bodyEnd := strings.LastIndex(value[:end], "</ao-report-delivery>")
+		leading := strings.Index(stripped, value)
+		for i, offset := range offsets {
+			inBody[i] = offset-leading >= bodyStart && offset-leading <= bodyEnd
+		}
+	}
 	paired := make([]bool, len(tags))
-	var open []int
-	unmatchedCloser := false
-	for index, tag := range tags {
-		if tag[2] >= 0 || tag[6] >= 0 {
-			open = append(open, index)
+	matched := make([]bool, len(tags))
+	for pass := 0; pass < 2; pass++ {
+		if pass == 0 && end == 0 {
 			continue
 		}
-		matched := false
-		for i := len(open) - 1; i >= 0; i-- {
-			opener := tags[open[i]]
-			if tag[4] < 0 || opener[2] >= 0 && prompt[opener[2]:opener[3]] == prompt[tag[4]:tag[5]] {
-				// A bare opening tag is literal text, not a Claude wrapper.
-				// Still pair it so its closer cannot consume an outer wrapper.
-				if opener[2] >= 0 {
-					paired[open[i]], paired[index] = true, true
-				}
-				open = append(open[:i], open[i+1:]...)
-				matched = true
-				break
+		var open []int
+		for index, tag := range tags {
+			if matched[index] {
+				continue
 			}
-		}
-		if !matched {
-			unmatchedCloser = true
+			if tag[2] >= 0 || tag[6] >= 0 {
+				open = append(open, index)
+				continue
+			}
+			if pass == 0 && inBody[index] {
+				// A bare body closer can be literal. An id closer can also
+				// be literal when the transport closes later; a new opener
+				// of that id instead marks the next separate paste block.
+				deferCloser := tag[4] < 0
+				if !deferCloser {
+					id := prompt[tag[4]:tag[5]]
+					for j := index + 1; j < len(tags); j++ {
+						next := tags[j]
+						if next[2] >= 0 && prompt[next[2]:next[3]] == id {
+							break
+						}
+						if !inBody[j] && next[2] < 0 && next[6] < 0 &&
+							(next[4] < 0 || prompt[next[4]:next[5]] == id) {
+							deferCloser = true
+							break
+						}
+					}
+				}
+				if deferCloser {
+					continue
+				}
+			}
+			match := -1
+			for i := len(open) - 1; i >= 0; i-- {
+				opener := tags[open[i]]
+				if tag[4] < 0 || opener[2] >= 0 && prompt[opener[2]:opener[3]] == prompt[tag[4]:tag[5]] {
+					if match < 0 {
+						match = i
+					}
+					if pass != 0 || inBody[index] || !inBody[open[i]] {
+						match = i
+						break
+					}
+				}
+			}
+			if match >= 0 {
+				opener := open[match]
+				matched[opener], matched[index] = true, true
+				// Bare openers are literal text, not Claude wrappers.
+				if tags[opener][2] >= 0 {
+					paired[opener], paired[index] = true, true
+				}
+				open = append(open[:match], open[match+1:]...)
+			}
 		}
 	}
 	var normalized strings.Builder
-	start := 0
+	start = 0
+	unmatched := false
 	for i, tag := range tags {
+		unmatched = unmatched || !matched[i]
 		if paired[i] {
 			normalized.WriteString(prompt[start:tag[0]])
 			start = tag[1]
 		}
 	}
 	normalized.WriteString(prompt[start:])
-	value := strings.TrimSpace(normalized.String())
-	if len(open) != 0 || unmatchedCloser {
+	value = strings.TrimSpace(normalized.String())
+	if unmatched {
 		_, end := intactReportPrefix(value)
 		if end == 0 || strings.Contains(value[end:], "<pasted_content") || strings.Contains(value[end:], "</pasted_content") {
 			return prompt

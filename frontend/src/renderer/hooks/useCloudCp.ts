@@ -23,6 +23,8 @@ export interface UseCloudCpResult {
 	client: CloudCpClient;
 	/** Cloud offering on, user signed in, and control-plane URL known. */
 	ready: boolean;
+	/** Configuration or sign-in state is still loading before Cloud can be enabled. */
+	loading: boolean;
 	/** Control-plane base URL the client is bound to; include it in query keys. */
 	baseUrl: string;
 	/** Signed-in cloud user id, or "" when signed out. */
@@ -38,13 +40,14 @@ export { cloudCpFetch, createRendererCloudCpClient } from "../lib/cloud-cp/rende
 
 export function useCloudCp(enabled = true): UseCloudCpResult {
 	const { settings } = useSettings(undefined, enabled);
-	const { cloudEnabled } = useCloudGate(enabled);
+	const { cloudEnabled, loading } = useCloudGate(enabled);
 	const { session, status } = useCloudSession();
 	const baseUrl = settings?.cloudControlPlaneUrl ?? "";
 	const client = useMemo(() => createRendererCloudCpClient(baseUrl), [baseUrl]);
 	return {
 		client,
 		ready: cloudEnabled && status === "authenticated" && baseUrl !== "",
+		loading: enabled && (loading || (cloudEnabled && status === "loading")),
 		baseUrl,
 		userId: session?.user.id ?? "",
 	};

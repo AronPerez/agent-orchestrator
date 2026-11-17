@@ -1052,12 +1052,18 @@ func TestHookConversationFactsAcceptsLiteralPasteMarkupInReportBody(t *testing.T
 		"Transcript example: <pasted_content>text</pasted_content>.",
 		"Transcript example: <pasted_content id=\"literal\">text</pasted_content id=\"literal\">.",
 		"Missing opener example: </pasted_content id=\"literal\">.",
+		"Missing opener example: </pasted_content>.",
 		"Missing closer example: <pasted_content id=\"literal\">text.",
+		"Same-id literal opener: <pasted_content id=\"outer\">text.",
+		"Same-id literal closer: </pasted_content id=\"outer\">.",
 	} {
 		report := domain.WrapReportDelivery(deliveryID, body)
 		for name, observed := range map[string]string{
-			"unwrapped": report,
-			"wrapped":   "<pasted_content id=\"outer\">\n" + report + "\n</pasted_content id=\"outer\">",
+			"unwrapped":           report,
+			"wrapped":             "<pasted_content id=\"outer\">\n" + report + "\n</pasted_content id=\"outer\">",
+			"plain wrapper close": "<pasted_content id=\"outer\">\n" + report + "\n</pasted_content>",
+			"multiple blocks splitting id": "<pasted_content id=\"head\">" + report[:35] + "</pasted_content>" +
+				"<pasted_content id=\"tail\">" + report[35:] + "</pasted_content>",
 		} {
 			t.Run(body+"/"+name, func(t *testing.T) {
 				for _, suffix := range []string{"", "\nPlease wait for my next instruction."} {

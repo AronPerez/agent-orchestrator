@@ -32,6 +32,7 @@ const shellMocks = vi.hoisted(() => {
 		workspaces: [] as WorkspaceSummary[],
 		remoteWorkspaces: [] as WorkspaceSummary[],
 		remoteFailedHostIds: [] as string[],
+		cloudLoadSettled: true,
 		removeRemoteProject: undefined as ((hostId: string, projectId: string) => void) | undefined,
 		configureRemoteProject: undefined as ((hostId: string, projectId: string) => void) | undefined,
 		workspaceQuery: {
@@ -205,7 +206,7 @@ vi.mock("../lib/bridge", () => ({
 }));
 
 vi.mock("../hooks/useWorkspaceQuery", () => ({
-	useWorkspaceQuery: () => shellMocks.state.workspaceQuery,
+	useWorkspaceQuery: () => ({ ...shellMocks.state.workspaceQuery, cloudLoadSettled: shellMocks.state.cloudLoadSettled }),
 	useWorkspacePolling: () => undefined,
 	useRemoteWorkspaces: () => ({ data: shellMocks.state.remoteWorkspaces, failedHostIds: shellMocks.state.remoteFailedHostIds, loadedProjectHostIds: shellMocks.state.remoteLoadedProjectHostIds, loadedSessionHostIds: shellMocks.state.remoteLoadedSessionHostIds }),
 	useWorkspaceTraySessions: () => ({ data: [] }),
@@ -506,6 +507,7 @@ beforeEach(() => {
 	shellMocks.state.workspaces = workspaces;
 	shellMocks.state.remoteWorkspaces = [];
 	shellMocks.state.remoteFailedHostIds = [];
+	shellMocks.state.cloudLoadSettled = true;
 	shellMocks.listRemoteHosts.mockReset().mockResolvedValue([]);
 	shellMocks.state.removeRemoteProject = undefined;
 	shellMocks.state.configureRemoteProject = undefined;
@@ -1865,6 +1867,42 @@ describe("shell session deep links", () => {
 		emitSessionDeepLink("ao-app://sessions/proj-1/sess-1");
 		expect(shellMocks.navigate).not.toHaveBeenCalled();
 		expect(useUiStore.getState().globalToast?.title).toContain("more than one machine");
+	});
+
+	it.each(["", "/artifacts/report.md"])("refuses a link matching sessions on two remote hosts: %s", async (suffix) => {
+		shellMocks.state.remoteWorkspaces = [
+			{ id: "remote", hostId: "box-a", sessions: [{ id: "remote-1", status: "working" }] },
+			{ id: "remote", hostId: "box-b", sessions: [{ id: "remote-1", status: "working" }] },
+		] as unknown as WorkspaceSummary[];
+		await renderShellWithReadyDaemon();
+		const openSpy = vi.spyOn(useUiStore.getState(), "requestWorkspaceFileOpen").mockImplementation(() => {});
+		emitSessionDeepLink("ao-app://sessions/remote/remote-1" + suffix);
+		expect(shellMocks.navigate).not.toHaveBeenCalled();
+		expect(openSpy).not.toHaveBeenCalled();
+		expect(useUiStore.getState().globalToast?.title).toContain("more than one machine");
+		openSpy.mockRestore();
+	});
+
+	it("holds a Cloud session link until the enabled Cloud sources settle", async () => {
+		shellMocks.state.cloudLoadSettled = false;
+		const view = await renderShellWithReadyDaemon();
+		emitSessionDeepLink("ao-app://sessions/cloud-project/cloud-session");
+		expect(shellMocks.navigate).not.toHaveBeenCalled();
+		expect(useUiStore.getState().globalToast).toBeNull();
+
+		shellMocks.state.workspaces = [...workspaces, {
+			id: "cloud-project", name: "Cloud", kind: "cloud", path: "",
+			sessions: [{ ...workspaces[0]!.sessions[0]!, id: "cloud-session", workspaceId: "cloud-project", cloud: { orgId: "org-1" } }],
+		}];
+		shellMocks.state.workspaceQuery.data = shellMocks.state.workspaces;
+		shellMocks.state.cloudLoadSettled = true;
+		await act(async () => {
+			view.rerender(<Suspense fallback={null}><ShellRoute /></Suspense>);
+		});
+		expect(shellMocks.navigate).toHaveBeenCalledWith({
+			to: "/projects/$projectId/sessions/$sessionId",
+			params: { projectId: "cloud-project", sessionId: "cloud-session" },
+		});
 	});
 
 	it("holds a remote-targeted link until the host's workspace data settles", async () => {
