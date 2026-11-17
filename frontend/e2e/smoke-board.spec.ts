@@ -30,7 +30,7 @@ for (const colorScheme of ["dark", "light"] as const) {
 		await input.fill("alpha");
 		await expect(bar).toContainText("1/2");
 		await expect(page.getByRole("button", { name: "Beta worker", exact: true })).toHaveCount(0);
-		await page.getByRole("button", { name: /^Archive, 1 session$/ }).click();
+		await page.getByRole("button", { name: /^Archived sessions, 1$/ }).click();
 		const archive = page.getByRole("dialog", { name: "Archived sessions" });
 		await expect(archive).toContainText("Alpha archived");
 		await page.keyboard.press("Escape");

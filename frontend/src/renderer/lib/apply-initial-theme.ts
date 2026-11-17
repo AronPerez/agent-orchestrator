@@ -1,4 +1,5 @@
 import { aoBridge } from "./bridge";
+import { isMacPlatform } from "./platform";
 import { applyDocumentTheme, applyDocumentThemeStyle, readStoredThemePreference, readStoredThemeStyle, resolveTheme } from "./theme";
 import { applyWindowTranslucency, readStoredWindowTranslucency } from "./window-translucency";
 
@@ -9,6 +10,10 @@ import { applyWindowTranslucency, readStoredWindowTranslucency } from "./window-
 // to main now as well: the vibrancy material follows nativeTheme, and the
 // shell only sends it after the loader, so a light app on a dark Mac (or the
 // reverse) would otherwise show its loader over the wrong material.
+// Browser previews have no native preload to select macOS font/chrome tokens.
+if (!document.documentElement.dataset.aoPlatform && isMacPlatform()) {
+	document.documentElement.dataset.aoPlatform = "darwin";
+}
 const themePreference = readStoredThemePreference();
 applyDocumentTheme(resolveTheme(themePreference));
 applyDocumentThemeStyle(readStoredThemeStyle());

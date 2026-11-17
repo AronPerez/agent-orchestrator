@@ -327,6 +327,16 @@ describe("idle evidence", () => {
 			reviewerHandleId: "exited-pane", reviewerActivityState: "exited", reviewerSurface: { mode: "tui", reviewId: "old-review" },
 		}), async () => { throw new Error("not Chat"); })).toBe(true);
 	});
+	it.each(["completed", "failed", "cancelled", "superseded"] satisfies components["schemas"]["ReviewRun"]["status"][])("accepts the current daemon's terminal review lifecycle: %s", async (status) => {
+		expect(await sessionsAndReviewsAreIdle({ sessions: [idleSession] }, async () => ({
+			autoReviewPending: false, chatReviewerIds: [], runs: [{ status }], activeReviewers: [],
+		}), noLiveReviewerWork)).toBe(true);
+	});
+	it.each(["queued", "launching", "running", "cancelling"] satisfies components["schemas"]["ReviewRun"]["status"][])("keeps the current daemon's active review lifecycle busy: %s", async (status) => {
+		expect(await sessionsAndReviewsAreIdle({ sessions: [idleSession] }, async () => ({
+			autoReviewPending: false, chatReviewerIds: [], runs: [{ status }], activeReviewers: [],
+		}), noLiveReviewerWork)).toBe(false);
+	});
 	function mainIdleProbe(sides: unknown[] = []) {
 		const main = fs.readFileSync(path.join(import.meta.dirname, "../main.ts"), "utf8");
 		const start = main.indexOf("\tisIdle: async () => {");
@@ -363,7 +373,7 @@ describe("idle evidence", () => {
 			reportDaemonFailure: vi.fn(), disposeBrowserRuntimeLink: vi.fn(), disposeBrowserStreamLink: vi.fn(),
 			sideStateTimer: undefined, telemetryIdentity: { invalidate: vi.fn(), flush: vi.fn() },
 			getShellWebContents: () => undefined, browserViewHost: undefined, daemonProcess: undefined, appRunId: "launch",
-			sideLaunchRecovery: { setAttachment: vi.fn(() => false) }, clearInterval,
+			sideLaunchRecovery: { setAttachment: vi.fn(() => false), status: "unavailable" }, sideCloseController: { setAttachment: vi.fn() }, clearInterval,
 		};
 		runInNewContext(transpile(main.slice(start, main.indexOf("\nconst MAX_DAEMON_OUTPUT", start)), { target: ScriptTarget.ES2022 }), context);
 		const setStatus = (context as typeof context & { setDaemonStatus(status: unknown): void }).setDaemonStatus;
@@ -373,21 +383,12 @@ describe("idle evidence", () => {
 		expect(context.daemonAttachmentGeneration).toBe(2);
 	});
 	it("can complete an explicitly confirmed retained-side close while normal recovery is detached", async () => {
-		const main = fs.readFileSync(path.join(import.meta.dirname, "../main.ts"), "utf8");
-		const start = main.indexOf("async function captureSideChatState(");
-		const recovery = new SideCloseRecovery();
-		recovery.remember({ appRunId: "launch", sides: [{ side: { id: "side", sessionId: "worker-1" } }] });
-		const context = {
-			sideCloseRecovery: recovery, sideLaunchState: recovery.state, publishPendingSideCloses: vi.fn(),
-			sideLaunchRecovery: { ensureReady: vi.fn(async () => { throw new Error("normal recovery detached"); }) },
-			daemonStatus: { state: "error", code: "identity_mismatch", port: 3001, pid: 11 }, daemonAttachmentGeneration: 1, appRunId: "launch",
-			closeMismatchedSide: vi.fn(async () => recovery.reconcileMissing("side", { appRunId: "launch", sides: [] })),
-		};
-		runInNewContext(transpile(main.slice(start, main.indexOf('\nipcMain.handle("sideChats:capture"', start)), { target: ScriptTarget.ES2022 }), context);
-		await expect((context as typeof context & { captureSideChatState(id: string): Promise<void> }).captureSideChatState("side")).resolves.toBeUndefined();
-		expect(context.closeMismatchedSide).toHaveBeenCalledOnce();
-		expect(recovery.state?.sides).toEqual([]);
-		expect(context.sideLaunchRecovery.ensureReady).not.toHaveBeenCalled();
+		const h = retainedDiscardIpc();
+		await expect(h.invoke(["side"])).resolves.toBeUndefined();
+		expect(h.context.closeMismatchedSide).toHaveBeenCalledOnce();
+		expect(h.context.sideLaunchState.sides).toEqual([{ side: { id: "other" } }]);
+		expect(h.context.sideLaunchRecovery.captureForClose).not.toHaveBeenCalled();
+		expect(h.context.sideCloseController.reconcile).toHaveBeenCalledOnce();
 	});
 	function retainedDiscardIpc() {
 		const main = fs.readFileSync(path.join(import.meta.dirname, "../main.ts"), "utf8");
@@ -396,41 +397,48 @@ describe("idle evidence", () => {
 		const shell = {};
 		const context = {
 			ipcMain: { handle: (_channel: string, next: typeof handler) => { handler = next; } }, getShellWebContents: () => shell,
-			ExpectedIpcError: Error, daemonStatus: { state: "error", code: "identity_mismatch" }, daemonAttachmentGeneration: 1, appRunId: "launch",
+			ExpectedIpcError: Error, daemonStatus: { state: "error", code: "identity_mismatch", port: 3001, pid: 11 }, daemonAttachmentGeneration: 1, appRunId: "launch",
 			sideLaunchState: { appRunId: "launch", sides: [{ side: { id: "side" } }, { side: { id: "other" } }] },
-			captureSideChatState: vi.fn(async (_id: string) => undefined), installedBuildGuard: { check: vi.fn(async () => undefined) },
+			sideCloseRecovery: new SideCloseRecovery(), sideCloseController: { reconcile: vi.fn() },
+			sideLaunchRecovery: { captureForClose: vi.fn(async () => { throw new Error("normal recovery detached"); }) },
+			closeMismatchedSide: vi.fn(async (_options: { sideId: string; onChange(): void }) => undefined), installedBuildGuard: { check: vi.fn(async () => undefined) },
 		};
-		context.captureSideChatState.mockImplementation(async id => { context.sideLaunchState.sides = context.sideLaunchState.sides.filter(record => record.side.id !== id); });
+		context.sideCloseRecovery.remember(context.sideLaunchState);
+		context.closeMismatchedSide.mockImplementation(async ({ sideId, onChange }) => {
+			context.sideCloseRecovery.begin(sideId);
+			context.sideCloseRecovery.reconcileMissing(sideId, { appRunId: "launch", sides: [] }, { ids: [sideId] });
+			onChange();
+		});
 		runInNewContext(transpile(main.slice(start, main.indexOf('\nipcMain.handle("editorHandoff:pathAction"', start)), { target: ScriptTarget.ES2022 }), context);
 		return { context, invoke: (ids: unknown, sender = shell) => handler({ sender }, ids) };
 	}
 	it("discards only the retained side identities approved in the dialog", async () => {
 		const h = retainedDiscardIpc();
 		await h.invoke(["side"]);
-		expect(h.context.captureSideChatState).toHaveBeenCalledExactlyOnceWith("side");
+		expect(h.context.closeMismatchedSide).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ sideId: "side", attachment: { generation: 1, port: 3001, pid: 11, appRunId: "launch" } }));
 		expect(h.context.sideLaunchState.sides).toEqual([{ side: { id: "other" } }]);
 		expect(h.context.installedBuildGuard.check).toHaveBeenCalledOnce();
 	});
 	it.each([{ ids: [] }, { ids: ["unknown"] }, { ids: ["side", "side"] }, { ids: [7] }, { ids: "side" }])("rejects invalid or stale discard selection: %j", async ({ ids }) => {
 		const h = retainedDiscardIpc();
 		await expect(h.invoke(ids)).rejects.toThrow();
-		expect(h.context.captureSideChatState).not.toHaveBeenCalled();
+		expect(h.context.closeMismatchedSide).not.toHaveBeenCalled();
 	});
 	it("rejects retained-discard requests after a normal daemon attachment resumes", async () => {
 		const h = retainedDiscardIpc(); h.context.daemonStatus.state = "ready";
 		await expect(h.invoke(["side"])).rejects.toThrow();
-		expect(h.context.captureSideChatState).not.toHaveBeenCalled();
+		expect(h.context.closeMismatchedSide).not.toHaveBeenCalled();
 	});
 	it("rejects discard requests from a non-shell sender", async () => {
 		const h = retainedDiscardIpc();
 		await expect(h.invoke(["side"], {})).rejects.toThrow();
-		expect(h.context.captureSideChatState).not.toHaveBeenCalled();
+		expect(h.context.closeMismatchedSide).not.toHaveBeenCalled();
 	});
 	it("stops a confirmed batch if the daemon attachment changes", async () => {
 		const h = retainedDiscardIpc();
-		h.context.captureSideChatState.mockImplementationOnce(async () => { h.context.daemonAttachmentGeneration++; });
+		h.context.closeMismatchedSide.mockImplementationOnce(async () => { h.context.daemonAttachmentGeneration++; });
 		await expect(h.invoke(["side", "other"])).rejects.toThrow(/attachment changed/);
-		expect(h.context.captureSideChatState).toHaveBeenCalledOnce();
+		expect(h.context.closeMismatchedSide).toHaveBeenCalledOnce();
 		expect(h.context.installedBuildGuard.check).toHaveBeenCalledOnce();
 	});
 	it("still protects retained local side state when daemon identities differ", async () => {

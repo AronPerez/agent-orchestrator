@@ -90,7 +90,7 @@ export async function sessionsAndReviewsAreIdle(body: unknown, readReviews: (ses
 			const result = await readReviews(session.id) as { autoReviewPending?: boolean; chatReviewerIds?: unknown; runs?: unknown; reviewerActivityState?: string; reviewerHandleId?: string; reviewerSurface?: { reviewId?: string }; activeReviewers?: unknown } | null;
 			if (!result || !Array.isArray(result.runs) || !result.runs.every((run: unknown) =>
 				run && typeof run === "object" && "status" in run &&
-				["complete", "delivered", "failed", "cancelled"].includes(String(run.status)))) return false;
+				["completed", "superseded", "complete", "delivered", "failed", "cancelled"].includes(String(run.status)))) return false;
 			if (result.autoReviewPending !== false) return false;
 			if (!Array.isArray(result.activeReviewers) || !Array.isArray(result.chatReviewerIds)) return false;
 			if (result.reviewerHandleId && result.activeReviewers.length === 0 && result.reviewerActivityState !== "exited") return false;

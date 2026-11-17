@@ -1,11 +1,16 @@
 import type { AoBridge } from "../../preload";
 import { coerceUiSettings, DEFAULT_UI_SETTINGS } from "../../shared/ui-locale";
+import { createWebSideCloseBridge } from "./web-side-close";
+import { SIDE_CLOSE_PROTOCOL_VERSION } from "../../shared/side-close";
 export type { FeatureBuild } from "../../main/feature-builds";
 
 
 export const aoBridge: AoBridge =
 	window.ao ??
 	({
+		triage: {
+			launch: async () => ({ ok: false, error: "report.desktopRequired" as const }),
+		},
 		dictation: {
 			start: async () => undefined,
 			stop: async () => undefined,
@@ -22,6 +27,8 @@ export const aoBridge: AoBridge =
 			showPrivacyGuide: async () => undefined,
 			updatePrivacyGuide: async () => false,
 			closePrivacyGuide: async () => undefined,
+			getAppPrivacy: async () => undefined,
+			requestAppPrivacy: async () => undefined,
 			openChromeExtensions: async () => undefined,
 			scanImportFolder: async ({ path }) => ({ path, repos: [] }),
 			checkAncestorRepo: async () => undefined,
@@ -33,6 +40,7 @@ export const aoBridge: AoBridge =
 		checkGitHubRepositoryAvailability: async () => ({ available: true }),
 			getPathForFile: () => "",
 			onOpenFolderPath: () => () => undefined,
+			onOpenSessionDeepLink: () => () => undefined,
 			onNewSessionShortcut: () => () => undefined,
 			onKeyboardShortcutsHelp: () => () => undefined,
 			onQuitConfirmRequest: () => () => undefined,
@@ -47,6 +55,7 @@ export const aoBridge: AoBridge =
 			onPreviousTabShortcut: () => () => undefined,
 			onNextTabShortcut: () => () => undefined,
 			onShortcut: () => () => undefined,
+			reportSessionsShown: () => undefined,
 			setMenuAvailability: () => undefined,
 			onMenuAction: () => () => undefined,
 			onScrollPhase: () => () => undefined,
@@ -132,6 +141,7 @@ export const aoBridge: AoBridge =
 			list: async () => {
 				throw new Error("Sharing needs the Orchestrator desktop app.");
 			},
+			hostLinks: async () => [],
 			publish: async () => {
 				throw new Error("Sharing needs the Orchestrator desktop app.");
 			},
@@ -178,7 +188,15 @@ export const aoBridge: AoBridge =
 			onStatus: () => () => undefined,
 		},
 		agentLogin: { request: async () => null },
-		sideChats: { discardRetained: async () => { throw new Error("The desktop app is required to discard retained side chats."); }, capture: async () => undefined, confirmClose: async () => undefined, getPendingCloses: async () => [], onPendingClosesChanged: () => () => {} },
+		sideChats: import.meta.env.VITE_NO_ELECTRON === "1" ? { ...createWebSideCloseBridge(), discardRetained: async () => { throw new Error("The desktop app is required to discard retained side chats."); } } : {
+			discardRetained: async () => { throw new Error("Desktop side chat bridge is unavailable. Reload the desktop app."); },
+			protocolVersion: SIDE_CLOSE_PROTOCOL_VERSION,
+			mode: "desktop",
+			capture: async () => { throw new Error("Desktop side chat bridge is unavailable. Reload the desktop app."); },
+			requestClose: async () => { throw new Error("Desktop side chat bridge is unavailable. Reload the desktop app."); },
+			getCloseState: async () => { throw new Error("Desktop side chat bridge is unavailable. Reload the desktop app."); },
+			onCloseStateChanged: () => () => {},
+		},
 		editorHandoff: {
 			pathAction: async () => { throw new Error("Desktop app is required to open local paths."); },
 			getState: async () => ({
@@ -247,6 +265,8 @@ export const aoBridge: AoBridge =
 			}),
 			historySuggestions: async () => [],
 			historyFavicon: async () => undefined,
+			userBrowser: async () => null,
+			openInUserBrowser: async () => ({ name: "", chrome: false }),
 			clear: async (viewId: string) => ({
 				viewId,
 				url: "",

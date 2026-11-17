@@ -294,7 +294,7 @@ function RestartToUpdateDialogBody() {
 				</div>
 			</DialogContent>
 		</Dialog>
-		<ConfirmDialog open={!!discardSides} title={t("update.restart.discardSideChats")} description={t("update.restart.discardSideChatsDetail", { names: discardSides?.map(side => side.label).join(", ") ?? "" })} confirmLabel={t("update.restart.discardSideChats")} destructive busy={pending} error={discardFailure} onOpenChange={open => { if (!open && !pending) setDiscardSides(undefined); }} onConfirm={() => void discardRetainedSides()} />
+		<ConfirmDialog open={!!discardSides} title={t("update.restart.discardSideChats")} description={t("update.restart.discardSideChatsDetail", { names: discardSides?.map(side => side.label).join(", ") ?? "" })} confirmLabel={t("update.restart.discardSideChats")} initialFocus="cancel" destructive busy={pending} error={discardFailure} onOpenChange={open => { if (!open && !pending) setDiscardSides(undefined); }} onConfirm={() => void discardRetainedSides()} />
 		</>
 	);
 }

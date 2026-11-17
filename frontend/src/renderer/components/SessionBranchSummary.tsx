@@ -1,7 +1,7 @@
 import { apiErrorException } from "../lib/api-error-exception";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useId, useState, type ReactNode } from "react";
-import { InspectorSection } from "@aoagents/product-ui";
+import { branchTopic, InspectorSection } from "@aoagents/product-ui";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import {
@@ -19,6 +19,7 @@ import {
 } from "@/components/app-icons";
 import { sessionWorkspaceFilesQueryOptions, type WorkspaceFileSummary } from "../hooks/useSessionWorkspaceFiles";
 import { clientForSessionHost } from "../lib/host-clients";
+import { useCloudCp } from "../hooks/useCloudCp";
 import { sessionUiKey } from "../lib/hosts";
 import { sessionBranchPresentation } from "../lib/session-branch";
 import { cn } from "../lib/utils";
@@ -27,7 +28,7 @@ import { ChangeCounts, ChangedFilesList } from "./ChangedFilesList";
 import { usesPreviewWorkspaceData as usePreviewData } from "../lib/preview-mode";
 import { useSessionGitActionStore, type SessionGitActionKind } from "../stores/session-git-action-store";
 import type { SessionPRSummary } from "../hooks/useSessionScmSummary";
-import { type SessionBranchState, type WorkspaceSession, sessionWorkspaceReady } from "../types/workspace";
+import { type SessionBranchState, type WorkspaceSession, sessionIsActive, sessionWorkspaceReady } from "../types/workspace";
 import { Button } from "./ui/button";
 import { Pressable } from "./ui/pressable";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
@@ -73,7 +74,13 @@ export type BranchGitStep = {
 };
 
 /** The branch rows and git step, handed to the PR card new commits land on. */
-export type BranchWork = { content: ReactNode; hasRows: boolean; git?: BranchGitStep };
+export type BranchWork = {
+	content: ReactNode;
+	hasRows: boolean;
+	git?: BranchGitStep;
+	/** The diff the commits row states, when there is one; the card leaves the same numbers off its own line. */
+	diff?: { additions: number; deletions: number };
+};
 
 export function SessionBranchSummary({
 	conflictFiles,
@@ -166,6 +173,8 @@ export function SessionBranchSummary({
 		);
 	}
 
+	const committedAdditions = sum(facts.committed, "additions");
+	const committedDeletions = sum(facts.committed, "deletions");
 	const rows = (
 		<>
 			{facts.uncommitted.length > 0 ? (
@@ -181,8 +190,8 @@ export function SessionBranchSummary({
 			) : null}
 			{commitsRow ? (
 				<GitStatusRow
-					additions={sum(facts.committed, "additions")}
-					deletions={sum(facts.committed, "deletions")}
+					additions={committedAdditions}
+					deletions={committedDeletions}
 					icon={<GitCommitHorizontal aria-hidden="true" className="size-icon-sm shrink-0 text-muted-foreground" />}
 					files={facts.committed}
 					label={commitsRow.label}
@@ -229,7 +238,7 @@ export function SessionBranchSummary({
 			<section aria-label={t("inspector.branch")} className="flex flex-col" data-testid="inspector-branch">
 				{/* A PR's card names its own branches; the line is for a branch without one. */}
 				{(branch || naming) && !pullRequests ? <BranchLine base={facts.base} branch={branch} naming={naming} /> : null}
-				{renderCards(workInPR ? { content: rows, hasRows: hasWork, git: gitStep } : undefined)}
+				{renderCards(workInPR ? { content: rows, hasRows: hasWork, git: gitStep, diff: commitsRow ? { additions: committedAdditions, deletions: committedDeletions } : undefined } : undefined)}
 				{workInPR ? null : workRows}
 			</section>
 		</InspectorSection>
@@ -241,7 +250,7 @@ function BranchLine({ base, branch, naming }: { base?: string; branch?: string; 
 		<div className="flex min-w-0 items-center gap-1.5 pb-3 font-mono last:pb-0 text-xs text-muted-foreground">
 			<GitBranch aria-hidden="true" className="size-icon-2xs shrink-0" />
 			{naming ? <BranchNamingLabel /> : <span className="min-w-0 truncate" title={branch}>
-				{branch}
+				{branch ? branchTopic(branch) : branch}
 			</span>}
 			{base && !naming ? <span className="shrink-0 text-passive">→ {base}</span> : null}
 		</div>
@@ -447,9 +456,15 @@ export function useAgentGitAction(session: WorkspaceSession, hostId: string | un
 	const startPending = useSessionGitActionStore((state) => state.start);
 	const updatePending = useSessionGitActionStore((state) => state.update);
 	const clearPending = useSessionGitActionStore((state) => state.clear);
+	const { client: cloudClient } = useCloudCp(Boolean(session.cloud));
 	const send = useMutation({
 		mutationFn: async ({ message }: { kind: SessionGitActionKind; message: string }) => {
 			if (usePreviewData) return;
+			// A Cloud session's agent takes the step as a message, through the control plane.
+			if (session.cloud) {
+				await cloudClient.sendSessionMessage(session.cloud.orgId, session.id, { text: message });
+				return;
+			}
 			const { error } = await clientForSessionHost(hostId).POST("/api/v1/sessions/{sessionId}/send", {
 				params: { path: { sessionId: session.id } },
 				body: { message },
@@ -500,7 +515,9 @@ export function useOtherPRConflictStep(session: WorkspaceSession, hostId: string
 	const { t } = useTranslation();
 	const conflicting = pr?.mergeability.state === "conflicting";
 	const { pending, run, error } = useAgentGitAction(session, hostId, pr ? `pr:${pr.url}` : "pr", () => !conflicting);
-	const applies = Boolean(pr && conflicting && (pr.state === "open" || pr.state === "draft") && !session.cloud && session.kind !== "orchestrator");
+	// An archived Cloud session's agent takes no message: the control plane refuses it.
+	const reachable = !session.cloud || sessionIsActive(session);
+	const applies = Boolean(pr && conflicting && (pr.state === "open" || pr.state === "draft") && session.kind !== "orchestrator" && reachable);
 	if (!pr || (!applies && !pending)) return undefined;
 	return {
 		primary: applies ? { kind: "resolveConflicts", label: t("inspector.git.resolveConflicts") } : undefined,

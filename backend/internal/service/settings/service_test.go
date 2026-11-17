@@ -29,6 +29,9 @@ func (*hibernationSettingsStore) SetComputerUse(context.Context, bool, time.Time
 func (*hibernationSettingsStore) SetSessionRetentionDays(context.Context, int, time.Time) error {
 	return nil
 }
+func (*hibernationSettingsStore) SetAccountHandoff(context.Context, bool, time.Time) error {
+	return nil
+}
 
 func TestChatHibernationGateResetsOnDaemonBoot(t *testing.T) {
 	ctx := context.Background()

@@ -220,11 +220,11 @@ test("renderer: local remote-host settings work signed out with Developer mode o
 // #2483 SET-001.
 test("renderer: global settings page renders all sections @T0 @SET", async ({ page }) => {
 	// The settings revamp (#2797) reduced the page to General + Updates + Help;
-	// Help now renders the report form inline rather than opening another dialog.
+	// Help renders the report action and support links inline.
 	await page.goto("/#/settings");
 	await expect(page.getByTestId("settings-page")).toBeVisible();
 	await page.getByRole("button", { name: "Updates" }).click();
 	await expect(page.locator('[data-testid="settings-section"][data-section="updates"]')).toBeVisible();
 	await page.getByRole("button", { name: "Help" }).click();
-	await expect(page.getByLabel("Title")).toBeVisible();
+	await expect(page.getByRole("button", { name: "Report a problem" })).toBeVisible();
 });

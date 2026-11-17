@@ -39,7 +39,10 @@ func TestWiringLifecycleOwnsHerdrSocket(t *testing.T) {
 		t.Fatalf("lifecycle did not start Herdr listener: %v", err)
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(time.Second))
+	// Allow the server's two-second request window plus scheduling overhead.
+	if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	_, err = fmt.Fprintln(conn, `{"id":"7","method":"pane.report_agent","params":{"pane_id":"ao:1:bWVyLTE:bGF1bmNoLTE","source":"custom:fx","agent":"fx","state":"working"}}`)
 	if err != nil {
 		t.Fatal(err)

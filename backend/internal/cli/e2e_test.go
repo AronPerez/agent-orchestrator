@@ -28,12 +28,18 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/testenv"
 )
 
 // aoBin is the path to the binary built once for the whole suite.
 var aoBin string
 
 func TestMain(m *testing.M) {
+	testenv.ClearSession()
+	if os.Getenv("AO_CLI_BATCH_HELPER") == "1" {
+		os.Exit(m.Run())
+	}
 	dir, err := os.MkdirTemp("", "ao-e2e-bin")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "e2e: mktemp:", err)

@@ -131,6 +131,7 @@ describe("default shortcuts", () => {
 	it.each([
 		["find", chord({ key: "f", meta: true })],
 		["find-in-chat", chord({ key: "f", meta: true })],
+		["add-selection-to-chat", chord({ key: "l", meta: true })],
 		["new-session", chord({ key: "n", meta: true })],
 		["new-shell-terminal", chord({ key: "t", meta: true })],
 		["close-shell-terminal", chord({ key: "w", meta: true })],
@@ -337,7 +338,7 @@ describe("shortcut binding matching and validation", () => {
 
 	it("keeps Windows/Linux defaults off bare terminal-owned chords other than the yielding ones", () => {
 		const readline = ["a", "e", "k", "u", "w", "r", "p", "n", "b", "f", "l", "y", "t", "d", "c", "z"];
-		const yielding = new Set(["k", "p", "w", "t", "b", "f"]);
+		const yielding = new Set(["k", "p", "w", "t", "b", "f", "l"]);
 		for (const key of readline) {
 			if (yielding.has(key)) continue;
 			for (const { id } of APP_SHORTCUTS) {
