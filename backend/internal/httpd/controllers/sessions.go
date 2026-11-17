@@ -50,7 +50,9 @@ const (
 	maxMessageLen     = 4096
 	maxModelLen       = 256
 	maxDisplayNameLen = 100
+	maxWorkerGoalLen  = 1000
 	maxIdempotencyKey = 128
+	maxTimeboxSeconds = 9_223_372_036
 
 	// Attachment bytes inlined as base64 in a JSON body are held in memory
 	// whole while the body is decoded, so those bodies stay bounded. A file of
@@ -390,6 +392,12 @@ func (c *SessionsController) spawn(w http.ResponseWriter, r *http.Request) {
 	if in.Kind == "" {
 		in.Kind = domain.KindWorker
 	}
+	goal, timebox, err := validateWorkerContract(in.Goal, in.TimeboxSeconds, in.Kind, in.ProjectID)
+	if err != nil {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "validation", "INVALID_WORKER_CONTRACT", err.Error(), nil)
+		return
+	}
+	in.Goal = goal
 	attachments, attachErr := decodeSpawnAttachments(in.Attachments)
 	if attachErr != nil {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", attachErr.code, attachErr.message, nil)
@@ -404,7 +412,7 @@ func (c *SessionsController) spawn(w http.ResponseWriter, r *http.Request) {
 	}
 	// A standalone worker has no project to start in the background.
 	async := in.Async && in.ProjectID != ""
-	sess, promptBytes, systemPromptBytes, err := c.Svc.Spawn(r.Context(), ports.SpawnConfig{ProjectID: in.ProjectID, IssueID: in.IssueID, ParentSessionID: in.ParentSessionID, TrackerProvider: in.TrackerProvider, Kind: in.Kind, Harness: in.Harness, Branch: in.Branch, BaseBranch: strings.TrimSpace(in.BaseBranch), RequestedMode: in.Mode, Prompt: in.Prompt, RequestedOutput: in.RequestedOutput, DisplayName: displayName, DisplayNameExplicit: in.DisplayNameExplicit && displayName != "", Attachments: attachments, AgentConfig: ports.AgentConfig{Model: in.Model, Effort: in.Effort, Permissions: in.ApprovalMode}, EffortOverride: strings.TrimSpace(in.Effort) != "", AgentAccountID: strings.TrimSpace(in.AccountID), ClientRequestID: in.ClientRequestID, ClientRequestHash: requestHash, Async: async})
+	sess, promptBytes, systemPromptBytes, err := c.Svc.Spawn(r.Context(), ports.SpawnConfig{ProjectID: in.ProjectID, IssueID: in.IssueID, ParentSessionID: in.ParentSessionID, TrackerProvider: in.TrackerProvider, Kind: in.Kind, Harness: in.Harness, Branch: in.Branch, BaseBranch: strings.TrimSpace(in.BaseBranch), RequestedMode: in.Mode, Prompt: in.Prompt, Goal: goal, Timebox: timebox, RequestedOutput: in.RequestedOutput, DisplayName: displayName, DisplayNameExplicit: in.DisplayNameExplicit && displayName != "", Attachments: attachments, AgentConfig: ports.AgentConfig{Model: in.Model, Effort: in.Effort, Permissions: in.ApprovalMode}, EffortOverride: strings.TrimSpace(in.Effort) != "", AgentAccountID: strings.TrimSpace(in.AccountID), ClientRequestID: in.ClientRequestID, ClientRequestHash: requestHash, Async: async})
 	if err != nil {
 		writeSpawnError(w, r, err)
 		return
@@ -2378,7 +2386,7 @@ func (c *SessionsController) send(w http.ResponseWriter, r *http.Request) {
 	}
 	message := domain.SanitizeControlChars(in.Message)
 	var err error
-	if in.UserAuthored || in.SenderSessionID != "" {
+	if in.UserAuthored || in.AutomationAuthored || in.SenderSessionID != "" {
 		sender, ok := c.Svc.(sessionMessageOptionsSender)
 		if !ok {
 			apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/send")
@@ -2393,7 +2401,7 @@ func (c *SessionsController) send(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if recorder, ok := c.Svc.(UserMessageRecorder); ok {
-		recordUserMessage(r.Context(), recorder, sessionID(r), in.SenderSessionID, false)
+		recordUserMessage(r.Context(), recorder, sessionID(r), in.SenderSessionID, in.AutomationAuthored, false)
 	}
 	envelope.WriteJSON(w, http.StatusOK, SendSessionMessageResponse{OK: true, SessionID: sessionID(r), Message: message})
 }
@@ -2437,6 +2445,12 @@ func (c *SessionsController) delegateTask(w http.ResponseWriter, r *http.Request
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_APPROVAL_MODE", "approvalMode is invalid", nil)
 		return
 	}
+	goal, timebox, err := validateWorkerContract(in.Goal, in.TimeboxSeconds, domain.KindWorker, in.ProjectID)
+	if err != nil {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "validation", "INVALID_WORKER_CONTRACT", err.Error(), nil)
+		return
+	}
+	in.Goal = goal
 	attachments, attachErr := decodeSpawnAttachments(in.Attachments)
 	if attachErr != nil {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", attachErr.code, attachErr.message, nil)
@@ -2456,6 +2470,8 @@ func (c *SessionsController) delegateTask(w http.ResponseWriter, r *http.Request
 		ClientRequestHash: requestHash,
 		ProjectID:         in.ProjectID,
 		Brief:             domain.SanitizeControlChars(in.Brief),
+		Goal:              goal,
+		Timebox:           timebox,
 		BaseBranch:        strings.TrimSpace(in.BaseBranch),
 		Branch:            domain.SanitizeControlChars(strings.TrimSpace(in.Branch)),
 		RequestedAgent:    in.Agent,
@@ -2476,6 +2492,29 @@ func (c *SessionsController) delegateTask(w http.ResponseWriter, r *http.Request
 
 func validClientRequestID(id string) bool {
 	return id == "" || len(id) <= maxIdempotencyKey && strings.TrimSpace(id) == id && strings.IndexFunc(id, unicode.IsControl) < 0
+}
+
+func validateWorkerContract(rawGoal string, seconds int64, kind domain.SessionKind, projectID domain.ProjectID) (string, time.Duration, error) {
+	goal := strings.TrimSpace(domain.SanitizeControlChars(rawGoal))
+	if seconds < 0 || seconds > maxTimeboxSeconds {
+		return "", 0, fmt.Errorf("timeboxSeconds must be between 1 and %d", maxTimeboxSeconds)
+	}
+	if goal == "" && seconds == 0 {
+		return "", 0, nil
+	}
+	if goal == "" || seconds == 0 {
+		return "", 0, fmt.Errorf("goal and timeboxSeconds must be supplied together")
+	}
+	if kind != domain.KindWorker {
+		return "", 0, fmt.Errorf("goal and timeboxSeconds are supported for worker sessions only")
+	}
+	if projectID == "" {
+		return "", 0, fmt.Errorf("goal and timeboxSeconds require a registered project")
+	}
+	if utf8.RuneCountInString(goal) > maxWorkerGoalLen {
+		return "", 0, fmt.Errorf("goal must be %d characters or fewer", maxWorkerGoalLen)
+	}
+	return goal, time.Duration(seconds) * time.Second, nil
 }
 
 func clientRequestFingerprint(route string, request any, attachments []ports.SpawnAttachment) string {

@@ -24,6 +24,13 @@ type steerOrSendService interface {
 	SteerOrSend(context.Context, domain.SessionID, ports.ChatUserMessage, bool) (chatsvc.SteerOrSendResult, error)
 }
 
+func steerRequestOrigin(req SteerConversationRequest) domain.MessageOrigin {
+	if req.AutomationAuthored || req.SenderSessionID != "" {
+		return domain.MessageOriginAutomation
+	}
+	return domain.MessageOriginHuman
+}
+
 // PromoteQueuedTurnResponse reports where one durable queued turn landed.
 type PromoteQueuedTurnResponse struct {
 	SourceTurnID   string `json:"sourceTurnId"`
@@ -54,7 +61,7 @@ func (c *ConversationsController) steerOrSend(w http.ResponseWriter, r *http.Req
 		domain.SessionID(chi.URLParam(r, "sessionId")),
 		ports.ChatUserMessage{
 			Text: req.Text, Content: content, ClientMessageID: req.ClientMessageID,
-			SenderSessionID: req.SenderSessionID, Origin: domain.MessageOriginHuman,
+			SenderSessionID: req.SenderSessionID, Origin: steerRequestOrigin(req),
 		},
 		req.RecoverOnly,
 	)
@@ -65,7 +72,7 @@ func (c *ConversationsController) steerOrSend(w http.ResponseWriter, r *http.Req
 	// A send that fell back to a new turn is a Chat message, counted where it is
 	// inserted; only a steer needs counting here.
 	if !req.RecoverOnly && !result.Duplicate && result.Steered {
-		recordUserMessage(r.Context(), c.UserMessages, domain.SessionID(chi.URLParam(r, "sessionId")), req.SenderSessionID, true)
+		recordUserMessage(r.Context(), c.UserMessages, domain.SessionID(chi.URLParam(r, "sessionId")), req.SenderSessionID, req.AutomationAuthored, true)
 	}
 	response := SteerOrSendConversationResponse{Duplicate: result.Duplicate}
 	if result.Steered {
@@ -127,7 +134,7 @@ func (c *ConversationsController) steer(w http.ResponseWriter, r *http.Request) 
 			Content:         content,
 			ClientMessageID: req.ClientMessageID,
 			SenderSessionID: req.SenderSessionID,
-			Origin:          domain.MessageOriginHuman,
+			Origin:          steerRequestOrigin(req),
 		})
 	if err != nil {
 		writeSteerError(w, r, err)
@@ -135,7 +142,7 @@ func (c *ConversationsController) steer(w http.ResponseWriter, r *http.Request) 
 	}
 	// A replay of an accepted client message id is the same steer, not a new one.
 	if !result.Replayed {
-		recordUserMessage(r.Context(), c.UserMessages, domain.SessionID(chi.URLParam(r, "sessionId")), req.SenderSessionID, true)
+		recordUserMessage(r.Context(), c.UserMessages, domain.SessionID(chi.URLParam(r, "sessionId")), req.SenderSessionID, req.AutomationAuthored, true)
 	}
 	envelope.WriteJSON(w, http.StatusAccepted, SteerConversationResponse{
 		ProviderTurnID: result.ProviderTurnID,

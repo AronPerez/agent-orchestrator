@@ -643,6 +643,71 @@ func TestRequestedOutputArtifactSetsRequestedOutput(t *testing.T) {
 	}
 }
 
+func TestSpawnWorkerContractSetsGoalAndTimebox(t *testing.T) {
+	cfg := setConfigEnv(t)
+	var req map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/demo":
+			_, _ = io.WriteString(w, `{"status":"ok","project":{"id":"demo","name":"Demo","path":"/repo/demo","repo":"https://github.com/aoagents/agent-orchestrator","defaultBranch":"main"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions":
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatal(err)
+			}
+			_, _ = io.WriteString(w, `{"session":{"id":"demo-1","status":"idle"}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	writeRunFileFor(t, cfg, srv)
+
+	_, errOut, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }},
+		"spawn", "--project", "demo", "--agent", "codex", "--name", "Contract worker",
+		"--goal", "Ship the verified contract foundation", "--timebox", "2h", "--skip-agent-check")
+	if err != nil {
+		t.Fatalf("spawn failed: %v stderr=%s", err, errOut)
+	}
+	if got := req["goal"]; got != "Ship the verified contract foundation" {
+		t.Fatalf("goal = %#v", got)
+	}
+	if got := req["timeboxSeconds"]; got != float64(2*time.Hour/time.Second) {
+		t.Fatalf("timeboxSeconds = %#v, want 7200", got)
+	}
+}
+
+func TestSpawnWorkerContractRejectsStandalone(t *testing.T) {
+	_, _, err := executeCLI(t, Deps{},
+		"spawn", "--standalone", "--agent", "codex", "--name", "Contract worker",
+		"--goal", "Ship it", "--timebox", "2h")
+	if err == nil || ExitCode(err) != 2 || !strings.Contains(err.Error(), "registered project") {
+		t.Fatalf("err=%v exit=%d, want standalone contract usage error", err, ExitCode(err))
+	}
+}
+
+func TestSpawnWorkerContractRejectsIncompleteOrInvalidUse(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "goal only", args: []string{"--goal", "Finish it"}, want: "--goal and --timebox must be used together"},
+		{name: "timebox only", args: []string{"--timebox", "2h"}, want: "--goal and --timebox must be used together"},
+		{name: "invalid timebox", args: []string{"--goal", "Finish it", "--timebox", "soon"}, want: "invalid --timebox"},
+		{name: "non-positive timebox", args: []string{"--goal", "Finish it", "--timebox", "0s"}, want: "--timebox must be greater than zero"},
+		{name: "orchestrator contract", args: []string{"--goal", "Finish it", "--timebox", "2h", "--kind", "orchestrator"}, want: "--goal and --timebox are supported for worker sessions only"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{"spawn", "--project", "demo", "--name", "worker"}, tc.args...)
+			_, _, err := executeCLI(t, Deps{}, args...)
+			if err == nil || ExitCode(err) != 2 || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v exit=%d, want %q", err, ExitCode(err), tc.want)
+			}
+		})
+	}
+}
+
 func TestSpawnOutputRejectsInvalidUse(t *testing.T) {
 	for _, tc := range []struct {
 		name string

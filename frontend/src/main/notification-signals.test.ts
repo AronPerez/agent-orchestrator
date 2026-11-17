@@ -10,7 +10,7 @@ import {
 	type NotificationType,
 } from "./notification-signals";
 
-const ALL_TYPES: NotificationType[] = ["needs_input", "ready_to_merge", "pr_merged", "pr_closed_unmerged"];
+const ALL_TYPES: NotificationType[] = ["needs_input", "session_stalled", "ready_to_merge", "pr_merged", "pr_closed_unmerged"];
 
 describe("shouldToast", () => {
 	it("fires a toast for every backend notification type", () => {
@@ -29,6 +29,7 @@ describe("shouldToast", () => {
 describe("shouldSignalAttention", () => {
 	it("flashes the taskbar for the actionable types", () => {
 		expect(shouldSignalAttention("needs_input")).toBe(true);
+		expect(shouldSignalAttention("session_stalled")).toBe(true);
 		expect(shouldSignalAttention("ready_to_merge")).toBe(true);
 	});
 
@@ -94,12 +95,13 @@ describe("toastSilent", () => {
 });
 
 describe("dockBounceType", () => {
-	it("bounces critically for a blocked agent waiting on the user", () => {
+	it("bounces critically for sessions that need the user", () => {
 		expect(dockBounceType("needs_input")).toBe("critical");
+		expect(dockBounceType("session_stalled")).toBe("critical");
 	});
 
 	it("bounces once for the other backend types", () => {
-		for (const type of ALL_TYPES.filter((t) => t !== "needs_input")) {
+		for (const type of ALL_TYPES.filter((t) => t !== "needs_input" && t !== "session_stalled")) {
 			expect(dockBounceType(type)).toBe("informational");
 		}
 	});

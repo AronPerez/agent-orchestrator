@@ -255,6 +255,36 @@ func TestAccessDevicesScopedClientReissueReplacesPriorToken(t *testing.T) {
 	}
 }
 
+func TestAccessDevicesScopedClientReissueReconcilesAcrossIssuerChange(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mobile", "access-devices.json")
+	now := time.Date(2026, 11, 17, 14, 0, 0, 0, time.UTC)
+	devices, err := LoadAccessDevices(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, firstToken, _, err := devices.IssueScopedByClient(
+		"Origin laptop", "darwin", []string{DeviceScopeAgentCoordination}, SharedAccount, "h_origin", now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, secondToken, replaced, err := devices.IssueScopedByClient(
+		"Origin laptop", "darwin", []string{DeviceScopeAgentCoordination}, DeviceIssuer("dev_new_parent"), "h_origin", now.Add(time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replaced) != 1 || replaced[0].ID != first.ID {
+		t.Fatalf("replacement = %+v, want first child %s", replaced, first.ID)
+	}
+	if _, ok := devices.Match(firstToken); ok {
+		t.Fatal("child issued by the old parent survived reconciliation")
+	}
+	if matched, ok := devices.Match(secondToken); !ok || matched.ID != second.ID || matched.Issuer != DeviceIssuer("dev_new_parent") {
+		t.Fatalf("new child = %+v, %v", matched, ok)
+	}
+}
+
 func TestAccessDevicesTouchAndLink(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "access-devices.json")
 	now := time.Date(2026, 11, 10, 9, 0, 0, 0, time.UTC)
