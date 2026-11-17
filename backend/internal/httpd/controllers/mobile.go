@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,8 @@ import (
 )
 
 const mobileUnencryptedWarning = "Traffic on this connection is not encrypted. Only use it on a network you trust."
+
+var coordinationClientIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 
 type mobileBridge interface {
 	Status() MobileStatusResponse
@@ -95,7 +98,7 @@ func (c *MobileController) IssueCoordinationToken(w http.ResponseWriter, r *http
 		return
 	}
 	issuer, ok := c.Bridge.(interface {
-		IssueCoordinationToken(context.Context, string, string, requestscope.Credential, string) (CoordinationTokenResponse, error)
+		IssueCoordinationToken(context.Context, string, string, string, requestscope.Credential, string) (CoordinationTokenResponse, error)
 	})
 	if !ok {
 		envelope.WriteAPIError(w, r, http.StatusNotImplemented, "not_implemented", "COORDINATION_TOKEN",
@@ -109,11 +112,16 @@ func (c *MobileController) IssueCoordinationToken(w http.ResponseWriter, r *http
 			return
 		}
 	}
+	if req.ClientID != "" && !coordinationClientIDPattern.MatchString(req.ClientID) {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_COORDINATION_CLIENT_ID",
+			"clientId must contain only letters, numbers, underscores, or hyphens.", nil)
+		return
+	}
 	presentedToken := ""
 	if authorization := r.Header.Get("Authorization"); strings.HasPrefix(authorization, "Bearer ") {
 		presentedToken = strings.TrimPrefix(authorization, "Bearer ")
 	}
-	result, err := issuer.IssueCoordinationToken(r.Context(), req.Name, req.Platform, credential, presentedToken)
+	result, err := issuer.IssueCoordinationToken(r.Context(), req.Name, req.Platform, req.ClientID, credential, presentedToken)
 	switch {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		writeCoordinationInterrupted(w, r)
@@ -1321,7 +1329,7 @@ func (b *BridgeService) PairDevice(code, name, platform string) (PairDeviceRespo
 
 // IssueCoordinationToken gives a headless client a route-filtered device token
 // after atomically revalidating the full credential that delegates its authority.
-func (b *BridgeService) IssueCoordinationToken(ctx context.Context, name, platform string, credential requestscope.Credential, presentedToken string) (CoordinationTokenResponse, error) {
+func (b *BridgeService) IssueCoordinationToken(ctx context.Context, name, platform, clientID string, credential requestscope.Credential, presentedToken string) (CoordinationTokenResponse, error) {
 	if err := b.lockTransition(ctx); err != nil {
 		return CoordinationTokenResponse{}, err
 	}
@@ -1345,9 +1353,14 @@ func (b *BridgeService) IssueCoordinationToken(ctx context.Context, name, platfo
 	if strings.TrimSpace(platform) == "" {
 		platform = "cli"
 	}
-	device, token, err := b.Devices.IssueScopedBy(name, platform, []string{mobilebridge.DeviceScopeAgentCoordination}, issuer, time.Now())
+	device, token, replaced, err := b.Devices.IssueScopedByClient(name, platform, []string{mobilebridge.DeviceScopeAgentCoordination}, issuer, clientID, time.Now())
 	if err != nil {
 		return CoordinationTokenResponse{}, err
+	}
+	if lan, ok := b.LAN.(interface{ DisconnectCredential(string) }); ok {
+		for _, previous := range replaced {
+			lan.DisconnectCredential(previous.TokenHash)
+		}
 	}
 	return CoordinationTokenResponse{
 		HostID: b.HostID, DeviceID: device.ID, Token: token,
