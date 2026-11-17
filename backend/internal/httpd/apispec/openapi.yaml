@@ -23015,6 +23015,10 @@ components:
           type: array
         trackerIntake:
           $ref: '#/components/schemas/TrackerIntakeConfig'
+        verify:
+          items:
+            type: string
+          type: array
         worker:
           $ref: '#/components/schemas/RoleOverride'
         workersRequestReview:
