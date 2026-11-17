@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,6 +29,7 @@ func aoHome(t *testing.T) string {
 	t.Setenv("USERPROFILE", dir) // os.UserHomeDir on Windows
 	t.Setenv("AO_URL", "")
 	t.Setenv("AO_TOKEN", "")
+	t.Setenv("AO_DATA_DIR", "")
 	return dir
 }
 
@@ -206,6 +208,210 @@ func TestResolveRemoteTargetCredentialSources(t *testing.T) {
 			t.Fatalf("err = %q, must not tell the user to add an entry that already exists", err)
 		}
 	})
+}
+
+func TestResolveSavedHostTargetByExactLabelOrHostID(t *testing.T) {
+	home := aoHome(t)
+	writeRemotes(t, home, 0o600,
+		remoteEntry{Label: "desk", URL: "http://host:3011/", HostID: "h_desk", CoordinationToken: "aoc_coordination"},
+		remoteEntry{Label: "mini", URL: "https://mini.example", HostID: "h_mini", CoordinationToken: "aoc_mini"},
+	)
+
+	for _, name := range []string{"desk", "h_desk"} {
+		got, err := resolveSavedHostTarget(name)
+		if err != nil {
+			t.Fatalf("resolveSavedHostTarget(%q): %v", name, err)
+		}
+		if got.baseURL != "http://host:3011" || got.token != "aoc_coordination" || got.hostID != "h_desk" || got.label != "desk" || got.source != "--host" {
+			t.Fatalf("resolveSavedHostTarget(%q) = %+v", name, got)
+		}
+	}
+
+	t.Run("stable host ID wins over a colliding label", func(t *testing.T) {
+		writeRemotes(t, home, 0o600,
+			remoteEntry{Label: "h_desk", URL: "http://other:3011", HostID: "h_other", CoordinationToken: "aoc_other"},
+			remoteEntry{Label: "desk", URL: "http://host:3011", HostID: "h_desk", CoordinationToken: "aoc_coordination"},
+		)
+		got, err := resolveSavedHostTarget("h_desk")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.hostID != "h_desk" || got.label != "desk" {
+			t.Fatalf("got %+v, want the stable host ID match", got)
+		}
+	})
+}
+
+func TestResolveSavedHostTargetRequiresUnambiguousCoordinationCredential(t *testing.T) {
+	t.Run("full password is never a fallback", func(t *testing.T) {
+		home := aoHome(t)
+		writeRemotes(t, home, 0o600, remoteEntry{
+			Label: "desk", URL: "http://host:3011", HostID: "h_desk", Password: "full-secret",
+		})
+		_, err := resolveSavedHostTarget("desk")
+		if err == nil || !strings.Contains(err.Error(), "coordination credential") || !strings.Contains(err.Error(), "desktop") {
+			t.Fatalf("err = %v, want reconnect guidance for a missing coordination credential", err)
+		}
+		if strings.Contains(err.Error(), "full-secret") {
+			t.Fatalf("error exposed the full credential: %v", err)
+		}
+	})
+
+	t.Run("legacy full-device token is rejected", func(t *testing.T) {
+		home := aoHome(t)
+		writeRemotes(t, home, 0o600, remoteEntry{
+			Label: "desk", URL: "http://host:3011", HostID: "h_desk", CoordinationToken: "aod_legacy",
+		})
+		_, err := resolveSavedHostTarget("desk")
+		if err == nil || !strings.Contains(err.Error(), "invalid coordination credential") {
+			t.Fatalf("err = %v, want legacy token rejection", err)
+		}
+	})
+
+	t.Run("host identity is required", func(t *testing.T) {
+		home := aoHome(t)
+		writeRemotes(t, home, 0o600, remoteEntry{Label: "desk", URL: "http://host:3011", CoordinationToken: "aoc_coordination"})
+		_, err := resolveSavedHostTarget("desk")
+		if err == nil || !strings.Contains(err.Error(), "host ID") {
+			t.Fatalf("err = %v, want a missing-host-ID error", err)
+		}
+	})
+
+	t.Run("duplicate exact labels are ambiguous", func(t *testing.T) {
+		home := aoHome(t)
+		writeRemotes(t, home, 0o600,
+			remoteEntry{Label: "desk", URL: "http://one:3011", HostID: "h_one", CoordinationToken: "aoc_one"},
+			remoteEntry{Label: "desk", URL: "http://two:3011", HostID: "h_two", CoordinationToken: "aoc_two"},
+		)
+		_, err := resolveSavedHostTarget("desk")
+		if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+			t.Fatalf("err = %v, want an ambiguity error", err)
+		}
+	})
+}
+
+func TestSelectSavedHostProbesIdentityBeforePresentingCredential(t *testing.T) {
+	home := aoHome(t)
+	var identityAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/identity" {
+			t.Fatalf("path = %q, want identity probe", r.URL.Path)
+		}
+		identityAuth = r.Header.Get("Authorization")
+		_ = json.NewEncoder(w).Encode(map[string]any{"hostId": "h_desk", "apiVersion": 1})
+	}))
+	defer srv.Close()
+	writeRemotes(t, home, 0o600, remoteEntry{Label: "desk", URL: srv.URL, HostID: "h_desk", CoordinationToken: "aoc_coordination"})
+
+	c := &commandContext{deps: Deps{HTTPClient: srv.Client()}.withDefaults()}
+	if err := c.selectSavedHost(context.Background(), "desk"); err != nil {
+		t.Fatal(err)
+	}
+	if identityAuth != "" {
+		t.Fatalf("identity probe sent Authorization %q", identityAuth)
+	}
+	req := httptest.NewRequest(http.MethodGet, srv.URL+"/api/v1/sessions", nil)
+	c.authorize(req)
+	if got := req.Header.Get("Authorization"); got != "Bearer aoc_coordination" {
+		t.Fatalf("Authorization = %q", got)
+	}
+	if got := req.Header.Get("X-AO-Expected-Host-ID"); got != "h_desk" {
+		t.Fatalf("X-AO-Expected-Host-ID = %q", got)
+	}
+}
+
+func TestSelectSavedHostRejectsIdentityMismatchAndSelfBeforeAuth(t *testing.T) {
+	t.Run("saved identity changed", func(t *testing.T) {
+		home := aoHome(t)
+		var gotAuth string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotAuth = r.Header.Get("Authorization")
+			_ = json.NewEncoder(w).Encode(map[string]any{"hostId": "h_other", "apiVersion": 1})
+		}))
+		defer srv.Close()
+		writeRemotes(t, home, 0o600, remoteEntry{Label: "desk", URL: srv.URL, HostID: "h_desk", CoordinationToken: "aoc_coordination"})
+		c := &commandContext{deps: Deps{HTTPClient: srv.Client()}.withDefaults()}
+		err := c.selectSavedHost(context.Background(), "desk")
+		if err == nil || !strings.Contains(err.Error(), "identity changed") {
+			t.Fatalf("err = %v, want identity mismatch", err)
+		}
+		if gotAuth != "" || c.remote != nil {
+			t.Fatalf("credential was selected before identity proof: auth=%q remote=%+v", gotAuth, c.remote)
+		}
+	})
+
+	t.Run("identity redirects are not followed", func(t *testing.T) {
+		home := aoHome(t)
+		followed := false
+		destination := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { followed = true }))
+		defer destination.Close()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if auth := r.Header.Get("Authorization"); auth != "" {
+				t.Fatalf("identity redirect response received Authorization %q", auth)
+			}
+			http.Redirect(w, r, destination.URL, http.StatusFound)
+		}))
+		defer srv.Close()
+		writeRemotes(t, home, 0o600, remoteEntry{Label: "desk", URL: srv.URL, HostID: "h_desk", CoordinationToken: "aoc_coordination"})
+		c := &commandContext{deps: Deps{HTTPClient: srv.Client()}.withDefaults()}
+		err := c.selectSavedHost(context.Background(), "desk")
+		if err == nil || !strings.Contains(err.Error(), "HTTP 302") {
+			t.Fatalf("err = %v, want redirect refusal", err)
+		}
+		if followed || c.remote != nil {
+			t.Fatalf("identity redirect was followed=%v or selected remote=%+v", followed, c.remote)
+		}
+	})
+
+	t.Run("saved host is this installation", func(t *testing.T) {
+		home := aoHome(t)
+		dataDir := filepath.Join(home, ".ao", "data")
+		t.Setenv("AO_DATA_DIR", dataDir)
+		identityPath := filepath.Join(dataDir, "mobile", "identity.json")
+		if err := os.MkdirAll(filepath.Dir(identityPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(identityPath, []byte(`{"hostId":"h_self"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var gotAuth string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotAuth = r.Header.Get("Authorization")
+			_ = json.NewEncoder(w).Encode(map[string]any{"hostId": "h_self", "apiVersion": 1})
+		}))
+		defer srv.Close()
+		// AO_DATA_DIR is also where an isolated desktop stores remotes.json.
+		if err := os.WriteFile(filepath.Join(dataDir, remotesFileName), mustJSON(t, remotesFile{Remotes: []remoteEntry{{Label: "self", URL: srv.URL, HostID: "h_self", CoordinationToken: "aoc_coordination"}}}), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		c := &commandContext{deps: Deps{HTTPClient: srv.Client()}.withDefaults()}
+		err := c.selectSavedHost(context.Background(), "self")
+		if err == nil || !strings.Contains(err.Error(), "itself") {
+			t.Fatalf("err = %v, want self-target refusal", err)
+		}
+		if gotAuth != "" || c.remote != nil {
+			t.Fatalf("self probe presented a credential: auth=%q remote=%+v", gotAuth, c.remote)
+		}
+	})
+}
+
+func TestSelectSavedHostConflictsWithExplicitRemoteTarget(t *testing.T) {
+	aoHome(t)
+	c := &commandContext{remote: &remoteTarget{baseURL: "http://explicit:3011", source: "--url"}}
+	err := c.selectSavedHost(context.Background(), "desk")
+	var usage usageError
+	if !errors.As(err, &usage) || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("err = %v, want a usage conflict", err)
+	}
+}
+
+func mustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
 }
 
 // remotes.json holds connection passwords in plaintext, so a group/other

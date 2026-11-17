@@ -2,7 +2,19 @@ import { execFile } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { IncompatibleRemoteVersionError, pairDevice, probeRemote, readAuthErrorCode, readRemoteIdentity, type PairDeviceResult, type RemoteHealth } from "./remote-request";
+import {
+	IncompatibleRemoteVersionError,
+	issueCoordinationToken,
+	pairDevice,
+	probeCoordinationToken,
+	probeRemote,
+	readAuthErrorCode,
+	readRemoteIdentity,
+	type CoordinationTokenHealth,
+	type CoordinationTokenResult,
+	type PairDeviceResult,
+	type RemoteHealth,
+} from "./remote-request";
 import { findRemote, removeSavedRemote, toHostViews, updateSavedRemote } from "./remotes-ipc";
 import type { RemoteRegistry } from "./remote-registry";
 import { ACCOUNT_TOKEN, DEVICE_TOKEN_PREFIX, addRemote, holdsAccountToken, holdsPairingPassword, readRemotes, updateRemote, type RemoteChanges, type RemoteEntry } from "./remotes-store";
@@ -55,6 +67,8 @@ export type RemotesIpcDeps = {
 	probe?: (entry: RemoteEntry) => Promise<RemoteHealth>;
 	identity?: (entry: Pick<RemoteEntry, "url">) => Promise<string>;
 	pair?: (entry: Pick<RemoteEntry, "url" | "hostId">, secret: string, device: { name: string; platform: string }) => Promise<PairDeviceResult>;
+	issueCoordination?: (entry: Pick<RemoteEntry, "url" | "hostId" | "password">, device: { name: string; platform: string }) => Promise<CoordinationTokenResult>;
+	probeCoordination?: (entry: Pick<RemoteEntry, "url" | "hostId" | "coordinationToken">) => Promise<CoordinationTokenHealth>;
 	authErrorCode?: (entry: RemoteEntry) => Promise<string | undefined>;
 	deviceName?: () => Promise<string>;
 };
@@ -74,7 +88,9 @@ export function registerRemotesIpc(
 	ipcMain: IpcMainLike,
 	{
 		file, registry, requireAccount, getAccountId, localIdentity, cloudRequest, accountDirectoryTimeoutMs = 10_000,
-		probe = probeRemote, identity = readRemoteIdentity, pair = pairDevice, authErrorCode = readAuthErrorCode, deviceName = computerName,
+		probe = probeRemote, identity = readRemoteIdentity, pair = pairDevice,
+		issueCoordination = issueCoordinationToken, probeCoordination = probeCoordinationToken,
+		authErrorCode = readAuthErrorCode, deviceName = computerName,
 	}: RemotesIpcDeps,
 ): void {
 	const disconnect = (url: string) => registry.disconnect(url);
@@ -139,6 +155,25 @@ export function registerRemotesIpc(
 		} else {
 			unsaved.delete(unsavedKey(account, typed.hostId));
 		}
+	};
+	const ensureCoordinationCredential = async (entry: RemoteEntry, localHostId: string, account: string): Promise<RemoteEntry> => {
+		if (entry.coordinationToken) {
+			let health: CoordinationTokenHealth;
+			try { health = await probeCoordination(entry); }
+			catch { return entry; }
+			if (health !== "invalid") return entry;
+		}
+		let issued: CoordinationTokenResult;
+		try {
+			issued = await issueCoordination(entry, { name: await deviceName(), platform: process.platform });
+		} catch {
+			// This credential exists for headless CLI coordination. An older host,
+			// transient failure, or display-name lookup must not break desktop use.
+			return entry;
+		}
+		if (issued.kind !== "issued") return entry;
+		await checkConnectionContext(localHostId, account);
+		return updateRemote(file, entry.url, { coordinationToken: issued.token });
 	};
 	// Keep edits and connects ordered so an update cannot leave a stale proxy.
 	// ponytail: one queue includes network probes; split by host if five-host setup is too slow.
@@ -266,6 +301,8 @@ export function registerRemotesIpc(
 				current = await updateRemote(file, url, { password: paired.entry.password, fallbackPassword: paired.entry.fallbackPassword });
 			}
 		}
+		current = await ensureCoordinationCredential(current, localHostId, account);
+		await checkConnectionContext(localHostId, account);
 		return registry.connect(current);
 	}));
 	// AO Cloud calls run outside the ordered queue: a slow answer must not hold

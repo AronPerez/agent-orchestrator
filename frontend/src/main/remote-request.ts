@@ -1,5 +1,5 @@
 import { parseDaemonProbe } from "../shared/daemon-attach";
-import { DEVICE_TOKEN_PREFIX, type RemoteEntry } from "./remotes-store";
+import { COORDINATION_TOKEN_PREFIX, DEVICE_TOKEN_PREFIX, type RemoteEntry } from "./remotes-store";
 
 // Remote HTTP lives in the main process for two reasons: the renderer's origin
 // is app://renderer and a remote daemon has no reason to allow it through CORS,
@@ -112,6 +112,14 @@ export type PairDeviceResult =
 	| { kind: "unauthorized" }
 	| { kind: "offline" };
 
+export type CoordinationTokenResult =
+	| { kind: "issued"; token: string }
+	| { kind: "unsupported" }
+	| { kind: "unauthorized" }
+	| { kind: "offline" };
+
+export type CoordinationTokenHealth = "valid" | "invalid" | "offline";
+
 /** Exchanges a pairing code or password for this device's own token. Confirm the
  * host's identity first: this sends the secret. */
 export async function pairDevice(
@@ -143,6 +151,66 @@ export async function pairDevice(
 		return { kind: "paired", token: body.token, credential: body.credential === "pairing-code" ? "pairing-code" : "password" };
 	} catch {
 		return { kind: "offline" };
+	}
+}
+
+/** Mint a route-filtered credential after the caller has verified this host's
+ * unauthenticated identity. The token carries full transitive host authority
+ * through agents and must remain owner-only. A missing endpoint is an older
+ * compatible release, not a reason to break the desktop connection. */
+export async function issueCoordinationToken(
+	entry: Pick<RemoteEntry, "url" | "hostId" | "password">,
+	device: { name: string; platform: string },
+	fetchImpl: FetchImpl = fetch,
+	timeoutMs = 8_000,
+): Promise<CoordinationTokenResult> {
+	try {
+		const response = await fetchImpl(remoteUrl(entry, "/api/v1/remote-host/coordination-token").href, {
+			method: "POST",
+			redirect: "error",
+			headers: {
+				Authorization: `Bearer ${entry.password}`,
+				"Content-Type": "application/json",
+				...(entry.hostId ? { "X-AO-Expected-Host-ID": entry.hostId } : {}),
+			},
+			body: JSON.stringify(device),
+			signal: AbortSignal.timeout(timeoutMs),
+		});
+		if (response.status === 401 || response.status === 403) return { kind: "unauthorized" };
+		if ([404, 405, 501].includes(response.status)) return { kind: "unsupported" };
+		if (!response.ok) return { kind: "offline" };
+		const body = (await response.json()) as { hostId?: unknown; token?: unknown; scope?: unknown };
+		if (typeof body.token !== "string" || !body.token.startsWith(COORDINATION_TOKEN_PREFIX)
+			|| body.scope !== "agent-coordination" || (entry.hostId && body.hostId !== entry.hostId)) {
+			return { kind: "offline" };
+		}
+		return { kind: "issued", token: body.token };
+	} catch {
+		return { kind: "offline" };
+	}
+}
+
+/** Check a saved coordination credential only against a route its direct filter allows. */
+export async function probeCoordinationToken(
+	entry: Pick<RemoteEntry, "url" | "hostId" | "coordinationToken">,
+	fetchImpl: FetchImpl = fetch,
+	timeoutMs = 5_000,
+): Promise<CoordinationTokenHealth> {
+	if (!entry.coordinationToken) return "invalid";
+	try {
+		const response = await fetchImpl(remoteUrl(entry, "/api/v1/sessions?active=true").href, {
+			method: "GET",
+			redirect: "error",
+			headers: {
+				Authorization: `Bearer ${entry.coordinationToken}`,
+				...(entry.hostId ? { "X-AO-Expected-Host-ID": entry.hostId } : {}),
+			},
+			signal: AbortSignal.timeout(timeoutMs),
+		});
+		if (response.status === 401 || response.status === 403) return "invalid";
+		return response.ok ? "valid" : "offline";
+	} catch {
+		return "offline";
 	}
 }
 
