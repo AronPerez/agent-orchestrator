@@ -12,8 +12,9 @@ function guardHarness() {
 	const onChange = vi.fn();
 	const relaunch = vi.fn();
 	const isIdle = vi.fn(async () => idle);
-	const guard = new InstalledBuildGuard({ readIdentity: async () => identity, isIdle, onChange, relaunch });
-	return { guard, onChange, relaunch, isIdle, replace: (next: string | null) => { identity = next; }, busy: () => { idle = false; }, idle: () => { idle = true; } };
+	const assertRestartSafe = vi.fn<() => void>();
+	const guard = new InstalledBuildGuard({ readIdentity: async () => identity, isIdle, onChange, assertRestartSafe, relaunch });
+	return { guard, onChange, relaunch, isIdle, assertRestartSafe, replace: (next: string | null) => { identity = next; }, busy: () => { idle = false; }, idle: () => { idle = true; } };
 }
 
 describe("installed desktop build", () => {
@@ -72,6 +73,32 @@ describe("installed desktop build", () => {
 		await h.guard.requestRestart("when-idle");
 		await h.guard.requestRestart("cancel");
 		h.idle();
+		await h.guard.check();
+		expect(h.relaunch).not.toHaveBeenCalled();
+	});
+
+	it.each(["now", "when-idle"] as const)("refuses %s while the native installer owns an update", async (mode) => {
+		const h = guardHarness();
+		h.replace("B");
+		await h.guard.check();
+		await h.guard.check();
+		h.assertRestartSafe.mockImplementation(() => { throw new Error("native update armed"); });
+		await expect(h.guard.requestRestart(mode)).rejects.toThrow("native update armed");
+		expect(h.guard.status?.restartWhenIdle).toBe(false);
+		expect(h.relaunch).not.toHaveBeenCalled();
+	});
+
+	it("cancels a queued restart if native staging starts before workers become idle", async () => {
+		const h = guardHarness();
+		h.busy();
+		h.replace("B");
+		await h.guard.check();
+		await h.guard.check();
+		await h.guard.requestRestart("when-idle");
+		h.assertRestartSafe.mockImplementation(() => { throw new Error("native update armed"); });
+		h.idle();
+		await expect(h.guard.check()).rejects.toThrow("native update armed");
+		expect(h.guard.status?.restartWhenIdle).toBe(false);
 		await h.guard.check();
 		expect(h.relaunch).not.toHaveBeenCalled();
 	});
@@ -142,7 +169,7 @@ describe("installed desktop build", () => {
 		await h.guard.check();
 		await h.guard.requestRestart("now");
 		const onChange = vi.fn();
-		const restarted = new InstalledBuildGuard({ readIdentity: async () => "new-asar", isIdle: async () => true, onChange, relaunch: vi.fn() });
+		const restarted = new InstalledBuildGuard({ readIdentity: async () => "new-asar", isIdle: async () => true, onChange, assertRestartSafe: () => undefined, relaunch: vi.fn() });
 		await restarted.check();
 		await restarted.check();
 		expect(restarted.status).toBeUndefined();

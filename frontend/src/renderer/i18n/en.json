@@ -2208,6 +2208,8 @@
 	"update.restart.scheduledShort": "Restart when idle",
 	"update.restart.cancelScheduled": "Cancel scheduled restart",
 	"update.restart.restartFailed": "Orchestrator could not restart. Please try again.",
+	"update.restart.nativeUpdatePending": "An earlier macOS update may still install when Orchestrator quits. Quit Orchestrator, let any pending update finish, then reinstall this build before reopening it.",
+	"update.restart.blockedShort": "Restart needs attention",
 	"update.restart.whatsNew": "What's new",
 	"update.restart.noNotes": "No release notes were published for this build.",
 	"update.restart.sessionsTitle_one": "1 chat session will lose its current turn",

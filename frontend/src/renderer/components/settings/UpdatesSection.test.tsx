@@ -99,6 +99,14 @@ it("says an external build is installed instead of asking the user to install it
 	expect(screen.getByRole("button", { name: "Restart options" })).toBeVisible();
 });
 
+it("explains recovery when a native update blocks restarting into an external build", async () => {
+	updGetStatus.mockResolvedValue({ state: "downloaded", installed: { identity: "B", idle: true, restartWhenIdle: false, restartBlocked: "native-update-staged" } } satisfies UpdateStatus);
+	renderUpdates();
+	expect(await screen.findByText(/An earlier macOS update may still install/)).toBeVisible();
+	expect(screen.queryByText("A new build of Orchestrator is installed. Restart to start using it.")).not.toBeInTheDocument();
+	expect(screen.getByRole("button", { name: "Restart options" })).toBeVisible();
+});
+
 it("links PRs and commits in downloaded notes from the renamed repository", async () => {
 	const repo = "https://github.com/OrchestratorInc/agent-orchestrator";
 	const commit = "7b7db96413e6a396a10afbcada0e2fd04a994ad8";
