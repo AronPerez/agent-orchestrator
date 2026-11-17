@@ -824,9 +824,10 @@ describe("Sidebar", () => {
 		renderSidebar();
 
 		const artifacts = screen.getByRole("button", { name: "Artifacts" });
-		const fleet = screen.getByRole("button", { name: "Fleet" });
+		const fleet = screen.getByRole("button", { name: "Session fleet" });
 		expect(artifacts.compareDocumentPosition(fleet) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 		expect(fleet).not.toHaveAttribute("aria-current");
+		expect(fleet).toHaveTextContent("Fleet");
 
 		await user.click(fleet);
 		expect(navigateMock).toHaveBeenCalledWith({ to: "/fleet" });
@@ -835,7 +836,7 @@ describe("Sidebar", () => {
 			mockLocation.pathname = "/fleet";
 			notifyRouteChange();
 		});
-		expect(screen.getByRole("button", { name: "Fleet" })).toHaveAttribute("aria-current", "page");
+		expect(screen.getByRole("button", { name: "Session fleet" })).toHaveAttribute("aria-current", "page");
 	});
 
 	it("navigates home from the brand row", async () => {

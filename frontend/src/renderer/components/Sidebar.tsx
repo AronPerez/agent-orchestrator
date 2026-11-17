@@ -1185,6 +1185,7 @@ export const Sidebar = memo(function Sidebar({
 					<SidebarMenuItem>
 						<SidebarTopNavRow
 							active={selection.isFleet}
+							ariaLabel={t("fleet.title")}
 							icon={<FolderTree aria-hidden="true" />}
 							label={t("fleet.tab")}
 							onClick={selection.goFleet}
@@ -3630,6 +3631,7 @@ function SectionDisclosure({
  * (NavRowHighlight pill, foreground text, instant) cannot drift apart. */
 function SidebarTopNavRow({
 	active = false,
+	ariaLabel,
 	disabled,
 	icon,
 	label,
@@ -3638,6 +3640,7 @@ function SidebarTopNavRow({
 	trailing,
 }: {
 	active?: boolean;
+	ariaLabel?: string;
 	disabled?: boolean;
 	icon: ReactNode;
 	label: string;
@@ -3647,7 +3650,7 @@ function SidebarTopNavRow({
 }) {
 	return (
 		<SidebarMenuButton
-			aria-label={label}
+			aria-label={ariaLabel ?? label}
 			className={cn(
 				NAV_ROW_CLASS,
 				SIDEBAR_ROW_CLASS,
