@@ -218,6 +218,10 @@ const (
 	// credentials. Packaged desktop daemons use ~/.ao/data for daemon state but
 	// keep remotes.json one level above it, so AO_DATA_DIR cannot derive this.
 	EnvRemotesFile = "AO_REMOTES_FILE"
+	// EnvCloudAccountFile tells an agent CLI which live desktop Cloud session may
+	// authorize account-owned rows in EnvRemotesFile. It is separate because dev
+	// and packaged desktops keep authentication in different state roots.
+	EnvCloudAccountFile = "AO_CLOUD_ACCOUNT_FILE"
 	// EnvDesktopApp is "1" when the Orchestrator desktop app started the
 	// daemon, so macOS charges the session's privacy checks to Orchestrator.
 	// A daemon started from a terminal (`ao start`) leaves it unset: macOS
@@ -7251,6 +7255,17 @@ func (m *Manager) runtimeEnvChecked(id domain.SessionID, project domain.ProjectI
 	}
 	if remotesFilePath != "" {
 		env[EnvRemotesFile] = remotesFilePath
+	}
+	cloudAccountFilePath := strings.TrimSpace(os.Getenv(EnvCloudAccountFile))
+	deleteProtectedEnv(env, EnvCloudAccountFile, caseInsensitive)
+	if cloudAccountFilePath == "" && m.stateDir != "" {
+		cloudAccountFilePath = filepath.Join(m.stateDir, "cloud_active_user")
+	}
+	if cloudAccountFilePath != "" {
+		if absolute, err := filepath.Abs(cloudAccountFilePath); err == nil {
+			cloudAccountFilePath = absolute
+		}
+		env[EnvCloudAccountFile] = cloudAccountFilePath
 	}
 	deleteProtectedEnv(env, EnvDesktopApp, caseInsensitive)
 	if desktopOwnedDaemon() {

@@ -30,6 +30,8 @@ export type RemoteEntry = {
 	coordinationParentHash?: string;
 	/** Old coordination children that must be retired before another is issued. */
 	pendingCoordinationDeviceIds?: string[];
+	/** Hidden tombstone retaining the original host authority until child cleanup succeeds. */
+	cleanupOnly?: true;
 };
 
 export const DEVICE_TOKEN_PREFIX = "aod_";
@@ -175,7 +177,9 @@ function serializeMutation<T>(operation: () => Promise<T>): Promise<T> {
 export async function addRemote(path: string, entry: RemoteEntry): Promise<void> {
 	return serializeMutation(async () => {
 		const existing = await readRemotes(path);
-		const replaced = existing.filter((candidate) => candidate.url === entry.url || (entry.hostId && candidate.hostId === entry.hostId));
+		const sameHost = (candidate: RemoteEntry) => !!entry.hostId && candidate.hostId === entry.hostId;
+		const legacySameAddress = (candidate: RemoteEntry) => candidate.url === entry.url && (!candidate.hostId || !entry.hostId);
+		const replaced = existing.filter((candidate) => sameHost(candidate) || legacySameAddress(candidate));
 		const pendingCoordinationDeviceIds = [...new Set([
 			...(entry.pendingCoordinationDeviceIds ?? []),
 			...replaced.flatMap((candidate) => [
@@ -183,13 +187,74 @@ export async function addRemote(path: string, entry: RemoteEntry): Promise<void>
 				...(candidate.coordinationDeviceId ? [candidate.coordinationDeviceId] : []),
 			]),
 		])].filter((deviceId) => deviceId !== entry.coordinationDeviceId);
-		const replacement = pendingCoordinationDeviceIds.length > 0
-			? { ...entry, pendingCoordinationDeviceIds }
-			: entry;
+		const replacement: RemoteEntry = pendingCoordinationDeviceIds.length > 0
+			? { ...entry, cleanupOnly: undefined, pendingCoordinationDeviceIds }
+			: { ...entry, cleanupOnly: undefined };
+		const displaced = existing
+			.filter((candidate) => candidate.url === entry.url && !sameHost(candidate) && !legacySameAddress(candidate))
+			.map((candidate) => toCleanupRemote(candidate))
+			.filter((candidate): candidate is RemoteEntry => candidate !== undefined);
 		await writeRemotes(path, [
-			...existing.filter((candidate) => candidate.url !== entry.url && (!entry.hostId || candidate.hostId !== entry.hostId)),
+			...existing.filter((candidate) => !replaced.includes(candidate) && candidate.url !== entry.url),
+			...displaced,
 			replacement,
 		]);
+	});
+}
+
+function coordinationDeviceIDs(entry: RemoteEntry, extra: string[] = []): string[] {
+	return [...new Set([
+		...(entry.pendingCoordinationDeviceIds ?? []),
+		...(entry.coordinationDeviceId ? [entry.coordinationDeviceId] : []),
+		...extra,
+	])];
+}
+
+function toCleanupRemote(entry: RemoteEntry, extraDeviceIDs: string[] = []): RemoteEntry | undefined {
+	const pendingCoordinationDeviceIds = coordinationDeviceIDs(entry, extraDeviceIDs);
+	if (pendingCoordinationDeviceIds.length === 0 && !entry.coordinationToken) return undefined;
+	const untrackedCoordinationToken = entry.coordinationToken && !entry.coordinationDeviceId
+		? entry.coordinationToken
+		: undefined;
+	const {
+		coordinationToken: _token, coordinationDeviceId: _device, coordinationParentHash: _parent,
+		pendingCoordinationDeviceIds: _pending, ...kept
+	} = entry;
+	return {
+		...kept,
+		cleanupOnly: true,
+		...(untrackedCoordinationToken ? { coordinationToken: untrackedCoordinationToken } : {}),
+		...(pendingCoordinationDeviceIds.length > 0 ? { pendingCoordinationDeviceIds } : {}),
+	};
+}
+
+/** Hide an active host locally while durably retaining any remote child cleanup. */
+export async function queueRemoteCleanup(path: string, url: string, hostId: string | undefined, extraDeviceIDs: string[] = []): Promise<RemoteEntry | undefined> {
+	return serializeMutation(async () => {
+		const existing = await readRemotes(path);
+		const current = existing.find((candidate) => candidate.url === url
+			&& (!hostId || candidate.hostId === hostId)
+			&& !candidate.cleanupOnly)
+			?? existing.find((candidate) => candidate.url === url
+				&& (!hostId || candidate.hostId === hostId)
+				&& candidate.cleanupOnly);
+		if (!current) return undefined;
+		const cleanup = toCleanupRemote(current, extraDeviceIDs);
+		await writeRemotes(path, existing.flatMap((candidate) => candidate === current
+			? (cleanup ? [cleanup] : [])
+			: [candidate]));
+		return cleanup;
+	});
+}
+
+/** Drop exactly one completed cleanup tombstone without touching an active row at the same address. */
+export async function removeCleanupRemote(path: string, url: string, hostId?: string): Promise<void> {
+	return serializeMutation(async () => {
+		const existing = await readRemotes(path);
+		const remaining = existing.filter((candidate) => !(candidate.cleanupOnly
+			&& candidate.url === url
+			&& (!hostId || candidate.hostId === hostId)));
+		if (remaining.length !== existing.length) await writeRemotes(path, remaining);
 	});
 }
 
@@ -222,13 +287,14 @@ export function applyRemoteChanges(entry: RemoteEntry, changes: RemoteChanges): 
 		coordinationDeviceId: passwordChanged ? undefined : changedString(changes.coordinationDeviceId, entry.coordinationDeviceId),
 		coordinationParentHash: passwordChanged ? undefined : changedString(changes.coordinationParentHash, entry.coordinationParentHash),
 		pendingCoordinationDeviceIds: pending && pending.length > 0 ? pending : undefined,
+		cleanupOnly: entry.cleanupOnly,
 	};
 }
 
 export async function updateRemote(path: string, url: string, changes: RemoteChanges): Promise<RemoteEntry> {
 	return serializeMutation(async () => {
 		const existing = await readRemotes(path);
-		const current = existing.find((candidate) => candidate.url === url);
+		const current = existing.find((candidate) => candidate.url === url && !candidate.cleanupOnly);
 		if (!current) throw new Error(`no saved host for ${url}`);
 		const updated = applyRemoteChanges(current, changes);
 		// Re-pointing a host MOVES its entry: the row keeps its place, and any other
@@ -236,6 +302,7 @@ export async function updateRemote(path: string, url: string, changes: RemoteCha
 		const remotes = existing
 			.map((candidate) => (candidate === current ? updated : candidate))
 			.filter((candidate) => candidate === updated
+				|| candidate.cleanupOnly
 				|| (candidate.url !== updated.url && (!updated.hostId || candidate.hostId !== updated.hostId)));
 		await writeRemotes(path, remotes);
 		return updated;
@@ -245,7 +312,7 @@ export async function updateRemote(path: string, url: string, changes: RemoteCha
 export async function removeRemote(path: string, url: string): Promise<void> {
 	return serializeMutation(async () => {
 		const existing = await readRemotes(path);
-		const remaining = existing.filter((candidate) => candidate.url !== url);
+		const remaining = existing.filter((candidate) => candidate.cleanupOnly || candidate.url !== url);
 		// Removing what is not there is not an error, but it is not a write either.
 		if (remaining.length === existing.length) return;
 		await writeRemotes(path, remaining);
