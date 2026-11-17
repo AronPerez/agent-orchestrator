@@ -439,10 +439,15 @@ const SummaryView = memo(function SummaryView({
 	const collisionProjectId = !session.cloud && session.workspaceId !== STANDALONE_WORKSPACE_ID && !standaloneAgent
 		? session.workspaceId
 		: undefined;
-	const overlaps = useProjectOverlaps(collisionProjectId, { hostId });
-	const collision = projectOverlapForSession(overlaps.data, session.id);
 	const collisionWorkspace = summaryQueryClient.getQueryData<WorkspaceSummary[]>(workspaceQueryKeyForHost(hostId))
 		?.find((workspace) => workspace.id === session.workspaceId);
+	const overlapLiveSessionIds = collisionProjectId
+		? (collisionWorkspace?.sessions ?? [])
+			.filter((candidate) => candidate.isTerminated !== true && !candidate.needsResume)
+			.map((candidate) => candidate.id)
+		: undefined;
+	const overlaps = useProjectOverlaps(collisionProjectId, { hostId, liveSessionIds: overlapLiveSessionIds });
+	const collision = projectOverlapForSession(overlaps.data, session.id);
 	const collisionNames = new Map((collisionWorkspace?.sessions ?? []).map((candidate) => [candidate.id, candidate.title]));
 	const query = useSessionScmSummary(session.id, true, session.cloud?.orgId, session.cloud ? session.autoInjectCI === true : false, hostId);
 	const linkedPRs = query.data?.linkedPrs ?? [];

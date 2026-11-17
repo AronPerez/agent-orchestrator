@@ -40,7 +40,7 @@ import type {
 import { STANDALONE_WORKSPACE_ID } from "../types/workspace";
 import { noPRDetails } from "../lib/pr-display";
 
-const { cloudCpMock, getMock, navigateMock, patchMock, putMock, postMock, sessionHostClientMock } = vi.hoisted(
+const { cloudCpMock, getMock, navigateMock, patchMock, projectOverlapSubscribeMock, putMock, postMock, sessionHostClientMock } = vi.hoisted(
   () => ({
     cloudCpMock: {
       cancelSessionReviews: vi.fn(),
@@ -60,6 +60,7 @@ const { cloudCpMock, getMock, navigateMock, patchMock, putMock, postMock, sessio
     getMock: vi.fn(),
     navigateMock: vi.fn(),
     patchMock: vi.fn(),
+    projectOverlapSubscribeMock: vi.fn(() => () => undefined),
     putMock: vi.fn(),
     postMock: vi.fn(),
     sessionHostClientMock: vi.fn(),
@@ -84,6 +85,11 @@ vi.mock("@tanstack/react-router", () => ({
 
 vi.mock("../lib/preview-mode", () => ({
   usesPreviewWorkspaceData: false,
+}));
+
+vi.mock("../lib/project-overlap-events", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../lib/project-overlap-events")>(),
+  subscribeProjectOverlapChanges: projectOverlapSubscribeMock,
 }));
 
 vi.mock("../lib/api-client", () => ({
@@ -387,6 +393,7 @@ beforeEach(() => {
   sessionHostClientMock.mockReset().mockImplementation(() => ({ GET: getMock, POST: postMock, PATCH: patchMock, PUT: putMock }));
   navigateMock.mockReset();
   patchMock.mockReset();
+  projectOverlapSubscribeMock.mockReset().mockReturnValue(() => undefined);
   postMock.mockReset();
   useUiStore.setState({ developerMode: false, prView: false, inspectorSessions: {}, settingsModal: null });
   putMock.mockReset();
@@ -432,6 +439,12 @@ describe("SessionInspector tabs", () => {
 		expect(screen.getByText("API cleanup")).toBeInTheDocument();
 		expect(screen.getByText("frontend/src/App.tsx")).toBeInTheDocument();
 		expect(screen.getByText("README.md")).toBeInTheDocument();
+		expect(projectOverlapSubscribeMock).toHaveBeenCalledWith(
+			"ws-1",
+			"sess-1\u0000sess-2",
+			expect.anything(),
+			undefined,
+		);
 	});
 
   it("gives an orchestrator Summary and Browser, with its account but no branch", () => {
@@ -3170,6 +3183,7 @@ describe("SessionInspector Activity section", () => {
   });
 
   it("links and timestamps draft, opened, and merged PR milestones from backend lifecycle times", async () => {
+    const respond = commonGetsResponder();
     const minutesAgo = (minutes: number) =>
       new Date(Date.now() - minutes * 60 * 1000).toISOString();
     const summaries = [
@@ -3193,7 +3207,7 @@ describe("SessionInspector Activity section", () => {
           error: undefined,
         };
       }
-      return { data: { reviewerHandleId: "", reviews: [] }, error: undefined };
+      return respond(path);
     });
 
     renderWithQuery(
