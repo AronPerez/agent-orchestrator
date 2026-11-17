@@ -224,8 +224,7 @@ export async function probeCoordinationToken(
 	}
 }
 
-/** Retire one saved coordination child with the current full credential. A
- * missing device is already retired, so 404 is an idempotent success. */
+/** Retire one saved coordination child with the current full credential. */
 export async function revokeCoordinationToken(
 	entry: Pick<RemoteEntry, "url" | "hostId" | "password">,
 	deviceId: string,
@@ -243,7 +242,15 @@ export async function revokeCoordinationToken(
 			},
 			signal: AbortSignal.timeout(timeoutMs),
 		});
-		if (response.status === 204 || response.status === 404) return "retired";
+		if (response.status === 204) return "retired";
+		if (response.status === 404) {
+			try {
+				const body = (await response.json()) as { code?: unknown };
+				return body.code === "COORDINATION_TOKEN_NOT_FOUND" ? "retired" : "unsupported";
+			} catch {
+				return "unsupported";
+			}
+		}
 		if (response.status === 401 || response.status === 403) return "unauthorized";
 		if (response.status === 405 || response.status === 501) return "unsupported";
 		return "offline";

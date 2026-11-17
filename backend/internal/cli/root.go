@@ -204,7 +204,7 @@ func (d Deps) withDefaults() Deps {
 func NewRootCommand(deps Deps) *cobra.Command {
 	deps = deps.withDefaults()
 	ctx := &commandContext{deps: deps}
-	var remoteURL string
+	var remoteURL, remoteHost string
 
 	root := &cobra.Command{
 		Use:           "ao",
@@ -216,6 +216,18 @@ func NewRootCommand(deps Deps) *cobra.Command {
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			// Resolve before anything else: every daemon call below, telemetry
 			// included, depends on which daemon this invocation targets.
+			if strings.TrimSpace(remoteHost) != "" {
+				if strings.TrimSpace(remoteURL) != "" || strings.TrimSpace(os.Getenv("AO_URL")) != "" {
+					return usageError{errors.New("--host cannot be combined with --url or AO_URL")}
+				}
+				if err := ctx.selectSavedHost(cmd.Context(), remoteHost); err != nil {
+					return err
+				}
+				if shouldEmitCLIInvocation(cmd) {
+					ctx.emitCLIInvoked(cmd.Context(), cmd)
+				}
+				return nil
+			}
 			activeAccount := ""
 			if savedRemoteCredentialRequested(remoteURL) {
 				activeAccount = ctx.activeCloudAccount(cmd.Context())
@@ -233,6 +245,8 @@ func NewRootCommand(deps Deps) *cobra.Command {
 	}
 	root.PersistentFlags().StringVar(&remoteURL, "url", "",
 		"Base URL of a remote AO daemon, e.g. http://host:3011 (env AO_URL); credential from AO_TOKEN or ~/.ao/remotes.json")
+	root.PersistentFlags().StringVar(&remoteHost, "host", "",
+		"Saved host label or host ID from the desktop app; uses its agent-coordination credential")
 	root.SetIn(deps.In)
 	root.SetOut(deps.Out)
 	root.SetErr(deps.Err)

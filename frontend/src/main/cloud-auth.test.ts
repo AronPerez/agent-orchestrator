@@ -76,6 +76,10 @@ import {
   writeAuthStore,
 } from "./cloud-auth";
 
+const activeCloudAccountPath = (dataDir: string) => path.join(dataDir, "cloud_active_user");
+const activeCloudAccount = async (dataDir: string) =>
+  JSON.parse(await readFile(activeCloudAccountPath(dataDir), "utf8")) as { userId: string; desktopPid: number };
+
 describe("native WorkOS authentication", () => {
   let dataDir: string;
 
@@ -153,6 +157,21 @@ describe("native WorkOS authentication", () => {
     await expect(handleCloudDeepLink(callback, dataDir)).resolves.toEqual({ account: first?.account });
     expect(mocks.authenticateWithCode).toHaveBeenCalledTimes(1);
     expect(mocks.showMessageBox).not.toHaveBeenCalled();
+  });
+
+  it("replaces the durable active-account marker when the stored account changes directly", async () => {
+    await beginCloudSignIn(dataDir);
+    await handleCloudDeepLink("ao-app://callback?code=code_123&state=state_123", dataDir);
+    await expect(activeCloudAccount(dataDir)).resolves.toEqual({ userId: "user_123", desktopPid: process.pid });
+
+    const store = await readAuthStore(dataDir);
+    if (!store.session) throw new Error("expected a stored session");
+    await writeAuthStore(dataDir, {
+      ...store,
+      session: { ...store.session, user: { ...store.session.user, id: "user_456" } },
+    });
+
+    await expect(activeCloudAccount(dataDir)).resolves.toEqual({ userId: "user_456", desktopPid: process.pid });
   });
 
   it("exchanges a callback once when the OS delivers it concurrently", async () => {
@@ -604,6 +623,7 @@ describe("native WorkOS authentication", () => {
 
     await expect(getCloudSession(dataDir)).resolves.toBeNull();
     await expect(getCloudSession(dataDir)).resolves.toBeNull();
+    await expect(readFile(activeCloudAccountPath(dataDir), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     expect(mocks.authenticateWithRefreshToken).toHaveBeenCalledOnce();
     expect(mocks.notifyRenderers).toHaveBeenCalledWith(null);
   });

@@ -87,6 +87,19 @@ describe("addRemote", () => {
 		expect(remotes).toEqual([{ label: "new", url: "http://192.0.2.1:1", password: "z" }]);
 	});
 
+	it("carries displaced coordination devices into the replacement cleanup queue", async () => {
+		const path = await tempFile(JSON.stringify({ remotes: [{
+			hostId: "h_workbox", label: "old", url: "http://192.0.2.1:1", password: "old",
+			coordinationToken: "aoc_old", coordinationDeviceId: "dev_active",
+			pendingCoordinationDeviceIds: ["dev_pending"],
+		}] }));
+		await addRemote(path, { hostId: "h_workbox", label: "new", url: "https://workbox.example", password: "new" });
+		expect(await savedRemotes(path)).toEqual([{
+			hostId: "h_workbox", label: "new", url: "https://workbox.example", password: "new",
+			pendingCoordinationDeviceIds: ["dev_pending", "dev_active"],
+		}]);
+	});
+
 	it("moves one host from its LAN address to its Tailscale address", async () => {
 		const path = await tempFile('{"remotes":[{"hostId":"h_workbox","label":"workbox","url":"http://192.0.2.1:1","password":"x"}]}');
 		await addRemote(path, { hostId: "h_workbox", label: "workbox", url: "https://workbox.tailnet", password: "x" });
