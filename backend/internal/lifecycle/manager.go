@@ -345,6 +345,28 @@ func New(store sessionStore, messenger ports.AgentMessenger, opts ...Option) *Ma
 	return m
 }
 
+// NudgeSession sends one unsolicited supervision message through the ordinary
+// just-in-time lifecycle guard. It may steer an active turn (needed for a
+// deadline wrap-up), but still refuses input and permission waits.
+func (m *Manager) NudgeSession(ctx context.Context, id domain.SessionID, message string) (bool, error) {
+	if m == nil || m.guard == nil {
+		return false, nil
+	}
+	outcome, err := m.guard.Nudge(ctx, id, message)
+	return outcome == sessionguard.Sent, err
+}
+
+// NudgeIdleSession is NudgeSession with active-turn steering disabled. Stall
+// supervision uses it so a worker that resumed after the coordinator's earlier
+// idle read cannot receive a stale "continue" message mid-turn.
+func (m *Manager) NudgeIdleSession(ctx context.Context, id domain.SessionID, message string) (bool, error) {
+	if m == nil || m.guard == nil {
+		return false, nil
+	}
+	outcome, err := m.guard.NudgeCoordination(ctx, id, message, nil)
+	return outcome == sessionguard.Sent, err
+}
+
 // SetCompletionTerminator wires merge completion to the same teardown path as
 // an explicit user kill.
 func (m *Manager) SetCompletionTerminator(terminator sessionTerminator) {

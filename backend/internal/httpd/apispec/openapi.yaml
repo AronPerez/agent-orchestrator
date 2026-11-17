@@ -19437,6 +19437,21 @@ components:
           - blocked
           - limit_hit
           type: string
+        contractStallEscalatedAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        contractStallNudgedAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        contractTimeboxPromptedAt:
+          format: date-time
+          type:
+          - "null"
+          - string
         createdAt:
           format: date-time
           type: string
@@ -21163,6 +21178,11 @@ components:
       - selection
       - sourceRole
       type: object
+    DomainWorkerContractConfig:
+      properties:
+        stallMinutes:
+          type: integer
+      type: object
     EditConversationMessageRequest:
       properties:
         clientMessageId:
@@ -22599,6 +22619,7 @@ components:
         type:
           enum:
           - needs_input
+          - session_stalled
           - ready_to_merge
           - pr_merged
           - pr_closed_unmerged
@@ -23038,6 +23059,8 @@ components:
           $ref: '#/components/schemas/TrackerIntakeConfig'
         worker:
           $ref: '#/components/schemas/RoleOverride'
+        workerContracts:
+          $ref: '#/components/schemas/DomainWorkerContractConfig'
         workersRequestReview:
           type: boolean
       type: object

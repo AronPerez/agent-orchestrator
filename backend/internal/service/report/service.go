@@ -15,7 +15,7 @@ import (
 // Store is the report service's persistence and ownership boundary.
 type Store interface {
 	GetSession(context.Context, domain.SessionID) (domain.SessionRecord, bool, error)
-	CreateReport(context.Context, domain.ReportRecord) (domain.ReportRecord, error)
+	CreateReportWithContractOutcome(context.Context, domain.ReportRecord, domain.SessionContractOutcome) (domain.ReportRecord, error)
 }
 
 // CreateInput is the validated caller payload before AO-derived ownership and deadlines.
@@ -132,7 +132,7 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (domain.ReportR
 		CreatedAt: now, DeliveryState: domain.ReportPending, AvailableAt: availableAt,
 		SettlementDeadline: settlementDeadline, RepeatCount: 1,
 	}
-	created, err := s.store.CreateReport(ctx, rec)
+	created, err := s.store.CreateReportWithContractOutcome(ctx, rec, contractOutcomeForReport(session, input.State))
 	if err != nil {
 		return created, err
 	}
@@ -150,4 +150,18 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (domain.ReportR
 		}
 	}
 	return created, nil
+}
+
+func contractOutcomeForReport(session domain.SessionRecord, state domain.ReportState) domain.SessionContractOutcome {
+	if session.Goal == "" || session.TimeboxDeadlineAt == nil || session.ContractOutcome != domain.SessionContractOutcomeNone {
+		return domain.SessionContractOutcomeNone
+	}
+	switch state {
+	case domain.ReportDone:
+		return domain.SessionContractOutcomeMet
+	case domain.ReportNeedsInput, domain.ReportStuck:
+		return domain.SessionContractOutcomeBlocked
+	default:
+		return domain.SessionContractOutcomeNone
+	}
 }

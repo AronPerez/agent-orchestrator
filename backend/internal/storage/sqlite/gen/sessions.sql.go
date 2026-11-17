@@ -191,6 +191,38 @@ func (q *Queries) CountStaleBinarySessions(ctx context.Context) ([]CountStaleBin
 	return items, nil
 }
 
+const expireSessionContract = `-- name: ExpireSessionContract :execrows
+UPDATE sessions
+SET contract_outcome = 'limit_hit',
+    contract_timebox_prompted_at = ?1,
+    updated_at = ?2
+WHERE id = ?3
+  AND goal <> ''
+  AND contract_outcome = ''
+  AND timebox_deadline_at = ?4
+  AND timebox_deadline_at <= ?1
+`
+
+type ExpireSessionContractParams struct {
+	PromptedAt sql.NullTime
+	UpdatedAt  time.Time
+	ID         domain.SessionID
+	DeadlineAt sql.NullTime
+}
+
+func (q *Queries) ExpireSessionContract(ctx context.Context, arg ExpireSessionContractParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, expireSessionContract,
+		arg.PromptedAt,
+		arg.UpdatedAt,
+		arg.ID,
+		arg.DeadlineAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const getClientRequestSession = `-- name: GetClientRequestSession :one
 SELECT id, client_request_hash, client_request_committed FROM sessions WHERE client_request_id = ?
 `
@@ -223,6 +255,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     conversation_checkpoint_unsettled, conversation_checkpoint_turn_id, native_checkpoint_evidence,
     native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions,
     requested_output, goal, timebox_deadline_at, contract_outcome,
+    contract_stall_nudged_at, contract_stall_escalated_at, contract_timebox_prompted_at,
     provision_state, provision_error, provision_steps, branch_state, branch_naming, temporary_branch, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
     hibernated_at, stale_binary_since, stale_binary_version, stale_binary_launch, stale_binary_switch_failed_at,
@@ -294,6 +327,9 @@ type GetSessionRow struct {
 	Goal                             string
 	TimeboxDeadlineAt                sql.NullTime
 	ContractOutcome                  string
+	ContractStallNudgedAt            sql.NullTime
+	ContractStallEscalatedAt         sql.NullTime
+	ContractTimeboxPromptedAt        sql.NullTime
 	ProvisionState                   domain.SessionProvisionState
 	ProvisionError                   string
 	ProvisionSteps                   string
@@ -384,6 +420,9 @@ func (q *Queries) GetSession(ctx context.Context, id domain.SessionID) (GetSessi
 		&i.Goal,
 		&i.TimeboxDeadlineAt,
 		&i.ContractOutcome,
+		&i.ContractStallNudgedAt,
+		&i.ContractStallEscalatedAt,
+		&i.ContractTimeboxPromptedAt,
 		&i.ProvisionState,
 		&i.ProvisionError,
 		&i.ProvisionSteps,
@@ -425,6 +464,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     conversation_checkpoint_unsettled, conversation_checkpoint_turn_id, native_checkpoint_evidence,
     native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions,
     requested_output, goal, timebox_deadline_at, contract_outcome,
+    contract_stall_nudged_at, contract_stall_escalated_at, contract_timebox_prompted_at,
     provision_state, provision_error, provision_steps, branch_state, branch_naming, temporary_branch, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
     hibernated_at, stale_binary_since, stale_binary_version, stale_binary_launch, stale_binary_switch_failed_at,
@@ -496,6 +536,9 @@ type GetSessionByAutomationRunIDRow struct {
 	Goal                             string
 	TimeboxDeadlineAt                sql.NullTime
 	ContractOutcome                  string
+	ContractStallNudgedAt            sql.NullTime
+	ContractStallEscalatedAt         sql.NullTime
+	ContractTimeboxPromptedAt        sql.NullTime
 	ProvisionState                   domain.SessionProvisionState
 	ProvisionError                   string
 	ProvisionSteps                   string
@@ -586,6 +629,9 @@ func (q *Queries) GetSessionByAutomationRunID(ctx context.Context, automationRun
 		&i.Goal,
 		&i.TimeboxDeadlineAt,
 		&i.ContractOutcome,
+		&i.ContractStallNudgedAt,
+		&i.ContractStallEscalatedAt,
+		&i.ContractTimeboxPromptedAt,
 		&i.ProvisionState,
 		&i.ProvisionError,
 		&i.ProvisionSteps,
@@ -813,6 +859,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     conversation_checkpoint_unsettled, conversation_checkpoint_turn_id, native_checkpoint_evidence,
     native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions,
     requested_output, goal, timebox_deadline_at, contract_outcome,
+    contract_stall_nudged_at, contract_stall_escalated_at, contract_timebox_prompted_at,
     provision_state, provision_error, provision_steps, branch_state, branch_naming, temporary_branch, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
     hibernated_at, stale_binary_since, stale_binary_version, stale_binary_launch, stale_binary_switch_failed_at,
@@ -884,6 +931,9 @@ type ListAllSessionsRow struct {
 	Goal                             string
 	TimeboxDeadlineAt                sql.NullTime
 	ContractOutcome                  string
+	ContractStallNudgedAt            sql.NullTime
+	ContractStallEscalatedAt         sql.NullTime
+	ContractTimeboxPromptedAt        sql.NullTime
 	ProvisionState                   domain.SessionProvisionState
 	ProvisionError                   string
 	ProvisionSteps                   string
@@ -980,6 +1030,9 @@ func (q *Queries) ListAllSessions(ctx context.Context) ([]ListAllSessionsRow, er
 			&i.Goal,
 			&i.TimeboxDeadlineAt,
 			&i.ContractOutcome,
+			&i.ContractStallNudgedAt,
+			&i.ContractStallEscalatedAt,
+			&i.ContractTimeboxPromptedAt,
 			&i.ProvisionState,
 			&i.ProvisionError,
 			&i.ProvisionSteps,
@@ -1123,6 +1176,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     conversation_checkpoint_unsettled, conversation_checkpoint_turn_id, native_checkpoint_evidence,
     native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions,
     requested_output, goal, timebox_deadline_at, contract_outcome,
+    contract_stall_nudged_at, contract_stall_escalated_at, contract_timebox_prompted_at,
     provision_state, provision_error, provision_steps, branch_state, branch_naming, temporary_branch, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
     hibernated_at, stale_binary_since, stale_binary_version, stale_binary_launch, stale_binary_switch_failed_at,
@@ -1194,6 +1248,9 @@ type ListSessionsByProjectRow struct {
 	Goal                             string
 	TimeboxDeadlineAt                sql.NullTime
 	ContractOutcome                  string
+	ContractStallNudgedAt            sql.NullTime
+	ContractStallEscalatedAt         sql.NullTime
+	ContractTimeboxPromptedAt        sql.NullTime
 	ProvisionState                   domain.SessionProvisionState
 	ProvisionError                   string
 	ProvisionSteps                   string
@@ -1290,6 +1347,9 @@ func (q *Queries) ListSessionsByProject(ctx context.Context, projectID *domain.P
 			&i.Goal,
 			&i.TimeboxDeadlineAt,
 			&i.ContractOutcome,
+			&i.ContractStallNudgedAt,
+			&i.ContractStallEscalatedAt,
+			&i.ContractTimeboxPromptedAt,
 			&i.ProvisionState,
 			&i.ProvisionError,
 			&i.ProvisionSteps,
@@ -1600,6 +1660,61 @@ func (q *Queries) PromoteTaskPreparation(ctx context.Context, arg PromoteTaskPre
 	return result.RowsAffected()
 }
 
+const recordSessionContractStallEscalation = `-- name: RecordSessionContractStallEscalation :execrows
+UPDATE sessions
+SET contract_stall_escalated_at = ?1,
+    updated_at = ?2
+WHERE id = ?3
+  AND contract_outcome = ''
+  AND contract_stall_nudged_at = ?4
+  AND contract_stall_escalated_at IS NULL
+`
+
+type RecordSessionContractStallEscalationParams struct {
+	EscalatedAt sql.NullTime
+	UpdatedAt   time.Time
+	ID          domain.SessionID
+	NudgedAt    sql.NullTime
+}
+
+func (q *Queries) RecordSessionContractStallEscalation(ctx context.Context, arg RecordSessionContractStallEscalationParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, recordSessionContractStallEscalation,
+		arg.EscalatedAt,
+		arg.UpdatedAt,
+		arg.ID,
+		arg.NudgedAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const recordSessionContractStallNudge = `-- name: RecordSessionContractStallNudge :execrows
+UPDATE sessions
+SET contract_stall_nudged_at = ?1,
+    contract_stall_escalated_at = NULL,
+    updated_at = ?2
+WHERE id = ?3
+  AND goal <> ''
+  AND timebox_deadline_at IS NOT NULL
+  AND contract_outcome = ''
+`
+
+type RecordSessionContractStallNudgeParams struct {
+	NudgedAt  sql.NullTime
+	UpdatedAt time.Time
+	ID        domain.SessionID
+}
+
+func (q *Queries) RecordSessionContractStallNudge(ctx context.Context, arg RecordSessionContractStallNudgeParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, recordSessionContractStallNudge, arg.NudgedAt, arg.UpdatedAt, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const recordSessionHumanMessage = `-- name: RecordSessionHumanMessage :execrows
 UPDATE sessions SET
     latest_user_prompt = ?1,
@@ -1900,6 +2015,29 @@ type SetSessionBranchStateParams struct {
 // alone because an observed git fact is not user-visible recency.
 func (q *Queries) SetSessionBranchState(ctx context.Context, arg SetSessionBranchStateParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, setSessionBranchState, arg.BranchState, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const setSessionContractOutcomeIfUnset = `-- name: SetSessionContractOutcomeIfUnset :execrows
+UPDATE sessions
+SET contract_outcome = ?1, updated_at = ?2
+WHERE id = ?3
+  AND goal <> ''
+  AND timebox_deadline_at IS NOT NULL
+  AND contract_outcome = ''
+`
+
+type SetSessionContractOutcomeIfUnsetParams struct {
+	ContractOutcome string
+	UpdatedAt       time.Time
+	ID              domain.SessionID
+}
+
+func (q *Queries) SetSessionContractOutcomeIfUnset(ctx context.Context, arg SetSessionContractOutcomeIfUnsetParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, setSessionContractOutcomeIfUnset, arg.ContractOutcome, arg.UpdatedAt, arg.ID)
 	if err != nil {
 		return 0, err
 	}

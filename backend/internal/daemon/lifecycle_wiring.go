@@ -68,6 +68,7 @@ type lifecycleStack struct {
 	trackerDone      <-chan struct{}
 	herdr            *herdr.Server
 	automationDone   <-chan struct{}
+	contractDone     <-chan struct{}
 	// activity is the activity observer. It polls only once
 	// StartActivityObserver has given it the session manager's runtime
 	// environment.
@@ -237,6 +238,9 @@ func (l *lifecycleStack) Stop() {
 	}
 	if l.automationDone != nil {
 		<-l.automationDone
+	}
+	if l.contractDone != nil {
+		<-l.contractDone
 	}
 }
 
