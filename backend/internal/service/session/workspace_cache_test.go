@@ -143,6 +143,10 @@ func TestAuthoritativeWorkspaceCacheInvalidationFencesOldFlight(t *testing.T) {
 		oldDone <- err
 	}()
 	<-started
+	// A watcher event invalidates publication before reconciliation establishes
+	// its authoritative snapshot. Reconciliation must still be able to forget
+	// the older singleflight call instead of joining it.
+	s.InvalidateWorkspaceCache(id)
 	s.invalidateWorkspaceCacheForReconcile(id)
 
 	type result struct {
@@ -186,18 +190,27 @@ func TestWorkspaceCacheOldLoadCannotAffectReplacement(t *testing.T) {
 			if len(c.loads) != 0 {
 				t.Fatal("invalidation retained a load reservation")
 			}
+			if c.flights[key] != old {
+				t.Fatal("ordinary invalidation lost the in-flight identity")
+			}
 			replacement := c.beginLoad(key)
 			*replacement = workspaceCacheEntry{at: c.now(), compare: workspaceCompareTarget{BaseRef: "replacement"}}
 			c.finishLoad(key, old, publishOld)
+			c.finishFlight(key, old)
+			if c.flights[key] != replacement {
+				t.Fatal("old flight cleanup removed the replacement identity")
+			}
 			c.finishLoad(key, replacement, true)
+			c.finishFlight(key, replacement)
 			// A late finish must also leave the replacement's cached result intact.
 			c.finishLoad(key, old, publishOld)
+			c.finishFlight(key, old)
 			got, ok := c.get(key)
 			if !ok || got.compare.BaseRef != "replacement" {
 				t.Fatalf("replacement cache = %+v, %v; want replacement", got, ok)
 			}
-			if len(c.loads) != 0 {
-				t.Fatal("completed loads retained reservations")
+			if len(c.loads) != 0 || len(c.flights) != 0 {
+				t.Fatal("completed loads retained bookkeeping")
 			}
 			c.invalidateSession(key.session)
 			c.invalidateSession("never loaded")
@@ -218,7 +231,7 @@ func TestWorkspaceCacheFailedLoadReleasesReservation(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected Git error")
 	}
-	if len(c.loads) != 0 || len(c.entries) != 0 {
+	if len(c.loads) != 0 || len(c.flights) != 0 || len(c.entries) != 0 {
 		t.Fatal("failed load retained cache bookkeeping")
 	}
 }

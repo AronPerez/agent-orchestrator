@@ -159,6 +159,29 @@ func TestProjectOverlapsSkipsScratchProjects(t *testing.T) {
 	}
 }
 
+func TestProjectOverlapsSkipsUnadoptedImports(t *testing.T) {
+	active := newWorkspaceRepo(t)
+	pendingImport := newWorkspaceRepo(t)
+	writeWorkspaceFile(t, active, "shared.go", "active\n")
+	writeWorkspaceFile(t, pendingImport, "shared.go", "pending import\n")
+
+	store := newFakeStore()
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+	store.sessions["demo-active"] = overlapSession("demo-active", active)
+	pending := overlapSession("demo-pending", pendingImport)
+	pending.Metadata.ImportSource = &domain.SessionImportSource{NativeID: "copied-history"}
+	store.sessions[pending.ID] = pending
+
+	svc := NewWithDeps(Deps{Store: store})
+	overlaps, err := svc.ProjectOverlaps(context.Background(), "demo")
+	if err != nil {
+		t.Fatalf("ProjectOverlaps: %v", err)
+	}
+	if len(overlaps.Overlaps) != 0 {
+		t.Fatalf("overlaps = %+v, want pending import excluded", overlaps.Overlaps)
+	}
+}
+
 func TestProjectOverlapsReportsUnresolvedBasesAndUnavailableSessions(t *testing.T) {
 	first := newWorkspaceRepo(t)
 	second := newWorkspaceRepo(t)

@@ -54,6 +54,7 @@ type workspaceCache struct {
 	now     func() time.Time
 	entries map[workspaceCacheKey]workspaceCacheEntry
 	loads   map[workspaceCacheKey]*workspaceCacheEntry
+	flights map[workspaceCacheKey]*workspaceCacheEntry
 	paths   map[workspaceCacheKey]*workspacePathsEntry
 }
 
@@ -65,6 +66,7 @@ func newWorkspaceCache(ttl time.Duration, now func() time.Time) *workspaceCache 
 		ttl: ttl, now: now,
 		entries: make(map[workspaceCacheKey]workspaceCacheEntry),
 		loads:   make(map[workspaceCacheKey]*workspaceCacheEntry),
+		flights: make(map[workspaceCacheKey]*workspaceCacheEntry),
 		paths:   make(map[workspaceCacheKey]*workspacePathsEntry),
 	}
 }
@@ -101,6 +103,7 @@ func (c *workspaceCache) beginLoad(key workspaceCacheKey) *workspaceCacheEntry {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.loads[key] = entry
+	c.flights[key] = entry
 	return entry
 }
 
@@ -122,16 +125,34 @@ func (c *workspaceCache) finishLoad(key workspaceCacheKey, entry *workspaceCache
 	}
 }
 
-// invalidateSession purges every cached entry for a session, across every
-// worktree root it spans (workspace projects can span several repos), and
-// prevents loads already in progress from repopulating the cache.
-func (c *workspaceCache) invalidateSession(id domain.SessionID) []workspaceCacheKey {
+// finishFlight releases in-flight identity only after singleflight.Do has
+// returned. Keeping that identity distinct from the publication reservation
+// lets ordinary invalidation prevent a stale publish while reconciliation can
+// still forget the older singleflight call.
+func (c *workspaceCache) finishFlight(key workspaceCacheKey, entry *workspaceCacheEntry) {
 	if c == nil {
-		return nil
+		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	inFlight := make([]workspaceCacheKey, 0)
+	if c.flights[key] == entry {
+		delete(c.flights, key)
+	}
+}
+
+// invalidateSession purges every cached entry for a session, across every
+// worktree root it spans (workspace projects can span several repos), and
+// prevents loads already in progress from repopulating the cache.
+func (c *workspaceCache) invalidateSession(id domain.SessionID) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.invalidateSessionLocked(id)
+}
+
+func (c *workspaceCache) invalidateSessionLocked(id domain.SessionID) {
 	for key := range c.entries {
 		if key.session == id {
 			delete(c.entries, key)
@@ -139,13 +160,31 @@ func (c *workspaceCache) invalidateSession(id domain.SessionID) []workspaceCache
 	}
 	for key := range c.loads {
 		if key.session == id {
-			inFlight = append(inFlight, key)
 			delete(c.loads, key)
 		}
 	}
 	for key := range c.paths {
 		if key.session == id {
 			delete(c.paths, key)
+		}
+	}
+}
+
+// invalidateSessionForReconcile also consumes the identities of flights that
+// an authoritative read must forget. Ordinary invalidation deliberately keeps
+// these identities so a later reconciliation can still fence the same work.
+func (c *workspaceCache) invalidateSessionForReconcile(id domain.SessionID) []workspaceCacheKey {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.invalidateSessionLocked(id)
+	inFlight := make([]workspaceCacheKey, 0)
+	for key := range c.flights {
+		if key.session == id {
+			inFlight = append(inFlight, key)
+			delete(c.flights, key)
 		}
 	}
 	return inFlight
@@ -156,7 +195,7 @@ func (c *workspaceCache) invalidateSession(id domain.SessionID) []workspaceCache
 // coalescing that flight; reconciliation must instead observe worktree state
 // from after the invalidation.
 func (s *Service) invalidateWorkspaceCacheForReconcile(id domain.SessionID) {
-	for _, key := range s.workspaceCache.invalidateSession(id) {
+	for _, key := range s.workspaceCache.invalidateSessionForReconcile(id) {
 		s.workspaceGroup.Forget(key.String())
 	}
 }

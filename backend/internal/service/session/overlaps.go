@@ -65,7 +65,7 @@ func (s *Service) ProjectOverlaps(ctx context.Context, projectID domain.ProjectI
 	}
 	active := records[:0]
 	for _, record := range records {
-		if record.IsTerminated || record.IsTaskPreparation || strings.TrimSpace(record.Metadata.WorkspacePath) == "" {
+		if record.IsTerminated || record.IsTaskPreparation || record.NeedsImportResume() || strings.TrimSpace(record.Metadata.WorkspacePath) == "" {
 			continue
 		}
 		active = append(active, record)
