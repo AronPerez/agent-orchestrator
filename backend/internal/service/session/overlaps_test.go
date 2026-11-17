@@ -355,6 +355,44 @@ func TestReconcileProjectOverlapNoticesSendsEachSideOnceAndRearmsAfterClear(t *t
 	}
 }
 
+func TestReconcileProjectOverlapNoticesKeepsDedupeAcrossIncompleteRead(t *testing.T) {
+	tests := map[string]ProjectOverlapResult{
+		"unavailable":     {ProjectID: "demo", UnavailableSessionIDs: []domain.SessionID{"demo-b"}},
+		"truncated":       {ProjectID: "demo", TruncatedSessionIDs: []domain.SessionID{"demo-b"}},
+		"unresolved base": {ProjectID: "demo", UnresolvedBaseSessionIDs: []domain.SessionID{"demo-b"}},
+	}
+	for name, incomplete := range tests {
+		t.Run(name, func(t *testing.T) {
+			store := newMemoryOverlapNoticeStore()
+			store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+			store.sessions["demo-a"] = domain.SessionRecord{ID: "demo-a", ProjectID: "demo"}
+			store.sessions["demo-b"] = domain.SessionRecord{ID: "demo-b", ProjectID: "demo"}
+			nudger := &recordingOverlapNudger{}
+			svc := NewWithDeps(Deps{Store: store, OverlapNudger: nudger})
+			overlap := ProjectOverlapResult{
+				ProjectID: "demo",
+				Overlaps:  []ProjectOverlap{{SessionA: "demo-a", SessionB: "demo-b", Paths: []string{"shared.go"}}},
+			}
+
+			if err := svc.ReconcileProjectOverlapNotices(context.Background(), overlap); err != nil {
+				t.Fatalf("initial reconcile: %v", err)
+			}
+			if err := svc.ReconcileProjectOverlapNotices(context.Background(), incomplete); err != nil {
+				t.Fatalf("incomplete reconcile: %v", err)
+			}
+			if len(store.notices) != 2 {
+				t.Fatalf("notices after incomplete read = %+v, want dedupe rows preserved", store.notices)
+			}
+			if err := svc.ReconcileProjectOverlapNotices(context.Background(), overlap); err != nil {
+				t.Fatalf("recovered reconcile: %v", err)
+			}
+			if len(nudger.calls) != 2 {
+				t.Fatalf("nudge calls after recovery = %d, want no duplicate notices", len(nudger.calls))
+			}
+		})
+	}
+}
+
 func TestReconcileProjectOverlapNoticesRetriesOnlySuppressedRecipient(t *testing.T) {
 	store := newMemoryOverlapNoticeStore()
 	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}

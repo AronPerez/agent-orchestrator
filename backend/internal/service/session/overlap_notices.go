@@ -70,11 +70,25 @@ func (s *Service) ReconcileProjectOverlapNotices(ctx context.Context, result Pro
 		active[projectOverlapNoticeKey{sessionID: overlap.SessionA, peerSessionID: overlap.SessionB}] = struct{}{}
 		active[projectOverlapNoticeKey{sessionID: overlap.SessionB, peerSessionID: overlap.SessionA}] = struct{}{}
 	}
+	incomplete := make(map[domain.SessionID]struct{}, len(result.TruncatedSessionIDs)+len(result.UnresolvedBaseSessionIDs)+len(result.UnavailableSessionIDs))
+	for _, ids := range [][]domain.SessionID{result.TruncatedSessionIDs, result.UnresolvedBaseSessionIDs, result.UnavailableSessionIDs} {
+		for _, id := range ids {
+			incomplete[id] = struct{}{}
+		}
+	}
 
 	delivered := make(map[projectOverlapNoticeKey]struct{}, len(persisted))
 	for _, notice := range persisted {
 		key := projectOverlapNoticeKey{sessionID: notice.SessionID, peerSessionID: notice.PeerSessionID}
 		if _, stillActive := active[key]; stillActive {
+			delivered[key] = struct{}{}
+			continue
+		}
+		_, recipientIncomplete := incomplete[key.sessionID]
+		_, peerIncomplete := incomplete[key.peerSessionID]
+		if recipientIncomplete || peerIncomplete {
+			// An incomplete scan cannot prove this directed pair cleared. Keep
+			// its delivery row so a transient read failure does not resend it.
 			delivered[key] = struct{}{}
 			continue
 		}
