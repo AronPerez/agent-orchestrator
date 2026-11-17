@@ -147,23 +147,33 @@ func (c *PushController) unpair(w http.ResponseWriter, r *http.Request) {
 		apispec.NotImplemented(w, r, "DELETE", "/api/v1/push/pairings/{id}")
 		return
 	}
+	// A phone that forgets the host gives up its credential and every delegated
+	// token first. If that durable revocation fails, retain the push row so the
+	// phone can retry instead of receiving a false success and forgetting a live
+	// credential.
+	id := chi.URLParam(r, "id")
+	if credential := requestscope.CredentialFrom(r.Context()); credential.Kind == requestscope.CredentialDevice {
+		var err error
+		if c.Access != nil {
+			_, _, err = c.Access.RevokeDeviceFromRequest(r.Context(), credential.DeviceID)
+		} else if c.Devices != nil {
+			_, _, err = c.Devices.Revoke(credential.DeviceID)
+		}
+		if err != nil {
+			envelope.CaptureError(r, err)
+			envelope.WriteAPIError(w, r, http.StatusServiceUnavailable, "unavailable", "DEVICE_UNPAIR_RETRY",
+				"The device could not be unpaired yet. Retry the request.", nil)
+			return
+		}
+	}
 	// chi decodes the percent-encoded segment, so {id} arrives as either a plain
 	// install ID or an Expo token with its brackets restored. Unpairing something
 	// already gone is a clean no-op.
-	id := chi.URLParam(r, "id")
 	if err := c.Registry.Unpair(id); err != nil {
 		envelope.WriteAPIError(w, r, http.StatusInternalServerError, "internal", "DEVICE_UNPAIR_FAILED",
 			"Could not unpair the device", nil)
 		return
 	}
-	// A phone that forgets the host gives up its token. Its connections stay open:
-	// one carries this response.
-	if credential := requestscope.CredentialFrom(r.Context()); credential.Kind == requestscope.CredentialDevice {
-		if c.Access != nil {
-			_, _, _ = c.Access.RevokeDeviceFromRequest(r.Context(), credential.DeviceID)
-		} else if c.Devices != nil {
-			_, _, _ = c.Devices.Revoke(credential.DeviceID)
-		}
-	}
+	// RevokeDeviceFromRequest leaves only this response-carrying connection open.
 	w.WriteHeader(http.StatusNoContent)
 }
