@@ -1457,6 +1457,17 @@ const replacementErrorCount = Object.keys(orchestratorReplacementErrors).length;
 			const target = parseSessionLink(link) ?? artifact;
 			const workspaces = workspacesRef.current;
 			const remoteWorkspaces = remoteWorkspacesRef.current;
+			// An unavailable host can leave a known project with an empty session list.
+			// That host remains a possible owner even when another machine matches.
+			// Every host owns the standalone scope, even when its row is omitted.
+			const unavailableHostIds = [...remoteFailedHostIds, ...remoteHosts.filter((host) => host.status === "offline").map((host) => host.hostId)];
+			const unverifiedHost = target !== undefined && unavailableHostIds.some((hostId) =>
+				target.projectId === STANDALONE_WORKSPACE_ID ||
+				remoteWorkspaces.some((entry) => entry.hostId === hostId && entry.id === target.projectId));
+			if (unverifiedHost) {
+				useUiStore.getState().showGlobalToast(t("deepLink.sessionHostUnavailable"));
+				return;
+			}
 			// Resolve the session and its owning workspace from the same list:
 			// a local and a remote project can share an id, and the workspace
 			// supplies the hostId for the route and artifact requests.
@@ -1473,12 +1484,7 @@ const replacementErrorCount = Object.keys(orchestratorReplacementErrors).length;
 			const workspace = matches[0];
 			const resolved = workspace ? resolveSessionLink(link, [workspace]) : undefined;
 			if (!resolved || !workspace) {
-				// A failed host query settles the gate with that host's projects
-				// holding empty session lists, so a miss on such a project is
-				// "could not load", not "does not exist" (CodeRabbit round 4).
-				const missOnFailedHost = target !== undefined && remoteFailedHostIds.some((hostId) =>
-					remoteWorkspacesRef.current.some((entry) => entry.hostId === hostId && entry.id === target.projectId));
-				useUiStore.getState().showGlobalToast(t(missOnFailedHost ? "deepLink.sessionHostUnavailable" : "deepLink.sessionNotFound"));
+				useUiStore.getState().showGlobalToast(t("deepLink.sessionNotFound"));
 				return;
 			}
 			// Same refusal as in-app ao:// links; a terminated session's
@@ -1490,7 +1496,7 @@ const replacementErrorCount = Object.keys(orchestratorReplacementErrors).length;
 			if (artifact) useUiStore.getState().requestWorkspaceFileOpen(resolved.sessionId, artifact.path, workspace.hostId, "artifact");
 			void navigate(sessionNavigateTarget(resolved.projectId, resolved.sessionId, workspace.hostId));
 		},
-		[navigate, remoteFailedHostIds, t],
+		[navigate, remoteFailedHostIds, remoteHosts, t],
 	);
 	useEffect(() => {
 		return aoBridge.app.onOpenSessionDeepLink((rawUrl) => {
