@@ -216,7 +216,11 @@ func NewRootCommand(deps Deps) *cobra.Command {
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			// Resolve before anything else: every daemon call below, telemetry
 			// included, depends on which daemon this invocation targets.
-			remote, err := resolveRemoteTarget(remoteURL)
+			activeAccount := ""
+			if savedRemoteCredentialRequested(remoteURL) {
+				activeAccount = ctx.activeCloudAccount(cmd.Context())
+			}
+			remote, err := resolveRemoteTargetForAccount(remoteURL, activeAccount)
 			if err != nil {
 				return err
 			}

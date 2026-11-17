@@ -97,6 +97,46 @@ func TestTelemetryIdentityRoutes(t *testing.T) {
 	}
 }
 
+func TestInternalCloudAccountIdentityRoute(t *testing.T) {
+	dir := t.TempDir()
+	ident, err := telemetryadapter.NewIdentity(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ident.SetCloudUserID(context.Background(), "user_A"); err != nil {
+		t.Fatal(err)
+	}
+	// Account ownership is not telemetry: opting out must not make another
+	// account's saved host credential visible to the CLI.
+	if err := os.WriteFile(filepath.Join(dir, telemetryadapter.OptOutFile), []byte("1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := NewRouterWithControl(config.Config{DataDir: dir}, discardLogger(), nil, APIDeps{TelemetryIdentity: ident}, ControlDeps{})
+	get := func(host, origin string) (int, map[string]any) {
+		req := httptest.NewRequest(http.MethodGet, "http://"+host+"/internal/telemetry/identity", nil)
+		req.Host = host
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		var body map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &body)
+		return rec.Code, body
+	}
+
+	status, body := get("127.0.0.1:3001", "")
+	if status != http.StatusOK || body["cloudUserId"] != "user_A" || body["known"] != true {
+		t.Fatalf("active account = status %d body %#v", status, body)
+	}
+	if status, _ := get("127.0.0.1:3001", "app://renderer"); status != http.StatusForbidden {
+		t.Fatalf("renderer origin = %d, want 403", status)
+	}
+	if status, _ := get("evil.example:3001", ""); status != http.StatusForbidden {
+		t.Fatalf("non-loopback host = %d, want 403", status)
+	}
+}
+
 // A sign-out whose install ID rotation fails must not leave the phone on the
 // ID that is still linked to the previous account.
 func TestTelemetryIdentityRouteSuppressesPhoneAfterFailedRotation(t *testing.T) {
