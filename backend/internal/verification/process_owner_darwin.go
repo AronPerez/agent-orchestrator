@@ -3,87 +3,49 @@
 package verification
 
 import (
+	"bytes"
 	"context"
-	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
-	"math/big"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"syscall"
 
+	"github.com/google/uuid"
 	"golang.org/x/sys/unix"
 
 	aoprocess "github.com/aoagents/agent-orchestrator/backend/internal/process"
 )
 
 const (
-	darwinZombieState       = 5
-	darwinMarkerFDMinimum   = 64
-	darwinMarkerFDMaximum   = 255
-	darwinOwnershipDivider  = "\n"
-	darwinLsofPath          = "/usr/sbin/lsof"
-	darwinWrapperProcessArg = "ao-verification-wrapper"
+	darwinZombieState = 5
+	darwinLsofPath    = "/usr/sbin/lsof"
 )
 
-func prepareUnixProcessOwnership(ctx context.Context, cmd *exec.Cmd) (string, func() error, error) {
+func prepareUnixProcessOwnership(ctx context.Context, cmd *exec.Cmd) (unixProcessOwnership, func() error, error) {
 	reader, writer, err := os.Pipe()
 	if err != nil {
-		return "", nil, fmt.Errorf("create verification ownership pipe: %w", err)
+		return unixProcessOwnership{}, nil, fmt.Errorf("create verification ownership pipe: %w", err)
 	}
-	closeOwnership := func() error { return errors.Join(reader.Close(), writer.Close()) }
-	fail := func(cause error) (string, func() error, error) {
-		return "", nil, errors.Join(cause, closeOwnership())
-	}
-
-	markerName, err := darwinDescriptorName(ctx, os.Getpid(), int(writer.Fd()))
+	closeOwnership := func() error { return errors.Join(writer.Close(), reader.Close()) }
+	descriptor, err := darwinDescriptorName(ctx, os.Getpid(), int(writer.Fd()))
 	if err != nil {
-		return fail(fmt.Errorf("identify verification ownership pipe: %w", err))
+		return unixProcessOwnership{}, nil, errors.Join(
+			fmt.Errorf("identify verification ownership pipe: %w", err), reader.Close(), writer.Close(),
+		)
 	}
-	sourceFD := 3 + len(cmd.ExtraFiles)
-	targetFD, err := randomDarwinMarkerFD(sourceFD)
-	if err != nil {
-		return fail(fmt.Errorf("select verification ownership descriptor: %w", err))
-	}
+	go func() { _, _ = io.Copy(io.Discard, reader) }()
+	token := uuid.NewString()
+	cmd.Env = newStepEnvironment(cmd.Env, map[string]string{verificationOwnerEnvironment: token}).list
+	fd := 3 + len(cmd.ExtraFiles)
 	cmd.ExtraFiles = append(cmd.ExtraFiles, writer)
-
-	if len(cmd.Args) != 3 || cmd.Args[1] != "-c" {
-		return fail(errors.New("verification shell command has an unexpected argument layout"))
-	}
-	originalArg0, command := cmd.Args[0], cmd.Args[2]
-	wrapper := fmt.Sprintf(
-		`exec %d>&%d; exec %d>&-; exec -a "$1" "$2" -c "$3"`,
-		targetFD, sourceFD, sourceFD,
-	)
-	cmd.Args = []string{
-		originalArg0, "-c", wrapper, darwinWrapperProcessArg,
-		originalArg0, cmd.Path, command,
-	}
-	owner := strconv.Itoa(targetFD) + darwinOwnershipDivider + markerName
-	return owner, closeOwnership, nil
-}
-
-func randomDarwinMarkerFD(sourceFD int) (int, error) {
-	var limit unix.Rlimit
-	if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &limit); err != nil {
-		return 0, err
-	}
-	if limit.Cur == 0 {
-		return 0, errors.New("open-file limit is zero")
-	}
-	minimum := max(darwinMarkerFDMinimum, sourceFD+1)
-	maximum := min(uint64(darwinMarkerFDMaximum), limit.Cur-1)
-	if uint64(minimum) > maximum {
-		return 0, fmt.Errorf("no descriptor available between %d and %d", minimum, maximum)
-	}
-	span := big.NewInt(int64(maximum) - int64(minimum) + 1)
-	offset, err := rand.Int(rand.Reader, span)
-	if err != nil {
-		return 0, err
-	}
-	return minimum + int(offset.Int64()), nil
+	return unixProcessOwnership{
+		token: token, descriptor: descriptor, fd: fd, daemonPID: os.Getpid(),
+	}, closeOwnership, nil
 }
 
 func darwinDescriptorName(ctx context.Context, pid, fd int) (string, error) {
@@ -102,59 +64,154 @@ func darwinDescriptorName(ctx context.Context, pid, fd int) (string, error) {
 	return "", errors.New("ownership pipe was absent from lsof output")
 }
 
-func ownedVerificationProcesses(ctx context.Context, owner string) ([]unixOwnedProcess, error) {
-	fdText, markerName, ok := strings.Cut(owner, darwinOwnershipDivider)
-	if !ok {
-		return nil, errors.New("invalid Darwin verification owner")
+func ownedVerificationProcesses(
+	ctx context.Context,
+	owner unixProcessOwnership,
+	descendants *unixDescendantWatch,
+) ([]unixOwnedProcess, error) {
+	identities, tracked, err := sharedUnixDescendantObserver.current(ctx, descendants)
+	if err != nil {
+		return nil, err
 	}
-	fd, err := strconv.Atoi(fdText)
-	if err != nil || fd < 0 {
-		return nil, errors.New("invalid Darwin verification owner descriptor")
+	descriptorPIDs, err := darwinDescriptorProcesses(ctx, owner.fd, owner.descriptor)
+	if err != nil {
+		return nil, err
 	}
+	marker := verificationOwnerEnvironment + "=" + owner.token
+	owned := make(map[unixOwnedProcess]struct{}, len(tracked))
+	for _, process := range tracked {
+		if process.pid != owner.daemonPID {
+			owned[process] = struct{}{}
+		}
+	}
+	for pid, identity := range identities {
+		if pid == owner.daemonPID {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		marked := descriptorPIDs[pid]
+		if !marked {
+			marked, err = darwinProcessHasEnvironmentEntry(pid, marker)
+			if errors.Is(err, unix.ESRCH) || errors.Is(err, unix.EINVAL) || errors.Is(err, unix.EPERM) {
+				continue
+			}
+			if err != nil {
+				return nil, fmt.Errorf("read environment of process %d: %w", pid, err)
+			}
+		}
+		if !marked {
+			continue
+		}
+		if !identity.Known() {
+			return nil, fmt.Errorf("identity of verification process %d is unknown", pid)
+		}
+		process, current, startErr := unixProcessFromSnapshot(pid, identity.Start, currentVerificationProcessStart)
+		if startErr != nil {
+			return nil, fmt.Errorf("recheck verification process %d: %w", pid, startErr)
+		}
+		if !current {
+			continue
+		}
+		owned[process] = struct{}{}
+	}
+	result := make([]unixOwnedProcess, 0, len(owned))
+	for process := range owned {
+		result = append(result, process)
+	}
+	return result, nil
+}
 
+func darwinDescriptorProcesses(ctx context.Context, fd int, descriptor string) (map[int]bool, error) {
 	cmd := aoprocess.CommandContext(ctx, darwinLsofPath, "-nP", "-a", "-d", strconv.Itoa(fd), "-F", "pn")
 	output, err := cmd.Output()
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 && len(output) == 0 {
-		return nil, nil
+		return map[int]bool{}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-
-	owned := make([]unixOwnedProcess, 0)
+	owned := make(map[int]bool)
 	pid := 0
 	for _, line := range strings.Split(string(output), "\n") {
 		switch {
 		case strings.HasPrefix(line, "p"):
 			pid, _ = strconv.Atoi(line[1:])
-		case pid > 0 && strings.HasPrefix(line, "n") && line[1:] == markerName:
-			start, startErr := darwinProcessStart(pid)
-			if errors.Is(startErr, errUnixProcessGone) {
-				continue
-			}
-			if startErr != nil {
-				return nil, fmt.Errorf("identify verification process %d: %w", pid, startErr)
-			}
-			owned = append(owned, unixOwnedProcess{pid: pid, start: start})
+		case pid > 0 && strings.HasPrefix(line, "n") && line[1:] == descriptor:
+			owned[pid] = true
 		}
 	}
 	return owned, nil
 }
 
-func signalOwnedVerificationProcess(process unixOwnedProcess, signal syscall.Signal) error {
-	return signalUnixProcessIfCurrent(process, signal, darwinProcessStart, syscall.Kill)
+func darwinProcessHasEnvironmentEntry(pid int, marker string) (bool, error) {
+	raw, err := unix.SysctlRaw("kern.procargs2", pid)
+	if err != nil {
+		return false, err
+	}
+	return darwinProcargsHasEnvironmentEntry(raw, marker), nil
 }
 
-func darwinProcessStart(pid int) (string, error) {
+func darwinProcargsHasEnvironmentEntry(raw []byte, marker string) bool {
+	if len(raw) < 4 {
+		return false
+	}
+	argc := int(binary.LittleEndian.Uint32(raw[:4]))
+	rest := raw[4:]
+	end := bytes.IndexByte(rest, 0)
+	if end < 0 {
+		return false
+	}
+	rest = rest[end:]
+	for len(rest) > 0 && rest[0] == 0 {
+		rest = rest[1:]
+	}
+	for range argc {
+		end = bytes.IndexByte(rest, 0)
+		if end < 0 {
+			return false
+		}
+		rest = rest[end+1:]
+	}
+	for len(rest) > 0 {
+		end = bytes.IndexByte(rest, 0)
+		if end < 0 {
+			return string(rest) == marker
+		}
+		if end == 0 {
+			return false
+		}
+		if string(rest[:end]) == marker {
+			return true
+		}
+		rest = rest[end+1:]
+	}
+	return false
+}
+
+func signalOwnedVerificationProcess(process unixOwnedProcess, signal syscall.Signal) error {
+	return signalUnixProcessIfCurrent(process, signal, currentVerificationProcessStart, syscall.Kill)
+}
+
+func currentVerificationProcessStart(pid int) (string, error) {
+	return darwinVerificationProcessStart(pid, false)
+}
+
+func verificationProcessStartForWatch(pid int) (string, error) {
+	return darwinVerificationProcessStart(pid, true)
+}
+
+func darwinVerificationProcessStart(pid int, includeZombie bool) (string, error) {
 	process, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
-	if errors.Is(err, unix.ESRCH) || errors.Is(err, unix.EINVAL) {
+	if errors.Is(err, unix.ESRCH) || errors.Is(err, unix.EINVAL) || errors.Is(err, unix.EIO) {
 		return "", errUnixProcessGone
 	}
 	if err != nil {
 		return "", err
 	}
-	if process.Proc.P_stat == darwinZombieState {
+	if !includeZombie && process.Proc.P_stat == darwinZombieState {
 		return "", errUnixProcessGone
 	}
 	return darwinProcessIdentity(*process), nil
