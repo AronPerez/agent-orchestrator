@@ -346,17 +346,37 @@ describe("idle evidence", () => {
 		const fetch = vi.fn(async (url: string): Promise<{ ok: boolean; json: () => Promise<unknown> }> => ({ ok: true, json: async () => url.endsWith("/sessions")
 			? { sessions: [idleSession] } : url.endsWith("/reviews") ? { chatReviewerIds: [], autoReviewPending: false, runs: [], activeReviewers: [] }
 			: { sides: sides.map((record: any) => record.side ?? record) } }));
-		const context = { daemonStatus: { port: 3001, state: "ready" } as DaemonStatus, daemonAttachmentGeneration: 1, appRunId: "launch", chatDraftRisks: [], readDaemonProbe: async () => true,
+		const probe = vi.fn<() => Promise<{ pid: number } | null>>(async () => ({ pid: 11 }));
+		const context = { daemonStatus: { port: 3001, pid: 11, state: "ready" } as DaemonStatus, daemonAttachmentGeneration: 1, appRunId: "launch", chatDraftRisks: [], readDaemonProbe: probe,
 			fetch, AbortSignal, sessionsAndReviewsAreIdle, sideLaunchState: undefined as { sides: unknown[] } | undefined,
 			sideLaunchRecovery: { ensureReady, capture, matches: (candidate: unknown) => candidate === attachment },
 			sideCloseController: { hasPending: vi.fn(() => false) },
 		};
 		const { isIdle } = runInNewContext(transpile(`({${main.slice(start, main.indexOf("\n\tonChange:", start))}})`, { target: ScriptTarget.ES2022 }), context);
-		return { isIdle: isIdle as () => Promise<boolean>, context, attachment, ensureReady, capture, fetch };
+		return { isIdle: isIdle as () => Promise<boolean>, context, attachment, ensureReady, capture, fetch, probe };
 	}
+	it.each(["ready", "mismatch"])("rejects a stale cached PID before probing work, state=%s", async state => {
+		const h = mainIdleProbe();
+		if (state === "mismatch") h.context.daemonStatus = { state: "error", code: "identity_mismatch", port: 3001, pid: 11 };
+		h.probe.mockResolvedValue({ pid: 12 });
+		expect(await h.isIdle()).toBe(false);
+		expect(h.context.daemonStatus.pid).toBe(11);
+		expect(h.context.daemonAttachmentGeneration).toBe(1);
+	});
+	it.each(["replacement", "unavailable"])("rejects a same-port live process change without a status notification: %s", async condition => {
+		const h = mainIdleProbe();
+		h.probe.mockResolvedValueOnce({ pid: 11 }).mockResolvedValue(condition === "replacement" ? { pid: 12 } : null);
+		expect(await h.isIdle()).toBe(false);
+		expect(h.context.daemonStatus.pid).toBe(11);
+		expect(h.context.daemonAttachmentGeneration).toBe(1);
+	});
+	it("requires a known cached process before accepting idle facts", async () => {
+		const h = mainIdleProbe(); delete h.context.daemonStatus.pid;
+		expect(await h.isIdle()).toBe(false);
+	});
 	it.each(["empty", "chat", "tui"])("allows an idle mismatched daemon without recovery attachment, board=%s", async (mode) => {
 		const h = mainIdleProbe();
-		h.context.daemonStatus = { state: "error", code: "identity_mismatch", port: 3001 };
+		h.context.daemonStatus = { state: "error", code: "identity_mismatch", port: 3001, pid: 11 };
 		h.capture.mockRejectedValue(new Error("no recovery attachment"));
 		const fetchNormally = h.fetch.getMockImplementation()!;
 		h.fetch.mockImplementation(async (url) => url.endsWith("/sessions")
@@ -399,6 +419,7 @@ describe("idle evidence", () => {
 		const context = {
 			ipcMain: { handle: (_channel: string, next: typeof handler) => { handler = next; } }, getShellWebContents: () => shell,
 			ExpectedIpcError: Error, daemonStatus: { state: "error", code: "identity_mismatch", port: 3001, pid: 11 }, daemonAttachmentGeneration: 1, appRunId: "launch",
+			readDaemonProbe: vi.fn(async () => ({ pid: 11 })),
 			sideLaunchState: { appRunId: "launch", sides: [{ side: { id: "side" } }, { side: { id: "other" } }] },
 			sideCloseRecovery: new SideCloseRecovery(), sideCloseController: { reconcile: vi.fn() },
 			sideLaunchRecovery: { captureForClose: vi.fn(async () => { throw new Error("normal recovery detached"); }) },
@@ -425,6 +446,12 @@ describe("idle evidence", () => {
 		await expect(h.invoke(ids)).rejects.toThrow();
 		expect(h.context.closeMismatchedSide).not.toHaveBeenCalled();
 	});
+	it("rejects retained cleanup when the live PID changed before cached status did", async () => {
+		const h = retainedDiscardIpc(); h.context.readDaemonProbe.mockResolvedValue({ pid: 12 });
+		await expect(h.invoke(["side"])).rejects.toThrow(/attachment changed/);
+		expect(h.context.closeMismatchedSide).not.toHaveBeenCalled();
+		expect(h.context.sideLaunchState.sides).toHaveLength(2);
+	});
 	it("rejects retained-discard requests after a normal daemon attachment resumes", async () => {
 		const h = retainedDiscardIpc(); h.context.daemonStatus.state = "ready";
 		await expect(h.invoke(["side"])).rejects.toThrow();
@@ -444,14 +471,14 @@ describe("idle evidence", () => {
 	});
 	it("still protects retained local side state when daemon identities differ", async () => {
 		const h = mainIdleProbe();
-		h.context.daemonStatus = { state: "error", code: "identity_mismatch", port: 3001 };
+		h.context.daemonStatus = { state: "error", code: "identity_mismatch", port: 3001, pid: 11 };
 		h.context.sideLaunchState = { sides: [{ side: { id: "side-1", label: "Design notes" } }] };
 		h.capture.mockRejectedValue(new Error("no recovery attachment"));
 		expect(await h.isIdle()).not.toBe(true);
 	});
 	it.each(["unavailable", "invalid", "attachment changed", "open side"])("rejects unsafe mismatched-daemon side facts: %s", async (condition) => {
 		const h = mainIdleProbe();
-		h.context.daemonStatus = { state: "error", code: "identity_mismatch", port: 3001 };
+		h.context.daemonStatus = { state: "error", code: "identity_mismatch", port: 3001, pid: 11 };
 		const fetchNormally = h.fetch.getMockImplementation()!;
 		h.fetch.mockImplementation(async url => {
 			if (!url.endsWith("/side-chats")) return fetchNormally(url);

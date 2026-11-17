@@ -27,7 +27,7 @@ function mismatchClose() {
 	const other = { ...record, side: { ...record.side, id: "other" }, providerHostId: "btw-run-other" };
 	const recovery = new SideCloseRecovery(); recovery.remember({ appRunId: "run", sides: [record, other] });
 	const fetcher = vi.fn<typeof fetch>();
-	const isCurrent = vi.fn(() => true), onChange = vi.fn();
+	const isCurrent = vi.fn<() => boolean | Promise<boolean>>(() => true), onChange = vi.fn();
 	const close = () => closeMismatchedSide({ attachment, sideId: "side", recovery, fetch: fetcher, isCurrent, onChange });
 	return { record, other, recovery, fetcher, isCurrent, onChange, close };
 }
@@ -116,6 +116,26 @@ it("keeps cleanup if the daemon changes after accepting DELETE", async () => {
 	});
 	await expect(h.close()).rejects.toThrow(/attachment changed/);
 	expect(h.recovery.state?.sides).toContainEqual(expect.objectContaining({ cleanupOnly: true }));
+});
+
+it.each(["headers", "body"])("rejects empty cleanup proof from a same-port replacement without a status notification, phase=%s", async phase => {
+	const h = mismatchClose();
+	let livePid = attachment.pid;
+	h.isCurrent.mockImplementation(async () => livePid === attachment.pid);
+	h.fetcher.mockResolvedValueOnce(ok()).mockResolvedValueOnce(noContent()).mockResolvedValueOnce(noContent())
+		.mockImplementationOnce(async () => {
+			if (phase === "headers") livePid = 12;
+			return { ...ok(), json: async () => { livePid = 12; return { appRunId: "run", sides: [] }; } } as Response;
+		});
+	await expect(h.close()).rejects.toThrow(/attachment changed/);
+	expect(h.recovery.state?.sides).toContainEqual(expect.objectContaining({ side: expect.objectContaining({ id: "side" }), cleanupOnly: true }));
+	expect(h.recovery.cleanupAcknowledged("side", JSON.stringify(attachment))).toBe(false);
+});
+it("does not dispatch cleanup after an asynchronous physical identity check fails", async () => {
+	const h = mismatchClose(); h.isCurrent.mockResolvedValue(false);
+	await expect(h.close()).rejects.toThrow(/attachment changed/);
+	expect(h.fetcher).not.toHaveBeenCalled();
+	expect(h.recovery.state?.sides).toHaveLength(2);
 });
 
 it("reports one restore fault when recovery and background waiters observe the same error", async () => {

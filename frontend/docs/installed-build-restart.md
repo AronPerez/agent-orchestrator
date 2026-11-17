@@ -79,6 +79,8 @@ activity for another TUI reviewer remains busy.
 
 Side-launch capture waits for recovery on the current daemon attachment. Main
 captures before and after the worker probes and rejects a changed attachment.
+The live `/readyz` PID must match the cached attachment before and after these
+reads, so a same-port replacement is rejected even before a status notification.
 Any retained side chat keeps both restart choices waiting, including a completed
 conversation or an idle side with a draft: quitting retires their launch-scoped
 state. The user must finish reading, save any text, and close those sides before
@@ -99,6 +101,9 @@ their drafts, transcripts, configuration or queued turns. The daemon attempts
 host-stop-before-fork-delete cleanup immediately, and the client keeps each
 record until a fresh snapshot on that attachment proves it gone. Acknowledged
 cleanup can finish on a later retry without being recreated on the same daemon.
+Each cleanup request checks the live `/healthz` PID before dispatch, after the
+response, and after reading a snapshot body. A physical-process change clears
+the acknowledgment and retains cleanup intent.
 Errors and attachment changes keep cleanup intent; other retained sides remain
 untouched. Repeated identical mismatch status polls keep the same attachment
 generation. The ordinary recovery attachment remains disabled throughout.

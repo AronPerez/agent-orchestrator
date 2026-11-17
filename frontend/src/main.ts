@@ -309,10 +309,10 @@ const installedBuildGuard = installedBuildDisk ? new InstalledBuildGuard({
 	assertRestartSafe: assertInstalledBuildRestartSafe,
 	onReplacement: setInstalledBuildReplacementDetected,
 	isIdle: async () => {
-		const { port, state, code } = daemonStatus;
+		const { port, state, code, pid } = daemonStatus;
 		const mismatched = state === "error" && code === "identity_mismatch";
 		const generation = daemonAttachmentGeneration;
-		if (chatDraftRisks.length > 0 || !port || (state !== "ready" && !mismatched) || !await readDaemonProbe(port, "readyz")) return false;
+		if (chatDraftRisks.length > 0 || !port || !pid || (state !== "ready" && !mismatched) || (await readDaemonProbe(port, "readyz"))?.pid !== pid) return false;
 		const checkSides = async (sessions?: { id: string; mode?: string; isTerminated?: boolean }[]) => {
 			let sides: unknown[] = [];
 			if (mismatched) {
@@ -359,7 +359,8 @@ const installedBuildGuard = installedBuildDisk ? new InstalledBuildGuard({
 		});
 		if (!idle) return false;
 		const latestSides = await checkSides(body.sessions).catch(() => false);
-		return !sideCloseController.hasPending() && generation === daemonAttachmentGeneration && daemonStatus.port === port && daemonStatus.state === state && daemonStatus.code === code ? latestSides : false;
+		const live = await readDaemonProbe(port, "readyz");
+		return live?.pid === pid && !sideCloseController.hasPending() && generation === daemonAttachmentGeneration && daemonStatus.port === port && daemonStatus.pid === pid && daemonStatus.state === state && daemonStatus.code === code ? latestSides : false;
 	},
 	onChange: (status) => {
 		console.info("AO: installed desktop build changed", { running: DESKTOP_BUILD_ID, installed: status?.identity, idle: status?.idle });
@@ -3341,10 +3342,13 @@ ipcMain.handle("sideChats:discardRetained", async (event, ids: unknown) => {
 	if (daemonStatus.state !== "error" || daemonStatus.code !== "identity_mismatch" || !daemonStatus.port || !daemonStatus.pid || sideLaunchState?.appRunId !== appRunId ||
 		ids.some(id => !sideLaunchState?.sides.some(record => (record as { side?: { id?: string } }).side?.id === id))) throw new ExpectedIpcError("Retained side chats changed. Review the current list and try again.");
 	const attachment = { generation: daemonAttachmentGeneration, port: daemonStatus.port, pid: daemonStatus.pid, appRunId };
-	const isCurrent = () => daemonAttachmentGeneration === attachment.generation && daemonStatus.port === attachment.port && daemonStatus.pid === attachment.pid && daemonStatus.state === "error" && daemonStatus.code === "identity_mismatch";
+	const isCurrent = async () => (await readDaemonProbe(attachment.port, "healthz"))?.pid === attachment.pid && daemonAttachmentGeneration === attachment.generation && daemonStatus.port === attachment.port && daemonStatus.pid === attachment.pid && daemonStatus.state === "error" && daemonStatus.code === "identity_mismatch";
 	try {
 		for (const id of ids) {
-			if (!isCurrent()) throw new ExpectedIpcError("Daemon attachment changed. Review the side chats before trying again.");
+			if (!await isCurrent()) {
+				sideCloseRecovery.acknowledgeCleanup(id);
+				throw new ExpectedIpcError("Daemon attachment changed. Review the side chats before trying again.");
+			}
 			await closeMismatchedSide({ attachment, sideId: id, recovery: sideCloseRecovery, isCurrent,
 				onChange: () => { sideLaunchState = sideCloseRecovery.state; sideCloseController.reconcile(); },
 			});

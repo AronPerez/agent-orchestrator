@@ -32,17 +32,23 @@ export async function closeMismatchedSide(options: {
 	attachment: SideLaunchAttachment;
 	sideId: string;
 	recovery: SideCloseRecovery;
-	isCurrent(): boolean;
+	isCurrent(): boolean | Promise<boolean>;
 	onChange(): void;
 	fetch?: typeof fetch;
 }): Promise<void> {
 	const { attachment, sideId, recovery } = options;
 	const attachmentKey = JSON.stringify(attachment);
 	const launch = "/api/v1/side-chats/launch";
+	const assertCurrent = async () => {
+		if (!await options.isCurrent()) {
+			recovery.acknowledgeCleanup(sideId);
+			throw new ExpectedIpcError("Side chat daemon attachment changed. Retry close after reconnecting.");
+		}
+	};
 	const request = async (path: string, init: RequestInit = {}, allowUnclaimed = false): Promise<SideLaunchSnapshot | undefined> => {
-		if (!options.isCurrent()) throw new ExpectedIpcError("Side chat daemon attachment changed. Retry close after reconnecting.");
+		await assertCurrent();
 		const response = await (options.fetch ?? fetch)(`http://127.0.0.1:${attachment.port}${path}`, { ...init, redirect: "error", signal: AbortSignal.timeout(15_000) });
-		if (!options.isCurrent()) { await response.body?.cancel(); throw new ExpectedIpcError("Side chat daemon attachment changed. Retry close after reconnecting."); }
+		try { await assertCurrent(); } catch (error) { await response.body?.cancel(); throw error; }
 		if (!response.ok) {
 			const error = await response.json().catch(() => undefined) as { code?: string } | undefined;
 			if (allowUnclaimed && response.status === 409 && error?.code === "CHAT_SIDE_UNAVAILABLE") return undefined;
@@ -50,7 +56,8 @@ export async function closeMismatchedSide(options: {
 		}
 		if (response.status === 204) { await response.body?.cancel(); return undefined; }
 		const state = await response.json() as SideLaunchSnapshot;
-		if (!options.isCurrent() || state.appRunId !== attachment.appRunId || !Array.isArray(state.sides) || !state.sides.every(record => {
+		await assertCurrent();
+		if (state.appRunId !== attachment.appRunId || !Array.isArray(state.sides) || !state.sides.every(record => {
 			const side = (record as { side?: { id?: unknown; sessionId?: unknown } } | null)?.side;
 			return side && typeof side.id === "string" && !!side.id && typeof side.sessionId === "string" && !!side.sessionId;
 		})) throw new ExpectedIpcError("Stale side chat close snapshot. Retry close after reconnecting.");

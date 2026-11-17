@@ -101,7 +101,7 @@ export class SideCloseRecovery {
 		}
 	}
 
-	acknowledgeCleanup(id: string, attachment: string): void {
+	acknowledgeCleanup(id: string, attachment?: string): void {
 		const intent = this.closing.get(id);
 		if (intent) intent.cleanupAttachment = attachment;
 	}
