@@ -283,6 +283,7 @@ func TestEmbeddedDecisionGuidanceCoversSearchingRaisingAndClosing(t *testing.T) 
 		"explicitly tell the human in your current response",
 		"project worker without an active orchestrator",
 		"ao decision show <call-link>",
+		"must not rely on the report alone",
 		`ao report --checkpoint --note "Decision call resolved: <call-link>; resume sessions blocked by it"`,
 		"If an unanswered match belongs to another project, do not reuse it.",
 	} {

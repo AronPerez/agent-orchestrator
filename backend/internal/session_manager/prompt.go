@@ -147,7 +147,7 @@ func buildSystemPromptText(cfg systemPromptConfig) string {
 func decisionCallsPrompt(hasActiveOrchestrator bool) string {
 	visibility := `- Before ending a turn blocked by a new or existing call, explicitly tell the human in the current response that a decision is waiting, include the call link and ` + "`ao decision show <call-link>`" + `. Do not end the turn silently.`
 	if hasActiveOrchestrator {
-		visibility = `- Before ending a turn blocked by a new or existing call, use the needs-input call-link handoff in Worker Reports.`
+		visibility = `- Before ending a turn blocked by a new or existing call, use the needs-input call-link handoff in Worker Reports; also explicitly tell the human in the current response that a decision is waiting, include the call link and ` + "`ao decision show <call-link>`" + `. Do not rely on the report alone because its recipient may no longer be active.`
 	}
 	return `## Decisions for the Human
 
