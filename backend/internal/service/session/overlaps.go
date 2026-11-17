@@ -77,7 +77,6 @@ func (s *Service) ProjectOverlaps(ctx context.Context, projectID domain.ProjectI
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.SetLimit(4)
 	for i := range active {
-		i := i
 		group.Go(func() error {
 			// An explicit collision-radar read is authoritative even when no Files
 			// view has a filesystem watcher open. Reconcile bypasses both cache
