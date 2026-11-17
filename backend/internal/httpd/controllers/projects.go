@@ -16,8 +16,6 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apispec"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
-	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/requestscope"
-	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
 )
 
@@ -184,7 +182,30 @@ func (c *ProjectsController) list(w http.ResponseWriter, r *http.Request) {
 	if projects == nil {
 		projects = []projectsvc.Summary{}
 	}
+	if isAgentCoordinationRequest(r.Context()) {
+		envelope.WriteJSON(w, http.StatusOK, struct {
+			Projects []coordinationProjectSummary `json:"projects"`
+		}{Projects: coordinationProjectSummaries(projects)})
+		return
+	}
 	envelope.WriteJSON(w, http.StatusOK, ListProjectsResponse{Projects: projects})
+}
+
+type coordinationProjectSummary struct {
+	ID                domain.ProjectID    `json:"id"`
+	Name              string              `json:"name"`
+	Kind              domain.ProjectKind  `json:"kind"`
+	OrchestratorAgent domain.AgentHarness `json:"orchestratorAgent,omitempty"`
+}
+
+func coordinationProjectSummaries(projects []projectsvc.Summary) []coordinationProjectSummary {
+	out := make([]coordinationProjectSummary, 0, len(projects))
+	for _, project := range projects {
+		out = append(out, coordinationProjectSummary{
+			ID: project.ID, Name: project.Name, Kind: project.Kind, OrchestratorAgent: project.OrchestratorAgent,
+		})
+	}
+	return out
 }
 
 func (c *ProjectsController) add(w http.ResponseWriter, r *http.Request) {
@@ -250,8 +271,7 @@ func (c *ProjectsController) get(w http.ResponseWriter, r *http.Request) {
 // Copy every projected layer so a scoped read cannot mutate the service's
 // cached value or a later full-credential response.
 func projectDetailForCredential(ctx context.Context, resp GetProjectResponse) GetProjectResponse {
-	credential := requestscope.CredentialFrom(ctx)
-	if !credential.HasScope(mobilebridge.DeviceScopeAgentCoordination) {
+	if !isAgentCoordinationRequest(ctx) {
 		return resp
 	}
 	if original := resp.Project.Project; original != nil {

@@ -31,6 +31,9 @@ type remoteTarget struct {
 	// probe proves that the saved address still belongs to that installation.
 	label  string
 	hostID string
+	// accountUserID binds a desktop-imported credential to the Cloud account
+	// that owns it. Empty means a local pairing, which remains usable signed out.
+	accountUserID string
 	// source names where the URL came from ("--url" or "AO_URL") so an error can
 	// tell the user which one is pointing them off-box.
 	source string
@@ -39,6 +42,11 @@ type remoteTarget struct {
 // remotesFileName holds saved remote daemons under the AO home directory. It
 // carries credentials, so it must be mode 0600.
 const remotesFileName = "remotes.json"
+
+// remotesFileEnv carries the desktop's host-store path through its daemon to
+// spawned agents. AO_DATA_DIR names daemon state, which is ~/.ao/data in a
+// packaged launch while the desktop store is ~/.ao/remotes.json.
+const remotesFileEnv = "AO_REMOTES_FILE"
 
 // coordinationTokenPrefix is distinct from the full-device aod_ format so an
 // older daemon cannot promote this credential when it ignores scope metadata.
@@ -58,6 +66,7 @@ type remoteEntry struct {
 	URL               string `json:"url"`
 	Password          string `json:"password"`
 	HostID            string `json:"hostId,omitempty"`
+	AccountUserID     string `json:"accountUserId,omitempty"`
 	CoordinationToken string `json:"coordinationToken,omitempty"`
 }
 
@@ -65,6 +74,10 @@ type remoteEntry struct {
 // nil for the default local daemon. The URL comes from --url or AO_URL; the
 // credential from AO_TOKEN or a matching entry in ~/.ao/remotes.json.
 func resolveRemoteTarget(flagURL string) (*remoteTarget, error) {
+	return resolveRemoteTargetForAccount(flagURL, "")
+}
+
+func resolveRemoteTargetForAccount(flagURL, activeAccount string) (*remoteTarget, error) {
 	raw, source := strings.TrimSpace(flagURL), "--url"
 	if raw == "" {
 		raw, source = strings.TrimSpace(os.Getenv("AO_URL")), "AO_URL"
@@ -77,8 +90,9 @@ func resolveRemoteTarget(flagURL string) (*remoteTarget, error) {
 		return nil, err
 	}
 	token := strings.TrimSpace(os.Getenv("AO_TOKEN"))
+	accountUserID := ""
 	if token == "" {
-		entry, err := lookupRemoteEntry(base)
+		entry, err := lookupRemoteEntryForAccount(base, activeAccount)
 		if err != nil {
 			return nil, err
 		}
@@ -90,8 +104,9 @@ func resolveRemoteTarget(flagURL string) (*remoteTarget, error) {
 			return nil, fmt.Errorf("the entry for %s in %s has an empty password — set its password, or use AO_TOKEN", base, path)
 		}
 		token = strings.TrimSpace(entry.Password)
+		accountUserID = strings.TrimSpace(entry.AccountUserID)
 	}
-	return &remoteTarget{baseURL: base, token: token, source: source}, nil
+	return &remoteTarget{baseURL: base, token: token, accountUserID: accountUserID, source: source}, nil
 }
 
 // resolveSavedHostTarget resolves one exact desktop-saved label or stable host
@@ -99,6 +114,10 @@ func resolveRemoteTarget(flagURL string) (*remoteTarget, error) {
 // the route-filtered credential minted for agent coordination. The filter is
 // defense in depth; the credential still carries full transitive host authority.
 func resolveSavedHostTarget(name string) (*remoteTarget, error) {
+	return resolveSavedHostTargetForAccount(name, "")
+}
+
+func resolveSavedHostTargetForAccount(name, activeAccount string) (*remoteTarget, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil, errors.New("saved host name must not be empty")
@@ -109,6 +128,9 @@ func resolveSavedHostTarget(name string) (*remoteTarget, error) {
 	}
 	var hostMatches, labelMatches []remoteEntry
 	for _, entry := range entries {
+		if !remoteEntryVisibleToAccount(entry, activeAccount) {
+			continue
+		}
 		switch {
 		case strings.TrimSpace(entry.HostID) == name:
 			hostMatches = append(hostMatches, entry)
@@ -149,7 +171,10 @@ func resolveSavedHostTarget(name string) (*remoteTarget, error) {
 	if label == "" {
 		label = hostID
 	}
-	return &remoteTarget{baseURL: base, token: token, label: label, hostID: hostID, source: "--host"}, nil
+	return &remoteTarget{
+		baseURL: base, token: token, label: label, hostID: hostID,
+		accountUserID: strings.TrimSpace(entry.AccountUserID), source: "--host",
+	}, nil
 }
 
 type savedHostIdentity struct {
@@ -164,7 +189,8 @@ func (c *commandContext) selectSavedHost(ctx context.Context, name string) error
 	if c.remote != nil {
 		return usageError{errors.New("--host cannot be combined with --url or AO_URL")}
 	}
-	target, err := resolveSavedHostTarget(name)
+	activeAccount := c.activeCloudAccount(ctx)
+	target, err := resolveSavedHostTargetForAccount(name, activeAccount)
 	if err != nil {
 		return err
 	}
@@ -180,6 +206,9 @@ func (c *commandContext) selectSavedHost(ctx context.Context, name string) error
 	}
 	if local := readLocalHostID(); local != "" && local == actual.HostID {
 		return fmt.Errorf("saved host %q is this AO installation itself", target.label)
+	}
+	if target.accountUserID != "" && c.activeCloudAccount(ctx) != target.accountUserID {
+		return errors.New("active Cloud account changed while verifying the saved host; retry with the intended account signed in")
 	}
 	c.remote = target
 	return nil
@@ -205,6 +234,22 @@ func (c *commandContext) savedHostRetryArgs() string {
 
 func shellQuoteArg(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
+}
+
+type activeCloudAccountResponse struct {
+	CloudUserID string `json:"cloudUserId"`
+	Known       bool   `json:"known"`
+}
+
+// activeCloudAccount asks the loopback daemon for the desktop's current
+// account. Failure or an unresolved/sign-out state hides account-owned hosts;
+// local pairings (which have no accountUserId) remain usable.
+func (c *commandContext) activeCloudAccount(ctx context.Context) string {
+	var result activeCloudAccountResponse
+	if err := c.doJSONPath(ctx, http.MethodGet, "/internal/telemetry/identity", nil, &result); err != nil || !result.Known {
+		return ""
+	}
+	return strings.TrimSpace(result.CloudUserID)
 }
 
 func (c *commandContext) probeSavedHostIdentity(ctx context.Context, base string) (savedHostIdentity, error) {
@@ -300,6 +345,9 @@ func hasUserinfo(raw string) bool {
 }
 
 func remotesFilePath() (string, error) {
+	if raw := strings.TrimSpace(os.Getenv(remotesFileEnv)); raw != "" {
+		return filepath.Abs(raw)
+	}
 	// The desktop places all of an isolated run's state directly under the
 	// explicit AO_DATA_DIR. Mirror that choice so its CLI sees the same hosts.
 	if raw := strings.TrimSpace(os.Getenv("AO_DATA_DIR")); raw != "" {
@@ -349,12 +397,15 @@ func loadRemoteEntries() ([]remoteEntry, error) {
 	return file.Remotes, nil
 }
 
-func lookupRemoteEntry(base string) (*remoteEntry, error) {
+func lookupRemoteEntryForAccount(base, activeAccount string) (*remoteEntry, error) {
 	entries, err := loadRemoteEntries()
 	if err != nil {
 		return nil, err
 	}
 	for _, entry := range entries {
+		if !remoteEntryVisibleToAccount(entry, activeAccount) {
+			continue
+		}
 		saved, err := normalizeRemoteURL(entry.URL)
 		if err != nil {
 			continue // a hand-edited entry must not break every other one
@@ -364,6 +415,18 @@ func lookupRemoteEntry(base string) (*remoteEntry, error) {
 		}
 	}
 	return nil, nil
+}
+
+func remoteEntryVisibleToAccount(entry remoteEntry, activeAccount string) bool {
+	owner := strings.TrimSpace(entry.AccountUserID)
+	return owner == "" || (strings.TrimSpace(activeAccount) != "" && owner == strings.TrimSpace(activeAccount))
+}
+
+func savedRemoteCredentialRequested(flagURL string) bool {
+	if strings.TrimSpace(os.Getenv("AO_TOKEN")) != "" {
+		return false
+	}
+	return strings.TrimSpace(flagURL) != "" || strings.TrimSpace(os.Getenv("AO_URL")) != ""
 }
 
 // resolvedBySuffix names the daemon that acted, for the messages where the

@@ -288,6 +288,17 @@ func (i *Identity) Snapshot() ports.TelemetryIdentity {
 	return snap
 }
 
+// CloudUserBinding returns the persisted desktop account even when telemetry
+// export is opted out. A failed persistence handoff is unknown and fails closed.
+func (i *Identity) CloudUserBinding() (id string, known bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if i.persistFailed {
+		return "", false
+	}
+	return i.cloudUserID, i.cloudUserKnown
+}
+
 // eventAttributes avoids another marker read while constructing an export.
 // The sender checks ExportSuppressed immediately before each HTTP attempt.
 func (i *Identity) eventAttributes() (cloudUserID, githubLogin string) {

@@ -25,6 +25,9 @@ type AccessDevice struct {
 	// Scopes is empty for the existing full app credential. A non-empty list
 	// is enforced by the LAN listener as a capability allowlist.
 	Scopes []string `json:"scopes,omitempty"`
+	// Issuer names the full credential that minted a scoped token. It lets
+	// revoking that credential also revoke the authority it delegated.
+	Issuer string `json:"issuer,omitempty"`
 	// InstallID links the device to its push registration.
 	InstallID  string    `json:"installId,omitempty"`
 	CreatedAt  time.Time `json:"createdAt"`
@@ -43,6 +46,9 @@ const (
 	// CoordinationTokenPrefix makes route-filtered coordination credentials
 	// fail closed on older daemons, which recognize only DeviceTokenPrefix.
 	CoordinationTokenPrefix = "aoc_"
+	// DeviceIssuerPrefix distinguishes a full device credential from shared
+	// password and account issuers in persisted scoped-token provenance.
+	DeviceIssuerPrefix = "device:"
 )
 
 // DeviceScopeAgentCoordination filters direct HTTP calls to the reads and
@@ -124,20 +130,27 @@ func (r *AccessDevices) moveAside(cause error) error {
 
 // Issue registers a new device and returns it with its token.
 func (r *AccessDevices) Issue(name, platform string, now time.Time) (AccessDevice, string, error) {
-	return r.issue(name, platform, nil, now)
+	return r.issue(name, platform, nil, "", now)
 }
 
 // IssueScoped registers a new device token carrying the given capability
 // scopes. Full app credentials are issued only through Issue.
 func (r *AccessDevices) IssueScoped(name, platform string, scopes []string, now time.Time) (AccessDevice, string, error) {
+	return r.IssueScopedBy(name, platform, scopes, "", now)
+}
+
+// IssueScopedBy registers a scoped token and records the full credential that
+// delegated its authority. An empty issuer is accepted for callers that do not
+// have an authentication context; network issuance always supplies one.
+func (r *AccessDevices) IssueScopedBy(name, platform string, scopes []string, issuer string, now time.Time) (AccessDevice, string, error) {
 	normalizedScopes := normalizeDeviceScopes(scopes)
 	if len(normalizedScopes) == 0 {
 		return AccessDevice{}, "", ErrInvalidDeviceScopes
 	}
-	return r.issue(name, platform, normalizedScopes, now)
+	return r.issue(name, platform, normalizedScopes, strings.TrimSpace(issuer), now)
 }
 
-func (r *AccessDevices) issue(name, platform string, normalizedScopes []string, now time.Time) (AccessDevice, string, error) {
+func (r *AccessDevices) issue(name, platform string, normalizedScopes []string, issuer string, now time.Time) (AccessDevice, string, error) {
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
 		return AccessDevice{}, "", err
@@ -157,6 +170,7 @@ func (r *AccessDevices) issue(name, platform string, normalizedScopes []string, 
 		Platform:   cleanLabel(strings.ToLower(platform), 32),
 		TokenHash:  HashPassword(token),
 		Scopes:     normalizedScopes,
+		Issuer:     issuer,
 		CreatedAt:  now.UTC(),
 		LastSeenAt: now.UTC(),
 	}
@@ -173,6 +187,15 @@ func (r *AccessDevices) issue(name, platform string, normalizedScopes []string, 
 		return AccessDevice{}, "", err
 	}
 	return cloneAccessDevice(device), token, nil
+}
+
+// DeviceIssuer names the full device credential that delegated a scoped token.
+func DeviceIssuer(deviceID string) string {
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" {
+		return ""
+	}
+	return DeviceIssuerPrefix + deviceID
 }
 
 // Match returns the device a token belongs to.
@@ -266,6 +289,46 @@ func (r *AccessDevices) Revoke(id string) (AccessDevice, bool, error) {
 		return AccessDevice{}, true, err
 	}
 	return device, true, nil
+}
+
+// RevokeIssuedBy atomically removes every scoped token delegated by issuer.
+// The removed records are returned so the caller can close live connections.
+func (r *AccessDevices) RevokeIssuedBy(issuer string) ([]AccessDevice, error) {
+	issuer = strings.TrimSpace(issuer)
+	if issuer == "" {
+		return nil, nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	revoked := make([]AccessDevice, 0)
+	for id, device := range r.devices {
+		if device.Issuer != issuer {
+			continue
+		}
+		revoked = append(revoked, device)
+		delete(r.devices, id)
+		delete(r.byHash, device.TokenHash)
+	}
+	if len(revoked) == 0 {
+		return nil, nil
+	}
+	if err := r.persistLocked(); err != nil {
+		for _, device := range revoked {
+			r.devices[device.ID] = device
+			r.byHash[device.TokenHash] = device.ID
+		}
+		return nil, err
+	}
+	sort.Slice(revoked, func(i, j int) bool {
+		if !revoked[i].CreatedAt.Equal(revoked[j].CreatedAt) {
+			return revoked[i].CreatedAt.Before(revoked[j].CreatedAt)
+		}
+		return revoked[i].ID < revoked[j].ID
+	})
+	for i := range revoked {
+		revoked[i] = cloneAccessDevice(revoked[i])
+	}
+	return revoked, nil
 }
 
 // RevokeAll removes every device.

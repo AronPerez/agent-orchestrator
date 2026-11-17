@@ -164,6 +164,56 @@ func TestAccessDevicesIssueScopedPersistsCapabilities(t *testing.T) {
 	}
 }
 
+func TestAccessDevicesScopedIssuerPersistsAndCanBeRevoked(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mobile", "access-devices.json")
+	now := time.Date(2026, 11, 17, 11, 0, 0, 0, time.UTC)
+	devices, err := LoadAccessDevices(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountDevice, accountToken, err := devices.IssueScopedBy(
+		"Account agent", "cli", []string{DeviceScopeAgentCoordination}, SharedAccount, now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, passwordToken, err := devices.IssueScopedBy(
+		"Password agent", "cli", []string{DeviceScopeAgentCoordination}, SharedPassword, now.Add(time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := LoadAccessDevices(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	matched, ok := reloaded.Match(accountToken)
+	if !ok || matched.ID != accountDevice.ID || matched.Issuer != SharedAccount {
+		t.Fatalf("account-issued device after reload = %+v, %v", matched, ok)
+	}
+	revoked, err := reloaded.RevokeIssuedBy(SharedAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(revoked) != 1 || revoked[0].ID != accountDevice.ID {
+		t.Fatalf("revoked = %+v, want account-issued device", revoked)
+	}
+	if _, ok := reloaded.Match(accountToken); ok {
+		t.Fatal("account-issued token survived issuer revocation")
+	}
+	if got, ok := reloaded.Match(passwordToken); !ok || got.Issuer != SharedPassword {
+		t.Fatalf("password-issued token was revoked too: %+v, %v", got, ok)
+	}
+	final, err := LoadAccessDevices(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := final.Match(accountToken); ok {
+		t.Fatal("issuer revocation was not persisted")
+	}
+}
+
 func TestAccessDevicesTouchAndLink(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "access-devices.json")
 	now := time.Date(2026, 11, 10, 9, 0, 0, 0, time.UTC)
