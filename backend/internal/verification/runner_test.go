@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -97,6 +98,60 @@ func TestRunnerRedactsASecretAcrossTheTailBoundary(t *testing.T) {
 	}
 	if strings.Contains(result.OutputTail, "value") {
 		t.Fatalf("secret suffix leaked from the tail boundary: %q", result.OutputTail)
+	}
+}
+
+func TestRunnerRedactsRepeatedSecretsBeforeBoundingTheTail(t *testing.T) {
+	const secret = "0123456789abcdef0123456789ABCDEF"
+	payload := strings.Repeat(secret, 2100) + strings.Repeat("x", 15)
+	runner := newTestRunner(func(_ context.Context, _ string, _ string, _ map[string]string, output io.Writer) error {
+		_, _ = io.WriteString(output, payload)
+		return nil
+	})
+	result, err := runner.Run(context.Background(), Request{
+		ProjectID: "demo", WorkspacePath: "/work/demo", Commands: []string{"verify"},
+		Env: map[string]string{"TOKEN": secret},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(result.OutputTail, secret[15:]) {
+		t.Fatalf("secret suffix leaked after repeated replacements: %q", result.OutputTail[:min(len(result.OutputTail), 80)])
+	}
+}
+
+func TestRunnerRedactsInheritedCredentialEnvironment(t *testing.T) {
+	const secret = "inherited-verification-secret"
+	t.Setenv("VERIFY_REVIEW_TOKEN", secret)
+	runner := newTestRunner(func(_ context.Context, _ string, _ string, _ map[string]string, output io.Writer) error {
+		_, _ = io.WriteString(output, os.Getenv("VERIFY_REVIEW_TOKEN"))
+		return nil
+	})
+	result, err := runner.Run(context.Background(), Request{
+		ProjectID: "demo", WorkspacePath: "/work/demo", Commands: []string{"verify"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(result.OutputTail, secret) || !strings.Contains(result.OutputTail, "[REDACTED]") {
+		t.Fatalf("inherited credential was not redacted: %q", result.OutputTail)
+	}
+}
+
+func TestRedactingWriterMatchesASecretSplitAcrossWrites(t *testing.T) {
+	var output bytes.Buffer
+	redactor := newRedactingWriter(&output, map[string]string{"TOKEN": "split-secret"})
+	if _, err := redactor.Write([]byte("before split-")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := redactor.Write([]byte("secret after")); err != nil {
+		t.Fatal(err)
+	}
+	if err := redactor.Finalize(); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := output.String(), "before [REDACTED] after"; got != want {
+		t.Fatalf("redacted output = %q, want %q", got, want)
 	}
 }
 

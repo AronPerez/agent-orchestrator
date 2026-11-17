@@ -4,10 +4,13 @@
 package verification
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -115,10 +118,9 @@ func (r *Runner) Run(ctx context.Context, request Request) (result Result, runEr
 	}
 	defer release()
 
-	// Keep enough lookbehind for a configured value that starts just before the
-	// final evidence window. Redact first and crop second, so a secret cannot
-	// leak only because the raw tail retained a suffix of it.
-	tail := &tailWriter{max: r.tailBytes + longestConfiguredValue(request.Env)}
+	redactions := verificationRedactions(request.Env, os.Environ())
+	tail := &tailWriter{max: r.tailBytes}
+	output := newRedactingWriter(tail, redactions)
 	env := agentlaunch.MergeEnv(request.Env, map[string]string{
 		"AO_PROJECT_ID":    string(request.ProjectID),
 		"AO_WORKTREE_PATH": request.WorkspacePath,
@@ -131,11 +133,15 @@ func (r *Runner) Run(ctx context.Context, request Request) (result Result, runEr
 			minutes = domain.DefaultScriptStepTimeoutMinutes
 		}
 		timeout := time.Duration(minutes) * r.timeoutUnit
-		_, _ = fmt.Fprintf(tail, "Verification step %d of %d\n", index+1, len(steps))
+		_, _ = fmt.Fprintf(output, "Verification step %d of %d\n", index+1, len(steps))
 		stepCtx, cancel := context.WithTimeout(ctx, timeout)
-		err := r.execute(stepCtx, request.WorkspacePath, command, env, tail)
-		timedOut := err != nil && ctx.Err() == nil && errors.Is(stepCtx.Err(), context.DeadlineExceeded)
-		if timedOut {
+		err := r.execute(stepCtx, request.WorkspacePath, command, env, output)
+		parentErr := ctx.Err()
+		stepContextErr := stepCtx.Err()
+		timedOut := err != nil && parentErr == nil && errors.Is(stepContextErr, context.DeadlineExceeded)
+		if parentErr != nil {
+			err = errors.Join(err, parentErr)
+		} else if timedOut {
 			err = errors.Join(err, stepCtx.Err())
 		}
 		cancel()
@@ -147,12 +153,16 @@ func (r *Runner) Run(ctx context.Context, request Request) (result Result, runEr
 		result.TimedOut = timedOut
 		runErr = &StepError{
 			Step: index + 1, TimedOut: timedOut, Timeout: timeout,
-			Cause: agentlaunch.RedactError(err, request.Env),
+			Cause: agentlaunch.RedactError(err, redactions),
 		}
 		break
 	}
 
-	result.OutputTail = boundedTail(agentlaunch.RedactValues(tail.String(), request.Env), r.tailBytes)
+	if err := output.Finalize(); err != nil {
+		runErr = errors.Join(runErr, fmt.Errorf("redact verification output: %w", err))
+		result.Passed = false
+	}
+	result.OutputTail = boundedTail(tail.String(), r.tailBytes)
 	if request.Output != nil && result.OutputTail != "" {
 		if _, err := io.WriteString(request.Output, result.OutputTail); err != nil {
 			runErr = errors.Join(runErr, fmt.Errorf("write verification output: %w", err))
@@ -256,12 +266,115 @@ func boundedTail(value string, maxBytes int) string {
 	return value[len(value)-maxBytes:]
 }
 
-func longestConfiguredValue(env map[string]string) int {
-	longest := 0
-	for _, value := range env {
-		if len(value) > longest {
-			longest = len(value)
+func verificationRedactions(configured map[string]string, inherited []string) map[string]string {
+	redactions := make(map[string]string, len(configured))
+	for key, value := range configured {
+		redactions[key] = value
+	}
+	for index, entry := range inherited {
+		name, value, ok := strings.Cut(entry, "=")
+		if !ok || value == "" || !credentialEnvironmentName(name) {
+			continue
+		}
+		// A project override can use the same name with a different value. Keep
+		// both values in the redaction set because the inherited value was still
+		// present in the daemon environment and must never reach evidence.
+		redactions[fmt.Sprintf("inherited:%d:%s", index, name)] = value
+	}
+	return redactions
+}
+
+func credentialEnvironmentName(name string) bool {
+	upper := strings.ToUpper(name)
+	for _, marker := range []string{
+		"TOKEN", "SECRET", "PASSWORD", "PASSWD", "API_KEY", "APIKEY",
+		"PRIVATE_KEY", "ACCESS_KEY", "CREDENTIAL", "AUTHORIZATION",
+	} {
+		if strings.Contains(upper, marker) {
+			return true
 		}
 	}
-	return longest
+	return false
+}
+
+// redactingWriter removes complete sensitive values before bytes enter the
+// bounded tail. It retains only a suffix that could be the start of a value,
+// so matches split across concurrent stdout/stderr writes are still removed.
+type redactingWriter struct {
+	mu      sync.Mutex
+	dst     io.Writer
+	pending []byte
+	secrets [][]byte
+}
+
+func newRedactingWriter(dst io.Writer, configured map[string]string) *redactingWriter {
+	seen := make(map[string]struct{}, len(configured))
+	secrets := make([][]byte, 0, len(configured))
+	for _, value := range configured {
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		secrets = append(secrets, []byte(value))
+	}
+	sort.Slice(secrets, func(i, j int) bool { return len(secrets[i]) > len(secrets[j]) })
+	return &redactingWriter{dst: dst, secrets: secrets}
+}
+
+func (w *redactingWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.pending = append(w.pending, p...)
+	return len(p), w.flush(false)
+}
+
+// Finalize emits a trailing partial prefix after the command's writers stop.
+func (w *redactingWriter) Finalize() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.flush(true)
+}
+
+func (w *redactingWriter) flush(final bool) error {
+	consumed := 0
+	for consumed < len(w.pending) {
+		rest := w.pending[consumed:]
+		matched := false
+		for _, secret := range w.secrets {
+			if len(rest) >= len(secret) && bytes.HasPrefix(rest, secret) {
+				if _, err := io.WriteString(w.dst, "[REDACTED]"); err != nil {
+					return err
+				}
+				consumed += len(secret)
+				matched = true
+				break
+			}
+		}
+		if matched {
+			continue
+		}
+		if !final && w.couldStartSecret(rest) {
+			break
+		}
+		if _, err := w.dst.Write(rest[:1]); err != nil {
+			return err
+		}
+		consumed++
+	}
+	if consumed > 0 {
+		w.pending = append(w.pending[:0], w.pending[consumed:]...)
+	}
+	return nil
+}
+
+func (w *redactingWriter) couldStartSecret(rest []byte) bool {
+	for _, secret := range w.secrets {
+		if len(rest) < len(secret) && bytes.HasPrefix(secret, rest) {
+			return true
+		}
+	}
+	return false
 }

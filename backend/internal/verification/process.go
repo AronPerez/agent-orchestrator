@@ -24,8 +24,11 @@ func runWorkspaceStep(ctx context.Context, workspacePath, command string, env ma
 	cmd.Stdin = strings.NewReader("")
 	cmd.Stdout, cmd.Stderr = output, output
 	err := cmd.Run()
-	if errors.Is(err, exec.ErrWaitDelay) && ctx.Err() == nil {
-		return nil
+	if errors.Is(err, exec.ErrWaitDelay) {
+		// A successful shell left a descendant holding the output pipes. It is
+		// not a successful verification: stop the tree before the project gate
+		// is released, then preserve ErrWaitDelay for the caller.
+		return errors.Join(err, aoprocess.KillProcessTree(cmd))
 	}
 	if err != nil && cmd.ProcessState != nil && cmd.ProcessState.Success() && ctx.Err() != nil && errors.Is(err, ctx.Err()) {
 		return nil
