@@ -274,7 +274,12 @@ func (c *commandContext) selectSavedHost(ctx context.Context, name string) error
 }
 
 func (c *commandContext) verifySavedHostTarget(ctx context.Context, target *remoteTarget) error {
-	if local := readLocalHostID(); local != "" && local == target.hostID {
+	return c.verifySavedHostTargetAgainst(ctx, target, readLocalHostID())
+}
+
+func (c *commandContext) verifySavedHostTargetAgainst(ctx context.Context, target *remoteTarget, localHostID string) error {
+	localHostID = strings.TrimSpace(localHostID)
+	if localHostID != "" && localHostID == target.hostID {
 		return fmt.Errorf("saved host %q is this AO installation itself", target.label)
 	}
 	actual, err := c.probeSavedHostIdentity(ctx, target.baseURL)
@@ -284,7 +289,7 @@ func (c *commandContext) verifySavedHostTarget(ctx context.Context, target *remo
 	if actual.HostID != target.hostID {
 		return fmt.Errorf("saved host identity changed for %s: expected %s, got %s; connection refused", target.baseURL, target.hostID, actual.HostID)
 	}
-	if local := readLocalHostID(); local != "" && local == actual.HostID {
+	if localHostID != "" && localHostID == actual.HostID {
 		return fmt.Errorf("saved host %q is this AO installation itself", target.label)
 	}
 	if target.accountUserID != "" && c.activeCloudAccount(ctx) != target.accountUserID {

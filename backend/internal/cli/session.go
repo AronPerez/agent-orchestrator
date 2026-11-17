@@ -270,6 +270,8 @@ type allHostSessionListResult struct {
 	Err       error
 }
 
+var allHostsSnapshotTimeout = 10 * time.Second
+
 func newSessionCommand(ctx *commandContext) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "session",
@@ -815,10 +817,7 @@ func (c *commandContext) listSessionsAllHosts(ctx context.Context, cmd *cobra.Co
 	}
 
 	localHostID, localIdentityErr := c.localHostIDForList(ctx)
-	candidates, err := resolveAllSavedHostTargetsForAccount(c.activeCloudAccount(ctx))
-	if err != nil {
-		return err
-	}
+	candidates, discoveryErr := resolveAllSavedHostTargetsForAccount(c.activeCloudAccount(ctx))
 	tasks := make([]listTask, 0, len(candidates)+1)
 	results := make([]allHostSessionListResult, 0, len(candidates)+1)
 	if localIdentityErr != nil {
@@ -826,15 +825,19 @@ func (c *commandContext) listSessionsAllHosts(ctx context.Context, cmd *cobra.Co
 	} else {
 		tasks = append(tasks, listTask{hostID: localHostID, hostLabel: "this machine", local: true})
 	}
-	for _, candidate := range candidates {
-		if localHostID != "" && candidate.HostID == localHostID {
-			continue
+	if discoveryErr != nil {
+		results = append(results, allHostSessionListResult{HostLabel: "saved hosts", Err: fmt.Errorf("discover saved hosts: %w", discoveryErr)})
+	} else {
+		for _, candidate := range candidates {
+			if localHostID != "" && candidate.HostID == localHostID {
+				continue
+			}
+			if candidate.Err != nil {
+				results = append(results, allHostSessionListResult{HostID: candidate.HostID, HostLabel: candidate.Label, Err: candidate.Err})
+				continue
+			}
+			tasks = append(tasks, listTask{hostID: candidate.HostID, hostLabel: candidate.Label, target: candidate.Target})
 		}
-		if candidate.Err != nil {
-			results = append(results, allHostSessionListResult{HostID: candidate.HostID, HostLabel: candidate.Label, Err: candidate.Err})
-			continue
-		}
-		tasks = append(tasks, listTask{hostID: candidate.HostID, hostLabel: candidate.Label, target: candidate.Target})
 	}
 
 	resultCh := make(chan allHostSessionListResult, len(tasks))
@@ -853,16 +856,18 @@ func (c *commandContext) listSessionsAllHosts(ctx context.Context, cmd *cobra.Co
 				resultCh <- result
 				return
 			}
+			hostCtx, cancel := context.WithTimeout(ctx, allHostsSnapshotTimeout)
+			defer cancel()
 			hostContext := *c
 			hostContext.remote = task.target
 			if task.target != nil {
-				if err := c.verifySavedHostTarget(ctx, task.target); err != nil {
+				if err := c.verifySavedHostTargetAgainst(hostCtx, task.target, localHostID); err != nil {
 					result.Err = err
 					resultCh <- result
 					return
 				}
 			}
-			result.Snapshot, result.Err = hostContext.fetchSessionListSnapshot(ctx, opts)
+			result.Snapshot, result.Err = hostContext.fetchSessionListSnapshot(hostCtx, opts)
 			resultCh <- result
 		}()
 	}
@@ -905,9 +910,6 @@ func (c *commandContext) listSessionsAllHosts(ctx context.Context, cmd *cobra.Co
 }
 
 func (c *commandContext) localHostIDForList(ctx context.Context) (string, error) {
-	if hostID := readLocalHostID(); hostID != "" && hostID != "local" {
-		return hostID, nil
-	}
 	var identity savedHostIdentity
 	if err := c.getJSON(ctx, "identity", &identity); err != nil {
 		return "", fmt.Errorf("read local host identity: %w", err)
@@ -919,7 +921,7 @@ func (c *commandContext) localHostIDForList(ctx context.Context) (string, error)
 }
 
 func writeAllHostSessionListJSON(cmd *cobra.Command, results []allHostSessionListResult) error {
-	out := sessionListOutput{}
+	out := sessionListOutput{Data: make([]sessionListEntry, 0)}
 	for _, result := range results {
 		status := sessionListHostStatus{
 			HostID: result.HostID, HostLabel: result.HostLabel, Local: result.Local,
