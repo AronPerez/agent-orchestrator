@@ -5194,7 +5194,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ListProjectsResponse'
+                $ref: '#/components/schemas/ListProjectsAPIResponse'
           description: OK
         "500":
           content:
@@ -20751,6 +20751,30 @@ components:
       - state
       - createdAt
       type: object
+    CoordinationListProjectsResponse:
+      properties:
+        projects:
+          items:
+            $ref: '#/components/schemas/CoordinationProjectSummary'
+          type: array
+      required:
+      - projects
+      type: object
+    CoordinationProjectSummary:
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+        name:
+          type: string
+        orchestratorAgent:
+          type: string
+      required:
+      - id
+      - name
+      - kind
+      type: object
     CoordinationTokenResponse:
       properties:
         deviceId:
@@ -22112,6 +22136,11 @@ components:
       - commits
       - truncated
       - summary
+      type: object
+    ListProjectsAPIResponse:
+      anyOf:
+      - $ref: '#/components/schemas/ListProjectsResponse'
+      - $ref: '#/components/schemas/CoordinationListProjectsResponse'
       type: object
     ListProjectsResponse:
       properties:

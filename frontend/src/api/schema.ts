@@ -7148,6 +7148,15 @@ export interface components {
             summary: string;
             targetSessionId?: string;
         };
+        CoordinationListProjectsResponse: {
+            projects: components["schemas"]["CoordinationProjectSummary"][];
+        };
+        CoordinationProjectSummary: {
+            id: string;
+            kind: string;
+            name: string;
+            orchestratorAgent?: string;
+        };
         CoordinationTokenResponse: {
             deviceId: string;
             hostId: string;
@@ -7652,6 +7661,7 @@ export interface components {
             summary: components["schemas"]["WorkspaceSummary"];
             truncated: boolean;
         };
+        ListProjectsAPIResponse: components["schemas"]["ListProjectsResponse"] | components["schemas"]["CoordinationListProjectsResponse"];
         ListProjectsResponse: {
             projects: components["schemas"]["ProjectSummary"][];
         };
@@ -16825,7 +16835,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ListProjectsResponse"];
+                    "application/json": components["schemas"]["ListProjectsAPIResponse"];
                 };
             };
             /** @description Internal Server Error */
