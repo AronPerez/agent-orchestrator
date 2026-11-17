@@ -42,6 +42,7 @@ import { useRemoteWorkspaces } from "../hooks/useWorkspaceQuery";
 import { clearOptimisticSessionKill, trackOptimisticSessionKill } from "../hooks/optimistic-session-kills";
 import { useRemoteUnpinStore } from "../stores/remote-unpin-store";
 import { sessionUiKey } from "../lib/hosts";
+import { connectHost, disconnectHost } from "../lib/host-clients";
 
 type DragOverTestEvent = {
 	active: {
@@ -3240,6 +3241,28 @@ describe("Sidebar", () => {
 		expect(window.localStorage.getItem("ao-sidebar-w")).toBe(String(SIDEBAR_MIN_WIDTH + 5));
 	});
 
+	it("keeps the fixed navigation clear of the center panel when window zoom moves it right", async () => {
+		const nav = document.createElement("div");
+		nav.setAttribute("data-slot", "titlebar-nav");
+		let right = 176;
+		nav.getBoundingClientRect = () => ({ width: 92, right }) as DOMRect;
+		document.body.append(nav);
+		try {
+			renderSidebar();
+			const gap = document.querySelector<HTMLElement>('[data-slot="sidebar-gap"]')!;
+			fireEvent.pointerDown(screen.getByTestId("resize-handle"), { clientX: SIDEBAR_DEFAULT_WIDTH });
+			fireEvent.pointerMove(window, { clientX: 0 });
+			fireEvent.pointerUp(window);
+			expect(gap.style.getPropertyValue("--ao-sidebar-w")).toBe(`${SIDEBAR_MIN_WIDTH}px`);
+
+			right = 260;
+			window.dispatchEvent(new Event("resize"));
+			await waitFor(() => expect(gap.style.getPropertyValue("--ao-sidebar-w")).toBe("272px"));
+		} finally {
+			nav.remove();
+		}
+	});
+
 	it("never drops the floor below SIDEBAR_MIN_WIDTH and grows when the brand moves right", async () => {
 		// Titlebar brand as in native fullscreen: no traffic-light reserve, so the
 		// label alone would fit a sidebar narrower than the footer needs.
@@ -3455,6 +3478,33 @@ describe("Sidebar", () => {
 		const icon = document.querySelector("[data-project-folder-icon]");
 		expect(icon).toHaveTextContent("P");
 		expect(icon?.querySelector(".icon-folder")).not.toBeInTheDocument();
+	});
+
+	it("renders the owning host's avatar beside a remote project with the same ID as a local project", async () => {
+		useUiStore.setState({ projectAvatars: true, remoteHosts: true });
+		const url = "http://box-avatar:3001";
+		const connection = vi.spyOn(aoBridge.remotes, "connect").mockResolvedValue({ hostId: "box-avatar", label: "Box", url, base: "http://127.0.0.1:4000" });
+		await connectHost(url);
+		const remoteUrl = "https://avatars.githubusercontent.com/remote?s=64";
+		const remoteData = "data:image/png;base64,cmVtb3Rl";
+		try {
+			renderSidebar({
+				workspaces: [{ ...workspace, sessions: [] }],
+				remoteHosts: [{ hostId: "box-avatar", label: "Box", url, status: "connected" }],
+				remoteWorkspaces: [{ ...workspace, hostId: "box-avatar", sessions: [] }],
+				seed: (client) => {
+					client.setQueryData(["project", workspace.id], { repo: "https://github.com/local/repo" });
+					client.setQueryData(["project", "box-avatar", workspace.id], { repo: "https://github.com/remote/repo" });
+					client.setQueryData(["project-avatar", "box-avatar", workspace.id, remoteUrl], remoteData);
+				},
+			});
+			await waitFor(() => expect(document.querySelector("[data-remote-project-row] img")).toHaveAttribute("src", remoteData));
+			expect(document.querySelector('[data-project-id]:not([data-remote-project-row]) img')).toHaveAttribute("src", "https://avatars.githubusercontent.com/local?s=64");
+		} finally {
+			cleanup();
+			await disconnectHost("box-avatar");
+			connection.mockRestore();
+		}
 	});
 
 	it("previews the board card to the right of a hovered session row", async () => {

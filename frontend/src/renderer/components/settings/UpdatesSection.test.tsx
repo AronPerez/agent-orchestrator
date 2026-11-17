@@ -92,6 +92,13 @@ it("renders the installed nightly build time as the device-local instant", async
 	expect(await screen.findByText(`Built ${builtAt}`)).toBeVisible();
 });
 
+it("says an external build is installed instead of asking the user to install it again", async () => {
+	updGetStatus.mockResolvedValue({ state: "downloaded", installed: { identity: "external", idle: false, restartWhenIdle: false } } satisfies UpdateStatus);
+	renderUpdates();
+	expect(await screen.findByText("A new build of Orchestrator is installed. Restart to start using it.")).toBeVisible();
+	expect(screen.getByRole("button", { name: "Restart options" })).toBeVisible();
+});
+
 it("links PRs and commits in downloaded notes from the renamed repository", async () => {
 	const repo = "https://github.com/OrchestratorInc/agent-orchestrator";
 	const commit = "7b7db96413e6a396a10afbcada0e2fd04a994ad8";

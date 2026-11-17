@@ -101,6 +101,7 @@ import { useCloudLocalAuth } from "../hooks/useCloudLocalAuth";
 import { useLocalSignInDialogStore } from "../stores/local-signin-dialog-store";
 import { useShellMaybe } from "../lib/shell-context";
 import { useUpdateStatus } from "../hooks/useUpdateStatus";
+import { useInstalledBuildPrompt } from "../hooks/useInstalledBuildPrompt";
 import { MAX_SESSION_DISPLAY_NAME_LEN, useSessionRename } from "../hooks/useSessionRename";
 import { useSessionPreviewHover } from "../hooks/useSessionPreviewHover";
 import { effectiveShortcutBindings, shortcutBindingKeys } from "../../shared/shortcuts";
@@ -174,7 +175,7 @@ import { RemoteHostsSection } from "./RemoteHostsSection";
 // sidebar toggle + history arrows above this surface. Windows hangs the sidebar
 // under its custom titlebar.
 const isMac = isMacPlatform();
-const brandInTitlebar = isMac || isLinuxPlatform();
+const usesTitlebarNav = isMac || isLinuxPlatform();
 const noDragStyle = isMac ? ({ WebkitAppRegion: "no-drag" } as React.CSSProperties) : undefined;
 
 // One row-action layout shared by project rows, session rows, and the section
@@ -356,16 +357,16 @@ export const SIDEBAR_DEFAULT_WIDTH = 240;
 export const SIDEBAR_MIN_WIDTH = 200;
 export const SIDEBAR_MAX_WIDTH = 420;
 const SIDEBAR_BRAND_TRAILING_GAP = 12;
-/** Narrowest the sidebar may get: SIDEBAR_MIN_WIDTH, widened to show the whole
- *  brand label. Measured, because the label's left edge moves with window zoom
- *  (the traffic-light reserve is divided by the zoom factor) and native
- *  fullscreen (no reserve). The label alone fits in less than the footer's
- *  Settings row needs, so never go below SIDEBAR_MIN_WIDTH. */
+/** Keep fixed navigation and the platform's brand clear of the center panel.
+ *  Native zoom/fullscreen moves the traffic-light reserve; the footer also
+ *  needs at least SIDEBAR_MIN_WIDTH. */
 function sidebarMinWidth(): number {
+	const nav = document.querySelector<HTMLElement>('[data-slot="titlebar-nav"]')?.getBoundingClientRect();
+	const navMinimum = nav?.width ? Math.ceil(nav.right + SIDEBAR_BRAND_TRAILING_GAP) : SIDEBAR_MIN_WIDTH;
 	const brand = Array.from(document.querySelectorAll<HTMLElement>("[data-sidebar-brand]")).find(
 		(el) => el.getBoundingClientRect().width > 0,
 	);
-	if (!brand) return SIDEBAR_MIN_WIDTH;
+	if (!brand) return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, navMinimum));
 	// Measure the label's natural width (its scrollWidth), not its painted width:
 	// the titlebar clips the label to the sidebar, so the painted width would
 	// shrink the floor to whatever the sidebar already is. Without a separate
@@ -376,7 +377,7 @@ function sidebarMinWidth(): number {
 	const fit = label
 		? Math.ceil(label.getBoundingClientRect().left + label.scrollWidth + SIDEBAR_BRAND_TRAILING_GAP + 1)
 		: Math.ceil(brand.getBoundingClientRect().left + brand.scrollWidth + SIDEBAR_BRAND_TRAILING_GAP);
-	return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, fit));
+	return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, navMinimum, fit));
 }
 /** Initial item count shown in expanded sections; Show more/less toggles the remainder.
  *  Collapsed icon rail always shows the full list so projects stay reachable. */
@@ -734,6 +735,7 @@ export const Sidebar = memo(function Sidebar({
 	const [expandedChromeVisible, setExpandedChromeVisible] = useState(!isCollapsed);
 	// One IPC subscription for both footer variants of the restart-to-update prompt.
 	const updateStatus = useUpdateStatus();
+	useInstalledBuildPrompt(updateStatus);
 	const openUpdateInstallPrompt = useUiStore((state) => state.openUpdateInstallPrompt);
 	// Daemon status for the smoke suite's sr-only mirror in the footer. Null when
 	// rendered outside the shell (unit tests) — the mirror simply doesn't render.
@@ -935,7 +937,8 @@ export const Sidebar = memo(function Sidebar({
 			sessions: scratchpads.flatMap((workspace) => workspace.sessions),
 		};
 	}, [t, workspaces]);
-	const projectAvatars = useProjectAvatars(projectWorkspaces);
+	const avatarWorkspaces = useMemo(() => [...projectWorkspaces, ...remoteWorkspaces], [projectWorkspaces, remoteWorkspaces]);
+	const projectAvatars = useProjectAvatars(avatarWorkspaces);
 	const {
 		listed: visibleWorkspaces,
 		hiddenCount: hiddenProjectCount,
@@ -1106,8 +1109,8 @@ export const Sidebar = memo(function Sidebar({
 					aria-label={t("shell.goHome")}
 					className={cn(
 						"group/brand flex w-full shrink-0 items-center gap-1.5 rounded-md px-0.5 text-left",
-						// macOS/Linux show the brand in TitlebarNav instead.
-						brandInTitlebar && "hidden",
+						// macOS/Linux reserve this chrome for the fixed navigation controls.
+						usesTitlebarNav && "hidden",
 						"group-data-[collapsible=icon]:flex-col group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:gap-1 group-data-[collapsible=icon]:px-0 group-data-[collapsible=icon]:pb-2",
 						commandPaletteEnabled ? "pb-2" : "pb-3",
 					)}
@@ -1312,6 +1315,7 @@ export const Sidebar = memo(function Sidebar({
 													key={projectKey}
 													workspace={workspace}
 													hostLabel={host.label}
+													avatarUrl={projectAvatars.get(projectKey)}
 													expanded={!collapsedRemoteProjects.has(projectKey)}
 													selection={scopedSelection}
 													isDragged={false}

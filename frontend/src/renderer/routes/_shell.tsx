@@ -1739,8 +1739,8 @@ const replacementErrorCount = Object.keys(orchestratorReplacementErrors).length;
 					) : null}
 					{/* Fixed macOS titlebar cluster beside the traffic lights — rendered
               once here so the toggle/history buttons never move when the
-              sidebar collapses or expands. History arrows stay visible but
-              locked on the empty start page. MUST come after the drag strip
+              sidebar collapses or expands. History arrows reflect the router
+              history on every page. MUST come after the drag strip
               (the page topbars or the welcome substitute) in the DOM: Electron
               builds the window-drag region in document order (drag rects add,
               no-drag rects subtract), so the cluster's no-drag holes only
@@ -1749,7 +1749,6 @@ const replacementErrorCount = Object.keys(orchestratorReplacementErrors).length;
               though DOM hit-testing looks correct. */}
 					<TitlebarNav
 						onBack={settingsPage?.close}
-						historyLocked={isHomeRoute}
 						isFullScreen={isFullScreen}
 						zoomFactor={windowZoomFactor}
 					/>

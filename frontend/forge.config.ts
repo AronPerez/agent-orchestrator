@@ -12,10 +12,15 @@ import { machoHasX86_64Slice } from "./makers/macho-archs";
 import MakerAppImage from "./makers/maker-appimage";
 import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { BUNDLED_TMUX_VERSION } from "./scripts/tmux-version.mjs";
 import { checkMacDmgLayout } from "./scripts/build-mac-dmg.mjs";
+
+// Vite builds main and renderer separately; both inherit this invocation's token.
+// Even two local builds at the same dirty commit must reject each other's JS.
+process.env.AO_DESKTOP_BUILD_ID ??= randomUUID();
 
 // Keep the packaged updater and publisher on this fork unless explicitly overridden.
 const DEFAULT_RELEASE_REPO = "AronPerez/agent-orchestrator";

@@ -3,20 +3,27 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { workspaceQueryKey } from "./useWorkspaceQuery";
+import { forgetRemoteHost, syncRemoteCache } from "../lib/remote-chat-cache";
 
 const { patch, del, get } = vi.hoisted(() => ({ patch: vi.fn(), del: vi.fn(), get: vi.fn() }));
 vi.mock("../lib/api-client", () => ({
 	apiClient: { PATCH: patch, DELETE: del, GET: get },
 	apiErrorMessage: (error: { message: string }) => error.message,
 }));
+vi.mock("../lib/host-clients", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../lib/host-clients")>();
+	return { ...actual, clientForSessionHost: (hostId?: string) => hostId
+		? { PATCH: patch, DELETE: del, GET: get }
+		: actual.clientForSessionHost(hostId) };
+});
 import { useRememberProjectPermissions } from "./useRememberProjectPermissions";
 
-function setup(sourceHarness?: string) {
-	const client = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+function setup(sourceHarness?: string, hostId?: string) {
+	const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
 	const invalidate = vi.spyOn(client, "invalidateQueries");
 	const wrapper = ({ children }: { children: ReactNode }) =>
 		<QueryClientProvider client={client}>{children}</QueryClientProvider>;
-	return { ...renderHook(() => useRememberProjectPermissions("project-one", sourceHarness), { wrapper }), invalidate, client };
+	return { ...renderHook(() => useRememberProjectPermissions("project-one", sourceHarness, hostId), { wrapper }), invalidate, client };
 }
 
 // The daemon's copy of the project: GET reads what the last successful write left.
@@ -103,4 +110,49 @@ it("does not read a project for a Scratchpad session", async () => {
 	await act(async () => {});
 	expect(get).not.toHaveBeenCalled();
 	expect(result.current.savedMode).toBeUndefined();
+});
+
+it("preserves remembered permissions for a retained offline host when the saved hosts change", async () => {
+	stored = "auto";
+	const { result, client } = setup(undefined, "box-a");
+	await waitFor(() => expect(result.current.savedMode).toBe("auto"));
+	get.mockRejectedValue(new Error("Host is offline"));
+	client.setQueryData(["project", "box-b", "project-one"], { config: {} });
+
+	await act(async () => { await syncRemoteCache(client, ["box-a", "box-c"]); });
+
+	expect(client.getQueryData(["project", "box-a", "project-one"])).toMatchObject({ config: { agentConfig: { permissions: "auto" } } });
+	expect(client.getQueryData(["project", "box-b", "project-one"])).toBeUndefined();
+	expect(result.current.savedMode).toBe("auto");
+	expect(get).toHaveBeenCalledTimes(1);
+});
+
+it("clears a revoked host's remembered permissions from a mounted observer while preserving other hosts and local projects", async () => {
+	stored = "auto";
+	const { result, client } = setup(undefined, "box-a");
+	await waitFor(() => expect(result.current.savedMode).toBe("auto"));
+	get.mockRejectedValue(new Error("Access revoked"));
+	client.setQueryData(["project", "box-b", "project-one"], { config: { agentConfig: { permissions: "default" } } });
+	client.setQueryData(["project", "project-one"], { config: { agentConfig: { permissions: "bypass-permissions" } } });
+
+	await act(async () => { await forgetRemoteHost(client, "box-a"); });
+
+	await waitFor(() => expect(result.current.savedMode).toBeUndefined());
+	expect(client.getQueryData(["project", "box-a", "project-one"])).toBeUndefined();
+	expect(client.getQueryData(["project", "box-b", "project-one"])).toMatchObject({ config: { agentConfig: { permissions: "default" } } });
+	expect(client.getQueryData(["project", "project-one"])).toMatchObject({ config: { agentConfig: { permissions: "bypass-permissions" } } });
+});
+
+it("invalidates the host-first project key after remembering remote permissions", async () => {
+	stored = "auto";
+	patch.mockImplementation(async (_path, { body }) => { stored = body.permissions; return {}; });
+	const { result, invalidate, client } = setup(undefined, "box-a");
+	await waitFor(() => expect(result.current.savedMode).toBe("auto"));
+
+	await act(async () => { await result.current.remember("bypass-permissions"); });
+
+	expect(invalidate).toHaveBeenCalledWith({ queryKey: ["project", "box-a", "project-one"] });
+	expect(invalidate).toHaveBeenCalledWith({ queryKey: ["remote-workspaces", "box-a"] });
+	await waitFor(() => expect(result.current.savedMode).toBe("bypass-permissions"));
+	expect(client.getQueryData(["project", "project-one", "box-a"])).toBeUndefined();
 });

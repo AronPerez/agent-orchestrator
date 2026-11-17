@@ -8,8 +8,9 @@ import { TooltipProvider } from "./ui/tooltip";
 import type { UpdateStatus } from "../../main/update-settings";
 import { appI18n } from "../i18n";
 
-const { updInstall, updRelaunch, updGetStatus, updOnStatus, openExternal, workspaceData } = vi.hoisted(() => ({
+const { updInstall, updRelaunch, restartInstalled, updGetStatus, updOnStatus, openExternal, workspaceData } = vi.hoisted(() => ({
 	updInstall: vi.fn(),
+	restartInstalled: vi.fn(),
 	openExternal: vi.fn(),
 	updRelaunch: vi.fn(),
 	updGetStatus: vi.fn(),
@@ -20,7 +21,7 @@ const { updInstall, updRelaunch, updGetStatus, updOnStatus, openExternal, worksp
 vi.mock("../lib/bridge", () => ({
 	aoBridge: {
 		app: { openExternal },
-		updates: { getStatus: updGetStatus, install: updInstall, relaunch: updRelaunch, onStatus: updOnStatus },
+		updates: { getStatus: updGetStatus, install: updInstall, relaunch: updRelaunch, restartInstalled, onStatus: updOnStatus },
 	},
 }));
 vi.mock("../hooks/useWorkspaceQuery", () => ({
@@ -49,11 +50,30 @@ function renderDialog(status: UpdateStatus) {
 }
 
 beforeEach(() => {
-	for (const m of [updInstall, updRelaunch, updGetStatus, updOnStatus, openExternal]) m.mockReset();
+	for (const m of [updInstall, updRelaunch, restartInstalled, updGetStatus, updOnStatus, openExternal]) m.mockReset();
 	openExternal.mockResolvedValue(undefined);
 	updOnStatus.mockReturnValue(() => undefined);
 	workspaceData.current = [];
 	useUiStore.setState({ updateInstallPromptOpen: false });
+});
+
+it("restarts into an externally installed build without invoking the downloaded installer", async () => {
+	useUiStore.setState({ updateInstallPromptOpen: true });
+	renderDialog({ state: "downloaded", installed: { identity: "new", idle: true, restartWhenIdle: false } });
+	expect(await screen.findByText("A new build of Orchestrator is installed. Restart to start using it.")).toBeVisible();
+	expect(screen.queryByText(/installs on its own/)).toBeNull();
+	await userEvent.click(screen.getByRole("button", { name: "Restart now" }));
+	expect(restartInstalled).toHaveBeenCalledWith("now");
+	expect(updInstall).not.toHaveBeenCalled();
+});
+
+it("offers to wait for idle instead of restarting active work", async () => {
+	useUiStore.setState({ updateInstallPromptOpen: true });
+	renderDialog({ state: "downloaded", installed: { identity: "new", idle: false, restartWhenIdle: false } });
+	expect(await screen.findByRole("button", { name: "Restart now" })).toBeDisabled();
+	await userEvent.click(screen.getByRole("button", { name: "Restart when idle" }));
+	expect(restartInstalled).toHaveBeenCalledWith("when-idle");
+	expect(updInstall).not.toHaveBeenCalled();
 });
 
 it("renders nothing at all while closed", () => {

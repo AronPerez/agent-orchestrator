@@ -959,6 +959,8 @@ const api = {
 		setRecording: (active: boolean) => ipcRenderer.invoke("keybindings:setRecording", active) as Promise<void>,
 	},
 	updates: {
+		restartInstalled: (mode: "now" | "when-idle" | "cancel") => ipcRenderer.invoke("updates:restartInstalled", mode) as Promise<void>,
+		verifyBuild: (identity: string) => ipcRenderer.invoke("updates:verifyBuild", identity) as Promise<boolean>,
 		getStatus: () => ipcRenderer.invoke("updates:getStatus") as Promise<UpdateStatus>,
 		check: (options?: UpdateCheckOptions) => ipcRenderer.invoke("updates:check", options) as Promise<void>,
 		returnHome: (requestId?: string) => ipcRenderer.invoke("updates:returnHome", requestId) as Promise<void>,

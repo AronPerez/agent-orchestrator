@@ -12,6 +12,7 @@ import { ARTIFACT_SNAPSHOT_SCHEME } from "./src/shared/artifact-snapshot";
 import { DEFAULT_POSTHOG_HOST } from "./src/shared/posthog-config";
 import { parseTeamsFlag } from "./src/shared/teams-flag";
 import { sentrySourceMaps } from "./vite.sentry";
+import { desktopBuildIdentity } from "./vite.build-identity";
 
 // Read once, when the renderer is built or served: a value that is neither
 // "on" nor "off" stops here instead of shipping a build that guessed.
@@ -219,6 +220,7 @@ const sentry = sentrySourceMaps();
 
 export default defineConfig({
 	define: {
+		__AO_DESKTOP_BUILD_ID__: JSON.stringify(desktopBuildIdentity()),
 		"import.meta.env.VITE_AO_GIT_BRANCH": JSON.stringify(DEV_BUILD_INFO.branch),
 		"import.meta.env.VITE_AO_GIT_COMMIT": JSON.stringify(DEV_BUILD_INFO.commit),
 		"import.meta.env.VITE_AO_GIT_WORKTREE": JSON.stringify(DEV_BUILD_INFO.worktree),

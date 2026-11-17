@@ -493,6 +493,8 @@ if (typeof window !== "undefined") {
 			setRecording: async () => undefined,
 		},
 		updates: {
+			restartInstalled: async () => undefined,
+			verifyBuild: async () => true,
 			getStatus: async () => ({ state: "idle" }),
 			check: async () => undefined,
 			returnHome: async () => undefined,

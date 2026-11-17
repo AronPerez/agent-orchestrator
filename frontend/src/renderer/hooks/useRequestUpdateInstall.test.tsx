@@ -5,9 +5,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useRequestUpdateInstall } from "./useRequestUpdateInstall";
 import { workspaceQueryOptions } from "./useWorkspaceQuery";
 
-const { install, openPrompt, fetchWorkspaces } = vi.hoisted(() => ({ install: vi.fn(), openPrompt: vi.fn(), fetchWorkspaces: vi.fn() }));
+const { install, getStatus, openPrompt, fetchWorkspaces } = vi.hoisted(() => ({ install: vi.fn(), getStatus: vi.fn(), openPrompt: vi.fn(), fetchWorkspaces: vi.fn() }));
 
-vi.mock("../lib/bridge", () => ({ aoBridge: { updates: { install } } }));
+vi.mock("../lib/bridge", () => ({ aoBridge: { updates: { install, getStatus } } }));
 vi.mock("../stores/ui-store", () => ({
 	useUiStore: (select: (state: { openUpdateInstallPrompt: () => void }) => unknown) =>
 		select({ openUpdateInstallPrompt: openPrompt }),
@@ -45,11 +45,18 @@ function renderTrigger(seed?: unknown, configure?: (client: QueryClient) => void
 
 beforeEach(() => {
 	install.mockReset();
+	getStatus.mockReset().mockResolvedValue({ state: "idle" });
 	openPrompt.mockReset();
 	fetchWorkspaces.mockReset().mockRejectedValue(new Error("daemon unavailable"));
 });
 
 describe("useRequestUpdateInstall", () => {
+	it("opens restart options for an external installation even with no workers", async () => {
+		getStatus.mockResolvedValue({ state: "downloaded", installed: { identity: "new", idle: true, restartWhenIdle: false } });
+		await renderTrigger([])();
+		expect(openPrompt).toHaveBeenCalledTimes(1);
+		expect(install).not.toHaveBeenCalled();
+	});
 	it("installs directly when nothing would lose a turn", async () => {
 		// The confirmation existed to warn about lost work. With nothing to warn
 		// about it is a modal on top of the Settings modal saying nothing, and the

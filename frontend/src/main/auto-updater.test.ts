@@ -98,6 +98,30 @@ afterEach(() => {
 
 /** Alias kept for readability: a re-import is a simulated relaunch. */
 const importAutoUpdaterKeepingStagedFile = importAutoUpdater;
+
+it("keeps an externally installed build visible across updater events and disables install-on-quit", async () => {
+  const { module, autoUpdater, updaterEvents } = await importAutoUpdater({ enabled: false, channel: "latest", nightlyAck: false, feature: null });
+  const installed = { identity: "external-asar", idle: false, restartWhenIdle: false };
+  module.setInstalledBuildStatus(installed);
+  expect(module.getUpdateStatus()).toEqual({ state: "downloaded", installed });
+  await module.startAutoUpdates(stateDir);
+  updaterEvents.get("update-downloaded")?.({ version: "9.9.9" });
+  expect(module.getUpdateStatus()).toEqual({ state: "downloaded", installed });
+  expect(autoUpdater.autoInstallOnAppQuit).toBe(false);
+  await expect(module.quitAndInstallUpdate()).rejects.toThrow(/installed/);
+  expect(autoUpdater.quitAndInstall).not.toHaveBeenCalled();
+});
+
+it("does not overwrite an external install arriving during a pending restart", async () => {
+  const { module, autoUpdater, updaterEvents } = await importAutoUpdater();
+  await module.startAutoUpdates(stateDir);
+  updaterEvents.get("update-downloaded")?.({ version: "2.1.0" });
+  const install = module.quitAndInstallUpdate();
+  module.setInstalledBuildStatus({ identity: "external-asar", idle: true, restartWhenIdle: false });
+  await expect(install).rejects.toThrow(/installed/);
+  expect(autoUpdater.quitAndInstall).not.toHaveBeenCalled();
+});
+
 describe("macOS differential update policy", () => {
   let restorePlatform: () => void;
   beforeEach(() => { restorePlatform = stubProcess("darwin", process.execPath); });
@@ -3636,6 +3660,27 @@ const TRANSLOCATED_EXEC_PATH =
   "/private/var/folders/hg/vkmz93d1T/T/AppTranslocation/0AC4-11EE/d/Agent Orchestrator.app/Contents/MacOS/agent-orchestrator";
 
 describe("quitAndInstallUpdate", () => {
+
+  it("abandons a macOS installer if an external build arrives while its helper starts", async () => {
+    const restore = stubProcess("darwin", "/usr/bin/node");
+    try {
+      const { module, autoUpdater, updaterEvents, nativeAutoUpdater, startMacUpdateProgress } = await importAutoUpdater(undefined, { nativeReadyManually: true });
+      await module.startAutoUpdates(stateDir);
+      updaterEvents.get("update-downloaded")?.({ version: "2.1.0" });
+      nativeAutoUpdater.emit("update-downloaded");
+      const progress = { assertAlive: vi.fn(), fail: vi.fn(async () => undefined) };
+      const handshake = deferred<typeof progress>();
+      startMacUpdateProgress.mockReturnValueOnce(handshake.promise);
+      const install = module.quitAndInstallUpdate("2.1.0");
+      await vi.waitFor(() => expect(startMacUpdateProgress).toHaveBeenCalledOnce());
+      module.setInstalledBuildStatus({ identity: "external-asar", idle: true, restartWhenIdle: false });
+      const assertion = expect(install).rejects.toThrow(/installed/);
+      handshake.resolve(progress);
+      await assertion;
+      expect(autoUpdater.quitAndInstall).not.toHaveBeenCalled();
+    } finally { restore(); }
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
     vi.resetModules();
