@@ -2509,6 +2509,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/remote-host/coordination-token/{deviceId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Revoke one route-limited cross-machine agent coordination credential */
+        delete: operations["revokeRemoteHostCoordinationToken"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/remote-host/devices": {
         parameters: {
             query?: never;
@@ -7131,6 +7148,15 @@ export interface components {
             summary: string;
             targetSessionId?: string;
         };
+        CoordinationListProjectsResponse: {
+            projects: components["schemas"]["CoordinationProjectSummary"][];
+        };
+        CoordinationProjectSummary: {
+            id: string;
+            kind: string;
+            name: string;
+            orchestratorAgent?: string;
+        };
         CoordinationTokenResponse: {
             deviceId: string;
             hostId: string;
@@ -7543,6 +7569,8 @@ export interface components {
             shellTerminal?: components["schemas"]["ShellTerminalResponse"];
         };
         IssueCoordinationTokenRequest: {
+            /** @description Stable opaque ID of the requesting AO installation; retries replace an unseen prior token for this client. */
+            clientId?: string;
             /** @description Name shown in the host's device list. */
             name?: string;
             /** @description The requesting machine's platform. */
@@ -7635,6 +7663,7 @@ export interface components {
             summary: components["schemas"]["WorkspaceSummary"];
             truncated: boolean;
         };
+        ListProjectsAPIResponse: components["schemas"]["ListProjectsResponse"] | components["schemas"]["CoordinationListProjectsResponse"];
         ListProjectsResponse: {
             projects: components["schemas"]["ProjectSummary"][];
         };
@@ -16808,7 +16837,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ListProjectsResponse"];
+                    "application/json": components["schemas"]["ListProjectsAPIResponse"];
                 };
             };
             /** @description Internal Server Error */
@@ -18404,6 +18433,54 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    revokeRemoteHostCoordinationToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The coordination token's device id. */
+                deviceId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 
@@ -42,6 +43,11 @@ type remoteTarget struct {
 // remotesFileName holds saved remote daemons under the AO home directory. It
 // carries credentials, so it must be mode 0600.
 const remotesFileName = "remotes.json"
+
+// activeCloudAccountFile is written by the desktop beside remotes.json. It is
+// the authorization boundary for account-owned hosts; telemetry state is not,
+// because a failed handoff must never preserve access after sign-out/switch.
+const activeCloudAccountFile = "cloud_active_user"
 
 // remotesFileEnv carries the desktop's host-store path through its daemon to
 // spawned agents. AO_DATA_DIR names daemon state, which is ~/.ao/data in a
@@ -214,15 +220,6 @@ func (c *commandContext) selectSavedHost(ctx context.Context, name string) error
 	return nil
 }
 
-// selectSavedHostIfSet lets individual commands opt into saved-host targeting
-// without making --host a global flag that unsupported commands could accept.
-func (c *commandContext) selectSavedHostIfSet(ctx context.Context, name string) error {
-	if strings.TrimSpace(name) == "" {
-		return nil
-	}
-	return c.selectSavedHost(ctx, name)
-}
-
 // savedHostRetryArgs preserves the destination in a copyable retry command.
 // Host IDs are stable and unambiguous even when a display label later changes.
 func (c *commandContext) savedHostRetryArgs() string {
@@ -236,20 +233,35 @@ func shellQuoteArg(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
-type activeCloudAccountResponse struct {
-	CloudUserID string `json:"cloudUserId"`
-	Known       bool   `json:"known"`
+var activeCloudUserIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+type activeCloudAccountMarker struct {
+	UserID     string `json:"userId"`
+	DesktopPID int    `json:"desktopPid"`
 }
 
-// activeCloudAccount asks the loopback daemon for the desktop's current
-// account. Failure or an unresolved/sign-out state hides account-owned hosts;
-// local pairings (which have no accountUserId) remain usable.
-func (c *commandContext) activeCloudAccount(ctx context.Context) string {
-	var result activeCloudAccountResponse
-	if err := c.doJSONPath(ctx, http.MethodGet, "/internal/telemetry/identity", nil, &result); err != nil || !result.Known {
+// activeCloudAccount reads the desktop auth authority beside the exact remote
+// store being resolved. The marker is valid only while its desktop process is
+// alive, so a stale file after a crash cannot authorize account-owned hosts.
+// Any read, parse, validation, or liveness failure hides those hosts; local
+// pairings (which have no accountUserId) remain usable.
+func (c *commandContext) activeCloudAccount(context.Context) string {
+	remotesPath, err := remotesFilePath()
+	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(result.CloudUserID)
+	raw, err := os.ReadFile(filepath.Join(filepath.Dir(remotesPath), activeCloudAccountFile)) // #nosec G304 -- fixed sibling of the configured owner-only remotes store.
+	if err != nil {
+		return ""
+	}
+	var marker activeCloudAccountMarker
+	if json.Unmarshal(raw, &marker) != nil || marker.DesktopPID <= 0 || !activeCloudUserIDPattern.MatchString(marker.UserID) {
+		return ""
+	}
+	if c.deps.ProcessAlive == nil || !c.deps.ProcessAlive(marker.DesktopPID) {
+		return ""
+	}
+	return marker.UserID
 }
 
 func (c *commandContext) probeSavedHostIdentity(ctx context.Context, base string) (savedHostIdentity, error) {

@@ -24,6 +24,12 @@ export type RemoteEntry = {
 	 * full transitive host authority because it can prompt OS-authority agents.
 	 */
 	coordinationToken?: string;
+	/** Device row backing coordinationToken, used to retire it remotely. */
+	coordinationDeviceId?: string;
+	/** SHA-256 of the full credential that issued coordinationToken. */
+	coordinationParentHash?: string;
+	/** Old coordination children that must be retired before another is issued. */
+	pendingCoordinationDeviceIds?: string[];
 };
 
 export const DEVICE_TOKEN_PREFIX = "aod_";
@@ -169,9 +175,20 @@ function serializeMutation<T>(operation: () => Promise<T>): Promise<T> {
 export async function addRemote(path: string, entry: RemoteEntry): Promise<void> {
 	return serializeMutation(async () => {
 		const existing = await readRemotes(path);
+		const replaced = existing.filter((candidate) => candidate.url === entry.url || (entry.hostId && candidate.hostId === entry.hostId));
+		const pendingCoordinationDeviceIds = [...new Set([
+			...(entry.pendingCoordinationDeviceIds ?? []),
+			...replaced.flatMap((candidate) => [
+				...(candidate.pendingCoordinationDeviceIds ?? []),
+				...(candidate.coordinationDeviceId ? [candidate.coordinationDeviceId] : []),
+			]),
+		])].filter((deviceId) => deviceId !== entry.coordinationDeviceId);
+		const replacement = pendingCoordinationDeviceIds.length > 0
+			? { ...entry, pendingCoordinationDeviceIds }
+			: entry;
 		await writeRemotes(path, [
 			...existing.filter((candidate) => candidate.url !== entry.url && (!entry.hostId || candidate.hostId !== entry.hostId)),
-			entry,
+			replacement,
 		]);
 	});
 }
@@ -186,6 +203,11 @@ export type RemoteChanges = Partial<RemoteEntry>;
  * password, which is exactly what "leave blank to keep it" sends.
  */
 export function applyRemoteChanges(entry: RemoteEntry, changes: RemoteChanges): RemoteEntry {
+	const passwordChanged = changes.password !== undefined && changes.password !== entry.password;
+	const pending = passwordChanged
+		? [...new Set([...(entry.pendingCoordinationDeviceIds ?? []), ...(entry.coordinationDeviceId ? [entry.coordinationDeviceId] : [])])]
+		: changes.pendingCoordinationDeviceIds ?? entry.pendingCoordinationDeviceIds;
+	const changedString = (next: string | undefined, current: string | undefined) => next === undefined ? current : next || undefined;
 	return {
 		label: changes.label ?? entry.label,
 		url: changes.url ?? entry.url,
@@ -196,7 +218,10 @@ export function applyRemoteChanges(entry: RemoteEntry, changes: RemoteChanges): 
 		accountToken: changes.password === undefined ? entry.accountToken : undefined,
 		fallbackPassword: changes.password === undefined ? entry.fallbackPassword : changes.fallbackPassword,
 		sealedFallbackPassword: changes.password === undefined ? entry.sealedFallbackPassword : undefined,
-		coordinationToken: changes.coordinationToken ?? entry.coordinationToken,
+		coordinationToken: passwordChanged ? undefined : changedString(changes.coordinationToken, entry.coordinationToken),
+		coordinationDeviceId: passwordChanged ? undefined : changedString(changes.coordinationDeviceId, entry.coordinationDeviceId),
+		coordinationParentHash: passwordChanged ? undefined : changedString(changes.coordinationParentHash, entry.coordinationParentHash),
+		pendingCoordinationDeviceIds: pending && pending.length > 0 ? pending : undefined,
 	};
 }
 

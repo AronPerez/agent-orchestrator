@@ -360,6 +360,9 @@ var schemaNames = map[string]string{ //nolint:gosec // Public OpenAPI type names
 	"DomainRoleOverride":              "RoleOverride",
 	// httpd/controllers (wire envelopes)
 	"ControllersListProjectsResponse":                     "ListProjectsResponse",
+	"ControllersCoordinationProjectSummary":               "CoordinationProjectSummary",
+	"ControllersCoordinationListProjectsResponse":         "CoordinationListProjectsResponse",
+	"ControllersListProjectsAPIResponse":                  "ListProjectsAPIResponse",
 	"ControllersProjectResponse":                          "ProjectResponse",
 	"ControllersClonePrepareStreamEvent":                  "ClonePrepareStreamEvent",
 	"ControllersAgentIDParam":                             "AgentIDParam",
@@ -2704,6 +2707,17 @@ func mobileOperations() []operation {
 			},
 		},
 		{
+			method: http.MethodDelete, path: "/api/v1/remote-host/coordination-token/{deviceId}", id: "revokeRemoteHostCoordinationToken", tag: "mobile",
+			summary:    "Revoke one route-limited cross-machine agent coordination credential",
+			pathParams: []any{controllers.CoordinationDeviceIDParam{}},
+			resps: []respUnit{
+				{http.StatusNoContent, nil},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+			},
+		},
+		{
 			method: http.MethodPost, path: "/api/v1/remote-host/account-token", id: "issueRemoteHostAccountToken", tag: "mobile",
 			summary: "Issue a host-scoped account credential using the pairing password or a device token",
 			resps: []respUnit{
@@ -3244,7 +3258,7 @@ func projectOperations() []operation {
 			method: http.MethodGet, path: "/api/v1/projects", id: "listProjects", tag: "projects",
 			summary: "List all registered projects (active + degraded)",
 			resps: []respUnit{
-				{http.StatusOK, controllers.ListProjectsResponse{}},
+				{http.StatusOK, controllers.ListProjectsAPIResponse{}},
 				{http.StatusInternalServerError, envelope.APIError{}},
 			},
 		},

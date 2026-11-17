@@ -87,6 +87,19 @@ describe("addRemote", () => {
 		expect(remotes).toEqual([{ label: "new", url: "http://192.0.2.1:1", password: "z" }]);
 	});
 
+	it("carries displaced coordination devices into the replacement cleanup queue", async () => {
+		const path = await tempFile(JSON.stringify({ remotes: [{
+			hostId: "h_workbox", label: "old", url: "http://192.0.2.1:1", password: "old",
+			coordinationToken: "aoc_old", coordinationDeviceId: "dev_active",
+			pendingCoordinationDeviceIds: ["dev_pending"],
+		}] }));
+		await addRemote(path, { hostId: "h_workbox", label: "new", url: "https://workbox.example", password: "new" });
+		expect(await savedRemotes(path)).toEqual([{
+			hostId: "h_workbox", label: "new", url: "https://workbox.example", password: "new",
+			pendingCoordinationDeviceIds: ["dev_pending", "dev_active"],
+		}]);
+	});
+
 	it("moves one host from its LAN address to its Tailscale address", async () => {
 		const path = await tempFile('{"remotes":[{"hostId":"h_workbox","label":"workbox","url":"http://192.0.2.1:1","password":"x"}]}');
 		await addRemote(path, { hostId: "h_workbox", label: "workbox", url: "https://workbox.tailnet", password: "x" });
@@ -115,6 +128,27 @@ describe("updateRemote", () => {
 			{ label: "workbox", url: "http://192.0.2.1:1", password: "rotated" },
 			{ label: "mini", url: "http://192.0.2.9:9", password: "m" },
 		]);
+	});
+
+	it("clears a child credential and queues its device when the parent password changes", async () => {
+		const path = await tempFile(JSON.stringify({ remotes: [{
+			label: "workbox", url: "http://192.0.2.1:1", password: "old",
+			coordinationToken: "aoc_old", coordinationDeviceId: "dev_old", coordinationParentHash: "parent_old",
+		}] }));
+		await updateRemote(path, "http://192.0.2.1:1", { password: "new" });
+		expect(await savedRemotes(path)).toEqual([{
+			label: "workbox", url: "http://192.0.2.1:1", password: "new", pendingCoordinationDeviceIds: ["dev_old"],
+		}]);
+	});
+
+	it("preserves child metadata when the parent password is unchanged", async () => {
+		const entry = {
+			label: "workbox", url: "http://192.0.2.1:1", password: "same",
+			coordinationToken: "aoc_old", coordinationDeviceId: "dev_old", coordinationParentHash: "parent_same",
+		};
+		const path = await tempFile(JSON.stringify({ remotes: [entry] }));
+		await updateRemote(path, entry.url, { password: "same", label: "renamed" });
+		expect(await savedRemotes(path)).toEqual([{ ...entry, label: "renamed" }]);
 	});
 
 	it("renames without touching the saved password", async () => {
@@ -213,7 +247,7 @@ describe("password encryption", () => {
 		await updateRemote(path, "http://192.0.2.1:3011", { label: "renamed" });
 		expect(JSON.parse(await readFile(path, "utf8")).remotes[0].coordinationToken).toBe("aoc_coordination");
 		await updateRemote(path, "http://192.0.2.1:3011", { coordinationToken: "" });
-		expect(JSON.parse(await readFile(path, "utf8")).remotes[0].coordinationToken).toBe("");
+		expect(JSON.parse(await readFile(path, "utf8")).remotes[0]).not.toHaveProperty("coordinationToken");
 	});
 
 	it("encrypts an existing plaintext file", async () => {

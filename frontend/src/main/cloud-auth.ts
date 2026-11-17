@@ -5,6 +5,7 @@ import {
   chmod,
   mkdir,
   readFile,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -102,6 +103,7 @@ const REDIRECT_URI = resolveCloudAuthRedirect(process.env, app.isPackaged, CLIEN
 const useLoopbackRedirect = isLoopbackRedirect(REDIRECT_URI);
 const AUTH_STORE_FILE = "cloud-auth.bin";
 const LEGACY_SESSION_FILE = "cloud-session.json";
+const ACTIVE_CLOUD_ACCOUNT_FILE = "cloud_active_user";
 const PKCE_TTL_MS = 10 * 60 * 1000;
 const workos = CLIENT_ID ? createWorkOS({ clientId: CLIENT_ID }) : null;
 
@@ -199,6 +201,31 @@ function storePath(dataDir: string): string {
   return path.join(dataDir, AUTH_STORE_FILE);
 }
 
+function activeCloudAccountPath(dataDir: string): string {
+  return path.join(dataDir, ACTIVE_CLOUD_ACCOUNT_FILE);
+}
+
+async function replaceActiveCloudAccountMarker(
+  dataDir: string,
+  userID: string | undefined,
+): Promise<void> {
+  const target = activeCloudAccountPath(dataDir);
+  // Clear first: if either the auth-store write or replacement marker fails,
+  // headless callers fail closed instead of retaining the previous account.
+  await rm(target, { force: true });
+  if (!userID) return;
+  await mkdir(dataDir, { recursive: true, mode: 0o700 });
+  const temporary = `${target}.${process.pid}.tmp`;
+  const raw = `${JSON.stringify({ userId: userID, desktopPid: process.pid })}\n`;
+  try {
+    await writeFile(temporary, raw, { mode: 0o600 });
+    await chmod(temporary, 0o600);
+    await rename(temporary, target);
+  } finally {
+    await rm(temporary, { force: true });
+  }
+}
+
 /** Whether safeStorage protects what it encrypts (not Linux's basic_text backend). */
 export function protectedStorageAvailable(): boolean {
   if (!safeStorage.isEncryptionAvailable()) return false;
@@ -220,6 +247,7 @@ export async function readAuthStore(dataDir: string): Promise<AuthStore> {
   if (memoryStore) return memoryStore;
   if (!protectedStorageAvailable()) {
     await rm(storePath(dataDir), { force: true });
+    await rm(activeCloudAccountPath(dataDir), { force: true });
     return emptyStore();
   }
   try {
@@ -234,12 +262,14 @@ export async function writeAuthStore(
   dataDir: string,
   store: AuthStore,
 ): Promise<void> {
+  await replaceActiveCloudAccountMarker(dataDir, undefined);
   if (!protectedStorageAvailable()) {
     // A rotating refresh token must never fall back to plaintext persistence.
     // Linux's basic_text backend also reports encryption as available despite
     // using an unprotected hardcoded password, so keep that process-local too.
     memoryStores.set(dataDir, store);
     await rm(storePath(dataDir), { force: true });
+    await replaceActiveCloudAccountMarker(dataDir, store.session?.user.id);
     return;
   }
   memoryStores.delete(dataDir);
@@ -247,6 +277,7 @@ export async function writeAuthStore(
   const target = storePath(dataDir);
   await writeFile(target, encodeStore(store), { mode: 0o600 });
   await chmod(target, 0o600);
+  await replaceActiveCloudAccountMarker(dataDir, store.session?.user.id);
 }
 
 export async function removeAuthStore(dataDir: string): Promise<void> {
@@ -254,6 +285,7 @@ export async function removeAuthStore(dataDir: string): Promise<void> {
   await Promise.all([
     rm(storePath(dataDir), { force: true }),
     rm(path.join(dataDir, LEGACY_SESSION_FILE), { force: true }),
+    rm(activeCloudAccountPath(dataDir), { force: true }),
   ]);
 }
 

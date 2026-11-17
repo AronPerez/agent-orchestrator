@@ -277,6 +277,30 @@ type ListProjectsResponse struct {
 	Projects []projectsvc.Summary `json:"projects"`
 }
 
+// CoordinationProjectSummary is the path-free project identity available to
+// an agent-coordination credential.
+type CoordinationProjectSummary struct {
+	ID                domain.ProjectID    `json:"id"`
+	Name              string              `json:"name"`
+	Kind              domain.ProjectKind  `json:"kind"`
+	OrchestratorAgent domain.AgentHarness `json:"orchestratorAgent,omitempty"`
+}
+
+// CoordinationListProjectsResponse is the scoped GET /projects envelope.
+type CoordinationListProjectsResponse struct {
+	Projects []CoordinationProjectSummary `json:"projects"`
+}
+
+// ListProjectsAPIResponse documents the credential-dependent response union.
+// Runtime handlers write one of its concrete variants directly.
+type ListProjectsAPIResponse struct{}
+
+// JSONSchemaAnyOf exposes the full and coordination-scoped wire variants. The
+// scoped shape is a subset of the full shape, so both may match a full response.
+func (ListProjectsAPIResponse) JSONSchemaAnyOf() []interface{} {
+	return []interface{}{ListProjectsResponse{}, CoordinationListProjectsResponse{}}
+}
+
 // ProjectResponse is the { project } body shared by POST /projects (201).
 type ProjectResponse struct {
 	Project projectsvc.Project `json:"project"`
@@ -3293,6 +3317,12 @@ type PairDeviceResponse struct {
 type IssueCoordinationTokenRequest struct {
 	Name     string `json:"name,omitempty" description:"Name shown in the host's device list."`
 	Platform string `json:"platform,omitempty" description:"The requesting machine's platform."`
+	ClientID string `json:"clientId,omitempty" description:"Stable opaque ID of the requesting AO installation; retries replace an unseen prior token for this client."`
+}
+
+// CoordinationDeviceIDParam identifies a previously issued coordination token.
+type CoordinationDeviceIDParam struct {
+	DeviceID string `path:"deviceId" description:"The coordination token's device id."`
 }
 
 // CoordinationTokenResponse carries a host-bound, route-filtered credential.

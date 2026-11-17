@@ -485,6 +485,7 @@ type Manager struct {
 	attachments                 *attachmentstore.Store
 	attachmentSuffix            func() (string, error)
 	dataDir                     string
+	stateDir                    string
 	runFilePath                 string
 	clock                       func() time.Time
 	reconcileWorkers            int
@@ -951,6 +952,10 @@ type Deps struct {
 	// DataDir owns durable attachment storage and is exported to spawned agents
 	// as AO_DATA_DIR so their hook commands can open the same store.
 	DataDir string
+	// StateDir owns non-database AO state such as remotes.json. It is distinct
+	// from the default DataDir (~/.ao/data), but equal to an explicit isolated
+	// AO_DATA_DIR override.
+	StateDir string
 	// RunFilePath is exported to spawned agents as AO_RUN_FILE so their hook
 	// callbacks reach this daemon even when another AO daemon is also running.
 	RunFilePath string
@@ -1019,6 +1024,7 @@ func New(d Deps) *Manager {
 		attachments:                    attachmentstore.New(d.DataDir),
 		attachmentSuffix:               randomSuffix,
 		dataDir:                        d.DataDir,
+		stateDir:                       strings.TrimSpace(d.StateDir),
 		runFilePath:                    strings.TrimSpace(d.RunFilePath),
 		clock:                          d.Clock,
 		reconcileWorkers:               d.ReconcileWorkers,
@@ -7160,6 +7166,14 @@ func (m *Manager) runtimeEnvChecked(id domain.SessionID, project domain.ProjectI
 	}
 	remotesFilePath := strings.TrimSpace(os.Getenv(EnvRemotesFile))
 	deleteProtectedEnv(env, EnvRemotesFile, caseInsensitive)
+	if remotesFilePath == "" && m.stateDir != "" {
+		remotesFilePath = filepath.Join(m.stateDir, "remotes.json")
+	}
+	if remotesFilePath != "" {
+		if absolute, err := filepath.Abs(remotesFilePath); err == nil {
+			remotesFilePath = absolute
+		}
+	}
 	if remotesFilePath != "" {
 		env[EnvRemotesFile] = remotesFilePath
 	}

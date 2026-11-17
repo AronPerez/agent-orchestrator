@@ -183,25 +183,16 @@ func (c *ProjectsController) list(w http.ResponseWriter, r *http.Request) {
 		projects = []projectsvc.Summary{}
 	}
 	if isAgentCoordinationRequest(r.Context()) {
-		envelope.WriteJSON(w, http.StatusOK, struct {
-			Projects []coordinationProjectSummary `json:"projects"`
-		}{Projects: coordinationProjectSummaries(projects)})
+		envelope.WriteJSON(w, http.StatusOK, CoordinationListProjectsResponse{Projects: coordinationProjectSummaries(projects)})
 		return
 	}
 	envelope.WriteJSON(w, http.StatusOK, ListProjectsResponse{Projects: projects})
 }
 
-type coordinationProjectSummary struct {
-	ID                domain.ProjectID    `json:"id"`
-	Name              string              `json:"name"`
-	Kind              domain.ProjectKind  `json:"kind"`
-	OrchestratorAgent domain.AgentHarness `json:"orchestratorAgent,omitempty"`
-}
-
-func coordinationProjectSummaries(projects []projectsvc.Summary) []coordinationProjectSummary {
-	out := make([]coordinationProjectSummary, 0, len(projects))
+func coordinationProjectSummaries(projects []projectsvc.Summary) []CoordinationProjectSummary {
+	out := make([]CoordinationProjectSummary, 0, len(projects))
 	for _, project := range projects {
-		out = append(out, coordinationProjectSummary{
+		out = append(out, CoordinationProjectSummary{
 			ID: project.ID, Name: project.Name, Kind: project.Kind, OrchestratorAgent: project.OrchestratorAgent,
 		})
 	}

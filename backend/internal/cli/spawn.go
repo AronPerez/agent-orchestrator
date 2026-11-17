@@ -21,7 +21,6 @@ import (
 const maxDisplayNameLen = 100
 
 type spawnOptions struct {
-	host            string
 	project         string
 	standalone      bool
 	harness         string
@@ -102,7 +101,7 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 			if opts.review && opts.claimPR == "" {
 				return usageError{fmt.Errorf("--review requires --claim-pr")}
 			}
-			if strings.TrimSpace(opts.host) != "" && opts.claimPR != "" {
+			if ctx.remote != nil && ctx.remote.hostID != "" && opts.claimPR != "" {
 				return usageError{fmt.Errorf("--claim-pr is not supported with --host")}
 			}
 			name := strings.TrimSpace(opts.name)
@@ -148,10 +147,6 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 				return usageError{fmt.Errorf(`--tracker-provider must be "github" or "gitlab"`)}
 			}
 			opts.trackerProvider = tp
-			if err := ctx.selectSavedHostIfSet(cmd.Context(), opts.host); err != nil {
-				return err
-			}
-
 			var project projectDetails
 			var err error
 			if !opts.standalone {
@@ -284,7 +279,6 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 		}
 		return pflag.NormalizedName(name)
 	})
-	f.StringVar(&opts.host, "host", "", "Saved remote host label or host ID (cannot be combined with --url or AO_URL)")
 	f.StringVar(&opts.project, "project", "", "Project id to spawn the session in (default: AO_PROJECT_ID or the current registered repo; required with --url)")
 	f.BoolVar(&opts.standalone, "standalone", false, "Spawn a projectless worker in an Orchestrator-managed plain directory (requires --agent)")
 	f.StringVar(&opts.harness, "harness", "", "Agent harness / --agent: claude-code, codex, aider, opencode, opencode-v2, grok, droid, amp, agy, crush, cursor, qwen, gemini, copilot, goose, auggie, continue, devin, cline, kimi, muse, kiro, kilocode, vibe, pi, kimchi, prime-agent, autohand, omp, fx, unreal-agent, mimo-code, deepseek-harness, openhands, command-code, docker-agent,minimax-code, memcode, hermes, stakpak (default: project worker.agent; orchestrator spawns default to project orchestrator.agent; required if the project has none)")

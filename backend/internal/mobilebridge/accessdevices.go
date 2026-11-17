@@ -28,6 +28,10 @@ type AccessDevice struct {
 	// Issuer names the full credential that minted a scoped token. It lets
 	// revoking that credential also revoke the authority it delegated.
 	Issuer string `json:"issuer,omitempty"`
+	// ClientID is the stable originating AO installation for idempotent scoped
+	// issuance. Reissuing for the same issuer, scopes, and client replaces the
+	// prior row, including when its one-time response was lost.
+	ClientID string `json:"clientId,omitempty"`
 	// InstallID links the device to its push registration.
 	InstallID  string    `json:"installId,omitempty"`
 	CreatedAt  time.Time `json:"createdAt"`
@@ -130,7 +134,8 @@ func (r *AccessDevices) moveAside(cause error) error {
 
 // Issue registers a new device and returns it with its token.
 func (r *AccessDevices) Issue(name, platform string, now time.Time) (AccessDevice, string, error) {
-	return r.issue(name, platform, nil, "", now)
+	device, token, _, err := r.issue(name, platform, nil, "", "", now)
+	return device, token, err
 }
 
 // IssueScoped registers a new device token carrying the given capability
@@ -143,21 +148,30 @@ func (r *AccessDevices) IssueScoped(name, platform string, scopes []string, now 
 // delegated its authority. An empty issuer is accepted for callers that do not
 // have an authentication context; network issuance always supplies one.
 func (r *AccessDevices) IssueScopedBy(name, platform string, scopes []string, issuer string, now time.Time) (AccessDevice, string, error) {
-	normalizedScopes := normalizeDeviceScopes(scopes)
-	if len(normalizedScopes) == 0 {
-		return AccessDevice{}, "", ErrInvalidDeviceScopes
-	}
-	return r.issue(name, platform, normalizedScopes, strings.TrimSpace(issuer), now)
+	device, token, _, err := r.IssueScopedByClient(name, platform, scopes, issuer, "", now)
+	return device, token, err
 }
 
-func (r *AccessDevices) issue(name, platform string, normalizedScopes []string, issuer string, now time.Time) (AccessDevice, string, error) {
+// IssueScopedByClient registers a scoped token for one stable originating
+// client. A retry atomically replaces the prior token for the same issuer,
+// exact scopes, and client ID, so a lost one-time response cannot leak rows.
+// Empty client IDs preserve the legacy append-only behavior.
+func (r *AccessDevices) IssueScopedByClient(name, platform string, scopes []string, issuer, clientID string, now time.Time) (AccessDevice, string, []AccessDevice, error) {
+	normalizedScopes := normalizeDeviceScopes(scopes)
+	if len(normalizedScopes) == 0 {
+		return AccessDevice{}, "", nil, ErrInvalidDeviceScopes
+	}
+	return r.issue(name, platform, normalizedScopes, strings.TrimSpace(issuer), cleanLabel(clientID, 128), now)
+}
+
+func (r *AccessDevices) issue(name, platform string, normalizedScopes []string, issuer, clientID string, now time.Time) (AccessDevice, string, []AccessDevice, error) {
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
-		return AccessDevice{}, "", err
+		return AccessDevice{}, "", nil, err
 	}
 	id := make([]byte, 8)
 	if _, err := rand.Read(id); err != nil {
-		return AccessDevice{}, "", err
+		return AccessDevice{}, "", nil, err
 	}
 	prefix := DeviceTokenPrefix
 	if len(normalizedScopes) > 0 {
@@ -171,22 +185,54 @@ func (r *AccessDevices) issue(name, platform string, normalizedScopes []string, 
 		TokenHash:  HashPassword(token),
 		Scopes:     normalizedScopes,
 		Issuer:     issuer,
+		ClientID:   clientID,
 		CreatedAt:  now.UTC(),
 		LastSeenAt: now.UTC(),
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(r.devices) >= maxAccessDevices {
-		return AccessDevice{}, "", ErrTooManyDevices
+	replaced := make([]AccessDevice, 0, 1)
+	if clientID != "" {
+		for _, candidate := range r.devices {
+			if candidate.Issuer == issuer && candidate.ClientID == clientID && deviceScopesEqual(candidate.Scopes, normalizedScopes) {
+				replaced = append(replaced, candidate)
+			}
+		}
+	}
+	if len(r.devices)-len(replaced) >= maxAccessDevices {
+		return AccessDevice{}, "", nil, ErrTooManyDevices
+	}
+	for _, previous := range replaced {
+		delete(r.devices, previous.ID)
+		delete(r.byHash, previous.TokenHash)
 	}
 	r.devices[device.ID] = device
 	r.byHash[device.TokenHash] = device.ID
 	if err := r.persistLocked(); err != nil {
 		delete(r.devices, device.ID)
 		delete(r.byHash, device.TokenHash)
-		return AccessDevice{}, "", err
+		for _, previous := range replaced {
+			r.devices[previous.ID] = previous
+			r.byHash[previous.TokenHash] = previous.ID
+		}
+		return AccessDevice{}, "", nil, err
 	}
-	return cloneAccessDevice(device), token, nil
+	for i := range replaced {
+		replaced[i] = cloneAccessDevice(replaced[i])
+	}
+	return cloneAccessDevice(device), token, replaced, nil
+}
+
+func deviceScopesEqual(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // DeviceIssuer names the full device credential that delegated a scoped token.
