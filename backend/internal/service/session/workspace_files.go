@@ -1266,14 +1266,14 @@ func (s *Service) resolveWorkspaceChanges(
 		return cached.compare, cached.changes, nil
 	}
 	v, err, _ := s.workspaceGroup.Do(key.String(), func() (any, error) {
+		entry := s.workspaceCache.beginLoad(key)
+		defer s.workspaceCache.finishLoad(key, entry, false)
 		// A concurrent caller may have already populated the cache while this
 		// call was queued behind the singleflight lock — re-check before
 		// doing the work again.
 		if cached, ok := s.workspaceCache.get(key); ok {
-			return loadResult{entry: cached}, nil
+			return loadResult{entry: cached, flight: entry}, nil
 		}
-		entry := s.workspaceCache.beginLoad(key)
-		defer s.workspaceCache.finishLoad(key, entry, false)
 		compare := resolve(ctx)
 		changes, err := workspaceChangeMaps(ctx, root, compare.gitBase())
 		if err != nil {
