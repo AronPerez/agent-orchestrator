@@ -5194,7 +5194,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ListProjectsResponse'
+                $ref: '#/components/schemas/ListProjectsAPIResponse'
           description: OK
         "500":
           content:
@@ -6402,6 +6402,83 @@ paths:
           description: Forbidden
       summary: Issue a host-scoped account credential using the pairing password or
         a device token
+      tags:
+      - mobile
+  /api/v1/remote-host/coordination-token:
+    post:
+      operationId: issueRemoteHostCoordinationToken
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IssueCoordinationTokenRequest'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CoordinationTokenResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+      summary: Issue a route-limited credential for cross-machine agent coordination
+      tags:
+      - mobile
+  /api/v1/remote-host/coordination-token/{deviceId}:
+    delete:
+      operationId: revokeRemoteHostCoordinationToken
+      parameters:
+      - description: The coordination token's device id.
+        in: path
+        name: deviceId
+        required: true
+        schema:
+          description: The coordination token's device id.
+          type: string
+      responses:
+        "204":
+          description: No Content
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+      summary: Revoke one route-limited cross-machine agent coordination credential
       tags:
       - mobile
   /api/v1/remote-host/devices:
@@ -20717,6 +20794,48 @@ components:
       - state
       - createdAt
       type: object
+    CoordinationListProjectsResponse:
+      properties:
+        projects:
+          items:
+            $ref: '#/components/schemas/CoordinationProjectSummary'
+          type: array
+      required:
+      - projects
+      type: object
+    CoordinationProjectSummary:
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+        name:
+          type: string
+        orchestratorAgent:
+          type: string
+      required:
+      - id
+      - name
+      - kind
+      type: object
+    CoordinationTokenResponse:
+      properties:
+        deviceId:
+          type: string
+        hostId:
+          type: string
+        scope:
+          enum:
+          - agent-coordination
+          type: string
+        token:
+          type: string
+      required:
+      - hostId
+      - deviceId
+      - token
+      - scope
+      type: object
     CreateAutomationRequest:
       properties:
         cron:
@@ -21826,6 +21945,19 @@ components:
       required:
       - kind
       type: object
+    IssueCoordinationTokenRequest:
+      properties:
+        clientId:
+          description: Stable opaque ID of the requesting AO installation; retries
+            replace an unseen prior token for this client.
+          type: string
+        name:
+          description: Name shown in the host's device list.
+          type: string
+        platform:
+          description: The requesting machine's platform.
+          type: string
+      type: object
     KillReviewResponse:
       properties:
         reviewerHandleId:
@@ -22064,6 +22196,11 @@ components:
       - commits
       - truncated
       - summary
+      type: object
+    ListProjectsAPIResponse:
+      anyOf:
+      - $ref: '#/components/schemas/ListProjectsResponse'
+      - $ref: '#/components/schemas/CoordinationListProjectsResponse'
       type: object
     ListProjectsResponse:
       properties:
@@ -23072,6 +23209,10 @@ components:
           type: array
         trackerIntake:
           $ref: '#/components/schemas/TrackerIntakeConfig'
+        verify:
+          items:
+            type: string
+          type: array
         worker:
           $ref: '#/components/schemas/RoleOverride'
         workerContracts:
