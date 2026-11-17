@@ -56,6 +56,8 @@ type workspaceCache struct {
 	loads   map[workspaceCacheKey]*workspaceCacheEntry
 	flights map[workspaceCacheKey]*workspaceCacheEntry
 	paths   map[workspaceCacheKey]*workspacePathsEntry
+	// afterGet is a deterministic seam for cache/singleflight race tests.
+	afterGet func(workspaceCacheKey, bool)
 }
 
 func newWorkspaceCache(ttl time.Duration, now func() time.Time) *workspaceCache {
@@ -81,20 +83,22 @@ func (c *workspaceCache) get(key workspaceCacheKey) (workspaceCacheEntry, bool) 
 		return workspaceCacheEntry{}, false
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	entry, ok := c.entries[key]
-	if !ok {
-		return workspaceCacheEntry{}, false
-	}
-	if c.now().Sub(entry.at) > c.ttl {
+	if ok && c.now().Sub(entry.at) > c.ttl {
 		delete(c.entries, key)
-		return workspaceCacheEntry{}, false
+		entry, ok = workspaceCacheEntry{}, false
 	}
-	return entry, true
+	afterGet := c.afterGet
+	c.mu.Unlock()
+	if afterGet != nil {
+		afterGet(key, ok)
+	}
+	return entry, ok
 }
 
-// beginLoad reserves publication before Git work starts. The entry's identity
-// is the token, so invalidation needs no retained per-session generation map.
+// beginLoad registers the singleflight before its inner cache recheck and
+// reserves publication if Git work is still needed. The entry's identity is
+// the token, so invalidation needs no retained per-session generation map.
 func (c *workspaceCache) beginLoad(key workspaceCacheKey) *workspaceCacheEntry {
 	entry := new(workspaceCacheEntry)
 	if c == nil {
@@ -173,21 +177,21 @@ func (c *workspaceCache) invalidateSessionLocked(id domain.SessionID) {
 // invalidateSessionForReconcile also consumes the identities of flights that
 // an authoritative read must forget. Ordinary invalidation deliberately keeps
 // these identities so a later reconciliation can still fence the same work.
-func (c *workspaceCache) invalidateSessionForReconcile(id domain.SessionID) []workspaceCacheKey {
+// Forget runs under the cache lock so another reconciliation cannot observe a
+// consumed identity before the corresponding singleflight has been forgotten.
+func (c *workspaceCache) invalidateSessionForReconcile(id domain.SessionID, forget func(string)) {
 	if c == nil {
-		return nil
+		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.invalidateSessionLocked(id)
-	inFlight := make([]workspaceCacheKey, 0)
 	for key := range c.flights {
 		if key.session == id {
-			inFlight = append(inFlight, key)
+			forget(key.String())
 			delete(c.flights, key)
 		}
 	}
-	return inFlight
 }
 
 // invalidateWorkspaceCacheForReconcile fences an authoritative read from any
@@ -195,9 +199,7 @@ func (c *workspaceCache) invalidateSessionForReconcile(id domain.SessionID) []wo
 // coalescing that flight; reconciliation must instead observe worktree state
 // from after the invalidation.
 func (s *Service) invalidateWorkspaceCacheForReconcile(id domain.SessionID) {
-	for _, key := range s.workspaceCache.invalidateSessionForReconcile(id) {
-		s.workspaceGroup.Forget(key.String())
-	}
+	s.workspaceCache.invalidateSessionForReconcile(id, s.workspaceGroup.Forget)
 }
 
 // workspacePaths shares the inventory between directory expansions and the
