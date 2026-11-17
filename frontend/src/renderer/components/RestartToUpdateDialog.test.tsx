@@ -76,6 +76,23 @@ it("offers to wait for idle instead of restarting active work", async () => {
 	expect(updInstall).not.toHaveBeenCalled();
 });
 
+it("blocks both restart choices and explains recovery while a macOS update is armed", async () => {
+	useUiStore.setState({ updateInstallPromptOpen: true });
+	renderDialog({ state: "downloaded", installed: { identity: "B", idle: true, restartWhenIdle: false, restartBlocked: "native-update-staged" } });
+	expect(await screen.findByText(/An earlier macOS update may still install/)).toBeVisible();
+	expect(screen.getByRole("button", { name: "Restart now" })).toBeDisabled();
+	expect(screen.getByRole("button", { name: "Restart when idle" })).toBeDisabled();
+	expect(restartInstalled).not.toHaveBeenCalled();
+});
+
+it("blocks restarting into an AppImage whose completeness cannot be verified", async () => {
+	useUiStore.setState({ updateInstallPromptOpen: true });
+	renderDialog({ state: "downloaded", installed: { identity: "partial", idle: true, restartWhenIdle: false, restartBlocked: "appimage-unverified" } });
+	expect(await screen.findByText(/cannot verify that the replacement AppImage is complete/)).toBeVisible();
+	expect(screen.getByRole("button", { name: "Restart now" })).toBeDisabled();
+	expect(screen.getByRole("button", { name: "Restart when idle" })).toBeDisabled();
+});
+
 it("renders nothing at all while closed", () => {
 	renderDialog({ state: "downloaded" });
 	expect(screen.queryByTestId("restart-to-update-dialog")).toBeNull();

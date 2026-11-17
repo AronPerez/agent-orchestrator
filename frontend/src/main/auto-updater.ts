@@ -206,9 +206,48 @@ export function configureFeed(
 
 let lastStatus: UpdateStatus = { state: "idle" };
 let installedBuildStatus: InstalledBuildStatus | undefined;
+let installedBuildReplacementDetected = false;
+let updateInstallGuard: () => Promise<boolean> = async () => true;
+export function setUpdateInstallGuard(guard: () => Promise<boolean>): void { updateInstallGuard = guard; }
+
+export function setInstalledBuildReplacementDetected(detected: boolean): void {
+  if (installedBuildReplacementDetected === detected) return;
+  installedBuildReplacementDetected = detected;
+  applyInstallOnQuitPolicy();
+  if (detected) activeDownloadCancellation?.cancel();
+}
+// A native request may arm ShipIt even if preparation later times out/errors.
+// Its apply-on-exit ownership cannot be revoked through electron-updater flags.
+let nativeUpdateMayInstallOnQuit = false;
+const INSTALLED_BUILD_NATIVE_UPDATE_BLOCKER = "An earlier macOS update may still install when Orchestrator quits. Quit Orchestrator, let any pending update finish, then reinstall this build before reopening it.";
+const INSTALLED_BUILD_APPIMAGE_BLOCKER = "Orchestrator cannot verify that the replacement AppImage is complete. Keep this app running until you have a verified download, then quit and open the new AppImage.";
+
+function nativeInstallBlocksRestart(): boolean {
+  return process.platform === "darwin" && nativeUpdateMayInstallOnQuit;
+}
+
+export function assertInstalledBuildRestartSafe(): void {
+  const replaced = installedBuildReplacementDetected || !!installedBuildStatus;
+  if (replaced && nativeInstallBlocksRestart()) throw new Error(INSTALLED_BUILD_NATIVE_UPDATE_BLOCKER);
+  // Stable size/hash observations alone cannot establish AppImage completeness.
+  if (replaced && process.platform === "linux" && process.env.APPIMAGE) throw new Error(INSTALLED_BUILD_APPIMAGE_BLOCKER);
+}
+
+function noteNativeUpdateHandoff(): void {
+  if (nativeUpdateMayInstallOnQuit) return;
+  nativeUpdateMayInstallOnQuit = true;
+  if (installedBuildStatus) sendToRenderer("updates:status", getUpdateStatus());
+}
 
 function withInstalledBuild(status: UpdateStatus): UpdateStatus {
-  return installedBuildStatus ? { state: "downloaded", installed: installedBuildStatus } : status;
+  return installedBuildStatus ? {
+    state: "downloaded",
+    installed: {
+      ...installedBuildStatus,
+      ...(nativeInstallBlocksRestart() ? { restartBlocked: "native-update-staged" as const }
+        : process.platform === "linux" && process.env.APPIMAGE ? { restartBlocked: "appimage-unverified" as const } : {}),
+    },
+  } : status;
 }
 
 export function setInstalledBuildStatus(status: InstalledBuildStatus | undefined): void {
@@ -2040,6 +2079,7 @@ function wireUpdaterEvents(): void {
   if (eventsWired) return;
   eventsWired = true;
   if (process.platform === "darwin") {
+    nativeAutoUpdater.on("checking-for-update", noteNativeUpdateHandoff);
     powerMonitor.on("suspend", () => {
       if (preparationSuspendedAt === undefined) preparationSuspendedAt = Date.now();
     });
@@ -2052,6 +2092,7 @@ function wireUpdaterEvents(): void {
       recordUpdateDiagnostic("native-preparation-resumed", { suspendedMs });
     });
     nativeAutoUpdater.on("update-downloaded", (_event, _notes, releaseName) => {
+      noteNativeUpdateHandoff();
       const timedOut = timedOutNativePreparation;
       const recoverable = timedOut !== undefined &&
         nativePreparation === undefined && nativePreparationBlocked === timedOut.error &&
@@ -2248,6 +2289,9 @@ function wireUpdaterEvents(): void {
     handledInstallRejection = undefined;
     awaitingStagedReplacement = false;
     applyInstallOnQuitPolicy();
+    // MacUpdater reads this flag immediately after dispatching this event, then
+    // hands the archive to Squirrel. Latch before its asynchronous native events.
+    if (process.platform === "darwin" && autoUpdater.autoInstallOnAppQuit) noteNativeUpdateHandoff();
     persistStagedBuild(escalationStateDir);
     automaticCheckPreviousStatus = undefined;
     // A completed automatic download advances the independent baseline; a
@@ -3032,7 +3076,9 @@ export function getMacInstallBlocker(): string | undefined {
 // the staged build wait for a location it can actually install from.
 function applyInstallOnQuitPolicy(): void {
   const blocker = getMacInstallBlocker();
-  autoUpdater.autoInstallOnAppQuit = !installedBuildStatus && blocker === undefined && !awaitingStagedReplacement && !nativePreparationBlocked && !stagingDiskShortfall;
+  // On macOS this prevents a future handoff only; the external restart gate
+  // separately protects an update Squirrel already owns.
+  autoUpdater.autoInstallOnAppQuit = !installedBuildReplacementDetected && !installedBuildStatus && blocker === undefined && !awaitingStagedReplacement && !nativePreparationBlocked && !stagingDiskShortfall;
   if (awaitingStagedReplacement) {
     console.info(
       "install-on-quit disabled until the replacement build is staged; the cached one belongs to a channel the user left",
@@ -3059,11 +3105,17 @@ export function clearUpdateRestartRequest(): void {
 }
 
 function assertNoInstalledBuild(): void {
-  if (installedBuildStatus) throw new Error("A different build is already installed. Restart to use the installed build.");
+  if (installedBuildReplacementDetected || installedBuildStatus) throw new Error("A different build is already installed. Restart to use the installed build.");
+}
+
+async function assertPhysicalBuildIsCurrent(): Promise<void> {
+  assertNoInstalledBuild();
+  if (!await updateInstallGuard().catch(() => false)) setInstalledBuildReplacementDetected(true);
+  assertNoInstalledBuild();
 }
 
 export async function quitAndInstallUpdate(confirmedVersion?: string): Promise<UpdateInstallResult> {
-  assertNoInstalledBuild();
+  await assertPhysicalBuildIsCurrent();
   recordUpdateDiagnostic("install-requested", { confirmedVersion });
   if (confirmedVersion !== undefined && (typeof confirmedVersion !== "string" || !confirmedVersion.trim())) {
     throw new Error("A valid confirmed update version is required.");
@@ -3111,7 +3163,7 @@ export async function quitAndInstallUpdate(confirmedVersion?: string): Promise<U
     recordUpdateDiagnostic("quit-and-install", { version: stagedVersion });
     updateRestartRequested = true;
     try {
-      assertNoInstalledBuild();
+      await assertPhysicalBuildIsCurrent();
       autoUpdater.quitAndInstall(false, true);
     } catch (error) {
       clearUpdateRestartRequest();
@@ -3179,6 +3231,7 @@ export async function quitAndInstallUpdate(confirmedVersion?: string): Promise<U
         }),
         new Promise<void>((resolve) => setTimeout(resolve, 750)),
       ]);
+      await assertPhysicalBuildIsCurrent();
       assertInstallActive();
       recordUpdateDiagnostic("quit-and-install", { version });
       autoUpdater.quitAndInstall(false, true);
