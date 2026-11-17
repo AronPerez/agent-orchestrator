@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -141,6 +142,85 @@ func TestWorkspaceManifestReconcilesUnwatchedEditBeforeCacheExpiry(t *testing.T)
 	if fresh.Stale || fresh.Refreshing || fresh.WorkspaceVersion == first.WorkspaceVersion || len(fresh.Files) == 0 {
 		t.Fatalf("reconnected manifest did not include unwatched edit inside cache lifetime: %+v", fresh)
 	}
+}
+
+func TestWorkspaceManifestRefreshRevalidatesPublishedFlightAfterReconcile(t *testing.T) {
+	repo := newWorkspaceRepo(t)
+	st := newFakeStore()
+	st.sessions["ao-1"] = domain.SessionRecord{ID: "ao-1", Metadata: domain.SessionMetadata{WorkspacePath: repo}}
+	svc := NewWithDeps(Deps{Store: st})
+	published := make(chan uint64, 1)
+	release := make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	var publications atomic.Int32
+	svc.workspaceManifests.afterPublish = func(_ domain.SessionID, generation uint64, fresh bool) {
+		if publications.Add(1) != 1 {
+			return
+		}
+		if !fresh {
+			t.Error("first publication was unexpectedly stale")
+		}
+		published <- generation
+		<-release
+	}
+
+	type result struct {
+		manifest WorkspaceManifest
+		err      error
+	}
+	firstDone := make(chan result, 1)
+	go func() {
+		manifest, err := svc.RefreshWorkspaceManifest(t.Context(), "ao-1")
+		firstDone <- result{manifest: manifest, err: err}
+	}()
+	generation := <-published
+	writeWorkspaceFile(t, repo, "reconnected.txt", "created while the first publication was in flight\n")
+	reconcileDone := make(chan result, 1)
+	go func() {
+		manifest, err := svc.ReconcileWorkspaceManifest(t.Context(), "ao-1")
+		reconcileDone <- result{manifest: manifest, err: err}
+	}()
+
+	deadline := time.NewTimer(3 * time.Second)
+	defer deadline.Stop()
+	for {
+		svc.workspaceManifests.mu.Lock()
+		entry := svc.workspaceManifests.entries["ao-1"]
+		invalidated := entry.generation != generation || entry.stale
+		svc.workspaceManifests.mu.Unlock()
+		if invalidated {
+			break
+		}
+		select {
+		case early := <-reconcileDone:
+			t.Fatalf("reconcile returned before the published flight completed: %+v", early)
+		case <-deadline.C:
+			t.Fatal("reconcile did not invalidate the published manifest")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	close(release)
+
+	assertFresh := func(name string, got result) {
+		t.Helper()
+		if got.err != nil {
+			t.Fatalf("%s refresh: %v", name, got.err)
+		}
+		for _, file := range got.manifest.Files {
+			if file.Path == "reconnected.txt" {
+				return
+			}
+		}
+		t.Fatalf("%s manifest returned the pre-edit publication: %+v", name, got.manifest.Files)
+	}
+	assertFresh("original", <-firstDone)
+	assertFresh("reconcile", <-reconcileDone)
 }
 
 func TestWorkspaceDiffBatchesReuseOnlyFreshManifest(t *testing.T) {
