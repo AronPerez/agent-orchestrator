@@ -312,6 +312,20 @@ describe("FleetOverview", () => {
 		expect(project).not.toHaveTextContent("Ready");
 	});
 
+	it.each(["merged", undefined] as const)("keeps a non-terminated merged session live with scmStatus %s", (scmStatus) => {
+		const worker = session("worker", "Continue work", "merged", {
+			isTerminated: false,
+			scmStatus,
+			prs: [pr(1, { state: "merged" })],
+		});
+		render(<FleetOverview localWorkspaces={[workspace("project", "Project", [worker])]} onOpen={vi.fn()} />);
+
+		const project = screen.getByRole("treeitem", { name: /^Project/ });
+		expect(project).toHaveTextContent("1 Working");
+		expect(project).not.toHaveTextContent("Ready");
+		expect(screen.getByRole("treeitem", { name: /Continue work/ })).toHaveTextContent("Merged");
+	});
+
 	it("collapses branches and reveals archived sessions on request", async () => {
 		const active = session("active", "Active worker");
 		const archived = session("archived", "Archived worker", "terminated", { isTerminated: true });

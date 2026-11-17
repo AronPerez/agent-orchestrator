@@ -183,6 +183,7 @@ function fleetPrStatus(pr: WorkspaceSession["prs"][number]): SessionStatus {
 }
 
 function fleetRollupStatus(session: WorkspaceSession): SessionStatus {
+	const liveStatus = session.status === "merged" && !session.isTerminated ? "idle" : session.status;
 	const active = session.prs.filter((pr) => pr.state === "open" || pr.state === "draft");
 	const statuses = new Set(active.map(fleetPrStatus));
 	const derivedStatus = ([
@@ -197,10 +198,10 @@ function fleetRollupStatus(session: WorkspaceSession): SessionStatus {
 	] as const).find((status) => statuses.has(status));
 	const deliveryStatus = session.scmStatus ?? derivedStatus ??
 		(session.prs.some((pr) => pr.state === "merged") ? "merged" : undefined);
-	if (!deliveryStatus) return session.status;
+	if (!deliveryStatus) return liveStatus;
 	const deliveryZone = deliveryStatus === "merged" ? "done" : attentionZone(deliveryStatus);
-	return rollupOrder.indexOf(attentionZone(session.status)) <= rollupOrder.indexOf(deliveryZone)
-		? session.status
+	return rollupOrder.indexOf(attentionZone(liveStatus)) <= rollupOrder.indexOf(deliveryZone)
+		? liveStatus
 		: deliveryStatus;
 }
 
