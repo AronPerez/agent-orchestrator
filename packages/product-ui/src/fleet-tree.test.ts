@@ -37,20 +37,30 @@ const scope = (
 });
 
 describe("buildFleetTree", () => {
-	it("groups equal project IDs across machines while keeping equal session IDs distinct", () => {
+	it("keeps equal host-local project IDs separate unless a trusted link groups them", () => {
 		const tree = buildFleetTree([
 			scope("ao", "laptop", [session("worker", "working")]),
 			scope("ao", "server", [session("worker", "needs_input")]),
 			scope("docs", "laptop", [session("worker", "idle")]),
 		]);
 
-		expect(tree.map((project) => project.project.id)).toEqual(["ao", "docs"]);
-		expect(tree[0]?.machines.map((machine) => machine.machine.id)).toEqual(["laptop", "server"]);
-		const [local, remote] = tree[0]!.machines.map((machine) => machine.sessions[0]!);
+		expect(tree.map((project) => project.project.id)).toEqual(["ao", "ao", "docs"]);
+		expect(tree.map((project) => project.machines[0]?.machine.id)).toEqual(["laptop", "server", "laptop"]);
+		expect(tree[0]?.key).not.toBe(tree[1]?.key);
+		const [local, remote] = tree.slice(0, 2).map((project) => project.machines[0]!.sessions[0]!);
 		expect(local.key).toBe(fleetSessionKey("ao", "laptop", "worker"));
 		expect(remote.key).toBe(fleetSessionKey("ao", "server", "worker"));
 		expect(local.key).not.toBe(remote.key);
-		expect(tree[0]?.rollup).toEqual({ ...emptyFleetRollup(), action: 1, working: 1 });
+		expect(tree[0]?.rollup).toEqual({ ...emptyFleetRollup(), working: 1 });
+		expect(tree[1]?.rollup).toEqual({ ...emptyFleetRollup(), action: 1 });
+
+		const linked = buildFleetTree([
+			scope("ao", "laptop", [session("local", "working")], { projectLinkId: "repo-123" }),
+			scope("ao-mirror", "server", [session("remote", "needs_input")], { projectLinkId: "repo-123" }),
+		]);
+		expect(linked).toHaveLength(1);
+		expect(linked[0]?.machines.map((machine) => machine.machine.id)).toEqual(["laptop", "server"]);
+		expect(linked[0]?.rollup).toEqual({ ...emptyFleetRollup(), action: 1, working: 1 });
 	});
 
 	it("derives roles and descendant-only roll-ups from the shared attention zones", () => {
@@ -93,6 +103,34 @@ describe("buildFleetTree", () => {
 				session("old-worker", "terminated", { isTerminated: true }),
 			]),
 		], { showArchived: true })[0]?.machines[0]?.sessions).toHaveLength(2);
+	});
+
+	it("keeps recorded manager roles when archived children are hidden", () => {
+		const manager = buildFleetTree([
+			scope("ao", "laptop", [
+				session("manager", "working"),
+				session("archived", "terminated", { parentSessionId: "manager", isTerminated: true }),
+			]),
+		])[0]!.machines[0]!.sessions[0]!;
+
+		expect(manager.children).toHaveLength(0);
+		expect(manager.role).toBe("manager");
+	});
+
+	it("counts terminated merged sessions as done when retained or archives are shown", () => {
+		const sessions = [
+			session("retained", "merged", { kind: "orchestrator", isTerminated: true }),
+			session("live", "working", { parentSessionId: "retained" }),
+			session("archived", "merged", { isTerminated: true }),
+		];
+		const active = buildFleetTree([scope("ao", "laptop", sessions)])[0]!.machines[0]!;
+
+		expect(active.sessions[0]?.zone).toBe("done");
+		expect(active.rollup).toEqual({ ...emptyFleetRollup(), done: 1, working: 1 });
+
+		const withArchives = buildFleetTree([scope("ao", "laptop", sessions)], { showArchived: true })[0]!
+			.machines[0]!;
+		expect(withArchives.rollup).toEqual({ ...emptyFleetRollup(), done: 2, working: 1 });
 	});
 
 	it("shows missing parents and corrupt cycles once instead of losing sessions", () => {

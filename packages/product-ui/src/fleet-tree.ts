@@ -12,6 +12,8 @@ export type FleetTreeSession = {
 export type FleetTreeScope<Session extends FleetTreeSession> = {
 	project: { id: string; name: string };
 	machine: { id: string; name: string; reachable: boolean };
+	/** Trusted cross-host association. Omit for host-local project identities. */
+	projectLinkId?: string;
 	sessions: readonly Session[];
 };
 
@@ -46,6 +48,7 @@ export type FleetProjectNode<Session extends FleetTreeSession> = {
 	type: "project";
 	key: string;
 	project: FleetTreeScope<Session>["project"];
+	projectLinkId?: string;
 	/** Every included session in this project, across machines. */
 	rollup: FleetRollup;
 	machines: FleetMachineNode<Session>[];
@@ -71,19 +74,25 @@ function addSession(target: FleetRollup, node: FleetSessionNode<FleetTreeSession
 
 // JSON keys keep arbitrary host/project/session IDs unambiguous and give the
 // later cross-machine edge work a stable target without defining its protocol.
-export const fleetProjectKey = (projectId: string): string => JSON.stringify(["project", projectId]);
+export const fleetProjectKey = (projectId: string, machineId: string): string =>
+	JSON.stringify(["project", machineId, projectId]);
+export const fleetLinkedProjectKey = (projectLinkId: string): string =>
+	JSON.stringify(["linked-project", projectLinkId]);
 export const fleetMachineKey = (projectId: string, machineId: string): string =>
 	JSON.stringify(["machine", projectId, machineId]);
 export const fleetSessionKey = (projectId: string, machineId: string, sessionId: string): string =>
 	JSON.stringify(["session", projectId, machineId, sessionId]);
 
 type MachineGroup<Session extends FleetTreeSession> = {
+	projectId: string;
 	machine: FleetTreeScope<Session>["machine"];
 	sessions: Map<string, Session>;
 };
 
 type ProjectGroup<Session extends FleetTreeSession> = {
+	key: string;
 	project: FleetTreeScope<Session>["project"];
+	projectLinkId?: string;
 	machines: Map<string, MachineGroup<Session>>;
 };
 
@@ -93,28 +102,38 @@ export function buildFleetTree<Session extends FleetTreeSession>(
 ): FleetProjectNode<Session>[] {
 	const projects = new Map<string, ProjectGroup<Session>>();
 	for (const scope of scopes) {
-		let project = projects.get(scope.project.id);
+		const projectKey = scope.projectLinkId
+			? fleetLinkedProjectKey(scope.projectLinkId)
+			: fleetProjectKey(scope.project.id, scope.machine.id);
+		let project = projects.get(projectKey);
 		if (!project) {
-			project = { project: scope.project, machines: new Map() };
-			projects.set(scope.project.id, project);
+			project = {
+				key: projectKey,
+				project: scope.project,
+				projectLinkId: scope.projectLinkId,
+				machines: new Map(),
+			};
+			projects.set(projectKey, project);
 		}
-		let machine = project.machines.get(scope.machine.id);
+		const machineKey = fleetMachineKey(scope.project.id, scope.machine.id);
+		let machine = project.machines.get(machineKey);
 		if (!machine) {
-			machine = { machine: scope.machine, sessions: new Map() };
-			project.machines.set(scope.machine.id, machine);
+			machine = { projectId: scope.project.id, machine: scope.machine, sessions: new Map() };
+			project.machines.set(machineKey, machine);
 		}
 		for (const item of scope.sessions) machine.sessions.set(item.id, item);
 	}
 
-	return [...projects.values()].map(({ project, machines }) => {
-		const machineNodes = [...machines.values()].map(({ machine, sessions }) =>
-			buildMachine(project.id, machine, [...sessions.values()], options.showArchived === true));
+	return [...projects.values()].map(({ key, project, projectLinkId, machines }) => {
+		const machineNodes = [...machines.values()].map(({ projectId, machine, sessions }) =>
+			buildMachine(projectId, machine, [...sessions.values()], options.showArchived === true));
 		const rollup = emptyFleetRollup();
 		for (const node of machineNodes) addRollup(rollup, node.rollup);
 		return {
 			type: "project" as const,
-			key: fleetProjectKey(project.id),
+			key,
 			project,
+			projectLinkId,
 			rollup,
 			machines: machineNodes,
 		};
@@ -151,7 +170,8 @@ function buildMachine<Session extends FleetTreeSession>(
 		if (visited.has(item.id) || !included.has(item.id)) return undefined;
 		visited.add(item.id);
 		const parentId = item.parentSessionId;
-		const directChildren = (children.get(item.id) ?? []).filter((child) => included.has(child.id));
+		const recordedChildren = children.get(item.id) ?? [];
+		const directChildren = recordedChildren.filter((child) => included.has(child.id));
 		const childNodes = directChildren.flatMap((child) => {
 			const node = visit(child);
 			return node ? [node] : [];
@@ -164,10 +184,10 @@ function buildMachine<Session extends FleetTreeSession>(
 			projectId,
 			machineId: machine.id,
 			session: item,
-			role: item.kind === "orchestrator" ? "orchestrator" : directChildren.length ? "manager" : "worker",
+			role: item.kind === "orchestrator" ? "orchestrator" : recordedChildren.length ? "manager" : "worker",
 			parentUnavailable: parentId !== undefined &&
 				(fallbackRoot || parentId === item.id || !byId.has(parentId)),
-			zone: attentionZone(item.status),
+			zone: item.isTerminated || item.status === "terminated" ? "done" : attentionZone(item.status),
 			rollup,
 			children: childNodes,
 		};
