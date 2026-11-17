@@ -57,6 +57,7 @@ vi.mock("../hooks/useProjectOrchestratorAction", () => ({
 }));
 vi.mock("../hooks/useProjectOverlaps", () => ({
 	projectOverlapForSession: () => undefined,
+	projectOverlapScanState: () => undefined,
 	useProjectOverlaps: () => ({ data: undefined }),
 }));
 vi.mock("../lib/api-client", () => ({

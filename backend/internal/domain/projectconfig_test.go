@@ -102,6 +102,10 @@ func TestProjectConfigValidate(t *testing.T) {
 		{"collision radar escaping ignore path", ProjectConfig{CollisionRadar: CollisionRadarConfig{IgnorePaths: []string{"../generated.go"}}}, true},
 		{"collision radar duplicate ignore path", ProjectConfig{CollisionRadar: CollisionRadarConfig{IgnorePaths: []string{"generated.go", "generated.go"}}}, true},
 		{"collision radar empty ignore path", ProjectConfig{CollisionRadar: CollisionRadarConfig{IgnorePaths: []string{""}}}, true},
+		{"worker contract default stall", ProjectConfig{WorkerContracts: WorkerContractConfig{}}, false},
+		{"worker contract custom stall", ProjectConfig{WorkerContracts: WorkerContractConfig{StallMinutes: 10}}, false},
+		{"worker contract negative stall", ProjectConfig{WorkerContracts: WorkerContractConfig{StallMinutes: -1}}, true},
+		{"worker contract excessive stall", ProjectConfig{WorkerContracts: WorkerContractConfig{StallMinutes: 24*60 + 1}}, true},
 		{"orchestrator prompt ok", ProjectConfig{OrchestratorPrompt: strings.Repeat("a", 1024)}, false},
 		{"orchestrator prompt too long", ProjectConfig{OrchestratorPrompt: strings.Repeat("a", 64*1024+1)}, true},
 	}
@@ -135,6 +139,9 @@ func TestProjectConfigWithDefaults(t *testing.T) {
 	got := (ProjectConfig{}).WithDefaults()
 	if got.DefaultBranch != DefaultBranchAuto {
 		t.Fatalf("WithDefaults = %#v, want branch=%s", got, DefaultBranchAuto)
+	}
+	if got.WorkerContracts.StallMinutes != DefaultWorkerContractStallMinutes {
+		t.Fatalf("default worker contract stall = %d, want %d", got.WorkerContracts.StallMinutes, DefaultWorkerContractStallMinutes)
 	}
 
 	// Set fields are preserved, not overwritten.
@@ -252,6 +259,9 @@ func TestProjectConfigIsZero(t *testing.T) {
 	}
 	if (ProjectConfig{AutoReview: true}).IsZero() {
 		t.Fatal("config with autoReview enabled should not be zero")
+	}
+	if (ProjectConfig{WorkerContracts: WorkerContractConfig{StallMinutes: 10}}).IsZero() {
+		t.Fatal("config with worker contract settings should not be zero")
 	}
 }
 
