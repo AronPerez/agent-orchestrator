@@ -1,6 +1,7 @@
 package mobilebridge
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -78,6 +79,179 @@ func TestAccessDevicesIssueMatchRevoke(t *testing.T) {
 	}
 	if _, ok := reloaded.Match(laptopToken); ok || len(reloaded.List()) != 0 {
 		t.Fatal("RevokeAll left a device")
+	}
+}
+
+func TestAccessDevicesIssueScopedPersistsCapabilities(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mobile", "access-devices.json")
+	now := time.Date(2026, 11, 17, 10, 0, 0, 0, time.UTC)
+	devices, err := LoadAccessDevices(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := devices.IssueScoped("Not actually scoped", "cli", []string{"", "  "}, now); !errors.Is(err, ErrInvalidDeviceScopes) {
+		t.Fatalf("blank scoped issuance = %v, want ErrInvalidDeviceScopes", err)
+	}
+
+	issued, token, err := devices.IssueScoped("Agent coordination", "cli", []string{DeviceScopeAgentCoordination}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(issued.Scopes) != 1 || issued.Scopes[0] != DeviceScopeAgentCoordination {
+		t.Fatalf("issued scopes = %v", issued.Scopes)
+	}
+	if !strings.HasPrefix(token, CoordinationTokenPrefix) || strings.HasPrefix(token, DeviceTokenPrefix) {
+		t.Fatalf("coordination token %q does not have its rollback-safe prefix", token)
+	}
+
+	reloaded, err := LoadAccessDevices(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	matched, ok := reloaded.Match(token)
+	if !ok || matched.ID != issued.ID {
+		t.Fatalf("Match after reload = %+v, %v", matched, ok)
+	}
+	if len(matched.Scopes) != 1 || matched.Scopes[0] != DeviceScopeAgentCoordination {
+		t.Fatalf("reloaded scopes = %v", matched.Scopes)
+	}
+
+	// Simulate a rollback daemon that loaded the record while ignoring scopes,
+	// then rewrote it without that unknown field. The distinct token prefix must
+	// make the upgraded daemon reject it instead of promoting it to full access.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored accessDevicesFile
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		t.Fatal(err)
+	}
+	stored.Devices[0].Scopes = nil
+	raw, err = json.Marshal(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	withoutScope, err := LoadAccessDevices(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := withoutScope.Match(token); ok {
+		t.Fatal("coordination token without persisted scope became a full credential")
+	}
+
+	// The inverse mismatch also fails closed: a legacy aod_ token may never
+	// inherit a scoped record's route authority.
+	legacyToken := DeviceTokenPrefix + strings.Repeat("a", 64)
+	stored.Devices[0].TokenHash = HashPassword(legacyToken)
+	stored.Devices[0].Scopes = []string{DeviceScopeAgentCoordination}
+	raw, err = json.Marshal(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacyScoped, err := LoadAccessDevices(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := legacyScoped.Match(legacyToken); ok {
+		t.Fatal("legacy device token accepted a scoped registry record")
+	}
+}
+
+func TestAccessDevicesScopedIssuerPersistsAndCanBeRevoked(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mobile", "access-devices.json")
+	now := time.Date(2026, 11, 17, 11, 0, 0, 0, time.UTC)
+	devices, err := LoadAccessDevices(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountDevice, accountToken, err := devices.IssueScopedBy(
+		"Account agent", "cli", []string{DeviceScopeAgentCoordination}, SharedAccount, now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, passwordToken, err := devices.IssueScopedBy(
+		"Password agent", "cli", []string{DeviceScopeAgentCoordination}, SharedPassword, now.Add(time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := LoadAccessDevices(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	matched, ok := reloaded.Match(accountToken)
+	if !ok || matched.ID != accountDevice.ID || matched.Issuer != SharedAccount {
+		t.Fatalf("account-issued device after reload = %+v, %v", matched, ok)
+	}
+	revoked, err := reloaded.RevokeIssuedBy(SharedAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(revoked) != 1 || revoked[0].ID != accountDevice.ID {
+		t.Fatalf("revoked = %+v, want account-issued device", revoked)
+	}
+	if _, ok := reloaded.Match(accountToken); ok {
+		t.Fatal("account-issued token survived issuer revocation")
+	}
+	if got, ok := reloaded.Match(passwordToken); !ok || got.Issuer != SharedPassword {
+		t.Fatalf("password-issued token was revoked too: %+v, %v", got, ok)
+	}
+	final, err := LoadAccessDevices(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := final.Match(accountToken); ok {
+		t.Fatal("issuer revocation was not persisted")
+	}
+}
+
+func TestAccessDevicesScopedClientReissueReplacesPriorToken(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mobile", "access-devices.json")
+	now := time.Date(2026, 11, 17, 14, 0, 0, 0, time.UTC)
+	devices, err := LoadAccessDevices(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, firstToken, replaced, err := devices.IssueScopedByClient(
+		"Origin laptop", "darwin", []string{DeviceScopeAgentCoordination}, SharedAccount, "h_origin", now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replaced) != 0 {
+		t.Fatalf("first issuance replaced = %+v, want none", replaced)
+	}
+	second, secondToken, replaced, err := devices.IssueScopedByClient(
+		"Origin laptop", "darwin", []string{DeviceScopeAgentCoordination}, SharedAccount, "h_origin", now.Add(time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replaced) != 1 || replaced[0].ID != first.ID {
+		t.Fatalf("second issuance replaced = %+v, want first device %s", replaced, first.ID)
+	}
+	if _, ok := devices.Match(firstToken); ok {
+		t.Fatal("first token survived idempotent reissue")
+	}
+	if matched, ok := devices.Match(secondToken); !ok || matched.ID != second.ID || matched.ClientID != "h_origin" {
+		t.Fatalf("second token = %+v, %v", matched, ok)
+	}
+
+	reloaded, err := LoadAccessDevices(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if listed := reloaded.List(); len(listed) != 1 || listed[0].ID != second.ID || listed[0].ClientID != "h_origin" {
+		t.Fatalf("reloaded devices = %+v", listed)
 	}
 }
 

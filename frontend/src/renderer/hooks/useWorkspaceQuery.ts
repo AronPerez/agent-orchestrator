@@ -294,6 +294,20 @@ class DaemonNotReadyError extends Error {
 	}
 }
 
+type FullProjectSummary = components["schemas"]["ProjectSummary"];
+
+function fullProjectSummaries(
+	response: components["schemas"]["ListProjectsAPIResponse"] | undefined,
+): FullProjectSummary[] {
+	const projects = response?.projects ?? [];
+	if (projects.some((project) => !("path" in project))) {
+		const error = new Error("Orchestrator returned a scoped project list to a full desktop client");
+		markApiError(error);
+		throw error;
+	}
+	return projects as FullProjectSummary[];
+}
+
 async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
 	if (usesPreviewWorkspaceData) {
 		const fake =
@@ -316,7 +330,7 @@ async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
 
 	const sessions = sessionsData?.sessions ?? [];
 	const standaloneName = standaloneWorkspaceName();
-	const projects = (projectsData?.projects ?? []).map((project) => {
+	const projects = fullProjectSummaries(projectsData).map((project) => {
 		const kind = toProjectKind(project.kind);
 		return {
 			id: project.id,
@@ -376,7 +390,7 @@ async function fetchRemoteProjects(hostId: string) {
 		recheckRemoteHost(hostId, response.status);
 		throw error;
 	}
-	const projects = data?.projects ?? [];
+	const projects = fullProjectSummaries(data);
 	remoteReadConnections.set(projects, connection);
 	return projects;
 }

@@ -7,11 +7,11 @@ import (
 	"strings"
 )
 
-// Each Setup (PostCreate) or Cleanup (PreRemove) step may set its own time
+// Each Setup (PostCreate), Cleanup (PreRemove), or Verify step may set its own time
 // limit, in whole minutes, from MinScriptStepTimeoutMinutes to
-// MaxScriptStepTimeoutMinutes. A Setup step without one runs for at most
-// DefaultScriptStepTimeoutMinutes; a Cleanup step without one keeps running
-// without a limit, as Cleanup always has.
+// MaxScriptStepTimeoutMinutes. A Setup or Verify step without one runs for at
+// most DefaultScriptStepTimeoutMinutes; a Cleanup step without one keeps
+// running without a limit, as Cleanup always has.
 //
 // The limit is stored with the step, as the Cloud control plane stores it
 // (the private control plane's internal/domain.TimedScriptCommand): the step's first line is the
