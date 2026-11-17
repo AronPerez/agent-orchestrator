@@ -22,6 +22,16 @@ type AccessDevice struct {
 	Name      string `json:"name,omitempty"`
 	Platform  string `json:"platform,omitempty"`
 	TokenHash string `json:"tokenHash"`
+	// Scopes is empty for the existing full app credential. A non-empty list
+	// is enforced by the LAN listener as a capability allowlist.
+	Scopes []string `json:"scopes,omitempty"`
+	// Issuer names the full credential that minted a scoped token. It lets
+	// revoking that credential also revoke the authority it delegated.
+	Issuer string `json:"issuer,omitempty"`
+	// ClientID is the stable originating AO installation for idempotent scoped
+	// issuance. Reissuing for the same issuer, scopes, and client replaces the
+	// prior row, including when its one-time response was lost.
+	ClientID string `json:"clientId,omitempty"`
 	// InstallID links the device to its push registration.
 	InstallID  string    `json:"installId,omitempty"`
 	CreatedAt  time.Time `json:"createdAt"`
@@ -34,10 +44,23 @@ const (
 	SharedAccount  = "account"
 )
 
-// DeviceTokenPrefix keeps a device token from looking like an account token.
-const DeviceTokenPrefix = "aod_"
+const (
+	// DeviceTokenPrefix keeps a full app device token from looking like an account token.
+	DeviceTokenPrefix = "aod_"
+	// CoordinationTokenPrefix makes route-filtered coordination credentials
+	// fail closed on older daemons, which recognize only DeviceTokenPrefix.
+	CoordinationTokenPrefix = "aoc_"
+	// DeviceIssuerPrefix distinguishes a full device credential from shared
+	// password and account issuers in persisted scoped-token provenance.
+	DeviceIssuerPrefix = "device:"
+)
 
-// maxAccessDevices bounds the tokens a holder of the pairing password can mint.
+// DeviceScopeAgentCoordination filters direct HTTP calls to the reads and
+// writes needed to list, spawn and message sessions on this host. Because those
+// agents run with the user's OS authority, this is not an authority sandbox.
+const DeviceScopeAgentCoordination = "agent-coordination"
+
+// maxAccessDevices bounds the device and capability tokens a full credential can mint.
 const maxAccessDevices = 64
 
 // touchInterval limits how often last-seen times are written to disk.
@@ -45,6 +68,10 @@ const touchInterval = 5 * time.Minute
 
 // ErrTooManyDevices is returned by Issue when the registry is full.
 var ErrTooManyDevices = errors.New("too many paired devices; revoke one first")
+
+// ErrInvalidDeviceScopes keeps a caller of IssueScoped from accidentally
+// minting a full credential after blank scopes normalize away.
+var ErrInvalidDeviceScopes = errors.New("scoped device token requires at least one scope")
 
 type accessDevicesFile struct {
 	Devices        []AccessDevice       `json:"devices"`
@@ -107,48 +134,131 @@ func (r *AccessDevices) moveAside(cause error) error {
 
 // Issue registers a new device and returns it with its token.
 func (r *AccessDevices) Issue(name, platform string, now time.Time) (AccessDevice, string, error) {
+	device, token, _, err := r.issue(name, platform, nil, "", "", now)
+	return device, token, err
+}
+
+// IssueScoped registers a new device token carrying the given capability
+// scopes. Full app credentials are issued only through Issue.
+func (r *AccessDevices) IssueScoped(name, platform string, scopes []string, now time.Time) (AccessDevice, string, error) {
+	return r.IssueScopedBy(name, platform, scopes, "", now)
+}
+
+// IssueScopedBy registers a scoped token and records the full credential that
+// delegated its authority. An empty issuer is accepted for callers that do not
+// have an authentication context; network issuance always supplies one.
+func (r *AccessDevices) IssueScopedBy(name, platform string, scopes []string, issuer string, now time.Time) (AccessDevice, string, error) {
+	device, token, _, err := r.IssueScopedByClient(name, platform, scopes, issuer, "", now)
+	return device, token, err
+}
+
+// IssueScopedByClient registers a scoped token for one stable originating
+// client. A retry atomically replaces the prior token for the same issuer,
+// exact scopes, and client ID, so a lost one-time response cannot leak rows.
+// Empty client IDs preserve the legacy append-only behavior.
+func (r *AccessDevices) IssueScopedByClient(name, platform string, scopes []string, issuer, clientID string, now time.Time) (AccessDevice, string, []AccessDevice, error) {
+	normalizedScopes := normalizeDeviceScopes(scopes)
+	if len(normalizedScopes) == 0 {
+		return AccessDevice{}, "", nil, ErrInvalidDeviceScopes
+	}
+	return r.issue(name, platform, normalizedScopes, strings.TrimSpace(issuer), cleanLabel(clientID, 128), now)
+}
+
+func (r *AccessDevices) issue(name, platform string, normalizedScopes []string, issuer, clientID string, now time.Time) (AccessDevice, string, []AccessDevice, error) {
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
-		return AccessDevice{}, "", err
+		return AccessDevice{}, "", nil, err
 	}
 	id := make([]byte, 8)
 	if _, err := rand.Read(id); err != nil {
-		return AccessDevice{}, "", err
+		return AccessDevice{}, "", nil, err
 	}
-	token := DeviceTokenPrefix + hex.EncodeToString(secret)
+	prefix := DeviceTokenPrefix
+	if len(normalizedScopes) > 0 {
+		prefix = CoordinationTokenPrefix
+	}
+	token := prefix + hex.EncodeToString(secret)
 	device := AccessDevice{
 		ID:         "dev_" + hex.EncodeToString(id),
 		Name:       cleanLabel(name, 64),
 		Platform:   cleanLabel(strings.ToLower(platform), 32),
 		TokenHash:  HashPassword(token),
+		Scopes:     normalizedScopes,
+		Issuer:     issuer,
+		ClientID:   clientID,
 		CreatedAt:  now.UTC(),
 		LastSeenAt: now.UTC(),
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(r.devices) >= maxAccessDevices {
-		return AccessDevice{}, "", ErrTooManyDevices
+	replaced := make([]AccessDevice, 0, 1)
+	if clientID != "" {
+		for _, candidate := range r.devices {
+			if candidate.Issuer == issuer && candidate.ClientID == clientID && deviceScopesEqual(candidate.Scopes, normalizedScopes) {
+				replaced = append(replaced, candidate)
+			}
+		}
+	}
+	if len(r.devices)-len(replaced) >= maxAccessDevices {
+		return AccessDevice{}, "", nil, ErrTooManyDevices
+	}
+	for _, previous := range replaced {
+		delete(r.devices, previous.ID)
+		delete(r.byHash, previous.TokenHash)
 	}
 	r.devices[device.ID] = device
 	r.byHash[device.TokenHash] = device.ID
 	if err := r.persistLocked(); err != nil {
 		delete(r.devices, device.ID)
 		delete(r.byHash, device.TokenHash)
-		return AccessDevice{}, "", err
+		for _, previous := range replaced {
+			r.devices[previous.ID] = previous
+			r.byHash[previous.TokenHash] = previous.ID
+		}
+		return AccessDevice{}, "", nil, err
 	}
-	return device, token, nil
+	for i := range replaced {
+		replaced[i] = cloneAccessDevice(replaced[i])
+	}
+	return cloneAccessDevice(device), token, replaced, nil
+}
+
+func deviceScopesEqual(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// DeviceIssuer names the full device credential that delegated a scoped token.
+func DeviceIssuer(deviceID string) string {
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" {
+		return ""
+	}
+	return DeviceIssuerPrefix + deviceID
 }
 
 // Match returns the device a token belongs to.
 func (r *AccessDevices) Match(token string) (AccessDevice, bool) {
-	if !strings.HasPrefix(token, DeviceTokenPrefix) {
+	coordination := strings.HasPrefix(token, CoordinationTokenPrefix)
+	deviceToken := strings.HasPrefix(token, DeviceTokenPrefix)
+	if !coordination && !deviceToken {
 		return AccessDevice{}, false
 	}
 	hash := HashPassword(token)
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	device, ok := r.devices[r.byHash[hash]]
-	return device, ok
+	if !ok || (coordination && len(device.Scopes) == 0) || (deviceToken && len(device.Scopes) != 0) {
+		return AccessDevice{}, false
+	}
+	return cloneAccessDevice(device), true
 }
 
 // Touch updates the device's last-seen time.
@@ -227,6 +337,46 @@ func (r *AccessDevices) Revoke(id string) (AccessDevice, bool, error) {
 	return device, true, nil
 }
 
+// RevokeIssuedBy atomically removes every scoped token delegated by issuer.
+// The removed records are returned so the caller can close live connections.
+func (r *AccessDevices) RevokeIssuedBy(issuer string) ([]AccessDevice, error) {
+	issuer = strings.TrimSpace(issuer)
+	if issuer == "" {
+		return nil, nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	revoked := make([]AccessDevice, 0)
+	for id, device := range r.devices {
+		if device.Issuer != issuer {
+			continue
+		}
+		revoked = append(revoked, device)
+		delete(r.devices, id)
+		delete(r.byHash, device.TokenHash)
+	}
+	if len(revoked) == 0 {
+		return nil, nil
+	}
+	if err := r.persistLocked(); err != nil {
+		for _, device := range revoked {
+			r.devices[device.ID] = device
+			r.byHash[device.TokenHash] = device.ID
+		}
+		return nil, err
+	}
+	sort.Slice(revoked, func(i, j int) bool {
+		if !revoked[i].CreatedAt.Equal(revoked[j].CreatedAt) {
+			return revoked[i].CreatedAt.Before(revoked[j].CreatedAt)
+		}
+		return revoked[i].ID < revoked[j].ID
+	})
+	for i := range revoked {
+		revoked[i] = cloneAccessDevice(revoked[i])
+	}
+	return revoked, nil
+}
+
 // RevokeAll removes every device.
 func (r *AccessDevices) RevokeAll() error {
 	r.mu.Lock()
@@ -249,7 +399,7 @@ func (r *AccessDevices) List() []AccessDevice {
 	defer r.mu.RUnlock()
 	out := make([]AccessDevice, 0, len(r.devices))
 	for _, device := range r.devices {
-		out = append(out, device)
+		out = append(out, cloneAccessDevice(device))
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
@@ -258,6 +408,29 @@ func (r *AccessDevices) List() []AccessDevice {
 		return out[i].ID < out[j].ID
 	})
 	return out
+}
+
+func normalizeDeviceScopes(scopes []string) []string {
+	if len(scopes) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(scopes))
+	for _, scope := range scopes {
+		if scope = strings.TrimSpace(scope); scope != "" {
+			seen[scope] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for scope := range seen {
+		out = append(out, scope)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func cloneAccessDevice(device AccessDevice) AccessDevice {
+	device.Scopes = append([]string(nil), device.Scopes...)
+	return device
 }
 
 func (r *AccessDevices) persistLocked() error {
