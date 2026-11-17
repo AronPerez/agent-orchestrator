@@ -193,7 +193,13 @@ func (c *commandContext) report(ctx context.Context, args []string, o reportOpti
 		apiOutputs[i] = reportAPIOutput{Kind: string(output.Kind), Reference: output.Reference}
 	}
 	var response reportAPIResponse
-	return c.postJSON(ctx, "reports", reportAPIRequest{SessionID: sessionID, State: string(selected), Note: o.note, Message: message, Outputs: apiOutputs}, &response)
+	if err := c.postJSON(ctx, "reports", reportAPIRequest{SessionID: sessionID, State: string(selected), Note: o.note, Message: message, Outputs: apiOutputs}, &response); err != nil {
+		return err
+	}
+	if selected == domain.ReportNeedsInput {
+		_, _ = fmt.Fprintln(c.deps.Err, "Reminder: if this is a choice between options, raise a call for the human instead. See: ao decision raise --help")
+	}
+	return nil
 }
 
 func legacyReportStatus(value string) bool {
