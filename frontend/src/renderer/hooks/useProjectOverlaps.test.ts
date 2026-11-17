@@ -76,13 +76,18 @@ describe("projectOverlapScanState", () => {
 		unavailableSessionIds: [],
 	};
 
-	it.each([
+	const cases: Array<[
+		string,
+		Parameters<typeof projectOverlapScanState>[0],
+		ReturnType<typeof projectOverlapScanState>,
+	]> = [
 		["idle", { data: undefined, isError: false }, undefined],
 		["initial error", { data: undefined, isError: true }, "unavailable"],
 		["failed refresh", { data: clean, isError: true }, "stale"],
 		["incomplete read", { data: { ...clean, unavailableSessionIds: ["one"] }, isError: false }, "incomplete"],
 		["clean read", { data: clean, isError: false }, undefined],
-	] as const)("classifies a %s", (_name, query, expected) => {
+	];
+	it.each(cases)("classifies a %s", (_name, query, expected) => {
 		expect(projectOverlapScanState(query)).toBe(expected);
 	});
 });
