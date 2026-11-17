@@ -315,6 +315,67 @@ func TestListPRFactsForSessionSplitsExternalCommentsFromAOInjectedComments(t *te
 	}
 }
 
+func TestPRFactsTreatAnchoredBotCommentsAsActionable(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "mer")
+	r, _ := s.CreateSession(ctx, sampleRecord("mer"))
+	now := time.Now().UTC().Truncate(time.Second)
+
+	write := func(url string, number int, file string, line int, updatedAt time.Time) {
+		t.Helper()
+		threadID := "thread-" + url
+		if err := s.WriteSCMObservation(ctx, domain.PullRequest{
+			URL: url, SessionID: r.ID, Number: number, CI: domain.CIPassing,
+			Review: domain.ReviewApproved, Mergeability: domain.MergeMergeable,
+			UpdatedAt: updatedAt, ObservedAt: updatedAt,
+		}, nil, nil, []domain.PullRequestReviewThread{{
+			ThreadID: threadID, Path: file, Line: line, UpdatedAt: updatedAt,
+		}}, []domain.PullRequestComment{{
+			ThreadID: threadID, ID: "comment-" + url, Author: "review-bot",
+			File: file, Line: line, Body: "please fix", IsBot: true, CreatedAt: updatedAt,
+		}}, ports.ReviewWriteReplace); err != nil {
+			t.Fatalf("write %s: %v", url, err)
+		}
+	}
+	write("pr/chatter", 1, "", 0, now)
+	write("pr/anchored", 2, "main.go", 7, now.Add(time.Minute))
+
+	assertFacts := func(t *testing.T, facts []domain.PRFacts) {
+		t.Helper()
+		byURL := map[string]domain.PRFacts{}
+		for _, fact := range facts {
+			byURL[fact.URL] = fact
+		}
+		if !byURL["pr/anchored"].ReviewComments || byURL["pr/anchored"].ExternalComments {
+			t.Fatalf("anchored bot comment facts = %+v, want actionable but not external", byURL["pr/anchored"])
+		}
+		if byURL["pr/chatter"].ReviewComments {
+			t.Fatalf("unanchored bot chatter facts = %+v, want non-actionable", byURL["pr/chatter"])
+		}
+	}
+
+	single, err := s.ListPRFactsForSession(ctx, r.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertFacts(t, single)
+
+	batch, err := s.ListPRFactsForSessions(ctx, []domain.SessionID{r.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertFacts(t, batch[r.ID])
+
+	display, ok, err := s.GetDisplayPRFactsForSession(ctx, r.ID)
+	if err != nil || !ok {
+		t.Fatalf("display facts: ok=%v err=%v", ok, err)
+	}
+	if display.URL != "pr/anchored" || !display.ReviewComments {
+		t.Fatalf("display facts = %+v, want anchored bot comment actionable", display)
+	}
+}
+
 func TestListPRFactsForSessionIgnoresHumanVerdictsFromAnOlderHead(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

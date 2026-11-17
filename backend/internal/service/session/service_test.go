@@ -88,6 +88,7 @@ type fakeStore struct {
 	interrupted         map[domain.SessionID]bool
 	listPRFactsCalls    int
 	listReviewRunsCalls int
+	getProjectCalls     int
 	num                 int
 	conversations       map[domain.SessionID]domain.ConversationRecord
 	activities          []domain.ConversationActivity
@@ -653,6 +654,7 @@ func (f *fakeStore) ListPRComments(_ context.Context, prURL string) ([]domain.Pu
 }
 
 func (f *fakeStore) GetProject(_ context.Context, id string) (domain.ProjectRecord, bool, error) {
+	f.getProjectCalls++
 	p, ok := f.projects[id]
 	return p, ok, nil
 }
@@ -6058,6 +6060,53 @@ func TestToSessionWithFactsDerivesCurrentContractStall(t *testing.T) {
 	}
 	if sess.ContractStalled {
 		t.Fatal("ContractStalled = true, want false while CI is pending")
+	}
+}
+
+func TestSessionsFromRecordsReusesContractProjectAndSkipsFinishedRows(t *testing.T) {
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	deadline := now.Add(time.Hour)
+	escalatedAt := now.Add(-30 * time.Minute)
+	record := func(id domain.SessionID) domain.SessionRecord {
+		return domain.SessionRecord{
+			ID: id, ProjectID: "ao", Kind: domain.KindWorker, Goal: "ship it",
+			TimeboxDeadlineAt: &deadline, ContractStallEscalatedAt: &escalatedAt,
+			Activity: domain.Activity{State: domain.ActivityIdle, LastActivityAt: now.Add(-45 * time.Minute)},
+		}
+	}
+	first := record("worker-1")
+	second := record("worker-2")
+	finished := record("worker-finished")
+	finished.ContractOutcome = domain.SessionContractOutcomeMet
+	terminated := record("worker-terminated")
+	terminated.IsTerminated = true
+
+	st := newFakeStore()
+	st.projects["ao"] = domain.ProjectRecord{
+		ID: "ao",
+		Config: domain.ProjectConfig{
+			WorkerContracts: domain.WorkerContractConfig{StallMinutes: 15},
+		},
+	}
+	for _, rec := range []domain.SessionRecord{first, second, finished, terminated} {
+		st.prFacts[rec.ID] = []domain.PRFacts{{CI: domain.CIFailing, Mergeability: domain.MergeMergeable}}
+	}
+
+	sessions, err := (&Service{store: st, clock: func() time.Time { return now }}).sessionsFromRecords(
+		context.Background(), []domain.SessionRecord{first, second, finished, terminated}, 0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 4 {
+		t.Fatalf("sessions = %d, want 4", len(sessions))
+	}
+	if st.getProjectCalls != 1 {
+		t.Fatalf("GetProject calls = %d, want one shared lookup for active escalations", st.getProjectCalls)
+	}
+	if !sessions[0].ContractStalled || !sessions[1].ContractStalled || sessions[2].ContractStalled || sessions[3].ContractStalled {
+		t.Fatalf("contract stalled values = [%v %v %v %v], want [true true false false]",
+			sessions[0].ContractStalled, sessions[1].ContractStalled, sessions[2].ContractStalled, sessions[3].ContractStalled)
 	}
 }
 

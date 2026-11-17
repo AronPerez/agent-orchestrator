@@ -1739,10 +1739,11 @@ func (s *Service) sessionsFromRecords(ctx context.Context, filtered []domain.Ses
 		}
 	}
 	titles := s.storedTerminalTitles(ctx, ids)
+	contractProjects := make(map[string]contractProjectLookup)
 	out := make([]domain.Session, 0, len(filtered))
 	for _, rec := range filtered {
 		facts, found := cleanupBySession[rec.ID]
-		sess, err := s.toSessionWithFacts(ctx, rec, prsBySession[rec.ID], runsBySession[rec.ID], interrupted[rec.ID], artifactsBySession[rec.ID], currentWorkspaceCleanup(rec, facts, found))
+		sess, err := s.toSessionWithFactsCached(ctx, rec, prsBySession[rec.ID], runsBySession[rec.ID], interrupted[rec.ID], artifactsBySession[rec.ID], currentWorkspaceCleanup(rec, facts, found), contractProjects)
 		if err != nil {
 			return nil, err
 		}
@@ -1853,6 +1854,15 @@ func (s *Service) Get(ctx context.Context, id domain.SessionID) (domain.Session,
 }
 
 func (s *Service) toSessionWithFacts(ctx context.Context, rec domain.SessionRecord, prs []domain.PRFacts, runs []domain.CurrentHeadReviewRun, interrupted bool, artifactRows []domain.SessionArtifactRecord, cleanup domain.SessionCleanupRecord) (domain.Session, error) { //nolint:unparam // Every read-model caller propagates this error.
+	return s.toSessionWithFactsCached(ctx, rec, prs, runs, interrupted, artifactRows, cleanup, nil)
+}
+
+type contractProjectLookup struct {
+	project domain.ProjectRecord
+	found   bool
+}
+
+func (s *Service) toSessionWithFactsCached(ctx context.Context, rec domain.SessionRecord, prs []domain.PRFacts, runs []domain.CurrentHeadReviewRun, interrupted bool, artifactRows []domain.SessionArtifactRecord, cleanup domain.SessionCleanupRecord, contractProjects map[string]contractProjectLookup) (domain.Session, error) {
 	// A row created before artifact_dir existed carries it as '' (the
 	// migration's default) even though session_manager always prompts the
 	// agent to write into the deterministic dataDir/artifacts/<id> path.
@@ -1905,13 +1915,23 @@ func (s *Service) toSessionWithFacts(ctx context.Context, rec domain.SessionReco
 	// period and have the card contradict its own status.
 	now := s.now()
 	contractStalled := false
-	if rec.ContractStallEscalatedAt != nil {
-		project, ok, err := s.store.GetProject(ctx, string(rec.ProjectID))
-		if err != nil {
-			return domain.Session{}, fmt.Errorf("get project for session contract: %w", err)
+	if rec.ContractStallEscalatedAt != nil && rec.Kind == domain.KindWorker && !rec.IsTerminated &&
+		rec.Goal != "" && rec.TimeboxDeadlineAt != nil && rec.ContractOutcome == domain.SessionContractOutcomeNone &&
+		now.Before(rec.TimeboxDeadlineAt.UTC()) && rec.Activity.State == domain.ActivityIdle && !rec.Activity.LastActivityAt.IsZero() {
+		projectID := string(rec.ProjectID)
+		lookup, cached := contractProjects[projectID]
+		if !cached {
+			project, found, err := s.store.GetProject(ctx, projectID)
+			if err != nil {
+				return domain.Session{}, fmt.Errorf("get project for session contract: %w", err)
+			}
+			lookup = contractProjectLookup{project: project, found: found}
+			if contractProjects != nil {
+				contractProjects[projectID] = lookup
+			}
 		}
-		if ok {
-			contractStalled = sessioncontract.IsCurrentlyStalled(rec, project, prs, now)
+		if lookup.found {
+			contractStalled = sessioncontract.IsCurrentlyStalled(rec, lookup.project, prs, now)
 		}
 	}
 	// rec.OutputType is the persisted column (lifecycle.Manager.

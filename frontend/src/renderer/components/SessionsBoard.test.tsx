@@ -483,7 +483,7 @@ describe("SessionsBoard", () => {
 		expect(presentation.lastUserMessageAt).toBe("2026-01-01T09:00:00Z");
 	});
 
-	it("marks only the current unresolved idle episode stalled", () => {
+	it("suppresses an unverifiable stall from an older daemon", () => {
 		const contract = boardSession({
 			id: "contract-worker",
 			status: "idle",
@@ -497,14 +497,8 @@ describe("SessionsBoard", () => {
 		expect(toBoardSessionPresentation(contract)).toMatchObject({
 			goal: "Ship the worker contract UI",
 			timeboxDeadlineAt: "2026-01-01T11:00:00Z",
-			contractStalled: true,
+			contractStalled: false,
 		});
-		expect(toBoardSessionPresentation({ ...contract, contractOutcome: "met" }).contractStalled).toBe(false);
-		expect(toBoardSessionPresentation({ ...contract, isTerminated: true }).contractStalled).toBe(false);
-		expect(toBoardSessionPresentation({ ...contract, statusReadiness: "checking" }).contractStalled).toBe(false);
-		expect(toBoardSessionPresentation({ ...contract, activity: { state: "active", lastActivityAt: "2026-01-01T09:00:00Z" } }).contractStalled).toBe(false);
-		expect(toBoardSessionPresentation({ ...contract, activity: { state: "idle", lastActivityAt: "2026-01-01T10:00:01Z" } }).contractStalled).toBe(false);
-		expect(toBoardSessionPresentation({ ...contract, lastInteractionAt: "2026-01-01T10:00:01Z" }).contractStalled).toBe(false);
 	});
 
 	it("prefers the daemon's current contract stall decision", () => {
@@ -520,6 +514,9 @@ describe("SessionsBoard", () => {
 
 		expect(toBoardSessionPresentation({ ...contract, contractStalled: true }).contractStalled).toBe(true);
 		expect(toBoardSessionPresentation({ ...contract, contractStalled: false, activity: { state: "idle", lastActivityAt: "2026-01-01T09:00:00Z" } }).contractStalled).toBe(false);
+		expect(toBoardSessionPresentation({ ...contract, contractStalled: true, contractOutcome: "met" }).contractStalled).toBe(false);
+		expect(toBoardSessionPresentation({ ...contract, contractStalled: true, isTerminated: true }).contractStalled).toBe(false);
+		expect(toBoardSessionPresentation({ ...contract, contractStalled: true, statusReadiness: "checking" }).contractStalled).toBe(false);
 	});
 
 	it("localizes dynamic card actions and pull request lifecycle labels", async () => {
