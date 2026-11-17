@@ -22,8 +22,13 @@ import { ExpectedIpcError } from "./main-error-capture";
 
 // An isolated desktop run must not read or write the real user's credentials.
 // Without an override, keep the existing ~/.ao location.
-export function remotesFilePath(): string {
-	return path.join(process.env.AO_DATA_DIR?.trim() || path.join(os.homedir(), ".ao"), "remotes.json");
+export function remotesFilePath(env: NodeJS.ProcessEnv = process.env, homeDir = os.homedir()): string {
+	return path.join(env.AO_DATA_DIR?.trim() || path.join(homeDir, ".ao"), "remotes.json");
+}
+
+/** Carry the desktop-owned host store through the daemon to spawned agents. */
+export function remotesDaemonEnvironment(env: NodeJS.ProcessEnv = process.env, homeDir = os.homedir()): { AO_REMOTES_FILE: string } {
+	return { AO_REMOTES_FILE: remotesFilePath(env, homeDir) };
 }
 
 type RunFile = (file: string, args: string[], options: { timeout: number }) => Promise<{ stdout: string }>;
@@ -334,7 +339,10 @@ export function registerRemotesIpc(
 			if (local.label !== host.label || local.url !== host.url) await updateRemote(file, local.url, { label: host.label, url: host.url });
 			return;
 		}
-		await addRemote(file, { hostId: host.hostId, label: host.label, url: host.url, password: host.token, accountUserId: account });
+		await addRemote(file, {
+			hostId: host.hostId, label: host.label, url: host.url, password: host.token, accountUserId: account,
+			coordinationToken: local?.accountUserId === account ? local.coordinationToken : undefined,
+		});
 	};
 	// Syncs read the directory at the same time. One that started before an
 	// already applied one holds an older listing and writes nothing.

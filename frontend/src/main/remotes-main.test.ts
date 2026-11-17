@@ -3,7 +3,7 @@ import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { registerRemotesIpc, remotesFilePath, type RemotesIpcDeps } from "./remotes-main";
+import { registerRemotesIpc, remotesDaemonEnvironment, remotesFilePath, type RemotesIpcDeps } from "./remotes-main";
 import { RemoteRegistry } from "./remote-registry";
 import { setPasswordCipher } from "./remotes-store";
 import { createLocalHostIdentity, type RemoteHealth } from "./remote-request";
@@ -66,6 +66,11 @@ describe("remotesFilePath", () => {
 		} finally {
 			vi.unstubAllEnvs();
 		}
+	});
+
+	it("carries the desktop store path into normal and isolated daemons", () => {
+		expect(remotesDaemonEnvironment({}, "/Users/tester")).toEqual({ AO_REMOTES_FILE: "/Users/tester/.ao/remotes.json" });
+		expect(remotesDaemonEnvironment({ AO_DATA_DIR: "/tmp/ao-lab" }, "/Users/tester")).toEqual({ AO_REMOTES_FILE: "/tmp/ao-lab/remotes.json" });
 	});
 });
 
@@ -667,6 +672,37 @@ describe("registerRemotesIpc", () => {
 			await ipc.invoke("remotes:connect", "http://192.0.2.1:1");
 			expect(issueCoordination).toHaveBeenCalledOnce();
 			expect((await saved(file))[0]).toMatchObject({ coordinationToken });
+		});
+
+		it("preserves an account host credential across repeated sync and connect cycles", async () => {
+			const file = await tempFile();
+			const accountToken = "a".repeat(64);
+			let account = TEST_ACCOUNT;
+			await writeFile(file, JSON.stringify({ remotes: [{
+				hostId: "h_workbox", label: "workbox", url: "http://192.0.2.1:1", password: accountToken,
+				accountUserId: TEST_ACCOUNT, coordinationToken: "aoc_old",
+			}] }));
+			const issueCoordination = vi.fn<NonNullable<RemotesIpcDeps["issueCoordination"]>>(async () => ({ kind: "issued", token: coordinationToken }));
+			const registry = new RemoteRegistry(proxy());
+			const ipc = fakeIpc();
+			registerRemotes(ipc.ipcMain, {
+				file, registry, requireAccount: signedIn, getAccountId: async () => account,
+				identity: async () => "h_workbox", probe: async () => "online",
+				cloudRequest: cloudListing({ hostId: "h_workbox", label: "workbox", url: "http://192.0.2.1:1" }),
+				probeCoordination: async () => "valid", issueCoordination,
+			});
+
+			for (let cycle = 0; cycle < 2; cycle++) {
+				await ipc.invoke("remotes:syncAccountHosts", TEST_ACCOUNT);
+				await ipc.invoke("remotes:connect", "http://192.0.2.1:1");
+				expect((await saved(file))[0]).toMatchObject({ coordinationToken: "aoc_old" });
+				await registry.disconnect("http://192.0.2.1:1");
+			}
+			expect(issueCoordination).not.toHaveBeenCalled();
+
+			account = "other-account";
+			await ipc.invoke("remotes:syncAccountHosts", account);
+			expect((await saved(file))[0]).not.toHaveProperty("coordinationToken");
 		});
 
 		it("keeps desktop connections working when the remote release has no issuer", async () => {

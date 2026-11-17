@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -30,6 +31,7 @@ func aoHome(t *testing.T) string {
 	t.Setenv("AO_URL", "")
 	t.Setenv("AO_TOKEN", "")
 	t.Setenv("AO_DATA_DIR", "")
+	t.Setenv(remotesFileEnv, "")
 	return dir
 }
 
@@ -242,6 +244,113 @@ func TestResolveSavedHostTargetByExactLabelOrHostID(t *testing.T) {
 	})
 }
 
+func TestResolveSavedHostTargetUsesDesktopCarriedRemotesFile(t *testing.T) {
+	home := aoHome(t)
+	writeRemotes(t, home, 0o600, remoteEntry{
+		Label: "desk", URL: "http://host:3011", HostID: "h_desk", CoordinationToken: "aoc_coordination",
+	})
+	// A packaged desktop runs its daemon and agents with ~/.ao/data as
+	// AO_DATA_DIR, while the desktop-owned host store remains ~/.ao/remotes.json.
+	t.Setenv("AO_DATA_DIR", filepath.Join(home, ".ao", "data"))
+	t.Setenv("AO_REMOTES_FILE", filepath.Join(home, ".ao", remotesFileName))
+
+	got, err := resolveSavedHostTarget("desk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.hostID != "h_desk" || got.token != "aoc_coordination" {
+		t.Fatalf("resolved target = %+v", got)
+	}
+}
+
+func TestSavedRemoteResolutionRespectsActiveAccount(t *testing.T) {
+	home := aoHome(t)
+	writeRemotes(t, home, 0o600,
+		remoteEntry{Label: "desk", URL: "https://a.example", HostID: "h_a", CoordinationToken: "aoc_a", Password: "account-a", AccountUserID: "user-a"},
+		remoteEntry{Label: "desk", URL: "https://b.example", HostID: "h_b", CoordinationToken: "aoc_b", Password: "account-b", AccountUserID: "user-b"},
+		remoteEntry{Label: "local", URL: "https://local.example", HostID: "h_local", CoordinationToken: "aoc_local", Password: "local-password"},
+	)
+
+	for _, tc := range []struct {
+		account string
+		hostID  string
+	}{
+		{account: "user-a", hostID: "h_a"},
+		{account: "user-b", hostID: "h_b"},
+	} {
+		got, err := resolveSavedHostTargetForAccount("desk", tc.account)
+		if err != nil {
+			t.Fatalf("account %q: %v", tc.account, err)
+		}
+		if got.hostID != tc.hostID {
+			t.Fatalf("account %q selected %+v, want %s", tc.account, got, tc.hostID)
+		}
+	}
+	if _, err := resolveSavedHostTargetForAccount("desk", ""); err == nil {
+		t.Fatal("signed-out resolution exposed an account-owned host")
+	}
+	if got, err := resolveSavedHostTargetForAccount("local", ""); err != nil || got.hostID != "h_local" {
+		t.Fatalf("signed-out local pairing = %+v, %v", got, err)
+	}
+	if _, err := resolveRemoteTargetForAccount("https://b.example", "user-a"); err == nil {
+		t.Fatal("legacy --url lookup exposed another account's password")
+	}
+}
+
+func TestSelectSavedHostUsesLocalActiveAccount(t *testing.T) {
+	home := aoHome(t)
+	dataDir := filepath.Join(home, ".ao", "data")
+	t.Setenv("AO_DATA_DIR", dataDir)
+	t.Setenv("AO_REMOTES_FILE", filepath.Join(home, ".ao", remotesFileName))
+	runPath := filepath.Join(dataDir, "running.json")
+	t.Setenv("AO_RUN_FILE", runPath)
+	if err := runfile.Write(runPath, runfile.Info{PID: os.Getpid(), Port: 3001, StartedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	writeRemotes(t, home, 0o600,
+		remoteEntry{Label: "desk", URL: "https://a.example", HostID: "h_a", CoordinationToken: "aoc_a", AccountUserID: "user-a"},
+		remoteEntry{Label: "desk", URL: "https://b.example", HostID: "h_b", CoordinationToken: "aoc_b", AccountUserID: "user-b"},
+	)
+	activeAccount := "user-a"
+	switchAccountDuringProbe := false
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/internal/telemetry/identity":
+			return jsonResponse(http.StatusOK, fmt.Sprintf(`{"cloudUserId":%q,"known":true}`, activeAccount)), nil
+		case "/api/v1/identity":
+			hostID := "h_a"
+			if req.URL.Host == "b.example" {
+				hostID = "h_b"
+			}
+			if switchAccountDuringProbe {
+				activeAccount = "user-b"
+			}
+			return jsonResponse(http.StatusOK, fmt.Sprintf(`{"hostId":%q,"apiVersion":1}`, hostID)), nil
+		default:
+			return jsonResponse(http.StatusNotFound, `{}`), nil
+		}
+	})}
+	c := &commandContext{deps: Deps{HTTPClient: client, ProcessAlive: func(int) bool { return true }}.withDefaults()}
+	if err := c.selectSavedHost(context.Background(), "desk"); err != nil || c.remote.hostID != "h_a" {
+		t.Fatalf("user-a selection = %+v, %v", c.remote, err)
+	}
+	c.remote = nil
+	activeAccount = "user-b"
+	if err := c.selectSavedHost(context.Background(), "desk"); err != nil || c.remote.hostID != "h_b" {
+		t.Fatalf("user-b selection = %+v, %v", c.remote, err)
+	}
+	c.remote = nil
+	activeAccount = ""
+	if err := c.selectSavedHost(context.Background(), "desk"); err == nil || c.remote != nil {
+		t.Fatalf("signed-out selection = %+v, %v", c.remote, err)
+	}
+	activeAccount = "user-a"
+	switchAccountDuringProbe = true
+	if err := c.selectSavedHost(context.Background(), "desk"); err == nil || c.remote != nil {
+		t.Fatalf("account-switch-during-probe selection = %+v, %v", c.remote, err)
+	}
+}
+
 func TestResolveSavedHostTargetRequiresUnambiguousCoordinationCredential(t *testing.T) {
 	t.Run("full password is never a fallback", func(t *testing.T) {
 		home := aoHome(t)
@@ -317,6 +426,50 @@ func TestSelectSavedHostProbesIdentityBeforePresentingCredential(t *testing.T) {
 	}
 	if got := req.Header.Get("X-AO-Expected-Host-ID"); got != "h_desk" {
 		t.Fatalf("X-AO-Expected-Host-ID = %q", got)
+	}
+}
+
+func TestSavedHostAuthenticatedRequestsRejectRedirects(t *testing.T) {
+	home := aoHome(t)
+	var destinationAuth string
+	destinationReached := false
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		destinationReached = true
+		destinationAuth = r.Header.Get("Authorization")
+		_ = json.NewEncoder(w).Encode(map[string]any{"sessions": []any{}})
+	}))
+	defer destination.Close()
+	var originAuth string
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/identity":
+			_ = json.NewEncoder(w).Encode(map[string]any{"hostId": "h_desk", "apiVersion": 1})
+		case "/api/v1/sessions":
+			originAuth = r.Header.Get("Authorization")
+			http.Redirect(w, r, destination.URL+r.URL.Path, http.StatusFound)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer origin.Close()
+	writeRemotes(t, home, 0o600, remoteEntry{
+		Label: "desk", URL: origin.URL, HostID: "h_desk", CoordinationToken: "aoc_coordination",
+	})
+
+	c := &commandContext{deps: Deps{HTTPClient: origin.Client()}.withDefaults()}
+	if err := c.selectSavedHost(context.Background(), "desk"); err != nil {
+		t.Fatal(err)
+	}
+	var sessions map[string]any
+	err := c.getJSON(context.Background(), "sessions", &sessions)
+	if err == nil || !strings.Contains(err.Error(), "HTTP 302") {
+		t.Fatalf("redirected saved-host request error = %v, want HTTP 302 refusal", err)
+	}
+	if originAuth != "Bearer aoc_coordination" {
+		t.Fatalf("origin Authorization = %q", originAuth)
+	}
+	if destinationReached || destinationAuth != "" {
+		t.Fatalf("redirect destination reached=%v Authorization=%q", destinationReached, destinationAuth)
 	}
 }
 

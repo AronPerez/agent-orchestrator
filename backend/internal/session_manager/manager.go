@@ -214,6 +214,10 @@ const (
 	// session. AO_DATA_DIR is durable storage, not daemon discovery; custom and
 	// isolated daemons therefore need this coordinate explicitly.
 	EnvRunFile = "AO_RUN_FILE"
+	// EnvRemotesFile tells an agent CLI where the desktop saved its remote-host
+	// credentials. Packaged desktop daemons use ~/.ao/data for daemon state but
+	// keep remotes.json one level above it, so AO_DATA_DIR cannot derive this.
+	EnvRemotesFile = "AO_REMOTES_FILE"
 	// EnvDesktopApp is "1" when the Orchestrator desktop app started the
 	// daemon, so macOS charges the session's privacy checks to Orchestrator.
 	// A daemon started from a terminal (`ao start`) leaves it unset: macOS
@@ -7228,6 +7232,11 @@ func (m *Manager) runtimeEnvChecked(id domain.SessionID, project domain.ProjectI
 	deleteProtectedEnv(env, EnvRunFile, caseInsensitive)
 	if runFilePath != "" {
 		env[EnvRunFile] = runFilePath
+	}
+	remotesFilePath := strings.TrimSpace(os.Getenv(EnvRemotesFile))
+	deleteProtectedEnv(env, EnvRemotesFile, caseInsensitive)
+	if remotesFilePath != "" {
+		env[EnvRemotesFile] = remotesFilePath
 	}
 	deleteProtectedEnv(env, EnvDesktopApp, caseInsensitive)
 	if desktopOwnedDaemon() {
