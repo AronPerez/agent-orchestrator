@@ -26,8 +26,8 @@ type Messenger interface {
 // FallbackOutcomeAuthorizer lets a selected fallback session record an outcome
 // while its accepted delivery is still waiting to become durable in the ledger.
 type FallbackOutcomeAuthorizer interface {
-	AuthorizeFallbackOutcome(string, domain.SessionID)
-	RevokeFallbackOutcome(string, domain.SessionID)
+	AuthorizeFallbackOutcome(string, string, domain.SessionID) bool
+	RevokeFallbackOutcome(string, string, domain.SessionID)
 }
 
 // DeliveryStore is the durable decision-delivery boundary.
@@ -221,12 +221,18 @@ func (d *Deliverer) deliverFallback(ctx context.Context, call domain.DecisionCal
 			ForEntry: call.StandingEntryID, Status: domain.DecisionDeliveredNoSession,
 		}), false
 	}
+	newGrant := false
 	if d.fallback != nil {
-		d.fallback.AuthorizeFallbackOutcome(call.ID, orchestrator.ID)
+		newGrant = d.fallback.AuthorizeFallbackOutcome(call.ID, call.StandingEntryID, orchestrator.ID)
 	}
 	revoke := func() {
 		if d.fallback != nil {
-			d.fallback.RevokeFallbackOutcome(call.ID, orchestrator.ID)
+			d.fallback.RevokeFallbackOutcome(call.ID, call.StandingEntryID, orchestrator.ID)
+		}
+	}
+	revokeAttempt := func() {
+		if newGrant {
+			revoke()
 		}
 	}
 	err := d.messenger.DeliverAsPerson(ctx, orchestrator.ID, DeliveryMessage(call, true), d.now().UTC())
@@ -241,12 +247,12 @@ func (d *Deliverer) deliverFallback(ctx context.Context, call domain.DecisionCal
 		}
 		return !recorded, true
 	case errors.Is(err, ErrSessionEnded):
-		revoke()
+		revokeAttempt()
 		return !d.record(ctx, call, domain.DecisionDeliveredPayload{
 			ForEntry: call.StandingEntryID, Status: domain.DecisionDeliveredNoSession,
 		}), false
 	default:
-		revoke()
+		revokeAttempt()
 		d.logFailure(call.ID, "send to fallback orchestrator", err)
 		return true, false
 	}

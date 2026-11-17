@@ -1911,6 +1911,48 @@ func TestSendChatDistinguishesAStaleExitFromAStoppedController(t *testing.T) {
 	}
 }
 
+func TestSendChatRetriesWhileAnExitedSessionIsResuming(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	launcher := &recordingLauncher{
+		beforeStart: func(ChatStart) {
+			close(started)
+			<-release
+		},
+	}
+	launcher.afterReady = func() { launcher.live = true }
+	mgr, store, _ := newChatManager(launcher)
+	seedChatResumeSession(store, domain.ActivityExited)
+
+	resumeDone := make(chan error, 1)
+	go func() {
+		_, err := mgr.ResumeAgentWithMode(context.Background(), "mer-1")
+		resumeDone <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("resume did not reach controller start")
+	}
+	sendErr := mgr.Send(context.Background(), "mer-1", "deliver after resume", nil)
+	close(release)
+	if err := <-resumeDone; err != nil {
+		t.Fatalf("ResumeAgentWithMode: %v", err)
+	}
+	if !errors.Is(sendErr, ErrResumeInProgress) || errors.Is(sendErr, ErrAgentExited) {
+		t.Fatalf("Send during resume = %v, want retryable ErrResumeInProgress", sendErr)
+	}
+	if len(launcher.relayed) != 0 {
+		t.Fatalf("message reached controller before resume completed: %v", launcher.relayed)
+	}
+	if err := mgr.Send(context.Background(), "mer-1", "deliver after resume", nil); err != nil {
+		t.Fatalf("Send after resume: %v", err)
+	}
+	if len(launcher.relayed) != 1 || launcher.relayed[0] != "deliver after resume" {
+		t.Fatalf("relayed = %v", launcher.relayed)
+	}
+}
+
 // A terminated chat session cannot receive a message, matching the terminal path.
 // The controller is gone; accepting the send would record a message nothing will
 // ever deliver.

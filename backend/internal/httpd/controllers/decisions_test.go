@@ -298,9 +298,9 @@ func TestDecisionsAPI_Actions(t *testing.T) {
 		t.Fatalf("empty dismiss status=%d body=%s action=%q note=%q", status, body, svc.action, svc.note)
 	}
 
-	body, status = decisionRequest(t, srv, http.MethodPost, "/api/v1/decisions/dec_1/outcome", `{"text":"Shipped in PR 412","link":"https://example.com/pr/412"}`, "w-1")
+	body, status = decisionRequest(t, srv, http.MethodPost, "/api/v1/decisions/dec_1/outcome", `{"forEntry":"dent_answer","text":"Shipped in PR 412","link":"https://example.com/pr/412"}`, "w-1")
 	if status != http.StatusOK || svc.action != "outcome" || svc.actor.Session != "w-1" ||
-		svc.outcome != (decisionsvc.OutcomeInput{Text: "Shipped in PR 412", Link: "https://example.com/pr/412"}) {
+		svc.outcome != (decisionsvc.OutcomeInput{ForEntry: "dent_answer", Text: "Shipped in PR 412", Link: "https://example.com/pr/412"}) {
 		t.Fatalf("outcome status=%d body=%s actor=%+v input=%+v", status, body, svc.actor, svc.outcome)
 	}
 

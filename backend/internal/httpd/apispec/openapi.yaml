@@ -21413,6 +21413,8 @@ components:
           type: string
         retired:
           type: boolean
+        standingEntryId:
+          type: string
         state:
           enum:
           - needs_you
@@ -21473,6 +21475,8 @@ components:
           type: string
         fallback:
           type: boolean
+        forEntry:
+          type: string
         hostId:
           type: string
         id:
@@ -21535,6 +21539,10 @@ components:
       type: object
     DecisionOutcomeRequest:
       properties:
+        forEntry:
+          description: Immutable answer entry being carried out. Required for session-authored
+            outcomes.
+          type: string
         link:
           type: string
         text:

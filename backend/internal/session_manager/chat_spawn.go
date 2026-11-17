@@ -473,6 +473,9 @@ func (m *Manager) sendChat(ctx context.Context, id domain.SessionID, message, cl
 		return true, fmt.Errorf("send %s: %w", id, ErrTerminated)
 	}
 	if rec.Activity.State == domain.ActivityExited && !m.chat.HasLiveChatController(id) {
+		if m.agentOperationIs(id, agentOperationResume) {
+			return true, fmt.Errorf("send %s: %w", id, ErrResumeInProgress)
+		}
 		return true, fmt.Errorf("send %s: %w", id, ErrAgentExited)
 	}
 	_, relayErr := m.chat.RelaySessionChatTurn(ctx, id, message, clientMessageID, options)
