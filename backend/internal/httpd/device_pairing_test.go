@@ -54,6 +54,16 @@ func newPairingHost(t *testing.T) *pairingHost {
 		(&controllers.PushController{Registry: registry, Devices: devices}).Register(r)
 	})
 	router.Get("/api/v1/sessions", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	router.Get("/api/v1/sessions/{id}", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	router.Get("/api/v1/sessions/{id}/pr", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	router.Post("/api/v1/sessions", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusCreated) })
+	router.Post("/api/v1/sessions/{id}/send", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	router.Post("/api/v1/sessions/{id}/conversation/steer-or-send", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	router.Post("/api/v1/sessions/{id}/kill", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	router.Get("/api/v1/projects", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	router.Get("/api/v1/projects/{id}", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	router.Post("/api/v1/projects/{id}", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	router.Post("/api/v1/agents/readiness/ensure", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	lan := NewMobileLAN(router, bridge.HostID, 0, nil, nil)
 	lan.UseDeviceCredentials(devices, codes)
 	bridge.LAN = lan
@@ -195,6 +205,85 @@ func TestOnlyACodeOrThePasswordPairs(t *testing.T) {
 		if status, _ := h.remote(http.MethodPost, devicePairPath, wrong, nil); status != http.StatusUnauthorized {
 			t.Fatalf("pairing with %q: %d", wrong, status)
 		}
+	}
+}
+
+func TestCoordinationTokenIsLimitedToAgentCoordinationRoutes(t *testing.T) {
+	h := newPairingHost(t)
+	status, issued := h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", "secret12", map[string]string{
+		"name": "desk agent", "platform": "darwin",
+	})
+	token, _ := issued["token"].(string)
+	if status != http.StatusOK || issued["hostId"] != "h_test" || issued["scope"] != mobilebridge.DeviceScopeAgentCoordination || !strings.HasPrefix(token, mobilebridge.DeviceTokenPrefix) {
+		t.Fatalf("issue coordination token: status=%d body=%v", status, issued)
+	}
+
+	allowed := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/api/v1/projects"},
+		{http.MethodGet, "/api/v1/projects/p1"},
+		{http.MethodPost, "/api/v1/agents/readiness/ensure"},
+		{http.MethodGet, "/api/v1/sessions"},
+		{http.MethodPost, "/api/v1/sessions"},
+		{http.MethodGet, "/api/v1/sessions/s1"},
+		{http.MethodGet, "/api/v1/sessions/s1/pr"},
+		{http.MethodPost, "/api/v1/sessions/s1/send"},
+		{http.MethodPost, "/api/v1/sessions/s1/conversation/steer-or-send"},
+	}
+	for _, tc := range allowed {
+		status, body := h.remote(tc.method, tc.path, token, map[string]string{})
+		if status < 200 || status >= 300 {
+			t.Errorf("%s %s: status=%d body=%v", tc.method, tc.path, status, body)
+		}
+	}
+
+	denied := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPost, "/api/v1/sessions/s1/kill"},
+		{http.MethodDelete, "/api/v1/sessions/s1"},
+		{http.MethodPost, "/api/v1/projects/p1"},
+		{http.MethodGet, "/api/v1/endpoints"},
+		{http.MethodPost, "/api/v1/remote-host/coordination-token"},
+	}
+	for _, tc := range denied {
+		status, body := h.remote(tc.method, tc.path, token, map[string]string{})
+		if status != http.StatusForbidden || body["code"] != "CREDENTIAL_SCOPE_DENIED" {
+			t.Errorf("%s %s: status=%d body=%v", tc.method, tc.path, status, body)
+		}
+	}
+
+	// An ordinary paired-device token is still a full app credential.
+	_, full := h.pair("secret12", "Laptop")
+	if status, body := h.remote(http.MethodPost, "/api/v1/sessions/s1/kill", full, nil); status != http.StatusOK {
+		t.Fatalf("full device credential was narrowed: status=%d body=%v", status, body)
+	}
+}
+
+func TestOnlyFullCredentialsIssueCoordinationTokens(t *testing.T) {
+	h := newPairingHost(t)
+	_, full := h.pair("secret12", "Laptop")
+	status, body := h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", full, nil)
+	limited, _ := body["token"].(string)
+	if status != http.StatusOK || limited == "" {
+		t.Fatalf("full device token: status=%d body=%v", status, body)
+	}
+	if status, body = h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", limited, nil); status != http.StatusForbidden || body["code"] != "CREDENTIAL_SCOPE_DENIED" {
+		t.Fatalf("limited token minted another token: status=%d body=%v", status, body)
+	}
+	_, accountBody := h.remote(http.MethodPost, "/api/v1/remote-host/account-token", full, nil)
+	account, _ := accountBody["token"].(string)
+	if status, body = h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", account, nil); status != http.StatusOK || body["token"] == "" {
+		t.Fatalf("account credential: status=%d body=%v", status, body)
+	}
+	if status, body = h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", h.code(), nil); status != http.StatusUnauthorized {
+		t.Fatalf("pairing code minted a coordination token: status=%d body=%v", status, body)
+	}
+	if status, _ := h.local(http.MethodPost, "/api/v1/remote-host/coordination-token", nil); status != http.StatusForbidden {
+		t.Fatalf("loopback issued a remote coordination token: %d", status)
 	}
 }
 

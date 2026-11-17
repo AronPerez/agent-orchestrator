@@ -81,6 +81,48 @@ func (c *MobileController) IssueAccountToken(w http.ResponseWriter, r *http.Requ
 	envelope.WriteJSON(w, http.StatusOK, result)
 }
 
+// IssueCoordinationToken handles POST /api/v1/remote-host/coordination-token.
+// Only an existing full LAN credential may mint the deliberately narrower
+// token that headless agents keep in the owner-only saved-host file.
+func (c *MobileController) IssueCoordinationToken(w http.ResponseWriter, r *http.Request) {
+	credential := requestscope.CredentialFrom(r.Context())
+	fullCredential := credential.Kind == requestscope.CredentialPassword ||
+		credential.Kind == requestscope.CredentialAccount ||
+		(credential.Kind == requestscope.CredentialDevice && len(credential.Scopes) == 0)
+	if !fullCredential {
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "COORDINATION_TOKEN_ISSUER",
+			"A full remote-host credential is required.", nil)
+		return
+	}
+	issuer, ok := c.Bridge.(interface {
+		IssueCoordinationToken(string, string) (CoordinationTokenResponse, error)
+	})
+	if !ok {
+		envelope.WriteAPIError(w, r, http.StatusNotImplemented, "not_implemented", "COORDINATION_TOKEN",
+			"agent coordination credentials are unavailable", nil)
+		return
+	}
+	var req IssueCoordinationTokenRequest
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req); err != nil {
+			envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
+			return
+		}
+	}
+	result, err := issuer.IssueCoordinationToken(req.Name, req.Platform)
+	switch {
+	case errors.Is(err, mobilebridge.ErrTooManyDevices):
+		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict", "TOO_MANY_DEVICES", err.Error(), nil)
+		return
+	case err != nil:
+		envelope.WriteAPIError(w, r, http.StatusInternalServerError, "internal", "COORDINATION_TOKEN",
+			"could not issue an agent coordination credential", nil)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	envelope.WriteJSON(w, http.StatusOK, result)
+}
+
 // NewPairingCode handles POST /api/v1/mobile/pairing-code. The route is
 // loopback-only, so only this machine can let a new device in.
 func (c *MobileController) NewPairingCode(w http.ResponseWriter, r *http.Request) {
@@ -1178,6 +1220,27 @@ func (b *BridgeService) PairDevice(code, name, platform string) (PairDeviceRespo
 		return PairDeviceResponse{}, err
 	}
 	return PairDeviceResponse{HostID: b.HostID, DeviceID: device.ID, Token: token, Credential: credential}, nil
+}
+
+// IssueCoordinationToken gives a headless client a route-limited device token.
+func (b *BridgeService) IssueCoordinationToken(name, platform string) (CoordinationTokenResponse, error) {
+	if b.Devices == nil {
+		return CoordinationTokenResponse{}, errors.New("device pairing is unavailable")
+	}
+	if strings.TrimSpace(name) == "" {
+		name = "Agent coordination"
+	}
+	if strings.TrimSpace(platform) == "" {
+		platform = "cli"
+	}
+	device, token, err := b.Devices.IssueScoped(name, platform, []string{mobilebridge.DeviceScopeAgentCoordination}, time.Now())
+	if err != nil {
+		return CoordinationTokenResponse{}, err
+	}
+	return CoordinationTokenResponse{
+		HostID: b.HostID, DeviceID: device.ID, Token: token,
+		Scope: mobilebridge.DeviceScopeAgentCoordination,
+	}, nil
 }
 
 // SetRequireDeviceCredentials turns the pairing password off or on.

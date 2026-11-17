@@ -2492,6 +2492,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/remote-host/coordination-token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Issue a route-limited credential for cross-machine agent coordination */
+        post: operations["issueRemoteHostCoordinationToken"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/remote-host/devices": {
         parameters: {
             query?: never;
@@ -7114,6 +7131,13 @@ export interface components {
             summary: string;
             targetSessionId?: string;
         };
+        CoordinationTokenResponse: {
+            deviceId: string;
+            hostId: string;
+            /** @enum {string} */
+            scope: "agent-coordination";
+            token: string;
+        };
         CreateAutomationRequest: {
             cron?: string;
             displayName: string;
@@ -7517,6 +7541,12 @@ export interface components {
             sessionId?: string;
             /** @description For command cues, the normal shell terminal that received the command. */
             shellTerminal?: components["schemas"]["ShellTerminalResponse"];
+        };
+        IssueCoordinationTokenRequest: {
+            /** @description Name shown in the host's device list. */
+            name?: string;
+            /** @description The requesting machine's platform. */
+            platform?: string;
         };
         KillReviewResponse: {
             reviewerHandleId: string;
@@ -18323,6 +18353,66 @@ export interface operations {
             };
             /** @description Forbidden */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    issueRemoteHostCoordinationToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["IssueCoordinationTokenRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CoordinationTokenResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };

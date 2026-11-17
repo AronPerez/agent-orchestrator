@@ -6404,6 +6404,48 @@ paths:
         a device token
       tags:
       - mobile
+  /api/v1/remote-host/coordination-token:
+    post:
+      operationId: issueRemoteHostCoordinationToken
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IssueCoordinationTokenRequest'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CoordinationTokenResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+      summary: Issue a route-limited credential for cross-machine agent coordination
+      tags:
+      - mobile
   /api/v1/remote-host/devices:
     post:
       operationId: pairRemoteHostDevice
@@ -20674,6 +20716,24 @@ components:
       - state
       - createdAt
       type: object
+    CoordinationTokenResponse:
+      properties:
+        deviceId:
+          type: string
+        hostId:
+          type: string
+        scope:
+          enum:
+          - agent-coordination
+          type: string
+        token:
+          type: string
+      required:
+      - hostId
+      - deviceId
+      - token
+      - scope
+      type: object
     CreateAutomationRequest:
       properties:
         cron:
@@ -21769,6 +21829,15 @@ components:
             command.
       required:
       - kind
+      type: object
+    IssueCoordinationTokenRequest:
+      properties:
+        name:
+          description: Name shown in the host's device list.
+          type: string
+        platform:
+          description: The requesting machine's platform.
+          type: string
       type: object
     KillReviewResponse:
       properties:

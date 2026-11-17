@@ -3288,6 +3288,22 @@ type PairDeviceResponse struct {
 	Credential string `json:"credential" enum:"pairing-code,password"`
 }
 
+// IssueCoordinationTokenRequest names the local agent client that will hold a
+// limited remote-host credential. Both fields are display metadata only.
+type IssueCoordinationTokenRequest struct {
+	Name     string `json:"name,omitempty" description:"Name shown in the host's device list."`
+	Platform string `json:"platform,omitempty" description:"The requesting machine's platform."`
+}
+
+// CoordinationTokenResponse carries a host-bound, route-limited credential.
+// The token is returned once and only its hash is persisted by the host.
+type CoordinationTokenResponse struct {
+	HostID   string `json:"hostId"`
+	DeviceID string `json:"deviceId"`
+	Token    string `json:"token"`
+	Scope    string `json:"scope" enum:"agent-coordination"`
+}
+
 // SetRequireDeviceCredentialsRequest turns the pairing password off or on.
 type SetRequireDeviceCredentialsRequest struct {
 	Enabled bool `json:"enabled"`

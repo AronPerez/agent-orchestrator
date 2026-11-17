@@ -22,6 +22,9 @@ type AccessDevice struct {
 	Name      string `json:"name,omitempty"`
 	Platform  string `json:"platform,omitempty"`
 	TokenHash string `json:"tokenHash"`
+	// Scopes is empty for the existing full app credential. A non-empty list
+	// is enforced by the LAN listener as a capability allowlist.
+	Scopes []string `json:"scopes,omitempty"`
 	// InstallID links the device to its push registration.
 	InstallID  string    `json:"installId,omitempty"`
 	CreatedAt  time.Time `json:"createdAt"`
@@ -37,7 +40,11 @@ const (
 // DeviceTokenPrefix keeps a device token from looking like an account token.
 const DeviceTokenPrefix = "aod_"
 
-// maxAccessDevices bounds the tokens a holder of the pairing password can mint.
+// DeviceScopeAgentCoordination permits only the reads and writes needed for a
+// headless agent to list, spawn and message sessions on this host.
+const DeviceScopeAgentCoordination = "agent-coordination"
+
+// maxAccessDevices bounds the device and capability tokens a full credential can mint.
 const maxAccessDevices = 64
 
 // touchInterval limits how often last-seen times are written to disk.
@@ -107,6 +114,12 @@ func (r *AccessDevices) moveAside(cause error) error {
 
 // Issue registers a new device and returns it with its token.
 func (r *AccessDevices) Issue(name, platform string, now time.Time) (AccessDevice, string, error) {
+	return r.IssueScoped(name, platform, nil, now)
+}
+
+// IssueScoped registers a new device token carrying the given capability
+// scopes. An empty scope list preserves the existing full app credential.
+func (r *AccessDevices) IssueScoped(name, platform string, scopes []string, now time.Time) (AccessDevice, string, error) {
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
 		return AccessDevice{}, "", err
@@ -121,6 +134,7 @@ func (r *AccessDevices) Issue(name, platform string, now time.Time) (AccessDevic
 		Name:       cleanLabel(name, 64),
 		Platform:   cleanLabel(strings.ToLower(platform), 32),
 		TokenHash:  HashPassword(token),
+		Scopes:     normalizeDeviceScopes(scopes),
 		CreatedAt:  now.UTC(),
 		LastSeenAt: now.UTC(),
 	}
@@ -136,7 +150,7 @@ func (r *AccessDevices) Issue(name, platform string, now time.Time) (AccessDevic
 		delete(r.byHash, device.TokenHash)
 		return AccessDevice{}, "", err
 	}
-	return device, token, nil
+	return cloneAccessDevice(device), token, nil
 }
 
 // Match returns the device a token belongs to.
@@ -148,7 +162,7 @@ func (r *AccessDevices) Match(token string) (AccessDevice, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	device, ok := r.devices[r.byHash[hash]]
-	return device, ok
+	return cloneAccessDevice(device), ok
 }
 
 // Touch updates the device's last-seen time.
@@ -249,7 +263,7 @@ func (r *AccessDevices) List() []AccessDevice {
 	defer r.mu.RUnlock()
 	out := make([]AccessDevice, 0, len(r.devices))
 	for _, device := range r.devices {
-		out = append(out, device)
+		out = append(out, cloneAccessDevice(device))
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
@@ -258,6 +272,29 @@ func (r *AccessDevices) List() []AccessDevice {
 		return out[i].ID < out[j].ID
 	})
 	return out
+}
+
+func normalizeDeviceScopes(scopes []string) []string {
+	if len(scopes) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(scopes))
+	for _, scope := range scopes {
+		if scope = strings.TrimSpace(scope); scope != "" {
+			seen[scope] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for scope := range seen {
+		out = append(out, scope)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func cloneAccessDevice(device AccessDevice) AccessDevice {
+	device.Scopes = append([]string(nil), device.Scopes...)
+	return device
 }
 
 func (r *AccessDevices) persistLocked() error {

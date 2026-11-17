@@ -81,6 +81,35 @@ func TestAccessDevicesIssueMatchRevoke(t *testing.T) {
 	}
 }
 
+func TestAccessDevicesIssueScopedPersistsCapabilities(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mobile", "access-devices.json")
+	now := time.Date(2026, 11, 17, 10, 0, 0, 0, time.UTC)
+	devices, err := LoadAccessDevices(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	issued, token, err := devices.IssueScoped("Agent coordination", "cli", []string{DeviceScopeAgentCoordination}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(issued.Scopes) != 1 || issued.Scopes[0] != DeviceScopeAgentCoordination {
+		t.Fatalf("issued scopes = %v", issued.Scopes)
+	}
+
+	reloaded, err := LoadAccessDevices(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	matched, ok := reloaded.Match(token)
+	if !ok || matched.ID != issued.ID {
+		t.Fatalf("Match after reload = %+v, %v", matched, ok)
+	}
+	if len(matched.Scopes) != 1 || matched.Scopes[0] != DeviceScopeAgentCoordination {
+		t.Fatalf("reloaded scopes = %v", matched.Scopes)
+	}
+}
+
 func TestAccessDevicesTouchAndLink(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "access-devices.json")
 	now := time.Date(2026, 11, 10, 9, 0, 0, 0, time.UTC)
