@@ -5392,5 +5392,11 @@
 	"collisionRadar.title": "Olası çakışma",
 	"collisionRadar.incompleteTitle": "Çakışma taraması tamamlanmadı",
 	"collisionRadar.summary": "{{sessions}} da bu çalışma alanındaki dosyaları değiştirdi.",
-	"collisionRadar.incomplete": "Bazı çalışma alanı değişiklikleri karşılaştırılamadı. Bu liste eksik olabilir."
+	"collisionRadar.incomplete": "Bazı çalışma alanı değişiklikleri karşılaştırılamadı. Bu liste eksik olabilir.",
+	"collisionRadar.unavailableBadge": "Tarama kullanılamıyor",
+	"collisionRadar.unavailableTitle": "Çakışma taraması kullanılamıyor",
+	"collisionRadar.unavailable": "Çakışma taraması sonucu kullanılamıyor.",
+	"collisionRadar.staleBadge": "Tarama eski",
+	"collisionRadar.staleTitle": "Çakışma taraması eski",
+	"collisionRadar.stale": "Çakışma taraması yenilenemedi. Son sonuç gösteriliyor."
 }

@@ -5395,5 +5395,11 @@
 	"collisionRadar.title": "可能存在冲突",
 	"collisionRadar.incompleteTitle": "冲突扫描未完成",
 	"collisionRadar.summary": "{{sessions}} 也更改了此工作区中的文件。",
-	"collisionRadar.incomplete": "无法比较部分工作区更改。此列表可能不完整。"
+	"collisionRadar.incomplete": "无法比较部分工作区更改。此列表可能不完整。",
+	"collisionRadar.unavailableBadge": "扫描不可用",
+	"collisionRadar.unavailableTitle": "冲突扫描不可用",
+	"collisionRadar.unavailable": "没有可用的冲突扫描结果。",
+	"collisionRadar.staleBadge": "扫描结果已过期",
+	"collisionRadar.staleTitle": "冲突扫描结果已过期",
+	"collisionRadar.stale": "无法刷新冲突扫描。正在显示上次结果。"
 }

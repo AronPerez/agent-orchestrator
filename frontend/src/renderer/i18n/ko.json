@@ -5413,5 +5413,11 @@
 	"collisionRadar.title": "충돌 가능성",
 	"collisionRadar.incompleteTitle": "충돌 검사가 완료되지 않음",
 	"collisionRadar.summary": "{{sessions}}도 이 작업 공간의 파일을 변경했습니다.",
-	"collisionRadar.incomplete": "일부 작업 공간 변경 사항을 비교하지 못했습니다. 이 목록은 완전하지 않을 수 있습니다."
+	"collisionRadar.incomplete": "일부 작업 공간 변경 사항을 비교하지 못했습니다. 이 목록은 완전하지 않을 수 있습니다.",
+	"collisionRadar.unavailableBadge": "검사 불가",
+	"collisionRadar.unavailableTitle": "충돌 검사를 사용할 수 없음",
+	"collisionRadar.unavailable": "사용 가능한 충돌 검사 결과가 없습니다.",
+	"collisionRadar.staleBadge": "검사 결과 오래됨",
+	"collisionRadar.staleTitle": "충돌 검사 결과가 오래됨",
+	"collisionRadar.stale": "충돌 검사를 새로 고치지 못했습니다. 마지막 결과를 표시합니다."
 }

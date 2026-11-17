@@ -5697,9 +5697,17 @@
 	"shell.cloudProjectDeleted": "Проект {{name}} удалён навсегда",
 	"collisionRadar.badge": "Пересечение",
 	"collisionRadar.cardAria_one": "1 изменённый файл пересекается с работой {{sessions}}",
+	"collisionRadar.cardAria_few": "{{count}} изменённых файла пересекаются с работой {{sessions}}",
+	"collisionRadar.cardAria_many": "{{count}} изменённых файлов пересекаются с работой {{sessions}}",
 	"collisionRadar.cardAria_other": "{{count}} изменённых файлов пересекаются с работой {{sessions}}",
 	"collisionRadar.title": "Возможный конфликт",
 	"collisionRadar.incompleteTitle": "Проверка конфликтов не завершена",
 	"collisionRadar.summary": "{{sessions}} также изменил(а) файлы в этом рабочем пространстве.",
-	"collisionRadar.incomplete": "Не удалось сравнить некоторые изменения рабочего пространства. Список может быть неполным."
+	"collisionRadar.incomplete": "Не удалось сравнить некоторые изменения рабочего пространства. Список может быть неполным.",
+	"collisionRadar.unavailableBadge": "Проверка недоступна",
+	"collisionRadar.unavailableTitle": "Проверка конфликтов недоступна",
+	"collisionRadar.unavailable": "Результат проверки конфликтов недоступен.",
+	"collisionRadar.staleBadge": "Результат устарел",
+	"collisionRadar.staleTitle": "Результат проверки конфликтов устарел",
+	"collisionRadar.stale": "Не удалось обновить проверку конфликтов. Показан последний результат."
 }

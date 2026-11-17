@@ -10,6 +10,7 @@ import {
 } from "../lib/project-overlap-events";
 
 export type ProjectOverlapsResponse = components["schemas"]["ProjectOverlapsResponse"];
+export type ProjectOverlapScanState = "incomplete" | "unavailable" | "stale";
 
 export type SessionProjectOverlap = {
 	peers: Array<{ sessionId: string; paths: string[] }>;
@@ -55,6 +56,19 @@ export function projectOverlapForSession(
 		.sort((a, b) => a.sessionId.localeCompare(b.sessionId));
 	const paths = [...new Set(peers.flatMap((peer) => peer.paths))].sort();
 	return { peers, paths, truncated, unresolvedBase, unavailable };
+}
+
+export function projectOverlapScanState(query: {
+	data: ProjectOverlapsResponse | undefined;
+	isError: boolean;
+}): ProjectOverlapScanState | undefined {
+	if (query.isError) return query.data ? "stale" : "unavailable";
+	if (!query.data) return undefined;
+	return query.data.truncatedSessionIds.length > 0
+		|| query.data.unresolvedBaseSessionIds.length > 0
+		|| query.data.unavailableSessionIds.length > 0
+		? "incomplete"
+		: undefined;
 }
 
 export function useProjectOverlaps(

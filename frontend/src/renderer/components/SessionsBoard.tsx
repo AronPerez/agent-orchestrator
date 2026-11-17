@@ -76,7 +76,7 @@ import {
 	sessionsBoardLabels,
 	toBoardSessionPresentation,
 } from "./SessionsBoardAdapters";
-import { projectOverlapForSession, useProjectOverlaps } from "../hooks/useProjectOverlaps";
+import { projectOverlapForSession, projectOverlapScanState, useProjectOverlaps } from "../hooks/useProjectOverlaps";
 
 type SessionsBoardProps = {
 	/** When set, the board shows only this project's sessions. */
@@ -240,6 +240,7 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 			.map(({ id, workspacePublished }) => ({ id, workspacePublished }))
 		: undefined;
 	const overlaps = useProjectOverlaps(collisionRadarProjectId, { hostId, liveSessions: overlapLiveSessions });
+	const collisionScanState = projectOverlapScanState(overlaps);
 	const collisionSessionNames = new Map((workspace?.sessions ?? []).map((session) => [session.id, session.title]));
 	const boardLabels = sessionsBoardLabels(t);
 	const presentation = useBoardPresentation({
@@ -461,6 +462,7 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 						labels={boardLabels}
 						renderSessionCard={(session) => (
 							<BoardSessionCardAdapter
+								collisionScanState={collisionScanState}
 								collision={(() => {
 									const overlap = projectOverlapForSession(overlaps.data, session.id);
 									return overlap?.peers.length ? {
