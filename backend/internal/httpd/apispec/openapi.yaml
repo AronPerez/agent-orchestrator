@@ -21892,8 +21892,8 @@ components:
     IssueCoordinationTokenRequest:
       properties:
         clientId:
-          description: Stable opaque ID of the requesting AO installation; retries
-            replace an unseen prior token for this client.
+          description: Required stable opaque ID of the requesting AO installation;
+            retries replace an unseen prior token for this client.
           type: string
         name:
           description: Name shown in the host's device list.
@@ -21901,6 +21901,8 @@ components:
         platform:
           description: The requesting machine's platform.
           type: string
+      required:
+      - clientId
       type: object
     KillReviewResponse:
       properties:

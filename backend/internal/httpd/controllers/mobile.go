@@ -112,9 +112,9 @@ func (c *MobileController) IssueCoordinationToken(w http.ResponseWriter, r *http
 			return
 		}
 	}
-	if req.ClientID != "" && !coordinationClientIDPattern.MatchString(req.ClientID) {
+	if req.ClientID == "" || !coordinationClientIDPattern.MatchString(req.ClientID) {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_COORDINATION_CLIENT_ID",
-			"clientId must contain only letters, numbers, underscores, or hyphens.", nil)
+			"clientId is required and must contain only letters, numbers, underscores, or hyphens.", nil)
 		return
 	}
 	presentedToken := ""
