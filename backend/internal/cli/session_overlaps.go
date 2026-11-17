@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -84,7 +85,12 @@ func writeProjectOverlaps(cmd *cobra.Command, response projectOverlapsResponse) 
 			return err
 		}
 		for _, overlap := range response.Overlaps {
-			if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\n", overlap.SessionA, overlap.SessionB, strings.Join(overlap.Paths, ", ")); err != nil {
+			paths := make([]string, len(overlap.Paths))
+			for i, path := range overlap.Paths {
+				quoted := strconv.QuoteToGraphic(path)
+				paths[i] = quoted[1 : len(quoted)-1]
+			}
+			if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\n", overlap.SessionA, overlap.SessionB, strings.Join(paths, ", ")); err != nil {
 				return err
 			}
 		}

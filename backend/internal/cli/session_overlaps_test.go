@@ -47,6 +47,39 @@ func TestSessionOverlapsJSONOutput(t *testing.T) {
 	}
 }
 
+func TestSessionOverlapsEscapesHumanPathsAndPreservesJSON(t *testing.T) {
+	deps := overlapTestDeps(t, http.StatusOK, `{
+		"projectId":"demo",
+		"overlaps":[{"sessionA":"demo-1","sessionB":"demo-2","paths":["unsafe\u001b[31m\nspoof\tcell"]}],
+		"truncatedSessionIds":[],
+		"unresolvedBaseSessionIds":[],
+		"unavailableSessionIds":[]
+	}`)
+
+	out, errOut, err := executeCLI(t, deps, "session", "overlaps", "--project", "demo")
+	if err != nil {
+		t.Fatalf("session overlaps failed: %v\nstderr=%s", err, errOut)
+	}
+	if want := `unsafe\x1b[31m\nspoof\tcell`; !strings.Contains(out, want) {
+		t.Fatalf("human output missing escaped path %q:\n%s", want, out)
+	}
+	if strings.Contains(out, "\x1b") {
+		t.Fatalf("human output contains a raw terminal escape:\n%q", out)
+	}
+
+	jsonOut, errOut, err := executeCLI(t, deps, "session", "overlaps", "--project", "demo", "--json")
+	if err != nil {
+		t.Fatalf("session overlaps --json failed: %v\nstderr=%s", err, errOut)
+	}
+	var got projectOverlapsResponse
+	if err := json.Unmarshal([]byte(jsonOut), &got); err != nil {
+		t.Fatalf("decode JSON output: %v\n%s", err, jsonOut)
+	}
+	if len(got.Overlaps) != 1 || len(got.Overlaps[0].Paths) != 1 || got.Overlaps[0].Paths[0] != "unsafe\x1b[31m\nspoof\tcell" {
+		t.Fatalf("JSON paths = %#v, want exact control characters", got.Overlaps)
+	}
+}
+
 func TestSessionOverlapsSurfacesDaemonError(t *testing.T) {
 	deps := overlapTestDeps(t, http.StatusNotFound, `{"error":"not_found","code":"PROJECT_NOT_FOUND","message":"Unknown project","requestId":"req-1"}`)
 
