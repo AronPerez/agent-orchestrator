@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -49,6 +50,7 @@ type Service struct {
 	now          func() time.Time
 	newID        func(string) string
 	onAppended   func(domain.DecisionEntry)
+	mutateMu     sync.Mutex
 }
 
 // New constructs a decision service from its daemon-owned dependencies.
@@ -203,6 +205,8 @@ func (s *Service) Get(ctx context.Context, callID string) (Detail, error) {
 
 // Answer records the person's standing answer to an open call.
 func (s *Service) Answer(ctx context.Context, actor Actor, callID string, input AnswerInput) (domain.DecisionCall, error) {
+	s.mutateMu.Lock()
+	defer s.mutateMu.Unlock()
 	call, err := s.call(ctx, callID)
 	if err != nil {
 		return domain.DecisionCall{}, err
@@ -213,7 +217,7 @@ func (s *Service) Answer(ctx context.Context, actor Actor, callID string, input 
 	if call.State != domain.DecisionStateNeedsYou && call.State != domain.DecisionStateInProgress && call.State != domain.DecisionStateDismissed {
 		return domain.DecisionCall{}, wrongState(call, `This call is closed. Its state is "%s".`)
 	}
-	payload := domain.DecisionAnsweredPayload{Choice: input.Choice, Option: input.Option, Note: input.Note}
+	payload := domain.DecisionAnsweredPayload{Choice: input.Choice, Option: input.Option, Note: strings.TrimSpace(input.Note)}
 	if err := domain.ValidateDecisionAnswer(len(call.Raised.Options), payload); err != nil {
 		return domain.DecisionCall{}, invalidDecision(err)
 	}
@@ -222,6 +226,8 @@ func (s *Service) Answer(ctx context.Context, actor Actor, callID string, input 
 
 // Dismiss records that the person declined to choose from a pending call.
 func (s *Service) Dismiss(ctx context.Context, actor Actor, callID, note string) (domain.DecisionCall, error) {
+	s.mutateMu.Lock()
+	defer s.mutateMu.Unlock()
 	call, err := s.call(ctx, callID)
 	if err != nil {
 		return domain.DecisionCall{}, err
@@ -232,6 +238,7 @@ func (s *Service) Dismiss(ctx context.Context, actor Actor, callID, note string)
 	if call.State != domain.DecisionStateNeedsYou {
 		return domain.DecisionCall{}, wrongState(call, `Only a call in "Needs you" can be dismissed. This one is "%s".`)
 	}
+	note = strings.TrimSpace(note)
 	if err := domain.ValidateDecisionNote(note); err != nil {
 		return domain.DecisionCall{}, invalidDecision(err)
 	}
@@ -240,6 +247,8 @@ func (s *Service) Dismiss(ctx context.Context, actor Actor, callID, note string)
 
 // RecordOutcome closes an in-progress call with the result of carrying it out.
 func (s *Service) RecordOutcome(ctx context.Context, actor Actor, callID string, input OutcomeInput) (domain.DecisionCall, error) {
+	s.mutateMu.Lock()
+	defer s.mutateMu.Unlock()
 	call, err := s.call(ctx, callID)
 	if err != nil {
 		return domain.DecisionCall{}, err
@@ -250,7 +259,7 @@ func (s *Service) RecordOutcome(ctx context.Context, actor Actor, callID string,
 	if call.State != domain.DecisionStateInProgress {
 		return domain.DecisionCall{}, wrongState(call, `An outcome can be recorded once a call is "In progress". This one is "%s".`)
 	}
-	payload := domain.DecisionOutcomePayload{Text: input.Text, Link: input.Link}
+	payload := domain.DecisionOutcomePayload{Text: strings.TrimSpace(input.Text), Link: strings.TrimSpace(input.Link)}
 	if err := domain.ValidateDecisionOutcome(payload); err != nil {
 		return domain.DecisionCall{}, invalidDecision(err)
 	}
@@ -259,6 +268,8 @@ func (s *Service) RecordOutcome(ctx context.Context, actor Actor, callID string,
 
 // Withdraw closes a pending call at the owning session's request.
 func (s *Service) Withdraw(ctx context.Context, actor Actor, callID string) (domain.DecisionCall, error) {
+	s.mutateMu.Lock()
+	defer s.mutateMu.Unlock()
 	call, err := s.call(ctx, callID)
 	if err != nil {
 		return domain.DecisionCall{}, err
@@ -274,6 +285,8 @@ func (s *Service) Withdraw(ctx context.Context, actor Actor, callID string) (dom
 
 // Retire changes whether a completed call still applies.
 func (s *Service) Retire(ctx context.Context, actor Actor, callID string, retired bool) (domain.DecisionCall, error) {
+	s.mutateMu.Lock()
+	defer s.mutateMu.Unlock()
 	call, err := s.call(ctx, callID)
 	if err != nil {
 		return domain.DecisionCall{}, err

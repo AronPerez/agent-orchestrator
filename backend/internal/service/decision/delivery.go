@@ -140,22 +140,37 @@ func (d *Deliverer) RunDue(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	pending := 0
+	blocked := make(map[string]bool)
+	sentAnswers := make(map[string]bool)
 	for _, call := range calls {
-		if d.deliver(ctx, call) {
+		if blocked[call.ID] {
 			pending++
+			continue
+		}
+		if call.StandingKind == domain.DecisionKindAnswered && sentAnswers[call.ID] {
+			call.Redelivery = true
+		}
+		retry, sent := d.deliver(ctx, call)
+		if sent && call.StandingKind == domain.DecisionKindAnswered {
+			sentAnswers[call.ID] = true
+		}
+		if retry {
+			pending++
+			blocked[call.ID] = true
 		}
 	}
 	return pending, nil
 }
 
-// deliver returns true while call still needs another attempt.
-func (d *Deliverer) deliver(ctx context.Context, call domain.DecisionCall) bool {
+// deliver reports whether the entry needs another attempt and whether its
+// message reached a session during this attempt.
+func (d *Deliverer) deliver(ctx context.Context, call domain.DecisionCall) (bool, bool) {
 	owner, found, err := d.store.GetSession(ctx, call.Raised.OwnerSessionID)
 	if err != nil {
 		d.logFailure(call.ID, "load owner", err)
-		return true
+		return true, false
 	}
-	ended := !found || owner.IsTerminated
+	ended := !found || owner.IsTerminated || owner.Activity.State == domain.ActivityExited
 	if !ended {
 		err = d.messenger.DeliverAsPerson(ctx, owner.ID, DeliveryMessage(call, false), d.now().UTC())
 		switch {
@@ -163,28 +178,28 @@ func (d *Deliverer) deliver(ctx context.Context, call domain.DecisionCall) bool 
 			return !d.record(ctx, call, domain.DecisionDeliveredPayload{
 				ForEntry: call.StandingEntryID, Status: domain.DecisionDeliveredSent,
 				SessionID: owner.ID, SessionName: sessionName(owner),
-			})
+			}), true
 		case errors.Is(err, ErrSessionEnded):
 			ended = true
 		default:
 			d.logFailure(call.ID, "send to owner", err)
-			return true
+			return true, false
 		}
 	}
 	if !ended {
-		return true
+		return true, false
 	}
 	return d.deliverFallback(ctx, call)
 }
 
-func (d *Deliverer) deliverFallback(ctx context.Context, call domain.DecisionCall) bool {
+func (d *Deliverer) deliverFallback(ctx context.Context, call domain.DecisionCall) (bool, bool) {
 	var orchestrator domain.SessionRecord
 	found := false
 	if call.Raised.ProjectID != "" {
 		sessions, err := d.store.ListSessions(ctx, call.Raised.ProjectID)
 		if err != nil {
 			d.logFailure(call.ID, "list fallback sessions", err)
-			return true
+			return true, false
 		}
 		orchestrator, found = domain.ActiveOrchestrator(sessions)
 		if found && orchestrator.ID == call.Raised.OwnerSessionID {
@@ -194,7 +209,7 @@ func (d *Deliverer) deliverFallback(ctx context.Context, call domain.DecisionCal
 	if !found {
 		return !d.record(ctx, call, domain.DecisionDeliveredPayload{
 			ForEntry: call.StandingEntryID, Status: domain.DecisionDeliveredNoSession,
-		})
+		}), false
 	}
 	err := d.messenger.DeliverAsPerson(ctx, orchestrator.ID, DeliveryMessage(call, true), d.now().UTC())
 	switch {
@@ -202,14 +217,14 @@ func (d *Deliverer) deliverFallback(ctx context.Context, call domain.DecisionCal
 		return !d.record(ctx, call, domain.DecisionDeliveredPayload{
 			ForEntry: call.StandingEntryID, Status: domain.DecisionDeliveredSent,
 			SessionID: orchestrator.ID, SessionName: sessionName(orchestrator), Fallback: true,
-		})
+		}), true
 	case errors.Is(err, ErrSessionEnded):
 		return !d.record(ctx, call, domain.DecisionDeliveredPayload{
 			ForEntry: call.StandingEntryID, Status: domain.DecisionDeliveredNoSession,
-		})
+		}), false
 	default:
 		d.logFailure(call.ID, "send to fallback orchestrator", err)
-		return true
+		return true, false
 	}
 }
 

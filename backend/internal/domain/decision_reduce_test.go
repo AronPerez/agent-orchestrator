@@ -71,7 +71,7 @@ func TestReduceDecisionCall(t *testing.T) {
 			name:    "answered",
 			entries: []DecisionEntry{raised, pick("a1", 2, 2)},
 			check: func(t *testing.T, call DecisionCall) {
-				if call.State != DecisionStateInProgress || call.Option != 2 || call.Note != "na1" || call.StandingEntryID != "a1" || call.Delivery != DecisionDeliveryPending || call.Redelivery || call.AnswerSurface != RequestSurfaceDesktop || call.ChosenLabel() != "Per-tenant API keys" {
+				if call.State != DecisionStateInProgress || call.Option != 2 || call.Note != "na1" || call.StandingEntryID != "a1" || call.StandingKind != DecisionKindAnswered || call.Delivery != DecisionDeliveryPending || call.Redelivery || call.AnswerSurface != RequestSurfaceDesktop || call.ChosenLabel() != "Per-tenant API keys" {
 					t.Fatalf("call = %+v", call)
 				}
 			},
@@ -98,7 +98,7 @@ func TestReduceDecisionCall(t *testing.T) {
 			name:    "dismissed",
 			entries: []DecisionEntry{raised, dismissed},
 			check: func(t *testing.T, call DecisionCall) {
-				if call.State != DecisionStateDismissed || call.Note != "not now" || call.Choice != "" || call.Delivery != DecisionDeliveryPending {
+				if call.State != DecisionStateDismissed || call.Note != "not now" || call.Choice != "" || call.StandingKind != DecisionKindDismissed || call.Delivery != DecisionDeliveryPending {
 					t.Fatalf("call = %+v", call)
 				}
 			},

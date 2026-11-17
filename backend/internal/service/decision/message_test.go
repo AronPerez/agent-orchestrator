@@ -59,7 +59,7 @@ func TestDeliveryMessageVariants(t *testing.T) {
 		{
 			name: "dismissed", call: func() domain.DecisionCall {
 				c := messageCall()
-				c.State, c.Choice, c.Option, c.Note = domain.DecisionStateDismissed, "", 0, "Not enough to go on."
+				c.State, c.StandingKind, c.Choice, c.Option, c.Note = domain.DecisionStateDismissed, domain.DecisionKindDismissed, "", 0, "Not enough to go on."
 				return c
 			}(),
 			contains: []string{
@@ -70,11 +70,20 @@ func TestDeliveryMessageVariants(t *testing.T) {
 		{
 			name: "dismissed fallback", call: func() domain.DecisionCall {
 				c := messageCall()
-				c.State, c.Choice, c.Option, c.Note = domain.DecisionStateDismissed, "", 0, "Not enough to go on."
+				c.State, c.StandingKind, c.Choice, c.Option, c.Note = domain.DecisionStateDismissed, domain.DecisionKindDismissed, "", 0, "Not enough to go on."
 				return c
 			}(), fallback: true,
 			contains: []string{"I dismissed a call raised by \"Proxy worker\", which has ended:", "Nothing needs to be carried out."},
 			excludes: []string{"Do not wait"},
+		},
+		{
+			name: "dismissed after close", call: func() domain.DecisionCall {
+				c := messageCall()
+				c.State, c.StandingKind, c.Choice, c.Option, c.Note = domain.DecisionStateWithdrawn, domain.DecisionKindDismissed, "", 0, "No longer needed."
+				return c
+			}(),
+			contains: []string{"I dismissed your call", "Do not wait for an answer"},
+			excludes: []string{"ao decision outcome", "I chose"},
 		},
 	}
 	for _, tt := range tests {
@@ -104,6 +113,7 @@ func messageCall() domain.DecisionCall {
 				{Label: "Per-tenant API keys"},
 			},
 		},
-		Choice: domain.DecisionChoiceOption, Option: 1, Note: "Rotate monthly.",
+		StandingKind: domain.DecisionKindAnswered,
+		Choice:       domain.DecisionChoiceOption, Option: 1, Note: "Rotate monthly.",
 	}
 }
