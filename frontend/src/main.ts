@@ -38,6 +38,9 @@ import {
 import {
 	setRendererSink,
 	setInstalledBuildStatus,
+	setInstalledBuildReplacementDetected,
+	setUpdateInstallGuard,
+	assertInstalledBuildRestartSafe,
 	startAutoUpdates,
 	ensureUpdatePrefs,
 	checkForUpdatesNow,
@@ -54,7 +57,8 @@ import {
 	type UpdateCheckOptions,
 } from "./main/auto-updater";
 import { listFeatureBuilds, getActiveFeatureBuild } from "./main/feature-builds";
-import { createArchiveIdentityReader, InstalledBuildGuard, sessionsAreIdle, watchInstalledBuild } from "./main/installed-build";
+import { createArchiveIdentityReader, InstalledBuildGuard, sessionsAndReviewsAreIdle, watchInstalledBuild } from "./main/installed-build";
+import { pinRendererResources } from "./main/renderer-resource-cache";
 import { clearMainSentryCache, initMainSentry, sanitizeRendererCapture } from "./main/sentry-main";
 import { TelemetryPolicyAuthority, resolveDesktopDataDir } from "./main/telemetry-policy-file";
 import { DesktopTelemetryController } from "./main/desktop-telemetry-controller";
@@ -302,13 +306,19 @@ const installedArchive = process.platform === "linux" && process.env.APPIMAGE ? 
 const installedBuildDisk = app.isPackaged ? require("original-fs") as typeof import("node:fs") : undefined;
 const installedBuildGuard = installedBuildDisk ? new InstalledBuildGuard({
 	readIdentity: createArchiveIdentityReader(installedArchive, installedBuildDisk),
+	assertRestartSafe: assertInstalledBuildRestartSafe,
+	onReplacement: setInstalledBuildReplacementDetected,
 	isIdle: async () => {
 		const port = daemonStatus.port;
 		if (chatDraftRisks.length > 0 || !port || !await readDaemonProbe(port, "readyz")) return false;
 		// A newer host may be refused for attachment, but can still report whether
 		// its tasks are idle so a replaced desktop can safely relaunch into it.
 		const response = await fetch(`http://127.0.0.1:${port}/api/v1/sessions`, { signal: AbortSignal.timeout(5_000) });
-		return response.ok && sessionsAreIdle(await response.json());
+		return response.ok && await sessionsAndReviewsAreIdle(await response.json(), async (sessionId) => {
+			const reviews = await fetch(`http://127.0.0.1:${port}/api/v1/sessions/${encodeURIComponent(sessionId)}/reviews`, { signal: AbortSignal.timeout(5_000) });
+			if (!reviews.ok) throw new Error("Review state unavailable");
+			return reviews.json();
+		});
 	},
 	onChange: (status) => {
 		console.info("AO: installed desktop build changed", { running: DESKTOP_BUILD_ID, installed: status?.identity, idle: status?.idle });
@@ -698,11 +708,22 @@ protocol.registerSchemesAsPrivileged([
 // releases) the ao-app:// deep-link protocol used by WorkOS auth callbacks and
 // billing returns: a second launch that is about to exit must not change it.
 // See registerCloudProtocol. Must run before app.whenReady().
+const sourceViteRoot = path.resolve(__dirname, "..");
+const pinPackagedRenderer = !!installedBuildGuard && !(process.platform === "linux" && process.env.APPIMAGE);
+const runtimeViteRoot = pinPackagedRenderer ? path.join(app.getPath("userData"), "running-renderer") : sourceViteRoot;
+let rendererCache: Awaited<ReturnType<typeof pinRendererResources>> | undefined;
+let rendererResourcesReady: Promise<boolean> = Promise.resolve(true);
 if (!app.requestSingleInstanceLock()) {
 	app.exit(0);
 } else {
 	registerCloudProtocol();
 	installLifecycleLog();
+	if (pinPackagedRenderer && installedBuildGuard) {
+		rendererResourcesReady = pinRendererResources(sourceViteRoot, runtimeViteRoot, () => installedBuildGuard.isRunningBuildInstalled()).then(
+			(cache) => { rendererCache = cache; return true; },
+			(error) => { console.error("AO: could not pin the running renderer:", error); return false; },
+		);
+	}
 }
 
 // Persistent record of main-process and daemon lifecycle (start, exit codes,
@@ -749,11 +770,14 @@ function installLifecycleLog(): void {
 		clearRunMarker();
 	});
 }
+app.once("will-quit", () => {
+	try { rendererCache?.dispose(); } catch (error) { console.warn("AO: renderer cache cleanup failed:", error); }
+});
 
 // Maps app://renderer/<path> to the built renderer in dist/. Paths without a
 // file extension are client-side routes and fall back to index.html (SPA).
 function registerRendererProtocol(): void {
-	const distRoot = path.join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}`);
+	const distRoot = path.join(runtimeViteRoot, "renderer", MAIN_WINDOW_VITE_NAME);
 	protocol.handle(RENDERER_SCHEME, async (request) => {
 		const url = new URL(request.url);
 		if (url.host !== RENDERER_HOST) {
@@ -766,16 +790,9 @@ function registerRendererProtocol(): void {
 		const target = path.extname(resolved) === "" ? path.join(distRoot, "index.html") : resolved;
 		try {
 			const replaced = () => new Response("<!doctype html><title>Restart Orchestrator</title><p>A new build is installed. Quit and reopen Orchestrator to continue.</p>", { status: 503, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
-			if (installedBuildGuard && !await installedBuildGuard.canLoadRenderer()) {
-				installedBuildWatching?.check();
-				return replaced();
-			}
-			const response = await net.fetch(pathToFileURL(target).toString());
-			if (!installedBuildGuard) return response;
-			// Finish reading before the second identity check, including lazy chunks.
-			const body = await response.arrayBuffer();
-			if (!await installedBuildGuard.canLoadRenderer()) return replaced();
-			return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
+			if (!await rendererResourcesReady) return replaced();
+			// The cache (or AppImage's original mount) stays pinned to this main.
+			return await net.fetch(pathToFileURL(target).toString());
 		} catch {
 			return new Response("Not found", { status: 404 });
 		}
@@ -791,15 +808,15 @@ function rendererUrl(): string {
 }
 
 function preloadPath(): string {
-	return path.join(__dirname, "preload.js");
+	return path.join(runtimeViteRoot, "build", "preload.js");
 }
 
 function annotatePreloadPath(): string {
-	return path.join(__dirname, "annotate-preload.js");
+	return path.join(runtimeViteRoot, "build", "annotate-preload.js");
 }
 
 function privacyGuidePreloadPath(): string {
-	return path.join(__dirname, "privacy-guide-preload.js");
+	return path.join(runtimeViteRoot, "build", "privacy-guide-preload.js");
 }
 
 // Runtime window/taskbar icon for Linux and Windows, and the unpackaged macOS
@@ -4141,9 +4158,10 @@ ipcMain.handle("updates:download", async (_event, requestId?: string) => {
 });
 ipcMain.handle("updates:install", (_event, confirmedVersion?: string) => quitAndInstallUpdate(confirmedVersion));
 // Retry after a failed macOS preparation: Squirrel can't reset a stalled staging
-// in-process, so restart AO like a manual quit-and-reopen. install-on-quit is
-// already off on the failed path, so quitting can't apply a half-prepared build.
+// in-process, so restart AO like a manual quit-and-reopen. An external build
+// still needs the native staging gate: disabling install-on-quit cannot disarm ShipIt.
 ipcMain.handle("updates:relaunch", () => {
+	assertInstalledBuildRestartSafe();
 	recordUpdateDiagnostic("retry-relaunch-requested");
 	preserveAgentsOnQuit = true;
 	app.relaunch();
@@ -4608,6 +4626,7 @@ app.on("second-instance", (_event, argv) => {
 function initAutoUpdates(): void {
 	if (!app.isPackaged) return;
 	if (installedBuildGuard && installedBuildDisk) {
+		setUpdateInstallGuard(() => installedBuildGuard.isRunningBuildInstalled());
 		installedBuildWatching = watchInstalledBuild(installedBuildGuard, installedBuildDisk, [
 			path.dirname(installedArchive),
 			...(process.platform === "darwin" ? [path.dirname(resolveBundlePath())] : []),
@@ -4810,6 +4829,7 @@ app.whenReady().then(async () => {
 		keybindingOverrides = await readKeybindingOverrides(path.dirname(keybindingRunFile));
 	}
 
+	await rendererResourcesReady;
 	registerRendererProtocol();
 	registerArtifactSnapshotProtocol({ protocol, store: artifactSnapshotStore });
 	// Which account owns the cached Cloud previews from the last run, so a different or lost one clears them

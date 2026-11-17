@@ -186,8 +186,9 @@ function RestartToUpdateDialogBody() {
 				</div>
 
 				<div className={cn(settingsDialogBodyClass, "gap-3 pt-4")}>
-					{installed && !installed.idle && <p role="status" className="text-sm text-settings-label">{t("update.restart.waitForIdle")}</p>}
-					{installed?.restartWhenIdle && <p role="status" className="text-sm text-settings-label">{t("update.restart.scheduled")}</p>}
+					{installed?.restartBlocked && <p role="alert" className="text-sm text-settings-label">{t(installed.restartBlocked === "appimage-unverified" ? "update.restart.appImageUnverified" : "update.restart.nativeUpdatePending")}</p>}
+					{installed && !installed.restartBlocked && !installed.idle && <p role="status" className="text-sm text-settings-label">{t("update.restart.waitForIdle")}</p>}
+					{installed?.restartWhenIdle && !installed.restartBlocked && <p role="status" className="text-sm text-settings-label">{t("update.restart.scheduled")}</p>}
 					{!installed && (workspace.isError || !workspace.data) && <p role="status">{t("update.restart.unknownWorkers", { defaultValue: "Current worker state could not be confirmed. Installing restarts Orchestrator and may interrupt current tasks." })}</p>}
 					{!installed && atRisk.length > 0 && (
 						<div
@@ -251,7 +252,7 @@ function RestartToUpdateDialogBody() {
 					<Button type="button" variant="secondary" size="sm" onClick={close} disabled={pending}>
 						{t("confirm.cancel")}
 					</Button>
-					{installed && <Button type="button" variant="secondary" size="sm" onClick={() => void confirm(installed.restartWhenIdle ? "cancel" : "when-idle")} disabled={pending}>
+					{installed && <Button type="button" variant="secondary" size="sm" onClick={() => void confirm(installed.restartWhenIdle ? "cancel" : "when-idle")} disabled={pending || (!!installed.restartBlocked && !installed.restartWhenIdle)}>
 						{t(installed.restartWhenIdle ? "update.restart.cancelScheduled" : "update.restart.whenIdle")}
 					</Button>}
 					<Button
@@ -259,7 +260,7 @@ function RestartToUpdateDialogBody() {
 						variant="primary"
 						size="sm"
 						onClick={hasFailed && !installed ? retry : () => void confirm()}
-						disabled={pending || (installed ? !installed.idle : !hasFailed && !version)}
+						disabled={pending || (installed ? !installed.idle || !!installed.restartBlocked : !hasFailed && !version)}
 					>
 						{pending
 							? t("update.restart.preparing")

@@ -1,5 +1,5 @@
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { onlineManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
@@ -19,10 +19,12 @@ const imageData = (url: string) => `data:image/png;base64,${btoa(url)}`;
 const project = (hostId?: string): WorkspaceSummary => ({ id: "same", name: "Project", path: "/repo", sessions: [], hostId });
 const clients: QueryClient[] = [];
 let imageFails = false;
+let corsBlocked = false;
+const imageLoads: Array<{ url: string; crossOrigin: string }> = [];
 let finishImage: (() => void) | undefined;
 
 function setup(workspaces: WorkspaceSummary[]) {
-	const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+	const client = new QueryClient({ defaultOptions: { queries: { retry: false, networkMode: "always" } } });
 	clients.push(client);
 	const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
 	return { client, ...renderHook(() => useProjectAvatars(workspaces), { wrapper }) };
@@ -32,6 +34,8 @@ beforeEach(() => {
 	window.localStorage.clear();
 	useUiStore.setState({ projectAvatars: true, remoteHosts: true });
 	imageFails = false;
+	corsBlocked = false;
+	imageLoads.length = 0;
 	finishImage = undefined;
 	localGet.mockReset().mockResolvedValue({ data: { status: "ok", project: { repo: "https://github.com/local/repo" } } });
 	remoteConnect.mockImplementation(async (url: string) => {
@@ -49,7 +53,9 @@ beforeEach(() => {
 		url = "";
 		set src(url: string) {
 			this.url = url;
-			queueMicrotask(() => imageFails ? this.onerror?.() : this.onload?.());
+			if (!url) return;
+			imageLoads.push({ url, crossOrigin: this.crossOrigin });
+			queueMicrotask(() => imageFails || (corsBlocked && this.crossOrigin === "anonymous") ? this.onerror?.() : this.onload?.());
 		}
 	});
 	let drawn = "";
@@ -60,6 +66,7 @@ beforeEach(() => {
 afterEach(async () => {
 	cleanup();
 	for (const client of clients.splice(0)) client.clear();
+	onlineManager.setOnline(true);
 	for (const hostId of connectedHosts()) await disconnectHost(hostId);
 	vi.restoreAllMocks();
 	vi.unstubAllGlobals();
@@ -155,4 +162,59 @@ it("keeps the local cached first paint and respects the avatar setting", () => {
 it("still saves local first-paint URLs while an unrelated remote host is offline", async () => {
 	setup([project(), project("offline")]);
 	await waitFor(() => expect(window.localStorage.getItem("ao.projectAvatarUrls")).toBe(JSON.stringify({ same: avatar("local") })));
+});
+
+it("uses child repositories from remote workspace details when the summary has none", async () => {
+	await connectHost("http://box-a:3001");
+	vi.mocked(fetch).mockResolvedValue(Response.json({ status: "ok", project: {
+		kind: "workspace", workspaceRepos: [{ repo: "https://github.com/workspace-owner/child" }],
+	} }));
+	const { result } = setup([{ ...project("box-a"), kind: "workspace" }]);
+	await waitFor(() => expect(result.current.get(sessionUiKey("same", "box-a"))).toBe(imageData(avatar("workspace-owner"))));
+	expect(localGet).not.toHaveBeenCalled();
+});
+
+it("displays an avatar that loads normally but cannot be loaded anonymously for a canvas", async () => {
+	await connectHost("http://box-a:3001");
+	corsBlocked = true;
+	const { result } = setup([project("box-a")]);
+	await waitFor(() => expect(result.current.get(sessionUiKey("same", "box-a"))).toBe(avatar("box-a")));
+	expect(imageLoads).toEqual([
+		{ url: avatar("box-a"), crossOrigin: "anonymous" },
+		{ url: avatar("box-a"), crossOrigin: "" },
+	]);
+});
+
+it.each(["network", "host", "setting"])("retries a failed image after %s recovery instead of retaining a successful null", async (recovery) => {
+	await connectHost("http://box-a:3001");
+	imageFails = true;
+	const { client, result } = setup([project("box-a")]);
+	const key = ["project-avatar", "box-a", "same", avatar("box-a")];
+	await waitFor(() => expect(client.getQueryState(key)?.fetchStatus).toBe("idle"));
+	expect(client.getQueryState(key)?.status).toBe("error");
+	expect(result.current.size).toBe(0);
+	imageFails = false;
+	if (recovery === "network") {
+		act(() => onlineManager.setOnline(false));
+		act(() => onlineManager.setOnline(true));
+	} else if (recovery === "host") {
+		await act(async () => { await disconnectHost("box-a"); });
+		await act(async () => { await connectHost("http://box-a:3001"); });
+	} else {
+		act(() => useUiStore.setState({ projectAvatars: false }));
+		act(() => useUiStore.setState({ projectAvatars: true }));
+	}
+	await waitFor(() => expect(result.current.get(sessionUiKey("same", "box-a"))).toBe(imageData(avatar("box-a"))));
+});
+
+it("does not reload every avatar's metadata when session polling invalidates a host's project queries", async () => {
+	await connectHost("http://box-a:3001");
+	const { client, result } = setup(["one", "two", "three"].map((id) => ({ ...project("box-a"), id })));
+	await waitFor(() => expect(result.current.size).toBe(3));
+	expect(fetch).toHaveBeenCalledTimes(3);
+	await act(async () => {
+		await client.invalidateQueries({ queryKey: ["project", "box-a"] });
+		await client.invalidateQueries({ queryKey: ["project", "box-a"] });
+	});
+	expect(fetch).toHaveBeenCalledTimes(3);
 });

@@ -90,6 +90,8 @@ describe("SidebarUpdateRow", () => {
 		expect(onRequestInstall).toHaveBeenCalledTimes(1);
 		view.rerender({ state: "downloaded", installed: { ...installed, restartWhenIdle: true } });
 		expect(screen.getByText("Restart when idle")).toBeVisible();
+		view.rerender({ state: "downloaded", installed: { ...installed, restartBlocked: "native-update-staged" } });
+		expect(screen.getByText("Restart needs attention")).toBeVisible();
 	});
 	it("turns an unlabelled error into a failed row only after a download it saw", () => {
 		const view = renderRow({ state: "downloading", percent: 30 });

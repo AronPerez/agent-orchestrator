@@ -36,6 +36,8 @@ export interface InstalledBuildStatus {
 	identity: string;
 	idle: boolean;
 	restartWhenIdle: boolean;
+	/** Native install ownership or unverified replacement bytes prevent a safe restart. */
+	restartBlocked?: "native-update-staged" | "appimage-unverified";
 }
 
 export interface UpdateStatus {
