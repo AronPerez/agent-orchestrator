@@ -341,11 +341,14 @@ func TestCoordinationProjectDetailIsASecretFreeProjection(t *testing.T) {
 
 func TestOnlyFullCredentialsIssueCoordinationTokens(t *testing.T) {
 	h := newPairingHost(t)
-	_, full := h.pair("secret12", "Laptop")
+	fullID, full := h.pair("secret12", "Laptop")
 	status, body := h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", full, nil)
 	coordination, _ := body["token"].(string)
 	if status != http.StatusOK || coordination == "" {
 		t.Fatalf("full device token: status=%d body=%v", status, body)
+	}
+	if device, ok := h.bridge.Devices.Match(coordination); !ok || device.Issuer != mobilebridge.DeviceIssuer(fullID) {
+		t.Fatalf("full-device coordination issuer = %+v, %v", device, ok)
 	}
 	if status, body = h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", coordination, nil); status != http.StatusForbidden || body["code"] != "CREDENTIAL_SCOPE_DENIED" {
 		t.Fatalf("coordination token minted another token: status=%d body=%v", status, body)
@@ -354,6 +357,10 @@ func TestOnlyFullCredentialsIssueCoordinationTokens(t *testing.T) {
 	account, _ := accountBody["token"].(string)
 	if status, body = h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", account, nil); status != http.StatusOK || body["token"] == "" {
 		t.Fatalf("account credential: status=%d body=%v", status, body)
+	}
+	accountCoordination, _ := body["token"].(string)
+	if device, ok := h.bridge.Devices.Match(accountCoordination); !ok || device.Issuer != mobilebridge.SharedAccount {
+		t.Fatalf("account coordination issuer = %+v, %v", device, ok)
 	}
 	if status, body = h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", h.code(), nil); status != http.StatusUnauthorized {
 		t.Fatalf("pairing code minted a coordination token: status=%d body=%v", status, body)

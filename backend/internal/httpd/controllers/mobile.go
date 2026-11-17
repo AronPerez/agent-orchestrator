@@ -96,7 +96,7 @@ func (c *MobileController) IssueCoordinationToken(w http.ResponseWriter, r *http
 		return
 	}
 	issuer, ok := c.Bridge.(interface {
-		IssueCoordinationToken(string, string) (CoordinationTokenResponse, error)
+		IssueCoordinationToken(string, string, string) (CoordinationTokenResponse, error)
 	})
 	if !ok {
 		envelope.WriteAPIError(w, r, http.StatusNotImplemented, "not_implemented", "COORDINATION_TOKEN",
@@ -110,7 +110,14 @@ func (c *MobileController) IssueCoordinationToken(w http.ResponseWriter, r *http
 			return
 		}
 	}
-	result, err := issuer.IssueCoordinationToken(req.Name, req.Platform)
+	issuingAuthority := mobilebridge.SharedPassword
+	switch credential.Kind {
+	case requestscope.CredentialAccount:
+		issuingAuthority = mobilebridge.SharedAccount
+	case requestscope.CredentialDevice:
+		issuingAuthority = mobilebridge.DeviceIssuer(credential.DeviceID)
+	}
+	result, err := issuer.IssueCoordinationToken(req.Name, req.Platform, issuingAuthority)
 	switch {
 	case errors.Is(err, mobilebridge.ErrTooManyDevices):
 		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict", "TOO_MANY_DEVICES", err.Error(), nil)
@@ -1130,6 +1137,11 @@ func (b *BridgeService) issueAccountToken(password string, device bool, accountI
 	if !ok {
 		return RemoteHostAccountTokenResponse{}, errors.New("account pairing is unavailable")
 	}
+	// A different account receives a different full credential. Revoke every
+	// scoped token delegated by the previous one before rotating it.
+	if err := b.revokeIssuedBy(mobilebridge.SharedAccount); err != nil {
+		return RemoteHostAccountTokenResponse{}, err
+	}
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
 		return RemoteHostAccountTokenResponse{}, err
@@ -1223,8 +1235,9 @@ func (b *BridgeService) PairDevice(code, name, platform string) (PairDeviceRespo
 	return PairDeviceResponse{HostID: b.HostID, DeviceID: device.ID, Token: token, Credential: credential}, nil
 }
 
-// IssueCoordinationToken gives a headless client a route-filtered device token.
-func (b *BridgeService) IssueCoordinationToken(name, platform string) (CoordinationTokenResponse, error) {
+// IssueCoordinationToken gives a headless client a route-filtered device token
+// and records which full credential delegated its authority.
+func (b *BridgeService) IssueCoordinationToken(name, platform, issuer string) (CoordinationTokenResponse, error) {
 	if b.Devices == nil {
 		return CoordinationTokenResponse{}, errors.New("device pairing is unavailable")
 	}
@@ -1234,7 +1247,7 @@ func (b *BridgeService) IssueCoordinationToken(name, platform string) (Coordinat
 	if strings.TrimSpace(platform) == "" {
 		platform = "cli"
 	}
-	device, token, err := b.Devices.IssueScoped(name, platform, []string{mobilebridge.DeviceScopeAgentCoordination}, time.Now())
+	device, token, err := b.Devices.IssueScopedBy(name, platform, []string{mobilebridge.DeviceScopeAgentCoordination}, issuer, time.Now())
 	if err != nil {
 		return CoordinationTokenResponse{}, err
 	}
@@ -1292,6 +1305,9 @@ func (b *BridgeService) RevokeDevice(id string) (installID string, found bool, e
 	if b.Devices == nil {
 		return "", false, nil
 	}
+	if err := b.revokeIssuedBy(mobilebridge.DeviceIssuer(id)); err != nil {
+		return "", false, err
+	}
 	device, found, err := b.Devices.Revoke(id)
 	if err != nil || !found {
 		return "", found, err
@@ -1310,6 +1326,9 @@ func (b *BridgeService) UnlinkAccount() error {
 	if err != nil {
 		return err
 	}
+	if err := b.revokeIssuedBy(mobilebridge.SharedAccount); err != nil {
+		return err
+	}
 	if st.AccountTokenHash == "" {
 		return nil
 	}
@@ -1321,6 +1340,22 @@ func (b *BridgeService) UnlinkAccount() error {
 		setter.SetAccountTokenHash("")
 	}
 	b.nudgeTunnel()
+	return nil
+}
+
+func (b *BridgeService) revokeIssuedBy(issuer string) error {
+	if b.Devices == nil {
+		return nil
+	}
+	revoked, err := b.Devices.RevokeIssuedBy(issuer)
+	if err != nil {
+		return err
+	}
+	if lan, ok := b.LAN.(interface{ DisconnectCredential(string) }); ok {
+		for _, device := range revoked {
+			lan.DisconnectCredential(device.TokenHash)
+		}
+	}
 	return nil
 }
 

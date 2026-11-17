@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -75,11 +76,12 @@ func TestMobileBrowserRemoteAccess(t *testing.T) {
 
 // fakeLAN is a minimal LANController for exercising BridgeService directly.
 type fakeLAN struct {
-	running     bool
-	hash        string
-	accountHash string
-	stopCalls   int
-	bindHost    string
+	running      bool
+	hash         string
+	accountHash  string
+	stopCalls    int
+	bindHost     string
+	disconnected []string
 }
 
 func (f *fakeLAN) Start(port int) (int, error) {
@@ -109,6 +111,9 @@ func (f *fakeLAN) SetPasswordHash(h string)     { f.hash = h }
 func (f *fakeLAN) PasswordHash() string         { return f.hash }
 func (f *fakeLAN) SetAccountTokenHash(h string) { f.accountHash = h }
 func (f *fakeLAN) AccountTokenHash() string     { return f.accountHash }
+func (f *fakeLAN) DisconnectCredential(hash string) {
+	f.disconnected = append(f.disconnected, hash)
+}
 
 func TestIssueAccountTokenRequiresPairingPasswordAndPersistsHash(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "mobile", "config.json")
@@ -196,6 +201,57 @@ func TestIssueAccountTokenReusesCredentialForSameAccount(t *testing.T) {
 	}
 	if got, err := bridge.IssueAccountToken(third.Token, "user-b"); err != nil || got.Token != third.Token {
 		t.Fatalf("current token retry = %+v, %v; want current credential", got, err)
+	}
+}
+
+func TestAccountRotationAndUnlinkRevokeDerivedCoordinationTokens(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mobile", "config.json")
+	if err := mobilebridge.Save(path, mobilebridge.State{Enabled: true, Password: "secret12"}); err != nil {
+		t.Fatal(err)
+	}
+	devices, err := mobilebridge.LoadAccessDevices(mobilebridge.AccessDevicesPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lan := &fakeLAN{running: true}
+	bridge := &BridgeService{LAN: lan, ConfigPath: path, HostID: "h_test", Devices: devices}
+	if _, err := bridge.IssueAccountToken("secret12", "user-a"); err != nil {
+		t.Fatal(err)
+	}
+	first, err := bridge.IssueCoordinationToken("Account agent", "cli", mobilebridge.SharedAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	password, err := bridge.IssueCoordinationToken("Password agent", "cli", mobilebridge.SharedPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bridge.IssueAccountToken("secret12", "user-b"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := devices.Match(first.Token); ok {
+		t.Fatal("account rotation left its derived coordination token valid")
+	}
+	if _, ok := devices.Match(password.Token); !ok {
+		t.Fatal("account rotation revoked a password-derived token")
+	}
+
+	second, err := bridge.IssueCoordinationToken("Second account agent", "cli", mobilebridge.SharedAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bridge.UnlinkAccount(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := devices.Match(second.Token); ok {
+		t.Fatal("account unlink left its derived coordination token valid")
+	}
+	for _, token := range []string{first.Token, second.Token} {
+		want := mobilebridge.HashPassword(token)
+		if !slices.Contains(lan.disconnected, want) {
+			t.Fatalf("live derived credential %s was not disconnected: %v", want, lan.disconnected)
+		}
 	}
 }
 
