@@ -55,7 +55,6 @@ type FleetOverviewRow = ProjectRow | MachineRow | SessionRow | UnscopedMachineRo
 
 type ScmRollup = {
 	pullRequests: number;
-	failingChecks: number;
 	checksFailing: boolean;
 };
 
@@ -149,28 +148,24 @@ function ScmRollupView({ rollup }: { rollup: ScmRollup }) {
 		<span className="inline-flex min-w-0 flex-wrap items-center justify-end gap-x-3 gap-y-1 text-xs text-muted-foreground">
 			{rollup.pullRequests > 0 ? <span className="whitespace-nowrap">{t("fleet.prCount", { count: rollup.pullRequests })}</span> : null}
 			{rollup.checksFailing ? (
-				<span className="whitespace-nowrap text-destructive">
-					{t("pr.card.checksFailing")}{rollup.failingChecks > 0 ? `: ${rollup.failingChecks}` : ""}
-				</span>
+				<span className="whitespace-nowrap text-destructive">{t("pr.card.checksFailing")}</span>
 			) : null}
 		</span>
 	);
 }
 
 function emptyScmRollup(): ScmRollup {
-	return { pullRequests: 0, failingChecks: 0, checksFailing: false };
+	return { pullRequests: 0, checksFailing: false };
 }
 
 function addScmRollup(target: ScmRollup, source: ScmRollup): void {
 	target.pullRequests += source.pullRequests;
-	target.failingChecks += source.failingChecks;
 	target.checksFailing ||= source.checksFailing;
 }
 
 function ownScmRollup(session: WorkspaceSession): ScmRollup {
 	return {
 		pullRequests: session.prs.length,
-		failingChecks: session.prs.reduce((count, pr) => count + (pr.failingChecks?.length ?? 0), 0),
 		checksFailing: session.prs.some((pr) => pr.ci === "failing"),
 	};
 }
@@ -203,7 +198,8 @@ function fleetRollupStatus(session: WorkspaceSession): SessionStatus {
 	const deliveryStatus = session.scmStatus ?? derivedStatus ??
 		(session.prs.some((pr) => pr.state === "merged") ? "merged" : undefined);
 	if (!deliveryStatus) return session.status;
-	return rollupOrder.indexOf(attentionZone(session.status)) <= rollupOrder.indexOf(attentionZone(deliveryStatus))
+	const deliveryZone = deliveryStatus === "merged" ? "done" : attentionZone(deliveryStatus);
+	return rollupOrder.indexOf(attentionZone(session.status)) <= rollupOrder.indexOf(deliveryZone)
 		? session.status
 		: deliveryStatus;
 }
@@ -369,6 +365,7 @@ export function FleetOverview({
 		? getDisplayStatusLabel(row.node.session.displayStatus, (key, values) => t(key as MessageKey, values))
 		: getSessionStatusView(row.node.session.status, t).label;
 	const machineConnectionLabel = (row: MachineRow) => {
+		if (row.node.machine.id === LOCAL_HOST) return undefined;
 		const host = hostsById.get(row.node.machine.id);
 		const status = host?.status;
 		if (status === "connecting") return t("session.statusChecking");
@@ -389,7 +386,7 @@ export function FleetOverview({
 		const rollup = scmRollups.get(key) ?? emptyScmRollup();
 		return [
 			rollup.pullRequests > 0 ? t("fleet.prCount", { count: rollup.pullRequests }) : undefined,
-			rollup.checksFailing ? `${t("pr.card.checksFailing")}${rollup.failingChecks > 0 ? `: ${rollup.failingChecks}` : ""}` : undefined,
+			rollup.checksFailing ? t("pr.card.checksFailing") : undefined,
 		].filter(Boolean).join(", ");
 	};
 	const rowLabel = (row: FleetOverviewRow) => {

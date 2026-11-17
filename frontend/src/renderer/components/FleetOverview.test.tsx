@@ -1,7 +1,9 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import type { components } from "../../api/schema";
 import type { RemoteHost } from "../hooks/useRemoteHosts";
+import { toWorkspaceSession } from "../hooks/useWorkspaceQuery";
 import type { WorkspaceSession, WorkspaceSummary } from "../types/workspace";
 import { FleetOverview } from "./FleetOverview";
 
@@ -56,6 +58,44 @@ function pr(number: number, overrides: Partial<WorkspaceSession["prs"][number]> 
 		updatedAt: "2026-11-17T12:00:00Z",
 		...overrides,
 	};
+}
+
+function mappedSessionWithFailingPR(): WorkspaceSession {
+	const view: components["schemas"]["ControllersSessionView"] = {
+		activity: { state: "idle", lastActivityAt: "2026-11-17T12:00:00Z" },
+		autoInjectCI: true,
+		autoInjectReview: true,
+		autoReviewEnabled: false,
+		chatProviderPreserved: false,
+		createdAt: "2026-11-17T12:00:00Z",
+		displayStatus: "CI failing",
+		id: "mapped-worker",
+		isPinned: false,
+		isTerminated: false,
+		kanbanColumn: "validating",
+		kind: "worker",
+		lastEventAt: "2026-11-17T12:00:00Z",
+		mode: "chat",
+		needsResume: false,
+		outputType: "pr",
+		prs: [{
+			url: "https://example.test/pr/1",
+			number: 1,
+			state: "open",
+			ci: "failing",
+			review: "review_required",
+			mergeability: "blocked",
+			reviewComments: false,
+			updatedAt: "2026-11-17T12:00:00Z",
+		}],
+		scmStatus: "ci_failed",
+		status: "working",
+		statusReadiness: "ready",
+		terminateOnPrMerge: false,
+		updatedAt: "2026-11-17T12:00:00Z",
+		workspacePublished: true,
+	};
+	return toWorkspaceSession(view, { id: "project", name: "Project" });
 }
 
 describe("FleetOverview", () => {
@@ -133,6 +173,20 @@ describe("FleetOverview", () => {
 		expect(screen.getByRole("treeitem", { name: /Checking box, Checking/ })).toBeInTheDocument();
 	});
 
+	it("does not apply empty remote readiness arrays to the local machine", () => {
+		render(
+			<FleetOverview
+				localWorkspaces={[workspace("project", "Project", [session("local", "Local worker")])]}
+				onOpen={vi.fn()}
+				remoteFailedHostIds={[]}
+				remoteLoadedProjectHostIds={[]}
+				remoteLoadedSessionHostIds={[]}
+			/>,
+		);
+
+		expect(screen.getByRole("treeitem", { name: /This computer/ })).not.toHaveAccessibleName(/Checking/);
+	});
+
 	it("hides cached project and session names immediately when a host rejects access", () => {
 		const refused = {
 			...host("build-box", "Build box", "offline"),
@@ -192,7 +246,7 @@ describe("FleetOverview", () => {
 		const worker = session("worker", "Ship release", "working", {
 			parentSessionId: coordinator.id,
 			prs: [
-				pr(1, { ci: "failing", failingChecks: [{ name: "unit", status: "failed", conclusion: "failure" }] }),
+				pr(1, { ci: "failing" }),
 				pr(2),
 			],
 		});
@@ -205,9 +259,18 @@ describe("FleetOverview", () => {
 			screen.getByRole("treeitem", { name: /Ship release/ }),
 		]) {
 			expect(within(row).getByText("PRs: 2")).toBeInTheDocument();
-			expect(within(row).getByText("Checks failing: 1")).toBeInTheDocument();
+			expect(within(row).getByText("Checks failing")).toBeInTheDocument();
 		}
 		expect(screen.getByRole("treeitem", { name: /^Project/ })).toHaveTextContent("1 Needs you");
+	});
+
+	it("rolls failing checks from the real lightweight workspace mapper without inventing a count", () => {
+		render(<FleetOverview localWorkspaces={[workspace("project", "Project", [mappedSessionWithFailingPR()])]} onOpen={vi.fn()} />);
+
+		const project = screen.getByRole("treeitem", { name: /^Project/ });
+		expect(within(project).getByText("PRs: 1")).toBeInTheDocument();
+		expect(within(project).getByText("Checks failing")).toBeInTheDocument();
+		expect(project).not.toHaveTextContent("Checks failing:");
 	});
 
 	it("uses daemon PR precedence when scmStatus is unavailable", () => {
@@ -235,6 +298,18 @@ describe("FleetOverview", () => {
 		const project = screen.getByRole("treeitem", { name: /^Project/ });
 		expect(project).toHaveTextContent("1 Needs you");
 		expect(project).not.toHaveTextContent("In review");
+	});
+
+	it.each(["merged", undefined] as const)("keeps live work above a merged-only PR with scmStatus %s", (scmStatus) => {
+		const worker = session("worker", "Continue work", "working", {
+			scmStatus,
+			prs: [pr(1, { state: "merged" })],
+		});
+		render(<FleetOverview localWorkspaces={[workspace("project", "Project", [worker])]} onOpen={vi.fn()} />);
+
+		const project = screen.getByRole("treeitem", { name: /^Project/ });
+		expect(project).toHaveTextContent("1 Working");
+		expect(project).not.toHaveTextContent("Ready");
 	});
 
 	it("collapses branches and reveals archived sessions on request", async () => {
