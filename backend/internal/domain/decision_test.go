@@ -80,6 +80,12 @@ func TestValidateDecisionRaiseNamesTheBrokenRule(t *testing.T) {
 		{name: "two recommendations", rule: "recommended_count", edit: func(p *DecisionRaisedPayload) { p.Options[1].Recommended = true }},
 		{name: "too many links", rule: "links_count", edit: func(p *DecisionRaisedPayload) { p.Links = make([]DecisionLink, 6) }},
 		{name: "link label required", rule: "link_invalid", edit: func(p *DecisionRaisedPayload) { p.Links = []DecisionLink{{URL: "https://example.com"}} }},
+		{name: "link label too long", rule: "link_label_too_long", edit: func(p *DecisionRaisedPayload) {
+			p.Links = []DecisionLink{{Label: strings.Repeat("x", 121), URL: "https://example.com"}}
+		}},
+		{name: "link URL too long", rule: "link_url_too_long", edit: func(p *DecisionRaisedPayload) {
+			p.Links = []DecisionLink{{Label: "Design", URL: "https://example.com/" + strings.Repeat("x", 2030)}}
+		}},
 		{name: "link scheme", rule: "link_invalid", edit: func(p *DecisionRaisedPayload) { p.Links = []DecisionLink{{Label: "x", URL: "file:///etc/passwd"}} }},
 		{name: "reference too long", rule: "reference_too_long", edit: func(p *DecisionRaisedPayload) { p.Reference = strings.Repeat("x", 65) }},
 	}
@@ -101,7 +107,7 @@ func TestValidateDecisionRaiseAcceptsTheLimits(t *testing.T) {
 		DecisionOption{Label: "Third", Consequence: "Third consequence."},
 		DecisionOption{Label: "Fourth", Consequence: "Fourth consequence."},
 	)
-	p.Links = []DecisionLink{{Label: "PR", URL: "https://example.com/pr/1"}}
+	p.Links = []DecisionLink{{Label: strings.Repeat("x", 120), URL: "https://example.com/" + strings.Repeat("x", 2028)}}
 	p.Reference = strings.Repeat("x", 64)
 	if err := ValidateDecisionRaise(p); err != nil {
 		t.Fatal(err)

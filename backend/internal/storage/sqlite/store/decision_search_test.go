@@ -63,7 +63,7 @@ func TestSearchDecisionCalls(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.query, func(t *testing.T) {
-			calls, err := store.SearchDecisionCalls(context.Background(), tc.query, 20)
+			calls, err := store.SearchDecisionCalls(context.Background(), tc.query, "", 20)
 			if err != nil || decisionIDs(calls) != tc.want {
 				t.Fatalf("SearchDecisionCalls(%q) = %q, %v; want %q", tc.query, decisionIDs(calls), err, tc.want)
 			}
@@ -74,12 +74,12 @@ func TestSearchDecisionCalls(t *testing.T) {
 func TestSearchDecisionCallsTreatsPunctuationAsText(t *testing.T) {
 	store := seedDecisionSearch(t)
 	for _, query := range []string{`"auth" OR -proxy* (scheme)`, `NEAR(auth, 2)`, `auth:scheme^`, "🙂 auth", `"`} {
-		if _, err := store.SearchDecisionCalls(context.Background(), query, 20); err != nil {
+		if _, err := store.SearchDecisionCalls(context.Background(), query, "", 20); err != nil {
 			t.Errorf("SearchDecisionCalls(%q): %v", query, err)
 		}
 	}
 	for _, query := range []string{"", "   ", `"-*()`} {
-		calls, err := store.SearchDecisionCalls(context.Background(), query, 20)
+		calls, err := store.SearchDecisionCalls(context.Background(), query, "", 20)
 		if err != nil || calls != nil {
 			t.Errorf("SearchDecisionCalls(%q) = %+v, %v; want nil, nil", query, calls, err)
 		}

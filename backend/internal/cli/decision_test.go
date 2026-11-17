@@ -141,6 +141,69 @@ func TestDecisionRaiseFromAFileAndStandardInput(t *testing.T) {
 	}
 }
 
+func TestDecisionRaiseFileRejectsUnknownFields(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "shop-1")
+	requests := 0
+	deps := decisionCLIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/decisions" {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		requests++
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"id":"dec_1"}`)
+	}))
+	deps.In = strings.NewReader(`{"title":"T","context":"C","options":[{"label":"A","consequence":"a","recommended":true},{"label":"B","consequence":"b"}],"ref":"SKY-12"}`)
+	_, _, err := executeCLI(t, deps, "decision", "raise", "--file", "-")
+	if err == nil || !strings.Contains(err.Error(), `unknown field "ref"`) {
+		t.Fatalf("err=%v", err)
+	}
+	if requests != 0 {
+		t.Fatalf("requests=%d, want 0", requests)
+	}
+}
+
+func TestDecisionSessionContextRefusesRemoteDaemonWithCollidingSessionID(t *testing.T) {
+	const collidingSessionID = "shop-1"
+	t.Setenv("AO_SESSION_ID", collidingSessionID)
+	t.Setenv("AO_TOKEN", "test-token")
+	remoteRequests := 0
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		remoteRequests++
+		if got := r.Header.Get(caller.Header); got != collidingSessionID {
+			t.Errorf("remote caller=%q, want colliding session %q", got, collidingSessionID)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"id":"dec_remote","ownerSessionId":"shop-1"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"calls":[{"id":"dec_remote","ownerSessionId":"shop-1"}]}`)
+	}))
+	t.Cleanup(remote.Close)
+	deps := decisionCLIServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("local daemon should not be called")
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+
+	tests := [][]string{
+		{"decision", "raise", "--title", "T", "--context", "C", "--option", "A :: a", "--option", "B :: b", "--recommend", "1"},
+		{"decision", "ls"},
+		{"decision", "search", "auth"},
+	}
+	for _, args := range tests {
+		args = append(args, "--url", remote.URL)
+		_, _, err := executeCLI(t, deps, args...)
+		if err == nil || ExitCode(err) != 2 || !strings.Contains(err.Error(), "shop-1") || !strings.Contains(err.Error(), "remote daemon") {
+			t.Fatalf("%v err=%v exit=%d", args, err, ExitCode(err))
+		}
+	}
+	if remoteRequests != 0 {
+		t.Fatalf("remote requests=%d, want 0", remoteRequests)
+	}
+}
+
 func TestDecisionRaiseShowsTheRuleTheDaemonNames(t *testing.T) {
 	t.Setenv("AO_SESSION_ID", "w-1")
 	deps := decisionCLIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -27,7 +27,7 @@ type Store interface {
 	ListDecisionCallsByOwner(context.Context, string, domain.SessionID, int) ([]domain.DecisionCall, error)
 	ListDecisionCallsByState(context.Context, domain.DecisionCallState, int) ([]domain.DecisionCall, error)
 	ListDecisionStreams(context.Context) ([]domain.DecisionStream, error)
-	SearchDecisionCalls(context.Context, string, int) ([]domain.DecisionCall, error)
+	SearchDecisionCalls(context.Context, string, domain.ProjectID, int) ([]domain.DecisionCall, error)
 }
 
 // Deps supplies the decision service's persistence, identity, clock and hooks.
@@ -119,6 +119,7 @@ func (s *Service) Raise(ctx context.Context, actor Actor, input RaiseInput) (dom
 		return domain.DecisionCall{}, apierr.NotFound("SESSION_NOT_FOUND", "Unknown session")
 	}
 
+	input = normalizeRaiseInput(input)
 	payload := domain.DecisionRaisedPayload{
 		Title: input.Title, Context: input.Context, Options: input.Options, Links: input.Links,
 		Reference: input.Reference, ProjectID: session.ProjectID,
@@ -195,9 +196,9 @@ func (s *Service) List(ctx context.Context, actor Actor, scope Scope) ([]domain.
 		if actor.Session == "" {
 			return nil, apierr.Invalid("DECISION_SESSION_REQUIRED", "This needs a session. Run it from inside a session.", nil)
 		}
-		calls, err = s.store.ListDecisionCallsByOwner(ctx, s.hostID, actor.Session, 50)
+		calls, err = s.store.ListDecisionCallsByOwner(ctx, s.hostID, actor.Session, -1)
 	case ScopeNeedsYou:
-		calls, err = s.store.ListDecisionCallsByState(ctx, domain.DecisionStateNeedsYou, 200)
+		calls, err = s.store.ListDecisionCallsByState(ctx, domain.DecisionStateNeedsYou, -1)
 	default:
 		return nil, apierr.Invalid("DECISION_SCOPE_INVALID", "Unknown scope.", nil)
 	}
@@ -212,15 +213,19 @@ func (s *Service) Search(ctx context.Context, actor Actor, query string) ([]doma
 	if strings.TrimSpace(query) == "" {
 		return nil, apierr.Invalid("DECISION_QUERY_REQUIRED", "Say what to search for.", nil)
 	}
-	calls, err := s.store.SearchDecisionCalls(ctx, query, 20)
+	project, hasProject, err := s.actorProject(ctx, actor)
+	if err != nil {
+		return nil, err
+	}
+	priorityProject := domain.ProjectID("")
+	if hasProject {
+		priorityProject = project
+	}
+	calls, err := s.store.SearchDecisionCalls(ctx, query, priorityProject, 20)
 	if err != nil {
 		return nil, err
 	}
 	calls, err = s.withStreams(ctx, calls)
-	if err != nil {
-		return nil, err
-	}
-	project, hasProject, err := s.actorProject(ctx, actor)
 	if err != nil {
 		return nil, err
 	}
@@ -265,6 +270,27 @@ func sessionName(session domain.SessionRecord) string {
 		return session.DisplayName
 	}
 	return string(session.ID)
+}
+
+func normalizeRaiseInput(input RaiseInput) RaiseInput {
+	input.Title = strings.TrimSpace(input.Title)
+	input.Context = strings.TrimSpace(input.Context)
+	input.Reference = strings.TrimSpace(input.Reference)
+	options := make([]domain.DecisionOption, len(input.Options))
+	for i, option := range input.Options {
+		option.Label = strings.TrimSpace(option.Label)
+		option.Consequence = strings.TrimSpace(option.Consequence)
+		options[i] = option
+	}
+	input.Options = options
+	links := make([]domain.DecisionLink, len(input.Links))
+	for i, link := range input.Links {
+		link.Label = strings.TrimSpace(link.Label)
+		link.URL = strings.TrimSpace(link.URL)
+		links[i] = link
+	}
+	input.Links = links
+	return input
 }
 
 func invalidDecision(err error) error {

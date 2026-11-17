@@ -21159,8 +21159,10 @@ components:
     DecisionLinkPayload:
       properties:
         label:
+          maxLength: 120
           type: string
         url:
+          maxLength: 2048
           type: string
       required:
       - label
@@ -21169,8 +21171,10 @@ components:
     DecisionOptionPayload:
       properties:
         consequence:
+          maxLength: 200
           type: string
         label:
+          maxLength: 60
           type: string
         recommended:
           type: boolean
@@ -23605,6 +23609,7 @@ components:
     RaiseDecisionRequest:
       properties:
         context:
+          maxLength: 1000
           type: string
         links:
           items:
@@ -23615,8 +23620,10 @@ components:
             $ref: '#/components/schemas/DecisionOptionPayload'
           type: array
         reference:
+          maxLength: 64
           type: string
         title:
+          maxLength: 120
           type: string
       required:
       - title

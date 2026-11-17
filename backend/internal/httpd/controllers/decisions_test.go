@@ -177,3 +177,15 @@ func TestDecisionsAPI_Errors(t *testing.T) {
 		t.Fatalf("json error status=%d body=%s", status, body)
 	}
 }
+
+func TestDecisionsAPI_RejectsOversizedWhitespaceBeforeDecoding(t *testing.T) {
+	svc := &fakeDecisionService{}
+	body := `{"title":"` + strings.Repeat(" ", 70<<10) + `x","context":"C","options":[{"label":"A","consequence":"a","recommended":true},{"label":"B","consequence":"b"}]}`
+	response, status := decisionRequest(t, newDecisionServer(t, svc), http.MethodPost, "/api/v1/decisions", body, "w-1")
+	if status != http.StatusBadRequest || !reportContainsAll(string(response), "INVALID_JSON") {
+		t.Fatalf("status=%d body=%s", status, response)
+	}
+	if svc.raise.Title != "" {
+		t.Fatalf("service received oversized title of %d bytes", len(svc.raise.Title))
+	}
+}

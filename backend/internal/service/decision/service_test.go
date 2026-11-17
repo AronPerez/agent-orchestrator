@@ -2,6 +2,7 @@ package decision
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -119,6 +120,27 @@ func TestRaiseFromASessionWithNoProject(t *testing.T) {
 	}
 }
 
+func TestRaiseNormalizesStoredText(t *testing.T) {
+	fixture := newDecisionService(t)
+	input := validRaiseInput()
+	input.Title = "  Which auth scheme?  "
+	input.Context = "\n Context for the choice. \t"
+	input.Options[0].Label = "  OAuth  "
+	input.Options[0].Consequence = "  Use one registration.  "
+	input.Links = []domain.DecisionLink{{Label: "  Design  ", URL: "  https://example.com/design  "}}
+	input.Reference = "  SKY-12  "
+	call, err := fixture.service.Raise(context.Background(), Actor{Session: fixture.w1}, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if call.Raised.Title != "Which auth scheme?" || call.Raised.Context != "Context for the choice." ||
+		call.Raised.Options[0].Label != "OAuth" || call.Raised.Options[0].Consequence != "Use one registration." ||
+		call.Raised.Links[0] != (domain.DecisionLink{Label: "Design", URL: "https://example.com/design"}) ||
+		call.Raised.Reference != "SKY-12" {
+		t.Fatalf("raised payload = %+v", call.Raised)
+	}
+}
+
 func TestRaiseRefusals(t *testing.T) {
 	fixture := newDecisionService(t)
 	if _, err := fixture.service.Raise(context.Background(), Actor{Surface: domain.RequestSurfaceCLI}, validRaiseInput()); apiCode(err) != "DECISION_SESSION_REQUIRED" {
@@ -198,6 +220,78 @@ func TestSearchPutsTheSameProjectFirst(t *testing.T) {
 	}
 	if _, err := fixture.service.Search(ctx, Actor{Session: fixture.w1}, "  "); apiCode(err) != "DECISION_QUERY_REQUIRED" {
 		t.Fatalf("blank search error = %v", err)
+	}
+}
+
+func TestSearchAppliesProjectAndRetirementPriorityBeforeLimit(t *testing.T) {
+	fixture := newDecisionService(t)
+	ctx := context.Background()
+	for range 20 {
+		if _, err := fixture.service.Raise(ctx, Actor{Session: fixture.loose}, validRaiseInput()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := range 20 {
+		call, err := fixture.service.Raise(ctx, Actor{Session: fixture.w1}, validRaiseInput())
+		if err != nil {
+			t.Fatal(err)
+		}
+		retireDecisionForTest(t, fixture, call, i)
+	}
+	current, err := fixture.service.Raise(ctx, Actor{Session: fixture.w2}, validRaiseInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	calls, err := fixture.service.Search(ctx, Actor{Session: fixture.w1}, "auth scheme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 20 || calls[0].ID != current.ID || calls[0].Retired {
+		t.Fatalf("search first = %+v, len=%d, want current %s", calls[0], len(calls), current.ID)
+	}
+	for i, call := range calls[1:] {
+		if call.Raised.ProjectID != "shop" || !call.Retired {
+			t.Fatalf("search[%d] = %+v, want retired shop call", i+1, call)
+		}
+	}
+}
+
+func TestListDoesNotHideOutstandingCallsPastOldCaps(t *testing.T) {
+	fixture := newDecisionService(t)
+	ctx := context.Background()
+	var latest domain.DecisionCall
+	for range 201 {
+		var err error
+		latest, err = fixture.service.Raise(ctx, Actor{Session: fixture.w1}, validRaiseInput())
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	mine, err := fixture.service.List(ctx, Actor{Session: fixture.w1}, ScopeMine)
+	if err != nil || len(mine) != 201 || mine[0].ID != latest.ID {
+		t.Fatalf("mine len=%d first=%q err=%v", len(mine), callIDs(mine[:min(len(mine), 1)]), err)
+	}
+	needsYou, err := fixture.service.List(ctx, Actor{Surface: domain.RequestSurfaceCLI}, ScopeNeedsYou)
+	if err != nil || len(needsYou) != 201 || needsYou[len(needsYou)-1].ID != latest.ID {
+		t.Fatalf("needs you len=%d err=%v", len(needsYou), err)
+	}
+}
+
+func retireDecisionForTest(t *testing.T, fixture decisionServiceFixture, call domain.DecisionCall, index int) {
+	t.Helper()
+	raw, err := json.Marshal(domain.DecisionRetiredPayload{Retired: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.UnixMilli(3_000_000 + int64(index)).UTC()
+	_, _, err = fixture.store.AppendDecisionEntry(context.Background(), domain.DecisionEntry{
+		ID: fmt.Sprintf("dent_retire_%d", index), Origin: "h_a", CallID: call.ID,
+		Kind: domain.DecisionKindRetired, Payload: raw, WrittenAt: at,
+		AuthorKind: domain.DecisionAuthorPerson, AuthorSurface: domain.RequestSurfaceCLI,
+	}, at)
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

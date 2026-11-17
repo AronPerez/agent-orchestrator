@@ -52,24 +52,24 @@ type ConversationFindResponse chatsvc.FindResult
 
 // DecisionOptionPayload is one available choice and what it leads to.
 type DecisionOptionPayload struct {
-	Label       string `json:"label"`
-	Consequence string `json:"consequence"`
+	Label       string `json:"label" maxLength:"60"`
+	Consequence string `json:"consequence" maxLength:"200"`
 	Recommended bool   `json:"recommended,omitempty"`
 }
 
 // DecisionLinkPayload is one supporting HTTP(S) link.
 type DecisionLinkPayload struct {
-	Label string `json:"label"`
-	URL   string `json:"url"`
+	Label string `json:"label" maxLength:"120"`
+	URL   string `json:"url" maxLength:"2048"`
 }
 
 // RaiseDecisionRequest is the session-to-daemon decision call contract.
 type RaiseDecisionRequest struct {
-	Title     string                  `json:"title"`
-	Context   string                  `json:"context"`
+	Title     string                  `json:"title" maxLength:"120"`
+	Context   string                  `json:"context" maxLength:"1000"`
 	Options   []DecisionOptionPayload `json:"options"`
 	Links     []DecisionLinkPayload   `json:"links,omitempty"`
-	Reference string                  `json:"reference,omitempty"`
+	Reference string                  `json:"reference,omitempty" maxLength:"64"`
 }
 
 // DecisionCallResponse is the current projection of one decision call.

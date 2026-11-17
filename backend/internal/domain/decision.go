@@ -22,6 +22,8 @@ const (
 	MaxDecisionOptionLabel = 60
 	MaxDecisionConsequence = 200
 	MaxDecisionLinks       = 5
+	MaxDecisionLinkLabel   = 120
+	MaxDecisionLinkURL     = 2048
 	MaxDecisionReference   = 64
 	MaxDecisionNote        = 1000
 	MaxDecisionOutcome     = 300
@@ -250,8 +252,16 @@ func ValidateDecisionRaise(p DecisionRaisedPayload) error {
 		return decisionRule("links_count", fmt.Sprintf("A call can carry at most five links; this one has %d.", len(p.Links)))
 	}
 	for i, link := range p.Links {
-		if strings.TrimSpace(link.Label) == "" || !validDecisionURL(link.URL) {
+		label := strings.TrimSpace(link.Label)
+		target := strings.TrimSpace(link.URL)
+		if label == "" || !validDecisionURL(target) {
 			return decisionRule("link_invalid", fmt.Sprintf("Link %d needs a label and an http or https URL.", i+1))
+		}
+		if n := utf8.RuneCountInString(label); n > MaxDecisionLinkLabel {
+			return decisionRule("link_label_too_long", fmt.Sprintf("Link %d's label is %d characters; the limit is 120.", i+1, n))
+		}
+		if n := utf8.RuneCountInString(target); n > MaxDecisionLinkURL {
+			return decisionRule("link_url_too_long", fmt.Sprintf("Link %d's URL is %d characters; the limit is 2048.", i+1, n))
 		}
 	}
 	if n := utf8.RuneCountInString(strings.TrimSpace(p.Reference)); n > MaxDecisionReference {

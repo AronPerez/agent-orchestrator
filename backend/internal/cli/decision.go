@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -122,6 +123,9 @@ func newDecisionRaiseCommand(ctx *commandContext) *cobra.Command {
 		Short: "Raise a decision call from this session",
 		Args:  usageArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := ctx.refuseRemoteDecisionSession("ao decision raise"); err != nil {
+				return err
+			}
 			request, err := decisionRaiseRequest(cmd, opts)
 			if err != nil {
 				return err
@@ -169,7 +173,15 @@ func decisionRaiseRequest(cmd *cobra.Command, opts decisionRaiseOptions) (decisi
 			return decisionRaiseAPIRequest{}, err
 		}
 		var request decisionRaiseAPIRequest
-		if err := json.Unmarshal(raw, &request); err != nil {
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&request); err != nil {
+			return decisionRaiseAPIRequest{}, fmt.Errorf("read decision JSON: %w", err)
+		}
+		if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+			if err == nil {
+				err = errors.New("multiple JSON values")
+			}
 			return decisionRaiseAPIRequest{}, fmt.Errorf("read decision JSON: %w", err)
 		}
 		return request, nil
@@ -213,6 +225,9 @@ func newDecisionSearchCommand(ctx *commandContext) *cobra.Command {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := ctx.refuseRemoteDecisionSession("ao decision search"); err != nil {
+				return err
+			}
 			var response decisionListAPIResponse
 			if err := ctx.getJSON(cmd.Context(), "decisions?q="+url.QueryEscape(strings.Join(args, " ")), &response); err != nil {
 				return err
@@ -239,6 +254,11 @@ func newDecisionListCommand(ctx *commandContext) *cobra.Command {
 			if needsYou || callerSession() == "" {
 				scope = "needs_you"
 			}
+			if scope == "mine" {
+				if err := ctx.refuseRemoteDecisionSession("ao decision ls"); err != nil {
+					return err
+				}
+			}
 			var response decisionListAPIResponse
 			if err := ctx.getJSON(cmd.Context(), "decisions?scope="+scope, &response); err != nil {
 				return err
@@ -252,6 +272,17 @@ func newDecisionListCommand(ctx *commandContext) *cobra.Command {
 	cmd.Flags().BoolVar(&needsYou, "needs-you", false, "List calls waiting for the person")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Print JSON")
 	return cmd
+}
+
+func (c *commandContext) refuseRemoteDecisionSession(command string) error {
+	session := callerSession()
+	if c.remote == nil || session == "" {
+		return nil
+	}
+	return usageError{fmt.Errorf(
+		"AO_SESSION_ID %q names a session on this machine, but %s targets the remote daemon at %s; `%s` must use the local daemon",
+		session, c.remote.source, c.remote.baseURL, command,
+	)}
 }
 
 func newDecisionShowCommand(ctx *commandContext) *cobra.Command {
