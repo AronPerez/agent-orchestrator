@@ -4,6 +4,7 @@ import { apiErrorException } from "../lib/api-error-exception";
 import { clientForSessionHost } from "../lib/host-clients";
 import { sessionUiKey } from "../lib/hosts";
 import { repositoryOwnerAvatar } from "../lib/repository-avatar";
+import { markApiError } from "../lib/reported-errors";
 import { useUiStore } from "../stores/ui-store";
 import { CLOUD_PROJECT_KIND, STANDALONE_PROJECT_KIND, type WorkspaceSummary } from "../types/workspace";
 import { useConnectedHosts } from "./useHostConnection";
@@ -40,10 +41,9 @@ function readCache(): AvatarCache {
 	return Object.fromEntries(Object.entries(readStrings(cacheKey)).filter(([, src]) => src.startsWith("data:image/")));
 }
 
-// Draws the avatar through a CORS image and a canvas. Loading it as an image
-// keeps it under the renderer's img-src policy (fetch would need connect-src),
-// and a redirect to a sign-in page fails to decode instead of being cached.
-function loadAsDataUrl(url: string, signal?: AbortSignal): Promise<string | null> {
+// Loading as an image stays under img-src and rejects sign-in HTML. CORS lets
+// us cache pixels; a normal image can still display public SCMs without CORS.
+function loadAvatarImage(url: string, signal?: AbortSignal, asDataUrl = true): Promise<string | null> {
 	return new Promise((resolve) => {
 		if (signal?.aborted) return resolve(null);
 		const image = new Image();
@@ -55,8 +55,9 @@ function loadAsDataUrl(url: string, signal?: AbortSignal): Promise<string | null
 		};
 		const abort = () => { finish(null); image.src = ""; };
 		signal?.addEventListener("abort", abort, { once: true });
-		image.crossOrigin = "anonymous";
+		if (asDataUrl) image.crossOrigin = "anonymous";
 		image.onload = () => {
+			if (!asDataUrl) return finish(url);
 			try {
 				const canvas = document.createElement("canvas");
 				canvas.width = 64;
@@ -93,7 +94,7 @@ export function useProjectAvatars(workspaces: readonly WorkspaceSummary[]): Map<
 	);
 	const details = useQueries({
 		queries: projects.map((project) => ({
-			queryKey: projectQueryKey(project.id, project.hostId),
+			queryKey: project.hostId ? ["project-avatar", project.hostId, project.id, "metadata"] : projectQueryKey(project.id),
 			enabled: enabled && (!project.hostId || connected.includes(project.hostId)),
 			staleTime: 30_000,
 			queryFn: async ({ signal }) => {
@@ -120,7 +121,8 @@ export function useProjectAvatars(workspaces: readonly WorkspaceSummary[]): Map<
 			}
 			const detail = query.data;
 			const ownRepo = detail && "repo" in detail && typeof detail.repo === "string" && detail.repo ? detail.repo : undefined;
-			const repo = ownRepo ?? project.workspaceRepos?.[0]?.repo;
+			const childRepo = detail && "workspaceRepos" in detail ? detail.workspaceRepos?.[0]?.repo : undefined;
+			const repo = ownRepo ?? (typeof childRepo === "string" && childRepo ? childRepo : project.workspaceRepos?.[0]?.repo);
 			// After a GitHub rename or transfer the remote's owner is stale; the
 			// avatar URL then changes, so the old cached image is not reused.
 			const canonical = ownRepo && detail && "canonicalRepo" in detail
@@ -136,14 +138,20 @@ export function useProjectAvatars(workspaces: readonly WorkspaceSummary[]): Map<
 		const url = urls.get(key);
 		return project.hostId && url ? [{ key, hostId: project.hostId, id: project.id, url }] : [];
 	});
-	// Public SCM images use the same CORS/canvas path as local avatars. Only
-	// their metadata needs host authentication; remote pixels stay memory-only.
+	// Only metadata needs host authentication; remote image sources stay memory-only.
 	const remoteSources = useQueries({
 		queries: remoteImages.map((image) => ({
 			queryKey: ["project-avatar", image.hostId, image.id, image.url],
 			enabled,
 			staleTime: Infinity,
-			queryFn: ({ signal }) => loadAsDataUrl(image.url, signal),
+			refetchOnReconnect: true,
+			queryFn: async ({ signal }) => {
+				const src = (await loadAvatarImage(image.url, signal)) ?? (await loadAvatarImage(image.url, signal, false));
+				if (src) return src;
+				const error = new Error("Project avatar image unavailable");
+				markApiError(error);
+				throw error;
+			},
 		})),
 	});
 	const localUrls = new Map(projects.filter((project) => !project.hostId).flatMap((project) => {
@@ -168,7 +176,7 @@ export function useProjectAvatars(workspaces: readonly WorkspaceSummary[]): Map<
 		for (const url of current) {
 			if (refreshedUrls.has(url)) continue;
 			refreshedUrls.add(url);
-			void loadAsDataUrl(url).then((src) => {
+			void loadAvatarImage(url).then((src) => {
 				if (!src) return;
 				setCache((previous) => {
 					if (previous[url] === src) return previous;
