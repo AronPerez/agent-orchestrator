@@ -349,6 +349,7 @@ describe("idle evidence", () => {
 		const context = { daemonStatus: { port: 3001, state: "ready" } as DaemonStatus, daemonAttachmentGeneration: 1, appRunId: "launch", chatDraftRisks: [], readDaemonProbe: async () => true,
 			fetch, AbortSignal, sessionsAndReviewsAreIdle, sideLaunchState: undefined as { sides: unknown[] } | undefined,
 			sideLaunchRecovery: { ensureReady, capture, matches: (candidate: unknown) => candidate === attachment },
+			sideCloseController: { hasPending: vi.fn(() => false) },
 		};
 		const { isIdle } = runInNewContext(transpile(`({${main.slice(start, main.indexOf("\n\tonChange:", start))}})`, { target: ScriptTarget.ES2022 }), context);
 		return { isIdle: isIdle as () => Promise<boolean>, context, attachment, ensureReady, capture, fetch };
@@ -499,6 +500,15 @@ describe("idle evidence", () => {
 		h.capture.mockResolvedValueOnce({ attachment: h.attachment, state: { appRunId: "launch", sides: [] } })
 			.mockResolvedValueOnce({ attachment: h.attachment, state: { appRunId: "launch", sides: [{ side: { id: "new-side" } }] } });
 		expect(await h.isIdle()).toEqual({ openSideChats: ["new-side"] });
+	});
+	it.each([false, true])("waits for a main-owned unconfirmed close even with empty snapshots, startedDuringProbe=%s", async (startedDuringProbe) => {
+		const h = mainIdleProbe();
+		if (startedDuringProbe) h.capture.mockImplementationOnce(async () => {
+			h.context.sideCloseController.hasPending.mockReturnValue(true);
+			return { attachment: h.attachment, state: { appRunId: "launch", sides: [] } };
+		});
+		else h.context.sideCloseController.hasPending.mockReturnValue(true);
+		expect(await h.isIdle()).toBe(false);
 	});
 	it("retains locally owned side-close state even if the daemon list is empty", async () => {
 		const h = mainIdleProbe();

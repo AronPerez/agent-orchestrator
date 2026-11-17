@@ -359,7 +359,7 @@ const installedBuildGuard = installedBuildDisk ? new InstalledBuildGuard({
 		});
 		if (!idle) return false;
 		const latestSides = await checkSides(body.sessions).catch(() => false);
-		return generation === daemonAttachmentGeneration && daemonStatus.port === port && daemonStatus.state === state && daemonStatus.code === code ? latestSides : false;
+		return !sideCloseController.hasPending() && generation === daemonAttachmentGeneration && daemonStatus.port === port && daemonStatus.state === state && daemonStatus.code === code ? latestSides : false;
 	},
 	onChange: (status) => {
 		console.info("AO: installed desktop build changed", { running: DESKTOP_BUILD_ID, installed: status?.identity, idle: status?.idle });
