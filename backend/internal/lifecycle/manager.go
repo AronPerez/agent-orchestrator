@@ -18,6 +18,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/reqid"
+	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessionguard"
 )
 
@@ -352,8 +353,8 @@ func (m *Manager) NudgeSession(ctx context.Context, id domain.SessionID, message
 	if m == nil || m.guard == nil {
 		return false, nil
 	}
-	outcome, err := m.guard.Nudge(ctx, id, message)
-	return outcome == sessionguard.Sent, err
+	outcome, err := m.guard.NudgeCoordination(ctx, id, message, m.steerActive)
+	return coordinationNudgeSent(outcome, err), err
 }
 
 // NudgeIdleSession is NudgeSession with active-turn steering disabled. Stall
@@ -364,7 +365,17 @@ func (m *Manager) NudgeIdleSession(ctx context.Context, id domain.SessionID, mes
 		return false, nil
 	}
 	outcome, err := m.guard.NudgeCoordination(ctx, id, message, nil)
-	return outcome == sessionguard.Sent, err
+	return coordinationNudgeSent(outcome, err), err
+}
+
+func coordinationNudgeSent(outcome sessionguard.Outcome, err error) bool {
+	if outcome != sessionguard.Sent {
+		return false
+	}
+	// DeliveryUnconfirmed is the one messenger error that follows a pane
+	// write. Other errors are definite refusals or pre-write failures and must
+	// remain retryable by the contract coordinator.
+	return err == nil || errors.Is(err, sessionmanager.ErrDeliveryUnconfirmed)
 }
 
 // SetCompletionTerminator wires merge completion to the same teardown path as

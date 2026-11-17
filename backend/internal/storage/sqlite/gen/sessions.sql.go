@@ -194,29 +194,22 @@ func (q *Queries) CountStaleBinarySessions(ctx context.Context) ([]CountStaleBin
 const expireSessionContract = `-- name: ExpireSessionContract :execrows
 UPDATE sessions
 SET contract_outcome = 'limit_hit',
-    contract_timebox_prompted_at = ?1,
-    updated_at = ?2
-WHERE id = ?3
+    updated_at = ?1
+WHERE id = ?2
   AND goal <> ''
   AND contract_outcome = ''
-  AND timebox_deadline_at = ?4
+  AND timebox_deadline_at = ?3
   AND timebox_deadline_at <= ?1
 `
 
 type ExpireSessionContractParams struct {
-	PromptedAt sql.NullTime
 	UpdatedAt  time.Time
 	ID         domain.SessionID
 	DeadlineAt sql.NullTime
 }
 
 func (q *Queries) ExpireSessionContract(ctx context.Context, arg ExpireSessionContractParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, expireSessionContract,
-		arg.PromptedAt,
-		arg.UpdatedAt,
-		arg.ID,
-		arg.DeadlineAt,
-	)
+	result, err := q.db.ExecContext(ctx, expireSessionContract, arg.UpdatedAt, arg.ID, arg.DeadlineAt)
 	if err != nil {
 		return 0, err
 	}
@@ -1709,6 +1702,36 @@ type RecordSessionContractStallNudgeParams struct {
 
 func (q *Queries) RecordSessionContractStallNudge(ctx context.Context, arg RecordSessionContractStallNudgeParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, recordSessionContractStallNudge, arg.NudgedAt, arg.UpdatedAt, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const recordSessionContractTimeboxPrompt = `-- name: RecordSessionContractTimeboxPrompt :execrows
+UPDATE sessions
+SET contract_timebox_prompted_at = ?1,
+    updated_at = ?2
+WHERE id = ?3
+  AND contract_outcome = 'limit_hit'
+  AND contract_timebox_prompted_at IS NULL
+  AND timebox_deadline_at = ?4
+`
+
+type RecordSessionContractTimeboxPromptParams struct {
+	PromptedAt sql.NullTime
+	UpdatedAt  time.Time
+	ID         domain.SessionID
+	DeadlineAt sql.NullTime
+}
+
+func (q *Queries) RecordSessionContractTimeboxPrompt(ctx context.Context, arg RecordSessionContractTimeboxPromptParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, recordSessionContractTimeboxPrompt,
+		arg.PromptedAt,
+		arg.UpdatedAt,
+		arg.ID,
+		arg.DeadlineAt,
+	)
 	if err != nil {
 		return 0, err
 	}

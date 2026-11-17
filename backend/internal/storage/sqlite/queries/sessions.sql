@@ -516,13 +516,21 @@ WHERE id = sqlc.arg(id)
 -- name: ExpireSessionContract :execrows
 UPDATE sessions
 SET contract_outcome = 'limit_hit',
-    contract_timebox_prompted_at = sqlc.arg(prompted_at),
     updated_at = sqlc.arg(updated_at)
 WHERE id = sqlc.arg(id)
   AND goal <> ''
   AND contract_outcome = ''
   AND timebox_deadline_at = sqlc.arg(deadline_at)
-  AND timebox_deadline_at <= sqlc.arg(prompted_at);
+  AND timebox_deadline_at <= sqlc.arg(updated_at);
+
+-- name: RecordSessionContractTimeboxPrompt :execrows
+UPDATE sessions
+SET contract_timebox_prompted_at = sqlc.arg(prompted_at),
+    updated_at = sqlc.arg(updated_at)
+WHERE id = sqlc.arg(id)
+  AND contract_outcome = 'limit_hit'
+  AND contract_timebox_prompted_at IS NULL
+  AND timebox_deadline_at = sqlc.arg(deadline_at);
 
 -- name: SetSessionProvisionedWorkspace :execrows
 -- Publish the worktree the moment it exists, rather than waiting for the

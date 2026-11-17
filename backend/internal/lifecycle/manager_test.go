@@ -16,6 +16,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 )
 
@@ -339,13 +340,45 @@ func TestNudgeIdleSessionUsesInputSafetyGuard(t *testing.T) {
 }
 
 func TestNudgeSessionCanSteerActiveDeadline(t *testing.T) {
-	m, st, messenger := newManager()
+	m, st, messenger := newManager(WithActiveSteering(func(h domain.AgentHarness) bool { return h == domain.HarnessCodex }))
 	rec := working("mer-1")
+	rec.Harness = domain.HarnessCodex
 	st.sessions[rec.ID] = rec
 
 	sent, err := m.NudgeSession(context.Background(), rec.ID, "wrap up and report")
 	if err != nil || !sent || len(messenger.msgs) != 1 {
 		t.Fatalf("sent=%v messages=%v err=%v", sent, messenger.msgs, err)
+	}
+}
+
+func TestNudgeSessionSuppressesActiveHarnessWithoutSteering(t *testing.T) {
+	m, st, messenger := newManager()
+	rec := working("mer-1")
+	rec.Harness = domain.HarnessClaudeCode
+	st.sessions[rec.ID] = rec
+
+	sent, err := m.NudgeSession(context.Background(), rec.ID, "wrap up and report")
+	if err != nil || sent || len(messenger.msgs) != 0 {
+		t.Fatalf("sent=%v messages=%v err=%v", sent, messenger.msgs, err)
+	}
+}
+
+func TestNudgeSessionReportsDefiniteMessengerRefusalAsUnsent(t *testing.T) {
+	m, st, messenger := newManager(WithActiveSteering(func(domain.AgentHarness) bool { return true }))
+	rec := working("mer-1")
+	rec.Harness = domain.HarnessCodex
+	st.sessions[rec.ID] = rec
+	messenger.err = sessionmanager.ErrComposerBusy
+
+	sent, err := m.NudgeSession(context.Background(), rec.ID, "wrap up and report")
+	if !errors.Is(err, sessionmanager.ErrComposerBusy) || sent {
+		t.Fatalf("sent=%v err=%v, want definite refusal", sent, err)
+	}
+
+	messenger.err = sessionmanager.ErrDeliveryUnconfirmed
+	sent, err = m.NudgeSession(context.Background(), rec.ID, "wrap up and report")
+	if !errors.Is(err, sessionmanager.ErrDeliveryUnconfirmed) || !sent {
+		t.Fatalf("sent=%v err=%v, want ambiguous post-write delivery", sent, err)
 	}
 }
 

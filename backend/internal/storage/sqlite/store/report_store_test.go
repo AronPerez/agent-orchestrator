@@ -134,6 +134,37 @@ func TestReportStoreCreatesReportWithFirstContractOutcome(t *testing.T) {
 	}
 }
 
+func TestReportStoreCreateOnceReturnsExistingReport(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "ao")
+	sess, err := s.CreateSession(ctx, sampleRecord("ao"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	rec := domain.ReportRecord{
+		ID: "rpt_contract_once", SessionID: sess.ID, ProjectID: sess.ProjectID,
+		State: domain.ReportCheckpoint, Note: "first", CreatedAt: now, DeliveryState: domain.ReportPending,
+		AvailableAt: now, RepeatCount: 1,
+		Outputs: []domain.ReportOutput{{Kind: domain.ReportOutputArtifact, Reference: "result.md"}},
+	}
+	first, inserted, err := s.CreateReportWithContractOutcomeOnce(ctx, rec, domain.SessionContractOutcomeNone)
+	if err != nil || !inserted || first.Note != "first" || len(first.Outputs) != 1 {
+		t.Fatalf("first=%+v inserted=%v err=%v", first, inserted, err)
+	}
+	replay := rec
+	replay.Note = "retry must not replace durable content"
+	second, inserted, err := s.CreateReportWithContractOutcomeOnce(ctx, replay, domain.SessionContractOutcomeNone)
+	if err != nil || inserted || second.Note != "first" || len(second.Outputs) != 1 || second.Outputs[0].Reference != "result.md" {
+		t.Fatalf("second=%+v inserted=%v err=%v", second, inserted, err)
+	}
+	rows, err := s.ListReportsBySession(ctx, sess.ID)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows=%+v err=%v", rows, err)
+	}
+}
+
 func TestReportStoreClaimAcknowledgeAndTokenFence(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

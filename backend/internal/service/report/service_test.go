@@ -14,6 +14,8 @@ type fakeStore struct {
 	created         domain.ReportRecord
 	contractOutcome domain.SessionContractOutcome
 	reports         []domain.ReportRecord
+	byID            map[string]domain.ReportRecord
+	insertions      int
 }
 
 func (f *fakeStore) GetSession(context.Context, domain.SessionID) (domain.SessionRecord, bool, error) {
@@ -27,6 +29,19 @@ func (f *fakeStore) CreateReportWithContractOutcome(_ context.Context, r domain.
 	f.created = r
 	f.contractOutcome = outcome
 	return r, nil
+}
+func (f *fakeStore) CreateReportWithContractOutcomeOnce(_ context.Context, r domain.ReportRecord, outcome domain.SessionContractOutcome) (domain.ReportRecord, bool, error) {
+	if f.byID == nil {
+		f.byID = make(map[string]domain.ReportRecord)
+	}
+	if existing, ok := f.byID[r.ID]; ok {
+		return existing, false, nil
+	}
+	f.byID[r.ID] = r
+	f.created = r
+	f.contractOutcome = outcome
+	f.insertions++
+	return r, true, nil
 }
 func (f *fakeStore) ListReportsByProject(context.Context, domain.ProjectID) ([]domain.ReportRecord, error) {
 	return append([]domain.ReportRecord(nil), f.reports...), nil
@@ -83,6 +98,28 @@ func TestCreateDerivesOwnershipAndFixedDeliveryDeadlines(t *testing.T) {
 				t.Fatalf("report=%+v", r)
 			}
 		})
+	}
+}
+
+func TestCreateImmediateOnceIsReplaySafe(t *testing.T) {
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	st := &fakeStore{ok: true, session: domain.SessionRecord{ID: "ao-7", ProjectID: "ao", Kind: domain.KindWorker}}
+	created := 0
+	svc := New(Deps{Store: st, Now: func() time.Time { return now }, OnCreated: func(domain.ReportRecord) { created++ }})
+	input := CreateInput{SessionID: "ao-7", Message: "worker stopped without reporting"}
+	first, err := svc.CreateImmediateOnce(context.Background(), input, "session-contract-stall:ao-7:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := svc.CreateImmediateOnce(context.Background(), input, "session-contract-stall:ao-7:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ID == "" || first.ID != second.ID || !first.AvailableAt.Equal(now) || first.DeliveryState != domain.ReportPending {
+		t.Fatalf("first=%+v second=%+v", first, second)
+	}
+	if st.insertions != 1 || created != 1 {
+		t.Fatalf("insertions=%d onCreated=%d, want one", st.insertions, created)
 	}
 }
 

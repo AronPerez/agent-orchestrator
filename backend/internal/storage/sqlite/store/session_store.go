@@ -902,10 +902,28 @@ func (s *Store) ExpireSessionContract(ctx context.Context, id domain.SessionID, 
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	rows, err := s.qw.ExpireSessionContract(ctx, gen.ExpireSessionContractParams{
-		PromptedAt: nullTime(at), UpdatedAt: at, ID: id, DeadlineAt: nullTime(deadline),
+		UpdatedAt: at, ID: id, DeadlineAt: nullTime(deadline),
 	})
 	if err != nil {
 		return false, fmt.Errorf("expire session contract for %s: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// RecordSessionContractTimeboxPrompt stamps delivery separately from the
+// limit_hit outcome so an unsafe surface can be retried without reopening the
+// contract or duplicating a prompt that already landed.
+func (s *Store) RecordSessionContractTimeboxPrompt(ctx context.Context, id domain.SessionID, deadline, at time.Time) (bool, error) {
+	if id == "" || deadline.IsZero() || at.IsZero() {
+		return false, fmt.Errorf("invalid contract timebox prompt")
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.RecordSessionContractTimeboxPrompt(ctx, gen.RecordSessionContractTimeboxPromptParams{
+		PromptedAt: nullTime(at), UpdatedAt: at, ID: id, DeadlineAt: nullTime(deadline),
+	})
+	if err != nil {
+		return false, fmt.Errorf("record contract timebox prompt for %s: %w", id, err)
 	}
 	return rows > 0, nil
 }
