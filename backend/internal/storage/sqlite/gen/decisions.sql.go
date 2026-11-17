@@ -291,9 +291,11 @@ WHERE current.stream_session_id <> ''
   AND current.call_id = (
       SELECT latest.call_id
       FROM decision_calls AS latest
+      JOIN decision_entries AS raised
+        ON raised.call_id = latest.call_id AND raised.kind = 'raised'
       WHERE latest.origin = current.origin
         AND latest.stream_session_id = current.stream_session_id
-      ORDER BY latest.raised_at DESC, latest.call_id DESC
+      ORDER BY raised.stamp_wall DESC, raised.stamp_counter DESC, raised.origin DESC, raised.id DESC
       LIMIT 1
   )
 ORDER BY current.origin, current.stream_session_id

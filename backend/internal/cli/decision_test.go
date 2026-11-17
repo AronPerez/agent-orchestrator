@@ -37,6 +37,7 @@ func TestDecisionRaiseUsage(t *testing.T) {
 		{"recommend zero", []string{"decision", "raise", "--title", "x", "--context", "y", "--option", opt1, "--option", opt2, "--recommend", "0"}, "--recommend takes the position"},
 		{"bad link", []string{"decision", "raise", "--title", "x", "--context", "y", "--option", opt1, "--option", opt2, "--recommend", "1", "--link", "PR"}, "write each --link as"},
 		{"search without words", []string{"decision", "search"}, "say what to search for"},
+		{"search with whitespace only", []string{"decision", "search", "  ", "\t"}, "say what to search for"},
 		{"show without id", []string{"decision", "show"}, "ao decision show <id>"},
 	}
 	for _, tc := range tests {

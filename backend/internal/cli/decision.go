@@ -219,7 +219,7 @@ func newDecisionSearchCommand(ctx *commandContext) *cobra.Command {
 		Use:   "search <words...>",
 		Short: "Search decision calls",
 		Args: func(_ *cobra.Command, args []string) error {
-			if len(args) == 0 {
+			if strings.TrimSpace(strings.Join(args, " ")) == "" {
 				return usageError{errors.New("usage: say what to search for")}
 			}
 			return nil

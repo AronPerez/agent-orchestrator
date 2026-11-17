@@ -16,7 +16,7 @@ FROM decision_calls_fts
 JOIN decision_calls ON decision_calls.rowid = decision_calls_fts.rowid
 WHERE decision_calls_fts MATCH ?
 ORDER BY
-    CASE WHEN ? <> '' AND decision_calls.project_id = ? THEN 0 ELSE 1 END,
+    CASE WHEN ? = 1 AND decision_calls.project_id = ? THEN 0 ELSE 1 END,
     decision_calls.retired,
     decision_calls_fts.rank,
     decision_calls_fts.rowid
@@ -24,7 +24,7 @@ LIMIT ?`
 
 // SearchDecisionCalls returns matching calls by FTS rank. All words must match;
 // when none do, a multi-word query falls back to any word.
-func (s *Store) SearchDecisionCalls(ctx context.Context, query string, project domain.ProjectID, limit int) ([]domain.DecisionCall, error) {
+func (s *Store) SearchDecisionCalls(ctx context.Context, query string, project domain.ProjectID, preferProject bool, limit int) ([]domain.DecisionCall, error) {
 	words := ftsWords(strings.Join(domain.SearchTerms(query), " "))
 	if len(words) == 0 {
 		return nil, nil
@@ -34,15 +34,19 @@ func (s *Store) SearchDecisionCalls(ctx context.Context, query string, project d
 		terms[i] = `"` + word + `"`
 	}
 	terms[len(terms)-1] += "*"
-	calls, err := s.searchDecisionCalls(ctx, strings.Join(terms, " "), project, limit)
+	calls, err := s.searchDecisionCalls(ctx, strings.Join(terms, " "), project, preferProject, limit)
 	if err != nil || len(calls) > 0 || len(terms) == 1 {
 		return calls, err
 	}
-	return s.searchDecisionCalls(ctx, strings.Join(terms, " OR "), project, limit)
+	return s.searchDecisionCalls(ctx, strings.Join(terms, " OR "), project, preferProject, limit)
 }
 
-func (s *Store) searchDecisionCalls(ctx context.Context, match string, project domain.ProjectID, limit int) ([]domain.DecisionCall, error) {
-	rows, err := s.readDB.QueryContext(ctx, searchDecisionCallsSQL, match, string(project), string(project), limit)
+func (s *Store) searchDecisionCalls(ctx context.Context, match string, project domain.ProjectID, preferProject bool, limit int) ([]domain.DecisionCall, error) {
+	preference := 0
+	if preferProject {
+		preference = 1
+	}
+	rows, err := s.readDB.QueryContext(ctx, searchDecisionCallsSQL, match, preference, string(project), limit)
 	if err != nil {
 		return nil, fmt.Errorf("search decision calls: %w", err)
 	}

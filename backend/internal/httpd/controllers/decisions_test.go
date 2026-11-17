@@ -22,12 +22,13 @@ import (
 const raiseDecisionBody = `{"title":"Which auth scheme should the proxy use?","context":"The connector calls the proxy for each tenant.","options":[{"label":"OAuth client credentials","consequence":"One app registration per tenant.","recommended":true},{"label":"Per-tenant API keys","consequence":"Customers rotate keys by hand."}]}`
 
 type fakeDecisionService struct {
-	actor decisionsvc.Actor
-	raise decisionsvc.RaiseInput
-	scope decisionsvc.Scope
-	query string
-	id    string
-	err   error
+	actor    decisionsvc.Actor
+	raise    decisionsvc.RaiseInput
+	scope    decisionsvc.Scope
+	query    string
+	searches int
+	id       string
+	err      error
 }
 
 func (f *fakeDecisionService) Raise(_ context.Context, actor decisionsvc.Actor, input decisionsvc.RaiseInput) (domain.DecisionCall, error) {
@@ -60,6 +61,7 @@ func (f *fakeDecisionService) List(_ context.Context, actor decisionsvc.Actor, s
 
 func (f *fakeDecisionService) Search(_ context.Context, actor decisionsvc.Actor, query string) ([]domain.DecisionCall, error) {
 	f.actor, f.query = actor, query
+	f.searches++
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -84,10 +86,14 @@ func sampleDecisionCall() domain.DecisionCall {
 
 func newDecisionServer(t *testing.T, svc *fakeDecisionService) *httptest.Server {
 	t.Helper()
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	srv := httptest.NewServer(httpd.NewRouterWithControl(config.Config{}, log, nil, httpd.APIDeps{Decisions: svc}, httpd.ControlDeps{}))
+	srv := httptest.NewServer(newDecisionHandler(svc))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+func newDecisionHandler(svc *fakeDecisionService) http.Handler {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	return httpd.NewRouterWithControl(config.Config{}, log, nil, httpd.APIDeps{Decisions: svc}, httpd.ControlDeps{})
 }
 
 func decisionRequest(t *testing.T, srv *httptest.Server, method, path, body, callerSession string) ([]byte, int) {
@@ -158,6 +164,23 @@ func TestDecisionsAPI_ListSearchAndGet(t *testing.T) {
 	body, status := decisionRequest(t, srv, http.MethodGet, "/api/v1/decisions/dec_1", "", "")
 	if status != http.StatusOK || svc.id != "dec_1" || !reportContainsAll(string(body), `"id":"dec_1"`, `"kind":"raised"`, `"authorKind":"session"`, `"authorSession":"w-1"`) {
 		t.Fatalf("get status=%d body=%s id=%q", status, body, svc.id)
+	}
+}
+
+func TestDecisionsAPI_ExplicitBlankQueryUsesSearchValidation(t *testing.T) {
+	for _, path := range []string{"/api/v1/decisions?q=", "/api/v1/decisions?q=%20%20"} {
+		t.Run(path, func(t *testing.T) {
+			svc := &fakeDecisionService{err: apierr.Invalid("DECISION_QUERY_REQUIRED", "Say what to search for.", nil)}
+			recorder := httptest.NewRecorder()
+			newDecisionHandler(svc).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+			body, status := recorder.Body.Bytes(), recorder.Code
+			if status != http.StatusBadRequest || !reportContainsAll(string(body), "DECISION_QUERY_REQUIRED", "Say what to search for") {
+				t.Fatalf("status=%d body=%s", status, body)
+			}
+			if svc.searches != 1 {
+				t.Fatalf("searches=%d scope=%q, want one search", svc.searches, svc.scope)
+			}
+		})
 	}
 }
 

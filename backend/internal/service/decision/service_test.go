@@ -257,6 +257,49 @@ func TestSearchAppliesProjectAndRetirementPriorityBeforeLimit(t *testing.T) {
 	}
 }
 
+func TestSearchAppliesProjectlessSessionPriorityBeforeLimit(t *testing.T) {
+	t.Run("at the limit", func(t *testing.T) {
+		fixture := newDecisionService(t)
+		ctx := context.Background()
+		for range 20 {
+			if _, err := fixture.service.Raise(ctx, Actor{Session: fixture.w1}, validRaiseInput()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		projectless, err := fixture.service.Raise(ctx, Actor{Session: fixture.loose}, validRaiseInput())
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		calls, err := fixture.service.Search(ctx, Actor{Session: fixture.loose}, "auth scheme")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(calls) != 20 || calls[0].ID != projectless.ID {
+			t.Fatalf("search first=%q len=%d, want projectless %s first", callIDs(calls[:min(len(calls), 1)]), len(calls), projectless.ID)
+		}
+	})
+
+	t.Run("under the limit", func(t *testing.T) {
+		fixture := newDecisionService(t)
+		ctx := context.Background()
+		project, err := fixture.service.Raise(ctx, Actor{Session: fixture.w1}, validRaiseInput())
+		if err != nil {
+			t.Fatal(err)
+		}
+		projectless, err := fixture.service.Raise(ctx, Actor{Session: fixture.loose}, validRaiseInput())
+		if err != nil {
+			t.Fatal(err)
+		}
+		retireDecisionForTest(t, fixture, projectless, 0)
+
+		calls, err := fixture.service.Search(ctx, Actor{Session: fixture.loose}, "auth scheme")
+		if err != nil || callIDs(calls) != projectless.ID+","+project.ID {
+			t.Fatalf("search=%q err=%v, want projectless call first", callIDs(calls), err)
+		}
+	})
+}
+
 func TestListDoesNotHideOutstandingCallsPastOldCaps(t *testing.T) {
 	fixture := newDecisionService(t)
 	ctx := context.Background()

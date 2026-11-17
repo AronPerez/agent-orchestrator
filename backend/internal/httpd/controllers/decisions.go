@@ -73,12 +73,14 @@ func (c *DecisionsController) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actor := decisionActor(r)
-	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	values := r.URL.Query()
+	query := strings.TrimSpace(values.Get("q"))
+	_, hasQuery := values["q"]
 	var (
 		calls []domain.DecisionCall
 		err   error
 	)
-	if query != "" {
+	if hasQuery {
 		calls, err = c.Svc.Search(r.Context(), actor, query)
 	} else {
 		scope := decisionsvc.Scope(r.URL.Query().Get("scope"))

@@ -27,7 +27,7 @@ type Store interface {
 	ListDecisionCallsByOwner(context.Context, string, domain.SessionID, int) ([]domain.DecisionCall, error)
 	ListDecisionCallsByState(context.Context, domain.DecisionCallState, int) ([]domain.DecisionCall, error)
 	ListDecisionStreams(context.Context) ([]domain.DecisionStream, error)
-	SearchDecisionCalls(context.Context, string, domain.ProjectID, int) ([]domain.DecisionCall, error)
+	SearchDecisionCalls(context.Context, string, domain.ProjectID, bool, int) ([]domain.DecisionCall, error)
 }
 
 // Deps supplies the decision service's persistence, identity, clock and hooks.
@@ -217,11 +217,7 @@ func (s *Service) Search(ctx context.Context, actor Actor, query string) ([]doma
 	if err != nil {
 		return nil, err
 	}
-	priorityProject := domain.ProjectID("")
-	if hasProject {
-		priorityProject = project
-	}
-	calls, err := s.store.SearchDecisionCalls(ctx, query, priorityProject, 20)
+	calls, err := s.store.SearchDecisionCalls(ctx, query, project, hasProject, 20)
 	if err != nil {
 		return nil, err
 	}

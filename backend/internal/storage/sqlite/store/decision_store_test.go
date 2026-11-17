@@ -166,6 +166,23 @@ func TestDecisionCallLists(t *testing.T) {
 	}
 }
 
+func TestDecisionStreamsUseLedgerOrderWhenTheClockMovesBackward(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	at := time.UnixMilli(1_000_000).UTC()
+	first, _ := appendDecision(t, store, decisionRaised("dent_1", "h_a", "dec_1", "w-1", "epic", "Checkout", at), at)
+	second, _ := appendDecision(t, store, decisionRaised("dent_2", "h_a", "dec_2", "w-1", "epic", "Checkout epic", at.Add(-time.Hour)), at.Add(-time.Hour))
+	if domain.CompareDecisionEntries(first, second) >= 0 {
+		t.Fatalf("ledger order first=%+v second=%+v, want second later", first.Stamp, second.Stamp)
+	}
+
+	streams, err := store.ListDecisionStreams(ctx)
+	want := []domain.DecisionStream{{Origin: "h_a", SessionID: "epic", Name: "Checkout epic"}}
+	if err != nil || !reflect.DeepEqual(streams, want) {
+		t.Fatalf("streams=%+v err=%v, want %+v", streams, err, want)
+	}
+}
+
 func decisionIDs(calls []domain.DecisionCall) string {
 	ids := make([]string, len(calls))
 	for i, call := range calls {
