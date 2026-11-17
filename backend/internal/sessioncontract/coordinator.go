@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -14,8 +15,13 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
-// DefaultSweepInterval is the production cadence for contract evaluation.
-const DefaultSweepInterval = time.Minute
+const (
+	// DefaultSweepInterval is the production cadence for contract evaluation.
+	DefaultSweepInterval = time.Minute
+	// DefaultEvaluationTimeout prevents one unresponsive delivery provider from
+	// blocking every later worker and all future sweeps.
+	DefaultEvaluationTimeout = 30 * time.Second
+)
 
 const (
 	stallNudgeMessage = "You stopped without reporting. Continue working, or report done, stuck, or needs input."
@@ -84,8 +90,9 @@ type Result struct {
 
 // Config customizes deterministic time, cadence, and logging.
 type Config struct {
-	Clock         func() time.Time
-	SweepInterval time.Duration
+	Clock             func() time.Time
+	SweepInterval     time.Duration
+	EvaluationTimeout time.Duration
 	// StartAfter holds the first sweep until startup reconciliation has made
 	// persisted activity and runtime facts safe to act on. Nil starts at once.
 	StartAfter <-chan struct{}
@@ -94,14 +101,17 @@ type Config struct {
 
 // Coordinator evaluates contracted workers and owns the periodic sweep.
 type Coordinator struct {
-	store         Store
-	nudger        Nudger
-	reporter      StallReporter
-	notifier      Notifier
-	clock         func() time.Time
-	sweepInterval time.Duration
-	startAfter    <-chan struct{}
-	logger        *slog.Logger
+	store             Store
+	nudger            Nudger
+	reporter          StallReporter
+	notifier          Notifier
+	clock             func() time.Time
+	sweepInterval     time.Duration
+	evaluationTimeout time.Duration
+	startAfter        <-chan struct{}
+	logger            *slog.Logger
+	evaluationMu      sync.Mutex
+	evaluating        map[domain.SessionID]struct{}
 }
 
 // New constructs a contract coordinator.
@@ -112,12 +122,16 @@ func New(store Store, nudger Nudger, reporter StallReporter, notifier Notifier, 
 	if cfg.SweepInterval <= 0 {
 		cfg.SweepInterval = DefaultSweepInterval
 	}
+	if cfg.EvaluationTimeout <= 0 {
+		cfg.EvaluationTimeout = DefaultEvaluationTimeout
+	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
 	return &Coordinator{
 		store: store, nudger: nudger, reporter: reporter, notifier: notifier,
-		clock: cfg.Clock, sweepInterval: cfg.SweepInterval, startAfter: cfg.StartAfter, logger: cfg.Logger,
+		clock: cfg.Clock, sweepInterval: cfg.SweepInterval, evaluationTimeout: cfg.EvaluationTimeout,
+		startAfter: cfg.StartAfter, logger: cfg.Logger, evaluating: make(map[domain.SessionID]struct{}),
 	}
 }
 
@@ -352,11 +366,47 @@ func (c *Coordinator) Sweep(ctx context.Context) error {
 		return err
 	}
 	for _, rec := range sessions {
-		if _, err := c.EvaluateSession(ctx, rec.ID); err != nil {
-			c.logger.Error("session contract: evaluate session failed", "session_id", rec.ID, "err", err)
+		if !c.beginEvaluation(rec.ID) {
+			continue
+		}
+		evalCtx, cancel := context.WithTimeout(ctx, c.evaluationTimeout)
+		result := make(chan error, 1)
+		go func(evalCtx context.Context, id domain.SessionID) {
+			defer c.endEvaluation(id)
+			_, evalErr := c.EvaluateSession(evalCtx, id)
+			result <- evalErr
+		}(evalCtx, rec.ID)
+		var evalErr error
+		select {
+		case evalErr = <-result:
+		case <-evalCtx.Done():
+			evalErr = evalCtx.Err()
+		}
+		cancel()
+		if evalErr != nil {
+			c.logger.Error("session contract: evaluate session failed", "session_id", rec.ID, "err", evalErr)
 		}
 	}
 	return nil
+}
+
+func (c *Coordinator) beginEvaluation(id domain.SessionID) bool {
+	c.evaluationMu.Lock()
+	defer c.evaluationMu.Unlock()
+	if _, running := c.evaluating[id]; running {
+		return false
+	}
+	if c.evaluating == nil {
+		c.evaluating = make(map[domain.SessionID]struct{})
+	}
+	c.evaluating[id] = struct{}{}
+	return true
+}
+
+func (c *Coordinator) endEvaluation(id domain.SessionID) {
+	c.evaluationMu.Lock()
+	delete(c.evaluating, id)
+	c.evaluationMu.Unlock()
 }
 
 // Start waits for the optional startup fence, then evaluates persisted

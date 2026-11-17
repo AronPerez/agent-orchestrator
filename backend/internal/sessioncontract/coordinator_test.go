@@ -3,6 +3,7 @@ package sessioncontract
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ type fakeStore struct {
 	prs      map[domain.SessionID][]domain.PullRequest
 	comments map[string][]domain.PullRequestComment
 	listed   chan struct{}
+	list     []domain.SessionRecord
 }
 
 func (f *fakeStore) GetSession(_ context.Context, id domain.SessionID) (domain.SessionRecord, bool, error) {
@@ -29,6 +31,9 @@ func (f *fakeStore) ListAllSessions(context.Context) ([]domain.SessionRecord, er
 		case f.listed <- struct{}{}:
 		default:
 		}
+	}
+	if f.list != nil {
+		return append([]domain.SessionRecord(nil), f.list...), nil
 	}
 	out := make([]domain.SessionRecord, 0, len(f.sessions))
 	for _, rec := range f.sessions {
@@ -92,14 +97,28 @@ func (f *fakeStore) RecordSessionContractTimeboxPrompt(_ context.Context, id dom
 }
 
 type fakeNudger struct {
-	sent  bool
-	err   error
-	calls []string
+	sent    bool
+	err     error
+	blockID domain.SessionID
+	mu      sync.Mutex
+	calls   []string
 }
 
-func (f *fakeNudger) NudgeSession(_ context.Context, id domain.SessionID, key, message string) (bool, error) {
+func (f *fakeNudger) NudgeSession(ctx context.Context, id domain.SessionID, key, message string) (bool, error) {
+	f.mu.Lock()
 	f.calls = append(f.calls, string(id)+" "+key+" "+message)
+	f.mu.Unlock()
+	if id == f.blockID {
+		<-ctx.Done()
+		return false, ctx.Err()
+	}
 	return f.sent, f.err
+}
+
+func (f *fakeNudger) callLog() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.calls...)
 }
 
 func (f *fakeNudger) NudgeIdleSession(ctx context.Context, id domain.SessionID, key, message string) (bool, error) {
@@ -415,5 +434,32 @@ func TestStartWaitsForStartupReconciliation(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("contract coordinator did not stop after cancellation")
+	}
+}
+
+func TestSweepBoundsEachWorkerEvaluation(t *testing.T) {
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	store, firstID := contractFixture(now)
+	first := store.sessions[firstID]
+	firstDeadline := now.Add(-time.Minute)
+	first.TimeboxDeadlineAt = &firstDeadline
+	first.ContractOutcome = domain.SessionContractOutcomeLimitHit
+	store.sessions[firstID] = first
+
+	secondID := domain.SessionID("worker-2")
+	second := first
+	second.ID = secondID
+	store.sessions[secondID] = second
+	store.list = []domain.SessionRecord{first, second}
+	nudger := &fakeNudger{blockID: firstID}
+	c := New(store, nudger, nil, nil, Config{
+		Clock: func() time.Time { return now }, EvaluationTimeout: 5 * time.Millisecond,
+	})
+
+	if err := c.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if calls := nudger.callLog(); len(calls) != 2 {
+		t.Fatalf("nudge calls = %v, want both workers evaluated", calls)
 	}
 }

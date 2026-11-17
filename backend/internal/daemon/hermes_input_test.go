@@ -82,6 +82,8 @@ func TestHermesEveryGuardedWriteRequiresCurrentEmptyComposer(t *testing.T) {
 	messenger := newSessionMessenger(store, runtime, nil, lineAgentResolver{})
 	if err := messenger.Send(ctx, rec.ID, "yes"); err == nil {
 		t.Fatal("answered native decision using stale durable idle")
+	} else if errors.Is(err, ports.ErrAgentDeliveryUnconfirmed) {
+		t.Fatalf("pre-write refusal marked ambiguous: %v", err)
 	}
 	if err := messenger.Send(ctx, rec.ID, "task"); err == nil {
 		t.Fatal("modal crossed shared writer")
@@ -137,6 +139,8 @@ func TestHermesAdmissionKeepsPendingAfterAmbiguousSendError(t *testing.T) {
 	messenger := newSessionMessenger(store, runtime, nil, lineAgentResolver{})
 	if err := messenger.Send(ctx, rec.ID, "first"); err == nil {
 		t.Fatal("write failure ignored")
+	} else if !errors.Is(err, ports.ErrAgentDeliveryUnconfirmed) {
+		t.Fatalf("post-write error = %v, want ErrAgentDeliveryUnconfirmed", err)
 	}
 	// The write may have landed: an unchanged frame must not admit a retry.
 	runtime.sendErr = nil
@@ -153,6 +157,31 @@ func TestHermesAdmissionKeepsPendingAfterAmbiguousSendError(t *testing.T) {
 	}
 	if len(runtime.messages) != 1 || runtime.messages[0] != "second" {
 		t.Fatalf("unexpected writes: %v", runtime.messages)
+	}
+}
+
+func TestRuntimeMessengerMarksGenericRuntimeErrorAmbiguous(t *testing.T) {
+	store, err := sqlitetest.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := t.Context()
+	if err := store.UpsertProject(ctx, domain.ProjectRecord{ID: "p", Path: "/repo/p", RegisteredAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := store.CreateSession(ctx, domain.SessionRecord{
+		ProjectID: "p", Kind: domain.KindWorker, Harness: domain.HarnessClaudeCode,
+		Activity: domain.Activity{State: domain.ActivityIdle},
+		Metadata: domain.SessionMetadata{RuntimeHandleID: "pane", RuntimeLaunchID: "generation"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &lineInputRuntime{sendErr: errors.New("runtime acknowledged after applying input")}
+	err = newSessionMessenger(store, runtime, nil).Send(ctx, rec.ID, "first")
+	if !errors.Is(err, ports.ErrAgentDeliveryUnconfirmed) {
+		t.Fatalf("generic runtime error = %v, want ErrAgentDeliveryUnconfirmed", err)
 	}
 }
 
@@ -199,7 +228,7 @@ func TestHermesAdmissionRecoversAfterEchoTimeout(t *testing.T) {
 	idle := "────────────────────────────────────────\n❯ \n────────────────────────────────────────"
 	runtime := &lineInputRuntime{screen: idle, holdScreen: true}
 	messenger := newSessionMessenger(store, runtime, nil, lineAgentResolver{})
-	if err := messenger.Send(ctx, rec.ID, "first"); err == nil || !strings.Contains(err.Error(), "native echo unconfirmed") {
+	if err := messenger.Send(ctx, rec.ID, "first"); err == nil || !strings.Contains(err.Error(), "native echo unconfirmed") || !errors.Is(err, ports.ErrAgentDeliveryUnconfirmed) {
 		t.Fatalf("submission with no observed echo did not time out: %v", err)
 	}
 	if len(runtime.messages) != 1 {

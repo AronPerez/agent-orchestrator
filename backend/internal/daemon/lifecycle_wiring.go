@@ -575,7 +575,7 @@ func (m runtimeMessenger) Send(ctx context.Context, id domain.SessionID, message
 			if err := m.runtime.SendMessage(ctx, ports.RuntimeHandle{ID: rec.Metadata.RuntimeHandleID}, message); err != nil {
 				// A runtime may report an error after applying input, so a failed write
 				// stays pending until a native witness or a new runtime generation.
-				return fmt.Errorf("session %s: terminal submission may have been written: %w", id, err)
+				return fmt.Errorf("%w: session %s: terminal submission may have been written: %w", ports.ErrAgentDeliveryUnconfirmed, id, err)
 			}
 			// A socket write acknowledgement precedes native acceptance. Hold admission
 			// until the adapter witnesses submission through busy chrome or a committed
@@ -592,9 +592,9 @@ func (m runtimeMessenger) Send(ctx context.Context, id domain.SessionID, message
 				}
 				select {
 				case <-ctx.Done():
-					return fmt.Errorf("session %s: terminal submission written but unconfirmed: %w", id, ctx.Err())
+					return fmt.Errorf("%w: session %s: terminal submission written but unconfirmed: %w", ports.ErrAgentDeliveryUnconfirmed, id, ctx.Err())
 				case <-deadline.C:
-					return fmt.Errorf("session %s: terminal submission written but native echo unconfirmed; do not automatically retry", id)
+					return fmt.Errorf("%w: session %s: terminal submission written but native echo unconfirmed; do not automatically retry", ports.ErrAgentDeliveryUnconfirmed, id)
 				case <-ticker.C:
 				}
 			}
@@ -605,7 +605,10 @@ func (m runtimeMessenger) Send(ctx context.Context, id domain.SessionID, message
 	if handleID == "" {
 		return fmt.Errorf("session %s: %w", id, sessionmanager.ErrIncompleteHandle)
 	}
-	return m.runtime.SendMessage(ctx, ports.RuntimeHandle{ID: handleID}, message)
+	if err := m.runtime.SendMessage(ctx, ports.RuntimeHandle{ID: handleID}, message); err != nil {
+		return fmt.Errorf("%w: session %s: terminal submission may have been written: %w", ports.ErrAgentDeliveryUnconfirmed, id, err)
+	}
+	return nil
 }
 
 // newSessionMessenger assembles the per-daemon agent messenger. For now, ao

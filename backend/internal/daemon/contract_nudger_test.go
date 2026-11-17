@@ -18,35 +18,37 @@ func (s *contractNudgeStoreStub) GetSession(context.Context, domain.SessionID) (
 }
 
 type contractChatNudgerStub struct {
-	calls []ports.ChatUserMessage
+	calls     []ports.ChatUserMessage
+	err       error
+	idleSent  bool
+	idleCalls []ports.ChatUserMessage
 }
 
 func (s *contractChatNudgerStub) SteerOrSend(_ context.Context, _ domain.SessionID, msg ports.ChatUserMessage, _ bool) (chatsvc.SteerOrSendResult, error) {
 	s.calls = append(s.calls, msg)
-	return chatsvc.SteerOrSendResult{Steered: true}, nil
+	return chatsvc.SteerOrSendResult{Steered: s.err == nil}, s.err
 }
 
-type contractSemanticNudgerStub struct {
-	keys []string
-}
-
-func (s *contractSemanticNudgerStub) SendSemantic(_ context.Context, _ domain.SessionID, _ string, key string) error {
-	s.keys = append(s.keys, key)
-	return nil
+func (s *contractChatNudgerStub) SendIfIdle(_ context.Context, _ domain.SessionID, msg ports.ChatUserMessage) (bool, error) {
+	s.idleCalls = append(s.idleCalls, msg)
+	return s.idleSent, nil
 }
 
 type contractTUINudgerStub struct {
 	deadline int
 	idle     int
+	keys     []string
 }
 
-func (s *contractTUINudgerStub) NudgeSession(context.Context, domain.SessionID, string) (bool, error) {
+func (s *contractTUINudgerStub) NudgeSession(_ context.Context, _ domain.SessionID, key, _ string) (bool, error) {
 	s.deadline++
+	s.keys = append(s.keys, key)
 	return true, nil
 }
 
-func (s *contractTUINudgerStub) NudgeIdleSession(context.Context, domain.SessionID, string) (bool, error) {
+func (s *contractTUINudgerStub) NudgeIdleSession(_ context.Context, _ domain.SessionID, key, _ string) (bool, error) {
 	s.idle++
+	s.keys = append(s.keys, key)
 	return true, nil
 }
 
@@ -64,19 +66,38 @@ func TestContractNudgerSteersActiveChatDeadlineWithStableKey(t *testing.T) {
 	}
 }
 
-func TestContractNudgerUsesSemanticSendOnlyForIdleChatStall(t *testing.T) {
+func TestContractNudgerRetriesUnsupportedChatDeadlineAsIdleSend(t *testing.T) {
+	store := &contractNudgeStoreStub{rec: domain.SessionRecord{ID: "worker", Mode: domain.SessionModeChat, Activity: domain.Activity{State: domain.ActivityActive}}}
+	chat := &contractChatNudgerStub{err: chatsvc.ErrSteerUnsupported}
+	n := contractNudger{store: store, chat: chat}
+
+	sent, err := n.NudgeSession(context.Background(), "worker", "deadline-key", "wrap up")
+	if err != nil || sent || len(chat.idleCalls) != 1 {
+		t.Fatalf("active sent=%v idle calls=%+v err=%v", sent, chat.idleCalls, err)
+	}
+	if got := chat.idleCalls[0]; got.ClientMessageID != "deadline-key:idle" || got.Text != "wrap up" {
+		t.Fatalf("fallback message=%+v", got)
+	}
+	chat.idleSent = true
+	sent, err = n.NudgeSession(context.Background(), "worker", "deadline-key", "wrap up")
+	if err != nil || !sent || len(chat.calls) != 2 || len(chat.idleCalls) != 2 {
+		t.Fatalf("idle recovery sent=%v steer calls=%d idle calls=%d err=%v", sent, len(chat.calls), len(chat.idleCalls), err)
+	}
+}
+
+func TestContractNudgerUsesAtomicIdleSendForChatStall(t *testing.T) {
 	store := &contractNudgeStoreStub{rec: domain.SessionRecord{ID: "worker", Mode: domain.SessionModeChat, Activity: domain.Activity{State: domain.ActivityIdle}}}
-	semantic := &contractSemanticNudgerStub{}
-	n := contractNudger{store: store, semantic: semantic}
+	chat := &contractChatNudgerStub{idleSent: true}
+	n := contractNudger{store: store, chat: chat}
 
 	sent, err := n.NudgeIdleSession(context.Background(), "worker", "stall-key", "continue")
-	if err != nil || !sent || len(semantic.keys) != 1 || semantic.keys[0] != "stall-key" {
-		t.Fatalf("sent=%v keys=%v err=%v", sent, semantic.keys, err)
+	if err != nil || !sent || len(chat.idleCalls) != 1 || chat.idleCalls[0].ClientMessageID != "stall-key" {
+		t.Fatalf("sent=%v calls=%+v err=%v", sent, chat.idleCalls, err)
 	}
 	store.rec.Activity.State = domain.ActivityActive
 	sent, err = n.NudgeIdleSession(context.Background(), "worker", "stale-key", "continue")
-	if err != nil || sent || len(semantic.keys) != 1 {
-		t.Fatalf("active sent=%v keys=%v err=%v", sent, semantic.keys, err)
+	if err != nil || sent || len(chat.idleCalls) != 1 {
+		t.Fatalf("active sent=%v calls=%+v err=%v", sent, chat.idleCalls, err)
 	}
 }
 
@@ -94,5 +115,8 @@ func TestContractNudgerSuppressesNeedsInputAndDelegatesTUI(t *testing.T) {
 	}
 	if tui.deadline != 0 || tui.idle != 1 {
 		t.Fatalf("tui deadline=%d idle=%d", tui.deadline, tui.idle)
+	}
+	if len(tui.keys) != 1 || tui.keys[0] != "stall-key" {
+		t.Fatalf("tui keys=%v", tui.keys)
 	}
 }
