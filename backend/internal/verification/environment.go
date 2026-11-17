@@ -106,5 +106,9 @@ func credentialEnvironmentName(name string) bool {
 
 func credentialBearingURL(value string) bool {
 	parsed, err := url.Parse(value)
-	return err == nil && parsed.IsAbs() && parsed.User != nil && parsed.User.Username() != ""
+	if err != nil || !parsed.IsAbs() || parsed.User == nil {
+		return false
+	}
+	_, hasPassword := parsed.User.Password()
+	return parsed.User.Username() != "" || hasPassword
 }

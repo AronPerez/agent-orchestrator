@@ -139,20 +139,29 @@ func TestRunnerRedactsInheritedCredentialEnvironment(t *testing.T) {
 }
 
 func TestRunnerRedactsInheritedCredentialURL(t *testing.T) {
-	const databaseURL = "postgres://verify-user:private-password@database.example/verify"
-	t.Setenv("DATABASE_URL", databaseURL)
-	runner := newTestRunner(func(_ context.Context, _ string, _ string, _ stepEnvironment, output io.Writer) error {
-		_, _ = io.WriteString(output, os.Getenv("DATABASE_URL"))
-		return nil
-	})
-	result, err := runner.Run(context.Background(), Request{
-		ProjectID: "demo", WorkspacePath: "/work/demo", Commands: []string{"verify"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(result.OutputTail, "private-password") || !strings.Contains(result.OutputTail, "[REDACTED]") {
-		t.Fatalf("credential URL was not redacted: %q", result.OutputTail)
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{name: "DATABASE_URL", value: "postgres://verify-user:private-password@database.example/verify"},
+		{name: "REDIS_URL", value: "redis://:private-password@localhost:6379"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(tc.name, tc.value)
+			runner := newTestRunner(func(_ context.Context, _ string, _ string, _ stepEnvironment, output io.Writer) error {
+				_, _ = io.WriteString(output, os.Getenv(tc.name))
+				return nil
+			})
+			result, err := runner.Run(context.Background(), Request{
+				ProjectID: "demo", WorkspacePath: "/work/demo", Commands: []string{"verify"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(result.OutputTail, "private-password") || !strings.Contains(result.OutputTail, "[REDACTED]") {
+				t.Fatalf("credential URL was not redacted: %q", result.OutputTail)
+			}
+		})
 	}
 }
 

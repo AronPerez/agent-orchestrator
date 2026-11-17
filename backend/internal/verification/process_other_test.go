@@ -7,26 +7,38 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/procmem"
 )
 
 func TestRunnerHostShellUsesRequestedWorkspaceAndEnvironment(t *testing.T) {
 	workspace := t.TempDir()
 	result, err := NewRunner().Run(context.Background(), Request{
 		ProjectID: "demo", WorkspacePath: workspace,
-		Commands: []string{`printf '%s|%s' "$PWD" "$VERIFY_VALUE"`},
+		Commands: []string{`printf '%s|%s|%s|%s' "$PWD" "$VERIFY_VALUE" "$0" "${1-}"`},
 		Env:      map[string]string{"VERIFY_VALUE": "from-project"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.Passed || !strings.Contains(result.OutputTail, workspace+"|[REDACTED]") {
+	if !result.Passed || !strings.Contains(result.OutputTail, workspace+"|[REDACTED]|sh|") {
 		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestWorkspaceStepPreservesShellExitStatus(t *testing.T) {
+	env := newStepEnvironment(os.Environ(), nil)
+	err := runWorkspaceStep(context.Background(), t.TempDir(), `exit 7`, env, io.Discard)
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 {
+		t.Fatalf("runWorkspaceStep() error = %v, want exit status 7", err)
 	}
 }
 
@@ -63,6 +75,85 @@ func TestWorkspaceStepFailsAndStopsALingeringBackgroundChild(t *testing.T) {
 				t.Fatalf("background child %d survived verification (error %v)", pid, err)
 			}
 		})
+	}
+}
+
+func TestWorkspaceStepFailsAndStopsADetachedChild(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	pidFile := filepath.Join(workspace, "detached.pid")
+	env := newStepEnvironment(os.Environ(), map[string]string{
+		"GO_WANT_VERIFICATION_DETACHED_CHILD": "1",
+		"VERIFY_DETACHED_HELPER":              executable,
+		"VERIFY_DETACHED_PID":                 pidFile,
+	})
+	err = runWorkspaceStep(
+		context.Background(),
+		workspace,
+		`"$VERIFY_DETACHED_HELPER" -test.run=^TestVerificationDetachedChildHelper$ >/dev/null 2>&1 & sleep 1`,
+		env,
+		io.Discard,
+	)
+	pid := readProcessID(t, pidFile)
+	t.Cleanup(func() {
+		if processAlive(pid) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	})
+	if err == nil {
+		t.Fatal("runWorkspaceStep() succeeded with a detached background child")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for processAlive(pid) && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if processAlive(pid) {
+		t.Fatalf("detached child %d survived verification (error %v)", pid, err)
+	}
+}
+
+func TestVerificationDetachedChildHelper(t *testing.T) {
+	if os.Getenv("GO_WANT_VERIFICATION_DETACHED_CHILD") != "1" {
+		return
+	}
+	if _, err := syscall.Setsid(); err != nil {
+		os.Exit(2)
+	}
+	if err := os.WriteFile(os.Getenv("VERIFY_DETACHED_PID"), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+		os.Exit(3)
+	}
+	time.Sleep(time.Minute)
+}
+
+func TestUnixCleanupNeverSignalsARecycledPID(t *testing.T) {
+	var signals []syscall.Signal
+	hooks := unixProcessHooks{
+		identities: func(context.Context) (map[int]procmem.Identity, error) {
+			return map[int]procmem.Identity{
+				4242: {PPID: 1, Start: "replacement", StartedAt: time.Unix(20, 0)},
+			}, nil
+		},
+		signal: func(_ int, signal syscall.Signal) error {
+			signals = append(signals, signal)
+			return nil
+		},
+		wait: time.Millisecond,
+		poll: time.Microsecond,
+	}
+	survived, err := stopCapturedUnixProcesses(
+		context.Background(),
+		unixCapturedProcess{pid: 4000, start: "anchor", startedAt: time.Unix(1, 0)},
+		[]unixCapturedProcess{{pid: 4242, start: "original", startedAt: time.Unix(2, 0)}},
+		hooks,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if survived || len(signals) != 0 {
+		t.Fatalf("recycled pid cleanup = survived %v, signals %v; want no signal", survived, signals)
 	}
 }
 

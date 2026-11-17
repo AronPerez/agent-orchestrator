@@ -16,6 +16,7 @@ import (
 
 type windowsWorkspaceProcessTree struct {
 	mu     sync.Mutex
+	cmd    *exec.Cmd
 	job    windows.Handle
 	closed bool
 }
@@ -25,6 +26,7 @@ type jobBasicAccountingInformation struct {
 	TotalKernelTime           int64
 	ThisPeriodTotalUserTime   int64
 	ThisPeriodTotalKernelTime int64
+	TotalPageFaultCount       uint32
 	TotalProcesses            uint32
 	ActiveProcesses           uint32
 	TotalTerminatedProcesses  uint32
@@ -35,7 +37,7 @@ func startWorkspaceProcessTree(ctx context.Context, cmd *exec.Cmd) (workspacePro
 	if err != nil {
 		return nil, fmt.Errorf("create verification job: %w", err)
 	}
-	tree := &windowsWorkspaceProcessTree{job: job}
+	tree := &windowsWorkspaceProcessTree{cmd: cmd, job: job}
 	var limits windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
 	limits.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
 	if _, err = windows.SetInformationJobObject(
@@ -95,6 +97,12 @@ func startWorkspaceProcessTree(ctx context.Context, cmd *exec.Cmd) (workspacePro
 	return tree, nil
 }
 
+func (t *windowsWorkspaceProcessTree) Wait() (bool, error) {
+	waitErr := t.cmd.Wait()
+	survived, stopErr := t.stopSurvivors()
+	return survived, errors.Join(waitErr, stopErr)
+}
+
 func (t *windowsWorkspaceProcessTree) terminate() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -104,7 +112,7 @@ func (t *windowsWorkspaceProcessTree) terminate() error {
 	return windows.TerminateJobObject(t.job, 1)
 }
 
-func (t *windowsWorkspaceProcessTree) StopSurvivors() (bool, error) {
+func (t *windowsWorkspaceProcessTree) stopSurvivors() (bool, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.closed || t.job == 0 {

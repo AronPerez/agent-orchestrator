@@ -11,7 +11,21 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 )
+
+func TestWindowsJobAccountingLayout(t *testing.T) {
+	if got, want := unsafe.Offsetof(jobBasicAccountingInformation{}.ActiveProcesses), uintptr(40); got != want {
+		t.Fatalf("ActiveProcesses offset = %d, want %d", got, want)
+	}
+}
+
+func TestWorkspaceStepAllowsACleanWindowsCommand(t *testing.T) {
+	env := newStepEnvironment(os.Environ(), nil)
+	if err := runWorkspaceStep(context.Background(), t.TempDir(), `exit /b 0`, env, io.Discard); err != nil {
+		t.Fatalf("clean Windows command failed: %v", err)
+	}
+}
 
 func TestWorkspaceStepStopsAWindowsJobChildAfterTheShellExits(t *testing.T) {
 	executable, err := os.Executable()
