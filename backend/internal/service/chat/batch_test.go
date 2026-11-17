@@ -202,18 +202,24 @@ func TestFailedQueuedTurnRetryPreservesProviderInput(t *testing.T) {
 	caps := productionCaps()
 	caps[ports.ChatCapabilityEmbeddedContext] = true
 	h.conv.setCapabilities(caps)
-	if _, err := h.svc.Send(ctx, testSession, ports.ChatUserMessage{
+	queued, err := h.svc.Send(ctx, testSession, ports.ChatUserMessage{
 		Text: "queued", ClientMessageID: "retry-queued", Origin: domain.MessageOriginHuman,
 		Content: []ports.ChatContent{
 			{Type: "text", Text: "verified context", Internal: true},
 			{Type: "resource", URI: "file:///worktree/context.txt", Name: "context.txt"},
 		},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 	h.conv.emit(ports.ChatEvent{Kind: ports.ChatEventTurnCompleted,
 		ProviderTurnID: active.ProviderTurnID, TurnState: domain.TurnStateCompleted})
-	h.awaitSnapshot(t, func(store.ConversationSnapshot) bool { return len(h.conv.sentTexts()) == 2 })
+	// The fake records the send before dispatch persists the provider turn ID.
+	h.awaitSnapshot(t, func(s store.ConversationSnapshot) bool {
+		turn, found := turnByID(s, queued.ID)
+		return len(h.conv.sentTexts()) == 2 && found &&
+			turn.State == domain.TurnStateRunning && turn.ProviderTurnID != ""
+	})
 	original := h.conv.sentMessages()[1]
 	if !strings.Contains(original.Text, "verified context") || len(original.Content) != 1 {
 		t.Fatalf("original provider input = %+v", original)
