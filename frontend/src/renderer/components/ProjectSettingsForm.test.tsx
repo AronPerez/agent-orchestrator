@@ -774,6 +774,7 @@ describe("ProjectSettingsForm", () => {
 				env: { FOO: "bar" },
 				symlinks: [".env"],
 				postCreate: ["npm install"],
+				verify: ["go test ./..."],
 				worker: {
 					agent: "codex",
 					agentConfig: { model: "worker-model" },
@@ -821,6 +822,7 @@ describe("ProjectSettingsForm", () => {
 					defaultBranch: "develop",
 					sessionPrefix: "po",
 					env: { FOO: "bar" },
+					verify: ["go test ./..."],
 					reviewers: [{ harness: "claude-code", agentConfig: { model: "claude-opus-4-5", permissions: "auto" } }],
 					// Agents changes applied
 					worker: {

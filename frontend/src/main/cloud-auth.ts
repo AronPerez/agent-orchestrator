@@ -1,6 +1,6 @@
 import { createWorkOS, type User } from "@workos-inc/node";
 import { app, dialog, ipcMain, safeStorage, shell } from "electron";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmod,
   mkdir,
@@ -215,7 +215,7 @@ async function replaceActiveCloudAccountMarker(
   await rm(target, { force: true });
   if (!userID) return;
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
-  const temporary = `${target}.${process.pid}.tmp`;
+  const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
   const raw = `${JSON.stringify({ userId: userID, desktopPid: process.pid })}\n`;
   try {
     await writeFile(temporary, raw, { mode: 0o600 });
@@ -223,6 +223,25 @@ async function replaceActiveCloudAccountMarker(
     await rename(temporary, target);
   } finally {
     await rm(temporary, { force: true });
+  }
+}
+
+async function publishActiveCloudAccountMarker(dataDir: string, userID: string | undefined): Promise<void> {
+  const target = activeCloudAccountPath(dataDir);
+  if (userID) {
+    try {
+      const current = JSON.parse(await readFile(target, "utf8")) as { userId?: unknown; desktopPid?: unknown };
+      if (current.userId === userID && current.desktopPid === process.pid) return;
+    } catch {
+      // Missing, stale, or unreadable markers are replaced below.
+    }
+  }
+  try {
+    await replaceActiveCloudAccountMarker(dataDir, userID);
+  } catch {
+    // The desktop session remains usable, but headless authorization fails
+    // closed until a later read can publish its live binding.
+    await rm(target, { force: true });
   }
 }
 
@@ -244,18 +263,25 @@ function decodeStore(value: Buffer): AuthStore {
 
 export async function readAuthStore(dataDir: string): Promise<AuthStore> {
   const memoryStore = memoryStores.get(dataDir);
-  if (memoryStore) return memoryStore;
+  if (memoryStore) {
+    await publishActiveCloudAccountMarker(dataDir, memoryStore.session?.user.id);
+    return memoryStore;
+  }
   if (!protectedStorageAvailable()) {
     await rm(storePath(dataDir), { force: true });
     await rm(activeCloudAccountPath(dataDir), { force: true });
     return emptyStore();
   }
+  let store: AuthStore;
   try {
-    return decodeStore(await readFile(storePath(dataDir)));
+    store = decodeStore(await readFile(storePath(dataDir)));
   } catch {
     await rm(storePath(dataDir), { force: true });
+    await rm(activeCloudAccountPath(dataDir), { force: true });
     return emptyStore();
   }
+  await publishActiveCloudAccountMarker(dataDir, store.session?.user.id);
+  return store;
 }
 
 export async function writeAuthStore(

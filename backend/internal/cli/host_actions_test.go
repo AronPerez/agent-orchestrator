@@ -114,6 +114,43 @@ func TestSpawnSavedHostPinsMachineAndOmitsUnqualifiedParent(t *testing.T) {
 	}
 }
 
+func TestSpawnSavedHostFailureNamesRemoteRecoveryLocation(t *testing.T) {
+	oldPollInterval := spawnStartPollInterval
+	spawnStartPollInterval = 0
+	t.Cleanup(func() { spawnStartPollInterval = oldPollInterval })
+
+	configureSavedHost(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/identity" {
+			writeSavedHostIdentity(t, w, r)
+			return
+		}
+		requireSavedHostRequest(t, r)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/demo":
+			_, _ = io.WriteString(w, `{"status":"ok","project":{"id":"demo","name":"Demo","kind":"single-repo"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/agents/readiness/ensure":
+			_, _ = io.WriteString(w, authorizedAgentsJSON("codex"))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions":
+			_, _ = io.WriteString(w, `{"session":{"id":"remote-1","status":"spawning","provisionState":"provisioning"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sessions/remote-1":
+			_, _ = io.WriteString(w, `{"session":{"id":"remote-1","status":"failed","provisionState":"failed","provisionError":"setup failed"}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+
+	_, _, err := executeCLI(t, Deps{}, "spawn", "--host", testSavedHostLabel,
+		"--project", "demo", "--agent", "codex", "--name", "Remote worker")
+	if err == nil || !strings.Contains(err.Error(), "session remote-1 on desk (h_desk) failed to start") ||
+		!strings.Contains(err.Error(), "open that machine in the Orchestrator app") {
+		t.Fatalf("err = %v, want destination-qualified remote recovery guidance", err)
+	}
+	if strings.Contains(err.Error(), "ao session kill") {
+		t.Fatalf("remote failure recommended a local-only kill command: %v", err)
+	}
+}
+
 func TestSendSavedHostPinsAndNamesEveryWrite(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -147,6 +184,9 @@ func TestSendSavedHostPinsAndNamesEveryWrite(t *testing.T) {
 				if sender, ok := payload["senderSessionId"]; ok {
 					t.Fatalf("remote write carried unqualified senderSessionId %v", sender)
 				}
+				if authored, _ := payload["automationAuthored"].(bool); !authored {
+					t.Fatalf("remote write automationAuthored = %v, want true", payload["automationAuthored"])
+				}
 				if got, want := payload[tc.payloadKey], "[from local-source on "+testLocalHostID+"] "+tc.message; got != want {
 					t.Fatalf("remote message source = %q, want %q", got, want)
 				}
@@ -179,7 +219,7 @@ func TestSendSavedHostRecoveryKeepsTarget(t *testing.T) {
 
 	_, _, err := executeCLI(t, Deps{}, "send", "--host", testSavedHostLabel, "--session", "remote-1",
 		"--steer", "--client-message-id", "delivery-1", "--message", "correct course")
-	if err == nil || !strings.Contains(err.Error(), "ao send --host 'h_desk'") {
+	if err == nil || !strings.Contains(err.Error(), "ao send --host h_desk") {
 		t.Fatalf("err = %v, want host-qualified recovery command", err)
 	}
 }
@@ -208,10 +248,24 @@ func TestSendSavedHostAgentSourceRequiresLocalHostIdentity(t *testing.T) {
 	}
 }
 
-func TestSavedHostRetryArgsQuotesOpaqueHostID(t *testing.T) {
-	c := &commandContext{remote: &remoteTarget{hostID: "h_'$(unsafe)"}}
-	if got, want := c.savedHostRetryArgs(), ` --host 'h_'"'"'$(unsafe)'`; got != want {
+func TestSavedHostRetryArgsUsesPortableGeneratedHostID(t *testing.T) {
+	c := &commandContext{remote: &remoteTarget{hostID: testSavedHostID}}
+	if got, want := c.savedHostRetryArgs(), ` --host h_desk`; got != want {
 		t.Fatalf("savedHostRetryArgs() = %q, want %q", got, want)
+	}
+}
+
+func TestSavedHostRejectsUnsafeHostIDBeforeRenderingCommands(t *testing.T) {
+	home := aoHome(t)
+	_ = setConfigEnv(t)
+	t.Setenv("AO_DATA_DIR", "")
+	writeRemotes(t, home, 0o600, remoteEntry{
+		Label: "unsafe", URL: "http://127.0.0.1:9", HostID: "h_$(unsafe)", CoordinationToken: testCoordination,
+	})
+
+	_, _, err := executeCLI(t, Deps{}, "send", "--host", "unsafe", "--session", "remote-1", "--message", "continue")
+	if err == nil || !strings.Contains(err.Error(), "invalid host ID") {
+		t.Fatalf("err = %v, want invalid host ID before any connection", err)
 	}
 }
 

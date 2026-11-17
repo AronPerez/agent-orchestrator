@@ -11,6 +11,9 @@ type NotificationType string
 const (
 	// NotificationNeedsInput means an agent session is waiting for user input.
 	NotificationNeedsInput NotificationType = "needs_input"
+	// NotificationSessionStalled means a contracted worker stayed idle after
+	// its one automatic nudge and needs human attention.
+	NotificationSessionStalled NotificationType = "session_stalled"
 	// NotificationReadyToMerge means a PR has no known merge blockers.
 	NotificationReadyToMerge NotificationType = "ready_to_merge"
 	// NotificationPRMerged means a tracked PR was merged.
@@ -26,7 +29,7 @@ const (
 // Valid reports whether t is one of the v1 notification kinds.
 func (t NotificationType) Valid() bool {
 	switch t {
-	case NotificationNeedsInput, NotificationReadyToMerge, NotificationPRMerged, NotificationPRClosedUnmerged,
+	case NotificationNeedsInput, NotificationSessionStalled, NotificationReadyToMerge, NotificationPRMerged, NotificationPRClosedUnmerged,
 		NotificationReviewCompleted, NotificationReviewChangesRequested:
 		return true
 	default:

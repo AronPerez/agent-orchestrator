@@ -233,6 +233,46 @@ func (s *Service) SteerOrSend(
 	return controller.SteerOrSend(ctx, msg, recoverOnly)
 }
 
+// SendIfIdle atomically delivers one idempotent automation message only when
+// the live controller has no running or queued work. Contract stall nudges use
+// it so a stale persisted idle read can never enqueue a "continue" prompt
+// behind work that resumed in the meantime.
+func (s *Service) SendIfIdle(
+	ctx context.Context,
+	id domain.SessionID,
+	msg ports.ChatUserMessage,
+) (bool, error) {
+	if strings.TrimSpace(msg.Text) == "" {
+		return false, ErrSteerTextRequired
+	}
+	if msg.ClientMessageID == "" {
+		return false, ErrSteerDeliveryUncertain
+	}
+	msg = s.resolveSteerSender(ctx, msg)
+	if msg.SenderSessionID != "" {
+		msg.Origin = domain.MessageOriginAutomation
+	}
+	record, err := s.requireChatSession(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	if err := validateFileReferenceContent(msg, string(id)); err != nil {
+		return false, err
+	}
+	if _, writerErr := s.checkOtherWriter(ctx, record); writerErr != nil {
+		if found, retryErr := s.sentMessageRetry(ctx, id, msg); found || retryErr != nil {
+			return found, retryErr
+		}
+		return false, writerErr
+	}
+	controller, release, err := s.workingController(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	return controller.SendIfIdle(ctx, msg)
+}
+
 // PromoteQueuedTurn delivers one already queued turn into the active turn. The
 // daemon reads the queued content; callers identify it but cannot replace it.
 func (s *Service) PromoteQueuedTurn(
@@ -665,6 +705,31 @@ func (c *Controller) SteerOrSend(
 		}
 	}
 	return SteerOrSendResult{Turn: turn}, nil
+}
+
+// SendIfIdle holds the ordinary send/queue mutex across both the live-state
+// check and dispatch. A duplicate accepted delivery remains successful even if
+// the controller is busy by the time its caller retries.
+func (c *Controller) SendIfIdle(ctx context.Context, msg ports.ChatUserMessage) (bool, error) {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+
+	if _, found, err := sentMessageReceipt(ctx, c.store, c.conversation.ID, msg, false); found || err != nil {
+		return found, err
+	}
+	if c.busy() {
+		return false, nil
+	}
+	if _, err := c.store.NextQueuedTurn(ctx, c.conversation.ID); err == nil {
+		return false, nil
+	} else if !errors.Is(err, domain.ErrNoQueuedTurn) {
+		return false, err
+	}
+	turn, err := c.sendLocked(ctx, msg, false, nil, nil)
+	if err != nil {
+		return false, err
+	}
+	return turn.ID != "", nil
 }
 
 func steerOrSendReceipt(

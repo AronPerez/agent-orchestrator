@@ -70,6 +70,7 @@ type fakeSessionService struct {
 	sent                       string
 	sentAttachment             *ports.SpawnAttachment
 	sentDeliveryOptions        ports.MessageDeliveryOptions
+	sentWithOptions            bool
 	delegationInput            sessionsvc.DelegateTaskInput
 	delegationErr              error
 	sendErr                    error
@@ -513,6 +514,7 @@ func (f *fakeSessionService) SendWithOptions(_ context.Context, _ domain.Session
 	f.sent = message
 	f.sentAttachment = attachment
 	f.sentDeliveryOptions = options
+	f.sentWithOptions = true
 	return f.sendErr
 }
 
@@ -1996,6 +1998,52 @@ func TestSessionsAPI_SpawnPassesModelToService(t *testing.T) {
 	}
 	if svc.lastSpawn.AgentConfig.Model != "sonnet" {
 		t.Fatalf("service AgentConfig.Model = %q, want sonnet", svc.lastSpawn.AgentConfig.Model)
+	}
+}
+
+func TestSessionsAPI_SpawnAndDelegatePassWorkerContract(t *testing.T) {
+	svc := newFakeSessionService()
+	srv := newSessionTestServer(t, svc)
+
+	body, status, _ := doRequest(t, srv, http.MethodPost, "/api/v1/sessions",
+		`{"projectId":"ao","kind":"worker","harness":"codex","goal":" Ship the foundation ","timeboxSeconds":7200}`)
+	if status != http.StatusCreated {
+		t.Fatalf("POST session = %d, want 201; body=%s", status, body)
+	}
+	if svc.lastSpawn.Goal != "Ship the foundation" || svc.lastSpawn.Timebox != 2*time.Hour {
+		t.Fatalf("spawn contract = goal %q timebox %v", svc.lastSpawn.Goal, svc.lastSpawn.Timebox)
+	}
+
+	body, status, _ = doRequest(t, srv, http.MethodPost, "/api/v1/orchestrators/delegate",
+		`{"projectId":"ao","brief":"Fix it","goal":"Ship the UI","timeboxSeconds":3600}`)
+	if status != http.StatusAccepted {
+		t.Fatalf("POST delegate = %d, want 202; body=%s", status, body)
+	}
+	if svc.delegationInput.Goal != "Ship the UI" || svc.delegationInput.Timebox != time.Hour {
+		t.Fatalf("delegate contract = goal %q timebox %v", svc.delegationInput.Goal, svc.delegationInput.Timebox)
+	}
+}
+
+func TestSessionsAPI_SpawnRejectsInvalidWorkerContract(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "goal only", body: `{"kind":"worker","harness":"codex","goal":"Ship it"}`},
+		{name: "timebox only", body: `{"kind":"worker","harness":"codex","timeboxSeconds":60}`},
+		{name: "negative timebox", body: `{"kind":"worker","harness":"codex","goal":"Ship it","timeboxSeconds":-1}`},
+		{name: "orchestrator", body: `{"kind":"orchestrator","harness":"codex","goal":"Ship it","timeboxSeconds":60}`},
+		{name: "standalone", body: `{"kind":"worker","harness":"codex","goal":"Ship it","timeboxSeconds":60}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := newFakeSessionService()
+			srv := newSessionTestServer(t, svc)
+			body, status, _ := doRequest(t, srv, http.MethodPost, "/api/v1/sessions", tc.body)
+			assertErrorCode(t, body, status, http.StatusBadRequest, "INVALID_WORKER_CONTRACT")
+			if svc.lastSpawn.Goal != "" || svc.lastSpawn.Timebox != 0 {
+				t.Fatalf("invalid contract reached service: %#v", svc.lastSpawn)
+			}
+		})
 	}
 }
 
@@ -5404,6 +5452,18 @@ func TestSessionsAPI_SendCarriesCooperativeSenderWithoutHumanAuthorship(t *testi
 	}
 	if svc.sentDeliveryOptions.SenderSessionID != "ao-orchestrator" || svc.sentDeliveryOptions.AuthoredByUser {
 		t.Fatalf("options=%+v", svc.sentDeliveryOptions)
+	}
+}
+
+func TestSessionsAPI_SendCarriesRemoteAutomationWithoutLocalSender(t *testing.T) {
+	svc := newFakeSessionService()
+	srv := newSessionTestServer(t, svc)
+	body, status, _ := doRequest(t, srv, "POST", "/api/v1/sessions/ao-1/send", `{"message":"Do the next step","automationAuthored":true}`)
+	if status != http.StatusOK {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+	if !svc.sentWithOptions || svc.sentDeliveryOptions.SenderSessionID != "" || svc.sentDeliveryOptions.AuthoredByUser {
+		t.Fatalf("sentWithOptions=%v options=%+v", svc.sentWithOptions, svc.sentDeliveryOptions)
 	}
 }
 

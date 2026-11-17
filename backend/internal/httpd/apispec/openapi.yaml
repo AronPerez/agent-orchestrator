@@ -19508,6 +19508,27 @@ components:
           $ref: '#/components/schemas/SessionBranchState'
         chatProviderPreserved:
           type: boolean
+        contractOutcome:
+          enum:
+          - met
+          - blocked
+          - limit_hit
+          type: string
+        contractStallEscalatedAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        contractStallNudgedAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        contractTimeboxPromptedAt:
+          format: date-time
+          type:
+          - "null"
+          - string
         createdAt:
           format: date-time
           type: string
@@ -19541,6 +19562,8 @@ components:
           - Merged
           - Closed without merge
           - Terminated
+          type: string
+        goal:
           type: string
         harness:
           type: string
@@ -19707,6 +19730,11 @@ components:
           type: string
         terminateOnPrMerge:
           type: boolean
+        timeboxDeadlineAt:
+          format: date-time
+          type:
+          - "null"
+          - string
         updatedAt:
           format: date-time
           type: string
@@ -21066,6 +21094,9 @@ components:
           type:
           - "null"
           - string
+        goal:
+          maxLength: 1000
+          type: string
         mode:
           enum:
           - tui
@@ -21078,6 +21109,11 @@ components:
           type: string
         taskPreparation:
           type: string
+        timeboxSeconds:
+          format: int64
+          maximum: 9.223372036e+09
+          minimum: 1
+          type: integer
       required:
       - projectId
       - brief
@@ -21262,6 +21298,11 @@ components:
       - revision
       - selection
       - sourceRole
+      type: object
+    DomainWorkerContractConfig:
+      properties:
+        stallMinutes:
+          type: integer
       type: object
     EditConversationMessageRequest:
       properties:
@@ -22717,6 +22758,7 @@ components:
         type:
           enum:
           - needs_input
+          - session_stalled
           - ready_to_merge
           - pr_merged
           - pr_closed_unmerged
@@ -23154,8 +23196,14 @@ components:
           type: array
         trackerIntake:
           $ref: '#/components/schemas/TrackerIntakeConfig'
+        verify:
+          items:
+            type: string
+          type: array
         worker:
           $ref: '#/components/schemas/RoleOverride'
+        workerContracts:
+          $ref: '#/components/schemas/DomainWorkerContractConfig'
         workersRequestReview:
           type: boolean
       type: object
@@ -24098,6 +24146,8 @@ components:
       properties:
         attachment:
           $ref: '#/components/schemas/AttachmentInput'
+        automationAuthored:
+          type: boolean
         message:
           maxLength: 4096
           minLength: 1
@@ -26157,6 +26207,9 @@ components:
         effort:
           maxLength: 32
           type: string
+        goal:
+          maxLength: 1000
+          type: string
         harness:
           enum:
           - claude-code
@@ -26230,6 +26283,11 @@ components:
           enum:
           - artifact
           type: string
+        timeboxSeconds:
+          format: int64
+          maximum: 9.223372036e+09
+          minimum: 1
+          type: integer
         trackerProvider:
           enum:
           - github
@@ -26455,6 +26513,8 @@ components:
           items:
             $ref: '#/components/schemas/ConversationImageContentRequest'
           type: array
+        automationAuthored:
+          type: boolean
         clientMessageId:
           type: string
         recoverOnly:

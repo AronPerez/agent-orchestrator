@@ -99,6 +99,25 @@ func (k RequestedOutput) Valid() bool {
 	return k == "" || k == RequestedOutputArtifact
 }
 
+// SessionContractOutcome records why a timeboxed worker stopped. Empty means
+// the worker has not reported a terminal contract outcome yet.
+type SessionContractOutcome string
+
+// Worker contract outcomes are deliberately small and durable. They describe
+// the contract result, not the session's derived board status.
+const (
+	SessionContractOutcomeNone     SessionContractOutcome = ""
+	SessionContractOutcomeMet      SessionContractOutcome = "met"
+	SessionContractOutcomeBlocked  SessionContractOutcome = "blocked"
+	SessionContractOutcomeLimitHit SessionContractOutcome = "limit_hit"
+)
+
+// Valid reports whether o is empty or a supported terminal outcome.
+func (o SessionContractOutcome) Valid() bool {
+	return o == SessionContractOutcomeNone || o == SessionContractOutcomeMet ||
+		o == SessionContractOutcomeBlocked || o == SessionContractOutcomeLimitHit
+}
+
 // HasPR reports whether a session's output includes a claimed/observed PR.
 func (t SessionOutputType) HasPR() bool {
 	return t == SessionOutputPR || t == SessionOutputPRAndArtifact
@@ -475,7 +494,20 @@ type SessionRecord struct {
 	// RequestedOutput is the deliverable requested at spawn. It is fixed after
 	// insertion so restore and agent switching rebuild the same worker prompt.
 	RequestedOutput RequestedOutput `json:"requestedOutput,omitempty" enum:"artifact"`
-	Metadata        SessionMetadata `json:"-"`
+	// Goal and TimeboxDeadlineAt are the immutable worker contract supplied at
+	// spawn. Both are absent for sessions without a contract.
+	Goal              string                 `json:"goal,omitempty"`
+	TimeboxDeadlineAt *time.Time             `json:"timeboxDeadlineAt,omitempty"`
+	ContractOutcome   SessionContractOutcome `json:"contractOutcome,omitempty" enum:"met,blocked,limit_hit"`
+	// ContractStallNudgedAt and ContractStallEscalatedAt record the current
+	// idle episode's one nudge and escalation. Activity after the nudge begins a
+	// new episode without erasing the audit timestamps.
+	ContractStallNudgedAt    *time.Time `json:"contractStallNudgedAt,omitempty"`
+	ContractStallEscalatedAt *time.Time `json:"contractStallEscalatedAt,omitempty"`
+	// ContractTimeboxPromptedAt records the one wrap-up prompt sent when the
+	// durable deadline first becomes due.
+	ContractTimeboxPromptedAt *time.Time      `json:"contractTimeboxPromptedAt,omitempty"`
+	Metadata                  SessionMetadata `json:"-"`
 	// CleanupGeneration is a monotonic counter bumped each time the session is
 	// un-terminated (spawn/restore). The terminal-resource reconciler stamps its
 	// durable cleanup facts with the generation they were written for so a

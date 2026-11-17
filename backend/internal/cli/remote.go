@@ -45,6 +45,8 @@ type remoteTarget struct {
 // carries credentials, so it must be mode 0600.
 const remotesFileName = "remotes.json"
 
+var savedHostIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+
 // activeCloudAccountFile is written by the desktop beside remotes.json. It is
 // the authorization boundary for account-owned hosts; telemetry state is not,
 // because a failed handoff must never preserve access after sign-out/switch.
@@ -54,6 +56,11 @@ const activeCloudAccountFile = "cloud_active_user"
 // spawned agents. AO_DATA_DIR names daemon state, which is ~/.ao/data in a
 // packaged launch while the desktop store is ~/.ao/remotes.json.
 const remotesFileEnv = "AO_REMOTES_FILE"
+
+// cloudAccountFileEnv identifies the exact desktop instance whose live Cloud
+// session owns account-scoped saved hosts. Dev and packaged desktops may run at
+// the same time while sharing the top-level remotes store.
+const cloudAccountFileEnv = "AO_CLOUD_ACCOUNT_FILE"
 
 // coordinationTokenPrefix is distinct from the full-device aod_ format so an
 // older daemon cannot promote this credential when it ignores scope metadata.
@@ -75,6 +82,7 @@ type remoteEntry struct {
 	HostID            string `json:"hostId,omitempty"`
 	AccountUserID     string `json:"accountUserId,omitempty"`
 	CoordinationToken string `json:"coordinationToken,omitempty"`
+	CleanupOnly       bool   `json:"cleanupOnly,omitempty"`
 }
 
 type savedHostTargetCandidate struct {
@@ -173,6 +181,9 @@ func savedHostTargetFromEntry(entry remoteEntry, name string) (*remoteTarget, er
 	if hostID == "" {
 		return nil, fmt.Errorf("saved host %q has no host ID — reconnect it in the desktop app before using --host", name)
 	}
+	if !savedHostIDPattern.MatchString(hostID) {
+		return nil, fmt.Errorf("saved host %q has an invalid host ID — reconnect it in the desktop app before using --host", name)
+	}
 	token := strings.TrimSpace(entry.CoordinationToken)
 	if token == "" {
 		return nil, fmt.Errorf("saved host %q has no agent coordination credential — connect it in the desktop app once, then retry", name)
@@ -263,7 +274,12 @@ func (c *commandContext) selectSavedHost(ctx context.Context, name string) error
 }
 
 func (c *commandContext) verifySavedHostTarget(ctx context.Context, target *remoteTarget) error {
-	if local := readLocalHostID(); local != "" && local == target.hostID {
+	return c.verifySavedHostTargetAgainst(ctx, target, readLocalHostID())
+}
+
+func (c *commandContext) verifySavedHostTargetAgainst(ctx context.Context, target *remoteTarget, localHostID string) error {
+	localHostID = strings.TrimSpace(localHostID)
+	if localHostID != "" && localHostID == target.hostID {
 		return fmt.Errorf("saved host %q is this AO installation itself", target.label)
 	}
 	actual, err := c.probeSavedHostIdentity(ctx, target.baseURL)
@@ -273,7 +289,7 @@ func (c *commandContext) verifySavedHostTarget(ctx context.Context, target *remo
 	if actual.HostID != target.hostID {
 		return fmt.Errorf("saved host identity changed for %s: expected %s, got %s; connection refused", target.baseURL, target.hostID, actual.HostID)
 	}
-	if local := readLocalHostID(); local != "" && local == actual.HostID {
+	if localHostID != "" && localHostID == actual.HostID {
 		return fmt.Errorf("saved host %q is this AO installation itself", target.label)
 	}
 	if target.accountUserID != "" && c.activeCloudAccount(ctx) != target.accountUserID {
@@ -285,14 +301,10 @@ func (c *commandContext) verifySavedHostTarget(ctx context.Context, target *remo
 // savedHostRetryArgs preserves the destination in a copyable retry command.
 // Host IDs are stable and unambiguous even when a display label later changes.
 func (c *commandContext) savedHostRetryArgs() string {
-	if c.remote == nil || c.remote.hostID == "" {
+	if c.remote == nil || !savedHostIDPattern.MatchString(c.remote.hostID) {
 		return ""
 	}
-	return " --host " + shellQuoteArg(c.remote.hostID)
-}
-
-func shellQuoteArg(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
+	return " --host " + c.remote.hostID
 }
 
 var activeCloudUserIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
@@ -308,11 +320,15 @@ type activeCloudAccountMarker struct {
 // Any read, parse, validation, or liveness failure hides those hosts; local
 // pairings (which have no accountUserId) remain usable.
 func (c *commandContext) activeCloudAccount(context.Context) string {
-	remotesPath, err := remotesFilePath()
-	if err != nil {
-		return ""
+	markerPath := strings.TrimSpace(os.Getenv(cloudAccountFileEnv))
+	if markerPath == "" {
+		remotesPath, err := remotesFilePath()
+		if err != nil {
+			return ""
+		}
+		markerPath = filepath.Join(filepath.Dir(remotesPath), activeCloudAccountFile)
 	}
-	raw, err := os.ReadFile(filepath.Join(filepath.Dir(remotesPath), activeCloudAccountFile)) // #nosec G304 -- fixed sibling of the configured owner-only remotes store.
+	raw, err := os.ReadFile(markerPath) // #nosec G304 -- desktop-carried owner-only authorization marker.
 	if err != nil {
 		return ""
 	}
@@ -492,6 +508,9 @@ func lookupRemoteEntryForAccount(base, activeAccount string) (*remoteEntry, erro
 }
 
 func remoteEntryVisibleToAccount(entry remoteEntry, activeAccount string) bool {
+	if entry.CleanupOnly {
+		return false
+	}
 	owner := strings.TrimSpace(entry.AccountUserID)
 	return owner == "" || (strings.TrimSpace(activeAccount) != "" && owner == strings.TrimSpace(activeAccount))
 }

@@ -731,6 +731,10 @@ type SpawnSessionRequest struct {
 	// ApprovalMode overrides the project/default policy for this spawn.
 	ApprovalMode domain.PermissionMode `json:"approvalMode,omitempty" enum:"default,accept-edits,auto,bypass-permissions"`
 	Prompt       string                `json:"prompt,omitempty" maxLength:"102400"`
+	// Goal and TimeboxSeconds define an optional worker contract. They must be
+	// supplied together and are rejected for orchestrator sessions.
+	Goal           string `json:"goal,omitempty" maxLength:"1000"`
+	TimeboxSeconds int64  `json:"timeboxSeconds,omitempty" minimum:"1" maximum:"9223372036"`
 	// Model is an optional agent model override scoped to this single spawn. Empty
 	// keeps the resolved project/role default. The daemon validates that the
 	// selected harness can honor the model before launching.
@@ -1527,6 +1531,9 @@ type SendSessionMessageRequest struct {
 	// SenderSessionID is cooperative loopback attribution, not authentication.
 	SenderSessionID string `json:"senderSessionId,omitempty"`
 	Message         string `json:"message" minLength:"1" maxLength:"4096"`
+	// AutomationAuthored preserves automation provenance when a remote sender's
+	// host-local session ID cannot safely identify it on this machine.
+	AutomationAuthored bool `json:"automationAuthored,omitempty"`
 	// UserAuthored marks content written directly by the user but delivered via
 	// AO's automation relay, such as inline document feedback.
 	UserAuthored bool `json:"userAuthored,omitempty"`
@@ -1549,7 +1556,10 @@ type DelegateTaskRequest struct {
 	ClientRequestID string           `json:"clientRequestId,omitempty" maxLength:"128"`
 	ProjectID       domain.ProjectID `json:"projectId"`
 	Brief           string           `json:"brief" maxLength:"102400"`
-	Branch          string           `json:"branch,omitempty" maxLength:"255"`
+	// Goal and TimeboxSeconds define the delegated worker's optional contract.
+	Goal           string `json:"goal,omitempty" maxLength:"1000"`
+	TimeboxSeconds int64  `json:"timeboxSeconds,omitempty" minimum:"1" maximum:"9223372036"`
+	Branch         string `json:"branch,omitempty" maxLength:"255"`
 	// BaseBranch starts the worker from this branch instead of the project's
 	// default, to stack its work on another pull request.
 	BaseBranch string              `json:"baseBranch,omitempty" maxLength:"255"`
@@ -2796,7 +2806,7 @@ type NotificationResponse struct {
 	SessionID string    `json:"sessionId"`
 	ProjectID string    `json:"projectId"`
 	PRURL     string    `json:"prUrl"`
-	Type      string    `json:"type" enum:"needs_input,ready_to_merge,pr_merged,pr_closed_unmerged,review_completed,review_changes_requested"`
+	Type      string    `json:"type" enum:"needs_input,session_stalled,ready_to_merge,pr_merged,pr_closed_unmerged,review_completed,review_changes_requested"`
 	Title     string    `json:"title"`
 	Body      string    `json:"body"`
 	Status    string    `json:"status" enum:"unread,read" description:"Seen state. unread means the user has not opened the notification panel since it arrived."`
@@ -3599,6 +3609,9 @@ type SteerConversationRequest struct {
 	// SenderSessionID identifies the AO session that authored an automation steer.
 	// It is optional so older callers and in-app human steering remain unchanged.
 	SenderSessionID string `json:"senderSessionId,omitempty"`
+	// AutomationAuthored preserves automation provenance when SenderSessionID is
+	// intentionally omitted across a machine boundary.
+	AutomationAuthored bool `json:"automationAuthored,omitempty"`
 	// Attachments are native image prompt blocks delivered with the correction.
 	Attachments []ConversationImageContentRequest `json:"attachments,omitempty"`
 	// ClientMessageID makes a retry idempotent at AO's durable daemon boundary. The

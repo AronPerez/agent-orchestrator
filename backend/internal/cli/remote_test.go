@@ -32,6 +32,7 @@ func aoHome(t *testing.T) string {
 	t.Setenv("AO_TOKEN", "")
 	t.Setenv("AO_DATA_DIR", "")
 	t.Setenv(remotesFileEnv, "")
+	t.Setenv("AO_CLOUD_ACCOUNT_FILE", "")
 	return dir
 }
 
@@ -390,6 +391,43 @@ func TestResolveAllSavedHostTargetsRespectsAccountOwnership(t *testing.T) {
 	}
 	if candidate := byID["h_broken"]; candidate.Err == nil || candidate.Target != nil || !strings.Contains(candidate.Err.Error(), "coordination credential") {
 		t.Fatalf("invalid candidate = %#v, want reconnect error without a target", candidate)
+	}
+}
+
+func TestActiveCloudAccountUsesDesktopCarriedMarker(t *testing.T) {
+	home := aoHome(t)
+	writeActiveCloudAccount(t, home, "user-production")
+	devDir := filepath.Join(home, ".ao", "dev")
+	if err := os.MkdirAll(devDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(activeCloudAccountMarker{UserID: "user-development", DesktopPID: os.Getpid()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	devMarker := filepath.Join(devDir, "cloud_active_user")
+	if err := os.WriteFile(devMarker, append(raw, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AO_CLOUD_ACCOUNT_FILE", devMarker)
+	c := &commandContext{deps: Deps{ProcessAlive: func(int) bool { return true }}.withDefaults()}
+	if got := c.activeCloudAccount(context.Background()); got != "user-development" {
+		t.Fatalf("active account = %q, want development desktop account", got)
+	}
+}
+
+func TestSavedHostResolverHidesCleanupRecords(t *testing.T) {
+	home := aoHome(t)
+	raw := `{"remotes":[{"label":"retired","url":"https://old.example","password":"old","hostId":"h_old","coordinationToken":"aoc_old","cleanupOnly":true}]}`
+	path := filepath.Join(home, ".ao", remotesFileName)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveSavedHostTarget("retired"); err == nil {
+		t.Fatal("cleanup-only row remained selectable")
 	}
 }
 

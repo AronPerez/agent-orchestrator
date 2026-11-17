@@ -180,6 +180,25 @@ func TestRuntimeEnvCarriesDesktopRemotesFileToAgent(t *testing.T) {
 	}
 }
 
+func TestRuntimeEnvCarriesDesktopCloudAccountMarkerToAgent(t *testing.T) {
+	aoRoot := t.TempDir()
+	marker := filepath.Join(aoRoot, "dev", "cloud_active_user")
+	t.Setenv("AO_CLOUD_ACCOUNT_FILE", marker)
+	manager := &Manager{
+		dataDir:    filepath.Join(aoRoot, "data"),
+		stateDir:   aoRoot,
+		executable: func() (string, error) { return filepath.Join(aoRoot, "data", "bin", "ao"), nil },
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	env := manager.runtimeEnv("mer-1", "mer", "", map[string]string{
+		"AO_CLOUD_ACCOUNT_FILE": filepath.Join(aoRoot, "project-cannot-redirect-marker"),
+	})
+	if got := env["AO_CLOUD_ACCOUNT_FILE"]; got != marker {
+		t.Fatalf("AO_CLOUD_ACCOUNT_FILE = %q, want desktop marker %q", got, marker)
+	}
+}
+
 func TestRuntimeEnvDerivesStandaloneRemotesFileFromStateDir(t *testing.T) {
 	aoRoot := t.TempDir()
 	t.Setenv(EnvRemotesFile, "")
@@ -220,6 +239,7 @@ func TestRuntimeEnvWindowsRemovesCaseVariantsOfProtectedVariables(t *testing.T) 
 		"Ao_Data_Dir":                    "hacked",
 		"ao_run_file":                    "hacked",
 		"Ao_Remotes_File":                "hacked",
+		"Ao_Cloud_Account_File":          "hacked",
 		"ao_browser_runtime_token":       "runtime-secret",
 		"ao_browser_runtime_token_stdin": "1",
 		"buildMode":                      "production",
@@ -233,6 +253,7 @@ func TestRuntimeEnvWindowsRemovesCaseVariantsOfProtectedVariables(t *testing.T) 
 		"Ao_Data_Dir",
 		"ao_run_file",
 		"Ao_Remotes_File",
+		"Ao_Cloud_Account_File",
 		"ao_browser_runtime_token",
 		"ao_browser_runtime_token_stdin",
 	} {

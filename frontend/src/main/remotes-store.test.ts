@@ -105,6 +105,21 @@ describe("addRemote", () => {
 		await addRemote(path, { hostId: "h_workbox", label: "workbox", url: "https://workbox.tailnet", password: "x" });
 		expect((await readRemotes(path)).map(({ url }) => url)).toEqual(["https://workbox.tailnet"]);
 	});
+
+	it("keeps displaced child cleanup bound to the original host when an address is reassigned", async () => {
+		const path = await tempFile(JSON.stringify({ remotes: [{
+			hostId: "h_old", label: "old", url: "https://shared.example", password: "old-secret",
+			coordinationToken: "aoc_old", coordinationDeviceId: "dev_old",
+		}] }));
+		await addRemote(path, { hostId: "h_new", label: "new", url: "https://shared.example", password: "new-secret" });
+		expect(await savedRemotes(path)).toEqual([
+			{
+				hostId: "h_old", label: "old", url: "https://shared.example", password: "old-secret",
+				cleanupOnly: true, pendingCoordinationDeviceIds: ["dev_old"],
+			},
+			{ hostId: "h_new", label: "new", url: "https://shared.example", password: "new-secret" },
+		]);
+	});
 });
 
 const TWO_HOSTS =

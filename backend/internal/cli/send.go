@@ -24,18 +24,20 @@ type sendOptions struct {
 // POST /api/v1/sessions/{id}/send. The CLI keeps its own copy so it need not
 // import httpd.
 type sendAPIRequest struct {
-	UserAuthored    bool   `json:"userAuthored,omitempty"`
-	SenderSessionID string `json:"senderSessionId,omitempty"`
-	Message         string `json:"message"`
+	UserAuthored       bool   `json:"userAuthored,omitempty"`
+	AutomationAuthored bool   `json:"automationAuthored,omitempty"`
+	SenderSessionID    string `json:"senderSessionId,omitempty"`
+	Message            string `json:"message"`
 }
 
 // The steering DTOs mirror the daemon conversation API without coupling the
 // thin CLI to the HTTP controller package.
 type conversationMessageAPIRequest struct {
-	Text            string `json:"text"`
-	ClientMessageID string `json:"clientMessageId"`
-	SenderSessionID string `json:"senderSessionId,omitempty"`
-	RecoverOnly     bool   `json:"recoverOnly,omitempty"`
+	Text               string `json:"text"`
+	ClientMessageID    string `json:"clientMessageId"`
+	SenderSessionID    string `json:"senderSessionId,omitempty"`
+	AutomationAuthored bool   `json:"automationAuthored,omitempty"`
+	RecoverOnly        bool   `json:"recoverOnly,omitempty"`
 }
 
 type steerOrSendAPIResponse struct {
@@ -84,6 +86,7 @@ func (c *commandContext) sendMessage(ctx context.Context, opts sendOptions) erro
 	}
 	senderSessionID := strings.TrimSpace(os.Getenv("AO_SESSION_ID"))
 	userAuthored := senderSessionID == ""
+	automationAuthored := c.remote != nil && senderSessionID != ""
 	message := opts.message
 	session := strings.TrimSpace(opts.session)
 	if session == "" {
@@ -110,7 +113,10 @@ func (c *commandContext) sendMessage(ctx context.Context, opts sendOptions) erro
 	// from sanitized issue refs; keep the URL well-formed regardless.
 	path := "sessions/" + url.PathEscape(session)
 	if !opts.steer {
-		if err := c.postJSON(ctx, path+"/send", sendAPIRequest{Message: message, SenderSessionID: senderSessionID, UserAuthored: userAuthored}, nil); err != nil {
+		if err := c.postJSON(ctx, path+"/send", sendAPIRequest{
+			Message: message, SenderSessionID: senderSessionID,
+			UserAuthored: userAuthored, AutomationAuthored: automationAuthored,
+		}, nil); err != nil {
 			return err
 		}
 		if suffix := c.resolvedBySuffix(); suffix != "" {
@@ -118,20 +124,21 @@ func (c *commandContext) sendMessage(ctx context.Context, opts sendOptions) erro
 		}
 		return nil
 	}
-	return c.steerMessage(ctx, path, message, senderSessionID, strings.TrimSpace(opts.clientMessageID), opts.recoverOnly)
+	return c.steerMessage(ctx, path, message, senderSessionID, strings.TrimSpace(opts.clientMessageID), automationAuthored, opts.recoverOnly)
 }
 
 func (c *commandContext) steerMessage(
 	ctx context.Context,
 	sessionPath, message, senderSessionID, clientMessageID string,
-	recoverOnly bool,
+	automationAuthored, recoverOnly bool,
 ) error {
 	if clientMessageID == "" {
 		clientMessageID = uuid.NewString()
 	}
 	var result steerOrSendAPIResponse
 	err := c.postJSON(ctx, sessionPath+"/conversation/steer-or-send", conversationMessageAPIRequest{
-		Text: message, ClientMessageID: clientMessageID, SenderSessionID: senderSessionID, RecoverOnly: recoverOnly,
+		Text: message, ClientMessageID: clientMessageID, SenderSessionID: senderSessionID,
+		AutomationAuthored: automationAuthored, RecoverOnly: recoverOnly,
 	}, &result)
 	if err != nil {
 		var responseErr apiResponseError
