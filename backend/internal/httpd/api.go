@@ -155,6 +155,11 @@ func normalizeAPIDeps(deps APIDeps, log *slog.Logger) APIDeps {
 	return deps
 }
 
+func requestDeviceRevoker(access controllers.DeviceAccess) controllers.RequestDeviceRevoker {
+	revoker, _ := access.(controllers.RequestDeviceRevoker)
+	return revoker
+}
+
 // API owns one controller per resource and is the single Register call the
 // router invokes to mount the /api/v1 surface.
 type API struct {
@@ -244,7 +249,7 @@ func newAPIWithLogger(cfg config.Config, deps APIDeps, log *slog.Logger) *API {
 		notifications: &controllers.NotificationsController{Svc: deps.Notifications, Stream: deps.NotificationStream},
 		reports:       &controllers.ReportsController{Svc: deps.Reports},
 		decisions:     &controllers.DecisionsController{Svc: deps.Decisions},
-		push:          &controllers.PushController{Registry: deps.Push, Devices: deps.AccessDevices},
+		push:          &controllers.PushController{Registry: deps.Push, Devices: deps.AccessDevices, Access: requestDeviceRevoker(deps.DeviceAccess)},
 		imports:       &controllers.ImportController{Svc: deps.Import},
 		sessionImport: &controllers.SessionImportController{Svc: deps.SessionImport},
 		fs:            &controllers.FSController{Svc: deps.Directories},
