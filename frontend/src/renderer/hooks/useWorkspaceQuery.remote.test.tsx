@@ -69,29 +69,33 @@ it("reports a failed remote query instead of treating the host as empty and heal
 	expect(result.current.loadedProjectHostIds).toEqual([]);
 });
 
-it.each(["startup", "reconnect", "proxy replacement", "proxy replacement during reads"])("waits for current-connection reads with restored data at %s", async (mode) => {
+it.each(["startup", "startup with unchanged data", "reconnect", "proxy replacement", "proxy replacement during reads"])("waits for current-connection reads with restored data at %s", async (mode) => {
 	const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
-	if (mode === "startup") {
+	const freshProjects = { projects: [{ id: "project-1", name: "Fresh", path: "/remote" }] };
+	const freshSessions = { sessions: [{ id: "new-session", projectId: "project-1", harness: "codex", status: "working", prs: [] }] };
+	if (mode.startsWith("startup")) {
 		remoteConnect.mockResolvedValue({ hostId: "box-a", label: "Box A", url: "http://box-a:3001", base: "http://127.0.0.1:4000" });
 		client.setQueryData([...remoteWorkspaceQueryKey("box-a"), "projects"], [{ id: "project-1", name: "Saved", path: "/saved" }]);
 		client.setQueryData([...remoteWorkspaceQueryKey("box-a"), "sessions"], []);
+		if (mode === "startup with unchanged data") {
+			client.setQueryData([...remoteWorkspaceQueryKey("box-a"), "projects"], freshProjects.projects);
+			client.setQueryData([...remoteWorkspaceQueryKey("box-a"), "sessions"], [{ ...freshSessions.sessions[0], artifactFiles: [] }]);
+		}
 	} else await prepareTwoHosts();
 	let finishProjects!: (response: Response) => void;
 	let finishSessions!: (response: Response) => void;
 	const projects = new Promise<Response>((resolve) => { finishProjects = resolve; });
 	const sessions = new Promise<Response>((resolve) => { finishSessions = resolve; });
-	const freshProjects = { projects: [{ id: "project-1", name: "Fresh", path: "/remote" }] };
-	const freshSessions = { sessions: [{ id: "new-session", projectId: "project-1", harness: "codex", status: "working", prs: [] }] };
 	const deferReads = () => vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) =>
 		(input instanceof Request ? input.url : String(input)).endsWith("/projects") ? projects : sessions));
-	if (mode === "startup") { deferReads(); await connectHost("http://box-a:3001"); }
+	if (mode.startsWith("startup")) { deferReads(); await connectHost("http://box-a:3001"); }
 	const cachedHostIds = ["box-a"];
 	const { result, unmount } = renderHook(() => useRemoteWorkspaces({ cachedHostIds }), {
 		wrapper: ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>,
 	});
 	try {
 		let finishPreviousReads: (() => Promise<void>) | undefined;
-		if (mode !== "startup") {
+		if (!mode.startsWith("startup")) {
 			await waitFor(() => expect(result.current.loadedSessionHostIds).toEqual(["box-a"]));
 			if (mode === "proxy replacement during reads") {
 				let finishPrevious!: (response: Response) => void;

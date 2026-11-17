@@ -1021,8 +1021,10 @@ export function useRemoteWorkspaces(options: WorkspaceSubscriptionOptions & {
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 		[dataInputs],
 	);
-	const loadedProjectHostIds = useStableArray(live((index) => hasCurrentRemoteRead(hostIds[index]!, projects[index]?.data)));
-	const loadedSessionHostIds = useStableArray(live((index) => hasCurrentRemoteRead(hostIds[index]!, sessions[index]?.data)));
+	// Observe request status so unchanged, structurally shared results still
+	// release the gate after a successful read; paused/in-flight reads wait.
+	const loadedProjectHostIds = useStableArray(live((index) => projects[index]?.fetchStatus === "idle" && hasCurrentRemoteRead(hostIds[index]!, projects[index]?.data)));
+	const loadedSessionHostIds = useStableArray(live((index) => sessions[index]?.fetchStatus === "idle" && hasCurrentRemoteRead(hostIds[index]!, sessions[index]?.data)));
 	const failedHostIds = useStableArray(live((index) => Boolean(projects[index]?.isError || sessions[index]?.isError)));
 	return {
 		data,
