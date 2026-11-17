@@ -210,6 +210,21 @@ describe("FleetOverview", () => {
 		expect(screen.getByRole("treeitem", { name: /^Project/ })).toHaveTextContent("1 Needs you");
 	});
 
+	it("uses daemon PR precedence when scmStatus is unavailable", () => {
+		const commented = session("commented", "Address feedback", "working", {
+			prs: [pr(1, { review: "none", mergeability: "blocked", reviewComments: true })],
+		});
+		const blocked = session("blocked", "Wait for base", "working", {
+			prs: [pr(2, { review: "approved", mergeability: "blocked" })],
+		});
+		render(<FleetOverview localWorkspaces={[workspace("project", "Project", [commented, blocked])]} onOpen={vi.fn()} />);
+
+		const project = screen.getByRole("treeitem", { name: /^Project/ });
+		expect(project).toHaveTextContent("1 Needs you");
+		expect(project).toHaveTextContent("1 In review");
+		expect(project).not.toHaveTextContent("Ready");
+	});
+
 	it("collapses branches and reveals archived sessions on request", async () => {
 		const active = session("active", "Active worker");
 		const archived = session("archived", "Archived worker", "terminated", { isTerminated: true });

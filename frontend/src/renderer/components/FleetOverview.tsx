@@ -174,15 +174,35 @@ function ownScmRollup(session: WorkspaceSession): ScmRollup {
 	};
 }
 
+function fleetPrStatus(pr: WorkspaceSession["prs"][number]): SessionStatus {
+	if (pr.ci === "failing") return "ci_failed";
+	if (pr.state === "draft") return "draft";
+	if (pr.review === "changes_requested") return "changes_requested";
+	if (pr.reviewComments) return "commented";
+	if (pr.mergeability === "mergeable") return "mergeable";
+	if (pr.review === "review_required") return "review_pending";
+	if (pr.mergeability === "blocked") return "pr_open";
+	if (pr.review === "approved") return "approved";
+	return "pr_open";
+}
+
 function fleetRollupStatus(session: WorkspaceSession): SessionStatus {
 	if (session.scmStatus) return session.scmStatus;
 	const active = session.prs.filter((pr) => pr.state === "open" || pr.state === "draft");
-	if (active.some((pr) => pr.ci === "failing")) return "ci_failed";
-	if (active.some((pr) => pr.review === "changes_requested" || pr.mergeability === "conflicting")) return "changes_requested";
-	if (active.some((pr) => pr.state === "draft")) return "draft";
-	if (active.some((pr) => pr.review !== "approved" && pr.mergeability !== "mergeable")) return "review_pending";
-	if (active.some((pr) => pr.mergeability === "mergeable")) return "mergeable";
-	if (active.some((pr) => pr.review === "approved")) return "approved";
+	const statuses = new Set(active.map(fleetPrStatus));
+	for (const status of [
+		"ci_failed",
+		"changes_requested",
+		"commented",
+		"draft",
+		"review_pending",
+		"pr_open",
+		"approved",
+		"mergeable",
+	] as const) {
+		if (statuses.has(status)) return status;
+	}
+	if (session.prs.some((pr) => pr.state === "merged")) return "merged";
 	return session.status;
 }
 
