@@ -9,6 +9,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	"github.com/aoagents/agent-orchestrator/backend/internal/providerkeys"
 )
 
 // SwitchTUIProvider replaces one terminal provider with another in the same AO
@@ -297,7 +298,7 @@ func (m *Manager) preflightTUISwitchTarget(ctx context.Context, rec domain.Sessi
 	if _, ok := target.(ports.AgentLaunchAuthValidator); ok {
 		rec.Harness = harness
 		config := effectiveAgentConfig(harness, rec.Kind, project.Config)
-		env := m.runtimeEnv(rec.ID, rec.ProjectID, rec.IssueID, project.Config.Env)
+		env := m.runtimeEnvForHarness(rec.ID, rec.ProjectID, rec.IssueID, project.Config.Env, harness)
 		pinRuntimePermissionEnv(env, config.Permissions)
 		m.augmentAgentRuntimeEnv(target, env)
 		if err := m.preflightLaunchAuth(ctx, target, rec, env); err != nil {
@@ -308,7 +309,10 @@ func (m *Manager) preflightTUISwitchTarget(ctx context.Context, rec domain.Sessi
 	status := ports.AgentAuthStatusUnknown
 	var err error
 	if runtimeChecker, ok := target.(ports.AgentRuntimeAuthChecker); ok && m.dataDir != "" {
-		status, _, _, err = runtimeChecker.AuthStatusForRuntime(ctx, m.dataDir)
+		// The probe sees what the relaunched session gets: no key AO holds
+		// back from this harness.
+		probeCtx := ports.WithAuthEnvironment(ctx, providerkeys.Withheld(m.dataDir, string(harness)))
+		status, _, _, err = runtimeChecker.AuthStatusForRuntime(probeCtx, m.dataDir)
 	} else if checker, ok := target.(ports.AgentAuthChecker); ok {
 		status, err = checker.AuthStatus(ctx)
 	}

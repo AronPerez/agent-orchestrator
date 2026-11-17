@@ -300,7 +300,7 @@ type CloneProjectHandler = (input: {
 	signal?: AbortSignal;
 }) => Promise<void>;
 type InitializeProjectHandler = (path: string) => Promise<void>;
-type RemoveProjectHandler = (projectId: string) => Promise<void>;
+type RemoveProjectHandler = (projectId: string, cloud: boolean) => void;
 type ImportValidationResult = components["schemas"]["ImportValidationResult"];
 type RepoGitStatus = components["schemas"]["RepoGitStatus"];
 
@@ -776,7 +776,7 @@ describe("Sidebar", () => {
 		expect(screen.getAllByLabelText("Sign in")).toHaveLength(2);
 	});
 
-	it("shows the Artifacts row under Automations with a count of live artifacts", async () => {
+	it("shows the Artifacts row under Automations with a count of every listed artifact, archived sessions' included", async () => {
 		const user = userEvent.setup();
 		const withArtifacts: WorkspaceSummary = {
 			...workspace,
@@ -803,7 +803,7 @@ describe("Sidebar", () => {
 		const automations = screen.getByRole("button", { name: "Automations" });
 		const artifacts = screen.getByRole("button", { name: "Artifacts" });
 		expect(automations.compareDocumentPosition(artifacts) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-		expect(artifacts).toHaveTextContent("2");
+		expect(artifacts).toHaveTextContent("3");
 		expect(artifacts).not.toHaveAttribute("aria-current");
 
 		await user.click(artifacts);
@@ -894,7 +894,8 @@ describe("Sidebar", () => {
 		const content = document.querySelector('[data-sidebar="content"]');
 		expect(content).toHaveClass("overflow-y-auto", "scrollbar-none");
 		expect(content).not.toHaveClass("project-sidebar-scrollbar");
-		expect(content).not.toContainElement(screen.getByText("Projects"));
+		// Section headers stay put: only each section's own list scrolls.
+		expect(screen.getByTestId("sidebar-projects-scroller")).not.toContainElement(screen.getByText("Projects"));
 	});
 
 	it("opens project settings instead of spawning when no orchestrator agent is configured", async () => {
@@ -984,7 +985,7 @@ describe("Sidebar", () => {
 		}
 	});
 
-	it("shows a ConfirmDialog and calls onRemoveProject when confirmed", async () => {
+	it("shows a ConfirmDialog and hands the removal to the shell when confirmed", async () => {
 		const user = userEvent.setup();
 		const onRemoveProject = renderSidebar();
 
@@ -997,18 +998,17 @@ describe("Sidebar", () => {
 		expect(dialog).toHaveTextContent("Project One");
 
 		await user.click(screen.getByRole("button", { name: "Remove" }));
-		await waitFor(() => expect(onRemoveProject).toHaveBeenCalledTimes(1));
-		expect(navigateMock).toHaveBeenCalledWith({ to: "/" });
+		// The fixture has no kind, like a row from an older daemon: still a local row.
+		await waitFor(() => expect(onRemoveProject).toHaveBeenCalledWith("proj-1", false));
+		// The shell leaves the project's page only when it is open (useRemoveProject).
+		expect(navigateMock).not.toHaveBeenCalled();
 	});
 
-	it("dismisses project removal immediately and shows progress outside the modal", async () => {
-		let finishRemoval!: () => void;
-		const onRemoveProject = vi.fn(
-			() =>
-				new Promise<void>((resolve) => {
-					finishRemoval = resolve;
-				}),
-		) as RemoveProjectHandler;
+	it("shows no Removing… state on the row while the removal runs", async () => {
+		// Removal is optimistic: the shell drops the row from the list, so the
+		// row never shows progress or an error of its own, even while a slow
+		// teardown is still running.
+		const onRemoveProject = vi.fn() as RemoveProjectHandler;
 		const user = userEvent.setup();
 		renderSidebar({ onRemoveProject });
 
@@ -1017,11 +1017,10 @@ describe("Sidebar", () => {
 		await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Remove" }));
 
 		expect(screen.queryByRole("dialog", { name: "Remove project" })).not.toBeInTheDocument();
-		expect(navigateMock).toHaveBeenCalledWith({ to: "/" });
-		expect(screen.getByRole("status")).toHaveTextContent("Removing Project One");
-
-		finishRemoval();
-		await waitFor(() => expect(screen.queryByRole("status")).not.toBeInTheDocument());
+		expect(onRemoveProject).toHaveBeenCalledTimes(1);
+		expect(screen.queryByRole("status")).not.toBeInTheDocument();
+		expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+		expect(screen.queryByText(/Removing/)).not.toBeInTheDocument();
 	});
 
 	it("does not remove the project when cancellation is clicked in the ConfirmDialog", async () => {
@@ -1037,23 +1036,6 @@ describe("Sidebar", () => {
 		// Dialog should close and the handler must not have fired
 		await waitFor(() => expect(screen.queryByRole("dialog", { name: "Remove project" })).not.toBeInTheDocument());
 		expect(onRemoveProject).not.toHaveBeenCalled();
-	});
-
-	it("keeps the removal dialog dismissed and surfaces failures in the sidebar", async () => {
-		const user = userEvent.setup();
-		const onRemoveProject = vi
-			.fn()
-			.mockRejectedValueOnce(new Error("Failed to remove project")) as RemoveProjectHandler;
-		renderSidebar({ onRemoveProject });
-
-		await user.click(screen.getByLabelText("Project actions for Project One"));
-		await user.click(await screen.findByRole("menuitem", { name: "Remove project" }));
-		await screen.findByRole("dialog", { name: "Remove project" });
-		await user.click(screen.getByRole("button", { name: "Remove" }));
-
-		expect(await screen.findByText("Failed to remove project")).toBeInTheDocument();
-		expect(screen.queryByRole("dialog", { name: "Remove project" })).not.toBeInTheDocument();
-		expect(navigateMock).toHaveBeenCalledWith({ to: "/" });
 	});
 
 	it("requests a new task for the project from the kebab menu", async () => {
@@ -1122,6 +1104,22 @@ describe("Sidebar", () => {
 		expect(request?.nonce ?? 0).toBeGreaterThan(before);
 	});
 
+	it("opens a new ad hoc agent on a remote host from its Scratchpad row", async () => {
+		const user = userEvent.setup();
+		renderSidebar({
+			remoteHosts: [{ hostId: "box-a", label: "Host A", url: "http://box-a:3011", status: "connected" }],
+			remoteWorkspaces: [
+				{ id: STANDALONE_WORKSPACE_ID, name: "Scratchpad", kind: STANDALONE_PROJECT_KIND, path: "", hostId: "box-a", sessions: [] },
+			],
+		});
+		const row = document.querySelector<HTMLElement>(`li[data-project-id="${STANDALONE_WORKSPACE_ID}"][data-host-id="box-a"]`)!;
+
+		expect(within(row).queryByLabelText("Project actions for Scratchpad · Host A")).not.toBeInTheDocument();
+		await user.click(within(row).getByRole("button", { name: "Open a new agent" }));
+
+		expect(useUiStore.getState().newTaskRequest).toMatchObject({ projectId: STANDALONE_WORKSPACE_ID, hostId: "box-a" });
+	});
+
 	it("lists ad hoc agents in their own Scratchpad section, not under a project row", () => {
 		renderSidebar({
 			workspaces: [
@@ -1146,6 +1144,8 @@ describe("Sidebar", () => {
 		expect(section).toHaveClass("mb-2", "min-h-0");
 		expect(screen.queryByRole("button", { name: /show (more|fewer) agents/i })).not.toBeInTheDocument();
 		expect(screen.getByTestId("sidebar-projects-scroller")).not.toContainElement(screen.getByText("baby"));
+		// Sessions sits above Projects, so standalone agents are found first.
+		expect(section.compareDocumentPosition(screen.getByRole("button", { name: "Projects" })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 	});
 
 	it("optically centers the Project and Scratchpad header add icons", () => {
@@ -1227,12 +1227,14 @@ describe("Sidebar", () => {
 		expect(section).toContainElement(screen.getByText("baby"));
 		const agentRow = screen.getByText("Fix the flake").closest("[data-session-row]")!;
 		expect(section).toContainElement(agentRow as HTMLElement);
-		// Only the Cloud agent carries the badge that tells it from a local one.
-		expect(within(agentRow as HTMLElement).getByText("Cloud")).toBeInTheDocument();
-		expect(within(screen.getByText("baby").closest("[data-session-row]") as HTMLElement).queryByText("Cloud")).toBeNull();
+		// Only the Cloud agent carries the cloud mark that tells it from a local one.
+		expect(within(agentRow as HTMLElement).getByRole("img", { name: "Cloud" })).toBeInTheDocument();
+		expect(within(screen.getByText("baby").closest("[data-session-row]") as HTMLElement).queryByRole("img", { name: "Cloud" })).toBeNull();
 		// It is no project of its own; a standalone agent shared with the person stays with the shared projects.
 		expect(document.querySelector('li[data-project-id="agent-1"]')).toBeNull();
 		expect(document.querySelector('li[data-project-id="agent-shared"]')).not.toBeNull();
+		// A Cloud project row carries the same cloud mark, not a text pill.
+		expect(within(document.querySelector('li[data-project-id="agent-shared"]') as HTMLElement).getByRole("img", { name: "Cloud" })).toBeInTheDocument();
 		expect(section).not.toContainElement(screen.queryByText("Their work"));
 
 		await user.click(screen.getByText("Fix the flake"));
@@ -1329,7 +1331,7 @@ describe("Sidebar", () => {
 		const section = document.querySelector("[data-scratchpad-section]") as HTMLElement;
 		expect(section).not.toBeNull();
 		expect(within(section).queryByText("Fix the flake")).toBeNull();
-		await user.click(within(section).getByRole("button", { name: "Archive, 1 session" }));
+		await user.click(within(section).getByRole("button", { name: "Archived sessions, 1" }));
 		expect(navigateMock).toHaveBeenCalledWith({ to: "/sessions" });
 		cleanup();
 
@@ -1337,7 +1339,7 @@ describe("Sidebar", () => {
 		renderSidebar({ workspaces: [workspace, agent([agentSession])] });
 		const active = document.querySelector("[data-scratchpad-section]") as HTMLElement;
 		expect(within(active).getByText("Fix the flake")).toBeInTheDocument();
-		expect(within(active).queryByRole("button", { name: /^Archive, / })).toBeNull();
+		expect(within(active).queryByRole("button", { name: /^Archived sessions, / })).toBeNull();
 		cleanup();
 
 		// A local Scratchpad still shows its sessions beside an archived agent.
@@ -1356,10 +1358,11 @@ describe("Sidebar", () => {
 		});
 		const local = document.querySelector("[data-scratchpad-section]") as HTMLElement;
 		expect(local).toContainElement(screen.getByText("baby"));
-		expect(within(local).queryByRole("button", { name: /^Archive, / })).toBeNull();
+		expect(within(local).queryByRole("button", { name: /^Archived sessions, / })).toBeNull();
 	});
 
-	it("shows no Scratchpad section for Cloud standalone agents that hold no session", () => {
+	it("shows the Sessions section with its + before any standalone session exists", async () => {
+		const user = userEvent.setup();
 		renderSidebar({
 			workspaces: [
 				workspace,
@@ -1367,8 +1370,12 @@ describe("Sidebar", () => {
 			],
 		});
 
-		expect(document.querySelector("[data-scratchpad-section]")).toBeNull();
+		const section = document.querySelector("[data-scratchpad-section]") as HTMLElement;
+		expect(within(section).getByRole("button", { name: "Sessions" })).toBeInTheDocument();
+		expect(within(section).queryByText("Refused start")).toBeNull();
 		expect(document.querySelector('li[data-project-id="agent-refused"]')).toBeNull();
+		await user.click(within(section).getByRole("button", { name: "Open a new agent" }));
+		expect(useUiStore.getState().newTaskRequest?.projectId).toBe(STANDALONE_WORKSPACE_ID);
 	});
 
 	it("collapses the Scratchpad section from its header", async () => {
@@ -1418,7 +1425,7 @@ describe("Sidebar", () => {
 		expect(screen.queryByText("baby")).not.toBeInTheDocument();
 	});
 
-	it("caps the ad hoc agent list at 10 and lets the section grow to half the available height", async () => {
+	it("caps the ad hoc agent list at 5 and lets the section grow to half the available height", async () => {
 		const user = userEvent.setup();
 		renderSidebar({
 			workspaces: [
@@ -1440,8 +1447,8 @@ describe("Sidebar", () => {
 			],
 		});
 
-		expect(screen.getByText("Agent 10")).toBeInTheDocument();
-		expect(screen.queryByText("Agent 11")).not.toBeInTheDocument();
+		expect(screen.getByText("Agent 5")).toBeInTheDocument();
+		expect(screen.queryByText("Agent 6")).not.toBeInTheDocument();
 
 		const scroller = screen.getByTestId("sidebar-scratchpad-scroller");
 		expect(scroller).toHaveClass("overflow-y-auto");
@@ -1449,17 +1456,17 @@ describe("Sidebar", () => {
 		expect(scroller.style.maxHeight).toBe("");
 		expect(document.querySelector<HTMLElement>("[data-scratchpad-section]")!.style.maxHeight).toBe("");
 
-		await user.click(screen.getByRole("button", { name: "Show 3 more agents" }));
+		await user.click(screen.getByRole("button", { name: "Show 8 more agents" }));
 
-		expect(screen.getByText("Agent 11")).toBeInTheDocument();
+		expect(screen.getByText("Agent 6")).toBeInTheDocument();
 		expect(screen.getByText("Agent 13")).toBeInTheDocument();
 		expect(scroller.style.maxHeight).toBe("");
 		expect(screen.getByRole("button", { name: "Show fewer agents" })).toBeInTheDocument();
 
 		await user.click(screen.getByRole("button", { name: "Show fewer agents" }));
 
-		expect(screen.queryByText("Agent 11")).not.toBeInTheDocument();
-		expect(screen.getByRole("button", { name: "Show 3 more agents" })).toBeInTheDocument();
+		expect(screen.queryByText("Agent 6")).not.toBeInTheDocument();
+		expect(screen.getByRole("button", { name: "Show 8 more agents" })).toBeInTheDocument();
 	});
 
 	it("fades the scroll edges of project and Scratchpad sections as they scroll", () => {
@@ -1574,7 +1581,7 @@ describe("Sidebar", () => {
 		expect(openSession).toHaveClass("pr-[36px]");
 		expect(openSession).toHaveClass(
 			"group-hover/session-row:pr-sidebar-project-actions",
-			"group-has-[:focus-visible]/session-row:pr-sidebar-project-actions",
+			"focus-visible-in-session-row:pr-sidebar-project-actions",
 		);
 		expect(label).toHaveClass("min-w-0", "flex-1", "truncate");
 		expect(actions).toHaveAttribute("data-session-actions");
@@ -1584,18 +1591,19 @@ describe("Sidebar", () => {
 			"gap-0.5",
 			"opacity-0",
 			"scale-[0.8]",
-			"duration-normal",
-			"group-has-[:focus-visible]/session-row:pointer-events-auto",
-			"group-has-[:focus-visible]/session-row:scale-100",
-			"group-has-[:focus-visible]/session-row:opacity-100",
+			"focus-visible-in-session-row:pointer-events-auto",
+			"focus-visible-in-session-row:scale-100",
+			"focus-visible-in-session-row:opacity-100",
 		);
+		// Hover shows them at once, with no transition.
+		expect(actionButtons?.className).not.toMatch(/\btransition/);
 		expect(actionButtons).toHaveAttribute("data-session-action-buttons", "");
 		expect(time).toHaveAttribute("datetime", lastUserMessageAt);
 		expect(time).toHaveClass(
 			"absolute",
 			"right-2",
 			"opacity-100",
-			"group-has-[:focus-visible]/session-row:opacity-0",
+			"focus-visible-in-session-row:opacity-0",
 		);
 		expect(openSession).toHaveClass("pl-1.5");
 		expect(openSession.closest("li")).toHaveClass("pl-0.5");
@@ -2743,6 +2751,39 @@ describe("Sidebar", () => {
 		expect(dialog).toHaveTextContent("repository folder");
 	});
 
+	it("names a Cloud project's removal as a permanent delete, unlike a local one", async () => {
+		const user = userEvent.setup();
+		const cloudProject: WorkspaceSummary = { ...workspace, id: "cloud-1", name: "Cloud One", kind: "cloud", cloudOrgId: "org-1", path: "", sessions: [] };
+		const onRemoveProject = renderSidebar({ workspaces: [cloudProject] });
+
+		await user.click(screen.getByLabelText("Project actions for Cloud One"));
+		expect(screen.queryByRole("menuitem", { name: "Remove project" })).not.toBeInTheDocument();
+		await user.click(await screen.findByRole("menuitem", { name: "Delete project" }));
+
+		const dialog = await screen.findByRole("dialog", { name: "Delete project" });
+		expect(dialog).toHaveTextContent("This will permanently delete Cloud One");
+		// No grey explainer under the lead: it said what the lead already says.
+		expect(dialog).not.toHaveTextContent("sandboxes");
+		expect(within(dialog).queryByRole("button", { name: "Remove" })).not.toBeInTheDocument();
+		await user.click(within(dialog).getByRole("button", { name: "Delete permanently" }));
+		await waitFor(() => expect(onRemoveProject).toHaveBeenCalledWith("cloud-1", true));
+	});
+
+	it("offers no Delete project on a Cloud project someone else shared: only its own organization deletes it", async () => {
+		const user = userEvent.setup();
+		const sharedProject: WorkspaceSummary = { ...workspace, id: "their-cloud", name: "Their Cloud", kind: "cloud", cloudOrgId: "org-2", path: "", sessions: [], shared: { source: "link" } };
+		renderSidebar({ workspaces: [sharedProject] });
+
+		// The guest's row has no project ⋮ menu; its right-click menu is the way in.
+		expect(screen.queryByLabelText("Project actions for Their Cloud")).toBeNull();
+		const row = document.querySelector('li[data-project-id="their-cloud"]') as HTMLElement;
+		fireEvent.contextMenu(within(row).getAllByText("Their Cloud")[0]!);
+		expect(await screen.findByRole("menuitem", { name: /Pin to top/ })).toBeInTheDocument();
+		expect(screen.queryByRole("menuitem", { name: "Delete project" })).not.toBeInTheDocument();
+		expect(screen.queryByRole("menuitem", { name: "Remove project" })).not.toBeInTheDocument();
+		await user.keyboard("{Escape}");
+	});
+
 	it("warns when removing a project would hide open pull requests", async () => {
 		const user = userEvent.setup();
 		const workspaceWithPullRequests = {
@@ -2809,6 +2850,7 @@ describe("Sidebar", () => {
 			"Copy path",
 			"Rename",
 			"Pin session",
+			"Fork session",
 			"Archive session",
 		]);
 		expect(renameItem).toHaveTextContent(/^Rename$/);
@@ -3489,10 +3531,8 @@ describe("Sidebar", () => {
 		resetSessionPreviewWarmth();
 		expect(screen.queryByTestId("board-session-card")).not.toBeInTheDocument();
 		await user.hover(screen.getByLabelText("Open preview task"));
-		// The first preview waits out a short hover before it opens.
-		expect(screen.queryByTestId("board-session-card")).not.toBeInTheDocument();
-
-		const card = await screen.findByTestId("board-session-card");
+		// The preview opens on hover, with no wait.
+		const card = screen.getByTestId("board-session-card");
 		expect(card).toHaveTextContent("preview task");
 		expect(within(card).getByTestId("session-status")).toHaveTextContent("Blocked");
 		// Static: attention styling without the pulse, and no card-level click target.
@@ -3529,7 +3569,6 @@ describe("Sidebar", () => {
 		await user.hover(screen.getByLabelText("Open first task"));
 		expect(await screen.findByTestId("board-session-card")).toHaveTextContent("first task");
 
-		// Well inside the first-open delay: only a warm preview can appear this fast.
 		await user.hover(screen.getByLabelText("Open second task"));
 		await waitFor(
 			() => {
@@ -3583,21 +3622,21 @@ describe("Sidebar", () => {
 		});
 
 		resetSessionPreviewWarmth();
-		// All three hovers land inside the first-open delay, so none has opened yet.
+		// Each hover replaces the previous row's preview.
 		await user.hover(screen.getByLabelText("Open sweep a"));
 		await user.hover(screen.getByLabelText("Open sweep b"));
 		await user.hover(screen.getByLabelText("Open sweep c"));
 
 		const card = await screen.findByTestId("board-session-card");
 		expect(card).toHaveTextContent("sweep c");
-		// Past every row's delay: nothing from the rows swept over may open late.
+		// Nothing from the rows swept over may open late.
 		await new Promise((resolve) => setTimeout(resolve, 600));
 		const cards = screen.getAllByTestId("board-session-card");
 		expect(cards).toHaveLength(1);
 		expect(cards[0]).toHaveTextContent("sweep c");
 	});
 
-	it("goes back to a delayed first preview after the pointer has left every row", async () => {
+	it("opens the preview instantly again after the pointer has left every row", async () => {
 		const user = userEvent.setup();
 		renderSidebar({
 			workspaces: [
@@ -3614,8 +3653,7 @@ describe("Sidebar", () => {
 
 		await new Promise((resolve) => setTimeout(resolve, 400));
 		await user.hover(row);
-		expect(screen.queryByTestId("board-session-card")).not.toBeInTheDocument();
-		const card = await screen.findByTestId("board-session-card");
+		const card = screen.getByTestId("board-session-card");
 		expect(card.closest('[data-slot="hover-card-content"]')?.className).not.toMatch(/animate-in/);
 	});
 
@@ -4909,14 +4947,14 @@ describe("Memoized Sidebar with unchanged props", () => {
 		const view = render(shell(client, <Sidebar workspaces={[alpha]} {...handlers} />));
 		fireEvent.contextMenu(document.querySelector('[data-project-id="alpha"] [data-project-label]')!);
 		expect(await screen.findByRole("menuitem", { name: "Open dashboard" })).toBeInTheDocument();
-		expect(screen.queryByRole("menuitem", { name: /^Archive/ })).not.toBeInTheDocument();
+		expect(screen.queryByRole("menuitem", { name: /^Archived sessions/ })).not.toBeInTheDocument();
 		await user.keyboard("{Escape}");
 		await waitFor(() => expect(screen.queryByRole("menuitem", { name: "Open dashboard" })).not.toBeInTheDocument());
 
 		const archived = { ...alpha, sessions: [...alpha.sessions, { ...alpha.sessions[0]!, id: "alpha-2", title: "old task", kanbanColumn: "archive" as const }] };
 		view.rerender(shell(client, <Sidebar workspaces={[archived]} {...handlers} />));
 		fireEvent.contextMenu(document.querySelector('[data-project-id="alpha"] [data-project-label]')!);
-		await user.click(await screen.findByRole("menuitem", { name: "Archive, 1 session" }));
+		await user.click(await screen.findByRole("menuitem", { name: "Archived sessions, 1" }));
 
 		expect(useUiStore.getState().archiveModal).toMatchObject({ projectId: "alpha" });
 		// The modal opens over the current page; the menu never goes to the board.

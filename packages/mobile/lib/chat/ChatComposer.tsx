@@ -34,6 +34,7 @@ import { ComposerAttachmentTray } from "./ComposerAttachmentTray";
 import { ComposerGlass, composerGlassSupported } from "./composer-glass";
 import { COMPOSER_DISC, COMPOSER_FIELD_HEIGHT, COMPOSER_FONT_SCALE_CAP, COMPOSER_RADIUS, composerStyleRules, useComposerFieldSize } from "./composerStyles";
 import { ChatTurnSettingsControl } from "./ChatTurnSettingsControl";
+import type { ChatTurnSettingsControlProps } from "./ChatTurnSettingsControl.types";
 import { EffortSliderOverlay } from "../effort-slider";
 import { useChatEffort } from "./useChatEffort";
 import { compactCount } from "../files/model";
@@ -74,8 +75,10 @@ const CHIP_SLOP = (touchTarget - CHIP_HEIGHT) / 2;
 const COMPOSER_FADE_MS = 160;
 /** How far above the dock the conversation starts fading out behind it. */
 const DOCK_FADE_RISE = space.xxl;
-/** The fade's gradient: from that height down past the chips, solid below. */
+/** The fade's gradient: from that height down past the chips, `DOCK_FADE_FLOOR` below. */
 const DOCK_FADE_HEIGHT = DOCK_FADE_RISE + CHIP_HEIGHT;
+/** The fade's cover below the chips, the bars' frost at the screen edge (see `frost`). */
+const DOCK_FADE_FLOOR = 0.92;
 
 // The composer's one-off glyphs.
 /** Redirect the running turn now. */
@@ -123,6 +126,7 @@ export function ChatComposer({
 	onInterrupt,
 	onSettings,
 	onConfigOption,
+	otherAgents,
 	restingInset,
 	dockRiseOverride,
 	onOpenUsage,
@@ -175,6 +179,8 @@ export function ChatComposer({
 	onInterrupt(): void;
 	onSettings(settings: TurnSettings): Promise<void>;
 	onConfigOption(id: string, value: { value: string } | { enabled: boolean }): Promise<ChatConfigOption[]>;
+	/** The model menu's other agents; choosing one's model switches the session's agent. */
+	otherAgents?: ChatTurnSettingsControlProps["otherAgents"];
 	/**
 	 * What the dock owes with the keyboard down — the home-indicator inset. The
 	 * dock keeps it at all times and closes the difference to the keyboard by
@@ -757,7 +763,7 @@ export function ChatComposer({
 				    drawn when the row opens rather than appearing partway through. */}
 				<Animated.View pointerEvents={expanded ? "box-none" : "none"} style={[styles.controlsRow, { paddingLeft: CORNER_CONTROL, paddingRight: CORNER_CONTROL }, controlsOpening]}>
 					<View style={styles.settingsSlot}>
-						<ChatTurnSettingsControl {...settingsProps} effort={{ choices: effort.choices, open: effort.open, onToggle: effort.toggle }} />
+						<ChatTurnSettingsControl {...settingsProps} otherAgents={otherAgents} effort={{ choices: effort.choices, open: effort.open, onToggle: effort.toggle }} />
 					</View>
 					{steerAction}
 				</Animated.View>
@@ -777,8 +783,11 @@ export function ChatComposer({
 
 /**
  * The conversation fading out behind the dock, as a system bar's scroll edge
- * does: clear above it, the page's colour by the time it reaches the composer,
- * so text running under the chips and the pill never competes with them.
+ * does: clear above it, nearly the page's colour by the time it reaches the
+ * composer, so text running under the chips and the pill never competes with
+ * them. Never fully solid: the conversation stays faintly visible below the
+ * pill, behind the system navigation, so the composer floats over the page
+ * rather than sitting on a strip of its own.
  *
  * The gradient is a strip of fixed height at the dock's top, and the page's
  * colour below it is a plain view that follows the dock's layout. A gradient
@@ -793,14 +802,14 @@ function DockFade() {
 				<Defs>
 					<LinearGradient id="dockFade" x1="0" y1="0" x2="0" y2="1">
 						<Stop offset="0" stopColor={color} stopOpacity={0} />
-						<Stop offset="0.5" stopColor={color} stopOpacity={0.85} />
-						<Stop offset="1" stopColor={color} stopOpacity={1} />
+						<Stop offset="0.5" stopColor={color} stopOpacity={0.7} />
+						<Stop offset="1" stopColor={color} stopOpacity={DOCK_FADE_FLOOR} />
 					</LinearGradient>
 				</Defs>
 				<Rect x="0" y="0" width="100%" height="100%" fill="url(#dockFade)" />
 			</Svg>
 		</View>
-		<View style={{ flex: 1, backgroundColor: color }} />
+		<View style={{ flex: 1, backgroundColor: color, opacity: DOCK_FADE_FLOOR }} />
 	</View>;
 }
 

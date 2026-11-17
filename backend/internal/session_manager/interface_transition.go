@@ -601,7 +601,7 @@ func (m *Manager) runInterfaceTransition(
 				fail("HANDOFF_STORAGE_BRIDGE_FAILED", projectErr)
 				return
 			}
-			env := m.runtimeEnv(rec.ID, rec.ProjectID, rec.IssueID, project.Config.Env)
+			env := m.runtimeEnvForHarness(rec.ID, rec.ProjectID, rec.IssueID, project.Config.Env, rec.Harness)
 			m.augmentAgentRuntimeEnv(bridge, env)
 			if bridgeErr := storageBridge.PrepareInterfaceHandoffStorage(ctx, ports.SessionRef{
 				ID: string(rec.ID), WorkspacePath: rec.Metadata.WorkspacePath,
@@ -1036,7 +1036,7 @@ func (m *Manager) persistedNativeConversationID(
 	if err != nil {
 		return "", err
 	}
-	env := m.runtimeEnv(rec.ID, rec.ProjectID, rec.IssueID, project.Config.Env)
+	env := m.runtimeEnvForHarness(rec.ID, rec.ProjectID, rec.IssueID, project.Config.Env, rec.Harness)
 	exists, err := probe.NativeConversationExists(ctx, ports.SessionRef{
 		ID:            string(rec.ID),
 		WorkspacePath: rec.Metadata.WorkspacePath,
@@ -1083,7 +1083,7 @@ func (m *Manager) preflightInterfaceTarget(
 		return err
 	}
 	config := restoredAgentConfig(rec, project.Config)
-	env := m.runtimeEnv(rec.ID, rec.ProjectID, rec.IssueID, project.Config.Env)
+	env := m.runtimeEnvForHarness(rec.ID, rec.ProjectID, rec.IssueID, project.Config.Env, rec.Harness)
 	pinRuntimePermissionEnv(env, config.Permissions)
 	m.augmentAgentRuntimeEnv(agent, env)
 	if err := m.preflightLaunchAuth(ctx, agent, rec, env); err != nil {
@@ -1129,7 +1129,7 @@ func (m *Manager) preflightTerminalLaunch(
 	var cmd []string
 	if nativeConversationID == "" {
 		cmd, _, _, err = freshLaunchArgv(ctx, agent, rec.ID, rec.Metadata.WorkspacePath,
-			rec.Metadata, systemPrompt, "", config, rec.Kind, m.dataDir, true, "")
+			rec.Metadata, systemPrompt, "", config, rec.Kind, m.dataDir, true, "", nil)
 	} else {
 		var resumable bool
 		cmd, resumable, err = agent.GetRestoreCommand(ctx, ports.RestoreConfig{

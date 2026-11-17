@@ -14,6 +14,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
+
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
@@ -156,6 +158,7 @@ func (p *Provider) Observe(ctx context.Context, prURL string) (ports.PRObservati
 		return out, scmObserveError(err)
 	}
 
+	p.markCancelledGateFailures(ctx, owner, repo, gq)
 	out.CI = ciSummaryFromGraphQL(gq)
 	out.Review = reviewDecisionFromGraphQL(gq)
 	out.Mergeability = mergeabilityFromGraphQL(gq, rest, out.CI, out.Review)
@@ -238,9 +241,9 @@ func (p *Provider) fetchRESTPull(ctx context.Context, owner, repo string, number
 const graphQLCheckContextLimit = 100
 
 // checkRunFields is the CheckRun selection every rollup query uses. The
-// workflow name and event identify which runs are reruns of the same check
-// (see latestCheckRuns).
-const checkRunFields = `name status conclusion detailsUrl url databaseId startedAt checkSuite{ workflowRun{ event workflow{ name } } }`
+// workflow ID and event identify which runs are reruns of the same check
+// (see latestCheckRuns). Suite IDs keep cancellation evidence within one run.
+const checkRunFields = `name status conclusion detailsUrl url databaseId startedAt checkSuite{ conclusion id workflowRun{ event workflow{ id name } } }`
 
 // prObservationQuery is the GraphQL query (derived from PR #28, credited
 // to @whoisasx) that pulls everything we need in one round trip:
@@ -318,6 +321,70 @@ func (p *Provider) fetchJobLogTail(ctx context.Context, owner, repo string, jobI
 		return "", err
 	}
 	return string(body), nil
+}
+
+// Cancellation alone cannot explain a failure. Require a gate-only script and
+// cancelled siblings, with no other failure in the complete, unfiltered run.
+func (p *Provider) markCancelledGateFailures(ctx context.Context, owner, repo string, pr map[string]any) {
+	contexts := statusContexts(pr)
+	if pageInfoHasMore(contexts) {
+		return
+	}
+	checks := nodes(contexts["nodes"])
+	for _, n := range checks {
+		suite, _ := n["checkSuite"].(map[string]any)
+		id := str(suite["id"])
+		jobID := int64(num(n["databaseId"]))
+		if id == "" || jobID <= 0 || checkSuiteConclusion(n) != "CANCELLED" || str(n["conclusion"]) != "FAILURE" {
+			continue
+		}
+		failures, cancelled := 0, false
+		for _, peer := range checks {
+			peerSuite, _ := peer["checkSuite"].(map[string]any)
+			if str(peerSuite["id"]) == id {
+				if checkStatusFromGraphQL(peer) == domain.PRCheckFailed {
+					failures++
+				}
+				cancelled = cancelled || str(peer["conclusion"]) == "CANCELLED"
+			}
+		}
+		if failures == 1 && cancelled {
+			if log, err := p.fetchJobLogTail(ctx, owner, repo, jobID); err == nil && cancellationGateLog(log) {
+				n["cancelledGateFailure"] = true
+			}
+		}
+	}
+}
+
+// Recognize the dependency-only assertions in the observed gate logs. Unknown
+// scripts or unreadable logs retain their failures; job names prove nothing.
+func cancellationGateLog(log string) bool {
+	parts := strings.Split(ansi.Strip(log), "##[group]Run ")
+	if len(parts) != 2 {
+		return false
+	}
+	commands, cancelled := 0, false
+	for _, raw := range strings.Split(parts[1], "\n")[1:] {
+		_, line, _ := strings.Cut(raw, " ") // Actions timestamps precede each line.
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "shell:") {
+			return commands > 0 && cancelled
+		}
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		switch line {
+		case "test 'cancelled' = success":
+			cancelled = true
+		case "test 'success' = success", `jq 'map_values(.result)' <<< "$NEEDS"`:
+		case `jq -e 'all(.[]; .result == "success" or .result == "skipped")' <<< "$NEEDS"`:
+			cancelled = strings.Contains(log, `"result": "cancelled"`) && !strings.Contains(log, `"result": "failure"`) && strings.Contains(log, "Z false\n")
+		default:
+			return false
+		}
+		commands++
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------
@@ -622,10 +689,11 @@ func checkRunKey(n map[string]any) string {
 	suite, _ := n["checkSuite"].(map[string]any)
 	run, _ := suite["workflowRun"].(map[string]any)
 	workflow, _ := run["workflow"].(map[string]any)
-	if workflow == nil {
+	workflowID, event, name := str(workflow["id"]), str(run["event"]), str(n["name"])
+	if workflowID == "" || event == "" || name == "" {
 		return ""
 	}
-	return strings.Join([]string{str(workflow["name"]), str(run["event"]), str(n["name"])}, "\x00")
+	return strings.Join([]string{workflowID, event, name}, "\x00")
 }
 
 // statusRollup extracts the commits[0].commit.statusCheckRollup blob
@@ -665,7 +733,12 @@ func checkStatusFromGraphQL(n map[string]any) domain.PRCheckStatus {
 	switch conclusion {
 	case "SUCCESS", "NEUTRAL":
 		return domain.PRCheckPassed
-	case "FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE":
+	case "FAILURE":
+		if boolv(n["cancelledGateFailure"]) && checkSuiteConclusion(n) == "CANCELLED" {
+			return domain.PRCheckCancelled
+		}
+		return domain.PRCheckFailed
+	case "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE":
 		return domain.PRCheckFailed
 	case "CANCELLED":
 		return domain.PRCheckCancelled
@@ -685,11 +758,9 @@ func checkStatusFromGraphQL(n map[string]any) domain.PRCheckStatus {
 	return domain.PRCheckUnknown
 }
 
-// latestConcludedCheckRun maps a CheckRun name to the startedAt of the newest
-// same-named run that reached a conclusion other than CANCELLED. Only rows
-// carrying a parseable startedAt count: without one there is no way to order
-// them, and the conservative existing behaviour (a cancel is failing) has to
-// stand rather than be guessed away.
+// latestConcludedCheckRun maps a workflow/event/job identity to the startedAt
+// of its newest non-cancelled conclusion. Missing identity or timestamps cannot
+// prove supersession, so those cancellations remain unknown.
 func latestConcludedCheckRun(rawNodes []map[string]any) map[string]time.Time {
 	out := make(map[string]time.Time)
 	for _, n := range rawNodes {
@@ -700,21 +771,21 @@ func latestConcludedCheckRun(rawNodes []map[string]any) map[string]time.Time {
 		case "", "CANCELLED":
 			continue
 		}
-		name := str(n["name"])
+		key := checkRunKey(n)
 		ts, ok := checkRunStartedAt(n)
-		if name == "" || !ok {
+		if key == "" || !ok {
 			continue
 		}
-		if prev, seen := out[name]; !seen || ts.After(prev) {
-			out[name] = ts
+		if prev, seen := out[key]; !seen || ts.After(prev) {
+			out[key] = ts
 		}
 	}
 	return out
 }
 
 // cancelSuperseded reports whether a CANCELLED run was replaced by a later
-// same-named run that actually concluded. GitHub re-runs a workflow under one
-// name (a push, a PR body edit), so a single sha carries several rows per name
+// run of the same workflow, event and job that actually concluded. GitHub
+// re-runs workflows on a push or PR body edit, so a SHA carries several rows
 // — measured on one commit: 61 contexts, 11 names repeated, one of them four
 // times — and the rollup does NOT return them in time order, so the comparison
 // must be on startedAt and never on position in the list.
@@ -723,7 +794,7 @@ func cancelSuperseded(n map[string]any, concluded map[string]time.Time) bool {
 	if !ok {
 		return false
 	}
-	newer, seen := concluded[str(n["name"])]
+	newer, seen := concluded[checkRunKey(n)]
 	return seen && newer.After(ts)
 }
 
@@ -733,6 +804,14 @@ func checkRunStartedAt(n map[string]any) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return ts, true
+}
+
+// checkSuiteConclusion is the upper-cased conclusion of the check suite a
+// CheckRun belongs to, or "" while the suite is running or when the field is
+// missing.
+func checkSuiteConclusion(n map[string]any) string {
+	suite, _ := n["checkSuite"].(map[string]any)
+	return strings.ToUpper(strings.TrimSpace(str(suite["conclusion"])))
 }
 
 func isFailingCheckStatus(s domain.PRCheckStatus) bool {

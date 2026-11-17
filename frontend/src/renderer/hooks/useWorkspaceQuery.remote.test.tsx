@@ -16,6 +16,7 @@ import { appI18n } from "../i18n";
 import { sessionUiKey } from "../lib/hosts";
 import { useRemoteUnpinStore } from "../stores/remote-unpin-store";
 import { clearOptimisticSessionKill, trackOptimisticSessionKill } from "./optimistic-session-kills";
+import { clearOptimisticProjectRemoval, trackOptimisticProjectRemoval } from "./optimistic-project-removals";
 import { remoteWorkspaceQueryKey, useRemoteProjectQuery, useRemoteWorkspaces, useWorkspaceQuery, useWorkspaceSession } from "./useWorkspaceQuery";
 
 function wrapper({ children }: { children: ReactNode }) {
@@ -68,10 +69,142 @@ it("reports a failed remote query instead of treating the host as empty and heal
 	expect(result.current.loadedProjectHostIds).toEqual([]);
 });
 
+it.each(["startup", "startup with unchanged data", "reconnect", "proxy replacement", "proxy replacement during reads"])("waits for current-connection reads with restored data at %s", async (mode) => {
+	const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+	const freshProjects = { projects: [{ id: "project-1", name: "Fresh", path: "/remote" }] };
+	const freshSessions = { sessions: [{ id: "new-session", projectId: "project-1", harness: "codex", status: "working", prs: [] }] };
+	if (mode.startsWith("startup")) {
+		remoteConnect.mockResolvedValue({ hostId: "box-a", label: "Box A", url: "http://box-a:3001", base: "http://127.0.0.1:4000" });
+		client.setQueryData([...remoteWorkspaceQueryKey("box-a"), "projects"], [{ id: "project-1", name: "Saved", path: "/saved" }]);
+		client.setQueryData([...remoteWorkspaceQueryKey("box-a"), "sessions"], []);
+		if (mode === "startup with unchanged data") {
+			client.setQueryData([...remoteWorkspaceQueryKey("box-a"), "projects"], freshProjects.projects);
+			client.setQueryData([...remoteWorkspaceQueryKey("box-a"), "sessions"], [{ ...freshSessions.sessions[0], artifactFiles: [] }]);
+		}
+	} else await prepareTwoHosts();
+	let finishProjects!: (response: Response) => void;
+	let finishSessions!: (response: Response) => void;
+	const projects = new Promise<Response>((resolve) => { finishProjects = resolve; });
+	const sessions = new Promise<Response>((resolve) => { finishSessions = resolve; });
+	const deferReads = () => vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) =>
+		(input instanceof Request ? input.url : String(input)).endsWith("/projects") ? projects : sessions));
+	if (mode.startsWith("startup")) { deferReads(); await connectHost("http://box-a:3001"); }
+	const cachedHostIds = ["box-a"];
+	const { result, unmount } = renderHook(() => useRemoteWorkspaces({ cachedHostIds }), {
+		wrapper: ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>,
+	});
+	try {
+		let finishPreviousReads: (() => Promise<void>) | undefined;
+		if (!mode.startsWith("startup")) {
+			await waitFor(() => expect(result.current.loadedSessionHostIds).toEqual(["box-a"]));
+			if (mode === "proxy replacement during reads") {
+				let finishPrevious!: (response: Response) => void;
+				const previous = new Promise<Response>((resolve) => { finishPrevious = resolve; });
+				vi.stubGlobal("fetch", vi.fn(async () => (await previous).clone()));
+				const pending = client.refetchQueries({ queryKey: remoteWorkspaceQueryKey("box-a") });
+				await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+				finishPreviousReads = async () => {
+					finishPrevious(Response.json({ projects: [], sessions: [] }));
+					await pending;
+				};
+			}
+			if (mode === "reconnect") await act(async () => { await disconnectHost("box-a"); });
+			deferReads();
+			remoteConnect.mockResolvedValue({ hostId: "box-a", label: "Box A", url: "http://box-a:3001", base: mode.startsWith("proxy replacement") ? "http://127.0.0.1:5000" : "http://127.0.0.1:4000" });
+			await act(async () => { await connectHost("http://box-a:3001"); });
+		}
+		expect(result.current.data[0]?.id).toBe("project-1");
+		expect(result.current.loadedProjectHostIds).toEqual([]);
+		expect(result.current.loadedSessionHostIds).toEqual([]);
+		await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+		await act(async () => { finishProjects(Response.json(freshProjects)); });
+		await waitFor(() => expect(result.current.loadedProjectHostIds).toEqual(["box-a"]));
+		expect(result.current.loadedSessionHostIds).toEqual([]);
+		await act(async () => { finishSessions(Response.json(freshSessions)); });
+		await waitFor(() => expect(result.current.loadedSessionHostIds).toEqual(["box-a"]));
+		expect(result.current.data[0]?.sessions[0]?.id).toBe("new-session");
+		const data = result.current.data;
+		if (finishPreviousReads) {
+			await act(finishPreviousReads);
+			expect(result.current.data).toBe(data);
+			expect(result.current.loadedProjectHostIds).toEqual(["box-a"]);
+			expect(result.current.loadedSessionHostIds).toEqual(["box-a"]);
+		}
+		vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => Response.json(
+			(input instanceof Request ? input.url : String(input)).endsWith("/projects") ? freshProjects : freshSessions)));
+		await act(async () => { await client.invalidateQueries({ queryKey: remoteWorkspaceQueryKey("box-a") }); });
+		expect(result.current.data).toBe(data);
+	} finally {
+		unmount(); client.clear();
+	}
+});
+
+it("keeps live readiness while a background poll is pending", async () => {
+	await prepareTwoHosts();
+	const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+	const { result, unmount } = renderHook(() => useRemoteWorkspaces(), {
+		wrapper: ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>,
+	});
+	let finish!: (response: Response) => void;
+	let poll: Promise<void> | undefined;
+	try {
+		await waitFor(() => expect(result.current.loadedSessionHostIds).toEqual(["box-a"]));
+		const data = result.current.data;
+		const source = {
+			projects: client.getQueryData([...remoteWorkspaceQueryKey("box-a"), "projects"]),
+			sessions: client.getQueryData([...remoteWorkspaceQueryKey("box-a"), "sessions"]),
+		};
+		const pending = new Promise<Response>((resolve) => { finish = resolve; });
+		vi.stubGlobal("fetch", vi.fn(async () => (await pending).clone()));
+		await act(async () => { poll = client.refetchQueries({ queryKey: remoteWorkspaceQueryKey("box-a") }); });
+		await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+		try {
+			expect(result.current.loadedProjectHostIds).toEqual(["box-a"]);
+			expect(result.current.loadedSessionHostIds).toEqual(["box-a"]);
+			expect(result.current.data).toBe(data);
+		} finally {
+			await act(async () => { finish(Response.json(source)); await poll; });
+		}
+	} finally {
+		unmount(); client.clear();
+	}
+});
+
+it("keeps live receipts when a remote board mounts during an unchanged read", async () => {
+	const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+	const source = {
+		projects: [{ id: "project-1", name: "Remote", path: "/remote" }],
+		sessions: [{ id: "session-1", projectId: "project-1", harness: "codex", status: "working", prs: [], artifactFiles: [] }],
+	};
+	client.setQueryData([...remoteWorkspaceQueryKey("box-a"), "projects"], source.projects);
+	client.setQueryData([...remoteWorkspaceQueryKey("box-a"), "sessions"], source.sessions);
+	remoteConnect.mockResolvedValue({ hostId: "box-a", label: "Box A", url: "http://box-a:3001", base: "http://127.0.0.1:4000" });
+	await connectHost("http://box-a:3001");
+	let finish!: (response: Response) => void;
+	const pending = new Promise<Response>((resolve) => { finish = resolve; });
+	vi.stubGlobal("fetch", vi.fn(async () => (await pending).clone()));
+	let showBoard = false;
+	function Board() { useRemoteProjectQuery("box-a", "project-1"); return null; }
+	const { result, rerender, unmount } = renderHook(() => useRemoteWorkspaces(), {
+		wrapper: ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}{showBoard && <Board />}</QueryClientProvider>,
+	});
+	try {
+		await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+		showBoard = true;
+		rerender();
+		await act(async () => { finish(Response.json(source)); });
+		await waitFor(() => expect(result.current.loadedProjectHostIds).toEqual(["box-a"]));
+		await waitFor(() => expect(result.current.loadedSessionHostIds).toEqual(["box-a"]));
+	} finally {
+		unmount(); client.clear();
+	}
+});
+
 it.each([
 	[401, true],
 	[426, true],
 	[502, true],
+	[504, true],
 	[530, true],
 	[500, false],
 ])("rechecks a connected host after a remote HTTP %i response only when connection health is in doubt", async (status, shouldRecheck) => {
@@ -82,7 +215,17 @@ it.each([
 	const dispatched = vi.spyOn(window, "dispatchEvent");
 	const { result } = renderHook(() => useWorkspaceSession("session-1", hostId), { wrapper });
 	await waitFor(() => expect(result.current.isError).toBe(true));
-	expect(dispatched.mock.calls.some(([event]) => event.type === "ao:remote-hosts-changed")).toBe(shouldRecheck);
+	expect(dispatched.mock.calls.some(([event]) => event.type === "ao:remote-host-check" && (event as CustomEvent<string>).detail === hostId)).toBe(shouldRecheck);
+});
+
+it("rechecks a connected host when a remote read gets no answer", async () => {
+	remoteConnect.mockResolvedValue({ hostId: "box-silent", label: "Box", url: "http://box:3001", base: "http://127.0.0.1:4000" });
+	vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("fetch failed"); }));
+	await connectHost("http://box:3001");
+	const dispatched = vi.spyOn(window, "dispatchEvent");
+	const { result } = renderHook(() => useRemoteWorkspaces(), { wrapper });
+	await waitFor(() => expect(result.current.failedHostIds).toEqual(["box-silent"]), { timeout: 3000 });
+	expect(dispatched.mock.calls.some(([event]) => event.type === "ao:remote-host-check" && (event as CustomEvent<string>).detail === "box-silent")).toBe(true);
 });
 
 it("coalesces simultaneous and repeated remote request failures into one host recheck", async () => {
@@ -93,13 +236,13 @@ it("coalesces simultaneous and repeated remote request failures into one host re
 	const dispatched = vi.spyOn(window, "dispatchEvent");
 	const { result } = renderHook(() => useRemoteWorkspaces(), { wrapper });
 	await waitFor(() => expect(result.current.failedHostIds).toEqual(["box-gate"]), { timeout: 3000 });
-	const refreshCount = () => dispatched.mock.calls.filter(([event]) => event.type === "ao:remote-hosts-changed").length;
-	expect(refreshCount()).toBe(1);
+	const checkCount = () => dispatched.mock.calls.filter(([event]) => event.type === "ao:remote-host-check").length;
+	expect(checkCount()).toBe(1);
 	await act(async () => { await result.current.refetch(); });
-	expect(refreshCount()).toBe(1);
-	now.mockReturnValue(1_015_000);
+	expect(checkCount()).toBe(1);
+	now.mockReturnValue(1_002_000);
 	await act(async () => { await result.current.refetch(); });
-	expect(refreshCount()).toBe(2);
+	expect(checkCount()).toBe(2);
 });
 
 it("keeps a host's registered projects visible when its sessions request fails", async () => {
@@ -337,15 +480,52 @@ it("marks a remote session terminated while its kill is in flight, and rolls it 
 	expect(result.current.data[0]?.sessions[0]?.isTerminated).not.toBe(true);
 });
 
-it("renames a remote Scratchpad when the language changes", async () => {
+it("hides a remote project while its removal is in flight, even when a poll returns it", () => {
+	const live = { id: "session-1", projectId: "project-1", harness: "codex", status: "working", prs: [] };
+	const { client, result } = renderCachedHost([live]);
+	const projectsKey = ["remote-workspaces", "box-a", "projects"];
+	expect(result.current.data.map((project) => project.id)).toEqual(["project-1"]);
+	try {
+		act(() => trackOptimisticProjectRemoval("project-1", "box-a"));
+		expect(result.current.data).toEqual([]);
+
+		// The host still lists the project while it tears it down.
+		act(() => client.setQueryData(projectsKey, [{ id: "project-1", name: "Remote", path: "/remote" }]));
+		expect(result.current.data).toEqual([]);
+		// A local project with the same id is a different project.
+		act(() => trackOptimisticProjectRemoval("project-1"));
+		act(() => clearOptimisticProjectRemoval("project-1"));
+		expect(result.current.data).toEqual([]);
+	} finally {
+		act(() => clearOptimisticProjectRemoval("project-1", "box-a"));
+	}
+	// Rolled back: the host's list shows it again.
+	expect(result.current.data.map((project) => project.id)).toEqual(["project-1"]);
+});
+
+it("keeps a removed local project out of a list fetched while its removal is in flight", async () => {
+	localGet.mockImplementation(async (path: string) => path === "/api/v1/projects"
+		? { data: { projects: [{ id: "project-1", name: "Gone", path: "/gone" }, { id: "project-2", name: "Kept", path: "/kept" }] } }
+		: { data: { sessions: [{ id: "session-1", projectId: "project-1", harness: "codex", status: "working", prs: [] }] } });
+	trackOptimisticProjectRemoval("project-1");
+	try {
+		const { result } = renderHook(() => useWorkspaceQuery(), { wrapper });
+		await waitFor(() => expect(result.current.data).toBeDefined());
+		expect(result.current.data?.map((project) => project.id)).toEqual(["project-2"]);
+	} finally {
+		clearOptimisticProjectRemoval("project-1");
+	}
+});
+
+it("renames a remote Sessions list when the language changes", async () => {
 	const { result } = renderCachedHost([{ id: "session-1", harness: "codex", status: "working", prs: [] }], []);
-	expect(result.current.data.map((project) => project.name)).toEqual(["Scratchpad"]);
+	expect(result.current.data.map((project) => project.name)).toEqual(["Sessions"]);
 	try {
 		await act(() => appI18n.changeLanguage("de"));
-		expect(result.current.data.map((project) => project.name)).toEqual(["Notizblock"]);
-		expect(result.current.data[0]?.sessions[0]?.workspaceName).toBe("Notizblock");
+		expect(result.current.data.map((project) => project.name)).toEqual(["Sitzungen"]);
+		expect(result.current.data[0]?.sessions[0]?.workspaceName).toBe("Sitzungen");
 	} finally {
 		await act(() => appI18n.changeLanguage("en"));
 	}
-	expect(result.current.data.map((project) => project.name)).toEqual(["Scratchpad"]);
+	expect(result.current.data.map((project) => project.name)).toEqual(["Sessions"]);
 });

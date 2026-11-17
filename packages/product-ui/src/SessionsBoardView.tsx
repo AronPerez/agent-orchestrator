@@ -22,6 +22,7 @@ import {
 	type ProductUITranslator,
 } from "./session-presentation";
 import type { KanbanColumn, SessionActivity, SessionStatus } from "./session-models";
+import { branchTopic } from "./formatting";
 import { UserAvatar } from "./UserAvatar";
 import { cn } from "./utils";
 
@@ -47,6 +48,14 @@ export type BoardSessionPresentation = {
 	 * send one falls back to the translated {@link status} label.
 	 */
 	displayStatus?: string;
+	/**
+	 * How a multi-PR session's live PRs stand when they do not all agree with
+	 * the one {@link displayStatus} speaks for: `lead`, when several PRs share
+	 * that state, replaces the phrase with its count ("2 awaiting review"), and
+	 * `detail` follows it, muted ("1 waiting on #8277"). Absent for a single PR
+	 * or when every live PR is in one state.
+	 */
+	prMix?: { lead?: string; detail: string };
 	statusReadiness?: "checking" | "ready" | "unavailable";
 	/**
 	 * Daemon-confirmed termination fact. `status` can already read "merged"
@@ -261,6 +270,7 @@ export function getBoardSessionStatusLabel(
 		: session.statusReadiness === "unavailable"
 			? translate("session.statusUnavailable")
 			: (session.statusPresentation?.label ??
+				session.prMix?.lead ??
 				(session.displayStatus
 					? getDisplayStatusLabel(session.displayStatus, translate)
 					: getSessionStatusView(session.status, translate).label));
@@ -301,12 +311,20 @@ export function SessionCardView({
 			? "text-status-exited"
 			: session.displayStatus === "Merged"
 				? "text-status-merged"
-				: session.status === "mergeable" || session.displayStatus === "Mergeable"
+				// The daemon's phrase decides; `status` only speaks for a daemon too old
+				// to send one (a PR stacked on another session's PR can still read
+				// "mergeable" there while the phrase says it waits on its parent).
+				: (session.displayStatus ? session.displayStatus === "Mergeable" : session.status === "mergeable")
 				? "text-success"
 				: (session.statusPresentation?.className ?? column.titleClassName);
 	const branch = session.branch ?? "";
-	const showBranch = Boolean(branchLabel) || (branch !== "" && !sameLabel(branch, session.title) && !sameLabel(branch, session.id));
+	const topic = branchTopic(branch);
+	const showBranch = Boolean(branchLabel) || (branch !== "" && !sameLabel(topic, session.title) && !sameLabel(topic, session.id));
 	const renderedStatusLabel = getBoardSessionStatusLabel(session, translate);
+	const statusDetail =
+		session.statusReadiness !== "checking" && session.statusReadiness !== "unavailable" && !statusPresentation
+			? session.prMix?.detail
+			: undefined;
 	// Additive summary footer, not a replacement for renderedStatusLabel: it
 	// only appears once the daemon confirms the session is actually finished
 	// ("terminated", or "merged" with isTerminated true -- a live session can
@@ -341,7 +359,10 @@ export function SessionCardView({
 			data-testid="session-status"
 		>
 			{showStatusLoader ? <LoaderCircleIcon aria-hidden="true" className="mr-1 size-icon-2xs animate-spin" /> : null}
-			<span className="min-w-0 truncate">{renderedStatusLabel}</span>
+			<span className="min-w-0 truncate" title={statusDetail ? `${renderedStatusLabel} · ${statusDetail}` : undefined}>
+				{renderedStatusLabel}
+				{statusDetail ? <span className="text-muted-foreground"> · {statusDetail}</span> : null}
+			</span>
 		</span>
 	);
 	const metrics = (
@@ -380,7 +401,7 @@ export function SessionCardView({
 	const branchRow = showBranch ? (
 		<>
 			{branchIcon ?? <GitBranchIcon aria-hidden="true" className="size-icon-2xs shrink-0" />}
-			{branchLabel ?? <span className="truncate text-muted-foreground">{branch}</span>}
+			{branchLabel ?? <span className="truncate text-muted-foreground" title={branch}>{topic}</span>}
 			{branchAction}
 		</>
 	) : null;

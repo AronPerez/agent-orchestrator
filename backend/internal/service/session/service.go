@@ -213,7 +213,9 @@ type terminalTitleSource interface {
 // assembly, including user-facing display status derivation.
 type Service struct {
 	// Fork compatibility: one batched legacy switch read, late-bound at assembly.
-	forkSwitches        func(context.Context) (map[domain.SessionID]*domain.AgentSwitch, error)
+	forkSwitches func(context.Context) (map[domain.SessionID]*domain.AgentSwitch, error)
+	// prMoved tells a live session that another session took its PR.
+	prMoved             PRMovedNotifier
 	manager             commander
 	terminalTitles      terminalTitleSource
 	store               Store
@@ -302,6 +304,13 @@ func (s *Service) SetGitHubRepositoryResolver(r ports.GitHubRepositoryResolver) 
 func (s *Service) SetComputerLoginCheck(check func(ctx context.Context, harness domain.AgentHarness, accountID string) bool) {
 	s.runsOnComputerLogin = check
 }
+
+// PRMovedNotifier is told when session to takes PR pr from live session from.
+type PRMovedNotifier func(ctx context.Context, from, to domain.SessionID, pr domain.PullRequest)
+
+// SetPRMovedNotifier wires the notice sent to a session whose PR was claimed
+// by another session.
+func (s *Service) SetPRMovedNotifier(notify PRMovedNotifier) { s.prMoved = notify }
 
 // SetChatProviderPreserver wires the live Chat lifetime observation after both
 // services have been constructed. It performs no provider or filesystem probes.
@@ -1345,6 +1354,8 @@ func (s *Service) Delete(ctx context.Context, id domain.SessionID, cleanup bool)
 	}
 	s.cancelTitleRefinement(id)
 	s.deleteArtifactDir(ctx, id)
+	// A kept record left by an earlier keeping delete that failed.
+	s.forgetKeptArtifacts(ctx, id)
 	return nil
 }
 
@@ -1354,8 +1365,9 @@ type archivedSessionLister interface {
 }
 
 // DeleteExpired permanently deletes the archived sessions whose worktree is
-// released and that were archived more than days ago, the same way Delete
-// does. The store leaves out sessions with shared history, which the delete
+// released and that were archived more than days ago. Their artifacts are
+// kept, the way DeleteKeepingArtifacts keeps them: artifacts are deleted only
+// when the person deletes them. The store leaves out sessions with shared history, which the delete
 // always refuses. A session the delete refuses for now (an operation running)
 // or that is already gone is left for a later pass.
 func (s *Service) DeleteExpired(ctx context.Context, days int) error {
@@ -1376,7 +1388,7 @@ func (s *Service) DeleteExpired(ctx context.Context, days int) error {
 		if sess.ArchivedAt.After(cutoff) {
 			continue
 		}
-		err := s.Delete(ctx, sess.ID, false)
+		err := s.DeleteKeepingArtifacts(ctx, sess.ID, false)
 		var apiErr *apierr.Error
 		if err == nil || errors.As(err, &apiErr) && (apiErr.Kind == apierr.KindConflict || apiErr.Kind == apierr.KindNotFound) {
 			continue
@@ -2044,6 +2056,8 @@ func mapSessionError(err error) error {
 		return apierr.Conflict("HARNESS_INSTALL_ACTIVE", "The selected harness is currently being installed", nil)
 	case errors.Is(err, sessionmanager.ErrUnsupportedModel):
 		return apierr.Invalid("UNSUPPORTED_MODEL", err.Error(), nil)
+	case errors.Is(err, sessionmanager.ErrTerminalUnsupported):
+		return apierr.Invalid("TERMINAL_UNSUPPORTED", err.Error(), nil)
 	case errors.Is(err, sessionmanager.ErrTargetAgentUnauthorized):
 		return apierr.Invalid("TARGET_AGENT_UNAUTHORIZED",
 			"The target agent is not authenticated; authenticate it before switching", nil)
@@ -2107,6 +2121,9 @@ func mapSessionError(err error) error {
 		return apierr.Conflict("CHAT_DRIVER_INCOMPATIBLE", err.Error(), nil)
 	case errors.Is(err, ports.ErrChatAuthRequired):
 		return apierr.Conflict("CHAT_AUTH_REQUIRED", "The agent is installed but not authenticated", nil)
+	case errors.Is(err, ports.ErrChatProviderSessionLost):
+		return apierr.Conflict("CHAT_PROVIDER_SESSION_LOST",
+			"The agent's process lost this conversation and was stopped. Resume the agent to continue; your history is kept.", nil)
 	case errors.Is(err, ports.ErrChatResumeFailed):
 		return apierr.Conflict("CHAT_RESUME_FAILED",
 			"The agent could not resume its saved conversation. Your Orchestrator history is still available.", nil)

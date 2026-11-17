@@ -404,14 +404,24 @@ func TestACPRelaySettlesStalledPrompt(t *testing.T) {
 		t.Fatalf("fresh prompt tripped the stall watchdog: %s", frame)
 	}
 
-	frames := failStalled(t, relay, 1, time.Now().Add(2*promptStallTimeout))
-	response := frames.client
+	stalledAt := time.Now().Add(2 * promptStallTimeout)
+	first := failStalled(t, relay, 1, stalledAt)
+	// The adapter still owns the turn; the watchdog cancels it and keeps the
+	// prompt active until the adapter answers or the grace runs out.
+	if want := `{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"session-live"}}` + "\n"; string(first.provider) != want {
+		t.Fatalf("adapter frame = %s, want %s", first.provider, want)
+	}
+	if first.client != nil || !relay.snapshot().ActivePrompt {
+		t.Fatalf("watchdog settled the prompt before the adapter answered the cancel: %+v", first)
+	}
+	if frames := failStalled(t, relay, 1, stalledAt.Add(promptStallCancelGrace/2)); frames.client != nil || frames.provider != nil {
+		t.Fatalf("watchdog acted again inside the cancel grace: %+v", frames)
+	}
+
+	// A wedged adapter never answers: the relay settles the prompt without it.
+	response := failStalled(t, relay, 1, stalledAt.Add(promptStallCancelGrace)).client
 	if response == nil || frameID(t, response) != promptID {
 		t.Fatalf("stalled prompt response = %s", response)
-	}
-	// The adapter still owns the turn; the watchdog cancels it.
-	if want := `{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"session-live"}}` + "\n"; string(frames.provider) != want {
-		t.Fatalf("adapter frame = %s, want %s", frames.provider, want)
 	}
 	var failure struct {
 		Error struct {
@@ -424,6 +434,11 @@ func TestACPRelaySettlesStalledPrompt(t *testing.T) {
 	}
 	if failure.Error.Code != -32603 || !strings.Contains(failure.Error.Message, "provider stopped responding") {
 		t.Fatalf("stalled response error = %+v", failure.Error)
+	}
+	// An adapter that ignored the cancel may still emit, so the failure must not
+	// carry the marker that releases the controller's queue.
+	if strings.Contains(string(response), ACPPromptStalledDataKey) {
+		t.Fatalf("wedged-adapter failure carries the %s marker: %s", ACPPromptStalledDataKey, response)
 	}
 
 	state := relay.snapshot()
@@ -464,7 +479,9 @@ func TestACPRelaySettlesStalledPrompt(t *testing.T) {
 func TestACPRelaySettlesStalledPromptAfterReattach(t *testing.T) {
 	relay, _ := startStallTestPrompt(t)
 
-	frame := failStalled(t, relay, 2, time.Now().Add(2*promptStallTimeout)).client
+	stalledAt := time.Now().Add(2 * promptStallTimeout)
+	failStalled(t, relay, 2, stalledAt)
+	frame := failStalled(t, relay, 2, stalledAt.Add(promptStallCancelGrace)).client
 	if !strings.Contains(string(frame), ACPPromptResultMethod) || !strings.Contains(string(frame), "provider stopped responding") {
 		t.Fatalf("reattached controller got %s, want the private prompt result carrying the failure", frame)
 	}
@@ -486,7 +503,7 @@ func TestACPRelayStallWatchdogWaitsOnTheClient(t *testing.T) {
 	if frame := failStalled(t, relay, 1, time.Now().Add(promptStallTimeout/2)).client; frame != nil {
 		t.Fatalf("watchdog counted the wait for the user as adapter silence: %s", frame)
 	}
-	if frame := failStalled(t, relay, 1, time.Now().Add(2*promptStallTimeout)).client; frame == nil {
+	if frames := failStalled(t, relay, 1, time.Now().Add(2*promptStallTimeout)); frames.provider == nil {
 		t.Fatal("watchdog ignored adapter silence after the user answered")
 	}
 }
@@ -522,7 +539,7 @@ func TestACPRelayStallWatchdogResumesAfterAllToolsFinish(t *testing.T) {
 	if frames := failStalled(t, relay, 1, time.Now()); len(frames.client)+len(frames.provider) != 0 {
 		t.Fatalf("watchdog counted tool execution as adapter silence: provider=%s client=%s", frames.provider, frames.client)
 	}
-	if frames := failStalled(t, relay, 1, time.Now().Add(2*promptStallTimeout)); len(frames.client) == 0 || len(frames.provider) == 0 {
+	if frames := failStalled(t, relay, 1, time.Now().Add(2*promptStallTimeout)); len(frames.provider) == 0 {
 		t.Fatalf("watchdog ignored adapter silence after all tools finished: provider=%s client=%s", frames.provider, frames.client)
 	}
 }
@@ -543,7 +560,7 @@ func TestACPRelayStallWatchdogForgetsToolsAfterPromptResult(t *testing.T) {
 	})
 	relayClientFrame(t, relay, append(ack, '\n'), 1)
 	relayClientFrame(t, relay, []byte(`{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":"session-live","prompt":[]}}`+"\n"), 1)
-	if frames := failStalled(t, relay, 1, time.Now().Add(2*promptStallTimeout)); len(frames.client) == 0 {
+	if frames := failStalled(t, relay, 1, time.Now().Add(2*promptStallTimeout)); len(frames.provider) == 0 {
 		t.Fatal("previous prompt's tools disabled the next prompt's watchdog")
 	}
 }
@@ -557,10 +574,42 @@ func TestACPRelayStallWatchdogIgnoresUnrelatedToolUpdates(t *testing.T) {
 		t.Run(params, func(t *testing.T) {
 			relay, _ := startStallTestPrompt(t)
 			relayProviderFrame(t, relay, []byte(`{"jsonrpc":"2.0","method":"session/update","params":`+params+`}`+"\n"), 1, true)
-			if frames := failStalled(t, relay, 1, time.Now().Add(2*promptStallTimeout)); len(frames.client) == 0 {
+			if frames := failStalled(t, relay, 1, time.Now().Add(2*promptStallTimeout)); len(frames.provider) == 0 {
 				t.Fatal("unrelated tool update disabled the watchdog")
 			}
 		})
+	}
+}
+
+// The adapter keeps emitting from the cancelled turn until it answers. That
+// output belongs to the stalled prompt, and the answer ends it with the stall
+// failure, so the next prompt starts on a quiet adapter.
+func TestACPRelayStalledPromptEndsWhenTheAdapterAnswersTheCancel(t *testing.T) {
+	relay, promptID := startStallTestPrompt(t)
+	stalledAt := time.Now().Add(2 * promptStallTimeout)
+	if first := failStalled(t, relay, 1, stalledAt); len(first.provider) == 0 {
+		t.Fatal("watchdog did not cancel the stalled prompt")
+	}
+
+	late, _ := relayProviderFrame(t, relay, []byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-live","update":{"agent_message_chunk":{"content":{"type":"text","text":"tail of the old turn"}}}}}`+"\n"), 1, true)
+	if !strings.Contains(string(late), ACPEventIDMetaKey) || !relay.snapshot().ActivePrompt {
+		t.Fatalf("output after the cancel left the stalled prompt: active=%v frame=%s", relay.snapshot().ActivePrompt, late)
+	}
+
+	// The answer arrives as a plain cancelled result; the turn still ends as a stall.
+	answer, _ := relayProviderFrame(t, relay, []byte(`{"jsonrpc":"2.0","id":`+promptID+`,"result":{"stopReason":"cancelled"}}`+"\n"), 1, true)
+	if !strings.Contains(string(answer), `"`+ACPPromptStalledDataKey+`":true`) || strings.Contains(string(answer), "cancelled") {
+		t.Fatalf("answer to the cancelled prompt = %s, want the stall failure", answer)
+	}
+	state := relay.snapshot()
+	if state.ActivePrompt || state.PendingResultEventID == "" {
+		t.Fatalf("post-answer state = %+v", state)
+	}
+	if frames := failStalled(t, relay, 1, stalledAt.Add(2*promptStallCancelGrace)); frames.client != nil || frames.provider != nil {
+		t.Fatalf("watchdog acted after the adapter answered: %+v", frames)
+	}
+	if len(relay.abandonedPrompts) != 0 {
+		t.Fatalf("an answered prompt must not be marked abandoned: %v", relay.abandonedPrompts)
 	}
 }
 

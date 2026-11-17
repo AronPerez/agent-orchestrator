@@ -1,5 +1,5 @@
 import { markApiError } from "../lib/reported-errors";
-import { type QueryClient, useQueries, useQuery, useQueryClient, type Query } from "@tanstack/react-query";
+import { type QueryClient, useQueries, useQuery, useQueryClient, type Query, replaceEqualDeep } from "@tanstack/react-query";
 import { useRemoteUnpinStore, withRemoteUnpins } from "../stores/remote-unpin-store";
 import { cleanUpLegacyPreparedCloudSessions } from "../lib/cloud-session-prestart";
 import type { TraySessionEntry } from "../../shared/tray";
@@ -20,10 +20,12 @@ import { usesPreviewWorkspaceData } from "../lib/preview-mode";
 import { toReviewerHarnessId } from "../lib/reviewer-harnesses";
 import { captureRendererEvent } from "../lib/telemetry";
 import { aoBridge } from "../lib/bridge";
-import { clientForHost } from "../lib/host-clients";
+import { withQueryFields } from "../lib/query-result";
+import { clientForHost, connectedHosts } from "../lib/host-clients";
 import { useConnectedHosts } from "./useHostConnection";
-import { requestRemoteHostsRefresh } from "./useRemoteHosts";
+import { requestRemoteHostCheck } from "./useRemoteHosts";
 import { applyOptimisticSessionKills, optimisticSessionKillsVersion, subscribeOptimisticSessionKills } from "./optimistic-session-kills";
+import { applyOptimisticProjectRemovals, isOptimisticallyRemovedProject, optimisticProjectRemovalsVersion, subscribeOptimisticProjectRemovals } from "./optimistic-project-removals";
 import { appI18n } from "../i18n";
 import {
 	type PRState,
@@ -65,10 +67,11 @@ function toPullRequestFacts(pr: components["schemas"]["SessionPRFacts"]): PullRe
 		mergeability: pr.mergeability,
 		reviewComments: pr.reviewComments,
 		updatedAt: pr.updatedAt,
+		...(pr.stackParent ? { stackParent: pr.stackParent } : {}),
 	};
 }
 
-function toSessionArtifact(artifact: components["schemas"]["SessionArtifact"]): SessionArtifact {
+export function toSessionArtifact(artifact: components["schemas"]["SessionArtifact"]): SessionArtifact {
 	return {
 		...(artifact.id ? { id: artifact.id } : {}),
 		kind: artifact.kind,
@@ -83,6 +86,8 @@ function toSessionArtifact(artifact: components["schemas"]["SessionArtifact"]): 
 		...(artifact.previousPaths?.length ? { previousPaths: artifact.previousPaths } : {}),
 		// Set while the file is published from this computer; the Artifacts list marks it.
 		...(artifact.shareUrl ? { shareUrl: artifact.shareUrl } : {}),
+		// Who that link opens for, as recorded, so a mark shows its globe or link before the link list is read.
+		...(artifact.shareUrl && artifact.shareAccess ? { shareAccess: artifact.shareAccess } : {}),
 	};
 }
 
@@ -115,6 +120,7 @@ export function toWorkspaceSession(
 			? {
 					model: session.reviewerConfig.model ?? undefined,
 					mode: session.reviewerConfig.mode ?? undefined,
+					effort: session.reviewerConfig.effort ?? undefined,
 					permissions: session.reviewerConfig.permissions ?? undefined,
 				}
 			: undefined,
@@ -166,18 +172,18 @@ export function toWorkspaceSession(
 export const workspaceQueryKey = ["workspaces"] as const;
 export const remoteWorkspaceQueryKey = (hostId: string) => ["remote-workspaces", hostId] as const;
 export const workspaceQueryKeyForHost = (hostId?: string) => hostId ? remoteWorkspaceQueryKey(hostId) : workspaceQueryKey;
-const remoteProjectsQueryKey = (hostId: string) => [...remoteWorkspaceQueryKey(hostId), "projects"] as const;
+export const remoteProjectsQueryKey = (hostId: string) => [...remoteWorkspaceQueryKey(hostId), "projects"] as const;
 export const remoteSessionsQueryKey = (hostId: string) => [...remoteWorkspaceQueryKey(hostId), "sessions"] as const;
 const lastRemoteHealthRecheck = new Map<string, number>();
 
-function recheckRemoteHost(hostId: string, status: number): void {
+function recheckRemoteHost(hostId: string, status?: number): void {
 	// 530: Cloudflare answers for a fixed address whose machine is offline.
-	if (![401, 403, 426, 502, 503, 530].includes(status)) return;
+	if (status !== undefined && ![401, 403, 426, 502, 503, 504, 530].includes(status)) return;
 	const now = Date.now();
 	const last = lastRemoteHealthRecheck.get(hostId);
-	if (last !== undefined && now >= last && now - last < 15_000) return;
+	if (last !== undefined && now >= last && now - last < 2_000) return;
 	lastRemoteHealthRecheck.set(hostId, now);
-	requestRemoteHostsRefresh();
+	requestRemoteHostCheck(hostId);
 }
 export function workspaceStatusesChecking(workspaces: WorkspaceSummary[] | undefined): boolean {
 	return (
@@ -225,6 +231,7 @@ function toLocalWorkspaceSession(
 			? {
 					model: session.reviewerConfig.model ?? undefined,
 					mode: session.reviewerConfig.mode ?? undefined,
+					effort: session.reviewerConfig.effort ?? undefined,
 					permissions: session.reviewerConfig.permissions ?? undefined,
 				}
 			: undefined,
@@ -293,7 +300,7 @@ async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
 			typeof window !== "undefined"
 				? (window as unknown as { __aoFakeAgent?: FakeAgentSeam }).__aoFakeAgent
 				: undefined;
-		const snapshot = fake ? fake.snapshot() : mockWorkspaces;
+		const snapshot = applyOptimisticProjectRemovals(fake ? fake.snapshot() : mockWorkspaces);
 		return applyOptimisticSessionKills(snapshot) ?? snapshot;
 	}
 	if (!hasTrustedApiBaseUrl()) {
@@ -333,28 +340,58 @@ async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
 			.filter((session) => !session.projectId)
 			.map((session) => toLocalWorkspaceSession(session, STANDALONE_WORKSPACE_ID, standaloneName)),
 	};
-	const workspaces =
-		standalone.sessions.length > 0 ? placeStandaloneWorkspaceLast([...projects, standalone]) : projects;
+	// A project the user just removed stays gone while the daemon tears it down.
+	const workspaces = applyOptimisticProjectRemovals(
+		standalone.sessions.length > 0 ? placeStandaloneWorkspaceLast([...projects, standalone]) : projects,
+	);
 	// Pending optimistic kills must survive CDC/refetch while the daemon kill is in flight.
 	return applyOptimisticSessionKills(workspaces) ?? workspaces;
 }
 
+// Disk snapshots carry no connection receipt. Keep live receipts in memory even
+// when structural sharing reuses an unchanged array from the query cache.
+const remoteReadConnections = new WeakMap<object, ReturnType<typeof clientForHost>>();
+
+function shareRemoteRead(previous: unknown, next: unknown): unknown {
+	const shared = replaceEqualDeep(previous, next);
+	const connection = next && typeof next === "object" ? remoteReadConnections.get(next) : undefined;
+	if (shared && typeof shared === "object") {
+		if (connection) remoteReadConnections.set(shared, connection);
+		else remoteReadConnections.delete(shared);
+	}
+	return shared;
+}
+
+function hasCurrentRemoteRead(hostId: string, data: unknown): boolean {
+	return Boolean(data && typeof data === "object" && remoteReadConnections.get(data) === clientForHost(hostId));
+}
+
 async function fetchRemoteProjects(hostId: string) {
-	const { data, error, response } = await clientForHost(hostId).GET("/api/v1/projects");
+	const connection = clientForHost(hostId);
+	const { data, error, response } = await connection.GET("/api/v1/projects").catch((cause: unknown) => {
+		recheckRemoteHost(hostId);
+		throw cause;
+	});
 	if (error) {
 		recheckRemoteHost(hostId, response.status);
 		throw error;
 	}
-	return data?.projects ?? [];
+	const projects = data?.projects ?? [];
+	remoteReadConnections.set(projects, connection);
+	return projects;
 }
 
 async function fetchRemoteSessions(hostId: string) {
-	const { data, error, response } = await clientForHost(hostId).GET("/api/v1/sessions");
+	const connection = clientForHost(hostId);
+	const { data, error, response } = await connection.GET("/api/v1/sessions").catch((cause: unknown) => {
+		recheckRemoteHost(hostId);
+		throw cause;
+	});
 	if (error) {
 		recheckRemoteHost(hostId, response.status);
 		throw error;
 	}
-	return Promise.all((data?.sessions ?? []).map(async (session) => ({
+	const sessions = await Promise.all((data?.sessions ?? []).map(async (session) => ({
 		...session,
 		artifactFiles: await Promise.all((session.artifactFiles ?? []).map(async (artifact) => ({
 			...artifact,
@@ -364,6 +401,8 @@ async function fetchRemoteSessions(hostId: string) {
 			inlineUrl: undefined,
 		}))),
 	})));
+	remoteReadConnections.set(sessions, connection);
+	return sessions;
 }
 
 function toRemoteWorkspaces(
@@ -397,7 +436,8 @@ function toRemoteWorkspaces(
 		path: "Not attached to a project",
 		sessions: standalone,
 	});
-	return applyOptimisticSessionKills(projects) ?? projects;
+	const kept = applyOptimisticProjectRemovals(projects);
+	return applyOptimisticSessionKills(kept) ?? kept;
 }
 
 async function fetchRemoteWorkspaces(hostId: string): Promise<WorkspaceSummary[]> {
@@ -562,8 +602,9 @@ export function toCloudWorkspaceSession(
 			updatedAt: file.updatedAt,
 			registered: file.registered,
 			...(file.previousPaths?.length ? { previousPaths: file.previousPaths } : {}),
+			...(file.sha256 ? { sha256: file.sha256 } : {}),
 		})),
-		...((session.artifactCount ?? 0) > 0 && !session.artifactFiles && !session.isTerminated ? { artifactFilesPending: true } : {}),
+		...((session.artifactCount ?? 0) > 0 && !session.artifactFiles ? { artifactFilesPending: true } : {}),
 	};
 }
 
@@ -674,7 +715,10 @@ export function useCloudProjectsQuery(options: WorkspaceSubscriptionOptions = {}
 				client.listProjects(orgId, { limit: 100, standaloneAgents: "only" }),
 			]);
 			const listed = new Set(projects.items.map((project) => project.id));
-			return [...projects.items, ...agents.items.filter((project) => !listed.has(project.id))];
+			// The control plane archives a removed project after answering, so it
+			// can still list one the user just removed.
+			return [...projects.items, ...agents.items.filter((project) => !listed.has(project.id))]
+				.filter((project) => !isOptimisticallyRemovedProject(project.id, undefined, true));
 		},
 	});
 }
@@ -727,10 +771,11 @@ export function useCloudSessionsQuery(options: WorkspaceSubscriptionOptions = {}
 			return response.items;
 		},
 	});
-	// The list carries only an artifact count. Each live session's files are
-	// read in their own query, once per artifact version, without holding up
-	// the list.
-	const withFiles = (list.data ?? []).filter((session) => (session.artifactCount ?? 0) > 0 && !session.isTerminated);
+	// The list carries only an artifact count. Each session's files are read in
+	// their own query, once per artifact version, without holding up the list.
+	// An archived session's are read too: its artifacts stay listed until the
+	// person deletes them.
+	const withFiles = (list.data ?? []).filter((session) => (session.artifactCount ?? 0) > 0);
 	const fileData = useQueries({
 		queries: withFiles.map((session) => ({
 			queryKey: cloudArtifactFilesQueryKey(baseUrl, orgId ?? "", session.id, cloudArtifactVersion(session)),
@@ -819,7 +864,7 @@ async function withSharedArtifactFiles(
 	baseUrl: string,
 	session: CloudCpSession,
 ): Promise<CloudCpSession> {
-	if ((session.artifactCount ?? 0) === 0 || session.isTerminated) return session;
+	if ((session.artifactCount ?? 0) === 0) return session;
 	let reads = sharedArtifactReads.get(queryClient);
 	if (!reads) {
 		reads = { last: new Map(), failed: new Map() };
@@ -899,6 +944,9 @@ export function useRemoteWorkspaces(options: WorkspaceSubscriptionOptions & {
 	cachedHostIds?: string[];
 } = {}) {
 	const connected = useConnectedHosts();
+	const queryClient = useQueryClient();
+	const connections = useMemo(() => new Map(connected.map((hostId) => [hostId, clientForHost(hostId)])), [connected]);
+	const previousConnections = useRef(connections);
 	const cachedHostIds = options.cachedHostIds;
 	const hostIds = useMemo(
 		() => cachedHostIds?.length ? [...new Set([...connected, ...cachedHostIds])] : connected,
@@ -908,6 +956,11 @@ export function useRemoteWorkspaces(options: WorkspaceSubscriptionOptions & {
 		queries: hostIds.map((hostId) => ({
 			queryKey: remoteProjectsQueryKey(hostId),
 			queryFn: () => fetchRemoteProjects(hostId),
+			structuralSharing: shareRemoteRead,
+			// A live receipt can change even when the data array stays identical.
+			notifyOnChangeProps: "all",
+			staleTime: 0,
+			refetchOnMount: "always",
 			enabled: connected.includes(hostId),
 			retry: 1,
 			refetchInterval: 15_000,
@@ -918,27 +971,47 @@ export function useRemoteWorkspaces(options: WorkspaceSubscriptionOptions & {
 		queries: hostIds.map((hostId) => ({
 			queryKey: remoteSessionsQueryKey(hostId),
 			queryFn: () => fetchRemoteSessions(hostId),
+			structuralSharing: shareRemoteRead,
+			notifyOnChangeProps: "all",
+			staleTime: 0,
+			refetchOnMount: "always",
 			enabled: connected.includes(hostId),
 			retry: 1,
 			refetchInterval: 15_000,
 			subscribed: options.subscribed,
 		})),
 	});
+	useEffect(() => {
+		const previous = previousConnections.current;
+		previousConnections.current = connections;
+		for (const [hostId, connection] of connections) {
+			if (!previous.has(hostId) || previous.get(hostId) === connection) continue;
+			// A proxy can be replaced without the host leaving the connected list.
+			// Discard any reads started through the previous proxy before refetching.
+			const keys = [remoteProjectsQueryKey(hostId), remoteSessionsQueryKey(hostId)];
+			void Promise.all(keys.map((queryKey) => queryClient.cancelQueries({ queryKey, exact: true }))).then(() => {
+				if (!connectedHosts().includes(hostId) || clientForHost(hostId) !== connection) return;
+				return Promise.all(keys.map((queryKey) => queryClient.refetchQueries({ queryKey, exact: true, type: "active" })));
+			});
+		}
+	}, [connections, queryClient]);
 	// Pins removed here that the host has not confirmed yet (it may be offline).
 	const unpins = useRemoteUnpinStore((state) => state.unpins);
 	const live = (predicate: (index: number) => boolean) => hostIds.filter((hostId, index) => connected.includes(hostId) && predicate(index));
 	// Every render of the shell would otherwise hand out new lists, which
 	// re-renders the sidebar and its rows even with no remote hosts. Rebuild
 	// them only when something the mapping reads changed: a host's data, a
-	// pending unpin, the language (the Scratchpad name) or an in-flight kill
-	// (a remote row hides at once).
+	// pending unpin, the language (the Scratchpad name), an in-flight kill or
+	// project removal (a remote row hides at once).
 	const language = useTranslation().i18n.language;
 	const killVersion = useSyncExternalStore(subscribeOptimisticSessionKills, optimisticSessionKillsVersion);
+	const removalVersion = useSyncExternalStore(subscribeOptimisticProjectRemovals, optimisticProjectRemovalsVersion);
 	const dataInputs = useStableArray([
 		hostIds,
 		unpins,
 		language,
 		killVersion,
+		removalVersion,
 		...projects.map((query) => query.data),
 		...sessions.map((query) => query.data),
 	]);
@@ -947,12 +1020,13 @@ export function useRemoteWorkspaces(options: WorkspaceSubscriptionOptions & {
 			? toRemoteWorkspaces(hostId, projects[index].data, sessions[index]?.data ?? []).map((workspace) => withRemoteUnpins(workspace, unpins))
 			: []),
 		// dataInputs holds every value read here, including the ones the mapping
-		// reads outside React (the language, in-flight kills).
+		// reads outside React (the language, in-flight kills and removals).
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 		[dataInputs],
 	);
-	const loadedProjectHostIds = useStableArray(live((index) => projects[index]?.data !== undefined));
-	const loadedSessionHostIds = useStableArray(live((index) => sessions[index]?.data !== undefined));
+	// A successful current-connection read stays available during later polls.
+	const loadedProjectHostIds = useStableArray(live((index) => hasCurrentRemoteRead(hostIds[index]!, projects[index]?.data)));
+	const loadedSessionHostIds = useStableArray(live((index) => hasCurrentRemoteRead(hostIds[index]!, sessions[index]?.data)));
 	const failedHostIds = useStableArray(live((index) => Boolean(projects[index]?.isError || sessions[index]?.isError)));
 	return {
 		data,
@@ -968,8 +1042,9 @@ export function useRemoteWorkspaces(options: WorkspaceSubscriptionOptions & {
 export function useRemoteProjectQuery(hostId: string, projectId: string) {
 	const queryClient = useQueryClient();
 	// Cache-only observers react when IndexedDB restores the lists after mount.
-	const savedProjects = useQuery({ queryKey: remoteProjectsQueryKey(hostId), queryFn: () => fetchRemoteProjects(hostId), enabled: false });
-	const savedSessions = useQuery({ queryKey: remoteSessionsQueryKey(hostId), queryFn: () => fetchRemoteSessions(hostId), enabled: false });
+	// These observers share query options with live reads; preserve their receipts.
+	const savedProjects = useQuery({ queryKey: remoteProjectsQueryKey(hostId), queryFn: () => fetchRemoteProjects(hostId), structuralSharing: shareRemoteRead, enabled: false });
+	const savedSessions = useQuery({ queryKey: remoteSessionsQueryKey(hostId), queryFn: () => fetchRemoteSessions(hostId), structuralSharing: shareRemoteRead, enabled: false });
 	const unpins = useRemoteUnpinStore((state) => state.unpins);
 	const select = useCallback((workspaces: WorkspaceSummary[]) => {
 		const workspace = workspaces.find((candidate) => candidate.id === projectId);
@@ -1067,14 +1142,17 @@ export function useWorkspaceQuery(options: WorkspaceSubscriptionOptions = {}) {
 	const cloud = useCloudProjectsQuery(cloudOptions);
 	const cloudSessions = useCloudSessionsQuery(cloudOptions);
 	const sharedWorkspaces = useSharedCloudWorkspacesQuery(cloudOptions);
-	const { org, ready } = useCloudOrg();
+	const { org, ready, isLoading: orgLoading } = useCloudOrg();
 	const orgId = org?.id;
 	const localData = local.data;
 	const cloudData = cloud.data;
 	const cloudSessionData = cloudSessions.data;
 	const sharedData = sharedWorkspaces.data;
 	const queryClient = useQueryClient();
-	const { baseUrl: cloudBaseUrl } = useCloudCp();
+	const { baseUrl: cloudBaseUrl, loading: cloudLoading } = useCloudCp();
+	// The merged list drops pending removals too (a shared project is not in the
+	// own-project list); the version rebuilds it when one starts or ends.
+	const removalVersion = useSyncExternalStore(subscribeOptimisticProjectRemovals, optimisticProjectRemovalsVersion);
 	// Checked where both lists meet, so it runs whichever arrives last: the
 	// session list can resolve before the project list on the first load.
 	useEffect(() => {
@@ -1095,9 +1173,17 @@ export function useWorkspaceQuery(options: WorkspaceSubscriptionOptions = {}) {
 		// A project shared from the person's own organization is already listed.
 		const shared = (sharedData ?? []).filter((workspace) => !own.some((ownWorkspace) => ownWorkspace.id === workspace.id));
 		if (own.length === 0 && shared.length === 0) return localData;
-		return placeStandaloneWorkspaceLast([...localData, ...own, ...shared]);
-	}, [localData, cloudData, cloudSessionData, sharedData, includeCloud, orgId, ready]);
-	return { ...local, data };
+		return applyOptimisticProjectRemovals(placeStandaloneWorkspaceLast([...localData, ...own, ...shared]));
+		// removalVersion is read outside React by applyOptimisticProjectRemovals.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [localData, cloudData, cloudSessionData, sharedData, includeCloud, orgId, ready, removalVersion]);
+	// Local status remains authoritative for rendering. Hostless deep links
+	// also need every enabled Cloud source's initial result before a miss is
+	// trustworthy; background refreshes with existing data do not hold them.
+	const cloudLoadSettled = !includeCloud || options.enabled === false || (!cloudLoading && (!ready ||
+		(!orgLoading && (orgId === undefined || ((cloud.isSuccess || cloud.isError) && (cloudSessions.isSuccess || cloudSessions.isError))) &&
+			(sharedWorkspaces.isSuccess || sharedWorkspaces.isError))));
+	return withQueryFields(local, { data, cloudLoadSettled });
 }
 
 /**
@@ -1189,11 +1275,10 @@ export function useWorkspaceSession(sessionId: string, hostId?: string, localLoo
 		});
 	}, [queryClient, resolvedDirectSession, hostId, localLookupEnabled]);
 	if (hostId) return remote;
-	return {
-		...local,
+	return withQueryFields(local, {
 		data: local.data ?? resolvedDirectSession ?? cloudSession,
 		isLoading: local.isLoading || direct.isLoading,
-	};
+	});
 }
 
 /**
@@ -1274,7 +1359,7 @@ export function useWorkspaceScope(projectId?: string, sessionId?: string, hostId
 	const data = local.data?.project || local.data?.session || !local.isSuccess
 		? local.data
 		: cloudScope ?? local.data;
-	return hostId ? remote : { ...local, data };
+	return hostId ? remote : withQueryFields(local, { data });
 }
 
 function selectTraySessions(workspaces: WorkspaceSummary[]): TraySessionEntry[] {
@@ -1316,5 +1401,5 @@ export function useWorkspaceTraySessions() {
 		if (local.data === undefined) return undefined;
 		return cloudEntries.length === 0 ? local.data : [...local.data, ...cloudEntries];
 	}, [cloudEntries, local.data]);
-	return { ...local, data };
+	return withQueryFields(local, { data });
 }
