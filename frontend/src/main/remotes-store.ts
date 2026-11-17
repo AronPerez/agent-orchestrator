@@ -18,9 +18,16 @@ export type RemoteEntry = {
 	fallbackPassword?: string;
 	/** An encrypted fallbackPassword this launch could not decrypt. */
 	sealedFallbackPassword?: string;
+	/**
+	 * Route-filtered agent-coordination token. Intentionally plaintext so the Go
+	 * CLI can use it; remotes.json is owner-only and the token is protected as
+	 * full transitive host authority because it can prompt OS-authority agents.
+	 */
+	coordinationToken?: string;
 };
 
 export const DEVICE_TOKEN_PREFIX = "aod_";
+export const COORDINATION_TOKEN_PREFIX = "aoc_";
 
 export function holdsPairingPassword(entry: Pick<RemoteEntry, "password">): boolean {
 	return entry.password !== "" && !entry.password.startsWith(DEVICE_TOKEN_PREFIX) && !ACCOUNT_TOKEN.test(entry.password);
@@ -89,7 +96,7 @@ export class RemotesFilePermissionError extends Error {
 		readonly mode: number,
 	) {
 		super(
-			`${path} holds connection passwords and is readable by others (mode ${mode.toString(8).padStart(4, "0")}) — run: chmod 600 ${path}`,
+			`${path} holds remote credentials and is readable by others (mode ${mode.toString(8).padStart(4, "0")}) — run: chmod 600 ${path}`,
 		);
 	}
 }
@@ -189,6 +196,7 @@ export function applyRemoteChanges(entry: RemoteEntry, changes: RemoteChanges): 
 		accountToken: changes.password === undefined ? entry.accountToken : undefined,
 		fallbackPassword: changes.password === undefined ? entry.fallbackPassword : changes.fallbackPassword,
 		sealedFallbackPassword: changes.password === undefined ? entry.sealedFallbackPassword : undefined,
+		coordinationToken: changes.coordinationToken ?? entry.coordinationToken,
 	};
 }
 

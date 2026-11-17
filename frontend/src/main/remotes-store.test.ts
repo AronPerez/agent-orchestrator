@@ -202,10 +202,18 @@ describe("password encryption", () => {
 	it("writes passwords encrypted and reads them back", async () => {
 		setPasswordCipher(() => cipher);
 		const path = await tempFile();
-		await addRemote(path, { label: "workbox", url: "http://192.0.2.1:3011", password: "pw" });
+		await addRemote(path, { label: "workbox", url: "http://192.0.2.1:3011", password: "pw", coordinationToken: "aoc_coordination" });
 		expect(await readFile(path, "utf8")).not.toContain('"password"');
-		expect(JSON.parse(await readFile(path, "utf8")).remotes[0].sealedPassword).toBe("sealed:pw");
-		await expect(readRemotes(path)).resolves.toEqual([{ label: "workbox", url: "http://192.0.2.1:3011", password: "pw" }]);
+		expect(JSON.parse(await readFile(path, "utf8")).remotes[0]).toEqual({
+			label: "workbox", url: "http://192.0.2.1:3011", sealedPassword: "sealed:pw", coordinationToken: "aoc_coordination",
+		});
+		await expect(readRemotes(path)).resolves.toEqual([
+			{ label: "workbox", url: "http://192.0.2.1:3011", password: "pw", coordinationToken: "aoc_coordination" },
+		]);
+		await updateRemote(path, "http://192.0.2.1:3011", { label: "renamed" });
+		expect(JSON.parse(await readFile(path, "utf8")).remotes[0].coordinationToken).toBe("aoc_coordination");
+		await updateRemote(path, "http://192.0.2.1:3011", { coordinationToken: "" });
+		expect(JSON.parse(await readFile(path, "utf8")).remotes[0].coordinationToken).toBe("");
 	});
 
 	it("encrypts an existing plaintext file", async () => {
