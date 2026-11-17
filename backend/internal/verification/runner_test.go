@@ -138,6 +138,24 @@ func TestRunnerRedactsInheritedCredentialEnvironment(t *testing.T) {
 	}
 }
 
+func TestRunnerRedactsInheritedAuggieSessionAuth(t *testing.T) {
+	const secret = "inherited-auggie-session"
+	t.Setenv("AUGMENT_SESSION_AUTH", secret)
+	runner := newTestRunner(func(_ context.Context, _ string, _ string, _ stepEnvironment, output io.Writer) error {
+		_, _ = io.WriteString(output, os.Getenv("AUGMENT_SESSION_AUTH"))
+		return nil
+	})
+	result, err := runner.Run(context.Background(), Request{
+		ProjectID: "demo", WorkspacePath: "/work/demo", Commands: []string{"verify"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(result.OutputTail, secret) || !strings.Contains(result.OutputTail, "[REDACTED]") {
+		t.Fatalf("inherited Auggie credential was not redacted: %q", result.OutputTail)
+	}
+}
+
 func TestRunnerRedactsInheritedCredentialURL(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

@@ -93,6 +93,11 @@ func verificationRedactions(configured map[string]string, env stepEnvironment) m
 
 func credentialEnvironmentName(name string) bool {
 	upper := strings.ToUpper(name)
+	// Auggie's documented environment credential does not use a conventional
+	// TOKEN or SECRET suffix, but AO recognizes and forwards it as auth input.
+	if upper == "AUGMENT_SESSION_AUTH" {
+		return true
+	}
 	for _, marker := range []string{
 		"TOKEN", "SECRET", "PASSWORD", "PASSWD", "API_KEY", "APIKEY",
 		"PRIVATE_KEY", "ACCESS_KEY", "CREDENTIAL", "AUTHORIZATION",

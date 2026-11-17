@@ -9,13 +9,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
-
-	"github.com/aoagents/agent-orchestrator/backend/internal/procmem"
 )
 
 func TestRunnerHostShellUsesRequestedWorkspaceAndEnvironment(t *testing.T) {
@@ -33,12 +32,45 @@ func TestRunnerHostShellUsesRequestedWorkspaceAndEnvironment(t *testing.T) {
 	}
 }
 
+func TestRunnerHostShellRedactsInheritedAuggieSessionAuth(t *testing.T) {
+	const secret = "inherited-auggie-host-session"
+	t.Setenv("AUGMENT_SESSION_AUTH", secret)
+	result, err := NewRunner().Run(context.Background(), Request{
+		ProjectID: "demo", WorkspacePath: t.TempDir(),
+		Commands: []string{`printf '%s' "$AUGMENT_SESSION_AUTH"`},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(result.OutputTail, secret) || !strings.Contains(result.OutputTail, "[REDACTED]") {
+		t.Fatalf("inherited Auggie credential was not redacted: %q", result.OutputTail)
+	}
+}
+
 func TestWorkspaceStepPreservesShellExitStatus(t *testing.T) {
 	env := newStepEnvironment(os.Environ(), nil)
 	err := runWorkspaceStep(context.Background(), t.TempDir(), `exit 7`, env, io.Discard)
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 {
 		t.Fatalf("runWorkspaceStep() error = %v, want exit status 7", err)
+	}
+}
+
+func TestWorkspaceStepPreservesProjectFileDescriptors(t *testing.T) {
+	workspace := t.TempDir()
+	logFile := filepath.Join(workspace, "verification.log")
+	env := newStepEnvironment(os.Environ(), map[string]string{"VERIFY_FD_LOG": logFile})
+	if err := runWorkspaceStep(
+		context.Background(), workspace, `exec 4>"$VERIFY_FD_LOG"; printf ok >&4`, env, io.Discard,
+	); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(contents), "ok"; got != want {
+		t.Fatalf("fd 4 output = %q, want %q", got, want)
 	}
 }
 
@@ -128,32 +160,164 @@ func TestVerificationDetachedChildHelper(t *testing.T) {
 	time.Sleep(time.Minute)
 }
 
+func TestWorkspaceStepFailsAndStopsADoubleForkedChild(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	pidFile := filepath.Join(workspace, "double-forked.pid")
+	env := newStepEnvironment(os.Environ(), map[string]string{
+		"GO_WANT_VERIFICATION_DOUBLE_FORK": "1",
+		"VERIFY_DOUBLE_FORK_HELPER":        executable,
+		"VERIFY_DOUBLE_FORK_PID":           pidFile,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err = runWorkspaceStep(
+		ctx,
+		workspace,
+		`"$VERIFY_DOUBLE_FORK_HELPER" -test.run=^TestVerificationDoubleForkHelper$; while [ ! -s "$VERIFY_DOUBLE_FORK_PID" ]; do sleep 1; done`,
+		env,
+		io.Discard,
+	)
+	pid := readProcessID(t, pidFile)
+	t.Cleanup(func() {
+		if processAlive(pid) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	})
+	if err == nil {
+		t.Fatal("runWorkspaceStep() succeeded with a double-forked background child")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for processAlive(pid) && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if processAlive(pid) {
+		t.Fatalf("double-forked child %d survived verification (error %v)", pid, err)
+	}
+}
+
+func TestVerificationDoubleForkHelper(t *testing.T) {
+	stage := os.Getenv("GO_WANT_VERIFICATION_DOUBLE_FORK")
+	if stage == "" {
+		return
+	}
+	if stage == "3" {
+		if err := os.WriteFile(os.Getenv("VERIFY_DOUBLE_FORK_PID"), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+			os.Exit(5)
+		}
+		time.Sleep(time.Minute)
+		return
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		os.Exit(2)
+	}
+	next := "2"
+	if stage == "2" {
+		next = "3"
+	}
+	child := exec.Command(executable, "-test.run=^TestVerificationDoubleForkHelper$")
+	child.Env = newStepEnvironment(os.Environ(), map[string]string{
+		"GO_WANT_VERIFICATION_DOUBLE_FORK": next,
+	}).list
+	if stage == "1" {
+		child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	}
+	if err = child.Start(); err != nil {
+		os.Exit(3)
+	}
+	if err = child.Process.Release(); err != nil {
+		os.Exit(4)
+	}
+	os.Exit(0)
+}
+
 func TestUnixCleanupNeverSignalsARecycledPID(t *testing.T) {
 	var signals []syscall.Signal
-	hooks := unixProcessHooks{
-		identities: func(context.Context) (map[int]procmem.Identity, error) {
-			return map[int]procmem.Identity{
-				4242: {PPID: 1, Start: "replacement", StartedAt: time.Unix(20, 0)},
-			}, nil
+	err := signalUnixProcessIfCurrent(
+		unixOwnedProcess{pid: 4242, start: "original"},
+		syscall.SIGKILL,
+		func(int) (string, error) { return "replacement", nil },
+		func(_ int, signal syscall.Signal) error {
+			signals = append(signals, signal)
+			return nil
 		},
-		signal: func(_ int, signal syscall.Signal) error {
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(signals) != 0 {
+		t.Fatalf("recycled pid received signals %v", signals)
+	}
+}
+
+func TestUnixCleanupKillsAlreadyFrozenProcessesAfterAScanFailure(t *testing.T) {
+	process := unixOwnedProcess{pid: 4242, start: "owned"}
+	scanCalls := 0
+	var signals []syscall.Signal
+	hooks := unixProcessHooks{
+		owned: func(context.Context, string) ([]unixOwnedProcess, error) {
+			scanCalls++
+			if scanCalls == 1 {
+				return []unixOwnedProcess{process}, nil
+			}
+			return nil, errors.New("scan failed")
+		},
+		signal: func(got unixOwnedProcess, signal syscall.Signal) error {
+			if got != process {
+				t.Fatalf("signal process = %+v, want %+v", got, process)
+			}
 			signals = append(signals, signal)
 			return nil
 		},
 		wait: time.Millisecond,
 		poll: time.Microsecond,
 	}
-	survived, err := stopCapturedUnixProcesses(
-		context.Background(),
-		unixCapturedProcess{pid: 4000, start: "anchor", startedAt: time.Unix(1, 0)},
-		[]unixCapturedProcess{{pid: 4242, start: "original", startedAt: time.Unix(2, 0)}},
-		hooks,
-	)
-	if err != nil {
-		t.Fatal(err)
+	survived, err := stopOwnedUnixProcesses(context.Background(), "owner", hooks)
+	if !survived || err == nil || !strings.Contains(err.Error(), "scan failed") {
+		t.Fatalf("cleanup = survived %v, error %v", survived, err)
 	}
-	if survived || len(signals) != 0 {
-		t.Fatalf("recycled pid cleanup = survived %v, signals %v; want no signal", survived, signals)
+	if got, want := signals, []syscall.Signal{syscall.SIGSTOP, syscall.SIGKILL}; !slices.Equal(got, want) {
+		t.Fatalf("signals = %v, want %v", got, want)
+	}
+}
+
+func TestUnixCleanupUsesBoundedPostExitOwnershipSweeps(t *testing.T) {
+	process := unixOwnedProcess{pid: 4242, start: "owned"}
+	scanCalls := 0
+	var signals []syscall.Signal
+	hooks := unixProcessHooks{
+		owned: func(context.Context, string) ([]unixOwnedProcess, error) {
+			scanCalls++
+			switch scanCalls {
+			case 1, 2:
+				return []unixOwnedProcess{process}, nil
+			default:
+				return nil, nil
+			}
+		},
+		signal: func(got unixOwnedProcess, signal syscall.Signal) error {
+			if got != process {
+				t.Fatalf("signal process = %+v, want %+v", got, process)
+			}
+			signals = append(signals, signal)
+			return nil
+		},
+		wait: time.Millisecond,
+		poll: time.Microsecond,
+	}
+	survived, err := stopOwnedUnixProcesses(context.Background(), "owner", hooks)
+	if !survived || err != nil {
+		t.Fatalf("cleanup = survived %v, error %v", survived, err)
+	}
+	if scanCalls != 3 {
+		t.Fatalf("ownership scans = %d, want 3", scanCalls)
+	}
+	if got, want := signals, []syscall.Signal{syscall.SIGSTOP, syscall.SIGKILL}; !slices.Equal(got, want) {
+		t.Fatalf("signals = %v, want %v", got, want)
 	}
 }
 
