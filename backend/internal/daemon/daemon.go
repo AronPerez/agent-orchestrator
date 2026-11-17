@@ -72,6 +72,7 @@ import (
 	chatsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/chat"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/computeruse"
 	cuesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/cue"
+	decisionsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/decision"
 	devimportsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/devimport"
 	fsbrowsersvc "github.com/aoagents/agent-orchestrator/backend/internal/service/fsbrowser"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/githubpat"
@@ -1177,6 +1178,7 @@ func Run(buildVersion string) (retErr error) {
 	if identityErr != nil {
 		log.Warn("could not establish host identity; /api/v1/identity will report unimplemented", "error", identityErr)
 	}
+	decisionSvc := decisionsvc.New(decisionsvc.Deps{Store: store, HostID: hostIdentity.HostID})
 
 	// Managed remote-access connector. Reap first: a daemon that died without
 	// stopping its connector leaves a public tunnel to this machine running
@@ -1284,6 +1286,7 @@ func Run(buildVersion string) (retErr error) {
 		Reviews:                     reviewSvc,
 		Notifications:               notifier,
 		Reports:                     reportSvc,
+		Decisions:                   decisionSvc,
 		NotificationStream:          notificationHub,
 		Push:                        pushRegistry,
 		Presence:                    presenceTracker,

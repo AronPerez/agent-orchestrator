@@ -1426,6 +1426,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/decisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List or search decision calls */
+        get: operations["listDecisions"];
+        put?: never;
+        /** Raise a decision call from a session */
+        post: operations["raiseDecision"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/decisions/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get one decision call and its history */
+        get: operations["getDecision"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/desktop/sessions/{sessionId}/artifacts": {
         parameters: {
             query?: never;
@@ -7178,6 +7213,81 @@ export interface components {
             /** Format: date-time */
             updatedAt: string;
         };
+        DecisionCallResponse: {
+            answerSurface?: string;
+            /** Format: date-time */
+            answeredAt?: null | string;
+            changedAfterClose?: boolean;
+            /** @enum {string} */
+            choice?: "option" | "other";
+            chosenLabel?: string;
+            context: string;
+            deliveredFallback?: boolean;
+            deliveredTo?: string;
+            deliveredToName?: string;
+            /** @enum {string} */
+            delivery?: "pending" | "sent" | "no_session";
+            hostId: string;
+            id: string;
+            link: string;
+            links: components["schemas"]["DecisionLinkPayload"][];
+            machineLabel: string;
+            note?: string;
+            option?: number;
+            options: components["schemas"]["DecisionOptionPayload"][];
+            outcome?: string;
+            /** Format: date-time */
+            outcomeAt?: null | string;
+            outcomeLink?: string;
+            ownerSessionId: string;
+            ownerSessionName: string;
+            projectId?: string;
+            projectName?: string;
+            /** Format: date-time */
+            raisedAt: string;
+            reference?: string;
+            retired: boolean;
+            /** @enum {string} */
+            state: "needs_you" | "in_progress" | "done" | "dismissed" | "withdrawn";
+            stateLabel: string;
+            streamName?: string;
+            streamSessionId?: string;
+            title: string;
+        };
+        DecisionDetailResponse: {
+            call: components["schemas"]["DecisionCallResponse"];
+            history: components["schemas"]["DecisionEntryResponse"][];
+        };
+        DecisionEntryResponse: {
+            /** @enum {string} */
+            authorKind: "person" | "session" | "system";
+            authorSession?: string;
+            authorSurface?: string;
+            choice?: string;
+            fallback?: boolean;
+            hostId: string;
+            id: string;
+            kind: string;
+            link?: string;
+            note?: string;
+            option?: number;
+            retired?: null | boolean;
+            sessionId?: string;
+            sessionName?: string;
+            status?: string;
+            text?: string;
+            /** Format: date-time */
+            writtenAt: string;
+        };
+        DecisionLinkPayload: {
+            label: string;
+            url: string;
+        };
+        DecisionOptionPayload: {
+            consequence: string;
+            label: string;
+            recommended?: boolean;
+        };
         DegradedProject: {
             id: string;
             /** @enum {string} */
@@ -7579,6 +7689,9 @@ export interface components {
         };
         ListCuesResponse: {
             cues: components["schemas"]["CueResponse"][];
+        };
+        ListDecisionsResponse: {
+            calls: components["schemas"]["DecisionCallResponse"][];
         };
         ListDirsResponse: {
             /** @description Subdirectories, excluding dotted names. */
@@ -8087,6 +8200,13 @@ export interface components {
             pat: string;
             refreshToken?: string;
             refreshTokenExpiresIn?: number;
+        };
+        RaiseDecisionRequest: {
+            context: string;
+            links?: components["schemas"]["DecisionLinkPayload"][];
+            options: components["schemas"]["DecisionOptionPayload"][];
+            reference?: string;
+            title: string;
         };
         RecordAgentSignInResponse: {
             releasedKey?: string;
@@ -14799,6 +14919,186 @@ export interface operations {
             };
             /** @description Request Entity Too Large */
             413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listDecisions: {
+        parameters: {
+            query?: {
+                /** @description Which calls to list. Defaults to needs_you. Ignored when q is given. */
+                scope?: "mine" | "needs_you";
+                /** @description Search words. When given, the response is the search result. */
+                q?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListDecisionsResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    raiseDecision: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RaiseDecisionRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DecisionCallResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getDecision: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Call identifier. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DecisionDetailResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
