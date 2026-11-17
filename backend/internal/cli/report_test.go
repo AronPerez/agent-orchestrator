@@ -100,6 +100,52 @@ func TestReportPreservesAPIEnvelopeAsRuntimeError(t *testing.T) {
 	}
 }
 
+func TestReportDonePrintsFailedVerificationOnce(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "worker-1")
+	cfg := setConfigEnv(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"id":"rpt_1","verification":{"state":"failed","evidence":"verification/rpt_1.txt","outputTail":"FAIL expected green\n"}}`)
+	}))
+	defer srv.Close()
+	writeRunFileFor(t, cfg, srv)
+	out, _, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }}, "report", "--done", "--note", "finished")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "Verification failed.\nEvidence: verification/rpt_1.txt\n\nFAIL expected green\n"
+	if out != want {
+		t.Fatalf("stdout = %q, want %q", out, want)
+	}
+}
+
+func TestReportDoneUsesDaemonStepTimeoutsInsteadOfAClientDeadline(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "worker-1")
+	cfg := setConfigEnv(t)
+	writeRunFileFor(t, cfg, &httptest.Server{URL: "http://127.0.0.1:43210"})
+	deadline := true
+	deps := Deps{
+		ProcessAlive: func(int) bool { return true },
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			_, deadline = req.Context().Deadline()
+			return &http.Response{
+				StatusCode: http.StatusCreated,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"id":"rpt_1"}`)),
+				Request:    req,
+			}, nil
+		})},
+	}
+	_, _, err := executeCLI(t, deps, "report", "--done", "--note", "finished")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deadline {
+		t.Fatal("done report request had a client deadline; project Verify steps own the timeout")
+	}
+}
+
 func TestReportShowPrintsOnlyTheRequestedBatch(t *testing.T) {
 	cfg := setConfigEnv(t)
 	t.Setenv("AO_PROJECT_ID", "demo")

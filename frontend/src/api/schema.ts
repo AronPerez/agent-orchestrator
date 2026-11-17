@@ -7213,6 +7213,7 @@ export interface components {
         };
         CreateReportResponse: {
             id: string;
+            verification?: components["schemas"]["ReportVerificationResponse"];
         };
         CueDefinitionRequest: {
             /** @description Shell command for a command cue. At most 4096 bytes; cleared when saving agent cues. */
@@ -8283,6 +8284,17 @@ export interface components {
             repeatCount: number;
             sessionId: string;
             state?: string;
+            verification?: components["schemas"]["ReportVerificationResponse"];
+        };
+        ReportVerificationResponse: {
+            /** Format: date-time */
+            completedAt: string;
+            evidence: string;
+            outputTail?: string;
+            /** Format: date-time */
+            startedAt: string;
+            /** @enum {string} */
+            state: "passed" | "failed";
         };
         ResolveCommentsResponse: {
             ok: boolean;

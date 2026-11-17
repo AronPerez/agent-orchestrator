@@ -1,17 +1,19 @@
 -- name: CreateReport :one
 INSERT INTO reports (
     id, session_id, project_id, state, note, message, created_at, available_at,
-    settlement_deadline, repeat_count
+    settlement_deadline, repeat_count, verification_state, verification_evidence,
+    verification_started_at, verification_completed_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING *;
 
 -- name: CreateReportIfAbsent :one
 INSERT INTO reports (
     id, session_id, project_id, state, note, message, created_at, available_at,
-    settlement_deadline, repeat_count
+    settlement_deadline, repeat_count, verification_state, verification_evidence,
+    verification_started_at, verification_completed_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO NOTHING
 RETURNING *;
 

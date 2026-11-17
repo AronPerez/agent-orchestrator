@@ -96,6 +96,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillassets"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 	"github.com/aoagents/agent-orchestrator/backend/internal/terminal"
+	"github.com/aoagents/agent-orchestrator/backend/internal/verification"
 )
 
 // usageReconcileTick is the safety-net interval for the usage pipeline
@@ -838,11 +839,23 @@ func Run(buildVersion string) (retErr error) {
 		return errors.New("wire report delivery: session manager lacks semantic send support")
 	}
 	var reportCoordinator *reportsvc.Coordinator
-	reportSvc := reportsvc.New(reportsvc.Deps{Store: store, Artifacts: chatSvc, OnCreated: func(domain.ReportRecord) {
-		if reportCoordinator != nil {
-			reportCoordinator.Wake()
-		}
-	}})
+	verificationRunner := verification.NewRunner()
+	evidenceArtifacts := reportEvidenceArtifacts{
+		register: func(registerCtx context.Context, id domain.SessionID, reference string) error {
+			_, err := sessionSvc.RegisterArtifacts(registerCtx, id, []string{reference})
+			return err
+		},
+		unregister: sessionSvc.UnregisterArtifact,
+	}
+	reportSvc := reportsvc.New(reportsvc.Deps{
+		Store: store, Artifacts: chatSvc, Verifier: verificationRunner,
+		EvidenceArtifacts: evidenceArtifacts, DataDir: cfg.DataDir,
+		OnCreated: func(domain.ReportRecord) {
+			if reportCoordinator != nil {
+				reportCoordinator.Wake()
+			}
+		},
+	})
 	reportCoordinator = reportsvc.NewCoordinator(reportsvc.CoordinatorDeps{
 		Store:    store,
 		Delivery: reportSemanticDelivery{chat: chatSvc, sessions: reportSessions, store: store},
@@ -1709,6 +1722,19 @@ func telemetryAppVersion(configured, buildVersion string) string {
 type reportSemanticSession interface {
 	SendSemantic(context.Context, domain.SessionID, string, string) error
 	InterruptTUI(context.Context, domain.SessionID) error
+}
+
+type reportEvidenceArtifacts struct {
+	register   func(context.Context, domain.SessionID, string) error
+	unregister func(context.Context, domain.SessionID, string) error
+}
+
+func (a reportEvidenceArtifacts) Register(ctx context.Context, id domain.SessionID, reference string) error {
+	return a.register(ctx, id, reference)
+}
+
+func (a reportEvidenceArtifacts) Unregister(ctx context.Context, id domain.SessionID, reference string) error {
+	return a.unregister(ctx, id, reference)
 }
 
 // sessionConversationService adds an explicit Stop turn endpoint. The existing

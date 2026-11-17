@@ -43,12 +43,15 @@ func (s *Store) CreateReportWithContractOutcomeOnce(ctx context.Context, rec dom
 	var row gen.Report
 	inserted := false
 	err := s.inTx(ctx, "create report once", func(q *gen.Queries) error {
+		verificationState, verificationEvidence, verificationStartedAt, verificationCompletedAt := reportVerificationToGen(rec.Verification)
 		var err error
 		row, err = q.CreateReportIfAbsent(ctx, gen.CreateReportIfAbsentParams{
 			ID: rec.ID, SessionID: string(rec.SessionID), ProjectID: string(rec.ProjectID),
 			State: string(rec.State), Note: rec.Note, Message: rec.Message,
 			CreatedAt: rec.CreatedAt, AvailableAt: rec.AvailableAt,
 			SettlementDeadline: nullTime(rec.SettlementDeadline), RepeatCount: rec.RepeatCount,
+			VerificationState: verificationState, VerificationEvidence: verificationEvidence,
+			VerificationStartedAt: verificationStartedAt, VerificationCompletedAt: verificationCompletedAt,
 		})
 		if errors.Is(err, sql.ErrNoRows) {
 			row, err = q.GetReport(ctx, rec.ID)
@@ -100,12 +103,15 @@ func (s *Store) createReport(ctx context.Context, rec domain.ReportRecord, outco
 	defer s.writeMu.Unlock()
 	var row gen.Report
 	err := s.inTx(ctx, "create report", func(q *gen.Queries) error {
+		verificationState, verificationEvidence, verificationStartedAt, verificationCompletedAt := reportVerificationToGen(rec.Verification)
 		var err error
 		row, err = q.CreateReport(ctx, gen.CreateReportParams{
 			ID: rec.ID, SessionID: string(rec.SessionID), ProjectID: string(rec.ProjectID),
 			State: string(rec.State), Note: rec.Note, Message: rec.Message,
 			CreatedAt: rec.CreatedAt, AvailableAt: rec.AvailableAt,
 			SettlementDeadline: nullTime(rec.SettlementDeadline), RepeatCount: rec.RepeatCount,
+			VerificationState: verificationState, VerificationEvidence: verificationEvidence,
+			VerificationStartedAt: verificationStartedAt, VerificationCompletedAt: verificationCompletedAt,
 		})
 		if err != nil {
 			return err
@@ -398,7 +404,7 @@ func orderedReportRows(rows []gen.Report) []gen.Report {
 }
 
 func reportFromGen(r gen.Report) domain.ReportRecord {
-	return domain.ReportRecord{
+	rec := domain.ReportRecord{
 		ID: r.ID, SessionID: domain.SessionID(r.SessionID), ProjectID: domain.ProjectID(r.ProjectID),
 		State: domain.ReportState(r.State), Note: r.Note, Message: r.Message, CreatedAt: r.CreatedAt,
 		DeliveryState: domain.ReportDeliveryState(r.DeliveryState), AvailableAt: r.AvailableAt,
@@ -407,4 +413,18 @@ func reportFromGen(r gen.Report) domain.ReportRecord {
 		AcknowledgedAt: timeFromNull(r.AcknowledgedAt), LastError: r.LastError,
 		DeliveryBatchID: r.DeliveryBatchID,
 	}
+	if r.VerificationState != "" {
+		rec.Verification = &domain.ReportVerification{
+			State: domain.ReportVerificationState(r.VerificationState), Evidence: r.VerificationEvidence,
+			StartedAt: timeFromNull(r.VerificationStartedAt), CompletedAt: timeFromNull(r.VerificationCompletedAt),
+		}
+	}
+	return rec
+}
+
+func reportVerificationToGen(v *domain.ReportVerification) (string, string, sql.NullTime, sql.NullTime) {
+	if v == nil {
+		return "", "", sql.NullTime{}, sql.NullTime{}
+	}
+	return string(v.State), v.Evidence, nullTime(v.StartedAt), nullTime(v.CompletedAt)
 }

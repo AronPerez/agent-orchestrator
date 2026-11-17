@@ -20928,6 +20928,8 @@ components:
       properties:
         id:
           type: string
+        verification:
+          $ref: '#/components/schemas/ReportVerificationResponse'
       required:
       - id
       type: object
@@ -23717,12 +23719,37 @@ components:
           type: string
         state:
           type: string
+        verification:
+          $ref: '#/components/schemas/ReportVerificationResponse'
       required:
       - id
       - sessionId
       - projectId
       - createdAt
       - repeatCount
+      type: object
+    ReportVerificationResponse:
+      properties:
+        completedAt:
+          format: date-time
+          type: string
+        evidence:
+          type: string
+        outputTail:
+          type: string
+        startedAt:
+          format: date-time
+          type: string
+        state:
+          enum:
+          - passed
+          - failed
+          type: string
+      required:
+      - state
+      - evidence
+      - startedAt
+      - completedAt
       type: object
     ResolveCommentsResponse:
       properties:

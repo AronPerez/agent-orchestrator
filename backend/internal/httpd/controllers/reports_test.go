@@ -18,9 +18,10 @@ import (
 )
 
 type fakeReportService struct {
-	input   reportsvc.CreateInput
-	err     error
-	reports []domain.ReportRecord
+	input        reportsvc.CreateInput
+	err          error
+	reports      []domain.ReportRecord
+	verification *domain.ReportVerification
 }
 
 func (f *fakeReportService) ListProject(_ context.Context, projectID domain.ProjectID) ([]domain.ReportRecord, error) {
@@ -35,11 +36,12 @@ func (f *fakeReportService) Create(_ context.Context, input reportsvc.CreateInpu
 	if f.err != nil {
 		return domain.ReportRecord{}, f.err
 	}
-	return domain.ReportRecord{ID: "rpt_1", SessionID: input.SessionID, ProjectID: "ao", State: input.State, Note: input.Note, Message: input.Message, Outputs: input.Outputs, CreatedAt: time.Unix(1, 0).UTC(), DeliveryState: domain.ReportPending}, nil
+	return domain.ReportRecord{ID: "rpt_1", SessionID: input.SessionID, ProjectID: "ao", State: input.State, Note: input.Note, Message: input.Message, Outputs: input.Outputs, CreatedAt: time.Unix(1, 0).UTC(), DeliveryState: domain.ReportPending, Verification: f.verification}, nil
 }
 
 func TestReportsAPI_CreateAndEnvelope(t *testing.T) {
-	svc := &fakeReportService{}
+	verifiedAt := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	svc := &fakeReportService{verification: &domain.ReportVerification{State: domain.ReportVerificationFailed, Evidence: "verification/rpt_1.txt", OutputTail: "FAIL\n", StartedAt: verifiedAt, CompletedAt: verifiedAt.Add(time.Second)}}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	srv := httptest.NewServer(httpd.NewRouterWithControl(config.Config{}, log, nil, httpd.APIDeps{Reports: svc}, httpd.ControlDeps{}))
 	defer srv.Close()
@@ -47,7 +49,7 @@ func TestReportsAPI_CreateAndEnvelope(t *testing.T) {
 	if status != http.StatusCreated || svc.input.SessionID != "ao-7" || svc.input.State != domain.ReportDone || svc.input.Note != "finished" || len(svc.input.Outputs) != 2 || svc.input.Outputs[0].Label != "Result" || svc.input.Outputs[1].Kind != domain.ReportOutputPRReviewed {
 		t.Fatalf("status=%d body=%s svc=%+v", status, body, svc)
 	}
-	if string(body) != `{"id":"rpt_1"}`+"\n" {
+	if !reportContainsAll(string(body), `"id":"rpt_1"`, `"state":"failed"`, `"evidence":"verification/rpt_1.txt"`, `"outputTail":"FAIL\n"`) {
 		t.Fatalf("response body = %s", body)
 	}
 	svc.err = apierr.Invalid("INVALID_REPORT", "bad report", nil)
@@ -72,13 +74,14 @@ func TestReportsAPI_ListIsReadOnlyProjection(t *testing.T) {
 	svc := &fakeReportService{reports: []domain.ReportRecord{{
 		ID: "rpt_1", SessionID: "worker", ProjectID: "ao", State: domain.ReportDone,
 		Note: "finished", CreatedAt: created, RepeatCount: 2, DeliveryBatchID: "report-batch:rpt_1",
-		Outputs: []domain.ReportOutput{{Kind: domain.ReportOutputArtifact, Reference: "opaque"}},
+		Outputs:      []domain.ReportOutput{{Kind: domain.ReportOutputArtifact, Reference: "opaque"}},
+		Verification: &domain.ReportVerification{State: domain.ReportVerificationPassed, Evidence: "verification/rpt_1.txt", StartedAt: created, CompletedAt: created.Add(time.Second)},
 	}}}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	srv := httptest.NewServer(httpd.NewRouterWithControl(config.Config{}, log, nil, httpd.APIDeps{Reports: svc}, httpd.ControlDeps{}))
 	defer srv.Close()
 	body, status, _ := doRequest(t, srv, "GET", "/api/v1/reports?projectId=ao", "")
-	if status != http.StatusOK || !reportContainsAll(string(body), `"id":"rpt_1"`, `"sessionId":"worker"`, `"reference":"opaque"`, `"repeatCount":2`, `"deliveryBatchId":"report-batch:rpt_1"`) {
+	if status != http.StatusOK || !reportContainsAll(string(body), `"id":"rpt_1"`, `"sessionId":"worker"`, `"reference":"opaque"`, `"repeatCount":2`, `"deliveryBatchId":"report-batch:rpt_1"`, `"state":"passed"`, `"evidence":"verification/rpt_1.txt"`) {
 		t.Fatalf("status=%d body=%s", status, body)
 	}
 	_, status, _ = doRequest(t, srv, "GET", "/api/v1/reports", "")

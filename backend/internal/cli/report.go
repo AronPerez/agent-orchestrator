@@ -36,14 +36,21 @@ type reportAPIRequest struct {
 }
 
 type reportAPIResponse struct {
-	ID string `json:"id"`
+	ID           string                         `json:"id"`
+	Verification *reportAPIVerificationResponse `json:"verification,omitempty"`
+}
+
+type reportAPIVerificationResponse struct {
+	State      string `json:"state"`
+	Evidence   string `json:"evidence"`
+	OutputTail string `json:"outputTail"`
 }
 
 func newReportCommand(ctx *commandContext) *cobra.Command {
 	var o reportOptions
 	cmd := &cobra.Command{Use: "report <free-form text>", Short: "Report worker progress to the orchestrator", Args: cobra.ArbitraryArgs, RunE: func(cmd *cobra.Command, args []string) error {
 		o.noteSet = cmd.Flags().Changed("note")
-		return ctx.report(cmd.Context(), args, o)
+		return ctx.report(cmd.Context(), cmd.OutOrStdout(), args, o)
 	}}
 	f := cmd.Flags()
 	f.StringVar(&o.note, "note", "", "Structured state note")
@@ -60,13 +67,14 @@ func newReportCommand(ctx *commandContext) *cobra.Command {
 
 type reportListAPIResponse struct {
 	Reports []struct {
-		SessionID       string            `json:"sessionId"`
-		State           string            `json:"state"`
-		Note            string            `json:"note"`
-		Message         string            `json:"message"`
-		Outputs         []reportAPIOutput `json:"outputs"`
-		RepeatCount     int64             `json:"repeatCount"`
-		DeliveryBatchID string            `json:"deliveryBatchId"`
+		SessionID       string                         `json:"sessionId"`
+		State           string                         `json:"state"`
+		Note            string                         `json:"note"`
+		Message         string                         `json:"message"`
+		Outputs         []reportAPIOutput              `json:"outputs"`
+		RepeatCount     int64                          `json:"repeatCount"`
+		DeliveryBatchID string                         `json:"deliveryBatchId"`
+		Verification    *reportAPIVerificationResponse `json:"verification"`
 	} `json:"reports"`
 }
 
@@ -115,6 +123,9 @@ func writeReportBatch(w io.Writer, response reportListAPIResponse, batchID strin
 		if text := report.Note + report.Message; text != "" {
 			_, _ = fmt.Fprintf(w, "\n%s", text)
 		}
+		if verification := report.Verification; verification != nil {
+			_, _ = fmt.Fprintf(w, "\nverification: %s (evidence: %s)", verification.State, verification.Evidence)
+		}
 		for _, output := range report.Outputs {
 			_, _ = fmt.Fprintf(w, "\n%s: %s", output.Kind, output.Reference)
 		}
@@ -126,7 +137,7 @@ func writeReportBatch(w io.Writer, response reportListAPIResponse, batchID strin
 	return err
 }
 
-func (c *commandContext) report(ctx context.Context, args []string, o reportOptions) error {
+func (c *commandContext) report(ctx context.Context, stdout io.Writer, args []string, o reportOptions) error {
 	states := []struct {
 		on    bool
 		state domain.ReportState
@@ -193,7 +204,28 @@ func (c *commandContext) report(ctx context.Context, args []string, o reportOpti
 		apiOutputs[i] = reportAPIOutput{Kind: string(output.Kind), Reference: output.Reference}
 	}
 	var response reportAPIResponse
-	return c.postJSON(ctx, "reports", reportAPIRequest{SessionID: sessionID, State: string(selected), Note: o.note, Message: message, Outputs: apiOutputs}, &response)
+	request := reportAPIRequest{SessionID: sessionID, State: string(selected), Note: o.note, Message: message, Outputs: apiOutputs}
+	post := c.postJSON
+	if selected == domain.ReportDone {
+		post = c.postVerificationJSON
+	}
+	if err := post(ctx, "reports", request, &response); err != nil {
+		return err
+	}
+	if response.Verification == nil || response.Verification.State != string(domain.ReportVerificationFailed) {
+		return nil
+	}
+	if _, err := fmt.Fprintf(stdout, "Verification failed.\nEvidence: %s\n", response.Verification.Evidence); err != nil {
+		return err
+	}
+	if response.Verification.OutputTail == "" {
+		return nil
+	}
+	_, err := fmt.Fprintf(stdout, "\n%s", response.Verification.OutputTail)
+	if err == nil && !strings.HasSuffix(response.Verification.OutputTail, "\n") {
+		_, err = fmt.Fprintln(stdout)
+	}
+	return err
 }
 
 func legacyReportStatus(value string) bool {
