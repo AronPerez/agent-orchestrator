@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -1096,6 +1097,10 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 	defer func() {
 		resultErr = RelabelSpawnTimeout(resultErr, requestCtx, budget)
 	}()
+	if err := validateSpawnContract(cfg); err != nil {
+		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w", err)
+	}
+	cfg.Goal = strings.TrimSpace(cfg.Goal)
 	if cfg.RequestedOutput == domain.RequestedOutputArtifact && m.artifactDir("") == "" {
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w", ErrArtifactOutputUnavailable)
 	}
@@ -1394,20 +1399,6 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 		}
 		return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnPrompt, err)
 	}
-	promptBytes := len(prompt)
-	systemPromptBytes := len(systemPrompt)
-	systemPromptFile, err := m.prepareSystemPromptFile(id, cfg.Harness, systemPrompt)
-	if err != nil {
-		m.cleanupArtifactDir(id)
-		if prep != nil {
-			cleanupCtx, cancel := spawnRollbackContext(ctx)
-			m.discardClaimedTaskPreparation(cleanupCtx, prep)
-			cancel()
-		} else {
-			m.rollbackSpawnSeedRowAfterFailure(ctx, id)
-		}
-		return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnSystemPrompt, err)
-	}
 	if prep != nil {
 		// A synchronous spawn can be promoted as ready only after the hidden
 		// preparation has finished publishing its worktree. Otherwise its late
@@ -1453,6 +1444,31 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 		if _, err := m.store.UpdateSessionArtifactOutput(ctx, id, artifactDir, rec.OutputType); err != nil {
 			m.logger.Warn("persist artifact dir for prepared session", "session", id, "err", err)
 		}
+		// The preflight prompt above read the hidden preparation row. Rebuild the
+		// launch text from the promoted row so its durable goal and absolute
+		// deadline reach the worker on the first launch, not only on restore.
+		prompt, systemPrompt, err = m.buildSpawnTexts(ctx, cfg, id)
+		if err != nil {
+			m.cleanupArtifactDir(id)
+			cleanupCtx, cancel := spawnRollbackContext(ctx)
+			m.discardClaimedTaskPreparation(cleanupCtx, prep)
+			cancel()
+			return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnPrompt, err)
+		}
+	}
+	promptBytes := len(prompt)
+	systemPromptBytes := len(systemPrompt)
+	systemPromptFile, err := m.prepareSystemPromptFile(id, cfg.Harness, systemPrompt)
+	if err != nil {
+		m.cleanupArtifactDir(id)
+		if prep != nil {
+			cleanupCtx, cancel := spawnRollbackContext(ctx)
+			m.discardClaimedTaskPreparation(cleanupCtx, prep)
+			cancel()
+		} else {
+			m.rollbackSpawnSeedRowAfterFailure(ctx, id)
+		}
+		return domain.SessionRecord{}, 0, 0, wrapSpawnStage(id, ErrSpawnSystemPrompt, err)
 	}
 	// A speculative worktree may still be being created under this gate. Wait
 	// for it above without holding the gate, then serialize the remaining
@@ -6491,6 +6507,11 @@ func normalizeWorkspacePath(p string) string {
 // ---- helpers ----
 
 func seedRecord(cfg ports.SpawnConfig, projectConfig domain.ProjectConfig, now time.Time) domain.SessionRecord {
+	var timeboxDeadlineAt *time.Time
+	if cfg.Timebox > 0 {
+		deadline := now.Add(cfg.Timebox)
+		timeboxDeadlineAt = &deadline
+	}
 	return domain.SessionRecord{
 		ParentSessionID:     cfg.ParentSessionID,
 		ProjectID:           cfg.ProjectID,
@@ -6510,11 +6531,34 @@ func seedRecord(cfg ports.SpawnConfig, projectConfig domain.ProjectConfig, now t
 		Mode:              domain.NormalizeSessionMode(cfg.RequestedMode),
 		Metadata:          domain.SessionMetadata{Permissions: applySpawnAgentConfig(effectiveAgentConfig(cfg.Harness, cfg.Kind, projectConfig), cfg.AgentConfig).Permissions},
 		RequestedOutput:   cfg.RequestedOutput,
+		Goal:              strings.TrimSpace(cfg.Goal),
+		TimeboxDeadlineAt: timeboxDeadlineAt,
 		OutputType:        domain.SessionOutputNone,
 		AutoReviewEnabled: projectConfig.AutoReview,
 		AutoInjectReview:  true,
 		AutoInjectCI:      true,
 	}
+}
+
+func validateSpawnContract(cfg ports.SpawnConfig) error {
+	const maxGoalRunes = 1000
+	goal := strings.TrimSpace(cfg.Goal)
+	if goal == "" && cfg.Timebox == 0 {
+		return nil
+	}
+	if goal == "" || cfg.Timebox <= 0 {
+		return fmt.Errorf("worker contract requires both a goal and a positive timebox")
+	}
+	if cfg.Kind != domain.KindWorker {
+		return fmt.Errorf("worker contract is supported for worker sessions only")
+	}
+	if cfg.ProjectID == "" {
+		return fmt.Errorf("worker contract requires a registered project")
+	}
+	if utf8.RuneCountInString(goal) > maxGoalRunes {
+		return fmt.Errorf("worker contract goal must be %d characters or fewer", maxGoalRunes)
+	}
+	return nil
 }
 
 func defaultSessionBranch(id domain.SessionID, kind domain.SessionKind, prefix, branchNamespace string) string {
@@ -6795,6 +6839,15 @@ func (m *Manager) buildSystemPrompt(ctx context.Context, kind domain.SessionKind
 		}
 	}
 	if kind == domain.KindWorker {
+		rec, ok, err := m.store.GetSession(ctx, sessionID)
+		if err != nil {
+			return "", err
+		}
+		if ok {
+			if contract := workerContractPrompt(rec.Goal, rec.TimeboxDeadlineAt); contract != "" {
+				cfg.AdditionalSections = append(cfg.AdditionalSections, contract)
+			}
+		}
 		if note := m.forkBoundaryPrompt(ctx, sessionID); note != "" {
 			cfg.AdditionalSections = append(cfg.AdditionalSections, note)
 		}

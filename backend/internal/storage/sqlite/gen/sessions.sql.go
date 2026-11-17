@@ -222,7 +222,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     conversation_checkpoint_state, conversation_checkpoint_generation, conversation_checkpoint_native_id,
     conversation_checkpoint_unsettled, conversation_checkpoint_turn_id, native_checkpoint_evidence,
     native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions,
-    requested_output,
+    requested_output, goal, timebox_deadline_at, contract_outcome,
     provision_state, provision_error, provision_steps, branch_state, branch_naming, temporary_branch, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
     hibernated_at, stale_binary_since, stale_binary_version, stale_binary_launch, stale_binary_switch_failed_at,
@@ -291,6 +291,9 @@ type GetSessionRow struct {
 	Effort                           string
 	SessionPermissions               string
 	RequestedOutput                  string
+	Goal                             string
+	TimeboxDeadlineAt                sql.NullTime
+	ContractOutcome                  string
 	ProvisionState                   domain.SessionProvisionState
 	ProvisionError                   string
 	ProvisionSteps                   string
@@ -378,6 +381,9 @@ func (q *Queries) GetSession(ctx context.Context, id domain.SessionID) (GetSessi
 		&i.Effort,
 		&i.SessionPermissions,
 		&i.RequestedOutput,
+		&i.Goal,
+		&i.TimeboxDeadlineAt,
+		&i.ContractOutcome,
 		&i.ProvisionState,
 		&i.ProvisionError,
 		&i.ProvisionSteps,
@@ -418,7 +424,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     conversation_checkpoint_state, conversation_checkpoint_generation, conversation_checkpoint_native_id,
     conversation_checkpoint_unsettled, conversation_checkpoint_turn_id, native_checkpoint_evidence,
     native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions,
-    requested_output,
+    requested_output, goal, timebox_deadline_at, contract_outcome,
     provision_state, provision_error, provision_steps, branch_state, branch_naming, temporary_branch, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
     hibernated_at, stale_binary_since, stale_binary_version, stale_binary_launch, stale_binary_switch_failed_at,
@@ -487,6 +493,9 @@ type GetSessionByAutomationRunIDRow struct {
 	Effort                           string
 	SessionPermissions               string
 	RequestedOutput                  string
+	Goal                             string
+	TimeboxDeadlineAt                sql.NullTime
+	ContractOutcome                  string
 	ProvisionState                   domain.SessionProvisionState
 	ProvisionError                   string
 	ProvisionSteps                   string
@@ -574,6 +583,9 @@ func (q *Queries) GetSessionByAutomationRunID(ctx context.Context, automationRun
 		&i.Effort,
 		&i.SessionPermissions,
 		&i.RequestedOutput,
+		&i.Goal,
+		&i.TimeboxDeadlineAt,
+		&i.ContractOutcome,
 		&i.ProvisionState,
 		&i.ProvisionError,
 		&i.ProvisionSteps,
@@ -624,7 +636,7 @@ INSERT INTO sessions (
     preview_url, preview_revision, terminate_on_pr_merge, cleanup_generation, browser_capability_verifier,
     artifact_dir, session_output_type,
     session_mode, provider_conversation_id, controller_generation, model, effort, session_permissions,
-    requested_output,
+    requested_output, goal, timebox_deadline_at, contract_outcome,
     created_at, updated_at, is_pinned, pinned_at, auto_inject_review, auto_inject_ci,
     provision_state, provision_error, is_task_preparation, automation_run_id, automation_launch_completed,
     client_request_id, client_request_hash, parent_session_id, import_source, display_name_explicit
@@ -635,7 +647,7 @@ INSERT INTO sessions (
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-    ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?, ?, ?, ?
 )
 `
 
@@ -690,6 +702,9 @@ type InsertSessionParams struct {
 	Effort                           string
 	SessionPermissions               string
 	RequestedOutput                  string
+	Goal                             string
+	TimeboxDeadlineAt                sql.NullTime
+	ContractOutcome                  string
 	CreatedAt                        time.Time
 	UpdatedAt                        time.Time
 	IsPinned                         bool
@@ -760,6 +775,9 @@ func (q *Queries) InsertSession(ctx context.Context, arg InsertSessionParams) er
 		arg.Effort,
 		arg.SessionPermissions,
 		arg.RequestedOutput,
+		arg.Goal,
+		arg.TimeboxDeadlineAt,
+		arg.ContractOutcome,
 		arg.CreatedAt,
 		arg.UpdatedAt,
 		arg.IsPinned,
@@ -794,7 +812,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     conversation_checkpoint_state, conversation_checkpoint_generation, conversation_checkpoint_native_id,
     conversation_checkpoint_unsettled, conversation_checkpoint_turn_id, native_checkpoint_evidence,
     native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions,
-    requested_output,
+    requested_output, goal, timebox_deadline_at, contract_outcome,
     provision_state, provision_error, provision_steps, branch_state, branch_naming, temporary_branch, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
     hibernated_at, stale_binary_since, stale_binary_version, stale_binary_launch, stale_binary_switch_failed_at,
@@ -863,6 +881,9 @@ type ListAllSessionsRow struct {
 	Effort                           string
 	SessionPermissions               string
 	RequestedOutput                  string
+	Goal                             string
+	TimeboxDeadlineAt                sql.NullTime
+	ContractOutcome                  string
 	ProvisionState                   domain.SessionProvisionState
 	ProvisionError                   string
 	ProvisionSteps                   string
@@ -956,6 +977,9 @@ func (q *Queries) ListAllSessions(ctx context.Context) ([]ListAllSessionsRow, er
 			&i.Effort,
 			&i.SessionPermissions,
 			&i.RequestedOutput,
+			&i.Goal,
+			&i.TimeboxDeadlineAt,
+			&i.ContractOutcome,
 			&i.ProvisionState,
 			&i.ProvisionError,
 			&i.ProvisionSteps,
@@ -1098,7 +1122,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     conversation_checkpoint_state, conversation_checkpoint_generation, conversation_checkpoint_native_id,
     conversation_checkpoint_unsettled, conversation_checkpoint_turn_id, native_checkpoint_evidence,
     native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions,
-    requested_output,
+    requested_output, goal, timebox_deadline_at, contract_outcome,
     provision_state, provision_error, provision_steps, branch_state, branch_naming, temporary_branch, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
     hibernated_at, stale_binary_since, stale_binary_version, stale_binary_launch, stale_binary_switch_failed_at,
@@ -1167,6 +1191,9 @@ type ListSessionsByProjectRow struct {
 	Effort                           string
 	SessionPermissions               string
 	RequestedOutput                  string
+	Goal                             string
+	TimeboxDeadlineAt                sql.NullTime
+	ContractOutcome                  string
 	ProvisionState                   domain.SessionProvisionState
 	ProvisionError                   string
 	ProvisionSteps                   string
@@ -1260,6 +1287,9 @@ func (q *Queries) ListSessionsByProject(ctx context.Context, projectID *domain.P
 			&i.Effort,
 			&i.SessionPermissions,
 			&i.RequestedOutput,
+			&i.Goal,
+			&i.TimeboxDeadlineAt,
+			&i.ContractOutcome,
 			&i.ProvisionState,
 			&i.ProvisionError,
 			&i.ProvisionSteps,
@@ -1491,16 +1521,19 @@ UPDATE sessions SET
     effort = ?12,
     session_permissions = ?13,
     requested_output = ?14,
-    created_at = ?15,
-    updated_at = ?16,
-    auto_inject_review = ?17,
-    auto_inject_ci = ?18,
-    provision_state = ?19,
+    goal = ?15,
+    timebox_deadline_at = ?16,
+    contract_outcome = ?17,
+    created_at = ?18,
+    updated_at = ?19,
+    auto_inject_review = ?20,
+    auto_inject_ci = ?21,
+    provision_state = ?22,
     provision_error = '',
-    client_request_id = ?20,
-    client_request_hash = ?21,
+    client_request_id = ?23,
+    client_request_hash = ?24,
     is_task_preparation = 0
-WHERE id = ?22 AND is_task_preparation = 1
+WHERE id = ?25 AND is_task_preparation = 1
 `
 
 type PromoteTaskPreparationParams struct {
@@ -1518,6 +1551,9 @@ type PromoteTaskPreparationParams struct {
 	Effort              string
 	SessionPermissions  string
 	RequestedOutput     string
+	Goal                string
+	TimeboxDeadlineAt   sql.NullTime
+	ContractOutcome     string
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
 	AutoInjectReview    bool
@@ -1546,6 +1582,9 @@ func (q *Queries) PromoteTaskPreparation(ctx context.Context, arg PromoteTaskPre
 		arg.Effort,
 		arg.SessionPermissions,
 		arg.RequestedOutput,
+		arg.Goal,
+		arg.TimeboxDeadlineAt,
+		arg.ContractOutcome,
 		arg.CreatedAt,
 		arg.UpdatedAt,
 		arg.AutoInjectReview,
