@@ -827,6 +827,12 @@ type Session struct {
 	DisplayNameExplicit              bool
 	AcceptedDeliveryID               string
 	AcceptedDeliveryLaunchID         string
+	Goal                             string
+	TimeboxDeadlineAt                sql.NullTime
+	ContractOutcome                  string
+	ContractStallNudgedAt            sql.NullTime
+	ContractStallEscalatedAt         sql.NullTime
+	ContractTimeboxPromptedAt        sql.NullTime
 }
 
 type SessionAgentAccount struct {

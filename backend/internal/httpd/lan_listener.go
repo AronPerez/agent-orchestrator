@@ -46,14 +46,68 @@ func NewLANManager(handler http.Handler, state *authState, defaultPort int, log 
 	lock := newLockout(time.Now)
 	auth := authMiddleware(state, lock, newMobileConnectReporter(sink, time.Now))
 	m := &LANManager{
-		handler:     lanControlBlock(auth(remoteJSONCompression(handler))),
+		handler:     lanControlBlock(auth(credentialScopeMiddleware(remoteJSONCompression(handler)))),
 		defaultPort: defaultPort,
 		log:         loggerOrDefault(log),
 		state:       state,
 		lock:        lock,
 	}
-	m.tunnel = auth(http.HandlerFunc(m.serveTunnel))
+	m.tunnel = auth(credentialScopeMiddleware(http.HandlerFunc(m.serveTunnel)))
 	return m
+}
+
+// credentialScopeMiddleware filters capability-token requests after bearer
+// authentication and before the shared app router. It limits direct API use;
+// it is not an authority sandbox for agents spawned or prompted through those
+// routes. Existing password, account and unscoped device credentials retain
+// the full LAN app API.
+func credentialScopeMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		credential := requestscope.CredentialFrom(r.Context())
+		if len(credential.Scopes) == 0 || credentialAllowsRequest(credential, r.Method, r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "CREDENTIAL_SCOPE_DENIED",
+			"This credential cannot access this route.", nil)
+	})
+}
+
+func credentialAllowsRequest(credential requestscope.Credential, method, path string) bool {
+	return credential.HasScope(mobilebridge.DeviceScopeAgentCoordination) && agentCoordinationRequestAllowed(method, path)
+}
+
+// agentCoordinationRequestAllowed is deliberately an exact method/path
+// allowlist. A new session or project route is denied until this boundary is
+// reviewed and extended on purpose.
+func agentCoordinationRequestAllowed(method, path string) bool {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 3 || parts[0] != "api" || parts[1] != "v1" {
+		return false
+	}
+	switch method {
+	case http.MethodGet:
+		switch {
+		case len(parts) == 3 && (parts[2] == "projects" || parts[2] == "sessions"):
+			return true
+		case len(parts) == 4 && (parts[2] == "projects" || parts[2] == "sessions"):
+			return true
+		case len(parts) == 5 && parts[2] == "sessions" && parts[4] == "pr":
+			return true
+		}
+	case http.MethodPost:
+		switch {
+		case len(parts) == 3 && parts[2] == "sessions":
+			return true
+		case len(parts) == 5 && parts[2] == "agents" && parts[3] == "readiness" && parts[4] == "ensure":
+			return true
+		case len(parts) == 5 && parts[2] == "sessions" && parts[4] == "send":
+			return true
+		case len(parts) == 6 && parts[2] == "sessions" && parts[4] == "conversation" && parts[5] == "steer-or-send":
+			return true
+		}
+	}
+	return false
 }
 
 // lanControlBlockedPrefixes are the loopback-only daemon-control route

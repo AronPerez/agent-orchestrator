@@ -5,6 +5,7 @@
 package controllers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -181,7 +182,21 @@ func (c *ProjectsController) list(w http.ResponseWriter, r *http.Request) {
 	if projects == nil {
 		projects = []projectsvc.Summary{}
 	}
+	if isAgentCoordinationRequest(r.Context()) {
+		envelope.WriteJSON(w, http.StatusOK, CoordinationListProjectsResponse{Projects: coordinationProjectSummaries(projects)})
+		return
+	}
 	envelope.WriteJSON(w, http.StatusOK, ListProjectsResponse{Projects: projects})
+}
+
+func coordinationProjectSummaries(projects []projectsvc.Summary) []CoordinationProjectSummary {
+	out := make([]CoordinationProjectSummary, 0, len(projects))
+	for _, project := range projects {
+		out = append(out, CoordinationProjectSummary{
+			ID: project.ID, Name: project.Name, Kind: project.Kind, OrchestratorAgent: project.OrchestratorAgent,
+		})
+	}
+	return out
 }
 
 func (c *ProjectsController) add(w http.ResponseWriter, r *http.Request) {
@@ -234,7 +249,41 @@ func (c *ProjectsController) get(w http.ResponseWriter, r *http.Request) {
 		envelope.WriteAPIError(w, r, http.StatusInternalServerError, "internal", "INTERNAL_ERROR", "Internal server error", nil)
 		return
 	}
+	resp = projectDetailForCredential(r.Context(), resp)
 	envelope.WriteJSON(w, http.StatusOK, resp)
+}
+
+// projectDetailForCredential returns the smallest project view the
+// coordination CLI needs to spawn: stable identity, kind, and the configured
+// worker/orchestrator harness selectors. Project config can contain environment
+// secrets, scripts, prompts and rules; paths and repository URLs can also carry
+// credentials. None cross this route-filtered credential boundary.
+//
+// Copy every projected layer so a scoped read cannot mutate the service's
+// cached value or a later full-credential response.
+func projectDetailForCredential(ctx context.Context, resp GetProjectResponse) GetProjectResponse {
+	if !isAgentCoordinationRequest(ctx) {
+		return resp
+	}
+	if original := resp.Project.Project; original != nil {
+		projected := projectsvc.Project{
+			ID: original.ID, Name: original.Name, Kind: original.Kind,
+		}
+		if original.Config != nil {
+			projected.Config = &domain.ProjectConfig{
+				Worker:       domain.RoleOverride{Harness: original.Config.Worker.Harness},
+				Orchestrator: domain.RoleOverride{Harness: original.Config.Orchestrator.Harness},
+			}
+		}
+		resp.Project.Project = &projected
+	}
+	if original := resp.Project.Degraded; original != nil {
+		resp.Project.Degraded = &projectsvc.Degraded{
+			ID: original.ID, Name: original.Name, Kind: original.Kind,
+			ResolveError: "project configuration is unavailable",
+		}
+	}
+	return resp
 }
 
 func (c *ProjectsController) updateSettings(w http.ResponseWriter, r *http.Request) {

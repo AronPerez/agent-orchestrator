@@ -179,6 +179,8 @@ var schemaNames = map[string]string{ //nolint:gosec // Public OpenAPI type names
 	"ControllersConversationFindResponse":                  "ConversationFindResponse",
 	"ChatFindOccurrence":                                   "ConversationFindOccurrence",
 	"ControllersTelemetryIdentityResponse":                 "TelemetryIdentityResponse",
+	"ControllersIssueCoordinationTokenRequest":             "IssueCoordinationTokenRequest",
+	"ControllersCoordinationTokenResponse":                 "CoordinationTokenResponse",
 	"ControllersAgentAccountIDParam":                       "AgentAccountIDParam",
 	"ControllersAgentLoginActionRequest":                   "AgentLoginActionRequest",
 	"ControllersAgentAccountLoginIDParam":                  "AgentAccountLoginIDParam",
@@ -349,6 +351,7 @@ var schemaNames = map[string]string{ //nolint:gosec // Public OpenAPI type names
 	"DomainSessionProvisionStep":      "SessionProvisionStep",
 	"DomainSessionBranchState":        "SessionBranchState",
 	"DomainSessionStaleBinary":        "SessionStaleBinary",
+	"DomainSessionContractOutcome":    "SessionContractOutcome",
 	"DomainSessionWait":               "SessionWait",
 	"DomainProjectConfig":             "ProjectConfig",
 	"DomainCollisionRadarConfig":      "CollisionRadarConfig",
@@ -359,6 +362,9 @@ var schemaNames = map[string]string{ //nolint:gosec // Public OpenAPI type names
 	"DomainRoleOverride":              "RoleOverride",
 	// httpd/controllers (wire envelopes)
 	"ControllersListProjectsResponse":                     "ListProjectsResponse",
+	"ControllersCoordinationProjectSummary":               "CoordinationProjectSummary",
+	"ControllersCoordinationListProjectsResponse":         "CoordinationListProjectsResponse",
+	"ControllersListProjectsAPIResponse":                  "ListProjectsAPIResponse",
 	"ControllersProjectResponse":                          "ProjectResponse",
 	"ControllersClonePrepareStreamEvent":                  "ClonePrepareStreamEvent",
 	"ControllersAgentIDParam":                             "AgentIDParam",
@@ -2685,13 +2691,36 @@ func agentOperations() []operation {
 	}
 }
 
-// mobileOperations declares the 5 /mobile control operations. These are
-// mounted on the loopback router (mountMobile in router.go), not the REST
-// /api/v1 group — only the desktop/CLI may enable, disable, or regenerate the
-// phone's LAN access; the phone never toggles its own connection. Must stay
+// mobileOperations declares the remote-host issuance and /mobile control
+// operations mounted by mountMobile. The LAN control block hides /mobile while
+// leaving the authenticated /remote-host issuance routes reachable. Must stay
 // 1:1 with the routes mountMobile registers (enforced by the parity test).
 func mobileOperations() []operation {
 	return []operation{
+		{
+			method: http.MethodPost, path: "/api/v1/remote-host/coordination-token", id: "issueRemoteHostCoordinationToken", tag: "mobile",
+			summary:         "Issue a route-limited credential for cross-machine agent coordination",
+			reqBody:         controllers.IssueCoordinationTokenRequest{},
+			optionalReqBody: true,
+			resps: []respUnit{
+				{http.StatusOK, controllers.CoordinationTokenResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodDelete, path: "/api/v1/remote-host/coordination-token/{deviceId}", id: "revokeRemoteHostCoordinationToken", tag: "mobile",
+			summary:    "Revoke one route-limited cross-machine agent coordination credential",
+			pathParams: []any{controllers.CoordinationDeviceIDParam{}},
+			resps: []respUnit{
+				{http.StatusNoContent, nil},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+			},
+		},
 		{
 			method: http.MethodPost, path: "/api/v1/remote-host/account-token", id: "issueRemoteHostAccountToken", tag: "mobile",
 			summary: "Issue a host-scoped account credential using the pairing password or a device token",
@@ -3233,7 +3262,7 @@ func projectOperations() []operation {
 			method: http.MethodGet, path: "/api/v1/projects", id: "listProjects", tag: "projects",
 			summary: "List all registered projects (active + degraded)",
 			resps: []respUnit{
-				{http.StatusOK, controllers.ListProjectsResponse{}},
+				{http.StatusOK, controllers.ListProjectsAPIResponse{}},
 				{http.StatusInternalServerError, envelope.APIError{}},
 			},
 		},

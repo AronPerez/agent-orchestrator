@@ -2,7 +2,9 @@ package report
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"sort"
 	"time"
 
@@ -15,7 +17,8 @@ import (
 // Store is the report service's persistence and ownership boundary.
 type Store interface {
 	GetSession(context.Context, domain.SessionID) (domain.SessionRecord, bool, error)
-	CreateReport(context.Context, domain.ReportRecord) (domain.ReportRecord, error)
+	CreateReportWithContractOutcome(context.Context, domain.ReportRecord, domain.SessionContractOutcome) (domain.ReportRecord, error)
+	CreateReportWithContractOutcomeOnce(context.Context, domain.ReportRecord, domain.SessionContractOutcome) (domain.ReportRecord, bool, error)
 }
 
 // CreateInput is the validated caller payload before AO-derived ownership and deadlines.
@@ -60,6 +63,52 @@ func New(d Deps) *Service {
 		d.NewID = func() string { return "rpt_" + uuid.NewString() }
 	}
 	return &Service{store: d.Store, now: d.Now, newID: d.NewID, onCreated: d.OnCreated, artifacts: d.Artifacts}
+}
+
+// CreateImmediateOnce persists an internal coordination report with an
+// immediate delivery deadline and a deterministic ID derived from key. Replays
+// return the existing report and do not publish a second creation event.
+func (s *Service) CreateImmediateOnce(ctx context.Context, input CreateInput, key string) (domain.ReportRecord, error) {
+	if s == nil || s.store == nil {
+		return domain.ReportRecord{}, errors.New("report: store is required")
+	}
+	if key == "" {
+		return domain.ReportRecord{}, errors.New("report: idempotency key is required")
+	}
+	if input.SessionID == "" {
+		return domain.ReportRecord{}, apierr.Invalid("INVALID_REPORT_SESSION", "Worker session id is required", nil)
+	}
+	if err := domain.ValidateReportContent(input.State, input.Note, input.Message, input.Outputs); err != nil {
+		return domain.ReportRecord{}, apierr.Invalid("INVALID_REPORT", "Report state, note, message, or outputs are invalid", nil)
+	}
+	session, ok, err := s.store.GetSession(ctx, input.SessionID)
+	if err != nil {
+		return domain.ReportRecord{}, err
+	}
+	if !ok {
+		return domain.ReportRecord{}, apierr.NotFound("SESSION_NOT_FOUND", "Unknown session")
+	}
+	if session.Kind != domain.KindWorker {
+		return domain.ReportRecord{}, apierr.Invalid("REPORT_WORKER_REQUIRED", "Reports can only be created by worker sessions", nil)
+	}
+	now := s.now().UTC()
+	sum := sha256.Sum256([]byte(key))
+	rec := domain.ReportRecord{
+		ID: fmt.Sprintf("rpt_contract_%x", sum[:16]), SessionID: session.ID, ProjectID: session.ProjectID,
+		State: input.State, Note: input.Note, Message: input.Message, Outputs: input.Outputs,
+		CreatedAt: now, DeliveryState: domain.ReportPending, AvailableAt: now, RepeatCount: 1,
+	}
+	created, inserted, err := s.store.CreateReportWithContractOutcomeOnce(ctx, rec, domain.SessionContractOutcomeNone)
+	if err != nil {
+		return created, err
+	}
+	if inserted && s.onCreated != nil {
+		s.onCreated(created)
+	}
+	if inserted {
+		s.recordArtifacts(ctx, created)
+	}
+	return created, nil
 }
 
 // ListProject returns persisted report facts ordered by created_at then id,
@@ -132,7 +181,7 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (domain.ReportR
 		CreatedAt: now, DeliveryState: domain.ReportPending, AvailableAt: availableAt,
 		SettlementDeadline: settlementDeadline, RepeatCount: 1,
 	}
-	created, err := s.store.CreateReport(ctx, rec)
+	created, err := s.store.CreateReportWithContractOutcome(ctx, rec, contractOutcomeForReport(session, input.State))
 	if err != nil {
 		return created, err
 	}
@@ -142,12 +191,31 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (domain.ReportR
 	// Synchronous on purpose: ao report --done is often the agent's last tool
 	// call, so a goroutine would race the turn's completion and could drop the
 	// artifact or put it on the next turn.
-	if s.artifacts != nil {
-		for _, output := range created.Outputs {
-			if output.Kind == domain.ReportOutputArtifact {
-				s.artifacts.RecordReportedArtifact(ctx, created.SessionID, output.Reference)
-			}
+	s.recordArtifacts(ctx, created)
+	return created, nil
+}
+
+func (s *Service) recordArtifacts(ctx context.Context, rec domain.ReportRecord) {
+	if s.artifacts == nil {
+		return
+	}
+	for _, output := range rec.Outputs {
+		if output.Kind == domain.ReportOutputArtifact {
+			s.artifacts.RecordReportedArtifact(ctx, rec.SessionID, output.Reference)
 		}
 	}
-	return created, nil
+}
+
+func contractOutcomeForReport(session domain.SessionRecord, state domain.ReportState) domain.SessionContractOutcome {
+	if session.Goal == "" || session.TimeboxDeadlineAt == nil || session.ContractOutcome != domain.SessionContractOutcomeNone {
+		return domain.SessionContractOutcomeNone
+	}
+	switch state {
+	case domain.ReportDone:
+		return domain.SessionContractOutcomeMet
+	case domain.ReportNeedsInput, domain.ReportStuck:
+		return domain.SessionContractOutcomeBlocked
+	default:
+		return domain.SessionContractOutcomeNone
+	}
 }

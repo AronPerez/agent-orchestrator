@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -17,8 +18,14 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/config"
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
 	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
+	sessionsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/session"
 )
 
 // pairingHost serves remote requests through a real LAN listener and local ones on the router.
@@ -51,9 +58,19 @@ func newPairingHost(t *testing.T) *pairingHost {
 	mountMobile(router, &controllers.MobileController{Bridge: bridge})
 	mountMobileDevices(router, &controllers.MobileDevicesController{Registry: registry, Access: bridge})
 	router.Route("/api/v1", func(r chi.Router) {
-		(&controllers.PushController{Registry: registry, Devices: devices}).Register(r)
+		(&controllers.PushController{Registry: registry, Devices: devices, Access: bridge}).Register(r)
 	})
 	router.Get("/api/v1/sessions", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	router.Get("/api/v1/sessions/{id}", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	router.Get("/api/v1/sessions/{id}/pr", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	router.Post("/api/v1/sessions", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusCreated) })
+	router.Post("/api/v1/sessions/{id}/send", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	router.Post("/api/v1/sessions/{id}/conversation/steer-or-send", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	router.Post("/api/v1/sessions/{id}/kill", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	router.Get("/api/v1/projects", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	router.Get("/api/v1/projects/{id}", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	router.Post("/api/v1/projects/{id}", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	router.Post("/api/v1/agents/readiness/ensure", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	lan := NewMobileLAN(router, bridge.HostID, 0, nil, nil)
 	lan.UseDeviceCredentials(devices, codes)
 	bridge.LAN = lan
@@ -195,6 +212,329 @@ func TestOnlyACodeOrThePasswordPairs(t *testing.T) {
 		if status, _ := h.remote(http.MethodPost, devicePairPath, wrong, nil); status != http.StatusUnauthorized {
 			t.Fatalf("pairing with %q: %d", wrong, status)
 		}
+	}
+}
+
+func TestCoordinationTokenIsLimitedToAgentCoordinationRoutes(t *testing.T) {
+	h := newPairingHost(t)
+	status, issued := h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", "secret12", map[string]string{
+		"name": "desk agent", "platform": "darwin",
+	})
+	token, _ := issued["token"].(string)
+	if status != http.StatusOK || issued["hostId"] != "h_test" || issued["scope"] != mobilebridge.DeviceScopeAgentCoordination || !strings.HasPrefix(token, mobilebridge.CoordinationTokenPrefix) {
+		t.Fatalf("issue coordination token: status=%d body=%v", status, issued)
+	}
+
+	allowed := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/api/v1/projects"},
+		{http.MethodGet, "/api/v1/projects/p1"},
+		{http.MethodPost, "/api/v1/agents/readiness/ensure"},
+		{http.MethodGet, "/api/v1/sessions"},
+		{http.MethodPost, "/api/v1/sessions"},
+		{http.MethodGet, "/api/v1/sessions/s1"},
+		{http.MethodGet, "/api/v1/sessions/s1/pr"},
+		{http.MethodPost, "/api/v1/sessions/s1/send"},
+		{http.MethodPost, "/api/v1/sessions/s1/conversation/steer-or-send"},
+	}
+	for _, tc := range allowed {
+		status, body := h.remote(tc.method, tc.path, token, map[string]string{})
+		if status < 200 || status >= 300 {
+			t.Errorf("%s %s: status=%d body=%v", tc.method, tc.path, status, body)
+		}
+	}
+
+	denied := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPost, "/api/v1/sessions/s1/kill"},
+		{http.MethodDelete, "/api/v1/sessions/s1"},
+		{http.MethodPost, "/api/v1/projects/p1"},
+		{http.MethodGet, "/api/v1/endpoints"},
+		{http.MethodPost, "/api/v1/remote-host/coordination-token"},
+	}
+	for _, tc := range denied {
+		status, body := h.remote(tc.method, tc.path, token, map[string]string{})
+		if status != http.StatusForbidden || body["code"] != "CREDENTIAL_SCOPE_DENIED" {
+			t.Errorf("%s %s: status=%d body=%v", tc.method, tc.path, status, body)
+		}
+	}
+
+	// An ordinary paired-device token is still a full app credential.
+	_, full := h.pair("secret12", "Laptop")
+	if status, body := h.remote(http.MethodPost, "/api/v1/sessions/s1/kill", full, nil); status != http.StatusOK {
+		t.Fatalf("full device credential was narrowed: status=%d body=%v", status, body)
+	}
+}
+
+type coordinationProjectManager struct {
+	projectsvc.Manager
+	project *projectsvc.Project
+}
+
+func (m coordinationProjectManager) List(context.Context) ([]projectsvc.Summary, error) {
+	return []projectsvc.Summary{{
+		ID: "p1", Name: "Private", Kind: domain.ProjectKindSingleRepo,
+		Path: "/private/repo", SessionPrefix: "private", OrchestratorAgent: domain.HarnessClaudeCode,
+		ResolveError: "resolve-secret", AutoSpawnPauses: []domain.AutoSpawnPause{{
+			Harness: domain.HarnessCodex, ErrorCode: "SETUP_FAILED", Message: "setup-list-secret", Failures: 3,
+		}},
+	}}, nil
+}
+
+func (m coordinationProjectManager) Get(context.Context, domain.ProjectID) (projectsvc.GetResult, error) {
+	return projectsvc.GetResult{Status: "ok", Project: m.project}, nil
+}
+
+func TestCoordinationProjectDetailIsASecretFreeProjection(t *testing.T) {
+	project := &projectsvc.Project{
+		ID: "p1", Name: "Private", Kind: domain.ProjectKindSingleRepo,
+		Path: "/private/repo", Repo: "https://token@github.example/owner/repo.git",
+		Config: &domain.ProjectConfig{
+			Env:                map[string]string{"GITHUB_TOKEN": "env-secret"},
+			PostCreate:         []string{"use-post-create-secret"},
+			AgentRules:         "rules-secret",
+			OrchestratorPrompt: "prompt-secret",
+			Worker:             domain.RoleOverride{Harness: domain.HarnessCodex},
+			Orchestrator:       domain.RoleOverride{Harness: domain.HarnessClaudeCode},
+		},
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	router := NewRouterWithControl(config.Config{}, log, nil, APIDeps{
+		Projects: coordinationProjectManager{project: project},
+	}, ControlDeps{})
+	devices, err := mobilebridge.LoadAccessDevices(mobilebridge.AccessDevicesPath(t.TempDir()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, token, err := devices.IssueScoped("Agent coordination", "cli", []string{mobilebridge.DeviceScopeAgentCoordination}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lan := NewMobileLAN(router, "h_test", 0, log, nil)
+	lan.UseDeviceCredentials(devices, nil)
+	lan.SetPasswordHash(mobilebridge.HashPassword("secret12"))
+	port, err := lan.StartLoopback(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lan.Stop(context.Background()) })
+	host := &pairingHost{t: t, lan: lan, router: router, port: port}
+
+	status, scoped := host.remote(http.MethodGet, "/api/v1/projects/p1", token, nil)
+	if status != http.StatusOK {
+		t.Fatalf("scoped project detail: status=%d body=%v", status, scoped)
+	}
+	scopedJSON, _ := json.Marshal(scoped)
+	for _, secret := range []string{"env-secret", "post-create-secret", "rules-secret", "prompt-secret", "/private/repo", "token@github"} {
+		if strings.Contains(string(scopedJSON), secret) {
+			t.Errorf("scoped project detail exposed %q: %s", secret, scopedJSON)
+		}
+	}
+	gotProject := scoped["project"].(map[string]any)
+	gotConfig := gotProject["config"].(map[string]any)
+	if gotProject["id"] != "p1" || gotProject["kind"] != string(domain.ProjectKindSingleRepo) {
+		t.Fatalf("coordination identity fields = %v", gotProject)
+	}
+	if gotConfig["worker"].(map[string]any)["agent"] != string(domain.HarnessCodex) || gotConfig["orchestrator"].(map[string]any)["agent"] != string(domain.HarnessClaudeCode) {
+		t.Fatalf("coordination agent selectors = %v", gotConfig)
+	}
+	status, scopedList := host.remote(http.MethodGet, "/api/v1/projects", token, nil)
+	if status != http.StatusOK {
+		t.Fatalf("scoped project list: status=%d body=%v", status, scopedList)
+	}
+	scopedListJSON, _ := json.Marshal(scopedList)
+	for _, secret := range []string{"/private/repo", "resolve-secret", "setup-list-secret"} {
+		if strings.Contains(string(scopedListJSON), secret) {
+			t.Errorf("scoped project list exposed %q: %s", secret, scopedListJSON)
+		}
+	}
+	listed := scopedList["projects"].([]any)[0].(map[string]any)
+	if len(listed) != 4 || listed["id"] != "p1" || listed["name"] != "Private" || listed["kind"] != string(domain.ProjectKindSingleRepo) || listed["orchestratorAgent"] != string(domain.HarnessClaudeCode) {
+		t.Fatalf("coordination project summary = %v", listed)
+	}
+
+	// The HTTP projection must not mutate the service object or change the full
+	// response returned to ordinary app credentials.
+	status, full := host.remote(http.MethodGet, "/api/v1/projects/p1", "secret12", nil)
+	fullJSON, _ := json.Marshal(full)
+	if status != http.StatusOK || !strings.Contains(string(fullJSON), "env-secret") || project.Config.Env["GITHUB_TOKEN"] != "env-secret" {
+		t.Fatalf("full project detail was redacted or mutated: status=%d body=%s project=%+v", status, fullJSON, project)
+	}
+	status, fullList := host.remote(http.MethodGet, "/api/v1/projects", "secret12", nil)
+	fullListJSON, _ := json.Marshal(fullList)
+	if status != http.StatusOK || !strings.Contains(string(fullListJSON), "/private/repo") || !strings.Contains(string(fullListJSON), "setup-list-secret") {
+		t.Fatalf("full project list was redacted: status=%d body=%s", status, fullListJSON)
+	}
+}
+
+type coordinationSessionService struct {
+	controllers.SessionService
+	session  domain.Session
+	spawnErr func() error
+}
+
+func (s coordinationSessionService) List(context.Context, sessionsvc.ListFilter) ([]domain.Session, error) {
+	return []domain.Session{s.session}, nil
+}
+
+func (s coordinationSessionService) ListPage(context.Context, sessionsvc.ListFilter) (sessionsvc.ListPage, error) {
+	return sessionsvc.ListPage{Sessions: []domain.Session{s.session}}, nil
+}
+
+func (s coordinationSessionService) Spawn(context.Context, ports.SpawnConfig) (domain.Session, int, int, error) {
+	return domain.Session{}, 0, 0, s.spawnErr()
+}
+
+func (s coordinationSessionService) Get(context.Context, domain.SessionID) (domain.Session, error) {
+	return s.session, nil
+}
+
+func TestCoordinationSessionResponsesHideSetupOutput(t *testing.T) {
+	const setupSecret = "literal-setup-output-secret"
+	session := domain.Session{SessionRecord: domain.SessionRecord{
+		ID: "s1", ProjectID: "p1", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		ProvisionState: domain.SessionProvisionFailed, ProvisionError: setupSecret,
+	}}
+	spawnErr := error(apierr.Conflict("WORKSPACE_PROVISION_FAILED", setupSecret, nil))
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	router := NewRouterWithControl(config.Config{}, log, nil, APIDeps{
+		Sessions: coordinationSessionService{
+			session: session, spawnErr: func() error { return spawnErr },
+		},
+	}, ControlDeps{})
+	devices, err := mobilebridge.LoadAccessDevices(mobilebridge.AccessDevicesPath(t.TempDir()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, token, err := devices.IssueScoped("Agent coordination", "cli", []string{mobilebridge.DeviceScopeAgentCoordination}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lan := NewMobileLAN(router, "h_test", 0, log, nil)
+	lan.UseDeviceCredentials(devices, nil)
+	lan.SetPasswordHash(mobilebridge.HashPassword("secret12"))
+	port, err := lan.StartLoopback(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lan.Stop(context.Background()) })
+	host := &pairingHost{t: t, lan: lan, router: router, port: port}
+
+	status, spawn := host.remote(http.MethodPost, "/api/v1/sessions", token, map[string]any{
+		"projectId": "p1", "kind": "worker", "harness": "codex", "mode": "tui", "prompt": "fix",
+	})
+	spawnJSON, _ := json.Marshal(spawn)
+	if status != http.StatusConflict || spawn["code"] != "WORKSPACE_PROVISION_FAILED" || strings.Contains(string(spawnJSON), setupSecret) {
+		t.Fatalf("scoped spawn failure leaked setup output: status=%d body=%s", status, spawnJSON)
+	}
+	for _, path := range []string{"/api/v1/sessions", "/api/v1/sessions/s1"} {
+		status, scoped := host.remote(http.MethodGet, path, token, nil)
+		raw, _ := json.Marshal(scoped)
+		if status != http.StatusOK || strings.Contains(string(raw), setupSecret) {
+			t.Fatalf("scoped %s leaked setup output: status=%d body=%s", path, status, raw)
+		}
+	}
+
+	status, fullSpawn := host.remote(http.MethodPost, "/api/v1/sessions", "secret12", map[string]any{
+		"projectId": "p1", "kind": "worker", "harness": "codex", "mode": "tui", "prompt": "fix",
+	})
+	fullSpawnJSON, _ := json.Marshal(fullSpawn)
+	if status != http.StatusConflict || !strings.Contains(string(fullSpawnJSON), setupSecret) {
+		t.Fatalf("full spawn failure was redacted: status=%d body=%s", status, fullSpawnJSON)
+	}
+
+	const checkoutPath = "/private/project/worktrees/other-session"
+	spawnErr = apierr.Conflict("BRANCH_CHECKED_OUT_ELSEWHERE", "branch main is already checked out at "+checkoutPath, nil)
+	status, spawn = host.remote(http.MethodPost, "/api/v1/sessions", token, map[string]any{
+		"projectId": "p1", "kind": "worker", "harness": "codex", "mode": "tui", "prompt": "fix", "branch": "main",
+	})
+	spawnJSON, _ = json.Marshal(spawn)
+	if status != http.StatusConflict || spawn["code"] != "BRANCH_CHECKED_OUT_ELSEWHERE" || strings.Contains(string(spawnJSON), checkoutPath) {
+		t.Fatalf("scoped branch failure leaked checkout path: status=%d body=%s", status, spawnJSON)
+	}
+	status, fullSpawn = host.remote(http.MethodPost, "/api/v1/sessions", "secret12", map[string]any{
+		"projectId": "p1", "kind": "worker", "harness": "codex", "mode": "tui", "prompt": "fix", "branch": "main",
+	})
+	fullSpawnJSON, _ = json.Marshal(fullSpawn)
+	if status != http.StatusConflict || !strings.Contains(string(fullSpawnJSON), checkoutPath) {
+		t.Fatalf("full branch failure was redacted: status=%d body=%s", status, fullSpawnJSON)
+	}
+
+	status, fullSession := host.remote(http.MethodGet, "/api/v1/sessions/s1", "secret12", nil)
+	fullSessionJSON, _ := json.Marshal(fullSession)
+	if status != http.StatusOK || !strings.Contains(string(fullSessionJSON), setupSecret) {
+		t.Fatalf("full session response was redacted: status=%d body=%s", status, fullSessionJSON)
+	}
+}
+
+func TestOnlyFullCredentialsIssueCoordinationTokens(t *testing.T) {
+	h := newPairingHost(t)
+	fullID, full := h.pair("secret12", "Laptop")
+	status, body := h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", full, nil)
+	coordination, _ := body["token"].(string)
+	if status != http.StatusOK || coordination == "" {
+		t.Fatalf("full device token: status=%d body=%v", status, body)
+	}
+	if device, ok := h.bridge.Devices.Match(coordination); !ok || device.Issuer != mobilebridge.DeviceIssuer(fullID) {
+		t.Fatalf("full-device coordination issuer = %+v, %v", device, ok)
+	}
+	if status, body = h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", coordination, nil); status != http.StatusForbidden || body["code"] != "CREDENTIAL_SCOPE_DENIED" {
+		t.Fatalf("coordination token minted another token: status=%d body=%v", status, body)
+	}
+	_, accountBody := h.remote(http.MethodPost, "/api/v1/remote-host/account-token", full, nil)
+	account, _ := accountBody["token"].(string)
+	if status, body = h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", account, nil); status != http.StatusOK || body["token"] == "" {
+		t.Fatalf("account credential: status=%d body=%v", status, body)
+	}
+	accountCoordination, _ := body["token"].(string)
+	if device, ok := h.bridge.Devices.Match(accountCoordination); !ok || device.Issuer != mobilebridge.SharedAccount {
+		t.Fatalf("account coordination issuer = %+v, %v", device, ok)
+	}
+	if status, body = h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", h.code(), nil); status != http.StatusUnauthorized {
+		t.Fatalf("pairing code minted a coordination token: status=%d body=%v", status, body)
+	}
+	if status, _ := h.local(http.MethodPost, "/api/v1/remote-host/coordination-token", nil); status != http.StatusForbidden {
+		t.Fatalf("loopback issued a remote coordination token: %d", status)
+	}
+}
+
+func TestOnlyFullCredentialsRevokeCoordinationTokens(t *testing.T) {
+	h := newPairingHost(t)
+	fullID, full := h.pair("secret12", "Laptop")
+	status, body := h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", full, nil)
+	coordinationID, _ := body["deviceId"].(string)
+	coordination, _ := body["token"].(string)
+	if status != http.StatusOK || coordinationID == "" || coordination == "" {
+		t.Fatalf("issue coordination token: status=%d body=%v", status, body)
+	}
+
+	path := "/api/v1/remote-host/coordination-token/" + coordinationID
+	if status, body = h.remote(http.MethodDelete, path, coordination, nil); status != http.StatusForbidden || body["code"] != "CREDENTIAL_SCOPE_DENIED" {
+		t.Fatalf("coordination token revoked itself: status=%d body=%v", status, body)
+	}
+	if h.sessions(coordination) != http.StatusOK {
+		t.Fatal("denied revoke invalidated the coordination token")
+	}
+
+	if status, body = h.remote(http.MethodDelete, "/api/v1/remote-host/coordination-token/"+fullID, full, nil); status != http.StatusNotFound || body["code"] != "COORDINATION_TOKEN_NOT_FOUND" {
+		t.Fatalf("full device was accepted as a coordination token: status=%d body=%v", status, body)
+	}
+	if h.sessions(full) != http.StatusOK {
+		t.Fatal("coordination revoke invalidated a full device credential")
+	}
+
+	if status, body = h.remote(http.MethodDelete, path, full, nil); status != http.StatusNoContent {
+		t.Fatalf("revoke coordination token: status=%d body=%v", status, body)
+	}
+	if h.sessions(coordination) != http.StatusUnauthorized {
+		t.Fatal("revoked coordination token still authenticates")
+	}
+	if status, body = h.remote(http.MethodDelete, path, full, nil); status != http.StatusNotFound || body["code"] != "COORDINATION_TOKEN_NOT_FOUND" {
+		t.Fatalf("second revoke: status=%d body=%v", status, body)
 	}
 }
 
@@ -356,7 +696,15 @@ func TestRemovingADeviceRevokesItAlone(t *testing.T) {
 
 func TestAPhoneThatForgetsTheHostLosesItsToken(t *testing.T) {
 	h := newPairingHost(t)
-	_, phone := h.pair(h.code(), "Phone")
+	phoneID, phone := h.pair(h.code(), "Phone")
+	status, issued := h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", phone, nil)
+	child, _ := issued["token"].(string)
+	if status != http.StatusOK || child == "" {
+		t.Fatalf("issue child: status=%d body=%v", status, issued)
+	}
+	if device, ok := h.bridge.Devices.Match(child); !ok || device.Issuer != mobilebridge.DeviceIssuer(phoneID) {
+		t.Fatalf("child issuer = %+v, %v", device, ok)
+	}
 	if status, _ := h.remote(http.MethodPost, "/api/v1/push/devices", phone, map[string]string{"installId": "install-phone"}); status != http.StatusOK {
 		t.Fatalf("register: %d", status)
 	}
@@ -365,6 +713,9 @@ func TestAPhoneThatForgetsTheHostLosesItsToken(t *testing.T) {
 	}
 	if got := h.sessions(phone); got != http.StatusUnauthorized {
 		t.Fatalf("token after the phone forgot the host: %d", got)
+	}
+	if got := h.sessions(child); got != http.StatusUnauthorized {
+		t.Fatalf("derived token after the phone forgot the host: %d", got)
 	}
 	if got := len(h.rows()); got != 0 {
 		t.Fatalf("rows left = %d", got)
