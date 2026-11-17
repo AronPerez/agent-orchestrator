@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { components } from "../../api/schema";
 import {
+	isProjectOverlapsResponse,
 	projectOverlapForSession,
 	projectOverlapScanState,
 	projectOverlapSessionFingerprint,
@@ -89,5 +90,22 @@ describe("projectOverlapScanState", () => {
 	];
 	it.each(cases)("classifies a %s", (_name, query, expected) => {
 		expect(projectOverlapScanState(query)).toBe(expected);
+	});
+});
+
+describe("isProjectOverlapsResponse", () => {
+	it("accepts the generated overlap response shape", () => {
+		expect(isProjectOverlapsResponse({
+			projectId: "project-1",
+			overlaps: [],
+			truncatedSessionIds: [],
+			unresolvedBaseSessionIds: [],
+			unavailableSessionIds: [],
+		})).toBe(true);
+	});
+
+	it("rejects a successful response that omits collision arrays", () => {
+		expect(isProjectOverlapsResponse({ projectId: "project-1" })).toBe(false);
+		expect(isProjectOverlapsResponse({})).toBe(false);
 	});
 });

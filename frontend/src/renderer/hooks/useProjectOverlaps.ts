@@ -25,6 +25,16 @@ export type ProjectOverlapLiveSession = {
 	workspacePublished?: boolean;
 };
 
+export function isProjectOverlapsResponse(value: unknown): value is ProjectOverlapsResponse {
+	if (!value || typeof value !== "object") return false;
+	const response = value as Partial<ProjectOverlapsResponse>;
+	return typeof response.projectId === "string"
+		&& Array.isArray(response.overlaps)
+		&& Array.isArray(response.truncatedSessionIds)
+		&& Array.isArray(response.unresolvedBaseSessionIds)
+		&& Array.isArray(response.unavailableSessionIds);
+}
+
 export function projectOverlapSessionFingerprint(sessions: readonly ProjectOverlapLiveSession[]): string {
 	const publishedByID = new Map(sessions.map((session) => [session.id, session.workspacePublished !== false]));
 	return JSON.stringify([...publishedByID].sort(([left], [right]) => left.localeCompare(right)));
@@ -92,6 +102,9 @@ export function useProjectOverlaps(
 				params: { path: { id: projectId! } },
 			});
 			if (error) throw apiErrorException(error);
+			if (!isProjectOverlapsResponse(data)) {
+				throw new Error("Invalid project overlap response");
+			}
 			return data;
 		},
 	});
