@@ -1883,6 +1883,34 @@ func TestSendRoutesIntoTheChatConversation(t *testing.T) {
 
 }
 
+func TestSendChatDistinguishesAStaleExitFromAStoppedController(t *testing.T) {
+	launcher := &recordingLauncher{live: true}
+	mgr, store, _ := newChatManager(launcher)
+	ctx := context.Background()
+
+	rec, _, _, err := mgr.Spawn(ctx, ports.SpawnConfig{
+		ProjectID: chatTestProject, Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		RequestedMode: domain.SessionModeChat,
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	rec.Activity.State = domain.ActivityExited
+	if err := store.UpdateSession(ctx, rec); err != nil {
+		t.Fatalf("UpdateSession: %v", err)
+	}
+	if err := mgr.Send(ctx, rec.ID, "accepted by the live controller", nil); err != nil {
+		t.Fatalf("Send with stale exit: %v", err)
+	}
+	launcher.live = false
+	if err := mgr.Send(ctx, rec.ID, "must not reach a stopped controller", nil); !errors.Is(err, ErrAgentExited) {
+		t.Fatalf("Send with stopped controller = %v, want ErrAgentExited", err)
+	}
+	if len(launcher.relayed) != 1 || launcher.relayed[0] != "accepted by the live controller" {
+		t.Fatalf("relayed = %v", launcher.relayed)
+	}
+}
+
 // A terminated chat session cannot receive a message, matching the terminal path.
 // The controller is gone; accepting the send would record a message nothing will
 // ever deliver.

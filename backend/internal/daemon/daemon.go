@@ -93,6 +93,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/terminaltitle"
 	usagesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/usage"
 	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
+	"github.com/aoagents/agent-orchestrator/backend/internal/sessioncontract"
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillassets"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 	"github.com/aoagents/agent-orchestrator/backend/internal/terminal"
@@ -853,6 +854,18 @@ func Run(buildVersion string) (retErr error) {
 	})
 	chatSvc.SetReportCoordinator(reportCoordinator)
 	reportDeliveryDone := reportCoordinator.Start(ctx)
+	contractStart := make(chan struct{})
+	contractCoordinator := sessioncontract.New(
+		store,
+		contractNudger{store: store, chat: chatSvc, tui: lcStack.LCM},
+		sessioncontract.StallReporterFunc(func(reportCtx context.Context, id domain.SessionID, key, message string) error {
+			_, err := reportSvc.CreateImmediateOnce(reportCtx, reportsvc.CreateInput{SessionID: id, Message: message}, key)
+			return err
+		}),
+		notificationWriter,
+		sessioncontract.Config{Logger: log, StartAfter: contractStart},
+	)
+	lcStack.contractDone = contractCoordinator.Start(ctx)
 	defer func() {
 		stop()
 		<-reportDeliveryDone
@@ -1182,14 +1195,18 @@ func Run(buildVersion string) (retErr error) {
 	if identityErr != nil {
 		log.Warn("could not establish host identity; /api/v1/identity will report unimplemented", "error", identityErr)
 	}
-	decisionDeliverer := decisionsvc.NewDeliverer(decisionsvc.DelivererDeps{
-		Store: store, Messenger: decisionMessenger{sessions: decisionSessions}, HostID: hostIdentity.HostID, Log: log,
-	})
+	var decisionDeliverer *decisionsvc.Deliverer
 	decisionSvc := decisionsvc.New(decisionsvc.Deps{
 		Store: store, HostID: hostIdentity.HostID,
 		OnAppended: func(domain.DecisionEntry) {
-			decisionDeliverer.Wake()
+			if decisionDeliverer != nil {
+				decisionDeliverer.Wake()
+			}
 		},
+	})
+	decisionDeliverer = decisionsvc.NewDeliverer(decisionsvc.DelivererDeps{
+		Store: store, Messenger: decisionMessenger{sessions: decisionSessions}, HostID: hostIdentity.HostID, Log: log,
+		FallbackAuthorizer: decisionSvc,
 	})
 	decisionDeliveryDone := decisionDeliverer.Start(ctx)
 	defer func() {
@@ -1479,6 +1496,10 @@ func Run(buildVersion string) (retErr error) {
 		go func() {
 			defer sentryobs.RecoverBackground()
 			defer close(done)
+			// Contract supervision acts on persisted idle time, so its immediate
+			// first sweep must wait until session and runtime reconciliation have
+			// refreshed facts left by the previous daemon.
+			defer close(contractStart)
 			defer lcStack.StartReaperLoop()
 			if reconcileErr := reconcilePersistentChatHosts(ctx, cfg.DataDir, store, cfg.AppRunID); reconcileErr != nil {
 				log.Error("persistent chat host reconciliation on boot failed", "err", reconcileErr)

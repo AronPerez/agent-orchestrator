@@ -85,6 +85,86 @@ func TestReportStoreRejectsInvalidRecord(t *testing.T) {
 	}
 }
 
+func TestReportStoreCreatesReportWithFirstContractOutcome(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "ao")
+	deadline := time.Date(2026, 11, 17, 14, 0, 0, 0, time.UTC)
+	rec := sampleRecord("ao")
+	rec.Goal = "ship the smallest version"
+	rec.TimeboxDeadlineAt = &deadline
+	session, err := s.CreateSession(ctx, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := deadline.Add(-time.Hour)
+	report := domain.ReportRecord{
+		ID: "rpt_contract_done", SessionID: session.ID, ProjectID: session.ProjectID,
+		State: domain.ReportDone, Note: "done", CreatedAt: now,
+		DeliveryState: domain.ReportPending, AvailableAt: now.Add(domain.ReportSettlementWindow),
+		SettlementDeadline: now.Add(domain.ReportSettlementWindow), RepeatCount: 1,
+	}
+	if _, err = s.CreateReportWithContractOutcome(ctx, report, domain.SessionContractOutcomeMet); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := s.GetSession(ctx, session.ID)
+	if err != nil || !ok || got.ContractOutcome != domain.SessionContractOutcomeMet {
+		t.Fatalf("session = %+v, ok=%v err=%v", got, ok, err)
+	}
+	if expired, err := s.ExpireSessionContract(ctx, session.ID, deadline, deadline); err != nil || expired {
+		t.Fatalf("deadline overwrote final report: expired=%v err=%v", expired, err)
+	}
+	storedReport, ok, err := s.GetReport(ctx, report.ID)
+	if err != nil || !ok || storedReport.State != domain.ReportDone {
+		t.Fatalf("report = %+v, ok=%v err=%v", storedReport, ok, err)
+	}
+
+	blocked := report
+	blocked.ID = "rpt_contract_blocked"
+	blocked.State = domain.ReportStuck
+	blocked.Note = "later"
+	blocked.SettlementDeadline = time.Time{}
+	blocked.AvailableAt = now
+	if _, err = s.CreateReportWithContractOutcome(ctx, blocked, domain.SessionContractOutcomeBlocked); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err = s.GetSession(ctx, session.ID)
+	if err != nil || got.ContractOutcome != domain.SessionContractOutcomeMet {
+		t.Fatalf("later report overwrote outcome: %+v err=%v", got, err)
+	}
+}
+
+func TestReportStoreCreateOnceReturnsExistingReport(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "ao")
+	sess, err := s.CreateSession(ctx, sampleRecord("ao"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	rec := domain.ReportRecord{
+		ID: "rpt_contract_once", SessionID: sess.ID, ProjectID: sess.ProjectID,
+		State: domain.ReportCheckpoint, Note: "first", CreatedAt: now, DeliveryState: domain.ReportPending,
+		AvailableAt: now, RepeatCount: 1,
+		Outputs: []domain.ReportOutput{{Kind: domain.ReportOutputArtifact, Reference: "result.md"}},
+	}
+	first, inserted, err := s.CreateReportWithContractOutcomeOnce(ctx, rec, domain.SessionContractOutcomeNone)
+	if err != nil || !inserted || first.Note != "first" || len(first.Outputs) != 1 {
+		t.Fatalf("first=%+v inserted=%v err=%v", first, inserted, err)
+	}
+	replay := rec
+	replay.Note = "retry must not replace durable content"
+	second, inserted, err := s.CreateReportWithContractOutcomeOnce(ctx, replay, domain.SessionContractOutcomeNone)
+	if err != nil || inserted || second.Note != "first" || len(second.Outputs) != 1 || second.Outputs[0].Reference != "result.md" {
+		t.Fatalf("second=%+v inserted=%v err=%v", second, inserted, err)
+	}
+	rows, err := s.ListReportsBySession(ctx, sess.ID)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows=%+v err=%v", rows, err)
+	}
+}
+
 func TestReportStoreClaimAcknowledgeAndTokenFence(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

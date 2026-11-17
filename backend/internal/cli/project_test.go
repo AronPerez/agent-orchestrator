@@ -263,7 +263,8 @@ func TestProjectConfigFlagsListsEveryFieldFlag(t *testing.T) {
 // set-config flag manages (effort, preRemove, workersRequestReview).
 const storedProjectConfig = `{"sessionPrefix":"old","env":{"KEEP":"1"},"preRemove":["make clean"],` +
 	`"agentConfig":{"model":"m1","effort":"high"},"worker":{"agent":"codex","agentConfig":{"effort":"medium"}},` +
-	`"reviewers":[{"harness":"claude-code","agentConfig":{"effort":"max"}}],"workersRequestReview":true}`
+	`"reviewers":[{"harness":"claude-code","agentConfig":{"effort":"max"}}],"workersRequestReview":true,` +
+	`"workerContracts":{"stallMinutes":17}}`
 
 type projectConfigCapture struct {
 	requests []string

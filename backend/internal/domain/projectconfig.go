@@ -92,6 +92,10 @@ type ProjectConfig struct {
 	// after spawn.
 	AutoReview bool `json:"autoReview,omitempty"`
 
+	// WorkerContracts tunes supervision for workers spawned with a goal and
+	// timebox. The zero value uses the generous default stall window.
+	WorkerContracts WorkerContractConfig `json:"workerContracts,omitempty"`
+
 	// WorkersRequestReview changes what worker sessions are told about AO's
 	// native reviewer. When set, a worker requests an AO review of its own PR
 	// (`ao review trigger`) once the PR is pushed and verified, and again after
@@ -99,6 +103,36 @@ type ProjectConfig struct {
 	// the feature but check with the user or orchestrator before using it.
 	// Read at spawn, when the worker prompt is built.
 	WorkersRequestReview bool `json:"workersRequestReview,omitempty"`
+}
+
+const (
+	// DefaultWorkerContractStallMinutes is the idle window before AO nudges a
+	// contracted worker, and again before that unchanged stall is escalated.
+	DefaultWorkerContractStallMinutes = 15
+	maxWorkerContractStallMinutes     = 24 * 60
+)
+
+// WorkerContractConfig is the per-project supervision policy for contracted
+// workers. Zero values preserve project-config backwards compatibility.
+type WorkerContractConfig struct {
+	StallMinutes int `json:"stallMinutes,omitempty"`
+}
+
+// WithDefaults returns the effective contract supervision policy.
+func (c WorkerContractConfig) WithDefaults() WorkerContractConfig {
+	if c.StallMinutes == 0 {
+		c.StallMinutes = DefaultWorkerContractStallMinutes
+	}
+	return c
+}
+
+// Validate rejects intervals too small to be meaningful or so large that a
+// typo would silently disable supervision. Zero means use the default.
+func (c WorkerContractConfig) Validate() error {
+	if c.StallMinutes < 0 || c.StallMinutes > maxWorkerContractStallMinutes {
+		return fmt.Errorf("workerContracts.stallMinutes must be between 1 and %d, or 0 for the default", maxWorkerContractStallMinutes)
+	}
+	return nil
 }
 
 // ContainerReapConfig is the project-level opt-out for #2652's Docker
@@ -208,6 +242,7 @@ func (c ProjectConfig) WithDefaults() ProjectConfig {
 		c.DefaultBranch = def.DefaultBranch
 	}
 	c.TrackerIntake = c.TrackerIntake.WithDefaults()
+	c.WorkerContracts = c.WorkerContracts.WithDefaults()
 	return c
 }
 
@@ -295,6 +330,9 @@ func (c ProjectConfig) Validate() error {
 		}
 	}
 	if err := c.TrackerIntake.Validate(); err != nil {
+		return err
+	}
+	if err := c.WorkerContracts.Validate(); err != nil {
 		return err
 	}
 	if n := len(c.OrchestratorPrompt); n > maxOrchestratorPromptBytes {
