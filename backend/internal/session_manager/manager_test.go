@@ -46,6 +46,51 @@ func TestSeedRecordPreservesAutomationRunIdentity(t *testing.T) {
 	}
 }
 
+func TestSeedRecordPreservesWorkerContract(t *testing.T) {
+	now := time.Date(2026, time.November, 17, 16, 30, 0, 0, time.UTC)
+	rec := seedRecord(ports.SpawnConfig{
+		ProjectID: "contracts",
+		Kind:      domain.KindWorker,
+		Goal:      "Ship the verified contract foundation",
+		Timebox:   2 * time.Hour,
+	}, domain.ProjectConfig{}, now)
+	if rec.Goal != "Ship the verified contract foundation" {
+		t.Fatalf("goal = %q", rec.Goal)
+	}
+	wantDeadline := now.Add(2 * time.Hour)
+	if rec.TimeboxDeadlineAt == nil || !rec.TimeboxDeadlineAt.Equal(wantDeadline) {
+		t.Fatalf("deadline = %v, want %v", rec.TimeboxDeadlineAt, wantDeadline)
+	}
+	if rec.ContractOutcome != domain.SessionContractOutcomeNone {
+		t.Fatalf("contract outcome = %q, want empty", rec.ContractOutcome)
+	}
+}
+
+func TestValidateSpawnContractRejectsIncompleteOrNonWorkerContracts(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  ports.SpawnConfig
+	}{
+		{name: "goal only", cfg: ports.SpawnConfig{Kind: domain.KindWorker, Goal: "Ship it"}},
+		{name: "timebox only", cfg: ports.SpawnConfig{Kind: domain.KindWorker, Timebox: time.Hour}},
+		{name: "negative timebox", cfg: ports.SpawnConfig{Kind: domain.KindWorker, Goal: "Ship it", Timebox: -time.Hour}},
+		{name: "orchestrator", cfg: ports.SpawnConfig{Kind: domain.KindOrchestrator, Goal: "Ship it", Timebox: time.Hour}},
+		{name: "overlong goal", cfg: ports.SpawnConfig{Kind: domain.KindWorker, Goal: strings.Repeat("x", 1001), Timebox: time.Hour}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := validateSpawnContract(tc.cfg); err == nil {
+				t.Fatal("validateSpawnContract succeeded")
+			}
+		})
+	}
+	if err := validateSpawnContract(ports.SpawnConfig{Kind: domain.KindWorker}); err != nil {
+		t.Fatalf("empty contract: %v", err)
+	}
+	if err := validateSpawnContract(ports.SpawnConfig{Kind: domain.KindWorker, Goal: "Ship it", Timebox: time.Hour}); err != nil {
+		t.Fatalf("complete contract: %v", err)
+	}
+}
+
 type fakeStore struct {
 	cleanupMu                          sync.Mutex
 	cleanupFacts                       map[domain.SessionID]domain.SessionCleanupRecord
@@ -6886,6 +6931,41 @@ func TestSystemPrompt_AppendsArtifactGuidance(t *testing.T) {
 	}
 	if strings.Contains(sp, "ao render --artifact") {
 		t.Fatalf("terminal session prompt names ao render:\n%s", sp)
+	}
+}
+
+func TestSystemPrompt_AppendsDurableWorkerContract(t *testing.T) {
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Path: t.TempDir(), Config: testRoleAgents()}
+	deadline := time.Date(2026, time.November, 17, 18, 30, 0, 0, time.UTC)
+	st.sessions["mer-7"] = domain.SessionRecord{
+		ID: "mer-7", ProjectID: "mer", Kind: domain.KindWorker,
+		Goal: "Ship the verified contract foundation", TimeboxDeadlineAt: &deadline,
+	}
+	m := New(Deps{
+		Runtime: &fakeRuntime{}, Agents: singleAgent{agent: &recordingAgent{}},
+		Workspace: &fakeWorkspace{}, Store: st, Messenger: &fakeMessenger{},
+		Lifecycle: &fakeLCM{store: st}, DataDir: t.TempDir(),
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+
+	sp, err := m.buildSystemPrompt(ctx, domain.KindWorker, "mer", "mer-7", "", false)
+	if err != nil {
+		t.Fatalf("buildSystemPrompt: %v", err)
+	}
+	for _, want := range []string{
+		"## Worker Contract",
+		"Ship the verified contract foundation",
+		"2026-11-17T18:30:00Z",
+		"goal met, blocked, or time limit reached",
+		"ao report --done",
+		"ao report --needs-input",
+		"ao report --stuck",
+		"report your outcome before stopping",
+	} {
+		if !strings.Contains(sp, want) {
+			t.Fatalf("system prompt missing %q:\n%s", want, sp)
+		}
 	}
 }
 

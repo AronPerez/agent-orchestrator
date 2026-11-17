@@ -77,6 +77,11 @@ type SpawnConfig struct {
 	// task flow; artifact adds an artifact-delivery section to the worker prompt.
 	RequestedOutput domain.RequestedOutput
 
+	// Goal and Timebox define an optional worker contract. The manager requires
+	// them together and persists an absolute deadline.
+	Goal    string
+	Timebox time.Duration
+
 	// DisplayName is the user-facing sidebar label. Empty falls back to the
 	// session id in the read model (e.g. orchestrator sessions).
 	DisplayName string

@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -1096,6 +1097,10 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 	defer func() {
 		resultErr = RelabelSpawnTimeout(resultErr, requestCtx, budget)
 	}()
+	if err := validateSpawnContract(cfg); err != nil {
+		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w", err)
+	}
+	cfg.Goal = strings.TrimSpace(cfg.Goal)
 	if cfg.RequestedOutput == domain.RequestedOutputArtifact && m.artifactDir("") == "" {
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w", ErrArtifactOutputUnavailable)
 	}
@@ -6491,6 +6496,11 @@ func normalizeWorkspacePath(p string) string {
 // ---- helpers ----
 
 func seedRecord(cfg ports.SpawnConfig, projectConfig domain.ProjectConfig, now time.Time) domain.SessionRecord {
+	var timeboxDeadlineAt *time.Time
+	if cfg.Timebox > 0 {
+		deadline := now.Add(cfg.Timebox)
+		timeboxDeadlineAt = &deadline
+	}
 	return domain.SessionRecord{
 		ParentSessionID:     cfg.ParentSessionID,
 		ProjectID:           cfg.ProjectID,
@@ -6510,11 +6520,31 @@ func seedRecord(cfg ports.SpawnConfig, projectConfig domain.ProjectConfig, now t
 		Mode:              domain.NormalizeSessionMode(cfg.RequestedMode),
 		Metadata:          domain.SessionMetadata{Permissions: applySpawnAgentConfig(effectiveAgentConfig(cfg.Harness, cfg.Kind, projectConfig), cfg.AgentConfig).Permissions},
 		RequestedOutput:   cfg.RequestedOutput,
+		Goal:              strings.TrimSpace(cfg.Goal),
+		TimeboxDeadlineAt: timeboxDeadlineAt,
 		OutputType:        domain.SessionOutputNone,
 		AutoReviewEnabled: projectConfig.AutoReview,
 		AutoInjectReview:  true,
 		AutoInjectCI:      true,
 	}
+}
+
+func validateSpawnContract(cfg ports.SpawnConfig) error {
+	const maxGoalRunes = 1000
+	goal := strings.TrimSpace(cfg.Goal)
+	if goal == "" && cfg.Timebox == 0 {
+		return nil
+	}
+	if goal == "" || cfg.Timebox <= 0 {
+		return fmt.Errorf("worker contract requires both a goal and a positive timebox")
+	}
+	if cfg.Kind != domain.KindWorker {
+		return fmt.Errorf("worker contract is supported for worker sessions only")
+	}
+	if utf8.RuneCountInString(goal) > maxGoalRunes {
+		return fmt.Errorf("worker contract goal must be %d characters or fewer", maxGoalRunes)
+	}
+	return nil
 }
 
 func defaultSessionBranch(id domain.SessionID, kind domain.SessionKind, prefix, branchNamespace string) string {
@@ -6795,6 +6825,15 @@ func (m *Manager) buildSystemPrompt(ctx context.Context, kind domain.SessionKind
 		}
 	}
 	if kind == domain.KindWorker {
+		rec, ok, err := m.store.GetSession(ctx, sessionID)
+		if err != nil {
+			return "", err
+		}
+		if ok {
+			if contract := workerContractPrompt(rec.Goal, rec.TimeboxDeadlineAt); contract != "" {
+				cfg.AdditionalSections = append(cfg.AdditionalSections, contract)
+			}
+		}
 		if note := m.forkBoundaryPrompt(ctx, sessionID); note != "" {
 			cfg.AdditionalSections = append(cfg.AdditionalSections, note)
 		}

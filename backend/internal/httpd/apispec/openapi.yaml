@@ -19431,6 +19431,12 @@ components:
           $ref: '#/components/schemas/SessionBranchState'
         chatProviderPreserved:
           type: boolean
+        contractOutcome:
+          enum:
+          - met
+          - blocked
+          - limit_hit
+          type: string
         createdAt:
           format: date-time
           type: string
@@ -19464,6 +19470,8 @@ components:
           - Merged
           - Closed without merge
           - Terminated
+          type: string
+        goal:
           type: string
         harness:
           type: string
@@ -19628,6 +19636,11 @@ components:
           type: string
         terminateOnPrMerge:
           type: boolean
+        timeboxDeadlineAt:
+          format: date-time
+          type:
+          - "null"
+          - string
         updatedAt:
           format: date-time
           type: string
@@ -20945,6 +20958,9 @@ components:
           type:
           - "null"
           - string
+        goal:
+          maxLength: 1000
+          type: string
         mode:
           enum:
           - tui
@@ -20957,6 +20973,11 @@ components:
           type: string
         taskPreparation:
           type: string
+        timeboxSeconds:
+          format: int64
+          maximum: 9.223372036e+09
+          minimum: 1
+          type: integer
       required:
       - projectId
       - brief
@@ -26018,6 +26039,9 @@ components:
         effort:
           maxLength: 32
           type: string
+        goal:
+          maxLength: 1000
+          type: string
         harness:
           enum:
           - claude-code
@@ -26088,6 +26112,11 @@ components:
           enum:
           - artifact
           type: string
+        timeboxSeconds:
+          format: int64
+          maximum: 9.223372036e+09
+          minimum: 1
+          type: integer
         trackerProvider:
           enum:
           - github
