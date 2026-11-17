@@ -397,7 +397,7 @@ func authMiddleware(state *authState, lock *lockout, connected *mobileConnectRep
 					"this host no longer accepts the pairing password; pair this device again", nil)
 				return
 			}
-			if strings.HasPrefix(tok, mobilebridge.DeviceTokenPrefix) {
+			if strings.HasPrefix(tok, mobilebridge.DeviceTokenPrefix) || strings.HasPrefix(tok, mobilebridge.CoordinationTokenPrefix) {
 				// A removed device. The distinct code stops it falling back to the password,
 				// and a 256-bit token is not a guess, so it does not count toward the lockout.
 				envelope.WriteAPIError(w, r, http.StatusUnauthorized, "unauthorized", "DEVICE_REVOKED",

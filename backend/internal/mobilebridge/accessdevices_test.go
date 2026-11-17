@@ -1,6 +1,7 @@
 package mobilebridge
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -88,6 +89,9 @@ func TestAccessDevicesIssueScopedPersistsCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, _, err := devices.IssueScoped("Not actually scoped", "cli", []string{"", "  "}, now); !errors.Is(err, ErrInvalidDeviceScopes) {
+		t.Fatalf("blank scoped issuance = %v, want ErrInvalidDeviceScopes", err)
+	}
 
 	issued, token, err := devices.IssueScoped("Agent coordination", "cli", []string{DeviceScopeAgentCoordination}, now)
 	if err != nil {
@@ -95,6 +99,9 @@ func TestAccessDevicesIssueScopedPersistsCapabilities(t *testing.T) {
 	}
 	if len(issued.Scopes) != 1 || issued.Scopes[0] != DeviceScopeAgentCoordination {
 		t.Fatalf("issued scopes = %v", issued.Scopes)
+	}
+	if !strings.HasPrefix(token, CoordinationTokenPrefix) || strings.HasPrefix(token, DeviceTokenPrefix) {
+		t.Fatalf("coordination token %q does not have its rollback-safe prefix", token)
 	}
 
 	reloaded, err := LoadAccessDevices(path)
@@ -107,6 +114,53 @@ func TestAccessDevicesIssueScopedPersistsCapabilities(t *testing.T) {
 	}
 	if len(matched.Scopes) != 1 || matched.Scopes[0] != DeviceScopeAgentCoordination {
 		t.Fatalf("reloaded scopes = %v", matched.Scopes)
+	}
+
+	// Simulate a rollback daemon that loaded the record while ignoring scopes,
+	// then rewrote it without that unknown field. The distinct token prefix must
+	// make the upgraded daemon reject it instead of promoting it to full access.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored accessDevicesFile
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		t.Fatal(err)
+	}
+	stored.Devices[0].Scopes = nil
+	raw, err = json.Marshal(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	withoutScope, err := LoadAccessDevices(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := withoutScope.Match(token); ok {
+		t.Fatal("coordination token without persisted scope became a full credential")
+	}
+
+	// The inverse mismatch also fails closed: a legacy aod_ token may never
+	// inherit a scoped record's route authority.
+	legacyToken := DeviceTokenPrefix + strings.Repeat("a", 64)
+	stored.Devices[0].TokenHash = HashPassword(legacyToken)
+	stored.Devices[0].Scopes = []string{DeviceScopeAgentCoordination}
+	raw, err = json.Marshal(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacyScoped, err := LoadAccessDevices(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := legacyScoped.Match(legacyToken); ok {
+		t.Fatal("legacy device token accepted a scoped registry record")
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -17,8 +18,11 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/config"
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
 	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
+	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
 )
 
 // pairingHost serves remote requests through a real LAN listener and local ones on the router.
@@ -214,7 +218,7 @@ func TestCoordinationTokenIsLimitedToAgentCoordinationRoutes(t *testing.T) {
 		"name": "desk agent", "platform": "darwin",
 	})
 	token, _ := issued["token"].(string)
-	if status != http.StatusOK || issued["hostId"] != "h_test" || issued["scope"] != mobilebridge.DeviceScopeAgentCoordination || !strings.HasPrefix(token, mobilebridge.DeviceTokenPrefix) {
+	if status != http.StatusOK || issued["hostId"] != "h_test" || issued["scope"] != mobilebridge.DeviceScopeAgentCoordination || !strings.HasPrefix(token, mobilebridge.CoordinationTokenPrefix) {
 		t.Fatalf("issue coordination token: status=%d body=%v", status, issued)
 	}
 
@@ -263,16 +267,88 @@ func TestCoordinationTokenIsLimitedToAgentCoordinationRoutes(t *testing.T) {
 	}
 }
 
+type coordinationProjectManager struct {
+	projectsvc.Manager
+	project *projectsvc.Project
+}
+
+func (m coordinationProjectManager) Get(context.Context, domain.ProjectID) (projectsvc.GetResult, error) {
+	return projectsvc.GetResult{Status: "ok", Project: m.project}, nil
+}
+
+func TestCoordinationProjectDetailIsASecretFreeProjection(t *testing.T) {
+	project := &projectsvc.Project{
+		ID: "p1", Name: "Private", Kind: domain.ProjectKindSingleRepo,
+		Path: "/private/repo", Repo: "https://token@github.example/owner/repo.git",
+		Config: &domain.ProjectConfig{
+			Env:                map[string]string{"GITHUB_TOKEN": "env-secret"},
+			PostCreate:         []string{"use-post-create-secret"},
+			AgentRules:         "rules-secret",
+			OrchestratorPrompt: "prompt-secret",
+			Worker:             domain.RoleOverride{Harness: domain.HarnessCodex},
+			Orchestrator:       domain.RoleOverride{Harness: domain.HarnessClaudeCode},
+		},
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	router := NewRouterWithControl(config.Config{}, log, nil, APIDeps{
+		Projects: coordinationProjectManager{project: project},
+	}, ControlDeps{})
+	devices, err := mobilebridge.LoadAccessDevices(mobilebridge.AccessDevicesPath(t.TempDir()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, token, err := devices.IssueScoped("Agent coordination", "cli", []string{mobilebridge.DeviceScopeAgentCoordination}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lan := NewMobileLAN(router, "h_test", 0, log, nil)
+	lan.UseDeviceCredentials(devices, nil)
+	lan.SetPasswordHash(mobilebridge.HashPassword("secret12"))
+	port, err := lan.StartLoopback(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lan.Stop(context.Background()) })
+	host := &pairingHost{t: t, lan: lan, router: router, port: port}
+
+	status, scoped := host.remote(http.MethodGet, "/api/v1/projects/p1", token, nil)
+	if status != http.StatusOK {
+		t.Fatalf("scoped project detail: status=%d body=%v", status, scoped)
+	}
+	scopedJSON, _ := json.Marshal(scoped)
+	for _, secret := range []string{"env-secret", "post-create-secret", "rules-secret", "prompt-secret", "/private/repo", "token@github"} {
+		if strings.Contains(string(scopedJSON), secret) {
+			t.Errorf("scoped project detail exposed %q: %s", secret, scopedJSON)
+		}
+	}
+	gotProject := scoped["project"].(map[string]any)
+	gotConfig := gotProject["config"].(map[string]any)
+	if gotProject["id"] != "p1" || gotProject["kind"] != string(domain.ProjectKindSingleRepo) {
+		t.Fatalf("coordination identity fields = %v", gotProject)
+	}
+	if gotConfig["worker"].(map[string]any)["agent"] != string(domain.HarnessCodex) || gotConfig["orchestrator"].(map[string]any)["agent"] != string(domain.HarnessClaudeCode) {
+		t.Fatalf("coordination agent selectors = %v", gotConfig)
+	}
+
+	// The HTTP projection must not mutate the service object or change the full
+	// response returned to ordinary app credentials.
+	status, full := host.remote(http.MethodGet, "/api/v1/projects/p1", "secret12", nil)
+	fullJSON, _ := json.Marshal(full)
+	if status != http.StatusOK || !strings.Contains(string(fullJSON), "env-secret") || project.Config.Env["GITHUB_TOKEN"] != "env-secret" {
+		t.Fatalf("full project detail was redacted or mutated: status=%d body=%s project=%+v", status, fullJSON, project)
+	}
+}
+
 func TestOnlyFullCredentialsIssueCoordinationTokens(t *testing.T) {
 	h := newPairingHost(t)
 	_, full := h.pair("secret12", "Laptop")
 	status, body := h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", full, nil)
-	limited, _ := body["token"].(string)
-	if status != http.StatusOK || limited == "" {
+	coordination, _ := body["token"].(string)
+	if status != http.StatusOK || coordination == "" {
 		t.Fatalf("full device token: status=%d body=%v", status, body)
 	}
-	if status, body = h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", limited, nil); status != http.StatusForbidden || body["code"] != "CREDENTIAL_SCOPE_DENIED" {
-		t.Fatalf("limited token minted another token: status=%d body=%v", status, body)
+	if status, body = h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", coordination, nil); status != http.StatusForbidden || body["code"] != "CREDENTIAL_SCOPE_DENIED" {
+		t.Fatalf("coordination token minted another token: status=%d body=%v", status, body)
 	}
 	_, accountBody := h.remote(http.MethodPost, "/api/v1/remote-host/account-token", full, nil)
 	account, _ := accountBody["token"].(string)

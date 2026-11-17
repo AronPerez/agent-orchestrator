@@ -56,9 +56,11 @@ func NewLANManager(handler http.Handler, state *authState, defaultPort int, log 
 	return m
 }
 
-// credentialScopeMiddleware narrows capability device tokens after bearer
-// authentication and before the shared app router. Existing password, account
-// and unscoped device credentials retain the full LAN app API.
+// credentialScopeMiddleware filters capability-token requests after bearer
+// authentication and before the shared app router. It limits direct API use;
+// it is not an authority sandbox for agents spawned or prompted through those
+// routes. Existing password, account and unscoped device credentials retain
+// the full LAN app API.
 func credentialScopeMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		credential := requestscope.CredentialFrom(r.Context())

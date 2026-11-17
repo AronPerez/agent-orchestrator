@@ -82,8 +82,9 @@ func (c *MobileController) IssueAccountToken(w http.ResponseWriter, r *http.Requ
 }
 
 // IssueCoordinationToken handles POST /api/v1/remote-host/coordination-token.
-// Only an existing full LAN credential may mint the deliberately narrower
-// token that headless agents keep in the owner-only saved-host file.
+// Only an existing full LAN credential may mint the route-filtered token that
+// headless agents keep in the owner-only saved-host file. Because it can prompt
+// agents with OS authority, clients must protect it as full host authority.
 func (c *MobileController) IssueCoordinationToken(w http.ResponseWriter, r *http.Request) {
 	credential := requestscope.CredentialFrom(r.Context())
 	fullCredential := credential.Kind == requestscope.CredentialPassword ||
@@ -1222,7 +1223,7 @@ func (b *BridgeService) PairDevice(code, name, platform string) (PairDeviceRespo
 	return PairDeviceResponse{HostID: b.HostID, DeviceID: device.ID, Token: token, Credential: credential}, nil
 }
 
-// IssueCoordinationToken gives a headless client a route-limited device token.
+// IssueCoordinationToken gives a headless client a route-filtered device token.
 func (b *BridgeService) IssueCoordinationToken(name, platform string) (CoordinationTokenResponse, error) {
 	if b.Devices == nil {
 		return CoordinationTokenResponse{}, errors.New("device pairing is unavailable")

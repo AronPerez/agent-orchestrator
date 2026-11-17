@@ -37,11 +37,17 @@ const (
 	SharedAccount  = "account"
 )
 
-// DeviceTokenPrefix keeps a device token from looking like an account token.
-const DeviceTokenPrefix = "aod_"
+const (
+	// DeviceTokenPrefix keeps a full app device token from looking like an account token.
+	DeviceTokenPrefix = "aod_"
+	// CoordinationTokenPrefix makes route-filtered coordination credentials
+	// fail closed on older daemons, which recognize only DeviceTokenPrefix.
+	CoordinationTokenPrefix = "aoc_"
+)
 
-// DeviceScopeAgentCoordination permits only the reads and writes needed for a
-// headless agent to list, spawn and message sessions on this host.
+// DeviceScopeAgentCoordination filters direct HTTP calls to the reads and
+// writes needed to list, spawn and message sessions on this host. Because those
+// agents run with the user's OS authority, this is not an authority sandbox.
 const DeviceScopeAgentCoordination = "agent-coordination"
 
 // maxAccessDevices bounds the device and capability tokens a full credential can mint.
@@ -52,6 +58,10 @@ const touchInterval = 5 * time.Minute
 
 // ErrTooManyDevices is returned by Issue when the registry is full.
 var ErrTooManyDevices = errors.New("too many paired devices; revoke one first")
+
+// ErrInvalidDeviceScopes keeps a caller of IssueScoped from accidentally
+// minting a full credential after blank scopes normalize away.
+var ErrInvalidDeviceScopes = errors.New("scoped device token requires at least one scope")
 
 type accessDevicesFile struct {
 	Devices        []AccessDevice       `json:"devices"`
@@ -114,12 +124,20 @@ func (r *AccessDevices) moveAside(cause error) error {
 
 // Issue registers a new device and returns it with its token.
 func (r *AccessDevices) Issue(name, platform string, now time.Time) (AccessDevice, string, error) {
-	return r.IssueScoped(name, platform, nil, now)
+	return r.issue(name, platform, nil, now)
 }
 
 // IssueScoped registers a new device token carrying the given capability
-// scopes. An empty scope list preserves the existing full app credential.
+// scopes. Full app credentials are issued only through Issue.
 func (r *AccessDevices) IssueScoped(name, platform string, scopes []string, now time.Time) (AccessDevice, string, error) {
+	normalizedScopes := normalizeDeviceScopes(scopes)
+	if len(normalizedScopes) == 0 {
+		return AccessDevice{}, "", ErrInvalidDeviceScopes
+	}
+	return r.issue(name, platform, normalizedScopes, now)
+}
+
+func (r *AccessDevices) issue(name, platform string, normalizedScopes []string, now time.Time) (AccessDevice, string, error) {
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
 		return AccessDevice{}, "", err
@@ -128,13 +146,17 @@ func (r *AccessDevices) IssueScoped(name, platform string, scopes []string, now 
 	if _, err := rand.Read(id); err != nil {
 		return AccessDevice{}, "", err
 	}
-	token := DeviceTokenPrefix + hex.EncodeToString(secret)
+	prefix := DeviceTokenPrefix
+	if len(normalizedScopes) > 0 {
+		prefix = CoordinationTokenPrefix
+	}
+	token := prefix + hex.EncodeToString(secret)
 	device := AccessDevice{
 		ID:         "dev_" + hex.EncodeToString(id),
 		Name:       cleanLabel(name, 64),
 		Platform:   cleanLabel(strings.ToLower(platform), 32),
 		TokenHash:  HashPassword(token),
-		Scopes:     normalizeDeviceScopes(scopes),
+		Scopes:     normalizedScopes,
 		CreatedAt:  now.UTC(),
 		LastSeenAt: now.UTC(),
 	}
@@ -155,14 +177,19 @@ func (r *AccessDevices) IssueScoped(name, platform string, scopes []string, now 
 
 // Match returns the device a token belongs to.
 func (r *AccessDevices) Match(token string) (AccessDevice, bool) {
-	if !strings.HasPrefix(token, DeviceTokenPrefix) {
+	coordination := strings.HasPrefix(token, CoordinationTokenPrefix)
+	deviceToken := strings.HasPrefix(token, DeviceTokenPrefix)
+	if !coordination && !deviceToken {
 		return AccessDevice{}, false
 	}
 	hash := HashPassword(token)
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	device, ok := r.devices[r.byHash[hash]]
-	return cloneAccessDevice(device), ok
+	if !ok || (coordination && len(device.Scopes) == 0) || (deviceToken && len(device.Scopes) != 0) {
+		return AccessDevice{}, false
+	}
+	return cloneAccessDevice(device), true
 }
 
 // Touch updates the device's last-seen time.
