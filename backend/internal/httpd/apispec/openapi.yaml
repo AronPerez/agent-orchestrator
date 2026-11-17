@@ -25009,6 +25009,8 @@ components:
       properties:
         attachment:
           $ref: '#/components/schemas/AttachmentInput'
+        automationAuthored:
+          type: boolean
         message:
           maxLength: 4096
           minLength: 1
@@ -27371,6 +27373,8 @@ components:
           items:
             $ref: '#/components/schemas/ConversationImageContentRequest'
           type: array
+        automationAuthored:
+          type: boolean
         clientMessageId:
           type: string
         recoverOnly:

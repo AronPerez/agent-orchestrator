@@ -375,6 +375,9 @@ func (c *commandContext) awaitSpawnStart(ctx context.Context, sess spawnedSessio
 		if reason == "" {
 			reason = "unknown error"
 		}
+		if destination := c.resolvedBySuffix(); destination != "" {
+			return sess, fmt.Errorf("session %s%s failed to start: %s (open that machine in the Orchestrator app to retry or archive it)", sess.ID, destination, reason)
+		}
 		return sess, fmt.Errorf("session %s failed to start: %s (retry it from the AO app, or archive it with `ao session kill %s`)", sess.ID, reason, sess.ID)
 	}
 	return sess, nil
