@@ -14,6 +14,85 @@ import (
 
 // CreateReport atomically persists one validated pending report and all outputs.
 func (s *Store) CreateReport(ctx context.Context, rec domain.ReportRecord) (domain.ReportRecord, error) {
+	return s.createReport(ctx, rec, domain.SessionContractOutcomeNone)
+}
+
+// CreateReportWithContractOutcome atomically persists one validated pending
+// report and, when supplied, the session contract's first terminal outcome.
+func (s *Store) CreateReportWithContractOutcome(ctx context.Context, rec domain.ReportRecord, outcome domain.SessionContractOutcome) (domain.ReportRecord, error) {
+	if !outcome.Valid() {
+		return domain.ReportRecord{}, domain.ErrInvalidReport
+	}
+	return s.createReport(ctx, rec, outcome)
+}
+
+// CreateReportWithContractOutcomeOnce persists rec at most once by its stable
+// ID. A replay returns the existing row without repeating outputs or contract
+// settlement, which lets callers finish a larger durable transition after a
+// restart without duplicating user-visible reports.
+func (s *Store) CreateReportWithContractOutcomeOnce(ctx context.Context, rec domain.ReportRecord, outcome domain.SessionContractOutcome) (domain.ReportRecord, bool, error) {
+	if !outcome.Valid() {
+		return domain.ReportRecord{}, false, domain.ErrInvalidReport
+	}
+	if err := rec.Validate(); err != nil {
+		return domain.ReportRecord{}, false, err
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	var row gen.Report
+	inserted := false
+	err := s.inTx(ctx, "create report once", func(q *gen.Queries) error {
+		var err error
+		row, err = q.CreateReportIfAbsent(ctx, gen.CreateReportIfAbsentParams{
+			ID: rec.ID, SessionID: string(rec.SessionID), ProjectID: string(rec.ProjectID),
+			State: string(rec.State), Note: rec.Note, Message: rec.Message,
+			CreatedAt: rec.CreatedAt, AvailableAt: rec.AvailableAt,
+			SettlementDeadline: nullTime(rec.SettlementDeadline), RepeatCount: rec.RepeatCount,
+		})
+		if errors.Is(err, sql.ErrNoRows) {
+			row, err = q.GetReport(ctx, rec.ID)
+			return err
+		}
+		if err != nil {
+			return err
+		}
+		inserted = true
+		for i, output := range rec.Outputs {
+			if err := q.CreateReportOutput(ctx, gen.CreateReportOutputParams{
+				ReportID: rec.ID, Position: int64(i), Kind: string(output.Kind),
+				Reference: output.Reference, Label: output.Label,
+			}); err != nil {
+				return err
+			}
+		}
+		if outcome != domain.SessionContractOutcomeNone {
+			_, err = q.SetSessionContractOutcomeIfUnset(ctx, gen.SetSessionContractOutcomeIfUnsetParams{
+				ContractOutcome: string(outcome), UpdatedAt: rec.CreatedAt, ID: rec.SessionID,
+			})
+		}
+		return err
+	})
+	if err != nil {
+		return domain.ReportRecord{}, false, fmt.Errorf("create report once %s: %w", rec.ID, err)
+	}
+	created := reportFromGen(row)
+	if inserted {
+		created.Outputs = append([]domain.ReportOutput(nil), rec.Outputs...)
+		return created, true, nil
+	}
+	outputs, err := s.qr.ListReportOutputs(ctx, row.ID)
+	if err != nil {
+		return domain.ReportRecord{}, false, fmt.Errorf("list report %s outputs: %w", row.ID, err)
+	}
+	created.Outputs = make([]domain.ReportOutput, len(outputs))
+	for i, output := range outputs {
+		created.Outputs[i] = domain.ReportOutput{Kind: domain.ReportOutputKind(output.Kind), Reference: output.Reference, Label: output.Label}
+	}
+	return created, false, nil
+}
+
+func (s *Store) createReport(ctx context.Context, rec domain.ReportRecord, outcome domain.SessionContractOutcome) (domain.ReportRecord, error) {
 	if err := rec.Validate(); err != nil {
 		return domain.ReportRecord{}, err
 	}
@@ -35,6 +114,13 @@ func (s *Store) CreateReport(ctx context.Context, rec domain.ReportRecord) (doma
 			if err := q.CreateReportOutput(ctx, gen.CreateReportOutputParams{
 				ReportID: rec.ID, Position: int64(i), Kind: string(output.Kind),
 				Reference: output.Reference, Label: output.Label,
+			}); err != nil {
+				return err
+			}
+		}
+		if outcome != domain.SessionContractOutcomeNone {
+			if _, err := q.SetSessionContractOutcomeIfUnset(ctx, gen.SetSessionContractOutcomeIfUnsetParams{
+				ContractOutcome: string(outcome), UpdatedAt: rec.CreatedAt, ID: rec.SessionID,
 			}); err != nil {
 				return err
 			}

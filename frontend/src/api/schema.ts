@@ -6784,11 +6784,20 @@ export interface components {
             branchNaming?: boolean;
             branchState?: components["schemas"]["SessionBranchState"];
             chatProviderPreserved: boolean;
+            /** @enum {string} */
+            contractOutcome?: "met" | "blocked" | "limit_hit";
+            /** Format: date-time */
+            contractStallEscalatedAt?: null | string;
+            /** Format: date-time */
+            contractStallNudgedAt?: null | string;
+            /** Format: date-time */
+            contractTimeboxPromptedAt?: null | string;
             /** Format: date-time */
             createdAt: string;
             displayName?: string;
             /** @enum {string} */
             displayStatus: "Working" | "Blocked" | "Needs input" | "Exited" | "No signal" | "Interrupted" | "Idle" | "Fixing CI failures" | "Addressing comments" | "Review scheduled" | "Reviewing" | "Retrying review" | "Draft" | "Awaiting review" | "Review failed" | "Review cancelled" | "CI failing" | "Merge conflicts" | "Commented" | "Changes requested" | "Waiting on base PR" | "Mergeable" | "Approved" | "Merged" | "Closed without merge" | "Terminated";
+            goal?: string;
             harness?: string;
             /** Format: date-time */
             hibernatedAt?: null | string;
@@ -6840,6 +6849,8 @@ export interface components {
             terminalHandleId?: string;
             terminalTitle?: string;
             terminateOnPrMerge: boolean;
+            /** Format: date-time */
+            timeboxDeadlineAt?: null | string;
             /** Format: date-time */
             updatedAt: string;
             /** @enum {string} */
@@ -7403,11 +7414,14 @@ export interface components {
             brief: string;
             clientRequestId?: string;
             effort?: null | string;
+            goal?: string;
             /** @enum {string} */
             mode?: "tui" | "chat";
             model?: string;
             projectId: string;
             taskPreparation?: string;
+            /** Format: int64 */
+            timeboxSeconds?: number;
         };
         DelegateTaskResponse: {
             ok: boolean;
@@ -7485,6 +7499,9 @@ export interface components {
             selection: string;
             snapshot?: components["schemas"]["ChatExcerptSnapshot"];
             sourceRole: string;
+        };
+        DomainWorkerContractConfig: {
+            stallMinutes?: number;
         };
         EditConversationMessageRequest: {
             clientMessageId?: string;
@@ -8034,7 +8051,7 @@ export interface components {
             target: components["schemas"]["NotificationTarget"];
             title: string;
             /** @enum {string} */
-            type: "needs_input" | "ready_to_merge" | "pr_merged" | "pr_closed_unmerged" | "review_completed" | "review_changes_requested";
+            type: "needs_input" | "session_stalled" | "ready_to_merge" | "pr_merged" | "pr_closed_unmerged" | "review_completed" | "review_changes_requested";
         };
         NotificationTarget: {
             /** @enum {string} */
@@ -8201,6 +8218,7 @@ export interface components {
             symlinks?: string[];
             trackerIntake?: components["schemas"]["TrackerIntakeConfig"];
             worker?: components["schemas"]["RoleOverride"];
+            workerContracts?: components["schemas"]["DomainWorkerContractConfig"];
             workersRequestReview?: boolean;
         };
         ProjectGetResponse: {
@@ -9403,6 +9421,7 @@ export interface components {
             displayName?: string;
             displayNameExplicit?: boolean;
             effort?: string;
+            goal?: string;
             /** @enum {string} */
             harness?: "claude-code" | "codex" | "aider" | "opencode" | "opencode-v2" | "grok" | "droid" | "amp" | "agy" | "crush" | "cursor" | "qwen" | "gemini" | "copilot" | "goose" | "auggie" | "continue" | "devin" | "cline" | "kimi" | "muse" | "kiro" | "kilocode" | "vibe" | "pi" | "kimchi" | "omp" | "fx" | "prime-agent" | "autohand" | "unreal-agent" | "codewhale" | "mimo-code" | "minimax-code" | "deepseek-harness" | "openhands" | "command-code" | "docker-agent" | "memcode" | "hermes" | "stakpak";
             issueId?: string;
@@ -9416,6 +9435,8 @@ export interface components {
             prompt?: string;
             /** @enum {string} */
             requestedOutput?: "artifact";
+            /** Format: int64 */
+            timeboxSeconds?: number;
             /** @enum {string} */
             trackerProvider?: "github" | "gitlab";
         };

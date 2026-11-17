@@ -282,6 +282,65 @@ func (q *Queries) CreateReport(ctx context.Context, arg CreateReportParams) (Rep
 	return i, err
 }
 
+const createReportIfAbsent = `-- name: CreateReportIfAbsent :one
+INSERT INTO reports (
+    id, session_id, project_id, state, note, message, created_at, available_at,
+    settlement_deadline, repeat_count
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO NOTHING
+RETURNING id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id
+`
+
+type CreateReportIfAbsentParams struct {
+	ID                 string
+	SessionID          string
+	ProjectID          string
+	State              string
+	Note               string
+	Message            string
+	CreatedAt          time.Time
+	AvailableAt        time.Time
+	SettlementDeadline sql.NullTime
+	RepeatCount        int64
+}
+
+func (q *Queries) CreateReportIfAbsent(ctx context.Context, arg CreateReportIfAbsentParams) (Report, error) {
+	row := q.db.QueryRowContext(ctx, createReportIfAbsent,
+		arg.ID,
+		arg.SessionID,
+		arg.ProjectID,
+		arg.State,
+		arg.Note,
+		arg.Message,
+		arg.CreatedAt,
+		arg.AvailableAt,
+		arg.SettlementDeadline,
+		arg.RepeatCount,
+	)
+	var i Report
+	err := row.Scan(
+		&i.ID,
+		&i.SessionID,
+		&i.ProjectID,
+		&i.State,
+		&i.Note,
+		&i.Message,
+		&i.CreatedAt,
+		&i.DeliveryState,
+		&i.AvailableAt,
+		&i.SettlementDeadline,
+		&i.RepeatCount,
+		&i.ClaimToken,
+		&i.ClaimedAt,
+		&i.DeliveryAttempts,
+		&i.AcknowledgedAt,
+		&i.LastError,
+		&i.DeliveryBatchID,
+	)
+	return i, err
+}
+
 const createReportOutput = `-- name: CreateReportOutput :exec
 INSERT INTO report_outputs (report_id, position, kind, reference, label)
 VALUES (?, ?, ?, ?, ?)
