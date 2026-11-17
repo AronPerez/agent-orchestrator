@@ -2,12 +2,16 @@ package domain
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
 	"time"
 	"unicode/utf8"
 )
+
+// ErrDecisionEntryInvalid reports a ledger entry missing required identity.
+var ErrDecisionEntryInvalid = errors.New("invalid decision entry")
 
 const (
 	MaxDecisionTitle       = 120
