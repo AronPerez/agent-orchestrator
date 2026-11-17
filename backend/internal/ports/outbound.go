@@ -76,6 +76,12 @@ type AgentMessenger interface {
 	Send(ctx context.Context, id domain.SessionID, message string) error
 }
 
+// ErrAgentDeliveryUnconfirmed means a message reached the agent surface but
+// the adapter could not confirm acceptance. Callers may treat the write as
+// possibly sent; every other messenger error is a definite failure unless its
+// contract says otherwise.
+var ErrAgentDeliveryUnconfirmed = errors.New("session: message delivery was not acknowledged")
+
 // ---- runtime / agent / workspace plugin ports ----
 
 // Runtime is the full runtime adapter contract: session creation/teardown plus

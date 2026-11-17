@@ -2509,6 +2509,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/remote-host/coordination-token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Issue a route-limited credential for cross-machine agent coordination */
+        post: operations["issueRemoteHostCoordinationToken"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/remote-host/coordination-token/{deviceId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Revoke one route-limited cross-machine agent coordination credential */
+        delete: operations["revokeRemoteHostCoordinationToken"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/remote-host/devices": {
         parameters: {
             query?: never;
@@ -6678,11 +6712,20 @@ export interface components {
             branchNaming?: boolean;
             branchState?: components["schemas"]["SessionBranchState"];
             chatProviderPreserved: boolean;
+            /** @enum {string} */
+            contractOutcome?: "met" | "blocked" | "limit_hit";
+            /** Format: date-time */
+            contractStallEscalatedAt?: null | string;
+            /** Format: date-time */
+            contractStallNudgedAt?: null | string;
+            /** Format: date-time */
+            contractTimeboxPromptedAt?: null | string;
             /** Format: date-time */
             createdAt: string;
             displayName?: string;
             /** @enum {string} */
             displayStatus: "Working" | "Blocked" | "Needs input" | "Exited" | "No signal" | "Interrupted" | "Idle" | "Fixing CI failures" | "Addressing comments" | "Review scheduled" | "Reviewing" | "Retrying review" | "Draft" | "Awaiting review" | "Review failed" | "Review cancelled" | "CI failing" | "Merge conflicts" | "Commented" | "Changes requested" | "Waiting on base PR" | "Mergeable" | "Approved" | "Merged" | "Closed without merge" | "Terminated";
+            goal?: string;
             harness?: string;
             /** Format: date-time */
             hibernatedAt?: null | string;
@@ -6734,6 +6777,8 @@ export interface components {
             terminalHandleId?: string;
             terminalTitle?: string;
             terminateOnPrMerge: boolean;
+            /** Format: date-time */
+            timeboxDeadlineAt?: null | string;
             /** Format: date-time */
             updatedAt: string;
             /** @enum {string} */
@@ -7134,6 +7179,22 @@ export interface components {
             summary: string;
             targetSessionId?: string;
         };
+        CoordinationListProjectsResponse: {
+            projects: components["schemas"]["CoordinationProjectSummary"][];
+        };
+        CoordinationProjectSummary: {
+            id: string;
+            kind: string;
+            name: string;
+            orchestratorAgent?: string;
+        };
+        CoordinationTokenResponse: {
+            deviceId: string;
+            hostId: string;
+            /** @enum {string} */
+            scope: "agent-coordination";
+            token: string;
+        };
         CreateAutomationRequest: {
             cron?: string;
             displayName: string;
@@ -7218,11 +7279,14 @@ export interface components {
             brief: string;
             clientRequestId?: string;
             effort?: null | string;
+            goal?: string;
             /** @enum {string} */
             mode?: "tui" | "chat";
             model?: string;
             projectId: string;
             taskPreparation?: string;
+            /** Format: int64 */
+            timeboxSeconds?: number;
         };
         DelegateTaskResponse: {
             ok: boolean;
@@ -7297,6 +7361,9 @@ export interface components {
             selection: string;
             snapshot?: components["schemas"]["ChatExcerptSnapshot"];
             sourceRole: string;
+        };
+        DomainWorkerContractConfig: {
+            stallMinutes?: number;
         };
         EditConversationMessageRequest: {
             clientMessageId?: string;
@@ -7538,6 +7605,14 @@ export interface components {
             /** @description For command cues, the normal shell terminal that received the command. */
             shellTerminal?: components["schemas"]["ShellTerminalResponse"];
         };
+        IssueCoordinationTokenRequest: {
+            /** @description Stable opaque ID of the requesting AO installation; retries replace an unseen prior token for this client. */
+            clientId?: string;
+            /** @description Name shown in the host's device list. */
+            name?: string;
+            /** @description The requesting machine's platform. */
+            platform?: string;
+        };
         KillReviewResponse: {
             reviewerHandleId: string;
             reviewerHarness?: string;
@@ -7625,6 +7700,7 @@ export interface components {
             summary: components["schemas"]["WorkspaceSummary"];
             truncated: boolean;
         };
+        ListProjectsAPIResponse: components["schemas"]["ListProjectsResponse"] | components["schemas"]["CoordinationListProjectsResponse"];
         ListProjectsResponse: {
             projects: components["schemas"]["ProjectSummary"][];
         };
@@ -7843,7 +7919,7 @@ export interface components {
             target: components["schemas"]["NotificationTarget"];
             title: string;
             /** @enum {string} */
-            type: "needs_input" | "ready_to_merge" | "pr_merged" | "pr_closed_unmerged" | "review_completed" | "review_changes_requested";
+            type: "needs_input" | "session_stalled" | "ready_to_merge" | "pr_merged" | "pr_closed_unmerged" | "review_completed" | "review_changes_requested";
         };
         NotificationTarget: {
             /** @enum {string} */
@@ -8010,7 +8086,9 @@ export interface components {
             sessionPrefix?: string;
             symlinks?: string[];
             trackerIntake?: components["schemas"]["TrackerIntakeConfig"];
+            verify?: string[];
             worker?: components["schemas"]["RoleOverride"];
+            workerContracts?: components["schemas"]["DomainWorkerContractConfig"];
             workersRequestReview?: boolean;
         };
         ProjectGetResponse: {
@@ -9218,6 +9296,7 @@ export interface components {
             displayName?: string;
             displayNameExplicit?: boolean;
             effort?: string;
+            goal?: string;
             /** @enum {string} */
             harness?: "claude-code" | "codex" | "aider" | "opencode" | "opencode-v2" | "grok" | "droid" | "amp" | "agy" | "crush" | "cursor" | "qwen" | "gemini" | "copilot" | "goose" | "auggie" | "continue" | "devin" | "cline" | "kimi" | "muse" | "kiro" | "kilocode" | "vibe" | "pi" | "kimchi" | "omp" | "fx" | "prime-agent" | "autohand" | "unreal-agent" | "codewhale" | "mimo-code" | "minimax-code" | "deepseek-harness" | "openhands" | "command-code" | "docker-agent" | "memcode" | "hermes" | "stakpak";
             issueId?: string;
@@ -9231,6 +9310,8 @@ export interface components {
             prompt?: string;
             /** @enum {string} */
             requestedOutput?: "artifact";
+            /** Format: int64 */
+            timeboxSeconds?: number;
             /** @enum {string} */
             trackerProvider?: "github" | "gitlab";
         };
@@ -16814,7 +16895,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ListProjectsResponse"];
+                    "application/json": components["schemas"]["ListProjectsAPIResponse"];
                 };
             };
             /** @description Internal Server Error */
@@ -18409,6 +18490,114 @@ export interface operations {
             };
             /** @description Forbidden */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    issueRemoteHostCoordinationToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["IssueCoordinationTokenRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CoordinationTokenResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    revokeRemoteHostCoordinationToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The coordination token's device id. */
+                deviceId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };

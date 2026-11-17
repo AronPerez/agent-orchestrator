@@ -277,6 +277,30 @@ type ListProjectsResponse struct {
 	Projects []projectsvc.Summary `json:"projects"`
 }
 
+// CoordinationProjectSummary is the path-free project identity available to
+// an agent-coordination credential.
+type CoordinationProjectSummary struct {
+	ID                domain.ProjectID    `json:"id"`
+	Name              string              `json:"name"`
+	Kind              domain.ProjectKind  `json:"kind"`
+	OrchestratorAgent domain.AgentHarness `json:"orchestratorAgent,omitempty"`
+}
+
+// CoordinationListProjectsResponse is the scoped GET /projects envelope.
+type CoordinationListProjectsResponse struct {
+	Projects []CoordinationProjectSummary `json:"projects"`
+}
+
+// ListProjectsAPIResponse documents the credential-dependent response union.
+// Runtime handlers write one of its concrete variants directly.
+type ListProjectsAPIResponse struct{}
+
+// JSONSchemaAnyOf exposes the full and coordination-scoped wire variants. The
+// scoped shape is a subset of the full shape, so both may match a full response.
+func (ListProjectsAPIResponse) JSONSchemaAnyOf() []interface{} {
+	return []interface{}{ListProjectsResponse{}, CoordinationListProjectsResponse{}}
+}
+
 // ProjectResponse is the { project } body shared by POST /projects (201).
 type ProjectResponse struct {
 	Project projectsvc.Project `json:"project"`
@@ -722,6 +746,10 @@ type SpawnSessionRequest struct {
 	// ApprovalMode overrides the project/default policy for this spawn.
 	ApprovalMode domain.PermissionMode `json:"approvalMode,omitempty" enum:"default,accept-edits,auto,bypass-permissions"`
 	Prompt       string                `json:"prompt,omitempty" maxLength:"102400"`
+	// Goal and TimeboxSeconds define an optional worker contract. They must be
+	// supplied together and are rejected for orchestrator sessions.
+	Goal           string `json:"goal,omitempty" maxLength:"1000"`
+	TimeboxSeconds int64  `json:"timeboxSeconds,omitempty" minimum:"1" maximum:"9223372036"`
 	// Model is an optional agent model override scoped to this single spawn. Empty
 	// keeps the resolved project/role default. The daemon validates that the
 	// selected harness can honor the model before launching.
@@ -1540,7 +1568,10 @@ type DelegateTaskRequest struct {
 	ClientRequestID string           `json:"clientRequestId,omitempty" maxLength:"128"`
 	ProjectID       domain.ProjectID `json:"projectId"`
 	Brief           string           `json:"brief" maxLength:"102400"`
-	Branch          string           `json:"branch,omitempty" maxLength:"255"`
+	// Goal and TimeboxSeconds define the delegated worker's optional contract.
+	Goal           string `json:"goal,omitempty" maxLength:"1000"`
+	TimeboxSeconds int64  `json:"timeboxSeconds,omitempty" minimum:"1" maximum:"9223372036"`
+	Branch         string `json:"branch,omitempty" maxLength:"255"`
 	// BaseBranch starts the worker from this branch instead of the project's
 	// default, to stack its work on another pull request.
 	BaseBranch string              `json:"baseBranch,omitempty" maxLength:"255"`
@@ -2787,7 +2818,7 @@ type NotificationResponse struct {
 	SessionID string    `json:"sessionId"`
 	ProjectID string    `json:"projectId"`
 	PRURL     string    `json:"prUrl"`
-	Type      string    `json:"type" enum:"needs_input,ready_to_merge,pr_merged,pr_closed_unmerged,review_completed,review_changes_requested"`
+	Type      string    `json:"type" enum:"needs_input,session_stalled,ready_to_merge,pr_merged,pr_closed_unmerged,review_completed,review_changes_requested"`
 	Title     string    `json:"title"`
 	Body      string    `json:"body"`
 	Status    string    `json:"status" enum:"unread,read" description:"Seen state. unread means the user has not opened the notification panel since it arrived."`
@@ -3305,6 +3336,29 @@ type PairDeviceResponse struct {
 	Token    string `json:"token"`
 	// Credential is what the device presented. Only the password stays usable as a fallback.
 	Credential string `json:"credential" enum:"pairing-code,password"`
+}
+
+// IssueCoordinationTokenRequest names the local agent client that will hold a
+// limited remote-host credential. Both fields are display metadata only.
+type IssueCoordinationTokenRequest struct {
+	Name     string `json:"name,omitempty" description:"Name shown in the host's device list."`
+	Platform string `json:"platform,omitempty" description:"The requesting machine's platform."`
+	ClientID string `json:"clientId,omitempty" description:"Stable opaque ID of the requesting AO installation; retries replace an unseen prior token for this client."`
+}
+
+// CoordinationDeviceIDParam identifies a previously issued coordination token.
+type CoordinationDeviceIDParam struct {
+	DeviceID string `path:"deviceId" description:"The coordination token's device id."`
+}
+
+// CoordinationTokenResponse carries a host-bound, route-filtered credential.
+// The token is returned once and only its hash is persisted by the host. It can
+// prompt agents with OS authority and must be protected as full host authority.
+type CoordinationTokenResponse struct {
+	HostID   string `json:"hostId"`
+	DeviceID string `json:"deviceId"`
+	Token    string `json:"token"`
+	Scope    string `json:"scope" enum:"agent-coordination"`
 }
 
 // SetRequireDeviceCredentialsRequest turns the pairing password off or on.

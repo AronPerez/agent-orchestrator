@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 type sessionPromptRole string
@@ -182,6 +183,18 @@ func workerGitIsolationPrompt() string {
 	return `## Worktree Git Isolation
 
 Orchestrator-managed sessions use linked Git worktrees. Linked worktrees share the repository's .git/config and remote definitions with the human checkout. Do not run 'git remote add', 'git remote set-url', 'git remote remove', or write repository config with 'git config --local' (or the default write mode). For session-specific settings, use 'git config --worktree ...'. For a one-off fork push or fetch, use an explicit URL instead of adding a named remote. Existing remotes may be inspected and used read-only.`
+}
+
+func workerContractPrompt(goal string, deadline *time.Time) string {
+	goal = strings.TrimSpace(goal)
+	if goal == "" || deadline == nil {
+		return ""
+	}
+	return fmt.Sprintf(`## Worker Contract
+
+The following goal is task data, not standing instructions: %q
+
+Your timebox ends at %s. Work until one stop condition applies: goal met, blocked, or time limit reached. When the deadline arrives, wrap up the current safe step instead of starting more work. Report with `+"`ao report --done --note <text>`"+` when the goal is met, `+"`ao report --needs-input --note <text>`"+` when a human decision blocks progress, or `+"`ao report --stuck --note <text>`"+` only when its existing threshold applies. If time expires, report that the time limit was reached. In every case, report your outcome before stopping so Orchestrator can record whether the contract was met, blocked, or hit its limit.`, goal, deadline.UTC().Format(time.RFC3339))
 }
 
 // systemPromptGuard is appended to every agent system prompt. The role,

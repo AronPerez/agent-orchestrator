@@ -9,9 +9,12 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/go-chi/chi/v5"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/requestscope"
@@ -19,6 +22,8 @@ import (
 )
 
 const mobileUnencryptedWarning = "Traffic on this connection is not encrypted. Only use it on a network you trust."
+
+var coordinationClientIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 
 type mobileBridge interface {
 	Status() MobileStatusResponse
@@ -79,6 +84,115 @@ func (c *MobileController) IssueAccountToken(w http.ResponseWriter, r *http.Requ
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	envelope.WriteJSON(w, http.StatusOK, result)
+}
+
+// IssueCoordinationToken handles POST /api/v1/remote-host/coordination-token.
+// Only an existing full LAN credential may mint the route-filtered token that
+// headless agents keep in the owner-only saved-host file. Because it can prompt
+// agents with OS authority, clients must protect it as full host authority.
+func (c *MobileController) IssueCoordinationToken(w http.ResponseWriter, r *http.Request) {
+	credential := requestscope.CredentialFrom(r.Context())
+	if !isFullRemoteCredential(credential) {
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "COORDINATION_TOKEN_ISSUER",
+			"A full remote-host credential is required.", nil)
+		return
+	}
+	issuer, ok := c.Bridge.(interface {
+		IssueCoordinationToken(context.Context, string, string, string, requestscope.Credential, string) (CoordinationTokenResponse, error)
+	})
+	if !ok {
+		envelope.WriteAPIError(w, r, http.StatusNotImplemented, "not_implemented", "COORDINATION_TOKEN",
+			"agent coordination credentials are unavailable", nil)
+		return
+	}
+	var req IssueCoordinationTokenRequest
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req); err != nil {
+			envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
+			return
+		}
+	}
+	if req.ClientID != "" && !coordinationClientIDPattern.MatchString(req.ClientID) {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_COORDINATION_CLIENT_ID",
+			"clientId must contain only letters, numbers, underscores, or hyphens.", nil)
+		return
+	}
+	presentedToken := ""
+	if authorization := r.Header.Get("Authorization"); strings.HasPrefix(authorization, "Bearer ") {
+		presentedToken = strings.TrimPrefix(authorization, "Bearer ")
+	}
+	result, err := issuer.IssueCoordinationToken(r.Context(), req.Name, req.Platform, req.ClientID, credential, presentedToken)
+	switch {
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		writeCoordinationInterrupted(w, r)
+		return
+	case errors.Is(err, errCoordinationIssuerRevoked):
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "COORDINATION_TOKEN_ISSUER",
+			"The issuing credential is no longer valid.", nil)
+		return
+	case errors.Is(err, mobilebridge.ErrTooManyDevices):
+		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict", "TOO_MANY_DEVICES", err.Error(), nil)
+		return
+	case err != nil:
+		envelope.WriteAPIError(w, r, http.StatusInternalServerError, "internal", "COORDINATION_TOKEN",
+			"could not issue an agent coordination credential", nil)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	envelope.WriteJSON(w, http.StatusOK, result)
+}
+
+// RevokeCoordinationToken retires one route-filtered token without exposing the
+// desktop-only mobile-device control surface on the LAN listener.
+func (c *MobileController) RevokeCoordinationToken(w http.ResponseWriter, r *http.Request) {
+	if !isFullRemoteCredential(requestscope.CredentialFrom(r.Context())) {
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "COORDINATION_TOKEN_ISSUER",
+			"A full remote-host credential is required.", nil)
+		return
+	}
+	revoker, ok := c.Bridge.(interface {
+		RevokeCoordinationToken(context.Context, string, requestscope.Credential, string) (bool, error)
+	})
+	if !ok {
+		envelope.WriteAPIError(w, r, http.StatusNotImplemented, "not_implemented", "COORDINATION_TOKEN",
+			"agent coordination credentials are unavailable", nil)
+		return
+	}
+	presentedToken := ""
+	if authorization := r.Header.Get("Authorization"); strings.HasPrefix(authorization, "Bearer ") {
+		presentedToken = strings.TrimPrefix(authorization, "Bearer ")
+	}
+	found, err := revoker.RevokeCoordinationToken(r.Context(), chi.URLParam(r, "deviceId"), requestscope.CredentialFrom(r.Context()), presentedToken)
+	switch {
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		writeCoordinationInterrupted(w, r)
+		return
+	case errors.Is(err, errCoordinationIssuerRevoked):
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "COORDINATION_TOKEN_ISSUER",
+			"The revoking credential is no longer valid.", nil)
+		return
+	case err != nil:
+		envelope.WriteAPIError(w, r, http.StatusInternalServerError, "internal", "COORDINATION_TOKEN",
+			"could not revoke the agent coordination credential", nil)
+		return
+	}
+	if !found {
+		envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "COORDINATION_TOKEN_NOT_FOUND",
+			"Unknown agent coordination credential.", nil)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func writeCoordinationInterrupted(w http.ResponseWriter, r *http.Request) {
+	envelope.WriteAPIError(w, r, http.StatusServiceUnavailable, "unavailable", "COORDINATION_TOKEN_INTERRUPTED",
+		"Remote access changed before the credential operation completed. Retry the request.", nil)
+}
+
+func isFullRemoteCredential(credential requestscope.Credential) bool {
+	return credential.Kind == requestscope.CredentialPassword ||
+		credential.Kind == requestscope.CredentialAccount ||
+		(credential.Kind == requestscope.CredentialDevice && len(credential.Scopes) == 0)
 }
 
 // NewPairingCode handles POST /api/v1/mobile/pairing-code. The route is
@@ -397,6 +511,9 @@ type BridgeService struct {
 	// state, listener state, or connector state. Status deliberately does not
 	// take it, so a slow listener or connector operation cannot freeze polling.
 	transitionMu sync.Mutex
+	// afterCoordinationIssueLock is a test-only overlap barrier. Production
+	// wiring leaves it nil.
+	afterCoordinationIssueLock func()
 
 	// Guards Tunnel, which ensureTunnel may replace while HTTP handlers read it.
 	tunnelMu sync.RWMutex
@@ -421,6 +538,30 @@ type BridgeService struct {
 	stateMu sync.RWMutex
 	// serveErr records the last Apply/Clear failure for Status.
 	serveErr error
+}
+
+func (b *BridgeService) lockTransition(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		if b.transitionMu.TryLock() {
+			if err := ctx.Err(); err != nil {
+				b.transitionMu.Unlock()
+				return err
+			}
+			return nil
+		}
+		timer := time.NewTimer(5 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func (b *BridgeService) lanHosts() []string {
@@ -1087,6 +1228,11 @@ func (b *BridgeService) issueAccountToken(password string, device bool, accountI
 	if !ok {
 		return RemoteHostAccountTokenResponse{}, errors.New("account pairing is unavailable")
 	}
+	// A different account receives a different full credential. Revoke every
+	// scoped token delegated by the previous one before rotating it.
+	if err := b.revokeIssuedBy(mobilebridge.SharedAccount); err != nil {
+		return RemoteHostAccountTokenResponse{}, err
+	}
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
 		return RemoteHostAccountTokenResponse{}, err
@@ -1108,8 +1254,9 @@ func (b *BridgeService) issueAccountToken(password string, device bool, accountI
 }
 
 var (
-	errRemoteAccessOff = errors.New("remote access is off; turn it on before pairing a device")
-	errPairingCodeUsed = errors.New("the pairing code is used or expired; make a new one")
+	errRemoteAccessOff           = errors.New("remote access is off; turn it on before pairing a device")
+	errPairingCodeUsed           = errors.New("the pairing code is used or expired; make a new one")
+	errCoordinationIssuerRevoked = errors.New("coordination credential issuer is no longer valid")
 )
 
 func (b *BridgeService) applyPasswordLogin(st mobilebridge.State) {
@@ -1180,6 +1327,78 @@ func (b *BridgeService) PairDevice(code, name, platform string) (PairDeviceRespo
 	return PairDeviceResponse{HostID: b.HostID, DeviceID: device.ID, Token: token, Credential: credential}, nil
 }
 
+// IssueCoordinationToken gives a headless client a route-filtered device token
+// after atomically revalidating the full credential that delegates its authority.
+func (b *BridgeService) IssueCoordinationToken(ctx context.Context, name, platform, clientID string, credential requestscope.Credential, presentedToken string) (CoordinationTokenResponse, error) {
+	if err := b.lockTransition(ctx); err != nil {
+		return CoordinationTokenResponse{}, err
+	}
+	defer b.transitionMu.Unlock()
+	if b.afterCoordinationIssueLock != nil {
+		b.afterCoordinationIssueLock()
+	}
+	if err := ctx.Err(); err != nil {
+		return CoordinationTokenResponse{}, err
+	}
+	if b.Devices == nil {
+		return CoordinationTokenResponse{}, errors.New("device pairing is unavailable")
+	}
+	issuer, err := b.coordinationIssuerLocked(credential, presentedToken)
+	if err != nil {
+		return CoordinationTokenResponse{}, err
+	}
+	if strings.TrimSpace(name) == "" {
+		name = "Agent coordination"
+	}
+	if strings.TrimSpace(platform) == "" {
+		platform = "cli"
+	}
+	device, token, replaced, err := b.Devices.IssueScopedByClient(name, platform, []string{mobilebridge.DeviceScopeAgentCoordination}, issuer, clientID, time.Now())
+	if err != nil {
+		return CoordinationTokenResponse{}, err
+	}
+	if lan, ok := b.LAN.(interface{ DisconnectCredential(string) }); ok {
+		for _, previous := range replaced {
+			lan.DisconnectCredential(previous.TokenHash)
+		}
+	}
+	return CoordinationTokenResponse{
+		HostID: b.HostID, DeviceID: device.ID, Token: token,
+		Scope: mobilebridge.DeviceScopeAgentCoordination,
+	}, nil
+}
+
+func (b *BridgeService) coordinationIssuerLocked(credential requestscope.Credential, presentedToken string) (string, error) {
+	presentedToken = strings.TrimSpace(presentedToken)
+	state, err := mobilebridge.Load(b.ConfigPath)
+	if err != nil {
+		return "", err
+	}
+	if !state.Enabled {
+		return "", errCoordinationIssuerRevoked
+	}
+	switch credential.Kind {
+	case requestscope.CredentialPassword:
+		if !state.Enabled || state.RequireDeviceCredentials || !mobilebridge.PasswordMatches(mobilebridge.HashPassword(state.Password), presentedToken) {
+			return "", errCoordinationIssuerRevoked
+		}
+		return mobilebridge.SharedPassword, nil
+	case requestscope.CredentialAccount:
+		if !state.Enabled || !mobilebridge.PasswordMatches(state.AccountTokenHash, presentedToken) {
+			return "", errCoordinationIssuerRevoked
+		}
+		return mobilebridge.SharedAccount, nil
+	case requestscope.CredentialDevice:
+		device, ok := b.Devices.Match(presentedToken)
+		if !ok || device.ID != credential.DeviceID || len(device.Scopes) != 0 {
+			return "", errCoordinationIssuerRevoked
+		}
+		return mobilebridge.DeviceIssuer(device.ID), nil
+	default:
+		return "", errCoordinationIssuerRevoked
+	}
+}
+
 // SetRequireDeviceCredentials turns the pairing password off or on.
 func (b *BridgeService) SetRequireDeviceCredentials(on bool) (MobileStatusResponse, error) {
 	b.transitionMu.Lock()
@@ -1225,17 +1444,76 @@ func (b *BridgeService) AccountDevices() (tokenHash string, lastUsed time.Time) 
 
 // RevokeDevice revokes a device and returns its push install ID.
 func (b *BridgeService) RevokeDevice(id string) (installID string, found bool, err error) {
+	b.transitionMu.Lock()
+	defer b.transitionMu.Unlock()
+	return b.revokeDeviceLocked(id, true)
+}
+
+// RevokeDeviceFromRequest is the request-cancelable form used by phone
+// self-unpair. It shares the same descendant sweep as desktop revocation.
+func (b *BridgeService) RevokeDeviceFromRequest(ctx context.Context, id string) (installID string, found bool, err error) {
+	if err := b.lockTransition(ctx); err != nil {
+		return "", false, err
+	}
+	defer b.transitionMu.Unlock()
+	// The caller is using this credential to carry the 204 response. Removing
+	// the registry row rejects its next request; closing this connection here
+	// would turn the successful self-unpair into EOF on the phone.
+	return b.revokeDeviceLocked(id, false)
+}
+
+func (b *BridgeService) revokeDeviceLocked(id string, disconnectParent bool) (installID string, found bool, err error) {
 	if b.Devices == nil {
 		return "", false, nil
+	}
+	if err := b.revokeIssuedBy(mobilebridge.DeviceIssuer(id)); err != nil {
+		return "", false, err
 	}
 	device, found, err := b.Devices.Revoke(id)
 	if err != nil || !found {
 		return "", found, err
 	}
-	if lan, ok := b.LAN.(interface{ DisconnectCredential(string) }); ok {
+	if lan, ok := b.LAN.(interface{ DisconnectCredential(string) }); ok && disconnectParent {
 		lan.DisconnectCredential(device.TokenHash)
 	}
 	return device.InstallID, true, nil
+}
+
+// RevokeCoordinationToken removes only a route-filtered coordination device.
+// It shares transitionMu with issuance and parent revocation so a token cannot
+// appear between a lifecycle check and the matching removal.
+func (b *BridgeService) RevokeCoordinationToken(ctx context.Context, id string, credential requestscope.Credential, presentedToken string) (bool, error) {
+	if err := b.lockTransition(ctx); err != nil {
+		return false, err
+	}
+	defer b.transitionMu.Unlock()
+	if b.Devices == nil {
+		return false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if _, err := b.coordinationIssuerLocked(credential, presentedToken); err != nil {
+		return false, err
+	}
+	coordination := false
+	for _, device := range b.Devices.List() {
+		if device.ID == id && len(device.Scopes) == 1 && device.Scopes[0] == mobilebridge.DeviceScopeAgentCoordination {
+			coordination = true
+			break
+		}
+	}
+	if !coordination {
+		return false, nil
+	}
+	device, found, err := b.Devices.Revoke(id)
+	if err != nil || !found {
+		return found, err
+	}
+	if lan, ok := b.LAN.(interface{ DisconnectCredential(string) }); ok {
+		lan.DisconnectCredential(device.TokenHash)
+	}
+	return true, nil
 }
 
 // UnlinkAccount revokes the account token, cutting off every account device.
@@ -1244,6 +1522,9 @@ func (b *BridgeService) UnlinkAccount() error {
 	defer b.transitionMu.Unlock()
 	st, err := mobilebridge.Load(b.ConfigPath)
 	if err != nil {
+		return err
+	}
+	if err := b.revokeIssuedBy(mobilebridge.SharedAccount); err != nil {
 		return err
 	}
 	if st.AccountTokenHash == "" {
@@ -1257,6 +1538,22 @@ func (b *BridgeService) UnlinkAccount() error {
 		setter.SetAccountTokenHash("")
 	}
 	b.nudgeTunnel()
+	return nil
+}
+
+func (b *BridgeService) revokeIssuedBy(issuer string) error {
+	if b.Devices == nil {
+		return nil
+	}
+	revoked, err := b.Devices.RevokeIssuedBy(issuer)
+	if err != nil {
+		return err
+	}
+	if lan, ok := b.LAN.(interface{ DisconnectCredential(string) }); ok {
+		for _, device := range revoked {
+			lan.DisconnectCredential(device.TokenHash)
+		}
+	}
 	return nil
 }
 

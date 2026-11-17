@@ -48,6 +48,7 @@ func TestDelegateTaskSpawnsWorkerAndRefinesTitleThroughBackgroundHarness(t *test
 			out, err := svc.DelegateTask(context.Background(), DelegateTaskInput{
 				ProjectID: "ao", Brief: brief, RequestedAgent: tt.agent, Model: tt.model,
 				Effort: effort, RequestedMode: tt.mode, TaskPreparation: "prep-token",
+				Goal: "Ship the renderer fix", Timebox: time.Hour,
 			})
 			if err != nil {
 				t.Fatalf("DelegateTask: %v", err)
@@ -69,6 +70,9 @@ func TestDelegateTaskSpawnsWorkerAndRefinesTitleThroughBackgroundHarness(t *test
 			}
 			if cmd.spawnedCfg.TaskPreparation != "prep-token" {
 				t.Fatalf("task preparation = %q", cmd.spawnedCfg.TaskPreparation)
+			}
+			if cmd.spawnedCfg.Goal != "Ship the renderer fix" || cmd.spawnedCfg.Timebox != time.Hour {
+				t.Fatalf("worker contract = goal %q timebox %v", cmd.spawnedCfg.Goal, cmd.spawnedCfg.Timebox)
 			}
 			call := cmd.backgroundCalls[0]
 			if call.id != "mer-9" || call.prompt != brief || call.systemPrompt != delegatedTaskTitleSystemPrompt {
