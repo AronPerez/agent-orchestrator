@@ -32,3 +32,18 @@ func TestNudgeCoordinationUsesSharedGuardActiveSteeringPolicy(t *testing.T) {
 		t.Fatalf("outcome=%s messages=%v, want sent coordination", outcome, messenger.msgs)
 	}
 }
+
+func TestNudgeCoordinationQueuesForActiveChatWithoutTerminalSteering(t *testing.T) {
+	m, store, messenger := newManager()
+	rec := working("chat-1")
+	rec.Mode = domain.SessionModeChat
+	store.sessions[rec.ID] = rec
+
+	outcome, err := m.NudgeCoordination(context.Background(), rec.ID, "coordinate")
+	if err != nil {
+		t.Fatalf("chat nudge: %v", err)
+	}
+	if outcome != sessionguard.Sent || len(messenger.msgs) != 1 || messenger.msgs[0] != "coordinate" {
+		t.Fatalf("outcome=%s messages=%v, want active Chat message queued", outcome, messenger.msgs)
+	}
+}

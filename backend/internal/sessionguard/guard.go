@@ -398,10 +398,9 @@ func (g *Guard) NudgeUrgent(ctx context.Context, id domain.SessionID, msg string
 // NudgeCoordination writes an AO-initiated coordination message under the full
 // delivery policy, re-evaluated here — at the write boundary — rather than from
 // a caller's earlier snapshot. It refuses whenever the session awaits the human,
-// and additionally while it is mid-turn on a harness that cannot safely steer an
-// active turn. steersActiveTurn is the adapter-provided capability; a nil
-// predicate is treated as "cannot steer", so an unknown harness never takes an
-// unsolicited write during a live turn.
+// and additionally while a terminal session is mid-turn on a harness that
+// cannot safely steer an active turn. Chat messages use the mode-aware queued
+// send path, so they do not depend on terminal steering capability.
 func (g *Guard) NudgeCoordination(ctx context.Context, id domain.SessionID, msg string, steersActiveTurn func(domain.AgentHarness) bool) (Outcome, error) {
 	return g.send(ctx, id, msg, func(rec domain.SessionRecord) (Outcome, bool) {
 		if g.tuiAwaitingStartupInput(rec) {
@@ -410,7 +409,7 @@ func (g *Guard) NudgeCoordination(ctx context.Context, id domain.SessionID, msg 
 		if rec.Activity.State.NeedsInput() {
 			return SuppressedAwaitingUser, true
 		}
-		if rec.Activity.State == domain.ActivityActive {
+		if rec.Activity.State == domain.ActivityActive && domain.NormalizeSessionMode(rec.Mode) != domain.SessionModeChat {
 			return SuppressedBusy, steersActiveTurn == nil || !steersActiveTurn(rec.Harness)
 		}
 		return SuppressedUnknown, false

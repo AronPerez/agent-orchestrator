@@ -43,6 +43,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/browserruntime"
 	"github.com/aoagents/agent-orchestrator/backend/internal/browserstream"
 	"github.com/aoagents/agent-orchestrator/backend/internal/caller"
+	"github.com/aoagents/agent-orchestrator/backend/internal/cdc"
 	"github.com/aoagents/agent-orchestrator/backend/internal/clienttz"
 	"github.com/aoagents/agent-orchestrator/backend/internal/codexops"
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
@@ -1479,6 +1480,26 @@ func Run(buildVersion string) (retErr error) {
 				log.Error("background agent-process reconciliation on boot failed", "err", reconcileErr)
 				sentryobs.CaptureBackground(ctx, reconcileErr, "lifecycle", "reconcile", map[string]string{"reason": "runtime"})
 			}
+		}()
+		go func() {
+			defer sentryobs.RecoverBackground()
+			select {
+			case <-done:
+			case <-ctx.Done():
+				return
+			}
+			sessionChanges := make(chan struct{}, 1)
+			unsubscribe := cdcPipe.Broadcaster.Subscribe(func(event cdc.Event) {
+				if event.Type != cdc.EventSessionCreated && event.Type != cdc.EventSessionUpdated {
+					return
+				}
+				select {
+				case sessionChanges <- struct{}{}:
+				default:
+				}
+			})
+			defer unsubscribe()
+			sessionSvc.RunProjectOverlapNoticeRadar(ctx, sessionChanges)
 		}()
 		go func() {
 			defer sentryobs.RecoverBackground()

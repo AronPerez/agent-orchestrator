@@ -122,7 +122,6 @@ type fakeSessionService struct {
 	overlapMu                  sync.Mutex
 	overlapProjectID           domain.ProjectID
 	projectOverlapReads        int
-	projectOverlapNoticeReads  int
 	overlapWatchProjectID      domain.ProjectID
 	spawnErr                   error
 	lastSpawn                  ports.SpawnConfig
@@ -978,16 +977,10 @@ func (f *fakeSessionService) ProjectOverlaps(_ context.Context, projectID domain
 	return f.projectOverlaps, nil
 }
 
-func (f *fakeSessionService) ScheduleProjectOverlapNotices(_ sessionsvc.ProjectOverlapResult) {
+func (f *fakeSessionService) projectOverlapCallState() (domain.ProjectID, domain.ProjectID, int) {
 	f.overlapMu.Lock()
 	defer f.overlapMu.Unlock()
-	f.projectOverlapNoticeReads++
-}
-
-func (f *fakeSessionService) projectOverlapCallState() (domain.ProjectID, domain.ProjectID, int, int) {
-	f.overlapMu.Lock()
-	defer f.overlapMu.Unlock()
-	return f.overlapProjectID, f.overlapWatchProjectID, f.projectOverlapReads, f.projectOverlapNoticeReads
+	return f.overlapProjectID, f.overlapWatchProjectID, f.projectOverlapReads
 }
 
 func newSessionTestServer(t *testing.T, svc *fakeSessionService) *httptest.Server {
@@ -4100,12 +4093,9 @@ func TestSessionsAPI_ProjectOverlaps(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("GET project overlaps = %d, want 200; body=%s", status, body)
 	}
-	projectID, _, _, noticeReads := svc.projectOverlapCallState()
+	projectID, _, _ := svc.projectOverlapCallState()
 	if projectID != "demo" {
 		t.Fatalf("project id = %q, want demo", projectID)
-	}
-	if noticeReads != 1 {
-		t.Fatalf("notice reconciles = %d, want 1", noticeReads)
 	}
 	var got controllers.ProjectOverlapsResponse
 	mustJSON(t, body, &got)
@@ -4763,9 +4753,9 @@ func TestSessionsAPI_StreamProjectOverlapChanges(t *testing.T) {
 	if contentType := resp.Header.Get("Content-Type"); !strings.HasPrefix(contentType, "text/event-stream") {
 		t.Fatalf("Content-Type = %q, want text/event-stream", contentType)
 	}
-	_, watchProjectID, overlapReads, noticeReads := svc.projectOverlapCallState()
-	if watchProjectID != "demo" || overlapReads != 1 || noticeReads != 1 {
-		t.Fatalf("startup reads watch=%q overlaps=%d notices=%d, want demo/1/1", watchProjectID, overlapReads, noticeReads)
+	_, watchProjectID, overlapReads := svc.projectOverlapCallState()
+	if watchProjectID != "demo" || overlapReads != 1 {
+		t.Fatalf("startup reads watch=%q overlaps=%d, want demo/1", watchProjectID, overlapReads)
 	}
 
 	event := make(chan string, 1)
@@ -4789,12 +4779,9 @@ func TestSessionsAPI_StreamProjectOverlapChanges(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for overlap change event")
 	}
-	_, _, overlapReads, noticeReads = svc.projectOverlapCallState()
+	_, _, overlapReads = svc.projectOverlapCallState()
 	if overlapReads != 2 {
 		t.Fatalf("overlap reads after change = %d, want 2", overlapReads)
-	}
-	if noticeReads != 2 {
-		t.Fatalf("notice reconciles after change = %d, want 2", noticeReads)
 	}
 }
 

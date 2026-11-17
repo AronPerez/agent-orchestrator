@@ -150,13 +150,17 @@ func (s *Service) activeProjectOverlapSessions(ctx context.Context, projectID do
 	}
 	active := records[:0]
 	for _, record := range records {
-		if record.IsTerminated || record.IsTaskPreparation || record.NeedsImportResume() || strings.TrimSpace(record.Metadata.WorkspacePath) == "" {
+		if !eligibleProjectOverlapSession(record) {
 			continue
 		}
 		active = append(active, record)
 	}
 	sort.Slice(active, func(i, j int) bool { return active[i].ID < active[j].ID })
 	return project, active, nil
+}
+
+func eligibleProjectOverlapSession(record domain.SessionRecord) bool {
+	return !record.IsTerminated && !record.IsTaskPreparation && !record.NeedsImportResume() && strings.TrimSpace(record.Metadata.WorkspacePath) != ""
 }
 
 func overlapWorkspaceUnavailable(err error) bool {

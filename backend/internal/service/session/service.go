@@ -245,9 +245,11 @@ type Service struct {
 	orchestratorLocksMu sync.Mutex
 	orchestratorLocks   map[domain.ProjectID]*sync.Mutex
 
-	overlapNoticeLocksMu sync.Mutex
-	overlapNoticeLocks   map[domain.ProjectID]*sync.Mutex
-	overlapNudger        OverlapNudger
+	overlapNoticeLocksMu   sync.Mutex
+	overlapNoticeLocks     map[domain.ProjectID]*sync.Mutex
+	overlapNoticePendingMu sync.Mutex
+	overlapNoticePending   map[projectOverlapNoticeKey]domain.SessionOverlapNotice
+	overlapNudger          OverlapNudger
 
 	workspaceCache     *workspaceCache
 	workspaceManifests *workspaceManifestIndex
