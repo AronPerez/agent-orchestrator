@@ -1328,6 +1328,7 @@ export function useWorkspaceProjectSessions(projectId?: string, hostId?: string)
 		queryFn: () => fetchRemoteWorkspaces(hostId ?? ""),
 		select: selectProjectSessions,
 		enabled: Boolean(projectId && hostId),
+		refetchOnMount: false,
 	});
 	return hostId ? remote : local;
 }
