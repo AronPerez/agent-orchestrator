@@ -48,7 +48,9 @@ ao send --session mer-3 --steer --recover-only --client-message-id correction-42
 
 For a session on another saved machine, keep the host on both the original
 write and every recovery attempt. Successful write output names the resolved
-machine; stop if it is not the intended destination.
+machine; stop if it is not the intended destination. Agent-authored messages
+identify their origin with both the source session id and stable host id; a
+destination must not treat an unqualified session id as a cross-machine sender.
 
 ```bash
 ao send --host build-mac --session mer-3 --steer \

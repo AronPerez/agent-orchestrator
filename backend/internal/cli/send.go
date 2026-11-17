@@ -87,9 +87,6 @@ func (c *commandContext) sendMessage(ctx context.Context, opts sendOptions) erro
 	senderSessionID := strings.TrimSpace(os.Getenv("AO_SESSION_ID"))
 	userAuthored := senderSessionID == ""
 	message := opts.message
-	if !opts.recoverOnly && senderSessionID != "" {
-		message = "[from " + senderSessionID + "] " + message
-	}
 	session := strings.TrimSpace(opts.session)
 	if session == "" {
 		return usageError{errors.New("usage: --session is required")}
@@ -97,9 +94,20 @@ func (c *commandContext) sendMessage(ctx context.Context, opts sendOptions) erro
 	if err := c.selectSavedHostIfSet(ctx, opts.host); err != nil {
 		return err
 	}
+	if !opts.recoverOnly && senderSessionID != "" {
+		if c.remote != nil {
+			sourceHostID := readLocalHostID()
+			if sourceHostID == "" {
+				return errors.New("local host identity is unavailable; open the Orchestrator desktop once before sending an agent-authored cross-machine message")
+			}
+			message = "[from " + senderSessionID + " on " + sourceHostID + "] " + message
+		} else {
+			message = "[from " + senderSessionID + "] " + message
+		}
+	}
 	if c.remote != nil {
-		// Session IDs are host-local. Keep the readable source prefix above, but
-		// do not let the destination resolve a same-named local session as sender.
+		// Session IDs are host-local. Keep only the host-qualified readable source
+		// above; do not let the destination resolve a same-named local session.
 		senderSessionID = ""
 	}
 
