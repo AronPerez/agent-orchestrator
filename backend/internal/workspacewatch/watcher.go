@@ -43,6 +43,7 @@ var maxWatchedDirectories = 4096
 type dirWatchLimiter struct {
 	watcher   *fsnotify.Watcher
 	limit     int
+	degraded  chan<- struct{}
 	mu        sync.Mutex
 	watched   map[string]struct{}
 	used      int
@@ -50,8 +51,12 @@ type dirWatchLimiter struct {
 	lastError error
 }
 
-func newDirWatchLimiter(watcher *fsnotify.Watcher, limit int) *dirWatchLimiter {
-	return &dirWatchLimiter{watcher: watcher, limit: limit, watched: make(map[string]struct{})}
+func newDirWatchLimiter(watcher *fsnotify.Watcher, limit int, degraded ...chan<- struct{}) *dirWatchLimiter {
+	limiter := &dirWatchLimiter{watcher: watcher, limit: limit, watched: make(map[string]struct{})}
+	if len(degraded) > 0 {
+		limiter.degraded = degraded[0]
+	}
+	return limiter
 }
 
 // add registers dir if budget remains. It returns ctx.Err() when the context
@@ -66,12 +71,11 @@ func (l *dirWatchLimiter) add(ctx context.Context, dir string) error {
 		return nil
 	}
 	if l.used >= l.limit {
-		l.skipped++
+		l.markDegradedLocked(nil)
 		return nil
 	}
 	if err := l.watcher.Add(dir); err != nil {
-		l.skipped++
-		l.lastError = err
+		l.markDegradedLocked(err)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -80,6 +84,19 @@ func (l *dirWatchLimiter) add(ctx context.Context, dir string) error {
 	l.watched[dir] = struct{}{}
 	l.used++
 	return nil
+}
+
+func (l *dirWatchLimiter) markDegradedLocked(err error) {
+	l.skipped++
+	if err != nil {
+		l.lastError = err
+	}
+	if l.degraded != nil {
+		select {
+		case l.degraded <- struct{}{}:
+		default:
+		}
+	}
 }
 
 // release drops the watch on dir and returns its budget so it can be reused.
@@ -113,13 +130,29 @@ func (l *dirWatchLimiter) warn(ctx context.Context, stage string) {
 	slog.WarnContext(ctx, "workspace watch skipped directories", "stage", stage, "skipped", skipped, "watch_limit", limit, "last_error", lastError)
 }
 
-// Watch subscribes to relevant changes below the workspace roots until ctx is cancelled. The
-// returned channel is intentionally edge-triggered and buffered by one: a burst
-// of editor writes only needs to tell the caller that its Git read model is
-// stale, not reproduce every low-level filesystem operation.
+// Subscription is a workspace invalidation stream plus a one-way coverage
+// warning. Degraded is edge-triggered when any directory cannot be watched;
+// once reported, callers should retain a bounded catch-up path until they
+// rebuild the subscription.
+type Subscription struct {
+	Changes  <-chan struct{}
+	Degraded <-chan struct{}
+}
+
+// Watch subscribes to relevant changes below the workspace roots until ctx is
+// cancelled. Existing callers only need invalidation edges; consumers that
+// must recover from partial coverage use WatchWithStatus.
 func Watch(ctx context.Context, roots ...string) (<-chan struct{}, error) {
+	subscription, err := WatchWithStatus(ctx, roots...)
+	return subscription.Changes, err
+}
+
+// WatchWithStatus is Watch plus a degraded-coverage stream. Both returned
+// channels close when the context is cancelled or every underlying watcher
+// stops.
+func WatchWithStatus(ctx context.Context, roots ...string) (Subscription, error) {
 	if len(roots) == 0 {
-		return nil, fmt.Errorf("at least one workspace path is required")
+		return Subscription{}, fmt.Errorf("at least one workspace path is required")
 	}
 
 	unique := make(map[string]struct{}, len(roots))
@@ -127,7 +160,7 @@ func Watch(ctx context.Context, roots ...string) (<-chan struct{}, error) {
 	for _, root := range roots {
 		cleanRoot, err := filepath.Abs(root)
 		if err != nil {
-			return nil, fmt.Errorf("resolve workspace path: %w", err)
+			return Subscription{}, fmt.Errorf("resolve workspace path: %w", err)
 		}
 		if _, seen := unique[cleanRoot]; seen {
 			continue
@@ -140,35 +173,54 @@ func Watch(ctx context.Context, roots ...string) (<-chan struct{}, error) {
 	}
 
 	watchCtx, cancel := context.WithCancel(ctx)
-	sources := make([]<-chan struct{}, 0, len(uniqueRoots))
+	sources := make([]Subscription, 0, len(uniqueRoots))
 	for _, cleanRoot := range uniqueRoots {
 		source, err := watchRoot(watchCtx, cleanRoot, nil)
 		if err != nil {
 			cancel()
-			return nil, err
+			return Subscription{}, err
 		}
 		sources = append(sources, source)
 	}
 	changes := make(chan struct{}, 1)
+	degraded := make(chan struct{}, 1)
 	var group sync.WaitGroup
 	group.Add(len(sources))
 	for _, source := range sources {
-		go func() {
+		go func(source Subscription) {
 			defer group.Done()
-			for range source {
+			changeSource, degradedSource := source.Changes, source.Degraded
+			for changeSource != nil || degradedSource != nil {
 				select {
-				case changes <- struct{}{}:
-				default:
+				case _, ok := <-changeSource:
+					if !ok {
+						changeSource = nil
+						continue
+					}
+					select {
+					case changes <- struct{}{}:
+					default:
+					}
+				case _, ok := <-degradedSource:
+					if !ok {
+						degradedSource = nil
+						continue
+					}
+					select {
+					case degraded <- struct{}{}:
+					default:
+					}
 				}
 			}
-		}()
+		}(source)
 	}
 	go func() {
 		group.Wait()
 		cancel()
 		close(changes)
+		close(degraded)
 	}()
-	return changes, nil
+	return Subscription{Changes: changes, Degraded: degraded}, nil
 }
 
 // WatchSkipping is Watch for one root, leaving out the entries skip names:
@@ -178,39 +230,41 @@ func Watch(ctx context.Context, roots ...string) (<-chan struct{}, error) {
 // file in a watched directory and maxWatchedDirectories counts directories, so
 // a directory of generated files must be skipped, not merely ignored.
 func WatchSkipping(ctx context.Context, root string, skip func(rel string) bool) (<-chan struct{}, error) {
-	return watchRoot(ctx, root, skip)
+	subscription, err := watchRoot(ctx, root, skip)
+	return subscription.Changes, err
 }
 
-func watchRoot(ctx context.Context, root string, skip func(rel string) bool) (<-chan struct{}, error) {
+func watchRoot(ctx context.Context, root string, skip func(rel string) bool) (Subscription, error) {
 	root, err := filepath.Abs(root)
 	if err != nil {
-		return nil, fmt.Errorf("resolve workspace path: %w", err)
+		return Subscription{}, fmt.Errorf("resolve workspace path: %w", err)
 	}
 	info, err := os.Stat(root)
 	if err != nil {
-		return nil, fmt.Errorf("stat workspace path: %w", err)
+		return Subscription{}, fmt.Errorf("stat workspace path: %w", err)
 	}
 	if !info.IsDir() {
-		return nil, fmt.Errorf("workspace path is not a directory")
+		return Subscription{}, fmt.Errorf("workspace path is not a directory")
 	}
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		return nil, fmt.Errorf("create workspace watcher: %w", err)
+		return Subscription{}, fmt.Errorf("create workspace watcher: %w", err)
 	}
 
 	git := discoverGitWorkspace(ctx, root)
 	git.skip = skip
-	limiter := newDirWatchLimiter(watcher, maxWatchedDirectories)
+	degraded := make(chan struct{}, 1)
+	limiter := newDirWatchLimiter(watcher, maxWatchedDirectories, degraded)
 	if err := addInitialDirectories(ctx, limiter, root, git); err != nil {
 		_ = watcher.Close()
-		return nil, err
+		return Subscription{}, err
 	}
 	limiter.warn(ctx, "initial")
 
 	changes := make(chan struct{}, 1)
-	go run(ctx, watcher, root, git, limiter, changes)
-	return changes, nil
+	go run(ctx, watcher, root, git, limiter, changes, degraded)
+	return Subscription{Changes: changes, Degraded: degraded}, nil
 }
 
 type gitWorkspace struct {
@@ -353,10 +407,6 @@ func addInitialDirectories(ctx context.Context, limiter *dirWatchLimiter, root s
 		}
 		return ordered[i] < ordered[j]
 	})
-	if len(ordered) > maxWatchedDirectories {
-		ordered = ordered[:maxWatchedDirectories]
-	}
-
 	for _, dir := range ordered {
 		if err := limiter.add(ctx, dir); err != nil {
 			return err
@@ -373,8 +423,9 @@ func directoryDepth(root, dir string) int {
 	return strings.Count(rel, string(filepath.Separator)) + 1
 }
 
-func run(ctx context.Context, watcher *fsnotify.Watcher, root string, git gitWorkspace, limiter *dirWatchLimiter, changes chan struct{}) {
+func run(ctx context.Context, watcher *fsnotify.Watcher, root string, git gitWorkspace, limiter *dirWatchLimiter, changes, degraded chan struct{}) {
 	defer close(changes)
+	defer close(degraded)
 	defer func() { _ = watcher.Close() }()
 	defer limiter.warn(ctx, "runtime")
 	notify := func() {

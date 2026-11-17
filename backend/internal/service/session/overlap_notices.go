@@ -2,11 +2,14 @@ package session
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessionguard"
@@ -14,8 +17,10 @@ import (
 )
 
 const (
-	maxProjectOverlapNoticePaths = 20
-	maxProjectOverlapNoticePath  = 240
+	maxProjectOverlapNoticePaths          = 20
+	maxProjectOverlapNoticePath           = 240
+	defaultProjectOverlapNoticeRetryDelay = 15 * time.Second
+	defaultProjectOverlapNoticeTimeout    = 30 * time.Second
 )
 
 type projectOverlapNoticeStore interface {
@@ -30,6 +35,16 @@ type projectOverlapNoticeKey struct {
 	peerSessionID domain.SessionID
 }
 
+type projectOverlapNoticeReconcileState struct {
+	retry             bool
+	coverageUncertain bool
+}
+
+type projectOverlapRadarWorker struct {
+	cancel  context.CancelFunc
+	refresh chan struct{}
+}
+
 // ReconcileActiveProjectOverlapNotices detects and retries notices without an
 // overlap reader. RunProjectOverlapNoticeRadar invokes it only for workspace or
 // session events; collision detection does not poll worktrees on a timer.
@@ -37,16 +52,37 @@ func (s *Service) ReconcileActiveProjectOverlapNotices(ctx context.Context) erro
 	if _, ok := s.store.(projectOverlapNoticeStore); !ok || s.overlapNudger == nil {
 		return nil
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	projectIDs, err := s.activeProjectOverlapIDs(ctx)
 	if err != nil {
 		return err
 	}
-	var reconcileErrors []error
+	var (
+		group           sync.WaitGroup
+		limit           = make(chan struct{}, 4)
+		reconcileMu     sync.Mutex
+		reconcileErrors []error
+	)
 	for _, projectID := range projectIDs {
-		if err := s.ReconcileCurrentProjectOverlapNotices(ctx, projectID); err != nil {
-			reconcileErrors = append(reconcileErrors, fmt.Errorf("reconcile collision notices for %s: %w", projectID, err))
-		}
+		group.Add(1)
+		go func(projectID domain.ProjectID) {
+			defer group.Done()
+			select {
+			case limit <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			defer func() { <-limit }()
+			if err := s.ReconcileCurrentProjectOverlapNotices(ctx, projectID); err != nil {
+				reconcileMu.Lock()
+				reconcileErrors = append(reconcileErrors, fmt.Errorf("reconcile collision notices for %s: %w", projectID, err))
+				reconcileMu.Unlock()
+			}
+		}(projectID)
 	}
+	group.Wait()
 	return errors.Join(reconcileErrors...)
 }
 
@@ -58,102 +94,273 @@ func (s *Service) activeProjectOverlapIDs(ctx context.Context) ([]domain.Project
 	if err != nil {
 		return nil, fmt.Errorf("list sessions for collision notices: %w", err)
 	}
-	projectSet := make(map[domain.ProjectID]struct{})
+	projectCounts := make(map[domain.ProjectID]int)
 	for _, record := range records {
 		if record.ProjectID != "" && eligibleProjectOverlapSession(record) {
-			projectSet[record.ProjectID] = struct{}{}
+			projectCounts[record.ProjectID]++
 		}
 	}
-	projectIDs := make([]domain.ProjectID, 0, len(projectSet))
-	for projectID := range projectSet {
-		projectIDs = append(projectIDs, projectID)
+	projectIDs := make([]domain.ProjectID, 0, len(projectCounts))
+	for projectID, count := range projectCounts {
+		if count >= 2 {
+			projectIDs = append(projectIDs, projectID)
+		}
 	}
 	sort.Slice(projectIDs, func(i, j int) bool { return projectIDs[i] < projectIDs[j] })
 	return projectIDs, nil
 }
 
-func (s *Service) activeProjectOverlapWatchPaths(ctx context.Context) ([]string, error) {
-	projectIDs, err := s.activeProjectOverlapIDs(ctx)
-	if err != nil {
-		return nil, err
+// SignalProjectOverlapRadar coalesces refreshes without dropping project
+// identity. Daemon session/config callbacks call it synchronously after their
+// durable write; the radar drains the set in its own goroutine.
+func (s *Service) SignalProjectOverlapRadar(projectID domain.ProjectID) {
+	if projectID == "" {
+		return
 	}
-	seen := make(map[string]struct{})
-	var paths []string
-	for _, projectID := range projectIDs {
-		projectPaths, err := s.ProjectOverlapWatchPaths(ctx, projectID)
-		if err != nil {
-			return nil, err
-		}
-		for _, workspacePath := range projectPaths {
-			if _, ok := seen[workspacePath]; ok {
-				continue
-			}
-			seen[workspacePath] = struct{}{}
-			paths = append(paths, workspacePath)
-		}
+	s.overlapRadarSignalMu.Lock()
+	if s.overlapRadarPending == nil {
+		s.overlapRadarPending = make(map[domain.ProjectID]struct{})
 	}
-	sort.Strings(paths)
-	return paths, nil
+	s.overlapRadarPending[projectID] = struct{}{}
+	if s.overlapRadarWake == nil {
+		s.overlapRadarWake = make(chan struct{}, 1)
+	}
+	wake := s.overlapRadarWake
+	s.overlapRadarSignalMu.Unlock()
+	select {
+	case wake <- struct{}{}:
+	default:
+	}
 }
 
-// RunProjectOverlapNoticeRadar owns one aggregate filesystem watcher for all
-// active project worktrees. Session CDC edges rebuild its roots and also retry
-// recipients whose last delivery was suppressed by activity state.
-func (s *Service) RunProjectOverlapNoticeRadar(ctx context.Context, sessionChanges <-chan struct{}) {
+func (s *Service) takeProjectOverlapRadarSignals() []domain.ProjectID {
+	s.overlapRadarSignalMu.Lock()
+	defer s.overlapRadarSignalMu.Unlock()
+	projectIDs := make([]domain.ProjectID, 0, len(s.overlapRadarPending))
+	for projectID := range s.overlapRadarPending {
+		projectIDs = append(projectIDs, projectID)
+		delete(s.overlapRadarPending, projectID)
+	}
+	sort.Slice(projectIDs, func(i, j int) bool { return projectIDs[i] < projectIDs[j] })
+	return projectIDs
+}
+
+// RunProjectOverlapNoticeRadar owns one independent worker per active project.
+// Workspace events therefore retain project identity, and a slow delivery in
+// one project cannot delay detection in another.
+func (s *Service) RunProjectOverlapNoticeRadar(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	workers := make(map[domain.ProjectID]projectOverlapRadarWorker)
+	var workerGroup sync.WaitGroup
+	defer func() {
+		for _, worker := range workers {
+			worker.cancel()
+		}
+		workerGroup.Wait()
+	}()
+	syncWorkers := func() error {
+		projectIDs, err := s.activeProjectOverlapIDs(ctx)
+		if err != nil {
+			return err
+		}
+		active := make(map[domain.ProjectID]struct{}, len(projectIDs))
+		for _, projectID := range projectIDs {
+			active[projectID] = struct{}{}
+			if _, ok := workers[projectID]; ok {
+				continue
+			}
+			workerCtx, cancel := context.WithCancel(ctx)
+			refresh := make(chan struct{}, 1)
+			workers[projectID] = projectOverlapRadarWorker{cancel: cancel, refresh: refresh}
+			workerGroup.Add(1)
+			go func() {
+				defer workerGroup.Done()
+				s.runProjectOverlapNoticeRadar(workerCtx, projectID, refresh)
+			}()
+		}
+		for projectID, worker := range workers {
+			if _, ok := active[projectID]; ok {
+				continue
+			}
+			worker.cancel()
+			delete(workers, projectID)
+		}
+		return nil
+	}
+	lastSyncFailed := false
+	if err := syncWorkers(); err != nil {
+		lastSyncFailed = true
+		s.logProjectOverlapNoticeError(ctx, "list collision radar projects", "", err)
+	}
 	for {
-		paths, pathErr := s.activeProjectOverlapWatchPaths(ctx)
-		if pathErr != nil && s.logger != nil && ctx.Err() == nil {
-			s.logger.Warn("list collision radar watch paths", "error", pathErr)
+		var retry <-chan time.Time
+		if lastSyncFailed {
+			retry = time.After(s.projectOverlapNoticeRetryDelay())
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-retry:
+			if err := syncWorkers(); err != nil {
+				s.logProjectOverlapNoticeError(ctx, "list collision radar projects", "", err)
+				lastSyncFailed = true
+			} else {
+				lastSyncFailed = false
+			}
+		case <-s.overlapRadarWake:
+			projectIDs := s.takeProjectOverlapRadarSignals()
+			if err := syncWorkers(); err != nil {
+				s.logProjectOverlapNoticeError(ctx, "list collision radar projects", "", err)
+				lastSyncFailed = true
+			} else {
+				lastSyncFailed = false
+			}
+			for _, projectID := range projectIDs {
+				worker, ok := workers[projectID]
+				if !ok {
+					continue
+				}
+				select {
+				case worker.refresh <- struct{}{}:
+				default:
+				}
+			}
+		}
+	}
+}
+
+func (s *Service) runProjectOverlapNoticeRadar(ctx context.Context, projectID domain.ProjectID, refresh <-chan struct{}) {
+	for {
+		paths, pathErr := s.ProjectOverlapWatchPaths(ctx, projectID)
+		if pathErr != nil {
+			s.logProjectOverlapNoticeError(ctx, "list collision radar watch paths", projectID, pathErr)
 		}
 		watchCtx, cancelWatch := context.WithCancel(ctx)
-		var workspaceChanges <-chan struct{}
-		if pathErr == nil && len(paths) > 0 {
+		subscription := workspacewatch.Subscription{}
+		watchFailed := pathErr != nil
+		if !watchFailed && len(paths) > 0 {
 			var watchErr error
-			workspaceChanges, watchErr = workspacewatch.Watch(watchCtx, paths...)
-			if watchErr != nil && s.logger != nil && ctx.Err() == nil {
-				s.logger.Warn("watch collision radar workspaces", "error", watchErr)
+			subscription, watchErr = s.overlapWatch(watchCtx, paths...)
+			if watchErr != nil {
+				watchFailed = true
+				s.logProjectOverlapNoticeError(ctx, "watch collision radar workspaces", projectID, watchErr)
 			}
 		}
 		// Install the watcher before the authoritative scan so an edit in the
 		// setup gap always leaves a later edge.
-		if err := s.ReconcileActiveProjectOverlapNotices(ctx); err != nil && s.logger != nil && ctx.Err() == nil {
-			s.logger.Warn("reconcile collision notices", "error", err)
-		}
+		state := s.reconcileProjectOverlapNoticeRadar(ctx, projectID)
+		coverageUncertain := watchFailed || state.coverageUncertain
+		retryNeeded := coverageUncertain || state.retry
+		retryTimer, retryC := s.resetProjectOverlapNoticeTimer(nil, retryNeeded)
 
-	waitForChange:
+	waitForProjectChange:
 		for {
 			select {
 			case <-ctx.Done():
 				cancelWatch()
+				s.stopProjectOverlapNoticeTimer(retryTimer)
 				return
-			case _, ok := <-sessionChanges:
+			case <-refresh:
 				cancelWatch()
+				s.stopProjectOverlapNoticeTimer(retryTimer)
+				break waitForProjectChange
+			case _, ok := <-subscription.Changes:
 				if !ok {
-					sessionChanges = nil
+					subscription.Changes = nil
+					coverageUncertain = true
+					retryTimer, retryC = s.resetProjectOverlapNoticeTimer(retryTimer, true)
+					continue
 				}
-				break waitForChange
-			case _, ok := <-workspaceChanges:
+				state = s.reconcileProjectOverlapNoticeRadar(ctx, projectID)
+				retryTimer, retryC = s.resetProjectOverlapNoticeTimer(retryTimer, coverageUncertain || state.coverageUncertain || state.retry)
+			case _, ok := <-subscription.Degraded:
 				if !ok {
+					subscription.Degraded = nil
+					continue
+				}
+				coverageUncertain = true
+				retryTimer, retryC = s.resetProjectOverlapNoticeTimer(retryTimer, true)
+			case <-retryC:
+				if coverageUncertain || state.coverageUncertain || watchFailed {
 					cancelWatch()
-					break waitForChange
+					s.stopProjectOverlapNoticeTimer(retryTimer)
+					break waitForProjectChange
 				}
-				if err := s.ReconcileActiveProjectOverlapNotices(ctx); err != nil && s.logger != nil && ctx.Err() == nil {
-					s.logger.Warn("reconcile collision notices", "error", err)
-				}
+				state = s.reconcileProjectOverlapNoticeRadar(ctx, projectID)
+				retryTimer, retryC = s.resetProjectOverlapNoticeTimer(retryTimer, state.coverageUncertain || state.retry)
 			}
 		}
 	}
+}
+
+func (s *Service) reconcileProjectOverlapNoticeRadar(ctx context.Context, projectID domain.ProjectID) projectOverlapNoticeReconcileState {
+	reconcileCtx, cancel := context.WithTimeout(ctx, s.projectOverlapNoticeTimeout())
+	defer cancel()
+	state, err := s.reconcileCurrentProjectOverlapNotices(reconcileCtx, projectID)
+	if err != nil && ctx.Err() == nil {
+		state.retry = true
+		s.logProjectOverlapNoticeError(ctx, "reconcile collision notices", projectID, err)
+	}
+	return state
+}
+
+func (s *Service) projectOverlapNoticeRetryDelay() time.Duration {
+	if s.overlapNoticeRetryDelay <= 0 {
+		return defaultProjectOverlapNoticeRetryDelay
+	}
+	return s.overlapNoticeRetryDelay
+}
+
+func (s *Service) projectOverlapNoticeTimeout() time.Duration {
+	if s.overlapNoticeTimeout <= 0 {
+		return defaultProjectOverlapNoticeTimeout
+	}
+	return s.overlapNoticeTimeout
+}
+
+func (s *Service) resetProjectOverlapNoticeTimer(timer *time.Timer, enabled bool) (*time.Timer, <-chan time.Time) {
+	s.stopProjectOverlapNoticeTimer(timer)
+	if !enabled {
+		return nil, nil
+	}
+	timer = time.NewTimer(s.projectOverlapNoticeRetryDelay())
+	return timer, timer.C
+}
+
+func (s *Service) stopProjectOverlapNoticeTimer(timer *time.Timer) {
+	if timer == nil || timer.Stop() {
+		return
+	}
+	select {
+	case <-timer.C:
+	default:
+	}
+}
+
+func (s *Service) logProjectOverlapNoticeError(ctx context.Context, message string, projectID domain.ProjectID, err error) {
+	if s.logger == nil || err == nil || ctx.Err() != nil {
+		return
+	}
+	if projectID == "" {
+		s.logger.WarnContext(ctx, message, "error", err)
+		return
+	}
+	s.logger.WarnContext(ctx, message, "projectID", projectID, "error", err)
 }
 
 // ReconcileCurrentProjectOverlapNotices serializes the authoritative overlap
 // read with delivery reconciliation, making completion order irrelevant.
 func (s *Service) ReconcileCurrentProjectOverlapNotices(ctx context.Context, projectID domain.ProjectID) error {
+	_, err := s.reconcileCurrentProjectOverlapNotices(ctx, projectID)
+	return err
+}
+
+func (s *Service) reconcileCurrentProjectOverlapNotices(ctx context.Context, projectID domain.ProjectID) (projectOverlapNoticeReconcileState, error) {
 	store, ok := s.store.(projectOverlapNoticeStore)
 	if !ok || s.overlapNudger == nil || projectID == "" {
-		return nil
+		return projectOverlapNoticeReconcileState{}, nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -162,9 +369,11 @@ func (s *Service) ReconcileCurrentProjectOverlapNotices(ctx context.Context, pro
 	defer unlock()
 	result, err := s.ProjectOverlaps(ctx, projectID)
 	if err != nil {
-		return err
+		return projectOverlapNoticeReconcileState{}, err
 	}
-	return s.reconcileProjectOverlapNoticesLocked(ctx, store, result)
+	state, err := s.reconcileProjectOverlapNoticesLocked(ctx, store, result)
+	state.coverageUncertain = len(result.UnavailableSessionIDs) > 0
+	return state, err
 }
 
 // reconcileProjectOverlapNotices is the snapshot-level unit-test boundary.
@@ -180,13 +389,15 @@ func (s *Service) reconcileProjectOverlapNotices(ctx context.Context, result Pro
 	}
 	unlock := s.lockProjectOverlapNotices(result.ProjectID)
 	defer unlock()
-	return s.reconcileProjectOverlapNoticesLocked(ctx, store, result)
+	_, err := s.reconcileProjectOverlapNoticesLocked(ctx, store, result)
+	return err
 }
 
-func (s *Service) reconcileProjectOverlapNoticesLocked(ctx context.Context, store projectOverlapNoticeStore, result ProjectOverlapResult) error {
+func (s *Service) reconcileProjectOverlapNoticesLocked(ctx context.Context, store projectOverlapNoticeStore, result ProjectOverlapResult) (projectOverlapNoticeReconcileState, error) {
+	state := projectOverlapNoticeReconcileState{}
 	persisted, err := store.ListProjectSessionOverlapNotices(ctx, result.ProjectID)
 	if err != nil {
-		return err
+		return state, err
 	}
 	var reconcileErr error
 	recordError := func(err error) {
@@ -211,6 +422,7 @@ func (s *Service) reconcileProjectOverlapNoticesLocked(ctx context.Context, stor
 		key := projectOverlapNoticeKey{projectID: result.ProjectID, sessionID: notice.SessionID, peerSessionID: notice.PeerSessionID}
 		if _, stillActive := active[key]; stillActive {
 			delivered[key] = struct{}{}
+			s.deleteProjectOverlapNoticeAttempt(key)
 			continue
 		}
 		_, recipientIncomplete := incomplete[key.sessionID]
@@ -219,10 +431,14 @@ func (s *Service) reconcileProjectOverlapNoticesLocked(ctx context.Context, stor
 			// An incomplete scan cannot prove this directed pair cleared. Keep
 			// its delivery row so a transient read failure does not resend it.
 			delivered[key] = struct{}{}
+			s.deleteProjectOverlapNoticeAttempt(key)
 			continue
 		}
 		if err := store.DeleteSessionOverlapNotice(ctx, notice.SessionID, notice.PeerSessionID); err != nil {
+			state.retry = true
 			recordError(err)
+		} else {
+			s.deleteProjectOverlapNoticeAttempt(key)
 		}
 	}
 	for key, notice := range s.pendingProjectOverlapNotices(result.ProjectID) {
@@ -231,13 +447,16 @@ func (s *Service) reconcileProjectOverlapNoticesLocked(ctx context.Context, stor
 		_, peerIncomplete := incomplete[key.peerSessionID]
 		if !stillActive && !recipientIncomplete && !peerIncomplete {
 			s.deletePendingProjectOverlapNotice(key)
+			s.deleteProjectOverlapNoticeAttempt(key)
 			continue
 		}
 		delivered[key] = struct{}{}
 		if err := store.UpsertSessionOverlapNotice(ctx, notice); err != nil {
+			state.retry = true
 			recordError(err)
 		} else {
 			s.deletePendingProjectOverlapNotice(key)
+			s.deleteProjectOverlapNoticeAttempt(key)
 		}
 	}
 
@@ -251,30 +470,65 @@ func (s *Service) reconcileProjectOverlapNoticesLocked(ctx context.Context, stor
 			}
 			peer, found, err := s.store.GetSession(ctx, key.peerSessionID)
 			if err != nil {
+				state.retry = true
 				recordError(fmt.Errorf("load collision peer %s: %w", key.peerSessionID, err))
 				continue
 			}
 			if !found || peer.IsTerminated {
+				s.deleteProjectOverlapNoticeAttempt(key)
 				continue
 			}
 			message := formatProjectOverlapNotice(peer.DisplayName, peer.ID, overlap.Paths)
-			outcome, nudgeErr := s.overlapNudger.NudgeCoordination(ctx, key.sessionID, message)
+			deliveryID := s.projectOverlapNoticeAttemptID(key)
+			outcome, nudgeErr := s.overlapNudger.NudgeCoordination(ctx, key.sessionID, message, deliveryID)
 			if outcome == sessionguard.Sent && nudgeErr == nil {
 				delivered[key] = struct{}{}
 				notice := domain.SessionOverlapNotice{SessionID: key.sessionID, PeerSessionID: key.peerSessionID, NotifiedAt: s.clock().UTC()}
 				if err := store.UpsertSessionOverlapNotice(ctx, notice); err != nil {
 					s.setPendingProjectOverlapNotice(key, notice)
+					s.deleteProjectOverlapNoticeAttempt(key)
+					state.retry = true
 					recordError(err)
 				} else {
 					s.deletePendingProjectOverlapNotice(key)
+					s.deleteProjectOverlapNoticeAttempt(key)
 				}
+			} else {
+				state.retry = true
 			}
 			if nudgeErr != nil {
 				recordError(fmt.Errorf("nudge collision recipient %s: %w", key.sessionID, nudgeErr))
 			}
 		}
 	}
-	return reconcileErr
+	return state, reconcileErr
+}
+
+func (s *Service) projectOverlapNoticeAttemptID(key projectOverlapNoticeKey) string {
+	s.overlapNoticePendingMu.Lock()
+	defer s.overlapNoticePendingMu.Unlock()
+	if deliveryID := s.overlapNoticeAttempts[key]; deliveryID != "" {
+		return deliveryID
+	}
+	if s.overlapNoticeAttempts == nil {
+		s.overlapNoticeAttempts = make(map[projectOverlapNoticeKey]string)
+	}
+	var token [12]byte
+	if _, err := rand.Read(token[:]); err == nil {
+		deliveryID := "collision:" + hex.EncodeToString(token[:])
+		s.overlapNoticeAttempts[key] = deliveryID
+		return deliveryID
+	}
+	s.overlapNoticeAttemptSeq++
+	deliveryID := fmt.Sprintf("collision:%x:%x", s.clock().UnixNano(), s.overlapNoticeAttemptSeq)
+	s.overlapNoticeAttempts[key] = deliveryID
+	return deliveryID
+}
+
+func (s *Service) deleteProjectOverlapNoticeAttempt(key projectOverlapNoticeKey) {
+	s.overlapNoticePendingMu.Lock()
+	defer s.overlapNoticePendingMu.Unlock()
+	delete(s.overlapNoticeAttempts, key)
 }
 
 func (s *Service) pendingProjectOverlapNotices(projectID domain.ProjectID) map[projectOverlapNoticeKey]domain.SessionOverlapNotice {

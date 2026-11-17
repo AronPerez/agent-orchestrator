@@ -6,12 +6,14 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessionguard"
+	"github.com/aoagents/agent-orchestrator/backend/internal/workspacewatch"
 )
 
 func TestProjectOverlapsReturnsSortedActivePairsAndHonorsIgnores(t *testing.T) {
@@ -515,7 +517,7 @@ func TestRunProjectOverlapNoticeRadarDetectsWorkspaceChangeWithoutReader(t *test
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		svc.RunProjectOverlapNoticeRadar(ctx, make(chan struct{}))
+		svc.RunProjectOverlapNoticeRadar(ctx)
 		close(done)
 	}()
 
@@ -562,9 +564,8 @@ func TestRunProjectOverlapNoticeRadarRetriesSuppressedRecipientAfterSessionChang
 	svc := NewWithDeps(Deps{Store: store, OverlapNudger: nudger})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	sessionChanges := make(chan struct{}, 1)
 	go func() {
-		svc.RunProjectOverlapNoticeRadar(ctx, sessionChanges)
+		svc.RunProjectOverlapNoticeRadar(ctx)
 		close(done)
 	}()
 
@@ -577,7 +578,7 @@ func TestRunProjectOverlapNoticeRadarRetriesSuppressedRecipientAfterSessionChang
 			t.Fatal("daemon-owned radar did not finish its initial delivery")
 		}
 	}
-	sessionChanges <- struct{}{}
+	svc.SignalProjectOverlapRadar("demo")
 	select {
 	case call := <-nudger.callCh:
 		if call.sessionID != "demo-a" {
@@ -593,6 +594,292 @@ func TestRunProjectOverlapNoticeRadarRetriesSuppressedRecipientAfterSessionChang
 	if len(store.notices) != 2 {
 		t.Fatalf("notices = %+v, want both directions after activity retry", store.notices)
 	}
+}
+
+func TestRunProjectOverlapNoticeRadarRetriesDefiniteRefusalWithoutAnotherEvent(t *testing.T) {
+	first := newWorkspaceRepo(t)
+	second := newWorkspaceRepo(t)
+	writeWorkspaceFile(t, first, "shared.go", "first\n")
+	writeWorkspaceFile(t, second, "shared.go", "second\n")
+	store := newMemoryOverlapNoticeStore()
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+	store.sessions["demo-a"] = overlapSession("demo-a", first)
+	store.sessions["demo-b"] = overlapSession("demo-b", second)
+	nudger := &recordingOverlapNudger{
+		callCh:   make(chan overlapNudgeCall, 3),
+		outcomes: map[domain.SessionID][]sessionguard.Outcome{"demo-a": {sessionguard.Sent, sessionguard.Sent}},
+		errors:   map[domain.SessionID][]error{"demo-a": {errors.New("composer busy"), nil}},
+	}
+	svc := NewWithDeps(Deps{Store: store, OverlapNudger: nudger})
+	svc.overlapNoticeRetryDelay = 10 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		svc.RunProjectOverlapNoticeRadar(ctx)
+		close(done)
+	}()
+
+	var calls []overlapNudgeCall
+	for range 3 {
+		select {
+		case call := <-nudger.callCh:
+			calls = append(calls, call)
+		case <-time.After(3 * time.Second):
+			cancel()
+			<-done
+			t.Fatal("definitely unsent notice was not retried by the bounded timer")
+		}
+	}
+	cancel()
+	<-done
+	if calls[2].sessionID != "demo-a" {
+		t.Fatalf("retried session = %s, want refused demo-a", calls[2].sessionID)
+	}
+}
+
+func TestRunProjectOverlapNoticeRadarReconcilesConfigOnlyChange(t *testing.T) {
+	first := newWorkspaceRepo(t)
+	second := newWorkspaceRepo(t)
+	writeWorkspaceFile(t, first, "shared.go", "first\n")
+	writeWorkspaceFile(t, second, "shared.go", "second\n")
+	store := newMemoryOverlapNoticeStore()
+	store.listNoticeCh = make(chan struct{}, 1)
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo", Config: domain.ProjectConfig{CollisionRadar: domain.CollisionRadarConfig{IgnorePaths: []string{"shared.go"}}}}
+	store.sessions["demo-a"] = overlapSession("demo-a", first)
+	store.sessions["demo-b"] = overlapSession("demo-b", second)
+	nudger := &recordingOverlapNudger{callCh: make(chan overlapNudgeCall, 2)}
+	svc := NewWithDeps(Deps{Store: store, OverlapNudger: nudger})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		svc.RunProjectOverlapNoticeRadar(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-store.listNoticeCh:
+	case <-time.After(3 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("radar did not finish the ignored-overlap scan")
+	}
+	project := store.projects["demo"]
+	project.Config.CollisionRadar.IgnorePaths = nil
+	store.projects["demo"] = project
+	svc.SignalProjectOverlapRadar("demo")
+	for range 2 {
+		select {
+		case <-nudger.callCh:
+		case <-time.After(3 * time.Second):
+			cancel()
+			<-done
+			t.Fatal("config-only overlap change did not deliver notices")
+		}
+	}
+	cancel()
+	<-done
+}
+
+func TestRunProjectOverlapNoticeRadarRecoversRestoredWorkspace(t *testing.T) {
+	first := newWorkspaceRepo(t)
+	second := newWorkspaceRepo(t)
+	writeWorkspaceFile(t, first, "shared.go", "first\n")
+	writeWorkspaceFile(t, second, "shared.go", "second\n")
+	parked := second + "-parked"
+	if err := os.Rename(second, parked); err != nil {
+		t.Fatalf("park workspace: %v", err)
+	}
+	store := newMemoryOverlapNoticeStore()
+	store.listNoticeCh = make(chan struct{}, 1)
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+	store.sessions["demo-a"] = overlapSession("demo-a", first)
+	store.sessions["demo-b"] = overlapSession("demo-b", second)
+	nudger := &recordingOverlapNudger{callCh: make(chan overlapNudgeCall, 2)}
+	svc := NewWithDeps(Deps{Store: store, OverlapNudger: nudger})
+	svc.overlapNoticeRetryDelay = 10 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		svc.RunProjectOverlapNoticeRadar(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-store.listNoticeCh:
+	case <-time.After(3 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("radar did not finish its missing-workspace scan")
+	}
+	if err := os.Rename(parked, second); err != nil {
+		cancel()
+		<-done
+		t.Fatalf("restore workspace: %v", err)
+	}
+	for range 2 {
+		select {
+		case <-nudger.callCh:
+		case <-time.After(3 * time.Second):
+			cancel()
+			<-done
+			t.Fatal("restored workspace was not discovered by bounded catch-up")
+		}
+	}
+	cancel()
+	<-done
+}
+
+func TestRunProjectOverlapNoticeRadarRetriesWatcherSetup(t *testing.T) {
+	first := newWorkspaceRepo(t)
+	second := newWorkspaceRepo(t)
+	writeWorkspaceFile(t, first, "shared.go", "first\n")
+	store := newMemoryOverlapNoticeStore()
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+	store.sessions["demo-a"] = overlapSession("demo-a", first)
+	store.sessions["demo-b"] = overlapSession("demo-b", second)
+	nudger := &recordingOverlapNudger{callCh: make(chan overlapNudgeCall, 2)}
+	svc := NewWithDeps(Deps{Store: store, OverlapNudger: nudger})
+	svc.overlapNoticeRetryDelay = 10 * time.Millisecond
+	watchCalls := make(chan int, 2)
+	var watchAttempt int
+	svc.overlapWatch = func(ctx context.Context, paths ...string) (workspacewatch.Subscription, error) {
+		watchAttempt++
+		watchCalls <- watchAttempt
+		if watchAttempt == 1 {
+			return workspacewatch.Subscription{}, errors.New("watch descriptors exhausted")
+		}
+		return workspacewatch.WatchWithStatus(ctx, paths...)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		svc.RunProjectOverlapNoticeRadar(ctx)
+		close(done)
+	}()
+
+	select {
+	case attempt := <-watchCalls:
+		if attempt != 1 {
+			t.Fatalf("first watch attempt = %d, want 1", attempt)
+		}
+	case <-time.After(3 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("radar did not attempt watcher setup")
+	}
+	writeWorkspaceFile(t, second, "shared.go", "second\n")
+	select {
+	case attempt := <-watchCalls:
+		if attempt != 2 {
+			t.Fatalf("retried watch attempt = %d, want 2", attempt)
+		}
+	case <-time.After(3 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("radar did not retry failed watcher setup")
+	}
+	for range 2 {
+		select {
+		case <-nudger.callCh:
+		case <-time.After(3 * time.Second):
+			cancel()
+			<-done
+			t.Fatal("watcher recovery did not reconcile the new overlap")
+		}
+	}
+	cancel()
+	<-done
+}
+
+func TestRunProjectOverlapNoticeRadarScopesWorkspaceEventsToProject(t *testing.T) {
+	store := newMemoryOverlapNoticeStore()
+	store.listProjectCh = make(chan domain.ProjectID, 4)
+	nudger := &recordingOverlapNudger{callCh: make(chan overlapNudgeCall, 2)}
+	for _, projectID := range []domain.ProjectID{"alpha", "beta"} {
+		first := newWorkspaceRepo(t)
+		second := newWorkspaceRepo(t)
+		writeWorkspaceFile(t, first, "shared.go", "first\n")
+		store.projects[string(projectID)] = domain.ProjectRecord{ID: string(projectID)}
+		store.sessions[domain.SessionID(string(projectID)+"-a")] = projectOverlapSession(domain.SessionID(string(projectID)+"-a"), projectID, first)
+		store.sessions[domain.SessionID(string(projectID)+"-b")] = projectOverlapSession(domain.SessionID(string(projectID)+"-b"), projectID, second)
+	}
+	svc := NewWithDeps(Deps{Store: store, OverlapNudger: nudger})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		svc.RunProjectOverlapNoticeRadar(ctx)
+		close(done)
+	}()
+
+	seen := map[domain.ProjectID]bool{}
+	for len(seen) < 2 {
+		select {
+		case projectID := <-store.listProjectCh:
+			seen[projectID] = true
+		case <-time.After(3 * time.Second):
+			cancel()
+			<-done
+			t.Fatal("radar did not initialize both project workers")
+		}
+	}
+	betaReads := store.listCalls("beta")
+	alphaSecond := store.sessions["alpha-b"].Metadata.WorkspacePath
+	writeWorkspaceFile(t, alphaSecond, "shared.go", "second\n")
+	for range 2 {
+		select {
+		case call := <-nudger.callCh:
+			if !strings.HasPrefix(string(call.sessionID), "alpha-") {
+				t.Fatalf("workspace event delivered to unrelated project session %s", call.sessionID)
+			}
+		case <-time.After(3 * time.Second):
+			cancel()
+			<-done
+			t.Fatal("alpha workspace event did not deliver")
+		}
+	}
+	cancel()
+	<-done
+	if got := store.listCalls("beta"); got != betaReads {
+		t.Fatalf("beta reconciles after alpha edit = %d, want unchanged %d", got, betaReads)
+	}
+}
+
+func TestRunProjectOverlapNoticeRadarIsolatesSlowProjects(t *testing.T) {
+	store := newMemoryOverlapNoticeStore()
+	for _, projectID := range []domain.ProjectID{"a-slow", "z-fast"} {
+		first := newWorkspaceRepo(t)
+		second := newWorkspaceRepo(t)
+		writeWorkspaceFile(t, first, "shared.go", "first\n")
+		writeWorkspaceFile(t, second, "shared.go", "second\n")
+		store.projects[string(projectID)] = domain.ProjectRecord{ID: string(projectID)}
+		store.sessions[domain.SessionID(string(projectID)+"-a")] = projectOverlapSession(domain.SessionID(string(projectID)+"-a"), projectID, first)
+		store.sessions[domain.SessionID(string(projectID)+"-b")] = projectOverlapSession(domain.SessionID(string(projectID)+"-b"), projectID, second)
+	}
+	nudger := &isolatingOverlapNudger{slowStarted: make(chan struct{}), fastSent: make(chan struct{}, 1)}
+	svc := NewWithDeps(Deps{Store: store, OverlapNudger: nudger})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		svc.RunProjectOverlapNoticeRadar(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-nudger.slowStarted:
+	case <-time.After(3 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("slow project never entered delivery")
+	}
+	select {
+	case <-nudger.fastSent:
+	case <-time.After(3 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("slow project blocked collision delivery for another project")
+	}
+	cancel()
+	<-done
 }
 
 func TestReconcileCurrentProjectOverlapNoticesSerializesConcurrentReads(t *testing.T) {
@@ -649,6 +936,9 @@ func TestReconcileProjectOverlapNoticesDoesNotRecordSentWithError(t *testing.T) 
 	if !store.hasNotice("demo-a", "demo-b") || len(nudger.calls) != 3 {
 		t.Fatalf("retry calls=%+v notices=%+v, want failed direction sent again", nudger.calls, store.notices)
 	}
+	if nudger.calls[0].deliveryID == "" || nudger.calls[0].deliveryID != nudger.calls[2].deliveryID {
+		t.Fatalf("ambiguous retry delivery ids = %q then %q, want one stable identity", nudger.calls[0].deliveryID, nudger.calls[2].deliveryID)
+	}
 }
 
 func TestReconcileProjectOverlapNoticesDedupesSuccessfulSendWhilePersistenceRetries(t *testing.T) {
@@ -694,20 +984,35 @@ type overlapNoticeKey struct {
 
 type memoryOverlapNoticeStore struct {
 	*fakeStore
-	notices      map[overlapNoticeKey]domain.SessionOverlapNotice
-	upsertErrors []error
-	upsertCalls  int
-	listNoticeCh chan struct{}
+	mu            sync.Mutex
+	notices       map[overlapNoticeKey]domain.SessionOverlapNotice
+	upsertErrors  []error
+	upsertCalls   int
+	listNoticeCh  chan struct{}
+	listProjectCh chan domain.ProjectID
+	listCounts    map[domain.ProjectID]int
 }
 
 func newMemoryOverlapNoticeStore() *memoryOverlapNoticeStore {
-	return &memoryOverlapNoticeStore{fakeStore: newFakeStore(), notices: map[overlapNoticeKey]domain.SessionOverlapNotice{}}
+	return &memoryOverlapNoticeStore{
+		fakeStore:  newFakeStore(),
+		notices:    map[overlapNoticeKey]domain.SessionOverlapNotice{},
+		listCounts: map[domain.ProjectID]int{},
+	}
 }
 
 func (s *memoryOverlapNoticeStore) ListProjectSessionOverlapNotices(_ context.Context, projectID domain.ProjectID) ([]domain.SessionOverlapNotice, error) {
+	s.mu.Lock()
+	s.listCounts[projectID]++
 	if s.listNoticeCh != nil {
 		select {
 		case s.listNoticeCh <- struct{}{}:
+		default:
+		}
+	}
+	if s.listProjectCh != nil {
+		select {
+		case s.listProjectCh <- projectID:
 		default:
 		}
 	}
@@ -717,10 +1022,13 @@ func (s *memoryOverlapNoticeStore) ListProjectSessionOverlapNotices(_ context.Co
 			result = append(result, notice)
 		}
 	}
+	s.mu.Unlock()
 	return result, nil
 }
 
 func (s *memoryOverlapNoticeStore) UpsertSessionOverlapNotice(_ context.Context, notice domain.SessionOverlapNotice) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.upsertCalls++
 	if len(s.upsertErrors) > 0 {
 		err := s.upsertErrors[0]
@@ -734,18 +1042,29 @@ func (s *memoryOverlapNoticeStore) UpsertSessionOverlapNotice(_ context.Context,
 }
 
 func (s *memoryOverlapNoticeStore) DeleteSessionOverlapNotice(_ context.Context, sessionID, peerSessionID domain.SessionID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	delete(s.notices, overlapNoticeKey{sessionID: sessionID, peerSessionID: peerSessionID})
 	return nil
 }
 
 func (s *memoryOverlapNoticeStore) hasNotice(sessionID, peerSessionID domain.SessionID) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	_, ok := s.notices[overlapNoticeKey{sessionID: sessionID, peerSessionID: peerSessionID}]
 	return ok
 }
 
+func (s *memoryOverlapNoticeStore) listCalls(projectID domain.ProjectID) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.listCounts[projectID]
+}
+
 type overlapNudgeCall struct {
-	sessionID domain.SessionID
-	message   string
+	sessionID  domain.SessionID
+	message    string
+	deliveryID string
 }
 
 type recordingOverlapNudger struct {
@@ -755,8 +1074,8 @@ type recordingOverlapNudger struct {
 	callCh   chan overlapNudgeCall
 }
 
-func (n *recordingOverlapNudger) NudgeCoordination(_ context.Context, sessionID domain.SessionID, message string) (sessionguard.Outcome, error) {
-	call := overlapNudgeCall{sessionID: sessionID, message: message}
+func (n *recordingOverlapNudger) NudgeCoordination(_ context.Context, sessionID domain.SessionID, message, deliveryID string) (sessionguard.Outcome, error) {
+	call := overlapNudgeCall{sessionID: sessionID, message: message, deliveryID: deliveryID}
 	n.calls = append(n.calls, call)
 	if n.callCh != nil {
 		n.callCh <- call
@@ -773,10 +1092,33 @@ func (n *recordingOverlapNudger) NudgeCoordination(_ context.Context, sessionID 
 	return sessionguard.Sent, err
 }
 
+type isolatingOverlapNudger struct {
+	slowOnce    sync.Once
+	slowStarted chan struct{}
+	fastSent    chan struct{}
+}
+
+func (n *isolatingOverlapNudger) NudgeCoordination(ctx context.Context, sessionID domain.SessionID, _, _ string) (sessionguard.Outcome, error) {
+	if strings.HasPrefix(string(sessionID), "a-slow-") {
+		n.slowOnce.Do(func() { close(n.slowStarted) })
+		<-ctx.Done()
+		return sessionguard.Sent, ctx.Err()
+	}
+	select {
+	case n.fastSent <- struct{}{}:
+	default:
+	}
+	return sessionguard.Sent, nil
+}
+
 func overlapSession(id domain.SessionID, workspace string) domain.SessionRecord {
+	return projectOverlapSession(id, "demo", workspace)
+}
+
+func projectOverlapSession(id domain.SessionID, projectID domain.ProjectID, workspace string) domain.SessionRecord {
 	return domain.SessionRecord{
 		ID:        id,
-		ProjectID: "demo",
+		ProjectID: projectID,
 		Kind:      domain.KindWorker,
 		Metadata:  domain.SessionMetadata{WorkspacePath: workspace},
 		Activity:  domain.Activity{State: domain.ActivityActive},

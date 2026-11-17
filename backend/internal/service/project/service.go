@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -82,14 +83,15 @@ type autoSpawnPauser interface {
 
 // Service implements project registration and lookup use-cases for controllers.
 type Service struct {
-	store          Store
-	sessions       SessionTeardowner
-	clock          func() time.Time
-	telemetry      ports.EventSink
-	milestones     ports.InstallMilestones
-	defaultHarness domain.AgentHarness
-	logger         *slog.Logger
-	githubRepos    ports.GitHubRepositoryResolver
+	store           Store
+	sessions        SessionTeardowner
+	clock           func() time.Time
+	telemetry       ports.EventSink
+	milestones      ports.InstallMilestones
+	defaultHarness  domain.AgentHarness
+	logger          *slog.Logger
+	githubRepos     ports.GitHubRepositoryResolver
+	onConfigChanged func(domain.ProjectID)
 	// addMu serialises the whole body of Add. Workspace registration performs
 	// filesystem mutations (git init, .gitignore writes, commits) that are not
 	// covered by the store's own writeMu, so path/id conflict checks plus the
@@ -119,6 +121,9 @@ type Deps struct {
 	// GitHubRepos resolves a github.com origin to its current owner/name so
 	// Get can report CanonicalRepo after a rename. Left nil, it is omitted.
 	GitHubRepos ports.GitHubRepositoryResolver
+	// OnConfigChanged is called after a successful collision-radar rule change.
+	// The daemon uses it to refresh only that project's overlap worker.
+	OnConfigChanged func(domain.ProjectID)
 }
 
 // New returns a project service backed by the given durable store.
@@ -133,14 +138,15 @@ func NewWithDeps(d Deps) *Service {
 		defaultHarness = domain.AgentHarness(config.DefaultAgent)
 	}
 	s := &Service{
-		store:          d.Store,
-		sessions:       d.Sessions,
-		clock:          d.Clock,
-		telemetry:      d.Telemetry,
-		milestones:     d.Milestones,
-		defaultHarness: defaultHarness,
-		logger:         d.Logger,
-		githubRepos:    d.GitHubRepos,
+		store:           d.Store,
+		sessions:        d.Sessions,
+		clock:           d.Clock,
+		telemetry:       d.Telemetry,
+		milestones:      d.Milestones,
+		defaultHarness:  defaultHarness,
+		logger:          d.Logger,
+		githubRepos:     d.GitHubRepos,
+		onConfigChanged: d.OnConfigChanged,
 	}
 	if s.clock == nil {
 		s.clock = time.Now
@@ -863,8 +869,10 @@ func (m *Service) UpdateSettings(ctx context.Context, id domain.ProjectID, in Up
 	if !updated {
 		return Project{}, apierr.NotFound("PROJECT_NOT_FOUND", "Unknown project")
 	}
+	previousConfig := row.Config
 	row.DisplayName = inDisplayName
 	row.Config = in.Config
+	m.notifyCollisionRadarConfigChange(id, previousConfig, in.Config)
 	return m.projectFromRow(ctx, row), nil
 }
 
@@ -892,11 +900,19 @@ func (m *Service) SetConfig(ctx context.Context, id domain.ProjectID, in SetConf
 	if err := in.Config.ValidateCanonicalRepository(row.RepoOriginURL); err != nil {
 		return Project{}, apierr.Invalid("INVALID_PROJECT_CONFIG", err.Error(), nil)
 	}
+	previousConfig := row.Config
 	row.Config = in.Config
 	if err := m.store.UpsertProject(ctx, row); err != nil {
 		return Project{}, apierr.Internal("PROJECT_CONFIG_UPDATE_FAILED", "Failed to update project config")
 	}
+	m.notifyCollisionRadarConfigChange(id, previousConfig, in.Config)
 	return m.projectFromRow(ctx, row), nil
+}
+
+func (m *Service) notifyCollisionRadarConfigChange(id domain.ProjectID, before, after domain.ProjectConfig) {
+	if m.onConfigChanged != nil && !slices.Equal(before.CollisionRadar.IgnorePaths, after.CollisionRadar.IgnorePaths) {
+		m.onConfigChanged(id)
+	}
 }
 
 func validateScratchProjectConfig(cfg domain.ProjectConfig) error {

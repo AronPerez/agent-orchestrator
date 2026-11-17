@@ -831,7 +831,7 @@ func Run(buildVersion string) (retErr error) {
 	if githubRepos != nil {
 		sessionSvc.SetGitHubRepositoryResolver(githubRepos)
 	}
-	projectSvc := projectsvc.NewWithDeps(projectsvc.Deps{Store: store, Sessions: sessionSvc, DefaultHarness: domain.AgentHarness(cfg.Agent), Telemetry: telemetrySink, Milestones: installMilestones(cfg), Logger: log, GitHubRepos: githubRepos})
+	projectSvc := projectsvc.NewWithDeps(projectsvc.Deps{Store: store, Sessions: sessionSvc, DefaultHarness: domain.AgentHarness(cfg.Agent), Telemetry: telemetrySink, Milestones: installMilestones(cfg), Logger: log, GitHubRepos: githubRepos, OnConfigChanged: sessionSvc.SignalProjectOverlapRadar})
 	go projectSvc.WarmCanonicalRepos(ctx)
 	reportSessions, ok := sessMgr.(reportSemanticSession)
 	if !ok {
@@ -1488,18 +1488,14 @@ func Run(buildVersion string) (retErr error) {
 			case <-ctx.Done():
 				return
 			}
-			sessionChanges := make(chan struct{}, 1)
 			unsubscribe := cdcPipe.Broadcaster.Subscribe(func(event cdc.Event) {
 				if event.Type != cdc.EventSessionCreated && event.Type != cdc.EventSessionUpdated {
 					return
 				}
-				select {
-				case sessionChanges <- struct{}{}:
-				default:
-				}
+				sessionSvc.SignalProjectOverlapRadar(domain.ProjectID(event.ProjectID))
 			})
 			defer unsubscribe()
-			sessionSvc.RunProjectOverlapNoticeRadar(ctx, sessionChanges)
+			sessionSvc.RunProjectOverlapNoticeRadar(ctx)
 		}()
 		go func() {
 			defer sentryobs.RecoverBackground()
