@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -24,27 +26,39 @@ import (
 type remoteTarget struct {
 	baseURL string
 	token   string
+	// label and hostID are populated only for a saved --host target. hostID is
+	// pinned on every authenticated request after an unauthenticated identity
+	// probe proves that the saved address still belongs to that installation.
+	label  string
+	hostID string
 	// source names where the URL came from ("--url" or "AO_URL") so an error can
 	// tell the user which one is pointing them off-box.
 	source string
 }
 
 // remotesFileName holds saved remote daemons under the AO home directory. It
-// carries connection passwords in plaintext, so it must be mode 0600.
+// carries credentials, so it must be mode 0600.
 const remotesFileName = "remotes.json"
 
-// remotesFile mirrors the mobile app's multi-node store
-// (packages/mobile/lib/config.ts): a list of saved nodes, each labelled, each
-// with its own connection password. The CLI has no OS keystore to split the
-// secret into, so the password lives in the file and the file must be 0600.
+// coordinationTokenPrefix is distinct from the full-device aod_ format so an
+// older daemon cannot promote this credential when it ignores scope metadata.
+const coordinationTokenPrefix = "aoc_"
+
+// remotesFile mirrors the desktop app's multi-node store. Full connection
+// passwords may be OS-keychain sealed and are retained here only for the
+// legacy --url lookup. coordinationToken is intentionally readable by the CLI:
+// remotes.json is owner-only, and the token is protected as full transitive
+// host authority because it can prompt agents running with OS authority.
 type remotesFile struct {
 	Remotes []remoteEntry `json:"remotes"`
 }
 
 type remoteEntry struct {
-	Label    string `json:"label,omitempty"`
-	URL      string `json:"url"`
-	Password string `json:"password"`
+	Label             string `json:"label,omitempty"`
+	URL               string `json:"url"`
+	Password          string `json:"password"`
+	HostID            string `json:"hostId,omitempty"`
+	CoordinationToken string `json:"coordinationToken,omitempty"`
 }
 
 // resolveRemoteTarget resolves the remote daemon this invocation targets, or
@@ -78,6 +92,145 @@ func resolveRemoteTarget(flagURL string) (*remoteTarget, error) {
 		token = strings.TrimSpace(entry.Password)
 	}
 	return &remoteTarget{baseURL: base, token: token, source: source}, nil
+}
+
+// resolveSavedHostTarget resolves one exact desktop-saved label or stable host
+// ID. It deliberately ignores password and sealedPassword: --host may use only
+// the route-filtered credential minted for agent coordination. The filter is
+// defense in depth; the credential still carries full transitive host authority.
+func resolveSavedHostTarget(name string) (*remoteTarget, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, errors.New("saved host name must not be empty")
+	}
+	entries, err := loadRemoteEntries()
+	if err != nil {
+		return nil, err
+	}
+	var hostMatches, labelMatches []remoteEntry
+	for _, entry := range entries {
+		switch {
+		case strings.TrimSpace(entry.HostID) == name:
+			hostMatches = append(hostMatches, entry)
+		case strings.TrimSpace(entry.Label) == name:
+			labelMatches = append(labelMatches, entry)
+		}
+	}
+	matches := hostMatches
+	if len(matches) == 0 {
+		matches = labelMatches
+	}
+	path, _ := remotesFilePath()
+	switch len(matches) {
+	case 0:
+		return nil, fmt.Errorf("no saved host named %q in %s", name, path)
+	case 1:
+		// Continue below.
+	default:
+		return nil, fmt.Errorf("saved host %q is ambiguous in %s — give the host ID instead", name, path)
+	}
+	entry := matches[0]
+	hostID := strings.TrimSpace(entry.HostID)
+	if hostID == "" {
+		return nil, fmt.Errorf("saved host %q has no host ID — reconnect it in the desktop app before using --host", name)
+	}
+	token := strings.TrimSpace(entry.CoordinationToken)
+	if token == "" {
+		return nil, fmt.Errorf("saved host %q has no agent coordination credential — connect it in the desktop app once, then retry", name)
+	}
+	if !strings.HasPrefix(token, coordinationTokenPrefix) {
+		return nil, fmt.Errorf("saved host %q has an invalid coordination credential — reconnect it in the desktop app before using --host", name)
+	}
+	base, err := normalizeRemoteURL(entry.URL)
+	if err != nil {
+		return nil, fmt.Errorf("saved host %q: %w", name, err)
+	}
+	label := strings.TrimSpace(entry.Label)
+	if label == "" {
+		label = hostID
+	}
+	return &remoteTarget{baseURL: base, token: token, label: label, hostID: hostID, source: "--host"}, nil
+}
+
+type savedHostIdentity struct {
+	HostID     string `json:"hostId"`
+	APIVersion int    `json:"apiVersion"`
+}
+
+// selectSavedHost proves the saved address still answers for the saved host ID
+// before placing its credential in commandContext. The identity endpoint is the
+// sole unauthenticated LAN route; no bearer is present on this probe.
+func (c *commandContext) selectSavedHost(ctx context.Context, name string) error {
+	if c.remote != nil {
+		return usageError{errors.New("--host cannot be combined with --url or AO_URL")}
+	}
+	target, err := resolveSavedHostTarget(name)
+	if err != nil {
+		return err
+	}
+	if local := readLocalHostID(); local != "" && local == target.hostID {
+		return fmt.Errorf("saved host %q is this AO installation itself", target.label)
+	}
+	actual, err := c.probeSavedHostIdentity(ctx, target.baseURL)
+	if err != nil {
+		return fmt.Errorf("verify saved host %q: %w", target.label, err)
+	}
+	if actual.HostID != target.hostID {
+		return fmt.Errorf("saved host identity changed for %s: expected %s, got %s; connection refused", target.baseURL, target.hostID, actual.HostID)
+	}
+	if local := readLocalHostID(); local != "" && local == actual.HostID {
+		return fmt.Errorf("saved host %q is this AO installation itself", target.label)
+	}
+	c.remote = target
+	return nil
+}
+
+func (c *commandContext) probeSavedHostIdentity(ctx context.Context, base string) (savedHostIdentity, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/v1/identity", http.NoBody) // #nosec G704 -- base is an explicitly saved AO host.
+	if err != nil {
+		return savedHostIdentity{}, err
+	}
+	client := *c.deps.HTTPClient
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := client.Do(req) // #nosec G704 -- target is an explicitly saved AO host, probed without credentials.
+	if err != nil {
+		return savedHostIdentity{}, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return savedHostIdentity{}, fmt.Errorf("identity probe returned HTTP %d", resp.StatusCode)
+	}
+	var identity savedHostIdentity
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&identity); err != nil {
+		return savedHostIdentity{}, fmt.Errorf("decode identity probe: %w", err)
+	}
+	if strings.TrimSpace(identity.HostID) == "" || identity.HostID == "local" {
+		return savedHostIdentity{}, errors.New("identity probe returned no valid host ID")
+	}
+	if identity.APIVersion != 1 {
+		return savedHostIdentity{}, fmt.Errorf("remote coordination API version %d is incompatible with version 1", identity.APIVersion)
+	}
+	return identity, nil
+}
+
+// readLocalHostID is best-effort and read-only. A missing local daemon identity
+// must not create one merely because the CLI is resolving a saved host.
+func readLocalHostID() string {
+	cfg, err := config.Load()
+	if err != nil {
+		return ""
+	}
+	raw, err := os.ReadFile(filepath.Join(cfg.DataDir, "mobile", "identity.json")) // #nosec G304 -- fixed path under AO's configured data directory.
+	if err != nil {
+		return ""
+	}
+	var identity struct {
+		HostID string `json:"hostId"`
+	}
+	if json.Unmarshal(raw, &identity) != nil {
+		return ""
+	}
+	return strings.TrimSpace(identity.HostID)
 }
 
 // normalizeRemoteURL turns a user-supplied target into a base URL with no
@@ -125,6 +278,15 @@ func hasUserinfo(raw string) bool {
 }
 
 func remotesFilePath() (string, error) {
+	// The desktop places all of an isolated run's state directly under the
+	// explicit AO_DATA_DIR. Mirror that choice so its CLI sees the same hosts.
+	if raw := strings.TrimSpace(os.Getenv("AO_DATA_DIR")); raw != "" {
+		dir, err := filepath.Abs(raw)
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(dir, remotesFileName), nil
+	}
 	dir, err := config.StateDir()
 	if err != nil {
 		return "", err
@@ -132,12 +294,11 @@ func remotesFilePath() (string, error) {
 	return filepath.Join(dir, remotesFileName), nil
 }
 
-// lookupRemoteEntry returns the saved entry for base, or nil when the file does
-// not exist or holds no entry for it. A nil entry and an entry with an empty
-// password are different problems, so the caller can say which one it is. A file
-// readable by anyone but the owner is refused rather than used: it is a
-// plaintext credential store.
-func lookupRemoteEntry(base string) (*remoteEntry, error) {
+// loadRemoteEntries reads the desktop's saved hosts. A file readable by anyone
+// but the owner is refused rather than used: it carries a plaintext
+// full-transitive-authority coordination token even when the full connection
+// password is keychain-sealed.
+func loadRemoteEntries() ([]remoteEntry, error) {
 	path, err := remotesFilePath()
 	if err != nil {
 		return nil, err
@@ -152,7 +313,7 @@ func lookupRemoteEntry(base string) (*remoteEntry, error) {
 	// Windows file modes do not carry meaningful group/other bits, so the check
 	// would reject every file there.
 	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("%s holds connection passwords and is readable by others (mode %04o) — run: chmod 600 %s",
+		return nil, fmt.Errorf("%s holds remote credentials and is readable by others (mode %04o) — run: chmod 600 %s",
 			path, info.Mode().Perm(), path)
 	}
 	raw, err := os.ReadFile(path) // #nosec G304 -- fixed path under the AO home directory.
@@ -163,7 +324,15 @@ func lookupRemoteEntry(base string) (*remoteEntry, error) {
 	if err := json.Unmarshal(raw, &file); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
-	for _, entry := range file.Remotes {
+	return file.Remotes, nil
+}
+
+func lookupRemoteEntry(base string) (*remoteEntry, error) {
+	entries, err := loadRemoteEntries()
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range entries {
 		saved, err := normalizeRemoteURL(entry.URL)
 		if err != nil {
 			continue // a hand-edited entry must not break every other one
@@ -195,6 +364,9 @@ func lookupRemoteEntry(base string) (*remoteEntry, error) {
 func (c *commandContext) resolvedBySuffix() string {
 	if c.remote == nil {
 		return ""
+	}
+	if c.remote.hostID != "" {
+		return fmt.Sprintf(" on %s (%s)", c.remote.label, c.remote.hostID)
 	}
 	return " on the remote daemon at " + c.remote.baseURL
 }
@@ -372,5 +544,8 @@ func (c *commandContext) pinToLocalDaemon(command string) error {
 func (c *commandContext) authorize(req *http.Request) {
 	if c.remote != nil {
 		req.Header.Set("Authorization", "Bearer "+c.remote.token)
+		if c.remote.hostID != "" {
+			req.Header.Set("X-AO-Expected-Host-ID", c.remote.hostID)
+		}
 	}
 }
