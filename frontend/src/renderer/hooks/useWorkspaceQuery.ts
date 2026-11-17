@@ -974,11 +974,14 @@ export function useRemoteWorkspaces(options: WorkspaceSubscriptionOptions & {
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 		[dataInputs],
 	);
+	// Preserve inventory knowledge for offline hosts, including an empty list.
+	const cachedProjectHostIds = useStableArray(hostIds.filter((_, index) => projects[index]?.data !== undefined));
 	const loadedProjectHostIds = useStableArray(live((index) => projects[index]?.data !== undefined));
 	const loadedSessionHostIds = useStableArray(live((index) => sessions[index]?.data !== undefined));
 	const failedHostIds = useStableArray(live((index) => Boolean(projects[index]?.isError || sessions[index]?.isError)));
 	return {
 		data,
+		cachedProjectHostIds,
 		loadedProjectHostIds,
 		loadedSessionHostIds,
 		failedHostIds,

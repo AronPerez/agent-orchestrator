@@ -69,6 +69,22 @@ it("reports a failed remote query instead of treating the host as empty and heal
 	expect(result.current.loadedProjectHostIds).toEqual([]);
 });
 
+it("distinguishes a cached empty project inventory from an unknown offline host", () => {
+	const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+	client.setQueryData([...remoteWorkspaceQueryKey("box-empty"), "projects"], []);
+	const cachedHostIds = ["box-empty", "box-unknown"];
+	const { result, unmount } = renderHook(() => useRemoteWorkspaces({ cachedHostIds }), {
+		wrapper: ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>,
+	});
+	try {
+		expect(result.current.data).toEqual([]);
+		expect(result.current.loadedProjectHostIds).toEqual([]);
+		expect(result.current.cachedProjectHostIds).toEqual(["box-empty"]);
+	} finally {
+		unmount(); client.clear();
+	}
+});
+
 it.each([
 	[401, true],
 	[426, true],

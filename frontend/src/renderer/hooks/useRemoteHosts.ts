@@ -57,9 +57,10 @@ type SavedHost = Pick<RemoteHost, "hostId" | "url">;
 
 /**
  * listed: hosts holds the saved list, not the empty one before the first read.
- * settled: the host-list attempt has concluded — disabled, signed out, or
- * listed. Consumers that must wait for remote workspace data (the session
- * deep-link gate) settle on this instead of restating the enable rule, so the
+ * settled: the saved host list has loaded, or remote hosts are disabled.
+ * Local pairings are listed even while signed out. Consumers that must wait
+ * for remote workspace data (the session deep-link gate) settle on this
+ * instead of restating the enable rule, so the
  * two can never drift apart.
  */
 export function useRemoteHosts(): { hosts: RemoteHost[]; listed: boolean; settled: boolean; refresh: () => Promise<void>; retryNow: () => Promise<void> } {
@@ -215,9 +216,7 @@ export function useRemoteHosts(): { hosts: RemoteHost[]; listed: boolean; settle
 	return {
 		hosts: enabled ? hosts : NO_HOSTS,
 		listed: enabled && listed,
-		// Concluded, per the doc comment above. Deliberately mirrors the
-		// `enabled` computation's inputs so the two cannot drift.
-		settled: !remoteHostsEnabled || status === "unauthenticated" || listed,
+		settled: !enabled || listed,
 		refresh,
 		retryNow,
 	};

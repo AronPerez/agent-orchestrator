@@ -361,7 +361,7 @@ function ShellLayout() {
 	useEffect(() => {
 		for (const hostId of refusedRemoteHostKey ? refusedRemoteHostKey.split("\0") : []) void forgetRemoteHost(queryClient, hostId);
 	}, [queryClient, refusedRemoteHostKey]);
-	const { data: remoteWorkspaces, failedHostIds: remoteFailedHostIds, loadedProjectHostIds: remoteLoadedProjectHostIds, loadedSessionHostIds: remoteLoadedSessionHostIds } = useRemoteWorkspaces({ cachedHostIds: remoteHostIds });
+	const { data: remoteWorkspaces, failedHostIds: remoteFailedHostIds, cachedProjectHostIds: remoteCachedProjectHostIds, loadedProjectHostIds: remoteLoadedProjectHostIds, loadedSessionHostIds: remoteLoadedSessionHostIds } = useRemoteWorkspaces({ cachedHostIds: remoteHostIds });
 	useAutoSpawnPauseNotice([...(workspaceQuery.data ?? EMPTY_PAUSE_PROJECTS), ...(remoteWorkspaces ?? EMPTY_PAUSE_PROJECTS)]);
 	// Global shortcut listeners need the latest workspace list, but recreating
 	// those subscriptions for every streamed activity update is avoidable.
@@ -1440,7 +1440,7 @@ const replacementErrorCount = Object.keys(orchestratorReplacementErrors).length;
 	//   has concluded its connect attempt, so it counts as settled and never
 	//   holds the gate open;
 	// - the remote side has concluded — useRemoteHosts' settled flag mirrors
-	//   its own enable rule (disabled or signed out never lists), so the gate
+	//   its own enable rule (disabled never lists), so the gate
 	//   cannot drift from it; a listed host counts as settled once offline,
 	//   failed, or its project and session queries have both landed.
 	const remoteWorkspaceLoadSettled = remoteHostsSettled
@@ -1457,11 +1457,12 @@ const replacementErrorCount = Object.keys(orchestratorReplacementErrors).length;
 			const target = parseSessionLink(link) ?? artifact;
 			const workspaces = workspacesRef.current;
 			const remoteWorkspaces = remoteWorkspacesRef.current;
-			// An unavailable host can leave a known project with an empty session list.
-			// That host remains a possible owner even when another machine matches.
+			// An unavailable host with no project inventory or a known matching project
+			// remains a possible owner even when another machine matches.
 			// Every host owns the standalone scope, even when its row is omitted.
 			const unavailableHostIds = [...remoteFailedHostIds, ...remoteHosts.filter((host) => host.status === "offline").map((host) => host.hostId)];
 			const unverifiedHost = target !== undefined && unavailableHostIds.some((hostId) =>
+				!remoteCachedProjectHostIds.includes(hostId) ||
 				target.projectId === STANDALONE_WORKSPACE_ID ||
 				remoteWorkspaces.some((entry) => entry.hostId === hostId && entry.id === target.projectId));
 			if (unverifiedHost) {
@@ -1496,7 +1497,7 @@ const replacementErrorCount = Object.keys(orchestratorReplacementErrors).length;
 			if (artifact) useUiStore.getState().requestWorkspaceFileOpen(resolved.sessionId, artifact.path, workspace.hostId, "artifact");
 			void navigate(sessionNavigateTarget(resolved.projectId, resolved.sessionId, workspace.hostId));
 		},
-		[navigate, remoteFailedHostIds, remoteHosts, t],
+		[navigate, remoteCachedProjectHostIds, remoteFailedHostIds, remoteHosts, t],
 	);
 	useEffect(() => {
 		return aoBridge.app.onOpenSessionDeepLink((rawUrl) => {

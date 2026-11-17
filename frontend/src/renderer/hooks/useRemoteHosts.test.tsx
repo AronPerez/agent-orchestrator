@@ -73,6 +73,21 @@ it("connects local hosts while signed out with Developer mode off without Cloud 
 	expect(remotes.pruneAccountHosts).not.toHaveBeenCalled();
 });
 
+it("waits for the signed-out saved-host list before reporting startup settled", async () => {
+	useUiStore.setState({ remoteHosts: true });
+	account.status = "unauthenticated";
+	let list!: (hosts: Array<{ hostId: string; label: string; url: string }>) => void;
+	remotes.list.mockReturnValueOnce(new Promise((resolve) => { list = resolve; }));
+	const { result } = renderHook(() => useRemoteHosts());
+	expect(result.current.listed).toBe(false);
+	expect(result.current.settled).toBe(false);
+	await act(async () => { list([{ hostId: "box-a", label: "Local pairing", url: "http://box-a:3001" }]); });
+	await waitFor(() => expect(result.current.hosts[0]?.status).toBe("connected"));
+	expect(result.current.listed).toBe(true);
+	expect(result.current.settled).toBe(true);
+	expect(remotes.syncAccountHosts).not.toHaveBeenCalled();
+});
+
 it("keeps local connections on sign-out but disconnects account-only hosts", async () => {
 	useUiStore.setState({ developerMode: false, remoteHosts: true });
 	cloud.baseUrl = "https://cloud.example";
