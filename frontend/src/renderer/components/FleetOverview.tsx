@@ -6,6 +6,7 @@ import {
 	type FleetProjectNode,
 	type FleetRollup,
 	type FleetSessionNode,
+	type SessionStatus,
 } from "@aoagents/product-ui";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
@@ -50,6 +51,12 @@ type UnscopedMachineRow = {
 };
 
 type FleetOverviewRow = ProjectRow | MachineRow | SessionRow | UnscopedMachineRow;
+
+type ScmRollup = {
+	pullRequests: number;
+	failingChecks: number;
+	checksFailing: boolean;
+};
 
 const rollupOrder: AttentionZone[] = ["action", "merge", "pending", "working", "done"];
 
@@ -134,6 +141,51 @@ function Rollup({ rollup }: { rollup: FleetRollup }) {
 	);
 }
 
+function ScmRollupView({ rollup }: { rollup: ScmRollup }) {
+	const { t } = useTranslation();
+	if (rollup.pullRequests === 0 && !rollup.checksFailing) return null;
+	return (
+		<span className="inline-flex min-w-0 flex-wrap items-center justify-end gap-x-3 gap-y-1 text-xs text-muted-foreground">
+			{rollup.pullRequests > 0 ? <span className="whitespace-nowrap">{t("fleet.prCount", { count: rollup.pullRequests })}</span> : null}
+			{rollup.checksFailing ? (
+				<span className="whitespace-nowrap text-destructive">
+					{t("pr.card.checksFailing")}{rollup.failingChecks > 0 ? `: ${rollup.failingChecks}` : ""}
+				</span>
+			) : null}
+		</span>
+	);
+}
+
+function emptyScmRollup(): ScmRollup {
+	return { pullRequests: 0, failingChecks: 0, checksFailing: false };
+}
+
+function addScmRollup(target: ScmRollup, source: ScmRollup): void {
+	target.pullRequests += source.pullRequests;
+	target.failingChecks += source.failingChecks;
+	target.checksFailing ||= source.checksFailing;
+}
+
+function ownScmRollup(session: WorkspaceSession): ScmRollup {
+	return {
+		pullRequests: session.prs.length,
+		failingChecks: session.prs.reduce((count, pr) => count + (pr.failingChecks?.length ?? 0), 0),
+		checksFailing: session.prs.some((pr) => pr.ci === "failing"),
+	};
+}
+
+function fleetRollupStatus(session: WorkspaceSession): SessionStatus {
+	if (session.scmStatus) return session.scmStatus;
+	const active = session.prs.filter((pr) => pr.state === "open" || pr.state === "draft");
+	if (active.some((pr) => pr.ci === "failing")) return "ci_failed";
+	if (active.some((pr) => pr.review === "changes_requested" || pr.mergeability === "conflicting")) return "changes_requested";
+	if (active.some((pr) => pr.state === "draft")) return "draft";
+	if (active.some((pr) => pr.review !== "approved" && pr.mergeability !== "mergeable")) return "review_pending";
+	if (active.some((pr) => pr.mergeability === "mergeable")) return "mergeable";
+	if (active.some((pr) => pr.review === "approved")) return "approved";
+	return session.status;
+}
+
 function hasChildren(row: FleetOverviewRow): boolean {
 	switch (row.kind) {
 		case "project": return row.node.machines.length > 0;
@@ -147,11 +199,17 @@ export function FleetOverview({
 	localWorkspaces,
 	remoteWorkspaces = [],
 	remoteHosts = [],
+	remoteFailedHostIds,
+	remoteLoadedProjectHostIds,
+	remoteLoadedSessionHostIds,
 	onOpen,
 }: {
 	localWorkspaces: readonly WorkspaceSummary[];
 	remoteWorkspaces?: readonly WorkspaceSummary[];
 	remoteHosts?: readonly RemoteHost[];
+	remoteFailedHostIds?: readonly string[];
+	remoteLoadedProjectHostIds?: readonly string[];
+	remoteLoadedSessionHostIds?: readonly string[];
 	onOpen: (session: WorkspaceSession, hostId?: string) => void;
 }) {
 	const { t } = useTranslation();
@@ -160,6 +218,19 @@ export function FleetOverview({
 	const [focusedKey, setFocusedKey] = useState<string>();
 	const rowRefs = useRef(new Map<string, HTMLElement>());
 	const hostsById = useMemo(() => new Map(remoteHosts.map((host) => [host.hostId, host])), [remoteHosts]);
+	const refusedHostIds = useMemo(
+		() => new Set(remoteHosts.filter((host) => host.failureReason === "unauthorized").map((host) => host.hostId)),
+		[remoteHosts],
+	);
+	const visibleRemoteWorkspaces = useMemo(
+		() => remoteWorkspaces.filter((workspace) => !workspace.hostId || !refusedHostIds.has(workspace.hostId)),
+		[refusedHostIds, remoteWorkspaces],
+	);
+	const remoteReadState = (hostId: string): "ready" | "pending" | "failed" => {
+		if (remoteFailedHostIds?.includes(hostId)) return "failed";
+		if (remoteLoadedProjectHostIds === undefined && remoteLoadedSessionHostIds === undefined) return "ready";
+		return remoteLoadedProjectHostIds?.includes(hostId) && remoteLoadedSessionHostIds?.includes(hostId) ? "ready" : "pending";
+	};
 	const projects = useMemo(() => {
 		const scopes = [
 			...localWorkspaces
@@ -167,9 +238,9 @@ export function FleetOverview({
 				.map((workspace) => ({
 					project: { id: workspace.id, name: workspace.name },
 					machine: { id: LOCAL_HOST, name: t("remote.thisComputer"), reachable: true },
-					sessions: workspace.sessions,
+					sessions: workspace.sessions.map((session) => ({ ...session, rollupStatus: fleetRollupStatus(session) })),
 				})),
-			...remoteWorkspaces
+			...visibleRemoteWorkspaces
 				.filter((workspace) => workspace.kind !== CLOUD_PROJECT_KIND && Boolean(workspace.hostId))
 				.map((workspace) => {
 					const hostId = workspace.hostId!;
@@ -181,18 +252,38 @@ export function FleetOverview({
 							name: host?.label ?? hostId,
 							reachable: host ? host.status === "connected" : true,
 						},
-						sessions: workspace.sessions,
+						sessions: workspace.sessions.map((session) => ({ ...session, rollupStatus: fleetRollupStatus(session) })),
 					};
 				}),
 		];
 		return orderProjects(buildFleetTree(scopes, { showArchived }));
-	}, [hostsById, localWorkspaces, remoteWorkspaces, showArchived, t]);
-	const scopedHostIds = useMemo(() => new Set(remoteWorkspaces.map((workspace) => workspace.hostId).filter(Boolean)), [remoteWorkspaces]);
+	}, [hostsById, localWorkspaces, showArchived, t, visibleRemoteWorkspaces]);
+	const scopedHostIds = useMemo(() => new Set(visibleRemoteWorkspaces.map((workspace) => workspace.hostId).filter(Boolean)), [visibleRemoteWorkspaces]);
 	const unscopedHosts = useMemo(
 		() => remoteHosts.filter((host) => !scopedHostIds.has(host.hostId)),
 		[remoteHosts, scopedHostIds],
 	);
 	const rows = useMemo(() => flattenRows(projects, unscopedHosts, collapsed), [projects, unscopedHosts, collapsed]);
+	const scmRollups = useMemo(() => {
+		const values = new Map<string, ScmRollup>();
+		const visitSession = (node: FleetSessionNode<WorkspaceSession>): ScmRollup => {
+			const rollup = ownScmRollup(node.session);
+			for (const child of node.children) addScmRollup(rollup, visitSession(child));
+			values.set(node.key, rollup);
+			return rollup;
+		};
+		for (const project of projects) {
+			const projectRollup = emptyScmRollup();
+			for (const machine of project.machines) {
+				const machineRollup = emptyScmRollup();
+				for (const session of machine.sessions) addScmRollup(machineRollup, visitSession(session));
+				values.set(machine.key, machineRollup);
+				addScmRollup(projectRollup, machineRollup);
+			}
+			values.set(project.key, projectRollup);
+		}
+		return values;
+	}, [projects]);
 	const activeFocusKey = rows.some((row) => row.key === focusedKey) ? focusedKey : rows[0]?.key;
 
 	useEffect(() => {
@@ -256,23 +347,50 @@ export function FleetOverview({
 		? getDisplayStatusLabel(row.node.session.displayStatus, (key, values) => t(key as MessageKey, values))
 		: getSessionStatusView(row.node.session.status, t).label;
 	const machineConnectionLabel = (row: MachineRow) => {
-		const status = hostsById.get(row.node.machine.id)?.status;
+		const host = hostsById.get(row.node.machine.id);
+		const status = host?.status;
 		if (status === "connecting") return t("session.statusChecking");
 		if (status === "offline" || !row.node.machine.reachable) return t("remote.offline");
+		if (remoteReadState(row.node.machine.id) === "failed") return t("fleet.stale");
+		if (remoteReadState(row.node.machine.id) === "pending") return t("session.statusChecking");
 		return undefined;
+	};
+	const unscopedMachineLabel = (host: RemoteHost) => {
+		if (host.failureReason === "unauthorized") return t("remote.passwordRejected");
+		if (host.status === "connecting") return t("session.statusChecking");
+		if (host.status === "offline") return t("remote.offline");
+		if (remoteReadState(host.hostId) === "failed") return t("fleet.stale");
+		if (remoteReadState(host.hostId) === "pending") return t("session.statusChecking");
+		return t("fleet.empty");
+	};
+	const scmRollupText = (key: string) => {
+		const rollup = scmRollups.get(key) ?? emptyScmRollup();
+		return [
+			rollup.pullRequests > 0 ? t("fleet.prCount", { count: rollup.pullRequests }) : undefined,
+			rollup.checksFailing ? `${t("pr.card.checksFailing")}${rollup.failingChecks > 0 ? `: ${rollup.failingChecks}` : ""}` : undefined,
+		].filter(Boolean).join(", ");
 	};
 	const rowLabel = (row: FleetOverviewRow) => {
 		switch (row.kind) {
-			case "project": return `${row.node.project.name}, ${rollupText(row.node.rollup)}`;
+			case "project": return [row.node.project.name, rollupText(row.node.rollup), scmRollupText(row.key)].filter(Boolean).join(", ");
 			case "machine": return [
 				row.node.machine.name,
 				machineConnectionLabel(row),
 				rollupText(row.node.rollup),
+				scmRollupText(row.key),
 			].filter(Boolean).join(", ");
-			case "session": return [row.node.session.title, roleLabel(row), sessionStatus(row), rollupText(row.node.rollup)].join(", ");
+			case "session": return [
+				row.node.session.title,
+				roleLabel(row),
+				sessionStatus(row),
+				row.node.session.isTerminated ? t("fleet.archived") : undefined,
+				row.node.parentUnavailable ? t("fleet.parentUnavailable") : undefined,
+				rollupOrder.some((zone) => row.node.rollup[zone] > 0) ? rollupText(row.node.rollup) : undefined,
+				scmRollupText(row.key),
+			].filter(Boolean).join(", ");
 			case "unscoped-machine": return [
 				row.host.label,
-				row.host.status === "connected" ? t("fleet.empty") : row.host.status === "connecting" ? t("session.statusChecking") : t("remote.offline"),
+				unscopedMachineLabel(row.host),
 			].join(", ");
 		}
 	};
@@ -345,16 +463,17 @@ export function FleetOverview({
 									) : <span aria-hidden="true" className="w-5 shrink-0" />}
 									<span className={cn("shrink-0 text-muted-foreground", row.kind === "session" && getSessionStatusView(row.node.session.status, t).className)}>{icon}</span>
 									<span className="min-w-0 flex-1 truncate">{title}</span>
-									{row.kind === "project" ? <Rollup rollup={row.node.rollup} />
+									{row.kind === "project" ? <span className="flex min-w-0 flex-wrap items-center justify-end gap-x-3 gap-y-1"><Rollup rollup={row.node.rollup} /><ScmRollupView rollup={scmRollups.get(row.key) ?? emptyScmRollup()} /></span>
 										: row.kind === "machine" ? (
 											<span className="flex min-w-0 flex-wrap items-center justify-end gap-x-3 gap-y-1">
 												{machineConnectionLabel(row) ? <span className="text-xs text-muted-foreground">{machineConnectionLabel(row)}</span> : null}
 												<Rollup rollup={row.node.rollup} />
+												<ScmRollupView rollup={scmRollups.get(row.key) ?? emptyScmRollup()} />
 											</span>
 										)
 										: row.kind === "unscoped-machine" ? (
 											<span className="text-xs text-muted-foreground">
-												{row.host.status === "connected" ? t("fleet.empty") : row.host.status === "connecting" ? t("session.statusChecking") : t("remote.offline")}
+												{unscopedMachineLabel(row.host)}
 											</span>
 										) : (
 											<span className="flex min-w-0 flex-wrap items-center justify-end gap-x-3 gap-y-1 text-xs text-muted-foreground">
@@ -362,6 +481,7 @@ export function FleetOverview({
 												{row.node.session.isTerminated ? <span>{t("fleet.archived")}</span> : null}
 												{row.node.parentUnavailable ? <span>{t("fleet.parentUnavailable")}</span> : null}
 												{rollupOrder.some((zone) => row.node.rollup[zone] > 0) ? <Rollup rollup={row.node.rollup} /> : null}
+												<ScmRollupView rollup={scmRollups.get(row.key) ?? emptyScmRollup()} />
 											</span>
 										)}
 								</div>

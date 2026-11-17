@@ -8,6 +8,9 @@ const { fleetProps, navigateMock } = vi.hoisted(() => ({
 		localWorkspaces: readonly WorkspaceSummary[];
 		remoteWorkspaces?: readonly WorkspaceSummary[];
 		remoteHosts?: readonly { hostId: string }[];
+		remoteFailedHostIds?: readonly string[];
+		remoteLoadedProjectHostIds?: readonly string[];
+		remoteLoadedSessionHostIds?: readonly string[];
 		onOpen: (session: WorkspaceSession, hostId?: string) => void;
 	} },
 	navigateMock: vi.fn(),
@@ -29,6 +32,9 @@ vi.mock("../lib/shell-context", () => ({
 	useShellMaybe: () => ({
 		remoteHosts: [{ hostId: "build-box", label: "Build box", status: "connected", url: "https://build-box.test" }],
 		remoteWorkspaces,
+		remoteFailedHostIds: ["failed-box"],
+		remoteLoadedProjectHostIds: ["build-box"],
+		remoteLoadedSessionHostIds: ["build-box"],
 	}),
 }));
 
@@ -53,6 +59,11 @@ describe("FleetPage", () => {
 		expect(fleetProps.current?.localWorkspaces).toEqual(localWorkspaces);
 		expect(fleetProps.current?.remoteWorkspaces).toEqual(remoteWorkspaces);
 		expect(fleetProps.current?.remoteHosts).toEqual([expect.objectContaining({ hostId: "build-box" })]);
+		expect(fleetProps.current).toMatchObject({
+			remoteFailedHostIds: ["failed-box"],
+			remoteLoadedProjectHostIds: ["build-box"],
+			remoteLoadedSessionHostIds: ["build-box"],
+		});
 
 		fireEvent.click(screen.getByRole("button", { name: "Open remote worker" }));
 		expect(navigateMock).toHaveBeenCalledWith({

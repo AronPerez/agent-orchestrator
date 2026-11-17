@@ -29,6 +29,9 @@ export function FleetPage() {
 				onOpen={openSession}
 				remoteHosts={shell?.remoteHosts}
 				remoteWorkspaces={shell?.remoteWorkspaces}
+				remoteFailedHostIds={shell?.remoteFailedHostIds}
+				remoteLoadedProjectHostIds={shell?.remoteLoadedProjectHostIds}
+				remoteLoadedSessionHostIds={shell?.remoteLoadedSessionHostIds}
 			/>
 		</div>
 	);
