@@ -87,21 +87,25 @@ export async function sessionsAndReviewsAreIdle(body: unknown, readReviews: (ses
 		for (const session of (body as { sessions: { id?: unknown; isTerminated?: boolean }[] }).sessions) {
 			if (session.isTerminated === true) continue;
 			if (typeof session.id !== "string" || !session.id) return false;
-			const result = await readReviews(session.id) as { autoReviewPending?: boolean; runs?: unknown; reviewerActivityState?: string; reviewerHandleId?: string; reviewerSurface?: { reviewId?: string }; activeReviewers?: unknown } | null;
+			const result = await readReviews(session.id) as { autoReviewPending?: boolean; chatReviewerIds?: unknown; runs?: unknown; reviewerActivityState?: string; reviewerHandleId?: string; reviewerSurface?: { reviewId?: string }; activeReviewers?: unknown } | null;
 			if (!result || !Array.isArray(result.runs) || !result.runs.every((run: unknown) =>
 				run && typeof run === "object" && "status" in run &&
 				["complete", "delivered", "failed", "cancelled"].includes(String(run.status)))) return false;
 			if (result.autoReviewPending !== false) return false;
-			if (!Array.isArray(result.activeReviewers)) return false;
+			if (!Array.isArray(result.activeReviewers) || !Array.isArray(result.chatReviewerIds)) return false;
 			if (result.reviewerHandleId && result.activeReviewers.length === 0) return false;
+			const chatIDs = new Set<unknown>(result.chatReviewerIds);
 			for (const reviewer of result.activeReviewers as { reviewId?: unknown; mode?: unknown }[]) {
 				if (!reviewer || typeof reviewer.reviewId !== "string" || !reviewer.reviewId) return false;
-				if (reviewer.mode === "chat") {
-					const live = await readReviewerConversation(reviewer.reviewId) as { mode?: string; controller?: string; turns?: unknown } | null;
-					if (!live || live.mode !== "chat" || !["ready", "stopped", "hibernated"].includes(live.controller ?? "") ||
-						!Array.isArray(live.turns) || !live.turns.every((turn: unknown) => turn && typeof turn === "object" && "state" in turn &&
-							["completed", "recovered", "interrupted", "failed", "cancelled"].includes(String(turn.state)))) return false;
-				} else if (reviewer.mode !== "tui" || reviewer.reviewId !== result.reviewerSurface?.reviewId || !["idle", "exited"].includes(result.reviewerActivityState ?? "")) return false;
+				if (reviewer.mode === "chat") chatIDs.add(reviewer.reviewId);
+				else if (reviewer.mode !== "tui" || reviewer.reviewId !== result.reviewerSurface?.reviewId || !["idle", "exited"].includes(result.reviewerActivityState ?? "")) return false;
+			}
+			for (const reviewId of chatIDs) {
+				if (typeof reviewId !== "string" || !reviewId) return false;
+				const live = await readReviewerConversation(reviewId) as { mode?: string; controller?: string; turns?: unknown } | null;
+				if (!live || live.mode !== "chat" || !["ready", "stopped", "hibernated"].includes(live.controller ?? "") ||
+					!Array.isArray(live.turns) || !live.turns.every((turn: unknown) => turn && typeof turn === "object" && "state" in turn &&
+						["completed", "recovered", "interrupted", "failed", "cancelled"].includes(String(turn.state)))) return false;
 			}
 		}
 		return true;
@@ -127,7 +131,7 @@ export class InstalledBuildGuard {
 
 	constructor(private readonly deps: {
 		readIdentity(): string | null;
-		isIdle(): Promise<boolean>;
+		isIdle(): Promise<boolean | { openSideChats: string[] }>;
 		onChange(status: InstalledBuildStatus | undefined): void;
 		onReplacement(replaced: boolean): void;
 		assertRestartSafe(): void;
@@ -140,6 +144,11 @@ export class InstalledBuildGuard {
 		if (JSON.stringify(this.status) === JSON.stringify(status)) return;
 		this.status = status;
 		this.deps.onChange(status);
+	}
+
+	private async idleState(): Promise<Pick<InstalledBuildStatus, "idle" | "openSideChats">> {
+		const result = await this.deps.isIdle().catch(() => false);
+		return { idle: result === true, openSideChats: typeof result === "object" ? result.openSideChats : undefined };
 	}
 
 	private assertRestartSafe(): void {
@@ -182,8 +191,9 @@ export class InstalledBuildGuard {
 			if (this.status) this.publish({ ...this.status, idle: false, restartWhenIdle: false });
 			return;
 		}
-		const idle = await this.deps.isIdle().catch(() => false);
-		this.publish({ identity: installed, idle, restartWhenIdle: this.status?.identity === installed && this.status.restartWhenIdle });
+		const readiness = await this.idleState();
+		const { idle } = readiness;
+		this.publish({ identity: installed, ...readiness, restartWhenIdle: this.status?.identity === installed && this.status.restartWhenIdle });
 		if (idle && this.status?.restartWhenIdle) await this.requestRestart("now");
 	}
 
@@ -197,13 +207,15 @@ export class InstalledBuildGuard {
 		if (!target || this.deps.readIdentity() !== target.identity) {
 			throw new Error("The installed build is still changing. Wait for installation to finish and try again.");
 		}
-		const idle = await this.deps.isIdle().catch(() => false);
+		const readiness = await this.idleState();
+		const { idle, openSideChats } = readiness;
 		if (revision !== this.restartRevision || this.status?.identity !== target.identity) return;
 		this.assertRestartSafe();
 		if (mode === "when-idle") {
-			this.publish({ ...target, idle, restartWhenIdle: true });
+			this.publish({ ...target, ...readiness, restartWhenIdle: true });
 		} else if (!idle) {
-			this.publish({ ...target, idle });
+			this.publish({ ...target, ...readiness });
+			if (openSideChats?.length) throw new Error(`Read or save and close these side chats before restarting: ${openSideChats.join(", ")}.`);
 			throw new Error("Current tasks are not confirmed idle. Choose Restart when idle or try again after they finish.");
 		}
 		if (!idle || this.restarting) return;

@@ -36,6 +36,8 @@ export interface InstalledBuildStatus {
 	identity: string;
 	idle: boolean;
 	restartWhenIdle: boolean;
+	/** Retained launch-scoped conversations must be saved/read and closed. */
+	openSideChats?: string[];
 	/** Native install ownership or unverified replacement bytes prevent a safe restart. */
 	restartBlocked?: "native-update-staged" | "appimage-unverified";
 }

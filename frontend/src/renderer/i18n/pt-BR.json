@@ -1878,6 +1878,8 @@
 	"update.restart.options": "Opções de reinicialização",
 	"update.restart.whenIdle": "Reiniciar quando ocioso",
 	"update.restart.waitForIdle": "Há tarefas ativas ou não foi possível confirmar o estado delas. O Orchestrator pode reiniciar quando elas estiverem ociosas.",
+	"update.restart.closeSideChats": "Leia ou salve estas conversas paralelas e feche-as antes de reiniciar: {{names}}.",
+	"update.restart.scheduledWithSides": "O Orchestrator reiniciará quando as conversas paralelas estiverem fechadas e as tarefas atuais estiverem ociosas.",
 	"update.restart.scheduled": "O Orchestrator reiniciará quando as tarefas atuais estiverem ociosas.",
 	"update.restart.scheduledShort": "Reiniciar quando ocioso",
 	"update.restart.cancelScheduled": "Cancelar reinicialização agendada",

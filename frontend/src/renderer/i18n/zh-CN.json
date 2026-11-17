@@ -1832,6 +1832,8 @@
 	"update.restart.options": "重启选项",
 	"update.restart.whenIdle": "空闲时重启",
 	"update.restart.waitForIdle": "当前任务仍在运行，或无法确认其状态。Orchestrator 可在任务空闲时重启。",
+	"update.restart.closeSideChats": "重启前，请先阅读或保存这些侧边聊天，然后关闭它们：{{names}}。",
+	"update.restart.scheduledWithSides": "关闭侧边聊天且当前任务空闲后，Orchestrator 将重启。",
 	"update.restart.scheduled": "Orchestrator 将在当前任务空闲时重启。",
 	"update.restart.scheduledShort": "空闲时重启",
 	"update.restart.cancelScheduled": "取消计划重启",

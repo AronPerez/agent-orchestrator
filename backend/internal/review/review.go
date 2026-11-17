@@ -210,6 +210,7 @@ type TriggerResult struct {
 // recorded passes, newest first.
 type SessionReviews struct {
 	AutoReviewPending     bool
+	ChatReviewerIDs       []string // Includes retained Chat controllers, without classifying stopped history as active panes.
 	ReviewerHandleID      string
 	ReviewerHarness       domain.ReviewerHarness
 	ReviewerActivityState domain.ActivityState
@@ -220,6 +221,15 @@ type SessionReviews struct {
 	// selected reviewer first, so clients can open each of several reviewers
 	// working on the same worker at once.
 	ActiveReviewers []domain.ReviewerSurface
+}
+
+// AutoReviewerHarness is shared with the coordinator: an explicit session or
+// project reviewer wins, otherwise inherit the actual worker's safe harness.
+func AutoReviewerHarness(worker domain.SessionRecord, config domain.ProjectConfig) domain.ReviewerHarness {
+	if worker.ReviewerHarness != "" {
+		return worker.ReviewerHarness
+	}
+	return config.ResolveReviewerHarness(worker.Harness)
 }
 
 // CancelResult is the review state after a reviewer pane cancellation.
@@ -1552,6 +1562,10 @@ func (e *Engine) listLocked(ctx stdctx.Context, worker domain.SessionRecord, sel
 		return SessionReviews{}, err
 	}
 	active := []domain.ReviewerSurface{}
+	chatIDs := []string{}
+	if reviewRow.ID != "" && !reviewRow.IsArchived && reviewRow.InterfaceMode == domain.ReviewerInterfaceChat {
+		chatIDs = append(chatIDs, reviewRow.ID)
+	}
 	if reviewerRowActive(reviewRow, runs) {
 		active = append(active, reviewerSurface(reviewRow))
 	}
@@ -1559,6 +1573,9 @@ func (e *Engine) listLocked(ctx stdctx.Context, worker domain.SessionRecord, sel
 		other := reviewRows[i]
 		if other.ID == reviewRow.ID {
 			continue
+		}
+		if !other.IsArchived && other.InterfaceMode == domain.ReviewerInterfaceChat {
+			chatIDs = append(chatIDs, other.ID)
 		}
 		// Other reviewers can be running alongside the selected one; a pane that
 		// died mid-pass must fail its runs the same way the selected one does.
@@ -1580,16 +1597,22 @@ func (e *Engine) listLocked(ctx stdctx.Context, worker domain.SessionRecord, sel
 	}
 	// Include work waiting for the idle threshold, before the coordinator's next sweep.
 	pending := false
-	if worker.AutoReviewEnabled && worker.Kind == domain.KindWorker && !worker.IsTerminated && worker.Activity.State == domain.ActivityIdle {
-		for _, state := range Plan(prs, reviewRunsForHarness(runs, selectedHarness)) {
-			if state.Status == ReviewStateNeedsReview && !autoReviewHeadBlocked(runs, state.PRURL, state.TargetSHA, selectedHarness) {
-				pending = true
-				break
+	if e.projects != nil && worker.AutoReviewEnabled && worker.Kind == domain.KindWorker && !worker.IsTerminated && worker.Activity.State == domain.ActivityIdle {
+		if project, ok, err := e.projects.GetProject(ctx, string(worker.ProjectID)); err != nil {
+			return SessionReviews{}, err
+		} else if ok {
+			harness := AutoReviewerHarness(worker, project.Config)
+			for _, state := range Plan(prs, reviewRunsForHarness(runs, harness)) {
+				if state.Status == ReviewStateNeedsReview && !autoReviewHeadBlocked(runs, state.PRURL, state.TargetSHA, harness) {
+					pending = true
+					break
+				}
 			}
 		}
 	}
 	return SessionReviews{
 		AutoReviewPending:     pending,
+		ChatReviewerIDs:       chatIDs,
 		ReviewerHandleID:      legacyReviewerHandle(reviewRow),
 		ReviewerHarness:       reviewerHarness,
 		ReviewerActivityState: reviewRow.ReviewerActivityState,
@@ -1605,9 +1628,6 @@ func (e *Engine) listLocked(ctx stdctx.Context, worker domain.SessionRecord, sel
 func reviewerRowActive(review domain.Review, runs []domain.ReviewRun) bool {
 	if review.ID == "" || review.IsArchived {
 		return false
-	}
-	if review.InterfaceMode == domain.ReviewerInterfaceChat {
-		return true // Chat panes have no terminal handle; read their live controller separately.
 	}
 	if review.ReviewerHandleID != "" && review.ReviewerActivityState != domain.ActivityExited {
 		return true

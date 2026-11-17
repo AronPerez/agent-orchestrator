@@ -527,6 +527,7 @@ func TestReviewsTriggerMapsSameCommitConflictsTo409(t *testing.T) {
 
 func TestReviewsListIncludesEveryActiveReviewer(t *testing.T) {
 	svc := &fakeReviewService{list: reviewcore.SessionReviews{
+		ChatReviewerIDs: []string{"stopped-chat"},
 		ActiveReviewers: []domain.ReviewerSurface{
 			{Mode: domain.ReviewerInterfaceTUI, ReviewID: "rev-claude", Harness: domain.ReviewerClaudeCode, HandleID: "claude-pane"},
 			{Mode: domain.ReviewerInterfaceTUI, ReviewID: "rev-codex", Harness: domain.ReviewerCodex, HandleID: "codex-pane"},
@@ -543,10 +544,16 @@ func TestReviewsListIncludesEveryActiveReviewer(t *testing.T) {
 	if len(got.ActiveReviewers) != 2 || got.ActiveReviewers[1].HandleID != "codex-pane" {
 		t.Fatalf("activeReviewers = %+v, want both reviewers", got.ActiveReviewers)
 	}
+	if len(got.ChatReviewerIDs) != 1 || got.ChatReviewerIDs[0] != "stopped-chat" {
+		t.Fatalf("Chat controller IDs = %+v, want retained history separate from active panes", got.ChatReviewerIDs)
+	}
 
 	empty := newReviewTestServer(t, &fakeReviewService{})
 	body, _, _ = doRequest(t, empty, "GET", "/api/v1/sessions/mer-1/reviews", "")
 	if !strings.Contains(string(body), `"activeReviewers":[]`) {
 		t.Fatalf("body = %s, want an empty activeReviewers array, never null", body)
+	}
+	if !strings.Contains(string(body), `"chatReviewerIds":[]`) {
+		t.Fatalf("body = %s, want an empty Chat-controller array, never null", body)
 	}
 }

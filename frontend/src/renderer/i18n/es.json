@@ -1878,6 +1878,8 @@
 	"update.restart.options": "Opciones de reinicio",
 	"update.restart.whenIdle": "Reiniciar al quedar inactivo",
 	"update.restart.waitForIdle": "Hay tareas activas o no se ha podido confirmar su estado. Orchestrator puede reiniciarse cuando queden inactivas.",
+	"update.restart.closeSideChats": "Lee o guarda estos chats secundarios y ciérralos antes de reiniciar: {{names}}.",
+	"update.restart.scheduledWithSides": "Orchestrator se reiniciará cuando los chats secundarios estén cerrados y las tareas actuales estén inactivas.",
 	"update.restart.scheduled": "Orchestrator se reiniciará cuando las tareas actuales queden inactivas.",
 	"update.restart.scheduledShort": "Reiniciar al quedar inactivo",
 	"update.restart.cancelScheduled": "Cancelar reinicio programado",

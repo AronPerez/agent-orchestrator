@@ -296,18 +296,42 @@ const installedBuildGuard = installedBuildDisk ? new InstalledBuildGuard({
 	assertRestartSafe: assertInstalledBuildRestartSafe,
 	onReplacement: setInstalledBuildReplacementDetected,
 	isIdle: async () => {
-		const port = daemonStatus.port;
+		const { port, state, code } = daemonStatus;
+		const mismatched = state === "error" && code === "identity_mismatch";
 		const generation = daemonAttachmentGeneration;
-		if (chatDraftRisks.length > 0 || !port || !await readDaemonProbe(port, "readyz")) return false;
-		// Capture waits for claim/restore and fences the daemon attachment. Even idle
-		// sides own launch-scoped drafts/transcripts that quit would discard.
-		const sideState = await sideLaunchRecovery.capture().catch(() => undefined);
-		if (!sideState || sideState.attachment.port !== port || sideState.attachment.generation !== generation ||
-			!Array.isArray(sideState.state.sides) || sideState.state.sides.length > 0 || (sideLaunchState?.sides.length ?? 0) > 0) return false;
-		// A newer host may be refused for attachment, but can still report whether
-		// its tasks are idle so a replaced desktop can safely relaunch into it.
+		if (chatDraftRisks.length > 0 || !port || (state !== "ready" && !mismatched) || !await readDaemonProbe(port, "readyz")) return false;
+		const checkSides = async (sessions?: { id: string; mode?: string; isTerminated?: boolean }[]) => {
+			let sides: unknown[] = [];
+			if (mismatched) {
+				// Read only: never claim or restore into an incompatible daemon. Side
+				// lists also work before a launch is claimed; local retained state wins.
+				for (const session of sessions ?? []) {
+					if (session.isTerminated || session.mode === "tui") continue;
+					if (session.mode !== "chat") return false;
+					const response = await fetch(`http://127.0.0.1:${port}/api/v1/sessions/${encodeURIComponent(session.id)}/side-chats`, { signal: AbortSignal.timeout(5_000) });
+					if (!response.ok) return false;
+					const body = await response.json();
+					if (!Array.isArray(body.sides)) return false;
+					sides.push(...body.sides);
+				}
+			} else {
+				// Capture waits for claim/restore on this exact daemon attachment.
+				const capture = await sideLaunchRecovery.capture();
+				if (capture.attachment.port !== port || capture.attachment.generation !== generation || !sideLaunchRecovery.matches(capture.attachment) || !Array.isArray(capture.state.sides)) return false;
+				sides = capture.state.sides;
+			}
+			const names = [...new Set([...sides, ...(sideLaunchState?.sides ?? [])].map(record => {
+				const side = (record && typeof record === "object" && "side" in record ? record.side : record) as { label?: string; id?: string } | undefined;
+				return side?.label || side?.id || "Side chat";
+			}))];
+			return names.length ? { openSideChats: names } : true;
+		};
+		const sides = await checkSides().catch(() => false);
+		if (sides !== true) return sides;
 		const response = await fetch(`http://127.0.0.1:${port}/api/v1/sessions`, { signal: AbortSignal.timeout(5_000) });
-		const idle = response.ok && await sessionsAndReviewsAreIdle(await response.json(), async (sessionId) => {
+		if (!response.ok) return false;
+		const body = await response.json();
+		const idle = await sessionsAndReviewsAreIdle(body, async (sessionId) => {
 			const reviews = await fetch(`http://127.0.0.1:${port}/api/v1/sessions/${encodeURIComponent(sessionId)}/reviews`, { signal: AbortSignal.timeout(5_000) });
 			if (!reviews.ok) throw new Error("Review state unavailable");
 			return reviews.json();
@@ -317,9 +341,8 @@ const installedBuildGuard = installedBuildDisk ? new InstalledBuildGuard({
 			return conversation.json();
 		});
 		if (!idle) return false;
-		const latestSides = await sideLaunchRecovery.capture().catch(() => undefined);
-		return !!latestSides && sideLaunchRecovery.matches(sideState.attachment) && generation === daemonAttachmentGeneration && daemonStatus.port === port &&
-			Array.isArray(latestSides.state.sides) && latestSides.state.sides.length === 0 && (sideLaunchState?.sides.length ?? 0) === 0;
+		const latestSides = await checkSides(body.sessions).catch(() => false);
+		return generation === daemonAttachmentGeneration && daemonStatus.port === port && daemonStatus.state === state && daemonStatus.code === code ? latestSides : false;
 	},
 	onChange: (status) => {
 		console.info("AO: installed desktop build changed", { running: DESKTOP_BUILD_ID, installed: status?.identity, idle: status?.idle });

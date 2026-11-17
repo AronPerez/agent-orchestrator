@@ -2273,6 +2273,8 @@
 	"update.restart.options": "Параметры перезапуска",
 	"update.restart.whenIdle": "Перезапустить после завершения работы",
 	"update.restart.waitForIdle": "Задачи выполняются или их состояние не удалось подтвердить. Orchestrator сможет перезапуститься, когда они будут бездействовать.",
+	"update.restart.closeSideChats": "Прочитайте или сохраните эти боковые чаты, затем закройте их перед перезапуском: {{names}}.",
+	"update.restart.scheduledWithSides": "Orchestrator перезапустится, когда боковые чаты будут закрыты, а текущие задачи перейдут в состояние простоя.",
 	"update.restart.scheduled": "Orchestrator перезапустится, когда текущие задачи будут бездействовать.",
 	"update.restart.scheduledShort": "Перезапуск после завершения работы",
 	"update.restart.cancelScheduled": "Отменить запланированный перезапуск",

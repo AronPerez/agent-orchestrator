@@ -1878,6 +1878,8 @@
 	"update.restart.options": "Options de redémarrage",
 	"update.restart.whenIdle": "Redémarrer une fois inactif",
 	"update.restart.waitForIdle": "Des tâches sont actives ou leur état n’a pas pu être confirmé. Orchestrator pourra redémarrer lorsqu’elles seront inactives.",
+	"update.restart.closeSideChats": "Lisez ou enregistrez ces discussions parallèles, puis fermez-les avant de redémarrer : {{names}}.",
+	"update.restart.scheduledWithSides": "Orchestrator redémarrera une fois les discussions parallèles fermées et les tâches actuelles inactives.",
 	"update.restart.scheduled": "Orchestrator redémarrera lorsque les tâches actuelles seront inactives.",
 	"update.restart.scheduledShort": "Redémarrer une fois inactif",
 	"update.restart.cancelScheduled": "Annuler le redémarrage prévu",

@@ -76,6 +76,14 @@ it("offers to wait for idle instead of restarting active work", async () => {
 	expect(updInstall).not.toHaveBeenCalled();
 });
 
+it.each([false, true])("explains the open side blocker even when already idle, scheduled=%s", async (restartWhenIdle) => {
+	useUiStore.setState({ updateInstallPromptOpen: true });
+	renderDialog({ state: "downloaded", installed: { identity: "new", idle: false, restartWhenIdle, openSideChats: ["Design notes"] } });
+	expect(await screen.findByText(/Read or save these side chats, then close them before restarting: Design notes/)).toBeVisible();
+	expect(screen.queryByText(/Current tasks are active/)).toBeNull();
+	expect(screen.getByRole("button", { name: "Restart now" })).toBeDisabled();
+});
+
 it("blocks both restart choices and explains recovery while a macOS update is armed", async () => {
 	useUiStore.setState({ updateInstallPromptOpen: true });
 	renderDialog({ state: "downloaded", installed: { identity: "B", idle: true, restartWhenIdle: false, restartBlocked: "native-update-staged" } });

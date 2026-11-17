@@ -67,9 +67,12 @@ unsafe unsaved chat drafts. Stored idle activity is insufficient when status is
 answer and all recorded review runs must be terminal; a display label for one
 PR cannot hide another running review. Scheduled and retrying reviews remain
 busy even without a running pass. The review API derives `autoReviewPending`
-from every current PR head, the selected harness, and the engine's retry policy;
+from every current PR head, the coordinator's resolved harness, and the engine's retry policy.
+The coordinator and restart probe share that harness policy, including workers
+whose actual harness differs from the project default.
 CI or another PR's display label cannot hide this work. Every non-archived Chat
-reviewer is included even without a terminal handle. Its live conversation
+reviewer is included in `chatReviewerIds` even without a terminal handle, separately
+from `activeReviewers` so stopped history does not hide a running reviewer. Its live conversation
 controller must be settled and its turns terminal; stored hook activity is not
 used for Chat reviewers. TUI activity must be idle or exited, and unreported
 activity for another TUI reviewer remains busy.
@@ -80,7 +83,14 @@ Any retained side chat keeps both restart choices waiting, including a completed
 conversation or an idle side with a draft: quitting retires their launch-scoped
 state. The user must finish reading, save any text, and close those sides before
 restarting. Unavailable recovery or capture facts and locally pending side-close
-state also keep the gate closed. The user can cancel the in-memory queue.
+state also keep the gate closed. The dialog names these sides and asks the user
+to read/save and close them, including when a restart is already queued.
+For an identity-mismatched daemon, normal recovery remains detached. The restart
+probe reads side lists for live Chat sessions, retains local side state, and
+fences the final result to the same daemon generation, port and failure code.
+An empty idle board can therefore restart into the installed build without
+claiming or restoring a side launch into an incompatible daemon.
+The user can cancel the in-memory queue.
 The normal quit path preserves agents; no harness stop/update/resume operation
 is added. No restart intent, preference or dismissal marker is persisted. A fresh
 process pins the newly installed archive and has no inherited mismatch or prompt.

@@ -1848,6 +1848,8 @@
 	"update.restart.options": "再起動のオプション",
 	"update.restart.whenIdle": "アイドル時に再起動",
 	"update.restart.waitForIdle": "タスクが実行中か、状態を確認できません。タスクがアイドル状態になってから Orchestrator を再起動できます。",
+	"update.restart.closeSideChats": "再起動する前に、これらのサイドチャットを読むか保存してから閉じてください: {{names}}。",
+	"update.restart.scheduledWithSides": "サイドチャットを閉じ、現在のタスクがアイドル状態になると、Orchestrator が再起動します。",
 	"update.restart.scheduled": "現在のタスクがアイドル状態になると Orchestrator が再起動します。",
 	"update.restart.scheduledShort": "アイドル時に再起動",
 	"update.restart.cancelScheduled": "再起動の予約をキャンセル",

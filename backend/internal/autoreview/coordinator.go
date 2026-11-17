@@ -101,7 +101,7 @@ func (c *Coordinator) EvaluateSession(ctx context.Context, id domain.SessionID) 
 		}
 		return Result{}, err
 	}
-	harness := effectiveReviewerHarness(session, project.Config)
+	harness := reviewcore.AutoReviewerHarness(session, project.Config)
 	if harness == "" {
 		return Result{Reason: "missing_reviewer_harness"}, nil
 	}
@@ -207,13 +207,6 @@ func existingHeadReason(runs []domain.ReviewRun, prURL, targetSHA string) string
 		return "failed_same_sha_retry_limit"
 	}
 	return ""
-}
-
-func effectiveReviewerHarness(session domain.SessionRecord, config domain.ProjectConfig) domain.ReviewerHarness {
-	if session.ReviewerHarness != "" {
-		return session.ReviewerHarness
-	}
-	return config.ResolveReviewerHarness(session.Harness)
 }
 
 func ineligibleReason(prs []domain.PullRequest, url string) string {

@@ -2204,6 +2204,8 @@
 	"update.restart.options": "Restart options",
 	"update.restart.whenIdle": "Restart when idle",
 	"update.restart.waitForIdle": "Current tasks are active or their state could not be confirmed. Orchestrator can restart once they are idle.",
+	"update.restart.closeSideChats": "Read or save these side chats, then close them before restarting: {{names}}.",
+	"update.restart.scheduledWithSides": "Orchestrator will restart after side chats are closed and current tasks are idle.",
 	"update.restart.scheduled": "Orchestrator will restart when current tasks are idle.",
 	"update.restart.scheduledShort": "Restart when idle",
 	"update.restart.cancelScheduled": "Cancel scheduled restart",
