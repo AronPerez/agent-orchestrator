@@ -119,6 +119,7 @@ type fakeSessionService struct {
 	workspaceBranches          sessionsvc.WorkspaceBranches
 	projectOverlaps            sessionsvc.ProjectOverlapResult
 	projectOverlapsErr         error
+	overlapMu                  sync.Mutex
 	overlapProjectID           domain.ProjectID
 	projectOverlapReads        int
 	projectOverlapNoticeReads  int
@@ -749,6 +750,8 @@ func (f *fakeSessionService) WorkspaceWatchPaths(_ context.Context, id domain.Se
 }
 
 func (f *fakeSessionService) ProjectOverlapWatchPaths(_ context.Context, projectID domain.ProjectID) ([]string, error) {
+	f.overlapMu.Lock()
+	defer f.overlapMu.Unlock()
 	f.overlapWatchProjectID = projectID
 	if f.projectOverlapPathsErr != nil {
 		return nil, f.projectOverlapPathsErr
@@ -965,6 +968,8 @@ func TestSessionsAPI_ListWorkspaceTree(t *testing.T) {
 func (f *fakeSessionService) InvalidateWorkspaceCache(_ domain.SessionID) {}
 
 func (f *fakeSessionService) ProjectOverlaps(_ context.Context, projectID domain.ProjectID) (sessionsvc.ProjectOverlapResult, error) {
+	f.overlapMu.Lock()
+	defer f.overlapMu.Unlock()
 	f.overlapProjectID = projectID
 	f.projectOverlapReads++
 	if f.projectOverlapsErr != nil {
@@ -974,7 +979,15 @@ func (f *fakeSessionService) ProjectOverlaps(_ context.Context, projectID domain
 }
 
 func (f *fakeSessionService) ScheduleProjectOverlapNotices(_ sessionsvc.ProjectOverlapResult) {
+	f.overlapMu.Lock()
+	defer f.overlapMu.Unlock()
 	f.projectOverlapNoticeReads++
+}
+
+func (f *fakeSessionService) projectOverlapCallState() (domain.ProjectID, domain.ProjectID, int, int) {
+	f.overlapMu.Lock()
+	defer f.overlapMu.Unlock()
+	return f.overlapProjectID, f.overlapWatchProjectID, f.projectOverlapReads, f.projectOverlapNoticeReads
 }
 
 func newSessionTestServer(t *testing.T, svc *fakeSessionService) *httptest.Server {
@@ -4087,11 +4100,12 @@ func TestSessionsAPI_ProjectOverlaps(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("GET project overlaps = %d, want 200; body=%s", status, body)
 	}
-	if svc.overlapProjectID != "demo" {
-		t.Fatalf("project id = %q, want demo", svc.overlapProjectID)
+	projectID, _, _, noticeReads := svc.projectOverlapCallState()
+	if projectID != "demo" {
+		t.Fatalf("project id = %q, want demo", projectID)
 	}
-	if svc.projectOverlapNoticeReads != 1 {
-		t.Fatalf("notice reconciles = %d, want 1", svc.projectOverlapNoticeReads)
+	if noticeReads != 1 {
+		t.Fatalf("notice reconciles = %d, want 1", noticeReads)
 	}
 	var got controllers.ProjectOverlapsResponse
 	mustJSON(t, body, &got)
@@ -4749,8 +4763,9 @@ func TestSessionsAPI_StreamProjectOverlapChanges(t *testing.T) {
 	if contentType := resp.Header.Get("Content-Type"); !strings.HasPrefix(contentType, "text/event-stream") {
 		t.Fatalf("Content-Type = %q, want text/event-stream", contentType)
 	}
-	if svc.overlapWatchProjectID != "demo" || svc.projectOverlapReads != 1 || svc.projectOverlapNoticeReads != 1 {
-		t.Fatalf("startup reads watch=%q overlaps=%d notices=%d, want demo/1/1", svc.overlapWatchProjectID, svc.projectOverlapReads, svc.projectOverlapNoticeReads)
+	_, watchProjectID, overlapReads, noticeReads := svc.projectOverlapCallState()
+	if watchProjectID != "demo" || overlapReads != 1 || noticeReads != 1 {
+		t.Fatalf("startup reads watch=%q overlaps=%d notices=%d, want demo/1/1", watchProjectID, overlapReads, noticeReads)
 	}
 
 	event := make(chan string, 1)
@@ -4774,11 +4789,12 @@ func TestSessionsAPI_StreamProjectOverlapChanges(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for overlap change event")
 	}
-	if svc.projectOverlapReads != 2 {
-		t.Fatalf("overlap reads after change = %d, want 2", svc.projectOverlapReads)
+	_, _, overlapReads, noticeReads = svc.projectOverlapCallState()
+	if overlapReads != 2 {
+		t.Fatalf("overlap reads after change = %d, want 2", overlapReads)
 	}
-	if svc.projectOverlapNoticeReads != 2 {
-		t.Fatalf("notice reconciles after change = %d, want 2", svc.projectOverlapNoticeReads)
+	if noticeReads != 2 {
+		t.Fatalf("notice reconciles after change = %d, want 2", noticeReads)
 	}
 }
 
