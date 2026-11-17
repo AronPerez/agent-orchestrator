@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -49,6 +50,34 @@ func TestTaskPreparationIsClaimedWithoutCreatingAnotherWorktree(t *testing.T) {
 	}
 	if got := st.sessions[spawned.ID].ProvisionState.WithDefault(); got != domain.SessionProvisionReady {
 		t.Fatalf("synchronous task provision state = %q, want ready", got)
+	}
+}
+
+func TestTaskPreparationLaunchUsesPromotedWorkerContract(t *testing.T) {
+	m, st, _, _ := newManager()
+	m.runBackground = func(work func()) { work() }
+	now := time.Date(2026, time.November, 17, 18, 0, 0, 0, time.UTC)
+	m.clock = func() time.Time { return now }
+	agent := &recordingAgent{}
+	m.agents = singleAgent{agent: agent}
+
+	token, err := m.PrepareTaskWorkspace(context.Background(), st.projects["mer"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	spawned, _, _, err := m.Spawn(context.Background(), ports.SpawnConfig{
+		ProjectID: "mer", Kind: domain.KindWorker, TaskPreparation: token,
+		Goal: "Ship the prepared contract", Timebox: 2 * time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDeadline := now.Add(2 * time.Hour).Format(time.RFC3339)
+	if !strings.Contains(agent.lastLaunch.SystemPrompt, "Ship the prepared contract") || !strings.Contains(agent.lastLaunch.SystemPrompt, wantDeadline) {
+		t.Fatalf("launch system prompt missing promoted contract:\n%s", agent.lastLaunch.SystemPrompt)
+	}
+	if got := st.sessions[spawned.ID]; got.Goal != "Ship the prepared contract" || got.TimeboxDeadlineAt == nil || !got.TimeboxDeadlineAt.Equal(now.Add(2*time.Hour)) {
+		t.Fatalf("stored contract = %+v", got)
 	}
 }
 

@@ -2026,6 +2026,7 @@ func TestSessionsAPI_SpawnRejectsInvalidWorkerContract(t *testing.T) {
 		{name: "timebox only", body: `{"kind":"worker","harness":"codex","timeboxSeconds":60}`},
 		{name: "negative timebox", body: `{"kind":"worker","harness":"codex","goal":"Ship it","timeboxSeconds":-1}`},
 		{name: "orchestrator", body: `{"kind":"orchestrator","harness":"codex","goal":"Ship it","timeboxSeconds":60}`},
+		{name: "standalone", body: `{"kind":"worker","harness":"codex","goal":"Ship it","timeboxSeconds":60}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			svc := newFakeSessionService()

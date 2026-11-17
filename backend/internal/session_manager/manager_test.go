@@ -75,6 +75,7 @@ func TestValidateSpawnContractRejectsIncompleteOrNonWorkerContracts(t *testing.T
 		{name: "timebox only", cfg: ports.SpawnConfig{Kind: domain.KindWorker, Timebox: time.Hour}},
 		{name: "negative timebox", cfg: ports.SpawnConfig{Kind: domain.KindWorker, Goal: "Ship it", Timebox: -time.Hour}},
 		{name: "orchestrator", cfg: ports.SpawnConfig{Kind: domain.KindOrchestrator, Goal: "Ship it", Timebox: time.Hour}},
+		{name: "standalone", cfg: ports.SpawnConfig{Kind: domain.KindWorker, Goal: "Ship it", Timebox: time.Hour}},
 		{name: "overlong goal", cfg: ports.SpawnConfig{Kind: domain.KindWorker, Goal: strings.Repeat("x", 1001), Timebox: time.Hour}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -86,7 +87,7 @@ func TestValidateSpawnContractRejectsIncompleteOrNonWorkerContracts(t *testing.T
 	if err := validateSpawnContract(ports.SpawnConfig{Kind: domain.KindWorker}); err != nil {
 		t.Fatalf("empty contract: %v", err)
 	}
-	if err := validateSpawnContract(ports.SpawnConfig{Kind: domain.KindWorker, Goal: "Ship it", Timebox: time.Hour}); err != nil {
+	if err := validateSpawnContract(ports.SpawnConfig{ProjectID: "contracts", Kind: domain.KindWorker, Goal: "Ship it", Timebox: time.Hour}); err != nil {
 		t.Fatalf("complete contract: %v", err)
 	}
 }
@@ -6958,9 +6959,9 @@ func TestSystemPrompt_AppendsDurableWorkerContract(t *testing.T) {
 		"Ship the verified contract foundation",
 		"2026-11-17T18:30:00Z",
 		"goal met, blocked, or time limit reached",
-		"ao report --done",
-		"ao report --needs-input",
-		"ao report --stuck",
+		"ao report --done --note <text>",
+		"ao report --needs-input --note <text>",
+		"ao report --stuck --note <text>",
 		"report your outcome before stopping",
 	} {
 		if !strings.Contains(sp, want) {

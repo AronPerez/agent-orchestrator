@@ -392,7 +392,7 @@ func (c *SessionsController) spawn(w http.ResponseWriter, r *http.Request) {
 	if in.Kind == "" {
 		in.Kind = domain.KindWorker
 	}
-	goal, timebox, err := validateWorkerContract(in.Goal, in.TimeboxSeconds, in.Kind)
+	goal, timebox, err := validateWorkerContract(in.Goal, in.TimeboxSeconds, in.Kind, in.ProjectID)
 	if err != nil {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "validation", "INVALID_WORKER_CONTRACT", err.Error(), nil)
 		return
@@ -2431,7 +2431,7 @@ func (c *SessionsController) delegateTask(w http.ResponseWriter, r *http.Request
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_APPROVAL_MODE", "approvalMode is invalid", nil)
 		return
 	}
-	goal, timebox, err := validateWorkerContract(in.Goal, in.TimeboxSeconds, domain.KindWorker)
+	goal, timebox, err := validateWorkerContract(in.Goal, in.TimeboxSeconds, domain.KindWorker, in.ProjectID)
 	if err != nil {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "validation", "INVALID_WORKER_CONTRACT", err.Error(), nil)
 		return
@@ -2480,7 +2480,7 @@ func validClientRequestID(id string) bool {
 	return id == "" || len(id) <= maxIdempotencyKey && strings.TrimSpace(id) == id && strings.IndexFunc(id, unicode.IsControl) < 0
 }
 
-func validateWorkerContract(rawGoal string, seconds int64, kind domain.SessionKind) (string, time.Duration, error) {
+func validateWorkerContract(rawGoal string, seconds int64, kind domain.SessionKind, projectID domain.ProjectID) (string, time.Duration, error) {
 	goal := strings.TrimSpace(domain.SanitizeControlChars(rawGoal))
 	if seconds < 0 || seconds > maxTimeboxSeconds {
 		return "", 0, fmt.Errorf("timeboxSeconds must be between 1 and %d", maxTimeboxSeconds)
@@ -2493,6 +2493,9 @@ func validateWorkerContract(rawGoal string, seconds int64, kind domain.SessionKi
 	}
 	if kind != domain.KindWorker {
 		return "", 0, fmt.Errorf("goal and timeboxSeconds are supported for worker sessions only")
+	}
+	if projectID == "" {
+		return "", 0, fmt.Errorf("goal and timeboxSeconds require a registered project")
 	}
 	if utf8.RuneCountInString(goal) > maxWorkerGoalLen {
 		return "", 0, fmt.Errorf("goal must be %d characters or fewer", maxWorkerGoalLen)

@@ -159,6 +159,9 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 				if opts.kind == "orchestrator" {
 					return usageError{fmt.Errorf("standalone sessions must be workers")}
 				}
+				if goal != "" {
+					return usageError{fmt.Errorf("--goal and --timebox require a registered project")}
+				}
 				if strings.TrimSpace(opts.branch) != "" || strings.TrimSpace(opts.baseBranch) != "" || strings.TrimSpace(opts.issue) != "" || strings.TrimSpace(opts.claimPR) != "" {
 					return usageError{fmt.Errorf("standalone sessions do not support --branch, --base, --issue, or --claim-pr")}
 				}
