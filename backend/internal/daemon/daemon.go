@@ -852,9 +852,9 @@ func Run(buildVersion string) (retErr error) {
 	contractStart := make(chan struct{})
 	contractCoordinator := sessioncontract.New(
 		store,
-		lcStack.LCM,
-		sessioncontract.StallReporterFunc(func(reportCtx context.Context, id domain.SessionID, message string) error {
-			_, err := reportSvc.Create(reportCtx, reportsvc.CreateInput{SessionID: id, Message: message})
+		contractNudger{store: store, chat: chatSvc, semantic: reportSessions, tui: lcStack.LCM},
+		sessioncontract.StallReporterFunc(func(reportCtx context.Context, id domain.SessionID, key, message string) error {
+			_, err := reportSvc.CreateImmediateOnce(reportCtx, reportsvc.CreateInput{SessionID: id, Message: message}, key)
 			return err
 		}),
 		notificationWriter,

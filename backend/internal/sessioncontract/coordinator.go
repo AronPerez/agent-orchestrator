@@ -33,19 +33,20 @@ type Store interface {
 	RecordSessionContractStallNudge(context.Context, domain.SessionID, time.Time) (bool, error)
 	RecordSessionContractStallEscalation(context.Context, domain.SessionID, time.Time, time.Time) (bool, error)
 	ExpireSessionContract(context.Context, domain.SessionID, time.Time, time.Time) (bool, error)
+	RecordSessionContractTimeboxPrompt(context.Context, domain.SessionID, time.Time, time.Time) (bool, error)
 }
 
 // Nudger performs the existing just-in-time sessionguard check before writing
 // to a worker. sent is false when the live surface is unsafe.
 type Nudger interface {
-	NudgeSession(context.Context, domain.SessionID, string) (sent bool, err error)
-	NudgeIdleSession(context.Context, domain.SessionID, string) (sent bool, err error)
+	NudgeSession(context.Context, domain.SessionID, string, string) (sent bool, err error)
+	NudgeIdleSession(context.Context, domain.SessionID, string, string) (sent bool, err error)
 }
 
 // StallReporter delivers a daemon-observed stall through the existing worker
 // report channel to the project's orchestrator.
 type StallReporter interface {
-	ReportSessionContractStall(context.Context, domain.SessionID, string) error
+	ReportSessionContractStall(context.Context, domain.SessionID, string, string) error
 }
 
 // Notifier is the user-facing side of a stall escalation.
@@ -54,11 +55,11 @@ type Notifier interface {
 }
 
 // StallReporterFunc adapts a report-service closure at daemon wiring time.
-type StallReporterFunc func(context.Context, domain.SessionID, string) error
+type StallReporterFunc func(context.Context, domain.SessionID, string, string) error
 
 // ReportSessionContractStall calls f with the observed stalled worker.
-func (f StallReporterFunc) ReportSessionContractStall(ctx context.Context, id domain.SessionID, message string) error {
-	return f(ctx, id, message)
+func (f StallReporterFunc) ReportSessionContractStall(ctx context.Context, id domain.SessionID, key, message string) error {
+	return f(ctx, id, key, message)
 }
 
 // Action names the one state transition an evaluation performed.
@@ -70,6 +71,9 @@ const (
 	ActionNudged    Action = "nudged"
 	ActionEscalated Action = "escalated"
 	ActionLimitHit  Action = "limit_hit"
+	// ActionTimeboxPrompted means a prompt suppressed during the original
+	// expiry sweep was delivered safely on a later evaluation.
+	ActionTimeboxPrompted Action = "timebox_prompted"
 )
 
 // Result explains an evaluation without making callers inspect store writes.
@@ -135,6 +139,12 @@ func (c *Coordinator) EvaluateSession(ctx context.Context, id domain.SessionID) 
 
 	now := c.clock().UTC()
 	deadline := rec.TimeboxDeadlineAt.UTC()
+	if rec.ContractOutcome == domain.SessionContractOutcomeLimitHit {
+		if now.Before(deadline) {
+			return Result{Reason: "contract_finished"}, nil
+		}
+		return c.promptTimebox(ctx, rec, deadline, now, ActionTimeboxPrompted)
+	}
 	if !now.Before(deadline) {
 		return c.expire(ctx, rec, deadline, now)
 	}
@@ -163,7 +173,7 @@ func (c *Coordinator) EvaluateSession(ctx context.Context, id domain.SessionID) 
 		return Result{Reason: prBlocker}, nil
 	}
 
-	if rec.ContractStallNudgedAt == nil || rec.Activity.LastActivityAt.After(*rec.ContractStallNudgedAt) {
+	if rec.ContractStallNudgedAt == nil || receivedDirectionAfter(rec, *rec.ContractStallNudgedAt) {
 		return c.nudge(ctx, rec, now)
 	}
 	if rec.ContractStallEscalatedAt == nil && !now.Before(rec.ContractStallNudgedAt.Add(stallWindow)) {
@@ -180,7 +190,8 @@ func contractGate(rec domain.SessionRecord) string {
 		return "terminated"
 	case rec.Goal == "" || rec.TimeboxDeadlineAt == nil:
 		return "no_contract"
-	case rec.ContractOutcome != domain.SessionContractOutcomeNone:
+	case rec.ContractOutcome != domain.SessionContractOutcomeNone &&
+		(rec.ContractOutcome != domain.SessionContractOutcomeLimitHit || rec.ContractTimeboxPromptedAt != nil):
 		return "contract_finished"
 	default:
 		return ""
@@ -191,7 +202,8 @@ func (c *Coordinator) nudge(ctx context.Context, rec domain.SessionRecord, now t
 	if c.nudger == nil {
 		return Result{Reason: "nudge_unavailable"}, nil
 	}
-	sent, sendErr := c.nudger.NudgeIdleSession(ctx, rec.ID, stallNudgeMessage)
+	key := fmt.Sprintf("session-contract-stall-nudge:%s:%d", rec.ID, directionBaseline(rec).UnixNano())
+	sent, sendErr := c.nudger.NudgeIdleSession(ctx, rec.ID, key, stallNudgeMessage)
 	if !sent {
 		if sendErr != nil {
 			return Result{}, sendErr
@@ -209,33 +221,49 @@ func (c *Coordinator) nudge(ctx context.Context, rec domain.SessionRecord, now t
 }
 
 func (c *Coordinator) expire(ctx context.Context, rec domain.SessionRecord, deadline, now time.Time) (Result, error) {
-	var sendErr error
-	if c.nudger != nil {
-		_, sendErr = c.nudger.NudgeSession(ctx, rec.ID, timeboxMessage)
-	}
 	expired, err := c.store.ExpireSessionContract(ctx, rec.ID, deadline, now)
 	if err != nil {
 		return Result{}, err
 	}
 	if !expired {
+		return Result{Reason: "contract_finished"}, nil
+	}
+	return c.promptTimebox(ctx, rec, deadline, now, ActionLimitHit)
+}
+
+func (c *Coordinator) promptTimebox(ctx context.Context, rec domain.SessionRecord, deadline, now time.Time, action Action) (Result, error) {
+	if c.nudger == nil {
+		return Result{Action: action, Reason: "timebox_prompt_pending"}, nil
+	}
+	key := fmt.Sprintf("session-contract-timebox:%s:%d", rec.ID, deadline.UnixNano())
+	sent, sendErr := c.nudger.NudgeSession(ctx, rec.ID, key, timeboxMessage)
+	if !sent {
+		return Result{Action: action, Reason: "timebox_prompt_pending"}, sendErr
+	}
+	recorded, err := c.store.RecordSessionContractTimeboxPrompt(ctx, rec.ID, deadline, now)
+	if err != nil {
+		return Result{}, err
+	}
+	if !recorded {
 		return Result{Reason: "contract_finished"}, sendErr
 	}
-	return Result{Action: ActionLimitHit}, sendErr
+	return Result{Action: action}, sendErr
 }
 
 func (c *Coordinator) escalate(ctx context.Context, rec domain.SessionRecord, nudgedAt, now time.Time) (Result, error) {
 	message := fmt.Sprintf("Worker %s stopped without reporting and remained idle after one automatic nudge.", rec.ID)
+	episodeKey := fmt.Sprintf("session-contract-stall:%s:%d", rec.ID, nudgedAt.UnixNano())
 	if c.notifier != nil {
 		if err := c.notifier.Notify(ctx, ports.NotificationIntent{
 			Type: domain.NotificationSessionStalled, SessionID: rec.ID, ProjectID: rec.ProjectID,
-			CreatedAt: now, SourceKey: fmt.Sprintf("session-contract-stall:%s:%d", rec.ID, nudgedAt.UnixNano()),
+			CreatedAt: now, SourceKey: episodeKey,
 			SessionDisplayName: rec.DisplayName,
 		}); err != nil {
 			return Result{}, err
 		}
 	}
 	if c.reporter != nil {
-		if err := c.reporter.ReportSessionContractStall(ctx, rec.ID, message); err != nil {
+		if err := c.reporter.ReportSessionContractStall(ctx, rec.ID, episodeKey, message); err != nil {
 			return Result{}, err
 		}
 	}
@@ -257,12 +285,14 @@ func (c *Coordinator) prStallBlocker(ctx context.Context, id domain.SessionID) (
 	if len(prs) == 0 {
 		return "", nil
 	}
+	open := 0
 	waiting := false
 	needsWorker := false
 	for _, pr := range prs {
 		if pr.Merged || pr.Closed {
 			continue
 		}
+		open++
 		comments, err := c.store.ListPRComments(ctx, pr.URL)
 		if err != nil {
 			return "", err
@@ -288,6 +318,9 @@ func (c *Coordinator) prStallBlocker(ctx context.Context, id domain.SessionID) (
 			needsWorker = true
 		}
 	}
+	if open == 0 {
+		return "", nil
+	}
 	if needsWorker {
 		return "", nil
 	}
@@ -295,6 +328,21 @@ func (c *Coordinator) prStallBlocker(ctx context.Context, id domain.SessionID) (
 		return "waiting_on_ci_or_review", nil
 	}
 	return "work_ready", nil
+}
+
+func receivedDirectionAfter(rec domain.SessionRecord, at time.Time) bool {
+	return rec.Metadata.LatestUserPromptAt.After(at) || rec.Metadata.LatestInteractionAt.After(at)
+}
+
+func directionBaseline(rec domain.SessionRecord) time.Time {
+	baseline := rec.Metadata.LatestUserPromptAt
+	if rec.Metadata.LatestInteractionAt.After(baseline) {
+		baseline = rec.Metadata.LatestInteractionAt
+	}
+	if baseline.IsZero() {
+		baseline = rec.CreatedAt
+	}
+	return baseline.UTC()
 }
 
 // Sweep evaluates every known session and isolates per-session failures.

@@ -78,8 +78,21 @@ func TestSessionContractSupervisionFactsAreFenced(t *testing.T) {
 		t.Fatalf("repeat expiry ok=%v err=%v", ok, err)
 	}
 	got, ok, err = s.GetSession(ctx, created.ID)
-	if err != nil || !ok || got.ContractOutcome != domain.SessionContractOutcomeLimitHit || got.ContractTimeboxPromptedAt == nil || !got.ContractTimeboxPromptedAt.Equal(deadline) {
+	if err != nil || !ok || got.ContractOutcome != domain.SessionContractOutcomeLimitHit || got.ContractTimeboxPromptedAt != nil {
 		t.Fatalf("expired session = %+v ok=%v err=%v", got, ok, err)
+	}
+	if ok, err := s.RecordSessionContractTimeboxPrompt(ctx, created.ID, deadline.Add(time.Second), deadline); err != nil || ok {
+		t.Fatalf("wrong deadline prompt ok=%v err=%v", ok, err)
+	}
+	if ok, err := s.RecordSessionContractTimeboxPrompt(ctx, created.ID, deadline, deadline); err != nil || !ok {
+		t.Fatalf("first prompt ok=%v err=%v", ok, err)
+	}
+	if ok, err := s.RecordSessionContractTimeboxPrompt(ctx, created.ID, deadline, deadline.Add(time.Minute)); err != nil || ok {
+		t.Fatalf("repeat prompt ok=%v err=%v", ok, err)
+	}
+	got, ok, err = s.GetSession(ctx, created.ID)
+	if err != nil || !ok || got.ContractTimeboxPromptedAt == nil || !got.ContractTimeboxPromptedAt.Equal(deadline) {
+		t.Fatalf("prompted session = %+v ok=%v err=%v", got, ok, err)
 	}
 	if ok, err := s.RecordSessionContractStallNudge(ctx, created.ID, deadline.Add(time.Minute)); err != nil || ok {
 		t.Fatalf("post-outcome nudge ok=%v err=%v", ok, err)

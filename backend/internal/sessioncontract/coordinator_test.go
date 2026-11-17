@@ -77,6 +77,15 @@ func (f *fakeStore) ExpireSessionContract(_ context.Context, id domain.SessionID
 		return false, nil
 	}
 	rec.ContractOutcome = domain.SessionContractOutcomeLimitHit
+	f.sessions[id] = rec
+	return true, nil
+}
+
+func (f *fakeStore) RecordSessionContractTimeboxPrompt(_ context.Context, id domain.SessionID, deadline, at time.Time) (bool, error) {
+	rec, ok := f.sessions[id]
+	if !ok || rec.ContractOutcome != domain.SessionContractOutcomeLimitHit || rec.ContractTimeboxPromptedAt != nil || rec.TimeboxDeadlineAt == nil || !rec.TimeboxDeadlineAt.Equal(deadline) {
+		return false, nil
+	}
 	rec.ContractTimeboxPromptedAt = &at
 	f.sessions[id] = rec
 	return true, nil
@@ -84,24 +93,25 @@ func (f *fakeStore) ExpireSessionContract(_ context.Context, id domain.SessionID
 
 type fakeNudger struct {
 	sent  bool
+	err   error
 	calls []string
 }
 
-func (f *fakeNudger) NudgeSession(_ context.Context, id domain.SessionID, message string) (bool, error) {
-	f.calls = append(f.calls, string(id)+" "+message)
-	return f.sent, nil
+func (f *fakeNudger) NudgeSession(_ context.Context, id domain.SessionID, key, message string) (bool, error) {
+	f.calls = append(f.calls, string(id)+" "+key+" "+message)
+	return f.sent, f.err
 }
 
-func (f *fakeNudger) NudgeIdleSession(ctx context.Context, id domain.SessionID, message string) (bool, error) {
-	return f.NudgeSession(ctx, id, message)
+func (f *fakeNudger) NudgeIdleSession(ctx context.Context, id domain.SessionID, key, message string) (bool, error) {
+	return f.NudgeSession(ctx, id, key, message)
 }
 
 type fakeReporter struct {
 	calls []string
 }
 
-func (f *fakeReporter) ReportSessionContractStall(_ context.Context, id domain.SessionID, message string) error {
-	f.calls = append(f.calls, string(id)+" "+message)
+func (f *fakeReporter) ReportSessionContractStall(_ context.Context, id domain.SessionID, key, message string) error {
+	f.calls = append(f.calls, string(id)+" "+key+" "+message)
 	return nil
 }
 
@@ -162,7 +172,7 @@ func TestEvaluateSessionSuppressedNudgeDoesNotConsumeEpisode(t *testing.T) {
 func TestEvaluateSessionEscalatesUnchangedStallAfterOneMoreThreshold(t *testing.T) {
 	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
 	store, id := contractFixture(now)
-	nudgedAt := now.Add(-11 * time.Minute)
+	nudgedAt := now.Add(-21 * time.Minute)
 	rec := store.sessions[id]
 	rec.ContractStallNudgedAt = &nudgedAt
 	store.sessions[id] = rec
@@ -212,11 +222,30 @@ func TestEvaluateSessionActivityAfterNudgeStartsNewEpisode(t *testing.T) {
 	rec := store.sessions[id]
 	rec.ContractStallNudgedAt = &oldNudge
 	rec.Activity.LastActivityAt = now.Add(-20 * time.Minute)
+	rec.Metadata.LatestUserPromptAt = now.Add(-20 * time.Minute)
 	store.sessions[id] = rec
 	nudger := &fakeNudger{sent: true}
 	result, err := New(store, nudger, nil, nil, Config{Clock: func() time.Time { return now }}).EvaluateSession(context.Background(), id)
 	if err != nil || result.Action != ActionNudged || len(nudger.calls) != 1 {
 		t.Fatalf("result=%+v calls=%v err=%v", result, nudger.calls, err)
+	}
+}
+
+func TestEvaluateSessionNudgeGeneratedTurnDoesNotStartNewEpisode(t *testing.T) {
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	store, id := contractFixture(now)
+	nudgedAt := now.Add(-11 * time.Minute)
+	rec := store.sessions[id]
+	rec.ContractStallNudgedAt = &nudgedAt
+	// The automatic nudge started and completed a turn, advancing activity, but
+	// no human or peer supplied fresh direction.
+	rec.Activity.LastActivityAt = now.Add(-11 * time.Minute)
+	store.sessions[id] = rec
+	nudger := &fakeNudger{sent: true}
+	reporter := &fakeReporter{}
+	result, err := New(store, nudger, reporter, &fakeNotifier{}, Config{Clock: func() time.Time { return now }}).EvaluateSession(context.Background(), id)
+	if err != nil || result.Action != ActionEscalated || len(nudger.calls) != 0 || len(reporter.calls) != 1 {
+		t.Fatalf("result=%+v nudges=%v reports=%v err=%v", result, nudger.calls, reporter.calls, err)
 	}
 }
 
@@ -237,6 +266,42 @@ func TestEvaluateSessionExpiresTimeboxExactlyOnce(t *testing.T) {
 	result, err = c.EvaluateSession(context.Background(), id)
 	if err != nil || result.Action != ActionNone || len(nudger.calls) != 1 {
 		t.Fatalf("repeat result=%+v calls=%v err=%v", result, nudger.calls, err)
+	}
+}
+
+func TestEvaluateSessionRetriesSuppressedTimeboxPrompt(t *testing.T) {
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	store, id := contractFixture(now)
+	rec := store.sessions[id]
+	deadline := now.Add(-time.Second)
+	rec.TimeboxDeadlineAt = &deadline
+	rec.Activity.State = domain.ActivityWaitingInput
+	store.sessions[id] = rec
+	nudger := &fakeNudger{}
+	c := New(store, nudger, nil, nil, Config{Clock: func() time.Time { return now }})
+
+	result, err := c.EvaluateSession(context.Background(), id)
+	if err != nil || result.Action != ActionLimitHit || result.Reason != "timebox_prompt_pending" {
+		t.Fatalf("first result=%+v err=%v", result, err)
+	}
+	got := store.sessions[id]
+	if got.ContractOutcome != domain.SessionContractOutcomeLimitHit || got.ContractTimeboxPromptedAt != nil || len(nudger.calls) != 1 {
+		t.Fatalf("first session=%+v calls=%v", got, nudger.calls)
+	}
+
+	nudger.sent = true
+	result, err = c.EvaluateSession(context.Background(), id)
+	if err != nil || result.Action != ActionTimeboxPrompted || result.Reason != "" {
+		t.Fatalf("retry result=%+v err=%v", result, err)
+	}
+	got = store.sessions[id]
+	if got.ContractTimeboxPromptedAt == nil || !got.ContractTimeboxPromptedAt.Equal(now) || len(nudger.calls) != 2 {
+		t.Fatalf("retry session=%+v calls=%v", got, nudger.calls)
+	}
+
+	result, err = c.EvaluateSession(context.Background(), id)
+	if err != nil || result.Reason != "contract_finished" || len(nudger.calls) != 2 {
+		t.Fatalf("settled result=%+v calls=%v err=%v", result, nudger.calls, err)
 	}
 }
 
@@ -294,6 +359,12 @@ func TestEvaluateSessionStallGates(t *testing.T) {
 			s.prs[id] = []domain.PullRequest{{URL: "pr-1", CI: domain.CIPending, Review: domain.ReviewChangesRequest, Mergeability: domain.MergeBlocked}}
 		}},
 		{name: "ready PR", mutate: func(s *fakeStore, id domain.SessionID) { s.prs[id] = []domain.PullRequest{ready} }, reason: "work_ready"},
+		{name: "merged PR set behaves like no open PR", mutate: func(s *fakeStore, id domain.SessionID) {
+			s.prs[id] = []domain.PullRequest{{URL: "pr-1", Merged: true, Closed: true}}
+		}},
+		{name: "closed unmerged PR set behaves like no open PR", mutate: func(s *fakeStore, id domain.SessionID) {
+			s.prs[id] = []domain.PullRequest{{URL: "pr-1", Closed: true}}
+		}},
 		{name: "ready PR with unresolved comment is still open", mutate: func(s *fakeStore, id domain.SessionID) {
 			s.prs[id] = []domain.PullRequest{ready}
 			s.comments[ready.URL] = []domain.PullRequestComment{{File: "x.go", Line: 1}}
