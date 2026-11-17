@@ -50,6 +50,31 @@ func TestNotificationStore_InsertListAndDedupe(t *testing.T) {
 	}
 }
 
+func TestNotificationStore_SessionStalledRoundTrips(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "mer")
+	sess, err := s.CreateSession(ctx, sampleRecord("mer"))
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	rec := domain.NotificationRecord{
+		ID: "ntf_stalled", SessionID: sess.ID, ProjectID: sess.ProjectID,
+		Type: domain.NotificationSessionStalled, Title: "checkout-flow stalled",
+		Status: domain.NotificationUnread, CreatedAt: now,
+		SourceKey: "session-contract-stall:" + string(sess.ID) + ":1",
+	}
+	created, inserted, err := s.CreateNotification(ctx, rec)
+	if err != nil || !inserted || created.Type != domain.NotificationSessionStalled {
+		t.Fatalf("created=%+v inserted=%v err=%v", created, inserted, err)
+	}
+	rows, err := s.ListNotifications(ctx, domain.NotificationListAll, time.Time{}, "", 10)
+	if err != nil || len(rows) != 1 || rows[0].ID != rec.ID || rows[0].Type != domain.NotificationSessionStalled {
+		t.Fatalf("rows=%+v err=%v", rows, err)
+	}
+}
+
 func TestNotificationStore_SourceKeyDedupesTerminalReviewResult(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

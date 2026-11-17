@@ -56,6 +56,11 @@ const activeCloudAccountFile = "cloud_active_user"
 // packaged launch while the desktop store is ~/.ao/remotes.json.
 const remotesFileEnv = "AO_REMOTES_FILE"
 
+// cloudAccountFileEnv identifies the exact desktop instance whose live Cloud
+// session owns account-scoped saved hosts. Dev and packaged desktops may run at
+// the same time while sharing the top-level remotes store.
+const cloudAccountFileEnv = "AO_CLOUD_ACCOUNT_FILE"
+
 // coordinationTokenPrefix is distinct from the full-device aod_ format so an
 // older daemon cannot promote this credential when it ignores scope metadata.
 const coordinationTokenPrefix = "aoc_"
@@ -76,6 +81,7 @@ type remoteEntry struct {
 	HostID            string `json:"hostId,omitempty"`
 	AccountUserID     string `json:"accountUserId,omitempty"`
 	CoordinationToken string `json:"coordinationToken,omitempty"`
+	CleanupOnly       bool   `json:"cleanupOnly,omitempty"`
 }
 
 // resolveRemoteTarget resolves the remote daemon this invocation targets, or
@@ -247,11 +253,15 @@ type activeCloudAccountMarker struct {
 // Any read, parse, validation, or liveness failure hides those hosts; local
 // pairings (which have no accountUserId) remain usable.
 func (c *commandContext) activeCloudAccount(context.Context) string {
-	remotesPath, err := remotesFilePath()
-	if err != nil {
-		return ""
+	markerPath := strings.TrimSpace(os.Getenv(cloudAccountFileEnv))
+	if markerPath == "" {
+		remotesPath, err := remotesFilePath()
+		if err != nil {
+			return ""
+		}
+		markerPath = filepath.Join(filepath.Dir(remotesPath), activeCloudAccountFile)
 	}
-	raw, err := os.ReadFile(filepath.Join(filepath.Dir(remotesPath), activeCloudAccountFile)) // #nosec G304 -- fixed sibling of the configured owner-only remotes store.
+	raw, err := os.ReadFile(markerPath) // #nosec G304 -- desktop-carried owner-only authorization marker.
 	if err != nil {
 		return ""
 	}
@@ -431,6 +441,9 @@ func lookupRemoteEntryForAccount(base, activeAccount string) (*remoteEntry, erro
 }
 
 func remoteEntryVisibleToAccount(entry remoteEntry, activeAccount string) bool {
+	if entry.CleanupOnly {
+		return false
+	}
 	owner := strings.TrimSpace(entry.AccountUserID)
 	return owner == "" || (strings.TrimSpace(activeAccount) != "" && owner == strings.TrimSpace(activeAccount))
 }

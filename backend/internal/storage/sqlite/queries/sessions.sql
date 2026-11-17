@@ -20,7 +20,7 @@ INSERT INTO sessions (
     preview_url, preview_revision, terminate_on_pr_merge, cleanup_generation, browser_capability_verifier,
     artifact_dir, session_output_type,
     session_mode, provider_conversation_id, controller_generation, model, effort, session_permissions,
-    requested_output,
+    requested_output, goal, timebox_deadline_at, contract_outcome,
     created_at, updated_at, is_pinned, pinned_at, auto_inject_review, auto_inject_ci,
     provision_state, provision_error, is_task_preparation, automation_run_id, automation_launch_completed,
     client_request_id, client_request_hash, parent_session_id, import_source, display_name_explicit
@@ -31,7 +31,7 @@ INSERT INTO sessions (
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-    ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?, ?, ?, ?
 );
 
 -- name: GetClientRequestSession :one
@@ -292,7 +292,8 @@ SELECT id, project_id, num, issue_id, kind, harness,
     conversation_checkpoint_state, conversation_checkpoint_generation, conversation_checkpoint_native_id,
     conversation_checkpoint_unsettled, conversation_checkpoint_turn_id, native_checkpoint_evidence,
     native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions,
-    requested_output,
+    requested_output, goal, timebox_deadline_at, contract_outcome,
+    contract_stall_nudged_at, contract_stall_escalated_at, contract_timebox_prompted_at,
     provision_state, provision_error, provision_steps, branch_state, branch_naming, temporary_branch, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
     hibernated_at, stale_binary_since, stale_binary_version, stale_binary_launch, stale_binary_switch_failed_at,
@@ -314,7 +315,8 @@ SELECT id, project_id, num, issue_id, kind, harness,
     conversation_checkpoint_state, conversation_checkpoint_generation, conversation_checkpoint_native_id,
     conversation_checkpoint_unsettled, conversation_checkpoint_turn_id, native_checkpoint_evidence,
     native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions,
-    requested_output,
+    requested_output, goal, timebox_deadline_at, contract_outcome,
+    contract_stall_nudged_at, contract_stall_escalated_at, contract_timebox_prompted_at,
     provision_state, provision_error, provision_steps, branch_state, branch_naming, temporary_branch, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
     hibernated_at, stale_binary_since, stale_binary_version, stale_binary_launch, stale_binary_switch_failed_at,
@@ -336,7 +338,8 @@ SELECT id, project_id, num, issue_id, kind, harness,
     conversation_checkpoint_state, conversation_checkpoint_generation, conversation_checkpoint_native_id,
     conversation_checkpoint_unsettled, conversation_checkpoint_turn_id, native_checkpoint_evidence,
     native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions,
-    requested_output,
+    requested_output, goal, timebox_deadline_at, contract_outcome,
+    contract_stall_nudged_at, contract_stall_escalated_at, contract_timebox_prompted_at,
     provision_state, provision_error, provision_steps, branch_state, branch_naming, temporary_branch, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
     hibernated_at, stale_binary_since, stale_binary_version, stale_binary_launch, stale_binary_switch_failed_at,
@@ -358,7 +361,8 @@ SELECT id, project_id, num, issue_id, kind, harness,
     conversation_checkpoint_state, conversation_checkpoint_generation, conversation_checkpoint_native_id,
     conversation_checkpoint_unsettled, conversation_checkpoint_turn_id, native_checkpoint_evidence,
     native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions,
-    requested_output,
+    requested_output, goal, timebox_deadline_at, contract_outcome,
+    contract_stall_nudged_at, contract_stall_escalated_at, contract_timebox_prompted_at,
     provision_state, provision_error, provision_steps, branch_state, branch_naming, temporary_branch, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
     hibernated_at, stale_binary_since, stale_binary_version, stale_binary_launch, stale_binary_switch_failed_at,
@@ -434,6 +438,9 @@ UPDATE sessions SET
     effort = sqlc.arg(effort),
     session_permissions = sqlc.arg(session_permissions),
     requested_output = sqlc.arg(requested_output),
+    goal = sqlc.arg(goal),
+    timebox_deadline_at = sqlc.narg(timebox_deadline_at),
+    contract_outcome = sqlc.arg(contract_outcome),
     created_at = sqlc.arg(created_at),
     updated_at = sqlc.arg(updated_at),
     auto_inject_review = sqlc.arg(auto_inject_review),
@@ -478,6 +485,52 @@ UPDATE sessions SET reviewer_harness = ?, reviewer_agent_config = ?, updated_at 
 
 -- name: SetSessionAutoReview :execrows
 UPDATE sessions SET auto_review_enabled = ?, updated_at = ? WHERE id = ?;
+
+-- name: SetSessionContractOutcomeIfUnset :execrows
+UPDATE sessions
+SET contract_outcome = sqlc.arg(contract_outcome), updated_at = sqlc.arg(updated_at)
+WHERE id = sqlc.arg(id)
+  AND goal <> ''
+  AND timebox_deadline_at IS NOT NULL
+  AND contract_outcome = '';
+
+-- name: RecordSessionContractStallNudge :execrows
+UPDATE sessions
+SET contract_stall_nudged_at = sqlc.arg(nudged_at),
+    contract_stall_escalated_at = NULL,
+    updated_at = sqlc.arg(updated_at)
+WHERE id = sqlc.arg(id)
+  AND goal <> ''
+  AND timebox_deadline_at IS NOT NULL
+  AND contract_outcome = '';
+
+-- name: RecordSessionContractStallEscalation :execrows
+UPDATE sessions
+SET contract_stall_escalated_at = sqlc.arg(escalated_at),
+    updated_at = sqlc.arg(updated_at)
+WHERE id = sqlc.arg(id)
+  AND contract_outcome = ''
+  AND contract_stall_nudged_at = sqlc.arg(nudged_at)
+  AND contract_stall_escalated_at IS NULL;
+
+-- name: ExpireSessionContract :execrows
+UPDATE sessions
+SET contract_outcome = 'limit_hit',
+    updated_at = sqlc.arg(updated_at)
+WHERE id = sqlc.arg(id)
+  AND goal <> ''
+  AND contract_outcome = ''
+  AND timebox_deadline_at = sqlc.arg(deadline_at)
+  AND timebox_deadline_at <= sqlc.arg(updated_at);
+
+-- name: RecordSessionContractTimeboxPrompt :execrows
+UPDATE sessions
+SET contract_timebox_prompted_at = sqlc.arg(prompted_at),
+    updated_at = sqlc.arg(updated_at)
+WHERE id = sqlc.arg(id)
+  AND contract_outcome = 'limit_hit'
+  AND contract_timebox_prompted_at IS NULL
+  AND timebox_deadline_at = sqlc.arg(deadline_at);
 
 -- name: SetSessionProvisionedWorkspace :execrows
 -- Publish the worktree the moment it exists, rather than waiting for the

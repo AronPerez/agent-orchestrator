@@ -18,7 +18,10 @@ import (
 
 // maxDisplayNameLen caps the sidebar label set by `--name`. Mirrored by the
 // daemon's spawn handler so a direct API call is held to the same limit.
-const maxDisplayNameLen = 100
+const (
+	maxDisplayNameLen = 100
+	maxWorkerGoalLen  = 1000
+)
 
 type spawnOptions struct {
 	project         string
@@ -29,6 +32,8 @@ type spawnOptions struct {
 	branch          string
 	baseBranch      string
 	prompt          string
+	goal            string
+	timebox         string
 	issue           string
 	name            string
 	model           string
@@ -55,6 +60,8 @@ type spawnRequest struct {
 	Branch              string `json:"branch,omitempty"`
 	BaseBranch          string `json:"baseBranch,omitempty"`
 	Prompt              string `json:"prompt,omitempty"`
+	Goal                string `json:"goal,omitempty"`
+	TimeboxSeconds      int64  `json:"timeboxSeconds,omitempty"`
 	Model               string `json:"model,omitempty"`
 	Effort              string `json:"effort,omitempty"`
 	AccountID           string `json:"accountId,omitempty"`
@@ -120,6 +127,31 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 			if opts.kind != "" && opts.kind != "worker" && opts.kind != "orchestrator" {
 				return usageError{fmt.Errorf(`--kind must be "worker" or "orchestrator"`)}
 			}
+			goal := strings.TrimSpace(opts.goal)
+			timeboxValue := strings.TrimSpace(opts.timebox)
+			if (goal == "") != (timeboxValue == "") {
+				return usageError{fmt.Errorf("--goal and --timebox must be used together")}
+			}
+			var timebox time.Duration
+			if goal != "" {
+				if opts.kind == "orchestrator" {
+					return usageError{fmt.Errorf("--goal and --timebox are supported for worker sessions only")}
+				}
+				if utf8.RuneCountInString(goal) > maxWorkerGoalLen {
+					return usageError{fmt.Errorf("--goal must be %d characters or fewer", maxWorkerGoalLen)}
+				}
+				var err error
+				timebox, err = time.ParseDuration(timeboxValue)
+				if err != nil {
+					return usageError{fmt.Errorf("invalid --timebox: %w", err)}
+				}
+				if timebox <= 0 {
+					return usageError{fmt.Errorf("--timebox must be greater than zero")}
+				}
+				if timebox < time.Second || timebox%time.Second != 0 {
+					return usageError{fmt.Errorf("--timebox must be a whole number of seconds")}
+				}
+			}
 			if opts.output != "" && opts.output != "artifact" {
 				return usageError{fmt.Errorf(`--output must be "artifact"`)}
 			}
@@ -129,6 +161,9 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 			if opts.standalone {
 				if opts.kind == "orchestrator" {
 					return usageError{fmt.Errorf("standalone sessions must be workers")}
+				}
+				if goal != "" {
+					return usageError{fmt.Errorf("--goal and --timebox require a registered project")}
 				}
 				if strings.TrimSpace(opts.branch) != "" || strings.TrimSpace(opts.baseBranch) != "" || strings.TrimSpace(opts.issue) != "" || strings.TrimSpace(opts.claimPR) != "" {
 					return usageError{fmt.Errorf("standalone sessions do not support --branch, --base, --issue, or --claim-pr")}
@@ -204,6 +239,8 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 				Branch:              opts.branch,
 				BaseBranch:          strings.TrimSpace(opts.baseBranch),
 				Prompt:              opts.prompt,
+				Goal:                goal,
+				TimeboxSeconds:      int64(timebox / time.Second),
 				Model:               strings.TrimSpace(opts.model),
 				Effort:              strings.TrimSpace(opts.effort),
 				AccountID:           strings.TrimSpace(opts.account),
@@ -287,6 +324,8 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 	f.StringVar(&opts.branch, "branch", "", "Branch for git project sessions (default: ao/<session-id>/root; unsupported for standalone or Scratch sessions)")
 	f.StringVar(&opts.baseBranch, "base", "", "Start the session's branch from this branch, to stack on its pull request (default: the project's default branch); with --branch, that branch must be new")
 	f.StringVar(&opts.prompt, "prompt", "", "Initial prompt for the agent")
+	f.StringVar(&opts.goal, "goal", "", "Worker contract goal (requires --timebox, max 1000 characters)")
+	f.StringVar(&opts.timebox, "timebox", "", "Worker contract time limit as a duration, such as 2h (requires --goal)")
 	f.StringVar(&opts.model, "model", "", "Agent model override for this session only (e.g. sonnet, gpt-5.6-sol); overrides project/role config without changing it")
 	f.StringVar(&opts.output, "output", "", "Deliverable for the session: artifact asks the agent to write a file in its artifact directory instead of opening a PR (default: ordinary task)")
 	f.StringVar(&opts.account, "account", "", "Claude Code or Codex account id to start on, from ao account ls; empty uses the agent's default account")

@@ -51,3 +51,22 @@ func TestEnrichReadyToMergeFallsBackWithoutPRTitle(t *testing.T) {
 		t.Fatalf("title = %q, want %q", rec.Title, want)
 	}
 }
+
+func TestEnrichSessionStalledUsesSessionContextWithoutPR(t *testing.T) {
+	t.Parallel()
+
+	rec, err := enrich(Intent{
+		Type: domain.NotificationSessionStalled, SessionID: "sess-1", ProjectID: "proj-1",
+		SessionDisplayName: "Checkout flow", SourceKey: "session-contract-stall:sess-1:1",
+		CreatedAt: time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("enrich stalled notification: %v", err)
+	}
+	if rec.Title != "Checkout flow stalled" {
+		t.Fatalf("title = %q", rec.Title)
+	}
+	if rec.Body != "Your worker stopped without reporting after one automatic nudge." || rec.PRURL != "" {
+		t.Fatalf("record = %+v", rec)
+	}
+}

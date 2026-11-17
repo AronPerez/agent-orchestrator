@@ -727,6 +727,10 @@ type SpawnSessionRequest struct {
 	// ApprovalMode overrides the project/default policy for this spawn.
 	ApprovalMode domain.PermissionMode `json:"approvalMode,omitempty" enum:"default,accept-edits,auto,bypass-permissions"`
 	Prompt       string                `json:"prompt,omitempty" maxLength:"102400"`
+	// Goal and TimeboxSeconds define an optional worker contract. They must be
+	// supplied together and are rejected for orchestrator sessions.
+	Goal           string `json:"goal,omitempty" maxLength:"1000"`
+	TimeboxSeconds int64  `json:"timeboxSeconds,omitempty" minimum:"1" maximum:"9223372036"`
 	// Model is an optional agent model override scoped to this single spawn. Empty
 	// keeps the resolved project/role default. The daemon validates that the
 	// selected harness can honor the model before launching.
@@ -1548,7 +1552,10 @@ type DelegateTaskRequest struct {
 	ClientRequestID string           `json:"clientRequestId,omitempty" maxLength:"128"`
 	ProjectID       domain.ProjectID `json:"projectId"`
 	Brief           string           `json:"brief" maxLength:"102400"`
-	Branch          string           `json:"branch,omitempty" maxLength:"255"`
+	// Goal and TimeboxSeconds define the delegated worker's optional contract.
+	Goal           string `json:"goal,omitempty" maxLength:"1000"`
+	TimeboxSeconds int64  `json:"timeboxSeconds,omitempty" minimum:"1" maximum:"9223372036"`
+	Branch         string `json:"branch,omitempty" maxLength:"255"`
 	// BaseBranch starts the worker from this branch instead of the project's
 	// default, to stack its work on another pull request.
 	BaseBranch string              `json:"baseBranch,omitempty" maxLength:"255"`
@@ -2795,7 +2802,7 @@ type NotificationResponse struct {
 	SessionID string    `json:"sessionId"`
 	ProjectID string    `json:"projectId"`
 	PRURL     string    `json:"prUrl"`
-	Type      string    `json:"type" enum:"needs_input,ready_to_merge,pr_merged,pr_closed_unmerged,review_completed,review_changes_requested"`
+	Type      string    `json:"type" enum:"needs_input,session_stalled,ready_to_merge,pr_merged,pr_closed_unmerged,review_completed,review_changes_requested"`
 	Title     string    `json:"title"`
 	Body      string    `json:"body"`
 	Status    string    `json:"status" enum:"unread,read" description:"Seen state. unread means the user has not opened the notification panel since it arrived."`
