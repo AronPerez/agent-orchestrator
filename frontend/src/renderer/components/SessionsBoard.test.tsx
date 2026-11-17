@@ -168,7 +168,6 @@ import { sessionScmSummaryQueryKey } from "../hooks/useSessionScmSummary";
 import { ArchiveModalHost } from "./ArchiveModalHost";
 import { SessionsBoard } from "./SessionsBoard";
 import { latestSessionArtifacts, toBoardSessionPresentation } from "./SessionsBoardAdapters";
-import { ShellProvider, type ShellContextValue } from "../lib/shell-context";
 import { TooltipProvider } from "./ui/tooltip";
 
 function renderBoard(projectId?: string) {
@@ -213,62 +212,6 @@ beforeEach(() => {
 });
 
 describe("SessionsBoard", () => {
-	it("shows the all-project fleet and opens a cached remote session on its machine", async () => {
-		const localSession: WorkspaceSession = {
-			id: "local-worker",
-			workspaceId: "local-project",
-			workspaceName: "Local project",
-			title: "Local task",
-			provider: "codex",
-			kind: "worker",
-			status: "working",
-			updatedAt: "2026-11-17T12:00:00Z",
-			prs: [],
-		};
-		const remoteSession: WorkspaceSession = {
-			...localSession,
-			id: "remote-worker",
-			workspaceId: "remote-project",
-			workspaceName: "Remote project",
-			title: "Remote task",
-			hostId: "build-box",
-		};
-		workspaceQueryMock.mockReturnValue({
-			data: [{ id: "local-project", name: "Local project", path: "/code/local", sessions: [localSession] }],
-			isError: false,
-			isSuccess: true,
-		});
-		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-		render(
-			<QueryClientProvider client={queryClient}>
-				<ShellProvider value={{
-					daemonStatus: { state: "ready" },
-					workspaceStartupState: "ready",
-					createProject: vi.fn(),
-					cloneProject: vi.fn(),
-					initializeProjectRepository: vi.fn(),
-					openRemoteProjectSettings: vi.fn(),
-					remoteHosts: [{ hostId: "build-box", label: "Build box", status: "offline", url: "https://build-box.example.test" }],
-					remoteWorkspaces: [{ id: "remote-project", hostId: "build-box", name: "Remote project", path: "/code/remote", sessions: [remoteSession] }],
-				} as ShellContextValue}>
-					<TooltipProvider>
-						<SessionsBoard />
-					</TooltipProvider>
-				</ShellProvider>
-			</QueryClientProvider>,
-		);
-
-		await userEvent.click(screen.getByRole("button", { name: "Fleet" }));
-		expect(screen.getByText("Local project")).toBeInTheDocument();
-		expect(screen.getByText("Remote project")).toBeInTheDocument();
-		expect(screen.getByText("Build box")).toBeInTheDocument();
-		await userEvent.click(screen.getByRole("treeitem", { name: /Remote task/ }));
-		expect(navigateMock).toHaveBeenCalledWith({
-			to: "/host/$hostId/project/$projectId/session/$sessionId",
-			params: { hostId: "build-box", projectId: "remote-project", sessionId: "remote-worker" },
-		});
-	});
-
 	it("leaves a Cloud standalone agent's project for Home: it has no board", async () => {
 		workspaceQueryMock.mockReturnValue({
 			data: [{ id: "agent-1", name: "Fix the flake", kind: "cloud", standaloneAgent: true, path: "", sessions: [] }],

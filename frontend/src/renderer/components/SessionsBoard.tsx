@@ -1,5 +1,4 @@
 import { SessionFleet } from "./SessionFleet";
-import { FleetOverview } from "./FleetOverview";
 import { BoardFindBar } from "./BoardFindBar";
 import { matchScore } from "../lib/command-palette";
 import type { MessageKey } from "../i18n";
@@ -273,9 +272,7 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 		window.addEventListener("keydown", handleKeyDown);
 		return () => window.removeEventListener("keydown", handleKeyDown);
 	}, [canFind, closeFind, isFindOpen]);
-	const canShowFleet = projectId
-		? Boolean(workspace && workspace.kind !== CLOUD_PROJECT_KIND)
-		: !hostId;
+	const canShowFleet = Boolean(projectId && workspace && workspace.kind !== CLOUD_PROJECT_KIND);
 	// Memory and CPU monitoring is a developer tool: the light, the card chips
 	// and the window behind them only exist with Diagnostics on in Developer mode.
 	// They read this machine, so another machine's board shows none of them.
@@ -305,10 +302,6 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 		if (session.kind === "worker") recordManualWorkerOpen(session.id, hostId);
 		void navigate(sessionNavigateTarget(session.workspaceId, session.id, hostId));
 	}, [navigate, hostId]);
-	const openFleetSession = useCallback((session: WorkspaceSession, targetHostId?: string) => {
-		if (session.kind === "worker") recordManualWorkerOpen(session.id, targetHostId);
-		void navigate(sessionNavigateTarget(session.workspaceId, session.id, targetHostId));
-	}, [navigate]);
 	const openSessionArtifact = useCallback((session: WorkspaceSession, path: string) => {
 		useUiStore.getState().requestWorkspaceFileOpen(session.id, path, hostId, "artifact");
 		openSession(session);
@@ -394,19 +387,9 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 					<Button variant={view === "fleet" ? "secondary" : "ghost"} size="sm" aria-pressed={view === "fleet"} onClick={() => { closeFind(); setView("fleet"); }}>{t("fleet.tab")}</Button>
 				</div>
 			) : null}
-			{canShowFleet && view === "fleet" ? <>
+			{canShowFleet && view === "fleet" && workspace ? <>
 				{boardLoadFailed || (hostId && remoteProjectQuery.isError) ? <p role="alert" className="px-4 py-2 text-xs text-destructive">{t("fleet.stale")}</p> : null}
-				{projectId && workspace ? (
-					<SessionFleet key={scopeKey} sessions={workspace.sessions} onOpen={openSession} hostId={hostId} />
-				) : (
-					<FleetOverview
-						key={scopeKey}
-						localWorkspaces={all}
-						onOpen={openFleetSession}
-						remoteHosts={shell?.remoteHosts}
-						remoteWorkspaces={shell?.remoteWorkspaces}
-					/>
-				)}
+				<SessionFleet key={scopeKey} sessions={workspace.sessions} onOpen={openSession} hostId={hostId} />
 			</> : <>
 			<div className={cn("relative min-h-0 flex-1 overflow-hidden", hostOffline && workspace && "opacity-75")} data-host-offline={hostOffline && workspace ? "" : undefined}>
 				{canFind && isFindOpen ? <BoardFindBar inputRef={findInputRef} matches={filteredSessions.length} onClose={closeFind} onQueryChange={setFindQuery} query={findQuery} total={searchableSessions.length} /> : null}
