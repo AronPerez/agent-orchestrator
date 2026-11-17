@@ -113,12 +113,13 @@ export type PairDeviceResult =
 	| { kind: "offline" };
 
 export type CoordinationTokenResult =
-	| { kind: "issued"; token: string }
+	| { kind: "issued"; token: string; deviceId: string }
 	| { kind: "unsupported" }
 	| { kind: "unauthorized" }
 	| { kind: "offline" };
 
-export type CoordinationTokenHealth = "valid" | "invalid" | "offline";
+export type CoordinationTokenHealth = "valid" | "invalid" | "revoked" | "offline";
+export type CoordinationTokenRevokeResult = "retired" | "unsupported" | "unauthorized" | "offline";
 
 /** Exchanges a pairing code or password for this device's own token. Confirm the
  * host's identity first: this sends the secret. */
@@ -179,12 +180,13 @@ export async function issueCoordinationToken(
 		if (response.status === 401 || response.status === 403) return { kind: "unauthorized" };
 		if ([404, 405, 501].includes(response.status)) return { kind: "unsupported" };
 		if (!response.ok) return { kind: "offline" };
-		const body = (await response.json()) as { hostId?: unknown; token?: unknown; scope?: unknown };
-		if (typeof body.token !== "string" || !body.token.startsWith(COORDINATION_TOKEN_PREFIX)
+		const body = (await response.json()) as { hostId?: unknown; deviceId?: unknown; token?: unknown; scope?: unknown };
+		if (typeof body.deviceId !== "string" || body.deviceId === ""
+			|| typeof body.token !== "string" || !body.token.startsWith(COORDINATION_TOKEN_PREFIX)
 			|| body.scope !== "agent-coordination" || (entry.hostId && body.hostId !== entry.hostId)) {
 			return { kind: "offline" };
 		}
-		return { kind: "issued", token: body.token };
+		return { kind: "issued", token: body.token, deviceId: body.deviceId };
 	} catch {
 		return { kind: "offline" };
 	}
@@ -207,8 +209,44 @@ export async function probeCoordinationToken(
 			},
 			signal: AbortSignal.timeout(timeoutMs),
 		});
-		if (response.status === 401 || response.status === 403) return "invalid";
+		if (response.status === 401 || response.status === 403) {
+			try {
+				const body = (await response.json()) as { code?: unknown };
+				if (body.code === "DEVICE_REVOKED") return "revoked";
+			} catch {
+				// A non-JSON auth response is still an invalid credential.
+			}
+			return "invalid";
+		}
 		return response.ok ? "valid" : "offline";
+	} catch {
+		return "offline";
+	}
+}
+
+/** Retire one saved coordination child with the current full credential. A
+ * missing device is already retired, so 404 is an idempotent success. */
+export async function revokeCoordinationToken(
+	entry: Pick<RemoteEntry, "url" | "hostId" | "password">,
+	deviceId: string,
+	fetchImpl: FetchImpl = fetch,
+	timeoutMs = 8_000,
+): Promise<CoordinationTokenRevokeResult> {
+	if (!deviceId) return "offline";
+	try {
+		const response = await fetchImpl(remoteUrl(entry, `/api/v1/remote-host/coordination-token/${encodeURIComponent(deviceId)}`).href, {
+			method: "DELETE",
+			redirect: "error",
+			headers: {
+				Authorization: `Bearer ${entry.password}`,
+				...(entry.hostId ? { "X-AO-Expected-Host-ID": entry.hostId } : {}),
+			},
+			signal: AbortSignal.timeout(timeoutMs),
+		});
+		if (response.status === 204 || response.status === 404) return "retired";
+		if (response.status === 401 || response.status === 403) return "unauthorized";
+		if (response.status === 405 || response.status === 501) return "unsupported";
+		return "offline";
 	} catch {
 		return "offline";
 	}
