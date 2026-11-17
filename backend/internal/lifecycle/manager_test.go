@@ -307,6 +307,48 @@ func newManager(opts ...Option) (*Manager, *fakeStore, *fakeMessenger) {
 	return New(st, msg, opts...), st, msg
 }
 
+func TestNudgeIdleSessionUsesInputSafetyGuard(t *testing.T) {
+	for _, tc := range []struct {
+		state domain.ActivityState
+		sent  bool
+	}{
+		{state: domain.ActivityIdle, sent: true},
+		{state: domain.ActivityActive},
+		{state: domain.ActivityWaitingInput},
+		{state: domain.ActivityBlocked},
+	} {
+		t.Run(string(tc.state), func(t *testing.T) {
+			m, st, messenger := newManager()
+			rec := working("mer-1")
+			rec.Activity.State = tc.state
+			st.sessions[rec.ID] = rec
+
+			sent, err := m.NudgeIdleSession(context.Background(), rec.ID, "continue or report")
+			if err != nil || sent != tc.sent {
+				t.Fatalf("sent=%v err=%v, want sent=%v", sent, err, tc.sent)
+			}
+			wantMessages := 0
+			if tc.sent {
+				wantMessages = 1
+			}
+			if got := len(messenger.msgs); got != wantMessages {
+				t.Fatalf("messages=%v, want sent=%v", messenger.msgs, tc.sent)
+			}
+		})
+	}
+}
+
+func TestNudgeSessionCanSteerActiveDeadline(t *testing.T) {
+	m, st, messenger := newManager()
+	rec := working("mer-1")
+	st.sessions[rec.ID] = rec
+
+	sent, err := m.NudgeSession(context.Background(), rec.ID, "wrap up and report")
+	if err != nil || !sent || len(messenger.msgs) != 1 {
+		t.Fatalf("sent=%v messages=%v err=%v", sent, messenger.msgs, err)
+	}
+}
+
 func working(id domain.SessionID) domain.SessionRecord {
 	return domain.SessionRecord{
 		ID: id, ProjectID: "mer",

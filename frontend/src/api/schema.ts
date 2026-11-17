@@ -6661,6 +6661,12 @@ export interface components {
             /** @enum {string} */
             contractOutcome?: "met" | "blocked" | "limit_hit";
             /** Format: date-time */
+            contractStallEscalatedAt?: null | string;
+            /** Format: date-time */
+            contractStallNudgedAt?: null | string;
+            /** Format: date-time */
+            contractTimeboxPromptedAt?: null | string;
+            /** Format: date-time */
             createdAt: string;
             displayName?: string;
             /** @enum {string} */
@@ -7286,6 +7292,9 @@ export interface components {
             snapshot?: components["schemas"]["ChatExcerptSnapshot"];
             sourceRole: string;
         };
+        DomainWorkerContractConfig: {
+            stallMinutes?: number;
+        };
         EditConversationMessageRequest: {
             clientMessageId?: string;
             text: string;
@@ -7831,7 +7840,7 @@ export interface components {
             target: components["schemas"]["NotificationTarget"];
             title: string;
             /** @enum {string} */
-            type: "needs_input" | "ready_to_merge" | "pr_merged" | "pr_closed_unmerged" | "review_completed" | "review_changes_requested";
+            type: "needs_input" | "session_stalled" | "ready_to_merge" | "pr_merged" | "pr_closed_unmerged" | "review_completed" | "review_changes_requested";
         };
         NotificationTarget: {
             /** @enum {string} */
@@ -7998,6 +8007,7 @@ export interface components {
             symlinks?: string[];
             trackerIntake?: components["schemas"]["TrackerIntakeConfig"];
             worker?: components["schemas"]["RoleOverride"];
+            workerContracts?: components["schemas"]["DomainWorkerContractConfig"];
             workersRequestReview?: boolean;
         };
         ProjectGetResponse: {

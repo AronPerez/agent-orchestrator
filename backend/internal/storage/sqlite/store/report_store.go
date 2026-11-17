@@ -14,6 +14,19 @@ import (
 
 // CreateReport atomically persists one validated pending report and all outputs.
 func (s *Store) CreateReport(ctx context.Context, rec domain.ReportRecord) (domain.ReportRecord, error) {
+	return s.createReport(ctx, rec, domain.SessionContractOutcomeNone)
+}
+
+// CreateReportWithContractOutcome atomically persists one validated pending
+// report and, when supplied, the session contract's first terminal outcome.
+func (s *Store) CreateReportWithContractOutcome(ctx context.Context, rec domain.ReportRecord, outcome domain.SessionContractOutcome) (domain.ReportRecord, error) {
+	if !outcome.Valid() {
+		return domain.ReportRecord{}, domain.ErrInvalidReport
+	}
+	return s.createReport(ctx, rec, outcome)
+}
+
+func (s *Store) createReport(ctx context.Context, rec domain.ReportRecord, outcome domain.SessionContractOutcome) (domain.ReportRecord, error) {
 	if err := rec.Validate(); err != nil {
 		return domain.ReportRecord{}, err
 	}
@@ -35,6 +48,13 @@ func (s *Store) CreateReport(ctx context.Context, rec domain.ReportRecord) (doma
 			if err := q.CreateReportOutput(ctx, gen.CreateReportOutputParams{
 				ReportID: rec.ID, Position: int64(i), Kind: string(output.Kind),
 				Reference: output.Reference, Label: output.Label,
+			}); err != nil {
+				return err
+			}
+		}
+		if outcome != domain.SessionContractOutcomeNone {
+			if _, err := q.SetSessionContractOutcomeIfUnset(ctx, gen.SetSessionContractOutcomeIfUnsetParams{
+				ContractOutcome: string(outcome), UpdatedAt: rec.CreatedAt, ID: rec.SessionID,
 			}); err != nil {
 				return err
 			}

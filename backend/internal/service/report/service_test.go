@@ -9,10 +9,11 @@ import (
 )
 
 type fakeStore struct {
-	session domain.SessionRecord
-	ok      bool
-	created domain.ReportRecord
-	reports []domain.ReportRecord
+	session         domain.SessionRecord
+	ok              bool
+	created         domain.ReportRecord
+	contractOutcome domain.SessionContractOutcome
+	reports         []domain.ReportRecord
 }
 
 func (f *fakeStore) GetSession(context.Context, domain.SessionID) (domain.SessionRecord, bool, error) {
@@ -20,6 +21,11 @@ func (f *fakeStore) GetSession(context.Context, domain.SessionID) (domain.Sessio
 }
 func (f *fakeStore) CreateReport(_ context.Context, r domain.ReportRecord) (domain.ReportRecord, error) {
 	f.created = r
+	return r, nil
+}
+func (f *fakeStore) CreateReportWithContractOutcome(_ context.Context, r domain.ReportRecord, outcome domain.SessionContractOutcome) (domain.ReportRecord, error) {
+	f.created = r
+	f.contractOutcome = outcome
 	return r, nil
 }
 func (f *fakeStore) ListReportsByProject(context.Context, domain.ProjectID) ([]domain.ReportRecord, error) {
@@ -75,6 +81,47 @@ func TestCreateDerivesOwnershipAndFixedDeliveryDeadlines(t *testing.T) {
 			}
 			if r.ID != "rpt_1" || r.ProjectID != "ao" || r.DeliveryState != domain.ReportPending || r.RepeatCount != 1 || !r.AvailableAt.Equal(tc.available) || !r.SettlementDeadline.Equal(tc.settles) {
 				t.Fatalf("report=%+v", r)
+			}
+		})
+	}
+}
+
+func TestCreateMapsTerminalContractReportsToOutcome(t *testing.T) {
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	deadline := now.Add(time.Hour)
+	for _, tc := range []struct {
+		name    string
+		state   domain.ReportState
+		note    string
+		message string
+		goal    string
+		want    domain.SessionContractOutcome
+	}{
+		{name: "done meets contract", state: domain.ReportDone, note: "finished", goal: "ship it", want: domain.SessionContractOutcomeMet},
+		{name: "needs input blocks contract", state: domain.ReportNeedsInput, note: "decision", goal: "ship it", want: domain.SessionContractOutcomeBlocked},
+		{name: "stuck blocks contract", state: domain.ReportStuck, note: "blocked", goal: "ship it", want: domain.SessionContractOutcomeBlocked},
+		{name: "checkpoint leaves contract open", state: domain.ReportCheckpoint, note: "working", goal: "ship it"},
+		{name: "message leaves contract open", message: "progress", goal: "ship it"},
+		{name: "ordinary worker has no contract outcome", state: domain.ReportDone, note: "finished"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := &fakeStore{ok: true, session: domain.SessionRecord{
+				ID: "ao-7", ProjectID: "ao", Kind: domain.KindWorker,
+				Goal: tc.goal, TimeboxDeadlineAt: func() *time.Time {
+					if tc.goal == "" {
+						return nil
+					}
+					return &deadline
+				}(),
+			}}
+			_, err := New(Deps{Store: st, Now: func() time.Time { return now }}).Create(context.Background(), CreateInput{
+				SessionID: "ao-7", State: tc.state, Note: tc.note, Message: tc.message,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.contractOutcome != tc.want {
+				t.Fatalf("contract outcome = %q, want %q", st.contractOutcome, tc.want)
 			}
 		})
 	}
