@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -104,6 +105,13 @@ type remoteEntry struct {
 	CleanupOnly       bool   `json:"cleanupOnly,omitempty"`
 }
 
+type savedHostTargetCandidate struct {
+	Label  string
+	HostID string
+	Target *remoteTarget
+	Err    error
+}
+
 // resolveRemoteTarget resolves the remote daemon this invocation targets, or
 // nil for the default local daemon. The URL comes from --url or AO_URL; the
 // credential from AO_TOKEN or a matching entry in ~/.ao/remotes.json.
@@ -185,7 +193,10 @@ func resolveSavedHostTargetForAccount(name, activeAccount string) (*remoteTarget
 	default:
 		return nil, fmt.Errorf("saved host %q is ambiguous in %s — give the host ID instead", name, path)
 	}
-	entry := matches[0]
+	return savedHostTargetFromEntry(matches[0], name)
+}
+
+func savedHostTargetFromEntry(entry remoteEntry, name string) (*remoteTarget, error) {
 	hostID := strings.TrimSpace(entry.HostID)
 	if hostID == "" {
 		return nil, fmt.Errorf("saved host %q has no host ID — reconnect it in the desktop app before using --host", name)
@@ -214,6 +225,50 @@ func resolveSavedHostTargetForAccount(name, activeAccount string) (*remoteTarget
 	}, nil
 }
 
+// resolveAllSavedHostTargetsForAccount validates every saved host visible to
+// the active account without presenting any credential. Invalid entries remain
+// in the result as machine-qualified errors so an aggregate list can keep the
+// healthy machines while explaining what it skipped.
+func resolveAllSavedHostTargetsForAccount(activeAccount string) ([]savedHostTargetCandidate, error) {
+	entries, err := loadRemoteEntries()
+	if err != nil {
+		return nil, err
+	}
+	results := make([]savedHostTargetCandidate, 0, len(entries))
+	byHostID := make(map[string]int, len(entries))
+	for _, entry := range entries {
+		if !remoteEntryVisibleToAccount(entry, activeAccount) {
+			continue
+		}
+		hostID := strings.TrimSpace(entry.HostID)
+		label := strings.TrimSpace(entry.Label)
+		if label == "" {
+			label = hostID
+		}
+		if label == "" {
+			label = "unnamed saved host"
+		}
+		if prior, ok := byHostID[hostID]; ok && hostID != "" {
+			results[prior].Target = nil
+			results[prior].Err = fmt.Errorf("saved host ID %s appears more than once", hostID)
+			continue
+		}
+		target, targetErr := savedHostTargetFromEntry(entry, label)
+		results = append(results, savedHostTargetCandidate{Label: label, HostID: hostID, Target: target, Err: targetErr})
+		if hostID != "" {
+			byHostID[hostID] = len(results) - 1
+		}
+	}
+	sort.SliceStable(results, func(i, j int) bool {
+		left, right := strings.ToLower(results[i].Label), strings.ToLower(results[j].Label)
+		if left != right {
+			return left < right
+		}
+		return results[i].HostID < results[j].HostID
+	})
+	return results, nil
+}
+
 type savedHostIdentity struct {
 	HostID     string `json:"hostId"`
 	APIVersion int    `json:"apiVersion"`
@@ -237,6 +292,14 @@ func (c *commandContext) selectSavedHost(ctx context.Context, name string) error
 	if err != nil {
 		return err
 	}
+	if err := c.verifySavedHostTarget(ctx, target); err != nil {
+		return err
+	}
+	c.remote = target
+	return nil
+}
+
+func (c *commandContext) verifySavedHostTarget(ctx context.Context, target *remoteTarget) error {
 	if local := c.localDaemonHostID(ctx); local != "" && local == target.hostID {
 		return fmt.Errorf("saved host %q is this AO installation itself", target.label)
 	}
@@ -253,7 +316,6 @@ func (c *commandContext) selectSavedHost(ctx context.Context, name string) error
 	if target.accountUserID != "" && c.activeCloudAccount(ctx) != target.accountUserID {
 		return errors.New("active Cloud account changed while verifying the saved host; retry with the intended account signed in")
 	}
-	c.remote = target
 	return nil
 }
 
