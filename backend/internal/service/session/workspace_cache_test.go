@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -118,6 +119,174 @@ func TestWorkspaceCacheInvalidatedFlightStillCoalesces(t *testing.T) {
 	})
 }
 
+func TestAuthoritativeWorkspaceCacheInvalidationFencesOldFlight(t *testing.T) {
+	root := newWorkspaceRepo(t)
+	now := func() time.Time { return time.Unix(100, 0) }
+	s := &Service{clock: now, workspaceCache: newWorkspaceCache(workspaceCacheTTL, now)}
+	id := domain.SessionID("session")
+	started := make(chan struct{})
+	release := make(chan struct{})
+	oldDone := make(chan error, 1)
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+
+	go func() {
+		_, _, err := s.resolveWorkspaceChanges(t.Context(), id, root, func(context.Context) workspaceCompareTarget {
+			close(started)
+			<-release
+			return workspaceCompareTarget{BaseRef: "before"}
+		})
+		oldDone <- err
+	}()
+	<-started
+	// A watcher event invalidates publication before reconciliation establishes
+	// its authoritative snapshot. Reconciliation must still be able to forget
+	// the older singleflight call instead of joining it.
+	s.InvalidateWorkspaceCache(id)
+	s.invalidateWorkspaceCacheForReconcile(id)
+
+	type result struct {
+		compare workspaceCompareTarget
+		err     error
+	}
+	freshDone := make(chan result, 1)
+	go func() {
+		compare, _, err := s.resolveWorkspaceChanges(t.Context(), id, root, func(context.Context) workspaceCompareTarget {
+			return workspaceCompareTarget{BaseRef: "after"}
+		})
+		freshDone <- result{compare: compare, err: err}
+	}()
+	select {
+	case fresh := <-freshDone:
+		if fresh.err != nil {
+			t.Fatalf("fresh load: %v", fresh.err)
+		}
+		if fresh.compare.BaseRef != "after" {
+			t.Fatalf("fresh load = %q, want after", fresh.compare.BaseRef)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("authoritative load joined the invalidated flight")
+	}
+
+	close(release)
+	if err := <-oldDone; err != nil {
+		t.Fatalf("old load: %v", err)
+	}
+}
+
+func TestWorkspaceCacheReconcileFenceSerializesForget(t *testing.T) {
+	c := newWorkspaceCache(workspaceCacheTTL, nil)
+	key := workspaceCacheKey{session: "session", root: "root"}
+	c.beginLoad(key)
+	forgetStarted := make(chan struct{})
+	releaseForget := make(chan struct{})
+	firstDone := make(chan struct{})
+	go func() {
+		c.invalidateSessionForReconcile(key.session, func(string) {
+			close(forgetStarted)
+			<-releaseForget
+		})
+		close(firstDone)
+	}()
+	<-forgetStarted
+
+	secondStarted := make(chan struct{})
+	secondDone := make(chan struct{})
+	go func() {
+		close(secondStarted)
+		c.invalidateSessionForReconcile(key.session, func(string) {})
+		close(secondDone)
+	}()
+	<-secondStarted
+	select {
+	case <-secondDone:
+		t.Fatal("second reconciliation passed bookkeeping before Forget completed")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseForget)
+	<-firstDone
+	<-secondDone
+}
+
+func TestAuthoritativeWorkspaceCacheInvalidationFencesInnerCacheHitFlight(t *testing.T) {
+	root := newWorkspaceRepo(t)
+	now := func() time.Time { return time.Unix(100, 0) }
+	c := newWorkspaceCache(workspaceCacheTTL, now)
+	s := &Service{clock: now, workspaceCache: c}
+	id := domain.SessionID("session")
+	key := workspaceCacheKey{session: id, root: root}
+	cacheHit := make(chan struct{})
+	releaseHit := make(chan struct{})
+	var gets atomic.Int32
+	c.afterGet = func(got workspaceCacheKey, ok bool) {
+		if got != key {
+			return
+		}
+		switch gets.Add(1) {
+		case 1:
+			if ok {
+				t.Error("outer lookup unexpectedly hit cache")
+			}
+			c.mu.Lock()
+			c.entries[key] = workspaceCacheEntry{at: now(), compare: workspaceCompareTarget{BaseRef: "before"}}
+			c.mu.Unlock()
+		case 2:
+			if !ok {
+				t.Error("inner lookup unexpectedly missed cache")
+			}
+			close(cacheHit)
+			<-releaseHit
+		}
+	}
+
+	oldDone := make(chan error, 1)
+	go func() {
+		_, _, err := s.resolveWorkspaceChanges(t.Context(), id, root, func(context.Context) workspaceCompareTarget {
+			t.Error("inner cache hit unexpectedly resolved Git state")
+			return workspaceCompareTarget{}
+		})
+		oldDone <- err
+	}()
+	<-cacheHit
+	s.invalidateWorkspaceCacheForReconcile(id)
+
+	type result struct {
+		compare workspaceCompareTarget
+		err     error
+	}
+	freshDone := make(chan result, 1)
+	go func() {
+		compare, _, err := s.resolveWorkspaceChanges(t.Context(), id, root, func(context.Context) workspaceCompareTarget {
+			return workspaceCompareTarget{BaseRef: "after"}
+		})
+		freshDone <- result{compare: compare, err: err}
+	}()
+	select {
+	case fresh := <-freshDone:
+		if fresh.err != nil {
+			t.Fatalf("fresh load: %v", fresh.err)
+		}
+		if fresh.compare.BaseRef != "after" {
+			t.Fatalf("fresh load = %q, want after", fresh.compare.BaseRef)
+		}
+	case <-time.After(3 * time.Second):
+		close(releaseHit)
+		<-oldDone
+		t.Fatal("authoritative load joined the in-progress cache-hit flight")
+	}
+
+	close(releaseHit)
+	if err := <-oldDone; err != nil {
+		t.Fatalf("cache-hit load: %v", err)
+	}
+}
+
 func TestWorkspaceCacheOldLoadCannotAffectReplacement(t *testing.T) {
 	for _, publishOld := range []bool{false, true} {
 		t.Run(map[bool]string{false: "cleanup", true: "publication"}[publishOld], func(t *testing.T) {
@@ -130,18 +299,27 @@ func TestWorkspaceCacheOldLoadCannotAffectReplacement(t *testing.T) {
 			if len(c.loads) != 0 {
 				t.Fatal("invalidation retained a load reservation")
 			}
+			if c.flights[key] != old {
+				t.Fatal("ordinary invalidation lost the in-flight identity")
+			}
 			replacement := c.beginLoad(key)
 			*replacement = workspaceCacheEntry{at: c.now(), compare: workspaceCompareTarget{BaseRef: "replacement"}}
 			c.finishLoad(key, old, publishOld)
+			c.finishFlight(key, old)
+			if c.flights[key] != replacement {
+				t.Fatal("old flight cleanup removed the replacement identity")
+			}
 			c.finishLoad(key, replacement, true)
+			c.finishFlight(key, replacement)
 			// A late finish must also leave the replacement's cached result intact.
 			c.finishLoad(key, old, publishOld)
+			c.finishFlight(key, old)
 			got, ok := c.get(key)
 			if !ok || got.compare.BaseRef != "replacement" {
 				t.Fatalf("replacement cache = %+v, %v; want replacement", got, ok)
 			}
-			if len(c.loads) != 0 {
-				t.Fatal("completed loads retained reservations")
+			if len(c.loads) != 0 || len(c.flights) != 0 {
+				t.Fatal("completed loads retained bookkeeping")
 			}
 			c.invalidateSession(key.session)
 			c.invalidateSession("never loaded")
@@ -162,7 +340,7 @@ func TestWorkspaceCacheFailedLoadReleasesReservation(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected Git error")
 	}
-	if len(c.loads) != 0 || len(c.entries) != 0 {
+	if len(c.loads) != 0 || len(c.flights) != 0 || len(c.entries) != 0 {
 		t.Fatal("failed load retained cache bookkeeping")
 	}
 }

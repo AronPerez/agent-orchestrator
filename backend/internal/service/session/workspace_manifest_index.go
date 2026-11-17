@@ -26,6 +26,8 @@ type workspaceManifestIndex struct {
 	entries map[domain.SessionID]workspaceManifestIndexEntry
 	clock   uint64
 	now     func() time.Time
+	// afterPublish is a deterministic seam for publication/singleflight race tests.
+	afterPublish func(domain.SessionID, uint64, bool)
 }
 
 const maxWorkspaceManifestEntries = 128
@@ -119,8 +121,22 @@ func (i *workspaceManifestIndex) publish(id domain.SessionID, manifest Workspace
 			delete(i.entries, oldestID)
 		}
 	}
+	afterPublish := i.afterPublish
 	i.mu.Unlock()
+	if afterPublish != nil {
+		afterPublish(id, generation, fresh)
+	}
 	return fresh
+}
+
+func (i *workspaceManifestIndex) isGenerationFresh(id domain.SessionID, generation uint64) bool {
+	if i == nil {
+		return true
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	entry, ok := i.entries[id]
+	return ok && entry.hasManifest && entry.generation == generation && !entry.stale
 }
 
 func (i *workspaceManifestIndex) fail(id domain.SessionID) {
@@ -168,7 +184,7 @@ func (s *Service) GetWorkspaceManifest(ctx context.Context, id domain.SessionID)
 // both the manifest and lower Git-status caches before the stream announces it
 // is ready.
 func (s *Service) ReconcileWorkspaceManifest(ctx context.Context, id domain.SessionID) (WorkspaceManifest, error) {
-	s.workspaceCache.invalidateSession(id)
+	s.invalidateWorkspaceCacheForReconcile(id)
 	s.workspaceManifests.markStale(id)
 	return s.RefreshWorkspaceManifest(ctx, id)
 }
@@ -189,8 +205,9 @@ func (s *Service) workspaceDiffManifest(ctx context.Context, id domain.SessionID
 // publishes only its complete result.
 func (s *Service) RefreshWorkspaceManifest(ctx context.Context, id domain.SessionID) (WorkspaceManifest, error) {
 	type refreshResult struct {
-		manifest WorkspaceManifest
-		fresh    bool
+		manifest   WorkspaceManifest
+		generation uint64
+		fresh      bool
 	}
 	for {
 		v, err, _ := s.manifestGroup.Do(string(id), func() (any, error) {
@@ -200,7 +217,11 @@ func (s *Service) RefreshWorkspaceManifest(ctx context.Context, id domain.Sessio
 				s.workspaceManifests.fail(id)
 				return refreshResult{}, err
 			}
-			return refreshResult{manifest: manifest, fresh: s.workspaceManifests.publish(id, manifest, generation)}, nil
+			return refreshResult{
+				manifest:   manifest,
+				generation: generation,
+				fresh:      s.workspaceManifests.publish(id, manifest, generation),
+			}, nil
 		})
 		if err != nil {
 			return WorkspaceManifest{}, err
@@ -209,7 +230,7 @@ func (s *Service) RefreshWorkspaceManifest(ctx context.Context, id domain.Sessio
 		if !ok {
 			return WorkspaceManifest{}, fmt.Errorf("refresh workspace manifest: unexpected singleflight result type %T", v)
 		}
-		if result.fresh {
+		if result.fresh && s.workspaceManifests.isGenerationFresh(id, result.generation) {
 			return result.manifest, nil
 		}
 	}
