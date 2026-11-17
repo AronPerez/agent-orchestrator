@@ -167,14 +167,19 @@ type WorkspaceManifest struct {
 	CompareBaseSHA   string
 	CompareBaseRef   string
 	CompareMode      WorkspaceCompareMode
-	Files            []WorkspaceFileSummary
-	Sections         WorkspaceFileSections
-	Summary          WorkspaceSummary
-	Truncated        bool
-	Stale            bool
-	Refreshing       bool
-	Degraded         bool
-	DegradedCode     string
+	// CompareIncomplete reports that at least one repository fell back to HEAD
+	// because its base could not be resolved. Workspace projects can retain an
+	// aggregate base mode when only a child repository fell back, so this cannot
+	// be inferred from CompareMode alone.
+	CompareIncomplete bool
+	Files             []WorkspaceFileSummary
+	Sections          WorkspaceFileSections
+	Summary           WorkspaceSummary
+	Truncated         bool
+	Stale             bool
+	Refreshing        bool
+	Degraded          bool
+	DegradedCode      string
 }
 
 // WorkspaceHistory is the non-critical commit metadata loaded after the

@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"os"
 	"slices"
 	"testing"
 
@@ -76,6 +77,119 @@ func TestProjectOverlapsCountsRenameSourceAsChanged(t *testing.T) {
 	}
 }
 
+func TestProjectOverlapsRefreshesCachedManifestsBeforeReading(t *testing.T) {
+	first := newWorkspaceRepo(t)
+	second := newWorkspaceRepo(t)
+	writeWorkspaceFile(t, first, "shared.go", "first\n")
+
+	store := newFakeStore()
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+	store.sessions["demo-a"] = overlapSession("demo-a", first)
+	store.sessions["demo-b"] = overlapSession("demo-b", second)
+	svc := NewWithDeps(Deps{Store: store})
+
+	initial, err := svc.ProjectOverlaps(context.Background(), "demo")
+	if err != nil {
+		t.Fatalf("initial ProjectOverlaps: %v", err)
+	}
+	if len(initial.Overlaps) != 0 {
+		t.Fatalf("initial overlaps = %+v, want none", initial.Overlaps)
+	}
+
+	// The manifest cache is still inside its TTL. The explicit overlap read must
+	// nevertheless observe this edit even when no workspace watcher is open.
+	writeWorkspaceFile(t, second, "shared.go", "second\n")
+	got, err := svc.ProjectOverlaps(context.Background(), "demo")
+	if err != nil {
+		t.Fatalf("refreshed ProjectOverlaps: %v", err)
+	}
+	if len(got.Overlaps) != 1 || !slices.Equal(got.Overlaps[0].Paths, []string{"shared.go"}) {
+		t.Fatalf("overlaps = %+v, want shared.go", got.Overlaps)
+	}
+}
+
+func TestProjectOverlapsWaitsForWatcherInvalidatedManifest(t *testing.T) {
+	first := newWorkspaceRepo(t)
+	second := newWorkspaceRepo(t)
+	writeWorkspaceFile(t, first, "shared.go", "first\n")
+
+	store := newFakeStore()
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+	store.sessions["demo-a"] = overlapSession("demo-a", first)
+	store.sessions["demo-b"] = overlapSession("demo-b", second)
+	svc := NewWithDeps(Deps{Store: store})
+	if _, err := svc.ProjectOverlaps(context.Background(), "demo"); err != nil {
+		t.Fatalf("initial ProjectOverlaps: %v", err)
+	}
+
+	var pending func()
+	svc.runBackground = func(work func()) { pending = work }
+	writeWorkspaceFile(t, second, "shared.go", "second\n")
+	svc.InvalidateWorkspaceCache("demo-b")
+	if pending == nil {
+		t.Fatal("watcher invalidation did not schedule a refresh")
+	}
+
+	got, err := svc.ProjectOverlaps(context.Background(), "demo")
+	if err != nil {
+		t.Fatalf("ProjectOverlaps: %v", err)
+	}
+	if len(got.Overlaps) != 1 || !slices.Equal(got.Overlaps[0].Paths, []string{"shared.go"}) {
+		t.Fatalf("overlaps = %+v, want fresh shared.go overlap", got.Overlaps)
+	}
+}
+
+func TestProjectOverlapsSkipsScratchProjects(t *testing.T) {
+	first := t.TempDir()
+	second := t.TempDir()
+	writeWorkspaceFile(t, first, "README.md", "first\n")
+	writeWorkspaceFile(t, second, "README.md", "second\n")
+
+	store := newFakeStore()
+	store.projects["scratch"] = domain.ProjectRecord{ID: "scratch", Kind: domain.ProjectKindScratch}
+	store.sessions["scratch-a"] = domain.SessionRecord{ID: "scratch-a", ProjectID: "scratch", Kind: domain.KindWorker, Metadata: domain.SessionMetadata{WorkspacePath: first}}
+	store.sessions["scratch-b"] = domain.SessionRecord{ID: "scratch-b", ProjectID: "scratch", Kind: domain.KindWorker, Metadata: domain.SessionMetadata{WorkspacePath: second}}
+
+	got, err := NewWithDeps(Deps{Store: store}).ProjectOverlaps(context.Background(), "scratch")
+	if err != nil {
+		t.Fatalf("ProjectOverlaps: %v", err)
+	}
+	if len(got.Overlaps) != 0 {
+		t.Fatalf("scratch overlaps = %+v, want none", got.Overlaps)
+	}
+}
+
+func TestProjectOverlapsReportsUnresolvedBasesAndUnavailableSessions(t *testing.T) {
+	first := newWorkspaceRepo(t)
+	second := newWorkspaceRepo(t)
+	writeWorkspaceFile(t, first, "shared.go", "first\n")
+	writeWorkspaceFile(t, second, "shared.go", "second\n")
+	missing := t.TempDir()
+	if err := os.Remove(missing); err != nil {
+		t.Fatalf("remove missing workspace fixture: %v", err)
+	}
+
+	store := newFakeStore()
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo", Config: domain.ProjectConfig{DefaultBranch: "missing-default"}}
+	store.sessions["demo-a"] = overlapSession("demo-a", first)
+	store.sessions["demo-b"] = overlapSession("demo-b", second)
+	store.sessions["demo-missing"] = overlapSession("demo-missing", missing)
+
+	got, err := NewWithDeps(Deps{Store: store}).ProjectOverlaps(context.Background(), "demo")
+	if err != nil {
+		t.Fatalf("ProjectOverlaps: %v", err)
+	}
+	if len(got.Overlaps) != 1 {
+		t.Fatalf("overlaps = %+v, want healthy pair", got.Overlaps)
+	}
+	if !slices.Equal(got.UnresolvedBaseSessionIDs, []domain.SessionID{"demo-a", "demo-b"}) {
+		t.Fatalf("unresolved bases = %v", got.UnresolvedBaseSessionIDs)
+	}
+	if !slices.Equal(got.UnavailableSessionIDs, []domain.SessionID{"demo-missing"}) {
+		t.Fatalf("unavailable sessions = %v", got.UnavailableSessionIDs)
+	}
+}
+
 func TestProjectOverlapsReportsTruncationAndConfiguredBasenameIgnores(t *testing.T) {
 	manifests := map[domain.SessionID]WorkspaceManifest{
 		"demo-b": {
@@ -88,7 +202,8 @@ func TestProjectOverlapsReportsTruncationAndConfiguredBasenameIgnores(t *testing
 			},
 		},
 		"demo-a": {
-			SessionID: "demo-a",
+			SessionID:         "demo-a",
+			CompareIncomplete: true,
 			Files: []WorkspaceFileSummary{
 				{Path: "backend/generated.go"},
 				{Path: "frontend/package-lock.json"},
@@ -103,6 +218,9 @@ func TestProjectOverlapsReportsTruncationAndConfiguredBasenameIgnores(t *testing
 	}
 	if !slices.Equal(got.TruncatedSessionIDs, []domain.SessionID{"demo-b"}) {
 		t.Fatalf("truncated sessions = %v, want demo-b", got.TruncatedSessionIDs)
+	}
+	if !slices.Equal(got.UnresolvedBaseSessionIDs, []domain.SessionID{"demo-a"}) {
+		t.Fatalf("unresolved bases = %v, want demo-a", got.UnresolvedBaseSessionIDs)
 	}
 }
 

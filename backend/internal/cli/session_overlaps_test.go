@@ -15,14 +15,16 @@ func TestSessionOverlapsHumanOutput(t *testing.T) {
 	deps := overlapTestDeps(t, http.StatusOK, `{
 		"projectId":"demo",
 		"overlaps":[{"sessionA":"demo-1","sessionB":"demo-2","paths":["backend/main.go","frontend/src/App.tsx"]}],
-		"truncatedSessionIds":["demo-3"]
+		"truncatedSessionIds":["demo-3"],
+		"unresolvedBaseSessionIds":["demo-4"],
+		"unavailableSessionIds":["demo-5"]
 	}`)
 
 	out, errOut, err := executeCLI(t, deps, "session", "overlaps", "--project", "demo")
 	if err != nil {
 		t.Fatalf("session overlaps failed: %v\nstderr=%s", err, errOut)
 	}
-	for _, want := range []string{"SESSION A", "SESSION B", "SHARED PATHS", "demo-1", "demo-2", "backend/main.go, frontend/src/App.tsx", "demo-3"} {
+	for _, want := range []string{"SESSION A", "SESSION B", "SHARED PATHS", "demo-1", "demo-2", "backend/main.go, frontend/src/App.tsx", "demo-3", "demo-4", "demo-5"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q:\n%s", want, out)
 		}
@@ -30,7 +32,7 @@ func TestSessionOverlapsHumanOutput(t *testing.T) {
 }
 
 func TestSessionOverlapsJSONOutput(t *testing.T) {
-	deps := overlapTestDeps(t, http.StatusOK, `{"projectId":"demo","overlaps":[],"truncatedSessionIds":[]}`)
+	deps := overlapTestDeps(t, http.StatusOK, `{"projectId":"demo","overlaps":[],"truncatedSessionIds":[],"unresolvedBaseSessionIds":[],"unavailableSessionIds":[]}`)
 
 	out, errOut, err := executeCLI(t, deps, "session", "overlaps", "--project", "demo", "--json")
 	if err != nil {
@@ -40,7 +42,7 @@ func TestSessionOverlapsJSONOutput(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &got); err != nil {
 		t.Fatalf("decode JSON output: %v\n%s", err, out)
 	}
-	if got.ProjectID != "demo" || got.Overlaps == nil || got.TruncatedSessionIDs == nil {
+	if got.ProjectID != "demo" || got.Overlaps == nil || got.TruncatedSessionIDs == nil || got.UnresolvedBaseSessionIDs == nil || got.UnavailableSessionIDs == nil {
 		t.Fatalf("response = %#v", got)
 	}
 }

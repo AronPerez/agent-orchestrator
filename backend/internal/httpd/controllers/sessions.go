@@ -3284,10 +3284,20 @@ func projectOverlapsResponse(result sessionsvc.ProjectOverlapResult) ProjectOver
 	if truncated == nil {
 		truncated = []domain.SessionID{}
 	}
+	unresolvedBases := append([]domain.SessionID(nil), result.UnresolvedBaseSessionIDs...)
+	if unresolvedBases == nil {
+		unresolvedBases = []domain.SessionID{}
+	}
+	unavailable := append([]domain.SessionID(nil), result.UnavailableSessionIDs...)
+	if unavailable == nil {
+		unavailable = []domain.SessionID{}
+	}
 	return ProjectOverlapsResponse{
-		ProjectID:           result.ProjectID,
-		Overlaps:            overlaps,
-		TruncatedSessionIDs: truncated,
+		ProjectID:                result.ProjectID,
+		Overlaps:                 overlaps,
+		TruncatedSessionIDs:      truncated,
+		UnresolvedBaseSessionIDs: unresolvedBases,
+		UnavailableSessionIDs:    unavailable,
 	}
 }
 

@@ -8027,7 +8027,12 @@ export interface components {
         ProjectOverlapsResponse: {
             overlaps: components["schemas"]["ProjectOverlapResponse"][];
             projectId: string;
+            /** @description Sessions whose bounded manifests were truncated, so some overlaps may be omitted. */
             truncatedSessionIds: string[];
+            /** @description Sessions whose workspace could not be read; healthy session pairs are still returned. */
+            unavailableSessionIds: string[];
+            /** @description Sessions where at least one repository comparison base could not be resolved, so committed overlaps may be omitted. */
+            unresolvedBaseSessionIds: string[];
         };
         ProjectResponse: {
             project: components["schemas"]["Project"];

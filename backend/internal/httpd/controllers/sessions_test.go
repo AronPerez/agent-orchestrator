@@ -4058,7 +4058,9 @@ func TestSessionsAPI_ProjectOverlaps(t *testing.T) {
 		Overlaps: []sessionsvc.ProjectOverlap{
 			{SessionA: "demo-1", SessionB: "demo-2", Paths: []string{"frontend/src/App.tsx", "backend/main.go"}},
 		},
-		TruncatedSessionIDs: []domain.SessionID{"demo-3"},
+		TruncatedSessionIDs:      []domain.SessionID{"demo-3"},
+		UnresolvedBaseSessionIDs: []domain.SessionID{"demo-4"},
+		UnavailableSessionIDs:    []domain.SessionID{"demo-5"},
 	}
 	srv := newSessionTestServer(t, svc)
 
@@ -4081,6 +4083,12 @@ func TestSessionsAPI_ProjectOverlaps(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.TruncatedSessionIDs, []domain.SessionID{"demo-3"}) {
 		t.Fatalf("truncated session ids = %#v", got.TruncatedSessionIDs)
+	}
+	if !reflect.DeepEqual(got.UnresolvedBaseSessionIDs, []domain.SessionID{"demo-4"}) {
+		t.Fatalf("unresolved base session ids = %#v", got.UnresolvedBaseSessionIDs)
+	}
+	if !reflect.DeepEqual(got.UnavailableSessionIDs, []domain.SessionID{"demo-5"}) {
+		t.Fatalf("unavailable session ids = %#v", got.UnavailableSessionIDs)
 	}
 }
 

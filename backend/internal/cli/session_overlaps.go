@@ -23,9 +23,11 @@ type projectOverlapDTO struct {
 }
 
 type projectOverlapsResponse struct {
-	ProjectID           string              `json:"projectId"`
-	Overlaps            []projectOverlapDTO `json:"overlaps"`
-	TruncatedSessionIDs []string            `json:"truncatedSessionIds"`
+	ProjectID                string              `json:"projectId"`
+	Overlaps                 []projectOverlapDTO `json:"overlaps"`
+	TruncatedSessionIDs      []string            `json:"truncatedSessionIds"`
+	UnresolvedBaseSessionIDs []string            `json:"unresolvedBaseSessionIds"`
+	UnavailableSessionIDs    []string            `json:"unavailableSessionIds"`
 }
 
 func newSessionOverlapsCommand(ctx *commandContext) *cobra.Command {
@@ -58,6 +60,12 @@ func (c *commandContext) listProjectOverlaps(ctx context.Context, cmd *cobra.Com
 	if response.TruncatedSessionIDs == nil {
 		response.TruncatedSessionIDs = []string{}
 	}
+	if response.UnresolvedBaseSessionIDs == nil {
+		response.UnresolvedBaseSessionIDs = []string{}
+	}
+	if response.UnavailableSessionIDs == nil {
+		response.UnavailableSessionIDs = []string{}
+	}
 	if opts.json {
 		return writeJSON(cmd.OutOrStdout(), response)
 	}
@@ -85,8 +93,19 @@ func writeProjectOverlaps(cmd *cobra.Command, response projectOverlapsResponse) 
 		}
 	}
 	if len(response.TruncatedSessionIDs) > 0 {
-		_, err := fmt.Fprintf(out, "Warning: overlap results may be incomplete; truncated manifests: %s\n", strings.Join(response.TruncatedSessionIDs, ", "))
-		return err
+		if _, err := fmt.Fprintf(out, "Warning: overlap results may be incomplete; truncated manifests: %s\n", strings.Join(response.TruncatedSessionIDs, ", ")); err != nil {
+			return err
+		}
+	}
+	if len(response.UnresolvedBaseSessionIDs) > 0 {
+		if _, err := fmt.Fprintf(out, "Warning: committed overlaps may be incomplete; unresolved comparison bases: %s\n", strings.Join(response.UnresolvedBaseSessionIDs, ", ")); err != nil {
+			return err
+		}
+	}
+	if len(response.UnavailableSessionIDs) > 0 {
+		if _, err := fmt.Fprintf(out, "Warning: workspaces could not be read: %s\n", strings.Join(response.UnavailableSessionIDs, ", ")); err != nil {
+			return err
+		}
 	}
 	return nil
 }

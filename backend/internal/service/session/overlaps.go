@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"sort"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
 // ProjectOverlap is one pair of live sessions that changed the same paths.
@@ -22,9 +24,11 @@ type ProjectOverlap struct {
 
 // ProjectOverlapResult is the derived collision radar for one project.
 type ProjectOverlapResult struct {
-	ProjectID           domain.ProjectID
-	Overlaps            []ProjectOverlap
-	TruncatedSessionIDs []domain.SessionID
+	ProjectID                domain.ProjectID
+	Overlaps                 []ProjectOverlap
+	TruncatedSessionIDs      []domain.SessionID
+	UnresolvedBaseSessionIDs []domain.SessionID
+	UnavailableSessionIDs    []domain.SessionID
 }
 
 var defaultOverlapIgnoredBasenames = map[string]struct{}{
@@ -41,9 +45,9 @@ var defaultOverlapIgnoredBasenames = map[string]struct{}{
 	"yarn.lock":         {},
 }
 
-// ProjectOverlaps computes overlap from base-relative workspace manifests.
-// The manifest cache is invalidated by workspace-change events, so this read
-// shares Git work with the Files inspector without storing derived status.
+// ProjectOverlaps computes overlap from fresh base-relative workspace
+// manifests and publishes those snapshots into the shared manifest cache. It
+// stores no derived collision status.
 func (s *Service) ProjectOverlaps(ctx context.Context, projectID domain.ProjectID) (ProjectOverlapResult, error) {
 	project, found, err := s.store.GetProject(ctx, string(projectID))
 	if err != nil {
@@ -51,6 +55,9 @@ func (s *Service) ProjectOverlaps(ctx context.Context, projectID domain.ProjectI
 	}
 	if !found {
 		return ProjectOverlapResult{}, apierr.NotFound("PROJECT_NOT_FOUND", "Unknown project")
+	}
+	if project.Kind.WithDefault() == domain.ProjectKindScratch {
+		return emptyProjectOverlapResult(projectID), nil
 	}
 	records, err := s.store.ListSessions(ctx, projectID)
 	if err != nil {
@@ -66,13 +73,21 @@ func (s *Service) ProjectOverlaps(ctx context.Context, projectID domain.ProjectI
 	sort.Slice(active, func(i, j int) bool { return active[i].ID < active[j].ID })
 
 	manifests := make([]WorkspaceManifest, len(active))
+	unavailable := make([]bool, len(active))
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.SetLimit(4)
 	for i := range active {
 		i := i
 		group.Go(func() error {
-			manifest, readErr := s.GetWorkspaceManifest(groupCtx, active[i].ID)
+			// An explicit collision-radar read is authoritative even when no Files
+			// view has a filesystem watcher open. Reconcile bypasses both cache
+			// layers, and also waits through a watcher-invalidated stale snapshot.
+			manifest, readErr := s.ReconcileWorkspaceManifest(groupCtx, active[i].ID)
 			if readErr != nil {
+				if overlapWorkspaceUnavailable(readErr) {
+					unavailable[i] = true
+					return nil
+				}
 				return fmt.Errorf("read workspace manifest for %s: %w", active[i].ID, readErr)
 			}
 			manifests[i] = manifest
@@ -83,24 +98,48 @@ func (s *Service) ProjectOverlaps(ctx context.Context, projectID domain.ProjectI
 		return ProjectOverlapResult{}, err
 	}
 	bySession := make(map[domain.SessionID]WorkspaceManifest, len(manifests))
-	for _, manifest := range manifests {
+	result := emptyProjectOverlapResult(projectID)
+	for i, manifest := range manifests {
+		if unavailable[i] {
+			result.UnavailableSessionIDs = append(result.UnavailableSessionIDs, active[i].ID)
+			continue
+		}
 		bySession[manifest.SessionID] = manifest
 	}
-	return projectOverlapsFromManifests(projectID, bySession, project.Config.CollisionRadar.IgnorePaths), nil
+	derived := projectOverlapsFromManifests(projectID, bySession, project.Config.CollisionRadar.IgnorePaths)
+	derived.UnavailableSessionIDs = result.UnavailableSessionIDs
+	return derived, nil
+}
+
+func overlapWorkspaceUnavailable(err error) bool {
+	if errors.Is(err, ports.ErrWorkspaceRepoUnavailable) {
+		return true
+	}
+	var apiError *apierr.Error
+	return errors.As(err, &apiError) && apiError.Code == "SESSION_WORKSPACE_NOT_FOUND"
+}
+
+func emptyProjectOverlapResult(projectID domain.ProjectID) ProjectOverlapResult {
+	return ProjectOverlapResult{
+		ProjectID:                projectID,
+		Overlaps:                 make([]ProjectOverlap, 0),
+		TruncatedSessionIDs:      make([]domain.SessionID, 0),
+		UnresolvedBaseSessionIDs: make([]domain.SessionID, 0),
+		UnavailableSessionIDs:    make([]domain.SessionID, 0),
+	}
 }
 
 func projectOverlapsFromManifests(projectID domain.ProjectID, manifests map[domain.SessionID]WorkspaceManifest, ignored []string) ProjectOverlapResult {
-	result := ProjectOverlapResult{
-		ProjectID:           projectID,
-		Overlaps:            make([]ProjectOverlap, 0),
-		TruncatedSessionIDs: make([]domain.SessionID, 0),
-	}
+	result := emptyProjectOverlapResult(projectID)
 	ids := make([]domain.SessionID, 0, len(manifests))
 	pathsBySession := make(map[domain.SessionID]map[string]struct{}, len(manifests))
 	for id, manifest := range manifests {
 		ids = append(ids, id)
 		if manifest.Truncated {
 			result.TruncatedSessionIDs = append(result.TruncatedSessionIDs, id)
+		}
+		if manifest.CompareIncomplete {
+			result.UnresolvedBaseSessionIDs = append(result.UnresolvedBaseSessionIDs, id)
 		}
 		paths := make(map[string]struct{}, len(manifest.Files))
 		for _, file := range manifest.Files {
@@ -116,6 +155,7 @@ func projectOverlapsFromManifests(projectID domain.ProjectID, manifests map[doma
 	}
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	sort.Slice(result.TruncatedSessionIDs, func(i, j int) bool { return result.TruncatedSessionIDs[i] < result.TruncatedSessionIDs[j] })
+	sort.Slice(result.UnresolvedBaseSessionIDs, func(i, j int) bool { return result.UnresolvedBaseSessionIDs[i] < result.UnresolvedBaseSessionIDs[j] })
 	for i, first := range ids {
 		for _, second := range ids[i+1:] {
 			shared := intersectOverlapPaths(pathsBySession[first], pathsBySession[second])

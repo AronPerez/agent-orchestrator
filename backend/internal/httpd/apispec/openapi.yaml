@@ -23110,6 +23110,20 @@ components:
         projectId:
           type: string
         truncatedSessionIds:
+          description: Sessions whose bounded manifests were truncated, so some overlaps
+            may be omitted.
+          items:
+            type: string
+          type: array
+        unavailableSessionIds:
+          description: Sessions whose workspace could not be read; healthy session
+            pairs are still returned.
+          items:
+            type: string
+          type: array
+        unresolvedBaseSessionIds:
+          description: Sessions where at least one repository comparison base could
+            not be resolved, so committed overlaps may be omitted.
           items:
             type: string
           type: array
@@ -23117,6 +23131,8 @@ components:
       - projectId
       - overlaps
       - truncatedSessionIds
+      - unresolvedBaseSessionIds
+      - unavailableSessionIds
       type: object
     ProjectResponse:
       properties:
