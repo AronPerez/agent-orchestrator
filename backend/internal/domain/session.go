@@ -737,6 +737,9 @@ func (r SessionRecord) ControllerOwner() SessionControllerOwner {
 type Session struct {
 	NeedsResume bool `json:"needsResume"`
 	SessionRecord
+	// ContractStalled is the current read-time interpretation of a durable
+	// escalation after applying activity, direction, threshold, and PR facts.
+	ContractStalled bool `json:"contractStalled"`
 	// WorkspaceCleanup is a durable teardown fact for the current generation.
 	WorkspaceCleanup WorkspaceDisposition `json:"workspaceCleanup,omitempty" enum:"pending,removed,preserved_dirty,failed,not_applicable"`
 	// WorkspaceCleanupReportOnly marks a cleanup a sweep started rather than an

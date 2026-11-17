@@ -507,6 +507,21 @@ describe("SessionsBoard", () => {
 		expect(toBoardSessionPresentation({ ...contract, lastInteractionAt: "2026-01-01T10:00:01Z" }).contractStalled).toBe(false);
 	});
 
+	it("prefers the daemon's current contract stall decision", () => {
+		const contract = boardSession({
+			id: "contract-worker",
+			status: "idle",
+			title: "Contract worker",
+			goal: "Ship the worker contract UI",
+			timeboxDeadlineAt: "2026-01-01T12:00:00Z",
+			contractStallEscalatedAt: "2026-01-01T10:00:00Z",
+			activity: { state: "idle", lastActivityAt: "2026-01-01T10:30:00Z" },
+		});
+
+		expect(toBoardSessionPresentation({ ...contract, contractStalled: true }).contractStalled).toBe(true);
+		expect(toBoardSessionPresentation({ ...contract, contractStalled: false, activity: { state: "idle", lastActivityAt: "2026-01-01T09:00:00Z" } }).contractStalled).toBe(false);
+	});
+
 	it("localizes dynamic card actions and pull request lifecycle labels", async () => {
 		await appI18n.changeLanguage("zh-CN");
 		workspaceQueryMock.mockReturnValue({

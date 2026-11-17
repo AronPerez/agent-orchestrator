@@ -207,6 +207,8 @@ export type WorkspaceSession = {
 	/** ISO deadline paired with {@link goal}. */
 	timeboxDeadlineAt?: string;
 	contractOutcome?: "met" | "blocked" | "limit_hit";
+	/** Daemon-derived current stall state. Absent when connected to an older daemon. */
+	contractStalled?: boolean;
 	/** Set once the daemon escalates a stalled contract. */
 	contractStallEscalatedAt?: string;
 	/**

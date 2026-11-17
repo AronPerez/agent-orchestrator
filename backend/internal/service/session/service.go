@@ -25,6 +25,7 @@ import (
 	chatsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/chat"
 	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessionartifacts"
+	"github.com/aoagents/agent-orchestrator/backend/internal/sessioncontract"
 	"github.com/aoagents/agent-orchestrator/backend/internal/telemetrymeta"
 )
 
@@ -1903,6 +1904,16 @@ func (s *Service) toSessionWithFacts(ctx context.Context, rec domain.SessionReco
 	// the no-signal rule, and two reads could put them either side of its grace
 	// period and have the card contradict its own status.
 	now := s.now()
+	contractStalled := false
+	if rec.ContractStallEscalatedAt != nil {
+		project, ok, err := s.store.GetProject(ctx, string(rec.ProjectID))
+		if err != nil {
+			return domain.Session{}, fmt.Errorf("get project for session contract: %w", err)
+		}
+		if ok {
+			contractStalled = sessioncontract.IsCurrentlyStalled(rec, project, prs, now)
+		}
+	}
 	// rec.OutputType is the persisted column (lifecycle.Manager.
 	// ReconcileSessionOutputType is the sole writer); it is deliberately not
 	// recomputed here so the API and Kanban see the same durable
@@ -1916,6 +1927,7 @@ func (s *Service) toSessionWithFacts(ctx context.Context, rec domain.SessionReco
 	}
 	return domain.Session{
 		SessionRecord:              rec,
+		ContractStalled:            contractStalled,
 		WorkspaceCleanup:           cleanup.WorkspaceDisposition,
 		WorkspaceCleanupReportOnly: cleanup.ReportOnly,
 		WorkspacePublished:         strings.TrimSpace(rec.Metadata.WorkspacePath) != "",

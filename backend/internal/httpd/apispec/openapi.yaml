@@ -19447,6 +19447,8 @@ components:
           type:
           - "null"
           - string
+        contractStalled:
+          type: boolean
         contractTimeboxPromptedAt:
           format: date-time
           type:
@@ -19688,6 +19690,7 @@ components:
       - createdAt
       - updatedAt
       - isPinned
+      - contractStalled
       - workspacePublished
       - statusReadiness
       - chatProviderPreserved

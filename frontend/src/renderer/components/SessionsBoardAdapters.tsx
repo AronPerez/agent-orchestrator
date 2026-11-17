@@ -117,6 +117,7 @@ export function toBoardSessionPresentation(
 function sessionContractIsStalled(session: WorkspaceSession): boolean {
 	if (!session.contractStallEscalatedAt || session.contractOutcome || session.isTerminated) return false;
 	if (session.statusReadiness && session.statusReadiness !== "ready") return false;
+	if (typeof session.contractStalled === "boolean") return session.contractStalled;
 	if (session.activity?.state !== "idle") return false;
 	const escalatedAt = Date.parse(session.contractStallEscalatedAt);
 	const lastActivityAt = Date.parse(session.activity.lastActivityAt);

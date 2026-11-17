@@ -6015,6 +6015,52 @@ func TestToSessionWithFactsRemapsTransferredAliasReviewRuns(t *testing.T) {
 	}
 }
 
+func TestToSessionWithFactsDerivesCurrentContractStall(t *testing.T) {
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	deadline := now.Add(time.Hour)
+	escalatedAt := now.Add(-30 * time.Minute)
+	rec := domain.SessionRecord{
+		ID:                       "contract-stall",
+		ProjectID:                "ao",
+		Kind:                     domain.KindWorker,
+		Goal:                     "ship it",
+		TimeboxDeadlineAt:        &deadline,
+		ContractStallEscalatedAt: &escalatedAt,
+		Activity: domain.Activity{
+			State:          domain.ActivityIdle,
+			LastActivityAt: now.Add(-45 * time.Minute),
+		},
+	}
+	st := newFakeStore()
+	st.projects["ao"] = domain.ProjectRecord{
+		ID: "ao",
+		Config: domain.ProjectConfig{
+			WorkerContracts: domain.WorkerContractConfig{StallMinutes: 15},
+		},
+	}
+	svc := &Service{store: st, clock: func() time.Time { return now }}
+
+	sess, err := svc.toSessionWithFacts(context.Background(), rec, []domain.PRFacts{{
+		CI: domain.CIFailing, Mergeability: domain.MergeMergeable,
+	}}, nil, false, nil, domain.SessionCleanupRecord{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sess.ContractStalled {
+		t.Fatal("ContractStalled = false, want true while the worker still owns failing CI")
+	}
+
+	sess, err = svc.toSessionWithFacts(context.Background(), rec, []domain.PRFacts{{
+		CI: domain.CIPending, Review: domain.ReviewApproved, Mergeability: domain.MergeMergeable,
+	}}, nil, false, nil, domain.SessionCleanupRecord{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.ContractStalled {
+		t.Fatal("ContractStalled = true, want false while CI is pending")
+	}
+}
+
 func TestToSessionWithFactsCanonicalAliasRunSupersedesOlderAliasRun(t *testing.T) {
 	st := newFakeStore()
 	rec := domain.SessionRecord{
