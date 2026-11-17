@@ -272,7 +272,7 @@ func TestEmbeddedDecisionGuidanceCoversSearchingRaisingAndClosing(t *testing.T) 
 		`"Changed decision on your call"`,
 		`"I dismissed your call"`,
 		`"Decision on a call raised by"`,
-		"ao decision outcome",
+		"ao decision outcome <id> --for-answer <answer-entry-id> --text <what-happened>",
 		"ao decision withdraw",
 		"ao decision ls",
 		"ao://decisions/",

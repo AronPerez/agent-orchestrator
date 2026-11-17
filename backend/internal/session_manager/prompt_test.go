@@ -355,7 +355,7 @@ func TestBuildSystemPromptTellsEveryRoleHowToAskTheHumanToDecide(t *testing.T) {
 				`begins "Decision on your call" or "Changed decision on your call"`,
 				`begins "I dismissed your call"`,
 				`begins "Decision on a call raised by"`,
-				"ao decision outcome <id> --text <what happened>",
+				"ao decision outcome <id> --for-answer <answer-entry-id> --text <what happened>",
 				"run `ao decision ls`",
 				"Only the human answers, dismisses or retires a call.",
 				"Never put secrets, credentials or personal data in a call.",

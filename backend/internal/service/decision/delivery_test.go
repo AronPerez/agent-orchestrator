@@ -358,7 +358,7 @@ func TestFallbackRecipientCanRecordOutcomeWhileDeliveryIsInFlight(t *testing.T) 
 		done <- deliveryResult{pending: pending, err: err}
 	}()
 	<-messenger.started
-	completed, outcomeErr := fixture.service.RecordOutcome(context.Background(), Actor{Session: fixture.orch}, call.ID, OutcomeInput{Text: "Carried it out"})
+	completed, outcomeErr := fixture.service.RecordOutcome(context.Background(), Actor{Session: fixture.orch}, call.ID, OutcomeInput{ForEntry: call.StandingEntryID, Text: "Carried it out"})
 	close(messenger.release)
 	result := <-done
 	if outcomeErr != nil {
@@ -366,6 +366,30 @@ func TestFallbackRecipientCanRecordOutcomeWhileDeliveryIsInFlight(t *testing.T) 
 	}
 	if completed.State != domain.DecisionStateDone || result.err != nil || result.pending != 0 {
 		t.Fatalf("completed=%+v delivery=%+v", completed, result)
+	}
+}
+
+func TestAcceptedFallbackGrantSurvivesAFailedRetry(t *testing.T) {
+	fixture := newDecisionService(t)
+	call := answeredCall(t, fixture, fixture.w1)
+	terminateDecisionSession(t, fixture, fixture.w1)
+	messenger := newFakeDecisionMessenger()
+	store := &failingAppendStore{DeliveryStore: fixture.store, fail: true}
+	deliverer := newTestDelivererWithAuthorizer(store, messenger, "h_a", fixture.service)
+
+	pending, err := deliverer.RunDue(context.Background())
+	if err != nil || pending != 1 || len(messenger.messages) != 1 || messenger.messages[0].session != fixture.orch {
+		t.Fatalf("accepted send pending=%d messages=%+v err=%v", pending, messenger.messages, err)
+	}
+	messenger.errs[fixture.orch] = errors.New("composer busy")
+	pending, err = deliverer.RunDue(context.Background())
+	if err != nil || pending != 1 {
+		t.Fatalf("failed retry pending=%d err=%v", pending, err)
+	}
+
+	completed, err := fixture.service.RecordOutcome(context.Background(), Actor{Session: fixture.orch}, call.ID, OutcomeInput{ForEntry: call.StandingEntryID, Text: "Carried it out"})
+	if err != nil || completed.State != domain.DecisionStateDone {
+		t.Fatalf("RecordOutcome after failed retry = %+v, %v", completed, err)
 	}
 }
 

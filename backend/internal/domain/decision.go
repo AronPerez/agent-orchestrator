@@ -183,8 +183,9 @@ type DecisionDeliveredPayload struct {
 
 // DecisionOutcomePayload records what happened after a decision was carried out.
 type DecisionOutcomePayload struct {
-	Text string `json:"text"`
-	Link string `json:"link,omitempty"`
+	ForEntry string `json:"forEntry,omitempty"`
+	Text     string `json:"text"`
+	Link     string `json:"link,omitempty"`
 }
 
 // DecisionRetiredPayload changes whether a call is hidden from active views.

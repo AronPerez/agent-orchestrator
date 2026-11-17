@@ -14,7 +14,7 @@ func TestDeliveryMessageForAnAnswer(t *testing.T) {
 		"I chose: OAuth client credentials\n" +
 		"Note: Rotate monthly.\n\n" +
 		"Carry this out. When it is done, record what happened in one line:\n" +
-		"ao decision outcome dec_1 --text \"<what happened>\"\n"
+		"ao decision outcome dec_1 --for-answer dent_answer --text \"<what happened>\"\n"
 	if got != want {
 		t.Fatalf("DeliveryMessage() =\n%q\nwant\n%q", got, want)
 	}
@@ -113,7 +113,7 @@ func messageCall() domain.DecisionCall {
 				{Label: "Per-tenant API keys"},
 			},
 		},
-		StandingKind: domain.DecisionKindAnswered,
-		Choice:       domain.DecisionChoiceOption, Option: 1, Note: "Rotate monthly.",
+		StandingEntryID: "dent_answer", StandingKind: domain.DecisionKindAnswered,
+		Choice: domain.DecisionChoiceOption, Option: 1, Note: "Rotate monthly.",
 	}
 }

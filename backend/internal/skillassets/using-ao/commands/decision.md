@@ -14,7 +14,7 @@ ao decision show <id>
 ao decision answer <id> --pick <n> [--note <text>]
 ao decision answer <id> --other --note <text>
 ao decision dismiss <id> [--note <text>]
-ao decision outcome <id> --text <one-line-outcome> [--link <url>]
+ao decision outcome <id> --for-answer <answer-entry-id> --text <one-line-outcome> [--link <url>]
 ao decision withdraw <id>
 ao decision retire <id> [--undo]
 ```
@@ -106,11 +106,13 @@ Act on the human's message, including its note and any replacement warning.
 After carrying out an answer, record what happened in one line:
 
 ```text
-ao decision outcome <id> --text <what-happened> [--link <url>]
+ao decision outcome <id> --for-answer <answer-entry-id> --text <what-happened> [--link <url>]
 ```
 
-The owning session, the session that received the delivered answer, or the
-human may record the outcome.
+Use the exact call id and `--for-answer` value from the delivered human message.
+The answer-entry id keeps delayed work for an older answer from closing a newer
+replacement answer. The owning session or the session that received the
+delivered answer must provide it; the human may record the outcome directly.
 
 ## Withdrawing a call
 

@@ -155,6 +155,12 @@ func ReduceDecisionCall(entries []DecisionEntry) (DecisionCall, bool) {
 			if json.Unmarshal(entry.Payload, &payload) != nil {
 				continue
 			}
+			// New outcomes name the immutable answer they carried out. If a
+			// newer answer already stands, keep the stale outcome in history but
+			// do not let it close that newer work. Empty preserves legacy entries.
+			if payload.ForEntry != "" && payload.ForEntry != standing.ID {
+				continue
+			}
 			if !hasClosing {
 				closing, hasClosing = entry, true
 			}

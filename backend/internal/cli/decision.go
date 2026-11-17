@@ -58,6 +58,7 @@ type decisionCallAPI struct {
 	Note              string              `json:"note,omitempty"`
 	AnsweredAt        *time.Time          `json:"answeredAt,omitempty"`
 	AnswerSurface     string              `json:"answerSurface,omitempty"`
+	StandingEntryID   string              `json:"standingEntryId,omitempty"`
 	Outcome           string              `json:"outcome,omitempty"`
 	OutcomeLink       string              `json:"outcomeLink,omitempty"`
 	OutcomeAt         *time.Time          `json:"outcomeAt,omitempty"`
@@ -80,6 +81,7 @@ type decisionEntryAPI struct {
 	Choice        string    `json:"choice,omitempty"`
 	Option        int       `json:"option,omitempty"`
 	Note          string    `json:"note,omitempty"`
+	ForEntry      string    `json:"forEntry,omitempty"`
 	Text          string    `json:"text,omitempty"`
 	Link          string    `json:"link,omitempty"`
 	Status        string    `json:"status,omitempty"`
@@ -109,8 +111,9 @@ type decisionDismissAPIRequest struct {
 }
 
 type decisionOutcomeAPIRequest struct {
-	Text string `json:"text"`
-	Link string `json:"link,omitempty"`
+	ForEntry string `json:"forEntry,omitempty"`
+	Text     string `json:"text"`
+	Link     string `json:"link,omitempty"`
 }
 
 type decisionRetireAPIRequest struct {
@@ -399,7 +402,7 @@ func newDecisionDismissCommand(ctx *commandContext) *cobra.Command {
 }
 
 func newDecisionOutcomeCommand(ctx *commandContext) *cobra.Command {
-	var text, link string
+	var text, link, forEntry string
 	cmd := &cobra.Command{
 		Use:   "outcome <id>",
 		Short: "Record what happened after a decision",
@@ -416,7 +419,7 @@ func newDecisionOutcomeCommand(ctx *commandContext) *cobra.Command {
 				return err
 			}
 			var response decisionCallAPI
-			if err := ctx.postJSON(cmd.Context(), decisionActionPath(id, "outcome"), decisionOutcomeAPIRequest{Text: text, Link: link}, &response); err != nil {
+			if err := ctx.postJSON(cmd.Context(), decisionActionPath(id, "outcome"), decisionOutcomeAPIRequest{ForEntry: forEntry, Text: text, Link: link}, &response); err != nil {
 				return err
 			}
 			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Recorded the outcome of %s\n", response.ID)
@@ -425,6 +428,7 @@ func newDecisionOutcomeCommand(ctx *commandContext) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&text, "text", "", "One-line outcome")
 	cmd.Flags().StringVar(&link, "link", "", "Optional supporting URL")
+	cmd.Flags().StringVar(&forEntry, "for-answer", "", "Answer entry named by the delivered instruction")
 	return cmd
 }
 
@@ -565,7 +569,7 @@ func writeDecisionCall(w io.Writer, call decisionCallAPI, outcomeOwed bool) erro
 		}
 	}
 	if outcomeOwed && call.State == "in_progress" {
-		_, err := fmt.Fprintf(w, "  Outcome owed: ao decision outcome %s --text \"<what happened>\"\n", call.ID)
+		_, err := fmt.Fprintf(w, "  Outcome owed: ao decision outcome %s --for-answer %s --text \"<what happened>\"\n", call.ID, call.StandingEntryID)
 		return err
 	}
 	return nil

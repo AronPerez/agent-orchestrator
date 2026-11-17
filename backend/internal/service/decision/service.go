@@ -52,7 +52,13 @@ type Service struct {
 	onAppended   func(domain.DecisionEntry)
 	mutateMu     sync.Mutex
 	fallbackMu   sync.RWMutex
-	fallback     map[string]domain.SessionID
+	fallback     map[fallbackOutcomeGrant]struct{}
+}
+
+type fallbackOutcomeGrant struct {
+	callID   string
+	forEntry string
+	session  domain.SessionID
 }
 
 // New constructs a decision service from its daemon-owned dependencies.
@@ -75,7 +81,7 @@ func New(d Deps) *Service {
 	return &Service{
 		store: d.Store, hostID: d.HostID, machineLabel: d.MachineLabel,
 		now: d.Now, newID: d.NewID, onAppended: d.OnAppended,
-		fallback: make(map[string]domain.SessionID),
+		fallback: make(map[fallbackOutcomeGrant]struct{}),
 	}
 }
 
@@ -103,8 +109,9 @@ type AnswerInput struct {
 
 // OutcomeInput records the result of carrying out a decision.
 type OutcomeInput struct {
-	Text string
-	Link string
+	ForEntry string
+	Text     string
+	Link     string
 }
 
 // Scope selects a decision list view.
@@ -256,19 +263,29 @@ func (s *Service) RecordOutcome(ctx context.Context, actor Actor, callID string,
 	if err != nil {
 		return domain.DecisionCall{}, err
 	}
-	if actor.Session != "" && !s.mayClose(call, actor.Session) {
+	input.ForEntry = strings.TrimSpace(input.ForEntry)
+	if actor.Session != "" && !s.mayClose(call, input.ForEntry, actor.Session) {
 		return domain.DecisionCall{}, notOwner()
 	}
 	if call.State != domain.DecisionStateInProgress {
 		return domain.DecisionCall{}, wrongState(call, `An outcome can be recorded once a call is "In progress". This one is "%s".`)
 	}
-	payload := domain.DecisionOutcomePayload{Text: strings.TrimSpace(input.Text), Link: strings.TrimSpace(input.Link)}
+	if input.ForEntry != "" && input.ForEntry != call.StandingEntryID {
+		return domain.DecisionCall{}, answerChanged(call)
+	}
+	if actor.Session != "" && input.ForEntry == "" {
+		return domain.DecisionCall{}, answerChanged(call)
+	}
+	if input.ForEntry == "" {
+		input.ForEntry = call.StandingEntryID
+	}
+	payload := domain.DecisionOutcomePayload{ForEntry: input.ForEntry, Text: strings.TrimSpace(input.Text), Link: strings.TrimSpace(input.Link)}
 	if err := domain.ValidateDecisionOutcome(payload); err != nil {
 		return domain.DecisionCall{}, invalidDecision(err)
 	}
 	completed, err := s.append(ctx, actor, call.ID, domain.DecisionKindOutcome, payload)
 	if err == nil && actor.Session != "" {
-		s.RevokeFallbackOutcome(call.ID, actor.Session)
+		s.RevokeFallbackOutcome(call.ID, payload.ForEntry, actor.Session)
 	}
 	return completed, err
 }
@@ -423,32 +440,39 @@ func (s *Service) owns(call domain.DecisionCall, session domain.SessionID) bool 
 	return session != "" && call.Origin == s.hostID && call.Raised.OwnerSessionID == session
 }
 
-func (s *Service) mayClose(call domain.DecisionCall, session domain.SessionID) bool {
-	return call.Origin == s.hostID && (call.Raised.OwnerSessionID == session || call.DeliveredTo == session || s.fallbackOutcomeAllowed(call.ID, session))
+func (s *Service) mayClose(call domain.DecisionCall, forEntry string, session domain.SessionID) bool {
+	return call.Origin == s.hostID && (call.Raised.OwnerSessionID == session ||
+		(forEntry == call.StandingEntryID && call.DeliveredTo == session) ||
+		s.fallbackOutcomeAllowed(call.ID, forEntry, session))
 }
 
 // AuthorizeFallbackOutcome grants the selected fallback session temporary
 // authority while delivery acceptance and the durable delivery entry are in flight.
-func (s *Service) AuthorizeFallbackOutcome(callID string, session domain.SessionID) {
+// It reports whether this attempt created the grant, so a failed retry cannot
+// revoke authority retained from an earlier accepted send.
+func (s *Service) AuthorizeFallbackOutcome(callID, forEntry string, session domain.SessionID) bool {
 	s.fallbackMu.Lock()
 	defer s.fallbackMu.Unlock()
-	s.fallback[callID] = session
-}
-
-// RevokeFallbackOutcome removes a matching temporary fallback grant. A grant
-// for a newer fallback recipient is left intact.
-func (s *Service) RevokeFallbackOutcome(callID string, session domain.SessionID) {
-	s.fallbackMu.Lock()
-	defer s.fallbackMu.Unlock()
-	if s.fallback[callID] == session {
-		delete(s.fallback, callID)
+	key := fallbackOutcomeGrant{callID: callID, forEntry: forEntry, session: session}
+	if _, exists := s.fallback[key]; exists {
+		return false
 	}
+	s.fallback[key] = struct{}{}
+	return true
 }
 
-func (s *Service) fallbackOutcomeAllowed(callID string, session domain.SessionID) bool {
+// RevokeFallbackOutcome removes one answer-scoped temporary fallback grant.
+func (s *Service) RevokeFallbackOutcome(callID, forEntry string, session domain.SessionID) {
+	s.fallbackMu.Lock()
+	defer s.fallbackMu.Unlock()
+	delete(s.fallback, fallbackOutcomeGrant{callID: callID, forEntry: forEntry, session: session})
+}
+
+func (s *Service) fallbackOutcomeAllowed(callID, forEntry string, session domain.SessionID) bool {
 	s.fallbackMu.RLock()
 	defer s.fallbackMu.RUnlock()
-	return session != "" && s.fallback[callID] == session
+	_, ok := s.fallback[fallbackOutcomeGrant{callID: callID, forEntry: forEntry, session: session}]
+	return session != "" && forEntry != "" && ok
 }
 
 func personOnly() error {
@@ -461,6 +485,14 @@ func notOwner() error {
 
 func wrongState(call domain.DecisionCall, message string) error {
 	return apierr.Conflict("DECISION_WRONG_STATE", fmt.Sprintf(message, call.State.Label()), map[string]any{"state": call.State})
+}
+
+func answerChanged(call domain.DecisionCall) error {
+	return apierr.Conflict(
+		"DECISION_ANSWER_CHANGED",
+		"The decision changed before this outcome was recorded. Review the latest answer and carry that out.",
+		map[string]any{"answerEntryId": call.StandingEntryID},
+	)
 }
 
 func sessionName(session domain.SessionRecord) string {

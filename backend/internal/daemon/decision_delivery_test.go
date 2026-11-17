@@ -50,4 +50,9 @@ func TestDecisionMessengerSendsAsThePersonAndNamesEndedSessions(t *testing.T) {
 	if err := messenger.DeliverAsPerson(context.Background(), "w-1", "hello", at); !errors.Is(err, busy) || errors.Is(err, decisionsvc.ErrSessionEnded) {
 		t.Fatalf("DeliverAsPerson(other) = %v", err)
 	}
+
+	sender.err = fmt.Errorf("send failed: %w", sessionmanager.ErrResumeInProgress)
+	if err := messenger.DeliverAsPerson(context.Background(), "w-1", "hello", at); !errors.Is(err, sessionmanager.ErrResumeInProgress) || errors.Is(err, decisionsvc.ErrSessionEnded) {
+		t.Fatalf("DeliverAsPerson(resuming) = %v, want transient ErrResumeInProgress", err)
+	}
 }

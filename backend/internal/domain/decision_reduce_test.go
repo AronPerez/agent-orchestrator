@@ -42,6 +42,7 @@ func TestReduceDecisionCall(t *testing.T) {
 	}
 	dismissed := decisionEntry(t, "d", 3, DecisionKindDismissed, DecisionDismissedPayload{Note: "not now"})
 	outcome := decisionEntry(t, "o", 6, DecisionKindOutcome, DecisionOutcomePayload{Text: "Shipped in PR 412"})
+	staleOutcome := decisionEntry(t, "stale-o", 6, DecisionKindOutcome, DecisionOutcomePayload{ForEntry: "a1", Text: "Finished the first answer"})
 	withdrawn := decisionEntry(t, "w", 2, DecisionKindWithdrawn, struct{}{})
 	noSession := decisionEntry(t, "ns", 3, DecisionKindDelivered, DecisionDeliveredPayload{
 		ForEntry: "a1", Status: DecisionDeliveredNoSession,
@@ -126,6 +127,15 @@ func TestReduceDecisionCall(t *testing.T) {
 			entries: []DecisionEntry{raised, pick("a1", 2, 1), outcome, pick("a2", 7, 2)},
 			check: func(t *testing.T, call DecisionCall) {
 				if call.State != DecisionStateDone || !call.ChangedAfterClose || call.StandingEntryID != "a2" || call.Delivery != DecisionDeliveryPending {
+					t.Fatalf("call = %+v", call)
+				}
+			},
+		},
+		{
+			name:    "outcome for an older answer does not close the newer answer",
+			entries: []DecisionEntry{raised, pick("a1", 2, 1), pick("a2", 4, 2), staleOutcome},
+			check: func(t *testing.T, call DecisionCall) {
+				if call.State != DecisionStateInProgress || call.StandingEntryID != "a2" || call.Option != 2 || call.Outcome != "" {
 					t.Fatalf("call = %+v", call)
 				}
 			},

@@ -178,7 +178,7 @@ func (c *DecisionsController) outcome(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	call, err := c.Svc.RecordOutcome(r.Context(), decisionActor(r), chi.URLParam(r, "id"), decisionsvc.OutcomeInput{
-		Text: req.Text, Link: req.Link,
+		ForEntry: req.ForEntry, Text: req.Text, Link: req.Link,
 	})
 	if err != nil {
 		envelope.WriteErrorWithCode(w, r, err, "DECISION_OUTCOME_FAILED", "Unable to record decision outcome")
@@ -256,7 +256,8 @@ func decisionCallResponse(call domain.DecisionCall) DecisionCallResponse {
 		HostID: call.Origin, MachineLabel: call.Raised.MachineLabel,
 		OwnerSessionID: string(call.Raised.OwnerSessionID), OwnerSessionName: call.Raised.OwnerSessionName,
 		RaisedAt: call.RaisedAt, Choice: call.Choice, Option: call.Option, ChosenLabel: call.ChosenLabel(), Note: call.Note,
-		AnswerSurface: string(call.AnswerSurface), Outcome: call.Outcome, OutcomeLink: call.OutcomeLink,
+		AnswerSurface: string(call.AnswerSurface), StandingEntryID: call.StandingEntryID,
+		Outcome: call.Outcome, OutcomeLink: call.OutcomeLink,
 		Retired: call.Retired, Delivery: string(call.Delivery), DeliveredTo: string(call.DeliveredTo),
 		DeliveredToName: call.DeliveredToName, DeliveredFallback: call.DeliveredFallback,
 		ChangedAfterClose: call.ChangedAfterClose,
@@ -291,12 +292,14 @@ func decisionEntryResponse(entry domain.DecisionEntry) DecisionEntryResponse {
 	case domain.DecisionKindDelivered:
 		var payload domain.DecisionDeliveredPayload
 		if json.Unmarshal(entry.Payload, &payload) == nil {
+			response.ForEntry = payload.ForEntry
 			response.Status, response.SessionID = payload.Status, string(payload.SessionID)
 			response.SessionName, response.Fallback = payload.SessionName, payload.Fallback
 		}
 	case domain.DecisionKindOutcome:
 		var payload domain.DecisionOutcomePayload
 		if json.Unmarshal(entry.Payload, &payload) == nil {
+			response.ForEntry = payload.ForEntry
 			response.Text, response.Link = payload.Text, payload.Link
 		}
 	case domain.DecisionKindRetired:

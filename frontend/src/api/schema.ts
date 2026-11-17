@@ -7349,6 +7349,7 @@ export interface components {
             raisedAt: string;
             reference?: string;
             retired: boolean;
+            standingEntryId?: string;
             /** @enum {string} */
             state: "needs_you" | "in_progress" | "done" | "dismissed" | "withdrawn";
             stateLabel: string;
@@ -7367,6 +7368,7 @@ export interface components {
             authorSurface?: string;
             choice?: string;
             fallback?: boolean;
+            forEntry?: string;
             hostId: string;
             id: string;
             kind: string;
@@ -7391,6 +7393,8 @@ export interface components {
             recommended?: boolean;
         };
         DecisionOutcomeRequest: {
+            /** @description Immutable answer entry being carried out. Required for session-authored outcomes. */
+            forEntry?: string;
             link?: string;
             text: string;
         };

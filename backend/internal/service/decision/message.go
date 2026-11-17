@@ -46,7 +46,7 @@ func answerMessage(call domain.DecisionCall, fallback bool) string {
 	} else {
 		fmt.Fprintln(&message, "Carry this out. When it is done, record what happened in one line:")
 	}
-	fmt.Fprintf(&message, "ao decision outcome %s --text %q\n", call.ID, "<what happened>")
+	fmt.Fprintf(&message, "ao decision outcome %s --for-answer %s --text %q\n", call.ID, call.StandingEntryID, "<what happened>")
 	return message.String()
 }
 

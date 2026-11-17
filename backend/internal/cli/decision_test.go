@@ -229,7 +229,7 @@ func TestDecisionRaiseShowsTheRuleTheDaemonNames(t *testing.T) {
 
 func TestDecisionListSearchAndShow(t *testing.T) {
 	t.Setenv("AO_SESSION_ID", "w-1")
-	callJSON := `{"id":"dec_1","link":"ao://decisions/dec_1","state":"in_progress","stateLabel":"In progress","title":"Which auth scheme should the proxy use?","context":"Choose one.","options":[],"links":[],"projectName":"Shop","streamName":"Checkout epic","machineLabel":"mac-mini","hostId":"h_a","ownerSessionId":"w-1","ownerSessionName":"Worker one","raisedAt":"2026-11-16T15:00:00Z","choice":"option","option":1,"chosenLabel":"OAuth client credentials","note":"Rotate monthly","retired":false}`
+	callJSON := `{"id":"dec_1","link":"ao://decisions/dec_1","state":"in_progress","stateLabel":"In progress","title":"Which auth scheme should the proxy use?","context":"Choose one.","options":[],"links":[],"projectName":"Shop","streamName":"Checkout epic","machineLabel":"mac-mini","hostId":"h_a","ownerSessionId":"w-1","ownerSessionName":"Worker one","raisedAt":"2026-11-16T15:00:00Z","standingEntryId":"dent_2","choice":"option","option":1,"chosenLabel":"OAuth client credentials","note":"Rotate monthly","retired":false}`
 	var paths []string
 	deps := decisionCLIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/api/v1/decisions") {
@@ -253,7 +253,7 @@ func TestDecisionListSearchAndShow(t *testing.T) {
 		"dec_1  In progress  Which auth scheme should the proxy use?",
 		"Shop · Checkout epic · mac-mini · 2026-11-16",
 		"Chose: OAuth client credentials · Note: Rotate monthly",
-		`Outcome owed: ao decision outcome dec_1 --text "<what happened>"`,
+		`Outcome owed: ao decision outcome dec_1 --for-answer dent_2 --text "<what happened>"`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("list output missing %q:\n%s", want, out)
@@ -352,8 +352,8 @@ func TestDecisionActionsSendTheRightRequest(t *testing.T) {
 			wantOut: "Dismissed dec_1\n",
 		},
 		{
-			name: "outcome", session: "w-1", args: []string{"decision", "outcome", "ao://decisions/dec_1", "--text", "Shipped in PR 412", "--link", "https://example.com/pr/412"},
-			path: "/api/v1/decisions/dec_1/outcome", body: `{"text":"Shipped in PR 412","link":"https://example.com/pr/412"}`,
+			name: "outcome", session: "w-1", args: []string{"decision", "outcome", "ao://decisions/dec_1", "--for-answer", "dent_2", "--text", "Shipped in PR 412", "--link", "https://example.com/pr/412"},
+			path: "/api/v1/decisions/dec_1/outcome", body: `{"forEntry":"dent_2","text":"Shipped in PR 412","link":"https://example.com/pr/412"}`,
 			wantCaller: "w-1", wantOut: "Recorded the outcome of dec_1\n",
 		},
 		{

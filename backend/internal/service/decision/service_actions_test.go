@@ -177,19 +177,30 @@ func TestOutcomeAndRetire(t *testing.T) {
 	if _, err := fixture.service.RecordOutcome(ctx, Actor{Session: fixture.w2}, call.ID, OutcomeInput{Text: "Done"}); apiCode(err) != "DECISION_NOT_OWNER" {
 		t.Fatalf("other session outcome error = %v", err)
 	}
-	_, err = fixture.service.RecordOutcome(ctx, Actor{Session: fixture.w1}, call.ID, OutcomeInput{Text: "a\nb"})
+	_, err = fixture.service.RecordOutcome(ctx, Actor{Session: fixture.w1}, call.ID, OutcomeInput{Text: "Done"})
+	assertDecisionAPIError(t, err, apierr.KindConflict, "DECISION_ANSWER_CHANGED", "", "")
+	_, err = fixture.service.RecordOutcome(ctx, Actor{Session: fixture.w1}, call.ID, OutcomeInput{ForEntry: answered.StandingEntryID, Text: "a\nb"})
 	assertDecisionAPIError(t, err, apierr.KindInvalid, "DECISION_INVALID", "outcome_one_line", "")
 
 	appendDeliveredEntry(t, fixture, answered, fixture.orch)
 	completed, err := fixture.service.RecordOutcome(ctx, Actor{Session: fixture.orch}, call.ID, OutcomeInput{
-		Text: "Shipped in PR 412",
-		Link: "https://example.com/pr/412",
+		ForEntry: answered.StandingEntryID,
+		Text:     "Shipped in PR 412",
+		Link:     "https://example.com/pr/412",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if completed.State != domain.DecisionStateDone || completed.Outcome != "Shipped in PR 412" || completed.OutcomeLink != "https://example.com/pr/412" {
 		t.Fatalf("completed call = %+v", completed)
+	}
+	entries, err := fixture.store.ListDecisionEntries(ctx, call.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var outcome domain.DecisionOutcomePayload
+	if last := entries[len(entries)-1]; last.Kind != domain.DecisionKindOutcome || json.Unmarshal(last.Payload, &outcome) != nil || outcome.ForEntry != answered.StandingEntryID {
+		t.Fatalf("outcome entry = %+v payload=%+v", last, outcome)
 	}
 	if _, err := fixture.service.Retire(ctx, Actor{Session: fixture.w1}, call.ID, true); apiCode(err) != "DECISION_PERSON_ONLY" {
 		t.Fatalf("session retire error = %v", err)
@@ -291,6 +302,29 @@ func TestThePersonCanRecordTheOutcome(t *testing.T) {
 	completed, err := fixture.service.RecordOutcome(ctx, person, call.ID, OutcomeInput{Text: "Did it by hand"})
 	if err != nil || completed.State != domain.DecisionStateDone {
 		t.Fatalf("completed call = %+v, err=%v", completed, err)
+	}
+}
+
+func TestOutcomeCannotCloseANewerAnswer(t *testing.T) {
+	fixture := newDecisionService(t)
+	ctx := context.Background()
+	person := Actor{Surface: domain.RequestSurfaceCLI}
+	call := raiseDecision(t, fixture, fixture.w1)
+	first, err := fixture.service.Answer(ctx, person, call.ID, AnswerInput{Choice: domain.DecisionChoiceOption, Option: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendDeliveredEntry(t, fixture, first, fixture.w1)
+	second, err := fixture.service.Answer(ctx, person, call.ID, AnswerInput{Choice: domain.DecisionChoiceOption, Option: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = fixture.service.RecordOutcome(ctx, Actor{Session: fixture.w1}, call.ID, OutcomeInput{ForEntry: first.StandingEntryID, Text: "Finished the first answer"})
+	assertDecisionAPIError(t, err, apierr.KindConflict, "DECISION_ANSWER_CHANGED", "", "")
+	stored := getDecisionCall(t, fixture, call.ID)
+	if stored.State != domain.DecisionStateInProgress || stored.StandingEntryID != second.StandingEntryID || stored.Option != 2 {
+		t.Fatalf("stored call = %+v", stored)
 	}
 }
 
