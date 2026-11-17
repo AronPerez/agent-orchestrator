@@ -2378,7 +2378,7 @@ func (c *SessionsController) send(w http.ResponseWriter, r *http.Request) {
 	}
 	message := domain.SanitizeControlChars(in.Message)
 	var err error
-	if in.UserAuthored || in.SenderSessionID != "" {
+	if in.UserAuthored || in.AutomationAuthored || in.SenderSessionID != "" {
 		sender, ok := c.Svc.(sessionMessageOptionsSender)
 		if !ok {
 			apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/send")
@@ -2393,7 +2393,7 @@ func (c *SessionsController) send(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if recorder, ok := c.Svc.(UserMessageRecorder); ok {
-		recordUserMessage(r.Context(), recorder, sessionID(r), in.SenderSessionID, false)
+		recordUserMessage(r.Context(), recorder, sessionID(r), in.SenderSessionID, in.AutomationAuthored, false)
 	}
 	envelope.WriteJSON(w, http.StatusOK, SendSessionMessageResponse{OK: true, SessionID: sessionID(r), Message: message})
 }

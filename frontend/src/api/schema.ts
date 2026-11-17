@@ -8426,6 +8426,7 @@ export interface components {
         };
         SendSessionMessageRequest: {
             attachment?: components["schemas"]["AttachmentInput"];
+            automationAuthored?: boolean;
             message: string;
             senderSessionId?: string;
             userAuthored?: boolean;
@@ -9342,6 +9343,7 @@ export interface components {
         };
         SteerConversationRequest: {
             attachments?: components["schemas"]["ConversationImageContentRequest"][];
+            automationAuthored?: boolean;
             clientMessageId?: string;
             recoverOnly?: boolean;
             senderSessionId?: string;

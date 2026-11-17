@@ -253,6 +253,23 @@ func TestSteerOrSendRouteReturnsAtomicOutcome(t *testing.T) {
 	}
 }
 
+func TestSteerOrSendRouteCarriesRemoteAutomationWithoutLocalSender(t *testing.T) {
+	svc := &steerStub{
+		fakeConversationService: &fakeConversationService{},
+		atomicResult:            chatsvc.SteerOrSendResult{Steered: true},
+	}
+	status, _, _ := postSteerOrSend(t, svc, map[string]any{
+		"text": "correct it", "clientMessageId": "remote-automation", "automationAuthored": true,
+	})
+	if status != http.StatusAccepted {
+		t.Fatalf("status=%d", status)
+	}
+	if len(svc.atomicSeen) != 1 || svc.atomicSeen[0].SenderSessionID != "" ||
+		svc.atomicSeen[0].Origin != domain.MessageOriginAutomation {
+		t.Fatalf("atomic request = %+v", svc.atomicSeen)
+	}
+}
+
 // 202, not 200: the provider takes the guidance and acts on it at its next model
 // boundary. The body names the turn it joined so a client can attach it.
 func TestSteerRouteAcceptsGuidanceAndNamesTheTurn(t *testing.T) {

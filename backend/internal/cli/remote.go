@@ -44,6 +44,8 @@ type remoteTarget struct {
 // carries credentials, so it must be mode 0600.
 const remotesFileName = "remotes.json"
 
+var savedHostIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+
 // activeCloudAccountFile is written by the desktop beside remotes.json. It is
 // the authorization boundary for account-owned hosts; telemetry state is not,
 // because a failed handoff must never preserve access after sign-out/switch.
@@ -162,6 +164,9 @@ func resolveSavedHostTargetForAccount(name, activeAccount string) (*remoteTarget
 	if hostID == "" {
 		return nil, fmt.Errorf("saved host %q has no host ID — reconnect it in the desktop app before using --host", name)
 	}
+	if !savedHostIDPattern.MatchString(hostID) {
+		return nil, fmt.Errorf("saved host %q has an invalid host ID — reconnect it in the desktop app before using --host", name)
+	}
 	token := strings.TrimSpace(entry.CoordinationToken)
 	if token == "" {
 		return nil, fmt.Errorf("saved host %q has no agent coordination credential — connect it in the desktop app once, then retry", name)
@@ -223,14 +228,10 @@ func (c *commandContext) selectSavedHost(ctx context.Context, name string) error
 // savedHostRetryArgs preserves the destination in a copyable retry command.
 // Host IDs are stable and unambiguous even when a display label later changes.
 func (c *commandContext) savedHostRetryArgs() string {
-	if c.remote == nil || c.remote.hostID == "" {
+	if c.remote == nil || !savedHostIDPattern.MatchString(c.remote.hostID) {
 		return ""
 	}
-	return " --host " + shellQuoteArg(c.remote.hostID)
-}
-
-func shellQuoteArg(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
+	return " --host " + c.remote.hostID
 }
 
 var activeCloudUserIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)

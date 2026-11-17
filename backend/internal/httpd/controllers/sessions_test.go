@@ -70,6 +70,7 @@ type fakeSessionService struct {
 	sent                       string
 	sentAttachment             *ports.SpawnAttachment
 	sentDeliveryOptions        ports.MessageDeliveryOptions
+	sentWithOptions            bool
 	delegationInput            sessionsvc.DelegateTaskInput
 	delegationErr              error
 	sendErr                    error
@@ -513,6 +514,7 @@ func (f *fakeSessionService) SendWithOptions(_ context.Context, _ domain.Session
 	f.sent = message
 	f.sentAttachment = attachment
 	f.sentDeliveryOptions = options
+	f.sentWithOptions = true
 	return f.sendErr
 }
 
@@ -5388,6 +5390,18 @@ func TestSessionsAPI_SendCarriesCooperativeSenderWithoutHumanAuthorship(t *testi
 	}
 	if svc.sentDeliveryOptions.SenderSessionID != "ao-orchestrator" || svc.sentDeliveryOptions.AuthoredByUser {
 		t.Fatalf("options=%+v", svc.sentDeliveryOptions)
+	}
+}
+
+func TestSessionsAPI_SendCarriesRemoteAutomationWithoutLocalSender(t *testing.T) {
+	svc := newFakeSessionService()
+	srv := newSessionTestServer(t, svc)
+	body, status, _ := doRequest(t, srv, "POST", "/api/v1/sessions/ao-1/send", `{"message":"Do the next step","automationAuthored":true}`)
+	if status != http.StatusOK {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+	if !svc.sentWithOptions || svc.sentDeliveryOptions.SenderSessionID != "" || svc.sentDeliveryOptions.AuthoredByUser {
+		t.Fatalf("sentWithOptions=%v options=%+v", svc.sentWithOptions, svc.sentDeliveryOptions)
 	}
 }
 
