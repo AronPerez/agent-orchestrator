@@ -3295,6 +3295,11 @@ type IssueCoordinationTokenRequest struct {
 	Platform string `json:"platform,omitempty" description:"The requesting machine's platform."`
 }
 
+// CoordinationDeviceIDParam identifies a previously issued coordination token.
+type CoordinationDeviceIDParam struct {
+	DeviceID string `path:"deviceId" description:"The coordination token's device id."`
+}
+
 // CoordinationTokenResponse carries a host-bound, route-filtered credential.
 // The token is returned once and only its hash is persisted by the host. It can
 // prompt agents with OS authority and must be protected as full host authority.

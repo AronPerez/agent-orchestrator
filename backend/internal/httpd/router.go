@@ -211,6 +211,7 @@ func mountMobile(r chi.Router, c *controllers.MobileController) {
 	r.Post("/api/v1/mobile/keep-awake", c.KeepAwake)
 	r.Post("/api/v1/remote-host/account-token", c.IssueAccountToken)
 	r.Post("/api/v1/remote-host/coordination-token", c.IssueCoordinationToken)
+	r.Delete("/api/v1/remote-host/coordination-token/{deviceId}", c.RevokeCoordinationToken)
 	r.Post("/api/v1/remote-host/devices", c.PairDevice)
 	r.Post("/api/v1/mobile/pairing-code", c.NewPairingCode)
 	r.Post("/api/v1/mobile/require-device-credentials", c.RequireDeviceCredentials)

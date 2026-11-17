@@ -6446,6 +6446,41 @@ paths:
       summary: Issue a route-limited credential for cross-machine agent coordination
       tags:
       - mobile
+  /api/v1/remote-host/coordination-token/{deviceId}:
+    delete:
+      operationId: revokeRemoteHostCoordinationToken
+      parameters:
+      - description: The coordination token's device id.
+        in: path
+        name: deviceId
+        required: true
+        schema:
+          description: The coordination token's device id.
+          type: string
+      responses:
+        "204":
+          description: No Content
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+      summary: Revoke one route-limited cross-machine agent coordination credential
+      tags:
+      - mobile
   /api/v1/remote-host/devices:
     post:
       operationId: pairRemoteHostDevice
