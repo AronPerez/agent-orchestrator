@@ -81,26 +81,28 @@ export function sessionsAreIdle(body: unknown): boolean {
 }
 
 /** Display labels can hide another PR's running reviewer. Read all live sessions. */
-export async function sessionsAndReviewsAreIdle(body: unknown, readReviews: (sessionId: string) => Promise<unknown>, readSideChats: (sessionId: string) => Promise<unknown>): Promise<boolean> {
+export async function sessionsAndReviewsAreIdle(body: unknown, readReviews: (sessionId: string) => Promise<unknown>, readReviewerConversation: (reviewId: string) => Promise<unknown>): Promise<boolean> {
 	if (!sessionsAreIdle(body)) return false;
 	try {
-		for (const session of (body as { sessions: { id?: unknown; isTerminated?: boolean; mode?: string }[] }).sessions) {
+		for (const session of (body as { sessions: { id?: unknown; isTerminated?: boolean }[] }).sessions) {
 			if (session.isTerminated === true) continue;
 			if (typeof session.id !== "string" || !session.id) return false;
-			const result = await readReviews(session.id) as { runs?: unknown; reviewerActivityState?: string; reviewerHandleId?: string; reviewerSurface?: { reviewId?: string }; activeReviewers?: unknown } | null;
+			const result = await readReviews(session.id) as { autoReviewPending?: boolean; runs?: unknown; reviewerActivityState?: string; reviewerHandleId?: string; reviewerSurface?: { reviewId?: string }; activeReviewers?: unknown } | null;
 			if (!result || !Array.isArray(result.runs) || !result.runs.every((run: unknown) =>
 				run && typeof run === "object" && "status" in run &&
 				["complete", "delivered", "failed", "cancelled"].includes(String(run.status)))) return false;
+			if (result.autoReviewPending !== false) return false;
 			if (!Array.isArray(result.activeReviewers)) return false;
-			if ((result.reviewerActivityState !== undefined || result.reviewerHandleId || result.reviewerSurface || result.activeReviewers.length > 0) &&
-				!["idle", "exited"].includes(result.reviewerActivityState ?? "")) return false;
-			// The API only supplies the selected reviewer's activity; other live panes are unknown.
-			if (!result.activeReviewers.every((reviewer: unknown) => reviewer && typeof reviewer === "object" &&
-				"reviewId" in reviewer && typeof reviewer.reviewId === "string" && reviewer.reviewId === result.reviewerSurface?.reviewId)) return false;
-			if (session.mode === "tui") continue; // TUI sessions cannot own independent side chats.
-			const sides = await readSideChats(session.id) as { sides?: unknown } | null;
-			if (!sides || !Array.isArray(sides.sides) || !sides.sides.every((side: unknown) => side && typeof side === "object" &&
-				"hasWork" in side && side.hasWork === false && "state" in side && ["ready", "failed", "closed"].includes(String(side.state)))) return false;
+			if (result.reviewerHandleId && result.activeReviewers.length === 0) return false;
+			for (const reviewer of result.activeReviewers as { reviewId?: unknown; mode?: unknown }[]) {
+				if (!reviewer || typeof reviewer.reviewId !== "string" || !reviewer.reviewId) return false;
+				if (reviewer.mode === "chat") {
+					const live = await readReviewerConversation(reviewer.reviewId) as { mode?: string; controller?: string; turns?: unknown } | null;
+					if (!live || live.mode !== "chat" || !["ready", "stopped", "hibernated"].includes(live.controller ?? "") ||
+						!Array.isArray(live.turns) || !live.turns.every((turn: unknown) => turn && typeof turn === "object" && "state" in turn &&
+							["completed", "recovered", "interrupted", "failed", "cancelled"].includes(String(turn.state)))) return false;
+				} else if (reviewer.mode !== "tui" || reviewer.reviewId !== result.reviewerSurface?.reviewId || !["idle", "exited"].includes(result.reviewerActivityState ?? "")) return false;
+			}
 		}
 		return true;
 	} catch { return false; }

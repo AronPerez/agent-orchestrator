@@ -209,6 +209,7 @@ type TriggerResult struct {
 // SessionReviews is a worker's review state: the live reviewer handle plus its
 // recorded passes, newest first.
 type SessionReviews struct {
+	AutoReviewPending     bool
 	ReviewerHandleID      string
 	ReviewerHarness       domain.ReviewerHarness
 	ReviewerActivityState domain.ActivityState
@@ -923,7 +924,7 @@ func (e *Engine) SwitchReviewer(
 	if _, err := e.restoreReviewerLocked(ctx, workerID, worker, selected, selectedConfig); err != nil {
 		return SessionReviews{}, err
 	}
-	return e.listLocked(ctx, workerID, selected)
+	return e.listLocked(ctx, worker, selected)
 }
 
 func reviewerPaneReusable(reviewRow domain.Review, hadRunningReviewer bool) bool {
@@ -1516,10 +1517,11 @@ func (e *Engine) List(ctx stdctx.Context, workerID domain.SessionID) (SessionRev
 	if err != nil {
 		return SessionReviews{}, err
 	}
-	return e.listLocked(ctx, workerID, selectedHarness)
+	return e.listLocked(ctx, worker, selectedHarness)
 }
 
-func (e *Engine) listLocked(ctx stdctx.Context, workerID domain.SessionID, selectedHarness domain.ReviewerHarness) (SessionReviews, error) {
+func (e *Engine) listLocked(ctx stdctx.Context, worker domain.SessionRecord, selectedHarness domain.ReviewerHarness) (SessionReviews, error) {
+	workerID := worker.ID
 	runs, err := e.store.ListReviewRunsBySession(ctx, workerID)
 	if err != nil {
 		return SessionReviews{}, err
@@ -1576,7 +1578,18 @@ func (e *Engine) listLocked(ctx stdctx.Context, workerID domain.SessionID, selec
 	if err != nil {
 		return SessionReviews{}, err
 	}
+	// Include work waiting for the idle threshold, before the coordinator's next sweep.
+	pending := false
+	if worker.AutoReviewEnabled && worker.Kind == domain.KindWorker && !worker.IsTerminated && worker.Activity.State == domain.ActivityIdle {
+		for _, state := range Plan(prs, reviewRunsForHarness(runs, selectedHarness)) {
+			if state.Status == ReviewStateNeedsReview && !autoReviewHeadBlocked(runs, state.PRURL, state.TargetSHA, selectedHarness) {
+				pending = true
+				break
+			}
+		}
+	}
 	return SessionReviews{
+		AutoReviewPending:     pending,
 		ReviewerHandleID:      legacyReviewerHandle(reviewRow),
 		ReviewerHarness:       reviewerHarness,
 		ReviewerActivityState: reviewRow.ReviewerActivityState,
@@ -1592,6 +1605,9 @@ func (e *Engine) listLocked(ctx stdctx.Context, workerID domain.SessionID, selec
 func reviewerRowActive(review domain.Review, runs []domain.ReviewRun) bool {
 	if review.ID == "" || review.IsArchived {
 		return false
+	}
+	if review.InterfaceMode == domain.ReviewerInterfaceChat {
+		return true // Chat panes have no terminal handle; read their live controller separately.
 	}
 	if review.ReviewerHandleID != "" && review.ReviewerActivityState != domain.ActivityExited {
 		return true

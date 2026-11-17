@@ -297,19 +297,29 @@ const installedBuildGuard = installedBuildDisk ? new InstalledBuildGuard({
 	onReplacement: setInstalledBuildReplacementDetected,
 	isIdle: async () => {
 		const port = daemonStatus.port;
+		const generation = daemonAttachmentGeneration;
 		if (chatDraftRisks.length > 0 || !port || !await readDaemonProbe(port, "readyz")) return false;
+		// Capture waits for claim/restore and fences the daemon attachment. Even idle
+		// sides own launch-scoped drafts/transcripts that quit would discard.
+		const sideState = await sideLaunchRecovery.capture().catch(() => undefined);
+		if (!sideState || sideState.attachment.port !== port || sideState.attachment.generation !== generation ||
+			!Array.isArray(sideState.state.sides) || sideState.state.sides.length > 0 || (sideLaunchState?.sides.length ?? 0) > 0) return false;
 		// A newer host may be refused for attachment, but can still report whether
 		// its tasks are idle so a replaced desktop can safely relaunch into it.
 		const response = await fetch(`http://127.0.0.1:${port}/api/v1/sessions`, { signal: AbortSignal.timeout(5_000) });
-		return response.ok && await sessionsAndReviewsAreIdle(await response.json(), async (sessionId) => {
+		const idle = response.ok && await sessionsAndReviewsAreIdle(await response.json(), async (sessionId) => {
 			const reviews = await fetch(`http://127.0.0.1:${port}/api/v1/sessions/${encodeURIComponent(sessionId)}/reviews`, { signal: AbortSignal.timeout(5_000) });
 			if (!reviews.ok) throw new Error("Review state unavailable");
 			return reviews.json();
-		}, async (sessionId) => {
-			const sides = await fetch(`http://127.0.0.1:${port}/api/v1/sessions/${encodeURIComponent(sessionId)}/conversation/side-chats`, { signal: AbortSignal.timeout(5_000) });
-			if (!sides.ok) throw new Error("Side chat state unavailable");
-			return sides.json();
+		}, async (reviewId) => {
+			const conversation = await fetch(`http://127.0.0.1:${port}/api/v1/reviews/${encodeURIComponent(reviewId)}/conversation?limit=1`, { signal: AbortSignal.timeout(5_000) });
+			if (!conversation.ok) throw new Error("Reviewer activity unavailable");
+			return conversation.json();
 		});
+		if (!idle) return false;
+		const latestSides = await sideLaunchRecovery.capture().catch(() => undefined);
+		return !!latestSides && sideLaunchRecovery.matches(sideState.attachment) && generation === daemonAttachmentGeneration && daemonStatus.port === port &&
+			Array.isArray(latestSides.state.sides) && latestSides.state.sides.length === 0 && (sideLaunchState?.sides.length ?? 0) === 0;
 	},
 	onChange: (status) => {
 		console.info("AO: installed desktop build changed", { running: DESKTOP_BUILD_ID, installed: status?.identity, idle: status?.idle });

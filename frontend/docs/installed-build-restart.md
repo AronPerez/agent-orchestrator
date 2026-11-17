@@ -66,11 +66,21 @@ unsafe unsaved chat drafts. Stored idle activity is insufficient when status is
 `no_signal` or the runtime is unreachable. Each live session's review API must
 answer and all recorded review runs must be terminal; a display label for one
 PR cannot hide another running review. Scheduled and retrying reviews remain
-busy even without a running pass. Live reviewer activity must also be idle or
-exited. The API only exposes the selected reviewer's activity, so another live
-reviewer keeps the gate closed until its activity can be confirmed. Independent
-side chats must report no queued or running work; unavailable side-chat facts
-also keep the gate closed. The user can cancel the in-memory queue.
+busy even without a running pass. The review API derives `autoReviewPending`
+from every current PR head, the selected harness, and the engine's retry policy;
+CI or another PR's display label cannot hide this work. Every non-archived Chat
+reviewer is included even without a terminal handle. Its live conversation
+controller must be settled and its turns terminal; stored hook activity is not
+used for Chat reviewers. TUI activity must be idle or exited, and unreported
+activity for another TUI reviewer remains busy.
+
+Side-launch capture waits for recovery on the current daemon attachment. Main
+captures before and after the worker probes and rejects a changed attachment.
+Any retained side chat keeps both restart choices waiting, including a completed
+conversation or an idle side with a draft: quitting retires their launch-scoped
+state. The user must finish reading, save any text, and close those sides before
+restarting. Unavailable recovery or capture facts and locally pending side-close
+state also keep the gate closed. The user can cancel the in-memory queue.
 The normal quit path preserves agents; no harness stop/update/resume operation
 is added. No restart intent, preference or dismissal marker is persisted. A fresh
 process pins the newly installed archive and has no inherited mismatch or prompt.

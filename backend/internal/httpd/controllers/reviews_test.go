@@ -267,6 +267,9 @@ func TestReviewsListIncludesReviewStates(t *testing.T) {
 	if !strings.Contains(string(body), `"autoInjectReview":false`) {
 		t.Fatalf("body missing stored AO injection decision: %s", body)
 	}
+	if !strings.Contains(string(body), `"autoReviewPending":false`) {
+		t.Fatalf("body missing explicit automatic-review eligibility: %s", body)
+	}
 	if strings.Contains(string(body), `"items"`) || strings.Contains(string(body), `"reviewItems"`) || strings.Contains(string(body), `"reviewRuns"`) {
 		t.Fatalf("body contains deprecated review item aliases: %s", body)
 	}

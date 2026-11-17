@@ -208,7 +208,7 @@ describe("installed desktop build", () => {
 });
 
 describe("idle evidence", () => {
-	const noSideWork = async () => ({ sides: [] });
+	const noLiveReviewerWork = async () => ({ mode: "chat", controller: "ready", turns: [] });
 	const idleSession = {
 		id: "worker-1", mode: "chat", isTerminated: false, status: "idle", statusReadiness: "ready",
 		activity: { state: "idle", lastActivityAt: "2026-11-16T20:00:00Z" },
@@ -217,78 +217,141 @@ describe("idle evidence", () => {
 		expect(sessionsAreIdle({ sessions: [{ ...idleSession, ...facts }] })).toBe(false);
 	});
 	it.each(["Approved", "Mergeable"])("checks all running review passes even when the display says %s", async (displayStatus) => {
-		const readReviews = vi.fn(async (_sessionId: string) => ({ runs: [{ status: "complete", prUrl: "pr-1" }, { status: "running", prUrl: "pr-2" }] }));
-		expect(await sessionsAndReviewsAreIdle({ sessions: [{ ...idleSession, displayStatus, status: displayStatus === "Approved" ? "approved" : "mergeable" }] }, readReviews, noSideWork)).toBe(false);
+		const readReviews = vi.fn(async (_sessionId: string) => ({ autoReviewPending: false, runs: [{ status: "complete", prUrl: "pr-1" }, { status: "running", prUrl: "pr-2" }] }));
+		expect(await sessionsAndReviewsAreIdle({ sessions: [{ ...idleSession, displayStatus, status: displayStatus === "Approved" ? "approved" : "mergeable" }] }, readReviews, noLiveReviewerWork)).toBe(false);
 		expect(readReviews).toHaveBeenCalledWith("worker-1");
 	});
 	it.each([
 		{ status: "pr_open", displayStatus: "Review scheduled", runs: [] },
 		{ status: "review_pending", displayStatus: "Retrying review", runs: [{ status: "failed" }] },
 	])("keeps pending reviews busy with terminal or absent runs: $displayStatus", async ({ status, displayStatus, runs }) => {
-		expect(await sessionsAndReviewsAreIdle({ sessions: [{ ...idleSession, status, displayStatus }] }, async () => ({ runs, activeReviewers: [] }), noSideWork)).toBe(false);
+		expect(await sessionsAndReviewsAreIdle({ sessions: [{ ...idleSession, status, displayStatus }] }, async () => ({ autoReviewPending: false, runs, activeReviewers: [] }), noLiveReviewerWork)).toBe(false);
 	});
 	it.each(["active", "waiting_input", "blocked", "unknown", undefined])("keeps terminal passes busy with reviewer activity %s", async (reviewerActivityState) => {
 		expect(await sessionsAndReviewsAreIdle({ sessions: [idleSession] }, async () => ({
-			runs: [{ status: "delivered" }], reviewerHandleId: "reviewer-1", reviewerActivityState, activeReviewers: [],
-		}), noSideWork)).toBe(false);
+			autoReviewPending: false, runs: [{ status: "delivered" }], reviewerHandleId: "reviewer-1", reviewerActivityState,
+			reviewerSurface: { reviewId: "review-1", mode: "tui" }, activeReviewers: [{ reviewId: "review-1", mode: "tui" }],
+		}), noLiveReviewerWork)).toBe(false);
 	});
 	it("does not infer another live reviewer's activity from the selected idle reviewer", async () => {
 		expect(await sessionsAndReviewsAreIdle({ sessions: [idleSession] }, async () => ({
-			runs: [{ status: "complete" }], reviewerHandleId: "pane-1", reviewerActivityState: "idle",
-			reviewerSurface: { reviewId: "reviewer-1", handleId: "pane-1" },
-			activeReviewers: [{ reviewId: "reviewer-1", handleId: "pane-1" }, { reviewId: "reviewer-2", handleId: "pane-2" }],
-		}), noSideWork)).toBe(false);
+			autoReviewPending: false, runs: [{ status: "complete" }], reviewerHandleId: "pane-1", reviewerActivityState: "idle",
+			reviewerSurface: { reviewId: "reviewer-1", mode: "tui", handleId: "pane-1" },
+			activeReviewers: [{ reviewId: "reviewer-1", mode: "tui", handleId: "pane-1" }, { reviewId: "reviewer-2", mode: "tui", handleId: "pane-2" }],
+		}), noLiveReviewerWork)).toBe(false);
 	});
 	it.each(["idle", "exited"])("accepts terminal passes with confirmed %s reviewer activity", async (reviewerActivityState) => {
 		expect(await sessionsAndReviewsAreIdle({ sessions: [idleSession] }, async () => ({
-			runs: [{ status: "complete" }, { status: "delivered" }], reviewerHandleId: "pane-1", reviewerActivityState,
-			reviewerSurface: { reviewId: "reviewer-1", handleId: "pane-1" },
-			activeReviewers: [{ reviewId: "reviewer-1", handleId: "pane-1" }],
-		}), noSideWork)).toBe(true);
-	});
-	it.each([
-		{ sides: [{ state: "ready", hasWork: true }] }, // Queued or running turns.
-		{ sides: [{ state: "failed", hasWork: true }] }, // Failed provider with a queued turn.
-		{ sides: [{ state: "opening", hasWork: false }] },
-		{ sides: [{ state: "recovering", hasWork: false }] },
-		{ sides: [{}] }, {}, null,
-	])("checks independent side-chat work in the main idle probe: %j", async (sides) => {
-		const main = fs.readFileSync(path.join(import.meta.dirname, "../main.ts"), "utf8");
-		const start = main.indexOf("\tisIdle: async () => {");
-		const fetch = vi.fn(async (url: string) => ({ ok: true, json: async () =>
-			url.endsWith("/sessions") ? { sessions: [idleSession] } : url.endsWith("/reviews") ? { runs: [], activeReviewers: [] } : sides }));
-		const { isIdle } = runInNewContext(`({${main.slice(start, main.indexOf("\n\tonChange:", start))}})`, {
-			daemonStatus: { port: 3001 }, chatDraftRisks: [], readDaemonProbe: async () => true,
-			fetch, AbortSignal, sessionsAndReviewsAreIdle,
-		});
-		expect(await isIdle()).toBe(false);
-		expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/conversation/side-chats"), expect.anything());
+			autoReviewPending: false, runs: [{ status: "complete" }, { status: "delivered" }], reviewerHandleId: "pane-1", reviewerActivityState,
+			reviewerSurface: { reviewId: "reviewer-1", mode: "tui", handleId: "pane-1" },
+			activeReviewers: [{ reviewId: "reviewer-1", mode: "tui", handleId: "pane-1" }],
+		}), noLiveReviewerWork)).toBe(true);
 	});
 	it("requires available review facts for every live session and ignores terminated sessions", async () => {
 		const body = { sessions: [idleSession, { ...idleSession, id: "worker-2" }, { isTerminated: true }] };
-		const readReviews = vi.fn<(_sessionId: string) => Promise<unknown>>(async () => ({ runs: [], activeReviewers: [] }));
-		const readSides = vi.fn(async (_sessionId: string) => ({ sides: [] }));
-		expect(await sessionsAndReviewsAreIdle(body, readReviews, readSides)).toBe(true);
+		const readReviews = vi.fn<(_sessionId: string) => Promise<unknown>>(async () => ({ autoReviewPending: false, runs: [], activeReviewers: [] }));
+		const readLiveReviewers = vi.fn(async (_reviewId: string) => ({ mode: "chat", controller: "ready", turns: [] }));
+		expect(await sessionsAndReviewsAreIdle(body, readReviews, readLiveReviewers)).toBe(true);
 		expect(readReviews.mock.calls.map(([id]) => id)).toEqual(["worker-1", "worker-2"]);
-		expect(readSides.mock.calls.map(([id]) => id)).toEqual(["worker-1", "worker-2"]);
+		expect(readLiveReviewers).not.toHaveBeenCalled();
 		readReviews.mockRejectedValueOnce(new Error("unavailable"));
-		expect(await sessionsAndReviewsAreIdle(body, readReviews, readSides)).toBe(false);
+		expect(await sessionsAndReviewsAreIdle(body, readReviews, readLiveReviewers)).toBe(false);
 		readReviews.mockResolvedValueOnce({});
-		expect(await sessionsAndReviewsAreIdle(body, readReviews, readSides)).toBe(false);
-		readReviews.mockResolvedValueOnce({ runs: [] });
-		expect(await sessionsAndReviewsAreIdle(body, readReviews, readSides)).toBe(false);
-		readSides.mockRejectedValueOnce(new Error("side chats unavailable"));
-		expect(await sessionsAndReviewsAreIdle(body, readReviews, readSides)).toBe(false);
+		expect(await sessionsAndReviewsAreIdle(body, readReviews, readLiveReviewers)).toBe(false);
+		readReviews.mockResolvedValueOnce({ autoReviewPending: false, runs: [] });
+		expect(await sessionsAndReviewsAreIdle(body, readReviews, readLiveReviewers)).toBe(false);
 	});
-	it("accepts side chats only with confirmed absence of queued or running work", async () => {
-		expect(await sessionsAndReviewsAreIdle({ sessions: [idleSession] }, async () => ({ runs: [], activeReviewers: [] }), async () => ({
-			sides: [{ state: "ready", hasWork: false }, { state: "failed", hasWork: false }],
-		}))).toBe(true);
+	it("does not read Chat controllers when there are no live Chat reviewers", async () => {
+		const readLiveReviewers = vi.fn(async () => { throw new Error("not a chat session"); });
+		expect(await sessionsAndReviewsAreIdle({ sessions: [{ ...idleSession, mode: "tui" } satisfies Pick<components["schemas"]["ControllersSessionView"], "mode">] }, async () => ({ autoReviewPending: false, runs: [], activeReviewers: [] }), readLiveReviewers)).toBe(true);
+		expect(readLiveReviewers).not.toHaveBeenCalled();
 	});
-	it("does not query the chat-only side endpoint for confirmed TUI sessions", async () => {
-		const readSides = vi.fn(async () => { throw new Error("not a chat session"); });
-		expect(await sessionsAndReviewsAreIdle({ sessions: [{ ...idleSession, mode: "tui" } satisfies Pick<components["schemas"]["ControllersSessionView"], "mode">] }, async () => ({ runs: [], activeReviewers: [] }), readSides)).toBe(true);
-		expect(readSides).not.toHaveBeenCalled();
+	it.each([
+		{ stored: "active", controller: "ready", turn: "completed", want: true },
+		{ stored: "idle", controller: "busy", turn: "running", want: false },
+	])("uses live Chat reviewer state after a pass or during follow-up: %j", async ({ stored, controller, turn, want }) => {
+		const surface = { reviewId: "chat-reviewer", mode: "chat", harness: "codex" };
+		const readLive = vi.fn(async () => ({ mode: "chat", controller, turns: [{ state: turn }] }));
+		expect(await sessionsAndReviewsAreIdle({ sessions: [idleSession] }, async () => ({
+			autoReviewPending: false, runs: [{ status: "complete" }], reviewerActivityState: stored,
+			reviewerSurface: surface, activeReviewers: [surface],
+		}), readLive)).toBe(want);
+		expect(readLive).toHaveBeenCalledWith("chat-reviewer");
+	});
+	it.each([
+		{ status: "ci_failed", displayStatus: "CI failing" },
+		{ status: "approved", displayStatus: "Approved" },
+		{ status: "mergeable", displayStatus: "Mergeable" },
+	])("keeps per-PR pending work busy despite the board label: $displayStatus", async (facts) => {
+		expect(await sessionsAndReviewsAreIdle({ sessions: [{ ...idleSession, ...facts, autoReviewEnabled: true }] }, async () => ({
+			autoReviewPending: true, runs: [], activeReviewers: [],
+			reviews: [{ status: "up_to_date" }, { status: "needs_review" }],
+		}), noLiveReviewerWork)).toBe(false);
+	});
+	it.each(["ready", "busy"])("reads every Chat reviewer independently when another controller is %s", async (controller) => {
+		const readLive = vi.fn(async (id: string) => ({ mode: "chat", controller: id === "other" ? controller : "ready", turns: [] }));
+		expect(await sessionsAndReviewsAreIdle({ sessions: [idleSession] }, async () => ({ autoReviewPending: false, runs: [],
+			activeReviewers: [{ reviewId: "selected", mode: "chat" }, { reviewId: "other", mode: "chat" }],
+		}), readLive)).toBe(controller === "ready");
+		expect(readLive.mock.calls.map(([id]) => id)).toEqual(["selected", "other"]);
+	});
+	it("keeps unavailable live Chat reviewer activity busy", async () => {
+		expect(await sessionsAndReviewsAreIdle({ sessions: [idleSession] }, async () => ({ autoReviewPending: false, runs: [], activeReviewers: [{ reviewId: "chat", mode: "chat" }] }), async () => { throw new Error("controller unavailable"); })).toBe(false);
+	});
+	function mainIdleProbe(sides: unknown[] = []) {
+		const main = fs.readFileSync(path.join(import.meta.dirname, "../main.ts"), "utf8");
+		const start = main.indexOf("\tisIdle: async () => {");
+		const attachment = { generation: 1, pid: 11, port: 3001, appRunId: "launch" };
+		const ensureReady = vi.fn<() => Promise<void>>(async () => undefined);
+		const capture = vi.fn(async () => { await ensureReady(); return { attachment, state: { appRunId: "launch", sides } }; });
+		const fetch = vi.fn(async (url: string) => ({ ok: true, json: async () => url.endsWith("/sessions")
+			? { sessions: [idleSession] } : url.endsWith("/reviews") ? { autoReviewPending: false, runs: [], activeReviewers: [] }
+			: { sides: sides.map((record: any) => record.side ?? record) } }));
+		const context = { daemonStatus: { port: 3001 }, daemonAttachmentGeneration: 1, appRunId: "launch", chatDraftRisks: [], readDaemonProbe: async () => true,
+			fetch, AbortSignal, sessionsAndReviewsAreIdle, sideLaunchState: undefined as { sides: unknown[] } | undefined,
+			sideLaunchRecovery: { ensureReady, capture, matches: (candidate: unknown) => candidate === attachment },
+		};
+		const { isIdle } = runInNewContext(`({${main.slice(start, main.indexOf("\n\tonChange:", start))}})`, context);
+		return { isIdle: isIdle as () => Promise<boolean>, context, attachment, ensureReady, capture, fetch };
+	}
+	it.each(["unsent draft", ""])("keeps launch-scoped idle side conversations safe, draft=%j", async (draft) => {
+		const h = mainIdleProbe([{ side: { id: "side-1", state: "ready", hasWork: false }, draft, messages: [{ text: "completed response" }] }]);
+		expect(await h.isIdle()).toBe(false);
+	});
+	it("waits for side recovery before reading an apparently empty daemon", async () => {
+		const h = mainIdleProbe();
+		let finish!: () => void;
+		h.ensureReady.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve; }));
+		const probing = h.isIdle();
+		await vi.waitFor(() => expect(h.ensureReady).toHaveBeenCalled());
+		expect(h.fetch).not.toHaveBeenCalled();
+		finish();
+		expect(await probing).toBe(true);
+	});
+	it("rejects empty side state from a changed daemon attachment", async () => {
+		const h = mainIdleProbe();
+		h.capture.mockImplementationOnce(async () => {
+			h.context.daemonAttachmentGeneration++;
+			return { attachment: { generation: 1, pid: 11, port: 3001, appRunId: "launch" }, state: { appRunId: "launch", sides: [] } };
+		});
+		expect(await h.isIdle()).toBe(false);
+	});
+	it("keeps unavailable side recovery busy", async () => {
+		const h = mainIdleProbe();
+		h.capture.mockRejectedValueOnce(new Error("restore unavailable"));
+		expect(await h.isIdle()).toBe(false);
+		expect(h.fetch).not.toHaveBeenCalled();
+	});
+	it("rechecks side state after asynchronous worker probes", async () => {
+		const h = mainIdleProbe();
+		h.capture.mockResolvedValueOnce({ attachment: h.attachment, state: { appRunId: "launch", sides: [] } })
+			.mockResolvedValueOnce({ attachment: h.attachment, state: { appRunId: "launch", sides: [{ side: { id: "new-side" } }] } });
+		expect(await h.isIdle()).toBe(false);
+	});
+	it("retains locally owned side-close state even if the daemon list is empty", async () => {
+		const h = mainIdleProbe();
+		h.context.sideLaunchState = { sides: [{ side: { id: "pending-close" }, cleanupOnly: true }] };
+		expect(await h.isIdle()).toBe(false);
 	});
 	it.each(["active", "waiting_input", "blocked", "unknown"])("waits for %s sessions", (state) => {
 		expect(sessionsAreIdle({ sessions: [{ activity: { state }, statusReadiness: "ready" }] })).toBe(false);

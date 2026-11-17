@@ -7095,6 +7095,8 @@ export interface components {
         };
         ListReviewsResponse: {
             activeReviewers: components["schemas"]["DomainReviewerSurface"][];
+            /** @description Automatic review work remains eligible on at least one current PR head, including pending retries and the idle threshold. */
+            autoReviewPending: boolean;
             /** @enum {string} */
             reviewerActivityState?: "active" | "idle" | "waiting_input" | "blocked" | "exited";
             reviewerHandleId: string;

@@ -2994,6 +2994,60 @@ func TestListReturnsHandleAndRuns(t *testing.T) {
 	}
 }
 
+func TestListRestartAutoReviewPending(t *testing.T) {
+	prURL := "https://github.com/o/r/pull/1"
+	failed := domain.ReviewRun{PRURL: prURL, TargetSHA: "sha1", Harness: domain.ReviewerCodex, Status: domain.ReviewRunFailed, TriggerSource: domain.ReviewTriggerAuto}
+	approved := domain.ReviewRun{PRURL: prURL, TargetSHA: "sha1", Harness: domain.ReviewerCodex, Status: domain.ReviewRunComplete, Verdict: domain.VerdictApproved}
+	otherApproval := approved
+	otherApproval.Harness = domain.ReviewerClaudeCode
+	for _, tc := range []struct {
+		name     string
+		runs     []domain.ReviewRun
+		secondPR bool
+		want     bool
+	}{
+		{name: "scheduled without runs", want: true},
+		{name: "retry remains eligible", runs: []domain.ReviewRun{failed}, want: true},
+		{name: "retry limit exhausted", runs: []domain.ReviewRun{failed, failed, failed}},
+		{name: "approved head", runs: []domain.ReviewRun{approved}},
+		{name: "another harness approval cannot hide pending work", runs: []domain.ReviewRun{otherApproval}, want: true},
+		{name: "cancelled head is not retried", runs: []domain.ReviewRun{{PRURL: prURL, TargetSHA: "sha1", Harness: domain.ReviewerCodex, Status: domain.ReviewRunCancelled}}},
+		{name: "approved PR cannot hide another pending PR", runs: []domain.ReviewRun{approved}, secondPR: true, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			worker := liveWorker()
+			worker.ReviewerHarness = domain.ReviewerCodex
+			prs := prAt("sha1")
+			if tc.secondPR {
+				prs.prs = append(prs.prs, domain.PullRequest{URL: "https://github.com/o/r/pull/2", Number: 2, HeadSHA: "sha2"})
+			}
+			eng := newEngineForTest(&fakeStore{runs: tc.runs}, fakeSessions{rec: worker, ok: true}, prs, fakeProjects{}, &fakeLauncher{})
+			got, err := eng.List(context.Background(), worker.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.AutoReviewPending != tc.want {
+				t.Fatalf("pending = %v, want %v", got.AutoReviewPending, tc.want)
+			}
+		})
+	}
+}
+
+func TestListRestartIncludesIdleChatReviewersWithoutTerminalHandles(t *testing.T) {
+	selected := domain.Review{ID: "chat-codex", SessionID: "mer-1", Harness: domain.ReviewerCodex, InterfaceMode: domain.ReviewerInterfaceChat, ReviewerActivityState: domain.ActivityActive}
+	other := domain.Review{ID: "chat-claude", SessionID: "mer-1", Harness: domain.ReviewerClaudeCode, InterfaceMode: domain.ReviewerInterfaceChat, ReviewerActivityState: domain.ActivityIdle}
+	worker := liveWorker()
+	worker.ReviewerHarness = domain.ReviewerCodex
+	eng := newEngineForTest(&fakeStore{review: &selected, reviews: map[domain.ReviewerHarness]domain.Review{domain.ReviewerCodex: selected, domain.ReviewerClaudeCode: other}}, fakeSessions{rec: worker, ok: true}, prAt("sha1"), fakeProjects{}, &fakeLauncher{})
+	got, err := eng.List(context.Background(), worker.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.ActiveReviewers) != 2 {
+		t.Fatalf("active reviewers = %+v, want both Chat surfaces", got.ActiveReviewers)
+	}
+}
+
 func TestListMarksRunningReviewFailedWhenReviewerExited(t *testing.T) {
 	store := &fakeStore{
 		review: &domain.Review{ID: "rev-1", SessionID: "mer-1", Harness: domain.ReviewerAider, ReviewerHandleID: "review-mer-1", ReviewerActivityState: domain.ActivityActive},

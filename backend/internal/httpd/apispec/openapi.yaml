@@ -20460,6 +20460,10 @@ components:
           items:
             $ref: '#/components/schemas/DomainReviewerSurface'
           type: array
+        autoReviewPending:
+          description: Automatic review work remains eligible on at least one current
+            PR head, including pending retries and the idle threshold.
+          type: boolean
         reviewerActivityState:
           enum:
           - active
@@ -20483,6 +20487,7 @@ components:
             $ref: '#/components/schemas/ReviewRun'
           type: array
       required:
+      - autoReviewPending
       - reviewerHandleId
       - reviews
       - runs

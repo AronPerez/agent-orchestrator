@@ -20,6 +20,7 @@ import (
 // reviewerHandleId is the live reviewer pane's runtime handle, for the UI to
 // attach its terminal over /mux (empty when no reviewer has run).
 type ListReviewsResponse struct {
+	AutoReviewPending     bool                       `json:"autoReviewPending" description:"Automatic review work remains eligible on at least one current PR head, including pending retries and the idle threshold."`
 	ReviewerHandleID      string                     `json:"reviewerHandleId"`
 	ReviewerHarness       domain.ReviewerHarness     `json:"reviewerHarness,omitempty"`
 	ReviewerActivityState string                     `json:"reviewerActivityState,omitempty" enum:"active,idle,waiting_input,blocked,exited"`
@@ -365,6 +366,7 @@ func reviewsResponse(res reviewcore.SessionReviews, reviews []reviewcore.PRRevie
 		runs = []domain.ReviewRun{}
 	}
 	return ListReviewsResponse{
+		AutoReviewPending:     res.AutoReviewPending,
 		ReviewerHandleID:      res.ReviewerHandleID,
 		ReviewerHarness:       res.ReviewerHarness,
 		ReviewerActivityState: string(res.ReviewerActivityState),
