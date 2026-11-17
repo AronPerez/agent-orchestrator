@@ -5,6 +5,7 @@ import { apiErrorException } from "../lib/api-error-exception";
 import { clientForSessionHost } from "../lib/host-clients";
 import {
 	projectOverlapsQueryKey,
+	refreshProjectOverlaps,
 	subscribeProjectOverlapChanges,
 } from "../lib/project-overlap-events";
 
@@ -83,7 +84,7 @@ export function useProjectOverlaps(
 
 	useEffect(() => {
 		if (!enabled || !projectId || fingerprint === undefined) return;
-		void queryClient.invalidateQueries({ queryKey: projectOverlapsQueryKey(projectId, options.hostId) });
+		refreshProjectOverlaps(queryClient, projectId, options.hostId);
 		if (liveSessionCount < 2) return;
 		return subscribeProjectOverlapChanges(projectId, fingerprint, queryClient, options.hostId);
 	}, [enabled, fingerprint, liveSessionCount, options.hostId, projectId, queryClient]);
