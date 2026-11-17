@@ -1,0 +1,293 @@
+package domain
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/url"
+	"strings"
+	"time"
+	"unicode/utf8"
+)
+
+const (
+	MaxDecisionTitle       = 120
+	MaxDecisionContext     = 1000
+	MinDecisionOptions     = 2
+	MaxDecisionOptions     = 4
+	MaxDecisionOptionLabel = 60
+	MaxDecisionConsequence = 200
+	MaxDecisionLinks       = 5
+	MaxDecisionReference   = 64
+	MaxDecisionNote        = 1000
+	MaxDecisionOutcome     = 300
+)
+
+// DecisionEntryKind identifies one fact appended to the decision ledger.
+type DecisionEntryKind string
+
+const (
+	DecisionKindRaised    DecisionEntryKind = "raised"
+	DecisionKindAnswered  DecisionEntryKind = "answered"
+	DecisionKindDismissed DecisionEntryKind = "dismissed"
+	DecisionKindDelivered DecisionEntryKind = "delivered"
+	DecisionKindOutcome   DecisionEntryKind = "outcome"
+	DecisionKindWithdrawn DecisionEntryKind = "withdrawn"
+	DecisionKindRetired   DecisionEntryKind = "retired"
+)
+
+// DecisionAuthorKind identifies who wrote a ledger entry.
+type DecisionAuthorKind string
+
+const (
+	DecisionAuthorPerson  DecisionAuthorKind = "person"
+	DecisionAuthorSession DecisionAuthorKind = "session"
+	DecisionAuthorSystem  DecisionAuthorKind = "system"
+)
+
+// DecisionStamp orders ledger entries across machines.
+type DecisionStamp struct {
+	WallMS  int64 `json:"wallMs"`
+	Counter int64 `json:"counter"`
+}
+
+// Next is the stamp for an entry written at nowMS on a machine whose newest
+// stored stamp is s. It is always greater than s.
+func (s DecisionStamp) Next(nowMS int64) DecisionStamp {
+	if nowMS > s.WallMS {
+		return DecisionStamp{WallMS: nowMS}
+	}
+	return DecisionStamp{WallMS: s.WallMS, Counter: s.Counter + 1}
+}
+
+// DecisionEntry is one immutable fact in the decision ledger.
+type DecisionEntry struct {
+	ID            string
+	Origin        string
+	OriginSeq     int64
+	Stamp         DecisionStamp
+	CallID        string
+	Kind          DecisionEntryKind
+	Payload       json.RawMessage
+	WrittenAt     time.Time
+	AuthorKind    DecisionAuthorKind
+	AuthorSurface RequestSurface
+	AuthorSession SessionID
+}
+
+// CompareDecisionEntries orders by stamp, origin, then entry id.
+func CompareDecisionEntries(a, b DecisionEntry) int {
+	if a.Stamp.WallMS != b.Stamp.WallMS {
+		if a.Stamp.WallMS < b.Stamp.WallMS {
+			return -1
+		}
+		return 1
+	}
+	if a.Stamp.Counter != b.Stamp.Counter {
+		if a.Stamp.Counter < b.Stamp.Counter {
+			return -1
+		}
+		return 1
+	}
+	if a.Origin != b.Origin {
+		if a.Origin < b.Origin {
+			return -1
+		}
+		return 1
+	}
+	if a.ID < b.ID {
+		return -1
+	}
+	if a.ID > b.ID {
+		return 1
+	}
+	return 0
+}
+
+type DecisionOption struct {
+	Label       string `json:"label"`
+	Consequence string `json:"consequence"`
+	Recommended bool   `json:"recommended,omitempty"`
+}
+
+type DecisionLink struct {
+	Label string `json:"label"`
+	URL   string `json:"url"`
+}
+
+type DecisionPageRef struct {
+	Fingerprint string `json:"fingerprint"`
+	Size        int64  `json:"size"`
+}
+
+type DecisionRaisedPayload struct {
+	Title            string           `json:"title"`
+	Context          string           `json:"context"`
+	Options          []DecisionOption `json:"options"`
+	Links            []DecisionLink   `json:"links,omitempty"`
+	Reference        string           `json:"reference,omitempty"`
+	Page             *DecisionPageRef `json:"page,omitempty"`
+	ProjectID        ProjectID        `json:"projectId,omitempty"`
+	ProjectName      string           `json:"projectName,omitempty"`
+	StreamSessionID  SessionID        `json:"streamSessionId,omitempty"`
+	StreamName       string           `json:"streamName,omitempty"`
+	MachineLabel     string           `json:"machineLabel"`
+	OwnerSessionID   SessionID        `json:"ownerSessionId"`
+	OwnerSessionName string           `json:"ownerSessionName"`
+}
+
+const (
+	DecisionChoiceOption = "option"
+	DecisionChoiceOther  = "other"
+)
+
+type DecisionAnsweredPayload struct {
+	Choice string `json:"choice"`
+	Option int    `json:"option,omitempty"`
+	Note   string `json:"note,omitempty"`
+}
+
+type DecisionDismissedPayload struct {
+	Note string `json:"note,omitempty"`
+}
+
+const (
+	DecisionDeliveredSent      = "sent"
+	DecisionDeliveredNoSession = "no_session"
+)
+
+type DecisionDeliveredPayload struct {
+	ForEntry    string    `json:"forEntry"`
+	Status      string    `json:"status"`
+	SessionID   SessionID `json:"sessionId,omitempty"`
+	SessionName string    `json:"sessionName,omitempty"`
+	Fallback    bool      `json:"fallback,omitempty"`
+}
+
+type DecisionOutcomePayload struct {
+	Text string `json:"text"`
+	Link string `json:"link,omitempty"`
+}
+
+type DecisionRetiredPayload struct {
+	Retired bool `json:"retired"`
+}
+
+// DecisionRuleError names the first decision rule a payload broke.
+type DecisionRuleError struct {
+	Rule    string
+	Message string
+}
+
+func (e *DecisionRuleError) Error() string { return e.Message }
+
+func ValidateDecisionRaise(p DecisionRaisedPayload) error {
+	title := strings.TrimSpace(p.Title)
+	if title == "" {
+		return decisionRule("title_required", "A call needs a title: the question itself, in one line.")
+	}
+	if strings.ContainsAny(title, "\r\n") {
+		return decisionRule("title_one_line", "The title must be one line.")
+	}
+	if n := utf8.RuneCountInString(title); n > MaxDecisionTitle {
+		return decisionRule("title_too_long", fmt.Sprintf("The title is %d characters; the limit is 120.", n))
+	}
+
+	context := strings.TrimSpace(p.Context)
+	if context == "" {
+		return decisionRule("context_required", "A call needs context: what the person needs to know to choose.")
+	}
+	if n := utf8.RuneCountInString(context); n > MaxDecisionContext {
+		return decisionRule("context_too_long", fmt.Sprintf("The context is %d characters; the limit is 1000.", n))
+	}
+	if len(p.Options) < MinDecisionOptions || len(p.Options) > MaxDecisionOptions {
+		return decisionRule("options_count", fmt.Sprintf("A call needs two to four options; this one has %d.", len(p.Options)))
+	}
+
+	recommended := 0
+	for i, option := range p.Options {
+		position := i + 1
+		label := strings.TrimSpace(option.Label)
+		if label == "" {
+			return decisionRule("option_label_required", fmt.Sprintf("Option %d has no label.", position))
+		}
+		if n := utf8.RuneCountInString(label); n > MaxDecisionOptionLabel {
+			return decisionRule("option_label_too_long", fmt.Sprintf("Option %d's label is %d characters; the limit is 60.", position, n))
+		}
+		consequence := strings.TrimSpace(option.Consequence)
+		if consequence == "" {
+			return decisionRule("option_consequence_required", fmt.Sprintf("Option %d does not say what it leads to.", position))
+		}
+		if n := utf8.RuneCountInString(consequence); n > MaxDecisionConsequence {
+			return decisionRule("option_consequence_too_long", fmt.Sprintf("Option %d's consequence is %d characters; the limit is 200.", position, n))
+		}
+		if option.Recommended {
+			recommended++
+		}
+	}
+	if recommended != 1 {
+		return decisionRule("recommended_count", fmt.Sprintf("Mark exactly one option as recommended; this call marks %d.", recommended))
+	}
+	if len(p.Links) > MaxDecisionLinks {
+		return decisionRule("links_count", fmt.Sprintf("A call can carry at most five links; this one has %d.", len(p.Links)))
+	}
+	for i, link := range p.Links {
+		if strings.TrimSpace(link.Label) == "" || !validDecisionURL(link.URL) {
+			return decisionRule("link_invalid", fmt.Sprintf("Link %d needs a label and an http or https URL.", i+1))
+		}
+	}
+	if n := utf8.RuneCountInString(strings.TrimSpace(p.Reference)); n > MaxDecisionReference {
+		return decisionRule("reference_too_long", fmt.Sprintf("The reference is %d characters; the limit is 64.", n))
+	}
+	return nil
+}
+
+func ValidateDecisionAnswer(optionCount int, p DecisionAnsweredPayload) error {
+	if p.Choice != DecisionChoiceOption && p.Choice != DecisionChoiceOther {
+		return decisionRule("choice_invalid", "Choose one of the call's options, or \"something else\".")
+	}
+	if p.Choice == DecisionChoiceOption && (p.Option < 1 || p.Option > optionCount) {
+		return decisionRule("option_range", fmt.Sprintf("This call has %d options; %d is not one of them.", optionCount, p.Option))
+	}
+	if p.Choice == DecisionChoiceOther && strings.TrimSpace(p.Note) == "" {
+		return decisionRule("note_required", "\"Something else\" needs a note that says what to do.")
+	}
+	return ValidateDecisionNote(p.Note)
+}
+
+func ValidateDecisionNote(note string) error {
+	if n := utf8.RuneCountInString(strings.TrimSpace(note)); n > MaxDecisionNote {
+		return decisionRule("note_too_long", fmt.Sprintf("The note is %d characters; the limit is 1000.", n))
+	}
+	return nil
+}
+
+func ValidateDecisionOutcome(p DecisionOutcomePayload) error {
+	text := strings.TrimSpace(p.Text)
+	if text == "" {
+		return decisionRule("outcome_required", "Say what happened, in one line.")
+	}
+	if strings.ContainsAny(text, "\r\n") {
+		return decisionRule("outcome_one_line", "The outcome must be one line.")
+	}
+	if n := utf8.RuneCountInString(text); n > MaxDecisionOutcome {
+		return decisionRule("outcome_too_long", fmt.Sprintf("The outcome is %d characters; the limit is 300.", n))
+	}
+	if p.Link != "" && !validDecisionURL(p.Link) {
+		return decisionRule("outcome_link_invalid", "The outcome link must be an http or https URL.")
+	}
+	return nil
+}
+
+// DecisionCallURL is the in-app link for a decision call.
+func DecisionCallURL(callID string) string {
+	return "ao://decisions/" + url.PathEscape(callID)
+}
+
+func decisionRule(rule, message string) error {
+	return &DecisionRuleError{Rule: rule, Message: message}
+}
+
+func validDecisionURL(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+}
