@@ -188,7 +188,8 @@ export const aoBridge: AoBridge =
 			onStatus: () => () => undefined,
 		},
 		agentLogin: { request: async () => null },
-		sideChats: import.meta.env.VITE_NO_ELECTRON === "1" ? createWebSideCloseBridge() : {
+		sideChats: import.meta.env.VITE_NO_ELECTRON === "1" ? { ...createWebSideCloseBridge(), discardRetained: async () => { throw new Error("The desktop app is required to discard retained side chats."); } } : {
+			discardRetained: async () => { throw new Error("Desktop side chat bridge is unavailable. Reload the desktop app."); },
 			protocolVersion: SIDE_CLOSE_PROTOCOL_VERSION,
 			mode: "desktop",
 			capture: async () => { throw new Error("Desktop side chat bridge is unavailable. Reload the desktop app."); },

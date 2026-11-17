@@ -933,7 +933,7 @@ export function SessionView({ sessionId, cloudOrgId, projectId, hostId }: Sessio
 				params: { path: { sessionId } },
 			});
 			if (error) throw apiErrorException(error, "Unable to load reviews");
-			return data ?? ({ reviewerHandleId: "", reviews: [], runs: [], activeReviewers: [] } satisfies ReviewsResponse);
+			return data ?? ({ chatReviewerIds: [], autoReviewPending: false, reviewerHandleId: "", reviews: [], runs: [], activeReviewers: [] } satisfies ReviewsResponse);
 		},
 	});
 	const reviewerSwitchPending = useIsMutating({

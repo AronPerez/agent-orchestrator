@@ -10,6 +10,7 @@ import { useUiStore } from "../stores/ui-store";
 import { cn } from "../lib/utils";
 import { Button } from "./ui/button";
 import { DesktopReleaseNotes } from "./DesktopReleaseNotes";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { displayableUpdateError } from "../../shared/update-error-message";
 import { localizedUpdateError } from "../lib/update-error-copy";
 import type { InstalledBuildRestart } from "../../main/installed-build";
@@ -54,6 +55,8 @@ function RestartToUpdateDialogBody() {
 	const [pending, setPending] = useState(false);
 	const [targetChanged, setTargetChanged] = useState(false);
 	const [failureDetail, setFailureDetail] = useState<string | null>(null);
+	const [discardSides, setDiscardSides] = useState<{ id: string; label: string }[]>();
+	const [discardFailure, setDiscardFailure] = useState<string>();
 	const installing = useRef(false);
 	const installStartedStatus = useRef(status);
 	const mounted = useRef(true);
@@ -167,7 +170,24 @@ function RestartToUpdateDialogBody() {
 		}
 	};
 
+	const discardRetainedSides = async () => {
+		if (installing.current || !discardSides?.length) return;
+		installing.current = true;
+		setPending(true);
+		setDiscardFailure(undefined);
+		try {
+			await aoBridge.sideChats.discardRetained(discardSides.map(side => side.id));
+			if (mounted.current) setDiscardSides(undefined);
+		} catch (error) {
+			if (mounted.current) setDiscardFailure(error instanceof Error ? error.message : String(error));
+		} finally {
+			installing.current = false;
+			if (mounted.current) setPending(false);
+		}
+	};
+
 	return (
+		<>
 		<Dialog open onOpenChange={(next) => !next && !installing.current && close()}>
 			<DialogContent
 				className={settingsDialogContentClass}
@@ -187,8 +207,9 @@ function RestartToUpdateDialogBody() {
 
 				<div className={cn(settingsDialogBodyClass, "gap-3 pt-4")}>
 					{installed?.restartBlocked && <p role="alert" className="text-sm text-settings-label">{t(installed.restartBlocked === "appimage-unverified" ? "update.restart.appImageUnverified" : "update.restart.nativeUpdatePending")}</p>}
-					{installed && !installed.restartBlocked && !installed.idle && <p role="status" className="text-sm text-settings-label">{t("update.restart.waitForIdle")}</p>}
-					{installed?.restartWhenIdle && !installed.restartBlocked && <p role="status" className="text-sm text-settings-label">{t("update.restart.scheduled")}</p>}
+					{installed && !installed.restartBlocked && !installed.idle && <p role="status" className="text-sm text-settings-label">{installed.openSideChats?.length ? t("update.restart.closeSideChats", { names: installed.openSideChats.join(", ") }) : t("update.restart.waitForIdle")}</p>}
+					{installed?.restartWhenIdle && !installed.restartBlocked && <p role="status" className="text-sm text-settings-label">{t(installed.openSideChats?.length ? "update.restart.scheduledWithSides" : "update.restart.scheduled")}</p>}
+					{installed?.sideChatsToClose?.length && !installed.restartBlocked ? <Button type="button" variant="secondary" size="sm" className="self-start" disabled={pending} onClick={() => { setDiscardFailure(undefined); setDiscardSides(installed.sideChatsToClose!.map(side => ({ ...side }))); }}>{t("update.restart.discardSideChats")}</Button> : null}
 					{!installed && (workspace.isError || !workspace.data) && <p role="status">{t("update.restart.unknownWorkers", { defaultValue: "Current worker state could not be confirmed. Installing restarts Orchestrator and may interrupt current tasks." })}</p>}
 					{!installed && atRisk.length > 0 && (
 						<div
@@ -273,5 +294,7 @@ function RestartToUpdateDialogBody() {
 				</div>
 			</DialogContent>
 		</Dialog>
+		<ConfirmDialog open={!!discardSides} title={t("update.restart.discardSideChats")} description={t("update.restart.discardSideChatsDetail", { names: discardSides?.map(side => side.label).join(", ") ?? "" })} confirmLabel={t("update.restart.discardSideChats")} initialFocus="cancel" destructive busy={pending} error={discardFailure} onOpenChange={open => { if (!open && !pending) setDiscardSides(undefined); }} onConfirm={() => void discardRetainedSides()} />
+		</>
 	);
 }

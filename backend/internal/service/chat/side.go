@@ -239,6 +239,13 @@ func (s *Service) RecoverSideChatLaunch(ctx context.Context, runID string, recor
 			}
 		}
 	}
+	for _, record := range records {
+		if record.CleanupOnly {
+			// An explicit close-only recovery should not wait for the cleanup ticker.
+			s.sides.retryCleanup()
+			break
+		}
+	}
 	return nil
 }
 

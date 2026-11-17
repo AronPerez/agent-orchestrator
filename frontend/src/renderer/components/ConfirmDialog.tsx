@@ -31,6 +31,7 @@ type ConfirmDialogProps = {
 	children?: React.ReactNode;
 	/** Starts here rather than on a button, for a dialog with a field to fill. */
 	initialFocusRef?: React.RefObject<HTMLElement | null>;
+	initialFocus?: "confirm" | "cancel";
 	busy?: boolean;
 	busyLabel?: string;
 	onCloseAutoFocus?: (event: Event) => void;
@@ -50,6 +51,7 @@ export function ConfirmDialog({
 	destructive,
 	children,
 	initialFocusRef,
+	initialFocus = "confirm",
 	busy,
 	busyLabel,
 	onCloseAutoFocus,
@@ -78,11 +80,11 @@ export function ConfirmDialog({
 				onClick={(event) => event.stopPropagation()}
 				onContextMenu={(event) => event.stopPropagation()}
 				onOpenAutoFocus={(event) => {
-					// Start on the confirm button, not the close X, so Enter confirms what
-					// the person just asked for; Escape cancels. A disabled button can't
+					// Default to confirm so Enter confirms what the person asked for;
+					// callers can explicitly start on Cancel. A disabled button can't
 					// take focus, which would leave it behind the dialog: then Cancel, or
 					// Radix's own choice.
-					const preferred = confirmRef.current;
+					const preferred = initialFocus === "cancel" ? cancelRef.current : confirmRef.current;
 					const target = initialFocusRef?.current ?? (preferred && !preferred.disabled
 						? preferred
 						: [cancelRef.current, confirmRef.current].find((button) => button && !button.disabled));

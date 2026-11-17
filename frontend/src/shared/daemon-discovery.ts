@@ -41,7 +41,7 @@ function portFromAddr(addr: string): number | null {
  * chunk consumer that line-buffers (chunks can split a line anywhere) and
  * invokes onPort exactly once, for the first announcement seen.
  */
-export function createListenPortScanner(onPort: (port: number) => void): (chunk: string) => void {
+export function createListenPortScanner(onPort: (port: number, pid?: number) => void): (chunk: string) => void {
 	let pending = "";
 	let done = false;
 	return (chunk) => {
@@ -53,7 +53,9 @@ export function createListenPortScanner(onPort: (port: number) => void): (chunk:
 			const port = parseDaemonListenPort(line);
 			if (port !== null) {
 				done = true;
-				onPort(port);
+				const pid = Number(/(?:^|\s)pid=(\d+)(?=\s|$)/.exec(line)?.[1]);
+				if (Number.isSafeInteger(pid) && pid > 0) onPort(port, pid);
+				else onPort(port);
 				return;
 			}
 		}

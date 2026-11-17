@@ -170,6 +170,32 @@ func TestSideClosedCleanupSurvivesRecovery(t *testing.T) {
 	}
 }
 
+func TestCleanupOnlyRecoveryAttemptsTheConfirmedCloseBeforeReturning(t *testing.T) {
+	stopped := false
+	svc := New(Options{AppRunID: "run", StopProviderHost: func(_ context.Context, id domain.SessionID) error {
+		if id != "btw-run-side" {
+			t.Fatalf("unexpected host: %s", id)
+		}
+		stopped = true
+		return nil
+	}})
+	_, _ = svc.sides.store.ClaimSideLaunch(t.Context(), "run", time.Now())
+	conv := &sideCleanupTestConversation{onDelete: func() {
+		if !stopped {
+			t.Error("fork deleted before host stopped")
+		}
+	}}
+	svc.controllers["session"] = &Controller{conv: conv}
+	record := SideRecoveryRecord{CleanupOnly: true, Side: domain.SideConversation{ID: "side", SessionID: "session", MainConversationID: "main", State: "ready"}, ProviderHostID: "btw-run-side", ProviderForkID: "fork"}
+	if err := svc.RecoverSideChatLaunch(t.Context(), "run", []SideRecoveryRecord{record}); err != nil {
+		t.Fatal(err)
+	}
+	records, err := svc.ExportSideChatLaunch(t.Context(), "run")
+	if err != nil || !stopped || len(conv.deleted) != 1 || len(records) != 0 {
+		t.Fatalf("confirmed cleanup not completed: stopped=%v deleted=%v retained=%+v err=%v", stopped, conv.deleted, records, err)
+	}
+}
+
 type restoredHistoryConversation struct {
 	deferredSideTestConversation
 	history []ports.ChatEvent

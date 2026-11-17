@@ -212,6 +212,7 @@ export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}
 					const publish = () => { revision++; for (const listener of listeners) listener(state(null)); };
 					return {
 						protocolVersion: 1 as const, mode: "desktop" as const,
+						discardRetained: async () => undefined,
 						capture: async () => undefined,
 						getCloseState: async (sessionId: string) => state(sessionId),
 						onCloseStateChanged: (listener: (value: import("../../src/shared/side-close").SideCloseState) => void) => {
@@ -1228,6 +1229,7 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 					const publish = () => { revision++; for (const listener of listeners) listener(state(null)); };
 					return {
 						protocolVersion: 1 as const, mode: "desktop" as const,
+						discardRetained: async () => undefined,
 						capture: async () => undefined,
 						getCloseState: async (sessionId: string) => state(sessionId),
 						onCloseStateChanged: (listener: (value: import("../../src/shared/side-close").SideCloseState) => void) => {

@@ -207,8 +207,8 @@ export function configureFeed(
 let lastStatus: UpdateStatus = { state: "idle" };
 let installedBuildStatus: InstalledBuildStatus | undefined;
 let installedBuildReplacementDetected = false;
-let updateInstallGuard: () => Promise<boolean> = async () => true;
-export function setUpdateInstallGuard(guard: () => Promise<boolean>): void { updateInstallGuard = guard; }
+let updateInstallGuard: () => boolean = () => true;
+export function setUpdateInstallGuard(guard: () => boolean): void { updateInstallGuard = guard; }
 
 export function setInstalledBuildReplacementDetected(detected: boolean): void {
   if (installedBuildReplacementDetected === detected) return;
@@ -2291,7 +2291,12 @@ function wireUpdaterEvents(): void {
     applyInstallOnQuitPolicy();
     // MacUpdater reads this flag immediately after dispatching this event, then
     // hands the archive to Squirrel. Latch before its asynchronous native events.
-    if (process.platform === "darwin" && autoUpdater.autoInstallOnAppQuit) noteNativeUpdateHandoff();
+    if (process.platform === "darwin" && autoUpdater.autoInstallOnAppQuit) {
+      try {
+        assertPhysicalBuildIsCurrent();
+        noteNativeUpdateHandoff();
+      } catch (error) { console.warn("Automatic native update handoff blocked:", error); }
+    }
     persistStagedBuild(escalationStateDir);
     automaticCheckPreviousStatus = undefined;
     // A completed automatic download advances the independent baseline; a
@@ -3108,14 +3113,15 @@ function assertNoInstalledBuild(): void {
   if (installedBuildReplacementDetected || installedBuildStatus) throw new Error("A different build is already installed. Restart to use the installed build.");
 }
 
-async function assertPhysicalBuildIsCurrent(): Promise<void> {
+function assertPhysicalBuildIsCurrent(): void {
   assertNoInstalledBuild();
-  if (!await updateInstallGuard().catch(() => false)) setInstalledBuildReplacementDetected(true);
+  try { if (!updateInstallGuard()) setInstalledBuildReplacementDetected(true); }
+  catch { setInstalledBuildReplacementDetected(true); }
   assertNoInstalledBuild();
 }
 
 export async function quitAndInstallUpdate(confirmedVersion?: string): Promise<UpdateInstallResult> {
-  await assertPhysicalBuildIsCurrent();
+  assertPhysicalBuildIsCurrent();
   recordUpdateDiagnostic("install-requested", { confirmedVersion });
   if (confirmedVersion !== undefined && (typeof confirmedVersion !== "string" || !confirmedVersion.trim())) {
     throw new Error("A valid confirmed update version is required.");
@@ -3163,7 +3169,7 @@ export async function quitAndInstallUpdate(confirmedVersion?: string): Promise<U
     recordUpdateDiagnostic("quit-and-install", { version: stagedVersion });
     updateRestartRequested = true;
     try {
-      await assertPhysicalBuildIsCurrent();
+      assertPhysicalBuildIsCurrent();
       autoUpdater.quitAndInstall(false, true);
     } catch (error) {
       clearUpdateRestartRequest();
@@ -3231,7 +3237,7 @@ export async function quitAndInstallUpdate(confirmedVersion?: string): Promise<U
         }),
         new Promise<void>((resolve) => setTimeout(resolve, 750)),
       ]);
-      await assertPhysicalBuildIsCurrent();
+      assertPhysicalBuildIsCurrent();
       assertInstallActive();
       recordUpdateDiagnostic("quit-and-install", { version });
       autoUpdater.quitAndInstall(false, true);

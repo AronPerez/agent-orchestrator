@@ -37,7 +37,7 @@ describe("createListenPortScanner", () => {
 		scan('level=INFO msg="daemon lis');
 		expect(onPort).not.toHaveBeenCalled();
 		scan('tening" addr=127.0.0.1:3001 pid=4242\n');
-		expect(onPort).toHaveBeenCalledWith(3001);
+		expect(onPort).toHaveBeenCalledWith(3001, 4242);
 	});
 
 	it("reports only the first announcement", () => {
@@ -48,9 +48,19 @@ describe("createListenPortScanner", () => {
 		scan(`${LISTEN_LINE.replace("3001", "5000")}\n`);
 
 		expect(onPort).toHaveBeenCalledTimes(1);
-		expect(onPort).toHaveBeenCalledWith(3001);
+		expect(onPort).toHaveBeenCalledWith(3001, 4242);
 	});
 
+	it("reports the daemon PID from a shell child's announcement", () => {
+		const onPort = vi.fn();
+		createListenPortScanner(onPort)(LISTEN_LINE + "\n");
+		expect(onPort).toHaveBeenCalledWith(3001, 4242);
+	});
+	it.each(["", " pid=0", " pid=-4", " pid=1.5", " pid=9007199254740993"])("preserves a port-only announcement when its PID is unavailable: %s", suffix => {
+		const onPort = vi.fn();
+		createListenPortScanner(onPort)('level=INFO msg="daemon listening" addr=127.0.0.1:3001' + suffix + "\n");
+		expect(onPort).toHaveBeenCalledExactlyOnceWith(3001);
+	});
 	it("stays quiet on streams without the announcement", () => {
 		const onPort = vi.fn();
 		const scan = createListenPortScanner(onPort);

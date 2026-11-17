@@ -15,11 +15,19 @@ export interface SideLaunchSnapshot {
 	numbers?: Record<string, number>;
 }
 
+export function cleanupSideRecord(original: RecoveryRecord): RecoveryRecord {
+	return {
+		side: Object.fromEntries(Object.entries(original.side).filter(([key]) => ["id", "sessionId", "mainConversationId", "label", "state", "contextMode", "hasWork", "createdAt", "updatedAt"].includes(key))) as RecoveryRecord["side"],
+		providerHostId: original.providerHostId, providerForkId: original.providerForkId, harness: original.harness,
+		cleanupOnly: true, hostStopped: original.hostStopped,
+	};
+}
+
 // Close intent is owned by Electron for this launch, including while the daemon
 // is unavailable. A stale open snapshot must never replace a cleanup record.
 export class SideCloseRecovery {
 	state?: SideLaunchSnapshot;
-	private closing = new Map<string, { original: RecoveryRecord; cleanup: RecoveryRecord; observed: boolean; accepted: boolean; conversationClosed: boolean }>();
+	private closing = new Map<string, { original: RecoveryRecord; cleanup: RecoveryRecord; observed: boolean; accepted: boolean; conversationClosed: boolean; cleanupAttachment?: string }>();
 	private closed = new Set<string>();
 	// Retain shutdown proof for this Electron launch, including across renderer
 	// remounts and snapshots that no longer contain the native fork cleanup.
@@ -61,16 +69,15 @@ export class SideCloseRecovery {
 		] };
 	}
 
-	begin(id: string): void {
+	begin(id: string, snapshot?: SideLaunchSnapshot): void {
 		if (this.closing.has(id)) return;
-		const original = (this.state?.sides as RecoveryRecord[] | undefined)?.find((record) => record.side?.id === id);
+		let original = (this.state?.sides as RecoveryRecord[] | undefined)?.find((record) => record.side?.id === id);
+		if (!original && snapshot && (!this.state || snapshot.appRunId === this.state.appRunId)) {
+			original = (snapshot.sides as RecoveryRecord[]).find(record => record.side?.id === id);
+			if (original) this.state = { ...snapshot, ...this.state, sides: [...(this.state?.sides ?? []), original] };
+		}
 		if (!original) throw new Error("Side chat recovery ownership is unavailable. Refresh and retry close.");
-		const cleanup: RecoveryRecord = {
-			side: Object.fromEntries(Object.entries(original.side).filter(([key]) => ["id", "sessionId", "mainConversationId", "label", "state", "contextMode", "hasWork", "createdAt", "updatedAt"].includes(key))) as RecoveryRecord["side"],
-			providerHostId: original.providerHostId,
-			providerForkId: original.providerForkId, harness: original.harness,
-			cleanupOnly: true, hostStopped: original.hostStopped,
-		};
+		const cleanup = cleanupSideRecord(original);
 		this.closing.set(id, { original, cleanup, observed: Boolean(original.cleanupOnly), accepted: false, conversationClosed: Boolean(original.cleanupOnly) });
 		this.closed.add(id);
 		this.state = { ...this.state!, sides: this.state!.sides.map((record) => (record as RecoveryRecord).side?.id === id ? cleanup : record) };
@@ -92,6 +99,15 @@ export class SideCloseRecovery {
 			intent.accepted = true;
 			this.rememberClosed(intent.original.side);
 		}
+	}
+
+	acknowledgeCleanup(id: string, attachment?: string): void {
+		const intent = this.closing.get(id);
+		if (intent) intent.cleanupAttachment = attachment;
+	}
+
+	cleanupAcknowledged(id: string, attachment: string): boolean {
+		return this.closing.get(id)?.cleanupAttachment === attachment;
 	}
 
 	markRestoreAttempt(snapshot?: SideLaunchSnapshot): void {

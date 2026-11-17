@@ -604,6 +604,7 @@ const api = {
 		request: (input: AgentLoginRequest) => ipcRenderer.invoke("agentLogin:request", input) as Promise<AgentLoginResponse | null>,
 	},
 	sideChats: {
+		discardRetained: (ids: string[]) => ipcRenderer.invoke("sideChats:discardRetained", ids) as Promise<void>,
 		protocolVersion: SIDE_CLOSE_PROTOCOL_VERSION,
 		mode: "desktop" as "desktop" | "web",
 		capture: () => ipcRenderer.invoke("sideChats:capture") as Promise<void>,

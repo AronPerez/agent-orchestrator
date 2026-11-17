@@ -3067,6 +3067,82 @@ func TestListReturnsHandleAndRuns(t *testing.T) {
 	}
 }
 
+func TestListRestartAutoReviewPending(t *testing.T) {
+	prURL := "https://github.com/o/r/pull/1"
+	failed := domain.ReviewRun{PRURL: prURL, TargetSHA: "sha1", Harness: domain.ReviewerCodex, Status: domain.ReviewRunFailed, TriggerSource: domain.ReviewTriggerAuto}
+	approved := domain.ReviewRun{PRURL: prURL, TargetSHA: "sha1", Harness: domain.ReviewerCodex, Status: domain.ReviewRunCompleted, Verdict: domain.VerdictApproved}
+	otherApproval := approved
+	otherApproval.Harness = domain.ReviewerClaudeCode
+	for _, tc := range []struct {
+		name     string
+		runs     []domain.ReviewRun
+		secondPR bool
+		want     bool
+	}{
+		{name: "scheduled without runs", want: true},
+		{name: "retry remains eligible", runs: []domain.ReviewRun{failed}, want: true},
+		{name: "retry limit exhausted", runs: []domain.ReviewRun{failed, failed, failed}},
+		{name: "approved head", runs: []domain.ReviewRun{approved}},
+		{name: "another harness approval cannot hide pending work", runs: []domain.ReviewRun{otherApproval}, want: true},
+		{name: "cancelled head is not retried", runs: []domain.ReviewRun{{PRURL: prURL, TargetSHA: "sha1", Harness: domain.ReviewerCodex, Status: domain.ReviewRunCancelled}}},
+		{name: "approved PR cannot hide another pending PR", runs: []domain.ReviewRun{approved}, secondPR: true, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			worker := liveWorker()
+			worker.ReviewerHarness = domain.ReviewerCodex
+			prs := prAt("sha1")
+			if tc.secondPR {
+				prs.prs = append(prs.prs, domain.PullRequest{URL: "https://github.com/o/r/pull/2", Number: 2, HeadSHA: "sha2"})
+			}
+			eng := newEngineForTest(&fakeStore{runs: tc.runs}, fakeSessions{rec: worker, ok: true}, prs, fakeProjects{}, &fakeLauncher{})
+			got, err := eng.List(context.Background(), worker.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.AutoReviewPending != tc.want {
+				t.Fatalf("pending = %v, want %v", got.AutoReviewPending, tc.want)
+			}
+		})
+	}
+}
+
+func TestListRestartUsesCoordinatorHarnessInsteadOfProjectWorkerDefault(t *testing.T) {
+	for _, approvedHarness := range []domain.ReviewerHarness{domain.ReviewerCodex, domain.ReviewerClaudeCode} {
+		t.Run(string(approvedHarness), func(t *testing.T) {
+			worker := liveWorker() // Claude worker, despite the project's Codex default.
+			cfg := domain.ProjectConfig{Worker: domain.RoleOverride{Harness: domain.HarnessCodex}}
+			run := domain.ReviewRun{PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha1", Harness: approvedHarness, Status: domain.ReviewRunCompleted, Verdict: domain.VerdictApproved}
+			eng := newEngineForTest(&fakeStore{runs: []domain.ReviewRun{run}}, fakeSessions{rec: worker, ok: true}, prAt("sha1"), fakeProjects{cfg: cfg}, &fakeLauncher{})
+			got, err := eng.List(context.Background(), worker.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := approvedHarness != domain.ReviewerClaudeCode; got.AutoReviewPending != want {
+				t.Fatalf("pending = %v, want %v for the coordinator's Claude reviewer", got.AutoReviewPending, want)
+			}
+		})
+	}
+}
+
+func TestListRestartKeepsStoppedChatHistoryOutOfActiveReviewers(t *testing.T) {
+	selected := domain.Review{ID: "chat-codex", SessionID: "mer-1", Harness: domain.ReviewerCodex, InterfaceMode: domain.ReviewerInterfaceChat, ReviewerActivityState: domain.ActivityActive}
+	other := domain.Review{ID: "chat-claude", SessionID: "mer-1", Harness: domain.ReviewerClaudeCode, InterfaceMode: domain.ReviewerInterfaceChat, ReviewerActivityState: domain.ActivityIdle}
+	running := domain.Review{ID: "running-aider", SessionID: "mer-1", Harness: domain.ReviewerAider, ReviewerHandleID: "aider-pane", ReviewerActivityState: domain.ActivityActive}
+	worker := liveWorker()
+	worker.ReviewerHarness = domain.ReviewerCodex
+	eng := newEngineForTest(&fakeStore{review: &selected, reviews: map[domain.ReviewerHarness]domain.Review{domain.ReviewerCodex: selected, domain.ReviewerClaudeCode: other, domain.ReviewerAider: running}}, fakeSessions{rec: worker, ok: true}, prAt("sha1"), fakeProjects{}, &fakeLauncher{})
+	got, err := eng.List(context.Background(), worker.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.ActiveReviewers) != 1 || got.ActiveReviewers[0].ReviewID != running.ID {
+		t.Fatalf("active reviewers = %+v, want the running reviewer instead of stopped Chat history", got.ActiveReviewers)
+	}
+	if len(got.ChatReviewerIDs) != 2 || got.ChatReviewerIDs[0] != selected.ID || got.ChatReviewerIDs[1] != other.ID {
+		t.Fatalf("Chat controllers = %+v, want both retained surfaces checked for restart safety", got.ChatReviewerIDs)
+	}
+}
+
 func TestListMarksRunningReviewFailedWhenReviewerExited(t *testing.T) {
 	store := &fakeStore{
 		review: &domain.Review{ID: "rev-1", SessionID: "mer-1", Harness: domain.ReviewerAider, ReviewerHandleID: "review-mer-1", ReviewerActivityState: domain.ActivityActive},

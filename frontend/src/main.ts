@@ -1,7 +1,7 @@
 import type { SideCloseRequest, SideCloseState } from "./shared/side-close";
 import { SideCloseRecovery, type SideSnapshotCoverage } from "./main/side-close";
 import { SideCloseController } from "./main/side-close-controller";
-import { SideLaunchRecovery } from "./main/side-launch-recovery";
+import { closeMismatchedSide, SideLaunchRecovery } from "./main/side-launch-recovery";
 import { launchTriageInTerminal } from "./main/triage-launch";
 import { initializeDesktopLog } from "./main/desktop-log";
 import { syncMacWindowButtons } from "./main/window-chrome";
@@ -309,16 +309,58 @@ const installedBuildGuard = installedBuildDisk ? new InstalledBuildGuard({
 	assertRestartSafe: assertInstalledBuildRestartSafe,
 	onReplacement: setInstalledBuildReplacementDetected,
 	isIdle: async () => {
-		const port = daemonStatus.port;
-		if (chatDraftRisks.length > 0 || !port || !await readDaemonProbe(port, "readyz")) return false;
-		// A newer host may be refused for attachment, but can still report whether
-		// its tasks are idle so a replaced desktop can safely relaunch into it.
+		const { port, state, code, pid } = daemonStatus;
+		const mismatched = state === "error" && code === "identity_mismatch";
+		const generation = daemonAttachmentGeneration;
+		if (chatDraftRisks.length > 0 || !port || !pid || (state !== "ready" && !mismatched) || (await readDaemonProbe(port, "readyz"))?.pid !== pid) return false;
+		const checkSides = async (sessions?: { id: string; mode?: string; isTerminated?: boolean }[]) => {
+			let sides: unknown[] = [];
+			if (mismatched) {
+				// Read only: never claim or restore into an incompatible daemon. Side
+				// lists also work before a launch is claimed; local retained state wins.
+				for (const session of sessions ?? []) {
+					if (session.isTerminated || session.mode === "tui") continue;
+					if (session.mode !== "chat") return false;
+					const response = await fetch(`http://127.0.0.1:${port}/api/v1/sessions/${encodeURIComponent(session.id)}/conversation/side-chats`, { signal: AbortSignal.timeout(5_000) });
+					if (!response.ok) return false;
+					const body = await response.json();
+					if (!Array.isArray(body.sides)) return false;
+					sides.push(...body.sides);
+				}
+			} else {
+				// Capture waits for claim/restore on this exact daemon attachment.
+				const capture = await sideLaunchRecovery.capture();
+				if (capture.attachment.port !== port || capture.attachment.generation !== generation || !sideLaunchRecovery.matches(capture.attachment) || !Array.isArray(capture.state.sides)) return false;
+				sides = capture.state.sides;
+			}
+			const names = [...new Set([...sides, ...(sideLaunchState?.sides ?? [])].map(record => {
+				const side = (record && typeof record === "object" && "side" in record ? record.side : record) as { label?: string; id?: string } | undefined;
+				return side?.label || side?.id || "Side chat";
+			}))];
+			const closable = mismatched ? (sideLaunchState?.sides ?? []).flatMap(record => {
+				const side = (record as { side?: { id?: string; label?: string } } | null)?.side;
+				return typeof side?.id === "string" && side.id ? [{ id: side.id, label: side.label || side.id }] : [];
+			}) : [];
+			return names.length ? { openSideChats: names, sideChatsToClose: closable.length ? closable : undefined } : true;
+		};
+		const sides = await checkSides().catch(() => false);
+		if (sides !== true) return sides;
 		const response = await fetch(`http://127.0.0.1:${port}/api/v1/sessions`, { signal: AbortSignal.timeout(5_000) });
-		return response.ok && await sessionsAndReviewsAreIdle(await response.json(), async (sessionId) => {
+		if (!response.ok) return false;
+		const body = await response.json();
+		const idle = await sessionsAndReviewsAreIdle(body, async (sessionId) => {
 			const reviews = await fetch(`http://127.0.0.1:${port}/api/v1/sessions/${encodeURIComponent(sessionId)}/reviews`, { signal: AbortSignal.timeout(5_000) });
 			if (!reviews.ok) throw new Error("Review state unavailable");
 			return reviews.json();
+		}, async (reviewId) => {
+			const conversation = await fetch(`http://127.0.0.1:${port}/api/v1/reviews/${encodeURIComponent(reviewId)}/conversation?limit=1`, { signal: AbortSignal.timeout(5_000) });
+			if (!conversation.ok) throw new Error("Reviewer activity unavailable");
+			return conversation.json();
 		});
+		if (!idle) return false;
+		const latestSides = await checkSides(body.sessions).catch(() => false);
+		const live = await readDaemonProbe(port, "readyz");
+		return live?.pid === pid && !sideCloseController.hasPending() && generation === daemonAttachmentGeneration && daemonStatus.port === port && daemonStatus.pid === pid && daemonStatus.state === state && daemonStatus.code === code ? latestSides : false;
 	},
 	onChange: (status) => {
 		console.info("AO: installed desktop build changed", { running: DESKTOP_BUILD_ID, installed: status?.identity, idle: status?.idle });
@@ -719,7 +761,7 @@ if (!app.requestSingleInstanceLock()) {
 	registerCloudProtocol();
 	installLifecycleLog();
 	if (pinPackagedRenderer && installedBuildGuard) {
-		rendererResourcesReady = pinRendererResources(sourceViteRoot, runtimeViteRoot, () => installedBuildGuard.isRunningBuildInstalled()).then(
+		rendererResourcesReady = pinRendererResources(sourceViteRoot, runtimeViteRoot, async () => installedBuildGuard.isRunningBuildInstalled()).then(
 			(cache) => { rendererCache = cache; return true; },
 			(error) => { console.error("AO: could not pin the running renderer:", error); return false; },
 		);
@@ -935,7 +977,7 @@ app.once("will-quit", () => {
 
 function setDaemonStatus(nextStatus: DaemonStatus): void {
 	reportDaemonFailure(daemonStatus, nextStatus);
-	if (nextStatus.state !== "ready" || daemonStatus.state !== "ready" || nextStatus.port !== daemonStatus.port || nextStatus.pid !== daemonStatus.pid) daemonAttachmentGeneration++;
+	if (nextStatus.state !== daemonStatus.state || nextStatus.code !== daemonStatus.code || nextStatus.port !== daemonStatus.port || nextStatus.pid !== daemonStatus.pid) daemonAttachmentGeneration++;
 	if (nextStatus.state !== "ready") disposeBrowserRuntimeLink();
 	if (nextStatus.state !== "ready") {
 		if (sideStateTimer) clearInterval(sideStateTimer);
@@ -2778,17 +2820,20 @@ async function startDaemonInner(startEpoch: number, autoRestartIntent: DaemonAut
 		fallbackTimer = undefined;
 	};
 
-	const reportBoundPort = (port: number) => {
+	const reportBoundPort = (port: number, reportedPid?: number) => {
 		if (portConfirmed || daemonProcess !== child || daemonStoppingProcess === child) return;
 		portConfirmed = true;
 		stopDiscovery();
-		lifecycleLog("daemon_ready", { daemonPid: child.pid ?? null, port, startupMs: Date.now() - spawnedAtMs });
-		setDaemonStatus({ state: "ready", port, pid: child.pid });
+		// A shell or systemd scope can supervise a different serving process.
+		// Keep the child handle for supervision and use the daemon's own PID for probes.
+		const pid = reportedPid ?? child.pid;
+		lifecycleLog("daemon_ready", { daemonPid: pid ?? null, supervisorPid: child.pid ?? null, port, startupMs: Date.now() - spawnedAtMs });
+		setDaemonStatus({ state: "ready", port, pid });
 		// The renderer opens event streams on a *.localhost name only while the
 		// daemon also serves [::1] at this port; its probe says whether it does.
 		void readDaemonProbe(port, "healthz").then((probe) => {
-			if (probe?.ipv6Loopback !== true || probe.pid !== child.pid) return;
-			if (daemonStatus.state !== "ready" || daemonStatus.port !== port || daemonStatus.pid !== child.pid) return;
+			if (probe?.ipv6Loopback !== true || probe.pid !== pid) return;
+			if (daemonProcess !== child || daemonStatus.state !== "ready" || daemonStatus.port !== port || daemonStatus.pid !== pid) return;
 			// The same attachment, so only the renderer's copy changes.
 			daemonStatus = { ...daemonStatus, ipv6Loopback: true };
 			getShellWebContents()?.send("daemon:status", daemonStatus);
@@ -2846,7 +2891,7 @@ async function startDaemonInner(startEpoch: number, autoRestartIntent: DaemonAut
 					// Ignore a stale handshake left by a previous daemon: only trust a
 					// file written at/after this spawn.
 					if (info && info.startedAtMs >= spawnedAtMs - RUN_FILE_FRESHNESS_SKEW_MS) {
-						reportBoundPort(info.port);
+						reportBoundPort(info.port, info.pid);
 					}
 				})
 				.catch(() => undefined); // absent until the daemon binds; keep polling
@@ -3293,6 +3338,25 @@ ipcMain.handle("sideChats:requestClose", (event, input: SideCloseRequest) => {
 ipcMain.handle("sideChats:closeState", (event, sessionId: string) => {
 	if (event.sender !== getShellWebContents() || typeof sessionId !== "string" || !sessionId || sessionId.length > 255) throw new Error("Invalid side close query.");
 	return sideCloseController.summary(sessionId);
+});
+ipcMain.handle("sideChats:discardRetained", async (event, ids: unknown) => {
+	if (event.sender !== getShellWebContents() || !Array.isArray(ids) || ids.length === 0 || ids.length > 1000 ||
+		ids.some(id => typeof id !== "string" || !id || id.length > 255) || new Set(ids).size !== ids.length) throw new ExpectedIpcError("Invalid retained side selection.");
+	if (daemonStatus.state !== "error" || daemonStatus.code !== "identity_mismatch" || !daemonStatus.port || !daemonStatus.pid || sideLaunchState?.appRunId !== appRunId ||
+		ids.some(id => !sideLaunchState?.sides.some(record => (record as { side?: { id?: string } }).side?.id === id))) throw new ExpectedIpcError("Retained side chats changed. Review the current list and try again.");
+	const attachment = { generation: daemonAttachmentGeneration, port: daemonStatus.port, pid: daemonStatus.pid, appRunId };
+	const isCurrent = async () => (await readDaemonProbe(attachment.port, "healthz"))?.pid === attachment.pid && daemonAttachmentGeneration === attachment.generation && daemonStatus.port === attachment.port && daemonStatus.pid === attachment.pid && daemonStatus.state === "error" && daemonStatus.code === "identity_mismatch";
+	try {
+		for (const id of ids) {
+			if (!await isCurrent()) {
+				sideCloseRecovery.acknowledgeCleanup(id);
+				throw new ExpectedIpcError("Daemon attachment changed. Review the side chats before trying again.");
+			}
+			await closeMismatchedSide({ attachment, sideId: id, recovery: sideCloseRecovery, isCurrent,
+				onChange: () => { sideLaunchState = sideCloseRecovery.state; sideCloseController.reconcile(); },
+			});
+		}
+	} finally { await installedBuildGuard?.check(); }
 });
 
 ipcMain.handle("editorHandoff:pathAction", (event, input) => {
@@ -4161,6 +4225,7 @@ ipcMain.handle("updates:install", (_event, confirmedVersion?: string) => quitAnd
 // in-process, so restart AO like a manual quit-and-reopen. An external build
 // still needs the native staging gate: disabling install-on-quit cannot disarm ShipIt.
 ipcMain.handle("updates:relaunch", () => {
+	installedBuildGuard?.isRunningBuildInstalled();
 	assertInstalledBuildRestartSafe();
 	recordUpdateDiagnostic("retry-relaunch-requested");
 	preserveAgentsOnQuit = true;

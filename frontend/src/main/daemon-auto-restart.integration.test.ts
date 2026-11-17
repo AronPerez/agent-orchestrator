@@ -37,7 +37,7 @@ function deferred<T>() {
 	return { promise, resolve };
 }
 
-function setup() {
+function setup(options: { shell?: boolean } = {}) {
 	let marker: string | Error = JSON.stringify({ pid: 42, port: 3001 });
 	const read = vi.fn(async () => {
 		if (marker instanceof Error) throw marker;
@@ -65,6 +65,8 @@ function setup() {
 	const daemonEnv = vi.fn((keep: boolean) => ({ AO_OWNER: keep ? "persistent" : "app" }));
 	const env: Record<string, string | undefined> = {};
 	const lifecycleLog = vi.fn();
+	const probe = vi.fn<() => Promise<{ pid: number; ipv6Loopback?: boolean } | null>>(async () => null);
+	const killProcess = vi.fn();
 	const planDaemonSpawnIsolation = vi.fn(async (): Promise<unknown> => ({ kind: "unchanged", reason: "disabled" }));
 	const applyDaemonOomScoreAdj = vi.fn(() => 300);
 	const openSync = vi.fn(() => 73);
@@ -72,17 +74,18 @@ function setup() {
 		lifecycleLog, planDaemonSpawnIsolation, applyDaemonOomScoreAdj,
 		console, Date, setTimeout, clearTimeout, setInterval, clearInterval, Buffer, path,
 		openSync, closeSync: vi.fn(),
-		process: { env, platform: "linux", resourcesPath: "/owned/lab", kill: vi.fn() },
+		process: { env, platform: "linux", resourcesPath: "/owned/lab", kill: killProcess },
 		os: { homedir: () => "/owned/home" }, app, ipcMain: { handle: (name: string, handler: () => unknown) => ipc.set(name, handler) },
 		browserQuitRequested: false, daemonOutput: "", supervisorLink: { dispose: supervisorDisposed }, appRunId: "test-app",
 		browserRuntimeRecoveryDecision, browserRuntimeRecoveryAttempted: false,
+		getShellWebContents: () => undefined,
 		forceReplaceAdoptedRequested: false, cachedShellEnv: {}, earlyShellEnvProbe: null,
 		repairDevAcpRuntime: async () => undefined, ensureShellEnv: async () => undefined, retryFailedEarlyShellEnvProbe: async () => undefined,
-		resolveDaemonLaunch: () => ({ command: "/owned/ao", args: [], cwd: "/owned/data", source: "override", shell: false }),
+		resolveDaemonLaunch: () => ({ command: "/owned/ao", args: [], cwd: "/owned/data", source: "override", shell: options.shell ?? false }),
 		daemonLaunchEnv: () => ({}), inspectExistingDaemon: inspect, browserDaemonOwnershipDecision,
 		shouldReplaceDaemonForStartup, keepAliveForReplacement, gracefullyReplaceDaemonForBrowser: replace,
 		shouldLinkOnAttach: () => false, establishSupervisorLink, resolveDaemonFromPort: direct,
-		resolvedDaemonPort: () => 3001, readDaemonProbe: async () => null, daemonIdentityError: () => null,
+		resolvedDaemonPort: () => 3001, readDaemonProbe: probe, daemonIdentityError: () => null,
 		runFilePath: () => "/owned/running.json", parseRunFile, readFile: read, rm: unlink,
 		portHolderPidToReplace, readProcessStartMs: async () => null, processAlive: () => false,
 		existsSync: () => true, ensureBundledTmuxStaged: stage, keepDaemonAlive,
@@ -96,7 +99,7 @@ function setup() {
 	});
 	vm.runInContext(`${controller}\nfunction setDaemonStatus(status) { daemonStatus = status; }`, context);
 	return {
-		read, unlink, spawn, children, replace, lifecycleLog, planDaemonSpawnIsolation, applyDaemonOomScoreAdj, openSync, inspect, direct, stage, supervisorDisposed, establishSupervisorLink, daemonEnv, env,
+		read, unlink, spawn, children, replace, lifecycleLog, probe, killProcess, planDaemonSpawnIsolation, applyDaemonOomScoreAdj, openSync, inspect, direct, stage, supervisorDisposed, establishSupervisorLink, daemonEnv, env,
 		setMarker(value: string | Error) { marker = value; },
 		start: () => ipc.get("daemon:start")!(), stop: () => ipc.get("daemon:stop")!(), restart: () => ipc.get("daemon:restart")!(),
 		status: () => vm.runInContext("daemonStatus", context),
@@ -113,6 +116,25 @@ beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
 describe("main.ts daemon lifecycle wiring with controlled I/O", () => {
+	it.each(["listen announcement", "running.json"])("keeps the serving daemon PID separate from its shell supervisor via %s", async source => {
+		const h = setup({ shell: true });
+		if (source === "running.json") h.env.AO_KEEP_DAEMON = "1";
+		h.probe.mockImplementation(async () => h.children.length ? { pid: 99, ipv6Loopback: true } : null);
+		await h.start();
+		expect(h.spawn).toHaveBeenCalledWith("/owned/ao", [], expect.objectContaining({ shell: true }));
+		if (source === "listen announcement") h.children[0].stderr.emit("data", Buffer.from('level=INFO msg="daemon listening" addr=127.0.0.1:3001 pid=99\n'));
+		else {
+			h.setMarker(JSON.stringify({ pid: 99, port: 3001, startedAt: new Date().toISOString() }));
+			await vi.advanceTimersByTimeAsync(100);
+		}
+		await vi.advanceTimersByTimeAsync(0);
+		expect(h.status()).toEqual({ state: "ready", port: 3001, pid: 99, ipv6Loopback: true });
+		expect(h.children[0].pid).toBe(42);
+		await h.stop();
+		expect(h.killProcess).toHaveBeenCalledWith(-42, "SIGTERM");
+		expect(h.killProcess).not.toHaveBeenCalledWith(-99, expect.anything());
+	});
+
 	it("restarts a crashed child through the actual startup path", async () => {
 		const h = setup();
 		await h.start();

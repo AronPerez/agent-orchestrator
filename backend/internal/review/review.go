@@ -244,6 +244,8 @@ type TriggerResult struct {
 // SessionReviews is a worker's review state: the live reviewer handle plus its
 // recorded passes, newest first.
 type SessionReviews struct {
+	AutoReviewPending     bool
+	ChatReviewerIDs       []string // Includes retained Chat controllers, without classifying stopped history as active panes.
 	ReviewerHandleID      string
 	ReviewerHarness       domain.ReviewerHarness
 	ReviewerActivityState domain.ActivityState
@@ -254,6 +256,15 @@ type SessionReviews struct {
 	// selected reviewer first, so clients can open each of several reviewers
 	// working on the same worker at once.
 	ActiveReviewers []domain.ReviewerSurface
+}
+
+// AutoReviewerHarness is shared with the coordinator: an explicit session or
+// project reviewer wins, otherwise inherit the actual worker's safe harness.
+func AutoReviewerHarness(worker domain.SessionRecord, config domain.ProjectConfig) domain.ReviewerHarness {
+	if worker.ReviewerHarness != "" {
+		return worker.ReviewerHarness
+	}
+	return config.ResolveReviewerHarness(worker.Harness)
 }
 
 // CancelResult is the review state after a reviewer pane cancellation.
@@ -1011,7 +1022,7 @@ func (e *Engine) SwitchReviewer(
 	if _, err := e.restoreReviewerLocked(ctx, workerID, worker, selected, selectedConfig); err != nil {
 		return SessionReviews{}, err
 	}
-	return e.listLocked(ctx, workerID, selected)
+	return e.listLocked(ctx, worker, selected)
 }
 
 func reviewerPaneReusable(reviewRow domain.Review, hadRunningReviewer bool) bool {
@@ -1571,10 +1582,11 @@ func (e *Engine) List(ctx stdctx.Context, workerID domain.SessionID) (SessionRev
 	if err != nil {
 		return SessionReviews{}, err
 	}
-	return e.listLocked(ctx, workerID, selectedHarness)
+	return e.listLocked(ctx, worker, selectedHarness)
 }
 
-func (e *Engine) listLocked(ctx stdctx.Context, workerID domain.SessionID, selectedHarness domain.ReviewerHarness) (SessionReviews, error) {
+func (e *Engine) listLocked(ctx stdctx.Context, worker domain.SessionRecord, selectedHarness domain.ReviewerHarness) (SessionReviews, error) {
+	workerID := worker.ID
 	// List never repairs state itself. It lets the run lifecycle settle this
 	// session first so a poll never shows a run the next tick would end.
 	if _, err := e.evaluateSessionLocked(ctx, workerID); err != nil {
@@ -1602,6 +1614,10 @@ func (e *Engine) listLocked(ctx stdctx.Context, workerID domain.SessionID, selec
 		return SessionReviews{}, err
 	}
 	active := []domain.ReviewerSurface{}
+	chatIDs := []string{}
+	if reviewRow.ID != "" && !reviewRow.IsArchived && reviewRow.InterfaceMode == domain.ReviewerInterfaceChat {
+		chatIDs = append(chatIDs, reviewRow.ID)
+	}
 	if reviewerRowActive(reviewRow, runs) {
 		active = append(active, reviewerSurface(reviewRow))
 	}
@@ -1609,6 +1625,9 @@ func (e *Engine) listLocked(ctx stdctx.Context, workerID domain.SessionID, selec
 		other := reviewRows[i]
 		if other.ID == reviewRow.ID {
 			continue
+		}
+		if !other.IsArchived && other.InterfaceMode == domain.ReviewerInterfaceChat {
+			chatIDs = append(chatIDs, other.ID)
 		}
 		if reviewerRowActive(other, runs) {
 			active = append(active, reviewerSurface(other))
@@ -1618,7 +1637,24 @@ func (e *Engine) listLocked(ctx stdctx.Context, workerID domain.SessionID, selec
 	if err != nil {
 		return SessionReviews{}, err
 	}
+	// Include work waiting for the idle threshold, before the coordinator's next sweep.
+	pending := false
+	if e.projects != nil && worker.AutoReviewEnabled && worker.Kind == domain.KindWorker && !worker.IsTerminated && worker.Activity.State == domain.ActivityIdle {
+		if project, ok, err := e.projects.GetProject(ctx, string(worker.ProjectID)); err != nil {
+			return SessionReviews{}, err
+		} else if ok {
+			harness := AutoReviewerHarness(worker, project.Config)
+			for _, state := range Plan(prs, reviewRunsForHarness(runs, harness)) {
+				if state.Status == ReviewStateNeedsReview && !autoReviewHeadBlocked(runs, state.PRURL, state.TargetSHA, harness) {
+					pending = true
+					break
+				}
+			}
+		}
+	}
 	return SessionReviews{
+		AutoReviewPending:     pending,
+		ChatReviewerIDs:       chatIDs,
 		ReviewerHandleID:      legacyReviewerHandle(reviewRow),
 		ReviewerHarness:       reviewerHarness,
 		ReviewerActivityState: reviewRow.ReviewerActivityState,

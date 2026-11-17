@@ -229,15 +229,17 @@ func TestEvaluateSessionReportsCancelledAfterStaleRunningReconciliation(t *testi
 func TestEvaluateSessionReviewerHarnessPrecedence(t *testing.T) {
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
-		name     string
-		session  domain.ReviewerHarness
-		project  domain.ReviewerHarness
-		worker   domain.AgentHarness
-		expected domain.ReviewerHarness
+		name          string
+		session       domain.ReviewerHarness
+		project       domain.ReviewerHarness
+		worker        domain.AgentHarness
+		defaultWorker domain.AgentHarness
+		expected      domain.ReviewerHarness
 	}{
 		{name: "session wins", session: domain.ReviewerOpenCode, project: domain.ReviewerClaudeCode, worker: domain.AgentHarness("codex"), expected: domain.ReviewerOpenCode},
 		{name: "project fallback", project: domain.ReviewerOpenCode, worker: domain.AgentHarness("codex"), expected: domain.ReviewerOpenCode},
 		{name: "safe worker inheritance", worker: domain.HarnessCodex, expected: domain.ReviewerCodex},
+		{name: "actual worker rather than project worker default", worker: domain.HarnessClaudeCode, defaultWorker: domain.HarnessCodex, expected: domain.ReviewerClaudeCode},
 		{name: "known reviewer outside safe inheritance set", worker: domain.HarnessKimi, expected: domain.ReviewerClaudeCode},
 		{name: "non-reviewer worker fallback", worker: domain.HarnessAider, expected: domain.ReviewerClaudeCode},
 	}
@@ -251,6 +253,7 @@ func TestEvaluateSessionReviewerHarnessPrecedence(t *testing.T) {
 			if tt.project != "" {
 				store.project.Config.Reviewers = []domain.ReviewerConfig{{Harness: tt.project}}
 			}
+			store.project.Config.Worker.Harness = tt.defaultWorker
 			trigger := &fakeTrigger{}
 			result, err := New(store, trigger, Config{Clock: func() time.Time { return now }}).EvaluateSession(context.Background(), "s1")
 			if err != nil || !result.Triggered {

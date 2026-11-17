@@ -7616,6 +7616,10 @@ export interface components {
         };
         ListReviewsResponse: {
             activeReviewers: components["schemas"]["DomainReviewerSurface"][];
+            /** @description Automatic review work remains eligible on at least one current PR head, including pending retries and the idle threshold. */
+            autoReviewPending: boolean;
+            /** @description Non-archived Chat reviewer controllers to inspect for restart safety, including stopped history that is not an active pane. */
+            chatReviewerIds: string[];
             /** @enum {string} */
             reviewerActivityState?: "active" | "idle" | "waiting_input" | "blocked" | "exited";
             reviewerHandleId: string;

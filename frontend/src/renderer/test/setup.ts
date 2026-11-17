@@ -263,6 +263,7 @@ if (typeof window !== "undefined") {
 		},
 		agentLogin: { request: async () => null },
 		sideChats: {
+			discardRetained: async () => undefined,
 			protocolVersion: 1, mode: "desktop", capture: async () => undefined,
 			requestClose: async () => { throw new Error("Install a close fixture before requesting deletion"); },
 			getCloseState: async (sessionId: string) => ({ protocolVersion: 1, epoch: "test-daemon", revision: 0, recovery: "ready", sessionId, sides: [] }),
