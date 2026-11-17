@@ -323,6 +323,25 @@ type GetProjectResponse struct {
 	Project ProjectOrDegraded `json:"project"`
 }
 
+// ProjectOverlapResponse identifies two active sessions changing the same
+// base-relative project paths.
+type ProjectOverlapResponse struct {
+	SessionA domain.SessionID `json:"sessionA"`
+	SessionB domain.SessionID `json:"sessionB"`
+	Paths    []string         `json:"paths"`
+}
+
+// ProjectOverlapsResponse is the derived collision-radar read model for one
+// project. TruncatedSessionIDs names manifests that may make the result
+// incomplete without turning an otherwise useful read into an error.
+type ProjectOverlapsResponse struct {
+	ProjectID                domain.ProjectID         `json:"projectId"`
+	Overlaps                 []ProjectOverlapResponse `json:"overlaps"`
+	TruncatedSessionIDs      []domain.SessionID       `json:"truncatedSessionIds" description:"Sessions whose bounded manifests were truncated, so some overlaps may be omitted."`
+	UnresolvedBaseSessionIDs []domain.SessionID       `json:"unresolvedBaseSessionIds" description:"Sessions where at least one repository comparison base could not be resolved, so committed overlaps may be omitted."`
+	UnavailableSessionIDs    []domain.SessionID       `json:"unavailableSessionIds" description:"Sessions whose workspace could not be read; healthy session pairs are still returned."`
+}
+
 // ProjectOrDegraded is the discriminated `project` field: exactly one of
 // Project/Degraded is set. It marshals as whichever is present (so the handler
 // emits the right object) and exposes the oneOf variants to the spec reflector

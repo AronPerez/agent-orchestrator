@@ -5401,6 +5401,45 @@ paths:
       summary: Replace a project's per-project config
       tags:
       - projects
+  /api/v1/projects/{id}/overlaps:
+    get:
+      operationId: getProjectOverlaps
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectOverlapsResponse'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Find active project sessions changing the same base-relative paths
+      tags:
+      - projects
   /api/v1/projects/{id}/permissions:
     delete:
       operationId: forgetProjectPermissions
@@ -18704,6 +18743,13 @@ components:
       required:
       - availableCount
       type: object
+    CollisionRadarConfig:
+      properties:
+        ignorePaths:
+          items:
+            type: string
+          type: array
+      type: object
     CompactConversationResponse:
       properties:
         tokensAfter:
@@ -23153,6 +23199,8 @@ components:
           type: boolean
         canonicalRepoURL:
           type: string
+        collisionRadar:
+          $ref: '#/components/schemas/CollisionRadarConfig'
         containerReap:
           $ref: '#/components/schemas/ContainerReapConfig'
         defaultBranch:
@@ -23222,6 +23270,54 @@ components:
       oneOf:
       - $ref: '#/components/schemas/Project'
       - $ref: '#/components/schemas/DegradedProject'
+      type: object
+    ProjectOverlapResponse:
+      properties:
+        paths:
+          items:
+            type: string
+          type: array
+        sessionA:
+          type: string
+        sessionB:
+          type: string
+      required:
+      - sessionA
+      - sessionB
+      - paths
+      type: object
+    ProjectOverlapsResponse:
+      properties:
+        overlaps:
+          items:
+            $ref: '#/components/schemas/ProjectOverlapResponse'
+          type: array
+        projectId:
+          type: string
+        truncatedSessionIds:
+          description: Sessions whose bounded manifests were truncated, so some overlaps
+            may be omitted.
+          items:
+            type: string
+          type: array
+        unavailableSessionIds:
+          description: Sessions whose workspace could not be read; healthy session
+            pairs are still returned.
+          items:
+            type: string
+          type: array
+        unresolvedBaseSessionIds:
+          description: Sessions where at least one repository comparison base could
+            not be resolved, so committed overlaps may be omitted.
+          items:
+            type: string
+          type: array
+      required:
+      - projectId
+      - overlaps
+      - truncatedSessionIds
+      - unresolvedBaseSessionIds
+      - unavailableSessionIds
       type: object
     ProjectResponse:
       properties:
