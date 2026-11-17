@@ -134,6 +134,15 @@ func WriteError(w http.ResponseWriter, r *http.Request, err error) {
 	WriteJSON(w, status, body)
 }
 
+// WriteRedactedError records original for request diagnostics while rendering
+// redacted on the wire. Use it when a classified service error carries host
+// details that a scoped caller must not receive.
+func WriteRedactedError(w http.ResponseWriter, r *http.Request, original, redacted error) {
+	captureError(r, original)
+	status, body := renderErrorEnvelope(r, redacted)
+	WriteJSON(w, status, body)
+}
+
 // StreamError is WriteError for a stream that has already sent its 200
 // status line: it records the failure the same way and returns the envelope
 // for the stream to send as its last event.
@@ -144,6 +153,10 @@ func StreamError(r *http.Request, err error) APIError {
 
 func errorEnvelope(r *http.Request, err error) (int, APIError) {
 	captureError(r, err)
+	return renderErrorEnvelope(r, err)
+}
+
+func renderErrorEnvelope(r *http.Request, err error) (int, APIError) {
 	reportingOwner := ownership.OwnerOf(err)
 	body := func(status int, kind, code, message string, details map[string]any) (int, APIError) {
 		return status, newAPIError(r, kind, code, message, details, reportingOwner)

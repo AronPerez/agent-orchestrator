@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/requestscope"
 	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
 )
@@ -57,6 +59,52 @@ func (f *fakeBridge) SetBrowserRemoteAccess(on bool) (MobileStatusResponse, erro
 	r := f.Status()
 	r.BrowserRemoteAccess = on
 	return r, nil
+}
+
+type interruptedCoordinationBridge struct{ fakeBridge }
+
+func (*interruptedCoordinationBridge) IssueCoordinationToken(context.Context, string, string, requestscope.Credential, string) (CoordinationTokenResponse, error) {
+	return CoordinationTokenResponse{}, context.Canceled
+}
+
+func (*interruptedCoordinationBridge) RevokeCoordinationToken(context.Context, string, requestscope.Credential, string) (bool, error) {
+	return false, context.Canceled
+}
+
+func TestCoordinationHandlersReturnNonSuccessWhenInterrupted(t *testing.T) {
+	controller := &MobileController{Bridge: &interruptedCoordinationBridge{}}
+	credential := requestscope.Credential{Kind: requestscope.CredentialDevice, DeviceID: "device-full"}
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+		handle http.HandlerFunc
+	}{
+		{name: "issue", method: http.MethodPost, path: "/api/v1/remote-host/coordination-token", handle: controller.IssueCoordinationToken},
+		{name: "revoke", method: http.MethodDelete, path: "/api/v1/remote-host/coordination-token/device-child", handle: controller.RevokeCoordinationToken},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			router := chi.NewRouter()
+			router.Method(tc.method, tc.path, tc.handle)
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			req.Header.Set("Authorization", "Bearer parent-token")
+			req = req.WithContext(requestscope.WithCredential(req.Context(), credential))
+			recorder := httptest.NewRecorder()
+
+			router.ServeHTTP(recorder, req)
+
+			if recorder.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want 503; body=%s", recorder.Code, recorder.Body.String())
+			}
+			var body map[string]any
+			if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if body["code"] != "COORDINATION_TOKEN_INTERRUPTED" {
+				t.Fatalf("body = %v", body)
+			}
+		})
+	}
 }
 
 func TestMobileBrowserRemoteAccess(t *testing.T) {

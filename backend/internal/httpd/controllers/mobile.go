@@ -116,6 +116,7 @@ func (c *MobileController) IssueCoordinationToken(w http.ResponseWriter, r *http
 	result, err := issuer.IssueCoordinationToken(r.Context(), req.Name, req.Platform, credential, presentedToken)
 	switch {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		writeCoordinationInterrupted(w, r)
 		return
 	case errors.Is(err, errCoordinationIssuerRevoked):
 		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "COORDINATION_TOKEN_ISSUER",
@@ -156,6 +157,7 @@ func (c *MobileController) RevokeCoordinationToken(w http.ResponseWriter, r *htt
 	found, err := revoker.RevokeCoordinationToken(r.Context(), chi.URLParam(r, "deviceId"), requestscope.CredentialFrom(r.Context()), presentedToken)
 	switch {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		writeCoordinationInterrupted(w, r)
 		return
 	case errors.Is(err, errCoordinationIssuerRevoked):
 		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "COORDINATION_TOKEN_ISSUER",
@@ -172,6 +174,11 @@ func (c *MobileController) RevokeCoordinationToken(w http.ResponseWriter, r *htt
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func writeCoordinationInterrupted(w http.ResponseWriter, r *http.Request) {
+	envelope.WriteAPIError(w, r, http.StatusServiceUnavailable, "unavailable", "COORDINATION_TOKEN_INTERRUPTED",
+		"Remote access changed before the credential operation completed. Retry the request.", nil)
 }
 
 func isFullRemoteCredential(credential requestscope.Credential) bool {

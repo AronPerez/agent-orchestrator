@@ -420,8 +420,7 @@ func writeSpawnError(w http.ResponseWriter, r *http.Request, err error) {
 		// Service errors may carry local paths or setup output. Keep the original in
 		// request diagnostics while returning its stable kind/code across the
 		// coordination credential boundary.
-		envelope.CaptureError(r, err)
-		envelope.WriteError(w, r, apierr.New(apiError.Kind, apiError.Code, coordinationSpawnFailureMessage, nil))
+		envelope.WriteRedactedError(w, r, err, apierr.New(apiError.Kind, apiError.Code, coordinationSpawnFailureMessage, nil))
 		return
 	}
 	envelope.WriteError(w, r, err)
