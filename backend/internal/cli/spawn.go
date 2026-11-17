@@ -24,6 +24,7 @@ const (
 )
 
 type spawnOptions struct {
+	host            string
 	project         string
 	standalone      bool
 	harness         string
@@ -108,6 +109,9 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 			if opts.review && opts.claimPR == "" {
 				return usageError{fmt.Errorf("--review requires --claim-pr")}
 			}
+			if strings.TrimSpace(opts.host) != "" && opts.claimPR != "" {
+				return usageError{fmt.Errorf("--claim-pr is not supported with --host")}
+			}
 			name := strings.TrimSpace(opts.name)
 			if name == "" {
 				return usageError{fmt.Errorf("--name is required")}
@@ -179,6 +183,9 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 				return usageError{fmt.Errorf(`--tracker-provider must be "github" or "gitlab"`)}
 			}
 			opts.trackerProvider = tp
+			if err := ctx.selectSavedHostIfSet(cmd.Context(), opts.host); err != nil {
+				return err
+			}
 
 			var project projectDetails
 			var err error
@@ -220,10 +227,16 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 					return err
 				}
 			}
+			parentSessionID := strings.TrimSpace(os.Getenv("AO_SESSION_ID"))
+			if ctx.remote != nil {
+				// Session IDs are host-local. Do not misrepresent a local session as a
+				// parent on the destination before the host-qualified lineage contract lands.
+				parentSessionID = ""
+			}
 			req := spawnRequest{
 				ProjectID:           opts.project,
 				IssueID:             opts.issue,
-				ParentSessionID:     strings.TrimSpace(os.Getenv("AO_SESSION_ID")),
+				ParentSessionID:     parentSessionID,
 				TrackerProvider:     opts.trackerProvider,
 				Kind:                opts.kind,
 				Harness:             opts.harness,
@@ -290,7 +303,7 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 			if displayName == "" {
 				displayName = name
 			}
-			if _, err := fmt.Fprintf(out, "spawned session %s %q (%s)%s%s\n", res.Session.ID, displayName, res.Session.Status, claimLabel, promptSize); err != nil {
+			if _, err := fmt.Fprintf(out, "spawned session %s %q (%s)%s%s%s\n", res.Session.ID, displayName, res.Session.Status, claimLabel, promptSize, ctx.resolvedBySuffix()); err != nil {
 				return err
 			}
 			if opts.claimPR != "" {
@@ -308,6 +321,7 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 		}
 		return pflag.NormalizedName(name)
 	})
+	f.StringVar(&opts.host, "host", "", "Saved remote host label or host ID (cannot be combined with --url or AO_URL)")
 	f.StringVar(&opts.project, "project", "", "Project id to spawn the session in (default: AO_PROJECT_ID or the current registered repo; required with --url)")
 	f.BoolVar(&opts.standalone, "standalone", false, "Spawn a projectless worker in an Orchestrator-managed plain directory (requires --agent)")
 	f.StringVar(&opts.harness, "harness", "", "Agent harness / --agent: claude-code, codex, aider, opencode, opencode-v2, grok, droid, amp, agy, crush, cursor, qwen, gemini, copilot, goose, auggie, continue, devin, cline, kimi, muse, kiro, kilocode, vibe, pi, kimchi, prime-agent, autohand, omp, fx, unreal-agent, mimo-code, deepseek-harness, openhands, command-code, docker-agent,minimax-code, memcode, hermes, stakpak (default: project worker.agent; orchestrator spawns default to project orchestrator.agent; required if the project has none)")
