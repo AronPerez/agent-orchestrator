@@ -180,6 +180,13 @@ func TestProjectOverlapsSkipsUnadoptedImports(t *testing.T) {
 	if len(overlaps.Overlaps) != 0 {
 		t.Fatalf("overlaps = %+v, want pending import excluded", overlaps.Overlaps)
 	}
+	watchPaths, err := svc.ProjectOverlapWatchPaths(context.Background(), "demo")
+	if err != nil {
+		t.Fatalf("ProjectOverlapWatchPaths: %v", err)
+	}
+	if !slices.Equal(watchPaths, []string{active}) {
+		t.Fatalf("watch paths = %v, want only adopted session %q", watchPaths, active)
+	}
 }
 
 func TestProjectOverlapsReportsUnresolvedBasesAndUnavailableSessions(t *testing.T) {

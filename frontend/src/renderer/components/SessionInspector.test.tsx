@@ -39,6 +39,7 @@ import type {
 } from "../types/workspace";
 import { STANDALONE_WORKSPACE_ID } from "../types/workspace";
 import { noPRDetails } from "../lib/pr-display";
+import { projectOverlapsQueryKey } from "../lib/project-overlap-events";
 
 const { cloudCpMock, getMock, navigateMock, patchMock, projectOverlapSubscribeMock, putMock, postMock, sessionHostClientMock } = vi.hoisted(
   () => ({
@@ -488,6 +489,46 @@ describe("SessionInspector tabs", () => {
 			expect.anything(),
 			undefined,
 		));
+	});
+
+	it("catches up when the live session set shrinks during the initial overlap read", async () => {
+		const respond = commonGetsResponder();
+		let resolveInitial!: (value: { data: unknown }) => void;
+		const initial = new Promise<{ data: unknown }>((resolve) => { resolveInitial = resolve; });
+		let overlapReads = 0;
+		const clean = {
+			projectId: "ws-1", overlaps: [], truncatedSessionIds: [],
+			unresolvedBaseSessionIds: [], unavailableSessionIds: [],
+		};
+		getMock.mockImplementation(async (path: string) => {
+			if (path !== "/api/v1/projects/{id}/overlaps") return respond(path);
+			overlapReads += 1;
+			if (overlapReads === 1) return initial;
+			return { data: clean };
+		});
+		const current = session([]);
+		const peer = session([], { id: "sess-2", title: "Archiving peer" });
+		const view = renderWithQuery(
+			<SessionInspector session={current} />,
+			[{ id: "ws-1", name: "my-app", path: "/repo", sessions: [current, peer] }],
+		);
+		await waitFor(() => expect(overlapReads).toBe(1));
+
+		act(() => view.queryClient.setQueryData<WorkspaceSummary[]>(workspaceQueryKey, [
+			{ id: "ws-1", name: "my-app", path: "/repo", sessions: [current] },
+		]));
+		resolveInitial({
+			data: {
+				...clean,
+				overlaps: [{ sessionA: "sess-1", sessionB: "sess-2", paths: ["stale.go"] }],
+			},
+		});
+
+		await waitFor(() => expect(overlapReads).toBeGreaterThanOrEqual(2));
+		await waitFor(() => expect(view.queryClient.getQueryData(
+			projectOverlapsQueryKey("ws-1"),
+		)).toEqual(clean));
+		expect(screen.queryByText("Possible collision")).not.toBeInTheDocument();
 	});
 
   it("gives an orchestrator Summary and Browser, with its account but no branch", () => {

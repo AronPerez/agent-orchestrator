@@ -33,7 +33,7 @@ vi.mock("./host-clients", () => ({
 vi.mock("./remote-sse-probe", () => ({ probeRemoteSse: probeRemoteSseMock }));
 vi.mock("./sse-backoff", () => ({ computeSseRetryDelayMs: () => 5_000 }));
 
-import { REMOTE_PROJECT_OVERLAP_POLL_MS, subscribeProjectOverlapChanges } from "./project-overlap-events";
+import { PROJECT_OVERLAP_REFRESH_MS, subscribeProjectOverlapChanges } from "./project-overlap-events";
 
 class EventSourceStub {
 	static instances: EventSourceStub[] = [];
@@ -127,6 +127,22 @@ describe("subscribeProjectOverlapChanges", () => {
 		second();
 	});
 
+	it("periodically refreshes a verified local stream and stops on disposal", async () => {
+		const { client, invalidateQueries } = fakeQueryClient();
+		const release = subscribe("demo", "one,two", client);
+		EventSourceStub.instances[0].dispatch("ready");
+		await vi.advanceTimersByTimeAsync(0);
+		const readyCount = invalidateQueries.mock.calls.length;
+
+		await vi.advanceTimersByTimeAsync(PROJECT_OVERLAP_REFRESH_MS * 2);
+		expect(invalidateQueries.mock.calls.length).toBeGreaterThan(readyCount);
+
+		release();
+		const disposedCount = invalidateQueries.mock.calls.length;
+		await vi.advanceTimersByTimeAsync(PROJECT_OVERLAP_REFRESH_MS * 2);
+		expect(invalidateQueries).toHaveBeenCalledTimes(disposedCount);
+	});
+
 	it("uses the authenticated remote stream transport", async () => {
 		baseUrlForHostMock.mockReturnValue("https://box.example/api");
 		const { client, invalidateQueries } = fakeQueryClient();
@@ -145,7 +161,7 @@ describe("subscribeProjectOverlapChanges", () => {
 		);
 	});
 
-	it("polls while a remote stream probe is unavailable and stops after verification", async () => {
+	it("polls while a remote stream is unavailable and keeps a safety refresh after verification", async () => {
 		baseUrlForHostMock.mockReturnValue("https://box.example");
 		const callbacks: Array<{ fail: () => void; verify: () => void }> = [];
 		probeRemoteSseMock.mockImplementation((_url, _names, _onEvent, onVerified, onFailure) => {
@@ -158,14 +174,20 @@ describe("subscribeProjectOverlapChanges", () => {
 		callbacks[0].fail();
 		await vi.advanceTimersByTimeAsync(0);
 		expect(invalidateQueries).toHaveBeenCalledTimes(1);
-		await vi.advanceTimersByTimeAsync(REMOTE_PROJECT_OVERLAP_POLL_MS);
+		await vi.advanceTimersByTimeAsync(PROJECT_OVERLAP_REFRESH_MS);
 		expect(invalidateQueries.mock.calls.length).toBeGreaterThan(1);
 
 		callbacks.at(-1)!.verify();
 		await vi.advanceTimersByTimeAsync(0);
 		const verifiedCount = invalidateQueries.mock.calls.length;
-		await vi.advanceTimersByTimeAsync(REMOTE_PROJECT_OVERLAP_POLL_MS * 2);
-		expect(invalidateQueries).toHaveBeenCalledTimes(verifiedCount);
+		await vi.advanceTimersByTimeAsync(PROJECT_OVERLAP_REFRESH_MS * 2);
+		expect(invalidateQueries.mock.calls.length).toBeGreaterThan(verifiedCount);
+
+		const release = subscriptions.at(-1)!;
+		release();
+		const disposedCount = invalidateQueries.mock.calls.length;
+		await vi.advanceTimersByTimeAsync(PROJECT_OVERLAP_REFRESH_MS * 2);
+		expect(invalidateQueries).toHaveBeenCalledTimes(disposedCount);
 	});
 
 	it("queues one follow-up refresh when an overlap event arrives during the initial fetch", async () => {
