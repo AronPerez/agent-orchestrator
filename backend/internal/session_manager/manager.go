@@ -146,7 +146,7 @@ var (
 	// harness never confirmed that the agent became active before the
 	// confirmation budget was exhausted (e.g. trailing Enter absorbed or dropped).
 	// The API maps it to a 409; the caller retries or inspects the terminal.
-	ErrDeliveryUnconfirmed = errors.New("session: message delivery was not acknowledged")
+	ErrDeliveryUnconfirmed = ports.ErrAgentDeliveryUnconfirmed
 
 	// Spawn-stage sentinels. Each is the existing log word after "spawn" /
 	// "spawn <id>:" so wrapping them does not change daemon-log wording, while
@@ -5751,6 +5751,28 @@ func (m *Manager) sendWithConfirmationStop(
 	// reach a chat worker.
 	if handled, err := m.sendChat(ctx, id, message, clientMessageID, options); handled {
 		return err
+	}
+	// Contract supervision retries carry one stable session-delivery envelope.
+	// If the current runtime generation already accepted that exact key, a
+	// daemon restart must not type it into the pane again.
+	if deliveryID, stable := domain.SessionDeliveryID(message); stable {
+		rec, found, err := m.store.GetSession(ctx, id)
+		if err != nil {
+			return fmt.Errorf("send %s: read stable delivery: %w", id, err)
+		}
+		if found && rec.Metadata.RuntimeLaunchID != "" {
+			accepted := semanticMessageAccepted(rec, deliveryID)
+			if receipts, ok := m.store.(semanticDeliveryStore); ok {
+				persisted, receiptErr := receipts.SemanticDeliveryAccepted(ctx, id, rec.Metadata.RuntimeLaunchID, deliveryID)
+				if receiptErr != nil {
+					return fmt.Errorf("send %s: read stable delivery receipt: %w", id, receiptErr)
+				}
+				accepted = accepted || persisted
+			}
+			if accepted {
+				return nil
+			}
+		}
 	}
 
 	if _, coordination := domain.CoordinationDeliveryID(message); !coordination && !options.AuthoredByUser && strings.TrimSpace(message) != "" {

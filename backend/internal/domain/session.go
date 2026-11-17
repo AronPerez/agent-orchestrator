@@ -495,7 +495,15 @@ type SessionRecord struct {
 	Goal              string                 `json:"goal,omitempty"`
 	TimeboxDeadlineAt *time.Time             `json:"timeboxDeadlineAt,omitempty"`
 	ContractOutcome   SessionContractOutcome `json:"contractOutcome,omitempty" enum:"met,blocked,limit_hit"`
-	Metadata          SessionMetadata        `json:"-"`
+	// ContractStallNudgedAt and ContractStallEscalatedAt record the current
+	// idle episode's one nudge and escalation. Activity after the nudge begins a
+	// new episode without erasing the audit timestamps.
+	ContractStallNudgedAt    *time.Time `json:"contractStallNudgedAt,omitempty"`
+	ContractStallEscalatedAt *time.Time `json:"contractStallEscalatedAt,omitempty"`
+	// ContractTimeboxPromptedAt records the one wrap-up prompt sent when the
+	// durable deadline first becomes due.
+	ContractTimeboxPromptedAt *time.Time      `json:"contractTimeboxPromptedAt,omitempty"`
+	Metadata                  SessionMetadata `json:"-"`
 	// CleanupGeneration is a monotonic counter bumped each time the session is
 	// un-terminated (spawn/restore). The terminal-resource reconciler stamps its
 	// durable cleanup facts with the generation they were written for so a

@@ -859,6 +859,75 @@ func (s *Store) SetSessionAutoReview(ctx context.Context, id domain.SessionID, e
 	return rows > 0, nil
 }
 
+// RecordSessionContractStallNudge stamps a delivered nudge for the current
+// contract and starts a fresh stall episode by clearing any prior escalation.
+func (s *Store) RecordSessionContractStallNudge(ctx context.Context, id domain.SessionID, at time.Time) (bool, error) {
+	if id == "" || at.IsZero() {
+		return false, fmt.Errorf("invalid contract stall nudge")
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.RecordSessionContractStallNudge(ctx, gen.RecordSessionContractStallNudgeParams{
+		NudgedAt: nullTime(at), UpdatedAt: at, ID: id,
+	})
+	if err != nil {
+		return false, fmt.Errorf("record contract stall nudge for %s: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// RecordSessionContractStallEscalation stamps one escalation only when the
+// named nudge is still the current stall episode.
+func (s *Store) RecordSessionContractStallEscalation(ctx context.Context, id domain.SessionID, nudgedAt, at time.Time) (bool, error) {
+	if id == "" || nudgedAt.IsZero() || at.IsZero() {
+		return false, fmt.Errorf("invalid contract stall escalation")
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.RecordSessionContractStallEscalation(ctx, gen.RecordSessionContractStallEscalationParams{
+		EscalatedAt: nullTime(at), UpdatedAt: at, ID: id, NudgedAt: nullTime(nudgedAt),
+	})
+	if err != nil {
+		return false, fmt.Errorf("record contract stall escalation for %s: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// ExpireSessionContract records limit_hit only for the exact still-open
+// deadline, so a terminal worker report or replacement contract wins races.
+func (s *Store) ExpireSessionContract(ctx context.Context, id domain.SessionID, deadline, at time.Time) (bool, error) {
+	if id == "" || deadline.IsZero() || at.IsZero() {
+		return false, fmt.Errorf("invalid contract expiry")
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.ExpireSessionContract(ctx, gen.ExpireSessionContractParams{
+		UpdatedAt: at, ID: id, DeadlineAt: nullTime(deadline),
+	})
+	if err != nil {
+		return false, fmt.Errorf("expire session contract for %s: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// RecordSessionContractTimeboxPrompt stamps delivery separately from the
+// limit_hit outcome so an unsafe surface can be retried without reopening the
+// contract or duplicating a prompt that already landed.
+func (s *Store) RecordSessionContractTimeboxPrompt(ctx context.Context, id domain.SessionID, deadline, at time.Time) (bool, error) {
+	if id == "" || deadline.IsZero() || at.IsZero() {
+		return false, fmt.Errorf("invalid contract timebox prompt")
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.RecordSessionContractTimeboxPrompt(ctx, gen.RecordSessionContractTimeboxPromptParams{
+		PromptedAt: nullTime(at), UpdatedAt: at, ID: id, DeadlineAt: nullTime(deadline),
+	})
+	if err != nil {
+		return false, fmt.Errorf("record contract timebox prompt for %s: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
 // DeleteSession removes a session row, but only if it is still in seed state
 // (no workspace, no runtime handle, no agent session id, no prompt, no handoff
 // metadata, and not already terminated). Rows that have observable spawn output are immutable
@@ -1230,19 +1299,22 @@ func rowToRecord(row gen.GetSessionRow) domain.SessionRecord {
 			State:          row.ActivityState,
 			LastActivityAt: row.ActivityLastAt,
 		},
-		FirstSignalAt:      nullTimeToTime(row.FirstSignalAt),
-		IsTerminated:       row.IsTerminated,
-		HibernatedAt:       nullTimeToTimePtr(row.HibernatedAt),
-		StaleBinary:        staleBinaryFromRow(row),
-		IsPinned:           row.IsPinned,
-		PinnedAt:           nullTimeToTimePtr(row.PinnedAt),
-		TerminateOnPRMerge: row.TerminateOnPRMerge,
-		AutoInjectReview:   row.AutoInjectReview,
-		AutoInjectCI:       row.AutoInjectCI,
-		OutputType:         normalizeSessionOutputType(domain.SessionOutputType(row.SessionOutputType)),
-		Goal:               row.Goal,
-		TimeboxDeadlineAt:  nullTimeToTimePtr(row.TimeboxDeadlineAt),
-		ContractOutcome:    domain.SessionContractOutcome(row.ContractOutcome),
+		FirstSignalAt:             nullTimeToTime(row.FirstSignalAt),
+		IsTerminated:              row.IsTerminated,
+		HibernatedAt:              nullTimeToTimePtr(row.HibernatedAt),
+		StaleBinary:               staleBinaryFromRow(row),
+		IsPinned:                  row.IsPinned,
+		PinnedAt:                  nullTimeToTimePtr(row.PinnedAt),
+		TerminateOnPRMerge:        row.TerminateOnPRMerge,
+		AutoInjectReview:          row.AutoInjectReview,
+		AutoInjectCI:              row.AutoInjectCI,
+		OutputType:                normalizeSessionOutputType(domain.SessionOutputType(row.SessionOutputType)),
+		Goal:                      row.Goal,
+		TimeboxDeadlineAt:         nullTimeToTimePtr(row.TimeboxDeadlineAt),
+		ContractOutcome:           domain.SessionContractOutcome(row.ContractOutcome),
+		ContractStallNudgedAt:     nullTimeToTimePtr(row.ContractStallNudgedAt),
+		ContractStallEscalatedAt:  nullTimeToTimePtr(row.ContractStallEscalatedAt),
+		ContractTimeboxPromptedAt: nullTimeToTimePtr(row.ContractTimeboxPromptedAt),
 		Metadata: domain.SessionMetadata{
 			ImportSource:                     unmarshalImportSource(row.ImportSource),
 			Branch:                           row.Branch,

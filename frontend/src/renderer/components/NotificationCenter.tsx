@@ -1419,6 +1419,7 @@ function notificationMentions(notification: NotificationCopy, value: string): bo
 function notificationIcon(type: string) {
 	switch (type) {
 		case "needs_input":
+		case "session_stalled":
 			return MessageSquareDot;
 		case "review_feedback":
 		case "review_changes_requested":
@@ -1446,6 +1447,7 @@ function notificationIcon(type: string) {
 function notificationIconClass(type: string): string {
 	switch (type) {
 		case "needs_input":
+		case "session_stalled":
 		case "review_feedback":
 		case "review_changes_requested":
 			return "text-warning";

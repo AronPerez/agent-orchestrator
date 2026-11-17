@@ -6,6 +6,15 @@ INSERT INTO reports (
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING *;
 
+-- name: CreateReportIfAbsent :one
+INSERT INTO reports (
+    id, session_id, project_id, state, note, message, created_at, available_at,
+    settlement_deadline, repeat_count
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO NOTHING
+RETURNING *;
+
 -- name: CreateReportOutput :exec
 INSERT INTO report_outputs (report_id, position, kind, reference, label)
 VALUES (?, ?, ?, ?, ?);

@@ -11636,6 +11636,28 @@ func TestSend_CodexSessionDeliveryStopsAfterSemanticAcceptance(t *testing.T) {
 	}
 }
 
+func TestSend_SkipsAcceptedStableCoordinationDelivery(t *testing.T) {
+	const deliveryID = "session-contract-timebox:s1:1"
+	st := newFakeStore()
+	st.sessions["s1"] = pastStartupGate(domain.SessionRecord{
+		ID: "s1", Harness: domain.HarnessCodex, Mode: domain.SessionModeTUI,
+		Activity: domain.Activity{State: domain.ActivityIdle},
+		Metadata: domain.SessionMetadata{RuntimeLaunchID: "launch-1", RuntimeHandleID: "handle-1"},
+	})
+	receipts := newFakeSemanticReceiptStore(st)
+	receipts.accept("s1", "launch-1", deliveryID)
+	messenger := &fakeMessenger{}
+	m := newSendTestManager(t, codex.New(), messenger, st)
+	m.store = receipts
+
+	if err := m.Send(context.Background(), "s1", domain.WrapSessionDelivery(deliveryID, "wrap up and report"), nil); err != nil {
+		t.Fatalf("Send accepted coordination retry: %v", err)
+	}
+	if len(messenger.msgs) != 0 {
+		t.Fatalf("pane writes = %#v, want accepted retry suppressed", messenger.msgs)
+	}
+}
+
 func TestSendSemanticTUIRequiresCorrelatedPromptAcceptance(t *testing.T) {
 	const deliveryID = "report-batch:abc123"
 	st := newFakeStore()
