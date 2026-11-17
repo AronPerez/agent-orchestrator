@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import { agentReadiness } from "../src/renderer/test/agent-readiness-fixtures";
 import { installFakeAgent } from "./support/fake-bridge";
 
@@ -136,9 +136,7 @@ test("clicking chat whitespace and composer padding keeps the draft caret positi
 	await expect(composer).toHaveText("abcdYXef");
 });
 
-test("typed chat composer text is visibly selected with a pointer drag @T0", async ({ page }) => {
-	const composer = await openChatWithDraft(page);
-
+async function selectComposerText(page: Page, composer: Locator) {
 	const textBounds = await composer.evaluate((element) => {
 		const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
 		const textNodes: Text[] = [];
@@ -167,6 +165,52 @@ test("typed chat composer text is visibly selected with a pointer drag @T0", asy
 	await page.mouse.down();
 	await page.mouse.move(textBounds.endX, textBounds.endY, { steps: 12 });
 	await page.mouse.up();
+}
+
+test.describe("macOS composer selection", () => {
+	test.use({
+		userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36",
+	});
+
+	for (const theme of ["dark", "light"]) {
+		for (const { width, collapsed } of [
+			{ width: 200, collapsed: false },
+			{ width: 240, collapsed: false },
+			{ width: 241, collapsed: false },
+			{ width: 320, collapsed: false },
+			{ width: 240, collapsed: true },
+		]) {
+			test(`selects wrapped text with sidebar=${width}, collapsed=${collapsed}, ${theme} @T0`, async ({ page }) => {
+				await page.addInitScript(({ width, theme }) => {
+					Object.defineProperty(navigator, "platform", { get: () => "MacIntel", configurable: true });
+					Object.defineProperty(navigator, "userAgentData", { get: () => ({ platform: "macOS" }), configurable: true });
+					localStorage.setItem("ao-sidebar-w", String(width));
+					localStorage.setItem("ao.theme", theme);
+				}, { width, theme });
+				const composer = await openChatWithDraft(page);
+				const nav = page.locator('[data-slot="titlebar-nav"]');
+				await expect(page.locator('[data-slot="sidebar-container"]')).toHaveCSS("width", `${width}px`);
+				if (collapsed) {
+					await nav.getByRole("button", { name: "Collapse sidebar", exact: true }).click();
+					await expect(page.locator('[data-slot="sidebar-gap"]')).toHaveCSS("width", "0px");
+				}
+				await expect(page.locator('[data-slot="sidebar"]')).toHaveAttribute("data-state", collapsed ? "collapsed" : "expanded");
+				await expect(nav.getByRole("button", { name: "Go back", exact: true })).toBeVisible();
+				await expect(nav.getByRole("button", { name: "Go forward", exact: true })).toBeVisible();
+
+				await selectComposerText(page, composer);
+
+				await expect.poll(() => page.evaluate(() => window.getSelection()?.toString())).toBe(draft);
+				await expect(page.locator("html")).toHaveAttribute("data-ao-platform", "darwin");
+				await expect(composer).toHaveCSS("font-family", /-apple-system/);
+			});
+		}
+	}
+});
+
+test("typed chat composer text is visibly selected with a pointer drag @T0", async ({ page }) => {
+	const composer = await openChatWithDraft(page);
+	await selectComposerText(page, composer);
 
 	const selection = await page.evaluate(() => ({
 		text: window.getSelection()?.toString() ?? "",
