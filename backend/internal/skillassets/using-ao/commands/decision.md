@@ -39,9 +39,11 @@ through your role's coordination or status path so the dependent session can
 resume after the answer.
 
 Before ending a turn blocked by a new or existing call, make it visible. A
-worker with a project orchestrator uses a needs-input status report with the
-call link. A standalone worker or orchestrator must explicitly tell the human
-in your current response that a decision is waiting, include the call link and
+worker whose prompt names an active project orchestrator uses a needs-input
+status report with the call link. Any session without a named active project
+orchestrator—including a standalone worker, a project worker without an active
+orchestrator, or an orchestrator—must explicitly tell the human in your current
+response that a decision is waiting, include the call link and
 `ao decision show <call-link>`, and not end the turn silently.
 
 ## Raising a call

@@ -130,7 +130,8 @@ func buildSystemPromptText(cfg systemPromptConfig) string {
 	default:
 		return ""
 	}
-	sections = append(sections, decisionCallsPrompt(), userOrientationPrompt(), publishingScopePrompt())
+	hasActiveOrchestrator := cfg.Role == sessionPromptRoleWorker && !cfg.Standalone && strings.TrimSpace(cfg.OrchestratorSessionID) != ""
+	sections = append(sections, decisionCallsPrompt(hasActiveOrchestrator), userOrientationPrompt(), publishingScopePrompt())
 	if zone := timeZonePrompt(cfg.TimeZone); zone != "" {
 		sections = append(sections, zone)
 	}
@@ -143,7 +144,11 @@ func buildSystemPromptText(cfg systemPromptConfig) string {
 	return strings.Join(sections, "\n\n")
 }
 
-func decisionCallsPrompt() string {
+func decisionCallsPrompt(hasActiveOrchestrator bool) string {
+	visibility := `- Before ending a turn blocked by a new or existing call, explicitly tell the human in the current response that a decision is waiting, include the call link and ` + "`ao decision show <call-link>`" + `. Do not end the turn silently.`
+	if hasActiveOrchestrator {
+		visibility = `- Before ending a turn blocked by a new or existing call, use the needs-input call-link handoff in Worker Reports.`
+	}
 	return `## Decisions for the Human
 
 When you need the human to choose between options, raise a call in Orchestrator's decision ledger. Do not ask in passing, and do not pass the question to another session.
@@ -152,7 +157,7 @@ When you need the human to choose between options, raise a call in Orchestrator'
 - Otherwise raise one call for each decision: ` + "`ao decision raise --title <the question> --context <what they need to know> --option \"<label> :: <what it leads to>\" --option \"<label> :: <what it leads to>\" --recommend <n>`" + `. Give two to four options and recommend one, with the reason in the context.
 - Raise it yourself. If another session brings you a question, tell it to raise the call. If that session has ended, raise the call yourself with the full context. Never ask the human for a ruling by id.
 - Keep working on anything that does not depend on the answer.
-- Before ending a turn blocked by a new or existing call, make it visible. A worker with a project orchestrator uses the needs-input call-link handoff in Worker Reports. A standalone worker or orchestrator must explicitly tell the human in the current response that a decision is waiting, include the call link and ` + "`ao decision show <call-link>`" + `. Do not end the turn silently.
+` + visibility + `
 - The answer arrives in this session as a message from the human that begins "Decision on your call" or "Changed decision on your call". A dismissal message begins "I dismissed your call" and means no answer is coming. When an answer or dismissal arrives and you have a project orchestrator, first run ` + "`ao report --checkpoint --note \"Decision call resolved: <call-link>; resume sessions blocked by it\"`" + ` so it can resume any other session that reused your call. For an answer, act on it, then use the exact call and answer-entry ids from that message to record what happened in one line: ` + "`ao decision outcome <id> --for-answer <answer-entry-id> --text <what happened>`" + `.
 - If the session that raised a call has ended, its answer goes to the project's orchestrator and begins "Decision on a call raised by". Carry it out or hand it to a worker, then record the outcome.
 - When you mention a call anywhere, use the link ` + "`ao decision raise`" + ` printed. Never use a bare id.

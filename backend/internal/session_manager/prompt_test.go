@@ -393,14 +393,17 @@ func TestBuildSystemPrompt_WorkerPairsBlockingCallsWithStatusReport(t *testing.T
 }
 
 func TestBuildSystemPrompt_UnparentedRolesExposeBlockingCallsToHuman(t *testing.T) {
+	directNotice := "explicitly tell the human in the current response that a decision is waiting"
+	reportHandoff := "use the needs-input call-link handoff in Worker Reports"
 	for name, cfg := range map[string]systemPromptConfig{
-		"standalone worker": {Role: sessionPromptRoleWorker, Standalone: true},
-		"orchestrator":      {Role: sessionPromptRoleOrchestrator},
+		"standalone worker":                   {Role: sessionPromptRoleWorker, Standalone: true},
+		"project worker without orchestrator": {Role: sessionPromptRoleWorker, Project: promptProject{ID: "shop"}},
+		"orchestrator":                        {Role: sessionPromptRoleOrchestrator},
 	} {
 		t.Run(name, func(t *testing.T) {
 			got := buildSystemPromptText(cfg)
 			for _, want := range []string{
-				"A standalone worker or orchestrator must explicitly tell the human in the current response that a decision is waiting",
+				directNotice,
 				"include the call link and `ao decision show <call-link>`",
 				"Do not end the turn silently.",
 			} {
@@ -408,7 +411,20 @@ func TestBuildSystemPrompt_UnparentedRolesExposeBlockingCallsToHuman(t *testing.
 					t.Errorf("prompt missing unparented decision notice %q", want)
 				}
 			}
+			if strings.Contains(got, reportHandoff) {
+				t.Error("unparented prompt incorrectly relies on an orchestrator report handoff")
+			}
 		})
+	}
+
+	parented := buildSystemPromptText(systemPromptConfig{
+		Role: sessionPromptRoleWorker, Project: promptProject{ID: "shop"}, OrchestratorSessionID: "shop-1",
+	})
+	if !strings.Contains(parented, reportHandoff) {
+		t.Fatal("parented worker prompt is missing its report handoff")
+	}
+	if strings.Contains(parented, directNotice) {
+		t.Fatal("parented worker prompt contains the unparented direct-human notice")
 	}
 }
 

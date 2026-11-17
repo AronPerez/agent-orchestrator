@@ -281,6 +281,7 @@ func TestEmbeddedDecisionGuidanceCoversSearchingRaisingAndClosing(t *testing.T) 
 		"ao report --needs-input",
 		"resume the blocked session after it is answered",
 		"explicitly tell the human in your current response",
+		"project worker without an active orchestrator",
 		"ao decision show <call-link>",
 		`ao report --checkpoint --note "Decision call resolved: <call-link>; resume sessions blocked by it"`,
 	} {
