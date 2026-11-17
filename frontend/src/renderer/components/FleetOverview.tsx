@@ -1,4 +1,5 @@
 import {
+	attentionZone,
 	buildFleetTree,
 	getDisplayStatusLabel,
 	type AttentionZone,
@@ -187,10 +188,9 @@ function fleetPrStatus(pr: WorkspaceSession["prs"][number]): SessionStatus {
 }
 
 function fleetRollupStatus(session: WorkspaceSession): SessionStatus {
-	if (session.scmStatus) return session.scmStatus;
 	const active = session.prs.filter((pr) => pr.state === "open" || pr.state === "draft");
 	const statuses = new Set(active.map(fleetPrStatus));
-	for (const status of [
+	const derivedStatus = ([
 		"ci_failed",
 		"changes_requested",
 		"commented",
@@ -199,11 +199,13 @@ function fleetRollupStatus(session: WorkspaceSession): SessionStatus {
 		"pr_open",
 		"approved",
 		"mergeable",
-	] as const) {
-		if (statuses.has(status)) return status;
-	}
-	if (session.prs.some((pr) => pr.state === "merged")) return "merged";
-	return session.status;
+	] as const).find((status) => statuses.has(status));
+	const deliveryStatus = session.scmStatus ?? derivedStatus ??
+		(session.prs.some((pr) => pr.state === "merged") ? "merged" : undefined);
+	if (!deliveryStatus) return session.status;
+	return rollupOrder.indexOf(attentionZone(session.status)) <= rollupOrder.indexOf(attentionZone(deliveryStatus))
+		? session.status
+		: deliveryStatus;
 }
 
 function hasChildren(row: FleetOverviewRow): boolean {

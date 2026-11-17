@@ -225,6 +225,18 @@ describe("FleetOverview", () => {
 		expect(project).not.toHaveTextContent("Ready");
 	});
 
+	it("keeps urgent live state above a less urgent open PR", () => {
+		const blocked = session("blocked", "Answer deploy question", "needs_input", {
+			scmStatus: "pr_open",
+			prs: [pr(1)],
+		});
+		render(<FleetOverview localWorkspaces={[workspace("project", "Project", [blocked])]} onOpen={vi.fn()} />);
+
+		const project = screen.getByRole("treeitem", { name: /^Project/ });
+		expect(project).toHaveTextContent("1 Needs you");
+		expect(project).not.toHaveTextContent("In review");
+	});
+
 	it("collapses branches and reveals archived sessions on request", async () => {
 		const active = session("active", "Active worker");
 		const archived = session("archived", "Archived worker", "terminated", { isTerminated: true });
