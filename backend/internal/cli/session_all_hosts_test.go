@@ -180,6 +180,132 @@ func TestSessionListAllHostsReadsLocalIdentityFromDaemonWhenFileIsMissing(t *tes
 	}
 }
 
+func TestSessionListAllHostsUsesQueriedDaemonIdentityWhenLocalFileDisagrees(t *testing.T) {
+	home, _ := prepareAllHostsTest(t, "local-1")
+	identityPath := filepath.Join(home, ".ao", "data", "mobile", "identity.json")
+	if err := os.WriteFile(identityPath, []byte(`{"hostId":"h_remote"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	remote := httptest.NewServer(allHostsHandler(t, "h_remote", "remote-1", "aoc_remote"))
+	t.Cleanup(remote.Close)
+	writeRemotes(t, home, 0o600, remoteEntry{
+		Label: "remote", URL: remote.URL, HostID: "h_remote", CoordinationToken: "aoc_remote",
+	})
+
+	out, errOut, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }},
+		"session", "ls", "--all-hosts", "--all", "--include-terminated", "--json")
+	if err != nil {
+		t.Fatalf("session ls --all-hosts: %v\nstderr=%s", err, errOut)
+	}
+	var got sessionListOutput
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Data) != 2 || got.Data[0].HostID != "h_local" || got.Data[1].HostID != "h_remote" {
+		t.Fatalf("data = %#v, want queried local identity plus saved remote", got.Data)
+	}
+}
+
+func TestSessionListAllHostsBoundsSnapshotAfterIdentitySucceeds(t *testing.T) {
+	home, _ := prepareAllHostsTest(t, "local-1")
+	oldTimeout := allHostsSnapshotTimeout
+	allHostsSnapshotTimeout = 250 * time.Millisecond
+	t.Cleanup(func() { allHostsSnapshotTimeout = oldTimeout })
+	stalled := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/identity":
+			_, _ = io.WriteString(w, `{"hostId":"h_stalled","apiVersion":1}`)
+		case "/api/v1/sessions":
+			<-r.Context().Done()
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(stalled.Close)
+	writeRemotes(t, home, 0o600, remoteEntry{
+		Label: "stalled", URL: stalled.URL, HostID: "h_stalled", CoordinationToken: "aoc_stalled",
+	})
+
+	started := time.Now()
+	out, errOut, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }},
+		"session", "ls", "--all-hosts", "--all", "--include-terminated", "--json")
+	if err != nil {
+		t.Fatalf("session ls --all-hosts: %v\nstderr=%s", err, errOut)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("all-host list took %s, want stalled host bounded", elapsed)
+	}
+	var got sessionListOutput
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Data) != 1 || got.Data[0].HostID != "h_local" {
+		t.Fatalf("data = %#v, want completed local result", got.Data)
+	}
+	if len(got.Meta.Hosts) != 2 || got.Meta.Hosts[1].HostID != "h_stalled" || got.Meta.Hosts[1].Error == "" {
+		t.Fatalf("hosts = %#v, want structured stalled-host failure", got.Meta.Hosts)
+	}
+}
+
+func TestSessionListAllHostsKeepsLocalResultWhenRemoteDiscoveryFails(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		breakStore func(t *testing.T, home string)
+	}{
+		{name: "corrupt", breakStore: func(t *testing.T, home string) {
+			path := filepath.Join(home, ".ao", remotesFileName)
+			if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "unreadable", breakStore: func(t *testing.T, home string) {
+			path := filepath.Join(home, ".ao", "remotes-directory")
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(remotesFileEnv, path)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, _ := prepareAllHostsTest(t, "local-1")
+			tc.breakStore(t, home)
+			out, errOut, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }},
+				"session", "ls", "--all-hosts", "--include-terminated", "--json")
+			if err != nil {
+				t.Fatalf("session ls --all-hosts: %v\nstderr=%s", err, errOut)
+			}
+			var got sessionListOutput
+			if err := json.Unmarshal([]byte(out), &got); err != nil {
+				t.Fatal(err)
+			}
+			if len(got.Data) != 1 || got.Data[0].HostID != "h_local" {
+				t.Fatalf("data = %#v, want healthy local result", got.Data)
+			}
+			if len(got.Meta.Hosts) != 2 || got.Meta.Hosts[1].HostLabel != "saved hosts" || got.Meta.Hosts[1].Error == "" {
+				t.Fatalf("hosts = %#v, want structured discovery failure", got.Meta.Hosts)
+			}
+		})
+	}
+}
+
+func TestSessionListAllHostsJSONUsesEmptyArrayForEmptyFleet(t *testing.T) {
+	home, _ := prepareAllHostsTest(t, "")
+	writeRemotes(t, home, 0o600)
+	out, errOut, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }},
+		"session", "ls", "--all-hosts", "--include-terminated", "--json")
+	if err != nil {
+		t.Fatalf("session ls --all-hosts: %v\nstderr=%s", err, errOut)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(out), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(raw["data"]); got != "[]" {
+		t.Fatalf("data JSON = %s, want []", got)
+	}
+}
+
 func TestSessionListAllHostsBoundsRemoteFanout(t *testing.T) {
 	home, _ := prepareAllHostsTest(t, "")
 	var inFlight atomic.Int32
