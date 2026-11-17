@@ -21,7 +21,6 @@ const shellMocks = vi.hoisted(() => {
 		openFolderPathListener: undefined as ((path: string) => void) | undefined,
 		sessionDeepLinkListener: undefined as ((rawUrl: string) => void) | undefined,
 		remoteLoadedProjectHostIds: [] as string[],
-		remoteCachedProjectHostIds: [] as string[],
 		remoteLoadedSessionHostIds: [] as string[],
 		remoteHostsState: null as null | { hosts: Array<{ hostId: string; status: string }>; listed: boolean; settled: boolean; refresh: () => Promise<void> },
 		routeParams: {} as { hostId?: string; projectId?: string; sessionId?: string },
@@ -209,7 +208,7 @@ vi.mock("../lib/bridge", () => ({
 vi.mock("../hooks/useWorkspaceQuery", () => ({
 	useWorkspaceQuery: () => ({ ...shellMocks.state.workspaceQuery, cloudLoadSettled: shellMocks.state.cloudLoadSettled }),
 	useWorkspacePolling: () => undefined,
-	useRemoteWorkspaces: () => ({ data: shellMocks.state.remoteWorkspaces, failedHostIds: shellMocks.state.remoteFailedHostIds, cachedProjectHostIds: shellMocks.state.remoteCachedProjectHostIds, loadedProjectHostIds: shellMocks.state.remoteLoadedProjectHostIds, loadedSessionHostIds: shellMocks.state.remoteLoadedSessionHostIds }),
+	useRemoteWorkspaces: () => ({ data: shellMocks.state.remoteWorkspaces, failedHostIds: shellMocks.state.remoteFailedHostIds, loadedProjectHostIds: shellMocks.state.remoteLoadedProjectHostIds, loadedSessionHostIds: shellMocks.state.remoteLoadedSessionHostIds }),
 	useWorkspaceTraySessions: () => ({ data: [] }),
 	workspaceQueryKey: ["workspaces"],
 	remoteWorkspaceQueryKey: (hostId: string) => ["remote-workspaces", hostId],
@@ -1758,7 +1757,6 @@ describe("shell session deep links", () => {
 
 	beforeEach(() => {
 		shellMocks.state.remoteLoadedProjectHostIds = [];
-		shellMocks.state.remoteCachedProjectHostIds = [];
 		shellMocks.state.remoteLoadedSessionHostIds = [];
 		shellMocks.state.accountStatus = "authenticated";
 		shellMocks.state.remoteHostsState = { hosts: [], listed: false, settled: true, refresh: async () => undefined };
@@ -1892,7 +1890,6 @@ describe("shell session deep links", () => {
 		["remote", "offline", ""], ["remote", "offline", "/artifacts/report.md"],
 	])("refuses a %s match while another known project host is %s: %s", async (source, availability, suffix) => {
 		const session = { id: "sess-1", status: "working" };
-		shellMocks.state.remoteCachedProjectHostIds = ["box-unavailable"];
 		shellMocks.state.remoteFailedHostIds = availability === "failed" ? ["box-unavailable"] : [];
 		if (availability === "offline") {
 			useUiStore.setState({ remoteHosts: true });
@@ -1931,7 +1928,6 @@ describe("shell session deep links", () => {
 			shellMocks.state.remoteHostsState.hosts.push({ hostId: "box-a", status: "connected" });
 			shellMocks.state.remoteLoadedProjectHostIds = ["box-a"];
 			shellMocks.state.remoteLoadedSessionHostIds = ["box-a"];
-			shellMocks.state.remoteCachedProjectHostIds = ["box-a"];
 			shellMocks.state.remoteWorkspaces = [
 				{ id: "proj-1", hostId: "box-a", sessions: [{ id: "sess-1", status: "working" }] },
 			] as unknown as WorkspaceSummary[];
@@ -1950,24 +1946,20 @@ describe("shell session deep links", () => {
 		}
 	});
 
-	it.each(["failed", "offline"])("opens a unique local link when a %s host has a known empty project inventory", async (availability) => {
+	it.each(["failed", "offline"])("refuses a local link when a %s host only has an old empty inventory", async (availability) => {
 		useUiStore.setState({ remoteHosts: true });
 		shellMocks.state.remoteHostsState = {
 			hosts: [{ hostId: "box-unavailable", status: availability === "failed" ? "connected" : "offline" }],
 			listed: true, settled: true, refresh: async () => undefined,
 		};
 		shellMocks.state.remoteFailedHostIds = availability === "failed" ? ["box-unavailable"] : [];
-		shellMocks.state.remoteCachedProjectHostIds = ["box-unavailable"];
 		await renderShellWithReadyDaemon();
 		emitSessionDeepLink("ao-app://sessions/proj-1/sess-1");
-		expect(shellMocks.navigate).toHaveBeenCalledWith({
-			to: "/projects/$projectId/sessions/$sessionId",
-			params: { projectId: "proj-1", sessionId: "sess-1" },
-		});
+		expect(shellMocks.navigate).not.toHaveBeenCalled();
+		expect(useUiStore.getState().globalToast?.title).toContain("host");
 	});
 
-	it.each(["failed", "offline"])("opens a unique local link when a %s host has a different project", async (availability) => {
-		shellMocks.state.remoteCachedProjectHostIds = ["box-unavailable"];
+	it.each(["failed", "offline"])("refuses a local link when a %s host only has an old unrelated project inventory", async (availability) => {
 		shellMocks.state.remoteFailedHostIds = availability === "failed" ? ["box-unavailable"] : [];
 		if (availability === "offline") {
 			useUiStore.setState({ remoteHosts: true });
@@ -1978,14 +1970,11 @@ describe("shell session deep links", () => {
 		] as unknown as WorkspaceSummary[];
 		await renderShellWithReadyDaemon();
 		emitSessionDeepLink("ao-app://sessions/proj-1/sess-1");
-		expect(shellMocks.navigate).toHaveBeenCalledWith({
-			to: "/projects/$projectId/sessions/$sessionId",
-			params: { projectId: "proj-1", sessionId: "sess-1" },
-		});
+		expect(shellMocks.navigate).not.toHaveBeenCalled();
+		expect(useUiStore.getState().globalToast?.title).toContain("host");
 	});
 
 	it.each(["failed", "offline"])("refuses a standalone collision when a %s host has no cached workspace row", async (availability) => {
-		shellMocks.state.remoteCachedProjectHostIds = ["box-unavailable"];
 		shellMocks.state.workspaces = [
 			{ id: STANDALONE_WORKSPACE_ID, sessions: [{ id: "scratch-1", status: "working" }] },
 		] as unknown as WorkspaceSummary[];

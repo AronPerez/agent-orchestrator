@@ -1,5 +1,5 @@
 import { markApiError } from "../lib/reported-errors";
-import { type QueryClient, useQueries, useQuery, useQueryClient, type Query } from "@tanstack/react-query";
+import { type QueryClient, useQueries, useQuery, useQueryClient, type Query, replaceEqualDeep } from "@tanstack/react-query";
 import { useRemoteUnpinStore, withRemoteUnpins } from "../stores/remote-unpin-store";
 import { cleanUpLegacyPreparedCloudSessions } from "../lib/cloud-session-prestart";
 import type { TraySessionEntry } from "../../shared/tray";
@@ -21,7 +21,7 @@ import { toReviewerHarnessId } from "../lib/reviewer-harnesses";
 import { captureRendererEvent } from "../lib/telemetry";
 import { aoBridge } from "../lib/bridge";
 import { withQueryFields } from "../lib/query-result";
-import { clientForHost } from "../lib/host-clients";
+import { clientForHost, connectedHosts } from "../lib/host-clients";
 import { useConnectedHosts } from "./useHostConnection";
 import { requestRemoteHostCheck } from "./useRemoteHosts";
 import { applyOptimisticSessionKills, optimisticSessionKillsVersion, subscribeOptimisticSessionKills } from "./optimistic-session-kills";
@@ -348,8 +348,27 @@ async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
 	return applyOptimisticSessionKills(workspaces) ?? workspaces;
 }
 
+// Disk snapshots carry no connection receipt. Keep live receipts in memory even
+// when structural sharing reuses an unchanged array from the query cache.
+const remoteReadConnections = new WeakMap<object, ReturnType<typeof clientForHost>>();
+
+function shareRemoteRead(previous: unknown, next: unknown): unknown {
+	const shared = replaceEqualDeep(previous, next);
+	const connection = next && typeof next === "object" ? remoteReadConnections.get(next) : undefined;
+	if (shared && typeof shared === "object") {
+		if (connection) remoteReadConnections.set(shared, connection);
+		else remoteReadConnections.delete(shared);
+	}
+	return shared;
+}
+
+function hasCurrentRemoteRead(hostId: string, data: unknown): boolean {
+	return Boolean(data && typeof data === "object" && remoteReadConnections.get(data) === clientForHost(hostId));
+}
+
 async function fetchRemoteProjects(hostId: string) {
-	const { data, error, response } = await clientForHost(hostId).GET("/api/v1/projects").catch((cause: unknown) => {
+	const connection = clientForHost(hostId);
+	const { data, error, response } = await connection.GET("/api/v1/projects").catch((cause: unknown) => {
 		recheckRemoteHost(hostId);
 		throw cause;
 	});
@@ -357,11 +376,14 @@ async function fetchRemoteProjects(hostId: string) {
 		recheckRemoteHost(hostId, response.status);
 		throw error;
 	}
-	return data?.projects ?? [];
+	const projects = data?.projects ?? [];
+	remoteReadConnections.set(projects, connection);
+	return projects;
 }
 
 async function fetchRemoteSessions(hostId: string) {
-	const { data, error, response } = await clientForHost(hostId).GET("/api/v1/sessions").catch((cause: unknown) => {
+	const connection = clientForHost(hostId);
+	const { data, error, response } = await connection.GET("/api/v1/sessions").catch((cause: unknown) => {
 		recheckRemoteHost(hostId);
 		throw cause;
 	});
@@ -369,7 +391,7 @@ async function fetchRemoteSessions(hostId: string) {
 		recheckRemoteHost(hostId, response.status);
 		throw error;
 	}
-	return Promise.all((data?.sessions ?? []).map(async (session) => ({
+	const sessions = await Promise.all((data?.sessions ?? []).map(async (session) => ({
 		...session,
 		artifactFiles: await Promise.all((session.artifactFiles ?? []).map(async (artifact) => ({
 			...artifact,
@@ -379,6 +401,8 @@ async function fetchRemoteSessions(hostId: string) {
 			inlineUrl: undefined,
 		}))),
 	})));
+	remoteReadConnections.set(sessions, connection);
+	return sessions;
 }
 
 function toRemoteWorkspaces(
@@ -920,6 +944,9 @@ export function useRemoteWorkspaces(options: WorkspaceSubscriptionOptions & {
 	cachedHostIds?: string[];
 } = {}) {
 	const connected = useConnectedHosts();
+	const queryClient = useQueryClient();
+	const connections = useMemo(() => new Map(connected.map((hostId) => [hostId, clientForHost(hostId)])), [connected]);
+	const previousConnections = useRef(connections);
 	const cachedHostIds = options.cachedHostIds;
 	const hostIds = useMemo(
 		() => cachedHostIds?.length ? [...new Set([...connected, ...cachedHostIds])] : connected,
@@ -929,6 +956,9 @@ export function useRemoteWorkspaces(options: WorkspaceSubscriptionOptions & {
 		queries: hostIds.map((hostId) => ({
 			queryKey: remoteProjectsQueryKey(hostId),
 			queryFn: () => fetchRemoteProjects(hostId),
+			structuralSharing: shareRemoteRead,
+			staleTime: 0,
+			refetchOnMount: "always",
 			enabled: connected.includes(hostId),
 			retry: 1,
 			refetchInterval: 15_000,
@@ -939,12 +969,29 @@ export function useRemoteWorkspaces(options: WorkspaceSubscriptionOptions & {
 		queries: hostIds.map((hostId) => ({
 			queryKey: remoteSessionsQueryKey(hostId),
 			queryFn: () => fetchRemoteSessions(hostId),
+			structuralSharing: shareRemoteRead,
+			staleTime: 0,
+			refetchOnMount: "always",
 			enabled: connected.includes(hostId),
 			retry: 1,
 			refetchInterval: 15_000,
 			subscribed: options.subscribed,
 		})),
 	});
+	useEffect(() => {
+		const previous = previousConnections.current;
+		previousConnections.current = connections;
+		for (const [hostId, connection] of connections) {
+			if (!previous.has(hostId) || previous.get(hostId) === connection) continue;
+			// A proxy can be replaced without the host leaving the connected list.
+			// Discard any reads started through the previous proxy before refetching.
+			const keys = [remoteProjectsQueryKey(hostId), remoteSessionsQueryKey(hostId)];
+			void Promise.all(keys.map((queryKey) => queryClient.cancelQueries({ queryKey, exact: true }))).then(() => {
+				if (!connectedHosts().includes(hostId) || clientForHost(hostId) !== connection) return;
+				return Promise.all(keys.map((queryKey) => queryClient.refetchQueries({ queryKey, exact: true, type: "active" })));
+			});
+		}
+	}, [connections, queryClient]);
 	// Pins removed here that the host has not confirmed yet (it may be offline).
 	const unpins = useRemoteUnpinStore((state) => state.unpins);
 	const live = (predicate: (index: number) => boolean) => hostIds.filter((hostId, index) => connected.includes(hostId) && predicate(index));
@@ -974,14 +1021,11 @@ export function useRemoteWorkspaces(options: WorkspaceSubscriptionOptions & {
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 		[dataInputs],
 	);
-	// Preserve inventory knowledge for offline hosts, including an empty list.
-	const cachedProjectHostIds = useStableArray(hostIds.filter((_, index) => projects[index]?.data !== undefined));
-	const loadedProjectHostIds = useStableArray(live((index) => projects[index]?.data !== undefined));
-	const loadedSessionHostIds = useStableArray(live((index) => sessions[index]?.data !== undefined));
+	const loadedProjectHostIds = useStableArray(live((index) => hasCurrentRemoteRead(hostIds[index]!, projects[index]?.data)));
+	const loadedSessionHostIds = useStableArray(live((index) => hasCurrentRemoteRead(hostIds[index]!, sessions[index]?.data)));
 	const failedHostIds = useStableArray(live((index) => Boolean(projects[index]?.isError || sessions[index]?.isError)));
 	return {
 		data,
-		cachedProjectHostIds,
 		loadedProjectHostIds,
 		loadedSessionHostIds,
 		failedHostIds,

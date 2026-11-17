@@ -69,17 +69,67 @@ it("reports a failed remote query instead of treating the host as empty and heal
 	expect(result.current.loadedProjectHostIds).toEqual([]);
 });
 
-it("distinguishes a cached empty project inventory from an unknown offline host", () => {
-	const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-	client.setQueryData([...remoteWorkspaceQueryKey("box-empty"), "projects"], []);
-	const cachedHostIds = ["box-empty", "box-unknown"];
+it.each(["startup", "reconnect", "proxy replacement", "proxy replacement during reads"])("waits for current-connection reads with restored data at %s", async (mode) => {
+	const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+	if (mode === "startup") {
+		remoteConnect.mockResolvedValue({ hostId: "box-a", label: "Box A", url: "http://box-a:3001", base: "http://127.0.0.1:4000" });
+		client.setQueryData([...remoteWorkspaceQueryKey("box-a"), "projects"], [{ id: "project-1", name: "Saved", path: "/saved" }]);
+		client.setQueryData([...remoteWorkspaceQueryKey("box-a"), "sessions"], []);
+	} else await prepareTwoHosts();
+	let finishProjects!: (response: Response) => void;
+	let finishSessions!: (response: Response) => void;
+	const projects = new Promise<Response>((resolve) => { finishProjects = resolve; });
+	const sessions = new Promise<Response>((resolve) => { finishSessions = resolve; });
+	const freshProjects = { projects: [{ id: "project-1", name: "Fresh", path: "/remote" }] };
+	const freshSessions = { sessions: [{ id: "new-session", projectId: "project-1", harness: "codex", status: "working", prs: [] }] };
+	const deferReads = () => vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) =>
+		(input instanceof Request ? input.url : String(input)).endsWith("/projects") ? projects : sessions));
+	if (mode === "startup") { deferReads(); await connectHost("http://box-a:3001"); }
+	const cachedHostIds = ["box-a"];
 	const { result, unmount } = renderHook(() => useRemoteWorkspaces({ cachedHostIds }), {
 		wrapper: ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>,
 	});
 	try {
-		expect(result.current.data).toEqual([]);
+		let finishPreviousReads: (() => Promise<void>) | undefined;
+		if (mode !== "startup") {
+			await waitFor(() => expect(result.current.loadedSessionHostIds).toEqual(["box-a"]));
+			if (mode === "proxy replacement during reads") {
+				let finishPrevious!: (response: Response) => void;
+				const previous = new Promise<Response>((resolve) => { finishPrevious = resolve; });
+				vi.stubGlobal("fetch", vi.fn(async () => (await previous).clone()));
+				const pending = client.refetchQueries({ queryKey: remoteWorkspaceQueryKey("box-a") });
+				await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+				finishPreviousReads = async () => {
+					finishPrevious(Response.json({ projects: [], sessions: [] }));
+					await pending;
+				};
+			}
+			if (mode === "reconnect") await act(async () => { await disconnectHost("box-a"); });
+			deferReads();
+			remoteConnect.mockResolvedValue({ hostId: "box-a", label: "Box A", url: "http://box-a:3001", base: mode.startsWith("proxy replacement") ? "http://127.0.0.1:5000" : "http://127.0.0.1:4000" });
+			await act(async () => { await connectHost("http://box-a:3001"); });
+		}
+		expect(result.current.data[0]?.id).toBe("project-1");
 		expect(result.current.loadedProjectHostIds).toEqual([]);
-		expect(result.current.cachedProjectHostIds).toEqual(["box-empty"]);
+		expect(result.current.loadedSessionHostIds).toEqual([]);
+		await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+		await act(async () => { finishProjects(Response.json(freshProjects)); });
+		await waitFor(() => expect(result.current.loadedProjectHostIds).toEqual(["box-a"]));
+		expect(result.current.loadedSessionHostIds).toEqual([]);
+		await act(async () => { finishSessions(Response.json(freshSessions)); });
+		await waitFor(() => expect(result.current.loadedSessionHostIds).toEqual(["box-a"]));
+		expect(result.current.data[0]?.sessions[0]?.id).toBe("new-session");
+		const data = result.current.data;
+		if (finishPreviousReads) {
+			await act(finishPreviousReads);
+			expect(result.current.data).toBe(data);
+			expect(result.current.loadedProjectHostIds).toEqual(["box-a"]);
+			expect(result.current.loadedSessionHostIds).toEqual(["box-a"]);
+		}
+		vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => Response.json(
+			(input instanceof Request ? input.url : String(input)).endsWith("/projects") ? freshProjects : freshSessions)));
+		await act(async () => { await client.invalidateQueries({ queryKey: remoteWorkspaceQueryKey("box-a") }); });
+		expect(result.current.data).toBe(data);
 	} finally {
 		unmount(); client.clear();
 	}
