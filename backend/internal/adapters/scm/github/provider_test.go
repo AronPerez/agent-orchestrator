@@ -488,10 +488,10 @@ func TestObserve_CIStates(t *testing.T) {
 			// would pick a cancel and report a green PR as failing.
 			name: "cancelled superseded by a later same-named run is not failing",
 			nodes: []any{
-				map[string]any{"__typename": "CheckRun", "name": "migrate", "status": "COMPLETED", "conclusion": "CANCELLED", "startedAt": "2026-08-21T18:10:42Z"},
-				map[string]any{"__typename": "CheckRun", "name": "migrate", "status": "COMPLETED", "conclusion": "CANCELLED", "startedAt": "2026-08-21T18:11:48Z"},
-				map[string]any{"__typename": "CheckRun", "name": "migrate", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "2026-08-21T18:10:45Z"},
-				map[string]any{"__typename": "CheckRun", "name": "migrate", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "2026-08-21T18:11:53Z"},
+				startedActionsCheckRun("CI", "migrate", "CANCELLED", "2026-08-21T18:10:42Z"),
+				startedActionsCheckRun("CI", "migrate", "CANCELLED", "2026-08-21T18:11:48Z"),
+				startedActionsCheckRun("CI", "migrate", "SUCCESS", "2026-08-21T18:10:45Z"),
+				startedActionsCheckRun("CI", "migrate", "SUCCESS", "2026-08-21T18:11:53Z"),
 			},
 			wantCI: domain.CIPassing,
 		},
@@ -501,8 +501,8 @@ func TestObserve_CIStates(t *testing.T) {
 			// a success" would promote the stale 18:10 success to the verdict.
 			name: "cancelled after an earlier success stays unknown",
 			nodes: []any{
-				map[string]any{"__typename": "CheckRun", "name": "migrate", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "2026-08-21T18:10:45Z"},
-				map[string]any{"__typename": "CheckRun", "name": "migrate", "status": "COMPLETED", "conclusion": "CANCELLED", "startedAt": "2026-08-21T18:11:48Z"},
+				startedActionsCheckRun("CI", "migrate", "SUCCESS", "2026-08-21T18:10:45Z"),
+				startedActionsCheckRun("CI", "migrate", "CANCELLED", "2026-08-21T18:11:48Z"),
 			},
 			wantCI: domain.CIUnknown,
 		},
@@ -1338,9 +1338,57 @@ func TestSCMObservationFlagsHeadsThatCannotBeStackParents(t *testing.T) {
 func actionsCheckRun(workflow, name, conclusion string, id float64) map[string]any {
 	n := map[string]any{"__typename": "CheckRun", "name": name, "status": "COMPLETED", "conclusion": conclusion, "databaseId": id}
 	if workflow != "" {
-		n["checkSuite"] = map[string]any{"workflowRun": map[string]any{"event": "pull_request", "workflow": map[string]any{"name": workflow}}}
+		n["checkSuite"] = map[string]any{"workflowRun": map[string]any{"event": "pull_request", "workflow": map[string]any{"id": "workflow:" + workflow, "name": workflow}}}
 	}
 	return n
+}
+
+func startedActionsCheckRun(workflow, name, conclusion, startedAt string) map[string]any {
+	n := actionsCheckRun(workflow, name, conclusion, 0)
+	n["startedAt"] = startedAt
+	return n
+}
+
+func TestCISummaryKeepsUnrelatedWorkflowCancellations(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		workflowID string
+		event      string
+		wantCI     domain.CIState
+	}{
+		{"replacement of the same workflow", "workflow:Go", "pull_request", domain.CIPassing},
+		{"another workflow", "workflow:Frontend", "pull_request", domain.CIUnknown},
+		{"another event", "workflow:Go", "push", domain.CIUnknown},
+		{"missing workflow identity", "", "pull_request", domain.CIUnknown},
+		{"missing event", "workflow:Go", "", domain.CIUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lint := suiteCheckRun("Go", "lint", "CANCELLED", "CANCELLED", 1)
+			gate := suiteCheckRun("Go", "build-test", "FAILURE", "CANCELLED", 2)
+			gate["cancelledGateFailure"] = true
+			lint["startedAt"], gate["startedAt"] = "2026-08-21T18:10:42Z", "2026-08-21T18:10:42Z"
+			replacementLint := actionsCheckRun("Go", "lint", "SUCCESS", 3)
+			replacementGate := actionsCheckRun("Go", "build-test", "SUCCESS", 4)
+			for _, n := range []map[string]any{replacementLint, replacementGate} {
+				n["startedAt"] = "2026-08-21T18:11:53Z"
+				run := n["checkSuite"].(map[string]any)["workflowRun"].(map[string]any)
+				run["event"] = tc.event
+				// Display names can coincide; only the stable workflow ID identifies it.
+				run["workflow"].(map[string]any)["id"] = tc.workflowID
+			}
+			var pr map[string]any
+			basePRFixture().prData(func(m map[string]any) {
+				pr = m
+				commit := m["commits"].(map[string]any)["nodes"].([]any)[0].(map[string]any)["commit"].(map[string]any)
+				roll := commit["statusCheckRollup"].(map[string]any)
+				roll["state"] = "FAILURE"
+				roll["contexts"] = map[string]any{"nodes": []any{lint, gate, replacementLint, replacementGate}}
+			})
+			if got := ciSummaryFromGraphQL(pr); got != tc.wantCI {
+				t.Fatalf("CI = %q, want %q", got, tc.wantCI)
+			}
+		})
+	}
 }
 
 // PR #7774: the same commit ran each workflow three times; the first run was
@@ -1694,7 +1742,7 @@ func TestFetchPullRequestsToleratesWorkflowRunAccessErrors(t *testing.T) {
 	basePRFixture().prData(func(m map[string]any) { pr = m })
 	fake.on(http.MethodPost, "/graphql", func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		if !strings.Contains(string(body), "checkSuite{ conclusion id workflowRun{ event workflow{ name } } }") {
+		if !strings.Contains(string(body), "checkSuite{ conclusion id workflowRun{ event workflow{ id name } } }") {
 			t.Fatalf("batch query should request each check run's suite conclusion and workflow, body=%s", body)
 		}
 		w.Header().Set("Content-Type", "application/json")

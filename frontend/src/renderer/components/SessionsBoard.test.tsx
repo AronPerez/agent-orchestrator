@@ -2416,6 +2416,29 @@ describe("SessionsBoard find bar", () => {
 		expect(within(findBar).getByText(count)).toBeInTheDocument();
 	});
 
+	it.each(["ontend", "345"])("matches substrings inside branch names and PR numbers: %s", async (query) => {
+		workspaceQueryMock.mockReturnValue({
+			data: [workspaceWithSessions([
+				boardSession({
+					id: "s-match",
+					title: "Fix cache",
+					status: "working",
+					branch: "ao/feature-frontend",
+					prs: [{ ...terminatedSession().prs[0], number: 12345 }],
+				}),
+				boardSession({ id: "s-other", title: "Unrelated worker", status: "working" }),
+			])],
+			isError: false,
+			isSuccess: true,
+		});
+		renderBoard("p1");
+		const findBar = await openFindBar();
+		await userEvent.type(within(findBar).getByRole("textbox"), query);
+		expect(findBar).toHaveTextContent("1/2");
+		expect(screen.getByText("Fix cache")).toBeInTheDocument();
+		expect(screen.queryByText("Unrelated worker")).not.toBeInTheDocument();
+	});
+
 	it.each<[string, Partial<WorkspaceSession>, string]>([
 		["en", {}, "Idle"],
 		["en", { displayStatus: "Awaiting PR" }, "Awaiting PR"],

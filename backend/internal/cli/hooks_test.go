@@ -1046,6 +1046,40 @@ func TestHookConversationFactsCorrelatesTranscriptPasteWrappedReportDelivery(t *
 	}
 }
 
+func TestHookConversationFactsAcceptsLiteralPasteMarkupInReportBody(t *testing.T) {
+	const deliveryID = "report-batch:literal"
+	for _, body := range []string{
+		"Transcript example: <pasted_content>text</pasted_content>.",
+		"Transcript example: <pasted_content id=\"literal\">text</pasted_content id=\"literal\">.",
+		"Missing opener example: </pasted_content id=\"literal\">.",
+		"Missing closer example: <pasted_content id=\"literal\">text.",
+	} {
+		report := domain.WrapReportDelivery(deliveryID, body)
+		for name, observed := range map[string]string{
+			"unwrapped": report,
+			"wrapped":   "<pasted_content id=\"outer\">\n" + report + "\n</pasted_content id=\"outer\">",
+		} {
+			t.Run(body+"/"+name, func(t *testing.T) {
+				for _, suffix := range []string{"", "\nPlease wait for my next instruction."} {
+					prompt := observed + suffix
+					got := hookConversationFacts(domain.HarnessClaudeCode, "user-prompt-submit",
+						[]byte(`{"prompt":`+mustJSONString(t, prompt)+`}`))
+					if got.CoordinationID != deliveryID {
+						t.Fatalf("literal report markup lost the receipt: %+v", got)
+					}
+					if suffix == "" {
+						if got.CheckpointOrigin != domain.ConversationCheckpointOriginCoordination || got.LatestUserPrompt != "" {
+							t.Fatalf("report displaced human intent: %+v", got)
+						}
+					} else if got.CheckpointOrigin != domain.ConversationCheckpointOriginHuman || got.LatestUserPrompt != prompt {
+						t.Fatalf("human instruction was lost: %+v", got)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestHookConversationFactsPreservesHumanTextAfterReportPaste(t *testing.T) {
 	const deliveryID = "report-batch:abc123"
 	report := domain.WrapReportDelivery(deliveryID, "worker finished")
@@ -1087,6 +1121,7 @@ func TestHookConversationFactsRejectsInvalidReportPastes(t *testing.T) {
 	}{
 		{name: "missing closing tag", prompt: pasteOpen + report},
 		{name: "mismatched paste id", prompt: pasteOpen + report + "\n</pasted_content id=\"other\">"},
+		{name: "bare opening tag", prompt: "<pasted_content>\n" + report + "\n</pasted_content>"},
 		{name: "malformed opening tag", prompt: "<pasted_content id=eead>\n" + report + pasteClose},
 		{name: "lookalike opening tag", prompt: "<pasted_content_other id=\"eead\">\n" + report + pasteClose},
 		{name: "invalid delivery id", prompt: pasteOpen + domain.WrapReportDelivery("bad value", "worker finished") + pasteClose},

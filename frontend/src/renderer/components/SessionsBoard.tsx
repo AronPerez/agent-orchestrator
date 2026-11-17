@@ -190,17 +190,19 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 	// The archive itself is the shell's modal; the board only shows its count.
 	const archivedCount = sessions.filter(isArchivedSession).length;
 	const searchableSessions = sessions.filter((candidate) => !isArchivedSession(candidate));
-	const filteredSessions = findQuery.trim()
-		? searchableSessions.filter((session) => matchScore(findQuery, {
-			title: session.title,
-			subtitle: session.branch,
-			keywords: [
+	const normalizedFindQuery = findQuery.trim().toLowerCase();
+	const filteredSessions = normalizedFindQuery
+		? searchableSessions.filter((session) => {
+			const metadata = [
+				session.branch ?? "",
 				session.workspaceName,
 				getBoardSessionStatusLabel(toBoardSessionPresentation(session), (key, values) => t(key as MessageKey, values)),
 				getSessionStatusView(session.status, t).label,
 				...session.prs.flatMap((pr) => [`#${pr.number}`, String(pr.number)]),
-			],
-		}) > 0)
+			];
+			return metadata.some((value) => value.toLowerCase().includes(normalizedFindQuery))
+				|| matchScore(findQuery, { title: session.title, keywords: metadata }) > 0;
+		})
 		: searchableSessions;
 	const activeSessions = filteredSessions;
 	// Who is in each shared cloud session, read without joining any of them.

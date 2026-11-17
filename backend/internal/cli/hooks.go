@@ -562,33 +562,55 @@ func hookConversationFacts(agent domain.AgentHarness, event string, payload []by
 	}
 }
 
-var claudePastedContentTag = regexp.MustCompile(`\n*(?:<pasted_content id="([A-Za-z0-9_-]+)">|</pasted_content(?: id="([A-Za-z0-9_-]+)")?>)\n*`)
+var claudePastedContentTag = regexp.MustCompile(`\n*(?:<pasted_content id="([A-Za-z0-9_-]+)">|</pasted_content(?: id="([A-Za-z0-9_-]+)")?>|(<pasted_content>))\n*`)
 
-// Paste blocks can split an envelope anywhere, including its id. Remove only
-// balanced Claude wrappers; malformed wrappers remain human input.
+// Paste blocks can split an envelope anywhere, including its id. Remove paired
+// Claude wrappers, allowing literal unmatched tags only inside a verified report.
 func normalizeClaudePastedPrompt(prompt string) string {
-	var open []string
-	for _, tag := range claudePastedContentTag.FindAllStringSubmatch(prompt, -1) {
-		if tag[1] != "" {
-			open = append(open, tag[1])
+	tags := claudePastedContentTag.FindAllStringSubmatchIndex(prompt, -1)
+	paired := make([]bool, len(tags))
+	var open []int
+	unmatchedCloser := false
+	for index, tag := range tags {
+		if tag[2] >= 0 || tag[6] >= 0 {
+			open = append(open, index)
 			continue
 		}
 		matched := false
 		for i := len(open) - 1; i >= 0; i-- {
-			if tag[2] == "" || open[i] == tag[2] {
+			opener := tags[open[i]]
+			if tag[4] < 0 || opener[2] >= 0 && prompt[opener[2]:opener[3]] == prompt[tag[4]:tag[5]] {
+				// A bare opening tag is literal text, not a Claude wrapper.
+				// Still pair it so its closer cannot consume an outer wrapper.
+				if opener[2] >= 0 {
+					paired[open[i]], paired[index] = true, true
+				}
 				open = append(open[:i], open[i+1:]...)
 				matched = true
 				break
 			}
 		}
 		if !matched {
+			unmatchedCloser = true
+		}
+	}
+	var normalized strings.Builder
+	start := 0
+	for i, tag := range tags {
+		if paired[i] {
+			normalized.WriteString(prompt[start:tag[0]])
+			start = tag[1]
+		}
+	}
+	normalized.WriteString(prompt[start:])
+	value := strings.TrimSpace(normalized.String())
+	if len(open) != 0 || unmatchedCloser {
+		_, end := intactReportPrefix(value)
+		if end == 0 || strings.Contains(value[end:], "<pasted_content") || strings.Contains(value[end:], "</pasted_content") {
 			return prompt
 		}
 	}
-	if len(open) != 0 {
-		return prompt
-	}
-	return claudePastedContentTag.ReplaceAllString(prompt, "")
+	return value
 }
 
 func firstHookValue(values ...string) string {
@@ -604,6 +626,24 @@ func aoCoordinationFacts(value string) (string, bool) {
 	value = strings.TrimSpace(value)
 	// An intact checksummed report followed by human text can acknowledge the
 	// delivery, but must preserve the human instruction as the turn's request.
+	if id, end := intactReportPrefix(value); end != 0 {
+		return id, strings.TrimSpace(value[end:]) == ""
+	}
+	// Only Claude's validated wrappers were removed above. Other harnesses and
+	// malformed wrappers must not gain the domain parser's tolerant PTY path.
+	if strings.Contains(value, "<pasted_content") || strings.Contains(value, "</pasted_content") {
+		return "", false
+	}
+	id, delivery := domain.CoordinationDeliveryID(value)
+	return id, delivery || strings.HasPrefix(value, "<ao-handoff-request") ||
+		strings.HasPrefix(value, "AO transferred the previous agent's context in hidden system instructions.")
+}
+
+func intactReportPrefix(value string) (string, int) {
+	const reportPrefix = `<ao-report-delivery id="`
+	if !strings.HasPrefix(value, reportPrefix) {
+		return "", 0
+	}
 	const footerPrefix = `<ao-report-delivery-end id="`
 	for searchFrom := 0; searchFrom < len(value); {
 		footer := strings.Index(value[searchFrom:], footerPrefix)
@@ -616,21 +656,15 @@ func aoCoordinationFacts(value string) (string, bool) {
 		if end := strings.Index(value[footer:], `"/>`); end >= 0 {
 			end += footer + len(`"/>`)
 			envelope := value[:end]
-			if !strings.Contains(envelope, "<pasted_content") && !strings.Contains(envelope, "</pasted_content") {
-				if id, ok := domain.ReportDeliveryID(envelope); ok {
-					return id, strings.TrimSpace(value[end:]) == ""
-				}
+			// Literal paste markup in the body is report content. Require the
+			// actual opening tag so tolerant domain unwrapping cannot accept
+			// an unvalidated outer wrapper or a split id from another harness.
+			if id, ok := domain.ReportDeliveryID(envelope); ok && strings.HasPrefix(envelope, reportPrefix+id+`">`) {
+				return id, end
 			}
 		}
 	}
-	// Only Claude's validated wrappers were removed above. Other harnesses and
-	// malformed wrappers must not gain the domain parser's tolerant PTY path.
-	if strings.Contains(value, "<pasted_content") || strings.Contains(value, "</pasted_content") {
-		return "", false
-	}
-	id, delivery := domain.CoordinationDeliveryID(value)
-	return id, delivery || strings.HasPrefix(value, "<ao-handoff-request") ||
-		strings.HasPrefix(value, "AO transferred the previous agent's context in hidden system instructions.")
+	return "", 0
 }
 
 func capHookText(value string, limit int) string {

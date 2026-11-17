@@ -9,6 +9,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	"github.com/aoagents/agent-orchestrator/backend/internal/providerkeys"
 )
 
 // childProbeRuntime adds the child-process probe the production runtime has.
@@ -213,6 +214,43 @@ func TestSwitchTUIProviderUsesProjectScopedAuthBeforeStoppingSource(t *testing.T
 				}
 			} else if err != nil || runtime.created != 1 || st.sessions[rec.ID].Harness != domain.HarnessClaudeCode {
 				t.Fatalf("project-authorized target did not start: err=%v created=%d", err, runtime.created)
+			}
+		})
+	}
+}
+
+func TestPreflightTUISwitchTargetWithholdsUnclaimedProviderKey(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	for _, tc := range []struct {
+		name       string
+		projectEnv map[string]string
+		wantKey    string
+	}{
+		{name: "subscription login"},
+		{name: "explicit project key", projectEnv: map[string]string{"ANTHROPIC_API_KEY": "project-key"}, wantKey: "project-key"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			if err := providerkeys.Save(t.Context(), dataDir, "ANTHROPIC_API_KEY", "unclaimed-store-key"); err != nil {
+				t.Fatal(err)
+			}
+			project := domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
+			project.Config.Env = tc.projectEnv
+			rec := mkLive("mer-1")
+			rec.Harness = domain.HarnessCodex
+			for _, status := range []ports.AgentAuthStatus{ports.AgentAuthStatusAuthorized, ports.AgentAuthStatusUnauthorized} {
+				target := scopedSwitchAuthAgent{&launchAuthAgent{recordingAgent: &recordingAgent{}, status: status}}
+				m := New(Deps{DataDir: dataDir})
+				err := m.preflightTUISwitchTarget(t.Context(), rec, project, domain.HarnessClaudeCode, target)
+				if target.env["ANTHROPIC_API_KEY"] != tc.wantKey || target.workingDir != rec.Metadata.WorkspacePath {
+					t.Fatalf("preflight used different credentials from launch: cwd=%q key=%q", target.workingDir, target.env["ANTHROPIC_API_KEY"])
+				}
+				if status == ports.AgentAuthStatusUnauthorized && !errors.Is(err, ports.ErrAgentAuthRequired) {
+					t.Fatalf("unauthorized target was accepted: %v", err)
+				}
+				if status == ports.AgentAuthStatusAuthorized && err != nil {
+					t.Fatalf("authorized target was refused: %v", err)
+				}
 			}
 		})
 	}

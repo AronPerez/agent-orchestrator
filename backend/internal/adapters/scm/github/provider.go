@@ -241,9 +241,9 @@ func (p *Provider) fetchRESTPull(ctx context.Context, owner, repo string, number
 const graphQLCheckContextLimit = 100
 
 // checkRunFields is the CheckRun selection every rollup query uses. The
-// workflow name and event identify which runs are reruns of the same check
+// workflow ID and event identify which runs are reruns of the same check
 // (see latestCheckRuns). Suite IDs keep cancellation evidence within one run.
-const checkRunFields = `name status conclusion detailsUrl url databaseId startedAt checkSuite{ conclusion id workflowRun{ event workflow{ name } } }`
+const checkRunFields = `name status conclusion detailsUrl url databaseId startedAt checkSuite{ conclusion id workflowRun{ event workflow{ id name } } }`
 
 // prObservationQuery is the GraphQL query (derived from PR #28, credited
 // to @whoisasx) that pulls everything we need in one round trip:
@@ -689,10 +689,11 @@ func checkRunKey(n map[string]any) string {
 	suite, _ := n["checkSuite"].(map[string]any)
 	run, _ := suite["workflowRun"].(map[string]any)
 	workflow, _ := run["workflow"].(map[string]any)
-	if workflow == nil {
+	workflowID, event, name := str(workflow["id"]), str(run["event"]), str(n["name"])
+	if workflowID == "" || event == "" || name == "" {
 		return ""
 	}
-	return strings.Join([]string{str(workflow["name"]), str(run["event"]), str(n["name"])}, "\x00")
+	return strings.Join([]string{workflowID, event, name}, "\x00")
 }
 
 // statusRollup extracts the commits[0].commit.statusCheckRollup blob
@@ -757,11 +758,9 @@ func checkStatusFromGraphQL(n map[string]any) domain.PRCheckStatus {
 	return domain.PRCheckUnknown
 }
 
-// latestConcludedCheckRun maps a CheckRun name to the startedAt of the newest
-// same-named run that reached a conclusion other than CANCELLED. Only rows
-// carrying a parseable startedAt count: without one there is no way to order
-// them, and the conservative existing behaviour (a cancel is failing) has to
-// stand rather than be guessed away.
+// latestConcludedCheckRun maps a workflow/event/job identity to the startedAt
+// of its newest non-cancelled conclusion. Missing identity or timestamps cannot
+// prove supersession, so those cancellations remain unknown.
 func latestConcludedCheckRun(rawNodes []map[string]any) map[string]time.Time {
 	out := make(map[string]time.Time)
 	for _, n := range rawNodes {
@@ -772,21 +771,21 @@ func latestConcludedCheckRun(rawNodes []map[string]any) map[string]time.Time {
 		case "", "CANCELLED":
 			continue
 		}
-		name := str(n["name"])
+		key := checkRunKey(n)
 		ts, ok := checkRunStartedAt(n)
-		if name == "" || !ok {
+		if key == "" || !ok {
 			continue
 		}
-		if prev, seen := out[name]; !seen || ts.After(prev) {
-			out[name] = ts
+		if prev, seen := out[key]; !seen || ts.After(prev) {
+			out[key] = ts
 		}
 	}
 	return out
 }
 
 // cancelSuperseded reports whether a CANCELLED run was replaced by a later
-// same-named run that actually concluded. GitHub re-runs a workflow under one
-// name (a push, a PR body edit), so a single sha carries several rows per name
+// run of the same workflow, event and job that actually concluded. GitHub
+// re-runs workflows on a push or PR body edit, so a SHA carries several rows
 // — measured on one commit: 61 contexts, 11 names repeated, one of them four
 // times — and the rollup does NOT return them in time order, so the comparison
 // must be on startedAt and never on position in the list.
@@ -795,7 +794,7 @@ func cancelSuperseded(n map[string]any, concluded map[string]time.Time) bool {
 	if !ok {
 		return false
 	}
-	newer, seen := concluded[str(n["name"])]
+	newer, seen := concluded[checkRunKey(n)]
 	return seen && newer.After(ts)
 }
 
