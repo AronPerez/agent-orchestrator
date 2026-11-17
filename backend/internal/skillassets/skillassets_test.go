@@ -284,6 +284,7 @@ func TestEmbeddedDecisionGuidanceCoversSearchingRaisingAndClosing(t *testing.T) 
 		"project worker without an active orchestrator",
 		"ao decision show <call-link>",
 		`ao report --checkpoint --note "Decision call resolved: <call-link>; resume sessions blocked by it"`,
+		"If an unanswered match belongs to another project, do not reuse it.",
 	} {
 		if !strings.Contains(guidance, want) {
 			t.Fatalf("decision guidance missing %q", want)

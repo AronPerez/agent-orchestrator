@@ -439,10 +439,25 @@ func TestBuildSystemPrompt_SharedCallOwnerAlertsOrchestratorForDependentWorker(t
 	for _, want := range []string{
 		"When an answer or dismissal arrives and you have a project orchestrator",
 		`ao report --checkpoint --note "Decision call resolved: <call-link>; resume sessions blocked by it"`,
-		"so it can resume any other session that reused your call",
+		"so it can resume any other session in your project that reused your call",
 	} {
 		if !strings.Contains(ownerPrompt, want) {
 			t.Errorf("call owner prompt missing dependent-session alert %q", want)
+		}
+	}
+}
+
+func TestBuildSystemPrompt_DoesNotReuseUnansweredCallsAcrossProjects(t *testing.T) {
+	workerB := buildSystemPromptText(systemPromptConfig{
+		Role: sessionPromptRoleWorker, Project: promptProject{ID: "project-b"}, OrchestratorSessionID: "project-b-1",
+	})
+	for _, want := range []string{
+		"If an unanswered match belongs to another project, do not reuse it.",
+		"raise one call in your current project",
+		"mention the related call link in its context",
+	} {
+		if !strings.Contains(workerB, want) {
+			t.Errorf("project B prompt missing cross-project boundary %q", want)
 		}
 	}
 }

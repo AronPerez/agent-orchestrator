@@ -33,10 +33,12 @@ report carries status, not a second question.
 
 Run `ao decision search <words>` before raising a call, and try more than one
 phrasing. If a decision that still applies covers the question, follow it and
-say which decision you followed. If a matching call still needs the human, do
-not raise a second call. If it blocks you, hand off the existing call link
-through your role's coordination or status path so the dependent session can
-resume after the answer.
+say which decision you followed. If an unanswered match belongs to another
+project, do not reuse it. Raise one call in your current project and mention the
+related call link in its context so the answer is delivered locally. For an
+unanswered match in your current project, do not raise a second call. If it
+blocks you, hand off the existing call link through your role's coordination or
+status path so the dependent session can resume after the answer.
 
 Before ending a turn blocked by a new or existing call, make it visible. A
 worker whose prompt names an active project orchestrator uses a needs-input
