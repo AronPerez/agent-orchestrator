@@ -657,11 +657,33 @@ describe("registerRemotesIpc", () => {
 			await expect(ipc.invoke("remotes:connect", "http://192.0.2.1:1")).resolves.toMatchObject({ hostId: "h_workbox" });
 			expect(issueCoordination).toHaveBeenCalledExactlyOnceWith(
 				expect.objectContaining({ hostId: "h_workbox", password: "old" }),
-				{ name: "Test Mac", platform: process.platform },
+				{ name: "Test Mac", platform: process.platform, clientId: "h_this_mac" },
 			);
 			expect((await saved(file))[0]).toMatchObject({
 				coordinationToken, coordinationDeviceId, coordinationParentHash: parentHash("old"),
 			});
+		});
+
+		it("retries a lost issuance response with the same stable client id", async () => {
+			const file = await tempFile();
+			const issueCoordination = vi.fn<NonNullable<RemotesIpcDeps["issueCoordination"]>>(async () => ({ kind: "offline" }))
+				.mockResolvedValueOnce({ kind: "offline" })
+				.mockResolvedValueOnce({ kind: "issued", token: coordinationToken, deviceId: coordinationDeviceId });
+			const registry = new RemoteRegistry(proxy());
+			const ipc = fakeIpc();
+			registerRemotes(ipc.ipcMain, {
+				file, registry, requireAccount: signedIn,
+				identity: async () => "h_workbox", probe: async () => "online", issueCoordination,
+			});
+
+			await ipc.invoke("remotes:connect", "http://192.0.2.1:1");
+			await registry.disconnect("http://192.0.2.1:1");
+			await ipc.invoke("remotes:connect", "http://192.0.2.1:1");
+			expect(issueCoordination).toHaveBeenCalledTimes(2);
+			for (const call of issueCoordination.mock.calls) {
+				expect(call[1]).toMatchObject({ clientId: "h_this_mac" });
+			}
+			expect((await saved(file))[0]).toMatchObject({ coordinationToken, coordinationDeviceId });
 		});
 
 		it("reuses a valid coordination credential and refreshes a refused one", async () => {

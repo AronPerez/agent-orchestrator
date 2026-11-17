@@ -172,7 +172,7 @@ describe("pairDevice", () => {
 describe("coordination credentials", () => {
 	const host = { ...entry, hostId: "h_workbox" };
 	const token = "aoc_" + "c".repeat(64);
-	const device = { name: "Test Mac", platform: "darwin" };
+	const device = { name: "Test Mac", platform: "darwin", clientId: "h_this_mac" };
 
 	it("issues a host-pinned, route-filtered credential with the full saved credential", async () => {
 		const fetchImpl = fakeFetch(200, { hostId: "h_workbox", deviceId: "dev_coord", token, scope: "agent-coordination" });
