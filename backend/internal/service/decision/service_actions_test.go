@@ -4,12 +4,41 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
 )
+
+type interleavingDecisionStore struct {
+	Store
+	answerAppending    chan struct{}
+	releaseAnswer      chan struct{}
+	withdrawRead       chan struct{}
+	releaseWithdrawGet chan struct{}
+}
+
+func (s *interleavingDecisionStore) GetDecisionCall(ctx context.Context, id string) (domain.DecisionCall, bool, error) {
+	call, ok, err := s.Store.GetDecisionCall(ctx, id)
+	select {
+	case <-s.answerAppending:
+		close(s.withdrawRead)
+		<-s.releaseWithdrawGet
+	default:
+	}
+	return call, ok, err
+}
+
+func (s *interleavingDecisionStore) AppendDecisionEntry(ctx context.Context, entry domain.DecisionEntry, at time.Time) (domain.DecisionEntry, domain.DecisionCall, error) {
+	if entry.Kind == domain.DecisionKindAnswered {
+		close(s.answerAppending)
+		<-s.releaseAnswer
+	}
+	return s.Store.AppendDecisionEntry(ctx, entry, at)
+}
 
 func TestAnswerIsThePersonsAlone(t *testing.T) {
 	fixture := newDecisionService(t)
@@ -177,6 +206,78 @@ func TestOutcomeAndRetire(t *testing.T) {
 	unfinished := raiseDecision(t, fixture, fixture.w2)
 	_, err = fixture.service.Retire(ctx, person, unfinished.ID, true)
 	assertDecisionAPIError(t, err, apierr.KindConflict, "DECISION_WRONG_STATE", "", "")
+}
+
+func TestDecisionActionsNormalizeStoredText(t *testing.T) {
+	fixture := newDecisionService(t)
+	ctx := context.Background()
+	person := Actor{Surface: domain.RequestSurfaceCLI}
+
+	answered, err := fixture.service.Answer(ctx, person, raiseDecision(t, fixture, fixture.w1).ID, AnswerInput{
+		Choice: domain.DecisionChoiceOption, Option: 1, Note: "  Rotate monthly. \n",
+	})
+	if err != nil || answered.Note != "Rotate monthly." {
+		t.Fatalf("answered = %+v, err=%v", answered, err)
+	}
+	dismissed, err := fixture.service.Dismiss(ctx, person, raiseDecision(t, fixture, fixture.w2).ID, "\t Not enough context.  ")
+	if err != nil || dismissed.Note != "Not enough context." {
+		t.Fatalf("dismissed = %+v, err=%v", dismissed, err)
+	}
+	call := raiseDecision(t, fixture, fixture.epic)
+	if _, err := fixture.service.Answer(ctx, person, call.ID, AnswerInput{Choice: domain.DecisionChoiceOption, Option: 2}); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := fixture.service.RecordOutcome(ctx, person, call.ID, OutcomeInput{
+		Text: "  Shipped in PR 412  ", Link: "  https://example.com/pr/412  ",
+	})
+	if err != nil || completed.Outcome != "Shipped in PR 412" || completed.OutcomeLink != "https://example.com/pr/412" {
+		t.Fatalf("completed = %+v, err=%v", completed, err)
+	}
+}
+
+func TestDecisionActionsSerializeStateCheckWithAppend(t *testing.T) {
+	fixture := newDecisionService(t)
+	call := raiseDecision(t, fixture, fixture.w1)
+	store := &interleavingDecisionStore{
+		Store: fixture.store, answerAppending: make(chan struct{}), releaseAnswer: make(chan struct{}),
+		withdrawRead: make(chan struct{}), releaseWithdrawGet: make(chan struct{}),
+	}
+	var nextID atomic.Int64
+	service := New(Deps{
+		Store: store, HostID: "h_a", Now: func() time.Time { return time.UnixMilli(4_000_000).UTC() },
+		NewID: func(prefix string) string { return fmt.Sprintf("%sconcurrent-%d", prefix, nextID.Add(1)) },
+	})
+	answerDone := make(chan error, 1)
+	go func() {
+		_, err := service.Answer(context.Background(), Actor{Surface: domain.RequestSurfaceCLI}, call.ID, AnswerInput{
+			Choice: domain.DecisionChoiceOption, Option: 1,
+		})
+		answerDone <- err
+	}()
+	<-store.answerAppending
+
+	withdrawDone := make(chan error, 1)
+	go func() {
+		_, err := service.Withdraw(context.Background(), Actor{Session: fixture.w1}, call.ID)
+		withdrawDone <- err
+	}()
+	select {
+	case <-store.withdrawRead:
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(store.releaseAnswer)
+	close(store.releaseWithdrawGet)
+
+	if err := <-answerDone; err != nil {
+		t.Fatalf("answer error = %v", err)
+	}
+	if err := <-withdrawDone; apiCode(err) != "DECISION_WRONG_STATE" {
+		t.Fatalf("withdraw error = %v, want DECISION_WRONG_STATE", err)
+	}
+	stored := getDecisionCall(t, fixture, call.ID)
+	if stored.State != domain.DecisionStateInProgress {
+		t.Fatalf("stored call = %+v", stored)
+	}
 }
 
 func TestThePersonCanRecordTheOutcome(t *testing.T) {

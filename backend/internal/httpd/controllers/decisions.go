@@ -18,7 +18,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/telemetrymeta"
 )
 
-const maxDecisionRaiseRequestBytes = 64 << 10
+const maxDecisionRequestBytes = 64 << 10
 
 // DecisionService is what the decisions routes need.
 type DecisionService interface {
@@ -53,7 +53,7 @@ func (c *DecisionsController) raise(w http.ResponseWriter, r *http.Request) {
 		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/decisions")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxDecisionRaiseRequestBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, maxDecisionRequestBytes)
 	var req RaiseDecisionRequest
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -218,6 +218,7 @@ func (c *DecisionsController) retire(w http.ResponseWriter, r *http.Request) {
 }
 
 func decodeDecisionRequest(w http.ResponseWriter, r *http.Request, dst any, optional bool) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxDecisionRequestBytes)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {

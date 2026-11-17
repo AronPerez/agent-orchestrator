@@ -304,7 +304,11 @@ func ValidateDecisionOutcome(p DecisionOutcomePayload) error {
 	if n := utf8.RuneCountInString(text); n > MaxDecisionOutcome {
 		return decisionRule("outcome_too_long", fmt.Sprintf("The outcome is %d characters; the limit is 300.", n))
 	}
-	if p.Link != "" && !validDecisionURL(p.Link) {
+	link := strings.TrimSpace(p.Link)
+	if n := utf8.RuneCountInString(link); n > MaxDecisionLinkURL {
+		return decisionRule("outcome_link_too_long", fmt.Sprintf("The outcome link is %d characters; the limit is 2048.", n))
+	}
+	if link != "" && !validDecisionURL(link) {
 		return decisionRule("outcome_link_invalid", "The outcome link must be an http or https URL.")
 	}
 	return nil

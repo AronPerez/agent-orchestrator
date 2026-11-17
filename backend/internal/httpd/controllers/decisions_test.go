@@ -252,6 +252,33 @@ func TestDecisionsAPI_RejectsOversizedWhitespaceBeforeDecoding(t *testing.T) {
 	}
 }
 
+func TestDecisionsAPI_RejectsOversizedActionBodiesBeforeDecoding(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path string
+		body string
+	}{
+		{name: "answer", path: "/api/v1/decisions/dec_1/answer", body: `{"choice":"option","option":1,"note":"` + strings.Repeat(" ", 70<<10) + `x"}`},
+		{name: "dismiss", path: "/api/v1/decisions/dec_1/dismiss", body: `{"note":"` + strings.Repeat(" ", 70<<10) + `x"}`},
+		{name: "outcome", path: "/api/v1/decisions/dec_1/outcome", body: `{"text":"done","link":"https://example.com/` + strings.Repeat("x", 70<<10) + `"}`},
+		{name: "retire", path: "/api/v1/decisions/dec_1/retire", body: `{` + strings.Repeat(" ", 70<<10) + `"retired":true}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &fakeDecisionService{}
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			request.Header.Set("Content-Type", "application/json")
+			newDecisionHandler(svc).ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusBadRequest || !reportContainsAll(recorder.Body.String(), "INVALID_JSON") {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			if svc.action != "" {
+				t.Fatalf("service action = %q", svc.action)
+			}
+		})
+	}
+}
+
 func TestDecisionsAPI_Actions(t *testing.T) {
 	svc := &fakeDecisionService{}
 	srv := newDecisionServer(t, svc)
