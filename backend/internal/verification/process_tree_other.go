@@ -15,9 +15,10 @@ import (
 )
 
 const (
-	unixProcessStopWait = 2 * time.Second
-	unixProcessStopPoll = 20 * time.Millisecond
-	maxUnixFreezeRounds = 32
+	unixProcessStopWait          = 2 * time.Second
+	unixProcessStopPoll          = 20 * time.Millisecond
+	maxUnixFreezeRounds          = 32
+	verificationOwnerEnvironment = "AO_VERIFICATION_OWNER"
 )
 
 var errUnixProcessGone = errors.New("verification process is gone")
@@ -27,16 +28,25 @@ type unixOwnedProcess struct {
 	start string
 }
 
+type unixProcessOwnership struct {
+	token      string
+	descriptor string
+	fd         int
+	daemonPID  int
+}
+
 type unixProcessHooks struct {
-	owned  func(context.Context, string) ([]unixOwnedProcess, error)
+	owned  func(context.Context) ([]unixOwnedProcess, error)
 	signal func(unixOwnedProcess, syscall.Signal) error
 	wait   time.Duration
 	poll   time.Duration
 }
 
-func defaultUnixProcessHooks() unixProcessHooks {
+func defaultUnixProcessHooks(ownership unixProcessOwnership, descendants *unixDescendantWatch) unixProcessHooks {
 	return unixProcessHooks{
-		owned:  ownedVerificationProcesses,
+		owned: func(ctx context.Context) ([]unixOwnedProcess, error) {
+			return ownedVerificationProcesses(ctx, ownership, descendants)
+		},
 		signal: signalOwnedVerificationProcess,
 		wait:   unixProcessStopWait,
 		poll:   unixProcessStopPoll,
@@ -45,7 +55,7 @@ func defaultUnixProcessHooks() unixProcessHooks {
 
 type unixWorkspaceProcessTree struct {
 	cmd            *exec.Cmd
-	owner          string
+	descendants    *unixDescendantWatch
 	hooks          unixProcessHooks
 	closeOwnership func() error
 	closeOnce      sync.Once
@@ -53,7 +63,7 @@ type unixWorkspaceProcessTree struct {
 }
 
 func startWorkspaceProcessTree(ctx context.Context, cmd *exec.Cmd) (workspaceProcessTree, error) {
-	owner, closeOwnership, err := prepareUnixProcessOwnership(ctx, cmd)
+	ownership, closeOwnership, err := prepareUnixProcessOwnership(ctx, cmd)
 	if err != nil {
 		return nil, err
 	}
@@ -61,21 +71,32 @@ func startWorkspaceProcessTree(ctx context.Context, cmd *exec.Cmd) (workspacePro
 	if err = cmd.Start(); err != nil {
 		return nil, errors.Join(err, closeOwnership())
 	}
+	start, err := verificationProcessStartForWatch(cmd.Process.Pid)
+	if err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, errors.Join(fmt.Errorf("identify verification process: %w", err), closeOwnership())
+	}
+	descendants := sharedUnixDescendantObserver.watch(unixOwnedProcess{pid: cmd.Process.Pid, start: start})
 	return &unixWorkspaceProcessTree{
-		cmd: cmd, owner: owner, hooks: defaultUnixProcessHooks(), closeOwnership: closeOwnership,
+		cmd: cmd, descendants: descendants,
+		hooks: defaultUnixProcessHooks(ownership, descendants), closeOwnership: closeOwnership,
 	}, nil
 }
 
 func (t *unixWorkspaceProcessTree) Wait() (bool, error) {
 	waitErr := t.cmd.Wait()
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), t.hooks.wait+time.Second)
-	survived, stopErr := stopOwnedUnixProcesses(cleanupCtx, t.owner, t.hooks)
+	survived, stopErr := stopOwnedUnixProcesses(cleanupCtx, t.hooks)
 	cancel()
 	return survived, errors.Join(waitErr, stopErr)
 }
 
 func (t *unixWorkspaceProcessTree) Close() error {
 	t.closeOnce.Do(func() {
+		if t.descendants != nil {
+			sharedUnixDescendantObserver.unwatch(t.descendants)
+		}
 		if t.closeOwnership != nil {
 			t.closeErr = t.closeOwnership()
 		}
@@ -84,12 +105,11 @@ func (t *unixWorkspaceProcessTree) Close() error {
 }
 
 // stopOwnedUnixProcesses freezes every process still carrying owner, rescans
-// until none can fork, then kills and confirms them gone. The platform owner
-// marker survives fork, exec, setsid, and reparenting, so a fast double-fork is
-// discoverable without polling the host while the command runs.
+// until none can fork, then kills and confirms them gone. A shared descendant
+// observer and independent environment/descriptor markers retain ownership
+// across normal reparenting and environment or descriptor sanitization.
 func stopOwnedUnixProcesses(
 	ctx context.Context,
-	owner string,
 	hooks unixProcessHooks,
 ) (survived bool, resultErr error) {
 	frozen := make(map[unixOwnedProcess]struct{})
@@ -114,7 +134,7 @@ func stopOwnedUnixProcesses(
 
 	settled := false
 	for range maxUnixFreezeRounds {
-		processes, err := hooks.owned(ctx, owner)
+		processes, err := hooks.owned(ctx)
 		if err != nil {
 			return survived, fmt.Errorf("find verification processes: %w", err)
 		}
@@ -147,7 +167,7 @@ func stopOwnedUnixProcesses(
 	}
 	deadline := time.Now().Add(hooks.wait)
 	for {
-		processes, err := hooks.owned(ctx, owner)
+		processes, err := hooks.owned(ctx)
 		if err != nil {
 			return survived, errors.Join(signalErr, fmt.Errorf("confirm verification process exit: %w", err))
 		}
@@ -204,4 +224,23 @@ func signalUnixProcessIfCurrent(
 		return err
 	}
 	return nil
+}
+
+func unixProcessFromSnapshot(
+	pid int,
+	start string,
+	currentStart func(int) (string, error),
+) (unixOwnedProcess, bool, error) {
+	process := unixOwnedProcess{pid: pid, start: start}
+	current, err := currentStart(pid)
+	if errors.Is(err, errUnixProcessGone) {
+		return unixOwnedProcess{}, false, nil
+	}
+	if err != nil {
+		return unixOwnedProcess{}, false, err
+	}
+	if current != process.start {
+		return unixOwnedProcess{}, false, nil
+	}
+	return process, true, nil
 }

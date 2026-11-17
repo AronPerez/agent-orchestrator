@@ -5,6 +5,7 @@ package verification
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -12,9 +13,12 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/procmem"
 )
 
 func TestRunnerHostShellUsesRequestedWorkspaceAndEnvironment(t *testing.T) {
@@ -57,20 +61,38 @@ func TestWorkspaceStepPreservesShellExitStatus(t *testing.T) {
 }
 
 func TestWorkspaceStepPreservesProjectFileDescriptors(t *testing.T) {
-	workspace := t.TempDir()
-	logFile := filepath.Join(workspace, "verification.log")
-	env := newStepEnvironment(os.Environ(), map[string]string{"VERIFY_FD_LOG": logFile})
+	for _, fd := range []int{3, 4} {
+		t.Run(strconv.Itoa(fd), func(t *testing.T) {
+			workspace := t.TempDir()
+			logFile := filepath.Join(workspace, "verification.log")
+			env := newStepEnvironment(os.Environ(), map[string]string{"VERIFY_FD_LOG": logFile})
+			command := fmt.Sprintf(`exec %d>"$VERIFY_FD_LOG"; printf ok >&%d`, fd, fd)
+			if err := runWorkspaceStep(context.Background(), workspace, command, env, io.Discard); err != nil {
+				t.Fatal(err)
+			}
+			contents, err := os.ReadFile(logFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := string(contents), "ok"; got != want {
+				t.Fatalf("fd %d output = %q, want %q", fd, got, want)
+			}
+		})
+	}
+}
+
+func TestWorkspaceStepDrainsOwnershipDescriptorWrites(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	env := newStepEnvironment(os.Environ(), nil)
 	if err := runWorkspaceStep(
-		context.Background(), workspace, `exec 4>"$VERIFY_FD_LOG"; printf ok >&4`, env, io.Discard,
+		ctx,
+		t.TempDir(),
+		`dd if=/dev/zero bs=65536 count=4 >&3 2>/dev/null`,
+		env,
+		io.Discard,
 	); err != nil {
-		t.Fatal(err)
-	}
-	contents, err := os.ReadFile(logFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := string(contents), "ok"; got != want {
-		t.Fatalf("fd 4 output = %q, want %q", got, want)
+		t.Fatalf("write to inherited fd 3 blocked verification: %v", err)
 	}
 }
 
@@ -254,12 +276,74 @@ func TestUnixCleanupNeverSignalsARecycledPID(t *testing.T) {
 	}
 }
 
+func TestUnixOwnershipRejectsPIDReusedAfterMarkerObservation(t *testing.T) {
+	process, current, err := unixProcessFromSnapshot(
+		4242,
+		"original",
+		func(int) (string, error) { return "replacement", nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current || process != (unixOwnedProcess{}) {
+		t.Fatalf("reused pid admitted as owned: current=%v process=%+v", current, process)
+	}
+}
+
+func TestUnixDescendantObserverSharesSnapshotAcrossProjectWatches(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var reads atomic.Int32
+	observer := newUnixDescendantObserver(time.Hour, func(ctx context.Context) (map[int]procmem.Identity, error) {
+		reads.Add(1)
+		started <- struct{}{}
+		select {
+		case <-release:
+			return map[int]procmem.Identity{}, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	})
+	first := observer.watch(unixOwnedProcess{pid: 100, start: "first"})
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("observer did not start its shared snapshot")
+	}
+	second := observer.watch(unixOwnedProcess{pid: 200, start: "second"})
+	if got := reads.Load(); got != 1 {
+		t.Fatalf("host snapshots = %d, want one shared in-flight read", got)
+	}
+	close(release)
+	observer.unwatch(first)
+	observer.unwatch(second)
+}
+
+func TestUnixDescendantObserverKeepsReparentedIdentity(t *testing.T) {
+	owned := map[unixOwnedProcess]struct{}{{pid: 100, start: "root"}: {}}
+	observeUnixDescendants(owned, map[int]procmem.Identity{
+		100: {PPID: 1, Start: "root"},
+		101: {PPID: 100, Start: "child"},
+	})
+	live := liveUnixDescendants(owned, map[int]procmem.Identity{
+		101: {PPID: 1, Start: "child"},
+	})
+	if got, want := live, []unixOwnedProcess{{pid: 101, start: "child"}}; !slices.Equal(got, want) {
+		t.Fatalf("reparented descendants = %+v, want %+v", got, want)
+	}
+	if got := liveUnixDescendants(owned, map[int]procmem.Identity{
+		101: {PPID: 1, Start: "replacement"},
+	}); len(got) != 0 {
+		t.Fatalf("reused child pid remained owned: %+v", got)
+	}
+}
+
 func TestUnixCleanupKillsAlreadyFrozenProcessesAfterAScanFailure(t *testing.T) {
 	process := unixOwnedProcess{pid: 4242, start: "owned"}
 	scanCalls := 0
 	var signals []syscall.Signal
 	hooks := unixProcessHooks{
-		owned: func(context.Context, string) ([]unixOwnedProcess, error) {
+		owned: func(context.Context) ([]unixOwnedProcess, error) {
 			scanCalls++
 			if scanCalls == 1 {
 				return []unixOwnedProcess{process}, nil
@@ -276,7 +360,7 @@ func TestUnixCleanupKillsAlreadyFrozenProcessesAfterAScanFailure(t *testing.T) {
 		wait: time.Millisecond,
 		poll: time.Microsecond,
 	}
-	survived, err := stopOwnedUnixProcesses(context.Background(), "owner", hooks)
+	survived, err := stopOwnedUnixProcesses(context.Background(), hooks)
 	if !survived || err == nil || !strings.Contains(err.Error(), "scan failed") {
 		t.Fatalf("cleanup = survived %v, error %v", survived, err)
 	}
@@ -290,7 +374,7 @@ func TestUnixCleanupUsesBoundedPostExitOwnershipSweeps(t *testing.T) {
 	scanCalls := 0
 	var signals []syscall.Signal
 	hooks := unixProcessHooks{
-		owned: func(context.Context, string) ([]unixOwnedProcess, error) {
+		owned: func(context.Context) ([]unixOwnedProcess, error) {
 			scanCalls++
 			switch scanCalls {
 			case 1, 2:
@@ -309,7 +393,7 @@ func TestUnixCleanupUsesBoundedPostExitOwnershipSweeps(t *testing.T) {
 		wait: time.Millisecond,
 		poll: time.Microsecond,
 	}
-	survived, err := stopOwnedUnixProcesses(context.Background(), "owner", hooks)
+	survived, err := stopOwnedUnixProcesses(context.Background(), hooks)
 	if !survived || err != nil {
 		t.Fatalf("cleanup = survived %v, error %v", survived, err)
 	}
