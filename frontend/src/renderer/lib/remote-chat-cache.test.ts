@@ -11,6 +11,7 @@ function seeded() {
 		client.setQueryData(["session-coordination", hostId, "session-1"], { events: [], hasMore: false });
 		client.setQueryData(["project", hostId, "same"], { repo: `https://github.com/${hostId}/repo` });
 		client.setQueryData(["project-avatar", hostId, "same", "https://avatars.githubusercontent.com/u/42"], "data:image/png;base64,cGl4ZWxz");
+		client.setQueryData(["project-avatar", hostId, "same", "metadata"], { repo: `https://github.com/${hostId}/repo` });
 	}
 	client.setQueryData(["project", "same"], { repo: "https://github.com/local/repo" });
 	client.setQueryData(["session-coordination", "", "session-1"], { events: [], hasMore: false });
@@ -32,6 +33,8 @@ it("prunes a removed account host while keeping locally paired and local history
 	expect(client.getQueryData(["project", "box-b", "same"])).toBeUndefined();
 	expect(client.getQueryData(["project-avatar", "box-b", "same", "https://avatars.githubusercontent.com/u/42"])).toBeUndefined();
 	expect(client.getQueryData(["project-avatar", "box-a", "same", "https://avatars.githubusercontent.com/u/42"])).toBeDefined();
+	expect(client.getQueryData(["project-avatar", "box-b", "same", "metadata"])).toBeUndefined();
+	expect(client.getQueryData(["project-avatar", "box-a", "same", "metadata"])).toBeDefined();
 	expect(client.getQueryData(["project", "same"])).toBeDefined();
 	// Only kept queries are the cache's to prune.
 	expect(client.getQueryData(["remote-conversation-refresh-error", "box-b", "session-1"])).toBe(true);
@@ -47,6 +50,7 @@ it("drops everything kept for a host that refused this device", async () => {
 	expect(client.getQueryData(["remote-conversation", "box-a", "session-1"])).toBeDefined();
 	expect(client.getQueryData(["project", "box-b", "same"])).toBeUndefined();
 	expect(client.getQueryData(["project-avatar", "box-b", "same", "https://avatars.githubusercontent.com/u/42"])).toBeUndefined();
+	expect(client.getQueryData(["project-avatar", "box-b", "same", "metadata"])).toBeUndefined();
 });
 
 it("does not confuse a local project ID with a forgotten host ID", async () => {
@@ -75,7 +79,7 @@ it("cancels forgotten-host coordination so a late response cannot repopulate it"
 	expect(client.getQueryData(["session-coordination", "box-b", "session-1"])).toBeUndefined();
 });
 
-it("does not add coordination history to the persistent remote cache", async () => {
+it("does not add coordination or avatar data to the persistent remote cache", async () => {
 	vi.useFakeTimers();
 	const open = vi.fn();
 	vi.stubGlobal("indexedDB", { open });
@@ -83,6 +87,8 @@ it("does not add coordination history to the persistent remote cache", async () 
 	const stop = persistRemoteCache(client);
 	try {
 		client.setQueryData(["session-coordination", "box-a", "session-1"], { events: [], hasMore: false });
+		client.setQueryData(["project-avatar", "box-a", "same", "metadata"], { repo: "https://github.com/box-a/repo" });
+		client.setQueryData(["project-avatar", "box-a", "same", "https://avatars.githubusercontent.com/u/42"], "data:image/png;base64,cGl4ZWxz");
 		await vi.advanceTimersByTimeAsync(1_100);
 		expect(open).not.toHaveBeenCalled();
 	} finally {

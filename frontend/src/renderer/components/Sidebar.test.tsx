@@ -3452,7 +3452,7 @@ describe("Sidebar", () => {
 				remoteWorkspaces: [{ ...workspace, hostId: "box-avatar", sessions: [] }],
 				seed: (client) => {
 					client.setQueryData(["project", workspace.id], { repo: "https://github.com/local/repo" });
-					client.setQueryData(["project", "box-avatar", workspace.id], { repo: "https://github.com/remote/repo" });
+					client.setQueryData(["project-avatar", "box-avatar", workspace.id, "metadata"], { repo: "https://github.com/remote/repo" });
 					client.setQueryData(["project-avatar", "box-avatar", workspace.id, remoteUrl], remoteData);
 				},
 			});
