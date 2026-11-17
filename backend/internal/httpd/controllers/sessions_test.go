@@ -115,6 +115,9 @@ type fakeSessionService struct {
 	workspaceHistoryView       sessionsvc.WorkspaceView
 	workspaceViewHistory       *sessionsvc.WorkspaceHistory
 	workspaceBranches          sessionsvc.WorkspaceBranches
+	projectOverlaps            sessionsvc.ProjectOverlapResult
+	projectOverlapsErr         error
+	overlapProjectID           domain.ProjectID
 	spawnErr                   error
 	lastSpawn                  ports.SpawnConfig
 	orchestratorMode           domain.SessionMode
@@ -947,6 +950,14 @@ func TestSessionsAPI_ListWorkspaceTree(t *testing.T) {
 }
 
 func (f *fakeSessionService) InvalidateWorkspaceCache(_ domain.SessionID) {}
+
+func (f *fakeSessionService) ProjectOverlaps(_ context.Context, projectID domain.ProjectID) (sessionsvc.ProjectOverlapResult, error) {
+	f.overlapProjectID = projectID
+	if f.projectOverlapsErr != nil {
+		return sessionsvc.ProjectOverlapResult{}, f.projectOverlapsErr
+	}
+	return f.projectOverlaps, nil
+}
 
 func newSessionTestServer(t *testing.T, svc *fakeSessionService) *httptest.Server {
 	return newSessionTestServerWithPreview(t, svc, nil)
@@ -1991,6 +2002,52 @@ func TestSessionsAPI_SpawnPassesModelToService(t *testing.T) {
 	}
 	if svc.lastSpawn.AgentConfig.Model != "sonnet" {
 		t.Fatalf("service AgentConfig.Model = %q, want sonnet", svc.lastSpawn.AgentConfig.Model)
+	}
+}
+
+func TestSessionsAPI_SpawnAndDelegatePassWorkerContract(t *testing.T) {
+	svc := newFakeSessionService()
+	srv := newSessionTestServer(t, svc)
+
+	body, status, _ := doRequest(t, srv, http.MethodPost, "/api/v1/sessions",
+		`{"projectId":"ao","kind":"worker","harness":"codex","goal":" Ship the foundation ","timeboxSeconds":7200}`)
+	if status != http.StatusCreated {
+		t.Fatalf("POST session = %d, want 201; body=%s", status, body)
+	}
+	if svc.lastSpawn.Goal != "Ship the foundation" || svc.lastSpawn.Timebox != 2*time.Hour {
+		t.Fatalf("spawn contract = goal %q timebox %v", svc.lastSpawn.Goal, svc.lastSpawn.Timebox)
+	}
+
+	body, status, _ = doRequest(t, srv, http.MethodPost, "/api/v1/orchestrators/delegate",
+		`{"projectId":"ao","brief":"Fix it","goal":"Ship the UI","timeboxSeconds":3600}`)
+	if status != http.StatusAccepted {
+		t.Fatalf("POST delegate = %d, want 202; body=%s", status, body)
+	}
+	if svc.delegationInput.Goal != "Ship the UI" || svc.delegationInput.Timebox != time.Hour {
+		t.Fatalf("delegate contract = goal %q timebox %v", svc.delegationInput.Goal, svc.delegationInput.Timebox)
+	}
+}
+
+func TestSessionsAPI_SpawnRejectsInvalidWorkerContract(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "goal only", body: `{"kind":"worker","harness":"codex","goal":"Ship it"}`},
+		{name: "timebox only", body: `{"kind":"worker","harness":"codex","timeboxSeconds":60}`},
+		{name: "negative timebox", body: `{"kind":"worker","harness":"codex","goal":"Ship it","timeboxSeconds":-1}`},
+		{name: "orchestrator", body: `{"kind":"orchestrator","harness":"codex","goal":"Ship it","timeboxSeconds":60}`},
+		{name: "standalone", body: `{"kind":"worker","harness":"codex","goal":"Ship it","timeboxSeconds":60}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := newFakeSessionService()
+			srv := newSessionTestServer(t, svc)
+			body, status, _ := doRequest(t, srv, http.MethodPost, "/api/v1/sessions", tc.body)
+			assertErrorCode(t, body, status, http.StatusBadRequest, "INVALID_WORKER_CONTRACT")
+			if svc.lastSpawn.Goal != "" || svc.lastSpawn.Timebox != 0 {
+				t.Fatalf("invalid contract reached service: %#v", svc.lastSpawn)
+			}
+		})
 	}
 }
 
@@ -4038,6 +4095,56 @@ func TestSessionsAPI_GetWorkspaceManifestOmitsUnchangedInventory(t *testing.T) {
 	if !strings.Contains(string(body), `"staged":[]`) {
 		t.Fatalf("manifest body = %s, want empty sections as arrays", body)
 	}
+}
+
+func TestSessionsAPI_ProjectOverlaps(t *testing.T) {
+	svc := newFakeSessionService()
+	svc.projectOverlaps = sessionsvc.ProjectOverlapResult{
+		ProjectID: "demo",
+		Overlaps: []sessionsvc.ProjectOverlap{
+			{SessionA: "demo-1", SessionB: "demo-2", Paths: []string{"frontend/src/App.tsx", "backend/main.go"}},
+		},
+		TruncatedSessionIDs:      []domain.SessionID{"demo-3"},
+		UnresolvedBaseSessionIDs: []domain.SessionID{"demo-4"},
+		UnavailableSessionIDs:    []domain.SessionID{"demo-5"},
+	}
+	srv := newSessionTestServer(t, svc)
+
+	body, status, headers := doRequest(t, srv, http.MethodGet, "/api/v1/projects/demo/overlaps", "")
+	assertJSON(t, headers)
+	if status != http.StatusOK {
+		t.Fatalf("GET project overlaps = %d, want 200; body=%s", status, body)
+	}
+	if svc.overlapProjectID != "demo" {
+		t.Fatalf("project id = %q, want demo", svc.overlapProjectID)
+	}
+	var got controllers.ProjectOverlapsResponse
+	mustJSON(t, body, &got)
+	if got.ProjectID != "demo" || len(got.Overlaps) != 1 {
+		t.Fatalf("response = %#v", got)
+	}
+	if got.Overlaps[0].SessionA != "demo-1" || got.Overlaps[0].SessionB != "demo-2" ||
+		!reflect.DeepEqual(got.Overlaps[0].Paths, []string{"frontend/src/App.tsx", "backend/main.go"}) {
+		t.Fatalf("overlap = %#v", got.Overlaps[0])
+	}
+	if !reflect.DeepEqual(got.TruncatedSessionIDs, []domain.SessionID{"demo-3"}) {
+		t.Fatalf("truncated session ids = %#v", got.TruncatedSessionIDs)
+	}
+	if !reflect.DeepEqual(got.UnresolvedBaseSessionIDs, []domain.SessionID{"demo-4"}) {
+		t.Fatalf("unresolved base session ids = %#v", got.UnresolvedBaseSessionIDs)
+	}
+	if !reflect.DeepEqual(got.UnavailableSessionIDs, []domain.SessionID{"demo-5"}) {
+		t.Fatalf("unavailable session ids = %#v", got.UnavailableSessionIDs)
+	}
+}
+
+func TestSessionsAPI_ProjectOverlapsPreservesServiceError(t *testing.T) {
+	svc := newFakeSessionService()
+	svc.projectOverlapsErr = apierr.NotFound("PROJECT_NOT_FOUND", "Unknown project")
+	srv := newSessionTestServer(t, svc)
+
+	body, status, _ := doRequest(t, srv, http.MethodGet, "/api/v1/projects/missing/overlaps", "")
+	assertErrorCode(t, body, status, http.StatusNotFound, "PROJECT_NOT_FOUND")
 }
 
 func TestSessionsAPI_GetWorkspaceHistoryForBranchView(t *testing.T) {

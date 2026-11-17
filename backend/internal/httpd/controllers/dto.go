@@ -50,6 +50,109 @@ type ConversationFindWindowQuery struct {
 // ConversationFindResponse returns occurrence positions and complete counts.
 type ConversationFindResponse chatsvc.FindResult
 
+// DecisionOptionPayload is one available choice and what it leads to.
+type DecisionOptionPayload struct {
+	Label       string `json:"label" maxLength:"60"`
+	Consequence string `json:"consequence" maxLength:"200"`
+	Recommended bool   `json:"recommended,omitempty"`
+}
+
+// DecisionLinkPayload is one supporting HTTP(S) link.
+type DecisionLinkPayload struct {
+	Label string `json:"label" maxLength:"120"`
+	URL   string `json:"url" maxLength:"2048"`
+}
+
+// RaiseDecisionRequest is the session-to-daemon decision call contract.
+type RaiseDecisionRequest struct {
+	Title     string                  `json:"title" maxLength:"120"`
+	Context   string                  `json:"context" maxLength:"1000"`
+	Options   []DecisionOptionPayload `json:"options"`
+	Links     []DecisionLinkPayload   `json:"links,omitempty"`
+	Reference string                  `json:"reference,omitempty" maxLength:"64"`
+}
+
+// DecisionCallResponse is the current projection of one decision call.
+type DecisionCallResponse struct {
+	ID                string                  `json:"id"`
+	Link              string                  `json:"link"`
+	State             string                  `json:"state" enum:"needs_you,in_progress,done,dismissed,withdrawn"`
+	StateLabel        string                  `json:"stateLabel"`
+	Title             string                  `json:"title"`
+	Context           string                  `json:"context"`
+	Options           []DecisionOptionPayload `json:"options"`
+	Links             []DecisionLinkPayload   `json:"links"`
+	Reference         string                  `json:"reference,omitempty"`
+	ProjectID         string                  `json:"projectId,omitempty"`
+	ProjectName       string                  `json:"projectName,omitempty"`
+	StreamSessionID   string                  `json:"streamSessionId,omitempty"`
+	StreamName        string                  `json:"streamName,omitempty"`
+	HostID            string                  `json:"hostId"`
+	MachineLabel      string                  `json:"machineLabel"`
+	OwnerSessionID    string                  `json:"ownerSessionId"`
+	OwnerSessionName  string                  `json:"ownerSessionName"`
+	RaisedAt          time.Time               `json:"raisedAt"`
+	Choice            string                  `json:"choice,omitempty" enum:"option,other"`
+	Option            int                     `json:"option,omitempty"`
+	ChosenLabel       string                  `json:"chosenLabel,omitempty"`
+	Note              string                  `json:"note,omitempty"`
+	AnsweredAt        *time.Time              `json:"answeredAt,omitempty"`
+	AnswerSurface     string                  `json:"answerSurface,omitempty"`
+	Outcome           string                  `json:"outcome,omitempty"`
+	OutcomeLink       string                  `json:"outcomeLink,omitempty"`
+	OutcomeAt         *time.Time              `json:"outcomeAt,omitempty"`
+	Retired           bool                    `json:"retired"`
+	Delivery          string                  `json:"delivery,omitempty" enum:"pending,sent,no_session"`
+	DeliveredTo       string                  `json:"deliveredTo,omitempty"`
+	DeliveredToName   string                  `json:"deliveredToName,omitempty"`
+	DeliveredFallback bool                    `json:"deliveredFallback,omitempty"`
+	ChangedAfterClose bool                    `json:"changedAfterClose,omitempty"`
+}
+
+// ListDecisionsQuery selects a decision scope or full-text search.
+type ListDecisionsQuery struct {
+	Scope string `query:"scope,omitempty" enum:"mine,needs_you" description:"Which calls to list. Defaults to needs_you. Ignored when q is given."`
+	Q     string `query:"q,omitempty" description:"Search words. When given, the response is the search result."`
+}
+
+// ListDecisionsResponse contains ordered decision projections.
+type ListDecisionsResponse struct {
+	Calls []DecisionCallResponse `json:"calls"`
+}
+
+// DecisionIDParam identifies one decision call.
+type DecisionIDParam struct {
+	ID string `path:"id" description:"Call identifier."`
+}
+
+// DecisionEntryResponse is one line of a call's history. Only the fields
+// that its kind uses are set.
+type DecisionEntryResponse struct {
+	ID            string    `json:"id"`
+	Kind          string    `json:"kind"`
+	WrittenAt     time.Time `json:"writtenAt"`
+	HostID        string    `json:"hostId"`
+	AuthorKind    string    `json:"authorKind" enum:"person,session,system"`
+	AuthorSurface string    `json:"authorSurface,omitempty"`
+	AuthorSession string    `json:"authorSession,omitempty"`
+	Choice        string    `json:"choice,omitempty"`
+	Option        int       `json:"option,omitempty"`
+	Note          string    `json:"note,omitempty"`
+	Text          string    `json:"text,omitempty"`
+	Link          string    `json:"link,omitempty"`
+	Status        string    `json:"status,omitempty"`
+	SessionID     string    `json:"sessionId,omitempty"`
+	SessionName   string    `json:"sessionName,omitempty"`
+	Fallback      bool      `json:"fallback,omitempty"`
+	Retired       *bool     `json:"retired,omitempty"`
+}
+
+// DecisionDetailResponse combines a call projection with its immutable log.
+type DecisionDetailResponse struct {
+	Call    DecisionCallResponse    `json:"call"`
+	History []DecisionEntryResponse `json:"history"`
+}
+
 // CreateReportRequest is the local caller-to-daemon report submission contract.
 // SessionID attributes the report; like the rest of AO's unauthenticated
 // loopback API, it is not cryptographic proof of worker authorship. Reports do
@@ -321,6 +424,25 @@ type ClonePrepareStreamEvent struct {
 type GetProjectResponse struct {
 	Status  string            `json:"status" enum:"ok,degraded"`
 	Project ProjectOrDegraded `json:"project"`
+}
+
+// ProjectOverlapResponse identifies two active sessions changing the same
+// base-relative project paths.
+type ProjectOverlapResponse struct {
+	SessionA domain.SessionID `json:"sessionA"`
+	SessionB domain.SessionID `json:"sessionB"`
+	Paths    []string         `json:"paths"`
+}
+
+// ProjectOverlapsResponse is the derived collision-radar read model for one
+// project. TruncatedSessionIDs names manifests that may make the result
+// incomplete without turning an otherwise useful read into an error.
+type ProjectOverlapsResponse struct {
+	ProjectID                domain.ProjectID         `json:"projectId"`
+	Overlaps                 []ProjectOverlapResponse `json:"overlaps"`
+	TruncatedSessionIDs      []domain.SessionID       `json:"truncatedSessionIds" description:"Sessions whose bounded manifests were truncated, so some overlaps may be omitted."`
+	UnresolvedBaseSessionIDs []domain.SessionID       `json:"unresolvedBaseSessionIds" description:"Sessions where at least one repository comparison base could not be resolved, so committed overlaps may be omitted."`
+	UnavailableSessionIDs    []domain.SessionID       `json:"unavailableSessionIds" description:"Sessions whose workspace could not be read; healthy session pairs are still returned."`
 }
 
 // ProjectOrDegraded is the discriminated `project` field: exactly one of
@@ -727,6 +849,10 @@ type SpawnSessionRequest struct {
 	// ApprovalMode overrides the project/default policy for this spawn.
 	ApprovalMode domain.PermissionMode `json:"approvalMode,omitempty" enum:"default,accept-edits,auto,bypass-permissions"`
 	Prompt       string                `json:"prompt,omitempty" maxLength:"102400"`
+	// Goal and TimeboxSeconds define an optional worker contract. They must be
+	// supplied together and are rejected for orchestrator sessions.
+	Goal           string `json:"goal,omitempty" maxLength:"1000"`
+	TimeboxSeconds int64  `json:"timeboxSeconds,omitempty" minimum:"1" maximum:"9223372036"`
 	// Model is an optional agent model override scoped to this single spawn. Empty
 	// keeps the resolved project/role default. The daemon validates that the
 	// selected harness can honor the model before launching.
@@ -1545,7 +1671,10 @@ type DelegateTaskRequest struct {
 	ClientRequestID string           `json:"clientRequestId,omitempty" maxLength:"128"`
 	ProjectID       domain.ProjectID `json:"projectId"`
 	Brief           string           `json:"brief" maxLength:"102400"`
-	Branch          string           `json:"branch,omitempty" maxLength:"255"`
+	// Goal and TimeboxSeconds define the delegated worker's optional contract.
+	Goal           string `json:"goal,omitempty" maxLength:"1000"`
+	TimeboxSeconds int64  `json:"timeboxSeconds,omitempty" minimum:"1" maximum:"9223372036"`
+	Branch         string `json:"branch,omitempty" maxLength:"255"`
 	// BaseBranch starts the worker from this branch instead of the project's
 	// default, to stack its work on another pull request.
 	BaseBranch string              `json:"baseBranch,omitempty" maxLength:"255"`
@@ -2792,7 +2921,7 @@ type NotificationResponse struct {
 	SessionID string    `json:"sessionId"`
 	ProjectID string    `json:"projectId"`
 	PRURL     string    `json:"prUrl"`
-	Type      string    `json:"type" enum:"needs_input,ready_to_merge,pr_merged,pr_closed_unmerged,review_completed,review_changes_requested"`
+	Type      string    `json:"type" enum:"needs_input,session_stalled,ready_to_merge,pr_merged,pr_closed_unmerged,review_completed,review_changes_requested"`
 	Title     string    `json:"title"`
 	Body      string    `json:"body"`
 	Status    string    `json:"status" enum:"unread,read" description:"Seen state. unread means the user has not opened the notification panel since it arrived."`

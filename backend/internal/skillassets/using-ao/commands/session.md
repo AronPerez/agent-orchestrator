@@ -92,6 +92,39 @@ ao session ls --include-terminated -p agent-orchestrator
 
 ---
 
+### ao session overlaps
+
+Show pairs of active sessions in one project that changed the same
+base-relative paths. The read is advisory: no reported overlap does not prove
+that branches integrate cleanly. Lockfiles and project-configured generated
+paths can be ignored by the daemon.
+
+**Syntax:**
+```
+ao session overlaps [flags]
+```
+
+**Flags:**
+
+| Flag | Meaning | Default / Required |
+|---|---|---|
+| `--json` | Output the project, session pairs, paths, and truncated-manifest warning as JSON | - |
+| `-p, --project string` | Project ID to inspect; otherwise use normal project resolution | - |
+
+**Examples:**
+
+```bash
+# Check the current project before assigning parallel work
+ao session overlaps
+```
+
+```bash
+# Inspect one project with machine-readable output
+ao session overlaps --project agent-orchestrator --json
+```
+
+---
+
 ### ao session get
 
 Fetch one session.

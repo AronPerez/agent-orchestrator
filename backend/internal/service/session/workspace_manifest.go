@@ -77,13 +77,14 @@ func (s *Service) gitWorkspaceManifest(
 	files := buildWorkspaceFileSummaries(root, prefix, excludePrefixes, paths, changes)
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 	manifest := WorkspaceManifest{
-		SessionID:      id,
-		CompareBaseSHA: compare.BaseSHA,
-		CompareBaseRef: compare.BaseRef,
-		CompareMode:    compare.Mode,
-		Files:          files,
-		Summary:        workspaceSummaryFromFiles(files),
-		Truncated:      truncated,
+		SessionID:         id,
+		CompareBaseSHA:    compare.BaseSHA,
+		CompareBaseRef:    compare.BaseRef,
+		CompareMode:       compare.Mode,
+		CompareIncomplete: compare.Mode != WorkspaceCompareBase,
+		Files:             files,
+		Summary:           workspaceSummaryFromFiles(files),
+		Truncated:         truncated,
 	}
 	if !includeSections {
 		// A workspace project reviews only its uncommitted changes.
@@ -172,13 +173,14 @@ func (s *Service) workspaceProjectManifest(ctx context.Context, rec domain.Sessi
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 	compare := aggregateWorkspaceCompare(compares)
 	manifest := WorkspaceManifest{
-		SessionID:      rec.ID,
-		CompareBaseSHA: compare.BaseSHA,
-		CompareBaseRef: compare.BaseRef,
-		CompareMode:    compare.Mode,
-		Files:          files,
-		Summary:        workspaceSummaryFromFiles(files),
-		Truncated:      truncated,
+		SessionID:         rec.ID,
+		CompareBaseSHA:    compare.BaseSHA,
+		CompareBaseRef:    compare.BaseRef,
+		CompareMode:       compare.Mode,
+		CompareIncomplete: workspaceComparesIncomplete(compares),
+		Files:             files,
+		Summary:           workspaceSummaryFromFiles(files),
+		Truncated:         truncated,
 	}
 	// listWorkspaceProjectFiles computes the same section, so the manifest and
 	// /files keep one workspaceVersion.
@@ -193,6 +195,15 @@ func (s *Service) workspaceProjectManifest(ctx context.Context, rec domain.Sessi
 	sort.Slice(uncommitted, func(i, j int) bool { return uncommitted[i].Path < uncommitted[j].Path })
 	manifest.Sections.Uncommitted = uncommitted
 	return finalizeWorkspaceManifest(manifest), nil
+}
+
+func workspaceComparesIncomplete(compares []workspaceCompareTarget) bool {
+	for _, compare := range compares {
+		if compare.Mode != WorkspaceCompareBase {
+			return true
+		}
+	}
+	return false
 }
 
 // workspaceGitSections computes only the section summaries required by the

@@ -30,6 +30,8 @@ const (
 type DelegateTaskInput struct {
 	ProjectID         domain.ProjectID
 	Brief             string
+	Goal              string
+	Timebox           time.Duration
 	BaseBranch        string
 	RequestedAgent    domain.AgentHarness
 	Branch            string
@@ -107,6 +109,8 @@ func (s *Service) DelegateTask(ctx context.Context, in DelegateTaskInput) (Deleg
 		Branch:            in.Branch,
 		RequireNewBranch:  in.Branch != "",
 		Prompt:            prompt,
+		Goal:              in.Goal,
+		Timebox:           in.Timebox,
 		DisplayName:       delegatedTaskDisplayName(in.Brief),
 		NameFromPrompt:    prompt != "" && in.Branch == "" && project.Kind.WithDefault() != domain.ProjectKindScratch,
 		AgentConfig: ports.AgentConfig{

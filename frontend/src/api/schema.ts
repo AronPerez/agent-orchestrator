@@ -1426,6 +1426,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/decisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List or search decision calls */
+        get: operations["listDecisions"];
+        put?: never;
+        /** Raise a decision call from a session */
+        post: operations["raiseDecision"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/decisions/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get one decision call and its history */
+        get: operations["getDecision"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/desktop/sessions/{sessionId}/artifacts": {
         parameters: {
             query?: never;
@@ -2125,6 +2160,23 @@ export interface paths {
         get?: never;
         /** Replace a project's per-project config */
         put: operations["setProjectConfig"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/overlaps": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Find active project sessions changing the same base-relative paths */
+        get: operations["getProjectOverlaps"];
+        put?: never;
         post?: never;
         delete?: never;
         options?: never;
@@ -6332,6 +6384,9 @@ export interface components {
             /** Format: date-time */
             nearestExpiresAt?: null | string;
         };
+        CollisionRadarConfig: {
+            ignorePaths?: string[];
+        };
         CompactConversationResponse: {
             /** Format: int64 */
             tokensAfter?: number;
@@ -6692,11 +6747,20 @@ export interface components {
             branchNaming?: boolean;
             branchState?: components["schemas"]["SessionBranchState"];
             chatProviderPreserved: boolean;
+            /** @enum {string} */
+            contractOutcome?: "met" | "blocked" | "limit_hit";
+            /** Format: date-time */
+            contractStallEscalatedAt?: null | string;
+            /** Format: date-time */
+            contractStallNudgedAt?: null | string;
+            /** Format: date-time */
+            contractTimeboxPromptedAt?: null | string;
             /** Format: date-time */
             createdAt: string;
             displayName?: string;
             /** @enum {string} */
             displayStatus: "Working" | "Blocked" | "Needs input" | "Exited" | "No signal" | "Interrupted" | "Idle" | "Fixing CI failures" | "Addressing comments" | "Review scheduled" | "Reviewing" | "Retrying review" | "Draft" | "Awaiting review" | "Review failed" | "Review cancelled" | "CI failing" | "Merge conflicts" | "Commented" | "Changes requested" | "Waiting on base PR" | "Mergeable" | "Approved" | "Merged" | "Closed without merge" | "Terminated";
+            goal?: string;
             harness?: string;
             /** Format: date-time */
             hibernatedAt?: null | string;
@@ -6748,6 +6812,8 @@ export interface components {
             terminalHandleId?: string;
             terminalTitle?: string;
             terminateOnPrMerge: boolean;
+            /** Format: date-time */
+            timeboxDeadlineAt?: null | string;
             /** Format: date-time */
             updatedAt: string;
             /** @enum {string} */
@@ -7228,6 +7294,81 @@ export interface components {
             /** Format: date-time */
             updatedAt: string;
         };
+        DecisionCallResponse: {
+            answerSurface?: string;
+            /** Format: date-time */
+            answeredAt?: null | string;
+            changedAfterClose?: boolean;
+            /** @enum {string} */
+            choice?: "option" | "other";
+            chosenLabel?: string;
+            context: string;
+            deliveredFallback?: boolean;
+            deliveredTo?: string;
+            deliveredToName?: string;
+            /** @enum {string} */
+            delivery?: "pending" | "sent" | "no_session";
+            hostId: string;
+            id: string;
+            link: string;
+            links: components["schemas"]["DecisionLinkPayload"][];
+            machineLabel: string;
+            note?: string;
+            option?: number;
+            options: components["schemas"]["DecisionOptionPayload"][];
+            outcome?: string;
+            /** Format: date-time */
+            outcomeAt?: null | string;
+            outcomeLink?: string;
+            ownerSessionId: string;
+            ownerSessionName: string;
+            projectId?: string;
+            projectName?: string;
+            /** Format: date-time */
+            raisedAt: string;
+            reference?: string;
+            retired: boolean;
+            /** @enum {string} */
+            state: "needs_you" | "in_progress" | "done" | "dismissed" | "withdrawn";
+            stateLabel: string;
+            streamName?: string;
+            streamSessionId?: string;
+            title: string;
+        };
+        DecisionDetailResponse: {
+            call: components["schemas"]["DecisionCallResponse"];
+            history: components["schemas"]["DecisionEntryResponse"][];
+        };
+        DecisionEntryResponse: {
+            /** @enum {string} */
+            authorKind: "person" | "session" | "system";
+            authorSession?: string;
+            authorSurface?: string;
+            choice?: string;
+            fallback?: boolean;
+            hostId: string;
+            id: string;
+            kind: string;
+            link?: string;
+            note?: string;
+            option?: number;
+            retired?: null | boolean;
+            sessionId?: string;
+            sessionName?: string;
+            status?: string;
+            text?: string;
+            /** Format: date-time */
+            writtenAt: string;
+        };
+        DecisionLinkPayload: {
+            label: string;
+            url: string;
+        };
+        DecisionOptionPayload: {
+            consequence: string;
+            label: string;
+            recommended?: boolean;
+        };
         DegradedProject: {
             id: string;
             /** @enum {string} */
@@ -7248,11 +7389,14 @@ export interface components {
             brief: string;
             clientRequestId?: string;
             effort?: null | string;
+            goal?: string;
             /** @enum {string} */
             mode?: "tui" | "chat";
             model?: string;
             projectId: string;
             taskPreparation?: string;
+            /** Format: int64 */
+            timeboxSeconds?: number;
         };
         DelegateTaskResponse: {
             ok: boolean;
@@ -7327,6 +7471,9 @@ export interface components {
             selection: string;
             snapshot?: components["schemas"]["ChatExcerptSnapshot"];
             sourceRole: string;
+        };
+        DomainWorkerContractConfig: {
+            stallMinutes?: number;
         };
         EditConversationMessageRequest: {
             clientMessageId?: string;
@@ -7638,6 +7785,9 @@ export interface components {
         ListCuesResponse: {
             cues: components["schemas"]["CueResponse"][];
         };
+        ListDecisionsResponse: {
+            calls: components["schemas"]["DecisionCallResponse"][];
+        };
         ListDirsResponse: {
             /** @description Subdirectories, excluding dotted names. */
             entries: components["schemas"]["FSEntry"][];
@@ -7882,7 +8032,7 @@ export interface components {
             target: components["schemas"]["NotificationTarget"];
             title: string;
             /** @enum {string} */
-            type: "needs_input" | "ready_to_merge" | "pr_merged" | "pr_closed_unmerged" | "review_completed" | "review_changes_requested";
+            type: "needs_input" | "session_stalled" | "ready_to_merge" | "pr_merged" | "pr_closed_unmerged" | "review_completed" | "review_changes_requested";
         };
         NotificationTarget: {
             /** @enum {string} */
@@ -8031,6 +8181,7 @@ export interface components {
             agentRulesFile?: string;
             autoReview?: boolean;
             canonicalRepoURL?: string;
+            collisionRadar?: components["schemas"]["CollisionRadarConfig"];
             containerReap?: components["schemas"]["ContainerReapConfig"];
             defaultBranch?: string;
             env?: {
@@ -8048,7 +8199,9 @@ export interface components {
             sessionPrefix?: string;
             symlinks?: string[];
             trackerIntake?: components["schemas"]["TrackerIntakeConfig"];
+            verify?: string[];
             worker?: components["schemas"]["RoleOverride"];
+            workerContracts?: components["schemas"]["DomainWorkerContractConfig"];
             workersRequestReview?: boolean;
         };
         ProjectGetResponse: {
@@ -8057,6 +8210,21 @@ export interface components {
             status: "ok" | "degraded";
         };
         ProjectOrDegraded: components["schemas"]["Project"] | components["schemas"]["DegradedProject"];
+        ProjectOverlapResponse: {
+            paths: string[];
+            sessionA: string;
+            sessionB: string;
+        };
+        ProjectOverlapsResponse: {
+            overlaps: components["schemas"]["ProjectOverlapResponse"][];
+            projectId: string;
+            /** @description Sessions whose bounded manifests were truncated, so some overlaps may be omitted. */
+            truncatedSessionIds: string[];
+            /** @description Sessions whose workspace could not be read; healthy session pairs are still returned. */
+            unavailableSessionIds: string[];
+            /** @description Sessions where at least one repository comparison base could not be resolved, so committed overlaps may be omitted. */
+            unresolvedBaseSessionIds: string[];
+        };
         ProjectResponse: {
             project: components["schemas"]["Project"];
         };
@@ -8146,6 +8314,13 @@ export interface components {
             pat: string;
             refreshToken?: string;
             refreshTokenExpiresIn?: number;
+        };
+        RaiseDecisionRequest: {
+            context: string;
+            links?: components["schemas"]["DecisionLinkPayload"][];
+            options: components["schemas"]["DecisionOptionPayload"][];
+            reference?: string;
+            title: string;
         };
         RecordAgentSignInResponse: {
             releasedKey?: string;
@@ -9241,6 +9416,7 @@ export interface components {
             displayName?: string;
             displayNameExplicit?: boolean;
             effort?: string;
+            goal?: string;
             /** @enum {string} */
             harness?: "claude-code" | "codex" | "aider" | "opencode" | "opencode-v2" | "grok" | "droid" | "amp" | "agy" | "crush" | "cursor" | "qwen" | "gemini" | "copilot" | "goose" | "auggie" | "continue" | "devin" | "cline" | "kimi" | "muse" | "kiro" | "kilocode" | "vibe" | "pi" | "kimchi" | "omp" | "fx" | "prime-agent" | "autohand" | "unreal-agent" | "codewhale" | "mimo-code" | "minimax-code" | "deepseek-harness" | "openhands" | "command-code" | "docker-agent" | "memcode" | "hermes" | "stakpak";
             issueId?: string;
@@ -9254,6 +9430,8 @@ export interface components {
             prompt?: string;
             /** @enum {string} */
             requestedOutput?: "artifact";
+            /** Format: int64 */
+            timeboxSeconds?: number;
             /** @enum {string} */
             trackerProvider?: "github" | "gitlab";
         };
@@ -14885,6 +15063,186 @@ export interface operations {
             };
         };
     };
+    listDecisions: {
+        parameters: {
+            query?: {
+                /** @description Which calls to list. Defaults to needs_you. Ignored when q is given. */
+                scope?: "mine" | "needs_you";
+                /** @description Search words. When given, the response is the search result. */
+                q?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListDecisionsResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    raiseDecision: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RaiseDecisionRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DecisionCallResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getDecision: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Call identifier. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DecisionDetailResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
     getDesktopSessionArtifacts: {
         parameters: {
             query?: never;
@@ -17092,6 +17450,56 @@ export interface operations {
             };
             /** @description Internal Server Error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getProjectOverlaps: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectOverlapsResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -455,6 +455,42 @@ type Cue struct {
 	UpdatedAt time.Time
 }
 
+type DecisionCall struct {
+	CallID          string
+	Origin          string
+	ProjectID       string
+	StreamSessionID string
+	StreamName      string
+	OwnerSessionID  string
+	State           string
+	Delivery        string
+	Retired         int64
+	RaisedAt        time.Time
+	LastWall        int64
+	LastCounter     int64
+	Body            string
+	SearchText      string
+}
+
+type DecisionCallsFt struct {
+	SearchText string
+}
+
+type DecisionEntry struct {
+	ID            string
+	Origin        string
+	OriginSeq     int64
+	StampWall     int64
+	StampCounter  int64
+	CallID        string
+	Kind          string
+	Payload       string
+	WrittenAt     time.Time
+	AuthorKind    string
+	AuthorSurface string
+	AuthorSession string
+}
+
 type DeletedSessionAccountUsage struct {
 	AccountID          string
 	Day                string
@@ -827,6 +863,12 @@ type Session struct {
 	DisplayNameExplicit              bool
 	AcceptedDeliveryID               string
 	AcceptedDeliveryLaunchID         string
+	Goal                             string
+	TimeboxDeadlineAt                sql.NullTime
+	ContractOutcome                  string
+	ContractStallNudgedAt            sql.NullTime
+	ContractStallEscalatedAt         sql.NullTime
+	ContractTimeboxPromptedAt        sql.NullTime
 }
 
 type SessionAgentAccount struct {

@@ -360,6 +360,49 @@ func TestSteerOrSendSendsWhenIdleAndRecoversWithoutRedispatch(t *testing.T) {
 	}
 }
 
+func TestSendIfIdleRecoversRejectedContractSteerAfterTurnCompletes(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	if _, err := h.svc.Send(ctx, testSession, ports.ChatUserMessage{
+		Text: "do the long thing", ClientMessageID: "turn-contract-active",
+	}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	h.conv.emit(ports.ChatEvent{Kind: ports.ChatEventTurnStarted, ProviderTurnID: "provider-turn-1"})
+
+	deadline := ports.ChatUserMessage{
+		Text: "wrap up and report", ClientMessageID: "session-contract-timebox:worker:1",
+		Origin: domain.MessageOriginAutomation,
+	}
+	if _, err := h.svc.SteerOrSend(ctx, testSession, deadline, false); !errors.Is(err, chatsvc.ErrSteerUnsupported) {
+		t.Fatalf("active deadline error = %v, want ErrSteerUnsupported", err)
+	}
+	fallback := deadline
+	fallback.ClientMessageID += ":idle"
+	if sent, err := h.svc.SendIfIdle(ctx, testSession, fallback); err != nil || sent {
+		t.Fatalf("active fallback sent=%v err=%v, want suppressed", sent, err)
+	}
+
+	h.conv.emit(ports.ChatEvent{
+		Kind: ports.ChatEventTurnCompleted, ProviderTurnID: "provider-turn-1", TurnState: domain.TurnStateCompleted,
+	})
+	h.awaitSnapshot(t, func(s store.ConversationSnapshot) bool {
+		return len(s.Turns) == 1 && s.Turns[0].State == domain.TurnStateCompleted
+	})
+	if _, err := h.svc.SteerOrSend(ctx, testSession, deadline, false); !errors.Is(err, chatsvc.ErrSteerUnsupported) {
+		t.Fatalf("durable rejected steer error = %v, want ErrSteerUnsupported", err)
+	}
+	if sent, err := h.svc.SendIfIdle(ctx, testSession, fallback); err != nil || !sent {
+		t.Fatalf("idle fallback sent=%v err=%v, want delivery", sent, err)
+	}
+	if sent, err := h.svc.SendIfIdle(ctx, testSession, fallback); err != nil || !sent {
+		t.Fatalf("fallback replay sent=%v err=%v, want idempotent success", sent, err)
+	}
+	if calls := h.conv.sendCallCount(); calls != 2 {
+		t.Fatalf("provider sends = %d, want initial turn plus one fallback", calls)
+	}
+}
+
 func TestSteerOrSendFallsBackWithoutLeavingAQueuedTurn(t *testing.T) {
 	h, provider := steerHarness(t)
 	provider.failWith(ports.ErrChatNoSteerableTurn)
