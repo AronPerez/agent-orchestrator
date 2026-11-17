@@ -38,6 +38,8 @@ export interface InstalledBuildStatus {
 	restartWhenIdle: boolean;
 	/** Retained launch-scoped conversations must be saved/read and closed. */
 	openSideChats?: string[];
+	/** The mismatch dialog can explicitly discard these retained side identities. */
+	sideChatsToClose?: { id: string; label: string }[];
 	/** Native install ownership or unverified replacement bytes prevent a safe restart. */
 	restartBlocked?: "native-update-staged" | "appimage-unverified";
 }

@@ -90,9 +90,21 @@ probe reads side lists for live Chat sessions, retains local side state, and
 fences the final result to the same daemon generation, port and failure code.
 An empty idle board can therefore restart into the installed build without
 claiming or restoring a side launch into an incompatible daemon.
+The mismatch dialog also offers an explicit discard action for the retained
+side IDs shown at confirmation. Cancel is the default. It stops those sides and
+removes their conversations/drafts; any newly retained sides remain protected.
+The close flow first reads launch ownership. Existing live sides use the normal
+DELETE route; missing sides recover only their minimal cleanup records, never
+their drafts, transcripts, configuration or queued turns. The daemon attempts
+host-stop-before-fork-delete cleanup immediately, and the client keeps each
+record until a fresh snapshot on that attachment proves it gone. Acknowledged
+cleanup can finish on a later retry without being recreated on the same daemon.
+Errors and attachment changes keep cleanup intent; other retained sides remain
+untouched. Repeated identical mismatch status polls keep the same attachment
+generation. The ordinary recovery attachment remains disabled throughout.
 The user can cancel the in-memory queue.
-The normal quit path preserves agents; no harness stop/update/resume operation
-is added. No restart intent, preference or dismissal marker is persisted. A fresh
+Restart preserves worker agents; confirmed side closes use their existing
+provider-host and fork cleanup. No restart intent, preference or dismissal marker is persisted. A fresh
 process pins the newly installed archive and has no inherited mismatch or prompt.
 
 Before opening a packaged window, main copies the built renderer and preloads

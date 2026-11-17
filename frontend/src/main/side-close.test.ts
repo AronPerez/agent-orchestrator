@@ -57,4 +57,19 @@ describe("side close recovery ownership", () => {
 		expect(recovery.pending()).toHaveLength(1);
 		expect(recovery.state?.sides).toMatchObject([{ cleanupOnly: true }]);
 	});
+	it("reconciles one confirmed close without discarding another retained conversation", () => {
+		const recovery = new SideCloseRecovery();
+		const other = { ...record, side: { ...record.side, id: "other" } };
+		recovery.remember(snapshot([record, other])); recovery.begin("side");
+		recovery.reconcileMissing("side", snapshot([]));
+		expect(recovery.state?.sides).toEqual([other]);
+	});
+	it("marks only the close offered to a mismatched daemon as uncertain", () => {
+		const recovery = new SideCloseRecovery();
+		const other = { ...record, side: { ...record.side, id: "other" } };
+		recovery.remember(snapshot([record, other])); recovery.begin("side"); recovery.begin("other");
+		recovery.markRestoreAttempt("side"); recovery.cancel("other"); recovery.cancel("side");
+		expect(recovery.state?.sides).toContainEqual(other);
+		expect(recovery.pending().map(side => side.id)).toEqual(["side"]);
+	});
 });

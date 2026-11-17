@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { SideLaunchRecovery, type SideLaunchAttachment } from "./side-launch-recovery";
+import { closeMismatchedSide, SideLaunchRecovery, type SideLaunchAttachment } from "./side-launch-recovery";
 import type { SideLaunchSnapshot } from "./side-close";
 import { SideCloseRecovery } from "./side-close";
 import { resetMainErrorCaptureForTests, setMainErrorSink } from "./main-error-capture";
@@ -21,6 +21,94 @@ function setup(snapshot?: SideLaunchSnapshot) {
 }
 beforeEach(() => { vi.useFakeTimers(); resetMainErrorCaptureForTests(); sentryCapture.mockClear(); setMainErrorSink(sentryCapture); });
 afterEach(() => { for (const controller of controllers.splice(0)) controller.setAttachment(undefined); resetMainErrorCaptureForTests(); vi.useRealTimers(); });
+
+function mismatchClose() {
+	const record = { side: { id: "side", sessionId: "worker-1", mainConversationId: "main", state: "ready", label: "Notes", launchConfig: "private side config" }, providerHostId: "btw-run-side", providerForkId: "fork", harness: "codex", draft: "private draft", turns: [{ state: "queued" }], launchConfig: "private launch config" };
+	const other = { ...record, side: { ...record.side, id: "other" }, providerHostId: "btw-run-other" };
+	const recovery = new SideCloseRecovery(); recovery.remember({ appRunId: "run", sides: [record, other] });
+	const fetcher = vi.fn<typeof fetch>();
+	const isCurrent = vi.fn(() => true), onChange = vi.fn();
+	const close = () => closeMismatchedSide({ attachment, sideId: "side", recovery, fetch: fetcher, isCurrent, onChange });
+	return { record, other, recovery, fetcher, isCurrent, onChange, close };
+}
+const noContent = () => ({ ok: true, status: 204 }) as Response;
+
+it("closes an owned side through the registered route while preserving other retained sides", async () => {
+	const h = mismatchClose();
+	h.fetcher.mockResolvedValueOnce(ok({ appRunId: "run", sides: [h.record] })).mockResolvedValueOnce(noContent()).mockResolvedValueOnce(ok());
+	await h.close();
+	expect(h.fetcher.mock.calls.map(([url, init]) => [url, init?.method ?? "GET"])).toEqual([
+		["http://127.0.0.1:3002/api/v1/side-chats/launch/state?appRunId=run", "GET"],
+		["http://127.0.0.1:3002/api/v1/sessions/worker-1/conversation/side-chats/side", "DELETE"],
+		["http://127.0.0.1:3002/api/v1/side-chats/launch/state?appRunId=run", "GET"],
+	]);
+	expect(h.recovery.state?.sides).toEqual([h.other]);
+});
+it("recovers only confirmed cleanup into an unclaimed mismatched daemon", async () => {
+	const h = mismatchClose();
+	h.fetcher.mockResolvedValueOnce({ ok: false, status: 409, json: async () => ({ code: "CHAT_SIDE_UNAVAILABLE" }) } as Response)
+		.mockResolvedValueOnce(noContent()).mockResolvedValueOnce(noContent()).mockResolvedValueOnce(ok());
+	await h.close();
+	expect(h.fetcher.mock.calls[1][0]).toBe("http://127.0.0.1:3002/api/v1/side-chats/launch/claim");
+	expect(h.fetcher.mock.calls[2][0]).toBe("http://127.0.0.1:3002/api/v1/side-chats/launch/state");
+	const payload = JSON.parse(String(h.fetcher.mock.calls[2][1]?.body));
+	expect(payload).toMatchObject({ appRunId: "run", sides: [{ cleanupOnly: true, side: { id: "side" }, providerHostId: "btw-run-side" }] });
+	expect(payload.sides).toHaveLength(1);
+	expect(JSON.stringify(payload)).not.toMatch(/private|turns|draft|launchConfig/);
+	expect(h.recovery.state?.sides).toEqual([h.other]);
+});
+it("can pin a just-created owned side without overwriting other retained state", async () => {
+	const h = mismatchClose(); h.recovery.remember({ appRunId: "run", sides: [h.other] });
+	h.fetcher.mockResolvedValueOnce(ok({ appRunId: "run", sides: [h.record] })).mockResolvedValueOnce(noContent()).mockResolvedValueOnce(ok());
+	await h.close();
+	expect(h.recovery.state?.sides).toEqual([h.other]);
+});
+it.each(["unavailable", "stale snapshot", "changed attachment", "foreign host", "malformed record"])("keeps close ownership on %s without sending a mutation", async condition => {
+	const h = mismatchClose();
+	if (condition === "foreign host") h.recovery.remember({ appRunId: "run", sides: [{ ...h.record, providerHostId: "someone-else" }] });
+	h.fetcher.mockImplementationOnce(async () => {
+		if (condition === "changed attachment") h.isCurrent.mockReturnValue(false);
+		return condition === "unavailable" ? { ok: false, status: 503, json: async () => ({}) } as Response : ok({ appRunId: condition === "stale snapshot" ? "other-launch" : "run", sides: condition === "malformed record" ? [{}] : [] });
+	});
+	await expect(h.close()).rejects.toThrow();
+	expect(h.fetcher).toHaveBeenCalledTimes(1);
+	expect(h.recovery.state?.sides).toContainEqual(expect.objectContaining({ cleanupOnly: true }));
+});
+it("retains cleanup until the daemon proves host and fork cleanup finished", async () => {
+	const h = mismatchClose();
+	h.fetcher.mockResolvedValueOnce(ok({ appRunId: "run", sides: [h.record] })).mockResolvedValueOnce(noContent())
+		.mockResolvedValueOnce(ok({ appRunId: "run", sides: [{ ...h.record, cleanupOnly: true }] }));
+	await expect(h.close()).rejects.toThrow(/still running/);
+	expect(h.recovery.state?.sides).toContainEqual(expect.objectContaining({ cleanupOnly: true }));
+});
+it("finishes a later close retry without recreating cleanup on the same older daemon", async () => {
+	const h = mismatchClose();
+	h.fetcher.mockResolvedValueOnce(ok({ appRunId: "run", sides: [h.record] })).mockResolvedValueOnce(noContent())
+		.mockResolvedValueOnce(ok({ appRunId: "run", sides: [{ ...h.record, cleanupOnly: true }] }));
+	await expect(h.close()).rejects.toThrow(/still running/);
+	h.fetcher.mockResolvedValueOnce(ok());
+	await h.close();
+	expect(h.fetcher).toHaveBeenCalledTimes(4);
+	expect(h.recovery.state?.sides).toEqual([h.other]);
+});
+it("replays acknowledged cleanup after the physical daemon changes", async () => {
+	const h = mismatchClose();
+	h.fetcher.mockResolvedValueOnce(ok({ appRunId: "run", sides: [h.record] })).mockResolvedValueOnce(noContent())
+		.mockResolvedValueOnce(ok({ appRunId: "run", sides: [{ ...h.record, cleanupOnly: true }] }));
+	await expect(h.close()).rejects.toThrow(/still running/);
+	h.fetcher.mockResolvedValueOnce(ok()).mockResolvedValueOnce(noContent()).mockResolvedValueOnce(noContent()).mockResolvedValueOnce(ok());
+	await closeMismatchedSide({ attachment: { ...attachment, generation: 2, pid: 12 }, sideId: "side", recovery: h.recovery, fetch: h.fetcher, isCurrent: h.isCurrent, onChange: h.onChange });
+	expect(h.fetcher).toHaveBeenCalledTimes(7);
+	expect(h.fetcher.mock.calls[5][0]).toBe("http://127.0.0.1:3002/api/v1/side-chats/launch/state");
+});
+it("keeps cleanup if the daemon changes after accepting DELETE", async () => {
+	const h = mismatchClose();
+	h.fetcher.mockResolvedValueOnce(ok({ appRunId: "run", sides: [h.record] })).mockImplementationOnce(async () => {
+		h.isCurrent.mockReturnValue(false); return noContent();
+	});
+	await expect(h.close()).rejects.toThrow(/attachment changed/);
+	expect(h.recovery.state?.sides).toContainEqual(expect.objectContaining({ cleanupOnly: true }));
+});
 
 it("reports one restore fault when recovery and background waiters observe the same error", async () => {
 	const { recovery, onRestore } = setup({ appRunId: "run", sides: [{ sessionId: "private-session", sideId: "private-side" }] } as unknown as SideLaunchSnapshot);

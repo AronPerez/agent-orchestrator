@@ -1,5 +1,5 @@
 import { SideCloseRecovery } from "./main/side-close";
-import { SideLaunchRecovery } from "./main/side-launch-recovery";
+import { closeMismatchedSide, SideLaunchRecovery } from "./main/side-launch-recovery";
 import { syncMacWindowButtons } from "./main/window-chrome";
 import { MAC_TRAFFIC_LIGHT_ROW_HEIGHT, MAC_WINDOW_BUTTON_X, MAC_WINDOW_BUTTON_RADIUS } from "./shared/window-chrome";
 import { finishUpdateQuit } from "./main/update-quit";
@@ -308,7 +308,7 @@ const installedBuildGuard = installedBuildDisk ? new InstalledBuildGuard({
 				for (const session of sessions ?? []) {
 					if (session.isTerminated || session.mode === "tui") continue;
 					if (session.mode !== "chat") return false;
-					const response = await fetch(`http://127.0.0.1:${port}/api/v1/sessions/${encodeURIComponent(session.id)}/side-chats`, { signal: AbortSignal.timeout(5_000) });
+					const response = await fetch(`http://127.0.0.1:${port}/api/v1/sessions/${encodeURIComponent(session.id)}/conversation/side-chats`, { signal: AbortSignal.timeout(5_000) });
 					if (!response.ok) return false;
 					const body = await response.json();
 					if (!Array.isArray(body.sides)) return false;
@@ -324,7 +324,11 @@ const installedBuildGuard = installedBuildDisk ? new InstalledBuildGuard({
 				const side = (record && typeof record === "object" && "side" in record ? record.side : record) as { label?: string; id?: string } | undefined;
 				return side?.label || side?.id || "Side chat";
 			}))];
-			return names.length ? { openSideChats: names } : true;
+			const closable = mismatched ? (sideLaunchState?.sides ?? []).flatMap(record => {
+				const side = (record as { side?: { id?: string; label?: string } } | null)?.side;
+				return typeof side?.id === "string" && side.id ? [{ id: side.id, label: side.label || side.id }] : [];
+			}) : [];
+			return names.length ? { openSideChats: names, sideChatsToClose: closable.length ? closable : undefined } : true;
 		};
 		const sides = await checkSides().catch(() => false);
 		if (sides !== true) return sides;
@@ -886,7 +890,7 @@ app.once("will-quit", () => {
 
 function setDaemonStatus(nextStatus: DaemonStatus): void {
 	reportDaemonFailure(daemonStatus, nextStatus);
-	if (nextStatus.state !== "ready" || daemonStatus.state !== "ready" || nextStatus.port !== daemonStatus.port || nextStatus.pid !== daemonStatus.pid) daemonAttachmentGeneration++;
+	if (nextStatus.state !== daemonStatus.state || nextStatus.code !== daemonStatus.code || nextStatus.port !== daemonStatus.port || nextStatus.pid !== daemonStatus.pid) daemonAttachmentGeneration++;
 	if (nextStatus.state !== "ready") disposeBrowserRuntimeLink();
 	if (nextStatus.state !== "ready") {
 		if (sideStateTimer) clearInterval(sideStateTimer);
@@ -3052,6 +3056,19 @@ async function captureSideChatState(closedSideId?: string, cancelClose = false, 
 		sideLaunchState = sideCloseRecovery.state;
 		publishPendingSideCloses();
 	}
+	if (daemonStatus.state === "error" && daemonStatus.code === "identity_mismatch" && daemonStatus.port && daemonStatus.pid) {
+		const sideId = closedSideId ?? alreadyClosedId;
+		if (cancelClose && sideId) { sideCloseRecovery.cancel(sideId); sideLaunchState = sideCloseRecovery.state; publishPendingSideCloses(); return; }
+		if (alreadyClosedId && !sideLaunchState?.sides.some(record => (record as { side?: { id?: string } }).side?.id === alreadyClosedId)) return;
+		if (!sideId) throw new ExpectedIpcError("Side chat recovery is unavailable until the installed build is opened.");
+		const attachment = { generation: daemonAttachmentGeneration, port: daemonStatus.port, pid: daemonStatus.pid, appRunId };
+		await closeMismatchedSide({
+			attachment, sideId, recovery: sideCloseRecovery,
+			isCurrent: () => daemonAttachmentGeneration === attachment.generation && daemonStatus.port === attachment.port && daemonStatus.pid === attachment.pid && daemonStatus.state === "error" && daemonStatus.code === "identity_mismatch",
+			onChange: () => { sideLaunchState = sideCloseRecovery.state; publishPendingSideCloses(); },
+		});
+		return;
+	}
 	await sideLaunchRecovery.ensureReady();
 	if (closedSideId) {
 		if (cancelClose) sideCloseRecovery.cancel(closedSideId);
@@ -3092,6 +3109,19 @@ ipcMain.handle("sideChats:confirmClose", async (event, sideId: string, alreadyCl
 ipcMain.handle("sideChats:pendingCloses", (event, sessionId: string) => {
 	if (event.sender !== getShellWebContents() || typeof sessionId !== "string" || sessionId.length > 255) throw new Error("Invalid side close query.");
 	return sideCloseRecovery.pending(sessionId);
+});
+ipcMain.handle("sideChats:discardRetained", async (event, ids: unknown) => {
+	if (event.sender !== getShellWebContents() || !Array.isArray(ids) || ids.length === 0 || ids.length > 1000 ||
+		ids.some(id => typeof id !== "string" || !id || id.length > 255) || new Set(ids).size !== ids.length) throw new ExpectedIpcError("Invalid retained side selection.");
+	if (daemonStatus.state !== "error" || daemonStatus.code !== "identity_mismatch" || sideLaunchState?.appRunId !== appRunId ||
+		ids.some(id => !sideLaunchState?.sides.some(record => (record as { side?: { id?: string } }).side?.id === id))) throw new ExpectedIpcError("Retained side chats changed. Review the current list and try again.");
+	const generation = daemonAttachmentGeneration;
+	try {
+		for (const id of ids) {
+			if (generation !== daemonAttachmentGeneration || daemonStatus.state !== "error" || daemonStatus.code !== "identity_mismatch") throw new ExpectedIpcError("Daemon attachment changed. Review the side chats before trying again.");
+			await captureSideChatState(id);
+		}
+	} finally { await installedBuildGuard?.check(); }
 });
 
 ipcMain.handle("editorHandoff:pathAction", (event, input) => {

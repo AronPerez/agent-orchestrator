@@ -190,7 +190,7 @@ export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}
 					},
 				},
 				agentLogin: { request: async () => null },
-				sideChats: { capture: async () => undefined, confirmClose: async () => undefined, getPendingCloses: async () => [], onPendingClosesChanged: () => () => {} },
+				sideChats: { discardRetained: async () => undefined, capture: async () => undefined, confirmClose: async () => undefined, getPendingCloses: async () => [], onPendingClosesChanged: () => () => {} },
 				editorHandoff: {
 					pathAction: async () => undefined,
 					copyWorkspacePath: async () => undefined,
@@ -1160,7 +1160,7 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 					},
 				},
 				agentLogin: { request: async () => null },
-				sideChats: { capture: async () => undefined, confirmClose: async () => undefined, getPendingCloses: async () => [], onPendingClosesChanged: () => () => {} },
+				sideChats: { discardRetained: async () => undefined, capture: async () => undefined, confirmClose: async () => undefined, getPendingCloses: async () => [], onPendingClosesChanged: () => () => {} },
 				editorHandoff: {
 					pathAction: async () => undefined,
 					copyWorkspacePath: async () => undefined,

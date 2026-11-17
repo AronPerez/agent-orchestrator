@@ -1,4 +1,4 @@
-import type { SideLaunchSnapshot } from "./side-close";
+import { cleanupSideRecord, type SideCloseRecovery, type SideLaunchSnapshot } from "./side-close";
 import { captureMainError, ExpectedIpcError } from "./main-error-capture";
 
 export interface SideLaunchAttachment {
@@ -23,6 +23,61 @@ type Recovery = {
 	reading: boolean;
 	waiters: CaptureWaiter[];
 };
+
+/** Only an explicit close may send cleanup into an identity-mismatched daemon. */
+export async function closeMismatchedSide(options: {
+	attachment: SideLaunchAttachment;
+	sideId: string;
+	recovery: SideCloseRecovery;
+	isCurrent(): boolean;
+	onChange(): void;
+	fetch?: typeof fetch;
+}): Promise<void> {
+	const { attachment, sideId, recovery } = options;
+	const attachmentKey = JSON.stringify(attachment);
+	const launch = "/api/v1/side-chats/launch";
+	const request = async (path: string, init: RequestInit = {}, allowUnclaimed = false): Promise<SideLaunchSnapshot | undefined> => {
+		if (!options.isCurrent()) throw new ExpectedIpcError("Side chat daemon attachment changed. Retry close after reconnecting.");
+		const response = await (options.fetch ?? fetch)(`http://127.0.0.1:${attachment.port}${path}`, { ...init, signal: AbortSignal.timeout(15_000) });
+		if (!options.isCurrent()) { await response.body?.cancel(); throw new ExpectedIpcError("Side chat daemon attachment changed. Retry close after reconnecting."); }
+		if (!response.ok) {
+			const error = await response.json().catch(() => undefined) as { code?: string } | undefined;
+			if (allowUnclaimed && response.status === 409 && error?.code === "CHAT_SIDE_UNAVAILABLE") return undefined;
+			throw new ExpectedIpcError(`Side chat close failed: HTTP ${response.status}. Retry close after reconnecting.`);
+		}
+		if (response.status === 204) { await response.body?.cancel(); return undefined; }
+		const state = await response.json() as SideLaunchSnapshot;
+		if (!options.isCurrent() || state.appRunId !== attachment.appRunId || !Array.isArray(state.sides) || !state.sides.every(record => {
+			const side = (record as { side?: { id?: unknown; sessionId?: unknown } } | null)?.side;
+			return side && typeof side.id === "string" && !!side.id && typeof side.sessionId === "string" && !!side.sessionId;
+		})) throw new ExpectedIpcError("Stale side chat close snapshot. Retry close after reconnecting.");
+		return state;
+	};
+	const snapshotPath = `${launch}/state?appRunId=${encodeURIComponent(attachment.appRunId)}`;
+	const hasSide = (record: unknown) => (record as { side?: { id?: string } } | null)?.side?.id === sideId;
+	if (recovery.state?.sides.some(hasSide)) { recovery.begin(sideId); options.onChange(); }
+	const before = await request(snapshotPath, {}, true);
+	recovery.begin(sideId, before);
+	options.onChange();
+	const record = recovery.state?.sides.find(hasSide) as Parameters<typeof cleanupSideRecord>[0];
+	if (recovery.state?.appRunId !== attachment.appRunId || record?.providerHostId !== `btw-${attachment.appRunId}-${sideId}` || typeof record.side.sessionId !== "string" || !record.side.sessionId || typeof record.side.mainConversationId !== "string" || !record.side.mainConversationId) throw new ExpectedIpcError("Side chat cleanup ownership could not be confirmed.");
+	if (before && !before.sides.some(hasSide) && recovery.cleanupAcknowledged(sideId, attachmentKey)) {
+		recovery.reconcileMissing(sideId, before); options.onChange(); return;
+	}
+	recovery.markRestoreAttempt(sideId);
+	if (before?.sides.some(record => hasSide(record) && !(record as { cleanupOnly?: boolean }).cleanupOnly)) {
+		await request(`/api/v1/sessions/${encodeURIComponent(record.side.sessionId)}/conversation/side-chats/${encodeURIComponent(sideId)}`, { method: "DELETE" });
+	} else {
+		const headers = { "content-type": "application/json" };
+		await request(`${launch}/claim`, { method: "POST", headers, body: JSON.stringify({ appRunId: attachment.appRunId }) });
+		await request(`${launch}/state`, { method: "POST", headers, body: JSON.stringify({ appRunId: attachment.appRunId, sides: [cleanupSideRecord(record)] }) });
+	}
+	recovery.acknowledgeCleanup(sideId, attachmentKey);
+	const after = await request(snapshotPath);
+	if (!after || after.sides.some(hasSide)) throw new ExpectedIpcError("Side chat cleanup is still running. Retry close after it finishes.");
+	recovery.reconcileMissing(sideId, after);
+	options.onChange();
+}
 
 class RecoveryHTTPError extends Error {
 	constructor(readonly status: number) { super(`Side chat launch recovery failed: HTTP ${status}`); }

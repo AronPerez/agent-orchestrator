@@ -1850,6 +1850,8 @@
 	"update.restart.waitForIdle": "タスクが実行中か、状態を確認できません。タスクがアイドル状態になってから Orchestrator を再起動できます。",
 	"update.restart.closeSideChats": "再起動する前に、これらのサイドチャットを読むか保存してから閉じてください: {{names}}。",
 	"update.restart.scheduledWithSides": "サイドチャットを閉じ、現在のタスクがアイドル状態になると、Orchestrator が再起動します。",
+	"update.restart.discardSideChats": "保持されているサイドチャットを破棄",
+	"update.restart.discardSideChatsDetail": "これにより {{names}} の作業が停止し、会話と下書きが完全に削除されます。必要な内容を先に保存してください。",
 	"update.restart.scheduled": "現在のタスクがアイドル状態になると Orchestrator が再起動します。",
 	"update.restart.scheduledShort": "アイドル時に再起動",
 	"update.restart.cancelScheduled": "再起動の予約をキャンセル",

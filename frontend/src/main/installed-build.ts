@@ -93,7 +93,7 @@ export async function sessionsAndReviewsAreIdle(body: unknown, readReviews: (ses
 				["complete", "delivered", "failed", "cancelled"].includes(String(run.status)))) return false;
 			if (result.autoReviewPending !== false) return false;
 			if (!Array.isArray(result.activeReviewers) || !Array.isArray(result.chatReviewerIds)) return false;
-			if (result.reviewerHandleId && result.activeReviewers.length === 0) return false;
+			if (result.reviewerHandleId && result.activeReviewers.length === 0 && result.reviewerActivityState !== "exited") return false;
 			const chatIDs = new Set<unknown>(result.chatReviewerIds);
 			for (const reviewer of result.activeReviewers as { reviewId?: unknown; mode?: unknown }[]) {
 				if (!reviewer || typeof reviewer.reviewId !== "string" || !reviewer.reviewId) return false;
@@ -131,7 +131,7 @@ export class InstalledBuildGuard {
 
 	constructor(private readonly deps: {
 		readIdentity(): string | null;
-		isIdle(): Promise<boolean | { openSideChats: string[] }>;
+		isIdle(): Promise<boolean | { openSideChats: string[]; sideChatsToClose?: InstalledBuildStatus["sideChatsToClose"] }>;
 		onChange(status: InstalledBuildStatus | undefined): void;
 		onReplacement(replaced: boolean): void;
 		assertRestartSafe(): void;
@@ -146,9 +146,9 @@ export class InstalledBuildGuard {
 		this.deps.onChange(status);
 	}
 
-	private async idleState(): Promise<Pick<InstalledBuildStatus, "idle" | "openSideChats">> {
+	private async idleState(): Promise<Pick<InstalledBuildStatus, "idle" | "openSideChats" | "sideChatsToClose">> {
 		const result = await this.deps.isIdle().catch(() => false);
-		return { idle: result === true, openSideChats: typeof result === "object" ? result.openSideChats : undefined };
+		return { idle: result === true, openSideChats: typeof result === "object" ? result.openSideChats : undefined, sideChatsToClose: typeof result === "object" ? result.sideChatsToClose : undefined };
 	}
 
 	private assertRestartSafe(): void {

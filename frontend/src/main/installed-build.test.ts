@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { runInNewContext } from "node:vm";
 import { ScriptTarget, transpile } from "typescript";
+import { SideCloseRecovery } from "./side-close";
 import { createPackage } from "@electron/asar";
 import type { DaemonStatus } from "../shared/daemon-status";
 import type { components } from "../api/schema";
@@ -320,6 +321,12 @@ describe("idle evidence", () => {
 		expect(await sessionsAndReviewsAreIdle({ sessions: [idleSession] }, async () => ({ chatReviewerIds: ["retained-chat"], autoReviewPending: false, runs: [], activeReviewers: [] }), readLive)).toBe(false);
 		expect(readLive).toHaveBeenCalledWith("retained-chat");
 	});
+	it("accepts the daemon's exited terminal reviewer shape with its retained handle", async () => {
+		expect(await sessionsAndReviewsAreIdle({ sessions: [idleSession] }, async () => ({
+			autoReviewPending: false, chatReviewerIds: [], runs: [{ status: "complete" }], activeReviewers: [],
+			reviewerHandleId: "exited-pane", reviewerActivityState: "exited", reviewerSurface: { mode: "tui", reviewId: "old-review" },
+		}), async () => { throw new Error("not Chat"); })).toBe(true);
+	});
 	function mainIdleProbe(sides: unknown[] = []) {
 		const main = fs.readFileSync(path.join(import.meta.dirname, "../main.ts"), "utf8");
 		const start = main.indexOf("\tisIdle: async () => {");
@@ -346,6 +353,85 @@ describe("idle evidence", () => {
 			: fetchNormally(url));
 		expect(await h.isIdle()).toBe(true);
 		expect(h.capture).not.toHaveBeenCalled();
+		if (mode === "chat") expect(h.fetch).toHaveBeenCalledWith("http://127.0.0.1:3001/api/v1/sessions/worker-1/conversation/side-chats", expect.any(Object));
+	});
+	it("keeps the physical mismatch attachment stable across identical status polls", () => {
+		const main = fs.readFileSync(path.join(import.meta.dirname, "../main.ts"), "utf8");
+		const start = main.indexOf("function setDaemonStatus(");
+		const context = {
+			daemonStatus: { state: "error", code: "identity_mismatch", port: 3001, pid: 11 }, daemonAttachmentGeneration: 1,
+			reportDaemonFailure: vi.fn(), disposeBrowserRuntimeLink: vi.fn(), disposeBrowserStreamLink: vi.fn(),
+			sideStateTimer: undefined, telemetryIdentity: { invalidate: vi.fn(), flush: vi.fn() },
+			getShellWebContents: () => undefined, browserViewHost: undefined, daemonProcess: undefined, appRunId: "launch",
+			sideLaunchRecovery: { setAttachment: vi.fn(() => false) }, clearInterval,
+		};
+		runInNewContext(transpile(main.slice(start, main.indexOf("\nconst MAX_DAEMON_OUTPUT", start)), { target: ScriptTarget.ES2022 }), context);
+		const setStatus = (context as typeof context & { setDaemonStatus(status: unknown): void }).setDaemonStatus;
+		setStatus({ ...context.daemonStatus }); setStatus({ ...context.daemonStatus });
+		expect(context.daemonAttachmentGeneration).toBe(1);
+		setStatus({ ...context.daemonStatus, pid: 12 });
+		expect(context.daemonAttachmentGeneration).toBe(2);
+	});
+	it("can complete an explicitly confirmed retained-side close while normal recovery is detached", async () => {
+		const main = fs.readFileSync(path.join(import.meta.dirname, "../main.ts"), "utf8");
+		const start = main.indexOf("async function captureSideChatState(");
+		const recovery = new SideCloseRecovery();
+		recovery.remember({ appRunId: "launch", sides: [{ side: { id: "side", sessionId: "worker-1" } }] });
+		const context = {
+			sideCloseRecovery: recovery, sideLaunchState: recovery.state, publishPendingSideCloses: vi.fn(),
+			sideLaunchRecovery: { ensureReady: vi.fn(async () => { throw new Error("normal recovery detached"); }) },
+			daemonStatus: { state: "error", code: "identity_mismatch", port: 3001, pid: 11 }, daemonAttachmentGeneration: 1, appRunId: "launch",
+			closeMismatchedSide: vi.fn(async () => recovery.reconcileMissing("side", { appRunId: "launch", sides: [] })),
+		};
+		runInNewContext(transpile(main.slice(start, main.indexOf('\nipcMain.handle("sideChats:capture"', start)), { target: ScriptTarget.ES2022 }), context);
+		await expect((context as typeof context & { captureSideChatState(id: string): Promise<void> }).captureSideChatState("side")).resolves.toBeUndefined();
+		expect(context.closeMismatchedSide).toHaveBeenCalledOnce();
+		expect(recovery.state?.sides).toEqual([]);
+		expect(context.sideLaunchRecovery.ensureReady).not.toHaveBeenCalled();
+	});
+	function retainedDiscardIpc() {
+		const main = fs.readFileSync(path.join(import.meta.dirname, "../main.ts"), "utf8");
+		const start = main.indexOf('ipcMain.handle("sideChats:discardRetained"');
+		let handler!: (event: { sender: object }, ids: unknown) => Promise<void>;
+		const shell = {};
+		const context = {
+			ipcMain: { handle: (_channel: string, next: typeof handler) => { handler = next; } }, getShellWebContents: () => shell,
+			ExpectedIpcError: Error, daemonStatus: { state: "error", code: "identity_mismatch" }, daemonAttachmentGeneration: 1, appRunId: "launch",
+			sideLaunchState: { appRunId: "launch", sides: [{ side: { id: "side" } }, { side: { id: "other" } }] },
+			captureSideChatState: vi.fn(async (_id: string) => undefined), installedBuildGuard: { check: vi.fn(async () => undefined) },
+		};
+		context.captureSideChatState.mockImplementation(async id => { context.sideLaunchState.sides = context.sideLaunchState.sides.filter(record => record.side.id !== id); });
+		runInNewContext(transpile(main.slice(start, main.indexOf('\nipcMain.handle("editorHandoff:pathAction"', start)), { target: ScriptTarget.ES2022 }), context);
+		return { context, invoke: (ids: unknown, sender = shell) => handler({ sender }, ids) };
+	}
+	it("discards only the retained side identities approved in the dialog", async () => {
+		const h = retainedDiscardIpc();
+		await h.invoke(["side"]);
+		expect(h.context.captureSideChatState).toHaveBeenCalledExactlyOnceWith("side");
+		expect(h.context.sideLaunchState.sides).toEqual([{ side: { id: "other" } }]);
+		expect(h.context.installedBuildGuard.check).toHaveBeenCalledOnce();
+	});
+	it.each([{ ids: [] }, { ids: ["unknown"] }, { ids: ["side", "side"] }, { ids: [7] }, { ids: "side" }])("rejects invalid or stale discard selection: %j", async ({ ids }) => {
+		const h = retainedDiscardIpc();
+		await expect(h.invoke(ids)).rejects.toThrow();
+		expect(h.context.captureSideChatState).not.toHaveBeenCalled();
+	});
+	it("rejects retained-discard requests after a normal daemon attachment resumes", async () => {
+		const h = retainedDiscardIpc(); h.context.daemonStatus.state = "ready";
+		await expect(h.invoke(["side"])).rejects.toThrow();
+		expect(h.context.captureSideChatState).not.toHaveBeenCalled();
+	});
+	it("rejects discard requests from a non-shell sender", async () => {
+		const h = retainedDiscardIpc();
+		await expect(h.invoke(["side"], {})).rejects.toThrow();
+		expect(h.context.captureSideChatState).not.toHaveBeenCalled();
+	});
+	it("stops a confirmed batch if the daemon attachment changes", async () => {
+		const h = retainedDiscardIpc();
+		h.context.captureSideChatState.mockImplementationOnce(async () => { h.context.daemonAttachmentGeneration++; });
+		await expect(h.invoke(["side", "other"])).rejects.toThrow(/attachment changed/);
+		expect(h.context.captureSideChatState).toHaveBeenCalledOnce();
+		expect(h.context.installedBuildGuard.check).toHaveBeenCalledOnce();
 	});
 	it("still protects retained local side state when daemon identities differ", async () => {
 		const h = mainIdleProbe();

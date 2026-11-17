@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import { RestartToUpdateDialog } from "./RestartToUpdateDialog";
@@ -8,7 +8,8 @@ import { TooltipProvider } from "./ui/tooltip";
 import type { UpdateStatus } from "../../main/update-settings";
 import { appI18n } from "../i18n";
 
-const { updInstall, updRelaunch, restartInstalled, updGetStatus, updOnStatus, openExternal, workspaceData } = vi.hoisted(() => ({
+const { discardRetained, updInstall, updRelaunch, restartInstalled, updGetStatus, updOnStatus, openExternal, workspaceData } = vi.hoisted(() => ({
+	discardRetained: vi.fn(),
 	updInstall: vi.fn(),
 	restartInstalled: vi.fn(),
 	openExternal: vi.fn(),
@@ -21,6 +22,7 @@ const { updInstall, updRelaunch, restartInstalled, updGetStatus, updOnStatus, op
 vi.mock("../lib/bridge", () => ({
 	aoBridge: {
 		app: { openExternal },
+		sideChats: { discardRetained },
 		updates: { getStatus: updGetStatus, install: updInstall, relaunch: updRelaunch, restartInstalled, onStatus: updOnStatus },
 	},
 }));
@@ -50,7 +52,7 @@ function renderDialog(status: UpdateStatus) {
 }
 
 beforeEach(() => {
-	for (const m of [updInstall, updRelaunch, restartInstalled, updGetStatus, updOnStatus, openExternal]) m.mockReset();
+	for (const m of [discardRetained, updInstall, updRelaunch, restartInstalled, updGetStatus, updOnStatus, openExternal]) m.mockReset();
 	openExternal.mockResolvedValue(undefined);
 	updOnStatus.mockReturnValue(() => undefined);
 	workspaceData.current = [];
@@ -82,6 +84,42 @@ it.each([false, true])("explains the open side blocker even when already idle, s
 	expect(await screen.findByText(/Read or save these side chats, then close them before restarting: Design notes/)).toBeVisible();
 	expect(screen.queryByText(/Current tasks are active/)).toBeNull();
 	expect(screen.getByRole("button", { name: "Restart now" })).toBeDisabled();
+});
+
+it("requires confirmation before discarding the specifically named retained side chats", async () => {
+	useUiStore.setState({ updateInstallPromptOpen: true });
+	renderDialog({ state: "downloaded", installed: { identity: "new", idle: false, restartWhenIdle: false, openSideChats: ["Design notes"], sideChatsToClose: [{ id: "side-1", label: "Design notes" }] } });
+	await userEvent.click(await screen.findByRole("button", { name: "Discard retained side chats" }));
+	expect(discardRetained).not.toHaveBeenCalled();
+	const confirmation = screen.getByRole("dialog", { name: "Discard retained side chats" });
+	expect(within(confirmation).getByText(/Design notes.*permanently removes/)).toBeVisible();
+	expect(within(confirmation).getByRole("button", { name: "Cancel" })).toHaveFocus();
+	await userEvent.click(within(confirmation).getByRole("button", { name: "Cancel" }));
+	expect(discardRetained).not.toHaveBeenCalled();
+	await userEvent.click(screen.getByRole("button", { name: "Discard retained side chats" }));
+	await userEvent.click(within(screen.getByRole("dialog", { name: "Discard retained side chats" })).getByRole("button", { name: "Discard retained side chats" }));
+	expect(discardRetained).toHaveBeenCalledWith(["side-1"]);
+	expect(restartInstalled).not.toHaveBeenCalled();
+});
+
+it("discards only the identities shown when confirmation opened", async () => {
+	useUiStore.setState({ updateInstallPromptOpen: true });
+	const installed = { identity: "new", idle: false, restartWhenIdle: false, openSideChats: ["Design notes"], sideChatsToClose: [{ id: "side-1", label: "Design notes" }] };
+	renderDialog({ state: "downloaded", installed });
+	await userEvent.click(await screen.findByRole("button", { name: "Discard retained side chats" }));
+	act(() => updOnStatus.mock.calls[0][0]({ state: "downloaded", installed: { ...installed, sideChatsToClose: [...installed.sideChatsToClose, { id: "side-2", label: "New notes" }] } }));
+	await userEvent.click(within(screen.getByRole("dialog", { name: "Discard retained side chats" })).getByRole("button", { name: "Discard retained side chats" }));
+	expect(discardRetained).toHaveBeenCalledWith(["side-1"]);
+});
+
+it("keeps the discard confirmation open when provider cleanup cannot finish", async () => {
+	useUiStore.setState({ updateInstallPromptOpen: true });
+	discardRetained.mockRejectedValueOnce(new Error("Cleanup is still running. Retry close."));
+	renderDialog({ state: "downloaded", installed: { identity: "new", idle: false, restartWhenIdle: false, openSideChats: ["Design notes"], sideChatsToClose: [{ id: "side-1", label: "Design notes" }] } });
+	await userEvent.click(await screen.findByRole("button", { name: "Discard retained side chats" }));
+	await userEvent.click(within(screen.getByRole("dialog", { name: "Discard retained side chats" })).getByRole("button", { name: "Discard retained side chats" }));
+	expect(await screen.findByRole("alert")).toHaveTextContent("Cleanup is still running");
+	expect(screen.getByRole("dialog", { name: "Discard retained side chats" })).toBeVisible();
 });
 
 it("blocks both restart choices and explains recovery while a macOS update is armed", async () => {
