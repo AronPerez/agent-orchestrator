@@ -1034,6 +1034,13 @@ type TimestampRepairProgress struct {
 	Rejected   int64
 }
 
+type TrackerIntakeHandled struct {
+	ProjectID string
+	IssueID   string
+	SessionID string
+	HandledAt time.Time
+}
+
 type UsageBinding struct {
 	ID             int64
 	SessionID      domain.SessionID

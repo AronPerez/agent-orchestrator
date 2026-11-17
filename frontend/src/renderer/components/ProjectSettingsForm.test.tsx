@@ -2104,6 +2104,7 @@ describe("ProjectSettingsForm", () => {
 							provider: "gitlab",
 							repo: "acme/project-one",
 							assignee: "octocat",
+							limits: { maxConcurrent: 4, maxStartsPerPass: 1 },
 							labels: ["agent-ready"],
 						},
 					},
@@ -2123,6 +2124,7 @@ describe("ProjectSettingsForm", () => {
 			provider: "gitlab",
 			repo: "acme/project-one",
 			assignee: "octocat",
+			limits: { maxConcurrent: 4, maxStartsPerPass: 1 },
 			labels: ["agent-ready"],
 		});
 	});

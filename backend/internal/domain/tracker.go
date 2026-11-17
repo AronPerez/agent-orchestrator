@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // TrackerProvider identifies an issue-tracker provider implementation.
@@ -111,6 +112,9 @@ type TrackerIntakeConfig struct {
 	// Assignee narrows eligible issues to one assignee. Provider-specific values
 	// such as "*" are passed through unchanged.
 	Assignee string `json:"assignee,omitempty"`
+	// Limits bounds unattended session starts. Omitted fields use safe defaults;
+	// zero never means unlimited.
+	Limits AutomatedSessionLimits `json:"limits,omitempty"`
 }
 
 // WithDefaults leaves the provider empty when not explicitly set so the
@@ -118,6 +122,9 @@ type TrackerIntakeConfig struct {
 // InferTrackerProvider). Disabled intake leaves the zero value untouched so
 // empty project configs still store as NULL.
 func (c TrackerIntakeConfig) WithDefaults() TrackerIntakeConfig {
+	if c.Enabled {
+		c.Limits = c.Limits.WithDefaults()
+	}
 	return c
 }
 
@@ -167,5 +174,18 @@ func (c TrackerIntakeConfig) Validate() error {
 	if strings.TrimSpace(c.Assignee) == "" {
 		return fmt.Errorf("trackerIntake: assignee is required when enabled")
 	}
+	if err := c.Limits.Validate(); err != nil {
+		return fmt.Errorf("trackerIntake.limits: %w", err)
+	}
 	return nil
+}
+
+// TrackerIntakeHandledRecord is durable proof that one project delivered a
+// tracker item. It survives session termination and deletion so an open issue
+// is not re-spawned forever. IssueID includes the provider and native identity.
+type TrackerIntakeHandledRecord struct {
+	ProjectID ProjectID
+	IssueID   IssueID
+	SessionID SessionID
+	HandledAt time.Time
 }

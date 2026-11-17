@@ -30,12 +30,20 @@ For an explicit GitLab intake configuration, set `trackerIntake.provider` to `gi
     "enabled": true,
     "provider": "gitlab",
     "repo": "group/project",
-    "assignee": "alice"
+    "assignee": "alice",
+    "limits": {
+      "maxConcurrent": 3,
+      "maxStartsPerPass": 2
+    }
   }
 }
 ```
 
 This is a fragment to merge into the full configuration, not a replacement for it. Use `ao project get my-app --json` to inspect the stored configuration, keeping in mind that its output omits effort.
+
+The limits are optional. Zero or an omitted value selects the safe default shown above; configured values must be between 1 and 100. `maxConcurrent` counts every live issue-linked session in the project, including one started manually, so missing historical creation metadata cannot make unattended intake less restrictive. `maxStartsPerPass` bounds launch attempts in each polling sweep, including failed attempts, even when hundreds of issues match.
+
+After a worker starts successfully, Orchestrator records that project and canonical issue id as handled. That record survives session termination and deletion: a still-open issue is not started again automatically. Start a replacement manually if the first session is abandoned.
 
 If `AO_TRACKER_INTAKE` is unset, the project config is still stored and validated, but no sessions are spawned. The daemon logs a warning at startup naming how many projects have intake configured while the flag is off.
 
