@@ -180,6 +180,24 @@ func TestRuntimeEnvCarriesDesktopRemotesFileToAgent(t *testing.T) {
 	}
 }
 
+func TestRuntimeEnvDerivesStandaloneRemotesFileFromStateDir(t *testing.T) {
+	aoRoot := t.TempDir()
+	t.Setenv(EnvRemotesFile, "")
+	manager := &Manager{
+		dataDir:    filepath.Join(aoRoot, "data"),
+		stateDir:   aoRoot,
+		executable: func() (string, error) { return filepath.Join(aoRoot, "data", "bin", "ao"), nil },
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	env := manager.runtimeEnv("mer-1", "mer", "", map[string]string{
+		EnvRemotesFile: filepath.Join(aoRoot, "project-cannot-redirect-remotes.json"),
+	})
+	if got, want := env[EnvRemotesFile], filepath.Join(aoRoot, "remotes.json"); got != want {
+		t.Fatalf("%s = %q, want daemon state path %q", EnvRemotesFile, got, want)
+	}
+}
+
 func TestRuntimeEnvWindowsRemovesCaseVariantsOfProtectedVariables(t *testing.T) {
 	daemonRunFile := filepath.Join(t.TempDir(), "daemon-running.json")
 	daemonRemotesFile := filepath.Join(t.TempDir(), "remotes.json")
