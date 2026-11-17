@@ -172,6 +172,21 @@ ao send --session <session-id> --steer --recover-only --client-message-id <handl
 
 `--recover-only` requires `--steer` and a handle; it does not require a new message or contact the provider. A receipt confirms acceptance state, not that the agent completed the instruction.
 
+### `ao decision`
+
+A decision call is a durable question from a session that needs you to choose between options. The ledger keeps the question, your answer, and the recorded outcome together so later sessions can find what you decided.
+
+```bash
+ao decision ls --needs-you
+ao decision show <id>
+ao decision answer <id> --pick <n> [--note <text>]
+ao decision answer <id> --other --note <text>
+ao decision dismiss <id> [--note <text>]
+ao decision retire <id> [--undo]
+```
+
+Sessions raise calls themselves; use these commands to inspect, answer, dismiss, or retire them.
+
 ### `ao orchestrator ls`
 
 Lists orchestrator sessions. Add `--json` for structured output.
