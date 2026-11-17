@@ -42,6 +42,11 @@ project on another machine. Remote `--claim-pr`, `--review`, and
 routes are outside the agent-coordination credential. Successful output names
 the destination machine; verify it before using the returned session ID.
 
+When an existing AO session runs `ao spawn --host`, the destination records
+the source as `parentHostId` plus `parentSessionId`. This is immutable lineage
+for fleet views; it does not grant the remote parent authority on the
+destination or inherit settings from a same-named destination session.
+
 Available harnesses: `claude-code`, `codex`, `aider`, `opencode`, `opencode-v2`, `grok`, `droid`, `amp`, `agy`, `crush`, `cursor`, `qwen`, `gemini`, `copilot`, `goose`, `auggie`, `continue`, `devin`, `cline`, `kimi`, `muse`, `kiro`, `kilocode`, `vibe`, `pi`, `kimchi`, `prime-agent`, `autohand`, `omp`, `fx`, `unreal-agent`, `mimo-code`, `minimax-code`, `deepseek-harness`, `openhands`, `command-code`. Check `ao agent ls --refresh` for readiness on the installed build. `unreal-agent` is Chat-only; Gemini, MiMo Code, MiniMax Code, and OpenHands are Terminal UI-only.
 
 `fx` is experimental and Terminal UI only: spawn it with `--agent fx --mode tui`.

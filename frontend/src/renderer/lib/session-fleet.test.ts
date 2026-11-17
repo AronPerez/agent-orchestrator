@@ -58,4 +58,14 @@ describe("fleetRows", () => {
 		expect(new Set(rows.map((row) => row.session.id)).size).toBe(4);
 		expect(rows.filter((row) => row.parentUnavailable).map((row) => row.session.id)).toEqual(["orphan", "self", "a"]);
 	});
+	it("does not attach an external parent to a same-named local session", () => {
+		const rows = fleetRows(
+			[session("parent"), session("child", "parent", { parentHostId: "h_other" })],
+			new Set(),
+		);
+		expect(rows.map(({ session, depth, parentUnavailable }) => [session.id, depth, parentUnavailable])).toEqual([
+			["parent", 0, false],
+			["child", 0, true],
+		]);
+	});
 });

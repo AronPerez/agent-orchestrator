@@ -8,6 +8,10 @@ export type FleetRow = {
 	parentUnavailable: boolean;
 };
 
+function localParentID(session: WorkspaceSession): string | undefined {
+	return session.parentHostId ? undefined : session.parentSessionId;
+}
+
 /** Spawn lineage only: names, prompts and report recipients never establish a parent. */
 export function fleetRows(
 	sessions: WorkspaceSession[],
@@ -17,10 +21,11 @@ export function fleetRows(
 	const byId = new Map(sessions.map((session) => [session.id, session]));
 	const children = new Map<string, WorkspaceSession[]>();
 	for (const session of sessions) {
-		if (session.parentSessionId && session.parentSessionId !== session.id && byId.has(session.parentSessionId)) {
-			const siblings = children.get(session.parentSessionId) ?? [];
+		const parentID = localParentID(session);
+		if (parentID && parentID !== session.id && byId.has(parentID)) {
+			const siblings = children.get(parentID) ?? [];
 			siblings.push(session);
-			children.set(session.parentSessionId, siblings);
+			children.set(parentID, siblings);
 		}
 	}
 	const included = new Set<string>();
@@ -29,7 +34,7 @@ export function fleetRows(
 		let current: WorkspaceSession | undefined = session;
 		while (current && !included.has(current.id)) {
 			included.add(current.id);
-			current = byId.get(current.parentSessionId ?? "");
+			current = byId.get(localParentID(current) ?? "");
 		}
 	}
 	const rows: FleetRow[] = [];
@@ -40,6 +45,7 @@ export function fleetRows(
 			const { session, depth, hidden } = stack.pop()!;
 			if (visited.has(session.id) || !included.has(session.id)) continue;
 			visited.add(session.id);
+			const parentID = localParentID(session);
 			const descendants = children.get(session.id) ?? [];
 			if (!hidden)
 				rows.push({
@@ -47,15 +53,17 @@ export function fleetRows(
 					depth,
 					childCount: descendants.filter((child) => included.has(child.id)).length,
 					role: session.kind === "orchestrator" ? "Orchestrator" : descendants.length ? "Manager" : "Worker",
-					parentUnavailable: !!session.parentSessionId && (!byId.has(session.parentSessionId) || depth === 0),
+					parentUnavailable: !!session.parentSessionId && (!parentID || !byId.has(parentID) || depth === 0),
 				});
 			for (const child of [...descendants].reverse())
 				stack.push({ session: child, depth: depth + 1, hidden: hidden || collapsed.has(session.id) });
 		}
 	}
 	const roots = sessions.filter(
-		(session) =>
-			!session.parentSessionId || !byId.has(session.parentSessionId) || session.parentSessionId === session.id,
+		(session) => {
+			const parentID = localParentID(session);
+			return !parentID || !byId.has(parentID) || parentID === session.id;
+		},
 	);
 	roots.filter((session) => session.kind === "orchestrator").forEach(visit);
 	roots.filter((session) => session.kind !== "orchestrator").forEach(visit);

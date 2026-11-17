@@ -47,6 +47,7 @@ type spawnOptions struct {
 type spawnRequest struct {
 	ProjectID           string `json:"projectId,omitempty"`
 	IssueID             string `json:"issueId,omitempty"`
+	ParentHostID        string `json:"parentHostId,omitempty"`
 	ParentSessionID     string `json:"parentSessionId,omitempty"`
 	TrackerProvider     string `json:"trackerProvider,omitempty"`
 	Kind                string `json:"kind,omitempty"`
@@ -188,14 +189,17 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 				}
 			}
 			parentSessionID := strings.TrimSpace(os.Getenv("AO_SESSION_ID"))
-			if ctx.remote != nil {
-				// Session IDs are host-local. Do not misrepresent a local session as a
-				// parent on the destination before the host-qualified lineage contract lands.
-				parentSessionID = ""
+			parentHostID := ""
+			if ctx.remote != nil && parentSessionID != "" {
+				parentHostID = readLocalHostID()
+				if parentHostID == "" {
+					return errors.New("local host identity is unavailable; open the Orchestrator desktop once before spawning an agent-authored cross-machine session")
+				}
 			}
 			req := spawnRequest{
 				ProjectID:           opts.project,
 				IssueID:             opts.issue,
+				ParentHostID:        parentHostID,
 				ParentSessionID:     parentSessionID,
 				TrackerProvider:     opts.trackerProvider,
 				Kind:                opts.kind,

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/caller"
 )
 
 const (
@@ -48,6 +50,9 @@ func requireSavedHostRequest(t *testing.T, r *http.Request) {
 	}
 	if got := r.Header.Get("X-AO-Expected-Host-ID"); got != testSavedHostID {
 		t.Fatalf("%s %s expected host = %q", r.Method, r.URL.Path, got)
+	}
+	if got := r.Header.Get(caller.Header); got != "" {
+		t.Fatalf("%s %s carried unqualified caller session %q", r.Method, r.URL.Path, got)
 	}
 }
 
@@ -92,8 +97,8 @@ func TestSpawnSavedHostPinsMachineAndOmitsUnqualifiedParent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn --host: %v stderr=%s", err, stderr)
 	}
-	if request.ParentSessionID != "" {
-		t.Fatalf("remote parentSessionId = %q, want empty until it is host-qualified", request.ParentSessionID)
+	if request.ParentSessionID != "local-parent" || request.ParentHostID != testLocalHostID {
+		t.Fatalf("remote parent = %q/%q, want %q/%q", request.ParentHostID, request.ParentSessionID, testLocalHostID, "local-parent")
 	}
 	if !strings.Contains(out, "spawned session remote-1") || !strings.Contains(out, "desk (h_desk)") {
 		t.Fatalf("output = %q, want session and destination machine", out)

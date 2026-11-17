@@ -1137,7 +1137,10 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 	if projectKind == domain.ProjectKindScratch && strings.TrimSpace(cfg.Branch) != "" {
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w", ErrScratchBranchUnsupported)
 	}
-	if cfg.ParentSessionID != "" {
+	if cfg.ParentSessionID == "" {
+		cfg.ParentHostID = ""
+	}
+	if cfg.ParentSessionID != "" && cfg.ParentHostID == "" {
 		parent, found, err := m.store.GetSession(ctx, cfg.ParentSessionID)
 		if err != nil {
 			return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: load parent: %w", err)
@@ -1161,7 +1164,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (result doma
 			cfg.RequireNewBranch = true
 		}
 	}
-	if cfg.ParentSessionID != "" && cfg.AgentConfig.Permissions == "" {
+	if cfg.ParentSessionID != "" && cfg.ParentHostID == "" && cfg.AgentConfig.Permissions == "" {
 		permissions, err := m.inheritedSpawnPermissions(ctx, cfg.ProjectID, cfg.ParentSessionID)
 		if err != nil {
 			return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w", err)
@@ -6502,6 +6505,7 @@ func normalizeWorkspacePath(p string) string {
 
 func seedRecord(cfg ports.SpawnConfig, projectConfig domain.ProjectConfig, now time.Time) domain.SessionRecord {
 	return domain.SessionRecord{
+		ParentHostID:        cfg.ParentHostID,
 		ParentSessionID:     cfg.ParentSessionID,
 		ProjectID:           cfg.ProjectID,
 		IssueID:             cfg.IssueID,

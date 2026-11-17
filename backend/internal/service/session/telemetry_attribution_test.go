@@ -77,6 +77,7 @@ func TestSpawnCreatedByAndSurface(t *testing.T) {
 		{"cli outside a session", ports.SpawnConfig{Kind: domain.KindWorker}, domain.RequestSurfaceCLI, domain.SessionCreatedByUser},
 		{"orchestrator ao spawn", ports.SpawnConfig{Kind: domain.KindWorker, ParentSessionID: "orch-1"}, domain.RequestSurfaceCLI, domain.SessionCreatedByOrchestrator},
 		{"worker ao spawn", ports.SpawnConfig{Kind: domain.KindWorker, ParentSessionID: "work-1"}, domain.RequestSurfaceCLI, domain.SessionCreatedByAutomation},
+		{"remote agent ao spawn", ports.SpawnConfig{Kind: domain.KindWorker, ParentHostID: "h_source", ParentSessionID: "orch-1"}, domain.RequestSurfaceCLI, domain.SessionCreatedByAutomation},
 		{"schedule", ports.SpawnConfig{Kind: domain.KindWorker, AutomationRunID: &run}, "", domain.SessionCreatedByScheduled},
 		{"tracker intake", ports.SpawnConfig{Kind: domain.KindWorker, CreatedBy: domain.SessionCreatedByAutomation}, "", domain.SessionCreatedByAutomation},
 	}

@@ -297,7 +297,7 @@ func (f *fakeSessionService) Spawn(_ context.Context, cfg ports.SpawnConfig) (do
 		return domain.Session{}, 0, 0, f.spawnErr
 	}
 	now := time.Now().UTC()
-	s := domain.Session{SessionRecord: domain.SessionRecord{ID: domain.SessionID(string(cfg.ProjectID) + "-2"), ProjectID: cfg.ProjectID, IssueID: cfg.IssueID, Kind: cfg.Kind, Harness: cfg.Harness, DisplayName: cfg.DisplayName, Activity: domain.Activity{State: domain.ActivityIdle, LastActivityAt: now}, AutoInjectReview: true, AutoInjectCI: true, CreatedAt: now, UpdatedAt: now}, Status: domain.StatusIdle}
+	s := domain.Session{SessionRecord: domain.SessionRecord{ID: domain.SessionID(string(cfg.ProjectID) + "-2"), ProjectID: cfg.ProjectID, IssueID: cfg.IssueID, ParentHostID: cfg.ParentHostID, ParentSessionID: cfg.ParentSessionID, Kind: cfg.Kind, Harness: cfg.Harness, DisplayName: cfg.DisplayName, Activity: domain.Activity{State: domain.ActivityIdle, LastActivityAt: now}, AutoInjectReview: true, AutoInjectCI: true, CreatedAt: now, UpdatedAt: now}, Status: domain.StatusIdle}
 	f.sessions[s.ID] = s
 	return s, len(cfg.Prompt), 0, nil
 }
@@ -1177,6 +1177,8 @@ func TestSessionsAPI_ListSpawnGetAndActions(t *testing.T) {
 	s.SCMStatus = domain.StatusReviewPending
 	s.KanbanColumn = domain.KanbanNeedsReview
 	s.DisplayStatus = contract.DisplayAwaitingReview
+	s.ParentHostID = "h_source"
+	s.ParentSessionID = "source-parent"
 	svc.sessions["ao-1"] = s
 	srv := newSessionTestServer(t, svc)
 
@@ -1199,6 +1201,9 @@ func TestSessionsAPI_ListSpawnGetAndActions(t *testing.T) {
 	}
 	if list.Sessions[0].Branch != "qa/modal-worker" {
 		t.Fatalf("branch = %q, want qa/modal-worker", list.Sessions[0].Branch)
+	}
+	if list.Sessions[0].ParentHostID != "h_source" || list.Sessions[0].ParentSessionID != "source-parent" {
+		t.Fatalf("parent = %q/%q, want h_source/source-parent", list.Sessions[0].ParentHostID, list.Sessions[0].ParentSessionID)
 	}
 	var rawList struct {
 		Sessions []map[string]any `json:"sessions"`
@@ -2052,12 +2057,21 @@ func TestSessionsAPI_SpawnPassesParentSessionToService(t *testing.T) {
 	srv := newSessionTestServer(t, svc)
 
 	body, status, _ := doRequest(t, srv, "POST", "/api/v1/sessions",
-		`{"projectId":"ao","kind":"worker","harness":"claude-code","parentSessionId":"ao-1","prompt":"fix"}`)
+		`{"projectId":"ao","kind":"worker","harness":"claude-code","parentHostId":"h_source","parentSessionId":"ao-1","prompt":"fix"}`)
 	if status != http.StatusCreated {
 		t.Fatalf("POST session = %d, want 201; body=%s", status, body)
 	}
 	if svc.lastSpawn.ParentSessionID != "ao-1" {
 		t.Fatalf("service ParentSessionID = %q, want ao-1", svc.lastSpawn.ParentSessionID)
+	}
+	if svc.lastSpawn.ParentHostID != "h_source" {
+		t.Fatalf("service ParentHostID = %q, want h_source", svc.lastSpawn.ParentHostID)
+	}
+
+	body, status, _ = doRequest(t, srv, "POST", "/api/v1/sessions",
+		`{"projectId":"ao","kind":"worker","harness":"claude-code","parentHostId":"h_source","prompt":"fix"}`)
+	if status != http.StatusBadRequest || !strings.Contains(string(body), "PARENT_SESSION_REQUIRED") {
+		t.Fatalf("host-only parent = %d body=%s, want PARENT_SESSION_REQUIRED", status, body)
 	}
 }
 
@@ -5194,6 +5208,8 @@ func TestSessionsAPI_CleanupWithoutProjectFilter(t *testing.T) {
 
 type sessionBody struct {
 	ID               string `json:"id"`
+	ParentHostID     string `json:"parentHostId"`
+	ParentSessionID  string `json:"parentSessionId"`
 	ProjectID        string `json:"projectId"`
 	IssueID          string `json:"issueId"`
 	Kind             string `json:"kind"`

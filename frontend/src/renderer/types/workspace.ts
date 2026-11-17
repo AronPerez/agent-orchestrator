@@ -144,6 +144,8 @@ export type AgentSwitchSummary = {
 };
 
 export type WorkspaceSession = {
+	/** Stable installation that owns parentSessionId; absent means a local parent. */
+	parentHostId?: string;
 	parentSessionId?: string;
 	activeAgentSwitch?: AgentSwitchSummary;
 	workspaceCleanup?: "pending" | "removed" | "preserved_dirty" | "failed" | "not_applicable";

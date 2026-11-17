@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -11,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/spf13/cobra"
 )
 
 func prepareAllHostsTest(t *testing.T, localSessionID string) (string, testConfig) {
@@ -240,5 +243,38 @@ func TestSessionListAllHostsRejectsSingleRemoteTarget(t *testing.T) {
 	_, _, err := executeCLI(t, Deps{}, "session", "ls", "--all-hosts", "--url", "https://remote.example")
 	if err == nil || ExitCode(err) != 2 || !strings.Contains(err.Error(), "--all-hosts cannot be combined") {
 		t.Fatalf("err=%v exit=%d, want target-conflict usage error", err, ExitCode(err))
+	}
+}
+
+func TestAllHostSessionJSONExposesQualifiedParentEdges(t *testing.T) {
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	results := []allHostSessionListResult{
+		{
+			HostID: "h_local", HostLabel: "this machine", Local: true,
+			Snapshot: sessionListSnapshot{Sessions: []sessionDTO{{ID: "local-child", ParentSessionID: "local-parent"}}},
+		},
+		{
+			HostID: "h_remote", HostLabel: "build",
+			Snapshot: sessionListSnapshot{Sessions: []sessionDTO{{ID: "remote-child", ParentHostID: "h_local", ParentSessionID: "local-parent"}}},
+		},
+	}
+	if err := writeAllHostSessionListJSON(cmd, results); err != nil {
+		t.Fatal(err)
+	}
+	var got sessionListOutput
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	byID := make(map[string]sessionListEntry, len(got.Data))
+	for _, entry := range got.Data {
+		byID[entry.ID] = entry
+	}
+	if child := byID["local-child"]; child.ParentHostID != "h_local" || child.ParentSessionID != "local-parent" {
+		t.Fatalf("local parent edge = %#v, want h_local/local-parent", child)
+	}
+	if child := byID["remote-child"]; child.ParentHostID != "h_local" || child.ParentSessionID != "local-parent" {
+		t.Fatalf("remote parent edge = %#v, want h_local/local-parent", child)
 	}
 }

@@ -220,10 +220,10 @@ func (c *commandContext) doJSONPathWithHeadersAndTimeout(
 	for name, value := range headers {
 		req.Header.Set(name, value)
 	}
-	if callerID := callerSession(); callerID != "" {
+	if callerID := callerSession(); callerID != "" && c.remote == nil {
 		req.Header.Set(caller.Header, callerID)
 	}
-	if sideID := os.Getenv("AO_SIDE_CONVERSATION_ID"); sideID != "" {
+	if sideID := os.Getenv("AO_SIDE_CONVERSATION_ID"); sideID != "" && c.remote == nil {
 		req.Header.Set("X-AO-Side-Conversation", sideID)
 	}
 

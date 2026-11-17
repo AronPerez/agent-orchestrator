@@ -164,6 +164,9 @@ func actionErrorText(err error) string {
 }
 
 func (s *Service) recordSpawnOutcome(ctx context.Context, cfg ports.SpawnConfig, child domain.SessionRecord, status domain.ActivityStatus, err error) {
+	if cfg.ParentHostID != "" {
+		return
+	}
 	audience := cfg.ParentSessionID
 	if audience == "" {
 		return

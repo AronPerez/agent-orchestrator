@@ -6719,6 +6719,7 @@ export interface components {
             needsResume: boolean;
             /** @enum {string} */
             outputType: "none" | "pr" | "artifact" | "pr_artifact";
+            parentHostId?: string;
             parentSessionId?: string;
             /** Format: date-time */
             pinnedAt?: null | string;
@@ -9249,6 +9250,7 @@ export interface components {
             /** @enum {string} */
             mode?: "chat" | "tui";
             model?: string;
+            parentHostId?: string;
             parentSessionId?: string;
             projectId?: string;
             prompt?: string;
