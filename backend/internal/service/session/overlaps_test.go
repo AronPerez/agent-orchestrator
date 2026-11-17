@@ -619,7 +619,9 @@ func TestRunProjectOverlapNoticeRadarIgnoresSessionSignalWithUnchangedTopology(t
 		t.Fatal("radar did not finish its initial scan")
 	}
 
-	svc.SignalProjectOverlapRadarSession("demo")
+	for range 20 {
+		svc.SignalProjectOverlapRadarSession("demo")
+	}
 	select {
 	case <-store.listNoticeCh:
 		cancel()
@@ -670,6 +672,20 @@ func TestRunProjectOverlapNoticeRadarClearsRowsWhenProjectDropsBelowTwoSessions(
 			t.Fatal("delivery rows remained after the project dropped below two eligible sessions")
 		}
 		time.Sleep(time.Millisecond)
+	}
+
+	restored := store.sessions["demo-b"]
+	restored.IsTerminated = false
+	store.sessions["demo-b"] = restored
+	svc.SignalProjectOverlapRadarSession("demo")
+	for range 2 {
+		select {
+		case <-nudger.callCh:
+		case <-time.After(3 * time.Second):
+			cancel()
+			<-done
+			t.Fatal("restored collision was suppressed by stale delivery rows")
+		}
 	}
 	cancel()
 	<-done
@@ -1050,6 +1066,9 @@ func TestReconcileProjectOverlapNoticesRetiresUnconfirmedAttemptAfterCleanScan(t
 	}
 	if got := nudger.calls[2].deliveryID; got == firstAttempt {
 		t.Fatalf("new collision reused cleared unconfirmed attempt %q", got)
+	}
+	if nudger.calls[2].confirmOnly {
+		t.Fatalf("new collision confirmed retired attempt instead of starting a new delivery: %+v", nudger.calls[2])
 	}
 }
 

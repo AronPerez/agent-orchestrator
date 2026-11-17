@@ -59,6 +59,32 @@ func TestNudgeCoordinationQueuesForActiveChatWithoutTerminalSteering(t *testing.
 	}
 }
 
+func TestNudgeCoordinationRetriesAmbiguousChatWithSameIdentity(t *testing.T) {
+	store := newFakeStore()
+	messenger := &recordingSemanticCoordinationMessenger{errors: []error{errors.New("dispatch unconfirmed"), nil}}
+	m := New(store, messenger)
+	rec := working("chat-1")
+	rec.Mode = domain.SessionModeChat
+	store.sessions[rec.ID] = rec
+
+	outcome, err := m.NudgeCoordination(context.Background(), rec.ID, "coordinate", "collision-chat")
+	if outcome != sessionguard.Sent || err == nil {
+		t.Fatalf("first Chat nudge = (%s, %v), want admitted unconfirmed delivery", outcome, err)
+	}
+	outcome, err = m.ConfirmCoordination(context.Background(), rec.ID, "coordinate", "collision-chat")
+	if outcome != sessionguard.Sent || err != nil {
+		t.Fatalf("Chat confirmation = (%s, %v), want idempotent retry accepted", outcome, err)
+	}
+	if messenger.normalCalls != 0 || len(messenger.semanticCalls) != 2 {
+		t.Fatalf("normal=%d semantic=%+v, want two keyed semantic attempts", messenger.normalCalls, messenger.semanticCalls)
+	}
+	for _, call := range messenger.semanticCalls {
+		if call.message != "coordinate" || call.deliveryID != "collision-chat" {
+			t.Fatalf("semantic Chat attempt = %+v, want stable message identity", call)
+		}
+	}
+}
+
 func TestNudgeCoordinationDoesNotDropChatDeliveryIdentity(t *testing.T) {
 	m, store, messenger := newManager()
 	rec := working("chat-1")
@@ -112,6 +138,7 @@ type semanticCoordinationCall struct {
 type recordingSemanticCoordinationMessenger struct {
 	normalCalls   int
 	semanticCalls []semanticCoordinationCall
+	errors        []error
 }
 
 func (m *recordingSemanticCoordinationMessenger) Send(context.Context, domain.SessionID, string) error {
@@ -121,6 +148,11 @@ func (m *recordingSemanticCoordinationMessenger) Send(context.Context, domain.Se
 
 func (m *recordingSemanticCoordinationMessenger) SendSemantic(_ context.Context, _ domain.SessionID, message, deliveryID string) error {
 	m.semanticCalls = append(m.semanticCalls, semanticCoordinationCall{message: message, deliveryID: deliveryID})
+	if len(m.errors) > 0 {
+		err := m.errors[0]
+		m.errors = m.errors[1:]
+		return err
+	}
 	return nil
 }
 
