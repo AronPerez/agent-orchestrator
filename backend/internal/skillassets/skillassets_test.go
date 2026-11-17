@@ -280,6 +280,8 @@ func TestEmbeddedDecisionGuidanceCoversSearchingRaisingAndClosing(t *testing.T) 
 		"Never put secrets, credentials or personal data in a call.",
 		"ao report --needs-input",
 		"resume the blocked session after it is answered",
+		"explicitly tell the human in your current response",
+		"ao decision show <call-link>",
 	} {
 		if !strings.Contains(guidance, want) {
 			t.Fatalf("decision guidance missing %q", want)

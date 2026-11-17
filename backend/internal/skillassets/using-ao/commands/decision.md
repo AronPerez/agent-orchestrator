@@ -38,6 +38,12 @@ not raise a second call. If it blocks you, hand off the existing call link
 through your role's coordination or status path so the dependent session can
 resume after the answer.
 
+Before ending a turn blocked by a new or existing call, make it visible. A
+worker with a project orchestrator uses a needs-input status report with the
+call link. A standalone worker or orchestrator must explicitly tell the human
+in your current response that a decision is waiting, include the call link and
+`ao decision show <call-link>`, and not end the turn silently.
+
 ## Raising a call
 
 Use `--title` for the question, `--context` for what the human needs to know,

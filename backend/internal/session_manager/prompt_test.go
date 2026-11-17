@@ -392,6 +392,26 @@ func TestBuildSystemPrompt_WorkerPairsBlockingCallsWithStatusReport(t *testing.T
 	}
 }
 
+func TestBuildSystemPrompt_UnparentedRolesExposeBlockingCallsToHuman(t *testing.T) {
+	for name, cfg := range map[string]systemPromptConfig{
+		"standalone worker": {Role: sessionPromptRoleWorker, Standalone: true},
+		"orchestrator":      {Role: sessionPromptRoleOrchestrator},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := buildSystemPromptText(cfg)
+			for _, want := range []string{
+				"A standalone worker or orchestrator must explicitly tell the human in the current response that a decision is waiting",
+				"include the call link and `ao decision show <call-link>`",
+				"Do not end the turn silently.",
+			} {
+				if !strings.Contains(got, want) {
+					t.Errorf("prompt missing unparented decision notice %q", want)
+				}
+			}
+		})
+	}
+}
+
 func TestBuildTaskPromptPreservesExplicitPublishingScope(t *testing.T) {
 	for _, prompt := range []string{"Fix the issue, push the branch, and open a PR.", "Fix the issue locally. Do not push or open a PR."} {
 		got := buildTaskPrompt(taskPromptConfig{Role: sessionPromptRoleWorker, Prompt: prompt, IssueID: "42"})
