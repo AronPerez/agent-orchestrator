@@ -4,34 +4,36 @@ import (
 	"context"
 	"errors"
 	"io"
-	"os"
-	"os/exec"
 	"strings"
 	"time"
-
-	aoprocess "github.com/aoagents/agent-orchestrator/backend/internal/process"
 )
 
-func runWorkspaceStep(ctx context.Context, workspacePath, command string, env map[string]string, output io.Writer) error {
+var errLingeringProcessTree = errors.New("verification command left background processes running")
+
+type workspaceProcessTree interface {
+	StopSurvivors() (bool, error)
+	Close() error
+}
+
+func runWorkspaceStep(ctx context.Context, workspacePath, command string, env stepEnvironment, output io.Writer) error {
 	cmd := workspaceStepCommand(ctx, command)
-	aoprocess.ConfigureTreeCancellation(cmd)
 	cmd.Dir = workspacePath
-	cmd.Env = os.Environ()
-	for key, value := range env {
-		cmd.Env = append(cmd.Env, key+"="+value)
-	}
+	cmd.Env = append([]string(nil), env.list...)
 	cmd.WaitDelay = time.Second
 	cmd.Stdin = strings.NewReader("")
 	cmd.Stdout, cmd.Stderr = output, output
-	err := cmd.Run()
-	if errors.Is(err, exec.ErrWaitDelay) {
-		// A successful shell left a descendant holding the output pipes. It is
-		// not a successful verification: stop the tree before the project gate
-		// is released, then preserve ErrWaitDelay for the caller.
-		return errors.Join(err, aoprocess.KillProcessTree(cmd))
+	tree, err := startWorkspaceProcessTree(ctx, cmd)
+	if err != nil {
+		return err
 	}
-	if err != nil && cmd.ProcessState != nil && cmd.ProcessState.Success() && ctx.Err() != nil && errors.Is(err, ctx.Err()) {
-		return nil
+	waitErr := cmd.Wait()
+	if waitErr != nil && cmd.ProcessState != nil && cmd.ProcessState.Success() && ctx.Err() != nil && errors.Is(waitErr, ctx.Err()) {
+		waitErr = nil
 	}
-	return err
+	survived, stopErr := tree.StopSurvivors()
+	closeErr := tree.Close()
+	if survived {
+		waitErr = errors.Join(waitErr, errLingeringProcessTree)
+	}
+	return errors.Join(waitErr, stopErr, closeErr)
 }

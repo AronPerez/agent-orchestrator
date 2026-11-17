@@ -17,8 +17,8 @@ import (
 
 func TestRunnerRunsVerifyStepsInOrderWithProjectContext(t *testing.T) {
 	var calls []string
-	runner := newTestRunner(func(_ context.Context, workspace, command string, env map[string]string, output io.Writer) error {
-		calls = append(calls, workspace+"\x00"+command+"\x00"+env["TOKEN"]+"\x00"+env["AO_PROJECT_ID"]+"\x00"+env["AO_WORKTREE_PATH"])
+	runner := newTestRunner(func(_ context.Context, workspace, command string, env stepEnvironment, output io.Writer) error {
+		calls = append(calls, workspace+"\x00"+command+"\x00"+env.Value("TOKEN")+"\x00"+env.Value("AO_PROJECT_ID")+"\x00"+env.Value("AO_WORKTREE_PATH"))
 		_, _ = io.WriteString(output, "output from "+command+"\n")
 		return nil
 	})
@@ -50,7 +50,7 @@ func TestRunnerRunsVerifyStepsInOrderWithProjectContext(t *testing.T) {
 func TestRunnerFailureStopsLaterStepsAndRedactsEvidence(t *testing.T) {
 	sentinel := errors.New("exit status 7")
 	var calls []string
-	runner := newTestRunner(func(_ context.Context, _ string, command string, _ map[string]string, output io.Writer) error {
+	runner := newTestRunner(func(_ context.Context, _ string, command string, _ stepEnvironment, output io.Writer) error {
 		calls = append(calls, command)
 		_, _ = io.WriteString(output, strings.Repeat("noise", 100)+" secret-value\n")
 		if command == "fail" {
@@ -84,7 +84,7 @@ func TestRunnerFailureStopsLaterStepsAndRedactsEvidence(t *testing.T) {
 
 func TestRunnerRedactsASecretAcrossTheTailBoundary(t *testing.T) {
 	const secret = "secret-value"
-	runner := newTestRunner(func(_ context.Context, _ string, _ string, _ map[string]string, output io.Writer) error {
+	runner := newTestRunner(func(_ context.Context, _ string, _ string, _ stepEnvironment, output io.Writer) error {
 		_, _ = io.WriteString(output, "prefix-"+secret+"!")
 		return nil
 	})
@@ -104,7 +104,7 @@ func TestRunnerRedactsASecretAcrossTheTailBoundary(t *testing.T) {
 func TestRunnerRedactsRepeatedSecretsBeforeBoundingTheTail(t *testing.T) {
 	const secret = "0123456789abcdef0123456789ABCDEF"
 	payload := strings.Repeat(secret, 2100) + strings.Repeat("x", 15)
-	runner := newTestRunner(func(_ context.Context, _ string, _ string, _ map[string]string, output io.Writer) error {
+	runner := newTestRunner(func(_ context.Context, _ string, _ string, _ stepEnvironment, output io.Writer) error {
 		_, _ = io.WriteString(output, payload)
 		return nil
 	})
@@ -123,7 +123,7 @@ func TestRunnerRedactsRepeatedSecretsBeforeBoundingTheTail(t *testing.T) {
 func TestRunnerRedactsInheritedCredentialEnvironment(t *testing.T) {
 	const secret = "inherited-verification-secret"
 	t.Setenv("VERIFY_REVIEW_TOKEN", secret)
-	runner := newTestRunner(func(_ context.Context, _ string, _ string, _ map[string]string, output io.Writer) error {
+	runner := newTestRunner(func(_ context.Context, _ string, _ string, _ stepEnvironment, output io.Writer) error {
 		_, _ = io.WriteString(output, os.Getenv("VERIFY_REVIEW_TOKEN"))
 		return nil
 	})
@@ -135,6 +135,46 @@ func TestRunnerRedactsInheritedCredentialEnvironment(t *testing.T) {
 	}
 	if strings.Contains(result.OutputTail, secret) || !strings.Contains(result.OutputTail, "[REDACTED]") {
 		t.Fatalf("inherited credential was not redacted: %q", result.OutputTail)
+	}
+}
+
+func TestRunnerRedactsInheritedCredentialURL(t *testing.T) {
+	const databaseURL = "postgres://verify-user:private-password@database.example/verify"
+	t.Setenv("DATABASE_URL", databaseURL)
+	runner := newTestRunner(func(_ context.Context, _ string, _ string, _ stepEnvironment, output io.Writer) error {
+		_, _ = io.WriteString(output, os.Getenv("DATABASE_URL"))
+		return nil
+	})
+	result, err := runner.Run(context.Background(), Request{
+		ProjectID: "demo", WorkspacePath: "/work/demo", Commands: []string{"verify"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(result.OutputTail, "private-password") || !strings.Contains(result.OutputTail, "[REDACTED]") {
+		t.Fatalf("credential URL was not redacted: %q", result.OutputTail)
+	}
+}
+
+func TestRunnerUsesOneEnvironmentSnapshotForEveryStep(t *testing.T) {
+	const initial = "initial-verification-token"
+	const rotated = "rotated-verification-token"
+	t.Setenv("VERIFY_ROTATING_TOKEN", initial)
+	runner := newTestRunner(func(_ context.Context, _ string, command string, env stepEnvironment, output io.Writer) error {
+		if command == "rotate" {
+			return os.Setenv("VERIFY_ROTATING_TOKEN", rotated)
+		}
+		_, _ = io.WriteString(output, env.Value("VERIFY_ROTATING_TOKEN"))
+		return nil
+	})
+	result, err := runner.Run(context.Background(), Request{
+		ProjectID: "demo", WorkspacePath: "/work/demo", Commands: []string{"rotate", "print"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(result.OutputTail, rotated) {
+		t.Fatalf("second step observed environment mutation after the run began: %q", result.OutputTail)
 	}
 }
 
@@ -155,8 +195,54 @@ func TestRedactingWriterMatchesASecretSplitAcrossWrites(t *testing.T) {
 	}
 }
 
+func TestRedactingWriterWaitsForOverlappingLongerSecret(t *testing.T) {
+	var output bytes.Buffer
+	redactor := newRedactingWriter(&output, map[string]string{
+		"PREFIX": "sk-",
+		"TOKEN":  "sk-abcdef123456",
+	})
+	if _, err := redactor.Write([]byte("sk-")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := redactor.Write([]byte("abcdef123456")); err != nil {
+		t.Fatal(err)
+	}
+	if err := redactor.Finalize(); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := output.String(), "[REDACTED]"; got != want {
+		t.Fatalf("overlapping redaction = %q, want %q", got, want)
+	}
+}
+
+type countingWriter struct {
+	calls int
+	bytes int
+}
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	w.calls++
+	w.bytes += len(p)
+	return len(p), nil
+}
+
+func TestRedactingWriterBatchesLargeSafeOutput(t *testing.T) {
+	var output countingWriter
+	redactor := newRedactingWriter(&output, map[string]string{"TOKEN": "not-in-the-output"})
+	payload := bytes.Repeat([]byte("x"), 1<<20)
+	if _, err := redactor.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := redactor.Finalize(); err != nil {
+		t.Fatal(err)
+	}
+	if output.bytes != len(payload) || output.calls > 10 {
+		t.Fatalf("large safe output used %d writes for %d bytes", output.calls, output.bytes)
+	}
+}
+
 func TestRunnerAppliesEachStepTimeout(t *testing.T) {
-	runner := newTestRunner(func(ctx context.Context, _ string, _ string, _ map[string]string, _ io.Writer) error {
+	runner := newTestRunner(func(ctx context.Context, _ string, _ string, _ stepEnvironment, _ io.Writer) error {
 		<-ctx.Done()
 		return ctx.Err()
 	})
@@ -179,7 +265,7 @@ func TestRunnerSerializesOneProjectButNotDifferentProjects(t *testing.T) {
 	releaseOther := make(chan struct{})
 	var active atomic.Int32
 	var maxActive atomic.Int32
-	runner := newTestRunner(func(ctx context.Context, _ string, _ string, env map[string]string, _ io.Writer) error {
+	runner := newTestRunner(func(ctx context.Context, _ string, _ string, env stepEnvironment, _ io.Writer) error {
 		n := active.Add(1)
 		for {
 			seen := maxActive.Load()
@@ -187,7 +273,7 @@ func TestRunnerSerializesOneProjectButNotDifferentProjects(t *testing.T) {
 				break
 			}
 		}
-		projectID := domain.ProjectID(env["AO_PROJECT_ID"])
+		projectID := domain.ProjectID(env.Value("AO_PROJECT_ID"))
 		entered <- projectID
 		release := releaseSame
 		if projectID == "other" {
@@ -248,7 +334,7 @@ func TestRunnerCanCancelWhileWaitingForProject(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	var calls atomic.Int32
-	runner := newTestRunner(func(context.Context, string, string, map[string]string, io.Writer) error {
+	runner := newTestRunner(func(context.Context, string, string, stepEnvironment, io.Writer) error {
 		if calls.Add(1) == 1 {
 			close(entered)
 			<-release
@@ -275,7 +361,7 @@ func TestRunnerCanCancelWhileWaitingForProject(t *testing.T) {
 }
 
 func TestRunnerValidatesRequestBeforeExecution(t *testing.T) {
-	runner := newTestRunner(func(context.Context, string, string, map[string]string, io.Writer) error {
+	runner := newTestRunner(func(context.Context, string, string, stepEnvironment, io.Writer) error {
 		t.Fatal("executor should not run")
 		return nil
 	})

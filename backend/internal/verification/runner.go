@@ -64,7 +64,7 @@ func (e *StepError) Error() string {
 
 func (e *StepError) Unwrap() error { return e.Cause }
 
-type stepExecutor func(context.Context, string, string, map[string]string, io.Writer) error
+type stepExecutor func(context.Context, string, string, stepEnvironment, io.Writer) error
 
 // Runner executes verification commands. Keep one daemon-owned Runner so its
 // per-project gate is shared by all verification callers.
@@ -118,13 +118,13 @@ func (r *Runner) Run(ctx context.Context, request Request) (result Result, runEr
 	}
 	defer release()
 
-	redactions := verificationRedactions(request.Env, os.Environ())
-	tail := &tailWriter{max: r.tailBytes}
-	output := newRedactingWriter(tail, redactions)
-	env := agentlaunch.MergeEnv(request.Env, map[string]string{
+	env := newStepEnvironment(os.Environ(), agentlaunch.MergeEnv(request.Env, map[string]string{
 		"AO_PROJECT_ID":    string(request.ProjectID),
 		"AO_WORKTREE_PATH": request.WorkspacePath,
-	})
+	}))
+	redactions := verificationRedactions(request.Env, env)
+	tail := &tailWriter{max: r.tailBytes}
+	output := newRedactingWriter(tail, redactions)
 	result.Passed = true
 	for index, step := range steps {
 		command, minutes := domain.ScriptStepMinutes(step)
@@ -266,37 +266,6 @@ func boundedTail(value string, maxBytes int) string {
 	return value[len(value)-maxBytes:]
 }
 
-func verificationRedactions(configured map[string]string, inherited []string) map[string]string {
-	redactions := make(map[string]string, len(configured))
-	for key, value := range configured {
-		redactions[key] = value
-	}
-	for index, entry := range inherited {
-		name, value, ok := strings.Cut(entry, "=")
-		if !ok || value == "" || !credentialEnvironmentName(name) {
-			continue
-		}
-		// A project override can use the same name with a different value. Keep
-		// both values in the redaction set because the inherited value was still
-		// present in the daemon environment and must never reach evidence.
-		redactions[fmt.Sprintf("inherited:%d:%s", index, name)] = value
-	}
-	return redactions
-}
-
-func credentialEnvironmentName(name string) bool {
-	upper := strings.ToUpper(name)
-	for _, marker := range []string{
-		"TOKEN", "SECRET", "PASSWORD", "PASSWD", "API_KEY", "APIKEY",
-		"PRIVATE_KEY", "ACCESS_KEY", "CREDENTIAL", "AUTHORIZATION",
-	} {
-		if strings.Contains(upper, marker) {
-			return true
-		}
-	}
-	return false
-}
-
 // redactingWriter removes complete sensitive values before bytes enter the
 // bounded tail. It retains only a suffix that could be the start of a value,
 // so matches split across concurrent stdout/stderr writes are still removed.
@@ -339,34 +308,50 @@ func (w *redactingWriter) Finalize() error {
 }
 
 func (w *redactingWriter) flush(final bool) error {
-	consumed := 0
-	for consumed < len(w.pending) {
-		rest := w.pending[consumed:]
-		matched := false
+	cursor, safeStart := 0, 0
+	writeSafe := func(end int) error {
+		if end <= safeStart {
+			return nil
+		}
+		_, err := w.dst.Write(w.pending[safeStart:end])
+		return err
+	}
+	for cursor < len(w.pending) {
+		rest := w.pending[cursor:]
+		// A complete shorter value may also be a prefix of a longer value. Do
+		// not commit either the shorter match or ordinary bytes until another
+		// write proves which value is present.
+		if !final && w.couldStartSecret(rest) {
+			if err := writeSafe(cursor); err != nil {
+				return err
+			}
+			w.pending = append(w.pending[:0], rest...)
+			return nil
+		}
+		matched := 0
 		for _, secret := range w.secrets {
 			if len(rest) >= len(secret) && bytes.HasPrefix(rest, secret) {
-				if _, err := io.WriteString(w.dst, "[REDACTED]"); err != nil {
-					return err
-				}
-				consumed += len(secret)
-				matched = true
+				matched = len(secret)
 				break
 			}
 		}
-		if matched {
+		if matched == 0 {
+			cursor++
 			continue
 		}
-		if !final && w.couldStartSecret(rest) {
-			break
-		}
-		if _, err := w.dst.Write(rest[:1]); err != nil {
+		if err := writeSafe(cursor); err != nil {
 			return err
 		}
-		consumed++
+		if _, err := io.WriteString(w.dst, "[REDACTED]"); err != nil {
+			return err
+		}
+		cursor += matched
+		safeStart = cursor
 	}
-	if consumed > 0 {
-		w.pending = append(w.pending[:0], w.pending[consumed:]...)
+	if err := writeSafe(len(w.pending)); err != nil {
+		return err
 	}
+	w.pending = w.pending[:0]
 	return nil
 }
 

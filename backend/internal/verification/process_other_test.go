@@ -7,7 +7,6 @@ import (
 	"errors"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -32,22 +31,38 @@ func TestRunnerHostShellUsesRequestedWorkspaceAndEnvironment(t *testing.T) {
 }
 
 func TestWorkspaceStepFailsAndStopsALingeringBackgroundChild(t *testing.T) {
-	workspace := t.TempDir()
-	pidFile := filepath.Join(workspace, "child.pid")
-	err := runWorkspaceStep(context.Background(), workspace, `sleep 60 & echo $! > "$VERIFY_CHILD_PID"`, map[string]string{
-		"VERIFY_CHILD_PID": pidFile,
-	}, io.Discard)
-	pid := readProcessID(t, pidFile)
-	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
-	if !errors.Is(err, exec.ErrWaitDelay) {
-		t.Fatalf("runWorkspaceStep() error = %v, want exec.ErrWaitDelay", err)
-	}
-	deadline := time.Now().Add(2 * time.Second)
-	for processAlive(pid) && time.Now().Before(deadline) {
-		time.Sleep(20 * time.Millisecond)
-	}
-	if processAlive(pid) {
-		t.Fatalf("background child %d survived verification", pid)
+	for _, tc := range []struct {
+		name    string
+		command string
+	}{
+		{name: "holds output pipe", command: `sleep 60 & echo $! > "$VERIFY_CHILD_PID"`},
+		{name: "shell fails", command: `sleep 60 & echo $! > "$VERIFY_CHILD_PID"; exit 7`},
+		{name: "redirects output", command: `sleep 60 >/dev/null 2>&1 & echo $! > "$VERIFY_CHILD_PID"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			pidFile := filepath.Join(workspace, "child.pid")
+			env := newStepEnvironment(os.Environ(), map[string]string{
+				"VERIFY_CHILD_PID": pidFile,
+			})
+			err := runWorkspaceStep(context.Background(), workspace, tc.command, env, io.Discard)
+			pid := readProcessID(t, pidFile)
+			t.Cleanup(func() {
+				if processAlive(pid) {
+					_ = syscall.Kill(pid, syscall.SIGKILL)
+				}
+			})
+			if err == nil {
+				t.Fatal("runWorkspaceStep() succeeded with a surviving background child")
+			}
+			deadline := time.Now().Add(2 * time.Second)
+			for processAlive(pid) && time.Now().Before(deadline) {
+				time.Sleep(20 * time.Millisecond)
+			}
+			if processAlive(pid) {
+				t.Fatalf("background child %d survived verification (error %v)", pid, err)
+			}
+		})
 	}
 }
 

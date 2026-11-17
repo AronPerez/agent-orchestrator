@@ -30,14 +30,6 @@ func ConfigureTreeCancellation(cmd *exec.Cmd) {
 	cmd.Cancel = func() error { return killProcessTree(cmd) }
 }
 
-// KillProcessTree force-stops cmd and every child in the process group/tree
-// configured by ConfigureTreeCancellation. Call it only after cmd has started.
-// It is also safe after the group leader exits, when a descendant still holds
-// one of the leader's inherited resources.
-func KillProcessTree(cmd *exec.Cmd) error {
-	return killProcessTree(cmd)
-}
-
 // InterruptOnCancel makes a context cancellation send os.Interrupt and kill
 // only after grace, so the child can run exit handlers such as releasing lock
 // files. Windows cannot deliver os.Interrupt and kills immediately. Call
