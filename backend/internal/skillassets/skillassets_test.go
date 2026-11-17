@@ -279,6 +279,7 @@ func TestEmbeddedDecisionGuidanceCoversSearchingRaisingAndClosing(t *testing.T) 
 		"Only the human answers, dismisses or retires a call.",
 		"Never put secrets, credentials or personal data in a call.",
 		"ao report --needs-input",
+		"resume the blocked session after it is answered",
 	} {
 		if !strings.Contains(guidance, want) {
 			t.Fatalf("decision guidance missing %q", want)
@@ -299,7 +300,7 @@ func TestEmbeddedDecisionGuidanceCoversSearchingRaisingAndClosing(t *testing.T) 
 		t.Fatal(err)
 	}
 	report := strings.Join(strings.Fields(string(reportBody)), " ")
-	if !strings.Contains(report, "For a choice, raise a call: see [`ao decision`](decision.md).") {
+	if !strings.Contains(report, "For a choice, raise or reuse one call") || !strings.Contains(report, "resume this session after it is answered") {
 		t.Fatal("report guidance does not route choices to decision calls")
 	}
 }

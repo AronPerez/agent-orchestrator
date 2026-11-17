@@ -197,7 +197,7 @@ func (c *commandContext) report(ctx context.Context, args []string, o reportOpti
 		return err
 	}
 	if selected == domain.ReportNeedsInput {
-		_, _ = fmt.Fprintln(c.deps.Err, "Reminder: if this is a choice between options, raise a call for the human instead. See: ao decision raise --help")
+		_, _ = fmt.Fprintln(c.deps.Err, "Reminder: for a choice, raise or reuse one call; if it blocks all remaining work, send one needs-input report with its link so the orchestrator can resume this session after it is answered. See: ao decision raise --help")
 	}
 	return nil
 }

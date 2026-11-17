@@ -349,6 +349,7 @@ func TestBuildSystemPromptTellsEveryRoleHowToAskTheHumanToDecide(t *testing.T) {
 			got := buildSystemPromptText(cfg)
 			for _, want := range []string{
 				"ao decision search <words>",
+				"If it blocks you, use your role's existing handoff or status path with the call link",
 				"ao decision raise --title <the question>",
 				`--option "<label> :: <what it leads to>"`,
 				"Never ask the human for a ruling by id.",
@@ -371,11 +372,13 @@ func TestBuildSystemPromptTellsEveryRoleHowToAskTheHumanToDecide(t *testing.T) {
 	}
 }
 
-func TestBuildSystemPrompt_WorkerSendsChoicesToCallsNotReports(t *testing.T) {
+func TestBuildSystemPrompt_WorkerPairsBlockingCallsWithStatusReport(t *testing.T) {
 	got := buildSystemPromptText(systemPromptConfig{Role: sessionPromptRoleWorker})
 	for _, want := range []string{
 		"raise a call for it (see Decisions for the Human) instead of guessing",
-		"When missing input that is not a choice between options blocks progress, such as missing access, run `ao report --needs-input --note <text>`. For a choice, raise a call (see Decisions for the Human).",
+		"For a choice, raise or reuse one call (see Decisions for the Human).",
+		`ao report --needs-input --note "Blocked by <call-link>; resume this session when it is answered"`,
+		"This is a status handoff, not a second question.",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("worker prompt missing decision instruction %q", want)
@@ -383,6 +386,9 @@ func TestBuildSystemPrompt_WorkerSendsChoicesToCallsNotReports(t *testing.T) {
 	}
 	if strings.Contains(got, "When a decision or missing input blocks progress") {
 		t.Error("worker prompt still routes decisions to needs-input reports")
+	}
+	if strings.Contains(got, "check it again later") {
+		t.Error("worker prompt leaves a dependent session waiting without a resume path")
 	}
 }
 

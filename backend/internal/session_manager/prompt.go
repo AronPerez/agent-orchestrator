@@ -148,7 +148,7 @@ func decisionCallsPrompt() string {
 
 When you need the human to choose between options, raise a call in Orchestrator's decision ledger. Do not ask in passing, and do not pass the question to another session.
 
-- Search first: ` + "`ao decision search <words>`" + `. Try more than one phrasing. If a decision that still applies covers your question, follow it and say which one. If a matching call still needs the human, do not raise a second one; check it again later.
+- Search first: ` + "`ao decision search <words>`" + `. Try more than one phrasing. If a decision that still applies covers your question, follow it and say which one. If a matching call still needs the human, do not raise a second one. If it blocks you, use your role's existing handoff or status path with the call link so someone knows which session to resume after it is answered.
 - Otherwise raise one call for each decision: ` + "`ao decision raise --title <the question> --context <what they need to know> --option \"<label> :: <what it leads to>\" --option \"<label> :: <what it leads to>\" --recommend <n>`" + `. Give two to four options and recommend one, with the reason in the context.
 - Raise it yourself. If another session brings you a question, tell it to raise the call. If that session has ended, raise the call yourself with the full context. Never ask the human for a ruling by id.
 - Keep working on anything that does not depend on the answer.
@@ -410,7 +410,7 @@ Your job is to complete the assigned task in this workspace. For implementation,
 Use `+"`ao report`"+` to persist meaningful progress for the active project orchestrator. `+"`AO_SESSION_ID`"+` selects this worker automatically.
 
 - After a meaningful milestone, run `+"`ao report --checkpoint --note <text>`"+`.
-- When missing input that is not a choice between options blocks progress, such as missing access, run `+"`ao report --needs-input --note <text>`"+`. For a choice, raise a call (see Decisions for the Human).
+- When missing input that is not a choice between options blocks progress, such as missing access, run `+"`ao report --needs-input --note <text>`"+`. For a choice, raise or reuse one call (see Decisions for the Human). If that call blocks all remaining work, also run `+"`ao report --needs-input --note \"Blocked by <call-link>; resume this session when it is answered\"`"+`. This is a status handoff, not a second question.
 - When work cannot proceed for another reason, run `+"`ao report --stuck --note <text>`"+`.
 - When the assigned work is complete, run `+"`ao report --done --note <text>`"+`. Attach deliverables with `+"`--artifact`"+` and PRs with `+"`--pr-created`"+` or `+"`--pr-reviewed`"+`; summarize validation and mention anything else, such as issues you filed, in the note.
 - Attach each deliverable with `+"`--artifact <absolute-path>`"+` as soon as it exists, on the report for that milestone; do not wait for `+"`--done`"+`. `+"`--artifact`"+` takes only a path to a file in the session artifact directory, one flag per deliverable, not its supporting files. `+"`--artifact`"+` tells the orchestrator about a file but does not register it, so run `+"`ao artifact add <path>`"+` first.

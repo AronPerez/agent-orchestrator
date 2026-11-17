@@ -24,14 +24,19 @@ ao decision retire <id> [--undo]
 Raise a call when work needs a choice between options that only the human can
 make. A blocker that is not a choice, such as missing access, belongs in
 `ao report --needs-input`. Do not raise a call when an earlier decision that
-still applies already covers the question.
+still applies already covers the question. If a new or existing call blocks all
+remaining work, also send one needs-input status report with the call link and
+ask the orchestrator to resume the blocked session after it is answered. That
+report carries status, not a second question.
 
 ## Search first
 
 Run `ao decision search <words>` before raising a call, and try more than one
 phrasing. If a decision that still applies covers the question, follow it and
 say which decision you followed. If a matching call still needs the human, do
-not raise a second call; check the existing one again later.
+not raise a second call. If it blocks you, hand off the existing call link
+through your role's coordination or status path so the dependent session can
+resume after the answer.
 
 ## Raising a call
 

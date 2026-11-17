@@ -93,7 +93,7 @@ func TestReportModesAndBoundaries(t *testing.T) {
 
 func TestReportNeedsInputRemindsAboutCalls(t *testing.T) {
 	t.Setenv("AO_SESSION_ID", "worker-1")
-	reminder := "Reminder: if this is a choice between options, raise a call for the human instead. See: ao decision raise --help\n"
+	reminder := "Reminder: for a choice, raise or reuse one call; if it blocks all remaining work, send one needs-input report with its link so the orchestrator can resume this session after it is answered. See: ao decision raise --help\n"
 	for _, tc := range []struct {
 		name       string
 		args       []string

@@ -54,7 +54,7 @@ requests immediate delivery plus a rate-limited interrupt. Informational work
 batches for up to one hour, while the first done report opens a fixed five
 minute settlement window.
 
-`--needs-input` is for a blocker that is not a choice between options, such as missing access. For a choice, raise a call: see [`ao decision`](decision.md).
+`--needs-input` is for a blocker that is not a choice between options, such as missing access. For a choice, raise or reuse one call. If it blocks all remaining work, send one `--needs-input` status report with its link and ask the orchestrator to resume this session after it is answered. See [`ao decision`](decision.md).
 
 ## Reading a delivered batch
 

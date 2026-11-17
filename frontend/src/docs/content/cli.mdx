@@ -197,6 +197,8 @@ Needs-input reports are sent immediately. Stuck reports may interrupt or combine
 
 For a structured report, choose one state flag: `--checkpoint`, `--needs-input`, `--stuck`, or `--done`. Include `--note` with it. Attach reviewable deliverables with `--artifact`, `--pr-created`, or `--pr-reviewed`; pull-request flags require full URLs. Do not combine free-form text with structured state or output flags.
 
+For a choice between options, raise or reuse one decision call. If it blocks all remaining work, send one needs-input status report with the call link and ask the orchestrator to resume the blocked session after it is answered; do not copy the question into a second request.
+
 ```bash
 ao report --done --note "Focused tests passed"
 ```
