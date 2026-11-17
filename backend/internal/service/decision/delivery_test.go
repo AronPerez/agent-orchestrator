@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
 type deliveredMessage struct {
@@ -41,6 +42,21 @@ type blockingDecisionMessenger struct {
 	block   domain.SessionID
 	started chan struct{}
 	release chan struct{}
+}
+
+type unconfirmedDecisionMessenger struct {
+	*fakeDecisionMessenger
+	unconfirmed domain.SessionID
+}
+
+func (m *unconfirmedDecisionMessenger) DeliverAsPerson(ctx context.Context, id domain.SessionID, message string, at time.Time) error {
+	if err := m.fakeDecisionMessenger.DeliverAsPerson(ctx, id, message, at); err != nil {
+		return err
+	}
+	if id == m.unconfirmed {
+		return fmt.Errorf("confirmation lost after write: %w", ports.ErrAgentDeliveryUnconfirmed)
+	}
+	return nil
 }
 
 func (m *blockingDecisionMessenger) DeliverAsPerson(ctx context.Context, id domain.SessionID, message string, at time.Time) error {
@@ -390,6 +406,29 @@ func TestAcceptedFallbackGrantSurvivesAFailedRetry(t *testing.T) {
 	completed, err := fixture.service.RecordOutcome(context.Background(), Actor{Session: fixture.orch}, call.ID, OutcomeInput{ForEntry: call.StandingEntryID, Text: "Carried it out"})
 	if err != nil || completed.State != domain.DecisionStateDone {
 		t.Fatalf("RecordOutcome after failed retry = %+v, %v", completed, err)
+	}
+}
+
+func TestFallbackRecipientKeepsOutcomeAuthorityAfterUnconfirmedDelivery(t *testing.T) {
+	fixture := newDecisionService(t)
+	call := answeredCall(t, fixture, fixture.w1)
+	terminateDecisionSession(t, fixture, fixture.w1)
+	messenger := &unconfirmedDecisionMessenger{
+		fakeDecisionMessenger: newFakeDecisionMessenger(),
+		unconfirmed:           fixture.orch,
+	}
+	deliverer := newTestDelivererWithAuthorizer(fixture.store, messenger, "h_a", fixture.service)
+
+	pending, err := deliverer.RunDue(context.Background())
+	if err != nil || pending != 1 || len(messenger.messages) != 1 || messenger.messages[0].session != fixture.orch {
+		t.Fatalf("unconfirmed send pending=%d messages=%+v err=%v", pending, messenger.messages, err)
+	}
+	completed, err := fixture.service.RecordOutcome(context.Background(), Actor{Session: fixture.orch}, call.ID, OutcomeInput{
+		ForEntry: call.StandingEntryID,
+		Text:     "Carried it out",
+	})
+	if err != nil || completed.State != domain.DecisionStateDone {
+		t.Fatalf("RecordOutcome after unconfirmed delivery = %+v, %v", completed, err)
 	}
 }
 

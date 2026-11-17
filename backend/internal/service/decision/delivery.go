@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
 // ErrSessionEnded marks a session that can no longer take a message.
@@ -246,6 +247,12 @@ func (d *Deliverer) deliverFallback(ctx context.Context, call domain.DecisionCal
 			revoke()
 		}
 		return !recorded, true
+	case errors.Is(err, ports.ErrAgentDeliveryUnconfirmed):
+		// The message reached the agent surface, so the fallback may already be
+		// acting on it even though AO missed the acceptance signal. Retain its
+		// answer-scoped authority while the delivery remains pending for retry.
+		d.logFailure(call.ID, "confirm fallback orchestrator delivery", err)
+		return true, false
 	case errors.Is(err, ErrSessionEnded):
 		revokeAttempt()
 		return !d.record(ctx, call, domain.DecisionDeliveredPayload{
