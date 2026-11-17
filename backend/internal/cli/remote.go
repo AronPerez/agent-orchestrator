@@ -542,6 +542,12 @@ func (c *commandContext) checkRemoteImplicitProject(explicit string) error {
 	case strings.TrimSpace(os.Getenv("AO_SESSION_ID")) != "":
 		signal = "AO_SESSION_ID"
 	}
+	if c.remote.hostID != "" {
+		return usageError{fmt.Errorf(
+			"%s describes this machine, but --host resolved saved machine %s (%s), where it could select a different project — "+
+				"pass --project <id> as it exists on that machine",
+			signal, c.remote.label, c.remote.hostID)}
+	}
 	return usageError{fmt.Errorf(
 		"%s describes this machine, and %s targets the remote daemon at %s, where it would select "+
 			"a project on that host — pass --project <id> as it exists on that host "+

@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -12,6 +14,7 @@ import (
 const (
 	testSavedHostID    = "h_desk"
 	testSavedHostLabel = "desk"
+	testLocalHostID    = "h_local"
 	testCoordination   = "aoc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 )
 
@@ -23,6 +26,13 @@ func configureSavedHost(t *testing.T, handler http.Handler) *httptest.Server {
 	// tests use the ordinary ~/.ao/remotes.json layout and retain only the
 	// separately isolated AO_RUN_FILE from setConfigEnv.
 	t.Setenv("AO_DATA_DIR", "")
+	identityDir := filepath.Join(home, ".ao", "data", "mobile")
+	if err := os.MkdirAll(identityDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(identityDir, "identity.json"), []byte(`{"hostId":"`+testLocalHostID+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 	writeRemotes(t, home, 0o600, remoteEntry{
@@ -101,13 +111,15 @@ func TestSpawnSavedHostPinsMachineAndOmitsUnqualifiedParent(t *testing.T) {
 
 func TestSendSavedHostPinsAndNamesEveryWrite(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		args []string
-		path string
-		body string
+		name       string
+		args       []string
+		path       string
+		body       string
+		payloadKey string
+		message    string
 	}{
-		{name: "send", args: []string{"--message", "continue"}, path: "/api/v1/sessions/remote-1/send", body: `{"ok":true}`},
-		{name: "steer", args: []string{"--steer", "--message", "correct course"}, path: "/api/v1/sessions/remote-1/conversation/steer-or-send", body: `{"outcome":"steered","providerTurnId":"turn-1"}`},
+		{name: "send", args: []string{"--message", "continue"}, path: "/api/v1/sessions/remote-1/send", body: `{"ok":true}`, payloadKey: "message", message: "continue"},
+		{name: "steer", args: []string{"--steer", "--message", "correct course"}, path: "/api/v1/sessions/remote-1/conversation/steer-or-send", body: `{"outcome":"steered","providerTurnId":"turn-1"}`, payloadKey: "text", message: "correct course"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("AO_SESSION_ID", "local-source")
@@ -129,6 +141,9 @@ func TestSendSavedHostPinsAndNamesEveryWrite(t *testing.T) {
 				}
 				if sender, ok := payload["senderSessionId"]; ok {
 					t.Fatalf("remote write carried unqualified senderSessionId %v", sender)
+				}
+				if got, want := payload[tc.payloadKey], "[from local-source on "+testLocalHostID+"] "+tc.message; got != want {
+					t.Fatalf("remote message source = %q, want %q", got, want)
 				}
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = io.WriteString(w, tc.body)
@@ -164,6 +179,30 @@ func TestSendSavedHostRecoveryKeepsTarget(t *testing.T) {
 	}
 }
 
+func TestSendSavedHostAgentSourceRequiresLocalHostIdentity(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "local-source")
+	var authenticatedWrites int
+	configureSavedHost(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/identity" {
+			writeSavedHostIdentity(t, w, r)
+			return
+		}
+		authenticatedWrites++
+		http.NotFound(w, r)
+	}))
+	if err := os.Remove(filepath.Join(os.Getenv("HOME"), ".ao", "data", "mobile", "identity.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := executeCLI(t, Deps{}, "send", "--host", testSavedHostLabel, "--session", "remote-1", "--message", "continue")
+	if err == nil || !strings.Contains(err.Error(), "local host identity is unavailable") {
+		t.Fatalf("err = %v, want missing origin-machine identity error", err)
+	}
+	if authenticatedWrites != 0 {
+		t.Fatalf("authenticated writes = %d, want none", authenticatedWrites)
+	}
+}
+
 func TestSavedHostRetryArgsQuotesOpaqueHostID(t *testing.T) {
 	c := &commandContext{remote: &remoteTarget{hostID: "h_'$(unsafe)"}}
 	if got, want := c.savedHostRetryArgs(), ` --host 'h_'"'"'$(unsafe)'`; got != want {
@@ -179,6 +218,24 @@ func TestSavedHostActionsRejectConflictingOrUnsupportedTargets(t *testing.T) {
 			"--session", "remote-1", "--message", "continue")
 		if err == nil || ExitCode(err) != 2 || !strings.Contains(err.Error(), "--host cannot be combined") {
 			t.Fatalf("err=%v exit=%d, want target-conflict usage error", err, ExitCode(err))
+		}
+	})
+
+	t.Run("spawn host implicit project never recommends raw url", func(t *testing.T) {
+		t.Setenv("AO_PROJECT_ID", "local-project")
+		configureSavedHost(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/v1/identity" {
+				writeSavedHostIdentity(t, w, r)
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		_, _, err := executeCLI(t, Deps{}, "spawn", "--host", testSavedHostLabel, "--agent", "codex", "--name", "worker")
+		if err == nil || ExitCode(err) != 2 || !strings.Contains(err.Error(), "pass --project") {
+			t.Fatalf("err=%v exit=%d, want explicit remote-project usage error", err, ExitCode(err))
+		}
+		if strings.Contains(err.Error(), "--url") {
+			t.Fatalf("saved-host error recommended raw URL targeting: %v", err)
 		}
 	})
 
