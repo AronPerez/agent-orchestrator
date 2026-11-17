@@ -161,7 +161,7 @@ export async function pairDevice(
  * compatible release, not a reason to break the desktop connection. */
 export async function issueCoordinationToken(
 	entry: Pick<RemoteEntry, "url" | "hostId" | "password">,
-	device: { name: string; platform: string },
+	device: { name: string; platform: string; clientId: string },
 	fetchImpl: FetchImpl = fetch,
 	timeoutMs = 8_000,
 ): Promise<CoordinationTokenResult> {
