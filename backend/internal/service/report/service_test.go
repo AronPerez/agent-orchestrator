@@ -180,6 +180,46 @@ func TestCreateDoneCleansEvidenceWhenReportPersistenceFails(t *testing.T) {
 	}
 }
 
+func TestCreateDoneRefusesVerificationEvidenceSymlinkEscape(t *testing.T) {
+	dataDir := t.TempDir()
+	artifactDir := filepath.Join(dataDir, "artifacts", "ao-7")
+	outside := t.TempDir()
+	if err := os.MkdirAll(artifactDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(artifactDir, "verification")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	started := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	verifier := &fakeVerifier{
+		results: []verification.Result{{Passed: true, StartedAt: started, CompletedAt: started}},
+		errs:    []error{nil},
+	}
+	artifacts := &fakeEvidenceArtifacts{}
+	st := &fakeStore{
+		ok: true, projectOK: true,
+		session: domain.SessionRecord{
+			ID: "ao-7", ProjectID: "ao", Kind: domain.KindWorker,
+			Metadata: domain.SessionMetadata{WorkspacePath: "/work/ao", ArtifactDir: artifactDir},
+		},
+		project: domain.ProjectRecord{ID: "ao", Config: domain.ProjectConfig{Verify: []string{"true"}}},
+	}
+
+	_, err := New(Deps{
+		Store: st, Verifier: verifier, EvidenceArtifacts: artifacts, DataDir: dataDir,
+		NewID: func() string { return "rpt_1" }, Now: func() time.Time { return started },
+	}).Create(context.Background(), CreateInput{SessionID: "ao-7", State: domain.ReportDone, Note: "done"})
+	if err == nil {
+		t.Fatal("Create succeeded through a symlinked verification directory")
+	}
+	if _, statErr := os.Stat(filepath.Join(outside, "rpt_1.txt")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("verification evidence escaped artifact directory: %v", statErr)
+	}
+	if st.created.ID != "" || len(artifacts.registered) != 0 {
+		t.Fatalf("failed evidence write persisted report=%q or registered=%q", st.created.ID, artifacts.registered)
+	}
+}
+
 func TestCreateDoneSkipsEmptyVerifyConfig(t *testing.T) {
 	verifier := &fakeVerifier{}
 	st := &fakeStore{

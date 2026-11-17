@@ -281,15 +281,15 @@ func (s *Service) verifyDone(ctx context.Context, reportID string, session domai
 			outputTail = runErr.Error()
 		}
 	}
-	reference, path, err := s.writeVerificationEvidence(session, reportID, verificationState, result, runErr)
+	reference, artifactDir, err := s.writeVerificationEvidence(session, reportID, verificationState, result, runErr)
 	if err != nil {
 		return nil, nil, err
 	}
 	if err := s.evidenceArtifacts.Register(ctx, session.ID, reference); err != nil {
-		return nil, nil, errors.Join(err, removeEvidence(path))
+		return nil, nil, errors.Join(err, removeEvidence(artifactDir, reference))
 	}
 	cleanup := func(cleanupCtx context.Context) error {
-		return errors.Join(s.evidenceArtifacts.Unregister(cleanupCtx, session.ID, reference), removeEvidence(path))
+		return errors.Join(s.evidenceArtifacts.Unregister(cleanupCtx, session.ID, reference), removeEvidence(artifactDir, reference))
 	}
 	return &domain.ReportVerification{
 		State: verificationState, Evidence: reference, StartedAt: result.StartedAt,
@@ -319,7 +319,6 @@ func (s *Service) writeVerificationEvidence(session domain.SessionRecord, report
 		return "", "", errors.New("report: verification artifact directory is required")
 	}
 	reference := filepath.ToSlash(filepath.Join("verification", reportID+".txt"))
-	path := filepath.Join(artifactDir, filepath.FromSlash(reference))
 	var evidence strings.Builder
 	fmt.Fprintf(&evidence, "Verification: %s\nStarted: %s\nCompleted: %s\n", state, result.StartedAt.Format(time.RFC3339Nano), result.CompletedAt.Format(time.RFC3339Nano))
 	if result.FailedStep > 0 {
@@ -335,43 +334,93 @@ func (s *Service) writeVerificationEvidence(session domain.SessionRecord, report
 			evidence.WriteByte('\n')
 		}
 	}
-	if err := writeEvidenceFile(path, evidence.String()); err != nil {
+	if err := writeEvidenceFile(artifactDir, reference, evidence.String()); err != nil {
 		return "", "", err
 	}
-	return reference, path, nil
+	return reference, artifactDir, nil
 }
 
-func writeEvidenceFile(path, contents string) (err error) {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+func writeEvidenceFile(artifactDir, reference, contents string) (err error) {
+	root, err := openEvidenceRoot(artifactDir, true)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+
+	name := filepath.FromSlash(reference)
+	dir := filepath.Dir(name)
+	if err := root.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create verification evidence directory: %w", err)
 	}
-	file, err := os.CreateTemp(dir, ".verification-*.tmp")
+	info, err := root.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("inspect verification evidence directory: %w", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("report: verification evidence directory is not a regular directory")
+	}
+	file, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return fmt.Errorf("create verification evidence: %w", err)
 	}
-	temporary := file.Name()
+	written := false
 	defer func() {
 		_ = file.Close()
-		_ = os.Remove(temporary)
+		if !written {
+			_ = root.Remove(name)
+		}
 	}()
-	if err := file.Chmod(0o600); err != nil {
-		return fmt.Errorf("protect verification evidence: %w", err)
-	}
 	if _, err := file.WriteString(contents); err != nil {
 		return fmt.Errorf("write verification evidence: %w", err)
 	}
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close verification evidence: %w", err)
 	}
-	if err := os.Rename(temporary, path); err != nil {
-		return fmt.Errorf("publish verification evidence: %w", err)
-	}
+	written = true
 	return nil
 }
 
-func removeEvidence(path string) error {
-	err := os.Remove(path)
+func openEvidenceRoot(dir string, create bool) (*os.Root, error) {
+	if create {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, fmt.Errorf("create verification artifact directory: %w", err)
+		}
+	}
+	before, err := os.Lstat(dir)
+	if errors.Is(err, os.ErrNotExist) && !create {
+		return nil, os.ErrNotExist
+	}
+	if err != nil {
+		return nil, fmt.Errorf("inspect verification artifact directory: %w", err)
+	}
+	if !before.IsDir() || before.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("report: verification artifact directory is not a regular directory")
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, fmt.Errorf("open verification artifact directory: %w", err)
+	}
+	after, err := root.Stat(".")
+	if err != nil || !os.SameFile(before, after) {
+		_ = root.Close()
+		if err != nil {
+			return nil, fmt.Errorf("verify verification artifact directory: %w", err)
+		}
+		return nil, errors.New("report: verification artifact directory changed while opening")
+	}
+	return root, nil
+}
+
+func removeEvidence(artifactDir, reference string) error {
+	root, err := openEvidenceRoot(artifactDir, false)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	err = root.Remove(filepath.FromSlash(reference))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
