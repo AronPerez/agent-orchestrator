@@ -75,7 +75,7 @@ export type RemotesIpcDeps = {
 	probe?: (entry: RemoteEntry) => Promise<RemoteHealth>;
 	identity?: (entry: Pick<RemoteEntry, "url">) => Promise<string>;
 	pair?: (entry: Pick<RemoteEntry, "url" | "hostId">, secret: string, device: { name: string; platform: string }) => Promise<PairDeviceResult>;
-	issueCoordination?: (entry: Pick<RemoteEntry, "url" | "hostId" | "password">, device: { name: string; platform: string }) => Promise<CoordinationTokenResult>;
+	issueCoordination?: (entry: Pick<RemoteEntry, "url" | "hostId" | "password">, device: { name: string; platform: string; clientId: string }) => Promise<CoordinationTokenResult>;
 	probeCoordination?: (entry: Pick<RemoteEntry, "url" | "hostId" | "coordinationToken">) => Promise<CoordinationTokenHealth>;
 	revokeCoordination?: (entry: Pick<RemoteEntry, "url" | "hostId" | "password">, deviceId: string) => Promise<CoordinationTokenRevokeResult>;
 	authErrorCode?: (entry: RemoteEntry) => Promise<string | undefined>;
@@ -261,7 +261,7 @@ export function registerRemotesIpc(
 		}
 		let issued: CoordinationTokenResult;
 		try {
-			issued = await issueCoordination(current, { name: await deviceName(), platform: process.platform });
+			issued = await issueCoordination(current, { name: await deviceName(), platform: process.platform, clientId: localHostId });
 		} catch {
 			// This credential exists for headless CLI coordination. An older host,
 			// transient failure, or display-name lookup must not break desktop use.
