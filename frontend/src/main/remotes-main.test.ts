@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { registerRemotesIpc, remotesDaemonEnvironment, remotesFilePath, type RemotesIpcDeps } from "./remotes-main";
 import { RemoteRegistry } from "./remote-registry";
 import { setPasswordCipher } from "./remotes-store";
@@ -37,6 +38,7 @@ function registerRemotes(
 		cloudRequest: async () => ({ status: 200, body: '{"hosts":[]}' }),
 		pair: async () => ({ kind: "unsupported" }),
 		issueCoordination: async () => ({ kind: "unsupported" }),
+		revokeCoordination: async () => "retired",
 		probeCoordination: async () => "valid",
 		authErrorCode: async () => undefined,
 		deviceName: async () => "Test Mac",
@@ -71,6 +73,13 @@ describe("remotesFilePath", () => {
 	it("carries the desktop store path into normal and isolated daemons", () => {
 		expect(remotesDaemonEnvironment({}, "/Users/tester")).toEqual({ AO_REMOTES_FILE: "/Users/tester/.ao/remotes.json" });
 		expect(remotesDaemonEnvironment({ AO_DATA_DIR: "/tmp/ao-lab" }, "/Users/tester")).toEqual({ AO_REMOTES_FILE: "/tmp/ao-lab/remotes.json" });
+	});
+
+	it("exports an absolute path when AO_DATA_DIR is relative", () => {
+		expect(remotesFilePath({ AO_DATA_DIR: "ao-lab" }, "/Users/tester", "/opt/orchestrator")).toBe("/opt/orchestrator/ao-lab/remotes.json");
+		expect(remotesDaemonEnvironment({ AO_DATA_DIR: "ao-lab" }, "/Users/tester", "/opt/orchestrator")).toEqual({
+			AO_REMOTES_FILE: "/opt/orchestrator/ao-lab/remotes.json",
+		});
 	});
 });
 
@@ -629,12 +638,14 @@ describe("registerRemotesIpc", () => {
 
 	describe("agent coordination credentials", () => {
 		const coordinationToken = "aoc_" + "d".repeat(64);
+		const coordinationDeviceId = "dev_coordination";
+		const parentHash = (password: string) => createHash("sha256").update(password).digest("hex");
 		const proxy = () => vi.fn(async () => ({ base: "http://127.0.0.1:5000/token", previewUrl: (_sessionId: string, sourceUrl: string) => sourceUrl, resolvePreviewUrl: (_sessionId: string, viewedUrl: string) => viewedUrl, agentBrowserUrl: async () => "", isAgentBrowserUrl: () => false, isRenderUrl: () => false, externalUrl: (url: string) => url, close: async () => {} }));
 		const saved = async (file: string) => (JSON.parse(await readFile(file, "utf8")) as { remotes: Array<Record<string, unknown>> }).remotes;
 
 		it("issues and saves a coordination credential after the full connection is verified", async () => {
 			const file = await tempFile();
-			const issueCoordination = vi.fn<NonNullable<RemotesIpcDeps["issueCoordination"]>>(async () => ({ kind: "issued", token: coordinationToken }));
+			const issueCoordination = vi.fn<NonNullable<RemotesIpcDeps["issueCoordination"]>>(async () => ({ kind: "issued", token: coordinationToken, deviceId: coordinationDeviceId }));
 			const start = proxy();
 			const ipc = fakeIpc();
 			registerRemotes(ipc.ipcMain, {
@@ -646,24 +657,28 @@ describe("registerRemotesIpc", () => {
 				expect.objectContaining({ hostId: "h_workbox", password: "old" }),
 				{ name: "Test Mac", platform: process.platform },
 			);
-			expect((await saved(file))[0]).toMatchObject({ coordinationToken });
+			expect((await saved(file))[0]).toMatchObject({
+				coordinationToken, coordinationDeviceId, coordinationParentHash: parentHash("old"),
+			});
 		});
 
 		it("reuses a valid coordination credential and refreshes a refused one", async () => {
 			const file = await tempFile();
 			await writeFile(file, JSON.stringify({ remotes: [{
 				hostId: "h_workbox", label: "workbox", url: "http://192.0.2.1:1", password: "old",
-				coordinationToken: "aoc_old", accountUserId: TEST_ACCOUNT,
+				coordinationToken: "aoc_old", coordinationDeviceId: "dev_old",
+				coordinationParentHash: parentHash("old"), accountUserId: TEST_ACCOUNT,
 			}] }));
 			const probeCoordination = vi.fn<NonNullable<RemotesIpcDeps["probeCoordination"]>>()
 				.mockResolvedValueOnce("valid")
 				.mockResolvedValueOnce("invalid");
-			const issueCoordination = vi.fn<NonNullable<RemotesIpcDeps["issueCoordination"]>>(async () => ({ kind: "issued", token: coordinationToken }));
+			const issueCoordination = vi.fn<NonNullable<RemotesIpcDeps["issueCoordination"]>>(async () => ({ kind: "issued", token: coordinationToken, deviceId: coordinationDeviceId }));
+			const revokeCoordination = vi.fn<NonNullable<RemotesIpcDeps["revokeCoordination"]>>(async () => "retired");
 			const registry = new RemoteRegistry(proxy());
 			const ipc = fakeIpc();
 			registerRemotes(ipc.ipcMain, {
 				file, registry, requireAccount: signedIn, identity: async () => "h_workbox", probe: async () => "online",
-				probeCoordination, issueCoordination,
+				probeCoordination, issueCoordination, revokeCoordination,
 			});
 			await ipc.invoke("remotes:connect", "http://192.0.2.1:1");
 			expect(issueCoordination).not.toHaveBeenCalled();
@@ -671,7 +686,37 @@ describe("registerRemotesIpc", () => {
 			await registry.disconnect("http://192.0.2.1:1");
 			await ipc.invoke("remotes:connect", "http://192.0.2.1:1");
 			expect(issueCoordination).toHaveBeenCalledOnce();
+			expect(revokeCoordination).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ coordinationDeviceId: "dev_old" }), "dev_old");
 			expect((await saved(file))[0]).toMatchObject({ coordinationToken });
+		});
+
+		it("retires a child whose saved parent fingerprint does not match the full credential", async () => {
+			const file = await tempFile();
+			await writeFile(file, JSON.stringify({ remotes: [{
+				hostId: "h_workbox", label: "workbox", url: "http://192.0.2.1:1", password: "new-parent",
+				coordinationToken: "aoc_old", coordinationDeviceId: "dev_old",
+				coordinationParentHash: parentHash("old-parent"), accountUserId: TEST_ACCOUNT,
+			}] }));
+			const calls: string[] = [];
+			const probeCoordination = vi.fn<NonNullable<RemotesIpcDeps["probeCoordination"]>>(async () => "valid");
+			const revokeCoordination = vi.fn<NonNullable<RemotesIpcDeps["revokeCoordination"]>>(async () => { calls.push("revoke"); return "retired"; });
+			const issueCoordination = vi.fn<NonNullable<RemotesIpcDeps["issueCoordination"]>>(async () => {
+				calls.push("issue");
+				return { kind: "issued", token: coordinationToken, deviceId: coordinationDeviceId };
+			});
+			const ipc = fakeIpc();
+			registerRemotes(ipc.ipcMain, {
+				file, registry: new RemoteRegistry(proxy()), requireAccount: signedIn,
+				identity: async () => "h_workbox", probe: async () => "online",
+				probeCoordination, revokeCoordination, issueCoordination,
+			});
+
+			await ipc.invoke("remotes:connect", "http://192.0.2.1:1");
+			expect(calls).toEqual(["revoke", "issue"]);
+			expect(probeCoordination).not.toHaveBeenCalledWith(expect.objectContaining({ coordinationToken: "aoc_old" }));
+			expect((await saved(file))[0]).toMatchObject({
+				coordinationToken, coordinationDeviceId, coordinationParentHash: parentHash("new-parent"),
+			});
 		});
 
 		it("preserves an account host credential across repeated sync and connect cycles", async () => {
@@ -682,7 +727,7 @@ describe("registerRemotesIpc", () => {
 				hostId: "h_workbox", label: "workbox", url: "http://192.0.2.1:1", password: accountToken,
 				accountUserId: TEST_ACCOUNT, coordinationToken: "aoc_old",
 			}] }));
-			const issueCoordination = vi.fn<NonNullable<RemotesIpcDeps["issueCoordination"]>>(async () => ({ kind: "issued", token: coordinationToken }));
+			const issueCoordination = vi.fn<NonNullable<RemotesIpcDeps["issueCoordination"]>>(async () => ({ kind: "issued", token: coordinationToken, deviceId: coordinationDeviceId }));
 			const registry = new RemoteRegistry(proxy());
 			const ipc = fakeIpc();
 			registerRemotes(ipc.ipcMain, {
@@ -703,6 +748,90 @@ describe("registerRemotesIpc", () => {
 			account = "other-account";
 			await ipc.invoke("remotes:syncAccountHosts", account);
 			expect((await saved(file))[0]).not.toHaveProperty("coordinationToken");
+		});
+
+		it("preserves an explicitly revoked child instead of silently replacing it", async () => {
+			const file = await tempFile();
+			await writeFile(file, JSON.stringify({ remotes: [{
+				hostId: "h_workbox", label: "workbox", url: "http://192.0.2.1:1", password: "old",
+				coordinationToken: "aoc_revoked", coordinationDeviceId: "dev_revoked",
+				coordinationParentHash: parentHash("old"), accountUserId: TEST_ACCOUNT,
+			}] }));
+			const issueCoordination = vi.fn<NonNullable<RemotesIpcDeps["issueCoordination"]>>(async () => {
+				throw new Error("revoked coordination credential must not be replaced");
+			});
+			const ipc = fakeIpc();
+			registerRemotes(ipc.ipcMain, {
+				file, registry: new RemoteRegistry(proxy()), requireAccount: signedIn,
+				identity: async () => "h_workbox", probe: async () => "online",
+				probeCoordination: async () => "revoked", issueCoordination,
+			});
+
+			await expect(ipc.invoke("remotes:connect", "http://192.0.2.1:1")).resolves.toMatchObject({ hostId: "h_workbox" });
+			expect(issueCoordination).not.toHaveBeenCalled();
+			expect((await saved(file))[0]).toMatchObject({ coordinationToken: "aoc_revoked", coordinationDeviceId: "dev_revoked" });
+		});
+
+		it("retires the old child before issuing under a rotated account credential", async () => {
+			const file = await tempFile();
+			const oldAccountToken = "a".repeat(64);
+			const newAccountToken = "b".repeat(64);
+			await writeFile(file, JSON.stringify({ remotes: [{
+				hostId: "h_workbox", label: "workbox", url: "http://192.0.2.1:1", password: oldAccountToken,
+				accountUserId: TEST_ACCOUNT, coordinationToken: "aoc_old", coordinationDeviceId: "dev_old",
+				coordinationParentHash: parentHash(oldAccountToken),
+			}] }));
+			const calls: string[] = [];
+			const revokeCoordination = vi.fn<NonNullable<RemotesIpcDeps["revokeCoordination"]>>(async () => { calls.push("revoke"); return "retired"; });
+			const issueCoordination = vi.fn<NonNullable<RemotesIpcDeps["issueCoordination"]>>(async () => {
+				calls.push("issue");
+				return { kind: "issued", token: coordinationToken, deviceId: coordinationDeviceId };
+			});
+			const ipc = fakeIpc();
+			registerRemotes(ipc.ipcMain, {
+				file, registry: new RemoteRegistry(proxy()), requireAccount: signedIn,
+				identity: async () => "h_workbox", probe: async () => "online",
+				cloudRequest: async () => ({ status: 200, body: JSON.stringify({ hosts: [{
+					hostId: "h_workbox", label: "workbox", url: "http://192.0.2.1:1", token: newAccountToken,
+				}] }) }),
+				revokeCoordination, issueCoordination,
+			});
+
+			await ipc.invoke("remotes:syncAccountHosts", TEST_ACCOUNT);
+			expect((await saved(file))[0]).toMatchObject({ password: newAccountToken, pendingCoordinationDeviceIds: ["dev_old"] });
+			expect((await saved(file))[0]).not.toHaveProperty("coordinationToken");
+			await ipc.invoke("remotes:connect", "http://192.0.2.1:1");
+			expect(calls).toEqual(["revoke", "issue"]);
+			expect(revokeCoordination).toHaveBeenCalledWith(expect.objectContaining({ password: newAccountToken }), "dev_old");
+			expect((await saved(file))[0]).toMatchObject({
+				coordinationToken, coordinationDeviceId, coordinationParentHash: parentHash(newAccountToken),
+			});
+			expect((await saved(file))[0]).not.toHaveProperty("pendingCoordinationDeviceIds");
+		});
+
+		it("keeps the desktop usable and reuses one child when persistence and cleanup both fail", async () => {
+			const file = await tempFile();
+			const issueCoordination = vi.fn<NonNullable<RemotesIpcDeps["issueCoordination"]>>(async () => ({
+				kind: "issued", token: coordinationToken, deviceId: coordinationDeviceId,
+			}));
+			const revokeCoordination = vi.fn<NonNullable<RemotesIpcDeps["revokeCoordination"]>>(async () => "offline");
+			const probeCoordination = vi.fn<NonNullable<RemotesIpcDeps["probeCoordination"]>>(async (entry) => entry.coordinationToken === coordinationToken ? "valid" : "invalid");
+			const registry = new RemoteRegistry(proxy());
+			const ipc = fakeIpc();
+			registerRemotes(ipc.ipcMain, {
+				file, registry, requireAccount: signedIn, identity: async () => "h_workbox", probe: async () => "online",
+				issueCoordination, revokeCoordination, probeCoordination,
+			});
+			await chmod(dirname(file), 0o500);
+			try {
+				await expect(ipc.invoke("remotes:connect", "http://192.0.2.1:1")).resolves.toMatchObject({ hostId: "h_workbox" });
+				await registry.disconnect("http://192.0.2.1:1");
+				await expect(ipc.invoke("remotes:connect", "http://192.0.2.1:1")).resolves.toMatchObject({ hostId: "h_workbox" });
+				expect(issueCoordination).toHaveBeenCalledOnce();
+				expect(revokeCoordination).toHaveBeenCalledOnce();
+			} finally {
+				await chmod(dirname(file), 0o700);
+			}
 		});
 
 		it("keeps desktop connections working when the remote release has no issuer", async () => {
@@ -727,7 +856,7 @@ describe("registerRemotesIpc", () => {
 				identity: async () => "h_workbox", probe: async () => "online",
 				issueCoordination: async () => {
 					account = "another-account";
-					return { kind: "issued", token: coordinationToken };
+					return { kind: "issued", token: coordinationToken, deviceId: coordinationDeviceId };
 				},
 			});
 			await expect(ipc.invoke("remotes:connect", "http://192.0.2.1:1")).rejects.toThrow(/Account changed/);

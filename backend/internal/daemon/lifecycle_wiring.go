@@ -394,6 +394,7 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 		AgentBrowserURL:     cfg.AgentBrowserURL,
 		AgentBrowserToken:   cfg.AgentBrowserToken,
 		DataDir:             cfg.DataDir,
+		StateDir:            cfg.StateDir,
 		RunFilePath:         cfg.RunFilePath,
 		BackgroundContext:   ctx,
 		Logger:              log,
