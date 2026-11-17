@@ -1,4 +1,4 @@
-import { render as rtlRender } from "@testing-library/react";
+import { render as rtlRender, screen } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useUiStore } from "../stores/ui-store";
@@ -42,6 +42,8 @@ describe("TitlebarNav on Linux", () => {
 		expect(nav).toHaveClass("left-titlebar-cluster-left-linux", "top-0.75", "h-toolbar");
 		expect(nav).not.toHaveClass("left-0");
 		expect(nav).not.toHaveClass("left-titlebar-cluster-left");
+		expect(screen.getByRole("button", { name: "Go back" })).toBeVisible();
+		expect(screen.getByRole("button", { name: "Go forward" })).toBeVisible();
 	});
 
 	it("shifts the cluster clear of the framed panel border when the sidebar is off-canvas", () => {
@@ -51,5 +53,7 @@ describe("TitlebarNav on Linux", () => {
 		const nav = container.querySelector('[data-slot="titlebar-nav"]');
 		expect(nav).toHaveClass("left-titlebar-cluster-left-linux-panel");
 		expect(nav).not.toHaveClass("left-titlebar-cluster-left-linux");
+		expect(screen.getByRole("button", { name: "Go back" })).toBeVisible();
+		expect(screen.getByRole("button", { name: "Go forward" })).toBeVisible();
 	});
 });
