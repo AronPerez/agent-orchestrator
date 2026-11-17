@@ -30,6 +30,7 @@ type sessionOptions struct {
 type sessionListOptions struct {
 	sessionOptions
 	all               bool
+	allHosts          bool
 	includeTerminated bool
 }
 
@@ -210,6 +211,8 @@ type claimPRResponse struct {
 }
 
 type sessionListEntry struct {
+	HostID         string          `json:"hostId,omitempty"`
+	HostLabel      string          `json:"hostLabel,omitempty"`
 	ID             string          `json:"id"`
 	ProjectID      string          `json:"projectId"`
 	Role           string          `json:"role"`
@@ -236,9 +239,35 @@ type sessionListPR struct {
 type sessionListOutput struct {
 	Data []sessionListEntry `json:"data"`
 	Meta struct {
-		HiddenTerminatedCount   int `json:"hiddenTerminatedCount"`
-		HiddenOrchestratorCount int `json:"hiddenOrchestratorCount"`
+		HiddenTerminatedCount   int                     `json:"hiddenTerminatedCount"`
+		HiddenOrchestratorCount int                     `json:"hiddenOrchestratorCount"`
+		Hosts                   []sessionListHostStatus `json:"hosts,omitempty"`
 	} `json:"meta"`
+}
+
+type sessionListHostStatus struct {
+	HostID                  string `json:"hostId,omitempty"`
+	HostLabel               string `json:"hostLabel"`
+	Local                   bool   `json:"local,omitempty"`
+	SessionCount            int    `json:"sessionCount"`
+	HiddenTerminatedCount   int    `json:"hiddenTerminatedCount,omitempty"`
+	HiddenOrchestratorCount int    `json:"hiddenOrchestratorCount,omitempty"`
+	Error                   string `json:"error,omitempty"`
+}
+
+type sessionListSnapshot struct {
+	Sessions                []sessionDTO
+	PRSummaries             map[string][]sessionPRSummaryDTO
+	HiddenTerminatedCount   int
+	HiddenOrchestratorCount int
+}
+
+type allHostSessionListResult struct {
+	HostID    string
+	HostLabel string
+	Local     bool
+	Snapshot  sessionListSnapshot
+	Err       error
 }
 
 func newSessionCommand(ctx *commandContext) *cobra.Command {
@@ -276,6 +305,7 @@ func newSessionListCommand(ctx *commandContext) *cobra.Command {
 	f := cmd.Flags()
 	addSessionProjectFlag(f, &opts.project, "Filter by project ID")
 	f.BoolVarP(&opts.all, "all", "a", false, "Include orchestrator sessions")
+	f.BoolVar(&opts.allHosts, "all-hosts", false, "List sessions on this machine and every saved remote host")
 	f.BoolVar(&opts.includeTerminated, "include-terminated", false, "Include terminated sessions")
 	f.BoolVar(&opts.json, "json", false, "Output as JSON")
 	return cmd
@@ -717,6 +747,26 @@ func writeClaimPRResult(cmd *cobra.Command, res claimPRResponse, review *bool) e
 }
 
 func (c *commandContext) listSessions(ctx context.Context, cmd *cobra.Command, opts sessionListOptions) error {
+	if opts.allHosts {
+		if c.remote != nil {
+			return usageError{errors.New("--all-hosts cannot be combined with --host, --url, or AO_URL")}
+		}
+		return c.listSessionsAllHosts(ctx, cmd, opts)
+	}
+	snapshot, err := c.fetchSessionListSnapshot(ctx, opts)
+	if err != nil {
+		return err
+	}
+	if opts.json {
+		out := sessionListOutput{Data: sessionListEntries(snapshot.Sessions, snapshot.PRSummaries)}
+		out.Meta.HiddenTerminatedCount = snapshot.HiddenTerminatedCount
+		out.Meta.HiddenOrchestratorCount = snapshot.HiddenOrchestratorCount
+		return writeJSON(cmd.OutOrStdout(), out)
+	}
+	return writeSessionList(cmd, snapshot.Sessions, snapshot.PRSummaries, snapshot.HiddenTerminatedCount, snapshot.HiddenOrchestratorCount, c.deps.Now())
+}
+
+func (c *commandContext) fetchSessionListSnapshot(ctx context.Context, opts sessionListOptions) (sessionListSnapshot, error) {
 	params := url.Values{}
 	if opts.project != "" {
 		params.Set("project", opts.project)
@@ -726,7 +776,7 @@ func (c *commandContext) listSessions(ctx context.Context, cmd *cobra.Command, o
 	}
 	var res sessionListResponse
 	if err := c.getJSON(ctx, apiPath("sessions", params), &res); err != nil {
-		return err
+		return sessionListSnapshot{}, err
 	}
 	hiddenOrchestratorCount := 0
 	if !opts.all {
@@ -741,22 +791,198 @@ func (c *commandContext) listSessions(ctx context.Context, cmd *cobra.Command, o
 	if !opts.includeTerminated {
 		terminatedCount, terminatedOrchestratorCount, err := c.countHiddenTerminated(ctx, opts.project, opts.all)
 		if err != nil {
-			return err
+			return sessionListSnapshot{}, err
 		}
 		hiddenTerminatedCount = terminatedCount
 		hiddenOrchestratorCount += terminatedOrchestratorCount
 	}
 	prSummaries, err := c.listSessionPRSummaries(ctx, sessions)
 	if err != nil {
+		return sessionListSnapshot{}, err
+	}
+	return sessionListSnapshot{
+		Sessions: sessions, PRSummaries: prSummaries,
+		HiddenTerminatedCount: hiddenTerminatedCount, HiddenOrchestratorCount: hiddenOrchestratorCount,
+	}, nil
+}
+
+func (c *commandContext) listSessionsAllHosts(ctx context.Context, cmd *cobra.Command, opts sessionListOptions) error {
+	type listTask struct {
+		hostID    string
+		hostLabel string
+		local     bool
+		target    *remoteTarget
+	}
+
+	localHostID, localIdentityErr := c.localHostIDForList(ctx)
+	candidates, err := resolveAllSavedHostTargetsForAccount(c.activeCloudAccount(ctx))
+	if err != nil {
 		return err
 	}
-	if opts.json {
-		out := sessionListOutput{Data: sessionListEntries(sessions, prSummaries)}
-		out.Meta.HiddenTerminatedCount = hiddenTerminatedCount
-		out.Meta.HiddenOrchestratorCount = hiddenOrchestratorCount
-		return writeJSON(cmd.OutOrStdout(), out)
+	tasks := make([]listTask, 0, len(candidates)+1)
+	results := make([]allHostSessionListResult, 0, len(candidates)+1)
+	if localIdentityErr != nil {
+		results = append(results, allHostSessionListResult{HostLabel: "this machine", Local: true, Err: localIdentityErr})
+	} else {
+		tasks = append(tasks, listTask{hostID: localHostID, hostLabel: "this machine", local: true})
 	}
-	return writeSessionList(cmd, sessions, prSummaries, hiddenTerminatedCount, hiddenOrchestratorCount, c.deps.Now())
+	for _, candidate := range candidates {
+		if localHostID != "" && candidate.HostID == localHostID {
+			continue
+		}
+		if candidate.Err != nil {
+			results = append(results, allHostSessionListResult{HostID: candidate.HostID, HostLabel: candidate.Label, Err: candidate.Err})
+			continue
+		}
+		tasks = append(tasks, listTask{hostID: candidate.HostID, hostLabel: candidate.Label, target: candidate.Target})
+	}
+
+	resultCh := make(chan allHostSessionListResult, len(tasks))
+	sem := make(chan struct{}, 4)
+	var wg sync.WaitGroup
+	for _, task := range tasks {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			result := allHostSessionListResult{HostID: task.hostID, HostLabel: task.hostLabel, Local: task.local}
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				result.Err = ctx.Err()
+				resultCh <- result
+				return
+			}
+			hostContext := *c
+			hostContext.remote = task.target
+			if task.target != nil {
+				if err := c.verifySavedHostTarget(ctx, task.target); err != nil {
+					result.Err = err
+					resultCh <- result
+					return
+				}
+			}
+			result.Snapshot, result.Err = hostContext.fetchSessionListSnapshot(ctx, opts)
+			resultCh <- result
+		}()
+	}
+	wg.Wait()
+	close(resultCh)
+	for result := range resultCh {
+		results = append(results, result)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	sort.SliceStable(results, func(i, j int) bool {
+		if results[i].Local != results[j].Local {
+			return results[i].Local
+		}
+		left, right := strings.ToLower(results[i].HostLabel), strings.ToLower(results[j].HostLabel)
+		if left != right {
+			return left < right
+		}
+		return results[i].HostID < results[j].HostID
+	})
+	healthy := 0
+	var firstErr error
+	for _, result := range results {
+		if result.Err == nil {
+			healthy++
+			continue
+		}
+		if firstErr == nil {
+			firstErr = result.Err
+		}
+	}
+	if healthy == 0 {
+		return fmt.Errorf("no machine could list sessions: %w", firstErr)
+	}
+	if opts.json {
+		return writeAllHostSessionListJSON(cmd, results)
+	}
+	return writeAllHostSessionList(cmd, results, c.deps.Now())
+}
+
+func (c *commandContext) localHostIDForList(ctx context.Context) (string, error) {
+	if hostID := readLocalHostID(); hostID != "" && hostID != "local" {
+		return hostID, nil
+	}
+	var identity savedHostIdentity
+	if err := c.getJSON(ctx, "identity", &identity); err != nil {
+		return "", fmt.Errorf("read local host identity: %w", err)
+	}
+	if strings.TrimSpace(identity.HostID) == "" || identity.HostID == "local" || identity.APIVersion != 1 {
+		return "", errors.New("local daemon returned no compatible stable host identity")
+	}
+	return identity.HostID, nil
+}
+
+func writeAllHostSessionListJSON(cmd *cobra.Command, results []allHostSessionListResult) error {
+	out := sessionListOutput{}
+	for _, result := range results {
+		status := sessionListHostStatus{
+			HostID: result.HostID, HostLabel: result.HostLabel, Local: result.Local,
+			SessionCount: len(result.Snapshot.Sessions),
+		}
+		if result.Err != nil {
+			status.Error = result.Err.Error()
+			out.Meta.Hosts = append(out.Meta.Hosts, status)
+			continue
+		}
+		status.HiddenTerminatedCount = result.Snapshot.HiddenTerminatedCount
+		status.HiddenOrchestratorCount = result.Snapshot.HiddenOrchestratorCount
+		out.Meta.Hosts = append(out.Meta.Hosts, status)
+		out.Meta.HiddenTerminatedCount += result.Snapshot.HiddenTerminatedCount
+		out.Meta.HiddenOrchestratorCount += result.Snapshot.HiddenOrchestratorCount
+		entries := sessionListEntries(result.Snapshot.Sessions, result.Snapshot.PRSummaries)
+		for i := range entries {
+			entries[i].HostID = result.HostID
+			entries[i].HostLabel = result.HostLabel
+		}
+		out.Data = append(out.Data, entries...)
+	}
+	return writeJSON(cmd.OutOrStdout(), out)
+}
+
+func writeAllHostSessionList(cmd *cobra.Command, results []allHostSessionListResult, now time.Time) error {
+	for _, result := range results {
+		if result.Err != nil {
+			if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s unavailable: %v\n", sessionHostLabel(result.HostLabel, result.HostID), result.Err); err != nil {
+				return err
+			}
+		}
+	}
+	wroteHost := false
+	for _, result := range results {
+		if result.Err != nil {
+			continue
+		}
+		if wroteHost {
+			if _, err := fmt.Fprintln(cmd.OutOrStdout()); err != nil {
+				return err
+			}
+		}
+		wroteHost = true
+		if _, err := fmt.Fprintf(cmd.OutOrStdout(), "%s:\n", sessionHostLabel(result.HostLabel, result.HostID)); err != nil {
+			return err
+		}
+		if err := writeSessionList(cmd, result.Snapshot.Sessions, result.Snapshot.PRSummaries, result.Snapshot.HiddenTerminatedCount, result.Snapshot.HiddenOrchestratorCount, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func sessionHostLabel(label, hostID string) string {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		label = "saved host"
+	}
+	if strings.TrimSpace(hostID) == "" {
+		return label
+	}
+	return fmt.Sprintf("%s (%s)", label, hostID)
 }
 
 // listSessionPRSummaries fetches rich PR facts concurrently from the daemon.

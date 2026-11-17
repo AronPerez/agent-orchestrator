@@ -56,6 +56,9 @@ trigger: "Using the `ao` CLI, importing existing agent sessions, or managing Orc
   steering recovery commands. Confirm that successful write output names the
   intended machine; stop if it names a different host. Do not replace
   `--host` with a full saved password or an unpinned `--url` target.
+- Use `ao session ls --all-hosts --json` to discover fleet sessions. Treat
+  `hostId` plus session `id` as the address; session ids alone are host-local.
+  Keep healthy results when `meta.hosts` reports a sleeping machine.
 - Every command accepts `-h / --help` for the full flag list.
 - For frontend launch or preview selection, read
   [commands/preview.md](commands/preview.md) before acting. Its static-file,
