@@ -5413,5 +5413,11 @@
 	"collisionRadar.title": "競合の可能性",
 	"collisionRadar.incompleteTitle": "競合スキャンが未完了です",
 	"collisionRadar.summary": "{{sessions}} もこのワークスペース内のファイルを変更しました。",
-	"collisionRadar.incomplete": "一部のワークスペース変更を比較できませんでした。この一覧は不完全な可能性があります。"
+	"collisionRadar.incomplete": "一部のワークスペース変更を比較できませんでした。この一覧は不完全な可能性があります。",
+	"collisionRadar.unavailableBadge": "スキャン不可",
+	"collisionRadar.unavailableTitle": "競合スキャンを利用できません",
+	"collisionRadar.unavailable": "競合スキャンの結果を取得できません。",
+	"collisionRadar.staleBadge": "スキャンが古い",
+	"collisionRadar.staleTitle": "競合スキャンの結果が古くなっています",
+	"collisionRadar.stale": "競合スキャンを更新できませんでした。最後の結果を表示しています。"
 }

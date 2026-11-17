@@ -131,7 +131,13 @@ import {
 	type ReviewRunFacts,
 } from "../lib/session-reviews";
 import type { CloudCpAOReviewRun, CloudCpProjectRepo, CloudCpSessionReviewState, CloudCpPullRequestSummary } from "../lib/cloud-cp";
-import { projectOverlapForSession, useProjectOverlaps, type SessionProjectOverlap } from "../hooks/useProjectOverlaps";
+import {
+	projectOverlapForSession,
+	projectOverlapScanState,
+	useProjectOverlaps,
+	type ProjectOverlapScanState,
+	type SessionProjectOverlap,
+} from "../hooks/useProjectOverlaps";
 
 type ProjectConfig = components["schemas"]["ProjectConfig"];
 type OpenReviewerTerminal = (target: { handleId: string; harness: string }) => void;
@@ -446,6 +452,7 @@ const SummaryView = memo(function SummaryView({
 		: undefined;
 	const overlaps = useProjectOverlaps(collisionProjectId, { hostId, liveSessions: overlapLiveSessions });
 	const collision = projectOverlapForSession(overlaps.data, session.id);
+	const collisionScanState = projectOverlapScanState(overlaps);
 	const collisionNames = new Map(collisionSessions.map((candidate) => [candidate.id, candidate.title]));
 	const query = useSessionScmSummary(session.id, true, session.cloud?.orgId, session.cloud ? session.autoInjectCI === true : false, hostId);
 	const linkedPRs = query.data?.linkedPrs ?? [];
@@ -620,31 +627,43 @@ const SummaryView = memo(function SummaryView({
 				/>
 			)}
 			completion={showSessionControls && !guest ? <SessionControls hostId={hostId} policies={hasPRs} scratchpad={scratchpadSession} session={session} stopTurn={stopTurn} /> : undefined}
-			context={collision ? <CollisionRadarSection collision={collision} names={collisionNames} /> : undefined}
+			context={collision || collisionScanState ? <CollisionRadarSection collision={collision} names={collisionNames} scanState={collisionScanState} /> : undefined}
 			scripts={session.cloud ? <CloudScriptRunSections cloud={session.cloud} sessionId={session.id} /> : undefined}
 			workers={showWorkers ? <OrchestratorChildrenSection session={session} /> : <SessionForksSection session={session} />}
 		/>
 	);
 });
 
-function CollisionRadarSection({ collision, names }: { collision: SessionProjectOverlap; names: Map<string, string> }) {
+function CollisionRadarSection({
+	collision,
+	names,
+	scanState,
+}: {
+	collision?: SessionProjectOverlap;
+	names: Map<string, string>;
+	scanState?: ProjectOverlapScanState;
+}) {
 	const { t } = useTranslation();
-	const incomplete = collision.truncated || collision.unresolvedBase || collision.unavailable;
-	const peerNames = collision.peers.map((peer) => names.get(peer.sessionId) ?? peer.sessionId);
+	const peers = collision?.peers ?? [];
+	const incomplete = collision?.truncated || collision?.unresolvedBase || collision?.unavailable;
+	const peerNames = peers.map((peer) => names.get(peer.sessionId) ?? peer.sessionId);
+	const title = peers.length
+		? t("collisionRadar.title")
+		: scanState === "unavailable"
+			? t("collisionRadar.unavailableTitle")
+			: scanState === "stale"
+				? t("collisionRadar.staleTitle")
+				: t("collisionRadar.incompleteTitle");
 	return (
-		<Section
-			defaultOpen
-			surface={false}
-			title={t(collision.peers.length ? "collisionRadar.title" : "collisionRadar.incompleteTitle")}
-		>
+		<Section defaultOpen surface={false} title={title}>
 			<div className="flex flex-col gap-2" data-testid="collision-radar-section">
-				{collision.peers.length ? (
+				{peers.length ? (
 					<div className="flex items-start gap-2 text-xs text-warning">
 						<AlertTriangle aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
 						<p>{t("collisionRadar.summary", { sessions: peerNames.join(", ") })}</p>
 					</div>
 				) : null}
-				{collision.peers.map((peer) => (
+				{peers.map((peer) => (
 					<div className="min-w-0" key={peer.sessionId}>
 						<p className="text-xs font-medium text-foreground">{names.get(peer.sessionId) ?? peer.sessionId}</p>
 						<ul className="mt-1 space-y-1">
@@ -653,6 +672,8 @@ function CollisionRadarSection({ collision, names }: { collision: SessionProject
 					</div>
 				))}
 				{incomplete ? <p className="text-xs text-warning">{t("collisionRadar.incomplete")}</p> : null}
+				{scanState === "unavailable" ? <p className="text-xs text-warning">{t("collisionRadar.unavailable")}</p> : null}
+				{scanState === "stale" ? <p className="text-xs text-warning">{t("collisionRadar.stale")}</p> : null}
 			</div>
 		</Section>
 	);

@@ -32,6 +32,7 @@ const {
 	spawnCloudOrchestratorMock,
 	offeringMock,
 	participantsMock,
+	projectOverlapsMock,
 	shareDialogMock,
 	routerListeners,
 	fakeRouter,
@@ -59,6 +60,7 @@ const {
 		spawnCloudOrchestratorMock: vi.fn(),
 		offeringMock: vi.fn((): Record<string, unknown> => ({ defaultProvider: "coder" })),
 		participantsMock: vi.fn((): ReadonlyMap<string, unknown[]> => new Map()),
+		projectOverlapsMock: vi.fn((): { data: unknown; isError: boolean } => ({ data: undefined, isError: false })),
 		shareDialogMock: vi.fn(),
 	};
 });
@@ -68,9 +70,9 @@ vi.mock("../lib/cloud-orchestrator", () => ({ spawnCloudOrchestrator: spawnCloud
 vi.mock("../hooks/useCloudOffering", () => ({ useCloudOffering: () => offeringMock() }));
 vi.mock("../hooks/useSessionParticipants", () => ({ useSessionParticipants: () => participantsMock() }));
 vi.mock("../hooks/useTeamsEnabled", () => ({ useTeamsEnabled: () => true }));
-vi.mock("../hooks/useProjectOverlaps", () => ({
-	projectOverlapForSession: () => undefined,
-	useProjectOverlaps: () => ({ data: undefined }),
+vi.mock("../hooks/useProjectOverlaps", async (importOriginal) => ({
+	...await importOriginal<typeof import("../hooks/useProjectOverlaps")>(),
+	useProjectOverlaps: () => projectOverlapsMock(),
 }));
 vi.mock("./ShareSessionDialog", () => ({
 	ShareSessionDialog: (props: { open: boolean; sessionId?: string; sessionName?: string; projectName?: string; orgId: string; projectId: string }) => {
@@ -212,10 +214,59 @@ beforeEach(() => {
 	sessionMemoryMock.mockReset().mockReturnValue({ data: undefined, isError: false });
 	offeringMock.mockReset().mockReturnValue({ defaultProvider: "coder" });
 	participantsMock.mockReset().mockReturnValue(new Map());
+	projectOverlapsMock.mockReset().mockReturnValue({ data: undefined, isError: false });
 	shareDialogMock.mockReset();
 });
 
 describe("SessionsBoard", () => {
+	function localCollisionBoard() {
+		const sessions = [
+			boardSession({ id: "s1", title: "API cleanup", status: "working" }),
+			boardSession({ id: "s2", title: "UI cleanup", status: "working" }),
+		];
+		workspaceQueryMock.mockReturnValue({ data: [workspaceWithSessions(sessions)], isSuccess: true, isError: false });
+		return sessions;
+	}
+
+	it("shows an incomplete collision scan when an unavailable peer leaves no known pairs", () => {
+		localCollisionBoard();
+		projectOverlapsMock.mockReturnValue({
+			data: {
+				projectId: "p1", overlaps: [], truncatedSessionIds: [],
+				unresolvedBaseSessionIds: [], unavailableSessionIds: ["s2"],
+			},
+			isError: false,
+		});
+		renderBoard("p1");
+
+		expect(screen.getAllByText("Collision scan incomplete")).toHaveLength(2);
+		expect(screen.queryByText("Overlap")).not.toBeInTheDocument();
+	});
+
+	it("shows an unavailable collision scan after an initial overlap read failure", () => {
+		localCollisionBoard();
+		projectOverlapsMock.mockReturnValue({ data: undefined, isError: true });
+		renderBoard("p1");
+
+		expect(screen.getAllByText("Scan unavailable")).toHaveLength(2);
+	});
+
+	it("marks cached board collisions stale after a failed refresh", () => {
+		localCollisionBoard();
+		projectOverlapsMock.mockReturnValue({
+			data: {
+				projectId: "p1",
+				overlaps: [{ sessionA: "s1", sessionB: "s2", paths: ["shared.go"] }],
+				truncatedSessionIds: [], unresolvedBaseSessionIds: [], unavailableSessionIds: [],
+			},
+			isError: true,
+		});
+		renderBoard("p1");
+
+		expect(screen.getAllByText("Overlap")).toHaveLength(2);
+		expect(screen.getAllByText("Scan stale")).toHaveLength(2);
+	});
+
 	it("leaves a Cloud standalone agent's project for Home: it has no board", async () => {
 		workspaceQueryMock.mockReturnValue({
 			data: [{ id: "agent-1", name: "Fix the flake", kind: "cloud", standaloneAgent: true, path: "", sessions: [] }],

@@ -5562,9 +5562,16 @@
 	"shell.cloudProjectDeleted": "Se eliminó {{name}} definitivamente",
 	"collisionRadar.badge": "Solapamiento",
 	"collisionRadar.cardAria_one": "1 archivo modificado se solapa con {{sessions}}",
+	"collisionRadar.cardAria_many": "{{count}} archivos modificados se solapan con {{sessions}}",
 	"collisionRadar.cardAria_other": "{{count}} archivos modificados se solapan con {{sessions}}",
 	"collisionRadar.title": "Posible colisión",
 	"collisionRadar.incompleteTitle": "Análisis de colisiones incompleto",
 	"collisionRadar.summary": "{{sessions}} también modificó archivos en este espacio de trabajo.",
-	"collisionRadar.incomplete": "No se pudieron comparar algunos cambios del espacio de trabajo. Esta lista puede estar incompleta."
+	"collisionRadar.incomplete": "No se pudieron comparar algunos cambios del espacio de trabajo. Esta lista puede estar incompleta.",
+	"collisionRadar.unavailableBadge": "Análisis no disponible",
+	"collisionRadar.unavailableTitle": "Análisis de colisiones no disponible",
+	"collisionRadar.unavailable": "No hay ningún resultado del análisis de colisiones disponible.",
+	"collisionRadar.staleBadge": "Análisis desactualizado",
+	"collisionRadar.staleTitle": "Análisis de colisiones desactualizado",
+	"collisionRadar.stale": "No se pudo actualizar el análisis de colisiones. Se muestra el último resultado."
 }

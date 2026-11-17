@@ -448,6 +448,51 @@ describe("SessionInspector tabs", () => {
 		);
 	});
 
+	it("shows the collision scan as unavailable after an initial read failure", async () => {
+		const respond = commonGetsResponder();
+		getMock.mockImplementation(async (path: string) => path === "/api/v1/projects/{id}/overlaps"
+			? { error: { message: "workspace scan failed" } }
+			: respond(path));
+		const current = session([]);
+		const peer = session([], { id: "sess-2", title: "API cleanup", branch: "feat/api" });
+		renderWithQuery(<SessionInspector session={current} />, [{ id: "ws-1", name: "my-app", path: "/repo", sessions: [current, peer] }]);
+
+		expect(await screen.findByText("Collision scan unavailable")).toBeInTheDocument();
+		expect(screen.getByText("No collision result is available.")).toBeInTheDocument();
+		expect(screen.queryByText("Possible collision")).not.toBeInTheDocument();
+	});
+
+	it("keeps cached collision details but marks them stale after a failed refresh", async () => {
+		const respond = commonGetsResponder();
+		let failRefresh = false;
+		getMock.mockImplementation(async (path: string) => {
+			if (path !== "/api/v1/projects/{id}/overlaps") return respond(path);
+			if (failRefresh) return { error: { message: "workspace scan failed" } };
+			return {
+				data: {
+					projectId: "ws-1",
+					overlaps: [{ sessionA: "sess-1", sessionB: "sess-2", paths: ["shared.go"] }],
+					truncatedSessionIds: [], unresolvedBaseSessionIds: [], unavailableSessionIds: [],
+				},
+			};
+		});
+		const current = session([]);
+		const peer = session([], { id: "sess-2", title: "API cleanup", branch: "feat/api" });
+		const view = renderWithQuery(
+			<SessionInspector session={current} />,
+			[{ id: "ws-1", name: "my-app", path: "/repo", sessions: [current, peer] }],
+		);
+		expect(await screen.findByText("shared.go")).toBeInTheDocument();
+
+		failRefresh = true;
+		await act(async () => {
+			await view.queryClient.invalidateQueries({ queryKey: projectOverlapsQueryKey("ws-1") });
+		});
+
+		expect(await screen.findByText("Collision scan could not refresh. Showing the last result.")).toBeInTheDocument();
+		expect(screen.getByText("shared.go")).toBeInTheDocument();
+	});
+
 	it("watches a peer added while open and reconnects when its workspace is published", async () => {
 		const respond = commonGetsResponder();
 		getMock.mockImplementation(async (path: string) => path === "/api/v1/projects/{id}/overlaps"

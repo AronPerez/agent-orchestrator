@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { components } from "../../api/schema";
-import { projectOverlapForSession, projectOverlapSessionFingerprint } from "./useProjectOverlaps";
+import {
+	projectOverlapForSession,
+	projectOverlapScanState,
+	projectOverlapSessionFingerprint,
+} from "./useProjectOverlaps";
 
 type ProjectOverlapsResponse = components["schemas"]["ProjectOverlapsResponse"];
 
@@ -60,5 +64,25 @@ describe("projectOverlapSessionFingerprint", () => {
 		expect(pending).toBe(JSON.stringify([["one", true], ["two", false]]));
 		expect(published).toBe(JSON.stringify([["one", true], ["two", true]]));
 		expect(published).not.toBe(pending);
+	});
+});
+
+describe("projectOverlapScanState", () => {
+	const clean: ProjectOverlapsResponse = {
+		projectId: "demo",
+		overlaps: [],
+		truncatedSessionIds: [],
+		unresolvedBaseSessionIds: [],
+		unavailableSessionIds: [],
+	};
+
+	it.each([
+		["idle", { data: undefined, isError: false }, undefined],
+		["initial error", { data: undefined, isError: true }, "unavailable"],
+		["failed refresh", { data: clean, isError: true }, "stale"],
+		["incomplete read", { data: { ...clean, unavailableSessionIds: ["one"] }, isError: false }, "incomplete"],
+		["clean read", { data: clean, isError: false }, undefined],
+	] as const)("classifies a %s", (_name, query, expected) => {
+		expect(projectOverlapScanState(query)).toBe(expected);
 	});
 });
