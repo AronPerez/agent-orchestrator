@@ -168,7 +168,7 @@ func (s *Service) GetWorkspaceManifest(ctx context.Context, id domain.SessionID)
 // both the manifest and lower Git-status caches before the stream announces it
 // is ready.
 func (s *Service) ReconcileWorkspaceManifest(ctx context.Context, id domain.SessionID) (WorkspaceManifest, error) {
-	s.workspaceCache.invalidateSession(id)
+	s.invalidateWorkspaceCacheForReconcile(id)
 	s.workspaceManifests.markStale(id)
 	return s.RefreshWorkspaceManifest(ctx, id)
 }

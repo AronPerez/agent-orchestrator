@@ -118,6 +118,62 @@ func TestWorkspaceCacheInvalidatedFlightStillCoalesces(t *testing.T) {
 	})
 }
 
+func TestAuthoritativeWorkspaceCacheInvalidationFencesOldFlight(t *testing.T) {
+	root := newWorkspaceRepo(t)
+	now := func() time.Time { return time.Unix(100, 0) }
+	s := &Service{clock: now, workspaceCache: newWorkspaceCache(workspaceCacheTTL, now)}
+	id := domain.SessionID("session")
+	started := make(chan struct{})
+	release := make(chan struct{})
+	oldDone := make(chan error, 1)
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+
+	go func() {
+		_, _, err := s.resolveWorkspaceChanges(t.Context(), id, root, func(context.Context) workspaceCompareTarget {
+			close(started)
+			<-release
+			return workspaceCompareTarget{BaseRef: "before"}
+		})
+		oldDone <- err
+	}()
+	<-started
+	s.invalidateWorkspaceCacheForReconcile(id)
+
+	type result struct {
+		compare workspaceCompareTarget
+		err     error
+	}
+	freshDone := make(chan result, 1)
+	go func() {
+		compare, _, err := s.resolveWorkspaceChanges(t.Context(), id, root, func(context.Context) workspaceCompareTarget {
+			return workspaceCompareTarget{BaseRef: "after"}
+		})
+		freshDone <- result{compare: compare, err: err}
+	}()
+	select {
+	case fresh := <-freshDone:
+		if fresh.err != nil {
+			t.Fatalf("fresh load: %v", fresh.err)
+		}
+		if fresh.compare.BaseRef != "after" {
+			t.Fatalf("fresh load = %q, want after", fresh.compare.BaseRef)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("authoritative load joined the invalidated flight")
+	}
+
+	close(release)
+	if err := <-oldDone; err != nil {
+		t.Fatalf("old load: %v", err)
+	}
+}
+
 func TestWorkspaceCacheOldLoadCannotAffectReplacement(t *testing.T) {
 	for _, publishOld := range []bool{false, true} {
 		t.Run(map[bool]string{false: "cleanup", true: "publication"}[publishOld], func(t *testing.T) {

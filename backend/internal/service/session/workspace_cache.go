@@ -125,12 +125,13 @@ func (c *workspaceCache) finishLoad(key workspaceCacheKey, entry *workspaceCache
 // invalidateSession purges every cached entry for a session, across every
 // worktree root it spans (workspace projects can span several repos), and
 // prevents loads already in progress from repopulating the cache.
-func (c *workspaceCache) invalidateSession(id domain.SessionID) {
+func (c *workspaceCache) invalidateSession(id domain.SessionID) []workspaceCacheKey {
 	if c == nil {
-		return
+		return nil
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	inFlight := make([]workspaceCacheKey, 0)
 	for key := range c.entries {
 		if key.session == id {
 			delete(c.entries, key)
@@ -138,6 +139,7 @@ func (c *workspaceCache) invalidateSession(id domain.SessionID) {
 	}
 	for key := range c.loads {
 		if key.session == id {
+			inFlight = append(inFlight, key)
 			delete(c.loads, key)
 		}
 	}
@@ -145,6 +147,17 @@ func (c *workspaceCache) invalidateSession(id domain.SessionID) {
 		if key.session == id {
 			delete(c.paths, key)
 		}
+	}
+	return inFlight
+}
+
+// invalidateWorkspaceCacheForReconcile fences an authoritative read from any
+// older Git-status flight. Ordinary cache invalidation intentionally keeps
+// coalescing that flight; reconciliation must instead observe worktree state
+// from after the invalidation.
+func (s *Service) invalidateWorkspaceCacheForReconcile(id domain.SessionID) {
+	for _, key := range s.workspaceCache.invalidateSession(id) {
+		s.workspaceGroup.Forget(key.String())
 	}
 }
 
