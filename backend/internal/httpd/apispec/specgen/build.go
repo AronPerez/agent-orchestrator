@@ -360,6 +360,9 @@ var schemaNames = map[string]string{ //nolint:gosec // Public OpenAPI type names
 	"DomainRoleOverride":              "RoleOverride",
 	// httpd/controllers (wire envelopes)
 	"ControllersListProjectsResponse":                     "ListProjectsResponse",
+	"ControllersCoordinationProjectSummary":               "CoordinationProjectSummary",
+	"ControllersCoordinationListProjectsResponse":         "CoordinationListProjectsResponse",
+	"ControllersListProjectsAPIResponse":                  "ListProjectsAPIResponse",
 	"ControllersProjectResponse":                          "ProjectResponse",
 	"ControllersClonePrepareStreamEvent":                  "ClonePrepareStreamEvent",
 	"ControllersAgentIDParam":                             "AgentIDParam",
@@ -3255,7 +3258,7 @@ func projectOperations() []operation {
 			method: http.MethodGet, path: "/api/v1/projects", id: "listProjects", tag: "projects",
 			summary: "List all registered projects (active + degraded)",
 			resps: []respUnit{
-				{http.StatusOK, controllers.ListProjectsResponse{}},
+				{http.StatusOK, controllers.ListProjectsAPIResponse{}},
 				{http.StatusInternalServerError, envelope.APIError{}},
 			},
 		},

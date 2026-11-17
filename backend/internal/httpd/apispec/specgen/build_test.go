@@ -101,6 +101,41 @@ func TestBuild_TelemetryIdentityUsesNamedSchema(t *testing.T) {
 	}
 }
 
+func TestBuild_ProjectListDocumentsFullAndCoordinationResponses(t *testing.T) {
+	got, err := specgen.Build()
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	var doc struct {
+		Paths map[string]map[string]struct {
+			Responses map[string]struct {
+				Content map[string]struct {
+					Schema openAPISchemaNode `yaml:"schema"`
+				} `yaml:"content"`
+			} `yaml:"responses"`
+		} `yaml:"paths"`
+		Components struct {
+			Schemas map[string]openAPISchemaNode `yaml:"schemas"`
+		} `yaml:"components"`
+	}
+	if err := yaml.Unmarshal(got, &doc); err != nil {
+		t.Fatalf("parse generated OpenAPI: %v", err)
+	}
+	response := doc.Paths["/api/v1/projects"]["get"].Responses["200"].Content["application/json"].Schema
+	if response.Ref != "#/components/schemas/ListProjectsAPIResponse" {
+		t.Fatalf("project list response ref = %q, want ListProjectsAPIResponse", response.Ref)
+	}
+	variants := doc.Components.Schemas["ListProjectsAPIResponse"].AnyOf
+	want := []string{"#/components/schemas/ListProjectsResponse", "#/components/schemas/CoordinationListProjectsResponse"}
+	if len(variants) != len(want) || variants[0].Ref != want[0] || variants[1].Ref != want[1] {
+		t.Fatalf("project list variants = %+v, want %v", variants, want)
+	}
+	coordination := doc.Components.Schemas["CoordinationProjectSummary"]
+	if _, ok := coordination.Properties["path"]; ok {
+		t.Fatal("coordination project schema exposes path")
+	}
+}
+
 func TestBuild_InstallJobTargetRemainsAnEnum(t *testing.T) {
 	got, err := specgen.Build()
 	if err != nil {

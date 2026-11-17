@@ -58,7 +58,7 @@ func newPairingHost(t *testing.T) *pairingHost {
 	mountMobile(router, &controllers.MobileController{Bridge: bridge})
 	mountMobileDevices(router, &controllers.MobileDevicesController{Registry: registry, Access: bridge})
 	router.Route("/api/v1", func(r chi.Router) {
-		(&controllers.PushController{Registry: registry, Devices: devices}).Register(r)
+		(&controllers.PushController{Registry: registry, Devices: devices, Access: bridge}).Register(r)
 	})
 	router.Get("/api/v1/sessions", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	router.Get("/api/v1/sessions/{id}", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
@@ -374,7 +374,7 @@ func TestCoordinationProjectDetailIsASecretFreeProjection(t *testing.T) {
 type coordinationSessionService struct {
 	controllers.SessionService
 	session  domain.Session
-	spawnErr error
+	spawnErr func() error
 }
 
 func (s coordinationSessionService) List(context.Context, sessionsvc.ListFilter) ([]domain.Session, error) {
@@ -386,7 +386,7 @@ func (s coordinationSessionService) ListPage(context.Context, sessionsvc.ListFil
 }
 
 func (s coordinationSessionService) Spawn(context.Context, ports.SpawnConfig) (domain.Session, int, int, error) {
-	return domain.Session{}, 0, 0, s.spawnErr
+	return domain.Session{}, 0, 0, s.spawnErr()
 }
 
 func (s coordinationSessionService) Get(context.Context, domain.SessionID) (domain.Session, error) {
@@ -399,10 +399,11 @@ func TestCoordinationSessionResponsesHideSetupOutput(t *testing.T) {
 		ID: "s1", ProjectID: "p1", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
 		ProvisionState: domain.SessionProvisionFailed, ProvisionError: setupSecret,
 	}}
+	spawnErr := error(apierr.Conflict("WORKSPACE_PROVISION_FAILED", setupSecret, nil))
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	router := NewRouterWithControl(config.Config{}, log, nil, APIDeps{
 		Sessions: coordinationSessionService{
-			session: session, spawnErr: apierr.Conflict("WORKSPACE_PROVISION_FAILED", setupSecret, nil),
+			session: session, spawnErr: func() error { return spawnErr },
 		},
 	}, ControlDeps{})
 	devices, err := mobilebridge.LoadAccessDevices(mobilebridge.AccessDevicesPath(t.TempDir()))
@@ -445,6 +446,24 @@ func TestCoordinationSessionResponsesHideSetupOutput(t *testing.T) {
 	if status != http.StatusConflict || !strings.Contains(string(fullSpawnJSON), setupSecret) {
 		t.Fatalf("full spawn failure was redacted: status=%d body=%s", status, fullSpawnJSON)
 	}
+
+	const checkoutPath = "/private/project/worktrees/other-session"
+	spawnErr = apierr.Conflict("BRANCH_CHECKED_OUT_ELSEWHERE", "branch main is already checked out at "+checkoutPath, nil)
+	status, spawn = host.remote(http.MethodPost, "/api/v1/sessions", token, map[string]any{
+		"projectId": "p1", "kind": "worker", "harness": "codex", "mode": "tui", "prompt": "fix", "branch": "main",
+	})
+	spawnJSON, _ = json.Marshal(spawn)
+	if status != http.StatusConflict || spawn["code"] != "BRANCH_CHECKED_OUT_ELSEWHERE" || strings.Contains(string(spawnJSON), checkoutPath) {
+		t.Fatalf("scoped branch failure leaked checkout path: status=%d body=%s", status, spawnJSON)
+	}
+	status, fullSpawn = host.remote(http.MethodPost, "/api/v1/sessions", "secret12", map[string]any{
+		"projectId": "p1", "kind": "worker", "harness": "codex", "mode": "tui", "prompt": "fix", "branch": "main",
+	})
+	fullSpawnJSON, _ = json.Marshal(fullSpawn)
+	if status != http.StatusConflict || !strings.Contains(string(fullSpawnJSON), checkoutPath) {
+		t.Fatalf("full branch failure was redacted: status=%d body=%s", status, fullSpawnJSON)
+	}
+
 	status, fullSession := host.remote(http.MethodGet, "/api/v1/sessions/s1", "secret12", nil)
 	fullSessionJSON, _ := json.Marshal(fullSession)
 	if status != http.StatusOK || !strings.Contains(string(fullSessionJSON), setupSecret) {
@@ -677,7 +696,15 @@ func TestRemovingADeviceRevokesItAlone(t *testing.T) {
 
 func TestAPhoneThatForgetsTheHostLosesItsToken(t *testing.T) {
 	h := newPairingHost(t)
-	_, phone := h.pair(h.code(), "Phone")
+	phoneID, phone := h.pair(h.code(), "Phone")
+	status, issued := h.remote(http.MethodPost, "/api/v1/remote-host/coordination-token", phone, nil)
+	child, _ := issued["token"].(string)
+	if status != http.StatusOK || child == "" {
+		t.Fatalf("issue child: status=%d body=%v", status, issued)
+	}
+	if device, ok := h.bridge.Devices.Match(child); !ok || device.Issuer != mobilebridge.DeviceIssuer(phoneID) {
+		t.Fatalf("child issuer = %+v, %v", device, ok)
+	}
 	if status, _ := h.remote(http.MethodPost, "/api/v1/push/devices", phone, map[string]string{"installId": "install-phone"}); status != http.StatusOK {
 		t.Fatalf("register: %d", status)
 	}
@@ -686,6 +713,9 @@ func TestAPhoneThatForgetsTheHostLosesItsToken(t *testing.T) {
 	}
 	if got := h.sessions(phone); got != http.StatusUnauthorized {
 		t.Fatalf("token after the phone forgot the host: %d", got)
+	}
+	if got := h.sessions(child); got != http.StatusUnauthorized {
+		t.Fatalf("derived token after the phone forgot the host: %d", got)
 	}
 	if got := len(h.rows()); got != 0 {
 		t.Fatalf("rows left = %d", got)

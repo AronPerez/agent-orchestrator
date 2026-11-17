@@ -412,15 +412,16 @@ func (c *SessionsController) spawn(w http.ResponseWriter, r *http.Request) {
 	envelope.WriteJSON(w, http.StatusCreated, SpawnSessionResponse{Session: sessionView(r, sess), PromptBytes: promptBytes, SystemPromptBytes: systemPromptBytes})
 }
 
-const coordinationProvisionFailureMessage = "Remote session setup failed. Check the destination host for details."
+const coordinationSpawnFailureMessage = "Remote session could not be started. Check the destination host for details."
 
 func writeSpawnError(w http.ResponseWriter, r *http.Request, err error) {
 	var apiError *apierr.Error
-	if isAgentCoordinationRequest(r.Context()) && errors.As(err, &apiError) && apiError.Code == "WORKSPACE_PROVISION_FAILED" {
-		// Keep the real setup output in request diagnostics while returning only a
-		// stable, secret-free message across the coordination credential boundary.
+	if isAgentCoordinationRequest(r.Context()) && errors.As(err, &apiError) {
+		// Service errors may carry local paths or setup output. Keep the original in
+		// request diagnostics while returning its stable kind/code across the
+		// coordination credential boundary.
 		envelope.CaptureError(r, err)
-		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict", apiError.Code, coordinationProvisionFailureMessage, nil)
+		envelope.WriteError(w, r, apierr.New(apiError.Kind, apiError.Code, coordinationSpawnFailureMessage, nil))
 		return
 	}
 	envelope.WriteError(w, r, err)
