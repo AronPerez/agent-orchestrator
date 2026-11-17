@@ -329,6 +329,16 @@ func (m sessionLifecycleMessenger) Send(ctx context.Context, id domain.SessionID
 	return m.sessionLifecycle.Send(ctx, id, message, nil)
 }
 
+func (m sessionLifecycleMessenger) SendSemantic(ctx context.Context, id domain.SessionID, message, deliveryID string) error {
+	semantic, ok := m.sessionLifecycle.(interface {
+		SendSemantic(context.Context, domain.SessionID, string, string) error
+	})
+	if !ok {
+		return sessionmanager.ErrSemanticAcceptanceUnsupported
+	}
+	return semantic.SendSemantic(ctx, id, message, deliveryID)
+}
+
 // telemetryEmitsSpawned reports whether the ao.sessions.spawned carrier event can
 // reach a sink under this config: product telemetry on and the event not on the
 // kill switch. When it cannot, session wiring leaves the GitHub identity resolver
@@ -638,6 +648,28 @@ func (m *modeAwareMessenger) Bind(target ports.AgentMessenger) {
 }
 
 func (m *modeAwareMessenger) Send(ctx context.Context, id domain.SessionID, message string) error {
+	target, err := m.waitTarget(ctx)
+	if err != nil {
+		return err
+	}
+	return target.Send(ctx, id, message)
+}
+
+func (m *modeAwareMessenger) SendSemantic(ctx context.Context, id domain.SessionID, message, deliveryID string) error {
+	target, err := m.waitTarget(ctx)
+	if err != nil {
+		return err
+	}
+	semantic, ok := target.(interface {
+		SendSemantic(context.Context, domain.SessionID, string, string) error
+	})
+	if !ok {
+		return sessionmanager.ErrSemanticAcceptanceUnsupported
+	}
+	return semantic.SendSemantic(ctx, id, message, deliveryID)
+}
+
+func (m *modeAwareMessenger) waitTarget(ctx context.Context) (ports.AgentMessenger, error) {
 	m.mu.RLock()
 	target := m.target
 	m.mu.RUnlock()
@@ -645,16 +677,16 @@ func (m *modeAwareMessenger) Send(ctx context.Context, id domain.SessionID, mess
 		select {
 		case <-m.ready:
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil, ctx.Err()
 		}
 		m.mu.RLock()
 		target = m.target
 		m.mu.RUnlock()
 	}
 	if target == nil {
-		return fmt.Errorf("mode-aware lifecycle messenger bound without a target")
+		return nil, fmt.Errorf("mode-aware lifecycle messenger bound without a target")
 	}
-	return target.Send(ctx, id, message)
+	return target, nil
 }
 
 // buildAgentRegistry returns a registry populated with the agent adapters the

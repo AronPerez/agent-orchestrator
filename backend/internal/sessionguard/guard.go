@@ -35,6 +35,11 @@ type InputLease interface {
 	AcquireSessionInput(id domain.SessionID) (release func(), ok bool)
 }
 
+// MessageWriter replaces the final messenger call for a guarded write. It
+// receives the same just-read session record used by the refusal policy, so a
+// mode-aware caller cannot dispatch through stale TUI/Chat state.
+type MessageWriter func(context.Context, domain.SessionRecord, string) error
+
 // Outcome reports what a guarded write did. Anything other than Sent means the
 // message did NOT reach the pane; callers that record delivery must not stamp
 // a suppressed write as delivered.
@@ -402,7 +407,13 @@ func (g *Guard) NudgeUrgent(ctx context.Context, id domain.SessionID, msg string
 // cannot safely steer an active turn. Chat messages use the mode-aware queued
 // send path, so they do not depend on terminal steering capability.
 func (g *Guard) NudgeCoordination(ctx context.Context, id domain.SessionID, msg string, steersActiveTurn func(domain.AgentHarness) bool) (Outcome, error) {
-	return g.send(ctx, id, msg, func(rec domain.SessionRecord) (Outcome, bool) {
+	return g.NudgeCoordinationWithWriter(ctx, id, msg, steersActiveTurn, nil)
+}
+
+// NudgeCoordinationWithWriter applies the ordinary coordination policy but
+// lets the caller choose the final mode-aware delivery primitive.
+func (g *Guard) NudgeCoordinationWithWriter(ctx context.Context, id domain.SessionID, msg string, steersActiveTurn func(domain.AgentHarness) bool, writer MessageWriter) (Outcome, error) {
+	return g.sendWithWriter(ctx, id, msg, func(rec domain.SessionRecord) (Outcome, bool) {
 		if g.tuiAwaitingStartupInput(rec) {
 			return SuppressedStartupPending, true
 		}
@@ -413,7 +424,7 @@ func (g *Guard) NudgeCoordination(ctx context.Context, id domain.SessionID, msg 
 			return SuppressedBusy, steersActiveTurn == nil || !steersActiveTurn(rec.Harness)
 		}
 		return SuppressedUnknown, false
-	})
+	}, writer)
 }
 
 // send re-reads the session immediately before pasting so the window between
@@ -423,12 +434,20 @@ func (g *Guard) NudgeCoordination(ctx context.Context, id domain.SessionID, msg 
 // available without scraping the terminal. Fail closed: a store error
 // suppresses the write rather than pressing Enter on an unknown state.
 func (g *Guard) send(ctx context.Context, id domain.SessionID, msg string, refuse func(domain.SessionRecord) (Outcome, bool)) (Outcome, error) {
-	return g.sendThenChecked(ctx, id, msg, refuse, nil, nil, nil)
+	return g.sendWithWriter(ctx, id, msg, refuse, nil)
+}
+
+func (g *Guard) sendWithWriter(ctx context.Context, id domain.SessionID, msg string, refuse func(domain.SessionRecord) (Outcome, bool), writer MessageWriter) (Outcome, error) {
+	return g.sendThenCheckedWithWriter(ctx, id, msg, refuse, nil, nil, nil, writer)
 }
 
 var errUnsafeNudgeSurface = errors.New("sessionguard: terminal surface is not a safe draft")
 
 func (g *Guard) sendThenChecked(ctx context.Context, id domain.SessionID, msg string, refuse func(domain.SessionRecord) (Outcome, bool), preWrite func(context.Context, domain.SessionRecord) error, composerBusy func(context.Context, domain.SessionRecord) (bool, func()), after func(context.Context) error) (Outcome, error) {
+	return g.sendThenCheckedWithWriter(ctx, id, msg, refuse, preWrite, composerBusy, after, nil)
+}
+
+func (g *Guard) sendThenCheckedWithWriter(ctx context.Context, id domain.SessionID, msg string, refuse func(domain.SessionRecord) (Outcome, bool), preWrite func(context.Context, domain.SessionRecord) error, composerBusy func(context.Context, domain.SessionRecord) (bool, func()), after func(context.Context) error, writer MessageWriter) (Outcome, error) {
 	g.leaseMu.RLock()
 	lease := g.lease
 	g.leaseMu.RUnlock()
@@ -440,7 +459,7 @@ func (g *Guard) sendThenChecked(ctx context.Context, id domain.SessionID, msg st
 		}
 		defer release()
 	}
-	outcome, err := g.sendAdmittedChecked(ctx, id, msg, refuse, preWrite, composerBusy)
+	outcome, err := g.sendAdmittedCheckedWithWriter(ctx, id, msg, refuse, preWrite, composerBusy, writer)
 	if err == nil && outcome == Sent && after != nil {
 		if afterErr := after(ctx); afterErr != nil {
 			return outcome, afterErr
@@ -460,6 +479,10 @@ func (g *Guard) sendAdmitted(ctx context.Context, id domain.SessionID, msg strin
 // caller-owned unsent-draft check; either may be nil. Both run after the refuse
 // policy and before the pane write, on the just-read record.
 func (g *Guard) sendAdmittedChecked(ctx context.Context, id domain.SessionID, msg string, refuse func(domain.SessionRecord) (Outcome, bool), preWrite func(context.Context, domain.SessionRecord) error, composerBusy func(context.Context, domain.SessionRecord) (bool, func())) (Outcome, error) {
+	return g.sendAdmittedCheckedWithWriter(ctx, id, msg, refuse, preWrite, composerBusy, nil)
+}
+
+func (g *Guard) sendAdmittedCheckedWithWriter(ctx context.Context, id domain.SessionID, msg string, refuse func(domain.SessionRecord) (Outcome, bool), preWrite func(context.Context, domain.SessionRecord) error, composerBusy func(context.Context, domain.SessionRecord) (bool, func()), writer MessageWriter) (Outcome, error) {
 	rec, ok, err := g.store.GetSession(ctx, id)
 	if err != nil {
 		return SuppressedUnknown, fmt.Errorf("guard %s: read session: %w", id, err)
@@ -505,7 +528,12 @@ func (g *Guard) sendAdmittedChecked(ctx context.Context, id domain.SessionID, ms
 	if err := ctx.Err(); err != nil {
 		return SuppressedUnknown, fmt.Errorf("guard %s: %w", id, err)
 	}
-	if err := g.messenger.Send(ctx, id, msg); err != nil {
+	if writer == nil {
+		writer = func(ctx context.Context, rec domain.SessionRecord, msg string) error {
+			return g.messenger.Send(ctx, rec.ID, msg)
+		}
+	}
+	if err := writer(ctx, rec, msg); err != nil {
 		return Sent, fmt.Errorf("guard %s: send: %w", id, err)
 	}
 	return Sent, nil

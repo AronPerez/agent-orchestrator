@@ -40,7 +40,9 @@ func TestNudgeCoordinationUsesSharedGuardActiveSteeringPolicy(t *testing.T) {
 }
 
 func TestNudgeCoordinationQueuesForActiveChatWithoutTerminalSteering(t *testing.T) {
-	m, store, messenger := newManager()
+	store := newFakeStore()
+	messenger := &recordingSemanticCoordinationMessenger{}
+	m := New(store, messenger)
 	rec := working("chat-1")
 	rec.Mode = domain.SessionModeChat
 	store.sessions[rec.ID] = rec
@@ -49,8 +51,26 @@ func TestNudgeCoordinationQueuesForActiveChatWithoutTerminalSteering(t *testing.
 	if err != nil {
 		t.Fatalf("chat nudge: %v", err)
 	}
-	if outcome != sessionguard.Sent || len(messenger.msgs) != 1 || messenger.msgs[0] != "coordinate" {
-		t.Fatalf("outcome=%s messages=%v, want active Chat message queued", outcome, messenger.msgs)
+	if outcome != sessionguard.Sent || messenger.normalCalls != 0 || len(messenger.semanticCalls) != 1 {
+		t.Fatalf("outcome=%s normal=%d semantic=%+v, want one semantic Chat delivery", outcome, messenger.normalCalls, messenger.semanticCalls)
+	}
+	if call := messenger.semanticCalls[0]; call.message != "coordinate" || call.deliveryID != "collision-chat" {
+		t.Fatalf("semantic Chat delivery = %+v, want plain message with stable collision id", call)
+	}
+}
+
+func TestNudgeCoordinationDoesNotDropChatDeliveryIdentity(t *testing.T) {
+	m, store, messenger := newManager()
+	rec := working("chat-1")
+	rec.Mode = domain.SessionModeChat
+	store.sessions[rec.ID] = rec
+
+	outcome, err := m.NudgeCoordination(context.Background(), rec.ID, "coordinate", "collision-chat")
+	if outcome != sessionguard.Sent || !errors.Is(err, errCoordinationSemanticDeliveryUnsupported) {
+		t.Fatalf("chat nudge = (%s, %v), want admitted semantic-delivery error", outcome, err)
+	}
+	if len(messenger.msgs) != 0 {
+		t.Fatalf("plain Chat messages = %v, want keyed delivery to fail closed", messenger.msgs)
 	}
 }
 
@@ -67,9 +87,13 @@ func TestNudgeCoordinationConfirmsAmbiguousAttemptBeforeResending(t *testing.T) 
 	if outcome != sessionguard.Sent || err == nil || messenger.calls != 1 {
 		t.Fatalf("first attempt outcome=%s err=%v calls=%d, want sent/unconfirmed/1", outcome, err, messenger.calls)
 	}
+	outcome, err = m.ConfirmCoordination(context.Background(), rec.ID, "coordinate", "collision-attempt")
+	if outcome != sessionguard.Sent || !errors.Is(err, ErrCoordinationDeliveryUnconfirmed) || messenger.calls != 1 {
+		t.Fatalf("unconfirmed retry outcome=%s err=%v calls=%d, want sent/unconfirmed without another write", outcome, err, messenger.calls)
+	}
 	store.accepted[string(rec.ID)+"\x00launch-1\x00collision-attempt"] = true
 	messenger.err = nil
-	outcome, err = m.NudgeCoordination(context.Background(), rec.ID, "coordinate", "collision-attempt")
+	outcome, err = m.ConfirmCoordination(context.Background(), rec.ID, "coordinate", "collision-attempt")
 	if err != nil || outcome != sessionguard.Sent || messenger.calls != 1 {
 		t.Fatalf("confirmed retry outcome=%s err=%v calls=%d, want sent/nil without another write", outcome, err, messenger.calls)
 	}
@@ -78,6 +102,26 @@ func TestNudgeCoordinationConfirmsAmbiguousAttemptBeforeResending(t *testing.T) 
 type appliedErrorMessenger struct {
 	calls int
 	err   error
+}
+
+type semanticCoordinationCall struct {
+	message    string
+	deliveryID string
+}
+
+type recordingSemanticCoordinationMessenger struct {
+	normalCalls   int
+	semanticCalls []semanticCoordinationCall
+}
+
+func (m *recordingSemanticCoordinationMessenger) Send(context.Context, domain.SessionID, string) error {
+	m.normalCalls++
+	return nil
+}
+
+func (m *recordingSemanticCoordinationMessenger) SendSemantic(_ context.Context, _ domain.SessionID, message, deliveryID string) error {
+	m.semanticCalls = append(m.semanticCalls, semanticCoordinationCall{message: message, deliveryID: deliveryID})
+	return nil
 }
 
 func (m *appliedErrorMessenger) Send(context.Context, domain.SessionID, string) error {

@@ -214,6 +214,7 @@ type terminalTitleSource interface {
 // shared lifecycle guard.
 type OverlapNudger interface {
 	NudgeCoordination(context.Context, domain.SessionID, string, string) (sessionguard.Outcome, error)
+	ConfirmCoordination(context.Context, domain.SessionID, string, string) (sessionguard.Outcome, error)
 }
 
 // Service is the controller-facing session service. It delegates command-side
@@ -250,11 +251,11 @@ type Service struct {
 	overlapNoticeLocks      map[domain.ProjectID]*sync.Mutex
 	overlapNoticePendingMu  sync.Mutex
 	overlapNoticePending    map[projectOverlapNoticeKey]domain.SessionOverlapNotice
-	overlapNoticeAttempts   map[projectOverlapNoticeKey]string
+	overlapNoticeAttempts   map[projectOverlapNoticeKey]projectOverlapNoticeAttempt
 	overlapNoticeAttemptSeq uint64
 	overlapNudger           OverlapNudger
 	overlapRadarSignalMu    sync.Mutex
-	overlapRadarPending     map[domain.ProjectID]struct{}
+	overlapRadarPending     map[domain.ProjectID]bool
 	overlapRadarWake        chan struct{}
 	overlapWatch            func(context.Context, ...string) (workspacewatch.Subscription, error)
 	overlapNoticeRetryDelay time.Duration
@@ -405,7 +406,7 @@ func NewWithDeps(d Deps) *Service {
 	if backgroundContext == nil {
 		backgroundContext = context.Background()
 	}
-	s := &Service{manager: d.Manager, store: d.Store, prClaimer: d.PRClaimer, scm: d.SCM, tracker: d.Tracker, clock: d.Clock, dataDir: d.DataDir, signalCapable: d.SignalCapable, runtimeUnreachable: d.RuntimeUnreachable, telemetry: d.Telemetry, milestones: d.Milestones, delivery: d.Delivery, logger: d.Logger, backgroundContext: backgroundContext, agentReadiness: d.AgentReadiness, githubIdentity: d.GithubIdentity, titleRefinementSlots: make(chan struct{}, delegatedTaskTitleConcurrency), titleRefinementCancels: map[domain.SessionID]context.CancelFunc{}, outputTypeReconciler: d.OutputTypeReconciler, artifactDeleter: d.ArtifactDeleter, artifactTracker: d.ArtifactTracker, shareLinks: d.ShareLinks, overlapNudger: d.OverlapNudger, overlapNoticeAttempts: map[projectOverlapNoticeKey]string{}, overlapRadarPending: map[domain.ProjectID]struct{}{}, overlapRadarWake: make(chan struct{}, 1), overlapWatch: workspacewatch.WatchWithStatus, overlapNoticeRetryDelay: defaultProjectOverlapNoticeRetryDelay, overlapNoticeTimeout: defaultProjectOverlapNoticeTimeout}
+	s := &Service{manager: d.Manager, store: d.Store, prClaimer: d.PRClaimer, scm: d.SCM, tracker: d.Tracker, clock: d.Clock, dataDir: d.DataDir, signalCapable: d.SignalCapable, runtimeUnreachable: d.RuntimeUnreachable, telemetry: d.Telemetry, milestones: d.Milestones, delivery: d.Delivery, logger: d.Logger, backgroundContext: backgroundContext, agentReadiness: d.AgentReadiness, githubIdentity: d.GithubIdentity, titleRefinementSlots: make(chan struct{}, delegatedTaskTitleConcurrency), titleRefinementCancels: map[domain.SessionID]context.CancelFunc{}, outputTypeReconciler: d.OutputTypeReconciler, artifactDeleter: d.ArtifactDeleter, artifactTracker: d.ArtifactTracker, shareLinks: d.ShareLinks, overlapNudger: d.OverlapNudger, overlapNoticeAttempts: map[projectOverlapNoticeKey]projectOverlapNoticeAttempt{}, overlapRadarPending: map[domain.ProjectID]bool{}, overlapRadarWake: make(chan struct{}, 1), overlapWatch: workspacewatch.WatchWithStatus, overlapNoticeRetryDelay: defaultProjectOverlapNoticeRetryDelay, overlapNoticeTimeout: defaultProjectOverlapNoticeTimeout}
 	s.terminalTitles, _ = d.Store.(terminalTitleSource)
 	if s.prClaimer == nil {
 		if w, ok := d.Store.(ports.PRClaimer); ok {

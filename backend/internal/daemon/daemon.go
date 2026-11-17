@@ -1492,7 +1492,7 @@ func Run(buildVersion string) (retErr error) {
 				if event.Type != cdc.EventSessionCreated && event.Type != cdc.EventSessionUpdated {
 					return
 				}
-				sessionSvc.SignalProjectOverlapRadar(domain.ProjectID(event.ProjectID))
+				sessionSvc.SignalProjectOverlapRadarSession(domain.ProjectID(event.ProjectID))
 			})
 			defer unsubscribe()
 			sessionSvc.RunProjectOverlapNoticeRadar(ctx)

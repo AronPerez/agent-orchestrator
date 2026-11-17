@@ -34,6 +34,42 @@ type wiringReadinessProvider struct {
 	purpose  domain.AgentReadinessPurpose
 }
 
+type semanticLifecycleStub struct {
+	sessionLifecycle
+	normalCalls int
+	sessionID   domain.SessionID
+	message     string
+	deliveryID  string
+}
+
+func (s *semanticLifecycleStub) Send(context.Context, domain.SessionID, string, *ports.SpawnAttachment) error {
+	s.normalCalls++
+	return nil
+}
+
+func (s *semanticLifecycleStub) SendSemantic(_ context.Context, sessionID domain.SessionID, message, deliveryID string) error {
+	s.sessionID = sessionID
+	s.message = message
+	s.deliveryID = deliveryID
+	return nil
+}
+
+func TestModeAwareMessengerForwardsSemanticDeliveryIdentity(t *testing.T) {
+	target := &semanticLifecycleStub{}
+	messenger := newModeAwareMessenger()
+	messenger.Bind(sessionLifecycleMessenger{sessionLifecycle: target})
+
+	if err := messenger.SendSemantic(context.Background(), "worker-1", "coordinate", "collision:attempt-1"); err != nil {
+		t.Fatalf("semantic send: %v", err)
+	}
+	if target.normalCalls != 0 {
+		t.Fatalf("plain sends = %d, want semantic delivery", target.normalCalls)
+	}
+	if target.sessionID != "worker-1" || target.message != "coordinate" || target.deliveryID != "collision:attempt-1" {
+		t.Fatalf("semantic delivery = (%q, %q, %q), want stable collision identity", target.sessionID, target.message, target.deliveryID)
+	}
+}
+
 func (p *wiringReadinessProvider) EnsureAgentReadiness(_ context.Context, agentID string, purpose domain.AgentReadinessPurpose) (domain.AgentReadinessSnapshot, error) {
 	p.agentID = agentID
 	p.purpose = purpose

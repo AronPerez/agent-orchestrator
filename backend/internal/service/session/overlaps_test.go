@@ -596,6 +596,85 @@ func TestRunProjectOverlapNoticeRadarRetriesSuppressedRecipientAfterSessionChang
 	}
 }
 
+func TestRunProjectOverlapNoticeRadarIgnoresSessionSignalWithUnchangedTopology(t *testing.T) {
+	first := newWorkspaceRepo(t)
+	second := newWorkspaceRepo(t)
+	store := newMemoryOverlapNoticeStore()
+	store.listNoticeCh = make(chan struct{}, 2)
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+	store.sessions["demo-a"] = overlapSession("demo-a", first)
+	store.sessions["demo-b"] = overlapSession("demo-b", second)
+	svc := NewWithDeps(Deps{Store: store, OverlapNudger: &recordingOverlapNudger{}})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		svc.RunProjectOverlapNoticeRadar(ctx)
+		close(done)
+	}()
+	select {
+	case <-store.listNoticeCh:
+	case <-time.After(3 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("radar did not finish its initial scan")
+	}
+
+	svc.SignalProjectOverlapRadarSession("demo")
+	select {
+	case <-store.listNoticeCh:
+		cancel()
+		<-done
+		t.Fatal("unchanged session topology rebuilt and rescanned the radar")
+	case <-time.After(100 * time.Millisecond):
+	}
+	cancel()
+	<-done
+}
+
+func TestRunProjectOverlapNoticeRadarClearsRowsWhenProjectDropsBelowTwoSessions(t *testing.T) {
+	first := newWorkspaceRepo(t)
+	second := newWorkspaceRepo(t)
+	writeWorkspaceFile(t, first, "shared.go", "first\n")
+	writeWorkspaceFile(t, second, "shared.go", "second\n")
+	store := newMemoryOverlapNoticeStore()
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+	store.sessions["demo-a"] = overlapSession("demo-a", first)
+	store.sessions["demo-b"] = overlapSession("demo-b", second)
+	nudger := &recordingOverlapNudger{callCh: make(chan overlapNudgeCall, 2)}
+	svc := NewWithDeps(Deps{Store: store, OverlapNudger: nudger})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		svc.RunProjectOverlapNoticeRadar(ctx)
+		close(done)
+	}()
+	for range 2 {
+		select {
+		case <-nudger.callCh:
+		case <-time.After(3 * time.Second):
+			cancel()
+			<-done
+			t.Fatal("radar did not persist the initial directed notices")
+		}
+	}
+
+	terminated := store.sessions["demo-b"]
+	terminated.IsTerminated = true
+	store.sessions["demo-b"] = terminated
+	svc.SignalProjectOverlapRadarSession("demo")
+	deadline := time.Now().Add(3 * time.Second)
+	for store.hasNotice("demo-a", "demo-b") || store.hasNotice("demo-b", "demo-a") {
+		if time.Now().After(deadline) {
+			cancel()
+			<-done
+			t.Fatal("delivery rows remained after the project dropped below two eligible sessions")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	<-done
+}
+
 func TestRunProjectOverlapNoticeRadarRetriesDefiniteRefusalWithoutAnotherEvent(t *testing.T) {
 	first := newWorkspaceRepo(t)
 	second := newWorkspaceRepo(t)
@@ -934,10 +1013,43 @@ func TestReconcileProjectOverlapNoticesDoesNotRecordSentWithError(t *testing.T) 
 		t.Fatalf("retry reconcile: %v", err)
 	}
 	if !store.hasNotice("demo-a", "demo-b") || len(nudger.calls) != 3 {
-		t.Fatalf("retry calls=%+v notices=%+v, want failed direction sent again", nudger.calls, store.notices)
+		t.Fatalf("retry calls=%+v notices=%+v, want failed direction confirmed", nudger.calls, store.notices)
 	}
 	if nudger.calls[0].deliveryID == "" || nudger.calls[0].deliveryID != nudger.calls[2].deliveryID {
 		t.Fatalf("ambiguous retry delivery ids = %q then %q, want one stable identity", nudger.calls[0].deliveryID, nudger.calls[2].deliveryID)
+	}
+	if nudger.calls[0].confirmOnly || !nudger.calls[2].confirmOnly {
+		t.Fatalf("ambiguous retry calls=%+v, want initial send followed by confirmation only", nudger.calls)
+	}
+}
+
+func TestReconcileProjectOverlapNoticesRetiresUnconfirmedAttemptAfterCleanScan(t *testing.T) {
+	store := newMemoryOverlapNoticeStore()
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+	store.sessions["demo-a"] = domain.SessionRecord{ID: "demo-a", ProjectID: "demo"}
+	store.sessions["demo-b"] = domain.SessionRecord{ID: "demo-b", ProjectID: "demo"}
+	nudger := &recordingOverlapNudger{
+		outcomes: map[domain.SessionID][]sessionguard.Outcome{"demo-a": {sessionguard.Sent, sessionguard.Sent}},
+		errors:   map[domain.SessionID][]error{"demo-a": {errors.New("delivery unconfirmed"), nil}},
+	}
+	svc := NewWithDeps(Deps{Store: store, OverlapNudger: nudger})
+	collision := ProjectOverlapResult{ProjectID: "demo", Overlaps: []ProjectOverlap{{SessionA: "demo-a", SessionB: "demo-b", Paths: []string{"shared.go"}}}}
+
+	if err := svc.reconcileProjectOverlapNotices(context.Background(), collision); err == nil {
+		t.Fatal("first reconcile unexpectedly ignored the unconfirmed write")
+	}
+	firstAttempt := nudger.calls[0].deliveryID
+	if firstAttempt == "" {
+		t.Fatal("first reconcile did not allocate a delivery id")
+	}
+	if err := svc.reconcileProjectOverlapNotices(context.Background(), ProjectOverlapResult{ProjectID: "demo"}); err != nil {
+		t.Fatalf("clean reconcile: %v", err)
+	}
+	if err := svc.reconcileProjectOverlapNotices(context.Background(), collision); err != nil {
+		t.Fatalf("new collision reconcile: %v", err)
+	}
+	if got := nudger.calls[2].deliveryID; got == firstAttempt {
+		t.Fatalf("new collision reused cleared unconfirmed attempt %q", got)
 	}
 }
 
@@ -1062,9 +1174,10 @@ func (s *memoryOverlapNoticeStore) listCalls(projectID domain.ProjectID) int {
 }
 
 type overlapNudgeCall struct {
-	sessionID  domain.SessionID
-	message    string
-	deliveryID string
+	sessionID   domain.SessionID
+	message     string
+	deliveryID  string
+	confirmOnly bool
 }
 
 type recordingOverlapNudger struct {
@@ -1075,7 +1188,15 @@ type recordingOverlapNudger struct {
 }
 
 func (n *recordingOverlapNudger) NudgeCoordination(_ context.Context, sessionID domain.SessionID, message, deliveryID string) (sessionguard.Outcome, error) {
-	call := overlapNudgeCall{sessionID: sessionID, message: message, deliveryID: deliveryID}
+	return n.record(sessionID, message, deliveryID, false)
+}
+
+func (n *recordingOverlapNudger) ConfirmCoordination(_ context.Context, sessionID domain.SessionID, message, deliveryID string) (sessionguard.Outcome, error) {
+	return n.record(sessionID, message, deliveryID, true)
+}
+
+func (n *recordingOverlapNudger) record(sessionID domain.SessionID, message, deliveryID string, confirmOnly bool) (sessionguard.Outcome, error) {
+	call := overlapNudgeCall{sessionID: sessionID, message: message, deliveryID: deliveryID, confirmOnly: confirmOnly}
 	n.calls = append(n.calls, call)
 	if n.callCh != nil {
 		n.callCh <- call
@@ -1109,6 +1230,10 @@ func (n *isolatingOverlapNudger) NudgeCoordination(ctx context.Context, sessionI
 	default:
 	}
 	return sessionguard.Sent, nil
+}
+
+func (n *isolatingOverlapNudger) ConfirmCoordination(ctx context.Context, sessionID domain.SessionID, message, deliveryID string) (sessionguard.Outcome, error) {
+	return n.NudgeCoordination(ctx, sessionID, message, deliveryID)
 }
 
 func overlapSession(id domain.SessionID, workspace string) domain.SessionRecord {

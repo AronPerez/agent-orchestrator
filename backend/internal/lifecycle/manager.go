@@ -250,6 +250,7 @@ type Manager struct {
 	// through (see sessionguard). Nil when no messenger was wired: reaction
 	// nudges become no-ops but the reducer still runs.
 	guard         *sessionguard.Guard
+	messenger     ports.AgentMessenger
 	notifications notificationSink
 	// completionTerminator is late-bound because Session Manager itself depends
 	// on this lifecycle reducer. It is required before the SCM observer starts.
@@ -335,6 +336,7 @@ func New(store sessionStore, messenger ports.AgentMessenger, opts ...Option) *Ma
 	}
 	if messenger != nil {
 		m.guard = sessionguard.New(store, messenger, nil)
+		m.messenger = messenger
 	}
 	for _, opt := range opts {
 		opt(m)
