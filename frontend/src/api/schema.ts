@@ -2132,6 +2132,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{id}/overlaps": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Find active project sessions changing the same base-relative paths */
+        get: operations["getProjectOverlaps"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{id}/permissions": {
         parameters: {
             query?: never;
@@ -6298,6 +6315,9 @@ export interface components {
             /** Format: date-time */
             nearestExpiresAt?: null | string;
         };
+        CollisionRadarConfig: {
+            ignorePaths?: string[];
+        };
         CompactConversationResponse: {
             /** Format: int64 */
             tokensAfter?: number;
@@ -7972,6 +7992,7 @@ export interface components {
             agentRulesFile?: string;
             autoReview?: boolean;
             canonicalRepoURL?: string;
+            collisionRadar?: components["schemas"]["CollisionRadarConfig"];
             containerReap?: components["schemas"]["ContainerReapConfig"];
             defaultBranch?: string;
             env?: {
@@ -7998,6 +8019,16 @@ export interface components {
             status: "ok" | "degraded";
         };
         ProjectOrDegraded: components["schemas"]["Project"] | components["schemas"]["DegradedProject"];
+        ProjectOverlapResponse: {
+            paths: string[];
+            sessionA: string;
+            sessionB: string;
+        };
+        ProjectOverlapsResponse: {
+            overlaps: components["schemas"]["ProjectOverlapResponse"][];
+            projectId: string;
+            truncatedSessionIds: string[];
+        };
         ProjectResponse: {
             project: components["schemas"]["Project"];
         };
@@ -17033,6 +17064,56 @@ export interface operations {
             };
             /** @description Internal Server Error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getProjectOverlaps: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectOverlapsResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
                 headers: {
                     [name: string]: unknown;
                 };

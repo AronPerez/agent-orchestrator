@@ -97,6 +97,11 @@ func TestProjectConfigValidate(t *testing.T) {
 		{"tracker intake assignee with whitespace", ProjectConfig{TrackerIntake: TrackerIntakeConfig{Enabled: true, Assignee: " alice"}}, true},
 		{"auto review enabled", ProjectConfig{AutoReview: true}, false},
 		{"auto review disabled", ProjectConfig{AutoReview: false}, false},
+		{"collision radar ignore path", ProjectConfig{CollisionRadar: CollisionRadarConfig{IgnorePaths: []string{"frontend/src/api/schema.ts", "package-lock.json"}}}, false},
+		{"collision radar absolute ignore path", ProjectConfig{CollisionRadar: CollisionRadarConfig{IgnorePaths: []string{"/tmp/generated.go"}}}, true},
+		{"collision radar escaping ignore path", ProjectConfig{CollisionRadar: CollisionRadarConfig{IgnorePaths: []string{"../generated.go"}}}, true},
+		{"collision radar duplicate ignore path", ProjectConfig{CollisionRadar: CollisionRadarConfig{IgnorePaths: []string{"generated.go", "generated.go"}}}, true},
+		{"collision radar empty ignore path", ProjectConfig{CollisionRadar: CollisionRadarConfig{IgnorePaths: []string{""}}}, true},
 		{"orchestrator prompt ok", ProjectConfig{OrchestratorPrompt: strings.Repeat("a", 1024)}, false},
 		{"orchestrator prompt too long", ProjectConfig{OrchestratorPrompt: strings.Repeat("a", 64*1024+1)}, true},
 	}

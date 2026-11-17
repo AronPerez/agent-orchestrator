@@ -1,0 +1,159 @@
+package session
+
+import (
+	"context"
+	"fmt"
+	"path"
+	"sort"
+	"strings"
+
+	"golang.org/x/sync/errgroup"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
+)
+
+// ProjectOverlap is one pair of live sessions that changed the same paths.
+type ProjectOverlap struct {
+	SessionA domain.SessionID
+	SessionB domain.SessionID
+	Paths    []string
+}
+
+// ProjectOverlapResult is the derived collision radar for one project.
+type ProjectOverlapResult struct {
+	ProjectID           domain.ProjectID
+	Overlaps            []ProjectOverlap
+	TruncatedSessionIDs []domain.SessionID
+}
+
+var defaultOverlapIgnoredBasenames = map[string]struct{}{
+	"Cargo.lock":        {},
+	"Gemfile.lock":      {},
+	"bun.lock":          {},
+	"bun.lockb":         {},
+	"composer.lock":     {},
+	"go.sum":            {},
+	"package-lock.json": {},
+	"pnpm-lock.yaml":    {},
+	"poetry.lock":       {},
+	"uv.lock":           {},
+	"yarn.lock":         {},
+}
+
+// ProjectOverlaps computes overlap from base-relative workspace manifests.
+// The manifest cache is invalidated by workspace-change events, so this read
+// shares Git work with the Files inspector without storing derived status.
+func (s *Service) ProjectOverlaps(ctx context.Context, projectID domain.ProjectID) (ProjectOverlapResult, error) {
+	project, found, err := s.store.GetProject(ctx, string(projectID))
+	if err != nil {
+		return ProjectOverlapResult{}, fmt.Errorf("get project %s: %w", projectID, err)
+	}
+	if !found {
+		return ProjectOverlapResult{}, apierr.NotFound("PROJECT_NOT_FOUND", "Unknown project")
+	}
+	records, err := s.store.ListSessions(ctx, projectID)
+	if err != nil {
+		return ProjectOverlapResult{}, fmt.Errorf("list project sessions: %w", err)
+	}
+	active := records[:0]
+	for _, record := range records {
+		if record.IsTerminated || record.IsTaskPreparation || strings.TrimSpace(record.Metadata.WorkspacePath) == "" {
+			continue
+		}
+		active = append(active, record)
+	}
+	sort.Slice(active, func(i, j int) bool { return active[i].ID < active[j].ID })
+
+	manifests := make([]WorkspaceManifest, len(active))
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(4)
+	for i := range active {
+		i := i
+		group.Go(func() error {
+			manifest, readErr := s.GetWorkspaceManifest(groupCtx, active[i].ID)
+			if readErr != nil {
+				return fmt.Errorf("read workspace manifest for %s: %w", active[i].ID, readErr)
+			}
+			manifests[i] = manifest
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return ProjectOverlapResult{}, err
+	}
+	bySession := make(map[domain.SessionID]WorkspaceManifest, len(manifests))
+	for _, manifest := range manifests {
+		bySession[manifest.SessionID] = manifest
+	}
+	return projectOverlapsFromManifests(projectID, bySession, project.Config.CollisionRadar.IgnorePaths), nil
+}
+
+func projectOverlapsFromManifests(projectID domain.ProjectID, manifests map[domain.SessionID]WorkspaceManifest, ignored []string) ProjectOverlapResult {
+	result := ProjectOverlapResult{
+		ProjectID:           projectID,
+		Overlaps:            make([]ProjectOverlap, 0),
+		TruncatedSessionIDs: make([]domain.SessionID, 0),
+	}
+	ids := make([]domain.SessionID, 0, len(manifests))
+	pathsBySession := make(map[domain.SessionID]map[string]struct{}, len(manifests))
+	for id, manifest := range manifests {
+		ids = append(ids, id)
+		if manifest.Truncated {
+			result.TruncatedSessionIDs = append(result.TruncatedSessionIDs, id)
+		}
+		paths := make(map[string]struct{}, len(manifest.Files))
+		for _, file := range manifest.Files {
+			for _, changedPath := range []string{file.Path, file.PreviousPath} {
+				changedPath = path.Clean(changedPath)
+				if changedPath == "." || overlapPathIgnored(changedPath, ignored) {
+					continue
+				}
+				paths[changedPath] = struct{}{}
+			}
+		}
+		pathsBySession[id] = paths
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	sort.Slice(result.TruncatedSessionIDs, func(i, j int) bool { return result.TruncatedSessionIDs[i] < result.TruncatedSessionIDs[j] })
+	for i, first := range ids {
+		for _, second := range ids[i+1:] {
+			shared := intersectOverlapPaths(pathsBySession[first], pathsBySession[second])
+			if len(shared) == 0 {
+				continue
+			}
+			result.Overlaps = append(result.Overlaps, ProjectOverlap{SessionA: first, SessionB: second, Paths: shared})
+		}
+	}
+	return result
+}
+
+func overlapPathIgnored(changedPath string, configured []string) bool {
+	if _, ignored := defaultOverlapIgnoredBasenames[path.Base(changedPath)]; ignored {
+		return true
+	}
+	for _, ignored := range configured {
+		if strings.ContainsRune(ignored, '/') {
+			if changedPath == ignored {
+				return true
+			}
+		} else if path.Base(changedPath) == ignored {
+			return true
+		}
+	}
+	return false
+}
+
+func intersectOverlapPaths(first, second map[string]struct{}) []string {
+	if len(first) > len(second) {
+		first, second = second, first
+	}
+	shared := make([]string, 0)
+	for changedPath := range first {
+		if _, ok := second[changedPath]; ok {
+			shared = append(shared, changedPath)
+		}
+	}
+	sort.Strings(shared)
+	return shared
+}

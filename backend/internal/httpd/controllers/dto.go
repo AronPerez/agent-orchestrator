@@ -299,6 +299,23 @@ type GetProjectResponse struct {
 	Project ProjectOrDegraded `json:"project"`
 }
 
+// ProjectOverlapResponse identifies two active sessions changing the same
+// base-relative project paths.
+type ProjectOverlapResponse struct {
+	SessionA domain.SessionID `json:"sessionA"`
+	SessionB domain.SessionID `json:"sessionB"`
+	Paths    []string         `json:"paths"`
+}
+
+// ProjectOverlapsResponse is the derived collision-radar read model for one
+// project. TruncatedSessionIDs names manifests that may make the result
+// incomplete without turning an otherwise useful read into an error.
+type ProjectOverlapsResponse struct {
+	ProjectID           domain.ProjectID         `json:"projectId"`
+	Overlaps            []ProjectOverlapResponse `json:"overlaps"`
+	TruncatedSessionIDs []domain.SessionID       `json:"truncatedSessionIds"`
+}
+
 // ProjectOrDegraded is the discriminated `project` field: exactly one of
 // Project/Degraded is set. It marshals as whichever is present (so the handler
 // emits the right object) and exposes the oneOf variants to the spec reflector

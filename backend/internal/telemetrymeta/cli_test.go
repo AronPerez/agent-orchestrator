@@ -15,6 +15,7 @@ func TestIsRoutineInternalCLICommandNormalizesLegacyShapes(t *testing.T) {
 		"AO HOOKS",
 		"ao hooks claude-code post-tool-use",
 		"ao session get sess-123",
+		"ao session overlaps",
 		"ao project ls",
 		"ao pty-host session-1",
 		"ao unreal-provider /tmp/config.json",
