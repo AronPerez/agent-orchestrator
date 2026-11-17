@@ -104,13 +104,14 @@ func (s *Store) ListDecisionEntries(ctx context.Context, callID string) ([]domai
 	return decisionEntriesFromGen(rows), nil
 }
 
-// ListDecisionCallsByOwner returns one session's calls on one machine, newest first.
-func (s *Store) ListDecisionCallsByOwner(ctx context.Context, origin string, owner domain.SessionID, limit int) ([]domain.DecisionCall, error) {
-	rows, err := s.qr.ListDecisionCallsByOwner(ctx, gen.ListDecisionCallsByOwnerParams{
-		Origin: origin, OwnerSessionID: string(owner), Limit: int64(limit),
+// ListDecisionCallsForSession returns calls owned by or delivered to one local
+// session, newest first.
+func (s *Store) ListDecisionCallsForSession(ctx context.Context, origin string, session domain.SessionID, limit int) ([]domain.DecisionCall, error) {
+	rows, err := s.qr.ListDecisionCallsForSession(ctx, gen.ListDecisionCallsForSessionParams{
+		Origin: origin, SessionID: string(session), ResultLimit: int64(limit),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("list decision calls by owner: %w", err)
+		return nil, fmt.Errorf("list decision calls for session: %w", err)
 	}
 	return decisionCallsFromGen(rows)
 }

@@ -93,22 +93,21 @@ func (q *Queries) GetDecisionCall(ctx context.Context, callID string) (DecisionC
 	return i, err
 }
 
-const listDecisionCallsByOwner = `-- name: ListDecisionCallsByOwner :many
+const listDecisionCallsByState = `-- name: ListDecisionCallsByState :many
 SELECT call_id, origin, project_id, stream_session_id, stream_name, owner_session_id, state, delivery, retired, raised_at, last_wall, last_counter, body, search_text
 FROM decision_calls
-WHERE origin = ? AND owner_session_id = ?
-ORDER BY raised_at DESC, call_id DESC
+WHERE state = ?
+ORDER BY raised_at, call_id
 LIMIT ?
 `
 
-type ListDecisionCallsByOwnerParams struct {
-	Origin         string
-	OwnerSessionID string
-	Limit          int64
+type ListDecisionCallsByStateParams struct {
+	State string
+	Limit int64
 }
 
-func (q *Queries) ListDecisionCallsByOwner(ctx context.Context, arg ListDecisionCallsByOwnerParams) ([]DecisionCall, error) {
-	rows, err := q.db.QueryContext(ctx, listDecisionCallsByOwner, arg.Origin, arg.OwnerSessionID, arg.Limit)
+func (q *Queries) ListDecisionCallsByState(ctx context.Context, arg ListDecisionCallsByStateParams) ([]DecisionCall, error) {
+	rows, err := q.db.QueryContext(ctx, listDecisionCallsByState, arg.State, arg.Limit)
 	if err != nil {
 		return nil, err
 	}
@@ -145,21 +144,26 @@ func (q *Queries) ListDecisionCallsByOwner(ctx context.Context, arg ListDecision
 	return items, nil
 }
 
-const listDecisionCallsByState = `-- name: ListDecisionCallsByState :many
+const listDecisionCallsForSession = `-- name: ListDecisionCallsForSession :many
 SELECT call_id, origin, project_id, stream_session_id, stream_name, owner_session_id, state, delivery, retired, raised_at, last_wall, last_counter, body, search_text
 FROM decision_calls
-WHERE state = ?
-ORDER BY raised_at, call_id
-LIMIT ?
+WHERE origin = ?1
+  AND (
+    owner_session_id = ?2
+    OR json_extract(body, '$.deliveredTo') = ?2
+  )
+ORDER BY raised_at DESC, call_id DESC
+LIMIT ?3
 `
 
-type ListDecisionCallsByStateParams struct {
-	State string
-	Limit int64
+type ListDecisionCallsForSessionParams struct {
+	Origin      string
+	SessionID   string
+	ResultLimit int64
 }
 
-func (q *Queries) ListDecisionCallsByState(ctx context.Context, arg ListDecisionCallsByStateParams) ([]DecisionCall, error) {
-	rows, err := q.db.QueryContext(ctx, listDecisionCallsByState, arg.State, arg.Limit)
+func (q *Queries) ListDecisionCallsForSession(ctx context.Context, arg ListDecisionCallsForSessionParams) ([]DecisionCall, error) {
+	rows, err := q.db.QueryContext(ctx, listDecisionCallsForSession, arg.Origin, arg.SessionID, arg.ResultLimit)
 	if err != nil {
 		return nil, err
 	}
