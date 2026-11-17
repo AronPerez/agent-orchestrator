@@ -22,16 +22,37 @@ type deliveredMessage struct {
 
 type fakeDecisionMessenger struct {
 	messages []deliveredMessage
+	attempts []domain.SessionID
 	errs     map[domain.SessionID]error
 }
 
 func (m *fakeDecisionMessenger) DeliverAsPerson(_ context.Context, id domain.SessionID, message string, at time.Time) error {
+	m.attempts = append(m.attempts, id)
 	if err := m.errs[id]; err != nil {
 		delete(m.errs, id)
 		return err
 	}
 	m.messages = append(m.messages, deliveredMessage{session: id, text: message, at: at})
 	return nil
+}
+
+type blockingDecisionMessenger struct {
+	*fakeDecisionMessenger
+	block   domain.SessionID
+	started chan struct{}
+	release chan struct{}
+}
+
+func (m *blockingDecisionMessenger) DeliverAsPerson(ctx context.Context, id domain.SessionID, message string, at time.Time) error {
+	if id == m.block {
+		m.started <- struct{}{}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-m.release:
+		}
+	}
+	return m.fakeDecisionMessenger.DeliverAsPerson(ctx, id, message, at)
 }
 
 type failingAppendStore struct {
@@ -272,7 +293,25 @@ func TestDelivererUsesDismissalEntryAfterTheCallClosed(t *testing.T) {
 	}
 }
 
-func TestDelivererFallsBackOnlyAfterTheOwnerIsConfirmedExited(t *testing.T) {
+func TestDelivererLetsTheMessengerVerifyAStaleExitBeforeFallback(t *testing.T) {
+	fixture := newDecisionService(t)
+	call := answeredCall(t, fixture, fixture.w1)
+	owner, ok, err := fixture.store.GetSession(context.Background(), fixture.w1)
+	if err != nil || !ok {
+		t.Fatalf("GetSession() = %+v, %v, %v", owner, ok, err)
+	}
+	owner.Activity.State = domain.ActivityExited
+	if err := fixture.store.UpdateSession(context.Background(), owner); err != nil {
+		t.Fatal(err)
+	}
+	messenger := newFakeDecisionMessenger()
+	pending, err := newTestDeliverer(fixture.store, messenger, "h_a").RunDue(context.Background())
+	if err != nil || pending != 0 || len(messenger.messages) != 1 || messenger.messages[0].session != fixture.w1 {
+		t.Fatalf("stale exit pending=%d messages=%+v attempts=%v err=%v call=%+v", pending, messenger.messages, messenger.attempts, err, call)
+	}
+}
+
+func TestDelivererFallsBackOnlyAfterTheMessengerConfirmsExit(t *testing.T) {
 	fixture := newDecisionService(t)
 	call := answeredCall(t, fixture, fixture.w1)
 	messenger := newFakeDecisionMessenger()
@@ -291,10 +330,42 @@ func TestDelivererFallsBackOnlyAfterTheOwnerIsConfirmedExited(t *testing.T) {
 	if err := fixture.store.UpdateSession(context.Background(), owner); err != nil {
 		t.Fatal(err)
 	}
+	messenger.errs[fixture.w1] = fmt.Errorf("%w: confirmed stopped", ErrSessionEnded)
 	pending, err = deliverer.RunDue(context.Background())
 	if err != nil || pending != 0 || len(messenger.messages) != 1 || messenger.messages[0].session != fixture.orch ||
-		!strings.HasPrefix(messenger.messages[0].text, "Decision on a call raised by") {
-		t.Fatalf("confirmed exit pending=%d messages=%+v err=%v call=%+v", pending, messenger.messages, err, call)
+		!strings.HasPrefix(messenger.messages[0].text, "Decision on a call raised by") ||
+		len(messenger.attempts) != 3 || messenger.attempts[1] != fixture.w1 || messenger.attempts[2] != fixture.orch {
+		t.Fatalf("confirmed exit pending=%d messages=%+v attempts=%v err=%v call=%+v", pending, messenger.messages, messenger.attempts, err, call)
+	}
+}
+
+func TestFallbackRecipientCanRecordOutcomeWhileDeliveryIsInFlight(t *testing.T) {
+	fixture := newDecisionService(t)
+	call := answeredCall(t, fixture, fixture.w1)
+	terminateDecisionSession(t, fixture, fixture.w1)
+	messenger := &blockingDecisionMessenger{
+		fakeDecisionMessenger: newFakeDecisionMessenger(),
+		block:                 fixture.orch, started: make(chan struct{}, 1), release: make(chan struct{}),
+	}
+	deliverer := newTestDelivererWithAuthorizer(fixture.store, messenger, "h_a", fixture.service)
+	type deliveryResult struct {
+		pending int
+		err     error
+	}
+	done := make(chan deliveryResult, 1)
+	go func() {
+		pending, err := deliverer.RunDue(context.Background())
+		done <- deliveryResult{pending: pending, err: err}
+	}()
+	<-messenger.started
+	completed, outcomeErr := fixture.service.RecordOutcome(context.Background(), Actor{Session: fixture.orch}, call.ID, OutcomeInput{Text: "Carried it out"})
+	close(messenger.release)
+	result := <-done
+	if outcomeErr != nil {
+		t.Fatalf("RecordOutcome while delivery blocked: %v", outcomeErr)
+	}
+	if completed.State != domain.DecisionStateDone || result.err != nil || result.pending != 0 {
+		t.Fatalf("completed=%+v delivery=%+v", completed, result)
 	}
 }
 
@@ -313,10 +384,15 @@ func newFakeDecisionMessenger() *fakeDecisionMessenger {
 }
 
 func newTestDeliverer(store DeliveryStore, messenger Messenger, hostID string) *Deliverer {
+	return newTestDelivererWithAuthorizer(store, messenger, hostID, nil)
+}
+
+func newTestDelivererWithAuthorizer(store DeliveryStore, messenger Messenger, hostID string, authorizer FallbackOutcomeAuthorizer) *Deliverer {
 	nextID := 0
 	return NewDeliverer(DelivererDeps{
 		Store: store, Messenger: messenger, HostID: hostID,
-		Now: func() time.Time { return time.UnixMilli(5_000_000).UTC() },
+		FallbackAuthorizer: authorizer,
+		Now:                func() time.Time { return time.UnixMilli(5_000_000).UTC() },
 		NewID: func(prefix string) string {
 			nextID++
 			return fmt.Sprintf("%stest-%d", prefix, nextID)

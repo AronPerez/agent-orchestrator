@@ -23,6 +23,13 @@ type Messenger interface {
 	DeliverAsPerson(context.Context, domain.SessionID, string, time.Time) error
 }
 
+// FallbackOutcomeAuthorizer lets a selected fallback session record an outcome
+// while its accepted delivery is still waiting to become durable in the ledger.
+type FallbackOutcomeAuthorizer interface {
+	AuthorizeFallbackOutcome(string, domain.SessionID)
+	RevokeFallbackOutcome(string, domain.SessionID)
+}
+
 // DeliveryStore is the durable decision-delivery boundary.
 type DeliveryStore interface {
 	GetSession(context.Context, domain.SessionID) (domain.SessionRecord, bool, error)
@@ -40,6 +47,8 @@ type DelivererDeps struct {
 	NewID      func(prefix string) string
 	RetryDelay time.Duration
 	Log        *slog.Logger
+	// FallbackAuthorizer is shared with the decision service in daemon wiring.
+	FallbackAuthorizer FallbackOutcomeAuthorizer
 }
 
 // Deliverer sends pending standing answers and records their delivery state.
@@ -51,6 +60,7 @@ type Deliverer struct {
 	newID      func(string) string
 	retryDelay time.Duration
 	log        *slog.Logger
+	fallback   FallbackOutcomeAuthorizer
 	wake       chan struct{}
 	mu         sync.Mutex
 }
@@ -72,7 +82,7 @@ func NewDeliverer(d DelivererDeps) *Deliverer {
 	return &Deliverer{
 		store: d.Store, messenger: d.Messenger, hostID: d.HostID,
 		now: d.Now, newID: d.NewID, retryDelay: d.RetryDelay, log: d.Log,
-		wake: make(chan struct{}, 1),
+		fallback: d.FallbackAuthorizer, wake: make(chan struct{}, 1),
 	}
 }
 
@@ -170,7 +180,7 @@ func (d *Deliverer) deliver(ctx context.Context, call domain.DecisionCall) (bool
 		d.logFailure(call.ID, "load owner", err)
 		return true, false
 	}
-	ended := !found || owner.IsTerminated || owner.Activity.State == domain.ActivityExited
+	ended := !found || owner.IsTerminated
 	if !ended {
 		err = d.messenger.DeliverAsPerson(ctx, owner.ID, DeliveryMessage(call, false), d.now().UTC())
 		switch {
@@ -211,18 +221,32 @@ func (d *Deliverer) deliverFallback(ctx context.Context, call domain.DecisionCal
 			ForEntry: call.StandingEntryID, Status: domain.DecisionDeliveredNoSession,
 		}), false
 	}
+	if d.fallback != nil {
+		d.fallback.AuthorizeFallbackOutcome(call.ID, orchestrator.ID)
+	}
+	revoke := func() {
+		if d.fallback != nil {
+			d.fallback.RevokeFallbackOutcome(call.ID, orchestrator.ID)
+		}
+	}
 	err := d.messenger.DeliverAsPerson(ctx, orchestrator.ID, DeliveryMessage(call, true), d.now().UTC())
 	switch {
 	case err == nil:
-		return !d.record(ctx, call, domain.DecisionDeliveredPayload{
+		recorded := d.record(ctx, call, domain.DecisionDeliveredPayload{
 			ForEntry: call.StandingEntryID, Status: domain.DecisionDeliveredSent,
 			SessionID: orchestrator.ID, SessionName: sessionName(orchestrator), Fallback: true,
-		}), true
+		})
+		if recorded {
+			revoke()
+		}
+		return !recorded, true
 	case errors.Is(err, ErrSessionEnded):
+		revoke()
 		return !d.record(ctx, call, domain.DecisionDeliveredPayload{
 			ForEntry: call.StandingEntryID, Status: domain.DecisionDeliveredNoSession,
 		}), false
 	default:
+		revoke()
 		d.logFailure(call.ID, "send to fallback orchestrator", err)
 		return true, false
 	}

@@ -51,6 +51,8 @@ type Service struct {
 	newID        func(string) string
 	onAppended   func(domain.DecisionEntry)
 	mutateMu     sync.Mutex
+	fallbackMu   sync.RWMutex
+	fallback     map[string]domain.SessionID
 }
 
 // New constructs a decision service from its daemon-owned dependencies.
@@ -73,6 +75,7 @@ func New(d Deps) *Service {
 	return &Service{
 		store: d.Store, hostID: d.HostID, machineLabel: d.MachineLabel,
 		now: d.Now, newID: d.NewID, onAppended: d.OnAppended,
+		fallback: make(map[string]domain.SessionID),
 	}
 }
 
@@ -263,7 +266,11 @@ func (s *Service) RecordOutcome(ctx context.Context, actor Actor, callID string,
 	if err := domain.ValidateDecisionOutcome(payload); err != nil {
 		return domain.DecisionCall{}, invalidDecision(err)
 	}
-	return s.append(ctx, actor, call.ID, domain.DecisionKindOutcome, payload)
+	completed, err := s.append(ctx, actor, call.ID, domain.DecisionKindOutcome, payload)
+	if err == nil && actor.Session != "" {
+		s.RevokeFallbackOutcome(call.ID, actor.Session)
+	}
+	return completed, err
 }
 
 // Withdraw closes a pending call at the owning session's request.
@@ -417,7 +424,31 @@ func (s *Service) owns(call domain.DecisionCall, session domain.SessionID) bool 
 }
 
 func (s *Service) mayClose(call domain.DecisionCall, session domain.SessionID) bool {
-	return call.Origin == s.hostID && (call.Raised.OwnerSessionID == session || call.DeliveredTo == session)
+	return call.Origin == s.hostID && (call.Raised.OwnerSessionID == session || call.DeliveredTo == session || s.fallbackOutcomeAllowed(call.ID, session))
+}
+
+// AuthorizeFallbackOutcome grants the selected fallback session temporary
+// authority while delivery acceptance and the durable delivery entry are in flight.
+func (s *Service) AuthorizeFallbackOutcome(callID string, session domain.SessionID) {
+	s.fallbackMu.Lock()
+	defer s.fallbackMu.Unlock()
+	s.fallback[callID] = session
+}
+
+// RevokeFallbackOutcome removes a matching temporary fallback grant. A grant
+// for a newer fallback recipient is left intact.
+func (s *Service) RevokeFallbackOutcome(callID string, session domain.SessionID) {
+	s.fallbackMu.Lock()
+	defer s.fallbackMu.Unlock()
+	if s.fallback[callID] == session {
+		delete(s.fallback, callID)
+	}
+}
+
+func (s *Service) fallbackOutcomeAllowed(callID string, session domain.SessionID) bool {
+	s.fallbackMu.RLock()
+	defer s.fallbackMu.RUnlock()
+	return session != "" && s.fallback[callID] == session
 }
 
 func personOnly() error {

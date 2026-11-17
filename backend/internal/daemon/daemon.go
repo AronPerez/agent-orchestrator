@@ -1182,14 +1182,18 @@ func Run(buildVersion string) (retErr error) {
 	if identityErr != nil {
 		log.Warn("could not establish host identity; /api/v1/identity will report unimplemented", "error", identityErr)
 	}
-	decisionDeliverer := decisionsvc.NewDeliverer(decisionsvc.DelivererDeps{
-		Store: store, Messenger: decisionMessenger{sessions: decisionSessions}, HostID: hostIdentity.HostID, Log: log,
-	})
+	var decisionDeliverer *decisionsvc.Deliverer
 	decisionSvc := decisionsvc.New(decisionsvc.Deps{
 		Store: store, HostID: hostIdentity.HostID,
 		OnAppended: func(domain.DecisionEntry) {
-			decisionDeliverer.Wake()
+			if decisionDeliverer != nil {
+				decisionDeliverer.Wake()
+			}
 		},
+	})
+	decisionDeliverer = decisionsvc.NewDeliverer(decisionsvc.DelivererDeps{
+		Store: store, Messenger: decisionMessenger{sessions: decisionSessions}, HostID: hostIdentity.HostID, Log: log,
+		FallbackAuthorizer: decisionSvc,
 	})
 	decisionDeliveryDone := decisionDeliverer.Start(ctx)
 	defer func() {
