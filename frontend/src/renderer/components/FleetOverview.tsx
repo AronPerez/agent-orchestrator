@@ -2,7 +2,10 @@ import {
 	attentionZone,
 	buildFleetTree,
 	getDisplayStatusLabel,
+	parseFleetCollapsePreferences,
+	resolveFleetCollapsedKeys,
 	type AttentionZone,
+	type FleetCollapsePreferences,
 	type FleetMachineNode,
 	type FleetProjectNode,
 	type FleetRollup,
@@ -59,6 +62,23 @@ type ScmRollup = {
 };
 
 const rollupOrder: AttentionZone[] = ["action", "merge", "pending", "working", "done"];
+const FLEET_COLLAPSE_STORAGE_KEY = "ao.fleet.branch-state.v1";
+
+function readCollapsePreferences(): FleetCollapsePreferences {
+	try {
+		return parseFleetCollapsePreferences(window.localStorage.getItem(FLEET_COLLAPSE_STORAGE_KEY));
+	} catch {
+		return {};
+	}
+}
+
+function writeCollapsePreferences(preferences: FleetCollapsePreferences): void {
+	try {
+		window.localStorage.setItem(FLEET_COLLAPSE_STORAGE_KEY, JSON.stringify(preferences));
+	} catch {
+		// A full or unavailable preference store should never make the fleet unusable.
+	}
+}
 
 function attentionPriority(rollup: FleetRollup, zone?: AttentionZone): number {
 	const count = (candidate: AttentionZone) => rollup[candidate] + (zone === candidate ? 1 : 0);
@@ -232,7 +252,7 @@ export function FleetOverview({
 	onOpen: (session: WorkspaceSession, hostId?: string) => void;
 }) {
 	const { t } = useTranslation();
-	const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+	const [collapsePreferences, setCollapsePreferences] = useState<FleetCollapsePreferences>(readCollapsePreferences);
 	const [showArchived, setShowArchived] = useState(false);
 	const [focusedKey, setFocusedKey] = useState<string>();
 	const rowRefs = useRef(new Map<string, HTMLElement>());
@@ -282,6 +302,10 @@ export function FleetOverview({
 		() => remoteHosts.filter((host) => !scopedHostIds.has(host.hostId)),
 		[remoteHosts, scopedHostIds],
 	);
+	const collapsed = useMemo(
+		() => resolveFleetCollapsedKeys(projects, collapsePreferences),
+		[collapsePreferences, projects],
+	);
 	const rows = useMemo(() => flattenRows(projects, unscopedHosts, collapsed), [projects, unscopedHosts, collapsed]);
 	const scmRollups = useMemo(() => {
 		const values = new Map<string, ScmRollup>();
@@ -310,10 +334,9 @@ export function FleetOverview({
 	}, [activeFocusKey, focusedKey]);
 
 	const toggle = (key: string) => {
-		setCollapsed((current) => {
-			const next = new Set(current);
-			if (next.has(key)) next.delete(key);
-			else next.add(key);
+		setCollapsePreferences((current) => {
+			const next = { ...current, [key]: !collapsed.has(key) };
+			writeCollapsePreferences(next);
 			return next;
 		});
 	};

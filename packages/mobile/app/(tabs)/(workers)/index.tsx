@@ -18,6 +18,7 @@ import { setNewTaskHandler } from "../../../lib/newTaskAction";
 import { useScrollToTopOnReselect } from "../../../lib/boardTabReselect";
 import { Button, EmptyState } from "../../../lib/ui";
 import { WorkerBoardList, type BoardRow } from "../../../lib/worker-board-list";
+import { FleetTreeList, type MobileFleetRow } from "../../../lib/fleet-tree-list";
 import { useMenuRowWidths } from "../../../lib/useMenuRowWidth";
 import type { ArchiveSource } from "../../../lib/archive/useArchivedSessions";
 import { isArchived } from "../../../lib/agentsView";
@@ -53,7 +54,7 @@ export default function FleetScreen() {
 	const largeTitle = useLargeTitle(boardTitle("(workers)"));
 	const tabBar = useTabBarFrost();
 	const headerOverlap = useHeaderOverlap();
-	const { config, configured, configResolved, connection, loading, error, refreshAll, refreshHost, allSessions, allProjects, hostStates, cloud, notificationsUnread, phoneNetwork } = useApp();
+	const { config, configured, configResolved, connection, loading, error, refreshAll, refreshHost, allSessions, allProjects, allOrchestrators, hostStates, cloud, notificationsUnread, phoneNetwork } = useApp();
 	const { status: cloudStatus, notificationsUnread: cloudUnread, watch: watchCloud, sessionsLoaded: cloudSessionsLoaded, sessionsError: cloudSessionsError, refreshSessions: refreshCloudSessions } = useCloud();
 	// Cloud's own list answering is enough to draw the board: offline machines
 	// re-racing in the background must not hold it on a spinner.
@@ -108,13 +109,19 @@ export default function FleetScreen() {
 	// The tab bar's New task button starts a task on the board's own machine
 	// and project filters while the board is the page in front.
 	useFocusEffect(useCallback(() => setNewTaskHandler(spawnWorker), [spawnWorker]));
-	const listRef = useRef<FlatList<BoardRow>>(null);
-	useScrollToTopOnReselect("(workers)", listRef);
+	const boardListRef = useRef<FlatList<BoardRow>>(null);
+	const fleetListRef = useRef<FlatList<MobileFleetRow>>(null);
 
 	const projectSessions = useMemo(
 		() => filterWorkersByEnvironmentAndProject(allSessions, workerEnvironmentId, workerProjectId, allProjects),
 		[allSessions, allProjects, workerEnvironmentId, workerProjectId],
 	);
+	const showFleetHierarchy = workerEnvironmentId === ALL_WORKER_ENVIRONMENTS
+		&& workerProjectId === ALL_WORKER_PROJECTS
+		&& allProjects.length > 0
+		&& (projectSessions.some((session) => !isArchived(session))
+			|| allOrchestrators.some((orchestrator) => orchestrator.isTerminal !== true && orchestrator.hasRuntime !== false));
+	useScrollToTopOnReselect("(workers)", showFleetHierarchy ? fleetListRef : boardListRef);
 	// Each machine that pages its archive, narrowed by the same machine and
 	// project filters as the live list. Keyed on the facts it reads, because
 	// hostStates is a new array on every poll.
@@ -223,8 +230,6 @@ export default function FleetScreen() {
 					: workerProjectId !== ALL_WORKER_PROJECTS ? "project"
 						: workerEnvironmentId !== ALL_WORKER_ENVIRONMENTS ? "environment"
 							: "idle";
-	const [boardEmpty, setBoardEmpty] = useState(false);
-
 	// Inside the list rather than above it: the header is translucent and the page
 	// is laid out under it, so the list has to be the page's first view. Above the
 	// rows rather than inside ListEmptyComponent, because the case the banner
@@ -242,6 +247,59 @@ export default function FleetScreen() {
 			) : null}
 		</>
 	);
+	const listEmpty = emptyView === "unpaired" ? (
+		<UnpairedState />
+	) : emptyView === "loading" ? (
+		<View style={styles.center}>
+			<ActivityIndicator color={t.accent} />
+		</View>
+	) : emptyView === "cloud" ? (
+		<EmptyState
+			icon="cloud"
+			title="Couldn't load cloud workers"
+			message={cloudSessionsError ?? undefined}
+			action={<Button title="Retry" icon="refresh-cw" variant="secondary" onPress={() => void refreshCloudSessions()} />}
+		/>
+	) : emptyView === "machine" && selectedHost ? (
+		<WorkerMachineState
+			host={selectedHost}
+			linkHealth={classifyLink(selectedHost.linkTracker ?? EMPTY_LINK_TRACKER, phoneNetwork, Date.now())}
+			environments={environments}
+			onSelectEnvironment={selectEnvironment}
+			onRetry={onRefresh}
+		/>
+	) : emptyView === "error" ? (
+		<EmptyState
+			icon={hostStates.length > 1 ? "unplug" : failure.icon}
+			title={hostStates.length > 1 ? "No machines connected" : failure.title}
+			message={hostStates.length > 1 ? undefined : failure.hint}
+			action={(
+				<View style={styles.errorActions}>
+					<Button title="Retry" icon="refresh-cw" variant="secondary" onPress={onRefresh} />
+					<Button title="Scan" icon="qrScanner" variant="primary" onPress={() => router.push("/pair")} />
+				</View>
+			)}
+		/>
+	) : emptyView === "project" ? (
+		<EmptyState
+			icon="folder"
+			title={`No workers in ${selectedProjectLabel}`}
+			message="Choose another project from the filter menu."
+		/>
+	) : emptyView === "environment" ? (
+		<EmptyState
+			icon="monitor"
+			title={`No workers on ${selectedEnvironmentLabel ?? "this machine"}`}
+			message="Choose another machine from the filter menu."
+		/>
+	) : (
+		<WorkersIdleState
+			machines={fleet.machines}
+			connection={fleet.connection}
+			lastFinishedAt={lastFinishedAt}
+			onNewAgent={spawnWorker}
+		/>
+	);
 
 	return (
 		<View style={styles.screen}>
@@ -249,6 +307,27 @@ export default function FleetScreen() {
 			    loading included: the large title binds to the first scroll view the
 			    page shows, and a placeholder swapped out for the list left the title
 			    tracking a view that was gone, so it stayed expanded over the rows. */}
+			{showFleetHierarchy ? (
+				<FleetTreeList
+					onScroll={largeTitle.onScroll}
+					projects={allProjects}
+					sessions={projectSessions}
+					orchestrators={allOrchestrators}
+					hosts={[...hostStates, ...(cloud ? [cloud] : [])].map((host) => ({
+						hostId: host.hostId,
+						name: host.name,
+						connection: host.connection,
+					}))}
+					listRef={fleetListRef}
+					contentBottomInset={space.xxl + tabBar.inset}
+					contentInsetAdjustmentBehavior="automatic"
+					overlayTopInset={headerOverlap + largeTitle.topInset}
+					refreshing={refreshing}
+					onRefresh={onRefresh}
+					ListHeaderComponent={listHeader}
+					ListEmptyComponent={listEmpty}
+				/>
+			) : (
 			<WorkerBoardList
 				onScroll={largeTitle.onScroll}
 				key={boardIdentityKey}
@@ -260,7 +339,7 @@ export default function FleetScreen() {
 				archiveFooter
 				identityKey={boardIdentityKey}
 				showMachine={!boardMachine}
-				listRef={listRef}
+				listRef={boardListRef}
 				// iOS insets the list by the tab bar already. Android pads it clear
 				// of the floating New button, and of the clear tab bar it runs
 				// on under.
@@ -270,66 +349,9 @@ export default function FleetScreen() {
 				refreshing={refreshing}
 				onRefresh={onRefresh}
 				ListHeaderComponent={listHeader}
-				onEmptyChange={setBoardEmpty}
-				ListEmptyComponent={
-					emptyView === "unpaired" ? (
-						<UnpairedState />
-					) : emptyView === "loading" ? (
-						<View style={styles.center}>
-							<ActivityIndicator color={t.accent} />
-						</View>
-					) : emptyView === "cloud" ? (
-						<EmptyState
-							icon="cloud"
-							title="Couldn't load cloud workers"
-							message={cloudSessionsError ?? undefined}
-							action={<Button title="Retry" icon="refresh-cw" variant="secondary" onPress={() => void refreshCloudSessions()} />}
-						/>
-					) : emptyView === "machine" && selectedHost ? (
-						<WorkerMachineState
-							host={selectedHost}
-							linkHealth={classifyLink(selectedHost.linkTracker ?? EMPTY_LINK_TRACKER, phoneNetwork, Date.now())}
-							environments={environments}
-							onSelectEnvironment={selectEnvironment}
-							onRetry={onRefresh}
-						/>
-					) : emptyView === "error" ? (
-						<EmptyState
-							icon={hostStates.length > 1 ? "unplug" : failure.icon}
-							title={hostStates.length > 1 ? "No machines connected" : failure.title}
-							message={hostStates.length > 1 ? undefined : failure.hint}
-							action={
-								<View style={styles.errorActions}>
-									<Button title="Retry" icon="refresh-cw" variant="secondary" onPress={onRefresh} />
-									{/* Re-scanning is the only fix for a rotated password, and the
-									    fastest one for a moved/renamed host — so it belongs beside
-									    Retry rather than three taps away in Settings. */}
-									<Button title="Scan" icon="qrScanner" variant="primary" onPress={() => router.push("/pair")} />
-								</View>
-							}
-						/>
-					) : emptyView === "project" ? (
-						<EmptyState
-							icon="folder"
-							title={`No workers in ${selectedProjectLabel}`}
-							message="Choose another project from the filter menu."
-						/>
-					) : emptyView === "environment" ? (
-						<EmptyState
-							icon="monitor"
-							title={`No workers on ${selectedEnvironmentLabel ?? "this machine"}`}
-							message="Choose another machine from the filter menu."
-						/>
-					) : (
-						<WorkersIdleState
-							machines={fleet.machines}
-							connection={fleet.connection}
-							lastFinishedAt={lastFinishedAt}
-							onNewAgent={spawnWorker}
-						/>
-					)
-				}
+				ListEmptyComponent={listEmpty}
 			/>
+			)}
 
 			{/* Over the rows and under what floats: the bars' frost. */}
 			{largeTitle.edge}

@@ -3,6 +3,8 @@ import {
 	buildFleetTree,
 	emptyFleetRollup,
 	flattenFleetSessions,
+	parseFleetCollapsePreferences,
+	resolveFleetCollapsedKeys,
 	fleetSessionKey,
 	type FleetTreeScope,
 } from "./fleet-tree";
@@ -174,5 +176,47 @@ describe("buildFleetTree", () => {
 			.toEqual([["manager", 0]]);
 		expect(flattenFleetSessions(machine.sessions, new Set()).map(({ node, depth }) => [node.session.id, depth]))
 			.toEqual([["manager", 0], ["worker", 1]]);
+	});
+
+	it("starts large qualified branches collapsed and lets remembered choices override the default", () => {
+		const sessions = Array.from({ length: 8 }, (_, index) =>
+			session(`worker-${index}`, "working"));
+		const project = buildFleetTree([scope("ao", "laptop", sessions)])[0]!;
+		const machine = project.machines[0]!;
+
+		const defaults = resolveFleetCollapsedKeys([project], {});
+		expect(defaults).toEqual(new Set([project.key, machine.key]));
+
+		const remembered = resolveFleetCollapsedKeys([project], {
+			[project.key]: false,
+			[machine.key]: true,
+		});
+		expect(remembered.has(project.key)).toBe(false);
+		expect(remembered.has(machine.key)).toBe(true);
+	});
+
+	it("defaults a large manager branch without conflating equal session ids on another machine", () => {
+		const manager = session("manager", "working");
+		const children = Array.from({ length: 8 }, (_, index) =>
+			session(`child-${index}`, "working", { parentSessionId: manager.id }));
+		const tree = buildFleetTree([
+			scope("ao", "laptop", [manager, ...children]),
+			scope("ao", "server", [session("manager", "working")]),
+		]);
+		const laptopManager = tree[0]!.machines[0]!.sessions[0]!;
+		const serverManager = tree[1]!.machines[0]!.sessions[0]!;
+
+		const collapsed = resolveFleetCollapsedKeys(tree, {});
+		expect(collapsed.has(laptopManager.key)).toBe(true);
+		expect(collapsed.has(serverManager.key)).toBe(false);
+		expect(laptopManager.key).not.toBe(serverManager.key);
+	});
+
+	it("accepts only bounded boolean collapse preferences from storage", () => {
+		expect(parseFleetCollapsePreferences(JSON.stringify({ a: true, b: false, ignored: "yes" })))
+			.toEqual({ a: true, b: false });
+		expect(parseFleetCollapsePreferences("not json")).toEqual({});
+		expect(parseFleetCollapsePreferences(JSON.stringify(Object.fromEntries(Array.from({ length: 2_001 }, (_, index) => [String(index), true])))))
+			.toEqual({});
 	});
 });
