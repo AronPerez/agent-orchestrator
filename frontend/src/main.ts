@@ -32,6 +32,7 @@ import {
 import {
 	setRendererSink,
 	setInstalledBuildStatus,
+	assertInstalledBuildRestartSafe,
 	startAutoUpdates,
 	ensureUpdatePrefs,
 	checkForUpdatesNow,
@@ -289,6 +290,7 @@ const installedArchive = process.platform === "linux" && process.env.APPIMAGE ? 
 const installedBuildDisk = app.isPackaged ? require("original-fs") as typeof import("node:fs") : undefined;
 const installedBuildGuard = installedBuildDisk ? new InstalledBuildGuard({
 	readIdentity: createArchiveIdentityReader(installedArchive, installedBuildDisk),
+	assertRestartSafe: assertInstalledBuildRestartSafe,
 	isIdle: async () => {
 		const port = daemonStatus.port;
 		if (chatDraftRisks.length > 0 || !port || !await readDaemonProbe(port, "readyz")) return false;
@@ -3852,9 +3854,10 @@ ipcMain.handle("updates:download", async (_event, requestId?: string) => {
 });
 ipcMain.handle("updates:install", (_event, confirmedVersion?: string) => quitAndInstallUpdate(confirmedVersion));
 // Retry after a failed macOS preparation: Squirrel can't reset a stalled staging
-// in-process, so restart AO like a manual quit-and-reopen. install-on-quit is
-// already off on the failed path, so quitting can't apply a half-prepared build.
+// in-process, so restart AO like a manual quit-and-reopen. An external build
+// still needs the native staging gate: disabling install-on-quit cannot disarm ShipIt.
 ipcMain.handle("updates:relaunch", () => {
+	assertInstalledBuildRestartSafe();
 	recordUpdateDiagnostic("retry-relaunch-requested");
 	preserveAgentsOnQuit = true;
 	app.relaunch();

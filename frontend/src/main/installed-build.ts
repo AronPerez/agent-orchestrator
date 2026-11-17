@@ -96,6 +96,7 @@ export class InstalledBuildGuard {
 		readIdentity(): Promise<string | null>;
 		isIdle(): Promise<boolean>;
 		onChange(status: InstalledBuildStatus | undefined): void;
+		assertRestartSafe(): void;
 		relaunch(): void;
 	}) {
 		this.running = deps.readIdentity();
@@ -105,6 +106,11 @@ export class InstalledBuildGuard {
 		if (JSON.stringify(this.status) === JSON.stringify(status)) return;
 		this.status = status;
 		this.deps.onChange(status);
+	}
+
+	private assertRestartSafe(): void {
+		try { this.deps.assertRestartSafe(); }
+		catch (error) { this.cancelRestart(); throw error; }
 	}
 
 	async canLoadRenderer(): Promise<boolean> {
@@ -156,6 +162,7 @@ export class InstalledBuildGuard {
 		}
 		const idle = await this.deps.isIdle().catch(() => false);
 		if (revision !== this.restartRevision || this.status?.identity !== target.identity) return;
+		this.assertRestartSafe();
 		if (mode === "when-idle") {
 			this.publish({ ...target, idle, restartWhenIdle: true });
 		} else if (!idle) {
@@ -165,6 +172,7 @@ export class InstalledBuildGuard {
 		if (!idle || this.restarting) return;
 		// Recheck the target after the asynchronous worker probe as well.
 		if (await this.deps.readIdentity() !== target.identity || revision !== this.restartRevision) return;
+		this.assertRestartSafe();
 		this.restarting = true;
 		try { this.deps.relaunch(); } catch (error) { this.restarting = false; throw error; }
 	}

@@ -36,6 +36,8 @@ export interface InstalledBuildStatus {
 	identity: string;
 	idle: boolean;
 	restartWhenIdle: boolean;
+	/** A native macOS update may still apply on exit despite the JS quit policy. */
+	restartBlocked?: "native-update-staged";
 }
 
 export interface UpdateStatus {

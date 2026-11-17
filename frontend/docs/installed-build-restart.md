@@ -35,9 +35,18 @@ outer file rather than the old mounted archive. Unpackaged development keeps
 its existing reload workflow.
 
 An installed-build notice overrides feed/download status even when automatic
-downloads are disabled. It disables updater install-on-quit so an older staged
-download cannot overwrite the external install. The sidebar opens the existing
-restart dialog; an idle board receives one automatic prompt per identity.
+downloads are disabled. It disables future updater install-on-quit handoffs.
+On macOS this cannot revoke a request already handed to Squirrel: ShipIt can
+still replace the bundle on any process exit, without `quitAndInstall`.
+The MacUpdater handoff and native checking/completion therefore latch a restart
+blocker for this launch, including after later errors or discarded staging
+metadata. Both external-build restart choices are blocked, and queued restarts
+are cancelled before exit.
+The dialog explains how to let the prepared update finish and then reinstall
+the desired build. This deliberately avoids a second installer, signature
+assumptions about local builds, or mutation of Squirrel's OS-owned cache.
+The sidebar opens the existing restart dialog; an idle board receives one
+automatic prompt per identity.
 Only an explicit Restart now or Restart when idle request can relaunch.
 
 Main refreshes local session facts before relaunching. Active, approval,

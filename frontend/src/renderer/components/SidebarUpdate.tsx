@@ -246,7 +246,7 @@ export function SidebarUpdateRow({
 		);
 	} else if (action.kind === "install") {
 		const version = displayVersion(action.version);
-		title = status.installed ? t(status.installed.restartWhenIdle ? "update.restart.scheduledShort" : "update.restart.installedShort") : t("shell.updateReadyToInstall");
+		title = status.installed ? t(status.installed.restartBlocked ? "update.restart.blockedShort" : status.installed.restartWhenIdle ? "update.restart.scheduledShort" : "update.restart.installedShort") : t("shell.updateReadyToInstall");
 		glyph = <UpdateGlyph icon={<RotateCw aria-hidden="true" />} solid="ready" />;
 		press = {
 			label: status.installed ? t("update.restart.options") : version ? t("shell.restartInstallUpdateVersion", { version }) : t("shell.restartInstallUpdate"),
@@ -355,7 +355,7 @@ export function SidebarUpdateRail({
 	} else if (action.kind === "install") {
 		const version = displayVersion(action.version);
 		label = status.installed ? t("update.restart.options") : version ? t("shell.restartInstallUpdateVersion", { version }) : t("shell.restartInstallUpdate");
-		tooltip = status.installed ? t(status.installed.restartWhenIdle ? "update.restart.scheduledShort" : "update.restart.installedShort") : t("shell.updateReadyToInstall");
+		tooltip = status.installed ? t(status.installed.restartBlocked ? "update.restart.blockedShort" : status.installed.restartWhenIdle ? "update.restart.scheduledShort" : "update.restart.installedShort") : t("shell.updateReadyToInstall");
 		onClick = onRequestInstall;
 	} else {
 		failed = true;

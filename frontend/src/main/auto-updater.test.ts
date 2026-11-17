@@ -7,6 +7,7 @@ import semver from "semver";
 import { CancellationToken } from "builder-util-runtime";
 import nodePath from "node:path";
 import { requestDesktopShutdown } from "./desktop-shutdown";
+import { InstalledBuildGuard } from "./installed-build";
 
 type UpdateSettings = {
   enabled: boolean;
@@ -120,6 +121,79 @@ it("does not overwrite an external install arriving during a pending restart", a
   module.setInstalledBuildStatus({ identity: "external-asar", idle: true, restartWhenIdle: false });
   await expect(install).rejects.toThrow(/installed/);
   expect(autoUpdater.quitAndInstall).not.toHaveBeenCalled();
+});
+
+it("keeps build B intact when native-staged A would install on any process exit", async () => {
+  const restore = stubProcess("darwin", "/usr/bin/node");
+  try {
+    const { module, autoUpdater, updaterEvents, nativeAutoUpdater } = await importAutoUpdater(undefined, { nativeReadyManually: true });
+    await module.startAutoUpdates(stateDir);
+    const bundle = nodePath.join(stateDir, "installed-build");
+    writeFileSync(bundle, "running");
+    let nativeStaged: string | undefined;
+    let exits = 0;
+    nativeAutoUpdater.on("update-downloaded", () => { nativeStaged = "A"; });
+    // ShipIt's exit action is independent of the JS updater flag and method.
+    const quit = () => { exits += 1; if (nativeStaged) writeFileSync(bundle, nativeStaged); };
+    const guard = new InstalledBuildGuard({
+      readIdentity: async () => readFileSync(bundle, "utf8"), isIdle: async () => true,
+      onChange: module.setInstalledBuildStatus, assertRestartSafe: module.assertInstalledBuildRestartSafe, relaunch: quit,
+    });
+    updaterEvents.get("update-downloaded")?.({ version: "2.1.0" });
+    nativeAutoUpdater.emit("update-downloaded", undefined, undefined, "2.1.0");
+    writeFileSync(bundle, "B");
+    await guard.check();
+    await guard.check();
+    expect(autoUpdater.autoInstallOnAppQuit).toBe(false);
+    // Positive control: flipping that flag did not disarm the native exit action.
+    quit();
+    expect(readFileSync(bundle, "utf8")).toBe("A");
+    writeFileSync(bundle, "B");
+    exits = 0;
+    await expect(guard.requestRestart("now")).rejects.toThrow(/macOS.*update/i);
+    expect(readFileSync(bundle, "utf8")).toBe("B");
+    expect(exits).toBe(0);
+    expect(module.getUpdateStatus().installed?.restartBlocked).toBe("native-update-staged");
+  } finally { restore(); }
+});
+
+it("keeps the native restart gate closed through in-flight checks and later errors", async () => {
+  const restore = stubProcess("darwin", "/usr/bin/node");
+  try {
+    const { module, nativeAutoUpdater } = await importAutoUpdater(undefined, { nativeReadyManually: true });
+    await module.startAutoUpdates(stateDir);
+    module.setInstalledBuildStatus({ identity: "B", idle: true, restartWhenIdle: false });
+    expect(() => module.assertInstalledBuildRestartSafe()).not.toThrow();
+    nativeAutoUpdater.emit("checking-for-update");
+    expect(() => module.assertInstalledBuildRestartSafe()).toThrow(/macOS.*update/i);
+    nativeAutoUpdater.emit("error", new Error("native preparation failed after handoff"));
+    expect(() => module.assertInstalledBuildRestartSafe()).toThrow(/macOS.*update/i);
+  } finally { restore(); }
+});
+
+it("blocks the MacUpdater handoff before its asynchronous native events arrive", async () => {
+  const restore = stubProcess("darwin", "/usr/bin/node");
+  try {
+    const { module, updaterEvents, autoUpdater } = await importAutoUpdater(undefined, { nativeReadyManually: true });
+    await module.startAutoUpdates(stateDir);
+    updaterEvents.get("update-downloaded")?.({ version: "2.1.0" });
+    expect(autoUpdater.autoInstallOnAppQuit).toBe(true);
+    module.setInstalledBuildStatus({ identity: "B", idle: true, restartWhenIdle: false });
+    expect(() => module.assertInstalledBuildRestartSafe()).toThrow(/macOS.*update/i);
+  } finally { restore(); }
+});
+
+it("allows an external restart when a macOS download was never handed to native staging", async () => {
+  const restore = stubProcess("darwin", "/usr/bin/node");
+  try {
+    const { module, updaterEvents, autoUpdater } = await importAutoUpdater(undefined, { nativeReadyManually: true });
+    await module.startAutoUpdates(stateDir);
+    module.setInstalledBuildStatus({ identity: "B", idle: true, restartWhenIdle: false });
+    updaterEvents.get("update-downloaded")?.({ version: "2.1.0" });
+    expect(autoUpdater.autoInstallOnAppQuit).toBe(false);
+    expect(() => module.assertInstalledBuildRestartSafe()).not.toThrow();
+    expect(module.getUpdateStatus().installed?.restartBlocked).toBeUndefined();
+  } finally { restore(); }
 });
 
 describe("macOS differential update policy", () => {

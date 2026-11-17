@@ -206,9 +206,33 @@ export function configureFeed(
 
 let lastStatus: UpdateStatus = { state: "idle" };
 let installedBuildStatus: InstalledBuildStatus | undefined;
+// A native request may arm ShipIt even if preparation later times out/errors.
+// Its apply-on-exit ownership cannot be revoked through electron-updater flags.
+let nativeUpdateMayInstallOnQuit = false;
+const INSTALLED_BUILD_NATIVE_UPDATE_BLOCKER = "An earlier macOS update may still install when Orchestrator quits. Quit Orchestrator, let any pending update finish, then reinstall this build before reopening it.";
+
+function nativeInstallBlocksRestart(): boolean {
+  return process.platform === "darwin" && nativeUpdateMayInstallOnQuit;
+}
+
+export function assertInstalledBuildRestartSafe(): void {
+  if (installedBuildStatus && nativeInstallBlocksRestart()) throw new Error(INSTALLED_BUILD_NATIVE_UPDATE_BLOCKER);
+}
+
+function noteNativeUpdateHandoff(): void {
+  if (nativeUpdateMayInstallOnQuit) return;
+  nativeUpdateMayInstallOnQuit = true;
+  if (installedBuildStatus) sendToRenderer("updates:status", getUpdateStatus());
+}
 
 function withInstalledBuild(status: UpdateStatus): UpdateStatus {
-  return installedBuildStatus ? { state: "downloaded", installed: installedBuildStatus } : status;
+  return installedBuildStatus ? {
+    state: "downloaded",
+    installed: {
+      ...installedBuildStatus,
+      ...(nativeInstallBlocksRestart() ? { restartBlocked: "native-update-staged" as const } : {}),
+    },
+  } : status;
 }
 
 export function setInstalledBuildStatus(status: InstalledBuildStatus | undefined): void {
@@ -2040,6 +2064,7 @@ function wireUpdaterEvents(): void {
   if (eventsWired) return;
   eventsWired = true;
   if (process.platform === "darwin") {
+    nativeAutoUpdater.on("checking-for-update", noteNativeUpdateHandoff);
     powerMonitor.on("suspend", () => {
       if (preparationSuspendedAt === undefined) preparationSuspendedAt = Date.now();
     });
@@ -2052,6 +2077,7 @@ function wireUpdaterEvents(): void {
       recordUpdateDiagnostic("native-preparation-resumed", { suspendedMs });
     });
     nativeAutoUpdater.on("update-downloaded", (_event, _notes, releaseName) => {
+      noteNativeUpdateHandoff();
       const timedOut = timedOutNativePreparation;
       const recoverable = timedOut !== undefined &&
         nativePreparation === undefined && nativePreparationBlocked === timedOut.error &&
@@ -2248,6 +2274,9 @@ function wireUpdaterEvents(): void {
     handledInstallRejection = undefined;
     awaitingStagedReplacement = false;
     applyInstallOnQuitPolicy();
+    // MacUpdater reads this flag immediately after dispatching this event, then
+    // hands the archive to Squirrel. Latch before its asynchronous native events.
+    if (process.platform === "darwin" && autoUpdater.autoInstallOnAppQuit) noteNativeUpdateHandoff();
     persistStagedBuild(escalationStateDir);
     automaticCheckPreviousStatus = undefined;
     // A completed automatic download advances the independent baseline; a
@@ -3032,6 +3061,8 @@ export function getMacInstallBlocker(): string | undefined {
 // the staged build wait for a location it can actually install from.
 function applyInstallOnQuitPolicy(): void {
   const blocker = getMacInstallBlocker();
+  // On macOS this prevents a future handoff only; the external restart gate
+  // separately protects an update Squirrel already owns.
   autoUpdater.autoInstallOnAppQuit = !installedBuildStatus && blocker === undefined && !awaitingStagedReplacement && !nativePreparationBlocked && !stagingDiskShortfall;
   if (awaitingStagedReplacement) {
     console.info(
