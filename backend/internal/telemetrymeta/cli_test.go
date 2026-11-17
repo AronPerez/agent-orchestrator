@@ -34,6 +34,8 @@ func TestCLIActorTypeKeepsKnownLegacyUserCommands(t *testing.T) {
 		"ao dev import-projects",
 		"ao project orchestration get",
 		"ao project orchestration set",
+		"ao decision raise",
+		"ao decision search",
 		"ao handoff",
 		"ao smoke list",
 		"ao smoke set",
