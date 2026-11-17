@@ -8,7 +8,70 @@ package gen
 import (
 	"context"
 	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
+
+const countLiveIssueLinkedSessions = `-- name: CountLiveIssueLinkedSessions :one
+SELECT COUNT(*)
+FROM sessions
+WHERE project_id = ?
+  AND issue_id IS NOT NULL
+  AND trim(issue_id) <> ''
+  AND is_terminated = FALSE
+`
+
+func (q *Queries) CountLiveIssueLinkedSessions(ctx context.Context, projectID *domain.ProjectID) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countLiveIssueLinkedSessions, projectID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const getTrackerIntakeHandled = `-- name: GetTrackerIntakeHandled :one
+SELECT project_id, issue_id, session_id, handled_at
+FROM tracker_intake_handled
+WHERE project_id = ? AND issue_id = ?
+`
+
+type GetTrackerIntakeHandledParams struct {
+	ProjectID string
+	IssueID   string
+}
+
+func (q *Queries) GetTrackerIntakeHandled(ctx context.Context, arg GetTrackerIntakeHandledParams) (TrackerIntakeHandled, error) {
+	row := q.db.QueryRowContext(ctx, getTrackerIntakeHandled, arg.ProjectID, arg.IssueID)
+	var i TrackerIntakeHandled
+	err := row.Scan(
+		&i.ProjectID,
+		&i.IssueID,
+		&i.SessionID,
+		&i.HandledAt,
+	)
+	return i, err
+}
+
+const insertTrackerIntakeHandled = `-- name: InsertTrackerIntakeHandled :exec
+INSERT INTO tracker_intake_handled (project_id, issue_id, session_id, handled_at)
+VALUES (?, ?, ?, ?)
+`
+
+type InsertTrackerIntakeHandledParams struct {
+	ProjectID string
+	IssueID   string
+	SessionID string
+	HandledAt time.Time
+}
+
+func (q *Queries) InsertTrackerIntakeHandled(ctx context.Context, arg InsertTrackerIntakeHandledParams) error {
+	_, err := q.db.ExecContext(ctx, insertTrackerIntakeHandled,
+		arg.ProjectID,
+		arg.IssueID,
+		arg.SessionID,
+		arg.HandledAt,
+	)
+	return err
+}
 
 const listTrackerIntakeHandled = `-- name: ListTrackerIntakeHandled :many
 SELECT project_id, issue_id, session_id, handled_at

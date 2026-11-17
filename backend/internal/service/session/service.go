@@ -2186,6 +2186,14 @@ func toSpawnAPIError(err error) error {
 		return apierr.Conflict("WORKSPACE_PROVISION_FAILED", setupErr.Error(), nil)
 	}
 	switch {
+	case errors.Is(err, ports.ErrTrackerIntakeHandled):
+		mapped := apierr.Conflict("TRACKER_INTAKE_ALREADY_HANDLED", "This tracker item was already delivered to a session", nil)
+		mapped.Cause = err
+		return mapped
+	case errors.Is(err, ports.ErrAutomatedSessionCapacity):
+		mapped := apierr.TooManyRequests("AUTOMATED_SESSION_CAPACITY", "The project is at its automated-session capacity")
+		mapped.Cause = err
+		return mapped
 	case errors.Is(err, sessionmanager.ErrClientRequestConflict):
 		return apierr.Conflict("CLIENT_REQUEST_CONFLICT", "clientRequestId belongs to a different task", nil)
 	case errors.Is(err, sessionmanager.ErrClientRequestIncomplete):

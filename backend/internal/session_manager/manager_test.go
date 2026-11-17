@@ -113,6 +113,8 @@ type fakeStore struct {
 
 	createClientRequestErr error
 	promoteTaskErr         error
+	trackerIntakeHandled   map[string]domain.SessionID
+	trackerIntakeLimits    []domain.AutomatedSessionLimits
 	// worktrees maps session ID to its saved worktree rows (shutdown-saved marker).
 	worktrees map[domain.SessionID][]domain.SessionWorktreeRecord
 	// sharedLog, when non-nil, receives an ordered call entry for each
@@ -128,12 +130,13 @@ func (s *fakeStore) RequireSessionLogin(_ context.Context, id domain.SessionID, 
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		sessions:      map[domain.SessionID]domain.SessionRecord{},
-		pr:            map[domain.SessionID]domain.PRFacts{},
-		projects:      map[string]domain.ProjectRecord{},
-		conversations: map[domain.SessionID]domain.ConversationRecord{},
-		workspaceRepo: map[string][]domain.WorkspaceRepoRecord{},
-		worktrees:     map[domain.SessionID][]domain.SessionWorktreeRecord{},
+		sessions:             map[domain.SessionID]domain.SessionRecord{},
+		pr:                   map[domain.SessionID]domain.PRFacts{},
+		projects:             map[string]domain.ProjectRecord{},
+		conversations:        map[domain.SessionID]domain.ConversationRecord{},
+		workspaceRepo:        map[string][]domain.WorkspaceRepoRecord{},
+		worktrees:            map[domain.SessionID][]domain.SessionWorktreeRecord{},
+		trackerIntakeHandled: map[string]domain.SessionID{},
 	}
 }
 func (f *fakeStore) GetProject(_ context.Context, id string) (domain.ProjectRecord, bool, error) {
@@ -155,6 +158,14 @@ func (f *fakeStore) CreateSession(_ context.Context, rec domain.SessionRecord) (
 	rec.ID = domain.SessionID(fmt.Sprintf("%s-%d", prefix, f.num))
 	f.sessions[rec.ID] = rec
 	return rec, nil
+}
+func (f *fakeStore) CreateTrackerIntakeSession(ctx context.Context, rec domain.SessionRecord, limits domain.AutomatedSessionLimits) (domain.SessionRecord, error) {
+	f.trackerIntakeLimits = append(f.trackerIntakeLimits, limits)
+	created, err := f.CreateSession(ctx, rec)
+	if err == nil {
+		f.trackerIntakeHandled[string(rec.ProjectID)+"\x00"+string(rec.IssueID)] = created.ID
+	}
+	return created, err
 }
 func (f *fakeStore) CreateAutomationSession(ctx context.Context, rec domain.SessionRecord) (domain.SessionRecord, bool, error) {
 	for _, existing := range f.sessions {
@@ -2779,6 +2790,32 @@ func TestSpawnAutomationAdoptsOnlyCompletedLaunch(t *testing.T) {
 	}
 	if adopted.ID != first.ID || rt.created != 1 {
 		t.Fatalf("retry session=%q runtime creates=%d, want %q and 1", adopted.ID, rt.created, first.ID)
+	}
+}
+
+func TestSpawnTrackerIntakeKeepsAdmissionProofAfterLaunchRollback(t *testing.T) {
+	m, st, rt, _ := newManager()
+	rt.createErr = errors.New("runtime unavailable")
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
+	_, _, _, err := m.Spawn(ctx, ports.SpawnConfig{
+		ProjectID:           "mer",
+		IssueID:             "github:acme/mer#12",
+		Kind:                domain.KindWorker,
+		Harness:             domain.HarnessClaudeCode,
+		Prompt:              "do it",
+		TrackerIntakeLimits: &limits,
+	})
+	if err == nil {
+		t.Fatal("Spawn() error = nil, want runtime failure")
+	}
+	if _, ok := st.sessions["mer-1"]; ok {
+		t.Fatal("failed launch left its seed session behind")
+	}
+	if got := st.trackerIntakeHandled["mer\x00github:acme/mer#12"]; got != "mer-1" {
+		t.Fatalf("intake proof = %q, want rolled-back seed mer-1", got)
+	}
+	if len(st.trackerIntakeLimits) != 1 || st.trackerIntakeLimits[0] != limits {
+		t.Fatalf("atomic-admission limits = %+v, want %+v", st.trackerIntakeLimits, limits)
 	}
 }
 
