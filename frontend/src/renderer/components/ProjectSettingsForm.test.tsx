@@ -80,7 +80,7 @@ vi.mock("../lib/api-client", () => ({
 	},
 }));
 
-import { ProjectSettingsForm, type ProjectSettingsSaveState, type ProjectSettingsSection } from "./ProjectSettingsForm";
+import { ProjectSettingsForm, projectSupportsWorkerContracts, type ProjectSettingsSaveState, type ProjectSettingsSection } from "./ProjectSettingsForm";
 import { workspaceQueryKey } from "../hooks/useWorkspaceQuery";
 import type { WorkspaceSummary } from "../types/workspace";
 
@@ -213,6 +213,12 @@ beforeEach(() => {
 });
 
 describe("ProjectSettingsForm", () => {
+	it("keeps worker contract settings off an older remote daemon", () => {
+		expect(projectSupportsWorkerContracts(undefined, {})).toBe(true);
+		expect(projectSupportsWorkerContracts("older-host", {})).toBe(false);
+		expect(projectSupportsWorkerContracts("current-host", { workerContracts: { stallMinutes: 15 } })).toBe(true);
+	});
+
 	it("saves the per-project worker stall threshold", async () => {
 		mockProject({
 			id: "proj-1",

@@ -1,5 +1,5 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	SessionCardView,
 	SessionsBoardGridView,
@@ -40,6 +40,8 @@ const baseSession: BoardSessionPresentation = {
 	updatedAt: "2026-08-09T10:00:00Z",
 };
 
+afterEach(() => vi.useRealTimers());
+
 const progressLabels: BoardPullRequestLabels = {
 	progress: ({ closed, draft, merged, open, total }) => {
 		const parts = [`${merged} of ${total} ${total === 1 ? "PR" : "PRs"} merged`];
@@ -57,9 +59,10 @@ describe("SessionsBoardView", () => {
 		render(<SessionCardView externalLink={ExternalLink}
 			labels={{ formatTime: () => "now", intakeIssue: (id) => id, pr: progressLabels, updatedAt: (at) => at }}
 			renderAvatar={() => null}
-			session={{ ...baseSession, status: "working", displayStatus: "Working", statusReadiness }} />);
+			session={{ ...baseSession, contractStalled: true, status: "working", displayStatus: "Working", statusReadiness }} />);
 		expect(screen.queryByText("Working")).not.toBeInTheDocument();
 		expect(screen.getByText(statusReadiness === "checking" ? "Checking…" : "Unable to verify")).toBeInTheDocument();
+		expect(screen.getByTestId("board-session-card")).not.toHaveClass("animate-attention-card-pulse", "border-status-needs-you");
 	});
 
 	it("renders one lane per Kanban column, newest first, with one scroller each", () => {
@@ -222,15 +225,17 @@ describe("SessionsBoardView", () => {
 		},
 	);
 
-	it("shows a worker goal and time left while using the existing attention treatment for a stalled contract", () => {
-		render(
+	it("shows a live worker goal and ticking time left while using the existing attention treatment for a stalled contract", () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date("2026-08-09T10:00:00Z"));
+		const view = render(
 			<SessionCardView
 				externalLink={ExternalLink}
 				labels={{
 					formatTime: () => "5m ago",
 					intakeIssue: (id) => `Issue ${id}`,
 					pr: progressLabels,
-					timeLeft: () => "45m left",
+					timeLeft: (deadline, now) => `${Math.ceil((Date.parse(deadline) - now) / 60_000)}m left`,
 					updatedAt: (timestamp) => `Updated ${timestamp}`,
 				}}
 				renderAvatar={() => null}
@@ -249,6 +254,30 @@ describe("SessionsBoardView", () => {
 		);
 		expect(within(card).getByTestId("session-status")).toHaveTextContent("Stalled");
 		expect(card).toHaveClass("animate-attention-card-pulse", "border-status-needs-you");
+		act(() => vi.advanceTimersByTime(60_000));
+		expect(within(card).getByTestId("session-contract")).toHaveTextContent("44m left");
+
+		view.rerender(
+			<SessionCardView
+				externalLink={ExternalLink}
+				labels={{
+					formatTime: () => "5m ago",
+					intakeIssue: (id) => `Issue ${id}`,
+					pr: progressLabels,
+					timeLeft: () => "time should be hidden",
+					updatedAt: (timestamp) => `Updated ${timestamp}`,
+				}}
+				renderAvatar={() => null}
+				session={{
+					...baseSession,
+					contractOutcome: "met",
+					goal: "Ship the worker contract UI",
+					timeboxDeadlineAt: "2026-08-09T10:45:00Z",
+				}}
+			/>,
+		);
+		expect(screen.getByTestId("session-contract")).toHaveTextContent("Ship the worker contract UI");
+		expect(screen.getByTestId("session-contract")).not.toHaveTextContent("time should be hidden");
 	});
 
 	it("gives a compact card branch and time on one line, PRs below, and no status strip", () => {

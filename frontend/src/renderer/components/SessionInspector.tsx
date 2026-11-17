@@ -31,6 +31,7 @@ import {
 	type InspectorReviewSummaryAction,
 	type InspectorTimelineEvent,
 	type InspectorView,
+	useMinuteClock,
 } from "@aoagents/product-ui";
 import {
 	Archive,
@@ -616,17 +617,18 @@ const SummaryView = memo(function SummaryView({
 export function SessionContractSummary({
 	session,
 }: {
-	session: Pick<WorkspaceSession, "goal" | "timeboxDeadlineAt">;
+	session: Pick<WorkspaceSession, "contractOutcome" | "goal" | "timeboxDeadlineAt">;
 }) {
 	const { t } = useTranslation();
 	const goal = session.goal?.trim();
+	const now = useMinuteClock(Boolean(goal && session.timeboxDeadlineAt && !session.contractOutcome));
 	if (!goal) return null;
 	return (
 		<Section surface={false} title={t("inspector.goal")}>
 			<div className="flex flex-col gap-1.5">
 				<InfoRow icon={CheckWaves} label={goal} title={goal} />
-				{session.timeboxDeadlineAt ? (
-					<InfoRow icon={Clock3} label={formatContractTimeLeft(session.timeboxDeadlineAt)} />
+				{session.timeboxDeadlineAt && !session.contractOutcome ? (
+					<InfoRow icon={Clock3} label={formatContractTimeLeft(session.timeboxDeadlineAt, now)} />
 				) : null}
 			</div>
 		</Section>

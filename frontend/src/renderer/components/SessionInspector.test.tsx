@@ -413,12 +413,15 @@ afterEach(() => {
 });
 
 describe("SessionInspector tabs", () => {
-	it("shows a worker contract goal and time left in Summary", () => {
-		render(
+	it("shows a worker contract goal, advances time left, and hides time after an outcome", () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date("2026-11-17T18:00:00Z"));
+		const deadline = "2026-11-17T18:45:00Z";
+		const view = render(
 			<SessionContractSummary
 				session={{
 					goal: "Ship the worker contract UI",
-					timeboxDeadlineAt: new Date(Date.now() + 45 * 60_000).toISOString(),
+					timeboxDeadlineAt: deadline,
 				}}
 			/>,
 		);
@@ -426,6 +429,20 @@ describe("SessionInspector tabs", () => {
 		expect(screen.getByRole("button", { name: "Goal" })).toHaveAttribute("aria-expanded", "true");
 		expect(screen.getByText("Ship the worker contract UI")).toBeInTheDocument();
 		expect(screen.getByText("45m left")).toBeInTheDocument();
+		act(() => vi.advanceTimersByTime(60_000));
+		expect(screen.getByText("44m left")).toBeInTheDocument();
+
+		view.rerender(
+			<SessionContractSummary
+				session={{
+					contractOutcome: "met",
+					goal: "Completed worker contract",
+					timeboxDeadlineAt: deadline,
+				}}
+			/>,
+		);
+		expect(screen.getByText("Completed worker contract")).toBeInTheDocument();
+		expect(screen.queryByText(/m left$/)).not.toBeInTheDocument();
 	});
 
   it("gives an orchestrator Summary and Browser, with its account but no branch", () => {

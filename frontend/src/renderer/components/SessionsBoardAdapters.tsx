@@ -109,10 +109,23 @@ export function toBoardSessionPresentation(
 		lastUserMessageAt: session.lastUserMessageAt,
 		goal: session.goal,
 		timeboxDeadlineAt: session.timeboxDeadlineAt,
-		contractStalled: Boolean(
-			session.contractStallEscalatedAt && !session.contractOutcome && !session.isTerminated,
-		),
+		contractOutcome: session.contractOutcome,
+		contractStalled: sessionContractIsStalled(session),
 	};
+}
+
+function sessionContractIsStalled(session: WorkspaceSession): boolean {
+	if (!session.contractStallEscalatedAt || session.contractOutcome || session.isTerminated) return false;
+	if (session.statusReadiness && session.statusReadiness !== "ready") return false;
+	if (session.activity?.state !== "idle") return false;
+	const escalatedAt = Date.parse(session.contractStallEscalatedAt);
+	const lastActivityAt = Date.parse(session.activity.lastActivityAt);
+	if (!Number.isFinite(escalatedAt) || !Number.isFinite(lastActivityAt) || lastActivityAt > escalatedAt) return false;
+	return [session.lastInteractionAt, session.lastUserMessageAt].every((timestamp) => {
+		if (!timestamp) return true;
+		const at = Date.parse(timestamp);
+		return !Number.isFinite(at) || at <= escalatedAt;
+	});
 }
 
 export function sessionsBoardLabels(t: TFunction): BoardColumnLabels {
