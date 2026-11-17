@@ -5,6 +5,7 @@ import { probeRemoteSse } from "./remote-sse-probe";
 import { computeSseRetryDelayMs } from "./sse-backoff";
 
 const EVENTSOURCE_CLOSED = 2;
+export const REMOTE_PROJECT_OVERLAP_POLL_MS = 15_000;
 
 type ProjectOverlapStream = { refs: number; dispose: () => void };
 
@@ -45,12 +46,35 @@ function openProjectOverlapStream(projectId: string, queryClient: QueryClient, h
 	let source: EventSource | undefined;
 	let stopRemote: (() => void) | undefined;
 	let retry: ReturnType<typeof setTimeout> | undefined;
+	let fallbackPoll: ReturnType<typeof setInterval> | undefined;
 	let sourceBaseUrl: string | undefined;
 	let failures = 0;
 	let generation = 0;
+	let refreshState: { dirty: boolean } | undefined;
 
 	const refresh = () => {
-		if (!disposed) void queryClient.invalidateQueries({ queryKey: projectOverlapsQueryKey(projectId, hostId) });
+		if (disposed) return;
+		if (refreshState) {
+			refreshState.dirty = true;
+			return;
+		}
+		const queryKey = projectOverlapsQueryKey(projectId, hostId);
+		const state = { dirty: queryClient.isFetching({ queryKey, type: "active" }) > 0 };
+		refreshState = state;
+		const settled = () => {
+			refreshState = undefined;
+			if (state.dirty && !disposed) refresh();
+		};
+		void queryClient.invalidateQueries({ queryKey }, { cancelRefetch: false }).then(settled, settled);
+	};
+	const startFallbackPolling = () => {
+		if (disposed || fallbackPoll) return;
+		refresh();
+		fallbackPoll = setInterval(refresh, REMOTE_PROJECT_OVERLAP_POLL_MS);
+	};
+	const stopFallbackPolling = () => {
+		if (fallbackPoll) clearInterval(fallbackPoll);
+		fallbackPoll = undefined;
 	};
 	const closeConnection = () => {
 		generation += 1;
@@ -75,6 +99,7 @@ function openProjectOverlapStream(projectId: string, queryClient: QueryClient, h
 		const baseUrl = hostId ? baseUrlForHost(hostId) : hasTrustedApiBaseUrl() ? getApiBaseUrl() : undefined;
 		if (!baseUrl || typeof EventSource === "undefined") {
 			closeConnection();
+			stopFallbackPolling();
 			return;
 		}
 		if (sourceBaseUrl === baseUrl && (source || stopRemote || retry)) return;
@@ -90,11 +115,13 @@ function openProjectOverlapStream(projectId: string, queryClient: QueryClient, h
 				refresh,
 				() => {
 					failures = 0;
+					stopFallbackPolling();
 					refresh();
 				},
 				() => {
 					failedSynchronously = stopRemote === undefined;
 					stopRemote = undefined;
+					startFallbackPolling();
 					scheduleRetry(connect, currentGeneration);
 				},
 			);
@@ -128,6 +155,7 @@ function openProjectOverlapStream(projectId: string, queryClient: QueryClient, h
 	return () => {
 		disposed = true;
 		stopConnectionChanges();
+		stopFallbackPolling();
 		closeConnection();
 	};
 }

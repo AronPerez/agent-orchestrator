@@ -55,7 +55,7 @@ import { clientForSessionHost } from "../lib/host-clients";
 import { sessionUiKey } from "../lib/hosts";
 import { projectNavigateTarget, sessionNavigateTarget } from "../lib/navigate-to-session";
 import { defaultReviewerHarness, WORKER_DEFAULT_REVIEWERS } from "../lib/reviewer-harnesses";
-import { cloudSessionsQueryKey, workspaceQueryKeyForHost } from "../hooks/useWorkspaceQuery";
+import { cloudSessionsQueryKey, useWorkspaceProjectSessions, workspaceQueryKeyForHost } from "../hooks/useWorkspaceQuery";
 import { captureRendererEvent } from "../lib/telemetry";
 import { formatTimeCompact } from "../lib/format-time";
 import { AgentAvatar } from "./AgentAvatar";
@@ -435,20 +435,18 @@ const SummaryView = memo(function SummaryView({
 	standaloneAgent?: boolean;
 }) {
 	const { t } = useTranslation();
-	const summaryQueryClient = useQueryClient();
 	const collisionProjectId = !session.cloud && session.workspaceId !== STANDALONE_WORKSPACE_ID && !standaloneAgent
 		? session.workspaceId
 		: undefined;
-	const collisionWorkspace = summaryQueryClient.getQueryData<WorkspaceSummary[]>(workspaceQueryKeyForHost(hostId))
-		?.find((workspace) => workspace.id === session.workspaceId);
-	const overlapLiveSessionIds = collisionProjectId
-		? (collisionWorkspace?.sessions ?? [])
+	const collisionSessions = useWorkspaceProjectSessions(collisionProjectId, hostId).data ?? [];
+	const overlapLiveSessions = collisionProjectId
+		? collisionSessions
 			.filter((candidate) => candidate.isTerminated !== true && !candidate.needsResume)
-			.map((candidate) => candidate.id)
+			.map(({ id, workspacePublished }) => ({ id, workspacePublished }))
 		: undefined;
-	const overlaps = useProjectOverlaps(collisionProjectId, { hostId, liveSessionIds: overlapLiveSessionIds });
+	const overlaps = useProjectOverlaps(collisionProjectId, { hostId, liveSessions: overlapLiveSessions });
 	const collision = projectOverlapForSession(overlaps.data, session.id);
-	const collisionNames = new Map((collisionWorkspace?.sessions ?? []).map((candidate) => [candidate.id, candidate.title]));
+	const collisionNames = new Map(collisionSessions.map((candidate) => [candidate.id, candidate.title]));
 	const query = useSessionScmSummary(session.id, true, session.cloud?.orgId, session.cloud ? session.autoInjectCI === true : false, hostId);
 	const linkedPRs = query.data?.linkedPrs ?? [];
 	const projectQuery = useQuery({

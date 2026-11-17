@@ -55,6 +55,10 @@ vi.mock("../hooks/useProjectOrchestratorAction", () => ({
 		isProjectRestarting: false, isProvisioning: false, openNewTask: vi.fn(), openOrchestrator: vi.fn(),
 	}),
 }));
+vi.mock("../hooks/useProjectOverlaps", () => ({
+	projectOverlapForSession: () => undefined,
+	useProjectOverlaps: () => ({ data: undefined }),
+}));
 vi.mock("../lib/api-client", () => ({
 	apiClient: { GET: mocks.localGet, POST: mocks.localPost },
 	apiErrorCode: (error: { code?: string }) => error?.code,

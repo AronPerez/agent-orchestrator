@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { components } from "../../api/schema";
-import { projectOverlapForSession } from "./useProjectOverlaps";
+import { projectOverlapForSession, projectOverlapSessionFingerprint } from "./useProjectOverlaps";
 
 type ProjectOverlapsResponse = components["schemas"]["ProjectOverlapsResponse"];
 
@@ -23,7 +23,7 @@ describe("projectOverlapForSession", () => {
 				{ sessionId: "two", paths: ["README.md", "frontend/App.tsx"] },
 			],
 			paths: ["README.md", "backend/main.go", "frontend/App.tsx"],
-			truncated: false,
+			truncated: true,
 			unresolvedBase: true,
 			unavailable: false,
 		});
@@ -40,6 +40,25 @@ describe("projectOverlapForSession", () => {
 		expect(projectOverlapForSession(response, "one")).toEqual({
 			peers: [], paths: [], truncated: false, unresolvedBase: false, unavailable: true,
 		});
-		expect(projectOverlapForSession(response, "two")).toBeUndefined();
+		expect(projectOverlapForSession(response, "two")).toEqual({
+			peers: [], paths: [], truncated: false, unresolvedBase: false, unavailable: true,
+		});
+	});
+});
+
+describe("projectOverlapSessionFingerprint", () => {
+	it("changes when a provisioned workspace becomes available to watch", () => {
+		const pending = projectOverlapSessionFingerprint([
+			{ id: "two", workspacePublished: false },
+			{ id: "one" },
+		]);
+		const published = projectOverlapSessionFingerprint([
+			{ id: "one" },
+			{ id: "two", workspacePublished: true },
+		]);
+
+		expect(pending).toBe(JSON.stringify([["one", true], ["two", false]]));
+		expect(published).toBe(JSON.stringify([["one", true], ["two", true]]));
+		expect(published).not.toBe(pending);
 	});
 });

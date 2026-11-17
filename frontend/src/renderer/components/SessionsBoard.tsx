@@ -234,10 +234,12 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 	const collisionRadarProjectId = projectId && workspace?.kind !== CLOUD_PROJECT_KIND && workspace?.kind !== "scratch" && !isScratchpadWorkspace(workspace)
 		? projectId
 		: undefined;
-	const overlapLiveSessionIds = collisionRadarProjectId
-		? (workspace?.sessions ?? []).filter((session) => session.isTerminated !== true && !session.needsResume).map((session) => session.id)
+	const overlapLiveSessions = collisionRadarProjectId
+		? (workspace?.sessions ?? [])
+			.filter((session) => session.isTerminated !== true && !session.needsResume)
+			.map(({ id, workspacePublished }) => ({ id, workspacePublished }))
 		: undefined;
-	const overlaps = useProjectOverlaps(collisionRadarProjectId, { hostId, liveSessionIds: overlapLiveSessionIds });
+	const overlaps = useProjectOverlaps(collisionRadarProjectId, { hostId, liveSessions: overlapLiveSessions });
 	const collisionSessionNames = new Map((workspace?.sessions ?? []).map((session) => [session.id, session.title]));
 	const boardLabels = sessionsBoardLabels(t);
 	const presentation = useBoardPresentation({

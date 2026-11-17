@@ -441,10 +441,53 @@ describe("SessionInspector tabs", () => {
 		expect(screen.getByText("README.md")).toBeInTheDocument();
 		expect(projectOverlapSubscribeMock).toHaveBeenCalledWith(
 			"ws-1",
-			"sess-1\u0000sess-2",
+			JSON.stringify([["sess-1", true], ["sess-2", true]]),
 			expect.anything(),
 			undefined,
 		);
+	});
+
+	it("watches a peer added while open and reconnects when its workspace is published", async () => {
+		const respond = commonGetsResponder();
+		getMock.mockImplementation(async (path: string) => path === "/api/v1/projects/{id}/overlaps"
+			? {
+				data: {
+					projectId: "ws-1", overlaps: [], truncatedSessionIds: [],
+					unresolvedBaseSessionIds: [], unavailableSessionIds: [],
+				},
+			}
+			: respond(path));
+		const current = session([]);
+		const view = renderWithQuery(
+			<SessionInspector session={current} />,
+			[{ id: "ws-1", name: "my-app", path: "/repo", sessions: [current] }],
+		);
+		await waitFor(() => expect(getMock).toHaveBeenCalledWith(
+			"/api/v1/projects/{id}/overlaps",
+			expect.anything(),
+		));
+		expect(projectOverlapSubscribeMock).not.toHaveBeenCalled();
+
+		const pendingPeer = session([], { id: "sess-2", title: "Provisioning peer", workspacePublished: false });
+		act(() => view.queryClient.setQueryData<WorkspaceSummary[]>(workspaceQueryKey, [
+			{ id: "ws-1", name: "my-app", path: "/repo", sessions: [current, pendingPeer] },
+		]));
+		await waitFor(() => expect(projectOverlapSubscribeMock).toHaveBeenCalledWith(
+			"ws-1",
+			JSON.stringify([["sess-1", true], ["sess-2", false]]),
+			expect.anything(),
+			undefined,
+		));
+
+		act(() => view.queryClient.setQueryData<WorkspaceSummary[]>(workspaceQueryKey, [
+			{ id: "ws-1", name: "my-app", path: "/repo", sessions: [current, { ...pendingPeer, workspacePublished: true }] },
+		]));
+		await waitFor(() => expect(projectOverlapSubscribeMock).toHaveBeenCalledWith(
+			"ws-1",
+			JSON.stringify([["sess-1", true], ["sess-2", true]]),
+			expect.anything(),
+			undefined,
+		));
 	});
 
   it("gives an orchestrator Summary and Browser, with its account but no branch", () => {

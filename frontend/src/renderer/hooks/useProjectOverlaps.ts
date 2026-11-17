@@ -18,6 +18,16 @@ export type SessionProjectOverlap = {
 	unavailable: boolean;
 };
 
+export type ProjectOverlapLiveSession = {
+	id: string;
+	workspacePublished?: boolean;
+};
+
+export function projectOverlapSessionFingerprint(sessions: readonly ProjectOverlapLiveSession[]): string {
+	const publishedByID = new Map(sessions.map((session) => [session.id, session.workspacePublished !== false]));
+	return JSON.stringify([...publishedByID].sort(([left], [right]) => left.localeCompare(right)));
+}
+
 export function projectOverlapForSession(
 	response: ProjectOverlapsResponse | undefined,
 	sessionId: string,
@@ -33,9 +43,11 @@ export function projectOverlapForSession(
 		for (const path of overlap.paths) paths.add(path);
 		peerPaths.set(peer, paths);
 	}
-	const truncated = response.truncatedSessionIds.includes(sessionId);
-	const unresolvedBase = response.unresolvedBaseSessionIds.includes(sessionId);
-	const unavailable = response.unavailableSessionIds.includes(sessionId);
+	// Every comparison in the project can be incomplete when any peer scan is
+	// incomplete, even if this session's own workspace was read successfully.
+	const truncated = response.truncatedSessionIds.length > 0;
+	const unresolvedBase = response.unresolvedBaseSessionIds.length > 0;
+	const unavailable = response.unavailableSessionIds.length > 0;
 	if (peerPaths.size === 0 && !truncated && !unresolvedBase && !unavailable) return undefined;
 	const peers = [...peerPaths]
 		.map(([peer, paths]) => ({ sessionId: peer, paths: [...paths].sort() }))
@@ -46,14 +58,16 @@ export function projectOverlapForSession(
 
 export function useProjectOverlaps(
 	projectId: string | undefined,
-	options: { enabled?: boolean; hostId?: string; liveSessionIds?: readonly string[] } = {},
+	options: { enabled?: boolean; hostId?: string; liveSessions?: readonly ProjectOverlapLiveSession[] } = {},
 ) {
 	const queryClient = useQueryClient();
 	const enabled = options.enabled !== false && Boolean(projectId);
-	const liveSessionIds = options.liveSessionIds === undefined
+	const fingerprint = options.liveSessions === undefined
 		? undefined
-		: [...new Set(options.liveSessionIds)].sort();
-	const fingerprint = liveSessionIds?.join("\u0000");
+		: projectOverlapSessionFingerprint(options.liveSessions);
+	const liveSessionCount = options.liveSessions === undefined
+		? 0
+		: new Set(options.liveSessions.map((session) => session.id)).size;
 	const query = useQuery({
 		queryKey: projectOverlapsQueryKey(projectId ?? "", options.hostId),
 		enabled,
@@ -70,9 +84,9 @@ export function useProjectOverlaps(
 	useEffect(() => {
 		if (!enabled || !projectId || fingerprint === undefined) return;
 		void queryClient.invalidateQueries({ queryKey: projectOverlapsQueryKey(projectId, options.hostId) });
-		if ((liveSessionIds?.length ?? 0) < 2) return;
+		if (liveSessionCount < 2) return;
 		return subscribeProjectOverlapChanges(projectId, fingerprint, queryClient, options.hostId);
-	}, [enabled, fingerprint, options.hostId, projectId, queryClient]);
+	}, [enabled, fingerprint, liveSessionCount, options.hostId, projectId, queryClient]);
 
 	return query;
 }

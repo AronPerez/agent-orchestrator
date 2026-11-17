@@ -68,6 +68,10 @@ vi.mock("../lib/cloud-orchestrator", () => ({ spawnCloudOrchestrator: spawnCloud
 vi.mock("../hooks/useCloudOffering", () => ({ useCloudOffering: () => offeringMock() }));
 vi.mock("../hooks/useSessionParticipants", () => ({ useSessionParticipants: () => participantsMock() }));
 vi.mock("../hooks/useTeamsEnabled", () => ({ useTeamsEnabled: () => true }));
+vi.mock("../hooks/useProjectOverlaps", () => ({
+	projectOverlapForSession: () => undefined,
+	useProjectOverlaps: () => ({ data: undefined }),
+}));
 vi.mock("./ShareSessionDialog", () => ({
 	ShareSessionDialog: (props: { open: boolean; sessionId?: string; sessionName?: string; projectName?: string; orgId: string; projectId: string }) => {
 		shareDialogMock(props);
