@@ -139,6 +139,67 @@ it.each(["startup", "startup with unchanged data", "reconnect", "proxy replaceme
 	}
 });
 
+it("keeps live readiness while a background poll is pending", async () => {
+	await prepareTwoHosts();
+	const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+	const { result, unmount } = renderHook(() => useRemoteWorkspaces(), {
+		wrapper: ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>,
+	});
+	let finish!: (response: Response) => void;
+	let poll: Promise<void> | undefined;
+	try {
+		await waitFor(() => expect(result.current.loadedSessionHostIds).toEqual(["box-a"]));
+		const data = result.current.data;
+		const source = {
+			projects: client.getQueryData([...remoteWorkspaceQueryKey("box-a"), "projects"]),
+			sessions: client.getQueryData([...remoteWorkspaceQueryKey("box-a"), "sessions"]),
+		};
+		const pending = new Promise<Response>((resolve) => { finish = resolve; });
+		vi.stubGlobal("fetch", vi.fn(async () => (await pending).clone()));
+		await act(async () => { poll = client.refetchQueries({ queryKey: remoteWorkspaceQueryKey("box-a") }); });
+		await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+		try {
+			expect(result.current.loadedProjectHostIds).toEqual(["box-a"]);
+			expect(result.current.loadedSessionHostIds).toEqual(["box-a"]);
+			expect(result.current.data).toBe(data);
+		} finally {
+			await act(async () => { finish(Response.json(source)); await poll; });
+		}
+	} finally {
+		unmount(); client.clear();
+	}
+});
+
+it("keeps live receipts when a remote board mounts during an unchanged read", async () => {
+	const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+	const source = {
+		projects: [{ id: "project-1", name: "Remote", path: "/remote" }],
+		sessions: [{ id: "session-1", projectId: "project-1", harness: "codex", status: "working", prs: [], artifactFiles: [] }],
+	};
+	client.setQueryData([...remoteWorkspaceQueryKey("box-a"), "projects"], source.projects);
+	client.setQueryData([...remoteWorkspaceQueryKey("box-a"), "sessions"], source.sessions);
+	remoteConnect.mockResolvedValue({ hostId: "box-a", label: "Box A", url: "http://box-a:3001", base: "http://127.0.0.1:4000" });
+	await connectHost("http://box-a:3001");
+	let finish!: (response: Response) => void;
+	const pending = new Promise<Response>((resolve) => { finish = resolve; });
+	vi.stubGlobal("fetch", vi.fn(async () => (await pending).clone()));
+	let showBoard = false;
+	function Board() { useRemoteProjectQuery("box-a", "project-1"); return null; }
+	const { result, rerender, unmount } = renderHook(() => useRemoteWorkspaces(), {
+		wrapper: ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}{showBoard && <Board />}</QueryClientProvider>,
+	});
+	try {
+		await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+		showBoard = true;
+		rerender();
+		await act(async () => { finish(Response.json(source)); });
+		await waitFor(() => expect(result.current.loadedProjectHostIds).toEqual(["box-a"]));
+		await waitFor(() => expect(result.current.loadedSessionHostIds).toEqual(["box-a"]));
+	} finally {
+		unmount(); client.clear();
+	}
+});
+
 it.each([
 	[401, true],
 	[426, true],

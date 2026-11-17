@@ -957,6 +957,8 @@ export function useRemoteWorkspaces(options: WorkspaceSubscriptionOptions & {
 			queryKey: remoteProjectsQueryKey(hostId),
 			queryFn: () => fetchRemoteProjects(hostId),
 			structuralSharing: shareRemoteRead,
+			// A live receipt can change even when the data array stays identical.
+			notifyOnChangeProps: "all",
 			staleTime: 0,
 			refetchOnMount: "always",
 			enabled: connected.includes(hostId),
@@ -970,6 +972,7 @@ export function useRemoteWorkspaces(options: WorkspaceSubscriptionOptions & {
 			queryKey: remoteSessionsQueryKey(hostId),
 			queryFn: () => fetchRemoteSessions(hostId),
 			structuralSharing: shareRemoteRead,
+			notifyOnChangeProps: "all",
 			staleTime: 0,
 			refetchOnMount: "always",
 			enabled: connected.includes(hostId),
@@ -1021,10 +1024,9 @@ export function useRemoteWorkspaces(options: WorkspaceSubscriptionOptions & {
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 		[dataInputs],
 	);
-	// Observe request status so unchanged, structurally shared results still
-	// release the gate after a successful read; paused/in-flight reads wait.
-	const loadedProjectHostIds = useStableArray(live((index) => projects[index]?.fetchStatus === "idle" && hasCurrentRemoteRead(hostIds[index]!, projects[index]?.data)));
-	const loadedSessionHostIds = useStableArray(live((index) => sessions[index]?.fetchStatus === "idle" && hasCurrentRemoteRead(hostIds[index]!, sessions[index]?.data)));
+	// A successful current-connection read stays available during later polls.
+	const loadedProjectHostIds = useStableArray(live((index) => hasCurrentRemoteRead(hostIds[index]!, projects[index]?.data)));
+	const loadedSessionHostIds = useStableArray(live((index) => hasCurrentRemoteRead(hostIds[index]!, sessions[index]?.data)));
 	const failedHostIds = useStableArray(live((index) => Boolean(projects[index]?.isError || sessions[index]?.isError)));
 	return {
 		data,
@@ -1040,8 +1042,9 @@ export function useRemoteWorkspaces(options: WorkspaceSubscriptionOptions & {
 export function useRemoteProjectQuery(hostId: string, projectId: string) {
 	const queryClient = useQueryClient();
 	// Cache-only observers react when IndexedDB restores the lists after mount.
-	const savedProjects = useQuery({ queryKey: remoteProjectsQueryKey(hostId), queryFn: () => fetchRemoteProjects(hostId), enabled: false });
-	const savedSessions = useQuery({ queryKey: remoteSessionsQueryKey(hostId), queryFn: () => fetchRemoteSessions(hostId), enabled: false });
+	// These observers share query options with live reads; preserve their receipts.
+	const savedProjects = useQuery({ queryKey: remoteProjectsQueryKey(hostId), queryFn: () => fetchRemoteProjects(hostId), structuralSharing: shareRemoteRead, enabled: false });
+	const savedSessions = useQuery({ queryKey: remoteSessionsQueryKey(hostId), queryFn: () => fetchRemoteSessions(hostId), structuralSharing: shareRemoteRead, enabled: false });
 	const unpins = useRemoteUnpinStore((state) => state.unpins);
 	const select = useCallback((workspaces: WorkspaceSummary[]) => {
 		const workspace = workspaces.find((candidate) => candidate.id === projectId);
