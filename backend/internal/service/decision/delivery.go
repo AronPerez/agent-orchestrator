@@ -1,0 +1,237 @@
+package decision
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+)
+
+// ErrSessionEnded marks a session that can no longer take a message.
+var ErrSessionEnded = errors.New("decision: session can no longer take a message")
+
+// Messenger delivers a decision as the person's own turn.
+type Messenger interface {
+	// DeliverAsPerson returns an error wrapping ErrSessionEnded when the session
+	// can no longer take a message.
+	DeliverAsPerson(context.Context, domain.SessionID, string, time.Time) error
+}
+
+// DeliveryStore is the durable decision-delivery boundary.
+type DeliveryStore interface {
+	GetSession(context.Context, domain.SessionID) (domain.SessionRecord, bool, error)
+	ListSessions(context.Context, domain.ProjectID) ([]domain.SessionRecord, error)
+	AppendDecisionEntry(context.Context, domain.DecisionEntry, time.Time) (domain.DecisionEntry, domain.DecisionCall, error)
+	ListDecisionCallsAwaitingDelivery(context.Context, string) ([]domain.DecisionCall, error)
+}
+
+// DelivererDeps configures decision answer delivery.
+type DelivererDeps struct {
+	Store      DeliveryStore
+	Messenger  Messenger
+	HostID     string
+	Now        func() time.Time
+	NewID      func(prefix string) string
+	RetryDelay time.Duration
+	Log        *slog.Logger
+}
+
+// Deliverer sends pending standing answers and records their delivery state.
+type Deliverer struct {
+	store      DeliveryStore
+	messenger  Messenger
+	hostID     string
+	now        func() time.Time
+	newID      func(string) string
+	retryDelay time.Duration
+	log        *slog.Logger
+	wake       chan struct{}
+	mu         sync.Mutex
+}
+
+// NewDeliverer constructs an idle decision answer deliverer.
+func NewDeliverer(d DelivererDeps) *Deliverer {
+	if d.Now == nil {
+		d.Now = time.Now
+	}
+	if d.NewID == nil {
+		d.NewID = func(prefix string) string { return prefix + uuid.NewString() }
+	}
+	if d.RetryDelay <= 0 {
+		d.RetryDelay = 30 * time.Second
+	}
+	if d.Log == nil {
+		d.Log = slog.Default()
+	}
+	return &Deliverer{
+		store: d.Store, messenger: d.Messenger, hostID: d.HostID,
+		now: d.Now, newID: d.NewID, retryDelay: d.RetryDelay, log: d.Log,
+		wake: make(chan struct{}, 1),
+	}
+}
+
+// Wake asks the deliverer to inspect durable pending calls.
+func (d *Deliverer) Wake() {
+	if d == nil {
+		return
+	}
+	select {
+	case d.wake <- struct{}{}:
+	default:
+	}
+}
+
+// Start runs delivery until ctx is cancelled and returns its completion signal.
+func (d *Deliverer) Start(ctx context.Context) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		d.run(ctx)
+	}()
+	return done
+}
+
+func (d *Deliverer) run(ctx context.Context) {
+	for {
+		pending, err := d.RunDue(ctx)
+		if err != nil {
+			d.log.Warn("decision delivery pass failed", "err", err)
+			pending = 1
+		}
+		if pending == 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-d.wake:
+			}
+			continue
+		}
+		timer := time.NewTimer(d.retryDelay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return
+		case <-d.wake:
+			if !timer.Stop() {
+				<-timer.C
+			}
+		case <-timer.C:
+		}
+	}
+}
+
+// RunDue tries every pending delivery once and returns how many are still pending.
+func (d *Deliverer) RunDue(ctx context.Context) (int, error) {
+	if d == nil || d.store == nil || d.messenger == nil {
+		return 0, errors.New("decision deliverer dependencies are required")
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	calls, err := d.store.ListDecisionCallsAwaitingDelivery(ctx, d.hostID)
+	if err != nil {
+		return 0, err
+	}
+	pending := 0
+	for _, call := range calls {
+		if d.deliver(ctx, call) {
+			pending++
+		}
+	}
+	return pending, nil
+}
+
+// deliver returns true while call still needs another attempt.
+func (d *Deliverer) deliver(ctx context.Context, call domain.DecisionCall) bool {
+	owner, found, err := d.store.GetSession(ctx, call.Raised.OwnerSessionID)
+	if err != nil {
+		d.logFailure(call.ID, "load owner", err)
+		return true
+	}
+	ended := !found || owner.IsTerminated
+	if !ended {
+		err = d.messenger.DeliverAsPerson(ctx, owner.ID, DeliveryMessage(call, false), d.now().UTC())
+		switch {
+		case err == nil:
+			return !d.record(ctx, call, domain.DecisionDeliveredPayload{
+				ForEntry: call.StandingEntryID, Status: domain.DecisionDeliveredSent,
+				SessionID: owner.ID, SessionName: sessionName(owner),
+			})
+		case errors.Is(err, ErrSessionEnded):
+			ended = true
+		default:
+			d.logFailure(call.ID, "send to owner", err)
+			return true
+		}
+	}
+	if !ended {
+		return true
+	}
+	return d.deliverFallback(ctx, call)
+}
+
+func (d *Deliverer) deliverFallback(ctx context.Context, call domain.DecisionCall) bool {
+	var orchestrator domain.SessionRecord
+	found := false
+	if call.Raised.ProjectID != "" {
+		sessions, err := d.store.ListSessions(ctx, call.Raised.ProjectID)
+		if err != nil {
+			d.logFailure(call.ID, "list fallback sessions", err)
+			return true
+		}
+		orchestrator, found = domain.ActiveOrchestrator(sessions)
+		if found && orchestrator.ID == call.Raised.OwnerSessionID {
+			found = false
+		}
+	}
+	if !found {
+		return !d.record(ctx, call, domain.DecisionDeliveredPayload{
+			ForEntry: call.StandingEntryID, Status: domain.DecisionDeliveredNoSession,
+		})
+	}
+	err := d.messenger.DeliverAsPerson(ctx, orchestrator.ID, DeliveryMessage(call, true), d.now().UTC())
+	switch {
+	case err == nil:
+		return !d.record(ctx, call, domain.DecisionDeliveredPayload{
+			ForEntry: call.StandingEntryID, Status: domain.DecisionDeliveredSent,
+			SessionID: orchestrator.ID, SessionName: sessionName(orchestrator), Fallback: true,
+		})
+	case errors.Is(err, ErrSessionEnded):
+		return !d.record(ctx, call, domain.DecisionDeliveredPayload{
+			ForEntry: call.StandingEntryID, Status: domain.DecisionDeliveredNoSession,
+		})
+	default:
+		d.logFailure(call.ID, "send to fallback orchestrator", err)
+		return true
+	}
+}
+
+func (d *Deliverer) record(ctx context.Context, call domain.DecisionCall, payload domain.DecisionDeliveredPayload) bool {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		d.logFailure(call.ID, "encode delivery", err)
+		return false
+	}
+	now := d.now().UTC()
+	_, _, err = d.store.AppendDecisionEntry(ctx, domain.DecisionEntry{
+		ID: d.newID("dent_"), Origin: d.hostID, CallID: call.ID,
+		Kind: domain.DecisionKindDelivered, Payload: raw, WrittenAt: now,
+		AuthorKind: domain.DecisionAuthorSystem,
+	}, now)
+	if err != nil {
+		d.logFailure(call.ID, "record delivery", err)
+		return false
+	}
+	return true
+}
+
+func (d *Deliverer) logFailure(callID, operation string, err error) {
+	d.log.Warn("decision delivery remains pending", "call", callID, "operation", operation, "err", err)
+}
