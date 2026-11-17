@@ -129,7 +129,8 @@ func TestConversationMessagesSearchIndexStaysInSync(t *testing.T) {
 	}
 	seedBranchTurns(t, s, session, conversation)
 
-	raw, err := sql.Open("sqlite", "file:"+filepath.Join(dataDir, "ao.db"))
+	// Match normal writers while the startup timestamp repair runs in the background.
+	raw, err := sql.Open("sqlite", "file:"+filepath.Join(dataDir, "ao.db")+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -173,6 +173,9 @@ func TestOpenRetriesCommittedProgressAfterStartupRepairDeadline(t *testing.T) {
 	counts, done := &repairScanCounts{}, make(chan struct{})
 	counts.expireAfterBatch.Store(true)
 	opts := repairScanOptions(t, counts, done)
+	// Use the production budget so the injected deadline controls this test
+	// even when race-instrumented SQLite takes longer to repair the fixture.
+	opts.fenceBudget = timestampFenceTimeout
 	// Inject a deadline into the second scan after one committed batch.
 	// Committed progress must survive and the background pass resumes.
 	s, err := openWithTimestampOptions(dir, opts)
@@ -189,7 +192,9 @@ func TestOpenRetriesCommittedProgressAfterStartupRepairDeadline(t *testing.T) {
 		t.Fatalf("misleading deadline log: %s", logs.String())
 	}
 	// Already committed rows survive; retry the unfinished table on reopen.
-	s, err = openWithTimestampOptions(dir, repairScanOptions(t, counts, done))
+	retryOpts := repairScanOptions(t, counts, done)
+	retryOpts.fenceBudget = timestampFenceTimeout
+	s, err = openWithTimestampOptions(dir, retryOpts)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -113,7 +113,9 @@ jobs:
   session-store-race:
     if: github.event_name != 'pull_request' || (!github.event.pull_request.draft && (github.base_ref == 'main' || github.base_ref == 'develop'))
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The full restore matrix and store suite need the same budget as other
+    # race jobs; both were still progressing at the former 20-minute cutoff.
+    timeout-minutes: 50
     defaults:
       run:
         working-directory: backend
@@ -126,7 +128,7 @@ jobs:
           cache-dependency-path: backend/go.sum
 
       - name: Test session manager and SQLite store
-        run: go test -race -count=1 -timeout=20m ./internal/session_manager ./internal/storage/sqlite/store
+        run: go test -race -count=1 -timeout=40m ./internal/session_manager ./internal/storage/sqlite/store
 
   sqlite-race:
     if: github.event_name != 'pull_request' || (!github.event.pull_request.draft && (github.base_ref == 'main' || github.base_ref == 'develop'))
@@ -135,7 +137,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1]
+        # Keep the expanded repair/migration suite within each runner's budget.
+        shard: [0, 1, 2, 3]
     defaults:
       run:
         working-directory: backend
@@ -150,7 +153,7 @@ jobs:
       - name: Test SQLite shard
         run: |
           tests=$(go test -race -list . ./internal/storage/sqlite | grep -E '^(Test|Example|Fuzz)')
-          selected=$(printf '%s\n' "$tests" | awk -v shard=${{ matrix.shard }} '((NR - 1) % 2) == shard' | paste -sd '|' -)
+          selected=$(printf '%s\n' "$tests" | awk -v shard=${{ matrix.shard }} '((NR - 1) % 4) == shard' | paste -sd '|' -)
           test -n "$selected"
           go test -race -count=1 -timeout=40m -run "^($selected)$" ./internal/storage/sqlite
 
