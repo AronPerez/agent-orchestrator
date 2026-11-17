@@ -81,6 +81,10 @@ Side-launch capture waits for recovery on the current daemon attachment. Main
 captures before and after the worker probes and rejects a changed attachment.
 The live `/readyz` PID must match the cached attachment before and after these
 reads, so a same-port replacement is rejected even before a status notification.
+Spawned daemons publish their serving PID in the listen announcement or fresh
+`running.json`; that PID is separate from the child handle used to supervise a
+shell or systemd wrapper. Probes compare the serving PID, while stop and exit
+handling continue to use the supervised child.
 Any retained side chat keeps both restart choices waiting, including a completed
 conversation or an idle side with a draft: quitting retires their launch-scoped
 state. The user must finish reading, save any text, and close those sides before

@@ -2820,17 +2820,20 @@ async function startDaemonInner(startEpoch: number, autoRestartIntent: DaemonAut
 		fallbackTimer = undefined;
 	};
 
-	const reportBoundPort = (port: number) => {
+	const reportBoundPort = (port: number, reportedPid?: number) => {
 		if (portConfirmed || daemonProcess !== child || daemonStoppingProcess === child) return;
 		portConfirmed = true;
 		stopDiscovery();
-		lifecycleLog("daemon_ready", { daemonPid: child.pid ?? null, port, startupMs: Date.now() - spawnedAtMs });
-		setDaemonStatus({ state: "ready", port, pid: child.pid });
+		// A shell or systemd scope can supervise a different serving process.
+		// Keep the child handle for supervision and use the daemon's own PID for probes.
+		const pid = reportedPid ?? child.pid;
+		lifecycleLog("daemon_ready", { daemonPid: pid ?? null, supervisorPid: child.pid ?? null, port, startupMs: Date.now() - spawnedAtMs });
+		setDaemonStatus({ state: "ready", port, pid });
 		// The renderer opens event streams on a *.localhost name only while the
 		// daemon also serves [::1] at this port; its probe says whether it does.
 		void readDaemonProbe(port, "healthz").then((probe) => {
-			if (probe?.ipv6Loopback !== true || probe.pid !== child.pid) return;
-			if (daemonStatus.state !== "ready" || daemonStatus.port !== port || daemonStatus.pid !== child.pid) return;
+			if (probe?.ipv6Loopback !== true || probe.pid !== pid) return;
+			if (daemonProcess !== child || daemonStatus.state !== "ready" || daemonStatus.port !== port || daemonStatus.pid !== pid) return;
 			// The same attachment, so only the renderer's copy changes.
 			daemonStatus = { ...daemonStatus, ipv6Loopback: true };
 			getShellWebContents()?.send("daemon:status", daemonStatus);
@@ -2888,7 +2891,7 @@ async function startDaemonInner(startEpoch: number, autoRestartIntent: DaemonAut
 					// Ignore a stale handshake left by a previous daemon: only trust a
 					// file written at/after this spawn.
 					if (info && info.startedAtMs >= spawnedAtMs - RUN_FILE_FRESHNESS_SKEW_MS) {
-						reportBoundPort(info.port);
+						reportBoundPort(info.port, info.pid);
 					}
 				})
 				.catch(() => undefined); // absent until the daemon binds; keep polling
