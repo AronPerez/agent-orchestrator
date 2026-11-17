@@ -51,6 +51,11 @@ trigger: "Using the `ao` CLI, importing existing agent sessions, or managing Orc
 - When the user asks to save a repeatable task as a Cue, use `ao cue list --json` to check existing definitions, then `ao cue create`. An agent Cue stores a reusable instruction; a command Cue stores an exact shell command. This agent-facing command can create and read Cues, but cannot edit or delete them. Direct the user to project settings for changes to existing Cues.
 - When the user asks to bring a repository's Conductor settings (scripts, run actions, environment variables, prompt) into Orchestrator, read [commands/conductor.md](commands/conductor.md) first.
 - `--agent` is an alias for `--harness` on `ao spawn`.
+- When coordinating with a session on another saved machine, pass `--host
+  <saved-label-or-host-id>` to every `ao spawn` and `ao send`, including
+  steering recovery commands. Confirm that successful write output names the
+  intended machine; stop if it names a different host. Do not replace
+  `--host` with a full saved password or an unpinned `--url` target.
 - Every command accepts `-h / --help` for the full flag list.
 - For frontend launch or preview selection, read
   [commands/preview.md](commands/preview.md) before acting. Its static-file,

@@ -21,6 +21,7 @@ ao send [flags]
 | `--session string` | Session id | Required |
 | `--steer` | Add guidance to the active Chat turn, or start a normal turn when idle | Optional |
 | `--client-message-id string` | Stable delivery handle for steering and safe retries | Generated automatically with `--steer` |
+| `--host string` | Saved remote-host label or stable host ID from `~/.ao/remotes.json` | Local machine; cannot combine with `--url` or `AO_URL` |
 | `--recover-only` | Recover the outcome for an existing delivery handle without resending | Requires `--steer` and `--client-message-id` |
 
 ## Steering and recovery
@@ -38,11 +39,22 @@ ao send --session mer-3 --steer --client-message-id correction-42 --message "Foc
 ```
 
 If the command reports an uncertain outcome or a transport failure, preserve
-the delivery handle printed in the error. Recover the existing result without
-contacting the provider again:
+the delivery handle and `--host` target printed in the error. Recover the
+existing result without contacting the provider again:
 
 ```bash
 ao send --session mer-3 --steer --recover-only --client-message-id correction-42
+```
+
+For a session on another saved machine, keep the host on both the original
+write and every recovery attempt. Successful write output names the resolved
+machine; stop if it is not the intended destination.
+
+```bash
+ao send --host build-mac --session mer-3 --steer \
+  --client-message-id correction-42 --message "Focus only on the backend."
+ao send --host build-mac --session mer-3 --steer --recover-only \
+  --client-message-id correction-42
 ```
 
 Do not invent a new client message id after an uncertain result. Reusing the

@@ -185,6 +185,28 @@ func (c *commandContext) selectSavedHost(ctx context.Context, name string) error
 	return nil
 }
 
+// selectSavedHostIfSet lets individual commands opt into saved-host targeting
+// without making --host a global flag that unsupported commands could accept.
+func (c *commandContext) selectSavedHostIfSet(ctx context.Context, name string) error {
+	if strings.TrimSpace(name) == "" {
+		return nil
+	}
+	return c.selectSavedHost(ctx, name)
+}
+
+// savedHostRetryArgs preserves the destination in a copyable retry command.
+// Host IDs are stable and unambiguous even when a display label later changes.
+func (c *commandContext) savedHostRetryArgs() string {
+	if c.remote == nil || c.remote.hostID == "" {
+		return ""
+	}
+	return " --host " + shellQuoteArg(c.remote.hostID)
+}
+
+func shellQuoteArg(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
+}
+
 func (c *commandContext) probeSavedHostIdentity(ctx context.Context, base string) (savedHostIdentity, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/v1/identity", http.NoBody) // #nosec G704 -- base is an explicitly saved AO host.
 	if err != nil {
