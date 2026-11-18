@@ -38,6 +38,7 @@ type projectOverlapNoticeKey struct {
 
 type projectOverlapNoticeAttempt struct {
 	deliveryID string
+	message    string
 	ambiguous  bool
 }
 
@@ -297,6 +298,7 @@ func (s *Service) RunProjectOverlapNoticeRadar(ctx context.Context) {
 		return nil
 	}
 	cleanupRetries := make(map[domain.ProjectID]struct{})
+	forcedRetries := make(map[domain.ProjectID]struct{})
 	applyProjects := func(projects map[domain.ProjectID]bool, hadWorker map[domain.ProjectID]bool) {
 		for projectID := range projects {
 			if err := applyTopologyChange(projectID, hadWorker[projectID]); err != nil {
@@ -334,13 +336,22 @@ func (s *Service) RunProjectOverlapNoticeRadar(ctx context.Context) {
 			} else {
 				lastSyncFailed = false
 				projects := projectOverlapRadarRefreshProjects(changed, nil)
+				for projectID := range forcedRetries {
+					projects[projectID] = true
+				}
 				for projectID := range cleanupRetries {
 					projects[projectID] = true
 				}
 				applyProjects(projects, hadWorker)
+				clear(forcedRetries)
 			}
 		case <-s.overlapRadarWake:
 			signals := s.takeProjectOverlapRadarSignals()
+			for _, signal := range signals {
+				if signal.force {
+					forcedRetries[signal.projectID] = struct{}{}
+				}
+			}
 			hadWorker := make(map[domain.ProjectID]bool, len(workers))
 			for projectID := range workers {
 				hadWorker[projectID] = true
@@ -356,10 +367,14 @@ func (s *Service) RunProjectOverlapNoticeRadar(ctx context.Context) {
 				continue
 			}
 			projects := projectOverlapRadarRefreshProjects(changed, signals)
+			for projectID := range forcedRetries {
+				projects[projectID] = true
+			}
 			for projectID := range cleanupRetries {
 				projects[projectID] = true
 			}
 			applyProjects(projects, hadWorker)
+			clear(forcedRetries)
 		}
 	}
 }
@@ -623,7 +638,8 @@ func (s *Service) reconcileProjectOverlapNoticesLocked(ctx context.Context, stor
 				continue
 			}
 			message := formatProjectOverlapNotice(peer.DisplayName, peer.ID, overlap.Paths)
-			attempt := s.projectOverlapNoticeAttempt(key)
+			attempt := s.projectOverlapNoticeAttempt(key, message)
+			message = attempt.message
 			var outcome sessionguard.Outcome
 			var nudgeErr error
 			if attempt.ambiguous {
@@ -688,10 +704,14 @@ func (s *Service) deleteInactiveProjectOverlapNoticeAttempts(
 	}
 }
 
-func (s *Service) projectOverlapNoticeAttempt(key projectOverlapNoticeKey) projectOverlapNoticeAttempt {
+func (s *Service) projectOverlapNoticeAttempt(key projectOverlapNoticeKey, message string) projectOverlapNoticeAttempt {
 	s.overlapNoticePendingMu.Lock()
 	defer s.overlapNoticePendingMu.Unlock()
 	if attempt := s.overlapNoticeAttempts[key]; attempt.deliveryID != "" {
+		if attempt.message == "" {
+			attempt.message = message
+			s.overlapNoticeAttempts[key] = attempt
+		}
 		return attempt
 	}
 	if s.overlapNoticeAttempts == nil {
@@ -699,12 +719,12 @@ func (s *Service) projectOverlapNoticeAttempt(key projectOverlapNoticeKey) proje
 	}
 	var token [12]byte
 	if _, err := rand.Read(token[:]); err == nil {
-		attempt := projectOverlapNoticeAttempt{deliveryID: "collision:" + hex.EncodeToString(token[:])}
+		attempt := projectOverlapNoticeAttempt{deliveryID: "collision:" + hex.EncodeToString(token[:]), message: message}
 		s.overlapNoticeAttempts[key] = attempt
 		return attempt
 	}
 	s.overlapNoticeAttemptSeq++
-	attempt := projectOverlapNoticeAttempt{deliveryID: fmt.Sprintf("collision:%x:%x", s.clock().UnixNano(), s.overlapNoticeAttemptSeq)}
+	attempt := projectOverlapNoticeAttempt{deliveryID: fmt.Sprintf("collision:%x:%x", s.clock().UnixNano(), s.overlapNoticeAttemptSeq), message: message}
 	s.overlapNoticeAttempts[key] = attempt
 	return attempt
 }

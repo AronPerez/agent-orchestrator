@@ -833,6 +833,51 @@ func TestRunProjectOverlapNoticeRadarReconcilesConfigOnlyChange(t *testing.T) {
 	<-done
 }
 
+func TestRunProjectOverlapNoticeRadarRetainsConfigSignalAfterTopologyFailure(t *testing.T) {
+	first := newWorkspaceRepo(t)
+	second := newWorkspaceRepo(t)
+	writeWorkspaceFile(t, first, "shared.go", "first\n")
+	writeWorkspaceFile(t, second, "shared.go", "second\n")
+	store := newMemoryOverlapNoticeStore()
+	store.listNoticeCh = make(chan struct{}, 1)
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo", Config: domain.ProjectConfig{CollisionRadar: domain.CollisionRadarConfig{IgnorePaths: []string{"shared.go"}}}}
+	store.sessions["demo-a"] = overlapSession("demo-a", first)
+	store.sessions["demo-b"] = overlapSession("demo-b", second)
+	nudger := &recordingOverlapNudger{callCh: make(chan overlapNudgeCall, 2)}
+	svc := NewWithDeps(Deps{Store: store, OverlapNudger: nudger})
+	svc.overlapNoticeRetryDelay = 10 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		svc.RunProjectOverlapNoticeRadar(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-store.listNoticeCh:
+	case <-time.After(3 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("radar did not finish the ignored-overlap scan")
+	}
+	project := store.projects["demo"]
+	project.Config.CollisionRadar.IgnorePaths = nil
+	store.projects["demo"] = project
+	store.failNextListAll(errors.New("transient topology read"))
+	svc.SignalProjectOverlapRadar("demo")
+	for range 2 {
+		select {
+		case <-nudger.callCh:
+		case <-time.After(3 * time.Second):
+			cancel()
+			<-done
+			t.Fatal("config-only refresh was lost after a transient topology read failure")
+		}
+	}
+	cancel()
+	<-done
+}
+
 func TestRunProjectOverlapNoticeRadarRecoversRestoredWorkspace(t *testing.T) {
 	first := newWorkspaceRepo(t)
 	second := newWorkspaceRepo(t)
@@ -1097,6 +1142,35 @@ func TestReconcileProjectOverlapNoticesDoesNotRecordSentWithError(t *testing.T) 
 	}
 }
 
+func TestReconcileProjectOverlapNoticesConfirmsOriginalAmbiguousPayload(t *testing.T) {
+	store := newMemoryOverlapNoticeStore()
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+	store.sessions["demo-a"] = domain.SessionRecord{ID: "demo-a", ProjectID: "demo"}
+	store.sessions["demo-b"] = domain.SessionRecord{ID: "demo-b", ProjectID: "demo", DisplayName: "Original peer"}
+	nudger := &recordingOverlapNudger{
+		errors: map[domain.SessionID][]error{"demo-a": {errors.New("delivery unconfirmed"), nil}},
+	}
+	svc := NewWithDeps(Deps{Store: store, OverlapNudger: nudger})
+	first := ProjectOverlapResult{ProjectID: "demo", Overlaps: []ProjectOverlap{{SessionA: "demo-a", SessionB: "demo-b", Paths: []string{"shared.go"}}}}
+
+	if err := svc.reconcileProjectOverlapNotices(context.Background(), first); err == nil {
+		t.Fatal("first reconcile unexpectedly ignored the ambiguous delivery")
+	}
+	rec := store.sessions["demo-b"]
+	rec.DisplayName = "Renamed peer"
+	store.sessions["demo-b"] = rec
+	changed := ProjectOverlapResult{ProjectID: "demo", Overlaps: []ProjectOverlap{{SessionA: "demo-a", SessionB: "demo-b", Paths: []string{"renamed.go"}}}}
+	if err := svc.reconcileProjectOverlapNotices(context.Background(), changed); err != nil {
+		t.Fatalf("confirm changed overlap: %v", err)
+	}
+	if len(nudger.calls) != 3 || !nudger.calls[2].confirmOnly {
+		t.Fatalf("calls = %+v, want one confirmation for the ambiguous direction", nudger.calls)
+	}
+	if nudger.calls[2].message != nudger.calls[0].message {
+		t.Fatalf("confirmation payload changed:\nfirst: %q\nconfirm: %q", nudger.calls[0].message, nudger.calls[2].message)
+	}
+}
+
 func TestReconcileProjectOverlapNoticesRetiresUnconfirmedAttemptAfterCleanScan(t *testing.T) {
 	store := newMemoryOverlapNoticeStore()
 	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
@@ -1177,10 +1251,32 @@ type memoryOverlapNoticeStore struct {
 	notices       map[overlapNoticeKey]domain.SessionOverlapNotice
 	upsertErrors  []error
 	deleteErrors  []error
+	listAllErrors []error
 	upsertCalls   int
 	listNoticeCh  chan struct{}
 	listProjectCh chan domain.ProjectID
 	listCounts    map[domain.ProjectID]int
+}
+
+func (s *memoryOverlapNoticeStore) ListAllSessions(ctx context.Context) ([]domain.SessionRecord, error) {
+	s.mu.Lock()
+	if len(s.listAllErrors) > 0 {
+		err := s.listAllErrors[0]
+		s.listAllErrors = s.listAllErrors[1:]
+		s.mu.Unlock()
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		s.mu.Unlock()
+	}
+	return s.fakeStore.ListAllSessions(ctx)
+}
+
+func (s *memoryOverlapNoticeStore) failNextListAll(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.listAllErrors = append(s.listAllErrors, err)
 }
 
 func newMemoryOverlapNoticeStore() *memoryOverlapNoticeStore {

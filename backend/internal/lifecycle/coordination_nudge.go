@@ -66,23 +66,28 @@ func (m *Manager) nudgeCoordination(ctx context.Context, id domain.SessionID, me
 		}
 	}
 	writer := func(ctx context.Context, rec domain.SessionRecord, message string) error {
-		if deliveryID != "" && domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
-			if confirmOnly {
-				if confirmer, ok := m.messenger.(semanticCoordinationConfirmer); ok {
-					return confirmer.ConfirmSemantic(ctx, rec.ID, message, deliveryID)
+		if deliveryID != "" {
+			switch domain.NormalizeSessionMode(rec.Mode) {
+			case domain.SessionModeChat:
+				if confirmOnly {
+					if confirmer, ok := m.messenger.(semanticCoordinationConfirmer); ok {
+						return confirmer.ConfirmSemantic(ctx, rec.ID, message, deliveryID)
+					}
+					return ErrCoordinationDeliveryUnconfirmed
 				}
-				return ErrCoordinationDeliveryUnconfirmed
+				if semantic, ok := m.messenger.(semanticCoordinationMessenger); ok {
+					return semantic.SendSemantic(ctx, rec.ID, message, deliveryID)
+				}
+				return errCoordinationSemanticDeliveryUnsupported
+			case domain.SessionModeTUI:
+				if confirmOnly {
+					return ErrCoordinationDeliveryUnconfirmed
+				}
+				if semantic, ok := m.messenger.(semanticCoordinationMessenger); ok {
+					return semantic.SendSemantic(ctx, rec.ID, message, deliveryID)
+				}
+				return errCoordinationSemanticDeliveryUnsupported
 			}
-			if semantic, ok := m.messenger.(semanticCoordinationMessenger); ok {
-				return semantic.SendSemantic(ctx, rec.ID, message, deliveryID)
-			}
-			return errCoordinationSemanticDeliveryUnsupported
-		}
-		if deliveryID != "" && domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeTUI {
-			if confirmOnly {
-				return ErrCoordinationDeliveryUnconfirmed
-			}
-			message = domain.WrapSessionDelivery(deliveryID, message)
 		}
 		return m.messenger.Send(ctx, rec.ID, message)
 	}

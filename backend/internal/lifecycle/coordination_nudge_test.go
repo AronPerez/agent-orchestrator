@@ -3,7 +3,6 @@ package lifecycle
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -23,7 +22,9 @@ func TestNudgeCoordinationUsesSharedGuardActiveSteeringPolicy(t *testing.T) {
 		t.Fatalf("outcome=%s messages=%v, want busy suppression", outcome, messenger.msgs)
 	}
 
-	m, store, messenger = newManager(WithActiveSteering(func(harness domain.AgentHarness) bool { return harness == domain.HarnessCodex }))
+	store = newFakeStore()
+	semanticMessenger := &recordingSemanticCoordinationMessenger{}
+	m = New(store, semanticMessenger, WithActiveSteering(func(harness domain.AgentHarness) bool { return harness == domain.HarnessCodex }))
 	rec := working("mer-1")
 	rec.Harness = domain.HarnessCodex
 	store.sessions[rec.ID] = rec
@@ -31,12 +32,11 @@ func TestNudgeCoordinationUsesSharedGuardActiveSteeringPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("steerable nudge: %v", err)
 	}
-	if outcome != sessionguard.Sent || len(messenger.msgs) != 1 {
-		t.Fatalf("outcome=%s messages=%v, want sent coordination", outcome, messenger.msgs)
+	if outcome != sessionguard.Sent || len(semanticMessenger.semanticCalls) != 1 {
+		t.Fatalf("outcome=%s semantic=%+v, want accepted semantic coordination", outcome, semanticMessenger.semanticCalls)
 	}
-	deliveryID, wrapped := domain.SessionDeliveryID(messenger.msgs[0])
-	if !strings.Contains(messenger.msgs[0], "coordinate") || !wrapped || deliveryID != "collision-2" {
-		t.Fatalf("message=%q deliveryID=%q, want wrapped collision-2 coordination", messenger.msgs[0], deliveryID)
+	if call := semanticMessenger.semanticCalls[0]; call.message != "coordinate" || call.deliveryID != "collision-2" {
+		t.Fatalf("semantic coordination = %+v, want collision-2", call)
 	}
 }
 
@@ -143,6 +143,25 @@ func TestNudgeCoordinationPreservesDefiniteComposerRefusal(t *testing.T) {
 	}
 }
 
+func TestNudgeCoordinationTUIRequiresSemanticAcceptance(t *testing.T) {
+	store := newFakeStore()
+	rec := working("mer-1")
+	rec.Activity.State = domain.ActivityIdle
+	store.sessions[rec.ID] = rec
+	messenger := &recordingSemanticCoordinationMessenger{
+		errors: []error{sessionmanager.ErrDeliveryUnconfirmed},
+	}
+	m := New(store, messenger)
+
+	outcome, err := m.NudgeCoordination(context.Background(), rec.ID, "coordinate", "collision-attempt")
+	if outcome != sessionguard.Sent || !errors.Is(err, sessionmanager.ErrDeliveryUnconfirmed) {
+		t.Fatalf("unconfirmed TUI nudge = (%s, %v), want sent/ErrDeliveryUnconfirmed", outcome, err)
+	}
+	if messenger.normalCalls != 0 || len(messenger.semanticCalls) != 1 {
+		t.Fatalf("normal=%d semantic=%+v, want semantic acceptance instead of ordinary send", messenger.normalCalls, messenger.semanticCalls)
+	}
+}
+
 type appliedErrorMessenger struct {
 	calls int
 	err   error
@@ -187,6 +206,11 @@ func (m *recordingSemanticCoordinationMessenger) ConfirmSemantic(_ context.Conte
 }
 
 func (m *appliedErrorMessenger) Send(context.Context, domain.SessionID, string) error {
+	m.calls++
+	return m.err
+}
+
+func (m *appliedErrorMessenger) SendSemantic(context.Context, domain.SessionID, string, string) error {
 	m.calls++
 	return m.err
 }
