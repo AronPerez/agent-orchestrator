@@ -7,6 +7,38 @@ import (
 	"time"
 )
 
+func TestReportVerificationValidation(t *testing.T) {
+	started := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	base := ReportRecord{
+		ID: "rpt_1", SessionID: "worker", ProjectID: "ao", State: ReportDone, Note: "done",
+		CreatedAt: started, DeliveryState: ReportPending, AvailableAt: started.Add(5 * time.Minute),
+		SettlementDeadline: started.Add(5 * time.Minute), RepeatCount: 1,
+	}
+	for _, state := range []ReportVerificationState{ReportVerificationPassed, ReportVerificationFailed} {
+		report := base
+		report.Verification = &ReportVerification{
+			State: state, Evidence: "verification/rpt_1.txt",
+			StartedAt: started, CompletedAt: started.Add(time.Second),
+		}
+		if err := report.Validate(); err != nil {
+			t.Fatalf("%s verification rejected: %v", state, err)
+		}
+	}
+
+	invalid := base
+	invalid.Verification = &ReportVerification{State: ReportVerificationPassed, Evidence: "verification/rpt_1.txt", StartedAt: started}
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("verification without completion time was accepted")
+	}
+	invalid = base
+	invalid.State = ReportCheckpoint
+	invalid.SettlementDeadline = time.Time{}
+	invalid.Verification = &ReportVerification{State: ReportVerificationFailed, Evidence: "verification/rpt_1.txt", StartedAt: started, CompletedAt: started}
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("non-done report with verification was accepted")
+	}
+}
+
 func TestReportDeliveryEnvelopeRoundTrip(t *testing.T) {
 	message := WrapReportDelivery("report-batch:abc_123", "Reports since your previous turn:\ncomplete")
 	if got, ok := ReportDeliveryID(message); !ok || got != "report-batch:abc_123" {

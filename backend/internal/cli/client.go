@@ -120,6 +120,14 @@ func (c *commandContext) postSetupJSON(ctx context.Context, path string, body, o
 	return c.doJSONPathWithHeadersAndTimeout(ctx, http.MethodPost, "/api/v1/"+path, body, out, nil, 0)
 }
 
+// postVerificationJSON is postJSON for a done report that runs the project's
+// Verify steps. The daemon applies each configured step's own timeout; a
+// shorter aggregate client timeout would cancel a valid multi-step run. The
+// command context still cancels the request when the caller interrupts it.
+func (c *commandContext) postVerificationJSON(ctx context.Context, path string, body, out any) error {
+	return c.doJSONPathWithHeadersAndTimeout(ctx, http.MethodPost, "/api/v1/"+path, body, out, nil, 0)
+}
+
 // patchJSON sends body as JSON to PATCH /api/v1/<path> on the running daemon
 // and decodes a 2xx response into out.
 func (c *commandContext) patchJSON(ctx context.Context, path string, body, out any) error {

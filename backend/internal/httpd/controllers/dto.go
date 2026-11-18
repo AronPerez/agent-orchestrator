@@ -198,10 +198,23 @@ type ReportOutputRequest struct {
 	Label     string `json:"label,omitempty"`
 }
 
-// CreateReportResponse returns only the durable identifier needed to correlate
-// a successful submission without echoing report contents.
+// CreateReportResponse returns the durable identifier and, when project verify
+// commands ran, their result. OutputTail is returned here once so the worker
+// can act on a failure without bloating later report-list responses.
 type CreateReportResponse struct {
-	ID string `json:"id"`
+	ID           string                      `json:"id"`
+	Verification *ReportVerificationResponse `json:"verification,omitempty"`
+}
+
+// ReportVerificationResponse is the observed verification fact for one done
+// report. OutputTail is populated only by report creation; Evidence remains the
+// durable session-artifact reference on read projections.
+type ReportVerificationResponse struct {
+	State       string    `json:"state" enum:"passed,failed"`
+	Evidence    string    `json:"evidence"`
+	StartedAt   time.Time `json:"startedAt"`
+	CompletedAt time.Time `json:"completedAt"`
+	OutputTail  string    `json:"outputTail,omitempty"`
 }
 
 // ReportOutputResponse is one ordered output reference in the read projection.
@@ -213,15 +226,16 @@ type ReportOutputResponse struct {
 
 // ReportResponse is one persisted worker claim, independent of delivery state.
 type ReportResponse struct {
-	ID          string                 `json:"id"`
-	SessionID   string                 `json:"sessionId"`
-	ProjectID   string                 `json:"projectId"`
-	State       string                 `json:"state,omitempty"`
-	Note        string                 `json:"note,omitempty"`
-	Message     string                 `json:"message,omitempty"`
-	Outputs     []ReportOutputResponse `json:"outputs,omitempty"`
-	CreatedAt   time.Time              `json:"createdAt"`
-	RepeatCount int64                  `json:"repeatCount"`
+	ID           string                      `json:"id"`
+	SessionID    string                      `json:"sessionId"`
+	ProjectID    string                      `json:"projectId"`
+	State        string                      `json:"state,omitempty"`
+	Note         string                      `json:"note,omitempty"`
+	Message      string                      `json:"message,omitempty"`
+	Outputs      []ReportOutputResponse      `json:"outputs,omitempty"`
+	CreatedAt    time.Time                   `json:"createdAt"`
+	RepeatCount  int64                       `json:"repeatCount"`
+	Verification *ReportVerificationResponse `json:"verification,omitempty"`
 	// DeliveryBatchID names the orchestrator delivery that carried this report.
 	DeliveryBatchID string `json:"deliveryBatchId,omitempty"`
 }

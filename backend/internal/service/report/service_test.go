@@ -2,15 +2,23 @@ package report
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/verification"
 )
 
 type fakeStore struct {
 	session         domain.SessionRecord
 	ok              bool
+	project         domain.ProjectRecord
+	projectOK       bool
+	createErr       error
 	created         domain.ReportRecord
 	contractOutcome domain.SessionContractOutcome
 	reports         []domain.ReportRecord
@@ -21,6 +29,9 @@ type fakeStore struct {
 func (f *fakeStore) GetSession(context.Context, domain.SessionID) (domain.SessionRecord, bool, error) {
 	return f.session, f.ok, nil
 }
+func (f *fakeStore) GetProject(context.Context, string) (domain.ProjectRecord, bool, error) {
+	return f.project, f.projectOK, nil
+}
 func (f *fakeStore) CreateReport(_ context.Context, r domain.ReportRecord) (domain.ReportRecord, error) {
 	f.created = r
 	return r, nil
@@ -28,6 +39,9 @@ func (f *fakeStore) CreateReport(_ context.Context, r domain.ReportRecord) (doma
 func (f *fakeStore) CreateReportWithContractOutcome(_ context.Context, r domain.ReportRecord, outcome domain.SessionContractOutcome) (domain.ReportRecord, error) {
 	f.created = r
 	f.contractOutcome = outcome
+	if f.createErr != nil {
+		return domain.ReportRecord{}, f.createErr
+	}
 	return r, nil
 }
 func (f *fakeStore) CreateReportWithContractOutcomeOnce(_ context.Context, r domain.ReportRecord, outcome domain.SessionContractOutcome) (domain.ReportRecord, bool, error) {
@@ -42,6 +56,243 @@ func (f *fakeStore) CreateReportWithContractOutcomeOnce(_ context.Context, r dom
 	f.contractOutcome = outcome
 	f.insertions++
 	return r, true, nil
+}
+
+type fakeVerifier struct {
+	requests []verification.Request
+	results  []verification.Result
+	errs     []error
+}
+
+func (f *fakeVerifier) Run(_ context.Context, request verification.Request) (verification.Result, error) {
+	f.requests = append(f.requests, request)
+	index := len(f.requests) - 1
+	if index >= len(f.results) {
+		return verification.Result{}, errors.New("unexpected verification run")
+	}
+	return f.results[index], f.errs[index]
+}
+
+type fakeEvidenceArtifacts struct {
+	registered       []string
+	unregistered     []string
+	registerErr      error
+	registerHook     func()
+	unregisterErr    error
+	unregisterCtxErr error
+}
+
+func (f *fakeEvidenceArtifacts) Register(_ context.Context, id domain.SessionID, reference string) error {
+	f.registered = append(f.registered, string(id)+" "+reference)
+	if f.registerHook != nil {
+		f.registerHook()
+	}
+	return f.registerErr
+}
+
+func (f *fakeEvidenceArtifacts) Unregister(ctx context.Context, id domain.SessionID, reference string) error {
+	f.unregistered = append(f.unregistered, string(id)+" "+reference)
+	f.unregisterCtxErr = ctx.Err()
+	return f.unregisterErr
+}
+
+func TestCreateDonePersistsVerificationEvidenceAndReturnsFailureOnce(t *testing.T) {
+	dataDir := t.TempDir()
+	artifactDir := filepath.Join(dataDir, "artifacts", "ao-7")
+	started := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	deadline := started.Add(time.Hour)
+	failed := verification.Result{
+		Passed: false, FailedStep: 1, OutputTail: "FAIL expected green\n",
+		StartedAt: started, CompletedAt: started.Add(2 * time.Second),
+	}
+	verifier := &fakeVerifier{results: []verification.Result{failed}, errs: []error{&verification.StepError{Step: 1, Cause: errors.New("exit status 1")}}}
+	artifacts := &fakeEvidenceArtifacts{}
+	st := &fakeStore{
+		ok: true, projectOK: true,
+		session: domain.SessionRecord{ID: "ao-7", ProjectID: "ao", Kind: domain.KindWorker, Goal: "ship it", TimeboxDeadlineAt: &deadline, Metadata: domain.SessionMetadata{WorkspacePath: "/work/ao", ArtifactDir: artifactDir}},
+		project: domain.ProjectRecord{ID: "ao", Config: domain.ProjectConfig{Verify: []string{"go test ./..."}, Env: map[string]string{"CI": "true"}}},
+	}
+	svc := New(Deps{Store: st, Verifier: verifier, EvidenceArtifacts: artifacts, DataDir: dataDir, NewID: func() string { return "rpt_1" }, Now: func() time.Time { return started }})
+	report, err := svc.Create(context.Background(), CreateInput{SessionID: "ao-7", State: domain.ReportDone, Note: "done"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Verification == nil || report.Verification.State != domain.ReportVerificationFailed || report.Verification.OutputTail != failed.OutputTail {
+		t.Fatalf("verification = %+v", report.Verification)
+	}
+	if st.contractOutcome != domain.SessionContractOutcomeNone {
+		t.Fatalf("contract outcome = %q, want unsettled", st.contractOutcome)
+	}
+	if len(verifier.requests) != 1 || verifier.requests[0].ProjectID != "ao" || verifier.requests[0].WorkspacePath != "/work/ao" || verifier.requests[0].Env["CI"] != "true" {
+		t.Fatalf("verification request = %+v", verifier.requests)
+	}
+	if len(report.Outputs) != 0 {
+		t.Fatalf("verification changed caller outputs: %+v", report.Outputs)
+	}
+	if len(artifacts.registered) != 1 || artifacts.registered[0] != "ao-7 "+report.Verification.Evidence {
+		t.Fatalf("registered = %q", artifacts.registered)
+	}
+	evidence, err := os.ReadFile(filepath.Join(artifactDir, filepath.FromSlash(report.Verification.Evidence)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(evidence), "Verification: failed") || !strings.Contains(string(evidence), failed.OutputTail) || !strings.Contains(string(evidence), "exit status 1") {
+		t.Fatalf("evidence = %q", evidence)
+	}
+}
+
+func TestCreateDoneRerunsVerificationAndPassSettlesContract(t *testing.T) {
+	dataDir := t.TempDir()
+	started := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	deadline := started.Add(time.Hour)
+	passed := verification.Result{Passed: true, OutputTail: "ok\n", StartedAt: started, CompletedAt: started.Add(time.Second)}
+	verifier := &fakeVerifier{results: []verification.Result{passed, passed}, errs: []error{nil, nil}}
+	artifacts := &fakeEvidenceArtifacts{}
+	st := &fakeStore{
+		ok: true, projectOK: true,
+		session: domain.SessionRecord{ID: "ao-7", ProjectID: "ao", Kind: domain.KindWorker, Goal: "ship it", TimeboxDeadlineAt: &deadline, Metadata: domain.SessionMetadata{WorkspacePath: "/work/ao"}},
+		project: domain.ProjectRecord{ID: "ao", Config: domain.ProjectConfig{Verify: []string{"go test ./..."}}},
+	}
+	ids := []string{"rpt_1", "rpt_2"}
+	svc := New(Deps{Store: st, Verifier: verifier, EvidenceArtifacts: artifacts, DataDir: dataDir, NewID: func() string { id := ids[0]; ids = ids[1:]; return id }, Now: func() time.Time { return started }})
+	for i := 0; i < 2; i++ {
+		report, err := svc.Create(context.Background(), CreateInput{SessionID: "ao-7", State: domain.ReportDone, Note: "done"})
+		if err != nil || report.Verification == nil || report.Verification.State != domain.ReportVerificationPassed || report.Verification.OutputTail != "" {
+			t.Fatalf("run %d: report=%+v err=%v", i+1, report, err)
+		}
+	}
+	if len(verifier.requests) != 2 || len(artifacts.registered) != 2 {
+		t.Fatalf("runs=%d registrations=%d", len(verifier.requests), len(artifacts.registered))
+	}
+	if st.contractOutcome != domain.SessionContractOutcomeMet {
+		t.Fatalf("contract outcome = %q", st.contractOutcome)
+	}
+}
+
+func TestCreateDoneCleansEvidenceWhenReportPersistenceFails(t *testing.T) {
+	dataDir := t.TempDir()
+	started := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	verifier := &fakeVerifier{results: []verification.Result{{Passed: true, StartedAt: started, CompletedAt: started}}, errs: []error{nil}}
+	artifacts := &fakeEvidenceArtifacts{}
+	st := &fakeStore{
+		ok: true, projectOK: true, createErr: errors.New("db unavailable"),
+		session: domain.SessionRecord{ID: "ao-7", ProjectID: "ao", Kind: domain.KindWorker, Metadata: domain.SessionMetadata{WorkspacePath: "/work/ao"}},
+		project: domain.ProjectRecord{ID: "ao", Config: domain.ProjectConfig{Verify: []string{"true"}}},
+	}
+	_, err := New(Deps{Store: st, Verifier: verifier, EvidenceArtifacts: artifacts, DataDir: dataDir, NewID: func() string { return "rpt_1" }, Now: func() time.Time { return started }}).Create(context.Background(), CreateInput{SessionID: "ao-7", State: domain.ReportDone, Note: "done"})
+	if !errors.Is(err, st.createErr) || len(artifacts.unregistered) != 1 {
+		t.Fatalf("error=%v unregistered=%q", err, artifacts.unregistered)
+	}
+	path := filepath.Join(dataDir, "artifacts", "ao-7", "verification", "rpt_1.txt")
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("evidence remained after failed report: %v", statErr)
+	}
+}
+
+func TestCreateDoneRollsBackCommittedRegistrationWhenRegisterReturnsAnError(t *testing.T) {
+	dataDir := t.TempDir()
+	started := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	verifier := &fakeVerifier{results: []verification.Result{{Passed: true, StartedAt: started, CompletedAt: started}}, errs: []error{nil}}
+	ctx, cancel := context.WithCancel(context.Background())
+	registerErr := errors.New("list registered artifacts: canceled")
+	artifacts := &fakeEvidenceArtifacts{registerErr: registerErr, registerHook: cancel}
+	st := &fakeStore{
+		ok: true, projectOK: true,
+		session: domain.SessionRecord{ID: "ao-7", ProjectID: "ao", Kind: domain.KindWorker, Metadata: domain.SessionMetadata{WorkspacePath: "/work/ao"}},
+		project: domain.ProjectRecord{ID: "ao", Config: domain.ProjectConfig{Verify: []string{"true"}}},
+	}
+
+	_, err := New(Deps{
+		Store: st, Verifier: verifier, EvidenceArtifacts: artifacts, DataDir: dataDir,
+		NewID: func() string { return "rpt_1" }, Now: func() time.Time { return started },
+	}).Create(ctx, CreateInput{SessionID: "ao-7", State: domain.ReportDone, Note: "done"})
+	if !errors.Is(err, registerErr) {
+		t.Fatalf("Create() error = %v, want registration error", err)
+	}
+	if got, want := artifacts.unregistered, []string{"ao-7 verification/rpt_1.txt"}; len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("unregistered = %q, want %q", got, want)
+	}
+	if artifacts.unregisterCtxErr != nil {
+		t.Fatalf("Unregister() context error = %v, want uncancelled cleanup context", artifacts.unregisterCtxErr)
+	}
+	path := filepath.Join(dataDir, "artifacts", "ao-7", "verification", "rpt_1.txt")
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("evidence remained after failed registration: %v", statErr)
+	}
+	if st.created.ID != "" {
+		t.Fatalf("report persisted after failed registration: %+v", st.created)
+	}
+}
+
+func TestCreateDoneRefusesVerificationEvidenceSymlinkEscape(t *testing.T) {
+	dataDir := t.TempDir()
+	artifactDir := filepath.Join(dataDir, "artifacts", "ao-7")
+	outside := t.TempDir()
+	if err := os.MkdirAll(artifactDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(artifactDir, "verification")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	started := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	verifier := &fakeVerifier{
+		results: []verification.Result{{Passed: true, StartedAt: started, CompletedAt: started}},
+		errs:    []error{nil},
+	}
+	artifacts := &fakeEvidenceArtifacts{}
+	st := &fakeStore{
+		ok: true, projectOK: true,
+		session: domain.SessionRecord{
+			ID: "ao-7", ProjectID: "ao", Kind: domain.KindWorker,
+			Metadata: domain.SessionMetadata{WorkspacePath: "/work/ao", ArtifactDir: artifactDir},
+		},
+		project: domain.ProjectRecord{ID: "ao", Config: domain.ProjectConfig{Verify: []string{"true"}}},
+	}
+
+	_, err := New(Deps{
+		Store: st, Verifier: verifier, EvidenceArtifacts: artifacts, DataDir: dataDir,
+		NewID: func() string { return "rpt_1" }, Now: func() time.Time { return started },
+	}).Create(context.Background(), CreateInput{SessionID: "ao-7", State: domain.ReportDone, Note: "done"})
+	if err == nil {
+		t.Fatal("Create succeeded through a symlinked verification directory")
+	}
+	if _, statErr := os.Stat(filepath.Join(outside, "rpt_1.txt")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("verification evidence escaped artifact directory: %v", statErr)
+	}
+	if st.created.ID != "" || len(artifacts.registered) != 0 {
+		t.Fatalf("failed evidence write persisted report=%q or registered=%q", st.created.ID, artifacts.registered)
+	}
+}
+
+func TestCreateDoneSkipsEmptyVerifyConfig(t *testing.T) {
+	verifier := &fakeVerifier{}
+	st := &fakeStore{
+		ok: true, projectOK: true,
+		session: domain.SessionRecord{ID: "ao-7", ProjectID: "ao", Kind: domain.KindWorker},
+		project: domain.ProjectRecord{ID: "ao"},
+	}
+	report, err := New(Deps{Store: st, Verifier: verifier, NewID: func() string { return "rpt_1" }}).Create(context.Background(), CreateInput{SessionID: "ao-7", State: domain.ReportDone, Note: "done"})
+	if err != nil || report.Verification != nil || len(verifier.requests) != 0 {
+		t.Fatalf("report=%+v runs=%d err=%v", report, len(verifier.requests), err)
+	}
+}
+
+func TestCreateDoneCancellationDoesNotPersistReport(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	verifier := &fakeVerifier{
+		results: []verification.Result{{Passed: false}},
+		errs:    []error{context.Canceled},
+	}
+	st := &fakeStore{
+		ok: true, projectOK: true,
+		session: domain.SessionRecord{ID: "ao-7", ProjectID: "ao", Kind: domain.KindWorker, Metadata: domain.SessionMetadata{WorkspacePath: "/work/ao"}},
+		project: domain.ProjectRecord{ID: "ao", Config: domain.ProjectConfig{Verify: []string{"go test ./..."}}},
+	}
+	_, err := New(Deps{Store: st, Verifier: verifier, EvidenceArtifacts: &fakeEvidenceArtifacts{}, DataDir: t.TempDir(), NewID: func() string { return "rpt_1" }}).Create(ctx, CreateInput{SessionID: "ao-7", State: domain.ReportDone, Note: "done"})
+	if !errors.Is(err, context.Canceled) || st.created.ID != "" {
+		t.Fatalf("error=%v persisted=%+v", err, st.created)
+	}
 }
 func (f *fakeStore) ListReportsByProject(context.Context, domain.ProjectID) ([]domain.ReportRecord, error) {
 	return append([]domain.ReportRecord(nil), f.reports...), nil

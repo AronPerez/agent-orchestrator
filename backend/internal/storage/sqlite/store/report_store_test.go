@@ -85,6 +85,37 @@ func TestReportStoreRejectsInvalidRecord(t *testing.T) {
 	}
 }
 
+func TestReportStorePersistsVerificationFact(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "ao")
+	sess, err := s.CreateSession(ctx, sampleRecord("ao"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	report := domain.ReportRecord{
+		ID: "rpt_verified", SessionID: sess.ID, ProjectID: sess.ProjectID,
+		State: domain.ReportDone, Note: "done", CreatedAt: now,
+		DeliveryState: domain.ReportPending, AvailableAt: now.Add(domain.ReportSettlementWindow),
+		SettlementDeadline: now.Add(domain.ReportSettlementWindow), RepeatCount: 1,
+		Verification: &domain.ReportVerification{
+			State: domain.ReportVerificationFailed, Evidence: "verification/rpt_verified.txt",
+			StartedAt: now, CompletedAt: now.Add(3 * time.Second),
+		},
+	}
+	if _, err := s.CreateReport(ctx, report); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := s.GetReport(ctx, report.ID)
+	if err != nil || !ok || got.Verification == nil {
+		t.Fatalf("report=%+v ok=%v err=%v", got, ok, err)
+	}
+	if *got.Verification != *report.Verification {
+		t.Fatalf("verification=%+v want %+v", got.Verification, report.Verification)
+	}
+}
+
 func TestReportStoreCreatesReportWithFirstContractOutcome(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
