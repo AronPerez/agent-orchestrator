@@ -92,6 +92,8 @@ export function buildMobileFleetTree({
 			projectId: item.projectId,
 			hostId: item.hostId,
 			title: "Orchestrator",
+			parentHostId: item.parentHostId,
+			parentSessionId: item.parentSessionId,
 			kind: "orchestrator",
 			status: toSessionStatus(item.status ?? undefined, terminated),
 			isTerminated: terminated,

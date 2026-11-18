@@ -133,6 +133,15 @@ describe("buildFleetTree", () => {
 		expect(manager.role).toBe("manager");
 	});
 
+	it("omits scopes whose sessions are all hidden by archive filtering", () => {
+		const archived = scope("ao", "server", [
+			session("archived", "terminated", { isTerminated: true }),
+		]);
+
+		expect(buildFleetTree([archived])).toEqual([]);
+		expect(buildFleetTree([archived], { showArchived: true })).toHaveLength(1);
+	});
+
 	it("counts terminated merged sessions as done when retained or archives are shown", () => {
 		const sessions = [
 			session("retained", "merged", { kind: "orchestrator", isTerminated: true }),

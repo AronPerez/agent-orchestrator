@@ -119,6 +119,26 @@ describe("buildMobileFleetTree", () => {
 		});
 	});
 
+	it("preserves a cross-host parent address for an orchestrator child", () => {
+		const tree = buildMobileFleetTree({
+			projects: [project("box")],
+			sessions: [worker("parent", "box", "same")],
+			orchestrators: [orchestrator("child", "box", "same", {
+				parentHostId: "mac",
+				parentSessionId: "parent",
+			})],
+			hosts: [{ hostId: "box", name: "Build box", connection: "open" }],
+		});
+
+		const child = flattenFleetSessions(tree[0]!.machines[0]!.sessions, new Set())
+			.find(({ node }) => node.session.id === "child")!.node;
+		expect(child).toMatchObject({
+			parentUnavailable: true,
+			parentAddress: { machineId: "mac", sessionId: "parent" },
+			role: "orchestrator",
+		});
+	});
+
 	it("keeps a disconnected but non-terminal cloud orchestrator live", () => {
 		const tree = buildMobileFleetTree({
 			projects: [project("mac")],

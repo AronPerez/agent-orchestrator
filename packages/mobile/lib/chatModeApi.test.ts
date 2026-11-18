@@ -102,12 +102,13 @@ describe("mobile Chat API boundaries", () => {
 	it("preserves the daemon parent address used by the fleet hierarchy", async () => {
 		vi.mocked(fetch)
 			.mockResolvedValueOnce(response({ sessions: [{ id: "child", projectId: "p-1", mode: "chat", parentHostId: "mac", parentSessionId: "manager" }], archived: { total: 0, byProject: {} } }))
-			.mockResolvedValueOnce(response({ sessions: [] }))
+			.mockResolvedValueOnce(response({ sessions: [{ id: "orch-child", projectId: "p-1", kind: "orchestrator", mode: "chat", parentHostId: "mac", parentSessionId: "manager" }] }))
 			.mockResolvedValueOnce(response({ projects: [{ id: "p-1", name: "Project" }] }));
 
 		const result = await getSessions(cfg);
 
 		expect(result.sessions[0]).toMatchObject({ id: "child", parentHostId: "mac", parentSessionId: "manager" });
+		expect(result.orchestrators[0]).toMatchObject({ id: "orch-child", parentHostId: "mac", parentSessionId: "manager" });
 	});
 
 	it("looks up one historical fleet ancestor with cancellation", async () => {

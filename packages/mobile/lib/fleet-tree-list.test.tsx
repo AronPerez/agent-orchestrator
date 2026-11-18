@@ -263,7 +263,7 @@ describe("FleetTreeList", () => {
 			status: "terminated",
 			isTerminated: true,
 		}));
-		render([
+		const view = render([
 			worker("Parent"),
 			worker("Child", { parentHostId: "mac", parentSessionId: "Parent" }),
 		], [], "open", [{ hostId: "mac", name: "Mac", connection: "open" }]);
@@ -273,6 +273,8 @@ describe("FleetTreeList", () => {
 			"Parent",
 			expect.objectContaining({ signal: expect.any(AbortSignal) }),
 		);
+		await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+		expect(view.root.findAllByProps({ accessibilityLabel: "project, No sessions" })).toHaveLength(0);
 	});
 
 	it("gates ancestor lookup on an open host and retries after reconnect", async () => {

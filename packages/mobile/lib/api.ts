@@ -142,6 +142,8 @@ export type DashboardSession = {
 export type OrchestratorLink = {
 	id: string;
 	projectId: string;
+	parentHostId?: string;
+	parentSessionId?: string;
 	/** Opaque daemon runtime handle used only for terminal mux operations. */
 	terminalHandleId?: string;
 	projectName: string;
@@ -399,6 +401,8 @@ function mapOrchestrator(s: WireSession, projectName: string): OrchestratorLink 
 	return {
 		id: s.id,
 		projectId: s.projectId ?? "",
+		parentHostId: s.parentHostId,
+		parentSessionId: s.parentSessionId,
 		terminalHandleId: s.terminalHandleId,
 		projectName,
 		status: s.status ?? null,
