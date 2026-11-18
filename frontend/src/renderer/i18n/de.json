@@ -1361,6 +1361,8 @@
 	"decisionInbox.neededForProject": "Entscheidung erforderlich · {{project}}",
 	"decisionInbox.recommended": "Empfohlen",
 	"decisionInbox.title": "Entscheidungen, die Sie benötigen",
+	"decisions.title": "Entscheidungen",
+	"decisions.navNeedsYou": "Entscheidungen, warten auf dich: {{count}}",
 	"pr.botSuffix": "{{name}}-Bot",
 	"pr.card.changesRequested": "Änderungen angefordert",
 	"pr.card.checksFailing": "Checks fehlgeschlagen",

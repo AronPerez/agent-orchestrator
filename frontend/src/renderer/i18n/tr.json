@@ -1327,6 +1327,8 @@
 	"decisionInbox.neededForProject": "Karar gerekiyor · {{project}}",
 	"decisionInbox.recommended": "Önerilen",
 	"decisionInbox.title": "Sizi bekleyen kararlar",
+	"decisions.title": "Kararlar",
+	"decisions.navNeedsYou": "Kararlar, sizi bekliyor: {{count}}",
 	"pr.botSuffix": "{{name}} botu",
 	"pr.card.changesRequested": "Değişiklik istendi",
 	"pr.card.checksFailing": "Denetimler başarısız",

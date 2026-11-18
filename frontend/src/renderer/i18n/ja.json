@@ -1361,6 +1361,8 @@
 	"decisionInbox.neededForProject": "判断が必要 · {{project}}",
 	"decisionInbox.recommended": "推奨",
 	"decisionInbox.title": "あなたの判断が必要な項目",
+	"decisions.title": "意思決定",
+	"decisions.navNeedsYou": "意思決定、対応が必要: {{count}}",
 	"pr.botSuffix": "{{name}} bot",
 	"pr.card.changesRequested": "変更がリクエストされました",
 	"pr.card.checksFailing": "チェックに失敗",

@@ -1355,6 +1355,8 @@
 	"decisionInbox.neededForProject": "Требуется решение · {{project}}",
 	"decisionInbox.recommended": "Рекомендуется",
 	"decisionInbox.title": "Решения, ожидающие вас",
+	"decisions.title": "Решения",
+	"decisions.navNeedsYou": "Решения, ждут вас: {{count}}",
 	"pr.botSuffix": "{{name}} бот",
 	"pr.card.changesRequested": "Запрошены изменения",
 	"pr.card.checksFailing": "Есть ошибки проверок",

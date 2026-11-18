@@ -1361,6 +1361,8 @@
 	"decisionInbox.neededForProject": "결정 필요 · {{project}}",
 	"decisionInbox.recommended": "권장",
 	"decisionInbox.title": "결정이 필요한 항목",
+	"decisions.title": "결정",
+	"decisions.navNeedsYou": "결정, 응답 필요: {{count}}",
 	"pr.botSuffix": "{{name}} bot",
 	"pr.card.changesRequested": "변경 요청됨",
 	"pr.card.checksFailing": "검사 실패",
