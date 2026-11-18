@@ -571,6 +571,24 @@ func TestRaisingAReplacementPlanCallClosesAnApprovedGate(t *testing.T) {
 	}
 }
 
+func TestRaisingAReplacementPlanCallWithdrawsTheUnansweredCall(t *testing.T) {
+	fixture := newDecisionService(t)
+	if updated, err := fixture.store.SetSessionPlanFirstState(context.Background(), fixture.loose, domain.PlanFirstPending); err != nil || !updated {
+		t.Fatalf("set plan-first state: updated=%v err=%v", updated, err)
+	}
+	first := raisePlanFirstCall(t, fixture, fixture.loose)
+	second := raisePlanFirstCall(t, fixture, fixture.loose)
+
+	detail, err := fixture.service.Get(context.Background(), first.ID)
+	if err != nil || detail.Call.State != domain.DecisionStateWithdrawn {
+		t.Fatalf("superseded call state=%q err=%v, want withdrawn", detail.Call.State, err)
+	}
+	needsYou, err := fixture.service.List(context.Background(), Actor{Surface: domain.RequestSurfaceCLI}, ScopeNeedsYou)
+	if err != nil || len(needsYou) != 1 || needsYou[0].ID != second.ID {
+		t.Fatalf("needs-you calls=%+v err=%v, want only %s", needsYou, err, second.ID)
+	}
+}
+
 func TestDelivererSerializesPlanApprovalWithChangedAnswer(t *testing.T) {
 	fixture := newDecisionService(t)
 	if updated, err := fixture.store.SetSessionPlanFirstState(context.Background(), fixture.loose, domain.PlanFirstPending); err != nil || !updated {

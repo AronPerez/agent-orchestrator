@@ -246,6 +246,9 @@ func (s *Service) Raise(ctx context.Context, actor Actor, input RaiseInput) (dom
 		if err := s.holdPlanFirstOwnerGate(ctx, session.ID, domain.PlanFirstPending); err != nil {
 			return domain.DecisionCall{}, err
 		}
+		if err := s.withdrawPendingPlanFirstCall(ctx, actor, session.ID); err != nil {
+			return domain.DecisionCall{}, err
+		}
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
@@ -394,6 +397,15 @@ func (s *Service) rejectSupersededPlanCall(ctx context.Context, call domain.Deci
 		)
 	}
 	return nil
+}
+
+func (s *Service) withdrawPendingPlanFirstCall(ctx context.Context, actor Actor, ownerID domain.SessionID) error {
+	current, found, err := newestPlanFirstCall(ctx, s.store, s.hostID, ownerID)
+	if err != nil || !found || current.State != domain.DecisionStateNeedsYou {
+		return err
+	}
+	_, err = s.append(ctx, actor, current.ID, domain.DecisionKindWithdrawn, struct{}{})
+	return err
 }
 
 // RecordOutcome closes an in-progress call with the result of carrying it out.

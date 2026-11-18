@@ -184,6 +184,35 @@ func TestObservationApplyKeepsPinnedEditedPlanApprovalRoleWithoutBirthOrGenerati
 	}
 }
 
+func TestObservationApplyConservativelyKeepsUnwitnessedPlanApprovalRole(t *testing.T) {
+	registeredAt := time.Now()
+	stored := domain.FileIdentity{Dev: 7, Ino: 11, ModTime: 13}
+	observed := domain.FileIdentity{Dev: 7, Ino: 11, ModTime: 17}
+	row := domain.SessionArtifactRecord{
+		ID: "approval", Path: "plan.md", File: stored, Role: domain.SessionArtifactRolePlanApproval,
+		RegisteredAt: &registeredAt,
+	}
+	observation := Observation{
+		Files: []domain.SessionArtifactFile{{Path: "project-plan.md"}},
+		quick: map[string]domain.FileIdentity{"project-plan.md": observed},
+		dir:   t.TempDir(),
+	}
+	changes := observation.Changes([]domain.SessionArtifactRecord{row}, time.Now(), func() string { return "new" })
+	if len(changes.Move) != 1 || changes.Move[0].ID != row.ID || changes.Move[0].To != "project-plan.md" {
+		t.Fatalf("unwitnessed renamed plan changes = %+v", changes)
+	}
+	row.Path = changes.Move[0].To
+	row.File = changes.Move[0].File
+	row.PreviousPaths = changes.Move[0].PreviousPaths
+	files := observation.Apply([]domain.SessionArtifactRecord{row})
+	if len(files) != 1 || files[0].ID != row.ID || files[0].Role != domain.SessionArtifactRolePlanApproval || !files[0].Registered {
+		t.Fatalf("unwitnessed renamed plan approval = %+v", files)
+	}
+	if count := DeliverableCount(files, false, false); count != 0 {
+		t.Fatalf("unwitnessed renamed plan deliverables = %d, want 0", count)
+	}
+}
+
 func TestObserveLoadsPlanApprovalPin(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "plan.md")

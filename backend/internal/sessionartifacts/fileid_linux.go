@@ -4,6 +4,7 @@ package sessionartifacts
 
 import (
 	"io/fs"
+	"strconv"
 	"syscall"
 	"unsafe"
 
@@ -16,6 +17,8 @@ import (
 // generation number, which ext4, btrfs and XFS change whenever they reuse an
 // inode number for a new file.
 const fsIOCGetVersion = 2<<30 | uint(unsafe.Sizeof(int(0)))<<16 | 'v'<<8 | 1
+
+var nameToHandleAt = unix.NameToHandleAt
 
 // quickIdentity is the device, inode and modification time in info. The
 // birth time and generation take a statx and an open, which fullIdentity adds.
@@ -51,7 +54,7 @@ func fullIdentity(path string, info fs.FileInfo) domain.FileIdentity {
 }
 
 func fileHandleGeneration(path string, ino uint64) (uint64, bool) {
-	handle, mountID, err := unix.NameToHandleAt(unix.AT_FDCWD, path, 0)
+	handle, _, err := nameToHandleAt(unix.AT_FDCWD, path, 0)
 	if err != nil {
 		return 0, false
 	}
@@ -59,8 +62,14 @@ func fileHandleGeneration(path string, ino uint64) (uint64, bool) {
 	if unix.Lstat(path, &st) != nil || st.Ino != ino {
 		return 0, false
 	}
-	// FNV-1a keeps the persisted identity compact while covering the mount,
-	// handle type, inode and opaque generation-bearing handle bytes.
+	var fsStats unix.Statfs_t
+	if unix.Statfs(path, &fsStats) != nil {
+		return 0, false
+	}
+	// FNV-1a keeps the persisted identity compact while covering the stable
+	// filesystem id, handle type, inode and opaque generation-bearing bytes.
+	// The mount id from name_to_handle_at is deliberately excluded: it changes
+	// after a remount even though the file handle still names the same object.
 	hash := uint64(14695981039346656037)
 	mix := func(value uint64) {
 		for range 8 {
@@ -69,8 +78,15 @@ func fileHandleGeneration(path string, ino uint64) (uint64, bool) {
 			value >>= 8
 		}
 	}
-	mix(uint64(mountID))
-	mix(uint64(uint32(handle.Type())))
+	metadata := strconv.AppendInt(nil, int64(fsStats.Fsid.Val[0]), 10)
+	metadata = append(metadata, 0)
+	metadata = strconv.AppendInt(metadata, int64(fsStats.Fsid.Val[1]), 10)
+	metadata = append(metadata, 0)
+	metadata = strconv.AppendInt(metadata, int64(handle.Type()), 10)
+	for _, value := range metadata {
+		hash ^= uint64(value)
+		hash *= 1099511628211
+	}
 	mix(ino)
 	for _, value := range handle.Bytes() {
 		hash ^= uint64(value)

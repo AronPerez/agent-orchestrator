@@ -240,8 +240,10 @@ func addSource(sources map[domain.FileIdentity]domain.SessionArtifactRecord, row
 
 // renameSource uses the exact identity first. A plan-approval row gets a narrow
 // fallback when birth/generation metadata or its private hard-link pin proves
-// the inode is still the same file after an edit. A bare device+inode is never
-// enough because it can be recycled after deletion.
+// the inode is still the same file after an edit. If the file system exposes
+// none of those witnesses, a registered approval conservatively follows the
+// same device+inode: a rare recycled-inode match can under-count a deliverable,
+// but the approved plan can never be mistaken for finished work.
 func renameSource(sources map[domain.FileIdentity]domain.SessionArtifactRecord, observed domain.FileIdentity, pins map[string]domain.FileIdentity) (domain.SessionArtifactRecord, bool) {
 	if source, ok := sources[observed]; ok {
 		return source, true
@@ -254,7 +256,12 @@ func renameSource(sources map[domain.FileIdentity]domain.SessionArtifactRecord, 
 			(stored.Birth != 0 || stored.Generation != 0) {
 			return source, true
 		}
-		if source.Role == domain.SessionArtifactRolePlanApproval && pins[source.ID].SameFile(observed) {
+		pin := pins[source.ID]
+		if source.Role == domain.SessionArtifactRolePlanApproval && pin.SameFile(observed) {
+			return source, true
+		}
+		if source.Role == domain.SessionArtifactRolePlanApproval && source.RegisteredAt != nil && pin.Ino == 0 &&
+			stored.Dev != 0 && stored.Dev == observed.Dev && stored.Ino != 0 && stored.Ino == observed.Ino {
 			return source, true
 		}
 	}
