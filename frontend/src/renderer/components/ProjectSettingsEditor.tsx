@@ -30,6 +30,7 @@ export type ProjectSettingsDraft = {
 	orchestratorPermissions: string;
 	reviewerPermissions: string;
 	autoReview: boolean;
+	stallMinutes?: string;
 	/** Local-only: workers may ask AO to review their own PRs. */
 	workersRequestReview?: boolean;
 	/** Cloud-only: agent commits name the AO GitHub App as a co-author. */
@@ -56,6 +57,7 @@ type Capabilities = {
 	reviewer: boolean;
 	requiredAgents: boolean;
 	workersRequestReview?: boolean;
+	workerContracts?: boolean;
 	coAuthorCommits?: boolean;
 	nameLimit?: number;
 	requiredBranch?: boolean;
@@ -140,6 +142,12 @@ export function ProjectSettingsEditor({ initialValues, section, capabilities, de
 		if ([...draft.displayName.trim()].length > nameLimit && draft.displayName.trim() !== initialValues.displayName.trim()) return t("settings.project.nameTooLong", { max: nameLimit });
 		if (capabilities.requiredBranch && (!draft.defaultBranch.trim() || [...draft.defaultBranch.trim()].length > 255)) return t("settings.cloudProject.identityValidation");
 		if (visibleRoles.some((role) => !validity[role])) return t("settings.project.tuningInvalid");
+		if (capabilities.workerContracts) {
+			const stallMinutes = Number(draft.stallMinutes);
+			if (!Number.isInteger(stallMinutes) || stallMinutes < 1 || stallMinutes > 1440) {
+				return t("settings.project.stallThresholdInvalid");
+			}
+		}
 		return undefined;
 	};
 	const submit = () => {
@@ -186,6 +194,9 @@ export function ProjectSettingsEditor({ initialValues, section, capabilities, de
 						<ProjectSettingsInputRow id="defaultBranch" label={t("settings.project.defaultBranch")} editLabel={t("settings.field.edit", { label: t("settings.project.defaultBranch") })} editIcon={<Pencil className="settings-inline-edit-icon" aria-hidden="true" />} value={draft.defaultBranch} placeholder={capabilities.requiredBranch ? undefined : "auto"} onChange={(defaultBranch) => patch({ defaultBranch })} />
 						{capabilities.sessionPrefix && <ProjectSettingsInputRow id="sessionPrefix" label={t("settings.project.sessionPrefix")} editLabel={t("settings.field.edit", { label: t("settings.project.sessionPrefix") })} editIcon={<Pencil className="settings-inline-edit-icon" aria-hidden="true" />} value={draft.sessionPrefix} placeholder="ao" onChange={(sessionPrefix) => patch({ sessionPrefix })} />}
 					</ProjectSettingsSection>
+					{capabilities.workerContracts && <ProjectSettingsSection title={t("settings.project.workerContracts")} grouped>
+						<ProjectSettingsInputRow id="stallMinutes" label={t("settings.project.stallThreshold")} editLabel={t("settings.field.edit", { label: t("settings.project.stallThreshold") })} editIcon={<Pencil className="settings-inline-edit-icon" aria-hidden="true" />} value={draft.stallMinutes ?? "15"} onChange={(stallMinutes) => patch({ stallMinutes })} />
+					</ProjectSettingsSection>}
 					{capabilities.intake && <ProjectSettingsSection title={t("settings.project.issues")} grouped><IntakeFields variant="settings" description={intakeDescription} form={intake} onChange={(values) => patch({ intakeEnabled: values.enabled ?? draft.intakeEnabled, intakeRepo: values.repo ?? draft.intakeRepo, intakeAssignee: values.assignee ?? draft.intakeAssignee })} repoPreview={{ value: draft.intakeRepo.trim() || deriveRepoPath(repository ?? ""), host: deriveRepoHost(repository ?? "") }} /></ProjectSettingsSection>}
 					<ProjectSettingsSection title={t("settings.project.pullRequests")} grouped>
 						<ProjectAutoReviewToggle description={autoReviewDescription} checked={draft.autoReview} onCheckedChange={(autoReview) => patch({ autoReview })} />

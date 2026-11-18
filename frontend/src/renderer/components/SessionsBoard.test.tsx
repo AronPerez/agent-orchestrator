@@ -538,6 +538,42 @@ describe("SessionsBoard", () => {
 		expect(presentation.lastUserMessageAt).toBe("2026-01-01T09:00:00Z");
 	});
 
+	it("suppresses an unverifiable stall from an older daemon", () => {
+		const contract = boardSession({
+			id: "contract-worker",
+			status: "idle",
+			title: "Contract worker",
+			goal: "Ship the worker contract UI",
+			timeboxDeadlineAt: "2026-01-01T11:00:00Z",
+			contractStallEscalatedAt: "2026-01-01T10:00:00Z",
+			activity: { state: "idle", lastActivityAt: "2026-01-01T09:00:00Z" },
+		});
+
+		expect(toBoardSessionPresentation(contract)).toMatchObject({
+			goal: "Ship the worker contract UI",
+			timeboxDeadlineAt: "2026-01-01T11:00:00Z",
+			contractStalled: false,
+		});
+	});
+
+	it("prefers the daemon's current contract stall decision", () => {
+		const contract = boardSession({
+			id: "contract-worker",
+			status: "idle",
+			title: "Contract worker",
+			goal: "Ship the worker contract UI",
+			timeboxDeadlineAt: "2026-01-01T12:00:00Z",
+			contractStallEscalatedAt: "2026-01-01T10:00:00Z",
+			activity: { state: "idle", lastActivityAt: "2026-01-01T10:30:00Z" },
+		});
+
+		expect(toBoardSessionPresentation({ ...contract, contractStalled: true }).contractStalled).toBe(true);
+		expect(toBoardSessionPresentation({ ...contract, contractStalled: false, activity: { state: "idle", lastActivityAt: "2026-01-01T09:00:00Z" } }).contractStalled).toBe(false);
+		expect(toBoardSessionPresentation({ ...contract, contractStalled: true, contractOutcome: "met" }).contractStalled).toBe(false);
+		expect(toBoardSessionPresentation({ ...contract, contractStalled: true, isTerminated: true }).contractStalled).toBe(false);
+		expect(toBoardSessionPresentation({ ...contract, contractStalled: true, statusReadiness: "checking" }).contractStalled).toBe(false);
+	});
+
 	it("localizes dynamic card actions and pull request lifecycle labels", async () => {
 		await appI18n.changeLanguage("zh-CN");
 		workspaceQueryMock.mockReturnValue({
@@ -680,7 +716,7 @@ describe("SessionsBoard", () => {
 
 		renderBoard();
 
-		expect(screen.getByText("Board")).toBeInTheDocument();
+		expect(within(screen.getByTestId("board-topbar-label")).getByText("Board")).toBeInTheDocument();
 	});
 
 	it("labels an idle session as Idle, not Working", () => {

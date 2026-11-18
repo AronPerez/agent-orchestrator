@@ -4,7 +4,7 @@ import { GitHubIcon } from "./GitHubIcon";
 import { artifactFileIcon } from "./artifact-file-icon";
 import { ArtifactShareMark } from "./ArtifactShareMark";
 import { useReconciledShareLinks, type ShareAccessByUrl } from "./ShareArtifactPopover";
-import { Chat, CheckWaves, Folder, List, Package } from "@/components/app-icons";
+import { Chat, CheckWaves, Clock3, Folder, List, Package } from "@/components/app-icons";
 import { AppLink } from "./AppLink";
 import { GitHubMarkdown, githubHtmlClass } from "./PRMarkdown";
 import { botThreadReviewers, mergeReviewers, prConversationComments, prHasReviewActivity } from "../lib/pr-review-comments";
@@ -31,6 +31,7 @@ import {
 	type InspectorReviewSummaryAction,
 	type InspectorTimelineEvent,
 	type InspectorView,
+	useMinuteClock,
 } from "@aoagents/product-ui";
 import {
 	AlertTriangle,
@@ -57,7 +58,7 @@ import { projectNavigateTarget, sessionNavigateTarget } from "../lib/navigate-to
 import { defaultReviewerHarness, WORKER_DEFAULT_REVIEWERS } from "../lib/reviewer-harnesses";
 import { cloudSessionsQueryKey, useWorkspaceProjectSessions, workspaceQueryKeyForHost } from "../hooks/useWorkspaceQuery";
 import { captureRendererEvent } from "../lib/telemetry";
-import { formatTimeCompact } from "../lib/format-time";
+import { formatContractTimeLeft, formatTimeCompact } from "../lib/format-time";
 import { AgentAvatar } from "./AgentAvatar";
 import { SessionArtifactsView, type ArtifactOpenRequest } from "./SessionArtifactsView";
 import { OrchestratorChildrenSection } from "./OrchestratorChildrenSection";
@@ -627,7 +628,12 @@ const SummaryView = memo(function SummaryView({
 				/>
 			)}
 			completion={showSessionControls && !guest ? <SessionControls hostId={hostId} policies={hasPRs} scratchpad={scratchpadSession} session={session} stopTurn={stopTurn} /> : undefined}
-			context={collision || collisionScanState ? <CollisionRadarSection collision={collision} names={collisionNames} scanState={collisionScanState} /> : undefined}
+			context={session.goal?.trim() || collision || collisionScanState ? (
+				<>
+					<SessionContractSummary session={session} />
+					{collision || collisionScanState ? <CollisionRadarSection collision={collision} names={collisionNames} scanState={collisionScanState} /> : null}
+				</>
+			) : undefined}
 			scripts={session.cloud ? <CloudScriptRunSections cloud={session.cloud} sessionId={session.id} /> : undefined}
 			workers={showWorkers ? <OrchestratorChildrenSection session={session} /> : <SessionForksSection session={session} />}
 		/>
@@ -674,6 +680,27 @@ function CollisionRadarSection({
 				{incomplete ? <p className="text-xs text-warning">{t("collisionRadar.incomplete")}</p> : null}
 				{scanState === "unavailable" ? <p className="text-xs text-warning">{t("collisionRadar.unavailable")}</p> : null}
 				{scanState === "stale" ? <p className="text-xs text-warning">{t("collisionRadar.stale")}</p> : null}
+			</div>
+		</Section>
+	);
+}
+
+export function SessionContractSummary({
+	session,
+}: {
+	session: Pick<WorkspaceSession, "contractOutcome" | "goal" | "timeboxDeadlineAt">;
+}) {
+	const { t } = useTranslation();
+	const goal = session.goal?.trim();
+	const now = useMinuteClock(Boolean(goal && session.timeboxDeadlineAt && !session.contractOutcome));
+	if (!goal) return null;
+	return (
+		<Section surface={false} title={t("inspector.goal")}>
+			<div className="flex flex-col gap-1.5">
+				<InfoRow icon={CheckWaves} label={goal} title={goal} />
+				{session.timeboxDeadlineAt && !session.contractOutcome ? (
+					<InfoRow icon={Clock3} label={formatContractTimeLeft(session.timeboxDeadlineAt, now)} />
+				) : null}
 			</div>
 		</Section>
 	);
