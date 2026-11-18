@@ -4225,6 +4225,52 @@ paths:
       summary: Withdraw a decision call
       tags:
       - decisions
+  /api/v1/decisions/kinds:
+    get:
+      operationId: listDecisionKinds
+      parameters:
+      - description: Project id. Required from the person's surfaces; a calling session
+          always gets its own project.
+        in: query
+        name: project
+        schema:
+          description: Project id. Required from the person's surfaces; a calling
+            session always gets its own project.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionKindsResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: List decision kinds and which ones a project reserves
+      tags:
+      - decisions
   /api/v1/desktop/sessions/{sessionId}/artifacts:
     get:
       operationId: getDesktopSessionArtifacts
@@ -21581,6 +21627,12 @@ components:
           type:
           - "null"
           - string
+        autonomyMode:
+          description: The project's autonomy mode when the call was raised.
+          enum:
+          - "off"
+          - observe
+          type: string
         changedAfterClose:
           type: boolean
         choice:
@@ -21607,6 +21659,10 @@ components:
         hostId:
           type: string
         id:
+          type: string
+        kind:
+          type: string
+        kindLabel:
           type: string
         link:
           type: string
@@ -21637,6 +21693,12 @@ components:
           type: string
         ownerSessionName:
           type: string
+        prediction:
+          $ref: '#/components/schemas/DecisionPredictionPayload'
+        predictionAgreed:
+          type:
+          - "null"
+          - boolean
         projectId:
           type: string
         projectName:
@@ -21646,6 +21708,10 @@ components:
           type: string
         reference:
           type: string
+        reserved:
+          description: The project reserved this kind for the person when the call
+            was raised.
+          type: boolean
         retired:
           type: boolean
         standingEntryId:
@@ -21666,6 +21732,13 @@ components:
           type: string
         title:
           type: string
+        urgency:
+          description: Effective urgency. Calls raised before urgency existed can
+            wait.
+          enum:
+          - blocking
+          - can_wait
+          type: string
       required:
       - id
       - link
@@ -21681,6 +21754,7 @@ components:
       - ownerSessionName
       - raisedAt
       - retired
+      - urgency
       type: object
     DecisionDetailResponse:
       properties:
@@ -21746,6 +21820,36 @@ components:
       - hostId
       - authorKind
       type: object
+    DecisionKindResponse:
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        reserved:
+          type: boolean
+      required:
+      - id
+      - label
+      - reserved
+      type: object
+    DecisionKindsResponse:
+      properties:
+        kinds:
+          items:
+            $ref: '#/components/schemas/DecisionKindResponse'
+          type: array
+        mode:
+          enum:
+          - "off"
+          - observe
+          type: string
+        projectId:
+          type: string
+      required:
+      - mode
+      - kinds
+      type: object
     DecisionLinkPayload:
       properties:
         label:
@@ -21785,6 +21889,25 @@ components:
           type: string
       required:
       - text
+      type: object
+    DecisionPredictionPayload:
+      properties:
+        label:
+          description: Label of the predicted option. Set in responses only.
+          type: string
+        option:
+          minimum: 1
+          type: integer
+        undo:
+          maxLength: 300
+          type: string
+        why:
+          maxLength: 300
+          type: string
+      required:
+      - option
+      - why
+      - undo
       type: object
     DegradedProject:
       properties:
@@ -22030,6 +22153,18 @@ components:
       required:
       - state
       - lastActivityAt
+      type: object
+    DomainAutonomyConfig:
+      properties:
+        mode:
+          enum:
+          - "off"
+          - observe
+          type: string
+        reserved:
+          items:
+            type: string
+          type: array
       type: object
     DomainConversationBatchedDelivery:
       properties:
@@ -23984,6 +24119,8 @@ components:
           type: string
         autoReview:
           type: boolean
+        autonomy:
+          $ref: '#/components/schemas/DomainAutonomyConfig'
         canonicalRepoURL:
           type: string
         collisionRadar:
@@ -24332,6 +24469,10 @@ components:
         context:
           maxLength: 1000
           type: string
+        kind:
+          description: Decision kind id from GET /api/v1/decisions/kinds. Required
+            when the project is in observe mode.
+          type: string
         links:
           items:
             $ref: '#/components/schemas/DecisionLinkPayload'
@@ -24340,11 +24481,20 @@ components:
           items:
             $ref: '#/components/schemas/DecisionOptionPayload'
           type: array
+        prediction:
+          $ref: '#/components/schemas/DecisionPredictionPayload'
         reference:
           maxLength: 64
           type: string
         title:
           maxLength: 120
+          type: string
+        urgency:
+          description: How soon the person is needed. Blocking means all of the session's
+            remaining work depends on the answer. Defaults to can_wait.
+          enum:
+          - blocking
+          - can_wait
           type: string
       required:
       - title

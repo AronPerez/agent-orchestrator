@@ -149,6 +149,7 @@ var legacyActorlessUserCLICommands = map[string]struct{}{
 	"ao decision":                               {},
 	"ao decision answer":                        {},
 	"ao decision dismiss":                       {},
+	"ao decision kinds":                         {},
 	"ao decision ls":                            {},
 	"ao decision outcome":                       {},
 	"ao decision raise":                         {},

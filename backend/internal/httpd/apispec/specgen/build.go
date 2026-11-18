@@ -625,6 +625,10 @@ var schemaNames = map[string]string{ //nolint:gosec // Public OpenAPI type names
 	"ControllersDecisionIDParam":                  "DecisionIDParam",
 	"ControllersDecisionEntryResponse":            "DecisionEntryResponse",
 	"ControllersDecisionDetailResponse":           "DecisionDetailResponse",
+	"ControllersDecisionPredictionPayload":        "DecisionPredictionPayload",
+	"ControllersDecisionKindsQuery":               "DecisionKindsQuery",
+	"ControllersDecisionKindResponse":             "DecisionKindResponse",
+	"ControllersDecisionKindsResponse":            "DecisionKindsResponse",
 	"ControllersClearNotificationsResponse":       "ClearNotificationsResponse",
 	"ControllersUsageHookMetadata":                "UsageHookMetadata",
 	"ControllersListUsageSessionsQuery":           "ListUsageSessionsQuery",
@@ -1101,6 +1105,11 @@ func decisionOperations() []operation {
 			method: http.MethodGet, path: "/api/v1/decisions", id: "listDecisions", tag: "decisions",
 			summary: "List or search decision calls", pathParams: []any{controllers.ListDecisionsQuery{}},
 			resps: append([]respUnit{{http.StatusOK, controllers.ListDecisionsResponse{}}}, commonErrors...),
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/decisions/kinds", id: "listDecisionKinds", tag: "decisions",
+			summary: "List decision kinds and which ones a project reserves", pathParams: []any{controllers.DecisionKindsQuery{}},
+			resps: append([]respUnit{{http.StatusOK, controllers.DecisionKindsResponse{}}}, commonErrors...),
 		},
 		{
 			method: http.MethodGet, path: "/api/v1/decisions/{id}", id: "getDecision", tag: "decisions",

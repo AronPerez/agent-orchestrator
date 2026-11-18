@@ -31,6 +31,29 @@ type decisionRaiseAPIRequest struct {
 	Options   []decisionOptionAPI `json:"options"`
 	Links     []decisionLinkAPI   `json:"links,omitempty"`
 	Reference string              `json:"reference,omitempty"`
+	Urgency   string              `json:"urgency,omitempty"`
+	Kind      string              `json:"kind,omitempty"`
+	// Prediction is what the session would have decided on its own.
+	Prediction *decisionPredictionAPI `json:"prediction,omitempty"`
+}
+
+type decisionPredictionAPI struct {
+	Option int    `json:"option"`
+	Label  string `json:"label,omitempty"`
+	Why    string `json:"why"`
+	Undo   string `json:"undo"`
+}
+
+type decisionKindAPI struct {
+	ID       string `json:"id"`
+	Label    string `json:"label"`
+	Reserved bool   `json:"reserved"`
+}
+
+type decisionKindsAPIResponse struct {
+	ProjectID string            `json:"projectId,omitempty"`
+	Mode      string            `json:"mode"`
+	Kinds     []decisionKindAPI `json:"kinds"`
 }
 
 type decisionCallAPI struct {
@@ -68,6 +91,14 @@ type decisionCallAPI struct {
 	DeliveredToName   string              `json:"deliveredToName,omitempty"`
 	DeliveredFallback bool                `json:"deliveredFallback,omitempty"`
 	ChangedAfterClose bool                `json:"changedAfterClose,omitempty"`
+	Urgency           string              `json:"urgency,omitempty"`
+	Kind              string              `json:"kind,omitempty"`
+	KindLabel         string              `json:"kindLabel,omitempty"`
+	Reserved          bool                `json:"reserved,omitempty"`
+	AutonomyMode      string              `json:"autonomyMode,omitempty"`
+	// Prediction is what the session would have decided on its own.
+	Prediction       *decisionPredictionAPI `json:"prediction,omitempty"`
+	PredictionAgreed *bool                  `json:"predictionAgreed,omitempty"`
 }
 
 type decisionEntryAPI struct {
@@ -122,8 +153,9 @@ type decisionRetireAPIRequest struct {
 
 type decisionRaiseOptions struct {
 	title, context, file, reference string
+	urgency, kind, why, undo        string
 	options, links                  []string
-	recommend                       int
+	recommend, wouldDecide          int
 	json                            bool
 }
 
@@ -139,6 +171,7 @@ func newDecisionCommand(ctx *commandContext) *cobra.Command {
 		newDecisionOutcomeCommand(ctx),
 		newDecisionWithdrawCommand(ctx),
 		newDecisionRetireCommand(ctx),
+		newDecisionKindsCommand(ctx),
 	)
 	return cmd
 }
@@ -175,6 +208,11 @@ func newDecisionRaiseCommand(ctx *commandContext) *cobra.Command {
 	f.IntVar(&opts.recommend, "recommend", 0, "Position of the recommended option")
 	f.StringArrayVar(&opts.links, "link", nil, `Supporting link as "<label>=<url>" (repeatable)`)
 	f.StringVar(&opts.reference, "ref", "", "Issue or plan reference")
+	f.StringVar(&opts.urgency, "urgency", "can-wait", "blocking when all your remaining work depends on the answer, otherwise can-wait")
+	f.StringVar(&opts.kind, "kind", "", "Kind of decision (see ao decision kinds)")
+	f.IntVar(&opts.wouldDecide, "would-decide", 0, "Position of the option you would have picked on your own")
+	f.StringVar(&opts.why, "why", "", "Why you would have picked it (with --would-decide)")
+	f.StringVar(&opts.undo, "undo", "", "How the person could undo it (with --would-decide)")
 	f.StringVar(&opts.file, "file", "", "Read the call JSON from a file, or - for stdin")
 	f.BoolVar(&opts.json, "json", false, "Print JSON")
 	return cmd
@@ -182,7 +220,7 @@ func newDecisionRaiseCommand(ctx *commandContext) *cobra.Command {
 
 func decisionRaiseRequest(cmd *cobra.Command, opts decisionRaiseOptions) (decisionRaiseAPIRequest, error) {
 	if cmd.Flags().Changed("file") {
-		for _, name := range []string{"title", "context", "option", "recommend", "link", "ref"} {
+		for _, name := range []string{"title", "context", "option", "recommend", "link", "ref", "urgency", "kind", "would-decide", "why", "undo"} {
 			if cmd.Flags().Changed(name) {
 				return decisionRaiseAPIRequest{}, usageError{errors.New("usage: --file cannot be combined with the other call flags")}
 			}
@@ -235,9 +273,79 @@ func decisionRaiseRequest(cmd *cobra.Command, opts decisionRaiseOptions) (decisi
 		}
 		links[i] = decisionLinkAPI{Label: strings.TrimSpace(label), URL: strings.TrimSpace(target)}
 	}
-	return decisionRaiseAPIRequest{
+	var urgency string
+	switch strings.TrimSpace(opts.urgency) {
+	case "blocking":
+		urgency = "blocking"
+	case "can-wait", "can_wait":
+		urgency = "can_wait"
+	default:
+		return decisionRaiseAPIRequest{}, usageError{errors.New("usage: --urgency is blocking or can-wait")}
+	}
+	request := decisionRaiseAPIRequest{
 		Title: opts.title, Context: opts.context, Options: options, Links: links, Reference: opts.reference,
-	}, nil
+		Urgency: urgency, Kind: strings.TrimSpace(opts.kind),
+	}
+	if cmd.Flags().Changed("would-decide") {
+		request.Prediction = &decisionPredictionAPI{Option: opts.wouldDecide, Why: opts.why, Undo: opts.undo}
+	} else if cmd.Flags().Changed("why") || cmd.Flags().Changed("undo") {
+		return decisionRaiseAPIRequest{}, usageError{errors.New("usage: --why and --undo go with --would-decide")}
+	}
+	return request, nil
+}
+
+func newDecisionKindsCommand(ctx *commandContext) *cobra.Command {
+	var project string
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:   "kinds",
+		Short: "List decision kinds and which ones the project reserves for the person",
+		Args:  usageArgs(cobra.NoArgs),
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			path := "decisions/kinds"
+			if project = strings.TrimSpace(project); project != "" {
+				path += "?project=" + url.QueryEscape(project)
+			}
+			var response decisionKindsAPIResponse
+			if err := ctx.getJSON(cmd.Context(), path, &response); err != nil {
+				return err
+			}
+			if jsonOutput {
+				return writeJSON(cmd.OutOrStdout(), response)
+			}
+			return writeDecisionKinds(cmd.OutOrStdout(), response)
+		},
+	}
+	cmd.Flags().StringVar(&project, "project", "", "Project id (the person's shell only; a session always gets its own project)")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Print JSON")
+	return cmd
+}
+
+func writeDecisionKinds(w io.Writer, policy decisionKindsAPIResponse) error {
+	project := policy.ProjectID
+	if project == "" {
+		project = "(none)"
+	}
+	if _, err := fmt.Fprintf(w, "Project %s · autonomy mode: %s\n", project, policy.Mode); err != nil {
+		return err
+	}
+	for _, group := range []struct {
+		heading  string
+		reserved bool
+	}{{"Reserved for the person:", true}, {"Not reserved:", false}} {
+		if _, err := fmt.Fprintln(w, group.heading); err != nil {
+			return err
+		}
+		for _, kind := range policy.Kinds {
+			if kind.Reserved != group.reserved {
+				continue
+			}
+			if _, err := fmt.Fprintf(w, "  %s  %s\n", kind.ID, kind.Label); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func newDecisionSearchCommand(ctx *commandContext) *cobra.Command {
@@ -625,6 +733,20 @@ func writeDecisionDetail(w io.Writer, detail decisionDetailAPIResponse) error {
 		"Delivered to: " + joinNamedID(call.DeliveredToName, call.DeliveredTo),
 		fmt.Sprintf("Delivered fallback: %t", call.DeliveredFallback),
 		fmt.Sprintf("Changed after close: %t", call.ChangedAfterClose),
+		"Urgency: " + call.Urgency,
+		"Kind: " + joinNamedID(call.KindLabel, call.Kind),
+		fmt.Sprintf("Reserved: %t", call.Reserved),
+		"Autonomy mode: " + call.AutonomyMode,
+	}
+	if prediction := call.Prediction; prediction != nil {
+		lines = append(lines, fmt.Sprintf("Would have decided: %d. %s — %s (undo: %s)", prediction.Option, prediction.Label, prediction.Why, prediction.Undo))
+	}
+	if call.PredictionAgreed != nil {
+		if *call.PredictionAgreed {
+			lines = append(lines, "Prediction: agreed with the answer")
+		} else {
+			lines = append(lines, "Prediction: differed from the answer")
+		}
 	}
 	for _, line := range lines {
 		if _, err := fmt.Fprintln(w, line); err != nil {

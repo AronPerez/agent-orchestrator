@@ -16,6 +16,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
 	decisionsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/decision"
 )
 
@@ -33,13 +34,29 @@ type fakeDecisionService struct {
 	note     string
 	outcome  decisionsvc.OutcomeInput
 	retired  bool
+	project  domain.ProjectID
+	call     *domain.DecisionCall
 	err      error
+}
+
+func (f *fakeDecisionService) Kinds(_ context.Context, actor decisionsvc.Actor, project domain.ProjectID) (decisionsvc.Policy, error) {
+	f.actor, f.project = actor, project
+	if f.err != nil {
+		return decisionsvc.Policy{}, f.err
+	}
+	return decisionsvc.Policy{ProjectID: "shop", Mode: domain.AutonomyObserve, Kinds: []decisionsvc.KindPolicy{
+		{ID: "production", Label: "Production changes and deploys", Reserved: true},
+		{ID: "pr_hygiene", Label: "Pull request hygiene"},
+	}}, nil
 }
 
 func (f *fakeDecisionService) Raise(_ context.Context, actor decisionsvc.Actor, input decisionsvc.RaiseInput) (domain.DecisionCall, error) {
 	f.actor, f.raise = actor, input
 	if f.err != nil {
 		return domain.DecisionCall{}, f.err
+	}
+	if f.call != nil {
+		return *f.call, nil
 	}
 	return sampleDecisionCall(), nil
 }
@@ -343,5 +360,82 @@ func TestDecisionsAPI_ActionRefusals(t *testing.T) {
 				t.Fatalf("status=%d body=%s", status, body)
 			}
 		})
+	}
+}
+
+func TestDecisionsAPI_RaiseCarriesUrgencyKindAndPrediction(t *testing.T) {
+	svc := &fakeDecisionService{}
+	body := `{"title":"Close the duplicate PR?","context":"It repeats an open one.",` +
+		`"options":[{"label":"Close it","consequence":"Branch kept.","recommended":true},{"label":"Keep both","consequence":"Two reviews."}],` +
+		`"urgency":"blocking","kind":"pr_hygiene","prediction":{"option":1,"why":"It is a duplicate.","undo":"Reopen the PR."}}`
+	response, status := decisionRequest(t, newDecisionServer(t, svc), http.MethodPost, "/api/v1/decisions", body, "w-1")
+	if status != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", status, response)
+	}
+	want := domain.DecisionPrediction{Option: 1, Why: "It is a duplicate.", Undo: "Reopen the PR."}
+	if svc.raise.Urgency != "blocking" || svc.raise.Kind != "pr_hygiene" || svc.raise.Prediction == nil || *svc.raise.Prediction != want {
+		t.Fatalf("raise=%+v", svc.raise)
+	}
+}
+
+func raisedResponse(t *testing.T, call domain.DecisionCall) controllers.DecisionCallResponse {
+	t.Helper()
+	svc := &fakeDecisionService{call: &call}
+	body, status := decisionRequest(t, newDecisionServer(t, svc), http.MethodPost, "/api/v1/decisions", raiseDecisionBody, "w-1")
+	if status != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+	var got controllers.DecisionCallResponse
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode: %v body=%s", err, body)
+	}
+	return got
+}
+
+func TestDecisionCallResponseCarriesAutonomyFields(t *testing.T) {
+	call := sampleDecisionCall()
+	legacy := raisedResponse(t, call)
+	if legacy.Urgency != "can_wait" || legacy.Kind != "" || legacy.Prediction != nil || legacy.PredictionAgreed != nil {
+		t.Fatalf("legacy response = %+v", legacy)
+	}
+
+	call.Raised.Urgency = domain.DecisionUrgencyBlocking
+	call.Raised.Kind = "pr_hygiene"
+	call.Raised.AutonomyMode = domain.AutonomyObserve
+	call.Raised.Prediction = &domain.DecisionPrediction{Option: 2, Why: "w", Undo: "u"}
+	call.State = domain.DecisionStateInProgress
+	call.StandingKind = domain.DecisionKindAnswered
+	call.Choice, call.Option = domain.DecisionChoiceOption, 2
+	got := raisedResponse(t, call)
+	if got.Urgency != "blocking" || got.Kind != "pr_hygiene" || got.KindLabel != "Pull request hygiene" || got.Reserved || got.AutonomyMode != "observe" {
+		t.Fatalf("response = %+v", got)
+	}
+	if got.Prediction == nil || got.Prediction.Option != 2 || got.Prediction.Label != "Per-tenant API keys" || got.Prediction.Why != "w" || got.Prediction.Undo != "u" {
+		t.Fatalf("prediction = %+v", got.Prediction)
+	}
+	if got.PredictionAgreed == nil || !*got.PredictionAgreed {
+		t.Fatalf("predictionAgreed = %v", got.PredictionAgreed)
+	}
+}
+
+func TestDecisionsAPI_Kinds(t *testing.T) {
+	svc := &fakeDecisionService{}
+	srv := newDecisionServer(t, svc)
+	body, status := decisionRequest(t, srv, http.MethodGet, "/api/v1/decisions/kinds?project=shop", "", "")
+	if status != http.StatusOK {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+	if svc.project != "shop" || svc.actor.Session != "" {
+		t.Fatalf("actor=%+v project=%q", svc.actor, svc.project)
+	}
+	var got controllers.DecisionKindsResponse
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode: %v body=%s", err, body)
+	}
+	if got.ProjectID != "shop" || got.Mode != "observe" || len(got.Kinds) != 2 || !got.Kinds[0].Reserved || got.Kinds[1].Reserved || got.Kinds[1].Label != "Pull request hygiene" {
+		t.Fatalf("kinds = %+v", got)
+	}
+	if _, status := decisionRequest(t, srv, http.MethodGet, "/api/v1/decisions/kinds", "", "w-1"); status != http.StatusOK || svc.actor.Session != "w-1" {
+		t.Fatalf("session kinds status=%d actor=%+v", status, svc.actor)
 	}
 }
