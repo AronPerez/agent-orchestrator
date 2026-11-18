@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -1004,5 +1005,35 @@ func TestReconnectOnlyNeverPreparesOrStartsMissingHost(t *testing.T) {
 	}
 	if _, err := readDescriptor(cfg.DataDir, cfg.SessionID); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("health check wrote a descriptor: %v", err)
+	}
+}
+
+func TestUnpublishedLiveHostRemainsFencedBeforeLockAndDescriptor(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionID := "unpublished-live"
+	token, err := reserveLaunchIntent(dataDir, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { clearLaunchIntent(dataDir, sessionID, token) })
+	if err := publishLaunchReady(dataDir, sessionID, token, os.Getpid()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "chat-hosts", sessionID, "host.lock")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("host lock exists before child ownership checkpoint: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "chat-hosts", sessionID, "host.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("descriptor exists before publication: %v", err)
+	}
+
+	if err := Shutdown(context.Background(), dataDir, sessionID); !errors.Is(err, ErrOwnershipInconclusive) {
+		t.Fatalf("Shutdown() error = %v, want ErrOwnershipInconclusive", err)
+	}
+	cfg := Config{SessionID: sessionID, DataDir: dataDir, Workdir: t.TempDir(), ReconnectOnly: true}
+	if _, err := ConnectOrStart(context.Background(), cfg); !errors.Is(err, ErrOwnershipInconclusive) {
+		t.Fatalf("Reconnect-only probe error = %v, want ErrOwnershipInconclusive", err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "chat-hosts", sessionID, "host.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("recovery launched or published a competing host: %v", err)
 	}
 }

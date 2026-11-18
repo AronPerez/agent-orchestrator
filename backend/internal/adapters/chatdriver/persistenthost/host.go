@@ -129,6 +129,7 @@ type Config struct {
 	Protocol             Protocol
 	OwnershipFingerprint string
 	Prepare              func(context.Context) (PreparedProvider, error)
+	launchToken          string
 }
 
 // PreparedProvider is resolved only when no compatible live host can be
@@ -371,6 +372,9 @@ func ConnectOrStart(ctx context.Context, cfg Config) (*Transport, error) {
 		// exists. Fail closed instead of launching a competing process.
 		return nil, fmt.Errorf("%w: %w", ErrOwnershipInconclusive, err)
 	}
+	if err := probeUnpublishedHost(cfg.DataDir, cfg.SessionID); err != nil {
+		return nil, err
+	}
 	if cfg.ReconnectOnly {
 		return nil, ErrNotRunning
 	}
@@ -388,7 +392,13 @@ func ConnectOrStart(ctx context.Context, cfg Config) (*Transport, error) {
 	if len(cfg.Argv) == 0 {
 		return nil, errors.New("chat host start requires provider argv")
 	}
+	launchToken, err := reserveLaunchIntent(cfg.DataDir, cfg.SessionID)
+	if err != nil {
+		return nil, fmt.Errorf("reserve chat host launch: %w", err)
+	}
+	cfg.launchToken = launchToken
 	if err := spawnDetached(ctx, cfg); err != nil {
+		clearLaunchIntent(cfg.DataDir, cfg.SessionID, launchToken)
 		return nil, err
 	}
 	deadline := time.Now().Add(startupTimeout)
@@ -414,6 +424,9 @@ func ConnectOrStart(ctx context.Context, cfg Config) (*Transport, error) {
 	}
 	if d, readErr := readDescriptor(cfg.DataDir, cfg.SessionID); readErr == nil && processalive.Alive(d.PID) {
 		return nil, fmt.Errorf("%w: %w", ErrOwnershipInconclusive, lastErr)
+	}
+	if ownershipErr := probeUnpublishedHost(cfg.DataDir, cfg.SessionID); ownershipErr != nil {
+		return nil, ownershipErr
 	}
 	return nil, fmt.Errorf("start chat host: %w", lastErr)
 }
@@ -585,7 +598,7 @@ func readShutdownDescriptor(ctx context.Context, dataDir, sessionID string) (Des
 func shutdown(ctx context.Context, dataDir, sessionID string, quick bool) error {
 	d, err := readShutdownDescriptor(ctx, dataDir, sessionID)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return probeUnpublishedHost(dataDir, sessionID)
 	}
 	if err != nil {
 		return err
@@ -654,6 +667,17 @@ func Run(ctx context.Context, cfg Config) error {
 	if len(cfg.Argv) == 0 || !filepath.IsAbs(cfg.Workdir) {
 		return errors.New("chat host requires provider argv and absolute workdir")
 	}
+	envLaunchToken, cleanEnv := launchTokenFromEnv(cfg.Env)
+	cfg.Env = cleanEnv
+	if cfg.launchToken == "" {
+		cfg.launchToken = envLaunchToken
+	}
+	if err := awaitLaunchReady(ctx, cfg); err != nil {
+		return err
+	}
+	if cfg.launchToken != "" {
+		defer clearLaunchIntent(cfg.DataDir, cfg.SessionID, cfg.launchToken)
+	}
 	releaseLock, err := acquireHostLock(cfg.DataDir, cfg.SessionID)
 	if err != nil {
 		return err
@@ -705,6 +729,9 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := writeDescriptor(cfg.DataDir, d); err != nil {
 		_ = killProviderProcess(context.WithoutCancel(ctx), child)
 		return err
+	}
+	if cfg.launchToken != "" {
+		clearLaunchIntent(cfg.DataDir, cfg.SessionID, cfg.launchToken)
 	}
 	path, _ := descriptorPath(cfg.DataDir, cfg.SessionID)
 	defer func() { _ = os.Remove(path) }()
