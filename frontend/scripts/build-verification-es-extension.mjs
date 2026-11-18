@@ -7,7 +7,8 @@ import { fileURLToPath } from "node:url";
 const frontend = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const VERIFICATION_ES_DEV_FLAG = "AO_MACOS_ES_EXTENSION_DEV";
 export const VERIFICATION_ES_EXECUTABLE = "ao-verification-endpoint-security";
-export const VERIFICATION_ES_BUNDLE = "AgentOrchestratorVerification.systemextension";
+export const VERIFICATION_ES_BUNDLE_IDENTIFIER = "dev.agent-orchestrator.verification.endpoint-security";
+export const VERIFICATION_ES_BUNDLE = `${VERIFICATION_ES_BUNDLE_IDENTIFIER}.systemextension`;
 
 const sources = [
 	"Protocol.swift",

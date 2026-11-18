@@ -32,7 +32,11 @@ final class AOESXPCConnectionService: NSObject, AOESControlXPCProtocol, @uncheck
 			self?.send(observation)
 		}
 		do {
-			reply(try AOESWireCodec.encode(registration))
+			let response = try AOESWireCodec.encode(registration)
+			reply(response)
+			if registration.accepted {
+				_ = tracker.acknowledge(request.runID, connectionID: connectionID)
+			}
 		} catch {
 			_ = tracker.unregister(
 				AOESUnregisterRunRequest(version: AOESProtocol.version, runID: request.runID),
@@ -88,8 +92,8 @@ final class AOESXPCListenerDelegate: NSObject, NSXPCListenerDelegate, @unchecked
 	}
 
 	func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
-		// Foundation rejects messages from peers outside AO's signing team or
-		// without the supervisor entitlement before dispatching exported methods.
+		// Foundation rejects messages unless the peer has AO's team identity and
+		// the dedicated verification-supervisor signing identifier.
 		connection.setCodeSigningRequirement(supervisorRequirement)
 		let connectionID = UUID()
 		let service = AOESXPCConnectionService(connectionID: connectionID, tracker: tracker, connection: connection)

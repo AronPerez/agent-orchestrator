@@ -5,13 +5,13 @@ Do not run this plan until Apple has granted the Endpoint Security entitlement a
 ## Prerequisites
 
 - Use a dedicated test Mac for each supported release from macOS 13 onward, covering Apple silicon and Intel.
-- Sign the containing app, extension, and per-run supervisor with the same approved Team ID. Give only the extension `com.apple.developer.endpoint-security.client`; give only the supervisor `dev.agent-orchestrator.verification-supervisor`.
+- Sign the containing app, extension, and per-run supervisor with the same approved Team ID. Give only the extension `com.apple.developer.endpoint-security.client`; sign the supervisor with the identifier `dev.agent-orchestrator.verification-supervisor`.
 - Install and activate through the containing app's reviewed `OSSystemExtensionRequest` flow, then grant Full Disk Access through normal System Settings approval.
 - If a daemon or supervisor harness is used, set private `AO_DATA_DIR`, `AO_RUN_FILE`, and `AO_PORT` values. Never use the defaults on a development machine.
 
 ## Checks
 
-1. Connect the supervisor with reciprocal code-signing requirements. Confirm an unsigned, differently signed, wrong-Team-ID, or missing-entitlement client receives no protocol messages.
+1. Connect the supervisor with reciprocal code-signing requirements. Confirm an unsigned, differently signed, wrong-Team-ID, or wrong-signing-identifier client receives no protocol messages.
 2. Spawn a root suspended, register its `(pid, pidversion)`, wait for the matching acknowledgement and extension source UUID, then release it. Confirm no run observation precedes registration.
 3. Exercise direct fork, fork then exec, normal exit, `posix_spawn`, fast double-fork, `setsid`, cleared environment, and closed/redirected descriptors. Confirm every descendant produces contiguous per-run observations and exact identity transitions.
 4. Reuse a PID after its earlier process exits. Confirm the changed `pidversion` cannot match or receive a termination intended for the old execution.

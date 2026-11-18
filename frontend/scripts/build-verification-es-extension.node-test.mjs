@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
 	buildVerificationExtension,
 	VERIFICATION_ES_BUNDLE,
+	VERIFICATION_ES_BUNDLE_IDENTIFIER,
 	VERIFICATION_ES_DEV_FLAG,
 	verificationExtensionBuildOptions,
 } from "./build-verification-es-extension.mjs";
@@ -16,6 +17,7 @@ describe("macOS verification Endpoint Security extension build", () => {
 			assert.ok(options.args.includes("-lEndpointSecurity"));
 			assert.ok(options.args.includes("-lbsm"));
 			assert.ok(options.bundle.endsWith(`/build-cache/verification-es-extension/${arch}/${VERIFICATION_ES_BUNDLE}`));
+			assert.equal(VERIFICATION_ES_BUNDLE, `${VERIFICATION_ES_BUNDLE_IDENTIFIER}.systemextension`);
 			assert.ok(options.executable.startsWith("/private/ao-data/"));
 		});
 	}

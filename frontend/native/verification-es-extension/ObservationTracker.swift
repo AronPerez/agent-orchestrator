@@ -37,6 +37,10 @@ final class AOESObservationTracker: @unchecked Sendable {
 		let deliver: Delivery
 		var identities: Set<AOESProcessIdentity>
 		var nextSequence: UInt64
+		var pending: [AOESObservation]
+		var acknowledged: Bool
+		var acknowledgementInProgress: Bool
+		var terminal: Bool
 	}
 
 	private struct PendingDelivery {
@@ -79,9 +83,52 @@ final class AOESObservationTracker: @unchecked Sendable {
 			connectionID: connectionID,
 			deliver: deliver,
 			identities: [request.root],
-			nextSequence: 1
+			nextSequence: 1,
+			pending: [],
+			acknowledged: false,
+			acknowledgementInProgress: false,
+			terminal: false
 		)
 		return registrationReply(accepted: true, error: nil)
+	}
+
+	func acknowledge(_ runID: UUID, connectionID: UUID) -> Bool {
+		lock.lock()
+		guard var run = runs[runID],
+			run.connectionID == connectionID,
+			!run.acknowledged,
+			!run.acknowledgementInProgress
+		else {
+			lock.unlock()
+			return false
+		}
+		run.acknowledgementInProgress = true
+		runs[runID] = run
+		lock.unlock()
+
+		while true {
+			lock.lock()
+			guard var current = runs[runID], current.connectionID == connectionID else {
+				lock.unlock()
+				return true
+			}
+			guard !current.pending.isEmpty else {
+				current.acknowledged = true
+				current.acknowledgementInProgress = false
+				if current.terminal {
+					runs.removeValue(forKey: runID)
+				} else {
+					runs[runID] = current
+				}
+				lock.unlock()
+				return true
+			}
+			let pending = current.pending.map { PendingDelivery(deliver: current.deliver, observation: $0) }
+			current.pending.removeAll()
+			runs[runID] = current
+			lock.unlock()
+			deliver(pending)
+		}
 	}
 
 	func unregister(_ request: AOESUnregisterRunRequest, connectionID: UUID) -> Bool {
@@ -169,9 +216,9 @@ final class AOESObservationTracker: @unchecked Sendable {
 				observation = nil
 			}
 			if let observation {
-				run.nextSequence += 1
-				runs[runID] = run
-				pending.append(PendingDelivery(deliver: run.deliver, observation: observation))
+				if let delivery = publishLocked(observation, runID: runID, run: &run) {
+					pending.append(delivery)
+				}
 			}
 		}
 		return pending
@@ -180,17 +227,39 @@ final class AOESObservationTracker: @unchecked Sendable {
 	private func failLocked(_ failure: AOESFailureCode, sourceSequence: UInt64) -> [PendingDelivery] {
 		guard sourceFailure == nil else { return [] }
 		sourceFailure = failure
-		let pending = runs.map { runID, run in
-			PendingDelivery(
-				deliver: run.deliver,
-				observation: makeObservation(
-					runID: runID, run: run, sourceSequence: sourceSequence,
-					kind: .sourceFailure, failure: failure
-				)
+		var pending: [PendingDelivery] = []
+		for runID in runs.keys.sorted(by: { $0.uuidString < $1.uuidString }) {
+			guard var run = runs[runID] else { continue }
+			let observation = makeObservation(
+				runID: runID, run: run, sourceSequence: sourceSequence,
+				kind: .sourceFailure, failure: failure
 			)
+			if let delivery = publishLocked(observation, runID: runID, run: &run, terminal: true) {
+				pending.append(delivery)
+			}
 		}
-		runs.removeAll()
 		return pending
+	}
+
+	private func publishLocked(
+		_ observation: AOESObservation,
+		runID: UUID,
+		run: inout Run,
+		terminal: Bool = false
+	) -> PendingDelivery? {
+		run.nextSequence += 1
+		run.terminal = run.terminal || terminal
+		guard run.acknowledged else {
+			run.pending.append(observation)
+			runs[runID] = run
+			return nil
+		}
+		if run.terminal {
+			runs.removeValue(forKey: runID)
+		} else {
+			runs[runID] = run
+		}
+		return PendingDelivery(deliver: run.deliver, observation: observation)
 	}
 
 	private func makeObservation(

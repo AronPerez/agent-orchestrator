@@ -68,9 +68,9 @@ jobs:
           AO_MACOS_ES_EXTENSION_DEV: "1"
         run: |
           node scripts/build-verification-es-extension.mjs --arch x64
-          lipo "$AO_DATA_DIR/build-cache/verification-es-extension/x64/AgentOrchestratorVerification.systemextension/Contents/MacOS/ao-verification-endpoint-security" -verify_arch x86_64
+          lipo "$AO_DATA_DIR/build-cache/verification-es-extension/x64/dev.agent-orchestrator.verification.endpoint-security.systemextension/Contents/MacOS/ao-verification-endpoint-security" -verify_arch x86_64
           node scripts/build-verification-es-extension.mjs --arch arm64
-          lipo "$AO_DATA_DIR/build-cache/verification-es-extension/arm64/AgentOrchestratorVerification.systemextension/Contents/MacOS/ao-verification-endpoint-security" -verify_arch arm64
+          lipo "$AO_DATA_DIR/build-cache/verification-es-extension/arm64/dev.agent-orchestrator.verification.endpoint-security.systemextension/Contents/MacOS/ao-verification-endpoint-security" -verify_arch arm64
       - name: Run fake Endpoint Security source tests
         env:
           AO_DATA_DIR: ${{ runner.temp }}/ao-verification-es

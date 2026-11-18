@@ -51,6 +51,7 @@ private final class ObservationRecorder: @unchecked Sendable {
 private enum StateTests {
 	static func main() throws {
 		try testRegistrationAndOrderedLifecycle()
+		try testFailureBeforeRegistrationAcknowledgementIsBuffered()
 		try testSequenceGapFailsClosed()
 		try testDuplicateSequenceFailsClosed()
 		try testSourceFailureFailsClosed()
@@ -79,6 +80,7 @@ private enum StateTests {
 			deliver: recorder.append
 		)
 		try expect(reply.accepted && reply.sourceID == sourceID && reply.nextSequence == 1, "root registration was not acknowledged")
+		try expect(tracker.acknowledge(runID, connectionID: connectionID), "registered root could not be acknowledged")
 
 		source.emit(AOESEventEnvelope(sourceSequence: 20, event: .fork(parent: root, child: child)))
 		source.emit(AOESEventEnvelope(sourceSequence: 21, event: .exec(previous: child, process: executed)))
@@ -92,18 +94,41 @@ private enum StateTests {
 		try expect(observations[1].previous == child && observations[1].process == executed, "exec identities were wrong")
 	}
 
+	private static func testFailureBeforeRegistrationAcknowledgementIsBuffered() throws {
+		let tracker = AOESObservationTracker()
+		let root = AOESProcessIdentity(pid: 150, pidVersion: 1)
+		let runID = UUID()
+		let connectionID = UUID()
+		let recorder = ObservationRecorder()
+		let reply = tracker.register(
+			AOESRegisterRootRequest(version: AOESProtocol.version, runID: runID, root: root),
+			connectionID: connectionID,
+			deliver: recorder.append
+		)
+		try expect(reply.accepted, "root registration failed")
+
+		tracker.sourceFailed(.sourceDisconnected)
+		try expect(recorder.observations.isEmpty, "source failure escaped before registration acknowledgement")
+		try expect(tracker.acknowledge(runID, connectionID: connectionID), "failed registration could not be acknowledged")
+		try expect(recorder.observations.count == 1, "buffered source failure was not delivered")
+		try expect(recorder.observations[0].failure == .sourceDisconnected, "buffered source failure changed")
+		try expect(!tracker.acknowledge(runID, connectionID: connectionID), "terminal registration remained active")
+	}
+
 	private static func testSequenceGapFailsClosed() throws {
 		let tracker = AOESObservationTracker()
 		let source = FakeEventSource()
 		let engine = AOESObservationEngine(source: source, tracker: tracker)
 		let root = AOESProcessIdentity(pid: 200, pidVersion: 1)
 		let runID = UUID()
+		let connectionID = UUID()
 		let recorder = ObservationRecorder()
 		try engine.start()
 		_ = tracker.register(
 			AOESRegisterRootRequest(version: AOESProtocol.version, runID: runID, root: root),
-			connectionID: UUID(), deliver: recorder.append
+			connectionID: connectionID, deliver: recorder.append
 		)
+		try expect(tracker.acknowledge(runID, connectionID: connectionID), "gap test registration was not acknowledged")
 		source.emit(AOESEventEnvelope(sourceSequence: 7, event: .fork(parent: root, child: .init(pid: 201, pidVersion: 1))))
 		source.emit(AOESEventEnvelope(sourceSequence: 9, event: .exit(process: root, status: 0)))
 
@@ -119,11 +144,14 @@ private enum StateTests {
 	private static func testDuplicateSequenceFailsClosed() throws {
 		let tracker = AOESObservationTracker()
 		let root = AOESProcessIdentity(pid: 300, pidVersion: 1)
+		let runID = UUID()
+		let connectionID = UUID()
 		let recorder = ObservationRecorder()
 		_ = tracker.register(
-			AOESRegisterRootRequest(version: AOESProtocol.version, runID: UUID(), root: root),
-			connectionID: UUID(), deliver: recorder.append
+			AOESRegisterRootRequest(version: AOESProtocol.version, runID: runID, root: root),
+			connectionID: connectionID, deliver: recorder.append
 		)
+		try expect(tracker.acknowledge(runID, connectionID: connectionID), "duplicate test registration was not acknowledged")
 		tracker.consume(.init(sourceSequence: 4, event: .fork(parent: root, child: .init(pid: 301, pidVersion: 1))))
 		tracker.consume(.init(sourceSequence: 4, event: .exit(process: root, status: 0)))
 		try expect(recorder.observations.last?.failure == .sourceSequenceInvalid, "duplicate sequence did not fail closed")
@@ -134,12 +162,15 @@ private enum StateTests {
 		let source = FakeEventSource()
 		let engine = AOESObservationEngine(source: source, tracker: tracker)
 		let root = AOESProcessIdentity(pid: 350, pidVersion: 1)
+		let runID = UUID()
+		let connectionID = UUID()
 		let recorder = ObservationRecorder()
 		try engine.start()
 		_ = tracker.register(
-			AOESRegisterRootRequest(version: AOESProtocol.version, runID: UUID(), root: root),
-			connectionID: UUID(), deliver: recorder.append
+			AOESRegisterRootRequest(version: AOESProtocol.version, runID: runID, root: root),
+			connectionID: connectionID, deliver: recorder.append
 		)
+		try expect(tracker.acknowledge(runID, connectionID: connectionID), "source-failure test registration was not acknowledged")
 		source.fail(.sourceDisconnected)
 		try expect(recorder.observations.count == 1, "source failure did not terminate the run")
 		try expect(recorder.observations[0].failure == .sourceDisconnected, "source failure code changed")
@@ -148,11 +179,14 @@ private enum StateTests {
 	private static func testStableIdentityRejectsPIDReuse() throws {
 		let tracker = AOESObservationTracker()
 		let root = AOESProcessIdentity(pid: 400, pidVersion: 8)
+		let runID = UUID()
+		let connectionID = UUID()
 		let recorder = ObservationRecorder()
 		_ = tracker.register(
-			AOESRegisterRootRequest(version: AOESProtocol.version, runID: UUID(), root: root),
-			connectionID: UUID(), deliver: recorder.append
+			AOESRegisterRootRequest(version: AOESProtocol.version, runID: runID, root: root),
+			connectionID: connectionID, deliver: recorder.append
 		)
+		try expect(tracker.acknowledge(runID, connectionID: connectionID), "identity test registration was not acknowledged")
 		tracker.consume(.init(sourceSequence: 1, event: .exit(process: .init(pid: 400, pidVersion: 9), status: 0)))
 		try expect(recorder.observations.isEmpty, "PID reuse matched an earlier process execution")
 	}
@@ -200,7 +234,7 @@ private enum StateTests {
 		let teamIdentifier = "A1B2C3D4E5"
 		let supervisor = try AOESPeerRequirement.supervisor(teamIdentifier: teamIdentifier)
 		try expect(supervisor.contains("certificate leaf[subject.OU] = \"\(teamIdentifier)\""), "supervisor requirement omitted the team")
-		try expect(supervisor.contains("entitlement[\"\(AOESProtocol.supervisorEntitlement)\"] exists"), "supervisor requirement omitted its entitlement")
+		try expect(supervisor.contains("identifier \"\(AOESProtocol.supervisorSigningIdentifier)\""), "supervisor requirement omitted its signing identifier")
 		let endpointSecurity = try AOESPeerRequirement.endpointSecurityExtension(teamIdentifier: teamIdentifier)
 		try expect(endpointSecurity.contains("identifier \"\(AOESProtocol.extensionBundleIdentifier)\""), "extension requirement omitted its bundle identifier")
 		try expect(endpointSecurity.contains("entitlement[\"\(AOESProtocol.endpointSecurityEntitlement)\"] exists"), "extension requirement omitted its entitlement")

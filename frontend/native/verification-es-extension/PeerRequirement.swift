@@ -10,7 +10,7 @@ enum AOESPeerRequirementError: Error, Equatable {
 enum AOESPeerRequirement {
 	static func supervisor(teamIdentifier: String) throws -> String {
 		try validate(teamIdentifier)
-		return "anchor apple generic and certificate leaf[subject.OU] = \"\(teamIdentifier)\" and entitlement[\"\(AOESProtocol.supervisorEntitlement)\"] exists"
+		return "anchor apple generic and identifier \"\(AOESProtocol.supervisorSigningIdentifier)\" and certificate leaf[subject.OU] = \"\(teamIdentifier)\""
 	}
 
 	static func endpointSecurityExtension(teamIdentifier: String) throws -> String {

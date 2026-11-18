@@ -4,7 +4,7 @@ enum AOESProtocol {
 	static let version: UInt16 = 1
 	static let extensionBundleIdentifier = "dev.agent-orchestrator.verification.endpoint-security"
 	static let machServiceName = "dev.agent-orchestrator.verification.endpoint-security.xpc"
-	static let supervisorEntitlement = "dev.agent-orchestrator.verification-supervisor"
+	static let supervisorSigningIdentifier = "dev.agent-orchestrator.verification-supervisor"
 	static let endpointSecurityEntitlement = "com.apple.developer.endpoint-security.client"
 	static let maximumMessageBytes = 16 * 1024
 }
