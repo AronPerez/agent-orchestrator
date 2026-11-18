@@ -48,7 +48,6 @@ func (m *Manager) ScheduleTrackerIntakeClaimReconciliation(ctx context.Context) 
 		if !m.beginTrackerIntakeRecovery(claim.SessionID) {
 			continue
 		}
-		claim := claim
 		m.runInBackground(func() {
 			defer m.endTrackerIntakeRecovery(claim.SessionID)
 			if err := m.reconcileTrackerIntakeClaim(m.backgroundContext, claim); err != nil {
