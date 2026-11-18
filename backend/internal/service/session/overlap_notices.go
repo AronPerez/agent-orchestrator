@@ -661,7 +661,9 @@ func (s *Service) reconcileProjectOverlapNoticesLocked(ctx context.Context, stor
 				}
 			} else {
 				state.retry = true
-				if outcome == sessionguard.Sent && nudgeErr != nil {
+				if outcome != sessionguard.Sent {
+					s.deleteProjectOverlapNoticeAttempt(key)
+				} else if nudgeErr != nil {
 					if projectOverlapNoticeDefinitelyUnsent(nudgeErr) {
 						s.deleteProjectOverlapNoticeAttempt(key)
 					} else {

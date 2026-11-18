@@ -437,7 +437,7 @@ func TestReconcileProjectOverlapNoticesRetriesOnlySuppressedRecipient(t *testing
 		"demo-b": {sessionguard.Sent},
 	}}
 	svc := NewWithDeps(Deps{Store: store, OverlapNudger: nudger})
-	result := ProjectOverlapResult{ProjectID: "demo", Overlaps: []ProjectOverlap{{SessionA: "demo-a", SessionB: "demo-b", Paths: []string{"shared.go"}}}}
+	result := ProjectOverlapResult{ProjectID: "demo", Overlaps: []ProjectOverlap{{SessionA: "demo-a", SessionB: "demo-b", Paths: []string{"a.go"}}}}
 
 	if err := svc.reconcileProjectOverlapNotices(context.Background(), result); err != nil {
 		t.Fatalf("first reconcile: %v", err)
@@ -445,11 +445,18 @@ func TestReconcileProjectOverlapNoticesRetriesOnlySuppressedRecipient(t *testing
 	if len(store.notices) != 1 || !store.hasNotice("demo-b", "demo-a") {
 		t.Fatalf("notices = %+v, want only delivered demo-b -> demo-a", store.notices)
 	}
-	if err := svc.reconcileProjectOverlapNotices(context.Background(), result); err != nil {
+	changed := ProjectOverlapResult{ProjectID: "demo", Overlaps: []ProjectOverlap{{SessionA: "demo-a", SessionB: "demo-b", Paths: []string{"b.go"}}}}
+	if err := svc.reconcileProjectOverlapNotices(context.Background(), changed); err != nil {
 		t.Fatalf("retry reconcile: %v", err)
 	}
 	if len(nudger.calls) != 3 || nudger.calls[2].sessionID != "demo-a" {
 		t.Fatalf("nudge calls = %+v, want only demo-a retried", nudger.calls)
+	}
+	if !strings.Contains(nudger.calls[0].message, "- a.go") || !strings.Contains(nudger.calls[2].message, "- b.go") || strings.Contains(nudger.calls[2].message, "- a.go") {
+		t.Fatalf("suppressed retry payloads = %q then %q, want current overlap path", nudger.calls[0].message, nudger.calls[2].message)
+	}
+	if nudger.calls[0].deliveryID == nudger.calls[2].deliveryID || nudger.calls[2].confirmOnly {
+		t.Fatalf("suppressed retry calls = %+v, want a fresh send attempt", nudger.calls)
 	}
 	if len(store.notices) != 2 {
 		t.Fatalf("notices after retry = %+v, want both directions", store.notices)
