@@ -24,7 +24,12 @@ function worker(id: string, hostId: string, projectId: string, over: Partial<Das
 	};
 }
 
-function orchestrator(id: string, hostId: string, projectId: string): HostedOrchestrator {
+function orchestrator(
+	id: string,
+	hostId: string,
+	projectId: string,
+	over: Partial<OrchestratorLink> = {},
+): HostedOrchestrator {
 	return {
 		id,
 		projectId,
@@ -33,6 +38,7 @@ function orchestrator(id: string, hostId: string, projectId: string): HostedOrch
 		hostName: hostId === "mac" ? "Mac" : "Build box",
 		status: "working",
 		mode: "chat",
+		...over,
 	} satisfies OrchestratorLink & { hostId: string; hostName: string };
 }
 
@@ -71,5 +77,35 @@ describe("buildMobileFleetTree", () => {
 		expect(local.rollup).toMatchObject({ action: 1, working: 2 });
 		expect(remote.sessions[0]).toMatchObject({ parentUnavailable: true });
 		expect(remote.sessions[0]!.session.status).toBe("unknown");
+	});
+
+	it("raises folded rollups for failing checks and requested changes", () => {
+		const tree = buildMobileFleetTree({
+			projects: [project("mac")],
+			sessions: [
+				worker("failing", "mac", "same", {
+					prs: [{ number: 1, url: "u", state: "open", ciStatus: "failing" }],
+				}),
+				worker("changes", "mac", "same", {
+					prs: [{ number: 2, url: "u", state: "open", reviewDecision: "changes_requested" }],
+				}),
+			],
+			orchestrators: [],
+			hosts: [{ hostId: "mac", name: "Mac", connection: "open" }],
+		});
+
+		expect(tree[0]!.rollup).toMatchObject({ action: 2, working: 0 });
+	});
+
+	it("keeps a disconnected but non-terminal cloud orchestrator live", () => {
+		const tree = buildMobileFleetTree({
+			projects: [project("mac")],
+			sessions: [],
+			orchestrators: [orchestrator("orch", "mac", "same", { hasRuntime: false, isTerminal: false })],
+			hosts: [{ hostId: "mac", name: "Mac", connection: "connecting" }],
+		});
+
+		expect(tree[0]!.machines[0]!.sessions[0]!.session).toMatchObject({ id: "orch", isTerminated: false });
+		expect(tree[0]!.rollup).toMatchObject({ working: 1, done: 0 });
 	});
 });

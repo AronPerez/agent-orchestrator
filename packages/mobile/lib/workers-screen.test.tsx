@@ -1,7 +1,7 @@
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DashboardSession } from "./api";
-import type { HostedProject } from "./hostedRows";
+import type { HostedOrchestrator, HostedProject } from "./hostedRows";
 import type { HostSnapshot } from "./otherHosts";
 
 const fixtures = vi.hoisted(() => {
@@ -11,7 +11,7 @@ const fixtures = vi.hoisted(() => {
 		headerHeight: 155,
 		hostStates: [] as HostSnapshot[],
 		projects: [] as HostedProject[],
-		orchestrators: [],
+		orchestrators: [] as HostedOrchestrator[],
 		refreshAll: vi.fn(async () => {}),
 		refreshHost: vi.fn(async (_hostId: string) => {}),
 		select: vi.fn(),
@@ -349,11 +349,25 @@ describe("Workers fleet hierarchy", () => {
 		act(() => { renderer = create(<FleetScreen />); });
 
 		expect(renderer.root.findByType(FleetTreeList).props.sessions).toHaveLength(1);
+		expect(renderer.root.findByType(FleetTreeList).props.archiveSources).toBeDefined();
 		expect(renderer.root.findAllByType(WorkerBoardList)).toHaveLength(0);
 
 		chooseMachine("Windows");
 		expect(renderer.root.findByType(WorkerBoardList).props.sessions).toHaveLength(0);
 		expect(renderer.root.findAllByType(FleetTreeList)).toHaveLength(0);
+	});
+
+	it("keeps a non-terminal orchestrator visible while its runtime reconnects", () => {
+		fixtures.projects = [project("project-1", "Project", "mac", "Mac")];
+		fixtures.hostStates[0].sessions = [];
+		fixtures.orchestrators = [{
+			id: "orch", projectId: "project-1", projectName: "Project", hostId: "mac", hostName: "Mac",
+			status: "working", mode: "chat", hasRuntime: false, isTerminal: false,
+		}];
+
+		act(() => { renderer = create(<FleetScreen />); });
+
+		expect(renderer.root.findByType(FleetTreeList).props.orchestrators).toHaveLength(1);
 	});
 });
 

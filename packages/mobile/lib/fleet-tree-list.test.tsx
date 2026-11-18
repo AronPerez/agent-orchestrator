@@ -1,12 +1,22 @@
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DashboardSession } from "./api";
+import type { ArchiveSource } from "./archive/useArchivedSessions";
 import type { HostedProject, HostedSession } from "./hostedRows";
 
 const fixtures = vi.hoisted(() => ({
 	push: vi.fn(),
-	getItem: vi.fn(async () => null as string | null),
-	setItem: vi.fn(async () => {}),
+	getItem: vi.fn(async (_key: string) => null as string | null),
+	setItem: vi.fn(async (_key: string, _value: string) => {}),
+	archive: {
+		rows: [] as HostedSession[], total: 0, loading: false, error: null as string | null,
+		hasMore: false, loadMore: vi.fn(), retry: vi.fn(),
+	},
+	app: {
+		kill: vi.fn(async () => {}), renameWorker: vi.fn(async () => {}), setWorkerPinned: vi.fn(async () => {}),
+		restore: vi.fn(async () => {}), resumeAgent: vi.fn(async () => {}), configForHost: vi.fn(),
+		connection: "open", currentHostId: "box", hostStates: [], projects: [], allProjects: [],
+	},
 	theme: new Proxy({}, { get: (_, key) => `#${String(key)}` }),
 }));
 
@@ -30,8 +40,14 @@ vi.mock("react-native", async () => {
 		StyleSheet: { create: (styles: object) => styles },
 		Text: host("Text"),
 		View: host("View"),
+		Alert: { alert: vi.fn() },
 	};
 });
+vi.mock("./store", () => ({ useApp: () => fixtures.app }));
+vi.mock("./archive/useArchivedSessions", () => ({ useArchivedSessions: () => fixtures.archive }));
+vi.mock("./worker-list-row", () => ({ WorkerListRow: "WorkerListRow" }));
+vi.mock("./archived-worker-row", () => ({ ArchivedWorkerRow: "ArchivedWorkerRow" }));
+vi.mock("./haptics", () => ({ haptics: { success: vi.fn(), error: vi.fn(), warning: vi.fn() } }));
 vi.mock("./ThemeProvider", () => ({
 	useTheme: () => fixtures.theme,
 	useThemedStyles: (factory: (theme: object) => object) => factory(fixtures.theme),
@@ -65,12 +81,13 @@ function worker(id: string, over: Partial<DashboardSession> = {}): HostedSession
 
 const project: HostedProject = { id: "project", name: "Project", hostId: "box", hostName: "Build box" };
 
-function render(sessions: HostedSession[]): ReactTestRenderer {
+function render(sessions: HostedSession[], archiveSources: readonly ArchiveSource[] = []): ReactTestRenderer {
 	let view!: ReactTestRenderer;
 	act(() => {
 		view = create(
 			<FleetTreeList
 				contentBottomInset={0}
+				archiveSources={archiveSources}
 				hosts={[{ hostId: "box", name: "Build box", connection: "closed" }]}
 				onRefresh={() => {}}
 				orchestrators={[]}
@@ -88,11 +105,15 @@ beforeEach(() => {
 	fixtures.push.mockClear();
 	fixtures.getItem.mockReset().mockResolvedValue(null);
 	fixtures.setItem.mockClear();
+	Object.assign(fixtures.archive, { rows: [], total: 0, loading: false, error: null, hasMore: false });
+	fixtures.archive.loadMore.mockClear();
+	fixtures.archive.retry.mockClear();
 });
 
 describe("FleetTreeList", () => {
-	it("keeps a large offline branch summarized while folded and persists disclosure", () => {
+	it("keeps a large offline branch summarized while folded and persists disclosure", async () => {
 		const view = render(Array.from({ length: 8 }, (_, index) => worker(`Worker ${index}`)));
+		await act(async () => {});
 		const projectRow = view.root.findByProps({ accessibilityLabel: "Project, 8 working" });
 		expect(projectRow.props.accessibilityState).toEqual({ expanded: false });
 		expect(view.root.findAllByProps({ children: "Build box" })).toHaveLength(0);
@@ -105,16 +126,13 @@ describe("FleetTreeList", () => {
 		);
 	});
 
-	it("opens a worker through its owning machine", () => {
+	it("routes a worker row through its owning machine", () => {
 		const view = render([worker("Manager"), worker("Child", { parentSessionId: "Manager", status: "needs_input" })]);
-		const child = view.root.findByProps({ accessibilityLabel: "Open Child, Worker, Needs input" });
+		const child = view.root.findAllByType("WorkerListRow" as never)
+			.find((row) => row.props.session.id === "Child")!;
 
-		act(() => child.props.onPress());
-
-		expect(fixtures.push).toHaveBeenCalledWith({
-			pathname: "/session/[id]",
-			params: { id: "Child", projectId: "project", hostId: "box" },
-		});
+		expect(child.props.hostId).toBe("box");
+		expect(child.props.session.projectId).toBe("project");
 	});
 
 	it("announces descendant attention and missing-parent state", () => {
@@ -124,7 +142,48 @@ describe("FleetTreeList", () => {
 			worker("Orphan", { parentSessionId: "missing" }),
 		]);
 
-		expect(view.root.findByProps({ accessibilityLabel: "Open Manager, Manager, Working, 1 needs you" })).toBeTruthy();
-		expect(view.root.findByProps({ accessibilityLabel: "Open Orphan, Worker, Working, Parent unavailable" })).toBeTruthy();
+		const rows = view.root.findAllByType("WorkerListRow" as never);
+		expect(rows.find((row) => row.props.session.id === "Manager")?.props.projectName).toBe("Manager · 1 needs you");
+		expect(rows.find((row) => row.props.session.id === "Orphan")?.props.projectName).toBe("Worker · Parent unavailable");
+	});
+
+	it("renders worker rows through the existing action-capable row", () => {
+		const view = render([worker("Worker")]);
+		const row = view.root.findByType("WorkerListRow" as never);
+
+		expect(row.props.session.id).toBe("Worker");
+		expect(row.props.onSetPinned).toEqual(expect.any(Function));
+		expect(row.props.onRename).toEqual(expect.any(Function));
+		expect(row.props.onDelete).toEqual(expect.any(Function));
+		expect(row.props.onResume).toEqual(expect.any(Function));
+	});
+
+	it("hydrates an archived parent and keeps the archive disclosure available", () => {
+		fixtures.archive.rows = [
+			worker("Grandparent", { status: "terminated", isTerminated: true }),
+			worker("Parent", { parentSessionId: "Grandparent", status: "terminated", isTerminated: true }),
+			worker("Unrelated", { status: "terminated", isTerminated: true }),
+		];
+		fixtures.archive.total = 3;
+		const sources: ArchiveSource[] = [{ hostId: "box", summary: { total: 3, byProject: { project: 3 } } }];
+		const view = render([worker("Child", { parentSessionId: "Parent" })], sources);
+
+		expect(view.root.findAllByType("WorkerListRow" as never).map((row) => row.props.session.id)).toEqual(["Grandparent", "Parent", "Child"]);
+		expect(view.root.findByProps({ accessibilityLabel: "Archive, 3 sessions" })).toBeTruthy();
+	});
+
+	it("merges a tap made before stored disclosure preferences finish loading", async () => {
+		let resolveStored!: (value: string | null) => void;
+		fixtures.getItem.mockReturnValueOnce(new Promise((resolve) => { resolveStored = resolve; }));
+		const view = render(Array.from({ length: 8 }, (_, index) => worker(`Worker ${index}`)));
+		const projectRow = view.root.findByProps({ accessibilityLabel: "Project, 8 working" });
+
+		act(() => projectRow.props.onPress());
+		expect(fixtures.setItem).not.toHaveBeenCalled();
+		await act(async () => resolveStored(JSON.stringify({ remembered: true })));
+
+		const saved = JSON.parse(fixtures.setItem.mock.calls.at(-1)![1]);
+		expect(saved).toMatchObject({ remembered: true });
+		expect(Object.values(saved)).toContain(false);
 	});
 });

@@ -223,6 +223,44 @@ describe("WorkerListRow", () => {
 		expect(renderer.root.findByProps({ testID: "machine-identity-symbol" }).props.appearance).toEqual({ symbol: "server" });
 	});
 
+	it("keeps the tree disclosure separate from opening the worker", () => {
+		router.push.mockClear();
+		const onTreeToggle = vi.fn();
+		let renderer!: ReactTestRenderer;
+		act(() => {
+			renderer = create(
+				<WorkerListRow
+					session={session}
+					projectName="Agent Orchestrator"
+					isRenaming={false}
+					nowBucket={1}
+					onSwipeOpen={vi.fn()}
+					onSwipeClose={vi.fn()}
+					onRenameStart={vi.fn()}
+					onRenameCancel={vi.fn()}
+					onRename={vi.fn(async () => {})}
+					onSetPinned={vi.fn(async () => {})}
+					onDelete={vi.fn()}
+					onResume={vi.fn()}
+					onRestore={vi.fn()}
+					treeDepth={1}
+					treeExpanded={false}
+					onTreeToggle={onTreeToggle}
+				/>,
+			);
+		});
+
+		const disclosure = renderer.root.findByProps({ accessibilityLabel: "Expand Polish workers" });
+		const stopPropagation = vi.fn();
+		act(() => disclosure.props.onPress({ stopPropagation }));
+
+		expect(disclosure.props.accessibilityState).toEqual({ expanded: false });
+		expect(stopPropagation).toHaveBeenCalledTimes(1);
+		expect(onTreeToggle).toHaveBeenCalledTimes(1);
+		expect(router.push).not.toHaveBeenCalled();
+		act(() => renderer.unmount());
+	});
+
 });
 
 // Haptics mark an outcome or a destructive confirmation; opening a row,

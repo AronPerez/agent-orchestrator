@@ -3,8 +3,9 @@ import {
 	type FleetProjectNode,
 	type FleetTreeSession,
 } from "../../product-ui/src/fleet-tree";
-import { toSessionStatus } from "../../product-ui/src/session-models";
-import type { DashboardSession, OrchestratorLink } from "./api";
+import { toSessionStatus, type SessionStatus } from "../../product-ui/src/session-models";
+import { attentionZone, type AttentionZone } from "../../product-ui/src/session-presentation";
+import type { DashboardPR, DashboardSession, OrchestratorLink } from "./api";
 import type { HostedOrchestrator, HostedProject, HostedSession } from "./hostedRows";
 import { sessionTitle } from "./sessionStatus";
 
@@ -29,6 +30,43 @@ type MobileFleetInput = {
 };
 
 const scopeKey = (hostId: string, projectId: string) => JSON.stringify([hostId, projectId]);
+const rollupOrder: AttentionZone[] = ["action", "merge", "pending", "working", "done"];
+
+function pullRequestStatus(pr: DashboardPR): SessionStatus {
+	if (pr.ciStatus === "failing") return "ci_failed";
+	if (pr.isDraft) return "draft";
+	if (pr.reviewDecision === "changes_requested") return "changes_requested";
+	if (pr.unresolvedThreads) return "commented";
+	if (pr.mergeability?.mergeable) return "mergeable";
+	if (pr.reviewDecision === "pending") return "review_pending";
+	if (pr.mergeability?.state === "blocked") return "pr_open";
+	if (pr.reviewDecision === "approved") return "approved";
+	return "pr_open";
+}
+
+function sessionRollupStatus(session: DashboardSession, liveStatus: SessionStatus): SessionStatus {
+	const normalizedLive = liveStatus === "merged" && !session.isTerminated ? "idle" : liveStatus;
+	const pullRequests = session.prs?.length ? session.prs : session.pr ? [session.pr] : [];
+	const statuses = new Set(
+		pullRequests
+			.filter((pr) => pr.state !== "merged" && pr.state !== "closed")
+			.map(pullRequestStatus),
+	);
+	const deliveryStatus = ([
+		"ci_failed",
+		"changes_requested",
+		"commented",
+		"draft",
+		"review_pending",
+		"pr_open",
+		"approved",
+		"mergeable",
+	] as const).find((status) => statuses.has(status));
+	if (!deliveryStatus) return normalizedLive;
+	return rollupOrder.indexOf(attentionZone(normalizedLive)) <= rollupOrder.indexOf(attentionZone(deliveryStatus))
+		? normalizedLive
+		: deliveryStatus;
+}
 
 /** Adapt the phone's host-qualified cache to the shared project → machine tree. */
 export function buildMobileFleetTree({
@@ -48,7 +86,7 @@ export function buildMobileFleetTree({
 		grouped.set(key, current);
 	};
 	for (const item of orchestrators) {
-		const terminated = item.isTerminal === true || item.hasRuntime === false;
+		const terminated = item.isTerminal === true;
 		add(item.hostId, item.projectId, {
 			id: item.id,
 			projectId: item.projectId,
@@ -61,6 +99,7 @@ export function buildMobileFleetTree({
 		});
 	}
 	for (const item of sessions) {
+		const status = toSessionStatus(item.status ?? undefined, item.isTerminated);
 		add(item.hostId, item.projectId, {
 			id: item.id,
 			projectId: item.projectId,
@@ -68,7 +107,8 @@ export function buildMobileFleetTree({
 			title: sessionTitle(item),
 			parentSessionId: item.parentSessionId,
 			kind: item.kind === "orchestrator" ? "orchestrator" : "worker",
-			status: toSessionStatus(item.status ?? undefined, item.isTerminated),
+			status,
+			rollupStatus: sessionRollupStatus(item, status),
 			isTerminated: item.isTerminated,
 			source: item,
 		});

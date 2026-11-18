@@ -120,7 +120,7 @@ export default function FleetScreen() {
 		&& workerProjectId === ALL_WORKER_PROJECTS
 		&& allProjects.length > 0
 		&& (projectSessions.some((session) => !isArchived(session))
-			|| allOrchestrators.some((orchestrator) => orchestrator.isTerminal !== true && orchestrator.hasRuntime !== false));
+			|| allOrchestrators.some((orchestrator) => orchestrator.isTerminal !== true));
 	useScrollToTopOnReselect("(workers)", showFleetHierarchy ? fleetListRef : boardListRef);
 	// Each machine that pages its archive, narrowed by the same machine and
 	// project filters as the live list. Keyed on the facts it reads, because
@@ -310,6 +310,7 @@ export default function FleetScreen() {
 			{showFleetHierarchy ? (
 				<FleetTreeList
 					onScroll={largeTitle.onScroll}
+					archiveSources={archiveSources}
 					projects={allProjects}
 					sessions={projectSessions}
 					orchestrators={allOrchestrators}
