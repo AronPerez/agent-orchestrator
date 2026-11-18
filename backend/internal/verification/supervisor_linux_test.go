@@ -146,6 +146,57 @@ func TestLinuxCleanupConfirmationIsIndependentOfCommandExitStatus(t *testing.T) 
 	}
 }
 
+func TestLinuxSupervisorDoesNotExposeCleanupConfirmationToRoot(t *testing.T) {
+	gateReader, gateWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupReader, cleanupWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cleanupReader.Close() })
+
+	// ExtraFiles arrive in the supervisor with close-on-exec cleared. Recreate
+	// that state so this test catches the project command inheriting the writer.
+	if _, err = unix.FcntlInt(cleanupWriter.Fd(), unix.F_SETFD, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = gateWriter.Write([]byte{'\n'}); err != nil {
+		t.Fatal(err)
+	}
+	if err = gateWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	shell, err := exec.LookPath("sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := fmt.Sprintf(
+		"if printf %c 2>/dev/null >&%d; then exit 42; fi; exit 0",
+		linuxSupervisorCleanupComplete,
+		cleanupWriter.Fd(),
+	)
+	code, runErr := runLinuxSupervisor(
+		int(gateReader.Fd()),
+		int(cleanupWriter.Fd()),
+		0,
+		shell,
+		[]string{"sh", "-c", script},
+	)
+	if runErr != nil || code != 0 {
+		t.Fatalf("runLinuxSupervisor() = code %d, %v; project process inherited cleanup descriptor", code, runErr)
+	}
+	confirmation, err := io.ReadAll(cleanupReader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(confirmation) != string([]byte{linuxSupervisorCleanupComplete}) {
+		t.Fatalf("cleanup confirmation = %q, want one supervisor-authored byte", confirmation)
+	}
+}
+
 func TestLinuxSupervisorDeathWithAnUnmarkedChildPoisonsTheProjectGate(t *testing.T) {
 	executable, err := os.Executable()
 	if err != nil {
