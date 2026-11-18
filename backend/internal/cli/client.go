@@ -212,6 +212,9 @@ func (c *commandContext) doJSONPathWithHeadersAndTimeout(
 	if err != nil {
 		return err
 	}
+	if err := c.revalidateRemoteTarget(ctx); err != nil {
+		return err
+	}
 
 	var reader io.Reader = http.NoBody
 	if body != nil {
@@ -232,7 +235,7 @@ func (c *commandContext) doJSONPathWithHeadersAndTimeout(
 	for name, value := range headers {
 		req.Header.Set(name, value)
 	}
-	if callerID := callerSession(); callerID != "" {
+	if callerID := c.requestCallerSession(); callerID != "" {
 		req.Header.Set(caller.Header, callerID)
 	}
 	if sideID := os.Getenv("AO_SIDE_CONVERSATION_ID"); sideID != "" {
@@ -243,7 +246,7 @@ func (c *commandContext) doJSONPathWithHeadersAndTimeout(
 	// give daemon API calls far more headroom than the 2s status-probe timeout.
 	client := *c.deps.HTTPClient
 	client.Timeout = timeout
-	if c.remote != nil && c.remote.hostID != "" {
+	if c.remote != nil && c.remote.expectedHostID != "" {
 		// The identity probe approved this exact origin. Following even a
 		// same-host redirect could send the coordination bearer to another port
 		// or downgrade an HTTPS target to plaintext.
@@ -308,6 +311,17 @@ func (c *commandContext) doJSONPathWithHeadersAndTimeout(
 		return fmt.Errorf("decode response: %w", err)
 	}
 	return nil
+}
+
+func (c *commandContext) requestCallerSession() string {
+	callerID := callerSession()
+	if callerID == "" || c.remote == nil {
+		return callerID
+	}
+	if c.remote.sourceRelationKnown && c.remote.sameAsSource {
+		return callerID
+	}
+	return ""
 }
 
 // callerSession is the agent session running this command, so the daemon can

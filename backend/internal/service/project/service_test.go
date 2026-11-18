@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -699,6 +700,52 @@ func TestManager_SetConfigRejectsScratchGitOnlyFields(t *testing.T) {
 	}
 	if proj.DefaultBranch != "" || proj.Config == nil || proj.Config.AgentConfig.Model != "gpt-5" {
 		t.Fatalf("scratch config result = %#v", proj)
+	}
+}
+
+func TestManager_SetConfigSignalsCollisionRadarRuleChange(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitetest.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.UpsertProject(ctx, domain.ProjectRecord{
+		ID:           "demo",
+		Path:         gitRepo(t),
+		RegisteredAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	var changed []domain.ProjectID
+	m := project.NewWithDeps(project.Deps{
+		Store: store,
+		OnConfigChanged: func(id domain.ProjectID) {
+			changed = append(changed, id)
+		},
+	})
+	config := domain.ProjectConfig{CollisionRadar: domain.CollisionRadarConfig{IgnorePaths: []string{"shared.go"}}}
+	if _, err := m.SetConfig(ctx, "demo", project.SetConfigInput{Config: config}); err != nil {
+		t.Fatalf("SetConfig collision rules: %v", err)
+	}
+	if !slices.Equal(changed, []domain.ProjectID{"demo"}) {
+		t.Fatalf("collision config signals = %v, want [demo]", changed)
+	}
+
+	config.AgentConfig.Model = "changed-without-radar-rules"
+	if _, err := m.SetConfig(ctx, "demo", project.SetConfigInput{Config: config}); err != nil {
+		t.Fatalf("SetConfig unrelated field: %v", err)
+	}
+	if !slices.Equal(changed, []domain.ProjectID{"demo"}) {
+		t.Fatalf("unrelated config signals = %v, want no additional radar signal", changed)
+	}
+
+	config.CollisionRadar.IgnorePaths = []string{"other.go"}
+	if _, err := m.UpdateSettings(ctx, "demo", project.UpdateSettingsInput{DisplayName: "Demo", Config: config}); err != nil {
+		t.Fatalf("UpdateSettings collision rules: %v", err)
+	}
+	if !slices.Equal(changed, []domain.ProjectID{"demo", "demo"}) {
+		t.Fatalf("settings collision config signals = %v, want [demo demo]", changed)
 	}
 }
 

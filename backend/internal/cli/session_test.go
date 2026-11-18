@@ -55,6 +55,8 @@ func sessionCommandServer(t *testing.T) (*httptest.Server, *sessionRequestLog) {
 		log.append(r)
 		w.Header().Set("Content-Type", "application/json")
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/identity":
+			_, _ = io.WriteString(w, `{"hostId":"h_remote","apiVersion":1}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sessions":
 			active := r.URL.Query().Get("active")
 			switch active {

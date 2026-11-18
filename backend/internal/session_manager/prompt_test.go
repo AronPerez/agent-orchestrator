@@ -116,6 +116,8 @@ func TestBuildSystemPrompt_OrchestratorRequiresConfirmationAndAOOnlyDelegation(t
 		"ao://sessions/{project-id}/{session-id}/artifacts/{path}",
 		"Use stable project and session IDs",
 		"operating-system deep links",
+		"ao session overlaps --project mer",
+		"before assigning implementation work",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("orchestrator prompt missing %q:\n%s", want, got)

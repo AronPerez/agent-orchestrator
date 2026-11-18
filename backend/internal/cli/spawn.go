@@ -108,6 +108,9 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 			if opts.review && opts.claimPR == "" {
 				return usageError{fmt.Errorf("--review requires --claim-pr")}
 			}
+			if ctx.remote != nil && ctx.remote.hostID != "" && opts.claimPR != "" {
+				return usageError{fmt.Errorf("--claim-pr is not supported with --host")}
+			}
 			name := strings.TrimSpace(opts.name)
 			if name == "" {
 				return usageError{fmt.Errorf("--name is required")}
@@ -179,7 +182,9 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 				return usageError{fmt.Errorf(`--tracker-provider must be "github" or "gitlab"`)}
 			}
 			opts.trackerProvider = tp
-
+			if ctx.remote != nil {
+				ctx.remote.identityPinRequired = true
+			}
 			var project projectDetails
 			var err error
 			if !opts.standalone {
@@ -220,10 +225,22 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 					return err
 				}
 			}
+			parentSessionID := callerSession()
+			if ctx.remote != nil && parentSessionID != "" {
+				_, sameHost, relationErr := ctx.remoteRelationToSource(cmd.Context(), parentSessionID)
+				if relationErr != nil {
+					return relationErr
+				}
+				if !sameHost {
+					// Session IDs are host-local. Do not misrepresent a source session as
+					// one on a different destination before host-qualified lineage lands.
+					parentSessionID = ""
+				}
+			}
 			req := spawnRequest{
 				ProjectID:           opts.project,
 				IssueID:             opts.issue,
-				ParentSessionID:     strings.TrimSpace(os.Getenv("AO_SESSION_ID")),
+				ParentSessionID:     parentSessionID,
 				TrackerProvider:     opts.trackerProvider,
 				Kind:                opts.kind,
 				Harness:             opts.harness,
@@ -290,7 +307,7 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 			if displayName == "" {
 				displayName = name
 			}
-			if _, err := fmt.Fprintf(out, "spawned session %s %q (%s)%s%s\n", res.Session.ID, displayName, res.Session.Status, claimLabel, promptSize); err != nil {
+			if _, err := fmt.Fprintf(out, "spawned session %s %q (%s)%s%s%s\n", res.Session.ID, displayName, res.Session.Status, claimLabel, promptSize, ctx.resolvedBySuffix()); err != nil {
 				return err
 			}
 			if opts.claimPR != "" {
@@ -360,6 +377,9 @@ func (c *commandContext) awaitSpawnStart(ctx context.Context, sess spawnedSessio
 		reason := strings.TrimSpace(sess.ProvisionError)
 		if reason == "" {
 			reason = "unknown error"
+		}
+		if destination := c.resolvedBySuffix(); destination != "" {
+			return sess, fmt.Errorf("session %s%s failed to start: %s (open that machine in the Orchestrator app to retry or archive it)", sess.ID, destination, reason)
 		}
 		return sess, fmt.Errorf("session %s failed to start: %s (retry it from the AO app, or archive it with `ao session kill %s`)", sess.ID, reason, sess.ID)
 	}

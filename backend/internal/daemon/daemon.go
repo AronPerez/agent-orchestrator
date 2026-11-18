@@ -43,6 +43,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/browserruntime"
 	"github.com/aoagents/agent-orchestrator/backend/internal/browserstream"
 	"github.com/aoagents/agent-orchestrator/backend/internal/caller"
+	"github.com/aoagents/agent-orchestrator/backend/internal/cdc"
 	"github.com/aoagents/agent-orchestrator/backend/internal/clienttz"
 	"github.com/aoagents/agent-orchestrator/backend/internal/codexops"
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
@@ -833,7 +834,7 @@ func Run(buildVersion string) (retErr error) {
 	if githubRepos != nil {
 		sessionSvc.SetGitHubRepositoryResolver(githubRepos)
 	}
-	projectSvc := projectsvc.NewWithDeps(projectsvc.Deps{Store: store, Sessions: sessionSvc, DefaultHarness: domain.AgentHarness(cfg.Agent), Telemetry: telemetrySink, Milestones: installMilestones(cfg), Logger: log, GitHubRepos: githubRepos})
+	projectSvc := projectsvc.NewWithDeps(projectsvc.Deps{Store: store, Sessions: sessionSvc, DefaultHarness: domain.AgentHarness(cfg.Agent), Telemetry: telemetrySink, Milestones: installMilestones(cfg), Logger: log, GitHubRepos: githubRepos, OnConfigChanged: sessionSvc.SignalProjectOverlapRadar})
 	go projectSvc.WarmCanonicalRepos(ctx)
 	reportSessions, ok := sessMgr.(reportSemanticSession)
 	if !ok {
@@ -1533,6 +1534,22 @@ func Run(buildVersion string) (retErr error) {
 				log.Error("background agent-process reconciliation on boot failed", "err", reconcileErr)
 				sentryobs.CaptureBackground(ctx, reconcileErr, "lifecycle", "reconcile", map[string]string{"reason": "runtime"})
 			}
+		}()
+		go func() {
+			defer sentryobs.RecoverBackground()
+			select {
+			case <-done:
+			case <-ctx.Done():
+				return
+			}
+			unsubscribe := cdcPipe.Broadcaster.Subscribe(func(event cdc.Event) {
+				if event.Type != cdc.EventSessionCreated && event.Type != cdc.EventSessionUpdated {
+					return
+				}
+				sessionSvc.SignalProjectOverlapRadarSession(domain.ProjectID(event.ProjectID))
+			})
+			defer unsubscribe()
+			sessionSvc.RunProjectOverlapNoticeRadar(ctx)
 		}()
 		go func() {
 			defer sentryobs.RecoverBackground()

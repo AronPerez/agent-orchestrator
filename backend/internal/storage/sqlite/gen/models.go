@@ -987,6 +987,12 @@ type SessionNumFloor struct {
 	MaxNum   int64
 }
 
+type SessionOverlapNotice struct {
+	SessionID     string
+	PeerSessionID string
+	NotifiedAt    time.Time
+}
+
 type SessionSearchDeleted struct {
 	SessionID string
 }

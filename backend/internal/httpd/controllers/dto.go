@@ -1702,6 +1702,9 @@ type SendSessionMessageRequest struct {
 	// SenderSessionID is cooperative loopback attribution, not authentication.
 	SenderSessionID string `json:"senderSessionId,omitempty"`
 	Message         string `json:"message" minLength:"1" maxLength:"4096"`
+	// AutomationAuthored preserves automation provenance when a remote sender's
+	// host-local session ID cannot safely identify it on this machine.
+	AutomationAuthored bool `json:"automationAuthored,omitempty"`
 	// UserAuthored marks content written directly by the user but delivered via
 	// AO's automation relay, such as inline document feedback.
 	UserAuthored bool `json:"userAuthored,omitempty"`
@@ -3409,6 +3412,14 @@ type IdentityResponse struct {
 	APIVersion int    `json:"apiVersion"`
 }
 
+// CoordinationCapabilitiesResponse is the authenticated compatibility
+// contract for cross-machine agent actions. The public identity probe stays
+// deliberately minimal; callers present a credential before learning which
+// coordination semantics this daemon supports.
+type CoordinationCapabilitiesResponse struct {
+	Capabilities []string `json:"capabilities"`
+}
+
 // TelemetryIdentityResponse is the body of GET /api/v1/telemetry/identity. A
 // phone paired to this desktop identifies only a signed-in AO Cloud user ID.
 // Without one, DistinctID is the desktop install ID and stays anonymous. The
@@ -3791,6 +3802,9 @@ type SteerConversationRequest struct {
 	// SenderSessionID identifies the AO session that authored an automation steer.
 	// It is optional so older callers and in-app human steering remain unchanged.
 	SenderSessionID string `json:"senderSessionId,omitempty"`
+	// AutomationAuthored preserves automation provenance when SenderSessionID is
+	// intentionally omitted across a machine boundary.
+	AutomationAuthored bool `json:"automationAuthored,omitempty"`
 	// Attachments are native image prompt blocks delivered with the correction.
 	Attachments []ConversationImageContentRequest `json:"attachments,omitempty"`
 	// ClientMessageID makes a retry idempotent at AO's durable daemon boundary. The

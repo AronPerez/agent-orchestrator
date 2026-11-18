@@ -733,6 +733,7 @@ var schemaNames = map[string]string{ //nolint:gosec // Public OpenAPI type names
 	"MobilebridgeEndpoint":                        "MobileEndpoint",
 	"MobilebridgeTunnelStatus":                    "MobileTunnelStatus",
 	"ControllersIdentityResponse":                 "IdentityResponse",
+	"ControllersCoordinationCapabilitiesResponse": "CoordinationCapabilitiesResponse",
 	"ControllersEndpointsResponse":                "EndpointsResponse",
 	"ControllersLinkPreviewQuery":                 "LinkPreviewQuery",
 	"ControllersLinkPreviewResponse":              "LinkPreviewResponse",
@@ -1038,6 +1039,13 @@ func identityOperations() []operation {
 			resps: []respUnit{
 				{http.StatusOK, controllers.IdentityResponse{}},
 				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/coordination/capabilities", id: "getCoordinationCapabilities", tag: "identity",
+			summary: "List authenticated cross-machine coordination capabilities",
+			resps: []respUnit{
+				{http.StatusOK, controllers.CoordinationCapabilitiesResponse{}},
 			},
 		},
 	}

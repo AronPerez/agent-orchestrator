@@ -214,6 +214,8 @@ func TestSessionClaimPRRefusesLocalGhAgainstRemoteDaemon(t *testing.T) {
 		log.append(r)
 		w.Header().Set("Content-Type", "application/json")
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/identity":
+			_, _ = io.WriteString(w, `{"hostId":"h_remote","apiVersion":1}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sessions/demo-1":
 			_, _ = io.WriteString(w, `{"session":`+sessionJSON("demo-1", "demo", "worker", "working", false)+`}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/demo":
