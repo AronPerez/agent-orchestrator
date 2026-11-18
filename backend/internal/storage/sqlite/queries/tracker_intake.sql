@@ -55,6 +55,7 @@ FROM (
     FROM tracker_intake_handled
     WHERE tracker_intake_handled.project_id = sqlc.arg(project_id)
       AND state = 'pending'
+      AND COALESCE(json_extract(recovery_state, '$.capacityReleased'), 0) = 0
 );
 
 -- name: ListLiveTrackerIssueReferences :many

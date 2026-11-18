@@ -807,13 +807,6 @@ func (r *Runtime) ProbeFencedRuntime(ctx context.Context, ref ports.FencedRuntim
 	}
 	alive, err := r.IsAlive(ctx, ref.Handle)
 	if err != nil {
-		if errors.Is(err, ports.ErrRuntimeUnavailable) {
-			// A missing tmux server is stronger than a missing session: no legacy
-			// candidate can exist on this socket. This settles unused fallback
-			// candidates from a successful native-host launch without treating
-			// transport/protocol failures as absence.
-			return ports.FencedProbeResult{Liveness: ports.FencedDead, Reason: ports.FencedReasonExactAbsent}
-		}
 		return ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed}
 	}
 	if !alive {

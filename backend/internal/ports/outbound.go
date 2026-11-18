@@ -629,6 +629,9 @@ type WorkspaceConfig struct {
 	// StartPoint creates a fresh branch at this commit instead of the base
 	// branch. Session forks use it to start at the source's HEAD.
 	StartPoint string
+	// BeforeCreate checkpoints the final managed identity before the adapter
+	// materializes a directory, branch, or worktree.
+	BeforeCreate func(WorkspaceInfo) error
 }
 
 // WorkspaceInfo describes a created workspace — where it lives and its branch.
@@ -669,6 +672,9 @@ type WorkspaceProjectConfig struct {
 	StartRef string
 	Repos    []WorkspaceProjectRepoConfig
 	Assets   []WorkspaceProjectAssetConfig
+	// BeforeCreate checkpoints the final root identity before the adapter
+	// materializes the first repository in the workspace project.
+	BeforeCreate func(WorkspaceInfo) error
 }
 
 // WorkspaceProjectAssetConfig describes a non-repository child directory that

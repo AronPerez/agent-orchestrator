@@ -144,13 +144,13 @@ func (s *Store) commitTrackerIntakeSessionLocked(ctx context.Context, q *gen.Que
 func (s *Store) ReconcileTrackerIntakeSession(ctx context.Context, id domain.SessionID, handledAt time.Time) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	return s.reconcileTrackerIntakeSessionLocked(ctx, s.qw, id)
+	return s.reconcileTrackerIntakeSessionLocked(ctx, s.qw, id, handledAt)
 }
 
 // ReconcileTrackerIntakeClaims settles every pending claim for a project before
 // an observer poll chooses more work. It is the restart recovery path for a
 // daemon that stopped between seed creation and launch completion.
-func (s *Store) ReconcileTrackerIntakeClaims(ctx context.Context, projectID domain.ProjectID, _ time.Time) error {
+func (s *Store) ReconcileTrackerIntakeClaims(ctx context.Context, projectID domain.ProjectID, handledAt time.Time) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	claims, err := s.qw.ListPendingTrackerIntakeClaims(ctx, string(projectID))
@@ -158,14 +158,14 @@ func (s *Store) ReconcileTrackerIntakeClaims(ctx context.Context, projectID doma
 		return fmt.Errorf("list pending tracker intake claims for %s: %w", projectID, err)
 	}
 	for _, claim := range claims {
-		if err := s.reconcileTrackerIntakeSessionLocked(ctx, s.qw, domain.SessionID(claim.SessionID)); err != nil {
+		if err := s.reconcileTrackerIntakeSessionLocked(ctx, s.qw, domain.SessionID(claim.SessionID), handledAt); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (s *Store) reconcileTrackerIntakeSessionLocked(ctx context.Context, q *gen.Queries, id domain.SessionID) error {
+func (s *Store) reconcileTrackerIntakeSessionLocked(ctx context.Context, q *gen.Queries, id domain.SessionID, handledAt time.Time) error {
 	claim, err := q.GetTrackerIntakeClaimBySession(ctx, string(id))
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && claim.State == "handled") {
 		return nil
@@ -178,6 +178,9 @@ func (s *Store) reconcileTrackerIntakeSessionLocked(ctx context.Context, q *gen.
 		reservation, pending, recoveryErr := getPendingTrackerIntakeRecovery(ctx, q, id)
 		if recoveryErr != nil {
 			return recoveryErr
+		}
+		if pending && reservation.CleanupConfirmed && reservation.DeliveryPossible {
+			return s.commitTrackerIntakeSessionLocked(ctx, q, id, handledAt)
 		}
 		if pending && !reservation.CleanupConfirmed && trackerIntakeRecoveryNeedsFence(reservation) {
 			return nil
@@ -192,6 +195,9 @@ func (s *Store) reconcileTrackerIntakeSessionLocked(ctx context.Context, q *gen.
 		reservation, pending, recoveryErr := getPendingTrackerIntakeRecovery(ctx, q, id)
 		if recoveryErr != nil {
 			return recoveryErr
+		}
+		if pending && reservation.CleanupConfirmed && reservation.DeliveryPossible {
+			return s.commitTrackerIntakeSessionLocked(ctx, q, id, handledAt)
 		}
 		if pending && reservation.CleanupConfirmed {
 			return s.deletePendingTrackerIntakeClaimLocked(ctx, q, id)

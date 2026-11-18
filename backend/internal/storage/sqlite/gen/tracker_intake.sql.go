@@ -45,6 +45,7 @@ FROM (
     FROM tracker_intake_handled
     WHERE tracker_intake_handled.project_id = ?1
       AND state = 'pending'
+      AND COALESCE(json_extract(recovery_state, '$.capacityReleased'), 0) = 0
 )
 `
 

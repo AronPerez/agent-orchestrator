@@ -52,10 +52,16 @@ func (w *Workspace) Create(_ context.Context, cfg ports.WorkspaceConfig) (ports.
 	} else if exists {
 		return ports.WorkspaceInfo{}, fmt.Errorf("scratch workspace: path %q already contains files: %w", path, ports.ErrWorkspaceDirty)
 	}
+	info := ports.WorkspaceInfo{Path: path, SessionID: cfg.SessionID, ProjectID: cfg.ProjectID}
+	if cfg.BeforeCreate != nil {
+		if err := cfg.BeforeCreate(info); err != nil {
+			return ports.WorkspaceInfo{}, err
+		}
+	}
 	if err := os.MkdirAll(path, 0o750); err != nil {
 		return ports.WorkspaceInfo{}, fmt.Errorf("scratch workspace: create %q: %w", path, err)
 	}
-	return ports.WorkspaceInfo{Path: path, SessionID: cfg.SessionID, ProjectID: cfg.ProjectID}, nil
+	return info, nil
 }
 
 // Restore ensures the preserved scratch directory exists and returns it.

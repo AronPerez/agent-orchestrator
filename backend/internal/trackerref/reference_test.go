@@ -44,3 +44,20 @@ func TestResolveLegacyIssueURLs(t *testing.T) {
 		}
 	}
 }
+
+func TestGitHubRepositoryIdentityIsCaseInsensitive(t *testing.T) {
+	project := domain.ProjectRecord{RepoOriginURL: "git@github.com:acme/app.git"}
+	for _, raw := range []domain.IssueID{
+		"github:Acme/App#42",
+		"Acme/App#42",
+		"https://github.com/Acme/App/issues/42",
+	} {
+		got, ok := Resolve(raw, project)
+		if !ok || got != "github:acme/app#42" {
+			t.Errorf("Resolve(%q) = %q, %t, want normalized GitHub identity", raw, got, ok)
+		}
+	}
+	if !Equivalent("https://github.com/Acme/App/issues/42", "github:acme/app#42", project) {
+		t.Fatal("case-variant GitHub issue URL did not match canonical intake identity")
+	}
+}

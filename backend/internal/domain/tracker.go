@@ -205,6 +205,10 @@ type TrackerIntakeRecoveryReservation struct {
 	// runtime/provider boundary. Recovery must preserve the worker and claim;
 	// cleaning it up and retrying could duplicate arbitrary external effects.
 	DeliveryPossible bool `json:"deliveryPossible,omitempty"`
+	// CapacityReleased means lifecycle has proved that no runtime or controller
+	// remains active. DeliveryPossible still prevents replay, while this flag
+	// lets unrelated issues use the freed project slot during workspace cleanup.
+	CapacityReleased bool `json:"capacityReleased,omitempty"`
 	CleanupConfirmed bool `json:"cleanupConfirmed,omitempty"`
 }
 

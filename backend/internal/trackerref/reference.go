@@ -25,6 +25,9 @@ func Canonical(id domain.TrackerID) domain.IssueID {
 	if native == "" {
 		return ""
 	}
+	if provider == domain.TrackerProviderGitHub {
+		native = strings.ToLower(native)
+	}
 	host := normalizeHost(provider, id.Host)
 	if host != "" {
 		return domain.IssueID(string(provider) + ":" + native + "@" + host)

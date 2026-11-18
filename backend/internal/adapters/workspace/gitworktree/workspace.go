@@ -357,6 +357,15 @@ func (w *Workspace) Create(ctx context.Context, cfg ports.WorkspaceConfig) (port
 			return ports.WorkspaceInfo{}, err
 		}
 	}
+	intent := ports.WorkspaceInfo{
+		Path: path, Branch: cfg.Branch, BaseSHA: seedSHA, BaseRef: cfg.BaseRef,
+		SessionID: cfg.SessionID, ProjectID: cfg.ProjectID, RepoPath: repo,
+	}
+	if cfg.BeforeCreate != nil {
+		if err := cfg.BeforeCreate(intent); err != nil {
+			return ports.WorkspaceInfo{}, err
+		}
+	}
 	baseRef, err := w.addWorktree(ctx, repo, path, cfg.Branch, cfg.BaseBranch, cfg.BaseRef, seedRef, true, cfg.RequireNewBranch)
 	if err != nil {
 		// An occupied path is refused before git runs, so there is no prepared
@@ -542,6 +551,14 @@ func (w *Workspace) CreateWorkspaceProject(ctx context.Context, cfg ports.Worksp
 		}
 		repos[i].seedRef = refs.seedRef
 		repos[i].baseRef = refs.baseRef
+	}
+	if cfg.BeforeCreate != nil {
+		if err := cfg.BeforeCreate(ports.WorkspaceInfo{
+			Path: rootPath, Branch: branch, BaseRef: repos[0].baseRef,
+			SessionID: cfg.SessionID, ProjectID: cfg.ProjectID, RepoPath: rootRepo,
+		}); err != nil {
+			return ports.WorkspaceProjectInfo{}, err
+		}
 	}
 	created := make([]workspaceProjectRepo, 0, len(repos))
 	touched := make([]ports.WorkspaceRepoInfo, 0, len(repos))

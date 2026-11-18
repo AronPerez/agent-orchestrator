@@ -71,23 +71,25 @@ func TestPollSpawnsWorkerForEligibleIssue(t *testing.T) {
 	}
 }
 
-func TestPollReconcilesExternalClaimsBeforeAdmission(t *testing.T) {
-	store := &fakeStore{projects: []domain.ProjectRecord{{
-		ID: "demo", RepoOriginURL: "https://github.com/acme/demo.git",
-		Config: domain.ProjectConfig{TrackerIntake: domain.TrackerIntakeConfig{Enabled: true, Assignee: "alice"}},
-	}}}
-	tracker := &fakeTracker{issues: []domain.Issue{{
+func TestPollReconciliationFailureDoesNotBlockUnrelatedProjects(t *testing.T) {
+	store := &fakeStore{projects: []domain.ProjectRecord{
+		{ID: "blocked", RepoOriginURL: "https://github.com/acme/blocked.git"},
+		{
+			ID: "demo", RepoOriginURL: "https://github.com/acme/demo.git",
+			Config: domain.ProjectConfig{TrackerIntake: domain.TrackerIntakeConfig{Enabled: true, Assignee: "alice"}},
+		},
+	}}
+	tracker := &fakeTracker{issuesByRepo: map[string][]domain.Issue{"acme/demo": {{
 		ID: domain.TrackerID{Provider: domain.TrackerProviderGitHub, Native: "acme/demo#1"}, State: domain.IssueOpen, Assignees: []string{"alice"},
-	}}}
+	}}}}
 	reconcileErr := errors.New("runtime probe inconclusive")
 	spawner := &fakeSpawner{reconcileErr: reconcileErr}
 
-	err := New(singleResolver(tracker), store, spawner, Config{Logger: discardLogger()}).Poll(context.Background())
-	if !errors.Is(err, reconcileErr) {
-		t.Fatalf("Poll() error = %v, want external reconciliation error", err)
+	if err := New(singleResolver(tracker), store, spawner, Config{Logger: discardLogger()}).Poll(context.Background()); err != nil {
+		t.Fatalf("Poll() error = %v, want claim failure isolated", err)
 	}
-	if spawner.reconcileCalls != 1 || len(tracker.filters) != 0 || len(spawner.calls) != 0 {
-		t.Fatalf("reconcile/list/spawn = %d/%d/%d, want cleanup before provider admission", spawner.reconcileCalls, len(tracker.filters), len(spawner.calls))
+	if spawner.reconcileCalls != 1 || len(tracker.filters) != 1 || len(spawner.calls) != 1 {
+		t.Fatalf("reconcile/list/spawn = %d/%d/%d, want unrelated admission to continue", spawner.reconcileCalls, len(tracker.filters), len(spawner.calls))
 	}
 }
 

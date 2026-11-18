@@ -108,8 +108,7 @@ func (r *hybridRuntime) Create(ctx context.Context, cfg ports.RuntimeConfig) (po
 
 func unresolvedRuntimeEffect(err error) (ports.RuntimeEffectError, bool) {
 	var effect ports.RuntimeEffectError
-	if !errors.As(err, &effect) || effect.EffectOutcome() == ports.RuntimeEffectNone ||
-		effect.CleanupOutcome() == ports.RuntimeCleanupSucceeded {
+	if !errors.As(err, &effect) || effect.EffectOutcome() == ports.RuntimeEffectNone {
 		return nil, false
 	}
 	return effect, true

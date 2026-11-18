@@ -160,6 +160,40 @@ func TestTrackerIntakeConfirmedCleanupReleasesMissingSessionClaim(t *testing.T) 
 	}
 }
 
+func TestTrackerIntakeConfirmedCleanupPromotesPossibleDelivery(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, store, "demo")
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
+
+	record := sampleRecord("demo")
+	record.Metadata = domain.SessionMetadata{}
+	record.IssueID = "github:acme/demo#14"
+	created, err := store.CreateTrackerIntakeSession(ctx, record, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReserveTrackerIntakeRecovery(ctx, created.ID, domain.TrackerIntakeRecoveryReservation{
+		RuntimeLaunchID: "launch-14", RuntimeHandleIDs: []string{"runtime-14"},
+		DeliveryPossible: true, CapacityReleased: true, CleanupConfirmed: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if deleted, err := store.DeleteSession(ctx, created.ID); err != nil || !deleted {
+		t.Fatalf("DeleteSession(seed) = %t, %v", deleted, err)
+	}
+
+	handledAt := time.Date(2026, 11, 18, 4, 0, 0, 0, time.UTC)
+	if err := store.ReconcileTrackerIntakeSession(ctx, created.ID, handledAt); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeSession(): %v", err)
+	}
+	retry := sampleRecord("demo")
+	retry.IssueID = record.IssueID
+	if _, err := store.CreateTrackerIntakeSession(ctx, retry, limits); !errors.Is(err, ports.ErrTrackerIntakeHandled) {
+		t.Fatalf("CreateTrackerIntakeSession(retry) error = %v, want ErrTrackerIntakeHandled", err)
+	}
+}
+
 func TestTrackerIntakePendingMissingOwnerConsumesConcurrentCapacity(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -186,6 +220,42 @@ func TestTrackerIntakePendingMissingOwnerConsumesConcurrentCapacity(t *testing.T
 	second.IssueID = "github:acme/demo#2"
 	if _, err := store.CreateTrackerIntakeSession(ctx, second, limits); !errors.Is(err, ports.ErrAutomatedSessionCapacity) {
 		t.Fatalf("CreateTrackerIntakeSession(second) error = %v, want unresolved owner to consume capacity", err)
+	}
+}
+
+func TestTrackerIntakeConfirmedStoppedDeliveryFenceDoesNotConsumeConcurrentCapacity(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, store, "demo")
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 1, MaxStartsPerPass: 1}
+
+	first := sampleRecord("demo")
+	first.Metadata = domain.SessionMetadata{}
+	first.IssueID = "github:acme/demo#1"
+	created, err := store.CreateTrackerIntakeSession(ctx, first, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReserveTrackerIntakeRecovery(ctx, created.ID, domain.TrackerIntakeRecoveryReservation{
+		RuntimeLaunchID: "launch-1", RuntimeHandleIDs: []string{"runtime-1"},
+		DeliveryPossible: true, CapacityReleased: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if deleted, err := store.DeleteSession(ctx, created.ID); err != nil || !deleted {
+		t.Fatalf("DeleteSession() = %t, %v", deleted, err)
+	}
+
+	second := sampleRecord("demo")
+	second.IssueID = "github:acme/demo#2"
+	if _, err := store.CreateTrackerIntakeSession(ctx, second, limits); err != nil {
+		t.Fatalf("CreateTrackerIntakeSession(second) error = %v, want released capacity", err)
+	}
+
+	retry := sampleRecord("demo")
+	retry.IssueID = first.IssueID
+	if _, err := store.CreateTrackerIntakeSession(ctx, retry, limits); !errors.Is(err, ports.ErrTrackerIntakeActive) {
+		t.Fatalf("CreateTrackerIntakeSession(retry) error = %v, want delivery fence preserved", err)
 	}
 }
 
@@ -312,6 +382,7 @@ func TestCreateTrackerIntakeSessionRejectsLegacyManualIssueReferences(t *testing
 		{name: "number with hash", manual: "#18", canonical: "github:acme/demo#18", wantMatch: true},
 		{name: "native github", manual: "acme/demo#18", canonical: "github:acme/demo#18", wantMatch: true},
 		{name: "github url", manual: "https://github.com/acme/demo/issues/18", canonical: "github:acme/demo#18", wantMatch: true},
+		{name: "github url case variant", manual: "https://github.com/Acme/Demo/issues/18", canonical: "github:acme/demo#18", wantMatch: true},
 		{name: "gitlab url", manual: "https://gitlab.com/acme/demo/-/issues/18", canonical: "gitlab:acme/demo#18", wantMatch: true},
 		{name: "self managed gitlab url", manual: "https://gitlab.one/acme/demo/-/issues/18", canonical: "gitlab:acme/demo#18@gitlab.one", wantMatch: true},
 		{name: "numeric is scoped to project repository", manual: "18", canonical: "github:other/demo#18", wantMatch: false},
@@ -352,7 +423,7 @@ func TestCreateTrackerIntakeSessionRejectsLegacyHandledAliasAfterSessionTerminat
 	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
 
 	legacy := sampleRecord("demo")
-	legacy.IssueID = "https://github.com/acme/demo/issues/18"
+	legacy.IssueID = "https://github.com/Acme/Demo/issues/18"
 	created, err := store.CreateSession(ctx, legacy)
 	if err != nil {
 		t.Fatal(err)

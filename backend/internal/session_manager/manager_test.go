@@ -233,6 +233,12 @@ func (f *fakeStore) ReconcileTrackerIntakeSession(_ context.Context, id domain.S
 			continue
 		}
 		reservation := f.trackerIntakeRecovery[id]
+		if reservation.CleanupConfirmed && reservation.DeliveryPossible {
+			delete(f.trackerIntakePending, key)
+			delete(f.trackerIntakeRecovery, id)
+			f.trackerIntakeHandled[key] = id
+			return nil
+		}
 		needsFence := reservation.DeliveryPossible || reservation.ControllerPossible ||
 			reservation.WorkspacePath != "" || len(reservation.RuntimeHandleIDs) != 0
 		externalEffect := rec.Metadata.WorkspacePath != "" || rec.Metadata.RuntimeHandleID != "" || rec.Metadata.AgentSessionID != "" ||
@@ -814,6 +820,7 @@ type fakeRuntime struct {
 	createErr          error
 	createErrSequence  []error
 	createIDs          []string
+	onCreate           func()
 	destroyErr         error
 	destroyErrSequence []error
 	onDestroy          func(call int, handle ports.RuntimeHandle)
@@ -961,6 +968,9 @@ func (r *blockingRestartRuntime) Destroy(ctx context.Context, handle ports.Runti
 }
 
 func (r *fakeRuntime) Create(_ context.Context, cfg ports.RuntimeConfig) (ports.RuntimeHandle, error) {
+	if r.onCreate != nil {
+		r.onCreate()
+	}
 	createErr := r.createErr
 	if len(r.createErrSequence) > 0 {
 		createErr = r.createErrSequence[0]
@@ -1517,9 +1527,6 @@ func (w *fakeWorkspace) FetchDefaultBranch(ctx context.Context, repoPath string,
 
 func (w *fakeWorkspace) Create(_ context.Context, cfg ports.WorkspaceConfig) (ports.WorkspaceInfo, error) {
 	w.createCount++
-	if w.createErr != nil {
-		return ports.WorkspaceInfo{}, w.createErr
-	}
 	if w.sharedLog != nil {
 		*w.sharedLog = append(*w.sharedLog, "Create")
 	}
@@ -1532,12 +1539,18 @@ func (w *fakeWorkspace) Create(_ context.Context, cfg ports.WorkspaceConfig) (po
 	if baseRef == "" {
 		baseRef = cfg.BaseBranch
 	}
-	return ports.WorkspaceInfo{Path: path, Branch: cfg.Branch, BaseRef: baseRef, SessionID: cfg.SessionID, ProjectID: cfg.ProjectID, RepoPath: w.createRepoPath}, nil
+	info := ports.WorkspaceInfo{Path: path, Branch: cfg.Branch, BaseRef: baseRef, SessionID: cfg.SessionID, ProjectID: cfg.ProjectID, RepoPath: w.createRepoPath}
+	if cfg.BeforeCreate != nil {
+		if err := cfg.BeforeCreate(info); err != nil {
+			return ports.WorkspaceInfo{}, err
+		}
+	}
+	if w.createErr != nil {
+		return ports.WorkspaceInfo{}, w.createErr
+	}
+	return info, nil
 }
 func (w *fakeWorkspace) CreateWorkspaceProject(_ context.Context, cfg ports.WorkspaceProjectConfig) (ports.WorkspaceProjectInfo, error) {
-	if w.projectErr != nil {
-		return ports.WorkspaceProjectInfo{}, w.projectErr
-	}
 	w.lastProjectCfg = cfg
 	if len(w.projectCreateInfo.Worktrees) > 0 {
 		return w.projectCreateInfo, nil
@@ -1552,6 +1565,14 @@ func (w *fakeWorkspace) CreateWorkspaceProject(_ context.Context, cfg ports.Work
 		rootBaseRef = "refs/remotes/origin/main"
 	}
 	root := ports.WorkspaceInfo{Path: rootPath, Branch: branch, BaseRef: rootBaseRef, SessionID: cfg.SessionID, ProjectID: cfg.ProjectID}
+	if cfg.BeforeCreate != nil {
+		if err := cfg.BeforeCreate(root); err != nil {
+			return ports.WorkspaceProjectInfo{}, err
+		}
+	}
+	if w.projectErr != nil {
+		return ports.WorkspaceProjectInfo{}, w.projectErr
+	}
 	out := ports.WorkspaceProjectInfo{
 		Root: root,
 		Worktrees: []ports.WorkspaceRepoInfo{{
@@ -3010,6 +3031,36 @@ func TestSpawnTrackerIntakeAmbiguousInCommandDeliveryRemainsFencedAfterRuntimeDi
 	}
 }
 
+func TestSpawnTrackerIntakePossibleInCommandDeliveryStaysHandledAfterSuccessfulRuntimeCleanup(t *testing.T) {
+	m, st, rt, ws := newManager()
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
+	cfg := ports.SpawnConfig{
+		ProjectID: "mer", IssueID: "github:acme/mer#91", Kind: domain.KindWorker,
+		Harness: domain.HarnessClaudeCode, Prompt: "do it", TrackerIntakeLimits: &limits,
+	}
+	rt.createErr = fakeRuntimeEffectError{
+		err: errors.New("runtime registry write failed after process start"), handle: ports.RuntimeHandle{ID: "partial-runtime"},
+		effect: ports.RuntimeEffectPossible, cleanup: ports.RuntimeCleanupSucceeded,
+	}
+
+	if _, _, _, err := m.Spawn(context.Background(), cfg); err == nil {
+		t.Fatal("Spawn() error = nil, want runtime create failure")
+	}
+	key := "mer\x00github:acme/mer#91"
+	if got := st.trackerIntakePending[key]; got != "" {
+		t.Fatalf("pending claim = %q, want settled no-replay claim", got)
+	}
+	if got := st.trackerIntakeHandled[key]; got != "mer-1" {
+		t.Fatalf("handled claim = %q, want possible delivery owned by mer-1", got)
+	}
+	if rt.destroyed != 0 || ws.destroyed != 1 {
+		t.Fatalf("cleanup calls runtime/workspace = %d/%d, want adapter-cleaned runtime and one workspace cleanup", rt.destroyed, ws.destroyed)
+	}
+	if _, _, _, err := m.Spawn(context.Background(), cfg); !errors.Is(err, ports.ErrTrackerIntakeHandled) {
+		t.Fatalf("Spawn(retry) error = %v, want ErrTrackerIntakeHandled", err)
+	}
+}
+
 func TestSpawnTrackerIntakeSuccessfulRuntimeBeforeCommitWaitsForDeadProofAfterFailedCleanup(t *testing.T) {
 	m, st, rt, _ := newManager()
 	lcm := &fakeLCM{store: st, markSpawnedErr: errors.New("session commit unavailable")}
@@ -3124,8 +3175,9 @@ func TestReconcileTrackerIntakeClaimsRecoversMissingAndTerminatedOwners(t *testi
 	}
 }
 
-func TestReconcileTrackerIntakeClaimsPreservesPossibleDeliveryAfterTermination(t *testing.T) {
+func TestReconcileTrackerIntakeClaimsSettlesPossibleDeliveryAfterTermination(t *testing.T) {
 	m, st, rt, ws := newManager()
+	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedDead, Reason: ports.FencedReasonExactAbsent}
 	id := domain.SessionID("terminated-delivery")
 	key := "mer\x00github:acme/mer#99"
 	st.trackerIntakePending[key] = id
@@ -3138,11 +3190,96 @@ func TestReconcileTrackerIntakeClaimsPreservesPossibleDeliveryAfterTermination(t
 	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
 		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
 	}
-	if got := st.trackerIntakePending[key]; got != id {
-		t.Fatalf("pending delivery claim = %q, want %q", got, id)
+	if got := st.trackerIntakePending[key]; got != "" {
+		t.Fatalf("pending delivery claim = %q, want promoted handled claim", got)
 	}
-	if len(rt.fencedRefs) != 0 || rt.destroyed != 0 || ws.destroyed != 0 {
-		t.Fatalf("ambiguous delivery was touched: probes=%+v runtimeDestroy=%d workspaceDestroy=%d", rt.fencedRefs, rt.destroyed, ws.destroyed)
+	if got := st.trackerIntakeHandled[key]; got != id {
+		t.Fatalf("handled delivery claim = %q, want %q", got, id)
+	}
+	if len(rt.fencedRefs) != 1 || rt.destroyed != 0 || ws.destroyed != 1 {
+		t.Fatalf("settled delivery cleanup: probes=%+v runtimeDestroy=%d workspaceDestroy=%d", rt.fencedRefs, rt.destroyed, ws.destroyed)
+	}
+}
+
+func TestReconcileTrackerIntakeClaimsAdoptsReservedRuntime(t *testing.T) {
+	m, st, _, _ := newManager()
+	lcm := &fakeLCM{store: st}
+	m.lcm = lcm
+	id := domain.SessionID("reserved-runtime")
+	key := "mer\x00github:acme/mer#101"
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		Branch: "ao/reserved-runtime/root", WorkspacePath: "/ws/reserved-runtime",
+		RuntimeLaunchID: "launch-101", RuntimeHandleIDs: []string{"runtime-101"}, DeliveryPossible: true,
+	}
+	st.sessions[id] = domain.SessionRecord{ID: id, ProjectID: "mer", IssueID: "github:acme/mer#101", Kind: domain.KindWorker}
+
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	got := st.sessions[id]
+	if lcm.completed != 1 || got.Metadata.RuntimeHandleID != "runtime-101" ||
+		got.Metadata.RuntimeLaunchID != "launch-101" || got.Metadata.WorkspacePath != "/ws/reserved-runtime" {
+		t.Fatalf("adopted runtime = %+v, completed=%d", got.Metadata, lcm.completed)
+	}
+	if st.trackerIntakePending[key] != id {
+		t.Fatal("adoption released no-replay claim")
+	}
+}
+
+func TestSpawnTrackerIntakeCheckpointsWorkspaceProjectIntentBeforeCreateFailure(t *testing.T) {
+	m, st, _, ws := newManager()
+	project := st.projects["mer"]
+	project.Kind = domain.ProjectKindWorkspace
+	project.Path = "/repo/mer"
+	st.projects["mer"] = project
+	st.workspaceRepo["mer"] = []domain.WorkspaceRepoRecord{{Name: "api", RelativePath: "services/api"}}
+	ws.path = "/ws/mer-1"
+	ws.projectErr = errors.New("child worktree creation interrupted")
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
+
+	_, _, _, err := m.Spawn(context.Background(), ports.SpawnConfig{
+		ProjectID: "mer", IssueID: "github:acme/mer#102", Kind: domain.KindWorker,
+		Harness: domain.HarnessClaudeCode, Prompt: "do it", TrackerIntakeLimits: &limits,
+	})
+	if err == nil {
+		t.Fatal("Spawn() error = nil, want workspace project failure")
+	}
+	id := st.trackerIntakePending["mer\x00github:acme/mer#102"]
+	if id == "" {
+		t.Fatal("workspace project creation failure lost pending claim")
+	}
+	if got := st.trackerIntakeRecovery[id]; got.WorkspacePath != ws.path || got.Branch == "" {
+		t.Fatalf("workspace creation intent = %+v, want root path and branch before materialization", got)
+	}
+	ws.projectErr = nil
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	if ws.projectDestroyed != 1 || st.trackerIntakePending["mer\x00github:acme/mer#102"] != "" {
+		t.Fatalf("recovered workspace project cleanup = %d, pending=%+v", ws.projectDestroyed, st.trackerIntakePending)
+	}
+}
+
+func TestDeliverAfterStartPromptDoesNotFenceBeforeReadiness(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	marked := false
+	agent := readinessAgent{
+		afterStartAgent: afterStartAgent{recordingAgent: &recordingAgent{}},
+		hints:           ports.PromptReadinessHints{InitialDelay: time.Second},
+	}
+	m := New(Deps{Runtime: &fakeRuntime{}, Messenger: &fakeMessenger{}})
+
+	err := m.deliverAfterStartPromptWithFence(ctx, agent, ports.LaunchConfig{}, ports.RuntimeHandle{}, "mer-1", "task", func() error {
+		marked = true
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("deliverAfterStartPromptWithFence() error = %v, want context cancellation", err)
+	}
+	if marked {
+		t.Fatal("delivery was fenced before readiness completed")
 	}
 }
 
@@ -4616,6 +4753,31 @@ func TestKill_TearsDownRuntimeAndWorkspace(t *testing.T) {
 		t.Fatalf("reviewer terminate bodies = %v", reviewer.bodies)
 	}
 	requireNoPromptDir(t, dataDir, "mer-1")
+}
+
+func TestKillTrackerIntakeReleasesCapacityWhileDirtyWorkspaceRemainsFenced(t *testing.T) {
+	m, st, _, ws := newManager()
+	id := domain.SessionID("mer-1")
+	issueID := domain.IssueID("github:acme/mer#103")
+	rec := mkLive(id)
+	rec.IssueID = issueID
+	rec.Metadata.RuntimeLaunchID = "launch-103"
+	st.sessions[id] = rec
+	key := "mer\x00" + string(issueID)
+	st.trackerIntakePending[key] = id
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: rec.Metadata.WorkspacePath, RuntimeLaunchID: rec.Metadata.RuntimeLaunchID,
+		RuntimeHandleIDs: []string{rec.Metadata.RuntimeHandleID}, DeliveryPossible: true,
+	}
+	ws.destroyErr = ports.ErrWorkspaceDirty
+
+	if freed, err := m.Kill(context.Background(), id); err == nil || freed {
+		t.Fatalf("Kill() = freed %t, err %v, want dirty workspace preserved", freed, err)
+	}
+	reservation := st.trackerIntakeRecovery[id]
+	if !reservation.CapacityReleased || st.trackerIntakePending[key] != id || st.trackerIntakeHandled[key] != "" {
+		t.Fatalf("post-kill claim = %+v pending=%q handled=%q", reservation, st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
 }
 
 func TestKillCleanupScriptHasNoTimeLimit(t *testing.T) {

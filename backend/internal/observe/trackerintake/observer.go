@@ -156,7 +156,10 @@ func (o *Observer) Poll(ctx context.Context) error {
 	}
 	if reconciler, ok := o.spawner.(claimReconciler); ok {
 		if err := reconciler.ReconcileTrackerIntakeClaims(ctx); err != nil {
-			return fmt.Errorf("tracker intake: reconcile external claims: %w", err)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			o.logger.Error("tracker intake: reconcile external claims failed", "err", err)
 		}
 	}
 	now := o.clock().UTC()

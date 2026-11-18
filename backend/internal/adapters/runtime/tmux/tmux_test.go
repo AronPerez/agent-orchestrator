@@ -1696,7 +1696,7 @@ func TestProbeFencedRuntimeExactProcessMatchIsAlive(t *testing.T) {
 	}
 }
 
-func TestProbeFencedRuntimeMissingServerIsExactAbsence(t *testing.T) {
+func TestProbeFencedRuntimeMissingServerIsInconclusive(t *testing.T) {
 	r, fr := newTestRuntime(0)
 	fr.outputs = [][]byte{[]byte("no server running on /tmp/tmux-1000/default")}
 	fr.err = &exec.ExitError{}
@@ -1704,8 +1704,8 @@ func TestProbeFencedRuntimeMissingServerIsExactAbsence(t *testing.T) {
 	got := r.ProbeFencedRuntime(context.Background(), ports.FencedRuntimeRef{
 		Handle: ports.RuntimeHandle{ID: "sess-1"}, SessionID: "sess-1", Generation: "launch-2",
 	})
-	if got.Liveness != ports.FencedDead || got.Reason != ports.FencedReasonExactAbsent {
-		t.Fatalf("ProbeFencedRuntime missing server = %+v, want dead/exact_absent", got)
+	if got.Liveness != ports.FencedUnknown || got.Reason != ports.FencedReasonProbeFailed {
+		t.Fatalf("ProbeFencedRuntime missing server = %+v, want unknown/probe_failed", got)
 	}
 }
 

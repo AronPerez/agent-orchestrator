@@ -24,9 +24,6 @@ func (m *Manager) ReconcileTrackerIntakeClaims(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return errors.Join(reconcileErr, err)
 		}
-		if claim.Recovery.DeliveryPossible {
-			continue
-		}
 		rec, found, err := m.store.GetSession(ctx, claim.SessionID)
 		if err != nil {
 			reconcileErr = errors.Join(reconcileErr, fmt.Errorf("recover tracker intake %s: load session: %w", claim.SessionID, err))
@@ -44,12 +41,40 @@ func (m *Manager) ReconcileTrackerIntakeClaims(ctx context.Context) error {
 				rec.Mode = domain.SessionModeChat
 			}
 		}
+		if claim.Recovery.DeliveryPossible && found && !rec.IsTerminated && !claim.Recovery.CapacityReleased {
+			if _, err := m.adoptTrackerIntakeRuntime(ctx, rec, claim.Recovery); err != nil {
+				reconcileErr = errors.Join(reconcileErr, err)
+			}
+			// A live row still owns a possibly delivered task. Adoption makes a
+			// concrete terminal runtime controllable; all other ownership remains
+			// fenced without replay or teardown.
+			continue
+		}
 		err = m.reconcileInterruptedTrackerIntake(ctx, rec, claim.Recovery)
 		if err != nil {
 			reconcileErr = errors.Join(reconcileErr, err)
 		}
 	}
 	return reconcileErr
+}
+
+func (m *Manager) adoptTrackerIntakeRuntime(ctx context.Context, rec domain.SessionRecord, reservation domain.TrackerIntakeRecoveryReservation) (bool, error) {
+	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat || strings.TrimSpace(rec.Metadata.RuntimeHandleID) != "" {
+		return false, nil
+	}
+	handles := uniqueTrackerIntakeHandles(reservation.RuntimeHandleIDs)
+	launchID := strings.TrimSpace(reservation.RuntimeLaunchID)
+	if len(handles) != 1 || launchID == "" {
+		return false, nil
+	}
+	rec = applyTrackerIntakeRecovery(rec, reservation)
+	metadata := rec.Metadata
+	metadata.RuntimeHandleID = handles[0]
+	metadata.RuntimeLaunchID = launchID
+	if err := m.lcm.MarkSpawned(ctx, rec.ID, metadata); err != nil {
+		return false, fmt.Errorf("recover tracker intake %s: adopt reserved runtime: %w", rec.ID, err)
+	}
+	return true, nil
 }
 
 // reconcileInterruptedTrackerIntake settles a launch whose claim never reached
@@ -62,14 +87,12 @@ func (m *Manager) reconcileInterruptedTrackerIntake(
 	reservation domain.TrackerIntakeRecoveryReservation,
 ) error {
 	rec = applyTrackerIntakeRecovery(rec, reservation)
-	if reservation.DeliveryPossible {
-		return nil
-	}
 	if reservation.CleanupConfirmed {
-		return m.releaseInterruptedTrackerIntake(ctx, rec)
+		m.rollbackSpawnSeedRow(ctx, rec.ID)
+		return m.settleInterruptedTrackerIntakeClaim(ctx, rec.ID, reservation)
 	}
 	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
-		if reservation.ControllerPossible || trackerIntakeHasChatEffect(rec) {
+		if !reservation.CapacityReleased && (reservation.ControllerPossible || trackerIntakeHasChatEffect(rec)) {
 			if m.chat == nil {
 				return fmt.Errorf("check session %s: pending tracker intake chat controller cannot be fenced", rec.ID)
 			}
@@ -77,7 +100,13 @@ func (m *Manager) reconcileInterruptedTrackerIntake(
 				return fmt.Errorf("check session %s: stop pending tracker intake chat controller: %w", rec.ID, err)
 			}
 		}
-		return m.releaseInterruptedTrackerIntake(ctx, rec)
+		if !reservation.CapacityReleased {
+			if err := m.markTrackerIntakeCapacityReleased(ctx, rec.ID); err != nil {
+				return err
+			}
+			reservation.CapacityReleased = true
+		}
+		return m.releaseInterruptedTrackerIntake(ctx, rec, reservation)
 	}
 
 	launchID := strings.TrimSpace(rec.Metadata.RuntimeLaunchID)
@@ -89,45 +118,53 @@ func (m *Manager) reconcileInterruptedTrackerIntake(
 		handleIDs = append([]string{handleID}, handleIDs...)
 	}
 	handleIDs = uniqueTrackerIntakeHandles(handleIDs)
-	if len(handleIDs) != 0 && launchID == "" {
+	if !reservation.CapacityReleased && len(handleIDs) != 0 && launchID == "" {
 		return fmt.Errorf("check session %s: pending tracker intake runtime has no generation fence", rec.ID)
 	}
-	for _, handleID := range handleIDs {
-		ref := ports.FencedRuntimeRef{
-			Handle:         ports.RuntimeHandle{ID: handleID},
-			SessionID:      rec.ID,
-			Generation:     launchID,
-			NativeIdentity: strings.TrimSpace(rec.Metadata.AgentSessionID),
-		}
-		probe := m.runtime.ProbeFencedRuntime(ctx, ref)
-		switch probe.Liveness {
-		case ports.FencedDead:
-			// Exact absence is sufficient proof that no duplicate worker survives.
-		case ports.FencedAlive:
-			if err := m.stopSourceRuntime(ctx, ref); err != nil {
-				return fmt.Errorf("check session %s: stop pending tracker intake runtime: %w", rec.ID, err)
+	if !reservation.CapacityReleased {
+		for _, handleID := range handleIDs {
+			ref := ports.FencedRuntimeRef{
+				Handle:         ports.RuntimeHandle{ID: handleID},
+				SessionID:      rec.ID,
+				Generation:     launchID,
+				NativeIdentity: strings.TrimSpace(rec.Metadata.AgentSessionID),
 			}
-		default:
-			return fmt.Errorf("check session %s: pending tracker intake runtime remains unresolved: %s", rec.ID, probe.Reason)
+			probe := m.runtime.ProbeFencedRuntime(ctx, ref)
+			switch probe.Liveness {
+			case ports.FencedDead:
+				// Exact absence is sufficient proof that no duplicate worker survives.
+			case ports.FencedAlive:
+				if err := m.stopSourceRuntime(ctx, ref); err != nil {
+					return fmt.Errorf("check session %s: stop pending tracker intake runtime: %w", rec.ID, err)
+				}
+			default:
+				return fmt.Errorf("check session %s: pending tracker intake runtime remains unresolved: %s", rec.ID, probe.Reason)
+			}
 		}
 	}
-	if len(handleIDs) == 0 && (trackerIntakeHasTerminalEffect(rec) || launchID != "") {
+	if !reservation.CapacityReleased && len(handleIDs) == 0 && (reservation.DeliveryPossible || trackerIntakeHasTerminalEffect(rec) || launchID != "") {
 		return fmt.Errorf("check session %s: pending tracker intake native identity has no runtime fence", rec.ID)
 	}
+	if !reservation.CapacityReleased {
+		if err := m.markTrackerIntakeCapacityReleased(ctx, rec.ID); err != nil {
+			return err
+		}
+		reservation.CapacityReleased = true
+	}
 
-	return m.releaseInterruptedTrackerIntake(ctx, rec)
+	return m.releaseInterruptedTrackerIntake(ctx, rec, reservation)
 }
 
-func (m *Manager) releaseInterruptedTrackerIntake(ctx context.Context, rec domain.SessionRecord) error {
+func (m *Manager) releaseInterruptedTrackerIntake(ctx context.Context, rec domain.SessionRecord, reservation domain.TrackerIntakeRecoveryReservation) error {
 	if strings.TrimSpace(rec.Metadata.WorkspacePath) == "" {
 		if err := m.confirmTrackerIntakeCleanup(ctx, rec.ID); err != nil {
 			return err
 		}
 		m.rollbackSpawnSeedRow(ctx, rec.ID)
-		return m.store.ReleaseTrackerIntakeSession(ctx, rec.ID)
+		return m.settleInterruptedTrackerIntakeClaim(ctx, rec.ID, reservation)
 	}
 
-	rows, isProject, err := m.workspaceProjectRows(ctx, rec)
+	rows, isProject, err := m.trackerIntakeWorkspaceRows(ctx, rec)
 	if err != nil {
 		return fmt.Errorf("check session %s: load pending tracker intake workspace: %w", rec.ID, err)
 	}
@@ -143,8 +180,34 @@ func (m *Manager) releaseInterruptedTrackerIntake(ctx context.Context, rec domai
 		return err
 	}
 	m.rollbackSpawnSeedRow(ctx, rec.ID)
-	if err := m.store.ReleaseTrackerIntakeSession(ctx, rec.ID); err != nil {
-		return fmt.Errorf("check session %s: release pending tracker intake claim: %w", rec.ID, err)
+	return m.settleInterruptedTrackerIntakeClaim(ctx, rec.ID, reservation)
+}
+
+func (m *Manager) trackerIntakeWorkspaceRows(ctx context.Context, rec domain.SessionRecord) ([]ports.WorkspaceRepoInfo, bool, error) {
+	project, err := m.loadProject(ctx, rec.ProjectID)
+	if err != nil {
+		return nil, false, err
+	}
+	if project.Kind.WithDefault() != domain.ProjectKindWorkspace {
+		return m.workspaceProjectRows(ctx, rec)
+	}
+	markers, err := m.store.ListSessionWorktrees(ctx, rec.ID)
+	if err != nil {
+		return nil, false, err
+	}
+	rows, err := m.workspaceProjectRestoreRowsFromMarkers(ctx, project, rec, markers)
+	return rows, true, err
+}
+
+func (m *Manager) settleInterruptedTrackerIntakeClaim(ctx context.Context, id domain.SessionID, reservation domain.TrackerIntakeRecoveryReservation) error {
+	if reservation.DeliveryPossible {
+		if err := m.store.CommitTrackerIntakeSession(ctx, id, m.clock()); err != nil {
+			return fmt.Errorf("check session %s: preserve delivered tracker intake claim: %w", id, err)
+		}
+		return nil
+	}
+	if err := m.store.ReleaseTrackerIntakeSession(ctx, id); err != nil {
+		return fmt.Errorf("check session %s: release pending tracker intake claim: %w", id, err)
 	}
 	return nil
 }

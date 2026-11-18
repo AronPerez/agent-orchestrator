@@ -235,6 +235,29 @@ func TestHybridRuntimeDoesNotFallbackAfterAmbiguousDirectCreate(t *testing.T) {
 	}
 }
 
+func TestHybridRuntimeDoesNotFallbackAfterPossibleDirectDeliveryWasCleanedUp(t *testing.T) {
+	legacy := &restartableFakeBackend{}
+	direct := &fakeBackend{createErr: fakeRuntimeEffectFailure{
+		err:     errors.New("native registry write failed after process start"),
+		handle:  ports.RuntimeHandle{ID: "session-1"},
+		effect:  ports.RuntimeEffectPossible,
+		cleanup: ports.RuntimeCleanupSucceeded,
+	}}
+	runtime := newHybridRuntime(legacy, direct, nil, "Linux")
+
+	_, err := runtime.Create(context.Background(), ports.RuntimeConfig{SessionID: "session-1"})
+	var effect ports.RuntimeEffectError
+	if !errors.As(err, &effect) {
+		t.Fatalf("Create error = %v, want RuntimeEffectError", err)
+	}
+	if got := effect.PossibleHandle().ID; got != directHandlePrefix+"session-1" {
+		t.Fatalf("possible handle = %q, want routed direct handle", got)
+	}
+	if len(legacy.calls) != 0 {
+		t.Fatalf("legacy calls = %v, want no fallback after possible task delivery", legacy.calls)
+	}
+}
+
 func TestHybridRuntimePreservesAmbiguousFallbackCreateEvidence(t *testing.T) {
 	legacy := &restartableFakeBackend{fakeBackend: fakeBackend{createErr: fakeRuntimeEffectFailure{
 		err:     errors.New("tmux response lost and cleanup failed"),
