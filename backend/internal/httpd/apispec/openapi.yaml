@@ -20201,6 +20201,8 @@ components:
           - artifact
           - pr_artifact
           type: string
+        parentHostId:
+          type: string
         parentSessionId:
           type: string
         pinnedAt:
@@ -27240,6 +27242,9 @@ components:
           type: string
         model:
           maxLength: 256
+          type: string
+        parentHostId:
+          maxLength: 128
           type: string
         parentSessionId:
           type: string

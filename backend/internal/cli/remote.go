@@ -274,7 +274,10 @@ type savedHostIdentity struct {
 	APIVersion int    `json:"apiVersion"`
 }
 
-const coordinationCapabilityAutomationAuthored = "automation-authored"
+const (
+	coordinationCapabilityAutomationAuthored  = "automation-authored"
+	coordinationCapabilityHostQualifiedParent = "host-qualified-parent"
+)
 
 type coordinationCapabilitiesResponse struct {
 	Capabilities []string `json:"capabilities"`
@@ -522,14 +525,14 @@ func (c *commandContext) revalidateRemoteTarget(ctx context.Context) error {
 func (c *commandContext) requireRemoteCoordinationCapability(ctx context.Context, capability string) error {
 	var response coordinationCapabilitiesResponse
 	if err := c.getJSON(ctx, "coordination/capabilities", &response); err != nil {
-		return fmt.Errorf("destination does not advertise %s support; upgrade Orchestrator on that machine before sending this agent-authored message: %w", capability, err)
+		return fmt.Errorf("destination does not advertise %s support; upgrade Orchestrator on that machine before using this cross-machine operation: %w", capability, err)
 	}
 	for _, available := range response.Capabilities {
 		if available == capability {
 			return nil
 		}
 	}
-	return fmt.Errorf("destination does not support %s; upgrade Orchestrator on that machine before sending this agent-authored message", capability)
+	return fmt.Errorf("destination does not support %s; upgrade Orchestrator on that machine before using this cross-machine operation", capability)
 }
 func (c *commandContext) localDaemonHostID(ctx context.Context) string {
 	base, err := c.localDaemonBase()

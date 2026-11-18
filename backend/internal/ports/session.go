@@ -46,9 +46,13 @@ type SpawnConfig struct {
 	// ClientRequestID and hash identify one optional interactive create request.
 	ClientRequestID   string
 	ClientRequestHash string
-	// ParentSessionID identifies the AO orchestrator that requested this worker
-	// through `ao spawn`. The daemon validates this reference and derives any
-	// inherited settings itself; callers never supply an inherited policy.
+	// ParentHostID is nonempty only when ParentSessionID belongs to another AO
+	// installation. Remote lineage is display-only on this daemon: it never
+	// grants authority or inherited settings to a same-named local session.
+	ParentHostID string
+	// ParentSessionID identifies the AO session that requested this worker
+	// through `ao spawn`. A local parent is validated before the daemon derives
+	// inherited settings; callers never supply an inherited policy.
 	ParentSessionID domain.SessionID
 	// CreatedBy names an unattended source the daemon cannot infer from the
 	// other fields (tracker intake sets automation). Empty derives it: an

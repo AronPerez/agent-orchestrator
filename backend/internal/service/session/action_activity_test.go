@@ -113,6 +113,21 @@ func TestParentlessSpawnWritesNothing(t *testing.T) {
 	}
 }
 
+func TestRemoteParentSpawnDoesNotWriteToSameNamedLocalConversation(t *testing.T) {
+	svc, st, fc := actionFixture(t)
+	fc.spawnRecord = domain.SessionRecord{ID: "child", ProjectID: "mer", DisplayName: "Reviewer", Harness: "codex"}
+	cfg := ports.SpawnConfig{
+		ProjectID: "mer", Kind: domain.KindWorker, Harness: "codex",
+		ParentHostID: "h_source", ParentSessionID: "parent", ClientRequestID: "remote-spawn",
+	}
+	if _, _, _, err := svc.Spawn(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(st.activities) != 0 {
+		t.Fatalf("activities = %+v, want no action on a same-named local parent", st.activities)
+	}
+}
+
 func TestTerminateRecordsOnSpawnParent(t *testing.T) {
 	svc, st, fc := actionFixture(t)
 	fc.spawnRecord = domain.SessionRecord{ID: "child", ProjectID: "mer", DisplayName: "Reviewer", Harness: "codex"}

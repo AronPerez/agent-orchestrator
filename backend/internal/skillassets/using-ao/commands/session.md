@@ -88,6 +88,12 @@ stderr. JSON puts the status of every machine in `meta.hosts` and adds
 `hostId`/`hostLabel` to every `data` row; address a fleet session by the pair
 `hostId` plus `id`, never by the session id alone.
 
+Spawn lineage in fleet JSON is also host-qualified. A child edge is
+`(parentHostId, parentSessionId) -> (hostId, id)`. For an existing local
+parent whose stored `parentHostId` is empty, `--all-hosts` fills it with that
+row's owning `hostId`, so consumers never need to infer a machine from a
+session ID.
+
 **Examples:**
 
 ```bash

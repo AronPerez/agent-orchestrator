@@ -23,6 +23,8 @@ func (s *Service) spawnCreatedBy(ctx context.Context, cfg ports.SpawnConfig) dom
 		return cfg.CreatedBy
 	case cfg.AutomationRunID != nil:
 		return domain.SessionCreatedByScheduled
+	case cfg.ParentHostID != "" && cfg.ParentSessionID != "":
+		return domain.SessionCreatedByAutomation
 	case cfg.ParentSessionID != "":
 		if s.store != nil {
 			if parent, ok, err := s.store.GetSession(ctx, cfg.ParentSessionID); err == nil && ok && parent.Kind != domain.KindOrchestrator {

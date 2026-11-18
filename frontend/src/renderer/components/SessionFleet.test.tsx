@@ -141,7 +141,14 @@ describe("SessionFleet", () => {
 		expect(screen.getByText(/does not mean acted on/)).toBeInTheDocument();
 	});
 	it("shows request failure and supports retry", async () => {
-		get.mockResolvedValueOnce({ error: { code: "failed" } });
+		let coordinationCalls = 0;
+		get.mockImplementation((path: string) => {
+			if (path === "/api/v1/identity") return Promise.resolve({ data: { hostId: "h_local", apiVersion: 1 } });
+			coordinationCalls++;
+			return Promise.resolve(coordinationCalls === 1
+				? { error: { code: "failed" } }
+				: { data: { events: [], hasMore: false } });
+		});
 		show();
 		expect(await screen.findByRole("alert")).toHaveTextContent("Could not load communication");
 		fireEvent.click(screen.getByRole("button", { name: "Retry" }));
@@ -172,7 +179,7 @@ describe("SessionFleet", () => {
 		for (const [host, summary] of [["", "Local communication"], ["box-a", "box-a communication"], ["box-b", "box-b communication"]]) {
 			expect(client.getQueryData(["session-coordination", host, "orch"])).toEqual(history(summary).data);
 		}
-		expect(get).toHaveBeenCalledTimes(1);
+		expect(get).toHaveBeenCalledTimes(2);
 		expect(remoteGet).toHaveBeenCalledWith("box-b", "/api/v1/sessions/{sessionId}/coordination", {
 			params: { path: { sessionId: "orch" } }, signal: expect.any(AbortSignal),
 		});
@@ -290,6 +297,19 @@ describe("SessionFleet", () => {
 		expect(screen.getByText(/Older sessions may predate lineage tracking/)).toBeVisible();
 		fireEvent.click(screen.getByRole("button", { name: "Open session" }));
 		expect(open).toHaveBeenCalledWith(expect.objectContaining({ id: "worker", hostId: "box-a" }));
+	});
+	it("shows a qualified remote parent instead of a colliding local session", async () => {
+		get.mockImplementation((path: string) => Promise.resolve(path === "/api/v1/identity"
+			? { data: { hostId: "h_local", apiVersion: 1 } }
+			: { data: { events: [], hasMore: false } }));
+		const items = [
+			{ ...sessions[0], id: "parent", title: "Local collision" },
+			{ ...sessions[2], id: "child", title: "Remote child", parentSessionId: "parent", parentHostId: "h_source" },
+		];
+		renderFleet(undefined, items);
+		fireEvent.click(screen.getByRole("button", { name: /Remote child.*Parent unavailable/ }));
+		expect(await screen.findByText("Spawned by h_source/parent")).toBeVisible();
+		expect(screen.queryByText("Spawned by Local collision")).toBeNull();
 	});
 	it("does not replace a remote failure with local preview communication", async () => {
 		preview.enabled = true;

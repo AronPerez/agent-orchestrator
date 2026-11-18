@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf16"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/caller"
 )
 
 const (
@@ -61,7 +63,7 @@ func writeSavedHostCapabilities(t *testing.T, w http.ResponseWriter, r *http.Req
 	t.Helper()
 	requireSavedHostRequest(t, r)
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = io.WriteString(w, `{"capabilities":["automation-authored"]}`)
+	_, _ = io.WriteString(w, `{"capabilities":["automation-authored","host-qualified-parent"]}`)
 }
 
 func requireSavedHostRequest(t *testing.T, r *http.Request) {
@@ -71,6 +73,9 @@ func requireSavedHostRequest(t *testing.T, r *http.Request) {
 	}
 	if got := r.Header.Get("X-AO-Expected-Host-ID"); got != testSavedHostID {
 		t.Fatalf("%s %s expected host = %q", r.Method, r.URL.Path, got)
+	}
+	if got := r.Header.Get(caller.Header); got != "" {
+		t.Fatalf("%s %s carried unqualified caller session %q", r.Method, r.URL.Path, got)
 	}
 }
 
@@ -83,7 +88,7 @@ func writeSavedHostIdentity(t *testing.T, w http.ResponseWriter, r *http.Request
 	_, _ = io.WriteString(w, `{"hostId":"h_desk","apiVersion":1}`)
 }
 
-func TestSpawnSavedHostPinsMachineAndOmitsUnqualifiedParent(t *testing.T) {
+func TestSpawnSavedHostUsesSelectedSourceDaemonForQualifiedParent(t *testing.T) {
 	t.Setenv("AO_SESSION_ID", "local-parent")
 	var request spawnRequest
 	var paths []string
@@ -96,6 +101,8 @@ func TestSpawnSavedHostPinsMachineAndOmitsUnqualifiedParent(t *testing.T) {
 		requireSavedHostRequest(t, r)
 		w.Header().Set("Content-Type", "application/json")
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/coordination/capabilities":
+			writeSavedHostCapabilities(t, w, r)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/demo":
 			_, _ = io.WriteString(w, `{"status":"ok","project":{"id":"demo","name":"Demo","kind":"single-repo"}}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/agents/readiness/ensure":
@@ -115,8 +122,8 @@ func TestSpawnSavedHostPinsMachineAndOmitsUnqualifiedParent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn --host: %v stderr=%s", err, stderr)
 	}
-	if request.ParentSessionID != "" {
-		t.Fatalf("remote parentSessionId = %q, want empty until it is host-qualified", request.ParentSessionID)
+	if request.ParentSessionID != "local-parent" || request.ParentHostID != testLocalHostID {
+		t.Fatalf("remote parent = %q/%q, want %q/%q", request.ParentHostID, request.ParentSessionID, testLocalHostID, "local-parent")
 	}
 	if !strings.Contains(out, "spawned session remote-1") || !strings.Contains(out, "desk (h_desk)") {
 		t.Fatalf("output = %q, want session and destination machine", out)
@@ -128,10 +135,47 @@ func TestSpawnSavedHostPinsMachineAndOmitsUnqualifiedParent(t *testing.T) {
 		"GET /api/v1/identity",
 		"POST /api/v1/agents/readiness/ensure",
 		"GET /api/v1/identity",
+		"GET /api/v1/coordination/capabilities",
+		"GET /api/v1/identity",
 		"POST /api/v1/sessions",
 	}
 	if strings.Join(paths, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("paths = %v, want %v", paths, want)
+	}
+}
+
+func TestSpawnSavedHostRejectsDestinationWithoutHostQualifiedParents(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "local-parent")
+	var spawnWrites int
+	configureSavedHost(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/identity" {
+			writeSavedHostIdentity(t, w, r)
+			return
+		}
+		requireSavedHostRequest(t, r)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/demo":
+			_, _ = io.WriteString(w, `{"status":"ok","project":{"id":"demo","name":"Demo","kind":"single-repo"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/agents/readiness/ensure":
+			_, _ = io.WriteString(w, authorizedAgentsJSON("codex"))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/coordination/capabilities":
+			_, _ = io.WriteString(w, `{"capabilities":["automation-authored"]}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions":
+			spawnWrites++
+			_, _ = io.WriteString(w, `{"session":{"id":"wrong-parent"}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+
+	_, _, err := executeCLI(t, Deps{}, "spawn", "--host", testSavedHostLabel,
+		"--project", "demo", "--agent", "codex", "--name", "Remote worker")
+	if err == nil || !strings.Contains(err.Error(), "host-qualified-parent") {
+		t.Fatalf("err = %v, want unsupported host-qualified-parent capability", err)
+	}
+	if spawnWrites != 0 {
+		t.Fatalf("spawn writes = %d, want none", spawnWrites)
 	}
 }
 
@@ -172,8 +216,8 @@ func TestSpawnSavedHostUserShellDoesNotNeedSourceDaemon(t *testing.T) {
 		"--project", "demo", "--agent", "codex", "--name", "Remote worker"); err != nil {
 		t.Fatalf("user-shell spawn: %v stderr=%s", err, stderr)
 	}
-	if request.ParentSessionID != "" {
-		t.Fatalf("parentSessionId = %q, want none for a user-shell spawn", request.ParentSessionID)
+	if request.ParentSessionID != "" || request.ParentHostID != "" {
+		t.Fatalf("parent = %q/%q, want none for a user-shell spawn", request.ParentHostID, request.ParentSessionID)
 	}
 	if capabilityRequests != 0 {
 		t.Fatalf("capability requests = %d, want none for a user-shell spawn", capabilityRequests)

@@ -3,6 +3,8 @@ import { attentionZone, type AttentionZone } from "./session-presentation";
 
 export type FleetTreeSession = {
 	id: string;
+	/** Stable machine ID owning parentSessionId when lineage is host-qualified. */
+	parentHostId?: string;
 	parentSessionId?: string;
 	kind?: "orchestrator" | "worker";
 	status: SessionStatus;
@@ -21,6 +23,7 @@ export type FleetTreeScope<Session extends FleetTreeSession> = {
 
 export type FleetRollup = Record<AttentionZone, number>;
 export type FleetSessionRole = "orchestrator" | "manager" | "worker";
+export type FleetSessionAddress = { machineId: string; sessionId: string };
 
 export type FleetSessionNode<Session extends FleetTreeSession> = {
 	type: "session";
@@ -28,6 +31,8 @@ export type FleetSessionNode<Session extends FleetTreeSession> = {
 	projectId: string;
 	machineId: string;
 	session: Session;
+	/** Stable address for a local or cross-machine spawn parent. */
+	parentAddress?: FleetSessionAddress;
 	role: FleetSessionRole;
 	parentUnavailable: boolean;
 	zone: AttentionZone;
@@ -179,12 +184,15 @@ function buildMachine<Session extends FleetTreeSession>(
 	showArchived: boolean,
 ): FleetMachineNode<Session> {
 	const byId = new Map(sessions.map((item) => [item.id, item]));
+	const localParentId = (item: Session): string | undefined =>
+		!item.parentHostId || item.parentHostId === machine.id ? item.parentSessionId : undefined;
 	const children = new Map<string, Session[]>();
 	for (const item of sessions) {
-		if (!item.parentSessionId || item.parentSessionId === item.id || !byId.has(item.parentSessionId)) continue;
-		const siblings = children.get(item.parentSessionId) ?? [];
+		const parentId = localParentId(item);
+		if (!parentId || parentId === item.id || !byId.has(parentId)) continue;
+		const siblings = children.get(parentId) ?? [];
 		siblings.push(item);
-		children.set(item.parentSessionId, siblings);
+		children.set(parentId, siblings);
 	}
 
 	const included = new Set<string>();
@@ -193,7 +201,7 @@ function buildMachine<Session extends FleetTreeSession>(
 		let current: Session | undefined = item;
 		while (current && !included.has(current.id)) {
 			included.add(current.id);
-			current = byId.get(current.parentSessionId ?? "");
+			current = byId.get(localParentId(current) ?? "");
 		}
 	}
 
@@ -201,7 +209,8 @@ function buildMachine<Session extends FleetTreeSession>(
 	const visit = (item: Session, fallbackRoot = false): FleetSessionNode<Session> | undefined => {
 		if (visited.has(item.id) || !included.has(item.id)) return undefined;
 		visited.add(item.id);
-		const parentId = item.parentSessionId;
+		const parentId = localParentId(item);
+		const externalParent = Boolean(item.parentSessionId && item.parentHostId && item.parentHostId !== machine.id);
 		const recordedChildren = children.get(item.id) ?? [];
 		const directChildren = recordedChildren.filter((child) => included.has(child.id));
 		const childNodes = directChildren.flatMap((child) => {
@@ -216,18 +225,23 @@ function buildMachine<Session extends FleetTreeSession>(
 			projectId,
 			machineId: machine.id,
 			session: item,
+			parentAddress: item.parentSessionId ? {
+				machineId: item.parentHostId || machine.id,
+				sessionId: item.parentSessionId,
+			} : undefined,
 			role: item.kind === "orchestrator" ? "orchestrator" : recordedChildren.length ? "manager" : "worker",
-			parentUnavailable: parentId !== undefined &&
-				(fallbackRoot || parentId === item.id || !byId.has(parentId)),
+			parentUnavailable: item.parentSessionId !== undefined &&
+				(externalParent || fallbackRoot || parentId === item.id || !parentId || !byId.has(parentId)),
 			zone: item.isTerminated || item.status === "terminated" ? "done" : attentionZone(item.rollupStatus ?? item.status),
 			rollup,
 			children: childNodes,
 		};
 	};
 
-	const roots = sessions.filter((item) =>
-		included.has(item.id) &&
-		(!item.parentSessionId || !byId.has(item.parentSessionId) || item.parentSessionId === item.id));
+	const roots = sessions.filter((item) => {
+		const parentId = localParentId(item);
+		return included.has(item.id) && (!parentId || !byId.has(parentId) || parentId === item.id);
+	});
 	const rootNodes = [
 		...roots.filter((item) => item.kind === "orchestrator"),
 		...roots.filter((item) => item.kind !== "orchestrator"),
