@@ -2983,9 +2983,13 @@ type NotificationIDParam struct {
 
 // NotificationTarget is the dashboard navigation target for a notification.
 type NotificationTarget struct {
-	Kind      string `json:"kind" enum:"session,pr"`
+	Kind      string `json:"kind" enum:"session,pr,decision"`
 	SessionID string `json:"sessionId"`
 	PRURL     string `json:"prUrl,omitempty"`
+	// CallID and OriginHostID identify a decision-ledger call. Set only when
+	// kind is decision; a decision target has no session.
+	CallID       string `json:"callId,omitempty"`
+	OriginHostID string `json:"originHostId,omitempty"`
 }
 
 // NotificationResponse is one stored notification returned by the API.
@@ -2994,7 +2998,7 @@ type NotificationResponse struct {
 	SessionID string    `json:"sessionId"`
 	ProjectID string    `json:"projectId"`
 	PRURL     string    `json:"prUrl"`
-	Type      string    `json:"type" enum:"needs_input,session_stalled,ready_to_merge,pr_merged,pr_closed_unmerged,review_completed,review_changes_requested"`
+	Type      string    `json:"type" enum:"needs_input,session_stalled,ready_to_merge,pr_merged,pr_closed_unmerged,review_completed,review_changes_requested,decision_needed"`
 	Title     string    `json:"title"`
 	Body      string    `json:"body"`
 	Status    string    `json:"status" enum:"unread,read" description:"Seen state. unread means the user has not opened the notification panel since it arrived."`
