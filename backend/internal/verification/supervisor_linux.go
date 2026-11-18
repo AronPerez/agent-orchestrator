@@ -19,9 +19,10 @@ import (
 )
 
 const (
-	linuxSupervisorArgument    = "__ao_internal_verification_supervisor_v1"
-	linuxSupervisorFailureCode = 125
-	linuxSupervisorStopWait    = 5 * time.Second
+	linuxSupervisorArgument      = "__ao_internal_verification_supervisor_v1"
+	linuxSupervisorFailureCode   = 125
+	linuxSupervisorUncertainCode = 124
+	linuxSupervisorStopWait      = 5 * time.Second
 )
 
 // RunLinuxSupervisorIfRequested handles AO's private verification-supervisor
@@ -95,7 +96,9 @@ func runLinuxSupervisor(gateFD, passthroughFiles int, path string, args []string
 	}
 	survived, cleanupErr := stopLinuxSupervisorChildren(linuxSupervisorStopWait)
 	code := linuxProcessExitCode(rootErr)
-	if survived || cleanupErr != nil {
+	if cleanupErr != nil {
+		code = linuxSupervisorUncertainCode
+	} else if survived {
 		code = linuxSupervisorFailureCode
 	}
 	if survived {

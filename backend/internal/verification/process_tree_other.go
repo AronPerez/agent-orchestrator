@@ -167,6 +167,10 @@ func stopOwnedUnixProcesses(
 				)
 			}
 		}
+		if resultErr == nil {
+			resultErr = errors.New("verification process cleanup was not confirmed")
+		}
+		resultErr = markCleanupUncertain(resultErr)
 	}()
 
 	settled := false
