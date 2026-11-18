@@ -1177,26 +1177,77 @@ func TestPriorBootOwnershipIgnoresReusedDescriptorAndLockPID(t *testing.T) {
 	}
 }
 
+func TestPriorBootAbandonedIntentIgnoresReusedLauncherPID(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(context.Context, string, string) error
+	}{
+		{
+			name: "reconnect",
+			run: func(ctx context.Context, dataDir, sessionID string) error {
+				_, err := ConnectOrStart(ctx, Config{
+					SessionID: sessionID, DataDir: dataDir, Workdir: t.TempDir(), ReconnectOnly: true,
+				})
+				return err
+			},
+		},
+		{name: "shutdown", run: Shutdown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			sessionID := "prior-boot-intent-" + tt.name
+			token, err := reserveLaunchIntent(dataDir, sessionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			intent, err := readLaunchIntent(dataDir, sessionID, token)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if intent.BootID == "" {
+				t.Fatal("reserved launch intent omitted boot identity")
+			}
+			intent.BootID = priorBootIDForTest(t)
+			intentPath, err := launchIntentPath(dataDir, sessionID, token)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err := json.Marshal(intent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(intentPath, b, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			err = tt.run(context.Background(), dataDir, sessionID)
+			if tt.name == "reconnect" {
+				if !errors.Is(err, ErrNotRunning) {
+					t.Fatalf("reconnect error = %v, want ErrNotRunning", err)
+				}
+			} else if err != nil {
+				t.Fatalf("shutdown error = %v, want nil", err)
+			}
+			if _, err := readLaunchIntent(dataDir, sessionID, token); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("abandoned prior-boot intent remains: %v", err)
+			}
+		})
+	}
+}
+
 func writePriorBootReusedPIDOwnership(t *testing.T, dataDir, sessionID string) {
 	t.Helper()
 	token, err := reserveLaunchIntent(dataDir, sessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	bootID, err := currentBootIdentity()
-	if err != nil {
-		t.Fatal(err)
-	}
-	bootSource, _, ok := strings.Cut(bootID, ":")
-	if !ok {
-		t.Fatalf("boot identity = %q, want source:value", bootID)
-	}
 	readyPath, err := launchReadyPath(dataDir, sessionID, token)
 	if err != nil {
 		t.Fatal(err)
 	}
 	b, err := json.Marshal(launchReady{
-		Token: token, HostPID: os.Getpid(), BootID: bootSource + ":prior-boot",
+		Token: token, HostPID: os.Getpid(), BootID: priorBootIDForTest(t),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1225,6 +1276,19 @@ func writePriorBootReusedPIDOwnership(t *testing.T, dataDir, sessionID string) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func priorBootIDForTest(t *testing.T) string {
+	t.Helper()
+	bootID, err := currentBootIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootSource, _, ok := strings.Cut(bootID, ":")
+	if !ok {
+		t.Fatalf("boot identity = %q, want source:value", bootID)
+	}
+	return bootSource + ":prior-boot"
 }
 
 func TestLaunchIDEnvironmentPreservesInheritanceAndStaysOutOfProvider(t *testing.T) {

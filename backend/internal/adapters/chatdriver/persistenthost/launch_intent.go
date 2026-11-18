@@ -26,6 +26,7 @@ const (
 type launchIntent struct {
 	Token     string `json:"token"`
 	ParentPID int    `json:"parentPid"`
+	BootID    string `json:"bootId,omitempty"`
 }
 
 type launchReady struct {
@@ -71,13 +72,17 @@ func reserveLaunchIntent(dataDir, sessionID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	bootID, err := currentBootIdentity()
+	if err != nil {
+		return "", fmt.Errorf("read system boot identity: %w", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", err
 	}
 	if err := os.Chmod(filepath.Dir(path), 0o700); err != nil { //nolint:gosec // Owner-only capability directory.
 		return "", err
 	}
-	b, err := json.Marshal(launchIntent{Token: token, ParentPID: os.Getpid()})
+	b, err := json.Marshal(launchIntent{Token: token, ParentPID: os.Getpid(), BootID: bootID})
 	if err != nil {
 		return "", err
 	}
@@ -298,6 +303,13 @@ func retirePriorBootHostOwnership(dataDir, sessionID string) error {
 	stalePIDs := make(map[int]struct{}, len(tokens))
 	for token := range tokens {
 		ready, readyErr := readLaunchReady(dataDir, sessionID, token)
+		if errors.Is(readyErr, os.ErrNotExist) {
+			if probeErr := probeLaunchToken(dataDir, sessionID, token); probeErr == nil {
+				delete(tokens, token)
+				continue
+			}
+			return nil // The normal descriptor/absent-host path retains the fence.
+		}
 		if readyErr != nil {
 			return fmt.Errorf("%w: inspect prior-boot chat host readiness: %w", ErrOwnershipInconclusive, readyErr)
 		}
@@ -305,6 +317,9 @@ func retirePriorBootHostOwnership(dataDir, sessionID string) error {
 			return nil
 		}
 		stalePIDs[ready.HostPID] = struct{}{}
+	}
+	if len(stalePIDs) == 0 {
+		return nil
 	}
 	if d, readErr := readDescriptorOnce(dataDir, sessionID); readErr == nil {
 		if _, ok := stalePIDs[d.PID]; !ok {
@@ -434,6 +449,11 @@ func probeLaunchTokenWithProbes(
 		)
 	}
 	if intentErr == nil {
+		currentBootID, bootErr := bootIdentity()
+		if bootErr == nil && priorBootIdentity(intent.BootID, currentBootID) {
+			clearLaunchIntent(dataDir, sessionID, token)
+			return nil
+		}
 		if !exited(intent.ParentPID) {
 			return fmt.Errorf("%w: chat host launcher %d has not published readiness", ErrOwnershipInconclusive, intent.ParentPID)
 		}
