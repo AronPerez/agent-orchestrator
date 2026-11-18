@@ -30,6 +30,20 @@ const entry: DecisionInboxEntry = {
 	},
 };
 
+const planEntry: DecisionInboxEntry = {
+	...entry,
+	call: {
+		...entry.call,
+		title: "Approve this plan?",
+		reference: "plan-first",
+		options: [
+			{ label: "Approve", consequence: "Start implementation exactly as planned.", recommended: true },
+			{ label: "Approve with changes", consequence: "Apply the approval note, then start implementation." },
+			{ label: "Do not proceed", consequence: "Stop without implementation changes." },
+		],
+	},
+};
+
 describe("DecisionInbox", () => {
 	it("shows the exact ask, identity, consequences, and recommendation", () => {
 		render(<DecisionInbox entries={[entry]} isLoading={false} loadFailed={false} onAnswer={vi.fn()} onRetry={vi.fn()} />);
@@ -49,6 +63,20 @@ describe("DecisionInbox", () => {
 
 		await userEvent.click(screen.getByRole("button", { name: "Soak overnight" }));
 		expect(onAnswer).toHaveBeenCalledWith(entry, 2);
+	});
+
+	it("requires and sends the note for a plan approval with changes", async () => {
+		const onAnswer = vi.fn();
+		render(<DecisionInbox entries={[planEntry]} isLoading={false} loadFailed={false} onAnswer={onAnswer} onRetry={vi.fn()} />);
+
+		const submit = screen.getByRole("button", { name: "Approve with changes" });
+		expect(submit).toBeDisabled();
+
+		await userEvent.type(screen.getByLabelText("Changes"), "  Add a rollback step.  ");
+		expect(submit).toBeEnabled();
+		await userEvent.click(submit);
+
+		expect(onAnswer).toHaveBeenCalledWith(planEntry, 2, "Add a rollback step.");
 	});
 
 	it("disables every choice for the call while its answer is being sent", () => {
