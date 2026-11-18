@@ -6844,6 +6844,7 @@ export interface components {
             contractStallEscalatedAt?: null | string;
             /** Format: date-time */
             contractStallNudgedAt?: null | string;
+            contractStalled: boolean;
             /** Format: date-time */
             contractTimeboxPromptedAt?: null | string;
             /** Format: date-time */
