@@ -151,6 +151,9 @@ type ReviewTask struct {
 	RunID     string
 	PRURL     string
 	TargetSHA string
+	// Tamper is advisory evidence for TargetSHA. Reviewers inspect it but it
+	// never changes review eligibility or blocks the pull request.
+	Tamper *domain.PRTamperAssessment
 }
 
 // ReviewCommandSpec is how to launch a reviewer: the argv, any extra env, and

@@ -20168,6 +20168,8 @@ components:
           type:
           - "null"
           - string
+        latestDoneReport:
+          $ref: '#/components/schemas/SessionDoneReportResponse'
         mode:
           enum:
           - chat
@@ -23791,6 +23793,27 @@ components:
       - open
       - layers
       type: object
+    PRTamperAssessmentResponse:
+      properties:
+        assessedAt:
+          format: date-time
+          type: string
+        ciWorkflowEdited:
+          type: boolean
+        headSha:
+          type: string
+        skipMarkersAdded:
+          type: integer
+        testCasesAdded:
+          type: integer
+        testCasesRemoved:
+          type: integer
+        testFilesDeleted:
+          type: integer
+      required:
+      - headSha
+      - assessedAt
+      type: object
     PostPRCommentRequest:
       properties:
         attachments:
@@ -24615,6 +24638,11 @@ components:
           type: string
         evidence:
           type: string
+        interactionAt:
+          format: date-time
+          type:
+          - "null"
+          - string
         outputTail:
           type: string
         startedAt:
@@ -24624,6 +24652,8 @@ components:
           enum:
           - passed
           - failed
+          type: string
+        workspaceRevision:
           type: string
       required:
       - state
@@ -25206,6 +25236,8 @@ components:
           type: string
         unpushed:
           type: integer
+        workspaceRevision:
+          type: string
       required:
       - commits
       - unpushed
@@ -25223,6 +25255,17 @@ components:
       required:
       - events
       - hasMore
+      type: object
+    SessionDoneReportResponse:
+      properties:
+        id:
+          type: string
+        superseded:
+          type: boolean
+        verification:
+          $ref: '#/components/schemas/ReportVerificationResponse'
+      required:
+      - id
       type: object
     SessionHistoryResponse:
       properties:
@@ -25613,6 +25656,8 @@ components:
           - merged
           - closed
           type: string
+        tamper:
+          $ref: '#/components/schemas/PRTamperAssessmentResponse'
         updatedAt:
           format: date-time
           type: string

@@ -7,9 +7,10 @@ INSERT INTO pr (
     provider_state, provider_mergeable, provider_merge_state_status, html_url,
     created_at_provider, updated_at_provider, merged_at_provider, closed_at_provider,
     metadata_hash, ci_hash, review_hash, observed_at, ci_observed_at, review_observed_at, review_partial,
-    head_from_fork, head_is_default_branch, auto_inject_ci
+    head_from_fork, head_is_default_branch, tamper_assessment_json, auto_inject_ci
 )
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+    ?,
     COALESCE((SELECT auto_inject_ci FROM sessions WHERE id = ?), TRUE))
 ON CONFLICT (url) DO UPDATE SET
     number = excluded.number,
@@ -39,6 +40,11 @@ ON CONFLICT (url) DO UPDATE SET
     target_branch = excluded.target_branch,
     head_from_fork = excluded.head_from_fork,
     head_is_default_branch = excluded.head_is_default_branch,
+    tamper_assessment_json = CASE
+        WHEN excluded.head_sha != pr.head_sha OR excluded.base_sha != pr.base_sha THEN excluded.tamper_assessment_json
+        WHEN excluded.tamper_assessment_json != '' THEN excluded.tamper_assessment_json
+        ELSE pr.tamper_assessment_json
+    END,
     head_sha = excluded.head_sha,
     title = excluded.title,
     additions = excluded.additions,
@@ -236,6 +242,15 @@ SELECT last_nudge_signature FROM pr WHERE url = ?;
 -- name: UpdatePRLastNudgeSignature :exec
 UPDATE pr SET last_nudge_signature = ? WHERE url = ?;
 
+-- name: UpdatePRTamperAssessmentIfRevision :execrows
+-- Narrow compare-and-update for local retry backfills. A provider observation
+-- may update any other PR fact while the filesystem assessment runs; only the
+-- exact base/head pair may receive this evidence.
+UPDATE pr SET tamper_assessment_json = sqlc.arg(tamper_assessment_json)
+WHERE url = sqlc.arg(url)
+  AND base_sha = sqlc.arg(base_sha)
+  AND head_sha = sqlc.arg(head_sha);
+
 -- name: SetPRAutoInjectCIBySession :exec
 UPDATE pr SET auto_inject_ci = ? WHERE session_id = ?;
 
@@ -248,6 +263,7 @@ SELECT
     pr.ci_state,
     pr.mergeability,
     pr.head_sha,
+    pr.tamper_assessment_json,
     pr.updated_at,
     EXISTS (
         SELECT 1
@@ -340,6 +356,7 @@ SELECT
     pr.host,
     pr.repo,
     pr.head_sha,
+    pr.tamper_assessment_json,
     pr.updated_at,
     pr.state_changed_at,
     pr.ci_observed_at,
@@ -490,6 +507,7 @@ SELECT
     pr.host,
     pr.repo,
     pr.head_sha,
+    pr.tamper_assessment_json,
     pr.updated_at,
     pr.state_changed_at,
     pr.ci_observed_at,

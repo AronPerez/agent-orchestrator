@@ -680,7 +680,7 @@ func (e *Engine) TriggerWithOptions(ctx stdctx.Context, workerID domain.SessionI
 
 	queueRuns := append([]domain.ReviewRun{}, restarted...)
 	queueRuns = append(queueRuns, created...)
-	queue := reviewQueue(queueRuns)
+	queue := reviewQueue(queueRuns, prs)
 	launchRun := queueRuns[0]
 	launchAgentSessionID := reviewRow.AgentSessionID
 	if hasConfigOverride || selectedMode == domain.ReviewerInterfaceChat {
@@ -1494,16 +1494,31 @@ func reviewLaunchSpec(
 	}
 }
 
-func reviewQueue(runs []domain.ReviewRun) []ports.ReviewTask {
+func reviewQueue(runs []domain.ReviewRun, prs []domain.PullRequest) []ports.ReviewTask {
 	queue := make([]ports.ReviewTask, 0, len(runs))
 	for _, run := range runs {
 		queue = append(queue, ports.ReviewTask{
 			RunID:     run.ID,
 			PRURL:     run.PRURL,
 			TargetSHA: run.TargetSHA,
+			Tamper:    tamperAssessmentForReview(run, prs),
 		})
 	}
 	return queue
+}
+
+func tamperAssessmentForReview(run domain.ReviewRun, prs []domain.PullRequest) *domain.PRTamperAssessment {
+	for i := range prs {
+		pr := &prs[i]
+		if run.PRURL != pr.URL && run.PRURL != pr.HTMLURL {
+			continue
+		}
+		if pr.HeadSHA != run.TargetSHA || pr.Tamper == nil || pr.Tamper.HeadSHA != run.TargetSHA || !pr.Tamper.Suspected() {
+			return nil
+		}
+		return pr.Tamper
+	}
+	return nil
 }
 
 // secondOpinionWanted reports whether an explicit manual override makes an

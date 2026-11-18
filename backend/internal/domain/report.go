@@ -232,11 +232,24 @@ func (s ReportVerificationState) Valid() bool {
 // report. OutputTail is returned only to the worker that creates the report;
 // the durable full bounded tail lives at Evidence.
 type ReportVerification struct {
-	State       ReportVerificationState
-	Evidence    string
-	StartedAt   time.Time
-	CompletedAt time.Time
-	OutputTail  string
+	State             ReportVerificationState
+	Evidence          string
+	StartedAt         time.Time
+	CompletedAt       time.Time
+	WorkspaceRevision string
+	InteractionAt     time.Time
+	OutputTail        string
+}
+
+// SessionDoneReport is the latest done report fact used by session read
+// models. Its presence means the session reported done; Verification remains
+// nil when that report had no configured verify commands.
+type SessionDoneReport struct {
+	ID           string
+	Verification *ReportVerification
+	// Superseded means another report of any state was created after this done
+	// report, so its verification no longer describes the latest work claim.
+	Superseded bool
 }
 
 // Validate checks the persisted verification fields. OutputTail is ephemeral

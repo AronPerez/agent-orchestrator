@@ -283,6 +283,8 @@ var shippedMigrations = map[int64]string{
 	20261117180942523: "20261117180942523_session_overlap_notices.sql",
 	20261117183702303: "20261117183702303_allow_session_stalled_notifications.sql",
 	20261117212535459: "20261117212535459_report_verification.sql",
+	20261117222321128: "20261117222321128_pr_tamper_assessment.sql",
+	20261118045922851: "20261118045922851_verified_report_snapshot.sql",
 }
 
 // burnedVersion reports version numbers that must never be (re)used: they

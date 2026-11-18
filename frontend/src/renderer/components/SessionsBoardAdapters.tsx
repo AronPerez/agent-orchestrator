@@ -13,7 +13,7 @@ import {
 	type BoardUsagePresentation,
 	type ProductUITranslator,
 } from "@aoagents/product-ui";
-import { AlertTriangle, Archive, Check, Copy, File, GitBranch, LoaderCircle, RotateCcw, Share2, Trash2 } from "@/components/app-icons";
+import { AlertTriangle, Archive, Check, CircleHelp, Copy, File, GitBranch, LoaderCircle, RotateCcw, Share2, ShieldCheck, Trash2, TriangleAlert } from "@/components/app-icons";
 import type { MessageKey } from "../i18n";
 import { apiClient, apiErrorMessage } from "../lib/api-client";
 import { aoBridge } from "../lib/bridge";
@@ -56,6 +56,7 @@ import { Checkbox } from "./ui/checkbox";
 import { HoverCard, HoverCardTrigger } from "./ui/hover-card";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import { someoneElseWorking, type SessionPerson } from "../lib/session-people";
+import { sessionVerificationPresentation, type SessionVerificationPresentation } from "../lib/session-verification";
 import { SessionPeopleStack } from "./SessionPeople";
 import { SessionOwnerTag } from "./SessionOwnerTag";
 import { Badge } from "./ui/badge";
@@ -396,6 +397,11 @@ function DesktopSessionCard({
 		</Tooltip>
 	) : null;
 	const people = participants && participants.length > 0 ? participants : undefined;
+	const verification = sessionVerificationPresentation(session);
+	const deliverables = sessionDeliverables(session);
+	const artifactLinks = interactive && onOpenArtifact && deliverables.length > 0
+		? <BoardArtifactLinks artifacts={deliverables} onOpen={onOpenArtifact} onOpenInspector={onOpenArtifacts} session={session} />
+		: undefined;
 	const collisionBadge = collision ? (
 		<Tooltip>
 			<TooltipTrigger asChild>
@@ -434,8 +440,11 @@ function DesktopSessionCard({
 		<SessionCardView
 			action={action}
 			artifacts={
-				interactive && onOpenArtifact ? (
-					<BoardArtifactLinks artifacts={sessionDeliverables(session)} onOpen={onOpenArtifact} onOpenInspector={onOpenArtifacts} session={session} />
+				verification || artifactLinks ? (
+					<div className="flex min-w-0 flex-col gap-1">
+						{verification ? <BoardVerificationMarker presentation={verification} onOpenEvidence={interactive ? onOpenArtifact : undefined} /> : null}
+						{artifactLinks}
+					</div>
 				) : undefined
 			}
 			branchAction={branchAction}
@@ -601,6 +610,59 @@ function SessionRenameDialog({
 const BOARD_ARTIFACT_LIMIT = 2;
 const BOARD_ARTIFACT_EXPANDED_LIMIT = 10;
 const BOARD_ARTIFACT_HOVER_DELAY = 300;
+
+function verificationLabel(t: TFunction, state: SessionVerificationPresentation["state"]): string {
+	switch (state) {
+		case "verified":
+			return t("verification.verified");
+		case "tampering_suspected":
+			return t("verification.tamperingSuspected");
+		default:
+			return t("verification.unverified");
+	}
+}
+
+function BoardVerificationMarker({
+	presentation,
+	onOpenEvidence,
+}: {
+	presentation: SessionVerificationPresentation;
+	onOpenEvidence?: (path: string) => void;
+}) {
+	const { t } = useTranslation();
+	const label = verificationLabel(t, presentation.state);
+	const Icon = presentation.state === "verified" ? ShieldCheck : presentation.state === "tampering_suspected" ? TriangleAlert : CircleHelp;
+	const tone = presentation.state === "verified" ? "text-success" : presentation.state === "tampering_suspected" ? "text-status-in-review" : "text-passive";
+	const content = (
+		<>
+			<Icon aria-hidden="true" className={cn("size-icon-2xs shrink-0", tone)} />
+			<span className="truncate">{label}</span>
+		</>
+	);
+	if (presentation.evidence && onOpenEvidence) {
+		return (
+			<Button
+				aria-label={t("verification.viewEvidence")}
+				className="h-auto min-w-0 self-start gap-1.5 px-0 py-0 text-2xs font-normal hover:underline"
+				data-session-verification={presentation.state}
+				onClick={(event) => {
+					event.stopPropagation();
+					onOpenEvidence(presentation.evidence!);
+				}}
+				size="none"
+				type="button"
+				variant="quiet"
+			>
+				{content}
+			</Button>
+		);
+	}
+	return (
+		<div className="flex min-w-0 items-center gap-1.5 text-2xs" data-session-verification={presentation.state}>
+			{content}
+		</div>
+	);
+}
 
 /** The session's most recently updated artifacts, newest first. */
 export function latestSessionArtifacts(artifacts: SessionArtifact[], limit = BOARD_ARTIFACT_LIMIT): SessionArtifact[] {

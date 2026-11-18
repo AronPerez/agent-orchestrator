@@ -15,7 +15,7 @@ const acknowledgeReport = `-- name: AcknowledgeReport :one
 UPDATE reports
 SET delivery_state = 'acknowledged', acknowledged_at = ?1
 WHERE id = ?2 AND delivery_state = 'claimed' AND claim_token = ?3
-RETURNING id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id, verification_state, verification_evidence, verification_started_at, verification_completed_at
+RETURNING id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id, verification_state, verification_evidence, verification_started_at, verification_completed_at, verification_workspace_revision, verification_interaction_at
 `
 
 type AcknowledgeReportParams struct {
@@ -49,6 +49,8 @@ func (q *Queries) AcknowledgeReport(ctx context.Context, arg AcknowledgeReportPa
 		&i.VerificationEvidence,
 		&i.VerificationStartedAt,
 		&i.VerificationCompletedAt,
+		&i.VerificationWorkspaceRevision,
+		&i.VerificationInteractionAt,
 	)
 	return i, err
 }
@@ -58,7 +60,7 @@ UPDATE reports
 SET delivery_state = 'acknowledged', acknowledged_at = ?1
 WHERE project_id = ?2 AND delivery_state = 'claimed'
   AND claim_token = ?3
-RETURNING id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id, verification_state, verification_evidence, verification_started_at, verification_completed_at
+RETURNING id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id, verification_state, verification_evidence, verification_started_at, verification_completed_at, verification_workspace_revision, verification_interaction_at
 `
 
 type AcknowledgeReportBatchParams struct {
@@ -98,6 +100,8 @@ func (q *Queries) AcknowledgeReportBatch(ctx context.Context, arg AcknowledgeRep
 			&i.VerificationEvidence,
 			&i.VerificationStartedAt,
 			&i.VerificationCompletedAt,
+			&i.VerificationWorkspaceRevision,
+			&i.VerificationInteractionAt,
 		); err != nil {
 			return nil, err
 		}
@@ -136,7 +140,7 @@ SET delivery_state = 'claimed', claim_token = ?1,
     last_error = ''
 WHERE project_id = ?3 AND delivery_state = 'pending'
   AND delivery_batch_id = ?4
-RETURNING id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id, verification_state, verification_evidence, verification_started_at, verification_completed_at
+RETURNING id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id, verification_state, verification_evidence, verification_started_at, verification_completed_at, verification_workspace_revision, verification_interaction_at
 `
 
 type ClaimPendingReportsByBatchParams struct {
@@ -182,6 +186,8 @@ func (q *Queries) ClaimPendingReportsByBatch(ctx context.Context, arg ClaimPendi
 			&i.VerificationEvidence,
 			&i.VerificationStartedAt,
 			&i.VerificationCompletedAt,
+			&i.VerificationWorkspaceRevision,
+			&i.VerificationInteractionAt,
 		); err != nil {
 			return nil, err
 		}
@@ -202,7 +208,7 @@ SET delivery_state = 'claimed', claim_token = ?1,
     claimed_at = ?2, delivery_attempts = delivery_attempts + 1,
     last_error = ''
 WHERE id = ?3 AND delivery_state = 'pending' AND available_at <= ?2
-RETURNING id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id, verification_state, verification_evidence, verification_started_at, verification_completed_at
+RETURNING id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id, verification_state, verification_evidence, verification_started_at, verification_completed_at, verification_workspace_revision, verification_interaction_at
 `
 
 type ClaimReportParams struct {
@@ -236,6 +242,8 @@ func (q *Queries) ClaimReport(ctx context.Context, arg ClaimReportParams) (Repor
 		&i.VerificationEvidence,
 		&i.VerificationStartedAt,
 		&i.VerificationCompletedAt,
+		&i.VerificationWorkspaceRevision,
+		&i.VerificationInteractionAt,
 	)
 	return i, err
 }
@@ -244,27 +252,30 @@ const createReport = `-- name: CreateReport :one
 INSERT INTO reports (
     id, session_id, project_id, state, note, message, created_at, available_at,
     settlement_deadline, repeat_count, verification_state, verification_evidence,
-    verification_started_at, verification_completed_at
+    verification_started_at, verification_completed_at, verification_workspace_revision,
+    verification_interaction_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-RETURNING id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id, verification_state, verification_evidence, verification_started_at, verification_completed_at
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+RETURNING id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id, verification_state, verification_evidence, verification_started_at, verification_completed_at, verification_workspace_revision, verification_interaction_at
 `
 
 type CreateReportParams struct {
-	ID                      string
-	SessionID               string
-	ProjectID               string
-	State                   string
-	Note                    string
-	Message                 string
-	CreatedAt               time.Time
-	AvailableAt             time.Time
-	SettlementDeadline      sql.NullTime
-	RepeatCount             int64
-	VerificationState       string
-	VerificationEvidence    string
-	VerificationStartedAt   sql.NullTime
-	VerificationCompletedAt sql.NullTime
+	ID                            string
+	SessionID                     string
+	ProjectID                     string
+	State                         string
+	Note                          string
+	Message                       string
+	CreatedAt                     time.Time
+	AvailableAt                   time.Time
+	SettlementDeadline            sql.NullTime
+	RepeatCount                   int64
+	VerificationState             string
+	VerificationEvidence          string
+	VerificationStartedAt         sql.NullTime
+	VerificationCompletedAt       sql.NullTime
+	VerificationWorkspaceRevision string
+	VerificationInteractionAt     sql.NullTime
 }
 
 func (q *Queries) CreateReport(ctx context.Context, arg CreateReportParams) (Report, error) {
@@ -283,6 +294,8 @@ func (q *Queries) CreateReport(ctx context.Context, arg CreateReportParams) (Rep
 		arg.VerificationEvidence,
 		arg.VerificationStartedAt,
 		arg.VerificationCompletedAt,
+		arg.VerificationWorkspaceRevision,
+		arg.VerificationInteractionAt,
 	)
 	var i Report
 	err := row.Scan(
@@ -307,6 +320,8 @@ func (q *Queries) CreateReport(ctx context.Context, arg CreateReportParams) (Rep
 		&i.VerificationEvidence,
 		&i.VerificationStartedAt,
 		&i.VerificationCompletedAt,
+		&i.VerificationWorkspaceRevision,
+		&i.VerificationInteractionAt,
 	)
 	return i, err
 }
@@ -315,28 +330,31 @@ const createReportIfAbsent = `-- name: CreateReportIfAbsent :one
 INSERT INTO reports (
     id, session_id, project_id, state, note, message, created_at, available_at,
     settlement_deadline, repeat_count, verification_state, verification_evidence,
-    verification_started_at, verification_completed_at
+    verification_started_at, verification_completed_at, verification_workspace_revision,
+    verification_interaction_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO NOTHING
-RETURNING id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id, verification_state, verification_evidence, verification_started_at, verification_completed_at
+RETURNING id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id, verification_state, verification_evidence, verification_started_at, verification_completed_at, verification_workspace_revision, verification_interaction_at
 `
 
 type CreateReportIfAbsentParams struct {
-	ID                      string
-	SessionID               string
-	ProjectID               string
-	State                   string
-	Note                    string
-	Message                 string
-	CreatedAt               time.Time
-	AvailableAt             time.Time
-	SettlementDeadline      sql.NullTime
-	RepeatCount             int64
-	VerificationState       string
-	VerificationEvidence    string
-	VerificationStartedAt   sql.NullTime
-	VerificationCompletedAt sql.NullTime
+	ID                            string
+	SessionID                     string
+	ProjectID                     string
+	State                         string
+	Note                          string
+	Message                       string
+	CreatedAt                     time.Time
+	AvailableAt                   time.Time
+	SettlementDeadline            sql.NullTime
+	RepeatCount                   int64
+	VerificationState             string
+	VerificationEvidence          string
+	VerificationStartedAt         sql.NullTime
+	VerificationCompletedAt       sql.NullTime
+	VerificationWorkspaceRevision string
+	VerificationInteractionAt     sql.NullTime
 }
 
 func (q *Queries) CreateReportIfAbsent(ctx context.Context, arg CreateReportIfAbsentParams) (Report, error) {
@@ -355,6 +373,8 @@ func (q *Queries) CreateReportIfAbsent(ctx context.Context, arg CreateReportIfAb
 		arg.VerificationEvidence,
 		arg.VerificationStartedAt,
 		arg.VerificationCompletedAt,
+		arg.VerificationWorkspaceRevision,
+		arg.VerificationInteractionAt,
 	)
 	var i Report
 	err := row.Scan(
@@ -379,6 +399,8 @@ func (q *Queries) CreateReportIfAbsent(ctx context.Context, arg CreateReportIfAb
 		&i.VerificationEvidence,
 		&i.VerificationStartedAt,
 		&i.VerificationCompletedAt,
+		&i.VerificationWorkspaceRevision,
+		&i.VerificationInteractionAt,
 	)
 	return i, err
 }
@@ -413,7 +435,7 @@ SET delivery_state = 'pending', available_at = max(available_at, ?1),
     claim_token = '', claimed_at = NULL, last_error = ?2
 WHERE project_id = ?3 AND delivery_state = 'claimed'
   AND claim_token = ?4
-RETURNING id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id, verification_state, verification_evidence, verification_started_at, verification_completed_at
+RETURNING id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id, verification_state, verification_evidence, verification_started_at, verification_completed_at, verification_workspace_revision, verification_interaction_at
 `
 
 type DeferReportBatchParams struct {
@@ -459,6 +481,8 @@ func (q *Queries) DeferReportBatch(ctx context.Context, arg DeferReportBatchPara
 			&i.VerificationEvidence,
 			&i.VerificationStartedAt,
 			&i.VerificationCompletedAt,
+			&i.VerificationWorkspaceRevision,
+			&i.VerificationInteractionAt,
 		); err != nil {
 			return nil, err
 		}
@@ -474,7 +498,7 @@ func (q *Queries) DeferReportBatch(ctx context.Context, arg DeferReportBatchPara
 }
 
 const getReport = `-- name: GetReport :one
-SELECT id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id, verification_state, verification_evidence, verification_started_at, verification_completed_at FROM reports WHERE id = ?
+SELECT id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id, verification_state, verification_evidence, verification_started_at, verification_completed_at, verification_workspace_revision, verification_interaction_at FROM reports WHERE id = ?
 `
 
 func (q *Queries) GetReport(ctx context.Context, id string) (Report, error) {
@@ -502,6 +526,8 @@ func (q *Queries) GetReport(ctx context.Context, id string) (Report, error) {
 		&i.VerificationEvidence,
 		&i.VerificationStartedAt,
 		&i.VerificationCompletedAt,
+		&i.VerificationWorkspaceRevision,
+		&i.VerificationInteractionAt,
 	)
 	return i, err
 }
@@ -517,8 +543,94 @@ func (q *Queries) GetReportInterrupt(ctx context.Context, sessionID string) (tim
 	return last_interrupted_at, err
 }
 
+const listLatestDoneReportsBySessions = `-- name: ListLatestDoneReportsBySessions :many
+WITH wanted_session AS (
+    SELECT CAST(j.value AS TEXT) AS session_id
+    FROM json_each(?) AS j
+)
+SELECT
+    r.session_id,
+    r.id,
+    r.verification_state,
+    r.verification_evidence,
+    r.verification_started_at,
+    r.verification_completed_at,
+    r.verification_workspace_revision,
+    r.verification_interaction_at,
+    EXISTS (
+        SELECT 1
+        FROM reports later
+        WHERE later.session_id = r.session_id
+          AND (
+              later.created_at > r.created_at
+              OR (later.created_at = r.created_at AND later.id > r.id)
+          )
+    ) AS superseded
+FROM reports r
+JOIN wanted_session ON wanted_session.session_id = r.session_id
+WHERE r.state = 'done'
+  AND NOT EXISTS (
+      SELECT 1
+      FROM reports newer
+      WHERE newer.session_id = r.session_id
+        AND newer.state = 'done'
+        AND (
+            newer.created_at > r.created_at
+            OR (newer.created_at = r.created_at AND newer.id > r.id)
+        )
+  )
+`
+
+type ListLatestDoneReportsBySessionsRow struct {
+	SessionID                     string
+	ID                            string
+	VerificationState             string
+	VerificationEvidence          string
+	VerificationStartedAt         sql.NullTime
+	VerificationCompletedAt       sql.NullTime
+	VerificationWorkspaceRevision string
+	VerificationInteractionAt     sql.NullTime
+	Superseded                    bool
+}
+
+// Batch projection for session cards. A done report without verification is
+// still returned so clients can distinguish unverified completion from no
+// completion report at all.
+func (q *Queries) ListLatestDoneReportsBySessions(ctx context.Context, jsonEach interface{}) ([]ListLatestDoneReportsBySessionsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listLatestDoneReportsBySessions, jsonEach)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListLatestDoneReportsBySessionsRow{}
+	for rows.Next() {
+		var i ListLatestDoneReportsBySessionsRow
+		if err := rows.Scan(
+			&i.SessionID,
+			&i.ID,
+			&i.VerificationState,
+			&i.VerificationEvidence,
+			&i.VerificationStartedAt,
+			&i.VerificationCompletedAt,
+			&i.VerificationWorkspaceRevision,
+			&i.VerificationInteractionAt,
+			&i.Superseded,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listPendingReportSchedule = `-- name: ListPendingReportSchedule :many
-SELECT id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id, verification_state, verification_evidence, verification_started_at, verification_completed_at FROM reports
+SELECT id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id, verification_state, verification_evidence, verification_started_at, verification_completed_at, verification_workspace_revision, verification_interaction_at FROM reports
 WHERE delivery_state = 'pending'
 ORDER BY available_at, created_at, id
 LIMIT ?
@@ -555,6 +667,8 @@ func (q *Queries) ListPendingReportSchedule(ctx context.Context, limit int64) ([
 			&i.VerificationEvidence,
 			&i.VerificationStartedAt,
 			&i.VerificationCompletedAt,
+			&i.VerificationWorkspaceRevision,
+			&i.VerificationInteractionAt,
 		); err != nil {
 			return nil, err
 		}
@@ -570,7 +684,7 @@ func (q *Queries) ListPendingReportSchedule(ctx context.Context, limit int64) ([
 }
 
 const listPendingReports = `-- name: ListPendingReports :many
-SELECT id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id, verification_state, verification_evidence, verification_started_at, verification_completed_at FROM reports
+SELECT id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id, verification_state, verification_evidence, verification_started_at, verification_completed_at, verification_workspace_revision, verification_interaction_at FROM reports
 WHERE delivery_state = 'pending' AND available_at <= ?
 ORDER BY created_at, id
 LIMIT ?
@@ -612,6 +726,8 @@ func (q *Queries) ListPendingReports(ctx context.Context, arg ListPendingReports
 			&i.VerificationEvidence,
 			&i.VerificationStartedAt,
 			&i.VerificationCompletedAt,
+			&i.VerificationWorkspaceRevision,
+			&i.VerificationInteractionAt,
 		); err != nil {
 			return nil, err
 		}
@@ -627,7 +743,7 @@ func (q *Queries) ListPendingReports(ctx context.Context, arg ListPendingReports
 }
 
 const listPendingReportsByProjectSchedule = `-- name: ListPendingReportsByProjectSchedule :many
-SELECT id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id, verification_state, verification_evidence, verification_started_at, verification_completed_at FROM reports
+SELECT id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id, verification_state, verification_evidence, verification_started_at, verification_completed_at, verification_workspace_revision, verification_interaction_at FROM reports
 WHERE project_id = ? AND delivery_state = 'pending'
 ORDER BY available_at, created_at, id
 LIMIT ?
@@ -669,6 +785,8 @@ func (q *Queries) ListPendingReportsByProjectSchedule(ctx context.Context, arg L
 			&i.VerificationEvidence,
 			&i.VerificationStartedAt,
 			&i.VerificationCompletedAt,
+			&i.VerificationWorkspaceRevision,
+			&i.VerificationInteractionAt,
 		); err != nil {
 			return nil, err
 		}
@@ -747,7 +865,7 @@ func (q *Queries) ListReportedPRURLs(ctx context.Context, sessionID string) ([]s
 }
 
 const listReportsByProject = `-- name: ListReportsByProject :many
-SELECT id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id, verification_state, verification_evidence, verification_started_at, verification_completed_at FROM reports WHERE project_id = ? ORDER BY created_at, id
+SELECT id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id, verification_state, verification_evidence, verification_started_at, verification_completed_at, verification_workspace_revision, verification_interaction_at FROM reports WHERE project_id = ? ORDER BY created_at, id
 `
 
 func (q *Queries) ListReportsByProject(ctx context.Context, projectID string) ([]Report, error) {
@@ -781,6 +899,8 @@ func (q *Queries) ListReportsByProject(ctx context.Context, projectID string) ([
 			&i.VerificationEvidence,
 			&i.VerificationStartedAt,
 			&i.VerificationCompletedAt,
+			&i.VerificationWorkspaceRevision,
+			&i.VerificationInteractionAt,
 		); err != nil {
 			return nil, err
 		}
@@ -796,7 +916,7 @@ func (q *Queries) ListReportsByProject(ctx context.Context, projectID string) ([
 }
 
 const listReportsBySession = `-- name: ListReportsBySession :many
-SELECT id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id, verification_state, verification_evidence, verification_started_at, verification_completed_at FROM reports WHERE session_id = ? ORDER BY created_at, id
+SELECT id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id, verification_state, verification_evidence, verification_started_at, verification_completed_at, verification_workspace_revision, verification_interaction_at FROM reports WHERE session_id = ? ORDER BY created_at, id
 `
 
 func (q *Queries) ListReportsBySession(ctx context.Context, sessionID string) ([]Report, error) {
@@ -830,6 +950,8 @@ func (q *Queries) ListReportsBySession(ctx context.Context, sessionID string) ([
 			&i.VerificationEvidence,
 			&i.VerificationStartedAt,
 			&i.VerificationCompletedAt,
+			&i.VerificationWorkspaceRevision,
+			&i.VerificationInteractionAt,
 		); err != nil {
 			return nil, err
 		}
@@ -865,7 +987,7 @@ UPDATE reports
 SET delivery_state = 'pending', available_at = ?1,
     claim_token = '', claimed_at = NULL, last_error = ?2
 WHERE id = ?3 AND delivery_state = 'claimed' AND claim_token = ?4
-RETURNING id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id, verification_state, verification_evidence, verification_started_at, verification_completed_at
+RETURNING id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id, verification_state, verification_evidence, verification_started_at, verification_completed_at, verification_workspace_revision, verification_interaction_at
 `
 
 type ReleaseReportParams struct {
@@ -905,6 +1027,8 @@ func (q *Queries) ReleaseReport(ctx context.Context, arg ReleaseReportParams) (R
 		&i.VerificationEvidence,
 		&i.VerificationStartedAt,
 		&i.VerificationCompletedAt,
+		&i.VerificationWorkspaceRevision,
+		&i.VerificationInteractionAt,
 	)
 	return i, err
 }
@@ -915,7 +1039,7 @@ SET delivery_state = 'pending', available_at = min(available_at, ?1),
     claim_token = '', claimed_at = NULL, last_error = ?2
 WHERE project_id = ?3 AND delivery_state = 'claimed'
   AND claim_token = ?4
-RETURNING id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id, verification_state, verification_evidence, verification_started_at, verification_completed_at
+RETURNING id, session_id, project_id, state, note, message, created_at, delivery_state, available_at, settlement_deadline, repeat_count, claim_token, claimed_at, delivery_attempts, acknowledged_at, last_error, delivery_batch_id, verification_state, verification_evidence, verification_started_at, verification_completed_at, verification_workspace_revision, verification_interaction_at
 `
 
 type ReleaseReportBatchParams struct {
@@ -961,6 +1085,8 @@ func (q *Queries) ReleaseReportBatch(ctx context.Context, arg ReleaseReportBatch
 			&i.VerificationEvidence,
 			&i.VerificationStartedAt,
 			&i.VerificationCompletedAt,
+			&i.VerificationWorkspaceRevision,
+			&i.VerificationInteractionAt,
 		); err != nil {
 			return nil, err
 		}

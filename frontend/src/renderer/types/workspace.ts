@@ -32,6 +32,16 @@ export type SessionKind = "worker" | "orchestrator";
 /** Lifecycle state of a single pull request, mirrors the daemon's enum. */
 export type PRState = "open" | "draft" | "merged" | "closed";
 
+export type PRTamperAssessment = {
+	headSha: string;
+	testFilesDeleted?: number;
+	testCasesRemoved?: number;
+	testCasesAdded?: number;
+	skipMarkersAdded?: number;
+	ciWorkflowEdited?: boolean;
+	assessedAt: string;
+};
+
 /**
  * One attributed pull request, mirroring the daemon's SessionPRFacts wire shape.
  * A session can own many (e.g. a stack), so {@link WorkspaceSession.prs} is a
@@ -56,6 +66,21 @@ export type PullRequestFacts = {
 	updatedAt: string;
 	/** The open PR whose branch this PR targets; absent when its base has no open PR. */
 	stackParent?: number;
+	/** Advisory deterministic signals for this exact PR head. */
+	tamper?: PRTamperAssessment;
+};
+
+export type SessionDoneReport = {
+	id: string;
+	superseded?: boolean;
+	verification?: {
+		state: "passed" | "failed";
+		evidence: string;
+		startedAt: string;
+		completedAt: string;
+		workspaceRevision?: string;
+		interactionAt?: string;
+	};
 };
 
 /** What kind of durable output a session has produced, when known. */
@@ -114,6 +139,8 @@ export type SessionProvisionStep = {
 /** The daemon's observed branch facts. `unpushed` equals `commits` until the branch reaches its remote. */
 export type SessionBranchState = {
 	commits: number;
+	/** Exact clean committed state of every repository in the workspace. Empty while dirty or unobservable. */
+	workspaceRevision?: string;
 	remoteBranch?: string;
 	/** The commit the remote branch points at, as last read. */
 	remoteHead?: string;
@@ -284,6 +311,8 @@ export type WorkspaceSession = {
 	 * done server-side, so {@link status} already reflects all of these.
 	 */
 	prs: PullRequestFacts[];
+	/** Newest durable done report; absent until this session has reported done. */
+	latestDoneReport?: SessionDoneReport;
 	/** What kind of durable output this session has produced, when known. */
 	outputType?: SessionOutputType;
 	/** The deliverable requested at spawn; "artifact" for sessions started from Create artifact. */

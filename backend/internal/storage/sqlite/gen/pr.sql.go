@@ -156,6 +156,7 @@ SELECT
     pr.ci_state,
     pr.mergeability,
     pr.head_sha,
+    pr.tamper_assessment_json,
     pr.updated_at,
     EXISTS (
         SELECT 1
@@ -190,16 +191,17 @@ LIMIT 1
 `
 
 type GetDisplayPRFactsBySessionRow struct {
-	URL              string
-	Number           int64
-	PRState          domain.PRState
-	ReviewDecision   domain.ReviewDecision
-	CIState          domain.CIState
-	Mergeability     domain.Mergeability
-	HeadSha          string
-	UpdatedAt        time.Time
-	ExternalComments bool
-	ReviewComments   bool
+	URL                  string
+	Number               int64
+	PRState              domain.PRState
+	ReviewDecision       domain.ReviewDecision
+	CIState              domain.CIState
+	Mergeability         domain.Mergeability
+	HeadSha              string
+	TamperAssessmentJson string
+	UpdatedAt            time.Time
+	ExternalComments     bool
+	ReviewComments       bool
 }
 
 func (q *Queries) GetDisplayPRFactsBySession(ctx context.Context, sessionID domain.SessionID) (GetDisplayPRFactsBySessionRow, error) {
@@ -213,6 +215,7 @@ func (q *Queries) GetDisplayPRFactsBySession(ctx context.Context, sessionID doma
 		&i.CIState,
 		&i.Mergeability,
 		&i.HeadSha,
+		&i.TamperAssessmentJson,
 		&i.UpdatedAt,
 		&i.ExternalComments,
 		&i.ReviewComments,
@@ -221,7 +224,7 @@ func (q *Queries) GetDisplayPRFactsBySession(ctx context.Context, sessionID doma
 }
 
 const getPR = `-- name: GetPR :one
-SELECT url, session_id, number, pr_state, review_decision, ci_state, mergeability, updated_at, provider, host, repo, source_branch, target_branch, head_sha, title, additions, deletions, changed_files, author, base_sha, merge_commit_sha, is_draft, is_merged, is_closed, provider_state, provider_mergeable, provider_merge_state_status, html_url, created_at_provider, updated_at_provider, merged_at_provider, closed_at_provider, metadata_hash, ci_hash, review_hash, observed_at, ci_observed_at, review_observed_at, last_nudge_signature, state_changed_at, auto_inject_ci, provider_id, author_avatar_url, review_partial, head_from_fork, head_is_default_branch FROM pr WHERE url = ?
+SELECT url, session_id, number, pr_state, review_decision, ci_state, mergeability, updated_at, provider, host, repo, source_branch, target_branch, head_sha, title, additions, deletions, changed_files, author, base_sha, merge_commit_sha, is_draft, is_merged, is_closed, provider_state, provider_mergeable, provider_merge_state_status, html_url, created_at_provider, updated_at_provider, merged_at_provider, closed_at_provider, metadata_hash, ci_hash, review_hash, observed_at, ci_observed_at, review_observed_at, last_nudge_signature, state_changed_at, auto_inject_ci, provider_id, author_avatar_url, review_partial, head_from_fork, head_is_default_branch, tamper_assessment_json FROM pr WHERE url = ?
 `
 
 func (q *Queries) GetPR(ctx context.Context, url string) (PR, error) {
@@ -274,12 +277,13 @@ func (q *Queries) GetPR(ctx context.Context, url string) (PR, error) {
 		&i.ReviewPartial,
 		&i.HeadFromFork,
 		&i.HeadIsDefaultBranch,
+		&i.TamperAssessmentJson,
 	)
 	return i, err
 }
 
 const getPRByNumber = `-- name: GetPRByNumber :one
-SELECT url, session_id, number, pr_state, review_decision, ci_state, mergeability, updated_at, provider, host, repo, source_branch, target_branch, head_sha, title, additions, deletions, changed_files, author, base_sha, merge_commit_sha, is_draft, is_merged, is_closed, provider_state, provider_mergeable, provider_merge_state_status, html_url, created_at_provider, updated_at_provider, merged_at_provider, closed_at_provider, metadata_hash, ci_hash, review_hash, observed_at, ci_observed_at, review_observed_at, last_nudge_signature, state_changed_at, auto_inject_ci, provider_id, author_avatar_url, review_partial, head_from_fork, head_is_default_branch FROM pr
+SELECT url, session_id, number, pr_state, review_decision, ci_state, mergeability, updated_at, provider, host, repo, source_branch, target_branch, head_sha, title, additions, deletions, changed_files, author, base_sha, merge_commit_sha, is_draft, is_merged, is_closed, provider_state, provider_mergeable, provider_merge_state_status, html_url, created_at_provider, updated_at_provider, merged_at_provider, closed_at_provider, metadata_hash, ci_hash, review_hash, observed_at, ci_observed_at, review_observed_at, last_nudge_signature, state_changed_at, auto_inject_ci, provider_id, author_avatar_url, review_partial, head_from_fork, head_is_default_branch, tamper_assessment_json FROM pr
 WHERE number = ?
 ORDER BY
     CASE WHEN pr_state NOT IN ('merged', 'closed') THEN 0 ELSE 1 END,
@@ -340,12 +344,13 @@ func (q *Queries) GetPRByNumber(ctx context.Context, number int64) (PR, error) {
 		&i.ReviewPartial,
 		&i.HeadFromFork,
 		&i.HeadIsDefaultBranch,
+		&i.TamperAssessmentJson,
 	)
 	return i, err
 }
 
 const getPRByProviderIdentity = `-- name: GetPRByProviderIdentity :one
-SELECT url, session_id, number, pr_state, review_decision, ci_state, mergeability, updated_at, provider, host, repo, source_branch, target_branch, head_sha, title, additions, deletions, changed_files, author, base_sha, merge_commit_sha, is_draft, is_merged, is_closed, provider_state, provider_mergeable, provider_merge_state_status, html_url, created_at_provider, updated_at_provider, merged_at_provider, closed_at_provider, metadata_hash, ci_hash, review_hash, observed_at, ci_observed_at, review_observed_at, last_nudge_signature, state_changed_at, auto_inject_ci, provider_id, author_avatar_url, review_partial, head_from_fork, head_is_default_branch
+SELECT url, session_id, number, pr_state, review_decision, ci_state, mergeability, updated_at, provider, host, repo, source_branch, target_branch, head_sha, title, additions, deletions, changed_files, author, base_sha, merge_commit_sha, is_draft, is_merged, is_closed, provider_state, provider_mergeable, provider_merge_state_status, html_url, created_at_provider, updated_at_provider, merged_at_provider, closed_at_provider, metadata_hash, ci_hash, review_hash, observed_at, ci_observed_at, review_observed_at, last_nudge_signature, state_changed_at, auto_inject_ci, provider_id, author_avatar_url, review_partial, head_from_fork, head_is_default_branch, tamper_assessment_json
 FROM pr
 WHERE provider = ?1
   AND host = ?2
@@ -409,12 +414,13 @@ func (q *Queries) GetPRByProviderIdentity(ctx context.Context, arg GetPRByProvid
 		&i.ReviewPartial,
 		&i.HeadFromFork,
 		&i.HeadIsDefaultBranch,
+		&i.TamperAssessmentJson,
 	)
 	return i, err
 }
 
 const getPRByURLOrAlias = `-- name: GetPRByURLOrAlias :one
-SELECT pr.url, pr.session_id, pr.number, pr.pr_state, pr.review_decision, pr.ci_state, pr.mergeability, pr.updated_at, pr.provider, pr.host, pr.repo, pr.source_branch, pr.target_branch, pr.head_sha, pr.title, pr.additions, pr.deletions, pr.changed_files, pr.author, pr.base_sha, pr.merge_commit_sha, pr.is_draft, pr.is_merged, pr.is_closed, pr.provider_state, pr.provider_mergeable, pr.provider_merge_state_status, pr.html_url, pr.created_at_provider, pr.updated_at_provider, pr.merged_at_provider, pr.closed_at_provider, pr.metadata_hash, pr.ci_hash, pr.review_hash, pr.observed_at, pr.ci_observed_at, pr.review_observed_at, pr.last_nudge_signature, pr.state_changed_at, pr.auto_inject_ci, pr.provider_id, pr.author_avatar_url, pr.review_partial, pr.head_from_fork, pr.head_is_default_branch
+SELECT pr.url, pr.session_id, pr.number, pr.pr_state, pr.review_decision, pr.ci_state, pr.mergeability, pr.updated_at, pr.provider, pr.host, pr.repo, pr.source_branch, pr.target_branch, pr.head_sha, pr.title, pr.additions, pr.deletions, pr.changed_files, pr.author, pr.base_sha, pr.merge_commit_sha, pr.is_draft, pr.is_merged, pr.is_closed, pr.provider_state, pr.provider_mergeable, pr.provider_merge_state_status, pr.html_url, pr.created_at_provider, pr.updated_at_provider, pr.merged_at_provider, pr.closed_at_provider, pr.metadata_hash, pr.ci_hash, pr.review_hash, pr.observed_at, pr.ci_observed_at, pr.review_observed_at, pr.last_nudge_signature, pr.state_changed_at, pr.auto_inject_ci, pr.provider_id, pr.author_avatar_url, pr.review_partial, pr.head_from_fork, pr.head_is_default_branch, pr.tamper_assessment_json
 FROM pr
 WHERE pr.url = COALESCE(
     (SELECT canonical_url FROM pr_url_alias WHERE alias_url = ?1),
@@ -472,6 +478,7 @@ func (q *Queries) GetPRByURLOrAlias(ctx context.Context, url string) (PR, error)
 		&i.ReviewPartial,
 		&i.HeadFromFork,
 		&i.HeadIsDefaultBranch,
+		&i.TamperAssessmentJson,
 	)
 	return i, err
 }
@@ -563,6 +570,7 @@ SELECT
     pr.host,
     pr.repo,
     pr.head_sha,
+    pr.tamper_assessment_json,
     pr.updated_at,
     pr.state_changed_at,
     pr.ci_observed_at,
@@ -662,6 +670,7 @@ type ListPRFactsBySessionRow struct {
 	Host                     string
 	Repo                     string
 	HeadSha                  string
+	TamperAssessmentJson     string
 	UpdatedAt                time.Time
 	StateChangedAt           sql.NullTime
 	CIObservedAt             sql.NullTime
@@ -700,6 +709,7 @@ func (q *Queries) ListPRFactsBySession(ctx context.Context, sessionID domain.Ses
 			&i.Host,
 			&i.Repo,
 			&i.HeadSha,
+			&i.TamperAssessmentJson,
 			&i.UpdatedAt,
 			&i.StateChangedAt,
 			&i.CIObservedAt,
@@ -785,6 +795,7 @@ SELECT
     pr.host,
     pr.repo,
     pr.head_sha,
+    pr.tamper_assessment_json,
     pr.updated_at,
     pr.state_changed_at,
     pr.ci_observed_at,
@@ -886,6 +897,7 @@ type ListPRFactsBySessionsRow struct {
 	Host                     string
 	Repo                     string
 	HeadSha                  string
+	TamperAssessmentJson     string
 	UpdatedAt                time.Time
 	StateChangedAt           sql.NullTime
 	CIObservedAt             sql.NullTime
@@ -922,6 +934,7 @@ func (q *Queries) ListPRFactsBySessions(ctx context.Context, jsonEach interface{
 			&i.Host,
 			&i.Repo,
 			&i.HeadSha,
+			&i.TamperAssessmentJson,
 			&i.UpdatedAt,
 			&i.StateChangedAt,
 			&i.CIObservedAt,
@@ -946,7 +959,7 @@ func (q *Queries) ListPRFactsBySessions(ctx context.Context, jsonEach interface{
 }
 
 const listPRsBySession = `-- name: ListPRsBySession :many
-SELECT url, session_id, number, pr_state, review_decision, ci_state, mergeability, updated_at, provider, host, repo, source_branch, target_branch, head_sha, title, additions, deletions, changed_files, author, base_sha, merge_commit_sha, is_draft, is_merged, is_closed, provider_state, provider_mergeable, provider_merge_state_status, html_url, created_at_provider, updated_at_provider, merged_at_provider, closed_at_provider, metadata_hash, ci_hash, review_hash, observed_at, ci_observed_at, review_observed_at, last_nudge_signature, state_changed_at, auto_inject_ci, provider_id, author_avatar_url, review_partial, head_from_fork, head_is_default_branch FROM pr
+SELECT url, session_id, number, pr_state, review_decision, ci_state, mergeability, updated_at, provider, host, repo, source_branch, target_branch, head_sha, title, additions, deletions, changed_files, author, base_sha, merge_commit_sha, is_draft, is_merged, is_closed, provider_state, provider_mergeable, provider_merge_state_status, html_url, created_at_provider, updated_at_provider, merged_at_provider, closed_at_provider, metadata_hash, ci_hash, review_hash, observed_at, ci_observed_at, review_observed_at, last_nudge_signature, state_changed_at, auto_inject_ci, provider_id, author_avatar_url, review_partial, head_from_fork, head_is_default_branch, tamper_assessment_json FROM pr
 WHERE pr.session_id = ?
 ORDER BY updated_at DESC
 `
@@ -1007,6 +1020,7 @@ func (q *Queries) ListPRsBySession(ctx context.Context, sessionID domain.Session
 			&i.ReviewPartial,
 			&i.HeadFromFork,
 			&i.HeadIsDefaultBranch,
+			&i.TamperAssessmentJson,
 		); err != nil {
 			return nil, err
 		}
@@ -1250,6 +1264,36 @@ func (q *Queries) UpdatePRLastNudgeSignature(ctx context.Context, arg UpdatePRLa
 	return err
 }
 
+const updatePRTamperAssessmentIfRevision = `-- name: UpdatePRTamperAssessmentIfRevision :execrows
+UPDATE pr SET tamper_assessment_json = ?1
+WHERE url = ?2
+  AND base_sha = ?3
+  AND head_sha = ?4
+`
+
+type UpdatePRTamperAssessmentIfRevisionParams struct {
+	TamperAssessmentJson string
+	URL                  string
+	BaseSha              string
+	HeadSha              string
+}
+
+// Narrow compare-and-update for local retry backfills. A provider observation
+// may update any other PR fact while the filesystem assessment runs; only the
+// exact base/head pair may receive this evidence.
+func (q *Queries) UpdatePRTamperAssessmentIfRevision(ctx context.Context, arg UpdatePRTamperAssessmentIfRevisionParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updatePRTamperAssessmentIfRevision,
+		arg.TamperAssessmentJson,
+		arg.URL,
+		arg.BaseSha,
+		arg.HeadSha,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const upgradeWorkerPRUsageIdentity = `-- name: UpgradeWorkerPRUsageIdentity :exec
 UPDATE OR IGNORE usage_pr_measurement
 SET pr_key = (SELECT pr.provider || ':' || pr.host || ':' || pr.provider_id FROM pr WHERE pr.url = ?1)
@@ -1347,9 +1391,10 @@ INSERT INTO pr (
     provider_state, provider_mergeable, provider_merge_state_status, html_url,
     created_at_provider, updated_at_provider, merged_at_provider, closed_at_provider,
     metadata_hash, ci_hash, review_hash, observed_at, ci_observed_at, review_observed_at, review_partial,
-    head_from_fork, head_is_default_branch, auto_inject_ci
+    head_from_fork, head_is_default_branch, tamper_assessment_json, auto_inject_ci
 )
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+    ?,
     COALESCE((SELECT auto_inject_ci FROM sessions WHERE id = ?), TRUE))
 ON CONFLICT (url) DO UPDATE SET
     number = excluded.number,
@@ -1379,6 +1424,11 @@ ON CONFLICT (url) DO UPDATE SET
     target_branch = excluded.target_branch,
     head_from_fork = excluded.head_from_fork,
     head_is_default_branch = excluded.head_is_default_branch,
+    tamper_assessment_json = CASE
+        WHEN excluded.head_sha != pr.head_sha OR excluded.base_sha != pr.base_sha THEN excluded.tamper_assessment_json
+        WHEN excluded.tamper_assessment_json != '' THEN excluded.tamper_assessment_json
+        ELSE pr.tamper_assessment_json
+    END,
     head_sha = excluded.head_sha,
     title = excluded.title,
     additions = excluded.additions,
@@ -1463,6 +1513,7 @@ type UpsertPRParams struct {
 	ReviewPartial            bool
 	HeadFromFork             bool
 	HeadIsDefaultBranch      bool
+	TamperAssessmentJson     string
 	ID                       domain.SessionID
 }
 
@@ -1512,6 +1563,7 @@ func (q *Queries) UpsertPR(ctx context.Context, arg UpsertPRParams) error {
 		arg.ReviewPartial,
 		arg.HeadFromFork,
 		arg.HeadIsDefaultBranch,
+		arg.TamperAssessmentJson,
 		arg.ID,
 	)
 	return err

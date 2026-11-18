@@ -3269,6 +3269,15 @@ func sessionView(r *http.Request, s domain.Session) SessionView {
 		LastEventAt:   s.LastEventAt(),
 		PRs:           sessionPRFacts(s.PRs),
 		ArtifactFiles: sessionArtifactFiles(r, s),
+		LatestDoneReport: func() *SessionDoneReportResponse {
+			if s.LatestDoneReport == nil {
+				return nil
+			}
+			return &SessionDoneReportResponse{
+				ID: s.LatestDoneReport.ID, Verification: reportVerificationResponse(s.LatestDoneReport.Verification),
+				Superseded: s.LatestDoneReport.Superseded,
+			}
+		}(),
 	}
 	if s.ActiveAgentSwitch != nil {
 		sw := agentSwitchView(*s.ActiveAgentSwitch)
@@ -3343,9 +3352,21 @@ func artifactRawURL(r *http.Request, id domain.SessionID, filePath string) (stri
 func sessionPRFacts(prs []domain.PRFacts) []SessionPRFacts {
 	out := make([]SessionPRFacts, 0, len(prs))
 	for _, pr := range prs {
-		out = append(out, SessionPRFacts{URL: pr.URL, Number: pr.Number, State: prState(pr), CI: pr.CI, Review: pr.Review, Mergeability: pr.Mergeability, ReviewComments: pr.ReviewComments, UpdatedAt: pr.UpdatedAt, StackParent: pr.StackParent})
+		out = append(out, SessionPRFacts{URL: pr.URL, Number: pr.Number, State: prState(pr), CI: pr.CI, Review: pr.Review, Mergeability: pr.Mergeability, ReviewComments: pr.ReviewComments, UpdatedAt: pr.UpdatedAt, StackParent: pr.StackParent, Tamper: prTamperAssessmentResponse(pr.Tamper)})
 	}
 	return out
+}
+
+func prTamperAssessmentResponse(assessment *domain.PRTamperAssessment) *PRTamperAssessmentResponse {
+	if assessment == nil {
+		return nil
+	}
+	return &PRTamperAssessmentResponse{
+		HeadSHA: assessment.HeadSHA, TestFilesDeleted: assessment.TestFilesDeleted,
+		TestCasesRemoved: assessment.TestCasesRemoved, TestCasesAdded: assessment.TestCasesAdded,
+		SkipMarkersAdded: assessment.SkipMarkersAdded, CIWorkflowEdited: assessment.CIWorkflowEdited,
+		AssessedAt: assessment.AssessedAt,
+	}
 }
 
 func sessionPRSummaries(prs []sessionsvc.PRSummary) []SessionPRSummary {

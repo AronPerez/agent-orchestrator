@@ -605,6 +605,11 @@ type SessionWait struct {
 // SessionBranchState is the session branch's commit and push facts.
 type SessionBranchState struct {
 	Branch string `json:"branch,omitempty"`
+	// WorkspaceRevision identifies the exact clean committed state of every
+	// repository in the session workspace. Empty means the workspace is dirty
+	// or could not be observed, so a prior verification must not be presented
+	// as current.
+	WorkspaceRevision string `json:"workspaceRevision,omitempty"`
 	// Commits is how many commits the branch has on top of its base.
 	Commits int `json:"commits"`
 	// RemoteBranch is the remote-tracking branch, such as "origin/feat/x".
@@ -795,6 +800,9 @@ type Session struct {
 	// They feed status derivation and are surfaced on the API read model. Not
 	// serialized here: the HTTP boundary maps them to the curated wire shape.
 	PRs []PRFacts `json:"-"`
+	// LatestDoneReport is the newest durable done report for this session. Its
+	// presence and verification fact drive the derived verification marker.
+	LatestDoneReport *SessionDoneReport `json:"-"`
 }
 
 // LastEventAt is when something a person would notice last happened to the

@@ -210,11 +210,13 @@ type CreateReportResponse struct {
 // report. OutputTail is populated only by report creation; Evidence remains the
 // durable session-artifact reference on read projections.
 type ReportVerificationResponse struct {
-	State       string    `json:"state" enum:"passed,failed"`
-	Evidence    string    `json:"evidence"`
-	StartedAt   time.Time `json:"startedAt"`
-	CompletedAt time.Time `json:"completedAt"`
-	OutputTail  string    `json:"outputTail,omitempty"`
+	State             string     `json:"state" enum:"passed,failed"`
+	Evidence          string     `json:"evidence"`
+	StartedAt         time.Time  `json:"startedAt"`
+	CompletedAt       time.Time  `json:"completedAt"`
+	WorkspaceRevision string     `json:"workspaceRevision,omitempty"`
+	InteractionAt     *time.Time `json:"interactionAt,omitempty"`
+	OutputTail        string     `json:"outputTail,omitempty"`
 }
 
 // ReportOutputResponse is one ordered output reference in the read projection.
@@ -794,6 +796,17 @@ type SessionView struct {
 	LastEventAt   time.Time             `json:"lastEventAt"`
 	PRs           []SessionPRFacts      `json:"prs"`
 	ArtifactFiles []SessionArtifactView `json:"artifactFiles,omitempty"`
+	// LatestDoneReport is present after the session reports done. Verification
+	// is absent when the project had no configured verify commands.
+	LatestDoneReport *SessionDoneReportResponse `json:"latestDoneReport,omitempty"`
+}
+
+// SessionDoneReportResponse is the latest done report fact needed to derive a
+// session's verification marker.
+type SessionDoneReportResponse struct {
+	ID           string                      `json:"id"`
+	Verification *ReportVerificationResponse `json:"verification,omitempty"`
+	Superseded   bool                        `json:"superseded,omitempty"`
 }
 
 // SessionArtifactView is one inferred file artifact for a session.
@@ -1772,7 +1785,20 @@ type SessionPRFacts struct {
 	// StackParent is the number of the open PR whose branch this PR targets.
 	// Absent when the PR's base branch has no open PR in a live session, e.g.
 	// the default branch.
-	StackParent int `json:"stackParent,omitempty"`
+	StackParent int                         `json:"stackParent,omitempty"`
+	Tamper      *PRTamperAssessmentResponse `json:"tamper,omitempty"`
+}
+
+// PRTamperAssessmentResponse is an advisory assessment bound to one PR head.
+// It never changes mergeability or blocks an action.
+type PRTamperAssessmentResponse struct {
+	HeadSHA          string    `json:"headSha"`
+	TestFilesDeleted int       `json:"testFilesDeleted,omitempty"`
+	TestCasesRemoved int       `json:"testCasesRemoved,omitempty"`
+	TestCasesAdded   int       `json:"testCasesAdded,omitempty"`
+	SkipMarkersAdded int       `json:"skipMarkersAdded,omitempty"`
+	CIWorkflowEdited bool      `json:"ciWorkflowEdited,omitempty"`
+	AssessedAt       time.Time `json:"assessedAt"`
 }
 
 // SessionPRSummary is the concise desktop SCM read model returned by GET

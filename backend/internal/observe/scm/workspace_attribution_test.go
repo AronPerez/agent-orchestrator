@@ -47,6 +47,36 @@ func TestPoll_WorkspaceLegacyBranches(t *testing.T) {
 	}
 }
 
+func TestDiscoverSubjectsBindsWorkspacePRToMatchingChildCheckout(t *testing.T) {
+	store := testStoreWithSession()
+	store.sessions[0].Metadata.WorkspacePath = "/session/workspace"
+	store.projects["p"] = domain.ProjectRecord{
+		ID: "p", Kind: domain.ProjectKindWorkspace, Path: "/registered/workspace",
+		RepoOriginURL: "https://github.com/o/r.git",
+	}
+	store.workspaceRepos = map[string][]domain.WorkspaceRepoRecord{"p": {{
+		Name: "api", RelativePath: "services/api", RepoOriginURL: "https://github.com/o/api.git",
+	}}}
+	store.prs["p-1"] = []domain.PullRequest{{
+		URL: "https://github.com/o/api/pull/7", Number: 7, Provider: "github", Host: "github.com", Repo: "o/api",
+		SourceBranch: "feat", BaseSHA: "base", HeadSHA: "head",
+	}}
+	observer := newTestObserver(store, &fakeProvider{}, &fakeLifecycle{}, time.Unix(1, 0).UTC())
+
+	subjects, _, err := observer.discoverSubjects(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(subjects) != 1 {
+		t.Fatalf("subjects = %+v", subjects)
+	}
+	for _, subj := range subjects {
+		if subj.workspacePath != "/session/workspace/services/api" {
+			t.Fatalf("workspace path = %q, want child checkout", subj.workspacePath)
+		}
+	}
+}
+
 func TestPoll_WorkspaceRepositoryBoundaries(t *testing.T) {
 	for _, tc := range []struct {
 		name                          string

@@ -19,6 +19,7 @@ func TestReportVerificationValidation(t *testing.T) {
 		report.Verification = &ReportVerification{
 			State: state, Evidence: "verification/rpt_1.txt",
 			StartedAt: started, CompletedAt: started.Add(time.Second),
+			WorkspaceRevision: "head-1", InteractionAt: started.Add(-time.Minute),
 		}
 		if err := report.Validate(); err != nil {
 			t.Fatalf("%s verification rejected: %v", state, err)

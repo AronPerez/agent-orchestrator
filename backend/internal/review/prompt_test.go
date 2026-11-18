@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
@@ -32,6 +33,33 @@ func TestReviewTextsIncludesMultiPRQueue(t *testing.T) {
 		"as its own shell call, in exactly the shape shown",
 		"ao review submit --session mer-1 --reviews -",
 		`"reviews": [`,
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestReviewTextsIncludesAdvisoryTamperEvidence(t *testing.T) {
+	spec := LaunchSpec{
+		WorkerID: "mer-1", PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha1", RunID: "run-1",
+		ReviewQueue: []ports.ReviewTask{{
+			RunID: "run-1", PRURL: "https://github.com/o/r/pull/1", TargetSHA: "sha1",
+			Tamper: &domain.PRTamperAssessment{
+				HeadSHA: "sha1", TestFilesDeleted: 1, TestCasesRemoved: 3, TestCasesAdded: 1,
+				SkipMarkersAdded: 2, CIWorkflowEdited: true,
+			},
+		}},
+	}
+
+	prompt, _ := reviewTexts(spec)
+	for _, want := range []string{
+		"Tamper marker (advisory)",
+		"1 test file deleted",
+		"3 test cases removed vs 1 added",
+		"2 skip markers added",
+		"CI workflow edited",
+		"does not block the PR",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)

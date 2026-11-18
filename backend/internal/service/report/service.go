@@ -17,12 +17,14 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessionartifacts"
 	"github.com/aoagents/agent-orchestrator/backend/internal/verification"
+	"github.com/aoagents/agent-orchestrator/backend/internal/workspacesnapshot"
 )
 
 // Store is the report service's persistence and ownership boundary.
 type Store interface {
 	GetSession(context.Context, domain.SessionID) (domain.SessionRecord, bool, error)
 	GetProject(context.Context, string) (domain.ProjectRecord, bool, error)
+	ListSessionWorktrees(context.Context, domain.SessionID) ([]domain.SessionWorktreeRecord, error)
 	CreateReportWithContractOutcome(context.Context, domain.ReportRecord, domain.SessionContractOutcome) (domain.ReportRecord, error)
 	CreateReportWithContractOutcomeOnce(context.Context, domain.ReportRecord, domain.SessionContractOutcome) (domain.ReportRecord, bool, error)
 }
@@ -67,6 +69,7 @@ type Service struct {
 	verifier          Verifier
 	evidenceArtifacts EvidenceArtifacts
 	dataDir           string
+	workspaceSnapshot func(context.Context, string, []domain.SessionWorktreeRecord) (string, error)
 }
 
 // Deps configures a Service. Artifacts is optional.
@@ -79,6 +82,7 @@ type Deps struct {
 	Verifier          Verifier
 	EvidenceArtifacts EvidenceArtifacts
 	DataDir           string
+	WorkspaceSnapshot func(context.Context, string, []domain.SessionWorktreeRecord) (string, error)
 }
 
 // New constructs a report Service.
@@ -89,9 +93,13 @@ func New(d Deps) *Service {
 	if d.NewID == nil {
 		d.NewID = func() string { return "rpt_" + uuid.NewString() }
 	}
+	if d.WorkspaceSnapshot == nil {
+		d.WorkspaceSnapshot = workspacesnapshot.Capture
+	}
 	return &Service{
 		store: d.Store, now: d.Now, newID: d.NewID, onCreated: d.OnCreated, artifacts: d.Artifacts,
 		verifier: d.Verifier, evidenceArtifacts: d.EvidenceArtifacts, dataDir: d.DataDir,
+		workspaceSnapshot: d.WorkspaceSnapshot,
 	}
 }
 
@@ -256,6 +264,11 @@ func (s *Service) verifyDone(ctx context.Context, reportID string, session domai
 		return nil, nil, errors.New("report: verification artifact registrar is required")
 	}
 
+	interactionAt := session.Metadata.LatestUserPromptAt
+	if session.Metadata.LatestInteractionAt.After(interactionAt) {
+		interactionAt = session.Metadata.LatestInteractionAt
+	}
+	revisionBefore := s.captureWorkspaceSnapshot(ctx, session)
 	startedAt := s.now().UTC()
 	result, runErr := s.verifier.Run(ctx, verification.Request{
 		ProjectID: session.ProjectID, WorkspacePath: session.Metadata.WorkspacePath,
@@ -269,6 +282,11 @@ func (s *Service) verifyDone(ctx context.Context, reportID string, session domai
 	}
 	if result.CompletedAt.IsZero() {
 		result.CompletedAt = s.now().UTC()
+	}
+	revisionAfter := s.captureWorkspaceSnapshot(ctx, session)
+	workspaceRevision := ""
+	if revisionBefore != "" && revisionBefore == revisionAfter {
+		workspaceRevision = revisionAfter
 	}
 	verificationState := domain.ReportVerificationFailed
 	if result.Passed && runErr == nil {
@@ -296,8 +314,21 @@ func (s *Service) verifyDone(ctx context.Context, reportID string, session domai
 	}
 	return &domain.ReportVerification{
 		State: verificationState, Evidence: reference, StartedAt: result.StartedAt,
-		CompletedAt: result.CompletedAt, OutputTail: outputTail,
+		CompletedAt: result.CompletedAt, WorkspaceRevision: workspaceRevision,
+		InteractionAt: interactionAt, OutputTail: outputTail,
 	}, cleanup, nil
+}
+
+func (s *Service) captureWorkspaceSnapshot(ctx context.Context, session domain.SessionRecord) string {
+	worktrees, err := s.store.ListSessionWorktrees(ctx, session.ID)
+	if err != nil {
+		return ""
+	}
+	revision, err := s.workspaceSnapshot(ctx, session.Metadata.WorkspacePath, worktrees)
+	if err != nil {
+		return ""
+	}
+	return revision
 }
 
 func hasVerificationCommands(commands []string) bool {

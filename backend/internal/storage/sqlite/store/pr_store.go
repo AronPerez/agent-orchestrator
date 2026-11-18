@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -48,6 +49,24 @@ func (s *Store) WritePR(ctx context.Context, pr domain.PullRequest, checks []dom
 // cadence than metadata/CI polling.
 func (s *Store) WriteSCMObservation(ctx context.Context, pr domain.PullRequest, checks []domain.PullRequestCheck, reviews []domain.PullRequestReview, threads []domain.PullRequestReviewThread, comments []domain.PullRequestComment, reviewMode ports.ReviewWriteMode) error {
 	return s.writePR(ctx, pr, checks, reviews, threads, comments, reviewMode, false)
+}
+
+// UpdatePRTamperAssessment records only head-bound local evidence. The
+// base/head guard prevents a retry computed from a stale PR snapshot from
+// replaying any provider-owned fields or attaching to a newer revision.
+func (s *Store) UpdatePRTamperAssessment(ctx context.Context, prURL, baseSHA, headSHA string, assessment domain.PRTamperAssessment) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.UpdatePRTamperAssessmentIfRevision(ctx, gen.UpdatePRTamperAssessmentIfRevisionParams{
+		TamperAssessmentJson: encodePRTamperAssessment(&assessment),
+		URL:                  prURL,
+		BaseSha:              baseSHA,
+		HeadSha:              headSHA,
+	})
+	if err != nil {
+		return false, fmt.Errorf("update PR tamper assessment %s: %w", prURL, err)
+	}
+	return rows == 1, nil
 }
 
 // MarkPRMerged records the authoritative success returned by the provider's
@@ -740,6 +759,7 @@ func genPRParams(r domain.PullRequest) gen.UpsertPRParams {
 		CIObservedAt:             nullTime(r.CIObservedAt),
 		ReviewObservedAt:         nullTime(r.ReviewObservedAt),
 		ReviewPartial:            r.ReviewPartial,
+		TamperAssessmentJson:     encodePRTamperAssessment(r.Tamper),
 		ID:                       r.SessionID,
 	}
 }
@@ -847,7 +867,30 @@ func prRowFromGen(p gen.PR) domain.PullRequest {
 		ReviewObservedAt:         timeFromNull(p.ReviewObservedAt),
 		ReviewPartial:            p.ReviewPartial,
 		AutoInjectCI:             p.AutoInjectCI,
+		Tamper:                   decodePRTamperAssessment(p.TamperAssessmentJson),
 	}
+}
+
+func encodePRTamperAssessment(assessment *domain.PRTamperAssessment) string {
+	if assessment == nil {
+		return ""
+	}
+	encoded, err := json.Marshal(assessment)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
+func decodePRTamperAssessment(raw string) *domain.PRTamperAssessment {
+	if raw == "" {
+		return nil
+	}
+	var assessment domain.PRTamperAssessment
+	if err := json.Unmarshal([]byte(raw), &assessment); err != nil {
+		return nil
+	}
+	return &assessment
 }
 
 func genCheckParams(prURL string, c domain.PullRequestCheck) gen.UpsertPRCheckParams {

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -43,15 +44,16 @@ func (s *Store) CreateReportWithContractOutcomeOnce(ctx context.Context, rec dom
 	var row gen.Report
 	inserted := false
 	err := s.inTx(ctx, "create report once", func(q *gen.Queries) error {
-		verificationState, verificationEvidence, verificationStartedAt, verificationCompletedAt := reportVerificationToGen(rec.Verification)
+		verification := reportVerificationToGen(rec.Verification)
 		var err error
 		row, err = q.CreateReportIfAbsent(ctx, gen.CreateReportIfAbsentParams{
 			ID: rec.ID, SessionID: string(rec.SessionID), ProjectID: string(rec.ProjectID),
 			State: string(rec.State), Note: rec.Note, Message: rec.Message,
 			CreatedAt: rec.CreatedAt, AvailableAt: rec.AvailableAt,
 			SettlementDeadline: nullTime(rec.SettlementDeadline), RepeatCount: rec.RepeatCount,
-			VerificationState: verificationState, VerificationEvidence: verificationEvidence,
-			VerificationStartedAt: verificationStartedAt, VerificationCompletedAt: verificationCompletedAt,
+			VerificationState: verification.state, VerificationEvidence: verification.evidence,
+			VerificationStartedAt: verification.startedAt, VerificationCompletedAt: verification.completedAt,
+			VerificationWorkspaceRevision: verification.workspaceRevision, VerificationInteractionAt: verification.interactionAt,
 		})
 		if errors.Is(err, sql.ErrNoRows) {
 			row, err = q.GetReport(ctx, rec.ID)
@@ -103,15 +105,16 @@ func (s *Store) createReport(ctx context.Context, rec domain.ReportRecord, outco
 	defer s.writeMu.Unlock()
 	var row gen.Report
 	err := s.inTx(ctx, "create report", func(q *gen.Queries) error {
-		verificationState, verificationEvidence, verificationStartedAt, verificationCompletedAt := reportVerificationToGen(rec.Verification)
+		verification := reportVerificationToGen(rec.Verification)
 		var err error
 		row, err = q.CreateReport(ctx, gen.CreateReportParams{
 			ID: rec.ID, SessionID: string(rec.SessionID), ProjectID: string(rec.ProjectID),
 			State: string(rec.State), Note: rec.Note, Message: rec.Message,
 			CreatedAt: rec.CreatedAt, AvailableAt: rec.AvailableAt,
 			SettlementDeadline: nullTime(rec.SettlementDeadline), RepeatCount: rec.RepeatCount,
-			VerificationState: verificationState, VerificationEvidence: verificationEvidence,
-			VerificationStartedAt: verificationStartedAt, VerificationCompletedAt: verificationCompletedAt,
+			VerificationState: verification.state, VerificationEvidence: verification.evidence,
+			VerificationStartedAt: verification.startedAt, VerificationCompletedAt: verification.completedAt,
+			VerificationWorkspaceRevision: verification.workspaceRevision, VerificationInteractionAt: verification.interactionAt,
 		})
 		if err != nil {
 			return err
@@ -164,6 +167,39 @@ func (s *Store) ListReportsBySession(ctx context.Context, id domain.SessionID) (
 		return nil, fmt.Errorf("list reports: %w", err)
 	}
 	return s.reportsWithOutputs(ctx, rows)
+}
+
+// ListLatestDoneReportsForSessions returns at most one done-report fact per
+// requested session. A present row with nil Verification means the session
+// reported done without configured verification commands.
+func (s *Store) ListLatestDoneReportsForSessions(ctx context.Context, ids []domain.SessionID) (map[domain.SessionID]domain.SessionDoneReport, error) {
+	out := make(map[domain.SessionID]domain.SessionDoneReport)
+	if len(ids) == 0 {
+		return out, nil
+	}
+	encoded, err := json.Marshal(ids)
+	if err != nil {
+		return nil, fmt.Errorf("marshal session ids: %w", err)
+	}
+	rows, err := s.qr.ListLatestDoneReportsBySessions(ctx, string(encoded))
+	if err != nil {
+		return nil, fmt.Errorf("list latest done reports: %w", err)
+	}
+	for _, row := range rows {
+		latest := domain.SessionDoneReport{ID: row.ID, Superseded: row.Superseded}
+		if row.VerificationState != "" {
+			latest.Verification = &domain.ReportVerification{
+				State:             domain.ReportVerificationState(row.VerificationState),
+				Evidence:          row.VerificationEvidence,
+				StartedAt:         timeFromNull(row.VerificationStartedAt),
+				CompletedAt:       timeFromNull(row.VerificationCompletedAt),
+				WorkspaceRevision: row.VerificationWorkspaceRevision,
+				InteractionAt:     timeFromNull(row.VerificationInteractionAt),
+			}
+		}
+		out[domain.SessionID(row.SessionID)] = latest
+	}
+	return out, nil
 }
 
 // ListReportedPRURLs returns only a worker's structured created-PR outputs.
@@ -417,14 +453,28 @@ func reportFromGen(r gen.Report) domain.ReportRecord {
 		rec.Verification = &domain.ReportVerification{
 			State: domain.ReportVerificationState(r.VerificationState), Evidence: r.VerificationEvidence,
 			StartedAt: timeFromNull(r.VerificationStartedAt), CompletedAt: timeFromNull(r.VerificationCompletedAt),
+			WorkspaceRevision: r.VerificationWorkspaceRevision, InteractionAt: timeFromNull(r.VerificationInteractionAt),
 		}
 	}
 	return rec
 }
 
-func reportVerificationToGen(v *domain.ReportVerification) (string, string, sql.NullTime, sql.NullTime) {
+type reportVerificationFields struct {
+	state             string
+	evidence          string
+	startedAt         sql.NullTime
+	completedAt       sql.NullTime
+	workspaceRevision string
+	interactionAt     sql.NullTime
+}
+
+func reportVerificationToGen(v *domain.ReportVerification) reportVerificationFields {
 	if v == nil {
-		return "", "", sql.NullTime{}, sql.NullTime{}
+		return reportVerificationFields{}
 	}
-	return string(v.State), v.Evidence, nullTime(v.StartedAt), nullTime(v.CompletedAt)
+	return reportVerificationFields{
+		state: string(v.State), evidence: v.Evidence,
+		startedAt: nullTime(v.StartedAt), completedAt: nullTime(v.CompletedAt),
+		workspaceRevision: v.WorkspaceRevision, interactionAt: nullTime(v.InteractionAt),
+	}
 }
