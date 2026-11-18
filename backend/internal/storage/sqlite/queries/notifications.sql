@@ -112,6 +112,22 @@ WHERE pr_url = sqlc.arg(pr_url)
   AND resolved_at IS NULL
   AND dismissed_at IS NOT NULL;
 
+-- name: ResolveDecisionNotificationsByCall :many
+UPDATE notifications
+SET resolved_at = sqlc.arg(resolved_at)
+WHERE decision_call_id = sqlc.arg(decision_call_id)
+  AND type = sqlc.arg(type)
+  AND resolved_at IS NULL
+  AND dismissed_at IS NULL
+RETURNING *;
+
+-- name: DeleteDismissedDecisionNotificationsByCall :execrows
+DELETE FROM notifications
+WHERE decision_call_id = sqlc.arg(decision_call_id)
+  AND type = sqlc.arg(type)
+  AND resolved_at IS NULL
+  AND dismissed_at IS NOT NULL;
+
 -- Readiness is more than open/closed: draft, CI, review decision, unresolved
 -- human comments, and mergeability all block a merge. Rather than restate that
 -- rule in SQL and let it drift from the live path, this returns the open rows

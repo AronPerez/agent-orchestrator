@@ -194,6 +194,40 @@ func (s *Store) ResolvePRNotifications(
 	return notificationsFromGen(rows), nil
 }
 
+// ResolveDecisionNotifications marks a call's open notification resolved and
+// returns the rows it changed. A dismissed tombstone for the call is deleted:
+// once the call leaves Needs you it has no dedupe purpose left.
+func (s *Store) ResolveDecisionNotifications(
+	ctx context.Context,
+	callID string,
+	typ domain.NotificationType,
+	at time.Time,
+) ([]domain.NotificationRecord, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	var rows []gen.Notification
+	err := s.inTx(ctx, "resolve decision notifications", func(q *gen.Queries) error {
+		var err error
+		rows, err = q.ResolveDecisionNotificationsByCall(ctx, gen.ResolveDecisionNotificationsByCallParams{
+			ResolvedAt:     nullTime(at),
+			DecisionCallID: callID,
+			Type:           typ,
+		})
+		if err != nil {
+			return err
+		}
+		_, err = q.DeleteDismissedDecisionNotificationsByCall(ctx, gen.DeleteDismissedDecisionNotificationsByCallParams{
+			DecisionCallID: callID,
+			Type:           typ,
+		})
+		return err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("resolve decision notifications %s/%s: %w", callID, typ, err)
+	}
+	return notificationsFromGen(rows), nil
+}
+
 // ReconcileResolvedNotifications closes open notifications whose resolving
 // transition happened while the daemon was down, by re-reading the durable
 // session and PR facts. Without it a restart can strand a needs-input row in

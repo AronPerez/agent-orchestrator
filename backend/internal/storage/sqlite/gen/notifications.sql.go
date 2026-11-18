@@ -115,6 +115,27 @@ func (q *Queries) CreateNotification(ctx context.Context, arg CreateNotification
 	return i, err
 }
 
+const deleteDismissedDecisionNotificationsByCall = `-- name: DeleteDismissedDecisionNotificationsByCall :execrows
+DELETE FROM notifications
+WHERE decision_call_id = ?1
+  AND type = ?2
+  AND resolved_at IS NULL
+  AND dismissed_at IS NOT NULL
+`
+
+type DeleteDismissedDecisionNotificationsByCallParams struct {
+	DecisionCallID string
+	Type           domain.NotificationType
+}
+
+func (q *Queries) DeleteDismissedDecisionNotificationsByCall(ctx context.Context, arg DeleteDismissedDecisionNotificationsByCallParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteDismissedDecisionNotificationsByCall, arg.DecisionCallID, arg.Type)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const deleteDismissedPRNotificationsByType = `-- name: DeleteDismissedPRNotificationsByType :execrows
 DELETE FROM notifications
 WHERE pr_url = ?1
@@ -578,6 +599,60 @@ func (q *Queries) MarkNotificationRead(ctx context.Context, id string) (Notifica
 		&i.DecisionOriginHostID,
 	)
 	return i, err
+}
+
+const resolveDecisionNotificationsByCall = `-- name: ResolveDecisionNotificationsByCall :many
+UPDATE notifications
+SET resolved_at = ?1
+WHERE decision_call_id = ?2
+  AND type = ?3
+  AND resolved_at IS NULL
+  AND dismissed_at IS NULL
+RETURNING id, session_id, project_id, pr_url, type, title, body, status, created_at, resolved_at, dismissed_at, source_key, decision_call_id, decision_origin_host_id
+`
+
+type ResolveDecisionNotificationsByCallParams struct {
+	ResolvedAt     sql.NullTime
+	DecisionCallID string
+	Type           domain.NotificationType
+}
+
+func (q *Queries) ResolveDecisionNotificationsByCall(ctx context.Context, arg ResolveDecisionNotificationsByCallParams) ([]Notification, error) {
+	rows, err := q.db.QueryContext(ctx, resolveDecisionNotificationsByCall, arg.ResolvedAt, arg.DecisionCallID, arg.Type)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Notification{}
+	for rows.Next() {
+		var i Notification
+		if err := rows.Scan(
+			&i.ID,
+			&i.SessionID,
+			&i.ProjectID,
+			&i.PRURL,
+			&i.Type,
+			&i.Title,
+			&i.Body,
+			&i.Status,
+			&i.CreatedAt,
+			&i.ResolvedAt,
+			&i.DismissedAt,
+			&i.SourceKey,
+			&i.DecisionCallID,
+			&i.DecisionOriginHostID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const resolvePRNotificationsByType = `-- name: ResolvePRNotificationsByType :many
