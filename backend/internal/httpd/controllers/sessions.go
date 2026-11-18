@@ -121,6 +121,7 @@ type SessionService interface {
 	ClaimPR(ctx context.Context, id domain.SessionID, ref string, opts sessionsvc.ClaimPROptions) (sessionsvc.ClaimPRResult, error)
 	StageAttachments(ctx context.Context, id domain.SessionID, attachments []ports.SpawnAttachment) ([]string, error)
 	WorkspaceWatchPaths(ctx context.Context, id domain.SessionID) ([]string, error)
+	ProjectOverlapWatchPaths(ctx context.Context, projectID domain.ProjectID) ([]string, error)
 	GetWorkspaceManifest(ctx context.Context, id domain.SessionID) (sessionsvc.WorkspaceManifest, error)
 	ProjectOverlaps(ctx context.Context, projectID domain.ProjectID) (sessionsvc.ProjectOverlapResult, error)
 	RefreshWorkspaceManifest(ctx context.Context, id domain.SessionID) (sessionsvc.WorkspaceManifest, error)
@@ -309,6 +310,7 @@ func (c *SessionsController) Register(r chi.Router) {
 // client is actually viewing that session's files or artifacts.
 func (c *SessionsController) RegisterStreams(r chi.Router) {
 	r.Get("/sessions/{sessionId}/workspace/events", c.streamWorkspaceChanges)
+	r.Get("/projects/{id}/overlaps/events", c.streamProjectOverlapChanges)
 	r.Get("/sessions/{sessionId}/artifact-events", c.streamArtifactChanges)
 }
 
@@ -1631,6 +1633,74 @@ func (c *SessionsController) getWorkspaceFileBlob(w http.ResponseWriter, r *http
 // branchStateReconciler refreshes a session's persisted branch facts.
 type branchStateReconciler interface {
 	ReconcileSessionBranchState(ctx context.Context, id domain.SessionID) error
+}
+
+func (c *SessionsController) streamProjectOverlapChanges(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "GET", "/api/v1/projects/{id}/overlaps/events")
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		envelope.WriteAPIError(w, r, http.StatusInternalServerError, "internal", "SSE_UNSUPPORTED", "Streaming is not supported by this server", nil)
+		return
+	}
+	projectID := domain.ProjectID(chi.URLParam(r, "id"))
+	paths, err := c.Svc.ProjectOverlapWatchPaths(r.Context(), projectID)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	var changes <-chan struct{}
+	if len(paths) > 0 {
+		changes, err = workspacewatch.Watch(r.Context(), paths...)
+		if err != nil {
+			envelope.WriteError(w, r, err)
+			return
+		}
+	}
+	// Install the watcher before the authoritative read so edits in the setup
+	// gap still produce a later invalidation edge.
+	if _, err := c.Svc.ProjectOverlaps(r.Context(), projectID); err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+
+	h := w.Header()
+	h.Set("Content-Type", "text/event-stream; charset=utf-8")
+	h.Set("Cache-Control", "no-cache")
+	h.Set("Connection", "keep-alive")
+	h.Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	if _, err := fmt.Fprint(w, "event: ready\ndata: {}\n\n"); err != nil {
+		return
+	}
+	flusher.Flush()
+
+	keepAlive := time.NewTicker(15 * time.Second)
+	defer keepAlive.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case _, ok := <-changes:
+			if !ok {
+				return
+			}
+			if _, err := c.Svc.ProjectOverlaps(r.Context(), projectID); err != nil {
+				return
+			}
+			if _, err := fmt.Fprint(w, "event: overlaps_changed\ndata: {}\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		case <-keepAlive.C:
+			if _, err := fmt.Fprint(w, "event: heartbeat\ndata: {}\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
 }
 
 func (c *SessionsController) streamWorkspaceChanges(w http.ResponseWriter, r *http.Request) {

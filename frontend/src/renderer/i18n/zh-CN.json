@@ -5409,5 +5409,18 @@
 	"shell.deleteCloudProjectTitle": "删除项目",
 	"shell.deleteCloudProjectLead": "这将永久删除 {{name}}",
 	"shell.deleteCloudProjectConfirm": "永久删除",
-	"shell.cloudProjectDeleted": "已永久删除 {{name}}"
+	"shell.cloudProjectDeleted": "已永久删除 {{name}}",
+	"collisionRadar.badge": "重叠",
+	"collisionRadar.cardAria_one": "1 个已更改文件与 {{sessions}} 的工作重叠",
+	"collisionRadar.cardAria_other": "{{count}} 个已更改文件与 {{sessions}} 的工作重叠",
+	"collisionRadar.title": "可能存在冲突",
+	"collisionRadar.incompleteTitle": "冲突扫描未完成",
+	"collisionRadar.summary": "{{sessions}} 也更改了此工作区中的文件。",
+	"collisionRadar.incomplete": "无法比较部分工作区更改。此列表可能不完整。",
+	"collisionRadar.unavailableBadge": "扫描不可用",
+	"collisionRadar.unavailableTitle": "冲突扫描不可用",
+	"collisionRadar.unavailable": "没有可用的冲突扫描结果。",
+	"collisionRadar.staleBadge": "扫描结果已过期",
+	"collisionRadar.staleTitle": "冲突扫描结果已过期",
+	"collisionRadar.stale": "无法刷新冲突扫描。正在显示上次结果。"
 }

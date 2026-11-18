@@ -76,6 +76,7 @@ import {
 	sessionsBoardLabels,
 	toBoardSessionPresentation,
 } from "./SessionsBoardAdapters";
+import { projectOverlapForSession, projectOverlapScanState, useProjectOverlaps } from "../hooks/useProjectOverlaps";
 
 type SessionsBoardProps = {
 	/** When set, the board shows only this project's sessions. */
@@ -230,6 +231,17 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 			? { ...session, kanbanColumn: "building" as const }
 			: session,
 	);
+	const collisionRadarProjectId = projectId && workspace?.kind !== CLOUD_PROJECT_KIND && workspace?.kind !== "scratch" && !isScratchpadWorkspace(workspace)
+		? projectId
+		: undefined;
+	const overlapLiveSessions = collisionRadarProjectId
+		? (workspace?.sessions ?? [])
+			.filter((session) => session.isTerminated !== true && !session.needsResume)
+			.map(({ id, workspacePublished }) => ({ id, workspacePublished }))
+		: undefined;
+	const overlaps = useProjectOverlaps(collisionRadarProjectId, { hostId, liveSessions: overlapLiveSessions });
+	const collisionScanState = projectOverlapScanState(overlaps);
+	const collisionSessionNames = new Map((workspace?.sessions ?? []).map((session) => [session.id, session.title]));
 	const boardLabels = sessionsBoardLabels(t);
 	const presentation = useBoardPresentation({
 		projectId,
@@ -450,6 +462,14 @@ export function SessionsBoard({ projectId, hostId }: SessionsBoardProps) {
 						labels={boardLabels}
 						renderSessionCard={(session) => (
 							<BoardSessionCardAdapter
+								collisionScanState={collisionScanState}
+								collision={(() => {
+									const overlap = projectOverlapForSession(overlaps.data, session.id);
+									return overlap?.peers.length ? {
+										pathCount: overlap.paths.length,
+										peerNames: overlap.peers.map((peer) => collisionSessionNames.get(peer.sessionId) ?? peer.sessionId),
+									} : undefined;
+								})()}
 								participants={participantsBySession.get(session.id)}
 								me={cloudUserId}
 								memory={memoryBySession?.get(session.id)}

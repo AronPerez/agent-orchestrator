@@ -39,8 +39,9 @@ import type {
 } from "../types/workspace";
 import { STANDALONE_WORKSPACE_ID } from "../types/workspace";
 import { noPRDetails } from "../lib/pr-display";
+import { projectOverlapsQueryKey } from "../lib/project-overlap-events";
 
-const { cloudCpMock, getMock, navigateMock, patchMock, putMock, postMock, sessionHostClientMock } = vi.hoisted(
+const { cloudCpMock, getMock, navigateMock, patchMock, projectOverlapSubscribeMock, putMock, postMock, sessionHostClientMock } = vi.hoisted(
   () => ({
     cloudCpMock: {
       cancelSessionReviews: vi.fn(),
@@ -60,6 +61,7 @@ const { cloudCpMock, getMock, navigateMock, patchMock, putMock, postMock, sessio
     getMock: vi.fn(),
     navigateMock: vi.fn(),
     patchMock: vi.fn(),
+    projectOverlapSubscribeMock: vi.fn(() => () => undefined),
     putMock: vi.fn(),
     postMock: vi.fn(),
     sessionHostClientMock: vi.fn(),
@@ -84,6 +86,11 @@ vi.mock("@tanstack/react-router", () => ({
 
 vi.mock("../lib/preview-mode", () => ({
   usesPreviewWorkspaceData: false,
+}));
+
+vi.mock("../lib/project-overlap-events", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../lib/project-overlap-events")>(),
+  subscribeProjectOverlapChanges: projectOverlapSubscribeMock,
 }));
 
 vi.mock("../lib/api-client", () => ({
@@ -387,6 +394,7 @@ beforeEach(() => {
   sessionHostClientMock.mockReset().mockImplementation(() => ({ GET: getMock, POST: postMock, PATCH: patchMock, PUT: putMock }));
   navigateMock.mockReset();
   patchMock.mockReset();
+  projectOverlapSubscribeMock.mockReset().mockReturnValue(() => undefined);
   postMock.mockReset();
   useUiStore.setState({ developerMode: false, prView: false, inspectorSessions: {}, settingsModal: null });
   putMock.mockReset();
@@ -413,6 +421,203 @@ afterEach(() => {
 });
 
 describe("SessionInspector tabs", () => {
+	it("lists exact overlapping paths and the other sessions in Summary", async () => {
+		const respond = commonGetsResponder();
+		getMock.mockImplementation(async (path: string) => path === "/api/v1/projects/{id}/overlaps"
+			? {
+				data: {
+					projectId: "ws-1",
+					overlaps: [{ sessionA: "sess-1", sessionB: "sess-2", paths: ["frontend/src/App.tsx", "README.md"] }],
+					truncatedSessionIds: [], unresolvedBaseSessionIds: [], unavailableSessionIds: [],
+				},
+			}
+			: respond(path));
+		const current = session([]);
+		const peer = session([], { id: "sess-2", title: "API cleanup", branch: "feat/api" });
+		renderWithQuery(<SessionInspector session={current} />, [{ id: "ws-1", name: "my-app", path: "/repo", sessions: [current, peer] }]);
+
+		expect(await screen.findByText("Possible collision")).toBeInTheDocument();
+		expect(screen.getByText("API cleanup")).toBeInTheDocument();
+		expect(screen.getByText("frontend/src/App.tsx")).toBeInTheDocument();
+		expect(screen.getByText("README.md")).toBeInTheDocument();
+		expect(projectOverlapSubscribeMock).toHaveBeenCalledWith(
+			"ws-1",
+			JSON.stringify([["sess-1", true], ["sess-2", true]]),
+			expect.anything(),
+			undefined,
+		);
+	});
+
+	it("shows the collision scan as unavailable after an initial read failure", async () => {
+		const respond = commonGetsResponder();
+		getMock.mockImplementation(async (path: string) => path === "/api/v1/projects/{id}/overlaps"
+			? { error: { message: "workspace scan failed" } }
+			: respond(path));
+		const current = session([]);
+		const peer = session([], { id: "sess-2", title: "API cleanup", branch: "feat/api" });
+		renderWithQuery(<SessionInspector session={current} />, [{ id: "ws-1", name: "my-app", path: "/repo", sessions: [current, peer] }]);
+
+		expect(await screen.findByText("Collision scan unavailable")).toBeInTheDocument();
+		expect(screen.getByText("No collision result is available.")).toBeInTheDocument();
+		expect(screen.queryByText("Possible collision")).not.toBeInTheDocument();
+	});
+
+	it("keeps cached collision details but marks them stale after a failed refresh", async () => {
+		const respond = commonGetsResponder();
+		let failRefresh = false;
+		getMock.mockImplementation(async (path: string) => {
+			if (path !== "/api/v1/projects/{id}/overlaps") return respond(path);
+			if (failRefresh) return { error: { message: "workspace scan failed" } };
+			return {
+				data: {
+					projectId: "ws-1",
+					overlaps: [{ sessionA: "sess-1", sessionB: "sess-2", paths: ["shared.go"] }],
+					truncatedSessionIds: [], unresolvedBaseSessionIds: [], unavailableSessionIds: [],
+				},
+			};
+		});
+		const current = session([]);
+		const peer = session([], { id: "sess-2", title: "API cleanup", branch: "feat/api" });
+		const view = renderWithQuery(
+			<SessionInspector session={current} />,
+			[{ id: "ws-1", name: "my-app", path: "/repo", sessions: [current, peer] }],
+		);
+		expect(await screen.findByText("shared.go")).toBeInTheDocument();
+
+		failRefresh = true;
+		await act(async () => {
+			await view.queryClient.invalidateQueries({ queryKey: projectOverlapsQueryKey("ws-1") });
+		});
+
+		expect(await screen.findByText("Collision scan could not refresh. Showing the last result.")).toBeInTheDocument();
+		expect(screen.getByText("shared.go")).toBeInTheDocument();
+	});
+
+	it("watches a peer added while open and reconnects when its workspace is published", async () => {
+		const respond = commonGetsResponder();
+		getMock.mockImplementation(async (path: string) => path === "/api/v1/projects/{id}/overlaps"
+			? {
+				data: {
+					projectId: "ws-1", overlaps: [], truncatedSessionIds: [],
+					unresolvedBaseSessionIds: [], unavailableSessionIds: [],
+				},
+			}
+			: respond(path));
+		const current = session([]);
+		const view = renderWithQuery(
+			<SessionInspector session={current} />,
+			[{ id: "ws-1", name: "my-app", path: "/repo", sessions: [current] }],
+		);
+		await waitFor(() => expect(getMock).toHaveBeenCalledWith(
+			"/api/v1/projects/{id}/overlaps",
+			expect.anything(),
+		));
+		expect(projectOverlapSubscribeMock).not.toHaveBeenCalled();
+
+		const pendingPeer = session([], { id: "sess-2", title: "Provisioning peer", workspacePublished: false });
+		act(() => view.queryClient.setQueryData<WorkspaceSummary[]>(workspaceQueryKey, [
+			{ id: "ws-1", name: "my-app", path: "/repo", sessions: [current, pendingPeer] },
+		]));
+		await waitFor(() => expect(projectOverlapSubscribeMock).toHaveBeenCalledWith(
+			"ws-1",
+			JSON.stringify([["sess-1", true], ["sess-2", false]]),
+			expect.anything(),
+			undefined,
+		));
+
+		act(() => view.queryClient.setQueryData<WorkspaceSummary[]>(workspaceQueryKey, [
+			{ id: "ws-1", name: "my-app", path: "/repo", sessions: [current, { ...pendingPeer, workspacePublished: true }] },
+		]));
+		await waitFor(() => expect(projectOverlapSubscribeMock).toHaveBeenCalledWith(
+			"ws-1",
+			JSON.stringify([["sess-1", true], ["sess-2", true]]),
+			expect.anything(),
+			undefined,
+		));
+	});
+
+	it("stops collision updates while closed and refreshes when reopened", async () => {
+		const respond = commonGetsResponder();
+		getMock.mockImplementation(async (path: string) => path === "/api/v1/projects/{id}/overlaps"
+			? {
+				data: {
+					projectId: "ws-1", overlaps: [], truncatedSessionIds: [],
+					unresolvedBaseSessionIds: [], unavailableSessionIds: [],
+				},
+			}
+			: respond(path));
+		const unsubscribe = vi.fn();
+		projectOverlapSubscribeMock.mockReturnValue(unsubscribe);
+		const current = session([]);
+		const peer = session([], { id: "sess-2", title: "API cleanup" });
+		function VisibilityHarness() {
+			const [visible, setVisible] = useState(true);
+			return (
+				<>
+					<button type="button" onClick={() => setVisible((value) => !value)}>Toggle inspector</button>
+					<SessionInspector isInspectorVisible={visible} session={current} />
+				</>
+			);
+		}
+		renderWithQuery(
+			<VisibilityHarness />,
+			[{ id: "ws-1", name: "my-app", path: "/repo", sessions: [current, peer] }],
+		);
+
+		await waitFor(() => expect(projectOverlapSubscribeMock).toHaveBeenCalledTimes(1));
+		await userEvent.click(screen.getByRole("button", { name: "Toggle inspector" }));
+		await waitFor(() => expect(unsubscribe).toHaveBeenCalledTimes(1));
+
+		getMock.mockClear();
+		projectOverlapSubscribeMock.mockClear();
+		await userEvent.click(screen.getByRole("button", { name: "Toggle inspector" }));
+		await waitFor(() => expect(getMock).toHaveBeenCalledWith(
+			"/api/v1/projects/{id}/overlaps",
+			expect.anything(),
+		));
+		await waitFor(() => expect(projectOverlapSubscribeMock).toHaveBeenCalledTimes(1));
+	});
+
+	it("catches up when the live session set shrinks during the initial overlap read", async () => {
+		const respond = commonGetsResponder();
+		let resolveInitial!: (value: { data: unknown }) => void;
+		const initial = new Promise<{ data: unknown }>((resolve) => { resolveInitial = resolve; });
+		let overlapReads = 0;
+		const clean = {
+			projectId: "ws-1", overlaps: [], truncatedSessionIds: [],
+			unresolvedBaseSessionIds: [], unavailableSessionIds: [],
+		};
+		getMock.mockImplementation(async (path: string) => {
+			if (path !== "/api/v1/projects/{id}/overlaps") return respond(path);
+			overlapReads += 1;
+			if (overlapReads === 1) return initial;
+			return { data: clean };
+		});
+		const current = session([]);
+		const peer = session([], { id: "sess-2", title: "Archiving peer" });
+		const view = renderWithQuery(
+			<SessionInspector session={current} />,
+			[{ id: "ws-1", name: "my-app", path: "/repo", sessions: [current, peer] }],
+		);
+		await waitFor(() => expect(overlapReads).toBe(1));
+
+		act(() => view.queryClient.setQueryData<WorkspaceSummary[]>(workspaceQueryKey, [
+			{ id: "ws-1", name: "my-app", path: "/repo", sessions: [current] },
+		]));
+		resolveInitial({
+			data: {
+				...clean,
+				overlaps: [{ sessionA: "sess-1", sessionB: "sess-2", paths: ["stale.go"] }],
+			},
+		});
+
+		await waitFor(() => expect(overlapReads).toBeGreaterThanOrEqual(2));
+		await waitFor(() => expect(view.queryClient.getQueryData(
+			projectOverlapsQueryKey("ws-1"),
+		)).toEqual(clean));
+		expect(screen.queryByText("Possible collision")).not.toBeInTheDocument();
+	});
+
 	it("shows a worker contract goal, advances time left, and hides time after an outcome", () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date("2026-11-17T18:00:00Z"));
@@ -3250,6 +3455,7 @@ describe("SessionInspector Activity section", () => {
   });
 
   it("links and timestamps draft, opened, and merged PR milestones from backend lifecycle times", async () => {
+    const respond = commonGetsResponder();
     const minutesAgo = (minutes: number) =>
       new Date(Date.now() - minutes * 60 * 1000).toISOString();
     const summaries = [
@@ -3273,7 +3479,7 @@ describe("SessionInspector Activity section", () => {
           error: undefined,
         };
       }
-      return { data: { reviewerHandleId: "", reviews: [] }, error: undefined };
+      return respond(path);
     });
 
     renderWithQuery(

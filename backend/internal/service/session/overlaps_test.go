@@ -180,6 +180,13 @@ func TestProjectOverlapsSkipsUnadoptedImports(t *testing.T) {
 	if len(overlaps.Overlaps) != 0 {
 		t.Fatalf("overlaps = %+v, want pending import excluded", overlaps.Overlaps)
 	}
+	watchPaths, err := svc.ProjectOverlapWatchPaths(context.Background(), "demo")
+	if err != nil {
+		t.Fatalf("ProjectOverlapWatchPaths: %v", err)
+	}
+	if !slices.Equal(watchPaths, []string{active}) {
+		t.Fatalf("watch paths = %v, want only adopted session %q", watchPaths, active)
+	}
 }
 
 func TestProjectOverlapsReportsUnresolvedBasesAndUnavailableSessions(t *testing.T) {
@@ -252,6 +259,72 @@ func TestProjectOverlapsRejectsUnknownProject(t *testing.T) {
 	var apiError *apierr.Error
 	if !errors.As(err, &apiError) || apiError.Kind != apierr.KindNotFound {
 		t.Fatalf("error = %v, want not found", err)
+	}
+}
+
+func TestProjectOverlapWatchPathsReturnsSortedActiveWorkspaceRoots(t *testing.T) {
+	first := t.TempDir()
+	second := t.TempDir()
+	child := t.TempDir()
+	ended := t.TempDir()
+	preparation := t.TempDir()
+
+	store := newFakeStore()
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+	store.sessions["demo-b"] = overlapSession("demo-b", second)
+	store.sessions["demo-a"] = overlapSession("demo-a", first)
+	endedSession := overlapSession("demo-ended", ended)
+	endedSession.IsTerminated = true
+	store.sessions[endedSession.ID] = endedSession
+	preparationSession := overlapSession("demo-preparation", preparation)
+	preparationSession.IsTaskPreparation = true
+	store.sessions[preparationSession.ID] = preparationSession
+	store.worktrees["demo-a"] = []domain.SessionWorktreeRecord{
+		{SessionID: "demo-a", WorktreePath: child},
+		{SessionID: "demo-a", WorktreePath: first},
+	}
+
+	got, err := NewWithDeps(Deps{Store: store}).ProjectOverlapWatchPaths(context.Background(), "demo")
+	if err != nil {
+		t.Fatalf("ProjectOverlapWatchPaths: %v", err)
+	}
+	want := []string{child, first, second}
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("watch paths = %v, want %v", got, want)
+	}
+}
+
+func TestProjectOverlapWatchPathsSkipsScratchAndUnavailableSessions(t *testing.T) {
+	missing := t.TempDir()
+	if err := os.Remove(missing); err != nil {
+		t.Fatalf("remove workspace fixture: %v", err)
+	}
+
+	store := newFakeStore()
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+	store.sessions["demo-missing"] = overlapSession("demo-missing", missing)
+	store.projects["scratch"] = domain.ProjectRecord{ID: "scratch", Kind: domain.ProjectKindScratch}
+	store.sessions["scratch-a"] = domain.SessionRecord{
+		ID: "scratch-a", ProjectID: "scratch", Kind: domain.KindWorker,
+		Metadata: domain.SessionMetadata{WorkspacePath: t.TempDir()},
+	}
+
+	svc := NewWithDeps(Deps{Store: store})
+	got, err := svc.ProjectOverlapWatchPaths(context.Background(), "demo")
+	if err != nil {
+		t.Fatalf("unavailable ProjectOverlapWatchPaths: %v", err)
+	}
+	if got == nil || len(got) != 0 {
+		t.Fatalf("unavailable watch paths = %#v, want non-nil empty list", got)
+	}
+
+	got, err = svc.ProjectOverlapWatchPaths(context.Background(), "scratch")
+	if err != nil {
+		t.Fatalf("scratch ProjectOverlapWatchPaths: %v", err)
+	}
+	if got == nil || len(got) != 0 {
+		t.Fatalf("scratch watch paths = %#v, want non-nil empty list", got)
 	}
 }
 

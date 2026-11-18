@@ -3956,6 +3956,18 @@ func sessionOperations() []operation {
 			},
 		},
 		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/overlaps/events", id: "streamProjectOverlapChanges", tag: "sessions",
+			summary:    "Stream project collision radar invalidations",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, ""},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+			contentTypes: map[int]string{http.StatusOK: "text/event-stream"},
+		},
+		{
 			method: http.MethodGet, path: "/api/v1/sessions/{sessionId}/workspace/events", id: "streamSessionWorkspaceChanges", tag: "sessions",
 			summary:    "Stream session workspace file changes",
 			pathParams: []any{controllers.SessionIDParam{}},

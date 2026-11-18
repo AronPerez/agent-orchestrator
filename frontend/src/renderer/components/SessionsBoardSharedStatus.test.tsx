@@ -134,4 +134,10 @@ describe("sharing from a board card", () => {
 		expect(screen.getByText("Tampering suspected")).toBeInTheDocument();
 		expect(container.querySelector("[data-session-verification='tampering_suspected'] .text-status-in-review")).not.toBeNull();
 	});
+
+	it("marks a card whose changed files overlap another session", () => {
+		renderCard({ collision: { pathCount: 2, peerNames: ["API cleanup"] } });
+		expect(screen.getByText("Overlap")).toBeInTheDocument();
+		expect(screen.getByLabelText("2 changed files overlap with API cleanup")).toBeInTheDocument();
+	});
 });

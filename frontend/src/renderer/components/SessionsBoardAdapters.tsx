@@ -13,7 +13,7 @@ import {
 	type BoardUsagePresentation,
 	type ProductUITranslator,
 } from "@aoagents/product-ui";
-import { Archive, Check, CircleHelp, Copy, File, GitBranch, LoaderCircle, RotateCcw, Share2, ShieldCheck, Trash2, TriangleAlert } from "@/components/app-icons";
+import { AlertTriangle, Archive, Check, CircleHelp, Copy, File, GitBranch, LoaderCircle, RotateCcw, Share2, ShieldCheck, Trash2, TriangleAlert } from "@/components/app-icons";
 import type { MessageKey } from "../i18n";
 import { apiClient, apiErrorMessage } from "../lib/api-client";
 import { aoBridge } from "../lib/bridge";
@@ -59,6 +59,10 @@ import { someoneElseWorking, type SessionPerson } from "../lib/session-people";
 import { sessionVerificationPresentation, type SessionVerificationPresentation } from "../lib/session-verification";
 import { SessionPeopleStack } from "./SessionPeople";
 import { SessionOwnerTag } from "./SessionOwnerTag";
+import { Badge } from "./ui/badge";
+import type { ProjectOverlapScanState } from "../hooks/useProjectOverlaps";
+
+export type BoardCollision = { pathCount: number; peerNames: string[] };
 
 export function toBoardSessionPresentation(
 	session: WorkspaceSession,
@@ -128,6 +132,8 @@ export function sessionsBoardLabels(t: TFunction): BoardColumnLabels {
 }
 
 export function BoardSessionCardAdapter({
+	collision,
+	collisionScanState,
 	me,
 	participants,
 	memory,
@@ -139,6 +145,8 @@ export function BoardSessionCardAdapter({
 	onTerminate,
 	session,
 }: {
+	collision?: BoardCollision;
+	collisionScanState?: ProjectOverlapScanState;
 	/** Live reading of the session's process tree, for the card's resource chip. */
 	memory?: SessionMemoryReading;
 	/** Colour for the chip; neutral unless this card is part of the fix. */
@@ -158,6 +166,8 @@ export function BoardSessionCardAdapter({
 }) {
 	return (
 		<DesktopSessionCard
+			collision={collision}
+			collisionScanState={collisionScanState}
 			me={me}
 			participants={participants}
 			memory={memory}
@@ -249,6 +259,8 @@ export function ArchivedSessionCardAdapter({
 }
 
 function DesktopSessionCard({
+	collision,
+	collisionScanState,
 	me,
 	participants,
 	action,
@@ -272,6 +284,8 @@ function DesktopSessionCard({
 }: {
 	action?: ReactNode;
 	branchAction?: ReactNode;
+	collision?: BoardCollision;
+	collisionScanState?: ProjectOverlapScanState;
 	compact?: boolean;
 	footer?: ReactNode;
 	hidePullRequestProgress?: boolean;
@@ -388,6 +402,39 @@ function DesktopSessionCard({
 	const artifactLinks = interactive && onOpenArtifact && deliverables.length > 0
 		? <BoardArtifactLinks artifacts={deliverables} onOpen={onOpenArtifact} onOpenInspector={onOpenArtifacts} session={session} />
 		: undefined;
+	const collisionBadge = collision ? (
+		<Tooltip>
+			<TooltipTrigger asChild>
+				<Badge
+					aria-label={t("collisionRadar.cardAria", { count: collision.pathCount, sessions: collision.peerNames.join(", ") })}
+					variant="warning"
+				>
+					<AlertTriangle aria-hidden="true" />
+					{t("collisionRadar.badge")}
+				</Badge>
+			</TooltipTrigger>
+			<TooltipContent>{t("collisionRadar.cardAria", { count: collision.pathCount, sessions: collision.peerNames.join(", ") })}</TooltipContent>
+		</Tooltip>
+	) : null;
+	const collisionScanCopy = collisionScanState === "incomplete"
+		? { label: t("collisionRadar.incompleteTitle"), detail: t("collisionRadar.incomplete") }
+		: collisionScanState === "unavailable"
+			? { label: t("collisionRadar.unavailableBadge"), detail: t("collisionRadar.unavailable") }
+			: collisionScanState === "stale"
+				? { label: t("collisionRadar.staleBadge"), detail: t("collisionRadar.stale") }
+				: undefined;
+	const collisionScanBadge = collisionScanCopy ? (
+		<Tooltip>
+			<TooltipTrigger asChild>
+				<Badge aria-label={collisionScanCopy.detail} variant="warning">
+					<AlertTriangle aria-hidden="true" />
+					{collisionScanCopy.label}
+				</Badge>
+			</TooltipTrigger>
+			<TooltipContent>{collisionScanCopy.detail}</TooltipContent>
+		</Tooltip>
+	) : null;
+	const ownerTag = session.cloud?.requestedBy ? <SessionOwnerTag session={session} /> : null;
 
 	const card = (
 		<SessionCardView
@@ -445,7 +492,7 @@ function DesktopSessionCard({
 				url: prBrowserUrl(pr),
 			}))}
 			renderAvatar={(provider) => <AgentAvatar provider={provider} />}
-			tag={session.cloud?.requestedBy ? <SessionOwnerTag session={session} /> : undefined}
+			tag={collisionBadge || collisionScanBadge || ownerTag ? <span className="inline-flex min-w-0 items-center gap-1">{collisionBadge}{collisionScanBadge}{ownerTag}</span> : undefined}
 			session={
 				hideTerminatedStatus
 					? hideTerminatedCardStatus(toBoardSessionPresentation(session))
