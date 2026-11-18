@@ -114,6 +114,11 @@ type ProjectConfig struct {
 	// A basename applies in every repository directory; a slash-containing path
 	// is matched exactly against the workspace-relative changed path.
 	CollisionRadar CollisionRadarConfig `json:"collisionRadar,omitempty"`
+
+	// Autonomy lists the kinds of decision the person keeps and how much the
+	// project's sessions decide on their own. The zero value is mode off.
+	// Read when a call is raised and when standing instructions are built.
+	Autonomy AutonomyConfig `json:"autonomy,omitempty"`
 }
 
 // CollisionRadarConfig keeps deterministic overlap warnings quiet for files
@@ -292,6 +297,9 @@ func (c ProjectConfig) Validate() error {
 		return err
 	}
 	if err := c.CollisionRadar.Validate(); err != nil {
+		return err
+	}
+	if err := c.Autonomy.Validate(); err != nil {
 		return err
 	}
 	if err := validateNameComponent("sessionPrefix", c.SessionPrefix); err != nil {
