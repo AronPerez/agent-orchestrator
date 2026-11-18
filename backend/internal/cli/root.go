@@ -229,6 +229,15 @@ func NewRootCommand(deps Deps) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			if flag := cmd.Flags().Lookup("all-hosts"); flag != nil {
+				allHosts, err := cmd.Flags().GetBool("all-hosts")
+				if err != nil {
+					return usageError{err}
+				}
+				if allHosts && (strings.TrimSpace(remoteHost) != "" || strings.TrimSpace(remoteURL) != "" || strings.TrimSpace(os.Getenv("AO_URL")) != "") {
+					return usageError{errors.New("--all-hosts cannot be combined with --host, --url, or AO_URL")}
+				}
+			}
 			// Resolve before anything else: every daemon call below, telemetry
 			// included, depends on which daemon this invocation targets.
 			if strings.TrimSpace(remoteHost) != "" {
