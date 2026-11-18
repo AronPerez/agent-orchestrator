@@ -483,6 +483,67 @@ func TestChatTrackerIntakePreSendErrorReleasesClaimForRetry(t *testing.T) {
 	}
 }
 
+func TestChatTrackerIntakePreSendCleanupFailureResumePublishesControllerFence(t *testing.T) {
+	preSendErr := errors.New("controller not registered")
+	cleanupErr := errors.New("workspace cleanup refused")
+	launcher := &recordingLauncher{turnBeforeSendErr: preSendErr}
+	m, st, _ := newChatManager(launcher)
+	m.newLaunchID = func() string { return "resumed-generation" }
+	ws := m.workspace.(*fakeWorkspace)
+	ws.destroyErr = cleanupErr
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
+	cfg := ports.SpawnConfig{
+		ProjectID: chatTestProject, IssueID: "github:acme/mer#821", Kind: domain.KindWorker,
+		Harness: domain.HarnessCodex, RequestedMode: domain.SessionModeChat,
+		Prompt: "fix it", TrackerIntakeLimits: &limits,
+	}
+
+	if _, _, _, err := m.Spawn(context.Background(), cfg); !errors.Is(err, preSendErr) {
+		t.Fatalf("Spawn() error = %v, want pre-send failure", err)
+	}
+	key := "mer\x00github:acme/mer#821"
+	id := st.trackerIntakePending[key]
+	if id == "" {
+		t.Fatal("failed cleanup released the pending intake claim")
+	}
+	if len(launcher.stopped) != 1 || ws.destroyed != 1 {
+		t.Fatalf("failed spawn stops/destroys = %v/%d, want one attempted controller and workspace cleanup", launcher.stopped, ws.destroyed)
+	}
+	prior := st.trackerIntakeRecovery[id]
+	if prior.DeliveryPossible || !prior.ControllerPossible {
+		t.Fatalf("pre-send reservation = %+v, want undelivered possible controller", prior)
+	}
+
+	launcher.turnBeforeSendErr = nil
+	ws.destroyErr = nil
+	resumed, err := m.ResumeAgentWithMode(context.Background(), id)
+	if err != nil {
+		t.Fatalf("ResumeAgentWithMode(): %v", err)
+	}
+	launcher.live = true
+	reservation := st.trackerIntakeRecovery[id]
+	if reservation.ControllerGeneration != "resumed-generation" || !reservation.ControllerPossible ||
+		!reservation.RelaunchPublished || reservation.DeliveryPossible || reservation.CapacityReleased {
+		t.Fatalf("resumed reservation = %+v, want published resumed-generation owner", reservation)
+	}
+	if resumed.Session.Metadata.ControllerGeneration != reservation.ControllerGeneration {
+		t.Fatalf("resumed controller generation = %q, reservation = %q",
+			resumed.Session.Metadata.ControllerGeneration, reservation.ControllerGeneration)
+	}
+
+	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
+		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
+	}
+	got := st.sessions[id]
+	if got.IsTerminated || got.Metadata.ControllerGeneration != "resumed-generation" {
+		t.Fatalf("resumed Chat owner after reconciliation = %+v", got)
+	}
+	if len(launcher.stopped) != 1 || ws.destroyed != 1 || st.trackerIntakePending[key] != id {
+		t.Fatalf("reconciliation stopped resumed controller=%v destroyed workspaces=%d or changed pending=%q",
+			launcher.stopped, ws.destroyed, st.trackerIntakePending[key])
+	}
+}
+
 func (l *generationClaimFailureLauncher) StartChat(ctx context.Context, cfg ChatStart) (ChatStarted, error) {
 	var prepareErr error
 	cfg, prepareErr = prepareTestChatStart(ctx, cfg)

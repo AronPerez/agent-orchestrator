@@ -2778,6 +2778,36 @@ func (m *Manager) markTrackerIntakeRelaunchPublished(ctx context.Context, id dom
 	return nil
 }
 
+func (m *Manager) reserveTrackerIntakeChatRelaunch(
+	ctx context.Context,
+	id domain.SessionID,
+	ws ports.WorkspaceInfo,
+	controllerGeneration string,
+) (string, domain.TrackerIntakeRecoveryReservation, bool, error) {
+	prior, pending, err := m.store.GetPendingTrackerIntakeRecovery(ctx, id)
+	if err != nil {
+		return "", domain.TrackerIntakeRecoveryReservation{}, false, fmt.Errorf("load tracker intake recovery before Chat relaunch: %w", err)
+	}
+	if !pending {
+		return controllerGeneration, domain.TrackerIntakeRecoveryReservation{}, false, nil
+	}
+	controllerGeneration = strings.TrimSpace(controllerGeneration)
+	if controllerGeneration == "" {
+		controllerGeneration = m.newLaunchID()
+	}
+	if strings.TrimSpace(controllerGeneration) == "" {
+		return "", domain.TrackerIntakeRecoveryReservation{}, false, errors.New("reserve tracker intake Chat relaunch: controller generation is empty")
+	}
+	reservation := trackerIntakeRecoveryForWorkspace(ws)
+	reservation.ControllerPossible = true
+	reservation.ControllerGeneration = controllerGeneration
+	reservation.DeliveryPossible = prior.DeliveryPossible
+	if err := m.store.ReserveTrackerIntakeRecovery(ctx, id, reservation); err != nil {
+		return "", domain.TrackerIntakeRecoveryReservation{}, false, fmt.Errorf("reserve tracker intake Chat relaunch: %w", err)
+	}
+	return controllerGeneration, reservation, true, nil
+}
+
 func (m *Manager) markTrackerIntakeCapacityReleased(ctx context.Context, id domain.SessionID) error {
 	reservation, pending, err := m.store.GetPendingTrackerIntakeRecovery(ctx, id)
 	if err != nil {
@@ -4383,9 +4413,29 @@ func (m *Manager) relaunchSessionWithPolicyAndGeneration(ctx context.Context, op
 		} else if strings.TrimSpace(rec.Metadata.ProviderConversationID) == "" {
 			return RestoreResult{}, fmt.Errorf("%s %s: %w", operation, rec.ID, ErrIncompleteHandle)
 		}
-		return m.resumeChatController(
-			ctx, operation, rec, project, ws, requireNativeHistory, false, reservedGeneration, historyPolicy,
+		controllerGeneration, trackerReservation, trackerPending, err := m.reserveTrackerIntakeChatRelaunch(
+			ctx, rec.ID, ws, reservedGeneration,
 		)
+		if err != nil {
+			return RestoreResult{}, relaunchFailed("tracker intake controller fence", fmt.Errorf("%s %s: %w", operation, rec.ID, err))
+		}
+		result, err := m.resumeChatController(
+			ctx, operation, rec, project, ws, requireNativeHistory, false, controllerGeneration, historyPolicy,
+		)
+		if err != nil {
+			return RestoreResult{}, err
+		}
+		if !trackerPending {
+			return result, nil
+		}
+		if trackerReservation.DeliveryPossible {
+			if err := m.store.CommitTrackerIntakeSession(ctx, rec.ID, m.clock()); err != nil {
+				return RestoreResult{}, relaunchFailed("tracker intake commit", fmt.Errorf("%s %s: commit resumed tracker intake claim: %w", operation, rec.ID, err))
+			}
+		} else if err := m.markTrackerIntakeRelaunchPublished(ctx, rec.ID); err != nil {
+			return RestoreResult{}, relaunchFailed("tracker intake commit", fmt.Errorf("%s %s: publish resumed tracker intake owner: %w", operation, rec.ID, err))
+		}
+		return result, nil
 	}
 
 	var env map[string]string

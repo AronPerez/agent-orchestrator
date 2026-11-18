@@ -191,6 +191,9 @@ func trackerIntakeClaimDefersToSessionHealth(rec domain.SessionRecord, reservati
 		return false
 	}
 	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
+		if trackerIntakeChatReservationMatchesSession(rec, reservation) {
+			return true
+		}
 		return reservation.DeliveryPossible && rec.Activity.State != domain.ActivityExited
 	}
 	if reservation.RelaunchPublished && trackerIntakeRuntimeReservationMatchesSession(rec, reservation) {
@@ -217,6 +220,11 @@ func trackerIntakeRuntimeReservationMatchesSession(rec domain.SessionRecord, res
 	return launchID != "" && handleID != "" &&
 		launchID == strings.TrimSpace(rec.Metadata.RuntimeLaunchID) &&
 		trackerIntakeHandleReserved(reservation.RuntimeHandleIDs, handleID)
+}
+
+func trackerIntakeChatReservationMatchesSession(rec domain.SessionRecord, reservation domain.TrackerIntakeRecoveryReservation) bool {
+	generation := strings.TrimSpace(reservation.ControllerGeneration)
+	return generation != "" && generation == strings.TrimSpace(rec.Metadata.ControllerGeneration)
 }
 
 func (m *Manager) reconcileLiveTrackerIntakeRuntime(ctx context.Context, claim domain.TrackerIntakePendingClaim, rec domain.SessionRecord) error {

@@ -208,6 +208,10 @@ type TrackerIntakeRecoveryReservation struct {
 	RuntimeLaunchID         string   `json:"runtimeLaunchId,omitempty"`
 	RuntimeHandleIDs        []string `json:"runtimeHandleIds,omitempty"`
 	ControllerPossible      bool     `json:"controllerPossible,omitempty"`
+	// ControllerGeneration fences a Chat controller reserved by a user resume.
+	// A matching session row proves that controller reached durable publication;
+	// recovery must not stop it as residue from the original failed intake.
+	ControllerGeneration string `json:"controllerGeneration,omitempty"`
 	// RelaunchPublished distinguishes a fully completed user restore/resume from
 	// an initial launch that merely published its runtime before after-start
 	// prompt delivery. Recovery preserves the former live owner without claiming
