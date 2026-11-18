@@ -20,6 +20,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/datadirlock"
 	aoprocess "github.com/aoagents/agent-orchestrator/backend/internal/process"
 	"github.com/aoagents/agent-orchestrator/backend/internal/processalive"
+	"github.com/aoagents/agent-orchestrator/backend/internal/procmem"
 	"github.com/aoagents/agent-orchestrator/backend/internal/telemetrymeta"
 )
 
@@ -89,6 +90,7 @@ type Deps struct {
 	Executable            func() (string, error)
 	StartProcess          func(processStartConfig) error
 	ProcessAlive          func(pid int) bool
+	ProcessStartedAt      func(context.Context, int) (time.Time, bool)
 	LookPath              func(file string) (string, error)
 	ResolveAgentBinary    func(context.Context, string) (string, error)
 	CommandOutput         func(ctx context.Context, name string, args ...string) ([]byte, error)
@@ -115,6 +117,7 @@ func DefaultDeps() Deps {
 		Executable:            os.Executable,
 		StartProcess:          startProcess,
 		ProcessAlive:          processalive.Alive,
+		ProcessStartedAt:      processStartedAt,
 		LookPath:              exec.LookPath,
 		CommandOutput:         commandOutput,
 		CommandOutputInDir:    commandOutputInDir,
@@ -132,6 +135,15 @@ func DefaultDeps() Deps {
 			return codex.ResolveCodexBinary(ctx)
 		},
 	}
+}
+
+func processStartedAt(ctx context.Context, pid int) (time.Time, bool) {
+	identities, err := procmem.Identities(ctx)
+	if err != nil {
+		return time.Time{}, false
+	}
+	identity, ok := identities[pid]
+	return identity.StartedAt, ok && !identity.StartedAt.IsZero()
 }
 
 func commandOutput(ctx context.Context, name string, args ...string) ([]byte, error) {
@@ -166,6 +178,9 @@ func (d Deps) withDefaults() Deps {
 	}
 	if d.ProcessAlive == nil {
 		d.ProcessAlive = def.ProcessAlive
+	}
+	if d.ProcessStartedAt == nil {
+		d.ProcessStartedAt = def.ProcessStartedAt
 	}
 	if d.LookPath == nil {
 		if d.ResolveAgentBinary == nil {
@@ -204,7 +219,7 @@ func (d Deps) withDefaults() Deps {
 func NewRootCommand(deps Deps) *cobra.Command {
 	deps = deps.withDefaults()
 	ctx := &commandContext{deps: deps}
-	var remoteURL string
+	var remoteURL, remoteHost string
 
 	root := &cobra.Command{
 		Use:           "ao",
@@ -216,7 +231,23 @@ func NewRootCommand(deps Deps) *cobra.Command {
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			// Resolve before anything else: every daemon call below, telemetry
 			// included, depends on which daemon this invocation targets.
-			remote, err := resolveRemoteTarget(remoteURL)
+			if strings.TrimSpace(remoteHost) != "" {
+				if strings.TrimSpace(remoteURL) != "" || strings.TrimSpace(os.Getenv("AO_URL")) != "" {
+					return usageError{errors.New("--host cannot be combined with --url or AO_URL")}
+				}
+				if err := ctx.selectSavedHost(cmd.Context(), remoteHost); err != nil {
+					return err
+				}
+				if shouldEmitCLIInvocation(cmd) {
+					ctx.emitCLIInvoked(cmd.Context(), cmd)
+				}
+				return nil
+			}
+			activeAccount := ""
+			if savedRemoteCredentialRequested(remoteURL) {
+				activeAccount = ctx.activeCloudAccount(cmd.Context())
+			}
+			remote, err := resolveRemoteTargetForAccount(remoteURL, activeAccount)
 			if err != nil {
 				return err
 			}
@@ -229,6 +260,8 @@ func NewRootCommand(deps Deps) *cobra.Command {
 	}
 	root.PersistentFlags().StringVar(&remoteURL, "url", "",
 		"Base URL of a remote AO daemon, e.g. http://host:3011 (env AO_URL); credential from AO_TOKEN or ~/.ao/remotes.json")
+	root.PersistentFlags().StringVar(&remoteHost, "host", "",
+		"Saved host label or host ID from the desktop app; uses its agent-coordination credential")
 	root.SetIn(deps.In)
 	root.SetOut(deps.Out)
 	root.SetErr(deps.Err)

@@ -26,7 +26,7 @@ type Store interface {
 	AppendDecisionEntry(context.Context, domain.DecisionEntry, time.Time) (domain.DecisionEntry, domain.DecisionCall, error)
 	GetDecisionCall(context.Context, string) (domain.DecisionCall, bool, error)
 	ListDecisionEntries(context.Context, string) ([]domain.DecisionEntry, error)
-	ListDecisionCallsByOwner(context.Context, string, domain.SessionID, int) ([]domain.DecisionCall, error)
+	ListDecisionCallsForSession(context.Context, string, domain.SessionID, int) ([]domain.DecisionCall, error)
 	ListDecisionCallsByState(context.Context, domain.DecisionCallState, int) ([]domain.DecisionCall, error)
 	ListDecisionStreams(context.Context) ([]domain.DecisionStream, error)
 	SearchDecisionCalls(context.Context, string, domain.ProjectID, bool, int) ([]domain.DecisionCall, error)
@@ -333,7 +333,7 @@ func (s *Service) List(ctx context.Context, actor Actor, scope Scope) ([]domain.
 		if actor.Session == "" {
 			return nil, apierr.Invalid("DECISION_SESSION_REQUIRED", "This needs a session. Run it from inside a session.", nil)
 		}
-		calls, err = s.store.ListDecisionCallsByOwner(ctx, s.hostID, actor.Session, -1)
+		calls, err = s.store.ListDecisionCallsForSession(ctx, s.hostID, actor.Session, -1)
 	case ScopeNeedsYou:
 		calls, err = s.store.ListDecisionCallsByState(ctx, domain.DecisionStateNeedsYou, -1)
 	default:

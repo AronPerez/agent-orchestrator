@@ -22,6 +22,7 @@ trigger: "Using the `ao` CLI, importing existing agent sessions, or managing Orc
 | `review` | Start, list, cancel, or submit Orchestrator's native reviewer for a worker's PR (default: this session) | Reviewing implementation PRs owned by workers. For someone else's PR, use a worker that claims it with automatic fixing off | [commands/review.md](commands/review.md) |
 | `send` | Send a message to a running agent session | Messaging a live agent; use `--steer` to correct it mid-turn | [commands/send.md](commands/send.md) |
 | `report` | Persist a meaningful worker report | Checkpoints, blockers, decisions, outputs, and completion | [commands/report.md](commands/report.md) |
+| `decision` | Ask the human to choose between options, and look up what they decided before | A choice only the human can make; checking earlier decisions before asking | [commands/decision.md](commands/decision.md) |
 | `artifact` | Register files in the artifact directory as deliverables | Making a finished file appear as one of the session's artifacts | [commands/artifact.md](commands/artifact.md) |
 | `preview` | Start a session-owned app or open an exact URL/file | Running and showing the worker's relevant app, Markdown, HTML, PDF, or image | [commands/preview.md](commands/preview.md) |
 | `pane` | Split this session's tabs in the desktop window and run commands in its terminal tabs (Developer Mode preview) | Putting a terminal, file or reviewer beside the chat, or running a command in a terminal the user can see | [commands/pane.md](commands/pane.md) |

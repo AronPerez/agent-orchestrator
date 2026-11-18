@@ -376,6 +376,11 @@ type telemetryIdentityRequest struct {
 	Sequence int64 `json:"sequence,omitempty"`
 }
 
+type cloudUserBindingResponse struct {
+	CloudUserID string `json:"cloudUserId,omitempty"`
+	Known       bool   `json:"known"`
+}
+
 // mountTelemetryIdentity lets the desktop app (Electron main, which sends no
 // Origin) tell the daemon which AO Cloud user is signed in; "" signs out. Only
 // the opaque user ID crosses: the email goes straight to PostHog from the
@@ -388,6 +393,17 @@ func mountTelemetryIdentity(r chi.Router, ident ports.TelemetryIdentityStore) {
 		seqMu   sync.Mutex
 		lastSeq int64
 	)
+	r.Get("/internal/telemetry/identity", func(w http.ResponseWriter, req *http.Request) {
+		if !localControlRequest(req) {
+			envelope.WriteJSON(w, http.StatusForbidden, map[string]any{"status": "forbidden", "service": daemonmeta.ServiceName})
+			return
+		}
+		resp := cloudUserBindingResponse{}
+		if source, ok := ident.(ports.CloudUserBindingSource); ok {
+			resp.CloudUserID, resp.Known = source.CloudUserBinding()
+		}
+		envelope.WriteJSON(w, http.StatusOK, resp)
+	})
 	r.Post("/internal/telemetry/identity", func(w http.ResponseWriter, req *http.Request) {
 		if !localControlRequest(req) {
 			envelope.WriteJSON(w, http.StatusForbidden, map[string]any{"status": "forbidden", "service": daemonmeta.ServiceName})

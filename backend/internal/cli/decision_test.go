@@ -40,6 +40,7 @@ func TestDecisionRaiseUsage(t *testing.T) {
 		{"search without words", []string{"decision", "search"}, "say what to search for"},
 		{"search with whitespace only", []string{"decision", "search", "  ", "\t"}, "say what to search for"},
 		{"show without id", []string{"decision", "show"}, "ao decision show <id>"},
+		{"show with malformed link", []string{"decision", "show", "ao://decisions/"}, "valid decision ID or ao://decisions/ link"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -268,7 +269,7 @@ func TestDecisionListSearchAndShow(t *testing.T) {
 	if _, _, err := executeCLI(t, deps, "decision", "search", "auth", "scheme"); err != nil {
 		t.Fatal(err)
 	}
-	out, _, err = executeCLI(t, deps, "decision", "show", "dec_1")
+	out, _, err = executeCLI(t, deps, "decision", "show", "ao://decisions/dec_1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,35 +337,35 @@ func TestDecisionActionsSendTheRightRequest(t *testing.T) {
 		wantOut    string
 	}{
 		{
-			name: "answer option", args: []string{"decision", "answer", "dec_1", "--pick", "2", "--note", "Rotate monthly"},
+			name: "answer option", args: []string{"decision", "answer", "ao://decisions/dec_1", "--pick", "2", "--note", "Rotate monthly"},
 			path: "/api/v1/decisions/dec_1/answer", body: `{"choice":"option","option":2,"note":"Rotate monthly"}`,
 			wantOut: "Answered dec_1: Per-tenant API keys\n",
 		},
 		{
-			name: "answer other", args: []string{"decision", "answer", "dec_1", "--other", "--note", "Use the vault"},
+			name: "answer other", args: []string{"decision", "answer", "ao://decisions/dec_1", "--other", "--note", "Use the vault"},
 			path: "/api/v1/decisions/dec_1/answer", body: `{"choice":"other","note":"Use the vault"}`,
 			wantOut: "Answered dec_1: Something else\n",
 		},
 		{
-			name: "dismiss", args: []string{"decision", "dismiss", "dec_1", "--note", "Not enough to go on"},
+			name: "dismiss", args: []string{"decision", "dismiss", "ao://decisions/dec_1", "--note", "Not enough to go on"},
 			path: "/api/v1/decisions/dec_1/dismiss", body: `{"note":"Not enough to go on"}`,
 			wantOut: "Dismissed dec_1\n",
 		},
 		{
-			name: "outcome", session: "w-1", args: []string{"decision", "outcome", "dec_1", "--for-answer", "dent_2", "--text", "Shipped in PR 412", "--link", "https://example.com/pr/412"},
+			name: "outcome", session: "w-1", args: []string{"decision", "outcome", "ao://decisions/dec_1", "--for-answer", "dent_2", "--text", "Shipped in PR 412", "--link", "https://example.com/pr/412"},
 			path: "/api/v1/decisions/dec_1/outcome", body: `{"forEntry":"dent_2","text":"Shipped in PR 412","link":"https://example.com/pr/412"}`,
 			wantCaller: "w-1", wantOut: "Recorded the outcome of dec_1\n",
 		},
 		{
-			name: "withdraw", session: "w-1", args: []string{"decision", "withdraw", "dec_1"},
+			name: "withdraw", session: "w-1", args: []string{"decision", "withdraw", "ao://decisions/dec_1"},
 			path: "/api/v1/decisions/dec_1/withdraw", wantCaller: "w-1", wantOut: "Withdrew dec_1\n",
 		},
 		{
-			name: "retire", args: []string{"decision", "retire", "dec_1"},
+			name: "retire", args: []string{"decision", "retire", "ao://decisions/dec_1"},
 			path: "/api/v1/decisions/dec_1/retire", body: `{"retired":true}`, wantOut: "dec_1 no longer applies\n",
 		},
 		{
-			name: "unretire", args: []string{"decision", "retire", "dec_1", "--undo"},
+			name: "unretire", args: []string{"decision", "retire", "ao://decisions/dec_1", "--undo"},
 			path: "/api/v1/decisions/dec_1/retire", body: `{"retired":false}`, wantOut: "dec_1 applies again\n",
 		},
 	}
