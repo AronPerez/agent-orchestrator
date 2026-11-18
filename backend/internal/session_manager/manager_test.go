@@ -119,6 +119,8 @@ type fakeStore struct {
 	trackerIntakeHandled                           map[string]domain.SessionID
 	trackerIntakeRecovery                          map[domain.SessionID]domain.TrackerIntakeRecoveryReservation
 	trackerIntakeReleaseErr                        error
+	trackerIntakeCommitStoppedErr                  error
+	trackerIntakeRecoveryHook                      func(domain.SessionID)
 	trackerIntakeCleanupConfirmedBeforeTermination bool
 	trackerIntakeLimits                            []domain.AutomatedSessionLimits
 	// worktrees maps session ID to its saved worktree rows (shutdown-saved marker).
@@ -194,6 +196,23 @@ func (f *fakeStore) CommitTrackerIntakeSession(_ context.Context, id domain.Sess
 	return fmt.Errorf("tracker intake session %s is missing", id)
 }
 
+func (f *fakeStore) CommitStoppedTrackerIntakeSession(_ context.Context, id domain.SessionID, _ time.Time) error {
+	if f.trackerIntakeCommitStoppedErr != nil {
+		return f.trackerIntakeCommitStoppedErr
+	}
+	for key, pendingID := range f.trackerIntakePending {
+		if pendingID == id {
+			reservation := f.trackerIntakeRecovery[id]
+			reservation.CapacityReleased = true
+			f.trackerIntakeRecovery[id] = reservation
+			delete(f.trackerIntakePending, key)
+			f.trackerIntakeHandled[key] = id
+			return nil
+		}
+	}
+	return fmt.Errorf("tracker intake session %s is missing", id)
+}
+
 func (f *fakeStore) ReserveTrackerIntakeRecovery(_ context.Context, id domain.SessionID, reservation domain.TrackerIntakeRecoveryReservation) error {
 	for _, pendingID := range f.trackerIntakePending {
 		if pendingID == id {
@@ -209,6 +228,9 @@ func (f *fakeStore) ReserveTrackerIntakeRecovery(_ context.Context, id domain.Se
 }
 
 func (f *fakeStore) GetPendingTrackerIntakeRecovery(_ context.Context, id domain.SessionID) (domain.TrackerIntakeRecoveryReservation, bool, error) {
+	if f.trackerIntakeRecoveryHook != nil {
+		f.trackerIntakeRecoveryHook(id)
+	}
 	for _, pendingID := range f.trackerIntakePending {
 		if pendingID == id {
 			return f.trackerIntakeRecovery[id], true, nil

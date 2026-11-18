@@ -78,14 +78,9 @@ func (m *Manager) endTrackerIntakeRecovery(id domain.SessionID) {
 }
 
 func (m *Manager) reconcileTrackerIntakeClaim(ctx context.Context, claim domain.TrackerIntakePendingClaim) error {
-	if err := m.beginAgentOperation(ctx, claim.SessionID, agentOperationReconcile); err != nil {
-		return fmt.Errorf("recover tracker intake %s: reserve reconciliation: %w", claim.SessionID, err)
-	}
-	defer m.endAgentOperation(claim.SessionID, agentOperationReconcile)
-
 	reservation, pending, err := m.store.GetPendingTrackerIntakeRecovery(ctx, claim.SessionID)
 	if err != nil {
-		return fmt.Errorf("recover tracker intake %s: reload claim: %w", claim.SessionID, err)
+		return fmt.Errorf("recover tracker intake %s: inspect claim: %w", claim.SessionID, err)
 	}
 	if !pending {
 		return nil
@@ -93,10 +88,45 @@ func (m *Manager) reconcileTrackerIntakeClaim(ctx context.Context, claim domain.
 	claim.Recovery = reservation
 	rec, found, err := m.store.GetSession(ctx, claim.SessionID)
 	if err != nil {
+		return fmt.Errorf("recover tracker intake %s: inspect session: %w", claim.SessionID, err)
+	}
+	if found && (rec.ProjectID != claim.ProjectID || rec.IssueID != claim.IssueID) {
+		return nil
+	}
+	if found && trackerIntakeClaimDefersToSessionHealth(rec, reservation) {
+		// This path performs no recovery mutation. In particular, do not reserve
+		// the session operation: startup health needs that fence to reconnect a
+		// surviving Chat controller and settle the delivery claim.
+		return nil
+	}
+
+	if err := m.beginAgentOperation(ctx, claim.SessionID, agentOperationReconcile); err != nil {
+		return fmt.Errorf("recover tracker intake %s: reserve reconciliation: %w", claim.SessionID, err)
+	}
+	defer m.endAgentOperation(claim.SessionID, agentOperationReconcile)
+
+	reservation, pending, err = m.store.GetPendingTrackerIntakeRecovery(ctx, claim.SessionID)
+	if err != nil {
+		return fmt.Errorf("recover tracker intake %s: reload claim: %w", claim.SessionID, err)
+	}
+	if !pending {
+		return nil
+	}
+	claim.Recovery = reservation
+	rec, found, err = m.store.GetSession(ctx, claim.SessionID)
+	if err != nil {
 		return fmt.Errorf("recover tracker intake %s: load session: %w", claim.SessionID, err)
 	}
 	if found && (rec.ProjectID != claim.ProjectID || rec.IssueID != claim.IssueID) {
 		return nil
+	}
+	if found && !rec.IsTerminated && domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat &&
+		claim.Recovery.DeliveryPossible && claim.Recovery.CapacityReleased && rec.Activity.State == domain.ActivityExited {
+		// A pre-atomic build may have persisted the released-capacity fact just
+		// before crashing ahead of claim promotion. The exited generation is
+		// already fenced, so finish the no-replay transition without retiring its
+		// resumable workspace.
+		return m.store.CommitStoppedTrackerIntakeSession(ctx, rec.ID, m.clock())
 	}
 	if !found {
 		rec = domain.SessionRecord{
@@ -107,16 +137,18 @@ func (m *Manager) reconcileTrackerIntakeClaim(ctx context.Context, claim domain.
 			rec.Mode = domain.SessionModeChat
 		}
 	}
+	if found && trackerIntakeClaimDefersToSessionHealth(rec, claim.Recovery) {
+		return nil
+	}
 	if claim.Recovery.DeliveryPossible && found && !rec.IsTerminated && !claim.Recovery.CapacityReleased {
-		if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat || strings.TrimSpace(rec.Metadata.RuntimeHandleID) != "" {
-			// Chat ownership is reattached by startup health without replaying the
-			// initial turn. A terminal row with a published handle is already
-			// controllable and keeps its no-replay claim until delivery settles.
-			return nil
-		}
 		return m.reconcileLiveTrackerIntakeRuntime(ctx, claim, rec)
 	}
 	return m.reconcileInterruptedTrackerIntake(ctx, rec, claim.Recovery)
+}
+
+func trackerIntakeClaimDefersToSessionHealth(rec domain.SessionRecord, reservation domain.TrackerIntakeRecoveryReservation) bool {
+	return reservation.DeliveryPossible && !reservation.CapacityReleased && !rec.IsTerminated &&
+		(domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat || strings.TrimSpace(rec.Metadata.RuntimeHandleID) != "")
 }
 
 func (m *Manager) reconcileLiveTrackerIntakeRuntime(ctx context.Context, claim domain.TrackerIntakePendingClaim, rec domain.SessionRecord) error {

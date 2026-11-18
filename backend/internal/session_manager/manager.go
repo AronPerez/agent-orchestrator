@@ -385,6 +385,7 @@ type Store interface {
 	CreateSession(ctx context.Context, rec domain.SessionRecord) (domain.SessionRecord, error)
 	CreateTrackerIntakeSession(ctx context.Context, rec domain.SessionRecord, limits domain.AutomatedSessionLimits) (domain.SessionRecord, error)
 	CommitTrackerIntakeSession(ctx context.Context, id domain.SessionID, handledAt time.Time) error
+	CommitStoppedTrackerIntakeSession(ctx context.Context, id domain.SessionID, handledAt time.Time) error
 	ReconcileTrackerIntakeSession(ctx context.Context, id domain.SessionID, handledAt time.Time) error
 	ReserveTrackerIntakeRecovery(ctx context.Context, id domain.SessionID, reservation domain.TrackerIntakeRecoveryReservation) error
 	GetPendingTrackerIntakeRecovery(ctx context.Context, id domain.SessionID) (domain.TrackerIntakeRecoveryReservation, bool, error)

@@ -203,6 +203,62 @@ func TestStartupHealthPendingDeliveredTrackerChatReattachesWithoutReplay(t *test
 	}
 }
 
+func TestStartupHealthPendingDeliveredTrackerChatRunsPastAsyncClaimInspection(t *testing.T) {
+	m, st, _, _ := newManager()
+	launcher := &healthCheckLauncher{}
+	m.chat = launcher
+	rec := startupChatRecord()
+	rec.ID = "mer-chat-intake-async-claim"
+	rec.IssueID = "github:acme/mer#461"
+	rec.Metadata.ControllerGeneration = "controller-461"
+	st.sessions[rec.ID] = rec
+	key := "mer\x00" + string(rec.IssueID)
+	st.trackerIntakePending[key] = rec.ID
+	st.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
+		Branch: rec.Metadata.Branch, WorkspacePath: rec.Metadata.WorkspacePath,
+		WorkspaceRepoPath: rec.Metadata.WorkspaceRepoPath, ControllerPossible: true, DeliveryPossible: true,
+	}
+	claimStarted := make(chan struct{})
+	releaseClaim := make(chan struct{})
+	var hookMu sync.Mutex
+	firstLookup := true
+	st.trackerIntakeRecoveryHook = func(domain.SessionID) {
+		hookMu.Lock()
+		block := firstLookup
+		firstLookup = false
+		hookMu.Unlock()
+		if block {
+			close(claimStarted)
+			<-releaseClaim
+		}
+	}
+	m.runBackground = func(work func()) {
+		go work()
+		select {
+		case <-claimStarted:
+		case <-time.After(time.Second):
+			t.Fatal("claim reconciliation did not begin")
+		}
+	}
+
+	if err := m.ReconcileBackground(context.Background()); err != nil {
+		close(releaseClaim)
+		t.Fatalf("ReconcileBackground(): %v", err)
+	}
+	close(releaseClaim)
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), time.Second)
+	defer cancelWait()
+	if err := m.WaitBackgroundWorkers(waitCtx); err != nil {
+		t.Fatalf("WaitBackgroundWorkers(): %v", err)
+	}
+	if len(launcher.checks) != 1 || !launcher.checks[0].ReconnectOnly {
+		t.Fatalf("pending delivered chat reconnects = %+v, want health check while claim lookup is blocked", launcher.checks)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != rec.ID {
+		t.Fatalf("async claim chat pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
 func TestStartupHealthPendingDeliveredTrackerChatMissingHostSettlesClaim(t *testing.T) {
 	m, st, _, _ := newManager()
 	launcher := &healthCheckLauncher{err: ports.ErrChatHostNotRunning}
@@ -228,6 +284,47 @@ func TestStartupHealthPendingDeliveredTrackerChatMissingHostSettlesClaim(t *test
 	}
 	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != rec.ID {
 		t.Fatalf("missing-host claim pending=%q handled=%q", st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+}
+
+func TestStartupHealthMissingTrackerChatSettlementFailureRemainsResumable(t *testing.T) {
+	m, st, _, ws := newManager()
+	commitErr := errors.New("commit stopped claim")
+	launcher := &healthCheckLauncher{err: ports.ErrChatHostNotRunning}
+	m.chat = launcher
+	m.runBackground = func(work func()) { work() }
+	rec := startupChatRecord()
+	rec.ID = "mer-chat-intake-missing-host-retry"
+	rec.IssueID = "github:acme/mer#462"
+	rec.Metadata.ControllerGeneration = "controller-462"
+	st.sessions[rec.ID] = rec
+	key := "mer\x00" + string(rec.IssueID)
+	st.trackerIntakePending[key] = rec.ID
+	st.trackerIntakeRecovery[rec.ID] = domain.TrackerIntakeRecoveryReservation{
+		Branch: rec.Metadata.Branch, WorkspacePath: rec.Metadata.WorkspacePath,
+		WorkspaceRepoPath: rec.Metadata.WorkspaceRepoPath, ControllerPossible: true, DeliveryPossible: true,
+	}
+	st.trackerIntakeCommitStoppedErr = commitErr
+
+	if err := m.checkSessionHealth(context.Background(), rec); !errors.Is(err, commitErr) {
+		t.Fatalf("checkSessionHealth() error = %v, want atomic settlement failure", err)
+	}
+	if got := st.sessions[rec.ID]; got.IsTerminated || got.Activity.State != domain.ActivityExited {
+		t.Fatalf("failed settlement changed stopped resumable session: %+v", got)
+	}
+	if got := st.trackerIntakeRecovery[rec.ID]; got.CapacityReleased {
+		t.Fatalf("failed atomic settlement partially released capacity: %+v", got)
+	}
+	if st.trackerIntakePending[key] != rec.ID || ws.destroyed != 0 {
+		t.Fatalf("failed settlement pending=%q workspace destroys=%d", st.trackerIntakePending[key], ws.destroyed)
+	}
+
+	st.trackerIntakeCommitStoppedErr = nil
+	if err := m.ReconcileBackground(context.Background()); err != nil {
+		t.Fatalf("ReconcileBackground() retry: %v", err)
+	}
+	if st.trackerIntakePending[key] != "" || st.trackerIntakeHandled[key] != rec.ID || ws.destroyed != 0 {
+		t.Fatalf("retried settlement pending=%q handled=%q workspace destroys=%d", st.trackerIntakePending[key], st.trackerIntakeHandled[key], ws.destroyed)
 	}
 }
 

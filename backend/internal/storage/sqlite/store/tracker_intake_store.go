@@ -113,6 +113,36 @@ func (s *Store) CommitTrackerIntakeSession(ctx context.Context, id domain.Sessio
 	return s.commitTrackerIntakeSessionLocked(ctx, s.qw, id, handledAt)
 }
 
+// CommitStoppedTrackerIntakeSession atomically preserves a delivered item's
+// no-replay fence and releases concurrency after lifecycle confirmed its owner
+// absent. Keeping both facts in one write prevents restart recovery from
+// mistaking a half-settled, resumable Chat for disposable interrupted work.
+func (s *Store) CommitStoppedTrackerIntakeSession(ctx context.Context, id domain.SessionID, handledAt time.Time) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.CommitStoppedTrackerIntakeSession(ctx, gen.CommitStoppedTrackerIntakeSessionParams{
+		RecordedAt: handledAt,
+		SessionID:  string(id),
+	})
+	if err != nil {
+		return fmt.Errorf("commit stopped tracker intake session %s: %w", id, err)
+	}
+	if rows == 1 {
+		return nil
+	}
+	claim, err := s.qw.GetTrackerIntakeClaimBySession(ctx, string(id))
+	if err == nil && claim.State == "handled" {
+		return nil
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("commit stopped tracker intake session %s: claim is missing", id)
+	}
+	if err != nil {
+		return fmt.Errorf("commit stopped tracker intake session %s: reload claim: %w", id, err)
+	}
+	return fmt.Errorf("commit stopped tracker intake session %s: claim state is %q", id, claim.State)
+}
+
 func (s *Store) commitTrackerIntakeSessionLocked(ctx context.Context, q *gen.Queries, id domain.SessionID, handledAt time.Time) error {
 	rows, err := q.CommitTrackerIntakeSession(ctx, gen.CommitTrackerIntakeSessionParams{
 		RecordedAt: handledAt,
@@ -375,6 +405,10 @@ func (s *Store) ListTrackerIntakeHandled(ctx context.Context, projectID domain.P
 	}
 	out := make([]domain.TrackerIntakeHandledRecord, 0, len(rows))
 	for _, row := range rows {
+		var recovery domain.TrackerIntakeRecoveryReservation
+		if err := json.Unmarshal([]byte(row.RecoveryState), &recovery); err != nil {
+			return nil, fmt.Errorf("list tracker intake handled for %s: decode recovery for %s: %w", projectID, row.SessionID, err)
+		}
 		issueID := domain.IssueID(row.IssueID)
 		if projectFound {
 			if canonical, resolved := trackerref.Resolve(issueID, project); resolved {
@@ -382,10 +416,11 @@ func (s *Store) ListTrackerIntakeHandled(ctx context.Context, projectID domain.P
 			}
 		}
 		out = append(out, domain.TrackerIntakeHandledRecord{
-			ProjectID: domain.ProjectID(row.ProjectID),
-			IssueID:   issueID,
-			SessionID: domain.SessionID(row.SessionID),
-			HandledAt: row.RecordedAt,
+			ProjectID:        domain.ProjectID(row.ProjectID),
+			IssueID:          issueID,
+			SessionID:        domain.SessionID(row.SessionID),
+			HandledAt:        row.RecordedAt,
+			CapacityReleased: recovery.CapacityReleased,
 		})
 	}
 	return out, nil

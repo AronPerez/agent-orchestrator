@@ -124,10 +124,7 @@ func (m *Manager) settleMissingTrackerIntakeChatHost(ctx context.Context, rec do
 	if err := m.recordAgentExited(ctx, rec); err != nil {
 		return err
 	}
-	if err := m.markTrackerIntakeCapacityReleased(ctx, rec.ID); err != nil {
-		return fmt.Errorf("check session %s: release missing tracker intake chat capacity: %w", rec.ID, err)
-	}
-	if err := m.store.CommitTrackerIntakeSession(ctx, rec.ID, m.clock()); err != nil {
+	if err := m.store.CommitStoppedTrackerIntakeSession(ctx, rec.ID, m.clock()); err != nil {
 		return fmt.Errorf("check session %s: preserve missing tracker intake chat claim: %w", rec.ID, err)
 	}
 	return nil

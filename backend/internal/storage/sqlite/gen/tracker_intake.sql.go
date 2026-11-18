@@ -12,6 +12,27 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
+const commitStoppedTrackerIntakeSession = `-- name: CommitStoppedTrackerIntakeSession :execrows
+UPDATE tracker_intake_handled
+SET state = 'handled',
+    recovery_state = json_set(recovery_state, '$.capacityReleased', json('true')),
+    recorded_at = ?
+WHERE session_id = ? AND state = 'pending'
+`
+
+type CommitStoppedTrackerIntakeSessionParams struct {
+	RecordedAt time.Time
+	SessionID  string
+}
+
+func (q *Queries) CommitStoppedTrackerIntakeSession(ctx context.Context, arg CommitStoppedTrackerIntakeSessionParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, commitStoppedTrackerIntakeSession, arg.RecordedAt, arg.SessionID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const commitTrackerIntakeSession = `-- name: CommitTrackerIntakeSession :execrows
 UPDATE tracker_intake_handled
 SET state = 'handled', recorded_at = ?
@@ -44,6 +65,7 @@ FROM (
           SELECT 1
           FROM tracker_intake_handled AS released_claim
           WHERE released_claim.session_id = sessions.id
+            AND sessions.activity_state IN ('', 'exited')
             AND COALESCE(json_extract(released_claim.recovery_state, '$.capacityReleased'), 0) = 1
       )
     UNION
@@ -327,17 +349,18 @@ func (q *Queries) ListTrackerIntakeClaims(ctx context.Context, projectID string)
 }
 
 const listTrackerIntakeHandled = `-- name: ListTrackerIntakeHandled :many
-SELECT project_id, issue_id, session_id, recorded_at
+SELECT project_id, issue_id, session_id, recovery_state, recorded_at
 FROM tracker_intake_handled
 WHERE project_id = ? AND state = 'handled'
 ORDER BY recorded_at, issue_id
 `
 
 type ListTrackerIntakeHandledRow struct {
-	ProjectID  string
-	IssueID    string
-	SessionID  string
-	RecordedAt time.Time
+	ProjectID     string
+	IssueID       string
+	SessionID     string
+	RecoveryState string
+	RecordedAt    time.Time
 }
 
 func (q *Queries) ListTrackerIntakeHandled(ctx context.Context, projectID string) ([]ListTrackerIntakeHandledRow, error) {
@@ -353,6 +376,7 @@ func (q *Queries) ListTrackerIntakeHandled(ctx context.Context, projectID string
 			&i.ProjectID,
 			&i.IssueID,
 			&i.SessionID,
+			&i.RecoveryState,
 			&i.RecordedAt,
 		); err != nil {
 			return nil, err

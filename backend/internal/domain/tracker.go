@@ -184,10 +184,11 @@ func (c TrackerIntakeConfig) Validate() error {
 // tracker item. It survives session termination and deletion so an open issue
 // is not re-spawned forever. IssueID includes the provider and native identity.
 type TrackerIntakeHandledRecord struct {
-	ProjectID ProjectID
-	IssueID   IssueID
-	SessionID SessionID
-	HandledAt time.Time
+	ProjectID        ProjectID
+	IssueID          IssueID
+	SessionID        SessionID
+	HandledAt        time.Time
+	CapacityReleased bool
 }
 
 // TrackerIntakeRecoveryReservation is the durable fence written before an

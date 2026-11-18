@@ -434,7 +434,7 @@ func TestIntakeSessionStateExcludesTerminatedAndOtherProjectSessions(t *testing.
 		{ID: "demo-2", ProjectID: "demo", IssueID: "github:acme/demo#12"},
 		{ID: "other-1", ProjectID: "other", IssueID: "github:acme/demo#13"},
 	}
-	seen, active := intakeSessionState(sessions, nil, "demo")
+	seen, active := intakeSessionState(sessions, nil, nil, "demo")
 	if !seen["github:acme/demo#12"] {
 		t.Fatal("issue with a live session alongside a terminated one should still be seen")
 	}
@@ -447,9 +447,42 @@ func TestIntakeSessionStateIgnoresOnlyTerminatedSession(t *testing.T) {
 	sessions := []domain.SessionRecord{
 		{ID: "demo-1", ProjectID: "demo", IssueID: "github:acme/demo#12", IsTerminated: true},
 	}
-	seen, active := intakeSessionState(sessions, nil, "demo")
+	seen, active := intakeSessionState(sessions, nil, nil, "demo")
 	if seen["github:acme/demo#12"] || active != 0 {
 		t.Fatalf("state = (%+v, %d), want no live intake sessions", seen, active)
+	}
+}
+
+func TestPollStartsAfterReleasedHandledSessionStops(t *testing.T) {
+	config := domain.TrackerIntakeConfig{
+		Enabled: true, Assignee: "alice",
+		Limits: domain.AutomatedSessionLimits{MaxConcurrent: 1, MaxStartsPerPass: 1},
+	}
+	store := &fakeStore{
+		projects: []domain.ProjectRecord{{
+			ID: "demo", RepoOriginURL: "https://github.com/acme/demo.git", Config: domain.ProjectConfig{TrackerIntake: config},
+		}},
+		sessions: []domain.SessionRecord{{
+			ID: "demo-1", ProjectID: "demo", IssueID: "github:acme/demo#1",
+			Activity: domain.Activity{State: domain.ActivityExited},
+		}},
+		handled: map[domain.ProjectID][]domain.TrackerIntakeHandledRecord{
+			"demo": {{
+				ProjectID: "demo", IssueID: "github:acme/demo#1", SessionID: "demo-1", CapacityReleased: true,
+			}},
+		},
+	}
+	tracker := &fakeTracker{issues: []domain.Issue{
+		{ID: domain.TrackerID{Provider: domain.TrackerProviderGitHub, Native: "acme/demo#1"}, State: domain.IssueOpen, Assignees: []string{"alice"}},
+		{ID: domain.TrackerID{Provider: domain.TrackerProviderGitHub, Native: "acme/demo#2"}, State: domain.IssueOpen, Assignees: []string{"alice"}},
+	}}
+	spawner := &fakeSpawner{}
+
+	if err := New(singleResolver(tracker), store, spawner, Config{Logger: discardLogger()}).Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(spawner.calls) != 1 || spawner.calls[0].IssueID != "github:acme/demo#2" {
+		t.Fatalf("spawn calls = %+v, want unrelated issue after stopped handled owner", spawner.calls)
 	}
 }
 

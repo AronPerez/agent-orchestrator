@@ -319,7 +319,7 @@ func TestListPendingTrackerIntakeClaimsIncludesMissingAndTerminatedOwners(t *tes
 	}
 }
 
-func TestHandledTrackerIntakeClaimWithReleasedCapacityDoesNotConsumeSlot(t *testing.T) {
+func TestStoppedHandledTrackerIntakeClaimReleasesCapacityUntilRestored(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 	seedProject(t, store, "demo")
@@ -331,19 +331,41 @@ func TestHandledTrackerIntakeClaimWithReleasedCapacityDoesNotConsumeSlot(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
+	created.Activity.State = domain.ActivityExited
+	if err := store.UpdateSession(ctx, created); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.ReserveTrackerIntakeRecovery(ctx, created.ID, domain.TrackerIntakeRecoveryReservation{
-		DeliveryPossible: true, CapacityReleased: true,
+		DeliveryPossible: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CommitTrackerIntakeSession(ctx, created.ID, time.Now()); err != nil {
+	if err := store.CommitStoppedTrackerIntakeSession(ctx, created.ID, time.Now()); err != nil {
 		t.Fatal(err)
+	}
+	handled, err := store.ListTrackerIntakeHandled(ctx, "demo")
+	if err != nil || len(handled) != 1 || !handled[0].CapacityReleased {
+		t.Fatalf("stopped handled claim = %+v, %v", handled, err)
 	}
 
 	second := sampleRecord("demo")
 	second.IssueID = "github:acme/demo#321"
-	if _, err := store.CreateTrackerIntakeSession(ctx, second, limits); err != nil {
+	second, err = store.CreateTrackerIntakeSession(ctx, second, limits)
+	if err != nil {
 		t.Fatalf("CreateTrackerIntakeSession(second) error = %v, want released handled capacity", err)
+	}
+	second.IsTerminated = true
+	if err := store.UpdateSession(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	created.Activity.State = domain.ActivityIdle
+	if err := store.UpdateSession(ctx, created); err != nil {
+		t.Fatal(err)
+	}
+	third := sampleRecord("demo")
+	third.IssueID = "github:acme/demo#322"
+	if _, err := store.CreateTrackerIntakeSession(ctx, third, limits); !errors.Is(err, ports.ErrAutomatedSessionCapacity) {
+		t.Fatalf("CreateTrackerIntakeSession(third) error = %v, want restored handled worker to consume capacity", err)
 	}
 }
 

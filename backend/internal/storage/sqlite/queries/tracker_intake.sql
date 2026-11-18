@@ -8,7 +8,7 @@ WHERE tracker_intake_handled.state = 'pending'
   AND tracker_intake_handled.session_id = excluded.session_id;
 
 -- name: ListTrackerIntakeHandled :many
-SELECT project_id, issue_id, session_id, recorded_at
+SELECT project_id, issue_id, session_id, recovery_state, recorded_at
 FROM tracker_intake_handled
 WHERE project_id = ? AND state = 'handled'
 ORDER BY recorded_at, issue_id;
@@ -54,6 +54,7 @@ FROM (
           SELECT 1
           FROM tracker_intake_handled AS released_claim
           WHERE released_claim.session_id = sessions.id
+            AND sessions.activity_state IN ('', 'exited')
             AND COALESCE(json_extract(released_claim.recovery_state, '$.capacityReleased'), 0) = 1
       )
     UNION
@@ -89,6 +90,13 @@ VALUES (?, ?, ?, 'pending', ?);
 -- name: CommitTrackerIntakeSession :execrows
 UPDATE tracker_intake_handled
 SET state = 'handled', recorded_at = ?
+WHERE session_id = ? AND state = 'pending';
+
+-- name: CommitStoppedTrackerIntakeSession :execrows
+UPDATE tracker_intake_handled
+SET state = 'handled',
+    recovery_state = json_set(recovery_state, '$.capacityReleased', json('true')),
+    recorded_at = ?
 WHERE session_id = ? AND state = 'pending';
 
 -- name: DeletePendingTrackerIntakeClaim :execrows

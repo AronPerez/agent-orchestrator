@@ -219,19 +219,19 @@ func (o *Observer) pollProject(ctx context.Context, project domain.ProjectRecord
 		o.logger.Error("tracker intake: list pending claims failed", "project", project.ID, "err", err)
 		return true
 	}
-	seen, active := intakeSessionState(sessions, pending, projectID)
 	handled, err := o.store.ListTrackerIntakeHandled(ctx, projectID)
 	if err != nil {
 		o.logger.Error("tracker intake: list handled items failed", "project", project.ID, "err", err)
 		return true
 	}
-	for _, record := range handled {
-		issueID := record.IssueID
+	for i := range handled {
+		issueID := handled[i].IssueID
 		if canonical, ok := trackerref.Resolve(issueID, project); ok {
 			issueID = canonical
 		}
-		seen[issueID] = true
+		handled[i].IssueID = issueID
 	}
+	seen, active := intakeSessionState(sessions, pending, handled, projectID)
 	remaining := cfg.Limits.RemainingStarts(active, 0)
 	if remaining == 0 {
 		o.logger.Debug("tracker intake: project at automated session capacity", "project", project.ID, "active", active, "maxConcurrent", cfg.Limits.MaxConcurrent)
@@ -346,7 +346,12 @@ func containsFold(values []string, needle string) bool {
 // ledger. A released claim remains seen so its issue cannot replay, but no
 // longer consumes concurrency while workspace cleanup finishes. Creation
 // provenance is optional telemetry, so rows without a claim stay conservative.
-func intakeSessionState(sessions []domain.SessionRecord, pending []domain.TrackerIntakePendingClaim, projectID domain.ProjectID) (map[domain.IssueID]bool, int) {
+func intakeSessionState(
+	sessions []domain.SessionRecord,
+	pending []domain.TrackerIntakePendingClaim,
+	handled []domain.TrackerIntakeHandledRecord,
+	projectID domain.ProjectID,
+) (map[domain.IssueID]bool, int) {
 	seen := make(map[domain.IssueID]bool)
 	active := make(map[domain.SessionID]struct{})
 	released := make(map[domain.SessionID]struct{})
@@ -361,14 +366,24 @@ func intakeSessionState(sessions []domain.SessionRecord, pending []domain.Tracke
 		}
 		active[claim.SessionID] = struct{}{}
 	}
+	for _, claim := range handled {
+		if claim.ProjectID != projectID {
+			continue
+		}
+		seen[claim.IssueID] = true
+		if claim.CapacityReleased {
+			released[claim.SessionID] = struct{}{}
+		}
+	}
 	for _, sess := range sessions {
 		if sess.ProjectID != projectID || sess.IssueID == "" || sess.IsTerminated {
 			continue
 		}
 		seen[sess.IssueID] = true
-		if _, ok := released[sess.ID]; !ok {
-			active[sess.ID] = struct{}{}
+		if _, ok := released[sess.ID]; ok && (sess.Activity.State == "" || sess.Activity.State == domain.ActivityExited) {
+			continue
 		}
+		active[sess.ID] = struct{}{}
 	}
 	return seen, len(active)
 }
