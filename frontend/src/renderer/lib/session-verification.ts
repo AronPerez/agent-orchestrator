@@ -51,7 +51,7 @@ export function sessionVerificationPresentation(session: WorkspaceSession): Sess
 	);
 	const snapshotIsCurrent = Boolean(
 		verification?.workspaceRevision &&
-		session.branchState?.head === verification.workspaceRevision &&
+		session.branchState?.workspaceRevision === verification.workspaceRevision &&
 		Number.isFinite(interactionAt) &&
 		Number.isFinite(currentInteractionAt) &&
 		currentInteractionAt <= interactionAt &&

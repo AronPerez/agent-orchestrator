@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/workspacesnapshot"
 )
 
 type branchStateStore struct {
@@ -48,7 +49,17 @@ func commitFile(t *testing.T, repo, name string) {
 func headed(t *testing.T, dir string, want domain.SessionBranchState) domain.SessionBranchState {
 	t.Helper()
 	want.Head = strings.TrimSpace(runGit(t, dir, "rev-parse", "HEAD"))
+	want.WorkspaceRevision = workspaceRevision(t, dir, nil)
 	return want
+}
+
+func workspaceRevision(t *testing.T, root string, rows []domain.SessionWorktreeRecord) string {
+	t.Helper()
+	revision, err := workspacesnapshot.Capture(context.Background(), root, rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return revision
 }
 
 func TestReconcileSessionBranchStateTracksCommitsAndPushes(t *testing.T) {
@@ -149,19 +160,48 @@ func TestReconcileBranchStatesRunsGitOnlyWhenTipsMove(t *testing.T) {
 
 	// One for-each-ref for the shared repository, then one commit count per
 	// session; neither branch is on the remote, so no unpushed count.
-	if got := pass(); got != 3 {
-		t.Fatalf("first pass ran %d git processes, want 3", got)
+	if got := pass(); got != 7 {
+		t.Fatalf("first pass ran %d git processes, want 7", got)
 	}
-	if got := pass(); got != 1 {
-		t.Fatalf("idle pass ran %d git processes, want only the for-each-ref", got)
+	if got := pass(); got != 5 {
+		t.Fatalf("idle pass ran %d git processes, want snapshots and one for-each-ref", got)
 	}
 	commitFile(t, worktrees["s1"], "more.go")
-	if got := pass(); got != 2 {
-		t.Fatalf("pass after one commit ran %d git processes, want 2", got)
+	if got := pass(); got != 6 {
+		t.Fatalf("pass after one commit ran %d git processes, want 6", got)
 	}
 	want := headed(t, worktrees["s1"], domain.SessionBranchState{Branch: "ao/s1", Commits: 2, Unpushed: 2, Base: "main", BaseRef: "origin/main"})
 	if got := st.sessions["s1"].BranchState; got == nil || *got != want {
 		t.Fatalf("s1 branch state = %+v, want %+v", got, want)
+	}
+}
+
+func TestReconcileWorkspaceBranchStateTracksAllReposAndFailsClosedWhenDirty(t *testing.T) {
+	root := newWorkspaceRepo(t)
+	child := newWorkspaceRepo(t)
+	st := &branchStateStore{fakeStore: newFakeStore()}
+	st.projects["p"] = domain.ProjectRecord{ID: "p", Kind: domain.ProjectKindWorkspace, Path: root}
+	st.sessions["s1"] = domain.SessionRecord{ID: "s1", ProjectID: "p", Metadata: domain.SessionMetadata{WorkspacePath: root}}
+	rows := []domain.SessionWorktreeRecord{
+		{SessionID: "s1", RepoName: domain.RootWorkspaceRepoName, WorktreePath: root},
+		{SessionID: "s1", RepoName: "child", WorktreePath: child},
+	}
+	st.worktrees["s1"] = rows
+
+	if err := (&Service{store: st}).ReconcileSessionBranchState(context.Background(), "s1"); err != nil {
+		t.Fatal(err)
+	}
+	want := workspaceRevision(t, root, rows)
+	if got := st.sessions["s1"].BranchState; got == nil || got.WorkspaceRevision != want || got.Head != "" {
+		t.Fatalf("workspace branch state = %+v, want revision %q", got, want)
+	}
+
+	writeWorkspaceFile(t, child, "dirty.txt", "dirty\n")
+	if err := (&Service{store: st}).ReconcileSessionBranchState(context.Background(), "s1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := st.sessions["s1"].BranchState; got == nil || got.WorkspaceRevision != "" {
+		t.Fatalf("dirty workspace branch state = %+v, want cleared revision", got)
 	}
 }
 

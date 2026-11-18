@@ -242,6 +242,15 @@ SELECT last_nudge_signature FROM pr WHERE url = ?;
 -- name: UpdatePRLastNudgeSignature :exec
 UPDATE pr SET last_nudge_signature = ? WHERE url = ?;
 
+-- name: UpdatePRTamperAssessmentIfRevision :execrows
+-- Narrow compare-and-update for local retry backfills. A provider observation
+-- may update any other PR fact while the filesystem assessment runs; only the
+-- exact base/head pair may receive this evidence.
+UPDATE pr SET tamper_assessment_json = sqlc.arg(tamper_assessment_json)
+WHERE url = sqlc.arg(url)
+  AND base_sha = sqlc.arg(base_sha)
+  AND head_sha = sqlc.arg(head_sha);
+
 -- name: SetPRAutoInjectCIBySession :exec
 UPDATE pr SET auto_inject_ci = ? WHERE session_id = ?;
 

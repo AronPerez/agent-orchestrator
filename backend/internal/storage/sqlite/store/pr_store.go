@@ -51,6 +51,24 @@ func (s *Store) WriteSCMObservation(ctx context.Context, pr domain.PullRequest, 
 	return s.writePR(ctx, pr, checks, reviews, threads, comments, reviewMode, false)
 }
 
+// UpdatePRTamperAssessment records only head-bound local evidence. The
+// base/head guard prevents a retry computed from a stale PR snapshot from
+// replaying any provider-owned fields or attaching to a newer revision.
+func (s *Store) UpdatePRTamperAssessment(ctx context.Context, prURL, baseSHA, headSHA string, assessment domain.PRTamperAssessment) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.UpdatePRTamperAssessmentIfRevision(ctx, gen.UpdatePRTamperAssessmentIfRevisionParams{
+		TamperAssessmentJson: encodePRTamperAssessment(&assessment),
+		URL:                  prURL,
+		BaseSha:              baseSHA,
+		HeadSha:              headSHA,
+	})
+	if err != nil {
+		return false, fmt.Errorf("update PR tamper assessment %s: %w", prURL, err)
+	}
+	return rows == 1, nil
+}
+
 // MarkPRMerged records the authoritative success returned by the provider's
 // merge endpoint without replacing concurrently refreshed CI or review facts.
 // The pr_cdc_update trigger emits the corresponding pr_updated event.

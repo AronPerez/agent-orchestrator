@@ -1264,6 +1264,36 @@ func (q *Queries) UpdatePRLastNudgeSignature(ctx context.Context, arg UpdatePRLa
 	return err
 }
 
+const updatePRTamperAssessmentIfRevision = `-- name: UpdatePRTamperAssessmentIfRevision :execrows
+UPDATE pr SET tamper_assessment_json = ?1
+WHERE url = ?2
+  AND base_sha = ?3
+  AND head_sha = ?4
+`
+
+type UpdatePRTamperAssessmentIfRevisionParams struct {
+	TamperAssessmentJson string
+	URL                  string
+	BaseSha              string
+	HeadSha              string
+}
+
+// Narrow compare-and-update for local retry backfills. A provider observation
+// may update any other PR fact while the filesystem assessment runs; only the
+// exact base/head pair may receive this evidence.
+func (q *Queries) UpdatePRTamperAssessmentIfRevision(ctx context.Context, arg UpdatePRTamperAssessmentIfRevisionParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updatePRTamperAssessmentIfRevision,
+		arg.TamperAssessmentJson,
+		arg.URL,
+		arg.BaseSha,
+		arg.HeadSha,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const upgradeWorkerPRUsageIdentity = `-- name: UpgradeWorkerPRUsageIdentity :exec
 UPDATE OR IGNORE usage_pr_measurement
 SET pr_key = (SELECT pr.provider || ':' || pr.host || ':' || pr.provider_id FROM pr WHERE pr.url = ?1)

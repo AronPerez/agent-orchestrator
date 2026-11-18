@@ -99,7 +99,7 @@ describe("sharing from a board card", () => {
 			onOpenArtifact,
 			session: {
 				...session,
-				branchState: { commits: 1, unpushed: 0, behind: 0, head: "head-1" },
+				branchState: { commits: 1, unpushed: 0, behind: 0, head: "head-1", workspaceRevision: "head-1" },
 				lastInteractionAt: "2026-11-17T11:59:00Z",
 				latestDoneReport: {
 					id: "done-1",

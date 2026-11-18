@@ -25212,6 +25212,8 @@ components:
           type: string
         unpushed:
           type: integer
+        workspaceRevision:
+          type: string
       required:
       - commits
       - unpushed

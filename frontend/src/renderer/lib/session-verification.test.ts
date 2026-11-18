@@ -59,14 +59,14 @@ describe("sessionVerificationPresentation", () => {
 			state: "unverified", reasons: [],
 		});
 		expect(sessionVerificationPresentation(session({
-			branchState: { commits: 1, unpushed: 0, behind: 0, head: "head-1" },
+			branchState: { commits: 1, unpushed: 0, behind: 0, head: "head-1", workspaceRevision: "snapshot-1" },
 			lastInteractionAt: "2026-11-17T11:59:00Z",
 			latestDoneReport: {
 				id: "done-1",
 				verification: {
 					state: "passed", evidence: "verification/done-1.txt",
 					startedAt: "2026-11-17T12:00:00Z", completedAt: "2026-11-17T12:01:00Z",
-					workspaceRevision: "head-1", interactionAt: "2026-11-17T11:59:00Z",
+					workspaceRevision: "snapshot-1", interactionAt: "2026-11-17T11:59:00Z",
 				},
 			},
 		}))).toEqual({ state: "verified", evidence: "verification/done-1.txt", reasons: [] });
@@ -83,14 +83,14 @@ describe("sessionVerificationPresentation", () => {
 
 	it("invalidates a passing verification when the branch head changes", () => {
 		expect(sessionVerificationPresentation(session({
-			branchState: { commits: 2, unpushed: 1, behind: 0, head: "head-2" },
+			branchState: { commits: 2, unpushed: 1, behind: 0, head: "head-2", workspaceRevision: "snapshot-2" },
 			lastInteractionAt: "2026-11-17T11:59:00Z",
 			latestDoneReport: {
 				id: "done-1",
 				verification: {
 					state: "passed", evidence: "verification/done-1.txt",
 					startedAt: "2026-11-17T12:00:00Z", completedAt: "2026-11-17T12:01:00Z",
-					workspaceRevision: "head-1", interactionAt: "2026-11-17T11:59:00Z",
+					workspaceRevision: "snapshot-1", interactionAt: "2026-11-17T11:59:00Z",
 				},
 			},
 		}))).toEqual({ state: "unverified", evidence: "verification/done-1.txt", reasons: [] });
@@ -100,10 +100,10 @@ describe("sessionVerificationPresentation", () => {
 		const verified = {
 			state: "passed" as const, evidence: "verification/done-1.txt",
 			startedAt: "2026-11-17T12:00:00Z", completedAt: "2026-11-17T12:01:00Z",
-			workspaceRevision: "head-1", interactionAt: "2026-11-17T11:59:00Z",
+			workspaceRevision: "snapshot-1", interactionAt: "2026-11-17T11:59:00Z",
 		};
 		const base = {
-			branchState: { commits: 1, unpushed: 0, behind: 0, head: "head-1" },
+			branchState: { commits: 1, unpushed: 0, behind: 0, head: "head-1", workspaceRevision: "snapshot-1" },
 			latestDoneReport: { id: "done-1", verification: verified },
 		};
 		expect(sessionVerificationPresentation(session({
@@ -113,6 +113,20 @@ describe("sessionVerificationPresentation", () => {
 			...base, lastInteractionAt: "2026-11-17T11:59:00Z",
 			latestDoneReport: { ...base.latestDoneReport, superseded: true },
 		}))).toEqual({ state: "unverified", evidence: "verification/done-1.txt", reasons: [] });
+	});
+
+	it("verifies a clean multi-repository workspace without a root branch head", () => {
+		expect(sessionVerificationPresentation(session({
+			branchState: { commits: 0, unpushed: 0, behind: 0, workspaceRevision: "workspace-snapshot" },
+			lastInteractionAt: "2026-11-17T11:59:00Z",
+			latestDoneReport: {
+				id: "done-1",
+				verification: {
+					state: "passed", evidence: "verification/done-1.txt", startedAt: "2026-11-17T12:00:00Z", completedAt: "2026-11-17T12:01:00Z",
+					workspaceRevision: "workspace-snapshot", interactionAt: "2026-11-17T11:59:00Z",
+				},
+			},
+		}))).toEqual({ state: "verified", evidence: "verification/done-1.txt", reasons: [] });
 	});
 
 	it("does not flag a clean tamper assessment", () => {

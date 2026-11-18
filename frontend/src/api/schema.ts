@@ -8810,6 +8810,7 @@ export interface components {
             remoteBranch?: string;
             remoteHead?: string;
             unpushed: number;
+            workspaceRevision?: string;
         };
         SessionCoordinationResponse: {
             events: components["schemas"]["CoordinationEvent"][];

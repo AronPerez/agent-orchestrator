@@ -98,6 +98,7 @@ type Store interface {
 	// details were read at; ok is false when they are due a read.
 	PRDetailsUpdatedAt(ctx context.Context, prURL string) (time.Time, bool, error)
 	WriteSCMObservation(ctx context.Context, pr domain.PullRequest, checks []domain.PullRequestCheck, reviews []domain.PullRequestReview, threads []domain.PullRequestReviewThread, comments []domain.PullRequestComment, reviewMode ports.ReviewWriteMode) error
+	UpdatePRTamperAssessment(ctx context.Context, prURL, baseSHA, headSHA string, assessment domain.PRTamperAssessment) (bool, error)
 	RecordRepositoryRename(ctx context.Context, r domain.RepositoryRename) error
 }
 
@@ -348,19 +349,23 @@ func (o *Observer) Start(ctx context.Context) <-chan struct{} {
 type subject struct {
 	session domain.SessionRecord
 	repo    ports.SCMRepo
-	branch  string
-	known   domain.PullRequest
-	hasPR   bool
+	// workspacePath is the local checkout for repo. Workspace projects must
+	// assess a child PR against its child worktree, not the root repository.
+	workspacePath string
+	branch        string
+	known         domain.PullRequest
+	hasPR         bool
 }
 
 // Head names are scoped to repo's provider and host. Each base has a separate
 // set because overlapping workspace checkouts can have different push targets.
 type sessionRepo struct {
-	session   domain.SessionRecord
-	repo      ports.SCMRepo
-	headNames map[string]struct{}
-	branch    string
-	workspace bool
+	session       domain.SessionRecord
+	repo          ports.SCMRepo
+	headNames     map[string]struct{}
+	branch        string
+	workspace     bool
+	workspacePath string
 }
 
 type repoGuardState struct {
@@ -715,7 +720,9 @@ func (o *Observer) Poll(ctx context.Context) (pollErr error) {
 		}
 		prepared := o.prepareForPersistence(obs, local, opts, now)
 		finalPR, finalChecks, finalReviews, finalThreads, finalComments := domainFromObservation(subj.session.ID, subj.session, prepared, local, opts, now)
-		tamper, tamperBackfilled := o.tamperAssessment(ctx, subj.session, finalPR, local, now)
+		tamperSession := subj.session
+		tamperSession.Metadata.WorkspaceRepoPath = subj.workspacePath
+		tamper, tamperBackfilled := o.tamperAssessment(ctx, tamperSession, finalPR, local, now)
 		finalPR.Tamper = tamper
 		if !prepared.Changed.Metadata && !prepared.Changed.CI && !prepared.Changed.Review {
 			// Details are left out of the hashes, and a provider reads them only
@@ -931,13 +938,15 @@ func (o *Observer) discoverSubjects(ctx context.Context) (map[string]*subject, [
 			}
 		}
 		repos := append([]ports.SCMRepo(nil), scanRepos[sess.ProjectID]...)
-		sessionRepos = append(sessionRepos, checkoutSessionRepos(sess, branch, proj.Kind.WithDefault() == domain.ProjectKindWorkspace, repos)...)
+		ownedSessionRepos := checkoutSessionRepos(sess, branch, proj.Kind.WithDefault() == domain.ProjectKindWorkspace, repos)
+		sessionRepos = append(sessionRepos, ownedSessionRepos...)
 		childRepos, err := o.workspaceSCMSessionRepos(ctx, proj, sess, branch)
 		if err != nil {
 			return nil, nil, err
 		}
 		for _, child := range childRepos {
 			sessionRepos = append(sessionRepos, child)
+			ownedSessionRepos = append(ownedSessionRepos, child)
 			repos = append(repos, child.repo)
 		}
 		if len(repos) == 0 {
@@ -962,7 +971,7 @@ func (o *Observer) discoverSubjects(ctx context.Context) (map[string]*subject, [
 				o.logger.Warn("scm observer: duplicate tracked PR subject skipped", "pr", key, "kept_session", existing.session.ID, "skipped_session", sess.ID)
 				continue
 			}
-			out[key] = &subject{session: sess, repo: prRepo, branch: branch, known: pr, hasPR: true}
+			out[key] = &subject{session: sess, repo: prRepo, workspacePath: localCheckoutPath(prRepo, ownedSessionRepos), branch: branch, known: pr, hasPR: true}
 		}
 	}
 	return out, sessionRepos, nil
@@ -1002,7 +1011,8 @@ func checkoutSessionRepos(sess domain.SessionRecord, branch string, workspace bo
 				byBase[key] = position
 				result = append(result, sessionRepo{
 					session: sess, repo: base, branch: branch, workspace: workspace,
-					headNames: make(map[string]struct{}),
+					workspacePath: firstNonEmpty(sess.Metadata.WorkspaceRepoPath, sess.Metadata.WorkspacePath),
+					headNames:     make(map[string]struct{}),
 				})
 			}
 			for _, destination := range checkout {
@@ -1024,7 +1034,7 @@ func (o *Observer) workspaceSCMSessionRepos(ctx context.Context, proj domain.Pro
 	if err != nil {
 		return nil, err
 	}
-	var checkouts [][]ports.SCMRepo
+	var result []sessionRepo
 	for _, child := range childRepos {
 		if strings.TrimSpace(child.RepoOriginURL) == "" {
 			continue
@@ -1035,9 +1045,29 @@ func (o *Observer) workspaceSCMSessionRepos(ctx context.Context, proj domain.Pro
 			continue
 		}
 		childPath := filepath.Join(proj.Path, filepath.FromSlash(child.RelativePath))
-		checkouts = append(checkouts, o.resolveScanRepos(ctx, domain.ProjectRecord{Path: childPath}, repo))
+		childCheckouts := checkoutSessionRepos(sess, branch, true, o.resolveScanRepos(ctx, domain.ProjectRecord{Path: childPath}, repo))
+		for i := range childCheckouts {
+			childCheckouts[i].workspacePath = filepath.Join(sess.Metadata.WorkspacePath, filepath.FromSlash(child.RelativePath))
+		}
+		result = append(result, childCheckouts...)
 	}
-	return checkoutSessionRepos(sess, branch, true, checkouts...), nil
+	return result, nil
+}
+
+func localCheckoutPath(repo ports.SCMRepo, candidates []sessionRepo) string {
+	name := strings.ToLower(repoFullName(repo))
+	for _, candidate := range candidates {
+		if !strings.EqualFold(candidate.repo.Provider, repo.Provider) || !strings.EqualFold(candidate.repo.Host, repo.Host) {
+			continue
+		}
+		if strings.EqualFold(repoFullName(candidate.repo), name) {
+			return candidate.workspacePath
+		}
+		if _, ok := candidate.headNames[name]; ok {
+			return candidate.workspacePath
+		}
+	}
+	return ""
 }
 
 func repoForTrackedPR(pr domain.PullRequest, repos []ports.SCMRepo) (ports.SCMRepo, bool) {
@@ -1339,11 +1369,12 @@ func (o *Observer) discoverNewPRs(ctx context.Context, sessionRepos []sessionRep
 				continue
 			}
 			subjects[keyForTrackedPR(known, repo)] = &subject{
-				session: sr.session,
-				repo:    repo,
-				branch:  sr.branch,
-				known:   known,
-				hasPR:   true,
+				session:       sr.session,
+				repo:          repo,
+				workspacePath: sr.workspacePath,
+				branch:        sr.branch,
+				known:         known,
+				hasPR:         true,
 			}
 		}
 	}
@@ -1956,18 +1987,19 @@ func (o *Observer) retryTamperAssessments(ctx context.Context, subjects map[stri
 			return
 		}
 		subj := subjects[key]
-		assessment, backfilled := o.tamperAssessment(ctx, subj.session, subj.known, subj.known, now)
+		tamperSession := subj.session
+		tamperSession.Metadata.WorkspaceRepoPath = subj.workspacePath
+		assessment, backfilled := o.tamperAssessment(ctx, tamperSession, subj.known, subj.known, now)
 		if !backfilled {
 			continue
 		}
-		updated := subj.known
-		updated.Tamper = assessment
-		if err := o.store.WriteSCMObservation(ctx, updated, nil, nil, nil, nil, ports.ReviewWritePreserve); err != nil {
-			o.scheduleTamperRetry(subj.session, updated, updated, now)
-			o.logger.Warn("scm observer: PR tamper retry write failed", "session", subj.session.ID, "pr", updated.URL, "err", err)
+		updated, err := o.store.UpdatePRTamperAssessment(ctx, subj.known.URL, subj.known.BaseSHA, subj.known.HeadSHA, *assessment)
+		if err != nil || !updated {
+			o.scheduleTamperRetry(tamperSession, subj.known, subj.known, now)
+			o.logger.Warn("scm observer: PR tamper retry write failed", "session", subj.session.ID, "pr", subj.known.URL, "updated", updated, "err", err)
 			continue
 		}
-		subj.known = updated
+		subj.known.Tamper = assessment
 	}
 }
 

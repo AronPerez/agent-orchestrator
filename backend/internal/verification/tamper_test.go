@@ -136,6 +136,29 @@ func TestAssessPullRequestTamperingTreatsTestRenameOutOfDiscoveryAsDeletion(t *t
 	}
 }
 
+func TestAssessPullRequestTamperingTreatsGoTestRenameInsideTestsDirectoryAsDeletion(t *testing.T) {
+	repo := t.TempDir()
+	runTestGit(t, repo, "init")
+	runTestGit(t, repo, "config", "user.name", "AO Test")
+	runTestGit(t, repo, "config", "user.email", "ao@example.test")
+	runTestGit(t, repo, "config", "commit.gpgsign", "false")
+	writeTestFile(t, repo, "tests/widget_test.go", "package tests\n\nfunc TestWidget(t *testing.T) {}\n")
+	runTestGit(t, repo, "add", ".")
+	runTestGit(t, repo, "commit", "-m", "base")
+	base := strings.TrimSpace(runTestGit(t, repo, "rev-parse", "HEAD"))
+	runTestGit(t, repo, "mv", "tests/widget_test.go", "tests/widget.go")
+	runTestGit(t, repo, "commit", "-m", "head")
+	head := strings.TrimSpace(runTestGit(t, repo, "rev-parse", "HEAD"))
+
+	assessment, err := AssessPullRequestTampering(context.Background(), repo, base, head, time.Unix(2, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assessment.TestFilesDeleted != 1 {
+		t.Fatalf("assessment = %+v, want renamed Go test counted as deleted", assessment)
+	}
+}
+
 func runTestGit(t *testing.T, repo string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", repo}, args...)...) //nolint:gosec // Test owns every argument.

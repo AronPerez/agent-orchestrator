@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/workspacesnapshot"
 )
 
 // branchStateWriter is the narrow store write for observed branch facts.
@@ -86,6 +87,25 @@ func (s *Service) reconcileBranchStates(ctx context.Context, writer branchStateW
 			project = projectLookup{rec: p, ok: ok}
 			projects[rec.ProjectID] = project
 		}
+		rows, rowsErr := s.store.ListSessionWorktrees(ctx, rec.ID)
+		workspaceRevision := ""
+		if rowsErr == nil && (project.rec.Kind.WithDefault() != domain.ProjectKindWorkspace || len(rows) > 0) {
+			workspaceRevision, _ = workspacesnapshot.Capture(ctx, rec.Metadata.WorkspacePath, rows)
+		}
+		state := domain.SessionBranchState{}
+		if rec.BranchState != nil {
+			state = *rec.BranchState
+		}
+		if state.WorkspaceRevision != workspaceRevision {
+			state.WorkspaceRevision = workspaceRevision
+			if _, err := writer.SetSessionBranchState(ctx, rec.ID, state); err != nil {
+				return err
+			}
+			rec.BranchState = &state
+		}
+		if rowsErr != nil {
+			return rowsErr
+		}
 		if project.ok && project.rec.Kind.WithDefault() == domain.ProjectKindWorkspace {
 			continue
 		}
@@ -149,6 +169,9 @@ func (s *Service) reconcileBranchTarget(ctx context.Context, writer branchStateW
 
 	root := rec.Metadata.WorkspacePath
 	state := domain.SessionBranchState{Branch: target.branch, Head: local}
+	if rec.BranchState != nil {
+		state.WorkspaceRevision = rec.BranchState.WorkspaceRevision
+	}
 	switch {
 	case base != "" && baseRef != "":
 		// One call counts both sides, so reading how far behind the base the

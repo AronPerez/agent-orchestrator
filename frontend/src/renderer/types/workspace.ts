@@ -139,6 +139,8 @@ export type SessionProvisionStep = {
 /** The daemon's observed branch facts. `unpushed` equals `commits` until the branch reaches its remote. */
 export type SessionBranchState = {
 	commits: number;
+	/** Exact clean committed state of every repository in the workspace. Empty while dirty or unobservable. */
+	workspaceRevision?: string;
 	remoteBranch?: string;
 	/** The commit the remote branch points at, as last read. */
 	remoteHead?: string;

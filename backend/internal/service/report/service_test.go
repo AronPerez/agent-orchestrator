@@ -24,6 +24,8 @@ type fakeStore struct {
 	reports         []domain.ReportRecord
 	byID            map[string]domain.ReportRecord
 	insertions      int
+	worktrees       []domain.SessionWorktreeRecord
+	worktreesErr    error
 }
 
 func (f *fakeStore) GetSession(context.Context, domain.SessionID) (domain.SessionRecord, bool, error) {
@@ -31,6 +33,9 @@ func (f *fakeStore) GetSession(context.Context, domain.SessionID) (domain.Sessio
 }
 func (f *fakeStore) GetProject(context.Context, string) (domain.ProjectRecord, bool, error) {
 	return f.project, f.projectOK, nil
+}
+func (f *fakeStore) ListSessionWorktrees(context.Context, domain.SessionID) ([]domain.SessionWorktreeRecord, error) {
+	return append([]domain.SessionWorktreeRecord(nil), f.worktrees...), f.worktreesErr
 }
 func (f *fakeStore) CreateReport(_ context.Context, r domain.ReportRecord) (domain.ReportRecord, error) {
 	f.created = r
@@ -148,6 +153,7 @@ func TestCreateDoneBindsPassingVerificationToRevisionAndInteraction(t *testing.T
 	verifier := &fakeVerifier{results: []verification.Result{{Passed: true, StartedAt: verifiedAt, CompletedAt: verifiedAt.Add(time.Second)}}, errs: []error{nil}}
 	st := &fakeStore{
 		ok: true, projectOK: true,
+		worktrees: []domain.SessionWorktreeRecord{{RepoName: "child", WorktreePath: "/work/ao/child"}},
 		session: domain.SessionRecord{
 			ID: "ao-7", ProjectID: "ao", Kind: domain.KindWorker,
 			Metadata: domain.SessionMetadata{WorkspacePath: "/work/ao", LatestInteractionAt: interactionAt},
@@ -157,9 +163,12 @@ func TestCreateDoneBindsPassingVerificationToRevisionAndInteraction(t *testing.T
 	svc := New(Deps{
 		Store: st, Verifier: verifier, EvidenceArtifacts: &fakeEvidenceArtifacts{}, DataDir: dataDir,
 		NewID: func() string { return "rpt_1" }, Now: func() time.Time { return verifiedAt },
-		WorkspaceRevision: func(_ context.Context, path string) (string, error) {
+		WorkspaceSnapshot: func(_ context.Context, path string, rows []domain.SessionWorktreeRecord) (string, error) {
 			if path != "/work/ao" {
 				t.Fatalf("workspace path = %q", path)
+			}
+			if len(rows) != 1 || rows[0].RepoName != "child" {
+				t.Fatalf("workspace rows = %+v", rows)
 			}
 			return "head-1", nil
 		},
@@ -170,6 +179,32 @@ func TestCreateDoneBindsPassingVerificationToRevisionAndInteraction(t *testing.T
 	}
 	if report.Verification == nil || report.Verification.WorkspaceRevision != "head-1" || !report.Verification.InteractionAt.Equal(interactionAt) {
 		t.Fatalf("verification snapshot = %+v", report.Verification)
+	}
+}
+
+func TestCreateDoneDoesNotBindVerificationWhenWorkspaceReposCannotBeListed(t *testing.T) {
+	verifiedAt := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	st := &fakeStore{
+		ok: true, projectOK: true, worktreesErr: errors.New("workspace rows unavailable"),
+		session: domain.SessionRecord{ID: "ao-7", ProjectID: "ao", Kind: domain.KindWorker, Metadata: domain.SessionMetadata{WorkspacePath: "/work/ao"}},
+		project: domain.ProjectRecord{ID: "ao", Config: domain.ProjectConfig{Verify: []string{"true"}}},
+	}
+	svc := New(Deps{
+		Store: st, Verifier: &fakeVerifier{results: []verification.Result{{Passed: true}}, errs: []error{nil}},
+		EvidenceArtifacts: &fakeEvidenceArtifacts{}, DataDir: t.TempDir(), NewID: func() string { return "rpt_1" },
+		Now: func() time.Time { return verifiedAt },
+		WorkspaceSnapshot: func(context.Context, string, []domain.SessionWorktreeRecord) (string, error) {
+			t.Fatal("snapshot must not run without the complete repository list")
+			return "", nil
+		},
+	})
+
+	report, err := svc.Create(context.Background(), CreateInput{SessionID: "ao-7", State: domain.ReportDone, Note: "done"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Verification == nil || report.Verification.State != domain.ReportVerificationPassed || report.Verification.WorkspaceRevision != "" {
+		t.Fatalf("verification = %+v, want unbound pass", report.Verification)
 	}
 }
 

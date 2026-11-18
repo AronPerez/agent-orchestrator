@@ -150,6 +150,36 @@ func TestPRTamperAssessmentRoundTripsAndTracksHead(t *testing.T) {
 	}
 }
 
+func TestUpdatePRTamperAssessmentIfRevisionIsNarrowAndCompareGuarded(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "mer")
+	r, _ := s.CreateSession(ctx, sampleRecord("mer"))
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	pr := domain.PullRequest{
+		URL: "pr/guarded", SessionID: r.ID, Number: 1, BaseSHA: "base-1", HeadSHA: "head-1",
+		CI: domain.CIFailing, Title: "concurrent title", UpdatedAt: now, ObservedAt: now,
+	}
+	if err := s.WriteSCMObservation(ctx, pr, nil, nil, nil, nil, ports.ReviewWritePreserve); err != nil {
+		t.Fatal(err)
+	}
+	assessment := domain.PRTamperAssessment{HeadSHA: "head-1", SkipMarkersAdded: 1, AssessedAt: now}
+
+	if updated, err := s.UpdatePRTamperAssessment(ctx, pr.URL, "wrong-base", pr.HeadSHA, assessment); err != nil || updated {
+		t.Fatalf("stale update: updated=%t err=%v", updated, err)
+	}
+	if updated, err := s.UpdatePRTamperAssessment(ctx, pr.URL, pr.BaseSHA, pr.HeadSHA, assessment); err != nil || !updated {
+		t.Fatalf("matching update: updated=%t err=%v", updated, err)
+	}
+	stored, ok, err := s.GetPR(ctx, pr.URL)
+	if err != nil || !ok {
+		t.Fatalf("GetPR: ok=%t err=%v", ok, err)
+	}
+	if stored.Tamper == nil || *stored.Tamper != assessment || stored.CI != domain.CIFailing || stored.Title != "concurrent title" {
+		t.Fatalf("stored PR = %+v", stored)
+	}
+}
+
 func TestPRStateChangedAtPersistsOnlyOnStateTransitions(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

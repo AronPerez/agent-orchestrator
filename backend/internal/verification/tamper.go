@@ -139,7 +139,7 @@ func removedTestPaths(output []byte) []string {
 			oldPath := filepath.ToSlash(string(parts[i]))
 			newPath := filepath.ToSlash(string(parts[i+1]))
 			i += 2
-			if isTestFile(oldPath) && !isTestFile(newPath) {
+			if isDiscoveredTestFile(oldPath) && !isDiscoveredTestFile(newPath) {
 				removed = append(removed, oldPath)
 			}
 		default:
@@ -234,6 +234,33 @@ func isTestFile(path string) bool {
 		return true
 	}
 	return strings.HasSuffix(name, "_test.py") || strings.HasSuffix(name, "_spec.rb")
+}
+
+// isDiscoveredTestFile is stricter than isTestFile for rename comparisons.
+// A helper in a tests directory may still be test-related, but moving a file
+// away from a language runner's discovery name removes the suite just as
+// surely as moving it out of that directory.
+func isDiscoveredTestFile(path string) bool {
+	path = strings.ToLower(filepath.ToSlash(strings.TrimSpace(path)))
+	name := filepath.Base(path)
+	ext := filepath.Ext(name)
+	switch ext {
+	case ".go":
+		return strings.HasSuffix(name, "_test.go")
+	case ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs":
+		return strings.Contains(name, ".test.") || strings.Contains(name, ".spec.") || strings.Contains("/"+path+"/", "/__tests__/")
+	case ".py":
+		return strings.HasPrefix(name, "test_") || strings.HasSuffix(name, "_test.py")
+	case ".rb":
+		return strings.HasPrefix(name, "test_") || strings.HasSuffix(name, "_spec.rb")
+	case ".java", ".kt", ".kts":
+		stem := strings.TrimSuffix(name, ext)
+		return strings.HasSuffix(stem, "test") || strings.HasSuffix(stem, "tests") || strings.HasSuffix(stem, "testcase")
+	case ".rs":
+		return strings.Contains("/"+path+"/", "/tests/")
+	default:
+		return isTestFile(path)
+	}
 }
 
 func isCIWorkflow(path string) bool {

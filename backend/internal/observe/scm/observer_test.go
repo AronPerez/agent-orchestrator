@@ -42,8 +42,9 @@ type fakeStore struct {
 	detailsUpdatedAt map[string]time.Time
 	writeErr         error
 
-	writes  []fakeWrite
-	renames []domain.RepositoryRename
+	writes        []fakeWrite
+	tamperUpdates []fakeTamperUpdate
+	renames       []domain.RepositoryRename
 
 	listEntered chan struct{}
 	listRelease chan struct{}
@@ -56,6 +57,11 @@ type fakeWrite struct {
 	threads    []domain.PullRequestReviewThread
 	comments   []domain.PullRequestComment
 	reviewMode ports.ReviewWriteMode
+}
+
+type fakeTamperUpdate struct {
+	url, baseSHA, headSHA string
+	assessment            domain.PRTamperAssessment
 }
 
 func (s *fakeStore) ListAllSessions(ctx context.Context) ([]domain.SessionRecord, error) {
@@ -128,6 +134,27 @@ func (s *fakeStore) WriteSCMObservation(_ context.Context, pr domain.PullRequest
 	}
 	s.writes = append(s.writes, fakeWrite{pr: pr, checks: append([]domain.PullRequestCheck(nil), checks...), reviews: append([]domain.PullRequestReview(nil), reviews...), threads: append([]domain.PullRequestReviewThread(nil), threads...), comments: append([]domain.PullRequestComment(nil), comments...), reviewMode: reviewMode})
 	return nil
+}
+
+func (s *fakeStore) UpdatePRTamperAssessment(_ context.Context, prURL, baseSHA, headSHA string, assessment domain.PRTamperAssessment) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.writeErr != nil {
+		return false, s.writeErr
+	}
+	for id, prs := range s.prs {
+		for i := range prs {
+			if prs[i].URL != prURL || prs[i].BaseSHA != baseSHA || prs[i].HeadSHA != headSHA {
+				continue
+			}
+			assessmentCopy := assessment
+			prs[i].Tamper = &assessmentCopy
+			s.prs[id] = prs
+			s.tamperUpdates = append(s.tamperUpdates, fakeTamperUpdate{url: prURL, baseSHA: baseSHA, headSHA: headSHA, assessment: assessment})
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (s *fakeStore) RecordRepositoryRename(_ context.Context, r domain.RepositoryRename) error {
@@ -1616,14 +1643,23 @@ func TestPoll_BackfillsHeadBoundTamperEvidenceWithoutSemanticChange(t *testing.T
 	}
 	lifecycle := &fakeLifecycle{}
 	observer := newTestObserver(store, provider, lifecycle, time.Unix(100, 0).UTC())
+	discovered, _, err := observer.discoverSubjects(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, subj := range discovered {
+		if subj.workspacePath != repo {
+			t.Fatalf("tamper workspace path = %q, want %q", subj.workspacePath, repo)
+		}
+	}
 
 	if err := observer.Poll(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(store.writes) != 1 {
-		t.Fatalf("writes = %d, want one tamper-evidence backfill", len(store.writes))
+	if len(store.writes) != 0 || len(store.tamperUpdates) != 1 {
+		t.Fatalf("writes = %d tamper_updates=%d, want one narrow backfill", len(store.writes), len(store.tamperUpdates))
 	}
-	written := store.writes[0].pr
+	written := store.prs["p-1"][0]
 	if written.Tamper == nil || written.Tamper.HeadSHA != headSHA || !written.Tamper.Suspected() || written.Tamper.SkipMarkersAdded != 1 {
 		t.Fatalf("tamper assessment = %+v", written.Tamper)
 	}
@@ -1631,13 +1667,13 @@ func TestPoll_BackfillsHeadBoundTamperEvidenceWithoutSemanticChange(t *testing.T
 		t.Fatalf("tamper backfill notified lifecycle: %+v", lifecycle.observed)
 	}
 
-	store.prs["p-1"] = []domain.PullRequest{written}
 	store.writes = nil
+	store.tamperUpdates = nil
 	if err := observer.Poll(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(store.writes) != 0 {
-		t.Fatalf("matching head evidence rewrote PR: %+v", store.writes)
+	if len(store.writes) != 0 || len(store.tamperUpdates) != 0 {
+		t.Fatalf("matching head evidence rewrote PR: writes=%+v tamper_updates=%+v", store.writes, store.tamperUpdates)
 	}
 }
 
@@ -1688,12 +1724,40 @@ func TestPoll_RetriesUnavailableTamperAssessmentWithoutProviderChange(t *testing
 	if err := observer.Poll(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if attempts != 2 || len(store.writes) != 1 || len(provider.fetchBatches) != 0 {
-		t.Fatalf("due retry: attempts=%d writes=%d fetches=%d", attempts, len(store.writes), len(provider.fetchBatches))
+	if attempts != 2 || len(store.writes) != 0 || len(store.tamperUpdates) != 1 || len(provider.fetchBatches) != 0 {
+		t.Fatalf("due retry: attempts=%d writes=%d tamper_updates=%d fetches=%d", attempts, len(store.writes), len(store.tamperUpdates), len(provider.fetchBatches))
 	}
-	written := store.writes[0]
-	if written.reviewMode != ports.ReviewWritePreserve || written.pr.Tamper == nil || written.pr.Tamper.HeadSHA != local.HeadSHA || written.pr.Tamper.SkipMarkersAdded != 1 {
+	written := store.tamperUpdates[0]
+	if written.headSHA != local.HeadSHA || written.assessment.HeadSHA != local.HeadSHA || written.assessment.SkipMarkersAdded != 1 {
 		t.Fatalf("retry write = %+v", written)
+	}
+}
+
+func TestRetryTamperAssessmentDoesNotReplayStalePRFacts(t *testing.T) {
+	store := testStoreWithSession()
+	store.sessions[0].Metadata.WorkspaceRepoPath = "/workspace"
+	local := knownPR(1)
+	local.BaseSHA, local.HeadSHA, local.CI = "base-1", "head-1", domain.CIPassing
+	store.prs["p-1"] = []domain.PullRequest{local}
+	observer := newTestObserver(store, &fakeProvider{}, &fakeLifecycle{}, time.Unix(100, 0).UTC())
+	observer.assessTamper = func(context.Context, string, string, string, time.Time) (domain.PRTamperAssessment, error) {
+		// A provider write lands while the local assessment is running.
+		store.mu.Lock()
+		current := store.prs["p-1"]
+		current[0].CI = domain.CIFailing
+		store.prs["p-1"] = current
+		store.mu.Unlock()
+		return domain.PRTamperAssessment{HeadSHA: local.HeadSHA, SkipMarkersAdded: 1}, nil
+	}
+	subjects := map[string]*subject{"pr": {session: store.sessions[0], workspacePath: "/workspace", known: local}}
+
+	observer.retryTamperAssessments(context.Background(), subjects, time.Unix(100, 0).UTC())
+
+	if len(store.writes) != 0 || len(store.tamperUpdates) != 1 {
+		t.Fatalf("writes=%d tamper_updates=%d, want narrow update", len(store.writes), len(store.tamperUpdates))
+	}
+	if got := store.prs["p-1"][0].CI; got != domain.CIFailing {
+		t.Fatalf("concurrent CI = %q, want preserved failing", got)
 	}
 }
 
