@@ -1096,3 +1096,37 @@ func TestLaunchIDEnvironmentPreservesInheritanceAndStaysOutOfProvider(t *testing
 		t.Fatal("nil environment no longer inherits the parent environment")
 	}
 }
+
+func TestShutdownStaleDescriptorPreservesUnpublishedReplacement(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionID := "stale-with-replacement"
+	token, err := reserveLaunchIntent(dataDir, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { clearLaunchIntent(dataDir, sessionID, token) })
+	if err := publishLaunchReady(dataDir, sessionID, token, os.Getpid()); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeDescriptor(dataDir, Descriptor{
+		Version: ProtocolVersion, SessionID: sessionID, Address: address,
+		Token: "stale", PID: 2147483647,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Shutdown(context.Background(), dataDir, sessionID); !errors.Is(err, ErrOwnershipInconclusive) {
+		t.Fatalf("Shutdown() error = %v, want replacement ownership inconclusive", err)
+	}
+	if _, err := readLaunchReady(dataDir, sessionID, token); err != nil {
+		t.Fatalf("stale descriptor cleanup removed replacement readiness: %v", err)
+	}
+}

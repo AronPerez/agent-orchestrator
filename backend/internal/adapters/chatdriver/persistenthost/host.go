@@ -221,7 +221,7 @@ func acquireHostLock(dataDir, sessionID string) (func(), error) {
 	if errors.Is(err, os.ErrExist) {
 		owner, readErr := os.ReadFile(path) //nolint:gosec // AO-owned path derived from validated session id.
 		pid, parseErr := strconv.Atoi(strings.TrimSpace(string(owner)))
-		if readErr != nil || parseErr != nil || pid <= 0 || processalive.Alive(pid) {
+		if readErr != nil || parseErr != nil || pid <= 0 || !processalive.Exited(pid) {
 			return nil, ErrHostExists
 		}
 		// A host can die after atomically creating its launch lock but before it
@@ -360,7 +360,7 @@ func ConnectOrStart(ctx context.Context, cfg Config) (*Transport, error) {
 		// A failed socket probe is not proof that a provider is dead. Only an OS
 		// process observation permits clearing the descriptor and falling back to
 		// native resume in a new host.
-		if processalive.Alive(d.PID) {
+		if !processalive.Exited(d.PID) {
 			return nil, fmt.Errorf("%w: %w", ErrOwnershipInconclusive, attachErr)
 		}
 		// Do not remove stale ownership files here. Another starter may have
@@ -461,7 +461,7 @@ func Reconcile(ctx context.Context, dataDir string, keep map[string]struct{}) er
 		if d.Version != ProtocolVersion {
 			continue
 		}
-		if !processalive.Alive(d.PID) {
+		if processalive.Exited(d.PID) {
 			// Claim the launch lock before cleaning a dead descriptor. If a new host
 			// already owns it, preserve its descriptor instead of deleting ownership
 			// state observed by a stale reconciler.
@@ -612,8 +612,11 @@ func shutdown(ctx context.Context, dataDir, sessionID string, quick bool) error 
 	defer cancel()
 	conn, err := (&net.Dialer{}).DialContext(handshakeCtx, "tcp", d.Address)
 	if err != nil {
-		if !processalive.Alive(d.PID) {
-			return nil
+		if processalive.Exited(d.PID) {
+			// A replacement can be between launch readiness and descriptor
+			// publication while this stale descriptor still names the old host.
+			// Launch intent or the host lock takes precedence over the dead record.
+			return probeUnpublishedHost(dataDir, sessionID)
 		}
 		return err
 	}

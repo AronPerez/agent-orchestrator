@@ -321,11 +321,7 @@ func probeLaunchTokenWithExitProbe(
 		return fmt.Errorf("%w: read chat host launch readiness: %w", ErrOwnershipInconclusive, readyErr)
 	}
 	if readyErr == nil {
-		if !exited(ready.HostPID) {
-			return fmt.Errorf("%w: unpublished chat host process %d is not proven absent", ErrOwnershipInconclusive, ready.HostPID)
-		}
-		clearLaunchIntent(dataDir, sessionID, token)
-		return nil
+		return admittedHostOwnershipError(ready.HostPID, exited)
 	}
 	if intentErr == nil {
 		if !exited(intent.ParentPID) {
@@ -336,11 +332,7 @@ func probeLaunchTokenWithExitProbe(
 		// first read and the exit observation still fences the admitted child.
 		ready, readyErr = readLaunchReady(dataDir, sessionID, token)
 		if readyErr == nil {
-			if !exited(ready.HostPID) {
-				return fmt.Errorf("%w: unpublished chat host process %d is not proven absent", ErrOwnershipInconclusive, ready.HostPID)
-			}
-			clearLaunchIntent(dataDir, sessionID, token)
-			return nil
+			return admittedHostOwnershipError(ready.HostPID, exited)
 		}
 		if !errors.Is(readyErr, os.ErrNotExist) {
 			return fmt.Errorf("%w: re-read chat host launch readiness: %w", ErrOwnershipInconclusive, readyErr)
@@ -348,4 +340,14 @@ func probeLaunchTokenWithExitProbe(
 		clearLaunchIntent(dataDir, sessionID, token)
 	}
 	return nil
+}
+
+func admittedHostOwnershipError(hostPID int, exited func(int) bool) error {
+	if exited(hostPID) {
+		// The host can die after starting its Unix provider process group but
+		// before publishing host.json. Only the host can prove orderly provider
+		// teardown by clearing this readiness record; host exit alone is not proof.
+		return fmt.Errorf("%w: admitted chat host %d exited without proving provider-tree cleanup", ErrOwnershipInconclusive, hostPID)
+	}
+	return fmt.Errorf("%w: unpublished chat host process %d is not proven absent", ErrOwnershipInconclusive, hostPID)
 }

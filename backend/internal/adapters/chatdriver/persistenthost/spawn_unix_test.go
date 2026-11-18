@@ -6,10 +6,53 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/processalive"
 )
+
+func TestAdmittedHostExitKeepsFenceWhileProviderSurvives(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionID := "orphan-provider"
+	pidFile := filepath.Join(t.TempDir(), "provider.pid")
+	host := exec.Command("sh", "-c", `nohup sleep 30 >/dev/null 2>&1 & echo $! > "$1"`, "sh", pidFile) //nolint:gosec // Fixed test helper command.
+	if err := host.Run(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(pidFile) //nolint:gosec // Test-owned temporary path.
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerPID, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(providerPID, syscall.SIGKILL) })
+	if !processalive.Alive(providerPID) {
+		t.Fatalf("provider %d did not survive host exit", providerPID)
+	}
+
+	token, err := reserveLaunchIntent(dataDir, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { clearLaunchIntent(dataDir, sessionID, token) })
+	if err := publishLaunchReady(dataDir, sessionID, token, host.Process.Pid); err != nil {
+		t.Fatal(err)
+	}
+	if err := probeLaunchToken(dataDir, sessionID, token); !errors.Is(err, ErrOwnershipInconclusive) {
+		t.Fatalf("probe error = %v, want possible orphan provider ownership", err)
+	}
+	if _, err := readLaunchReady(dataDir, sessionID, token); err != nil {
+		t.Fatalf("probe removed readiness while provider %d survives: %v", providerPID, err)
+	}
+}
 
 func TestDetachedChatHostsAreReapedAfterRepeatedShutdown(t *testing.T) {
 	cfg := Config{
