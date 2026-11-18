@@ -98,6 +98,14 @@ type RaiseInput struct {
 	Options   []domain.DecisionOption
 	Links     []domain.DecisionLink
 	Reference string
+	// Urgency is blocking or can_wait; empty means can_wait.
+	Urgency string
+	// Kind is one of domain.DecisionKinds; required in observe mode.
+	Kind string
+	// Prediction is what the session would decide on its own. Required in
+	// observe mode for kinds the project has not reserved; refused for
+	// reserved kinds.
+	Prediction *domain.DecisionPrediction
 }
 
 // AnswerInput identifies an offered option or a person-authored alternative.
@@ -150,7 +158,12 @@ func (s *Service) Raise(ctx context.Context, actor Actor, input RaiseInput) (dom
 		Title: input.Title, Context: input.Context, Options: input.Options, Links: input.Links,
 		Reference: input.Reference, ProjectID: session.ProjectID,
 		MachineLabel: s.machineLabel(), OwnerSessionID: session.ID, OwnerSessionName: sessionName(session),
+		Urgency: input.Urgency, Kind: domain.DecisionKindID(input.Kind), Prediction: input.Prediction,
 	}
+	if payload.Urgency == "" {
+		payload.Urgency = domain.DecisionUrgencyCanWait
+	}
+	var autonomy domain.AutonomyConfig
 	if session.ProjectID != "" {
 		project, found, err := s.store.GetProject(ctx, string(session.ProjectID))
 		if err != nil {
@@ -159,6 +172,9 @@ func (s *Service) Raise(ctx context.Context, actor Actor, input RaiseInput) (dom
 		payload.ProjectName = string(session.ProjectID)
 		if found && project.DisplayName != "" {
 			payload.ProjectName = project.DisplayName
+		}
+		if found {
+			autonomy = project.Config.Autonomy
 		}
 		sessions, err := s.store.ListSessions(ctx, session.ProjectID)
 		if err != nil {
@@ -171,6 +187,11 @@ func (s *Service) Raise(ctx context.Context, actor Actor, input RaiseInput) (dom
 	}
 	if err := domain.ValidateDecisionRaise(payload); err != nil {
 		return domain.DecisionCall{}, invalidDecision(err)
+	}
+	payload.AutonomyMode = autonomy.EffectiveMode()
+	payload.Reserved = payload.Kind != "" && autonomy.IsReserved(payload.Kind)
+	if err := checkRaisePolicy(payload); err != nil {
+		return domain.DecisionCall{}, err
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
@@ -191,6 +212,75 @@ func (s *Service) Raise(ctx context.Context, actor Actor, input RaiseInput) (dom
 		s.onAppended(stored)
 	}
 	return call, nil
+}
+
+// checkRaisePolicy applies the project's autonomy policy, already snapshotted
+// into the payload, to a call that passed the shape rules.
+func checkRaisePolicy(p domain.DecisionRaisedPayload) error {
+	observe := p.AutonomyMode == domain.AutonomyObserve
+	if observe && p.Kind == "" {
+		return policyRule("kind_required", "This project records the kind of every call. Pass --kind; use other if none fits. Run ao decision kinds to list them.")
+	}
+	if p.Reserved && p.Prediction != nil {
+		kind, _ := domain.LookupDecisionKind(string(p.Kind))
+		return policyRule("prediction_on_reserved", fmt.Sprintf("%q is reserved for the person in this project. Drop --would-decide.", kind.Label))
+	}
+	if observe && !p.Reserved && p.Prediction == nil {
+		return policyRule("prediction_required", "This project is in observe mode. Say what you would have decided with --would-decide, --why and --undo.")
+	}
+	return nil
+}
+
+func policyRule(rule, message string) error {
+	return apierr.Invalid("DECISION_INVALID", message, map[string]any{"rule": rule})
+}
+
+// KindPolicy is one decision kind and whether a project reserves it.
+type KindPolicy struct {
+	ID       domain.DecisionKindID
+	Label    string
+	Reserved bool
+}
+
+// Policy is a project's autonomy mode and its view of every decision kind.
+type Policy struct {
+	ProjectID domain.ProjectID
+	Mode      domain.AutonomyMode
+	Kinds     []KindPolicy
+}
+
+// Kinds returns the autonomy policy for the calling session's project, or
+// for the named project when the person asks.
+func (s *Service) Kinds(ctx context.Context, actor Actor, projectID domain.ProjectID) (Policy, error) {
+	if actor.Session != "" {
+		session, ok, err := s.store.GetSession(ctx, actor.Session)
+		if err != nil {
+			return Policy{}, err
+		}
+		if !ok {
+			return Policy{}, apierr.NotFound("SESSION_NOT_FOUND", "Unknown session")
+		}
+		projectID = session.ProjectID
+	} else if projectID == "" {
+		return Policy{}, apierr.Invalid("DECISION_PROJECT_REQUIRED", "Name the project with --project.", nil)
+	}
+	var autonomy domain.AutonomyConfig
+	if projectID != "" {
+		project, found, err := s.store.GetProject(ctx, string(projectID))
+		if err != nil {
+			return Policy{}, err
+		}
+		if !found {
+			return Policy{}, apierr.NotFound("PROJECT_NOT_FOUND", "Unknown project")
+		}
+		autonomy = project.Config.Autonomy
+	}
+	kinds := domain.DecisionKinds()
+	policy := Policy{ProjectID: projectID, Mode: autonomy.EffectiveMode(), Kinds: make([]KindPolicy, len(kinds))}
+	for i, kind := range kinds {
+		policy.Kinds[i] = KindPolicy{ID: kind.ID, Label: kind.Label, Reserved: autonomy.IsReserved(kind.ID)}
+	}
+	return policy, nil
 }
 
 // Get returns one call and its ordered ledger history.
@@ -520,6 +610,14 @@ func normalizeRaiseInput(input RaiseInput) RaiseInput {
 		links[i] = link
 	}
 	input.Links = links
+	input.Urgency = strings.TrimSpace(input.Urgency)
+	input.Kind = strings.TrimSpace(input.Kind)
+	if input.Prediction != nil {
+		prediction := *input.Prediction
+		prediction.Why = strings.TrimSpace(prediction.Why)
+		prediction.Undo = strings.TrimSpace(prediction.Undo)
+		input.Prediction = &prediction
+	}
 	return input
 }
 
