@@ -3016,18 +3016,22 @@ func TestSpawnTrackerIntakeAmbiguousInCommandDeliveryRemainsFencedAfterRuntimeDi
 	}
 
 	// The prompt was part of the runtime create command, so a possible create
-	// effect also means possible delivery. Later runtime death cannot prove that
-	// the agent did not already perform arbitrary external work.
+	// effect also means possible delivery. Exact runtime death frees capacity and
+	// cleanup can finish, but the issue remains durably handled so it is never
+	// replayed after arbitrary external work may have occurred.
 	rt.createErr = nil
 	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedDead, Reason: ports.FencedReasonExactAbsent}
 	if err := m.Reconcile(ctx); err != nil {
 		t.Fatalf("Reconcile(restart): %v", err)
 	}
-	if got := st.trackerIntakePending[key]; got != rec.ID {
-		t.Fatalf("pending claim after exact dead proof = %q, want fenced owner %q", got, rec.ID)
+	if got := st.trackerIntakePending[key]; got != "" {
+		t.Fatalf("pending claim after exact dead proof = %q, want settled", got)
 	}
-	if _, _, _, err := m.Spawn(ctx, cfg); !errors.Is(err, ports.ErrTrackerIntakeActive) {
-		t.Fatalf("Spawn(retry after dead proof) error = %v, want ErrTrackerIntakeActive", err)
+	if got := st.trackerIntakeHandled[key]; got != rec.ID {
+		t.Fatalf("handled claim after exact dead proof = %q, want fenced owner %q", got, rec.ID)
+	}
+	if _, _, _, err := m.Spawn(ctx, cfg); !errors.Is(err, ports.ErrTrackerIntakeHandled) {
+		t.Fatalf("Spawn(retry after dead proof) error = %v, want ErrTrackerIntakeHandled", err)
 	}
 }
 
@@ -3098,17 +3102,18 @@ func TestSpawnTrackerIntakeSuccessfulRuntimeBeforeCommitWaitsForDeadProofAfterFa
 	}
 
 	// Once an in-command launch may have delivered the task, restart recovery
-	// must not stop it or release the claim even if a probe could settle runtime
-	// ownership. Retrying the issue could duplicate arbitrary external effects.
+	// probes exact ownership. An inconclusive probe reports a retryable recovery
+	// error while preserving the claim, so intake cannot duplicate arbitrary
+	// external effects.
 	rt.fencedResult = ports.FencedProbeResult{Liveness: ports.FencedUnknown, Reason: ports.FencedReasonProbeFailed}
-	if err := m.checkSessionHealth(ctx, rec); err != nil {
-		t.Fatalf("checkSessionHealth() error = %v, want ambiguous delivery preserved", err)
+	if err := m.checkSessionHealth(ctx, rec); err == nil || !strings.Contains(err.Error(), "remains unresolved") {
+		t.Fatalf("checkSessionHealth() error = %v, want unresolved ownership", err)
 	}
 	if got := st.trackerIntakePending[key]; got != rec.ID {
 		t.Fatalf("pending claim after unknown probe = %q, want %q", got, rec.ID)
 	}
-	if len(rt.fencedRefs) != 0 {
-		t.Fatalf("runtime probes = %+v, want no teardown probe after delivery became possible", rt.fencedRefs)
+	if len(rt.fencedRefs) != 1 {
+		t.Fatalf("runtime probes = %+v, want one exact ownership probe", rt.fencedRefs)
 	}
 }
 
@@ -4771,8 +4776,8 @@ func TestKillTrackerIntakeReleasesCapacityWhileDirtyWorkspaceRemainsFenced(t *te
 	}
 	ws.destroyErr = ports.ErrWorkspaceDirty
 
-	if freed, err := m.Kill(context.Background(), id); err == nil || freed {
-		t.Fatalf("Kill() = freed %t, err %v, want dirty workspace preserved", freed, err)
+	if freed, err := m.Kill(context.Background(), id); err != nil || freed {
+		t.Fatalf("Kill() = freed %t, err %v, want successful termination with dirty workspace preserved", freed, err)
 	}
 	reservation := st.trackerIntakeRecovery[id]
 	if !reservation.CapacityReleased || st.trackerIntakePending[key] != id || st.trackerIntakeHandled[key] != "" {

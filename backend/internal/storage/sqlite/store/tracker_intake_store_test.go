@@ -230,6 +230,7 @@ func TestTrackerIntakeConfirmedStoppedDeliveryFenceDoesNotConsumeConcurrentCapac
 	limits := domain.AutomatedSessionLimits{MaxConcurrent: 1, MaxStartsPerPass: 1}
 
 	first := sampleRecord("demo")
+	first.ID = "demo-1"
 	first.Metadata = domain.SessionMetadata{}
 	first.IssueID = "github:acme/demo#1"
 	created, err := store.CreateTrackerIntakeSession(ctx, first, limits)
@@ -247,12 +248,14 @@ func TestTrackerIntakeConfirmedStoppedDeliveryFenceDoesNotConsumeConcurrentCapac
 	}
 
 	second := sampleRecord("demo")
+	second.ID = "demo-2"
 	second.IssueID = "github:acme/demo#2"
 	if _, err := store.CreateTrackerIntakeSession(ctx, second, limits); err != nil {
 		t.Fatalf("CreateTrackerIntakeSession(second) error = %v, want released capacity", err)
 	}
 
 	retry := sampleRecord("demo")
+	retry.ID = "demo-3"
 	retry.IssueID = first.IssueID
 	if _, err := store.CreateTrackerIntakeSession(ctx, retry, limits); !errors.Is(err, ports.ErrTrackerIntakeActive) {
 		t.Fatalf("CreateTrackerIntakeSession(retry) error = %v, want delivery fence preserved", err)
