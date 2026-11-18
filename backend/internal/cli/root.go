@@ -320,6 +320,13 @@ type commandContext struct {
 	deps Deps
 	// remote is nil for the default local daemon; see remote.go.
 	remote *remoteTarget
+	// pinnedBase keeps a multi-request local read on the daemon whose identity was
+	// verified at the start of the operation, even if AO_RUN_FILE changes.
+	pinnedBase string
+	// beforeRequest revalidates short-lived authority immediately before a
+	// request is sent. Aggregate saved-host reads use it to fail closed when the
+	// active Cloud account changes between their individual API calls.
+	beforeRequest func(context.Context) error
 }
 
 func shouldEmitCLIInvocation(cmd *cobra.Command) bool {
