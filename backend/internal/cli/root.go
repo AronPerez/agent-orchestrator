@@ -229,6 +229,15 @@ func NewRootCommand(deps Deps) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			if flag := cmd.Flags().Lookup("all-hosts"); flag != nil {
+				allHosts, err := cmd.Flags().GetBool("all-hosts")
+				if err != nil {
+					return usageError{err}
+				}
+				if allHosts && (strings.TrimSpace(remoteHost) != "" || strings.TrimSpace(remoteURL) != "" || strings.TrimSpace(os.Getenv("AO_URL")) != "") {
+					return usageError{errors.New("--all-hosts cannot be combined with --host, --url, or AO_URL")}
+				}
+			}
 			// Resolve before anything else: every daemon call below, telemetry
 			// included, depends on which daemon this invocation targets.
 			if strings.TrimSpace(remoteHost) != "" {
@@ -320,6 +329,13 @@ type commandContext struct {
 	deps Deps
 	// remote is nil for the default local daemon; see remote.go.
 	remote *remoteTarget
+	// pinnedBase keeps a multi-request local read on the daemon whose identity was
+	// verified at the start of the operation, even if AO_RUN_FILE changes.
+	pinnedBase string
+	// beforeRequest revalidates short-lived authority immediately before a
+	// request is sent. Aggregate saved-host reads use it to fail closed when the
+	// active Cloud account changes between their individual API calls.
+	beforeRequest func(context.Context) error
 }
 
 func shouldEmitCLIInvocation(cmd *cobra.Command) bool {
