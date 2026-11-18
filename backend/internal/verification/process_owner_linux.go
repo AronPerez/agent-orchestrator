@@ -74,9 +74,9 @@ func ownedVerificationProcesses(
 			return nil, fmt.Errorf("read environment of process %d: %w", pid, err)
 		}
 		if !marked {
-			descriptor, descriptorErr := os.Readlink(filepath.Join(
-				"/proc", strconv.Itoa(pid), "fd", strconv.Itoa(owner.fd),
-			))
+			descriptor, descriptorErr := os.Readlink(
+				"/proc/" + strconv.Itoa(pid) + "/fd/" + strconv.Itoa(owner.fd),
+			)
 			switch {
 			case descriptorErr == nil:
 				marked = descriptor == owner.descriptor
