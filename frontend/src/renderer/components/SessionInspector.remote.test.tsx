@@ -26,6 +26,10 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 	useNavigate: () => vi.fn(),
 }));
 vi.mock("../hooks/useCloudCp", () => ({ useCloudCp: () => ({ ready: false, baseUrl: "", client: {} }) }));
+vi.mock("../hooks/useProjectOverlaps", async (importOriginal) => ({
+	...await importOriginal<typeof import("../hooks/useProjectOverlaps")>(),
+	useProjectOverlaps: () => ({ data: undefined, isError: false }),
+}));
 
 function session(hostId: string): WorkspaceSession {
 	return {

@@ -1322,6 +1322,27 @@ export function useRemoteSessionProjectKind(sessionId: string, hostId?: string):
 	}).data;
 }
 
+/** Subscribe a detail surface to only one project's session list. */
+export function useWorkspaceProjectSessions(projectId?: string, hostId?: string) {
+	const selectProjectSessions = useMemo(
+		() => (workspaces: WorkspaceSummary[]) => workspaces.find((workspace) => workspace.id === projectId)?.sessions,
+		[projectId],
+	);
+	const local = useQuery({
+		...workspaceQueryOptions,
+		select: selectProjectSessions,
+		enabled: Boolean(projectId) && !hostId,
+	});
+	const remote = useQuery({
+		queryKey: remoteWorkspaceQueryKey(hostId ?? ""),
+		queryFn: () => fetchRemoteWorkspaces(hostId ?? ""),
+		select: selectProjectSessions,
+		enabled: Boolean(projectId && hostId),
+		refetchOnMount: false,
+	});
+	return hostId ? remote : local;
+}
+
 export type WorkspaceScope = {
 	project?: Pick<WorkspaceSummary, "id" | "kind" | "name" | "orchestratorAgent" | "standaloneAgent">;
 	hasWorkerSessions: boolean;
