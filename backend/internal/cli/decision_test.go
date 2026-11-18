@@ -1,0 +1,441 @@
+package cli
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/caller"
+)
+
+func decisionCLIServer(t *testing.T, handler http.Handler) Deps {
+	t.Helper()
+	cfg := setConfigEnv(t)
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	writeRunFileFor(t, cfg, srv)
+	return Deps{ProcessAlive: func(int) bool { return true }}
+}
+
+func TestDecisionRaiseUsage(t *testing.T) {
+	opt1 := "OAuth :: One registration per tenant"
+	opt2 := "API keys :: Rotate by hand"
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"file with flags", []string{"decision", "raise", "--file", "call.json", "--title", "x"}, "--file cannot be combined"},
+		{"bad option", []string{"decision", "raise", "--title", "x", "--context", "y", "--option", "OAuth", "--option", opt2, "--recommend", "1"}, "write each --option as"},
+		{"recommend too high", []string{"decision", "raise", "--title", "x", "--context", "y", "--option", opt1, "--option", opt2, "--recommend", "3"}, "--recommend takes the position"},
+		{"recommend zero", []string{"decision", "raise", "--title", "x", "--context", "y", "--option", opt1, "--option", opt2, "--recommend", "0"}, "--recommend takes the position"},
+		{"bad link", []string{"decision", "raise", "--title", "x", "--context", "y", "--option", opt1, "--option", opt2, "--recommend", "1", "--link", "PR"}, "write each --link as"},
+		{"search without words", []string{"decision", "search"}, "say what to search for"},
+		{"search with whitespace only", []string{"decision", "search", "  ", "\t"}, "say what to search for"},
+		{"show without id", []string{"decision", "show"}, "ao decision show <id>"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := executeCLI(t, Deps{}, tc.args...)
+			if err == nil || ExitCode(err) != 2 || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v exit=%d want=%q", err, ExitCode(err), tc.want)
+			}
+		})
+	}
+}
+
+func TestDecisionRaiseSendsTheCallAndPrintsItsLink(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "w-1")
+	var (
+		got       decisionRaiseAPIRequest
+		gotMethod string
+		gotPath   string
+		gotCaller string
+	)
+	deps := decisionCLIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/decisions" {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		gotMethod, gotPath, gotCaller = r.Method, r.URL.Path, r.Header.Get(caller.Header)
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"id":"dec_1","link":"ao://decisions/dec_1","state":"needs_you","stateLabel":"Needs you"}`)
+	}))
+
+	out, _, err := executeCLI(t, deps,
+		"decision", "raise",
+		"--title", "Which auth scheme should the proxy use?",
+		"--context", "The connector calls the proxy for each tenant.",
+		"--option", "OAuth client credentials :: One app registration per tenant :: no keys to rotate",
+		"--option", " Per-tenant API keys::Customers rotate keys by hand ",
+		"--recommend", "1",
+		"--link", "Design=https://example.com/d?x=1",
+		"--ref", "SKY-12",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "Raised dec_1\nao://decisions/dec_1\n" {
+		t.Fatalf("output=%q", out)
+	}
+	want := decisionRaiseAPIRequest{
+		Title:     "Which auth scheme should the proxy use?",
+		Context:   "The connector calls the proxy for each tenant.",
+		Reference: "SKY-12",
+		Options: []decisionOptionAPI{
+			{Label: "OAuth client credentials", Consequence: "One app registration per tenant :: no keys to rotate", Recommended: true},
+			{Label: "Per-tenant API keys", Consequence: "Customers rotate keys by hand"},
+		},
+		Links: []decisionLinkAPI{{Label: "Design", URL: "https://example.com/d?x=1"}},
+	}
+	if gotMethod != http.MethodPost || gotPath != "/api/v1/decisions" || gotCaller != "w-1" || !reflect.DeepEqual(got, want) {
+		t.Fatalf("method=%s path=%s caller=%q request=%+v want=%+v", gotMethod, gotPath, gotCaller, got, want)
+	}
+}
+
+func TestDecisionRaiseFromAFileAndStandardInput(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "w-1")
+	doc := `{"title":"T","context":"C","options":[{"label":"A","consequence":"a","recommended":true},{"label":"B","consequence":"b"}]}`
+	var requests []decisionRaiseAPIRequest
+	deps := decisionCLIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/decisions" {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		var got decisionRaiseAPIRequest
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		requests = append(requests, got)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"id":"dec_1","link":"ao://decisions/dec_1","state":"needs_you","stateLabel":"Needs you"}`)
+	}))
+	path := filepath.Join(t.TempDir(), "call.json")
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := executeCLI(t, deps, "decision", "raise", "--file", path); err != nil {
+		t.Fatal(err)
+	}
+	deps.In = strings.NewReader(doc)
+	if _, _, err := executeCLI(t, deps, "decision", "raise", "--file", "-"); err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("requests=%d", len(requests))
+	}
+	for i, got := range requests {
+		if got.Title != "T" || len(got.Options) != 2 || !got.Options[0].Recommended {
+			t.Errorf("request %d=%+v", i, got)
+		}
+	}
+}
+
+func TestDecisionRaiseFileRejectsUnknownFields(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "shop-1")
+	requests := 0
+	deps := decisionCLIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/decisions" {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		requests++
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"id":"dec_1"}`)
+	}))
+	deps.In = strings.NewReader(`{"title":"T","context":"C","options":[{"label":"A","consequence":"a","recommended":true},{"label":"B","consequence":"b"}],"ref":"SKY-12"}`)
+	_, _, err := executeCLI(t, deps, "decision", "raise", "--file", "-")
+	if err == nil || !strings.Contains(err.Error(), `unknown field "ref"`) {
+		t.Fatalf("err=%v", err)
+	}
+	if requests != 0 {
+		t.Fatalf("requests=%d, want 0", requests)
+	}
+}
+
+func TestDecisionSessionContextRefusesRemoteDaemonWithCollidingSessionID(t *testing.T) {
+	const collidingSessionID = "shop-1"
+	t.Setenv("AO_SESSION_ID", collidingSessionID)
+	t.Setenv("AO_TOKEN", "test-token")
+	remoteRequests := 0
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		remoteRequests++
+		if got := r.Header.Get(caller.Header); got != collidingSessionID {
+			t.Errorf("remote caller=%q, want colliding session %q", got, collidingSessionID)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"id":"dec_remote","ownerSessionId":"shop-1"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"calls":[{"id":"dec_remote","ownerSessionId":"shop-1"}]}`)
+	}))
+	t.Cleanup(remote.Close)
+	deps := decisionCLIServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("local daemon should not be called")
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+
+	tests := [][]string{
+		{"decision", "raise", "--title", "T", "--context", "C", "--option", "A :: a", "--option", "B :: b", "--recommend", "1"},
+		{"decision", "ls"},
+		{"decision", "search", "auth"},
+		{"decision", "outcome", "dec_1", "--text", "done"},
+		{"decision", "withdraw", "dec_1"},
+	}
+	for _, args := range tests {
+		args = append(args, "--url", remote.URL)
+		_, _, err := executeCLI(t, deps, args...)
+		if err == nil || ExitCode(err) != 2 || !strings.Contains(err.Error(), "shop-1") || !strings.Contains(err.Error(), "remote daemon") {
+			t.Fatalf("%v err=%v exit=%d", args, err, ExitCode(err))
+		}
+	}
+	if remoteRequests != 0 {
+		t.Fatalf("remote requests=%d, want 0", remoteRequests)
+	}
+}
+
+func TestDecisionRaiseShowsTheRuleTheDaemonNames(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "w-1")
+	deps := decisionCLIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/decisions" {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"kind":"validation","code":"DECISION_INVALID","message":"Mark exactly one option as recommended; this call marks 2.","requestId":"req-7"}`)
+	}))
+	deps.In = strings.NewReader(`{}`)
+	_, _, err := executeCLI(t, deps, "decision", "raise", "--file", "-")
+	if err == nil || ExitCode(err) != 1 || !strings.Contains(err.Error(), "Mark exactly one option as recommended; this call marks 2.") {
+		t.Fatalf("err=%v exit=%d", err, ExitCode(err))
+	}
+}
+
+func TestDecisionListSearchAndShow(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "w-1")
+	callJSON := `{"id":"dec_1","link":"ao://decisions/dec_1","state":"in_progress","stateLabel":"In progress","title":"Which auth scheme should the proxy use?","context":"Choose one.","options":[],"links":[],"projectName":"Shop","streamName":"Checkout epic","machineLabel":"mac-mini","hostId":"h_a","ownerSessionId":"w-1","ownerSessionName":"Worker one","raisedAt":"2026-11-16T15:00:00Z","standingEntryId":"dent_2","choice":"option","option":1,"chosenLabel":"OAuth client credentials","note":"Rotate monthly","retired":false}`
+	var paths []string
+	deps := decisionCLIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/v1/decisions") {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		paths = append(paths, r.URL.RequestURI())
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/decisions/dec_1" {
+			_, _ = io.WriteString(w, `{"call":`+callJSON+`,"history":[{"id":"dent_1","kind":"raised","writtenAt":"2026-11-16T15:00:00Z","hostId":"h_a","authorKind":"session","authorSession":"w-1"},{"id":"dent_2","kind":"answered","writtenAt":"2026-11-16T15:05:00Z","hostId":"h_a","authorKind":"person","authorSurface":"desktop","choice":"option","option":1,"note":"Rotate monthly"}]}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"calls":[`+callJSON+`]}`)
+	}))
+
+	out, _, err := executeCLI(t, deps, "decision", "ls")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"dec_1  In progress  Which auth scheme should the proxy use?",
+		"Shop · Checkout epic · mac-mini · 2026-11-16",
+		"Chose: OAuth client credentials · Note: Rotate monthly",
+		`Outcome owed: ao decision outcome dec_1 --for-answer dent_2 --text "<what happened>"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("list output missing %q:\n%s", want, out)
+		}
+	}
+	out, _, err = executeCLI(t, deps, "decision", "ls", "--needs-you")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "Outcome owed") {
+		t.Fatalf("needs-you output=%s", out)
+	}
+	if _, _, err := executeCLI(t, deps, "decision", "search", "auth", "scheme"); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err = executeCLI(t, deps, "decision", "show", "dec_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"ao://decisions/dec_1", "History:", "raised", "answered", "person (desktop)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("show output missing %q:\n%s", want, out)
+		}
+	}
+	out, _, err = executeCLI(t, deps, "decision", "ls", "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if json.Unmarshal([]byte(out), &decoded) != nil || !strings.Contains(out, "dec_1") {
+		t.Fatalf("json output=%q", out)
+	}
+	t.Setenv("AO_SESSION_ID", "")
+	if _, _, err := executeCLI(t, deps, "decision", "ls"); err != nil {
+		t.Fatal(err)
+	}
+
+	wantPaths := []string{
+		"/api/v1/decisions?scope=mine",
+		"/api/v1/decisions?scope=needs_you",
+		"/api/v1/decisions?q=auth+scheme",
+		"/api/v1/decisions/dec_1",
+		"/api/v1/decisions?scope=mine",
+		"/api/v1/decisions?scope=needs_you",
+	}
+	if !reflect.DeepEqual(paths, wantPaths) {
+		t.Fatalf("paths=%q want=%q", paths, wantPaths)
+	}
+}
+
+func TestDecisionActionUsage(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "answer without id", args: []string{"decision", "answer"}, want: "ao decision <command> <id>"},
+		{name: "answer without a choice", args: []string{"decision", "answer", "dec_1"}, want: "--pick <n> or --other"},
+		{name: "answer with both choices", args: []string{"decision", "answer", "dec_1", "--pick", "1", "--other"}, want: "--pick <n> or --other"},
+		{name: "outcome without text", args: []string{"decision", "outcome", "dec_1"}, want: "--text is required"},
+		{name: "withdraw with two ids", args: []string{"decision", "withdraw", "dec_1", "dec_2"}, want: "ao decision <command> <id>"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := executeCLI(t, Deps{}, tt.args...)
+			if err == nil || ExitCode(err) != 2 || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err=%v exit=%d want=%q", err, ExitCode(err), tt.want)
+			}
+		})
+	}
+}
+
+func TestDecisionActionsSendTheRightRequest(t *testing.T) {
+	tests := []struct {
+		name       string
+		session    string
+		args       []string
+		path       string
+		body       string
+		wantCaller string
+		wantOut    string
+	}{
+		{
+			name: "answer option", args: []string{"decision", "answer", "dec_1", "--pick", "2", "--note", "Rotate monthly"},
+			path: "/api/v1/decisions/dec_1/answer", body: `{"choice":"option","option":2,"note":"Rotate monthly"}`,
+			wantOut: "Answered dec_1: Per-tenant API keys\n",
+		},
+		{
+			name: "answer other", args: []string{"decision", "answer", "dec_1", "--other", "--note", "Use the vault"},
+			path: "/api/v1/decisions/dec_1/answer", body: `{"choice":"other","note":"Use the vault"}`,
+			wantOut: "Answered dec_1: Something else\n",
+		},
+		{
+			name: "dismiss", args: []string{"decision", "dismiss", "dec_1", "--note", "Not enough to go on"},
+			path: "/api/v1/decisions/dec_1/dismiss", body: `{"note":"Not enough to go on"}`,
+			wantOut: "Dismissed dec_1\n",
+		},
+		{
+			name: "outcome", session: "w-1", args: []string{"decision", "outcome", "dec_1", "--for-answer", "dent_2", "--text", "Shipped in PR 412", "--link", "https://example.com/pr/412"},
+			path: "/api/v1/decisions/dec_1/outcome", body: `{"forEntry":"dent_2","text":"Shipped in PR 412","link":"https://example.com/pr/412"}`,
+			wantCaller: "w-1", wantOut: "Recorded the outcome of dec_1\n",
+		},
+		{
+			name: "withdraw", session: "w-1", args: []string{"decision", "withdraw", "dec_1"},
+			path: "/api/v1/decisions/dec_1/withdraw", wantCaller: "w-1", wantOut: "Withdrew dec_1\n",
+		},
+		{
+			name: "retire", args: []string{"decision", "retire", "dec_1"},
+			path: "/api/v1/decisions/dec_1/retire", body: `{"retired":true}`, wantOut: "dec_1 no longer applies\n",
+		},
+		{
+			name: "unretire", args: []string{"decision", "retire", "dec_1", "--undo"},
+			path: "/api/v1/decisions/dec_1/retire", body: `{"retired":false}`, wantOut: "dec_1 applies again\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("AO_SESSION_ID", tt.session)
+			var gotMethod, gotPath, gotBody, gotCaller string
+			deps := decisionCLIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !strings.HasPrefix(r.URL.Path, "/api/v1/decisions/") {
+					w.WriteHeader(http.StatusAccepted)
+					return
+				}
+				gotMethod, gotPath, gotCaller = r.Method, r.URL.Path, r.Header.Get(caller.Header)
+				raw, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Errorf("read body: %v", err)
+				}
+				gotBody = strings.TrimSpace(string(raw))
+				chosen := "Per-tenant API keys"
+				if strings.Contains(gotBody, `"choice":"other"`) {
+					chosen = "Something else"
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprintf(w, `{"id":"dec_1","chosenLabel":%q,"state":"in_progress","stateLabel":"In progress"}`, chosen)
+			}))
+
+			out, _, err := executeCLI(t, deps, tt.args...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotMethod != http.MethodPost || gotPath != tt.path || gotCaller != tt.wantCaller || out != tt.wantOut {
+				t.Fatalf("method=%s path=%s caller=%q out=%q", gotMethod, gotPath, gotCaller, out)
+			}
+			assertDecisionJSONBody(t, gotBody, tt.body)
+		})
+	}
+}
+
+func TestDecisionAnswerFromASessionIsRefusedByTheDaemon(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "w-1")
+	deps := decisionCLIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/decisions/dec_1/answer" {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"kind":"forbidden","code":"DECISION_PERSON_ONLY","message":"Only the person can answer, dismiss or retire a call. A session cannot.","requestId":"req-7"}`)
+	}))
+	_, _, err := executeCLI(t, deps, "decision", "answer", "dec_1", "--pick", "1")
+	if err == nil || ExitCode(err) != 1 || !strings.Contains(err.Error(), "Only the person can answer") {
+		t.Fatalf("err=%v exit=%d", err, ExitCode(err))
+	}
+}
+
+func assertDecisionJSONBody(t *testing.T, got, want string) {
+	t.Helper()
+	if want == "" {
+		if got != "" {
+			t.Fatalf("body=%q, want empty", got)
+		}
+		return
+	}
+	var gotJSON, wantJSON any
+	if err := json.Unmarshal([]byte(got), &gotJSON); err != nil {
+		t.Fatalf("decode body %q: %v", got, err)
+	}
+	if err := json.Unmarshal([]byte(want), &wantJSON); err != nil {
+		t.Fatalf("decode wanted body %q: %v", want, err)
+	}
+	if !reflect.DeepEqual(gotJSON, wantJSON) {
+		t.Fatalf("body=%s want=%s", got, want)
+	}
+}

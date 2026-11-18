@@ -12,7 +12,7 @@ const initialValues: ProjectSettingsDraft = {
 	workerMode: "", orchestratorMode: "", reviewerMode: "",
 	workerEffort: "", orchestratorEffort: "", reviewerEffort: "",
 	workerPermissions: "auto", orchestratorPermissions: "auto", reviewerPermissions: "",
-	autoReview: true, intakeEnabled: false, intakeRepo: "", intakeAssignee: "",
+	autoReview: true, stallMinutes: "15", intakeEnabled: false, intakeRepo: "", intakeAssignee: "",
 };
 
 function setup(cloud: boolean, save = vi.fn().mockResolvedValue({})) {
@@ -20,7 +20,7 @@ function setup(cloud: boolean, save = vi.fn().mockResolvedValue({})) {
 	const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
 	render(<QueryClientProvider client={client}><TooltipProvider>
 		<ProjectSettingsEditor initialValues={initialValues} section="general"
-			capabilities={{ workflow: true, sessionPrefix: !cloud, intake: !cloud, reviewer: true, requiredAgents: !cloud, requiredBranch: cloud, nameLimit: cloud ? 120 : 100, runtimeDefaults: cloud }}
+			capabilities={{ workflow: true, sessionPrefix: !cloud, intake: !cloud, reviewer: true, requiredAgents: !cloud, requiredBranch: cloud, nameLimit: cloud ? 120 : 100, runtimeDefaults: cloud, workerContracts: !cloud }}
 			details={[]} modelScope={() => ""} renderAgent={() => null} save={save} onSaveState={onSaveState} />
 	</TooltipProvider></QueryClientProvider>);
 	return { save, onSaveState };
@@ -38,6 +38,7 @@ describe.each([false, true])("shared settings page, Cloud=%s", (cloud) => {
 		expect(screen.getByRole("button", { name: "Edit Project name" })).toBeInTheDocument();
 		expect(screen.getByRole("button", { name: "Edit Default branch" })).toBeInTheDocument();
 		expect(Boolean(screen.queryByRole("button", { name: "Edit Session prefix" }))).toBe(!cloud);
+		expect(Boolean(screen.queryByRole("button", { name: "Edit Stall threshold (minutes)" }))).toBe(!cloud);
 		await edit("Project name", "Renamed project");
 		await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
 		expect(save).toHaveBeenLastCalledWith(expect.objectContaining({ displayName: "Renamed project", defaultBranch: "main" }));
@@ -77,4 +78,14 @@ describe.each([false, true])("shared settings page, Cloud=%s", (cloud) => {
 		await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
 		await waitFor(() => expect(onSaveState).toHaveBeenLastCalledWith(expect.objectContaining({ phase: "saved", dirty: false, error: undefined })));
 	});
+});
+
+it("does not save an invalid worker stall threshold", async () => {
+	const { save, onSaveState } = setup(false);
+	await edit("Stall threshold (minutes)", "0");
+	await waitFor(() => expect(onSaveState).toHaveBeenLastCalledWith(expect.objectContaining({
+		phase: "failed",
+		error: "Stall threshold must be a whole number from 1 to 1440 minutes.",
+	})));
+	expect(save).not.toHaveBeenCalled();
 });

@@ -275,7 +275,10 @@ SELECT
         FROM pr_comment
         WHERE pr_comment.pr_url = pr.url
           AND pr_comment.resolved = 0
-          AND pr_comment.is_bot = 0
+          AND (
+              pr_comment.is_bot = 0
+              OR (TRIM(pr_comment.file) != '' AND pr_comment.line > 0)
+          )
     ) AS review_comments
 FROM pr
 WHERE pr.session_id = ?
@@ -368,7 +371,10 @@ SELECT
         FROM pr_comment
         WHERE pr_comment.pr_url = pr.url
           AND pr_comment.resolved = 0
-          AND pr_comment.is_bot = 0
+          AND (
+              pr_comment.is_bot = 0
+              OR (TRIM(pr_comment.file) != '' AND pr_comment.line > 0)
+          )
     ) AS review_comments,
     EXISTS (
         SELECT 1
@@ -516,7 +522,10 @@ SELECT
         FROM pr_comment
         WHERE pr_comment.pr_url = pr.url
           AND pr_comment.resolved = 0
-          AND pr_comment.is_bot = 0
+          AND (
+              pr_comment.is_bot = 0
+              OR (TRIM(pr_comment.file) != '' AND pr_comment.line > 0)
+          )
     ) AS review_comments,
     EXISTS (
         SELECT 1

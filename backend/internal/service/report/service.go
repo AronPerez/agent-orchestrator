@@ -285,11 +285,14 @@ func (s *Service) verifyDone(ctx context.Context, reportID string, session domai
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := s.evidenceArtifacts.Register(ctx, session.ID, reference); err != nil {
-		return nil, nil, errors.Join(err, removeEvidence(artifactDir, reference))
-	}
 	cleanup := func(cleanupCtx context.Context) error {
 		return errors.Join(s.evidenceArtifacts.Unregister(cleanupCtx, session.ID, reference), removeEvidence(artifactDir, reference))
+	}
+	if err := s.evidenceArtifacts.Register(ctx, session.ID, reference); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		cleanupErr := cleanup(cleanupCtx)
+		cancel()
+		return nil, nil, errors.Join(err, cleanupErr)
 	}
 	return &domain.ReportVerification{
 		State: verificationState, Evidence: reference, StartedAt: result.StartedAt,

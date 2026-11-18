@@ -258,6 +258,7 @@ func newSessionCommand(ctx *commandContext) *cobra.Command {
 	cmd.AddCommand(newSessionCleanupCommand(ctx))
 	cmd.AddCommand(newSessionDeleteCommand(ctx))
 	cmd.AddCommand(newSessionClaimPRCommand(ctx))
+	cmd.AddCommand(newSessionOverlapsCommand(ctx))
 	cmd.AddCommand(newSessionHistoryCommand(ctx))
 	cmd.AddCommand(newSessionForkCommand(ctx))
 	return cmd

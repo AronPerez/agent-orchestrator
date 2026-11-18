@@ -74,18 +74,26 @@ func (f *fakeVerifier) Run(_ context.Context, request verification.Request) (ver
 }
 
 type fakeEvidenceArtifacts struct {
-	registered   []string
-	unregistered []string
+	registered       []string
+	unregistered     []string
+	registerErr      error
+	registerHook     func()
+	unregisterErr    error
+	unregisterCtxErr error
 }
 
 func (f *fakeEvidenceArtifacts) Register(_ context.Context, id domain.SessionID, reference string) error {
 	f.registered = append(f.registered, string(id)+" "+reference)
-	return nil
+	if f.registerHook != nil {
+		f.registerHook()
+	}
+	return f.registerErr
 }
 
-func (f *fakeEvidenceArtifacts) Unregister(_ context.Context, id domain.SessionID, reference string) error {
+func (f *fakeEvidenceArtifacts) Unregister(ctx context.Context, id domain.SessionID, reference string) error {
 	f.unregistered = append(f.unregistered, string(id)+" "+reference)
-	return nil
+	f.unregisterCtxErr = ctx.Err()
+	return f.unregisterErr
 }
 
 func TestCreateDonePersistsVerificationEvidenceAndReturnsFailureOnce(t *testing.T) {
@@ -177,6 +185,41 @@ func TestCreateDoneCleansEvidenceWhenReportPersistenceFails(t *testing.T) {
 	path := filepath.Join(dataDir, "artifacts", "ao-7", "verification", "rpt_1.txt")
 	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
 		t.Fatalf("evidence remained after failed report: %v", statErr)
+	}
+}
+
+func TestCreateDoneRollsBackCommittedRegistrationWhenRegisterReturnsAnError(t *testing.T) {
+	dataDir := t.TempDir()
+	started := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	verifier := &fakeVerifier{results: []verification.Result{{Passed: true, StartedAt: started, CompletedAt: started}}, errs: []error{nil}}
+	ctx, cancel := context.WithCancel(context.Background())
+	registerErr := errors.New("list registered artifacts: canceled")
+	artifacts := &fakeEvidenceArtifacts{registerErr: registerErr, registerHook: cancel}
+	st := &fakeStore{
+		ok: true, projectOK: true,
+		session: domain.SessionRecord{ID: "ao-7", ProjectID: "ao", Kind: domain.KindWorker, Metadata: domain.SessionMetadata{WorkspacePath: "/work/ao"}},
+		project: domain.ProjectRecord{ID: "ao", Config: domain.ProjectConfig{Verify: []string{"true"}}},
+	}
+
+	_, err := New(Deps{
+		Store: st, Verifier: verifier, EvidenceArtifacts: artifacts, DataDir: dataDir,
+		NewID: func() string { return "rpt_1" }, Now: func() time.Time { return started },
+	}).Create(ctx, CreateInput{SessionID: "ao-7", State: domain.ReportDone, Note: "done"})
+	if !errors.Is(err, registerErr) {
+		t.Fatalf("Create() error = %v, want registration error", err)
+	}
+	if got, want := artifacts.unregistered, []string{"ao-7 verification/rpt_1.txt"}; len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("unregistered = %q, want %q", got, want)
+	}
+	if artifacts.unregisterCtxErr != nil {
+		t.Fatalf("Unregister() context error = %v, want uncancelled cleanup context", artifacts.unregisterCtxErr)
+	}
+	path := filepath.Join(dataDir, "artifacts", "ao-7", "verification", "rpt_1.txt")
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("evidence remained after failed registration: %v", statErr)
+	}
+	if st.created.ID != "" {
+		t.Fatalf("report persisted after failed registration: %+v", st.created)
 	}
 }
 

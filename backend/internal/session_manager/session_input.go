@@ -98,6 +98,12 @@ func (m *Manager) agentOperationActiveLocked(id domain.SessionID) bool {
 	return ok || deferred
 }
 
+func (m *Manager) agentOperationIs(id domain.SessionID, kind agentOperationKind) bool {
+	m.agentOpMu.Lock()
+	defer m.agentOpMu.Unlock()
+	return m.agentOperations[id] == kind
+}
+
 // beginAgentOperation closes input admission before waiting for already-issued
 // leases. Because both actions share agentOpMu, a pane write is either fully
 // admitted before the operation (and drained) or rejected after it; there is

@@ -6,6 +6,8 @@ export type FleetTreeSession = {
 	parentSessionId?: string;
 	kind?: "orchestrator" | "worker";
 	status: SessionStatus;
+	/** Delivery/SCM state to aggregate while `status` keeps the live agent state. */
+	rollupStatus?: SessionStatus;
 	isTerminated?: boolean;
 };
 
@@ -187,7 +189,7 @@ function buildMachine<Session extends FleetTreeSession>(
 			role: item.kind === "orchestrator" ? "orchestrator" : recordedChildren.length ? "manager" : "worker",
 			parentUnavailable: parentId !== undefined &&
 				(fallbackRoot || parentId === item.id || !byId.has(parentId)),
-			zone: item.isTerminated || item.status === "terminated" ? "done" : attentionZone(item.status),
+			zone: item.isTerminated || item.status === "terminated" ? "done" : attentionZone(item.rollupStatus ?? item.status),
 			rollup,
 			children: childNodes,
 		};

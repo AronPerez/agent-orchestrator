@@ -550,6 +550,21 @@ type SessionRecord struct {
 	TemporaryBranch string `json:"-"`
 }
 
+// ActiveOrchestrator returns the newest orchestrator session that is neither
+// terminated nor exited.
+func ActiveOrchestrator(sessions []SessionRecord) (SessionRecord, bool) {
+	var selected SessionRecord
+	for _, session := range sessions {
+		if session.Kind != KindOrchestrator || session.IsTerminated || session.Activity.State == ActivityExited {
+			continue
+		}
+		if selected.ID == "" || session.CreatedAt.After(selected.CreatedAt) {
+			selected = session
+		}
+	}
+	return selected, selected.ID != ""
+}
+
 // SessionStaleBinary describes a launch left on a replaced harness release.
 type SessionStaleBinary struct {
 	// Version is the release now installed, which the session moves to.
@@ -737,6 +752,9 @@ func (r SessionRecord) ControllerOwner() SessionControllerOwner {
 type Session struct {
 	NeedsResume bool `json:"needsResume"`
 	SessionRecord
+	// ContractStalled is the current read-time interpretation of a durable
+	// escalation after applying activity, direction, threshold, and PR facts.
+	ContractStalled bool `json:"contractStalled"`
 	// WorkspaceCleanup is a durable teardown fact for the current generation.
 	WorkspaceCleanup WorkspaceDisposition `json:"workspaceCleanup,omitempty" enum:"pending,removed,preserved_dirty,failed,not_applicable"`
 	// WorkspaceCleanupReportOnly marks a cleanup a sweep started rather than an
