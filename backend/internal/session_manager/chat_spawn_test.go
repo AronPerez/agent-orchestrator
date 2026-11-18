@@ -71,6 +71,7 @@ type recordingLauncher struct {
 
 	permissionModes   []ports.PermissionMode
 	preflightErr      error
+	preStartErr       error
 	startErr          error
 	turnBeforeSendErr error
 	turnErr           error
@@ -176,6 +177,12 @@ func (l *recordingLauncher) PreflightChat(
 }
 
 func prepareTestChatStart(ctx context.Context, cfg ChatStart) (ChatStart, error) {
+	if cfg.BeforeProviderStart != nil {
+		if err := cfg.BeforeProviderStart(ctx); err != nil {
+			return cfg, err
+		}
+		cfg.BeforeProviderStart = nil
+	}
 	if cfg.PrepareControllerEnv == nil {
 		return cfg, nil
 	}
@@ -188,6 +195,9 @@ func prepareTestChatStart(ctx context.Context, cfg ChatStart) (ChatStart, error)
 }
 
 func (l *recordingLauncher) StartChat(ctx context.Context, cfg ChatStart) (ChatStarted, error) {
+	if l.preStartErr != nil {
+		return ChatStarted{}, l.preStartErr
+	}
 	var err error
 	cfg, err = prepareTestChatStart(ctx, cfg)
 	if err != nil {
@@ -563,7 +573,7 @@ func TestCheckSessionHealth_PublishedUndeliveredTrackerChatReconnectsWithoutHand
 	st.trackerIntakePending[key] = id
 	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
 		WorkspacePath: "/ws/mer-published-chat", Branch: "ao/mer-published-chat/root",
-		ControllerPossible: true, ControllerGeneration: "resumed-generation", RelaunchPublished: true,
+		ControllerPossible: true, ControllerGeneration: "resumed-generation",
 	}
 
 	if err := m.checkSessionHealth(context.Background(), rec); err != nil {
@@ -613,6 +623,7 @@ func TestReconcileTrackerIntake_PublishedUndeliveredChatExitReleasesCapacityWith
 		t.Fatalf("ExitAgent(): %v", err)
 	}
 	launcher.live = false
+	launcher.startErr = ports.ErrChatHostNotRunning
 	if err := m.ReconcileTrackerIntakeClaims(context.Background()); err != nil {
 		t.Fatalf("ReconcileTrackerIntakeClaims(): %v", err)
 	}
@@ -631,10 +642,11 @@ func TestReconcileTrackerIntake_PublishedUndeliveredChatExitReleasesCapacityWith
 	}
 }
 
-func TestRelaunchSession_PublishedUndeliveredChatPreStartFailurePreservesFence(t *testing.T) {
-	launcher := &recordingLauncher{}
+func TestReconcileTrackerIntake_PublishedChatInconclusiveDisconnectKeepsCapacity(t *testing.T) {
+	launcher := &recordingLauncher{startErr: ports.ErrChatRecoveryInconclusive}
 	m, st, _ := newChatManager(launcher)
-	id := domain.SessionID("mer-second-resume")
+	ws := m.workspace.(*fakeWorkspace)
+	id := domain.SessionID("mer-disconnected-chat")
 	issueID := domain.IssueID("github:acme/mer#824")
 	key := "mer\x00" + string(issueID)
 	rec := domain.SessionRecord{
@@ -642,29 +654,86 @@ func TestRelaunchSession_PublishedUndeliveredChatPreStartFailurePreservesFence(t
 		Harness: domain.HarnessCodex, Mode: domain.SessionModeChat,
 		Activity: domain.Activity{State: domain.ActivityExited},
 		Metadata: domain.SessionMetadata{
-			Branch: "ao/mer-second-resume/root", WorkspacePath: "/ws/mer-second-resume",
-			ProviderConversationID: "thread-1", ControllerGeneration: "prior-generation",
+			Branch: "ao/mer-disconnected-chat/root", WorkspacePath: "/ws/mer-disconnected-chat",
+			ProviderConversationID: "thread-1", ControllerGeneration: "resumed-generation",
 		},
-	}
-	prior := domain.TrackerIntakeRecoveryReservation{
-		WorkspacePath: "/ws/mer-second-resume", Branch: "ao/mer-second-resume/root",
-		ControllerPossible: true, ControllerGeneration: "prior-generation", RelaunchPublished: true,
-		CapacityReleased: true, ReleasedControllerGeneration: "prior-generation",
 	}
 	st.sessions[id] = rec
 	st.trackerIntakePending[key] = id
-	st.trackerIntakeRecovery[id] = prior
-	m.chat = nil
-
-	_, err := m.relaunchSessionWithPolicyAndGeneration(
-		context.Background(), "resume agent", rec, st.projects[string(chatTestProject)], workspaceInfo(rec),
-		nil, false, false, "", domain.SessionInterfaceTransitionHistoryStrict, nil,
-	)
-	if !errors.Is(err, ports.ErrChatUnsupported) {
-		t.Fatalf("relaunch error = %v, want Chat unsupported", err)
+	st.trackerIntakeRecovery[id] = domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath: "/ws/mer-disconnected-chat", Branch: "ao/mer-disconnected-chat/root",
+		ControllerPossible: true, ControllerGeneration: "resumed-generation", RelaunchPublished: true,
 	}
-	if got := st.trackerIntakeRecovery[id]; !reflect.DeepEqual(got, prior) {
-		t.Fatalf("pre-start failure changed published fence:\n got: %+v\nwant: %+v", got, prior)
+
+	err := m.ReconcileTrackerIntakeClaims(context.Background())
+	if !errors.Is(err, ports.ErrChatRecoveryInconclusive) {
+		t.Fatalf("ReconcileTrackerIntakeClaims() error = %v, want inconclusive recovery", err)
+	}
+	reservation := st.trackerIntakeRecovery[id]
+	if reservation.CapacityReleased || st.trackerIntakePending[key] != id || st.trackerIntakeHandled[key] != "" {
+		t.Fatalf("inconclusive disconnect changed claim: reservation=%+v pending=%q handled=%q",
+			reservation, st.trackerIntakePending[key], st.trackerIntakeHandled[key])
+	}
+	if ws.destroyed != 0 || st.sessions[id].IsTerminated {
+		t.Fatalf("inconclusive disconnect destroyed=%d terminated=%v", ws.destroyed, st.sessions[id].IsTerminated)
+	}
+}
+
+func TestRelaunchSession_PublishedUndeliveredChatStartFailurePreservesCorrectFence(t *testing.T) {
+	definiteErr := errors.New("controller gate canceled")
+	uncertainErr := errors.New("provider start outcome unknown")
+	tests := []struct {
+		name      string
+		launcher  *recordingLauncher
+		wantPrior bool
+	}{
+		{name: "definite pre-provider failure", launcher: &recordingLauncher{preStartErr: definiteErr}, wantPrior: true},
+		{name: "uncertain provider failure", launcher: &recordingLauncher{startErr: uncertainErr}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, st, _ := newChatManager(tt.launcher)
+			m.newLaunchID = func() string { return "replacement-generation" }
+			id := domain.SessionID("mer-second-resume")
+			issueID := domain.IssueID("github:acme/mer#825")
+			key := "mer\x00" + string(issueID)
+			rec := domain.SessionRecord{
+				ID: id, ProjectID: chatTestProject, IssueID: issueID, Kind: domain.KindWorker,
+				Harness: domain.HarnessCodex, Mode: domain.SessionModeChat,
+				Activity: domain.Activity{State: domain.ActivityExited},
+				Metadata: domain.SessionMetadata{
+					Branch: "ao/mer-second-resume/root", WorkspacePath: "/ws/mer-second-resume",
+					ProviderConversationID: "thread-1", ControllerGeneration: "prior-generation",
+				},
+			}
+			prior := domain.TrackerIntakeRecoveryReservation{
+				WorkspacePath: "/ws/mer-second-resume", Branch: "ao/mer-second-resume/root",
+				ControllerPossible: true, ControllerGeneration: "prior-generation", RelaunchPublished: true,
+				CapacityReleased: true, ReleasedControllerGeneration: "prior-generation",
+			}
+			st.sessions[id] = rec
+			st.trackerIntakePending[key] = id
+			st.trackerIntakeRecovery[id] = prior
+
+			_, err := m.relaunchSessionWithPolicyAndGeneration(
+				context.Background(), "resume agent", rec, st.projects[string(chatTestProject)], workspaceInfo(rec),
+				nil, false, false, "", domain.SessionInterfaceTransitionHistoryStrict, nil,
+			)
+			if err == nil {
+				t.Fatal("relaunch unexpectedly succeeded")
+			}
+			got := st.trackerIntakeRecovery[id]
+			if tt.wantPrior {
+				if !reflect.DeepEqual(got, prior) {
+					t.Fatalf("definite pre-start failure changed published fence:\n got: %+v\nwant: %+v", got, prior)
+				}
+				return
+			}
+			if got.ControllerGeneration != "replacement-generation" || !got.ControllerPossible ||
+				got.RelaunchPublished || got.CapacityReleased {
+				t.Fatalf("uncertain start reservation = %+v, want replacement generation fenced", got)
+			}
+		})
 	}
 }
 

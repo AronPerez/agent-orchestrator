@@ -690,8 +690,9 @@ func (m *Manager) resumeChatController(
 	}
 	var trackerReservation domain.TrackerIntakeRecoveryReservation
 	var trackerPending bool
+	var beforeProviderStart func(context.Context) error
 	if !reconnectOnly {
-		controllerGeneration, trackerReservation, trackerPending, err = m.reserveTrackerIntakeChatRelaunch(
+		controllerGeneration, trackerReservation, trackerPending, beforeProviderStart, err = m.prepareTrackerIntakeChatRelaunch(
 			ctx, rec.ID, ws, controllerGeneration,
 		)
 		if err != nil {
@@ -716,6 +717,7 @@ func (m *Manager) resumeChatController(
 		AdditionalDirectories:   additionalDirectories,
 		MCPServers:              m.aoMCPServers(ctx, rec.Harness, env),
 		ExpectedControllerOwner: rec.ControllerOwner(),
+		BeforeProviderStart:     beforeProviderStart,
 		PrepareControllerEnv: func(launchCtx context.Context, expected domain.SessionControllerOwner) (map[string]string, error) {
 			if preparedImportEnv {
 				// The import preparer already saw this resolved environment. Only

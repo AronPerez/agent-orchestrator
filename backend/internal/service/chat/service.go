@@ -860,6 +860,16 @@ func (s *Service) startLocked(ctx context.Context, cfg StartConfig) (*Controller
 	}
 	providerSystemPrompt := withHandoffNote(cfg.SystemPrompt, handoffNote)
 
+	if beforeProviderStart := cfg.BeforeProviderStart; beforeProviderStart != nil {
+		// This is the last definite no-provider-effect boundary. Once it returns,
+		// Resume/Start may create or attach a host even when the call later reports
+		// an error, so the caller's durable ownership fence must already exist.
+		cfg.BeforeProviderStart = nil
+		if err := beforeProviderStart(ctx); err != nil {
+			return nil, fmt.Errorf("prepare chat provider start: %w", err)
+		}
+	}
+
 	var conv ports.ChatConversation
 	hostID := providerHostID(cfg)
 	freshIfMissing := cfg.FreshIfProviderConversationMissing

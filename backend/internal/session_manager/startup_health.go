@@ -48,9 +48,8 @@ func (m *Manager) checkSessionHealth(ctx context.Context, rec domain.SessionReco
 				return m.reconnectPendingTrackerIntakeChat(ctx, rec, project)
 			}
 			if !intakeRecovery.DeliveryPossible && !intakeRecovery.CapacityReleased &&
-				intakeRecovery.RelaunchPublished && rec.Activity.State != domain.ActivityExited &&
 				trackerIntakeChatReservationMatchesSession(rec, intakeRecovery) {
-				return m.reconnectPublishedTrackerIntakeChat(ctx, rec, project, intakeRecovery)
+				return m.reconnectReservedTrackerIntakeChat(ctx, rec, project, intakeRecovery)
 			}
 			if !intakeRecovery.DeliveryPossible {
 				// The per-claim background job owns interrupted launch teardown.
@@ -105,7 +104,7 @@ func (m *Manager) checkSessionHealth(ctx context.Context, rec domain.SessionReco
 	return m.recordTerminalStoppedAtStartup(ctx, rec)
 }
 
-func (m *Manager) reconnectPublishedTrackerIntakeChat(
+func (m *Manager) reconnectReservedTrackerIntakeChat(
 	ctx context.Context,
 	rec domain.SessionRecord,
 	project domain.ProjectRecord,
@@ -115,23 +114,38 @@ func (m *Manager) reconnectPublishedTrackerIntakeChat(
 		return ports.ErrChatUnsupported
 	}
 	if rec.Metadata.ProviderConversationID == "" {
-		return fmt.Errorf("check session %s: published tracker intake chat has no provider conversation: %w", rec.ID, ErrIncompleteHandle)
+		return fmt.Errorf("check session %s: reserved tracker intake chat has no provider conversation: %w", rec.ID, ErrIncompleteHandle)
 	}
-	if m.chat.HasLiveChatController(rec.ID) {
-		return nil
-	}
-	_, err := m.resumeChatController(ctx, "check published tracker intake", rec, project,
-		workspaceInfo(rec), false, true, reservation.ControllerGeneration, domain.SessionInterfaceTransitionHistoryStrict)
-	if errors.Is(err, ports.ErrChatHostNotRunning) {
-		if recordErr := m.recordAgentExited(ctx, rec); recordErr != nil {
-			return recordErr
+	if !m.chat.HasLiveChatController(rec.ID) {
+		_, err := m.resumeChatController(ctx, "check reserved tracker intake", rec, project,
+			workspaceInfo(rec), false, true, reservation.ControllerGeneration, domain.SessionInterfaceTransitionHistoryStrict)
+		if err != nil && !errors.Is(err, ports.ErrChatHostNotRunning) {
+			return err
 		}
-		if releaseErr := m.markTrackerIntakeCapacityReleased(ctx, rec.ID); releaseErr != nil {
-			return fmt.Errorf("check session %s: release stopped published tracker intake chat: %w", rec.ID, releaseErr)
+		if err != nil {
+			// ControllerReady durably published this exact generation before the
+			// relaunch marker could be written. Preserve it as a resumable owner even
+			// when the provider host has since stopped.
+			if !reservation.RelaunchPublished {
+				if publishErr := m.markTrackerIntakeRelaunchPublished(ctx, rec.ID); publishErr != nil {
+					return fmt.Errorf("check session %s: publish recovered tracker intake Chat: %w", rec.ID, publishErr)
+				}
+			}
+			if recordErr := m.recordAgentExited(ctx, rec); recordErr != nil {
+				return recordErr
+			}
+			if releaseErr := m.markTrackerIntakeCapacityReleased(ctx, rec.ID); releaseErr != nil {
+				return fmt.Errorf("check session %s: release stopped published tracker intake chat: %w", rec.ID, releaseErr)
+			}
+			return nil
 		}
-		return nil
 	}
-	return err
+	if !reservation.RelaunchPublished {
+		if err := m.markTrackerIntakeRelaunchPublished(ctx, rec.ID); err != nil {
+			return fmt.Errorf("check session %s: publish reattached tracker intake Chat: %w", rec.ID, err)
+		}
+	}
+	return nil
 }
 
 func (m *Manager) reconnectPendingTrackerIntakeChat(ctx context.Context, rec domain.SessionRecord, project domain.ProjectRecord) error {

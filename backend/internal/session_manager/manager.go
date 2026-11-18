@@ -2778,34 +2778,37 @@ func (m *Manager) markTrackerIntakeRelaunchPublished(ctx context.Context, id dom
 	return nil
 }
 
-func (m *Manager) reserveTrackerIntakeChatRelaunch(
+func (m *Manager) prepareTrackerIntakeChatRelaunch(
 	ctx context.Context,
 	id domain.SessionID,
 	ws ports.WorkspaceInfo,
 	controllerGeneration string,
-) (string, domain.TrackerIntakeRecoveryReservation, bool, error) {
+) (string, domain.TrackerIntakeRecoveryReservation, bool, func(context.Context) error, error) {
 	prior, pending, err := m.store.GetPendingTrackerIntakeRecovery(ctx, id)
 	if err != nil {
-		return "", domain.TrackerIntakeRecoveryReservation{}, false, fmt.Errorf("load tracker intake recovery before Chat relaunch: %w", err)
+		return "", domain.TrackerIntakeRecoveryReservation{}, false, nil, fmt.Errorf("load tracker intake recovery before Chat relaunch: %w", err)
 	}
 	if !pending {
-		return controllerGeneration, domain.TrackerIntakeRecoveryReservation{}, false, nil
+		return controllerGeneration, domain.TrackerIntakeRecoveryReservation{}, false, nil, nil
 	}
 	controllerGeneration = strings.TrimSpace(controllerGeneration)
 	if controllerGeneration == "" {
 		controllerGeneration = m.newLaunchID()
 	}
 	if strings.TrimSpace(controllerGeneration) == "" {
-		return "", domain.TrackerIntakeRecoveryReservation{}, false, errors.New("reserve tracker intake Chat relaunch: controller generation is empty")
+		return "", domain.TrackerIntakeRecoveryReservation{}, false, nil, errors.New("reserve tracker intake Chat relaunch: controller generation is empty")
 	}
 	reservation := trackerIntakeRecoveryForWorkspace(ws)
 	reservation.ControllerPossible = true
 	reservation.ControllerGeneration = controllerGeneration
 	reservation.DeliveryPossible = prior.DeliveryPossible
-	if err := m.store.ReserveTrackerIntakeRecovery(ctx, id, reservation); err != nil {
-		return "", domain.TrackerIntakeRecoveryReservation{}, false, fmt.Errorf("reserve tracker intake Chat relaunch: %w", err)
+	reserve := func(reserveCtx context.Context) error {
+		if err := m.store.ReserveTrackerIntakeRecovery(reserveCtx, id, reservation); err != nil {
+			return fmt.Errorf("reserve tracker intake Chat relaunch: %w", err)
+		}
+		return nil
 	}
-	return controllerGeneration, reservation, true, nil
+	return controllerGeneration, reservation, true, reserve, nil
 }
 
 func (m *Manager) markTrackerIntakeCapacityReleased(ctx context.Context, id domain.SessionID) error {

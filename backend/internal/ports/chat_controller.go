@@ -57,6 +57,10 @@ type ChatControllerStart struct {
 	// PrepareControllerEnv rotates launch-only credentials inside the per-session
 	// controller gate. The returned environment is never retained in startConfigs.
 	PrepareControllerEnv func(context.Context, domain.SessionControllerOwner) (map[string]string, error)
+	// BeforeProviderStart durably fences an external controller immediately before
+	// Resume or Start may create it. Chat Service calls it once after every
+	// definite pre-provider check, then clears it before retaining startConfigs.
+	BeforeProviderStart func(context.Context) error
 	// ProviderConversationID resumes an existing provider conversation when set.
 	ProviderConversationID string
 	// FreshIfProviderConversationMissing is set only when AO has durable proof
