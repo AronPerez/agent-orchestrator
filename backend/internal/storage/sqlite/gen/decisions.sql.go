@@ -7,6 +7,7 @@ package gen
 
 import (
 	"context"
+	"database/sql"
 	"time"
 )
 
@@ -68,7 +69,7 @@ func (q *Queries) CreateDecisionEntry(ctx context.Context, arg CreateDecisionEnt
 }
 
 const getDecisionCall = `-- name: GetDecisionCall :one
-SELECT call_id, origin, project_id, stream_session_id, stream_name, owner_session_id, state, delivery, retired, raised_at, last_wall, last_counter, body, search_text FROM decision_calls WHERE call_id = ?
+SELECT call_id, origin, project_id, stream_session_id, stream_name, owner_session_id, state, delivery, retired, raised_at, last_wall, last_counter, body, search_text, outcome_at FROM decision_calls WHERE call_id = ?
 `
 
 func (q *Queries) GetDecisionCall(ctx context.Context, callID string) (DecisionCall, error) {
@@ -89,12 +90,13 @@ func (q *Queries) GetDecisionCall(ctx context.Context, callID string) (DecisionC
 		&i.LastCounter,
 		&i.Body,
 		&i.SearchText,
+		&i.OutcomeAt,
 	)
 	return i, err
 }
 
 const listDecisionCallsByState = `-- name: ListDecisionCallsByState :many
-SELECT call_id, origin, project_id, stream_session_id, stream_name, owner_session_id, state, delivery, retired, raised_at, last_wall, last_counter, body, search_text
+SELECT call_id, origin, project_id, stream_session_id, stream_name, owner_session_id, state, delivery, retired, raised_at, last_wall, last_counter, body, search_text, outcome_at
 FROM decision_calls
 WHERE state = ?
 ORDER BY raised_at, call_id
@@ -130,6 +132,56 @@ func (q *Queries) ListDecisionCallsByState(ctx context.Context, arg ListDecision
 			&i.LastCounter,
 			&i.Body,
 			&i.SearchText,
+			&i.OutcomeAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listDecisionCallsForBoard = `-- name: ListDecisionCallsForBoard :many
+SELECT call_id, origin, project_id, stream_session_id, stream_name, owner_session_id, state, delivery, retired, raised_at, last_wall, last_counter, body, search_text, outcome_at
+FROM decision_calls
+WHERE state IN ('needs_you', 'in_progress')
+   OR (state = 'done' AND retired = 0 AND outcome_at >= ?1)
+ORDER BY raised_at, call_id
+`
+
+// Every active call plus non-retired Done calls whose outcome landed at or
+// after done_since. Grouping and display order belong to the client.
+func (q *Queries) ListDecisionCallsForBoard(ctx context.Context, doneSince sql.NullTime) ([]DecisionCall, error) {
+	rows, err := q.db.QueryContext(ctx, listDecisionCallsForBoard, doneSince)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []DecisionCall{}
+	for rows.Next() {
+		var i DecisionCall
+		if err := rows.Scan(
+			&i.CallID,
+			&i.Origin,
+			&i.ProjectID,
+			&i.StreamSessionID,
+			&i.StreamName,
+			&i.OwnerSessionID,
+			&i.State,
+			&i.Delivery,
+			&i.Retired,
+			&i.RaisedAt,
+			&i.LastWall,
+			&i.LastCounter,
+			&i.Body,
+			&i.SearchText,
+			&i.OutcomeAt,
 		); err != nil {
 			return nil, err
 		}
@@ -145,7 +197,7 @@ func (q *Queries) ListDecisionCallsByState(ctx context.Context, arg ListDecision
 }
 
 const listDecisionCallsForSession = `-- name: ListDecisionCallsForSession :many
-SELECT call_id, origin, project_id, stream_session_id, stream_name, owner_session_id, state, delivery, retired, raised_at, last_wall, last_counter, body, search_text
+SELECT call_id, origin, project_id, stream_session_id, stream_name, owner_session_id, state, delivery, retired, raised_at, last_wall, last_counter, body, search_text, outcome_at
 FROM decision_calls
 WHERE origin = ?1
   AND (
@@ -186,6 +238,7 @@ func (q *Queries) ListDecisionCallsForSession(ctx context.Context, arg ListDecis
 			&i.LastCounter,
 			&i.Body,
 			&i.SearchText,
+			&i.OutcomeAt,
 		); err != nil {
 			return nil, err
 		}
@@ -381,9 +434,9 @@ const upsertDecisionCall = `-- name: UpsertDecisionCall :one
 INSERT INTO decision_calls (
     call_id, origin, project_id, stream_session_id, stream_name,
     owner_session_id, state, delivery, retired, raised_at,
-    last_wall, last_counter, body, search_text
+    last_wall, last_counter, body, search_text, outcome_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(call_id) DO UPDATE SET
     origin = excluded.origin,
     project_id = excluded.project_id,
@@ -397,8 +450,9 @@ ON CONFLICT(call_id) DO UPDATE SET
     last_wall = excluded.last_wall,
     last_counter = excluded.last_counter,
     body = excluded.body,
-    search_text = excluded.search_text
-RETURNING call_id, origin, project_id, stream_session_id, stream_name, owner_session_id, state, delivery, retired, raised_at, last_wall, last_counter, body, search_text
+    search_text = excluded.search_text,
+    outcome_at = excluded.outcome_at
+RETURNING call_id, origin, project_id, stream_session_id, stream_name, owner_session_id, state, delivery, retired, raised_at, last_wall, last_counter, body, search_text, outcome_at
 `
 
 type UpsertDecisionCallParams struct {
@@ -416,6 +470,7 @@ type UpsertDecisionCallParams struct {
 	LastCounter     int64
 	Body            string
 	SearchText      string
+	OutcomeAt       sql.NullTime
 }
 
 func (q *Queries) UpsertDecisionCall(ctx context.Context, arg UpsertDecisionCallParams) (DecisionCall, error) {
@@ -434,6 +489,7 @@ func (q *Queries) UpsertDecisionCall(ctx context.Context, arg UpsertDecisionCall
 		arg.LastCounter,
 		arg.Body,
 		arg.SearchText,
+		arg.OutcomeAt,
 	)
 	var i DecisionCall
 	err := row.Scan(
@@ -451,6 +507,7 @@ func (q *Queries) UpsertDecisionCall(ctx context.Context, arg UpsertDecisionCall
 		&i.LastCounter,
 		&i.Body,
 		&i.SearchText,
+		&i.OutcomeAt,
 	)
 	return i, err
 }

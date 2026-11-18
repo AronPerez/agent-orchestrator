@@ -230,3 +230,87 @@ func decisionIDs(calls []domain.DecisionCall) string {
 	}
 	return strings.Join(ids, ",")
 }
+
+func decisionEntryOf(entryID, origin, callID string, kind domain.DecisionEntryKind, payload any, writtenAt time.Time) domain.DecisionEntry {
+	author := domain.DecisionAuthorPerson
+	if kind == domain.DecisionKindOutcome || kind == domain.DecisionKindWithdrawn {
+		author = domain.DecisionAuthorSession
+	}
+	return domain.DecisionEntry{
+		ID: entryID, Origin: origin, CallID: callID, Kind: kind,
+		Payload: mustDecisionJSON(payload), WrittenAt: writtenAt,
+		AuthorKind: author, AuthorSurface: domain.RequestSurfaceCLI,
+	}
+}
+
+// The board window holds every active call plus non-retired Done calls whose
+// outcome landed in the last seven days. Retiring or re-reducing a call never
+// moves its outcome timestamp, so neither can extend that window.
+func TestDecisionBoardWindow(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	since := now.Add(-7 * 24 * time.Hour)
+	raisedAt := since.Add(-24 * time.Hour)
+
+	done := func(callID string, outcomeAt time.Time) {
+		appendDecision(t, store, decisionRaised(callID+"_r", "h_a", callID, "w-1", "", "", raisedAt), raisedAt)
+		answer, _ := appendDecision(t, store, decisionAnswered(callID+"_a", "h_a", callID, 1, raisedAt.Add(time.Minute)), raisedAt.Add(time.Minute))
+		appendDecision(t, store, decisionEntryOf(callID+"_o", "h_a", callID, domain.DecisionKindOutcome,
+			domain.DecisionOutcomePayload{ForEntry: answer.ID, Text: "Shipped"}, outcomeAt), outcomeAt)
+	}
+	appendDecision(t, store, decisionRaised("needs_r", "h_a", "dec_needs", "w-1", "", "", raisedAt), raisedAt)
+	appendDecision(t, store, decisionRaised("prog_r", "h_b", "dec_progress", "w-2", "", "", raisedAt.Add(time.Second)), raisedAt.Add(time.Second))
+	appendDecision(t, store, decisionAnswered("prog_a", "h_b", "dec_progress", 1, raisedAt.Add(2*time.Second)), raisedAt.Add(2*time.Second))
+	done("dec_edge", since)
+	done("dec_old", since.Add(-time.Nanosecond))
+	done("dec_recent", now.Add(-time.Hour))
+	done("dec_retired", now.Add(-time.Hour))
+	appendDecision(t, store, decisionEntryOf("retired_x", "h_a", "dec_retired", domain.DecisionKindRetired,
+		domain.DecisionRetiredPayload{Retired: true}, now), now)
+	appendDecision(t, store, decisionRaised("dis_r", "h_a", "dec_dismissed", "w-1", "", "", raisedAt), raisedAt)
+	appendDecision(t, store, decisionEntryOf("dis_d", "h_a", "dec_dismissed", domain.DecisionKindDismissed,
+		domain.DecisionDismissedPayload{Note: "not needed"}, now), now)
+	appendDecision(t, store, decisionRaised("wd_r", "h_a", "dec_withdrawn", "w-1", "", "", raisedAt), raisedAt)
+	appendDecision(t, store, decisionEntryOf("wd_w", "h_a", "dec_withdrawn", domain.DecisionKindWithdrawn, struct{}{}, now), now)
+
+	board, err := store.ListDecisionCallsForBoard(ctx, since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]domain.DecisionCall{}
+	for _, call := range board {
+		ids[call.ID] = call
+	}
+	for _, want := range []string{"dec_needs", "dec_progress", "dec_edge", "dec_recent"} {
+		if _, ok := ids[want]; !ok {
+			t.Fatalf("board %q is missing %s", decisionIDs(board), want)
+		}
+	}
+	for _, absent := range []string{"dec_old", "dec_retired", "dec_dismissed", "dec_withdrawn"} {
+		if _, ok := ids[absent]; ok {
+			t.Fatalf("board %q includes %s", decisionIDs(board), absent)
+		}
+	}
+	if len(board) != 4 {
+		t.Fatalf("board = %q, want exactly four calls", decisionIDs(board))
+	}
+	stored, ok, err := store.GetDecisionCall(ctx, "dec_recent")
+	if err != nil || !ok || !reflect.DeepEqual(ids["dec_recent"], stored) {
+		t.Fatalf("board call differs from decoded call: %+v vs %+v (%v)", ids["dec_recent"], stored, err)
+	}
+
+	// Retiring then restoring a recent Done call, and a late delivery entry,
+	// keep the original outcome timestamp.
+	appendDecision(t, store, decisionEntryOf("recent_ret", "h_a", "dec_recent", domain.DecisionKindRetired,
+		domain.DecisionRetiredPayload{Retired: true}, now.Add(time.Minute)), now.Add(time.Minute))
+	appendDecision(t, store, decisionEntryOf("recent_unret", "h_a", "dec_recent", domain.DecisionKindRetired,
+		domain.DecisionRetiredPayload{Retired: false}, now.Add(2*time.Minute)), now.Add(2*time.Minute))
+	board, err = store.ListDecisionCallsForBoard(ctx, now.Add(-30*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := decisionIDs(board); got != "dec_needs,dec_progress" {
+		t.Fatalf("board after retire/unretire with a 30-minute window = %q, want only active calls", got)
+	}
+}

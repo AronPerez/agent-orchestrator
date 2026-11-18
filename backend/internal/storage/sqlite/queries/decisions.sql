@@ -27,9 +27,9 @@ ORDER BY stamp_wall, stamp_counter, origin, id;
 INSERT INTO decision_calls (
     call_id, origin, project_id, stream_session_id, stream_name,
     owner_session_id, state, delivery, retired, raised_at,
-    last_wall, last_counter, body, search_text
+    last_wall, last_counter, body, search_text, outcome_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(call_id) DO UPDATE SET
     origin = excluded.origin,
     project_id = excluded.project_id,
@@ -43,7 +43,8 @@ ON CONFLICT(call_id) DO UPDATE SET
     last_wall = excluded.last_wall,
     last_counter = excluded.last_counter,
     body = excluded.body,
-    search_text = excluded.search_text
+    search_text = excluded.search_text,
+    outcome_at = excluded.outcome_at
 RETURNING *;
 
 -- name: GetDecisionCall :one
@@ -66,6 +67,15 @@ FROM decision_calls
 WHERE state = ?
 ORDER BY raised_at, call_id
 LIMIT ?;
+
+-- name: ListDecisionCallsForBoard :many
+-- Every active call plus non-retired Done calls whose outcome landed at or
+-- after done_since. Grouping and display order belong to the client.
+SELECT *
+FROM decision_calls
+WHERE state IN ('needs_you', 'in_progress')
+   OR (state = 'done' AND retired = 0 AND outcome_at >= sqlc.arg(done_since))
+ORDER BY raised_at, call_id;
 
 -- name: ListDecisionEntriesAwaitingDelivery :many
 SELECT pending.*
