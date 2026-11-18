@@ -343,6 +343,16 @@ func (m sessionLifecycleMessenger) SendSemantic(ctx context.Context, id domain.S
 	return semantic.SendSemantic(ctx, id, message, deliveryID)
 }
 
+func (m sessionLifecycleMessenger) ConfirmSemantic(ctx context.Context, id domain.SessionID, message, deliveryID string) error {
+	confirmer, ok := m.sessionLifecycle.(interface {
+		ConfirmSemantic(context.Context, domain.SessionID, string, string) error
+	})
+	if !ok {
+		return sessionmanager.ErrDeliveryUnconfirmed
+	}
+	return confirmer.ConfirmSemantic(ctx, id, message, deliveryID)
+}
+
 // telemetryEmitsSpawned reports whether the ao.sessions.spawned carrier event can
 // reach a sink under this config: product telemetry on and the event not on the
 // kill switch. When it cannot, session wiring leaves the GitHub identity resolver
@@ -674,6 +684,20 @@ func (m *modeAwareMessenger) SendSemantic(ctx context.Context, id domain.Session
 		return sessionmanager.ErrSemanticAcceptanceUnsupported
 	}
 	return semantic.SendSemantic(ctx, id, message, deliveryID)
+}
+
+func (m *modeAwareMessenger) ConfirmSemantic(ctx context.Context, id domain.SessionID, message, deliveryID string) error {
+	target, err := m.waitTarget(ctx)
+	if err != nil {
+		return err
+	}
+	confirmer, ok := target.(interface {
+		ConfirmSemantic(context.Context, domain.SessionID, string, string) error
+	})
+	if !ok {
+		return sessionmanager.ErrDeliveryUnconfirmed
+	}
+	return confirmer.ConfirmSemantic(ctx, id, message, deliveryID)
 }
 
 func (m *modeAwareMessenger) waitTarget(ctx context.Context) (ports.AgentMessenger, error) {

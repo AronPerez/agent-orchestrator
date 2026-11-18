@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessionguard"
 )
 
@@ -61,7 +62,10 @@ func TestNudgeCoordinationQueuesForActiveChatWithoutTerminalSteering(t *testing.
 
 func TestNudgeCoordinationRetriesAmbiguousChatWithSameIdentity(t *testing.T) {
 	store := newFakeStore()
-	messenger := &recordingSemanticCoordinationMessenger{errors: []error{errors.New("dispatch unconfirmed"), nil}}
+	messenger := &recordingSemanticCoordinationMessenger{
+		errors:        []error{errors.New("dispatch unconfirmed")},
+		confirmErrors: []error{nil},
+	}
 	m := New(store, messenger)
 	rec := working("chat-1")
 	rec.Mode = domain.SessionModeChat
@@ -75,10 +79,10 @@ func TestNudgeCoordinationRetriesAmbiguousChatWithSameIdentity(t *testing.T) {
 	if outcome != sessionguard.Sent || err != nil {
 		t.Fatalf("Chat confirmation = (%s, %v), want idempotent retry accepted", outcome, err)
 	}
-	if messenger.normalCalls != 0 || len(messenger.semanticCalls) != 2 {
-		t.Fatalf("normal=%d semantic=%+v, want two keyed semantic attempts", messenger.normalCalls, messenger.semanticCalls)
+	if messenger.normalCalls != 0 || len(messenger.semanticCalls) != 1 || len(messenger.confirmCalls) != 1 {
+		t.Fatalf("normal=%d semantic=%+v confirmations=%+v, want one send and one read-only confirmation", messenger.normalCalls, messenger.semanticCalls, messenger.confirmCalls)
 	}
-	for _, call := range messenger.semanticCalls {
+	for _, call := range append(messenger.semanticCalls, messenger.confirmCalls...) {
 		if call.message != "coordinate" || call.deliveryID != "collision-chat" {
 			t.Fatalf("semantic Chat attempt = %+v, want stable message identity", call)
 		}
@@ -125,6 +129,20 @@ func TestNudgeCoordinationConfirmsAmbiguousAttemptBeforeResending(t *testing.T) 
 	}
 }
 
+func TestNudgeCoordinationPreservesDefiniteComposerRefusal(t *testing.T) {
+	store := newFakeStore()
+	rec := working("mer-1")
+	rec.Activity.State = domain.ActivityIdle
+	store.sessions[rec.ID] = rec
+	messenger := &appliedErrorMessenger{err: sessionmanager.ErrComposerBusy}
+	m := New(store, messenger)
+
+	outcome, err := m.NudgeCoordination(context.Background(), rec.ID, "coordinate", "collision-attempt")
+	if outcome != sessionguard.Sent || !errors.Is(err, sessionmanager.ErrComposerBusy) || messenger.calls != 1 {
+		t.Fatalf("composer refusal outcome=%s err=%v calls=%d, want sent/ErrComposerBusy/1", outcome, err, messenger.calls)
+	}
+}
+
 type appliedErrorMessenger struct {
 	calls int
 	err   error
@@ -138,7 +156,9 @@ type semanticCoordinationCall struct {
 type recordingSemanticCoordinationMessenger struct {
 	normalCalls   int
 	semanticCalls []semanticCoordinationCall
+	confirmCalls  []semanticCoordinationCall
 	errors        []error
+	confirmErrors []error
 }
 
 func (m *recordingSemanticCoordinationMessenger) Send(context.Context, domain.SessionID, string) error {
@@ -151,6 +171,16 @@ func (m *recordingSemanticCoordinationMessenger) SendSemantic(_ context.Context,
 	if len(m.errors) > 0 {
 		err := m.errors[0]
 		m.errors = m.errors[1:]
+		return err
+	}
+	return nil
+}
+
+func (m *recordingSemanticCoordinationMessenger) ConfirmSemantic(_ context.Context, _ domain.SessionID, message, deliveryID string) error {
+	m.confirmCalls = append(m.confirmCalls, semanticCoordinationCall{message: message, deliveryID: deliveryID})
+	if len(m.confirmErrors) > 0 {
+		err := m.confirmErrors[0]
+		m.confirmErrors = m.confirmErrors[1:]
 		return err
 	}
 	return nil

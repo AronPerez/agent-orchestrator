@@ -17,6 +17,10 @@ type semanticCoordinationMessenger interface {
 	SendSemantic(context.Context, domain.SessionID, string, string) error
 }
 
+type semanticCoordinationConfirmer interface {
+	ConfirmSemantic(context.Context, domain.SessionID, string, string) error
+}
+
 // ErrCoordinationDeliveryUnconfirmed means a prior TUI write may already have
 // reached the pane, but no durable acceptance receipt exists yet. Retrying the
 // write would duplicate the message, so callers should keep checking instead.
@@ -31,9 +35,8 @@ func (m *Manager) NudgeCoordination(ctx context.Context, id domain.SessionID, me
 	return m.nudgeCoordination(ctx, id, message, deliveryID, false)
 }
 
-// ConfirmCoordination rechecks a possibly accepted delivery. Chat safely
-// retries the same idempotency key; TUI checks its receipt without another
-// pane write.
+// ConfirmCoordination rechecks a possibly accepted delivery without writing it
+// again. Chat reads its durable turn state; TUI checks its receipt.
 func (m *Manager) ConfirmCoordination(ctx context.Context, id domain.SessionID, message, deliveryID string) (sessionguard.Outcome, error) {
 	return m.nudgeCoordination(ctx, id, message, deliveryID, true)
 }
@@ -64,6 +67,12 @@ func (m *Manager) nudgeCoordination(ctx context.Context, id domain.SessionID, me
 	}
 	writer := func(ctx context.Context, rec domain.SessionRecord, message string) error {
 		if deliveryID != "" && domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
+			if confirmOnly {
+				if confirmer, ok := m.messenger.(semanticCoordinationConfirmer); ok {
+					return confirmer.ConfirmSemantic(ctx, rec.ID, message, deliveryID)
+				}
+				return ErrCoordinationDeliveryUnconfirmed
+			}
 			if semantic, ok := m.messenger.(semanticCoordinationMessenger); ok {
 				return semantic.SendSemantic(ctx, rec.ID, message, deliveryID)
 			}

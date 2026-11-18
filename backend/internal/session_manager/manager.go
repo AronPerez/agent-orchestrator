@@ -142,6 +142,9 @@ var (
 	// submit both as one prompt (#5711). The API maps it to a retryable 409; the
 	// caller retries once the operator submits or discards their draft.
 	ErrComposerBusy = errors.New("session: composer has an unsent draft")
+	// ErrSemanticDeliveryRejected means a keyed Chat delivery is durably known
+	// not to have crossed the provider boundary and may use a new attempt ID.
+	ErrSemanticDeliveryRejected = errors.New("session: semantic delivery was rejected before provider dispatch")
 	// ErrDeliveryUnconfirmed means the prompt was written to the pane, but the
 	// harness never confirmed that the agent became active before the
 	// confirmation budget was exhausted (e.g. trailing Enter absorbed or dropped).
@@ -5458,6 +5461,38 @@ func (m *Manager) SendWithOptions(ctx context.Context, id domain.SessionID, mess
 
 type semanticDeliveryStore interface {
 	SemanticDeliveryAccepted(ctx context.Context, id domain.SessionID, runtimeLaunchID, deliveryID string) (bool, error)
+}
+
+type chatSemanticDeliveryConfirmer interface {
+	ConfirmSessionChatTurn(context.Context, domain.SessionID, string, string, ports.MessageDeliveryOptions) (bool, error)
+}
+
+// ConfirmSemantic reads the durable status of a prior keyed Chat delivery. It
+// never retries the provider call: ambiguous attempts retain their identity,
+// while a proven pre-dispatch rejection can safely start a new attempt.
+func (m *Manager) ConfirmSemantic(ctx context.Context, id domain.SessionID, message, clientMessageID string) error {
+	rec, ok, err := m.store.GetSession(ctx, id)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrNotFound
+	}
+	if domain.NormalizeSessionMode(rec.Mode) != domain.SessionModeChat {
+		return ErrSemanticAcceptanceUnsupported
+	}
+	confirmer, ok := m.chat.(chatSemanticDeliveryConfirmer)
+	if !ok {
+		return ErrDeliveryUnconfirmed
+	}
+	accepted, err := confirmer.ConfirmSessionChatTurn(ctx, id, message, clientMessageID, ports.MessageDeliveryOptions{})
+	if err != nil {
+		return err
+	}
+	if !accepted {
+		return ErrSemanticDeliveryRejected
+	}
+	return nil
 }
 
 // SendSemantic delivers an internal message and returns only after the target

@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"slices"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
+	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessionguard"
 	"github.com/aoagents/agent-orchestrator/backend/internal/workspacewatch"
 )
@@ -691,6 +693,54 @@ func TestRunProjectOverlapNoticeRadarClearsRowsWhenProjectDropsBelowTwoSessions(
 	<-done
 }
 
+func TestRunProjectOverlapNoticeRadarClearsInactiveRowsOnStartup(t *testing.T) {
+	store := newMemoryOverlapNoticeStore()
+	store.listNoticeCh = make(chan struct{}, 4)
+	store.projects["demo"] = domain.ProjectRecord{ID: "demo"}
+	store.sessions["demo-a"] = overlapSession("demo-a", t.TempDir())
+	store.sessions["demo-b"] = domain.SessionRecord{ID: "demo-b", ProjectID: "demo", IsTerminated: true}
+	store.deleteErrors = []error{errors.New("disk full")}
+	store.notices[overlapNoticeKey{sessionID: "demo-a", peerSessionID: "demo-b"}] = domain.SessionOverlapNotice{
+		SessionID: "demo-a", PeerSessionID: "demo-b",
+	}
+	store.notices[overlapNoticeKey{sessionID: "demo-b", peerSessionID: "demo-a"}] = domain.SessionOverlapNotice{
+		SessionID: "demo-b", PeerSessionID: "demo-a",
+	}
+	svc := NewWithDeps(Deps{Store: store, OverlapNudger: &recordingOverlapNudger{}})
+	svc.overlapNoticeRetryDelay = 10 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		svc.RunProjectOverlapNoticeRadar(ctx)
+		close(done)
+	}()
+
+	for range 2 {
+		select {
+		case <-store.listNoticeCh:
+		case <-time.After(3 * time.Second):
+			cancel()
+			<-done
+			t.Fatal("startup did not retry stale-notice cleanup for an inactive project")
+		}
+	}
+	cancel()
+	<-done
+	if len(store.notices) != 0 {
+		t.Fatalf("startup notices = %+v, want inactive rows removed", store.notices)
+	}
+}
+
+func TestProjectOverlapRadarRefreshProjectsAppliesEveryObservedTopologyChange(t *testing.T) {
+	got := projectOverlapRadarRefreshProjects(
+		map[domain.ProjectID]bool{"alpha": false, "beta": true},
+		[]projectOverlapRadarSignal{{projectID: "alpha"}},
+	)
+	if got["alpha"] || !got["beta"] {
+		t.Fatalf("refresh projects = %+v, want only beta after alpha's event observed beta's topology change", got)
+	}
+}
+
 func TestRunProjectOverlapNoticeRadarRetriesDefiniteRefusalWithoutAnotherEvent(t *testing.T) {
 	first := newWorkspaceRepo(t)
 	second := newWorkspaceRepo(t)
@@ -703,7 +753,9 @@ func TestRunProjectOverlapNoticeRadarRetriesDefiniteRefusalWithoutAnotherEvent(t
 	nudger := &recordingOverlapNudger{
 		callCh:   make(chan overlapNudgeCall, 3),
 		outcomes: map[domain.SessionID][]sessionguard.Outcome{"demo-a": {sessionguard.Sent, sessionguard.Sent}},
-		errors:   map[domain.SessionID][]error{"demo-a": {errors.New("composer busy"), nil}},
+		errors: map[domain.SessionID][]error{
+			"demo-a": {fmt.Errorf("mode-aware send: %w", sessionmanager.ErrComposerBusy), nil},
+		},
 	}
 	svc := NewWithDeps(Deps{Store: store, OverlapNudger: nudger})
 	svc.overlapNoticeRetryDelay = 10 * time.Millisecond
@@ -729,6 +781,12 @@ func TestRunProjectOverlapNoticeRadarRetriesDefiniteRefusalWithoutAnotherEvent(t
 	<-done
 	if calls[2].sessionID != "demo-a" {
 		t.Fatalf("retried session = %s, want refused demo-a", calls[2].sessionID)
+	}
+	if calls[2].confirmOnly {
+		t.Fatalf("definite refusal retry = %+v, want a new send rather than receipt confirmation", calls[2])
+	}
+	if calls[0].deliveryID == calls[2].deliveryID {
+		t.Fatalf("definite refusal reused attempt id %q, want a fresh delivery", calls[0].deliveryID)
 	}
 }
 
@@ -1118,6 +1176,7 @@ type memoryOverlapNoticeStore struct {
 	mu            sync.Mutex
 	notices       map[overlapNoticeKey]domain.SessionOverlapNotice
 	upsertErrors  []error
+	deleteErrors  []error
 	upsertCalls   int
 	listNoticeCh  chan struct{}
 	listProjectCh chan domain.ProjectID
@@ -1175,6 +1234,13 @@ func (s *memoryOverlapNoticeStore) UpsertSessionOverlapNotice(_ context.Context,
 func (s *memoryOverlapNoticeStore) DeleteSessionOverlapNotice(_ context.Context, sessionID, peerSessionID domain.SessionID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(s.deleteErrors) > 0 {
+		err := s.deleteErrors[0]
+		s.deleteErrors = s.deleteErrors[1:]
+		if err != nil {
+			return err
+		}
+	}
 	delete(s.notices, overlapNoticeKey{sessionID: sessionID, peerSessionID: peerSessionID})
 	return nil
 }

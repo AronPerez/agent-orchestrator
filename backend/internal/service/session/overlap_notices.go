@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessionguard"
 	"github.com/aoagents/agent-orchestrator/backend/internal/workspacewatch"
 )
@@ -53,6 +54,24 @@ type projectOverlapRadarWorker struct {
 type projectOverlapRadarTopology struct {
 	eligible    int
 	fingerprint string
+}
+
+func projectOverlapRadarRefreshProjects(
+	changed map[domain.ProjectID]bool,
+	signals []projectOverlapRadarSignal,
+) map[domain.ProjectID]bool {
+	refresh := make(map[domain.ProjectID]bool, len(changed)+len(signals))
+	for projectID, topologyChanged := range changed {
+		if topologyChanged {
+			refresh[projectID] = true
+		}
+	}
+	for _, signal := range signals {
+		if signal.force {
+			refresh[signal.projectID] = true
+		}
+	}
+	return refresh
 }
 
 type projectOverlapRadarSignal struct {
@@ -126,15 +145,22 @@ func (s *Service) projectOverlapRadarTopology(ctx context.Context) (map[domain.P
 	}
 	rows := make(map[domain.ProjectID][]string)
 	for _, record := range records {
-		if record.ProjectID != "" && eligibleProjectOverlapSession(record) {
-			rows[record.ProjectID] = append(rows[record.ProjectID], strings.Join([]string{
-				string(record.ID),
-				record.Metadata.WorkspacePath,
-				record.Metadata.WorkspaceRepoPath,
-				record.Metadata.DiffBaseSHA,
-				record.Metadata.DiffBaseRef,
-			}, "\x00"))
+		if record.ProjectID == "" {
+			continue
 		}
+		if _, ok := rows[record.ProjectID]; !ok {
+			rows[record.ProjectID] = nil
+		}
+		if !eligibleProjectOverlapSession(record) {
+			continue
+		}
+		rows[record.ProjectID] = append(rows[record.ProjectID], strings.Join([]string{
+			string(record.ID),
+			record.Metadata.WorkspacePath,
+			record.Metadata.WorkspaceRepoPath,
+			record.Metadata.DiffBaseSHA,
+			record.Metadata.DiffBaseRef,
+		}, "\x00"))
 	}
 	topology := make(map[domain.ProjectID]projectOverlapRadarTopology, len(rows))
 	for projectID, members := range rows {
@@ -213,7 +239,8 @@ func (s *Service) RunProjectOverlapNoticeRadar(ctx context.Context) {
 		}
 		changed := make(map[domain.ProjectID]bool, len(topology)+len(lastTopology))
 		for projectID, current := range topology {
-			changed[projectID] = lastTopology[projectID] != current.fingerprint
+			previous, existed := lastTopology[projectID]
+			changed[projectID] = !existed || previous != current.fingerprint
 		}
 		for projectID := range lastTopology {
 			if _, ok := topology[projectID]; !ok {
@@ -251,31 +278,45 @@ func (s *Service) RunProjectOverlapNoticeRadar(ctx context.Context) {
 		}
 		return changed, nil
 	}
-	applyTopologyChange := func(projectID domain.ProjectID, hadWorker bool) {
+	applyTopologyChange := func(projectID domain.ProjectID, hadWorker bool) error {
 		worker, ok := workers[projectID]
 		if !ok {
 			_, err := s.reconcileProjectOverlapNoticesLockedByProject(ctx, projectID)
 			if err != nil {
 				s.logProjectOverlapNoticeError(ctx, "clear inactive collision notices", projectID, err)
 			}
-			return
+			return err
 		}
 		if !hadWorker {
-			return
+			return nil
 		}
 		select {
 		case worker.refresh <- struct{}{}:
 		default:
 		}
+		return nil
+	}
+	cleanupRetries := make(map[domain.ProjectID]struct{})
+	applyProjects := func(projects map[domain.ProjectID]bool, hadWorker map[domain.ProjectID]bool) {
+		for projectID := range projects {
+			if err := applyTopologyChange(projectID, hadWorker[projectID]); err != nil {
+				cleanupRetries[projectID] = struct{}{}
+			} else {
+				delete(cleanupRetries, projectID)
+			}
+		}
 	}
 	lastSyncFailed := false
-	if _, err := syncWorkers(); err != nil {
+	changed, err := syncWorkers()
+	if err != nil {
 		lastSyncFailed = true
 		s.logProjectOverlapNoticeError(ctx, "list collision radar projects", "", err)
+	} else {
+		applyProjects(projectOverlapRadarRefreshProjects(changed, nil), nil)
 	}
 	for {
 		var retry <-chan time.Time
-		if lastSyncFailed {
+		if lastSyncFailed || len(cleanupRetries) > 0 {
 			retry = time.After(s.projectOverlapNoticeRetryDelay())
 		}
 		select {
@@ -292,17 +333,17 @@ func (s *Service) RunProjectOverlapNoticeRadar(ctx context.Context) {
 				lastSyncFailed = true
 			} else {
 				lastSyncFailed = false
-				for projectID, topologyChanged := range changed {
-					if topologyChanged {
-						applyTopologyChange(projectID, hadWorker[projectID])
-					}
+				projects := projectOverlapRadarRefreshProjects(changed, nil)
+				for projectID := range cleanupRetries {
+					projects[projectID] = true
 				}
+				applyProjects(projects, hadWorker)
 			}
 		case <-s.overlapRadarWake:
 			signals := s.takeProjectOverlapRadarSignals()
-			hadWorker := make(map[domain.ProjectID]bool, len(signals))
-			for _, signal := range signals {
-				_, hadWorker[signal.projectID] = workers[signal.projectID]
+			hadWorker := make(map[domain.ProjectID]bool, len(workers))
+			for projectID := range workers {
+				hadWorker[projectID] = true
 			}
 			changed, err := syncWorkers()
 			if err != nil {
@@ -311,12 +352,14 @@ func (s *Service) RunProjectOverlapNoticeRadar(ctx context.Context) {
 			} else {
 				lastSyncFailed = false
 			}
-			for _, signal := range signals {
-				if err != nil || (!signal.force && !changed[signal.projectID]) {
-					continue
-				}
-				applyTopologyChange(signal.projectID, hadWorker[signal.projectID])
+			if err != nil {
+				continue
 			}
+			projects := projectOverlapRadarRefreshProjects(changed, signals)
+			for projectID := range cleanupRetries {
+				projects[projectID] = true
+			}
+			applyProjects(projects, hadWorker)
 		}
 	}
 }
@@ -603,7 +646,11 @@ func (s *Service) reconcileProjectOverlapNoticesLocked(ctx context.Context, stor
 			} else {
 				state.retry = true
 				if outcome == sessionguard.Sent && nudgeErr != nil {
-					s.markProjectOverlapNoticeAttemptAmbiguous(key)
+					if projectOverlapNoticeDefinitelyUnsent(nudgeErr) {
+						s.deleteProjectOverlapNoticeAttempt(key)
+					} else {
+						s.markProjectOverlapNoticeAttemptAmbiguous(key)
+					}
 				}
 			}
 			if nudgeErr != nil {
@@ -612,6 +659,11 @@ func (s *Service) reconcileProjectOverlapNoticesLocked(ctx context.Context, stor
 		}
 	}
 	return state, reconcileErr
+}
+
+func projectOverlapNoticeDefinitelyUnsent(err error) bool {
+	return errors.Is(err, sessionmanager.ErrComposerBusy) ||
+		errors.Is(err, sessionmanager.ErrSemanticDeliveryRejected)
 }
 
 func (s *Service) deleteInactiveProjectOverlapNoticeAttempts(

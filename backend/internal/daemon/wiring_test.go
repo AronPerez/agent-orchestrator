@@ -36,18 +36,42 @@ type wiringReadinessProvider struct {
 
 type semanticLifecycleStub struct {
 	sessionLifecycle
-	normalCalls int
-	sessionID   domain.SessionID
-	message     string
-	deliveryID  string
+	normalCalls  int
+	normalErr    error
+	sessionID    domain.SessionID
+	message      string
+	deliveryID   string
+	confirmCalls int
 }
 
 func (s *semanticLifecycleStub) Send(context.Context, domain.SessionID, string, *ports.SpawnAttachment) error {
 	s.normalCalls++
-	return nil
+	return s.normalErr
+}
+
+func TestModeAwareMessengerPreservesDefiniteComposerRefusal(t *testing.T) {
+	target := &semanticLifecycleStub{normalErr: sessionmanager.ErrComposerBusy}
+	messenger := newModeAwareMessenger()
+	messenger.Bind(sessionLifecycleMessenger{sessionLifecycle: target})
+
+	err := messenger.Send(context.Background(), "worker-1", "coordinate")
+	if !errors.Is(err, sessionmanager.ErrComposerBusy) {
+		t.Fatalf("mode-aware send error = %v, want ErrComposerBusy", err)
+	}
+	if target.normalCalls != 1 {
+		t.Fatalf("plain sends = %d, want 1", target.normalCalls)
+	}
 }
 
 func (s *semanticLifecycleStub) SendSemantic(_ context.Context, sessionID domain.SessionID, message, deliveryID string) error {
+	s.sessionID = sessionID
+	s.message = message
+	s.deliveryID = deliveryID
+	return nil
+}
+
+func (s *semanticLifecycleStub) ConfirmSemantic(_ context.Context, sessionID domain.SessionID, message, deliveryID string) error {
+	s.confirmCalls++
 	s.sessionID = sessionID
 	s.message = message
 	s.deliveryID = deliveryID
@@ -67,6 +91,12 @@ func TestModeAwareMessengerForwardsSemanticDeliveryIdentity(t *testing.T) {
 	}
 	if target.sessionID != "worker-1" || target.message != "coordinate" || target.deliveryID != "collision:attempt-1" {
 		t.Fatalf("semantic delivery = (%q, %q, %q), want stable collision identity", target.sessionID, target.message, target.deliveryID)
+	}
+	if err := messenger.ConfirmSemantic(context.Background(), "worker-1", "coordinate", "collision:attempt-1"); err != nil {
+		t.Fatalf("semantic confirmation: %v", err)
+	}
+	if target.confirmCalls != 1 {
+		t.Fatalf("semantic confirmation calls = %d, want 1", target.confirmCalls)
 	}
 }
 
