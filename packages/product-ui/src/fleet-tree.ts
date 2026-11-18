@@ -61,6 +61,36 @@ export type FlatFleetSession<Session extends FleetTreeSession> = {
 	depth: number;
 };
 
+/** A person's explicit choice for a qualified branch. Absent keys use the size default. */
+export type FleetCollapsePreferences = Readonly<Record<string, boolean>>;
+
+/** Eight visible sessions already fill most of a compact laptop or phone list. */
+export const DEFAULT_FLEET_COLLAPSE_SIZE = 8;
+
+const MAX_FLEET_COLLAPSE_PREFERENCES = 2_000;
+const MAX_FLEET_COLLAPSE_KEY_LENGTH = 1_024;
+
+/** Keep the newest valid preferences within the storage contract's hard limit. */
+export function limitFleetCollapsePreferences(
+	preferences: Readonly<Record<string, unknown>>,
+): Record<string, boolean> {
+	const valid = Object.entries(preferences).filter(([key, value]) =>
+		key.length <= MAX_FLEET_COLLAPSE_KEY_LENGTH && typeof value === "boolean");
+	return Object.fromEntries(valid.slice(-MAX_FLEET_COLLAPSE_PREFERENCES)) as Record<string, boolean>;
+}
+
+/** Remember one choice as the newest entry, evicting the oldest choice when full. */
+export function rememberFleetCollapsePreference(
+	preferences: FleetCollapsePreferences,
+	key: string,
+	collapsed: boolean,
+): Record<string, boolean> {
+	const next = { ...preferences };
+	delete next[key];
+	next[key] = collapsed;
+	return limitFleetCollapsePreferences(next);
+}
+
 export function emptyFleetRollup(): FleetRollup {
 	return { merge: 0, action: 0, pending: 0, working: 0, done: 0 };
 }
@@ -237,4 +267,51 @@ export function flattenFleetSessions<Session extends FleetTreeSession>(
 		for (const child of [...row.node.children].reverse()) stack.push({ node: child, depth: row.depth + 1 });
 	}
 	return rows;
+}
+
+/**
+ * Resolve the branches that should be folded now.
+ *
+ * Large branches start folded so their roll-up remains the useful first view.
+ * A stored boolean is an override rather than merely a list of collapsed keys:
+ * `false` remembers that someone deliberately opened a branch which defaults
+ * to folded.
+ */
+export function resolveFleetCollapsedKeys<Session extends FleetTreeSession>(
+	projects: readonly FleetProjectNode<Session>[],
+	preferences: FleetCollapsePreferences,
+	defaultSize = DEFAULT_FLEET_COLLAPSE_SIZE,
+): Set<string> {
+	const collapsed = new Set<string>();
+	const resolve = (key: string, sessionCount: number) => {
+		const remembered = preferences[key];
+		if (remembered ?? sessionCount >= defaultSize) collapsed.add(key);
+	};
+	const visitSession = (node: FleetSessionNode<Session>): number => {
+		const count = 1 + node.children.reduce((total, child) => total + visitSession(child), 0);
+		if (node.children.length) resolve(node.key, count);
+		return count;
+	};
+	for (const project of projects) {
+		let projectCount = 0;
+		for (const machine of project.machines) {
+			const machineCount = machine.sessions.reduce((total, session) => total + visitSession(session), 0);
+			projectCount += machineCount;
+			if (machine.sessions.length) resolve(machine.key, machineCount);
+		}
+		if (project.machines.length) resolve(project.key, projectCount);
+	}
+	return collapsed;
+}
+
+/** Parse untrusted client storage without allowing it to grow the view model unboundedly. */
+export function parseFleetCollapsePreferences(raw: string | null | undefined): Record<string, boolean> {
+	if (!raw) return {};
+	try {
+		const parsed: unknown = JSON.parse(raw);
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+		return limitFleetCollapsePreferences(parsed as Record<string, unknown>);
+	} catch {
+		return {};
+	}
 }

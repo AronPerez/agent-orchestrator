@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { components } from "../../api/schema";
 import type { RemoteHost } from "../hooks/useRemoteHosts";
 import { toWorkspaceSession } from "../hooks/useWorkspaceQuery";
@@ -100,6 +100,8 @@ function mappedSessionWithFailingPR(): WorkspaceSession {
 }
 
 describe("FleetOverview", () => {
+	beforeEach(() => window.localStorage.clear());
+
 	it("keeps host-local project and session identities separate and opens the selected machine", async () => {
 		const onOpen = vi.fn();
 		const local = workspace("project", "Alpha", [session("same", "Fix cache")]);
@@ -373,5 +375,68 @@ describe("FleetOverview", () => {
 		expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ id: "worker" }), undefined);
 		fireEvent.keyDown(workerRow, { key: "ArrowLeft" });
 		expect(machine).toHaveFocus();
+	});
+
+	it("starts a large branch collapsed, keeps its rollup visible, and remembers an explicit expansion", async () => {
+		const busy = Array.from({ length: 8 }, (_, index) => session(`worker-${index}`, `Worker ${index}`));
+		const view = render(<FleetOverview localWorkspaces={[workspace("project", "Busy project", busy)]} onOpen={vi.fn()} />);
+
+		const project = screen.getByRole("treeitem", { name: /^Busy project/ });
+		expect(project).toHaveAttribute("aria-expanded", "false");
+		expect(project).toHaveTextContent("8 Working");
+		expect(screen.queryByText("This computer")).not.toBeInTheDocument();
+
+		await userEvent.click(project);
+		expect(screen.getByText("This computer")).toBeInTheDocument();
+		expect(Object.values(JSON.parse(window.localStorage.getItem("ao.fleet.branch-state.v1") ?? "{}"))).toContain(false);
+
+		view.unmount();
+		render(<FleetOverview localWorkspaces={[workspace("project", "Busy project", busy)]} onOpen={vi.fn()} />);
+		expect(screen.getByRole("treeitem", { name: /^Busy project/ })).toHaveAttribute("aria-expanded", "true");
+		expect(screen.getByText("This computer")).toBeInTheDocument();
+	});
+
+	it("evicts the oldest collapse choice when storage is full", async () => {
+		window.localStorage.setItem("ao.fleet.branch-state.v1", JSON.stringify(Object.fromEntries(
+			Array.from({ length: 2_000 }, (_, index) => [`old-${index}`, true]),
+		)));
+		render(<FleetOverview localWorkspaces={[workspace("project", "Project", [session("worker", "Worker")])]} onOpen={vi.fn()} />);
+
+		await userEvent.click(screen.getByRole("treeitem", { name: /^Project/ }));
+
+		const saved = JSON.parse(window.localStorage.getItem("ao.fleet.branch-state.v1") ?? "{}");
+		expect(Object.keys(saved)).toHaveLength(2_000);
+		expect(saved["old-0"]).toBeUndefined();
+		expect(Object.keys(saved).some((key) => key.startsWith("["))).toBe(true);
+	});
+
+	it("remembers a collapsed host-local project without folding the same id on another machine", async () => {
+		const local = workspace("same", "Same", [session("local", "Local")]);
+		const remote = workspace("same", "Same", [session("remote", "Remote", "idle", { hostId: "build-box" })], { hostId: "build-box" });
+		const view = render(
+			<FleetOverview
+				localWorkspaces={[local]}
+				onOpen={vi.fn()}
+				remoteHosts={[host("build-box", "Build box", "connected")]}
+				remoteWorkspaces={[remote]}
+			/>,
+		);
+		const [first, second] = screen.getAllByRole("treeitem", { name: /^Same/ });
+		await userEvent.click(first!);
+		expect(first).toHaveAttribute("aria-expanded", "false");
+		expect(second).toHaveAttribute("aria-expanded", "true");
+
+		view.unmount();
+		render(
+			<FleetOverview
+				localWorkspaces={[local]}
+				onOpen={vi.fn()}
+				remoteHosts={[host("build-box", "Build box", "connected")]}
+				remoteWorkspaces={[remote]}
+			/>,
+		);
+		const restored = screen.getAllByRole("treeitem", { name: /^Same/ });
+		expect(restored[0]).toHaveAttribute("aria-expanded", "false");
+		expect(restored[1]).toHaveAttribute("aria-expanded", "true");
 	});
 });

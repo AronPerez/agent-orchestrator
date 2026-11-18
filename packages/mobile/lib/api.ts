@@ -67,6 +67,8 @@ export type SessionProvisionStep = {
 export type DashboardSession = {
 	id: string;
 	projectId: string;
+	/** The session that spawned this one, when the daemon still has that lineage. */
+	parentSessionId?: string;
 	/** Opaque daemon runtime handle used only for terminal mux operations. */
 	terminalHandleId?: string;
 	status: string | null;
@@ -255,6 +257,7 @@ type WireSession = {
 	// Absent for a standalone agent session: the daemon marks the field
 	// omitempty and a standalone session has no project to name.
 	projectId?: string;
+	parentSessionId?: string;
 	terminalHandleId?: string;
 	issueId?: string;
 	kind?: string; // worker | orchestrator
@@ -350,6 +353,7 @@ function mapSession(s: WireSession): DashboardSession {
 		// "" rather than undefined: every consumer treats the id as a string, and
 		// `shortLabel(undefined)` threw inside render and took the whole board down.
 		projectId: s.projectId ?? "",
+		parentSessionId: s.parentSessionId,
 		terminalHandleId: s.terminalHandleId,
 		status: s.status ?? null,
 		kanbanColumn: isKanbanColumn(s.kanbanColumn) ? s.kanbanColumn : null,
@@ -1474,8 +1478,12 @@ export type SpawnAttachmentInput = {
 	data: string;
 };
 
-export async function getSession(cfg: ServerConfig, id: string): Promise<DashboardSession> {
-	const res = await req(cfg, `${API}/sessions/${encodeURIComponent(id)}`);
+export async function getSession(
+	cfg: ServerConfig,
+	id: string,
+	init?: Pick<RequestInit, "signal">,
+): Promise<DashboardSession> {
+	const res = await req(cfg, `${API}/sessions/${encodeURIComponent(id)}`, init);
 	const data = await res.json();
 	return mapSession(data?.session ?? data);
 }

@@ -139,6 +139,17 @@ it("closes the rail before a menu action takes over", () => {
 	expect(onAction).toHaveBeenCalledWith("rename");
 });
 
+it("forwards a whole-row accessibility action to the platform menu wrapper", () => {
+	const additionalAccessibilityAction = {
+		name: "toggleBranch",
+		label: "Expand branch",
+		onAction: vi.fn(),
+	};
+	const view = mount({ additionalAccessibilityAction });
+	expect(view.root.findByType("ContextMenu" as never).props.additionalAccessibilityAction)
+		.toBe(additionalAccessibilityAction);
+});
+
 it("drops the menu, the swipe and the full swipe while the row is being renamed", () => {
 	const view = mount({ enabled: false });
 	expect(boundary(view).props.enabled).toBe(false);
