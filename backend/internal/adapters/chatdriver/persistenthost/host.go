@@ -681,6 +681,11 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 	if cfg.launchToken != "" {
+		// Keep the durable fence for the host's full lifetime. On Unix the
+		// provider owns a separate process group and can survive an abrupt host
+		// exit, so descriptor publication alone does not prove that later host
+		// death also stopped the provider tree. This defer runs after the
+		// provider-tree closer and host-lock release on orderly shutdown.
 		defer clearLaunchIntent(cfg.DataDir, cfg.SessionID, cfg.launchToken)
 	}
 	releaseLock, err := acquireHostLock(cfg.DataDir, cfg.SessionID)
@@ -734,9 +739,6 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := writeDescriptor(cfg.DataDir, d); err != nil {
 		_ = killProviderProcess(context.WithoutCancel(ctx), child)
 		return err
-	}
-	if cfg.launchToken != "" {
-		clearLaunchIntent(cfg.DataDir, cfg.SessionID, cfg.launchToken)
 	}
 	path, _ := descriptorPath(cfg.DataDir, cfg.SessionID)
 	defer func() { _ = os.Remove(path) }()

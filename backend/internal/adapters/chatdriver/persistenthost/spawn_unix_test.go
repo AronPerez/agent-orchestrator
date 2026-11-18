@@ -54,6 +54,52 @@ func TestAdmittedHostExitKeepsFenceWhileProviderSurvives(t *testing.T) {
 	}
 }
 
+func TestPublishedHostExitKeepsFenceWhileProviderSurvives(t *testing.T) {
+	cfg := Config{
+		SessionID: "published-orphan-provider", DataDir: t.TempDir(), Workdir: t.TempDir(),
+		Env: append(os.Environ(),
+			"AO_CHAT_HOST_PROVIDER_HELPER=1",
+			"AO_CHAT_HOST_IGNORE_STDIN=1",
+		),
+		Argv: []string{os.Args[0], "-test.run=TestProviderHelper"},
+	}
+	transport, err := ConnectOrStart(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := readDescriptor(cfg.DataDir, cfg.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerPID := requestProviderPID(t, transport, 1, "pid")
+	t.Cleanup(func() {
+		_ = transport.Stdin.Close()
+		_ = syscall.Kill(-providerPID, syscall.SIGKILL)
+		_ = syscall.Kill(-d.PID, syscall.SIGKILL)
+	})
+
+	if err := syscall.Kill(d.PID, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for !processalive.Exited(d.PID) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !processalive.Exited(d.PID) {
+		t.Fatalf("chat host %d did not exit", d.PID)
+	}
+	if !processalive.Alive(providerPID) {
+		t.Fatalf("provider %d did not survive published host exit", providerPID)
+	}
+
+	if err := Shutdown(context.Background(), cfg.DataDir, cfg.SessionID); !errors.Is(err, ErrOwnershipInconclusive) {
+		t.Fatalf("Shutdown() error = %v, want orphan provider ownership inconclusive", err)
+	}
+	if !processalive.Alive(providerPID) {
+		t.Fatalf("provider %d exited before ownership was fenced", providerPID)
+	}
+}
+
 func TestDetachedChatHostsAreReapedAfterRepeatedShutdown(t *testing.T) {
 	cfg := Config{
 		SessionID: "reaped-host", DataDir: t.TempDir(), Workdir: t.TempDir(),
