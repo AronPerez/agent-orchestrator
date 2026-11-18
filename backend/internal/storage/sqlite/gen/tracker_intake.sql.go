@@ -33,11 +33,19 @@ func (q *Queries) CommitTrackerIntakeSession(ctx context.Context, arg CommitTrac
 
 const countLiveIssueLinkedSessions = `-- name: CountLiveIssueLinkedSessions :one
 SELECT COUNT(*)
-FROM sessions
-WHERE project_id = ?
-  AND issue_id IS NOT NULL
-  AND trim(issue_id) <> ''
-  AND is_terminated = FALSE
+FROM (
+    SELECT id AS session_id
+    FROM sessions
+    WHERE sessions.project_id = ?1
+      AND issue_id IS NOT NULL
+      AND trim(issue_id) <> ''
+      AND is_terminated = FALSE
+    UNION
+    SELECT session_id
+    FROM tracker_intake_handled
+    WHERE tracker_intake_handled.project_id = ?1
+      AND state = 'pending'
+)
 `
 
 func (q *Queries) CountLiveIssueLinkedSessions(ctx context.Context, projectID *domain.ProjectID) (int64, error) {
@@ -154,6 +162,50 @@ func (q *Queries) InsertTrackerIntakeClaim(ctx context.Context, arg InsertTracke
 	return err
 }
 
+const listAllPendingTrackerIntakeClaims = `-- name: ListAllPendingTrackerIntakeClaims :many
+SELECT project_id, issue_id, session_id, recovery_state, recorded_at
+FROM tracker_intake_handled
+WHERE state = 'pending'
+ORDER BY recorded_at, project_id, issue_id
+`
+
+type ListAllPendingTrackerIntakeClaimsRow struct {
+	ProjectID     string
+	IssueID       string
+	SessionID     string
+	RecoveryState string
+	RecordedAt    time.Time
+}
+
+func (q *Queries) ListAllPendingTrackerIntakeClaims(ctx context.Context) ([]ListAllPendingTrackerIntakeClaimsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listAllPendingTrackerIntakeClaims)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListAllPendingTrackerIntakeClaimsRow{}
+	for rows.Next() {
+		var i ListAllPendingTrackerIntakeClaimsRow
+		if err := rows.Scan(
+			&i.ProjectID,
+			&i.IssueID,
+			&i.SessionID,
+			&i.RecoveryState,
+			&i.RecordedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listLiveTrackerIssueReferences = `-- name: ListLiveTrackerIssueReferences :many
 SELECT issue_id
 FROM sessions
@@ -187,13 +239,50 @@ func (q *Queries) ListLiveTrackerIssueReferences(ctx context.Context, projectID 
 }
 
 const listPendingTrackerIntakeClaims = `-- name: ListPendingTrackerIntakeClaims :many
-SELECT project_id, issue_id, session_id, state, recorded_at
+SELECT project_id, issue_id, session_id, state, recovery_state, recorded_at
 FROM tracker_intake_handled
 WHERE project_id = ? AND state = 'pending'
 ORDER BY recorded_at, issue_id
 `
 
-type ListPendingTrackerIntakeClaimsRow struct {
+func (q *Queries) ListPendingTrackerIntakeClaims(ctx context.Context, projectID string) ([]TrackerIntakeHandled, error) {
+	rows, err := q.db.QueryContext(ctx, listPendingTrackerIntakeClaims, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []TrackerIntakeHandled{}
+	for rows.Next() {
+		var i TrackerIntakeHandled
+		if err := rows.Scan(
+			&i.ProjectID,
+			&i.IssueID,
+			&i.SessionID,
+			&i.State,
+			&i.RecoveryState,
+			&i.RecordedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTrackerIntakeClaims = `-- name: ListTrackerIntakeClaims :many
+SELECT project_id, issue_id, session_id, state, recorded_at
+FROM tracker_intake_handled
+WHERE project_id = ?
+ORDER BY recorded_at, issue_id
+`
+
+type ListTrackerIntakeClaimsRow struct {
 	ProjectID  string
 	IssueID    string
 	SessionID  string
@@ -201,15 +290,15 @@ type ListPendingTrackerIntakeClaimsRow struct {
 	RecordedAt time.Time
 }
 
-func (q *Queries) ListPendingTrackerIntakeClaims(ctx context.Context, projectID string) ([]ListPendingTrackerIntakeClaimsRow, error) {
-	rows, err := q.db.QueryContext(ctx, listPendingTrackerIntakeClaims, projectID)
+func (q *Queries) ListTrackerIntakeClaims(ctx context.Context, projectID string) ([]ListTrackerIntakeClaimsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listTrackerIntakeClaims, projectID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []ListPendingTrackerIntakeClaimsRow{}
+	items := []ListTrackerIntakeClaimsRow{}
 	for rows.Next() {
-		var i ListPendingTrackerIntakeClaimsRow
+		var i ListTrackerIntakeClaimsRow
 		if err := rows.Scan(
 			&i.ProjectID,
 			&i.IssueID,

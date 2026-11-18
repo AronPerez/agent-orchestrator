@@ -121,6 +121,10 @@ type exitAgentCommander interface {
 	ExitAgent(context.Context, domain.SessionID) (domain.SessionRecord, error)
 }
 
+type trackerIntakeReconciler interface {
+	ReconcileTrackerIntakeClaims(context.Context) error
+}
+
 // agentAccountCommander keeps account moves optional for focused service fakes.
 type agentAccountCommander interface {
 	StartAccountTransition(context.Context, domain.SessionID, string, domain.SessionInterfaceTransitionPolicy) (domain.SessionInterfaceTransition, error)
@@ -445,6 +449,16 @@ func (s *Service) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 		}
 	}
 	return s.spawnUnlessAutoPaused(ctx, cfg, func(spawnCtx context.Context) (domain.Session, int, int, error) { return s.spawn(spawnCtx, cfg) })
+}
+
+// ReconcileTrackerIntakeClaims lets the intake observer retry external cleanup
+// before admitting another batch. Focused service fakes need not implement it.
+func (s *Service) ReconcileTrackerIntakeClaims(ctx context.Context) error {
+	reconciler, ok := s.manager.(trackerIntakeReconciler)
+	if !ok {
+		return nil
+	}
+	return reconciler.ReconcileTrackerIntakeClaims(ctx)
 }
 
 func (s *Service) spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Session, int, int, error) {

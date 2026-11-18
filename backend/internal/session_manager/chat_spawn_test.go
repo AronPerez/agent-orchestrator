@@ -405,6 +405,36 @@ type generationClaimFailureLauncher struct {
 	err        error
 }
 
+func TestChatTrackerIntakeTurnErrorPreservesPossibleDelivery(t *testing.T) {
+	turnErr := errors.New("provider accepted turn but response was lost")
+	launcher := &recordingLauncher{turnErr: turnErr}
+	m, st, _ := newChatManager(launcher)
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
+
+	_, _, _, err := m.Spawn(context.Background(), ports.SpawnConfig{
+		ProjectID: chatTestProject, IssueID: "github:acme/mer#81", Kind: domain.KindWorker,
+		Harness: domain.HarnessCodex, RequestedMode: domain.SessionModeChat,
+		Prompt: "fix it", TrackerIntakeLimits: &limits,
+	})
+	if !errors.Is(err, turnErr) {
+		t.Fatalf("Spawn() error = %v, want ambiguous turn error", err)
+	}
+	if len(launcher.turns) != 1 || len(launcher.stopped) != 0 {
+		t.Fatalf("turns/stops = %v/%v, want attempted turn and preserved controller", launcher.turns, launcher.stopped)
+	}
+	id := st.trackerIntakePending["mer\x00github:acme/mer#81"]
+	if id == "" {
+		t.Fatal("ambiguous Chat delivery released its intake claim")
+	}
+	if st.sessions[id].IsTerminated {
+		t.Fatalf("ambiguous Chat delivery terminated session: %+v", st.sessions[id])
+	}
+	reservation := st.trackerIntakeRecovery[id]
+	if !reservation.ControllerPossible || !reservation.DeliveryPossible {
+		t.Fatalf("Chat recovery reservation = %+v, want controller and delivery fences", reservation)
+	}
+}
+
 func (l *generationClaimFailureLauncher) StartChat(ctx context.Context, cfg ChatStart) (ChatStarted, error) {
 	var prepareErr error
 	cfg, prepareErr = prepareTestChatStart(ctx, cfg)

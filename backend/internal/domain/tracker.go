@@ -201,5 +201,20 @@ type TrackerIntakeRecoveryReservation struct {
 	RuntimeLaunchID    string   `json:"runtimeLaunchId,omitempty"`
 	RuntimeHandleIDs   []string `json:"runtimeHandleIds,omitempty"`
 	ControllerPossible bool     `json:"controllerPossible,omitempty"`
-	CleanupConfirmed   bool     `json:"cleanupConfirmed,omitempty"`
+	// DeliveryPossible means the initial task may already have crossed the
+	// runtime/provider boundary. Recovery must preserve the worker and claim;
+	// cleaning it up and retrying could duplicate arbitrary external effects.
+	DeliveryPossible bool `json:"deliveryPossible,omitempty"`
+	CleanupConfirmed bool `json:"cleanupConfirmed,omitempty"`
+}
+
+// TrackerIntakePendingClaim is the durable recovery worklist. It deliberately
+// survives a missing or terminated session row so lifecycle recovery is driven
+// by ownership facts rather than by the session list.
+type TrackerIntakePendingClaim struct {
+	ProjectID  ProjectID
+	IssueID    IssueID
+	SessionID  SessionID
+	Recovery   TrackerIntakeRecoveryReservation
+	RecordedAt time.Time
 }

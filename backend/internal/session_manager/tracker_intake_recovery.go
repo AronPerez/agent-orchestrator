@@ -2,12 +2,55 @@ package sessionmanager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
+
+// ReconcileTrackerIntakeClaims retries cleanup from the durable claim ledger.
+// Session rows are optional: a user may terminate or delete one while runtime
+// or workspace ownership is still unresolved. Claims whose initial task may
+// already have been delivered remain fenced and are never replayed.
+func (m *Manager) ReconcileTrackerIntakeClaims(ctx context.Context) error {
+	claims, err := m.store.ListPendingTrackerIntakeClaims(ctx)
+	if err != nil {
+		return err
+	}
+	var reconcileErr error
+	for _, claim := range claims {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(reconcileErr, err)
+		}
+		if claim.Recovery.DeliveryPossible {
+			continue
+		}
+		rec, found, err := m.store.GetSession(ctx, claim.SessionID)
+		if err != nil {
+			reconcileErr = errors.Join(reconcileErr, fmt.Errorf("recover tracker intake %s: load session: %w", claim.SessionID, err))
+			continue
+		}
+		if !found {
+			rec = domain.SessionRecord{
+				ID:        claim.SessionID,
+				ProjectID: claim.ProjectID,
+				IssueID:   claim.IssueID,
+				Kind:      domain.KindWorker,
+				Mode:      domain.SessionModeTUI,
+			}
+			if claim.Recovery.ControllerPossible {
+				rec.Mode = domain.SessionModeChat
+			}
+		}
+		err = m.reconcileInterruptedTrackerIntake(ctx, rec, claim.Recovery)
+		if err != nil {
+			reconcileErr = errors.Join(reconcileErr, err)
+		}
+	}
+	return reconcileErr
+}
 
 // reconcileInterruptedTrackerIntake settles a launch whose claim never reached
 // the explicit post-prompt commit. It never infers delivery from a controller
@@ -19,6 +62,9 @@ func (m *Manager) reconcileInterruptedTrackerIntake(
 	reservation domain.TrackerIntakeRecoveryReservation,
 ) error {
 	rec = applyTrackerIntakeRecovery(rec, reservation)
+	if reservation.DeliveryPossible {
+		return nil
+	}
 	if reservation.CleanupConfirmed {
 		return m.releaseInterruptedTrackerIntake(ctx, rec)
 	}

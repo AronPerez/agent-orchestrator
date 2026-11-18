@@ -24,18 +24,38 @@ FROM tracker_intake_handled
 WHERE session_id = ?;
 
 -- name: ListPendingTrackerIntakeClaims :many
-SELECT project_id, issue_id, session_id, state, recorded_at
+SELECT project_id, issue_id, session_id, state, recovery_state, recorded_at
 FROM tracker_intake_handled
 WHERE project_id = ? AND state = 'pending'
 ORDER BY recorded_at, issue_id;
 
+-- name: ListAllPendingTrackerIntakeClaims :many
+SELECT project_id, issue_id, session_id, recovery_state, recorded_at
+FROM tracker_intake_handled
+WHERE state = 'pending'
+ORDER BY recorded_at, project_id, issue_id;
+
+-- name: ListTrackerIntakeClaims :many
+SELECT project_id, issue_id, session_id, state, recorded_at
+FROM tracker_intake_handled
+WHERE project_id = ?
+ORDER BY recorded_at, issue_id;
+
 -- name: CountLiveIssueLinkedSessions :one
 SELECT COUNT(*)
-FROM sessions
-WHERE project_id = ?
-  AND issue_id IS NOT NULL
-  AND trim(issue_id) <> ''
-  AND is_terminated = FALSE;
+FROM (
+    SELECT id AS session_id
+    FROM sessions
+    WHERE sessions.project_id = sqlc.arg(project_id)
+      AND issue_id IS NOT NULL
+      AND trim(issue_id) <> ''
+      AND is_terminated = FALSE
+    UNION
+    SELECT session_id
+    FROM tracker_intake_handled
+    WHERE tracker_intake_handled.project_id = sqlc.arg(project_id)
+      AND state = 'pending'
+);
 
 -- name: ListLiveTrackerIssueReferences :many
 SELECT issue_id

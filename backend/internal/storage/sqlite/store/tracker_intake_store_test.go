@@ -160,6 +160,96 @@ func TestTrackerIntakeConfirmedCleanupReleasesMissingSessionClaim(t *testing.T) 
 	}
 }
 
+func TestTrackerIntakePendingMissingOwnerConsumesConcurrentCapacity(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, store, "demo")
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 1, MaxStartsPerPass: 1}
+
+	first := sampleRecord("demo")
+	first.Metadata = domain.SessionMetadata{}
+	first.IssueID = "github:acme/demo#1"
+	created, err := store.CreateTrackerIntakeSession(ctx, first, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReserveTrackerIntakeRecovery(ctx, created.ID, domain.TrackerIntakeRecoveryReservation{
+		RuntimeLaunchID: "launch-1", RuntimeHandleIDs: []string{"runtime-1"}, DeliveryPossible: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if deleted, err := store.DeleteSession(ctx, created.ID); err != nil || !deleted {
+		t.Fatalf("DeleteSession() = %t, %v", deleted, err)
+	}
+
+	second := sampleRecord("demo")
+	second.IssueID = "github:acme/demo#2"
+	if _, err := store.CreateTrackerIntakeSession(ctx, second, limits); !errors.Is(err, ports.ErrAutomatedSessionCapacity) {
+		t.Fatalf("CreateTrackerIntakeSession(second) error = %v, want unresolved owner to consume capacity", err)
+	}
+}
+
+func TestListPendingTrackerIntakeClaimsIncludesMissingAndTerminatedOwners(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, store, "demo")
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
+
+	missing := sampleRecord("demo")
+	missing.Metadata = domain.SessionMetadata{}
+	missing.IssueID = "github:acme/demo#31"
+	missing, err := store.CreateTrackerIntakeSession(ctx, missing, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missingRecovery := domain.TrackerIntakeRecoveryReservation{
+		RuntimeLaunchID:  "launch-31",
+		RuntimeHandleIDs: []string{" runtime-31 ", "runtime-31"},
+		DeliveryPossible: true,
+	}
+	if err := store.ReserveTrackerIntakeRecovery(ctx, missing.ID, missingRecovery); err != nil {
+		t.Fatal(err)
+	}
+	terminated := sampleRecord("demo")
+	terminated.Metadata = domain.SessionMetadata{}
+	terminated.IssueID = "github:acme/demo#32"
+	terminated, err = store.CreateTrackerIntakeSession(ctx, terminated, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminatedRecovery := domain.TrackerIntakeRecoveryReservation{
+		WorkspacePath:     "/tmp/demo-32",
+		WorkspaceRepoPath: "/tmp/demo-32/repo",
+	}
+	if err := store.ReserveTrackerIntakeRecovery(ctx, terminated.ID, terminatedRecovery); err != nil {
+		t.Fatal(err)
+	}
+	if deleted, err := store.DeleteSession(ctx, missing.ID); err != nil || !deleted {
+		t.Fatalf("DeleteSession(missing owner) = %t, %v", deleted, err)
+	}
+	terminated.IsTerminated = true
+	if err := store.UpdateSession(ctx, terminated); err != nil {
+		t.Fatal(err)
+	}
+
+	claims, err := store.ListPendingTrackerIntakeClaims(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bySession := make(map[domain.SessionID]domain.TrackerIntakePendingClaim, len(claims))
+	for _, claim := range claims {
+		bySession[claim.SessionID] = claim
+	}
+	if got := bySession[missing.ID]; got.ProjectID != "demo" || got.IssueID != missing.IssueID ||
+		!got.Recovery.DeliveryPossible || fmt.Sprint(got.Recovery.RuntimeHandleIDs) != "[runtime-31]" {
+		t.Fatalf("missing owner claim = %+v", got)
+	}
+	if got := bySession[terminated.ID]; got.ProjectID != "demo" || got.IssueID != terminated.IssueID ||
+		got.Recovery.WorkspacePath != terminatedRecovery.WorkspacePath {
+		t.Fatalf("terminated owner claim = %+v", got)
+	}
+}
+
 func TestTrackerIntakeRuntimeReservationAtomicallyCheckpointsRecoveryIdentity(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -224,6 +314,7 @@ func TestCreateTrackerIntakeSessionRejectsLegacyManualIssueReferences(t *testing
 		{name: "github url", manual: "https://github.com/acme/demo/issues/18", canonical: "github:acme/demo#18", wantMatch: true},
 		{name: "gitlab url", manual: "https://gitlab.com/acme/demo/-/issues/18", canonical: "gitlab:acme/demo#18", wantMatch: true},
 		{name: "self managed gitlab url", manual: "https://gitlab.one/acme/demo/-/issues/18", canonical: "gitlab:acme/demo#18@gitlab.one", wantMatch: true},
+		{name: "numeric is scoped to project repository", manual: "18", canonical: "github:other/demo#18", wantMatch: false},
 		{name: "different repository", manual: "github:other/demo#18", canonical: "github:acme/demo#18", wantMatch: false},
 		{name: "different provider", manual: "github:acme/demo#18", canonical: "gitlab:acme/demo#18", wantMatch: false},
 		{name: "different gitlab host", manual: "gitlab:acme/demo#18@gitlab.one", canonical: "gitlab:acme/demo#18@gitlab.two", wantMatch: false},
@@ -251,6 +342,40 @@ func TestCreateTrackerIntakeSessionRejectsLegacyManualIssueReferences(t *testing
 				t.Fatalf("CreateTrackerIntakeSession() error = %v, want distinct scoped issue", err)
 			}
 		})
+	}
+}
+
+func TestCreateTrackerIntakeSessionRejectsLegacyHandledAliasAfterSessionTermination(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, store, "demo")
+	limits := domain.AutomatedSessionLimits{MaxConcurrent: 3, MaxStartsPerPass: 2}
+
+	legacy := sampleRecord("demo")
+	legacy.IssueID = "https://github.com/acme/demo/issues/18"
+	created, err := store.CreateSession(ctx, legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.InsertRawTrackerIntakeHandledForTest(ctx, "demo", string(legacy.IssueID), string(created.ID), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	created.IsTerminated = true
+	if err := store.UpdateSession(ctx, created); err != nil {
+		t.Fatal(err)
+	}
+
+	retry := sampleRecord("demo")
+	retry.IssueID = "github:acme/demo#18"
+	if _, err := store.CreateTrackerIntakeSession(ctx, retry, limits); !errors.Is(err, ports.ErrTrackerIntakeHandled) {
+		t.Fatalf("CreateTrackerIntakeSession(canonical retry) error = %v, want ErrTrackerIntakeHandled", err)
+	}
+	handled, err := store.ListTrackerIntakeHandled(ctx, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(handled) != 1 || handled[0].IssueID != retry.IssueID {
+		t.Fatalf("handled records = %+v, want canonicalized durable identity %q", handled, retry.IssueID)
 	}
 }
 

@@ -25,7 +25,8 @@ func newTestStore(t *testing.T) *sqlite.Store {
 func seedProject(t *testing.T, s *sqlite.Store, id string) {
 	t.Helper()
 	if err := s.UpsertProject(context.Background(), domain.ProjectRecord{
-		ID: id, Path: "/tmp/" + id, RegisteredAt: time.Now().UTC().Truncate(time.Second),
+		ID: id, Path: "/tmp/" + id, RepoOriginURL: "https://github.com/acme/" + id + ".git",
+		RegisteredAt: time.Now().UTC().Truncate(time.Second),
 	}); err != nil {
 		t.Fatalf("seed project %s: %v", id, err)
 	}

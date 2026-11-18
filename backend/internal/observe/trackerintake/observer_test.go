@@ -71,6 +71,53 @@ func TestPollSpawnsWorkerForEligibleIssue(t *testing.T) {
 	}
 }
 
+func TestPollReconcilesExternalClaimsBeforeAdmission(t *testing.T) {
+	store := &fakeStore{projects: []domain.ProjectRecord{{
+		ID: "demo", RepoOriginURL: "https://github.com/acme/demo.git",
+		Config: domain.ProjectConfig{TrackerIntake: domain.TrackerIntakeConfig{Enabled: true, Assignee: "alice"}},
+	}}}
+	tracker := &fakeTracker{issues: []domain.Issue{{
+		ID: domain.TrackerID{Provider: domain.TrackerProviderGitHub, Native: "acme/demo#1"}, State: domain.IssueOpen, Assignees: []string{"alice"},
+	}}}
+	reconcileErr := errors.New("runtime probe inconclusive")
+	spawner := &fakeSpawner{reconcileErr: reconcileErr}
+
+	err := New(singleResolver(tracker), store, spawner, Config{Logger: discardLogger()}).Poll(context.Background())
+	if !errors.Is(err, reconcileErr) {
+		t.Fatalf("Poll() error = %v, want external reconciliation error", err)
+	}
+	if spawner.reconcileCalls != 1 || len(tracker.filters) != 0 || len(spawner.calls) != 0 {
+		t.Fatalf("reconcile/list/spawn = %d/%d/%d, want cleanup before provider admission", spawner.reconcileCalls, len(tracker.filters), len(spawner.calls))
+	}
+}
+
+func TestStartWaitsForStartupRecoveryGate(t *testing.T) {
+	gate := make(chan struct{})
+	listed := make(chan struct{}, 1)
+	store := &fakeStore{listed: listed}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := New(singleResolver(&fakeTracker{}), store, &fakeSpawner{}, Config{Tick: time.Hour, StartGate: gate, Logger: discardLogger()}).Start(ctx)
+
+	select {
+	case <-listed:
+		t.Fatal("tracker intake polled before startup recovery completed")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(gate)
+	select {
+	case <-listed:
+	case <-time.After(time.Second):
+		t.Fatal("tracker intake did not poll after startup recovery completed")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("tracker intake did not stop after cancellation")
+	}
+}
+
 func TestPollSkipsExistingIssueSessionsAfterRestart(t *testing.T) {
 	store := &fakeStore{
 		projects: []domain.ProjectRecord{{
@@ -230,6 +277,52 @@ func TestPollCapsFailedSpawnAttemptsPerPass(t *testing.T) {
 	}
 	if len(spawner.calls) != 1 || spawner.calls[0].IssueID != "github:acme/demo#1" {
 		t.Fatalf("spawn calls = %+v, want the failed first attempt to consume the pass budget", spawner.calls)
+	}
+}
+
+func TestPollAdmissionDuplicateDoesNotConsumeStartBudget(t *testing.T) {
+	store := &fakeStore{projects: []domain.ProjectRecord{{
+		ID:            "demo",
+		RepoOriginURL: "https://github.com/acme/demo.git",
+		Config: domain.ProjectConfig{TrackerIntake: domain.TrackerIntakeConfig{
+			Enabled: true, Assignee: "alice", Limits: domain.AutomatedSessionLimits{MaxConcurrent: 10, MaxStartsPerPass: 1},
+		}},
+	}}}
+	tracker := &fakeTracker{issues: []domain.Issue{
+		{ID: domain.TrackerID{Provider: domain.TrackerProviderGitHub, Native: "acme/demo#1"}, State: domain.IssueOpen, Assignees: []string{"alice"}},
+		{ID: domain.TrackerID{Provider: domain.TrackerProviderGitHub, Native: "acme/demo#2"}, State: domain.IssueOpen, Assignees: []string{"alice"}},
+	}}
+	spawner := &fakeSpawner{failIssue: "github:acme/demo#1", failErr: ports.ErrTrackerIntakeHandled}
+
+	if err := New(singleResolver(tracker), store, spawner, Config{Logger: discardLogger()}).Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(spawner.calls) != 2 || spawner.calls[1].IssueID != "github:acme/demo#2" {
+		t.Fatalf("spawn calls = %+v, want duplicate admission followed by issue #2", spawner.calls)
+	}
+}
+
+func TestPollCanonicalizesLegacyHandledAlias(t *testing.T) {
+	store := &fakeStore{
+		projects: []domain.ProjectRecord{{
+			ID:            "demo",
+			RepoOriginURL: "https://github.com/acme/demo.git",
+			Config:        domain.ProjectConfig{TrackerIntake: domain.TrackerIntakeConfig{Enabled: true, Assignee: "alice"}},
+		}},
+		handled: map[domain.ProjectID][]domain.TrackerIntakeHandledRecord{
+			"demo": {{ProjectID: "demo", IssueID: "18", SessionID: "demo-old"}},
+		},
+	}
+	tracker := &fakeTracker{issues: []domain.Issue{{
+		ID: domain.TrackerID{Provider: domain.TrackerProviderGitHub, Native: "acme/demo#18"}, State: domain.IssueOpen, Assignees: []string{"alice"},
+	}}}
+	spawner := &fakeSpawner{}
+
+	if err := New(singleResolver(tracker), store, spawner, Config{Logger: discardLogger()}).Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(spawner.calls) != 0 {
+		t.Fatalf("spawn calls = %+v, want legacy handled alias to suppress canonical issue", spawner.calls)
 	}
 }
 
@@ -718,6 +811,7 @@ func singleResolver(tracker ports.Tracker) TrackerResolver {
 
 type fakeStore struct {
 	projects     []domain.ProjectRecord
+	listed       chan<- struct{}
 	sessions     []domain.SessionRecord
 	sessionsErr  error
 	reconciled   []domain.ProjectID
@@ -727,6 +821,12 @@ type fakeStore struct {
 }
 
 func (f *fakeStore) ListProjects(context.Context) ([]domain.ProjectRecord, error) {
+	if f.listed != nil {
+		select {
+		case f.listed <- struct{}{}:
+		default:
+		}
+	}
 	return append([]domain.ProjectRecord(nil), f.projects...), nil
 }
 
@@ -770,9 +870,16 @@ func (f *fakeTracker) List(_ context.Context, repo domain.TrackerRepo, filter do
 func (f *fakeTracker) Preflight(context.Context) error { return nil }
 
 type fakeSpawner struct {
-	calls     []ports.SpawnConfig
-	failIssue domain.IssueID
-	failErr   error
+	calls          []ports.SpawnConfig
+	failIssue      domain.IssueID
+	failErr        error
+	reconcileCalls int
+	reconcileErr   error
+}
+
+func (f *fakeSpawner) ReconcileTrackerIntakeClaims(context.Context) error {
+	f.reconcileCalls++
+	return f.reconcileErr
 }
 
 func (f *fakeSpawner) Spawn(_ context.Context, cfg ports.SpawnConfig) (domain.Session, int, int, error) {

@@ -17,6 +17,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/observe/sentryobs"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/telemetrymeta"
+	"github.com/aoagents/agent-orchestrator/backend/internal/trackerref"
 )
 
 const (
@@ -48,6 +49,10 @@ type Store interface {
 // Spawner is the session creation surface used by intake.
 type Spawner interface {
 	Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Session, int, int, error)
+}
+
+type claimReconciler interface {
+	ReconcileTrackerIntakeClaims(context.Context) error
 }
 
 // TrackerResolver picks the tracker adapter for a project's configured
@@ -82,6 +87,9 @@ type Config struct {
 	FailureBackoff time.Duration
 	Clock          func() time.Time
 	Logger         *slog.Logger
+	// StartGate delays the first poll until startup lifecycle recovery has
+	// fenced every pre-existing claim. Nil starts immediately.
+	StartGate <-chan struct{}
 }
 
 // Observer polls configured projects and starts sessions for eligible issues.
@@ -93,13 +101,14 @@ type Observer struct {
 	failureBackoff    time.Duration
 	clock             func() time.Time
 	logger            *slog.Logger
+	startGate         <-chan struct{}
 	backoffUntil      map[string]time.Time
 	issueBackoffUntil map[string]time.Time
 }
 
 // New constructs an Observer with safe defaults.
 func New(resolver TrackerResolver, store Store, spawner Spawner, cfg Config) *Observer {
-	o := &Observer{resolver: resolver, store: store, spawner: spawner, tick: cfg.Tick, failureBackoff: cfg.FailureBackoff, clock: cfg.Clock, logger: cfg.Logger, backoffUntil: map[string]time.Time{}, issueBackoffUntil: map[string]time.Time{}}
+	o := &Observer{resolver: resolver, store: store, spawner: spawner, tick: cfg.Tick, failureBackoff: cfg.FailureBackoff, clock: cfg.Clock, logger: cfg.Logger, startGate: cfg.StartGate, backoffUntil: map[string]time.Time{}, issueBackoffUntil: map[string]time.Time{}}
 	if o.tick <= 0 {
 		o.tick = DefaultTickInterval
 	}
@@ -115,9 +124,22 @@ func New(resolver TrackerResolver, store Store, spawner Spawner, cfg Config) *Ob
 	return o
 }
 
-// Start launches the observer loop. The first poll runs immediately inside the
-// goroutine, keeping daemon startup non-blocking.
+// Start launches the observer loop. The first poll runs immediately once the
+// optional startup gate opens, keeping daemon startup non-blocking.
 func (o *Observer) Start(ctx context.Context) <-chan struct{} {
+	if o.startGate != nil {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			select {
+			case <-ctx.Done():
+				return
+			case <-o.startGate:
+			}
+			<-observe.StartPollLoop(ctx, o.tick, o.Poll, o.logger, "tracker intake")
+		}()
+		return done
+	}
 	return observe.StartPollLoop(ctx, o.tick, o.Poll, o.logger, "tracker intake")
 }
 
@@ -131,6 +153,11 @@ func (o *Observer) Poll(ctx context.Context) error {
 	}
 	if o.resolver == nil || o.store == nil || o.spawner == nil {
 		return nil
+	}
+	if reconciler, ok := o.spawner.(claimReconciler); ok {
+		if err := reconciler.ReconcileTrackerIntakeClaims(ctx); err != nil {
+			return fmt.Errorf("tracker intake: reconcile external claims: %w", err)
+		}
 	}
 	now := o.clock().UTC()
 	projects, err := o.store.ListProjects(ctx)
@@ -190,7 +217,11 @@ func (o *Observer) pollProject(ctx context.Context, project domain.ProjectRecord
 		return true
 	}
 	for _, record := range handled {
-		seen[record.IssueID] = true
+		issueID := record.IssueID
+		if canonical, ok := trackerref.Resolve(issueID, project); ok {
+			issueID = canonical
+		}
+		seen[issueID] = true
 	}
 	remaining := cfg.Limits.RemainingStarts(active, 0)
 	if remaining == 0 {
@@ -243,7 +274,6 @@ func (o *Observer) pollProject(ctx context.Context, project domain.ProjectRecord
 		// Suppress duplicate provider rows for this sweep even when the spawn
 		// fails. Only the durable handled ledger suppresses later sweeps.
 		seen[issueID] = true
-		attempted++
 		limits := cfg.Limits
 		_, _, _, err := o.spawner.Spawn(ctx, ports.SpawnConfig{
 			ProjectID:           domain.ProjectID(project.ID),
@@ -264,6 +294,7 @@ func (o *Observer) pollProject(ctx context.Context, project domain.ProjectRecord
 				o.logger.Debug("tracker intake: project reached automated session capacity during admission", "project", project.ID)
 				return false
 			}
+			attempted++
 			o.logger.Error("tracker intake: spawn issue session failed", "project", project.ID, "issue", issueID, "err", err)
 			// An automated spawn has no HTTP request, so the request logger never
 			// sees it. Bad input (an invalid issue or project) stays out.
@@ -273,6 +304,7 @@ func (o *Observer) pollProject(ctx context.Context, project domain.ProjectRecord
 			o.issueBackoffUntil[backoffKey] = now.Add(o.failureBackoff)
 			continue
 		}
+		attempted++
 		delete(o.issueBackoffUntil, backoffKey)
 	}
 	return false
@@ -325,19 +357,7 @@ func intakeSessionState(sessions []domain.SessionRecord, projectID domain.Projec
 // (e.g. gitlab.com/group/repo#7 vs gitlab.internal/group/repo#7). GitHub
 // and gitlab.com (zero-value host) produce the same format as before.
 func CanonicalIssueID(id domain.TrackerID) domain.IssueID {
-	provider := id.Provider
-	if provider == "" {
-		provider = domain.TrackerProviderGitHub
-	}
-	native := strings.TrimSpace(id.Native)
-	if native == "" {
-		return ""
-	}
-	host := strings.TrimSpace(id.Host)
-	if host != "" {
-		return domain.IssueID(string(provider) + ":" + native + "@" + host)
-	}
-	return domain.IssueID(string(provider) + ":" + native)
+	return trackerref.Canonical(id)
 }
 
 // BuildIssuePrompt turns normalized issue facts into the worker's initial task.

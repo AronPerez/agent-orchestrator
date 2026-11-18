@@ -531,7 +531,9 @@ func TestStartTrackerIntake_RunsEvenWithoutEnabledProjects(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	done := startTrackerIntake(ctx, config.Config{TrackerIntake: true}, store, svc, newMultiTracker(config.GitLabConfig{}, log), log)
+	gate := make(chan struct{})
+	close(gate)
+	done := startTrackerIntake(ctx, config.Config{TrackerIntake: true}, store, svc, newMultiTracker(config.GitLabConfig{}, log), log, gate)
 
 	select {
 	case <-done:
@@ -584,7 +586,7 @@ func TestStartTrackerIntake_GatedOff(t *testing.T) {
 			var logs strings.Builder
 			logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-			if done := startTrackerIntake(ctx, config.Config{}, store, nil, nil, logger); done != nil {
+			if done := startTrackerIntake(ctx, config.Config{}, store, nil, nil, logger, nil); done != nil {
 				t.Fatal("startTrackerIntake returned a non-nil channel while gated off")
 			}
 

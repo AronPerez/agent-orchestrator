@@ -15,7 +15,7 @@ import (
 // The observer then runs unconditionally: Poll re-reads each project's config
 // every tick, so a project enabling intake after boot is picked up without a
 // restart.
-func startTrackerIntake(ctx context.Context, cfg config.Config, store *sqlite.Store, sessions *sessionsvc.Service, tracker ports.Tracker, logger *slog.Logger) <-chan struct{} {
+func startTrackerIntake(ctx context.Context, cfg config.Config, store *sqlite.Store, sessions *sessionsvc.Service, tracker ports.Tracker, logger *slog.Logger, startGate <-chan struct{}) <-chan struct{} {
 	if !cfg.TrackerIntake {
 		logGatedOffIntake(ctx, store, logger)
 		return nil
@@ -27,7 +27,7 @@ func startTrackerIntake(ctx context.Context, cfg config.Config, store *sqlite.St
 	resolver := trackerintake.SingleTrackerResolver{
 		Adapter: tracker,
 	}
-	observer := trackerintake.New(resolver, store, sessions, trackerintake.Config{Logger: logger})
+	observer := trackerintake.New(resolver, store, sessions, trackerintake.Config{Logger: logger, StartGate: startGate})
 	return observer.Start(ctx)
 }
 

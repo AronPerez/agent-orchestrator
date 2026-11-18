@@ -6,14 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/gen"
+	"github.com/aoagents/agent-orchestrator/backend/internal/trackerref"
 )
 
 // CreateTrackerIntakeSession atomically admits one tracker item, creates its
@@ -36,6 +35,11 @@ func (s *Store) CreateTrackerIntakeSession(ctx context.Context, rec domain.Sessi
 	defer s.writeMu.Unlock()
 	var created domain.SessionRecord
 	err := s.inTx(ctx, "create tracker intake session", func(q *gen.Queries) error {
+		projectRow, err := q.GetProject(ctx, rec.ProjectID)
+		if err != nil {
+			return fmt.Errorf("load tracker intake project %s: %w", rec.ProjectID, err)
+		}
+		project := projectRowFromGen(projectRow)
 		claim, err := q.GetTrackerIntakeClaim(ctx, gen.GetTrackerIntakeClaimParams{
 			ProjectID: string(rec.ProjectID),
 			IssueID:   string(rec.IssueID),
@@ -49,13 +53,26 @@ func (s *Store) CreateTrackerIntakeSession(ctx context.Context, rec domain.Sessi
 		case !errors.Is(err, sql.ErrNoRows):
 			return fmt.Errorf("find tracker intake claim %s/%s: %w", rec.ProjectID, rec.IssueID, err)
 		}
+		claims, err := q.ListTrackerIntakeClaims(ctx, string(rec.ProjectID))
+		if err != nil {
+			return fmt.Errorf("find tracker intake aliases %s/%s: %w", rec.ProjectID, rec.IssueID, err)
+		}
+		for _, claim := range claims {
+			if !trackerref.Equivalent(domain.IssueID(claim.IssueID), rec.IssueID, project) {
+				continue
+			}
+			if claim.State == "handled" {
+				return fmt.Errorf("%w: %s/%s", ports.ErrTrackerIntakeHandled, rec.ProjectID, rec.IssueID)
+			}
+			return fmt.Errorf("%w: %s/%s", ports.ErrTrackerIntakeActive, rec.ProjectID, rec.IssueID)
+		}
 
 		issueRefs, err := q.ListLiveTrackerIssueReferences(ctx, optionalProjectID(rec.ProjectID))
 		if err != nil {
 			return fmt.Errorf("find live tracker issue session %s/%s: %w", rec.ProjectID, rec.IssueID, err)
 		}
 		for _, issueRef := range issueRefs {
-			if trackerIssueReferencesMatch(issueRef, rec.IssueID) {
+			if trackerref.Equivalent(issueRef, rec.IssueID, project) {
 				return fmt.Errorf("%w: %s/%s", ports.ErrTrackerIntakeActive, rec.ProjectID, rec.IssueID)
 			}
 		}
@@ -121,9 +138,9 @@ func (s *Store) commitTrackerIntakeSessionLocked(ctx context.Context, q *gen.Que
 }
 
 // ReconcileTrackerIntakeSession settles one claim after an uncertain launch.
-// Missing sessions are confirmed failures. A terminated session is released
-// only when neither its row nor its recovery reservation carries possible
-// controller ownership. Live rows remain pending for lifecycle reconciliation.
+// A missing or terminated session is released only when its recovery facts
+// prove that no workspace, runtime, controller, or delivery may survive. Live
+// rows remain pending for lifecycle reconciliation.
 func (s *Store) ReconcileTrackerIntakeSession(ctx context.Context, id domain.SessionID, handledAt time.Time) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -203,7 +220,8 @@ func (s *Store) deletePendingTrackerIntakeClaimLocked(ctx context.Context, q *ge
 }
 
 func trackerIntakeSessionHasExternalEffect(rec domain.SessionRecord) bool {
-	return rec.Metadata.RuntimeHandleID != "" ||
+	return rec.Metadata.WorkspacePath != "" ||
+		rec.Metadata.RuntimeHandleID != "" ||
 		rec.Metadata.AgentSessionID != "" ||
 		rec.Metadata.ProviderConversationID != "" ||
 		rec.Metadata.ControllerGeneration != "" ||
@@ -241,6 +259,31 @@ func (s *Store) GetPendingTrackerIntakeRecovery(ctx context.Context, id domain.S
 	return getPendingTrackerIntakeRecovery(ctx, s.qr, id)
 }
 
+// ListPendingTrackerIntakeClaims returns every unresolved claim, including
+// those whose session row is terminated or missing. Lifecycle recovery uses
+// this durable worklist instead of inferring ownership from session liveness.
+func (s *Store) ListPendingTrackerIntakeClaims(ctx context.Context) ([]domain.TrackerIntakePendingClaim, error) {
+	rows, err := s.qr.ListAllPendingTrackerIntakeClaims(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list pending tracker intake claims: %w", err)
+	}
+	out := make([]domain.TrackerIntakePendingClaim, 0, len(rows))
+	for _, row := range rows {
+		var reservation domain.TrackerIntakeRecoveryReservation
+		if err := json.Unmarshal([]byte(row.RecoveryState), &reservation); err != nil {
+			return nil, fmt.Errorf("decode tracker intake recovery for %s: %w", row.SessionID, err)
+		}
+		out = append(out, domain.TrackerIntakePendingClaim{
+			ProjectID:  domain.ProjectID(row.ProjectID),
+			IssueID:    domain.IssueID(row.IssueID),
+			SessionID:  domain.SessionID(row.SessionID),
+			Recovery:   normalizeTrackerIntakeRecovery(reservation),
+			RecordedAt: row.RecordedAt,
+		})
+	}
+	return out, nil
+}
+
 func getPendingTrackerIntakeRecovery(ctx context.Context, q *gen.Queries, id domain.SessionID) (domain.TrackerIntakeRecoveryReservation, bool, error) {
 	raw, err := q.GetPendingTrackerIntakeRecovery(ctx, string(id))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -257,7 +300,8 @@ func getPendingTrackerIntakeRecovery(ctx context.Context, q *gen.Queries, id dom
 }
 
 func trackerIntakeRecoveryNeedsFence(reservation domain.TrackerIntakeRecoveryReservation) bool {
-	return reservation.ControllerPossible || len(reservation.RuntimeHandleIDs) != 0
+	return reservation.DeliveryPossible || reservation.ControllerPossible ||
+		strings.TrimSpace(reservation.WorkspacePath) != "" || len(reservation.RuntimeHandleIDs) != 0
 }
 
 func normalizeTrackerIntakeRecovery(reservation domain.TrackerIntakeRecoveryReservation) domain.TrackerIntakeRecoveryReservation {
@@ -290,118 +334,16 @@ func (s *Store) ReleaseTrackerIntakeSession(ctx context.Context, id domain.Sessi
 	return s.deletePendingTrackerIntakeClaimLocked(ctx, s.qw, id)
 }
 
-type trackerIssueReference struct {
-	provider domain.TrackerProvider
-	native   string
-	host     string
-	number   int
-}
-
-func trackerIssueReferencesMatch(existing, canonical domain.IssueID) bool {
-	existingText := strings.TrimSpace(string(existing))
-	canonicalText := strings.TrimSpace(string(canonical))
-	if existingText == "" || canonicalText == "" {
-		return false
-	}
-	if existingText == canonicalText {
-		return true
-	}
-	want, ok := parseCanonicalTrackerIssueReference(canonicalText)
-	if !ok {
-		return false
-	}
-	if number, ok := parsePositiveIssueNumber(strings.TrimPrefix(existingText, "#")); ok {
-		return number == want.number
-	}
-	if got, ok := parseCanonicalTrackerIssueReference(existingText); ok {
-		return got.provider == want.provider && got.native == want.native && strings.EqualFold(got.host, want.host)
-	}
-	if got, ok := parseTrackerIssueURL(existingText); ok {
-		return got.provider == want.provider && got.native == want.native && strings.EqualFold(got.host, want.host)
-	}
-	// The manual issue parser treats owner/repo#N as GitHub before considering
-	// project origin, so retain that exact provider choice for legacy rows.
-	return want.provider == domain.TrackerProviderGitHub && existingText == want.native
-}
-
-func parseCanonicalTrackerIssueReference(raw string) (trackerIssueReference, bool) {
-	providerText, scoped, ok := strings.Cut(strings.TrimSpace(raw), ":")
-	if !ok {
-		return trackerIssueReference{}, false
-	}
-	provider := domain.TrackerProvider(strings.ToLower(strings.TrimSpace(providerText)))
-	if provider != domain.TrackerProviderGitHub && provider != domain.TrackerProviderGitLab {
-		return trackerIssueReference{}, false
-	}
-	host := ""
-	if at := strings.LastIndexByte(scoped, '@'); at > strings.LastIndexByte(scoped, '#') {
-		host = strings.ToLower(strings.TrimSpace(scoped[at+1:]))
-		scoped = scoped[:at]
-	}
-	hash := strings.LastIndexByte(scoped, '#')
-	if hash <= 0 || hash == len(scoped)-1 {
-		return trackerIssueReference{}, false
-	}
-	number, ok := parsePositiveIssueNumber(scoped[hash+1:])
-	if !ok {
-		return trackerIssueReference{}, false
-	}
-	native := strings.TrimSpace(scoped)
-	if native == "" || (provider == domain.TrackerProviderGitHub && host != "") {
-		return trackerIssueReference{}, false
-	}
-	return trackerIssueReference{provider: provider, native: native, host: host, number: number}, true
-}
-
-func parseTrackerIssueURL(raw string) (trackerIssueReference, bool) {
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" {
-		return trackerIssueReference{}, false
-	}
-	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
-	if strings.EqualFold(u.Hostname(), "github.com") {
-		if len(parts) != 4 || parts[2] != "issues" {
-			return trackerIssueReference{}, false
-		}
-		number, ok := parsePositiveIssueNumber(parts[3])
-		if !ok {
-			return trackerIssueReference{}, false
-		}
-		native := fmt.Sprintf("%s/%s#%d", parts[0], strings.TrimSuffix(parts[1], ".git"), number)
-		return trackerIssueReference{provider: domain.TrackerProviderGitHub, native: native, number: number}, true
-	}
-	separator := -1
-	for i := range parts {
-		if i+2 < len(parts) && parts[i] == "-" && parts[i+1] == "issues" {
-			separator = i
-			break
-		}
-	}
-	if separator < 2 || separator+3 != len(parts) {
-		return trackerIssueReference{}, false
-	}
-	number, ok := parsePositiveIssueNumber(parts[separator+2])
-	if !ok {
-		return trackerIssueReference{}, false
-	}
-	project := append([]string(nil), parts[:separator]...)
-	project[len(project)-1] = strings.TrimSuffix(project[len(project)-1], ".git")
-	host := strings.ToLower(u.Host)
-	if host == "gitlab.com" || host == "www.gitlab.com" {
-		host = ""
-	}
-	native := fmt.Sprintf("%s#%d", strings.Join(project, "/"), number)
-	return trackerIssueReference{provider: domain.TrackerProviderGitLab, native: native, host: host, number: number}, true
-}
-
-func parsePositiveIssueNumber(raw string) (int, bool) {
-	number, err := strconv.Atoi(strings.TrimSpace(raw))
-	return number, err == nil && number > 0
-}
-
 // RecordTrackerIntakeHandled durably records one delivered source item. The
 // primary key makes retries idempotent and preserves the first delivery facts.
 func (s *Store) RecordTrackerIntakeHandled(ctx context.Context, record domain.TrackerIntakeHandledRecord) error {
+	if project, ok, err := s.GetProject(ctx, string(record.ProjectID)); err != nil {
+		return fmt.Errorf("record tracker intake handled %s/%s: load project: %w", record.ProjectID, record.IssueID, err)
+	} else if ok {
+		if canonical, resolved := trackerref.Resolve(record.IssueID, project); resolved {
+			record.IssueID = canonical
+		}
+	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	if err := s.qw.RecordTrackerIntakeHandled(ctx, gen.RecordTrackerIntakeHandledParams{
@@ -421,11 +363,21 @@ func (s *Store) ListTrackerIntakeHandled(ctx context.Context, projectID domain.P
 	if err != nil {
 		return nil, fmt.Errorf("list tracker intake handled for %s: %w", projectID, err)
 	}
+	project, projectFound, projectErr := s.GetProject(ctx, string(projectID))
+	if projectErr != nil {
+		return nil, fmt.Errorf("list tracker intake handled for %s: load project: %w", projectID, projectErr)
+	}
 	out := make([]domain.TrackerIntakeHandledRecord, 0, len(rows))
 	for _, row := range rows {
+		issueID := domain.IssueID(row.IssueID)
+		if projectFound {
+			if canonical, resolved := trackerref.Resolve(issueID, project); resolved {
+				issueID = canonical
+			}
+		}
 		out = append(out, domain.TrackerIntakeHandledRecord{
 			ProjectID: domain.ProjectID(row.ProjectID),
-			IssueID:   domain.IssueID(row.IssueID),
+			IssueID:   issueID,
 			SessionID: domain.SessionID(row.SessionID),
 			HandledAt: row.RecordedAt,
 		})
