@@ -27,7 +27,24 @@ const (
 	MaxDecisionReference   = 64
 	MaxDecisionNote        = 1000
 	MaxDecisionOutcome     = 300
+	MaxDecisionWhy         = 300
+	MaxDecisionUndo        = 300
 )
+
+// DecisionUrgencyBlocking and DecisionUrgencyCanWait say how soon a call needs
+// the person. A blocking call stops all of the session's remaining work.
+const (
+	DecisionUrgencyBlocking = "blocking"
+	DecisionUrgencyCanWait  = "can_wait"
+)
+
+// DecisionPrediction is what the session would have decided on its own: the
+// option it would pick, why, and how the person could undo it.
+type DecisionPrediction struct {
+	Option int    `json:"option"`
+	Why    string `json:"why"`
+	Undo   string `json:"undo"`
+}
 
 // DecisionEntryKind identifies one fact appended to the decision ledger.
 type DecisionEntryKind string
@@ -146,6 +163,26 @@ type DecisionRaisedPayload struct {
 	MachineLabel     string           `json:"machineLabel"`
 	OwnerSessionID   SessionID        `json:"ownerSessionId"`
 	OwnerSessionName string           `json:"ownerSessionName"`
+
+	// Urgency, Kind and Prediction were added by the autonomy-levels design.
+	// Entries written before it omit them; older machines ignore them.
+	Urgency    string              `json:"urgency,omitempty"`
+	Kind       DecisionKindID      `json:"kind,omitempty"`
+	Prediction *DecisionPrediction `json:"prediction,omitempty"`
+	// Reserved and AutonomyMode are filled in by Orchestrator from the
+	// project's policy when the call is raised, so later policy changes do
+	// not rewrite what the call was raised under.
+	Reserved     bool         `json:"reserved,omitempty"`
+	AutonomyMode AutonomyMode `json:"autonomyMode,omitempty"`
+}
+
+// EffectiveUrgency returns the call's urgency. Calls raised before urgency
+// existed, or without one, can wait.
+func (p DecisionRaisedPayload) EffectiveUrgency() string {
+	if p.Urgency == "" {
+		return DecisionUrgencyCanWait
+	}
+	return p.Urgency
 }
 
 // DecisionChoiceOption and DecisionChoiceOther distinguish answer forms.
@@ -267,6 +304,41 @@ func ValidateDecisionRaise(p DecisionRaisedPayload) error {
 	}
 	if n := utf8.RuneCountInString(strings.TrimSpace(p.Reference)); n > MaxDecisionReference {
 		return decisionRule("reference_too_long", fmt.Sprintf("The reference is %d characters; the limit is 64.", n))
+	}
+	return validateDecisionAutonomy(p)
+}
+
+func validateDecisionAutonomy(p DecisionRaisedPayload) error {
+	switch p.Urgency {
+	case "", DecisionUrgencyBlocking, DecisionUrgencyCanWait:
+	default:
+		return decisionRule("urgency_invalid", fmt.Sprintf("Urgency must be blocking or can-wait, not %q.", p.Urgency))
+	}
+	if p.Kind != "" {
+		if _, ok := LookupDecisionKind(string(p.Kind)); !ok {
+			return decisionRule("kind_unknown", fmt.Sprintf("%q is not a decision kind. Run ao decision kinds to list them.", p.Kind))
+		}
+	}
+	prediction := p.Prediction
+	if prediction == nil {
+		return nil
+	}
+	if prediction.Option < 1 || prediction.Option > len(p.Options) {
+		return decisionRule("prediction_option_range", fmt.Sprintf("This call has %d options; you would decide %d, which is not one of them.", len(p.Options), prediction.Option))
+	}
+	why := strings.TrimSpace(prediction.Why)
+	if why == "" {
+		return decisionRule("prediction_why_required", "Say why you would decide that, with --why.")
+	}
+	if n := utf8.RuneCountInString(why); n > MaxDecisionWhy {
+		return decisionRule("prediction_why_too_long", fmt.Sprintf("The reason is %d characters; the limit is 300.", n))
+	}
+	undo := strings.TrimSpace(prediction.Undo)
+	if undo == "" {
+		return decisionRule("prediction_undo_required", "Say how the person could undo it, with --undo.")
+	}
+	if n := utf8.RuneCountInString(undo); n > MaxDecisionUndo {
+		return decisionRule("prediction_undo_too_long", fmt.Sprintf("The undo note is %d characters; the limit is 300.", n))
 	}
 	return nil
 }
