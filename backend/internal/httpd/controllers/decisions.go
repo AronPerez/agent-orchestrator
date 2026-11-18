@@ -3,6 +3,8 @@ package controllers
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"strings"
 
@@ -16,14 +18,19 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/telemetrymeta"
 )
 
-const maxDecisionRaiseRequestBytes = 64 << 10
+const maxDecisionRequestBytes = 64 << 10
 
-// DecisionService is what the decisions routes need. Later slices add actions.
+// DecisionService is what the decisions routes need.
 type DecisionService interface {
 	Raise(context.Context, decisionsvc.Actor, decisionsvc.RaiseInput) (domain.DecisionCall, error)
 	Get(context.Context, string) (decisionsvc.Detail, error)
 	List(context.Context, decisionsvc.Actor, decisionsvc.Scope) ([]domain.DecisionCall, error)
 	Search(context.Context, decisionsvc.Actor, string) ([]domain.DecisionCall, error)
+	Answer(context.Context, decisionsvc.Actor, string, decisionsvc.AnswerInput) (domain.DecisionCall, error)
+	Dismiss(context.Context, decisionsvc.Actor, string, string) (domain.DecisionCall, error)
+	RecordOutcome(context.Context, decisionsvc.Actor, string, decisionsvc.OutcomeInput) (domain.DecisionCall, error)
+	Withdraw(context.Context, decisionsvc.Actor, string) (domain.DecisionCall, error)
+	Retire(context.Context, decisionsvc.Actor, string, bool) (domain.DecisionCall, error)
 }
 
 // DecisionsController owns the /decisions routes.
@@ -34,6 +41,11 @@ func (c *DecisionsController) Register(r chi.Router) {
 	r.Post("/decisions", c.raise)
 	r.Get("/decisions", c.list)
 	r.Get("/decisions/{id}", c.get)
+	r.Post("/decisions/{id}/answer", c.answer)
+	r.Post("/decisions/{id}/dismiss", c.dismiss)
+	r.Post("/decisions/{id}/outcome", c.outcome)
+	r.Post("/decisions/{id}/withdraw", c.withdraw)
+	r.Post("/decisions/{id}/retire", c.retire)
 }
 
 func (c *DecisionsController) raise(w http.ResponseWriter, r *http.Request) {
@@ -41,7 +53,7 @@ func (c *DecisionsController) raise(w http.ResponseWriter, r *http.Request) {
 		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/decisions")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxDecisionRaiseRequestBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, maxDecisionRequestBytes)
 	var req RaiseDecisionRequest
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -120,6 +132,105 @@ func (c *DecisionsController) get(w http.ResponseWriter, r *http.Request) {
 	envelope.WriteJSON(w, http.StatusOK, response)
 }
 
+func (c *DecisionsController) answer(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/decisions/{id}/answer")
+		return
+	}
+	var req AnswerDecisionRequest
+	if !decodeDecisionRequest(w, r, &req, false) {
+		return
+	}
+	call, err := c.Svc.Answer(r.Context(), decisionActor(r), chi.URLParam(r, "id"), decisionsvc.AnswerInput{
+		Choice: req.Choice, Option: req.Option, Note: req.Note,
+	})
+	if err != nil {
+		envelope.WriteErrorWithCode(w, r, err, "DECISION_ANSWER_FAILED", "Unable to answer decision")
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, decisionCallResponse(call))
+}
+
+func (c *DecisionsController) dismiss(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/decisions/{id}/dismiss")
+		return
+	}
+	var req DismissDecisionRequest
+	if !decodeDecisionRequest(w, r, &req, true) {
+		return
+	}
+	call, err := c.Svc.Dismiss(r.Context(), decisionActor(r), chi.URLParam(r, "id"), req.Note)
+	if err != nil {
+		envelope.WriteErrorWithCode(w, r, err, "DECISION_DISMISS_FAILED", "Unable to dismiss decision")
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, decisionCallResponse(call))
+}
+
+func (c *DecisionsController) outcome(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/decisions/{id}/outcome")
+		return
+	}
+	var req DecisionOutcomeRequest
+	if !decodeDecisionRequest(w, r, &req, false) {
+		return
+	}
+	call, err := c.Svc.RecordOutcome(r.Context(), decisionActor(r), chi.URLParam(r, "id"), decisionsvc.OutcomeInput{
+		ForEntry: req.ForEntry, Text: req.Text, Link: req.Link,
+	})
+	if err != nil {
+		envelope.WriteErrorWithCode(w, r, err, "DECISION_OUTCOME_FAILED", "Unable to record decision outcome")
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, decisionCallResponse(call))
+}
+
+func (c *DecisionsController) withdraw(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/decisions/{id}/withdraw")
+		return
+	}
+	call, err := c.Svc.Withdraw(r.Context(), decisionActor(r), chi.URLParam(r, "id"))
+	if err != nil {
+		envelope.WriteErrorWithCode(w, r, err, "DECISION_WITHDRAW_FAILED", "Unable to withdraw decision")
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, decisionCallResponse(call))
+}
+
+func (c *DecisionsController) retire(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/decisions/{id}/retire")
+		return
+	}
+	var req RetireDecisionRequest
+	if !decodeDecisionRequest(w, r, &req, false) {
+		return
+	}
+	call, err := c.Svc.Retire(r.Context(), decisionActor(r), chi.URLParam(r, "id"), req.Retired)
+	if err != nil {
+		envelope.WriteErrorWithCode(w, r, err, "DECISION_RETIRE_FAILED", "Unable to retire decision")
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, decisionCallResponse(call))
+}
+
+func decodeDecisionRequest(w http.ResponseWriter, r *http.Request, dst any, optional bool) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxDecisionRequestBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		if optional && errors.Is(err, io.EOF) {
+			return true
+		}
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
+		return false
+	}
+	return true
+}
+
 func decisionActor(r *http.Request) decisionsvc.Actor {
 	if session := caller.From(r.Context()); session != "" {
 		return decisionsvc.Actor{Session: domain.SessionID(session)}
@@ -145,7 +256,8 @@ func decisionCallResponse(call domain.DecisionCall) DecisionCallResponse {
 		HostID: call.Origin, MachineLabel: call.Raised.MachineLabel,
 		OwnerSessionID: string(call.Raised.OwnerSessionID), OwnerSessionName: call.Raised.OwnerSessionName,
 		RaisedAt: call.RaisedAt, Choice: call.Choice, Option: call.Option, ChosenLabel: call.ChosenLabel(), Note: call.Note,
-		AnswerSurface: string(call.AnswerSurface), Outcome: call.Outcome, OutcomeLink: call.OutcomeLink,
+		AnswerSurface: string(call.AnswerSurface), StandingEntryID: call.StandingEntryID,
+		Outcome: call.Outcome, OutcomeLink: call.OutcomeLink,
 		Retired: call.Retired, Delivery: string(call.Delivery), DeliveredTo: string(call.DeliveredTo),
 		DeliveredToName: call.DeliveredToName, DeliveredFallback: call.DeliveredFallback,
 		ChangedAfterClose: call.ChangedAfterClose,
@@ -180,12 +292,14 @@ func decisionEntryResponse(entry domain.DecisionEntry) DecisionEntryResponse {
 	case domain.DecisionKindDelivered:
 		var payload domain.DecisionDeliveredPayload
 		if json.Unmarshal(entry.Payload, &payload) == nil {
+			response.ForEntry = payload.ForEntry
 			response.Status, response.SessionID = payload.Status, string(payload.SessionID)
 			response.SessionName, response.Fallback = payload.SessionName, payload.Fallback
 		}
 	case domain.DecisionKindOutcome:
 		var payload domain.DecisionOutcomePayload
 		if json.Unmarshal(entry.Payload, &payload) == nil {
+			response.ForEntry = payload.ForEntry
 			response.Text, response.Link = payload.Text, payload.Link
 		}
 	case domain.DecisionKindRetired:
